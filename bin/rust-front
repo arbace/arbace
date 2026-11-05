@@ -81,6 +81,31 @@ case ${1:-} in
     gcc -std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off "$out/$n.ours.c" "$out/driver.c" -o "$out/$n.exe" 2>&1 | head -5 >&2
     [ -x "$out/$n.exe" ] || { echo "rust-front run: gcc refused the lowered C" >&2; exit 125; }
     "$out/$n.exe" "$@"; exit $? ;;
+  run-native)
+    # RF3: a program whose own unit is the front's IR, linked with the host's native std as rsi's native-std leg links the
+    # oracle's (bin/lib/rsi/link, RSI_FRONT_IR): the unit lowered by rsi's lowering, gcc -O0; status and stdout against the
+    # program built by rustc alone
+    shift
+    f=$(realpath "$1"); n=$(basename "$f" .rs); out=$work/native/$n; mkdir -p "$out"
+    rt=$work/rt
+    if [ ! -f "$rt/native.o" ]; then
+      mkdir -p "$rt"
+      GCC_FLAGS="-std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off"
+      (cd "$root" && arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/rust/rt/native.c.ae" "$rt/native.c" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >&2)
+      gcc $GCC_FLAGS -c "$rt/native.c" -o "$rt/native.o"
+      rustc --edition 2024 --crate-type=lib --emit=obj -Copt-level=0 -Cdebuginfo=0 "$root/test/rust/runtime/native/try.rs" -o "$rt/try.o" 2> "$rt/try.log"
+    fi
+    (cd "$out" && "$helper" rustc --mono-mir "$n.mono.edn" -- --edition 2024 --crate-type bin -A warnings -C opt-level=0 -C debuginfo=0 -Zshare-generics=no -o "$n.h.bin" "$f" > "$n.log" 2>&1) || { echo "run-native: the helper failed ($out/$n.log)" >&2; exit 1; }
+    cd "$root"
+    arbace_tool -m arbace.rust.back.check --emit-mono "$out" "$n" --native 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >&2
+    [ -f "$out/$n.ours.ll" ] || { echo "run-native: unsupported by the front (see above)" >&2; exit 125; }
+    rm -rf "$out/low"; mkdir -p "$out/low"
+    (cd "$(dirname "$f")" && RSI_LOW="$out/low" RSI_RT="$rt" RSI_FRONT_IR="$out/$n.ours.ll" RSI_KEEP=1 rustc --edition 2024 -A warnings -C opt-level=0 -C debuginfo=0 -Zshare-generics=no \
+       -C codegen-units=1 -C save-temps --emit=llvm-ir,link -C linker="$root/bin/lib/rsi/link" -C linker-flavor=gcc "$f" -o "$out/$n.front.bin" > "$out/link.log" 2>&1) || { echo "run-native: the link failed ($out/link.log)" >&2; tail -5 "$out/link.log" >&2; exit 125; }
+    (cd "$(dirname "$f")" && rustc --edition 2024 -A warnings -C opt-level=0 -C debuginfo=0 "$f" -o "$out/$n.rustc.bin" 2>/dev/null)
+    "$out/$n.rustc.bin" > "$out/rustc.out" 2> "$out/rustc.err"; a=$?
+    "$out/$n" > "$out/front.out" 2> "$out/front.err"; b=$?
+    if [ "$a" = "$b" ] && cmp -s "$out/rustc.out" "$out/front.out" && cmp -s "$out/rustc.err" "$out/front.err"; then echo "run-native: $n: status $b, stdout and stderr equal to rustc's"; else echo "run-native: $n: rustc $a, front $b (outputs in $out)"; exit 1; fi ;;
   coverage)
     # RF3's coverage: the mono items rustc collects for each program (the helper's --mono-mir: monomorphic MIR, symbols, resolved
     # callees) through arbace.rust.back.codegen, each function judged against rustc's own IR of the same symbol

@@ -1114,7 +1114,50 @@ fn mono_mir<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
         }
     }
     out.push_str(&mirdata::layouts(tcx, &tys));
+    out.push_str(&langsyms(tcx));
+    out.push_str(&entry(tcx));
     out
+}
+
+/// `(mir/entry {:main S :lang-start S :sigpipe N})`: what `maybe_create_entry_wrapper` makes the C `main` of
+fn entry<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
+    use rustc_hir::attrs::lang_items::LangItem as L;
+    use rustc_middle::ty::{self, Instance};
+    let Some((def_id, et)) = tcx.entry_fn(()) else { return String::new() };
+    let sigpipe = match et {
+        rustc_session::config::EntryFnType::Main { sigpipe } => sigpipe,
+    };
+    let main_i = Instance::mono(tcx, def_id);
+    let ret = tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip().skip_binder().output();
+    let start = tcx.require_lang_item(L::Start, rustc_span::DUMMY_SP);
+    let start_i = Instance::expect_resolve(tcx, ty::TypingEnv::fully_monomorphized(), start, tcx.mk_args(&[ret.into()]), rustc_span::DUMMY_SP);
+    format!("(mir/entry {{:main {} :lang-start {} :sigpipe {}}})\n", mirdata::q(&tcx.symbol_name(main_i).name.to_string()), mirdata::q(&tcx.symbol_name(start_i).name.to_string()), sigpipe)
+}
+
+/// `(mir/langsyms {"panic_const_add_overflow" "SYMBOL" ...})`: the symbols of the lang items codegen calls
+fn langsyms<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
+    use rustc_hir::attrs::lang_items::LangItem as L;
+    let items: &[(&str, L)] = &[
+        ("panic_const_add_overflow", L::PanicAddOverflow), ("panic_const_sub_overflow", L::PanicSubOverflow),
+        ("panic_const_mul_overflow", L::PanicMulOverflow), ("panic_const_div_overflow", L::PanicDivOverflow),
+        ("panic_const_rem_overflow", L::PanicRemOverflow), ("panic_const_neg_overflow", L::PanicNegOverflow),
+        ("panic_const_shr_overflow", L::PanicShrOverflow), ("panic_const_shl_overflow", L::PanicShlOverflow),
+        ("panic_const_div_by_zero", L::PanicDivZero), ("panic_const_rem_by_zero", L::PanicRemZero),
+        ("panic_bounds_check", L::PanicBoundsCheck), ("panic_cannot_unwind", L::PanicCannotUnwind),
+        ("panic_in_cleanup", L::PanicInCleanup), ("panic_null_pointer_dereference", L::PanicNullPointerDereference),
+        ("panic_null_reference_constructed", L::PanicNullReferenceConstructed),
+        ("panic_misaligned_pointer_dereference", L::PanicMisalignedPointerDereference),
+        ("eh_personality", L::EhPersonality),
+    ];
+    let mut o = String::from("(mir/langsyms {");
+    for (n, l) in items {
+        if let Some(d) = tcx.lang_items().get(*l) {
+            let i = rustc_middle::ty::Instance::mono(tcx, d);
+            o.push_str(&format!("{} {} ", mirdata::q(n), mirdata::q(&tcx.symbol_name(i).name.to_string())));
+        }
+    }
+    o.push_str("})\n");
+    o
 }
 
 /// a type and the types its layout is made of (pointees, elements, fields), for the `mir/layouts` table

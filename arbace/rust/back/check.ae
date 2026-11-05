@@ -93,7 +93,7 @@
         bodies (:bodies all) lt (:layouts all)
         theirs-forms0 (llvm/read-ll (str dir "/" n ".ll"))
         theirs (into {} (keep (fn [f] (when (= 'llvm/define (first f)) (let [x (normalize f (global-map theirs-forms0))] [(first x) x]))) theirs-forms0))
-        gl (cg/new-globals)
+        gl (cg/new-globals (:langsyms all))
         theirs-forms (llvm/read-ll (str dir "/" n ".ll"))
         tgm (global-map theirs-forms)
         res (for [b (reachable bodies)]
@@ -149,13 +149,25 @@
 (def triple "x86_64-alpine-linux-musl")
 
 (defn emit-mono
-  "DIR/NAME.mono.edn (the helper's --mono-mir) to DIR/NAME.ours.ll: every function instance of the program codegen'd, the panic
-  functions stubbed to abort, or the first refusal: [:unsupported WHAT]."
-  [dir n]
+  "DIR/NAME.mono.edn (the helper's --mono-mir) to DIR/NAME.ours.ll: every function instance of the program codegen'd; the
+  functions it calls but does not define stubbed to abort (`native?` false: a no_std program to run alone) or declared (the
+  host's std supplies them); or the first refusal: [:unsupported WHAT]."
+  [dir n native?]
   (let [all (mir/read-all (slurp (str dir "/" n ".mono.edn")))
         lt (:layouts all)
-        gl (cg/new-globals)
-        fns (try (doall (map (fn [b] (cg/codegen-fn b lt gl)) (filter #(= :body (:form %)) (:bodies all))))
+        gl (cg/new-globals (:langsyms all))
+        entry (:entry all)
+        wrapper (when entry
+                  (let [{:keys [main lang-start sigpipe]} entry
+                        gs (fn [x] (symbol "g" x))]
+                    ;; maybe_create_entry_wrapper: the C main calls lang_start::<T>(main, argc as isize, argv, sigpipe)
+                    (list 'llvm/define (gs "main") 'i32 [['i32 '%0] ['ptr '%1]]
+                          :body [(list 'block '%top
+                                       (list '= '%2 (list 'sext 'i32 '%0 'i64))
+                                       (list '= '%3 (list 'call 'i64 (gs lang-start) [['ptr (gs main)] ['i64 '%2] ['ptr '%1] ['i8 sigpipe]]))
+                                       (list '= '%4 (list 'trunc 'i64 '%3 'i32))
+                                       '(ret i32 %4))])))
+        fns (try (doall (concat (map (fn [b] (cg/codegen-fn b lt gl)) (filter #(= :body (:form %)) (:bodies all))) (when wrapper [wrapper])))
                  (catch Throwable e [:unsupported (or (:codegen/unsupported (ex-data e)) (.getMessage e))]))]
     (if (= :unsupported (first fns))
       fns
@@ -163,20 +175,21 @@
             defined (set (map (comp name second) fns))
             decls (filter #(and (= 'llvm/declare (first %)) (not (defined (name (second %))))) extras)
             real (filter #(and (not (.startsWith (name (second %)) "llvm.")) ) decls)
-            stubs (for [f real]
+            stubs (for [f (if native? [] real)]
                     (list 'llvm/define (second f) 'void (vec (map-indexed (fn [i [t & _]] [t (symbol (str "%p" i))]) (nth f 3)))
                           :body [(list 'block '%start (list 'call 'void (symbol "g" "abort") []) '(unreachable))]))
             forms (vec (concat [(list 'llvm/source-filename n) (list 'llvm/datalayout datalayout) (list 'llvm/triple triple)]
                                (filter #(= 'llvm/global (first %)) extras)
                                (filter #(and (= 'llvm/declare (first %)) (.startsWith (name (second %)) "llvm.")) decls)
-                               (when (seq real) [(list 'llvm/declare (symbol "g" "abort") 'void [])])
+                               (when (and (seq real) (not native?)) [(list 'llvm/declare (symbol "g" "abort") 'void [])])
+                               (when native? real)
                                stubs fns))]
         (llvm/spit-latin1 (str dir "/" n ".ours.ll") (llvm/print-ll forms))
         [:ok (count fns)]))))
 
 (defn -main [dir & names]
   (when (= "--emit-mono" dir)
-    (let [[st what] (emit-mono (first names) (second names))]
+    (let [[st what] (emit-mono (first names) (second names) (= "--native" (nth names 2 nil)))]
       (println (name st) what)
       (System/exit (if (= st :ok) 0 3))))
   (when (= "--emit" dir)

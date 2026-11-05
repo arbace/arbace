@@ -413,8 +413,10 @@
     (unsupported "aggregate as a return")))
 
 (defn new-globals
-  "The module's interned constants and external declarations: pass it to codegen-fn, read it with `module-extras`."
-  [] (volatile! {:consts {} :decls {} :n 0}))
+  "The module's interned constants and external declarations: pass it to codegen-fn, read it with `module-extras`; `langs`
+  the symbols of the lang items codegen calls (the dump's mir/langsyms)."
+  ([] (new-globals {}))
+  ([langs] (volatile! {:consts {} :decls {} :n 0 :langs langs})))
 
 (defn- le-bytes [n k] (apply str (map (fn [i] (char (bit-and (bit-shift-right n (* 8 i)) 255))) (range k))))
 
@@ -960,7 +962,8 @@
         terminate-block! (fn [reason]
                            (or (get-in @st [:terminate reason])
                                (let [nm (new-block! "terminate") lp (fresh!)
-                                     callee (symbol "g" (if (= reason "cleanup") "panicking.panic_in_cleanup" "panicking.panic_cannot_unwind"))]
+                                     callee (symbol "g" (let [k (if (= reason "cleanup") "panic_in_cleanup" "panic_cannot_unwind")]
+                                                          (or (get-in @gl [:langs k]) (str "panicking." k))))]
                                  (vswap! st assoc :personality true)
                                  (declare! gl callee 'void [])
                                  (emit! nm (list '= lp (list 'landingpad (list 'struct 'ptr 'i32) (list 'filter (list 'array 0 'ptr) 'zeroinitializer))))
@@ -1025,7 +1028,8 @@
                                                         "rem-zero" "panic_const_rem_by_zero"
                                                         "bounds-check" "panic_bounds_check"
                                                         (unsupported (str "assert message " mk)))
-                                           callee (symbol "g" (if (= mk "bounds-check") "panicking.panic_bounds_check" (str "panicking.panic_const." panic-name)))
+                                           callee (symbol "g" (or (get-in @gl [:langs panic-name])
+                                                                  (if (= mk "bounds-check") "panicking.panic_bounds_check" (str "panicking.panic_const." panic-name))))
                                            pbs (symbol (str "%" pb))
                                            _ (emit! bb (if expected (list 'br 'i1 (:v v) lltarget pbs) (list 'br 'i1 (:v v) pbs lltarget)))
                                            [cargs ptypes] (if (= mk "bounds-check")
@@ -1151,6 +1155,8 @@
                                                           (emit! bb (list '= r instr-form))
                                                           (store-cast! rbb ci r pl (:size dl)))
                                                 (unsupported "aggregate returned")))]
+                                 (when (and ci (symbol? callee))
+                                   (declare! gl callee ret (mapv #(vec (butlast %)) argfs)))
                                  (handle (apply list callf))
                                  (cond
                                    unw nil
