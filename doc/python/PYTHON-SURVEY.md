@@ -2779,3 +2779,88 @@ generator's item, one resumption per level (resume, run, runFrames' entry, the y
   `check-depths` on, and the 73-program sample with it on: 73 pass, 0 failing, no code object on the stack generator.
 - `make python-essential`: check --aot 21 programs, 20 pass, 1 classed, 0 failing, the control refused.
 - `bin/pyi runtime check`: the seven packages the same forms, the unicodedata and CJK tables equal, runtime-ops equal, 136 programs of test/python/pyi run by pyi as by the oracle: 136 equal, the REPL session 1 equal (40 min at load 4; the check runs the loop, not compiled code: it covers runFrames' new parameter, guardedStep and the free list).
+
+## Design: 219, `frame.f_locals` as PEP 667's write-through proxy, and the frame's other views (2026-11-05, the Mac VM, queue 219)
+
+216 found `frame.f_locals` a snapshot (tbobj.go's `FrameLocals`: a new dict of the fast locals and cells): a callee's
+`sys._getframe(1).f_locals["x"] = 2` did not reach its caller's `x` (tb.py: CPython `(1, None, 2, 2)`, pyi
+`(1, None, 1, 1)`, loop and compiled alike). Read from go/arbace/py and arbace/python/aot.ae at 40ab1e13, and from
+CPython 3.14.10's Objects/frameobject.c (`framelocalsproxy_*`, `frame_locals_get_impl`, `frame_clear_impl`,
+`frame_lineno_set_impl`) and Python/bltinmodule.c's locals, exec and eval.
+
+**What reads or writes a frame's locals from outside its code:**
+
+| observer | CPython 3.14 | pyi at 40ab1e13 | 219 |
+|---|---|---|---|
+| `frame.f_locals`, a function's frame | `FrameLocalsProxy`: reads and writes the frame's localsplus (a cell's or free variable's contents through the cell), a name none of the code's in `f_extra_locals`; no delete of a local (ValueError) | a new dict each time | the proxy (below) |
+| `frame.f_locals`, a module's or class's body, exec's frame | the namespace object itself (`__prepare__`'s or exec's mapping) | `f.Locals`, the dict (a dict subclass's dict, not the instance) | `f.LocalsMap` when set, else `f.Locals` |
+| `locals()` / `vars()` / `dir()` in a function | a new dict each call: `dict(proxy)` (extra locals included), a snapshot | a new dict of fast locals and cells | the proxy's snapshot |
+| `locals()` in a module or class body | the namespace (its mapping) | `f.Locals` | as f_locals |
+| `exec`/`eval` without locals in a function | that snapshot: writes do not reach the frame | the same | unchanged |
+| `exec(code, f.f_globals, f.f_locals)` (pdb, code.interact, the debuggers) | any mapping as locals: the name operations through the proxy, so writes reach the frame | a dict or dict subclass only ("locals must be a mapping"; `:function-constructor`'s rest) | any mapping (`PyMapping_Check`): `f.LocalsMap`, the name operations through its methods |
+| `frame.clear()` | executing: RuntimeError; a suspended generator's: RuntimeError; a generator's not started: closed; else locals, stack, extra locals, f_trace dropped | no `clear` | as CPython (executing: on the current thread's chain of frames or a running generator's) |
+| `f_trace`, `f_trace_lines`, `f_trace_opcodes` | stored; the trace function called per event | absent (AttributeError) | stored, no event (below) |
+| `f_lineno = N` | a jump, allowed only in a trace function on a line event ("f_lineno can only be set in a trace function" outside) | AttributeError | always the outside answer: pyi runs no trace function |
+| `sys.settrace`, `sys.setprofile`, `threading.settrace` | events | no-ops (sys.go) | unchanged: a DECISION (below) |
+| `inspect` (`getargvalues`, `currentframe().f_back.f_locals`, `FrameInfo`), `traceback.StackSummary`'s `capture_locals`, `warnings` | read f_locals | read the snapshot | read the proxy: the same values |
+
+**Where the locals live, and why no write-back or reload point is needed.** A function's locals are `f.Fast` (the
+fast locals) and `f.Cells` (its cells, then the free variables' cells), heap memory the frame owns for its whole life,
+also after it returned (an escaped frame is never reused: frame.go's `releaseFrame`). The loop reads and writes them
+in place. The compiled code does too: 216's register generator (`reg-func`) emits `(aget (.-Fast f) i)` at every
+`load-fast`, `AotStoreFastV` at every `store-fast`, `(.-Value (aget (.-Cells f) i))` at every `load-deref`; it keeps
+only the *value stack* in Go locals within a block, never a local variable's value across an instruction, and 210's
+stack generator (the fallback) keeps nothing. So the proxy writes the memory the code reads: a write made by any code
+the frame calls (a callee through `f_back`/`sys._getframe(n)`, a dunder, a property, a warning's filter, a signal
+handler, another thread between two instructions) is seen at the frame's next load, compiled or not, with no
+write-back before and no reload after. What a Python-level view can never see is the value stack, the one thing 216
+holds in Go locals: f_locals never shows it (CPython's neither). An operand already on the stack keeps its value:
+`(x, poke(), x)` gives `(1, None, 2)` in CPython and in pyi alike. Hence the rule the compiled code keeps, written here
+for later optimisations (unboxed locals, a local held in a Go variable across a loop): **a local may live in a Go
+variable only between two instructions that cannot run Python code**; one that keeps it across a call, an AotExec
+operation, a dunder dispatch or anything that may raise into a handler must store it to `f.Fast` before and load it
+after (a callee's `f_locals` write is not statically visible: `sys._getframe` is dynamic). 219 adds no instruction
+to the compiled code: 216's and 216d's speed is unchanged by construction (measured below).
+
+**The proxy** (`FrameLocalsProxy`, tbobj.go): the names in `co_localsplusnames`' order (the fast locals, a parameter
+that is a cell read and written through its cell as pyi's code reads it, `CellParams`; then the cells that are no
+parameter; then the free variables), each with its value when bound; a key found by its text when it is an exact str,
+else by hash and `==` (a str subclass, an impostor with str's hash: `framelocalsproxy_getkeyindex`); unhashable keys
+TypeError. `__getitem__` (KeyError "local variable 'KEY' is not defined"), `__setitem__` (a local's slot or cell, a
+free variable's cell: the defining frame's variable changes; otherwise the frame's extra locals), `__delitem__`
+(ValueError for a local, the extra locals' delete), `__contains__`, `__len__`, `__iter__`, `keys`/`values`/`items`
+(lists, as CPython's), `get`, `setdefault`, `pop` (ValueError for a local), `update` (a dict or a proxy only),
+`copy` (a dict), `__reversed__` (a list), `__or__`/`__ror__`/`__ior__`, `__eq__` (proxies by frame, a dict by
+content), `__repr__` (the dict's), unhashable, unpicklable ("cannot pickle 'FrameLocalsProxy' object"), the
+constructor `FrameLocalsProxy(frame)` with frameobject.c's messages, a mapping for `match` (Py_TPFLAGS_MAPPING) and
+`collections.abc.Mapping` (`_collections_abc` registers `type(sys._getframe().f_locals)`). The extra locals are a
+dict on the frame, read by the proxy and the `locals()` snapshot, never by the code (CPython's: a name that is not a
+local of the code object is no variable of the function).
+
+**By design (pyi's IR, not the proxy):** PEP 709's hidden locals (`CO_FAST_HIDDEN`: an inlined comprehension's
+variables while it runs) are not marked in pyi's IR, so a write to such a name while the comprehension runs goes to
+the slot where CPython puts it in the extra locals; pyi's inlined comprehension swaps its cells and locals in the
+function's slots (load-fast-and-clear, load-cell-and-clear), so reads see what CPython's do (test_frame's
+`test_closure_with_inline_comprehension`, `test_write_with_hidden`). `frame.clear()` finds an executing frame on the
+current thread only (the other threads' frames are not walked: pyi's threads hold the GIL in turn, a frame of a thread
+blocked elsewhere is not detected).
+
+**Tracing (`sys.settrace`, `sys.setprofile`, `f_trace`'s events, `f_lineno` jumps): not built here.** pyi's
+`sys.settrace` is a no-op (the class `:tracing`); `f_trace` is stored and never called. Building it is a task of its
+own, sketched for its decision: (1) the loop calls the trace function on call, line (a new line or a backward jump,
+from the IR's line table), return, exception and opcode events while a thread's trace function is set (one branch per
+instruction on the loop, taken only then); (2) the compiled code cannot report lines, so a frame that is traced runs
+on the loop: runFrames enters `Code.Native` only when no trace function is set, and a compiled frame already running
+when one is set (pdb's `set_trace` sets `f_trace` on its caller's frames) hands itself to the loop at its next block
+start, where the frame holds its whole stack (216's rule 2: a check of a thread flag per block start, the cost to
+measure); (3) `f_lineno` jumps from a line event need CPython's `mark_stacks` over pyi's IR (the kind of each stack slot
+at each instruction: iterator, exception, object; the jump's errors are named by them) and the jump's legality rules;
+(4) test_sys_settrace's expected event sequences follow CPython's line table instruction by instruction (a loop's
+head re-lined at each iteration, `with`'s exit, `RESUME`'s call event), each difference a compiler line fix. See
+DECISION in queue 219's report.
+
+**The proof asked:** tb.py's f_locals line equal to CPython's (check216.sh's known line gone), compiled and on the
+loop; test_frame's and test_scope's methods that need it (`bin/pyi lib-test-all test_frame test_scope`), test_inspect's,
+test_sys_settrace's and test_pdb's that need f_locals rather than tracing; `bin/pyi runtime check`, `make
+python-essential`, check216/check216d/check210 PASS; `bin/pyi bench`'s sample, CPython, base and branch back to back
+(210's method), to show 216's speed kept.
