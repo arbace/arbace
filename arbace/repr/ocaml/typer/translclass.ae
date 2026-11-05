@@ -356,11 +356,61 @@
       :Lfunction nil
       (when-let [[s args] (conv body)] [(str "get_" s) args]))))
 
+(defn- rebind-exit [] (throw (ex-info "rebind" {::rebind true})))
+
+(defn- transl-class-rebind*
+  "Translclass.transl_class_rebind's recursion: [path path-lam obj-init], throws for its Exit"
+  [obj-init cl vf]
+  (let [d (:desc cl)]
+    (case (d 0)
+      :Tcl_ident (do (when (and (= :Concrete vf) (not (:new (:decl (d 2))))) (rebind-exit))
+                     [(d 1) (tr/transl-value-path (d 2)) obj-init])
+      :Tcl_fun (let [[_ pat _ cl' partial] d
+                     [path pl oi] (transl-class-rebind* obj-init cl' vf)]
+                 [path pl (fun-of oi pat partial)])
+      :Tcl_apply (let [[path pl oi] (transl-class-rebind* obj-init (d 1) vf)] [path pl (tr/transl-apply oi (d 2))])
+      :Tcl_let (let [[path pl oi] (transl-class-rebind* obj-init (d 4) vf)] [path pl (tr/transl-let (d 1) (d 2) oi false)])
+      :Tcl_structure (rebind-exit)
+      :Tcl_constraint (let [[path pl oi] (transl-class-rebind* obj-init (d 1) vf)]
+                        (loop [c (:type cl)]
+                          (case (c 0)
+                            :Cty_constr (when-not (= (c 1) path) (rebind-exit))
+                            :Cty_arrow (recur (c 3))
+                            (rebind-exit)))
+                        [path pl oi]))))
+
+(defn- transl-class-rebind
+  "Translclass.transl_class_rebind: a class that only applies or re-exports another, or nil"
+  [cl vf]
+  (try
+    (let [obj-init (ty/ident-create "obj_init") self (ty/ident-create "self")
+          oi0 [:Lapply [:Lvar obj-init] [[:Lvar self]]]
+          rebind0 (fn rebind0 [oi cl]
+                    (let [d (:desc cl)]
+                      (if (= :Tcl_let (d 0))
+                        (let [[path pl oi'] (rebind0 oi (d 4))] [path pl (tr/transl-let (d 1) (d 2) oi' false)])
+                        (let [[path pl oi'] (transl-class-rebind* oi cl vf)] [path pl (lfunction [[self ""]] oi')]))))
+          [_ path-lam oi'] (rebind0 oi0 cl)]
+      (if (= oi' (lfunction [[self ""]] oi0))
+        path-lam
+        (let [cla (ty/ident-create "class") new-init (ty/ident-create "new_init") env-init (ty/ident-create "env_init")
+              table (ty/ident-create "table") envs (ty/ident-create "envs")]
+          [:Llet :strict "" new-init (lfunction [[obj-init ""]] oi')
+           [:Llet :alias "" cla path-lam
+            [:Lprim (l/pmakeblock 0 false nil)
+             [(mkappl [:Lvar new-init] [(lfield cla 0)])
+              (lfunction [[table ""]]
+                         [:Llet :strict "" env-init (mkappl (lfield cla 1) [[:Lvar table]])
+                          (lfunction [[envs ""]] (mkappl [:Lvar new-init] [(mkappl [:Lvar env-init] [[:Lvar envs]])]))])
+              (lfield cla 2)]]]])))
+    (catch arbace.lang.ExceptionInfo e (if (::rebind (ex-data e)) nil (throw e)))))
+
 (defn transl-class*
   "Translclass.transl_class: [lambda kind]"
   [ids cl-id pub-meths cl vflag]
-  (let [_ [(ty/ident-create "obj_init") (ty/ident-create "self")]
-        tables (ty/ident-create (str (:name cl-id) "_tables"))
+  (if-let [rebind (transl-class-rebind cl vflag)]
+    [rebind :dynamic]
+  (let [tables (ty/ident-create (str (:name cl-id) "_tables"))
         [top-env req] (oo-add-class tables)
         top (not req)
         [cl-env llets] (build-class-lets cl)
@@ -455,7 +505,7 @@
                                                 (if concrete [(mkappl (lfield cached 0) [lenvs]) (lfield cached 1) lenvs]
                                                     [l/lambda-unit (lfield cached 0) lenvs])]
                                                :static])))]
-            [(llets lam) rk]))))))
+            [(llets lam) rk])))))))
 
 (defn transl-class
   "Translclass.transl_class's wrapper: under oo_wrap"
