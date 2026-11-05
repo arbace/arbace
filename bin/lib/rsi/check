@@ -1,0 +1,215 @@
+#!/bin/bash
+# rsi's check on ci (doc/rust/EVAL.md §9; doc/rust/RUST-EVAL-SURVEY.md, "As built: RE4 (write-ahead)"), C++'s bin/cppi check for
+# Rust: every program of the corpora compiled to IR by the oracle (rustc 1.99.1 -O0 against std's build, the plan's flags, as
+# run-program builds it, through bin/lib/rsi/wrap-ir: the program's codegen unit and its allocator shim), lowered to C
+# (arbace.cpp.lower), the C read by repr/c and checked by ci's checker, linked with std's lowered units (bin/rsi runtime-ci),
+# ci's ports and musl's forms, built into a node program (arbace.rust.run) and run by ci's back end (tools/cirun) as run-program
+# runs the original (a fresh directory, an empty standard input, PATH, HOME and the program's environment, its arguments, the
+# budget: 60 s; test/rust/check-budget.edn's programs more), its outputs normalized as run-program's; its status, standard
+# output's and standard error's SHA-256 against the judge's recorded run (test/rust/ref-rustc-1.99.1.edn, bin/rsi record-ref);
+# every program that does not pass in a class of test/rust/divergences.edn (arbace.rust.check's run-judge), against the committed
+# record test/rust/check-linux-amd64.edn (a recorded pass that fails is a regression); the negative controls
+# test/rust/controls.edn. With --aot the node programs translated by cf2g into Go packages, built by TamaGo's go in shards
+# (RSI_SHARD programs an executable) and run the same way (classes divergences-aot.edn, then divergences.edn; record
+# check-aot-linux-amd64.edn). Each program's seconds (IR, lowering, ci's build [+ translation], run) in WORK/CORPUS/times.tsv and,
+# with --record, test/rust/check{,-aot}-times-linux-amd64.edn (GT8's subsets, GTS205).
+#
+# Usage: bin/rsi check [--aot] [--corpus samples,ui] [--set SET] [--only LIST] [--sample N [--offset K]] [--record] [--judge]
+#   --corpus   samples (test/rust/eval/), synthetic (test/rust/synthetic/, RE5), ui (the UI suite's run programs, bin/rsi list); default samples,synthetic,ui
+#   --set      the UI programs' set (bin/rsi list --set: all, run, threads, process, net; default all)
+#   --only     a file of ids (# comments) to check alone (GT8's lists)
+#   --sample   every Nth program of each corpus's list, from the Kth (--offset)
+#   --essential  the nightly's essential programs alone (test/rust/essential.txt: --only that file, --corpus samples,synthetic)
+#   --record   the record and the times rewritten for the corpora run (not with --only or --sample)
+#   --judge    the last run judged again (nothing run)
+#   RSI_JOBS (default 4): the IR's and the runs' jobs; RSI_THREADS (default 3): the builder's threads (its GOMEMLIMIT
+#   RSI_CI_MEMLIMIT, default 6GiB); RSI_CHECK_WORK (default .tmp/rsi-check, .tmp/rsi-aot with --aot); RSI_KEEP: the IR, the C and
+#   the node programs kept
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+cd "$root"
+corpora=samples,synthetic,ui set=all only= sample=1 offset=0 record= judge= aot=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --aot) aot=1; shift ;;
+    --corpus) corpora=$2; shift 2 ;;
+    --set) set=$2; shift 2 ;;
+    --only) only=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+    --sample) sample=$2; shift 2 ;;
+    --offset) offset=$2; shift 2 ;;
+    --record) record=1; shift ;;
+    --judge) judge=1; shift ;;
+    --essential) only=$root/test/rust/essential.txt; corpora=samples,synthetic; shift ;;
+    *) sed -n '17,28p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+level=eval; [ -n "$aot" ] && level=aot
+if [ -n "$only" ] || [ "$sample" != 1 ] || [ "$set" != all ]; then
+  [ -n "$record" ] && { echo "bin/rsi check: --record records whole corpora, not --only's, --sample's or --set's subset" >&2; exit 2; }
+  export CI_SUBSET=1
+fi
+work=${RSI_CHECK_WORK:-$root/.tmp/rsi-$([ -n "$aot" ] && echo aot || echo check)}
+jobs=${RSI_JOBS:-4}; threads=${RSI_THREADS:-3}; shard=${RSI_SHARD:-4}; gop=${RSI_GO_P:-2}
+go=${ARBACE_GOROOT:-/root/tamago-go}/bin/go
+srcroot=$root/.tmp/repr-rust/src/rustc-1.99.1-src
+sb=${RSI_STD_DIR:-$root/.tmp/rsi/std}
+mkdir -p "$work"; work=$(cd "$work" && pwd)
+IFS=, read -r -a ids <<< "$corpora"
+if [ -n "$judge" ]; then
+  for id in "${ids[@]}"; do [ -f "$work/$id/subset" ] && export CI_SUBSET=1; done
+  [ -n "${CI_SUBSET:-}" ] && [ -n "$record" ] && { echo "bin/rsi check: --judge --record: the last run was a subset" >&2; exit 2; }
+fi
+
+budget() { # ID: the run's seconds (60, or test/rust/check-budget.edn's)
+  local b; b=$(grep -F "\"$1\"" "$root/test/rust/check-budget.edn" 2>"$TMPDIR/rsi-budget.err" | sed -n 's/.*" *\([0-9][0-9]*\).*/\1/p' | head -1)
+  echo "${b:-${RSI_BUDGET:-60}}"
+}
+ir1() { # N CORPUS: the plan's Nth program's IR (bin/lib/rsi/wrap-ir) in WORK/files/KEY, its status and seconds
+  . "$root/bin/lib/rsi/plan.bash"
+  plan_line "$work/$2/list.tsv" "$1"
+  local src=$srcroot k d t0
+  case $file in test/rust/eval/*|test/rust/synthetic/*) src=$root ;; esac
+  k=$(plan_key "$id"); d=$work/files/$k
+  rm -rf "$d"; mkdir -p "$d/b"; t0=$(date +%s.%N)
+  RSI_LOW=$d RUN_PROGRAM_ID=$id plan_rustc "$src" "$sb/sysroot" "$d/b/t" "$root/bin/lib/rsi/wrap-ir" > "$d/ir.log" 2>&1; echo $? > "$d/ir.status"
+  echo "$(date +%s.%N) $t0" | awk '{printf "%.1f\n", $1 - $2}' > "$d/ir.secs"
+  rm -rf "$d/b"
+}
+run1() { # N CORPUS RUNNER [PKG]: the Nth program run by RUNNER (cirun NODES, or the shard's executable PKG) as run-program runs
+  # the original; ID STATUS STDOUT-SUM BYTES FAULT STDERR-SUM SECONDS
+  . "$root/bin/lib/rsi/plan.bash"
+  plan_line "$work/$2/list.tsv" "$1"
+  local k d rd st t0 t1 cmd
+  k=$(plan_key "$id"); d=$work/files/$k
+  if [ -n "${4:-}" ]; then cmd=("$3" "$4"); else cmd=("$3" "$d/x.nodes"); fi
+  rd=$(mktemp -d "$work/run.XXXXXX"); mkdir -p "$rd/x"; t0=$(date +%s.%N)
+  { (cd "$rd/x" && ulimit -f 1024 && env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$rd/x" "${xe[@]}" timeout "$(budget "$id")" "${cmd[@]}" "${rf[@]}" < "$work/empty" > "$rd/out" 2> "$rd/err"); } 2> "$rd/signal.log"
+  st=$?; t1=$(date +%s.%N)
+  [ $st = 124 ] && st=timeout
+  plan_norm "$rd/out" "$rd/err"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$rd/out" | cut -d' ' -f1)" "$(wc -c < "$rd/out")" \
+    "$(grep -m1 '^\(ci\(run\|aot\): \(fault\|internal\)\|fatal error: \|runtime: \|rsi: not lowered\)' "$rd/err" | cut -c1-200 | tr '\t' ' ')" \
+    "$(sha256sum < "$rd/err" | cut -d' ' -f1)" "$(echo "$t1 $t0" | awk '{printf "%.1f", $1 - $2}')"
+  if [ -n "${RSI_KEEP_RUNS:-}" ]; then mkdir -p "$work/runs/$k"; cp "$rd/out" "$rd/err" "$work/runs/$k/"; echo "$st" > "$work/runs/$k/st"; fi
+  rm -rf "$rd"
+}
+gobuild() { # the shard's executable (RSI_HEAVY: the host's heavy-slot wrapper, around go build alone)
+  (cd "$mod" && ${RSI_HEAVY:-} env CGO_ENABLED=0 GOFLAGS=-mod=mod GOCACHE=${RSI_GOCACHE:-$root/.tmp/gocache} GOMAXPROCS=4 GOMEMLIMIT=4GiB \
+     "$go" build -p "$gop" -trimpath -o "$@")
+}
+export -f budget ir1 run1 gobuild; export work root srcroot sb
+
+if [ -z "$judge" ]; then
+  rtlib=$("$root/bin/rsi" runtime-ci) || exit 1
+  cirun=${CIRUN:-$root/.tmp/ci/cirun}
+  { [ -n "${CIRUN:-}" ] && [ -x "$cirun" ]; } || "$root/bin/ci" cirun-build --ensure > "$work/cirun-build.log" 2>&1 || { cat "$work/cirun-build.log"; exit 1; }
+  "$root/bin/ci" musl ensure || exit 1
+  : > "$work/empty"
+  # compiletest's native helpers (tests/auxiliary/rust_test_helpers.c), read as a library of ci's (the original links gcc's)
+  xlib=$work/helpers
+  if [ ! -f "$xlib/index.edn" ] && [ -f "$srcroot/tests/auxiliary/rust_test_helpers.c" ]; then
+    rm -rf "$xlib"; mkdir -p "$xlib"
+    printf 'rust_test_helpers\t%s\n' "$srcroot/tests/auxiliary/rust_test_helpers.c" > "$xlib/list.tsv"
+    GOMEMLIMIT=${RSI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.rust.run read-lib "$xlib" "$xlib/list.tsv" 1 > "$xlib/read.log" 2>&1 || { tail -5 "$xlib/read.log"; exit 1; }
+  fi
+  [ -f "$xlib/index.edn" ] && export RSI_EXTRA_LIBS=$xlib
+  # the original's native helpers, for programs that link them (rustc's link needs the archive even when nothing is linked)
+  mkdir -p "$work/native"
+  [ -f "$work/native/librust_test_helpers.a" ] || { cc -c -O2 -fPIC -o "$work/native/rust_test_helpers.o" "$srcroot/tests/auxiliary/rust_test_helpers.c" \
+    && ar rcs "$work/native/librust_test_helpers.a" "$work/native/rust_test_helpers.o"; } > "$work/native/build.log" 2>&1
+  export REPR_RUST_NATIVE=$work/native
+  for id in "${ids[@]}"; do
+    d=$work/$id
+    rm -rf "${d:?}"; mkdir -p "$d"
+    if [ -n "$only" ] || [ "$sample" != 1 ] || [ "$set" != all ]; then printf '%s %s %s %s\n' "${only:-all}" "$sample" "$offset" "$set" > "$d/subset"; fi
+    case $id in
+      samples|synthetic) "$root/bin/rsi" list --set "$id" -o "$d/all.tsv" ;;
+      ui) "$root/bin/rsi" list --set "$set" -o "$d/all.tsv" ;;
+      *) echo "bin/rsi check: no corpus $id (samples, synthetic, ui)" >&2; exit 2 ;;
+    esac
+    # the list: every Nth from the Kth, --only's ids, not a program the judge does not build
+    grep -o '{:id "[^"]*" :status :no-build' test/rust/ref-rustc-1.99.1.edn 2>"$TMPDIR/rsi-ref.err" | cut -d'"' -f2 > "$d/no-build.txt"
+    awk -F'\x1f' -v only="${only:-}" -v nb="$d/no-build.txt" -v sm="$sample" -v off="$offset" '
+      BEGIN { while ((getline l < nb) > 0) skip[l] = 1
+              if (only != "") { while ((getline l < only) > 0) if (l !~ /^#/ && l != "") want[l] = 1 } }
+      { n++; if ((n - 1) % sm != off % sm) next; if ($1 in skip) next; if (only != "" && !($1 in want)) next; print }' "$d/all.tsv" > "$d/list.tsv"
+    n=$(grep -c . "$d/list.tsv")
+    cut -d$'\x1f' -f1 "$d/list.tsv" > "$d/ids.txt"
+    [ "$n" -gt 0 ] || continue
+    echo "rsi check ($level): $id: $n programs" >&2
+    # the oracle's IR
+    seq 1 "$n" | xargs -P "$jobs" -I{} nice bash -c 'ir1 "$1" "$2"' _ {} "$id"
+    # the build list: ID DIR (DIR - when the IR is missing), and for AOT the package
+    awk -v w="$work" '{ k = $0; gsub(/[\/#]/, "%", k); s = ""; f = w "/files/" k "/ir.status"
+                        if ((getline s < f) <= 0) s = ""; close(f)
+                        print $0 "\t" (s == "0" ? w "/files/" k : w "/files/" k "/-") "\tp" NR }' "$d/ids.txt" > "$d/build.tsv"
+    if [ -z "$aot" ]; then
+      GOMEMLIMIT=${RSI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.rust.run nodes-list "$d" "$d/build.tsv" "$rtlib" "$threads" > "$d/nodes.log" 2>&1
+      : > "$d/run.tsv"
+      awk -F'\t' '$2 == "ok" {print $1}' "$d/nodes.tsv" | sort > "$d/ok.txt"
+      awk 'BEGIN { while ((getline l < ARGV[2]) > 0) ok[l] = 1; ARGV[2] = "" } ($0 in ok) { print NR }' "$d/ids.txt" "$d/ok.txt" \
+        | xargs -P "$jobs" -I{} bash -c 'run1 "$1" "$2" "$3"' _ {} "$id" "$cirun" >> "$d/run.tsv"
+    else
+      mod=$work/go; export mod
+      : > "$d/nodes.tsv"; : > "$d/run.tsv"
+      split -l "$shard" -d -a 5 "$d/build.tsv" "$d/shard."
+      for s in "$d"/shard.[0-9][0-9][0-9][0-9][0-9]; do
+        [ -f "$s" ] || continue
+        rm -rf "$mod"; mkdir -p "$mod/progs" "$mod/shard"
+        cp -r "$root/.tmp/ci/go/ci" "$root/.tmp/ci/go/crt" "$mod/"
+        printf 'module arbace\n\ngo 1.27\n' > "$mod/go.mod"
+        GOMEMLIMIT=${RSI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.rust.run compile-list "$mod" "$s" "$rtlib" "$threads" > "$s.compile.log" 2>&1
+        [ -f "$mod/nodes.tsv" ] && cat "$mod/nodes.tsv" >> "$d/nodes.tsv"
+        awk -F'\t' '$2 == "ok" {print $1}' "$mod/nodes.tsv" 2>"$TMPDIR/rsi-aot.err" | sort > "$s.ok"
+        awk -F'\t' '{print $1 "\t" $3}' "$s" | sort > "$s.pkgs"
+        join -t "$(printf '\t')" "$s.ok" "$s.pkgs" > "$s.built" 2>>"$s.compile.log" || true
+        if [ -s "$s.built" ]; then
+          {
+            echo 'package main'; echo; echo 'import ('; echo '	"os"'
+            cut -f2 "$s.built" | while read -r p; do echo "	$p \"arbace/progs/$p\""; done
+            echo ')'; echo; echo 'func main() {'; echo '	switch os.Args[1] {'
+            cut -f2 "$s.built" | while read -r p; do echo "	case \"$p\":"; echo "		$p.Main(os.Args[2:])"; done
+            echo '	}'; echo '	println("ciaot: internal: no package", os.Args[1])'; echo '	os.Exit(70)'; echo '}'
+          } > "$mod/shard/main.go"
+          exe=$work/shard.exe
+          t0=$(date +%s)
+          if ! gobuild "$exe" ./shard > "$s.build.log" 2>&1; then
+            cut -f2 "$s.built" | while read -r p; do
+              if ! gobuild "$work/pkg.a" "./progs/$p" > "$s.$p.log" 2>&1; then
+                i=$(awk -F'\t' -v p="$p" '$2 == p {print $1}' "$s.built")
+                printf '%s\tgo-error\t\t%s\t\t\n' "$i" "$(grep -m1 'prog.go' "$s.$p.log" | cut -c1-200 | tr '\t' ' ')" >> "$d/go-errors.tsv"
+                awk -F'\t' -v p="$p" '$2 != p' "$s.built" > "$s.built.new" && mv "$s.built.new" "$s.built"
+                sed -i "/\"arbace\/progs\/$p\"\$/d; /case \"$p\":/,+1d" "$mod/shard/main.go"
+              fi
+              rm -f "$work/pkg.a" "$s.$p.log"
+            done
+            [ -s "$s.built" ] && gobuild "$exe" ./shard >> "$s.build.log" 2>&1
+          fi
+          echo "$(basename "$s") $(( $(date +%s) - t0 ))" >> "$d/go-build.secs"
+          [ -x "$exe" ] && while IFS=$'\t' read -r i p; do
+              printf '%s\t%s\n' "$(grep -n -x -F "$i" "$d/ids.txt" | head -1 | cut -d: -f1)" "$p"
+            done < "$s.built" | while IFS=$'\t' read -r nn p; do printf '%s\037%s\0' "$nn" "$p"; done \
+            | xargs -0 -P "$jobs" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r n p <<< "$1"; run1 "$n" "$2" "$3" "$p"' _ {} "$id" "$exe" >> "$d/run.tsv"
+          rm -f "$exe"
+        fi
+        rm -rf "$mod"; rm -f "$s" "$s.pkgs" "$s.ok"
+        echo "rsi aot: $id $(basename "$s"): $(wc -l < "$s.built") built" >&2
+      done
+      if [ -s "$d/go-errors.tsv" ]; then
+        awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, f, "\t"); e[f[1]] = l }; ARGV[2] = "" }
+                    ($1 in e) { print e[$1]; next } { print }' "$d/nodes.tsv" "$d/go-errors.tsv" > "$d/nodes.tsv.new" && mv "$d/nodes.tsv.new" "$d/nodes.tsv"
+      fi
+    fi
+    # the seconds of each program: IR, lowering, ci's build (with --aot: and cf2g's translation), run
+    awk -F'\t' -v w="$work" 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, f, "\t"); b[f[1]] = f[6] }
+                                     while ((getline l < ARGV[3]) > 0) { split(l, f, "\t"); r[f[1]] = f[7] }; ARGV[2] = ""; ARGV[3] = "" }
+      { k = $0; gsub(/[\/#]/, "%", k); s = "-"; if ((getline s < (w "/files/" k "/ir.secs")) <= 0) s = "-"; close(w "/files/" k "/ir.secs")
+        lb = ($0 in b) ? b[$0] : "-+-"; n = split(lb, x, "+"); print $0 "\t" s "\t" x[1] "\t" (n > 2 ? x[2] + x[3] : x[2]) "\t" (($0 in r) ? r[$0] : "-") }' \
+      "$d/ids.txt" "$d/nodes.tsv" "$d/run.tsv" > "$d/times.tsv"
+    [ -n "${RSI_KEEP:-}" ] || awk -F'\t' '$2 == "ok" {print $1}' "$d/nodes.tsv" | while IFS= read -r i; do
+      k=$(printf '%s' "$i" | tr '/#' '%%'); rm -f "$work/files/$k/x.ll" "$work/files/$k/shim.ll" "$work/files/$k/x.c" "$work/files/$k/x.nodes"; done
+  done
+fi
+arbace_tool -m arbace.rust.check run-judge "$work" "$level" "${record:+--record}" "${ids[@]}"

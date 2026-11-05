@@ -1,0 +1,176 @@
+(in-ns 'c.rust.rt.eh) (c/file "eh.c" :std :gnu23)
+;; The pending-flag layer of the lowered Rust (doc/rust/EVAL.md §8; doc/rust/RUST-EVAL-SURVEY.md §5.4, RES4, "As built: RE3"), as C
+;; forms written by hand: what stands for libgcc's unwinder when std is lowered with the program (bin/rsi runtime-build). Everything
+;; else of Rust's panics is std's own code, lowered: panic_unwind's __rust_start_panic and cleanup (the boxed payload in its
+;; _Unwind_Exception, exception class "MOZ\0RUST"), std's panicking, catch_unwind's __rust_try (an invoke and a `catch ptr null`
+;; landing pad). The unwinder's entry points raise the pending flag instead of unwinding; the lowered frames return while it is set,
+;; to a landing pad (arbace.cpp.lower, doc/cpp/LLVM.md §8) or out of main. Rust's landing pads have three clause shapes (survey P6):
+;; `cleanup`, `filter [0 x ptr] zeroinitializer` (a nounwind boundary: the lowering's selector -1) and `catch ptr null`, which
+;; cx$catches answers: no type_info matching, no personality. rust_eh_personality (std's personality/gcc.rs) is lowered with std but
+;; never called; the unwinder's queries it and std's backtrace make are answered as by an unwinder that finds no frame (RES8 (a):
+;; backtraces off). Per thread, as C++'s (CP103 (b)): the flag and the in-flight exception are _Thread_local.
+;;
+;; RES4 (a) shares one layer between C++ and Rust (arbace/cpp/rt/eh.c.ae split into the unwinder's entry points and C++'s personality
+;; part); the split waits for RES16's rename after C++'s CX8 (RES23), so this file holds Rust's part and the entry points it needs.
+;;
+;; Also the platform std asks of the CPU (RES8 (a)): std_detect's cpuid and xgetbv answered as a fixed x86-64 baseline CPU (the SSE2
+;; level every x86-64 has: std's runtime-detected features off, its generic paths), and the stubs' report (rsi_not_lowered: a
+;; function of std whose IR the lowering does not take, called).
+
+(c/declare abort ^void [void])
+(c/declare write ^long [int (* (const void)) unsigned-long])
+(c/declare strlen ^unsigned-long [(* (const char))])
+(c/declare malloc ^{:tag (* void)} [unsigned-long])
+(c/declare free ^void [(* void)])
+(c/declare pthread_create ^int [(* void) (* void) (* (fn [(* void)] (* void))) (* void)])
+(c/declare __cxa_atexit ^int [(* (fn [(* void)] void)) (* void) (* void)])
+(c/declare at_quick_exit ^int [(* (fn [void] void))])
+
+(c/struct cx$ue [^unsigned-long cls ^{:tag (* (fn [int (* void)] void))} cleanup ^unsigned-long p1 ^unsigned-long p2])
+(c/static-assert (== (sizeof-type (struct cx$ue)) 32))
+
+(c/var ^:thread_local ^int cx$pending 0)
+(c/var ^:static ^:thread_local ^{:tag (* (struct cx$ue))} cx$cur)
+
+(c/defn ^:static rsi$say ^void [^{:tag (* (const char))} s]
+  (write 2 s (strlen s)))
+
+(c/defn ^:static cx$raise ^int [^{:tag (* (struct cx$ue))} ue]
+  (set! cx$cur ue)
+  (set! cx$pending 1)
+  (return 5))
+
+;; the unwinder's entry points panic_unwind and std call (unwind.h's): each raise only sets the flag; the return value (5,
+;; _URC_END_OF_STACK) is never looked at, since the caller returns at once while the flag is set
+(c/defn _Unwind_RaiseException ^int [^{:tag (* (struct cx$ue))} ue] (return (cx$raise ue)))
+(c/defn _Unwind_Resume_or_Rethrow ^int [^{:tag (* (struct cx$ue))} ue] (return (cx$raise ue)))
+(c/defn _Unwind_Resume ^void [^{:tag (* (struct cx$ue))} ue] (cx$raise ue))
+(c/defn _Unwind_DeleteException ^void [^{:tag (* (struct cx$ue))} ue]
+  (when (-> ue cleanup) ((-> ue cleanup) 1 ue)))
+
+;; the queries of the personality routine (never called: no frame is searched) and of std's backtrace (an unwinder that finds no
+;; frame: _Unwind_Backtrace ends at once, _URC_END_OF_STACK)
+(c/defn _Unwind_GetLanguageSpecificData ^{:tag (* void)} [^{:tag (* void)} ctx] (return 0))
+(c/defn _Unwind_GetRegionStart ^unsigned-long [^{:tag (* void)} ctx] (return 0))
+(c/defn _Unwind_GetTextRelBase ^unsigned-long [^{:tag (* void)} ctx] (return 0))
+(c/defn _Unwind_GetDataRelBase ^unsigned-long [^{:tag (* void)} ctx] (return 0))
+(c/defn _Unwind_GetIP ^unsigned-long [^{:tag (* void)} ctx] (return 0))
+(c/defn _Unwind_GetIPInfo ^unsigned-long [^{:tag (* void)} ctx ^{:tag (* int)} before]
+  (when before (set! @before 0))
+  (return 0))
+(c/defn _Unwind_GetCFA ^unsigned-long [^{:tag (* void)} ctx] (return 0))
+(c/defn _Unwind_GetGR ^unsigned-long [^{:tag (* void)} ctx ^int i] (return 0))
+(c/defn _Unwind_SetGR ^void [^{:tag (* void)} ctx ^int i ^unsigned-long v])
+(c/defn _Unwind_SetIP ^void [^{:tag (* void)} ctx ^unsigned-long v])
+(c/defn _Unwind_FindEnclosingFunction ^{:tag (* void)} [^{:tag (* void)} pc] (return 0))
+(c/defn _Unwind_Backtrace ^int [^{:tag (* void)} f ^{:tag (* void)} a] (return 5))
+
+;; the lowering's: a resume instruction, a landing pad's in-flight exception and its catch clauses (Rust's only clause is `catch ptr
+;; null`, catch_unwind's: every exception, Rust's and foreign ones, as rust_eh_personality's search finds it)
+(c/defn cx$resume ^void [^{:tag (* void)} o] (cx$raise o))
+(c/defn cx$exception ^{:tag (* void)} [void] (return cx$cur))
+(c/defn cx$catches ^int [^{:tag (* void)} ti] (return (== ti 0)))
+
+;; an exception that leaves main, a thread's routine or an exit handler: every Rust thread's entry catches every panic (std's
+;; lang_start and thread start), so only a panic no frame catches gets here, where the native _Unwind_RaiseException returns
+;; _URC_END_OF_STACK and std's rust_panic aborts with this message
+(c/defn cx$uncaught ^void [void]
+  (set! cx$pending 0)
+  (rsi$say "fatal runtime error: failed to initiate panic, error 5, aborting\n")
+  (abort))
+
+;; the thread start, as C++'s (CP120 (b)): musl's pthread_create is native, so a routine that returns with the flag set is caught here
+(c/struct cx$start [^{:tag (* (fn [(* void)] (* void)))} f ^{:tag (* void)} a])
+
+(c/defn ^:static cx$thread_start ^{:tag (* void)} [^{:tag (* void)} p]
+  (let [^{:tag (* (struct cx$start))} s (conv (* (struct cx$start)) p)
+        ^{:tag (* (fn [(* void)] (* void)))} f (-> s f)
+        ^{:tag (* void)} a (-> s a)]
+    (free p)
+    (let [^{:tag (* void)} r (f a)]
+      (when cx$pending (cx$uncaught))
+      (return r))))
+
+(c/defn cx$pthread_create ^int [^{:tag (* void)} th ^{:tag (* void)} attr ^{:tag (* (fn [(* void)] (* void)))} f ^{:tag (* void)} a]
+  (let [^{:tag (* (struct cx$start))} s (conv (* (struct cx$start)) (malloc (sizeof-type (struct cx$start))))]
+    (when (== s 0) (return 11))
+    (set! (-> s f) f)
+    (set! (-> s a) a)
+    (let [^int r (pthread_create th attr cx$thread_start s)]
+      (when r (free s))
+      (return r))))
+
+;; exit-time handlers (std registers none; a program may through libc): run through a trampoline that checks the flag
+(c/struct cx$exit [^{:tag (* (fn [(* void)] void))} f ^{:tag (* (fn [void] void))} f0 ^{:tag (* void)} a])
+
+(c/defn ^:static cx$exit_run ^void [^{:tag (* void)} p]
+  (let [^{:tag (* (struct cx$exit))} s (conv (* (struct cx$exit)) p)
+        ^{:tag (* (fn [(* void)] void))} f (-> s f)
+        ^{:tag (* (fn [void] void))} f0 (-> s f0)
+        ^{:tag (* void)} a (-> s a)]
+    (free p)
+    (if f (f a) (f0))
+    (when cx$pending (cx$uncaught))))
+
+(c/defn ^:static cx$exit_add ^int [^{:tag (* (fn [(* void)] void))} f ^{:tag (* (fn [void] void))} f0 ^{:tag (* void)} a ^{:tag (* void)} dso]
+  (let [^{:tag (* (struct cx$exit))} s (conv (* (struct cx$exit)) (malloc (sizeof-type (struct cx$exit))))]
+    (when (== s 0) (return -1))
+    (set! (-> s f) f)
+    (set! (-> s f0) f0)
+    (set! (-> s a) a)
+    (let [^int r (__cxa_atexit cx$exit_run s dso)]
+      (when r (free s))
+      (return r))))
+
+(c/defn cx$cxa_atexit ^int [^{:tag (* (fn [(* void)] void))} f ^{:tag (* void)} a ^{:tag (* void)} dso] (return (cx$exit_add f 0 a dso)))
+(c/defn cx$atexit ^int [^{:tag (* (fn [void] void))} f] (return (cx$exit_add 0 f 0 0)))
+(c/defn cx$at_quick_exit ^int [^{:tag (* (fn [void] void))} f] (return (at_quick_exit f)))
+
+;; std_detect's cpuid (RES8 (a)): leaf 0 the highest leaf (1) and the vendor "ArbaceRsiCPU" (ebx, edx, ecx), leaf 1 the x86-64
+;; baseline's features in edx (fpu, tsc, cx8, cmov, mmx, fxsr, sse, sse2) and none in ecx (no sse3, no osxsave, no avx), every other
+;; leaf zeros (0x80000000: no extended leaf). The result's order is the asm's outputs: ebx, eax, ecx, edx.
+(c/struct rsi$cpuid [^unsigned rbx ^unsigned eax ^unsigned ecx ^unsigned edx])
+
+(c/defn rsi_cpuid ^{:tag (struct rsi$cpuid)} [^unsigned leaf ^unsigned sub]
+  (let [^{:tag (struct rsi$cpuid)} r (init 0 0 0 0)]
+    (when (== leaf 0)
+      (set! (.-eax r) 1)
+      (set! (.-rbx r) 0x61627241)
+      (set! (.-edx r) 0x73526563)
+      (set! (.-ecx r) 0x55504369))
+    (when (== leaf 1)
+      (set! (.-eax r) 0x00000f01)
+      (set! (.-edx r) 0x07808111))
+    (return r)))
+
+(c/defn rsi_xgetbv ^unsigned-long [^unsigned xcr] (return 0))
+
+;; a stub's call (arbace.rust.lower's runtime-forms): the function's name and why it was not lowered, then abort
+(c/defn rsi_not_lowered ^void [^{:tag (* (const char))} what]
+  (rsi$say "rsi: not lowered: ")
+  (rsi$say what)
+  (rsi$say "\n")
+  (abort))
+
+;; u128's carrying_mul_add (arbace.rust.lower's replaced-functions: its IR multiplies in i256): a * b + c + d as 256 bits, the low
+;; 128 bits at out[0], the high at out[1], by 64-bit limbs
+(c/defn rsi_u128_carrying_mul_add ^void [^{:tag (* unsigned-__int128)} out ^unsigned-__int128 a ^unsigned-__int128 b
+                                         ^unsigned-__int128 c ^unsigned-__int128 d]
+  (let [^unsigned-__int128 m (conv unsigned-__int128 (lit unsigned-long 0xffffffffffffffff))
+        ^unsigned-__int128 a0 (bit-and a m)
+        ^unsigned-__int128 a1 (>> a 64)
+        ^unsigned-__int128 b0 (bit-and b m)
+        ^unsigned-__int128 b1 (>> b 64)
+        ^unsigned-__int128 p00 (* a0 b0)
+        ^unsigned-__int128 p01 (* a0 b1)
+        ^unsigned-__int128 p10 (* a1 b0)
+        ^unsigned-__int128 p11 (* a1 b1)
+        ^unsigned-__int128 mid (+ (>> p00 64) (bit-and p01 m) (bit-and p10 m))
+        ^unsigned-__int128 lo (bit-or (bit-and p00 m) (<< (bit-and mid m) 64))
+        ^unsigned-__int128 hi (+ p11 (>> p01 64) (>> p10 64) (>> mid 64))]
+    (set! lo (+ lo c))
+    (when (< lo c) (set! hi (+ hi 1)))
+    (set! lo (+ lo d))
+    (when (< lo d) (set! hi (+ hi 1)))
+    (set! (aget out 0) lo)
+    (set! (aget out 1) hi)))

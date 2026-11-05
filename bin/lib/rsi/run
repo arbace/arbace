@@ -1,0 +1,33 @@
+#!/bin/bash
+# bin/rsi run [--edition E] [RUSTC-OPTION...] FILE.rs [-- ARG...] (doc/rust/EVAL.md §9): one Rust program compiled to IR by the
+# oracle (rustc 1.99.1 -O0 against std's build, edition E, default 2021, through bin/lib/rsi/wrap-ir), lowered, its C read and
+# checked by ci, linked with std's lowered units, ci's ports and musl's forms (arbace.rust.run) and run by ci's back end
+# (tools/cirun) with ARG...; the program's status is the command's. RSI_RUN_KEEP=DIR keeps the IR, the C and the node program in DIR.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+ed=2021 opts=() file= pargs=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --) shift; pargs=("$@"); break ;;
+    --edition) ed=$2; shift 2 ;;
+    -*) opts+=("$1"); shift ;;
+    *) file=$(cd "$(dirname "$1")" && pwd)/$(basename "$1"); shift ;;
+  esac
+done
+[ -n "$file" ] || { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+sb=${RSI_STD_DIR:-$root/.tmp/rsi/std}
+rtlib=$("$root/bin/rsi" runtime-ci) || exit 1
+cirun=${CIRUN:-$root/.tmp/ci/cirun}
+{ [ -n "${CIRUN:-}" ] && [ -x "$cirun" ]; } || "$root/bin/ci" cirun-build --ensure > "$TMPDIR/rsi-cirun-build.log" 2>&1 || { cat "$TMPDIR/rsi-cirun-build.log" >&2; exit 1; }
+"$root/bin/ci" musl ensure >&2 || exit 1
+d=${RSI_RUN_KEEP:-$(mktemp -d "$TMPDIR/rsi-run.XXXXXX")}
+mkdir -p "$d/b"; d=$(cd "$d" && pwd)
+(cd "$(dirname "$file")" && RUSTC_BOOTSTRAP=1 RSI_LOW=$d "$root/bin/lib/rsi/wrap-ir" rustc --sysroot "$sb/sysroot" --edition "$ed" \
+   -A unused -A internal_features -Cdebuginfo=0 "${opts[@]}" "$(basename "$file")" -o "$d/b/t") >&2 || { [ -n "${RSI_RUN_KEEP:-}" ] || rm -rf "$d"; exit 1; }
+(cd "$root" && GOMEMLIMIT=${RSI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.rust.run nodes "$rtlib" "$d" "$d/x.nodes") 2>&1 | { grep -v -E '^Reflection warning|recur arg|^Auto-boxing' || true; } >&2
+[ -f "$d/x.nodes" ] || { [ -n "${RSI_RUN_KEEP:-}" ] || rm -rf "$d"; exit 1; }
+"$cirun" "$d/x.nodes" "${pargs[@]}"; st=$?
+[ -n "${RSI_RUN_KEEP:-}" ] || rm -rf "$d"
+exit $st
