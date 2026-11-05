@@ -1226,6 +1226,51 @@
                                                                (list 'call 'void (list 'asm "" "~{memory}" :sideeffect) [])
                                                                (list 'call 'void (list 'asm "" "r,~{memory}" :sideeffect) [['ptr (:ptr pl)]])))
                                                    (when target (br-or-merge bb t target)))
+                                     ("ctpop" "ctlz" "ctlz_nonzero" "cttz" "cttz_nonzero" "bswap" "bitreverse" "saturating_add" "saturating_sub"
+                                      "unchecked_funnel_shl" "unchecked_funnel_shr" "rotate_left" "rotate_right")
+                                     (let [a0 (first args)
+                                           sc (scalar-of-op a0)
+                                           w (:ibits sc)
+                                           ity (symbol (:imm sc))
+                                           dl (layout lt (place-type body dest))
+                                           dsc (:scalar dl)
+                                           call! (fn [nm argvals]
+                                                   (let [iname (symbol "g" (str "llvm." nm ".i" w)) r (fresh!)]
+                                                     (declare! gl iname ity (mapv (fn [[t _]] [t]) argvals))
+                                                     (emit! bb (list '= r (list 'call ity iname (vec argvals))))
+                                                     {:ty (:imm sc) :v r}))
+                                           intcast (fn [v]
+                                                     (let [fb (:ibits sc) tb (:ibits dsc)]
+                                                       (cond (= fb tb) v
+                                                             (< fb tb) (let [r (fresh!)] (emit! bb (list '= r (list 'zext (symbol (:imm sc)) (:v v) (symbol (:imm dsc))))) {:ty (:imm dsc) :v r})
+                                                             :else (let [r (fresh!)] (emit! bb (list '= r (list 'trunc (symbol (:imm sc)) (:v v) (symbol (:imm dsc))))) {:ty (:imm dsc) :v r}))))
+                                           x (operand! bb a0)
+                                           v (case intrinsic
+                                               ("ctlz" "ctlz_nonzero" "cttz" "cttz_nonzero")
+                                               (intcast (call! (if (#{"ctlz" "ctlz_nonzero"} intrinsic) "ctlz" "cttz")
+                                                               [[ity (:v x)] ['i1 (if (#{"ctlz_nonzero" "cttz_nonzero"} intrinsic) 'true 'false)]]))
+                                               "ctpop" (intcast (call! "ctpop" [[ity (:v x)]]))
+                                               "bswap" (if (= w 8) x (call! "bswap" [[ity (:v x)]]))
+                                               "bitreverse" (call! "bitreverse" [[ity (:v x)]])
+                                               ("saturating_add" "saturating_sub")
+                                               (let [y (operand! bb (second args))]
+                                                 (call! (str (if (:signed sc) "s" "u") (if (= intrinsic "saturating_add") "add" "sub") ".sat") [[ity (:v x)] [ity (:v y)]]))
+                                               ("unchecked_funnel_shl" "unchecked_funnel_shr")
+                                               (let [y (operand! bb (second args)) sh (operand! bb (nth args 2))
+                                                     shc (let [fb (:ibits (scalar-of-op (nth args 2)))]
+                                                           (cond (= fb w) sh
+                                                                 (< fb w) (let [r (fresh!)] (emit! bb (list '= r (list 'zext (symbol (:ty sh)) (:v sh) ity))) {:ty (:imm sc) :v r})
+                                                                 :else (let [r (fresh!)] (emit! bb (list '= r (list 'trunc (symbol (:ty sh)) (:v sh) ity))) {:ty (:imm sc) :v r})))]
+                                                 (call! (if (= intrinsic "unchecked_funnel_shl") "fshl" "fshr") [[ity (:v x)] [ity (:v y)] [ity (:v shc)]]))
+                                               ("rotate_left" "rotate_right")
+                                               (let [sh (operand! bb (second args))
+                                                     shc (let [fb (:ibits (scalar-of-op (second args)))]
+                                                           (cond (= fb w) sh
+                                                                 (< fb w) (let [r (fresh!)] (emit! bb (list '= r (list 'zext (symbol (:ty sh)) (:v sh) ity))) {:ty (:imm sc) :v r})
+                                                                 :else (let [r (fresh!)] (emit! bb (list '= r (list 'trunc (symbol (:ty sh)) (:v sh) ity))) {:ty (:imm sc) :v r})))]
+                                                 (call! (if (= intrinsic "rotate_left") "fshl" "fshr") [[ity (:v x)] [ity (:v x)] [ity (:v shc)]])))]
+                                       (assign! bb dest v)
+                                       (when target (br-or-merge bb t target)))
                                      (unsupported (str "intrinsic " intrinsic)))
                                  (let [callee (if (or (nil? (nth f 0 nil)) (not= "const" (name (first f))))
                                                 (let [v (operand! bb f)] (:v v))
