@@ -1462,6 +1462,138 @@ server alone, from the GHC API, with no evaluation). The scripted session compar
 
 HES60-HES64, each (a) as recommended: the helper dumps foreign exports' and wrappers' helpers and hsi makes real callbacks (decided at the next night by what the stgToCmm hook sees); descriptors waited on by poll with HE4f's scheduler work; coverage subsets by a counting mode and greedy cover at HE10; forkProcess a design class; a program's own C through ci beside hsi at HE6's second half.
 
+## As built: HE6's second half (write-ahead)
+
+Built 2026-11-05 on branch `haskell-he6` from `haskell-he5` (main `d86cb874` merged first, for the C crop's prebuilt
+runtime, `arbace.c.runtime`), light work by day (2 jobs, no gate, no lock, the main checkout's stage 0), every result below on
+lists of the testsuite's run tests a few dozen at a time, never a whole corpus. Nothing of Haskell is in `gate_key` or a gate
+step (HES19 (a)); `go/arbace/ci` and `go/arbace/crt`, which hsi now imports, are unchanged (the C crop's, in `gate_key`).
+
+### HES64 (a): a program's own C
+
+- **`bin/hsi cnodes OUT [--refs FILE] [OPTION...] FILE...`** (`test/haskell/eval/cnodes.ae`, on stage 0): the test's C files
+  read by repr/c and checked by ci's checker (`arbace.c.run/read-unit`, gnu23, the RTS's headers of the installed GHC on the
+  include path: `HsFFI.h`, `Rts.h` read as they are), linked with what they need of musl through ci's prebuilt runtime
+  (`arbace.c.runtime/link-text`, the fragments cached in `.tmp/ci-runtime/`) and with hsi's glue (`test/haskell/hsi/c/glue.c`:
+  `fflush(0)` and musl's allocator always linked; `main.c`, a `main` of nothing when the files have none, since the linker
+  wants one), into one node program. `--refs`: the C functions the Haskell calls (the dump's static foreign targets) that musl
+  defines and the files do not, linked through a unit of references (`qsort` for a wrapper's comparator). About 8 to 10 s a
+  program, once (`bin/hsi check` keeps it by the dump's key, which now holds the C files' text).
+- **`hsi run --c NODES`** (`go/arbace/hs/cprog.ae`): the node program loaded into `go/arbace/ci` over the machine's own
+  `crt.Mem` and `crt.Sys` (one address space, one table of descriptors), its static initializers run and musl initialized as
+  `__libc_start_main` would (`__init_libc` over an initial stack's argv, environment and auxiliary vector), no `main` called.
+  Then: a static foreign call of a symbol the C defines and hsi's table lacks calls ci's function (the C's stdio and
+  allocator, `printf`, `puts`, `putchar`, `fflush`, `malloc`, `calloc`, `realloc`, `free`, are musl's whenever a C program is
+  loaded: one stdout buffer for both sides, a block freed on either side); a label (`&sym`) of the C's object or function is
+  its address in ci's space, a capi `value` import of a C object its value read by the result's representation; a dynamic
+  call of an address of ci's text calls that function; hsi's own C functions take addresses past ci's (`funIndex`, 65,536
+  functions in) and are natives of ci's program, so C can call a pointer to one, and a function the C calls that neither it nor
+  musl defines is hsi's when its table has it (the RTS's API below); a C finalizer (`newForeignPtr` of a C function) runs
+  in ci, and `finalizeWeak#` now runs a weak pointer's C finalizers at once, as `stg_finalizzeWeakzh` does (fptr01); an
+  `Array#` or `ArrayArray#` argument (UnliftedFFITypes, T16650b-d) is a word per element, an element's identity; C's fault
+  is the program's end by its signal (`hsi: C fault: ...`, status 128 + the signal).
+- **`bin/hsi check`** builds a test's C: all.T's `.c` files, the `.c` beside a `.o` of a `pre_cmd` (the `_ghci` tests),
+  `multi_compile_and_run`'s extra sources (`test/haskell/eval/run_plan.ae`: its `(tuple FILE OPTS)` list, T20735, T21305),
+  `-optc` flags' `-D`, `-I`, `-U` (`-optc-D -optcFOO` is `-DFOO`, T17471).
+- **Results** (`test/haskell/divergences.edn`'s `:test-c` and `:test-c-output` of HE5, 57 tests): **33 pass** (28 by the C
+  alone, the rest with the stubs and the RTS's API below); of the 24 left, 10 are Cmm (`:test-cmm`), 3 need what ci or hsi's RTS
+  API lacks (`:test-c`), 10 have no reference (GHC's own build of them failed, `:no-reference`, HES66) and conc038 needs a
+  blocking safe call beside running threads (`:rts`).
+
+### HES60 (a): Haskell called from C
+
+- **The probe** (`tools/hsdump/probe/StubProbe.hs`, `bin/hsi stubs-build`, about 3 minutes to build, light: not the helper,
+  so the dumps' key is untouched): what GHC 9.14.1 holds of a module's foreign exports and wrappers, at the end of the Core
+  pipeline and at the stgToCmm hook. Answered by day on ffi002 and ffi005: the `ModGuts`' `mg_foreign` holds the module's
+  stubs, the `_stub.h` header and the stub C GHC's C compiler compiles (for a foreign export `foo`, a C function `foo` that
+  calls `rts_lock`, `rts_inCall(&cap, rts_apply(cap, ghc_hs_iface->runIO_closure, rts_apply(cap,
+  &$fstableZC0ZCmainZCFooZCfoo_closure, rts_mkInt(cap, a1))), &ret)`, `rts_getInt`; for a wrapper, a C function
+  `zdmainzdMainzdMainzuwrapIO(StgStablePtr the_stableptr, ...)` that applies `deRefStablePtr(the_stableptr)`); the exported
+  helper `$fstable...` is an exported binding of the Core and **is in the STG the hook sees, so in hsdump's dumps already**
+  (HE5's "not in the dump" was wrong: what the dump lacked was the stub C, which is not STG). No helper extension is
+  needed beyond writing the stubs; the stubs come from the probe's `--stubs` mode, run by `bin/hsi check` (about 20 to 30 s
+  a program, once, kept with the dump) for a program whose sources export a function or import a wrapper.
+- **The stubs** are compiled by ci with the program's C (`DIR/BASE_stub.c`, GHC's prologue: `IN_STG_CODE 0`, `Rts.h`), and
+  **the RTS's C API is hsi's** (`go/arbace/hs/rtsapi.ae`): a `HaskellObj` is a word standing for a machine value (a region no
+  mapping has); a stub's closure label `X_closure` (undefined in the C, linked by ci at address 0) is rewritten at load to
+  the word of the global it names (`$fstableZC0ZCunitZCModZCname` decoded); `ghc_hs_iface` a structure whose closures at
+  DerivedConstants.h's offsets are `runIO`, `runNonIO`, `()`, `True`, `False`, `flushStdHandles`, `runMainIO`;
+  `stable_ptr_table` the stable pointers' words (`deRefStablePtr` is an inline function of Rts.h reading it, entry `sp - 1`);
+  `rts_mk*` box, `rts_apply` makes an application thunk, `rts_inCall`/`rts_evalIO` run the IO action on a thread of its
+  own to its end while the calling thread waits in its foreign call (blocked to exceptions meanwhile: a `throwTo` to it waits,
+  conc040), `rts_get*` force and unbox, `getStablePtr`, `hs_try_putmvar`, `hs_init*`, `hs_exit` (the handles flushed, the C
+  finalizers run), `hs_perform_gc`. `createAdjustor` makes a function of ci's text that calls the wrapper's stub with the stable
+  pointer first, and with a word where the stub declares GHC's x86-64 adjustor's `original_return_addr` (its index read from
+  the stub by `bin/hsi check` into `NODES.adjust`; T24314's eight- and twenty-four-argument callbacks). A `-no-hs-main` program
+  runs its C `main` through musl's `__libc_start_main` (`hsi run --c-main`).
+- **Results**: of HE5's `:callback` (21, with nofib's two) **18 pass** (conc021, conc039, conc040, T1679, T24314, T2469,
+  T2594, T4038, T4221, fed001, ffi006, ffi007, ffi008, ffi010, ffi011, ffi013, ffi019, and ffi020, whose C finalizer calls
+  back, GHC's error: its message and status 1 as GHC's), nofib's two run but have no reference (`:no-reference`), conc038 is
+  in `:rts`; the class `:callback` is gone. Of the C tests T19149, ffi016, T493 and ffi005 pass by it.
+
+### HES61 (a): waiting on descriptors
+
+`waitRead#`, `waitWrite#` and `fdReady` on the posix layer's host descriptors (pipes, spawned processes' ends) by `poll(2)`
+(`go/arbace/hs/fdwait.ae`): a thread not ready blocks interruptibly (a `killThread` takes it off its wait), the scheduler
+polls the waiters after its slices (every millisecond at most) and, when no thread can run, sleeps in `poll` until a
+descriptor is ready or the first delay expires (100 ms at most with no delay, the non-threaded RTS's `awaitEvent`); a
+waiting thread is a root of the collector; crt's descriptors are always ready (its files never block). HE4f's scheduling
+work does not exist on the branch: this is the minimal scheduler change. With it `fcntl(F_GETFL)` of a pipe's write end says
+`O_WRONLY` (`fdToHandle`'s mode; before, a write handle of `createPipe` was a read handle). T21969 (50,000 rounds of
+`threadWaitRead`, `hClose` and `killThread` on pipes) passes in 15 s; the class `:fd-wait` is gone.
+
+### HES43 (b): reasons per run
+
+hsi writes why it stopped on a line of its own after its message, `hsi-reason: WORD` (`c-function`, `primcall`, `primop`,
+`c-pointer`, `rts-api`, `deadlock`, `fatal`, `compile`, `load`, `c-fault`, `internal`); `bin/hsi check` records it as the
+result's `:reason` (`:c-build` when ci refuses the C, `:limit` for a run killed at the check's limits, status 137 or 152), and a
+class may name its `:reasons`, a member's reason among them (`bin/lib/hsi/check` and `bin/hsi divergences` both judge it).
+The classes keep their `:ids` (HES43 (a)); `:reasons` replaces `:message` where both say the same, as the record is rerun.
+
+### Classes after HE6
+
+`bin/hsi divergences` over the record (`test/haskell/check-hsi.edn`, rerecorded today for the 181 testsuite programs of
+the lists above, nofib's two callbacks and the samples and synthetic corpora; the other programs' lines kept): **789 of 907
+pass** (737 before: the samples 24 of 25, synthetic 37 of 37, the testsuite's core **652 of 701** (600 before), nofib 76 of
+144), the other 118 in a class, none unclassed: `:test-cmm` 10, `:test-c` 3, `:rts` 15, `:speed` 12, `:rts-options` 2,
+`:process` 1, `:simd` 1, `:skipped` 1, `:no-reference` 72 (57 of nofib's, T17920, T24809, and the 13 tests and nofib's two
+callbacks of HES66), `:async-revert` 1. Gone: `:test-c-output`, `:callback`, `:callback-c` (an intermediate split of the
+day), `:fd-wait`. The lists' runs: the 104 recorded passes of the core's `concurrent`, `lib` and `ffi` (scheduling and
+descriptors touched) all pass again; the samples and synthetic corpora 61 of 62 as before (AsyncRerun in `:async-revert`), the
+four negative controls failing as they must.
+
+### Night commands (listed, not run)
+
+1. `bin/hsi stubs-build` (3 minutes), then `bin/hsi check --corpus samples,synthetic,testsuite-core,nofib --jobs 3 --record`
+   under `bin/heavy-lock` (the HE5 night's command; about 15 minutes more than HE5's for the C and stubs of about 90
+   programs, once), then `bin/hsi divergences` (must exit 0).
+2. HE5's night commands 2 and 3 unchanged.
+
+### Proposed (HES65 onward)
+
+- **HES65 Where the stubs come from.** (a) the probe's `--stubs` mode, a second GHC compile of a program that exports or
+  wraps (as built: 20 to 30 s once per program, kept with its dump; the helper and the dumps' key untouched); (b) the helper
+  writes the stubs beside the STG in its stg mode (`mg_foreign` at its Core pass, as the probe does): one compile, but the
+  helper's hash changes and every cached dump of every corpus is made again (a night's re-dump). *Recommended: (b)* at the
+  next helper change that re-keys the dumps anyway; (a) until then.
+- **HES66 The references GHC did not build.** Ten tests (ffi002, T5594, T5402, ffi023, conc059, hs_try_putmvar002 and 003,
+  the `_ghci` three, T20735) and nofib's two callbacks have `:no-build` references: record-ref compiled the C before GHC wrote
+  the Haskell's `_stub.h`, or did not link the `.o` a `pre_cmd` makes. (a) record-ref compiles the Haskell first (`ghc -c`
+  with `-stubdir`), then the C with the stub directory on its include path, then links, as the testsuite's driver does with
+  its ways' setup; (b) judge them against the testsuite's `.stdout` files (ffi002 and T5594 equal them today); (c) the
+  class `:no-reference` (as built). *Recommended: (a)*: an hour of record-ref and a night's `--only` of the twelve.
+- **HES67 Cmm.** (a) a class until HE8 (as built: 10 tests, `:test-cmm`, `foreign import prim` and `.cmm` sources); (b) the
+  helper dumps the test's Cmm (GHC's Cmm parser's `CmmGroup`) as forms and hsi interprets them: weeks for 10 tests.
+  *Recommended: (a)*.
+- **HES68 C threads.** (a) a class until ci has threads (as built: hs_try_putmvar001's `pthread_create`, IncallAffinity's
+  RTS OS-thread calls); (b) `pthread_create` in hsi as a Haskell-side green thread running the C function on ci's
+  thread state (ci has one C stack, `Thread` per call chain: a second stack and the scheduler's switch between them, the C
+  crop's work). *Recommended: (a)*, (b) when ci's REPL needs threads.
+
+## Decided (2026-11-05, the user: HES65-HES68)
+
+HES65: the stub writer a separate step now (a), folded into the helper at the next helper change that re-keys the dumps (b); HES66 (a): record-ref compiles the Haskell before the C; HES67 (a): Cmm a class until HE8; HES68 (a): C threads a class until ci has threads.
+
 ## As built: HE8 (write-ahead)
 
 Built 2026-11-05 on branch `haskell-he8` from `haskell-he5` (`a7fafe0b`), on the host's GHC 9.14.1, TamaGo's go and the main

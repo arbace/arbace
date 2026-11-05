@@ -1,0 +1,107 @@
+;; goi's interpreter tests: a sync.Mutex held as a struct's field is the field, not a copy (the Mac VM's
+;; PY6f report, 2026-11-03): Lock and Unlock on s.mu through pointer receivers (the implicit &s.mu), a
+;; nested field and an array element's, an embedded Mutex's promoted methods, an RWMutex, a selector
+;; through a pointer field, a method value and a method expression, the field as a sync.Locker and a
+;; sync.Cond's L, a deferred Unlock, a package variable's field locked from goroutines and a timer's
+;; function; a value receiver locks its copy, as gc does (vet's copylocks). TryLock tells which mutex.
+(ns go.t.mutexfield (:require [arbace.go :as go]))
+(go/package main :path "main")
+(go/file "mutexfield.go" :imports [[fmt "fmt"] [sync "sync"] [time "time"]])
+(go/type Inner (struct ^{:tag sync/Mutex} mu ^int n))
+(go/type Outer (struct ^Inner in ^{:tag (array 2 Inner)} arr sync/Mutex ^{:tag sync/RWMutex} rw))
+(go/type Emb (struct sync/Mutex ^int k))
+(go/type Wrap (struct ^{:tag (* Outer)} o))
+
+(go/method lockIn [^{:tag (* Outer)} o] (.Lock (.-mu (.-in o))))
+(go/method unlockIn [^{:tag (* Outer)} o] (.Unlock (.-mu (.-in o))))
+(go/method deferIn [^{:tag (* Outer)} o] (.Lock (.-mu (.-in o))) (defer (.Unlock (.-mu (.-in o)))) (inc! (.-n (.-in o))))
+(go/method valLock [^Inner v] (.Lock (.-mu v)))
+
+(go/type gilState (struct ^{:tag sync/Mutex} mu ^{:tag (* sync/Cond)} free ^bool locked ^int switches))
+(go/var gil (newGIL))
+(go/func newGIL ^{:tag (* gilState)} []
+  (let [g (addr (lit gilState))]
+    (set! (.-free g) (sync/NewCond (addr (.-mu g))))
+    g))
+(go/method take [^{:tag (* gilState)} g]
+  (.Lock (.-mu g))
+  (while (.-locked g)
+    (let [t (time/AfterFunc time/Millisecond (fn [] (.Lock (.-mu g)) (.Broadcast (.-free g)) (.Unlock (.-mu g))))]
+      (.Wait (.-free g))
+      (.Stop t)))
+  (set! (values (.-locked g) (.-switches g)) (values true (+ (.-switches g) 1)))
+  (.Unlock (.-mu g)))
+(go/method release [^{:tag (* gilState)} g]
+  (.Lock (.-mu g))
+  (defer (.Unlock (.-mu g)))
+  (set! (.-locked g) false)
+  (.Signal (.-free g)))
+
+(go/func main []
+  (let [o (addr (lit Outer))]
+    (.lockIn o)
+    (fmt/Println "nested field" (.TryLock (.-mu (.-in o))))
+    (.unlockIn o)
+    (fmt/Println "nested unlocked" (.TryLock (.-mu (.-in o))))
+    (.Unlock (.-mu (.-in o)))
+    (.deferIn o)
+    (fmt/Println "defer" (.TryLock (.-mu (.-in o))) (.-n (.-in o)))
+    (.Unlock (.-mu (.-in o)))
+    (.Lock (.-mu (aget (.-arr o) 1)))
+    (fmt/Println "array elem" (.TryLock (.-mu (aget (.-arr o) 1))) (.TryLock (.-mu (aget (.-arr o) 0))))
+    (.Unlock (.-mu (aget (.-arr o) 0)))
+    (.Unlock (.-mu (aget (.-arr o) 1)))
+    (.Lock o)
+    (fmt/Println "embedded promoted" (.TryLock o) (.TryLock (.-Mutex o)))
+    (.Unlock o)
+    (.RLock (.-rw o))
+    (fmt/Println "rwmutex" (.TryLock (.-rw o)) (.TryRLock (.-rw o)))
+    (.RUnlock (.-rw o)) (.RUnlock (.-rw o))
+    (fmt/Println "rw free" (.TryLock (.-rw o)))
+    (.Unlock (.-rw o))
+    (let [w (lit Wrap o)]
+      (.Lock (.-mu (.-in (.-o w))))
+      (fmt/Println "through pointer field" (.TryLock (.-mu (.-in o))))
+      (.Unlock (.-mu (.-in o))))
+    (let [f (.-Lock (.-mu (.-in o)))
+          g (method-expr (* sync/Mutex) Unlock)]
+      (f)
+      (fmt/Println "method value" (.TryLock (.-mu (.-in o))))
+      (g (addr (.-mu (.-in o))))
+      (fmt/Println "method expr" (.TryLock (.-mu (.-in o))))
+      (.Unlock (.-mu (.-in o))))
+    (let [^{:tag sync/Locker} l (addr (.-mu (.-in o)))]
+      (.Lock l)
+      (fmt/Println "locker" (.TryLock (.-mu (.-in o))))
+      (.Unlock l))
+    (let [c (sync/NewCond (addr (.-mu (.-in o))))
+          wg (lit sync/WaitGroup)]
+      (.Lock (.-mu (.-in o)))
+      (.Add (addr wg) 1)
+      (go ((fn [] (defer (.Done (addr wg))) (.Lock (.-mu (.-in o))) (set! (.-n (.-in o)) 42) (.Signal c) (.Unlock (.-mu (.-in o))))))
+      (while (!= (.-n (.-in o)) 42) (.Wait c))
+      (.Unlock (.-mu (.-in o)))
+      (.Wait (addr wg))
+      (fmt/Println "cond" (.-n (.-in o))))
+    (let [e (lit Emb)]
+      (.Lock e)
+      (fmt/Println "local embedded" (.TryLock (addr e)) (.TryLock (.-Mutex e)))
+      (.Unlock e))
+    (let [i (lit Inner)]
+      (.valLock i)
+      (fmt/Println "value receiver copies" (.TryLock (.-mu i)))
+      (.Unlock (.-mu i)))
+    (let [wg (lit sync/WaitGroup) total 0]
+      (range [8]
+        (.Add (addr wg) 1)
+        (go ((fn [] (defer (.Done (addr wg)))
+               (range [100] (.deferIn o) (.Lock (.-mu (aget (.-arr o) 0))) (inc! total) (.Unlock (.-mu (aget (.-arr o) 0))))))))
+      (.Wait (addr wg))
+      (fmt/Println "contended" (.-n (.-in o)) total)))
+  (let [wg (lit sync/WaitGroup) n 0]
+    (range [4]
+      (.Add (addr wg) 1)
+      (go ((fn [] (defer (.Done (addr wg)))
+             (range [50] (.take gil) (inc! n) (.release gil))))))
+    (.Wait (addr wg))
+    (fmt/Println "gil" n (.-switches gil) (.-locked gil) (.TryLock (.-mu gil)))))

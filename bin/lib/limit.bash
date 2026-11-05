@@ -18,7 +18,7 @@
 #                        64-CPU host, 3.2 times its 10 s, so a CPU limit of twice the wall limit was too
 #                        tight (the first audit of goi-check) and five times holds the programs measured.
 #
-#   ARBACE_MEM_GIB       each limited program's memory cap in GiB (default 16; 0: none; 2026-11-03, after 25 OOM kills
+#   ARBACE_MEM_GIB       each limited program's memory cap in GiB (default 24, above goi's issue79874.go, which maps 16 GiB on purpose; 0: none; 2026-11-03, after 25 OOM kills
 #                        from an interpreter's leak, 5 of them other agents' processes): GOMEMLIMIT at three quarters of it
 #                        when the caller set none (Go's collector works hard before it), and a hard address-space limit
 #                        (ulimit -v) at the cap, so a leaking program fails alone (Go: "out of memory", status 2) instead of
@@ -39,7 +39,7 @@
 
 limited_cpu() {
   local cpu=$1 wall=$2 lim='ulimit -t "$1"; shift; exec "$@"'; shift 2
-  local mem=${ARBACE_MEM_GIB:-16} memlim=
+  local mem=${ARBACE_MEM_GIB:-24} memlim=
   # the memory cap (ARBACE_MEM_GIB above): before the CPU limit in the same inline shell, so xargs' exported copy keeps it
   [ "$mem" = 0 ] || memlim="ulimit -v $((mem * 1048576)); export GOMEMLIMIT=\${GOMEMLIMIT:-$((mem * 768))MiB}; "
   # under ARBACE_COVER_DIR (GT8.3, bin/lib/cover.bash) a soft limit at the limit and the hard one 5 s above, so the

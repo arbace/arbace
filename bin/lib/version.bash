@@ -36,7 +36,10 @@
 # with, its sources' hash and the tool, not the runtime; gate_key leaves it out likewise, so that
 # a provenance rewritten keeps the gate's executables and their runtime the checkout's); nor jdk/platform/ (JN10
 # part 2, the java.base pack of repr/java's shipped reader: no program embeds it until the read closure is
-# embedded, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN10 (write-ahead)", JFS147). Two programs of one runtime key
+# embedded, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN10 (write-ahead)", JFS147); nor the crops' Go forms
+# (go/arbace/{oi,scm,scminterp,py,libm}{.ae,/}: oi's, si's, pyi's and the libm port hsi and pyi import; the user, 2026-11-03,
+# before the re-seed after the backlog: a crop's Go change reruns no compile of the runtime's namespaces; c2j analyzes
+# the runtime's classes, not their Go natives; ci's, cinterp's and crt's stay, C's embedded runtime). Two programs of one runtime key
 # analyze a checkout's namespaces alike, so a build's host of that key compiles them (one j2g
 # run).
 arbace_runtime_key() {
@@ -44,6 +47,9 @@ arbace_runtime_key() {
   mkdir -p "${discard%/*}"
   (cd "$1" && find arbace/lang go overlay/jdk jdk -type f ! -path jdk/edge.edn ! -path 'jdk/javac/*' ! -path jdk/provenance.edn \
        ! -path 'jdk/platform/*' \
+       ! -path go/arbace/oi.ae ! -path 'go/arbace/oi/*' ! -path go/arbace/scm.ae ! -path 'go/arbace/scm/*' \
+       ! -path go/arbace/scminterp.ae ! -path 'go/arbace/scminterp/*' \
+       ! -path go/arbace/py.ae ! -path 'go/arbace/py/*' ! -path go/arbace/libm.ae ! -path 'go/arbace/libm/*' \
        ! -path 'overlay/jdk/javac/*' 2>"$discard" \
      | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64)
 }

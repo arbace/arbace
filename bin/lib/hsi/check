@@ -58,7 +58,10 @@ if [ "$images" != none ]; then
   for l in "${dirs[@]}"; do [ -d "$l" ] && ia+=(--lib "$l"); done
   "$hsi" image --out "$images" "${ia[@]}" >&2 || { echo "hsi check: hsi image failed" >&2; exit 1; }
 fi
-export root work hsi libs helper helper_hash libdir ref keep images aot
+# the RTS's headers (HsFFI.h, Rts.h) for a program's own C, as ghc gives its C compiler
+rtsinc=$(ls -d "$libdir"/../lib/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1)
+stubprobe=$("$root/bin/hsi" stubs-build)
+export root work hsi libs helper helper_hash libdir ref keep images aot rtsinc stubprobe
 export HSI_TIMEOUT=${HSI_TIMEOUT:-60}
 # programs that need more than ARBACE_MEM_GIB name their own cap (ID=GIB ...); none today: the deepest stacks, Loop
 # (7.3 GB of RSS) and T16846 (9.7 GB), pass under the default 16 GiB (measured alone, 2026-11-03)
@@ -99,6 +102,8 @@ for c in ${corpora//,/ }; do
           hc=$(sed -n 's/^SRC_HC_OPTS *+\{0,1\}= *//p' "$mk" | tr '\n' ' ')
           deps=$(sed -n 's/^SRC_DEPS *= *//p' "$mk" | head -1)
           for dpk in $deps; do hc="$hc -package $dpk"; done
+          # nofib's target.mk builds every .c of the directory with the program (HES64 (a): ci's, as the tests' C)
+          for cf in "$p"*.c; do [ -f "$cf" ] && hc="$hc $(basename "$cf")"; done
           sin=-; for f in "$n.faststdin" "$n.stdin"; do [ -f "$p/$f" ] && { sin=$f; break; }; done
           args=$(echo "$pa ${fo:-}" | xargs)
           hcf=$(echo "$hc" | xargs)
@@ -118,13 +123,21 @@ one() {
   IFS=$'\037' read -r id src main flags ropts name sin kind <<< "$1"
   local res=$work/res/${id//\//_}
   if [ "$main" = - ]; then echo "{:id \"$id\" :result :no-dump :error \"no main file\"}" > "$res"; return 0; fi
-  # the dump's flags: all.T's, less a test's own C, Cmm, assembly and objects (the helper compiles Haskell only; hsi
-  # stops at the C function it would call: the class :test-c)
-  local fl=() f; if [ "$flags" != - ]; then for f in $flags; do
-    case $f in *.c|*.cmm|*.s|*.S|*.o|*.h|*.cpp|*.cc) ;; *) fl+=("$f") ;; esac; done; fi
+  # the dump's flags: all.T's, less a test's own C, Cmm, assembly and objects (the helper compiles Haskell only); its
+  # C files built by ci into a node program hsi loads (HES64 (a), bin/hsi cnodes), with the flags the C reads (-I, -D)
+  local fl=() f cfiles=() cflags=() optc=""; if [ "$flags" != - ]; then for f in $flags; do
+    # -optcX: X for the C compiler, a lone -D, -I or -U joined to the next one's (-optc-D -optcFOO is -DFOO)
+    if [[ $f == -optc* ]]; then
+      f=${f#-optc}
+      if [ -n "$optc" ]; then cflags+=("$optc$f"); optc=""; continue; fi
+      case $f in -D|-I|-U) optc=$f ;; -D*|-I*|-U*) cflags+=("$f") ;; esac
+      continue
+    fi
+    case $f in *.c) cfiles+=("$f") ;; *.o) [ -f "$src/${f%.o}.c" ] && cfiles+=("${f%.o}.c") ;; *.cmm|*.s|*.S|*.h|*.cpp|*.cc) ;; -I*|-D*|-U*) fl+=("$f"); cflags+=("$f") ;; *) fl+=("$f") ;; esac; done; fi
   # the dump's key: the main file, the flags, the helper; a test of several modules: its directory's sources too
   local key prog
   key=$( { echo "$flags $kind"; cat "$src/$main"
+           for f in ${cfiles[@]+"${cfiles[@]}"}; do cat "$src/$f" 2>&1; done
            if [ "$kind" != plain ] && [ "$kind" != compile_and_run ]; then
              (cd "$src" && find . -type f \( -name '*.hs' -o -name '*.lhs' -o -name '*.hs-boot' -o -name '*.c' -o -name '*.h' \) | LC_ALL=C sort | xargs sha256sum)
            fi; } | sha256sum | cut -c1-16)-${helper_hash:0:16}
@@ -142,6 +155,41 @@ one() {
     rm -rf "$prog/obj"; touch "$prog/ok"
   fi
   local la=() l
+  # the modules' foreign stubs (HES60 (a)): a program whose Haskell exports a function or imports a wrapper gets the C
+  # GHC writes for them (bin/hsi stubs-build's stubprobe --stubs), compiled by ci with its own C
+  if [ ! -f "$prog/stubs.ok" ]; then
+    rm -rf "$prog/stubs"
+    if (cd "$src" && grep -qE 'foreign +export|"wrapper"|foreign +import +capi' "$main" $( [ "$kind" != plain ] && [ "$kind" != compile_and_run ] && find . -name '*.hs' -o -name '*.lhs' ) 2> "$prog/stubs.grep"); then
+      (cd "$src" && timeout 300 "$stubprobe" --stubs "$libdir" "$prog/stubs" -O0 ${fl[@]+"${fl[@]}"} -outputdir "$prog/stubobj" -- "$main") > "$prog/stubs.log" 2>&1 || true
+      rm -rf "$prog/stubobj"
+    fi
+    touch "$prog/stubs.ok"
+  fi
+  local sf; for sf in "$prog"/stubs/*_stub.c; do [ -f "$sf" ] && cfiles+=("$sf"); done
+  # a wrapper's stub whose parameters hold the x86-64 adjustor's original_return_addr: its name and that parameter's
+  # index (the stable pointer's 0), for hsi's createAdjustor (NODES.adjust, read beside the node program)
+  if [ -d "$prog/stubs" ] && [ ! -f "$prog/c.ok" ]; then
+    cat "$prog"/stubs/*_stub.c 2> "$prog/adjust.err" | awk '/the_stableptr.*original_return_addr/ {
+      h = $0; sub(/\(.*/, "", h); n = split(h, w, /[ \t*]+/); name = w[n]
+      p = $0; sub(/^[^(]*\(/, "", p); sub(/\).*/, "", p); k = split(p, ps, ",")
+      for (i = 1; i <= k; i++) if (ps[i] ~ /original_return_addr/) print name, i - 1 }' > "$prog/c.nodes.adjust" || true
+  fi
+  # the stubs' headers, and a capi stub's #include of the test's own header (its directory)
+  [ -d "$prog/stubs" ] && cflags+=(-I"$prog/stubs" -I"$src")
+  if [ ${#cfiles[@]} -gt 0 ]; then
+    if [ ! -f "$prog/c.ok" ]; then
+      # the C functions the Haskell calls: those musl defines linked too (cnodes --refs)
+      grep -oh '(ffi (static "[^"]*"' "$prog"/stg/*.ae 2> "$prog/refs.err" | sed 's/.*"\([^"]*\)"$/\1/' | sort -u > "$prog/c.refs" || true
+      if ! (cd "$src" && "$root/bin/hsi" cnodes "$prog/c.nodes" --refs "$prog/c.refs" ${cflags[@]+"${cflags[@]}"} -I"$rtsinc" "${cfiles[@]}") > "$prog/c.log" 2>&1; then
+        local e; e=$(grep -v '^==\|^Reflection\|^$' "$prog/c.log" | tail -n 1 | cut -c1-160 | sed 's/\\/\\\\/g; s/"/\\"/g')
+        echo "{:id \"$id\" :result :hsi :status 3 :message \"hsi: ci: $e\" :reason :c-build :dump $td :run 0}" > "$res"; return 0
+      fi
+      touch "$prog/c.ok"
+    fi
+    la+=(--c "$prog/c.nodes")
+    # a -no-hs-main program: its C's main is the entry (hsi run --c-main)
+    [[ " $flags " == *" -no-hs-main "* ]] && la+=(--c-main)
+  fi
   IFS=: read -r -a dirs <<< "$libs"
   for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
   [ "$images" != none ] && la+=(--image "$images")
@@ -208,8 +256,10 @@ one() {
   rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
   rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
   if grep -q '^hsi: ' "$o.stderr"; then
-    local msg; msg=$(grep -m1 '^hsi: ' "$o.stderr" | cut -c1-200 | sed 's/\\/\\\\/g; s/"/\\"/g')
-    echo "{:id \"$id\" :result :hsi :status $st :message \"$msg\" $tm}" > "$res"
+    local msg rsn; msg=$(grep -m1 '^hsi: ' "$o.stderr" | cut -c1-200 | sed 's/\\/\\\\/g; s/"/\\"/g')
+    # why hsi stopped, as hsi words it (HES43 (b)): its hsi-reason line
+    rsn=$(sed -n 's/^hsi-reason: \([a-z-]*\)$/\1/p' "$o.stderr" | head -1)
+    echo "{:id \"$id\" :result :hsi :status $st :message \"$msg\"${rsn:+ :reason :$rsn} $tm}" > "$res"
   elif [ "$st" = "$rst" ] && [ "$so" = "$rso" ] && [ "$se" = "$rse" ]; then
     echo "{:id \"$id\" :result :pass $tm}" > "$res"
   else
@@ -217,7 +267,9 @@ one() {
     [ "$st" = "$rst" ] || why="$why :status"
     [ "$so" = "$rso" ] || why="$why :stdout"
     [ "$se" = "$rse" ] || why="$why :stderr"
-    echo "{:id \"$id\" :result :fail :status $st :differs [${why# }] $tm}" > "$res"
+    # killed at the check's limits (SIGKILL at the wall cap, SIGXCPU at the CPU limit): the reason :limit
+    local lim=""; case $st in 137|152) lim=" :reason :limit" ;; esac
+    echo "{:id \"$id\" :result :fail :status $st :differs [${why# }]$lim $tm}" > "$res"
   fi
   [ -n "$keep" ] || grep -q "^$id " "$root/test/haskell/hsi-controls.txt" || rm -f "$o.stdout" "$o.stderr"
 }
@@ -245,14 +297,22 @@ echo "hsi check: $total programs ($out)"
 unclassed=0
 while IFS= read -r line; do
   id=$(sed 's/^{:id "\([^"]*\)".*/\1/' <<< "$line"); kind=$(sed -n 's/.* :result :\([a-z-]*\).*/\1/p' <<< "$line")
-  IFS=$'\t' read -r c cres cmsg < <(awk -v id="\"$id\"" '
-    /^ *\{:id :/ {cls=$2; res=""; msg=""}
+  IFS=$'\t' read -r c cres cmsg crsn < <(awk -v id="\"$id\"" '
+    /^ *\{:id :/ {cls=$2; res=""; msg=""; rsn=""}
     /^ *:results \[/ {res=$0; sub(/.*:results \[/, "", res); sub(/\].*/, "", res)}
+    /^ *:reasons \[/ {rsn=$0; sub(/.*:reasons \[/, "", rsn); sub(/\].*/, "", rsn)}
     /^ *:message "/ {msg=$0; sub(/.*:message "/, "", msg); sub(/".*/, "", msg)}
-    index($0, id) {printf "%s\t%s\t%s\n", cls, res, msg; exit}' "$root/test/haskell/divergences.edn") || true
+    index($0, id) {printf "%s\t%s\t%s\t%s\n", cls, (res == "" ? "-" : res), (msg == "" ? "-" : msg), (rsn == "" ? "-" : rsn); exit}' "$root/test/haskell/divergences.edn") || true
+  # "-" for a field the class has not (a tab is IFS whitespace: empty fields would run together)
+  [ "$cres" = - ] && cres=""; [ "$cmsg" = - ] && cmsg=""; [ "$crsn" = - ] && crsn=""
   if [ -z "$c" ]; then echo "hsi check: $id in no class"; unclassed=$((unclassed + 1)); continue; fi
   if [ -n "$cres" ] && [[ " $cres " != *" :$kind "* ]]; then
     echo "hsi check: $id in class $c, but its result :$kind is not the class's ($cres)"; unclassed=$((unclassed + 1)); continue
+  fi
+  # a class's :reasons (HES43 (b)): a member's result with a reason has one of them
+  local_r=$(sed -n 's/.* :reason :\([a-z-]*\).*/\1/p' <<< "$line")
+  if [ -n "$crsn" ] && [ -n "$local_r" ] && [[ " $crsn " != *" :$local_r "* ]]; then
+    echo "hsi check: $id in class $c, but its reason :$local_r is not the class's ($crsn)"; unclassed=$((unclassed + 1)); continue
   fi
   if [ -n "$cmsg" ] && [ "$kind" = hsi ] && [[ $line != *"$cmsg"* ]]; then
     echo "hsi check: $id in class $c, but hsi's message is not the class's (\"$cmsg\")"; unclassed=$((unclassed + 1)); continue

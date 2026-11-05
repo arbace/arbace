@@ -100,6 +100,41 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The program being built
 
+(def ^:dynamic *p* nil)       ; the program, or a unit's fragment (new-frag: :frag true)
+(def ^:dynamic *item* nil)    ; a fragment's item being built: {:ev ArrayList :seen HashSet}, its references in order
+
+;; A unit's fragment (unit-fragment) is built with *p* a new-frag: functions and statics are placeholders, the symbols
+;; ?fL and ?sL (L the fragment's own number; no C name holds a ?), each item recording the references it makes in the order
+;; it first makes them (*item*), so that link-text, replaying the items in the order build-program built them, allocates
+;; and emits exactly what build-program did.
+
+(defn- new-frag []
+  {:frag true
+   :fkeys (HashMap.)          ; fn key -> L
+   :fns (ArrayList.)          ; L -> [key name]
+   :skeys (HashMap.)          ; static key -> L
+   :sts (ArrayList.)          ; L -> [:obj key] | [:n size align ro name] | [:str n esize hex]
+   :entries (HashMap.)})
+
+(defn- item-ref!
+  "The current item's reference ev (once: its first), recorded."
+  [seen-key ev]
+  (when-let [{:keys [^ArrayList ev-list ^java.util.HashSet seen]} *item*]
+    (when (.add seen seen-key) (.add ev-list ev))))
+
+(defn- frag-static!
+  "A fragment's static L for key, its spec made by (spec) when new: [L new?]."
+  [key spec]
+  (let [^HashMap ks (:skeys *p*)]
+    (if-let [l (.get ks key)]
+      [l false]
+      (let [^ArrayList ss (:sts *p*) l (.size ss)]
+        (.add ss (spec))
+        (.put ks key l)
+        [l true]))))
+
+(defn- sph [l] (symbol (str "?s" l)))
+
 (defn- new-prog []
   {:out (ArrayList.)          ; the commands
    :fns (HashMap.)            ; key -> id (a global function by name, a static one by [unit name])
@@ -114,7 +149,6 @@
    :entries (HashMap.)        ; [unit name] -> a file-scope entry (alias targets)
    :natives #{}})
 
-(def ^:dynamic *p* nil)       ; the program
 (def ^:dynamic *u* nil)       ; the unit: {:idx :results :std}
 (def ^:dynamic *f* nil)       ; the function: its state (an atom)
 
@@ -123,23 +157,33 @@
 (defn fn-id
   "The function of the key (a name, or [unit name] for a static one): its id, declared when new."
   [key ^String nm]
+  (if (:frag *p*)
+    (let [^HashMap ks (:fkeys *p*) ^ArrayList fs (:fns *p*)
+          l (or (.get ks key) (let [l (.size fs)] (.add fs [key nm]) (.put ks key l) l))]
+      (item-ref! [:f l] [:f l])
+      (symbol (str "?f" l)))
   (let [^HashMap fs (:fns *p*)]
     (or (.get fs key)
         (let [id (.size ^ArrayList (:fn-names *p*))]
           (.add ^ArrayList (:fn-names *p*) nm)
           (.put fs key id)
           (emit! (list 'fn id nm))
-          id))))
+          id)))))
 
 (defn- static-idx
   "A static object's index, allocated (SIZE ALIGN RO) when new."
   [key size align ro]
+  (if (:frag *p*)
+    ;; a fragment's own static (a static local, a temporary, a compound literal: its key is new)
+    (let [[l new?] (frag-static! key #(vector :n size align (if ro 1 0) (str (if (vector? key) (last key) key))))]
+      (item-ref! [:s l] [:s l])
+      (sph l))
   (let [^HashMap ss (:statics *p*)]
     (or (.get ss key)
         (let [i (swap! (:nstatic *p*) inc)]
           (.put ss key i)
           (emit! (list 'static i size align (if ro 1 0) (str (if (vector? key) (last key) key))))
-          i))))
+          i)))))
 
 (defn- hex-of ^String [^bytes b]
   (let [sb (StringBuilder.)]
@@ -152,13 +196,17 @@
   (let [hx (hex-of bs)
         k [esize hx]
         ^HashMap ss (:strings *p*)]
+    (if (:frag *p*)
+      (let [[l] (frag-static! [:str k] #(vector :str (+ (alength bs) esize) esize hx))]
+        (item-ref! [:s l] [:s l])
+        (sph l))
     (or (.get ss k)
         (let [i (swap! (:nstatic *p*) inc)
               n (+ (alength bs) esize)]
           (.put ss k i)
           (emit! (list 'static i n (max 1 esize) 1))
           (when (pos? (alength bs)) (emit! (list 'data i 0 hx)))
-          i))))
+          i)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Literals (§8)
@@ -432,6 +480,15 @@
 (defn- global-key [e]
   (if (= :i (:linkage e)) [(:idx *u*) (:name e)] (:name e)))
 
+(defn- obj-size
+  "An undefined object's size and alignment as global-obj-idx allocates it (the entry e's alignment specifiers too,
+  obj-align): [size align], or [nil nil message] when its alignment throws (only an error when the object is in the end
+  undefined)."
+  [e]
+  (let [t (:t e)
+        n (max 1 (or (try (size-of t) (catch Exception _ nil)) 1))]
+    (try [n (obj-align e t)] (catch Exception x [nil nil (str (.getName (class x)) ": " (.getMessage x))]))))
+
 (defn- fn-ref [e]
   (fn-id (global-key e) (:name e)))
 
@@ -441,11 +498,16 @@
   [e]
   (let [k (global-key e)
         t (:t e)]
+    (if (:frag *p*)
+      ;; resolved by link-text: the object's definition, else allocated here as undefined with this declaration's type
+      (let [[l] (frag-static! [:obj k] #(vector :obj k))]
+        (item-ref! [:s l] (into [:o l] (obj-size e)))
+        (sph l))
     (or (.get ^HashMap (:statics *p*) [:obj k])
         ;; not defined by any unit: a weak reference's (address 0), or one the linker defines
         (let [i (static-idx [:obj k] (max 1 (or (try (size-of t) (catch Exception _ nil)) 1)) (obj-align e t) false)]
           (.add ^ArrayList (:undefined *p*) (list 'at i 0))
-          i))))
+          i)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Places: {:mode :slot-i|:slot-f|:mem, :k slot, :a address-node, :t type, :bits field}
@@ -878,6 +940,14 @@
   (let [st (if fs @fs {:ni 0 :nf 0})]
     (list 'init (:ni st) (:nf st) (list 'x (list 'ei (list 'seq (vec stores) '(i 0)))))))
 
+(defn- add-init!
+  "A static initializer's command added to the program's (in a fragment, to its item's references, in order)."
+  [cmd]
+  (if (:frag *p*)
+    (let [{:keys [^ArrayList ev-list]} *item*]
+      (.add ev-list [:i (binding [*print-length* nil *print-level* nil] (pr-str cmd))]))
+    (.add ^ArrayList (:inits *p*) cmd)))
+
 (defn- frame-temp
   "A temporary aggregate of type t in the frame: its address node."
   [t]
@@ -898,7 +968,7 @@
             (frame-temp t))
         stores (build-init-stores t a (apply list 'init els) (not static?))]
     (if static?
-      (do (.add ^ArrayList (:inits *p*) (init-cmd *f* stores))
+      (do (add-init! (init-cmd *f* stores))
           {:t t :a a :stores []})
       {:t t :a a :stores stores})))
 
@@ -1672,7 +1742,7 @@
                         (let [fs (atom {:ni 0 :nf 0 :frame 0 :labels (:labels @*f*) :locals (:locals @*f*) :addressed #{}})
                               stores (binding [*static-init* true *f* fs] (build-init-stores t (list 'g (:idx loc)) (first more) false))]
                           (swap! *f* assoc :labels (:labels @fs))
-                          (.add ^ArrayList (:inits *p*) (init-cmd fs stores))))
+                          (add-init! (init-cmd fs stores))))
                       [])
                   (= :vla (:loc loc))
                   (let [[es rt] (elab (:tag (meta nm)) t false)
@@ -2041,7 +2111,249 @@
           0))
       0)))
 
+;; ---------------------------------------------------------------------------------------------
+;; Fragments and their link (doc/C23-SURVEY.md, "As built: ci's prebuilt runtime"): a unit built alone into a fragment, the
+;; data link-text makes a node program of with the other units' fragments. A fragment holds the unit's candidates as
+;; build-program's linking sees them (each file-scope object definition, each function definition and alias, in the forms'
+;; order) and an item for each one build-program would build (an object's initializer, a function's code): its command's
+;; text with placeholders and its references in the order the build first made them. link-text chooses the definitions by
+;; build-program's rules over the same keys in the same order, and replays the chosen items in build-program's order:
+;; each reference allocated and emitted when new to the program, the placeholders replaced. So a program linked from
+;; fragments is byte for byte the one build-program built from the units (but the names of statics of no name, which
+;; print an identity), and a library unit's fragment, made once, is cached (arbace.c.musl).
+
+(def fragment-version
+  "The fragments' format: in the prebuilt runtime's key (arbace.c.musl/runtime-key)."
+  1)
+
+(defn- ex-of
+  "An exception as a fragment records it: [:refused CLASS MESSAGE] for a builder's refusal, else [:error MESSAGE]."
+  [^Throwable x]
+  (if (instance? arbace.lang.ExceptionInfo x)
+    (if-let [c (:ci/refused (ex-data x))] [:refused c (.getMessage x)] [:error (.getMessage x)])
+    [:error (str (.getName (class x)) ": " (.getMessage x))]))
+
+(defn- throw-ex [[kind a b]]
+  (if (= kind :refused)
+    (throw (ex-info b {:ci/refused a}))
+    (throw (ex-info a {}))))
+
+(defn- frag-item
+  "An item built by (thunk), its command: {:ev [reference ...] :text TEXT}, or {:ex EX} when the build throws."
+  [thunk]
+  (let [ev (ArrayList.)]
+    (binding [*item* {:ev-list ev :seen (java.util.HashSet.)}]
+      (try
+        (let [cmd (thunk)
+              text (binding [*print-length* nil *print-level* nil] (pr-str cmd))]
+          {:ev (vec ev) :text text})
+        (catch Exception x {:ex (ex-of x)})))))
+
+(defn unit-fragment
+  "A checked unit {:rd :results :std :unsigned-char} built alone: {:fns [[KEY NAME] ...] :sts [SPEC ...] :objs [CANDIDATE ...]
+  :fcands [CANDIDATE ...]}, plain data (printed and read back by arbace.c.musl's cache). A key of internal linkage is
+  [:self NAME] until link-text puts the unit's index in it."
+  [u]
+  (binding [*p* (new-frag)]
+    (let [u (assoc u :idx :self :forms (unit-forms (:rd u)))
+          ucfg (assoc *cfg* :unsigned-char (:unsigned-char u))
+          decls (fn [] (for [f (:forms u)
+                             :when (seq? f)
+                             d (if (= 'c/group (first f)) (drop 2 f) [f])
+                             :when (and (seq? d) ('#{c/defn c/var c/declare} (first d)))]
+                         d))
+          ^HashMap entries (:entries *p*)]
+      ;; the file-scope entries by name (alias targets)
+      (binding [*u* u]
+        (doseq [d (decls)]
+          (when-let [e (ex-res (second d))]
+            (when (map? e)
+              (let [k [:self (:name e)] old (.get entries k)]
+                (when (or (nil? old) (= 'c/defn (first d))) (.put entries k e)))))))
+      (let [objs (binding [*u* u *cfg* ucfg]
+                   (vec (for [[f e] (file-objects (:forms u))
+                              :when (and e (= :obj (:kind e)) (#{:x :i} (:linkage e)) (not (second (decl-attrs (meta (second f))))))
+                              :let [has-init (> (count f) 2)
+                                    def (boolean (tentative-or-def? f e))]
+                              :when (or has-init def)]
+                          (let [k (global-key e)
+                                t (:t e)
+                                sz (try {:size (max 1 (+ (size-of t) (flex-extra t (when has-init (nth f 2)))))
+                                         :align (obj-align e t)
+                                         :ro (boolean (and (contains? (chk/quals t) :const) has-init))}
+                                        (catch Exception x {:ex (ex-of x)}))]
+                            (cond-> (assoc sz :k k :init has-init :def def)
+                              has-init (assoc :item (frag-item
+                                                     #(let [fs (atom {:ni 0 :nf 0 :frame 0 :labels {} :locals {} :addressed #{}})
+                                                            [l] (frag-static! [:obj k] (fn [] [:obj k]))
+                                                            _ (item-ref! [:s l] [:o l nil nil "no definition"])
+                                                            stores (binding [*static-init* true *f* fs]
+                                                                     (build-init-stores t (list 'g (sph l)) (nth f 2) false))]
+                                                        (init-cmd fs stores)))))))))
+            fcands (binding [*u* u *cfg* ucfg]
+                     (vec (for [d (decls)
+                                :let [e (ex-res (second d))
+                                      [weak alias] (decl-attrs (meta (second d)))]
+                                :when (and e (or (= 'c/defn (first d)) alias))]
+                            (if alias
+                              (let [te (ex-res-name u alias)
+                                    fn? (= :fn (:kind e))
+                                    ent (fn [x] (cond-> {:k (global-key x) :name (:name x)}
+                                                  (not fn?) (into (zipmap [:size :align :err] (obj-size x)))))]
+                                {:k (global-key e) :weak (boolean weak) :alias alias :fn fn? :e (ent e) :te (when te (ent te))})
+                              {:k (global-key e) :weak (boolean weak) :item (frag-item #(build-fn d))}))))]
+        {:fns (vec (:fns *p*)) :sts (vec (:sts *p*)) :objs objs :fcands fcands}))))
+
+(defn- reached
+  "The keys a program reaches (a linker's --gc-sections at link-text's level): from the names `roots` and every candidate of
+  the fragments not in `prune` (a set of indices), each included candidate's references (its item's, an alias's target),
+  a pruned fragment's candidate included when its key is reached. A HashSet of keys (an object's key as a function's: a
+  name, or [unit name])."
+  [frags prune roots rk]
+  (let [kept (java.util.HashSet.)
+        q (java.util.ArrayDeque.)
+        by (HashMap.)                   ; a pruned fragment's key -> [[i candidate] ...]
+        reach! (fn [k] (when (.add kept k) (.add q k)))
+        refs-of (fn [i c]
+                  (let [fr (frags i)]
+                    (concat
+                     (for [ev (concat (:ev (:item c))) :when (#{:f :o} (first ev))]
+                       (if (= :f (first ev))
+                         (rk i (first ((:fns fr) (second ev))))
+                         (rk i (second ((:sts fr) (second ev))))))
+                     (when-let [a (:alias c)] [(if-let [te (:te c)] (rk i (:k te)) a)]))))
+        include! (fn [i c] (doseq [k (refs-of i c)] (reach! k)))]
+    (doseq [i (range (count frags)) :when (contains? prune i)
+            c (concat (:objs (frags i)) (:fcands (frags i)))]
+      (let [k (rk i (:k c))] (.put by k (conj (or (.get by k) []) [i c]))))
+    (doseq [r roots] (reach! r))
+    (doseq [i (range (count frags)) :when (not (contains? prune i))
+            c (concat (:objs (frags i)) (:fcands (frags i)))]
+      (reach! (rk i (:k c)))
+      (include! i c))
+    (while (not (.isEmpty q))
+      (let [k (.poll q)]
+        (doseq [[i c] (.get by k)] (include! i c))))
+    kept))
+
+(defn link-text
+  "The node program's text (program-text's) of fragments (unit-fragment's, in link order), linked as build-program links
+  units: with (entry main) or, when `libc-start`, (start ...). Throws build-program's refusals. `prune` (a set of the
+  fragments' indices) with `roots` (names): those fragments' candidates kept only when the program reaches them (reached;
+  arbace.cpp.run's lowered C++ runtime, as its prune cut the forms)."
+  ^String [frags & {:keys [libc-start prune roots]}]
+  (binding [*p* (new-prog)]
+    (let [frags (vec frags)
+          rk (fn [i k] (if (and (vector? k) (= :self (first k))) [i (second k)] k))
+          fmaps (mapv #(object-array (count (:fns %))) frags)
+          smaps (mapv #(object-array (count (:sts %))) frags)
+          ^ArrayList out (:out *p*)
+          ^HashMap statics (:statics *p*)
+          ^ArrayList undefined (:undefined *p*)
+          ^ArrayList aliases (:aliases *p*)
+          ^ArrayList inits (:inits *p*)
+          subst (fn [i ^String s]
+                  (let [^objects fm (fmaps i) ^objects sm (smaps i)]
+                    (str/replace s #"\?([fs])(\d+)"
+                                 (fn [[_ k n]]
+                                   (str (or (aget (if (= k "f") fm sm) (Integer/parseInt n))
+                                            (throw (ex-info (str "ci link: unresolved ?" k n) {}))))))))
+          undefined-obj (fn [k size align err]
+                          (or (.get statics [:obj k])
+                              (do (when (nil? size) (throw (ex-info (str "ci link: " err) {})))
+                                  (let [ix (static-idx [:obj k] size align false)]
+                                    (.add undefined (list 'at ix 0))
+                                    ix))))
+          replay (fn [i item]
+                   (when-let [x (:ex item)] (throw-ex x))
+                   (let [fr (frags i) ^objects fm (fmaps i) ^objects sm (smaps i)]
+                     (doseq [ev (:ev item)]
+                       (if (= :i (first ev))
+                         (.add inits (subst i (second ev)))
+                         (let [l (int (second ev))]
+                           (case (first ev)
+                             :f (when (nil? (aget fm l))
+                                  (let [[k nm] ((:fns fr) l)] (aset fm l (fn-id (rk i k) nm))))
+                             :o (when (nil? (aget sm l))
+                                  (let [[_ k] ((:sts fr) l) [_ _ size align err] ev]
+                                    (aset sm l (undefined-obj (rk i k) size align err))))
+                             :s (when (nil? (aget sm l))
+                                  (let [spec ((:sts fr) l)]
+                                    (aset sm l
+                                          (case (first spec)
+                                            :n (let [[_ size align ro nm] spec ix (swap! (:nstatic *p*) inc)]
+                                                 (emit! (list 'static ix size align ro nm))
+                                                 ix)
+                                            :str (let [[_ n esize hx] spec k [esize hx] ^HashMap ss (:strings *p*)]
+                                                   (or (.get ss k)
+                                                       (let [ix (swap! (:nstatic *p*) inc)]
+                                                         (.put ss k ix)
+                                                         (emit! (list 'static ix n (max 1 esize) 1))
+                                                         (when (pos? (count hx)) (emit! (list 'data ix 0 hx)))
+                                                         ix)))))))))))
+                     (subst i (:text item))))
+          defs (HashMap.)
+          chosen (HashMap.)
+          kept (when (seq prune) (reached frags prune roots rk))
+          keep? (fn [i c] (or (nil? kept) (not (contains? prune i)) (.contains ^java.util.HashSet kept (rk i (:k c)))))]
+      ;; the objects: each external one's defining declaration, allocated first, then their initializers
+      (doseq [i (range (count frags)) c (:objs (frags i)) :when (keep? i c)]
+        (let [k (rk i (:k c)) old (.get defs k) has-init (:init c)]
+          (when (or (nil? old)
+                    (and has-init (not (:init old)))
+                    (and (not (:init old)) (:def c) (not (:def old))))
+            (.put defs k (assoc c :u i)))))
+      (doseq [[k c] defs]
+        (when-let [x (:ex c)] (throw-ex x))
+        (static-idx [:obj k] (:size c) (:align c) (:ro c)))
+      (doseq [[k c] defs]
+        (when (:init c) (.add inits (replay (:u c) (:item c)))))
+      ;; the functions: static ones always, an external one's strong definition over a weak one
+      (doseq [i (range (count frags)) c (:fcands (frags i)) :when (keep? i c)]
+        (let [k (rk i (:k c)) old (.get chosen k)]
+          (when (or (nil? old) (and (:weak old) (not (:weak c))))
+            (.put chosen k (assoc c :u i)))))
+      (doseq [[k c] chosen]
+        (let [i (:u c)]
+          (if (:alias c)
+            (if (:fn c)
+              (let [a (fn-id (rk i (:k (:e c))) (:name (:e c)))
+                    b (if-let [te (:te c)] (fn-id (rk i (:k te)) (:name te)) (fn-id (:alias c) (:alias c)))]
+                (.add aliases (list 'fnalias a b)))
+              ;; a weak alias of an object another unit defines is not taken
+              (when (and (:te c) (not (.containsKey defs k)))
+                (let [ob (fn [{:keys [k size align err]}] (undefined-obj (rk i k) size align err))
+                      a (ob (:e c))
+                      b (ob (:te c))]
+                  (.add aliases (list 'alias a b 0)))))
+            (.add out (replay i (:item c))))))
+      (doseq [a undefined] (emit! a))
+      (doseq [a aliases] (emit! a))
+      (doseq [x inits] (emit! x))
+      (let [main (.get ^HashMap (:fns *p*) "main")]
+        (when-not main (refuse :no-main "no main"))
+        (emit! (if libc-start
+                 (list 'start (fn-id "__libc_start_main" "__libc_start_main") main)
+                 (list 'entry main))))
+      (let [sb (StringBuilder.)]
+        (binding [*print-length* nil *print-level* nil]
+          (doseq [c out] (.append sb (if (string? c) ^String c (pr-str c))) (.append sb "\n")))
+        (str sb)))))
+
+(defn read-program
+  "A node program's commands from its text (program-text's, link-text's)."
+  [^String text]
+  (vec (for [l (str/split-lines text) :when (not (str/blank? l))] (read-string l))))
+
 (defn build-program
+  "The node program of checked units [{:rd :results :std :unsigned-char}] (a program's, in link order):
+  the commands, with (entry main) or, when `libc-start` names __libc_start_main, (start ...). Throws
+  ex-info with :ci/refused CLASS for a construct out of eval (SPEC §14) or not built yet. The units' fragments
+  linked (link-text)."
+  [units & {:keys [libc-start]}]
+  (read-program (link-text (mapv unit-fragment units) :libc-start libc-start)))
+
+(defn build-program-direct
   "The node program of checked units [{:rd :results :std :unsigned-char}] (a program's, in link order):
   the commands, with (entry main) or, when `libc-start` names __libc_start_main, (start ...). Throws
   ex-info with :ci/refused CLASS for a construct out of eval (SPEC §14) or not built yet."
