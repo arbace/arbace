@@ -303,6 +303,18 @@
      :entries (vec (mapcat (fn [r] (when (or (not= :pass (:verdict r)) (seq (:items r))) (scheme-entries r))) rows))
      :detail (str (count rows) (if tests? " records" " cases") " in " (:file src))}))
 
+(defmethod read-source :rust-lower [src]
+  ;; rsi lower-check's results (test/rust/lower-results.edn, lower-std-results.edn: {PROGRAM :pass | :nondet | :skip | [RESULT CLASS]},
+  ;; EVAL.md section 7): a non-pass an entry of its RESULT, reason the CLASS's id, taken by that class (:class-id) of the classes file;
+  ;; :nondet (the judge's own runs differ) and :skip are no cases.
+  (let [m (read-edn (:file src))
+        vs (vals m)]
+    {:pass (count (filter #{:pass} vs))
+     :entries (vec (for [[id v] (sort-by (comp str key) m) :when (vector? v)]
+                     (assoc (entry id (first v) (name (second v))) :class-id (second v))))
+     :detail (str (count m) " programs in " (:file src) "; " (count (filter #{:nondet} vs)) " nondeterministic and "
+                  (count (filter #{:skip} vs)) " skipped, not counted")}))
+
 ;; the cases a source must have (report 021's finding 1: a shrunk record is a valid record)
 
 (def ^:private ref-ids
@@ -322,7 +334,7 @@
       (let [x (read r false ::eof)]
         (if (= ::eof x) xs (recur (conj xs x)))))))
 
-;; ---- Haskell's readers
+;; ---- the crops' readers (Haskell's and Rust's round trips' known files)
 
 (defmethod read-source :corpus-known [src]
   ;; A round trip's known file (bin/repr-haskell roundtrip's test/haskell/roundtrip-CORPUS[-LEVEL]-known.edn: a map from PKG/FILE to the
@@ -332,11 +344,15 @@
   (let [parts (for [{:keys [corpus known]} (:parts src)]
                 (let [c (read-edn corpus)
                       total (case (:count src)
-                              :hs-modules (reduce + (map #(+ (count (:modules %)) (count (:hsc %)) (count (:boot %))) (:packages c))))
+                              :hs-modules (reduce + (map #(+ (count (:modules %)) (count (:hsc %)) (count (:boot %))) (:packages c)))
+                              ;; Rust's (:files, the files of its crates; :ifaces, the crates rustdoc documents; :programs, the behaviour level's)
+                              :files (reduce + (map #(count (:files %)) (:crates c)))
+                              :ifaces (count (filter :iface (:crates c)))
+                              :programs (count (:programs c)))
                       ks (sort-by (comp str key) (read-edn known))]
                   {:total total
                    :entries (for [[k why] ks]
-                              (entry (str "ghc-" (:ghc c) " " k) :known (str (:level src) ": " (str/replace (str why) #"\s+" " "))))}))]
+                              (entry (str (if (:ghc c) (str "ghc-" (:ghc c)) (:name c)) " " k) :known (str (:level src) ": " (str/replace (str why) #"\s+" " "))))}))]
     {:pass (- (reduce + (map :total parts)) (count (mapcat :entries parts)))
      :entries (vec (mapcat :entries parts))
      :detail (str (str/join ", " (map #(format "%,d" (long (:total %))) parts)) " " (name (:count src)) " in the corpus")}))

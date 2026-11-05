@@ -1,0 +1,420 @@
+(ns arbace.rust.run
+  "rsi's programs on ci (doc/rust/EVAL.md §9; doc/rust/RUST-EVAL-SURVEY.md, \"As built: RE4 (write-ahead)\"): a Rust program's
+  lowered C (its codegen unit's and its allocator shim's IR, arbace.cpp.lower's C printed by repr/c) read by repr/c and checked by
+  ci's checker as any C program is (arbace.c.run/check-read), then linked as a static link pulls archive members from the
+  libraries in order: ci's ports (test/rust/runtime/ci/*.c: what std's lowered C needs of the C compiler's runtime that ci does
+  not give, RES25's compiler_builtins), std's lowered units (bin/rsi runtime-build's, read as a library of read units with the
+  pending-flag layer arbace/rust/rt/eh.c.ae) and musl's forms (arbace.c.musl), each library prebuilt (arbace.c.runtime: a unit's
+  fragment made once and cached by the library's key), into the node program ci's back end runs (tools/cirun) or cf2g translates
+  (arbace.c.cf2g/translate) for AOT.
+
+  The machinery is C++'s (arbace.cpp.run, branch cpp-cx8, as ci-prebuilt-cpp adapted it to the prebuilt runtime), copied here
+  because C++'s CX8 is not merged where RE4 was built: RES28 folds both into one namespace of the LLVM path at RES16's rename. What
+  is Rust's own: a program is two units (x, the program's codegen unit, and shim, the allocator shim), the libraries' order and
+  the ports. Evaluated from the checkout on the tools' host (arbace.c.* the checkout's with ARBACE_PATH_FIRST)."
+  (:require [arbace.repr.c :as rc]
+            [arbace.repr.c.host :as host]
+            [arbace.c.build :as build]
+            [arbace.c.musl :as musl]
+            [arbace.c.run :as crun]
+            [arbace.c.runtime :as rtm]
+            [arbace.cpp.lower :as lower]
+            [arbace.repr.llvm :as llvm]
+            [arbace.string :as str])
+  (:import (java.io File)
+           (java.util ArrayDeque HashMap HashSet)
+           (java.util.concurrent ConcurrentHashMap ConcurrentLinkedQueue)))
+
+(set! *warn-on-reflection* true)
+
+;; runtime-ci-key begin: what bin/rsi runtime-ci keys the library on (the read and its options), to the end marker
+(def ci-atomics
+  "gcc's __atomic builtins, which the lowering writes for the IR's atomics and ci's back end does not have, as macros of plain
+  operations for ci's one thread (RES7 (a)): each evaluates its operands once, the memory orders not at all (arbace.cpp.run's)."
+  (let [rmw (fn [nm op new?]
+              [(str "__atomic_" nm "(p,v,o)")
+               (str "({ __typeof__(p) cx$ap = (p); __typeof__(*cx$ap) cx$ao = *cx$ap; __typeof__(*cx$ap) cx$an = " op "; *cx$ap = cx$an; "
+                    (if new? "cx$an" "cx$ao") "; })")])]
+    (into [["__atomic_load_n(p,o)" "(*(p))"]
+           ["__atomic_store_n(p,v,o)" "((void)(*(p) = (v)))"]
+           ["__atomic_exchange_n(p,v,o)" "({ __typeof__(p) cx$ap = (p); __typeof__(*cx$ap) cx$ao = *cx$ap; *cx$ap = (v); cx$ao; })"]
+           ["__atomic_compare_exchange_n(p,e,d,w,s,f)"
+            "({ __typeof__(p) cx$ap = (p); __typeof__(e) cx$ae = (e); _Bool cx$ok = *cx$ap == *cx$ae; if (cx$ok) *cx$ap = (d); else *cx$ae = *cx$ap; cx$ok; })"]
+           ["__atomic_compare_exchange(p,e,d,w,s,f)"
+            "({ _Bool cx$ok = __builtin_memcmp((p), (e), sizeof(*(p))) == 0; if (cx$ok) __builtin_memcpy((p), (d), sizeof(*(p))); else __builtin_memcpy((e), (p), sizeof(*(p))); cx$ok; })"]
+           ["__atomic_thread_fence(o)" "((void)0)"]
+           ["__atomic_signal_fence(o)" "((void)0)"]
+           ["__atomic_is_lock_free(n,p)" "1"]
+           ["__atomic_always_lock_free(n,p)" "1"]
+           ["__atomic_test_and_set(p,o)" "({ unsigned char *cx$ab = (unsigned char *)(p); _Bool cx$ok = *cx$ab; *cx$ab = 1; cx$ok; })"]
+           ["__atomic_clear(p,o)" "((void)(*(unsigned char *)(p) = 0))"]]
+          (for [[nm op] [["add" "cx$ao + (v)"] ["sub" "cx$ao - (v)"] ["and" "cx$ao & (v)"] ["or" "cx$ao | (v)"] ["xor" "cx$ao ^ (v)"]
+                         ["nand" "~(cx$ao & (v))"]]
+                [k new?] [[(str "fetch_" nm) false] [(str nm "_fetch") true]]]
+            (rmw k op new?)))))
+
+(def ci-math
+  "The math builtins the lowering writes for LLVM's math intrinsics that ci's back end does not compute, as macros calling musl's
+  function (arbace.cpp.run's)."
+  (for [f ["log2" "exp2" "trunc" "round" "rint" "nearbyint" "fmin" "fmax" "fma"]
+        [sfx t] [["" "double"] ["f" "float"] ["l" "long double"]]
+        :let [n (str f sfx) args (if (= f "fma") ["x" "y" "z"] (if (#{"fmin" "fmax"} f) ["x" "y"] ["x"]))]]
+    [(str "__builtin_" n "(" (str/join "," args) ")")
+     (str "({ extern " t " " n "(" (str/join ", " (repeat (count args) t)) "); " n "(" (str/join ", " (map #(str "(" % ")") args)) "); })")]))
+
+(def opts
+  "The lowered C's options: gnu23; ci-atomics' and ci-math's macros."
+  (into ["-std=gnu23"] (for [[n d] (concat ci-atomics ci-math)] (str "-D" n "=" d))))
+
+(defn- spit-mk [^String path ^String s]
+  (.mkdirs (.getParentFile (File. path)))
+  (spit path s))
+
+(defn- clean [s] (str/replace (str s) #"[\t\n\r]" " "))
+
+(defn- tsv [^String f]
+  (let [x (File. f)]
+    (if (.exists x) (mapv #(str/split % #"\t" -1) (remove str/blank? (str/split-lines (slurp x)))) [])))
+
+(defn read-one
+  "The lowered C file `path` read by repr/c into DIR/forms/NAME.ae: nil, or the error's text."
+  [h ^String dir ^String nm ^String path]
+  (let [f (File. path)
+        fc (host/file-config opts "gnu23")
+        rd (rc/read-c (host/config h fc (.getParent f)) fc (.getName f) false)]
+    (cond
+      (:error rd) (str "read-error: " (str/join "; " (take 2 (:error rd))))
+      (:refused rd) (str "read-refused: " (name (:refused rd)) ": " (:message rd))
+      :else (do (doseq [[p t] (rc/unit-texts rd (.getName f))]
+                  (let [out (if (str/starts-with? p "c/h/") (str dir "/forms/" p) (str dir "/forms/" nm ".ae"))]
+                    (when-not (and (str/starts-with? p "c/h/") (.exists (File. out)))
+                      (spit-mk out t))))
+                (spit-mk (str dir "/forms/" nm ".units") (pr-str (vec (map str (keys (:units rd))))))
+                nil))))
+
+(defn load-unit
+  "A library unit's read: {:forms :units} as arbace.repr.c/read-c gives."
+  [^String dir ^String nm]
+  (let [[_ forms] (rc/read-unit-text (slurp (str dir "/forms/" nm ".ae")))
+        us (read-string (slurp (str dir "/forms/" nm ".units")))]
+    {:forms forms
+     :units (into {} (for [u us]
+                       (let [[hf hforms] (rc/read-unit-text (slurp (str dir "/forms/c/h/" (subs u 4) ".ae")))]
+                         [(symbol u) {:forms hforms :header (second hf)}])))}))
+
+(defn read-lib
+  "read-lib DIR LIST THREADS: each line of LIST (NAME PATH: a unit's lowered C) read into DIR (the units already read kept when
+  DIR/read.tsv says so), DIR/index.edn written; the errors printed. True when every unit read."
+  [h ^String dir ^String list threads]
+  (let [lines (mapv #(str/split % #"\t") (remove str/blank? (str/split-lines (slurp list))))
+        done (into {} (map (juxt first identity) (tsv (str dir "/read.tsv"))))
+        ;; an interrupted read's units (read-one writes NAME.units last: a unit with it was read whole), kept
+        done (into done (for [[n] lines :when (and (not (contains? done n)) (.exists (File. (str dir "/forms/" n ".units"))))]
+                          [n [n "ok" "" "-"]]))
+        todo (vec (remove (fn [[n]] (= "ok" (second (get done n)))) lines))
+        q (ConcurrentLinkedQueue. ^java.util.Collection todo)
+        res (ConcurrentHashMap.)
+        k (atom 0)
+        workers (doall (for [_ (range threads)]
+                         (future
+                           (loop []
+                             (when-let [[n p] (.poll q)]
+                               (let [t0 (System/nanoTime)
+                                     e (try (read-one h dir n p) (catch Throwable e (str "error: " e)))]
+                                 (.put res n (str/join "\t" [n (if e "error" "ok") (clean (or e "")) (format "%.1f" (/ (- (System/nanoTime) t0) 1e9))]))
+                                 (let [i (swap! k inc)] (when (zero? (mod i 10)) (binding [*out* *err*] (println "rsi: read" i "of" (count todo)))))
+                                 (recur)))))))]
+    (doseq [w workers] @w)
+    (let [rows (sort-by first (concat (for [[n r] done :when (not (.containsKey res n))] (str/join "\t" r)) (vals res)))
+          rows (map #(if (string? %) % (str/join "\t" %)) rows)]
+      (spit (str dir "/read.tsv") (str (str/join "\n" rows) "\n")))
+    (let [ok (for [[n st] (tsv (str dir "/read.tsv")) :when (= st "ok")] n)
+          ix (into (sorted-map)
+                   (for [n ok]
+                     (let [u (load-unit dir n)
+                           all (concat (:forms u) (mapcat :forms (vals (:units u))))]
+                       [n {:defs (musl/unit-defs (:forms u)) :refs (set (musl/refs all))}])))]
+      (spit (str dir "/index.edn") (pr-str ix))
+      (let [bad (for [[n st e] (tsv (str dir "/read.tsv")) :when (not= st "ok")] [n e])]
+        (doseq [[n e] bad] (println "rsi: not read:" n e))
+        (println "rsi: read" (count ok) "units of" (count lines) "into" dir)
+        (empty? bad)))))
+
+;; runtime-ci-key end
+
+(def prog-opts
+  "A program's options: opts and the declarations of the builtins the lowering writes that repr/c's <builtin> source does not
+  declare and ci does not compute, so that a call of one is not an implicit int function's: llvm.powi's __builtin_powi and
+  __builtin_powif (their bodies ci's ports, test/rust/runtime/ci/builtins.c). Apart from opts because std's lowered units use
+  none of them (bin/rsi runtime-ci's key covers opts: a change there reads std again); folded into opts at the next read
+  (RES30)."
+  (into opts (for [[n t] [["__builtin_powi" "double"] ["__builtin_powif" "float"]]]
+               (str "-D" n "(x,n)=({ extern " t " " n "(" t ", int); " n "((x), (n)); })"))))
+
+(defn library
+  "A library of read units: {:dir :index :by-name {name [[unit weak] ...]}}."
+  [^String dir]
+  (let [ix (read-string (slurp (str dir "/index.edn")))
+        by (HashMap.)]
+    (doseq [[s {:keys [defs]}] ix
+            [n d] defs]
+      (.put by n (conj (or (.get by n) []) [s (:weak d)])))
+    {:dir dir :index ix :by-name by}))
+
+;; The constructors (as arbace.cpp.run's, LLVM.md §11): the lowering makes llvm.global_ctors __attribute__((constructor))
+;; wrappers, which ci's builder does not run; each renamed to a name of the program's own and called from musl's _init.
+
+(defn- ctor-attr
+  [m]
+  (some (fn [a] (when (and (seq? a) (= '__attribute__ (first a)))
+                  (some (fn [x] (cond (= 'constructor x) 65536
+                                      (and (vector? x) (= 'constructor (first x))) (long (second x))))
+                        (rest a))))
+        (:c/decl-attrs m)))
+
+(defn ctors
+  "A read's top-level forms with its constructors renamed (TAG distinguishes the units): [forms [[priority name] ...]]."
+  [forms ^String tag]
+  (let [acc (java.util.ArrayList.)
+        tag (str/replace tag #"[^A-Za-z0-9_]" "_")
+        fs (mapv (fn [f]
+                   (if (and (seq? f) (= 'c/defn (first f)))
+                     (let [nm (second f) m (meta nm)]
+                       (if-let [pr (ctor-attr m)]
+                         (let [n2 (symbol (str "cx$init$" tag "$" (name nm)))]
+                           (.add acc [pr (name n2)])
+                           (apply list (first f) (with-meta n2 (-> m (dissoc :static) (update :c/decl-attrs #(vec (remove (fn [a] (and (seq? a) (some #{'constructor} (map (fn [x] (if (vector? x) (first x) x)) (rest a))))) %)))))
+                                  (drop 2 f)))
+                         f))
+                     f))
+                 forms)]
+    [fs (vec acc)]))
+
+(defn- with-ctors [rd tag] (let [[fs cs] (ctors (:forms rd) tag)] (assoc rd :forms fs :ctors cs)))
+
+(defn- check-lib-unit
+  [h lib ^String nm]
+  (let [rd (with-ctors (load-unit (:dir lib) nm) (str (.getName (File. ^String (:dir lib))) "_" nm))
+        u (assoc (crun/check-read h (host/file-config opts "gnu23") rd) :src nm)]
+    (when (seq (:errors u))
+      (throw (ex-info (str "the library unit " nm " does not check: " (str/join "; " (take 2 (:errors u)))
+                           (when (crun/uses-long-double? (:forms rd)) " uses-long-double"))
+                      {:ci/refused :runtime-check})))
+    u))
+
+(defn closure
+  "The library units a program needs, in the libraries' order (musl's last): for a name the program or a linked unit references
+  and nothing linked defines, the first library defining it gives its unit (a strong definition before a weak one).
+  [[lib unit] ...]."
+  [libs prog-defs prog-refs]
+  (let [defined (HashSet. ^java.util.Collection prog-defs)
+        linked (java.util.LinkedHashSet.)
+        q (ArrayDeque.)]
+    (doseq [r (concat musl/roots prog-refs)] (.add q r))
+    (while (not (.isEmpty q))
+      (let [n (.poll q)]
+        (when-not (.contains defined n)
+          (when-let [[lib cands] (some (fn [lib] (when-let [c (.get ^HashMap (:by-name lib) n)] [lib c])) libs)]
+            (let [[s _] (or (first (remove second cands)) (first cands))]
+              (when (.add linked [lib s])
+                (let [{:keys [defs refs]} (get (:index lib) s)]
+                  (doseq [d (keys defs)] (.add defined d))
+                  (doseq [r refs]
+                    (when-not (.contains defined r) (.add q r))
+                    (when (str/starts-with? r "__builtin_") (.add q (subs r 10)))))))))))
+    (vec linked)))
+
+(defn- init-unit
+  "The checked unit defining _init, which calls the constructors named, in order."
+  [h names]
+  (let [f (File/createTempFile "rsi-init" ".c")
+        text (str (str/join (for [n names] (str "void " n "(void);\n")))
+                  "void _init(void) {\n" (str/join (for [n names] (str "  " n "();\n"))) "}\n")]
+    (try
+      (spit f text)
+      (let [fc (host/file-config opts "gnu23")
+            rd (rc/read-c (host/config h fc (.getParent f)) fc (.getName f) false)
+            u (crun/check-read h fc rd)]
+        (when (or (:error rd) (seq (:errors u)))
+          (throw (ex-info (str "the constructors' unit does not check: " (or (:error rd) (:errors u))) {:ci/refused :init})))
+        u)
+      (finally (.delete f)))))
+
+(defn- lib-key
+  "A library directory's key for ci's prebuilt runtime: its index's, key file's and read's digest."
+  ^String [^String dir]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")
+        sb (StringBuilder.)]
+    (doseq [f ["index.edn" "key" "read.tsv"]]
+      (let [x (File. (str dir "/" f))]
+        (.update md (.getBytes (str f "\n") "UTF-8"))
+        (when (.exists x) (.update md (java.nio.file.Files/readAllBytes (.toPath x))))))
+    (doseq [b (.digest md)] (.append sb (format "%02x" (bit-and 0xff (long b)))))
+    (str sb)))
+
+(defn prebuilt-lib
+  "A library of read units made prebuilt (arbace.c.runtime/prebuilt), its fragments cached by its key."
+  [h lib ^String tag]
+  (let [dir (:dir lib) k (lib-key dir)]
+    (rtm/prebuilt lib (System/getProperty "user.dir") (str "rsi-" tag "-" (subs k 0 12)) k #(check-lib-unit h lib %))))
+
+(defn build-linked
+  "The node program's text of the program's checked units linked with the libraries (musl's last): the program's units and the
+  constructors' unit built into fragments, the libraries' fragments made once (cached), the Rust libraries' candidates cut at the
+  link to what the program reaches (arbace.c.build/link-text's :prune)."
+  [h libs units]
+  (let [pdefs (set (mapcat #(keys (musl/unit-defs (:forms (:rd %)))) units))
+        prefs (set (mapcat #(musl/refs (concat (:forms (:rd %)) (mapcat :forms (vals (:units (:rd %)))))) units))
+        prefs (into prefs (keep #(when (str/starts-with? % "__builtin_") (subs % 10)) prefs))
+        linked (closure libs pdefs prefs)
+        _ (when (System/getenv "RSI_TRACE") (binding [*out* *err*] (println "rsi: linked" (count linked) (mapv second linked))))
+        lfs (mapv (fn [[lib s]] (rtm/lib-fragment lib s)) linked)
+        cs (concat (mapcat #(:ctors (:rd %)) units) (mapcat :ctors lfs))
+        init (when (seq cs) (init-unit h (map second (sort-by first cs))))
+        pre (cond-> (mapv build/unit-fragment units) init (conj (build/unit-fragment init)))
+        n (count pre)
+        prune (set (keep-indexed (fn [i [lib]] (when-not (:root lib) (+ n i))) linked))]
+    (build/link-text (into pre lfs) :libc-start true
+                     :prune (when-not (System/getenv "RSI_NO_PRUNE") prune)
+                     :roots (concat (map second cs) ["main" "_init"]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Programs
+
+(defn- secs [t0] (format "%.1f" (/ (- (System/nanoTime) t0) 1e9)))
+
+(defn read-program
+  "A lowered C file read and checked (its constructors renamed with TAG): a unit with :status :ok, or {:status
+  :read-error|:read-refused|:check-error :message}."
+  [h ^File f ^String tag]
+  (let [fc (host/file-config prog-opts "gnu23")
+        rd (rc/read-c (host/config h fc (.getParent f)) fc (.getName f) false)]
+    (cond
+      (:error rd) {:status :read-error :message (str/join "; " (take 3 (:error rd)))}
+      (:refused rd) {:status :read-refused :message (str (name (:refused rd)) ": " (:message rd))}
+      :else (let [u (crun/check-read h fc (with-ctors rd tag))]
+              (if (seq (:errors u))
+                (assoc u :status :check-error :message (str (str/join "; " (take 3 (:errors u)))
+                                                            (when (crun/uses-long-double? (:forms rd)) " uses-long-double")))
+                (assoc u :status :ok))))))
+
+(defn lower-ll
+  "The IR at DIR/NAME.ll lowered (arbace.cpp.lower/lower-file) into DIR/NAME.c: nil, or [\"lower-refused\" class message]."
+  [^String dir ^String nm]
+  (let [r (lower/lower-file (str dir "/" nm ".ll") (str nm ".c"))]
+    (if (:refused r)
+      ["lower-refused" (name (:refused r)) (:message r)]
+      (do (llvm/spit-latin1 (str dir "/" nm ".c") (:c r)) nil))))
+
+(def unit-names
+  "A program's units in its directory: its codegen unit and the allocator shim (bin/lib/rsi/link-ir)."
+  ["x" "shim"])
+
+(defn- build-one
+  "One program's directory (x.ll and shim.ll: bin/lib/rsi/link-ir's): each unit lowered, read and checked, linked, built:
+  [status class message flags seconds text], seconds \"LOWER+BUILD\"."
+  [h libs ^String dir]
+  (let [t0 (System/nanoTime)
+        nms (filterv #(.exists (File. (str dir "/" % ".ll"))) unit-names)
+        refused (some #(lower-ll dir %) nms)
+        ls (secs t0)
+        t1 (System/nanoTime)
+        us (when-not refused (mapv #(read-program h (File. (str dir "/" % ".c")) (str "p" %)) nms))
+        bad (first (remove #(= :ok (:status %)) us))
+        bs (fn [] (str ls "+" (secs t1)))]
+    (cond
+      (empty? nms) ["ir-missing" "" "" "" "" nil]
+      refused (conj refused "" (str ls "+0") nil)
+      bad [(name (:status bad)) "" (:message bad) "" (bs) nil]
+      :else
+      (let [ld (if (some #(crun/uses-long-double? (:forms (:rd %))) us) "long-double" "")
+            r (try {:text (build-linked h libs us)}
+                   (catch arbace.lang.ExceptionInfo e
+                     (if-let [c (:ci/refused (ex-data e))]
+                       {:refused c :message (.getMessage e)}
+                       (throw e))))]
+        (if (:text r)
+          ["ok" "" "" ld (bs) (:text r)]
+          ["refused" (name (:refused r)) (:message r) ld (bs) nil])))))
+
+(defn- work-list
+  "Runs f on each line of LIST in `threads` threads; f returns the row's fields after the id; OUT the rows."
+  [^String list threads ^String out f]
+  (let [lines (vec (remove str/blank? (str/split-lines (slurp list))))
+        q (ConcurrentLinkedQueue. ^java.util.Collection lines)
+        res (ConcurrentHashMap.)
+        workers (doall (for [_ (range threads)]
+                         (future
+                           (loop []
+                             (when-let [^String l (.poll q)]
+                               (let [fs (str/split l #"\t" -1)
+                                     r (try (f fs) (catch Throwable e ["build-error" "" (str (.getName (class e)) ": " (.getMessage e)) "" ""]))]
+                                 (.put res (first fs) (str/join "\t" (cons (first fs) (map clean r))))
+                                 (binding [*out* *err*] (println "rsi:" (first fs) (second r) (nth r 4 ""))))
+                               (recur))))))]
+    (doseq [w workers] @w)
+    (spit out (str (str/join "\n" (sort (vals res))) "\n"))))
+
+(defn libs
+  "The libraries of RTLIB (bin/rsi runtime-ci's directory): [extra... ports std musl cb], each prebuilt; extra: RSI_EXTRA_LIBS's
+  directories (colon-separated: the check's rust_test_helpers.c, compiletest's native helpers, read as a library)."
+  [h ^String rtlib]
+  (vec (concat (for [d (remove str/blank? (str/split (or (System/getenv "RSI_EXTRA_LIBS") "") #":"))]
+                 (prebuilt-lib h (library d) (.getName (File. ^String d))))
+               (when (.exists (File. (str rtlib "/ports/index.edn"))) [(prebuilt-lib h (library (str rtlib "/ports")) "ports")])
+               [(prebuilt-lib h (library (str rtlib "/std")) "std")
+                (rtm/library h (System/getProperty "user.dir"))]
+               ;; compiler_builtins lowered (bin/rsi runtime-ci), after musl: what neither std nor musl defines
+               (when (.exists (File. (str rtlib "/cb/index.edn"))) [(prebuilt-lib h (library (str rtlib "/cb")) "cb")]))))
+
+(defn nodes-list
+  "nodes-list WORK LIST RTLIB THREADS: each line of LIST (ID DIR) built into WORK/nodes/ID.nodes (ID with / written %); WORK/nodes.tsv
+  lists ID STATUS CLASS MESSAGE FLAGS SECONDS."
+  [h ^String work ^String list ^String rtlib threads]
+  (let [ls (libs h rtlib)]
+    (work-list list threads (str work "/nodes.tsv")
+               (fn [[id dir]]
+                 (let [[st cls msg ld s text] (build-one h ls dir)]
+                   (when text (spit-mk (str dir "/x.nodes") text))
+                   [st cls msg ld s])))))
+
+(defn compile-list
+  "compile-list OUT LIST RTLIB THREADS: each line of LIST (ID DIR PKG) built and translated by cf2g into OUT/progs/PKG/prog.go
+  (package PKG, path arbace/progs/PKG); OUT/nodes.tsv as nodes-list's (cf2g's refusal: refused, its class)."
+  [h ^String out ^String list ^String rtlib threads]
+  (require 'arbace.c.cf2g)
+  (let [ls (libs h rtlib)
+        translate (resolve 'arbace.c.cf2g/translate)
+        go-text (resolve 'arbace.c.cf2g/go-text)]
+    (work-list list threads (str out "/nodes.tsv")
+               (fn [[id dir pkg]]
+                 (let [[st cls msg ld s text] (build-one h ls dir)]
+                   (if-not text
+                     [st cls msg ld s]
+                     (let [t0 (System/nanoTime)]
+                       (try (let [[forms] (translate (build/read-program text) pkg (str "arbace/progs/" pkg))]
+                              (spit-mk (str out "/progs/" pkg "/prog.go") (go-text forms))
+                              ["ok" "" "" ld (str s "+" (secs t0))])
+                            (catch arbace.lang.ExceptionInfo e
+                              (if-let [c (:cf2g/refused (ex-data e))]
+                                ["refused" (name c) (.getMessage e) ld s]
+                                (throw e)))))))))))
+
+(defn -main
+  "bin/rsi's ci steps: read-lib DIR LIST THREADS, nodes-list WORK LIST RTLIB THREADS, compile-list OUT LIST RTLIB THREADS,
+  nodes RTLIB DIR OUT (one program's directory)."
+  [verb & args]
+  (let [h (host/load-host "test/c/host")
+        th #(Long/parseLong (or % "3"))]
+    (case verb
+      "read-lib" (let [[dir list t] args] (System/exit (if (read-lib h dir list (th t)) 0 1)))
+      "nodes-list" (let [[work list rt t] args] (nodes-list h work list rt (th t)))
+      "compile-list" (let [[out list rt t] args] (compile-list h out list rt (th t)))
+      "nodes" (let [[rt dir out] args
+                    [st cls msg _ s text] (build-one h (libs h rt) dir)]
+                (if text
+                  (do (spit out text) (println "rsi: built in" s "s"))
+                  (do (binding [*out* *err*] (println (str st (when (seq cls) (str " (" cls ")")) ": " msg))) (System/exit 1))))
+      (do (println "arbace.rust.run: read-lib, nodes-list, compile-list, nodes") (System/exit 2)))
+    (shutdown-agents)
+    (System/exit 0)))
