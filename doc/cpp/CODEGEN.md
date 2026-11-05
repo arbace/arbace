@@ -439,7 +439,7 @@ The corpus's 141 others, by what stops them (each file's first refusal or its ve
 ### G3.8 What is not done (refused with a class)
 
 Concepts and `requires` (the native tree keeps a `ConceptDecl`'s parameters but not its constraint, and no
-requires-clause or requirement: P11), class template argument deduction, `explicit(bool)`, conversion function templates
+requires-clause or requirement: P14), class template argument deduction, `explicit(bool)`, conversion function templates
 (with G2's conversion functions), defaults of template template parameters, `decltype` beyond `nullptr` and `sizeof`
 (with G2's `auto`), the address of an array or of a subobject as a template argument (`XadsoiL_Z3arrEEE`), a dependent
 expression in a signature beyond G3.5's kinds (calls, casts), explicit pack arguments extended by deduction
@@ -451,39 +451,39 @@ expression in a signature beyond G3.5's kinds (calls, casts), explicit pack argu
 | stage | what | target | estimate |
 |---|---|---|---|
 | **G3a** (this branch) | G3.3-G3.5 as built | 32 samples (all pass); the gcc corpus as measured (G3.7), its template-specific refusals nearly gone | done |
-| **G3b** | concepts after P11: the parser's constraint nodes, `SemaConcept.cpp`'s satisfaction (atomic constraints evaluated as constant expressions, `requires` expressions' requirements checked by analysis as SFINAE), constrained overloads ordered by subsumption (normal forms, `IsAtLeastAsConstrained`), `Q`/`Tk` mangling; `explicit(bool)`, `noexcept(expr)` | `p1-first.cpp`; the libstdc++ 15 constructs of G3.6 at `-std=c++23` | 2-3 |
+| **G3b** | concepts after P14: the parser's constraint nodes, `SemaConcept.cpp`'s satisfaction (atomic constraints evaluated as constant expressions, `requires` expressions' requirements checked by analysis as SFINAE), constrained overloads ordered by subsumption (normal forms, `IsAtLeastAsConstrained`), `Q`/`Tk` mangling; `explicit(bool)`, `noexcept(expr)` | `p1-first.cpp`; the libstdc++ 15 constructs of G3.6 at `-std=c++23` | 2-3 |
 | **G3c** | CTAD (`SemaTemplateDeductionGuide.cpp`: implicit guides from constructors, user guides), conversion function templates with G2's conversions, `decltype` and `auto` with G2 | the corpus files refused on these | 1-2 |
-| **G3d** | with G4: header bodies parsed, each node's text from its own file (P10), the type-trait builtins of G3.6 | `<utility>` and `<type_traits>` samples by our route | with G4 |
+| **G3d** | with G4: header bodies parsed, each node's text from its own file (P13), the type-trait builtins of G3.6 | `<utility>` and `<type_traits>` samples by our route | with G4 |
 
 ### G3.10 Proposed
 
-**P8. The template corpus.** (a) gcc's run tests as measured here, read in place from the gcc tarball's extraction, the
+**P11. The template corpus.** (a) gcc's run tests as measured here, read in place from the gcc tarball's extraction, the
 list made by a rule (no header beyond C's, accepted by clang at `-std=c++23`), not committed. (b) The same with the list
 and its recorded results committed (`test/cpp/codegen/gxx-templates.tsv`, `gxx-templates-results.edn`, a judge as
 `lower-check`'s with a known file), `bin/cppi codegen-check --corpus gxx-templates`; costs a known file to keep. (c)
 (b) plus llvm-test-suite's `SingleSource` C++ programs (not fetched). **Recommended: (b)**: the measure becomes a
 regression check at light cost (the 288 files run in about 3 minutes).
 
-**P9. Instantiation by re-analysis or by substitution.** (a) Re-analysis of the pattern in a binding scope (as built):
+**P12. Instantiation by re-analysis or by substitution.** (a) Re-analysis of the pattern in a binding scope (as built):
 small, every construct sema knows works in templates at once; costs the first phase of two-phase lookup's exactness
 (a name visible at the definition but declared after it is approximated by the cutoff) and repeats the analysis per
 specialization. (b) A port of TreeTransform's substitution over analyzed patterns: clang's exact behaviour; costs
 analyzing dependent patterns (a dependent type system in sema) and a port of TreeTransform's 18,000 lines' worth of
 cases. **Recommended: (a)**, revisited if the corpus finds a program whose meaning differs by lookup phase.
 
-**P10. Where explicit template arguments come from.** (a) The main file's text at the node's range (as built). (b) The
+**P13. Where explicit template arguments come from.** (a) The main file's text at the node's range (as built). (b) The
 native parser records them in its tree (a `TemplateArgument` list on `DeclRefExpr` and `MemberExpr`, the explicit arguments clang's
 `DeclRefExpr::template_arguments` holds): no text reading, headers work as the main file; costs a parser change
 and native-check's comparison of the new field. **Recommended: (b) before G4**, which needs it for the headers.
 
-**P11. Concepts' input.** (a) Read constraints from the main file's text, as explicit arguments are now: needs an
+**P14. Concepts' input.** (a) Read constraints from the main file's text, as explicit arguments are now: needs an
 expression parser of text (only constant expressions are read today) and fails in headers. (b) The native parser keeps
 what clang's dump keeps: a `ConceptDecl`'s constraint expression, a template's requires-clause and a function's trailing
 one (`TemplateParameterList::getRequiresClause`, `FunctionDecl::getTrailingRequiresClause`), a constrained parameter's
 `TypeConstraint`, `RequiresExpr` with its parameters and requirements (simple, type, compound, nested); costs a
 parser change, its native-check against cxxdump (the oracle's dumper, extended where it does not write them yet) and
 the converter's forms for them.
-**Recommended: (b)**, with P10 (b): both are the native tree carrying what the analysis needs instead of the text.
+**Recommended: (b)**, with P13 (b): both are the native tree carrying what the analysis needs instead of the text.
 
 ### G3.11 Sources
 
