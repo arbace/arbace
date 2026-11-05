@@ -776,3 +776,90 @@ GHC's choices exactly where they leave no trace in the types (the two classes ab
 ## Decided (2026-11-05, the user: HF3's proposals)
 
 HF3's five proposals as recommended: the judge types plus evidence, full Core from HF5; the default-method unfoldings kept; constraint order a known class until the solver keeps GHC's; a --full step haskell-front (rename-check and typecheck-check) after review; HF4 (deriving) next, then the extensions in the corpora's order, the nofib sweeps committed as a check list.
+
+## As built: HF4 (2026-11-05, branch `haskell-hf4`)
+
+Deriving, `arbace/repr/haskell/deriv.ae` (about 500 lines) with its integration in `typecheck.ae`; ports of GHC 9.14.1's
+`compiler/GHC/Tc/Deriv/Generate.hs` and `Deriv/Functor.hs` (HFS5 (a), BSD-3, recorded in `LICENSE.md` and
+`doc/ARBACE.md`; `Deriv/Infer.hs`, `Deriv/Utils.hs` and `Deriv.hs` read as the specification of the contexts and the
+choice of strategy). Nothing else of GHC was needed beyond the pinned tarball's text.
+
+- **Generators** (the generators' trees, built as the renamed tree's nodes so that the elaborator types them as any
+  instance's methods): Eq (`gen_Eq_binds`: one constructor, all nullary by tags, mixed by a tag check then a case per
+  non-nullary constructor), Ord (`gen_Ord_binds`: `compare` always and `<`, `<=`, `>`, `>=` for one to three
+  constructors or an enumeration, `mkOrdOpRhs`/`mkInnerRhs` with their tag ranges, `mkCompareFields`), Show
+  (`showsPrec` with `showParen`, infix constructors with their declared precedence, records, operators in
+  parentheses), Read (`readPrec` with `parens`, `prec`, `expectP`, `choose`, `readField`, `+++`; `readList` and
+  `readListPrec` the defaults), Enum, Bounded, Ix (enumerations and single constructors), Functor (`fmap`, `<$`),
+  Foldable (`foldr`, `foldMap`, `null`), Traversable (`traverse`), by `functorLikeTraverse`'s cases: the type variable,
+  a type constructor applied with the variable in its last argument only (nested), no occurrence. Not generated:
+  tuple and function fields of Functor-like classes (the class is left to its defaults and the judge shows it),
+  `Data`, `Lift`, `Generic`.
+- **Contexts** (`Deriv/Infer.hs`): each field's `C ty` reduced by the instances to constraints on type variables, a
+  fixpoint over the module's derived instances (the recursive types), duplicates dropped keeping the last occurrence
+  (GHC's solver leaves `T a [b] (Maybe a)`'s context as `(Eq b, Eq a)`: found by the judge); Functor-like classes
+  need the class at each nested type constructor (`Functor f` for a field `f a`).
+- **Strategies** (`Deriv.hs`, `mkNewTypeEqn`): a newtype's Eq, Ord, Ix and Bounded by the newtype strategy as GHC
+  chooses it without any extension (`std_class_via_coercible`); with `GeneralizedNewtypeDeriving` every class but Show
+  and Read, unless `DeriveAnyClass` is on too (then the stock classes stock, the others anyclass); `DeriveAnyClass`
+  gives an empty instance; standalone deriving (`deriving instance ctx => C (T a)`) uses the declaration's own
+  context. The newtype strategy is the representation type's methods coerced: `$cm = m dRep` (with the method's own
+  constraints still parameters); in an instance with a context whose representation dictionary is one of its
+  parameters, GHC's simple optimiser has inlined them into the dictionary function and so does the elaborator. The
+  rename tree now carries the module's extensions (`:exts`) for it.
+- **Where GHC's primops are replaced**: `dataToTag#`, `tagToEnum#` and the `Int#` comparisons and subtraction have no
+  type in the elaborator (no unboxed types yet); the tree has `(DerivTag e)` (an Int), `(DerivTag2Con [CON...] e)` and
+  `(DerivPrim op ...)`, typed as GHC's code is at `Int`, the comparisons are `eqInt`, `ltInt`... of `GHC.Classes`,
+  and the auxiliary bindings `$tag2con_T` and `$maxtag_T` are inlined at their uses (so they stay among the
+  "GHC only" bindings of the judge, the one recorded difference of the samples).
+- **The judge** is the evidence judge of HF3, now over the derived instances' bindings as well (`-ddump-deriv` is
+  GHC's text of the same bindings, `bin/repr-haskell tc-dump FILE --ghc -XHaskell2010 -ddump-deriv`, kept for reading;
+  the tc dump's Core of `$c==@$fEqT`... is what the judge compares, per instance and per method, so a method GHC
+  generates that the port lacks is a "GHC only" binding and one with other dictionaries is an evidence difference:
+  the set of methods of each derived instance, the dictionaries each one applies, their order and the instance's
+  context equal GHC's). Samples `T18Derive` (the seven Haskell 2010 classes over enumerations, records, infix
+  constructors, parameterised and recursive types, a newtype), `T19Derive2` (Functor, Foldable, Traversable over a
+  tree, a rose tree, a pair, a type with a non-parameter first argument; newtype strategy for `Num`, `Eq`, `Show`,
+  `Functor`, `Foldable` of a newtype; standalone deriving with and without contexts), `T20Derive3` (tag-range
+  Ord, large enumerations, backquoted and symbolic infix constructors, record syntax with an operator field, an
+  empty data type, a unit type, strict fields, newtypes), `T21AnyClass` (`DeriveAnyClass` with the other classes
+  together). `typecheck-check` also takes a list (`test/haskell/typecheck-check.txt`, HF3's decision 5): the nofib
+  programs of the sweeps, each a session of its own, the non-passes `known` with their classes.
+- **Results** (2026-11-05): `bin/repr-haskell typecheck-check` over the 22 samples of `test/haskell/typecheck/` (the 17
+  of HF3 and T18-T22): **22 of 22 equal**, the negative control differs on 11; the only "GHC only" bindings are the
+  enumerations' `$tag2con_T` and `$maxtag_T`. The list `test/haskell/typecheck-check.txt` (`bin/repr-haskell
+  typecheck-check test/haskell/typecheck-check.txt`: the 21 nofib/spectral programs of rename-check and the 36 others
+  of HF3's sweep, each in a session of its own, about 13 minutes, light): **48 of 57 equal, the 9 others `known`** in
+  HF3's three classes (life and simple: the order of two constraints; exact-reals, power, gc/power, integrate:
+  inlining differences of GHC's simple optimiser; k-nucleotide, reverse-complement, threads005: unboxed tuples, a
+  newtype-derived instance of a C type, `printf`), none new, and the derived instances of the nofib programs (their
+  `Eq`, `Ord`, `Show`, `Read`, `Enum`, `Ix`, `Bounded` instances, which HF3 left as "GHC only") now judged: the
+  constraints programs went from 36 to 57 evidence bindings. What the judge found while matching GHC: the order of an
+  inferred context (last occurrence kept), the newtype strategy for `Eq`, `Ord`, `Ix`, `Bounded` without any
+  extension, a coerced method as a binding of its own except when its dictionary is the instance's parameter,
+  GHC's choice of strategy with both `GeneralizedNewtypeDeriving` and `DeriveAnyClass` on, `foldMap`/`null` and the
+  tuple cases of `functorLikeTraverse`.
+- **Not covered**: `Generic`, `Data`, `Lift`, `Typeable` (built in), `DerivingVia`, `deriving newtype`/`stock`/`anyclass`
+  strategies written in the clause (the choice is GHC's default), `DeriveAnyClass` contexts inferred from default
+  signatures, function fields (contravariance) in Functor-like classes, deriving for data families and GADTs,
+  existentials, `-XStandaloneDeriving` of a type of another module, strict-field unboxed types; `show` and `read` runs
+  (the exit criterion's second half) wait for hsi's first light (HF7), so the derived code is judged by its types and
+  dictionaries only; `-ddump-deriv` is GHC's text and was read, not compared (no pretty-printer of the generated trees:
+  the tc dump's Core of each `$c` binding is the stricter comparison, and the sets of methods per instance equal).
+
+**Proposed** (the user decides).
+
+1. The enumerations' auxiliary bindings `$tag2con_T`, `$maxtag_T` (GHC's `DerivTag2Con`/`DerivMaxTag`, top-level
+   bindings of the module's Core). Options: (a) keep them inlined, the one recorded difference of the samples, until
+   HF5 gives the desugarer primops and unboxed `Int#`; (b) generate them now as top-level bindings over the `DerivTag`
+   nodes (about 40 lines, judged equal in evidence, still not in Core). *Recommended: (a)*.
+2. The gate step `haskell-front` of HF3's decision 4: now that the list exists. Options: (a) `--full` step with the 22
+   samples (under 2 minutes) and the 57-program list (about 13 minutes, at most 1 GiB), as `rename-check` is judged; (b) the samples
+   only in the essential gate (2 minutes), the list in `--full`; (c) leave it out of the gate until GT8's budget.
+   *Recommended: (b)*, after the user's review of this branch.
+3. What the next derivings need. Options: (a) `Generic` (HF9: needs type families and kinds, `Rep` types), `Data` and
+   `Lift` then; (b) `DerivingVia` and the strategy keywords first (cheap: the strategy is already the code's choice;
+   `via T` needs the representation by coercion like `newtype`); (c) neither until a corpus asks. *Recommended: (b)*
+   next, (a) at HF9.
+4. Deriving in Tier L (the libraries from source, HF10): the base library derives with `Generic`, `Data`, `Lift`
+   in places; those instances become HF9's scope, noted here so the Tier S exit is not read as covering them.
