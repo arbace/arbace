@@ -291,8 +291,8 @@
       (= h 'phi) (let [t (norm-type (first ps*))] (vec (mapcat (fn [[v l]] [[v t l] [l 'label]]) (rest ps*))))
       (= h 'select) (mapv typed ps*)
       (= h 'call) (conj (into (mapv arg (nth ps 2)) bun) [(second ps) (norm-type (list 'ptr (or (:addrspace o) *prog-as*)))])
-      (= h 'invoke) (conj (into (into (mapv arg (nth ps 2)) bun) [[(:to o) 'label] [(:unwind o) 'label]]) [(second ps) 'ptr])
-      (= h 'callbr) (conj (into (into (mapv arg (nth ps 2)) bun) (map (fn [l] [l 'label]) (cons (:to o) (:indirect o)))) [(second ps) 'ptr])
+      (= h 'invoke) (conj (into (into (mapv arg (nth ps 2)) bun) [[(:to o) 'label] [(:unwind o) 'label]]) [(second ps) (norm-type (list 'ptr (or (:addrspace o) *prog-as*)))])
+      (= h 'callbr) (conj (into (into (mapv arg (nth ps 2)) bun) (map (fn [l] [l 'label]) (cons (:to o) (:indirect o)))) [(second ps) (norm-type (list 'ptr (or (:addrspace o) *prog-as*)))])
       (= h 'ret) (if (= (first ps) 'void) [] [[(second ps) (norm-type (first ps))]])
       (= h 'br) (if (= 1 (count ps)) [[(first ps) 'label]] [[(nth ps 1) (norm-type (first ps))] [(nth ps 2) 'label] [(nth ps 3) 'label]])
       (= h 'switch) (into [[(nth ps 1) (norm-type (first ps))] [(nth ps 2) 'label]]
@@ -842,15 +842,17 @@
                             (when-not (or (integer? v) (and (seq? v) (= (first v) 'int))) (verr :parser/switch "case value is not a constant integer" {:at [:case idx]}))
                             (when (seen v) (verr :parser/switch "duplicate case value in switch" {:at [:case idx]}))
                             (recur (conj seen v) (next cs) (inc idx))))))
-      (= h 'extractvalue) (let [t (norm-type (first (first ps)))]
-                            (when-not (aggregate? t) (verr :parser/extractvalue "extractvalue operand must be aggregate type" {:at [:ty]}))
-                            (when-not (index-type t (rest ps)) (verr :parser/extractvalue "invalid indices for extractvalue")))
-      (= h 'insertvalue) (let [t (norm-type (first (first ps))) vt (norm-type (first (second ps)))]
-                           (when-not (aggregate? t) (verr :parser/insertvalue "insertvalue operand must be aggregate type"))
+      (= h 'extractvalue) (let [t (norm-type (first (first ps))) at {:at [:ty]}]
+                            (when-not (aggregate? t) (verr :parser/extractvalue "extractvalue operand must be aggregate type" at))
+                            (when-not (index-type t (rest ps)) (verr :parser/extractvalue "invalid indices for extractvalue" at)))
+      (= h 'insertvalue) (let [t (norm-type (first (first ps))) vt (norm-type (first (second ps)))
+                               at {:at [:ty]}]
+                           (when-not (aggregate? t) (verr :parser/insertvalue "insertvalue operand must be aggregate type" at))
                            (let [it (index-type t (nnext ps))]
-                             (when-not it (verr :parser/insertvalue "invalid indices for insertvalue"))
+                             (when-not it (verr :parser/insertvalue "invalid indices for insertvalue" at))
                              (when-not (= (norm-type it) vt)
-                               (verr :parser/insertvalue (str "insertvalue operand and field disagree in type: '" (tstr vt) "' instead of '" (tstr (norm-type it)) "'")))))
+                               (verr :parser/insertvalue (str "insertvalue operand and field disagree in type: '" (tstr vt) "' instead of '" (tstr (norm-type it)) "'")
+                                     {:at [:op 1]}))))
       (= h 'extractelement) (let [[[vt] [it]] ps] (when-not (and (vec-type? (norm-type vt)) (int-type? (norm-type it))) (verr :parser/vector "invalid extractelement operands")))
       (= h 'insertelement) (let [[[vt] [et] [it]] ps vt (norm-type vt)]
                              (when-not (and (vec-type? vt) (= (elem vt) (norm-type et)) (int-type? (norm-type it))) (verr :parser/vector "invalid insertelement operands")))
@@ -969,8 +971,8 @@
       nil)
     (when (and (#{:declare :define} what) (#{:appending :common} l)) (verr :parser/linkage "invalid function linkage type" {:at [:linkage]}))
     (when (and (local-linkage? l) (:visibility o) (not= (:visibility o) :default))
-      (verr :parser/visibility "symbol with local linkage must have default visibility"))
-    (when (and (local-linkage? l) (:dll o)) (verr :parser/dll "symbol with local linkage cannot have a DLL storage class"))))
+      (verr :parser/visibility "symbol with local linkage must have default visibility" {:at [:linkage]}))
+    (when (and (local-linkage? l) (:dll o)) (verr :parser/dll "symbol with local linkage cannot have a DLL storage class" {:at [:linkage]}))))
 
 (defn- parse-function [f]
   (let [[h nm rt ps & opts] f
@@ -3068,6 +3070,18 @@
     (vector? x) (mapv canon-di x)
     :else x))
 
+(defn- canon-decl
+  "A declaration as the AsmWriter prints it: its parameters without names, nocapture upgraded to captures(none)."
+  [f]
+  (let [[h nm rt ps & more] f
+        up (fn [a] (if (= a :nocapture) (list :captures "none") a))
+        ps (mapv (fn [p] (if (vector? p)
+                           (let [p (if (and (= h 'llvm/declare) (> (count p) 1) (local? (peek p))) (pop p) p)]
+                             (mapv up p))
+                           p))
+                 ps)]
+    (apply list h nm rt ps more)))
+
 (defn- culprit-text
   "What the Verifier prints for one culprit, a line (its own newline kept by the caller)."
   [c ctx metaforms]
@@ -3077,7 +3091,7 @@
     (= c :fn) (fn-operand (:fn ctx))
     (= c :decl) (let [f (:fn ctx) o (apply hash-map (drop 4 f))
                         as (cond->> (group-items (:attrs o)) (own-intrinsic? f) (remove #(= (aname %) "mustprogress")))]
-                  (str (when (seq as) (str "; Function Attrs: " (str/join " " (map pr/attr-str as)) "\n")) (pr/fn-head-str (number-groups (canon-attr-order f)))))
+                  (str (when (seq as) (str "; Function Attrs: " (str/join " " (map pr/attr-str as)) "\n")) (pr/fn-head-str (number-groups (canon-attr-order (canon-decl f))))))
     (= c :bb) (label-text (:bb ctx))
     (= c :global) (global-operand (:global ctx))
     (and (vector? c) (= (first c) :global)) (global-operand (second c))
