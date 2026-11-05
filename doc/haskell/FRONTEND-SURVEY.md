@@ -544,15 +544,15 @@ all equal**, imports, occurrences, operator trees, binding groups and exports, i
 (the renamer itself 1 to 1.6 s a module on stage 0's evaluator, at most 430 MB: `Data/OldList.hs`, 2,145 lines, 3,386
 occurrences, 1.6 s): 41 samples written for it (`test/haskell/rename/`: fixities, sections, records, classes,
 imports and exports across modules, `where`/`let`/guards, GADTs and existentials, type families, type operators,
-deriving, literals, RULES...), 33 modules of ghc-internal's source (`Data/{Maybe,Functor,Foldable-free closure,
-OldList,Bits,List,Monoid,...}`, `Control/{Monad,Arrow,Category}`, `Arr`, `Ix`, `Numeric`, `Text/Read/Lex`, `CString`,
+deriving, literals, RULES...), 33 modules of ghc-internal's source (`Data/{Maybe,Functor,Function,Ord,Monoid,
+OldList,Bits,List,String,...}`, `Control/{Monad,Arrow,Category}`, `Arr`, `Ix`, `Numeric`, `Text/Read/Lex`, `CString`,
 `Exts`: the Prelude's own closure, renamed against the installed interfaces, 10 to 2,145 lines) and 21 programs of
 `nofib/spectral` (Haskell 2010, imports of base, array...). Bugs the corpora found that the samples did not: a hiding item
 names both the type and the constructor of its spelling; a method exported alone belongs to its parent's avail; the uses
-of a nested `let` flow to the enclosing binding's group; RULES and `SPECIALISE`/`DEFAULT` spans for implicit binders;
+of a nested `let` flow to the enclosing binding's group; RULES and the spans of implicit binders in `SPECIALISE`, standalone deriving and expression signatures;
 `FixitySig` names every namespace the module declares; a GADT constructor does not see the declaration's variables.
 The order of the groups (`group-order`) is reported, not judged: GHC's order of independent bindings is reverse source
-order and depends on its uniques (equal in 22 of 95 modules by reversing the visit order of Tarjan's algorithm).
+order and depends on its uniques (equal in 25 of the 95 modules with Tarjan's algorithm visiting the nodes last to first).
 Two samples that GHC itself loads and the renamer does not yet cover are kept in `test/haskell/rename/gaps/`.
 
 **Not covered yet** (all outside Tier S's common subset, none attempted): pattern synonyms and their signatures,
@@ -564,8 +564,9 @@ recorded, not reported in GHC's words), CPP and hsc2hs modules (the reader still
 two ghc-internal modules with `#include` were left out), `Data/Foldable.hs` (GHC itself cannot load it standalone:
 its derivings need the package's constructors).
 
-**What this says about the survey's estimates.** HF1 took about half a day (the survey: 4 to 6), HF2 about a day for
-the whole of Tier S's renamer subset (12 to 18, on the port route; 7 to 10 on the clean one): 1,400 lines against
+**What this says about the survey's estimates.** HF1 and HF2 together took one session, about an hour of the agent's
+wall clock (the survey's days are working days of one agent: 4 to 6 for HF1, 12 to 18 for HF2 on the port route, 7 to
+10 on the clean one, 16 to 24 for the trial): 1,400 lines against
 `Rename/`'s 18,774 (7%), for a subset that renames the Prelude's own sources and 21 real programs equal to GHC's.
 The clean route's estimate (6,000 to 9,000 lines) is high by a factor of three for Tier S: a complete Tier S renamer
 (with pattern synonyms, `mdo`, the rest of the list above and error messages) is about 2,500 to 3,500 lines. The type
