@@ -193,20 +193,27 @@
 
 (declare print-type print-expr print-pat print-block print-generic-args print-expr-cond-paren head-of)
 
-(defn- dollar-crate [segs]
-  ;; $crate as HIR prints it: the macro's crate after a path root
+(def ^:private std-modules
+  "std's, core's and alloc's modules that std's macros name after $crate: another name is the crate's own item"
+  #{"fmt" "io" "panicking" "boxed" "vec" "intrinsics" "hint" "option" "result" "cmp" "clone" "marker" "default" "hash"
+    "iter" "ops" "ptr" "mem" "slice" "str" "string" "rc" "sync" "collections" "borrow" "alloc" "__export" "rt" "process"
+    "thread" "macros" "prelude" "convert" "any" "cell" "char" "num" "array" "assert_matches" "eprint" "print" "panic"})
+
+(defn- dollar-crate [segs file]
+  ;; $crate as HIR prints it: the macro's crate after a path root (std's macros: the crate of the file their tokens come
+  ;; from), `crate` for the crate's own macros; a root-file $crate naming one of std's modules is a builtin derive's (core)
   (if (= "$crate" (:ident (first segs)))
-    (let [krate (case [(:ident (second segs)) (:ident (nth segs 2 nil))]
-                  (["fmt" "format"] ["intrinsics" "write_box_via_move"]) "alloc"
-                  (case (:ident (second segs))
-                  ("boxed" "vec" "slice" "string" "rc" "sync" "collections" "borrow" "alloc" "__export") "alloc"
-                  ("io" "eprint" "print" "process" "thread" "rt") "std"
-                  "core"))]
-      (into [{:ident "{{root}}"} {:ident krate}] (rest segs)))
+    (let [krate (cond (nil? file) (when (std-modules (:ident (second segs))) "core")
+                      (str/includes? file "/library/std/") "std"
+                      (str/includes? file "/library/alloc/") "alloc"
+                      :else "core")]
+      (if krate
+        (into [{:ident "{{root}}"} {:ident krate}] (rest segs))
+        (into [{:ident "crate"}] (rest segs))))
     segs))
 
-(defn- print-segs [segs colons]
-  (doseq [[i s] (map-indexed vector (dollar-crate segs))]
+(defn- print-segs [segs colons & [file]]
+  (doseq [[i s] (map-indexed vector (dollar-crate segs file))]
     (when (pos? i) (w "::"))
     (when-not (= "{{root}}" (:ident s))
       (w (:ident s))
@@ -214,7 +221,7 @@
 
 (defn- print-path [path colons]
   (maybe-print-comment (lo (:span path)))
-  (print-segs (:segs path) colons))
+  (print-segs (:segs path) colons (:file path)))
 
 (defn- print-lifetime-arg [a elide]
   (when-not elide (w (:lifetime a))))
@@ -259,6 +266,14 @@
 
 (declare print-fn)
 
+(defn- synthetic-name
+  "An impl Trait argument's synthetic parameter: its name is the type's text, one word"
+  [bounds]
+  (let [p (pp/printer)]
+    (binding [*p* p *comments* (atom nil)]
+      (print-bounds "impl" bounds)
+      (pp/eof p))))
+
 (defn print-type [t]
   (maybe-print-comment (lo (:span t)))
   (ibox 0)
@@ -280,6 +295,7 @@
                (when (pos? i) (nbsp) (ws "+"))
                (if (:trait b) (print-path (:trait b) false) (w (:lifetime b)))))
     :impl (w "/*impl Trait*/")
+    :impl-param (w (synthetic-name (:bounds t)))
     :array (do (w "[") (print-type (:ty t)) (w "; ") (print-expr (:len t)) (w "]"))
     :infer (w "_")
     :fnptr (do (ibox indent-unit)
@@ -299,7 +315,7 @@
     (commasep :inconsistent ps
               (fn [p]
                 (when (= :const (:kind p)) (ws "const"))
-                (w (:name p))
+                (w (if (:synthetic p) (synthetic-name (:synthetic p)) (:name p)))
                 (case (:kind p)
                   :type (when-let [d (:default p)] (sp) (ws "=") (print-type d))
                   :const (do (ws ":") (print-type (:ty p))
@@ -312,7 +328,8 @@
   (concat (for [p (:params g) :when (seq (:bounds p))]
             (if (= :lifetime (:kind p))
               {:lifetime (:name p) :bounds (:bounds p)}
-              {:ty {:kind :path :path {:segs [{:ident (:name p)}]}} :bounds (:bounds p)}))
+              {:ty (if (:synthetic p) {:kind :impl-param :bounds (:synthetic p)} {:kind :path :path {:segs [{:ident (:name p)}]}})
+               :bounds (:bounds p)}))
           (:where g)))
 
 (defn- print-where-clause [g]
@@ -490,6 +507,7 @@
     :field (do (print-expr-cond-paren (:expr x) (p< (precedence (:expr x)) :unambiguous)) (w ".") (w (:ident x)))
     :index (do (print-expr-cond-paren (:expr x) (p< (precedence (:expr x)) :unambiguous)) (w "[") (print-expr (:index x)) (w "]"))
     :path (print-path (:path x) true)
+    :type-relative (do (print-type (:qself x)) (w "::") (w (:ident (:seg x))) (print-generic-args (:args (:seg x)) true))
     :qpath (let [segs (:segs (:path x)) pos (or (:position x) 0)]
              (w "<") (print-type (:qself x))
              (if (pos? pos)
@@ -575,7 +593,7 @@
              (commasep :inconsistent before print-pat)
              (when dd
                (when (seq before) (ws ","))
-               (let [s (nth ps dd)] (when (= :binding (:kind s)) (w (:name s)) (w "@")))
+               (let [s (nth ps dd)] (when (= :binding (:kind s)) (w (:name s)) (w "@") (w "_")))
                (w "..")
                (when (seq after) (ws ",")))
              (commasep :inconsistent after print-pat)
@@ -640,6 +658,104 @@
     (print-expr x)
     (maybe-print-trailing-comment (:span x) (hi (:span b))))
   (bclose-maybe-open (:span b) close?))
+
+;; ---------------------------------------------------------------------------------------------
+;; Token streams (pprust/state.rs: print_tt, print_tts, space_between, print_mac_common, print_mac_def)
+
+(def ^:private punct-text
+  {'Eq "=" 'Lt "<" 'Le "<=" 'EqEq "==" 'Ne "!=" 'Ge ">=" 'Gt ">" 'AndAnd "&&" 'OrOr "||" 'Bang "!" 'Tilde "~"
+   'Plus "+" 'Minus "-" 'Star "*" 'Slash "/" 'Percent "%" 'Caret "^" 'And "&" 'Or "|" 'Shl "<<" 'Shr ">>"
+   'PlusEq "+=" 'MinusEq "-=" 'StarEq "*=" 'SlashEq "/=" 'PercentEq "%=" 'CaretEq "^=" 'AndEq "&=" 'OrEq "|="
+   'ShlEq "<<=" 'ShrEq ">>=" 'At "@" 'Dot "." 'DotDot ".." 'DotDotDot "..." 'DotDotEq "..=" 'Comma "," 'Semi ";"
+   'Colon ":" 'PathSep "::" 'RArrow "->" 'LArrow "<-" 'FatArrow "=>" 'Pound "#" 'Dollar "$" 'Question "?"
+   'SingleQuote "'"})
+
+(def ^:private reserved
+  #{"as" "break" "const" "continue" "crate" "else" "enum" "extern" "false" "fn" "for" "if" "impl" "in" "let" "loop"
+    "match" "mod" "move" "mut" "pub" "ref" "return" "self" "Self" "static" "struct" "super" "trait" "true" "type"
+    "unsafe" "use" "where" "while" "async" "await" "dyn" "abstract" "become" "box" "do" "final" "macro" "override"
+    "priv" "typeof" "unsized" "virtual" "yield" "try" "gen" "_"})
+
+(declare fv-of)
+(defn- tok-kind [tt] (when (= 'Token (head-of tt)) (fv-of (second tt) :kind)))
+(defn- fv-of [x k] (when (seq? x) (loop [s (rest x)] (when (seq s) (if (= (first s) k) (second s) (recur (rest s)))))))
+
+(defn- token-text [k]
+  (cond (symbol? k) (or (punct-text k) (str k))
+        (= 'Ident (first k)) (str (when (= 'Yes (nth k 2 nil)) "r#") (second k))
+        (= 'Lifetime (first k)) (str (second k))
+        (= 'Literal (first k)) (let [l (second k) lk (fv-of l :kind) sym (fv-of l :symbol) suf (let [x (fv-of l :suffix)] (when (seq? x) (second x)))]
+                                 (str (case (if (seq? lk) (first lk) lk)
+                                        Str (str "\"" sym "\"")
+                                        Char (str "'" sym "'")
+                                        Byte (str "b'" sym "'")
+                                        ByteStr (str "b\"" sym "\"")
+                                        CStr (str "c\"" sym "\"")
+                                        StrRaw (let [d (apply str (repeat (second lk) "#"))] (str "r" d "\"" sym "\"" d))
+                                        ByteStrRaw (let [d (apply str (repeat (second lk) "#"))] (str "br" d "\"" sym "\"" d))
+                                        (str sym))
+                                      suf))
+        (= 'DocComment (first k)) (str "///" (last k))
+        :else (str k)))
+
+(defn- punct? [tt] (let [k (tok-kind tt)] (and (symbol? k) (contains? punct-text k))))
+(defn- ident-tok [tt] (let [k (tok-kind tt)] (when (and (seq? k) (= 'Ident (first k))) k)))
+
+(defn- space-between? [a b]
+  (let [ka (tok-kind a) kb (tok-kind b)]
+    (cond (= ka 'Dot) (punct? b) 
+          (and (= ka 'Dollar) (ident-tok b)) false
+          (and (#{'Comma 'Semi 'Dot} kb) (not (punct? a))) false
+          (and (ident-tok a) (= kb 'Bang)) (and (reserved (second ka)) (not= 'Yes (nth ka 2 nil)))
+          (and (ident-tok a) (= 'Delimited (head-of b)) (= 'Parenthesis (nth b 3)))
+          (and (reserved (second ka)) (not (#{"fn" "Self" "pub"} (second ka))) (not= 'Yes (nth ka 2 nil)))
+          (and (= ka 'Pound) (= 'Delimited (head-of b)) (= 'Bracket (nth b 3))) false
+          :else true)))
+
+(declare print-mac-common)
+
+(defn- print-tt [tt]
+  (if (= 'Token (head-of tt))
+    (do (w (token-text (tok-kind tt)))
+        (nth tt 2))
+    (let [[_ dspan dsp delim ts] tt]
+      (print-mac-common nil false nil delim (fv-of dsp :open) ts (let [c (fv-of dspan :close)] (when (vector? c) c)))
+      (fv-of dsp :close))))
+
+(defn- print-tts [ts]
+  (let [tts (vec (if (= 'TokenStream (head-of ts)) (second ts) ts))]
+    (doseq [[i tt] (map-indexed vector tts)]
+      (let [spacing (print-tt tt)]
+        (when-let [nx (get tts (inc i))]
+          (cond (and (= spacing 'Alone) (space-between? tt nx)) (sp)
+                (and (not= spacing 'Alone) (ident-tok tt) (ident-tok nx)) (sp)))))))
+
+(defn- print-mac-common [header bang ident delim open-spacing ts close-span]
+  (let [brace (= delim 'Brace)
+        empty (empty? (if (= 'TokenStream (head-of ts)) (second ts) ts))]
+    (when brace (cbox indent-unit))
+    (when header (w header))
+    (when bang (w "!"))
+    (when ident (nbsp) (w ident))
+    (if brace
+      (let [open-space (and (or (nil? open-spacing) (= open-spacing 'Alone)) (not empty))]
+        (when (or header bang ident) (nbsp))
+        (w "{")
+        (when open-space (sp))
+        (ibox 0) (print-tts ts) (end)
+        (let [had (maybe-print-comment (when close-span (hi close-span)))]
+          (when (or open-space had) (break-offset-if-not-bol 1 (- indent-unit))))
+        (w "}")
+        (end))
+      (do (w (case delim Parenthesis "(" Bracket "[" ""))
+          (ibox 0) (print-tts ts) (end)
+          (w (case delim Parenthesis ")" Bracket "]" ""))))))
+
+(defn- print-mac-def [it]
+  (let [d (:def it) body (fv-of d :body) delim (fv-of body :delim)]
+    (print-mac-common (if (fv-of d :macro_rules) "macro_rules" "macro") (fv-of d :macro_rules) (:ident it) delim nil
+                      (fv-of body :tokens) (:span it))
+    (when (and (fv-of d :macro_rules) (not= delim 'Brace)) (w ";"))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Items
@@ -732,7 +848,7 @@
                       (when-let [o (:orig it)] (w o) (sp) (w "as") (sp))
                       (w (:ident it)) (w ";") (end) (end))
     :use (do (head "use")
-             (print-segs (:path it) false)
+             (print-segs (:path it) false (:file it))
              (case (:use it)
                :single (do (when (not= (:ident (peek (:path it))) (:ident it)) (sp) (ws "as") (w (:ident it))) (w ";"))
                :glob (w "::*;")
@@ -787,7 +903,7 @@
              (w " ") (bopen)
              (doseq [ii (:items it)] (print-assoc ii true))
              (bclose (:span it)))
-    :macro (w (str "/*MACRO " (:ident it) "*/"))
+    :macro (print-mac-def it)
     (w "/*ITEM?*/")))
 
 (defn print-crate [hir ^String source]

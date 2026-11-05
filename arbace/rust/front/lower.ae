@@ -108,10 +108,12 @@
           "cold" {:parsed "Cold"}
           "coverage" {:parsed (str "Coverage(" (str/capitalize (or (first w) "on")) ")")}
           "feature" {:parsed (str "Feature([" (str/join ", " (map #(str % "#0") w)) "])")}
-          "doc" {:toks (-> ["Doc" "(" "DocAttribute" " " "{"]
+          "doc" (if-let [d (attr-eq-str a)]
+                  {:doc-comment (str (if (= 'Inner (fv a :style)) "#![doc = \"" "#[doc = \"") d "\"]") :immediate true}
+                  {:toks (-> ["Doc" "(" "DocAttribute" " " "{"]
                            (into (mapcat (fn [i f] (concat (when (pos? i) ["," :space]) [f ":" " " "[" "]"]))
                                          (range) ["aliases" "inline" "cfg" "auto_cfg" "auto_cfg_change" "test_attrs"]))
-                           (into ["}" ")"]))}
+                           (into ["}" ")"]))})
           "repr" {:toks (-> ["Repr" " " "{" "reprs" ":" " " "["]
                             (into (mapcat (fn [i r]
                                             (concat (when (pos? i) ["," :space])
@@ -128,10 +130,36 @@
             {:unparsed (str p (when (= 'Delimited (head args)) (str "(" (tokens-text (fv (second args) :tokens)) ")")))
              :immediate true :span (span-of a)}))))))
 
+(def ^:dynamic *source-file* "main.rs")
+
+(defn- span-debug [[l1 c1 l2 c2]] (str *source-file* ":" l1 ":" c1 ": " l2 ":" c2 " (#0)"))
+
+(defn- cfg-debug
+  "A CfgEntry as its Debug prints it (CfgTrace's entries)"
+  [c]
+  (case (head c)
+    NameValue (str "NameValue { name: " (pr-str (fv c :name)) ", value: "
+                   (let [v (fv c :value)] (if (= 'Some (head v)) (str "Some(" (pr-str (second v)) ")") "None"))
+                   ", span: " (span-debug (fv c :span)) " }")
+    Not (str "Not(" (cfg-debug (second c)) ", " (span-debug (nth c 2)) ")")
+    (All Any) (str (head c) "([" (str/join ", " (map cfg-debug (second c))) "], " (span-debug (nth c 2)) ")")
+    Bool (str "Bool(" (second c) ", " (span-debug (nth c 2)) ")")
+    (pr-str c)))
+
 (defn- lower-attrs
-  "rustc_attr_parsing's order: doc comments and unparsed attributes as they come, the parsed ones after them"
+  "rustc_attr_parsing's order: doc comments and unparsed attributes as they come, the parsed ones after them; the
+  cfg traces as one CfgTrace"
   [as]
-  (let [xs (keep lower-attr as)]
+  (let [trace-of (fn [a] (let [k (fv a :kind)] (when (= 'Synthetic (head k)) (head (second k)))))
+        trace-attr (fn [kind]
+                     (let [ts (filter #(= kind (trace-of %)) as)]
+                       (when (seq ts)
+                         {:toks (-> [(str kind) "(" "["]
+                                    (into (mapcat (fn [i t] (concat (when (pos? i) ["," :space]) [(cfg-debug (second (second (fv t :kind))))]))
+                                                  (range) ts))
+                                    (into ["]" ")"]))})))
+        xs (concat (keep (fn [a] (when-not (trace-of a) (lower-attr a))) as)
+                   (keep trace-attr ['CfgTrace 'CfgAttrTrace]))]
     (vec (concat (filter :immediate xs) (remove :immediate xs)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -146,7 +174,9 @@
 
 (defn- lower-path [p]
   (let [segs (fv p :segments)]
-    {:span (span-of p) :res (res-at (span-of p)) :segs (mapv lower-seg segs)}))
+    {:span (span-of p) :res (res-at (span-of p)) :segs (mapv lower-seg segs)
+     ;; a path of std's macros: its file names the crate $crate stands for
+     :file (let [s (fv p :span)] (when (and (seq? s) (= 'span (first s))) (second s)))}))
 
 (defn- lang-path [name & [args]] {:segs [{:ident name :args args}] :lang true})
 (defn- lang-path* [names] {:segs (mapv (fn [n] {:ident n}) names) :lang true})
@@ -310,7 +340,7 @@
         has-let (fn has-let [x] (or (= :let (:kind x)) (and (= :binary (:kind x)) (= "&&" (:op x)) (or (has-let (:lhs x)) (has-let (:rhs x))))))]
     (if (has-let lc) lc (e {:kind :drop-temps :expr lc :span (:span lc)}))))
 
-(defn- label-name [l] (when-let [l (some-val l)] (second (fv l :ident))))
+(defn- label-name [l] (when-let [l (some-val l)] (if (= 'label (head l)) (id-name (second l)) (id-name (fv l :ident)))))
 
 (defn- lower-fn-decl-params [d]
   (vec (for [p (fv d :inputs)] {:pat (lower-pat (fv p :pat)) :ty (lower-ty (fv p :ty)) :attrs (lower-attrs (fv p :attrs))})))
@@ -323,7 +353,10 @@
       Path (let [[_ q p] k]
              (if (some-val q)
                (ex {:kind :qpath :qself (lower-ty (fv (some-val q) :ty)) :path (lower-path p) :position (fv (some-val q) :position)})
-               (ex {:kind :path :path (lower-path p)})))
+               (let [lp (lower-path p) segs (:segs lp)]
+                 (if (and (> (count segs) 1) (seq *res*) (nil? (:res lp)) (some :args (butlast segs)))
+                   (ex {:kind :type-relative :qself {:node :ty :kind :path :path (assoc lp :segs (vec (butlast segs)))} :seg (peek segs)})
+                   (ex {:kind :path :path lp})))))
       Lit (ex {:kind :lit :lit (lower-lit (second k))})
       Call (ex {:kind :call :func (lower-expr (second k)) :args (mapv lower-expr (nth k 2))})
       MethodCall (let [m (second k)]
@@ -399,7 +432,7 @@
                 (and a b) (ex {:kind :struct :path (lang-path "Range") :fields [(fld "start" a) (fld "end" b)]})
                 a (ex {:kind :struct :path (lang-path "RangeFrom") :fields [(fld "start" a)]})
                 b (ex {:kind :struct :path (lang-path "RangeTo") :fields [(fld "end" b)]})
-                :else (ex {:kind :path :path (lang-path "RangeFull")})))
+                :else (ex {:kind :struct :path (lang-path "RangeFull") :fields []})))
       Struct (let [s (second k) rest (fv s :rest)]
                (ex {:kind :struct :path (lower-path (fv s :path))
                     :fields (mapv (fn [f] {:ident (id-name (fv f :ident)) :expr (lower-expr (fv f :expr)) :shorthand (fv f :is_shorthand)
@@ -629,7 +662,7 @@
                        [(pop stmts) (:expr (peek stmts))]
                        [stmts nil])]
     (node {:node :block :stmts stmts :expr expr :span (span-of b)
-           :rules (when (let [r (fv b :rules)] (and (seq? r) (= 'Unsafe (first r)))) :unsafe)})))
+           :rules (let [r (fv b :rules)] (when (and (seq? r) (= 'Unsafe (first r))) (if (= 'UserProvided (second r)) :unsafe :unsafe-generated)))})))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Items (item.rs)
@@ -661,9 +694,16 @@
 
 (defn- lower-fn [f]
   (let [sig (fv f :sig) d (fv sig :decl) h (fv sig :header)
-        params (binding [*sig* true] (lower-fn-decl-params d))]
+        params (binding [*sig* true] (lower-fn-decl-params d))
+        ;; impl Trait in argument position: a synthetic type parameter, named by the type's text, the argument its path
+        synth (vec (for [p params :when (= :impl (:kind (:ty p)))] (:bounds (:ty p))))
+        params (mapv (fn [p] (if (= :impl (:kind (:ty p)))
+                               (assoc p :ty (assoc (:ty p) :kind :impl-param))
+                               p)) params)
+        g (lower-generics (fv f :generics))
+        g (update g :params into (for [b synth] {:synthetic b :kind :type :bounds b}))]
     {:ident (id-name (fv f :ident))
-     :generics (lower-generics (fv f :generics))
+     :generics g
      :header {:constness (if (= 'No (fv h :constness)) nil :const)
               :safety (let [s (fv h :safety)] (when (and (seq? s) (= 'Unsafe (first s))) :unsafe))
               :abi (let [x (fv h :ext)]
@@ -676,17 +716,18 @@
      :output (let [o (fv d :output)] (when (= 'Ty (head o)) (binding [*sig* true] (lower-ty (second o)))))
      :body (some-> (some-val (fv f :body)) lower-block)}))
 
-(defn- use-items [tree prefix sp attrs vis]
+(defn- use-items [tree prefix sp attrs vis & [file]]
   ;; one item per leaf of a use tree (lower_use_tree), and a ListStem for a nested tree
   (let [k (fv tree :kind)
-        path (into prefix (map lower-seg (fv (fv tree :prefix) :segments)))]
+        path (into prefix (map lower-seg (fv (fv tree :prefix) :segments)))
+        file (or file (let [s (fv (fv tree :prefix) :span)] (when (and (seq? s) (= 'span (first s))) (second s))))]
     (case (head k)
       Simple (let [rename (some-val (second k))
                    path (if (= "self" (:ident (peek path))) (pop path) path)]
-               [{:kind :use :use :single :path path :ident (or (id-name rename) (:ident (peek path))) :span sp :attrs attrs :vis vis}])
-      Glob [{:kind :use :use :glob :path path :span sp :attrs attrs :vis vis}]
+               [{:kind :use :use :single :path path :ident (or (id-name rename) (:ident (peek path))) :span sp :attrs attrs :vis vis :file file}])
+      Glob [{:kind :use :use :glob :path path :span sp :attrs attrs :vis vis :file file}]
       Nested (into [{:kind :use :use :list-stem :path [] :span sp :attrs attrs :vis vis}]
-                   (mapcat (fn [t] (use-items (if (= 'tuple (head t)) (second t) t) path sp [] vis)) (fv k :items)))
+                   (mapcat (fn [t] (use-items (if (= 'tuple (head t)) (second t) t) path sp [] vis file)) (fv k :items)))
       [])))
 
 (defn- vis-of [it] (let [k (fv (fv it :vis) :kind)] (cond (= 'Public k) :pub (= 'Restricted (head k)) :restricted :else nil)))
@@ -740,10 +781,10 @@
                                   :safety (let [s (fv t :safety)] (when (and (seq? s) (= 'Unsafe (first s))) :unsafe))
                                   :auto (= 'Yes (fv t :is_auto))
                                   :bounds (mapv lower-bound (fv t :bounds)) :items (mapv lower-assoc-item (fv t :items))}))
-             Const (let [c (second k)] (merge base {:kind :const :ident (id-name (fv c :ident)) :ty (lower-ty (fv c :ty))
+             Const (let [c (second k)] (merge base {:kind :const :ident (id-name (fv c :ident)) :ty (binding [*sig* true] (lower-ty (fv c :ty)))
                                                     :generics (lower-generics (fv c :generics))
                                                     :expr (some-> (some-val (fv c :body)) lower-expr)}))
-             Static (let [s (second k)] (merge base {:kind :static :ident (id-name (fv s :ident)) :ty (lower-ty (fv s :ty))
+             Static (let [s (second k)] (merge base {:kind :static :ident (id-name (fv s :ident)) :ty (binding [*sig* true] (lower-ty (fv s :ty)))
                                                      :mutbl (= 'Mut (fv s :mutability)) :expr (some-> (some-val (fv s :expr)) lower-expr)}))
              TyAlias (let [t (second k)] (merge base {:kind :ty-alias :ident (id-name (fv t :ident)) :generics (lower-generics (fv t :generics))
                                                       :ty (some-> (some-val (fv t :ty)) lower-ty)}))
@@ -771,8 +812,9 @@
              :when (some #(= 'Lifetime (fv % :kind)) (fv (nth k 2) :params))]
          (id-name (second k)))))
 
-(defn lower-crate [crate res]
+(defn lower-crate [crate res & [{:keys [file]}]]
   (binding [*owners* (atom -1)
+            *source-file* (or file "main.rs")
             *res* res
             *lt-types* (into (disj std-lt-types "PhantomData" "Iter" "Ref") (crate-lt-types (fv crate :items)))]
     (let [attrs (lower-attrs (fv crate :attrs))
