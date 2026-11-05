@@ -1358,6 +1358,18 @@
 
 (defn- primary-chain [x] (cons x (when-let [pb (:primary (abi/layout x))] (primary-chain (:cls pb)))))
 
+(defn- return-adjustment
+  "The return adjustment of the overrider `ofid` for the slot of `gid` (a covariant return type): nil, {:nv n} or
+  {:nv n :v oo} (the base's offset in the derived class, `oo` where its vtable holds the virtual base's offset)."
+  [gid ofid]
+  (let [rc (fn [f] (let [r (abi/unq (:ret (:ty (sema/fnd f)))) t (when (#{:ptr :ref :rref} (:k r)) (abi/unq (:to r)))]
+                     (when (and t (abi/class? t)) (:id t))))
+        d (rc ofid) b (rc gid)]
+    (when (and d b (not= d b) (abi/derived-from? d b))
+      (let [[_ off vb] (abi/base-path d b)]
+        (cond vb {:nv (long off) :v (vbase-offset-offset d vb)}
+              (not (zero? (long off))) {:nv (long off)})))))
+
 (defn vt-group
   "The vtable group of class `m` at `moff` in the layout class `lid` (a construction vtable group when they differ):
   {:items [component ...] :aps {[cls off] index of its address point}}; a component [:off n], [:rtti cid] or [:fn fid
@@ -1396,9 +1408,11 @@
                                 ;; nothing unless its overrider is the chain's or overrides one of the chain's
                                 (and beyond (not= (:cls ox) x) (empty? (overridden))) [:unused]
                                 (:pure of) [:pure]
-                                (= (long (:off ox)) xoff) [:fn ofid (:v sl) nil]
-                                :else (let [[_ off vb] (abi/base-path (:cls ox) (:cls g))]
-                                        [:fn ofid (:v sl) (if vb {:nv (- (long off)) :v (vcall-offset-offset vb gid)} {:nv (- (long (:off ox)) xoff)})]))))]
+                                :else (let [this-adj (when-not (= (long (:off ox)) xoff)
+                                                       (let [[_ off vb] (abi/base-path (:cls ox) (:cls g))]
+                                                         (if vb {:nv (- (long off)) :v (vcall-offset-offset vb gid)} {:nv (- (long (:off ox)) xoff)})))
+                                            radj (return-adjustment gid ofid)]
+                                        [:fn ofid (:v sl) (when (or this-adj radj) (cond-> (or this-adj {:nv 0}) radj (assoc :ret radj)))]))))]
                 (swap! items into (concat pre slots))
                 (doseq [c (primary-chain x)] (swap! aps assoc [c xoff] ap))
                 (secondary! x xoff mv)))
@@ -1735,8 +1749,12 @@
   (let [f (sema/fnd fid)
         num (fn [n] (if (neg? (long n)) (str "n" (- (long n))) (str n)))
         target (cond (= 0 v) (do (want-fn! fid 1) (want-d0! fid) (gsym (abi/mangle-fn f 0))) :else (want-fn! fid 1))
-        nm (str (if (:v adj) (str "_ZTv" (num (:nv adj)) "_" (num (:v adj)) "_") (str "_ZTh" (num (:nv adj)) "_"))
-                (subs (abi/mangle-fn f (if (= :dtor (:kind f)) (or v 1) nil)) 2))]
+        coff (fn [a] (if (:v a) (str "v" (num (:nv a)) "_" (num (:v a)) "_") (str "h" (num (:nv a)) "_")))
+        radj (:ret adj)
+        nm (if radj
+             (str "_ZTc" (coff adj) (coff radj) (subs (abi/mangle-fn f nil) 2))
+             (str (if (:v adj) (str "_ZTv" (num (:nv adj)) "_" (num (:v adj)) "_") (str "_ZTh" (num (:nv adj)) "_"))
+                  (subs (abi/mangle-fn f (if (= :dtor (:kind f)) (or v 1) nil)) 2)))]
     (when-not (contains? (:declared @*top*) nm)
       (swap! *top* update :declared conj nm)
       (let [[ret ps va plan] (if (= :dtor (:kind f)) ['void '[ptr] false {:pattrs [[]]}] (fn-sig f))
@@ -1755,10 +1773,24 @@
             call (list 'call (if va (list 'fn ret (conj ps '&)) ret) target args)]
         (add-top! (apply list 'llvm/define (gsym nm) ret (mapv (fn [t a p] (vec (concat [t] a [p]))) ps pa pn) :linkage (if (:internal f) :internal :linkonce_odr)
                          (concat (when (nothrow-fn? f) [:attrs [:nounwind]])
-                                 [:body [(apply list 'block nil
-                                                (concat adj-insts
-                                                        [(if (= 'void ret) call (list '= '%t2 call))
-                                                         (if (= 'void ret) '(ret void) (list 'ret ret '%t2))]))]])))))
+                                 [:body (if radj
+                                          (let [isref (not= :ptr (:k (abi/unq (:ret (:ty f)))))
+                                                rv-insts (concat (when (:v radj)
+                                                                   [(list '= '%r1 (list 'load 'ptr ['ptr '%t2] :align 8))
+                                                                    (list '= '%r2 (list 'getelementptr 'i8 ['ptr '%r1] ['i64 (:v radj)]))
+                                                                    (list '= '%r3 (list 'load 'i64 ['ptr '%r2] :align 8))
+                                                                    (list '= '%r4 (list 'getelementptr :inbounds 'i8 ['ptr '%t2] ['i64 '%r3]))])
+                                                                 [(list '= '%r5 (list 'getelementptr :inbounds 'i8 ['ptr (if (:v radj) '%r4 '%t2)] ['i64 (:nv radj)]))])]
+                                            (if isref
+                                              [(apply list 'block nil (concat adj-insts [(list '= '%t2 call)] rv-insts [(list 'ret ret '%r5)]))]
+                                              [(apply list 'block '%entry (concat adj-insts [(list '= '%t2 call) (list '= '%r0 (list 'icmp :eq 'ptr '%t2 'null))
+                                                                                         (list 'br 'i1 '%r0 '%rend '%rnn)]))
+                                               (apply list 'block '%rnn (concat rv-insts ['(br %rend)]))
+                                               (list 'block '%rend (list '= '%r6 (list 'phi 'ptr ['%r5 '%rnn] ['null '%entry])) (list 'ret ret '%r6))]))
+                                          [(apply list 'block nil
+                                                  (concat adj-insts
+                                                          [(if (= 'void ret) call (list '= '%t2 call))
+                                                           (if (= 'void ret) '(ret void) (list 'ret ret '%t2))]))])])))))
     (gsym nm)))
 
 (defn- group! [grp]

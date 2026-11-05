@@ -660,8 +660,23 @@
                                       (and (= (:kind g) (:kind f))
                                            (or (= :dtor (:kind f))
                                                (and (= (:name g) (:name f)) (= (:cq g) (:cq f)) (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps (:ty f)))))))))
-            vt (mapv (fn [slot] (if-let [f (first (filter #(overrides? % slot) mine))] (assoc slot :fn (:id f)) slot)) inherited)
-            new-fs (remove (fn [f] (some #(overrides? f %) inherited)) mine)
+            ;; a covariant return that needs an adjustment (the base's offset is not 0 or is virtual) does not reuse the slot
+            ;; of the nearest overridden function: the overrider gets a slot of its own and the old slot holds a thunk
+            ;; (clang's AddMethods, ComputeReturnAdjustmentBaseOffset)
+            ret-class (fn [g] (let [r (abi/unq (:ret (:ty g))) t (when (#{:ptr :ref :rref} (:k r)) (abi/unq (:to r)))] (when (and t (abi/class? t)) (:id t))))
+            ret-adj? (fn [f g] (let [d (ret-class f) b (ret-class g)]
+                                 (boolean (and d b (not= d b) (abi/derived-from? d b)
+                                               (let [[_ off vb] (abi/base-path d b)] (or vb (not (zero? (long off)))))))))
+            vt0 (vec inherited)
+            vt (reduce (fn [vt f]
+                         (let [idxs (keep-indexed (fn [i slot] (when (overrides? f slot) i)) vt)]
+                           (cond
+                             (empty? idxs) vt
+                             (= :dtor (:kind f)) (reduce #(assoc-in %1 [%2 :fn] (:id f)) vt idxs)
+                             :else (let [n (last idxs)]
+                                     (if (ret-adj? f (fnd (:fn (nth vt n)))) vt (assoc-in vt [n :fn] (:id f)))))))
+                       vt0 mine)
+            new-fs (remove (fn [f] (some #(= (:id f) (:fn %)) vt)) mine)
             vt (into vt (mapcat (fn [f] (if (= :dtor (:kind f)) [{:fn (:id f) :v 1} {:fn (:id f) :v 0}] [{:fn (:id f)}])) new-fs))]
         (abi/update-cls! id assoc :vtable vt)))
     (abi/layout id)
