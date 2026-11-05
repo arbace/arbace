@@ -988,12 +988,48 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Functions
 
+;; The vtable group (Itanium §2.5.2): the primary vtable, then a secondary one for each dynamic base subobject that is
+;; not a primary base, in a pre-order of the bases; a secondary vtable's slots are its class's with each function
+;; replaced by its final overrider in the complete class, through a this-adjusting thunk when the overrider's
+;; subobject is elsewhere
+
+(defn vtable-group
+  "[{:cls :off :chain [[cls off] ...]} ...] of the class `cid`: its vtables' subobjects in order."
+  [cid]
+  (let [out (atom [{:cls cid :off 0 :chain [[cid 0]]}])]
+    ((fn walk [x ^long off chain]
+       (let [c (abi/cls x) l (abi/layout x) pb (abi/primary-base x)]
+         (doseq [[i b] (map-indexed vector (:bases c))]
+           (let [bid (:cls b) bo (+ off (long (nth (:bases l) i))) ch (conj chain [bid bo])]
+             (when (abi/dynamic? bid)
+               (when-not (identical? b pb) (swap! out conj {:cls bid :off bo :chain ch}))
+               (walk bid bo ch))))))
+     cid 0 [[cid 0]])
+    @out))
+
+(defn- overrides-fn? [f g]
+  (and (= (:kind g) (:kind f))
+       (or (= :dtor (:kind f))
+           (and (= (:name g) (:name f)) (= (boolean (:cq g)) (boolean (:cq f))) (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps (:ty f))))))))
+
+(defn- final-overrider
+  "[fid offset] of the final overrider of the slot function `fid` in a vtable of the subobject the chain ends at."
+  [chain fid]
+  (let [g (sema/fnd fid)]
+    (or (some (fn [[x off]] (some #(when (overrides-fn? (sema/fnd %) g) [% off]) (:virtuals (abi/cls x)))) (butlast chain))
+        [fid (second (last chain))])))
+
+(defn- vtable-name ^String [cid] (str "_ZTV" (abi/mangle-type-name {:k :class :id cid})))
+
 (defn- vptr-store! [cid this]
-  (let [vt (:vtable (abi/cls cid))
-        n (+ 2 (count vt))]
+  (let [group (vtable-group cid)
+        sizes (map #(+ 2 (count (:vtable (abi/cls (:cls %))))) group)
+        total (reduce + sizes)
+        starts (reductions + 0 sizes)]
     (swap! *top* update :vtables conj cid)
-    (emit! (list 'store ['ptr (list 'getelementptr :inbounds (list 'array n 'ptr) ['ptr (gsym (str "_ZTV" (abi/mangle-type-name {:k :class :id cid})))] ['i64 0] ['i64 2])]
-                 ['ptr this] :align 8))))
+    (doseq [[g start] (map vector group starts)]
+      (emit! (list 'store ['ptr (list 'getelementptr :inbounds (list 'array total 'ptr) ['ptr (gsym (vtable-name cid))] ['i64 0] ['i64 (+ (long start) 2)])]
+                   ['ptr (offset! this (:off g))] :align 8)))))
 
 (defn- linkage-of [f]
   (cond
@@ -1138,60 +1174,45 @@
                             :linkage :linkonce_odr :constant true :align 8))))))
     (gsym ti)))
 
+(defn- thunk!
+  "The this-adjusting thunk (`_ZThn<k>_` for -k, `_ZTh<k>_` for +k) that calls the function `fid` (the destructor
+  variant `v`) with this moved by `adj` bytes."
+  [fid v ^long adj]
+  (let [f (sema/fnd fid)
+        target (cond (= 0 v) (do (want-fn! fid) (gsym (abi/mangle-fn f 0))) :else (want-fn! fid))
+        nm (str "_ZTh" (if (neg? adj) (str "n" (- adj)) adj) "_" (subs (abi/mangle-fn f (if (= :dtor (:kind f)) (or v 1) nil)) 2))]
+    (when-not (contains? (:declared @*top*) nm)
+      (swap! *top* update :declared conj nm)
+      (let [[ret ps va] (if (= :dtor (:kind f)) ['void '[ptr] false] (fn-sig f))
+            sret (class-ret? f)
+            pn (vec (map-indexed (fn [i _] (symbol (str "%a" i))) ps))
+            ti (if sret 1 0)
+            args (vec (map-indexed (fn [i [t p]] [t (if (= i ti) '%t1 p)]) (map vector ps pn)))
+            call (list 'call (if va (list 'fn ret (conj ps '&)) ret) target args)]
+        (add-top! (apply list 'llvm/define (gsym nm) ret (mapv vector ps pn) :linkage (if (:internal f) :internal :linkonce_odr)
+                         (concat (when (nothrow-fn? f) [:attrs [:nounwind]])
+                                 [:body [(list 'block nil
+                                               (list '= '%t1 (list 'getelementptr :inbounds 'i8 ['ptr (nth pn ti)] ['i64 adj]))
+                                               (if (= 'void ret) call (list '= '%t2 call))
+                                               (if (= 'void ret) '(ret void) (list 'ret ret '%t2)))]])))))
+    (gsym nm)))
+
 (defn- vtable! [cid]
-  (let [t {:k :class :id cid}
-        nm (str "_ZTV" (abi/mangle-type-name t))
-        vt (:vtable (abi/cls cid))
+  (let [nm (vtable-name cid)
         ti (typeinfo! cid)
-        slots (vec (concat [['ptr 'null] ['ptr ti]]
-                           (for [s vt]
-                             (let [f (sema/fnd (:fn s))]
-                               (if (:pure f)
-                                 (do (declare! "__cxa_pure_virtual" 'void []) ['ptr (gsym "__cxa_pure_virtual")])
-                                 (if (= 0 (:v s))
-                                   (do (want-fn! (:fn s)) ['ptr (gsym (abi/mangle-fn f 0))])
-                                   ['ptr (want-fn! (:fn s))]))))))]
+        slots (vec (for [g (vtable-group cid)
+                         x (concat [['ptr (if (zero? (long (:off g))) 'null (list 'inttoptr 'i64 (- (long (:off g))) 'ptr))] ['ptr ti]]
+                                   (for [s (:vtable (abi/cls (:cls g)))]
+                                     (let [[ofid ooff] (final-overrider (:chain g) (:fn s))
+                                           f (sema/fnd ofid)
+                                           adj (- (long ooff) (long (:off g)))]
+                                       (cond
+                                         (:pure f) (do (declare! "__cxa_pure_virtual" 'void []) ['ptr (gsym "__cxa_pure_virtual")])
+                                         (not (zero? adj)) ['ptr (thunk! ofid (:v s) adj)]
+                                         (= 0 (:v s)) (do (want-fn! ofid) ['ptr (gsym (abi/mangle-fn f 0))])
+                                         :else ['ptr (want-fn! ofid)]))))]
+                     x))]
     (add-top! (list 'llvm/global (gsym nm) (list 'array (count slots) 'ptr) (apply list 'array slots) :linkage :linkonce_odr :constant true :align 8))))
-
-(defn- abi-class-global! [^String kind]
-  (when-not (contains? (:declared @*top*) kind)
-    (swap! *top* update :declared conj kind)
-    (add-top! (list 'llvm/global (gsym kind) '(array 0 ptr) :linkage :external)))
-  ['ptr (list 'getelementptr :inbounds 'ptr ['ptr (gsym kind)] ['i64 2])])
-
-(defn eh-typeinfo!
-  "The type_info object of the type `t` (a thrown or caught type): a class's own; a fundamental type's and a pointer
-  to one's in the runtime (external); a pointer to a class's or an enumeration's written here (Itanium §2.9.5)."
-  [t]
-  (let [t (abi/unq t)
-        fundamental? (fn [x] (= :b (:k (abi/unq x))))]
-    (cond
-      (abi/class? t) (typeinfo! (:id t))
-      (or (fundamental? t) (and (abi/ptr? t) (fundamental? (:to t))))
-      (let [nm (str "_ZTI" (abi/mangle-type-name t))]
-        (when-not (contains? (:declared @*top*) nm)
-          (swap! *top* update :declared conj nm)
-          (add-top! (list 'llvm/global (gsym nm) 'ptr :linkage :external :constant true)))
-        (gsym nm))
-      :else
-      (let [mn (abi/mangle-type-name t)
-            nm (str "_ZTI" mn) ts (str "_ZTS" mn)]
-        (when-not (contains? (:declared @*top*) nm)
-          (swap! *top* update :declared conj nm ts)
-          (add-top! (list 'llvm/global (gsym ts) (list 'array (inc (count mn)) 'i8) (list 'c-string (str mn (char 0))) :linkage :linkonce_odr :constant true :align 1))
-          (cond
-            (abi/ptr? t)
-            (let [to (:to t)
-                  inner (eh-typeinfo! to)
-                  vt (abi-class-global! "_ZTVN10__cxxabiv119__pointer_type_infoE")]
-              (add-top! (list 'llvm/global (gsym nm) '(struct ptr ptr i32 ptr)
-                              (list 'struct vt ['ptr (gsym ts)] ['i32 (+ (if (:c to) 1 0) (if (:v to) 2 0))] ['ptr inner])
-                              :linkage :linkonce_odr :constant true :align 8)))
-            (abi/enum? t)
-            (add-top! (list 'llvm/global (gsym nm) '(struct ptr ptr) (list 'struct (abi-class-global! "_ZTVN10__cxxabiv116__enum_type_infoE") ['ptr (gsym ts)])
-                            :linkage :linkonce_odr :constant true :align 8))
-            :else (fail :rtti "type_info of " (pr-str t))))
-        (gsym nm)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Namespace-scope variables
