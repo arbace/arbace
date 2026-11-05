@@ -104,6 +104,7 @@ expect "oi: a program over the CPU limit is a timeout row" 0 '124.timeout 1s' "$
 echo "$out" | grep -Eq '^(137|152)$' || { echo "FAIL oi: the program did not run under limited_cpu (no line in ARBACE_CPU_LOG)"; bad=1; }
 
 # finding 9: bin/oi suite expect is a check: the run against the record, the committed record untouched without --record
+if [ -z "${OI_JUDGES_NO_LIVE:-}" ]; then
 only='basic/patmatch_for_multiple'
 before=$(sha256sum "$root/test/ocaml/ref-expect.edn")
 out=$(cd "$root" && bin/oi suite expect --only "$only" 2>&1); st=$?
@@ -126,6 +127,7 @@ out=$(cd "$root" && OI_EXPECT_RECORD=$W/no-such-record bin/oi suite expect --onl
 expect "expect: a missing record is an error" 2 'cannot be read' "$out" $st
 out=$(cd "$root" && bin/oi suite expect --only 'no-such-directory/zzz' 2>&1); st=$?
 expect "expect: an --only that matches nothing says so" 2 'no test selected' "$out" $st
+else echo "skip the cases of expect (OI_JUDGES_NO_LIVE: the expect tool is built by the host's ocamlc, the oracle tier's)"; cases=$((cases + 6)); fi
 
 # finding 2: a listed slow program recorded as slow that passes this time (the CPU limit's boundary) is not a change
 printf 'a\t0\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
@@ -148,8 +150,10 @@ out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 152 3 2>&1); expect "oi: 152
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 2 3 2>&1); expect "oi: another status is kept" 0 '^2$' "$out" $?
 
 # re-review 042's finding 6: a whole run against an unreadable record says so, as --only does (and before the run)
+if [ -z "${OI_JUDGES_NO_LIVE:-}" ]; then
 out=$(cd "$root" && OI_EXPECT_RECORD=$W/no-such-record bin/oi suite expect 2>&1); st=$?
 expect "expect: a whole run against an unreadable record says it cannot be read" 2 'cannot be read' "$out" $st
+else echo "skip the cases of expect (OI_JUDGES_NO_LIVE: the expect tool is built by the host's ocamlc, the oracle tier's)"; cases=$((cases + 1)); fi
 
 # re-review 049's finding 5: the "status " pins are attested by the digests of the runs they were made for, test/ocaml/pins-attested.tsv (bin/oi pins:
 # no run); a pin with no attested digest, or an attested row with no pin, fails
