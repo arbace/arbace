@@ -89,22 +89,24 @@
     (when (and u (= "cleanup" (name (first u)))) (second u))))
 
 (defn nop-landing-pads
-  "find_noop_landing_pads: the cleanup blocks that do nothing but resume (through trivial statements, gotos to such blocks and
-  drops that need no glue): a call that unwinds to one is a plain call."
+  "find_noop_landing_pads (rustc_mir_transform/remove_noop_landing_pads.rs): the cleanup blocks that do nothing but resume: their
+  statements trivial (or writes of a local, a drop flag), their terminator a goto, resume, switch or false edge whose
+  successors are all such blocks, or a drop that needs no glue likewise. A call that unwinds to one is a plain call."
   [blocks]
-  (let [trivial #{"nop" "storage-dead" "storage-live" "fake-read" "place-mention" "const-eval-counter"}
-        cleanup? #(:cleanup (nth blocks %))]
+  (let [trivial #{"nop" "storage-dead" "storage-live" "fake-read" "place-mention" "const-eval-counter" "bidh" "raw"}
+        ok-stmt (fn [st] (let [st (if (= "dbg-stmt" (name (first st))) (second st) st) k (name (first st))]
+                           (or (trivial k)
+                               (and (= k "assign") (empty? (drop 2 (nth st 1))) (#{"use" "use-noretag" "discriminant"} (name (first (nth st 2))))))))]
     (loop [nops #{}]
       (let [nops' (into nops
                         (for [b (range (count blocks))
                               :let [blk (nth blocks b)]
                               :when (and (:cleanup blk) (not (nops b))
-                                         (every? #(trivial (name (first (if (= "dbg-stmt" (name (first %))) (second %) %)))) (:stmts blk))
-                                         (let [t (:term blk)]
+                                         (every? ok-stmt (:stmts blk))
+                                         (let [t (:term blk) all-nop (fn [] (every? nops (successors t)))]
                                            (case (name (first t))
-                                             "resume" true
-                                             "goto" (boolean (nops (second t)))
-                                             "drop" (let [[_ _ target u _ _ glue] t] (and (nil? glue) (nops target) (or (not= "cleanup" (name (first u))) (nops (second u)))))
+                                             ("resume" "goto" "switch" "false-edge" "false-unwind") (all-nop)
+                                             "drop" (and (nil? (nth t 6)) (all-nop))
                                              false)))]
                           b))]
         (if (= nops' nops) nops (recur nops'))))))
@@ -234,6 +236,7 @@
                          (visit-rvalue r loc))
               ("storage-live" "storage-dead" "nop" "fake-read" "place-mention" "const-eval-counter" "bidh") nil
               "assume" (visit-operand (second s) loc)
+              "copy-nonoverlapping" (doseq [o (rest s)] (visit-operand o loc))
               "set-discriminant" (visit-place (second s) :store loc)
               (unsupported (str "statement " (first s))))))
         (let [loc [b (count (:stmts bb))] t (:term bb)]
@@ -300,8 +303,9 @@
         nil))))
 
 (defn- const-val
-  "A constant operand's value: {:ty :v} or {:pair [...]}, or nil for a zero-sized one; `ag` gives the global of an allocation."
-  [lt c ag]
+  "A constant operand's value: {:ty :v} or {:pair [...]}, or nil for a zero-sized one; `ag` gives the global of an allocation,
+  `ind` the value of a constant held in an allocation at an offset."
+  [lt c ag ind]
   (let [[_ _ t v] c
         l (layout lt t)]
     (case (name (first v))
@@ -317,6 +321,7 @@
               {:ty "ptr" :v (ag id)})
       "slice" (let [[_ id n] v]
                 {:pair [{:ty "ptr" :v (ag id)} {:ty "i64" :v n}]})
+      "indirect" (let [[_ id off] v] (ind id off l))
       "zst" nil
       (unsupported (str "const " (first v))))))
 
@@ -489,6 +494,26 @@
                                      vals (mapv (fn [[k a b]] (if (= k :ptr) ['ptr (alloc-sym! a)] [(list 'array (- b a) 'i8) (list 'c-string (chars a b))])) segs)]
                                  (intern-const! gl (apply list 'packed tys) (apply list 'packed vals) (:align a))))))
                          (unsupported "allocation of this kind"))))
+        ;; a constant held in an allocation: scalars and pairs read from its bytes, aggregates by reference to its global
+        alloc-const! (fn [id off l]
+                       (let [a (get allocs (str id))
+                             bs (:bytes a)
+                             relocs (into {} (:relocs a))
+                             rd (fn [o sc]
+                                  (if-let [t (get relocs o)]
+                                    {:ty "ptr" :v (alloc-sym! t)}
+                                    (let [n (:size sc)
+                                          v (reduce (fn [acc i] (.add (.shiftLeft acc 8) (java.math.BigInteger/valueOf (Integer/parseInt (subs bs (* 2 (+ o (- n 1 i))) (+ 2 (* 2 (+ o (- n 1 i))))) 16))))
+                                                    java.math.BigInteger/ZERO (range n))]
+                                      (cond (:bool sc) {:ty "i1" :v (if (zero? (.signum v)) 'false 'true)}
+                                            (= :ptr (:prim sc)) (if (zero? (.signum v)) {:ty "ptr" :v 'null} (unsupported "pointer constant"))
+                                            :else {:ty (:imm sc) :v (as-num (sext-const (:bits sc) v))}))))]
+                         (when-not (zero? off) (unsupported "indirect constant at an offset"))
+                         (case (:kind l)
+                           :scalar (rd 0 (:scalar l))
+                           :pair (let [[sa sb boff] (:pair l)] {:pair [(rd 0 sa) (rd boff sb)]})
+                           :memory {:ref {:ptr (alloc-sym! id) :align (:align a) :ly l}}
+                           (unsupported "indirect constant of this layout"))))
         st (volatile! {:n 0 :skip #{} :bbs {} :bb-order [] :vals {} :allocas {} :start []})
         fresh! (fn [] (let [n (:n @st)] (vswap! st assoc :n (inc n)) (symbol (str "%t" n))))
         emit! (fn [bb f] (vswap! st update-in [:bbs bb] (fnil conj []) f) nil)
@@ -534,10 +559,10 @@
                            {:ty (:imm sc) :v a})))
         store-scalar! (fn [bb sc {:keys [ty v]} ptr align]
                         (cond
-                          (and (:bool sc) (boolean? v)) (emit! bb (list 'store ['i8 (if v 1 0)] ['ptr ptr] :align 1))
+                          (and (:bool sc) (boolean? v)) (emit! bb (list 'store ['i8 (if v 1 0)] ['ptr ptr] :align align))
                           (:bool sc) (let [z (fresh!)]
                                        (emit! bb (list '= z (list 'zext (symbol ty) v 'i8)))
-                                       (emit! bb (list 'store ['i8 z] ['ptr ptr] :align 1)))
+                                       (emit! bb (list 'store ['i8 z] ['ptr ptr] :align align)))
                           :else (emit! bb (list 'store [(symbol ty) v] ['ptr ptr] :align align))))
         load-place! (fn [bb {:keys [ptr align ly] :as pl}]
                       (case (:kind ly)
@@ -632,7 +657,7 @@
                                           [(get-in @st [:vals l]) (nth lay l)] projs)]
                            (first ty))
                          :else (load-place! bb (place-of! bb p))))
-                     "const" (const-val lt o alloc-sym!)
+                     "const" (const-val lt o alloc-sym! alloc-const!)
                      ;; the session's checks, decided at codegen: ub checks follow debug assertions (on at -O0), overflow
                      ;; checks the flag of the run, contract checks are off
                      "runtime-checks" {:ty "i1" :v (case (second o)
@@ -915,6 +940,16 @@
         statement! (fn [bb s]
                      (case (name (first (stmt-of s)))
                        "set-discriminant" (let [[_ p v] (stmt-of s)] (set-discr! bb (place-of! bb p) v))
+                       ;; copy_nonoverlapping: a memcpy of count * size_of::<T>() bytes
+                       "copy-nonoverlapping" (let [[_ dst src cnt] (stmt-of s)
+                                                   el (layout lt (second (ty-struct (ty-of dst))))
+                                                   dv (operand! bb dst) sv (operand! bb src) cv (operand! bb cnt)
+                                                   nm (symbol "g" "llvm.memcpy.p0.p0.i64")
+                                                   bytes (if (number? (:v cv))
+                                                           (* (:size el) (:v cv))
+                                                           (let [r (fresh!)] (emit! bb (list '= r (list 'mul 'i64 (:size el) (:v cv)))) r))]
+                                               (declare! gl nm 'void [['ptr] ['ptr] ['i64] ['i1]])
+                                               (emit! bb (list 'call 'void nm [['ptr (list :align (:align el)) (:v dv)] ['ptr (list :align (:align el)) (:v sv)] ['i64 bytes] ['i1 'false]])))
                        "assign" (let [[_ p r] (stmt-of s)
                                       dly (layout lt (place-type body p))
                                       l (place-local p)
