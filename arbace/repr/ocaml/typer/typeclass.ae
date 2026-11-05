@@ -25,6 +25,7 @@
   (:require [arbace.repr.ocaml.typer.types :as ty]
             [arbace.repr.ocaml.typer.env :as env]
             [arbace.repr.ocaml.typer.typecore :as tc]
+            [arbace.repr.ocaml.typer.typemod :as tm]
             [arbace.string :as str]))
 
 (set! *warn-on-reflection* false)
@@ -212,7 +213,7 @@
                    (add-method! sign label (if (= :public priv) :Public :Private) virt t))
                  (doseq [[label [mut virt t]] (:vars @psign)]
                    (add-instance-variable! sign true label mut virt t))
-                 (let [ivars (mapv (fn [[label _]] [label (ty/ident-create label)]) (sort-by first (:vars @psign)))
+                 (let [ivars (mapv (fn [[label _]] [label (ty/ident-create label)]) (reverse (sort-by first (:vars @psign))))
                        super-meths (mapv (fn [l] [l (ty/ident-create l)])
                                          (reverse (sort (keep (fn [[l [_ v _]]] (when (= :Concrete v) l)) (:meths @psign)))))]
                    [(conj acc [:inherit over parent (some-> super :txt) ivars super-meths psign])
@@ -301,5 +302,249 @@
     (hide-private-methods! (:sign cs))
     [cs (public-methods (:sign cs))]))
 
+;; ---------------------------------------------------------------------------------------------
+;; Class types (types.ml's class_type: [:Cty_signature sign] [:Cty_arrow label t cty] [:Cty_constr path args cty])
+
+(defn signature-of-class-type [cty]
+  (case (cty 0) :Cty_signature (cty 1) :Cty_arrow (recur (cty 3)) :Cty_constr (recur (cty 3))))
+
+(defn self-type [cty] (:self @(signature-of-class-type cty)))
+
+(defn- class-type-types
+  "Every type of a class type, in a fixed order"
+  [cty]
+  (case (cty 0)
+    :Cty_signature (let [s @(cty 1)]
+                     (concat [(:self s) (:row s)] (map #(nth % 2) (vals (into (sorted-map) (:vars s))))
+                             (map #(nth % 2) (vals (into (sorted-map) (:meths s))))))
+    :Cty_arrow (cons (cty 2) (class-type-types (cty 3)))
+    :Cty_constr (concat (cty 2) (class-type-types (cty 3)))))
+
+(defn- rebuild-class-type
+  "The class type with its types replaced, in class-type-types' order, by ts (a seq consumed)"
+  [cty ts]
+  (case (cty 0)
+    :Cty_signature (let [s @(cty 1)
+                         vs (into (sorted-map) (:vars s)) ms (into (sorted-map) (:meths s))
+                         [self row & more] @ts
+                         nv (count vs) nm (count ms)
+                         vts (take nv more) mts (take nm (drop nv more))]
+                     (reset! ts (drop (+ nv nm) more))
+                     [:Cty_signature (atom {:self self :row row
+                                            :vars (into {} (map (fn [[l [m v _]] t] [l [m v t]]) vs vts))
+                                            :meths (into {} (map (fn [[l [p v _]] t] [l [p v t]]) ms mts))})])
+    :Cty_arrow (let [t (first @ts)] (swap! ts rest) [:Cty_arrow (cty 1) t (rebuild-class-type (cty 3) ts)])
+    :Cty_constr (let [n (count (cty 2)) args (vec (take n @ts))]
+                  (swap! ts #(drop n %))
+                  [:Cty_constr (cty 1) args (rebuild-class-type (cty 3) ts)])))
+
+(defn instance-class
+  "Ctype.instance_class: [params cty] copied together"
+  [params cty]
+  (let [ts (ty/instance-list (concat params (class-type-types cty)))
+        np (count params)]
+    [(vec (take np ts)) (rebuild-class-type cty (atom (drop np ts)))]))
+
+(defn generalize-class-type! [params cty] (run! ty/generalize (concat params (class-type-types cty))))
+
+(defn- constructor-type
+  "Typeclass.constructor_type"
+  [constr cty]
+  (case (cty 0)
+    :Cty_signature constr
+    :Cty_arrow (ty/newty [:Tarrow (cty 1) (cty 2) (constructor-type constr (cty 3))])
+    :Cty_constr (constructor-type constr (cty 3))))
+
+(defn class-type-arity [cty] (case (cty 0) :Cty_arrow (inc (class-type-arity (cty 3))) :Cty_signature 0 :Cty_constr (class-type-arity (cty 3))))
+
+(defn- set-object-name!
+  "Ctype.set_object_name: the self type named by the class's abbreviation, its row first"
+  [p params t]
+  (let [t (ty/repr t) d (ty/desc t)]
+    (when (= :Tobject (d 0))
+      (swap! t assoc :desc [:Tobject (d 1) [p (vec (cons (ty/object-row t) params))]]))))
+
+(defn extract-constraints
+  "Typeclass.extract_constraints: [vals meths concrete-meths] of a class type (Map folds: labels descending)"
+  [cty]
+  (let [s @(signature-of-class-type cty)]
+    [(vec (reverse (sort (keys (:vars s))))) (vec (reverse (sort (keys (:meths s)))))
+     (set (keep (fn [[l [_ v _]]] (when (= :Concrete v) l)) (:meths s)))]))
+
+(defn- add-dummy-method! [sign]
+  (let [[_ t row] (filter-method-row dummy-method :Private (:row @sign))]
+    (tc/unify! t (ty/newty [:Ttuple []]) "self")
+    (swap! sign assoc :row row)))
+
+(def ^:dynamic *class-vars* "The type variables of the class being typed (Typetexp.TyVarEnv)" nil)
+
+(defn class-expr
+  "Typeclass.class_expr: {:desc d :env env :type cty}"
+  [cl-num val-env met-env virt scl]
+  (let [d (:pcl_desc scl)
+        mk (fn [desc cty] {:desc desc :env val-env :type cty :loc (:pcl_loc scl)})]
+    (case (d 0)
+      :Pcl_constr (let [e (or (env/lookup val-env :classes (:txt (d 1)))
+                              (type-error (str "Unbound class " (str/join "." (env/lid-parts (:txt (d 1)))))))
+                        decl (:decl e)
+                        tyl (mapv #(env/transl-type val-env (or *class-vars* (atom {})) %) (d 2))
+                        [params clty] (instance-class (:params decl) (:type decl))
+                        clty' (if (= :Cty_signature (clty 0)) [:Cty_constr (:path e) params clty] clty)]
+                    (add-dummy-method! (signature-of-class-type clty'))
+                    (when (and (seq tyl) (not= (count tyl) (count params)))
+                      (type-error "The class constructor expects another number of type arguments"))
+                    (dorun (map #(tc/unify! %1 %2 "class parameter") tyl params))
+                    (let [cl (mk [:Tcl_ident (:path e) e] clty')
+                          [vals meths concrs] (extract-constraints clty)]
+                      (mk [:Tcl_constraint cl vals meths concrs] clty')))
+      :Pcl_structure (let [cs (class-structure cl-num virt false val-env met-env (d 1))]
+                       (mk [:Tcl_structure cs] [:Cty_signature (:sign cs)]))
+      :Pcl_fun (let [[_ l default spat scl'] d]
+                 (when default (type-error "optional class parameters with defaults are outside the slice"))
+                 (let [vars (atom [])
+                       pat (tc/type-pat val-env spat (ty/newvar) vars)
+                       _ (when (ty/is-optional l) (tc/unify! (:type pat) (ty/type-option (ty/newvar)) "pattern"))
+                       pv (mapv (fn [[n id t]] [n id (ty/ident-rename id) t]) @vars)
+                       val-env' (reduce (fn [e [n id _ t]] (tc/add-value e n id t)) val-env pv)
+                       met-env' (reduce (fn [e [n _ id' t]]
+                                          (assoc-in e [:values n] {:type t :kind [:ivar :Immutable cl-num] :path [:Pident id'] :id id'}))
+                                        met-env pv)
+                       vals (mapv (fn [[n id id' t]]
+                                    [id' (tc/mkexp [:Texp_ident [:Pident id] {:type t :kind [:reg] :path [:Pident id] :id id}] (ty/instance t) nil)])
+                                  pv)
+                       partial (tc/partiality [{:lhs pat}])
+                       cl (class-expr cl-num val-env' met-env' virt scl')]
+                   (mk [:Tcl_fun pat vals cl partial] [:Cty_arrow l (ty/instance (:type pat)) (:type cl)])))
+      :Pcl_apply (let [cl (class-expr cl-num val-env met-env virt (d 1))
+                       ;; the arguments typed as a function application of the class's constructor type
+                       ft (constructor-type (ty/newvar) (:type cl))
+                       f (tc/mkexp [:Texp_ident [:Pident (ty/ident-create "*class*")] {}] ft nil)
+                       [args _] (tc/type-application val-env f (vec (d 2)))
+                       cty (loop [cty (:type cl) n (count args)]
+                             (if (and (pos? n) (= :Cty_arrow (cty 0))) (recur (cty 3) (dec n)) cty))]
+                   (mk [:Tcl_apply cl args] cty))
+      :Pcl_let (let [[_ rec svbs scl'] d
+                     [vbs val-env'] (tc/type-let val-env rec svbs)
+                     ids (mapcat #(arbace.repr.ocaml.typer.parmatch/bound-idents-full (:pat %)) vbs)
+                     [vals met-env']
+                     (reduce (fn [[vals me] [id n t]]
+                               (let [id' (ty/ident-rename id)
+                                     e (tc/mkexp [:Texp_ident [:Pident id] {:type t :kind [:reg] :path [:Pident id] :id id}] (ty/instance t) nil)]
+                                 [(conj vals [id' e])
+                                  (assoc-in me [:values n] {:type t :kind [:ivar :Immutable cl-num] :path [:Pident id'] :id id'})]))
+                             [[] met-env] ids)
+                     cl (class-expr cl-num val-env' met-env' virt scl')]
+                 (mk [:Tcl_let rec vbs vals cl] (:type cl)))
+      :Pcl_constraint (type-error "class type constraints are outside the slice")
+      (type-error (str "class expression " (d 0) " outside the slice")))))
+
+(alter-var-root #'*class-expr* (constantly (fn [cl-num val-env met-env scl] (class-expr cl-num val-env met-env :Virtual scl))))
+
+(defn- approx-declaration [scl]
+  (let [d (:pcl_desc scl)]
+    (case (d 0)
+      :Pcl_fun (ty/newty [:Tarrow (d 1) (if (ty/is-optional (d 1)) (ty/type-option (ty/newvar)) (ty/newvar)) (approx-declaration (d 4))])
+      :Pcl_let (approx-declaration (d 3))
+      :Pcl_constraint (approx-declaration (d 1))
+      (ty/newvar))))
+
+(defn- temp-abbrev [arity]
+  (let [params (vec (repeatedly arity ty/newvar))]
+    [params (ty/newty [:Tobject (ty/newvar) nil])]))
+
+(defn- type-param [vars sty]
+  (let [d (:ptyp_desc sty)]
+    (case (d 0)
+      :Ptyp_var (let [v (ty/newvar (d 1))] (swap! vars assoc (d 1) v) v)
+      (ty/newvar))))
+
+(defn class-declarations
+  "Typeclass.class_declarations: [[class-info...] env'], a class-info {:id :name :decl :obj-id :obj-abbr :expr
+  :pub-meths :virt}; the environment binds each class, its type and its #-type"
+  [env scls]
+  (let [cls (mapv (fn [scl] (let [n (:txt (:pci_name scl))] [scl n (ty/ident-create n) (ty/ident-create n) (ty/ident-create n)])) scls)
+        [res env]
+        (ty/with-local-level
+          (let [;; initial_env: temporary abbreviations and the constructors' approximate types
+                pre (mapv (fn [[scl n id ty-id obj-id]]
+                            (let [arity (count (:pci_params scl))
+                                  [obj-params obj-ty] (temp-abbrev arity)
+                                  [cl-params cl-ty] (temp-abbrev arity)
+                                  constr-type (ty/with-local-level (approx-declaration (:pci_expr scl)))]
+                              (env/add-decl! [:Pident obj-id] {:path [:Pident obj-id] :params obj-params :kind [:abstract] :manifest obj-ty
+                                                               :arity arity :variance (repeat :inv)})
+                              {:scl scl :name n :id id :ty-id ty-id :obj-id obj-id :obj-params obj-params :obj-ty obj-ty
+                               :cl-params cl-params :cl-ty cl-ty :constr-type constr-type}))
+                          cls)
+                env1 (reduce (fn [e c]
+                               (-> e
+                                   (assoc-in [:types (:name c)] [:Pident (:obj-id c)])
+                                   (assoc-in [:classes (:name c)] {:path [:Pident (:id c)] :id (:id c)
+                                                                   :decl {:params [] :type [:Cty_signature (new-class-signature)]
+                                                                          :path [:Pident (:obj-id c)]
+                                                                          :new (when (= :Concrete (:pci_virt (:scl c))) (:constr-type c))}})))
+                             env pre)
+                infos
+                (mapv (fn [c]
+                        (let [scl (:scl c) vars (atom {})
+                              [params cl-expr]
+                              (ty/with-local-level
+                                (let [params (mapv (fn [[sty _]] (type-param vars sty)) (:pci_params scl))
+                                      n (swap! class-num inc)
+                                      e (binding [*class-vars* vars] (class-expr (str n) env1 env1 (:pci_virt scl) (:pci_expr scl)))]
+                                  (update-class-signature! (signature-of-class-type (:type e)))
+                                  [params e]))
+                              typ (:type cl-expr)
+                              _ (generalize-class-type! params typ)
+                              sign (signature-of-class-type typ)
+                              obj-path [:Pident (:obj-id c)]
+                              ;; the object type's abbreviation: a closed instance
+                              [obj-params' obj-type] (instance-class params typ)
+                              constr (ty/newty [:Tconstr obj-path (:obj-params c)])
+                              _ (do (tc/unify! (ty/object-row (self-type obj-type)) (ty/newty [:Tnil]) "class")
+                                    (dorun (map #(tc/unify! %1 %2 "class parameters") (:obj-params c) obj-params'))
+                                    (tc/unify! (self-type obj-type) constr "class"))
+                              _ (set-object-name! obj-path params (:self @sign))
+                              ;; the #-type
+                              [cl-params' cl-type] (instance-class params typ)
+                              _ (do (dorun (map #(tc/unify! %1 %2 "class parameters") (:cl-params c) cl-params'))
+                                    (tc/unify! (self-type cl-type) (:cl-ty c) "class"))
+                              _ (tc/unify! (constructor-type constr obj-type) (ty/instance (:constr-type c)) "class constructor")
+                              [params' typ'] (instance-class params typ)
+                              [hparams hty] (let [ts (ty/instance-list (concat params [(:self @sign)]))] [(vec (butlast ts)) (last ts)])
+                              _ (set-object-name! obj-path hparams hty)
+                              decl {:params params' :type typ' :path obj-path :virt (:pci_virt scl)
+                                    :new (when (= :Concrete (:pci_virt scl)) (ty/instance (:constr-type c)))
+                                    :hash {:params hparams :manifest hty}}]
+                          (assoc c :decl decl :expr cl-expr :pub-meths (public-methods sign) :virt (:pci_virt scl))))
+                      pre)]
+            [infos env1]))]
+    ;; generalized (with_local_level_generalize_for_class)
+    (doseq [c res]
+      (generalize-class-type! (:params (:decl c)) (:type (:decl c)))
+      (some-> (:new (:decl c)) ty/generalize)
+      (run! ty/generalize (:obj-params c)) (ty/generalize (:obj-ty c))
+      (run! ty/generalize (:params (:hash (:decl c)))) (ty/generalize (:manifest (:hash (:decl c)))))
+    (let [env (reduce (fn [e c]
+                        (let [obj-path [:Pident (:obj-id c)]
+                              d {:path obj-path :params (:obj-params c) :kind [:abstract] :manifest (:obj-ty c)
+                                 :arity (count (:obj-params c)) :variance (repeat :inv) :class-ghost true}]
+                          (env/add-decl! obj-path d)
+                          (-> e
+                              (assoc-in [:types (:name c)] obj-path)
+                              (assoc-in [:classes (:name c)] {:path [:Pident (:id c)] :id (:id c) :decl (:decl c)}))))
+                      env res)]
+      [res env])))
+
+(defn type-new
+  "Typecore's Pexp_new: [path decl type]"
+  [env lid]
+  (let [e (or (env/lookup env :classes lid) (type-error (str "Unbound class " (str/join "." (env/lid-parts lid)))))
+        decl (:decl e)]
+    (when-not (:new decl) (type-error (str "Cannot instantiate the virtual class " (str/join "." (env/lid-parts lid)))))
+    [e decl (ty/instance (:new decl))]))
+
 (alter-var-root #'tc/*type-object* (constantly type-object))
 (alter-var-root #'tc/*type-send* (constantly type-send))
+(alter-var-root #'tc/*type-new* (constantly type-new))
+(alter-var-root #'tm/*class-declarations* (constantly class-declarations))
