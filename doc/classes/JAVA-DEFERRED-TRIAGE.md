@@ -529,6 +529,166 @@ untried.
 **What is left of F4 and F2**: the night's run and the day's classification and records; `Class.getProtectionDomain`
 (above); JCS140-JCS142 (Proposed).
 
+## As built: F3 (write-ahead)
+
+Branch `java-jc9-tls` (from `java-jc9-pki`, JCS128-JCS154 decided), 2026-11-05, F3 prepared by day under the
+light rules as F1, F5, F4, F2 and JC9b were: the closure's list, jrt's own Java, the variants, j2g's tables, the
+data step, and light checks only. Nothing converted, translated or built. JCS131 (a): TLS is jdk26u's own
+SunJSSE translated; JCS138 (b): System.Logger was to come with F3, whose `SSLLogger` is its first in-world
+user (what was built instead, and why: below and JCS155). **F3 needs F1, F2 and F4** (SunJSSE's ciphers, key
+agreements, KDFs, signatures and key factories are F1's; its trust and key managers, certificate messages and
+`X509TrustManagerImpl` stand on F2's certificates, PKIX and key stores; `AccessController` and the permissions
+are F4's) **and F5** (`SSLLogger`'s path for an empty `javax.net.debug`): its closure was computed against the
+world plus F1's, F5's, F4's and F2's lists (by reference: `tls-sources` names none of their files), and
+`ProviderConfigJsse.ae` repeats F1's `getProvider` with SunJSSE beside it, so the branch merges after
+`java-jc9-jca`, `java-jc9-logging` and `java-jc9-pki`. F3 does not need JC9b (no F7, F8, F10 or F11 class:
+the closure names none). The branch's hunks in the shared files are apart from the other branches' (`git
+merge-tree` with `java-jc9-jca`, `java-jc9-logging`: a conflict in this file alone, as `java-jc9-pki` had;
+with `java-jc9b`: none, once F3's lines in `bin/jrt-convert` and `sources` were moved off JC9b's).
+**Not mergeable before its night**, as JC9's branches: its variants name classes `jdk/forms` does not hold yet
+(SSLContext, SNIHostName, SSLSocketImpl: "a variant for a class not in the inputs").
+
+**What comes in, and how** (jdk26u at `baf63fb`; `test/jrt/jrt_sources.ae`'s `tls-sources`, one line in
+`sources`):
+
+| part | how |
+|---|---|
+| sun.security.ssl (137) | the whole package but `SSLLogger` (jrt's copy, below): `SunJSSE`, `SSLContextImpl` and its TLS, DTLS and Default contexts, the handshake (`ClientHello` ... `Finished`, `KeyUpdate`, `NewSessionTicket`, the extensions), the record layer (`SSLSocketInputRecord`, `SSLEngineOutputRecord`, DTLS's records), the key exchanges (RSA, DH, ECDH, XDH, the named groups, `KAKeyDerivation`) and cipher suites (`CipherSuite`, `SSLCipher`), the key and trust managers (`X509KeyManagerImpl`, `SunX509KeyManagerImpl`, `X509TrustManagerImpl`, `TrustStoreManager`), the sessions, `SSLSocketImpl`, `SSLServerSocketImpl`, `SSLEngineImpl`, `StatusResponseManager`; and QUIC's TLS engine (`QuicTLSEngineImpl`, `QuicKeyManager`, `QuicCipher`, `QuicEngineOutputRecord`, `QuicTransportParametersExtension`), which 13 files of the handshake name (JCS156) |
+| jdk.internal.net.quic (7) | the QUIC engine's interfaces, versions and errors; not `QuicTLSContext`, HTTP/3's entry (java.net.http), whose `VarHandle` reads `SSLContext`'s private field through `privateLookupIn` |
+| javax.net.ssl (40), javax.net (2) | the whole package but `HttpsURLConnection` (java.net's `HttpURLConnection` is not in the Go build: F12); `SocketFactory`, `ServerSocketFactory` |
+| javax.security.cert (7) | the deprecated certificate API `SSLSession` and `HandshakeCompletedEvent` name (j2g renames, below) |
+| java.net.IDN with ICU's StringPrep (8) | `IDN`, `jdk.internal.icu` `StringPrep`, `Punycode`, `StringPrepDataReader`, `Trie`, `CharTrie`, `UCharacterDirection`, `UCharacterEnums`: `SNIHostName`'s `toASCII` (JCS157); its profile `sun/net/idn/uidna.spp` copied into `jdk/data` by `bin/jrt-convert`'s data step, as the build copies the resource |
+| the rest (4) | `sun.security.util`'s `ByteArrays`, `LegacyAlgorithmConstraints`; `jdk.internal.event.TLSHandshakeEvent` (never enabled: no JFR); `jdk.internal.access.JavaNetInetAddressAccess` |
+| jrt's own (overlay, 3) | `sun.security.ssl.SSLLogger`, jdk26u's transcribed: implements no `System.Logger` (jrt's hand-written `System` has none), a nested `Level` of the same constants and severities, `javax.net.debug` non-empty: the JDK's private console logger exactly; empty: java.util.logging's logger `javax.net.ssl` (F5) reached by reflection with `PlatformLogger`'s level mapping, what the JDK's `System.getLogger` gives with java.logging present (java.base does not read java.logging); the caller from a Throwable's stack trace (no StackWalker, F20). `sun.security.ssl.JsseServices`: SunJSSE's 14 service classes constructed directly (after JrtServices and PkiServices). `jdk.internal.jrt.NetAccess`: InetAddress's access object, in place of SharedSecrets |
+| the variants (5) | `SSLContext.ae` (the default context published under the class's monitor: j2g compiles `findVarHandle`, not `findStaticVarHandle`), `SNIHostName.ae` (the encoded name decoded by String's UTF-8 and checked by encoding it back, no `CharsetDecoder` before F8), `SSLSocketImpl.ae` (`useImplicitHost` through NetAccess), `InetAddressAccess.ae` (InetAddress's second file: a static initializer added, jdk26u's anonymous `JavaNetInetAddressAccess` given to NetAccess), `ProviderConfigJsse.ae` (ProviderConfig's second file: F1's `getProvider` with `SunJSSE` by name and class name); `Provider.ae`'s `newInstanceUtil` asks JsseServices after PkiServices |
+| j2g | renames `javax/security/cert/*` (7) → `JavaxCert_*` (java.security.cert's namesakes, F2's), `sun/security/ssl/RSASignature` → `Ssl_RSASignature` (sun.security.rsa's, F1's), `sun/security/ssl/Record` → `Ssl_Record` (jrt's `java.lang.Record`); `class-supers` + `X509ExtendedTrustManager`, `X509ExtendedKeyManager`, `SSLSocketFactory`, `SSLServerSocketFactory`, `SSLSocket`, `SSLEngine`, `SSLContextSpi`, `SNIServerName`, `SNIMatcher`, `KeyManagerFactorySpi` (the classes the area's tests extend: 3, 3, 3, 2, 2, 2, 1, 1, 1, 1 of them) |
+
+The sockets are jrt's: `SSLSocketImpl` is a `java.net.Socket` over jrt's `HostSocketImpl` (the world's `Socket`
+and `ServerSocket` variants), its streams the plain socket's, the TLS records SunJSSE's own; jrt's
+`TlsSocket` over Go's crypto/tls (arbace.tls's HTTPS) stays as it is, apart. The engine (`SSLEngineImpl`)
+needs no socket. Left out, with their tests: `HttpsURLConnection` (6 tests at each level:
+`HttpsURLConnection/*`, `sun/net/www/protocol/https/*`, `FixingJavadocs/JavaxURLNulls`,
+`SSLSession/HttpsURLConnectionLocalCertificateChain`; F12, F12b), QUIC's `QuicTLSContext` (no test of the
+areas), `javax.security.cert.X509Certificate.getInstance`'s provider class loaded by name (the default
+`com.sun.security.cert.internal.x509.X509V1CertImpl` is not in the closure; the deprecated chain methods throw
+`UnsupportedOperationException` in jdk26u anyway). What stays outside the world in members no variant
+replaces becomes j2g's operation-level stubs: `BaseSSLSocketImpl.getChannel` (`SocketChannel`, F10; the
+plain socket's answer is null), the sessions' and keys' serialization members (J2G-SPEC §12).
+
+**Light checks done** (stage 0 main's `ARBACE_HOST_EXE`, javac's tool `.tmp/gate-exe/javac-8f24f568a977b802084a`,
+`REPR_JAVA_STALE_OK=1`, each under 2 GiB; scratch in the worktree's `.tmp/f3/`):
+- the closure (F1's `closure.py` as JC9b ran it, every module indexed, the world extended by JC9's lists and
+  overlays, scope `sun.security.ssl`, `javax.net.ssl`, `javax.net`, `sun.security.util`, `javax.security.cert`,
+  `jdk.internal.net.quic`, `java.net`, `jdk.internal.icu.**`, `sun.net.idn`): 205 files, 77,684 lines, all
+  `share`, and the 3 overlays, 808 lines; outside the world and the list it names `VarHandle` and
+  `MethodHandles` (`SSLContext`: the variant; `QuicTLSEngineImpl`: an instance field's `findVarHandle`, which
+  j2g compiles, arbace.j2g.vh), `StackWalker` (SSLLogger: the overlay), `CharsetDecoder`, `CodingErrorAction`
+  (SNIHostName: the variant), `SocketChannel` (a stub) and `JavaNetInetAddressAccess` (added);
+- `jrt.jrt-sources/print-sources`: the branch's list is `java-jc9-pki`'s 1,216 lines plus exactly these 208
+  (205 `share`, 3 `overlay`), 1,424, no line twice; JC9 merged with the branch (`git merge-tree` with
+  `java-jc9-jca`, then `java-jc9-logging`, their `jrt_sources.ae` conflict resolved as the union): 1,790;
+- the read: `bin/repr-java read-jdk --check` of the 205 files and the 3 overlays as a patch of java.base, as
+  `bin/jrt-convert`'s convert step reads them: 208 converted, 0 failed, 0 javac errors, 0 unreadable (23 s); `--no-javac`: 208 native, 0 fallbacks, the forms identical (`diff -r`);
+- the variants applied and parsed (`.tmp/f3/vet3.ae`, `vet.ae` given the variant files in j2g's order): SSLContext
+  1/2/0 (replaced/cut/added), SNIHostName 1/0/0, SSLSocketImpl 1/0/0 on the converted forms; on the world's
+  forms InetAddress 5/2/1 (InetAddress.ae, then InetAddressAccess.ae's added initializer), ProviderConfig 2/0/0
+  (F1's ProviderConfig.ae, then ProviderConfigJsse.ae: the second replacement wins), Provider 1/0/0 with
+  `Provider$Service` 1/0/0; all parsed;
+- the whole closure by the JDK's javac against jrt's overlays (JC9b's `all9/run.sh` with F3's paths,
+  `.tmp/f3/run.sh`): JC9 and F3 merged, every line of print-sources from jdk26u, the build's gensrc and the
+  merged tree's overlays, `--patch-module java.base`: 1,790 files, **0 errors**, 4,231 classes (18 s, 0.9 GB);
+- jrt's hand-written classes: every `System.`, `Thread.` member the new files call is in jrt's manifest
+  (`System.getLogger` was the one missing: SSLLogger's overlay);
+- Go names: every class of the new forms (with the nested ones) against the gate executable's Go types, jrt's
+  hand-written ones and F1's, F2's, F4's and F5's classes: the collisions are the renames above.
+
+**JCS135, the closure's growth**: +78,492 Java lines (77,684 jdk26u's, 808 jrt's: **+16.2%** on the closure's
+483,461), the forms +2,119,080 bytes (**+19.0%** on `jdk/forms`' 11,161,667), and 20 KB of data; about
++12.8 MB on the executable by JC6b's measure. JC9 with F3: **+277,409 lines, +57.4%**, the forms about +7.1 MB
+(+64%), the executable some +45 MB (22%) on the gate build's 206.9 MB, before JC9b's +22.4%. JCS135 (a)'s
+threshold (a minute more of build) is measured at each night.
+
+**Expected yield** (the triage's scan of `d86cb874a`, `causes.json`: the deferred tests whose causes F1, F5,
+F4, F2 and F3 together cover, `tls` among them): **91 interpreted / 92 compiled** at most (the plan's 94 / 94
+counted F3 after F1-F2 alone), of which 6 / 6 need `HttpsURLConnection` (above) and 2 / 2 a `SocketChannel`
+(`SSLEngine/LargePacket`, `SSLSocketImpl/NewSocketMethods`): about **58 / 59 expected** (0.7 of 83 / 84). At
+risk besides: the handshake's speed interpreted (the tests' loops interpreted, SunJSSE compiled), the tests
+that run a server thread and a client on loopback under the check's CPU limits, the default trust store
+(`TrustStoreManager` reads cacerts: JCS140 (a)'s data step is not on `java-jc9-pki` yet), the test library's
+`SSLSocketTemplate` and `SSLEngineTemplate` (48 and 17 subclasses: one failure there fails many). `javax/net/ssl/DTLS`'s
+tests (over `DatagramSocket`, JC9b's F11) have no row in the scan, so none is counted; F12 adds 3 / 2 and F12b
+1 / 1 more. Beside them, `jdk/java/net/IDN`'s two tests (filed under F12's `net-http`: `java.net.IDN` was all
+they lacked) can pass with F3's IDN (JCS157), +2 / 2.
+
+**The night's commands**, in the worktree after `next` holds F1, F5, F4 and F2 (their nights' conversions
+committed; merge `next` into `java-jc9-tls` first), heavy ones under `bin/heavy-lock`; about 3 hours with the
+check. F3 adds no build tool: javac's world and tool are unchanged, so no `bin/javac-vendor convert` and no
+`--build-java`.
+
+```sh
+cd /root/arbace/.tmp/worktrees/java-jc9-tls
+git merge next      # JC9 (F1, F5, F4, F2), their nights' jdk/ and jdk/javac/ committed
+# 1. jdk/ converted afresh: expect F2's night's count + 208 files (205 share, 3 of jrt's own), 0 failed,
+#    0 javac errors, no javac: 0 fallbacks; jdk/forms + 221 files; jdk/data + sun/net/idn/uidna.spp
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. j2g's edge afresh (the new classes' outside references: SocketChannel, the object streams, StackWalker no
+#    longer); 3. javac's world's edge less the new jdk/edge.edn
+bin/heavy-lock bin/j2g-edge update
+bin/heavy-lock bin/javac-vendor edge
+# 4. the executable (JCS135: its size against F2's night's, `ls -l`; the j2g and Go times); j2g's report: the
+#    variants' counts above, "a variant for a class not in the inputs" for none, QuicTLSEngineImpl's handle
+#    compiled (no "VarHandle not constant")
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 5. a smoke of F3: a key store made by the JDK's keytool, a TLS 1.3 handshake on loopback in one process:
+#    expect "42 TLSv1.3 TLS_AES_256_GCM_SHA384", then the providers with SunJSSE, then "xn--bcher-kva.example"
+mkdir -p .tmp/f3-night && /root/jdk26u/build/linux-x86_64-server-release/images/jdk/bin/keytool -genkeypair \
+  -alias k -keyalg EC -groupname secp256r1 -dname CN=localhost -validity 30 -storetype PKCS12 \
+  -keystore .tmp/f3-night/ks.p12 -storepass passphrase
+target/arbace-go/amd64/arbace -e '(import (quote (javax.net.ssl SSLContext KeyManagerFactory TrustManagerFactory SNIHostName)) (quote (java.security KeyStore Security)) (quote (java.io FileInputStream)))
+  (let [pw (.toCharArray "passphrase")
+        ks (doto (KeyStore/getInstance "PKCS12") (.load (FileInputStream. ".tmp/f3-night/ks.p12") pw))
+        kmf (doto (KeyManagerFactory/getInstance "SunX509") (.init ks pw))
+        tmf (doto (TrustManagerFactory/getInstance "PKIX") (.init ks))
+        ctx (doto (SSLContext/getInstance "TLSv1.3") (.init (.getKeyManagers kmf) (.getTrustManagers tmf) nil))
+        ss (.createServerSocket (.getServerSocketFactory ctx) 0)
+        srv (future (with-open [s (.accept ss)] (.read (.getInputStream s))))
+        c (.createSocket (.getSocketFactory ctx) "localhost" (.getLocalPort ss))]
+    (doto (.getOutputStream c) (.write 42) (.flush))
+    (println @srv (.getProtocol (.getSession c)) (.getCipherSuite (.getSession c)))
+    (.close c) (.close ss)
+    (println (mapv #(.getName %) (Security/getProviders)))
+    (println (.getAsciiName (SNIHostName. "bücher.example")))))'
+# 6. Java's levels interp and compiled on F3's areas (then the whole corpus with JC9's, as JC6b): saved, not
+#    recorded; expect about 58 / 59 of the 91 / 92 tests to pass, no passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/(javax/net|sun/security/ssl|sun/net/www/protocol/https|com/sun/net/ssl|java/net/IDN)' \
+  --save .tmp/f3-night/check
+```
+
+Then, the day after (light), as F1's and F2's: the saved results judged (`bin/java-check --judge`), the tail
+classified (`:tls` split by cause: `:https` for HttpsURLConnection, the channel tests to F10's class),
+`--record` once the whole corpus is rerun, `bin/reap --record`, the docs with the numbers (JRT-SOURCES.md's
+closure list, JRT-NOTES.md's "Security" and "Sockets", J2G-SPEC §4.1 and §4.4's renames), the commit of `jdk/`,
+the merge to `next`.
+
+**Risks and fallbacks**: (1) `SSLLogger`'s reflection on java.util.logging (`Class.forName`, `getMethod`,
+`Method.invoke` on a compiled class from compiled code): should jrt's member tables not hold `Logger.log(Level,
+String)`, the empty-`javax.net.debug` path logs nothing (the static initializer catches it) and only the
+tests of that path fail; JCS155 (a) is the proper fix; (2) `QuicTLSEngineImpl`'s `findVarHandle` on a final
+local bound to the class literal: should arbace.j2g.vh not take it, a two-line variant (the handle's
+`compareAndSet` under the engine's lock); (3) `ProviderConfigJsse.ae` replaces what `ProviderConfig.ae`
+replaced: should j2g's order of variant files not be the file names', fold SunJSSE into F1's file (a one-line
+change once F1 is merged); (4) a `class-supers` class whose DynSub j2g cannot make (`SSLSocket` over jrt's
+`Socket`, `SSLEngine`'s final members): remove it, its tests stay `:interp-protected`; (5) loopback servers
+under the check's CPU-time limits (`bin/lib/limit.bash`): the handshake's key generation interpreted
+around compiled code, `:speed`'s measure if they time out.
+
+**What is left of F3**: the night's run and the day's classification and records; JCS140 (a)'s cacerts in
+the data step (F2's, decided, not built), which the default `SSLContext`'s trust managers read; JCS155-JCS157
+(Proposed).
+
 ## 6. Findings on the way
 
 - `:j2g-unresolved` (305 compiled, kind `:world`) is the compiled level's catch-all for "a type the world does
@@ -556,11 +716,68 @@ untried.
   `test/jrt/jrt_sources.ae` (both insert after `zip-sources` in `sources`, and a `def` before `overlay-sources`)
   and here (both append at the end). The resolution is the union in each place; `java-jc9-pki` merges cleanly
   with either.
+- (F3's day) F1's `closure.py` takes jrt's hand-written classes into the world by their top-level name
+  (`world-classes.txt` cut at `$`), so a nested type jrt does not have passes as present: `SSLLogger implements
+  System.Logger` and its `System.getLogger` were invisible to the scan and showed on reading the file (jrt's
+  `System` has no `Logger`, `Logger.Level` or `LoggerFinder`). F3's new files were then checked by hand against
+  jrt's manifest for `System`'s, `Thread`'s and `Runtime`'s members (only `getLogger` missing). The scan should
+  read `go/arbace/jrt/manifest.edn`'s nested types and members; the next widening's day can add it.
+- (F3's day) `arbace.j2g.vh` compiles `findVarHandle` on an instance field, with the class or field type a
+  literal or a final local bound to one, but not `findStaticVarHandle` (a static field) nor a handle stored
+  through a local (`QuicTLSContext`'s `vh = lookup.findVarHandle(...); CONTEXT_SPI = vh;`). jdk26u's java.base
+  has three `findStaticVarHandle` users outside java.lang.invoke: `SSLContext` (F3's variant),
+  `DatagramSocketAdaptor` (F10) and `jdk.internal.event.EventHelper` (jrt's overlay since F2). A small j2g
+  amendment (static fields in the handle table, a local's initializer followed) would retire such variants;
+  not needed by F3.
 
 ## Proposed
 
-JCS140-JCS142 are F4's and F2's ("As built: F4 (write-ahead)", "As built: F2 (write-ahead)", branch
+JCS155-JCS157 are F3's ("As built: F3 (write-ahead)", branch `java-jc9-tls`); JCS143-JCS154 are JC9b's
+(`java-jc9b`). JCS140-JCS142 are F4's and F2's ("As built: F4 (write-ahead)", "As built: F2 (write-ahead)", branch
 `java-jc9-pki`); JCS136-JCS137 are F1's (`java-jc9-jca`), JCS138-JCS139 F5's (`java-jc9-logging`).
+
+### JCS155 System.Logger: jrt's own now, or SSLLogger without it (F3; JCS138 (b))
+
+JCS138 (b) left `System.getLogger` until F3, whose `SSLLogger` implements `System.Logger`. `java.lang.System`
+is jrt's hand-written Go: `System.Logger` (an interface with eight default methods), `System.Logger.Level` (an
+enum) and `System.LoggerFinder` (an abstract class) would be new hand-written types, with default methods,
+which no jrt interface has had; only a j2g run can try them (the manifest, the translated `SSLLogger`
+implementing a hand-written interface, the defaults dispatched). F3 as built does not need them.
+- (a) jrt's own: the three types in `go/arbace/jrt/system.ae` and the manifest (`bin/jrt manifest`),
+  `System.getLogger(String)` and `getLogger(String, ResourceBundle)` over F5's `LoggingProviderImpl` (its
+  wrappers translated, `LoggerFinder.getLoggerFinder` the java.logging one directly, no `BootstrapLogger`),
+  jdk26u's `SSLLogger` unchanged but for `formatCaller` (a variant: no StackWalker), F2's `EventHelper` logging
+  as the JDK's. About 2 days by day plus a night (a build of jrt and j2g's check); +1 test
+  (`LoggerInterfaceTest`) and the JDK classes that log through it (`EventHelper`, `SSLLogger`).
+- (b) As built: jrt's `SSLLogger` (overlay) implements no `System.Logger`, java.util.logging reached by
+  reflection when `javax.net.debug` is empty; System.Logger deferred until a second user or F20 (StackWalker),
+  `:logging` narrowed to `System\$Logger` meanwhile.
+- *Recommended: (b)* for F3's night (javac checked it, no Go to try by night), (a) as its own small fix after
+  JC9's nights, when a build of jrt can be tried by day.
+
+### JCS156 QUIC's TLS engine in F3, or cut by variants
+
+JCS131 (a) planned SunJSSE "QUIC's engine left out". jdk26u's handshake names it in 13 files (`Finished`,
+`ServerHello`, `CertificateMessage`, `KeyUpdate`, `SSLConfiguration`, `TransportContext`, the key managers'
+`QuicTLSEngineImpl` overloads, `SSLExtension`'s transport parameters, ...).
+- (a) In, as built: `sun.security.ssl`'s five QUIC files and `jdk.internal.net.quic`'s seven interfaces (4.4k
+  lines, +5.6% on F3), plain Java over F1's ciphers; never reached without HTTP/3 (`QuicTLSContext`, its only
+  entry, stays out). Cost: none by day; +0.7 MB.
+- (b) Out: 13 variants, each a member or more with its QUIC branch cut (the extension's producers, the key
+  managers' overloads), about a day, and each a divergence to keep in step with jdk26u.
+- *Recommended: (a)*: less work and no divergence; the engine is there when F12b's HTTP/3 needs it.
+
+### JCS157 java.net.IDN in F3, or SNIHostName without it
+
+`SNIHostName(String)` and `(byte[])` call `IDN.toASCII(name, USE_STD3_ASCII_RULES)`; `IDN` is not in the world
+(F2's `HostnameChecker` and F4's `SocketPermission.checkForIDN` stub it).
+- (a) In, as built: `java.net.IDN` and ICU's `StringPrep`, `Punycode`, `StringPrepDataReader`, `Trie`,
+  `CharTrie`, `UCharacterDirection`, `UCharacterEnums` (2.9k lines), the profile `sun/net/idn/uidna.spp` (20 KB)
+  in `jdk/data`; F2's and F4's stubs become the JDK's code. Cost: half a day (done), the data step's line.
+- (b) Out: `SNIHostName`'s variant checks STD3 ASCII rules itself and rejects a non-ASCII name (the JDK accepts
+  `bücher.example` as `xn--bcher-kva.example`): `ServerName`'s IDN tests fail, `:tls-idn`.
+- *Recommended: (a)*: the JDK's behaviour for little, and `jdk/java/net/IDN`'s own two tests (`IllegalArg`,
+  `UseSTD3ASCIIRules`, filed under F12's `net-http` by the scan) can pass with F3.
 
 ### JCS140 The trust anchors: jdk26u's cacerts or x509roots' roots (F2)
 
