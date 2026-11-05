@@ -638,3 +638,43 @@ the converter's forms for them.
 ## Decided (2026-11-05, the user: P11-P14)
 
 P11 (b): gcc's template run corpus list committed with a recorded-results file as a regression check; P12 (a): instantiation by re-analysis; P13 (b): the native parser records explicit template arguments, before G4; P14 (b): the native parser keeps constraints and requires-expressions.
+
+## G2 fixes (branch `cpp-g2fix`, 2026-11-05): G3's three bugs and P8 (a)
+
+Each fix has a sample in `test/cpp/codegen/` that failed before and passes at all three levels of `bin/cppi codegen-check`
+(run, native, names).
+
+| Bug | Cause | Fix | Sample |
+|---|---|---|---|
+| a temporary bound to a reference through a subobject (`const int &r = B().i[0]`) destroyed at the full-expression's end | only a reference bound directly to the temporary extended it | codegen finds the complete temporary under a member, base, array element or decay (`extend-root`) and puts its destructor in the extended cleanups ([class.temporary]) | `temp-extend1` |
+| an empty base's offset among virtual bases (16 where clang has 24) | empty bases and empty-class members always at 0 | `arbace.cpp.abi/layout` tracks the empty subobjects placed ({offset #{class}}), as clang's `EmptySubobjectMap` (`CanPlaceBaseAtOffset`, `CanPlaceFieldSubobjectAtOffset`, `UpdateEmpty...`): a base or member whose empty subobjects clash with one of the same class at the same offset moves to the next aligned offset, virtual bases likewise | `mi1` |
+| an `extern` global declared before its definition broke the lowered C (`extern void *bp` after `struct lt$1 bp`) | the use through the extern declaration declared the global again | a defined variable's name is entered as declared when the definitions are written | `virtual4` |
+
+`virtual4` showed two more faults behind its native level's failure (`_ZN1BC1Ev`): an out-of-line constructor or
+destructor did not join its in-class declaration (`find-redecl` looked the name up where only functions are entered; the
+call went to the body-less declaration, declared next to the definition, which clang's IR parser refuses), and a member
+declared in the class and defined outside was marked inline (so `linonce_odr`, where clang's is external). Also, the
+complete-object alias `C1`/`D1` of a strong definition is now written where the complete constructor is called, as clang
+emits it (a class never constructed whole has none). Sample `ctor-outofline`.
+
+P8 (a), the three items asked for (done):
+
+- Covariant returns that need an adjustment ([class.virtual]/8; the base's offset is not 0, or it is a virtual base): as
+  clang's `AddMethods`, the overrider gets a slot of its own and the slot of the overridden function keeps its function,
+  whose entry is a thunk `_ZTc<this call-offset><return call-offset><encoding of the overrider>` (this adjustment
+  `h0_` or `v..._`; return adjustment `h<n>_` or, through a virtual base, `v<n>_<offset of the vbase offset>_`),
+  null-checked for pointers, the virtual offset applied before the non-virtual one (`performReturnAdjustment`). Samples
+  `covariant-adjust` (non-virtual: `_ZTch0_h16_N1Q3getEv`), `covariant-virtual` (virtual base, reference, a further override).
+- A namespace-scope lambda's `$_N`: the numbering was right (the TU's closures in order); what differed was the
+  mangled scope, the closure class took no namespace path (`_ZNK3$_1clEi` for `_ZNK1N3$_1clEi`). Sample `lambda-namespace`.
+- Array bounds that call a constexpr function (`int a[sq(3)]`): `arbace.cpp.template/eval-text` evaluates a call of a
+  named function on constant arguments through `arbace.cpp.sema/ce-call-fn`. Sample `constexpr-bound`. A call with a
+  dependent argument is still refused (G3's substitution would carry it).
+
+Not done of P8: generic lambdas (they need templates' machinery for the closure's `operator()` template), `goto` across
+destructors, a `while` condition's declaration, a class through `...`.
+
+Provenance: the layout and the vtable code were read in `clang/lib/AST/RecordLayoutBuilder.cpp` (EmptySubobjectMap,
+`LayoutBase`, `LayoutField`) and `clang/lib/AST/VTableBuilder.cpp` (`AddMethods`, `ComputeReturnAdjustmentBaseOffset`,
+`ComputeReturnAdjustment`) and `ItaniumMangle.cpp` (`mangleThunk`) of llvm-project 23.1.4 (the pinned tarball); the code
+is a reimplementation of their rules in Arbace's structures, not a port of their text (P6, P9 as built).
