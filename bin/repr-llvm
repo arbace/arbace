@@ -41,11 +41,14 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tools.bash"
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
 
-# judge NAME ORIG PRINT CMD...: CMD ORIG ORIG-OUT, CMD PRINT PRINT-OUT, the verdict on the two outputs
+# judge NAME ORIG PRINT CMD...: CMD ORIG ORIG-OUT, CMD PRINT PRINT-OUT, the verdict on the two outputs; both inputs are copied
+# to one name (NAME.d/in.ll) first: a module without a source_filename takes it from the file's path, which is no difference
+# of the print (the first 282 modules all wrote one, llvm/test's mostly do not)
 judge() {
   local o=$1 a=$2 b=$3; shift 3
-  if ! "$@" "$a" -o "$o.orig" 2> "$o.log"; then echo none
-  elif [ -f "$b" ] && "$@" "$b" -o "$o.print" 2>> "$o.log" && cmp -s "$o.orig" "$o.print"; then echo same
+  mkdir -p "$o.d"; cp "$a" "$o.d/in.ll"
+  if ! "$@" "$o.d/in.ll" -o "$o.orig" 2> "$o.log"; then echo none
+  elif [ -f "$b" ] && cp "$b" "$o.d/in.ll" && "$@" "$o.d/in.ll" -o "$o.print" 2>> "$o.log" && cmp -s "$o.orig" "$o.print"; then echo same
   else echo differs; fi
 }
 
@@ -81,10 +84,27 @@ case ${1:-} in
     no=$(wc -l < "$work/objects.tsv"); nsame=$(grep -c '	same$' "$work/objects.tsv" || true)
     nb=$(wc -l < "$work/bitcode.tsv"); nbsame=$(grep -c '	same$' "$work/bitcode.tsv" || true)
     echo "roundtrip: $nok of $nf forms equal, $nsame of $no objects equal${llvm_as:+, $nbsame of $nb bitcode equal}"
+    ctl=0
+    controls=${REPR_LLVM_CONTROLS:-$root/test/repr/llvm/roundtrip-controls.txt}
+    if [ -f "$controls" ]; then
+      while read -r cid csub cref _; do
+        case $cid in ''|'#'*) continue ;; esac
+        cpath=$(awk -F'\t' -v n="$cref" '$1 == n {print $2; exit}' "$list")
+        if [ -z "$cpath" ] || ! grep -q "^$csub	" "$list"; then echo "control $cid left: $csub or $cref is not in the list"; continue; fi
+        if ! grep -q "^$csub	same\$" "$work/objects.tsv" || ! grep -q "^$cref	same\$" "$work/objects.tsv"; then echo "control $cid left: $csub or $cref did not round-trip"; continue; fi
+        cf=$(arbace_tool -m arbace.repr.llvm control "$work" "$csub" "$cpath" 2>/dev/null | tail -1)
+        if [ -f "$work/obj/$csub.o.print" ] && [ -f "$work/obj/$cref.o.orig" ]; then
+          if cmp -s "$work/obj/$csub.o.print" "$work/obj/$cref.o.orig"; then co=same; else co=differs; fi
+        else co=none; fi
+        if [ "$cf" = differs ] && [ "$co" = differs ]; then echo "control $cid fails as it must (forms and objects differ)"
+        elif [ "$cf" != same ] && [ "$cf" != differs ] || [ "$co" = none ]; then echo "control not judged: $cid ($csub against $cref: forms $cf, objects $co)"; ctl=1
+        else echo "control passed: $cid ($csub against $cref): forms $cf, objects $co"; ctl=1; fi
+      done < "$controls"
+    fi
     # a check: every form equal, no judge differing, and every file judged same by one of them (review 007's finding 11)
     judged=$(cat "$work/objects.tsv" "$work/bitcode.tsv" | awk -F'\t' '$2 == "same" { print $1 }' | sort -u | wc -l)
     [ "$nf" -gt 0 ] && [ "$nok" = "$nf" ] && awk -F'\t' '$2 == "differs" { d = 1 } END { exit d }' "$work/objects.tsv" "$work/bitcode.tsv" \
-      && [ "$no" = "$(grep -c . "$list")" ] && [ "$judged" = "$no" ] ;;
+      && [ "$ctl" = 0 ] && [ "$no" = "$(grep -c . "$list")" ] && [ "$judged" = "$no" ] ;;
   mutants)
     list=$2 out=$3
     mkdir -p "$out"; out=$(cd "$out" && pwd)
