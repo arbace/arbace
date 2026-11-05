@@ -87,3 +87,9 @@ show("prepare-ok", lambda: T.__typing_prepare_subst__(Box, (int,)))
 show("prepare-ps", lambda: P.__typing_prepare_subst__(PS, (int, str)))
 show("prepare-arity", lambda: T.__typing_prepare_subst__(Box))
 show("subst-arity", lambda: T.__typing_subst__())
+
+# *list[int]: types.GenericAlias' iterator (ga_iter), one starred copy, its repr and equality
+print((*tuple[int],)[0], tuple[*tuple[int, ...]], tuple[Unpack[tuple[*tuple[int, ...]]]], Unpack[tuple[int]])
+x = (*tuple[int, str],)[0]
+print(x.__origin__, x.__args__, x == tuple[int, str], x == (*tuple[int, str],)[0], list(iter(list[int])), next(iter(dict[str, int])))
+print(tuple[()], *tuple[()])
