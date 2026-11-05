@@ -327,3 +327,17 @@ and recursive modules, inline records, lazy, [@tail_mod_cons]); the stdlib 48 of
 Printf's formats, GADTs, objects, effects, recursive values: T9, T10); the probe 17 of 36 (12 of the 19 others are
 formats). The judge's alternative for the stdlib, recording its 71 units' dumps (TY5 (b)), stays rejected. Proposals
 TY7-TY10 (TYPER.md §10), none decided.
+
+## 2026-11-05: oi's native front end, T7 and T8 continued (branch ocaml-typer2)
+
+Later the same day, on the same branch: the stdlib's units left after the module system were blocked by Printf's
+formats and the GADTs they rest on, so these parts of T9 and T10 were ported from the same tarball (TYPER.md §9,
+"Pulled forward from T9 and T10"): GADTs with local equations and explicit polymorphism (typing/typecore.ml's
+type_newtype and its pattern mode, typedecl.ml's GADT constructors), type extensions (typedecl.ml's
+transl_type_extension, translmod.ml's extension constructors), the format parser of stdlib/camlinternalFormat.ml and
+typecore.ml's type_format (arbace/repr/ocaml/typer/fmt.ae), type_argument's elimination of optional arguments, lazy
+and array patterns from lambda/matching.ml, immutable arrays, atomics, Bigarray's specialization, the effect
+primitives. Results replacing the entry above's: test/ocaml/typer/ 52 of 52 at every level (types, raw and simplified
+Lambda, oi's runs); the stdlib 64 of 71 units equal natively (the 7 others: polymorphic variants, objects, GADT-aware
+exhaustiveness, recursive values); the probe 31 of 36. The alternative of stopping at the module system was weighed:
+T8's exit criterion is the whole stdlib, and T11, decided next, needs corpus runs the day's rules exclude.

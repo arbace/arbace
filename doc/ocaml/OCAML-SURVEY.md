@@ -1913,6 +1913,6 @@ Proposals TY1-TY6 there.
 ## As built: oi's native front end, T7 and T8 (2026-11-05)
 
 On the branch `ocaml-typer2`: Simplif (T7) and the module system with the stdlib typed natively unit by unit (T8),
-doc/ocaml/TYPER.md §9: 48 of 48 samples equal at every level (types, raw and simplified Lambda, oi's runs), the
-oracle's dumps committed (TY2), the stdlib's units equal natively counted by `bin/oi stdlib-check`, the probe 17 of
-36; proposals TY7-TY10 (TYPER.md §10).
+doc/ocaml/TYPER.md §9: 52 of 52 samples equal at every level (types, raw and simplified Lambda, oi's runs), the
+oracle's dumps committed (TY2), the stdlib 64 of 71 units equal natively (`bin/oi stdlib-check`; GADTs, formats and
+type extensions pulled forward from T9-T10 for it), the probe 31 of 36; proposals TY7-TY10 (TYPER.md §10).

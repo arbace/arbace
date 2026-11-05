@@ -1,7 +1,8 @@
 # oi's native front end: OCaml's typer and Translcore ported
 
 Status: the first slice (T1-T6) on the branch `ocaml-typer`, then T7 (Simplif) and T8 (the module system, the stdlib
-typed natively unit by unit) on `ocaml-typer2`, 2026-11-05 (§9, "As built: T7 and T8"). From `ocaml-native`, whose
+typed natively unit by unit, with GADTs, formats and type extensions pulled forward from T9-T10 for it) on
+`ocaml-typer2`, 2026-11-05 (§9, "As built: T7 and T8"). From `ocaml-native`, whose
 native reader gives the Parsetree as Arbace data. The route of OC4 (b) (doc/ocaml/OCAML-SURVEY.md §6.4): port OCaml 5.5.0's `typing/` and
 `lambda/`'s Translcore with Matching, so that the native Parsetree becomes Lambda in Arbace and oi stops needing the
 host's `ocamlc` for a program. Light rules (the day's): no gate, no Arbace build, no re-seed; every run on main's stage 0
@@ -16,7 +17,7 @@ compiler-libs:
 | use | today | after this slice |
 |---|---|---|
 | a program's Lambda (`bin/oi run`, `check`) | `ocdump --mode lambda --simplify` | `bin/oi run-native`: Arbace (the core language and the module system; Simplif's output since T7) |
-| the stdlib's Lambda (`bin/oi stdlib`) | ocamlc builds the `.cmi`, ocdump dumps each unit | still ocamlc's (TY5); `bin/oi stdlib-check` types 48 of the 71 units natively, equal (T8) |
+| the stdlib's Lambda (`bin/oi stdlib`) | ocamlc builds the `.cmi`, ocdump dumps each unit | still ocamlc's (TY5); `bin/oi stdlib-check` types 64 of the 71 units natively, equal (T8) |
 | the toplevel's phrases (`bin/oi repl`, `bin/lib/oi/phrase`) | ocdump types and lowers each phrase | unchanged (T11) |
 | the judge (types, Lambda, runs) | ocdump `--mode types`, `--mode lambda`, the toplevel | unchanged: the oracle stays the judge |
 
@@ -126,7 +127,7 @@ of these, in `test/ocaml/divergences.edn`'s format:
 |---|---|---|---:|
 | T1-T6 (this) | types, env, parmatch, typecore, lambda (Switch), matching, translcore; driver and check | 36 of 36 samples: types, Lambda, oi runs | done |
 | T7 Simplif | `lambda/simplif.ml`: `simplify_exits`, `simplify_lets` (`mutlet`), `simplify_local_functions`; the judge against `-dlambda` too | the samples equal to `ocdump --simplify` | done (§9) |
-| T8 the module system | Typemod (structures, signatures, inclusion and coercions, strengthening, applicative paths), functors (`Map.Make`, `Set.Make`, `Hashtbl.Make`), `open`/`include`/local opens, recursive modules; Translmod complete; then the stdlib's own `.ml` typed and translated natively | `bin/oi stdlib --native`: every unit's Lambda equal to the oracle's (canonical), oi's check on it unchanged | the module system done, the stdlib 48 of 71 (§9); the rest wait on T9 and T10 |
+| T8 the module system | Typemod (structures, signatures, inclusion and coercions, strengthening, applicative paths), functors (`Map.Make`, `Set.Make`, `Hashtbl.Make`), `open`/`include`/local opens, recursive modules; Translmod complete; then the stdlib's own `.ml` typed and translated natively | `bin/oi stdlib --native`: every unit's Lambda equal to the oracle's (canonical), oi's check on it unchanged | the module system done, the stdlib 64 of 71 (§9); the rest wait on T9's objects and variants and T10 |
 | T9 formats, variants, objects | `format6` typing of literals (Typecore's `type_format`, CamlinternalFormatBasics), polymorphic variants (rows, `Tvariant`, Matching's `divide_variant`), objects and classes (Typeclass, Translobj, Translclass) | the testsuite's `basic/` and `typing-objects/` run programs through the native path | 6-10 |
 | T10 the rest of the core | GADTs and locally abstract types, existentials, first-class modules, effect handlers (`transl_handler`), lazy and array patterns, inline records, labelled tuples, `let` operators, optional-argument elimination | the probe's refusals gone | 6-10 |
 | T11 the corpus and the toplevel | `bin/oi check --native` over the run corpus with the classes of §5; `bin/oi repl --native` (phrases typed here, Genprintval's value printing from types) | none failing, every non-pass classed; repl-check without ocamlc | 4-6 |
@@ -183,7 +184,7 @@ TY1-TY6, each as recommended: the raw Lambda judged until T7, then both; the sam
 :inline :tmc}`): Translcore's functions do not fuse their arity, Translmod's functors do. `bin/oi typer-check` judges
 the raw Lambda against `-drawlambda`'s and Simplif's against `-dlambda`'s, and runs the simplified one on oi.
 
-**TY2, the oracle's dumps committed** (`test/ocaml/typer/oracle/`, 48 samples' types, raw and simplified Lambda, 516
+**TY2, the oracle's dumps committed** (`test/ocaml/typer/oracle/`, 52 samples' types, raw and simplified Lambda, 590
 KB). With ocdump present they are dumped afresh and compared (a deliberately altered dump fails the check: tried);
 `OI_TYPER_NO_OCDUMP=1` (or no compiler-libs) judges on the committed dumps alone, the oi runs skipped. TY3's gate step
 is not added here (a light essential step `bin/oi typer-check` with `OI_TYPER_NO_OCDUMP=1`, about 25 s: for main's
@@ -214,32 +215,42 @@ stdlib/Compflags) is typed and translated by Arbace, coerced to its own interfac
 simplified Lambda compared with bin/oi stdlib's in the canonical form; the units that are equal replace the oracle's in
 `.tmp/oi/lib-native`, and the typer's samples run again on oi with them. `bin/oi stdlib` stays the library oi runs on.
 
+**Pulled forward from T9 and T10, for the stdlib.** The stdlib's remaining units after the module system were blocked
+by Printf's formats and the GADTs they rest on, so these parts of T9 and T10 were ported too (the rest of T9 and T10
+stays to do): GADTs (constructors with their own result types, existentials made abstract in patterns, local equations
+for locally abstract types in cases, parameters and `let K = e in`, `fun (type a)`, `let f : type a. ...`, explicit
+polymorphism with polymorphic recursion), type extensions (`type t += ...`, Typedecl.transl_type_extension, Translmod's
+extension constructors), Printf's formats (`typer.fmt`: CamlinternalFormat's parser and Typecore.type_format, a format
+literal typed as CamlinternalFormatBasics' constructors), coercions `(e :> t)` without the subtyping check (the program
+is one ocamlc accepts), optional arguments eliminated in arguments (Typecore.type_argument), lazy and array patterns
+(Matching's divide_lazy, divide_array, combine_array), immutable arrays, the effect primitives, atomic record fields
+with `[%atomic.loc]`, `[%extension_constructor]`, Bigarray's primitives specialized by kind and layout, `_ t` for a
+constructor of any arity, type paths compared after normalization (through aliases). Samples t49-t52 cover them.
+
 **Results (2026-11-05, stage 0 of main, one process under 1.5 GB)**:
 
 | set | files | types equal | raw Lambda equal | simplified Lambda equal | oi's run equal |
 |---|---:|---:|---:|---:|---:|
-| `test/ocaml/typer/` (48 samples: 36 of the first slice, 3 for Simplif, 9 for the module system and the stdlib's needs) | 48 | 48 | 48 | 48 | 48 |
-| the stdlib's units (`bin/oi stdlib-check`) | 71 | - | - | 48 | the 48 samples on the native units: 48 |
-| probe: `testsuite/tests/basic/`'s first 40 files, the 36 ocamlc accepts | 36 | 18 | 17 | 17 | - |
+| `test/ocaml/typer/` (52 samples: 36 of the first slice, 3 for Simplif, 9 for the module system and the stdlib's needs, 4 for GADTs, extensible variants, formats, eliminated optional arguments) | 52 | 52 | 52 | 52 | 52 |
+| the stdlib's units (`bin/oi stdlib-check`) | 71 | - | - | 64 | the samples on the native units: all equal |
+| probe: `testsuite/tests/basic/`'s first 40 files, the 36 ocamlc accepts | 36 | 31 | 31 | 31 | - |
 
-The 12 new samples were written after the code they test and passed on their first or second run but two
+The 16 new samples were written after the code they test and passed on their first or second run but two
 (`t45_stdlib_features` found the missing inline-record flag on constructors; `t46_first_class_modules` the 5.5
-Parsetree's package type inside `Ppat_unpack` and an escaping local type). The stdlib's units equal natively (48): Stdlib, CamlinternalLazy and Stdlib's Either, Obj, Lazy, Seq, Option, Pair,
-Result, Bool, Char, Uchar, List, Int, Array, Bytes, String, Unit, Marshal, Float, Int32, Int64, Nativeint, Lexing,
-Parsing, Repr, Set, Map, Stack, Queue, Buffer, Mutex, Condition, Semaphore, Fun, Digest, Hashtbl, Weak, Callback,
-Pqueue, Ephemeron, Complex and the six `*Labels` units with StdLabels. The others, each with the slice's reason: Printf's formats (`format6` typing of literals,
-T9: Arg, Gc, Printexc, Scanf, Filename, Printf; and the GADTs they rest on), GADTs (T10: CamlinternalFormatBasics,
-CamlinternalFormat, Bigarray, Domain, Sys, Type, Random through Bigarray's kinds, In_channel and Out_channel through
-Bigarray), objects (T9: Oo, CamlinternalOO, Dynarray's object type), type extensions and effects (T10: Effect, Format's
-`type stag += ...`), `[%atomic.loc]` (Atomic), Iarray's `iarray` primitives, recursive values (CamlinternalMod's `let
-rec l = lazy ...`, class `typer-recursive-values`). The probe's 19 others: 12 Printf formats, 2 GADT constructors, 1
-locally abstract type, 1 class, 1 object, 1 optional-argument elimination, 1 recursive values (`tailcalls`: its
-signature is now equal).
+Parsetree's package type inside `Ppat_unpack` and an escaping local type). The stdlib's 7 units not equal, each with
+its reason: CamlinternalFormatBasics (a polymorphic variant in one annotation, T9), Format (a polymorphic variant
+pattern, T9), CamlinternalOO, Oo and Dynarray (objects, T9), CamlinternalFormat (types and Lambda but for one match:
+GADT-aware exhaustiveness, Parmatch's check of counter-examples against the GADT equations, is not ported, so a match
+OCaml finds total gets a Match_failure handler; T10), CamlinternalMod (`let rec l = lazy ...`, recursive values:
+Value_rec_compiler and Rec_check, TY10). The probe's 5 others: a class, an object, polymorphic variants, two recursive
+values (`recvalues`, `tailcalls`); and `patmatch`'s Lambda is equal but its signature prints a polymorphic record field
+(`'a. 'a cell -> ...`, T10).
 
-Speed: a sample about 0.1 to 0.5 s once the stdlib's interfaces are read (about 3 s); a stdlib unit 0.1 to 4 s;
-`bin/oi typer-check` about 45 s with the fresh dumps and the oi runs, `bin/oi stdlib-check` about 4 minutes.
+Speed: a sample about 0.1 to 0.5 s once the stdlib's interfaces are read (about 3 s); a stdlib unit 0.1 to 4 s
+(CamlinternalFormat 13 s); `bin/oi typer-check` about a minute with the fresh dumps and the oi runs, `bin/oi
+stdlib-check` about 4 minutes.
 
-Size: 6,300 lines of Arbace under `arbace/repr/ocaml/typer/` (and the driver, 270) for what they port.
+Size: about 7,200 lines of Arbace under `arbace/repr/ocaml/typer/` (and the driver, 270) for what they port.
 
 ## 10. Proposed (TY7-TY10; options with costs, a recommendation each, none decided)
 
@@ -251,10 +262,11 @@ Size: 6,300 lines of Arbace under `arbace/repr/ocaml/typer/` (and the driver, 27
 - **TY8 The stdlib check in the gate.** (a) `bin/oi stdlib-check` in `--full` with OCaml's steps, judged against a
   recorded list of the units expected equal (a unit that regresses fails, a new one passes); (b) in the essential gate
   (4 minutes, ocamlc needed for the oracle's library); (c) none until T8 is complete. *Recommended: (a)*.
-- **TY9 What comes next.** (a) T9's formats with T10's GADTs first (CamlinternalFormatBasics, then type_format: 12 of
-  the probe's 19 and 9 stdlib units), then the decided T11; (b) T11 now (the run corpus through the native path, the
-  classes of §5), formats after; (c) GADTs alone first (6 units). *Recommended: (a)*: the probe and the stdlib show
-  formats as the one blocker that matters, and T11's corpus would class most of its programs `typer-outside-slice`
-  for them.
+- **TY9 What comes next.** Formats and GADTs were pulled forward today (§9) because the stdlib needed them. (a) the
+  decided T11 next (the run corpus through the native path, the classes of §5, `bin/oi repl --native`), then what is
+  left of T9 (polymorphic variants, objects and classes) and T10; (b) polymorphic variants first (2 stdlib units, a
+  common feature of the opam corpus), then T11; (c) finish the stdlib first (variants, objects, GADT exhaustiveness,
+  recursive values: the last 7 units). *Recommended: (b)*: T11's corpus would class many of its programs
+  `typer-outside-slice` for polymorphic variants, which a day or two removes.
 - **TY10 Recursive values.** (a) port Rec_check's classification and Value_rec_compiler with T10; (b) now, as part of
   T8's stdlib (CamlinternalMod and the probe's `tailcalls`). *Recommended: (a)*.
