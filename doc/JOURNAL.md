@@ -431,3 +431,21 @@ smaller parts), each on a branch of its own, held for after the tag (the merge p
 - `bin/hsi cnodes`: the integration's race fixed, `bin/ci musl ensure` under a lock (`.tmp/hsi/cnodes-musl.lock`), a log per
   job; two runs at once gave byte-identical node programs. Considered: preparing musl once in `bin/lib/hsi/check` before
   the jobs (only the check would be safe; the lock covers every caller).
+
+## 2026-11-05: HES74 (c), the compiled level on GHC's -O1 STG, on branch haskell-o1
+
+- Decided by the user (HES74: (c) first, then (a)). The helper unchanged: `tools/hsdump stg --ghc -O1` dumps the program's
+  modules with GHC's optimiser on, against the installed `-O2` interfaces; the libraries' dumps were already the installed
+  units' `-O2` builds (HES6 (a)), so every worker and specialisation an `-O1` program names is there. `bin/hsi check --opt O1`
+  (own dump cache, references, results, record, and `test/haskell/divergences-O1.edn` with `:eval-order`), `bin/hsi
+  record-ref --opt O1` (`test/haskell/ref-ghc914-O1.edn`: the essential list and five benchmarks recorded), `HSI_OPT=O1` for
+  `bin/hsi aot run`. hsi's own level stays on `-O0`. Considered: dumping `-O1` for hsi too (rejected by the decision: the
+  interpreter is the reference); a second library dump at `-O1` (not needed: the installed libraries are `-O2`).
+- Two runtime fixes the `-O1` code showed: `runSlice` ends the slice after `ret` when a compiled case continuation spent
+  the budget (an inline `yield#` was lost: MVarOrder, ThrowMasked); `integer_gmp_gcd_word` in hsi's C table (the installed
+  gmp backend's `gcdWord`, inlined at `-O1`). GHC's own `-O0`/`-O1` references differ on five synthetic programs, all
+  constant folding (negative zero, `float2Int#` out of range), which the compiled level matches at `-O1`.
+- Measured (one run each, the same host one after the other): compiled `-O1` against compiled `-O0` 6.7-10.3 times (nfib
+  0.53 s, tak 2.23, rfib 2.98, fibheaps 3.97, sphere 2.39), 6.0-8.7 times HES73's numbers: the target of 3 met. `bin/hsi check
+  --aot --opt O1` on the essential list: 123 of 123, all the same as hsi on the same dumps, the controls failing; after the
+  machine's change `bin/hsi check --aot` (`-O0`) and `bin/hsi check` (hsi) on the essential list 123 of 123 each. Details: doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES74 (c)".

@@ -1944,3 +1944,82 @@ every `<` on `Int` (`ltInt`) ran as nodes. The generated functions themselves we
 ## Decided (2026-11-05, the user: HES74, HES75)
 
 HES74: (c) -O1 STG for the compiled level first (evaluation-order-dependent programs a class), then (a) frameless evaluation of a compiled case's scrutinee; HES75 (a): the library packages compiled once per runtime key at night with HES70.
+
+## As built: HES74 (c) (write-ahead)
+
+Built 2026-11-05 on branch `haskell-o1` from `haskell-speed` (`5615a0eb`), light work by day (2 jobs, no gate, no lock,
+every process under 2.5 GB). The compiled level takes GHC's `-O1` STG; hsi's own level stays on `-O0`, the reference.
+
+### What is in the tree
+
+- **The dumps at -O1** (no change to the helper: `tools/hsdump stg --ghc -O1`, the same serializer with GHC's optimiser on,
+  the program's modules compiled against the libraries' installed `-O2` interfaces, so their unfoldings, workers (`$w...`)
+  and specialisations are inlined or called by name). The libraries' dumps are unchanged: they were already `-O2` builds of
+  the installed units (HES6 (a)), so every name an `-O1` program calls is a closure of `.tmp/hsi/dumps`; none was missing on
+  the essential list or the benchmarks.
+- **`bin/hsi check --opt O1`** (`bin/lib/hsi/check`): the programs dumped at `-O1` (their own cache, `.tmp/hsi/progs-O1`,
+  the key with the level), the stubs probe at `-O1` too, results in `.tmp/hsi/check[-aot]-O1`, judged against
+  `test/haskell/ref-ghc914-O1.edn`, `--record` into `test/haskell/check-hsi[-aot]-O1.edn`; a non-pass's class looked up in
+  `test/haskell/divergences-O1.edn` first, then in `test/haskell/divergences.edn`. With `--aot` the profile's run (the
+  closures it enters) is hsi on the same `-O1` dumps, so `:vs-hsi` still compares the compiled code with the interpreter on
+  one STG (diffcheck's kind); `--opt O1` without `--aot` runs hsi on `-O1` dumps (allowed, not the reference). `bin/hsi
+  aot run` takes `HSI_OPT=O1`. Makefile: `hsi-check-aot-o1`, `hsi-record-ref-o1`.
+- **`bin/hsi record-ref --opt O1`**: GHC's `-O1` builds run as the `-O0` ones are, into `test/haskell/ref-ghc914-O1.edn`
+  (recorded: the 123 programs of the essential list and the five benchmarks, 128 lines, `--only`; the other corpora's lines
+  are night work). Against `-O0`'s references five differ, all in GHC's own `-O1` constant folding, not evaluation order:
+  `synthetic/class-num`, `class-enum`, `class-real-fractional`, `class-realfrac` (`0 + (-0.0)` folded to `-0.0`, `x * 0`'s
+  sign) and `synthetic/primops-float` (`float2Int#` of an out-of-range literal folded to another value); the compiled
+  level passes all five against `-O1`'s references (the dumped STG is already folded).
+- **`:eval-order`** (`test/haskell/divergences-O1.edn`, by design): a program whose output depends on when or whether a
+  thunk is forced (`trace`, `unsafePerformIO`, which of two imprecise exceptions is raised) may differ between the STG
+  GHC dumps and the code GHC's `-O1` build runs after it; hsi follows the dumped STG's order exactly, and such programs keep
+  `-O0` (hsi's level) as their reference. No member on the essential list: `samples/Trace` and the exception tests pass.
+- **Two fixes the -O1 code needed** (read back into the forms by `bin/hsi runtime read`):
+  - *A slice ends after a compiled continuation* (`machine.ae`, `runSlice`): at `-O1`, `yield#`, `fork#` and the MVar
+    primops sit inline in the program's compiled code, and a case continuation the machine's `ret` runs may be compiled
+    code that runs a `yield#` (the budget set to 0) and returns; `runSlice`'s return path did not look at the budget (the
+    interpreter's continuation is an expression evaluated on the eval path, which does), so the yield was lost and a forked
+    thread missed its turn (`samples/MVarOrder`: the reader queued after the put, `BlockedIndefinitelyOnMVar`;
+    `samples/ThrowMasked`). Now the slice ends after `ret` when the budget is spent (not while blocked, not in a
+    transaction), as after an eval. `-O0` code was not affected (its `yield#` is inside `GHC.Conc`'s wrapper).
+  - *`integer_gmp_gcd_word`* (`ffi.ae`): the installed `ghc-internal` is built with the gmp backend, and `-O1` inlines its
+    `gcdWord` into the program (`synthetic/class-integral`); hsi's table gains it (Euclid on two words).
+
+### Results
+
+- **Speed** (wall seconds, one run each, one after the other on the same host, its load about 15 of 64 cores; the same
+  programs and arguments as HES73's table; hsi and the compiled executables of this branch's final runtime, each built
+  from its level's profile):
+
+  | program | hsi -O0 | compiled -O0 | hsi -O1 | compiled -O1 | compiled -O1 / compiled -O0 | / HES73's compiled | / HE8 hsi |
+  |---|---|---|---|---|---|---|---|
+  | nfib 32 | 6.67 | 4.69 | 1.21 | 0.53 | 8.8 | 7.6 | 11.0 |
+  | imaginary/tak | 29.15 | 22.94 | 5.81 | 2.23 | 10.3 | 8.7 | 11.6 |
+  | imaginary/rfib | 29.14 | 19.97 | 5.72 | 2.98 | 6.7 | 6.0 | 8.7 |
+  | spectral/fibheaps | 33.61 | 31.00 | 6.07 | 3.97 | 7.8 | 6.8 | 7.5 |
+  | spectral/sphere | 24.41 | 23.07 | 4.40 | 2.39 | 9.7 | 7.9 | 9.3 |
+
+  The target (3 times or better over HES73's compiled level) is met on all five: 6.0 to 8.7 times HES73's own numbers, 6.7
+  to 10.3 times this host's `-O0` compiled runs measured beside them (the host was busier than at HES73's run: its `-O0`
+  compiled numbers are 12-22 % slower here). GHC's own `-O0` to `-O1` gap on these programs is 10 to 17 times (the
+  references' run seconds: nfib 0.35 to 0.03, tak 1.32 to 0.10, rfib 1.36 to 0.08, fibheaps 1.69 to 0.17, sphere 1.17 to
+  0.11); hsi's own gain from the same dumps is 5.0 to 5.5 times, and the compiled code is another 1.5 to 2.6 times over hsi
+  on them (HES73's was 1.1 to 1.45 at `-O0`: the `-O1` code's strict worker loops on `Int#` are where the typed locals and
+  direct calls pay). A first series before the slice fix gave the same picture (compiled `-O1` 0.53, 2.40, 3.66, 3.86,
+  2.41 s): the fix costs nothing measurable.
+- **Correctness** (2 jobs): `bin/hsi check
+  --aot --opt O1 --corpus samples,synthetic,testsuite-core --only @test/haskell/hsi/essential.txt`: **123 of 123** equal to
+  GHC's `-O1` runs, **all 123 the same as hsi's** on the same dumps, the four controls failing (recorded,
+  `test/haskell/check-hsi-aot-O1.edn`; 3 min 47 s, peak 1.3 GB; a first run before the fixes, every library package
+  generated and compiled afresh: 8 min 32 s, peak 1.6 GB, 120 of 123, MVarOrder and ThrowMasked failing and class-integral stopping
+  at `integer_gmp_gcd_word`, which led to the two fixes). After the machine's change, `-O0`: `bin/hsi check --aot` on the
+  essential list 123 of 123, all the same as hsi (12 min 44 s, peak 2.5 GB, its library packages compiled afresh), and
+  `bin/hsi check` (hsi) 123 of 123; `bin/hsi runtime check`: the same forms. The benchmarks pass at both levels.
+
+### What is left
+
+- The `-O1` references of the other corpora (samples, synthetic and testsuite-core beyond the essential list, nofib),
+  `bin/hsi record-ref --opt O1` (the 128 programs took 65 s at 4 jobs) and `bin/hsi check --aot --opt O1` over them: night
+  work, with HES75 (a)'s library packages compiled once per runtime key (the first essential run after a runtime change
+  generates and compiles them: 8.5 minutes at 2 jobs, peak 1.6 GB).
+- HES74 (a), frameless evaluation of a compiled case's scrutinee, as decided: next.
