@@ -72,17 +72,18 @@ oir_stdlib_get() {
   echo "pack $(oracle_pin_sha "$OIR_STDLIB")" > "$LIB/key"
 }
 
-# oir_progs_make DIR IDS CMD: the pack of the programs in DIR/ocaml-lambda-progs (members ID.ae), IDS the "ID.ae<TAB>KEY" lines, the members
-# the old pack holds and the new lines do not name kept in place (a partial recording extends the pack)
-oir_progs_make() {
-  local dir=$1 ids=$2 cmd=$3 u id k
-  if [ -f "$OIR_PROGS" ] && [ -f "$(oracle_manifest "$OIR_PROGS")" ]; then
-    u=$(oracle_unpack "$OIR_PROGS") || return 1
+# oir_pack_make PIN NAME DIR IDS CMD [dirs]: the pack NAME from DIR/NAME, IDS the "MEMBER<TAB>KEY" lines; the members the old pack holds and the new
+# lines do not name are kept in place (a partial recording extends the pack); with `dirs` a member is replaced with its directory's
+oir_pack_make() {
+  local pin=$1 name=$2 dir=$3 ids=$4 cmd=$5 mode=${6:-} u id k
+  if [ -f "$pin" ] && [ -f "$(oracle_manifest "$pin")" ]; then
+    u=$(oracle_unpack "$pin") || return 1
     while IFS=$'\t' read -r id k _; do
       case $id in '#'*|'') continue ;; esac
-      grep -q "^$id	" "$ids" && continue
-      mkdir -p "$dir/ocaml-lambda-progs/$(dirname "$id")"; cp "$u/ocaml-lambda-progs/$id" "$dir/ocaml-lambda-progs/$id"; printf '%s\t%s\n' "$id" "$k" >> "$ids"
-    done < "$(oracle_manifest "$OIR_PROGS")"
+      if [ "$mode" = dirs ]; then grep -q "^$(dirname "$id")/" "$ids" && continue; else grep -q "^$id	" "$ids" && continue; fi
+      mkdir -p "$dir/$name/$(dirname "$id")"; cp "$u/$name/$id" "$dir/$name/$id"; printf '%s\t%s\n' "$id" "$k" >> "$ids"
+    done < "$(oracle_manifest "$pin")"
   fi
-  oracle_make "$OIR_PROGS" "$dir" "$ids" "$cmd" ocaml
+  oracle_make "$pin" "$dir" "$ids" "$cmd" ocaml
 }
+oir_progs_make() { oir_pack_make "$OIR_PROGS" ocaml-lambda-progs "$1" "$2" "$3"; }
