@@ -247,3 +247,7 @@ it). (b) `bin/cppi codegen-check` as an essential step once C++'s crop has a row
   models; nothing ported in this slice. Its output (`clang++ -O0 -S -emit-llvm` on the samples) is the oracle.
 - The native parser's change: `arbace/repr/cpp/parse.ae` keeps a function entity's printed type (`:qt`) and its C linkage
   (`:clink`, the dynamic `*linkage*` bound in `parse-linkage`); the tree and the forms are unchanged.
+
+## Decided (2026-11-05, the user)
+
+P1-P7, each as recommended: LLVM forms as the output; the native tree as input now, C++ forms at G6; SysV's classification in G2; nounwind with G2; the headers in dependency order; clang's code (Apache-2.0 with the LLVM exception) ported for templates and the ABI classification only, recorded in LICENSE.md and doc/ARBACE.md; codegen-check essential once C++ has its row.
