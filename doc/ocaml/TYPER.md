@@ -270,3 +270,7 @@ Size: about 7,200 lines of Arbace under `arbace/repr/ocaml/typer/` (and the driv
   `typer-outside-slice` for polymorphic variants, which a day or two removes.
 - **TY10 Recursive values.** (a) port Rec_check's classification and Value_rec_compiler with T10; (b) now, as part of
   T8's stdlib (CamlinternalMod and the probe's `tailcalls`). *Recommended: (a)*.
+
+## Decided (2026-11-05, the user: TY7-TY10)
+
+TY7 (c): ocamlc's stdlib Lambda stays oi's library until every unit is native; TY8 (a): bin/oi stdlib-check in --full against a recorded list of the units expected equal; TY9 (b): polymorphic variants next, then T11 (amending TY6's order); TY10 (a): recursive values with T10.
