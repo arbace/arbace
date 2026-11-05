@@ -851,11 +851,18 @@
               [dfun (mapv (fn [[pc pts]] [pc (mapv #(subst m %) pts)]) ctx)])))
         @*insts*))
 
+(def ^:dynamic *self-givens* nil) ; an instance's own dictionary and its superclasses, for its methods
+
 (defn- solve-with-givens!
-  "Solve the wanteds of a checked binding with its givens; the unsolved are deferred"
+  "Solve the wanteds of a checked binding with its givens; the unsolved are deferred. In an instance's method a
+  constraint the instances solve to a dictionary variable is solved so, else by the instance's own dictionary's
+  superclasses when they give it (as GHC's solver chose on the corpora)"
   [wanteds givens]
   (doseq [w wanteds]
-    (if-let [term (solve-pred (:pred w) givens 0)]
+    (if-let [term (let [t (solve-pred (:pred w) givens 0)]
+                    (if (and *self-givens* (not (and (seq? t) (contains? '#{v lv} (first t)))))
+                      (or (solve-pred (:pred w) *self-givens* 0) t)
+                      t))]
       (swap! *evidence* assoc (:ev w) term)
       (swap! *wanteds* conj w))))
 
@@ -1117,14 +1124,15 @@
         self-term (if (empty? params) (list 'v dfun) (list 'app (list 'v dfun) params))
         ;; the instance's own dictionary is a given too, its superclasses with it (GHC selects a superclass of the
         ;; instance being defined rather than solving it again from the instances)
-        givens (super-closure (conj (mapv vector ctx params) [[cls ts] self-term]))
+        givens (super-closure (mapv vector ctx params))
+        self-givens (super-closure (conj (mapv vector ctx params) [[cls ts] self-term]))
         info (get @*classes* cls)
         defined (into {} (keep (fn [b] (when-let [n (bind-name b)] [(occ n) b])) binds))
         methods (for [mn (:methods info)]
                   (let [cm (fresh-lv (str "$c" (occ mn)))
                         b (get defined (occ mn))]
                     [cm (if b
-                          (check-method env b (method-type mn cls ts) givens params)
+                          (binding [*self-givens* self-givens] (check-method env b (method-type mn cls ts) givens params))
                           (if-let [dm (get (:defaults info) mn)]
                             ;; a default method with an INLINE pragma is inlined, as GHC does even at -O0
                             (let [d (if (empty? params) (list 'v dfun) (list 'app (list 'v dfun) params))
