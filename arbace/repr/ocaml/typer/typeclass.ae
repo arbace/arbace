@@ -112,6 +112,12 @@
   (doseq [[_ k _] (first (ty/flatten-fields (object-fields (:self @sign))))]
     (when (= :private (ty/field-kind-repr k)) (ty/link-kind! k (atom :absent)))))
 
+(defn complete-class-signature!
+  "Typeclass.complete_class_signature: updated, its private methods hidden"
+  [sign]
+  (update-class-signature! sign)
+  (hide-private-methods! sign))
+
 (defn close-class-signature!
   "Ctype.close_class_signature: false when the self type has the dummy method"
   [sign]
@@ -209,7 +215,7 @@
                (let [[_ over scl super] d
                      parent (*class-expr* cl-num val-env met-env scl)
                      psign (signature-of-class-type (:type parent))
-                     _ (update-class-signature! psign)]
+                     _ (complete-class-signature! psign)]
                  (inherit-class-signature! sign psign true)
                  (let [ivars (mapv (fn [[label _]] [label (ty/ident-create label)]) (reverse (sort-by first (:vars @psign))))
                        super-meths (mapv (fn [l] [l (ty/ident-create l)])
@@ -345,6 +351,32 @@
 
 (defn generalize-class-type! [params cty] (run! ty/generalize (concat params (class-type-types cty))))
 
+(defn limited-generalize!
+  "Ctype.limited_generalize: of the nodes of the types above the current level, the row variable ty0 and the nodes
+  that contain it (or a generic node) made generic, the others lowered to the current level"
+  [ty0 types]
+  (let [graph (java.util.IdentityHashMap.) roots (atom []) ty0 (ty/repr ty0) lv @ty/current-level]
+    (letfn [(inverse [pty t]
+              (let [t (ty/repr t)]
+                (if-let [ps (.get graph t)]
+                  (swap! ps into pty)
+                  (when (> (ty/level t) lv)
+                    (.put graph t (atom (vec pty)))
+                    (when (or (= ty/generic-level (ty/level t)) (identical? t ty0)) (swap! roots conj t))
+                    (run! #(inverse [t] %) (ty/children (ty/desc t)))))))
+            (gen-parents [root t]
+              (when (or root (not= ty/generic-level (ty/level t)))
+                (ty/set-level! t ty/generic-level)
+                (run! #(gen-parents false %) @(.get graph t))))]
+      (run! #(inverse [] %) types)
+      (run! #(gen-parents true %) @roots)
+      (doseq [t (vec (.keySet graph))] (when-not (= ty/generic-level (ty/level t)) (ty/set-level! t lv))))))
+
+(defn limited-generalize-class-type! [params cty]
+  (let [row (:row @(signature-of-class-type cty))]
+    (run! #(limited-generalize! row [%]) params)
+    (run! #(limited-generalize! row [%]) (class-type-types cty))))
+
 (defn- constructor-type
   "Typeclass.constructor_type"
   [constr cty]
@@ -409,7 +441,7 @@
           (let [fd (:pctf_desc f)]
             (case (fd 0)
               :Pctf_inherit (let [pt (class-type env (fd 1)) ps (signature-of-class-type pt)]
-                              (update-class-signature! ps)
+                              (complete-class-signature! ps)
                               (inherit-class-signature! sign ps false))
               :Pctf_val (let [[{lab :txt} mut virt sty] (fd 1)]
                           (add-instance-variable! sign false lab mut virt (env/transl-type env (cvars) sty)))
@@ -483,9 +515,9 @@
                      cl (class-expr cl-num val-env' met-env' virt scl')]
                  (mk [:Tcl_let rec vbs vals cl] (:type cl)))
       :Pcl_constraint (let [cl (class-expr cl-num val-env met-env virt (d 1))
-                            _ (update-class-signature! (signature-of-class-type (:type cl)))
+                            _ (complete-class-signature! (signature-of-class-type (:type cl)))
                             clty (class-type val-env (d 2))
-                            _ (update-class-signature! (signature-of-class-type clty))
+                            _ (complete-class-signature! (signature-of-class-type clty))
                             [vals meths concrs] (extract-constraints clty)
                             [_ t] (instance-class [] clty)]
                         (add-dummy-method! (signature-of-class-type t))
@@ -546,10 +578,10 @@
                                 (let [params (mapv (fn [[sty _]] (type-param vars sty)) (:pci_params scl))
                                       n (swap! class-num inc)
                                       e (binding [*class-vars* vars env/*shared-tyvars* vars] (class-expr (str n) env1 env1 (:pci_virt scl) (:pci_expr scl)))]
-                                  (update-class-signature! (signature-of-class-type (:type e)))
+                                  (complete-class-signature! (signature-of-class-type (:type e)))
                                   [params e]))
                               typ (:type cl-expr)
-                              _ (generalize-class-type! params typ)
+                              _ (limited-generalize-class-type! params typ)
                               sign (signature-of-class-type typ)
                               obj-path [:Pident (:obj-id c)]
                               ;; the object type's abbreviation: a closed instance
@@ -587,7 +619,8 @@
     (let [env (reduce (fn [e c]
                         (let [obj-path [:Pident (:obj-id c)]
                               d {:path obj-path :params (:obj-params c) :kind [:abstract] :manifest (:obj-ty c)
-                                 :arity (count (:obj-params c)) :variance (repeat :inv) :class-ghost true}]
+                                 :arity (count (:obj-params c)) :variance (repeat :inv) :class-ghost true
+                                 :hash (:hash (:decl c))}]
                           (env/add-decl! obj-path d)
                           (-> e
                               (assoc-in [:types (:name c)] obj-path)
@@ -606,9 +639,9 @@
                       [params typ] (ty/with-local-level
                                      (let [params (mapv (fn [[sty _]] (type-param vars sty)) (:pci_params scl))
                                            t (binding [*class-vars* vars env/*shared-tyvars* vars] (class-type env (:pci_expr scl)))]
-                                       (update-class-signature! (signature-of-class-type t))
+                                       (complete-class-signature! (signature-of-class-type t))
                                        [params t]))
-                      _ (generalize-class-type! params typ)
+                      _ (limited-generalize-class-type! params typ)
                       sign (signature-of-class-type typ)
                       obj-path [:Pident obj-id]
                       [obj-params obj-type] (instance-class params typ)
@@ -620,7 +653,7 @@
                       decl {:params params :type typ :path obj-path :virt (:pci_virt scl) :hash {:params hparams :manifest hty}}]
                   (run! ty/generalize (concat obj-params [obj-ty] hparams [hty]))
                   (env/add-decl! obj-path {:path obj-path :params obj-params :kind [:abstract] :manifest obj-ty
-                                           :arity (count obj-params) :variance (repeat :inv) :class-ghost true})
+                                           :arity (count obj-params) :variance (repeat :inv) :class-ghost true :hash (:hash decl)})
                   {:name n :ty-id ty-id :obj-id obj-id :decl decl}))
               scls)]
     [res (reduce (fn [e c] (-> e (assoc-in [:types (:name c)] [:Pident (:obj-id c)])
