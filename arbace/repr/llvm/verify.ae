@@ -41,7 +41,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value)
+(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value phase-debug*)
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
@@ -2006,7 +2006,117 @@
 (def ^:private di-type-kinds #{"DIBasicType" "DIDerivedType" "DICompositeType" "DISubroutineType" "DIStringType" "DIFixedPointType" "DISubrangeType"})
 (def ^:private di-file-checked #{"DICompileUnit" "DISubprogram" "DILocalVariable" "DIGlobalVariable" "DICompositeType" "DIDerivedType"})
 
+(declare check-di-node*)
+
+(defn- check-di-type-node
+  "visitDIDerivedType, visitDICompositeType, visitDISubrange, visitDIGenericSubrange, visitDISubroutineType and
+  visitDIBasicType (with visitDIType and visitDIScope) over the node `id`; true when the node is one of these kinds."
+  [id node]
+  (let [k (di-kind node) fs (di-fields node)
+        kind-of (fn [x] (when (and x (not= x 'null)) (or (di-kind (node-of x)) (when (md-ops x) "MDTuple"))))
+        given (fn [x] (and (some? x) (not= x 'null)))
+        type? (fn [x] (or (not (given x)) (contains? di-type-kinds (kind-of x))))
+        scope? (fn [x] (or (not (given x)) (contains? scope-kinds (kind-of x))))
+        tuple? (fn [x] (or (not (given x)) (= "MDTuple" (kind-of x))))
+        var? (fn [x] (#{"DILocalVariable" "DIGlobalVariable"} (kind-of x)))
+        expr? (fn [x] (= "DIExpression" (kind-of x)))
+        const? (fn [x] (or (integer? x) (vector? x)))
+        me [:md id]
+        fail (fn [msg & cs] (let [cs (keep #(cond (= % me) %
+                                                  (and (vector? %) (= :mdv (first %))) (when (given (second %)) %)
+                                                  :else %) cs)]
+                              (apply verr :di/node msg (if (seq cs) cs [:none]))))
+        tag (:tag fs)
+        flags (let [v (:flags fs)] (set (if (and (seq? v) (= '| (first v))) (rest v) (when (symbol? v) [v]))))
+        di-type (fn []
+                  (when-not (scope? (:scope fs)) (fail "invalid scope" me [:mdv (:scope fs)]))
+                  (when (and (given (:file fs)) (not= "DIFile" (kind-of (:file fs)))) (fail "invalid file" me [:mdv (:file fs)]))
+                  (when (and (not (given (:file fs))) (some? (:line fs)) (not (zero? (long (:line fs)))))
+                    (fail "line specified with no file" me (str (:line fs)))))
+        conflicting? (or (and (flags 'DIFlagLValueReference) (flags 'DIFlagRValueReference))
+                         (and (flags 'DIFlagTypePassByValue) (flags 'DIFlagTypePassByReference)))
+        bound-ok? (fn [x] (or (not (given x)) (const? x) (var? x) (expr? x)))]
+    (case k
+      "DIDerivedType"
+      (do (di-type)
+          (when-not ('#{DW_TAG_typedef DW_TAG_pointer_type DW_TAG_ptr_to_member_type DW_TAG_reference_type DW_TAG_rvalue_reference_type
+                       DW_TAG_const_type DW_TAG_immutable_type DW_TAG_volatile_type DW_TAG_restrict_type DW_TAG_atomic_type
+                       DW_TAG_LLVM_ptrauth_type DW_TAG_member DW_TAG_inheritance DW_TAG_friend DW_TAG_set_type DW_TAG_template_alias} tag)
+            (when-not (and (= tag 'DW_TAG_variable) (flags 'DIFlagStaticMember)) (fail "invalid tag" me)))
+          (let [x (:extraData fs)]
+            (cond
+              (= tag 'DW_TAG_ptr_to_member_type) (when-not (type? x) (fail "invalid pointer to member type" me [:mdv x]))
+              (= tag 'DW_TAG_template_alias) (when-not (tuple? x) (fail "invalid template parameters" me [:mdv x]))
+              ('#{DW_TAG_inheritance DW_TAG_member DW_TAG_variable} tag)
+              (when-not (or (not (given x)) (const? x) (some? (md-str x)) (= "DIObjCProperty" (kind-of x))
+                            (let [ops (md-ops x)] (and ops (= 1 (count ops)) (const? (first ops)))))
+                (fail "extraData must be ConstantAsMetadata, MDString, DIObjCProperty, or MDTuple with single ConstantAsMetadata operand" me [:mdv x]))))
+          (when-not (type? (:baseType fs)) (fail "invalid base type" me [:mdv (:baseType fs)]))
+          (when (and (contains? fs :dwarfAddressSpace) (not ('#{DW_TAG_pointer_type DW_TAG_reference_type DW_TAG_rvalue_reference_type} tag)))
+            (fail "DWARF address space only applies to pointer or reference types" me))
+          (let [z (:size fs)] (when-not (bound-ok? z) (fail "SizeInBits must be a constant or DIVariable or DIExpression")))
+          true)
+      "DICompositeType"
+      (do (di-type)
+          (when-not ('#{DW_TAG_array_type DW_TAG_structure_type DW_TAG_union_type DW_TAG_enumeration_type DW_TAG_class_type
+                       DW_TAG_variant_part DW_TAG_variant DW_TAG_namelist} tag)
+            (fail "invalid tag" me))
+          (when-not (type? (:baseType fs)) (fail "invalid base type" me [:mdv (:baseType fs)]))
+          (when-not (tuple? (:elements fs)) (fail "invalid composite elements" me [:mdv (:elements fs)]))
+          (when-not (type? (:vtableHolder fs)) (fail "invalid vtable holder" me [:mdv (:vtableHolder fs)]))
+          (when conflicting? (fail "invalid reference flags" me))
+          (when (some #(= 'null %) (md-ops (:elements fs))) (fail "DISubprogram contains null entry in `elements` field" me))
+          (when (flags 'DIFlagVector)
+            (let [es (md-ops (:elements fs))]
+              (when-not (and (= 1 (count es)) (= "DISubrange" (kind-of (first es))))
+                (fail "invalid vector, expected one element of type subrange" me))))
+          (when-let [tp (when (given (:templateParams fs)) (:templateParams fs))]
+            (let [ops (md-ops tp)]
+              (when-not ops (fail "invalid template params" me [:mdv tp]))
+              (doseq [op ops]
+                (when-not (#{"DITemplateTypeParameter" "DITemplateValueParameter"} (kind-of op))
+                  (fail "invalid template parameter" me [:mdv tp] [:mdv op])))))
+          (when (given (:discriminator fs))
+            (when-not (and (= "DIDerivedType" (kind-of (:discriminator fs))) (= tag 'DW_TAG_variant_part))
+              (fail "discriminator can only appear on variant part")))
+          (doseq [[f nm] [[:dataLocation "dataLocation"] [:associated "associated"] [:allocated "allocated"] [:rank "rank"]]]
+            (when (and (given (get fs f)) (not= tag 'DW_TAG_array_type)) (fail (str nm " can only appear in array type"))))
+          (when (and (= tag 'DW_TAG_array_type) (not (given (:baseType fs)))) (fail "array types must have a base type" me))
+          (let [z (:size fs)] (when-not (bound-ok? z) (fail "SizeInBits must be a constant or DIVariable or DIExpression")))
+          true)
+      "DISubrange"
+      (do (when-not (contains? #{nil 'DW_TAG_subrange_type} tag) (fail "invalid tag" me))
+          (when (and (given (:count fs)) (given (:upperBound fs))) (fail "Subrange can have any one of count or upperBound" me))
+          (when-not (bound-ok? (:count fs)) (fail "Count must be signed constant or DIVariable or DIExpression" me))
+          (when (and (integer? (:count fs)) (< (long (:count fs)) -1)) (fail "invalid subrange count" me))
+          (when-not (bound-ok? (:lowerBound fs)) (fail "LowerBound must be signed constant or DIVariable or DIExpression" me))
+          (when-not (bound-ok? (:upperBound fs)) (fail "UpperBound must be signed constant or DIVariable or DIExpression" me))
+          (when-not (bound-ok? (:stride fs)) (fail "Stride must be signed constant or DIVariable or DIExpression" me))
+          true)
+      "DIGenericSubrange"
+      (let [vx? (fn [x] (or (var? x) (expr? x)))]
+        (when (and (given (:count fs)) (given (:upperBound fs))) (fail "GenericSubrange can have any one of count or upperBound" me))
+        (when (and (given (:count fs)) (not (vx? (:count fs)))) (fail "Count must be signed constant or DIVariable or DIExpression" me))
+        (when-not (given (:lowerBound fs)) (fail "GenericSubrange must contain lowerBound" me))
+        (when-not (vx? (:lowerBound fs)) (fail "LowerBound must be signed constant or DIVariable or DIExpression" me))
+        (when (and (given (:upperBound fs)) (not (vx? (:upperBound fs)))) (fail "UpperBound must be signed constant or DIVariable or DIExpression" me))
+        (when-not (given (:stride fs)) (fail "GenericSubrange must contain stride" me))
+        (when-not (vx? (:stride fs)) (fail "Stride must be signed constant or DIVariable or DIExpression" me))
+        true)
+      "DISubroutineType"
+      (do (di-type)
+          (when (given (:types fs))
+            (when-not (md-ops (:types fs)) (fail "invalid composite elements" me [:mdv (:types fs)]))
+            (doseq [t (md-ops (:types fs))] (when-not (type? t) (fail "invalid subroutine type ref" me [:mdv (:types fs)] [:mdv t]))))
+          (when conflicting? (fail "invalid reference flags" me))
+          true)
+      nil)))
+
 (defn- check-di-node [id node]
+  (when-not (check-di-type-node id node)
+    (check-di-node* id node)))
+
+(defn- check-di-node* [id node]
   (let [k (di-kind node) fs (di-fields node)
         N (fn [f] [[:md id] [:mdv (get fs f)]])]
     (when fs
@@ -2157,8 +2267,27 @@
                                         items))))
           (:body o))))
 
+(def ^:dynamic ^java.util.List *errs2* nil)   ; the verification after StripDebugInfo (opt's second verifyModule)
+
+(defn- stripped-pass
+  "The DI nodes still reachable after StripDebugInfo, checked with their errors hard (into *errs2*)."
+  [forms]
+  (binding [*errs* *errs2*]
+    (let [left (stripped-reachable-md forms)]
+      (doseq [f forms :when (= (first f) 'llvm/meta) :let [id (second f) n (nth f 2)] :when (and (di-kind n) (.contains ^java.util.Set left id))]
+        (visiting (binding [*ctx* {:md id}] (check-di-node id n)))))
+    (doseq [i (range (.size *errs2*))]
+      (let [e (.get *errs2* i)] (.set *errs2* (int i) (ex-info (.getMessage ^Throwable e) (assoc (ex-data e) :llvm/verify :verifier/di)))))))
+
 (defn- phase-debug
   "Debug info checks: nothing here makes the module invalid (opt warns and strips), the first message is the result."
+  [forms]
+  (let [n0 (.size *errs*)]
+    (phase-debug* forms)
+    (when (some #(= "di" (namespace (:llvm/verify (ex-data %)))) (drop n0 (vec *errs*)))
+      (stripped-pass forms))))
+
+(defn- phase-debug*
   [forms]
   (let [reach (reachable-md forms)
         nodes (for [f forms :when (= (first f) 'llvm/meta) :let [n (nth f 2)] :when (and (di-kind n) (.contains ^java.util.Set reach (second f)))] [(second f) n])
@@ -2617,13 +2746,14 @@
             *meta* (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
             *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
             *errs* (java.util.ArrayList.)
+            *errs2* (java.util.ArrayList.)
             *renames* {}]
     (try
       (phase-parser forms)
       (set! *renames* (implicit-renames forms))
       (try (phase-verifier forms) (catch arbace.lang.ExceptionInfo e (if (:llvm/verify (ex-data e)) (.add *errs* e) (throw e))))
       (try (phase-debug forms) (catch arbace.lang.ExceptionInfo e (cond (::stripped (ex-data e)) nil (:llvm/verify (ex-data e)) (.add *errs* e) :else (throw e))))
-      [nil (vec *errs*) *renames*]
+      [nil (vec *errs*) *renames* (vec *errs2*)]
       (catch arbace.lang.ExceptionInfo e
         (if (:llvm/verify (ex-data e)) [e [] {}] (throw e))))))
 
@@ -2908,6 +3038,36 @@
         (map? x) (into (empty x) (map (fn [[k v]] [k (canon-ptr0 v)]) x))
         :else x))
 
+(def ^:private di-print-order
+  (delay
+    (require 'arbace.repr.llvm.di-table)
+    (reduce (fn [m l] (let [[k f md] (str/split l #" ")] (update m k (fnil conj []) [(keyword f) md])))
+            {} (str/split-lines @(resolve 'arbace.repr.llvm.di-table/print-order)))))
+
+(defn- canon-di
+  "A specialized node as the AsmWriter prints it: its fields in the writer's order, the defaults it skips left out, the
+  flags in DebugInfoFlags.def's order; nested nodes likewise."
+  [x]
+  (cond
+    (and (seq? x) (di-kind x) (get @di-print-order (di-kind x)))
+    (let [order (get @di-print-order (di-kind x)) fs (apply hash-map (rest x))
+          fo @(resolve 'arbace.repr.llvm.di-table/flag-order)
+          canon-v (fn [v] (if (and (seq? v) (= '| (first v)))
+                            (let [ix (into {} (map-indexed (fn [i n] [(symbol n) i]) fo))]
+                              (apply list '| (sort-by #(get ix % 1000) (rest v))))
+                            (canon-di v)))
+          skip? (fn [md v] (case md
+                             "z" (or (nil? v) (= v 0) (= v 'null) (= v "") (= v false) (= v 'DIFlagZero))
+                             "f" (= v false) "t" (= v true) false))
+          known (set (map first order))]
+      (apply list (first x)
+             (concat (when (contains? fs :tag) [:tag (:tag fs)])
+                     (mapcat (fn [[f md]] (when (and (contains? fs f) (not (skip? md (get fs f)))) [f (canon-v (get fs f))])) order)
+                     (mapcat (fn [[f v]] (when-not (or (known f) (= f :tag)) [f v])) (partition 2 (rest x))))))
+    (seq? x) (apply list (map canon-di x))
+    (vector? x) (mapv canon-di x)
+    :else x))
+
 (defn- culprit-text
   "What the Verifier prints for one culprit, a line (its own newline kept by the caller)."
   [c ctx metaforms]
@@ -2921,10 +3081,10 @@
     (= c :bb) (label-text (:bb ctx))
     (= c :global) (global-operand (:global ctx))
     (and (vector? c) (= (first c) :global)) (global-operand (second c))
-    (and (vector? c) (= (first c) :md)) (if-let [f (get metaforms (second c))] (pr/top-str f) (str (second c)))
+    (and (vector? c) (= (first c) :md)) (if-let [f (get metaforms (second c))] (pr/top-str (canon-di f)) (str (second c)))
     (and (vector? c) (= (first c) :mdv)) (let [v (second c)]
                                            (cond (nil? v) "null"
-                                                 (and (symbol? v) (get metaforms v)) (pr/top-str (get metaforms v))
+                                                 (and (symbol? v) (get metaforms v)) (pr/top-str (canon-di (get metaforms v)))
                                                  (vector? v) (pr/typed-str (canon-fps v))
                                                  :else (pr/md-str v)))
     (and (vector? c) (= (first c) :inst)) (let [x (canon-fps (number-groups (canon-attr-order (with-default-align (canon-ptr0 (second c)))))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
@@ -2968,7 +3128,7 @@
   "[verdict message rule text] of forms: verdict valid, invalid or debug; the text what `opt -passes=verify` prints to
   stderr (empty when valid). `src`, `spans` (reader's items) and `file` give the parser errors their position."
   [forms ^String src spans ^String file]
-  (let [[pe es renames] (run-phases forms)
+  (let [[pe es renames es2] (run-phases forms)
         metaforms (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) %]) forms))
         slots (when (or pe (seq es)) (try (diag/md-slots forms) (catch Throwable _ {})))
         rule-of #(:llvm/verify (ex-data %))
@@ -3001,14 +3161,22 @@
             body-text (str (when ver (str "warning: " (.getMessage ^Throwable ver) " in " file "\n"))
                            (apply str (map #(error-text % metaforms slots) broken))
                            (when-not ver (apply str (map #(error-text % metaforms slots) dis))))
+            ;; after the warning and the stripping, opt verifies again: what is left of the debug info fails hard
+            again (when (and (empty? broken) (not ver) (seq dis) (seq es2)) es2)
+            body-text (if again
+                        (str body-text "warning: ignoring invalid debug info in " file "\n" (apply str (map #(error-text % metaforms slots) again)))
+                        body-text)
+            broken (if again (vec again) broken)
             tail (cond
+                   again (str (prog) ": " file ": error: input module is broken!\n")
                    (seq broken) (if (some (fn [f] (and (= (first f) 'llvm/named-meta) (= (second f) '!llvm.dbg.cu))) forms)
                                   (str "LLVM ERROR: Broken module found, compilation aborted!\n"
                                        "PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/ and include the crash backtrace and instructions to reproduce the bug.\n"
                                        "Stack dump:\n0.\tProgram arguments: " (prog) " -passes=verify -disable-output " file "\n")
                                   (str (prog) ": " file ": error: input module is broken!\n"))
                    ver ""
-                   :else (str "warning: ignoring invalid debug info in " file "\n"))]
+                   :else (str "warning: ignoring invalid debug info in " file "\n"))
+]
         [(if (seq broken) "invalid" "debug") (.getMessage ^Throwable first-e) (str (rule-of first-e)) (str body-text tail (when-not (seq broken) tm-warning))])))))
 
 (defn- forms-of-file
