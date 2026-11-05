@@ -171,6 +171,11 @@ crops splice "$src/test/gate/steps.edn" "$w/frag.edn" > "$w/spliced.edn" 2> "$w/
 [ "$(cat "$w/sp.out")" = '[test/gate/] gt9-test-step [gt9-test-step] {:waived a test}' ] && ok "its groups, step, crop and control in place" || bad "spliced: $(cat "$w/sp.out")"
 grep -q 'notes, left out' "$w/spliced.edn" && bad "the fragment's notes spliced" || ok "the fragment's notes left out"
 [ "$(grep -c ';;@ ' "$w/spliced.edn")" = 4 ] && ok "the markers kept (a second crop splices after)" || bad "markers: $(grep -c ';;@ ' "$w/spliced.edn")"
+# a later fragment's steps of a crop already in :crops join its vector (no second :ocaml key)
+printf ';;@ steps\n  {:name gt9-test-two :mem-gib 1 :phase :full :chain gt9-test :cmd "true" :hosts [:stage0] :inputs [:gt9-test]}\n;;@ crops\n         :ocaml [gt9-test-two]\n;;@ controls\n  gt9-test-two {:waived "a test"}\n' > "$w/frag3.edn"
+crops splice "$w/spliced.edn" "$w/frag3.edn" > "$w/spliced3.edn" 2> "$w/splice3.err" || bad "the second splice: $(cat "$w/splice3.err")"
+"$exe" -e "(let [t (read-string (slurp \"$w/spliced3.edn\"))] (println (:ocaml (:crops t)) (count (:host-ids t))))" > "$w/sp3.out" 2>&1
+[ "$(cat "$w/sp3.out")" = "[gt9-test-step gt9-test-two] $(crops host-names "$src/test/gate/steps.edn" | wc -l)" ] && ok "a second fragment's crop entry joins the crop's vector (no second key; :host-ids untouched)" || bad "second splice: $(cat "$w/sp3.out")"
 printf ';;@ nowhere\n x\n' > "$w/frag2.edn"
 crops splice "$src/test/gate/steps.edn" "$w/frag2.edn" > "$w/sp2.out" 2>&1 && bad "a section with no marker spliced" || ok "a section with no marker refused"
 

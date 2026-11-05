@@ -1,0 +1,91 @@
+;; GT9 (doc/GATE-SURVEY.md, "As built: GT9 (write-ahead)"): OCaml's gate steps, ocaml-o8's (O8, OC161-OC166) on GT8's planner and
+;; GT9's tooling, for merge plan batch 1 (after ocaml-o8 and crop-controls merge into next). Apply with
+;;   arbace_tool -p test -m gate.crops splice test/gate/steps.edn test/gate/crops/ocaml.edn > .tmp/steps.edn && mv .tmp/steps.edn test/gate/steps.edn
+;; and, in the merge itself, take next's side for bin/lib/gate-run.bash (o8's gate_ocaml_id is steps.edn's :host-ids :ocaml, the
+;; same identity), test/gate/audited-test.bash and gate-tests-test.bash (their fixtures take the table's hosts), and o8's steps.edn
+;; hunks but reap's (its :inputs gain "test/ocaml/*.edn", its :summary OCaml), which stay. GT9's changes to o8's entries:
+;;   - ocaml-read-essential: corpus check moved to bin/gate --pins (GTS211; :crop-pins :ocaml); the round trip's controls (crop-controls)
+;;   - oi-check: rotated (OC166) by --only-list, the record's ids by an :id-re of one group (bare ids, as the subsets name them: OC161's :prefix superseded)
+;;   - oi-aot, oi-suite-aot: :prefix dropped (the same :id-re), O2J_JOBS=4 at night (GTS216: about half the 2-process time), 4 GiB
+;;   - every step a control or a waiver (GTS218); no corpus check in a step
+;; Not here (their verbs are not on ocaml-o8): menhir --check, native-check (ocaml-native: crops/ocaml-native.edn, batch 3),
+;; roundtrip --cmi-only and judges-test --no-expect (NEW, GT9.4); until they exist the round trip's parts keep o8's --cmi on every
+;; corpus (o8's 12.4 min) and ocaml-judges runs suite expect (9.5 min)
+;;@ groups
+  ;; OCaml's tools (O8): repr/ocaml and o2j evaluated from the checkout on stage 0, the helper tools/ocdump on the host's compiler-libs
+  ;; (:ocaml), the records and references (test/ocaml/); the corpora read in the main checkout's .tmp/repr-ocaml at their pins (GTS212)
+  :ocaml ["bin/oi" "bin/lib/oi/" "bin/repr-ocaml" "bin/lib/limit.bash" "arbace/repr/ocaml.ae" "arbace/repr/ocaml/" "tools/ocdump/"
+          "test/ocaml/"]
+  ;; oi's driver: go/arbace/oi printed by repr/go and built by TamaGo's go; the AOT level's runtime jdk/ocaml/
+  :ocaml-run ["go/arbace/oi.ae" "go/arbace/oi/" "bin/repr-go" "bin/lib/repr-go-host.bash" "bin/lib/repr-go/"]
+  :ocaml-aot ["jdk/ocaml/"]
+;;@ steps
+  ;; ---- OCaml (O8; GT9): essential, two chains of about 1.4 min warm (GTS215); full, the chain ocaml-full beside the serial run (GTS216)
+  {:name oi-essential :mem-gib 2 :phase :essential :chain oi-essential
+   :cmd "bin/oi test && bin/oi repl-check && bin/oi check --only-list test/ocaml/essential-check.txt"
+   :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run]
+   :summary ["^ok|repl-check|programs:|failing|FAILING|control" 6]}
+  {:name oi-divergences :mem-gib 1 :phase :essential :chain oi-essential :needs [oi-essential]
+   :cmd "bin/oi divergences && bin/oi divergences --aot && bin/oi suite divergences && bin/oi suite divergences --aot"
+   :hosts [:stage0] :never-loads [arbace.j2g] :inputs [:lib-base :ocaml]
+   :summary ["pass, [0-9]+ failing|^oi: pins: [0-9]|FAILING" 6]}
+  {:name ocaml-read-essential :mem-gib 2 :phase :essential :chain ocaml-read-essential
+   :cmd "bin/repr-ocaml roundtrip --cmi samples stdlib && bin/repr-ocaml roundtrip --spec && bin/repr-ocaml spec-check && bin/repr-ocaml embed-check"
+   :hosts [:stage0 :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml "arbace/j2g/embed.ae" "bin/lib/version.bash"]
+   :summary ["^compare: |^full: |cmi: |spec|embed|control|FAIL|DIFF|GONE" 10]}
+  {:name ocaml-roundtrip :mem-gib 2 :phase :full :chain ocaml-full
+   :cmd "bin/repr-ocaml roundtrip --cmi --corpus {part}"
+   :hosts [:stage0 :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml]
+   :parts [{:part stdlib} {:part compiler-sources} {:part compiler-backend} {:part testsuite} {:part whiml} {:part samples}
+           {:part opam}]
+   :summary ["^compare: |^full: |cmi: |control|FAIL|DIFF|GONE|UNSTABLE|FLOOR" 6]}
+  {:name ocaml-dumps :mem-gib 2 :phase :full :chain ocaml-full
+   :cmd "bin/repr-ocaml dumps && bin/repr-ocaml samples"
+   :hosts [:stage0 :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml]
+   :summary ["^dumps|FLOOR|unstable|FAIL|ok" 6]}
+  {:name oi-check :mem-gib 2 :phase :full :chain ocaml-full
+   :cmd "bin/oi check {only} && bin/oi suite check && bin/oi suite rollup"
+   :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run]
+   :parts [{:part run}]
+   :summary ["programs:|pass, [0-9]+ failing|FAILING|CHANGED|GONE|control|rollup" 8]
+   :rotate {:only "--only-list {list}" :universe "test/ocaml/check-oi.edn" :subset "test/ocaml/subsets.edn" :subset-key :subset-oi
+            :always ["effects/cmphash" "effects/evenodd"]
+            :id-re "^\\s*\\[\"([^\"]+)\"" :failed-re "^FAILING ([^ :]+):.*$"}}
+  {:name oi-aot :mem-gib 4 :phase :full :chain ocaml-full :needs [oi-check]
+   :cmd "env O2J_JOBS=4 bin/oi check --aot"
+   :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run :ocaml-aot]
+   :parts [{:part run}]
+   :summary ["^o2j: [0-9]+ programs|pass, [0-9]+ failing|FAILING|CHANGED|GONE|control" 6]
+   :rotate {:only "--only-list {list}" :universe "test/ocaml/check-aot.edn" :subset "test/ocaml/subsets.edn"
+            :id-re "^\\s*\\[\"([^\"]+)\"" :failed-re "^FAILING ([^ :]+):.*$"}}
+  {:name oi-suite-aot :mem-gib 4 :phase :full :chain ocaml-full :needs [oi-check]
+   :cmd "env O2J_JOBS=4 bin/oi suite check --aot"
+   :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run :ocaml-aot]
+   :parts [{:part suite}]
+   :summary ["^o2j: [0-9]+ programs|pass, [0-9]+ failing|FAILING|CHANGED|GONE|control" 6]
+   :rotate {:only "--only-list {list}" :universe "test/ocaml/check-suite-aot.edn" :subset "test/ocaml/subsets.edn"
+            :id-re "^\\s*\\[\"([^\"]+)\"" :failed-re "^FAILING ([^ :]+):.*$"}}
+  {:name ocaml-judges :mem-gib 2 :phase :full :chain ocaml-full :needs [oi-aot]
+   :cmd "bin/oi judges-test"
+   :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run :ocaml-aot]
+   :summary ["ok|FAIL|cases|expect" 8]}
+;;@ crops
+         :ocaml [oi-essential oi-divergences ocaml-read-essential ocaml-roundtrip ocaml-dumps oi-check oi-aot oi-suite-aot ocaml-judges]
+;;@ controls
+  oi-essential "test/ocaml/controls.txt"
+  oi-divergences {:waived "a judgment of the committed records (no run): its negative cases are the judges' tests (ocaml-judges)"}
+  ocaml-read-essential "test/ocaml/roundtrip-controls.txt"
+  ocaml-roundtrip "test/ocaml/roundtrip-controls.txt"
+  ocaml-dumps {:waived "the typed and Lambda dumps against their known file and floors, with the determinism test; no crossed pair (GT9.8: not a read or print family)"}
+  oi-check "test/ocaml/controls.txt"
+  oi-aot "test/ocaml/controls.txt"
+  oi-suite-aot "test/ocaml/controls.txt"
+  ocaml-judges {:waived "the judges' own tests: each a negative case"}
