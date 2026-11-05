@@ -435,7 +435,11 @@ this goi package, `bin/build-go`, as for liveness)
   0 fail after one fix (`issue43428`, `range2`: parentheses doubled, fixed and rerun: pass); before, 532 pass, 113
   unsupported, 11 known. 4 s a program on both corpora (the checker evaluated from the checkout).
 - Run programs: two samples of `linux-test` (every 11th from two offsets, 200 run programs): 198 pass, 2 known
-  (`finprofiled`, `nilptr`, as before), no regression; then `bin/goi check --essential` (below).
+  (`finprofiled`, `nilptr`, as before), no regression; `bin/goi check --essential` on this executable: 801 of 801
+  pass (536 s at 6 jobs).
+- `bin/goi test`: the checker's tests, the interpreter's programs (22), the REPL's (124) and std's (185) pass; the
+  session transcript differs only in its banner (`Arbace unknown`: an executable built by `bin/build-go` alone has no
+  version stamp).
 - AOT: `GOI_AOT_LAYOUT=full bin/goi check --aot --only` on the three positions programs: 3 pass (printed back to their
   text by `bin/build-go --layout full`, now accepted).
 - `bin/goi divergences`: 1,694 pass, 143 in 12 classes (the classes `frames` and `line-directives` emptied and removed,
