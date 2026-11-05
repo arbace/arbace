@@ -635,3 +635,7 @@ No default cap is set: the measure of the day's shards is too small to choose on
 - **OT24 Signals between processes at the AOT levels.** Java receives no OS signal: `kill` of another pid raises `EPERM`, a signal
   from outside is not seen. (a) by design at the AOT levels (no program of the lists needs it); (b) the compiled level over
   os/signal (as oi). *Recommended: (a)*.
+
+## Decided (2026-11-05, the user: OT21-OT26)
+
+OT21 (b): compiler-libs' parser now through ocdump; OT22 (a): the shard byte cap from tonight's shards.tsv; OT23 (a), OT24 (a): Unix sockets and datagrams, and signals between processes, by design at AOT; OT25: at most 3 unix programs a shard tonight, then the library units built once; OT26 (a): compiler-libs' units translated once into ocaml.u.
