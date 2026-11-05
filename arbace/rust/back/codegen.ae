@@ -762,9 +762,13 @@
                                 {:pair [a b]})
                         (unsupported "load")))
         memcpy! (fn [bb dst src size]
-                  (let [nm (symbol "g" "llvm.memcpy.p0.p0.i64")]
-                    (declare! gl nm 'void [['ptr] ['ptr] ['i64] ['i1]])
-                    (emit! bb (list 'call 'void nm [['ptr (list :align (:align dst)) (:ptr dst)] ['ptr (list :align (:align src)) (:ptr src)] ['i64 size] ['i1 'false]]))))
+                  (let [nm (symbol "g" "llvm.memcpy.p0.p0.i64")
+                        ;; a constant that is all uninitialized copies nothing
+                        undef? (and (symbol? (:ptr src)) (= "g" (namespace (:ptr src)))
+                                    (some (fn [[[_ v _] n]] (and (= n (:ptr src)) (= 'undef v))) (:consts @gl)))]
+                    (when-not undef?
+                      (declare! gl nm 'void [['ptr] ['ptr] ['i64] ['i1]])
+                      (emit! bb (list 'call 'void nm [['ptr (list :align (:align dst)) (:ptr dst)] ['ptr (list :align (:align src)) (:ptr src)] ['i64 size] ['i1 'false]])))))
         store-val! (fn [bb {:keys [ptr align ly] :as dstpl} val]
                      (case (:kind ly)
                        :zst nil
@@ -909,14 +913,14 @@
                     (unsupported (str "float binop " op)))))
         shift! (fn [bb op a b sc bsc]
                  (let [t (symbol (:imm sc))
-                       bv (cond (= (:ibits sc) (:ibits bsc)) (:v b)
-                                (number? (:v b)) (:v b)
-                                (< (:ibits bsc) (:ibits sc)) (let [r (fresh!)] (emit! bb (list '= r (list 'zext (symbol (:imm bsc)) (:v b) t))) r)
-                                :else (let [r (fresh!)] (emit! bb (list '= r (list 'trunc (symbol (:imm bsc)) (:v b) t))) r))
                        mask (dec (:ibits sc))
-                       masked (if (number? bv)
-                                (bit-and bv mask)
-                                (let [r (fresh!)] (emit! bb (list '= r (list 'and t bv mask))) r))
+                       ;; rustc masks the amount in its own type, then casts it to the shifted value's
+                       mb (cond (number? (:v b)) (bit-and (:v b) mask)
+                                (= (:ibits sc) (:ibits bsc)) (let [r (fresh!)] (emit! bb (list '= r (list 'and t (:v b) mask))) r)
+                                :else (let [r (fresh!)] (emit! bb (list '= r (list 'and (symbol (:imm bsc)) (:v b) mask))) r))
+                       masked (cond (or (number? mb) (= (:ibits sc) (:ibits bsc))) mb
+                                    (< (:ibits bsc) (:ibits sc)) (let [r (fresh!)] (emit! bb (list '= r (list 'zext (symbol (:imm bsc)) mb t))) r)
+                                    :else (let [r (fresh!)] (emit! bb (list '= r (list 'trunc (symbol (:imm bsc)) mb t))) r))
                        bits (:ibits sc)
                        two (java.math.BigInteger/valueOf 2)
                        M (.pow two bits)]
