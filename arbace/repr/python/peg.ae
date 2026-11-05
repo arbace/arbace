@@ -24,13 +24,14 @@
 
 (deftype Parser [lx ^java.util.ArrayList toks ^longs st ^java.util.HashMap memo ^java.util.Map keywords
                  ^java.util.Set soft ^java.util.ArrayList type-ignores ^objects types])
-;; st: [mark fill call-invalid barry feature-version last-stmt-lineno last-stmt-col-offset]; types: [an int array of the tokens' types]
+;; st: [mark fill call-invalid barry feature-version last-stmt-lineno last-stmt-col-offset single parsing-started]
+;; (single: 0, or Py_single_input 1, with PyPARSE_DONT_IMPLY_DEDENT 2); types: [an int array of the tokens' types]
 
 (defn parser
   "A parser over `text` (the string tokenizer's input: new-lines translated, ending in one), with type comments
   when `type-comments`"
   ^Parser [^String text keywords soft type-comments]
-  (let [p (Parser. (lex/lexer text false type-comments true) (java.util.ArrayList.) (long-array 7) (java.util.HashMap.)
+  (let [p (Parser. (lex/lexer text false type-comments true) (java.util.ArrayList.) (long-array 9) (java.util.HashMap.)
                    keywords (set soft) (java.util.ArrayList.) (object-array [(int-array 1024)]))]
     (aset ^longs (.-st p) 4 14)
     p))
@@ -40,6 +41,13 @@
   negative one is the current, 14)"
   [^Parser p ^long v]
   (aset ^longs (.-st p) 4 (if (neg? v) 14 v))
+  p)
+
+(defn set-single
+  "p->start_rule = Py_single_input (queue 203), PyPARSE_DONT_IMPLY_DEDENT when `dont-imply-dedent`: the source's
+  ENDMARKER read as a NEWLINE once parsing started (_PyPegen_fill_token)"
+  [^Parser p dont-imply-dedent]
+  (aset ^longs (.-st p) 7 (long (if dont-imply-dedent 2 1)))
   p)
 
 (defn mark ^long [^Parser p] (aget ^longs (.-st p) 0))
@@ -201,7 +209,15 @@
           (== type lex/TYPE_IGNORE)
           (do (.add ^java.util.ArrayList (.-type-ignores p) [line s]) (recur))
           :else
-          (let [type (if (== type lex/NAME) (long (or (.get ^java.util.Map (.-keywords p) s) lex/NAME)) type)
+          (let [^longs st (.-st p)
+                ;; the end of a single statement: an extra NEWLINE, the open blocks dedented unless
+                ;; PyPARSE_DONT_IMPLY_DEDENT (_PyPegen_fill_token)
+                type (if (and (pos? (aget st 7)) (== type lex/ENDMARKER) (pos? (aget st 8)))
+                       (do (aset st 8 0)
+                           (when (== 1 (aget st 7)) (lex/imply-dedent! lx))
+                           lex/NEWLINE)
+                       (do (aset st 8 1) type))
+                type (if (== type lex/NAME) (long (or (.get ^java.util.Map (.-keywords p) s) lex/NAME)) type)
                 t {:type type :string s :lineno line :col_offset col :end_lineno end-line :end_col_offset end-col
                    :metadata meta :level level}
                 n (.size ^java.util.ArrayList (.-toks p))
