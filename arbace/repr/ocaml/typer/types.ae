@@ -521,7 +521,7 @@
   (when-not (and *gadt-equation* t1 t2 (*gadt-equation* t1 t2))
     (throw (ex-info "Unify" {:unify :mismatch :t1 t1 :t2 t2}))))
 
-(declare unify unify-row unify-fields)
+(declare unify unify-row unify-fields associate-fields build-fields)
 
 (defn- unify-list [l1 l2]
   (when-not (= (count l1) (count l2)) (unify-error nil nil))
@@ -606,7 +606,7 @@
                    :else nil)]
     (cond use1 rest1 use2 rest2 :else (newty2 lv [:Tvar name]))))
 
-(defn- associate-fields
+(defn associate-fields
   "Ctype.associate_fields over sorted field lists: [pairs miss1 miss2]"
   [f1 f2]
   (loop [p [] s [] s' [] a (seq f1) b (seq f2)]
@@ -788,6 +788,16 @@
                           c (reduce max 0 (map second fs))]
                       ;; the row's name: OCaml's is lost (on its levels' update below the type's scope)
                       [(newty [:Tvariant (create-row (mapv first fs) (newvar) posi nil nil)]) 2])))
+      :Tobject (if (or (visited t) (opened-object (d 1)))
+                 [t 0]
+                 (let [level' (pred-enlarge level)
+                       v (if (< level' level) #{t} (conj visited t))
+                       [f' c] (build-subtype v posi level' (d 1))]
+                   (if (pos? c) [(newty [:Tobject f' nil]) c] [t 0])))
+      :Tfield (let [[t1 c1] (build-subtype visited posi level (d 3))
+                    [t2 c2] (build-subtype visited posi level (d 4))
+                    c (max c1 c2)]
+                (if (pos? c) [(newty [:Tfield (d 1) (field-public) t1 t2]) c] [t 0]))
       :Tnil (if posi [(newvar) 2] [t 0])
       [t 0])))
 
@@ -836,7 +846,20 @@
                           (conj cs [t1 t2]))
                         (= :Tvariant (d1 0) (d2 0))
                         (or (sub-row (d1 1) (d2 1) cs) (conj cs [t1 t2]))
+                        (= :Tobject (d1 0) (d2 0))
+                        (if (and (tvar? (object-row (d1 1))) (tvar? (object-row (d2 1))))
+                          (conj cs [t1 t2])
+                          (sub-fields (d1 1) (d2 1) cs))
                         :else (conj cs [t1 t2])))))))
+            (sub-fields [ty1 ty2 cs]
+              ;; Ctype.subtype_fields
+              (let [[f1 rest1] (flatten-fields ty1) [f2 rest2] (flatten-fields ty2)
+                    [pairs miss1 miss2] (associate-fields f1 f2)
+                    cs (cond (= :Tnil ((desc rest2) 0)) cs
+                             (empty? miss1) (sub rest1 rest2 cs)
+                             :else (conj cs [(build-fields (level ty1) miss1 rest1) rest2]))
+                    cs (if (empty? miss2) cs (conj cs [rest1 (build-fields (level ty2) miss2 (newvar))]))]
+                (reduce (fn [cs [_ _ a _ b]] (sub a b cs)) cs pairs)))
             (sub-row [row1 row2 cs]
               ;; Ctype.subtype_row: nil for its Exit
               (let [r1row (row-repr row1) r2row (row-repr row2)

@@ -36,6 +36,7 @@
 ;; Class signatures (ctype.ml)
 
 (def dummy-method "*dummy method*")
+(declare signature-of-class-type)
 
 (defn new-class-signature []
   (let [row (ty/newvar)]
@@ -183,6 +184,7 @@
 (defn- add-value [env name vd] (assoc-in env [:values name] vd))
 
 (def ^:dynamic *class-expr* "class_expr for an inherited class: (fn [cl-num val-env met-env scl] typed-class)" nil)
+(declare inherit-class-signature!)
 
 (defn class-structure
   "Typeclass.class_structure: final true for an immediate object (its self type closed)"
@@ -206,13 +208,9 @@
                :Pcf_inherit
                (let [[_ over scl super] d
                      parent (*class-expr* cl-num val-env met-env scl)
-                     psign (:sign parent)]
-                 ;; Ctype.inherit_class_signature
-                 (tc/unify! (:self @sign) (:self @psign) "inherited self")
-                 (doseq [[label [priv virt t]] (:meths @psign)]
-                   (add-method! sign label (if (= :public priv) :Public :Private) virt t))
-                 (doseq [[label [mut virt t]] (:vars @psign)]
-                   (add-instance-variable! sign true label mut virt t))
+                     psign (signature-of-class-type (:type parent))
+                     _ (update-class-signature! psign)]
+                 (inherit-class-signature! sign psign true)
                  (let [ivars (mapv (fn [[label _]] [label (ty/ident-create label)]) (reverse (sort-by first (:vars @psign))))
                        super-meths (mapv (fn [l] [l (ty/ident-create l)])
                                          (reverse (sort (keep (fn [[l [_ v _]]] (when (= :Concrete v) l)) (:meths @psign)))))]
@@ -378,6 +376,55 @@
 
 (def ^:dynamic *class-vars* "The type variables of the class being typed (Typetexp.TyVarEnv)" nil)
 
+(defn- cvars [] (or *class-vars* (atom {})))
+
+(defn class-body [cty] (if (= :Cty_arrow (cty 0)) (recur (cty 3)) cty))
+
+(defn- inherit-class-signature! [sign psign strict]
+  (tc/unify! (:self @sign) (:self @psign) "inherited self")
+  (doseq [[label [priv virt t]] (:meths @psign)]
+    (add-method! sign label (if (= :public priv) :Public :Private) virt t))
+  (doseq [[label [mut virt t]] (:vars @psign)]
+    (add-instance-variable! sign strict label mut virt t)))
+
+(defn class-type
+  "Typeclass.class_type: a class type of its Parsetree"
+  [env scty]
+  (let [d (:pcty_desc scty)]
+    (case (d 0)
+      :Pcty_constr (let [e (or (env/lookup env :cltypes (:txt (d 1)))
+                               (type-error (str "Unbound class type " (str/join "." (env/lid-parts (:txt (d 1)))))))
+                         decl (:decl e)
+                         [params clty] (instance-class (:params decl) (:type decl))]
+                     (add-dummy-method! (signature-of-class-type clty))
+                     (when-not (= (count params) (count (d 2))) (type-error "The class type expects another number of arguments"))
+                     (dorun (map (fn [sty t] (tc/unify! (env/transl-type env (cvars) sty) t "class parameter")) (d 2) params))
+                     [:Cty_constr (:path e) params clty])
+      :Pcty_signature
+      (let [{sty :pcsig_self fields :pcsig_fields} (d 1)
+            sign (new-class-signature)]
+        (add-dummy-method! sign)
+        (tc/unify! (env/transl-type env (cvars) sty) (:self @sign) "self")
+        (doseq [f fields]
+          (let [fd (:pctf_desc f)]
+            (case (fd 0)
+              :Pctf_inherit (let [pt (class-type env (fd 1)) ps (signature-of-class-type pt)]
+                              (update-class-signature! ps)
+                              (inherit-class-signature! sign ps false))
+              :Pctf_val (let [[{lab :txt} mut virt sty] (fd 1)]
+                          (add-instance-variable! sign false lab mut virt (env/transl-type env (cvars) sty)))
+              :Pctf_method (let [[{lab :txt} priv virt sty] (fd 1)]
+                             (add-method! sign lab priv virt (env/transl-type env (cvars) sty)))
+              :Pctf_constraint (tc/unify! (env/transl-type env (cvars) ((fd 1) 0)) (env/transl-type env (cvars) ((fd 1) 1)) "constraint")
+              :Pctf_attribute nil
+              (type-error (str "class type field " (fd 0) " outside the slice")))))
+        [:Cty_signature sign])
+      :Pcty_arrow (let [[_ l sty scty'] d
+                        t (env/transl-type env (cvars) sty)
+                        t (if (ty/is-optional l) (ty/type-option t) t)]
+                    [:Cty_arrow l t (class-type env scty')])
+      (type-error (str "class type " (d 0) " outside the slice")))))
+
 (defn class-expr
   "Typeclass.class_expr: {:desc d :env env :type cty}"
   [cl-num val-env met-env virt scl]
@@ -435,7 +482,14 @@
                              [[] met-env] ids)
                      cl (class-expr cl-num val-env' met-env' virt scl')]
                  (mk [:Tcl_let rec vbs vals cl] (:type cl)))
-      :Pcl_constraint (type-error "class type constraints are outside the slice")
+      :Pcl_constraint (let [cl (class-expr cl-num val-env met-env virt (d 1))
+                            _ (update-class-signature! (signature-of-class-type (:type cl)))
+                            clty (class-type val-env (d 2))
+                            _ (update-class-signature! (signature-of-class-type clty))
+                            [vals meths concrs] (extract-constraints clty)
+                            [_ t] (instance-class [] clty)]
+                        (add-dummy-method! (signature-of-class-type t))
+                        (mk [:Tcl_constraint cl vals meths concrs] t))
       (type-error (str "class expression " (d 0) " outside the slice")))))
 
 (alter-var-root #'*class-expr* (constantly (fn [cl-num val-env met-env scl] (class-expr cl-num val-env met-env :Virtual scl))))
@@ -491,7 +545,7 @@
                               (ty/with-local-level
                                 (let [params (mapv (fn [[sty _]] (type-param vars sty)) (:pci_params scl))
                                       n (swap! class-num inc)
-                                      e (binding [*class-vars* vars] (class-expr (str n) env1 env1 (:pci_virt scl) (:pci_expr scl)))]
+                                      e (binding [*class-vars* vars env/*shared-tyvars* vars] (class-expr (str n) env1 env1 (:pci_virt scl) (:pci_expr scl)))]
                                   (update-class-signature! (signature-of-class-type (:type e)))
                                   [params e]))
                               typ (:type cl-expr)
@@ -532,9 +586,51 @@
                           (env/add-decl! obj-path d)
                           (-> e
                               (assoc-in [:types (:name c)] obj-path)
-                              (assoc-in [:classes (:name c)] {:path [:Pident (:id c)] :id (:id c) :decl (:decl c)}))))
+                              (assoc-in [:classes (:name c)] {:path [:Pident (:id c)] :id (:id c) :decl (:decl c)})
+                              (assoc-in [:cltypes (:name c)] {:path [:Pident (:ty-id c)] :decl (update (:decl c) :type class-body)}))))
                       env res)]
       [res env])))
+
+(defn class-type-declarations
+  "Typeclass.class_type_declarations: [[info...] env'], info {:name :ty-id :obj-id :decl}"
+  [env scls]
+  (let [res
+        (mapv (fn [scl]
+                (let [n (:txt (:pci_name scl)) ty-id (ty/ident-create n) obj-id (ty/ident-create n)
+                      vars (atom {})
+                      [params typ] (ty/with-local-level
+                                     (let [params (mapv (fn [[sty _]] (type-param vars sty)) (:pci_params scl))
+                                           t (binding [*class-vars* vars env/*shared-tyvars* vars] (class-type env (:pci_expr scl)))]
+                                       (update-class-signature! (signature-of-class-type t))
+                                       [params t]))
+                      _ (generalize-class-type! params typ)
+                      sign (signature-of-class-type typ)
+                      obj-path [:Pident obj-id]
+                      [obj-params obj-type] (instance-class params typ)
+                      _ (tc/unify! (ty/object-row (self-type obj-type)) (ty/newty [:Tnil]) "class type")
+                      obj-ty (self-type obj-type)
+                      _ (set-object-name! obj-path params (:self @sign))
+                      [hparams hty] (let [ts (ty/instance-list (concat params [(:self @sign)]))] [(vec (butlast ts)) (last ts)])
+                      _ (set-object-name! obj-path hparams hty)
+                      decl {:params params :type typ :path obj-path :virt (:pci_virt scl) :hash {:params hparams :manifest hty}}]
+                  (run! ty/generalize (concat obj-params [obj-ty] hparams [hty]))
+                  (env/add-decl! obj-path {:path obj-path :params obj-params :kind [:abstract] :manifest obj-ty
+                                           :arity (count obj-params) :variance (repeat :inv) :class-ghost true})
+                  {:name n :ty-id ty-id :obj-id obj-id :decl decl}))
+              scls)]
+    [res (reduce (fn [e c] (-> e (assoc-in [:types (:name c)] [:Pident (:obj-id c)])
+                               (assoc-in [:cltypes (:name c)] {:path [:Pident (:ty-id c)] :decl (:decl c)})))
+                 env res)]))
+
+(defn hash-type
+  "Typetexp's Ptyp_class: #c applied to args, an instance of the class type's #-abbreviation"
+  [env lid args]
+  (let [e (or (env/lookup env :cltypes lid) (type-error (str "Unbound class type " (str/join "." (env/lid-parts lid)))))
+        {:keys [params manifest]} (:hash (:decl e))
+        ts (ty/instance-list (concat params [manifest]))]
+    (when-not (= (count args) (count params)) (type-error "The class type expects another number of arguments"))
+    (dorun (map #(tc/unify! %1 %2 "class parameter") args (butlast ts)))
+    (last ts)))
 
 (defn type-new
   "Typecore's Pexp_new: [path decl type]"
@@ -548,3 +644,5 @@
 (alter-var-root #'tc/*type-send* (constantly type-send))
 (alter-var-root #'tc/*type-new* (constantly type-new))
 (alter-var-root #'tm/*class-declarations* (constantly class-declarations))
+(alter-var-root #'tm/*class-type-declarations* (constantly class-type-declarations))
+(alter-var-root #'env/*hash-type* (constantly hash-type))
