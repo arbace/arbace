@@ -360,3 +360,149 @@ dictionary functions' names; and in the judge, GHC's `simpleOptPgm` inlining of 
 and `:Main.main`. Results now: 17 of 17 samples (types 194 of 194, evidence 220 of 220), nofib/spectral 17 of 21, 36 more
 nofib programs 31 of 36 (with foreign imports, `~` and expression pragmas added), every non-pass in the survey's three recorded classes ("As built: HF3 (start)"). `typecheck.ae`
 is about 1,650 lines.
+## 2026-11-04: the day and the night; the staging branch `next`
+
+- The user pinned the night shift to 12 hours, 19:00-07:00 UTC, for gating, testing, details and the bugs checks find; the
+  day for development and design with sample checks and occasional light gating. Asked for my opinion, I proposed: plan 8
+  of the 12 hours (4 of slack for fixes and reruns), the clean run in one night (two at most, resumed by `--clean --only`,
+  `main` frozen between), and day merges through a staging branch rather than an essential gate per merge (the alternative
+  considered: one or two batched essential gates a day). The user decided all three, with the staging branch:
+  doc/GATE-SURVEY.md "Decided (2026-11-04, the user): the day and the night" (GTS224-GTS226, amending GTS209), doc/AGENDA.md's
+  tier table.
+- `bin/lib/gate-cache.bash`'s `arbace_main_checkout` no longer writes `${TMPDIR:-.}/gate-cache-git.err`: unset TMPDIR left an
+  empty file in the checkout's root; git's error now joins the output (not a directory: the fallback).
+
+## 2026-11-04: the day's development, held for after the tag
+
+The user asked for deep-thinking development by day (the tokens otherwise lost) with sample checks only, no corpus runs
+and no gates: "bringing all the crops' readers and printers on par". Agents (Opus at max or high effort, Sonnet for the
+smaller parts), each on a branch of its own, held for after the tag (the merge plan: `.tmp/tag-v2/merge-plan.md`):
+
+- **Native readers.**
+  - OCaml (`ocaml-native`): Menhir's LALR construction ported, its tables generated from OCaml 5's `parser.mly` and
+    checked state for state against the tarball's `boot/menhir/parser.ml` (2,327 states); `lexer.mll` ported.
+  - Haskell (`haskell-native`): Happy's construction ported, the tables from GHC 9.14.1's `Parser.y` equal to the
+    tarball's `Parser.hs` (1,537 states); `Lexer.x` hand-ported with the layout rule; PostProcess and the Haddock pass.
+  - Rust (`rust-native`): `rustc_lexer` and `rustc_parse` of rustc 1.99.1 ported rule for rule; the identifier tables
+    from the `unicode-ident` and `unicode-properties` crates rustc pins (`rust-unicode`).
+  - C++ (`cpp-native`, `cpp-native2`, `cpp-sema`, `cpp-tree`): CX11, the standard's grammar with clang's disambiguation,
+    clang's AST as data, a minimal Sema (defaulted noexcept, init-list forms, CTAD, dependent members), a node-by-node tree
+    check against tools/cxxdump.
+  - LLVM IR (`llvm-read`, `llvm-full`, `llvm-verify2`, `llvm-verify3`): the reader's gaps (debug records, structured DI
+    nodes, callbr, Windows EH, summaries, ptrtoaddr), mode `:full`, and a verifier ported from LLVM 23's Verifier.cpp and
+    LLParser's checks, judged against `opt -passes=verify`'s whole stderr; its messages taken from libLLVM-23's strings
+    (LLVM's Apache-2.0 with the LLVM exception: LICENSE.md at the merge).
+- **Error messages equal to the compilers':** OCaml's (`ocaml-errors`, `ocaml-errors2`), Haskell's (`haskell-errors`,
+  `-errors2`, `-errors3`: GHC's pretty-printer and its 123 parser codes ported), Rust's first error (`rust-errors`,
+  `-errors2`).
+- **Haskell's preprocessing:** native unlit and a traditional cpp. The first cpp was a port of GCC 15.2's (GPL-3.0); the
+  user decided (2026-11-04) to reimplement it clean, written from the documented behaviour and judged against gcc's
+  `cpp -traditional` as a black box (`haskell-cpp`); haskell-pp and haskell-cpp merge as one squashed commit so the port
+  never enters main's history.
+- **The C++ lowering takes -g IR** (`cpp-lower-dbg`); the embedding of C++, Scheme and OCaml's oi prepared (`embed-crops`,
+  `embed-gaps`; CP191 decided (a) by the user: ci's `arbace/c` reloaded by RT.toolSource); negative controls for the
+  crops' read and print checks (`crop-controls*`); the evaluator's speed (`eval-speed`, doc/go/EVAL-SPEED.md: calls,
+  arrays, reflection, protocols; a runtime change, held for the re-seed window).
+- **goi:** its classes reduced (`goi-classes`: gc's build flags in the reference, gc's type-size checks, `//line`
+  directives, types2's go/defer check) and the frames class (`goi-frames`: runtime.Caller and gc's traces from the
+  interpreted stack): 1,620 → 1,664 of 1,837; both merged into `next` for night 4's gate. Its checker now rejects
+  `for _ := range x` ("no new variables", main 01d3ce9f).
+- **GT9** (`gate-crops`, doc/GATE-SURVEY.md "GT9: the crops' gate"): the seven ungated crops' gating plan; GTS210-GTS223
+  decided (a) by the user, implemented after the tag.
+- **The Zed survey** (`zed-survey`, zedlanguage/zed at d00a13469e30): parked by the user, "let Zed reach maturity".
+- **Python on the Mac VM:** PY6 done (104 modules, 14,132 methods, 0 failing); queue 201 done as one branch,
+  `mac/201-python-py7-py11` 45ce1e92 (PY6-PY10, PY11 prepared); the user's decisions: finalization's 47 methods by design
+  (PYS9 (a)), no re-seed before Python's tag, the compiled loop judged in its clean run, expat ported to Go forms
+  (pyexpat (a)); queue 202 next.
+- **Housekeeping:** the disk from 83% to 47% (merged and old worktrees removed, the user's OK for the older lines;
+  night 3's raw coverage and the speed reruns' work directories; `bin/gate --prune`); a stray `/.tmp/tmp` (an empty root
+  in a TMPDIR, 2026-11-03) removed. The account switched (`/login`): both hosts switch together next time.
+
+## 2026-11-05: Haskell's HE5 (the libraries' C) and HE6's verbs, on branch haskell-he5
+
+- Branch `haskell-he5` from `haskell-he4d`, light work by day (2 jobs, no gate, no lock): the dumps of the 41 packages
+  rebuilt (`bin/hsi dumps`, 1,320 modules), the foreign symbols counted (434; 253 C functions the table lacked, 69 left after
+  this work, all in classes or unreached), and the C of the libraries ported by need, proved on seven library samples
+  (`test/haskell/eval/samples/Lib*.hs`) against GHC's recorded runs, all equal. Ported from GHC 9.14.1's source tarball
+  (`libraries/bytestring/cbits`: `itoa.c`, `fpstring.c`, `shortbytestring.c`, `is-valid-utf8.c` by Go's `unicode/utf8`,
+  `aligned-static-hs-data.c`'s tables generated by `bin/lib/hsi/cdata-gen`; `libraries/text/cbits`: `is_ascii.c`,
+  `measure_off.c`, `reverse.c`, `utils.c`), licenses bytestring (BSD 3-Clause) and text (BSD 2-Clause) in LICENSE.md; the rest
+  (POSIX layer over os and syscall, spawned processes and pipes over os/exec, signals, printf) is Arbace's own.
+- Considered and not done: forking (no fork of a Go process: `:process`, a design class), wrappers and foreign exports (the
+  helper's dump lacks the exported Haskell helper: HES60), the tests' own C (ci beside hsi: HES64), waiting on descriptors by
+  poll (HES61). `bin/hsi divergences` and `slice` (HE6's first verbs) and nofib as a run corpus of `bin/hsi check`.
+- Results: check of samples, synthetic and testsuite-core 661 of 763 (650 of 756 before),
+  nofib 76 of 144 (57 not built by GHC either, 9 `:speed`, 2 `:callback`), every non-pass in a class
+  (doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE5, HE6 (write-ahead)", the night commands there).
+
+## 2026-11-05: Haskell's HE6, second half (a program's own C, callbacks, descriptors, reasons), on branch haskell-he6
+
+- Branch `haskell-he6` from `haskell-he5`, main `d86cb874` merged first (the C crop's prebuilt runtime, `arbace.c.runtime`,
+  which hsi's C builds link through); light work by day (2 jobs, no gate, no lock, the main checkout's stage 0), every check on
+  lists of a few dozen tests. HES60, HES61, HES64 (a) and HES43 (b) built (doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE6's
+  second half (write-ahead)").
+- **HES64 (a):** a test's C read and checked by ci and linked with musl (`bin/hsi cnodes`, `test/haskell/eval/cnodes.ae`, hsi's
+  glue `test/haskell/hsi/c/`) and loaded into `go/arbace/ci` over hsi's own `crt.Mem` and `crt.Sys` (`hsi run --c`,
+  `go/arbace/hs/cprog.ae`); `go/arbace/ci` and `crt` unchanged.
+- **HES60 (a), by the probe:** `tools/hsdump/probe/StubProbe.hs` (`bin/hsi stubs-build`) showed that GHC 9.14.1's `ModGuts`
+  hold a module's foreign stubs and that the exported helpers (`$fstable...`) are in the STG the hook sees, so in the dumps
+  already: HE5's journal entry ("the helper's dump lacks the exported Haskell helper") is corrected here, the missing part
+  was the stub C. The stubs are written by the probe's `--stubs` mode and compiled by ci; the RTS's C API is hsi's
+  (`go/arbace/hs/rtsapi.ae`), Arbace's own, written from the declarations of the installed GHC's `RtsAPI.h`, `StablePtr.h`,
+  `Adjustor.h` and `DerivedConstants.h`'s offsets (GHC 9.14.1, Alpine's ghc package; no code copied). The helper is not
+  changed (the dumps' key stays): folding the stubs into it is HES65.
+- **HES61 (a):** `waitRead#`, `waitWrite#`, `fdReady` by poll(2), the minimal scheduler change (HE4f's work does not exist on
+  the branch); `fcntl(F_GETFL)` of a pipe's write end fixed.
+- **HES43 (b):** `hsi-reason:` lines, `:reason` in the results, classes' `:reasons`.
+- Considered: a helper extension (HES60 as decided) against a separate stub writer (taken today, the dumps' key untouched);
+  hsi's own `printf` and `malloc` beside musl's (taken: musl's whenever a C program is loaded, one buffer and one heap);
+  changing `go/arbace/ci`'s loader to name statics (not needed: the node program's `static` commands carry names, and hsi
+  rewrites the `at` of an undefined object it defines before ci loads it).
+- Results (lists of the testsuite's run tests, 2 jobs): of HE5's 57 `:test-c`/`:test-c-output` tests 33 pass, of its 21
+  `:callback` 18, T21969 passes; the 104 recorded passes of the core's `concurrent`, `lib`, `ffi` and the samples and synthetic
+  corpora unchanged; `test/haskell/check-hsi.edn` rerecorded for those: 789 of 907 pass (737 before; the core 652 of 701),
+  `bin/hsi divergences` 118 in a class, none unclassed. Proposed: HES65-HES68 (the survey's "Proposed (HES65 onward)").
+
+## 2026-11-05: Haskell's HE8 (AOT) designed and its first slice, on branch haskell-he8
+
+- Branch `haskell-he8` from `haskell-he5` (`a7fafe0b`), light work by day (2 jobs, no gate, no lock, each Go build of a
+  program under `GOMEMLIMIT=1536MiB`). HE8's design written into doc/haskell/HASKELL-EVAL-SURVEY.md ("As built: HE8
+  (write-ahead)"): STG compiled to Go as a second implementation of hsi's node trees' `eval` over the same machine (one Go
+  function per closure body, per case continuation and per join point, returning the next code to hsi's trampoline; the
+  explicit stack, update frames, blackholes, exceptions, masks, STM, continuations and green threads all hsi's), installed
+  per closure by its tree's shape when first entered, every other closure interpreted.
+- Alternatives considered: Go's goroutine stacks for Haskell's stack (HES8 (b) again: loses `<<loop>>`, `-K`, asynchronous
+  exceptions' unwinding, `control0#` and the collector's walk); STG → Java forms → j2g (Eta's route, §7 (b)); whole library
+  modules in one Go package (measured: 9.2 MB of Go for 21 modules of `ghc-internal` peaks at 5.2 GB in the Go compiler, so
+  the slice compiles the closures a profile run entered, and HES70 proposes a package per module).
+- Built: `go/arbace/hs/aot.ae` (generator and runtime half), hooks in `load.ae`, `nodes.ae`, `rts.ae`, `live.ae` (the kill
+  lists sorted: images and shapes depended on a map's order), `hsi aot`, `bin/hsi aot build|run`, `bin/hsi check --aot`.
+- Results: `bin/hsi check --aot` over the samples (but Loop, a night's 7 GB) and the synthetic corpus, 61 of 62 equal to GHC's
+  runs, AsyncRerun in its class as on hsi, and GT8's essential list (73 testsuite run tests among its 123) 123 of 123, every
+  run the same as on hsi (`test/haskell/check-hsi-aot.edn`, 139 programs); a new sample `Classes` (user classes and
+  dictionaries) with GHC's reference; every module of the 41 packages generated (88,465 closures, none refused, 337 MB of Go);
+  speed 1.05 to 1.23 times hsi on nfib and four nofib programs (the machine's frames and allocation, shared by design, are the
+  rest: HES73). Proposed HES70-HES73 (HES65-HES69 left to HE6's branch).
+
+## 2026-11-05: Haskell's line integrated (HE6's second half and HE7 onto HE8's REAP row), on branch haskell-integrate
+
+- Branch `haskell-integrate` from `haskell-row2` (`5045c5c3`: `haskell-he8` merged onto the REAP row); `haskell-he6`
+  (`40b58c2f`) merged, then `haskell-he7` (`19268f47`, HE7: the REPL, built on HE6; its own commits carry no journal
+  entry: `tools/hsrepl/Repl.hs`, GHC 9.14.1's API session whose `hscCompileCoreExprHook` writes each statement's STG,
+  `go/arbace/hs/repl.ae`, `hsi repl`, `bin/hsi repl` and `repl-session` over the seven sessions of `test/haskell/repl/`, the
+  survey's "As built: HE7 (write-ahead)", HES69 decided (b)). Light work by day, the main checkout's stage 0.
+- hsi's Go forms (`go/arbace/hs.ae`, `hs/nodes.ae`, `hs/rts.ae`, `test/haskell/hsi/cmd/main.ae`) merged as Go, the Python
+  crop's method: the packages `arbace/hs` and the driver printed by repr/go from the merge base, ours and theirs, `git
+  merge-file` file by file (he6: no conflict left; he7: the driver's usage lines and cases, `aot` and `repl`, both kept), the
+  module built and `go vet` clean, read back by `bin/hsi runtime read`; the forms equal to one side wherever only one side
+  changed a file. Considered: resolving the `.ae` conflicts by hand (positions and the package's `:files` and
+  `:init-order` make the forms' hunks interleave where the Go's do not). Makefile: `hsi-check-aot`, `hsi-stubs-build` and a
+  new `hsi-repl-session`; `bin/lib/hsi/check` exports both sides' variables; the survey's sections and the journal as unions,
+  HE6's second half, HE7 and HE8 in the order of their proposals (HES65-HES68, HES69, HES70-HES73).
+- `test/haskell/check-hsi.edn` reconciled: the 78 programs whose rows differ between HE8's record and HE6's (`bin/hsi check
+  --only`, 2 jobs) rerun on the merged hsi, every row now HE6's, and HE8's sample `Classes` added (it passes): 790 of 908. The
+  first run met a race: two jobs' first `bin/ci musl ensure` in a fresh worktree at once, twelve programs failing
+  `:c-build`; rerun once the cache was made, all twelve as recorded by HE6.
+- Results: `bin/hsi runtime check` the same forms; `bin/hsi check` (samples, synthetic) 62 of 63, none unclassed, the controls
+  failing; `bin/hsi check --aot` on GT8's essential list 123 of 123, every run the same as on hsi; `bin/hsi repl-session` 7 of
+  7 byte for byte, the control failing; `bin/reap --record`, `bin/reap` 20 of 20 cells, 0 problems.

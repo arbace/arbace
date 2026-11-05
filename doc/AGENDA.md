@@ -23,7 +23,7 @@ The current state of the work. This file is rewritten as things change. For the 
 - The REAP matrix (`bin/reap`): four crops, Clojure, Java 26, Go 1.27.1 and C (C23 against gcc 15.2), 16 of 16 cells
   checked, none failing, every non-pass in a recorded class ([FULL-SUPPORT-SURVEY.md](FULL-SUPPORT-SURVEY.md), "REAP
   v3's divergences"). The other crops (OCaml, Scheme, C++23, net/http) have their checks and classes, out of the matrix
-  and of the gate.
+  and of the gate; since 2026-11-04 every crop has a native reader (on held branches for OCaml, Haskell, Rust, C++).
 - The gate is keyed and audited (GT1-GT7, [GATE-SURVEY.md](GATE-SURVEY.md)); since 2026-11-02 `bin/gate --full` runs C's
   seven full checks as heavy steps (about 7 to 8 hours more, serial).
 - The JVM (Java 26 from jdk26u's own build, 2026-11-02) runs only the frozen jar of `arbace-for-java-26-v4` (pinned by
@@ -61,50 +61,47 @@ The current state of the work. This file is rewritten as things change. For the 
   `1fe1063f` verified, the records written and classified, CS265-CS268), the keyed `bin/gate --full` with C's full
   checks (TODO(tag): its result). Its record: an audited clean run of the four crops over GT8's compressed corpora, within budget (the user, 2026-11-03).
 
-## Now: GT8, the test budget, and the backlog, before the tag (the user, 2026-11-03)
+## Now: the tag `arbace-reaps-4-crops-v1` (as of 2026-11-04, evening)
 
-The user's decision of 2026-11-02: the checks get a budget before the next crops, so that every crop's full check runs
-in bounded time. The tiers, for all ten planned crops (Clojure, Java, Go, C, C++, OCaml, Scheme, Haskell, Rust, Python):
+The tag waits for GT8 and the backlog (the user, 2026-11-03), and stands on an audited clean run of the four crops over
+GT8's compressed corpora within budget. The backlog is merged; GT8's tooling is on main (dedup, coverage subsets for C,
+goi and Java's interpreted level, the nightly rotation, the tiers, `bin/gate --costs`).
+
+The budgets (the user, 2026-11-04, GTS224-GTS226, GATE-SURVEY.md "Decided (2026-11-04)"):
 
 | tier | budget | when |
 |---|---|---|
-| essential | at most 15 minutes | every merge (the essential gate) |
-| nightly | at most 6 hours | each night, a keyed `--full` over compressed corpora |
-| clean | at most 24 hours | a fresh clone, every step audited, at a tag |
+| essential | at most 15 minutes (a goal) | each night's first step, on `next` (the staging branch); by hand rarely by day |
+| nightly | 8 hours planned in the 12-hour night shift, 4 of slack for fixes and reruns | each night, a keyed `--nightly` over compressed corpora |
+| clean | one night (about 10 hours planned), two at most | a fresh clone, every step audited, at a tag; it replaces that night's nightly |
 
-The methods: deduplication (byte-identical and equivalent files counted once: `torture-execute-mirror`'s collapse, VM
-report 156, the first case, GATE-SURVEY.md's note beside GT7), coverage subsets (the files that keep every back-end
-block, every kept class, the controls and one per class: VM reports 160 and 161; the user, 2026-11-02: optimise for
-those, keep every deferred and gap program, a `:subset` per corpus), rotation (the rest of a corpus over the nights),
-and synthetic corpora where a corpus is large and repetitive. Heavy runs at night, development by day. The Mac peer takes
-small development tasks. Nothing of GT8 is written yet: its survey first (GATE-SURVEY.md, a GT8 section).
+The night shift is 19:00-07:00 UTC, for gating, testing, details and the bugs the checks find; the day is for development
+and design with sample checks. Day merges go to the branch `next` after their sample checks; the night's first step gates
+`next` (the essential gate) and fast-forwards `main` to it.
 
-## The backlog, before the tag, in this order
+The nights to the tag:
 
-1. **The Mac VM's held branches** (each built and reported, held because repr/c or ci is embedded and a change reruns
-   the whole `--full`), merged one at a time with their main-host checks:
-   - 154 (`mac/154-builtins`, ci's missing builtins): first re-record its 7 `ref-gcc15` lines on amd64 (they came from
-     aarch64's gcc: `bin/ci record-ref --corpus ci-run --only ...`), check the hand-written record rows, then
-     `bin/ci c2j-check`;
-   - 164 (`mac/164-bitint-wide`, `_BitInt` wider than 64 bits, the `:wide` class; carries 154's two commits: after 154);
-   - 155 (`mac/155-float128`, `_Float128`/`_Float64x` compared exactly);
-   - 157 (`mac/157-headers`, C header gaps 4 and 5; no recorded result moves);
-   - 158 (`mac/158-transparent-union`, the checker's redeclaration through a `transparent_union` parameter): re-record
-     the torture-compile annotations here (ccdump);
-   - 159 (`mac/159-rt-control`, the round trip's levels 1-2 control): judge benchmarksgame's known file on amd64 (the
-     `nbody-8` entry is VM-only); its docs (GATE-SURVEY.md, C23-SURVEY.md's controls paragraph);
-   - 161 (`mac/161-subsets`, coverage subsets of all C run corpora): six amd64 `bin/ci cover` runs here;
-   - 162 (`mac/162-overlay-key`, the overlay keyed by its inputs): `bin/jrt overlay` twice on the main host;
-   - 163 (`mac/163-c-keys`, the C steps keyed by the namespaces they load): confirmed by `bin/gate --audit` on the listed
-     steps;
-   - 165 (`mac/165-vla-aot`, VLAs at AOT: 9 of 18 `:vla` programs pass).
-2. **CS268 (a)**, the `--record` writers' guess narrowed (VM task 167, `mac/167-cs268`).
-3. **CS221 (a) with CS232 (a)**, conflicting specifiers printed as written, `:bad-specs-print` emptied (VM task 168).
-4. **Java's `speed` curated** (GTS102): the per-test limits lowered after the next clean run, the catch-all's timeouts
-   judged one by one.
-5. The night-fix review (VM task 166) and its findings.
-6. The journal starts over after the tag (the user's rule), as after v2: JOURNAL.md's header, README's documentation
-   line.
+1. **Night 4 (2026-11-04):** `next` gated and `main` fast-forwarded (the day/night decisions, goi's classes and frames:
+   1,664 of 1,837); the cover build; Java compiled and Clojure AOT coverage; the first real `bin/gate --nightly`, measured
+   by `bin/gate --costs` (`.tmp/night4/`).
+2. **Night 5:** the re-seed window (C only, with the held digraph commit 8dfd5840; the crops' Go forms out of
+   `arbace_runtime_key` and `arbace_javac_key`; the PATH_FIRST trio removed after), `.tmp/night5/reseed.sh`. Its day: the
+   preconditions on `next`.
+3. **Night 6 (and 7 if needed):** the clean run of the four crops, `.tmp/night5/clean.sh`; estimated about 12 hours, over
+   one night's plan: the options to fit it (`.tmp/night5/clean-fit.md`) and the rotation's state in the record are the
+   user's decisions after night 4's numbers. Then the tag, by hand, on the record.
+
+## After the tag
+
+- **The held branches, in batches into `next`** (`.tmp/tag-v2/merge-plan.md`): the crops' rows (C++ CX8-CX10, Scheme
+  SM9, OCaml O8, GT9's plan, goi's frames), the LLVM IR line (the reader's gaps, `:full`, the verifier, the lowering of
+  `-g` IR), the native readers with their error messages (OCaml: Menhir's tables generated from parser.mly; Haskell:
+  Happy's from Parser.y, a clean-room traditional cpp; Rust: rustc's parser rule for rule; C++: CX11 with a minimal Sema
+  and the tree check), the negative controls, Python's line (`mac/201-python-py7-py11`, then its amd64 records and
+  PY11), and the re-seed window W (the evaluator's speed, the embedding of C++, Scheme and OCaml's oi).
+- **GT9** (the crops' gate, GTS210-GTS223 decided (a)), CS268, LLS1-LLS16.
+- Python on the Mac VM: queue 202 (PY6's open items, pyi's speed, the native reader as default, expat ported, a design
+  note after PY11).
 
 ## Open
 
@@ -115,7 +112,9 @@ small development tasks. Nothing of GT8 is written yet: its survey first (GATE-S
   source's fix waits for the next re-seed.
 - The box can no longer build the program: `go/arbace/crt` calls `syscall.Access` and `syscall.Stat_t`, which TamaGo's
   syscall lacks (C9.2's hazard (e)); for the box's revival.
-- Waiting for the user: none known; each survey's "Proposed" sections not marked "Decided" are the list.
+- Waiting for the user: the clean run's fit and the rotation's state in its record (after night 4's numbers); each
+  survey's "Proposed" sections not marked "Decided" are the rest. Parked by the user: Zed (doc/ZED-SURVEY.md on
+  `zed-survey`).
 - Working rules: subagents on Sonnet for as much as possible, Opus for the hard parts (the user, 2026-10-25/26); one
   20 GiB job at a time on the host; Go's build cache trimmed when the disk fills.
 

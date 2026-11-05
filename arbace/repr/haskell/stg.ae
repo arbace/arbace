@@ -1,0 +1,283 @@
+(ns arbace.repr.haskell.stg
+  "STG forms (doc/haskell/STG-SPEC.md): GHC 9.14.1's final STG of a module as the helper's stg mode writes it
+  (tools/hsdump/Stg.hs). Reads dumps back with Arbace's reader, nothing evaluated, and checks each form against the
+  spec's grammar: every head known at its place, every field of its kind (`check`); counts what the dumps hold:
+  the heads, the primops, the foreign calls by symbol, the Cmm calls, the labels (`stats`), the inventory HE4 and HE5
+  are sized by. Evaluated from the checkout (repr/haskell is not embedded), on stage 0 (bin/hsi dumps).
+
+    -m arbace.repr.haskell.stg check --files LIST [--report FILE]   each file of LIST (one path a line) read and
+        checked; the report: files, forms, bytes, errors (the first 50) and the statistics
+    -m arbace.repr.haskell.stg merge --out FILE --root DIR [--times F] [--abi DIR] [--read-seconds N] REPORT...
+        the reports summed with the compile times, the ABI comparison and the sizes per package"
+  (:require [arbace.string :as str])
+  (:import [java.io File]))
+
+;; ---------------------------------------------------------------------------------------------------------
+;; The grammar (STG-SPEC §2-§8). Each checker returns nil or throws ex-info with the path to the bad form.
+
+(def rep-kws #{:L :U :B :int :int8 :int16 :int32 :int64 :word :word8 :word16 :word32 :word64 :addr :float :double})
+(def elem-kws #{:int8 :int16 :int32 :int64 :word8 :word16 :word32 :word64 :float :double})
+(def upd-kws #{:r :u :s :j})
+(def conv-kws #{:ccall :capi :stdcall :prim :javascript})
+(def safety-kws #{:safe :interruptible :unsafe})
+(def lit-heads '#{char int int8 int16 int32 int64 word word8 word16 word32 word64 bignat str nulladdr rubbish float double label})
+
+(defn- bad [what x] (throw (ex-info (str what ": " (pr-str (if (and (coll? x) (> (count (pr-str x)) 300)) (subs (pr-str x) 0 300) x))) {:form x})))
+
+(defn- head [x] (when (and (seq? x) (symbol? (first x))) (first x)))
+
+(def ^:dynamic *stats* nil)
+(defn- count! [k v] (when *stats* (swap! *stats* update-in [k v] (fnil inc 0))))
+
+(defn- name? [x] (string? x))
+(defn- check-name [x] (when-not (name? x) (bad "a name" x)))
+
+(defn- check-rep [r]
+  (cond (keyword? r) (when-not (rep-kws r) (bad "a representation" r))
+        (and (vector? r) (= 3 (count r)) (= :vec (r 0)) (integer? (r 1)) (elem-kws (r 2))) nil
+        :else (bad "a representation" r)))
+
+(defn- check-reps [r]
+  (cond (= r :v) nil
+        (= r :rp) (count! :rep-poly :rp)
+        (and (vector? r) (not= :vec (first r))) (do (when (< (count r) 2) (bad "representations" r)) (run! check-rep r))
+        :else (check-rep r)))
+
+(defn- check-binder [b]
+  (when-not (and (vector? b) (= 2 (count b)) (name? (b 0))) (bad "a binder" b))
+  (check-reps (b 1)))
+
+(defn- check-binders [bs] (when-not (vector? bs) (bad "binders" bs)) (run! check-binder bs))
+
+(defn- check-lit [x]
+  (let [h (head x) [_ a b] x]
+    (when-not (lit-heads h) (bad "a literal" x))
+    (count! :literals h)
+    (case h
+      (char int int8 int16 int32 int64 word word8 word16 word32 word64 bignat float double)
+      (when-not (and (= 2 (count x)) (integer? a)) (bad "a numeric literal" x))
+      str (when-not (and (= 2 (count x)) (string? a)) (bad "a string literal" x))
+      nulladdr (when-not (= 1 (count x)) (bad "nulladdr" x))
+      rubbish (do (when-not (and (= 3 (count x)) (#{:type :constraint} a)) (bad "rubbish" x))
+                  (when-not (string? b) (check-reps b)))
+      label (do (when-not (and (= 3 (count x)) (string? a) (#{:fun :data} b)) (bad "label" x))
+                (count! :labels a)))))
+
+(defn- check-atom [a] (if (string? a) nil (check-lit a)))
+(defn- check-atoms [as] (when-not (vector? as) (bad "arguments" as)) (run! check-atom as))
+
+(defn- check-map [m ks] (when-not (and (map? m) (every? ks (keys m))) (bad "a map" m)))
+
+(declare check-expr check-bind)
+
+(defn- check-tick [t]
+  (let [h (head t)]
+    (count! :ticks h)
+    (case h
+      scc (when-not (and (= 4 (count t)) (string? (nth t 1)) (boolean? (nth t 2)) (boolean? (nth t 3))) (bad "scc" t))
+      hpc (when-not (and (= 3 (count t)) (string? (nth t 1)) (integer? (nth t 2))) (bad "hpc" t))
+      break (when-not (and (= 3 (count t)) (string? (nth t 1)) (vector? (nth t 2)) (every? name? (nth t 2))) (bad "break" t))
+      src (when-not (and (= 7 (count t)) (string? (nth t 1)) (every? integer? (subvec (vec t) 2 6)) (string? (nth t 6))) (bad "src" t))
+      (bad "a tick" t))))
+
+(defn- check-rhs [r]
+  (let [h (head r)]
+    (count! :heads h)
+    (case h
+      closure (let [[_ u fvs args body] r]
+                (when-not (and (= 5 (count r)) (upd-kws u) (vector? fvs) (every? name? fvs)) (bad "closure" r))
+                (count! :updates u)
+                (check-binders args)
+                (check-expr body))
+      rcon (let [[_ c as & more] r]
+             (check-name c) (check-atoms as)
+             (doseq [m more]
+               (cond (map? m) (check-map m #{:number})
+                     (vector? m) (run! check-tick m)
+                     :else (bad "rcon" r))))
+      (bad "a right-hand side" r))))
+
+(defn- check-bind [b]
+  (let [h (head b)]
+    (count! :heads h)
+    (case h
+      bind (do (when-not (= 3 (count b)) (bad "bind" b)) (check-binder (nth b 1)) (check-rhs (nth b 2)))
+      rec (do (when (< (count b) 2) (bad "rec" b))
+              (doseq [x (rest b)] (when-not (= 'bind (head x)) (bad "rec's bind" x)) (check-bind x)))
+      (bad "a binding" b))))
+
+(defn- check-alt-type [t]
+  (let [h (head t)]
+    (count! :alt-types h)
+    (case h
+      poly (when-not (= 1 (count t)) (bad "poly" t))
+      multi (when-not (and (= 2 (count t)) (integer? (second t))) (bad "multi" t))
+      alg (when-not (and (= 2 (count t)) (name? (second t))) (bad "alg" t))
+      prim (do (when-not (= 2 (count t)) (bad "prim" t)) (check-rep (second t)))
+      (bad "an alternatives' type" t))))
+
+(defn- check-alt [a]
+  (when-not (and (= 'alt (head a)) (= 4 (count a))) (bad "an alternative" a))
+  (let [[_ c bs e] a]
+    (cond (= c :default) nil (string? c) nil :else (check-lit c))
+    (check-binders bs)
+    (check-expr e)))
+
+(defn- check-target [t]
+  (case (head t)
+    static (let [[_ s m] t]
+             (when-not (and (string? s) (<= 2 (count t) 3)) (bad "a static target" t))
+             (when m (check-map m #{:unit :fun}))
+             (count! :ffi s))
+    dynamic (do (when-not (= 1 (count t)) (bad "dynamic" t)) (count! :ffi "(dynamic)"))
+    (bad "a call's target" t)))
+
+(defn- check-expr [e]
+  (let [h (head e)]
+    (if (lit-heads h)
+      (do (count! :heads 'lit) (check-lit e))
+      (do
+        (count! :heads h)
+        (case h
+          app (do (when-not (= 3 (count e)) (bad "app" e)) (check-name (nth e 1)) (check-atoms (nth e 2)))
+          con (let [[_ c as & more] e]
+                (check-name c) (check-atoms as)
+                (doseq [m more]
+                  (cond (map? m) (check-map m #{:number})
+                        (vector? m) (run! check-reps m)
+                        :else (bad "con" e))))
+          primop (let [[_ p as m] e]
+                   (when-not (and (string? p) (<= 3 (count e) 4)) (bad "primop" e))
+                   (count! :primops p)
+                   (check-atoms as)
+                   (when m (check-map m #{:tycon})))
+          primcall (let [[_ l u as r] e]
+                     (when-not (and (= 5 (count e)) (string? l) (string? u)) (bad "primcall" e))
+                     (count! :primcalls l)
+                     (check-atoms as) (check-reps r))
+          ffi (let [[_ t c s as r] e]
+                (when-not (and (= 6 (count e)) (conv-kws c) (safety-kws s)) (bad "ffi" e))
+                (count! :ffi-conv c)
+                (check-target t) (check-atoms as) (check-reps r))
+          case (let [[_ s b t alts] e]
+                 (when-not (and (= 5 (count e)) (vector? alts)) (bad "case" e))
+                 (check-expr s) (check-binder b) (check-alt-type t) (run! check-alt alts))
+          (let letne) (do (when-not (= 3 (count e)) (bad (str h) e)) (check-bind (nth e 1)) (check-expr (nth e 2)))
+          tick (do (when-not (= 3 (count e)) (bad "tick" e)) (check-tick (nth e 1)) (check-expr (nth e 2)))
+          (bad "an expression" e))))))
+
+(defn- check-data [d]
+  (let [[_ t cs] d]
+    (when-not (and (= 3 (count d)) (name? t) (vector? cs)) (bad "stg/data" d))
+    (doseq [c cs]
+      (let [[h n tag fields marks w] c]
+        (when-not (and (= 'dc h) (<= 5 (count c) 6) (name? n) (integer? tag) (vector? fields) (vector? marks)
+                       (= (count fields) (count marks)) (every? #{:strict :lazy} marks) (or (nil? w) (name? w)))
+          (bad "dc" c))
+        (count! :heads 'dc)
+        (run! check-reps fields)))))
+
+(defn check-top
+  "One top-level form of a dump (after the header)."
+  [x]
+  (let [h (head x)]
+    (case h
+      stg/data (do (count! :heads h) (check-data x))
+      string (do (count! :heads h) (when-not (and (= 3 (count x)) (string? (nth x 2))) (bad "string" x))
+                 (check-binder (nth x 1)))
+      (bind rec) (check-bind x)
+      (bad "a top-level form" x))))
+
+(defn- read-forms [^String file]
+  (let [rdr (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. (slurp file)))]
+    (loop [acc []]
+      (let [f (read {:eof ::eof} rdr)]
+        (if (= f ::eof) acc (recur (conj acc f)))))))
+
+(defn check-file
+  "Reads FILE and checks it; returns {:forms n :bytes b :error msg-or-nil}."
+  [^String file]
+  (let [bytes (.length (File. file))]
+    (try
+      (let [forms (read-forms file)
+            [hd & body] forms]
+        (when-not (and (= 'stg/module (head hd)) (= 2 (count hd)) (map? (second hd))
+                       (every? (second hd) [:unit :module :file :ghc :helper]))
+          (bad "the header" hd))
+        (when-not (= "9.14.1" (:ghc (second hd))) (bad "the header's :ghc" hd))
+        (run! check-top body)
+        {:forms (count forms) :bytes bytes :error nil})
+      (catch Throwable e {:forms 0 :bytes bytes :error (str file ": " (.getMessage e))}))))
+
+(defn- arg-map [args]
+  (loop [as args m {} pos []]
+    (if (empty? as) (assoc m :pos pos)
+        (let [[a b & more] as]
+          (if (str/starts-with? a "--") (recur more (assoc m (keyword (subs a 2)) b) pos) (recur (rest as) m (conj pos a)))))))
+
+(defn- cmd-check [args]
+  (let [{:keys [files report]} (arg-map args)
+        fs (remove str/blank? (str/split-lines (slurp files)))
+        st (atom {})
+        rs (binding [*stats* st] (mapv check-file fs))
+        errs (keep :error rs)
+        r {:files (count fs) :forms (reduce + (map :forms rs)) :bytes (reduce + (map :bytes rs))
+           :errors (count errs) :first-errors (vec (take 50 errs)) :stats @st}]
+    (doseq [e (take 5 errs)] (binding [*out* *err*] (println "hsi stg:" e)))
+    (when report (spit report (pr-str r)))
+    (if (seq errs) 1 0)))
+
+(defn- merge-stats [a b] (merge-with (fn [x y] (merge-with + x y)) a b))
+
+(defn- sorted-map-desc [m] (into (sorted-map) m))
+
+(defn- cmd-merge [args]
+  (let [{:keys [out root times abi pos] :as o} (arg-map args)
+        rs (map (comp read-string slurp) pos)
+        stats (reduce merge-stats {} (map :stats rs))
+        sizes (when root
+                (into (sorted-map)
+                      (for [^File d (.listFiles (File. ^String root)) :when (.isDirectory d)]
+                        (let [fs (filter #(str/ends-with? (.getName ^File %) ".stg.ae") (file-seq d))]
+                          [(.getName d) {:modules (count fs) :bytes (reduce + (map #(.length ^File %) fs))}]))))
+        tms (when times
+              (into (sorted-map)
+                    (for [l (str/split-lines (slurp times)) :when (not (str/blank? l))
+                          :let [[p u rc s] (str/split l #" ")]]
+                      [p {:unit u :status (Long/parseLong rc) :seconds (Double/parseDouble s)}])))
+        abis (when abi
+               (into (sorted-map)
+                     (for [^File f (.listFiles (File. ^String abi)) :when (str/ends-with? (.getName f) ".txt")]
+                       (let [ls (map #(str/split % #" ") (remove str/blank? (str/split-lines (slurp f))))]
+                         [(subs (.getName f) 0 (- (count (.getName f)) 4))
+                          (merge (frequencies (map (comp keyword second) ls))
+                                 (let [d (map first (filter #(= "differs" (second %)) ls))]
+                                   (when (seq d) {:differing (vec (sort d))})))]))))
+        r {:files (reduce + (map :files rs)) :forms (reduce + (map :forms rs)) :bytes (reduce + (map :bytes rs))
+           :errors (reduce + (map :errors rs)) :first-errors (vec (take 50 (mapcat :first-errors rs)))
+           :read-seconds (some-> (:read-seconds o) Long/parseLong)
+           :packages sizes :compile tms :abi abis
+           :heads (sorted-map-desc (:heads stats)) :updates (:updates stats) :alt-types (:alt-types stats)
+           :literals (sorted-map-desc (:literals stats)) :ticks (:ticks stats) :ffi-conv (:ffi-conv stats) :rep-poly (get-in stats [:rep-poly :rp] 0)
+           :primops (sorted-map-desc (:primops stats)) :primcalls (sorted-map-desc (:primcalls stats))
+           :ffi (sorted-map-desc (:ffi stats)) :labels (sorted-map-desc (:labels stats))}]
+    (spit out (with-out-str
+                (println ";; bin/hsi dumps' report (arbace.repr.haskell.stg merge): the dumps read back and their contents")
+                (println "{")
+                (doseq [[k v] r] (print " ") (pr k) (print " ") (prn v))
+                (println "}")))
+    (println (str "hsi stg: " (:files r) " dumps, " (:forms r) " forms, " (:bytes r) " bytes, " (:errors r) " errors; "
+                  (count (:primops r)) " primops, " (count (:ffi r)) " foreign symbols, " (count (:primcalls r)) " Cmm calls"))
+    (if (pos? (:errors r)) 1 0)))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        status (try
+                 (case verb
+                   "check" (cmd-check more)
+                   "merge" (cmd-merge more)
+                   (do (println "usage: -m arbace.repr.haskell.stg check|merge ...") 2))
+                 (catch Throwable e (.printStackTrace e) 1))]
+    (shutdown-agents)
+    (flush)
+    (System/exit status)))

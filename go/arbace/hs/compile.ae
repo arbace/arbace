@@ -1,0 +1,680 @@
+(in-ns 'go.arbace.hs) ^{:go/comments [[10 1 "// The compiled code: each closure's body a tree of nodes over the slots of its frame (its free"] [11 1 "// variables first, then its arguments, then every local binder of the body, join points' arguments"] [12 1 "// among them). A node's eval returns the next node to run in a frame (a tail position), or nil when it"] [13 1 "// has put its value in the machine's return registers."] [18 1 "// Atom is an argument: a slot, a global or a literal."] [20 13 "// aSlot, aGlobal, aLit"] [54 1 "// scope is a closure's compile-time frame."] [61 2 "// tail: the expression compiled is in its function's tail position, outside every case's scrutinee: no frame of"] [62 2 "// the activation is on the stack there, so a call may reuse the activation's frame (App.tail)"] [64 2 "// atail: the expression is in its activation's tail position (outside every scrutinee), in a function or a thunk:"] [65 2 "// a call or an entry there clears the activation's local slots, dead from then on, so a frame the stack still holds"] [66 2 "// (a thunk evaluated in its own array, an arena's frame) keeps nothing alive (App.clr, Enter.clr); nfree its"] [67 2 "// closure's free variables, which stay (a thunk reverted needs them)"] [90 1 "// bind gives name a fresh slot; the returned func restores the outer binding."] [116 1 "// isVoid reports a binder's representations of none (:v)."] [131 1 "// atom compiles an argument."] [171 3 "// two's complement truncation"] [179 1 "// literal is a literal's value (STG-SPEC §5)."] [249 1 "// staticCon is the one value of a constructor whose fields are all literals (as GHC's static closures: immutable,"] [250 1 "// so one value serves every evaluation), or nil. Not in an image's compilation: its literals may be placeholders."] [272 1 "// rubbish is a LitRubbish of a lifted or unlifted type: never entered."] [275 1 "// literal keys of case alternatives: integers by their 64 bits, floats as themselves."] [284 1 "// compileLambda compiles (closure UPD [FREE...] [BINDER...] EXPR) in a frame of its own."] [309 1 "// freeAtoms are a closure's free variables as atoms of the enclosing frame."] [319 1 "// expr compiles an expression. minDouble#'s and maxDouble#'s (and Float#'s) literal operand goes second:"] [320 1 "// GHC's code generator emits minsd reg, [lit], and the operands' order decides a NaN's and a zero's result."] [359 4 "// GHC's code generator puts a literal operand second (minsd reg, [lit]): the order decides"] [360 4 "// a NaN's and a zero's result"] [397 3 "// a literal"] [404 1 "// isTuple reports an unboxed tuple's constructor (returned as several values, STG-SPEC §3)."] [483 1 "// let compiles (let BIND EXPR): closures and constructors allocated in the frame's slots."] [545 1 "// letne compiles join points: their arguments are slots of this frame, a jump assigns them."] [584 2 "// the join points' bodies see each other (rec) and themselves"] [606 2 "// (ffi TARGET CONV SAFETY [ATOM...] REPS)"] [630 1 "// cSymbol is the C function a static target calls: a capi wrapper's name decoded"] [631 1 "// (ghczuwrapperZC23ZC...ZCread is read)."] [641 1 "// zdecode decodes GHC's z-encoding of a name."]] :go/pos {:name [1 9] :package [1 1]} :go/semis [[135 25] [327 26] [367 28] [368 43] [381 25] [460 23] [460 31] [539 22] [539 30] [594 24] [594 32] [599 22] [599 30] [634 39] [644 12] [644 24]]} (go/file "compile.go" :imports [
+
+
+    ^{:go/apos {1 [4 2]} :go/pos {:lparen [3 8] :rparen [8 1] :tok-pos [3 1]}} [fmt "fmt"]
+    ^{:go/apos {1 [5 2]}} [math "math"]
+    ^{:go/apos {1 [6 2]}} [big "math/big"]
+    ^{:go/apos {1 [7 2]}} [strings "strings"]])
+
+
+
+
+
+
+^{:go/pos {:doc [10 1] :tok-pos [14 1]}} (go/type ^{:go/pos {:name-pos [14 6]}} Expr "The compiled code: each closure's body a tree of nodes over the slots of its frame (its free\nvariables first, then its arguments, then every local binder of the body, join points' arguments\namong them). A node's eval returns the next node to run in a frame (a tail position), or nil when it\nhas put its value in the machine's return registers.\n" ^{:go/pos {:interface [14 11] :lbrace [14 21] :rbrace [16 1]}} (interface
+    (^{:go/pos {:name-pos [15 2]}} eval ^{:go/pos {:closing [15 30] :opening [15 6]}} [^{:tag ^{:go/pos {:star [15 9]}} (* ^{:go/pos {:name-pos [15 10]}} Machine) :go/pos {:name-pos [15 7]}} m ^{:tag ^{:go/pos {:lbrack [15 23]}} (slice ^{:go/pos {:name-pos [15 25]}} Value) :go/pos {:name-pos [15 19]}} env] :results ^{:go/pos {:closing [15 46] :opening [15 32]}} [^{:go/pos {:name-pos [15 33]}} Expr ^{:go/pos {:lbrack [15 39]}} (slice ^{:go/pos {:name-pos [15 41]}} Value)])))
+
+
+
+^{:go/pos {:doc [18 1] :tok-pos [19 1]}} (go/type ^{:go/pos {:name-pos [19 6]}} Atom "Atom is an argument: a slot, a global or a literal.\n" ^{:go/pos {:lbrace [19 18] :rbrace [24 1] :struct [19 11]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [20 7]}} uint8 :go/pos {:name-pos [20 2]}} kind ; aSlot, aGlobal, aLit
+    ^{:tag ^{:go/pos {:name-pos [21 7]}} int :go/pos {:name-pos [21 2]}} slot
+    ^{:tag ^{:go/pos {:star [22 7]}} (* ^{:go/pos {:name-pos [22 8]}} Global) :go/pos {:name-pos [22 2]}} g
+    ^{:tag ^{:go/pos {:name-pos [23 7]}} Value :go/pos {:name-pos [23 2]}} lit))
+
+
+^{:go/pos {:lparen [26 7] :rparen [30 1] :tok-pos [26 1]}} (go/const
+  [^{:tag ^{:go/pos {:name-pos [27 8]}} uint8 :val 0 :go/pos {:name-pos [27 2]}} aSlot ^{:go/pos {:name-pos [27 16]}} iota]
+  [^{:val 1 :go/pos {:name-pos [28 2]}} aGlobal]
+  [^{:val 2 :go/pos {:name-pos [29 2]}} aLit])
+
+
+^{:go/pos {:func [32 1] :lbrace [32 51] :rbrace [44 1] :return [43 2]}} (go/method ^{:go/pos {:name-pos [32 16]}} get ^{:tag ^{:go/pos {:name-pos [32 45]}} Value :go/pos {:closing [32 43] :opening [32 19] :recv-closing [32 14] :recv-opening [32 6]}} [^{:tag ^{:go/pos {:star [32 9]}} (* ^{:go/pos {:name-pos [32 10]}} Atom) :go/pos {:name-pos [32 7]}} a ^{:tag ^{:go/pos {:star [32 22]}} (* ^{:go/pos {:name-pos [32 23]}} Machine) :go/pos {:name-pos [32 20]}} m ^{:tag ^{:go/pos {:lbrack [32 36]}} (slice ^{:go/pos {:name-pos [32 38]}} Value) :go/pos {:name-pos [32 32]}} env]
+  ^{:go/pos {:lbrace [33 16] :rbrace [42 2] :switch [33 2]}} (switch ^{:go/pos {:dot [33 10] :name-pos [33 11]}} (.-kind ^{:go/pos {:name-pos [33 9]}} a)
+    ^{:go/pos {:case [34 2] :colon [34 12]}} (case [^{:go/pos {:name-pos [34 7]}} aSlot]
+      ^{:go/pos {:return [35 3]}} (return ^{:go/pos {:lbrack [35 13] :rbrack [35 20]}} (aget ^{:go/pos {:name-pos [35 10]}} env ^{:go/pos {:dot [35 15] :name-pos [35 16]}} (.-slot ^{:go/pos {:name-pos [35 14]}} a))))
+    ^{:go/pos {:case [36 2] :colon [36 14]}} (case [^{:go/pos {:name-pos [36 7]}} aGlobal]
+      (let [^{:go/pos {:name-pos [37 3] :tok-pos [37 5]}} g ^{:go/pos {:dot [37 9] :name-pos [37 10]}} (.-g ^{:go/pos {:name-pos [37 8]}} a)]
+        ^{:go/pos {:if [38 3] :lbrace [38 12] :rbrace [40 3]}} (when ^{:go/pos {:op-pos [38 6]}} (not ^{:go/pos {:dot [38 8] :name-pos [38 9]}} (.-ok ^{:go/pos {:name-pos [38 7]}} g))
+          ^{:go/pos {:dot [39 8] :lparen [39 14] :name-pos [39 9] :rparen [39 16]}} (.force ^{:go/pos {:dot [39 5] :name-pos [39 6]}} (.-ld ^{:go/pos {:name-pos [39 4]}} m) ^{:go/pos {:name-pos [39 15]}} g))
+
+        ^{:go/pos {:return [41 3]}} (return ^{:go/pos {:dot [41 11] :name-pos [41 12]}} (.-V ^{:go/pos {:name-pos [41 10]}} g)))))
+
+  ^{:go/pos {:dot [43 10] :name-pos [43 11]}} (.-lit ^{:go/pos {:name-pos [43 9]}} a))
+
+
+^{:go/pos {:func [46 1] :lbrace [46 57] :rbrace [52 1] :return [51 2]}} (go/method ^{:go/pos {:name-pos [46 19]}} atoms ^{:tag ^{:go/pos {:lbrack [46 49]}} (slice ^{:go/pos {:name-pos [46 51]}} Value) :go/pos {:closing [46 47] :opening [46 24] :recv-closing [46 17] :recv-opening [46 6]}} [^{:tag ^{:go/pos {:star [46 9]}} (* ^{:go/pos {:name-pos [46 10]}} Machine) :go/pos {:name-pos [46 7]}} m ^{:tag ^{:go/pos {:lbrack [46 28]}} (slice ^{:go/pos {:name-pos [46 30]}} Atom) :go/pos {:name-pos [46 25]}} as ^{:tag ^{:go/pos {:lbrack [46 40]}} (slice ^{:go/pos {:name-pos [46 42]}} Value) :go/pos {:name-pos [46 36]}} env]
+  (let [^{:go/pos {:name-pos [47 2] :tok-pos [47 5]}} vs ^{:go/pos {:lparen [47 12] :rparen [47 29]}} (^{:go/pos {:name-pos [47 8]}} make ^{:go/pos {:lbrack [47 13]}} (slice ^{:go/pos {:name-pos [47 15]}} Value) ^{:go/pos {:lparen [47 25] :rparen [47 28]}} (^{:go/pos {:name-pos [47 22]}} len ^{:go/pos {:name-pos [47 26]}} as))]
+    ^{:go/pos {:for [48 2] :lbrace [48 20] :range [48 11] :rbrace [50 2] :tok-pos [48 8]}} (range [^{:go/pos {:name-pos [48 6]}} i ^{:go/pos {:name-pos [48 17]}} as]
+      ^{:go/pos {:lbrack [49 5] :rbrack [49 7] :tok-pos [49 9]}} (aset ^{:go/pos {:name-pos [49 3]}} vs ^{:go/pos {:name-pos [49 6]}} i ^{:go/pos {:dot [49 16] :lparen [49 20] :name-pos [49 17] :rparen [49 27]}} (.get ^{:go/pos {:lbrack [49 13] :rbrack [49 15]}} (aget ^{:go/pos {:name-pos [49 11]}} as ^{:go/pos {:name-pos [49 14]}} i) ^{:go/pos {:name-pos [49 21]}} m ^{:go/pos {:name-pos [49 24]}} env)))
+
+    ^{:go/pos {:name-pos [51 9]}} vs))
+
+
+
+^{:go/pos {:doc [54 1] :tok-pos [55 1]}} (go/type ^{:go/pos {:name-pos [55 6]}} scope "scope is a closure's compile-time frame.\n" ^{:go/pos {:lbrace [55 19] :rbrace [70 1] :struct [55 12]}} (struct
+    ^{:tag ^{:go/pos {:star [56 8]}} (* ^{:go/pos {:name-pos [56 9]}} Module) :go/pos {:name-pos [56 2]}} mod
+    ^{:tag ^{:go/pos {:name-pos [57 8]}} int :go/pos {:name-pos [57 2]}} n
+    ^{:tag ^{:go/pos {:map [58 8]}} (map ^{:go/pos {:name-pos [58 12]}} string ^{:go/pos {:name-pos [58 19]}} vinfo) :go/pos {:name-pos [58 2]}} vars
+    ^{:tag ^{:go/pos {:name-pos [59 8]}} string :go/pos {:name-pos [59 2]}} name
+    ^{:tag ^{:go/pos {:name-pos [60 8]}} int :go/pos {:name-pos [60 2]}} depth
+
+
+    ^{:tag ^{:go/pos {:name-pos [63 7]}} bool :doc "tail: the expression compiled is in its function's tail position, outside every case's scrutinee: no frame of\nthe activation is on the stack there, so a call may reuse the activation's frame (App.tail)\n" :go/pos {:name-pos [63 2]}} tail
+
+
+
+
+    ^{:tag ^{:go/pos {:name-pos [68 8]}} bool :doc "atail: the expression is in its activation's tail position (outside every scrutinee), in a function or a thunk:\na call or an entry there clears the activation's local slots, dead from then on, so a frame the stack still holds\n(a thunk evaluated in its own array, an arena's frame) keeps nothing alive (App.clr, Enter.clr); nfree its\nclosure's free variables, which stay (a thunk reverted needs them)\n" :go/pos {:name-pos [68 2]}} atail
+    ^{:tag ^{:go/pos {:name-pos [69 8]}} int :go/pos {:name-pos [69 2]}} nfree))
+
+
+^{:go/pos {:tok-pos [72 1]}} (go/type ^{:go/pos {:name-pos [72 6]}} vinfo ^{:go/pos {:lbrace [72 19] :rbrace [75 1] :struct [72 12]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [73 7]}} int :go/pos {:name-pos [73 2]}} slot
+    ^{:tag ^{:go/pos {:star [74 7]}} (* ^{:go/pos {:name-pos [74 8]}} Join) :go/pos {:name-pos [74 2]}} join))
+
+
+^{:go/pos {:tok-pos [77 1]}} (go/type ^{:go/pos {:name-pos [77 6]}} compileError ^{:go/pos {:lbrace [77 25] :rbrace [77 38] :struct [77 19]}} (struct ^{:tag ^{:go/pos {:name-pos [77 31]}} string :go/pos {:name-pos [77 27]}} msg))
+
+^{:go/pos {:func [79 1] :lbrace [79 39] :rbrace [79 54] :return [79 41]}} (go/method ^{:go/pos {:name-pos [79 24]}} Error ^{:tag ^{:go/pos {:name-pos [79 32]}} string :go/pos {:closing [79 30] :opening [79 29] :recv-closing [79 22] :recv-opening [79 6]}} [^{:tag ^{:go/pos {:star [79 9]}} (* ^{:go/pos {:name-pos [79 10]}} compileError) :go/pos {:name-pos [79 7]}} e] ^{:go/pos {:dot [79 49] :name-pos [79 50]}} (.-msg ^{:go/pos {:name-pos [79 48]}} e))
+
+^{:go/pos {:func [81 1] :lbrace [81 32] :rbrace [83 1]}} (go/func ^{:go/pos {:name-pos [81 6]}} cfail ^{:go/pos {:closing [81 30] :opening [81 11]}} [^{:tag ^{:go/pos {:name-pos [81 14]}} string :go/pos {:name-pos [81 12]}} f & ^{:tag ^{:go/pos {:ellipsis [81 24]}} (slice ^{:go/pos {:name-pos [81 27]}} any) :go/pos {:name-pos [81 22]}} a]
+  ^{:go/pos {:lparen [82 7] :rparen [82 43]}} (^{:go/pos {:name-pos [82 2]}} panic ^{:go/pos {:op-pos [82 8]}} (addr ^{:go/pos {:lbrace [82 21] :rbrace [82 42]}} (lit ^{:go/pos {:name-pos [82 9]}} compileError ^{:go/pos {:ellipsis [82 38] :lparen [82 33] :rparen [82 41]}} (^{:go/pos {:dot [82 25] :name-pos [82 26] :x-pos [82 22]}} fmt/Sprintf ^{:go/pos {:name-pos [82 34]}} f (spread ^{:go/pos {:name-pos [82 37]}} a))))))
+
+
+^{:go/pos {:func [85 1] :lbrace [85 31] :rbrace [88 1] :return [87 2]}} (go/method ^{:go/pos {:name-pos [85 17]}} newSlot ^{:tag ^{:go/pos {:name-pos [85 27]}} int :go/pos {:closing [85 25] :opening [85 24] :recv-closing [85 15] :recv-opening [85 6]}} [^{:tag ^{:go/pos {:star [85 9]}} (* ^{:go/pos {:name-pos [85 10]}} scope) :go/pos {:name-pos [85 7]}} s]
+  ^{:go/pos {:tok-pos [86 5]}} (inc! ^{:go/pos {:dot [86 3] :name-pos [86 4]}} (.-n ^{:go/pos {:name-pos [86 2]}} s))
+  ^{:go/apos {2 [87 15]} :go/pos {:op-pos [87 13]}} (- ^{:go/pos {:dot [87 10] :name-pos [87 11]}} (.-n ^{:go/pos {:name-pos [87 9]}} s) 1))
+
+
+
+^{:go/pos {:doc [90 1] :func [91 1] :lbrace [91 49] :rbrace [102 1]}} (go/method ^{:go/pos {:name-pos [91 17]}} bind "bind gives name a fresh slot; the returned func restores the outer binding.\n" ^{:go/pos {:closing [91 33] :opening [91 21] :recv-closing [91 15] :recv-opening [91 6]}} [^{:tag ^{:go/pos {:star [91 9]}} (* ^{:go/pos {:name-pos [91 10]}} scope) :go/pos {:name-pos [91 7]}} s ^{:tag ^{:go/pos {:name-pos [91 27]}} string :go/pos {:name-pos [91 22]}} name] :results ^{:go/pos {:closing [91 47] :opening [91 35]}} [^{:go/pos {:name-pos [91 36]}} int ^{:go/pos {:func [91 41]}} (func ^{:go/pos {:closing [91 46] :opening [91 45]}} [])]
+  (let [^{:go/pos {:tok-pos [92 11]}} (values ^{:go/pos {:name-pos [92 2]}} old ^{:go/pos {:name-pos [92 7]}} had) ^{:go/pos {:lbrack [92 20] :rbrack [92 25]}} (aget ^{:go/pos {:dot [92 15] :name-pos [92 16]}} (.-vars ^{:go/pos {:name-pos [92 14]}} s) ^{:go/pos {:name-pos [92 21]}} name)
+      ^{:go/pos {:name-pos [93 2] :tok-pos [93 4]}} k ^{:go/pos {:dot [93 8] :lparen [93 16] :name-pos [93 9] :rparen [93 17]}} (.newSlot ^{:go/pos {:name-pos [93 7]}} s)]
+    ^{:go/pos {:lbrack [94 8] :rbrack [94 13] :tok-pos [94 15]}} (aset ^{:go/pos {:dot [94 3] :name-pos [94 4]}} (.-vars ^{:go/pos {:name-pos [94 2]}} s) ^{:go/pos {:name-pos [94 9]}} name ^{:go/acolon {2 [94 27]} :go/apos {2 [94 23]} :go/pos {:lbrace [94 22] :rbrace [94 30]}} (lit ^{:go/pos {:name-pos [94 17]}} vinfo :slot ^{:go/pos {:name-pos [94 29]}} k))
+    ^{:go/pos {:return [95 2]}} (return ^{:go/pos {:name-pos [95 9]}} k ^{:go/pos {:func [95 12] :lbrace [95 19] :rbrace [101 2]}} (fn ^{:go/pos {:closing [95 17] :opening [95 16]}} []
+        ^{:go/pos {:else-lbrace [98 10] :else-rbrace [100 3] :if [96 3] :lbrace [96 10] :rbrace [98 3]}} (if ^{:go/pos {:name-pos [96 6]}} had
+          ^{:go/pos {:lbrack [97 10] :rbrack [97 15] :tok-pos [97 17]}} (aset ^{:go/pos {:dot [97 5] :name-pos [97 6]}} (.-vars ^{:go/pos {:name-pos [97 4]}} s) ^{:go/pos {:name-pos [97 11]}} name ^{:go/pos {:name-pos [97 19]}} old)
+
+          ^{:go/pos {:lparen [99 10] :rparen [99 23]}} (^{:go/pos {:name-pos [99 4]}} delete ^{:go/pos {:dot [99 12] :name-pos [99 13]}} (.-vars ^{:go/pos {:name-pos [99 11]}} s) ^{:go/pos {:name-pos [99 19]}} name))))))
+
+
+
+
+^{:go/pos {:func [104 1] :lbrace [104 38] :rbrace [114 1]}} (go/func ^{:go/pos {:name-pos [104 6]}} binderName ^{:go/pos {:closing [104 22] :opening [104 16]}} [^{:tag ^{:go/pos {:name-pos [104 19]}} any :go/pos {:name-pos [104 17]}} f] :results ^{:go/pos {:closing [104 36] :opening [104 24]}} [^{:go/pos {:name-pos [104 25]}} string ^{:go/pos {:name-pos [104 33]}} any]
+  (let [^{:go/pos {:tok-pos [105 8]}} (values ^{:go/pos {:name-pos [105 2]}} v ^{:go/pos {:name-pos [105 5]}} ok) ^{:go/pos {:dot [105 12] :lparen [105 13] :rparen [105 17]}} (assert ^{:go/pos {:name-pos [105 14]}} Vec ^{:go/pos {:name-pos [105 11]}} f)]
+    ^{:go/pos {:if [106 2] :lbrace [106 24] :rbrace [108 2]}} (when ^{:go/pos {:op-pos [106 9]}} (or ^{:go/pos {:op-pos [106 5]}} (not ^{:go/pos {:name-pos [106 6]}} ok) ^{:go/apos {2 [106 22]} :go/pos {:op-pos [106 19]}} (!= ^{:go/pos {:lparen [106 15] :rparen [106 17]}} (^{:go/pos {:name-pos [106 12]}} len ^{:go/pos {:name-pos [106 16]}} v) 2))
+      ^{:go/apos {1 [107 9]} :go/pos {:lparen [107 8] :rparen [107 27]}} (^{:go/pos {:name-pos [107 3]}} cfail "bad binder %v" ^{:go/pos {:name-pos [107 26]}} f))
+
+    (let [^{:go/pos {:tok-pos [109 8]}} (values ^{:go/pos {:name-pos [109 2]}} n ^:assign ^{:go/pos {:name-pos [109 5]}} ok) ^{:go/pos {:dot [109 15] :lparen [109 16] :rparen [109 23]}} (assert ^{:go/pos {:name-pos [109 17]}} string ^{:go/apos {2 [109 13]} :go/pos {:lbrack [109 12] :rbrack [109 14]}} (aget ^{:go/pos {:name-pos [109 11]}} v 0))]
+      ^{:go/pos {:if [110 2] :lbrace [110 9] :rbrace [112 2]}} (when ^{:go/pos {:op-pos [110 5]}} (not ^{:go/pos {:name-pos [110 6]}} ok)
+        ^{:go/apos {1 [111 9]} :go/pos {:lparen [111 8] :rparen [111 27]}} (^{:go/pos {:name-pos [111 3]}} cfail "bad binder %v" ^{:go/pos {:name-pos [111 26]}} f))
+
+      ^{:go/pos {:return [113 2]}} (return ^{:go/pos {:name-pos [113 9]}} n ^{:go/apos {2 [113 14]} :go/pos {:lbrack [113 13] :rbrack [113 15]}} (aget ^{:go/pos {:name-pos [113 12]}} v 1)))))
+
+
+
+^{:go/pos {:doc [116 1] :func [117 1] :lbrace [117 28] :rbrace [120 1] :return [119 2]}} (go/func ^{:go/pos {:name-pos [117 6]}} isVoid "isVoid reports a binder's representations of none (:v).\n" ^{:tag ^{:go/pos {:name-pos [117 23]}} bool :go/pos {:closing [117 21] :opening [117 12]}} [^{:tag ^{:go/pos {:name-pos [117 18]}} any :go/pos {:name-pos [117 13]}} reps]
+  (let [^{:go/pos {:tok-pos [118 8]}} (values ^{:go/pos {:name-pos [118 2]}} k ^{:go/pos {:name-pos [118 5]}} ok) ^{:go/pos {:dot [118 15] :lparen [118 16] :rparen [118 19]}} (assert ^{:go/pos {:name-pos [118 17]}} Kw ^{:go/pos {:name-pos [118 11]}} reps)]
+    ^{:go/pos {:op-pos [119 12]}} (and ^{:go/pos {:name-pos [119 9]}} ok ^{:go/apos {2 [119 20]} :go/pos {:op-pos [119 17]}} (== ^{:go/pos {:name-pos [119 15]}} k "v"))))
+
+
+^{:go/pos {:func [122 1] :lbrace [122 30] :rbrace [129 1]}} (go/func ^{:go/pos {:name-pos [122 6]}} head ^{:go/pos {:closing [122 16] :opening [122 10]}} [^{:tag ^{:go/pos {:name-pos [122 13]}} any :go/pos {:name-pos [122 11]}} f] :results ^{:go/pos {:closing [122 28] :opening [122 18]}} [^{:go/pos {:name-pos [122 19]}} Sym ^{:go/pos {:name-pos [122 24]}} List]
+  (let [^{:go/pos {:tok-pos [123 8]}} (values ^{:go/pos {:name-pos [123 2]}} l ^{:go/pos {:name-pos [123 5]}} ok) ^{:go/pos {:dot [123 12] :lparen [123 13] :rparen [123 18]}} (assert ^{:go/pos {:name-pos [123 14]}} List ^{:go/pos {:name-pos [123 11]}} f)]
+    ^{:go/pos {:if [124 2] :lbrace [124 24] :rbrace [126 2]}} (when ^{:go/pos {:op-pos [124 9]}} (or ^{:go/pos {:op-pos [124 5]}} (not ^{:go/pos {:name-pos [124 6]}} ok) ^{:go/apos {2 [124 22]} :go/pos {:op-pos [124 19]}} (== ^{:go/pos {:lparen [124 15] :rparen [124 17]}} (^{:go/pos {:name-pos [124 12]}} len ^{:go/pos {:name-pos [124 16]}} l) 0))
+      ^{:go/apos {1 [125 10] 2 [125 14]} :go/pos {:return [125 3]}} (return "" nil))
+
+    (let [^{:go/pos {:tok-pos [127 7]}} (values ^{:go/pos {:name-pos [127 2]}} h ^{:go/pos {:name-pos [127 5]}} _) ^{:go/pos {:dot [127 14] :lparen [127 15] :rparen [127 19]}} (assert ^{:go/pos {:name-pos [127 16]}} Sym ^{:go/apos {2 [127 12]} :go/pos {:lbrack [127 11] :rbrack [127 13]}} (aget ^{:go/pos {:name-pos [127 10]}} l 0))]
+      ^{:go/pos {:return [128 2]}} (return ^{:go/pos {:name-pos [128 9]}} h ^{:go/pos {:name-pos [128 12]}} l))))
+
+
+
+^{:go/pos {:doc [131 1] :func [132 1] :lbrace [132 34] :rbrace [147 1] :return [146 2]}} (go/method ^{:go/pos {:name-pos [132 17]}} atom "atom compiles an argument.\n" ^{:tag ^{:go/pos {:name-pos [132 29]}} Atom :go/pos {:closing [132 27] :opening [132 21] :recv-closing [132 15] :recv-opening [132 6]}} [^{:tag ^{:go/pos {:star [132 9]}} (* ^{:go/pos {:name-pos [132 10]}} scope) :go/pos {:name-pos [132 7]}} s ^{:tag ^{:go/pos {:name-pos [132 24]}} any :go/pos {:name-pos [132 22]}} f]
+  ^{:go/pos {:guard-dot [133 15] :guard-lparen [133 16] :guard-rparen [133 21] :guard-tok [133 11] :lbrace [133 23] :rbrace [144 2] :switch [133 2]}} (type-switch [^{:go/pos {:name-pos [133 9]}} x ^{:go/pos {:name-pos [133 14]}} f]
+    ^{:go/pos {:case [134 2] :colon [134 13]}} (case [^{:go/pos {:name-pos [134 7]}} string]
+      ^{:go/pos {:if [135 3] :lbrace [135 30] :rbrace [140 3]}} (when [^{:go/pos {:tok-pos [135 13]}} (values ^{:go/pos {:name-pos [135 6]}} vi ^{:go/pos {:name-pos [135 10]}} ok) ^{:go/pos {:lbrack [135 22] :rbrack [135 24]}} (aget ^{:go/pos {:dot [135 17] :name-pos [135 18]}} (.-vars ^{:go/pos {:name-pos [135 16]}} s) ^{:go/pos {:name-pos [135 23]}} x)] ^{:go/pos {:name-pos [135 27]}} ok
+        ^{:go/pos {:if [136 4] :lbrace [136 22] :rbrace [138 4]}} (when ^{:go/apos {2 [136 18]} :go/pos {:op-pos [136 15]}} (!= ^{:go/pos {:dot [136 9] :name-pos [136 10]}} (.-join ^{:go/pos {:name-pos [136 7]}} vi) nil)
+          ^{:go/apos {1 [137 11]} :go/pos {:lparen [137 10] :rparen [137 44]}} (^{:go/pos {:name-pos [137 5]}} cfail "join point %s as an argument" ^{:go/pos {:name-pos [137 43]}} x))
+
+        ^{:go/pos {:return [139 4]}} (return ^{:go/acolon {2 [139 20] 4 [139 33]} :go/apos {2 [139 16] 4 [139 29]} :go/pos {:lbrace [139 15] :rbrace [139 42]}} (lit ^{:go/pos {:name-pos [139 11]}} Atom :kind ^{:go/pos {:name-pos [139 22]}} aSlot :slot ^{:go/pos {:dot [139 37] :name-pos [139 38]}} (.-slot ^{:go/pos {:name-pos [139 35]}} vi))))
+
+      ^{:go/pos {:return [141 3]}} (return ^{:go/acolon {2 [141 19] 4 [141 31]} :go/apos {2 [141 15] 4 [141 30]} :go/pos {:lbrace [141 14] :rbrace [141 48]}} (lit ^{:go/pos {:name-pos [141 10]}} Atom :kind ^{:go/pos {:name-pos [141 21]}} aGlobal :g ^{:go/pos {:dot [141 38] :lparen [141 45] :name-pos [141 39] :rparen [141 47]}} (.global ^{:go/pos {:dot [141 34] :name-pos [141 35]}} (.-mod ^{:go/pos {:name-pos [141 33]}} s) ^{:go/pos {:name-pos [141 46]}} x))))
+    ^{:go/pos {:case [142 2] :colon [142 11]}} (case [^{:go/pos {:name-pos [142 7]}} List]
+      ^{:go/pos {:return [143 3]}} (return ^{:go/acolon {2 [143 19] 4 [143 30]} :go/apos {2 [143 15] 4 [143 27]} :go/pos {:lbrace [143 14] :rbrace [143 48]}} (lit ^{:go/pos {:name-pos [143 10]}} Atom :kind ^{:go/pos {:name-pos [143 21]}} aLit :lit ^{:go/pos {:dot [143 37] :lparen [143 45] :name-pos [143 38] :rparen [143 47]}} (.literal ^{:go/pos {:dot [143 33] :name-pos [143 34]}} (.-mod ^{:go/pos {:name-pos [143 32]}} s) ^{:go/pos {:name-pos [143 46]}} x)))))
+
+  ^{:go/apos {1 [145 8]} :go/pos {:lparen [145 7] :rparen [145 24]}} (^{:go/pos {:name-pos [145 2]}} cfail "bad atom %v" ^{:go/pos {:name-pos [145 23]}} f)
+  ^{:go/pos {:lbrace [146 13] :rbrace [146 14]}} (lit ^{:go/pos {:name-pos [146 9]}} Atom))
+
+
+^{:go/pos {:func [149 1] :lbrace [149 40] :rbrace [159 1] :return [158 2]}} (go/method ^{:go/pos {:name-pos [149 17]}} atomList ^{:tag ^{:go/pos {:lbrack [149 33]}} (slice ^{:go/pos {:name-pos [149 35]}} Atom) :go/pos {:closing [149 31] :opening [149 25] :recv-closing [149 15] :recv-opening [149 6]}} [^{:tag ^{:go/pos {:star [149 9]}} (* ^{:go/pos {:name-pos [149 10]}} scope) :go/pos {:name-pos [149 7]}} s ^{:tag ^{:go/pos {:name-pos [149 28]}} any :go/pos {:name-pos [149 26]}} f]
+  (let [^{:go/pos {:tok-pos [150 8]}} (values ^{:go/pos {:name-pos [150 2]}} v ^{:go/pos {:name-pos [150 5]}} ok) ^{:go/pos {:dot [150 12] :lparen [150 13] :rparen [150 17]}} (assert ^{:go/pos {:name-pos [150 14]}} Vec ^{:go/pos {:name-pos [150 11]}} f)]
+    ^{:go/pos {:if [151 2] :lbrace [151 9] :rbrace [153 2]}} (when ^{:go/pos {:op-pos [151 5]}} (not ^{:go/pos {:name-pos [151 6]}} ok)
+      ^{:go/apos {1 [152 9]} :go/pos {:lparen [152 8] :rparen [152 26]}} (^{:go/pos {:name-pos [152 3]}} cfail "bad atoms %v" ^{:go/pos {:name-pos [152 25]}} f))
+
+    (let [^{:go/pos {:name-pos [154 2] :tok-pos [154 5]}} as ^{:go/pos {:lparen [154 12] :rparen [154 27]}} (^{:go/pos {:name-pos [154 8]}} make ^{:go/pos {:lbrack [154 13]}} (slice ^{:go/pos {:name-pos [154 15]}} Atom) ^{:go/pos {:lparen [154 24] :rparen [154 26]}} (^{:go/pos {:name-pos [154 21]}} len ^{:go/pos {:name-pos [154 25]}} v))]
+      ^{:go/pos {:for [155 2] :lbrace [155 22] :range [155 14] :rbrace [157 2] :tok-pos [155 11]}} (range [^{:go/pos {:name-pos [155 6]}} i ^{:go/pos {:name-pos [155 9]}} x ^{:go/pos {:name-pos [155 20]}} v]
+        ^{:go/pos {:lbrack [156 5] :rbrack [156 7] :tok-pos [156 9]}} (aset ^{:go/pos {:name-pos [156 3]}} as ^{:go/pos {:name-pos [156 6]}} i ^{:go/pos {:dot [156 12] :lparen [156 17] :name-pos [156 13] :rparen [156 19]}} (.atom ^{:go/pos {:name-pos [156 11]}} s ^{:go/pos {:name-pos [156 18]}} x)))
+
+      ^{:go/pos {:name-pos [158 9]}} as)))
+
+
+^{:go/apos {5 [176 9]} :go/pos {:func [161 1] :lbrace [161 25] :rbrace [177 1] :return [176 2]}} (go/func ^{:go/pos {:name-pos [161 6]}} asInt ^{:tag ^{:go/pos {:name-pos [161 19]}} int64 :go/pos {:closing [161 17] :opening [161 11]}} [^{:tag ^{:go/pos {:name-pos [161 14]}} any :go/pos {:name-pos [161 12]}} f]
+  ^{:go/pos {:guard-dot [162 15] :guard-lparen [162 16] :guard-rparen [162 21] :guard-tok [162 11] :lbrace [162 23] :rbrace [174 2] :switch [162 2]}} (type-switch [^{:go/pos {:name-pos [162 9]}} x ^{:go/pos {:name-pos [162 14]}} f]
+    ^{:go/pos {:case [163 2] :colon [163 12]}} (case [^{:go/pos {:name-pos [163 7]}} int64]
+      ^{:go/pos {:return [164 3]}} (return ^{:go/pos {:name-pos [164 10]}} x))
+    ^{:go/pos {:case [165 2] :colon [165 13]}} (case [^{:go/pos {:name-pos [165 7]}} uint64]
+      ^{:go/pos {:return [166 3]}} (return ^{:go/pos {:lparen [166 15] :rparen [166 17]}} (conv ^{:go/pos {:name-pos [166 10]}} int64 ^{:go/pos {:name-pos [166 16]}} x)))
+    ^{:go/pos {:case [167 2] :colon [167 15]}} (case [^{:go/pos {:star [167 7]}} (* ^{:go/pos {:dot [167 11] :name-pos [167 12] :x-pos [167 8]}} big/Int)]
+      ^{:go/pos {:if [168 3] :lbrace [168 19] :rbrace [170 3]}} (when ^{:go/pos {:dot [168 7] :lparen [168 16] :name-pos [168 8] :rparen [168 17]}} (.IsUint64 ^{:go/pos {:name-pos [168 6]}} x)
+        ^{:go/pos {:return [169 4]}} (return ^{:go/pos {:lparen [169 16] :rparen [169 27]}} (conv ^{:go/pos {:name-pos [169 11]}} int64 ^{:go/pos {:dot [169 18] :lparen [169 25] :name-pos [169 19] :rparen [169 26]}} (.Uint64 ^{:go/pos {:name-pos [169 17]}} x))))
+
+      ;; two's complement truncation
+      (let [^{:go/pos {:name-pos [172 3] :tok-pos [172 5]}} m ^{:go/pos {:dot [172 20] :lparen [172 24] :name-pos [172 21] :rparen [172 66]}} (.And ^{:go/pos {:lparen [172 11] :rparen [172 19]}} (^{:go/pos {:name-pos [172 8]}} new ^{:go/pos {:dot [172 15] :name-pos [172 16] :x-pos [172 12]}} big/Int) ^{:go/pos {:name-pos [172 25]}} x ^{:go/pos {:dot [172 40] :lparen [172 50] :name-pos [172 41] :rparen [172 65]}} (.SetUint64 ^{:go/pos {:lparen [172 31] :rparen [172 39]}} (^{:go/pos {:name-pos [172 28]}} new ^{:go/pos {:dot [172 35] :name-pos [172 36] :x-pos [172 32]}} big/Int) ^{:go/pos {:dot [172 55] :name-pos [172 56] :x-pos [172 51]}} math/MaxUint64))]
+        ^{:go/pos {:return [173 3]}} (return ^{:go/pos {:lparen [173 15] :rparen [173 26]}} (conv ^{:go/pos {:name-pos [173 10]}} int64 ^{:go/pos {:dot [173 17] :lparen [173 24] :name-pos [173 18] :rparen [173 25]}} (.Uint64 ^{:go/pos {:name-pos [173 16]}} m))))))
+
+  ^{:go/apos {1 [175 8]} :go/pos {:lparen [175 7] :rparen [175 27]}} (^{:go/pos {:name-pos [175 2]}} cfail "bad integer %v" ^{:go/pos {:name-pos [175 26]}} f)
+  0)
+
+
+
+^{:go/pos {:doc [179 1] :func [180 1] :lbrace [180 41] :rbrace [247 1] :return [246 2]}} (go/method ^{:go/pos {:name-pos [180 19]}} literal "literal is a literal's value (STG-SPEC §5).\n" ^{:tag ^{:go/pos {:name-pos [180 35]}} Value :go/pos {:closing [180 33] :opening [180 26] :recv-closing [180 17] :recv-opening [180 6]}} [^{:tag ^{:go/pos {:star [180 10]}} (* ^{:go/pos {:name-pos [180 11]}} Module) :go/pos {:name-pos [180 7]}} md ^{:tag ^{:go/pos {:name-pos [180 29]}} List :go/pos {:name-pos [180 27]}} l]
+  ^{:go/apos {4 [246 9]}} (let [^{:go/pos {:tok-pos [181 7]}} (values ^{:go/pos {:name-pos [181 2]}} h ^{:go/pos {:name-pos [181 5]}} _) ^{:go/pos {:dot [181 14] :lparen [181 15] :rparen [181 19]}} (assert ^{:go/pos {:name-pos [181 16]}} Sym ^{:go/apos {2 [181 12]} :go/pos {:lbrack [181 11] :rbrack [181 13]}} (aget ^{:go/pos {:name-pos [181 10]}} l 0))
+      ^{:go/pos {:name-pos [182 2] :tok-pos [182 6]}} arg ^{:go/pos {:func [182 9] :lbrace [182 20] :rbrace [187 2] :return [186 3]}} (fn ^{:tag ^{:go/pos {:name-pos [182 16]}} any :go/pos {:closing [182 14] :opening [182 13]}} []
+        ^{:go/pos {:if [183 3] :lbrace [183 17] :rbrace [185 3]}} (when ^{:go/apos {2 [183 15]} :go/pos {:op-pos [183 13]}} (< ^{:go/pos {:lparen [183 9] :rparen [183 11]}} (^{:go/pos {:name-pos [183 6]}} len ^{:go/pos {:name-pos [183 10]}} l) 2)
+          ^{:go/apos {1 [184 10]} :go/pos {:lparen [184 9] :rparen [184 29]}} (^{:go/pos {:name-pos [184 4]}} cfail "bad literal %v" ^{:go/pos {:name-pos [184 28]}} l))
+
+        ^{:go/apos {2 [186 12]} :go/pos {:lbrack [186 11] :rbrack [186 13]}} (aget ^{:go/pos {:name-pos [186 10]}} l 1))]
+
+    ^{:go/pos {:lbrace [188 11] :rbrace [244 2] :switch [188 2]}} (switch ^{:go/pos {:name-pos [188 9]}} h
+      ^{:go/pos {:case [189 2] :colon [189 21]}} (case ^{:go/apos {0 [189 7] 1 [189 14]}} ["int" "int64"]
+        ^{:go/pos {:return [190 3]}} (return ^{:go/pos {:lparen [190 15] :rparen [190 21]}} (^{:go/pos {:name-pos [190 10]}} asInt ^{:go/pos {:lparen [190 19] :rparen [190 20]}} (^{:go/pos {:name-pos [190 16]}} arg))))
+      ^{:go/pos {:case [191 2] :colon [191 13]}} (case ^{:go/apos {0 [191 7]}} ["int8"]
+        ^{:go/pos {:return [192 3]}} (return ^{:go/pos {:lparen [192 15] :rparen [192 34]}} (conv ^{:go/pos {:name-pos [192 10]}} int64 ^{:go/pos {:lparen [192 20] :rparen [192 33]}} (conv ^{:go/pos {:name-pos [192 16]}} int8 ^{:go/pos {:lparen [192 26] :rparen [192 32]}} (^{:go/pos {:name-pos [192 21]}} asInt ^{:go/pos {:lparen [192 30] :rparen [192 31]}} (^{:go/pos {:name-pos [192 27]}} arg))))))
+      ^{:go/pos {:case [193 2] :colon [193 14]}} (case ^{:go/apos {0 [193 7]}} ["int16"]
+        ^{:go/pos {:return [194 3]}} (return ^{:go/pos {:lparen [194 15] :rparen [194 35]}} (conv ^{:go/pos {:name-pos [194 10]}} int64 ^{:go/pos {:lparen [194 21] :rparen [194 34]}} (conv ^{:go/pos {:name-pos [194 16]}} int16 ^{:go/pos {:lparen [194 27] :rparen [194 33]}} (^{:go/pos {:name-pos [194 22]}} asInt ^{:go/pos {:lparen [194 31] :rparen [194 32]}} (^{:go/pos {:name-pos [194 28]}} arg))))))
+      ^{:go/pos {:case [195 2] :colon [195 14]}} (case ^{:go/apos {0 [195 7]}} ["int32"]
+        ^{:go/pos {:return [196 3]}} (return ^{:go/pos {:lparen [196 15] :rparen [196 35]}} (conv ^{:go/pos {:name-pos [196 10]}} int64 ^{:go/pos {:lparen [196 21] :rparen [196 34]}} (conv ^{:go/pos {:name-pos [196 16]}} int32 ^{:go/pos {:lparen [196 27] :rparen [196 33]}} (^{:go/pos {:name-pos [196 22]}} asInt ^{:go/pos {:lparen [196 31] :rparen [196 32]}} (^{:go/pos {:name-pos [196 28]}} arg))))))
+      ^{:go/pos {:case [197 2] :colon [197 13]}} (case ^{:go/apos {0 [197 7]}} ["char"]
+        ^{:go/pos {:return [198 3]}} (return ^{:go/pos {:lparen [198 15] :rparen [198 21]}} (^{:go/pos {:name-pos [198 10]}} asInt ^{:go/pos {:lparen [198 19] :rparen [198 20]}} (^{:go/pos {:name-pos [198 16]}} arg))))
+      ^{:go/pos {:case [199 2] :colon [199 23]}} (case ^{:go/apos {0 [199 7] 1 [199 15]}} ["word" "word64"]
+        ^{:go/pos {:return [200 3]}} (return ^{:go/pos {:lparen [200 16] :rparen [200 29]}} (conv ^{:go/pos {:name-pos [200 10]}} uint64 ^{:go/pos {:lparen [200 22] :rparen [200 28]}} (^{:go/pos {:name-pos [200 17]}} asInt ^{:go/pos {:lparen [200 26] :rparen [200 27]}} (^{:go/pos {:name-pos [200 23]}} arg)))))
+      ^{:go/pos {:case [201 2] :colon [201 14]}} (case ^{:go/apos {0 [201 7]}} ["word8"]
+        ^{:go/pos {:return [202 3]}} (return ^{:go/pos {:lparen [202 16] :rparen [202 36]}} (conv ^{:go/pos {:name-pos [202 10]}} uint64 ^{:go/pos {:lparen [202 22] :rparen [202 35]}} (conv ^{:go/pos {:name-pos [202 17]}} uint8 ^{:go/pos {:lparen [202 28] :rparen [202 34]}} (^{:go/pos {:name-pos [202 23]}} asInt ^{:go/pos {:lparen [202 32] :rparen [202 33]}} (^{:go/pos {:name-pos [202 29]}} arg))))))
+      ^{:go/pos {:case [203 2] :colon [203 15]}} (case ^{:go/apos {0 [203 7]}} ["word16"]
+        ^{:go/pos {:return [204 3]}} (return ^{:go/pos {:lparen [204 16] :rparen [204 37]}} (conv ^{:go/pos {:name-pos [204 10]}} uint64 ^{:go/pos {:lparen [204 23] :rparen [204 36]}} (conv ^{:go/pos {:name-pos [204 17]}} uint16 ^{:go/pos {:lparen [204 29] :rparen [204 35]}} (^{:go/pos {:name-pos [204 24]}} asInt ^{:go/pos {:lparen [204 33] :rparen [204 34]}} (^{:go/pos {:name-pos [204 30]}} arg))))))
+      ^{:go/pos {:case [205 2] :colon [205 15]}} (case ^{:go/apos {0 [205 7]}} ["word32"]
+        ^{:go/pos {:return [206 3]}} (return ^{:go/pos {:lparen [206 16] :rparen [206 37]}} (conv ^{:go/pos {:name-pos [206 10]}} uint64 ^{:go/pos {:lparen [206 23] :rparen [206 36]}} (conv ^{:go/pos {:name-pos [206 17]}} uint32 ^{:go/pos {:lparen [206 29] :rparen [206 35]}} (^{:go/pos {:name-pos [206 24]}} asInt ^{:go/pos {:lparen [206 33] :rparen [206 34]}} (^{:go/pos {:name-pos [206 30]}} arg))))))
+      ^{:go/pos {:case [207 2] :colon [207 15]}} (case ^{:go/apos {0 [207 7]}} ["double"]
+        ^{:go/pos {:return [208 3]}} (return ^{:go/pos {:lparen [208 30] :rparen [208 51]}} (^{:go/pos {:dot [208 14] :name-pos [208 15] :x-pos [208 10]}} math/Float64frombits ^{:go/pos {:lparen [208 37] :rparen [208 50]}} (conv ^{:go/pos {:name-pos [208 31]}} uint64 ^{:go/pos {:lparen [208 43] :rparen [208 49]}} (^{:go/pos {:name-pos [208 38]}} asInt ^{:go/pos {:lparen [208 47] :rparen [208 48]}} (^{:go/pos {:name-pos [208 44]}} arg))))))
+      ^{:go/pos {:case [209 2] :colon [209 14]}} (case ^{:go/apos {0 [209 7]}} ["float"]
+        ^{:go/pos {:return [210 3]}} (return ^{:go/pos {:lparen [210 30] :rparen [210 51]}} (^{:go/pos {:dot [210 14] :name-pos [210 15] :x-pos [210 10]}} math/Float32frombits ^{:go/pos {:lparen [210 37] :rparen [210 50]}} (conv ^{:go/pos {:name-pos [210 31]}} uint32 ^{:go/pos {:lparen [210 43] :rparen [210 49]}} (^{:go/pos {:name-pos [210 38]}} asInt ^{:go/pos {:lparen [210 47] :rparen [210 48]}} (^{:go/pos {:name-pos [210 44]}} arg))))))
+      ^{:go/pos {:case [211 2] :colon [211 12]}} (case ^{:go/apos {0 [211 7]}} ["str"]
+        (let [^{:go/pos {:tok-pos [212 8]}} (values ^{:go/pos {:name-pos [212 3]}} s ^{:go/pos {:name-pos [212 6]}} _) ^{:go/pos {:dot [212 16] :lparen [212 17] :rparen [212 24]}} (assert ^{:go/pos {:name-pos [212 18]}} string ^{:go/pos {:lparen [212 14] :rparen [212 15]}} (^{:go/pos {:name-pos [212 11]}} arg))]
+          ^{:go/pos {:if [213 3] :lbrace [213 17] :rbrace [215 3]}} (when ^{:go/pos {:dot [213 8] :name-pos [213 9]}} (.-imaging ^{:go/pos {:name-pos [213 6]}} md)
+            ^{:go/pos {:return [214 4]}} (return ^{:go/pos {:op-pos [214 11]}} (addr ^{:go/pos {:lbrace [214 18] :rbrace [214 28]}} (lit ^{:go/pos {:name-pos [214 12]}} strLit ^{:go/pos {:lparen [214 25] :rparen [214 27]}} (^{:go/pos {:name-pos [214 19]}} latin1 ^{:go/pos {:name-pos [214 26]}} s)))))
+
+          ^{:go/pos {:return [216 3]}} (return ^{:go/pos {:dot [216 17] :lparen [216 30] :name-pos [216 18] :rparen [216 40]}} (.staticString ^{:go/pos {:dot [216 15] :name-pos [216 16]}} (.-m ^{:go/pos {:dot [216 12] :name-pos [216 13]}} (.-ld ^{:go/pos {:name-pos [216 10]}} md)) ^{:go/pos {:lparen [216 37] :rparen [216 39]}} (^{:go/pos {:name-pos [216 31]}} latin1 ^{:go/pos {:name-pos [216 38]}} s)))))
+      ^{:go/pos {:case [217 2] :colon [217 17]}} (case ^{:go/apos {0 [217 7]}} ["nulladdr"]
+        ^{:go/pos {:return [218 3]}} (return ^{:go/apos {2 [218 17]} :go/pos {:lparen [218 16] :rparen [218 18]}} (conv ^{:go/pos {:name-pos [218 10]}} uint64 0)))
+      ^{:go/pos {:case [219 2] :colon [219 14]}} (case ^{:go/apos {0 [219 7]}} ["label"]
+        (let [^{:go/pos {:tok-pos [220 8]}} (values ^{:go/pos {:name-pos [220 3]}} s ^{:go/pos {:name-pos [220 6]}} _) ^{:go/pos {:dot [220 16] :lparen [220 17] :rparen [220 24]}} (assert ^{:go/pos {:name-pos [220 18]}} string ^{:go/pos {:lparen [220 14] :rparen [220 15]}} (^{:go/pos {:name-pos [220 11]}} arg))]
+          ^{:go/pos {:if [221 3] :lbrace [221 17] :rbrace [223 3]}} (when ^{:go/pos {:dot [221 8] :name-pos [221 9]}} (.-imaging ^{:go/pos {:name-pos [221 6]}} md)
+            ^{:go/pos {:return [222 4]}} (return ^{:go/pos {:op-pos [222 11]}} (addr ^{:go/pos {:lbrace [222 20] :rbrace [222 22]}} (lit ^{:go/pos {:name-pos [222 12]}} labelLit ^{:go/pos {:name-pos [222 21]}} s))))
+
+          ^{:go/pos {:return [224 3]}} (return ^{:go/pos {:dot [224 17] :lparen [224 23] :name-pos [224 18] :rparen [224 25]}} (.label ^{:go/pos {:dot [224 15] :name-pos [224 16]}} (.-m ^{:go/pos {:dot [224 12] :name-pos [224 13]}} (.-ld ^{:go/pos {:name-pos [224 10]}} md)) ^{:go/pos {:name-pos [224 24]}} s))))
+      ^{:go/pos {:case [225 2] :colon [225 16]}} (case ^{:go/apos {0 [225 7]}} ["rubbish"]
+        ^{:go/pos {:if [226 3] :lbrace [226 18] :rbrace [240 3]}} (when ^{:go/apos {2 [226 16]} :go/pos {:op-pos [226 13]}} (>= ^{:go/pos {:lparen [226 9] :rparen [226 11]}} (^{:go/pos {:name-pos [226 6]}} len ^{:go/pos {:name-pos [226 10]}} l) 3)
+          ^{:go/pos {:guard-dot [227 20] :guard-lparen [227 21] :guard-rparen [227 26] :guard-tok [227 13] :lbrace [227 28] :rbrace [239 4] :switch [227 4]}} (type-switch [^{:go/pos {:name-pos [227 11]}} r ^{:go/apos {2 [227 18]} :go/pos {:lbrack [227 17] :rbrack [227 19]}} (aget ^{:go/pos {:name-pos [227 16]}} l 2)]
+            ^{:go/pos {:case [228 4] :colon [228 11]}} (case [^{:go/pos {:name-pos [228 9]}} Kw]
+              ^{:go/pos {:lbrace [229 14] :rbrace [238 5] :switch [229 5]}} (switch ^{:go/pos {:name-pos [229 12]}} r
+                ^{:go/pos {:case [230 5] :colon [230 50]}} (case ^{:go/apos {0 [230 10] 1 [230 17] 2 [230 25] 3 [230 34] 4 [230 43]}} ["int" "int8" "int16" "int32" "int64"]
+                  ^{:go/pos {:return [231 6]}} (return ^{:go/apos {2 [231 19]} :go/pos {:lparen [231 18] :rparen [231 20]}} (conv ^{:go/pos {:name-pos [231 13]}} int64 0)))
+                ^{:go/pos {:case [232 5] :colon [232 63]}} (case ^{:go/apos {0 [232 10] 1 [232 18] 2 [232 27] 3 [232 37] 4 [232 47] 5 [232 57]}} ["word" "word8" "word16" "word32" "word64" "addr"]
+                  ^{:go/pos {:return [233 6]}} (return ^{:go/apos {2 [233 20]} :go/pos {:lparen [233 19] :rparen [233 21]}} (conv ^{:go/pos {:name-pos [233 13]}} uint64 0)))
+                ^{:go/pos {:case [234 5] :colon [234 18]}} (case ^{:go/apos {0 [234 10]}} ["double"]
+                  ^{:go/pos {:return [235 6]}} (return ^{:go/apos {2 [235 21]} :go/pos {:lparen [235 20] :rparen [235 22]}} (conv ^{:go/pos {:name-pos [235 13]}} float64 0)))
+                ^{:go/pos {:case [236 5] :colon [236 17]}} (case ^{:go/apos {0 [236 10]}} ["float"]
+                  ^{:go/pos {:return [237 6]}} (return ^{:go/apos {2 [237 21]} :go/pos {:lparen [237 20] :rparen [237 22]}} (conv ^{:go/pos {:name-pos [237 13]}} float32 0)))))))
+
+
+
+        ^{:go/pos {:return [241 3]}} (return ^{:go/pos {:name-pos [241 10]}} rubbish))
+      ^{:go/pos {:case [242 2] :colon [242 15]}} (case ^{:go/apos {0 [242 7]}} ["bignat"]
+        ^{:go/apos {1 [243 9]} :go/pos {:lparen [243 8] :rparen [243 25]}} (^{:go/pos {:name-pos [243 3]}} cfail "bignat literal")))
+
+    ^{:go/apos {1 [245 8]} :go/pos {:lparen [245 7] :rparen [245 31]}} (^{:go/pos {:name-pos [245 2]}} cfail "unknown literal %v" ^{:go/pos {:name-pos [245 30]}} l)
+    nil))
+
+
+
+
+^{:go/pos {:doc [249 1] :func [251 1] :lbrace [251 45] :rbrace [270 1] :return [269 2]}} (go/func ^{:go/pos {:name-pos [251 6]}} staticCon "staticCon is the one value of a constructor whose fields are all literals (as GHC's static closures: immutable,\nso one value serves every evaluation), or nil. Not in an image's compilation: its literals may be placeholders.\n" ^{:tag ^{:go/pos {:star [251 40]}} (* ^{:go/pos {:name-pos [251 41]}} Con) :go/pos {:closing [251 38] :opening [251 15]}} [^{:tag ^{:go/pos {:star [251 19]}} (* ^{:go/pos {:name-pos [251 20]}} DataCon) :go/pos {:name-pos [251 16]}} dc ^{:tag ^{:go/pos {:lbrack [251 32]}} (slice ^{:go/pos {:name-pos [251 34]}} Atom) :go/pos {:name-pos [251 29]}} as]
+  ^{:go/pos {:if [252 2] :lbrace [252 33] :rbrace [254 2]}} (when ^{:go/pos {:op-pos [252 18]}} (or ^{:go/apos {2 [252 16]} :go/pos {:op-pos [252 13]}} (== ^{:go/pos {:lparen [252 8] :rparen [252 11]}} (^{:go/pos {:name-pos [252 5]}} len ^{:go/pos {:name-pos [252 9]}} as) 0) ^{:go/apos {2 [252 31]} :go/pos {:op-pos [252 29]}} (> ^{:go/pos {:lparen [252 24] :rparen [252 27]}} (^{:go/pos {:name-pos [252 21]}} len ^{:go/pos {:name-pos [252 25]}} as) 4))
+    ^{:go/apos {1 [253 10]} :go/pos {:return [253 3]}} (return nil))
+
+  ^{:go/pos {:for [255 2] :lbrace [255 20] :range [255 11] :rbrace [264 2] :tok-pos [255 8]}} (range [^{:go/pos {:name-pos [255 6]}} i ^{:go/pos {:name-pos [255 17]}} as]
+    ^{:go/pos {:if [256 3] :lbrace [256 25] :rbrace [258 3]}} (when ^{:go/pos {:op-pos [256 17]}} (!= ^{:go/pos {:dot [256 11] :name-pos [256 12]}} (.-kind ^{:go/pos {:lbrack [256 8] :rbrack [256 10]}} (aget ^{:go/pos {:name-pos [256 6]}} as ^{:go/pos {:name-pos [256 9]}} i)) ^{:go/pos {:name-pos [256 20]}} aLit)
+      ^{:go/apos {1 [257 11]} :go/pos {:return [257 4]}} (return nil))
+
+    ^{:go/pos {:guard-dot [259 19] :guard-lparen [259 20] :guard-rparen [259 25] :lbrace [259 27] :rbrace [263 3] :switch [259 3]}} (type-switch ^{:go/pos {:dot [259 15] :name-pos [259 16]}} (.-lit ^{:go/pos {:lbrack [259 12] :rbrack [259 14]}} (aget ^{:go/pos {:name-pos [259 10]}} as ^{:go/pos {:name-pos [259 13]}} i))
+      ^{:go/pos {:case [260 3] :colon [260 39]}} (case [^{:go/pos {:name-pos [260 8]}} int64 ^{:go/pos {:name-pos [260 15]}} uint64 ^{:go/pos {:name-pos [260 23]}} float64 ^{:go/pos {:name-pos [260 32]}} float32])
+      ^{:go/pos {:case [261 3] :colon [261 10]}} (default
+        ^{:go/apos {1 [262 11]} :go/pos {:return [262 4]}} (return nil))))
+
+
+  (let [^{:go/pos {:name-pos [265 2] :tok-pos [265 4]}} c ^{:go/pos {:lparen [265 14] :rparen [265 26]}} (^{:go/pos {:name-pos [265 7]}} newConN ^{:go/pos {:name-pos [265 15]}} dc ^{:go/pos {:lparen [265 22] :rparen [265 25]}} (^{:go/pos {:name-pos [265 19]}} len ^{:go/pos {:name-pos [265 23]}} as))]
+    ^{:go/pos {:for [266 2] :lbrace [266 20] :range [266 11] :rbrace [268 2] :tok-pos [266 8]}} (range [^{:go/pos {:name-pos [266 6]}} i ^{:go/pos {:name-pos [266 17]}} as]
+      ^{:go/pos {:lbrack [267 6] :rbrack [267 8] :tok-pos [267 10]}} (aset ^{:go/pos {:dot [267 4] :name-pos [267 5]}} (.-F ^{:go/pos {:name-pos [267 3]}} c) ^{:go/pos {:name-pos [267 7]}} i ^{:go/pos {:dot [267 17] :name-pos [267 18]}} (.-lit ^{:go/pos {:lbrack [267 14] :rbrack [267 16]}} (aget ^{:go/pos {:name-pos [267 12]}} as ^{:go/pos {:name-pos [267 15]}} i))))
+
+    ^{:go/pos {:name-pos [269 9]}} c))
+
+
+
+^{:go/pos {:doc [272 1] :tok-pos [273 1]}} (go/var ^{:doc "rubbish is a LitRubbish of a lifted or unlifted type: never entered.\n" :go/pos {:name-pos [273 5]}} rubbish ^{:go/pos {:op-pos [273 15]}} (addr ^{:go/acolon {2 [273 22]} :go/apos {2 [273 20]} :go/pos {:lbrace [273 19] :rbrace [273 59]}} (lit ^{:go/pos {:name-pos [273 16]}} Con :DC ^{:go/pos {:op-pos [273 24]}} (addr ^{:go/acolon {2 [273 37] 4 [273 52]} :go/apos {2 [273 33] 3 [273 39] 4 [273 50] 5 [273 54]} :go/pos {:lbrace [273 32] :rbrace [273 58]}} (lit ^{:go/pos {:name-pos [273 25]}} DataCon :Name "rubbish" :ok true)))))
+
+
+^{:go/pos {:doc [275 1] :func [276 1] :lbrace [276 28] :rbrace [282 1] :return [281 2]}} (go/func ^{:go/pos {:name-pos [276 6]}} litKey "literal keys of case alternatives: integers by their 64 bits, floats as themselves.\n" ^{:tag ^{:go/pos {:name-pos [276 22]}} Value :go/pos {:closing [276 20] :opening [276 12]}} [^{:tag ^{:go/pos {:name-pos [276 15]}} Value :go/pos {:name-pos [276 13]}} v]
+  ^{:go/pos {:guard-dot [277 15] :guard-lparen [277 16] :guard-rparen [277 21] :guard-tok [277 11] :lbrace [277 23] :rbrace [280 2] :switch [277 2]}} (type-switch [^{:go/pos {:name-pos [277 9]}} x ^{:go/pos {:name-pos [277 14]}} v]
+    ^{:go/pos {:case [278 2] :colon [278 13]}} (case [^{:go/pos {:name-pos [278 7]}} uint64]
+      ^{:go/pos {:return [279 3]}} (return ^{:go/pos {:lparen [279 15] :rparen [279 17]}} (conv ^{:go/pos {:name-pos [279 10]}} int64 ^{:go/pos {:name-pos [279 16]}} x))))
+
+  ^{:go/pos {:name-pos [281 9]}} v)
+
+
+
+^{:go/pos {:doc [284 1] :func [285 1] :lbrace [285 73] :rbrace [307 1] :return [306 2]}} (go/method ^{:go/pos {:name-pos [285 19]}} compileLambda "compileLambda compiles (closure UPD [FREE...] [BINDER...] EXPR) in a frame of its own.\n" ^{:tag ^{:go/pos {:star [285 65]}} (* ^{:go/pos {:name-pos [285 66]}} Lambda) :go/pos {:closing [285 63] :opening [285 32] :recv-closing [285 17] :recv-opening [285 6]}} [^{:tag ^{:go/pos {:star [285 10]}} (* ^{:go/pos {:name-pos [285 11]}} Module) :go/pos {:name-pos [285 7]}} md ^{:tag ^{:go/pos {:name-pos [285 38]}} string :go/pos {:name-pos [285 33]}} name ^{:tag ^{:go/pos {:name-pos [285 48]}} List :go/pos {:name-pos [285 46]}} f ^{:tag ^{:go/pos {:name-pos [285 60]}} int :go/pos {:name-pos [285 54]}} depth]
+  ^{:go/pos {:if [286 2] :lbrace [286 17] :rbrace [288 2]}} (when ^{:go/apos {2 [286 15]} :go/pos {:op-pos [286 12]}} (!= ^{:go/pos {:lparen [286 8] :rparen [286 10]}} (^{:go/pos {:name-pos [286 5]}} len ^{:go/pos {:name-pos [286 9]}} f) 5)
+    ^{:go/apos {1 [287 9]} :go/pos {:lparen [287 8] :rparen [287 28]}} (^{:go/pos {:name-pos [287 3]}} cfail "bad closure %v" ^{:go/pos {:name-pos [287 27]}} f))
+
+  (let [^{:go/pos {:tok-pos [289 9]}} (values ^{:go/pos {:name-pos [289 2]}} upd ^{:go/pos {:name-pos [289 7]}} _) ^{:go/pos {:dot [289 16] :lparen [289 17] :rparen [289 20]}} (assert ^{:go/pos {:name-pos [289 18]}} Kw ^{:go/apos {2 [289 14]} :go/pos {:lbrack [289 13] :rbrack [289 15]}} (aget ^{:go/pos {:name-pos [289 12]}} f 1))
+      ^{:go/pos {:tok-pos [290 10]}} (values ^{:go/pos {:name-pos [290 2]}} free ^{:go/pos {:name-pos [290 8]}} _) ^{:go/pos {:dot [290 17] :lparen [290 18] :rparen [290 22]}} (assert ^{:go/pos {:name-pos [290 19]}} Vec ^{:go/apos {2 [290 15]} :go/pos {:lbrack [290 14] :rbrack [290 16]}} (aget ^{:go/pos {:name-pos [290 13]}} f 2))
+      ^{:go/pos {:tok-pos [291 10]}} (values ^{:go/pos {:name-pos [291 2]}} args ^{:go/pos {:name-pos [291 8]}} _) ^{:go/pos {:dot [291 17] :lparen [291 18] :rparen [291 22]}} (assert ^{:go/pos {:name-pos [291 19]}} Vec ^{:go/apos {2 [291 15]} :go/pos {:lbrack [291 14] :rbrack [291 16]}} (aget ^{:go/pos {:name-pos [291 13]}} f 3))
+      ^{:go/pos {:name-pos [292 2] :tok-pos [292 4]}} s ^{:go/pos {:op-pos [292 7]}} (addr ^{:go/acolon {2 [292 17] 4 [292 27] 6 [292 53] 8 [292 66] 10 [292 79] 12 [292 101] 14 [292 114]} :go/apos {2 [292 14] 4 [292 23] 6 [292 49] 8 [292 61] 10 [292 75] 12 [292 96] 13 [292 103] 14 [292 109]} :go/pos {:lbrace [292 13] :rbrace [292 125]}} (lit ^{:go/pos {:name-pos [292 8]}} scope :mod ^{:go/pos {:name-pos [292 19]}} md :vars ^{:go/pos {:lbrace [292 45] :rbrace [292 46]}} (lit ^{:go/pos {:map [292 29]}} (map ^{:go/pos {:name-pos [292 33]}} string ^{:go/pos {:name-pos [292 40]}} vinfo)) :name ^{:go/pos {:name-pos [292 55]}} name :depth ^{:go/pos {:name-pos [292 68]}} depth :tail ^{:go/apos {2 [292 93]} :go/pos {:op-pos [292 91]}} (> ^{:go/pos {:lparen [292 84] :rparen [292 89]}} (^{:go/pos {:name-pos [292 81]}} len ^{:go/pos {:name-pos [292 85]}} args) 0) :atail true :nfree ^{:go/pos {:lparen [292 119] :rparen [292 124]}} (^{:go/pos {:name-pos [292 116]}} len ^{:go/pos {:name-pos [292 120]}} free)))]
+    ^{:go/pos {:for [293 2] :lbrace [293 25] :range [293 14] :rbrace [296 2] :tok-pos [293 11]}} (range [^{:go/pos {:name-pos [293 6]}} _ ^{:go/pos {:name-pos [293 9]}} x ^{:go/pos {:name-pos [293 20]}} free]
+      (let [^{:go/pos {:tok-pos [294 8]}} (values ^{:go/pos {:name-pos [294 3]}} n ^{:go/pos {:name-pos [294 6]}} _) ^{:go/pos {:dot [294 12] :lparen [294 13] :rparen [294 20]}} (assert ^{:go/pos {:name-pos [294 14]}} string ^{:go/pos {:name-pos [294 11]}} x)]
+        ^{:go/pos {:lbrack [295 9] :rbrack [295 11] :tok-pos [295 13]}} (aset ^{:go/pos {:dot [295 4] :name-pos [295 5]}} (.-vars ^{:go/pos {:name-pos [295 3]}} s) ^{:go/pos {:name-pos [295 10]}} n ^{:go/acolon {2 [295 25]} :go/apos {2 [295 21]} :go/pos {:lbrace [295 20] :rbrace [295 38]}} (lit ^{:go/pos {:name-pos [295 15]}} vinfo :slot ^{:go/pos {:dot [295 28] :lparen [295 36] :name-pos [295 29] :rparen [295 37]}} (.newSlot ^{:go/pos {:name-pos [295 27]}} s)))))
+
+    ^{:go/pos {:for [297 2] :lbrace [297 25] :range [297 14] :rbrace [300 2] :tok-pos [297 11]}} (range [^{:go/pos {:name-pos [297 6]}} _ ^{:go/pos {:name-pos [297 9]}} a ^{:go/pos {:name-pos [297 20]}} args]
+      (let [^{:go/pos {:tok-pos [298 8]}} (values ^{:go/pos {:name-pos [298 3]}} n ^{:go/pos {:name-pos [298 6]}} _) ^{:go/pos {:lparen [298 21] :rparen [298 23]}} (^{:go/pos {:name-pos [298 11]}} binderName ^{:go/pos {:name-pos [298 22]}} a)]
+        ^{:go/pos {:lbrack [299 9] :rbrack [299 11] :tok-pos [299 13]}} (aset ^{:go/pos {:dot [299 4] :name-pos [299 5]}} (.-vars ^{:go/pos {:name-pos [299 3]}} s) ^{:go/pos {:name-pos [299 10]}} n ^{:go/acolon {2 [299 25]} :go/apos {2 [299 21]} :go/pos {:lbrace [299 20] :rbrace [299 38]}} (lit ^{:go/pos {:name-pos [299 15]}} vinfo :slot ^{:go/pos {:dot [299 28] :lparen [299 36] :name-pos [299 29] :rparen [299 37]}} (.newSlot ^{:go/pos {:name-pos [299 27]}} s)))))
+
+    (let [^{:go/pos {:name-pos [301 2] :tok-pos [301 4]}} l ^{:go/pos {:op-pos [301 7]}} (addr ^{:go/acolon {2 [301 19] 4 [301 30] 6 [301 53] 8 [301 71] 10 [301 87]} :go/apos {2 [301 15] 4 [301 27] 6 [301 48] 8 [301 66] 10 [301 84]} :go/pos {:lbrace [301 14] :rbrace [301 91]}} (lit ^{:go/pos {:name-pos [301 8]}} Lambda :Name ^{:go/pos {:name-pos [301 21]}} name :Upd ^{:go/apos {2 [301 44]} :go/pos {:lbrack [301 43] :rbrack [301 45]}} (aget ^{:go/pos {:lparen [301 38] :rparen [301 42]}} (conv ^{:go/pos {:name-pos [301 32]}} string ^{:go/pos {:name-pos [301 39]}} upd) 0) :NFree ^{:go/pos {:lparen [301 58] :rparen [301 63]}} (^{:go/pos {:name-pos [301 55]}} len ^{:go/pos {:name-pos [301 59]}} free) :NArgs ^{:go/pos {:lparen [301 76] :rparen [301 81]}} (^{:go/pos {:name-pos [301 73]}} len ^{:go/pos {:name-pos [301 77]}} args) :mod ^{:go/pos {:name-pos [301 89]}} md))]
+      ^{:go/pos {:tok-pos [302 9]}} (set! ^{:go/pos {:dot [302 3] :name-pos [302 4]}} (.-Body ^{:go/pos {:name-pos [302 2]}} l) ^{:go/pos {:dot [302 12] :lparen [302 17] :name-pos [302 13] :rparen [302 22]}} (.expr ^{:go/pos {:name-pos [302 11]}} s ^{:go/apos {2 [302 20]} :go/pos {:lbrack [302 19] :rbrack [302 21]}} (aget ^{:go/pos {:name-pos [302 18]}} f 4)))
+      ^{:go/pos {:tok-pos [303 11]}} (set! ^{:go/pos {:dot [303 3] :name-pos [303 4]}} (.-NSlots ^{:go/pos {:name-pos [303 2]}} l) ^{:go/pos {:dot [303 14] :name-pos [303 15]}} (.-n ^{:go/pos {:name-pos [303 13]}} s))
+      ^{:go/pos {:dot [304 3] :lparen [304 12] :name-pos [304 4] :rparen [304 13]}} (.selector ^{:go/pos {:name-pos [304 2]}} l)
+      ^{:go/pos {:dot [305 3] :lparen [305 16] :name-pos [305 4] :rparen [305 17]}} (.annotateLive ^{:go/pos {:name-pos [305 2]}} l)
+      ^{:go/pos {:name-pos [306 9]}} l)))
+
+
+
+^{:go/pos {:doc [309 1] :func [310 1] :lbrace [310 42] :rbrace [317 1] :return [316 2]}} (go/method ^{:go/pos {:name-pos [310 17]}} freeAtoms "freeAtoms are a closure's free variables as atoms of the enclosing frame.\n" ^{:tag ^{:go/pos {:lbrack [310 35]}} (slice ^{:go/pos {:name-pos [310 37]}} Atom) :go/pos {:closing [310 33] :opening [310 26] :recv-closing [310 15] :recv-opening [310 6]}} [^{:tag ^{:go/pos {:star [310 9]}} (* ^{:go/pos {:name-pos [310 10]}} scope) :go/pos {:name-pos [310 7]}} s ^{:tag ^{:go/pos {:name-pos [310 29]}} List :go/pos {:name-pos [310 27]}} f]
+  (let [^{:go/pos {:tok-pos [311 10]}} (values ^{:go/pos {:name-pos [311 2]}} free ^{:go/pos {:name-pos [311 8]}} _) ^{:go/pos {:dot [311 17] :lparen [311 18] :rparen [311 22]}} (assert ^{:go/pos {:name-pos [311 19]}} Vec ^{:go/apos {2 [311 15]} :go/pos {:lbrack [311 14] :rbrack [311 16]}} (aget ^{:go/pos {:name-pos [311 13]}} f 2))
+      ^{:go/pos {:name-pos [312 2] :tok-pos [312 5]}} as ^{:go/pos {:lparen [312 12] :rparen [312 30]}} (^{:go/pos {:name-pos [312 8]}} make ^{:go/pos {:lbrack [312 13]}} (slice ^{:go/pos {:name-pos [312 15]}} Atom) ^{:go/pos {:lparen [312 24] :rparen [312 29]}} (^{:go/pos {:name-pos [312 21]}} len ^{:go/pos {:name-pos [312 25]}} free))]
+    ^{:go/pos {:for [313 2] :lbrace [313 25] :range [313 14] :rbrace [315 2] :tok-pos [313 11]}} (range [^{:go/pos {:name-pos [313 6]}} i ^{:go/pos {:name-pos [313 9]}} x ^{:go/pos {:name-pos [313 20]}} free]
+      ^{:go/pos {:lbrack [314 5] :rbrack [314 7] :tok-pos [314 9]}} (aset ^{:go/pos {:name-pos [314 3]}} as ^{:go/pos {:name-pos [314 6]}} i ^{:go/pos {:dot [314 12] :lparen [314 17] :name-pos [314 13] :rparen [314 19]}} (.atom ^{:go/pos {:name-pos [314 11]}} s ^{:go/pos {:name-pos [314 18]}} x)))
+
+    ^{:go/pos {:name-pos [316 9]}} as))
+
+
+
+
+^{:go/pos {:doc [319 1] :func [321 1] :lbrace [321 34] :rbrace [402 1] :return [401 2]}} (go/method ^{:go/pos {:name-pos [321 17]}} expr "expr compiles an expression. minDouble#'s and maxDouble#'s (and Float#'s) literal operand goes second:\nGHC's code generator emits minsd reg, [lit], and the operands' order decides a NaN's and a zero's result.\n" ^{:tag ^{:go/pos {:name-pos [321 29]}} Expr :go/pos {:closing [321 27] :opening [321 21] :recv-closing [321 15] :recv-opening [321 6]}} [^{:tag ^{:go/pos {:star [321 9]}} (* ^{:go/pos {:name-pos [321 10]}} scope) :go/pos {:name-pos [321 7]}} s ^{:tag ^{:go/pos {:name-pos [321 24]}} any :go/pos {:name-pos [321 22]}} f]
+  ^{:go/apos {5 [401 9]}} (let [^{:go/pos {:tok-pos [322 7]}} (values ^{:go/pos {:name-pos [322 2]}} h ^{:go/pos {:name-pos [322 5]}} l) ^{:go/pos {:lparen [322 14] :rparen [322 16]}} (^{:go/pos {:name-pos [322 10]}} head ^{:go/pos {:name-pos [322 15]}} f)]
+    ^{:go/pos {:lbrace [323 11] :rbrace [395 2] :switch [323 2]}} (switch ^{:go/pos {:name-pos [323 9]}} h
+      ^{:go/pos {:case [324 2] :colon [324 12]}} (case ^{:go/apos {0 [324 7]}} ["app"]
+        (let [^{:go/pos {:tok-pos [325 9]}} (values ^{:go/pos {:name-pos [325 3]}} fn ^{:go/pos {:name-pos [325 7]}} _) ^{:go/pos {:dot [325 16] :lparen [325 17] :rparen [325 24]}} (assert ^{:go/pos {:name-pos [325 18]}} string ^{:go/apos {2 [325 14]} :go/pos {:lbrack [325 13] :rbrack [325 15]}} (aget ^{:go/pos {:name-pos [325 12]}} l 1))
+            ^{:go/pos {:name-pos [326 3] :tok-pos [326 6]}} as ^{:go/pos {:dot [326 10] :lparen [326 19] :name-pos [326 11] :rparen [326 24]}} (.atomList ^{:go/pos {:name-pos [326 9]}} s ^{:go/apos {2 [326 22]} :go/pos {:lbrack [326 21] :rbrack [326 23]}} (aget ^{:go/pos {:name-pos [326 20]}} l 2))]
+          ^{:go/pos {:if [327 3] :lbrace [327 49] :rbrace [332 3]}} (when [^{:go/pos {:tok-pos [327 13]}} (values ^{:go/pos {:name-pos [327 6]}} vi ^{:go/pos {:name-pos [327 10]}} ok) ^{:go/pos {:lbrack [327 22] :rbrack [327 25]}} (aget ^{:go/pos {:dot [327 17] :name-pos [327 18]}} (.-vars ^{:go/pos {:name-pos [327 16]}} s) ^{:go/pos {:name-pos [327 23]}} fn)] ^{:go/pos {:op-pos [327 31]}} (and ^{:go/pos {:name-pos [327 28]}} ok ^{:go/apos {2 [327 45]} :go/pos {:op-pos [327 42]}} (!= ^{:go/pos {:dot [327 36] :name-pos [327 37]}} (.-join ^{:go/pos {:name-pos [327 34]}} vi) nil))
+            ^{:go/pos {:if [328 4] :lbrace [328 28] :rbrace [330 4]}} (when ^{:go/pos {:op-pos [328 15]}} (!= ^{:go/pos {:lparen [328 10] :rparen [328 13]}} (^{:go/pos {:name-pos [328 7]}} len ^{:go/pos {:name-pos [328 11]}} as) ^{:go/pos {:dot [328 25] :name-pos [328 26]}} (.-n ^{:go/pos {:dot [328 20] :name-pos [328 21]}} (.-join ^{:go/pos {:name-pos [328 18]}} vi)))
+              ^{:go/apos {1 [329 11]} :go/pos {:lparen [329 10] :rparen [329 78]}} (^{:go/pos {:name-pos [329 5]}} cfail "jump to %s with %d arguments, %d expected" ^{:go/pos {:name-pos [329 56]}} fn ^{:go/pos {:lparen [329 63] :rparen [329 66]}} (^{:go/pos {:name-pos [329 60]}} len ^{:go/pos {:name-pos [329 64]}} as) ^{:go/pos {:dot [329 76] :name-pos [329 77]}} (.-n ^{:go/pos {:dot [329 71] :name-pos [329 72]}} (.-join ^{:go/pos {:name-pos [329 69]}} vi))))
+
+            ^{:go/pos {:return [331 4]}} (return ^{:go/pos {:op-pos [331 11]}} (addr ^{:go/acolon {2 [331 18] 4 [331 33]} :go/apos {2 [331 17] 4 [331 29]} :go/pos {:lbrace [331 16] :rbrace [331 37]}} (lit ^{:go/pos {:name-pos [331 12]}} Jump :j ^{:go/pos {:dot [331 22] :name-pos [331 23]}} (.-join ^{:go/pos {:name-pos [331 20]}} vi) :args ^{:go/pos {:name-pos [331 35]}} as))))
+
+          (let ^{:go/apos {3 [334 10]}} [^{:go/pos {:name-pos [333 3] :tok-pos [333 6]}} fa ^{:go/pos {:dot [333 10] :lparen [333 15] :name-pos [333 11] :rparen [333 18]}} (.atom ^{:go/pos {:name-pos [333 9]}} s ^{:go/pos {:name-pos [333 16]}} fn)
+              ^{:go/pos {:name-pos [334 3] :tok-pos [334 7]}} clr 0]
+            ^{:go/pos {:if [335 3] :lbrace [335 14] :rbrace [337 3]}} (when ^{:go/pos {:dot [335 7] :name-pos [335 8]}} (.-atail ^{:go/pos {:name-pos [335 6]}} s)
+              ^{:go/pos {:tok-pos [336 8]}} (set! ^{:go/pos {:name-pos [336 4]}} clr ^{:go/apos {2 [336 20]} :go/pos {:op-pos [336 18]}} (+ ^{:go/pos {:dot [336 11] :name-pos [336 12]}} (.-nfree ^{:go/pos {:name-pos [336 10]}} s) 1)))
+
+            ^{:go/pos {:if [338 3] :lbrace [338 19] :rbrace [340 3]}} (when ^{:go/apos {2 [338 17]} :go/pos {:op-pos [338 14]}} (== ^{:go/pos {:lparen [338 9] :rparen [338 12]}} (^{:go/pos {:name-pos [338 6]}} len ^{:go/pos {:name-pos [338 10]}} as) 0)
+              ^{:go/pos {:return [339 4]}} (return ^{:go/pos {:op-pos [339 11]}} (addr ^{:go/acolon {2 [339 19] 4 [339 28]} :go/apos {2 [339 18] 4 [339 25]} :go/pos {:lbrace [339 17] :rbrace [339 33]}} (lit ^{:go/pos {:name-pos [339 12]}} Enter :f ^{:go/pos {:name-pos [339 21]}} fa :clr ^{:go/pos {:name-pos [339 30]}} clr))))
+
+            ^{:go/pos {:return [341 3]}} (return ^{:go/pos {:op-pos [341 10]}} (addr ^{:go/acolon {2 [341 16] 4 [341 26] 6 [341 36] 8 [341 49]} :go/apos {2 [341 15] 4 [341 22] 6 [341 32] 8 [341 46]} :go/pos {:lbrace [341 14] :rbrace [341 54]}} (lit ^{:go/pos {:name-pos [341 11]}} App :f ^{:go/pos {:name-pos [341 18]}} fa :args ^{:go/pos {:name-pos [341 28]}} as :tail ^{:go/pos {:dot [341 39] :name-pos [341 40]}} (.-tail ^{:go/pos {:name-pos [341 38]}} s) :clr ^{:go/pos {:name-pos [341 51]}} clr))))))
+      ^{:go/pos {:case [342 2] :colon [342 12]}} (case ^{:go/apos {0 [342 7]}} ["con"]
+        (let [^{:go/pos {:tok-pos [343 9]}} (values ^{:go/pos {:name-pos [343 3]}} dc ^{:go/pos {:name-pos [343 7]}} _) ^{:go/pos {:dot [343 16] :lparen [343 17] :rparen [343 24]}} (assert ^{:go/pos {:name-pos [343 18]}} string ^{:go/apos {2 [343 14]} :go/pos {:lbrack [343 13] :rbrack [343 15]}} (aget ^{:go/pos {:name-pos [343 12]}} l 1))
+            ^{:go/pos {:name-pos [344 3] :tok-pos [344 6]}} as ^{:go/pos {:dot [344 10] :lparen [344 19] :name-pos [344 11] :rparen [344 24]}} (.atomList ^{:go/pos {:name-pos [344 9]}} s ^{:go/apos {2 [344 22]} :go/pos {:lbrack [344 21] :rbrack [344 23]}} (aget ^{:go/pos {:name-pos [344 20]}} l 2))]
+          ^{:go/pos {:if [345 3] :lbrace [345 18] :rbrace [347 3]}} (when ^{:go/pos {:lparen [345 13] :rparen [345 16]}} (^{:go/pos {:name-pos [345 6]}} isTuple ^{:go/pos {:name-pos [345 14]}} dc)
+            ^{:go/pos {:return [346 4]}} (return ^{:go/pos {:op-pos [346 11]}} (addr ^{:go/acolon {2 [346 22]} :go/apos {2 [346 18]} :go/pos {:lbrace [346 17] :rbrace [346 26]}} (lit ^{:go/pos {:name-pos [346 12]}} Tuple :args ^{:go/pos {:name-pos [346 24]}} as))))
+
+          ^{:go/pos {:return [348 3]}} (return ^{:go/pos {:op-pos [348 10]}} (addr ^{:go/acolon {2 [348 18] 4 [348 46] 6 [348 58]} :go/apos {2 [348 16] 4 [348 42] 6 [348 52]} :go/pos {:lbrace [348 15] :rbrace [348 95]}} (lit ^{:go/pos {:name-pos [348 11]}} ConE :dc ^{:go/pos {:dot [348 28] :lparen [348 36] :name-pos [348 29] :rparen [348 39]}} (.dataCon ^{:go/pos {:dot [348 25] :name-pos [348 26]}} (.-ld ^{:go/pos {:dot [348 21] :name-pos [348 22]}} (.-mod ^{:go/pos {:name-pos [348 20]}} s)) ^{:go/pos {:name-pos [348 37]}} dc) :args ^{:go/pos {:name-pos [348 48]}} as :static ^{:go/pos {:lparen [348 69] :rparen [348 94]}} (^{:go/pos {:name-pos [348 60]}} staticCon ^{:go/pos {:dot [348 78] :lparen [348 86] :name-pos [348 79] :rparen [348 89]}} (.dataCon ^{:go/pos {:dot [348 75] :name-pos [348 76]}} (.-ld ^{:go/pos {:dot [348 71] :name-pos [348 72]}} (.-mod ^{:go/pos {:name-pos [348 70]}} s)) ^{:go/pos {:name-pos [348 87]}} dc) ^{:go/pos {:name-pos [348 92]}} as))))))
+      ^{:go/pos {:case [349 2] :colon [349 15]}} (case ^{:go/apos {0 [349 7]}} ["primop"]
+        (let [^{:go/pos {:tok-pos [350 9]}} (values ^{:go/pos {:name-pos [350 3]}} op ^{:go/pos {:name-pos [350 7]}} _) ^{:go/pos {:dot [350 16] :lparen [350 17] :rparen [350 24]}} (assert ^{:go/pos {:name-pos [350 18]}} string ^{:go/apos {2 [350 14]} :go/pos {:lbrack [350 13] :rbrack [350 15]}} (aget ^{:go/pos {:name-pos [350 12]}} l 1))
+            ^{:go/pos {:name-pos [351 3] :tok-pos [351 6]}} as ^{:go/pos {:dot [351 10] :lparen [351 19] :name-pos [351 11] :rparen [351 24]}} (.atomList ^{:go/pos {:name-pos [351 9]}} s ^{:go/apos {2 [351 22]} :go/pos {:lbrack [351 21] :rbrack [351 23]}} (aget ^{:go/pos {:name-pos [351 20]}} l 2))
+            ^{:go/pos {:name-pos [352 3] :tok-pos [352 5]}} p ^{:go/pos {:lbrack [352 15] :rbrack [352 18]}} (aget ^{:go/pos {:name-pos [352 8]}} primops ^{:go/pos {:name-pos [352 16]}} op)]
+          ^{:go/pos {:if [353 3] :lbrace [353 15] :rbrace [355 3]}} (when ^{:go/apos {2 [353 11]} :go/pos {:op-pos [353 8]}} (== ^{:go/pos {:name-pos [353 6]}} p nil)
+            ^{:go/pos {:return [354 4]}} (return ^{:go/pos {:op-pos [354 11]}} (addr ^{:go/acolon {2 [354 23]} :go/apos {2 [354 19]} :go/pos {:lbrace [354 18] :rbrace [354 39]}} (lit ^{:go/pos {:name-pos [354 12]}} Unimpl :what ^{:go/apos {1 [354 25]} :go/pos {:op-pos [354 35]}} (+ "primop " ^{:go/pos {:name-pos [354 37]}} op)))))
+
+          (let [^{:go/pos {:name-pos [356 3] :tok-pos [356 6]}} pe ^{:go/pos {:op-pos [356 9]}} (addr ^{:go/acolon {2 [356 17] 4 [356 26]} :go/apos {2 [356 16] 4 [356 22]} :go/pos {:lbrace [356 15] :rbrace [356 30]}} (lit ^{:go/pos {:name-pos [356 10]}} PrimE :p ^{:go/pos {:name-pos [356 19]}} p :args ^{:go/pos {:name-pos [356 28]}} as))]
+            ^{:go/pos {:lbrace [357 13] :rbrace [364 3] :switch [357 3]}} (switch ^{:go/pos {:name-pos [357 10]}} op
+              ^{:go/pos {:case [358 3] :colon [358 60]}} (case ^{:go/apos {0 [358 8] 1 [358 22] 2 [358 36] 3 [358 49]}} ["minDouble#" "maxDouble#" "minFloat#" "maxFloat#"]
+                ;; GHC's code generator puts a literal operand second (minsd reg, [lit]): the order decides
+                ;; a NaN's and a zero's result
+                ^{:go/pos {:if [361 4] :lbrace [361 64] :rbrace [363 4]}} (when ^{:go/ops [[361 20] [361 42]] :go/pos {:op-pos [361 42]}} (and ^{:go/apos {2 [361 18]} :go/pos {:op-pos [361 15]}} (== ^{:go/pos {:lparen [361 10] :rparen [361 13]}} (^{:go/pos {:name-pos [361 7]}} len ^{:go/pos {:name-pos [361 11]}} as) 2) ^{:go/pos {:op-pos [361 34]}} (== ^{:go/pos {:dot [361 28] :name-pos [361 29]}} (.-kind ^{:go/apos {2 [361 26]} :go/pos {:lbrack [361 25] :rbrack [361 27]}} (aget ^{:go/pos {:name-pos [361 23]}} as 0)) ^{:go/pos {:name-pos [361 37]}} aLit) ^{:go/pos {:op-pos [361 56]}} (!= ^{:go/pos {:dot [361 50] :name-pos [361 51]}} (.-kind ^{:go/apos {2 [361 48]} :go/pos {:lbrack [361 47] :rbrack [361 49]}} (aget ^{:go/pos {:name-pos [361 45]}} as 1)) ^{:go/pos {:name-pos [361 59]}} aLit))
+                  ^{:go/pos {:tok-pos [362 13]}} (set! ^{:go/pos {:dot [362 7] :name-pos [362 8]}} (.-args ^{:go/pos {:name-pos [362 5]}} pe) ^{:go/pos {:lbrace [362 21] :rbrace [362 34]}} (lit ^{:go/pos {:lbrack [362 15]}} (slice ^{:go/pos {:name-pos [362 17]}} Atom) ^{:go/apos {2 [362 25]} :go/pos {:lbrack [362 24] :rbrack [362 26]}} (aget ^{:go/pos {:name-pos [362 22]}} as 1) ^{:go/apos {2 [362 32]} :go/pos {:lbrack [362 31] :rbrack [362 33]}} (aget ^{:go/pos {:name-pos [362 29]}} as 0))))))
+
+
+            ^{:go/pos {:if [365 3] :lbrace [365 25] :rbrace [376 3]}} (when ^{:go/apos {2 [365 12]} :go/pos {:op-pos [365 9]}} (== ^{:go/pos {:name-pos [365 6]}} op "tagToEnum#")
+              ^{:go/pos {:if [366 4] :lbrace [366 18] :rbrace [372 4]}} (when ^{:go/apos {2 [366 16]} :go/pos {:op-pos [366 14]}} (> ^{:go/pos {:lparen [366 10] :rparen [366 12]}} (^{:go/pos {:name-pos [366 7]}} len ^{:go/pos {:name-pos [366 11]}} l) 3)
+                ^{:go/pos {:if [367 5] :lbrace [367 33] :rbrace [371 5]}} (when [^{:go/pos {:tok-pos [367 15]}} (values ^{:go/pos {:name-pos [367 8]}} mm ^{:go/pos {:name-pos [367 12]}} ok) ^{:go/pos {:dot [367 22] :lparen [367 23] :rparen [367 27]}} (assert ^{:go/pos {:name-pos [367 24]}} Map ^{:go/apos {2 [367 20]} :go/pos {:lbrack [367 19] :rbrack [367 21]}} (aget ^{:go/pos {:name-pos [367 18]}} l 3))] ^{:go/pos {:name-pos [367 30]}} ok
+                  ^{:go/pos {:if [368 6] :lbrace [368 48] :rbrace [370 6]}} (when [^{:go/pos {:tok-pos [368 16]}} (values ^{:go/pos {:name-pos [368 9]}} tc ^{:go/pos {:name-pos [368 13]}} ok) ^{:go/pos {:dot [368 34] :lparen [368 35] :rparen [368 42]}} (assert ^{:go/pos {:name-pos [368 36]}} string ^{:go/pos {:lbrack [368 21] :rbrack [368 33]}} (aget ^{:go/pos {:name-pos [368 19]}} mm ^{:go/apos {2 [368 25]} :go/pos {:lparen [368 24] :rparen [368 32]}} (conv ^{:go/pos {:name-pos [368 22]}} Kw "tycon")))] ^{:go/pos {:name-pos [368 45]}} ok
+                    ^{:go/pos {:tok-pos [369 13]}} (set! ^{:go/pos {:dot [369 9] :name-pos [369 10]}} (.-tc ^{:go/pos {:name-pos [369 7]}} pe) ^{:go/pos {:dot [369 23] :lparen [369 29] :name-pos [369 24] :rparen [369 32]}} (.tyCon ^{:go/pos {:dot [369 20] :name-pos [369 21]}} (.-ld ^{:go/pos {:dot [369 16] :name-pos [369 17]}} (.-mod ^{:go/pos {:name-pos [369 15]}} s)) ^{:go/pos {:name-pos [369 30]}} tc)))))
+
+
+
+              ^{:go/pos {:if [373 4] :lbrace [373 20] :rbrace [375 4]}} (when ^{:go/apos {2 [373 16]} :go/pos {:op-pos [373 13]}} (== ^{:go/pos {:dot [373 9] :name-pos [373 10]}} (.-tc ^{:go/pos {:name-pos [373 7]}} pe) nil)
+                ^{:go/apos {1 [374 11]} :go/pos {:lparen [374 10] :rparen [374 40]}} (^{:go/pos {:name-pos [374 5]}} cfail "tagToEnum# without its type")))
+
+
+            ^{:go/pos {:return [377 3]}} (return ^{:go/pos {:name-pos [377 10]}} pe))))
+      ^{:go/pos {:case [378 2] :colon [378 17]}} (case ^{:go/apos {0 [378 7]}} ["primcall"]
+        (let [^{:go/pos {:tok-pos [379 10]}} (values ^{:go/pos {:name-pos [379 3]}} lbl ^{:go/pos {:name-pos [379 8]}} _) ^{:go/pos {:dot [379 17] :lparen [379 18] :rparen [379 25]}} (assert ^{:go/pos {:name-pos [379 19]}} string ^{:go/apos {2 [379 15]} :go/pos {:lbrack [379 14] :rbrack [379 16]}} (aget ^{:go/pos {:name-pos [379 13]}} l 1))
+            ^{:go/pos {:name-pos [380 3] :tok-pos [380 6]}} as ^{:go/pos {:dot [380 10] :lparen [380 19] :name-pos [380 11] :rparen [380 24]}} (.atomList ^{:go/pos {:name-pos [380 9]}} s ^{:go/apos {2 [380 22]} :go/pos {:lbrack [380 21] :rbrack [380 23]}} (aget ^{:go/pos {:name-pos [380 20]}} l 3))]
+          ^{:go/pos {:if [381 3] :lbrace [381 36] :rbrace [383 3]}} (when [^{:go/pos {:name-pos [381 6] :tok-pos [381 8]}} p ^{:go/pos {:lbrack [381 20] :rbrack [381 24]}} (aget ^{:go/pos {:name-pos [381 11]}} primcalls ^{:go/pos {:name-pos [381 21]}} lbl)] ^{:go/apos {2 [381 32]} :go/pos {:op-pos [381 29]}} (!= ^{:go/pos {:name-pos [381 27]}} p nil)
+            ^{:go/pos {:return [382 4]}} (return ^{:go/pos {:op-pos [382 11]}} (addr ^{:go/acolon {2 [382 19] 4 [382 28]} :go/apos {2 [382 18] 4 [382 24]} :go/pos {:lbrace [382 17] :rbrace [382 32]}} (lit ^{:go/pos {:name-pos [382 12]}} PrimE :p ^{:go/pos {:name-pos [382 21]}} p :args ^{:go/pos {:name-pos [382 30]}} as))))
+
+          ^{:go/pos {:return [384 3]}} (return ^{:go/pos {:op-pos [384 10]}} (addr ^{:go/acolon {2 [384 22]} :go/apos {2 [384 18]} :go/pos {:lbrace [384 17] :rbrace [384 41]}} (lit ^{:go/pos {:name-pos [384 11]}} Unimpl :what ^{:go/apos {1 [384 24]} :go/pos {:op-pos [384 36]}} (+ "primcall " ^{:go/pos {:name-pos [384 38]}} lbl))))))
+      ^{:go/pos {:case [385 2] :colon [385 12]}} (case ^{:go/apos {0 [385 7]}} ["ffi"]
+        ^{:go/pos {:return [386 3]}} (return ^{:go/pos {:dot [386 11] :lparen [386 15] :name-pos [386 12] :rparen [386 17]}} (.ffi ^{:go/pos {:name-pos [386 10]}} s ^{:go/pos {:name-pos [386 16]}} l)))
+      ^{:go/pos {:case [387 2] :colon [387 13]}} (case ^{:go/apos {0 [387 7]}} ["case"]
+        ^{:go/pos {:return [388 3]}} (return ^{:go/pos {:dot [388 11] :lparen [388 20] :name-pos [388 12] :rparen [388 22]}} (.caseExpr ^{:go/pos {:name-pos [388 10]}} s ^{:go/pos {:name-pos [388 21]}} l)))
+      ^{:go/pos {:case [389 2] :colon [389 12]}} (case ^{:go/apos {0 [389 7]}} ["let"]
+        ^{:go/pos {:return [390 3]}} (return ^{:go/pos {:dot [390 11] :lparen [390 15] :name-pos [390 12] :rparen [390 26]}} (.let ^{:go/pos {:name-pos [390 10]}} s ^{:go/apos {2 [390 18]} :go/pos {:lbrack [390 17] :rbrack [390 19]}} (aget ^{:go/pos {:name-pos [390 16]}} l 1) ^{:go/apos {2 [390 24]} :go/pos {:lbrack [390 23] :rbrack [390 25]}} (aget ^{:go/pos {:name-pos [390 22]}} l 2))))
+      ^{:go/pos {:case [391 2] :colon [391 14]}} (case ^{:go/apos {0 [391 7]}} ["letne"]
+        ^{:go/pos {:return [392 3]}} (return ^{:go/pos {:dot [392 11] :lparen [392 17] :name-pos [392 12] :rparen [392 28]}} (.letne ^{:go/pos {:name-pos [392 10]}} s ^{:go/apos {2 [392 20]} :go/pos {:lbrack [392 19] :rbrack [392 21]}} (aget ^{:go/pos {:name-pos [392 18]}} l 1) ^{:go/apos {2 [392 26]} :go/pos {:lbrack [392 25] :rbrack [392 27]}} (aget ^{:go/pos {:name-pos [392 24]}} l 2))))
+      ^{:go/pos {:case [393 2] :colon [393 13]}} (case ^{:go/apos {0 [393 7]}} ["tick"]
+        ^{:go/pos {:return [394 3]}} (return ^{:go/pos {:dot [394 11] :lparen [394 16] :name-pos [394 12] :rparen [394 21]}} (.expr ^{:go/pos {:name-pos [394 10]}} s ^{:go/apos {2 [394 19]} :go/pos {:lbrack [394 18] :rbrack [394 20]}} (aget ^{:go/pos {:name-pos [394 17]}} l 2)))))
+
+    ^{:go/pos {:if [396 2] :lbrace [396 14] :rbrace [399 2]}} (when ^{:go/apos {2 [396 10]} :go/pos {:op-pos [396 7]}} (!= ^{:go/pos {:name-pos [396 5]}} l nil)
+      ;; a literal
+      ^{:go/pos {:return [398 3]}} (return ^{:go/pos {:op-pos [398 10]}} (addr ^{:go/acolon {2 [398 16]} :go/apos {2 [398 15]} :go/pos {:lbrace [398 14] :rbrace [398 34]}} (lit ^{:go/pos {:name-pos [398 11]}} Lit :v ^{:go/pos {:dot [398 23] :lparen [398 31] :name-pos [398 24] :rparen [398 33]}} (.literal ^{:go/pos {:dot [398 19] :name-pos [398 20]}} (.-mod ^{:go/pos {:name-pos [398 18]}} s) ^{:go/pos {:name-pos [398 32]}} l)))))
+
+    ^{:go/apos {1 [400 8]} :go/pos {:lparen [400 7] :rparen [400 30]}} (^{:go/pos {:name-pos [400 2]}} cfail "bad expression %v" ^{:go/pos {:name-pos [400 29]}} f)
+    nil))
+
+
+
+^{:go/pos {:doc [404 1] :func [405 1] :lbrace [405 30] :rbrace [414 1] :return [413 2]}} (go/func ^{:go/pos {:name-pos [405 6]}} isTuple "isTuple reports an unboxed tuple's constructor (returned as several values, STG-SPEC §3).\n" ^{:tag ^{:go/pos {:name-pos [405 25]}} bool :go/pos {:closing [405 23] :opening [405 13]}} [^{:tag ^{:go/pos {:name-pos [405 17]}} string :go/pos {:name-pos [405 14]}} dc]
+  (let [^{:go/pos {:name-pos [406 2] :tok-pos [406 4]}} o ^{:go/pos {:lparen [406 10] :rparen [406 13]}} (^{:go/pos {:name-pos [406 7]}} occ ^{:go/pos {:name-pos [406 11]}} dc)]
+    ^{:go/pos {:if [407 2] :lbrace [407 20] :rbrace [409 2]}} (when ^{:go/apos {2 [407 10]} :go/pos {:op-pos [407 7]}} (== ^{:go/pos {:name-pos [407 5]}} o "MkSolo#")
+      ^{:go/apos {1 [408 10]} :go/pos {:return [408 3]}} (return true))
+
+    ^{:go/pos {:if [410 2] :lbrace [410 64] :rbrace [412 2]}} (when ^{:go/pos {:op-pos [410 33]}} (or ^{:go/pos {:op-pos [410 5]}} (not ^{:go/apos {2 [410 27]} :go/pos {:lparen [410 23] :rparen [410 31]}} (^{:go/pos {:dot [410 13] :name-pos [410 14] :x-pos [410 6]}} strings/HasPrefix ^{:go/pos {:name-pos [410 24]}} o "(#")) ^{:go/pos {:op-pos [410 36]}} (not ^{:go/apos {2 [410 58]} :go/pos {:lparen [410 54] :rparen [410 62]}} (^{:go/pos {:dot [410 44] :name-pos [410 45] :x-pos [410 37]}} strings/HasSuffix ^{:go/pos {:name-pos [410 55]}} o "#)")))
+      ^{:go/apos {1 [411 10]} :go/pos {:return [411 3]}} (return false))
+
+    ^{:go/apos {2 [413 46]} :go/pos {:op-pos [413 43]}} (== ^{:go/apos {2 [413 37]} :go/pos {:lparen [413 21] :rparen [413 41]}} (^{:go/pos {:dot [413 16] :name-pos [413 17] :x-pos [413 9]}} strings/Trim ^{:go/apos {2 [413 24]} :go/pos {:lbrack [413 23] :rbrack [413 34]}} (subslice ^{:go/pos {:name-pos [413 22]}} o 2 ^{:go/apos {2 [413 33]} :go/pos {:op-pos [413 32]}} (- ^{:go/pos {:lparen [413 29] :rparen [413 31]}} (^{:go/pos {:name-pos [413 26]}} len ^{:go/pos {:name-pos [413 30]}} o) 2)) ", ") "")))
+
+
+^{:go/pos {:func [416 1] :lbrace [416 39] :rbrace [481 1] :return [480 2]}} (go/method ^{:go/pos {:name-pos [416 17]}} caseExpr ^{:tag ^{:go/pos {:name-pos [416 34]}} Expr :go/pos {:closing [416 32] :opening [416 25] :recv-closing [416 15] :recv-opening [416 6]}} [^{:tag ^{:go/pos {:star [416 9]}} (* ^{:go/pos {:name-pos [416 10]}} scope) :go/pos {:name-pos [416 7]}} s ^{:tag ^{:go/pos {:name-pos [416 28]}} List :go/pos {:name-pos [416 26]}} l]
+  ^{:go/pos {:if [417 2] :lbrace [417 17] :rbrace [419 2]}} (when ^{:go/apos {2 [417 15]} :go/pos {:op-pos [417 12]}} (!= ^{:go/pos {:lparen [417 8] :rparen [417 10]}} (^{:go/pos {:name-pos [417 5]}} len ^{:go/pos {:name-pos [417 9]}} l) 5)
+    ^{:go/apos {1 [418 9]} :go/pos {:lparen [418 8] :rparen [418 19]}} (^{:go/pos {:name-pos [418 3]}} cfail "bad case"))
+
+  (let [^{:go/pos {:name-pos [420 2] :tok-pos [420 4]}} c ^{:go/pos {:op-pos [420 7]}} (addr ^{:go/acolon {2 [420 19]} :go/apos {2 [420 14] 3 [420 21]} :go/pos {:lbrace [420 13] :rbrace [420 23]}} (lit ^{:go/pos {:name-pos [420 8]}} CaseE :bslot -1))
+      ^{:go/pos {:tok-pos [421 14]}} (values ^{:go/pos {:name-pos [421 2]}} tail ^{:go/pos {:name-pos [421 8]}} atail) (values ^{:go/pos {:dot [421 18] :name-pos [421 19]}} (.-tail ^{:go/pos {:name-pos [421 17]}} s) ^{:go/pos {:dot [421 26] :name-pos [421 27]}} (.-atail ^{:go/pos {:name-pos [421 25]}} s))]
+    ^{:go/pos {:tok-pos [422 18]}} (set! (values ^{:go/pos {:dot [422 3] :name-pos [422 4]}} (.-tail ^{:go/pos {:name-pos [422 2]}} s) ^{:go/pos {:dot [422 11] :name-pos [422 12]}} (.-atail ^{:go/pos {:name-pos [422 10]}} s)) ^{:go/apos {1 [422 20] 2 [422 27]}} (values false false))
+    ^{:go/pos {:tok-pos [423 10]}} (set! ^{:go/pos {:dot [423 3] :name-pos [423 4]}} (.-scrut ^{:go/pos {:name-pos [423 2]}} c) ^{:go/pos {:dot [423 13] :lparen [423 18] :name-pos [423 14] :rparen [423 23]}} (.expr ^{:go/pos {:name-pos [423 12]}} s ^{:go/apos {2 [423 21]} :go/pos {:lbrack [423 20] :rbrack [423 22]}} (aget ^{:go/pos {:name-pos [423 19]}} l 1)))
+    ^{:go/pos {:tok-pos [424 18]}} (set! (values ^{:go/pos {:dot [424 3] :name-pos [424 4]}} (.-tail ^{:go/pos {:name-pos [424 2]}} s) ^{:go/pos {:dot [424 11] :name-pos [424 12]}} (.-atail ^{:go/pos {:name-pos [424 10]}} s)) (values ^{:go/pos {:name-pos [424 20]}} tail ^{:go/pos {:name-pos [424 26]}} atail))
+    (let [^{:go/pos {:tok-pos [425 12]}} (values ^{:go/pos {:name-pos [425 2]}} bn ^{:go/pos {:name-pos [425 6]}} breps) ^{:go/pos {:lparen [425 25] :rparen [425 30]}} (^{:go/pos {:name-pos [425 15]}} binderName ^{:go/apos {2 [425 28]} :go/pos {:lbrack [425 27] :rbrack [425 29]}} (aget ^{:go/pos {:name-pos [425 26]}} l 2))
+        ^{:go/pos {:tok-pos [426 8]}} (values ^{:go/pos {:name-pos [426 2]}} at ^{:go/pos {:name-pos [426 6]}} _) ^{:go/pos {:dot [426 15] :lparen [426 16] :rparen [426 21]}} (assert ^{:go/pos {:name-pos [426 17]}} List ^{:go/apos {2 [426 13]} :go/pos {:lbrack [426 12] :rbrack [426 14]}} (aget ^{:go/pos {:name-pos [426 11]}} l 3))
+        ^{:go/pos {:tok-pos [427 8]}} (values ^{:go/pos {:name-pos [427 2]}} ak ^{:go/pos {:name-pos [427 6]}} _) ^{:go/pos {:dot [427 16] :lparen [427 17] :rparen [427 21]}} (assert ^{:go/pos {:name-pos [427 18]}} Sym ^{:go/apos {2 [427 14]} :go/pos {:lbrack [427 13] :rbrack [427 15]}} (aget ^{:go/pos {:name-pos [427 11]}} at 0))
+        ^{:tag ^{:go/pos {:func [428 14]}} (func ^{:go/pos {:closing [428 19] :opening [428 18]}} []) :go/pos {:name-pos [428 6] :tok-pos [428 2]}} restore (zero ^{:go/pos {:func [428 14]}} (func ^{:go/pos {:closing [428 19] :opening [428 18]}} []))]
+      ^{:go/pos {:lbrace [429 12] :rbrace [438 2] :switch [429 2]}} (switch ^{:go/pos {:name-pos [429 9]}} ak
+        ^{:go/pos {:case [430 2] :colon [430 14]}} (case ^{:go/apos {0 [430 7]}} ["multi"]
+          ^{:go/pos {:tok-pos [431 10]}} (set! ^{:go/pos {:dot [431 4] :name-pos [431 5]}} (.-kind ^{:go/pos {:name-pos [431 3]}} c) ^{:go/pos {:name-pos [431 12]}} kMulti))
+        ^{:go/pos {:case [432 2] :colon [432 12]}} (case ^{:go/apos {0 [432 7]}} ["alg"]
+          ^{:go/pos {:tok-pos [433 10]}} (set! ^{:go/pos {:dot [433 4] :name-pos [433 5]}} (.-kind ^{:go/pos {:name-pos [433 3]}} c) ^{:go/pos {:name-pos [433 12]}} kAlg))
+        ^{:go/pos {:case [434 2] :colon [434 13]}} (case ^{:go/apos {0 [434 7]}} ["prim"]
+          ^{:go/pos {:tok-pos [435 10]}} (set! ^{:go/pos {:dot [435 4] :name-pos [435 5]}} (.-kind ^{:go/pos {:name-pos [435 3]}} c) ^{:go/pos {:name-pos [435 12]}} kPrim))
+        ^{:go/pos {:case [436 2] :colon [436 13]}} (case ^{:go/apos {0 [436 7]}} ["poly"]
+          ^{:go/pos {:tok-pos [437 10]}} (set! ^{:go/pos {:dot [437 4] :name-pos [437 5]}} (.-kind ^{:go/pos {:name-pos [437 3]}} c) ^{:go/pos {:name-pos [437 12]}} kPoly)))
+
+      ^{:go/pos {:if [439 2] :lbrace [439 40] :rbrace [442 2]}} (when ^{:go/pos {:op-pos [439 22]}} (and ^{:go/pos {:op-pos [439 12]}} (!= ^{:go/pos {:dot [439 6] :name-pos [439 7]}} (.-kind ^{:go/pos {:name-pos [439 5]}} c) ^{:go/pos {:name-pos [439 15]}} kMulti) ^{:go/pos {:op-pos [439 25]}} (not ^{:go/pos {:lparen [439 32] :rparen [439 38]}} (^{:go/pos {:name-pos [439 26]}} isVoid ^{:go/pos {:name-pos [439 33]}} breps)))
+        ^{:go/pos {:tok-pos [440 20]}} (set! (values ^{:go/pos {:dot [440 4] :name-pos [440 5]}} (.-bslot ^{:go/pos {:name-pos [440 3]}} c) ^{:go/pos {:name-pos [440 12]}} restore) ^{:go/pos {:dot [440 23] :lparen [440 28] :name-pos [440 24] :rparen [440 31]}} (.bind ^{:go/pos {:name-pos [440 22]}} s ^{:go/pos {:name-pos [440 29]}} bn))
+        ^{:go/pos {:defer [441 3]}} (defer ^{:go/pos {:lparen [441 16] :rparen [441 17]}} (^{:go/pos {:name-pos [441 9]}} restore)))
+
+      (let [^{:go/pos {:tok-pos [443 10]}} (values ^{:go/pos {:name-pos [443 2]}} alts ^{:go/pos {:name-pos [443 8]}} _) ^{:go/pos {:dot [443 17] :lparen [443 18] :rparen [443 22]}} (assert ^{:go/pos {:name-pos [443 19]}} Vec ^{:go/apos {2 [443 15]} :go/pos {:lbrack [443 14] :rbrack [443 16]}} (aget ^{:go/pos {:name-pos [443 13]}} l 4))]
+        ^{:go/pos {:for [444 2] :lbrace [444 25] :range [444 14] :rbrace [479 2] :tok-pos [444 11]}} (range [^{:go/pos {:name-pos [444 6]}} _ ^{:go/pos {:name-pos [444 9]}} a ^{:go/pos {:name-pos [444 20]}} alts]
+          (let [^{:go/pos {:tok-pos [445 9]}} (values ^{:go/pos {:name-pos [445 3]}} al ^{:go/pos {:name-pos [445 7]}} _) ^{:go/pos {:dot [445 13] :lparen [445 14] :rparen [445 19]}} (assert ^{:go/pos {:name-pos [445 15]}} List ^{:go/pos {:name-pos [445 12]}} a)]
+            ^{:go/pos {:if [446 3] :lbrace [446 19] :rbrace [448 3]}} (when ^{:go/apos {2 [446 17]} :go/pos {:op-pos [446 14]}} (!= ^{:go/pos {:lparen [446 9] :rparen [446 12]}} (^{:go/pos {:name-pos [446 6]}} len ^{:go/pos {:name-pos [446 10]}} al) 4)
+              ^{:go/apos {1 [447 10]} :go/pos {:lparen [447 9] :rparen [447 27]}} (^{:go/pos {:name-pos [447 4]}} cfail "bad alternative"))
+
+            (let [^{:go/pos {:tok-pos [449 9]}} (values ^{:go/pos {:name-pos [449 3]}} bs ^{:go/pos {:name-pos [449 7]}} _) ^{:go/pos {:dot [449 17] :lparen [449 18] :rparen [449 22]}} (assert ^{:go/pos {:name-pos [449 19]}} Vec ^{:go/apos {2 [449 15]} :go/pos {:lbrack [449 14] :rbrack [449 16]}} (aget ^{:go/pos {:name-pos [449 12]}} al 2))
+                ^{:go/pos {:name-pos [450 3] :tok-pos [450 6]}} ca ^{:go/pos {:op-pos [450 9]}} (addr ^{:go/pos {:lbrace [450 13] :rbrace [450 14]}} (lit ^{:go/pos {:name-pos [450 10]}} alt))
+                ^{:tag ^{:go/pos {:lbrack [451 10]}} (slice ^{:go/pos {:func [451 12]}} (func ^{:go/pos {:closing [451 17] :opening [451 16]}} [])) :go/pos {:name-pos [451 7] :tok-pos [451 3]}} rs (zero ^{:go/pos {:lbrack [451 10]}} (slice ^{:go/pos {:func [451 12]}} (func ^{:go/pos {:closing [451 17] :opening [451 16]}} [])))]
+              ^{:go/pos {:for [452 3] :lbrace [452 24] :range [452 15] :rbrace [458 3] :tok-pos [452 12]}} (range [^{:go/pos {:name-pos [452 7]}} _ ^{:go/pos {:name-pos [452 10]}} b ^{:go/pos {:name-pos [452 21]}} bs]
+                (let [^{:go/pos {:tok-pos [453 12]}} (values ^{:go/pos {:name-pos [453 4]}} n ^{:go/pos {:name-pos [453 7]}} reps) ^{:go/pos {:lparen [453 25] :rparen [453 27]}} (^{:go/pos {:name-pos [453 15]}} binderName ^{:go/pos {:name-pos [453 26]}} b)
+                    ^{:go/pos {:tok-pos [454 9]}} (values ^{:go/pos {:name-pos [454 4]}} k ^{:go/pos {:name-pos [454 7]}} r) ^{:go/pos {:dot [454 13] :lparen [454 18] :name-pos [454 14] :rparen [454 20]}} (.bind ^{:go/pos {:name-pos [454 12]}} s ^{:go/pos {:name-pos [454 19]}} n)]
+                  ^{:go/pos {:tok-pos [455 7]}} (set! ^{:go/pos {:name-pos [455 4]}} rs ^{:go/pos {:lparen [455 15] :rparen [455 21]}} (^{:go/pos {:name-pos [455 9]}} append ^{:go/pos {:name-pos [455 16]}} rs ^{:go/pos {:name-pos [455 20]}} r))
+                  ^{:go/pos {:tok-pos [456 6]}} (set! ^{:go/pos {:name-pos [456 4]}} _ ^{:go/pos {:name-pos [456 8]}} reps)
+                  ^{:go/pos {:tok-pos [457 13]}} (set! ^{:go/pos {:dot [457 6] :name-pos [457 7]}} (.-binds ^{:go/pos {:name-pos [457 4]}} ca) ^{:go/pos {:lparen [457 21] :rparen [457 33]}} (^{:go/pos {:name-pos [457 15]}} append ^{:go/pos {:dot [457 24] :name-pos [457 25]}} (.-binds ^{:go/pos {:name-pos [457 22]}} ca) ^{:go/pos {:name-pos [457 32]}} k))))
+
+              ^{:go/pos {:tok-pos [459 11]}} (set! ^{:go/pos {:dot [459 5] :name-pos [459 6]}} (.-body ^{:go/pos {:name-pos [459 3]}} ca) ^{:go/pos {:dot [459 14] :lparen [459 19] :name-pos [459 15] :rparen [459 25]}} (.expr ^{:go/pos {:name-pos [459 13]}} s ^{:go/apos {2 [459 23]} :go/pos {:lbrack [459 22] :rbrack [459 24]}} (aget ^{:go/pos {:name-pos [459 20]}} al 3)))
+              ^{:go/pos {:for [460 3] :lbrace [460 37] :rbrace [462 3]}} (for [^{:go/pos {:name-pos [460 7] :tok-pos [460 9]}} i ^{:go/apos {2 [460 22]} :go/pos {:op-pos [460 20]}} (- ^{:go/pos {:lparen [460 15] :rparen [460 18]}} (^{:go/pos {:name-pos [460 12]}} len ^{:go/pos {:name-pos [460 16]}} rs) 1)] ^{:go/apos {2 [460 30]} :go/pos {:op-pos [460 27]}} (>= ^{:go/pos {:name-pos [460 25]}} i 0) ^{:go/pos {:tok-pos [460 34]}} (dec! ^{:go/pos {:name-pos [460 33]}} i)
+                ^{:go/pos {:lparen [461 9] :rparen [461 10]}} (^{:go/pos {:lbrack [461 6] :rbrack [461 8]}} (aget ^{:go/pos {:name-pos [461 4]}} rs ^{:go/pos {:name-pos [461 7]}} i)))
+
+              ^{:go/pos {:guard-dot [463 22] :guard-lparen [463 23] :guard-rparen [463 28] :guard-tok [463 14] :lbrace [463 30] :rbrace [478 3] :switch [463 3]}} (type-switch [^{:go/pos {:name-pos [463 10]}} con ^{:go/apos {2 [463 20]} :go/pos {:lbrack [463 19] :rbrack [463 21]}} (aget ^{:go/pos {:name-pos [463 17]}} al 1)]
+                ^{:go/pos {:case [464 3] :colon [464 10]}} (case [^{:go/pos {:name-pos [464 8]}} Kw]
+                  ^{:go/pos {:tok-pos [465 10]}} (set! ^{:go/pos {:dot [465 5] :name-pos [465 6]}} (.-def ^{:go/pos {:name-pos [465 4]}} c) ^{:go/pos {:name-pos [465 12]}} ca))
+                ^{:go/pos {:case [466 3] :colon [466 14]}} (case [^{:go/pos {:name-pos [466 8]}} string]
+                  ^{:go/pos {:else-lbrace [469 11] :else-rbrace [472 4] :if [467 4] :lbrace [467 24] :rbrace [469 4]}} (if ^{:go/pos {:op-pos [467 14]}} (== ^{:go/pos {:dot [467 8] :name-pos [467 9]}} (.-kind ^{:go/pos {:name-pos [467 7]}} c) ^{:go/pos {:name-pos [467 17]}} kMulti)
+                    ^{:go/pos {:tok-pos [468 11]}} (set! ^{:go/pos {:dot [468 6] :name-pos [468 7]}} (.-def ^{:go/pos {:name-pos [468 5]}} c) ^{:go/pos {:name-pos [468 13]}} ca)
+                    ^{:go/pos {:lbrace [469 11] :rbrace [472 4]}} (do
+                      ^{:go/pos {:tok-pos [470 11]}} (set! ^{:go/pos {:dot [470 7] :name-pos [470 8]}} (.-dc ^{:go/pos {:name-pos [470 5]}} ca) ^{:go/pos {:dot [470 21] :lparen [470 29] :name-pos [470 22] :rparen [470 33]}} (.dataCon ^{:go/pos {:dot [470 18] :name-pos [470 19]}} (.-ld ^{:go/pos {:dot [470 14] :name-pos [470 15]}} (.-mod ^{:go/pos {:name-pos [470 13]}} s)) ^{:go/pos {:name-pos [470 30]}} con))
+                      ^{:go/pos {:tok-pos [471 12]}} (set! ^{:go/pos {:dot [471 6] :name-pos [471 7]}} (.-alts ^{:go/pos {:name-pos [471 5]}} c) ^{:go/pos {:lparen [471 20] :rparen [471 31]}} (^{:go/pos {:name-pos [471 14]}} append ^{:go/pos {:dot [471 22] :name-pos [471 23]}} (.-alts ^{:go/pos {:name-pos [471 21]}} c) ^{:go/pos {:name-pos [471 29]}} ca)))))
+
+                ^{:go/pos {:case [473 3] :colon [473 12]}} (case [^{:go/pos {:name-pos [473 8]}} List]
+                  ^{:go/pos {:tok-pos [474 11]}} (set! ^{:go/pos {:dot [474 6] :name-pos [474 7]}} (.-lit ^{:go/pos {:name-pos [474 4]}} ca) ^{:go/pos {:lparen [474 19] :rparen [474 38]}} (^{:go/pos {:name-pos [474 13]}} litKey ^{:go/pos {:dot [474 25] :lparen [474 33] :name-pos [474 26] :rparen [474 37]}} (.literal ^{:go/pos {:dot [474 21] :name-pos [474 22]}} (.-mod ^{:go/pos {:name-pos [474 20]}} s) ^{:go/pos {:name-pos [474 34]}} con)))
+                  ^{:go/pos {:tok-pos [475 11]}} (set! ^{:go/pos {:dot [475 5] :name-pos [475 6]}} (.-lits ^{:go/pos {:name-pos [475 4]}} c) ^{:go/pos {:lparen [475 19] :rparen [475 30]}} (^{:go/pos {:name-pos [475 13]}} append ^{:go/pos {:dot [475 21] :name-pos [475 22]}} (.-lits ^{:go/pos {:name-pos [475 20]}} c) ^{:go/pos {:name-pos [475 28]}} ca)))
+                ^{:go/pos {:case [476 3] :colon [476 10]}} (default
+                  ^{:go/apos {1 [477 10]} :go/pos {:lparen [477 9] :rparen [477 51]}} (^{:go/pos {:name-pos [477 4]}} cfail "bad alternative's constructor %v" ^{:go/apos {2 [477 49]} :go/pos {:lbrack [477 48] :rbrack [477 50]}} (aget ^{:go/pos {:name-pos [477 46]}} al 1)))))))
+
+
+        ^{:go/pos {:name-pos [480 9]}} c))))
+
+
+
+^{:go/pos {:doc [483 1] :func [484 1] :lbrace [484 43] :rbrace [543 1] :return [542 2]}} (go/method ^{:go/pos {:name-pos [484 17]}} let "let compiles (let BIND EXPR): closures and constructors allocated in the frame's slots.\n" ^{:tag ^{:go/pos {:name-pos [484 38]}} Expr :go/pos {:closing [484 36] :opening [484 20] :recv-closing [484 15] :recv-opening [484 6]}} [^{:tag ^{:go/pos {:star [484 9]}} (* ^{:go/pos {:name-pos [484 10]}} scope) :go/pos {:name-pos [484 7]}} s ^{:tag ^{:go/pos {:name-pos [484 23]}} any :go/pos {:name-pos [484 21]}} b ^{:tag ^{:go/pos {:name-pos [484 33]}} any :go/pos {:name-pos [484 28]}} body]
+  (let ^{:go/apos {5 [487 9]}} [^{:go/pos {:tok-pos [485 8]}} (values ^{:go/pos {:name-pos [485 2]}} h ^{:go/pos {:name-pos [485 5]}} bl) ^{:go/pos {:lparen [485 15] :rparen [485 17]}} (^{:go/pos {:name-pos [485 11]}} head ^{:go/pos {:name-pos [485 16]}} b)
+      ^{:tag ^{:go/pos {:lbrack [486 12]}} (slice ^{:go/pos {:name-pos [486 14]}} List) :go/pos {:name-pos [486 6] :tok-pos [486 2]}} binds (zero ^{:go/pos {:lbrack [486 12]}} (slice ^{:go/pos {:name-pos [486 14]}} List))
+      ^{:go/pos {:name-pos [487 2] :tok-pos [487 6]}} rec false]
+    ^{:go/pos {:lbrace [488 11] :rbrace [499 2] :switch [488 2]}} (switch ^{:go/pos {:name-pos [488 9]}} h
+      ^{:go/pos {:case [489 2] :colon [489 13]}} (case ^{:go/apos {0 [489 7]}} ["bind"]
+        ^{:go/pos {:tok-pos [490 9]}} (set! ^{:go/pos {:name-pos [490 3]}} binds ^{:go/pos {:lbrace [490 17] :rbrace [490 20]}} (lit ^{:go/pos {:lbrack [490 11]}} (slice ^{:go/pos {:name-pos [490 13]}} List) ^{:go/pos {:name-pos [490 18]}} bl)))
+      ^{:go/pos {:case [491 2] :colon [491 12]}} (case ^{:go/apos {0 [491 7]}} ["rec"]
+        ^{:go/apos {2 [492 9]} :go/pos {:tok-pos [492 7]}} (set! ^{:go/pos {:name-pos [492 3]}} rec true)
+        ^{:go/pos {:for [493 3] :lbrace [493 28] :range [493 15] :rbrace [496 3] :tok-pos [493 12]}} (range [^{:go/pos {:name-pos [493 7]}} _ ^{:go/pos {:name-pos [493 10]}} x ^{:go/apos {2 [493 24]} :go/pos {:lbrack [493 23] :rbrack [493 26]}} (subslice ^{:go/pos {:name-pos [493 21]}} bl 1)]
+          (let [^{:go/pos {:tok-pos [494 10]}} (values ^{:go/pos {:name-pos [494 4]}} _ ^{:go/pos {:name-pos [494 7]}} xl) ^{:go/pos {:lparen [494 17] :rparen [494 19]}} (^{:go/pos {:name-pos [494 13]}} head ^{:go/pos {:name-pos [494 18]}} x)]
+            ^{:go/pos {:tok-pos [495 10]}} (set! ^{:go/pos {:name-pos [495 4]}} binds ^{:go/pos {:lparen [495 18] :rparen [495 28]}} (^{:go/pos {:name-pos [495 12]}} append ^{:go/pos {:name-pos [495 19]}} binds ^{:go/pos {:name-pos [495 26]}} xl)))))
+
+      ^{:go/pos {:case [497 2] :colon [497 9]}} (default
+        ^{:go/apos {1 [498 9]} :go/pos {:lparen [498 8] :rparen [498 28]}} (^{:go/pos {:name-pos [498 3]}} cfail "bad binding %v" ^{:go/pos {:name-pos [498 27]}} b)))
+
+    (let [^{:go/pos {:name-pos [500 2] :tok-pos [500 5]}} le ^{:go/pos {:op-pos [500 8]}} (addr ^{:go/acolon {2 [500 17]} :go/apos {2 [500 14]} :go/pos {:lbrace [500 13] :rbrace [500 22]}} (lit ^{:go/pos {:name-pos [500 9]}} LetE :rec ^{:go/pos {:name-pos [500 19]}} rec))
+        ^{:tag ^{:go/pos {:lbrack [501 9]}} (slice ^{:go/pos {:func [501 11]}} (func ^{:go/pos {:closing [501 16] :opening [501 15]}} [])) :go/pos {:name-pos [501 6] :tok-pos [501 2]}} rs (zero ^{:go/pos {:lbrack [501 9]}} (slice ^{:go/pos {:func [501 11]}} (func ^{:go/pos {:closing [501 16] :opening [501 15]}} [])))
+        ^{:go/pos {:name-pos [502 2] :tok-pos [502 8]}} slots ^{:go/pos {:lparen [502 15] :rparen [502 33]}} (^{:go/pos {:name-pos [502 11]}} make ^{:go/pos {:lbrack [502 16]}} (slice ^{:go/pos {:name-pos [502 18]}} int) ^{:go/pos {:lparen [502 26] :rparen [502 32]}} (^{:go/pos {:name-pos [502 23]}} len ^{:go/pos {:name-pos [502 27]}} binds))]
+      ^{:go/pos {:if [503 2] :lbrace [503 9] :rbrace [510 2]}} (when ^{:go/pos {:name-pos [503 5]}} rec
+        ^{:go/pos {:for [504 3] :lbrace [504 28] :range [504 16] :rbrace [509 3] :tok-pos [504 13]}} (range [^{:go/pos {:name-pos [504 7]}} i ^{:go/pos {:name-pos [504 10]}} bd ^{:go/pos {:name-pos [504 22]}} binds]
+          (let [^{:go/pos {:tok-pos [505 9]}} (values ^{:go/pos {:name-pos [505 4]}} n ^{:go/pos {:name-pos [505 7]}} _) ^{:go/pos {:lparen [505 22] :rparen [505 28]}} (^{:go/pos {:name-pos [505 12]}} binderName ^{:go/apos {2 [505 26]} :go/pos {:lbrack [505 25] :rbrack [505 27]}} (aget ^{:go/pos {:name-pos [505 23]}} bd 1))
+              ^{:go/pos {:tok-pos [506 9]}} (values ^{:go/pos {:name-pos [506 4]}} k ^{:go/pos {:name-pos [506 7]}} r) ^{:go/pos {:dot [506 13] :lparen [506 18] :name-pos [506 14] :rparen [506 20]}} (.bind ^{:go/pos {:name-pos [506 12]}} s ^{:go/pos {:name-pos [506 19]}} n)]
+            ^{:go/pos {:lbrack [507 9] :rbrack [507 11] :tok-pos [507 13]}} (aset ^{:go/pos {:name-pos [507 4]}} slots ^{:go/pos {:name-pos [507 10]}} i ^{:go/pos {:name-pos [507 15]}} k)
+            ^{:go/pos {:tok-pos [508 7]}} (set! ^{:go/pos {:name-pos [508 4]}} rs ^{:go/pos {:lparen [508 15] :rparen [508 21]}} (^{:go/pos {:name-pos [508 9]}} append ^{:go/pos {:name-pos [508 16]}} rs ^{:go/pos {:name-pos [508 20]}} r)))))
+
+
+      ^{:go/pos {:for [511 2] :lbrace [511 27] :range [511 15] :rbrace [537 2] :tok-pos [511 12]}} (range [^{:go/pos {:name-pos [511 6]}} i ^{:go/pos {:name-pos [511 9]}} bd ^{:go/pos {:name-pos [511 21]}} binds]
+        (let [^{:go/pos {:tok-pos [512 8]}} (values ^{:go/pos {:name-pos [512 3]}} n ^{:go/pos {:name-pos [512 6]}} _) ^{:go/pos {:lparen [512 21] :rparen [512 27]}} (^{:go/pos {:name-pos [512 11]}} binderName ^{:go/apos {2 [512 25]} :go/pos {:lbrack [512 24] :rbrack [512 26]}} (aget ^{:go/pos {:name-pos [512 22]}} bd 1))
+            ^{:go/pos {:tok-pos [513 10]}} (values ^{:go/pos {:name-pos [513 3]}} rh ^{:go/pos {:name-pos [513 7]}} rl) ^{:go/pos {:lparen [513 17] :rparen [513 23]}} (^{:go/pos {:name-pos [513 13]}} head ^{:go/apos {2 [513 21]} :go/pos {:lbrack [513 20] :rbrack [513 22]}} (aget ^{:go/pos {:name-pos [513 18]}} bd 2))
+            ^{:go/pos {:name-pos [514 3] :tok-pos [514 6]}} lb ^{:go/pos {:lbrace [514 16] :rbrace [514 17]}} (lit ^{:go/pos {:name-pos [514 9]}} letBind)]
+          ^{:go/pos {:lbrace [515 13] :rbrace [529 3] :switch [515 3]}} (switch ^{:go/pos {:name-pos [515 10]}} rh
+            ^{:go/pos {:case [516 3] :colon [516 17]}} (case ^{:go/apos {0 [516 8]}} ["closure"]
+              ^{:go/pos {:tok-pos [517 11]}} (set! ^{:go/pos {:dot [517 6] :name-pos [517 7]}} (.-lam ^{:go/pos {:name-pos [517 4]}} lb) ^{:go/pos {:dot [517 18] :lparen [517 32] :name-pos [517 19] :rparen [517 60]}} (.compileLambda ^{:go/pos {:dot [517 14] :name-pos [517 15]}} (.-mod ^{:go/pos {:name-pos [517 13]}} s) ^{:go/apos {2 [517 40]} :go/ops [[517 39] [517 43]] :go/pos {:op-pos [517 43]}} (+ ^{:go/pos {:dot [517 34] :name-pos [517 35]}} (.-name ^{:go/pos {:name-pos [517 33]}} s) "/" ^{:go/pos {:name-pos [517 44]}} n) ^{:go/pos {:name-pos [517 47]}} rl ^{:go/apos {2 [517 59]} :go/pos {:op-pos [517 58]}} (+ ^{:go/pos {:dot [517 52] :name-pos [517 53]}} (.-depth ^{:go/pos {:name-pos [517 51]}} s) 1)))
+              ^{:go/pos {:tok-pos [518 12]}} (set! ^{:go/pos {:dot [518 6] :name-pos [518 7]}} (.-free ^{:go/pos {:name-pos [518 4]}} lb) ^{:go/pos {:dot [518 15] :lparen [518 25] :name-pos [518 16] :rparen [518 28]}} (.freeAtoms ^{:go/pos {:name-pos [518 14]}} s ^{:go/pos {:name-pos [518 26]}} rl)))
+            ^{:go/pos {:case [519 3] :colon [519 14]}} (case ^{:go/apos {0 [519 8]}} ["rcon"]
+              (let [^{:go/pos {:tok-pos [520 10]}} (values ^{:go/pos {:name-pos [520 4]}} dc ^{:go/pos {:name-pos [520 8]}} _) ^{:go/pos {:dot [520 18] :lparen [520 19] :rparen [520 26]}} (assert ^{:go/pos {:name-pos [520 20]}} string ^{:go/apos {2 [520 16]} :go/pos {:lbrack [520 15] :rbrack [520 17]}} (aget ^{:go/pos {:name-pos [520 13]}} rl 1))]
+                ^{:go/pos {:tok-pos [521 12]}} (set! ^{:go/pos {:dot [521 6] :name-pos [521 7]}} (.-args ^{:go/pos {:name-pos [521 4]}} lb) ^{:go/pos {:dot [521 15] :lparen [521 24] :name-pos [521 16] :rparen [521 30]}} (.atomList ^{:go/pos {:name-pos [521 14]}} s ^{:go/apos {2 [521 28]} :go/pos {:lbrack [521 27] :rbrack [521 29]}} (aget ^{:go/pos {:name-pos [521 25]}} rl 2)))
+                ^{:go/pos {:if [522 4] :lbrace [522 19] :rbrace [524 4]}} (when ^{:go/pos {:lparen [522 14] :rparen [522 17]}} (^{:go/pos {:name-pos [522 7]}} isTuple ^{:go/pos {:name-pos [522 15]}} dc)
+                  ^{:go/apos {1 [523 11]} :go/pos {:lparen [523 10] :rparen [523 37]}} (^{:go/pos {:name-pos [523 5]}} cfail "rcon of an unboxed tuple"))
+
+                ^{:go/pos {:tok-pos [525 10]}} (set! ^{:go/pos {:dot [525 6] :name-pos [525 7]}} (.-dc ^{:go/pos {:name-pos [525 4]}} lb) ^{:go/pos {:dot [525 20] :lparen [525 28] :name-pos [525 21] :rparen [525 31]}} (.dataCon ^{:go/pos {:dot [525 17] :name-pos [525 18]}} (.-ld ^{:go/pos {:dot [525 13] :name-pos [525 14]}} (.-mod ^{:go/pos {:name-pos [525 12]}} s)) ^{:go/pos {:name-pos [525 29]}} dc))
+                ^{:go/pos {:tok-pos [526 14]}} (set! ^{:go/pos {:dot [526 6] :name-pos [526 7]}} (.-static ^{:go/pos {:name-pos [526 4]}} lb) ^{:go/pos {:lparen [526 25] :rparen [526 40]}} (^{:go/pos {:name-pos [526 16]}} staticCon ^{:go/pos {:dot [526 28] :name-pos [526 29]}} (.-dc ^{:go/pos {:name-pos [526 26]}} lb) ^{:go/pos {:dot [526 35] :name-pos [526 36]}} (.-args ^{:go/pos {:name-pos [526 33]}} lb)))))
+            ^{:go/pos {:case [527 3] :colon [527 10]}} (default
+              ^{:go/apos {1 [528 10]} :go/pos {:lparen [528 9] :rparen [528 41]}} (^{:go/pos {:name-pos [528 4]}} cfail "bad right-hand side %v" ^{:go/apos {2 [528 39]} :go/pos {:lbrack [528 38] :rbrack [528 40]}} (aget ^{:go/pos {:name-pos [528 36]}} bd 2))))
+
+          ^{:go/pos {:if [530 3] :lbrace [530 11] :rbrace [534 3]}} (when ^{:go/pos {:op-pos [530 6]}} (not ^{:go/pos {:name-pos [530 7]}} rec)
+            (let [^{:go/pos {:tok-pos [531 9]}} (values ^{:go/pos {:name-pos [531 4]}} k ^{:go/pos {:name-pos [531 7]}} r) ^{:go/pos {:dot [531 13] :lparen [531 18] :name-pos [531 14] :rparen [531 20]}} (.bind ^{:go/pos {:name-pos [531 12]}} s ^{:go/pos {:name-pos [531 19]}} n)]
+              ^{:go/pos {:lbrack [532 9] :rbrack [532 11] :tok-pos [532 13]}} (aset ^{:go/pos {:name-pos [532 4]}} slots ^{:go/pos {:name-pos [532 10]}} i ^{:go/pos {:name-pos [532 15]}} k)
+              ^{:go/pos {:tok-pos [533 7]}} (set! ^{:go/pos {:name-pos [533 4]}} rs ^{:go/pos {:lparen [533 15] :rparen [533 21]}} (^{:go/pos {:name-pos [533 9]}} append ^{:go/pos {:name-pos [533 16]}} rs ^{:go/pos {:name-pos [533 20]}} r))))
+
+          ^{:go/pos {:tok-pos [535 11]}} (set! ^{:go/pos {:dot [535 5] :name-pos [535 6]}} (.-slot ^{:go/pos {:name-pos [535 3]}} lb) ^{:go/pos {:lbrack [535 18] :rbrack [535 20]}} (aget ^{:go/pos {:name-pos [535 13]}} slots ^{:go/pos {:name-pos [535 19]}} i))
+          ^{:go/pos {:tok-pos [536 12]}} (set! ^{:go/pos {:dot [536 5] :name-pos [536 6]}} (.-binds ^{:go/pos {:name-pos [536 3]}} le) ^{:go/pos {:lparen [536 20] :rparen [536 33]}} (^{:go/pos {:name-pos [536 14]}} append ^{:go/pos {:dot [536 23] :name-pos [536 24]}} (.-binds ^{:go/pos {:name-pos [536 21]}} le) ^{:go/pos {:name-pos [536 31]}} lb))))
+
+      ^{:go/pos {:tok-pos [538 10]}} (set! ^{:go/pos {:dot [538 4] :name-pos [538 5]}} (.-body ^{:go/pos {:name-pos [538 2]}} le) ^{:go/pos {:dot [538 13] :lparen [538 18] :name-pos [538 14] :rparen [538 23]}} (.expr ^{:go/pos {:name-pos [538 12]}} s ^{:go/pos {:name-pos [538 19]}} body))
+      ^{:go/pos {:for [539 2] :lbrace [539 36] :rbrace [541 2]}} (for [^{:go/pos {:name-pos [539 6] :tok-pos [539 8]}} i ^{:go/apos {2 [539 21]} :go/pos {:op-pos [539 19]}} (- ^{:go/pos {:lparen [539 14] :rparen [539 17]}} (^{:go/pos {:name-pos [539 11]}} len ^{:go/pos {:name-pos [539 15]}} rs) 1)] ^{:go/apos {2 [539 29]} :go/pos {:op-pos [539 26]}} (>= ^{:go/pos {:name-pos [539 24]}} i 0) ^{:go/pos {:tok-pos [539 33]}} (dec! ^{:go/pos {:name-pos [539 32]}} i)
+        ^{:go/pos {:lparen [540 8] :rparen [540 9]}} (^{:go/pos {:lbrack [540 5] :rbrack [540 7]}} (aget ^{:go/pos {:name-pos [540 3]}} rs ^{:go/pos {:name-pos [540 6]}} i)))
+
+      ^{:go/pos {:name-pos [542 9]}} le)))
+
+
+
+^{:go/pos {:doc [545 1] :func [546 1] :lbrace [546 45] :rbrace [603 1] :return [602 2]}} (go/method ^{:go/pos {:name-pos [546 17]}} letne "letne compiles join points: their arguments are slots of this frame, a jump assigns them.\n" ^{:tag ^{:go/pos {:name-pos [546 40]}} Expr :go/pos {:closing [546 38] :opening [546 22] :recv-closing [546 15] :recv-opening [546 6]}} [^{:tag ^{:go/pos {:star [546 9]}} (* ^{:go/pos {:name-pos [546 10]}} scope) :go/pos {:name-pos [546 7]}} s ^{:tag ^{:go/pos {:name-pos [546 25]}} any :go/pos {:name-pos [546 23]}} b ^{:tag ^{:go/pos {:name-pos [546 35]}} any :go/pos {:name-pos [546 30]}} body]
+  (let [^{:go/pos {:tok-pos [547 8]}} (values ^{:go/pos {:name-pos [547 2]}} h ^{:go/pos {:name-pos [547 5]}} bl) ^{:go/pos {:lparen [547 15] :rparen [547 17]}} (^{:go/pos {:name-pos [547 11]}} head ^{:go/pos {:name-pos [547 16]}} b)
+      ^{:tag ^{:go/pos {:lbrack [548 12]}} (slice ^{:go/pos {:name-pos [548 14]}} List) :go/pos {:name-pos [548 6] :tok-pos [548 2]}} binds (zero ^{:go/pos {:lbrack [548 12]}} (slice ^{:go/pos {:name-pos [548 14]}} List))]
+    ^{:go/pos {:lbrace [549 11] :rbrace [557 2] :switch [549 2]}} (switch ^{:go/pos {:name-pos [549 9]}} h
+      ^{:go/pos {:case [550 2] :colon [550 13]}} (case ^{:go/apos {0 [550 7]}} ["bind"]
+        ^{:go/pos {:tok-pos [551 9]}} (set! ^{:go/pos {:name-pos [551 3]}} binds ^{:go/pos {:lbrace [551 17] :rbrace [551 20]}} (lit ^{:go/pos {:lbrack [551 11]}} (slice ^{:go/pos {:name-pos [551 13]}} List) ^{:go/pos {:name-pos [551 18]}} bl)))
+      ^{:go/pos {:case [552 2] :colon [552 12]}} (case ^{:go/apos {0 [552 7]}} ["rec"]
+        ^{:go/pos {:for [553 3] :lbrace [553 28] :range [553 15] :rbrace [556 3] :tok-pos [553 12]}} (range [^{:go/pos {:name-pos [553 7]}} _ ^{:go/pos {:name-pos [553 10]}} x ^{:go/apos {2 [553 24]} :go/pos {:lbrack [553 23] :rbrack [553 26]}} (subslice ^{:go/pos {:name-pos [553 21]}} bl 1)]
+          (let [^{:go/pos {:tok-pos [554 10]}} (values ^{:go/pos {:name-pos [554 4]}} _ ^{:go/pos {:name-pos [554 7]}} xl) ^{:go/pos {:lparen [554 17] :rparen [554 19]}} (^{:go/pos {:name-pos [554 13]}} head ^{:go/pos {:name-pos [554 18]}} x)]
+            ^{:go/pos {:tok-pos [555 10]}} (set! ^{:go/pos {:name-pos [555 4]}} binds ^{:go/pos {:lparen [555 18] :rparen [555 28]}} (^{:go/pos {:name-pos [555 12]}} append ^{:go/pos {:name-pos [555 19]}} binds ^{:go/pos {:name-pos [555 26]}} xl))))))
+
+
+    (let-type [^{:go/pos {:name-pos [558 7] :tok-pos [558 2]}} pend ^{:go/pos {:lbrace [558 19] :rbrace [562 2] :struct [558 12]}} (struct
+          ^{:tag ^{:go/pos {:star [559 8]}} (* ^{:go/pos {:name-pos [559 9]}} Join) :go/pos {:name-pos [559 3]}} j
+          ^{:tag ^{:go/pos {:name-pos [560 8]}} Vec :go/pos {:name-pos [560 3]}} args
+          ^{:tag ^{:go/pos {:name-pos [561 8]}} any :go/pos {:name-pos [561 3]}} body)]
+
+      (let [^{:tag ^{:go/pos {:lbrack [563 9]}} (slice ^{:go/pos {:name-pos [563 11]}} pend) :go/pos {:name-pos [563 6] :tok-pos [563 2]}} ps (zero ^{:go/pos {:lbrack [563 9]}} (slice ^{:go/pos {:name-pos [563 11]}} pend))
+          ^{:tag ^{:go/pos {:lbrack [564 9]}} (slice ^{:go/pos {:func [564 11]}} (func ^{:go/pos {:closing [564 16] :opening [564 15]}} [])) :go/pos {:name-pos [564 6] :tok-pos [564 2]}} rs (zero ^{:go/pos {:lbrack [564 9]}} (slice ^{:go/pos {:func [564 11]}} (func ^{:go/pos {:closing [564 16] :opening [564 15]}} [])))]
+        ^{:go/pos {:for [565 2] :lbrace [565 27] :range [565 15] :rbrace [583 2] :tok-pos [565 12]}} (range [^{:go/pos {:name-pos [565 6]}} _ ^{:go/pos {:name-pos [565 9]}} bd ^{:go/pos {:name-pos [565 21]}} binds]
+          (let [^{:go/pos {:tok-pos [566 8]}} (values ^{:go/pos {:name-pos [566 3]}} n ^{:go/pos {:name-pos [566 6]}} _) ^{:go/pos {:lparen [566 21] :rparen [566 27]}} (^{:go/pos {:name-pos [566 11]}} binderName ^{:go/apos {2 [566 25]} :go/pos {:lbrack [566 24] :rbrack [566 26]}} (aget ^{:go/pos {:name-pos [566 22]}} bd 1))
+              ^{:go/pos {:tok-pos [567 10]}} (values ^{:go/pos {:name-pos [567 3]}} rh ^{:go/pos {:name-pos [567 7]}} rl) ^{:go/pos {:lparen [567 17] :rparen [567 23]}} (^{:go/pos {:name-pos [567 13]}} head ^{:go/apos {2 [567 21]} :go/pos {:lbrack [567 20] :rbrack [567 22]}} (aget ^{:go/pos {:name-pos [567 18]}} bd 2))]
+            ^{:go/pos {:if [568 3] :lbrace [568 22] :rbrace [570 3]}} (when ^{:go/apos {2 [568 12]} :go/pos {:op-pos [568 9]}} (!= ^{:go/pos {:name-pos [568 6]}} rh "closure")
+              ^{:go/apos {1 [569 10]} :go/pos {:lparen [569 9] :rparen [569 27]}} (^{:go/pos {:name-pos [569 4]}} cfail "letne of %v" ^{:go/pos {:name-pos [569 25]}} rh))
+
+            (let [^{:go/pos {:tok-pos [571 11]}} (values ^{:go/pos {:name-pos [571 3]}} args ^{:go/pos {:name-pos [571 9]}} _) ^{:go/pos {:dot [571 19] :lparen [571 20] :rparen [571 24]}} (assert ^{:go/pos {:name-pos [571 21]}} Vec ^{:go/apos {2 [571 17]} :go/pos {:lbrack [571 16] :rbrack [571 18]}} (aget ^{:go/pos {:name-pos [571 14]}} rl 3))
+                ^{:go/pos {:name-pos [572 3] :tok-pos [572 5]}} j ^{:go/pos {:op-pos [572 8]}} (addr ^{:go/acolon {2 [572 18] 4 [572 24]} :go/apos {2 [572 14] 4 [572 23]} :go/pos {:lbrace [572 13] :rbrace [572 35]}} (lit ^{:go/pos {:name-pos [572 9]}} Join :name ^{:go/pos {:name-pos [572 20]}} n :n ^{:go/pos {:lparen [572 29] :rparen [572 34]}} (^{:go/pos {:name-pos [572 26]}} len ^{:go/pos {:name-pos [572 30]}} args)))
+                ^{:go/pos {:tok-pos [573 12]}} (values ^{:go/pos {:name-pos [573 3]}} old ^{:go/pos {:name-pos [573 8]}} had) ^{:go/pos {:lbrack [573 21] :rbrack [573 23]}} (aget ^{:go/pos {:dot [573 16] :name-pos [573 17]}} (.-vars ^{:go/pos {:name-pos [573 15]}} s) ^{:go/pos {:name-pos [573 22]}} n)]
+              ^{:go/pos {:lbrack [574 9] :rbrack [574 11] :tok-pos [574 13]}} (aset ^{:go/pos {:dot [574 4] :name-pos [574 5]}} (.-vars ^{:go/pos {:name-pos [574 3]}} s) ^{:go/pos {:name-pos [574 10]}} n ^{:go/acolon {2 [574 25]} :go/apos {2 [574 21]} :go/pos {:lbrace [574 20] :rbrace [574 28]}} (lit ^{:go/pos {:name-pos [574 15]}} vinfo :join ^{:go/pos {:name-pos [574 27]}} j))
+              ^{:go/pos {:tok-pos [575 6]}} (set! ^{:go/pos {:name-pos [575 3]}} rs ^{:go/pos {:lparen [575 14] :rparen [581 4]}} (^{:go/pos {:name-pos [575 8]}} append ^{:go/pos {:name-pos [575 15]}} rs ^{:go/pos {:func [575 19] :lbrace [575 26] :rbrace [581 3]}} (fn ^{:go/pos {:closing [575 24] :opening [575 23]}} []
+                    ^{:go/pos {:else-lbrace [578 11] :else-rbrace [580 4] :if [576 4] :lbrace [576 11] :rbrace [578 4]}} (if ^{:go/pos {:name-pos [576 7]}} had
+                      ^{:go/pos {:lbrack [577 11] :rbrack [577 13] :tok-pos [577 15]}} (aset ^{:go/pos {:dot [577 6] :name-pos [577 7]}} (.-vars ^{:go/pos {:name-pos [577 5]}} s) ^{:go/pos {:name-pos [577 12]}} n ^{:go/pos {:name-pos [577 17]}} old)
+
+                      ^{:go/pos {:lparen [579 11] :rparen [579 21]}} (^{:go/pos {:name-pos [579 5]}} delete ^{:go/pos {:dot [579 13] :name-pos [579 14]}} (.-vars ^{:go/pos {:name-pos [579 12]}} s) ^{:go/pos {:name-pos [579 20]}} n)))))
+
+
+              ^{:go/pos {:tok-pos [582 6]}} (set! ^{:go/pos {:name-pos [582 3]}} ps ^{:go/pos {:lparen [582 14] :rparen [582 39]}} (^{:go/pos {:name-pos [582 8]}} append ^{:go/pos {:name-pos [582 15]}} ps ^{:go/pos {:lbrace [582 23] :rbrace [582 38]}} (lit ^{:go/pos {:name-pos [582 19]}} pend ^{:go/pos {:name-pos [582 24]}} j ^{:go/pos {:name-pos [582 27]}} args ^{:go/apos {2 [582 36]} :go/pos {:lbrack [582 35] :rbrack [582 37]}} (aget ^{:go/pos {:name-pos [582 33]}} rl 4)))))))
+
+        ;; the join points' bodies see each other (rec) and themselves
+        ^{:go/pos {:for [585 2] :lbrace [585 23] :range [585 14] :rbrace [597 2] :tok-pos [585 11]}} (range [^{:go/pos {:name-pos [585 6]}} _ ^{:go/pos {:name-pos [585 9]}} p ^{:go/pos {:name-pos [585 20]}} ps]
+          (let [^{:tag ^{:go/pos {:lbrack [586 11]}} (slice ^{:go/pos {:func [586 13]}} (func ^{:go/pos {:closing [586 18] :opening [586 17]}} [])) :go/pos {:name-pos [586 7] :tok-pos [586 3]}} ars (zero ^{:go/pos {:lbrack [586 11]}} (slice ^{:go/pos {:func [586 13]}} (func ^{:go/pos {:closing [586 18] :opening [586 17]}} [])))]
+            ^{:go/pos {:for [587 3] :lbrace [587 28] :range [587 15] :rbrace [592 3] :tok-pos [587 12]}} (range [^{:go/pos {:name-pos [587 7]}} _ ^{:go/pos {:name-pos [587 10]}} a ^{:go/pos {:dot [587 22] :name-pos [587 23]}} (.-args ^{:go/pos {:name-pos [587 21]}} p)]
+              (let [^{:go/pos {:tok-pos [588 9]}} (values ^{:go/pos {:name-pos [588 4]}} n ^{:go/pos {:name-pos [588 7]}} _) ^{:go/pos {:lparen [588 22] :rparen [588 24]}} (^{:go/pos {:name-pos [588 12]}} binderName ^{:go/pos {:name-pos [588 23]}} a)
+                  ^{:go/pos {:tok-pos [589 9]}} (values ^{:go/pos {:name-pos [589 4]}} k ^{:go/pos {:name-pos [589 7]}} r) ^{:go/pos {:dot [589 13] :lparen [589 18] :name-pos [589 14] :rparen [589 20]}} (.bind ^{:go/pos {:name-pos [589 12]}} s ^{:go/pos {:name-pos [589 19]}} n)]
+                ^{:go/pos {:tok-pos [590 8]}} (set! ^{:go/pos {:name-pos [590 4]}} ars ^{:go/pos {:lparen [590 16] :rparen [590 23]}} (^{:go/pos {:name-pos [590 10]}} append ^{:go/pos {:name-pos [590 17]}} ars ^{:go/pos {:name-pos [590 22]}} r))
+                ^{:go/pos {:tok-pos [591 14]}} (set! ^{:go/pos {:dot [591 7] :name-pos [591 8]}} (.-slots ^{:go/pos {:dot [591 5] :name-pos [591 6]}} (.-j ^{:go/pos {:name-pos [591 4]}} p)) ^{:go/pos {:lparen [591 22] :rparen [591 35]}} (^{:go/pos {:name-pos [591 16]}} append ^{:go/pos {:dot [591 26] :name-pos [591 27]}} (.-slots ^{:go/pos {:dot [591 24] :name-pos [591 25]}} (.-j ^{:go/pos {:name-pos [591 23]}} p)) ^{:go/pos {:name-pos [591 34]}} k))))
+
+            ^{:go/pos {:tok-pos [593 12]}} (set! ^{:go/pos {:dot [593 6] :name-pos [593 7]}} (.-body ^{:go/pos {:dot [593 4] :name-pos [593 5]}} (.-j ^{:go/pos {:name-pos [593 3]}} p)) ^{:go/pos {:dot [593 15] :lparen [593 20] :name-pos [593 16] :rparen [593 27]}} (.expr ^{:go/pos {:name-pos [593 14]}} s ^{:go/pos {:dot [593 22] :name-pos [593 23]}} (.-body ^{:go/pos {:name-pos [593 21]}} p)))
+            ^{:go/pos {:for [594 3] :lbrace [594 38] :rbrace [596 3]}} (for [^{:go/pos {:name-pos [594 7] :tok-pos [594 9]}} i ^{:go/apos {2 [594 23]} :go/pos {:op-pos [594 21]}} (- ^{:go/pos {:lparen [594 15] :rparen [594 19]}} (^{:go/pos {:name-pos [594 12]}} len ^{:go/pos {:name-pos [594 16]}} ars) 1)] ^{:go/apos {2 [594 31]} :go/pos {:op-pos [594 28]}} (>= ^{:go/pos {:name-pos [594 26]}} i 0) ^{:go/pos {:tok-pos [594 35]}} (dec! ^{:go/pos {:name-pos [594 34]}} i)
+              ^{:go/pos {:lparen [595 10] :rparen [595 11]}} (^{:go/pos {:lbrack [595 7] :rbrack [595 9]}} (aget ^{:go/pos {:name-pos [595 4]}} ars ^{:go/pos {:name-pos [595 8]}} i)))))
+
+
+        (let [^{:go/pos {:name-pos [598 2] :tok-pos [598 4]}} e ^{:go/pos {:dot [598 8] :lparen [598 13] :name-pos [598 9] :rparen [598 18]}} (.expr ^{:go/pos {:name-pos [598 7]}} s ^{:go/pos {:name-pos [598 14]}} body)]
+          ^{:go/pos {:for [599 2] :lbrace [599 36] :rbrace [601 2]}} (for [^{:go/pos {:name-pos [599 6] :tok-pos [599 8]}} i ^{:go/apos {2 [599 21]} :go/pos {:op-pos [599 19]}} (- ^{:go/pos {:lparen [599 14] :rparen [599 17]}} (^{:go/pos {:name-pos [599 11]}} len ^{:go/pos {:name-pos [599 15]}} rs) 1)] ^{:go/apos {2 [599 29]} :go/pos {:op-pos [599 26]}} (>= ^{:go/pos {:name-pos [599 24]}} i 0) ^{:go/pos {:tok-pos [599 33]}} (dec! ^{:go/pos {:name-pos [599 32]}} i)
+            ^{:go/pos {:lparen [600 8] :rparen [600 9]}} (^{:go/pos {:lbrack [600 5] :rbrack [600 7]}} (aget ^{:go/pos {:name-pos [600 3]}} rs ^{:go/pos {:name-pos [600 6]}} i)))
+
+          ^{:go/pos {:name-pos [602 9]}} e)))))
+
+
+^{:go/pos {:func [605 1] :lbrace [605 34] :rbrace [628 1] :return [627 2]}} (go/method ^{:go/pos {:name-pos [605 17]}} ffi ^{:tag ^{:go/pos {:name-pos [605 29]}} Expr :go/pos {:closing [605 27] :opening [605 20] :recv-closing [605 15] :recv-opening [605 6]}} [^{:tag ^{:go/pos {:star [605 9]}} (* ^{:go/pos {:name-pos [605 10]}} scope) :go/pos {:name-pos [605 7]}} s ^{:tag ^{:go/pos {:name-pos [605 23]}} List :go/pos {:name-pos [605 21]}} l]
+  ;; (ffi TARGET CONV SAFETY [ATOM...] REPS)
+  ^{:go/pos {:if [607 2] :lbrace [607 17] :rbrace [609 2]}} (when ^{:go/apos {2 [607 15]} :go/pos {:op-pos [607 12]}} (!= ^{:go/pos {:lparen [607 8] :rparen [607 10]}} (^{:go/pos {:name-pos [607 5]}} len ^{:go/pos {:name-pos [607 9]}} l) 6)
+    ^{:go/apos {1 [608 9]} :go/pos {:lparen [608 8] :rparen [608 18]}} (^{:go/pos {:name-pos [608 3]}} cfail "bad ffi"))
+
+  (let [^{:go/pos {:tok-pos [610 10]}} (values ^{:go/pos {:name-pos [610 2]}} tgt ^{:go/pos {:name-pos [610 7]}} tl) ^{:go/pos {:lparen [610 17] :rparen [610 22]}} (^{:go/pos {:name-pos [610 13]}} head ^{:go/apos {2 [610 20]} :go/pos {:lbrack [610 19] :rbrack [610 21]}} (aget ^{:go/pos {:name-pos [610 18]}} l 1))
+      ^{:go/pos {:name-pos [611 2] :tok-pos [611 5]}} fe ^{:go/pos {:op-pos [611 8]}} (addr ^{:go/acolon {2 [611 18]} :go/apos {2 [611 14]} :go/pos {:lbrace [611 13] :rbrace [611 36]}} (lit ^{:go/pos {:name-pos [611 9]}} FFIE :args ^{:go/pos {:dot [611 21] :lparen [611 30] :name-pos [611 22] :rparen [611 35]}} (.atomList ^{:go/pos {:name-pos [611 20]}} s ^{:go/apos {2 [611 33]} :go/pos {:lbrack [611 32] :rbrack [611 34]}} (aget ^{:go/pos {:name-pos [611 31]}} l 4))))]
+    ^{:go/pos {:guard-dot [612 18] :guard-lparen [612 19] :guard-rparen [612 24] :guard-tok [612 11] :lbrace [612 26] :rbrace [617 2] :switch [612 2]}} (type-switch [^{:go/pos {:name-pos [612 9]}} r ^{:go/apos {2 [612 16]} :go/pos {:lbrack [612 15] :rbrack [612 17]}} (aget ^{:go/pos {:name-pos [612 14]}} l 5)]
+      ^{:go/pos {:case [613 2] :colon [613 9]}} (case [^{:go/pos {:name-pos [613 7]}} Kw]
+        ^{:go/pos {:tok-pos [614 10]}} (set! ^{:go/pos {:dot [614 5] :name-pos [614 6]}} (.-res ^{:go/pos {:name-pos [614 3]}} fe) ^{:go/pos {:lparen [614 18] :rparen [614 20]}} (conv ^{:go/pos {:name-pos [614 12]}} string ^{:go/pos {:name-pos [614 19]}} r)))
+      ^{:go/pos {:case [615 2] :colon [615 10]}} (case [^{:go/pos {:name-pos [615 7]}} Vec]
+        ^{:go/apos {2 [616 12]} :go/pos {:tok-pos [616 10]}} (set! ^{:go/pos {:dot [616 5] :name-pos [616 6]}} (.-res ^{:go/pos {:name-pos [616 3]}} fe) "multi")))
+
+    ^{:go/pos {:lbrace [618 13] :rbrace [625 2] :switch [618 2]}} (switch ^{:go/pos {:name-pos [618 9]}} tgt
+      ^{:go/pos {:case [619 2] :colon [619 15]}} (case ^{:go/apos {0 [619 7]}} ["static"]
+        (let [^{:go/pos {:tok-pos [620 10]}} (values ^{:go/pos {:name-pos [620 3]}} sym ^{:go/pos {:name-pos [620 8]}} _) ^{:go/pos {:dot [620 18] :lparen [620 19] :rparen [620 26]}} (assert ^{:go/pos {:name-pos [620 20]}} string ^{:go/apos {2 [620 16]} :go/pos {:lbrack [620 15] :rbrack [620 17]}} (aget ^{:go/pos {:name-pos [620 13]}} tl 1))]
+          ^{:go/pos {:tok-pos [621 10]}} (set! ^{:go/pos {:dot [621 5] :name-pos [621 6]}} (.-sym ^{:go/pos {:name-pos [621 3]}} fe) ^{:go/pos {:lparen [621 19] :rparen [621 23]}} (^{:go/pos {:name-pos [621 12]}} cSymbol ^{:go/pos {:name-pos [621 20]}} sym))
+          ^{:go/pos {:tok-pos [622 10]}} (set! ^{:go/pos {:dot [622 5] :name-pos [622 6]}} (.-raw ^{:go/pos {:name-pos [622 3]}} fe) ^{:go/pos {:name-pos [622 12]}} sym)))
+      ^{:go/pos {:case [623 2] :colon [623 16]}} (case ^{:go/apos {0 [623 7]}} ["dynamic"]
+        ^{:go/apos {2 [624 16]} :go/pos {:tok-pos [624 14]}} (set! ^{:go/pos {:dot [624 5] :name-pos [624 6]}} (.-dynamic ^{:go/pos {:name-pos [624 3]}} fe) true)))
+
+    ^{:go/pos {:tok-pos [626 8]}} (set! ^{:go/pos {:dot [626 4] :name-pos [626 5]}} (.-fn ^{:go/pos {:name-pos [626 2]}} fe) ^{:go/pos {:lbrack [626 18] :rbrack [626 25]}} (aget ^{:go/pos {:name-pos [626 10]}} ffiTable ^{:go/pos {:dot [626 21] :name-pos [626 22]}} (.-sym ^{:go/pos {:name-pos [626 19]}} fe)))
+    ^{:go/pos {:name-pos [627 9]}} fe))
+
+
+
+
+^{:go/pos {:doc [630 1] :func [632 1] :lbrace [632 33] :rbrace [639 1] :return [638 2]}} (go/func ^{:go/pos {:name-pos [632 6]}} cSymbol "cSymbol is the C function a static target calls: a capi wrapper's name decoded\n(ghczuwrapperZC23ZC...ZCread is read).\n" ^{:tag ^{:go/pos {:name-pos [632 26]}} string :go/pos {:closing [632 24] :opening [632 13]}} [^{:tag ^{:go/pos {:name-pos [632 18]}} string :go/pos {:name-pos [632 14]}} sym]
+  ^{:go/pos {:if [633 2] :lbrace [633 46] :rbrace [637 2]}} (when ^{:go/apos {2 [633 28]} :go/pos {:lparen [633 22] :rparen [633 44]}} (^{:go/pos {:dot [633 12] :name-pos [633 13] :x-pos [633 5]}} strings/HasPrefix ^{:go/pos {:name-pos [633 23]}} sym "ghczuwrapperZC")
+    ^{:go/pos {:if [634 3] :lbrace [634 48] :rbrace [636 3]}} (when [^{:go/pos {:name-pos [634 6] :tok-pos [634 8]}} i ^{:go/apos {2 [634 34]} :go/pos {:lparen [634 28] :rparen [634 38]}} (^{:go/pos {:dot [634 18] :name-pos [634 19] :x-pos [634 11]}} strings/LastIndex ^{:go/pos {:name-pos [634 29]}} sym "ZC")] ^{:go/apos {2 [634 46]} :go/pos {:op-pos [634 43]}} (>= ^{:go/pos {:name-pos [634 41]}} i 0)
+      ^{:go/pos {:return [635 4]}} (return ^{:go/pos {:lparen [635 18] :rparen [635 28]}} (^{:go/pos {:name-pos [635 11]}} zdecode ^{:go/pos {:lbrack [635 22] :rbrack [635 27]}} (subslice ^{:go/pos {:name-pos [635 19]}} sym ^{:go/apos {2 [635 25]} :go/pos {:op-pos [635 24]}} (+ ^{:go/pos {:name-pos [635 23]}} i 2))))))
+
+
+  ^{:go/pos {:name-pos [638 9]}} sym)
+
+
+
+^{:go/pos {:doc [641 1] :func [642 1] :lbrace [642 31] :rbrace [681 1] :return [680 2]}} (go/func ^{:go/pos {:name-pos [642 6]}} zdecode "zdecode decodes GHC's z-encoding of a name.\n" ^{:tag ^{:go/pos {:name-pos [642 24]}} string :go/pos {:closing [642 22] :opening [642 13]}} [^{:tag ^{:go/pos {:name-pos [642 16]}} string :go/pos {:name-pos [642 14]}} s]
+  (let [^{:tag ^{:go/pos {:dot [643 15] :name-pos [643 16] :x-pos [643 8]}} strings/Builder :go/pos {:name-pos [643 6] :tok-pos [643 2]}} b (zero ^{:go/pos {:dot [643 15] :name-pos [643 16] :x-pos [643 8]}} strings/Builder)]
+    ^{:go/pos {:for [644 2] :lbrace [644 30] :rbrace [679 2]}} (for ^{:go/apos {1 [644 11]}} [^{:go/pos {:name-pos [644 6] :tok-pos [644 8]}} i 0] ^{:go/pos {:op-pos [644 16]}} (< ^{:go/pos {:name-pos [644 14]}} i ^{:go/pos {:lparen [644 21] :rparen [644 23]}} (^{:go/pos {:name-pos [644 18]}} len ^{:go/pos {:name-pos [644 22]}} s)) ^{:go/pos {:tok-pos [644 27]}} (inc! ^{:go/pos {:name-pos [644 26]}} i)
+      (let [^{:go/pos {:name-pos [645 3] :tok-pos [645 5]}} c ^{:go/pos {:lbrack [645 9] :rbrack [645 11]}} (aget ^{:go/pos {:name-pos [645 8]}} s ^{:go/pos {:name-pos [645 10]}} i)]
+        ^{:go/pos {:if [646 3] :lbrace [646 45] :rbrace [677 3]}} (when ^{:go/pos {:op-pos [646 29]}} (and ^:go/paren ^{:go/parens [[[646 6] [646 27]]] :go/pos {:op-pos [646 16]}} (or ^{:go/apos {2 [646 12]} :go/pos {:op-pos [646 9]}} (== ^{:go/pos {:name-pos [646 7]}} c \z) ^{:go/apos {2 [646 24]} :go/pos {:op-pos [646 21]}} (== ^{:go/pos {:name-pos [646 19]}} c \Z)) ^{:go/pos {:op-pos [646 36]}} (< ^{:go/apos {2 [646 34]} :go/pos {:op-pos [646 33]}} (+ ^{:go/pos {:name-pos [646 32]}} i 1) ^{:go/pos {:lparen [646 41] :rparen [646 43]}} (^{:go/pos {:name-pos [646 38]}} len ^{:go/pos {:name-pos [646 42]}} s)))
+          (let [^{:go/pos {:name-pos [647 4] :tok-pos [647 6]}} d ^{:go/pos {:lbrack [647 10] :rbrack [647 14]}} (aget ^{:go/pos {:name-pos [647 9]}} s ^{:go/apos {2 [647 13]} :go/pos {:op-pos [647 12]}} (+ ^{:go/pos {:name-pos [647 11]}} i 1))]
+            ^{:go/pos {:tok-pos [648 5]}} (inc! ^{:go/pos {:name-pos [648 4]}} i)
+            ^{:go/pos {:else-lbrace [665 11] :else-rbrace [675 4] :if [649 4] :lbrace [649 16] :rbrace [665 4]}} (if ^{:go/apos {2 [649 12]} :go/pos {:op-pos [649 9]}} (== ^{:go/pos {:name-pos [649 7]}} c \z)
+              ^{:go/pos {:lbrace [650 14] :rbrace [664 5] :switch [650 5]}} (switch ^{:go/pos {:name-pos [650 12]}} d
+                ^{:go/pos {:case [651 5] :colon [651 13]}} (case ^{:go/apos {0 [651 10]}} [\z]
+                  ^{:go/apos {2 [652 18]} :go/pos {:dot [652 7] :lparen [652 17] :name-pos [652 8] :rparen [652 21]}} (.WriteByte ^{:go/pos {:name-pos [652 6]}} b \z))
+                ^{:go/pos {:case [653 5] :colon [653 13]}} (case ^{:go/apos {0 [653 10]}} [\u]
+                  ^{:go/apos {2 [654 18]} :go/pos {:dot [654 7] :lparen [654 17] :name-pos [654 8] :rparen [654 21]}} (.WriteByte ^{:go/pos {:name-pos [654 6]}} b \_))
+                ^{:go/pos {:case [655 5] :colon [655 13]}} (case ^{:go/apos {0 [655 10]}} [\i]
+                  ^{:go/apos {2 [656 18]} :go/pos {:dot [656 7] :lparen [656 17] :name-pos [656 8] :rparen [656 21]}} (.WriteByte ^{:go/pos {:name-pos [656 6]}} b \.))
+                ^{:go/pos {:case [657 5] :colon [657 13]}} (case ^{:go/apos {0 [657 10]}} [\m]
+                  ^{:go/apos {2 [658 18]} :go/pos {:dot [658 7] :lparen [658 17] :name-pos [658 8] :rparen [658 21]}} (.WriteByte ^{:go/pos {:name-pos [658 6]}} b \-))
+                ^{:go/pos {:case [659 5] :colon [659 13]}} (case ^{:go/apos {0 [659 10]}} [\h]
+                  ^{:go/apos {2 [660 18]} :go/pos {:dot [660 7] :lparen [660 17] :name-pos [660 8] :rparen [660 21]}} (.WriteByte ^{:go/pos {:name-pos [660 6]}} b \#))
+                ^{:go/pos {:case [661 5] :colon [661 12]}} (default
+                  ^{:go/pos {:dot [662 7] :lparen [662 17] :name-pos [662 8] :rparen [662 19]}} (.WriteByte ^{:go/pos {:name-pos [662 6]}} b ^{:go/pos {:name-pos [662 18]}} c)
+                  ^{:go/pos {:dot [663 7] :lparen [663 17] :name-pos [663 8] :rparen [663 19]}} (.WriteByte ^{:go/pos {:name-pos [663 6]}} b ^{:go/pos {:name-pos [663 18]}} d)))
+
+
+              ^{:go/pos {:lbrace [666 14] :rbrace [674 5] :switch [666 5]}} (switch ^{:go/pos {:name-pos [666 12]}} d
+                ^{:go/pos {:case [667 5] :colon [667 13]}} (case ^{:go/apos {0 [667 10]}} [\Z]
+                  ^{:go/apos {2 [668 18]} :go/pos {:dot [668 7] :lparen [668 17] :name-pos [668 8] :rparen [668 21]}} (.WriteByte ^{:go/pos {:name-pos [668 6]}} b \Z))
+                ^{:go/pos {:case [669 5] :colon [669 13]}} (case ^{:go/apos {0 [669 10]}} [\C]
+                  ^{:go/apos {2 [670 18]} :go/pos {:dot [670 7] :lparen [670 17] :name-pos [670 8] :rparen [670 21]}} (.WriteByte ^{:go/pos {:name-pos [670 6]}} b \:))
+                ^{:go/pos {:case [671 5] :colon [671 12]}} (default
+                  ^{:go/pos {:dot [672 7] :lparen [672 17] :name-pos [672 8] :rparen [672 19]}} (.WriteByte ^{:go/pos {:name-pos [672 6]}} b ^{:go/pos {:name-pos [672 18]}} c)
+                  ^{:go/pos {:dot [673 7] :lparen [673 17] :name-pos [673 8] :rparen [673 19]}} (.WriteByte ^{:go/pos {:name-pos [673 6]}} b ^{:go/pos {:name-pos [673 18]}} d))))
+
+
+            ^{:go/pos {:tok-pos [676 4]}} (continue)))
+
+        ^{:go/pos {:dot [678 4] :lparen [678 14] :name-pos [678 5] :rparen [678 16]}} (.WriteByte ^{:go/pos {:name-pos [678 3]}} b ^{:go/pos {:name-pos [678 15]}} c)))
+
+    ^{:go/pos {:dot [680 10] :lparen [680 17] :name-pos [680 11] :rparen [680 18]}} (.String ^{:go/pos {:name-pos [680 9]}} b)))

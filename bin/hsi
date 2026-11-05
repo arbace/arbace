@@ -1,0 +1,711 @@
+#!/bin/bash
+# hsi, Haskell's eval (doc/haskell/HASKELL-EVAL-SURVEY.md, HES1-HES43 decided 2026-11-03): the trial HE1-HE3 ("As
+# built: HE1-HE3 (write-ahead)") and HE4a-HE4c's machine, libm and checks: the pins and corpora, the STG dumps of
+# the helper (tools/hsdump stg, doc/haskell/STG-SPEC.md), the references (GHC 9.14.1's -O0 runs recorded) and the synthetic corpus. Out of
+# gate_key and the gate (HES19 (a)): the Arbace parts (arbace/repr/haskell/stg.ae, test/haskell/eval/*.ae) are
+# evaluated from the checkout on stage 0, the helper and the references run on the host's GHC
+# (tools/hsdump/GHC_VERSION).
+#
+#   bin/hsi pins --fetch           the testsuite tarball into .tmp/hsi/src/ (downloaded once through a temporary
+#                                  name, checked by its SHA-256 and SHA-512) and extracted into .tmp/hsi/ghc-9.14.1/;
+#                                  nofib at its commit into .tmp/hsi/nofib (git fetch of the one commit, its tree
+#                                  hash checked); the source tarball by bin/repr-haskell corpus fetch (its pin)
+#   bin/hsi pins --count           every corpus's measures as they are now (ID KEY VALUE lines)
+#   bin/hsi pins --check           the pins hold (GHC's version, the tarballs' digests, nofib's tree) and every
+#                                  corpus's measures equal test/haskell/eval-corpora.edn's (fetches first)
+#   bin/hsi spec-check             doc/haskell/STG-SPEC.md's checklist against GHC 9.14.1's sources (the pinned source
+#                                  tarball): every constructor of the 23 declarations STG is made of named in it
+#   bin/hsi tests [--out DIR]     the testsuite's all.T files read (test/haskell/eval/allt.ae, HES17 (a)) and its
+#                                  run tests listed with their options, into test/haskell/eval/testsuite-run.edn
+#   bin/hsi dumps [--packages P,...|--no-packages] [--samples] [--again] [--out DIR]
+#                                  the boot libraries compiled as hadrian compiled the installed ones (HES6 (a): the
+#                                  installed unit ids, the paths from the source tree's root, -O2, ghc-internal's
+#                                  bignum backend native, HES7 (a)) by the helper's stg mode, every module's STG into
+#                                  DIR/stg/PKG/M.stg.ae (default .tmp/hsi/dumps); each module's interface's ABI hash
+#                                  against the installed one's; the samples (test/haskell/eval/samples) at -O0; every
+#                                  dump read back by Arbace's reader with every head known at its place
+#                                  (arbace.repr.haskell.stg); --again: a second run into DIR.again, byte for byte
+#                                  equal; sizes and times into DIR/report.edn
+#   bin/hsi record-ref [--corpus C,...] [--only ID,...] [--jobs N]
+#                                  GHC 9.14.1's -O0 builds of the run corpora run and recorded into
+#                                  test/haskell/ref-ghc914.edn (status, stdout's SHA-256, size and first line,
+#                                  stderr's, the build's and the run's seconds); --only keeps every other line
+#   bin/hsi build                  hsi's light driver built (go/arbace/hs, go/arbace/libm, test/haskell/hsi/cmd.ae and
+#                                  go/arbace/crt printed by repr/go, TamaGo's go) into .tmp/hsi/bin/hsi, its path printed
+#                                  (HSI_EXE names another)
+#   bin/hsi runtime print|read|check
+#                                  hsi's runtime as Go forms, mode :full (HES38): print, its Go into .tmp/hsi/runtime (hs,
+#                                  hs/cmd/hsi, libm) to edit; read, that Go read back by repr/go's native reader into the
+#                                  tree; check, the committed forms printed and read again equal to themselves
+#   bin/hsi run FILE.hs [ARG...]   FILE compiled to STG at -O0 by the helper and run on hsi (HE4a), the libraries
+#                                  from their images (HE4d: hsi image, made when stale into HSI_IMAGE, default
+#                                  .tmp/hsi/image; none: the forms read every run), under the memory cap
+#                                  (ARBACE_MEM_GIB, default 16 GiB, as bin/lib/limit.bash's)
+#   bin/hsi check [--corpus C,...] [--only ID,...|@FILE] [--jobs N] [--record] [--keep]
+#                                  the run corpora (samples, synthetic, testsuite-core, nofib; default the first two) on hsi
+#                                  against test/haskell/ref-ghc914.edn, every non-pass in a class of
+#                                  test/haskell/divergences.edn, the negative controls failing (bin/lib/hsi/check);
+#                                  --only @FILE: a list of ids (test/haskell/hsi/essential.txt, GT8); --record writes
+#                                  test/haskell/check-hsi.edn
+#   bin/hsi aot build|run ...      HE8's AOT, the first slice (bin/lib/hsi/aot): a program's STG and the library closures
+#                                  it enters compiled to Go over hsi's machine and built with it; aot run FILE.hs [ARG...]
+#                                  as bin/hsi run; bin/hsi check --aot judges the corpora so
+#   bin/hsi divergences [--results FILE] [--programs]
+#                                  the recorded check (test/haskell/check-hsi.edn) judged against test/haskell/divergences.edn with
+#                                  no run (HE6): every non-pass in a class of a kind it allows, a summary by class
+#   bin/hsi slice K [--results FILE] [--slices N]
+#                                  the recorded programs of rotation slice K of N (default 7: the first 8 hex digits of the id's SHA-256
+#                                  mod N, GTS203 (a)), for bin/hsi check --only 
+#   bin/hsi stubs-build            HES60's probe and stub writer (tools/hsdump/probe/StubProbe.hs) built by the host's ghc
+#                                  into .tmp/hsi/stubprobe/stubprobe (kept by its source's digest), its path printed:
+#                                  stubprobe LIBDIR OUT FILE.hs... writes what GHC holds of the modules' foreign exports and
+#                                  wrappers (the stubs, the bindings, the STG names); --stubs LIBDIR DIR FLAG... -- FILE...
+#                                  the modules' foreign stubs as GHC's C compiler gets them (bin/hsi check's use)
+#   bin/hsi cnodes OUT [--refs FILE] [OPTION...] FILE...
+#                                  a program's own C files (HES64 (a), HE6's second half) read by repr/c, checked by ci's
+#                                  checker and linked with musl (ci's prebuilt runtime) and hsi's glue
+#                                  (test/haskell/hsi/c/) into the node program OUT, which hsi run --c loads over the
+#                                  machine's memory (test/haskell/eval/cnodes.ae); the files relative to the working
+#                                  directory, -I, -D, -U and -std= passed to repr/c, gcc's other flags dropped
+#   bin/hsi repl [DIR]             the REPL (HE7): ghci's session on stdin and stdout (the banner, "ghci> " before each line), each
+#                                  line a request to the session server tools/hsrepl (a GHC API session, built by bin/hsi repl-build),
+#                                  its statements' STG written into DIR's modules and run on hsi, `let` and `it` kept across lines
+#   bin/hsi repl-session [--record] [FILE.in...]
+#                                  test/haskell/repl/'s sessions run through bin/hsi repl, stdout byte for byte against GHCi's
+#                                  recorded transcript (--record: from the host's GHC), the negative control
+#   bin/hsi primops                hsi's primops against GHC.Prim's non-SIMD names
+#   bin/hsi libm-check [N [SEED]]  the port of musl's libm (go/arbace/libm, HE4b) against the host's libm
+#                                  (musl 1.2.6) function by function: test/haskell/hsi/libm-ref.c built by the host's cc
+#                                  writes each function's results over its edges and N random inputs of each kind
+#                                  (default 20000), hsi recomputes them, every result's bits equal; then the negative
+#                                  control, the same lines by Go's math package, must mismatch; then no product of the
+#                                  port fused into an FMA (tools/fmacheck over its Go, and its functions' instructions);
+#                                  the reference is the host's musl as x86_64 builds it: on arm64 Alpine's musl takes its
+#                                  own FMA paths (pow(DBL_MAX, 0.5)), and an exact check there needs musl's src/math
+#                                  built with x86_64's configuration (review 189, F1's second part)
+#   bin/hsi generate [--check]     the synthetic corpus test/haskell/eval/synthetic/ written by its generator
+#                                  (test/haskell/eval/gen.ae, survey §8.3); --check: the committed files equal it
+# Environment: HSI_JOBS (default 8; bin/hsi check 3: a program of the core may take 10 GB, run it under .tmp/heavy), HSI_CORPORA (another test/haskell/eval-corpora.edn), HSI_IMAGE (the images'
+# directory, none for none), HSI_EXE (another hsi).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+here=$PWD
+. "$root/bin/lib/tmpdir.bash"
+cd "$root"
+
+CORPORA="${HSI_CORPORA:-$root/test/haskell/eval-corpora.edn}"
+WORK="$root/.tmp/hsi"
+jobs=${HSI_JOBS:-8}
+pin=$(cat "$root/tools/hsdump/GHC_VERSION")
+
+die() { echo "hsi: $*" >&2; exit 1; }
+
+# stage 0 reads the data: ARBACE_HOST_EXE, else the checkout's stage 0, else the main checkout's (never built here)
+arbace_exe() {
+  if [ -n "${ARBACE_HOST_EXE:-}" ]; then echo "$ARBACE_HOST_EXE"; return; fi
+  local arch main
+  case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=$(uname -m) ;; esac
+  if [ -x "$root/target/seed/$arch/arbace" ]; then echo "$root/target/seed/$arch/arbace"; return; fi
+  main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+  if [ -x "$main/target/seed/$arch/arbace" ]; then echo "$main/target/seed/$arch/arbace"; return; fi
+  die "no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)"
+}
+ae() { ARBACE_PATH=$root "$(arbace_exe)" "$@"; }
+
+ghc_check() {
+  local v
+  v=$(ghc --numeric-version) || die "no ghc"
+  [ "$v" = "$pin" ] || die "the host's GHC is $v, tools/hsdump/GHC_VERSION pins $pin"
+  libdir=$(ghc --print-libdir)
+  pkgdb=$(ls -d "$libdir"/../lib/*-ghc-"$pin"-* | head -1)
+}
+
+# pin_field KEY FIELD: a pin's field of the corpora file
+pin_field() { ae -e "(println (get-in (read-string (slurp \"$CORPORA\")) [:pins $1 $2]))"; }
+
+srcroot=""
+src_fetch() {
+  srcroot=$("$root/bin/repr-haskell" corpus fetch | tail -1)
+  [ -d "$srcroot/libraries" ] || die "no source tree ($srcroot)"
+}
+
+testsuite_fetch() {
+  local url sha sha512 tb=$WORK/src/ghc-9.14.1-testsuite.tar.xz
+  url=$(pin_field :ghc-9.14.1-testsuite :url); sha=$(pin_field :ghc-9.14.1-testsuite :sha256)
+  sha512=$(pin_field :ghc-9.14.1-testsuite :sha512)
+  mkdir -p "$WORK/src"
+  if [ ! -f "$tb" ]; then
+    echo "== hsi: fetching $url" >&2
+    curl -fsSL -o "$tb.part" "$url" && mv "$tb.part" "$tb"
+  fi
+  [ "$(sha256sum < "$tb" | cut -c1-64)" = "$sha" ] || die "$tb: SHA-256 is not the pin's"
+  [ "$(sha512sum < "$tb" | cut -c1-128)" = "$sha512" ] || die "$tb: SHA-512 is not the pin's"
+  if [ ! -f "$WORK/ghc-9.14.1/testsuite.$sha" ]; then
+    rm -rf "$WORK/ghc-9.14.1/testsuite"; mkdir -p "$WORK"
+    tar -xJf "$tb" -C "$WORK"
+    touch "$WORK/ghc-9.14.1/testsuite.$sha"
+  fi
+}
+
+nofib_fetch() {
+  local repo commit tree d=$WORK/nofib
+  repo=$(pin_field :nofib :repo); commit=$(pin_field :nofib :commit); tree=$(pin_field :nofib :tree)
+  if [ ! -d "$d/.git" ] || [ "$(git -C "$d" rev-parse HEAD)" != "$commit" ]; then
+    echo "== hsi: fetching nofib $commit" >&2
+    rm -rf "$d"; mkdir -p "$d"
+    git -C "$d" init -q
+    git -C "$d" fetch -q --depth 1 "$repo" "$commit"
+    git -C "$d" -c advice.detachedHead=false checkout -q FETCH_HEAD
+  fi
+  [ "$(git -C "$d" rev-parse HEAD)" = "$commit" ] || die "nofib: HEAD is not the pin's commit"
+  [ "$(git -C "$d" rev-parse 'HEAD^{tree}')" = "$tree" ] || die "nofib: the tree is not the pin's"
+  [ -z "$(git -C "$d" status --porcelain)" ] || die "nofib: the checkout is modified"
+}
+
+# files_measure DIR GLOB...: the files under DIR matching the globs: their count, newline count, and the SHA-256 of
+# their sha256sum lines sorted by path (relative to DIR)
+files_measure() {
+  local d=$1 g args=(); shift
+  for g in "$@"; do args+=(${args:+-o} -name "$g"); done
+  (cd "$d" && find . -path ./.git -prune -o -type f \( "${args[@]}" \) -print0 | LC_ALL=C sort -z > "$TMPDIR/hsi-files.$$")
+  echo "$(tr -cd '\0' < "$TMPDIR/hsi-files.$$" | wc -c) \
+$(cd "$d" && xargs -0 cat < "$TMPDIR/hsi-files.$$" | wc -l) \
+$(cd "$d" && xargs -0 sha256sum < "$TMPDIR/hsi-files.$$" | sha256sum | cut -c1-64)"
+  rm -f "$TMPDIR/hsi-files.$$"
+}
+
+# measures: every corpus's measures as lines ID KEY VALUE (bin/hsi pins --count, --check)
+measures() {
+  local f l dg t=$WORK/ghc-9.14.1/testsuite/tests
+  read -r f l dg <<< "$(files_measure "$WORK/ghc-9.14.1/testsuite/tests" '*.hs' '*.lhs')"
+  echo "testsuite files $f"; echo "testsuite lines $l"; echo "testsuite digest $dg"
+  ae "$root/test/haskell/eval/allt.ae" "$t" "$TMPDIR/hsi-tests.$$.edn" "$TMPDIR/hsi-summary.$$.edn" > "$TMPDIR/hsi-allt.log"
+  ae -e "(let [m (read-string (slurp \"$TMPDIR/hsi-summary.$$.edn\"))] (println \"testsuite all-t\" (:all-t m)) (println \"testsuite tests\" (:tests m)) (println \"testsuite run-tests\" (:run-tests m)))"
+  rm -f "$TMPDIR/hsi-tests.$$.edn" "$TMPDIR/hsi-summary.$$.edn"
+  local dirs; dirs=$(ae -e "(println (apply str (interpose \",\" (get-in (some #(when (= :testsuite-core (:id %)) %) (:corpora (read-string (slurp \"$CORPORA\")))) [:where :dirs]))))")
+  echo "testsuite-core run-tests $(ae "$root/test/haskell/eval/run_plan.ae" "$root/test/haskell/eval/testsuite-run.edn" "$t" "$dirs" 2>> "$TMPDIR/hsi-allt.log" | wc -l)"
+  read -r f l dg <<< "$(files_measure "$WORK/nofib" '*.hs' '*.lhs')"
+  echo "nofib files $f"; echo "nofib lines $l"; echo "nofib digest $dg"
+  local s p n
+  for s in imaginary spectral real shootout gc parallel smp; do
+    n=0; for p in "$WORK/nofib/$s"/*/; do [ -f "$p/Makefile" ] && n=$((n + 1)); done
+    echo "nofib programs/$s $n"
+  done
+  read -r f l dg <<< "$(files_measure "$root/test/haskell/eval/samples" '*.hs')"
+  echo "samples files $f"; echo "samples lines $l"; echo "samples digest $dg"
+  if [ -d "$root/test/haskell/eval/synthetic" ]; then
+    read -r f l dg <<< "$(files_measure "$root/test/haskell/eval/synthetic" '*.hs')"
+    echo "synthetic files $f"; echo "synthetic lines $l"; echo "synthetic digest $dg"
+  fi
+  ae "$root/test/haskell/eval/dump_plan.ae" "$root/test/haskell/corpus-ghc-9.14.1.edn" native |
+    awk -F'\037' '{n++; m += split($5, a, " ")} END {print "boot-libraries packages " n; print "boot-libraries modules " m}'
+}
+
+# recorded: the corpora file's measures in the same lines
+recorded() {
+  ae -e "(let [c (read-string (slurp \"$CORPORA\"))]
+    (doseq [{:keys [id] :as k} (:corpora c) [f v] (sort-by (comp str key) k)
+            :when (#{:files :lines :digest :all-t :tests :run-tests :packages :modules :programs} f)]
+      (if (map? v)
+        (doseq [[s n] (sort v)] (println (name id) (str (name f) \"/\" s) n))
+        (println (name id) (name f) v))))"
+}
+
+pins() {
+  case ${1:---check} in
+    --fetch) ghc_check; src_fetch; testsuite_fetch; nofib_fetch; echo "hsi pins: fetched" ;;
+    --count) ghc_check; src_fetch; testsuite_fetch; nofib_fetch; measures | sort ;;
+    --check)
+      ghc_check; src_fetch; testsuite_fetch; nofib_fetch
+      local g
+      g=$(pin_field :ghc :version)
+      [ "$g" = "$pin" ] || die "the corpora's GHC $g is not tools/hsdump/GHC_VERSION's $pin"
+      [ "$(pin_field :ghc-9.14.1-src :sha256)" = "$(ae -e "(println (:sha256 (:tarball (read-string (slurp \"$root/test/haskell/corpus-ghc-9.14.1.edn\")))))")" ] ||
+        die "the source tarball's pin is not repr/haskell's"
+      measures | sort > "$TMPDIR/hsi-measures.$$"
+      recorded | sort > "$TMPDIR/hsi-recorded.$$"
+      if ! diff "$TMPDIR/hsi-recorded.$$" "$TMPDIR/hsi-measures.$$" > "$TMPDIR/hsi-measures.diff"; then
+        cat "$TMPDIR/hsi-measures.diff" >&2; rm -f "$TMPDIR/hsi-measures.$$" "$TMPDIR/hsi-recorded.$$"
+        die "the corpora's measures differ from test/haskell/eval-corpora.edn's (< recorded, > now)"
+      fi
+      rm -f "$TMPDIR/hsi-measures.$$" "$TMPDIR/hsi-recorded.$$"
+      echo "hsi pins: OK" ;;
+    *) die "usage: bin/hsi pins --fetch|--count|--check" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------------------------------------
+# dumps
+
+# unit_of NAME UNIT-FLAG: the unit id a package is compiled with: the installed unit's id, but a wired-in unit's
+# own name (ghc-internal: the installed libraries' symbols name it so, ghczminternal_...)
+unit_of() {
+  if [ "$2" = ghc-internal ]; then echo ghc-internal; return; fi
+  ghc-pkg field "$1" id --simple-output
+}
+
+# prefix_rel DIR FLAG...: the flags with -I and -i of a relative directory made relative to the source tree's root
+prefix_rel() {
+  local d=$1 f; shift
+  for f in "$@"; do
+    case $f in
+      -i.) echo "-i$d" ;;
+      -I/*|-i/*|-I\$*|-i\$*) echo "$f" ;;
+      -I*) echo "-I$d/${f#-I}" ;;
+      -i*) echo "-i$d/${f#-i}" ;;
+      *) echo "$f" ;;
+    esac
+  done
+}
+
+# strip_srcdir FILE SRCDIR...: FILE (under the package's directory) less the source directory it is in
+strip_srcdir() {
+  local f=$1 s; shift
+  for s in "$@"; do
+    [ "$s" = . ] && continue
+    case $f in "$s"/*) echo "${f#"$s"/}"; return ;; esac
+  done
+  echo "$f"
+}
+
+dump_package() { # NAME DIR UNITFLAG FLAGS MODS HSC HFLAGS GENS GFILES OUT
+  local name=$1 dir=$2 unitf=$3 flags=$4 mods=$5 hscs=$6 hflags=$7 gens=$8 gfiles=$9 out=${10}
+  local r=$WORK/root unit b srcdirs=() f t0 t1 rc=0
+  unit=$(unit_of "$name" "$unitf")
+  b=_build/stage1/$dir/build
+  rm -rf "${r:?}/$b" "$out/stg/$name"; mkdir -p "$r/$b" "$out/stg/$name" "$out/logs"
+  for f in $flags; do case $f in -i*) srcdirs+=("${f#-i}") ;; esac; done
+  # shellcheck disable=SC2086
+  local hf=($(prefix_rel "$dir" $(echo "$hflags" | sed "s|\\\$libdir|$libdir|g; s|\\\$repo|$root|g")))
+  for f in $hscs; do
+    local m; m=$(strip_srcdir "$f" "${srcdirs[@]}")
+    mkdir -p "$(dirname "$r/$b/$m")"
+    (cd "$r" && hsc2hs "${hf[@]}" --cflag=-D__GLASGOW_HASKELL__=914 --cflag=-Dx86_64_HOST_ARCH=1 \
+       --cflag=-Dlinux_HOST_OS=1 "$dir/$f" -o "$b/${m%.hsc}.hs") \
+      >> "$out/logs/$name.hsc2hs.log" 2>&1 || { echo "hsi: hsc2hs failed on $name/$f" >&2; return 1; }
+  done
+  for f in $gens; do
+    local m; m=$(strip_srcdir "${f%%=*}" "${srcdirs[@]}")
+    mkdir -p "$(dirname "$r/$b/$m")"
+    "$genprimopcode" "${f#*=}" < "$primops" > "$r/$b/$m"
+  done
+  for f in $gfiles; do
+    local m; m=$(strip_srcdir "${f%%=*}" "${srcdirs[@]}")
+    mkdir -p "$(dirname "$r/$b/$m")"
+    cp "$root/${f#*=}" "$r/$b/$m"
+  done
+  # shellcheck disable=SC2046,SC2086
+  local gf=(-this-unit-id "$unit" $(prefix_rel "$dir" $(echo "$flags" | sed "s|\\\$libdir|$libdir|g; s|\\\$repo|$root|g"))
+            "-i$b" "-I$b" -O2 -haddock -outputdir "$b" -j"$jobs")
+  t0=$(date +%s.%N)
+  # shellcheck disable=SC2086
+  (cd "$r" && "$helper" stg --one-shot -o "$out/stg/$name" --libdir "$libdir" --helper-hash "sha256:$helper_hash" \
+     --ghc "${gf[@]}" --files $mods) > "$out/logs/$name.log" 2>&1 || rc=$?
+  t1=$(date +%s.%N)
+  echo "$name $unit $rc $(echo "$t1 - $t0" | bc)" >> "$out/times.txt"
+  [ $rc = 0 ] || { echo "hsi: $name failed to compile ($out/logs/$name.log)" >&2; tail -20 "$out/logs/$name.log" >&2; return 1; }
+  # the interfaces' ABI hashes against the installed ones' (HES6's check: the same unit, paths, flags)
+  local inst; inst=$pkgdb/$(ghc-pkg field "$name" id --simple-output)
+  for m in $mods; do echo "$m"; done | xargs -P "$jobs" -I{} sh -c '
+    p=$(echo "$1" | tr . /).hi
+    a=$(ghc --show-iface "$2/$p" 2>&1 | sed -n "s/^ *ABI hash: //p")
+    i=$(ghc --show-iface "$3/$p" 2>&1 | sed -n "s/^ *ABI hash: //p")
+    if [ -z "$i" ]; then echo "$1 not-installed"; elif [ "$a" = "$i" ]; then echo "$1 equal"; else echo "$1 differs"; fi' _ {} "$r/$b" "$inst" \
+    | sort > "$out/abi/$name.txt"
+}
+
+dumps() {
+  local pkgs="" samples="" again="" out=$WORK/dumps nopk=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --packages) pkgs=,$2,; shift 2 ;;
+      --no-packages) nopk=1; shift ;;
+      --samples) samples=1; shift ;;
+      --again) again=1; shift ;;
+      --out) out=$2; shift 2 ;;
+      *) die "usage: bin/hsi dumps [--packages P,...|--no-packages] [--samples] [--again] [--out DIR]" ;;
+    esac
+  done
+  mkdir -p "$out"; out=$(cd "$out" && pwd)
+  ghc_check; src_fetch
+  "$root/bin/repr-haskell" helper
+  helper=$root/.tmp/hsdump/hsdump
+  helper_hash=$(cat "$root"/tools/hsdump/*.hs "$root/tools/hsdump/GHC_VERSION" | sha256sum | cut -c1-64)
+  read -r genprimopcode primops <<< "$("$root/bin/repr-haskell" genprimopcode | tail -1)"
+  # the source tree's root as hadrian sees it: libraries/ (the extracted tarball's) and _build/
+  mkdir -p "$WORK/root/_build"
+  ln -sfn "$srcroot/libraries" "$WORK/root/libraries"
+  local one
+  for one in "" ${again:+.again}; do
+    local o=$out$one
+    rm -rf "$o"; mkdir -p "$o/abi" "$o/logs"
+    : > "$o/times.txt"
+    if [ -z "$nopk" ]; then
+      local pl; pl=$(mktemp "$TMPDIR/hsi-plan.XXXXXX")
+      ae "$root/test/haskell/eval/dump_plan.ae" "$root/test/haskell/corpus-ghc-9.14.1.edn" "${HSI_BIGNUM:-native}" > "$pl"
+      while IFS=$'\x1f' read -r name dir unitf flags mods hscs hflags gens gfiles; do
+        if [ -n "$pkgs" ] && [[ $pkgs != *",$name,"* ]]; then continue; fi
+        echo "== hsi dumps: $name" >&2
+        dump_package "$name" "$dir" "$unitf" "$flags" "$mods" "$hscs" "$hflags" "$gens" "$gfiles" "$o"
+      done < "$pl"
+      rm -f "$pl"
+    fi
+    if [ -n "$samples" ]; then
+      local s t0 t1 n
+      mkdir -p "$o/stg/samples" "$o/samples-obj"
+      for s in "$root"/test/haskell/eval/samples/*.hs; do
+        n=$(basename "$s" .hs)
+        t0=$(date +%s.%N)
+        (cd "$root/test/haskell/eval/samples" && "$helper" stg -o "$o/stg/samples/$n" --libdir "$libdir" \
+           --helper-hash "sha256:$helper_hash" --ghc -O0 -outputdir "$o/samples-obj/$n" --files "$n.hs") \
+           > "$o/logs/sample-$n.log" 2>&1 || { tail "$o/logs/sample-$n.log" >&2; die "sample $n failed"; }
+        t1=$(date +%s.%N)
+        echo "samples/$n main 0 $(echo "$t1 - $t0" | bc)" >> "$o/times.txt"
+      done
+    fi
+  done
+  # every dump read back, every head known at its place (arbace.repr.haskell.stg), its statistics
+  echo "== hsi dumps: reading back" >&2
+  local t0 t1
+  t0=$(date +%s)
+  find "$out/stg" -name '*.stg.ae' | sort > "$out/files.txt"
+  split -n "r/$jobs" -d "$out/files.txt" "$out/files.part."
+  local p
+  for p in "$out"/files.part.*; do
+    ae -m arbace.repr.haskell.stg check --files "$p" --report "$p.report.edn" > "$p.log" 2>&1 &
+  done
+  local bad=0
+  wait || bad=1
+  t1=$(date +%s)
+  ae -m arbace.repr.haskell.stg merge --out "$out/report.edn" --times "$out/times.txt" --abi "$out/abi" \
+     --read-seconds $((t1 - t0)) --root "$out/stg" "$out"/files.part.*.report.edn || bad=1
+  rm -f "$out"/files.part.*
+  if [ -n "$again" ]; then
+    if diff -r "$out/stg" "$out.again/stg" > "$out/again.diff" 2>&1; then
+      echo "hsi dumps: two runs byte for byte equal" >&2
+    else
+      echo "hsi dumps: the two runs differ ($out/again.diff)" >&2; bad=1
+    fi
+  fi
+  [ $bad = 0 ] || die "dumps: failed (see $out)"
+  echo "hsi dumps: OK ($out/report.edn)"
+}
+
+# spec-check: STG-SPEC.md's checklist (§10) against GHC 9.14.1's sources (the pinned source tarball): every
+# constructor of the declarations STG is made of is named in the spec as `Con`
+spec_check() {
+  local tb ex=$WORK/spec-src decl file name cons c missing=0 n=0
+  src_fetch
+  tb=$(dirname "$srcroot")/ghc-9.14.1-src.tar.xz
+  [ -f "$tb" ] || die "no source tarball ($tb)"
+  rm -rf "$ex"; mkdir -p "$ex"
+  tar -xJf "$tb" -C "$ex" ghc-9.14.1/compiler/GHC/Stg/Syntax.hs ghc-9.14.1/compiler/GHC/Core.hs \
+    ghc-9.14.1/compiler/GHC/Types/Literal.hs ghc-9.14.1/compiler/GHC/Types/Basic.hs ghc-9.14.1/compiler/GHC/Core/TyCon.hs \
+    ghc-9.14.1/compiler/GHC/Types/ForeignCall.hs ghc-9.14.1/compiler/GHC/Types/Tickish.hs ghc-9.14.1/compiler/GHC/Core/DataCon.hs
+  for decl in Stg/Syntax.hs:GenStgTopBinding Stg/Syntax.hs:GenStgBinding Stg/Syntax.hs:StgArg Stg/Syntax.hs:GenStgExpr \
+              Stg/Syntax.hs:GenStgRhs Stg/Syntax.hs:GenStgAlt Stg/Syntax.hs:AltType Stg/Syntax.hs:UpdateFlag \
+              Stg/Syntax.hs:StgOp Stg/Syntax.hs:ConstructorNumber Core.hs:AltCon Types/Literal.hs:Literal \
+              Types/Literal.hs:LitNumType Types/Basic.hs:FunctionOrData Types/Basic.hs:TypeOrConstraint Types/Basic.hs:Levity \
+              Core/TyCon.hs:PrimRep Core/TyCon.hs:PrimElemRep Types/ForeignCall.hs:CCallTarget Types/ForeignCall.hs:CCallConv \
+              Types/ForeignCall.hs:Safety Types/Tickish.hs:GenTickish Core/DataCon.hs:StrictnessMark; do
+    file=$ex/ghc-9.14.1/compiler/GHC/${decl%%:*}; name=${decl#*:}
+    # the constructors: the names after "=" and "|" that begin a line of the declaration (comments dropped), to the
+    # first line at column 0 after it
+    cons=$(awk -v n="$name" '
+      $0 ~ "^data " n "( |$)" { on = 1 }
+      on && NR > start && /^[^ \t-]/ && $0 !~ "^data " n "( |$)" { exit }
+      on { sub(/--.*/, ""); line = $0
+           while (match(line, /(^|[=|])[ \t]*[A-Z][A-Za-z0-9_]*/)) {
+             c = substr(line, RSTART, RLENGTH); gsub(/^[=| \t]*/, "", c)
+             if (substr(line, RSTART, 1) == "=" || substr(line, RSTART, 1) == "|" || line ~ /^[ \t]*[=|]/) print c
+             line = substr(line, RSTART + RLENGTH) } }' "$file" | sort -u)
+    [ -n "$cons" ] || { echo "hsi spec-check: no constructors found for $name in ${decl%%:*}" >&2; missing=1; continue; }
+    for c in $cons; do
+      n=$((n + 1))
+      grep -q "\`$c\`" "${HSI_SPEC:-$root/doc/haskell/STG-SPEC.md}" || { echo "hsi spec-check: $name's $c is not in STG-SPEC.md" >&2; missing=1; }
+    done
+  done
+  [ $missing = 0 ] || die "spec-check: failed"
+  echo "hsi spec-check: $n constructors of 23 declarations, every one in doc/haskell/STG-SPEC.md's checklist"
+}
+
+# stubs_build: HES60's probe and stub writer (tools/hsdump/probe/StubProbe.hs, not the helper: the dumps' key stays) built
+# by the host's ghc into .tmp/hsi/stubprobe/stubprobe, kept by its source's digest; its path on stdout
+stubs_build() {
+  local d=$WORK/stubprobe key exe=$WORK/stubprobe/stubprobe
+  key=$(cat "$root/tools/hsdump/probe/StubProbe.hs" "$root/tools/hsdump/GHC_VERSION" | sha256sum | cut -c1-64)
+  if [ -x "$exe" ] && [ -f "$d/key" ] && [ "$(cat "$d/key")" = "$key" ]; then echo "$exe"; return; fi
+  ghc_check
+  mkdir -p "$d"
+  ghc -O0 -package ghc -outputdir "$d/obj" -o "$exe.new" "$root/tools/hsdump/probe/StubProbe.hs" > "$d/build.log" 2>&1 \
+    || { cat "$d/build.log" >&2; die "stubs-build: ghc"; }
+  mv -f "$exe.new" "$exe"
+  echo "$key" > "$d/key"
+  echo "$exe"
+}
+
+# build_hsi: hsi's light driver (go/arbace/hs and test/haskell/hsi/cmd.ae printed by repr/go with go/arbace/crt, built
+# by TamaGo's go into .tmp/hsi/bin/hsi, kept by the forms' digest; HSI_EXE names another); its path on stdout
+build_hsi() {
+  if [ -n "${HSI_EXE:-}" ]; then echo "$HSI_EXE"; return; fi
+  local d=$WORK/bin mod=$WORK/bin/mod key exe=$WORK/bin/hsi
+  key=$( { find "$root/go/arbace/hs" "$root/go/arbace/libm" "$root/go/arbace/crt" "$root/go/arbace/ci" "$root/test/haskell/hsi" -type f | LC_ALL=C sort | xargs sha256sum
+           sha256sum "$root/go/arbace/hs.ae" "$root/go/arbace/libm.ae" "$root/go/arbace/crt.ae" "$root/go/arbace/ci.ae"; } | sha256sum | cut -c1-64)
+  if [ -x "$exe" ] && [ -f "$d/key" ] && [ "$(cat "$d/key")" = "$key" ]; then echo "$exe"; return; fi
+  mkdir -p "$d"
+  runtime_print "$mod"
+  (cd "$mod" && GOCACHE=$WORK/bin/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off \
+     "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -trimpath -o "$exe.new" ./hs/cmd/hsi) >&2 || die "build: go build"
+  mv -f "$exe.new" "$exe"
+  echo "$key" > "$d/key"
+  echo "$exe"
+}
+
+# hsi's runtime as Go forms (HES38, mode :full, as pyi's): the packages arbace/hs, arbace/hs/cmd/hsi (the driver,
+# test/haskell/hsi/cmd.ae) and arbace/libm (musl's libm, shared with pyi); their source is the forms, the Go text a
+# print of them
+RT_PKGS="go/arbace/hs.ae:hs go/arbace/libm.ae:libm test/haskell/hsi/cmd.ae:hs/cmd/hsi"
+
+# runtime_print DIR: the runtime's forms printed by repr/go into the module DIR, with crt's (hs imports it)
+runtime_print() {
+  local out=$1 p h; h=$(arbace_exe)
+  rm -rf "$out"; mkdir -p "$out"
+  printf 'module arbace\n\ngo 1.27\n' > "$out/go.mod"
+  local pk="$RT_PKGS go/arbace/crt.ae:crt go/arbace/ci.ae:ci"
+  for p in $pk; do
+    mkdir -p "$out/${p#*:}"
+    ARBACE_HOST_EXE=$h GOMAXPROCS=4 "$root/bin/repr-go" print "$root/${p%%:*}" "$out/${p#*:}" > "$out.print.log" 2>&1 \
+      || { cat "$out.print.log" >&2; die "runtime: repr-go print ${p%%:*}"; }
+  done
+}
+
+# runtime_read SRC OUT: the module SRC's runtime packages read by repr/go's native reader (mode :full) into OUT, laid
+# out as the tree holds them
+runtime_read() {
+  local src=$1 out=$2 h; h=$(arbace_exe)
+  rm -rf "$out" "$out.raw"
+  (cd "$src" && ARBACE_HOST_EXE=$h GOMAXPROCS=4 REPR_GO_JOBS=4 "$root/bin/repr-go" read --full --goos linux --goarch amd64 \
+     --out "$out.raw" ./hs ./hs/cmd/hsi ./libm) > "$out.log" 2>&1 \
+    || { cat "$out.log" >&2; die "runtime: the runtime's Go does not read (log $out.log)"; }
+  mkdir -p "$out/go/arbace" "$out/test/haskell/hsi/cmd"
+  cp -r "$out.raw/go/arbace/hs.ae" "$out.raw/go/arbace/libm.ae" "$out.raw/go/arbace/libm" "$out/go/arbace/"
+  mkdir -p "$out/go/arbace/hs"; cp "$out.raw/go/arbace/hs/"*.ae "$out/go/arbace/hs/"
+  sed 's|(load "hsi/\([a-z_]*\)")|(load "cmd/\1")|' "$out.raw/go/arbace/hs/cmd/hsi.ae" > "$out/test/haskell/hsi/cmd.ae"
+  cp "$out.raw/go/arbace/hs/cmd/hsi/"*.ae "$out/test/haskell/hsi/cmd/"
+  rm -rf "$out.raw"
+}
+
+# runtime print|read|check: print, the Go text into .tmp/hsi/runtime to edit; read, that text read back into the
+# tree's forms; check, the committed forms printed and read again equal to themselves (the forms are a read's output)
+runtime_cmd() {
+  local rt=$WORK/runtime t=$WORK/runtime-check
+  case ${1:-} in
+    print) runtime_print "$rt"; echo "hsi runtime: the Go in $rt (hs, hs/cmd/hsi, libm): edit it there, then bin/hsi runtime read" ;;
+    read)
+      [ -d "$rt/hs" ] || die "no $rt/hs: bin/hsi runtime print first"
+      "${ARBACE_GOROOT:-/root/tamago-go}/bin/gofmt" -l "$rt/hs" "$rt/libm" > "$WORK/runtime.gofmt"
+      [ ! -s "$WORK/runtime.gofmt" ] || { cat "$WORK/runtime.gofmt" >&2; die "runtime: gofmt these first"; }
+      runtime_read "$rt" "$WORK/runtime-forms"
+      rm -rf "$root/go/arbace/hs" "$root/go/arbace/hs.ae" "$root/go/arbace/libm" "$root/go/arbace/libm.ae" \
+        "$root/test/haskell/hsi/cmd" "$root/test/haskell/hsi/cmd.ae"
+      cp -r "$WORK/runtime-forms/go/arbace/." "$root/go/arbace/"
+      cp -r "$WORK/runtime-forms/test/haskell/hsi/." "$root/test/haskell/hsi/"
+      echo "hsi runtime: go/arbace/hs, go/arbace/libm and test/haskell/hsi/cmd read from $rt" ;;
+    check)
+      runtime_print "$t/src"
+      runtime_read "$t/src" "$t/forms"
+      local bad=0 f
+      for f in go/arbace/hs.ae go/arbace/hs go/arbace/libm.ae go/arbace/libm test/haskell/hsi/cmd.ae test/haskell/hsi/cmd; do
+        diff -r "$root/$f" "$t/forms/$f" > "$t/$(basename "$f").diff" 2>&1 || { echo "hsi runtime: $f differs ($t/$(basename "$f").diff)"; bad=1; }
+      done
+      [ $bad = 0 ] || die "runtime check: the committed forms are not a read of their own print"
+      echo "hsi runtime: go/arbace/hs, go/arbace/libm and the driver printed and read again: the same forms" ;;
+    *) die "usage: bin/hsi runtime print|read|check" ;;
+  esac
+}
+
+# run_hsi FILE.hs [ARG...]: FILE compiled to STG at -O0 by the helper and run on hsi over the libraries' dumps
+run_hsi() {
+  [ $# -ge 1 ] || die "usage: bin/hsi run FILE.hs [ARG...]"
+  local f=$1; shift
+  ghc_check
+  local exe; exe=$(build_hsi)
+  "$root/bin/repr-haskell" helper >&2
+  local hh; hh=$(cat "$root"/tools/hsdump/*.hs "$root/tools/hsdump/GHC_VERSION" | sha256sum | cut -c1-64)
+  local d; d=$(mktemp -d "$WORK/run.XXXXXX")
+  (cd "$(dirname "$f")" && "$root/.tmp/hsdump/hsdump" stg -o "$d/stg" --libdir "$libdir" --helper-hash "sha256:$hh" --ghc -O0 \
+     -outputdir "$d/obj" --files "$(basename "$f")") > "$d/dump.log" 2>&1 || { cat "$d/dump.log" >&2; rm -rf "$d"; exit 1; }
+  local la=() l
+  IFS=: read -r -a dirs <<< "${HSI_LIBS:-$WORK/dumps/stg:$WORK/dumps-extra/stg:$WORK/dumps-more/stg}"
+  for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
+  local img=${HSI_IMAGE:-$WORK/image}
+  if [ "$img" != none ]; then "$exe" image --out "$img" "${la[@]}" 2> "$d/image.log" || { cat "$d/image.log" >&2; exit 1; }; la+=(--image "$img"); fi
+  local st=0 mem=${ARBACE_MEM_GIB:-16}
+  # the memory cap (bin/lib/limit.bash's ARBACE_MEM_GIB, default 16 GiB, 0 none): ulimit -v and GOMEMLIMIT at 3/4
+  if [ "$mem" = 0 ]; then "$exe" run "${la[@]}" --prog "$d/stg" --name "$(basename "$f" .hs)" -- "$@" || st=$?
+  else (ulimit -v $((mem * 1048576)); export GOMEMLIMIT=$((mem * 768))MiB
+        exec "$exe" run "${la[@]}" --prog "$d/stg" --name "$(basename "$f" .hs)" -- "$@") || st=$?
+  fi
+  rm -rf "$d"
+  exit $st
+}
+
+# primops_hsi: the non-SIMD primops of GHC 9.14.1 (GHC.Prim's names, :browse by the host's GHC) against hsi's
+primops_hsi() {
+  ghc_check
+  local exe; exe=$(build_hsi)
+  local d=$WORK/primops; mkdir -p "$d"
+  # :browse's names are qualified (GHC.Internal.Prim.x, an operator in parentheses); the SIMD ones (a vector's width in
+  # the name) and seq (not one of primops.txt.pp's) left out: the survey's E4, 742 names
+  echo ':browse GHC.Prim' | ghc --interactive -v0 -ignore-dot-ghci 2>&1 | sed -n 's/^\([^ :][^ ]*\) ::.*/\1/p' \
+    | sed 's/^(\(.*\))$/\1/; s/^GHC\.Internal\.Prim\.//' | grep -v -x seq \
+    | grep -v -E 'X(2|4|8|16|32|64)#?$|X(2|4|8|16|32|64)(Array|OffAddr|AsWord8|AsInt8)' | LC_ALL=C sort -u > "$d/ghc.txt" || true
+  "$exe" primops | LC_ALL=C sort -u > "$d/hsi.txt"
+  local all done; all=$(wc -l < "$d/ghc.txt"); done=$(comm -12 "$d/ghc.txt" "$d/hsi.txt" | wc -l)
+  comm -23 "$d/ghc.txt" "$d/hsi.txt" > "$d/missing.txt"
+  echo "hsi primops: $done of GHC.Prim's $all non-SIMD names implemented; the others in $d/missing.txt"
+}
+
+# libm_check [N [SEED]]: hsi's libm against the host's musl, bit for bit, and its negative control
+libm_check() {
+  local exe d=$WORK/libm n=${1:-20000} seed=${2:-1}
+  exe=$(build_hsi)
+  mkdir -p "$d"
+  cc -O0 -fno-builtin -o "$d/libm-ref" "$root/test/haskell/hsi/libm-ref.c" -lm || die "libm-check: cc"
+  "$d/libm-ref" "$n" "$seed" > "$d/ref.txt"
+  local st=0
+  "$exe" libm < "$d/ref.txt" > "$d/result.txt" || st=$?
+  grep '^mismatch' "$d/result.txt" | head -20 >&2 || true
+  local lines bad; lines=$(wc -l < "$d/ref.txt"); bad=$(awk '!/^mismatch/ {n += $3} END {print n + 0}' "$d/result.txt")
+  echo "hsi libm-check: $lines calls of $(grep -vc '^mismatch' "$d/result.txt") functions, $bad mismatches ($d/result.txt)"
+  local cst=0
+  "$exe" libm --control < "$d/ref.txt" > "$d/control.txt" || cst=$?
+  local cbad; cbad=$(awk '!/^mismatch/ {n += $3} END {print n + 0}' "$d/control.txt")
+  rm -f "$d/ref.txt"
+  if [ "$cst" = 0 ]; then echo "hsi libm-check: the control (Go's math) passes: the judge does not discriminate" >&2; exit 1; fi
+  echo "hsi libm-check: the control (Go's math) mismatches $cbad, as it must"
+  [ "$st" = 0 ] || die "libm-check: hsi's libm differs from the host's"
+  libm_fma_check "$exe"
+}
+
+# libm_fma_check EXE: no multiply and add of the libm port fused (review 189, F1): tools/fmacheck over the printed
+# go/arbace/libm (every floating-point product a conversion of itself, which Go never fuses: the rule holds on a host
+# whose compiler would fuse, arm64 or GOAMD64=v3, without one), then EXE's libm functions disassembled, no FMA
+# instruction among them
+libm_fma_check() {
+  local exe=$1 d=$WORK/libm go=${ARBACE_GOROOT:-/root/tamago-go}
+  runtime_print "$d/src"
+  (cd "$root/tools/fmacheck" && GOROOT=$go GOCACHE=$WORK/bin/gocache CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off      "$go/bin/go" build -o "$d/fmacheck" .) || die "libm-check: building tools/fmacheck"
+  GOROOT=$go "$d/fmacheck" "$d/src/libm" || die "libm-check: a product of go/arbace/libm Go may fuse (tools/fmacheck -w)"
+  local n; n=$("$go/bin/go" tool objdump -s '^arbace/libm\.' "$exe" | grep -ciE '\b(V?FN?M(ADD|SUB)[0-9A-Z]*)\b' || true)
+  [ "$n" = 0 ] || die "libm-check: $n fused multiply-add instructions in $exe's libm functions"
+  echo "hsi libm-check: no product of go/arbace/libm fused (tools/fmacheck; 0 FMA instructions in its functions)"
+}
+
+# repl_build: HE7's session server (tools/hsrepl/Repl.hs over tools/hsdump/Stg.hs's serializer) built by the host's ghc into
+# .tmp/hsi/hsrepl/hsrepl, kept by its sources' digest; its path printed
+repl_build() {
+  ghc_check
+  local d=$WORK/hsrepl key exe=$WORK/hsrepl/hsrepl
+  key=$(cat "$root/tools/hsrepl/Repl.hs" "$root/tools/hsdump/Stg.hs" "$root/tools/hsdump/GHC_VERSION" | sha256sum | cut -c1-64)
+  if [ -x "$exe" ] && [ -f "$d/key" ] && [ "$(cat "$d/key")" = "$key" ]; then echo "$exe"; return; fi
+  mkdir -p "$d"
+  ghc -O0 -package ghc -package ghci -i"$root/tools/hsdump" -outputdir "$d/obj" -o "$exe.new" "$root/tools/hsrepl/Repl.hs" > "$d/build.log" 2>&1 \
+    || { cat "$d/build.log" >&2; die "repl-build: ghc"; }
+  mv -f "$exe.new" "$exe"
+  echo "$key" > "$d/key"
+  echo "$exe"
+}
+
+# repl_hsi [DIR]: the REPL (HE7): ghci's session on stdin and stdout, run by hsi's repl over the session server; the statements'
+# STG modules written into DIR (default a fresh directory of .tmp/hsi/repl/, removed after)
+repl_hsi() {
+  ghc_check
+  local exe helper d
+  exe=$(build_hsi); helper=$(repl_build)
+  d=${1:-$(mktemp -d "$WORK/repl.XXXXXX")}; mkdir -p "$d"
+  local la=() l
+  IFS=: read -r -a dirs <<< "${HSI_LIBS:-$WORK/dumps/stg:$WORK/dumps-extra/stg:$WORK/dumps-more/stg}"
+  for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
+  local img=${HSI_IMAGE:-$WORK/image}
+  if [ "$img" != none ]; then "$exe" image --out "$img" "${la[@]}" 2> "$d/image.log" || { cat "$d/image.log" >&2; exit 1; }; la+=(--image "$img"); fi
+  local st=0
+  "$exe" repl "${la[@]}" --prog "$d" --helper "$helper" --libdir "$libdir" || st=$?
+  [ -n "${1:-}" ] || rm -rf "$d"
+  return $st
+}
+
+# repl_session [--record] [--control] [FILE.in...]: HE7's scripted sessions (test/haskell/repl/NAME.in, the input lines): each run through
+# bin/hsi repl, its stdout compared byte for byte with the recorded GHCi transcript NAME.out (`ghc --interactive
+# -ignore-dot-ghci` on the same input; --record writes NAME.out and NAME.err from the host's GHC), its stderr's messages
+# listed beside (NAME.err: GHCi's, compared line for line and reported, not judged); the negative control: each session's output against the next
+# session's transcript must differ
+repl_session() {
+  local record=0 files=() a
+  for a in "$@"; do case $a in --record) record=1 ;; *) files+=("$a") ;; esac; done
+  [ ${#files[@]} -gt 0 ] || files=("$root"/test/haskell/repl/*.in)
+  local out=$WORK/repl-session; mkdir -p "$out"
+  local f n bad=0 ok=0 serr=0
+  if [ $record = 1 ]; then
+    ghc_check
+    for f in "${files[@]}"; do
+      n=$(basename "$f" .in)
+      ghc --interactive -ignore-dot-ghci < "$f" > "${f%.in}.out" 2> "${f%.in}.err" || true
+      echo "repl-session: recorded $n ($(wc -l < "${f%.in}.out") lines)"
+    done
+    return 0
+  fi
+  for f in "${files[@]}"; do
+    n=$(basename "$f" .in)
+    repl_hsi < "$f" > "$out/$n.out" 2> "$out/$n.err" || true
+    if cmp -s "$out/$n.out" "${f%.in}.out"; then ok=$((ok+1)); echo "repl-session: $n: stdout equal to GHCi's ($(wc -c < "$out/$n.out") bytes)"
+    else bad=$((bad+1)); echo "repl-session: $n: stdout DIFFERS"; diff "${f%.in}.out" "$out/$n.out" | head -10; fi
+    if diff <(sed 's/^[0-9]*://' "${f%.in}.err") <(sed 's/^[0-9]*://' "$out/$n.err") > /dev/null 2>&1; then :; else serr=$((serr+1)); fi
+  done
+  # the control: a run judged against another session's transcript must fail
+  local i k ctl=0 cbad=0
+  if [ ${#files[@]} -gt 1 ]; then
+    for i in "${!files[@]}"; do
+      k=$(( (i + 1) % ${#files[@]} ))
+      n=$(basename "${files[$i]}" .in)
+      ctl=$((ctl+1))
+      if cmp -s "$out/$n.out" "${files[$k]%.in}.out"; then cbad=$((cbad+1)); echo "repl-session: the control passes: $n against $(basename "${files[$k]}" .in)'s transcript"; fi
+    done
+    [ $cbad = 0 ] || die "repl-session: the negative control passes: the judge does not discriminate"
+    echo "repl-session: the control: $ctl runs judged against another session's transcript, all fail, as they must"
+  fi
+  echo "repl-session: $ok of ${#files[@]} sessions byte for byte; stderr differing from GHCi's in $serr (not judged)"
+  [ $bad = 0 ] || exit 1
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  pins) pins "$@" ;;
+  spec-check) spec_check ;;
+  dumps) dumps "$@" ;;
+  exe) arbace_exe ;;
+  tests) exec "$root/bin/lib/hsi/tests" "$@" ;;
+  record-ref) exec "$root/bin/lib/hsi/record-ref" "$@" ;;
+  build) build_hsi ;;
+  stubs-build) stubs_build ;;
+  runtime) runtime_cmd "$@" ;;
+  run) run_hsi "$@" ;;
+  repl) repl_hsi "$@" ;;
+  repl-session) repl_session "$@" ;;
+  repl-build) repl_build ;;
+  cnodes)
+    # bin/hsi cnodes OUT [OPTION...] FILE...: a program's own C (HES64 (a)) built by ci into the node program OUT, the
+    # files relative to the working directory (test/haskell/eval/cnodes.ae); musl's forms cache prepared first
+    [ $# -ge 2 ] || die "usage: bin/hsi cnodes OUT [OPTION...] FILE..."
+    "$root/bin/ci" musl ensure > "$WORK/cnodes-musl.log" 2>&1 || { cat "$WORK/cnodes-musl.log" >&2; die "cnodes: bin/ci musl ensure"; }
+    out=$1; shift; case $out in /*) ;; *) out=$here/$out ;; esac
+    cd "$here" && ARBACE_PATH=$root "$(arbace_exe)" "$root/test/haskell/eval/cnodes.ae" "$root" "$out" "$@" ;;
+  check) exec "$root/bin/lib/hsi/check" "$@" ;;
+  aot) exec "$root/bin/lib/hsi/aot" "$@" ;;
+  primops) primops_hsi "$@" ;;
+  libm-check) libm_check "$@" ;;
+  generate) exec "$root/bin/lib/hsi/generate" "$@" ;;
+  divergences|slice) exec "$root/bin/lib/hsi/divergences" "$cmd" "$@" ;;
+  *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

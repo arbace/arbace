@@ -31,6 +31,14 @@
 --       resolved names, operator trees, binding groups, imports and exports (OUTDIR/FILE.rn.edn), and the libraries'
 --       interfaces (OUTDIR/MODULE.iface.edn); tc (HF3): each module's typed things in the iface verb's forms and its
 --       desugared Core with the types erased (OUTDIR/FILE.tc.edn)
+--   hsdump stg [--core] [--one-shot] -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] FILE...
+--       the files compiled as ghc --make compiles them (the GHC flags as given: -O, -this-unit-id,
+--       -i, -outputdir...; no link), each module's final STG written as OUTDIR/MODULE.stg.ae by a
+--       hook between STG and Cmm, and with --core its simplified Core as OUTDIR/MODULE.core.ae
+--       (doc/haskell/STG-SPEC.md); the exit status is 1 when a module fails to compile; --one-shot: the
+--       modules compiled each by a process of its own (--single) in dependency order, -jN at once, as hadrian
+--       runs ghc -c per module
+--   hsdump core -o OUTDIR ...   the Core alone
 -- FILE is relative to the current directory (the package's directory: it is the file name of
 -- every span). R6: an .hsc FILE is run through the host's hsc2hs first (--hsc2hs-arg A, repeated:
 -- its arguments; the output X.hs written beside X.hsc, as Cabal's build writes it, recorded in
@@ -98,6 +106,8 @@ import System.Directory (renameFile, removeFile)
 import System.FilePath (takeDirectory, takeFileName, (</>), makeRelative, normalise)
 import System.IO
 
+import Stg (stgMain, Mode(..))
+
 -- The helper's version: bumped when its output changes (recorded in every dump's config).
 helperVersion :: Int
 helperVersion = 4
@@ -114,13 +124,16 @@ pinnedGhc = "unset"
 data Opts = Opts
   { oVerb :: String, oFull :: Bool, oOut :: Maybe FilePath, oLibdir :: Maybe FilePath
   , oCorpus :: Maybe String, oSrcHash :: Maybe String, oFiles :: [FilePath], oGhc :: [String]
-  , oHscArgs :: [String], oRepo :: Maybe FilePath }
+  , oHscArgs :: [String], oRepo :: Maybe FilePath, oCore :: Bool, oOneShot :: Bool, oSingle :: Bool }
 
 parseOpts :: [String] -> Either String Opts
-parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing [] [] [] Nothing) rest
+parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing [] [] [] Nothing False False False) rest
   where
     go o ("--ghc" : fs) = let (gs, r) = break (== "--files") fs in go o { oGhc = oGhc o ++ gs } (drop 1 r)
     go o ("--full" : xs) = go o { oFull = True } xs
+    go o ("--core" : xs) = go o { oCore = True } xs
+    go o ("--one-shot" : xs) = go o { oOneShot = True } xs
+    go o ("--single" : xs) = go o { oSingle = True } xs
     go o ("-o" : d : xs) = go o { oOut = Just d } xs
     go o ("--libdir" : d : xs) = go o { oLibdir = Just d } xs
     go o ("--corpus" : c : xs) = go o { oCorpus = Just c } xs
@@ -155,6 +168,26 @@ main = do
       "tc" -> tcVerb libdir (oGhc o) out (oFiles o)
       _ -> ifaceVerb libdir (oGhc o) out True (oFiles o)
     exitWith (if ok then ExitSuccess else ExitFailure 1)
+  -- the STG and Core modes (doc/haskell/STG-SPEC.md): the files compiled as ghc --make does
+  when (oVerb o `elem` ["stg", "core"]) $ do
+    out <- maybe (fail "hsdump: -o OUTDIR") return (oOut o)
+    let header = [("ghc", show cProjectVersion), ("helper", show helperVersion)]
+                 ++ [("helper-hash", show h) | Just h <- [oSrcHash o]]
+                 ++ [("flags", "[" ++ unwords (map show (recorded (oGhc o))) ++ "]")]
+        -- the flags that decide the STG; not where the objects go, nor the parallelism
+        recorded ("-outputdir" : _ : fs) = recorded fs
+        recorded (f : fs) | "-j" `isPrefixOf` f = recorded fs
+                          | otherwise = f : recorded fs
+        recorded [] = []
+    let core = oVerb o == "core" || oCore o
+        childArgs f = [oVerb o, "--single"] ++ ["--core" | oCore o] ++ ["-o", out, "--libdir", libdir]
+                      ++ concat [["--helper-hash", h] | Just h <- [oSrcHash o]]
+                      ++ ["--ghc"] ++ filter (not . ("-j" `isPrefixOf`)) (oGhc o) ++ ["--files", f]
+        mode | oSingle o = Single
+             | oOneShot o = OneShotAll childArgs
+             | otherwise = Make
+    stgMain (oVerb o == "stg") core mode libdir out (oGhc o) (oFiles o) header
+    exitWith ExitSuccess
   failures <- newIORef (0 :: Int)
   runGhc (Just libdir) $ do
     dflags0 <- getSessionDynFlags
