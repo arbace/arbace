@@ -163,7 +163,7 @@
       volatile (assoc (resolve-type-form scope (second f)) :v true)
       restrict (resolve-type-form scope (second f))
       cpp/attributed (resolve-type-form scope (last f))
-      array (abi/arr (when (number? (second f)) (second f)) (resolve-type-form scope (nth f 2)))
+      array (if (= 2 (count f)) (abi/arr nil (resolve-type-form scope (second f))) (abi/arr (when (number? (second f)) (second f)) (resolve-type-form scope (nth f 2))))
       fn (let [[_ ps r] f
                va (some #{'&} ps)
                ps (remove #{'&} ps)
@@ -283,6 +283,7 @@
            :inline (boolean (or (:inline n) (:constexpr n) (and cid (= scope home))))
            :path (:path home)
            :scope home
+           :explicit (boolean (re-find #"^\s*(?:inline\s+|constexpr\s+)*explicit\b" (or (node-text n) "")))
            :defaulted (when (:explicitlyDefaulted n) true) :deleted (boolean (:explicitlyDeleted n))
            :pos (long (or (:_b n) 0))}
         old (find-redecl home f)
@@ -562,13 +563,29 @@
 
 (defn- cast-node [e ck t] {:op :cast :ck ck :e e :ty t :cat :pr})
 
+(defn- fn-matching
+  "The function of the overload set `e` whose type is the function type `ft` (the address of an overloaded function,
+  [over.over]), or its only one when `ft` is nil."
+  [e ft]
+  (let [fs (:fns e)]
+    (if ft
+      (first (filter #(let [g (fnd %)] (and (not (and (:cls g) (not (:static g))))
+                                             (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps ft))) (= (abi/unq (:ret (:ty g))) (abi/unq (:ret ft)))))
+                     fs))
+      (when (= 1 (count fs)) (first fs)))))
+
 (defn rv
   "The prvalue of a glvalue of non-class type (lvalue-to-rvalue), an array's decay, a function's."
   [e]
   (let [t (:ty e)]
     (cond
+      (= :fnset (:op e)) (if-let [f (fn-matching e nil)] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr} e)
       (abi/arr? t) {:op :decay :e e :ty (abi/ptr (:of t)) :cat :pr}
       (abi/fn? t) {:op :fnaddr :e e :fn (:fn e) :ty (abi/ptr t) :cat :pr}
+      (and (= :var (:op e)) (:c t) (abi/integral? t) (:init (var* (:id e))) (not= :local (:storage (var* (:id e)))))
+      (let [v (var* (:id e))
+            c (try (const-int (or (:def-scope v) *root*) (:init v)) (catch arbace.lang.ExceptionInfo _ nil))]
+        (if c {:op :int :v c :ty (abi/unq t) :cat :pr} {:op :load :e e :ty (abi/unq t) :cat :pr}))
       (and (lv? e) (not (abi/class? t))) {:op :load :e e :ty (abi/unq t) :cat :pr}
       :else e)))
 
@@ -609,7 +626,10 @@
 (defn convert-scalar
   "The standard conversion of the prvalue `e` to the scalar type `t` (implicit or, with `explicit?`, a cast's)."
   [e t explicit?]
-  (let [from (abi/unq (:ty e)) to (abi/unq t)]
+  (let [e (if (and (= :fnset (:op e)) (abi/ptr? (abi/unq t)) (abi/fn? (:to (abi/unq t))))
+            (if-let [f (fn-matching e (:to (abi/unq t)))] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr} (fail :conversion "no function of the set matches"))
+            e)
+        from (abi/unq (:ty e)) to (abi/unq t)]
     (cond
       (= from to) e
       (abi/void? to) (cast-node e :void to)
@@ -655,6 +675,8 @@
           :else nil))
       :else nil)))
 
+(def ^:dynamic *no-user* false) ; inside a user-defined conversion: standard conversions only ([over.best.ics]/4)
+
 (defn ics
   "The implicit conversion sequence of the argument `e` (a typed expression or {:op :init-list}) to the parameter type `p`."
   [e p]
@@ -681,13 +703,16 @@
       (cond
         (and (class-id at) (= (class-id at) (:id pt))) {:rank 0}
         (and (class-id at) (abi/derived-from? (class-id at) (:id pt))) {:rank 2}
+        *no-user* nil
         :else (when (some (fn [cid] (let [f (fnd cid)]
                                       (and (not (:explicit f)) (>= (count (:ps (:ty f))) 1)
+                                           (not (let [p0 (first (:ps (:ty f)))] (and (abi/ref? p0) (= (class-id (:to p0)) (:id pt)))))
                                            (<= (- (count (:ps (:ty f))) (count (filter some? (:defaults f)))) 1)
-                                           (let [r (ics e (first (:ps (:ty f))))] (and r (< (long (:rank r)) 3))))))
+                                           (let [r (binding [*no-user* true] (ics e (first (:ps (:ty f)))))] (and r (< (long (:rank r)) 3))))))
                           (ctor-candidates (:id pt)))
                 {:rank 3}))
       (abi/class? at) nil
+      (= :fnset (:op e)) (when (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching e (:to (abi/unq pt)))) {:rank 0})
       :else (let [r (std-rank e (:ty (rv e)) pt)] (when r {:rank r})))))
 
 (defn- better-ics? [a b]
@@ -1009,14 +1034,20 @@
         o (analyze ctx objn)
         obj (if (:isArrow n) (deref-node o) o)
         cid (class-id (:ty obj))
-        nm (:name n)]
+        nm (:name n)
+        ;; a qualified member (o.B::f): looked up in B, called without virtual dispatch
+        q (let [t (or (node-text n) "")
+                m (re-find #"(?:\.|->)\s*((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)+)~?[A-Za-z_][A-Za-z_0-9]*\s*$" t)]
+            (when m (vec (map str/trim (remove str/blank? (str/split (second m) #"::"))))))
+        qcid (when (seq q) (let [e (first (filter #(= :type (:e %)) (lookup-qualified (:scope ctx) q)))] (class-id (:ty e))))]
     (when-not cid (fail :member "member of a non-class"))
-    (let [[fcid fids e] (method-set-of cid nm)]
+    (let [[fcid fids e] (method-set-of (or qcid cid) nm)
+          fids (if qcid fids fids)]
       (cond
         (nil? e) (fail :member "no member " nm)
         (= :field (:e e)) (field-node (if (= :pr (:cat obj)) (materialize obj) obj) (:cls e) (:i e))
         (= :var (:e e)) {:op :comma :l obj :r (var-node (:id e)) :ty (:ty (var* (:id e))) :cat :lv}
-        (= :fn (:e e)) {:op :fnset :fns fids :obj (if (= :pr (:cat obj)) (materialize obj) obj) :ty {:k :overload} :cat :lv}
+        (= :fn (:e e)) {:op :fnset :fns fids :obj (if (= :pr (:cat obj)) (materialize obj) obj) :ty {:k :overload} :cat :lv :qualified (boolean qcid)}
         (= :enumerator (:e e)) {:op :int :v (:val e) :ty (:ty e) :cat :pr}
         :else (fail :member "member " nm)))))
 
@@ -1092,14 +1123,18 @@
         [nexpr ks] (if (:isArray n) [(first ks) (rest ks)] [nil ks])
         initn (first ks)
         init (cond
-               (nil? initn) (init-for et nil ctx :default)
+               (or (nil? initn) nexpr) (init-for et nil ctx :default)
                (= "ParenListExpr" (:kind initn)) (init-for et (mapv #(analyze ctx %) (kids initn)) ctx (if (empty? (kids initn)) :value :direct))
                (= "InitListExpr" (:kind initn)) (init-for et (analyze ctx initn) ctx :list)
                :else (init-for et [(analyze ctx initn)] ctx :direct))
         init (if (and (= :ctor (:i init)) (empty? (:args init)) (nil? initn)) init init)]
     (when (and nexpr initn (not= "InitListExpr" (:kind initn))) nil)
     {:op :new :ty t :et et :n (when nexpr (convert-scalar (rv (analyze ctx nexpr)) abi/ulong* false))
-     :init (if nexpr (if initn (init-for (abi/arr nil et) (analyze ctx initn) ctx :list) (init-for et nil ctx :default)) init)
+     :init (if nexpr
+             (cond (nil? initn) (init-for et nil ctx :default)
+                   (#{"ImplicitValueInitExpr" "ParenListExpr"} (:kind initn)) {:i :list :items [] :fill (init-for et nil ctx :value)}
+                   :else (init-for (abi/arr nil et) (analyze ctx initn) ctx :list))
+             init)
      :cat :pr}))
 
 (defn- dtor-of [cid] (:dtor (abi/cls cid)))
@@ -1284,13 +1319,15 @@
                    [cvar ks] (if (:hasVar n) [(first ks) (subvec ks 1)] [nil ks])
                    init-s (when init (stmt c init))
                    cvar-s (when cvar (stmt c cvar))
-                   cn (first ks)]
+                   cn (first ks)
+                   cn (if (and cvar (nil? (get-in cn [:referencedDecl :name])))
+                        (assoc cn :referencedDecl {:name (:name (first (kids cvar)))}) cn)]
                {:s :block :items (vec (concat (when init-s [init-s]) (when cvar-s [cvar-s])
                                               [{:s :if :cond (cond-of c cn) :then (stmt (block-ctx c) (nth ks 1))
                                                 :else (when (:hasElse n) (stmt (block-ctx c) (nth ks 2)))}]))})
     "WhileStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
                       [cvar ks] (if (:hasVar n) [(first ks) (subvec ks 1)] [nil ks])]
-                  (when cvar (fail :stmt "a while condition's declaration"))
+                  (when cvar (fail :stmt "a while condition's declaration (destroyed each iteration)"))
                   {:s :while :cond (cond-of c (first ks)) :body (stmt (block-ctx c) (second ks))})
     "DoStmt" (let [[b cn] (kids n)] {:s :do :body (stmt (block-ctx ctx) b) :cond (cond-of ctx cn)})
     "ForStmt" (let [c (block-ctx ctx)

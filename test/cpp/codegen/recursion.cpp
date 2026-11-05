@@ -1,7 +1,7 @@
 // recursion: factorial, fibonacci with memo, mutual recursion, the towers of Hanoi, a recursive struct walk
 #include <cstdio>
 long fact(int n) { return n <= 1 ? 1 : n * fact(n - 1); }
-long memo[64];
+long memo[100];
 long fib(int n) { if (n < 2) return n; if (memo[n]) return memo[n]; return memo[n] = fib(n - 1) + fib(n - 2); }
 bool is_odd(int n);
 bool is_even(int n) { return n == 0 ? true : is_odd(n - 1); }

@@ -231,7 +231,7 @@
     (cond
       ;; the trivial special members: a copy of bytes, nothing
       (and (:trivial f) (= "=" (:op f)))
-      (let [src (case (:i (first inits)) :bind (emit-lv (:e (first inits))) (fail :call "trivial assignment"))]
+      (let [src (second (first (arg-values (:ps (:ty f)) inits)))]
         (memcpy! obj src (abi/size-of {:k :class :id (:cls f)}))
         obj)
       (and (:trivial f) (= :dtor (:kind f))) nil
@@ -268,7 +268,12 @@
   (or (get-in @*f* [:addr id])
       (let [v (sema/var* id)]
         (case (:storage v)
-          (:global :member-static) (gsym (abi/mangle-var v))
+          (:global :member-static) (let [nm (abi/mangle-var v)]
+                                     ;; an internal variable with a constant initializer: written when first used, as clang does
+                                     (when-let [f (get-in @*top* [:lazy nm])]
+                                       (swap! *top* update :lazy dissoc nm)
+                                       (add-top! f))
+                                     (gsym nm))
           :static-local (gsym (abi/mangle-local-static (sema/fnd (:fn-of v)) (:name v) (long (:disc v))))
           (fail :codegen "no address for " (:name v))))))
 
@@ -370,7 +375,7 @@
     (condbr! c lt lf)
     (begin! lt)
     (let [a (binding [*cond* (inc (long *cond*))] (f (:then e))) fa (:label @*f*)]
-      (begin! lf)
+      (br! le) (close-block!) (start! lf)
       (let [b (binding [*cond* (inc (long *cond*))] (f (:else e))) fb (:label @*f*)]
         (begin! le)
         (when t (val! (list 'phi t [a fa] [b fb])))))))
@@ -792,7 +797,7 @@
         nm (fn-name fid)
         [ret ps va] (fn-sig f)
         pnames (vec (map-indexed (fn [i _] (symbol (str "%a" i))) ps))
-        state (atom {:blocks [] :label nil :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores []
+        state (atom {:blocks [] :label '%entry :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores []
                      :fn f :nrvo (:nrvo f) :ret-label '%return})]
     (binding [*f* state]
       (let [k (atom 0)
@@ -1007,14 +1012,16 @@
                 link (if (:internal v) [:linkage :internal] [])]
             (cond
               (and leaves (abi/scalar? (abi/unq t)) (<= (count leaves) 1))
-              (add-top! (apply list 'llvm/global (gsym nm) (abi/llvm-type t) (if (seq leaves) (nth (first leaves) 2) (zero-of t)) (concat link [:align a])))
+              ((if (:internal v) #(swap! *top* assoc-in [:lazy nm] %) add-top!)
+               (apply list 'llvm/global (gsym nm) (abi/llvm-type t) (if (seq leaves) (nth (first leaves) 2) (zero-of t)) (concat link [:align a])))
               leaves
-              (let [[ct cv] (leaves-constant leaves s)] (add-top! (apply list 'llvm/global (gsym nm) ct cv (concat link [:align a]))))
+              (let [[ct cv] (leaves-constant leaves s)]
+                ((if (:internal v) #(swap! *top* assoc-in [:lazy nm] %) add-top!) (apply list 'llvm/global (gsym nm) ct cv (concat link [:align a]))))
               :else
               (do (add-top! (apply list 'llvm/global (gsym nm) (if (abi/ref? t) 'ptr (list 'array s 'i8)) (if (abi/ref? t) 'null 'zeroinitializer) (concat link [:align a])))
                   (swap! dyn conj id)))))))
     (when (seq @dyn)
-      (let [state (atom {:blocks [] :label nil :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores []
+      (let [state (atom {:blocks [] :label '%entry :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores []
                          :fn {:name "init" :ty {:k :fn :ret abi/void :ps []}} :ret-label '%return})
             nm (str "_GLOBAL__sub_I_" file)]
         (binding [*f* state]
