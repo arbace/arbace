@@ -85,7 +85,7 @@
 #                                  of the runtime (go/arbace/py), each module on its loop with its GOCOVERDIR (run: the main
 #                                  host's night); blocks: tools/covsubset's block sets per module; subset: the modules of every
 #                                  covered block, one per class, the controls (bin/cover subset); --write: corpora.edn's :subset
-#   bin/pyi runtime print|read|vet|check
+#   bin/pyi runtime print|read|vet|check|tables
 #                                  PY5b0, the runtime's sources (doc/python/PYI-SPEC.md §8): go/arbace/py's Go forms (mode :full,
 #                                  lossless) printed as a Go module into .tmp/repr-python/pyi/runtime (print), edited there,
 #                                  read back into go/arbace/py (read; go/arbace/libm, go/arbace/expat and go/arbace/pyexpat,
@@ -98,7 +98,9 @@
 #                                  arbace.python.ir/ops's (runtime-ops), the programs of test/python/pyi/ run by bin/pyi run
 #                                  equal to the oracle's runs (stdout, status, stderr's last line), and repl --check;
 #                                  also the Unicode tables and the CJK codecs' (tools/pyi/unicodedata_table.py and
-#                                  cjkcodecs_table.py --check on the printed files)
+#                                  cjkcodecs_table.py --check on the printed files) where the oracle runs live; queue 213: the
+#                                  oracle's runs and sessions from test/python/records/outcomes/{smoke,repl}/ in records mode,
+#                                  PYI_SMOKE_ONLY=REGEX a sample of them; tables: the two generators alone (the oracle tier's)
 #   bin/pyi aot FILE.py [ARGS...]  PY8: FILE compiled by pyi's AOT (arbace.python.aot: the IR to Go forms over go/arbace/py, its
 #                                  module-level imports compiled ahead; printed by repr/go, built by TamaGo's go in
 #                                  .tmp/repr-python/pyi/aot/mod) and run; source compiled at run time by the host's compiler
@@ -166,6 +168,10 @@ arbace_exe() {
 need_python() { type -P python3 >/dev/null || die "no python3 (the oracle, CPython 3.14.10): ${1:-this verb} runs it (doc/ALPINE.md)"; }
 python3() { need_python; command python3 "$@"; }
 py() { local s=$1; shift; python3 -I -S -B "$root/tools/pydump/$s" "$@"; }
+# the oracle's records (queue 213): REPR_PYTHON_ORACLE records|live|record, tools/pydump/records.bash
+. "$root/tools/pydump/records.bash"
+PYREC_VERB="bin/pyi $*"
+trap 'rc=$?; pyrec_flush || rc=1; exit $rc' EXIT
 pyall() { python3 -I -S -B "$root/tools/pyi/libtest_all.py" "$@"; }
 
 check_oracle() {
@@ -183,15 +189,19 @@ cmd_gen() {
     "$(arbace_exe)" "$root/test/python/gen.ae" "$d"
     local bad=0
     diff -r "$d" "$SYNTH" > "$WORK/gen.diff" || { echo "gen --check: the generated corpus differs from test/python/synth (bin/pyi gen):"; head -20 "$WORK/gen.diff"; bad=1; }
-    (cd "$SYNTH/constructs" && py corpus.py samples . .) || bad=1
-    (cd "$SYNTH" && py corpus.py samples . . | tail -1)
+    # CPython's verdicts (corpus.py: the programs parsed and compiled, the node classes and the builtins' methods covered),
+    # live or recorded (queue 213), keyed by corpus.py and the files each reads
+    local cp="$root/tools/pydump/corpus.py" out
+    gen_samples() { (cd "$1" && command python3 -I -S -B "$cp" samples . .); }
+    pyrec_outcome gen-constructs "$(pyrec_key "$cp" $(find "$SYNTH/constructs" -name '*.py' | LC_ALL=C sort))" gen_samples "$SYNTH/constructs" || bad=1
+    { pyrec_outcome gen-synth "$(pyrec_key "$cp" $(find "$SYNTH" -name '*.py' | LC_ALL=C sort))" gen_samples "$SYNTH" || true; } | tail -1
     local t
-    for t in str bytes list tuple dict set frozenset int float complex bool range memoryview slice; do
-      py corpus.py methods "$t" "$SYNTH/builtins/$t.py" | tail -1 | grep -q ' of ' || bad=1
-      py corpus.py methods "$t" "$SYNTH/builtins/$t.py" >/dev/null || { py corpus.py methods "$t" "$SYNTH/builtins/$t.py" | grep UNCOVERED; bad=1; }
+    for t in str bytes list tuple dict set frozenset int float complex bool range memoryview slice bytearray; do
+      local -a fs=("$SYNTH/builtins/$t.py"); [ "$t" != bytearray ] || fs+=("$SYNTH/builtins/bytearray-shared.py")
+      if out=$(pyrec_outcome "gen-methods-$t" "$(pyrec_key "$cp" "${fs[@]}")" command python3 -I -S -B "$cp" methods "$t" "${fs[@]}"); then
+        tail -1 <<< "$out" | grep -q ' of ' || bad=1
+      else grep UNCOVERED <<< "$out" || true; bad=1; fi
     done
-    py corpus.py methods bytearray "$SYNTH/builtins/bytearray.py" "$SYNTH/builtins/bytearray-shared.py" >/dev/null \
-      || { py corpus.py methods bytearray "$SYNTH/builtins/bytearray.py" "$SYNTH/builtins/bytearray-shared.py" | grep UNCOVERED; bad=1; }
     if [ $bad = 0 ]; then echo "gen --check: $(wc -l < "$SYNTH/MANIFEST") programs as committed; every node class and builtin method covered"; else return 1; fi
   else
     rm -rf "$SYNTH"; mkdir -p "$SYNTH"
@@ -256,6 +266,7 @@ HDR
 }
 
 cmd_record_ref() {
+  need_python "record-ref (CPython's runs; --check is the oracle tier's verify)"
   local check="" ids=()
   while [ $# -gt 0 ]; do case $1 in --check) check=1; shift ;; *) ids+=("$1"); shift ;; esac; done
   [ ${#ids[@]} -gt 0 ] || ids=(programs language-core)
@@ -339,7 +350,7 @@ corpus_list() {
   local -a args=(); IFS=, read -ra pa <<< "$paths"; args+=("${pa[@]}")
   if [ "$excl" != - ]; then IFS=, read -ra ea <<< "$excl"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
   mkdir -p "$d"
-  (cd "$base" && py corpus.py list "$base" "${args[@]}") > "$d/list"
+  pyrec_list "$base" "${args[@]}" > "$d/list"
   echo "$base"
 }
 
@@ -358,9 +369,9 @@ cmd_scope_check() {
     rm -rf "$d"
     base=$(corpus_list "$id" "$d")
     t0=$(date +%s)
-    py pydump.py tree --base "$base" --list "$d/list" --out "$d/dumps" --tsv "$d/dumps.tsv"
-    py pydump.py scopes --base "$base" --list "$d/list" --out "$d/scopes"
     rc=0
+    pyrec_dump tree "$id" "$base" "$d/list" "$d/dumps" "$d/dumps.tsv" && pyrec_dump scopes "$id" "$base" "$d/list" "$d/scopes" \
+      || { echo "scope-check $id: FAILED: no reference (the oracle's records, above)"; worst=1; continue; }
     pa_arbace scope-check --corpus "$id" --dumps "$d/dumps" --scopes "$d/scopes" --known "$root/test/python/scope-known.edn" \
       --results "$d/results.edn" ${record:+--record} || rc=$?
     echo "  $(( $(date +%s) - t0 )) s"
@@ -380,9 +391,10 @@ cscontrol() {
   rm -rf "$c"; mkdir -p "$c/s" "$c/run/dumps" "$c/run/scopes"
   sb=$(corpus_list samples "$c/s")
   printf 'classes.py\nfunctions.py\n' > "$c/s/list"
-  py pydump.py tree ${full:+--full} --base "$sb" --list "$c/s/list" --out "$c/s/dumps" --tsv "$c/s/dumps.tsv"
+  pyrec_dump "$([ -n "$full" ] && echo full || echo tree)" samples "$sb" "$c/s/list" "$c/s/dumps" "$c/s/dumps.tsv" \
+    || { echo "control not judged: $kind${full:+ --full}: no reference"; return 1; }
   if [ "$kind" = scope ]; then
-    py pydump.py scopes --base "$sb" --list "$c/s/list" --out "$c/s/scopes"
+    pyrec_dump scopes samples "$sb" "$c/s/list" "$c/s/scopes" || { echo "control not judged: $kind: no reference"; return 1; }
     cp "$c/s/dumps/classes.py.ae" "$c/run/dumps/classes.py.ae"
     cp "$c/s/scopes/functions.py.scopes.ae" "$c/run/scopes/classes.py.scopes.ae"
     grep '^classes\.py	' "$c/s/dumps.tsv" > "$c/run/dumps.tsv"; echo classes.py > "$c/run/list"
@@ -390,7 +402,8 @@ cscontrol() {
       --results "$c/run/results.edn" 2>&1) || rc=$?
   else
     mkdir -p "$c/e"; eb=$(corpus_list errors "$c/e"); echo annotated-global.py > "$c/e/list"
-    py pydump.py tree ${full:+--full} --base "$eb" --list "$c/e/list" --out "$c/e/dumps" --tsv "$c/e/dumps.tsv"
+    pyrec_dump "$([ -n "$full" ] && echo full || echo tree)" errors "$eb" "$c/e/list" "$c/e/dumps" "$c/e/dumps.tsv" \
+      || { echo "control not judged: $kind${full:+ --full}: no reference"; return 1; }
     cp "$c/s/dumps/classes.py.ae" "$c/run/dumps/annotated-global.py.ae"
     cp "$c/e/dumps.tsv" "$c/run/dumps.tsv"
     out=$(pa_arbace compile-check ${full:+--check compile-full} --corpus errors --dumps "$c/run/dumps" --tsv "$c/run/dumps.tsv" \
@@ -410,8 +423,9 @@ cmd_compile_check() {
     rm -rf "$d"
     base=$(corpus_list "$id" "$d")
     t0=$(date +%s)
-    py pydump.py tree ${full:+--full} --base "$base" --list "$d/list" --out "$d/dumps" --tsv "$d/dumps.tsv"
     rc=0
+    pyrec_dump "$([ -n "$full" ] && echo full || echo tree)" "$id" "$base" "$d/list" "$d/dumps" "$d/dumps.tsv" \
+      || { echo "compile-check $id: FAILED: no reference (the oracle's records, above)"; worst=1; continue; }
     pa_arbace compile-check ${full:+--check compile-full} --corpus "$id" --dumps "$d/dumps" --tsv "$d/dumps.tsv" --known "$root/test/python/compile-known.edn" \
       --results "$d/results.edn" --ops "$d/ops.edn" ${record:+--record} || rc=$?
     echo "  $(( $(date +%s) - t0 )) s"
@@ -447,8 +461,9 @@ cmd_repl() {
 repl_check() {
   local p n=0 bad=0 want got
   for p in "$root"/test/python/pyi/*.in; do
+    [[ $(basename "$p") =~ ${PYI_SMOKE_ONLY:-.} ]] || continue
     n=$((n + 1))
-    want=$(repl_run "$p" python3 -q -i)
+    want=$(pyrec_outcome "repl/$(basename "$p")" "$(smoke_key "$p")" repl_run "$p" python3 -q -i) || { echo "  FAIL $(basename "$p"): no reference (the oracle's records)"; bad=$((bad + 1)); continue; }
     got=$(repl_run "$p" "$root/bin/pyi" repl)
     if [ "$want" = "$got" ]; then echo "  pass $(basename "$p")"; else
       echo "  FAIL $(basename "$p")"; { diff <(echo "$want") <(echo "$got") | head -10 || true; }; bad=$((bad + 1)); fi
@@ -862,6 +877,7 @@ aot_cache_trim() {
 # and on the loop of the same executable (and with --pyi by pyi on goi): the whole process's seconds, the outputs
 # compared with CPython's; --record writes test/python/bench-aot-linux-ARCH.edn
 cmd_bench() {
+  need_python "bench (CPython's timings: the oracle tier's)"
   local record="" pyi="" bms=() b loops
   while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --pyi) pyi=1; shift ;; *) bms+=("$1"); shift ;; esac; done
   # the sdist's full benchmark directories (data files, variants' tomls: PY6h's REQUEST, queue 200)
@@ -1231,14 +1247,19 @@ cmd_runtime() {
       # from the pinned tarball's generated headers
       local top="$root/.tmp/repr-python/Python-3.14.10"
       [ -d "$top/Lib" ] || "$root/bin/repr-python" pins --fetch >/dev/null
-      if python3 -I -S -B "$root/tools/pyi/unicodedata_table.py" "$top" "$t/src/py/builtins_unicodedata_table.go" --check; then
+      # (queue 213: python3's generators over the tarball's headers, the committed tables their record: the oracle tier's,
+      # bin/pyi runtime tables; here only where the oracle runs live)
+      if ! pyrec_live; then
+        echo "runtime: builtins_unicodedata_table.go and builtins_cjk_table.go against their generators: the oracle tier's (bin/pyi runtime tables)"
+      elif python3 -I -S -B "$root/tools/pyi/unicodedata_table.py" "$top" "$t/src/py/builtins_unicodedata_table.go" --check; then
         echo "runtime: builtins_unicodedata_table.go is unicodedata_table.py's from the tarball's headers"
       else
         echo "runtime: builtins_unicodedata_table.go DIFFERS from unicodedata_table.py's"; rc=1
       fi
       # the CJK codecs' tables (PY6c2): builtins_cjk_table.go as tools/pyi/cjkcodecs_table.py makes it from the pinned
       # tarball's Modules/cjkcodecs/mappings_*.h
-      if python3 -I -S -B "$root/tools/pyi/cjkcodecs_table.py" "$top" "$t/src/py/builtins_cjk_table.go" --check; then
+      if ! pyrec_live; then :
+      elif python3 -I -S -B "$root/tools/pyi/cjkcodecs_table.py" "$top" "$t/src/py/builtins_cjk_table.go" --check; then
         echo "runtime: builtins_cjk_table.go is cjkcodecs_table.py's from the tarball's headers"
       else
         echo "runtime: builtins_cjk_table.go DIFFERS from cjkcodecs_table.py's"; rc=1
@@ -1246,9 +1267,11 @@ cmd_runtime() {
       pa_arbace runtime-ops || rc=1
       local n=0 bad=0
       for p in "$root"/test/python/pyi/*.py; do
+        # PYI_SMOKE_ONLY=REGEX: the programs (and sessions) whose names match, a sample (queue 213)
+        [[ $(basename "$p") =~ ${PYI_SMOKE_ONLY:-.} ]] || continue
         n=$((n + 1))
         local want got
-        want=$(cd "$(dirname "$p")" && smoke_run python3 -I "$(basename "$p")")
+        want=$(pyrec_outcome "smoke/$(basename "$p")" "$(smoke_key "$p")" smoke_cpython "$p") || { echo "  FAIL $(basename "$p"): no reference (the oracle's records)"; bad=$((bad + 1)); continue; }
         got=$(cd "$(dirname "$p")" && smoke_run "$root/bin/pyi" run "$(basename "$p")")
         if [ "$want" = "$got" ]; then echo "  pass $(basename "$p")"; else
           echo "  FAIL $(basename "$p")"; { diff <(echo "$want") <(echo "$got") | head -10 || true; }; bad=$((bad + 1)); fi
@@ -1257,10 +1280,24 @@ cmd_runtime() {
       [ $bad -eq 0 ] || rc=1
       repl_check || rc=1
       return $rc ;;
-    *) die "usage: bin/pyi runtime print|read|vet|check" ;;
+    tables)
+      # the oracle tier's (queue 213): the generated tables against python3's generators over the tarball's headers
+      need_python "runtime tables"
+      local t="$WORK/runtime-tables" top="$root/.tmp/repr-python/Python-3.14.10" rc=0
+      [ -d "$top/Lib" ] || "$root/bin/repr-python" pins --fetch >/dev/null
+      rm -rf "$t"; mkdir -p "$t"; runtime_print "$t/src"
+      python3 -I -S -B "$root/tools/pyi/unicodedata_table.py" "$top" "$t/src/py/builtins_unicodedata_table.go" --check \
+        && echo "runtime: builtins_unicodedata_table.go is unicodedata_table.py's from the tarball's headers" || { echo "runtime: builtins_unicodedata_table.go DIFFERS"; rc=1; }
+      python3 -I -S -B "$root/tools/pyi/cjkcodecs_table.py" "$top" "$t/src/py/builtins_cjk_table.go" --check \
+        && echo "runtime: builtins_cjk_table.go is cjkcodecs_table.py's from the tarball's headers" || { echo "runtime: builtins_cjk_table.go DIFFERS"; rc=1; }
+      return $rc ;;
+    *) die "usage: bin/pyi runtime print|read|vet|check|tables" ;;
   esac
 }
 
+# smoke_key FILE: a smoke program's or session's key: its bytes and test/python/pyi's subdirectories' files (the data it reads)
+smoke_key() { pyrec_key "$1" $(find "$root/test/python/pyi" -mindepth 2 -type f | LC_ALL=C sort); }
+smoke_cpython() { (cd "$(dirname "$1")" && smoke_run python3 -I "$(basename "$1")"); }
 # smoke_run CMD...: the run's stdout, its exit status and stderr's last line, for comparing pyi with the oracle
 smoke_run() {
   local o e rc=0
@@ -1360,12 +1397,49 @@ wheels_cmp() {
   return 1
 }
 
-# the oracle's side: python3 -I -S, sys.path [the program's directory, the stdlib, the site's lib]
-wheels_cpython() { # SITE FILE ARGS...
-  python3 -I -S -B -c 'import os, runpy, sys
+# the oracle's side: python3 -I -S, sys.path [the program's directory, the stdlib, the site's lib]: python3 -c "$WHEELS_RUNPY"
+# FILE SITE ARGS...
+export WHEELS_RUNPY='import os, runpy, sys
 f, site = sys.argv[1], sys.argv[2]
 sys.path.insert(0, os.path.dirname(f)); sys.path.append(site); sys.argv = [f] + sys.argv[3:]
-runpy.run_path(f, run_name="__main__")' "$2" "$1" "${@:3}"
+runpy.run_path(f, run_name="__main__")'
+
+# wheels_run_cpython NAME KEY OUT CMD...: CPython's run as OUT.out, OUT.err (its last line) and OUT.rc, live or recorded
+# (queue 213): the outcome's text is "rc N", "err LAST-LINE", then stdout; the site's directory is @WHEELS in the record
+wheels_run_cpython() {
+  local name=$1 key=$2 text rc=0; WHEELS_RUN_O=$3; shift 3
+  # (WHEELS_RUN_O, not a local: pyrec_outcome has an o of its own, and bash scopes dynamically)
+  wheels_run_enc() { local rc=0; "$@" > "$WHEELS_RUN_O.out" 2> "$WHEELS_RUN_O.err" || rc=$?
+    echo "rc $rc"; echo "err $(grep -v '^[[:space:]]*$' "$WHEELS_RUN_O.err" | tail -1)"; sed "s|$WHEELS_CACHE|@WHEELS|g" "$WHEELS_RUN_O.out"; }
+  text=$(pyrec_outcome "$name" "$key" wheels_run_enc "$@"; echo .) || true
+  [ "${text:0:3}" = "rc " ] || { echo 1 > "$WHEELS_RUN_O.rc"; echo "no reference (the oracle's records): ${text%.}" > "$WHEELS_RUN_O.err"; : > "$WHEELS_RUN_O.out"; return 0; }
+  text=${text%.}
+  sed -n '1s/^rc //p' <<< "$text" > "$WHEELS_RUN_O.rc"
+  sed -n '2s/^err //p' <<< "$text" > "$WHEELS_RUN_O.err"
+  tail -n +3 <<< "$text" | sed "s|@WHEELS|$WHEELS_CACHE|g" | head -c -1 > "$WHEELS_RUN_O.out"
+}
+
+# wheels_layout LIB BIN: a tree's layout as lines: "file PATH SHA256" (but INSTALLER, RECORD, REQUESTED, direct_url.json and
+# LIB/bin), "record DIST ROW" (each RECORD's rows but those files' and ../, sorted, without \r), "bin NAME"
+wheels_layout() {
+  local lib=$1 bin=$2 r skip='/(INSTALLER|RECORD|REQUESTED|direct_url\.json),|^\.\./'
+  (cd "$lib" && find . -type f ! -name INSTALLER ! -name RECORD ! -name REQUESTED ! -name direct_url.json ! -path './bin/*' \
+     | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r r; do echo "file $r $(sha256sum < "$r" | cut -c1-64)"; done)
+  for r in "$lib"/*.dist-info/RECORD; do
+    [ -f "$r" ] || continue
+    tr -d '\r' < "$r" | grep -Ev "$skip" | LC_ALL=C sort | sed "s|^|record $(basename "$(dirname "$r")") |"
+  done
+  [ -d "$bin" ] && ls "$bin" | LC_ALL=C sort | sed 's/^/bin /'
+  return 0
+}
+# wheels_pip_layout DIR WHEEL...: CPython's pip --target DIR over the wheels, its layout
+wheels_pip_layout() {
+  local d=$1; shift
+  python3 -I -m pip --version >/dev/null 2>&1 || { echo "no pip for python3"; return 1; }
+  rm -rf "$d"
+  python3 -I -m pip install -q --no-index --no-deps --no-compile --disable-pip-version-check --root-user-action=ignore \
+    --target "$d" "$@" > "$d.log" 2>&1 || { echo "pip failed: $(tail -1 "$d.log")"; return 1; }
+  wheels_layout "$d" "$d/bin"
 }
 
 wheels_check() {
@@ -1374,33 +1448,24 @@ wheels_check() {
   wheels_arbace install --pins "$WHEELS_PINS" --cache "$WHEELS_CACHE/wheels" --site "$site" || return 1
   wheels_arbace verify --pins "$WHEELS_PINS" --cache "$WHEELS_CACHE/wheels" --site "$site" || return 1
   rm -rf "$W"; mkdir -p "$W/runs"
-  # the layout against the host CPython's pip on the same wheels (all at once: their bin/ is one directory)
+  # the layout against the host CPython's pip on the same wheels (all at once: their bin/ is one directory): pip's tree as a
+  # listing (wheels_layout), live or recorded (queue 213), against the site's
   local -a whls=()
   while IFS=$'\t' read -r file url sha bytes sample script; do whls+=("$WHEELS_CACHE/wheels/$file"); done < <(wheels_arbace list --pins "$WHEELS_PINS")
-  if python3 -I -m pip --version >/dev/null 2>&1; then
-    python3 -I -m pip install -q --no-index --no-deps --no-compile --disable-pip-version-check --root-user-action=ignore \
-      --target "$W/pip" "${whls[@]}" > "$W/pip.log" 2>&1 || { echo "  pip failed: $(tail -1 "$W/pip.log")"; bad=1; }
-    if diff -r -x INSTALLER -x RECORD -x REQUESTED -x direct_url.json -x bin "$W/pip" "$site/lib" > "$W/layout.diff"; then
-      local r d rows=0
-      for r in "$W/pip"/*.dist-info/RECORD; do
-        d=$(basename "$(dirname "$r")")
-        local skip='/(INSTALLER|RECORD|REQUESTED|direct_url\.json),|^\.\./'
-        if ! diff <(tr -d '\r' < "$r" | grep -Ev "$skip" | sort) <(grep -Ev "$skip" "$site/lib/$d/RECORD" | sort) > "$W/record.diff"; then
-          echo "  $d's RECORD differs from pip's:"; head -5 "$W/record.diff" | sed 's/^/    /'; bad=1
-        fi
-        rows=$((rows + $(grep -Evc "$skip" "$site/lib/$d/RECORD")))
-      done
-      [ "$(ls "$W/pip/bin" | sort)" = "$(ls "$site/bin" | sort)" ] || { echo "  the console scripts differ from pip's: $(ls "$W/pip/bin" | tr '\n' ' ')"; bad=1; }
-      echo "  layout: lib/ as pip --target lays it out, $rows RECORD rows equal; scripts $(ls "$site/bin" | tr '\n' ' ')"
-    else echo "  layout: differs from pip --target's:"; head -10 "$W/layout.diff" | sed 's/^/    /'; bad=1; fi
-  else echo "  layout: no pip for python3, not compared"; fi
+  if pyrec_outcome wheels/layout "$(pyrec_key "$WHEELS_PINS")" wheels_pip_layout "$W/pip" "${whls[@]}" > "$W/layout.pip"; then
+    wheels_layout "$site/lib" "$site/bin" > "$W/layout.site"
+    if diff "$W/layout.pip" "$W/layout.site" > "$W/layout.diff"; then
+      echo "  layout: lib/ as pip --target lays it out, $(grep -c '^record ' "$W/layout.site") RECORD rows equal; scripts $(ls "$site/bin" | tr '\n' ' ')"
+    else echo "  layout: differs from pip --target's (< pip's, > the site's):"; head -10 "$W/layout.diff" | sed 's/^/    /'; bad=1; fi
+  else echo "  layout: pip's not known: $(tail -1 "$W/layout.pip")"; bad=1; fi
   # each pin's sample, and its console script, by pyi and by CPython with the same site
   while IFS=$'\t' read -r file url sha bytes sample script; do
     if [ ${#only[@]} -gt 0 ] && ! printf '%s\n' "${only[@]}" | grep -qx "${file%%-*}"; then continue; fi
     if [ "$sample" != - ]; then
       n=$((n + 1)); local r="$W/runs/${sample%.py}" c="$W/runs/${sample%.py}.cpython" t0=$SECONDS
       mkdir -p "$r.d" "$c.d"
-      (cd "$c.d" && PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC wheels_cpython "$site/lib" "$T/$sample" > "$c.out" 2> "$c.err"; echo $? > "$c.rc") || true
+      wheels_run_cpython "wheels/$sample" "$(pyrec_key "$WHEELS_PINS" "$T/$sample")" "$c" \
+        bash -c 'cd "$1" && shift && PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC python3 -I -S -B -c "$WHEELS_RUNPY" "$@"' - "$c.d" "$T/$sample" "$site/lib"
       (cd "$r.d" && PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC PYI_SITE="$site/lib" "$root/bin/pyi" run "$T/$sample" > "$r.out" 2> "$r.err"; echo $? > "$r.rc") || true
       if wheels_cmp "$c" "$r"; then echo "  pass $sample ($(wc -l < "$r.out") lines, $((SECONDS - t0)) s)"; else echo "  FAIL $sample"; bad=1; fi
     fi
@@ -1409,8 +1474,9 @@ wheels_check() {
       local r="$W/runs/script-$name" c="$W/runs/script-$name.cpython" mod attr
       mod=$(sed -n "s/^${name}[[:space:]]*=[[:space:]]*\([^: ]*\):.*/\1/p" "$site/lib/"*.dist-info/entry_points.txt | head -1)
       attr=$(sed -n "s/^${name}[[:space:]]*=[[:space:]]*[^:]*:\([A-Za-z0-9_.]*\).*/\1/p" "$site/lib/"*.dist-info/entry_points.txt | head -1)
-      (cd "$T" && PYTHONHASHSEED=0 python3 -I -S -B -c "import sys; sys.path.append(sys.argv.pop(1)); sys.argv[0] = '$name'
-from $mod import ${attr%%.*}; sys.exit($attr())" "$site/lib" "${args[@]}" > "$c.out" 2> "$c.err"; echo $? > "$c.rc") || true
+      wheels_run_cpython "wheels/script-$name" "$(pyrec_key "$WHEELS_PINS")" "$c" \
+        bash -c 'cd "$1" && shift && PYTHONHASHSEED=0 python3 -I -S -B -c "$@"' - "$T" "import sys; sys.path.append(sys.argv.pop(1)); sys.argv[0] = '$name'
+from $mod import ${attr%%.*}; sys.exit($attr())" "$site/lib" "${args[@]}"
       (cd "$T" && PYTHONHASHSEED=0 PYI_EXECUTABLE="$root/tools/pyi/python3" "$site/bin/$name" "${args[@]}" > "$r.out" 2> "$r.err"; echo $? > "$r.rc") || true
       if wheels_cmp "$c" "$r"; then echo "  pass the console script $name ${args[*]} (status $(cat "$r.rc"))"; else echo "  FAIL the console script $name"; bad=1; fi
     fi
@@ -1419,12 +1485,10 @@ from $mod import ${attr%%.*}; sys.exit($attr())" "$site/lib" "${args[@]}" > "$c.
   local six; six=$(printf '%s\n' "${whls[@]}" | grep '/six-' | head -1)
   mkdir -p "$W/controls"
   cp "$six" "$W/controls/six-1.17.0-cp314-cp314-linux_x86_64.whl"
-  python3 -I -S -c 'import sys, zipfile
-src, out = sys.argv[1], sys.argv[2]
-with zipfile.ZipFile(src) as a, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as b:
-    for i in a.infolist():
-        data = a.read(i)
-        b.writestr(i, data + b"# tampered\n" if i.filename == "six.py" else data)' "$six" "$W/controls/six-1.17.0-py3-none-any.whl"
+  # six.py with a line appended, its RECORD digest left (zip, not python3: queue 213)
+  cp "$six" "$W/controls/six-1.17.0-py3-none-any.whl"; mkdir -p "$W/controls/t"
+  unzip -p "$six" six.py > "$W/controls/t/six.py"; echo "# tampered" >> "$W/controls/t/six.py"
+  (cd "$W/controls/t" && zip -q "$W/controls/six-1.17.0-py3-none-any.whl" six.py)
   local w want
   for w in "six-1.17.0-cp314-cp314-linux_x86_64.whl:are not py3-none-any" "six-1.17.0-py3-none-any.whl:differs from RECORD"; do
     want=${w#*:}; w=${w%%:*}
@@ -1474,6 +1538,7 @@ pip_tree() {
 }
 
 wheels_pip_probe() {
+  need_python "wheels pip-probe (CPython's pip beside pyi's: the oracle tier's)"
   local W="$WORK/wheels/pip-probe" sp="$root/.tmp/repr-python/site-packages/$(uname -m)/usr/lib/python3.14/site-packages"
   [ -d "$sp/pip" ] || "$root/bin/repr-python" pins --fetch >/dev/null
   rm -rf "$W"; mkdir -p "$W/path" "$W/pyi" "$W/cpython"; ln -s "$sp/pip" "$W/path/pip"
