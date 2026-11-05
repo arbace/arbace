@@ -1,9 +1,10 @@
 #!/bin/bash
 # bin/hsi aot build|run (HE8, doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE8 (write-ahead)"): Haskell's AOT level's
 # first slice. A program's STG compiled to Go over hsi's machine (go/arbace/hs/aot.ae): hsi aot writes every closure of
-# the program's modules and the libraries' closures a list names (a run's HSI_AOT_MODULES: the closures it entered) as
-# Go files of package arbace/hs, and TamaGo's go builds them with hsi's runtime (bin/hsi build's module) into an
-# executable that is hsi with those closures compiled: each installed by its tree's shape when first entered, every
+# the program's modules and the library modules a list names (a run's HSI_AOT_MODULES: the closures it entered, by
+# module) as Go packages arbace/aot/ID over the machine's exported API (go/arbace/hs/aotapi.ae), the libraries' generated
+# once per runtime and image and compiled once by Go's build cache, and TamaGo's go builds them with hsi's runtime (bin/hsi
+# build's module) into an executable that is hsi with those modules compiled: each installed by its tree's shape when first entered, every
 # other closure interpreted as before (the libraries' images and the program's dumps still loaded: the declarations,
 # constructors and globals come from them).
 #
@@ -33,16 +34,47 @@ libargs() {
   if [ "$img" != none ]; then "$hsi" image --out "$img" "${la[@]}" > "$TMPDIR/hsi-aot-image.$$" 2>&1 || { cat "$TMPDIR/hsi-aot-image.$$" >&2; die "hsi image"; }; rm -f "$TMPDIR/hsi-aot-image.$$"; la+=(--image "$img"); fi
 }
 
-# aot_build STGDIR CLOSURES OUT: OUT/hsi-aot
+# aot_build STGDIR CLOSURES OUT: OUT/hsi-aot. The program's modules generated into OUT/gen, a package each; the library
+# modules CLOSURES names (whole modules: a package's text depends only on the module's image and the generator, so Go's
+# build cache compiles it once for every program) generated once into .tmp/hsi/aot/lib/KEY/ID, KEY the runtime's and the
+# image's digests
 aot_build() {
-  local prog=$1 cl=$2 out=$3 gen=$3/gen mod=$3/mod key
-  mkdir -p "$out"
+  local prog=$1 cl=$2 out=$3 gen=$3/gen mod=$3/mod key rk lib=$WORK/aot/lib
+  mkdir -p "$out" "$lib"
+  rk=$(cut -c1-16 "$WORK/bin/key")
   rm -rf "${gen:?}"; mkdir -p "$gen"
-  "$hsi" aot "${la[@]}" ${cl:+--modules "$cl"} --prog "$prog" --out "$gen" > "$out/aot.log" 2>&1 || { cat "$out/aot.log" >&2; die "hsi aot failed"; }
-  key=$( { cat "$WORK/bin/key"; (cd "$gen" && LC_ALL=C ls | xargs sha256sum); } | sha256sum | cut -c1-64)
-  if [ -x "$out/hsi-aot" ] && [ "$(cat "$out/key" 2> /dev/null)" = "$key" ]; then echo "$out/hsi-aot"; return; fi
+  "$hsi" aot "${la[@]}" --prog "$prog" --out "$gen" > "$out/aot.log" 2>&1 || { cat "$out/aot.log" >&2; die "hsi aot failed"; }
+  # the library modules: those of CLOSURES's lines, their packages generated when not cached
+  local m id unit md imgf ik miss=$out/missing.txt
+  : > "$miss"; : > "$out/libs.txt"
+  if [ -n "$cl" ] && [ -s "$cl" ]; then
+    while read -r m; do
+      [ -n "$m" ] || continue
+      unit=${m%%:*}; md=${m#*:}; id=$(printf '%s' "$m" | sed 's/[^a-zA-Z0-9]/_/g')
+      imgf=$img/${unit//\//_}/$md.img
+      if [ -f "$imgf" ]; then ik=$(sha256sum < "$imgf" | cut -c1-16); else ik=noimage; fi
+      echo "$id $lib/$rk-$ik/$id" >> "$out/libs.txt"
+      [ -f "$lib/$rk-$ik/$id/aot.go" ] || echo "$m $rk-$ik $id" >> "$miss"
+    done < <(cut -d' ' -f1 "$cl" | grep -v '^main:' | LC_ALL=C sort -u)
+  fi
+  if [ -s "$miss" ]; then
+    local st=$out/lib-staging k
+    rm -rf "${st:?}"; mkdir -p "$st"
+    cut -d' ' -f1 "$miss" > "$out/missing-mods.txt"
+    "$hsi" aot "${la[@]}" --modules "$out/missing-mods.txt" --out "$st" > "$out/aot-lib.log" 2>&1 || { cat "$out/aot-lib.log" >&2; die "hsi aot (libraries) failed"; }
+    while read -r m k id; do
+      mkdir -p "$lib/$k"; rm -rf "${lib:?}/$k/$id"; mv "$st/$id" "$lib/$k/$id"
+    done < "$miss"
+    rm -rf "${st:?}"
+  fi
+  key=$( { cat "$WORK/bin/key"; (cd "$gen" && find . -name '*.go' | LC_ALL=C sort | xargs sha256sum); cat "$out/libs.txt"; } | sha256sum | cut -c1-64)
+  if [ -x "$out/hsi-aot" ] && [ "$(cat "$out/key" 2> "$out/key.err")" = "$key" ]; then echo "$out/hsi-aot"; return; fi
   rm -rf "${mod:?}"; cp -r "$WORK/bin/mod" "$mod"
-  cp "$gen"/*.go "$mod/hs/"
+  mkdir -p "$mod/aot"; cp -r "$gen"/. "$mod/aot/"
+  local d
+  while read -r id d; do cp -r "$d" "$mod/aot/$id"; done < "$out/libs.txt"
+  { echo "package main"; echo
+    for d in "$mod"/aot/*/; do echo "import _ \"arbace/aot/$(basename "$d")\""; done; } > "$mod/hs/cmd/hsi/aot_link.go"
   (cd "$mod" && GOCACHE=$WORK/bin/gocache GOFLAGS=-p=2 GOMAXPROCS=4 GOMEMLIMIT=1536MiB CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off \
      "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -trimpath -o "$out/hsi-aot.new" ./hs/cmd/hsi) > "$out/build.log" 2>&1 \
     || { tail -20 "$out/build.log" >&2; die "go build failed ($out/build.log)"; }
