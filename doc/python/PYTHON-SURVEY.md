@@ -2643,3 +2643,139 @@ show the first line. And pyi's `frame.f_locals` is a snapshot, not PEP 667's wri
   (`:testcapi` 3, `:finalization-collect` 2, `:finalization` 1, `:surrogate-pairs` 1, `:sqlite-process-locks` 1), 0
   failing, on goi (`bin/pyi lib-test-all --fresh test_sqlite3`, 13 min, against the committed record) and compiled (about
   70 s). SQLite through ci under goi is quick enough for the whole module, unlike zstd's dictionary training.
+
+## Design: 216d, direct calls between compiled functions (2026-11-05, the Mac VM, queue 216d; the user's 1 (a) on 216's DECISION)
+
+The aim (216's DECISION 1 (a), 210's option (b)): a compiled function calling a compiled function without going back
+through runFrames' generic dispatch, and generators resumed in the caller's loop, with frames, exception unwinding,
+tracebacks, the C level's accounting and the recursion limit as before. No behaviour change.
+
+**What a call costs, probed first** (fib(35) compiled, the VM, least of 3): a callee run by a loop of its own from the
+caller's Go code (runFrames entered for the callee, the caller's Go frames kept under it) costs what the pushed frame
+costs (2.4 s both): the trip back to runFrames and the caller's re-entry by its entry switch is not where a call's
+time goes. It goes to the frame (newFrame, bindArgs, freeFrame and the allocations of a free list of 4 per code object:
+a recursion allocates frames as it descends), the boxed ints, and the compiled code's own traffic around a call: every
+local written back onto `f.Stack` (AotSpill), the arguments copied off it and the slots cleared (callStack), the value
+pushed and the locals taken back after the call's block start. So the direct call is placed in the register
+generator, where it removes that traffic, not only in the runtime.
+
+**The design:**
+
+1. *A call from the locals.* The register generator (216's `reg-func`) compiles call [N KWNAMES] and a method call
+   (after `AotLoadMethodV`) as `tmp, err = py.AotCallV(t, f, kw, callable, args...)` (`py.AotCallMethodV(t, f, m,
+   self, args...)`): the callable and its arguments are Go locals (Go's variadic array, kept on Go's stack: never
+   retained by the helper, copied where a callee may keep it), the locals below them stay in Go locals across the
+   call, the value comes back in a local. The helpers take callStack's cases in callStack's order (a Python function, a
+   bound method with self in the callable's place, a class whose `__init__` callInit runs, a bound built-in, any other
+   callable called): a compiled Python function's frame is made by newFrame as before and run directly (runDirect),
+   a generator's or coroutine's object made, a built-in or any other callable called as callStack calls it.
+2. *The stack's way, when the callee is not compiled* (code compiled at run time, on the loop) *or `directMax` (256)
+   direct calls are nested*: the helper answers `py.AotStackCall` before doing anything; the generated code then writes
+   everything back, sets `f.PC` and calls AotCall or AotCallMethod as before (the callee's frame pushed for runFrames),
+   and the frame re-enters at the call's next instruction by a re-entry label of its own, `C<n>`, in the entry switch,
+   which takes the slots the direct way keeps in locals back from the frame. The call's next instruction is no longer
+   a block start (unless a jump or a handler makes it one: then both ways meet there with everything written back).
+3. *runDirect* runs the callee by `runFrames(callee, direct)`: a loop with the callee as its entry frame, entered as
+   runFrames enters a pushed frame: `f_back` the caller, `escape` passed on, `t.depth` counted against the recursion
+   limit (exceeded: the RecursionError returned to the caller's code and raised at the call, as the pushed frame's is
+   raised in the caller), the eval breaker checked at the callee's entry with its error raised in the callee
+   (`f.Lasti = f.PC`, as for a pushed frame; a call from Go raises it in the caller instead), and no C level counted
+   (`t.cdepth` is Go's entries into the machine: a Python call is none, so a pure Python recursion still goes past
+   10,000 levels as before). The callee's own calls run in that loop (or directly again), its exceptions unwind
+   through its handlers there; one that leaves it has the callee's traceback entry, the caller's code returns it
+   through its error path (the handler's slots written back, 216's rule 4) and the caller's loop adds the caller's
+   entry, the order and the context chaining as before. callInit's instance replaces the value (an `__init__`
+   returning anything but None: the TypeError raised in the caller). A Go panic in the callee is caught by the
+   callee's guardedStep and raised at the callee's instruction, as before; guardedStep now also restores the thread's
+   frame and direct depth should a panic cross a direct call.
+4. *What may observe the caller during the call* (216's table): its value stack is not observable from Python; the
+   locals the direct way keeps in Go variables are the value stack's slots, kept across a call as 216 keeps them across
+   an instruction that runs Python code by a nested run (a dunder, a property). `f.Lasti` is stored before the call
+   (tracebacks, `f_lineno` from the callee, warnings' stack levels, the caches); `f.PC` only on the stack's way (only
+   runFrames' re-entry reads it). `f_locals` and the frame's other readers see `f.Fast`, unchanged. A generator or
+   coroutine calling is never suspended in the middle of a direct call (a callee's yield suspends its own frame).
+5. *Go's stack*: each direct call holds its caller's Go frames (the compiled function, the helper, runDirect,
+   runFrames, guardedStep), so at most `directMax` (256) are nested on a thread at once (`t.direct`); deeper, the calls
+   go the stack's way in the innermost loop, with no Go frames per Python call, so a recursion limit of any size works
+   as before.
+6. *Frames*: a code object's free list keeps 16 frames instead of 4 (a recursion's descent no longer allocates every
+   frame past the fourth; memory only: the frames are cleared as before), and guardedStep runs a compiled function
+   itself rather than through step (step's large Go frame entered for one call per resumption).
+
+**Generators resumed in the caller's loop.** A compiled for-iter already resumes its generator from the caller's Go
+code with the caller's values in Go locals (216: `AotNext(it)`, the iterator a local), so the caller-side traffic the
+direct call removes is not there. What is left is the resumption itself (resume, run's C level, runFrames' entry, the
+generator's entry switch and its yield through AotExec). CPython's way (FOR_ITER_GEN, SEND_GEN: the generator's frame
+pushed into the caller's loop, its yield returning to the caller in that loop) would replace one Go call by two trips
+through runFrames per item and per level of a `yield from` chain (the caller left and re-entered by its entry switch
+for every item), and run's C level would have to be emulated (a resumption from Go counts one today: removing it
+changes where a deep generator nesting raises); probed by the calls above, a trip through runFrames is not cheaper than
+a Go call, so it is not built. The resumption gains what the call path gains in the runtime (guardedStep running the
+compiled body without step).
+
+**The proofs asked:** a recursion and traceback program (recursion limits from 60 to 3,000 and 15,000 levels with the
+limit raised; tracebacks through functions, methods, `__init__`, bound methods, keywords, closures, lambdas; exceptions
+caught and raised again mid-chain with causes, contexts and `finally`; `f_back`'s chain and the callers' `f_lineno`
+from a callee; a callback from `sorted` raising; a recursion through `map` running out of C levels at the same depth as
+before; RecursionError caught in a handler past the direct bound; recursive generators, a generator and a coroutine
+raising; callees compiled at run time called mid-expression from compiled code, the stack's way, and calling back) run
+compiled and on the loop against CPython, its known lines recorded on the base (ce1b4e71); 216's check216.sh and
+210's check210.sh; `make python-essential`; `bin/pyi check --aot --no-pyi` on 210's 73-program sample; `bin/pyi runtime
+check`; the bench sample's table, base and branch back to back with CPython.
+
+## As built: 216d, direct calls between compiled functions (2026-11-05, the Mac VM, queue 216d)
+
+Built as "Design: 216d" above: `go/arbace/py` (eval.go: `runFrames(f, direct)`, `enter`, `callDirect`, `runDirect`,
+`directMax` 256, guardedStep running `Code.Native` itself and restoring `t.Frame` and `t.direct` on a panic; aot.go:
+`AotCallV`, `AotCallMethodV`, `AotStackCall`, `stackCall`, `callFunctionV`; frame.go: `Thread.direct`, `frameFreeMax`
+16) and `arbace.python.aot`'s register generator (`call!`: calls and method calls from the locals, the stack's way
+re-entered at `C<n+1>`; with `check-depths` on, the re-entry checks the frame's depth too). The stack generator
+(`code-func`, the fallback) and AotExec's call-ex reach compiled callees through `enter`, directly as well. Generators'
+resumption is unchanged but for step's frame (the design's paragraph: CPython's in-loop resumption not built).
+
+Where the time went (fib(35) compiled, least of 3, the VM): base 2.4-2.6 s; the stack's direct call alone (a nested
+loop per call, the locals still written back) the same; the free list of 16 alone 1.95 s; the calls from the locals
+alone 1.95 s; both 1.42 s (CPython 0.11 s for fib(31), pyi 0.31 -> 0.2 s).
+
+**The table** (wall seconds, the least of 3 rounds; each round runs CPython 3.14 (`python3 -s -B`), the base
+(ce1b4e71, 216's head) and this branch back to back on the same benchmark; the VM's load 3.7-4.3, another agent
+running: differences under 10% are noise; `/root/arbace-mac/.tmp/q216d/table1.tsv`; every output equal to CPython's):
+
+| benchmark | loops | CPython | base | after | base / CPython | after / CPython |
+|---|---:|---:|---:|---:|---:|---:|
+| raytrace | 1 | 0.20 | 0.60 | 0.58 | 3.0x | 2.9x |
+| deltablue | 50 | 0.12 | 0.43 | 0.38 | 3.6x | 3.2x |
+| fannkuch | 1 | 0.29 | 0.61 | 0.61 | 2.1x | 2.1x |
+| generators | 4 | 0.15 | 0.78 | 0.68 | 5.2x | 4.5x |
+| nqueens | 4 | 0.25 | 0.66 | 0.64 | 2.6x | 2.6x |
+| go | 1 | 0.10 | 0.25 | 0.23 | 2.5x | 2.3x |
+| richards | 10 | 0.32 | 0.63 | 0.51 | 2.0x | 1.6x |
+| chaos | 1 | 0.07 | 0.21 | 0.20 | 3.0x | 2.9x |
+| json_dumps | 1 | 0.03 | 0.20 | 0.20 | 6.7x | 6.7x |
+| spectral_norm | 4 | 0.34 | 0.68 | 0.61 | 2.0x | 1.8x |
+| unpack_sequence | 20000 | 0.23 | 0.62 | 0.61 | 2.7x | 2.7x |
+| coroutines | 20 | 0.36 | 0.71 | 0.62 | 2.0x | 1.7x |
+| float | 4 | 0.22 | 0.48 | 0.46 | 2.2x | 2.1x |
+| nbody | 3 | 0.30 | 0.35 | 0.35 | 1.2x | 1.2x |
+| hexiom | 1 | 0.03 | 0.09 | 0.09 | 3.0x | 3.0x |
+| base64 | 1 | 1.60 | 2.96 | 2.96 | 1.8x | 1.8x |
+| bpe_tokeniser | 1 | 3.25 | 6.41 | 5.92 | 2.0x | 1.8x |
+| async_tree | 1 | 0.22 | 1.01 | 0.98 | 4.6x | 4.5x |
+| mdp | 1 | 0.81 | 2.76 | 2.69 | 3.4x | 3.3x |
+| pprint | 1 | 1.40 | 4.70 | 4.24 | 3.4x | 3.0x |
+
+Sum over the 20: CPython 10.29 s, base 25.14 s (2.44x), after 23.56 s (2.29x); median 2.67x -> 2.61x. The call-heavy
+benchmarks gain 10-20% (richards, deltablue, coroutines, spectral_norm, pprint), generators 13% (step's frame), the
+arithmetic and attribute-bound ones nothing; the base is faster here than in 216's table (load 4 against 5-15). What
+is left of a call is its frame (newFrame, bindArgs, freeFrame), the defer of guardedStep, the boxed ints; of a
+generator's item, one resumption per level (resume, run, runFrames' entry, the yield through AotExec).
+
+**The proofs (run, the VM):**
+- `t/check216d.sh` (rec.py, the design's program, 70 output lines): compiled = the loop byte for byte, both = CPython
+  but for the one line recorded on the base (where a recursion through `map` runs out of C levels: pyi's count, 10,001
+  as on the base; CPython's own stack); on the base the same. RecursionError's depth at limits 60-3,000, the
+  tracebacks and the frames' chains equal CPython's.
+- 216's `t/check216.sh` PASS (1 known line, `f_locals`), 210's `t/check210.sh` PASS (10 pass lines); both also with
+  `check-depths` on, and the 73-program sample with it on: 73 pass, 0 failing, no code object on the stack generator.
+- `make python-essential`: check --aot 21 programs, 20 pass, 1 classed, 0 failing, the control refused.
+- `bin/pyi runtime check`: the seven packages the same forms, the unicodedata and CJK tables equal, runtime-ops equal, 136 programs of test/python/pyi run by pyi as by the oracle: 136 equal, the REPL session 1 equal (40 min at load 4; the check runs the loop, not compiled code: it covers runFrames' new parameter, guardedStep and the free list).
