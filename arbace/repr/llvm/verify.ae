@@ -41,7 +41,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare label-text parse-offset check-intrinsic-call verify-function*)
+(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value)
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
@@ -68,6 +68,7 @@
 (def ^:dynamic *dbg-format* nil)   ; LLParser's SeenOldDbgInfoFormat / SeenNewDbgInfoFormat (a volatile of #{:old :new})   ; the forms end at an LLParser error the reader met: no end-of-function/module checks
 (def ^:dynamic *alloca-as* 0)   ; the data layout's alloca address space (A), program address space (P)
 (def ^:dynamic *prog-as* 0)
+(def ^:dynamic *dl-str* "")   ; the module's data layout string
 
 (defn dl-as
   "The address space a data layout string gives with the letter `c` (A, P, G), 0 when it names none."
@@ -2319,6 +2320,7 @@
       (let [ptypes (mapv #(norm-type (first %)) (remove #{'&} ps))
             pattrs (mapv #(group-items (param-attrs %)) (remove #{'&} ps))]
         (check-function-attrs (:ret-attrs o) (norm-type rt) pattrs ptypes (group-items (:attrs o)) (str/starts-with? k "llvm.") false)))
+    (check-global-value f o)
     (check-function-header h (norm-type rt) ps o k (:body o))
     (when (str/starts-with? k "llvm.")
       (when (= h 'llvm/define) (verr :verifier/intrinsic-defined "llvm intrinsics cannot be defined!"))
@@ -2328,7 +2330,7 @@
           (when-not (or (= u (:fty (.get *gdefs* k))) (old-form-decl? k (:fty (.get *gdefs* k))))
             (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!" [:inst ux]))))
       (check-intrinsic-signature k (:fty (.get *gdefs* k))))
-    (when (and (:comdat o) (= h 'llvm/declare)) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!"))
+
     (check-function-md (apply hash-map (:md o)))))
     (when (= h 'llvm/define)
       (let [blocks (numbered-blocks f)
@@ -2462,6 +2464,130 @@
                       (recur (inc ii) (or seen-non-phi (not= hd 'phi))))))))))
         (visiting (binding [*ctx* {:fn f}] (check-sibling-unwinds blocks g defs)))))))
 
+(defn- global-opts [f]
+  (let [[_ _ _ & more] f] (apply hash-map (if (and (seq more) (not (keyword? (first more)))) (rest more) more))))
+
+(defn- global-init [f]
+  (let [[_ _ _ & more] f] (when (and (seq more) (not (keyword? (first more)))) (first more))))
+
+(defn- dl-ptr-bits
+  "The data layout's pointer size in bits for address space `as` (p[N]:SIZE:...), 64 when it names none."
+  [as]
+  (or (some #(when-let [m (re-matches #"p([0-9]*):([0-9]+).*" %)]
+               (when (= (long (if (= "" (second m)) 0 (Long/parseLong (second m)))) (long as)) (Long/parseLong (nth m 2))))
+            (str/split (or *dl-str* "") #"-"))
+      64))
+
+(defn- alloc-bytes
+  "A sized type's allocation size in bytes (the data layout's padding left out but for scalars' power-of-two sizes)."
+  [t]
+  (let [t (resolve-type t)]
+    (cond
+      (int-type? t) (let [b (quot (+ (int-bits t) 7) 8)] (loop [k 1] (if (>= k b) k (recur (* 2 k)))))
+      (fp-type? t) ({16 2 32 4 64 8 80 16 128 16} (fp-bits t))
+      (ptr-type? t) (quot (dl-ptr-bits (addrspace t)) 8)
+      (and (seq? t) (= 'array (first t))) (* (biginteger (nth t 1)) (biginteger (alloc-bytes (nth t 2))))
+      (vec-type? t) (* (biginteger (nth t 1)) (biginteger (or (some-> (bits (nth t 2)) (quot 8)) 8)))
+      (and (seq? t) (#{'struct 'packed} (first t))) (reduce + 0 (map alloc-bytes (rest t)))
+      :else 0)))
+
+(defn- remove-md
+  "A top-level form without its metadata attachments."
+  [f]
+  (let [v (vec f) i (.indexOf ^java.util.List v :md)] (if (neg? i) f (concat (subvec v 0 i) (subvec v (min (count v) (+ i 2)))))))
+
+(defn- count-global-uses
+  "The uses of the global `k` outside metadata (materialized_use_empty)."
+  [forms k]
+  (let [n (volatile! 0)]
+    (letfn [(walk [y] (cond (and (global? y) (= (global-key y) k)) (vswap! n inc)
+                            (or (seq? y) (vector? y)) (doseq [z y] (walk z))
+                            (map? y) (doseq [[kk z] y] (when-not (= kk :md) (walk z)))))]
+      (doseq [f forms :when (#{'llvm/global 'llvm/define 'llvm/declare 'llvm/alias 'llvm/ifunc} (first f))]
+        (walk (vec (drop 2 (remove-md f))))))
+    @n))
+
+(defn- check-global-value
+  "Verifier::visitGlobalValue's rules of a global variable or a function `f` with its options `o`."
+  [f o]
+  (let [me (if (= 'llvm/global (first f)) :global :fn)
+        k (global-key (nth f 1)) md (apply hash-map (:md o)) decl? (if (= 'llvm/global (first f)) (nil? (global-init f)) (= 'llvm/declare (first f)))]
+    (when (and decl? (not (contains? #{nil :external :extern_weak} (:linkage o))))
+      (verr :verifier/global "Global is external, but doesn't have external or weak linkage!"))
+    (when-let [a (get md '!associated)]
+      (let [ops (md-ops a)]
+        (when-not (= 1 (count ops)) (verr :verifier/global "associated metadata must have one operand" me [:mdv a]))
+        (let [op (first ops)]
+          (when (= op 'null) (verr :verifier/global "associated metadata must have a global value" me [:mdv a]))
+          (when-not (vector? op) (verr :verifier/global "associated metadata must be ValueAsMetadata" me [:mdv a]))
+          (when-not (ptr-type? (norm-type (first op))) (verr :verifier/global "associated value must be pointer typed" me [:mdv a]))
+          (when (and (global? (second op)) (= (global-key (second op)) k))
+            (verr :verifier/global "global values should not associate to themselves" me [:mdv a])))))
+    (doseq [[mk r] (partition 2 (:md o)) :when (= mk '!implicit.ref)]
+      (when decl? (verr :verifier/global "ref metadata must not be placed on a declaration" me))
+      (let [ops (md-ops r)]
+        (when-not (= 1 (count ops)) (verr :verifier/global "ref metadata must have one operand" me [:mdv r]))
+        (let [op (first ops)]
+          (when-not (vector? op) (verr :verifier/global "ref metadata must be ValueAsMetadata" me [:mdv r]))
+          (when-not (ptr-type? (norm-type (first op))) (verr :verifier/global "ref value must be pointer typed" me [:mdv r]))
+          (when (and (global? (second op)) (= (global-key (second op)) k))
+            (verr :verifier/global "values should not reference themselves" me [:mdv r])))))
+    (when-let [pr (get md '!elf_section_properties)]
+      (let [ops (md-ops pr)]
+        (when-not (= 2 (count ops)) (verr :verifier/global "elf_section_properties metadata must have two operands" me [:mdv pr]))
+        (when-not (vector? (first ops)) (verr :verifier/global "type field must be ConstantAsMetadata" me [:mdv pr]))
+        (when-not (md-int-op? (first ops)) (verr :verifier/global "type field must be ConstantInt" me [:mdv pr]))
+        (when-not (vector? (second ops)) (verr :verifier/global "entsize field must be ConstantAsMetadata" me [:mdv pr]))
+        (when-not (md-int-op? (second ops)) (verr :verifier/global "entsize field must be ConstantInt" me [:mdv pr]))))
+    (when (= (:linkage o) :appending)
+      (when-not (= 'llvm/global (first f)) (verr :verifier/global "Only global variables can have appending linkage!" me))
+      (when-not (let [t (resolve-type (norm-type (nth f 2)))] (and (seq? t) (= 'array (first t))))
+        (verr :verifier/global "Only global arrays can have appending linkage!" me)))
+    (when (and (or decl? (= (:linkage o) :available_externally)) (:comdat o)) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!" me))
+    (when (and (= (:dll o) :dllexport) (= (:visibility o) :hidden))
+      (verr :verifier/global "dllexport GlobalValue must have default or protected visibility" me))
+    (when (= (:dll o) :dllimport)
+      (when-not (contains? #{nil :default} (:visibility o)) (verr :verifier/global "dllimport GlobalValue must have default visibility" me)))))
+
+(defn- check-global-variable
+  "Verifier::visitGlobalVariable, then visitGlobalValue."
+  [forms f]
+  (let [o (global-opts f) k (global-key (nth f 1)) t (norm-type (nth f 2)) init (global-init f)
+        rt (resolve-type t) arr? (and (seq? rt) (= 'array (first rt)))]
+    (when (and (integer? (:align o)) (> (long (:align o)) 4294967296)) (verr :verifier/global "huge alignment values are unsupported" :global))
+    (when (some? init)
+      (when-not (sized? t) (verr :verifier/global "Global variable initializer must be sized" :global))
+      (when (= (:linkage o) :common)
+        (when-not (#{'zeroinitializer 'null 0 false} init) (verr :verifier/global "'common' global must have a zero initializer!" :global))
+        (when (:constant o) (verr :verifier/global "'common' global may not be marked constant!" :global))
+        (when (:comdat o) (verr :verifier/global "'common' global may not be in a Comdat!" :global))))
+    (when (#{"llvm.global_ctors" "llvm.global_dtors"} k)
+      (when (and (some? init) (not= (:linkage o) :appending)) (verr :verifier/global "invalid linkage for intrinsic global variable" :global))
+      (when (pos? (long (count-global-uses forms k))) (verr :verifier/global "invalid uses of intrinsic global variable" :global))
+      (when arr?
+        (let [st (resolve-type (nth rt 2)) es (when (and (seq? st) (= 'struct (first st))) (vec (rest st)))]
+          (when-not (and es (#{2 3} (count es)) (= 'i32 (norm-type (first es))) (= (norm-type (second es)) (norm-type (list 'ptr *prog-as*))))
+            (verr :verifier/global "wrong type for intrinsic global variable" :global))
+          (when-not (= 3 (count es))
+            (verr :verifier/global "the third field of the element type is mandatory, specify ptr null to migrate from the obsoleted 2-field form" :none))
+          (when-not (ptr-type? (norm-type (nth es 2))) (verr :verifier/global "wrong type for intrinsic global variable" :global)))))
+    (when (#{"llvm.used" "llvm.compiler.used"} k)
+      (when (and (some? init) (not= (:linkage o) :appending)) (verr :verifier/global "invalid linkage for intrinsic global variable" :global))
+      (when (pos? (long (count-global-uses forms k))) (verr :verifier/global "invalid uses of intrinsic global variable" :global))
+      (when arr?
+        (when-not (ptr-type? (norm-type (nth rt 2))) (verr :verifier/global "wrong type for intrinsic global variable" :global))
+        (when (some? init)
+          (when-not (and (seq? init) (= 'array (first init)))
+            (verr :verifier/global "wrong initializer for intrinsic global variable" (pr/typed-str [t init])))
+          (doseq [[et v] (rest init)]
+            (let [v (loop [v v] (if (and (seq? v) ('#{bitcast addrspacecast getelementptr} (first v))) (recur (second (second (strip-flags (rest v))))) v))]
+              (when-not (and (global? v) (#{:global :function :alias} (:kind (.get *gdefs* (global-key v)))))
+                (verr :verifier/global (str "invalid " k " member") (pr/typed-str [(norm-type et) v]))))))))
+    (when (scalable? t) (verr :verifier/global "Globals cannot contain scalable types" :global))
+    (when (and (sized? t) (>= (biginteger (alloc-bytes t)) (.shiftLeft java.math.BigInteger/ONE (int (dl-ptr-bits (or (:addrspace o) 0))))))
+      (verr :verifier/global "Global variable is too large to fit into the address space" :global [:raw (str " " (tstr t))]))
+    (check-global-value f o)))
+
 (defn- phase-verifier [forms]
   (let [users (java.util.HashMap.)]
     ;; the function types an intrinsic is called with (its users)
@@ -2474,11 +2600,7 @@
     (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
       (verify-function f (into {} users)))
     (doseq [f forms :when (= (first f) 'llvm/global)]
-      (visiting (binding [*ctx* {:global f}]
-        (when (scalable? (norm-type (nth f 2))) (verr :verifier/global "Globals cannot contain scalable types")))))
-    (doseq [f forms :when (= (first f) 'llvm/global)]
-      (let [[_ _ _ & more] f o (apply hash-map (if (and (seq more) (not (keyword? (first more)))) (rest more) more))]
-        (when (and (:comdat o) (#{:external :extern_weak} (:linkage o))) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!"))))
+      (visiting (binding [*ctx* {:global f}] (check-global-variable forms f))))
     (check-module-flags forms)
     (check-module-ident forms)
     (check-errno-tbaa forms)))
@@ -2490,6 +2612,7 @@
   (binding [*types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))
             *alloca-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "A")
             *prog-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "P")
+            *dl-str* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
             *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
             *meta* (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
             *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
@@ -2769,6 +2892,12 @@
 
 (defn- fn-operand [f] (str "ptr " (pr/global-str (nth f 1))))
 
+(defn- global-operand
+  "A global as the AsmWriter prints it as an operand: its pointer type in its address space and its name."
+  [f]
+  (let [o (global-opts f) as (or (:addrspace o) 0)]
+    (str (if (and (integer? as) (pos? as)) (str "ptr addrspace(" as ")") "ptr") " " (pr/global-str (nth f 1)))))
+
 (defn- canon-ptr0
   "`ptr addrspace(0)` written as `ptr`, as the AsmWriter prints it; an implicitly declared intrinsic by its mangled name."
   [x]
@@ -2790,7 +2919,8 @@
                         as (cond->> (group-items (:attrs o)) (own-intrinsic? f) (remove #(= (aname %) "mustprogress")))]
                   (str (when (seq as) (str "; Function Attrs: " (str/join " " (map pr/attr-str as)) "\n")) (pr/fn-head-str (number-groups (canon-attr-order f)))))
     (= c :bb) (label-text (:bb ctx))
-    (= c :global) (fn-operand (:global ctx))
+    (= c :global) (global-operand (:global ctx))
+    (and (vector? c) (= (first c) :global)) (global-operand (second c))
     (and (vector? c) (= (first c) :md)) (if-let [f (get metaforms (second c))] (pr/top-str f) (str (second c)))
     (and (vector? c) (= (first c) :mdv)) (let [v (second c)]
                                            (cond (nil? v) "null"
@@ -2811,7 +2941,7 @@
   (let [d (ex-data e) ctx (:ctx d)
         cs (cond (= [:none] (:culprits d)) [] (seq (:culprits d)) (:culprits d) :else (default-culprits ctx))]
     (binding [*ctx* ctx]
-      (apply str (.getMessage ^Throwable e) "\n" (map #(str (diag/renumber (culprit-text % ctx metaforms) slots) "\n") cs)))))
+      (apply str (.getMessage ^Throwable e) "\n" (map #(if (and (vector? %) (= :raw (first %))) (second %) (str (diag/renumber (culprit-text % ctx metaforms) slots) "\n")) cs)))))
 
 (defn- parse-offset
   "The offset in the text of a parser error: its item and hint."
