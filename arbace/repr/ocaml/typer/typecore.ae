@@ -208,7 +208,12 @@
                             [targs tres] (instance-constructor c)]
                         (dorun (map (fn [a t] (ty/unify a t)) targs tyl))
                         tres)
-      :Tpat_or (let [t1 (build-as-type (d 1)) t2 (build-as-type (d 2))] (ty/unify t2 t1) t1)
+      :Tpat_or (if-let [row (get d 3)]
+                 ;; a #t pattern's row, open (its name lost as OCaml loses it: the scope check of update_level)
+                 (let [r (ty/row-repr row)]
+                   (ty/newty [:Tvariant (ty/create-row (:fields r) (ty/newvar) false (:fixed r) nil)]))
+                 (let [t1 (build-as-type (d 1)) t2 (build-as-type (d 2))] (ty/unify t2 t1) t1))
+      :Tpat_variant (ty/newty [:Tvariant (ty/create-row [[(d 1) (ty/rf-present (some-> (d 2) build-as-type))]] (ty/newvar) false nil nil)])
       :Tpat_record (let [ppl (into {} (map (fn [[l q]] [(:pos l) q]) (d 1)))
                          t (ty/newvar)]
                      (doseq [lbl (ty/label-all (first (first (d 1))))]
@@ -244,7 +249,7 @@
         t (ty/newty [:Tvariant (ty/create-row fields (ty/newvar) false nil [path tyl])])
         pats (map (fn [[l p]] {:desc [:Tpat_variant l p (atom nil)] :type t}) pats)]
     (when (empty? pats) (type-error (str "The type " (str/join "." (env/lid-parts lid)) " is not a variant type")))
-    [path (reduce (fn [p p0] {:desc [:Tpat_or p0 p] :type t}) (first pats) (rest pats))]))
+    [path (reduce (fn [p p0] {:desc [:Tpat_or p0 p (e 1)] :type t}) (first pats) (rest pats))]))
 
 (defn type-pat
   "The pattern sp at the expected type; its variables conj'ed onto the atom vars as [name id type]"
@@ -600,7 +605,10 @@
       :Pexp_function (let [sbody (if-let [c (d 2)]
                                    (if (and (= :Pfunction_body ((d 3) 0)) (= :Pconstraint (c 0)))
                                      [:Pfunction_body {:pexp_desc [:Pexp_constraint ((d 3) 1) (c 1)] :pexp_loc (:pexp_loc ((d 3) 1))}]
-                                     (type-error "this function's body constraint is outside the slice"))
+                                     (if (and (= :Pfunction_cases ((d 3) 0)) (= :Pconstraint (c 0)))
+                                       ;; fun p : t -> function ...: the cases' function type constrained
+                                       (conj (d 3) [::constraint (c 1)])
+                                       (type-error "this function's body constraint is outside the slice")))
                                    (d 3))
                            [params body t] (type-function env (d 1) sbody expected)]
                        (mkexp [:Texp_function params body] t loc))
@@ -817,7 +825,9 @@
   (if (empty? sparams)
     (case (sbody 0)
       :Pfunction_body (let [e (type-expect env (sbody 1) expected)] [[] [:body e] (:type e)])
-      :Pfunction_cases (let [[targ tres] (split-arrow expected [:Nolabel])
+      :Pfunction_cases (let [_ (when-let [[_ c] (first (filter #(and (vector? %) (= ::constraint (first %))) sbody))]
+                                 (unify! (ty/instance (env/make-generic! (env/transl-type env (atom {}) c))) expected "function"))
+                             [targ tres] (split-arrow expected [:Nolabel])
                              cases (type-cases env targ tres (sbody 1) false)]
                          [[] [:cases cases (partiality cases) (name-pattern "param" (map :lhs cases)) (get sbody 2)] expected]))
     (let [sp (first sparams) pd (:pparam_desc sp)]

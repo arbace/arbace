@@ -427,7 +427,16 @@
                 (when-not (@seen t)
                   (swap! seen conj t)
                   (when (identical? t v) (throw (ex-info "occur check" {:unify :occur})))
-                  (run! go (children (desc t))))))]
+                  ;; Ctype.occur_rec: a cycle through a variant is a recursive type, allowed; one through an
+                  ;; abbreviation retried on its expansion
+                  (let [d (desc t)]
+                    (case (d 0)
+                      :Tvariant nil
+                      :Tconstr (try (run! go (d 2))
+                                    (catch arbace.lang.ExceptionInfo e
+                                      (let [x (expand-head t)]
+                                        (if (and (:unify (ex-data e)) (not (identical? x t))) (go x) (throw e)))))
+                      (run! go (children d)))))))]
       (go t))))
 
 (defn update-level
@@ -627,7 +636,8 @@
                                          (if posi [[l (rf-either-of nil)] 0] [orig 0]))))
                                    (filter-row-fields false (row-fields row)))
                           c (reduce max 0 (map second fs))]
-                      [(newty [:Tvariant (create-row (mapv first fs) (newvar) posi nil (when-not (pos? c) (row-name row)))]) 2])))
+                      ;; the row's name: OCaml's is lost (on its levels' update below the type's scope)
+                      [(newty [:Tvariant (create-row (mapv first fs) (newvar) posi nil nil)]) 2])))
       :Tnil (if posi [(newvar) 2] [t 0])
       [t 0])))
 
@@ -695,9 +705,16 @@
   "Ctype.immediacy: an int, a char, or a variant whose constructors are all constant"
   [t]
   (let [t (expand-head t) d (desc t)]
-    (and (= :Tconstr (d 0))
-         (let [decl (*find-type* (d 1))]
-           (boolean (:immediate decl))))))
+    (case (d 0)
+      :Tconstr (let [decl (*find-type* (d 1))]
+                 (boolean (:immediate decl)))
+      ;; a closed row whose tags have no argument
+      :Tvariant (let [row (d 1)]
+                  (and (row-closed row)
+                       (not (some (fn [[_ f]] (let [v (field-view f)]
+                                                (or (and (= :Rpresent (v 0)) (v 1)) (and (= :Reither (v 0)) (not (v 1))))))
+                                  (row-fields row)))))
+      false)))
 
 (declare value-kind*)
 
@@ -814,7 +831,7 @@
   (let [order (atom []) seen (atom #{})
         aliased (mark-loops ts)]
     (letfn [(go [t] (let [t (repr t) px (type-proxy t)]
-                      (if (and (aliased px) (not= px t))
+                      (if (and (aliased px) (not (tvar? t)))
                         (when-not (@seen px)
                           (swap! seen conj px)
                           (swap! order conj px)
@@ -823,14 +840,14 @@
                           (swap! seen conj t)
                           (if (tvar? t) (swap! order conj t) (run! go (printer-children t)))))))]
       (run! go ts))
-    (let [named (set (keep #((desc %) 1) @order))
+    (let [named (set (keep #(when (tvar? %) ((desc %) 1)) @order))
           counter (atom 0)]
       (loop [vs @order m {} used #{}]
         (if (empty? vs)
           (assoc m ::aliased aliased ::printed (atom #{}))
-          (let [v (first vs) nm ((desc v) 1)]
+          (let [v (first vs) nm (when (tvar? v) ((desc v) 1))]
             (cond
-              (not= generic-level (level v))
+              (and (tvar? v) (not= generic-level (level v)))
               (let [n (or (get @weak-names v) (let [n (str "'_weak" (swap! weak-counter inc))] (swap! weak-names assoc v n) n))]
                 (recur (rest vs) (assoc m v n) used))
               nm (let [n (if (used nm) (first (remove used (map #(str nm %) (iterate inc 1)))) nm)]
