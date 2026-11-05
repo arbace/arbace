@@ -91,15 +91,52 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Memory
 
+(declare val!)
+
+(defn- bf-load!
+  "A bit-field's value from its storage unit (a marker {:bf addr :shift :w :ty}): the unit loaded, the field's bits
+  extracted, sign-extended for a signed type."
+  [{:keys [bf shift w ty]}]
+  (let [lt (abi/llvm-type ty) n (* 8 (abi/size-of ty)) shift (long shift) w (long w)
+        v (val! (list 'load lt ['ptr bf] :align (abi/align-of ty)))
+        r (if (abi/signed? ty)
+            (let [hi (- n w shift) v (if (pos? hi) (val! (list 'shl lt v hi)) v)] (if (< w n) (val! (list 'ashr lt v (- n w))) v))
+            (let [v (if (pos? shift) (val! (list 'lshr lt v shift)) v)] (if (< w n) (val! (list 'and lt v (dec (bit-shift-left 1 w)))) v)))]
+    (if (= :bool (abi/bn (abi/underlying (abi/unq ty)))) (val! (list 'trunc lt r 'i1)) r)))
+
+(defn- bf-store! [{:keys [bf shift w ty]} v]
+  (let [lt (abi/llvm-type ty) n (* 8 (abi/size-of ty)) shift (long shift) w (long w)
+        m (if (>= w 64) -1 (dec (bit-shift-left 1 w)))
+        v (if (= :bool (abi/bn (abi/underlying (abi/unq ty)))) (if (boolean? v) (if v 1 0) (val! (list 'zext 'i1 v lt))) v)
+        old (val! (list 'load lt ['ptr bf] :align (abi/align-of ty)))
+        keep (bit-not (bit-shift-left m shift))
+        keep (if (< n 64) (let [x (bit-and keep (dec (bit-shift-left 1 n)))] (if (>= x (bit-shift-left 1 (dec n))) (- x (bit-shift-left 1 n)) x)) keep)
+        vm (val! (list 'and lt v (if (< n 64) (let [x m] (if (>= x (bit-shift-left 1 (dec n))) (- x (bit-shift-left 1 n)) x)) m)))
+        vs (if (pos? shift) (val! (list 'shl lt vm shift)) vm)
+        cl (val! (list 'and lt old keep))]
+    (emit! (list 'store [lt (val! (list 'or lt cl vs))] ['ptr bf] :align (abi/align-of ty)))))
+
 (defn- load! [ty addr]
+  (if (map? addr) (bf-load! addr)
   (let [t (abi/llvm-type ty) a (abi/align-of ty)
         v (val! (list 'load t ['ptr addr] :align a))]
-    (if (= :bool (abi/bn (abi/underlying (abi/unq ty)))) (val! (list 'trunc 'i8 v 'i1)) v)))
+    (if (= :bool (abi/bn (abi/underlying (abi/unq ty)))) (val! (list 'trunc 'i8 v 'i1)) v))))
 
 (defn- store! [ty v addr]
+  (if (map? addr) (bf-store! addr v)
   (let [t (abi/llvm-type ty) a (abi/align-of ty)
         v (if (= :bool (abi/bn (abi/underlying (abi/unq ty)))) (if (boolean? v) (if v 1 0) (val! (list 'zext 'i1 v 'i8))) v)]
-    (emit! (list 'store [t v] ['ptr addr] :align a))))
+    (emit! (list 'store [t v] ['ptr addr] :align a)))))
+
+(declare offset!)
+
+(defn field-place
+  "The place of field `i` of class `cid` in the object at `base`: its address, or a bit-field's marker."
+  [base cid i]
+  (let [f (nth (:fields (abi/cls cid)) i) l (abi/layout cid) uoff (long (nth (:fields l) i))]
+    (if (:bits f)
+      {:bf (offset! base uoff) :shift (- (long (nth (:bitoffs l) i)) (* 8 uoff)) :w (:bits f) :ty (:ty f)}
+      (offset! base uoff))))
 
 (defn- offset! [addr ^long off]
   (if (zero? off) addr (val! (list 'getelementptr :inbounds 'i8 ['ptr addr] ['i64 off]))))
@@ -661,7 +698,7 @@
   (case (:op e)
     :var (var-addr (:id e))
     :deref (emit-rv (:e e))
-    :field (offset! (emit-lv (:obj e)) (abi/field-offset (:cls e) (:i e)))
+    :field (field-place (emit-lv (:obj e)) (:cls e) (:i e))
     :base-lv (offset! (emit-lv (:e e)) (base-offset (:id (abi/unq (:ty (:e e)))) (:to e)))
     :derived-lv (offset! (emit-lv (:e e)) (- (long (base-offset (:to e) (:id (abi/unq (:ty (:e e))))))))
     :reinterpret-lv (emit-lv (:e e))
@@ -747,10 +784,10 @@
                       (= :zero (:i fill)) (memset! (offset! addr (* (count (:items init)) sz)) (* (- n (count (:items init))) sz))
                       :else (doseq [i (range (count (:items init)) n)] (emit-init (offset! addr (* i sz)) et fill))))))
               (let [cid (:id tu) c (abi/cls cid) l (abi/layout cid)
-                    subs (concat (map-indexed (fn [i b] [(nth (:bases l) i) {:k :class :id (:cls b)}]) (:bases c))
-                                 (map-indexed (fn [i f] [(nth (:fields l) i) (:ty f)]) (:fields c)))]
+                    subs (concat (map-indexed (fn [i b] [#(offset! addr (nth (:bases l) i)) {:k :class :id (:cls b)}]) (:bases c))
+                                 (map (fn [i] [#(field-place addr cid i) (:ty (nth (:fields c) i))]) (or (:fields-used init) (range (count (:fields c))))))]
                 (when (abi/dynamic? cid) (fail :codegen "an aggregate with a vptr"))
-                (doseq [[[off st] it] (map vector subs (:items init))] (emit-init (offset! addr off) st it))))
+                (doseq [[[place st] it] (map vector subs (:items init))] (emit-init (place) st it))))
       (fail :codegen "initializer " (:i init)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1006,7 +1043,7 @@
                           (when (abi/dynamic? cid) (vptr-store! cid thisv))
                           (doseq [fi (:fields ti)]
                             (let [fl (nth (:fields (abi/cls cid)) (:field fi))
-                                  addr (offset! thisv (abi/field-offset cid (:field fi)))
+                                  addr (field-place thisv cid (:field fi))
                                   ft (abi/unq (:ty fl))]
                               (with-full (emit-init addr (:ty fl) (:init fi)))
                               (when (and (abi/class? ft) (nontrivial-dtor? (:id ft))) (push-cleanup! {:eh-only true :addr addr :cls (:id ft)})))))))
@@ -1198,9 +1235,9 @@
                 (when (and (every? some? ls) (#{:none :zero} (:i fill))) (vec (apply concat ls))))
               (let [cid (:id tu) l (abi/layout cid) c (abi/cls cid)
                     subs (concat (map-indexed (fn [i b] [(nth (:bases l) i) {:k :class :id (:cls b)}]) (:bases c))
-                                 (map-indexed (fn [i f] [(nth (:fields l) i) (:ty f)]) (:fields c)))
+                                 (map (fn [i] [(nth (:fields l) i) (:ty (nth (:fields c) i))]) (or (:fields-used init) (range (count (:fields c))))))
                     ls (map (fn [[o st] it] (const-leaves st it (+ off (long o)))) subs (:items init))]
-                (when (and (not (abi/dynamic? cid)) (every? some? ls)) (vec (apply concat ls)))))
+                (when (and (not (abi/dynamic? cid)) (not-any? :bits (:fields c)) (every? some? ls)) (vec (apply concat ls)))))
       :string (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
                 (vec (map-indexed (fn [i ch] [(+ off i) 'i8 (long (int ch))]) (subs (str s (apply str (repeat n (char 0)))) 0 n))))
       nil)))
