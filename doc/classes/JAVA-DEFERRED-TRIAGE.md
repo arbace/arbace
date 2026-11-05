@@ -543,8 +543,9 @@ world plus F1's, F5's, F4's and F2's lists (by reference: `tls-sources` names no
 `ProviderConfigJsse.ae` repeats F1's `getProvider` with SunJSSE beside it, so the branch merges after
 `java-jc9-jca`, `java-jc9-logging` and `java-jc9-pki`. F3 does not need JC9b (no F7, F8, F10 or F11 class:
 the closure names none). The branch's hunks in the shared files are apart from the other branches' (`git
-merge-tree` with `java-jc9-jca`, `java-jc9-logging`: a conflict in this file alone, as `java-jc9-pki` had;
-with `java-jc9b`: none, once F3's lines in `bin/jrt-convert` and `sources` were moved off JC9b's).
+merge-tree` with `java-jc9-jca`, `java-jc9-logging`, `java-jc9b` and `java-jc9b-natives`: a conflict in this
+file alone, as `java-jc9-pki` had, once F3's lines in `bin/jrt-convert`, `sources` and LICENSE.md were moved off
+JC9b's; the resolution is the union, every branch adding sections of its own).
 **Not mergeable before its night**, as JC9's branches: its variants name classes `jdk/forms` does not hold yet
 (SSLContext, SNIHostName, SSLSocketImpl: "a variant for a class not in the inputs").
 
