@@ -21,12 +21,14 @@
   (field ^:public ^OutputStream out)
   ;; a connection select accepted ahead of accept
   (field ^:public ^Socket ahead)
+  ;; its entry of Fd's table (its streams and what closes it are the entry's)
+  (field ^:public ^Fd fd)
 
   (method ^:public ^:static ofFd ^Sock [^long fd ^String fn]
     (let [d (Fd/get fd)]
       (when (nil? d) (throw (ExtUnix/error 9 fn "")))
       (when (nil? (.-sock d)) (throw (ExtUnix/error 88 fn "")))
-      (.-sock d)))
+      (cast Sock (.-sock d))))
 
   (method ^:static errno ^int [^Throwable t]
     (let [^String m (if (nil? (.getMessage t)) "" (.getMessage t))]
@@ -39,6 +41,8 @@
   (method ^:public ^:static install ^long [^Sock s]
     (let [d (Fd.)]
       (set! (.-sock d) s)
+      (set! (.-fd s) d)
+      (set! (.-sdgram d) (== (.-typ s) 1))
       (set! (.-readable d) true)
       (set! (.-writable d) true)
       (Fd/install d)))
@@ -68,7 +72,8 @@
           (let [ss (ServerSocket.)]
             (.setReuseAddress ss true)
             (.bind ss (.-bound s) 50)
-            (set! (.-server s) ss))
+            (set! (.-server s) ss)
+            (when (some? (.-fd s)) (set! (.-sclose (.-fd s)) ss)))
           (catch IOException e (throw (ExtUnix/error (Sock/errno e) "bind" "")))))
       Rt/UNIT))
 
@@ -78,15 +83,20 @@
        (try
         (let [ss (ServerSocket.)]
           (.setReuseAddress ss true)
-          (.bind ss (or (.-bound s) (InetSocketAddress. 0)) (Rt/ii n))
-          (set! (.-server s) ss))
+          (.bind ss (if (nil? (.-bound s)) (InetSocketAddress. 0) (.-bound s)) (Rt/ii n))
+          (set! (.-server s) ss)
+          (when (some? (.-fd s)) (set! (.-sclose (.-fd s)) ss)))
         (catch IOException e (throw (ExtUnix/error (Sock/errno e) "listen" "")))))
       Rt/UNIT))
 
   (method ^:static attach ^void [^Sock s ^Socket c]
     (set! (.-conn s) c)
     (set! (.-in s) (.getInputStream c))
-    (set! (.-out s) (.getOutputStream c)))
+    (set! (.-out s) (.getOutputStream c))
+    (when (some? (.-fd s))
+      (set! (.-sin (.-fd s)) (.-in s))
+      (set! (.-sout (.-fd s)) (.-out s))
+      (set! (.-sclose (.-fd s)) c)))
 
   (method ^:public ^:static caml_unix_accept [cloexec fd]
     (let [s (Sock/ofFd (Rt/l fd) "accept")]
@@ -99,8 +109,9 @@
                          (finally (Gil/lock)))))
             n (Sock.)]
         (set! (.-domain n) (.-domain s))
-        (Sock/attach n c)
-        (Rt/tuple (new Object/1 [(Long/valueOf (Sock/install n)) (Sock/valueOf (cast InetSocketAddress (.getRemoteSocketAddress c)))])))))
+        (let [i (Sock/install n)]
+          (Sock/attach n c)
+          (Rt/tuple (new Object/1 [(Long/valueOf i) (Sock/valueOf (cast InetSocketAddress (.getRemoteSocketAddress c)))]))))))
 
   (method ^:public ^:static caml_unix_connect [fd sa]
     (let [s (Sock/ofFd (Rt/l fd) "connect")
@@ -181,7 +192,7 @@
     (let [d (Fd/get fd)]
       (cond (nil? d) false
             (some? (.-sock d))
-            (let [s (.-sock d)]
+            (let [s (cast Sock (.-sock d))]
               (cond (some? (.-ahead s)) true
                     (some? (.-server s))
                     (try (.setSoTimeout (.-server s) 1)

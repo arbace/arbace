@@ -25,8 +25,13 @@
   (field ^:public ^int extra)
   ;; the path a file was opened by Unix.openfile with (fstat's), or nil
   (field ^:public ^String path)
-  ;; a socket (Unix.socket, OT9's sixth fix), or nil
-  (field ^:public ^Sock sock)
+  ;; a socket (Unix.socket, OT9's sixth fix): its Sock (held as an Object, so that a program without sockets does not reach Sock and
+  ;; java.net: the compiled level's package), its streams once connected, what closes it, whether it is a datagram socket
+  (field ^:public ^Object sock)
+  (field ^:public ^InputStream sin)
+  (field ^:public ^OutputStream sout)
+  (field ^:public ^java.io.Closeable sclose)
+  (field ^:public ^boolean sdgram)
 
   (field ^:public ^:static ^:final ^java.util.ArrayList table (java.util.ArrayList.))
 
@@ -131,7 +136,7 @@
       (cond (or (nil? d) (not (.-readable d))) (long -9)
             (.-dir d) (long -21)
             (some? (.-pipe d)) (.read (.-pipe d) buf off len (.-nonblock d))
-            (some? (.-sock d)) (Sock/read (.-sock d) buf off len)
+            (some? (.-sock d)) (Fd/sockRead d buf off len)
             :else
             (try
               (let [n (if (nil? (.-raf d)) (.read System/in buf off len) (.read (.-raf d) buf off len))]
@@ -143,7 +148,7 @@
     (let [d (Fd/get fd)]
       (cond (or (nil? d) (not (.-writable d))) (long -9)
             (some? (.-pipe d)) (.write (.-pipe d) buf off len (.-nonblock d))
-            (some? (.-sock d)) (Sock/write (.-sock d) buf off len)
+            (some? (.-sock d)) (Fd/sockWrite d buf off len)
             :else
             (try
               (if (nil? (.-raf d))
@@ -152,6 +157,22 @@
                     (.write (.-raf d) buf off len)))
               (long len)
               (catch IOException e (long (unchecked-negate (Fd/errnoOf e))))))))
+
+  ;; a socket's read and write (Sock's streams), outside the Gil: the count (0 at the end) or -errno (107 not connected, 104 reset)
+  (method ^:static sockRead ^long [^Fd d ^byte/1 buf ^int off ^int len]
+    (if (nil? (.-sin d))
+      (long -107)
+      (do (Gil/unlock)
+          (try (let [n (.read (.-sin d) buf off len)] (if (< n 0) (long 0) (long n)))
+               (catch IOException e (long -104))
+               (finally (Gil/lock))))))
+  (method ^:static sockWrite ^long [^Fd d ^byte/1 buf ^int off ^int len]
+    (if (nil? (.-sout d))
+      (long -107)
+      (do (Gil/unlock)
+          (try (.write (.-sout d) buf off len) (.flush (.-sout d)) (long len)
+               (catch IOException e (long -32))
+               (finally (Gil/lock))))))
 
   ;; lseek(2): the new offset or -errno
   (method ^:public ^:static seek ^long [^long fd ^long off ^int whence]
@@ -182,7 +203,7 @@
           (cond
             (> (.-extra d) 0) (do (set! (.-extra d) (unchecked-dec-int (.-extra d))) (long 0))
             (some? (.-pipe d)) (do (.closeEnd (.-pipe d) (.-pipeW d)) (long 0))
-            (some? (.-sock d)) (do (Sock/close (.-sock d)) (long 0))
+            (some? (.-sock d)) (do (when (some? (.-sclose d)) (try (.close (.-sclose d)) (catch IOException e nil))) (long 0))
             (nil? (.-raf d))
             (do (when (> (.-std d) 1) (try (.flush (Fd/stream d)) (catch IOException e nil))) (long 0))
             :else
