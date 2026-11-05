@@ -57,6 +57,7 @@
 (def tc-int (ext-name "tc" "GHC.Internal.Types" "Int"))
 (def tc-integer (ext-name "tc" "GHC.Internal.Bignum.Integer" "Integer"))
 (def tc-double (ext-name "tc" "GHC.Internal.Types" "Double"))
+(def tc-float (ext-name "tc" "GHC.Internal.Types" "Float"))
 (def tc-char (ext-name "tc" "GHC.Internal.Types" "Char"))
 (def tc-bool (ext-name "tc" "GHC.Internal.Types" "Bool"))
 (def cls-num (ext-name "tc" "GHC.Internal.Num" "Num"))
@@ -859,7 +860,7 @@
       (swap! *wanteds* conj w))))
 
 (defn- core-name [top? n] (if top? n (lv n)))
-(defn- bind-core [top? n] (if top? n (lv n)))
+(defn- bind-core [top? n] (if (and top? (ext? n)) n (lv n)))
 
 (defn tc-group
   "A binding group: [env' [(bind B core)...]]; sigs {NAME type}"
@@ -886,7 +887,9 @@
                                       (let [t (fresh-meta) c (infer-grhss env1 (arg (lval b) 4) t)
                                             [env2 pc] (tc-pat env1 (arg (lval b) 2) t)]
                                         (doseq [[n m] es] (unify m (:mono (get env2 n))))
-                                        (mapv (fn [[n _]] [n (list 'match [c] [(list 'clause [pc] (lv n))])]) es))))
+                                        ;; the right-hand side bound once, each variable selected from it
+                                        (let [pn ["loc" "var" "pat" (str "u" (fresh-id))]]
+                                          (into [[pn c]] (mapv (fn [[n _]] [n (list 'match [(lv pn)] [(list 'clause [pc] (lv n))])]) es))))))
                                   unsigned entries)))
                 results (vec (apply concat results))
                 [tvs preds params] (generalize (mapv second all) @ws (restricted? unsigned))
@@ -1050,9 +1053,10 @@
 (defn- head-occs
   "The type constructors' occurrence names of an instance head, as GHC's dictionary functions spell them"
   [ts]
-  (apply str (map (fn [t] (let [t (zonk t)]
+  ;; each argument's outermost type constructor, synonyms expanded (State Env: StateT)
+  (apply str (map (fn [t] (let [t (deep-expand (zonk t))]
                             (case (first t)
-                              :tc (let [o (occ (second t))] (str (case o "Unit" "Unit" o) (head-occs (nth t 2))))
+                              :tc (occ (second t))
                               ""))) ts)))
 
 (defn- inst-decl!
@@ -1111,7 +1115,9 @@
         ctx (mapv (fn [[c xs]] [c (mapv #(subst skol %) xs)]) ctx)
         params (mapv dict-param ctx)
         self-term (if (empty? params) (list 'v dfun) (list 'app (list 'v dfun) params))
-        givens (into (super-closure (mapv vector ctx params)) [[[cls ts] self-term]])
+        ;; the instance's own dictionary is a given too, its superclasses with it (GHC selects a superclass of the
+        ;; instance being defined rather than solving it again from the instances)
+        givens (super-closure (conj (mapv vector ctx params) [[cls ts] self-term]))
         info (get @*classes* cls)
         defined (into {} (keep (fn [b] (when-let [n (bind-name b)] [(occ n) b])) binds))
         methods (for [mn (:methods info)]
@@ -1126,14 +1132,19 @@
                               (if (empty? params) (list 'app f [d]) (list 'lam params (list 'app f [d]))))
                             (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "noMethodBindingError")) [(list 'lit (occ mn))])))]))
         supers (for [[sc sts] (:supers info)]
-                 (or (solve-pred [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)] (vec (remove #(= [cls ts] (first %)) givens)) 0)
+                 (or (solve-pred [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)] (super-closure (mapv vector ctx params)) 0)
                      (do (error! "no superclass dictionary " (occ sc)) (list 'lit "?"))))
         dcon (list 'v (ext-name "var" (nmod cls) (str "C:" (occ cls))))
         ;; an instance with a context: each superclass dictionary a binding of its own over the context's
         ;; dictionaries ($cp1Cls), as GHC's tcSuperClasses makes it; without one the dictionary inline
-        sc-binds (when (seq params)
-                   (vec (map-indexed (fn [i term] [(fresh-lv (str "$cp" (inc i) (occ cls))) (list 'lam params term)]) supers)))
-        sc-fields (if (seq params) (map (fn [[x _]] (list 'app x params)) sc-binds) supers)
+        ;; (also without a context when the dictionary is not a variable: GHC binds it apart, $cpNCls)
+        sc-entries (vec (map-indexed (fn [i term]
+                                       (if (or (seq params) (not (and (seq? term) (= 'v (first term)))))
+                                         [(fresh-lv (str "$cp" (inc i) (occ cls))) (if (seq params) (list 'lam params term) term)]
+                                         [nil term]))
+                                     supers))
+        sc-binds (vec (filter first sc-entries))
+        sc-fields (map (fn [[x term]] (cond (nil? x) term (seq params) (list 'app x params) :else x)) sc-entries)
         fields (concat sc-fields (map (fn [[cm _]] (if (empty? params) cm (list 'app cm params))) methods))
         dict (list 'app dcon (vec fields))]
     (into [(list 'bind dfun (if (empty? params) dict (list 'lam params dict)))]
@@ -1173,11 +1184,13 @@
     (case kind
       :int (cond (= tn tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str val "#"))])
                  (= tn tc-double) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "D#")) [(list 'lit (str val ".0##"))])
+                 (= tn tc-float) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "F#")) [(list 'lit (str val ".0#"))])
                  (= tn tc-integer) (list 'app (list 'v (ext-name "var" "GHC.Internal.Bignum.Integer" "IS")) [(list 'lit (str val "#"))])
                  :else (list 'app (list 'v f) [ev (list 'app (list 'v (ext-name "var" "GHC.Internal.Bignum.Integer" "IS")) [(list 'lit (str val "#"))])]))
       :frac (let [txt (let [s (nth val 1)] (if (seq? s) (second s) (str s)))]
-              (if (= tn tc-double)
-                (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "D#")) [(list 'lit (str txt "##"))])
+              (case (when tn (occ tn))
+                "Double" (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "D#")) [(list 'lit (str txt "##"))])
+                "Float" (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "F#")) [(list 'lit (str txt "#"))])
                 (list 'app (list 'v f) [ev (list 'lit (str "rational " txt))]))))))
 
 (defn resolve-core
