@@ -564,3 +564,113 @@ What is left: `llvm/test`'s rejection tests as the corpus (LLS6 (i), (ii): the t
 errors with positions (the reader's refusals keep their own words), the attribute, calling-convention, `musttail`,
 funclet and metadata-structure rules, a fuller intrinsic table (`Intrinsics.td`'s), and the Makefile's targets for
 `roundtrip --text`, `verify-check` and `mutants` (this branch touches only repr/llvm, its script and the docs).
+
+## Decision sheet (2026-11-05)
+
+For the user to decide in one pass. Written from the branches `llvm-read`, `llvm-full`, `llvm-verify2`, `llvm-verify3`
+(this branch's base), `cpp-lower-dbg` and `cpp-codegen` (doc/cpp/CODEGEN.md, via `git show cpp-codegen:...`), and the GT9
+fragment `gt9-build:test/gate/crops/llvm-rust.edn`. Reading only: nothing was built or run, the figures are those the branches'
+docs record. LLS17 and LLS18 are decided (above); LLS5, LLS6 and LLS19 have been done in fact (rows marked "done in fact":
+the user may ratify them in a word).
+
+### What changed since the survey (2026-11-03)
+
+- **repr/llvm reads the whole grammar** (`llvm-read`): debug records, the `DI*` nodes as keyword forms, `callbr`,
+  `ptrtoaddr`, Windows EH pads, summaries, `uselistorder`; three judges per module (forms, object per the module's own
+  triple, `llvm-as`'s bitcode byte for byte: the bitcode is the canonical-text judge of LLS5 (a)). The lists: 282 modules
+  (C torture `-O0`/`-O2`/`-g`, C++, LTO, Windows, Rust, hand-written); forms 282 of 282, bitcode 282, objects 279 (3 `none`).
+- **`:full`** (`llvm-full`, LLS18 (a)): 282 of 282 printed back byte for byte (LL8 done on that list).
+- **The verifier** (`llvm-full`, `llvm-verify2`, `llvm-verify3`): `arbace/repr/llvm/verify.ae` after LLParser and LLVM 23's
+  Verifier, now **opt's whole stderr** (messages, positions, culprits): 282 of 282 valid modules as opt's; the held-out
+  mutants 1,040 of 1,082 whole stderr (96.1 %), verdicts about 99.8 %; probes 470 of 478 whole stderr (8 known in
+  `test/llvm/probes-known.tsv`). Not done: `llvm/test`'s rejection tests as the corpus, a few attribute/DI rules.
+- **The lowering took the reader's new forms** (`cpp-lower-dbg`): debug records and `!dbg` dropped (`-g` lowers as `-g0`),
+  structured metadata values refused as `:metadata`, `callbr` with an empty template lowered, `:callbr` and `:windows-eh`
+  refused. Vectors, `blockaddress` and `ptrtoaddr` are not reported done there; LL5 is open.
+- **`llvm23` and `llvm23-test-utils` are installed** (`opt`, `llvm-as`, `lli`, `FileCheck` at clang's 23.1.4): the verifier's
+  judge is `opt -passes=verify`; `lli` is available as an IR reference (LLS3, LLS8, LL10). The llvm-project 23.1.4 tarball
+  is pinned in `test/cpp/corpora.edn` (fetched-into `.tmp/llvm/`, SHA-512 against Alpine's APKBUILD); llvm-test-suite's pin
+  is still `:later`.
+- **cpp-codegen makes Arbace a second producer of LLVM forms** (G1: 38 of 38 samples through three levels: lowered and run by
+  gcc equal to clang's route, the IR printed and built by `clang++`, every defined name one clang defines). Decided there
+  (P1, 2026-11-05): the output is LLVM forms, through the same lowering and runtime. Consequences for this crop: the
+  lowering is now the contract between **two** producers (clang's IR and ours), so judging it once, on its own corpus (LLS1),
+  is worth more; our IR is a corpus by construction (byte-offset memory, no struct types, no attributes, so it shows what
+  the lowering does without clang's attributes: P4 will add `nounwind`), and the verifier of repr/llvm can judge it
+  (`opt -passes=verify` is already the native level's check); G2-G6 (about 22 to 33 days) will keep changing
+  `arbace.cpp.lower` (SysV classification, exceptions, vtables) for a long time, which makes the LL2 move costlier early.
+  `cpp-cx8` (the lowering on ci and compiled; samples 10 of 14, 4 in classes) is not in main as seen from this branch.
+- **GT9's llvm fragment** (`test/gate/crops/llvm-rust.edn`, group `:llvm` = `bin/repr-llvm`, `arbace/repr/llvm{.ae,/}`,
+  `test/cpp/runtime/`, `test/repr/llvm/`): one interim step, `llvm-roundtrip` (`:phase :full`, chain `llvm-full`, 3 GiB, needs
+  `cpp-runtime`; `bin/repr-llvm roundtrip .tmp/cppi/runtime/ir-units.txt .tmp/gate/llvm-roundtrip`; hosts stage0, cxx, llvm;
+  pin `test/cpp/corpora.edn`; summary `same|differ|control|FAIL`), over C++'s pinned runtime IR (198 units), half a share
+  (GTS221 (a)), control `test/repr/llvm/roundtrip-controls.txt`. It assumes: the verb `roundtrip LIST WORK` (exists on
+  `llvm-read`), the controls file (NEW; `test/repr/llvm/` does not exist on this branch), the list
+  `test/llvm/essential.txt` (NEW, LL1: until then the runtime's units), and a plan without the runtime's units is GTS221's
+  open item. It judges neither `:full`, the verifier nor eval: the step is the round trip alone, so everything built since
+  (LL4, LL8) is outside the gate. It needs the files `test/repr/llvm/*` and the essential list added before it can pass.
+
+### The REAP row as it would be now
+
+`test/reap/cells.edn`'s `:languages` is `[:clojure :java :go :c]`; the new levels are the same four. Row `:llvm`, an
+intermediate row printed after the languages (LLS1 (a)); cells and their sources:
+
+| cell | sources today | status |
+|---|---|---|
+| read | `bin/repr-llvm roundtrip` over the 282 modules (forms, object, bitcode); `bin/repr-llvm verify-check` (sets and held-out mutants, probes, vs `opt`), classes by `test/llvm/divergences-read.edn` (new; the 8 probes' known file is the seed) | can be recorded now on the 282-module list and the mutant sets; `llvm/test` not read (needs the tarball extracted and LL1's count) |
+| eval | `llvmi`'s run of recorded IR: lowering to C forms on ci, against the IR's own build by clang 23 (`test/llvm/ref-clang23.edn`); today only C++'s `cppi lower-check` (234 of 234 libstdc++ tests, gcc the judge) and cpp-codegen's `codegen-check` (38) exist | no `llvmi`, no reference file: LL2 and LL6 |
+| AOT | `llvmi check --aot`: the same C forms through cf2g | C++'s AOT record of the samples (10 of 14) is the only record; LL7 |
+| print | `bin/repr-llvm roundtrip --text` (`:full`, 282 of 282), the printed canonical text read by `llvm-as` equal to the original's bitcode | can be recorded now; classes file new |
+
+So at once only read and print could be checked (about two cells of four, on small corpora); eval and AOT wait for LL2, LL6,
+LL7. The judging code (`test/reap/main.ae`) needs a reader for repr/llvm's results files and a `:languages` entry for an
+intermediate row (a few hours, LL9's).
+
+### Milestones: effectively done
+
+| milestone | state |
+|---|---|
+| LL1 spec and pins | pins mostly done (tarball pinned, llvm23 named by the note above); the spec is still `doc/cpp/LLVM.md`, not moved; `llvm/test` not counted, no `test/llvm/corpora.edn`, no synthetic generator. Open, about 1 day |
+| LL2 the move | not started; see LLS13/LLS2 |
+| LL3 read: the whole grammar | **done in substance** (`llvm-read`) on the 282 and the probes; open: `llvm/test`'s whole as the corpus, the classes file, `bin/repr-llvm check` over it |
+| LL4 the verifier | **done beyond the survey's stage (iii)** (whole stderr); open: `llvm/test`'s rejection corpus (needs the tarball), a few rules |
+| LL5 the lowering's breadth | partial (`cpp-lower-dbg`: debug, `callbr`); vectors, `blockaddress`, `freeze` flags, `ptrtoaddr`, `-O2` intrinsics open |
+| LL6, LL7 llvmi's check, AOT | not started |
+| LL8 `:full` | **done** on the 282 (`llvm-full`); open: `llvm/test`'s files |
+| LL9 the row | not started (the GT9 step is the interim) |
+| LL10, LL11 | not started, optional |
+
+Remaining by the survey's estimates: LL1 1-2, LL2 2-3, LL3 about 1-2 (was 5-9), LL4 about 1-2 (was 5-8), LL5 6-10, LL6 5-8, LL7
+2-4, LL8 about 0.5, LL9 2-3: **about 21 to 35 days** (was 31 to 52), the saving all in read, verifier and `:full`.
+
+### Decisions
+
+Recommendations carry costs in working days. "Done in fact" rows ask only for ratification.
+
+| id | question (two lines) | recommendation | cost | why, and what changed |
+|---|---|---|---|---|
+| LLS1 | The row: (a) an intermediate crop, its own row beside the ten languages; (b) part of C++'s row; (c) no row. | **(a)** | LL9 2-3 | Unchanged, stronger: two producers (clang's IR, cpp-codegen's) feed one lowering; one row judges it once. |
+| LLS2 | Timing: (a) after CX8 merges, LL2 only after it and RE2's rename; (b) now; (c) after C++'s and Rust's rows. | **(a), refined: LL1, LL3, LL4, LL8 (reader-side, repr/llvm only) go on now; LL2 and LL5 wait until codegen's G2 settles `arbace.cpp.lower`** | 0 extra | The reader side is done without waiting; the lowering is the moving part (CX8 not in main, codegen G2-G6 coming). |
+| LLS3 | Reference: (a) the host's clang 23.1.4; (b) the `llvm23` apk; (c) built from the tarball. | **(a)+(b) as installed**: clang for builds and objects, `opt`/`llvm-as` for the verifier and bitcode, `lli` optional; pin both versions in LL1; (c) no | 0 (installed) | The apk is installed and used: the verifier and bitcode judges depend on it. Ratify, and record `llvm23`'s apk version in the pins. |
+| LLS4 | Version churn: (a) one version, a bump an event; (b) several versions' spellings; (c) bitcode as the only stable input. | **(a)**; LL11 later | 0 | Unchanged. The bitcode judge already gives a version-pinned check. |
+| LLS5 | Read's judges: (a) forms, canonical text, objects. | **done in fact, as (a) with bitcode as the canonical-text judge**; ratify | 0 | `llvm-read` implements forms, object, bitcode: 282 of 282. |
+| LLS6 | Verifier: (a) staged, (b) acceptance only, (c) none. | **done in fact, beyond (a)**; ratify. Open: `llvm/test`'s rejections as corpus | 0 now; 1-2 later with the tarball | Whole stderr as opt's, 96 % held out. Stop extending the rules; the corpus's tail finds the rest. |
+| LLS7 | Eval's route: (a) lowering to C forms on ci; (b) an IR interpreter; (c) (a), then (b) as a second judge. | **(a), (b) as LL10 only if wanted** | LL6 5-8; LL10 15-25 | cpp-codegen's whole route is (a) (P1); `lli` is installed and gives a cheap semantics reference, so LL10 is less urgent than before. |
+| LLS8 | Eval's reference: (a) the IR's own build by the pin as data; (b) the source's compiler; (c) lli. | **(a)**; `lli` as a spot check on small modules | in LL6 | cpp-codegen's check already uses the IR's own build by clang (its "native" level) as one judge: the same machinery. |
+| LLS9 | Poison, undef, UB: (a) deterministic refinement, UB-free corpora; (b) tracked; (c) refuse. | **(a)** | in LL5 | Unchanged. Our own IR (no flags written) is UB-free by construction. |
+| LLS10 | Target intrinsics: (a) a class, a table grown by what the corpora reach; (b) x86's whole table; (c) refuse. | **(a)** | in LL5 | The verifier's intrinsic table (Intrinsics.td's immarg positions) already covers the read side. |
+| LLS11 | Corpora: (a) `llvm/test`, C's run corpora at `-O0`/`-O2`, client crops' IR deduplicated, synthetic, random, llvm-test-suite if fetched; (b) client IR alone; (c) (a)+MultiSource. | **(a)**, adding cpp-codegen's IR; **the go-ahead of the llvm-project tarball's fetch** (about 150 MB, SHA-512 pinned); llvm-test-suite's fetch still deferred | fetch minutes; LL1 counts 1-2 | `llvm/test` is the one corpus the reader, the verifier (rejections) and `:full` all still lack; it unblocks LL1, LL3's close and LL4's close. |
+| LLS12 | Optimization levels: (a) `-O0` and `-O2`; (b) `-O0` only. | **(a)** | in LL5 | Already read at both (torture at `-O2` round-trips); only the lowering is `-O0`-centred. |
+| LLS13 | Layout: (a) `arbace.repr.llvm`, `arbace.llvm.{lower,run,check,verify}`, `bin/llvmi`, `doc/llvm/`, `test/llvm/`; (b) all left under `cpp/`. | **(a) as the end state, moving LL2 after codegen G2 (or last, by renames only)**; the reader and verifier stay where they are | LL2 2-3 | `arbace.cpp.codegen`, `.sema`, `.abi` now sit on `arbace.cpp.lower`; moving it while G2 edits it costs merges in two crops. The repr half already lives in `arbace/repr/llvm/`. |
+| LLS14 | Evaluator's name: (a) `llvmi`; (b) `lli`; (c) `iri`. | **(a)**; `lli` is now installed, which confirms the clash | 0 | Decided by the facts. |
+| LLS15 | What C++ and Rust keep: (a) language-specific parts; the generic IR work judged once, deduplicated by digest; (b) both keep everything. | **(a)**; add: C++'s codegen-check stays C++'s (the producer), the lowering's breadth (LL5) is the row's | 0.5 in LL9 | Two producers make the split clearer: producers test themselves, the row tests the shared consumer. |
+| LLS16 | Embedding: (a) with C++ at the first re-seed after the tag; (b) its own later re-seed. | **(a)** | 0 (rides the re-seed) | The 2026-11-03 re-seed (d5548e72) was C only; C++'s embedding is the next, now with codegen and sema beside the lowering. |
+| LLS19 | Metadata: (a) `DI*` and debug records as structured forms; (b) text. | **done in fact, (a)**; ratify | 0 | `llvm-read` has them (`(!DILocation :line 3 ...)`); the lowering refuses them as `:metadata`, drops debug records. |
+| (new) LLS20 | GT9's interim `llvm-roundtrip` step: (a) keep as GT9 has it (the round trip alone, the runtime's units); (b) replace its list by the 282-module list and add `verify-check` and `roundtrip --text` as parts; (c) leave all out of the gate until LL9. | **(b)**, once `test/llvm/essential.txt` and `test/repr/llvm/roundtrip-controls.txt` exist | 0.5-1 | The step as written gates only the oldest part; the verifier and `:full` are most of the new code and have no gate coverage. Within half a share (the 282 list is minutes, the mutant sets must be a sampled part). |
+
+### What to decide first
+
+1. **LLS11's fetch** (the llvm-project tarball): unblocks LL1, the verifier's last corpus and `:full`'s.
+2. **LLS2/LLS13's refinement** (reader side now, the move after codegen's G2): the one change to the plan.
+3. **Ratify** LLS3, LLS5, LLS6, LLS19 (done in fact) and take LLS1, LLS4, LLS7-LLS10, LLS12, LLS14-LLS16 as recommended in one word.
+4. **LLS20**: whether the gate's interim step grows with the verifier and `:full`.
