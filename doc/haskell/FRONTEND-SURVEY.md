@@ -795,16 +795,21 @@ string patterns as character lists, newtype constructors transparent), groupEqua
 equations of a constructor gathered, the alternatives in tag order, DEFAULT first and only when a constructor is missing,
 and a DEFAULT standing for one constructor made that constructor's alternative (`refineDefaultAlt`, whose `ipv` binders
 GHC's `-O0` STG shows); guards as dsGuarded (`otherwise` and `True` drop out); list comprehensions as deListComp (the `-O0`
-translation, no foldr/build); lambdas collected (`mkLams`); the interfaces' inlined unfoldings normalised to the program's
-spelling. Failure is a let-bound thunk inlined when used once and dropped when unused (GHC: a join point over a void
-argument): a normaliser class. The elaborator gained the tables the passes need (`:all-cons` with tags and strict marks,
+translation, no foldr/build); lambdas collected (`mkLams`); lazy patterns (`~p`, kept by the elaborator now: each variable bound by a selector, as
+mkSelectorBinds); the interfaces' inlined unfoldings normalised to the program's spelling and, applied, beta-reduced (the
+simple optimiser's beta); a scrutinised variable replaced by its case binder in the alternatives (what GHC's `-O0` output
+shows). Failure is a let-bound handler inlined when used once and dropped when unused; shared, it becomes a join point in
+STG (`letne` of a `:j` closure over the void argument, called with `(##)`, as GHC's mkFailurePair and let-no-escape
+make it; an ordinary closure when a call is under a closure). The elaborator gained the tables the passes need (`:all-cons` with tags and strict marks,
 `:tycons` with each type's flavour and constructors, `:all-classes`), and a fix: the record selectors' case scrutinised
 an unbound variable.
 
 **HF6, CorePrep, CoreToStg, Unarise** (`arbace/repr/haskell/tostg.ae`, `arbace.repr.haskell.tostg`, about 450 lines): A-normal
 form (every non-trivial argument let-bound, the last argument's binding outermost as cpeArgs makes them; a string literal's
 `Addr#` bound by a case, as the spec's worked example), constructors saturated (a saturated application `con`/`rcon`, an
-unsaturated one the worker, whose binding the module carries; a strict field's argument evaluated first, `$WCon`'s work),
+unsaturated one the worker, whose binding the module carries; a strict field's argument evaluated first, `$WCon`'s work;
+the library classes' `C:Cls` constructors saturated too), floats (a saturated constructor's arguments' bindings floated out
+before it, a case scrutinee's lets out of the case, a top-level CAF's arguments to the top level: wantFloatTop),
 right-hand sides (lambda a `:r` closure, a saturated constructor of atoms `rcon`, else an updatable thunk), free variables
 (Stg/FVs; top-level binders excluded), representations from the constructors' `stg/data` (the libraries' dumps for theirs:
 `I#`'s field `:int`, `C#`'s `:word`, ...), literal alternatives with `(prim REP)`, the module's `stg/data` (data types,
@@ -815,27 +820,32 @@ binders `main:M/occ`, the libraries' by the unit of their module (read from the 
 
 **The judges** (`bin/repr-haskell stg-check`, `make repr-haskell-stg-check`; about 2 minutes, at most 1 GB a process):
 
-- **Run, the final judge**: the programs of `test/haskell/stg/` (six Haskell 2010 programs with a `main`: list functions
+- **Run, the final judge**: the programs of `test/haskell/stg/` (nine Haskell 2010 programs with a `main`: list functions
   and nested patterns, guards and character and numeric literal patterns, data types and classes with defaults, a user
   `State` monad with `Functor`/`Applicative`/`Monad` instances and `Maybe`'s `do`, records (construction, update, field
   patterns), strict fields, a `Num` instance, newtypes, `Integer`, `where` with local recursion, list comprehensions with
-  guards and `let`, imports of `Data.List` and `Data.Char`) compiled from source by Arbace's front end (native read, rename,
-  elaborate, desugar, STG) and run on hsi: **6 of 6 print GHC's `-O0` build's output byte for byte**. The negative control
+  guards and `let`, imports of `Data.List` and `Data.Char`, hsi's own samples `Hello` and `Nfib`, guards falling through
+  equations, string and `Integer` literal patterns, `reads`, local mutual recursion, lazy patterns) compiled from source by
+  Arbace's front end (native read, rename, elaborate, desugar, STG) and run on hsi: **9 of 9 print GHC's `-O0` build's
+  stdout byte for byte**. The negative control
   (each program's run against the next program's reference) fails as it must.
 - **Core** (decision 1 of HF3: in full from HF5): the desugared Core against the helper's tc verb after the judge's
-  normalisation: **152 of 220 bindings of the 17 typecheck samples equal** (107 of 220 before the match compiler), 41 of 71
-  of the six programs.
+  normalisation: **152 of 220 bindings of the 17 typecheck samples equal** (107 of 220 before the match compiler), 48 of 85
+  of the nine programs.
 - **STG** (`arbace/repr/haskell/stgcmp.ae`): per top-level binding of an external name, against the helper's `stg` dump at
-  `-O0`, Typeable bindings dropped, internal names renamed by first occurrence: **28 of 67 bindings equal**, the data
-  declarations equal (as sets) in 6 of 6.
+  `-O0`, Typeable bindings dropped, internal names renamed by first occurrence, a closure's free variables as a set (GHC
+  orders them by unique): **62 of 83 bindings equal**, the data declarations equal (as sets) in 9 of 9 (S01, S07, S08
+  entirely).
 
 The remaining differences, by class (none is a wrong result on the programs): (1) GHC's simple optimiser at `-O0`
-(`simpleOptPgm`): local functions used once inlined and beta-reduced, constant dictionaries and string literals floated to
-the top level as internal bindings (`$dShow_4`, `main_sat_6`): the STG judge compares `main` and the instances' methods
-against GHC's floated shape; (2) AbsBinds of a mutually recursive group without signatures (GHC's tuple and selectors,
-T04's `evens`/`odds`), which the elaborator writes as a letrec; (3) the failure join points' void argument; (4) GHC's
-top-level `(rec ...)` groups (the judge flattens them; hsi takes the separate bindings); (5) the order of the module's
-`stg/data` forms. Not covered yet: lazy patterns (the elaborator reads `~p` as `p`), `n+k`, view and bang patterns' strictness
+(`simpleOptPgm`): local functions used once inlined and beta-reduced, constant dictionaries floated to the top level as
+internal bindings (`$dShow_4`), record selectors applied to a matched record (`older`); (2) CorePrep's eta-expansion of
+top-level bindings of a function type that are not lambdas (`get = \eta -> get1 eta`, the newtype-wrapped functions,
+`total`); (3) the order of a binding's floats relative to a join point (`grade`); (4) AbsBinds of a mutually recursive
+group without signatures (GHC's tuple and selectors, T04's `evens`/`odds`), which the elaborator writes as a letrec; (5)
+GHC's top-level `(rec ...)` groups (the judge flattens them; hsi takes the separate bindings); (6) the order of the
+module's `stg/data` forms. hsi's own `Loop` sample (a 3,000,000 element `foldl`) exhausts the light runs' 3 GiB cap from
+GHC's STG as from ours: a memory class, not the compiler's. Not covered yet: `n+k`, view and bang patterns' strictness
 in matches, `seq`, overloaded literal patterns at non-built-in types beyond `(==)` chains, string literals with characters
 beyond ASCII (`unpackCStringUtf8#`), `fromRational` literals at other than `Double` and `Float`, foreign imports, the
 derived instances' bindings (HF4), unboxed tuples (no Unarise work yet), the Typeable bindings (`$trModule`, `$tc`), and
