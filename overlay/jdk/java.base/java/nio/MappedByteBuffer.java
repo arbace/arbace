@@ -11,7 +11,12 @@
  * src/java.base/share/classes/java/nio/MappedByteBuffer.java; Copyright (c) Oracle and/or its
  * affiliates, GPL 2 with the Classpath Exception: LICENSE.md): isLoaded is true and load does
  * nothing (the copy is in memory), force(index, length) writes the region back; unmapper answers
- * null (no unmapping of a heap copy).
+ * null (no unmapping of a heap copy). The class is non-sealed, where jdk26u's is sealed with
+ * DirectByteBuffer, which implements sun.nio.ch.DirectBuffer, as its one subclass: jrt's
+ * DirectByteBuffer is a heap buffer and not a DirectBuffer (no address), and the JCA's casts of a
+ * direct buffer to DirectBuffer (GaloisCounterMode's overlapDetection, behind isDirect, which is
+ * false) must still compile against it (F1 with F7: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+ * F7 (write-ahead)").
  * The rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package java.nio;
@@ -27,9 +32,8 @@ import jdk.internal.jrt.HostFileChannels;
  * A direct byte buffer whose content is a memory-mapped region of a file: in the Go build, a
  * heap copy of the region, written back to the file by {@link #force()}.
  */
-public abstract sealed class MappedByteBuffer
+public abstract non-sealed class MappedByteBuffer
     extends ByteBuffer
-    permits DirectByteBuffer
 {
 
     // The mapping of a file region, null for a buffer that maps no file (allocateDirect)
