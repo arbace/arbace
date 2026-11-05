@@ -703,10 +703,10 @@
         ;; a value of the cast integer type stored into a place: directly when the place is aligned enough, else through a
         ;; scratch alloca and a memcpy (PassMode::Cast's store)
         store-cast! (fn [bb ci val pl size]
-                      (let [calign size]
+                      (let [calign (cond (<= size 1) 1 (<= size 2) 2 (<= size 4) 4 :else 8)]
                         (if (>= (:align pl) calign)
                           (emit! bb (list 'store [ci val] ['ptr (:ptr pl)] :align (:align pl)))
-                          (let [sc (scratch! size calign)]
+                          (let [sc (scratch! calign calign)]
                             (emit! bb (list 'store [ci val] ['ptr sc] :align calign))
                             (declare! gl (symbol "g" "llvm.memcpy.p0.p0.i64") 'void [['ptr] ['ptr] ['i64] ['i1]])
                             (emit! bb (list 'call 'void (symbol "g" "llvm.memcpy.p0.p0.i64")
@@ -802,6 +802,13 @@
                                             (when-not (:array (:ly pl)) (unsupported "index of a non-array"))
                                             (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (backend-type lt gl (second (ty-struct (:ty pl)))) ['ptr (:ptr pl)] ['i64 idx])))
                                             {:ptr r :align (restrict-align (:align pl) (:size el)) :ly el :ty (second (ty-struct (:ty pl)))})
+                                  "cindex" (let [[_ off _ from-end] e
+                                                 _ (when-not (:array (:ly pl)) (unsupported "constant index of a slice"))
+                                                 el (layout lt (second (ty-struct (:ty pl))))
+                                                 idx (if from-end (- (:count (:array (:ly pl))) off) off)
+                                                 r (fresh!)]
+                                             (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (backend-type lt gl (second (ty-struct (:ty pl)))) ['ptr (:ptr pl)] ['i64 idx])))
+                                             {:ptr r :align (restrict-align (:align pl) (* idx (:size el))) :ly el :ty (second (ty-struct (:ty pl)))})
                                   (unsupported (str "place projection " (first e)))))
                               base (:rest base))))
         ;; field of an SSA pair/scalar value
@@ -867,6 +874,11 @@
                      "Eq" (cmp :eq) "Ne" (cmp :ne)
                      "Lt" (cmp (if sg :slt :ult)) "Le" (cmp (if sg :sle :ule))
                      "Gt" (cmp (if sg :sgt :ugt)) "Ge" (cmp (if sg :sge :uge))
+                     ;; Ord::cmp: llvm.ucmp / llvm.scmp
+                     "Cmp" (let [nm (symbol "g" (str "llvm." (if sg "scmp" "ucmp") ".i8." (:imm sc)))]
+                             (declare! gl nm 'i8 [[t] [t]])
+                             (emit! bb (list '= r (list 'call 'i8 nm [[t (:v a)] [t (:v b)]])))
+                             {:ty "i8" :v r})
                      (unsupported (str "binop " op))))))
         ;; a shift: the right operand cast to the left's type, masked, then shl / lshr / ashr
         fbin! (fn [bb op a b sc]
@@ -1473,7 +1485,7 @@
                                              len (second (:pair a)) r (fresh!)]
                                          (if (number? (:v len))
                                            (assign! bb dest {:ty "i64" :v (* unit (:v len))})
-                                           (do (emit! bb (list '= r (list 'mul 'i64 (:v len) unit)))
+                                           (do (emit! bb (list '= r (list 'mul :nuw :nsw 'i64 (:v len) unit)))
                                                (assign! bb dest {:ty "i64" :v r})))
                                          (when target (br-or-merge bb t target))))
                                      "compare_bytes"
