@@ -2740,3 +2740,107 @@ CX8/CX9: about 30-35 min (selftest unmeasured), at the share before CX8's check 
   `runtime-build` ran it (its tail failed after 198 of 198; run again), and a second `lower-essential` started while the first chain's still ran on the same runtime
   directory (four units crashed; run again alone: 6 of 6); `python3` for multi-line edits.
 - Scratch: `.tmp/reap-scratch/` (the stand-in records), `.tmp/repr-cpp-check/`, `.tmp/repr-cpp-roundtrip/`, `.tmp/cppi/` in the worktree.
+
+## As built: cppi-check (2026-11-05)
+
+On the branch `cppi-check` from `cpp-cx10` (5889aa52), with `cpp-cx8` (6d16c65a) and `cpp-cx9` (b2117cc6) merged into it, then main
+(d86cb874: the re-seed d5548e72, whose stage 0 embeds the tree's ci and repr/c). Round two of the day's light tier: stage 0 by
+`ARBACE_HOST_EXE` (main's), no gate run but `costs-test`, no executable built; the run checks at `CPPI_THREADS=2 CPPI_JOBS=4
+CPPI_CI_MEMLIMIT=4GiB`. Goal: C++'s eval and AOT cells checked, from CX8's records and a sampling recorded here.
+
+### The merges
+
+- **cpp-cx8 into cpp-cx10.** Conflicts both sides (the Makefile's `.PHONY`, `bin/cppi`'s verbs, `bin/lib/gate-run.bash`'s `gate_cxx_id`
+  and the plan's `ancestors.txt`, `test/gate/steps.edn`: CX10's steps and GT8's `:crops`, now with a crop `:cpp`, which
+  `test/gate/costs.ae` knows). The runtime's IR pin (`test/cpp/runtime/ir.sha256`): CX8 and CX10 fixed the same bug two ways (CX8 names the
+  shim relative to the tarball's root, CX10 rewrites the absolute path in the IR's first two lines); with CX8's `rt_ir` the shims' IR names
+  `../../../../test/cpp/runtime/shims/X`, the same in every checkout, and CX10's rewrite matches nothing: the pin's two lines are CX8's
+  (`runtime-build`: 198 of 198 against them here).
+- **cpp-cx9.** Both sides (`bin/repr-cpp`'s verbs, `test/c/judge_test.ae`'s tests, this file's sections).
+- **main.** Needed: main's stage 0 (the re-seed) embeds repr/c compiled; the branch's older copy, loaded from the checkout beside it, made
+  `runtime-ci` fail on every unit (`ClassCastException: arbace.repr.c.lex.Tok cannot be cast to arbace.repr.c.lex.Tok`). After the merge the
+  checkout's repr/c and ci are main's, the embedded ones. Conflicts both sides (the Makefile, `judge_test.ae`, `steps.edn`: c-roundtrip's
+  `:rotate`, then C++'s steps).
+
+### What was built
+
+- **A sampling's own record.** `bin/cppi check [--aot] --sample N` (no `--only`) is no longer only a subset: it is judged against
+  `test/cpp/check[-aot]-every-N-linux-amd64.edn` (its absent rows fail, as a whole corpus's do) and `--record` writes it (with its times,
+  `-every-N-times-`); `--judge` reads N from the run's `subset` marker; `bin/cppi divergences [--aot] [--sample N]`. `--only` stays a subset
+  (CI_SUBSET, no record). `arbace.cpp.check/run-judge`'s `--sample N`; the AOT level's interpreted column reads the eval record of the same
+  sampling. Why: the reference (`test/cpp/ref-gxx15.edn`, CX8) holds every 25th program of libstdcxx and gxx-dg-run, and C's rule (a subset is
+  not recorded) left 207 of its 224 programs judged by no record.
+- **The cells** (`test/reap/cells.edn`): eval's sources the whole corpora's record (`check-linux-amd64.edn`: samples, runtime) and the
+  sampling's (`check-every-25-linux-amd64.edn`: gxx-dg-run), each `:ref-runs test/cpp/ref-gxx15.edn` with `:ref-corpora` (new in
+  `test/reap/main.ae`'s `case-problems`: only the reference's cases of those corpora are wanted); AOT's the two compiled records, each
+  `:same-cases` its eval record; the `:until`s gone (CX8's and CX9's records exist). CX9's dg source named by its command, `bin/repr-cpp dg`.
+- **Classes.** `test/cpp/divergences-dg.edn` `:dg-unsupported` (31 files of CX9's record whose selector is false here or whose `.exp` driver is
+  not modelled; C's class of the name, CS195 (a); design); `test/cpp/divergences-print.edn` `:read-refused` (CX9's two modules files the
+  converter refuses; deferred, as the read level's class). The run classes are CX8's (`divergences.edn`, `divergences-aot.edn` empty).
+- **reap's round-trip reader** counts no `CORPUS-every-N.edn` beside `CORPUS-all.edn` (CX9's `gxx-modules-all` holds `gxx-modules-every-10`'s
+  119 files with equal verdicts: 119 "in 2 records" problems before).
+- **The negative controls** (GTS81 (a)): CX8's `_control/run/bitfields-vs-io` (samples) and the sampling's
+  `_control/run/no-elide2-vs-dr2137-1` (`gxx-dg-run/init/no-elide2.C`'s run, 15 bytes, against `DRs/dr2137-1.C`'s g++ run, empty), each
+  judged by `run-judge` at eval and AOT: "differs, as a control must".
+- **Gate steps** (`test/gate/steps.edn`, crop `:cpp`): essential `cpp-check-essential` and `cpp-aot-essential` (`bin/cppi check [--aot] --only
+  test/cpp/essential-check.txt`: 6 light programs, the control's subject among them, one recorded non-pass of class threads) after
+  `cpp-lower-essential` in the chain `cpp-essential`; `--full` `cpp-check` and `cpp-aot`, parts `samples-runtime` and `gxx-dg-run-every-25`.
+  Not run here (no `bin/gate`); `bin/gate --plan` needs this seed's stage 0 in the worktree (refused: "not building one here").
+
+### Numbers (this branch, this host)
+
+| run (this branch, warm unless said) | programs | result | wall | peak RSS |
+|---|---|---|---|---|
+| `bin/cppi check` (samples, runtime; first run: runtime-build, its ci library, musl read) | 14 | 10 pass, threads 3, long-double 1: CX8's record exactly; the control differs | 25.6 min (about 14 warm) | 7.5 GB |
+| `bin/cppi check --corpus gxx-dg-run --sample 25 --record` | 67 | 60 pass, oracle-rejected 6, oracle-text 1 (CX8's numbers); the control differs | 4.2 min | 3.0 GB |
+| `bin/cppi check --aot` | 14 | the same 10 and 4; compiled and interpreted agree on all 14 | 13.7 min | 4.8 GB |
+| `bin/cppi check --aot --corpus gxx-dg-run --sample 25 --record` | 67 | 60 pass, the same 7; agree on all 67 | 21.4 min | 4.0 GB |
+| `bin/cppi check --only test/cpp/essential-check.txt` | 6 | 5 pass, threads 1; the control differs | 60 s | 2.7 GB |
+| `bin/cppi check --aot --only test/cpp/essential-check.txt` | 6 | the same | 2.4 min | 3.8 GB |
+
+The sampling's judge, tampered record (`--judge`, restored after): a recorded pass that now fails is a REGRESSION and a recorded row the run
+lacks "absent from the run", both FAIL, exit 1. `bin/reap` (recorded, `test/reap/matrix.edn`): **20 of 20 cells checked, 0 problems**;
+C++ read 5,262 / 1,192 / 77, **eval 70 / 8 / 3**, **AOT 70 / 8 / 3** (each: the whole corpora samples and runtime, 10 / 1 / 3, and the
+sampling of gxx-dg-run, 60 / 7 / 0), print 1,625+ / 1,665 / 76. `test/gate/costs-test.bash` passes; `make check-makefile` passes.
+
+### The night (whole corpora; commands and expected outcomes)
+
+Each under the heavy lock (`bin/heavy-lock CMD`; `CPPI_THREADS=3`, a process up to about 10 GB on libstdcxx, CX8's measure), in this order:
+
+1. `bin/cppi check --corpus libstdcxx --sample 25 --record`, then `--aot`: 141 programs; expected about 127 pass and the rest in
+   CX8's classes (threads, long-double, speed, atomic-generic, va-arg), no UNCLASSED; about 50 min and 1.5 h. Then add `"libstdcxx"` to the
+   sampling sources' `:ref-corpora` and names in `test/reap/cells.edn` and the parts `libstdcxx-every-25` to `cpp-check` and `cpp-aot`,
+   `bin/reap --record`.
+2. The whole of gxx-dg-run: `bin/cppi record-ref --corpus gxx-dg-run` (g++'s runs of ~1,680 programs, about 1 h), then `bin/cppi check
+   --corpus gxx-dg-run --record` (about 40 min) and `--aot` (about 8 h at 21 min per 67: a night of its own). Expected: about 9 in 10 pass,
+   oracle-rejected about 1 in 10, a few oracle-text (`test/cpp/check-known.edn`). Then gxx-dg-run moves from the sampling's sources to the whole
+   corpora's (`:ref-corpora ["samples" "runtime" "gxx-dg-run"]`; the every-25 record of it is a subset and is dropped, with its part).
+3. libstdcxx whole (3,504 programs, about 23 h at 3 threads, CX8): not a night's; it waits for CP220.
+
+### Proposals (CP220-CP222; none decided)
+
+- **CP220 The run checks' cost.** ci's build holds the lowered runtime's checked units in each build process (7.5 GB at samples' peak, about
+  10 GB on libstdcxx) and dominates (CX8: 59 s a libstdcxx program). Options: (a) a ci library of prebuilt nodes for the runtime (CX8's report:
+  built once per runtime key, linked by reference), then the whole corpora; (b) the samplings only (every 25th) in the nightly, the whole
+  corpora at the clean run; (c) the samplings only, for good. Costs: (a) a change to ci's builder (arbace.c), days; (b) the clean run grows by
+  a day for libstdcxx; (c) the cells stay partial. *Recommended: (a), with (b) until it lands.*
+- **CP221 The essential subset's place.** `cpp-check-essential` and `cpp-aot-essential` add about 3.5 min warm (7 more when the runtime is
+  stale) to the chain `cpp-essential` (about 1.5 min before), beside C's chain. Options: (a) as built, in the essential gate; (b) in `--full`
+  only. *Recommended: (a)*: the share (GTS201 (a)) holds it, and a lowering change is caught at merge.
+- **CP222 A sampling's record.** Options: (a) as built: `--sample N` held to `check-every-N`, written by `--record`; (b) C's rule (no record
+  of a subset), the reference cut to the whole corpora recorded. *Recommended: (a)*: the reference already holds the sampling's runs, and the
+  cell counts what is recorded (185's DECISION (a)).
+
+### Left
+
+- CX9's `cpp-dg` gate step (CX10.4) and `cpp-c2j` (CP180): not here.
+- The gate steps are written and parse (`costs-test`); no `bin/gate --plan` here (this seed's stage 0 is not the worktree's). The first gate
+  run keys them.
+
+### Slips, scratch
+
+- `bin/lib/cppi/check` edited while the first background `bin/cppi check` ran it (bash reads its script as it goes): stopped (TaskStop)
+  before its runtime-build finished, run again after.
+- Two background waiters started on the same condition (one stopped). `python3` for multi-line edits, as CX10.
+- Scratch in the worktree's `.tmp/`: `cppi-check/`, `cppi-aot/` (the runs' work), `cppi/runtime/` (the lowered runtime and its ci library),
+  `ci-musl/`, `run-*.log`, `reap*.txt`.

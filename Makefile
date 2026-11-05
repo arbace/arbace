@@ -284,15 +284,15 @@ cppi-lower-corpus: ## C++'s lowering check over a recorded list of test/cpp/lowe
 	bin/cppi lower-corpus $(KEY)
 cppi-lower-essential: ## the essential subset of C++'s lowering check (test/cpp/essential-lower.txt: 6 programs, the negative control's pair) (bin/cppi lower-essential)
 	bin/cppi lower-essential
-cpp-essential: ## C++'s essential subsets, as the gate's chain cpp-essential runs them: tokens, round trip, lowering (bin/repr-cpp, bin/cppi)
-	bin/repr-cpp pp-check --essential && bin/repr-cpp roundtrip-corpus gxx-dg-essential && bin/repr-cpp roundtrip-corpus samples && bin/cppi lower-essential
+cpp-essential: ## C++'s essential subsets, as the gate's chain cpp-essential runs them: tokens, round trip, lowering, run on ci and compiled (bin/repr-cpp, bin/cppi)
+	bin/repr-cpp pp-check --essential && bin/repr-cpp roundtrip-corpus gxx-dg-essential && bin/repr-cpp roundtrip-corpus samples && bin/cppi lower-essential && bin/cppi check --only test/cpp/essential-check.txt && bin/cppi check --aot --only test/cpp/essential-check.txt
 cppi-run: ## a C++ file compiled to IR by the oracle, lowered, built by ci with the lowered runtime and musl, run on ci (bin/cppi run FILE; FILE=...)
 	bin/cppi run $(FILE)
 cppi-runtime-ci: ## the lowered runtime's units read by repr/c as ci's library, .tmp/cppi/runtime/ci (bin/cppi runtime-ci)
 	bin/cppi runtime-ci
 cppi-record-ref: ## g++ 15.2's -O0 runs of the C++ run corpora recorded, test/cpp/ref-gxx15.edn (bin/cppi record-ref; ARGS=--corpus ...)
 	bin/cppi record-ref $(ARGS)
-cppi-check: ## C++'s run check on ci: the run corpora lowered and run on ci against g++'s runs, every non-pass in a class of test/cpp/divergences.edn (bin/cppi check, default samples,runtime; ARGS=--corpus libstdcxx --sample 25, --only ..., --record)
+cppi-check: ## C++'s run check on ci: the run corpora lowered and run on ci against g++'s runs, every non-pass in a class of test/cpp/divergences.edn (bin/cppi check, default samples,runtime; ARGS=--corpus gxx-dg-run --sample 25 [--record]: the sampling's own record check-every-25, --only ..., --record)
 	bin/cppi check $(ARGS)
 cppi-check-aot: ## C++'s AOT check: the same programs translated by cf2g and built by TamaGo's go, against g++'s runs and test/cpp/divergences-aot.edn (bin/cppi check --aot; ARGS=...)
 	bin/cppi check --aot $(ARGS)
