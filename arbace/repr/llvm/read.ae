@@ -93,6 +93,8 @@
 ;; Mode :full's item spans (arbace.repr.llvm.full): when bound, each item's [start end] offsets in the text's order (a
 ;; top-level form, or a definition's header up to `{`, its labels, instructions, debug records, use-list orders and `}`).
 (def ^:dynamic ^java.util.ArrayList *items* nil)
+(def ^:dynamic *di-expression* false)   ; parsing a DIExpression's operands
+(declare di-names)
 (def ^:dynamic *pending* nil)   ; when bound (a volatile), an LLParser error inside a function body ends the reading there
 (def ^:dynamic ^"[J" *top* nil)
 
@@ -318,6 +320,8 @@
             (cond
               (and (#{"align" "alignstack"} w) (punct? "(") (= (kind 1) :int) (not (punct-at? 2 ")")))
               (llerr "expected ')'")
+              (and (#{"align" "alignstack"} w) (punct? "(") (not= (kind 1) :int))
+              (do (adv!) (llerr "expected integer"))
               (punct? "(") (if (type-attrs w)
                              (do (adv!) (when-not (type-start?) (llerr "expected type")) (let [t (parse-type)] (expect! ")") (list kw t)))
                              (list kw (raw-parens)))
@@ -477,13 +481,14 @@
     :meta (let [s (symbol (str "!" (text)))] (adv!) s)
     :mstr (let [s (unescape (text))] (adv!) (list '! s))
     :mspec (parse-di-node)
-    :punct (if (and (= (text) "!") (punct-at? 1 "{"))
+    :punct (if (and (= (text) "!") (not (punct-at? 1 "{"))) (do (adv!) (llerr "expected '{' here"))
+           (if (and (= (text) "!") (punct-at? 1 "{"))
              (do (adv!) (adv!)
                  (if (accept! "}")
                    (list '! [])
                    (let [xs (comma-list parse-md-value)]
                      (expect! "}") (list '! xs))))
-             (parse-typed))
+             (parse-typed)))
     :word (if (word? "null") (do (adv!) 'null) (parse-typed))
     :eof (llerr "expected metadata operand")
     (parse-typed)))
@@ -527,6 +532,15 @@
 (defn- parse-di-operand
   "An operand of a positional node: DIExpression's DW_OP words and integers, DIArgList's typed values."
   []
+  (when *di-expression*
+    ;; parseDIExpressionBody: a DWARF op or an attribute encoding by name, else an unsigned 64-bit integer
+    (cond
+      (and (= (kind) :word) (str/starts-with? (text) "DW_OP_"))
+      (when-not (contains? (di-names "DW_OP_") (text)) (llerr (str "invalid DWARF op '" (text) "'")))
+      (and (= (kind) :word) (str/starts-with? (text) "DW_ATE_"))
+      (when-not (contains? (di-names "DW_ATE_") (text)) (llerr (str "invalid DWARF attribute encoding '" (text) "'")))
+      (not (and (= (kind) :int) (not (str/starts-with? (text) "-")))) (llerr "expected unsigned integer")
+      (> (bigint (text)) 18446744073709551615N) (llerr "element too large, limit is 18446744073709551615")))
   (case (kind)
     :int (take-num!)
     :word (if (type-start?) (parse-typed) (symbol (take-word!)))
@@ -605,6 +619,9 @@
       "DwarfEnumKindField" (di-keyword! f 1 "DW_APPLE_ENUM_KIND_" (di-names "DW_APPLE_ENUM_KIND_") "expected DWARF enum kind code" "invalid DWARF enum kind code")
       "DwarfMacinfoTypeField" (di-keyword! f 255 "DW_MACINFO_" #{"DW_MACINFO_define" "DW_MACINFO_undef" "DW_MACINFO_start_file" "DW_MACINFO_end_file" "DW_MACINFO_vendor_ext"}
                                            "expected DWARF macinfo type" "invalid DWARF macinfo type")
+      "DwarfLangDialectField" (if (= (kind) :int)
+                                (when-not (#{"0" "1" "2"} (text)) (llerr "value for 'dialect' must be a known DWARF language dialect"))
+                                (di-keyword! f 2 "DW_LLVM_LANG_DIALECT_" (di-names "DW_LLVM_LANG_DIALECT_") "expected DWARF language dialect" "invalid DWARF language dialect"))
       "EmissionKindField" (let [ks #{"NoDebug" "FullDebug" "LineTablesOnly" "DebugDirectivesOnly"}] (di-keyword! f 3 ks ks "expected emission kind" "invalid emission kind"))
       "NameTableKindField" (let [ks #{"Default" "GNU" "None" "Apple"}] (di-keyword! f 3 ks ks "expected nameTable kind" "invalid nameTable kind"))
       "FixedPointKindField" (let [ks #{"Binary" "Decimal" "Rational"}] (di-keyword! f 2 ks ks "expected fixed-point kind" "invalid fixed-point kind"))
@@ -661,7 +678,7 @@
                       (llerr "'sourceLanguageVersion' requires an associated 'sourceLanguageName' on !DICompileUnit" head-off)))))
               (expect! ")") (apply list head fs))
             :else
-            (let [xs (comma-list parse-di-operand)] (expect! ")") (apply list head xs)))]
+            (let [xs (binding [*di-expression* (= (name head) "!DIExpression")] (comma-list parse-di-operand))] (expect! ")") (apply list head xs)))]
       node)))
 
 (defn- parse-md-attachments
@@ -878,6 +895,7 @@
   "A debug record, #dbg_KIND(operand, ...) (value, declare, assign, label, declare_value): (dbg_KIND md...), its
   operands metadata (a value as [T v], !N, an inline !DIExpression(...) or !DIArgList(...))."
   []
+  (when-not (#{"value" "declare" "assign" "label" "declare_value"} (text)) (llerr "expected debug record type here" (inc (tok-start))))
   (let [k (text)
         md-op (fn [i] (when (and (or (pos? i) (= k "label")) (not (#{:meta :mstr :mspec} (kind))) (not (punct? "!")))
                         (llerr "expected '!' here"))
