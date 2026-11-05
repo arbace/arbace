@@ -91,8 +91,13 @@ code. Three kinds of things live here:
   structure items, and lambda/'s lambda.ml helpers, switch.ml, printlambda.ml's names, matching.ml, translcore.ml,
   translprim.ml and translmod.ml's bytecode structure, then (T7) simplif.ml with lambda.ml's traversals and (T8)
   typemod.ml, includemod.ml, mtype.ml, subst.ml, env.ml's module components, translmod.ml, tmc.ml, stdlib/format.ml's
-  engine and oprint.ml's printers, for the core language and the module system (the slice TYPER.md names), by hand,
-  the files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own.
+  engine and oprint.ml's printers, for the core language and the module system (the slice TYPER.md names), then (T9's
+  polymorphic variants, TYPER.md §11) types.ml's rows, btype.ml's row helpers and hash_variant, ctype.ml's
+  unify_row, unify_row_field, copy_row, build_subtype and enlarge_type, typetexp.ml's Ptyp_variant, typecore.ml's
+  variant expressions and patterns, build_or_pat, finalize_variant and type_coerce, parmatch.ml's full_match,
+  close_variant and pressure_variants, out_type.ml's rows and aliases, matching.ml's divide_variant and
+  combine_variant, switch.ml's test_sequence, translcore.ml's Texp_variant and translprim.ml's %loc_ primitives, by
+  hand, the files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

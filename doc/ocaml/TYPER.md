@@ -2,12 +2,14 @@
 
 Status: the first slice (T1-T6) on the branch `ocaml-typer`, then T7 (Simplif) and T8 (the module system, the stdlib
 typed natively unit by unit, with GADTs, formats and type extensions pulled forward from T9-T10 for it) on
-`ocaml-typer2`, 2026-11-05 (§9, "As built: T7 and T8"). From `ocaml-native`, whose
+`ocaml-typer2`, 2026-11-05 (§9, "As built: T7 and T8"), then T9's polymorphic variants on `ocaml-polyvar` (TY9 (b);
+§11, "As built: T9's polymorphic variants"). From `ocaml-native`, whose
 native reader gives the Parsetree as Arbace data. The route of OC4 (b) (doc/ocaml/OCAML-SURVEY.md §6.4): port OCaml 5.5.0's `typing/` and
 `lambda/`'s Translcore with Matching, so that the native Parsetree becomes Lambda in Arbace and oi stops needing the
 host's `ocamlc` for a program. Light rules (the day's): no gate, no Arbace build, no re-seed; every run on main's stage 0
 (`ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace`), one process under 1.5 GB, samples only. Nothing here is
-TY1-TY6 (§8) were decided by the user (below §8); the proposals of T7-T8 are TY7-TY10 (§10).
+TY1-TY6 (§8) were decided by the user (below §8); the proposals of T7-T8 are TY7-TY10 (§10), decided; those of T9's
+polymorphic variants TY11-TY13 (§12).
 
 ## 1. What needs ocamlc today, and what the slice removes
 
@@ -17,7 +19,7 @@ compiler-libs:
 | use | today | after this slice |
 |---|---|---|
 | a program's Lambda (`bin/oi run`, `check`) | `ocdump --mode lambda --simplify` | `bin/oi run-native`: Arbace (the core language and the module system; Simplif's output since T7) |
-| the stdlib's Lambda (`bin/oi stdlib`) | ocamlc builds the `.cmi`, ocdump dumps each unit | still ocamlc's (TY5); `bin/oi stdlib-check` types 64 of the 71 units natively, equal (T8) |
+| the stdlib's Lambda (`bin/oi stdlib`) | ocamlc builds the `.cmi`, ocdump dumps each unit | still ocamlc's (TY5, TY7 (c)); `bin/oi stdlib-check` types 66 of the 71 units natively, equal (T8, T9's variants) |
 | the toplevel's phrases (`bin/oi repl`, `bin/lib/oi/phrase`) | ocdump types and lowers each phrase | unchanged (T11) |
 | the judge (types, Lambda, runs) | ocdump `--mode types`, `--mode lambda`, the toplevel | unchanged: the oracle stays the judge |
 
@@ -128,7 +130,7 @@ of these, in `test/ocaml/divergences.edn`'s format:
 | T1-T6 (this) | types, env, parmatch, typecore, lambda (Switch), matching, translcore; driver and check | 36 of 36 samples: types, Lambda, oi runs | done |
 | T7 Simplif | `lambda/simplif.ml`: `simplify_exits`, `simplify_lets` (`mutlet`), `simplify_local_functions`; the judge against `-dlambda` too | the samples equal to `ocdump --simplify` | done (§9) |
 | T8 the module system | Typemod (structures, signatures, inclusion and coercions, strengthening, applicative paths), functors (`Map.Make`, `Set.Make`, `Hashtbl.Make`), `open`/`include`/local opens, recursive modules; Translmod complete; then the stdlib's own `.ml` typed and translated natively | `bin/oi stdlib --native`: every unit's Lambda equal to the oracle's (canonical), oi's check on it unchanged | the module system done, the stdlib 64 of 71 (§9); the rest wait on T9's objects and variants and T10 |
-| T9 formats, variants, objects | `format6` typing of literals (Typecore's `type_format`, CamlinternalFormatBasics), polymorphic variants (rows, `Tvariant`, Matching's `divide_variant`), objects and classes (Typeclass, Translobj, Translclass) | the testsuite's `basic/` and `typing-objects/` run programs through the native path | 6-10 |
+| T9 formats, variants, objects | `format6` typing of literals (Typecore's `type_format`, CamlinternalFormatBasics), polymorphic variants (rows, `Tvariant`, Matching's `divide_variant`), objects and classes (Typeclass, Translobj, Translclass) | the testsuite's `basic/` and `typing-objects/` run programs through the native path | formats done (§9), polymorphic variants done (§11); objects and classes left |
 | T10 the rest of the core | GADTs and locally abstract types, existentials, first-class modules, effect handlers (`transl_handler`), lazy and array patterns, inline records, labelled tuples, `let` operators, optional-argument elimination | the probe's refusals gone | 6-10 |
 | T11 the corpus and the toplevel | `bin/oi check --native` over the run corpus with the classes of §5; `bin/oi repl --native` (phrases typed here, Genprintval's value printing from types) | none failing, every non-pass classed; repl-check without ocamlc | 4-6 |
 | T12 errors | typing errors as ocamlc reports them (Location's report, Printtyp's explanations), the testsuite's expect tests' type errors | the error tests' messages equal | 5-8 |
@@ -274,3 +276,61 @@ Size: about 7,200 lines of Arbace under `arbace/repr/ocaml/typer/` (and the driv
 ## Decided (2026-11-05, the user: TY7-TY10)
 
 TY7 (c): ocamlc's stdlib Lambda stays oi's library until every unit is native; TY8 (a): bin/oi stdlib-check in --full against a recorded list of the units expected equal; TY9 (b): polymorphic variants next, then T11 (amending TY6's order); TY10 (a): recursive values with T10.
+
+## 11. As built: T9's polymorphic variants (2026-11-05, branch `ocaml-polyvar`)
+
+TY9 (b): polymorphic variants before T11. Ported from the same tarball (SHA-256 fcc6ae66...f015ba), into the existing
+namespaces (§2's table), each port following OCaml's functions:
+
+| namespace | OCaml 5.5.0 sources | what |
+|---|---|---|
+| `typer.types` | `types.ml` (row_desc, row_field with its `ext` cells, row_fields, row_repr, get_row_field, rf_either, link_row_field_ext), `btype.ml` (hash_variant, static_row, fixed_explanation, proxy), `ctype.ml` (merge_row_fields, filter_row_fields, unify_row, unify_row_field, copy_row and copy's sharing of a row by its more, occur_rec through rows and abbreviations, unify3's link of a row before its unification, memorized abbreviations, build_subtype and enlarge_type, immediacy of rows, lower_contravariant's visited table), `out_type.ml` (nameable_row, printer_iter_type_expr, mark_loops with alias_nongen_row) | a row `[:Tvariant {:fields :more :closed :fixed :name}]`, a field `[:RFpresent t]` `[:RFabsent]` `[:RFeither {:no-arg :arg-type :matched :ext}]`; Btype's snapshots and backtrack (`*trail*`, `try-unify`) for unifications that may fail |
+| `typer.env` | `typetexp.ml`'s Ptyp_variant (tags by hash, inheritance of static rows, `[< ... > ...]`) and Ptyp_alias, `btype.ml`'s set_static_row_name, `typedecl.ml`'s constraints (`as 'a`, `constraint`), checked at a constrained type's uses | |
+| `typer.typecore` | `typecore.ml`'s Pexp_variant, solve_Ppat_variant, build_or_pat (`#t` patterns), finalize_variant, build_as_type of variants, the polymorphic variant processing of type_cases, type_function's parameters and type_let, type_coerce (a ground coercion tried as one unification with the enlarged type, else the argument unified with it), the application operators `|>` and `@@` typed as applications (Pexp_apply's `%revapply`/`%apply`), a function's cases with a type constraint | |
+| `typer.parmatch` | `parmatch.ml`'s variant heads, full_match (closing or not), close_variant, pressure_variants; GADT constructors whose result type cannot be the matched one left out of a signature's completeness | |
+| `typer.matching`, `typer.lambda` | `matching.ml`'s divide_variant, combine_variant (test sequences, switches on the hashes, isint splits), `switch.ml`'s test_sequence | |
+| `typer.translcore` | `translcore.ml`'s Texp_variant (constant blocks), `translprim.ml`'s `%loc_LINE`, `%loc_FILE`, `%loc_LOC`, `%loc_POS`, the comparisons with a constant tag as `==` | |
+| `typer.printtyp` | `out_type.ml` and `oprint.ml`'s Otyp_variant (`[ `A ]`, `[> ...]`, `[< ... > ...]`, a row printed by its name, `[< t ]`), aliases (`as 'a`) of open rows and recursive types, Ctype.normalize_type's sorted fields and conjunctions, Printtyp's hidden own name of a variant declaration, type declarations' constraints | |
+
+**Results (2026-11-05, stage 0 of main, one process under 1.5 GB)**:
+
+| set | files | types equal | raw Lambda equal | simplified Lambda equal | oi's run equal |
+|---|---:|---:|---:|---:|---:|
+| `test/ocaml/typer/` (58 samples; t53-t58 new: inferred rows, abbreviations and `#t`, coercions, Matching on variants, modules and recursive rows, recursive types through abbreviations and constraints) | 58 | 58 | 58 | 58 | 58 |
+| the stdlib's units (`bin/oi stdlib-check`) | 71 | - | - | 66 | the samples on the native units: 58 of 58 |
+| probe: `testsuite/tests/basic/`'s first 40 files, the 36 ocamlc accepts as programs | 36 | 32 | 32 | 32 | - |
+| probe: other run tests with polymorphic variants (basic-more/robustmatch, typing-labels/mixin, typing-modules-bugs/pr5914_ok, pr6985_ok, pr7601_ok, pr7601a_ok, typing-polyvariants-bugs/pr4933_ok, pr7199_ok, privrowsabate_ok, translprim/ref_spec) | 10 | 5 | 6 | 6 | - |
+
+The stdlib's new units: CamlinternalFormatBasics and Format (Format also needed `|>`'s typing). The basic/ probe's
+polymorphic variant file, `switch_opts`, is equal (it also needed `%loc_LINE` and the GADT constructors' filter of its
+last match). The stdlib's 5 units left: CamlinternalOO, Oo, Dynarray (objects, T9), CamlinternalFormat (GADT-aware
+exhaustiveness over a tuple of GADTs: Typecore's check of Parmatch's counter-examples, T10), CamlinternalMod (recursive
+values, TY10 (a): T10). The basic/ probe's 4 others: a class, an object, `recvalues` and `tailcalls` (recursive values);
+`patmatch`'s and `sets`' signatures differ (a polymorphic record field, T10; a functor application's printed path,
+`type t = Set.Make(SetOrd(BaseSet)).t`, T8's printer), their Lambda equal. The other probe's not equal: robustmatch
+(GADT tuples' exhaustiveness, T10), mixin (MoreLabels' `type +!'a t` read as outside the slice, and two printed types
+sharing differently: TY11), pr5914_ok and privrowsabate_ok (constraints recursive through a row, private rows in a
+functor's parameter: refused), pr6985_ok, pr4933_ok (private abbreviations' and module types' printing).
+
+Faithfulness notes: unification links a row to the other before unifying their fields (Ctype.unify3) but links no
+other type (TY11); a row built by build_subtype or build_as_type carries no name, as OCaml's loses it when
+update_level lowers it below its type's scope (scopes are not ported: TY13); Ctype.subtype is not ported (a ground
+coercion whose single unification fails is accepted: the program is one ocamlc accepts, TY12).
+
+Size: about 8,100 lines of Arbace under `arbace/repr/ocaml/typer/` (and the driver, 177), about 940 more than T8 left (T9's variants and their fixes).
+
+## 12. Proposed (TY11-TY13; options with costs, a recommendation each, none decided)
+
+- **TY11 Sharing in unification.** OCaml's unify3 links every non-variable type to the other before unifying their
+  parts; the port does it for rows only, so a printed type can show the other node of an equal pair (mixin:
+  `Subst.key` where OCaml prints `string`'s alias, `('a expr as 'a) expr` for `('a expr as 'a)`). (a) link every
+  type as unify3 does (about half a day: every sample and the stdlib re-judged, the expansions' memo checked); (b) when
+  T11's corpus shows the difference in its classes; (c) not at all. *Recommended: (b)*, as (a) risks the 58 samples'
+  printed types for a case the corpus may not have.
+- **TY12 Ctype.subtype.** The checking coercion (`(e : t1 :> t2)`, a ground coercion a single unification cannot make)
+  is not ported; only accepted programs are typed, so no output depends on it but an error's. (a) port it with T12's
+  errors (about a day: subtype's constraints and its trace); (b) now. *Recommended: (a)*.
+- **TY13 Scopes.** OCaml drops a row's name when update_level lowers it below its type's scope, and checks escapes by
+  scopes; the port approximates the first (rows built by enlarge_type and build_as_type unnamed) and has no escape
+  check. (a) port Ident's scopes and update_scope with T11 if its corpus shows printed names differing; (b) now (about
+  a day, every type node gaining a scope). *Recommended: (a)*.

@@ -341,3 +341,22 @@ primitives. Results replacing the entry above's: test/ocaml/typer/ 52 of 52 at e
 Lambda, oi's runs); the stdlib 64 of 71 units equal natively (the 7 others: polymorphic variants, objects, GADT-aware
 exhaustiveness, recursive values); the probe 31 of 36. The alternative of stopping at the module system was weighed:
 T8's exit criterion is the whole stdlib, and T11, decided next, needs corpus runs the day's rules exclude.
+
+## 2026-11-05: oi's native front end, T9's polymorphic variants (branch ocaml-polyvar)
+
+TY9 (b), decided by the user the same day: polymorphic variants before T11. On the branch `ocaml-polyvar` from
+`ocaml-typer2`, under the day's light rules (main's stage 0, samples and single units, one process under 1.5 GB). Ported
+from the same pinned tarball (ocaml-5.5.0.tar.xz, SHA-256 fcc6ae66...f015ba; LGPL-2.1 with the linking exception, the
+notices in the files, LICENSE.md and doc/ARBACE.md extended): typing/types.ml's rows and row fields, btype.ml's row
+helpers and hash_variant, ctype.ml's unify_row, unify_row_field, copy_row, build_subtype, enlarge_type and the
+occur check through rows, typetexp.ml's Ptyp_variant, typecore.ml's variant expressions and patterns (solve_Ppat_variant,
+build_or_pat, finalize_variant, type_coerce), parmatch.ml's full_match, close_variant and pressure_variants,
+out_type.ml's and oprint.ml's rows and aliases, lambda/matching.ml's divide_variant and combine_variant, switch.ml's
+test_sequence, translcore.ml's Texp_variant; with them `|>` and `@@` typed as applications, `%loc_` primitives,
+declarations' constraints, memorized abbreviation expansions (recursive types through abbreviations) and GADT
+constructors filtered out of a match's completeness when their result type cannot be the matched one (TYPER.md §11).
+Results: test/ocaml/typer/ 58 of 58 at every level (6 new samples, t53-t58, their oracle dumps committed); the stdlib 66
+of 71 units equal natively (CamlinternalFormatBasics and Format new); the basic/ probe 32 of 36 (switch_opts new).
+Alternatives weighed: a row representation of our own (rejected: Matching and the printer need OCaml's rows as they
+are); porting Ctype.subtype and scopes now (deferred: TY12, TY13, no accepted program's output depends on them).
+Proposals TY11-TY13 (TYPER.md §12), none decided.
