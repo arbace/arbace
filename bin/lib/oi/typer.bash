@@ -6,14 +6,14 @@
 #                                  (--simplify), equal up to the identifiers' stamps and the static exits' numbers; the oracle's dumps
 #                                  are committed in test/ocaml/typer/oracle/ (TY2) and, with ocdump present, verified against a fresh
 #                                  dump; then each native simplified Lambda run on oi against the sample's NAME.out (the ocaml
-#                                  toplevel's run of the file; skipped without ocdump: oi's stdlib still needs ocamlc). --record
+#                                  toplevel's run of the file; the library is the native one, so without ocdump only the dump comparison is skipped). --record
 #                                  rewrites the dumps and the outputs
-#   bin/oi stdlib-check [UNIT...]            the stdlib's units (bin/oi stdlib's build directory, its .mli read natively) typed and
-#                                  translated by Arbace, each simplified Lambda against bin/oi stdlib's (canonical form); then a
-#                                  library with the equal units native (.tmp/oi/lib-native) and the typer's samples run on oi on it
+#   bin/oi stdlib-check [UNIT...]            the native library (bin/oi stdlib, TY18) against the oracle's (OI_STDLIB=ocamlc: ocamlc and ocdump):
+#                                  each unit typed afresh and its Lambda equal to the oracle's (canonical form), the library's files byte for
+#                                  byte those of the fresh run, the same units, lib/testing's Lambda equal, the typer's samples run on it
 #   bin/oi check --native [--record] [--jobs N] [--only RE|--only-list FILE]
 #                                  T11: the run corpus typed and translated by Arbace (no ocamlc for the programs; testing.ml likewise),
-#                                  run on oi with the native library (OI_LIB_NATIVE, default bin/oi stdlib-check's .tmp/oi/lib-native),
+#                                  run on oi with the native library (bin/oi stdlib's, TY18; OI_LIB_NATIVE another),
 #                                  judged against ocamlc's runs (ref-ocaml55.edn) and the classes; every row that differs from ocamlc's
 #                                  path (test/ocaml/check-oi.edn) printed as CHANGED; --record writes test/ocaml/check-oi-native.edn
 #   bin/oi typer-probe [--only RE|--only-list FILE]
@@ -22,8 +22,7 @@
 #                                  Lambda), and the typer's check over them (signatures and Lambda against the oracle's), its report
 #                                  in .tmp/oi/probe/check.txt: the printed types that differ (TY11's sharing, TY12's scopes,
 #                                  TY14's Tpoly) and the Lambda that differs (TY17's partiality among them)
-#   bin/oi run-native FILE.ml [ARG...]       FILE typed and translated by Arbace (no ocamlc for the program) and run on oi with the
-#                                  stdlib's Lambda (bin/oi stdlib's, still the oracle's: TYPER.md, T8)
+#   bin/oi run-native FILE.ml [ARG...]       FILE typed and translated by Arbace (no ocamlc, no ocdump) and run on oi with the native library
 
 TYPER_DIR=$root/test/ocaml/typer
 TYPER_ORACLE=$TYPER_DIR/oracle
@@ -32,6 +31,9 @@ typer_ns() {
   local exe; exe=$(arbace_exe)
   ARBACE_PATH="$root" GOMEMLIMIT=${OI_TYPER_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${OI_TYPER_THREADS:-2} "$exe" -m arbace.repr.ocaml.typer "$@"
 }
+
+# the directory the typer reads the library's interfaces from: the sources as the native build prepared them, with lib/testing's
+native_dir() { if [ "$OI_STDLIB" = ocamlc ]; then echo "$OI_DIR/stdlib-build"; else echo "$OI_DIR/stdlib-native-build"; fi; }
 
 unit_of() { local u; u=$(basename "$1" .ml); echo "$(echo "${u:0:1}" | tr a-z A-Z)${u:1}"; }
 
@@ -50,6 +52,7 @@ cmd_typer_check() {
   mkdir -p "$OI_DIR"
   "$root/bin/repr-ocaml" corpus fetch > "$OI_DIR/fetch.log" 2>&1 || { cat "$OI_DIR/fetch.log" >&2; die "corpus fetch"; }
   local w=$OI_DIR/typer; rm -rf "$w"; mkdir -p "$w/fresh" "$w/native" "$w/run"
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build
   # the oracle: the committed dumps (TYPER_ORACLE), made by the host's compiler-libs through tools/ocdump; with ocdump present they are
   # dumped afresh and must equal the committed ones (--record rewrites them and the toplevel's outputs)
   local have_ocd=0 st=0
@@ -72,10 +75,8 @@ cmd_typer_check() {
   else
     echo "oi: typer-check: no ocdump (compiler-libs): the committed oracle dumps judge alone, the runs on oi skipped"
   fi
-  typer_ns check --dir "$TYPER_DIR" --oracle "$TYPER_ORACLE" --out "$w/native" --stdlib "$TOP/stdlib" --report "$w/report.edn" \
+  typer_ns check --dir "$TYPER_DIR" --oracle "$TYPER_ORACLE" --out "$w/native" --stdlib "$(native_dir)" --report "$w/report.edn" \
     "${names[@]}" || st=1
-  [ $have_ocd = 1 ] || return $st
-  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build
   local ok=0 bad=0 u
   for n in "${names[@]}"; do
     u=$(unit_of "$n")
@@ -93,59 +94,63 @@ cmd_run_native() {
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build
   local d; d=$(mktemp -d "$OI_DIR/run.XXXXXX")
   local u; u=$(unit_of "$file")
-  typer_ns lambda --simplify --stdlib "$TOP/stdlib" --file "$(basename "$file")" "$file" > "$d/$u.ae" || { rm -rf "$d"; exit 2; }
+  typer_ns lambda --simplify --stdlib "$(native_dir)" --file "$(basename "$file")" "$file" > "$d/$u.ae" || { rm -rf "$d"; exit 2; }
   local st=0
-  "$EXE" run "$LIB" "$d/$u.ae" -- "$@" || st=$?
+  local tl=""; grep -q 'Testing\.' "$file" && tl="$TESTLIB/Testing.ae"
+  "$EXE" run "$LIB" $tl "$d/$u.ae" -- "$@" || st=$?
   rm -rf "$d"
   exit $st
 }
 
 cmd_stdlib_check() {
   local units=("$@") st=0
+  [ "$OI_STDLIB" = native ] || die "stdlib-check compares the native library with the oracle's: OI_STDLIB is native"
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build
-  [ ${#units[@]} -gt 0 ] || mapfile -t units < "$LIB/order.txt"
-  local nat=$OI_DIR/stdlib-native nlib=$OI_DIR/lib-native
-  rm -rf "$nat" "$nlib"; mkdir -p "$nat"
-  local exe; exe=$(arbace_exe)
-  ARBACE_PATH="$root" GOMEMLIMIT=${OI_TYPER_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${OI_TYPER_THREADS:-2} "$exe" -m arbace.repr.ocaml.typer \
-    stdlib-check --dir "$OI_DIR/stdlib-build" --lib "$LIB" --out "$nat" "${units[@]}" | tee "$OI_DIR/stdlib-check.txt" || st=1
-  cp -r "$LIB" "$nlib"
+  # the oracle's library, by ocamlc and ocdump (lib-ocamlc), in the order of StdlibModules
+  OI_STDLIB=ocamlc "$0" stdlib > "$OI_DIR/stdlib-ocamlc.log" || { tail -5 "$OI_DIR/stdlib-ocamlc.log" >&2; die "stdlib-check: the oracle's library"; }
+  [ ${#units[@]} -gt 0 ] || mapfile -t units < "$ORACLE_LIB/order.txt"
+  local nat=$OI_DIR/stdlib-native; rm -rf "$nat"; mkdir -p "$nat"
+  # each unit typed afresh, its Lambda equal (canonical form) to the oracle's
+  typer_ns stdlib-check --dir "$(native_dir)" --lib "$ORACLE_LIB" --out "$nat" "${units[@]}" | tee "$OI_DIR/stdlib-check.txt" || st=1
+  # the library bin/oi stdlib made: the same units byte for byte, the same set and a link order the oracle's dependencies accept
   local u n=0
-  for u in $(awk '$2 == "ok" {print $1}' "$OI_DIR/stdlib-check.txt"); do cp "$nat/$u.ae" "$nlib/$u.ae"; n=$((n + 1)); done
-  echo "oi: stdlib-check: $n units native in $nlib"
-  # the typer's samples, natively translated, run on the library with the native units
+  for u in "${units[@]}"; do
+    if cmp -s "$nat/$u.ae" "$LIB/$u.ae"; then n=$((n + 1)); else echo "oi: stdlib-check: $u: the library's Lambda differs from a fresh native run"; st=1; fi
+  done
+  echo "oi: stdlib-check: $n of ${#units[@]} units of the native library equal to a fresh typing"
+  if [ "$(LC_ALL=C sort "$LIB/order.txt" | paste -sd' ')" = "$(LC_ALL=C sort "$ORACLE_LIB/order.txt" | paste -sd' ')" ]; then
+    echo "oi: stdlib-check: the native link order has the oracle's units ($(wc -l < "$LIB/order.txt")), computed from the dependencies"
+  else echo "oi: stdlib-check: the native library's units differ from the oracle's"; st=1; fi
+  if cmp -s "$LIB/order.txt" "$ORACLE_LIB/order.txt"; then echo "oi: stdlib-check: its order is the oracle's"
+  else echo "oi: stdlib-check: its order differs from StdlibModules' (both satisfy the dependencies)"; fi
+  # the testsuite's lib/testing: the oracle's Lambda
+  if cmp -s "$TESTLIB/Testing.ae" "$OI_DIR/testlib-ocamlc/Testing.ae"; then echo "oi: stdlib-check: lib/testing's Lambda byte for byte the oracle's"
+  else
+    if typer_ns canon-equal "$TESTLIB/Testing.ae" "$OI_DIR/testlib-ocamlc/Testing.ae"; then echo "oi: stdlib-check: lib/testing's Lambda equal to the oracle's (up to stamps)"
+    else echo "oi: stdlib-check: lib/testing differs from the oracle's"; st=1; fi
+  fi
+  # the typer's samples, natively translated, run on the library
   local w=$OI_DIR/typer-native; rm -rf "$w"; mkdir -p "$w/native" "$w/run"
-  typer_ns check --dir "$TYPER_DIR" --oracle "$TYPER_ORACLE" --out "$w/native" --stdlib "$TOP/stdlib" \
+  typer_ns check --dir "$TYPER_DIR" --oracle "$TYPER_ORACLE" --out "$w/native" --stdlib "$(native_dir)" \
     $(cd "$TYPER_DIR" && ls *.ml | sed 's/\.ml$//') > "$w/check.txt" || true
-  local ok=0 bad=0 name
+  local ok=0 bad=0 name f
   for f in "$TYPER_DIR"/*.ml; do
     name=$(basename "$f" .ml); u=$(unit_of "$name")
     [ -f "$w/native/$u.ae" ] || { bad=$((bad + 1)); continue; }
-    GOMAXPROCS=1 "$EXE" run "$nlib" "$w/native/$u.ae" > "$w/run/$name.out" 2>&1 || true
-    if cmp -s "$w/run/$name.out" "$TYPER_DIR/$name.out"; then ok=$((ok + 1)); else bad=$((bad + 1)); echo "oi: stdlib-check: $name: oi's output differs on the native units"; fi
+    GOMAXPROCS=1 "$EXE" run "$LIB" "$w/native/$u.ae" > "$w/run/$name.out" 2>&1 || true
+    if cmp -s "$w/run/$name.out" "$TYPER_DIR/$name.out"; then ok=$((ok + 1)); else bad=$((bad + 1)); echo "oi: stdlib-check: $name: oi's output differs on the native library"; fi
   done
-  echo "oi: stdlib-check: the typer's samples on the native units: $ok equal to the toplevel's output, $bad differ"
+  echo "oi: stdlib-check: the typer's samples on the native library: $ok equal to the toplevel's output, $bad differ"
   [ $bad = 0 ] && return $st
-}
-
-# T11: the native library's lib/testing, typed against testing.mli and translated by Arbace
-testlib_native() {
-  local t=$OI_DIR/testlib-native
-  mkdir -p "$t"
-  if [ ! -f "$t/Testing.ae" ] || [ "$t/Testing.ae" -ot "$TESTLIB/testing.ml" ]; then
-    (cd "$TESTLIB" && typer_ns lambda --simplify --intf --stdlib "$TOP/stdlib" --include "$TESTLIB" --file testing.ml testing.ml) > "$t/Testing.ae.new" ||
-      die "check --native: testing.ml does not type natively"
-    mv "$t/Testing.ae.new" "$t/Testing.ae"
-  fi
 }
 
 cmd_check_native() {
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; cmd_build
-  LIB_NATIVE=${OI_LIB_NATIVE:-$OI_DIR/lib-native}
-  [ -f "$LIB_NATIVE/order.txt" ] || die "check --native: no native library $LIB_NATIVE (bin/oi stdlib-check)"
-  TESTLIB_NATIVE=$OI_DIR/testlib-native; testlib_native
+  # the native library (TY18): bin/oi stdlib's by default; with OI_STDLIB=ocamlc the programs are still typed natively but run on ocamlc's
+  LIB_NATIVE=${OI_LIB_NATIVE:-$LIB}; TESTLIB_NATIVE=${OI_TESTLIB_NATIVE:-$TESTLIB}
+  [ -f "$LIB_NATIVE/order.txt" ] || die "check --native: no library $LIB_NATIVE (bin/oi stdlib)"
   RUN_DIR=$OI_DIR/run-native
-  export -f oi_one limited_cpu typer_ns arbace_exe die; export OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root TOP NATIVE LIB_NATIVE TESTLIB_NATIVE RUN_DIR
+  export -f oi_one limited_cpu typer_ns arbace_exe die native_dir; export OI_STDLIB OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root TOP NATIVE LIB_NATIVE TESTLIB_NATIVE RUN_DIR
   # the typer's own process: one thread, its memory within the light tier's (each process at most about 2 GiB)
   export OI_TYPER_THREADS=${OI_TYPER_THREADS:-1} OI_TYPER_GOMEMLIMIT=${OI_TYPER_GOMEMLIMIT:-1200MiB}
   local out=$OI_DIR/check-native.tsv
@@ -183,7 +188,7 @@ cmd_typer_probe() {
     grep -q '^(ocaml/error' "$p/oracle/$n.types" && continue
     names+=("$n")
   done < <(selected | awk -F'\t' '$2 == "run"' | cut -f1,2,3,4,5)
-  typer_ns check --dir "$p/src" --oracle "$p/oracle" --out "$p/native" --stdlib "$TOP/stdlib" --include "$TESTLIB" \
+  typer_ns check --dir "$p/src" --oracle "$p/oracle" --out "$p/native" --stdlib "$(native_dir)" --include "$TESTLIB" \
     --report "$p/report.edn" "${names[@]}" > "$p/check.txt" 2>&1 || true
   tail -1 "$p/check.txt"
 }

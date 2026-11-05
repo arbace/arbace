@@ -5,7 +5,8 @@ typed natively unit by unit, with GADTs, formats and type extensions pulled forw
 `ocaml-typer2`, 2026-11-05 (§9, "As built: T7 and T8"), then T9's polymorphic variants on `ocaml-polyvar` (TY9 (b);
 §11, "As built: T9's polymorphic variants"), then the rest of T9, objects and classes, on `ocaml-objects` (§13, "As
 built: T9's objects and classes"), then T10's two stdlib blockers (TY15 (a)), GADT-aware exhaustiveness and recursive
-values, on `ocaml-t10` (§15, "As built: T10's stdlib blockers"): the stdlib 71 of 71 natively. From `ocaml-native`, whose
+values, on `ocaml-t10` (§15, "As built: T10's stdlib blockers"): the stdlib 71 of 71 natively; then TY18 (a), oi's library made
+natively, on `ocaml-native-lib` (§17, "As built: TY18"). From `ocaml-native`, whose
 native reader gives the Parsetree as Arbace data. The route of OC4 (b) (doc/ocaml/OCAML-SURVEY.md §6.4): port OCaml 5.5.0's `typing/` and
 `lambda/`'s Translcore with Matching, so that the native Parsetree becomes Lambda in Arbace and oi stops needing the
 host's `ocamlc` for a program. Light rules (the day's): no gate, no Arbace build, no re-seed; every run on main's stage 0
@@ -477,4 +478,49 @@ in parmatch.ae and typecore.ae.
 
 ## Decided (2026-11-05, the user: TY16-TY18)
 
-TY16 (a): the validity check with T12; TY17 (a): Refine_or and wildcard expansion with T11 if its corpus needs them; TY18 (a): the native units become oi's library now, before T11 (ocamlc stays the oracle).
+TY16 (a): the validity check with T12; TY17 (a): Refine_or and wildcard expansion with T11 if its corpus needs them; TY18 (a): the native units become oi's library now, before T11 (ocamlc stays the oracle). Built: §17.
+
+## 17. As built: TY18, oi's library native (2026-11-05, branch `ocaml-native-lib`, from `ocaml-t10`)
+
+`bin/oi stdlib` now types and translates the tarball's stdlib and the testsuite's lib/testing with Arbace (the verb
+`stdlib-build` of `arbace.repr.ocaml.typer`, on stage 0), with no ocamlc and no ocdump; the oracle's path stays behind a flag.
+
+- **The sources** are prepared as stdlib/Makefile does, by `stdlib_prepare` (sys.ml from sys.ml.in, `expand_module_aliases.awk`
+  over stdlib.ml, stdlib.mli and the *Labels.mli: sed and awk, shared with the oracle's path), into `.tmp/oi/stdlib-native-build`,
+  with testing.ml and testing.mli beside them (`Testing` is found as the stdlib's interfaces are). The set of units is
+  stdlib/StdlibModules' STDLIB_MODULE_BASENAMES (71); its order is not used.
+- **The link order is computed.** Typing reads interfaces by name, so every unit is typed in any order; the order comes from each
+  Lambda's required globals (the header of its program, the modules whose values the unit uses: what ocamlc links before it), plus
+  Stdlib for every unit but Stdlib and CamlinternalFormatBasics (the opened default), by Kahn's algorithm, the smallest ready unit
+  first (`link-order`, no cycle). A first try scanned the sources for module names as ocamldep does and was dropped: ocamldep
+  counts type-only uses (`Int32.t` in Obj, `Complex.t` in Bigarray), a nested `Obj.Ephemeron`, a local `module Mutex` in Lazy, and
+  Stdlib's aliases (-no-alias-deps), so the order StdlibModules lists violated its "dependencies". Against the computed ones
+  StdlibModules' order satisfies every dependency (the build prints it), and the computed order differs from it (an alphabetical
+  tie-break); the 71 samples and oi's essential subset run the same on it.
+- **Flags** as before: -nopervasives for Stdlib and CamlinternalFormatBasics, classic labels for the *Labels and Float, the
+  transparent aliases of Stdlib (T8); lib/testing typed against its own interface.
+- **The directories and the key.** The native library is `.tmp/oi/lib` and `.tmp/oi/testlib` (Lambda `Testing.ae`, and
+  testing.ml and .mli), its key (`native_key`: the sources, StdlibModules, the typer's and the reader's forms, stage 0's bytes, the
+  script) in `lib/key`, up to date or rebuilt as before, so `aot-lib`, `oi_key` and the suite's keys read it as they read the oracle's.
+  `bin/oi stdlib --ocamlc` (or `OI_STDLIB=ocamlc` for any command) is the oracle's path, ocamlc in StdlibModules' order and ocdump,
+  into `lib-ocamlc` and `testlib-ocamlc`. The oracle's commands (`corpus`, `check`, the suite's, which dump programs with ocdump and
+  run references with ocamlc) get `testing.cmi` and `testing.cmo` in the native `testlib` through `oracle_testlib` (in `need_tree`).
+- **`bin/oi stdlib-check`** compares the two libraries: every unit typed afresh and equal to ocamlc's (canonical form), the library's
+  files byte for byte a fresh run's, the same set of units, lib/testing's Lambda equal up to stamps, the typer's samples run on it.
+  `typer-check` and `run-native` take their interfaces from the native build directory and the library from `lib`.
+
+**Results (2026-11-05, stage 0 of main; processes under 1.5 GB)**:
+
+| command | result |
+|---|---|
+| `bin/oi stdlib` with ocamlc off PATH (the 1189 other tools of /usr/bin linked into a directory, no `ocaml*`) | 71 units and lib/testing built, 1 min 23 s |
+| `bin/oi run-native` of a program using List, String and Printf, ocamlc off PATH | runs, 10 s |
+| `OI_TYPER_NO_OCDUMP=1 bin/oi typer-check`, ocamlc off PATH | 73 of 73 types, raw and simplified Lambda equal; 73 of 73 runs on oi equal the toplevel's |
+| `bin/oi typer-check` | the same, the committed dumps verified |
+| `bin/oi stdlib-check` | 71 of 71 units equal to ocamlc's; 71 of 71 files equal a fresh run; lib/testing equal; the samples 73 of 73 on the library; 2 min 9 s |
+| oi's essential subset (the 59 ids of `test/ocaml/essential-check.txt` on `ocaml-o8`, by `--only`: the branch has no `--only-list`) on the native library | 58 pass, none failing, the negative control differs as it must |
+| the same subset on the oracle's library (`OI_STDLIB=ocamlc`) | 58 pass: no regression |
+
+What is left: the AOT path (`aot-lib`) over the native library and the gates' keys (`ocaml-o8` declares oi's steps' inputs: they must
+list `arbace/repr/ocaml` and `arbace/repr/ocaml/typer` for the library) were not run here (light day, no AOT); the oracle's
+`ocdump` still types the programs of `check`, `suite` and `repl` (T11 and T12 are what retire it).

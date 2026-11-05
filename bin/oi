@@ -6,10 +6,12 @@
 # goi's table and the shipped program carries it (the heavy list), its driver is a small Go program
 # built from the forms printed by repr/go with TamaGo's go (test/ocaml/oi/cmd.ae, OC62).
 #
-#   bin/oi stdlib                  the stdlib of the pinned tarball (bin/repr-ocaml corpus fetch) built by
-#                                  ocamlc in dependency order with its own flags (stdlib/Makefile,
-#                                  Compflags) and its Lambda dumped, into .tmp/oi/lib/ (order.txt the link
-#                                  order); the testsuite's lib/testing too (.tmp/oi/testlib/)
+#   bin/oi stdlib [--ocamlc]       oi's library (TY18, doc/ocaml/TYPER.md): the stdlib of the pinned tarball (bin/repr-ocaml
+#                                  corpus fetch) typed and translated natively (Arbace's typer, no ocamlc, no ocdump) in the link
+#                                  order its units' dependencies give, with the flags of stdlib/Compflags, into .tmp/oi/lib/ (order.txt
+#                                  the link order); the testsuite's lib/testing too (.tmp/oi/testlib/). --ocamlc (or OI_STDLIB=ocamlc
+#                                  for every command): the oracle's path, built by ocamlc in the order of stdlib/StdlibModules and
+#                                  its Lambda dumped by ocdump, into .tmp/oi/lib-ocamlc/ and testlib-ocamlc/
 #   bin/oi build                   the driver: go/arbace/oi's forms and test/ocaml/oi/cmd.ae printed by
 #                                  repr/go and built by TamaGo's go into .tmp/oi/bin/oi (kept by the forms'
 #                                  hash); OI_GO_SRC=DIR builds from a Go tree instead (development)
@@ -21,10 +23,10 @@
 #                                  typed and translated to Lambda by Arbace, their signatures and Lambda against the oracle's,
 #                                  then run on oi against the toplevel's outputs
 #   bin/oi run-native FILE.ml [ARG...]
-#                                  FILE typed and translated by Arbace (no ocamlc for the program), run on oi
-#   bin/oi stdlib-check [UNIT...]  the stdlib's units typed and translated natively (TYPER.md, T8), each against bin/oi stdlib's
-#                                  Lambda; the units equal replace the oracle's in .tmp/oi/lib-native, on which the typer's
-#                                  samples run again
+#                                  FILE typed and translated by Arbace (no ocamlc, no ocdump: TY18), run on oi with the native library
+#   bin/oi stdlib-check [UNIT...]  the native library (bin/oi stdlib) against the oracle's (bin/oi stdlib --ocamlc, built if missing):
+#                                  each unit typed afresh and equal to ocamlc's Lambda, the library's files the same bytes, the same
+#                                  set of units, lib/testing equal, the typer's samples run on it
 #   bin/oi repl                    the toplevel: phrases on stdin, each typed and lowered by the oracle,
 #                                  run on oi, its values printed with their types (OC12 (a))
 #   bin/oi repl --native, repl-check --native
@@ -77,6 +79,8 @@
 # Environment: O2J_JOBS (check --aot's processes, default 2), O2J_LOAD_ALLOWANCE (CPU seconds the rerun of a program that timed out gets beyond OI_TIMEOUT, default 20; `bin/oi aot-cpu` prints the limits, `bin/oi key` and `suite key` the key of oi's rows), O2J_GOMEMLIMIT (default 900MiB), OI_JOBS (default 3), OI_TIMEOUT (seconds a program, default 120), OI_GOMEMLIMIT (default
 # 400MiB: the light tier), ARBACE_HOST_EXE (stage 0 for the judgment and repr/go's print).
 set -euo pipefail
+# `bin/oi stdlib --ocamlc`: the library of the oracle's path (ocamlc and ocdump), in lib-ocamlc beside the native one
+if [ "${1:-}" = stdlib ] && [ "${2:-}" = --ocamlc ]; then OI_STDLIB=ocamlc; fi
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/limit.bash"
@@ -87,8 +91,15 @@ OCDUMP_KEY=${OI_OCDUMP_KEY:-$root/.tmp/ocdump/key}
 # the opam packages' pins (version, URL, hashes) as `bin/repr-ocaml corpus fetch` wrote them: the content of the suite's opam rows
 OPAM_PINS=${OI_OPAM_PINS:-$root/.tmp/repr-ocaml/opam-pins.txt}
 TOP=$root/.tmp/repr-ocaml/ocaml-5.5.0
-LIB=$OI_DIR/lib
-TESTLIB=$OI_DIR/testlib
+# oi's library (TY18, doc/ocaml/TYPER.md): made by Arbace's own typer and translation (native, the default), or by ocamlc and ocdump
+# (OI_STDLIB=ocamlc, or `bin/oi stdlib --ocamlc`: the oracle and the comparison), each in a directory of its own
+OI_STDLIB=${OI_STDLIB:-native}
+case $OI_STDLIB in
+  native) LIB=$OI_DIR/lib; TESTLIB=$OI_DIR/testlib ;;
+  ocamlc) LIB=$OI_DIR/lib-ocamlc; TESTLIB=$OI_DIR/testlib-ocamlc ;;
+  *) echo "oi: OI_STDLIB is native or ocamlc" >&2; exit 2 ;;
+esac
+ORACLE_LIB=$OI_DIR/lib-ocamlc
 EXE=$OI_DIR/bin/oi
 TESTS=$TOP/testsuite/tests
 REFS=$root/test/ocaml/ref-ocaml55.edn
@@ -139,6 +150,21 @@ arbace_exe() {
 need_tree() {
   "$root/bin/repr-ocaml" ocdump-build > "$OI_DIR/ocdump-build.log" 2>&1 || { cat "$OI_DIR/ocdump-build.log" >&2; die "ocdump"; }
   "$root/bin/repr-ocaml" corpus fetch > "$OI_DIR/fetch.log" 2>&1 || { cat "$OI_DIR/fetch.log" >&2; die "corpus fetch"; }
+  oracle_testlib
+}
+
+# the sources of the program-free steps: the tarball alone (no ocamlc, no ocdump)
+need_source() {
+  "$root/bin/repr-ocaml" corpus fetch > "$OI_DIR/fetch.log" 2>&1 || { cat "$OI_DIR/fetch.log" >&2; die "corpus fetch"; }
+}
+
+# the testsuite's lib/testing as ocamlc compiles it (testing.cmi and testing.cmo in TESTLIB, which the oracle's dumps and runs of the
+# programs that use it take with -I): the native library's TESTLIB has its Lambda and gets these when the oracle runs
+oracle_testlib() {
+  [ -f "$TESTLIB/testing.cmo" ] && return 0
+  mkdir -p "$TESTLIB"
+  cp "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli" "$TESTLIB/"
+  (cd "$TESTLIB" && ocamlc -w -a -c testing.mli testing.ml)
 }
 
 # ---- the stdlib ----
@@ -164,16 +190,56 @@ stdlib_key() {
 }
 
 cmd_stdlib() {
-  mkdir -p "$OI_DIR"; need_tree
-  local key; key=$(stdlib_key)
-  if [ -f "$LIB/key" ] && [ "$(cat "$LIB/key")" = "$key" ]; then echo "oi: stdlib up to date ($LIB)"; return 0; fi
-  local b=$OI_DIR/stdlib-build
-  rm -rf "$b" "$LIB" "$TESTLIB"; mkdir -p "$b" "$LIB" "$TESTLIB"
+  if [ "$OI_STDLIB" = ocamlc ]; then cmd_stdlib_ocamlc; else cmd_stdlib_native; fi
+}
+
+# the stdlib's sources prepared as stdlib/Makefile does (sys.ml from sys.ml.in, the module aliases of stdlib.ml and the *Labels.mli expanded)
+# in the directory B, no compiler
+stdlib_prepare() {
+  local b=$1
+  rm -rf "$b"; mkdir -p "$b"
   cp "$TOP"/stdlib/*.ml "$TOP"/stdlib/*.mli "$TOP"/stdlib/expand_module_aliases.awk "$b/"
   sed -e 's/@configure_input@/generated by bin\/oi stdlib from sys.ml.in/' -e 's/@VERSION@/5.5.0/' \
       -e 's/@OCAML_DEVELOPMENT_VERSION@/false/' -e 's/@OCAML_VERSION_MAJOR@/5/' -e 's/@OCAML_VERSION_MINOR@/5/' \
       -e 's/@OCAML_VERSION_PATCHLEVEL@/0/' -e 's/@OCAML_RELEASE_EXTRA@/None/' "$TOP/stdlib/sys.ml.in" > "$b/sys.ml"
   (cd "$b" && for f in stdlib.ml stdlib.mli *Labels.mli; do awk -f expand_module_aliases.awk "$f" > "$f.pp" && mv "$f.pp" "$f"; done)
+  # STDLIB_MODULE_BASENAMES: the set of the library's units (their order is computed natively, from their dependencies)
+  sed -n '/^STDLIB_MODULE_BASENAMES = /,/^$/p' "$TOP/stdlib/StdlibModules" | tr -d '\\' | tail -n +2 | tr -s ' \n' '\n\n' | sed '/^$/d' > "$b/bases.txt"
+}
+
+# the native library's key: the sources, the typer's and the reader's forms, the stage 0 they run on, this script
+native_key() {
+  local s t e
+  s=$(sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/stdlib/StdlibModules" "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli") || { echo "oi: key: the stdlib's sources cannot be read" >&2; return 1; }
+  t=$(cat "$root"/arbace/repr/ocaml/*.ae "$root"/arbace/repr/ocaml/typer/*.ae | sha256sum) || return 1
+  e=$(sha256sum "$(arbace_exe)" | cut -d' ' -f1) || return 1
+  { echo native; echo "$s"; echo "$t"; echo "$e"; cat "$0"; } | sha256sum | cut -d' ' -f1
+}
+
+# the native library (TY18): the stdlib's units and the testsuite's lib/testing typed and translated by Arbace (arbace.repr.ocaml.typer
+# stdlib-build) in the link order its units' dependencies give, no ocamlc and no ocdump; the key and the directory as the oracle path's
+cmd_stdlib_native() {
+  mkdir -p "$OI_DIR"; need_source
+  local key; key=$(native_key)
+  if [ -f "$LIB/key" ] && [ "$(cat "$LIB/key")" = "$key" ]; then echo "oi: stdlib up to date ($LIB)"; return 0; fi
+  local b=$OI_DIR/stdlib-native-build
+  stdlib_prepare "$b"
+  rm -rf "$LIB" "$TESTLIB"; mkdir -p "$LIB" "$TESTLIB"
+  cp "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli" "$b/"
+  cp "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli" "$TESTLIB/"
+  typer_ns stdlib-build --dir "$b" --out "$LIB" --bases "$b/bases.txt" --testing testing --testing-out "$TESTLIB" > "$OI_DIR/stdlib-build.log" || { tail -20 "$OI_DIR/stdlib-build.log" >&2; die "stdlib: native build failed"; }
+  tail -1 "$OI_DIR/stdlib-build.log"
+  echo "$key" > "$LIB/key"
+  echo "oi: stdlib: $(wc -l < "$LIB/order.txt") units, $(du -sh "$LIB" | cut -f1) of Lambda, in $LIB (native)"
+}
+
+cmd_stdlib_ocamlc() {
+  mkdir -p "$OI_DIR"; need_tree
+  local key; key=$(stdlib_key)
+  if [ -f "$LIB/key" ] && [ "$(cat "$LIB/key")" = "$key" ]; then echo "oi: stdlib up to date ($LIB)"; return 0; fi
+  local b=$OI_DIR/stdlib-build
+  stdlib_prepare "$b"
+  rm -rf "$LIB" "$TESTLIB"; mkdir -p "$LIB" "$TESTLIB"
   # the link order: stdlib/StdlibModules' STDLIB_MODULE_BASENAMES, then std_exit
   local mods
   mods=$(sed -n '/^STDLIB_MODULE_BASENAMES = /,/^$/p' "$TOP/stdlib/StdlibModules" | tr -d '\\' | tail -n +2)
@@ -295,9 +361,9 @@ cmd_repl() {
   local st=0 lib=$LIB phrase=$root/bin/lib/oi/phrase
   # --native (T11, doc/ocaml/TYPER.md): each phrase typed and translated by Arbace's typer, run on the native library
   if [ "${1:-}" = --native ]; then
-    lib=${OI_LIB_NATIVE:-$OI_DIR/lib-native}; phrase=$root/bin/lib/oi/phrase-native
-    [ -f "$lib/order.txt" ] || die "repl --native: no native library $lib (bin/oi stdlib-check)"
-    export ARBACE_HOST_EXE=$(arbace_exe)
+    lib=${OI_LIB_NATIVE:-$LIB}; phrase=$root/bin/lib/oi/phrase-native
+    [ -f "$lib/order.txt" ] || die "repl --native: no library $lib (bin/oi stdlib)"
+    export ARBACE_HOST_EXE=$(arbace_exe) OI_TYPER_STDLIB=$(native_dir)
   fi
   "$EXE" repl "$lib" "$w" "$phrase" || st=$?
   rm -rf "$w"
@@ -394,7 +460,7 @@ oi_one() {
       esac
     done
     local inc=""; [ -n "$incs" ] && inc="--include $TESTLIB"
-    if ! (cd "$d" && typer_ns lambda --simplify --stdlib "$TOP/stdlib" $inc $nf --file "$base.ml" "$base.ml" > "$u.ae" 2> typer.err); then
+    if ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" $inc $nf --file "$base.ml" "$base.ml" > "$u.ae" 2> typer.err); then
       printf '%s\t-\t-\t0\t0\tdump: typer: %s\n' "$id" "$(grep -a -v '^\s*at ' "$d/typer.err" | head -c 200 | tr '\n\t' '  ')"; return
     fi
     [ -n "$incs" ] && units="$TESTLIB_NATIVE/Testing.ae"
@@ -753,7 +819,7 @@ cmd=${1:-}
 [ -n "$cmd" ] || { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2; }
 shift
 case $cmd in
-  stdlib) cmd_stdlib ;;
+  stdlib) [ $# -eq 0 ] || [ "$1" = --ocamlc ] || die "usage: bin/oi stdlib [--ocamlc]"; cmd_stdlib ;;
   build) cmd_build ;;
   test) cmd_test ;;
   run) cmd_run "$@" ;;
