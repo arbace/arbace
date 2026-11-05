@@ -103,8 +103,22 @@ The nights to the tag:
   and the tree check), the negative controls, Python's line (`mac/201-python-py7-py11`, then its amd64 records and
   PY11), and the re-seed window W (the evaluator's speed, the embedding of C++, Scheme and OCaml's oi).
 - **GT9** (the crops' gate, GTS210-GTS223 decided (a)), CS268, LLS1-LLS16.
-- Python on the Mac VM: queue 202 (PY6's open items, pyi's speed, the native reader as default, expat ported, a design
-  note after PY11).
+- Python on the Mac VM: 202 done (`mac/201-python-py7-py11` 9540946b); queued 203-206 (the user, 2026-11-05, in order):
+  202's lows, `_csv` and `mmap` as Go ports (PYS22), pinned wheels and the installer (PYS23-PYS25), `bin/pyi c2j-check`.
+- **The day's deep-thinking work (the user, 2026-11-05; agents on branches, sample checks only, held for after the tag):**
+  1. OCaml's typer and Translcore ported (OC4 (b)'s route): oi without the host's `ocamlc` (`ocaml-typer`; started).
+  2. C++ without clang: Sema's rest and a code generator into the LLVM IR forms, the design and a first slice
+     (`cpp-codegen`; started).
+  3. The crops' oracles recorded as data, so no gate needs a host toolchain (GHC, rustc, clang, ocamlc, Chez, python3): a
+     design with proposals (after the keyed `--full`).
+  4. Java eval's 1,220 deferred cases triaged by root cause, ranked by tests per day, the top fixes planned
+     (`java-deferred-triage`; started).
+  5. Haskell's hsi from HE4d: the boot libraries and the C they call (HE5-HE7).
+  6. Rust's eval from RE4 (RE5 on).
+  7. Go eval's 173 by-design cases reviewed for what is reachable (`gc-flags`' 98: gc's `-m` diagnostics).
+  8. GT9 built on a branch (GTS210-GTS223 (a)): the crops' gate steps and keys, checked by `--plan` and gate-tests
+     (`gt9-build`; started).
+  9. The merge plan's batches 0-5 rehearsed against `next`: conflicts, key changes, order, nights.
 
 ## Open
 
