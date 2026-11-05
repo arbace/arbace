@@ -696,25 +696,37 @@ compares those through `-Zdump-mir`'s text.
 
 ### RF3: a first slice of the back half
 
-`arbace.rust.back.codegen` (about 1,300 lines): MIR forms to LLVM forms (`arbace.repr.llvm`), after `rustc_codegen_ssa/src/mir`:
+`arbace.rust.back.codegen` (about 1,500 lines): MIR forms to LLVM forms (`arbace.repr.llvm`), after `rustc_codegen_ssa/src/mir`:
 the SSA analysis of locals (`analyze.rs`: which locals need an alloca, dominators, the order of allocation), the order and merging
-of blocks (reverse postorder, last successor first; a block with one successor that has one predecessor merges; blocks created
-when first referenced; unreached blocks as `unreachable`), operands (immediates, scalar pairs, memory aggregates by reference),
-places (fields at the layout's offsets, downcasts, derefs, indexes), the rvalues (arithmetic, checked arithmetic with
-rustc's lowering to `llvm.*.with.overflow` or `add` and `icmp ult`, shifts masked, comparisons, casts, borrows, aggregates of
-structs, tuples, arrays and enums, discriminants with direct and niche tags, vtables of unsizings, function pointers), the
+of blocks (reverse postorder, last successor first, mono reachability of constant switches; a block with one successor that has
+one predecessor merges; blocks created when first referenced; unreached blocks as `unreachable`), operands (immediates, scalar
+pairs, memory aggregates by reference), places (fields at the layout's offsets, downcasts, derefs, indexes), the rvalues
+(arithmetic, checked arithmetic with rustc's lowering to `llvm.*.with.overflow` or `add` and `icmp ult`, unchecked arithmetic with
+`nuw`/`nsw`, shifts masked and folded, comparisons, casts, borrows, aggregates of structs, tuples, arrays and enums,
+discriminants with direct and niche tags, vtables of unsizings, function pointers, constants held in allocations), the
 terminators (switch in all its forms, calls and `invoke`s with landing pads, the personality slot, `resume`, terminate blocks,
-nop landing pads, drops through the glue's symbol, asserts with the panic functions and `Location` constants,
-`#[track_caller]` parameters and arguments through the inlined scopes, spread `rust-call` arguments), the Rust ABI of
-scalars, pairs and small memory aggregates (cast to an integer, through a scratch alloca when under-aligned), return
-and parameter attributes, constants interned by content (strings, byte slices, vtables, locations), and the intrinsics `abort`,
-`black_box`, `cold_path` and the inhabitedness assertions. **Not taken yet**: floats, SIMD, `i128` in pairs, memory aggregates
-larger than a pointer (their copies by `memcpy`, indirect passing), `copy_nonoverlapping`, `Offset` of non-scalars, unsized places,
-virtual calls, most intrinsics, constants held in memory (`indirect`), coroutines, inline assembly.
+nop landing pads as `find_noop_landing_pads` finds them, drops through the glue's symbol, asserts with the panic functions and
+`Location` constants, `#[track_caller]` parameters and arguments through the inlined scopes, spread `rust-call` arguments,
+indirect calls), the Rust ABI of scalars, pairs, small memory aggregates (cast to an integer, through a scratch alloca when
+under-aligned) and large ones (by pointer, `sret` returns, `memcpy`), return and parameter attributes, constants interned by
+content (strings, byte slices, vtables, locations), the constant folding LLVM's builder does, and the intrinsics `abort`,
+`black_box`, `cold_path` and the inhabitedness assertions. **Not taken yet**: floats, SIMD, `i128` in pairs, `Offset` of
+non-scalars, unsized places, virtual calls, most intrinsics (`ctpop`, `ctlz`, `size_of_val`, the saturating ones...), coroutines,
+inline assembly.
 
-What it does **not** do: the layouts, the mono item set, the resolution of calls and drops, the symbols and the vtables'
-contents are rustc's (the helper's data); porting those is the rest of RF3 (`mono`, `layout`, `abi`, v0 names). The judge needs
-none of them to be Arbace's to be exact about the code generation.
+`arbace.rust.back.collect` (the collector slice, about 100 lines): the mono items of a program from its roots (the entry's
+`main` and `lang_start`; for `no_std` programs the functions with plain symbols and the panic handler) by what the bodies use:
+callees (the helper's resolved instances), drop glue, function items and pointers (a closure coerced to a pointer too), the
+functions and statics of the allocations the constants reach (vtables' methods among them), the panic functions the asserts call, the
+personality and terminate functions unwinding needs; after `rustc_monomorphize/src/collector.rs`. **80 of 81 programs' item sets equal
+rustc's** (`bin/rust-front collect`; the one miss, `iterators`, lacks one function item, `min_by_key::compare`). The instances
+themselves are the helper's (`Instance::try_resolve`): of the 23,287 calls of function items in the corpus's monomorphic bodies
+(`:callee` facts), 15,813 resolve to the very item named (nothing to resolve), 4,413 to another definition (an impl's method or a
+trait's default method: impl selection, RF8's work), 2,809 are intrinsics, 228 drop glue (167 empty), 24 virtual calls.
+
+What it does **not** do: the layouts, the instance resolution, the symbols and the vtables' contents are rustc's (the helper's data);
+porting those is the rest of RF3 (`layout`, `abi`, resolution, v0 names). The judge needs none of them to be Arbace's to be exact
+about the code generation and the collection.
 
 The judge (`arbace.rust.back.check`, `arbace.rust.back.coverage`, `bin/rust-front codegen-check|coverage`): rustc's `-O0
 -Zshare-generics=no -C no-prepopulate-passes` IR of the same program, read by repr/llvm, each function's forms against ours after a
@@ -723,24 +735,26 @@ metadata and linkage dropped), and the global constants as a set; a negative con
 function's IR) must differ. `-C no-prepopulate-passes` is part of the oracle: at `-O0` LLVM still runs the always-inliner, so the
 final IR of an `#[inline(always)]` callee is inlined into its callers (the first coverage run found it).
 
-Results (`test/rust/front/coverage-2026-11-05.edn`):
+Results (`test/rust/front/coverage-2026-11-05.edn`, `.tmp/rust-front/mono/*.coverage.edn` per program):
 
-- the five `no_std` samples `a1`-`a5` (integers, structs, tuples, enums, arrays, overflow checks, panics; `bin/rust-front
-  codegen-check`): **every function equal**, and the programs built from our IR (`bin/rsi run --front mir`: the LLVM forms lowered by
-  rsi's lowering to C, gcc `-O0`) give the exit statuses rustc's executables give (5, 212, 41, 17, 45); `a6` (drops, unwinding) 7 of 11;
-- the corpus: **2,113 of 4,844 mono items' functions equal rustc's IR (43.6 %)** over the 80 programs, **11 programs with every
-  item equal** (the five samples, `abort`, `exit-code`, `panic-assert`, `panic-todo`, `panic-unwrap-err`, `trap`; the first coverage
-  run, after the scalar subset, was 391 of 4,526: aggregates, enums, unwinding, track_caller and the shims took it to the figure);
+- the six `no_std` samples `a1`-`a7` (integers, structs, tuples, enums, arrays, overflow checks, panics, large aggregates;
+  `bin/rust-front codegen-check`): **every function equal**, and the programs built from our IR (`bin/rsi run --front mir`: the LLVM forms
+  lowered by rsi's lowering to C, gcc `-O0`) give the exit statuses rustc's executables give (5, 212, 41, 17, 45); `a6` (drops,
+  unwinding) 8 of 11 (its `core::ptr::write_volatile` precondition checks need intrinsics);
+- the corpus: **7,117 of 11,453 mono items' functions equal rustc's IR (62.1 %)** over the 81 programs, **12 programs with every
+  item equal** (the six samples, `abort`, `exit-code`, `panic-assert`, `panic-todo`, `panic-unwrap-err`, `trap`). The progress of the
+  day: the scalar subset 391 of 4,526 (the first run; nine programs were not readable then), then aggregates, enums, unwinding,
+  `track_caller` and the shims, then folding, constants in memory, indirect aggregates and nop landing pads;
 - **runs**: six of those synthetic programs (`abort` 134, `exit-code` 37, `panic-assert`, `panic-todo`, `panic-unwrap-err` 101,
   `trap` 132) built with their own unit made of our IR, linked with the host's native std as rsi's native-std leg links the oracle's
   (`bin/rust-front run-native`, `RSI_FRONT_IR` in `bin/lib/rsi/link`), give rustc's status, stdout and stderr (thread ids
   normalized). These print through `std::io::_print`, exit, trap and panic with a message: the first synthetic programs run from
   Arbace's code generation. rsi's ci leg and its lowered std (`runtime-ci`, minutes and gigabytes) were not run: the day's rule.
-- what blocks the rest, by items (the refusals' ranking of the last run): memory aggregates 475, the layouts of types the helper
-  did not collect (`no layout`, 333: unsized and generic-parameter types of bodies still generic), constants in memory 330, floats
-  218, `ctpop` 100, `copy_nonoverlapping` 88, `ctlz` 55, then the intrinsics' tail; and 577 items that differ (their classes:
-  attributes on pointer parameters of non-reference types, the `i128` pair ABI, `invoke` of callees whose `can_unwind` the helper
-  answers differently, the hardware-width integer casts of `PassMode::Cast` for aggregates over 8 bytes).
+- what blocks the rest, by items (the last run's refusals): `Offset` of non-scalar pointees 396, floats 300, an ABI the slice
+  does not take (`abi other`: vectors) 233, pointer scalars (constants) 224, `ctpop` 132, `ptr_offset_from_unsigned` 107,
+  `size_of_val` 75, arrays of non-scalars 67, `ctlz` 62, the saturating intrinsics 61, then a tail; 1,383 items differ (classes seen:
+  an alloca or a store the other side does not make in functions with drop flags of other shapes, an unreachable block the traversal
+  keeps, parameter attributes of newtype pointers) and 627 are whole programs' reads that failed (counted by item).
 
 Findings worth keeping (the surprises of the first runs): the oracle IR needs `-C no-prepopulate-passes`; unsigned `AddWithOverflow`
 is `add` and `icmp ult res, lhs`, unsigned `SubWithOverflow` `sub` and `icmp ult lhs, rhs`, the other four use the intrinsics;
@@ -748,7 +762,9 @@ allocas appear in the reverse of their allocation (arguments, then `_0`, then th
 referenced; an invoke continues in its normal destination, which is where the result is stored; `#[track_caller]` is an extra
 last parameter and `get_caller_location` walks the inlined scopes (the dump carries `inlined_parent_scope`); a `rust-call`
 function's spread tuple argument is a place of its own even when zero-sized; a cleanup block is a landing pad only when
-reached from a non-cleanup block, and a cleanup block that only resumes is no pad at all.
+reached from a non-cleanup block, and a cleanup block that only resumes (through trivial statements, switches on drop flags and
+empty drops) is no pad at all; aggregates over a pointer's size travel by pointer, returns by `sret`; constants LLVM's builder
+can fold (shifts, comparisons, int-to-pointer) never reach the IR as instructions.
 
 ### Estimates, revisited
 
