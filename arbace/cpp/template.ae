@@ -340,6 +340,7 @@
   (cond
     (get-in n [:type :qualType]) (sema/resolve-type scope (get-in n [:type :qualType]))
     (contains? n :value) (value-arg (let [v (:value n)] (if (boolean? v) (if v 1 0) (long v))) (:name p) (param-type scope p))
+    (:isPack n) {:pack (mapv #(node-arg scope p %) (filter (fn [k] (= "TemplateArgument" (:kind k))) (kids n)))}
     (seq (kids n)) (value-arg (sema/const-int scope (first (kids n))) (:name p) (param-type scope p))
     :else (fail :template "template argument " (pr-str (dissoc n :inner)))))
 
@@ -475,6 +476,44 @@
 
 (defn- dependent-on? [x tid] (some #(and (map? %) (#{:tparam :tparam-v :ttp} (:k %)) (= tid (:tid %))) (tree-seq coll? seq x)))
 
+(declare match-args)
+
+(defn- match-arg
+  "One template argument of a signature (or a partial specialization's pattern) against an argument: a parameter
+  bound, a value compared, a non-deduced expression checked, a pack matched element-wise, a type deduced."
+  [b tid p a]
+  (cond
+    (tparam-of? p tid) (bind-arg! b (:i p) a)
+    (and (map? p) (contains? p :val)) (= (:val p) (:val a))
+    ;; a non-deduced expression (HoldInt<-N>): consistent with what the others deduced
+    (= :texpr (:k p)) (let [v (subst-value p @b tid)]
+                        (or (dependent-on? v tid) (same-arg? (if (number? v) {:val v} v) a)))
+    (and (map? p) (contains? p :pack)) (and (map? a) (contains? a :pack) (match-args b tid (:pack p) (:pack a)))
+    :else (deduce-by-type-match b tid p a #{} :none)))
+
+(defn- pack-pattern?
+  "A trailing pack expansion of an argument list: a parameter pack of tid, or {:k :pack-exp}."
+  [p tid]
+  (and (map? p) (or (and (:pack p) (#{:tparam :tparam-v} (:k p)) (= tid (:tid p))) (= :pack-exp (:k p)))))
+
+(defn match-args
+  "Argument lists matched ([temp.deduct.type]/9-10): a trailing pack expansion takes the remaining arguments, each
+  pack it names bound to the elements deduced from them."
+  [b tid ps as]
+  (let [ps (vec ps) as (vec as) lastp (peek ps)]
+    (if (and lastp (pack-pattern? lastp tid))
+      (let [n (dec (count ps))]
+        (and (>= (count as) n)
+             (every? true? (map #(match-arg b tid %1 %2) (subvec ps 0 n) (subvec as 0 n)))
+             (if (= :pack-exp (:k lastp))
+               (let [pat (:of lastp)
+                     packs (distinct (keep #(when (and (map? %) (:pack %) (= tid (:tid %))) (:i %)) (tree-seq coll? seq pat)))
+                     elems (for [a (subvec as n)] (let [b2 (atom (apply dissoc @b packs))] (when (match-arg b2 tid pat a) @b2)))]
+                 (and (every? some? elems)
+                      (every? true? (for [i packs] (bind-arg! b i {:pack (mapv #(get % i) elems)})))))
+               (bind-arg! b (:i lastp) {:pack (subvec as n)}))))
+      (and (= (count ps) (count as)) (every? true? (map #(match-arg b tid %1 %2) ps as))))))
+
 (defn- deduce-template-spec
   "DeduceTemplateSpecArguments: P a template-id of the template, A a class; the arguments matched pairwise
   (TDF_None), and with :derived-class, failing that, A's bases searched (DeduceTemplateBases, [temp.deduct.call]/4.3:
@@ -487,15 +526,7 @@
                     ttp-ok (if-let [tt (:ttp P)]
                              (and (= tid (:tid tt)) (:tmpl c) (bind-arg! b (:i tt) (let [t (tmpl (:tmpl c))] {:tmpl (:tmpl c) :name (:name t) :path (:path t)})))
                              (= (:tmpl c) (:tmpl P)))]
-                (if (and ttp-ok (= (count (:args P)) (count (:targs c)))
-                         (every? true? (map (fn [p a]
-                                              (cond (and (map? p) (= :tparam-v (:k p)) (= tid (:tid p))) (bind-arg! b (:i p) a)
-                                                    (contains? p :val) (= (:val p) (:val a))
-                                                    ;; a non-deduced expression (HoldInt<-N>): consistent with what the others deduced
-                                                    (= :texpr (:k p)) (let [v (subst-value p @b tid)]
-                                                                        (or (dependent-on? v tid) (same-arg? (if (number? v) {:val v} v) a)))
-                                                    :else (deduce-by-type-match b tid p a #{} :none)))
-                                            (:args P) (:targs c))))
+                (if (and ttp-ok (match-args b tid (:args P) (:targs c)))
                   true
                   (do (reset! b snap) false))))]
     (and (or (abi/class? A) (= :tspec (:k A)))
@@ -566,9 +597,12 @@
                           (if (and (map? n) (= :tparam-v (:k n)) (= tid (:tid n)))
                             (bind-arg! b (:i n) {:val (:n A) :bound true})
                             (= n (:n A)))))
-              :fn (and (abi/fn? A) (= (count (:ps P)) (count (:ps A))) (= (boolean (:va P)) (boolean (:va A)))
+              :fn (and (abi/fn? A) (= (boolean (:va P)) (boolean (:va A)))
                        (deduce-by-type-match b tid (:ret P) (:ret A) #{} down)
-                       (every? true? (map #(deduce-by-type-match b tid %1 %2 #{} pok) (:ps P) (:ps A))))
+                       (if (= :pack-exp (:k (peek (vec (:ps P)))))
+                         (match-args b tid (:ps P) (:ps A)) ; R(Args...): the trailing pack takes the rest
+                         (and (= (count (:ps P)) (count (:ps A)))
+                              (every? true? (map #(deduce-by-type-match b tid %1 %2 #{} pok) (:ps P) (:ps A))))))
               :tspec (deduce-template-spec b tid P A tdf)
               ;; T::name: a non-deduced context ([temp.deduct.type]/5.1)
               :tdep true
@@ -718,6 +752,8 @@
 
 (declare attach-ool!)
 
+(declare name-pack-params!)
+
 (defn- declare-instance!
   "The class of the template `t` for `args` from the pattern node `node` in a scope binding `params` to `bargs`
   (a partial specialization's or the primary's); `explicit?`: an explicit specialization (its members ordinary)."
@@ -746,6 +782,9 @@
       (when-not explicit?
         (doseq [[id f] @sema/*fns* :when (and (>= (long id) first-fn) (= cid (:cls f)) (:body f) (not (:implicit f)))]
           (upd-fn! id assoc :lazy true :inline true)))
+      ;; members whose parameter list expands a pack of the class (R call(A... a))
+      (doseq [[id f] @sema/*fns* :when (and (>= (long id) first-fn) (= cid (:cls f)) (:node f) (not (:implicit f)))]
+        (name-pack-params! id (:node f)))
       (when (identical? node (:pattern t)) (abi/update-cls! cid assoc :from-primary true) (attach-ool! tid cid)))
     {:k :class :id cid}))
 
@@ -753,11 +792,7 @@
   "The partial specialization `pt`'s parameters deduced from the arguments, or nil ([temp.class.spec.match])."
   [pt args]
   (let [b (atom {}) tid (:id pt)]
-    (when (every? true? (map (fn [p a]
-                               (cond (tparam-of? p tid) (let [old (get @b (:i p))] (if (some? old) (same-arg? old a) (do (swap! b assoc (:i p) a) true)))
-                                     (contains? p :val) (= (:val p) (:val a))
-                                     :else (deduce-type b tid p a)))
-                             (:args pt) args))
+    (when (match-args b tid (:args pt) args)
       (when (= (count @b) (count (:params pt)))
         (mapv #(get @b %) (range (count (:params pt))))))))
 
@@ -765,12 +800,7 @@
   "[temp.class.order]: the partial specialization p1 more specialized than p2 (p2's arguments deduced from p1's, not
   the reverse)."
   [p1 p2]
-  (let [ded (fn [pa pb] (some? (let [b (atom {})]
-                                 (when (every? true? (map (fn [x y] (cond (tparam-of? x (:id pa)) (let [old (get @b (:i x))] (if (some? old) (= old y) (do (swap! b assoc (:i x) y) true)))
-                                                                         (contains? x :val) (= x y)
-                                                                         :else (deduce-type b (:id pa) x y)))
-                                                          (:args pa) (:args pb)))
-                                   true))))]
+  (let [ded (fn [pa pb] (match-args (atom {}) (:id pa) (:args pa) (:args pb)))]
     (and (ded p2 p1) (not (ded p1 p2)))))
 
 (defn instantiate-class
@@ -1205,7 +1235,7 @@
           params (tparams n)
           pt0 {:id pid :scope (:scope t) :params params}
           ss (bind-scope (:scope t) params nil pid)
-          args (mapv (fn [p f] (resolve-arg ss p f)) (:params t) (template-text-args n))]
+          args (resolve-args ss t (template-text-args n) true)]
       (upd-tmpl! tid update :partials conj {:id pid :params params :args args :node n})
       :template)
     "ClassTemplateSpecializationDecl"
