@@ -338,6 +338,7 @@
         f {:name nm :kind k :cls cid :ty ty :cq (method-const? qt) :op (when (and nm (not= k :conv)) (fn-op nm))
            :static (and cid (= "static" (:storageClass n)))
            :virtual (boolean (:virtual n)) :pure (boolean (:pure n))
+           :constexpr (boolean (:constexpr n))
            :noexcept (boolean (re-find #"\bnoexcept\b(?!\s*\(\s*false)" (or qt "")))
            :noexcept-false (boolean (re-find #"\bnoexcept\s*\(\s*false" (or qt "")))
            :linkage (if (linkage-c? home) :c :cpp)
@@ -607,6 +608,8 @@
 
 (declare analyze rv)
 
+(declare ce-eval)
+
 (defn const-int [scope n]
   (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} n)))]
     (letfn [(ev [e]
@@ -621,9 +624,138 @@
                                "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0) "&&" (if (and (not= a 0) (not= b 0)) 1 0)
                                "||" (if (or (not= a 0) (not= b 0)) 1 0)))
                 :cond (if (zero? (long (ev (:c e)))) (ev (:else e)) (ev (:then e)))
-                :load (let [v (var* (:id (:e e)))] (if (and (:c (:ty v)) (:init v)) (const-int (:def-scope v) (:init v)) (fail :const "not a constant")))
-                (fail :const "constant " (:op e))))]
+                :load (let [v (var* (:id (:e e)))] (if (and (:c (:ty v)) (:init v)) (const-int (:def-scope v) (:init v)) (ce-eval e)))
+                (ce-eval e)))]
       (ev e))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Constant evaluation ([expr.const]): the typed expressions of integral and floating values, calls of constexpr
+;; functions with their parameters, locals, conditions, loops and assignments (as clang's ExprConstant evaluates them,
+;; for what the slice's code asks: initializers of globals, constexpr and const integral locals, array bounds and case
+;; labels); anything else is not a constant (ex-info {:codegen/not-constant true})
+
+(declare analyze-fn! stmt ce-exec)
+
+(defn- not-constant [& msg] (throw (ex-info (apply str "not a constant: " msg) {:codegen/not-constant true})))
+
+(defn ce-wrap
+  "The value `v` as the type `t` holds it (integers wrapped to its width, bool 0/1, floats as doubles)."
+  [t v]
+  (let [t (abi/underlying (abi/unq t))]
+    (cond
+      (= :bool (abi/bn t)) (if (if (number? v) (not (zero? (double v))) v) 1 0)
+      (abi/floating? t) (if (= :float (abi/bn t)) (double (float (double v))) (double v))
+      (abi/integral? t) (let [bits (* 8 (abi/size-of t)) x (long (if (float? v) (long (double v)) v))]
+                          (if (>= bits 64) x
+                              (let [m (dec (bit-shift-left 1 bits)) y (bit-and x m)]
+                                (if (and (abi/signed? t) (>= y (bit-shift-left 1 (dec bits)))) (- y (bit-shift-left 1 bits)) y))))
+      :else (not-constant "a value of " (pr-str t)))))
+
+(def ^:dynamic *ce-steps* nil)
+
+(defn ce-eval
+  "The constant value of the typed expression `e` (`env` {var-id atom} the locals of the evaluated calls)."
+  ([e] (binding [*ce-steps* (atom 0)] (ce-eval e {})))
+  ([e env]
+   (when (> (long (swap! *ce-steps* inc)) 1000000) (not-constant "too many steps"))
+   (let [ev #(ce-eval % env)
+         t (:ty e)]
+     (case (:op e)
+       :int (:v e)
+       :float (:v e)
+       :cast (let [v (ev (:e e))]
+               (case (:ck e)
+                 (:noop :int :int->fp :fp :fp->int) (ce-wrap t (if (and (= :fp->int (:ck e))) (long (double v)) v))
+                 :to-bool (if (zero? (double v)) 0 1)
+                 (not-constant "cast " (:ck e))))
+       :unop (let [v (ev (:e e))]
+               (ce-wrap t (case (:o e) "-" (if (float? v) (- (double v)) (- (long v))) "+" v "~" (bit-not (long v)))))
+       :not (if (zero? (long (ev (:e e)))) 1 0)
+       :binop (let [a (ev (:l e)) b (ev (:r e))]
+                (if (abi/floating? t)
+                  (let [a (double a) b (double b)]
+                    (ce-wrap t (case (:o e) "+" (+ a b) "-" (- a b) "*" (* a b) "/" (/ a b) (not-constant "op " (:o e)))))
+                  (let [a (long a) b (long b) u (not (abi/signed? t))]
+                    (ce-wrap t (case (:o e)
+                                 "+" (+ a b) "-" (- a b) "*" (* a b)
+                                 "/" (if (zero? b) (not-constant "division by zero") (if u (Long/divideUnsigned a b) (quot a b)))
+                                 "%" (if (zero? b) (not-constant "division by zero") (if u (Long/remainderUnsigned a b) (rem a b)))
+                                 "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
+                                 "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b))))))
+       :cmp (let [a (ev (:l e)) b (ev (:r e))
+                  c (if (or (float? a) (float? b)) (compare (double a) (double b))
+                        (if (abi/signed? (:ct e)) (compare (long a) (long b)) (Long/compareUnsigned (long a) (long b))))]
+              (if (case (:o e) "<" (neg? c) ">" (pos? c) "<=" (<= c 0) ">=" (>= c 0) "==" (zero? c) "!=" (not (zero? c))) 1 0))
+       :land (if (and (not (zero? (long (ev (:l e))))) (not (zero? (long (ev (:r e)))))) 1 0)
+       :lor (if (or (not (zero? (long (ev (:l e))))) (not (zero? (long (ev (:r e)))))) 1 0)
+       :cond (if (zero? (long (ev (:c e)))) (ev (:else e)) (ev (:then e)))
+       :comma (do (ev (:l e)) (ev (:r e)))
+       :load (let [x (:e e)]
+               (if (and (= :var (:op x)) (contains? env (:id x)))
+                 @(get env (:id x))
+                 (let [v (when (= :var (:op x)) (var* (:id x)))
+                       init (or (:init v) (:init-node v))]
+                   (if (and v (:c (:ty v)) init (or (abi/integral? (:ty v)) (:constexpr v)))
+                     (ce-wrap (:ty v) (ce-eval (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (or (:def-scope v) *root*)} init))) {}))
+                     (not-constant "a load")))))
+       :assign (let [x (:l e)] (when-not (and (= :var (:op x)) (contains? env (:id x))) (not-constant "an assignment"))
+                 (let [v (ce-wrap (:ty x) (ev (:r e)))] (reset! (get env (:id x)) v) v))
+       :cassign (let [x (:l e)] (when-not (and (= :var (:op x)) (contains? env (:id x))) (not-constant "an assignment"))
+                  (let [old @(get env (:id x))
+                        r (ev (:r e))
+                        ct (:ct e)
+                        v (ce-eval {:op :binop :o (:o e) :ty ct :l {:op (if (float? old) :float :int) :v old} :r {:op (if (float? r) :float :int) :v r}} env)
+                        v (ce-wrap (:ty x) v)]
+                    (reset! (get env (:id x)) v) v))
+       :incdec (let [x (:e e)] (when-not (and (= :var (:op x)) (contains? env (:id x))) (not-constant "an increment"))
+                 (let [old @(get env (:id x)) nv (ce-wrap (:ty x) ((if (= "++" (:o e)) + -) old 1))]
+                   (reset! (get env (:id x)) nv) (if (:post e) old nv)))
+       :call (let [f (fnd (:fn e))]
+               (when (or (not (:constexpr f)) (:obj e) (and (:cls f) (not (:static f)))) (not-constant "a call of " (:name f)))
+               (when-not (:tbody f) (when (:body f) (analyze-fn! (:id f))))
+               (let [f (fnd (:fn e))
+                     args (mapv (fn [i] (if (= :expr (:i i)) (ev (:e i)) (not-constant "an argument"))) (:args e))
+                     env2 (into {} (map (fn [pid a] [pid (atom (ce-wrap (:ty (var* pid)) a))]) (:params f) args))
+                     r (ce-exec (:tbody f) env2)]
+                 (if (= :ret (first r)) (ce-wrap t (second r)) (not-constant "no return"))))
+       (not-constant "the expression " (:op e))))))
+
+(defn- ce-exec
+  "Executes a constexpr function's typed statement: [:normal], [:ret v], [:break] or [:continue]."
+  [s env]
+  (case (:s s)
+    (nil :null) [:normal]
+    :block (let [env (atom env)]
+             (loop [[x & more] (mapcat #(if (:flat %) (:items %) [%]) (:items s))]
+               (if (nil? x) [:normal]
+                   (if (= :decl (:s x))
+                     (let [v (var* (:var x)) init (:init x)
+                           val (case (:i init) :expr (ce-eval (:e init) @env) (:zero :none) 0 (not-constant "a local's initializer"))]
+                       (swap! env assoc (:var x) (atom (ce-wrap (:ty v) val)))
+                       (recur more))
+                     (let [r (ce-exec x @env)] (if (= :normal (first r)) (recur more) r))))))
+    :return (cond (:void-e s) [:ret 0] (:init s) [:ret (ce-eval (:e (:init s)) env)] :else [:ret 0])
+    :expr (do (ce-eval (:e s) env) [:normal])
+    :if (if (zero? (long (ce-eval (:cond s) env))) (if (:else s) (ce-exec (:else s) env) [:normal]) (ce-exec (:then s) env))
+    :while (loop [] (if (zero? (long (ce-eval (:cond s) env))) [:normal]
+                        (let [r (ce-exec (:body s) env)] (case (first r) :ret r :break [:normal] (recur)))))
+    :do (loop [] (let [r (ce-exec (:body s) env)]
+                   (case (first r) :ret r :break [:normal]
+                         (if (zero? (long (ce-eval (:cond s) env))) [:normal] (recur)))))
+    :for (loop [] (if (and (:cond s) (zero? (long (ce-eval (:cond s) env)))) [:normal]
+                      (let [r (ce-exec (:body s) env)]
+                        (case (first r) :ret r :break [:normal]
+                              (do (when (:inc s) (ce-eval (:inc s) env)) (recur))))))
+    :break [:break]
+    :continue [:continue]
+    (not-constant "the statement " (:s s))))
+
+(defn ce-try
+  "The constant `e` folds to (a typed literal of its type), or nil."
+  [e]
+  (try (let [v (ce-eval e) t (abi/unq (:ty e))]
+         (if (abi/floating? t) {:op :float :v (double v) :ty t :cat :pr} {:op :int :v (long v) :ty t :cat :pr}))
+       (catch arbace.lang.ExceptionInfo x (when-not (:codegen/not-constant (ex-data x)) (when-not (:codegen/refused (ex-data x)) (throw x))) nil)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions: typed nodes {:op ... :ty T :cat :lv|:xv|:pr}
@@ -1476,7 +1608,8 @@
     "CharacterLiteral" {:op :int :v (long (:value n)) :ty (int-type-of (get-in n [:type :qualType] "char")) :cat :pr}
     "CXXBoolLiteralExpr" {:op :int :v (if (:value n) 1 0) :ty abi/bool* :cat :pr}
     "FloatingLiteral" (let [qt (get-in n [:type :qualType])]
-                        {:op :float :v (Double/parseDouble (:value n)) :ty (case qt "float" abi/float* "long double" (abi/b :ldouble) abi/double*) :cat :pr})
+                        {:op :float :v (Double/parseDouble (:value n)) :lit (when (= qt "long double") (:value n))
+                         :ty (case qt "float" abi/float* "long double" (abi/b :ldouble) abi/double*) :cat :pr})
     "StringLiteral" (let [s (decode-string (:value n))
                           t (resolve-type (:scope ctx) (get-in n [:type :qualType]))]
                       (when-not (= :char (abi/bn (abi/unq (:of t)))) (fail :string "a wide string"))
@@ -1625,7 +1758,7 @@
   (let [ty (resolve-type (:scope ctx) (get-in n [:type :qualType]))
         id (next-id)
         st (if (= "static" (:storageClass n)) :static-local storage)
-        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (first (kids n))}]
+        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (first (kids n)) :constexpr (boolean (:constexpr n))}]
     (swap! *vars* assoc id v)
     id))
 
@@ -1676,7 +1809,14 @@
                                (enter! (:scope ctx) (or (:name d) "") {:e :var :id id})
                                (upd-var! id assoc :sinit init)
                                {:s :static-local :var id}))
-                         (let [init (decl-init ctx id d)]
+                         (let [init (decl-init ctx id d)
+                               t (:ty (var* id))
+                               ;; a constexpr local, or a const integral one, initialized by a constant: folded (clang
+                               ;; emits the value)
+                               init (if (and (= :expr (:i init)) (abi/scalar? (abi/unq t)) (not (#{:int :float :null} (:op (:e init))))
+                                             (or (:constexpr d) (and (:c t) (abi/integral? t))))
+                                      (if-let [c (ce-try (:e init))] (assoc init :e c) init)
+                                      init)]
                            (enter! (:scope ctx) (or (:name d) "") {:e :var :id id})
                            {:s :decl :var id :init init})))
            "CXXRecordDecl" (do (declare-class! (:scope ctx) d) {:s :null})
@@ -1935,9 +2075,13 @@
         ctx {:scope (or (:def-scope v) (:scope v)) :statics (atom [])}
         init (:init v)]
     (binding [*cutoff* Long/MAX_VALUE]
-      (cond
-        (nil? init) (init-for (:ty v) nil ctx :value)
-        :else (decl-init ctx vid (assoc (or (:node v) {}) :init (:init-style v) :inner [init] :kind "VarDecl"))))))
+      (let [i (cond
+                (nil? init) (init-for (:ty v) nil ctx :value)
+                :else (decl-init ctx vid (assoc (or (:node v) {}) :init (:init-style v) :inner [init] :kind "VarDecl")))]
+        ;; a scalar initialized by a constant expression: constant initialization ([basic.start.static])
+        (if (and (= :expr (:i i)) (abi/scalar? (abi/unq (:ty v))) (not (#{:int :float :null} (:op (:e i)))))
+          (if-let [c (ce-try (:e i))] (assoc i :e c) i)
+          i)))))
 
 (def prelude-typeinfo
   ;; std::type_info as the Itanium ABI lays it out (§2.9.4: the vptr, then the name) and compares it (§2.9.4: equal
@@ -1986,7 +2130,7 @@ protected:
         (case k
           :fn (let [f (fnd id)]
                 (cond
-                  (:body f) (analyze-fn! id)
+                  (and (:body f) (not (:tbody f))) (analyze-fn! id)
                   (or (:implicit f) (:defaulted f)) (analyze-implicit! id)
                   :else nil))
           :var (let [v (var* id)] (when (:defined v) (upd-var! id assoc :ginit (global-init id))))))

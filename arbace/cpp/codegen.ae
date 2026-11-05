@@ -607,11 +607,32 @@
       (let [s (abi/signed? t)]
         (val! (list 'icmp (case o "<" (if s :slt :ult) ">" (if s :sgt :ugt) "<=" (if s :sle :ule) ">=" (if s :sge :uge) "==" :eq "!=" :ne) lt a b))))))
 
-(defn- fp-const [t ^double v]
+(defn- pow2 ^java.math.BigDecimal [^long e]
+  (if (neg? e)
+    (.divide java.math.BigDecimal/ONE (java.math.BigDecimal. (.pow java.math.BigInteger/TWO (int (- e)))))
+    (java.math.BigDecimal. (.pow java.math.BigInteger/TWO (int e)))))
+
+(defn fp80-hex
+  "The x86 80-bit extended value nearest the decimal `s` (or the BigDecimal), as LLVM 23 writes it: f0x, then the sign
+  and the biased exponent (4 hex digits) and the 64-bit significand with its integer bit (16)."
+  ^String [x]
+  (let [bd (if (instance? java.math.BigDecimal x) x (java.math.BigDecimal. (str/replace (str x) #"[lLfF]$" "")))]
+    (if (zero? (.signum bd))
+      (if (str/starts-with? (str x) "-") "f0x80000000000000000000" "f0x00000000000000000000")
+      (let [neg (neg? (.signum bd)) bd (.abs bd)
+            e (loop [e (long (Math/getExponent (.doubleValue bd)))]
+                (cond (neg? (.compareTo bd (pow2 e))) (recur (dec e))
+                      (>= (.compareTo bd (pow2 (inc e))) 0) (recur (inc e))
+                      :else e))
+            m (.toBigInteger (.setScale (.multiply bd (pow2 (- 63 e))) 0 java.math.RoundingMode/HALF_EVEN))
+            [m e] (if (>= (.bitLength m) 65) [(.shiftRight m 1) (inc e)] [m e])]
+        (format "f0x%04X%016X" (bit-or (if neg 0x8000 0) (+ (long e) 16383)) m)))))
+
+(defn- fp-const [t ^double v & [lit]]
   (if (= :float (abi/bn (abi/unq t)))
     (list 'fp (str "0x" (str/upper-case (format "%016x" (Double/doubleToRawLongBits (double (float v)))))))
     (if (= :ldouble (abi/bn (abi/unq t)))
-      (fail :long-double "long double constants")
+      (list 'fp (fp80-hex (if lit lit (java.math.BigDecimal. v))))
       (list 'fp (str "0x" (str/upper-case (format "%016x" (Double/doubleToRawLongBits v))))))))
 
 (defn- int-cast! [from to v]
@@ -731,7 +752,7 @@
   [e]
   (case (:op e)
     :int (if (= 'i1 (abi/llvm-type (:ty e) true)) (not (zero? (long (:v e)))) (:v e))
-    :float (fp-const (:ty e) (:v e))
+    :float (fp-const (:ty e) (:v e) (:lit e))
     :null (if (abi/mptr? (abi/unq (:ty e))) (zero-of (:ty e)) 'null)
     :mptr-data (:off e)
     :mptr-fn (let [f (sema/fnd (:fn e))
@@ -1804,7 +1825,7 @@
                       v (letfn [(cv [e]
                                   (case (:op e)
                                     :int (:v e)
-                                    :float (fp-const (:ty e) (:v e))
+                                    :float (fp-const (:ty e) (:v e) (:lit e))
                                     :null 'null
                                     :decay (when (= :str (:op (:e e))) (gsym (string-global (:s (:e e)))))
                                     :addr (when (= :var (:op (:e e))) (let [v (sema/var* (:id (:e e)))] (when (#{:global :member-static} (:storage v)) (gsym (abi/mangle-var v)))))
