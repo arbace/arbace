@@ -1573,7 +1573,7 @@
           (node p "MemberExpr" b (:e qn) {:name (:s lp) :isArrow false :inner [(node p "DeclRefExpr" b (:e qn) {:referencedDecl {:name ""}})]})
           ;; a value named through a dependent using-declaration in a class template: unresolved (its text)
           (and (:unres en) (= 1 (count (:parts qn))) (not (:g qn)) (or (in-template? p) (dep-this? p)))
-          (node p "UnresolvedMemberExpr" b (:e qn) {})
+          (node p "UnresolvedMemberExpr" b (:e qn) (merge (written-name p qn) {:referencedDecl {:name (:s lp)}}))
           :else
           (node p "DeclRefExpr" b (:e qn) (merge (written-name p qn)
                                           {:_ent en
@@ -3211,11 +3211,17 @@
             (do (adv! p)
                 (let [nm (ts (cur p)) ni (ix p)]
                   (adv! p) (attr-nodes p) (expect! p "=")
-                  (skip-until! p #{";"})
-                  (let [e (last-ix p)]
+                  (let [cb (ix p)
+                        _ (skip-until! p #{";"})
+                        ce (ix p)
+                        ;; its constraint expression (P14 (b), the code generator's mode: G4)
+                        cx (when (and *full-headers* (not (skim? p)))
+                             (let [x (tentatively p (fn [p] (seek! p cb) (let [x (with-gt p true (parse-expr p))] (when (= (ix p) ce) x))))]
+                               (when (map? x) x)))
+                        e (last-ix p)]
                     (expect! p ";")
                     (sc/declare! (sc/decl-scope (scope p)) {:k :concept :name nm})
-                    [(node p "ConceptDecl" hb e {:name nm :loc (loc p ni) :inner ps})])))
+                    [(node p "ConceptDecl" hb e (cond-> {:name nm :loc (loc p ni) :inner ps} cx (assoc :constraintExpr cx)))])))
             :else
             (do (st! p THDR {:names (vec (remove nil? names)) :n (count names) :params ps})
                 (let [ns (try (parse-external-decl p (if (= ctx :member) :member :top)) (finally (st! p THDR nil)))]
@@ -3549,17 +3555,49 @@
   (let [b (ix p)
         _ (skip-requires-clause! p)
         e (ix p)]
-    (when (and *full-headers* (not (skim? p)) (not (t= (tok-at p (inc b)) "requires")) (not (System/getenv "CPP_NO_RC")))
+    (when (and *full-headers* (not (skim? p)) (not (System/getenv "CPP_NO_RC")))
       (let [x (tentatively p (fn [p] (seek! p (inc b)) (let [x (with-gt p true (parse-expr p))] (when (= (ix p) e) x))))]
         (when (map? x) x)))))
+
+(defn- parse-requires-body
+  "A requires-expression's parameters and requirements ([expr.prim.req]), the cursor after its `requires`: the node with
+  its requirements as clang's AST has them (SimpleRequirement, TypeRequirement, CompoundRequirement, NestedRequirement:
+  the code generator's mode, G4)."
+  [^P p b]
+  (with-scope p :block nil
+    (let [pl (when (is? p "(") (adv! p) (parse-param-list p))
+          _ (when pl (declare-params! p (:names pl) (:types pl)))
+          _ (expect! p "{")
+          reqs (loop [out []]
+                 (cond
+                   (accept! p "}") out
+                   (is? p "typename") (let [rb (ix p)] (skip-until! p #{";"}) (let [e (last-ix p)] (expect! p ";")
+                                                                                  (recur (conj out {:kind "TypeRequirement" :type {:qualType (tok-text p (inc rb) e)}}))))
+                   (is? p "{") (do (adv! p)
+                                   (let [x (with-gt p true (parse-expr p))]
+                                     (expect! p "}")
+                                     (accept! p "noexcept")
+                                     (skip-until! p #{";"}) (expect! p ";")
+                                     (recur (conj out {:kind "CompoundRequirement" :inner [x]}))))
+                   (is? p "requires") (do (adv! p)
+                                          (let [x (with-gt p true (parse-expr p))] (expect! p ";")
+                                            (recur (conj out {:kind "NestedRequirement" :inner [x]}))))
+                   :else (let [x (with-gt p true (parse-expr p))] (expect! p ";")
+                           (recur (conj out {:kind "SimpleRequirement" :inner [x]})))))]
+      (node p "RequiresExpr" b (last-ix p) {:inner reqs :params (vec (:params pl))}))))
 
 (defn parse-requires-expr [^P p]
   (let [b (ix p)]
     (adv! p)
-    (when (is? p "(") (skip-balanced! p))
-    (when-not (is? p "{") (perr p "a requires-expression's body"))
-    (skip-balanced! p)
-    (text-node p "RequiresExpr" b)))
+    (or (when (and *full-headers* (not (skim? p)))
+          (let [save (ix p)]
+            (try (parse-requires-body p b)
+                 (catch arbace.lang.ExceptionInfo _ (seek! p save) nil))))
+        (do
+          (when (is? p "(") (skip-balanced! p))
+          (when-not (is? p "{") (perr p "a requires-expression's body"))
+          (skip-balanced! p)
+          (text-node p "RequiresExpr" b)))))
 
 (defn parse-lambda [^P p]
   (let [b (ix p)]

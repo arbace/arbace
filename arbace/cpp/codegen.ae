@@ -838,7 +838,10 @@
     :new (let [et (:et e)
                cid (when (abi/class? (abi/unq et)) (:id (abi/unq et)))
                sz (abi/size-of et)]
-           (if (:n e)
+           (cond
+             ;; new (p) T: the object constructed at p ([new.delete.placement]; clang calls no operator new; G4)
+             (:placement e) (let [p (emit-rv (:placement e))] (emit-init p et (:init e)) p)
+             (:n e)
              (let [n (emit-rv (:n e))
                    cookie (nontrivial-dtor? cid)
                    bytes (val! (list 'mul 'i64 n sz))
@@ -864,6 +867,7 @@
                        (br! lc)
                        (begin! le)))))
                p)
+             :else
              (do (declare! "_Znwm" 'ptr '[i64])
                  (let [p (call-insn! 'ptr 'ptr (gsym "_Znwm") [['i64 sz]] false)
                        d (count (:cleanups @*f*))]
@@ -1705,11 +1709,26 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Vtables and type_info (Itanium §2.5, §2.9.5)
 
+(defn- external-class?
+  "A header's dynamic class whose key function ([basic.def.odr]; Itanium §5.2.3: its first virtual function that is
+  not pure and not inline where it is declared) is not defined here: its vtable and type_info are the runtime's,
+  external (G4: std::exception, std::logic_error)."
+  [cid]
+  (let [c (abi/cls cid)]
+    (and (:header c) (abi/dynamic? cid)
+         (let [k (first (filter (fn [id] (let [f (sema/fnd id)] (and (:virtual f) (not (:pure f)) (not (:inline f)) (not (:implicit f)) (not (:defaulted f)))))
+                                (:methods c)))]
+           (and k (not (:body (sema/fnd k))))))))
+
 (defn- typeinfo! [cid]
   (let [t {:k :class :id cid}
         mn (abi/mangle-type-name t)
         ti (str "_ZTI" mn) ts (str "_ZTS" mn)
         c (abi/cls cid)]
+    (if (external-class? cid)
+      (when-not (contains? (:declared @*top*) ti)
+        (swap! *top* update :declared conj ti)
+        (add-top! (list 'llvm/global (gsym ti) 'ptr :linkage :external :constant true)))
     (when-not (contains? (:declared @*top*) ti)
       (swap! *top* update :declared conj ti ts)
       (add-top! (list 'llvm/global (gsym ts) (list 'array (inc (count mn)) 'i8) (list 'c-string (str mn (char 0))) :linkage :linkonce_odr :constant true :align 1))
@@ -1740,7 +1759,7 @@
                                                       ['i64 (+ (bit-shift-left (long (if (:virtual b) (vbase-offset-offset cid (:cls b)) (nth bl i))) 8)
                                                                (if (= :public (:access b)) 2 0) (if (:virtual b) 1 0))]])
                                            (range) bases))
-                            :linkage :linkonce_odr :constant true :align 8))))))
+                            :linkage :linkonce_odr :constant true :align 8)))))))
     (gsym ti)))
 
 (defn- thunk!
@@ -1795,6 +1814,11 @@
     (gsym nm)))
 
 (defn- group! [grp]
+  (if (and (= (first grp) (second grp)) (external-class? (first grp)))
+    ;; a class whose vtable is the runtime's (its key function not defined here): declared, external (G4)
+    (let [g (apply group-of grp)]
+      (typeinfo! (first grp))
+      (add-top! (list 'llvm/global (gsym (group-name grp)) (list 'array (count (:items g)) 'ptr) :linkage :external :constant true :align 8)))
   (let [[m lid moff] grp
         g (apply group-of grp)
         ti (typeinfo! m)
@@ -1809,7 +1833,7 @@
                                adj ['ptr (thunk! fid v adj)]
                                (= 0 v) (do (want-fn! fid 1) (want-d0! fid) ['ptr (gsym (abi/mangle-fn f 0))])
                                :else ['ptr (want-fn! fid 1)])))))]
-    (add-top! (list 'llvm/global (gsym (group-name grp)) (list 'array (count slots) 'ptr) (apply list 'array slots) :linkage :linkonce_odr :constant true :align 8))))
+    (add-top! (list 'llvm/global (gsym (group-name grp)) (list 'array (count slots) 'ptr) (apply list 'array slots) :linkage :linkonce_odr :constant true :align 8)))))
 
 (defn- vtt! [cid]
   (let [{:keys [entries]} (vtt-layout cid)]

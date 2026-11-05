@@ -149,7 +149,12 @@
   (if (dependent? t)
     {:k :texpr :o :sr :base t :name nm}
     (do (when-not (abi/class? t) (fail :template "a member of a non-class: " nm))
-        (const-entity (:scope (abi/cls (:id t))) [nm]))))
+        ;; a qualified name: its dependent bases searched too ([temp.dep.type]; G4: value through __and_<...>::type)
+        (let [e (first (map second (sema/class-lookup (:id t) nm false)))]
+          (if (= :var (:e e))
+            (let [v (sema/var* (:id e))]
+              (if (and (:c (:ty v)) (:init v)) (sema/const-int (or (:def-scope v) (:scope (abi/cls (:id t)))) (:init v)) (fail :template "not a constant: " nm)))
+            (const-entity (:scope (abi/cls (:id t))) [nm]))))))
 
 (def ^:private binary-fns
   {"+" + "-" - "*" * "/" quot "%" rem "<<" bit-shift-left ">>" bit-shift-right "&" bit-and "|" bit-or "^" bit-xor
@@ -720,7 +725,8 @@
   bound, a value compared, a non-deduced expression checked, a pack matched element-wise, a type deduced."
   [b tid p a]
   (cond
-    (tparam-of? p tid) (bind-arg! b (:i p) a)
+    ;; (a cv-qualified parameter, `const T` of allocator<const T>, is matched by type: [temp.deduct.type]/8; G4)
+    (and (tparam-of? p tid) (not (:c p)) (not (:v p))) (bind-arg! b (:i p) a)
     (and (map? p) (contains? p :val)) (= (:val p) (:val a))
     ;; a non-deduced expression (HoldInt<-N>): consistent with what the others deduced
     (= :texpr (:k p)) (let [v (subst-value p @b tid)]
@@ -857,10 +863,14 @@
   "A function template's signature with its own parameters (the type its specializations are mangled with)."
   [t]
   (or (:sig t)
-      (let [s (sema/resolve-type (sym-scope t) (get-in (:pattern t) [:type :qualType]))
-            s (dissoc s :cq)]
-        (upd-tmpl! (:id t) assoc :sig s)
-        s)))
+      ;; (a signature whose decltype calls the template itself, `-> decltype(__niter_base(...))`: refused inside, G4)
+      (do (when (:sig-pending (tmpl (:id t))) (fail :template "a signature that names its own template " (:name t)))
+          (upd-tmpl! (:id t) assoc :sig-pending true)
+          (let [s (try (sema/resolve-type (sym-scope t) (get-in (:pattern t) [:type :qualType]))
+                       (finally (upd-tmpl! (:id t) dissoc :sig-pending)))
+                s (dissoc s :cq)]
+            (upd-tmpl! (:id t) assoc :sig s)
+            s))))
 
 (defn- finish-deduction
   "The bindings as the template's argument list: the deduced bound of an array ({:bound}) typed by its parameter,
@@ -1032,7 +1042,17 @@
   (let [b (atom {}) tid (:id pt)]
     (when (match-args b tid (:args pt) args)
       (when (= (count @b) (count (:params pt)))
-        (mapv #(get @b %) (range (count (:params pt))))))))
+        (let [ded (mapv #(get @b %) (range (count (:params pt))))]
+          ;; its associated constraints satisfied ([temp.spec.partial.match]/2; G4)
+          (when (and (or (nil? (:constraint pt))
+                         (sema/constraint-satisfied? (bind-scope (:scope pt) (:params pt) ded nil) (:constraint pt)))
+                     ;; the partial specialization's arguments substituted ([temp.spec.partial.match]/2: a failure is no
+                     ;; match, SFINAE: __void_t<typename _Alloc::value_type, decltype(...)>; G4) equal to the arguments
+                     (or (nil? (:forms pt))
+                         (when-let [sub (try (resolve-args (bind-scope (:scope pt) (:params pt) ded nil) (:tmpl pt) (:forms pt) true)
+                                             (catch arbace.lang.ExceptionInfo _ nil))]
+                           (= (canonical sub) (canonical args)))))
+            ded))))))
 
 (defn- more-specialized-partial?
   "[temp.class.order]: the partial specialization p1 more specialized than p2 (p2's arguments deduced from p1's, not
@@ -1060,7 +1080,8 @@
                                    (abi/update-cls! (:id c) assoc :from-partial [(:id pt) (:params pt) b])
                                    (doseq [o (:ool pt)] (attach-one! (:id t) (:id c) o [(:params pt) b]))
                                    c)
-              :else (fail :template "ambiguous partial specializations of " (:name t))))))))
+              :else (fail :template "ambiguous partial specializations of " (:name t)
+                          (when (System/getenv "CPP_TMPL_TRACE") (str " " (pr-str (map (fn [[p b]] [(:args p) b]) ms)) " for " (pr-str args))))))))))
 
 (defn- tmpl-of-entity [es]
   (or (some #(when (and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) (:id %)) es)
@@ -1072,7 +1093,8 @@
   [scope f]
   (let [[_ nm & forms] f
         [in nm] (if (map? nm) [(:in nm) (:name nm)] [nil nm])
-        parts (if (namespace nm) (concat (str/split (namespace nm) #"/") [(name nm)]) [(name nm)])
+        ;; (the qualified name's parts from its whole spelling: a symbol n/C/t may hold "C/t" as its name)
+        parts (if (namespace nm) (str/split (str nm) #"/") [(name nm)])
         es (cond in (map second (sema/class-lookup (:cls in) (name nm)))
                  (= 1 (count parts)) (sema/lookup scope (first parts))
                  :else (sema/lookup-qualified scope (vec parts)))
@@ -1247,7 +1269,7 @@
         (name-pack-params! fid (:pattern t))
         (when-let [decls (seq (:decls t))]
           (let [f (sema/fnd fid)
-                alt (for [d decls] (mapv #(first (kids %)) (filter #(= "ParmVarDecl" (:kind %)) (kids d))))]
+                alt (for [d decls] (mapv (fn [p] (first (remove (fn [k] (str/ends-with? (str (:kind k)) "Attr")) (kids p)))) (filter #(= "ParmVarDecl" (:kind %)) (kids d))))]
             (upd-fn! fid assoc :defaults (vec (map-indexed (fn [i x] (or x (some #(get % i) alt))) (:defaults f))))))
         (upd-tmpl! tid assoc-in [:insts args] fid)
         fid)))
@@ -1463,7 +1485,13 @@
           old (find-template scope (:name n) :class)
           tid (or old (next-id))]
       (if old
-        (when (:completeDefinition pattern) (upd-tmpl! tid assoc :pattern pattern :params (tparams n)))
+        ;; the definition's parameters, the earlier declarations' default arguments kept ([temp.param]/12; G4:
+        ;; basic_string's defaults are on its declaration in <stringfwd.h>)
+        (when (:completeDefinition pattern)
+          (let [olds (:params (tmpl tid))]
+            (upd-tmpl! tid assoc :pattern pattern
+                       :params (vec (map-indexed (fn [i p] (if (and (nil? (:default p)) (:default (get olds i))) (assoc p :default (:default (get olds i))) p))
+                                                 (tparams n))))))
         (do (swap! *tmpls* assoc tid {:id tid :tk :class :name (:name n) :scope scope :path (:path scope) :params (tparams n)
                                       :pattern (when (:completeDefinition pattern) pattern) :pos (:_b n) :insts {} :specs {} :partials [] :ool []})
             (enter! scope (:name n) {:e :tmpl :tk :class :id tid :pos (long (or (:_b n) 0))})))
@@ -1503,6 +1531,14 @@
             (abi/update-cls! (:cls scope) update :ctor-tmpls (fnil conj []) tid)
             (enter! scope (:name n) {:e :tmpl :tk :fn :id tid :pos (long (or (:_b n) 0))}))))
       :template))
+    ;; a concept ([temp.concept]): its parameters and constraint expression; a concept-id is its satisfaction (G4)
+    "ConceptDecl"
+    (if-let [cx (:constraintExpr n)]
+      (let [tid (next-id)]
+        (swap! *tmpls* assoc tid {:id tid :tk :concept :name (:name n) :scope scope :path (:path scope) :params (tparams n) :expr cx :pos (:_b n)})
+        (enter! scope (:name n) {:e :tmpl :tk :concept :id tid :pos (long (or (:_b n) 0))})
+        :template)
+      (fail :template "a concept without its constraint"))
     "FriendDecl" (friend! scope n)
     ;; an explicit instantiation (template struct A<int>; extern template ...): the definitions clang emits weak_odr are
     ;; emitted here only when used (the names check takes ours among clang's)
@@ -1522,7 +1558,15 @@
           params (tparams n)
           ss (bind-scope (:scope t) params nil pid)
           args (resolve-args ss t (template-text-args n) true)]
-      (upd-tmpl! tid update :partials conj {:id pid :params params :args args :node n})
+      ;; a redeclaration of a partial specialization (its declaration, then its definition: <iterator_concepts.h>'s
+      ;; iterator_traits<_Tp*>) is the same one, its definition kept (G4); its requires-clause its constraint (P14 (b))
+      (let [same (first (filter #(= (canonical (:args %)) (canonical args)) (:partials t)))
+            pt {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t)
+                :forms (template-text-args n) :tmpl t}]
+        (if same
+          (when (:completeDefinition n)
+            (upd-tmpl! tid update :partials (fn [ps] (mapv #(if (identical? % same) pt %) ps))))
+          (upd-tmpl! tid update :partials conj pt)))
       :template)
     "ClassTemplateSpecializationDecl"
     (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope (:name n))) (fail :template "no primary template " (:name n)))
@@ -1682,5 +1726,12 @@
                                [{:e :type :ty {:k :tdep :base (:ty e) :names (vec (rest parts))} :pos -1}])))
          :trait-type (fn [scope nm forms] (if (contains? type-traits nm) (trait-type scope nm forms) (fail :type "unknown type " nm)))
          :trait-text (fn [scope t] (binding [sema/*cutoff* Long/MAX_VALUE] (eval-text scope t)))
+         :concept-id (fn [ctx e n]
+                       (let [t (tmpl (:id e))
+                             args (or (complete-args t (or (explicit-args t (sema/written-targs n (:name t)) (:scope ctx)) []))
+                                      (fail :template "missing template arguments for " (:name t)))]
+                         (if (dependent? args)
+                           (fail :template "a dependent concept-id")
+                           (if (sema/constraint-satisfied? (bind-scope (:scope t) (:params t) args nil) (:expr t)) 1 0))))
          :pending pending
          :wrap (fn [f] (binding [*tmpls* (atom {}) *scanned* (atom #{})] (f)))})

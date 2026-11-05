@@ -192,7 +192,9 @@
    "__builtin_strlen" ["strlen" "unsigned long (const char *)"]
    "__builtin_strcmp" ["strcmp" "int (const char *, const char *)"]
    "__builtin_abs" ["abs" "int (int)"]
-   "__builtin_abort" ["abort" "void ()"]})
+   "__builtin_abort" ["abort" "void ()"]
+   ;; never reached (clang writes LLVM's unreachable): abort stands for it (G4: the headers' __builtin_unreachable)
+   "__builtin_unreachable" ["abort" "void ()"]})
 
 (defn- builtin-entities [^String nm]
   (when-let [[cn qt] (builtin-fns nm)]
@@ -210,7 +212,7 @@
    'float :float 'double :double 'long-double :ldouble 'wchar_t :wchar 'char8_t :char8 'char16_t :char16 'char32_t :char32
    'std/nullptr_t :nullptr 'nullptr_t :nullptr 'decltype/nullptr :nullptr})
 
-(defn- name-parts [sym] (if (namespace sym) (concat (str/split (namespace sym) #"/") [(name sym)]) [(name sym)]))
+(defn- name-parts [sym] (if (namespace sym) (str/split (str sym) #"/") [(name sym)]))
 
 (defn- type-entity [es] (first (filter #(= :type (:e %)) es)))
 
@@ -224,9 +226,19 @@
   else T& for an lvalue, T&& for an xvalue, T for a prvalue."
   [scope ^String t]
   (let [n (get *decltypes* (str/replace t #"\s+" ""))]
-    (when-not n (fail :decltype "decltype(" t ")"))
-    (let [x (analyze {:scope scope :statics (atom [])} n)]
+    (when-not n
+      (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "decltype(" t ") not kept by the parser")))
+      (fail :decltype "decltype(" t ")"))
+    (let [x (try (analyze {:scope scope :statics (atom [])} n)
+                 ;; (an operand that does not analyze, a template's parameters in it: a dependent type, the decltype
+                 ;; analyzed again where the arguments are bound; G4: __void_t<decltype(declval<_Alloc&>().allocate(...))>)
+                 (catch arbace.lang.ExceptionInfo e
+                   (if (:codegen/refused (ex-data e))
+                     (do (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "decltype(" t ") dependent:" (.getMessage e))))
+                         {:dependent-decltype t})
+                     (throw e))))]
       (cond
+        (:dependent-decltype x) {:k :tdep :base {:k :tparam :i -1 :tid -1 :name "decltype"} :names [(str "decltype(" t ")")]}
         (and (= "DeclRefExpr" (:kind n)) (= :var (:op x))) (:ty (var* (:id x)))
         (#{"DeclRefExpr" "MemberExpr"} (:kind n)) (:ty x)
         (= :lv (:cat x)) (abi/lref (:ty x))
@@ -285,12 +297,22 @@
                        (re-find #"^(sizeof|alignof)\b" t) abi/ulong*
                        :else (decltype-of scope t)))
       <> (if-let [h (:template-id @hooks)] (h scope f) (fail :template "template-id " (pr-str f)))
-      cpp/scope (loop [t (resolve-type-form scope (second f)) [p & more] (nnext f)]
+      cpp/scope (loop [t (resolve-type-form scope (second f))
+                       ;; X::template Y<A>::Z: the parts after `template` (G4: __alloc_traits<_Alloc>::template rebind<_Tp>::other)
+                       [p & more] (mapcat (fn [x] (if (and (seq? x) (= 'template (first x)))
+                                                    (let [y (second x)] (if (and (seq? y) (= 'cpp/scope (first y))) (rest y) [y]))
+                                                    [x]))
+                                          (nnext f))]
                   (cond
                     (nil? p) t
-                    ;; a member of a dependent type in a template's signature (CODEGEN.md G3)
+                    ;; a member of a dependent type in a template's signature (CODEGEN.md G3); a member template's
+                    ;; specialization among the names (G4)
                     (#{:tparam :tspec :tdep} (:k (abi/unq t)))
-                    {:k :tdep :base t :names (mapv #(if (symbol? %) (name %) (fail :type "type form " (pr-str f))) (cons p more))}
+                    {:k :tdep :base t :names (mapv #(cond (symbol? %) (name %)
+                                                          (and (seq? %) (= '<> (first %)) (symbol? (second %)))
+                                                          {:name (name (second %)) :args (mapv (fn [a] (resolve-type-form scope a)) (nnext %))}
+                                                          :else (fail :type "type form " (pr-str f)))
+                                                   (cons p more))}
                     (not (abi/class? t)) (fail :type "a scope of a non-class " (pr-str f))
                     ;; a member template's specialization (Outer<int>::Inner<double>): its name found in the class, its
                     ;; arguments resolved here
@@ -542,7 +564,16 @@
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
   their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
   [scope n]
-  (if (and (:trailingRequiresClause n) (not (constraint-satisfied? scope (:trailingRequiresClause n))))
+  (if (and (:trailingRequiresClause n)
+           ;; (its parameters in scope: requires { __lhs.base() == __rhs.base(); }, G4)
+           (not (constraint-satisfied? (let [ps (new-scope :block scope)]
+                                         (doseq [pn (param-nodes n) :when (:name pn)]
+                                           (when-let [t (try (resolve-type scope (get-in pn [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
+                                             (let [id (next-id)]
+                                               (swap! *vars* assoc id {:id id :name (:name pn) :ty t :storage :param})
+                                               (enter! ps (:name pn) {:e :var :id id}))))
+                                         ps)
+                                       (:trailingRequiresClause n))))
     nil
   (let [q (when (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "FunctionDecl" "CXXConversionDecl"} (:kind n)) (qualifier-before n))
         home (if (seq q)
@@ -552,7 +583,18 @@
         cid (:cls home)
         k (case (:kind n) "CXXConstructorDecl" :ctor "CXXDestructorDecl" :dtor "CXXConversionDecl" :conv (if cid :method :fn))
         qt (get-in n [:type :qualType])
-        ty (assoc (resolve-type home qt) :cq (method-const? qt))
+        ;; (a trailing return type's decltype names the parameters: `-> decltype(make_move_iterator(__it.base()))`;
+        ;; they are in its scope, [basic.scope.param]; G4)
+        tscope (if (and qt (str/includes? qt "decltype"))
+                 (let [ps (new-scope :block home)]
+                   (doseq [pn (param-nodes n) :when (:name pn)]
+                     (when-let [t (try (resolve-type home (get-in pn [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
+                       (let [id (next-id)]
+                         (swap! *vars* assoc id {:id id :name (:name pn) :ty t :storage :param})
+                         (enter! ps (:name pn) {:e :var :id id}))))
+                   ps)
+                 home)
+        ty (assoc (resolve-type tscope qt) :cq (method-const? qt))
         ty (dissoc ty :cq)
         nm (:name n)
         body (first (filter #(= "CompoundStmt" (:kind %)) (kids n)))
@@ -576,7 +618,7 @@
         old (find-redecl home f)
         id (or old (next-id))
         pinfo {:param-names (mapv :name pn)
-               :defaults (mapv (fn [p] (first (kids p))) pn)}]
+               :defaults (mapv (fn [p] (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))) pn)}]
     (if old
       (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names] [])))
                             (some some? (:defaults pinfo)) (assoc :defaults (:defaults pinfo))
@@ -669,6 +711,7 @@
                                          ;; a base dependent in a template's pattern (CODEGEN.md G3: [temp.dep]/4)
                                          (contains? (:dep-bases (abi/cls id)) bi) (assoc :dependent true))))))
       (let [access (atom (if (= "class" (:tagUsed n)) :private :public))]
+        (when (System/getenv "CPP_USING_TRACE") (binding [*out* *err*] (println "class" nm (mapv :kind (kids n)) (mapv :kind (:inner n)))))
         (doseq [k (kids n)]
           (case (:kind k)
             "AccessSpecDecl" (reset! access (keyword (:access k)))
@@ -692,6 +735,7 @@
 
 (declare declare-node*!)
 
+(def ^:dynamic *retry* nil) ; atom [[scope node] ...]: header declarations to declare again after the headers (G4)
 (def ^:dynamic *header-drops* nil) ; atom [[kind name message] ...]: the header declarations not declared (G4)
 
 (defn declare-node!
@@ -703,8 +747,13 @@
          (catch arbace.lang.ExceptionInfo e
            (if (or (:codegen/refused (ex-data e)) (:codegen/not-constant (ex-data e)))
              (do (when *header-drops* (swap! *header-drops* conj [(:kind n) (:name n) (.getMessage e)]))
+                 ;; a declaration that named a class template's specialization before its specialization was defined
+                 ;; (<stringfwd.h>'s typedef basic_string<char> string, char_traits<char> defined later): tried again
+                 ;; after the headers (clang instantiates only when the type must be complete)
+                 (when (and *retry* (re-find #"an incomplete class template" (str (.getMessage e))))
+                   (swap! *retry* conj [scope n]))
                  (when (System/getenv "CPP_HDR_TRACE")
-                   (binding [*out* *err*] (println "header drop:" (:kind n) (:name n) (get-in n [:range :begin :offset]) (.getMessage e))))
+                   (binding [*out* *err*] (println "header drop:" (:kind n) (:name n) (get-in n [:range :begin :offset]) (.getMessage e) (:file (loc-of (get-in n [:range :begin]))))))
                  nil)
              (throw e))))
     (declare-node*! scope n)))
@@ -714,7 +763,12 @@
   (if-let [r (when-let [h (:declare @hooks)] (h scope n))]
     r
   (case (:kind n)
-    "NamespaceDecl" (let [s (ns-scope! scope (:name n) (nil? (:name n)))] (doseq [k (kids n)] (declare-node! s k)))
+    "NamespaceDecl" (let [s (ns-scope! scope (:name n) (nil? (:name n)))]
+                      ;; an inline namespace's members are members of the enclosing one too ([namespace.def]/7; G4:
+                      ;; std::__cxx11)
+                      (when (and (:isInline n) (:name n))
+                        (let [^java.util.ArrayList us (:usings scope)] (when-not (some #(identical? % s) us) (.add us s))))
+                      (doseq [k (kids n)] (declare-node! s k)))
     "LinkageSpecDecl" (let [s (assoc scope :extern-c (= "C" (:language n)))] (doseq [k (kids n)] (declare-node! s k)))
     ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl") (declare-fn! scope n)
     "VarDecl" (declare-var! scope n :global)
@@ -731,10 +785,13 @@
                                parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
                                e (first (filter #(= :ns (:e %)) (lookup-qualified scope parts)))]
                            (.add ^java.util.ArrayList (:usings scope) (:scope e)))
-    "UsingDecl" (let [t (node-text n)
-                      [_ target] (re-find #"using\s+([^;]+);?\s*$" (or t ""))
+    ;; (a using-declaration naming a dependent base's member, resolved in the specialization: G4)
+    ("UsingDecl" "UnresolvedUsingValueDecl" "UnresolvedUsingTypenameDecl")
+                (let [t (node-text n)
+                      [_ target] (re-find #"using\s+(?:typename\s+)?([^;]+);?\s*$" (or t ""))
                       parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
                       es (lookup-qualified scope parts (str/starts-with? (str/trim target) "::"))]
+                  (when (System/getenv "CPP_USING_TRACE") (binding [*out* *err*] (println "using" (pr-str t) parts (pr-str (map :e es)))))
                   (doseq [e es] (enter! scope (last parts) (assoc e :pos (long (or (:_b n) 0))))))
     ("EmptyDecl" "StaticAssertDecl" "AccessSpecDecl" "FriendDecl") nil
     (if (str/ends-with? (str (:kind n)) "Attr") nil (fail :decl "declaration " (:kind n))))))
@@ -818,7 +875,11 @@
         (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [] :va false} :trivial (not nontriv))))
     (doseq [x (:ctors (abi/cls id))]
       (let [g (fnd x)] (when (and (:defaulted g) (empty? (:ps (:ty g))))
-                         (upd-fn! x assoc :trivial (not (or (abi/dynamic? id) (some :init (:fields c))))))))
+                         ;; (trivial only when its bases' and members' default constructors are: [class.default.ctor]/3;
+                         ;; G4: std::vector() = default over _Vector_impl's user-provided one)
+                         (upd-fn! x assoc :trivial (not (or (abi/dynamic? id) (some :init (:fields c))
+                                                            (some #(let [b (abi/cls %)] (some (fn [y] (let [g (fnd y)] (and (empty? (:ps (:ty g))) (not (:trivial g))))) (:ctors b)))
+                                                                  (class-like-members id))))))))
     ;; the copy constructor and the copy assignment
     (when-not (has-ctor-of? id copy-ctor?)
       (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [cref] :va false} :trivial (trivial-copy? id)))
@@ -912,7 +973,7 @@
 
 (declare analyze-fn! stmt ce-exec)
 
-(defn- not-constant [& msg] (throw (ex-info (apply str "not a constant: " msg) {:codegen/not-constant true})))
+(defn- not-constant [& msg] (when (System/getenv "CPP_NC_STACK") (.printStackTrace (Exception. (apply str msg)))) (throw (ex-info (apply str "not a constant: " msg) {:codegen/not-constant true})))
 
 (defn ce-wrap
   "The value `v` as the type `t` holds it (integers wrapped to its width, bool 0/1, floats as doubles)."
@@ -990,8 +1051,12 @@
                (when (or (not (:constexpr f)) (:obj e) (and (:cls f) (not (:static f)))) (not-constant "a call of " (:name f)))
                (when-not (:tbody f) (when (:body f) (analyze-fn! (:id f))))
                (let [f (fnd (:fn e))
-                     args (mapv (fn [i] (if (= :expr (:i i)) (ev (:e i)) (not-constant "an argument"))) (:args e))
-                     env2 (into {} (map (fn [pid a] [pid (atom (ce-wrap (:ty (var* pid)) a))]) (:params f) args))
+                     ;; (an argument of an empty class, a tag such as true_type: a value nothing reads; G4)
+                     args (mapv (fn [i pid] (cond (= :expr (:i i)) (ev (:e i))
+                                                  (let [t (abi/unq (abi/non-ref (:ty (var* pid))))] (and (abi/class? t) (abi/empty-class? (:id t)))) ::empty
+                                                  :else (not-constant "an argument")))
+                                (:args e) (:params f))
+                     env2 (into {} (map (fn [pid a] [pid (atom (if (= ::empty a) a (ce-wrap (:ty (var* pid)) a)))]) (:params f) args))
                      r (ce-exec (:tbody f) env2)]
                  (if (= :ret (first r)) (ce-wrap t (second r)) (not-constant "no return"))))
        (not-constant "the expression " (:op e))))))
@@ -1100,6 +1165,8 @@
 (defn arith-common
   "The usual arithmetic conversions' type ([expr.arith.conv])."
   [a b]
+  (when-not (and (abi/arith? (abi/unq (abi/underlying (abi/unq a)))) (abi/arith? (abi/unq (abi/underlying (abi/unq b)))))
+    (fail :type "arithmetic on " (pr-str (select-keys a [:k :n :id])) " and " (pr-str (select-keys b [:k :n :id]))))
   (let [a (promote-type a) b (promote-type b)]
     (cond
       (or (= :ldouble (abi/bn a)) (= :ldouble (abi/bn b))) (abi/b :ldouble)
@@ -1284,7 +1351,7 @@
     (cond
       (= 1 (count best)) (ffirst best)
       (empty? viable) (fail :overload "no viable function among " (count (distinct cands)) " for " (count args) " arguments: " (pr-str (map :ty args)))
-      :else (fail :overload "ambiguous call (" (count viable) " viable)"))))
+      :else (fail :overload "ambiguous call (" (count viable) " viable)" (when (System/getenv "CPP_HDR_TRACE") (str ": " (pr-str (map (fn [[f]] [(:name (fnd f)) (:ps (:ty (fnd f))) (loc-of (get-in (:node (fnd f)) [:range :begin]))]) viable))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Initialization ([dcl.init]): an initializer of an object of type T, written for codegen as
@@ -1520,10 +1587,14 @@
                      (abi/ref? t) (if (= k :var) (var-node id) (fail :template "a reference to a function as an argument"))
                      (= k :fn) {:op :fnaddr :fn id :ty t :cat :pr}
                      :else {:op :addr :e (var-node id) :ty t :cat :pr}))
-      (:fn :tmpl) (if (and (= :tmpl (:e e)) (= :var (:tk e)))
+      (:fn :tmpl) (cond
+                    (and (= :tmpl (:e e)) (= :concept (:tk e)))
+                    {:op :int :v (long ((:concept-id @hooks) ctx e n)) :ty abi/bool* :cat :pr}
+                    :else
+                  (if (and (= :tmpl (:e e)) (= :var (:tk e)))
                     (if-let [h (:var-template @hooks)] (var-node (h ctx e n)) (fail :template "a variable template"))
                     {:op :fnset :fns (mapv :id (filter #(= :fn (:e %)) es)) :tmpls (mapv :id (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))) es))
-                   :name (get-in n [:referencedDecl :name]) :ty {:k :overload} :cat :lv :implicit-this true})
+                   :name (get-in n [:referencedDecl :name]) :ty {:k :overload} :cat :lv :implicit-this true}))
       (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e)))))
 
 (defn- name-expr [ctx n]
@@ -1667,16 +1738,30 @@
         (= :enumerator (:e e)) {:op :int :v (:val e) :ty (:ty e) :cat :pr}
         :else (fail :member "member " nm)))))
 
+(declare analyze-fn! has-auto?)
+
+(defn- deduced!
+  "The function `fid` with its deduced return type deduced ([dcl.spec.auto.general]/11: a use needs its definition
+  analyzed first; G4: <bits/ptr_traits.h>'s auto __to_address)."
+  [fid]
+  (let [f (fnd fid)]
+    (when (and (has-auto? (:ret (:ty f))) (:body f) (not (:tbody f)) (not (:analyzing f)))
+      (upd-fn! fid assoc :analyzing true)
+      (analyze-fn! fid)
+      (upd-fn! fid assoc :analyzed true)
+      (upd-fn! fid dissoc :analyzing))
+    fid))
+
 (defn- method-call
   "A call of the method `fid` on the object glvalue `obj` with the typed arguments."
   [ctx fid obj args virtual-ok]
-  (let [f (fnd fid)
+  (let [f (fnd (deduced! fid))
         o (when-not (:static f) (to-base-lv obj (:cls f)))]
     {:op :call :fn fid :obj o :args (call-args f args ctx) :virtual (and virtual-ok (:virtual f) (not (:static f)))
      :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}))
 
 (defn- fn-call [ctx fid args]
-  (let [f (fnd fid)]
+  (let [f (fnd (deduced! fid))]
     {:op :call :fn fid :args (call-args f args ctx)
      :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}))
 
@@ -1689,6 +1774,14 @@
          :let [outer (loop [s (:outer (abi/cls cid))] (if (= :ns (:kind s)) s (recur (:parent s))))]
          e (binding [*cutoff* Long/MAX_VALUE] (own-names outer nm)) :when (= :fn (:e e))]
      (:id e))))
+
+(declare block-ctx)
+
+(def ^:private value-builtins
+  {"__builtin_expect" :expect "__builtin_expect_with_probability" :expect "__builtin_constant_p" :constant-p
+   "__builtin_is_constant_evaluated" :is-constant-evaluated
+   "__builtin_addressof" :addressof
+   "__builtin_add_overflow" :add-overflow "__builtin_sub_overflow" :sub-overflow "__builtin_mul_overflow" :mul-overflow})
 
 (def ^:private std-builtins
   {"move" :cast "forward" :cast "move_if_noexcept" :cast "as_const" :cast "forward_like" :cast "addressof" :addr "__addressof" :addr})
@@ -1709,7 +1802,8 @@
                  obj (or obj (when (and (:implicit-this callee) any-method (:this-type ctx)) (deref-node (this-expr ctx))))
                  cands (concat (:fns callee) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
                  _ (when (and (empty? cands) (empty? (:tmpls callee))) (fail :name "unknown name " (:name callee)))
-                 fid (resolve-overload cands args obj)
+                 ;; (a function found twice, through a using-declaration and its class: one candidate; G4)
+                 fid (resolve-overload (distinct cands) args obj)
                  f (fnd fid)
                  std-builtin (when (and (= 1 (count args)) (= [[:ns "std"]] (:path f)) (not (:cls f)))
                                (std-builtins (:name f)))]
@@ -1741,8 +1835,20 @@
   (let [nm (str "operator" o)
         [l & more] args
         lc (class-id (:ty l))
-        members (when lc (second (method-set-of lc nm)))
-        frees (concat (filter #(not (:cls (fnd %))) (map :id (filter #(= :fn (:e %)) (lookup (:scope ctx) nm)))) (adl-fns args nm))
+        mtmpls (when lc (vec (keep (fn [[_ x]] (when (and (= :tmpl (:e x)) (= :fn (:tk x))) (:id x))) (class-lookup lc nm))))
+        ;; the member operator templates' specializations deduced from the other operands (G4: ranges::iter_move's
+        ;; operator() template)
+        mspecs (when (and (seq mtmpls) (:call-candidates @hooks))
+                 (try ((:call-candidates @hooks) ctx {:op :fnset :fns [] :name nm :tmpls mtmpls :obj l} more)
+                      (catch arbace.lang.ExceptionInfo _ nil)))
+        members (when lc (concat (second (method-set-of lc nm)) mspecs))
+        found (lookup (:scope ctx) nm)
+        ;; the operator function templates found by lookup and ADL, their specializations deduced from the operands
+        ;; (G4: <bits/stl_iterator.h>'s operator- of two __normal_iterators)
+        tspecs (when-let [h (:call-candidates @hooks)]
+                 (try (h ctx {:op :fnset :fns [] :name nm :tmpls (mapv :id (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))) found))} args)
+                      (catch arbace.lang.ExceptionInfo _ nil)))
+        frees (concat (filter #(not (:cls (fnd %))) (map :id (filter #(= :fn (:e %)) found))) (adl-fns args nm) tspecs)
         cands (concat (map (fn [m] [:m m]) members) (map (fn [f] [:f f]) (distinct frees)))]
     (if (empty? cands)
       (cond
@@ -1764,15 +1870,26 @@
         et (:to t)
         ks (kids n)
         [nexpr ks] (if (:isArray n) [(first ks) (rest ks)] [nil ks])
-        initn (first ks)
+        ;; the initializer when written, then the placement arguments (the native parser's order; G4)
+        initn (when (or (:initStyle n) (not (:isPlacement n))) (first ks))
+        place (vec (if initn (rest ks) ks))
+        placement (when (:isPlacement n)
+                    (let [as (analyze-args ctx place)]
+                      ;; only the reserved placement form new (void*) T: clang's CodeGen uses its argument, calls nothing
+                      (when-not (and (= 1 (count as)) (abi/ptr? (abi/unq (:ty (rv (first as))))))
+                        (fail :new "a placement new other than new (void*) T"))
+                      (convert-scalar (rv (first as)) (abi/ptr abi/void) false)))
+        _ (when (System/getenv "CPP_NEW_TRACE") (binding [*out* *err*] (println "new-expr kids:" (mapv :kind ks) (mapv #(mapv :kind (kids %)) ks))))
         init (cond
                (or (nil? initn) nexpr) (init-for et nil ctx :default)
-               (= "ParenListExpr" (:kind initn)) (init-for et (mapv #(analyze ctx %) (kids initn)) ctx (if (empty? (kids initn)) :value :direct))
+               ;; (its pack expansions spliced: new T(std::forward<Args>(args)...), G4)
+               (= "ParenListExpr" (:kind initn)) (init-for et (vec (analyze-args ctx (kids initn))) ctx (if (empty? (kids initn)) :value :direct))
                (= "InitListExpr" (:kind initn)) (init-for et (analyze ctx initn) ctx :list)
+               (= "PackExpansionExpr" (:kind initn)) (let [as (vec (analyze-args ctx [initn]))] (init-for et (when (seq as) as) ctx (if (seq as) :direct :value)))
                :else (init-for et [(analyze ctx initn)] ctx :direct))
         init (if (and (= :ctor (:i init)) (empty? (:args init)) (nil? initn)) init init)]
     (when (and nexpr initn (not= "InitListExpr" (:kind initn))) nil)
-    {:op :new :ty t :et et :n (when nexpr (convert-scalar (rv (analyze ctx nexpr)) abi/ulong* false))
+    {:op :new :placement placement :ty t :et et :n (when nexpr (convert-scalar (rv (analyze ctx nexpr)) abi/ulong* false))
      :init (if nexpr
              (cond (nil? initn) (init-for et nil ctx :default)
                    (#{"ImplicitValueInitExpr" "ParenListExpr"} (:kind initn)) {:i :list :items [] :fill (init-for et nil ctx :value)}
@@ -1975,6 +2092,38 @@
                           t (resolve-type (:scope ctx) (get-in n [:type :qualType]))]
                       (when-not (= :char (abi/bn (abi/unq (:of t)))) (fail :string "a wide string"))
                       {:op :str :s s :ty t :cat :lv})
+    ;; __func__, __FUNCTION__, __PRETTY_FUNCTION__ ([dcl.fct.def.general]/8): the enclosing function's name (the pretty
+    ;; one approximated by the name: G4, the headers' assertions, whose strings no run reads)
+    "PredefinedExpr" (let [nm (or (:name (fnd (:fn-id ctx))) "")]
+                       {:op :str :s nm :ty (abi/arr (inc (count nm)) (assoc abi/char* :c true)) :cat :lv})
+    ;; a requires-expression ([expr.prim.req]): true when each requirement holds, its parameters local names of their
+    ;; types; an expression's requirement holds when it analyzes (a substitution failure is false), a type's when it
+    ;; resolves, a nested one when its constraint is satisfied; a compound one's return-type requirement not checked (G4)
+    "RequiresExpr" (if (and (empty? (:inner n)) (nil? (:params n)))
+                     (fail :expr "a requires-expression the parser kept as its text")
+                     (let [c (block-ctx ctx)
+                           _ (doseq [pn (:params n)]
+                               (let [id (next-id)]
+                                 (swap! *vars* assoc id {:id id :name (:name pn) :ty (resolve-type (:scope c) (get-in pn [:type :qualType])) :storage :local :fn (:fn-id ctx)})
+                                 (when (:name pn) (enter! (:scope c) (:name pn) {:e :var :id id}))))
+                           ok? (fn [r]
+                                 (try (case (:kind r)
+                                        "TypeRequirement" (do (resolve-type (:scope c) (get-in r [:type :qualType])) true)
+                                        "NestedRequirement" (constraint-satisfied? (:scope c) (first (:inner r)))
+                                        (do (analyze c (first (:inner r))) true))
+                                      (catch arbace.lang.ExceptionInfo _ false)))]
+                       {:op :int :v (if (every? ok? (:inner n)) 1 0) :ty abi/bool* :cat :pr}))
+    ;; noexcept(e) ([expr.unary.noexcept]): e unevaluated, true when no function it calls may throw (an implicit or
+    ;; defaulted special member counted as not throwing; G4)
+    "CXXNoexceptExpr" (let [x (analyze ctx (first (kids n)))
+                            fns (atom #{})
+                            walk (fn walk [x] (cond (map? x) (when-not (:kind x)
+                                                                (when (integer? (:fn x)) (swap! fns conj (:fn x)))
+                                                                (doseq [[k v] x :when (not (#{:scope :node :def-scope :parent :names :usings :ty} k))] (walk v)))
+                                                    (sequential? x) (doseq [y x] (walk y))
+                                                    :else nil))]
+                        (walk x)
+                        {:op :int :v (if (every? #(let [f (fnd %)] (or (:noexcept f) (:implicit f) (:defaulted f))) @fns) 1 0) :ty abi/bool* :cat :pr})
     "CXXNullPtrLiteralExpr" {:op :null :ty abi/nullptr-t :cat :pr}
     "GNUNullExpr" {:op :int :v 0 :ty abi/long* :cat :pr}
     "ParenExpr" (analyze ctx (first (kids n)))
@@ -2036,12 +2185,44 @@
                             :else (abi/unq (:ty a)))]
                 {:op :cond :c c :then (convert-scalar a t false) :else (convert-scalar b t false) :ty t :cat :pr})))
     "CallExpr"
+    (if-let [op (when (= "DeclRefExpr" (:kind (first (kids n))))
+                  ({"__builtin_operator_new" "operator new" "__builtin_operator_delete" "operator delete"}
+                   (get-in (first (kids n)) [:referencedDecl :name])))]
+      ;; __builtin_operator_new/delete: the global operator new or delete called as by a new- or delete-expression
+      ;; (clang's EmitBuiltinNewDeleteCall; G4: std::allocator's allocate and deallocate)
+      (analyze ctx (assoc n :inner (vec (cons (assoc (first (kids n)) :referencedDecl {:name op} :_wn true :globalQualifier true) (rest (kids n))))))
+    (if-let [b (when (= "DeclRefExpr" (:kind (first (kids n)))) (value-builtins (get-in (first (kids n)) [:referencedDecl :name])))]
+      ;; the builtins that are their operand's value (G4: the headers' __builtin_expect(e, v): e as a long;
+      ;; __builtin_constant_p: 0 at run time, as clang folds it at -O0 when e is not a constant)
+      (case b
+        :expect (convert-scalar (rv (analyze ctx (second (kids n)))) abi/long* false)
+        :constant-p {:op :int :v (if (ce-try (rv (analyze ctx (second (kids n))))) 1 0) :ty abi/int* :cat :pr}
+        :is-constant-evaluated {:op :int :v 0 :ty abi/bool* :cat :pr}
+        ;; __builtin_addressof(x): x's address, no operator& ([specialized.addressof])
+        :addressof (let [e (analyze ctx (second (kids n)))] {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr})
+        ;; __builtin_{add,sub,mul}_overflow(a, b, &r): r = a op b in r's type; the overflow flag false (a divergence
+        ;; when it overflows: no wider arithmetic yet; G4: <bits/stl_vector.h>'s size computations)
+        (:add-overflow :sub-overflow :mul-overflow)
+        (let [[x y r] (mapv #(analyze ctx %) (rest (kids n)))
+              dst (deref-node (rv r))
+              o ({:add-overflow "+" :sub-overflow "-" :mul-overflow "*"} b)]
+          {:op :comma :l (assign-node ctx dst (convert-scalar (arith-binop o x y) (abi/unq (:ty dst)) false)) :r {:op :int :v 0 :ty abi/bool* :cat :pr}
+           :ty abi/bool* :cat :pr}))
     (let [[cn & an] (kids n)
-          callee (analyze ctx cn)
+          ;; a pseudo-destructor call (p->~T() of a scalar T, [expr.prim.id.dtor]): its object evaluated, no effect (G4:
+          ;; std::destroy_at<int>)
+          pseudo (when (and (= "MemberExpr" (:kind cn)) (str/starts-with? (str (:name cn)) "~") (empty? an))
+                   (let [o (analyze ctx (first (kids cn))) o (if (:isArrow cn) (deref-node o) o)]
+                     (when-not (class-id (:ty o)) o)))]
+     (if pseudo
+      (cast-expr ctx abi/void pseudo true)
+    (let [callee (analyze ctx cn)
           args (analyze-args ctx an)]
       (if (and (abi/class? (abi/unq (:ty callee))) (not= :fnset (:op callee)))
         (or (operator-call ctx "()" (into [callee] args)) (fail :call "no operator()"))
-        (analyze-call ctx (if (and (= :fnset (:op callee)) (if (:_wn cn) (boolean (or (:globalQualifier cn) (seq (:qualifier cn)))) (str/includes? (or (node-text cn) "") "::"))) (assoc callee :qualified true) callee) args)))
+        (analyze-call ctx (if (and (= :fnset (:op callee)) (if (:_wn cn) (boolean (or (:globalQualifier cn) (seq (:qualifier cn)))) (str/includes? (or (node-text cn) "") "::"))) (assoc callee :qualified true) callee) args)))))
+)
+)
     "MemberExpr" (member-expr ctx n)
     ;; a member named in a template's pattern whose lookup clang left to the instantiation (f<T>() in a member)
     "UnresolvedMemberExpr" (if (seq (kids n))
@@ -2194,6 +2375,8 @@
            "FunctionDecl" (do (declare-fn! (:scope ctx) d) {:s :null}) ; a block-scope function declaration
            "EnumDecl" (do (declare-enum! (:scope ctx) d) {:s :null})
            ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "NamespaceAliasDecl") (do (declare-node! (:scope ctx) d) {:s :null})
+           ;; (a static_assert: checked by clang's route, no code)
+           "StaticAssertDecl" {:s :null}
            (fail :decl "local declaration " (:kind d))))))
 
 (defn- block-ctx [ctx] (assoc ctx :scope (new-scope :block (:scope ctx))))
@@ -2202,6 +2385,40 @@
 
 (defn- cond-of [ctx n]
   (to-bool (analyze ctx n)))
+
+(declare local-var! stmt)
+
+(defn- range-for-class
+  "A range-based for over a class ([stmt.ranged]/1: auto&& __range = e; auto __begin = __range.begin(), __end =
+  __range.end(); for (; __begin != __end; ++__begin) { T x = *__begin; body }), the members begin and end (G4: the
+  headers' containers), their operators by overload resolution."
+  [c range-e loopd body]
+  (let [ref (fn [nm] {:kind "DeclRefExpr" :referencedDecl {:name nm}})
+        local! (fn [nm t]
+                 (let [id (next-id)]
+                   (swap! *vars* assoc id {:id id :name nm :ty t :storage :local :fn (:fn-id c)})
+                   (enter! (:scope c) nm {:e :var :id id})
+                   id))
+        rt (if (= :lv (:cat range-e)) (abi/lref (:ty range-e)) (abi/rref (abi/unq (:ty range-e))))
+        rid (local! "__range1" rt)
+        rinit (init-for rt range-e c :copy)
+        call (fn [m] (analyze c {:kind "CallExpr" :inner [{:kind "MemberExpr" :name m :isArrow false :inner [(ref "__range1")]}]}))
+        be (call "begin") ee (call "end")
+        bt (abi/unq (abi/non-ref (:ty be))) et (abi/unq (abi/non-ref (:ty ee)))
+        bid (local! "__begin1" bt) eid (local! "__end1" et)
+        binit (init-for bt be c :copy) einit (init-for et ee c :copy)
+        cnd (cond-of c {:kind "BinaryOperator" :opcode "!=" :inner [(ref "__begin1") (ref "__end1")]})
+        inc (analyze c {:kind "UnaryOperator" :opcode "++" :inner [(ref "__begin1")]})
+        ic (block-ctx c)
+        de (analyze ic {:kind "UnaryOperator" :opcode "*" :inner [(ref "__begin1")]})
+        lid (local-var! ic loopd :local)
+        lt (:ty (var* lid))
+        lt (if (has-auto? lt) (deduce-auto lt de) lt)
+        _ (upd-var! lid assoc :ty lt)
+        linit (init-for lt de ic :copy)
+        _ (enter! (:scope ic) (:name loopd) {:e :var :id lid})]
+    {:s :block :items [{:s :decl :var rid :init rinit} {:s :decl :var bid :init binit} {:s :decl :var eid :init einit}
+                       {:s :for :cond cnd :inc inc :body {:s :block :items [{:s :decl :var lid :init linit} (stmt ic body)]}}]}))
 
 (defn stmt
   "The typed statement of a tree node."
@@ -2270,6 +2487,9 @@
           loopd (first (kids (last (filter #(= "DeclStmt" (:kind %)) ks))))
           body (last ks)
           at (:ty range-e)]
+      (if (and (not (abi/arr? (abi/unq at))) (class-id at))
+        (range-for-class c range-e loopd body)
+      (do
       (when-not (abi/arr? (abi/unq at)) (fail :range-for "a range for over a non-array"))
       ;; for (T x : a) as { T* b = a; T* e = a + N; for (; b != e; ++b) { T x = *b; body } }
       (let [et (:of at)
@@ -2289,7 +2509,7 @@
                            {:s :decl :var eid :init {:i :expr :e {:op :ptradd :o "+" :p (rv range-e) :n {:op :int :v (:n at) :ty abi/long* :cat :pr} :ty pt :cat :pr}}}
                            {:s :for :cond {:op :cmp :o "!=" :l (rv bvar) :r (rv evar) :ct pt :ty abi/bool* :cat :pr}
                             :inc {:op :incdec :o "++" :post false :e bvar :ty pt :cat :lv}
-                            :body {:s :block :items [{:s :decl :var lid :init linit} (stmt ic body)]}}]}))
+                            :body {:s :block :items [{:s :decl :var lid :init linit} (stmt ic body)]}}]}))))
     "BreakStmt" {:s :break}
     "ContinueStmt" {:s :continue}
     "SwitchStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
@@ -2342,6 +2562,8 @@
                   (cond
                     (nil? x) nil
                     (= "ParenListExpr" (:kind x)) (init-for t (analyze-args ctx (kids x)) ctx (if (empty? (kids x)) :value :direct))
+                    ;; base() or member(): value-initialization ([dcl.init.general]/16.4)
+                    (= "ImplicitValueInitExpr" (:kind x)) (init-for t nil ctx :value)
                     (= "InitListExpr" (:kind x)) (init-for t (analyze ctx x) ctx :list)
                     (= "CXXParenListInitExpr" (:kind x)) (init-for t (mapv #(analyze ctx %) (kids x)) ctx :direct)
                     :else (init-for t [(analyze ctx x)] ctx :direct)))
@@ -2406,8 +2628,13 @@
         ctx {:scope fs :fn-id fid :this-type this-t :statics (atom [])}]
     (binding [*cutoff* (if cls Long/MAX_VALUE (max (long cut) (long (or (:_b (:body f)) 0))))
               *src* (or (:src f) *src*)]
-      (let [inits (when (= :ctor (:kind f)) (when-not (:implicit f) (ctor-inits ctx f)))
-            body (when (:body f) (stmt ctx (:body f)))]
+      (let [trace (fn [g] (if (System/getenv "CPP_HDR_TRACE")
+                            (try (g) (catch arbace.lang.ExceptionInfo e
+                                       (binding [*out* *err*] (println "in the body of" (:name f) (pr-str (loc-of (get-in (:node f) [:range :begin]))) ":" (.getMessage e)))
+                                       (throw e)))
+                            (g)))
+            inits (when (= :ctor (:kind f)) (when-not (:implicit f) (trace #(ctor-inits ctx f))))
+            body (when (:body f) (trace #(stmt ctx (:body f))))]
         (upd-fn! fid assoc :params pids :tbody body :tinits inits :nrvo (when body (nrvo-var body)) :statics @(:statics ctx))))))
 
 (defn analyze-implicit!
@@ -2514,7 +2741,12 @@ protected:
          (when (and (re-find #"\btypeid\b|\btype_info\b" src) (not-any? header-node? nodes))
            (binding [*src* prelude-typeinfo]
              (doseq [n (prelude-nodes)] (declare-node! root n))))
-         (doseq [n nodes] (declare-node! root n))
+         (binding [*retry* (atom [])]
+           (let [retry! (fn [] (let [r @*retry*] (reset! *retry* []) (doseq [[sc n] r] (declare-node! sc n))))
+                 [hs ms] (split-with header-node? nodes)]
+             (doseq [n hs] (declare-node! root n))
+             (retry!) (retry!)
+             (doseq [n ms] (declare-node! root n))))
          ;; the declarations in order, then (templates) the lazy definitions each round made used, until none
          (let [entry! (fn [[k id]]
                         (case k
