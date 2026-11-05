@@ -2227,7 +2227,7 @@ samples on the VM; nothing recorded is committed (the main host's night records 
     (1,514 files, 1.87 MB; the gate's essential chain needs no store). A missing entry is UNRECORDED, a changed input or
     helper STALE, a committed file off its manifest REFUSED: each fails the check.
   - Class A, outcomes: `test/python/records/outcomes/NAME.{out,meta}` (stdout with `$root` as `@ROOT`, the status, the key,
-    `host: :python ID`): spec-check, samples, gen --check's eighteen, `smoke/*.py`, `repl/*.in`, `wheels/*` (the samples'
+    `host: :python ID`): spec-check, samples, gen --check's seventeen, `smoke/*.py`, `repl/*.in`, `wheels/*` (the samples'
     and the console script's runs, the site's directory as `@WHEELS`, and pip's layout).
   - The corpora listed and counted without python3 (`pyrec_list`, `count_files`: equal to corpus.py's on all nine corpora,
     and `pins --check` without python3 matched every corpus's recorded files, lines and digest).
