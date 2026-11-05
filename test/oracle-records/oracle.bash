@@ -55,6 +55,7 @@ oracle_make() {  # PIN DIR IDS CMD HOST
   local pin=$1 dir=$2 ids=$3 cmd=$4 host=$5 name man store sha id key f s n
   name=$(oracle_pin_name "$pin"); man=$(oracle_manifest "$pin"); store=$(oracle_store)
   [ -d "$dir/$name" ] || { echo "oracle: no $dir/$name to pack" >&2; return 1; }
+  [ -s "$ids" ] || { echo "oracle: no members listed for $name ($ids)" >&2; return 1; }
   # every file under DIR/NAME is a listed member, and every listed member is there
   (cd "$dir/$name" && find . -type f -printf '%P\n' | LC_ALL=C sort) > "$TMPDIR/oracle-make.files"
   awk -F'\t' '{id=$1; sub(/^\//, "", id); print id}' "$ids" | LC_ALL=C sort > "$TMPDIR/oracle-make.ids"
