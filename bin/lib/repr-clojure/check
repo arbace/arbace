@@ -39,6 +39,24 @@
 #                                 host's .tmp/repr-clojure-check/host.out once it is checked);
 #                                 standard error is shown. Skips GO-EXE when it is missing. (Until
 #                                 standalone S4 the JVM build ran beside the Go one.)
+#        bin/repr-clojure check --roundtrip --only FILE
+#                                 GT8.4's rotation: the round trips of the files listed in FILE, one id a
+#                                 line, CORPUS:PATH (blank and # lines ignored; CORPUS one of frozen,
+#                                 suite-keep-ext, suite-ae, suite-full, libs-keep-ext, libs-ae, libs-full,
+#                                 arbace; PATH as the round trip names a difference, a library's file as
+#                                 JAR-NAME/path), from `check --roundtrip --ids`. A partial run: the
+#                                 directories holding a listed file are read and printed, only the listed
+#                                 files are judged, the known entries of the others are neither stale nor
+#                                 new, the recorded :counts are not enforced, a corpus with no listed file
+#                                 is left (said so, its tree not even fetched). There is no control (no
+#                                 negative control is declared for this check). The failure lines: "  NEW
+#                                 CORPUS:PATH - why" and "  STALE CORPUS:PATH - ...". The other checks
+#                                 (unit tests, --suite, --libs) are not file-level: --only is refused
+#        bin/repr-clojure check --roundtrip --ids
+#                                 every file the round trips translate, CORPUS:PATH, one a line (the
+#                                 trees fetched or extracted as the round trips do; no committed record
+#                                 lists them: test/repr/clojure/roundtrip-known.edn holds only the
+#                                 differing files and the corpora's counts)
 # Writes under .tmp/repr-clojure-check/. Exit status 0 when every check passed.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -95,6 +113,30 @@ lib_fetch() {
 
 digest() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }
 
+# --only FILE and --ids (GT8.4): of --roundtrip alone
+only= ids=
+mode=${1:-}
+if [ $# -gt 0 ]; then
+  shift
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --only) [ -f "${2:-}" ] || { echo "repr-clojure check: --only FILE: no such file: ${2:-}" >&2; exit 2; }
+              only=$2; shift 2 ;;
+      --ids) ids=1; shift ;;
+      *) break ;;
+    esac
+  done
+  set -- "$mode" "$@"
+fi
+if [ -n "$only$ids" ] && [ "$mode" != --roundtrip ]; then
+  echo "repr-clojure check: --only and --ids are of --roundtrip alone (the other checks are not file-level)" >&2; exit 2
+fi
+if [ -n "$only" ] && [ -n "$ids" ]; then echo "repr-clojure check: --only and --ids do not go together" >&2; exit 2; fi
+ids_of() { # CORPUS: the listed ids of the corpus, PATH a line, in $work/only-CORPUS.txt (empty: none)
+  local f=$work/only-$1.txt
+  grep -v '^[[:space:]]*#' "$only" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | grep -F "$1:" | sed -n "s/^$1://p" > "$f" || true
+  [ -s "$f" ]
+}
 case ${1:-} in
 "")
   rm -rf "$work"/unit*
@@ -120,12 +162,31 @@ case ${1:-} in
 --roundtrip)
   # the corpora; each against its section of the known differences
   known=$root/test/repr/clojure/roundtrip-known.edn
-  frozen=$(frozen_clojure)/clojure
-  suite_tree "$work/suite"
   status=0
+  # a list (--only): the corpora with a listed file only, each with its paths; --ids: every corpus's files
+  # prefixed CORPUS:
+  want() { # CORPUS: whether the corpus runs (a list names a file of it), or is left
+    [ -z "$only" ] && return 0
+    ids_of "$1" && return 0
+    echo "== $1: left (no listed file)"; return 1
+  }
   rt() { local corpus=$1; shift
+         if [ -n "$ids" ]; then
+           "$root/bin/repr-clojure" roundtrip --ids "$@" | sed "s/^/$corpus:/" || status=1; return
+         fi
+         want "$corpus" || return 0
          echo "== $corpus"
-         "$root/bin/repr-clojure" roundtrip --known "$known" --corpus "$corpus" "$@" || status=1; }
+         if [ -n "$only" ]; then
+           "$root/bin/repr-clojure" roundtrip --only "$work/only-$corpus.txt" --known "$known" --corpus "$corpus" "$@" \
+             | sed -E "s/^(  (NEW   |STALE ))/\1$corpus:/" || status=1
+         else
+           "$root/bin/repr-clojure" roundtrip --known "$known" --corpus "$corpus" "$@" || status=1
+         fi; }
+  # the trees: fetched or extracted when a corpus runs
+  need() { [ -z "$only" ] || { for c in "$@"; do ids_of "$c" && return 0; done; return 1; }; }
+  frozen=
+  if need frozen; then frozen=$(frozen_clojure)/clojure; fi
+  if need suite-keep-ext suite-ae suite-full; then suite_tree "$work/suite"; fi
   rt frozen "$frozen"
   rt suite-keep-ext --keep-ext "$work/suite"
   rt suite-ae "$work/suite"
@@ -134,6 +195,9 @@ case ${1:-} in
   # by its pins), each tree apart; without them (no network) skipped, said so, but in the gate
   # (GATE_OUT set: bin/lib/gate-run.bash), where a pass must have judged them
   libs=$root/.tmp/clojure-tests/lib
+  if ! need libs-keep-ext libs-ae libs-full; then
+    for c in libs-keep-ext libs-ae libs-full; do want $c || true; done
+  else
   # fetched when missing (lib_fetch, by bin/clojure-tests' pins), then every jar of its deps checked against its
   # SHA-1 pin (lib_verify, audit 076 finding 5): some missing or wrong fails; none there (no network) is lv 2
   have=; lv=0; lib_fetch "$libs" || true
@@ -152,6 +216,7 @@ case ${1:-} in
     echo "== libs: FAILED: the jars are not in $libs and could not be downloaded (the gate judges them)"; status=1
   else
     echo "== libs: SKIPPED: the jars are not in $libs and could not be downloaded (bin/clojure-tests downloads them)"
+  fi
   fi
   rt arbace --from-arbace "$root/arbace"
   exit $status ;;
@@ -202,5 +267,5 @@ EOR
     echo "== Go: no $go, skipped (bin/arbace-go --build)"
   fi
   exit $status ;;
-*) echo "usage: bin/repr-clojure check [--suite | --roundtrip | --libs [GO-EXE]]" >&2; exit 2 ;;
+*) echo "usage: bin/repr-clojure check [--suite | --roundtrip [--only FILE | --ids] | --libs [GO-EXE]]" >&2; exit 2 ;;
 esac

@@ -30,7 +30,9 @@ AUDITED_TEST_ASSUME_UNTRACED=1 strace -f -qq -y -s 4096 -o "$t/tr2" -e trace=ope
 grep -v ' = -1 ' "$t/tr2" | grep -E 'open(at)?\(' | grep -E ', O_RDONLY' | sed -n 's/^[^"]*"\([^"]*\)".*/\1/p' \
   | awk -v r="$root" '{ print (substr($0, 1, 1) == "/" ? $0 : r "/" $0) }' | sort -u > "$t/opened"
 if grep -qx "$root/test/gate/steps.edn" "$t/opened"; then ok "the trace is not blind (the steps table was opened)"; else no "the trace is blind: steps.edn not opened ($(wc -l < "$t/opened") files)"; fi
-bulk=$(grep -E "^$root/(jdk|go|overlay|tamago|x509roots|doc|seed|tools|box|test/java|test/repr|test/goi)/" "$t/opened" | head -3)
+# (GT8: the planner reads a rotated part's corpora file, its :subset, small; its record only when the part has one)
+bulk=$(grep -E "^$root/(jdk|go|overlay|tamago|x509roots|doc|seed|tools|box|test/java|test/repr|test/goi)/" "$t/opened" \
+  | grep -vxF "$root/test/java/corpora.edn" | head -3)
 if [ -z "$bulk" ]; then ok "no file of the tree's bulk read ($(grep -c "^$root/" "$t/opened") files of the checkout opened)"; else no "undeclared reads, the first: $(echo "$bulk" | tr '\n' ' ')"; fi
 
 echo "audited-test-test: $((n - bad)) of $n passed"

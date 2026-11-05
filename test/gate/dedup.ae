@@ -1,0 +1,551 @@
+(ns gate.dedup
+  "bin/corpus-dedup (GT8, the test budget's deduplication; VM report 156, queue 171): every corpus a gate
+  step reads, per crop, its units (a file, or a test's files: a directory test with its .dir, a jtreg
+  test with its helpers and golden file) hashed at two levels:
+
+    byte        the files' bytes (SHA-256)
+    normalized  (--normalize) the files after dropping comments and white space by the language's own
+                reader where Arbace has one: C arbace.repr.c.lex's preprocessing tokens (new-lines
+                kept only at a directive's end), Go repr/go's native reader (go/parser's tree,
+                arbace.repr.go.parse, without positions and comments), Java arbace.repr.java.lex's
+                tokens (javac's lexer's kinds and texts), Clojure the reader (the forms printed
+                with their metadata, syntax-quote's gensym numbers dropped); a file the reader
+                rejects, and a language without one, by a plain white-space normalization (runs of
+                white space one space), counted apart as the fallback
+
+  and reported per corpus, across the corpora of a crop and across crops, and per check (a gate step
+  or part, test/gate/steps.edn): the units it reads that repeat a unit it read before (the copy to keep
+  is the first in corpora order: the crops c, go, java, clojure, each crop's corpora in its manifest's
+  order, a corpus's units in its order) and what dropping them would save: their count, and the time
+  where a record holds per-file times (none of the crops' records does; the clean run's record,
+  test/gate/clean-*.edn, gives each step's wall time, apportioned by the step's units: marked est).
+
+  -main report CFG   CFG: an EDN map from bin/corpus-dedup: :checkout, the roots (:gomodcache, :gcc,
+                     :goroot, :jdk, :frozen, :clj-suite, :clj-libs; a root missing or not at its pin is
+                     a string, why), :crops, :normalize, :groups, :jobs, :manifest (a made-up manifest
+                     instead of the crops': {:corpora [{:crop :id :lang :dir :units [{:name :files [[REL
+                     ABS] ...]}] :checks [...]}]}, the tool's test)."
+  (:require [arbace.string :as str])
+  (:import (java.io File)
+           (java.security MessageDigest)
+           (java.util.concurrent Executors Callable TimeUnit Future)))
+
+(set! *warn-on-reflection* true)
+
+;; C's token type, for the normalizer's field access (the lexer is light; Go's and Java's readers load when used)
+(require 'arbace.repr.c.lex)
+
+;; ---------------------------------------------------------------------------------------------
+;; Files and digests
+
+(defn- read-bytes ^bytes [^String path] (java.nio.file.Files/readAllBytes (.toPath (File. path))))
+
+(def ^:private hexd "0123456789abcdef")
+
+(defn- hex ^String [^bytes b]
+  (let [sb (StringBuilder. (* 2 (alength b)))]
+    (dotimes [i (alength b)]
+      (let [v (bit-and (long (aget b i)) 0xff)]
+        (.append sb (.charAt ^String hexd (int (bit-shift-right v 4))))
+        (.append sb (.charAt ^String hexd (int (bit-and v 15))))))
+    (.toString sb)))
+
+(defn- sha256-bytes ^String [^bytes b] (hex (.digest (MessageDigest/getInstance "SHA-256") b)))
+(defn- sha256-str ^String [^String s] (sha256-bytes (.getBytes s "UTF-8")))
+
+(defn- read-edn [^String f] (binding [*read-eval* false] (read-string (slurp f))))
+
+(defn- walk
+  "Every regular file under dir, as paths relative to it, sorted."
+  [^String dir]
+  (let [base (.toPath (File. dir))
+        out (java.util.ArrayList.)]
+    (letfn [(go [^File d]
+              (doseq [^File f (or (seq (.listFiles d)) [])]
+                (cond
+                  (.isDirectory f) (go f)
+                  (.isFile f) (.add out (str (.relativize base (.toPath f)))))))]
+      (go (File. dir)))
+    (sort (vec out))))
+
+(defn- dir? [d] (and (string? d) (.isDirectory (File. ^String d))))
+
+(defn- one-file-unit [^String name ^String abs] {:name name :files [[(.getName (File. abs)) abs]]})
+
+;; ---------------------------------------------------------------------------------------------
+;; The normalizers
+
+(defn- ws-norm ^String [^String text] (str/trim (str/replace text #"\s+" " ")))
+
+(defn- c-norm
+  "C: the preprocessing tokens of arbace.repr.c.lex (cc's scanner, comments and white space in
+  their separators), each on a line; a line's end kept only where it ends a directive."
+  ^String [^String path]
+  (let [new-file (requiring-resolve 'arbace.repr.c.lex/new-file)
+        tokens (requiring-resolve 'arbace.repr.c.lex/tokens)
+        [ts errs] (tokens (new-file path (read-bytes path)))
+        sb (StringBuilder.)]
+    (when (seq errs) (throw (ex-info (str "lex: " (first errs)) {})))
+    (loop [ts (seq ts) bol true dir false]
+      (when ts
+        (let [t (first ts) ch (.-ch ^arbace.repr.c.lex.Tok t)]
+          (cond
+            (= ch \newline) (do (when dir (.append sb "\n")) (recur (next ts) true false))
+            (= ch \space) (recur (next ts) bol dir)
+            :else (let [src (.-src ^arbace.repr.c.lex.Tok t)]
+                    (.append sb src) (.append sb "\u0001")
+                    (recur (next ts) false (or dir (and bol (= src "#")))))))))
+    (.toString sb)))
+
+(defn- strip-go
+  "A go/parser tree without its positions (the \"L:C\" strings) and without :doc and :comments."
+  [x]
+  (cond
+    (map? x) (into (sorted-map) (for [[k v] x
+                                      :when (not (#{:doc :comment :comments} k))
+                                      :when (not (and (string? v) (re-matches #"\d+:\d+" v)))]
+                                  [k (strip-go v)]))
+    (seq? x) (apply list (map strip-go x))
+    (vector? x) (mapv strip-go x)
+    :else x))
+
+(defn- go-norm ^String [^String path]
+  (let [parse (requiring-resolve 'arbace.repr.go.parse/parse-file)
+        r (parse nil path)]
+    (when (:error r) (throw (ex-info (str "go/parser: " (:error r)) {})))
+    (binding [*print-length* nil *print-level* nil *print-meta* false]
+      (pr-str (strip-go (:ast r))))))
+
+(defn- java-norm ^String [^String path]
+  (let [tokens (requiring-resolve 'arbace.repr.java.lex/tokens)
+        [^objects ts _] (tokens (String. (read-bytes path) "UTF-8"))
+        sb (StringBuilder.)]
+    (doseq [t ts]
+      (let [^objects t t k (aget t 0)]
+        (when (= k :ERROR) (throw (ex-info "javac's lexer: an error token" {})))
+        (.append sb (name k)) (.append sb " ") (.append sb (str (aget t 3))) (.append sb "\u0001")))
+    (.toString sb)))
+
+(def ^:private read-ns (delay (create-ns 'gate.dedup.read)))
+
+(defn- clojure-norm ^String [^String path]
+  (let [text (String. (read-bytes path) "UTF-8")
+        rdr (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. text))
+        eof (Object.)
+        sb (StringBuilder.)]
+    (binding [*ns* @read-ns *read-eval* false *default-data-reader-fn* tagged-literal
+              *print-length* nil *print-level* nil *print-meta* true]
+      (loop []
+        (let [f (read {:eof eof :read-cond :preserve} rdr)]
+          (when-not (identical? f eof)
+            (.append sb (pr-str (if (instance? arbace.lang.IObj f) (vary-meta f dissoc :line :column :end-line :end-column) f)))
+            (.append sb "\n")
+            (recur)))))
+    ;; syntax-quote's auto-gensyms and #()'s arguments carry the reader's counter
+    (-> (.toString sb)
+        (str/replace #"__\d+__auto__" "__auto__")
+        (str/replace #"(p\d+|rest)__\d+#" "$1__#")
+        (str/replace #":(line|column|end-line|end-column) \d+,? ?" ""))))
+
+(def normalizers
+  "Each language's normalizer and its label."
+  {:c [c-norm "arbace.repr.c.lex's tokens"]
+   :go [go-norm "go/parser's tree (repr/go's native reader), positions and comments dropped"]
+   :java [java-norm "arbace.repr.java.lex's tokens (javac's lexer)"]
+   :clojure [clojure-norm "the Clojure reader's forms"]})
+
+(def ^:private source-ext
+  "The files a language's reader takes; another file of a unit (a golden file, a dir test's assembly) is
+  normalized by white space, not counted as a fallback."
+  {:c #"\.[ch]$" :go #"\.go$" :java #"\.java$" :clojure #"\.clj[cs]?$"})
+
+(def ^:private readers
+  "Each language's namespaces, loaded once before the pool's threads normalize (require is not safe to
+  race: a namespace half loaded by one thread is seen by another)."
+  {:c ['arbace.repr.c.lex] :go ['arbace.repr.go.parse] :java ['arbace.repr.java.lex] :clojure []})
+
+(defn- prepare!
+  "The readers of the languages langs loaded, Go's dumper with go/parser too."
+  [langs]
+  (doseq [l langs n (readers l)] (require n))
+  (when (some #{:go} langs) ((requiring-resolve 'arbace.repr.go.parse/load!) nil)))
+
+(defn- normalize
+  "[digest how why] of the file at path for lang: how :lang (its reader), :ws (the fallback: the reader
+  refused it, or the language has none) or :other (not a source file of the language, white space)."
+  [lang ^String path]
+  (let [ws #(sha256-str (ws-norm (String. (read-bytes path) "UTF-8")))
+        [f _] (normalizers lang)]
+    (cond
+      (and f (not (re-find (source-ext lang) path))) [(ws) :other]
+      f (try [(sha256-str (f path)) :lang]
+             (catch Throwable e [(ws) :ws (str (.getMessage e))]))
+      :else [(ws) :ws])))
+
+;; ---------------------------------------------------------------------------------------------
+;; The crops' corpora
+
+(defn- steps-of
+  "{part #{STEP.PART ...}} of steps.edn's steps whose name the predicate takes."
+  [steps pred]
+  (apply merge-with into {}
+         (for [s (:steps steps)
+               :let [n (name (:name s))]
+               :when (pred n)
+               p (:parts s)]
+           {(name (:part p)) #{(str n "." (name (:part p)))}})))
+
+(defn- c-corpora [cfg steps]
+  (let [ck (:checkout cfg)
+        man (read-edn (str ck "/test/c/corpora.edn"))
+        by-id (into {} (map (juxt :id identity) (:corpora man)))
+        parts (steps-of steps #(str/starts-with? % "c-"))
+        dg #{"gcc-c23" "gcc-cpp-c23" "gcc-c23-sub" "gcc-gnu23" "gcc-embed" "gcc-va-opt" "gcc-bitint"}
+        roots {:gomodcache (:gomodcache cfg) :gcc-15.2.0 (:gcc cfg) :checkout ck}
+        corpus-files (requiring-resolve 'arbace.repr.c.ppcheck/corpus-files)
+        run-files (requiring-resolve 'arbace.repr.c.ppcheck/run-files)]
+    (vec (for [c (:corpora man)
+               :let [id (name (:id c))
+                     checks (cond-> (set (get parts id)) (dg id) (conj "c-dg"))]
+               :when (seq checks)
+               :let [c (if-let [l (:like c)] (merge (by-id l) c) c)
+                     root (get roots (:root (:where c)))
+                     dir (when (string? root) (str/replace (str root "/" (:path (:where c))) #"/$" ""))]]
+           (merge {:crop "c" :id id :lang :c :checks (sort checks)}
+                  (cond
+                    (nil? root) {:unreached (str "no root " (:root (:where c)))}
+                    (not (dir? root)) {:unreached (str (:root (:where c)) ": " root)}
+                    (not (dir? dir)) {:unreached (str "no directory " dir)}
+                    :else (let [fs (corpus-files c dir)
+                                fs (if (= (:dg-do c) :run) (run-files dir fs) fs)]
+                            {:dir dir :units (mapv #(one-file-unit % (str dir "/" %)) fs)})))))))
+
+(defn- goroot-test-unit
+  "A program of $GOROOT/test: its file, and for a directory test its FILE.dir's files."
+  [^String test ^String id]
+  (let [abs (str test "/" id)
+        d (str/replace abs #"\.go$" ".dir")
+        stem (str/replace (.getName (File. abs)) #"\.go$" "")]
+    {:name id
+     :files (into [["@.go" abs]]
+                  (when (dir? d) (for [r (walk d)] [(str "@.dir/" r) (str d "/" r)])))
+     :stem stem}))
+
+(defn- record-ids
+  "The ids of a record: the first string of each entry vector ([ID ...] or [KIND ID ...])."
+  [x]
+  (vec (for [e (if (map? x) (:results x) x)]
+         (if (keyword? (first e)) (second e) (first e)))))
+
+(defn- go-corpora [cfg steps]
+  (let [ck (:checkout cfg)
+        gr (:goroot cfg)
+        parts (steps-of steps #(= % "repr-go-native"))
+        jobs (requiring-resolve 'arbace.repr.go.load/jobs)
+        unreached (when-not (dir? gr) {:unreached (str "$GOROOT: " gr)})
+        test-corpus (fn [id rec checks]
+                      (merge {:crop "go" :id id :lang :go :checks checks}
+                             (or unreached
+                                 {:dir (str gr "/test")
+                                  :units (mapv #(goroot-test-unit (str gr "/test") %) (record-ids (read-edn (str ck "/" rec))))})))
+        std-corpus (fn [id goos goarch tests? checks]
+                     (merge {:crop "go" :id id :lang :go :checks checks}
+                            (or unreached
+                                (let [js (filter :files (jobs (cond-> {:goroot gr :goos goos :goarch goarch :mode :packages
+                                                                        :cwd ck :args ["std"]}
+                                                                tests? (assoc :tests true))))
+                                      src (str gr "/src/")
+                                      abs (distinct (for [j js f (:files j)] (str (:dir j) "/" f)))]
+                                  {:dir (str gr "/src")
+                                   :units (mapv #(one-file-unit (subs % (count src)) %) abs)}))))]
+    [(test-corpus "goi-check" "test/goi/check-linux-amd64.edn" ["goi"])
+     (test-corpus "goi-aot" "test/goi/check-aot-linux-amd64.edn" ["goi-aot"])
+     (test-corpus "dirtest" "test/repr/go/roundtrip-dirtest-amd64.edn"
+                  (sort (into ["repr-go"] (concat (get parts "dirtest") (get parts "linux-dirtest")))))
+     (std-corpus "std-amd64" "tamago" "amd64" false (sort (into ["repr-go"] (get parts "amd64"))))
+     (std-corpus "std-arm64" "tamago" "arm64" false (sort (get parts "arm64")))
+     (std-corpus "std-linux-amd64" "linux" "amd64" false (sort (into ["repr-go"] (get parts "linux-amd64"))))
+     (std-corpus "std-linux-arm64" "linux" "arm64" false (sort (get parts "linux-arm64")))
+     (std-corpus "std-tests" "tamago" "amd64" true (sort (get parts "tests")))]))
+
+(def ^:private java-run-levels ["java-read" "java-interp" "java-classes" "java-compiled-full" "java-print"])
+
+(defn- java-corpora [cfg steps]
+  (let [ck (:checkout cfg)
+        jdk (:jdk cfg)
+        parts (steps-of steps #(str/starts-with? % "repr-java"))
+        ids (into (set (record-ids (read-edn (str ck "/test/java/check-read.edn"))))
+                  (record-ids (read-edn (str ck "/test/java/check-diagnostics.edn"))))
+        ref (filter #(ids (:id %)) (read-edn (str ck "/test/java/ref-jdk26.edn")))
+        by-corpus (group-by :corpus ref)
+        order (map :id (:corpora (read-edn (str ck "/test/java/corpora.edn"))))
+        unit (fn [e]
+               (let [base (if (= (:root e) :checkout) ck (str jdk "/test"))
+                     d (str base "/" (:dir e))
+                     golden (for [a (:actions e)
+                                  :let [m (re-find #"ref=([^\s/,]+)" (str (:modes a)))]
+                                  :when m]
+                              (second m))
+                     fs (if (seq (:files e))
+                          (mapv first (:files e))
+                          [(.getName (File. ^String (str/replace (:test e) #"#.*$" "")))])]
+                 {:name (:test e) :files (vec (for [f (distinct (concat fs golden))] [f (str d "/" f)]))}))
+        jtreg (for [c order
+                    :let [es (by-corpus c)]
+                    :when (seq es)]
+                (merge {:crop "java" :id (name c) :lang :java
+                        :checks (if (= c :langtools-diagnostics) ["java-diagnostics"] java-run-levels)}
+                       (if (and (not= c :jls) (not (dir? jdk)))
+                         {:unreached (str "jdk26u at the platform's pin: " jdk)}
+                         {:dir (if (= c :jls) ck (str jdk "/test")) :units (mapv unit es)})))
+        tree (fn [id dirs checks]
+               (merge {:crop "java" :id id :lang :java :checks (sort checks)}
+                      (if-let [bad (first (remove dir? dirs))]
+                        {:unreached (str "no " bad)}
+                        {:dir (first dirs)
+                         :units (vec (for [d dirs f (walk d) :when (str/ends-with? f ".java")]
+                                       (one-file-unit (str (.getName (File. ^String d)) "/" f) (str d "/" f))))})))]
+    (vec (concat jtreg
+                 [(tree "samples" [(str ck "/test/repr/java/java") (str ck "/test/repr/java/module")] (get parts "samples"))
+                  (tree "baseline" [(if (string? (:frozen cfg)) (str (:frozen cfg) "/clojure") "the frozen tree")] (get parts "baseline"))
+                  {:crop "java" :id "jdk" :lang :java :checks (sort (get parts "jdk"))
+                   :unreached "jdk26u's sources and its build tree (repr/java's jdk corpus, bin/lib/repr-java/originals.bash)"}]))))
+
+(defn- clojure-corpora [cfg _steps]
+  (let [clj? #(re-find #"\.clj[c]?$" %)
+        suite (:clj-suite cfg)
+        libs (:clj-libs cfg)
+        frozen (:frozen cfg)]
+    [(merge {:crop "clojure" :id "suite" :lang :clojure :checks ["repr-clojure" "suite-aot" "suite-go"]}
+            (if (dir? suite)
+              {:dir suite :units (vec (for [sub ["test" "src/script"] :let [d (str suite "/" sub)] :when (dir? d)
+                                            f (walk d) :when (clj? f)]
+                                        (one-file-unit (str sub "/" f) (str d "/" f))))}
+              {:unreached (str "the suite's checkout at bin/clojure-tests' rev: " suite)}))
+     (merge {:crop "clojure" :id "libraries" :lang :clojure :checks ["repr-clojure" "suite-aot" "suite-go"]}
+            (if (dir? libs)
+              {:dir libs :units (vec (for [f (walk libs) :when (clj? f)] (one-file-unit f (str libs "/" f))))}
+              {:unreached (str "the suite's libraries: " libs)}))
+     (merge {:crop "clojure" :id "frozen-src" :lang :clojure :checks ["repr-clojure"]}
+            (if (dir? frozen)
+              {:dir (str frozen "/clojure")
+               :units (vec (for [f (walk (str frozen "/clojure")) :when (clj? f)]
+                             (one-file-unit (str "clojure/" f) (str frozen "/clojure/" f))))}
+              {:unreached (str "the frozen tree: " frozen)}))]))
+
+(def ^:private crop-order ["c" "go" "java" "clojure"])
+
+(defn corpora
+  "The corpora of the crops cfg names (or of its :manifest), in corpora order."
+  [cfg]
+  (if-let [m (:manifest cfg)]
+    (vec (:corpora (read-edn m)))
+    (let [steps (read-edn (str (:checkout cfg) "/test/gate/steps.edn"))
+          build {"c" c-corpora "go" go-corpora "java" java-corpora "clojure" clojure-corpora}]
+      (vec (for [c crop-order :when ((set (:crops cfg)) c) x ((build c) cfg steps)] x)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The units' keys
+
+(defn- unit-key
+  "A unit's key from its files' digests: a one-file unit's is the file's digest (so that equal files
+  of different names are one), a unit of several the digest of its names and digests."
+  [files digest-of]
+  (if (= 1 (count files))
+    (digest-of (second (first files)))
+    (sha256-str (str/join (for [[r a] (sort-by first files)] (str r "\t" (digest-of a) "\n"))))))
+
+(defn- digests
+  "{abs {:byte D :norm D :how :lang|:ws}} of every file of the corpora, :norm with normalize?, computed
+  on a pool of `jobs` threads."
+  [cs normalize? jobs]
+  (let [files (distinct (for [c cs u (:units c) [_ a] (:files u)] [(:lang c) a]))
+        _ (when normalize? (prepare! (distinct (map first files))))
+        pool (Executors/newFixedThreadPool (int jobs))
+        fs (doall (for [[lang a] files]
+                    [a (.submit pool ^Callable (fn []
+                                                 (let [b (try (sha256-bytes (read-bytes a)) (catch Throwable _ nil))]
+                                                   (cond-> {:byte (or b (str "missing:" a)) :missing (nil? b)}
+                                                     (and normalize? b) (merge (let [[d h w] (normalize lang a)] {:norm d :how h :why w}))))))]))
+        m (into {} (for [[a ^Future f] fs] [a (.get f)]))]
+    (.shutdown pool)
+    (.awaitTermination pool 1 TimeUnit/MINUTES)
+    m))
+
+(defn- keyed
+  "The corpora with each unit's :byte and :norm keys."
+  [cs dg]
+  (vec (for [c cs]
+         (assoc c :units (vec (for [u (:units c)]
+                                (assoc u
+                                       :paths (vec (sort (map second (:files u))))
+                                       :byte (unit-key (:files u) #(get-in dg [% :byte]))
+                                       :norm (when (:norm (dg (second (first (:files u)))))
+                                               (unit-key (:files u) #(get-in dg [% :norm]))))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The report
+
+(defn- dups
+  "The units of seq us (each with :corpus and :paths) at level k: [dups groups repeats]. A repeat is a
+  unit whose files (their paths) an earlier unit read already (a jtreg file of several @test blocks,
+  std's file under another configuration, a corpus that is another's at another level): read again,
+  not a duplicate file. A dup is a unit whose key an earlier unit of other files has: a copy. groups
+  {key [unit ...]}: the units of each key read from two sets of files or more, a set's first unit
+  each, in order."
+  [us k]
+  (let [seen-paths (java.util.HashSet.)
+        seen-keys (java.util.HashSet.)
+        out (reduce (fn [acc u]
+                      (cond
+                        (.contains seen-paths (:paths u)) (update acc :repeats conj u)
+                        (and (k u) (.contains seen-keys (k u))) (do (.add seen-paths (:paths u)) (update acc :dups conj u))
+                        :else (do (.add seen-paths (:paths u)) (when (k u) (.add seen-keys (k u))) acc)))
+                    {:dups [] :repeats []} us)
+        firsts (vals (into {} (for [u (reverse us)] [(:paths u) u])))
+        g (group-by k (sort-by :ord (filter k firsts)))]
+    [(:dups out) (into {} (filter #(> (count (val %)) 1) g)) (:repeats out)]))
+
+(defn- pct [n d] (if (pos? d) (format "%.1f%%" (/ (* 100.0 n) d)) "-"))
+
+(defn- clean-walls
+  "{step-or-part wall-s} of the newest clean record test/gate/clean-*.edn, and its tag."
+  [^String ck]
+  (let [fs (sort (filter #(re-matches #"clean-.*\.edn" (.getName ^File %))
+                         (or (seq (.listFiles (File. (str ck "/test/gate")))) [])))]
+    (when-let [^File f (last fs)]
+      (let [r (read-edn (.getPath f))]
+        [(:tag r) (into {} (for [s (:steps r)] [(:step s) (:wall-s s)]))]))))
+
+(defn- step-of
+  "A check's step: STEP of STEP.PART (a part is a run of its step's over one corpus)."
+  ^String [^String ch]
+  (first (str/split ch #"\." 2)))
+
+(defn- check-wall
+  "A step's wall seconds in the clean record: its own, else the sum of its parts', else nil."
+  [walls ^String step]
+  (or (get walls step)
+      (let [ps (keep (fn [[k v]] (when (str/starts-with? k (str step ".")) v)) walls)]
+        (when (seq ps) (reduce + ps)))))
+
+(defn report [cfg]
+  (let [t0 (System/nanoTime)
+        all (corpora cfg)
+        reached (filterv :units all)
+        normalize? (:normalize cfg)
+        dg (digests reached normalize? (or (:jobs cfg) 8))
+        cs (keyed reached dg)
+        levels (if normalize? [:byte :norm] [:byte])
+        lname {:byte "byte-identical" :norm "normalized"}
+        [ctag walls] (when-not (:manifest cfg) (clean-walls (:checkout cfg)))
+        ords (into {} (map-indexed (fn [i c] [(:id c) (* 1000000 i)]) cs))
+        tagged (fn [c] (map-indexed #(assoc %2 :corpus (:id c) :crop (:crop c) :ord (+ (ords (:id c)) %1)) (:units c)))]
+    (println (str "corpus-dedup: " (count all) " corpora, " (count reached) " reached, "
+                  (reduce + (map (comp count :units) reached)) " units, " (count dg) " files"
+                  (when normalize? "; normalized")))
+    ;; per corpus
+    (println)
+    (println "## Per corpus (dups: units of other files than an earlier unit's, the same bytes or normalized text; repeats: units of the same files as an earlier unit's)")
+    (println)
+    (println (str "| crop | corpus | units | files | repeats (same files) | byte dups | byte groups"
+                  (when normalize? " | normalized dups | normalized groups | normalizer | fallback (ws) files") " | checks |"))
+    (println (str "|---|---|---:|---:|---:|---:|---:" (when normalize? "|---:|---:|---|---:") "|---|"))
+    (doseq [c all]
+      (if-let [u (:unreached c)]
+        (println (str "| " (:crop c) " | " (:id c) " | not reached: " u " |"))
+        (let [c (first (filter #(= (:id %) (:id c)) cs))
+              us (tagged c)
+              nf (count (distinct (for [u (:units c) [_ a] (:files u)] a)))
+              [bd bg rp] (dups us :byte)
+              [nd ng] (dups us :norm)
+              ws (count (distinct (for [u (:units c) [_ a] (:files u) :when (= :ws (:how (dg a)))] a)))]
+          (println (str "| " (:crop c) " | " (:id c) " | " (count us) " | " nf " | " (count rp) " | " (count bd) " (" (pct (count bd) (count us)) ") | " (count bg)
+                        (when normalize?
+                          (str " | " (count nd) " (" (pct (count nd) (count us)) ") | " (count ng) " | "
+                               (if-let [[_ l] (normalizers (:lang c))] l "white space") " | " ws))
+                        " | " (str/join ", " (distinct (map step-of (:checks c)))) " |")))))
+    (when normalize?
+      (doseq [c cs
+              :let [ws (distinct (for [u (:units c) [r a] (:files u) :when (= :ws (:how (dg a)))] (str (:name u) (when (next (:files u)) (str " " r)))))]
+              :when (seq ws)]
+        (println (str "- " (:crop c) "/" (:id c) ": " (count ws) " normalized by white space (the reader refused them): "
+                      (str/join ", " (take 8 ws)) (when (> (count ws) 8) " ...")
+                      "; the first's reason: "
+                      (let [w (str (some (fn [u] (some (fn [[_ a]] (:why (dg a))) (:files u))) (:units c)))]
+                        (str/replace (subs w 0 (min 160 (count w))) #"\s+" " "))))))
+    ;; across the corpora of a crop, pairwise
+    (println)
+    (println "## Across corpora (B's units with a twin in an earlier corpus A of the same crop; shared: the checks that read both)")
+    (println)
+    (println (str "| crop | A | B | B's units | the same files in A | byte copies in A" (when normalize? " | normalized copies in A") " | checks reading both |"))
+    (println (str "|---|---|---|---:|---:|---:" (when normalize? "|---:") "|---|"))
+    (doseq [[i a] (map-indexed vector cs)
+            b (drop (inc i) cs)
+            :when (= (:crop a) (:crop b))
+            :let [pa (set (map :paths (:units a)))
+                  ka (set (map :byte (:units a)))
+                  na (set (keep :norm (:units a)))
+                  other (remove #(pa (:paths %)) (:units b))
+                  st (- (count (:units b)) (count other))
+                  bt (count (filter #(ka (:byte %)) other))
+                  nt (count (filter #(and (:norm %) (na (:norm %))) other))]
+            :when (pos? (+ st bt nt))]
+      (println (str "| " (:crop a) " | " (:id a) " | " (:id b) " | " (count (:units b)) " | " st " | " bt
+                    (when normalize? (str " | " nt))
+                    " | " (let [s (distinct (filter (set (map step-of (:checks a))) (map step-of (:checks b))))] (if (seq s) (str/join ", " s) "none (different levels)")) " |")))
+    ;; across crops
+    (let [us (mapcat tagged cs)
+          [_ bg _] (dups us :byte)
+          cross (filter (fn [[_ g]] (> (count (distinct (map :crop g))) 1)) bg)]
+      (println)
+      (println (str "## Across crops: " (count cross) " byte-identical groups span two crops or more"))
+      (doseq [[_ g] (take 10 cross)]
+        (println (str "- " (str/join ", " (map #(str (:crop %) "/" (:corpus %) ":" (:name %)) (take 4 g)))
+                      (when (> (count g) 4) (str " (+" (- (count g) 4) ")"))))))
+    ;; per check
+    (println)
+    (println (str "## Per check (a gate step, its parts together: the units it reads, in corpora order; repeats: units of files it read before; dups: copies of a unit it read before, the first in corpora order kept;"
+                  " est: the clean record's wall" (when ctag (str " (" ctag ")")) " times the dup share)"))
+    (println)
+    (println (str "| check | corpora | units | repeats (same files) | byte dups (copies)" (when normalize? " | normalized dups") " | time of the byte dups |"))
+    (println (str "|---|---|---:|---:|---:" (when normalize? "|---:") "|---|"))
+    (let [checks (distinct (for [c cs ch (:checks c)] (step-of ch)))]
+      (doseq [ch checks
+              :let [rc (filter #(some #{ch} (map step-of (:checks %))) cs)
+                    us (mapcat tagged rc)
+                    [bd _ rp] (dups us :byte)
+                    [nd _] (dups us :norm)
+                    w (check-wall walls ch)]]
+        (println (str "| " ch " | " (str/join ", " (map :id rc)) " | " (count us) " | " (count rp) " (" (pct (count rp) (count us)) ") | " (count bd) " (" (pct (count bd) (count us)) ")"
+                      (when normalize? (str " | " (count nd) " (" (pct (count nd) (count us)) ")"))
+                      " | " (cond
+                              (zero? (count bd)) "0"
+                              w (format "est %.0f s of %d s" (/ (* (double w) (count bd)) (max 1 (count us))) w)
+                              :else "no per-file times recorded, no wall in the clean record")
+                      " |"))))
+    ;; the groups
+    (doseq [k levels
+            crop (distinct (map :crop cs))
+            :let [us (mapcat tagged (filter #(= crop (:crop %)) cs))
+                  [_ g _] (dups us k)
+                  gs (sort-by #(- (count %)) (vals g))]]
+      (println)
+      (println (str "## " crop ", " (lname k) " groups: " (count gs) " (" (reduce + (map (comp dec count) gs)) " units beyond the kept copy)"
+                    (when-not (:groups cfg) "; the 10 largest (--groups: all)")
+                    "; a group's copies may be read by different checks (levels): the per-check table counts the repeats within a check"))
+      (doseq [grp (if (:groups cfg) gs (take 10 gs))
+              :let [[keep & drop] grp]]
+        (println (str "- keep " (:corpus keep) ":" (:name keep) "; drop " (count drop) ": "
+                      (str/join ", " (map #(str (:corpus %) ":" (:name %)) (if (:groups cfg) drop (take 5 drop))))
+                      (when (and (not (:groups cfg)) (> (count drop) 5)) " ...")))))
+    (let [miss (count (filter :missing (vals dg)))]
+      (when (pos? miss)
+        (println (str "\ncorpus-dedup: " miss " listed files missing (counted by name, not content): "
+                      (str/join ", " (take 10 (sort (keep (fn [[a d]] (when (:missing d) a)) dg))))))))
+    (println (format "\ncorpus-dedup: done in %.1f s" (/ (- (System/nanoTime) t0) 1e9)))))
+
+(defn -main [& args]
+  (case (first args)
+    "report" (do (report (read-string (second args))) (shutdown-agents) (System/exit 0))
+    (do (println "usage: gate.dedup report CFG") (System/exit 2))))

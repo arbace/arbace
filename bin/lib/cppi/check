@@ -1,0 +1,158 @@
+#!/bin/bash
+# cppi's run check (doc/cpp/CPP-SURVEY.md, "As built: CX8 (write-ahead)"; doc/cpp/LLVM.md §11), C's bin/ci check for C++: every
+# program of the run corpora (bin/lib/cppi/lists.bash) compiled to IR by the oracle (clang++ -O0, the list's -std and options),
+# lowered to C (arbace.cpp.lower), the C read by repr/c and checked by ci's checker, linked with the lowered runtime (bin/cppi
+# runtime-build's units read as a ci library, bin/cppi runtime-ci) and musl's forms, built into a node program
+# (arbace.cpp.run) and run by ci's back end (tools/cirun, the light path) with an empty standard input, no arguments, the
+# budget (30 s; test/cpp/check-budget.edn's programs more); its status, standard output's and standard error's SHA-256 against
+# g++ 15.2's -O0 run (test/cpp/ref-gxx15.edn, bin/cppi record-ref; a program whose -O0 and -O2 runs differ is compared on its
+# status alone); every program that does not pass in a class of test/cpp/divergences.edn (arbace.cpp.check's run-judge), and
+# against the committed record test/cpp/check-linux-amd64.edn (a recorded pass that fails is a regression). The negative
+# controls (GTS81 (a)): test/cpp/controls.edn's :level :run entries. Each program's seconds (IR, lowering, ci's build, run)
+# in WORK/CORPUS/times.tsv and, with --record, test/cpp/check-times-linux-amd64.edn (GT8's subsets, GTS205).
+#
+# Usage: bin/cppi check [--corpus C,...] [--only LIST] [--sample N] [--record] [--judge] [--resume]
+#   --corpus   the run corpora (default samples,runtime: the recorded ones, 185's DECISION (a); libstdcxx and gxx-dg-run
+#              need a g++ run of every program judged: their reference holds every 25th, --sample 25)
+#   --only     a file of ids (CORPUS/NAME, # comments) to check alone
+#   --sample   every Nth program of each corpus's list
+#   --record   test/cpp/check-linux-amd64.edn (and the times) rewritten for the corpora run (not with --only or --sample)
+#   --judge    the last run judged again (nothing run)
+#   --resume   the programs already run kept
+#   CPPI_JOBS (default 4): the IR's and the runs' jobs; CPPI_THREADS (default 3): the builder's threads (its GOMEMLIMIT
+#   CPPI_CI_MEMLIMIT, default 6GiB: the runtime's checked units are held); CPPI_CHECK_WORK
+#   (default .tmp/cppi-check) the work directory; CPPI_KEEP_NODES: keep every node program (else those of a run that failed)
+# Writes WORK/CORPUS/list.tsv, files/ID/ (x.ll, lowered.c), nodes/ID.nodes, nodes.tsv, run.tsv, times.tsv; WORK/results.edn.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+. "$root/bin/lib/cppi/lists.bash"
+cd "$root"
+corpora=$cppi_corpora_recorded only= sample=1 record= judge= resume=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --only) only=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+    --sample) sample=$2; shift 2 ;;
+    --record) record=1; shift ;;
+    --judge) judge=1; shift ;;
+    --resume) resume=1; shift ;;
+    *) sed -n '14,24p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+if [ -n "$only" ]; then
+  bad=$(grep -v '^#' "$only" | awk -F/ -v a=",$corpora," 'NF && index(a, "," $1 ",") == 0' | head -5 | tr '\n' ' ')
+  [ -z "$bad" ] || { echo "bin/cppi check: --only lists programs outside the run corpora ($corpora): $bad" >&2; exit 2; }
+fi
+if [ -n "$only" ] || [ "$sample" != 1 ]; then
+  [ -n "$record" ] && { echo "bin/cppi check: --record records whole corpora, not --only's or --sample's subset" >&2; exit 2; }
+  export CI_SUBSET=1
+fi
+work=${CPPI_CHECK_WORK:-$root/.tmp/cppi-check}
+jobs=${CPPI_JOBS:-4}; threads=${CPPI_THREADS:-3}
+mkdir -p "$work"
+IFS=, read -r -a ids <<< "$corpora"
+if [ -n "$judge" ]; then
+  for id in "${ids[@]}"; do [ -f "$work/$id/subset" ] && export CI_SUBSET=1; done
+  [ -n "${CI_SUBSET:-}" ] && [ -n "$record" ] && { echo "bin/cppi check: --judge --record: the last run was a subset" >&2; exit 2; }
+fi
+
+budget() { # ID: the run's seconds (30, or test/cpp/check-budget.edn's)
+  local b; b=$(sed -n "s|^[{ ]*\"$1\" *\\([0-9][0-9]*\\).*|\\1|p" "$root/test/cpp/check-budget.edn" 2>"$TMPDIR/cppi-budget.err" | head -1)
+  echo "${b:-${CPPI_BUDGET:-30}}"
+}
+
+if [ -z "$judge" ]; then
+  rtlib=$("$root/bin/cppi" runtime-ci) || exit 1
+  cirun=${CIRUN:-$root/.tmp/ci/cirun}
+  { [ -n "${CIRUN:-}" ] && [ -x "$cirun" ]; } || "$root/bin/ci" cirun-build --ensure > "$work/cirun-build.log" 2>&1 || { cat "$work/cirun-build.log"; exit 1; }
+  "$root/bin/ci" musl ensure || exit 1
+  : > "$work/empty-stdin"
+  ir1() { # ID STD ARGS PATH: the oracle's IR, its seconds
+    local d=$work/files/$1 t0
+    rm -rf "$d"; mkdir -p "$d"; t0=$(date +%s.%N)
+    # shellcheck disable=SC2086
+    (cd "$d" && timeout 300 clang++ -x c++ -std=$2 $3 -O0 -S -emit-llvm "$4" -o x.ll; echo $? > ir.status) > "$d/ir.log" 2>&1
+    echo "$(date +%s.%N) $t0" | awk '{printf "%.1f\n", $1 - $2}' > "$d/ir.secs"
+  }
+  run1() { # ID
+    local i=$1 f=$work/nodes/$1.nodes rd st t0 t1
+    rd=$(mktemp -d "$work/run.XXXXXX"); t0=$(date +%s.%N)
+    (cd "$rd" && ulimit -f 1024 && timeout "$(budget "$i")" "$cirun" "$f" < "$work/empty-stdin" > out 2> err); st=$?
+    t1=$(date +%s.%N)
+    [ $st = 124 ] && st=timeout
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$st" "$(sha256sum < "$rd/out" | cut -d' ' -f1)" "$(wc -c < "$rd/out")" \
+      "$(grep -m1 '^\(cirun: \(fault\|internal\)\|fatal error: \|runtime: \)' "$rd/err" | cut -c1-200 | tr '\t' ' ')" \
+      "$(sha256sum < "$rd/err" | cut -d' ' -f1)" "$(echo "$t1 $t0" | awk '{printf "%.1f", $1 - $2}')"
+    rm -rf "$rd"
+    [ -n "${CPPI_KEEP_NODES:-}" ] || [ "$st" != 0 ] || rm -f "$f"
+  }
+  export -f ir1 run1 budget; export work cirun root
+  for id in "${ids[@]}"; do
+    d=$work/$id
+    if [ -z "$resume" ]; then rm -rf "${d:?}" "${work:?}/files/$id" "${work:?}/nodes/$id"; fi
+    mkdir -p "$d"
+    if [ -n "$only" ] || [ "$sample" != 1 ]; then printf '%s %s\n' "${only:-all}" "$sample" > "$d/subset"; else rm -f "$d/subset"; fi
+    run_list "$id" > "$d/all.tsv" || exit 1
+    grep -o '{:id "[^"]*" :status :no-build' test/cpp/ref-gxx15.edn | cut -d'"' -f2 > "$d/no-build.txt"
+    awk -F'\t' -v only="${only:-}" -v nb="$d/no-build.txt" -v sm="$sample" '
+      BEGIN { while ((getline l < nb) > 0) skip[l] = 1
+              if (only != "") { while ((getline l < only) > 0) want[l] = 1 } }
+      { n++; if ((n - 1) % sm != 0) next; if ($1 in skip) next; if (only != "" && !($1 in want)) next; print }' "$d/all.tsv" > "$d/list.tsv"
+    # every program judged has g++'s run recorded (review 191, F4; 185's DECISION (a)): the sampled corpora's reference holds every
+    # 25th program only, so a run of another selection is refused before anything runs, not failed program by program
+    grep -o '^{:id "[^"]*"' test/cpp/ref-gxx15.edn | cut -d'"' -f2 > "$d/ref-ids.txt"
+    nref=$(awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) r[l] = 1; ARGV[2] = "" } !($1 in r)' "$d/list.tsv" "$d/ref-ids.txt" | wc -l)
+    if [ "$nref" != 0 ]; then
+      echo "bin/cppi check: $nref programs of $id have no g++ run in test/cpp/ref-gxx15.edn (bin/cppi record-ref --corpus $id first; the recorded part of libstdcxx and gxx-dg-run is --sample 25)" >&2
+      exit 2
+    fi
+    : > "$d/done.txt"
+    if [ -n "$resume" ] && [ -f "$d/run.tsv" ]; then cut -f1 "$d/run.tsv" > "$d/done.txt"; fi
+    awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) done[l] = 1; ARGV[2] = "" } !($1 in done)' "$d/list.tsv" "$d/done.txt" > "$d/todo.tsv"
+    [ -s "$d/todo.tsv" ] || continue
+    # the oracle's IR
+    tr '\t\n' '\037\0' < "$d/todo.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r i s a p <<< "$1"; ir1 "$i" "$s" "$a" "$p"' _ {}
+    # the corpus's own library: the testsuite's util/ lowered and read (once a run)
+    xlib=
+    if [ "$id" = libstdcxx ]; then
+      xlib=$work/util
+      if [ ! -f "$xlib/index.edn" ]; then
+        rm -rf "$xlib"; mkdir -p "$xlib"
+        for f in testsuite_abi testsuite_allocator testsuite_character testsuite_hooks; do
+          mkdir -p "$xlib/src/$f"
+          clang++ -std=gnu++17 -O0 -S -emit-llvm -I"$cppi_ts/util" "$cppi_ts/util/$f.cc" -o "$xlib/src/$f/x.ll" || exit 1
+          printf '%s\t%s\n' "$f" "$xlib/src/$f/x.ll"
+        done > "$xlib/ll.tsv"
+        GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run lower-lib "$xlib" "$xlib/ll.tsv" "$threads" > "$xlib/read.log" 2>&1 || { tail -5 "$xlib/read.log"; exit 1; }
+      fi
+    fi
+    # lowered, read, checked, linked and built, a process for the corpus (the library's checked units shared)
+    awk -F'\t' -v w="$work" -v x="$xlib" '{ if ((getline s < (w "/files/" $1 "/ir.status")) > 0 && s == 0) print $1 "\t" w "/files/" $1 "/x.ll\t" x
+                                             else print $1 "\t-\t" x; close(w "/files/" $1 "/ir.status") }' "$d/todo.tsv" > "$d/build.tsv"
+    mkdir -p "$work/nodes"
+    rm -f "$work/nodes/nodes.tsv"
+    GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run nodes-list "$work/nodes" "$d/build.tsv" "$rtlib" "$threads" > "$d/nodes.log" 2>&1
+    [ -f "$work/nodes/nodes.tsv" ] && cat "$work/nodes/nodes.tsv" >> "$d/nodes.tsv" && rm -f "$work/nodes/nodes.tsv"
+    [ -n "$resume" ] || : > "$d/run.tsv"
+    awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, f, "\t"); t[f[1]] = 1 }; ARGV[2] = "" } $2 == "ok" && ($1 in t) && !seen[$1]++ {print $1}' "$d/nodes.tsv" "$d/todo.tsv" \
+      | xargs -P "$jobs" -I{} bash -c 'run1 "$1"' _ {} >> "$d/run.tsv"
+    # the quiet retry: a program the record passes that timed out (the host loaded) is run again alone, once
+    awk -F'\t' '$2 == "timeout" {print $1}' "$d/run.tsv" | while IFS= read -r i; do
+      grep -qF "[\"$i\" :pass " test/cpp/check-linux-amd64.edn 2>"$TMPDIR/cppi-rec.err" || continue
+      r=$(run1 "$i"); echo "cppi check: $i timed out; run again alone: $(printf '%s' "$r" | cut -f2)"
+      R=$r awk -F'\t' -v i="$i" '$1 == i { print ENVIRON["R"]; next } { print }' "$d/run.tsv" > "$d/run.tsv.new" && mv "$d/run.tsv.new" "$d/run.tsv"
+    done
+    # the seconds of each program: IR, lowering, ci's build, run
+    awk -F'\t' -v w="$work" 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, f, "\t"); b[f[1]] = f[6] }
+                                     while ((getline l < ARGV[3]) > 0) { split(l, f, "\t"); r[f[1]] = f[7] }; ARGV[2] = ""; ARGV[3] = "" }
+      { s = "-"; if ((getline s < (w "/files/" $1 "/ir.secs")) <= 0) s = "-"; close(w "/files/" $1 "/ir.secs")
+        lb = ($1 in b) ? b[$1] : "-+-"; split(lb, x, "+"); print $1 "\t" s "\t" x[1] "\t" x[2] "\t" (($1 in r) ? r[$1] : "-") }' \
+      "$d/list.tsv" "$d/nodes.tsv" "$d/run.tsv" > "$d/times.tsv"
+    # the disk: the IR and the lowered C of a program that passed its build are not needed again
+    [ -n "${CPPI_KEEP:-}" ] || awk -F'\t' '$2 == "ok" {print $1}' "$d/nodes.tsv" | while IFS= read -r i; do rm -f "$work/files/$i/x.ll"; done
+    echo "cppi check: $id: $(wc -l < "$d/list.tsv") programs, $(df -h "$root" | awk 'NR==2 {print $5}') disk"
+  done
+fi
+arbace_tool -m arbace.cpp.check run-judge "$work" eval "${record:+--record}" "${ids[@]}"

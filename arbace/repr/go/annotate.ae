@@ -787,19 +787,26 @@
                [k [st msg]]))
     {}))
 
-(defn- check-corpus [spec pool known]
+(defn- check-corpus
+  "per dump of corpus spec: E-tree, raw, E-ann, E-forms (-main's check). only (GT8, --only): nil, or the set
+  of ids NAME/KEY the check is restricted to (the others' dumps neither checked nor missing; a selected
+  job's dependencies still prepared, as in a whole run)"
+  [spec pool known only]
   (let [t0 (System/nanoTime)
         nm (:name spec)
+        sel? (fn [k] (or (nil? only) (contains? only (str nm "/" k))))
         dumps (str/replace (:dumps spec) #"/+$" "")
         loads (spec-loads spec)
         load-ms (/ (- (System/nanoTime) t0) 1e6)
-        helper (into {} (for [p (rd/dump-files [dumps])]
-                          [(str/replace (subs p (inc (count dumps))) #"\.edn$" "") p]))
+        helper (into {} (for [p (rd/dump-files [dumps])
+                              :let [k (str/replace (subs p (inc (count dumps))) #"\.edn$" "")]
+                              :when (sel? k)]
+                          [k p]))
         hres (helper-results (:tsv spec))
         ;; each job with its session; the kept keys registered before any job runs
         work (vec (mapcat (fn [[l js]]
                             (let [[sess-of js] (load-sessions l js)]
-                              (for [j js]
+                              (for [j js :when (sel? (:key j))]
                                 (do (when-let [k (job-key l j)]
                                       (when-not (external-test? l j) (.put ^ConcurrentHashMap (:keep (sess-of j)) k true)))
                                     [l sess-of j]))))
@@ -964,7 +971,7 @@
     {:status status :corpus nm :dumps (count conv)}))
 
 (defn -main
-  "check [--jobs N] [--forms DIR] [--known FILE] [--report FILE] SPEC...
+  "check [--jobs N] [--forms DIR] [--known FILE] [--report FILE] [--only FILE] SPEC...
   read [--full] [--jobs N] [--forms DIR] [--out DIR] [--print DIR] [--text] [--text-known FILE]
        [--quiet] [--report FILE] [--tsv FILE] SPEC
 
@@ -981,7 +988,8 @@
   (:dumps): E-tree, the raw forms against the final ones (conform), E-ann (the final forms of the
   annotated native dump equal the helper's), E-forms (their .ae text equal in modes :lines and
   :full). Exits 1 on a difference or failure that the known differences (a map of dump key,
-  package path or file key to the reason) do not list."
+  package path or file key to the reason) do not list. --only FILE (GT8, the rotation's lists): the
+  ids NAME/KEY of FILE (one a line; NAME a spec's :name, KEY a dump's key) alone, a partial check."
   [& args]
   (let [[cmd & args] args
         _ (when-not (#{"check" "read"} cmd)
@@ -1001,7 +1009,11 @@
                          "--text" (recur (assoc opts :text true) more)
                          "--text-known" (recur (assoc opts :text-known (first more)) (rest more))
                          "--quiet" (recur (assoc opts :quiet true) more)
+                         "--only" (recur (assoc opts :only (first more)) (rest more))
                          [opts args]))
+        ;; GT8 (the rotation's lists): check --only FILE, the ids NAME/KEY of FILE alone (a partial check)
+        only (when-let [f (:only opts)]
+               (set (remove #(or (str/blank? %) (str/starts-with? % "#")) (map str/trim (str/split-lines (slurp f))))))
         _ (when (and (= cmd "read") (not= 1 (count specs)))
             (binding [*out* *err*] (println "read: one SPEC"))
             (System/exit 2))
@@ -1031,7 +1043,7 @@
                                              [i (if (= cmd "read")
                                                   (read-corpus sp pool (:out opts) (if (:full opts) :full :lines)
                                                                (select-keys opts [:print :text :text-known :quiet :report :tsv :jobs]))
-                                                  (check-corpus sp pool known))]))]]
+                                                  (check-corpus sp pool known only))]))]]
                        (do (drop-std-sessions!) (System/gc) rs))
                      (apply concat)
                      (sort-by first)
@@ -1048,6 +1060,9 @@
                        (reduce + (map (comp count :ann-fail) results))
                        (reduce + (keep :forms-equal results)) (reduce + (map (comp count :forms-differ) results)) unknown)))
     (when-let [rf (when (= cmd "check") (:report opts))]
-      (spit rf (with-out-str (binding [*print-length* nil *print-level* nil] (prn {:forms fc :corpora results})))))
+      (spit rf (with-out-str (binding [*print-length* nil *print-level* nil] (prn (cond-> {:forms fc :corpora results} only (assoc :partial (count only))))))))
+    (when only
+      (println (format "native-check: a partial check (--only, %d ids): %d dumps of the listed ones checked; the others neither checked nor missing"
+                       (count only) (reduce + (keep :dumps results)))))
     (shutdown-agents)
     (System/exit (if (or (pos? unknown) (some #(pos? (or (:status %) 0)) results)) 1 0))))

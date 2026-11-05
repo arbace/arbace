@@ -1,0 +1,313 @@
+(ns arbace.repr.python.convert
+  "The converter of repr/python (doc/python/SPEC.md; PY2, mode :lines): the helper's dump (tools/pydump/pydump.py,
+  forms in the spec's vocabulary, PYS3 (a), PYS5 (a)) as Python forms, and their .ae text.
+
+  convert: reads the dump with Arbace's reader, checks every head against the spec's checklist (§13: an unknown head
+  is an error), and checks the contexts: the helper marks a Name, Attribute, Subscript, Starred, List or Tuple in a
+  Store or Del context (^:store, ^:del on a symbol, {:ctx :store} on a list), and the mark must be the slot's (a
+  target slot is Store, a delete's targets Del, the elements of a target tuple or list and a target's starred value
+  the target's, everything else Load: §1.2, S15); the marks are then dropped, so the forms are the spec's.
+  write-forms: the forms as .ae text, a form on one line when it fits in 110 columns, else its fields one a line
+  (a statement vector one statement a line); read back and compared by the caller (read-check)."
+  (:require [arbace.string :as str]))
+
+(def known-heads
+  (set '[python/module python/interactive python/expression python/function-type python/error
+         function-def async-function-def class-def return delete assign type-alias aug-assign ann-assign for
+         async-for while if with async-with match raise try try-star assert import import-from global nonlocal
+         expr pass break continue bool-op named-expr bin-op unary-op lambda if-exp dict set list-comp set-comp
+         dict-comp generator-exp await yield yield-from compare call formatted-value interpolation joined-str
+         template-str int float imag str bytes const attribute subscript starred name list tuple slice
+         comprehension except-handler arguments arg keyword alias withitem match-case match-value match-singleton
+         match-sequence match-mapping match-class match-star match-as match-or type-ignore type-var param-spec
+         type-var-tuple str-concat]))
+
+(defn error-form? [x] (and (seq? x) (= 'python/error (first x))))
+
+;; the target slots: [head positional-index] -> the context of that field's nodes
+(def ^:private target-slots
+  {['assign 0] :store ['aug-assign 0] :store ['ann-assign 0] :store ['for 0] :store ['async-for 0] :store
+   ['comprehension 0] :store ['named-expr 0] :store ['type-alias 0] :store ['withitem 1] :store ['delete 0] :del})
+
+(def ^:private ctx-heads '#{name attribute subscript starred list tuple})
+
+(defn- mark-of [x]
+  (cond
+    (symbol? x) (let [m (meta x)] (cond (:store m) :store (:del m) :del))
+    (and (seq? x) (map? (last x))) (:ctx (last x))))
+
+(declare clean)
+
+(defn- clean-list
+  "A list node, its context checked against expect and its children cleaned"
+  [x expect]
+  (let [h (first x)
+        _ (when-not (and (symbol? h) (known-heads h)) (throw (ex-info (str "unknown head " (pr-str h)) {:head h})))
+        own (mark-of x)
+        _ (when (and (ctx-heads h) (not= own (when (#{:store :del} expect) expect)))
+            (throw (ex-info (str "context " (or own :load) " of " h " where the slot takes " expect) {:head h})))
+        _ (when (and own (not (ctx-heads h))) (throw (ex-info (str h " carries a context") {:head h})))
+        xs (vec (rest x))
+        xs (if (and (seq xs) (map? (peek xs)) (contains? (peek xs) :ctx))
+             (let [m (dissoc (peek xs) :ctx)] (if (empty? m) (pop xs) (conj (pop xs) m)))
+             xs)
+        target? (#{:store :del} expect)
+        child (fn [i]
+                (or (target-slots [h i])
+                    (when (and target? ('#{tuple list starred} h) (zero? i)) expect)
+                    :load))]
+    (loop [i 0 in-opts false ys xs acc [h]]
+      (if (empty? ys)
+        (apply list acc)
+        (let [y (first ys)]
+          (cond
+            (keyword? y) (recur i true (rest ys) (conj acc y))
+            in-opts (recur i in-opts (rest ys) (conj acc (clean y :load)))
+            :else (recur (inc i) false (rest ys) (conj acc (clean y (child i))))))))))
+
+(defn clean [x expect]
+  (cond
+    (symbol? x) (do (when (and (mark-of x) (not= (mark-of x) expect))
+                      (throw (ex-info (str "context " (mark-of x) " of " x " where the slot takes " expect) {})))
+                    (when (and (#{:store :del} expect) (not (mark-of x)) (not (#{'None 'True 'False '...} x)))
+                      (throw (ex-info (str "context load of " x " where the slot takes " expect) {})))
+                    (with-meta x nil))
+    (seq? x) (clean-list x expect)
+    (vector? x) (mapv #(clean % expect) x)
+    (map? x) (into {} (map (fn [[k v]] [k (if (= k :tokens) v (clean v :load))]) x))
+    :else x))
+
+(defn convert
+  "A dump's text as Python forms in mode :lines; an error dump ((python/error ...)) is returned as it is"
+  [text]
+  (let [x (read-string text)]
+    (when-not (seq? x) (throw (ex-info "the dump is not a form" {})))
+    (if (error-form? x) x (clean x :load))))
+
+;; ---- the .ae writer ----
+
+(defn- atom-text [x]
+  (cond (nil? x) "nil"
+        (string? x) (pr-str x)
+        (symbol? x) (str x)
+        :else (pr-str x)))
+
+(defn- flat-into [^StringBuilder sb x]
+  (cond (or (seq? x) (vector? x))
+        (do (.append sb (if (seq? x) "(" "["))
+            (loop [ys (seq x) first? true]
+              (when ys
+                (when-not first? (.append sb " "))
+                (flat-into sb (first ys))
+                (recur (next ys) false)))
+            (.append sb (if (seq? x) ")" "]")))
+        (map? x)
+        (do (.append sb "{")
+            (loop [kvs (seq x) first? true]
+              (when kvs
+                (when-not first? (.append sb " "))
+                (flat-into sb (key (first kvs))) (.append sb " ") (flat-into sb (val (first kvs)))
+                (recur (next kvs) false)))
+            (.append sb "}"))
+        :else (.append sb ^String (atom-text x))))
+
+(defn- flat [x] (let [sb (StringBuilder.)] (flat-into sb x) (str sb)))
+
+(def ^:private width 110)
+
+(declare module-map)
+
+(defn- fits
+  "x's flat text when it is at most limit characters, else nil, without building the text of a larger form"
+  [x limit]
+  (cond
+    (neg? limit) nil
+    (or (seq? x) (vector? x))
+    (loop [ys (seq x) acc (StringBuilder. (if (seq? x) "(" "[")) left (- limit 2) first? true]
+      (if (nil? ys)
+        (str (.append acc (if (seq? x) ")" "]")))
+        (let [t (fits (first ys) (if first? left (dec left)))]
+          (if (nil? t)
+            nil
+            (do (when-not first? (.append acc " "))
+                (.append acc ^String t)
+                (recur (next ys) acc (- left (count t) (if first? 0 1)) false))))))
+    :else (let [t (flat x)] (when (<= (count t) limit) t))))
+
+(defn- write-x [^StringBuilder sb x ind]
+  (let [f (when (or (not (coll? x)) (map? x)) (flat x))
+        f (or f (fits x (- width ind)))]
+    (if (and f (not (str/includes? f "\n")))
+      (.append sb f)
+      (if (or (not (coll? x)) (map? x))
+        (.append sb (flat x))
+        (let [pad (str "\n" (apply str (repeat (inc ind) \space)))]
+          (if (seq? x)
+            (let [[h & more] x]
+              (.append sb (str "(" (flat h)))
+              (doseq [y more] (.append sb pad) (write-x sb y (inc ind)))
+              (.append sb ")"))
+            (do (.append sb "[")
+                (doseq [[i y] (map-indexed vector x)]
+                  (when (pos? i) (.append sb pad))
+                  (write-x sb y (inc ind)))
+                (.append sb "]"))))))))
+
+(defn write-forms
+  "The forms' .ae text: in mode :lines laid out to 110 columns; in mode :full (not meant to be read, as Go forms' :full)
+  one top-level statement a line, and the map (its tokens) on the last"
+  [x]
+  (let [sb (StringBuilder.)]
+    (if (and (seq? x) (= :full (:mode (module-map x))))
+      (let [[h body & more] x]
+        (.append sb (str "(" h "\n ["))
+        (doseq [[i y] (map-indexed vector body)]
+          (when (pos? i) (.append sb "\n  "))
+          (flat-into sb y))
+        (.append sb "]")
+        (doseq [y more] (.append sb "\n ") (flat-into sb y))
+        (.append sb ")"))
+      (write-x sb x 0))
+    (.append sb "\n")
+    (str sb)))
+
+(defn read-check
+  "The written text reads back to the forms"
+  [text x]
+  (when-not (= (read-string text) x)
+    (throw (ex-info "the written forms do not read back equal" {}))))
+
+;; ---- mode :full (doc/python/SPEC.md §11; PY3) ----
+
+(defn module-map [x] (let [m (last x)] (if (map? m) m {})))
+
+(defn- pos-of [x] (when (seq? x) (let [m (last x)] (when (map? m) (:pos m)))))
+
+(defn- utf8-len ^long [^String s]
+  (let [n (count s)]
+    (loop [i 0 b 0]
+      (if (= i n) b
+          (let [c (int (.charAt s i))]
+            (cond (< c 0x80) (recur (inc i) (inc b))
+                  (< c 0x800) (recur (inc i) (+ b 2))
+                  (and (>= c 0xD800) (<= c 0xDBFF)) (recur (+ i 2) (+ b 4))
+                  :else (recur (inc i) (+ b 3))))))))
+
+(defn- key-of ^long [l c] (+ (* (long l) 10000000) (long c)))
+
+(defn token-index
+  "The tokens' starts and ends by [line UTF-8 column] (the ast's positions): {:starts {key [kind text]} :ends #{key}}"
+  [toks]
+  (loop [ts (seq (partition 2 toks)) l 1 c 0 starts (transient {}) ends (transient #{})]
+    (if (nil? ts)
+      {:starts (persistent! starts) :ends (persistent! (conj! ends (key-of l c)))}
+      (let [[kind ^String text] (first ts)
+            k0 (key-of l c)
+            [l2 c2] (if (or (str/includes? text "\n") (str/includes? text "\r"))
+                      (let [parts (str/split text #"\r\n|\r|\n" -1)]
+                        [(+ l (dec (count parts))) (utf8-len (last parts))])
+                      [l (+ c (utf8-len text))])]
+        (recur (next ts) l2 c2
+               (if (= kind :ws) starts (assoc! starts k0 [kind text]))
+               (if (= kind :ws) ends (conj! ends (key-of l2 c2))))))))
+
+(defn- opts-of [x] (let [xs (remove map? (rest x))] (apply hash-map (drop-while #(not (keyword? %)) xs))))
+
+(defn- string-text [x]
+  (let [o (opts-of x)]
+    (str (get o :prefix (if (= 'bytes (first x)) "b" "")) (get o :quote "\"") (second x) (get o :quote "\""))))
+
+(defn weave-check
+  "Mode :full's forms against their tokens: every :pos begins and ends at a token's edge, and the leaves' spellings
+  are their tokens' texts (a name, a number, a string token, an f-string's start); returns the counts"
+  [x]
+  (let [{:keys [starts ends]} (token-index (:tokens (module-map x)))
+        n (atom 0) leaves (atom 0) nfkc (atom 0)
+        fail (fn [msg] (throw (ex-info (str "weave: " msg) {})))
+        tok (fn [p] (get starts (key-of (nth p 0) (nth p 1))))
+        leaf (fn [p kind text]
+               (swap! leaves inc)
+               (let [[k t] (tok p)]
+                 (when-not (= k kind) (fail (str "at " p " the token is " k " " (pr-str t) ", not " kind " " (pr-str text))))
+                 (when-not (= t text)
+                   (if (and (= kind :name) (not (re-matches #"[\x00-\x7f]*" t)))
+                     (swap! nfkc inc)
+                     (fail (str "at " p " the token is " (pr-str t) ", the form's " (pr-str text)))))))]
+    (letfn [(walk [y]
+              (cond
+                (seq? y)
+                (do (when-let [p (pos-of y)]
+                      (swap! n inc)
+                      (when-not (tok p) (fail (str (first y) " at " p ": no token begins there")))
+                      (when-not (contains? ends (key-of (nth p 2) (nth p 3))) (fail (str (first y) " at " p ": no token ends there")))
+                      (case (first y)
+                        name (leaf p :name (let [v (second y)] (if (string? v) v (str v))))
+                        (int float imag) (leaf p :number (second y))
+                        (str bytes) (leaf p :string (string-text y))
+                        (joined-str template-str)
+                        (let [o (opts-of y)]
+                          (leaf p (if (= 'joined-str (first y)) :fstring-start :tstring-start)
+                                (str (get o :prefix (if (= 'joined-str (first y)) "f" "t")) (get o :quote "\""))))
+                        const (leaf p (if (= '... (second y)) :op :name) (str (second y)))
+                        arg (leaf p :name (let [v (second y)] (if (string? v) v (str v))))
+                        alias (let [v (str (second y))] (leaf p (if (= v "*") :op :name) (first (str/split v #"\."))))
+                        nil))
+                    (doseq [c (rest y)] (walk c)))
+                (vector? y) (doseq [c y] (walk c))
+                (map? y) (doseq [[k v] y :when (not= k :tokens)] (walk v))
+                :else nil))]
+      (walk x))
+    {:nodes @n :leaves @leaves :nfkc @nfkc}))
+
+(defn- plain-decimal? [s] (boolean (re-matches #"0|[1-9][0-9]*" s)))
+
+(defn full->lines
+  "Mode :full's forms as mode :lines writes them: no :pos, no :tokens, :encoding, :bom, and the short spellings
+  where :lines uses them (§1.4)"
+  [x]
+  (letfn [(strip [y]
+            (cond
+              (seq? y)
+              (let [ys (map strip (rest y))
+                    ys (if (and (seq ys) (map? (last ys)))
+                         (let [m (dissoc (last ys) :pos :tokens :encoding :bom)
+                               m (if (contains? m :mode) (assoc m :mode :lines) m)]
+                           (if (empty? m) (butlast ys) (concat (butlast ys) [m])))
+                         ys)
+                    y2 (apply list (first y) ys)
+                    [h a] y2
+                    plain? (= 2 (count y2))]
+                (cond
+                  (and plain? (= h 'name) (symbol? a)) a
+                  (and plain? (= h 'const)) a
+                  (and plain? (= h 'int) (plain-decimal? a)) (read-string a)
+                  (and plain? (= h 'str) (not (str/includes? a "\\"))) a
+                  (and plain? ('#{alias arg} h) (symbol? a)) a
+                  :else y2))
+              (vector? y) (mapv strip y)
+              (map? y) (into {} (map (fn [[k v]] [k (strip v)]) y))
+              :else y))]
+    (strip x)))
+
+(defn full-text
+  "Mode :full's text: its tokens' texts, concatenated"
+  [x]
+  (let [toks (:tokens (module-map x))
+        sb (StringBuilder.)]
+    (when-not (vector? toks) (throw (ex-info "not forms in mode :full (no :tokens)" {})))
+    (doseq [[_ t] (partition 2 toks)] (.append sb ^String t))
+    (str sb)))
+
+(defn full-bytes
+  "Mode :full's file: its text in its encoding (UTF-8 unless :encoding), after a UTF-8 BOM when :bom"
+  [x]
+  (let [m (module-map x)
+        enc (get m :encoding "utf-8")
+        b (try (.getBytes ^String (full-text x) ^String enc)
+               (catch Throwable _ (throw (ex-info (str "the runtime has no charset " enc) {:class :charset}))))]
+    (if (:bom m)
+      (let [out (java.io.ByteArrayOutputStream.)]
+        (.write out (byte-array [(unchecked-byte 0xEF) (unchecked-byte 0xBB) (unchecked-byte 0xBF)]))
+        (.write out ^bytes b)
+        (.toByteArray out))
+      b)))

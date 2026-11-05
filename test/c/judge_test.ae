@@ -13,6 +13,8 @@
             [arbace.repr.c.parse :as cparse]
             [arbace.c.check :as chk]
             [arbace.repr.c.host :as host]
+            [arbace.repr.c.layout :as layout]
+            [arbace.repr.c.rtcheck :as rt]
             [arbace.string :as str]))
 
 (def ^:private judge-dir (str (System/getProperty "user.dir") "/test/c/judge"))
@@ -237,6 +239,23 @@
     (is (empty? (:lines r)))
     (is (= [:pass] (dg/verdict d r)))))
 
+(deftest float128-compared-exactly
+  ;; review 110's finding 2: _Float128 and _Float64x constants keep their exact value; a comparison in any type wider than double
+  ;; compares exactly (0.1L != (_Float128)0.1 on x86-64), integers rounded to the type's significand, the q suffix is _Float128
+  (let [d (dg/analyze (slurp (str judge-dir "/constexpr-float128-compare.c")))
+        r (read-one "constexpr-float128-compare.c" :compile ["-std=gnu23"])]
+    (is (not (:unsupported d)))
+    (is (empty? (:lines r)))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest constexpr-float128-representable
+  ;; review 110's finding 2: binary128's 0.1 is not a double's nor a long double's value; 2^120 + 1 is not a _Float128's
+  (let [d (dg/analyze (slurp (str judge-dir "/constexpr-float128.c")))
+        r (read-one "constexpr-float128.c" :compile ["-std=c23" "-pedantic-errors"])]
+    (is (not (:unsupported d)))
+    (is (= [5 7 11 13 14 15] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))))
+
 (deftest float16-with-bf16-is-float16
   ;; review 057's finding 4: usual arithmetic conversions of _Float16 and __bf16
   (let [d (dg/analyze (slurp (str judge-dir "/generic-float16-bf16.c")))
@@ -283,6 +302,19 @@
     (is (= [8 9 10] (vec (keys (:lines r)))))
     (is (= [:pass] (dg/verdict d r)))))
 
+;; queue 154: the builtins of the :missing-builtin class folded by the checker as gcc 15.2 folds them (gcc accepts every
+;; _Static_assert of test/c/judge/builtin-fold.c but the seven of the wrong value, lines 36-42, one a family; the checker
+;; accepts a _Static_assert it cannot fold, so the wrong values are the test)
+
+(deftest missing-builtins-fold
+  ;; the bit builtins (narrow and wide _BitInt), <stdbit.h>'s, the overflow predicates over a _BitInt result,
+  ;; the float and long double classification spellings, __atomic_always_lock_free, __builtin_assoc_barrier in an enumerator
+  (let [d (dg/analyze (slurp (str judge-dir "/builtin-fold.c")))
+        r (read-one "builtin-fold.c" :compile)]
+    (is (not (:unsupported d)))
+    (is (= [36 37 38 39 40 41 42] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))))
+
 ;; review 027, finding 3: --judge --record after a subset's run refuses, in the three judges
 
 (defn- sh-status
@@ -295,6 +327,40 @@
     (.redirectErrorStream pb true)
     (.redirectOutput pb log)
     (let [st (.waitFor (.start pb))] (.delete log) st)))
+
+;; queue 164: _BitInt wider than 64 bits (and __int128) where the builder refused or built an integer node: wide
+;; bit-fields, postfix ++/-- of a wide object, a wide statement expression, a wide switch; the program checks itself
+;; against gcc 15.2's values (status 0), run by ci's back end (bin/ci run: the builder and tools/cirun)
+
+(deftest wide-bitint-run
+  (is (= 0 (sh-status {} "bin/ci" "run" "test/c/judge/bitint-wide-run.c"))))
+
+;; queue 178 (CX8's finding 1, fixed by queue 173's place of a compound literal): the address of a scalar compound literal,
+;; automatic and static, is its object's (memcpy(&x, &(unsigned){7u}, 4) faulted at 0x7); the program checks itself
+
+(deftest complit-scalar-address-run
+  (is (= 0 (sh-status {} "bin/ci" "run" "test/c/judge/complit-scalar-addr-run.c"))))
+
+;; queue 178 (CX8's finding 2): a conditional whose arms are structures or unions (6.5.16), which the builder refused ("a
+;; conversion from struct pt to struct pt"): objects, calls (only the chosen one evaluated), compound literals, a member of
+;; the result; the program checks itself
+
+(deftest struct-conditional-run
+  (is (= 0 (sh-status {} "bin/ci" "run" "test/c/judge/struct-conditional-run.c"))))
+
+;; queue 178 (CX8's finding 3): <math.h>'s functions in __builtin_ spellings cc's Builtin does not declare (an undeclared
+;; builtin's int result: __builtin_log2(2.75) was 0, __builtin_exp2f an undefined function), every prototype shape and
+;; spelling with no header; the program checks itself
+
+(deftest math-builtins-run
+  (is (= 0 (sh-status {} "bin/ci" "run" "test/c/judge/math-builtins-run.c"))))
+
+;; queue 178 (CX8's finding 4): musl's sources that include a table inside a declaration (strerror.c, iswalpha.c, iswpunct.c,
+;; wcwidth.c, iconv.c), refused as :split-declaration by repr/c, read for ci's libc since (convert/*include-inside*, bound by
+;; arbace.c.musl/read-one); the program checks itself
+
+(deftest musl-table-include-run
+  (is (= 0 (sh-status {} "bin/ci" "run" "test/c/judge/musl-table-include-run.c"))))
 
 (declare sh-out-env)
 
@@ -706,6 +772,62 @@
   (is (= [["i/lm.h" false] ["i/lmc.h" true]] (chg-enters "m-lm.c")))
   (is (= [:ok 1] (chg-errs "m-lm.c"))))
 
+;; queue 157 (review 130's finding 4): a header entered more than once is judged entry by entry, each by its own status, its forms in the
+;; unit of the main file's #include it came through. i/tw.h is unguarded, with a pedwarn (a _Generic association of incomplete type in a
+;; _Static_assert, which may repeat); sy/tws.h includes it. gcc 15.2 (aarch64's, -std=c23 -pedantic-errors -fsyntax-only -I i -isystem
+;; sy) gives 1 error each, the user entry's
+(defn- chg-units [main]
+  (let [h (host/load-host "test/c/host")
+        fc (host/file-config ["-std=c23" "-I" "i" "-isystem" "sy"] "gnu23")
+        rd (rc/read-c (host/config h fc (str judge-dir "/sysx/chg")) fc main false)]
+    (vec (sort (map (fn [u] [(:path u) (:form-sys u)]) (vals (:units rd)))))))
+
+(deftest header-entered-twice-by-its-entries
+  ;; system first (through sy/tws.h: -E `# 1 "i/tw.h" 1 3 4`), then from the main file (`# 1 "i/tw.h" 1`): before, both entries'
+  ;; forms were in tws.h's unit, judged by the first entry's status (0)
+  (is (= [:ok 1] (chg-errs "m-tw.c")))
+  (is (= [["i/tw.h" [false false false]] ["sy/tws.h" [true true true]]] (chg-units "m-tw.c")))
+  ;; the other order: before, both in tw.h's unit, a user header's (2); the two units' forms are the same, judged otherwise: two units
+  (is (= [:ok 1] (chg-errs "m-tw2.c")))
+  (is (= [["i/tw.h" [false false false]] ["sy/tws.h" [true true true]]] (chg-units "m-tw2.c")))
+  ;; i/tp.h has `#pragma GCC system_header` under #ifdef TP_SYS, which the main file defines between its two includes: the first
+  ;; entry is a user header's, the second a system header's after the pragma (gcc 1; before: the pragma's record counted for both, 0)
+  (is (= [:ok 1] (chg-errs "m-tp.c")))
+  (is (= [["i/tp.h" [false false false]] ["i/tp.h" [true true true]]] (chg-units "m-tp.c")))
+  ;; within one unit: i/twn.h includes <tw.h>, then has the pragma, then includes it again (-E: `# 1 "i/tw.h" 1`, then `1 3`): gcc 1
+  ;; (before: both entries judged by the first's status, 2)
+  (is (= [:ok 1] (chg-errs "m-twn.c")))
+  (is (= [["i/twn.h" [false false false true true true]]] (chg-units "m-twn.c")))
+  ;; the main file includes it twice (m-tw3.c): two units, each checked at its #include (gcc 2; before: both entries' forms in the first
+  ;; unit, 2; the units of the same forms one unit checked once would give 1)
+  (is (= [:ok 2] (chg-errs "m-tw3.c")))
+  (is (= [["i/tw.h" [false false false]] ["i/tw.h" [false false false]]] (chg-units "m-tw3.c"))))
+
+;; queue 157 (review 130's finding 5): a unit read back from its .ae (arbace.c.musl's cache: load-forms) has no :form-sys and is judged
+;; by the old rule (CS214, review 079's finding 3): a system header by the directory of its :path, which load-forms keeps from the
+;; c/header form (before: no :path, every such unit a user header's), and by a `#pragma GCC system_header` line anywhere in its file
+(defn- reread-errs [dir main & opts]
+  (let [h (host/load-host "test/c/host")
+        base (str judge-dir "/sysx" (when dir (str "/" dir)))
+        fc (host/file-config (vec (concat ["-std=c23" "-pedantic-errors"] opts)) "gnu23")
+        rd (rc/read-c (host/config h fc base) fc main false)
+        fr (str (System/getProperty "user.dir") "/.tmp/judge-reread/" (or dir "top") "-" main)]
+    (doseq [[p t] (rc/unit-texts rd main)]
+      (let [f (java.io.File. (str fr "/" p))] (.mkdirs (.getParentFile f)) (spit f t)))
+    (spit (str fr "/" main ".units") (pr-str (vec (map str (keys (:units rd))))))
+    (let [back ((requiring-resolve 'arbace.c.musl/load-forms) fr main)
+          r (chk/check-unit (assoc rd :forms (:forms back) :units (:units back)) (keyword (:std fc)) (annot/builtin-forms h fc)
+                            :pedantic (:pedantic fc) :ext-lines (:ext-lines rd) :sys-dirs (host/sys-dirs h fc) :base (:base rd))]
+      [(every? (comp nil? :form-sys) (vals (:units back))) (count (:errors r))])))
+
+(deftest reread-unit-by-the-old-rule
+  ;; sy/ph.h found through -isystem sy: gcc 0 (before: 1), through -I sy: gcc 1
+  (is (= [true 0] (reread-errs nil "m-ph.c" "-isystem" "sy")))
+  (is (= [true 1] (reread-errs nil "m-ph.c" "-I" "sy")))
+  ;; i/p1.h's pedwarn before its pragma: gcc 1, read from C 1 (pragma-from-its-place-on), read back 0: the old rule's pragma line
+  ;; silences the whole file (before: 2, the pragma not seen with no :path)
+  (is (= [true 0] (reread-errs "chg" "m-p1.c" "-I" "i" "-isystem" "sy"))))
+
 (deftest gcc-reread-without-status
   ;; review 079's finding 5: a kept gcc output with no status (an interrupted run) is a difference, not an exception
   (let [work (str (System/getProperty "user.dir") "/.tmp/judge-gcc-status")
@@ -889,6 +1011,26 @@
     ;; CS237 (a): _Atomic, which (atomic T) cannot tell from the specifier, comes through the converter's mark
     (is (re-find #"(?m)^_Atomic int bool;" txt))
     (is (re-find #"const _Atomic int bool;" txt))))
+
+(deftest bad-specs-print-the-words
+  ;; queue 168 (CS221 (a) with CS232 (a), the user, 2026-11-03): a c/var, c/declare, c/typedef, member, parameter or definition
+  ;; with conflicting specifiers prints its words as written, _BitInt with its width (gcc-bitint's bitint-1.c: long _BitInt(42) h;),
+  ;; so the reread keeps :c/bad-specs and its forms are the original's (the round trip's level 1); before: _BitInt(42) h;
+  (let [h (host/load-host "test/c/host")
+        fc (host/file-config ["-std=c23"] "gnu23")
+        rd (rc/read-c (host/config h fc judge-dir) fc "bad-specs-words.c" false)
+        txt (rc/print-c (:file-form rd) (:forms rd))
+        pdir (doto (java.io.File. (str (System/getProperty "user.dir") "/.tmp/judge-test-bad-specs")) (.mkdirs))
+        _ (spit (str pdir "/bad-specs-words.c") txt)
+        rd2 (rc/read-c (host/config h fc (str pdir)) fc "bad-specs-words.c" false)
+        ftext (fn [r] (str/join "\n" (map #(layout/form-str (rt/strip %)) (:forms r))))]
+    (is (nil? (:error rd)))
+    (is (nil? (:error rd2)))
+    (doseq [re [#"(?m)^long _BitInt\(42\) h;" #"(?m)^unsigned short _BitInt\(7\) \*p;" #"(?m)^unsigned short _BitInt\(7\) q;"
+                #"(?m)^const long _Bool z;" #"(?m)^typedef int _BitInt\(9\) T;" #"(?m)^long _BitInt\(8\) f\(void\);"
+                #"short _BitInt\(5\) m;" #"(?m)^void g\(long _BitInt\(6\) a\);" #"(?m)^long _BitInt\(10\);"]]
+      (is (re-find re txt) (str re)))
+    (is (= (ftext rd) (ftext rd2)))))
 
 (deftest read-error-cannot-stand-for-a-semantic-message
   ;; review 031's finding B: a read error stands for an expected line only when its text matches the line's regexes (or a family)
@@ -1129,6 +1271,21 @@
     (is (= :left (r ["c"] "c/n.c" "c/b.c")))
     (is (= :left (r ["d"] "c/a.c" "c/b.c")))))
 
+;; queue 158: a redeclaration through a union parameter, as gcc's type_lists_compatible_p allows it (torture-compile's
+;; pr34885.c and pr46866.c, reduced), and the conflicts it still leaves (transparent_union dropped by the union's mode,
+;; compute_record_mode: a first member of floating type among them); under -pedantic-errors composite_type's pedwarn
+
+(deftest transparent-union-redeclaration
+  (let [d (dg/analyze (slurp (str judge-dir "/transparent-union.c")))
+        r (read-one "transparent-union.c" :compile ["-std=gnu23"])]
+    (is (= :ok (:status r)))
+    (is (= [25 28 30 32 35 47 50 53 57] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r))))
+  (let [d (dg/analyze (slurp (str judge-dir "/transparent-union-pedantic.c")))
+        r (read-one "transparent-union-pedantic.c" :compile ["-std=gnu23" "-pedantic-errors"])]
+    (is (= [6 8 11] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))))
+
 (deftest annot-controls
   (let [w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-controls-annot")
         r (fn [ids s rf] (annot/annot-control-result w ids {:level :annot :subject s :reference rf}))]
@@ -1191,11 +1348,71 @@
         b (str w "/src")
         kf (str w "/known.edn")]
     (put-files w {"c/base.txt" b "c/files.tsv" "a.c\tequal\nk.c\tknown\ne.c\tdiffer\nz.c\tcrash\n"
-                  "src/a.c" "int a;\n" "src/k.c" "int k;\n" "src/e.c" "#embed \"f\"\n" "src/z.c" "int z;\n"
-                  "known.edn" (pr-str {:classes {:embed "e" :k "k"} :parse {:c {"k.c" {:class :k}}}})})
+                  "src/a.c" "int a;\n" "src/k.c" "int k;\n" "src/e.c" "??=define E 1\n" "src/z.c" "int z;\n"
+                  "known.edn" (pr-str {:classes {:trigraphs "t" :k "k"} :parse {:c {"k.c" {:class :k}}}})})
     (is (= 1 (rec w ["c"] kf)))
-    (is (= {"k.c" {:class :k} "e.c" {:class :embed}} (get-in (read-string (slurp kf)) [:parse :c])))
+    (is (= {"k.c" {:class :k} "e.c" {:class :trigraphs}} (get-in (read-string (slurp kf)) [:parse :c])))
     (is (not (re-find #"unclassified" (slurp kf))))))
+
+(deftest parse-record-pp-errors-only-the-preprocessors
+  ;; CS268 (a): the tree check's --record guesses :pp-errors only when the trees equal and every differing error line is
+  ;; the preprocessor's (the port's among its preprocessor's errors, cc's on a directive's line), never the parser's: such
+  ;; a file is printed, left out of the known file and counted (the run exits 3)
+  (require 'arbace.repr.c.parsecheck)
+  (let [rec (resolve 'arbace.repr.c.parsecheck/record)
+        w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-parse-record-pp")
+        b (str w "/src")
+        kf (str w "/known.edn")
+        fc (host/file-config [] "gnu23")
+        h (host/load-host "test/c/host")
+        srcs {"p.c" "#error boom\nint p;\n" "q.c" "int q = ;\n" "r.c" "#if 1\n#endif\nint r;\n" "s.c" "#if 1\n#endif\nint s;\n"
+              "o.c" "#error one\nint o = ;\n"}
+        _ (put-files w (into {} (for [[n t] srcs] [(str "src/" n) t])))
+        port (fn [n] (cparse/result-dump (cparse/parse (host/config h fc b) n)))
+        no-errors (fn [^String d] (str/join (for [l (str/split-lines d) :when (not (.startsWith ^String l "#error"))] (str l "\n"))))
+        errs (fn [^String d] (filter #(.startsWith ^String % "#error") (str/split-lines d)))]
+    ;; the port's dumps: p.c the preprocessor's #error, q.c the parser's error, r.c and s.c none; o.c both, in this order
+    (is (= ["#error\tp.c:1:2: boom"] (errs (port "p.c"))))
+    (is (re-find #"^#error\tq\.c:1:9: unexpected" (first (errs (port "q.c")))))
+    (is (empty? (errs (port "r.c"))))
+    (is (= 2 (count (errs (port "o.c")))))
+    (put-files w (merge
+                   {"c/base.txt" b "c/files.tsv" (str/join (for [n (keys srcs)] (str n "\tdiffer\n")))
+                    "c/files.edn" (pr-str (vec (for [n (keys srcs)] {:name n :read n :out (str n ".tsv") :fc fc})))
+                    "known.edn" (pr-str {:classes {:pp-errors "p"} :parse {}})}
+                   (into {} (for [n (keys srcs)] [(str "c/diff/" n ".tsv.port") (port n)]))
+                   {;; cc without the port's preprocessor's error: guessed
+                    "c/diff/p.c.tsv.cc" (no-errors (port "p.c"))
+                    ;; cc without the port's parser's error: the parser's, not guessed
+                    "c/diff/q.c.tsv.cc" (no-errors (port "q.c"))
+                    ;; cc's own error on a directive's line: guessed; on a declaration's line: not
+                    "c/diff/r.c.tsv.cc" (str (port "r.c") "#error\tr.c:1:5: cc's complaint\n")
+                    "c/diff/s.c.tsv.cc" (str (port "s.c") "#error\ts.c:3:5: cc's complaint\n")
+                    ;; cc with the parser's error alone, not the preprocessor's: the preprocessor's differs, guessed
+                    "c/diff/o.c.tsv.cc" (str (no-errors (port "o.c")) (last (errs (port "o.c"))) "\n")}))
+    (is (= 2 (rec w ["c"] kf)))
+    (is (= {"p.c" {:class :pp-errors} "r.c" {:class :pp-errors} "o.c" {:class :pp-errors}} (get-in (read-string (slurp kf)) [:parse :c])))
+    ;; o.c the other way: cc with the preprocessor's error alone, the port's parser's error the difference: not guessed
+    (put-files w {"c/diff/o.c.tsv.cc" (str (no-errors (port "o.c")) (first (errs (port "o.c"))) "\n")
+                  "known.edn" (pr-str {:classes {:pp-errors "p"} :parse {}})})
+    (is (= 3 (rec w ["c"] kf)))
+    (is (= {"p.c" {:class :pp-errors} "r.c" {:class :pp-errors}} (get-in (read-string (slurp kf)) [:parse :c])))))
+
+(deftest parse-record-no-foreign-class
+  ;; CS268 (a): the tree check's --record never takes another check's class (the token check's classify, :c23-if-true,
+  ;; :has-c-attribute, :embed): a file only those name is printed, left out and counted
+  (require 'arbace.repr.c.parsecheck)
+  (let [rec (resolve 'arbace.repr.c.parsecheck/record)
+        w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-parse-record-foreign")
+        b (str w "/src")
+        kf (str w "/known.edn")]
+    (doseq [classes [{:pp-errors "p"} {:pp-errors "p" :c23-if-true "c" :has-c-attribute "h" :embed "e"}]]
+      (put-files w {"c/base.txt" b "c/files.tsv" "i.c\tdiffer\nh.c\tdiffer\ne.c\tcrash\n"
+                    "src/i.c" "#if true\n#endif\nint i;\n" "src/h.c" "#if __has_c_attribute(nodiscard)\n#endif\n"
+                    "src/e.c" "#embed \"f\"\n"
+                    "known.edn" (pr-str {:classes classes :parse {}})})
+      (is (= 3 (rec w ["c"] kf)))
+      (is (nil? (get-in (read-string (slurp kf)) [:parse :c]))))))
 
 (deftest roundtrip-record-writes-no-placeholder
   ;; queue 122 F1: the round trip's --record keeps a file's class and leaves a failing file of no class out, never :unclassified
@@ -1233,3 +1450,41 @@
     (is (= :not-judged (r "a.c" "x.c")))
     (is (= :left (r "l.c" "b.c")))
     (is (= :left (res w ["c"] g {:subject (str b "/a.c") :reference (str b "/b.c")})))))
+
+;; queue 159: levels 1 and 2 crossed (test/c/controls.edn, :roundtrip-forms and :roundtrip-full) on the texts the run keeps for
+;; the controls' files (control/): the subject's reread forms against another file's read forms, its :full print against
+;; another file's original, differ; against its own pass (a control made to pass); a text not kept is not judged; a subject
+;; whose own row does not pass, or a corpus not in the run, leaves it.
+(deftest roundtrip-text-controls
+  (require 'arbace.repr.c.rtcheck)
+  (let [res (resolve 'arbace.repr.c.rtcheck/text-control-result)
+        w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-controls-rt-text")
+        b "benchmarksgame"
+        g {}
+        r (fn [lvl s rf] (res w [b] g {:level lvl :subject (str b "/" s) :reference (str b "/" rf)}))]
+    (put-files w {(str b "/forms.tsv") (str "a.c\tok\tequal\tequal\t\tequal\nb.c\tok\tequal\tequal\t\tequal\n"
+                                            "l.c\tok\tequal\tdiffer\t\tequal\nn.c\tok\tequal\tequal\t\tequal\n")
+                  (str b "/obj.tsv") "a.c\t0\t0\tequal\nb.c\t0\t0\tequal\nl.c\t0\t0\tequal\nn.c\t0\t0\tequal\n"
+                  (str b "/run.tsv") "a.c\t0\t0\tsame\nb.c\t0\t0\tsame\nl.c\t0\t0\tsame\nn.c\t0\t0\tsame\n"
+                  (str b "/control/a.c.read") "(c/fn main)" (str b "/control/a.c.reread") "(c/fn main)"
+                  (str b "/control/a.c.read-units") "[]" (str b "/control/a.c.reread-units") "[]"
+                  (str b "/control/a.c.orig") "int main;\n" (str b "/control/a.c.full") "int main;\n"
+                  (str b "/control/b.c.read") "(c/fn fasta)" (str b "/control/b.c.read-units") "[]"
+                  (str b "/control/b.c.orig") "void fasta;\n"
+                  (str b "/control/l.c.reread") "(c/fn main)" (str b "/control/l.c.reread-units") "[]"
+                  (str b "/control/l.c.full") "int main;\n"})
+    (doseq [lvl [:roundtrip-forms :roundtrip-full]]
+      (is (= :differs (r lvl "a.c" "b.c")))
+      (is (= :passes (r lvl "a.c" "a.c")))
+      ;; n.c passes its own row but kept nothing; a reference without kept texts
+      (is (= :not-judged (r lvl "n.c" "b.c")))
+      (is (= :not-judged (r lvl "a.c" "n.c")))
+      (is (= :left (r lvl "l.c" "a.c")))
+      (is (= :left (res w ["c"] g {:level lvl :subject (str b "/a.c") :reference (str b "/b.c")}))))
+    ;; the read's header units count at level 1, as check-file's comparison counts them
+    (put-files w {(str b "/control/b.c.read") "(c/fn main)" (str b "/control/b.c.read-units") "[\"h\"]"})
+    (is (= :differs (r :roundtrip-forms "a.c" "b.c")))
+    ;; the committed controls name both levels
+    (is (= #{:roundtrip-forms :roundtrip-full}
+           (set (filter #{:roundtrip-forms :roundtrip-full} (map :level (read-string (slurp "test/c/controls.edn")))))))
+    (is (= #{"fannkuchredux.c" "fasta-8.c"} ((resolve 'arbace.repr.c.rtcheck/control-names) "benchmarksgame")))))
