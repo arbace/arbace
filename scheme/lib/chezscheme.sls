@@ -120,7 +120,9 @@
     port-has-set-port-nonblocking!? fresh-line port-length set-port-length! port-nonblocking? set-port-nonblocking!)
   ;; SC170 (b): Chez's wider forms of eval (the environment optional), dynamic-wind (a leading critical flag), fx+ fx* fx-
   ;; (any number of arguments) and the file procedures' options ('replace, 'truncate) replace (rnrs)'s
-  (import (except (rnrs) file-options fx+ fx* fx- for-each dynamic-wind open-output-file call-with-output-file with-output-to-file)
+  (import (except (rnrs) file-options fx+ fx* fx- for-each dynamic-wind open-output-file call-with-output-file with-output-to-file
+                  string->number number->string)
+          (rename (only (rnrs) string->number number->string) (string->number r6-string->number) (number->string r6-number->string))
           (rename (only (rnrs) fx+ fx* fx- for-each dynamic-wind open-output-file call-with-output-file with-output-to-file)
                   (fx+ fx2+) (fx* fx2*) (fx- fx2-) (dynamic-wind r6-dynamic-wind) (for-each r6-for-each) (open-output-file r6-open-output-file)
                   (call-with-output-file r6-call-with-output-file) (with-output-to-file r6-with-output-to-file))
@@ -137,6 +139,11 @@
     (lambda (x)
       (syntax-case x ()
         ((_ opt ...) (for-all identifier? #'(opt ...)) #'(make-file-options '(opt ...))))))
+;; SMR4: Chez's own string->number and number->string (radix 2 to 36, #Nr, # placeholders, a point and an exponent in any radix, a precision
+  ;; with any radix) are (rnrs)'s primitives with a mark in the last place the (rnrs) ones do not take
+  (define string->number (case-lambda ((s) (r6-string->number s 10 #t)) ((s r) (r6-string->number s r #t))))
+  (define number->string
+    (case-lambda ((x) (r6-number->string x 10 #f #t)) ((x r) (r6-number->string x r #f #t)) ((x r p) (r6-number->string x r p #t))))
   (define (transcoder? x) (guard (e (#t #f)) (transcoder-codec x) #t))
   (define ienv #f)
   (define interaction-environment
