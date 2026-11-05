@@ -46,7 +46,7 @@
           ak (name (first abi))
           zst (and (zero? (:size e)) (= ak "memory"))]
       (cond-> {:size (:size e) :align (:align e) :ty t
-               :offsets (when (vector? (:fields e)) (:fields e))
+               :offsets (let [f (:fields e)] (cond (vector? f) f (and (seq? f) (= "union" (name (first f)))) (vec (repeat (second f) 0))))
                :array (let [f (:fields e)] (when (and (seq? f) (= "array" (name (first f)))) {:stride (second f) :count (nth f 2)}))
                :kind (cond zst :zst
                            (= ak "scalar") :scalar
@@ -284,7 +284,8 @@
             (case (proj-kind e)
               "deref" (pointee-type t)
               "field" (nth e 2)
-              "index" (second (ty-struct t))
+              ("index" "cindex") (second (ty-struct t))
+              "downcast" t
               (unsupported (str "projection " (first e)))))
           (:ty (nth (:locals body) (place-local p)))
           (place-projs p)))
@@ -540,6 +541,18 @@
       (= k "adt") (some (fn [a] (when (and (seq? a) (= "ty" (name (first a))) (= "ref" (ty-kind a))) (ref-align lt a))) (nth (ty-struct t) 3))
       :else nil)))
 
+(defn unsize-array-len
+  "The length N when `from` is a pointer (a reference, a raw pointer, a Box or another wrapper around one type argument) to a
+  [T; N] and `to` the same pointer to [T]; else nil."
+  [from to]
+  (let [pointee (fn [t] (case (ty-kind t)
+                          ("ref" "ptr") (pointee-type t)
+                          "adt" (let [a (first (nth (ty-struct t) 3))] (when (and (seq? a) (= "ty" (name (first a)))) a))
+                          nil))
+        pf (pointee from) pt (pointee to)]
+    (when (and pf pt (= "array" (ty-kind pf)) (= "slice" (ty-kind pt)))
+      (Long/parseLong (nth (ty-struct pf) 2)))))
+
 (defn pair-align
   "The align attribute of component `i` of a fat reference's pair: a slice reference's data pointer (its element's alignment),
   a trait object reference's vtable pointer (8); likewise for Box<[T]> and Box<dyn Trait>."
@@ -569,7 +582,9 @@
 (defn indirect?
   "A memory aggregate the Rust ABI passes and returns by pointer (larger than a pointer)."
   [l]
-  (and (= :memory (:kind l)) (> (:size l) 8)))
+  (or (and (= :memory (:kind l)) (> (:size l) 8))
+      ;; a scalar pair larger than two registers (an i128 and a bool) is returned through a pointer
+      (and (= :pair (:kind l)) (> (:size l) 16))))
 
 (defn cast-int
   "The integer type a small memory aggregate is passed and returned as (the Rust ABI: size up to a pointer's)."
@@ -580,7 +595,7 @@
   (case (:kind l)
     :zst 'void
     :scalar (symbol (:imm (:scalar l)))
-    :pair (list 'struct (symbol (:imm (first (:pair l)))) (symbol (:imm (second (:pair l)))))
+    :pair (if (indirect? l) 'void (list 'struct (symbol (:imm (first (:pair l)))) (symbol (:imm (second (:pair l))))))
     :memory (if (indirect? l) 'void (cast-int l))
     (unsupported "aggregate as a return")))
 
@@ -626,7 +641,7 @@
         locs (:locals body)
         lay (mapv #(layout lt (:ty %)) locs)
         spread (:spread-arg body)
-        mem (cond-> (non-ssa-locals body lt order-all idom-all) spread (conj spread))
+        mem (cond-> (non-ssa-locals body lt order-all idom-all) spread (conj spread) (indirect? (layout lt (:ty (first (:locals body))))) (conj 0))
         preds (reduce (fn [m b] (reduce (fn [m s] (update m s (fnil conj []) b)) m (successors (:term (nth blocks b))))) {} (range (count blocks)))
         mergeable (fn [t] (let [ss (successors t)] (when (and (= 1 (count ss)) (= 1 (count (get preds (first ss))))) (first ss))))
         allocs (into {} (:alloc-data body))
@@ -1139,9 +1154,8 @@
                                (let [v (operand! bb o)
                                      vt (second (drop-while #(not= :vtable %) r))]
                                  {:pair [v {:ty "ptr" :v (alloc-sym! vt)}]})
-                               (and (.startsWith ^String kind "PointerCoercion(Unsize") (#{"ref" "ptr"} (ty-kind (ty-of o))) (#{"ref" "ptr"} (ty-kind t))
-                                    (= "array" (ty-kind (pointee-type (ty-of o)))) (= "slice" (ty-kind (pointee-type t))))
-                               (let [v (operand! bb o) n (Long/parseLong (nth (ty-struct (pointee-type (ty-of o))) 2))]
+                               (and (.startsWith ^String kind "PointerCoercion(Unsize") (unsize-array-len (ty-of o) t))
+                               (let [v (operand! bb o) n (unsize-array-len (ty-of o) t)]
                                  {:pair [v {:ty "i64" :v n}]})
                                (= kind "PtrToPtr")
                                (let [fl (layout lt (ty-of o)) tl (layout lt t) v (operand! bb o)]
@@ -1232,8 +1246,9 @@
                        nil))
         ret-value! (fn [bb]
                      (let [ly (first lay)
-                           v (if (contains? mem 0) (load-place! bb {:ptr (get-in @st [:allocas 0]) :align (:align ly) :ly ly}) (get-in @st [:vals 0]))]
-                       (case (:kind ly)
+                           v (if (indirect? ly) nil (if (contains? mem 0) (load-place! bb {:ptr (get-in @st [:allocas 0]) :align (:align ly) :ly ly}) (get-in @st [:vals 0])))]
+                       (case (if (indirect? ly) :indirect (:kind ly))
+                         :indirect (emit! bb '(ret void))
                          :zst (emit! bb '(ret void))
                          :scalar (emit! bb (list 'ret (symbol (:ty v)) (:v v)))
                          :pair (let [ty (llvm-type ly)
@@ -1526,6 +1541,13 @@
                                            (assign! bb dest {:ty "i1" :v r}))
                                          (assign! bb dest {:ty "i1" :v 'false}))
                                        (when target (br-or-merge bb t target)))
+                                     "select_unpredictable"
+                                     (let [c (operand! bb (first args)) x (operand! bb (second args)) y (operand! bb (nth args 2))
+                                           l (layout lt (ty-of (second args))) r (fresh!)]
+                                       (when-not (= :scalar (:kind l)) (unsupported "select_unpredictable of a non-scalar"))
+                                       (emit! bb (list '= r (list 'select ['i1 (:v c)] [(symbol (:ty x)) (:v x)] [(symbol (:ty y)) (:v y)])))
+                                       (assign! bb dest {:ty (:ty x) :v r})
+                                       (when target (br-or-merge bb t target)))
                                      "arith_offset"
                                      (let [pv (operand! bb (first args)) nv (operand! bb (second args))
                                            r (fresh!)]
@@ -1578,7 +1600,9 @@
                                                 (call-symbol f callee-info))
                                      can-unwind (if (and (seq? callee-info) (map? (second callee-info))) (:can-unwind (second callee-info)) true)
                                      dl0 (let [d (nth lay (place-local dest))] (if (seq (place-projs dest)) (layout lt (place-type body dest)) d))
-                                     sret-pl (when (indirect? dl0) (place-of! bb dest))
+                                     sret-tmp (when (and (indirect? dl0) (= :pair (:kind dl0)) (empty? (place-projs dest)) (not (contains? mem (place-local dest))))
+                                                (let [tmp (scratch! (:size dl0) (:align dl0))] {:ptr tmp :align (:align dl0) :ly dl0}))
+                                     sret-pl (when (indirect? dl0) (or sret-tmp (place-of! bb dest)))
                                      argfs (vec (mapcat #(arg-forms bb %) args))
                                      argfs (if sret-pl (into [['ptr (list :sret (list 'array (:size dl0) 'i8)) (list :align (:align dl0)) (:ptr sret-pl)]] argfs) argfs)
                                      argfs (if (and (seq? callee-info) (map? (second callee-info)) (:track-caller (second callee-info)))
@@ -1600,11 +1624,14 @@
                                                 :scalar (let [r (fresh!)]
                                                           (emit! bb (list '= r instr-form))
                                                           (assign-in! rbb dest {:ty (:imm (:scalar dl)) :v r}))
-                                                :pair (let [r (fresh!) a (fresh!) c (fresh!) [sa sb] (:pair dl)]
+                                                :pair (if (indirect? dl)
+                                                        (do (emit! bb instr-form)
+                                                            (when sret-tmp (assign-in! rbb dest (load-place! rbb sret-tmp))))
+                                                        (let [r (fresh!) a (fresh!) c (fresh!) [sa sb] (:pair dl)]
                                                         (emit! bb (list '= r instr-form))
                                                         (emit! rbb (list '= a (list 'extractvalue [ret r] 0)))
                                                         (emit! rbb (list '= c (list 'extractvalue [ret r] 1)))
-                                                        (assign-in! rbb dest {:pair [{:ty (:imm sa) :v a} {:ty (:imm sb) :v c}]}))
+                                                        (assign-in! rbb dest {:pair [{:ty (:imm sa) :v a} {:ty (:imm sb) :v c}]})))
                                                 :memory (if (indirect? dl)
                                                           (emit! bb instr-form)
                                                           (let [r (fresh!) ci (cast-int dl) pl (place-of! bb dest)]
