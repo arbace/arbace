@@ -639,3 +639,141 @@ commitment to the front half (25 to 40 days): the back half is useful alone and 
 ## Decided (2026-11-05, the user)
 
 RFS1-RFS13 as recommended: RFS1 (b), rustc's code ported for the paths programs it accepts take, in tiers; MIR forms out, LLVM forms the target; Tier B first with expansion and resolution beside it; std's interface and MIR as helper data in Tier U; no lifetimes, borrowck, exhaustiveness or lints; the new trait solver if RF1's census confirms it; every generic instantiated locally; proc macros a class until RF11, then mrustc's token protocol on rsi; a clean MIR interpreter for constants; Tier S decided at RF11; rustc's front end on rsi measured as an oracle only; rustc's text ported under MIT, rust-analyzer and mrustc read as design, gccrs never; the code in arbace/rust/front and arbace/rust/back, out of gate_key. RF1-RF3 start as a trial.
+
+
+## As built: RF1-RF3 (trial, 2026-11-05)
+
+The trial the user asked for (RFS1-RFS13 decided as recommended): RF1's oracles and census, RF2's MIR forms, and a first slice of RF3
+(the code generation of the back half), one day of work on the branch `rust-rf13`. Code in `arbace/rust/front/` and
+`arbace/rust/back/` (evaluated from the checkout, out of `gate_key`, RFS13), the helper's new modes in `tools/rsdump/mirdata.rs`,
+the command `bin/rust-front` (`make rust-front-*`), samples in `test/rust/front/`, the spec `doc/rust/MIR.md`. Ports of rustc 1.99.1
+(`58cf8f9c3`, the apks `tools/rsdump/apks.sha256` pins) are recorded in `LICENSE.md` and `doc/ARBACE.md`. No gate step, no corpus
+run beyond the 80 programs of the synthetic corpus and the samples, each process under 2 GiB.
+
+### RF1: the oracles and the census
+
+`rsdump rustc` (the helper on the host's rustc 1.99.1, `bin/repr-rust helper`) gained, beside `--hir` and `--mir` (RR6):
+
+- `--mir-data FILE`: the crate's MIR bodies as forms, in the order and with the choices of `write_mir_pretty`
+  (runtime-optimized MIR, promoteds, the CTFE body of a `const fn`), with the locals' layouts (`layout_of`: size, alignment, backend
+  representation, field offsets, variants with their tags and niches, discriminants), each body's allocations (`:alloc-data`:
+  bytes, initialization, relocations, functions, statics, vtables) and its `track_caller` and spread-argument facts. Spec:
+  `doc/rust/MIR.md`.
+- `--mono-mir FILE` (the oracle of RF3's collector, resolution, symbols and layouts): the mono items rustc collects
+  (`collect_and_partition_mono_items`), each function instance's monomorphic MIR (`instance_mir` instantiated at its arguments)
+  under its symbol, every call's callee resolved (`Instance::try_resolve`: kind, v0 symbol, `can_unwind`, `track_caller`, intrinsic
+  name), drop glue symbols, unevaluated constants evaluated, function items' symbols, unsizing casts' vtables, the lang items'
+  symbols (the panic functions, the personality) and the entry wrapper's facts.
+- `--census FILE` (the enabled features, the lang items and intrinsics called, the rvalue and terminator kinds) and `--iface FILE`
+  (the crate's collected items: kind, generics, signatures and types, ADTs' variants, impls' trait references; std's interface
+  stays RR's rustdoc JSON).
+
+`bin/rust-front oracles|corpus` runs them: the synthetic corpus (67 programs), the samples (5 of `test/rust/sample/`, 3 of
+`test/rust/eval/`, `p.rs`-like programs not counted) are 80 files, **77 built** (the three left out: `constructs.rs` needs
+`#![feature(stmt_expr_attributes)]`, `edition2015.rs` is not dyn-compatible at its edition, `lowered_table.rs` is not a crate).
+Census: no program of the 77 enables a feature; the crates' own bodies (not std's generics) call 15 lang items (the iterator's
+`next`/`into_iter`, `PanicFmt`, `CloneFn`, `TryTrait*`, `RangeInclusiveNew`, `FromFn`, `SliceLen`, `Panic`), 1 intrinsic and use
+613 drops, 99 pointer coercions and 20 closures. **The new solver agrees**: `-Znext-solver=globally` gives the same MIR text on all
+77 (RFS6's condition holds for this corpus, as the survey's probe did for 73). The mono items (`-Zprint-mono-items`, 74 programs
+that build with the default flags): 11,406 in all, 9 (`trap`) to 1,664 (`collections`), median 44, 21,402 of the path components
+name `std`: **a program of this corpus is its handful of own functions plus std's generics instantiated for it**, so Tier B has
+to take std's MIR as it takes the program's. The intrinsics the monomorphic bodies still call (after MIR lowering), by calls:
+`cold_path` 583, `black_box` 233, `rotate_left` 208, `ctpop` 147, `ptr_offset_from_unsigned` 144, `assert_inhabited` 123, `ctlz` 115,
+`abort` 113, `saturating_add` 103, `arith_offset` 102, `size_of_val` 82, `copy` 77, `simd_*` (about 190), `catch_unwind` 13.
+The two judges' texts: the helper's `--mir` writes paths in full, rustc's `-Zunpretty=mir` trims them; 73 of 74 programs'
+texts agree once module prefixes are removed (the other differs in a closure's name).
+
+### RF2: MIR forms
+
+`doc/rust/MIR.md` (the spec), `arbace.rust.front.mir` (the reader of the dump and `print-dump`/`print-body`, after
+`rustc_middle/src/mir/pretty.rs`) and `bin/rust-front mir-check`: **79 of 79 programs' bodies, read from the helper's forms and
+printed back, equal the helper's `--mir` text**, byte for byte (the three header lines, every separator, `// MIR FOR CTFE`,
+promoteds, the allocations' text), the negative control (one program's bodies against another's text) differing. What the
+printer does not yet own: the text of types and of constants (rustc's renderings travel in the forms next to their structure,
+`(ty "TEXT" STRUCT)`, `(const "TEXT" T VALUE)`) and the allocations' bytes display. The phases before `runtime-optimized` (`built`,
+`promoted`, `drops-elaborated`) are not dumped as data (their queries are stolen by later passes in a `rustc_driver` run): RF10
+compares those through `-Zdump-mir`'s text.
+
+### RF3: a first slice of the back half
+
+`arbace.rust.back.codegen` (about 1,300 lines): MIR forms to LLVM forms (`arbace.repr.llvm`), after `rustc_codegen_ssa/src/mir`:
+the SSA analysis of locals (`analyze.rs`: which locals need an alloca, dominators, the order of allocation), the order and merging
+of blocks (reverse postorder, last successor first; a block with one successor that has one predecessor merges; blocks created
+when first referenced; unreached blocks as `unreachable`), operands (immediates, scalar pairs, memory aggregates by reference),
+places (fields at the layout's offsets, downcasts, derefs, indexes), the rvalues (arithmetic, checked arithmetic with
+rustc's lowering to `llvm.*.with.overflow` or `add` and `icmp ult`, shifts masked, comparisons, casts, borrows, aggregates of
+structs, tuples, arrays and enums, discriminants with direct and niche tags, vtables of unsizings, function pointers), the
+terminators (switch in all its forms, calls and `invoke`s with landing pads, the personality slot, `resume`, terminate blocks,
+nop landing pads, drops through the glue's symbol, asserts with the panic functions and `Location` constants,
+`#[track_caller]` parameters and arguments through the inlined scopes, spread `rust-call` arguments), the Rust ABI of
+scalars, pairs and small memory aggregates (cast to an integer, through a scratch alloca when under-aligned), return
+and parameter attributes, constants interned by content (strings, byte slices, vtables, locations), and the intrinsics `abort`,
+`black_box`, `cold_path` and the inhabitedness assertions. **Not taken yet**: floats, SIMD, `i128` in pairs, memory aggregates
+larger than a pointer (their copies by `memcpy`, indirect passing), `copy_nonoverlapping`, `Offset` of non-scalars, unsized places,
+virtual calls, most intrinsics, constants held in memory (`indirect`), coroutines, inline assembly.
+
+What it does **not** do: the layouts, the mono item set, the resolution of calls and drops, the symbols and the vtables'
+contents are rustc's (the helper's data); porting those is the rest of RF3 (`mono`, `layout`, `abi`, v0 names). The judge needs
+none of them to be Arbace's to be exact about the code generation.
+
+The judge (`arbace.rust.back.check`, `arbace.rust.back.coverage`, `bin/rust-front codegen-check|coverage`): rustc's `-O0
+-Zshare-generics=no -C no-prepopulate-passes` IR of the same program, read by repr/llvm, each function's forms against ours after a
+normalizer (values and blocks renamed by first occurrence, symbols by their v0 path, constants by their content, attribute groups,
+metadata and linkage dropped), and the global constants as a set; a negative control (one function's forms against another
+function's IR) must differ. `-C no-prepopulate-passes` is part of the oracle: at `-O0` LLVM still runs the always-inliner, so the
+final IR of an `#[inline(always)]` callee is inlined into its callers (the first coverage run found it).
+
+Results (`test/rust/front/coverage-2026-11-05.edn`):
+
+- the five `no_std` samples `a1`-`a5` (integers, structs, tuples, enums, arrays, overflow checks, panics; `bin/rust-front
+  codegen-check`): **every function equal**, and the programs built from our IR (`bin/rsi run --front mir`: the LLVM forms lowered by
+  rsi's lowering to C, gcc `-O0`) give the exit statuses rustc's executables give (5, 212, 41, 17, 45); `a6` (drops, unwinding) 7 of 11;
+- the corpus: **2,113 of 4,844 mono items' functions equal rustc's IR (43.6 %)** over the 80 programs, **11 programs with every
+  item equal** (the five samples, `abort`, `exit-code`, `panic-assert`, `panic-todo`, `panic-unwrap-err`, `trap`; the first coverage
+  run, after the scalar subset, was 391 of 4,526: aggregates, enums, unwinding, track_caller and the shims took it to the figure);
+- **runs**: six of those synthetic programs (`abort` 134, `exit-code` 37, `panic-assert`, `panic-todo`, `panic-unwrap-err` 101,
+  `trap` 132) built with their own unit made of our IR, linked with the host's native std as rsi's native-std leg links the oracle's
+  (`bin/rust-front run-native`, `RSI_FRONT_IR` in `bin/lib/rsi/link`), give rustc's status, stdout and stderr (thread ids
+  normalized). These print through `std::io::_print`, exit, trap and panic with a message: the first synthetic programs run from
+  Arbace's code generation. rsi's ci leg and its lowered std (`runtime-ci`, minutes and gigabytes) were not run: the day's rule.
+- what blocks the rest, by items (the refusals' ranking of the last run): memory aggregates 475, the layouts of types the helper
+  did not collect (`no layout`, 333: unsized and generic-parameter types of bodies still generic), constants in memory 330, floats
+  218, `ctpop` 100, `copy_nonoverlapping` 88, `ctlz` 55, then the intrinsics' tail; and 577 items that differ (their classes:
+  attributes on pointer parameters of non-reference types, the `i128` pair ABI, `invoke` of callees whose `can_unwind` the helper
+  answers differently, the hardware-width integer casts of `PassMode::Cast` for aggregates over 8 bytes).
+
+Findings worth keeping (the surprises of the first runs): the oracle IR needs `-C no-prepopulate-passes`; unsigned `AddWithOverflow`
+is `add` and `icmp ult res, lhs`, unsigned `SubWithOverflow` `sub` and `icmp ult lhs, rhs`, the other four use the intrinsics;
+allocas appear in the reverse of their allocation (arguments, then `_0`, then the rest) and LLVM blocks in the order they are first
+referenced; an invoke continues in its normal destination, which is where the result is stored; `#[track_caller]` is an extra
+last parameter and `get_caller_location` walks the inlined scopes (the dump carries `inlined_parent_scope`); a `rust-call`
+function's spread tuple argument is a place of its own even when zero-sized; a cleanup block is a landing pad only when
+reached from a non-cleanup block, and a cleanup block that only resumes is no pad at all.
+
+### Estimates, revisited
+
+RF1 (6-9 days planned): the modes the table names for RF3's judging are in (`mir`, `iface`, `layout` as the layouts table, the
+mono-items run, the census); `expanded`, `resolve`, `typeck` and `consts` (RF4-RF10's oracles) are not built. RF2 (3-5): done
+in under a day, the spec, reader, printer and check. RF3 (16-26 days): the first day took the code generation from nothing to 43.6 %
+of the mono items of 80 programs and to six programs running; what is left of the 16 to 26 is the remaining codegen
+(memory aggregates and `memcpy`, floats, the intrinsics' list, virtual calls, `indirect` constants, about 5 to 8 days by the
+refusal counts), then the pieces the helper still answers: layout (`rustc_abi`, about 2,500 lines), the collector and instance
+resolution with specialization, v0 symbols (the crates' disambiguator hashes), vtable and drop glue and shim MIR from data
+(about 8 to 12 days). The estimate stands; the exactness of the judge is what the day showed.
+
+### Proposed (RF-trial)
+
+- **RFP1 What next in RF3.** Options: (a) **finish the codegen on rustc's data first (memory aggregates, floats, the intrinsics,
+  virtual calls, constants in memory) to reach most of the corpus's mono items, then replace the oracle's answers one at a time (layout,
+  then the collector with resolution, then symbols), each judged against the helper's**; (b) port layout and the collector first, with
+  the codegen at today's 43 %; (c) stop at the trial. *Recommended: (a)*: every step stays judged exactly and the program runs grow
+  with it.
+- **RFP2 Running std.** Options: (a) **keep the native-std leg for RF3's runs (the unit replaced, std native) and the ci leg after the
+  lowered std exists at the checkout's key (RE3/RE4, heavy)**; (b) build the lowered std in a worktree for the trial's runs. *Recommended:
+  (a)* until the night's budget has a place for it.
+- **RFP3 Where `--front mir` ends.** Options: (a) **`bin/rsi run --front mir FILE` as built (no_std programs through the lowering and gcc;
+  `bin/rust-front run-native` for std programs through the native leg), the ci leg when RFP2's runtime exists**; (b) one command with
+  both legs now. *Recommended: (a)*.
+- **RFP4 The gate.** Options: (a) **none until the row fits GT8's budget (as rsi, RES14 (a)); `make rust-front-mir-check` and
+  `rust-front-codegen-check` are seconds and light, the corpus coverage about ten minutes**; (b) the two light checks as essential
+  steps now. *Recommended: (a)*.

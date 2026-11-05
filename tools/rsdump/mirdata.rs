@@ -41,6 +41,8 @@ pub struct W<'tcx> {
     pub tcx: TyCtxt<'tcx>,
     /// the allocations the constants of the body being written reach: id -> form (see `alloc_form`)
     pub allocs: std::cell::RefCell<std::collections::BTreeMap<String, String>>,
+    /// every type a form of the dump mentions, for the layouts table
+    pub seen: std::cell::RefCell<std::collections::BTreeMap<String, Ty<'tcx>>>,
     /// bodies of monomorphic instances: a call's callee is resolved (rustc's `Instance::try_resolve`) and its symbol given
     pub mono: bool,
 }
@@ -65,6 +67,9 @@ impl<'tcx> W<'tcx> {
 
     pub fn ty(&self, t: Ty<'tcx>) -> String {
         let text = ty::print::with_no_trimmed_paths!(format!("{t}"));
+        if self.mono {
+            self.seen.borrow_mut().entry(text.clone()).or_insert(t);
+        }
         let st = match *t.kind() {
             ty::Bool => "bool".to_string(),
             ty::Char => "char".to_string(),
@@ -410,6 +415,7 @@ impl<'tcx> W<'tcx> {
                         ty::ShimKind::Reify(..) => "reify-shim",
                         ty::ShimKind::FnPtr(..) => "fnptr-shim",
                         ty::ShimKind::ClosureOnce { .. } => "closure-once-shim",
+                        ty::ShimKind::DropGlue(_, None) => "drop-glue-empty",
                         ty::ShimKind::DropGlue(..) => "drop-glue",
                         ty::ShimKind::Clone(..) => "clone-shim",
                         _ => "shim",
@@ -713,7 +719,7 @@ pub fn census<'tcx>(tcx: TyCtxt<'tcx>) -> String {
 /// trait refs (std's interface format for RF7's judge, doc/rust/FRONTEND-SURVEY.md §3.5)
 pub fn iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
     use rustc_hir::def::DefKind;
-    let w = W { tcx, mono: false, allocs: Default::default() };
+    let w = W { tcx, mono: false, allocs: Default::default(), seen: Default::default() };
     let mut out = String::new();
     for local in tcx.iter_local_def_id() {
         let d = local.to_def_id();
@@ -785,7 +791,13 @@ pub fn layouts<'tcx>(tcx: TyCtxt<'tcx>, tys: &std::collections::BTreeMap<String,
     };
     let mut out = String::from("(mir/layouts [");
     for (text, ty) in tys {
-        let Ok(l) = tcx.layout_of(ty::TypingEnv::fully_monomorphized().as_query_input(*ty)) else { continue };
+        let l = match tcx.layout_of(ty::TypingEnv::fully_monomorphized().as_query_input(*ty)) {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = write!(out, "\n ;; no layout for {}: {:?}", text.replace('\n', " "), e);
+                continue;
+            }
+        };
         let abi = match l.backend_repr {
             BackendRepr::Scalar(s) => format!("(scalar {})", prim(s)),
             BackendRepr::ScalarPair { a, b, b_offset } => format!("(pair {} {} {})", prim(a), prim(b), b_offset.bytes()),

@@ -269,7 +269,7 @@
         full (.pow two bits)]
     (if (>= (.compareTo v half) 0) (.subtract v full) v)))
 
-(defn- as-num [^java.math.BigInteger x] (if (< (.bitLength x) 63) (long x) (bigint x)))
+(defn- as-num [^java.math.BigInteger x] (if (<= (.bitLength x) 63) (long x) (bigint x)))
 
 (defn- fold-bin
   "LLVM's IRBuilder folds an operation on constants: [type value] or nil."
@@ -285,6 +285,9 @@
           key (fn [x] (if (:signed sc) (sg x) (u x)))
           c (fn [x y] (.compareTo ^java.math.BigInteger x ^java.math.BigInteger y))]
       (case op
+        "BitAnd" [(:imm sc) (wrap (.and (u a) (u b)))]
+        "BitOr" [(:imm sc) (wrap (.or (u a) (u b)))]
+        "BitXor" [(:imm sc) (wrap (.xor (u a) (u b)))]
         "Add" [(:imm sc) (wrap (.add (big a) (big b)))]
         "Sub" [(:imm sc) (wrap (.subtract (big a) (big b)))]
         "Mul" [(:imm sc) (wrap (.multiply (big a) (big b)))]
@@ -667,9 +670,19 @@
                        masked (if (number? bv)
                                 (bit-and bv mask)
                                 (let [r (fresh!)] (emit! bb (list '= r (list 'and t bv mask))) r))
-                       r (fresh!)]
-                   (emit! bb (list '= r (list (if (#{"Shl" "ShlUnchecked"} op) 'shl (if (:signed sc) 'ashr 'lshr)) t (:v a) masked)))
-                   {:ty (:imm sc) :v r}))
+                       bits (:ibits sc)
+                       two (java.math.BigInteger/valueOf 2)
+                       M (.pow two bits)]
+                   (if (and (number? (:v a)) (number? masked))
+                     ;; the builder folds a shift of constants
+                     (let [ua (.mod (java.math.BigInteger/valueOf (long (:v a))) M)
+                           res (cond (#{"Shl" "ShlUnchecked"} op) (.mod (.shiftLeft ua (long masked)) M)
+                                     (:signed sc) (.mod (.shiftRight (let [x ua] (if (>= (.compareTo x (.pow two (dec bits))) 0) (.subtract x M) x)) (long masked)) M)
+                                     :else (.shiftRight ua (long masked)))]
+                       {:ty (:imm sc) :v (as-num (if (:signed sc) (sext-const bits res) res))})
+                     (let [r (fresh!)]
+                       (emit! bb (list '= r (list (if (#{"Shl" "ShlUnchecked"} op) 'shl (if (:signed sc) 'ashr 'lshr)) t (:v a) masked)))
+                       {:ty (:imm sc) :v r}))))
         ;; checked arithmetic: the pair (value, overflowed)
         overflow! (fn [bb op a b sc]
                     (let [t (symbol (:imm sc))
@@ -828,7 +841,7 @@
                                       el (layout lt (second (ty-struct (ty-of a))))
                                       rr (fresh!)]
                                   (when-not (= :scalar (:kind el)) (unsupported "Offset of a non-scalar pointee"))
-                                  (emit! bb (list '= rr (list 'getelementptr :inbounds (symbol (:mem (:scalar el))) ['ptr (:v pv)] [(symbol (:ty nv)) (:v nv)])))
+                                  (emit! bb (list '= rr (apply list 'getelementptr :inbounds (concat (when-not (:signed (scalar-of-op b)) [:nuw]) [(symbol (:mem (:scalar el))) ['ptr (:v pv)] [(symbol (:ty nv)) (:v nv)]]))))
                                   {:ty "ptr" :v rr})
                                 (#{"Shl" "Shr" "ShlUnchecked" "ShrUnchecked"} op) (shift! bb op (operand! bb a) (operand! bb b) sc (scalar-of-op b))
                                 (#{"AddWithOverflow" "SubWithOverflow" "MulWithOverflow"} op) (overflow! bb op (operand! bb a) (operand! bb b) sc)
@@ -871,7 +884,10 @@
                                        (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= :ptr (:prim (:scalar fl))) (= :int (:prim (:scalar tl))))
                                        (let [r (fresh!)] (emit! bb (list '= r (list 'ptrtoint 'ptr (:v v) (symbol (:imm (:scalar tl)))))) {:ty (:imm (:scalar tl)) :v r})
                                        (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= :int (:prim (:scalar fl))) (= :ptr (:prim (:scalar tl))))
-                                       (let [r (fresh!)] (emit! bb (list '= r (list 'inttoptr (symbol (:imm (:scalar fl))) (:v v) 'ptr))) {:ty "ptr" :v r})
+                                       (if (number? (:v v))
+                                         ;; a constant expression, not an instruction
+                                         {:ty "ptr" :v (list 'inttoptr (symbol (:imm (:scalar fl))) (:v v) 'ptr)}
+                                         (let [r (fresh!)] (emit! bb (list '= r (list 'inttoptr (symbol (:imm (:scalar fl))) (:v v) 'ptr))) {:ty "ptr" :v r}))
                                        :else (unsupported "Transmute between these layouts")))
                                :else (unsupported (str "cast " kind))))
                     "rawptr" (let [p (nth r 2) projs (place-projs p)]
@@ -1108,6 +1124,9 @@
                         "call" (let [[_ f args dest target unwind callee-info fn-loc scope] t
                                      ci (when (and (seq? callee-info) (map? (second callee-info))) (second callee-info))
                                      intrinsic (when (= "intrinsic" (:kind ci)) (:intrinsic ci))]
+                                 (if (= "drop-glue-empty" (:kind ci))
+                                   ;; a call of empty drop glue is a no-op: a branch to the return target
+                                   (when target (br-or-merge bb t target))
                                  (if intrinsic
                                    (case intrinsic
                                      "abort" (do (declare! gl (symbol "g" "llvm.trap") 'void [])
@@ -1161,7 +1180,7 @@
                                  (cond
                                    unw nil
                                    target (br-or-merge bb t target)
-                                   :else (emit! bb '(unreachable))))))
+                                   :else (emit! bb '(unreachable)))))))
                         (unsupported (str "terminator " (first t)))))]
     (llbb! 0)
     (doseq [l (concat (range 1 (inc (:args body))) [0] (range (inc (:args body)) (count locs)))]
