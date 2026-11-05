@@ -85,6 +85,8 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
+. "$root/test/oracle-records/oracle.bash"
+. "$root/test/oracle-records/cpp.bash"
 # the main checkout: a worktree's (.tmp/worktrees/NAME) or the clean run's clone's (.tmp/gate-clean/SHA), else this one (CX10, as C's
 # tools since queue 150)
 main_checkout=${root%%/.tmp/gate-clean/*}; main_checkout=${main_checkout%%/.tmp/worktrees/*}
@@ -158,6 +160,8 @@ one() { # one NAME STD ARGS PATH: the native steps of one file into $work/files/
   # run in a reused WORK stands for this one's, review 007's finding 5)
   local n=$1 std=$2 args=$3 p=$4 d=$work/files/$1
   rm -rf "$d"; mkdir -p "$d"
+  # ORS12 (a): the oracle's products and outcomes from the records (test/oracle-records/cpp.bash), the toolchain only when CPPI_LIVE is set
+  if ! cpr_live; then cpr_ir_or_fail "$n" "$std" "$args" "$p" "$d"; return 0; fi
   # shellcheck disable=SC2086
   ( cd "$d" && timeout 300 clang++ -x c++ -std=$std $args -O0 -S -emit-llvm "$p" -o x.ll; echo $? > ir.status ) 2>&1 | cap "$d/ir.log"
   [ "$(cat "$d/ir.status")" = 0 ] || return 0
@@ -177,10 +181,12 @@ one() { # one NAME STD ARGS PATH: the native steps of one file into $work/files/
 
 two() { # two NAME: the print's object, gcc on the lowered C and its run
   local n=$1 d=$work/files/$1
-  [ -f "$d/print.ll" ] && { ( cd "$d" && timeout 300 clang -c print.ll -o print.o; echo $? > print-obj.status ) 2>&1 | cap "$d/print-obj.log"; }
+  # the print's object (class D: the oracle compiling Arbace's own output) is judged in the oracle tier (CPPI_LIVE=1); from the records it is `skipped`
+  [ -f "$d/print.ll" ] && cpr_live && { ( cd "$d" && timeout 300 clang -c print.ll -o print.o; echo $? > print-obj.status ) 2>&1 | cap "$d/print-obj.log"; }
   # the objects compared here and dropped, with the forms' texts (the disk: a few MB a file)
   if [ -f "$d/x.o" ] && [ -f "$d/print.o" ]; then
     if cmp -s "$d/x.o" "$d/print.o"; then echo same > "$d/object"; else echo differs > "$d/object"; fi
+  elif ! cpr_live && [ -f "$d/ir.status" ] && [ "$(cat "$d/ir.status")" = 0 ]; then echo skipped > "$d/object"
   fi
   rm -f "$d/x.o" "$d/print.o" "$d/forms.ae" "$d/print.ll" "$d/lowered.c.ae" "$d/lowered.o"
   if [ -f "$d/lowered.c" ]; then
@@ -202,6 +208,8 @@ rt_ir() { # rt_ir UNIT SOURCE STD FLAGS: one runtime unit's IR (cwd the tarball'
   local u=$1 src=$2 std=$3 fl=$4 d=$rt/units/$1 shim
   rm -rf "$d"; mkdir -p "$d" # no level file of an earlier build stands for this one's
   shim=$(grep -F -x -A1 "$src" "$rt/shims.txt" | sed -n 2p || true)
+  # ORS12 (a): the unit's IR from the pack cpp-runtime-ir unless CPPI_LIVE is set
+  if ! cpr_live; then rt_ir_records "$u" "$src" "$std" "$fl" "$shim" "$d"; return 0; fi
   # the shim named relative to the tarball's root, where clang runs: the IR's ModuleID and source_filename are the path as
   # given, which no -ffile-prefix-map rewrites, so an absolute one made the IR's digest the checkout's place (CX8)
   [ -n "$shim" ] && src=$(realpath --relative-to="$gcc_root" "$root/test/cpp/runtime/shims/$shim")
@@ -223,11 +231,29 @@ rt_ir() { # rt_ir UNIT SOURCE STD FLAGS: one runtime unit's IR (cwd the tarball'
   return 0
 }
 
+rt_key() { # rt_key UNIT SRC STD FLAGS SHIM: the key of a unit's IR record (ORS4 (a)): the unit's line, its shim's bytes, the gcc tarball's pin, the recorded
+  # clang line, the headers' pin, the recipe (this function's text and rt_ir's)
+  local sh=-
+  [ -n "$5" ] && sh=$(sha256sum < "$root/test/cpp/runtime/shims/$5" | cut -c1-64)
+  { printf '%s\n%s\n%s %s %s\n%s\n%s\n%s\n%s\n' cpr-rt-1 "$1" "$2" "$3" "$4" "$sh" \
+      "$(sed -n '/^ {:gcc-15.2.0$/,/:sha256/s/^ *:sha256 "\([0-9a-f]*\)".*/\1/p' "$root/test/cpp/corpora.edn" | head -1)" "$(cpr_clang_line)" "$(cpr_headers_digest)"
+    declare -f rt_ir | sha256sum; } | sha256sum | cut -c1-64
+}
+rt_ir_records() { # rt_ir_records UNIT SRC STD FLAGS SHIM DIR
+  local pin=$root/test/cpp/records/cpp-runtime-ir.sha256 man want f n names
+  man=$(oracle_manifest "$pin")
+  want=$(awk -F'\t' -v i="$1/ir.status" '!/^#/ && $1 == i {print $2; exit}' "$man" 2>"$TMPDIR/cppi-rtir.err")
+  if [ -z "$want" ]; then echo 99 > "$6/ir.status"; echo "UNRECORDED: $1 is not in $man (bin/cppi record-ir --runtime, by hand on a host with clang)" > "$6/ir.log"; return 0; fi
+  if [ "$want" != "$(rt_key "$1" "$2" "$3" "$4" "$5")" ]; then echo 99 > "$6/ir.status"; echo "STALE: $1's key moved: record again by hand" > "$6/ir.log"; return 0; fi
+  names=$(awk -F'\t' -v i="$1/" '!/^#/ && index($1, i) == 1 { r = substr($1, length(i) + 1); if (r !~ /\//) print r }' "$man")
+  for n in $names; do f=$(oracle_get "$pin" "$1/$n") || { echo 99 > "$6/ir.status"; echo "refused: $1/$n" > "$6/ir.log"; return 0; }; cp "$f" "$6/$n"; done
+}
 rt_two() { # rt_two UNIT: the print's object against the IR's, gcc -O0 on the lowered C; the texts dropped once judged
   local d=$rt/units/$1
-  [ -f "$d/print.ll" ] && { ( cd "$d" && timeout 600 clang -c print.ll -o print.o; echo $? > print-obj.status ) 2>&1 | cap "$d/print-obj.log"; }
+  [ -f "$d/print.ll" ] && cpr_live && { ( cd "$d" && timeout 600 clang -c print.ll -o print.o; echo $? > print-obj.status ) 2>&1 | cap "$d/print-obj.log"; }
   if [ -f "$d/x.o" ] && [ -f "$d/print.o" ]; then
     if cmp -s "$d/x.o" "$d/print.o"; then echo same > "$d/object"; else echo differs > "$d/object"; fi
+  elif ! cpr_live && [ "$(cat "$d/ir.status" 2>"$TMPDIR/cppi-rt2.err")" = 0 ]; then echo skipped > "$d/object"
   fi
   rm -f "$d/x.o" "$d/print.o" "$d/forms.ae" "$d/print.ll" "$d/lowered.c.ae"
   if [ -f "$d/lowered.c" ]; then
@@ -237,7 +263,7 @@ rt_two() { # rt_two UNIT: the print's object against the IR's, gcc -O0 on the lo
   fi
   return 0
 }
-export -f rt_ir rt_two
+export -f rt_ir rt_two rt_key rt_ir_records
 
 runtime_key() { # what the lowered runtime is built from, a digest a line (review 007's finding 1): the namespaces the lowering
   # loads, the pending-flag layer, the units and their shims, the IR's pin, runtime-build's own steps, gcc's flags, the
@@ -253,7 +279,9 @@ runtime_key() { # what the lowered runtime is built from, a digest a line (revie
   printf '%s  bin/cppi:rt_ir,rt_two,runtime_build\n' "$(declare -f rt_ir rt_two runtime_build | sha256sum | cut -d' ' -f1)"
   printf '%s  GCC_FLAGS\n' "$(printf '%s' "$GCC_FLAGS" | sha256sum | cut -d' ' -f1)"
   printf '%s  gcc --version\n' "$(gcc --version | head -1 | sha256sum | cut -d' ' -f1)"
-  printf '%s  clang --version\n' "$(clang --version | head -1 | sha256sum | cut -d' ' -f1)"
+  # the recorded clang line unless CPPI_LIVE (ORS12 (a): no clang in the records' mode; the host's when live, the same text when the host is the recorded one)
+  if cpr_live; then printf '%s  clang --version\n' "$(clang --version | head -1 | sha256sum | cut -d' ' -f1)"
+  else printf '%s  clang --version\n' "$(cpr_clang_line | sha256sum | cut -d' ' -f1)"; fi
   . "$root/bin/lib/host.bash"
   exe=$(arbace_host_exe)
   printf '%s  the tools'"'"' host\n' "$(sha256sum < "$exe" | cut -d' ' -f1)"
@@ -269,6 +297,33 @@ runtime_key_check() { # runtime_key_check OUT: 0 when OUT's key is the checkout'
   rm -f "$TMPDIR/cppi-key.$$"; return 1
 }
 
+runtime_ir() { # runtime_ir: the units' IR into $rt/units (rt and jobs set): from the records, or by clang when CPPI_LIVE is set (ORS12 (a))
+  local t
+  cpr_prepare || exit 1
+  # CP101 (c): the configured headers the IR is compiled against (the host's libstdc++ 15.2.0) at their pinned digests, so a
+  # changed IR is named by its cause first (the pin is bin/repr-cpp host record's; CPPI_HEADERS_PIN names another)
+  if cpr_live; then # the sources and the host's headers are the IR's inputs: needed only when the IR is made (ORS12 (a))
+    local pin=${CPPI_HEADERS_PIN:-$root/test/cpp/host/headers.sha256}
+    if ! ( cd / && sha256sum --quiet -c "$pin" ) > "$rt/headers.check" 2>&1; then
+      echo "runtime-build: the configured headers differ from $pin (bin/repr-cpp host record after a look):" >&2
+      head -20 "$rt/headers.check" >&2; exit 1
+    fi
+    t=$(tarball_check)
+    mkdir -p "$root/.tmp/cppi/gcc"
+    tar -xJf "$t" -C "$root/.tmp/cppi/gcc" gcc-15.2.0/libstdc++-v3/src gcc-15.2.0/libstdc++-v3/libsupc++ gcc-15.2.0/libstdc++-v3/config \
+      gcc-15.2.0/libiberty/cp-demangle.c gcc-15.2.0/libiberty/cp-demangle.h gcc-15.2.0/include/demangle.h gcc-15.2.0/include/libiberty.h \
+      gcc-15.2.0/include/ansidecl.h gcc-15.2.0/libgcc/unwind-pe.h
+    # the build's generated files (test/cpp/runtime/units.edn, :generated)
+    mkdir -p "$rt/gen/bits"
+    : > "$rt/gen/bits/largefile-config.h"
+    { echo 'static const char tzdata_chars[] = R"__libstdcxx__('; cat "$gcc_root/libstdc++-v3/src/c++20/tzdata.zi"; echo ')__libstdcxx__";'; } > "$rt/gen/tzdata.zi.h"
+  fi
+  GOMEMLIMIT=1GiB arbace_tool -e "(let [u (read-string (slurp \"$root/test/cpp/runtime/units.edn\"))]
+    (spit \"$rt/units.tsv\" (apply str (for [r (:units u)] (str (apply str (interpose \"\t\" r)) \"\n\"))))
+    (spit \"$rt/shims.txt\" (apply str (for [[k v] (:shims u)] (str k \"\n\" v \"\n\")))))"
+  tr '\t\n' '\037\0' < "$rt/units.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r u s a f <<< "$1"; rt_ir "$u" "$s" "$a" "$f"' _ {}
+}
+
 runtime_build() {
   rt=$root/.tmp/cppi/runtime; local update="" jobs=${CPPI_JOBS:-4} t
   while [ $# -gt 0 ]; do case $1 in --update) update=1; shift ;; --jobs) jobs=$2; shift 2 ;; -*) echo "runtime-build: unknown option $1" >&2; exit 2 ;; *) rt=$1; shift ;; esac; done
@@ -278,28 +333,9 @@ runtime_build() {
   # the end, not one keyed to the edit and built from the old file
   runtime_key > "$rt/key.start"
   disk_ok
-  # CP101 (c): the configured headers the IR is compiled against (the host's libstdc++ 15.2.0) at their pinned digests, so a
-  # changed IR is named by its cause first (the pin is bin/repr-cpp host record's; CPPI_HEADERS_PIN names another)
-  local pin=${CPPI_HEADERS_PIN:-$root/test/cpp/host/headers.sha256}
-  if ! ( cd / && sha256sum --quiet -c "$pin" ) > "$rt/headers.check" 2>&1; then
-    echo "runtime-build: the configured headers differ from $pin (bin/repr-cpp host record after a look):" >&2
-    head -20 "$rt/headers.check" >&2; exit 1
-  fi
-  t=$(tarball_check)
-  mkdir -p "$root/.tmp/cppi/gcc"
-  tar -xJf "$t" -C "$root/.tmp/cppi/gcc" gcc-15.2.0/libstdc++-v3/src gcc-15.2.0/libstdc++-v3/libsupc++ gcc-15.2.0/libstdc++-v3/config \
-    gcc-15.2.0/libiberty/cp-demangle.c gcc-15.2.0/libiberty/cp-demangle.h gcc-15.2.0/include/demangle.h gcc-15.2.0/include/libiberty.h \
-    gcc-15.2.0/include/ansidecl.h gcc-15.2.0/libgcc/unwind-pe.h
-  # the build's generated files (test/cpp/runtime/units.edn, :generated)
-  mkdir -p "$rt/gen/bits"
-  : > "$rt/gen/bits/largefile-config.h"
-  { echo 'static const char tzdata_chars[] = R"__libstdcxx__('; cat "$gcc_root/libstdc++-v3/src/c++20/tzdata.zi"; echo ')__libstdcxx__";'; } > "$rt/gen/tzdata.zi.h"
-  GOMEMLIMIT=1GiB arbace_tool -e "(let [u (read-string (slurp \"$root/test/cpp/runtime/units.edn\"))]
-    (spit \"$rt/units.tsv\" (apply str (for [r (:units u)] (str (apply str (interpose \"\t\" r)) \"\n\"))))
-    (spit \"$rt/shims.txt\" (apply str (for [[k v] (:shims u)] (str k \"\n\" v \"\n\")))))"
   local t0 t1 t2 t3
   t0=$(date +%s)
-  tr '\t\n' '\037\0' < "$rt/units.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r u s a f <<< "$1"; rt_ir "$u" "$s" "$a" "$f"' _ {}
+  runtime_ir
   cut -f1 "$rt/units.tsv" | while read -r u; do
     if [ -f "$rt/units/$u/x.ll" ]; then printf '%s  %s\n' "$(sha256sum < "$rt/units/$u/x.ll" | cut -d' ' -f1)" "$u"; fi
   done > "$rt/ir.sha256"
@@ -423,6 +459,7 @@ lower_check() {
     LOW_LIBS="$rtdir/rt.o -Wl,--start-group $work/libltestc++.a $rtdir/liblstdc++exp.a $rtdir/liblstdc++.a -Wl,--end-group -lm -latomic"
   fi
   export LIBS LOW_LIBS
+  cpr_prepare || exit 1
   local t0 t1 t2 t3
   t0=$(date +%s)
   tr '\t\n' '\037\0' < "$work/list.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r n s a p <<< "$1"; one "$n" "$s" "$a" "$p"' _ {}
@@ -519,7 +556,76 @@ codegen_check() {
   arbace_tool -m arbace.cpp.codegen judge "$work" "$root/test/cpp/codegen/known.edn"
 }
 
+record_ir() { # record-ir [--corpus C,...] [--runtime] [--verify [--sample N]]: ORS12 (a), by hand on a host with clang++ and g++ (ORS5 (a))
+  local corpora=samples,runtime rtonly= verify= sample= jobs=${CPPI_JOBS:-4} c st pack
+  while [ $# -gt 0 ]; do case $1 in
+    --corpus) corpora=$2; shift 2 ;; --runtime) rtonly=1; shift ;; --verify) verify=1; shift ;; --sample) sample=$2; shift 2 ;;
+    --jobs) jobs=$2; shift 2 ;; *) echo "record-ir: unknown option $1" >&2; exit 2 ;; esac; done
+  command -v clang++ > "$TMPDIR/cppi-rec.err" && command -v g++ > "$TMPDIR/cppi-rec.err" || { echo "record-ir: needs clang++ and g++ (the host :cxx)" >&2; exit 2; }
+  export CPPI_LIVE=1
+  st=$root/.tmp/cppi/record-ir; rm -rf "$st"; mkdir -p "$st"
+  local cmd="bin/cppi record-ir${rtonly:+ --runtime}${rtonly:- --corpus $corpora}"
+  if [ -n "$rtonly" ]; then
+    rt=$st/rt; mkdir -p "$rt"; rt=$(cd "$rt" && pwd); export rt jobs
+    runtime_ir
+    pack=cpp-runtime-ir; mkdir -p "$st/$pack"; : > "$st/ids.tsv"
+    while IFS= read -r line; do
+      u=$(printf '%s' "$line" | cut -f1); src=$(printf '%s' "$line" | cut -f2); std=$(printf '%s' "$line" | cut -f3); fl=$(printf '%s' "$line" | cut -f4)
+      [ -f "$rt/units/$u/x.ll" ] || { echo "record-ir: $u has no IR (ir.status $(cat "$rt/units/$u/ir.status" 2>"$TMPDIR/cppi-rec.err"))" >&2; continue; }
+      local shim; shim=$(grep -F -x -A1 "$src" "$rt/shims.txt" | sed -n 2p || true)
+      local key; key=$(rt_key "$u" "$src" "$std" "$fl" "$shim")
+      mkdir -p "$st/$pack/$u"
+      for f in x.ll ir.status ir.log obj.log; do [ -f "$rt/units/$u/$f" ] && cp "$rt/units/$u/$f" "$st/$pack/$u/$f"; done
+      [ -f "$rt/units/$u/x.o" ] && sha256sum < "$rt/units/$u/x.o" | cut -c1-64 > "$st/$pack/$u/x.o.sha256"
+      for f in "$st/$pack/$u"/*; do printf '%s/%s\t%s\n' "$u" "$(basename "$f")" "$key"; done >> "$st/ids.tsv"
+    done < "$rt/units.tsv"
+    if [ -n "$verify" ]; then verify_ir_pack "$root/test/cpp/records/$pack.sha256" "$st/$pack" "$st/ids.tsv" "$sample"; return; fi
+    oracle_make "$root/test/cpp/records/$pack.sha256" "$st" "$st/ids.tsv" "$cmd" cxx; return
+  fi
+  . "$root/bin/lib/cppi/lists.bash"
+  work=$st/work; mkdir -p "$work/files"; LIBS="-lstdc++ -lm -latomic"; export work LIBS
+  : > "$st/list.tsv"
+  for c in ${corpora//,/ }; do run_list "$c" >> "$st/list.tsv" || exit 1; done
+  tr '\t\n' '\037\0' < "$st/list.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r n s a p <<< "$1"; one "$n" "$s" "$a" "$p"' _ {}
+  # what is kept of each program: the members of the header comment of test/oracle-records/cpp.bash
+  local pk id std args p key d f
+  for pack in cpp-ir-samples cpp-ir-libstdcxx cpp-ir-gxx-dg-run; do
+    mkdir -p "$st/$pack"; : > "$st/ids-$pack.tsv"
+    while IFS= read -r line; do
+      id=$(printf '%s' "$line" | cut -f1); std=$(printf '%s' "$line" | cut -f2); args=$(printf '%s' "$line" | cut -f3); p=$(printf '%s' "$line" | cut -f4)
+      [ "$(basename "$(cpr_pin "$id")" .sha256)" = "$pack" ] || continue
+      d=$work/files/$id
+      [ -f "$d/x.o" ] && { sha256sum < "$d/x.o" | cut -c1-64 > "$d/x.o.sha256"; rm -f "$d/x.o"; }
+      key=$(cpr_key "$id" "$std" "$args" "$p")
+      mkdir -p "$st/$pack/$id"
+      for f in "$d"/*; do
+        case $(basename "$f") in *.secs) continue ;; esac
+        cp "$f" "$st/$pack/$id/"; printf '%s/%s\t%s\n' "$id" "$(basename "$f")" "$key" >> "$st/ids-$pack.tsv"
+      done
+    done < "$st/list.tsv"
+    [ -s "$st/ids-$pack.tsv" ] || { rm -rf "${st:?}/$pack"; continue; }
+    if [ -n "$verify" ]; then verify_ir_pack "$root/test/cpp/records/$pack.sha256" "$st/$pack" "$st/ids-$pack.tsv" "$sample"
+    else oracle_make "$root/test/cpp/records/$pack.sha256" "$st" "$st/ids-$pack.tsv" "$cmd" cxx; fi
+  done
+}
+
+verify_ir_pack() { # PIN DIR IDS SAMPLE: the live run's members against the pack's, entries by ID (the program or unit), toolchain moved reported (ORS6 (a))
+  local pin=$1 d=$2 ids=$3 sample=$4 id n=0 bad=0 all f got want k
+  all=$(cut -f1 "$ids" | sed 's|/[^/]*$||' | LC_ALL=C sort -u)
+  [ -z "$sample" ] || all=$(echo "$all" | awk -v n="$sample" 'NR % n == 1')
+  for id in $all; do
+    n=$((n+1)); k=0
+    for f in "$d/$id"/*; do
+      want=$(oracle_get "$pin" "$id/$(basename "$f")" 2>"$TMPDIR/cppi-ver.err") || { k=1; continue; }
+      cmp -s "$f" "$want" || k=1
+    done
+    bad=$((bad+k))
+  done
+  oracle_verdict cxx "$(oracle_manifest "$pin")" "$bad" "$n"
+}
+
 case ${1:-} in
+  record-ir) shift; record_ir "$@" ;;
   lower) shift; arbace_tool -m arbace.cpp.lower lower "$@" ;;
   runtime) arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/cpp/rt/eh.c.ae" "$2" ;;
   runtime-build) shift; runtime_build "$@" ;;
