@@ -326,7 +326,7 @@
   [lt t]
   (let [k (ty-kind t)]
     (cond
-      (= k "ref") (let [pl (layout lt (pointee-type t))] (when-not (zst? pl) (:align pl)))
+      (= k "ref") (let [pl (layout lt (pointee-type t))] (when (and (not (zst? pl)) (> (:align pl) 1)) (:align pl)))
       (= k "adt") (some (fn [a] (when (and (seq? a) (= "ty" (name (first a))) (= "ref" (ty-kind a))) (ref-align lt a))) (nth (ty-struct t) 3))
       :else nil)))
 
@@ -434,11 +434,12 @@
                            (emit! bb (list '= a (list 'load (symbol (:mem sc)) ['ptr ptr] :align align)))
                            {:ty (:imm sc) :v a})))
         store-scalar! (fn [bb sc {:keys [ty v]} ptr align]
-                        (if (:bool sc)
-                          (let [z (fresh!)]
-                            (emit! bb (list '= z (list 'zext (symbol ty) v 'i8)))
-                            (emit! bb (list 'store ['i8 z] ['ptr ptr] :align align)))
-                          (emit! bb (list 'store [(symbol ty) v] ['ptr ptr] :align align))))
+                        (cond
+                          (and (:bool sc) (boolean? v)) (emit! bb (list 'store ['i8 (if v 1 0)] ['ptr ptr] :align 1))
+                          (:bool sc) (let [z (fresh!)]
+                                       (emit! bb (list '= z (list 'zext (symbol ty) v 'i8)))
+                                       (emit! bb (list 'store ['i8 z] ['ptr ptr] :align 1)))
+                          :else (emit! bb (list 'store [(symbol ty) v] ['ptr ptr] :align align))))
         load-place! (fn [bb {:keys [ptr align ly] :as pl}]
                       (case (:kind ly)
                         :memory {:ref pl}
@@ -687,6 +688,7 @@
                                    [tagv tag-ty tag-bits] (if (= :ptr (:prim tag))
                                                             (let [r (fresh!)] (emit! bb (list '= r (list 'ptrtoint 'ptr (:v tv) 'i64))) [{:ty "i64" :v r} "i64" 64])
                                                             [tv (:imm tag) (:ibits tag)])
+                                   niche-start (as-num (sext-const tag-bits niche-start))
                                    relative-max (- end start)
                                    cmp (fn [c a b] (let [r (fresh!)] (emit! bb (list '= r (list 'icmp c (symbol tag-ty) a b))) r))]
                                (when-not (zero? relative-max)
@@ -731,9 +733,27 @@
                                "Neg" (do (emit! bb (list '= x (list 'sub (symbol (:imm sc)) 0 (:v v)))) {:ty (:imm sc) :v x})
                                (unsupported (str "unop " op))))
                     "cast" (let [[_ kind o t] r]
-                             (if (= kind "IntToInt")
-                               (cast! bb o (or (:scalar (layout lt t)) (unsupported "cast to a non-scalar")) (scalar-of-op o))
-                               (unsupported (str "cast " kind))))
+                             (cond
+                               (= kind "IntToInt") (cast! bb o (or (:scalar (layout lt t)) (unsupported "cast to a non-scalar")) (scalar-of-op o))
+                               ;; a pointer cast between thin pointers changes nothing in LLVM's opaque pointers
+                               (= kind "PtrToPtr")
+                               (let [fl (layout lt (ty-of o)) tl (layout lt t) v (operand! bb o)]
+                                 (cond (and (= :scalar (:kind fl)) (= :scalar (:kind tl))) v
+                                       (and (= :pair (:kind fl)) (= :pair (:kind tl))) v
+                                       (and (= :pair (:kind fl)) (= :scalar (:kind tl))) (first (:pair v))
+                                       :else (unsupported "PtrToPtr between these layouts")))
+                               (= kind "Transmute")
+                               (let [fl (layout lt (ty-of o)) tl (layout lt t) v (operand! bb o)]
+                                 (cond (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= (:imm (:scalar fl)) (:imm (:scalar tl)))) v
+                                       (and (= :pair (:kind fl)) (= :pair (:kind tl))
+                                            (= (map :imm (take 2 (:pair fl))) (map :imm (take 2 (:pair tl))))) v
+                                       (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= :ptr (:prim (:scalar fl))) (= :int (:prim (:scalar tl))))
+                                       (let [r (fresh!)] (emit! bb (list '= r (list 'ptrtoint 'ptr (:v v) (symbol (:imm (:scalar tl)))))) {:ty (:imm (:scalar tl)) :v r})
+                                       (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= :int (:prim (:scalar fl))) (= :ptr (:prim (:scalar tl))))
+                                       (let [r (fresh!)] (emit! bb (list '= r (list 'inttoptr (symbol (:imm (:scalar fl))) (:v v) 'ptr))) {:ty "ptr" :v r})
+                                       :else (unsupported "Transmute between these layouts")))
+                               :else (unsupported (str "cast " kind))))
+                    "rawptr" (let [pl (place-of! bb (nth r 2))] {:ty "ptr" :v (:ptr pl)})
                     "ref" (let [pl (place-of! bb (nth r 2))] {:ty "ptr" :v (:ptr pl)})
                     (unsupported (str "rvalue " (first r)))))
         statement! (fn [bb s]
