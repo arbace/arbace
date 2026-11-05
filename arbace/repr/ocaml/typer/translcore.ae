@@ -126,8 +126,8 @@
                                             :arity (+ n base)}]))
    (into {} (for [n [1 2 3]] [(str "%caml_ba_dim_" n) {:t :p :name (str "Bigarray.dim_" n) :arity 1}]))
    (into {} (for [[op ar] [["load" 1] ["exchange" 2] ["cas" 3] ["fetch_add" 2]]
-                  [k extra] [["" 0] ["_field" 1]]]
-              [(str "%atomic_" op k) {:t :atomic :op op :field (= k "_field") :arity (+ ar extra)}]))
+                  [k extra] [["" 0] ["_field" 1] ["_loc" 0]]]
+              [(str "%atomic_" op k) {:t :atomic :op op :field (= k "_field") :loc (= k "_loc") :arity (+ ar extra)}]))
    {"%raise_with_backtrace" {:t :raise-bt} "%frame_pointers" {:t :frame-pointers} "%lazy_force" {:t :lazy-force}
     "%standard_library_default" {:t :p :name "sys.constant_standard_library_default" :arity 1}
     "%nativeint_of_int32" {:t :p :name "nativeint_of_int32" :arity 1} "%nativeint_to_int32" {:t :p :name "int32_of_nativeint" :arity 1}
@@ -270,8 +270,18 @@
                   [:Lprim (l/praise :reraise) [[:Lvar vexn]]]]])
     :frame-pointers (l/lconst-int 0)
     :lazy-force (inline-lazy-force (first args))
-    :atomic (let [p (if (= "load" (:op prim)) (l/prim "atomic_load") (l/pccall (str "caml_atomic_" (:op prim) "_field")))]
-              [:Lprim p (if (:field prim) args (into [(first args) (l/lconst-int 0)] (rest args)))])
+    :atomic (let [p (if (= "load" (:op prim)) (l/prim "atomic_load") (l/pccall (str "caml_atomic_" (:op prim) "_field")))
+                  a (first args)]
+              (cond
+                (:field prim) [:Lprim p args]
+                (:loc prim) (if (and (= :Lprim (a 0)) (= :makeblock (:kind (a 1))) (= 2 (count (a 2))))
+                              [:Lprim p (into (a 2) (rest args))]
+                              (let [v (ty/ident-create "atomic_arg")]
+                                [:Llet :strict "" v a
+                                 [:Lprim p (into [[:Lprim (l/pfield 0 :pointer false) [[:Lvar v]]]
+                                                  [:Lprim (l/pfield 1 :immediate false) [[:Lvar v]]]]
+                                                 (rest args))]]))
+                :else [:Lprim p (into [a (l/lconst-int 0)] (rest args))]))
     :apply [:Lapply (first args) [(second args)]]
     :revapply [:Lapply (second args) [(first args)]]
     [:Lprim (prim-of prim) args]))
@@ -438,15 +448,23 @@
           :Cstr_extension (let [lam (transl-extension-path (tag 1))]
                             (if (tag 2) lam [:Lprim (l/pmakeblock 0 false (vec (cons "" shape))) (vec (cons lam ll))]))))
       :Texp_record (transl-record (:loc e) (d 1) (d 2) (d 3))
+      :Texp_extension_constructor (transl-extension-path (d 1))
+      :Texp_atomic_loc (let [r (d 1) lbl (d 2)]
+                         [:Lprim (l/pmakeblock 0 false [(ty/value-kind (:type r)) "[int]"]) [(transl-exp r) (l/lconst-int (:pos lbl))]])
       :Texp_field (let [lbl (d 2) targ (transl-exp (d 1))]
+                    (if (:atomic lbl)
+                      [:Lprim (l/prim "atomic_load") [targ (l/lconst-int (:pos lbl))]]
                     (if (= :float (:repres lbl))
                       [:Lprim (l/prim (str "floatfield " (:pos lbl))) [targ]]
-                      [:Lprim (l/pfield (:pos lbl) (ty/maybe-pointer (:type e)) (:mut lbl)) [targ]]))
+                      [:Lprim (l/pfield (:pos lbl) (ty/maybe-pointer (:type e)) (:mut lbl)) [targ]])))
       :Texp_setfield (let [lbl (d 2) v (d 3)]
+                       (if (:atomic lbl)
+                         [:Lprim (l/prim "ignore") [[:Lprim (l/pccall "caml_atomic_exchange_field")
+                                                     [(transl-exp (d 1)) (l/lconst-int (:pos lbl)) (transl-exp v)]]]]
                        [:Lprim (if (= :float (:repres lbl))
                                  (l/prim (str "setfloatfield " (:pos lbl)))
                                  (l/psetfield (:pos lbl) (ty/maybe-pointer (:type v))))
-                        [(transl-exp (d 1)) (transl-exp v)]])
+                        [(transl-exp (d 1)) (transl-exp v)]]))
       :Texp_array (transl-array e (d 1) (false? (get d 2)))
       :Texp_ifthenelse [:Lifthenelse (transl-exp (d 1)) (transl-exp (d 2)) (if (d 3) (transl-exp (d 3)) l/lambda-unit)]
       :Texp_sequence [:Lsequence (transl-exp (d 1)) (transl-exp (d 2))]
