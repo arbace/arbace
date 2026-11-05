@@ -28,7 +28,13 @@
 #                                         written by Arbace and by Chez, equal; judged by
 #                                         test/scheme/check-known.edn (--record rewrites it and writes the read level's
 #                                         record, test/scheme/check-read-results.edn; --quick: no scans); --corpus (SM9):
-#                                         those alone (an id, a glob such as 'srfi-*', probes, scans), --record refused
+#                                         those alone (an id, a glob such as 'srfi-*', probes, scans), --record refused;
+#                                         ORS12, doc/ORACLE-RECORDS-SURVEY.md "As built: Scheme": Chez's dumps are read from the pack
+#                                         scheme-chez-dumps (test/scheme/records/; the essential subset's committed beside it),
+#                                         no Chez run, an entry whose inputs changed STALE and an unlisted one UNRECORDED (both fail);
+#                                         --live: Chez runs as before; --record-dumps [--corpus ID]...: Chez runs and the dumps are
+#                                         recorded (by hand, ORS5 (a)); --verify-dumps [--corpus ID]... [--sample N]: Chez's live dumps
+#                                         against the record (ORS6 (a): a moved Chez reported, not failed), with the crossed pair
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
@@ -94,24 +100,126 @@ dump_cmd() { "$CHEZ" --script "$root/tools/schemedump/dump.ss" "$@"; }
 sel=()
 selected() { local x; [ ${#sel[@]} -eq 0 ] && return 0; for x in "${sel[@]}"; do case $1 in $x) return 0 ;; esac; done; return 1; }
 
+# ---- Chez's dumps as records (ORS12, "As built: Scheme"): the pack scheme-chez-dumps, members dump-ID.edn (ID a corpus, probes) and
+# scan-KIND.edn, the :file paths normalized (@corpora/, @whimsical/, @probes/), keyed by the inputs' bytes and dump.ss's
+pin=$root/test/scheme/records/scheme-chez-dumps.sha256
+essential_dir=$root/test/scheme/records/essential
+essential_re='^dump-(probes|racket-r6rs|larceny-r6rs|chibi-r7rs|srfi-.*)\.edn$'
+scan_kinds="whitespace ident-initial ident-subsequent string-escaped char-hex symbol-escaped-first symbol-escaped-rest"
+. "$root/test/oracle-records/oracle.bash"
+
+# unit_key NAME OUT: the entry's key: dump.ss's digest and, for a dump, the digest of each file it reads in order (OUT/files-ID.txt,
+# OUT/probes/); for a scan, its kind
+unit_key() {
+  local n=$1 out=$2 id
+  { sha256sum < "$root/tools/schemedump/dump.ss" | cut -c1-64
+    case $n in
+      scan-*) echo "$n" ;;
+      dump-probes.edn) ls "$out"/probes/*.ss | LC_ALL=C sort | xargs sha256sum | cut -c1-64 ;;
+      dump-*.edn) id=${n#dump-}; id=${id%.edn}; xargs -a "$out/files-$id.txt" -d '\n' sha256sum | cut -c1-64 ;;
+    esac; } | sha256sum | cut -c1-64
+}
+unit_names() { # OUT: the units selected: dump-ID.edn for each corpus, dump-probes.edn, scan-KIND.edn
+  local id k
+  for id in $(check_ids); do if selected "$id"; then echo "dump-$id.edn"; fi; done
+  if selected probes; then echo dump-probes.edn; fi
+  if [ "${quick:-0}" != 1 ] && selected scans; then for k in $scan_kinds; do echo "scan-$k.edn"; done; fi
+}
+normalize() { # IN OUT OUTDIR: the dump's :file paths with their roots as placeholders
+  sed -e "s|^{:file \"$corpora/|{:file \"@corpora/|" -e "s|^{:file \"$gowhim/whimsical/|{:file \"@whimsical/|" -e "s|^{:file \"$3/probes/|{:file \"@probes/|" "$1" > "$2"
+}
+denormalize() { # IN OUT OUTDIR
+  sed -e "s|^{:file \"@corpora/|{:file \"$corpora/|" -e "s|^{:file \"@whimsical/|{:file \"$gowhim/whimsical/|" -e "s|^{:file \"@probes/|{:file \"$3/probes/|" "$1" > "$2"
+}
+live_unit() { # NAME OUT DEST: Chez's dump of the unit
+  local n=$1 out=$2 id k
+  case $n in
+    scan-*) k=${n#scan-}; k=${k%.edn}; dump_cmd --scan "$k" > "$3" ;;
+    dump-probes.edn) ls "$out"/probes/*.ss | LC_ALL=C sort | xargs "$CHEZ" --script "$root/tools/schemedump/dump.ss" > "$3" ;;
+    dump-*.edn) id=${n#dump-}; id=${id%.edn}; xargs -a "$out/files-$id.txt" -d '\n' "$CHEZ" --script "$root/tools/schemedump/dump.ss" > "$3" ;;
+  esac
+}
+# record_unit NAME OUT DEST: the recorded dump (denormalized) in DEST; 0, else prints why and 1 (UNRECORDED, STALE, refused)
+record_unit() {
+  local n=$1 out=$2 man want sha f
+  man=$(oracle_manifest "$pin")
+  want=$(awk -F'\t' -v id="$n" '!/^#/ && $1 == id {print $2; exit}' "$man" 2>"$TMPDIR/repr-scheme.err")
+  [ -n "$want" ] || { echo "UNRECORDED $n: no entry in $man (bin/repr-scheme check --record-dumps --corpus ...)"; return 1; }
+  [ "$want" = "$(unit_key "$n" "$out")" ] || { echo "STALE $n: its inputs or tools/schemedump/dump.ss changed since the record"; return 1; }
+  sha=$(awk -F'\t' -v id="$n" '!/^#/ && $1 == id {print $3; exit}' "$man")
+  if [ -f "$essential_dir/$n" ]; then
+    [ "$(sha256sum < "$essential_dir/$n" | cut -c1-64)" = "$sha" ] || { echo "REFUSED $n: $essential_dir/$n differs from the manifest's digest"; return 1; }
+    f=$essential_dir/$n
+  else f=$(oracle_get "$pin" "$n" 2>"$TMPDIR/repr-scheme.err") || { echo "UNRECORDED $n: $(head -1 "$TMPDIR/repr-scheme.err")"; return 1; }; fi
+  denormalize "$f" "$3" "$out"
+}
+
 check() {
-  local out=$root/.tmp/repr-scheme/check kind id quick=0 args=()
+  local out=$root/.tmp/repr-scheme/check n quick=0 live=0 rec=0 ver=0 sample= args=() bad=0
   while [ $# -gt 0 ]; do
-    case $1 in --quick) quick=1; shift ;; --corpus) sel+=("$2"); shift 2 ;; *) args+=("$1"); shift ;; esac
+    case $1 in --quick) quick=1; shift ;; --corpus) sel+=("$2"); shift 2 ;; --live) live=1; shift ;;
+      --record-dumps) rec=1; shift ;; --verify-dumps) ver=1; shift ;; --sample) sample=$2; shift 2 ;; *) args+=("$1"); shift ;; esac
   done
   [ ${#sel[@]} -eq 0 ] || args+=(--partial)
   rm -rf "$out"; mkdir -p "$out"
   corpus_fetch >/dev/null
   arbace_tool -m arbace.repr.scheme prepare "$out"
-  for id in $(check_ids); do
-    selected "$id" || continue
-    xargs -a "$out/files-$id.txt" -d '\n' "$CHEZ" --script "$root/tools/schemedump/dump.ss" > "$out/dump-$id.edn"
+  if [ $rec = 1 ]; then record_dumps "$out"; return $?; fi
+  if [ $ver = 1 ]; then verify_dumps "$out" "$sample"; return $?; fi
+  for n in $(unit_names "$out"); do
+    if [ $live = 1 ]; then live_unit "$n" "$out" "$out/$n"
+    elif ! record_unit "$n" "$out" "$out/$n"; then bad=1; rm -f "$out/$n"; fi
   done
-  ! selected probes || "$CHEZ" --script "$root/tools/schemedump/dump.ss" "$out"/probes/*.ss > "$out/dump-probes.edn"
-  [ $quick = 1 ] || ! selected scans || for kind in whitespace ident-initial ident-subsequent string-escaped char-hex symbol-escaped-first symbol-escaped-rest; do
-    dump_cmd --scan $kind > "$out/scan-$kind.edn"
-  done
+  [ $bad = 0 ] || { echo "bin/repr-scheme check: dumps missing from the record (--live runs Chez)"; return 1; }
   arbace_tool -m arbace.repr.scheme check-dumps ${args[@]+"${args[@]}"} "$out"
+}
+
+# record_dumps OUT: Chez's dumps of the selected units packed into scheme-chez-dumps (the members of the units not selected kept
+# from the pack in place), the essential subset's committed beside; by hand, a commit of its own naming :chez's identity
+record_dumps() {
+  local out=$1 stage=$root/.tmp/repr-scheme/records n d man; man=$(oracle_manifest "$pin")
+  rm -rf "$stage"; mkdir -p "$stage/scheme-chez-dumps"; : > "$stage/ids"
+  if [ -f "$man" ] && [ -f "$pin" ] && d=$(oracle_unpack "$pin" 2>"$TMPDIR/repr-scheme.err"); then
+    cp -a "$d/scheme-chez-dumps/." "$stage/scheme-chez-dumps/"
+    awk -F'\t' '!/^#/ && NF {print $1 "\t" $2}' "$man" > "$stage/ids"
+  fi
+  for n in $(unit_names "$out"); do
+    live_unit "$n" "$out" "$out/$n"
+    normalize "$out/$n" "$stage/scheme-chez-dumps/$n" "$out"
+    awk -F'\t' -v id="$n" '$1 != id' "$stage/ids" > "$stage/ids.new"; mv "$stage/ids.new" "$stage/ids"
+    printf '%s\t%s\n' "$n" "$(unit_key "$n" "$out")" >> "$stage/ids"
+  done
+  oracle_make "$pin" "$stage" "$stage/ids" "bin/repr-scheme check --record-dumps${sel[*]:+ --corpus ${sel[*]// / --corpus }}" chez || return 1
+  mkdir -p "$essential_dir"; find "$essential_dir" -type f -delete
+  for n in $(awk -F'\t' '!/^#/ {print $1}' "$man"); do
+    if printf '%s\n' "$n" | grep -Eq "$essential_re"; then cp "$stage/scheme-chez-dumps/$n" "$essential_dir/$n"; fi
+  done
+  echo "recorded: $(grep -vc '^#' "$man") units, the essential subset's $(ls "$essential_dir" | wc -l) committed ($(du -sk "$essential_dir" | cut -f1) KB)"
+}
+
+# verify_dumps OUT SAMPLE: Chez's live dumps of the selected units (SAMPLE: that many, evenly spread) against the record, normalized,
+# byte for byte, ORS6 (a)'s verdict, and the crossed pair (one unit's live dump against another's entry) which must differ
+verify_dumps() {
+  local out=$1 sample=$2 names=() n total i j f ndiff=0 tmp=$root/.tmp/repr-scheme/verify picked=()
+  unit_names "$out" > "$TMPDIR/repr-scheme.names"; mapfile -t names < "$TMPDIR/repr-scheme.names"; total=${#names[@]}
+  if [ -n "$sample" ] && [ "$sample" -lt "$total" ]; then
+    for ((i = 0; i < sample; i++)); do j=$(( i * total / sample )); picked+=("${names[$j]}"); done; names=("${picked[@]}")
+  fi
+  rm -rf "$tmp"; mkdir -p "$tmp"
+  for n in "${names[@]}"; do
+    live_unit "$n" "$out" "$tmp/live"; normalize "$tmp/live" "$tmp/live.n" "$out"
+    if f=$(oracle_get "$pin" "$n" 2>"$tmp/err"); then
+      if cmp -s "$tmp/live.n" "$f"; then echo "verify: $n: equal"; else echo "verify: $n: DIFFERS"; ndiff=$((ndiff + 1)); fi
+    else echo "verify: $n: $(head -1 "$tmp/err")"; ndiff=$((ndiff + 1)); fi
+  done
+  oracle_verdict chez "$(oracle_manifest "$pin")" "$ndiff" "${#names[@]}" || return 1
+  # the crossed pair: the first unit's live dump against the last unit's record must differ, else the verify judges nothing
+  if [ ${#names[@]} -ge 2 ]; then
+    live_unit "${names[0]}" "$out" "$tmp/a"; normalize "$tmp/a" "$tmp/a.n" "$out"
+    f=$(oracle_get "$pin" "${names[${#names[@]}-1]}") || return 1
+    if cmp -s "$tmp/a.n" "$f"; then echo "verify: FAILED: the crossed pair (${names[0]} against ${names[${#names[@]}-1]}'s entry) is equal: control not judged"; return 1
+    else echo "verify: the crossed pair differs (control passed)"; fi
+  fi
 }
 
 roundtrip() {

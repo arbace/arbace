@@ -137,11 +137,26 @@ oracle_host_id() {  # TOOL
         if [ -f "$c" ]; then sha256sum < "$c" | cut -c1-64; else echo "no cc1"; fi
         awk '{print $2}' "$root/test/c/host/headers.sha256" 2>"$TMPDIR/oracle-gcc.err" | while read -r h; do
           if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64 ;;
+    chez) oracle_scheme_id "${CHEZ:-chez}" --version /usr/lib/csv10.3.0/ta6le/petite.boot /usr/lib/csv10.3.0/ta6le/scheme.boot /usr/lib/csv10.3.0/ta6le/chez.boot ;;
+    chibi) oracle_scheme_id "${CHIBI:-chibi-scheme}" -V ;;
     *) echo "oracle: no identity recipe for $1" >&2; echo none ;;
   esac
 }
+oracle_scheme_id() {  # CMD VERSION-FLAG FILE...: bin/lib/gate-run.bash's gate_scheme_id (:chez, :chibi): the version line, the executable's
+  # SHA-256 through its links, the FILEs' (Chez's boot files); none when the command is not installed
+  local c=$1 v=$2 x f; shift 2
+  x=$(command -v "$c") || { echo none; return; }
+  { "$c" "$v" 2>&1 | head -1
+    sha256sum < "$(readlink -f "$x")" | cut -c1-64
+    for f in "$@"; do if [ -f "$f" ]; then sha256sum < "$f" | cut -c1-64; else echo "missing $f"; fi; done; } | sha256sum | cut -c1-64
+}
 oracle_host_version() {  # TOOL: its version line
-  case $1 in gcc) gcc --version 2>"$TMPDIR/oracle-gcc.err" | head -1 ;; *) echo unknown ;; esac
+  case $1 in
+    gcc) gcc --version 2>"$TMPDIR/oracle-gcc.err" | head -1 ;;
+    chez) "${CHEZ:-chez}" --version 2>&1 | head -1 ;;
+    chibi) "${CHIBI:-chibi-scheme}" -V 2>&1 | head -1 ;;
+    *) echo unknown ;;
+  esac
 }
 oracle_record_header() {  # PREFIX TOOL CMD
   local p=$1
