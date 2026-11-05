@@ -41,7 +41,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value phase-debug* md-str global-opts md-ops md-int-op? md-int-val alloc-bytes dl-ptr-bits canon-fps dl-index-bits)
+(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value phase-debug* md-str global-opts md-ops md-int-op? md-int-val alloc-bytes dl-ptr-bits canon-fps dl-index-bits global-init)
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
@@ -75,6 +75,7 @@
 (def ^:dynamic ^java.util.Map *gfwd* nil)    ; global name referenced before its definition -> true
 (def ^:dynamic ^java.util.Set *mdefs* nil)   ; !N defined
 (def ^:dynamic ^java.util.Set *mrefs* nil)   ; !N referenced
+(def ^:dynamic *all-forms* [])   ; the module's forms (the Verifier's module-wide lookups)
 (def ^:dynamic *distinct* #{})   ; the ids of the distinct nodes
 (def ^:dynamic *partial* false)
 (def ^:dynamic *dbg-format* nil)   ; LLParser's SeenOldDbgInfoFormat / SeenNewDbgInfoFormat (a volatile of #{:old :new})   ; the forms end at an LLParser error the reader met: no end-of-function/module checks
@@ -2909,7 +2910,16 @@
       (when-not (re-find #"^llvm\.(assume|sideeffect|pseudoprobe|dbg\.|invariant\.|lifetime\.|experimental\.noalias\.scope\.decl|objectsize|ptr\.annotation|var\.annotation)" k)
         (doseq [[u ux] (get users k)]
           (when-not (or (= u (:fty (.get *gdefs* k))) (old-form-decl? k (:fty (.get *gdefs* k))))
-            (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!" [:inst ux]))))
+            (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!" [:inst ux])))
+        ;; a global variable that takes the intrinsic's address
+        (doseq [g (reverse (filter #(and (= 'llvm/global (first %))
+                                         (let [n (volatile! false)]
+                                           (letfn [(walk [y] (cond (and (global? y) (= (global-key y) k)) (vreset! n true)
+                                                                   (or (seq? y) (vector? y)) (doseq [z y] (walk z))))]
+                                             (walk (global-init %)))
+                                           @n))
+                                   *all-forms*))]
+          (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!" [:global g])))
       (check-intrinsic-signature k (:fty (.get *gdefs* k))))
 
     (check-function-md (:md o) (= h 'llvm/declare))))
@@ -3271,6 +3281,7 @@
   at the first; the Verifier's visits go on (`visiting`), the debug info's last."
   [forms]
   (binding [*types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))
+            *all-forms* forms
             *alloca-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "A")
             *distinct* (set (keep #(when (and (= (first %) 'llvm/meta) (:distinct (apply hash-map (drop 3 %)))) (second %)) forms))
             *prog-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "P")
