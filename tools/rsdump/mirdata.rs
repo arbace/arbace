@@ -10,6 +10,10 @@ use rustc_middle::mir::*;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use std::fmt::Write;
 
+fn id_sym(id: rustc_middle::mir::interpret::AllocId) -> String {
+    format!("{id:?}")
+}
+
 pub fn q(s: &str) -> String {
     let mut o = String::from("\"");
     for c in s.chars() {
@@ -258,7 +262,7 @@ impl<'tcx> W<'tcx> {
         }
     }
 
-    fn rvalue(&self, r: &Rvalue<'tcx>) -> String {
+    fn rvalue(&self, r: &Rvalue<'tcx>, b_: &Body<'tcx>) -> String {
         match r {
             Rvalue::Use(o, rt) => format!("({} {})", if rt.no() { "use-noretag" } else { "use" }, self.operand(o)),
             Rvalue::Repeat(o, n) => format!("(repeat {} {})", self.operand(o), q(&n.to_string())),
@@ -276,7 +280,29 @@ impl<'tcx> W<'tcx> {
                 format!("(tlsref {} {})", q(m), q(&self.path(*d)))
             }
             Rvalue::RawPtr(m, p) => format!("(rawptr {} {})", q(m.ptr_str()), self.place(p)),
-            Rvalue::Cast(k, o, t) => format!("(cast {} {} {})", q(&format!("{k:?}")), self.operand(o), self.ty(*t)),
+            Rvalue::Cast(k, o, t) => {
+                // an unsizing to a trait object: the vtable of the source's pointee for the target's trait (mono bodies)
+                let mut vt = String::new();
+                if self.mono && matches!(k, CastKind::PointerCoercion(rustc_middle::ty::adjustment::PointerCoercion::Unsize, _)) {
+                    let src = o.ty(&b_.local_decls, self.tcx);
+                    let pointee = |t: Ty<'tcx>| match *t.kind() {
+                        ty::Ref(_, e, _) | ty::RawPtr(e, _) => Some(e),
+                        ty::Adt(d, a) if d.is_box() => Some(a.type_at(0)),
+                        _ => None,
+                    };
+                    if let (Some(sp), Some(tp)) = (pointee(src), pointee(*t)) {
+                        if let ty::Dynamic(dyn_ty, _) = *tp.kind() {
+                            let sp = self.tcx.erase_and_anonymize_regions(sp);
+                            if !matches!(sp.kind(), ty::Dynamic(..)) {
+                                let id = self.tcx.vtable_allocation((sp, dyn_ty.principal().map(|p| self.tcx.instantiate_bound_regions_with_erased(p))));
+                                self.note_alloc(id);
+                                vt = format!(" :vtable {}", id_sym(id));
+                            }
+                        }
+                    }
+                }
+                format!("(cast {} {} {}{})", q(&format!("{k:?}")), self.operand(o), self.ty(*t), vt)
+            }
             Rvalue::BinaryOp(op, ab) => format!("(binop {} {} {})", q(&format!("{op:?}")), self.operand(&ab.0), self.operand(&ab.1)),
             Rvalue::UnaryOp(op, a) => format!("(unop {} {})", q(&format!("{op:?}")), self.operand(a)),
             Rvalue::Discriminant(p) => format!("(discriminant {})", self.place(p)),
@@ -480,7 +506,7 @@ impl<'tcx> W<'tcx> {
         }
     }
 
-    fn statement(&self, s: &Statement<'tcx>) -> String {
+    fn statement(&self, s: &Statement<'tcx>, b_: &Body<'tcx>) -> String {
         use StatementKind::*;
         let dbg = if s.debuginfos.is_empty() {
             String::new()
@@ -488,7 +514,7 @@ impl<'tcx> W<'tcx> {
             format!(" :dbg [{}]", join(s.debuginfos.iter(), |d| q(&format!("{d:?}"))))
         };
         let body = match &s.kind {
-            Assign(b) => format!("(assign {} {})", self.place(&b.0), self.rvalue(&b.1)),
+            Assign(b) => format!("(assign {} {})", self.place(&b.0), self.rvalue(&b.1, b_)),
             FakeRead(b) => format!("(fake-read {} {})", q(&format!("{:?}", b.0)), self.place(&b.1)),
             SetDiscriminant { place, variant_index } => format!("(set-discriminant {} {})", self.place(place), variant_index.index()),
             StorageLive(l) => format!("(storage-live {})", self.local(*l)),
@@ -604,7 +630,7 @@ impl<'tcx> W<'tcx> {
                 o,
                 "{{:cleanup {} :stmts [{}] :after-dbg [{}] :term {}}}",
                 bb.is_cleanup,
-                join(bb.statements.iter(), |s| self.statement(s)),
+                join(bb.statements.iter(), |s| self.statement(s, b)),
                 join(bb.after_last_stmt_debuginfos.iter(), |d| q(&format!("{d:?}"))),
                 bb.terminator.as_ref().map(|t| self.terminator(t, b)).unwrap_or("nil".into())
             );
