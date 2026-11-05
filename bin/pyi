@@ -30,7 +30,8 @@
 #                                  verified (doc/python/PYI-SPEC.md §4), against test/python/compile-known.edn;
 #                                  --full (PY5b): the forms of mode :full, the runs' (check :compile-full); then its negative
 #                                  control (PY7, GTS81 (a)): classes.py's tree judged as errors/annotated-global.py
-#   bin/pyi run FILE.py            PY5b0: FILE read in mode :full (tools/pydump/pydump.py tree --full: its lines), compiled to
+#   bin/pyi run FILE.py            PY5b0: FILE read in mode :full (the native reader since queue 213, no CPython; PYI_READER=helper:
+#                                  tools/pydump/pydump.py tree --full, as before), compiled to
 #                                  the IR and run by pyi's runtime go/arbace/py, interpreted by goi on stage 0 (PY5a's DECISION
 #                                  (a)); the program's stdout, stderr and exit status
 #   bin/pyi run FILE.py ARGS...    PY5e: sys.argv [FILE ARGS...], sys.path [FILE's directory, the pinned tarball's Lib];
@@ -129,7 +130,8 @@
 #                                  no Go build), as the build's first pass compiles an embedded namespace; ends "N namespaces:
 #                                  N compiled, 0 failed", each failure "c2j-check: not compiled: SOURCE MESSAGE"; then its
 #                                  negative control, test/python/c2j/pyi/c2j_control.ae, which must fail with its message
-# Environment: REPR_PYTHON_SRC as for bin/repr-python (the tarball's source).
+# Environment: REPR_PYTHON_SRC as for bin/repr-python (the tarball's source). python3 (the oracle) is looked for only by
+# the verbs that run it (queue 213): run, python, repl, aot, check --aot --no-pyi and c2j-check need none.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
@@ -159,6 +161,10 @@ arbace_exe() {
   if [ -x "$main/target/seed/$arch/arbace" ]; then echo "$main/target/seed/$arch/arbace"; return; fi
   die "no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)"
 }
+# the oracle, CPython (queue 213): looked for only when a verb runs it (the records, the native read and the AOT need none;
+# doc/ORACLE-RECORDS-SURVEY.md, ORS14 (a)); a call through env, timeout or a list (smoke_run, run_one) checks first
+need_python() { type -P python3 >/dev/null || die "no python3 (the oracle, CPython 3.14.10): ${1:-this verb} runs it (doc/ALPINE.md)"; }
+python3() { need_python; command python3 "$@"; }
 py() { local s=$1; shift; python3 -I -S -B "$root/tools/pydump/$s" "$@"; }
 pyall() { python3 -I -S -B "$root/tools/pyi/libtest_all.py" "$@"; }
 
@@ -467,14 +473,18 @@ cmd_run() {
   [ -f "$f" ] || die "no file $1"
   name=$(basename "$f")
   d=$(mktemp -d "$WORK/run.XXXXXX")
-  echo "$name" > "$d/list"
-  py pydump.py tree --full --base "$(dirname "$f")" --list "$d/list" --out "$d/dumps" --tsv "$d/tsv" >/dev/null
+  local -a dump=()
+  if [ "${PYI_READER:-native}" = helper ]; then
+    echo "$name" > "$d/list"
+    py pydump.py tree --full --base "$(dirname "$f")" --list "$d/list" --out "$d/dumps" --tsv "$d/tsv" >/dev/null
+    dump=(--dump "$d/dumps/$name.ae")
+  fi
   local rc=0
   shift
   pyi_env
   # in the caller's directory, as python3 runs a program (PY6e's REQUEST 5: lib-test's TESTFN files were made in the
   # checkout's root)
-  (cd "$caller_pwd" && pa_arbace run --dump "$d/dumps/$name.ae" --file "$f" --lib "$(stdlib_lib)" ${site_args[@]+"${site_args[@]}"} --argv0 "$argv0" -- "$@") || rc=$?
+  (cd "$caller_pwd" && pa_arbace run ${dump[@]+"${dump[@]}"} --file "$f" --lib "$(stdlib_lib)" ${site_args[@]+"${site_args[@]}"} --argv0 "$argv0" -- "$@") || rc=$?
   rm -rf "$d"
   return $rc
 }
@@ -516,7 +526,7 @@ cmd_python() {
        # runpy's _run_module_as_main needs the loader's get_code, which pyi's loader has not (PY6b): the module's
        # source found by its spec and run as __main__
        { printf 'import sys as __pyi_sys; __pyi_sys.path[0] = ""; __pyi_mod = %s\n' \
-           "$(python3 -I -c 'import sys; print(repr(sys.argv[1]))' "$mod")"
+           "'${mod//[\\\']/}'"
          cat <<'PYI_M'
 def __pyi_main(name):
     import importlib.util, sys, types
@@ -543,8 +553,12 @@ PYI_M
   local name dir rc=0
   src=$(cd "$(dirname "$src")" && pwd)/$(basename "$src")
   name=$(basename "$src"); dir=$(dirname "$src")
-  echo "$name" > "$d/list"
-  py pydump.py tree --full --base "$dir" --list "$d/list" --out "$d/dumps" --tsv "$d/tsv" >/dev/null
+  local -a dump=()
+  if [ "${PYI_READER:-native}" = helper ]; then
+    echo "$name" > "$d/list"
+    py pydump.py tree --full --base "$dir" --list "$d/list" --out "$d/dumps" --tsv "$d/tsv" >/dev/null
+    dump=(--dump "$d/dumps/$name.ae")
+  fi
   pyi_env
   # the interpreter exec'd in this process, so the pid the caller holds is the interpreter's: a test's kill of its child
   # (subprocess's timeout, Popen.kill) ends the run. Run as a child, the interpreter outlived the kill with parent 1
@@ -554,7 +568,7 @@ PYI_M
   echo $$ > "$d/pid"
   cd "$caller_pwd"
   ARBACE_PATH="$root:$root/x509roots" GOMEMLIMIT=${PYI_GOMEMLIMIT:-3GiB} GOMAXPROCS=${PYI_THREADS:-4} \
-    exec "$(arbace_exe)" -m arbace.python run --dump "$d/dumps/$name.ae" --file "$src" --lib "$lib" ${site_args[@]+"${site_args[@]}"} --argv0 "$argv0" -- "$@"
+    exec "$(arbace_exe)" -m arbace.python run ${dump[@]+"${dump[@]}"} --file "$src" --lib "$lib" ${site_args[@]+"${site_args[@]}"} --argv0 "$argv0" -- "$@"
 }
 
 # in_group CMD...: CMD in a session and process group of its own (setsid), waited for, then the whole group killed: a
@@ -1302,7 +1316,6 @@ A
   echo "c2j-check: ok ($n namespaces, the negative control refused)"
 }
 
-command -v python3 >/dev/null || die "no python3 (the oracle)"
 # ---- wheels (queue 205; survey "As built: 205", PYS23-PYS25 (a)) ----
 # the pins test/python/wheels.edn; the wheels fetched once into WHEELS_CACHE/wheels (the one network step), the site
 # WHEELS_CACHE/site-KEY (lib/, bin/) built from the cache alone by arbace.python.wheels (no pip, no Python)
