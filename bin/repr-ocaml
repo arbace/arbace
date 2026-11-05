@@ -71,6 +71,24 @@ SRC_DIR="$root/.tmp/repr-ocaml/src"
 TOP="$root/.tmp/repr-ocaml/ocaml-5.5.0"
 CORPORA="$root/test/ocaml/corpora.edn"
 
+# ORS12 (doc/ORACLE-RECORDS-SURVEY.md, "As built: OCaml"): the originals' dumps (class B: the parse dump and the layout dump of every file of a
+# corpus, a pack ocaml-dumps-CORPUS each, test/ocaml/records/) are read from the packs unless REPR_OCAML_LIVE=1 (or `roundtrip --oracle`), which
+# runs ocdump as before. The round trip's class D parts (ocdump's parse of Arbace's print, ocamlc -c of the print, the .cmi level) need the
+# toolchain and are the oracle tier's (`roundtrip --oracle`); in the records mode the tree level's redump and compare and the .cmi level are
+# not run (said), the text level (mode :full printed back byte for byte) and the print are
+. "$root/bin/lib/oi/records.bash"
+ORR_DIR=$root/test/ocaml/records
+orr_live() { [ -n "${REPR_OCAML_LIVE:-}" ]; }
+# orr_get PACK MEMBER KIND SRC OUT: the dump of SRC (KIND parse|tokens) into OUT from PACK's MEMBER; a record that is not usable is named in
+# $ORR_MISS (UNRECORDED, STALE, REFUSED), never an `(ocaml/error` that a known reject could hide behind
+orr_get() {
+  local pack=$1 mem=$2 kind=$3 src=$4 out=$5 key f
+  key=$({ echo "dump-1 $kind"; oir_helper_key; sha256sum < "$src" | cut -c1-64; } | sha256sum | cut -c1-64)
+  if f=$(oir_member "$pack" "$mem" "$key" 2> "$out.err"); then cp "$f" "$out"; rm -f "$out.err"
+  else echo "$(cat "$out.err")" >> "${ORR_MISS:-$TMPDIR/orr-miss.txt}"; : > "$out"; rm -f "$out.err"; fi
+}
+export -f orr_get orr_live
+
 # stage 0 reads the data: ARBACE_HOST_EXE, else the checkout's stage 0, else the main checkout's
 arbace_exe() {
   if [ -n "${ARBACE_HOST_EXE:-}" ]; then echo "$ARBACE_HOST_EXE"; return; fi
@@ -150,9 +168,10 @@ cmd_ocdump_build() {
   echo "ocdump: built $OCD (OCaml $have)"
 }
 
-need_ocdump() { cmd_ocdump_build >/dev/null; }
+need_ocdump() { if orr_live; then cmd_ocdump_build >/dev/null; fi; }
+need_live() { export REPR_OCAML_LIVE=1; cmd_ocdump_build >/dev/null; }
 
-cmd_dump() { need_ocdump; exec "$OCD" "$@"; }
+cmd_dump() { need_live; exec "$OCD" "$@"; }
 
 tarball() { echo "$root/$(edn :pins :ocaml-5.5.0 :fetched-into)"; }
 
@@ -246,7 +265,7 @@ cmd_corpus_count_or_check() {
 }
 
 cmd_samples() {
-  need_ocdump
+  need_live
   local exe; exe=$(arbace_exe)
   local out="$root/.tmp/repr-ocaml/samples"; rm -rf "$out"; mkdir -p "$out"
   local f b n=0 bad=0 typed
@@ -283,8 +302,10 @@ cmd_spec_check() {
     [ -e "$f" ] || continue
     id=$(basename "$f" .kind); kind=$(cat "$f"); flag=""
     case $kind in intf|sigitem) flag=--intf; src="$d/$id.mli" ;; *) src="$d/$id.ml" ;; esac
-    "$OCD" $flag --file "$id.ml" "$src" > "$d/$id.dump"
+    if orr_live; then "$OCD" $flag --file "$id.ml" "$src" > "$d/$id.dump"
+    else ORR_MISS=$d/unrecorded.txt orr_get "$ORR_DIR/ocaml-dumps-spec.sha256" "check/$id.dump" parse "$src" "$d/$id.dump"; fi
   done
+  if [ -s "$d/unrecorded.txt" ]; then echo "spec-check: the records of the spec examples' dumps are not usable:"; sort -u "$d/unrecorded.txt" | head -3; return 1; fi
   "$exe" "$root/test/ocaml/spec_check.ae" "$d" || bad=1
   floor spec-entries all "$(ls "$d"/*.kind 2>/dev/null | wc -l)" || bad=1
   # coverage: every constructor of parsetree.mli (and asttypes.mli) is in the spec
@@ -302,7 +323,8 @@ dump_one() {
   local rel=$1 flag=""
   case $rel in *.mli) flag=--intf ;; esac
   mkdir -p "$OUT/$(dirname "$rel")"
-  "$OCD" $flag --file "$rel" "$BASE/$rel" > "$OUT/$rel${SUF:-.ae}"
+  if orr_live; then "$OCD" $flag --file "$rel" "$BASE/$rel" > "$OUT/$rel${SUF:-.ae}"
+  else orr_get "$ORR_PACK" "parse/$rel.ae" parse "$BASE/$rel" "$OUT/$rel${SUF:-.ae}"; fi
 }
 export -f dump_one
 
@@ -314,7 +336,7 @@ rt_arbace() {
 }
 
 cmd_read() {
-  need_ocdump
+  need_live
   local out="$root/.tmp/repr-ocaml/forms" tmp="$root/.tmp/repr-ocaml/read-dumps" f b flag
   if [ "${1:-}" = "-o" ]; then out=$2; shift 2; fi
   rm -rf "$tmp"; mkdir -p "$tmp"
@@ -329,7 +351,7 @@ cmd_print() { rt_arbace print "$@"; }
 
 # read --full: forms in mode :full (O3): the parse dump and the layout dump (ocdump --mode tokens) converted together
 cmd_read_full() {
-  need_ocdump
+  need_live
   local out="$root/.tmp/repr-ocaml/forms-full" tmp="$root/.tmp/repr-ocaml/read-full" f b flag
   if [ "${1:-}" = "-o" ]; then out=$2; shift 2; fi
   rm -rf "$tmp"; mkdir -p "$tmp/src" "$tmp/parse" "$tmp/layout"
@@ -366,21 +388,31 @@ corpus_list() {
 rt_one() {
   local name=$1 base=$2 list=$3 jobs=${REPR_OCAML_JOBS:-4} w="$root/.tmp/repr-ocaml/rt/$1"
   rm -rf "$w"; mkdir -p "$w"
-  export OCD BASE="$base"
+  export OCD BASE="$base" ORR_PACK="$ORR_DIR/ocaml-dumps-$name.sha256" ORR_MISS="$w/unrecorded.txt"
+  : > "$ORR_MISS"
   local t0=$SECONDS
+  if ! orr_live; then oracle_unpack "$ORR_PACK" > "$w/unpack.out" 2>&1 || true; fi
   OUT="$w/orig" SUF=.ae xargs -a "$list" -P "$jobs" -n 1 bash -c 'dump_one "$0"'
-  local t1=$SECONDS
+  local t1=$SECONDS rc=0
+  if [ -s "$ORR_MISS" ]; then echo "  $name: the records of the originals' dumps are not usable ($(wc -l < "$ORR_MISS") files):"; sort -u "$ORR_MISS" | head -5; return 1; fi
   rt_arbace print --root "$w/orig" -o "$w/printed" > "$w/print.log" || { tail -20 "$w/print.log"; }
   local t2=$SECONDS
-  # the printed file's dump: its name is the original's
-  BASE="$w/printed" OUT="$w/cand" SUF=.ae xargs -a "$list" -P "$jobs" -n 1 bash -c 'dump_one "$0"' 2>/dev/null || true
-  local t3=$SECONDS
-  local extra=() rc=0; [ "${RECORD:-}" = 1 ] && extra+=(--record)
-  rt_arbace compare --orig "$w/orig" --cand "$w/cand" --printed "$w/printed" --known "$root/test/ocaml/roundtrip-known.edn" \
-    --report "$w/report.edn" "${extra[@]}" || rc=$?
-  echo "  $name: dump $((t1 - t0)) s, print $((t2 - t1)) s, redump $((t3 - t2)) s"
+  if orr_live; then
+    # the printed file's dump: its name is the original's
+    BASE="$w/printed" OUT="$w/cand" SUF=.ae xargs -a "$list" -P "$jobs" -n 1 bash -c 'dump_one "$0"' 2>/dev/null || true
+    local t3=$SECONDS
+    local extra=(); [ "${RECORD:-}" = 1 ] && extra+=(--record)
+    rt_arbace compare --orig "$w/orig" --cand "$w/cand" --printed "$w/printed" --known "$root/test/ocaml/roundtrip-known.edn" \
+      --report "$w/report.edn" "${extra[@]}" || rc=$?
+    echo "  $name: dump $((t1 - t0)) s, print $((t2 - t1)) s, redump $((t3 - t2)) s"
+  else
+    echo "  $name: dump (the records) $((t1 - t0)) s, print $((t2 - t1)) s; the tree level's redump and compare (ocdump on the print, class D): the oracle tier's (roundtrip --oracle)"
+  fi
   if [ -n "${TEXT:-}" ]; then rt_text "$name" "$base" "$list" || rc=1; fi
-  if [ -n "${CMI:-}" ]; then rt_cmi "$name" "$base" "$list" || rc=1; fi
+  if [ -n "${CMI:-}" ]; then
+    if orr_live; then rt_cmi "$name" "$base" "$list" || rc=1
+    else echo "  $name cmi: ocamlc -c of the original and of the print (class D) is the oracle tier's (roundtrip --oracle): not run"; fi
+  fi
   return $rc
 }
 
@@ -388,7 +420,8 @@ rt_one() {
 layout_one() {
   local rel=$1
   mkdir -p "$OUT/$(dirname "$rel")"
-  "$OCD" --mode tokens --file "$rel" "$BASE/$rel" > "$OUT/$rel.ae"
+  if orr_live; then "$OCD" --mode tokens --file "$rel" "$BASE/$rel" > "$OUT/$rel.ae"
+  else orr_get "$ORR_PACK" "tokens/$rel.ae" tokens "$BASE/$rel" "$OUT/$rel.ae"; fi
 }
 export -f layout_one
 
@@ -396,8 +429,10 @@ export -f layout_one
 # and read back, the text printed from them equal to the original byte for byte (cmp, beside Arbace's own compare)
 rt_text() {
   local name=$1 base=$2 list=$3 jobs=${REPR_OCAML_JOBS:-4} w="$root/.tmp/repr-ocaml/rt/$1" rc=0 t0=$SECONDS
-  export OCD
+  export OCD ORR_PACK="$ORR_DIR/ocaml-dumps-$name.sha256" ORR_MISS="$w/unrecorded-layout.txt"
+  : > "$ORR_MISS"
   BASE="$base" OUT="$w/layout" xargs -a "$list" -P "$jobs" -n 1 bash -c 'layout_one "$0"'
+  if [ -s "$ORR_MISS" ]; then echo "  $name text: the records of the layout dumps are not usable:"; sort -u "$ORR_MISS" | head -5; return 1; fi
   local t1=$SECONDS
   rm -rf "$w/full" "$w/full-forms"
   local extra=(); [ "${RECORD:-}" = 1 ] && extra+=(--record)
@@ -578,7 +613,7 @@ dumps_corpus() {
 
 # cmd_dumps MODES [--jobs N] [--loc] [--simplify] [CORPUS...]
 cmd_dumps() {
-  need_ocdump; cmd_corpus_fetch >/dev/null
+  need_live; cmd_corpus_fetch >/dev/null
   local modes=$1 ids=(); shift
   DUMPS_BAD=""
   while [ $# -gt 0 ]; do
@@ -597,6 +632,76 @@ cmd_dumps() {
   [ -z "$DUMPS_BAD" ]
 }
 
+# record-dumps [CORPUS...] (and `spec`): the originals' parse and layout dumps (ocdump live) of every file of each corpus into the pack
+# ocaml-dumps-CORPUS, members parse/REL.ae and tokens/REL.ae (the spec's: parse/REL.ae and check/ID.dump); by hand on a host with ocamlc (ORS5 (a));
+# verify-dumps [--sample N] [CORPUS...]: the dumps again, compared with the pack's members (the oracle tier's: ORS6 (a))
+orr_corpus_files() {  # ID DIR: the files of corpus ID into DIR/list (spec: the extracted examples), sets ORR_BASE
+  local id=$1 d=$2
+  if [ "$id" = spec ]; then
+    local sd="$root/.tmp/repr-ocaml/spec" f kind id2
+    rm -rf "$sd"; mkdir -p "$sd/files"; python3 -I "$root/tools/ocdump/spec_extract.py" "$root/doc/ocaml/SPEC.md" "$sd"
+    : > "$d/list"
+    for f in "$sd"/*.kind; do id2=$(basename "$f" .kind); kind=$(cat "$f")
+      case $kind in intf|sigitem) cp "$sd/$id2.mli" "$sd/files/$id2.mli"; echo "$id2.mli" >> "$d/list" ;; *) cp "$sd/$id2.ml" "$sd/files/$id2.ml"; echo "$id2.ml" >> "$d/list" ;; esac
+    done
+    ORR_BASE=$sd/files
+  else corpus_list "$id" > "$d/list"; ORR_BASE=$CORPUS_BASE; fi
+}
+orr_key() { { echo "dump-1 $1"; oir_helper_key; sha256sum < "$2" | cut -c1-64; } | sha256sum | cut -c1-64; }
+cmd_record_dumps() {
+  need_live; cmd_corpus_fetch >/dev/null
+  local id rel w name flag
+  [ $# -gt 0 ] || set -- samples stdlib spec
+  for id in "$@"; do
+    name=ocaml-dumps-$id; w="$root/.tmp/repr-ocaml/record-dumps/$id"; rm -rf "$w"; mkdir -p "$w/pack/$name"
+    orr_corpus_files "$id" "$w"
+    : > "$w/ids.tsv"
+    while read -r rel; do
+      flag=""; case $rel in *.mli) flag=--intf ;; esac
+      mkdir -p "$w/pack/$name/parse/$(dirname "$rel")"
+      "$OCD" $flag --file "$rel" "$ORR_BASE/$rel" > "$w/pack/$name/parse/$rel.ae"
+      printf 'parse/%s.ae\t%s\n' "$rel" "$(orr_key parse "$ORR_BASE/$rel")" >> "$w/ids.tsv"
+      if [ "$id" = spec ]; then
+        mkdir -p "$w/pack/$name/check"
+        "$OCD" $flag --file "${rel%.*}.ml" "$ORR_BASE/$rel" > "$w/pack/$name/check/${rel%.*}.dump"
+        printf 'check/%s.dump\t%s\n' "${rel%.*}" "$(orr_key parse "$ORR_BASE/$rel")" >> "$w/ids.tsv"
+      else
+        mkdir -p "$w/pack/$name/tokens/$(dirname "$rel")"
+        "$OCD" --mode tokens --file "$rel" "$ORR_BASE/$rel" > "$w/pack/$name/tokens/$rel.ae"
+        printf 'tokens/%s.ae\t%s\n' "$rel" "$(orr_key tokens "$ORR_BASE/$rel")" >> "$w/ids.tsv"
+      fi
+    done < "$w/list"
+    oracle_make "$ORR_DIR/$name.sha256" "$w/pack" "$w/ids.tsv" "bin/repr-ocaml record-dumps $id" ocaml
+  done
+}
+cmd_verify_dumps() {
+  need_live; cmd_corpus_fetch >/dev/null
+  local sample=0 id rel w name u pin nd total flag; [ "${1:-}" = --sample ] && { sample=$2; shift 2; }
+  [ $# -gt 0 ] || set -- samples stdlib spec
+  for id in "$@"; do
+    name=ocaml-dumps-$id; pin=$ORR_DIR/$name.sha256; w="$root/.tmp/repr-ocaml/verify-dumps/$id"; rm -rf "$w"; mkdir -p "$w"
+    u=$(oracle_unpack "$pin") || return 1
+    orr_corpus_files "$id" "$w"; nd=0; total=0; first=""; last=""
+    while read -r rel; do
+      [ "$sample" = 0 ] || [ "$total" -lt "$sample" ] || break
+      total=$((total + 1)); flag=""; case $rel in *.mli) flag=--intf ;; esac
+      "$OCD" $flag --file "$rel" "$ORR_BASE/$rel" > "$w/p.ae"
+      [ -n "$first" ] || { first=$rel; cp "$w/p.ae" "$w/first.ae"; }; last=$rel
+      cmp -s "$w/p.ae" "$u/$name/parse/$rel.ae" || { echo "verify: parse/$rel DIFFERS"; nd=$((nd + 1)); }
+      if [ "$id" != spec ]; then
+        "$OCD" --mode tokens --file "$rel" "$ORR_BASE/$rel" > "$w/t.ae"
+        cmp -s "$w/t.ae" "$u/$name/tokens/$rel.ae" || { echo "verify: tokens/$rel DIFFERS"; nd=$((nd + 1)); }
+      fi
+    done < "$w/list"
+    oracle_verdict ocaml "$(oracle_manifest "$pin")" "$nd" "$total" || return 1
+    # the crossed pair (ORS7 (a)): the first file's live parse dump against the last file's record must differ
+    if [ "$total" -ge 2 ]; then
+      if cmp -s "$w/first.ae" "$u/$name/parse/$last.ae"; then echo "verify: FAILED: the crossed pair ($first against $last's record) is equal: control not judged"; return 1
+      else echo "verify: the crossed pair differs (control passed)"; fi
+    fi
+  done
+}
+
 cmd_roundtrip() {
   need_ocdump; cmd_corpus_fetch >/dev/null
   local spec="" ids=() bad=0 id list
@@ -604,6 +709,7 @@ cmd_roundtrip() {
     case $1 in
       --record) RECORD=1 ;;
       --jobs) shift; REPR_OCAML_JOBS=$1 ;;
+      --oracle) export REPR_OCAML_LIVE=1 ;;
       --spec) spec=1 ;;
       --text) TEXT=1 ;;
       --record-results) TEXT=1; RESULTS=1 ;;
@@ -688,6 +794,8 @@ case "${1:-}" in
       *) sed -n '2,40p' "$0"; exit 2 ;;
     esac ;;
   samples) cmd_samples ;;
+  record-dumps) shift; cmd_record_dumps "$@" ;;
+  verify-dumps) shift; cmd_verify_dumps "$@" ;;
   spec-check) shift; cmd_spec_check "$@" ;;
   embed-check) cmd_embed_check ;;
   *) sed -n '2,40p' "$0"; exit 2 ;;

@@ -20,18 +20,24 @@ chk "OI_GOMEMLIMIT is in the key" differ "$(OI_GOMEMLIMIT=300MiB bin/oi key)"
 chk "OI_GOMAXPROCS is in the key" differ "$(OI_GOMAXPROCS=2 bin/oi key)"
 chk "the suite corpus has a key of its own" differ "$(bin/oi suite key)"
 
+# ORS12: the key of the live level (OI_LIVE=1) holds ocdump's key file; the records level's is the pack's
 # re-review 042's finding 4: the opam pins are in the key; a part of the key that cannot be had fails the key, it does not shorten it
 sed 's/0\.17\.0/0.17.1/' "$root/.tmp/repr-ocaml/opam-pins.txt" > "$root/.tmp/w/opam-pins.changed" || { echo "FAIL cannot make the changed pins"; exit 1; }
 cmp -s "$root/.tmp/repr-ocaml/opam-pins.txt" "$root/.tmp/w/opam-pins.changed" && { echo "FAIL the changed pins equal the pins (the edit did not apply)"; exit 1; }
 chk "the program corpus's key does not hold the opam pins (a pin bump must not rerun its rows)" same "$(OI_OPAM_PINS=$root/.tmp/w/opam-pins.changed bin/oi key)"
 chk "the opam pins are in the suite's key" differ "$(OI_OPAM_PINS=$root/.tmp/w/opam-pins.changed bin/oi suite key)" "$(bin/oi suite key)"
 for v in OI_OPAM_PINS OI_OCDUMP_KEY; do
-  OI_TIMEOUT=30 env "$v=$root/.tmp/w/missing" bin/oi suite key > "$root/.tmp/w/key.out" 2> "$root/.tmp/w/key.err"; st=$?
+  # the live key (OI_LIVE=1) holds ocdump's key file, which needs the toolchain: the oracle tier's (OI_JUDGES_NO_LIVE leaves it out)
+  live=""; if [ "$v" = OI_OCDUMP_KEY ]; then
+    if [ -n "${OI_JUDGES_NO_LIVE:-}" ]; then echo "skip a missing part ($v): the live key needs ocamlc (OI_JUDGES_NO_LIVE)"; continue; fi
+    live=1
+  fi
+  OI_LIVE=$live OI_TIMEOUT=30 env "$v=$root/.tmp/w/missing" bin/oi suite key > "$root/.tmp/w/key.out" 2> "$root/.tmp/w/key.err"; st=$?
   if [ "$st" != 0 ] && [ ! -s "$root/.tmp/w/key.out" ] && grep -q '^oi: key: ' "$root/.tmp/w/key.err"; then echo "ok   a missing part ($v) fails the key"; else echo "FAIL a missing part ($v): exit $st, key $(cat "$root/.tmp/w/key.out")"; bad=1; fi
 done
 
 # re-review 042's finding 5: a checkout without .tmp/oi and .tmp/o7 (a clean run): the verbs find their directories (a copy of bin/ in a scratch root)
-R=$root/.tmp/w/oi-key-root; rm -rf "$R"; mkdir -p "$R"; cp -r "$root/bin" "$R/bin"
+R=$root/.tmp/w/oi-key-root; rm -rf "$R"; mkdir -p "$R"; cp -r "$root/bin" "$R/bin"; mkdir -p "$R/test"; cp -r "$root/test/oracle-records" "$R/test/oracle-records"
 (cd "$R" && bin/oi oi-limits > "$R.log" 2>&1)
 [ -d "$R/.tmp/oi" ] && [ -d "$R/.tmp/o7" ] && [ -d "$R/.tmp/o6" ] && echo "ok   bin/oi makes .tmp/oi, .tmp/o7 and .tmp/o6 (re-review 049)" || { echo "FAIL bin/oi left .tmp/oi, .tmp/o7 or .tmp/o6 unmade"; bad=1; }
 exit $bad

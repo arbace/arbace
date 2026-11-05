@@ -641,18 +641,43 @@ repr-ocaml-check: ## O2's check: the round trip over the default corpora and ove
 	bin/repr-ocaml check
 
 ## OCaml's row of the REAP matrix and its gate steps (O8, doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)")
-.PHONY: repr-ocaml-record-results ocaml-read-essential oi-essential oi-divergences-all ocaml-essential ocaml-judges
+.PHONY: repr-ocaml-record-results ocaml-read-essential oi-essential oi-divergences-all ocaml-essential ocaml-judges ocaml-judges-records
 repr-ocaml-record-results: ## the round trip over every corpus at every level, recording the read and print levels' test/ocaml/{read,print}-results.edn (bin/repr-ocaml roundtrip --cmi --record-results all)
 	bin/repr-ocaml roundtrip --cmi --record-results all
-ocaml-read-essential: ## repr/ocaml's essential step: the pins, the samples' and the stdlib's round trip at every level, the spec's examples, the embedding check (bin/repr-ocaml)
-	bin/repr-ocaml corpus check && bin/repr-ocaml roundtrip --cmi samples stdlib && bin/repr-ocaml roundtrip --spec && bin/repr-ocaml spec-check && bin/repr-ocaml embed-check
+ocaml-read-essential: ## repr/ocaml's essential step: the samples' and the stdlib's round trip (the print and the text level, the originals' dumps from the packs: no ocamlc, ORS12), the spec's examples, the embedding check (bin/repr-ocaml)
+	bin/repr-ocaml roundtrip --text samples stdlib && bin/repr-ocaml roundtrip --spec && bin/repr-ocaml spec-check && bin/repr-ocaml embed-check
 oi-essential: ## oi's essential step (OC67 (a)): the package's tests, the REPL's session, the check's basic and effects directories with the control (test/ocaml/essential-check.txt) (bin/oi)
 	bin/oi test && bin/oi repl-check && bin/oi check --only-list test/ocaml/essential-check.txt
 oi-divergences-all: ## OC160 (a): the four judgments of oi's committed records, no runs (bin/oi divergences [--aot], bin/oi suite divergences [--aot])
 	bin/oi divergences && bin/oi divergences --aot && bin/oi suite divergences && bin/oi suite divergences --aot
 ocaml-essential: oi-essential oi-divergences-all ocaml-read-essential ## OCaml's three essential steps, one after another (about 2.5 minutes)
-ocaml-judges: ## OC120 (b), OC130 (b), OC112 (b): the judges' and levels' tests, the dumps' determinism, the expect check against test/ocaml/ref-expect.edn (bin/oi judges-test)
+ocaml-judges: ## OC120 (b), OC130 (b), OC112 (b): the judges' and levels' tests, the dumps' determinism, the expect check against test/ocaml/ref-expect.edn, with ocamlc: the oracle tier's (bin/oi judges-test)
 	bin/oi judges-test
+ocaml-judges-records: ## the judges' tests that need no ocamlc, the gate's ocaml-judges step (bin/oi judges-test --records)
+	bin/oi judges-test --records
+
+## OCaml's oracle records (ORS12, doc/ORACLE-RECORDS-SURVEY.md, "As built: OCaml"): ocamlc's and ocdump's answers as packs and a committed record, recorded by hand on a host with ocamlc
+.PHONY: oi-stdlib-record oi-stdlib-verify oi-record-lambda oi-verify-lambda oi-suite-record-lambda oi-repl-record oi-repl-verify repr-ocaml-record-dumps repr-ocaml-verify-dumps repr-ocaml-oracle
+oi-stdlib-record: ## the stdlib's Lambda packed into ocaml-lambda-stdlib, by hand (bin/oi stdlib --record)
+	bin/oi stdlib --record
+oi-stdlib-verify: ## the stdlib built afresh by ocamlc, its Lambda against the pack (bin/oi stdlib --verify)
+	bin/oi stdlib --verify
+oi-record-lambda: ## the run corpus's programs' Lambda packed into ocaml-lambda-progs, ONLY=--only-list FILE or --only RE for some, by hand (bin/oi record-lambda)
+	bin/oi record-lambda $(ONLY)
+oi-verify-lambda: ## the programs' Lambda made live again against the pack, every program or SAMPLE=N (bin/oi verify-lambda)
+	bin/oi verify-lambda $(if $(SAMPLE),--sample $(SAMPLE))
+oi-suite-record-lambda: ## the suite corpus' units' Lambda packed into ocaml-lambda-suite, by hand (bin/oi suite record-lambda)
+	bin/oi suite record-lambda $(ONLY)
+oi-repl-record: ## the REPL session's phrases' answers recorded into test/ocaml/records/repl/, by hand (bin/oi repl-check --record)
+	bin/oi repl-check --record
+oi-repl-verify: ## the session's phrases made live again against the committed record (bin/oi repl-check --verify-records)
+	bin/oi repl-check --verify-records
+repr-ocaml-record-dumps: ## the originals' parse and layout dumps packed (ocaml-dumps-CORPUS), CORPUS=samples stdlib spec or others, by hand (bin/repr-ocaml record-dumps)
+	bin/repr-ocaml record-dumps $(CORPUS)
+repr-ocaml-verify-dumps: ## the dumps made live again against the packs, SAMPLE=N files a corpus (bin/repr-ocaml verify-dumps)
+	bin/repr-ocaml verify-dumps $(if $(SAMPLE),--sample $(SAMPLE)) $(CORPUS)
+repr-ocaml-oracle: ## the round trip's class D levels: ocdump on the print, ocamlc -c of the original and the print (bin/repr-ocaml roundtrip --oracle --cmi), CORPUS=samples stdlib ...
+	bin/repr-ocaml roundtrip --oracle --cmi $(or $(CORPUS),samples stdlib)
 
 ## The host and housekeeping
 alpine-check: ## one minimal apk add line reinstalls exactly the host's packages (bin/alpine-env check)

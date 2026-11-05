@@ -108,12 +108,39 @@ cmd_suite_record_ref() {
   sed -i '1i ;; ocamlc'"'"'s and ocamlopt'"'"'s runs of the suite corpus (bin/oi suite record-ref; doc/ocaml/OCAML-SURVEY.md, "As built: O7\n;; (write-ahead)"): the testsuite'"'"'s run programs without a .reference or with ocamltest'"'"'s `modules` (the units compiled in\n;; the order listed), and the opam set'"'"'s programs (test/ocaml/opam-programs.tsv: a package'"'"'s library units and a test), each\n;; compiled by the host'"'"'s OCaml 5.5.0 and run; same fields as test/ocaml/ref-ocaml55.edn. Read with the Clojure reader.' "$SUITE_REFS"
 }
 
+# ORS12: the units' Lambda of a suite program is a pack too (ocaml-lambda-suite: members ID/units.list (the unit files' names in link order),
+# ID/U.ae, or ID/error), one key an ID: the helper, the flags, the units' sources; read unless OI_LIVE=1
+OIR_SUITE=$OIR_DIR/ocaml-lambda-suite.sha256
+export OIR_SUITE
+suite_key() {  # ID FLAGS INCS BASE UNITS
+  local u
+  { echo lambda-suite-1; oir_helper_key; echo "flags=$2 incs=$3 units=$5"
+    if [ -n "$3" ]; then sha256sum < "$TOP/testsuite/lib/testing.ml" | cut -c1-64; fi
+    for u in $5; do case $u in =*) sha256sum < "$root/test/ocaml/opam/${u#=}" | cut -c1-64 ;; *) sha256sum < "$4/$u" | cut -c1-64 ;; esac; done; } | sha256sum | cut -c1-64
+}
+suite_lambda_get() {  # ID FLAGS INCS BASE UNITS DIR: DIR/U.ae and DIR/units.list from the pack, or DIR/error
+  local id=$1 d=$6 key f n msg
+  key=$(suite_key "$1" "$2" "$3" "$4" "$5")
+  if f=$(oir_member "$OIR_SUITE" "$id/units.list" "$key" 2> "$d/records.err"); then
+    : > "$d/units.list"
+    while read -r n; do
+      cp "$(dirname "$f")/$n" "$d/$n" 2> "$d/records.err" || { echo "REFUSED $id/$n" > "$d/records.err"; break; }
+      case $n in error) ;; *) echo "$d/$n" >> "$d/units.list" ;; esac
+    done < "$f"
+    [ ! -s "$d/records.err" ] || { tr '\n' ' ' < "$d/records.err" > "$d/error"; return 0; }
+  else tr '\n' ' ' < "$d/records.err" > "$d/error"; return 0; fi
+  # a recorded failure: its text is the recorded error file (listed in units.list as "error")
+  if [ -f "$d/error" ]; then rm -f "$d/units.list"; fi
+}
+export -f suite_key suite_lambda_get
+
 # suite_dump ID FLAGS INCS BASE UNITS: the units compiled (their .cmi for the next) and their simplified Lambda
 # dumped into $S/run/ID/<Unit>.ae; the list of the .ae files in link order in units.list; "error" when one fails
 suite_dump() {
   local id=$1 flags=$2 incs=$3 base=$4 units=$5
   local d=$S/run/$id u n b U
   rm -rf "$d"; mkdir -p "$d"
+  if [ -z "${OI_LIVE:-}" ]; then suite_lambda_get "$id" "$flags" "$incs" "$base" "$units" "$d"; return 0; fi
   suite_stage "$id" "$base" "$units" "$d"
   local I=""; [ -n "$incs" ] && I="-I $TESTLIB"
   : > "$d/units.list"
@@ -151,10 +178,34 @@ suite_header() { # LEVEL: replace the first comment block of a results file
   sed -i '1,/^\[$/{/^\[$/!d}' "$f"; printf '%s\n' "$text" | cat - "$f" > "$f.new"; mv "$f.new" "$f"
 }
 
+# suite record-lambda [--only-list FILE | --only RE]: the selected programs' units compiled and dumped live (OI_LIVE=1) into the pack ocaml-lambda-suite;
+# the programs the pack holds and the selection does not name are kept (by hand, on a host with ocamlc, ORS5 (a))
+cmd_suite_record_lambda() {
+  opts "$@"; export OI_LIVE=1
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_suite_corpus > "$S/corpus.log"
+  local w=$S/record-lambda ids id kind flags incs args env base units n=0 d f u
+  rm -rf "$w"; mkdir -p "$w/ocaml-lambda-suite"; ids=$w/ids.tsv; : > "$ids"
+  while IFS=$'\037' read -r id kind flags incs args env base units; do
+    [ "$kind" = run ] || continue
+    suite_dump "$id" "$flags" "$incs" "$base" "$units"
+    d=$S/run/$id; mkdir -p "$w/ocaml-lambda-suite/$id"; key=$(suite_key "$id" "$flags" "$incs" "$base" "$units")
+    if [ -f "$d/error" ]; then
+      cp "$d/error" "$w/ocaml-lambda-suite/$id/error"; echo error > "$w/ocaml-lambda-suite/$id/units.list"
+    else
+      : > "$w/ocaml-lambda-suite/$id/units.list"
+      while read -r f; do cp "$f" "$w/ocaml-lambda-suite/$id/$(basename "$f")"; basename "$f" >> "$w/ocaml-lambda-suite/$id/units.list"; done < "$d/units.list"
+    fi
+    (cd "$w/ocaml-lambda-suite" && find "$id" -type f | LC_ALL=C sort) | awk -v k="$key" '{ printf "%s\t%s\n", $0, k }' >> "$ids"; n=$((n + 1))
+  done < <(suite_selected | tr '\t' '\037')
+  [ "$n" -gt 0 ] || die "suite record-lambda: no program selected"
+  oir_pack_make "$OIR_SUITE" ocaml-lambda-suite "$w" "$ids" "bin/oi suite record-lambda ${ONLY:+--only $ONLY}" dirs
+}
+
 cmd_suite_check() {
   opts "$@"
   if [ "$AOT" = 1 ]; then cmd_suite_check_aot; return; fi
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"
+  [ -n "${OI_LIVE:-}" ] || oracle_unpack "$OIR_SUITE" > "$TMPDIR/oi-unpack.out" || die "the suite's Lambda pack is not usable"
   export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   local out=$S/check.tsv
   suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' | xargs -0 -n 7 -P "$JOBS" bash -c 'suite_oi_one "$@"' _ > "$out.new"
@@ -171,6 +222,7 @@ cmd_suite_check() {
 
 cmd_suite_check_aot() {
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; cmd_aot_lib > "$O2J/aot-lib.log"
+  [ -n "${OI_LIVE:-}" ] || oracle_unpack "$OIR_SUITE" > "$TMPDIR/oi-unpack.out" || die "the suite's Lambda pack is not usable"
   local jobs=${O2J_JOBS:-2}
   [ -n "${OPT_JOBS:-}" ] && jobs=$OPT_JOBS
   mkdir -p "$O2J/tmp"
@@ -239,6 +291,7 @@ cmd_suite() {
     corpus) cmd_suite_corpus ;;
     key) cmd_suite_corpus > "$S/corpus.log"; oi_key "$S/corpus.tsv" ;;
     record-ref) cmd_suite_record_ref "$@" ;;
+    record-lambda) cmd_suite_record_lambda "$@" ;;
     check) cmd_suite_check "$@" ;;
     divergences) cmd_suite_divergences "$@" ;;
     actions) suite_actions ;;

@@ -143,6 +143,7 @@ oracle_host_id() {  # TOOL
     rustc) oracle_rustc_id ;;
     cxx) oracle_cxx_id ;;
     llvm) oracle_llvm_id ;;
+    ocaml) oracle_ocaml_id ;;
     *) echo "oracle: no identity recipe for $1" >&2; echo none ;;
   esac
 }
@@ -202,6 +203,18 @@ oracle_llvm_id() {  # GT9's :host-ids :llvm recipe (gt9-verbs: test/gate/steps.e
     for p in "$b"/../lib/libLLVM.so.*; do [ -f "$p" ] && { sha256sum < "$(readlink -f "$p")" | cut -c1-64; m=1; }; done
     [ $m = 1 ] || echo "missing $b/../lib/libLLVM.so.*"; } | sha256sum | cut -c1-64
 }
+oracle_ocaml_id() {  # bin/lib/gate-run.bash's gate_ocaml_id (:ocaml, O8; GT9's :host-ids :ocaml is the same recipe): ocamlc's and ocamlopt's version lines, the
+  # SHA-256 of their executables through their links, of compiler-libs' ocamlcommon (.cmxa, .a, .cma) and of the installed stdlib's archives
+  # (.cma, .cmxa, .a), "missing FILE" for one that is not there; none without ocamlc and ocamlopt
+  local c o w f
+  c=$(command -v ocamlc) && o=$(command -v ocamlopt) || { echo none; return; }
+  w=$(ocamlc -where 2>"$TMPDIR/oracle-ocaml.err")
+  { ocamlc -version 2>"$TMPDIR/oracle-ocaml.err"; ocamlopt -version 2>"$TMPDIR/oracle-ocaml.err"
+    sha256sum < "$(readlink -f "$c")" | cut -c1-64; sha256sum < "$(readlink -f "$o")" | cut -c1-64
+    for f in "$w/compiler-libs/ocamlcommon.cmxa" "$w/compiler-libs/ocamlcommon.a" "$w/compiler-libs/ocamlcommon.cma" \
+             "$w/stdlib.cma" "$w/stdlib.cmxa" "$w/stdlib.a"; do
+      if [ -f "$f" ]; then sha256sum < "$f" | cut -c1-64; else echo "missing $f"; fi; done; } | sha256sum | cut -c1-64
+}
 oracle_host_version() {  # TOOL: its version line
   case $1 in
     cxx) { g++ --version 2>"$TMPDIR/oracle-cxx.err" | head -1; clang++ --version 2>"$TMPDIR/oracle-cxx.err" | head -1; } | tr '\n' ';' | sed 's/;$//' ;;
@@ -211,6 +224,7 @@ oracle_host_version() {  # TOOL: its version line
     chibi) "${CHIBI:-chibi-scheme}" -V 2>&1 | head -1 ;;
     ghc) ghc --version 2>"$TMPDIR/oracle-ghc.err" | head -1 ;;
     rustc) rustc --version 2>"$TMPDIR/oracle-rustc.err" | head -1 ;;
+    ocaml) echo "ocamlc $(ocamlc -version 2>"$TMPDIR/oracle-ocaml.err")" ;;
     *) echo unknown ;;
   esac
 }
