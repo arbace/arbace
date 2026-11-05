@@ -594,6 +594,38 @@
           (fail :mangle "operator " op))
       (source-name (:name f)))))
 
+(defn- q-param
+  "A template parameter of depth `depth` in a constraint ([temp.param]; ItaniumMangle.cpp's mangleTemplateParameter:
+  T_, T<n-1>_, TL<d-1>__, TL<d-1>_<n-1>_), a substitution candidate."
+  ^String [^long depth ^long i]
+  (sub-or [:qparam depth i] #(str "T" (when (pos? depth) (str "L" (dec depth) "_")) (when (pos? i) (dec i)) "_")))
+
+(defn- mangle-constraint
+  "A requires-clause's expression (the native parser's node) as clang 23 mangles it after a function template's
+  arguments (Q <expression>; ItaniumMangle.cpp's mangleRequiresClause, mangleExpression): operators, calls, names as
+  written (an unresolved simple name with its explicit arguments), the template's own parameters by depth and index;
+  `pidx` {name index} of the template's parameters (G4)."
+  ^String [n pidx ^long depth]
+  (letfn [(arg [^String a]
+            (let [a (str/trim a)]
+              (if-let [i (get pidx a)] (q-param depth i) (fail :mangle "a constraint's argument " a))))
+          (ex [n]
+            (case (:kind n)
+              "ParenExpr" (ex (first (:inner n)))
+              "BinaryOperator" (str (or (expr-op-codes (:opcode n)) (fail :mangle "operator " (:opcode n))) (ex (first (:inner n))) (ex (second (:inner n))))
+              "UnaryOperator" (str (case (:opcode n) "!" "nt" "-" "ng" "~" "co" (fail :mangle "operator " (:opcode n))) (ex (first (:inner n))))
+              "CallExpr" (str "cl" (apply str (map ex (:inner n))) "E")
+              "CXXBoolLiteralExpr" (if (:value n) "Lb1E" "Lb0E")
+              "IntegerLiteral" (str "Li" (:value n) "E")
+              ("DeclRefExpr" "UnresolvedLookupExpr")
+              (let [nm (get-in n [:referencedDecl :name])]
+                (when (or (seq (:qualifier n)) (:globalQualifier n)) (fail :mangle "a qualified name in a constraint"))
+                (if-let [i (get pidx nm)]
+                  (q-param depth i)
+                  (str (source-name nm) (when-let [as (:explicitTemplateArgs n)] (str "I" (apply str (map arg as)) "E")))))
+              (fail :mangle "a constraint's " (:kind n))))]
+    (ex n)))
+
 (defn mangle-fn
   "A function's mangled name (variant: 1 or 2 for a constructor's C1/C2, 0/1/2 for a destructor's D0/D1/D2). A
   function template's specialization (:tinst) writes its template arguments after its name, then its template's
@@ -612,12 +644,16 @@
              uname (fn [^String out]
                      (if ti
                        (str (if (#{:ctor :dtor :conv} (:kind f))
-                              (str out (unqualified-name f variant))
+                              ;; (a constructor template a substitution candidate too: clang's mangleTemplatePrefix)
+                              (let [s (str out (unqualified-name f variant))] (swap! *subs* conj [:tmpl (:tid ti)]) s)
                               (let [i (.indexOf ^java.util.List @*subs* [:tmpl (:tid ti)])]
                                 (if (neg? i)
                                   (let [s (str out (unqualified-name f variant))] (swap! *subs* conj [:tmpl (:tid ti)]) s)
                                   (seq-id i))))
-                            (str "I" (apply str (map-indexed (fn [i a] (str (when-let [t (get (:tn ti) i)] (str (when (:pack t) "Tp") "Tn" (mangle-type* (:ty t)))) (template-arg a))) (:args ti))) "E"))
+                            (str "I" (apply str (map-indexed (fn [i a] (str (when-let [t (get (:tn ti) i)] (str (when (:pack t) "Tp") "Tn" (mangle-type* (:ty t)))) (template-arg a))) (:args ti)))
+                            ;; a constrained template's requires-clause (clang 23: Q <expression>, G4)
+                            (when-let [q (:q ti)] (str "Q" (mangle-constraint (:node q) (:pidx q) (:depth q))))
+                            "E"))
                        (str out (unqualified-name f variant))))
              enc (cond
                    (empty? path) (str (when (:internal-l f) "L") (uname ""))
