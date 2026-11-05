@@ -1406,14 +1406,19 @@
                                                         "div-zero" "panic_const_div_by_zero"
                                                         "rem-zero" "panic_const_rem_by_zero"
                                                         "bounds-check" "panic_bounds_check"
+                                                        "misaligned" "panic_misaligned_pointer_dereference"
+                                                        "null-deref" "panic_null_pointer_dereference"
+                                                        "null-ref" "panic_null_reference_constructed"
                                                         (unsupported (str "assert message " mk)))
                                            callee (symbol "g" (or (get-in @gl [:langs panic-name])
-                                                                  (if (= mk "bounds-check") "panicking.panic_bounds_check" (str "panicking.panic_const." panic-name))))
+                                                                  (case mk "bounds-check" "panicking.panic_bounds_check" "misaligned" "panicking.panic_misaligned_pointer_dereference" (str "panicking.panic_const." panic-name))))
                                            pbs (symbol (str "%" pb))
                                            _ (emit! bb (if expected (list 'br 'i1 (:v v) lltarget pbs) (list 'br 'i1 (:v v) pbs lltarget)))
-                                           [cargs ptypes] (if (= mk "bounds-check")
+                                           [cargs ptypes] (if (#{"bounds-check" "misaligned"} mk)
                                                             (let [idx (operand! pb (nth msg 2)) len (operand! pb (nth msg 1))]
-                                                              [[['i64 (:v idx)] ['i64 (:v len)] ['ptr (list :align 8) lg]] [['i64] ['i64] ['ptr (list :align 8)]]])
+                                                              (if (= mk "misaligned")
+                                                                [[['i64 (:v len)] ['i64 (:v idx)] ['ptr (list :align 8) lg]] [['i64] ['i64] ['ptr (list :align 8)]]]
+                                                                [[['i64 (:v idx)] ['i64 (:v len)] ['ptr (list :align 8) lg]] [['i64] ['i64] ['ptr (list :align 8)]]]))
                                                             [[['ptr (list :align 8) lg]] [['ptr (list :align 8)]]])
                                            unw (unwind-block! b unwind)]
                                        (declare! gl callee 'void ptypes)
@@ -1590,14 +1595,24 @@
                                        (when target (br-or-merge bb t target)))
                                      "size_of_val"
                                      (let [a (operand! bb (first args)) pt (second (ty-struct (ty-of (first args)))) k (ty-kind pt)]
-                                       (when-not (#{"slice" "str"} k) (unsupported (str "intrinsic size_of_val of " k)))
+                                       (cond
+                                         (not (#{"slice" "str" "dyn"} k))
+                                         (do (assign! bb dest {:ty "i64" :v (:size (layout lt pt))})
+                                             (when target (br-or-merge bb t target)))
+                                         (= k "dyn")
+                                         (let [g (fresh!) r (fresh!)]
+                                           (emit! bb (list '= g (list 'getelementptr :inbounds 'i8 ['ptr (:v (second (:pair a)))] ['i64 8])))
+                                           (emit! bb (list '= r (list 'load 'i64 ['ptr g] :align 8)))
+                                           (assign! bb dest {:ty "i64" :v r})
+                                           (when target (br-or-merge bb t target)))
+                                         :else
                                        (let [unit (if (= k "str") 1 (:size (layout lt (second (ty-struct pt)))))
                                              len (second (:pair a)) r (fresh!)]
                                          (if (number? (:v len))
                                            (assign! bb dest {:ty "i64" :v (* unit (:v len))})
                                            (do (emit! bb (list '= r (list 'mul :nuw :nsw 'i64 (:v len) unit)))
                                                (assign! bb dest {:ty "i64" :v r})))
-                                         (when target (br-or-merge bb t target))))
+                                         (when target (br-or-merge bb t target)))))
                                      "compare_bytes"
                                      (let [a (operand! bb (first args)) b (operand! bb (second args)) n (operand! bb (nth args 2))
                                            nm (symbol "g" "memcmp") r (fresh!)]
