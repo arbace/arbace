@@ -37,11 +37,13 @@
 (def ^:dynamic *std* nil)      ; name -> macro def (std's)
 (def ^:private mark-counter (atom 0))
 (def ^:dynamic *frags* nil)    ; atom: placeholder name -> the fragment's tree (names unique in a crate's expansion)
-(defn- fresh-mark [] (swap! mark-counter inc))
+(def ^:dynamic *site* nil)     ; the root call site [l1 c1 l2 c2] of the expansion being made (line!, column!)
+(def ^:dynamic *sites* nil)    ; atom: mark -> its expansion's root call site
+(defn- fresh-mark [] (let [m (swap! mark-counter inc)] (when (and *sites* *site*) (swap! *sites* assoc m *site*)) m))
 
 (defn- root-src ^Src [] (:src *root*))
 
-(declare cfg-pred cfg-item include-expr unesc remark-1 rep-vars format-args expand-derives items->stream items-text concat-text attr-name)
+(declare strip-cfg cfg-pred cfg-item include-expr unesc remark-1 rep-vars format-args expand-derives items->stream items-text concat-text attr-name)
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Tokens
@@ -127,6 +129,10 @@
             Delimited (let [[_ ds dsp delim ts] tr
                             dm (apply hash-map (rest ds)) spm (apply hash-map (rest dsp))
                             kids (dump-tts->items (second ts) mark)]
+                        (if-let [fr (let [o (:open dm)]
+                                      (when (and *frags* (seq? o) (str/starts-with? (str (second o)) "<fragment "))
+                                        (get @*frags* (subs (second o) 10 (dec (count (second o)))))))]
+                          [fr]
                         (if-let [ok (delim-open delim)]
                           (let [oi (or (and (nil? mark) (vector? (:open dm)) (= 4 (count (:open dm))) (root-at (:open dm))
                                             (titem (root-at (:open dm)) 0))
@@ -135,7 +141,7 @@
                                             (titem (root-at (:close dm)) 0))
                                        (titem (ftok (open-close ok) nil nil nil 0 (keyword (name (:close spm)))) (or mark (span-mark (:close dm)))))]
                             [{:g ok :open oi :close ci :kids kids}])
-                          kids))))
+                          kids)))))
         trees)))
 
 (defn- remark
@@ -272,6 +278,26 @@
     :DocComment (list 'DocComment (symbol (name (.-x t))) (symbol (name (.-y t))) (.-sym t))
     (symbol (name (.-kind t)))))
 
+(declare items->stream)
+
+(defn- invisible-group
+  "A fragment's placeholder in a token stream as rustc writes it: an invisible group of the fragment's tokens"
+  [ctx ^Tok t]
+  (when-let [f (and (= :Ident (.-kind t)) *frags* (get @*frags* (.-sym t)))]
+    (when (:items f)
+      (let [sp (list 'span (str "<fragment " (.-sym t) ">") 0 0 0 0 (mark-at ctx (.-lo t)))
+            ^Tok t0 (:t (first (flat (:items f) (java.util.ArrayList.))))
+            mv (case (:frag f)
+                 (:expr :expr_2021) (list 'Expr :kind (if (= :expr (:frag f)) 'Expr 'Expr2021)
+                                          :can_begin_literal_maybe_minus (boolean (and t0 (or (= :Literal (.-kind t0)) (= :Minus (.-kind t0)))))
+                                          :can_begin_string_literal (boolean (and t0 (= :Literal (.-kind t0)))))
+                 :ty 'Ty :path 'Path :block 'Block :stmt 'Stmt :item 'Item
+                 :pat '(Pat PatWithOr) :pat_param '(Pat PatParam {:inferred false})
+                 (symbol (name (:frag f))))]
+        (list 'Delimited (list 'DelimSpan :open sp :close sp) (list 'DelimSpacing :open 'Alone :close 'Alone)
+              (list 'Invisible (list 'MetaVar mv))
+              (items->stream (:items f)))))))
+
 (defn- cstream [ctx ^long from ^long to]
   (let [^objects toks (:toks ctx) ^ints mt (:mt ctx)]
     (list 'TokenStream
@@ -285,8 +311,9 @@
                                                    (list 'DelimSpacing :open (symbol (name (.-sp t))) :close (symbol (name (.-sp cl))))
                                                    (open-delim-name (.-kind t))
                                                    (cstream ctx (inc i) c)))))
-                  (recur (inc i) (conj out (list 'Token (list 'Token :kind (tok-kind-out t) :span (cspan ctx (.-lo t) (.-hi t)))
-                                                 (symbol (name (.-sp t)))))))))))))
+                  (recur (inc i) (conj out (or (invisible-group ctx t)
+                                               (list 'Token (list 'Token :kind (tok-kind-out t) :span (cspan ctx (.-lo t) (.-hi t)))
+                                                     (symbol (name (.-sp t))))))))))))))
 
 (defn- frag-name [x]
   ;; the placeholder's name when x is an Expr, Ty or Pat that is just __rf_frag_N
@@ -360,7 +387,7 @@
                                          (let [it (ps/parse-item p :yes)]
                                            (when-not it (throw (ex-info "expand: not an item" {:expand true})))
                                            (recur (conj out it))))))]
-                    (cout ctx r))))))
+                    (strip-cfg (cout ctx r)))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; macro_rules!: arms, matching, transcription (mbe)
@@ -423,7 +450,7 @@
                     (let [r (case kind
                               (:expr :expr_2021) (ps/parse-expr p)
                               :ty (ps/parse-ty p)
-                              (:pat :pat_param) (if (= kind :pat) (parse-pat* p) (ps/parse-pat-no-top-alt p nil nil))
+                              (:pat :pat_param) (if (= kind :pat) (ps/parse-pat-no-top-guard p nil nil nil nil) (ps/parse-pat-no-top-alt p nil nil))
                               :path (ps/parse-path p 'Type)
                               :block (ps/parse-block p)
                               :stmt (#'ps/parse-stmt-without-recovery p false)
@@ -432,7 +459,8 @@
                           ci (cur-index p)
                           k (.indexOf ^java.util.List starts (Long/valueOf ci))]
                       (when (neg? k) (throw (ex-info "expand: a fragment ends inside a group" {:expand true})))
-                      [{:frag kind :ast (let [a (cout ctx r)]
+                      [{:frag kind :text (items-text (subvec elems i (+ i k))) :items (subvec elems i (+ i k))
+                        :ast (let [a (cout ctx r)]
                                           (if (= kind :block) (list 'Expr :kind (list 'Block a 'None) :span (second (drop-while #(not= :span %) a)) :attrs []) a))}
                        (+ i k)])))
       (catch arbace.lang.ExceptionInfo e (when-not (:expand (ex-data e)) (throw e)) nil))))
@@ -493,7 +521,7 @@
         (fn [p]
           (cond
             ;; transcribe.rs: a token of the definition is Alone; a delimiter keeps its spacing but `]` closes Alone
-            (:tok p) [(remark-1 (:tok p) mark :Alone)]
+            (:tok p) [(if (:t (:tok p)) (remark-1 (:tok p) mark :Alone) (:tok p))]
             (:crate p) [(titem (ftok :Ident "$crate" false nil 0 :Alone) mark)]
             (:group p) (let [g (:group p)]
                          [{:g (:g g) :open (remark-1 (:open g) mark) :close (remark-1 (:close g) mark (when (= :OpenBracket (:g g)) :Alone))
@@ -543,6 +571,17 @@
 
 
 (defn- id-form [nm m] (list 'id nm m))
+
+(defn esc
+  "A cooked string literal's symbol from its text (expr_str: str::escape_debug)"
+  ^String [^String t]
+  (let [sb (StringBuilder.)]
+    (doseq [c t]
+      (case c
+        \\ (.append sb "\\\\") \" (.append sb "\\\"") \' (.append sb "\\'")
+        \newline (.append sb "\\n") \return (.append sb "\\r") \tab (.append sb "\\t")
+        (.append sb c)))
+    (str sb)))
 (defn- path-form [segs m]
   (list 'Path :span (foreign-span m) :segments (mapv (fn [s] (list 'PathSegment :ident (id-form s m) :args 'None)) segs)))
 
@@ -575,20 +614,20 @@
                       :span (foreign-span m) :attrs [])
                 (list 'Expr :kind (list 'If (list 'Expr :kind (list 'Unary 'Not c) :span (foreign-span m) :attrs [])
                                         (list 'Block :stmts [(list 'Stmt :kind (list 'Expr (list 'Expr :kind (list 'Call (list 'Expr :kind (list 'Path 'None (path-form ["$crate" "panicking" "panic"] m)) :span (foreign-span m) :attrs [])
-                                                                                                                  [(list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (str "assertion failed: " (items-text cond-items)) :suffix 'None)) :span nil :attrs [])])
+                                                                                                                  [(list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (esc (str "assertion failed: " (items-text cond-items))) :suffix 'None)) :span nil :attrs [])])
                                                                                                 :span (foreign-span m) :attrs []))
                                                                     :span (foreign-span m))]
                                               :rules 'Default :span (foreign-span m))
                                         'None)
                       :span (foreign-span m) :attrs []))})
-      "stringify" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (items-text input) :suffix 'None)) :span (foreign-span m) :attrs [])}
+      "stringify" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (esc (items-text input)) :suffix 'None)) :span (foreign-span m) :attrs [])}
       "line" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Integer :symbol (str (first (:span call))) :suffix (list 'Some "u32"))) :span (foreign-span m) :attrs [])}
       "column" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Integer :symbol (str (second (:span call))) :suffix (list 'Some "u32"))) :span (foreign-span m) :attrs [])}
       "file" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (.getCanonicalPath (File. ^String (:file *root*))) :suffix 'None)) :span (foreign-span m) :attrs [])}
       "include" {:ast (include-expr input)}
       "cfg" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Bool :symbol (str (boolean (second (cfg-pred input)))) :suffix 'None))
                         :span (foreign-span m) :attrs [])}
-      "concat" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (concat-text input) :suffix 'None)) :span (foreign-span m) :attrs [])}
+      "concat" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (esc (concat-text input)) :suffix 'None)) :span (foreign-span m) :attrs [])}
       (throw (ex-info (str "expand: the builtin " nm " is not taken") {:expand true})))))
 
 (defn include-expr
@@ -615,11 +654,14 @@
   [items]
   (let [fl (flat items (java.util.ArrayList.))
         toks (map :t fl)]
-    (if (and (seq toks) (every? #(>= (.-lo ^Tok %) 0) toks))
+    (cond
+      (and (= 1 (count fl)) (:frag (first fl))) (or (:text (first fl)) "")
+      (some :frag fl) (str/join " " (map #(if (:frag %) (or (:text %) "") (tok-text (:t %))) fl))
+      (and (seq toks) (every? #(>= (.-lo ^Tok %) 0) toks))
       (let [^Tok a (first toks) ^Tok b (last toks)
             s (lx/text-of (root-src) (.-lo a) (.-hi b))]
         (str/replace s #"\s+" " "))
-      (str/join " " (map tok-text toks)))))
+      :else (str/join " " (map tok-text toks)))))
 
 (defn- concat-text [items]
   (apply str (for [part (split-commas items) :let [it (first part) ^Tok t (:t it)]]
@@ -654,10 +696,16 @@
   (let [nm (mac-name mac)
         input (mac-input mac)
         user (get @*macros* nm)
-        r (cond user (expand-rules user input)
-                (contains? std-builtins nm) (builtin nm input {:span (let [sp (fget (fget mac :path) :span)] (if (vector? sp) sp (vec (take 4 (drop 2 sp)))))})
-                (get *std* nm) (expand-rules (get *std* nm) input)
-                :else (throw (ex-info (str "expand: no macro " nm) {:expand true})))]
+        sp (fget (fget mac :path) :span)
+        ;; the call's root site: its own when written in the root file, else its expansion's (a macro inside a macro)
+        site (cond (vector? sp) (vec (take 4 sp))
+                   (seq? sp) (or (get @*sites* (last sp)) (when (pos? (long (nth sp 2))) (vec (take 4 (drop 2 sp)))))
+                   :else nil)
+        r (binding [*site* site]
+            (cond user (expand-rules user input)
+                  (contains? std-builtins nm) (builtin nm input {:span (or site [0 0 0 0])})
+                  (get *std* nm) (expand-rules (get *std* nm) input)
+                  :else (throw (ex-info (str "expand: no macro " nm) {:expand true}))))]
     (if (map? r)
       (:ast r)
       (parse-fragment r kind))))
@@ -695,8 +743,14 @@
   (cond
     (nil? (cfg-item it)) []
     (not (identical? it (cfg-item it))) (expand-item (cfg-item it))
+    (not= it (strip-cfg it)) (expand-item (strip-cfg it))
     (item-kind-mac? it) (vec (mapcat expand-item (expand-mac (second (fget it :kind)) :items)))
-    :else (let [[it' derived] (expand-derives it)]
+    :else (let [k (fget it :kind)
+                _ (when (and (seq? k) (= 'MacroDef (first k)))
+                    ;; a macro_rules! a macro's expansion defines is in scope from there on (textual scoping)
+                    (let [[_ idf md] k]
+                      (swap! *macros* assoc (second idf) {:name (second idf) :arms (macro-arms (dump-tts->items (second (fget (fget md :body) :tokens)) nil))})))
+                [it' derived] (expand-derives it)]
             (into [(expand-form it')] (mapcat expand-item derived)))))
 
 (defn expand-form [x]
@@ -778,7 +832,8 @@
     (binding [*root* {:src src :toks toks :mt mt :by-span by-span :ed ed :file file}
               *std* std-macros
               *macros* (atom {})
-              *frags* (atom {})]
+              *frags* (atom {})
+              *sites* (atom {})]
       (reset! mark-counter 1)
       (reset! *macros* (collect-user-macros crate))
       (let [items (fget crate :items)
