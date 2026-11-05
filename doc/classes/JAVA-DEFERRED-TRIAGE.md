@@ -430,7 +430,7 @@ The REPL needs every class at hand (the interpreter calls the world by reflectio
   a program (`--build-program`) asks for them; the check's executables with it.
 - *Recommended: (a)*, revisited if the build grows past a minute.
 
-### JCS136 System.Logger after java.util.logging
+### JCS138 System.Logger after java.util.logging
 
 F5 brings java.util.logging without `System.getLogger` (its `LoggerFinder`, `jdk.internal.logger`'s bootstrap and
 lazy loggers, `sun.util.logging.PlatformLogger`'s bridge): `java.lang.System` is jrt's hand-written Go, whose
@@ -446,7 +446,7 @@ corpus has one test that names them (`jdk/java/lang/System/Logger/interface/Logg
   or a test area needs it; `:logging` narrowed to `System\$Logger` meanwhile.
 - *Recommended: (b)*, taken up with F3, whose `SSLLogger` is the first in-world user.
 
-### JCS137 Localized level names
+### JCS139 Localized level names
 
 `Level.getLocalizedName` and the system loggers' bundle read `sun.util.logging.resources.logging`, a
 `ListResourceBundle` the JDK build generates from `logging.properties` (and ten translations) with
@@ -486,12 +486,12 @@ apart from the lists F1 extends (`security-sources`, the end of `class-supers` a
 | `LogRecord` | variant: `inferCaller` over `new Throwable().getStackTrace()` with `CallerFinder`'s test and `SimpleConsoleLogger.Formatting.isFilteredFrame`'s names (no `StackWalker`, F20); `serialPersistentFields` cut (serialization by design) |
 | `SimpleFormatter` | variant: the format by `SimpleConsoleLogger.Formatting.getSimpleFormat`'s rules, transcribed (no `jdk.internal.logger`) |
 | `FileHandler` | variant (`LoggingFileHandler.ae`: `FileHandler.ae` is the file: URL handler's): the lock file held by an output stream, availability by the in-process lock table alone (no `FileChannel`/`FileLock`, F7); `%h` without the set-UID check |
-| `sun.util.logging.internal.LoggingProviderImpl` | jrt's own (overlay): only `LogManagerAccess` and its holder, which `LogManager`'s static initializer registers with; no `LoggerFinder` (JCS136) |
+| `sun.util.logging.internal.LoggingProviderImpl` | jrt's own (overlay): only `LogManagerAccess` and its holder, which `LogManager`'s static initializer registers with; no `LoggerFinder` (JCS138) |
 | `conf/logging.properties` | resource data: `bin/jrt-convert`'s generate step copies `src/java.logging/share/conf/logging.properties` as the build's Copy.gmk installs it (identical to the build's `jdk/conf/logging.properties`); `jdk/data/conf/logging.properties` after `update` |
 | j2g | rename `java/util/logging/Formatter` → `Logging_Formatter` (java.util.Formatter's Go name); `class-supers` gains the 10 logging classes the area's tests extend (11 of the 27 subclass `Handler`, `Logger`, `LogManager`, `Formatter`, ...), so interpreted subclasses work (JC4b's mechanism) |
 
 Left out: `LoggingPermission` (extends `BasicPermission`: F4's), `HttpLogFormatter` (sun.net.www.protocol.http's),
-`System.Logger` (JCS136), the localized level names' bundle (JCS137). Corrections to §5's F5 design: `LoggingMXBean`
+`System.Logger` (JCS138), the localized level names' bundle (JCS139). Corrections to §5's F5 design: `LoggingMXBean`
 and `Logging` are plain Java (no java.lang.management), so they come in and `LogManager.getLoggingMXBean` works
 (`LoggingMXBeanTest2`); `MemoryHandler` has no management part; no table of handlers is needed: `LogManager`
 names classes through `ClassLoader.getSystemClassLoader().loadClass`, which is jrt's registry (the world's and a
@@ -549,7 +549,7 @@ edge, the build, the runs.
    `RootLoggerHandlers` interpreted (the test's own bundle and handlers are not in jrt's registry),
    `ParentLoggerWithHandlerGC` and `TestLoggerNames` (collection of weakly held loggers, F17).
 5. `bin/java-check --judge` on the results; `test/java/divergences.edn`: `:logging` narrowed to `System\$Logger`
-   (JCS136), the tail filed by cause; `--record` of the levels' files once the whole corpus is rerun (no test
+   (JCS138), the tail filed by cause; `--record` of the levels' files once the whole corpus is rerun (no test
    passing before may fail: `levels-known.edn`); `bin/reap --record`.
 6. `bin/gate` (essential) and, with JC9's other parts, `bin/gate --full` (its `jrt-convert verify` byte for
    byte).
