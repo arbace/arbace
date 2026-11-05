@@ -4,13 +4,15 @@ Status: the first slice (T1-T6) on the branch `ocaml-typer`, then T7 (Simplif) a
 typed natively unit by unit, with GADTs, formats and type extensions pulled forward from T9-T10 for it) on
 `ocaml-typer2`, 2026-11-05 (§9, "As built: T7 and T8"), then T9's polymorphic variants on `ocaml-polyvar` (TY9 (b);
 §11, "As built: T9's polymorphic variants"), then the rest of T9, objects and classes, on `ocaml-objects` (§13, "As
-built: T9's objects and classes"). From `ocaml-native`, whose
+built: T9's objects and classes"), then T10's two stdlib blockers (TY15 (a)), GADT-aware exhaustiveness and recursive
+values, on `ocaml-t10` (§15, "As built: T10's stdlib blockers"): the stdlib 71 of 71 natively. From `ocaml-native`, whose
 native reader gives the Parsetree as Arbace data. The route of OC4 (b) (doc/ocaml/OCAML-SURVEY.md §6.4): port OCaml 5.5.0's `typing/` and
 `lambda/`'s Translcore with Matching, so that the native Parsetree becomes Lambda in Arbace and oi stops needing the
 host's `ocamlc` for a program. Light rules (the day's): no gate, no Arbace build, no re-seed; every run on main's stage 0
 (`ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace`), one process under 1.5 GB, samples only. Nothing here is
 TY1-TY6 (§8) were decided by the user (below §8); the proposals of T7-T8 are TY7-TY10 (§10), decided; those of T9's
-polymorphic variants TY11-TY12 (§12), decided; those of T9's objects and classes TY13-TY15 (§14).
+polymorphic variants TY11-TY12 (§12), decided; those of T9's objects and classes TY13-TY15 (§14), decided; those of
+T10's stdlib blockers TY16-TY18 (§16).
 
 ## 1. What needs ocamlc today, and what the slice removes
 
@@ -20,7 +22,7 @@ compiler-libs:
 | use | today | after this slice |
 |---|---|---|
 | a program's Lambda (`bin/oi run`, `check`) | `ocdump --mode lambda --simplify` | `bin/oi run-native`: Arbace (the core language and the module system; Simplif's output since T7) |
-| the stdlib's Lambda (`bin/oi stdlib`) | ocamlc builds the `.cmi`, ocdump dumps each unit | still ocamlc's (TY5, TY7 (c)); `bin/oi stdlib-check` types 69 of the 71 units natively, equal (T8, T9) |
+| the stdlib's Lambda (`bin/oi stdlib`) | ocamlc builds the `.cmi`, ocdump dumps each unit | still ocamlc's (TY5, TY7 (c)); `bin/oi stdlib-check` types the 71 units natively, all equal (T8, T9, T10's blockers, §15) |
 | the toplevel's phrases (`bin/oi repl`, `bin/lib/oi/phrase`) | ocdump types and lowers each phrase | unchanged (T11) |
 | the judge (types, Lambda, runs) | ocdump `--mode types`, `--mode lambda`, the toplevel | unchanged: the oracle stays the judge |
 
@@ -121,7 +123,8 @@ of these, in `test/ocaml/divergences.edn`'s format:
 
 - `typer-outside-slice`: refused with "outside the slice" (until its milestone lands; the reason names it);
 - `typer-format-breaking`: the signature differs only in Format's line breaks (`val` lines over the margin);
-- `typer-recursive-values`: `let rec` of values that are not all functions (Value_rec_compiler, Rec_check), refused;
+- `typer-recursive-values`: `let rec` of values that are not all functions (Value_rec_compiler, Rec_check), refused
+  (until §15; since then a program OCaml rejects for an invalid recursive definition is accepted, TY16);
 - `typer-error-message`: a program OCaml rejects, refused with another message (until T12).
 
 ## 6. Milestones
@@ -412,3 +415,62 @@ variants left (typeclass.ae 738, translclass.ae 495, the rest in the existing na
 ## Decided (2026-11-05, the user: TY13-TY15)
 
 TY13 (a): Includeclass with T12; TY14 (a): Tpoly (t, []) for every method type with T11 if its corpus shows a difference; TY15 (a): T10's two stdlib blockers next, then T11 (amending TY9's order).
+
+## 15. As built: T10's stdlib blockers (2026-11-05, branch `ocaml-t10`)
+
+TY15 (a): the two parts of T10 the stdlib's last units needed, from `ocaml-objects`, ported from the same tarball
+(SHA-256 fcc6ae66...f015ba):
+
+| namespace | OCaml 5.5.0 sources | what |
+|---|---|---|
+| `typer.valuerec` (new) | `typing/value_rec_check.ml`'s classify_expression (and is_valid_recursive_expression's fast path for functions), `lambda/value_rec_compiler.ml` whole (compute_static_size with its delayed sizes of let-bound names, split_static_function, compile_alloc, compile_update with CamlinternalLazy.indirect, compile_letrec) | a recursive binding's kind (`:static`, `:dynamic`), computed by `type_let` for `let rec` (the Typedtree's vb_rec_kind); `transl_let`'s recursive case through compile_letrec: dynamic bindings let-bound first, static blocks pre-allocated by caml_alloc_dummy, caml_alloc_dummy_float or caml_alloc_dummy_lazy and backpatched after the functions by caml_update_dummy(_lazy), constants with the recursive names replaced by the dummy constant, non-syntactic functions lifted with their context's block (`letrec_function_context`) or eta-expanded |
+| `typer.parmatch` | `parmatch.ml`'s exhaust (exhaust_single_row, specialize_and_exhaust), full_match false, build_other for constructors (pat_of_constrs with orify_many) | the counter-examples of a match, lazily, or-patterns at the choice points |
+| `typer.typecore` | `typecore.ml`'s check_counter_example_pat and partial_pred, `parmatch.ml`'s do_check_partial | each counter-example typed against the scrutinee's type with the GADT equations its constructors add (the type checker's pattern mode), an or-pattern's alternatives tried in turn with the rest of the witness (find_valid_alternative), every change to the types (Btype's snapshot) and to the equations undone; a match is total when no counter-example types, so Translcore adds no Match_failure handler |
+
+The exhaustiveness check runs as before (Maranget's usefulness with the constructors a GADT's type excludes left
+out); only when it finds the match partial and a GADT constructor is among the patterns are the counter-examples
+built and checked, as do_check_partial does for every match (the same answer: a counter-example without a GADT
+constructor always types). Two parts of check_counter_example_pat are not ported: the Refine_or strategy (or-patterns
+are always split, Backtrack_or, which explores more but answers the same for the stdlib and the samples) and the
+explosion of wildcards (`explode` 5 for a one-case match: a wildcard of an empty type is not refuted here); TY17.
+Value_rec_check's validity check (its modes and environments: Dereference, Guard, Delay, the rejection of `let rec x =
+x + 1`) is not ported: the kind is computed for programs OCaml accepts, and one it rejects for an invalid recursive
+definition is compiled here (TY16).
+
+**Results (2026-11-05, stage 0 of main, one process under 1.5 GB)**:
+
+| set | files | types equal | raw Lambda equal | simplified Lambda equal | oi's run equal |
+|---|---:|---:|---:|---:|---:|
+| `test/ocaml/typer/` (73 samples; t72: GADT matches total only by their indices, over tuples and an option; t73: recursive values of every kind) | 73 | 73 | 73 | 73 | 73 |
+| the stdlib's units (`bin/oi stdlib-check`) | 71 | - | - | 71 | the samples on the native units: 71 of 71 |
+| probe: `testsuite/tests/basic/`'s first 40 files, the 36 ocamlc accepts | 36 | 34 | 36 | 36 | - |
+| probe: run tests with objects and classes (§13's 29) | 29 | 16 | 19 | 19 | - |
+
+The stdlib's new units: CamlinternalFormat (`trans`'s match over a pair of `fmtty_rel`, whose impossible pairs are
+refuted by their shared indices) and CamlinternalMod (`let rec l = lazy ...`, a lazy block pre-allocated and
+backpatched). With them every unit of the stdlib is typed and translated natively, its simplified Lambda equal to
+ocamlc's, and the samples run on oi on that library alone, as on ocamlc's. The basic/ probe's recvalues and tailcalls
+are equal now (36 of 36 in Lambda; patmatch's and sets' signatures differ as before, §11), and the objects probe's
+class_2 (19 of 29). A sample written with `Lazy.is_val l` inside `let rec l = lazy ...` printed `int lazy_t` where
+OCaml prints `int Lazy.t`: unify3's link of a type to the abbreviation it meets, TY11 (b); t73 avoids it.
+
+Speed: CamlinternalFormat 25 s natively (21 s before, its 30-odd GADT matches' counter-examples checked), `bin/oi
+stdlib-check` 1 min 34 s, `bin/oi typer-check` 25 s. Size: valuerec.ae 289 lines, the counter-examples about 165 lines
+in parmatch.ae and typecore.ae.
+
+## 16. Proposed (TY16-TY18; options with costs, a recommendation each, none decided)
+
+- **TY16 Value_rec_check's validity check.** A `let rec` OCaml rejects ("This kind of expression is not allowed as
+  right-hand side of let rec") is compiled here. (a) port its modes and environments (about 800 lines of
+  value_rec_check.ml: expression, value_bindings, modexp, class_expr) with T12, where rejected programs are judged;
+  (b) now (about half a day); (c) never, the oracle judging rejected programs. *Recommended: (a)*.
+- **TY17 check_counter_example_pat's strategies.** (a) port Refine_or and the explosion of wildcards (Parmatch's
+  pats_of_type) with T11 if its corpus shows a match whose partiality differs (a one-case match total by an empty
+  type, or a search too slow); (b) now (about half a day), also running the counter-examples' check for every partial
+  match as OCaml does; (c) not at all. *Recommended: (a)*.
+- **TY18 oi's library native.** TY7 (c)'s condition holds: every stdlib unit is native and equal. (a) make the native
+  units oi's library (`bin/oi stdlib` typing and translating the tarball's stdlib in its link order with Arbace, ocamlc
+  and ocdump kept as the oracle and for `stdlib-check`), so that `bin/oi run-native` and the typer's samples need no
+  ocamlc (about half a day: the link order from stdlib/Makefile without ocamlc, the testsuite's lib/testing too, the
+  check that the two libraries stay equal); (b) with T11, whose corpus runs would use it; (c) keep ocamlc's library.
+  *Recommended: (a)*, before T11: it is what T8-T10's stdlib work was for.

@@ -104,8 +104,11 @@ code. Three kinds of things live here:
   overrides, Pexp_poly), out_type.ml's and oprint.ml's object types and class declarations, translobj.ml and
   translclass.ml (`typer/translclass.ae`: shared constants, oo_wrap, the object and class initialisers, builtin
   methods, cached classes), translcore.ml's object expressions and fuse_method_arity, translprim.ml's %send primitives
-  and simplif.ml's Lifused, by hand, the files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver
-  and its judge are Arbace's own.
+  and simplif.ml's Lifused, then (T10's stdlib blockers, TYPER.md §15) typing/value_rec_check.ml's classify_expression
+  and lambda/value_rec_compiler.ml (`typer/valuerec.ae`: recursive values' kinds, sizes, function lifting and
+  compile_letrec), parmatch.ml's exhaust and build_other (`typer/parmatch.ae`) and typecore.ml's
+  check_counter_example_pat and partial_pred (`typer/typecore.ae`: GADT-aware exhaustiveness), by hand, the files
+  carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

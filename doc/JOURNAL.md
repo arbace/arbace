@@ -402,3 +402,19 @@ Ctype.normalize_type's object names, the class parameters' `constraint 'a = ...`
 Btype.link_type's passing of a variable's name, polytypes' pre-univars. Results (TYPER.md §13): test/ocaml/typer/ 71 of
 71 at every level (t69-t71 new); the stdlib still 69 of 71; the basic/ probe 34 of 36; the objects probe, widened to 29
 run tests, 18 of 29 equal in Lambda (16 in their signatures). Proposals TY13-TY15 unchanged.
+
+## 2026-11-05: oi's native front end, T10's two stdlib blockers (branch ocaml-t10)
+
+TY15 (a), from `ocaml-objects`. Ported by hand from OCaml 5.5.0's release tarball (SHA-256
+fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba): typing/value_rec_check.ml's classify_expression and
+lambda/value_rec_compiler.ml into the new `arbace/repr/ocaml/typer/valuerec.ae` (a recursive binding's kind, computed
+by type_let; compile_letrec with pre-allocation, backpatching, constants and lifted functions, used by transl_let), and
+typing/parmatch.ml's exhaust with build_other and typing/typecore.ml's check_counter_example_pat and partial_pred into
+`parmatch.ae` and `typecore.ae` (a match's counter-examples typed with their GADT equations; total when none types).
+Results (TYPER.md §15): the stdlib 71 of 71 units equal natively (CamlinternalFormat and CamlinternalMod new);
+test/ocaml/typer/ 73 of 73 at every level (t72, t73 new, their oracle dumps committed); the basic/ probe 36 of 36 in
+Lambda (recvalues, tailcalls new); the objects probe 19 of 29 (class_2 new). Not ported, by choice: Value_rec_check's
+validity check (rejected programs, TY16), check_counter_example_pat's Refine_or and explosion (TY17); the counter-
+examples are checked only when the usefulness check finds a match with GADT constructors partial. Alternatives weighed:
+replacing the usefulness check by exhaust and the counter-example check for every match, as OCaml does (deferred,
+TY17 (b): the same answers, more work per match). Proposals TY16-TY18 (TYPER.md §16), none decided.
