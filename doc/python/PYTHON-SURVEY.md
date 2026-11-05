@@ -1408,3 +1408,43 @@ over all 71 rewrites `test/python/bench-aot-linux-amd64.edn` (the night's).
 Not taken (the profile's next items, for later): a load-method form in the IR (a method call still makes a bound method
 for the call to unwrap; CPython's LOAD_ATTR method variant), global loads cached by the dicts' keys version, a fused
 to-bool/jump (AotToBool pushes a bool AotTruthy pops), frame reuse for generator frames.
+
+## As built: 203, 202's lows (2026-11-05, the Mac VM, queue 203)
+
+- **compile()'s mode single is parsed as CPython parses it.** `arbace.python.run`'s compiler (modes `single` and
+  `single-complete`) asks the native reader's single parse, `arbace.repr.python.astjson/single-error` (the start
+  rule `interactive`, then Parser/pegen.c's `bad_single_statement`). Its "multiple statements found while compiling a
+  single statement" comes ahead of codeop's rule, because CPython's parser stops after the first statement and the
+  rest may be broken or unfinished. Its other errors come after that rule, for example a compound statement followed
+  by another (invalid syntax at the second). The location is the first statement's NEWLINE token, as CPython gives
+  it. The reader's port gained two of CPython's single-input rules:
+  - `_PyPegen_fill_token`'s end of input: the ENDMARKER is read as a NEWLINE once parsing has started, and the open
+    blocks are dedented unless `PyPARSE_DONT_IMPLY_DEDENT` (`peg/set-single`, `lex/imply-dedent!`). Without it,
+    `statement_newline`'s `compound_stmt NEWLINE` never matched at the end of the source.
+  - The string tokenizer adds no new-line to non-exec input (`lex/lexer`'s `no-fake`), so
+    `compile('def f(): pass', f, 'single')` is CPython's invalid syntax at (1, 0).
+
+  The AST mode passes `PyCF_DONT_IMPLY_DEDENT`. Checked against `python3 -I` on 34 sources in mode single
+  (message, lineno, offset, end, text), all equal, and on mode single's AST with and without `PyCF_DONT_IMPLY_DEDENT`.
+  With `PyCF_ALLOW_INCOMPLETE_INPUT` (codeop's flags), pyi's approximated incomplete-input rule still differs; see the
+  lows in 203's report. test_compile's test_bad_single_statement passes. test_codeop and test_compile otherwise
+  fail the same methods as at the base.
+- **test_dict: 10 failing methods at the base, 0 now.** Seven are fixed in the runtime:
+  - setdefault hashes the key and looks it up once;
+  - update from a dict raises "dict mutated during update" when a key's `__eq__` changes the other dict;
+  - update from a sequence raises PySequence_Fast's "object is not iterable", with `__notes__`;
+  - the views are compared as `dictview_richcompare` compares them: the sizes, then containment item by item, with no
+    set made;
+  - the views' `mapping` is a mappingproxy of the dict;
+  - getattr and the other attribute builtins take an instance of a str subclass;
+  - the dict iterators count the items they still expect (`di->len`): "keys changed" is raised only on an item past
+    that count, and a reverse iterator ends past the entries of a dict refilled since. Before, any change of the keys
+    raised. A compaction since the iterator was made still counts as a keys change.
+
+  Three are classed. test_container_iterator and test_free_after_iterating go in `:finalization-collect` (they call
+  gc.collect before they look). test_oob_indexing_dictiter_iternextitem goes in `:finalization`: it needs `__del__` to
+  run when the last reference goes.
+- **test_list's test_list_index_modifing_operand**: an extended slice's length is taken after the assigned value is
+  converted (`list_ass_subscript`, gh-120384).
+- **The sample**: `bin/pyi lib-test-all --fresh test_dict test_list`, 190 methods: 163 equal, 27 classed, 0 failing
+  (the base: 155, 24, 11).
