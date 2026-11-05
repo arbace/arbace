@@ -26,6 +26,15 @@
 #                                  dump read back by Arbace's reader with every head known at its place
 #                                  (arbace.repr.haskell.stg); --again: a second run into DIR.again, byte for byte
 #                                  equal; sizes and times into DIR/report.edn
+#   bin/hsi dumps --record [--packages P,...]
+#                                  ORS12: the dumps made as above and the packages' STG (those named, else all of DIR/stg but samples) packed
+#                                  into haskell-stg-libs (test/haskell/records/ pin and manifest, the pack in the store; the packages not
+#                                  named kept from the pack in place); by hand, a commit of its own naming :ghc's identity. bin/hsi run, check and
+#                                  aot read the libraries from the pack unless HSI_LIBS names others or HSI_LIVE=1 (run --live, check --live)
+#                                  reads .tmp/hsi/dumps*/stg
+#   bin/hsi record-libs DIR [P,...]   the same packing from an existing dumps directory DIR (its stg/) without dumping
+#   bin/hsi verify-libs --packages P,...|--sample N   the packages (the N smallest of the pack) dumped again by the helper into .tmp/hsi/verify-libs and compared with the pack's
+#                                  members byte for byte (ORS6 (a)'s verdict), and the crossed pair
 #   bin/hsi record-ref [--corpus C,...] [--only ID,...] [--jobs N]
 #                                  GHC 9.14.1's -O0 builds of the run corpora run and recorded into
 #                                  test/haskell/ref-ghc914.edn (status, stdout's SHA-256, size and first line,
@@ -99,6 +108,7 @@ jobs=${HSI_JOBS:-8}
 pin=$(cat "$root/tools/hsdump/GHC_VERSION")
 
 die() { echo "hsi: $*" >&2; exit 1; }
+. "$root/bin/lib/hsi/records.bash" # ORS12: the libraries' and the programs' STG as records
 
 # stage 0 reads the data: ARBACE_HOST_EXE, else the checkout's stage 0, else the main checkout's (never built here)
 arbace_exe() {
@@ -315,15 +325,16 @@ dump_package() { # NAME DIR UNITFLAG FLAGS MODS HSC HFLAGS GENS GFILES OUT
 }
 
 dumps() {
-  local pkgs="" samples="" again="" out=$WORK/dumps nopk=""
+  local pkgs="" samples="" again="" out=$WORK/dumps nopk="" record="" recpk=""
   while [ $# -gt 0 ]; do
     case $1 in
-      --packages) pkgs=,$2,; shift 2 ;;
+      --record) record=1; shift ;;
+      --packages) pkgs=,$2,; recpk=$2; shift 2 ;;
       --no-packages) nopk=1; shift ;;
       --samples) samples=1; shift ;;
       --again) again=1; shift ;;
       --out) out=$2; shift 2 ;;
-      *) die "usage: bin/hsi dumps [--packages P,...|--no-packages] [--samples] [--again] [--out DIR]" ;;
+      *) die "usage: bin/hsi dumps [--packages P,...|--no-packages] [--samples] [--again] [--record] [--out DIR]" ;;
     esac
   done
   mkdir -p "$out"; out=$(cd "$out" && pwd)
@@ -389,6 +400,35 @@ dumps() {
   fi
   [ $bad = 0 ] || die "dumps: failed (see $out)"
   echo "hsi dumps: OK ($out/report.edn)"
+  # ORS12: the packages' STG packed into haskell-stg-libs (by hand, a commit of its own naming :ghc's identity)
+  if [ -n "$record" ]; then hsi_record_libs "$out" "$recpk" || die "dumps --record: failed"; fi
+}
+
+# verify_libs PKG,...: the packages dumped again by the helper into .tmp/hsi/verify-libs, each STG file against the pack's member byte for
+# byte (ORS6 (a)'s verdict) and the crossed pair (the first live file against the last member, which must differ)
+verify_libs() {
+  local pkgs="" n="" o=$WORK/verify-libs u name pk f total=0 ndiff=0 first="" last=""
+  while [ $# -gt 0 ]; do
+    case $1 in --packages) pkgs=$2; shift 2 ;; --sample) n=$2; shift 2 ;; *) die "usage: bin/hsi verify-libs --packages P,... | --sample N" ;; esac
+  done
+  if [ -z "$pkgs" ]; then
+    # the N smallest packages of the pack (by their members' bytes; the big ones, Cabal's 33 MB, take minutes to dump), else every package
+    pkgs=$(awk -F'\t' '!/^#/ && NF {split($1, a, "/"); b[a[1]] += $4} END {for (p in b) print b[p], p}' "$(oracle_manifest "$hsi_libs_pin")" | sort -n | head -"${n:-1000}" | awk '{print $2}' | sort | paste -sd, -)
+  fi
+  dumps --packages "$pkgs" --out "$o" > "$WORK/verify-libs.log" 2>&1 || { tail -5 "$WORK/verify-libs.log" >&2; die "verify-libs: the dumps failed ($WORK/verify-libs.log)"; }
+  name=$(oracle_pin_name "$hsi_libs_pin"); u=$(oracle_unpack "$hsi_libs_pin") || exit 1
+  for pk in ${pkgs//,/ }; do
+    for f in "$o/stg/$pk/"*.stg.ae; do
+      total=$((total + 1)); [ -n "$first" ] || first=$f; last=$u/$name/$pk/$(basename "$f")
+      if [ ! -f "$last" ]; then echo "verify: $pk/$(basename "$f"): UNRECORDED"; ndiff=$((ndiff + 1))
+      elif ! cmp -s "$f" "$last"; then echo "verify: $pk/$(basename "$f"): DIFFERS"; ndiff=$((ndiff + 1)); fi
+    done
+  done
+  oracle_verdict ghc "$(oracle_manifest "$hsi_libs_pin")" "$ndiff" "$total" || exit 1
+  if [ "$total" -ge 2 ]; then
+    if cmp -s "$first" "$last"; then echo "verify: FAILED: the crossed pair is equal: control not judged"; exit 1
+    else echo "verify: the crossed pair differs (control passed)"; fi
+  fi
 }
 
 # spec-check: STG-SPEC.md's checklist (§10) against GHC 9.14.1's sources (the pinned source tarball): every
@@ -526,7 +566,8 @@ runtime_cmd() {
 
 # run_hsi FILE.hs [ARG...]: FILE compiled to STG at -O0 by the helper and run on hsi over the libraries' dumps
 run_hsi() {
-  [ $# -ge 1 ] || die "usage: bin/hsi run FILE.hs [ARG...]"
+  [ "${1:-}" != --live ] || { export HSI_LIVE=1; shift; }
+  [ $# -ge 1 ] || die "usage: bin/hsi run [--live] FILE.hs [ARG...]"
   local f=$1; shift
   ghc_check
   local exe; exe=$(build_hsi)
@@ -536,7 +577,8 @@ run_hsi() {
   (cd "$(dirname "$f")" && "$root/.tmp/hsdump/hsdump" stg -o "$d/stg" --libdir "$libdir" --helper-hash "sha256:$hh" --ghc -O0 \
      -outputdir "$d/obj" --files "$(basename "$f")") > "$d/dump.log" 2>&1 || { cat "$d/dump.log" >&2; rm -rf "$d"; exit 1; }
   local la=() l
-  IFS=: read -r -a dirs <<< "${HSI_LIBS:-$WORK/dumps/stg:$WORK/dumps-extra/stg:$WORK/dumps-more/stg}"
+  local libs; libs=$(hsi_libs) || exit 1
+  IFS=: read -r -a dirs <<< "$libs"
   for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
   local img=${HSI_IMAGE:-$WORK/image}
   if [ "$img" != none ]; then "$exe" image --out "$img" "${la[@]}" 2> "$d/image.log" || { cat "$d/image.log" >&2; exit 1; }; la+=(--image "$img"); fi
@@ -684,6 +726,8 @@ case $cmd in
   pins) pins "$@" ;;
   spec-check) spec_check ;;
   dumps) dumps "$@" ;;
+  verify-libs) verify_libs "$@" ;;
+  record-libs) hsi_record_libs "${1:?usage: bin/hsi record-libs DIR [P,...]}" "${2:-}" "bin/hsi record-libs DIR${2:+ $2} (DIR: a bin/hsi dumps output)" ;;
   exe) arbace_exe ;;
   tests) exec "$root/bin/lib/hsi/tests" "$@" ;;
   record-ref) exec "$root/bin/lib/hsi/record-ref" "$@" ;;
