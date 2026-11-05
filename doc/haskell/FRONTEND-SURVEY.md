@@ -1,0 +1,491 @@
+# Haskell without GHC: a survey of the front end (HES21 (b))
+
+Survey of 2026-11-05 (branch `haskell-frontend-survey`, from `haskell-native`), design only. Question: today hsi
+(`doc/haskell/HASKELL-EVAL-SURVEY.md`, branch `haskell-he5`) interprets GHC's final STG, dumped by a GHC API driver, so a
+Haskell program needs the host's GHC. What is the smallest route from repr/haskell's native parse trees
+(`doc/haskell/NATIVE.md`: GHC 9.14.1's `HsModule GhcPs`, no GHC at read time) to STG that hsi already runs, and what
+does it cost? HES21 (c) there (an Arbace type checker for Haskell, "years") is re-measured here and found smaller if the
+subset is chosen well, and not the same thing as porting GHC.
+
+Sources: the pinned `ghc-9.14.1-src.tar.xz` (SHA-256 `2a83779c...`, `compiler/`, `libraries/`, `nofib/`; the tarball
+carries no `testsuite/`), the host's installed GHC 9.14.1 for the probe of §2.3, and the surveys above. Measured by
+scripts kept in this worktree's `.tmp/src/` (`files.pl`, `closure.pl`, not committed: scratch). What is from memory (prior
+art, licenses, papers) is marked "(memory, verify)".
+
+Contents: Summary · 1 What the front end must produce · 2 Measurements · 3 The pieces · 4 Judging · 5 Prior art ·
+6 Routes and tiers · 7 Milestones HF1-HF12 · 8 Risks · Proposed (HFS1-HFS9).
+
+## Summary
+
+- **The target is smaller than GHC's Core.** hsi runs untyped, A-normal, unarised STG. Types, kinds, coercions, rewrite
+  rules, pragmas and the whole of GHC's simplifier (`Core/Opt`, 43,545 lines) are not needed for a correct run: a probe
+  (§2.3) shows GHC's own `-O0` STG for a 14-line program is the naive desugaring, with dictionaries passed and nothing
+  specialised. What the front end must still decide *with types*: instance selection (dictionary passing), defaulting,
+  deriving, `PrimRep`s of binders (unlifted and unboxed), literals' types, `Typeable`/`HasCallStack` evidence. So a
+  **trusting elaborator** (it needs to be right on programs GHC accepts, not to reject the others) is the target, not GHC's
+  checker.
+- **GHC's front end is 571,824 lines in `compiler/` (820 modules of GHC/), of which the path source to STG** (rename,
+  typecheck, deriving, desugar, prep, to STG, unarise) **is about 150,000 lines** before the support data
+  (Name/Id/Var/Type/Core data types, FastString, UniqFM, Bag: 60,000 more). A faithful port is out of reach as "smallest";
+  a clean elaborator for a measured subset is about 35,000 to 50,000 lines of `.ae`, with GHC's own text ported only
+  where the output is checkable text (deriving's generated code, the match compiler, CorePrep, CoreToStg, Unarise: about
+  11,000 GHC lines).
+- **The subset is not Haskell 2010 alone, if the libraries are compiled from source.** `Prelude`'s transitive closure
+  in `base`/`ghc-internal`/`ghc-prim`/`ghc-bignum` is about 266 modules and 98,000 lines, with `MagicHash` in 101,
+  `UnboxedTuples` in 74, `PolyKinds` in 33, `DataKinds` in 23, `TypeFamilies` in 17, `GADTs` in 17, `RankNTypes` in 23,
+  `ImplicitParams` in 8, `PatternSynonyms` in 7, `GHC.Generics` and `Typeable` machinery all in. The programs that
+  matter for the row (nofib: 88% of 657 files use no extension pragma at all; 6% simple extensions; 2% type-level; 4%
+  `MagicHash`) are Haskell 2010 plus a handful of common extensions. So there are two tiers: **Tier S**, user programs in
+  Haskell 2010 plus the common extensions, **libraries' STG and interfaces taken from the host GHC once, as pinned data**
+  (no host GHC at program build time, GHC only at the pin, as the JVM's jar is for the frozen reference): about 65 to 95
+  working days. **Tier L**, the libraries compiled from source by Arbace too (type families, GADTs, PolyKinds, levity,
+  pattern synonyms, `Generic`, `Typeable`, CPP, hs-boot cycles): about 40 to 70 days more. Neither includes Template
+  Haskell, arrows, or `-O1`.
+- **Judging is cheap where GHC leaves checkable data**: the renamer's resolved names (a `GhcRn` dump), inferred
+  top-level types and instance heads against the installed `.hi` interfaces (the interface level of repr/haskell already
+  reads them, 3.7 million lines of `--show-iface` over the corpus), deriving's text against `-ddump-deriv`, desugared Core
+  and STG at `-O0` against `-ddump-ds-preopt` and `-ddump-stg-final` after normalisation, and hsi's runs against
+  hsi on GHC's STG and against GHC's native runs (the final judge).
+- **Recommended** (HFS1-HFS9): the clean trusting elaborator in tiers (HFS1 (b)), the front end's input the `GhcPs` dump
+  (HFS2 (a)), interfaces from the host as forms for Tier S (HFS3 (a)), Arbace's own Core without types (HFS4 (a)), faithful
+  ports only of deriving, the match compiler, CorePrep, CoreToStg and Unarise (HFS5), `-O0` as the reference and no
+  simplifier (HFS6 (a)), the order HF1-HF8 before the type-level tier (HFS7), and a decision on the HES21 (a) route after
+  HE5, because it is cheaper in front-end days and different in kind (HFS8).
+
+## 1. What the front end must produce
+
+hsi loads STG forms (`HASKELL-EVAL-SURVEY.md` §4): `(stg/bind ID RHS)`, closures with update flags, `case` with its
+alternatives, `let` and `let-no-escape`, constructor and primop applications saturated, each binder's `PrimRep`s and
+arity, a per-module table of data constructors (tag, arity, field representations, strictness marks), literals,
+foreign calls. It is *final* STG: after CorePrep (ANF, saturation, floating of arguments), CoreToStg (free variables,
+update flags, `let-no-escape`, arity), and Unarise (unboxed tuples and sums flattened to their `PrimRep`s; void
+arguments dropped, a function whose arguments are all void keeping one). Names are GHC's external names
+(`module:occ`), because library STG from GHC (HES6) is linked by name: `$fShowInt`, `$WCon`, `$dmshow`, `$p1Ord`,
+class-method selectors, `$trModule`, `$tcT`.
+
+What the front end owes in the other direction (to link with GHC's library STG, Tier S): the dictionary layout of each
+class (the `C:Ord` constructor: superclasses first, then methods, strictness marks), the names of the default methods and
+selectors, which constructors have wrappers (`$WCon`, for strict fields and unpacking: a wrapper must be called, the
+worker assumes evaluated arguments after tag inference), fixities, and an interface per library module with exports,
+types, instances and data constructors (§3.2).
+
+## 2. Measurements
+
+### 2.1 GHC's front end by phase (9.14.1, `compiler/GHC/`, lines of `.hs`; `wc -l`)
+
+| phase | directory | lines | what we would need of it |
+|---|---|---:|---|
+| renamer | `Rename/` (12 modules) | 18,774 | all but `Splice.hs` (1,101): `Env` 2,493, `Names` 2,501, `Expr` 2,911, `Module` 2,877, `HsType` 2,219, `Pat` 1,560, `Bind` 1,547, `Utils` 812, `Unbound` 504, `Fixity` 205 |
+| typechecker, expressions | `Tc/Gen/` | 23,584 | `HsType` 4,783, `Splice` 3,123 (TH: no), `App` 2,337, `Pat` 1,951, `Expr` 1,925, `Bind` 1,917, `Sig` 1,692, `Match` 1,311, `Head` 1,224, `Export` 1,153, `Foreign` 790, `Do` 494, `Arrow` 472 (no) |
+| typechecker, support | `Tc/Utils/` | 16,442 | `Unify` 4,764, `TcMType` 2,483, `TcType` 2,463, `Monad` 2,461, `Env` 1,256, `Instantiate` 1,183, `Concrete` 809 (`Backpack` 1,023: no) |
+| constraint solver | `Tc/Solver/` | 14,899 | `Equality` 3,467, `Monad` 2,458, `Dict` 2,231, `InertSet` 2,142, `Solve` 1,837, `Rewrite` 1,115, `Default` 1,263 |
+| declarations | `Tc/TyCl/` + `Tc/TyCl.hs` | 6,174 + 5,922 | kind inference, classes, instances (`Instance` 2,691), pattern synonyms (`PatSyn` 1,263) |
+| deriving | `Tc/Deriv/` + `Tc/Deriv.hs` | 8,097 + 2,355 | `Generate` 3,104, `Functor` 1,481, `Utils` 1,279, `Infer` 1,118, `Generics` 1,115 |
+| built-in instances | `Tc/Instance/` | 3,759 | `Class` 1,324 (`Coercible`, `KnownNat`, ...), `Family` 944, `Typeable` 789, `FunDeps` 702 |
+| types, zonking, errors, top | `Tc/Types/`, `Tc/Zonk/`, `Tc/Errors/`, `Tc/*.hs` | 6,964 + 3,262 + 15,940 + 20,920 | errors (16k) and plugins: not needed; `Module` 3,334, `Validity` 3,025 (a checker's: not needed) |
+| desugarer | `HsToCore/` (+ `HsToCore.hs` 787) | 23,969 | `Binds` 1,854, `Match` 1,321 (+ `Match/Constructor` 296, `Match/Literal` 725), `Expr` 1,268, `ListComp` 665, `Utils` 1,012, `Monad` 625, `GuardedRHSs` 162, `Foreign/` (C 598, Call 358, Decl 220); not: `Quote` 3,306 (TH), `Pmc/` 4,5xx (warnings), `Ticks` 1,451, `Arrows` 1,259, `Docs` 652, `Usage` 383 |
+| Core: types and data | `Core/` (77 modules) | 91,903 | `Type` 3,438, `TyCon` 3,188, `Coercion` 2,807, `Core/TyCo/` 6,029, `Utils` 3,066, `DataCon` 2,016, `InstEnv` 1,711, `FamInstEnv` 1,607, `Unify` 2,541, `Make` 1,305, `Lint` 4,017 (no) |
+| Core to Core | `Core/Opt/` | 43,545 | not needed: `Simplify/Iteration` 4,827, `OccurAnal` 4,075, `Specialise` 3,736, `ConstantFold` 3,634, `Arity` 3,262, `SpecConstr` 2,946, `DmdAnal` 2,751 ... ; `Core/SimpleOpt.hs` 1,612 is `-O0`'s only optimiser |
+| to STG | `CoreToStg/Prep` 2,858 + `CoreToStg.hs` 900 + `AddImplicitBinds` 151; `Stg/` 7,597 | 3,909 + 7,597 | `Prep`, `CoreToStg`, `Stg/Unarise` 1,193, `Stg/Syntax` 945, `Stg/FVs` 292, `Stg/EnforceEpt` 750 (tag inference: an optimisation) |
+| names and wired-in | `Types/` 31,816, `Builtin/` 11,818, `Data/` 15,197, `Unit/` 11,024, `Utils/` 11,307 | 81,162 | `Builtin/Names` 2,777, `Types` 2,948, `Types/Prim` 1,440, `Types/Id/Make` 2,495 (wrapper/selector/dictionary constructors); the rest is GHC's own data structures, replaced by Arbace's |
+| interfaces | `Iface/` | 19,308 | `Syntax` 3,256, `Type` 2,667, `Tidy` 1,489, `Load` 1,251, `Binary` 749 |
+| driver | `Driver/` | 25,055 | module graph and flags: ours, small |
+
+Whole `compiler/GHC/*.hs`: 571,824 lines.
+
+### 2.2 The programs: extensions in use
+
+`LANGUAGE` pragmas counted per file (scripts `files.pl`, `closure.pl`; a pragma inside a comment is counted when
+it matches, an error of a few per cent; the packages' `default-extensions` and the language edition (`GHC2021` for
+five of the corpus's packages) come on top: `NoImplicitPrelude` is the cabal default of `base` and `ghc-internal`).
+
+| set | files | no pragma at all | simple extensions | type-level | prim (`MagicHash`, unboxed) | CPP |
+|---|---:|---:|---:|---:|---:|---:|
+| `libraries/` (the 41 packages, less tests, Cabal, Win32) | 1,318 | 750 (57%) | 200 (15%) | 96 (7%) | 268 (20%) | 411 (31%) |
+| `nofib/` | 657 | 580 (88%) | 38 (6%) | 15 (2%) | 24 (4%) | 74 |
+| `libraries/*/tests/` | 595 | 462 (78%) | 80 | 23 | 14 | 96 |
+| `compiler/` (GHC itself, HES21 (a)) | 820 | 315 (38%) | 235 | 222 (27%) | 45 | 101 |
+
+("Simple" = bang patterns, lambda case, tuple sections, records' extensions, scoped type variables, flexible
+instances and contexts, multi-parameter classes, deriving extensions, existential quantification; "type-level" =
+RankNTypes, TypeFamilies, GADTs, DataKinds, PolyKinds, QuantifiedConstraints, role annotations, standalone kinds.)
+
+Per extension, files in `libraries/` (base, ghc-internal, ghc-prim and the rest): CPP 411, MagicHash 219, UnboxedTuples
+120, BangPatterns about 200, ScopedTypeVariables 92, RankNTypes 66, PolyKinds 57, StandaloneDeriving 56, TypeFamilies
+43, TypeApplications 40, GeneralizedNewtypeDeriving 38, DataKinds 33, PatternSynonyms 32, GADTs 28, MultiParamTypeClasses
+22, OverloadedStrings 22, FunctionalDependencies 11, ImplicitParams 9, QuantifiedConstraints 7, DerivingVia 4,
+`TemplateHaskell` 0, `Arrows` 0, `RebindableSyntax` 0, `QuasiQuotes` 4 (the testsuite's tests: TH 9, QQ 7). GHC itself:
+TypeFamilies 130, GADTs 89, DataKinds 76, PatternSynonyms 56, DerivingVia 27, TH 3.
+
+Declarations in `libraries/` (lines starting so): `instance` 3,281, `data` 1,147, `deriving instance` 449, `pattern` 324,
+`newtype` 283, `class` 244, `foreign import` 1,197 (hsi's side), type and data families 48, `{-# RULES` 424 and
+`SPECIALISE` 342 (semantic no-ops), `HasCallStack` 285, `deriving ... Generic` 284, `Data` 143, `Lift` 132,
+`mdo`/`rec` about 99, implicit parameters 2. Derived classes by clause: Eq 457, Show 382, Ord 290, Generic 240, Lift
+219, Data 209, Typeable 97, Read 94, Bounded 91, Generic1 54, Foldable 32, Traversable 31, Enum 30, Functor 15.
+
+`Prelude`'s closure (a Hello program's library): 266 modules, 98,421 lines (plus `GHC.Types` and `GHC.Classes` of
+ghc-prim, built in), extensions: NoImplicitPrelude 224, MagicHash 101, CPP 89, UnboxedTuples 74, BangPatterns 64,
+ScopedTypeVariables 37, PolyKinds 33, DataKinds 23, RankNTypes 23, DeriveGeneric 21, GND 20, StandaloneDeriving 19,
+GADTs 17, TypeFamilies 17, TypeApplications 16, ExistentialQuantification 14, ImplicitParams 8, PatternSynonyms 7,
+ViewPatterns 6, UnboxedSums 4, QuantifiedConstraints 2, LinearTypes 1. So every program's libraries need Tier L's
+features; a Tier S front end has them only as the *host's output* (interfaces and STG).
+
+### 2.3 Probe: what GHC does at `-O0` and `-O1` to a small program
+
+`P.hs` (14 lines: a tree type deriving `Show` and `Eq`, an overloaded insertion with guards and an as-pattern, a list
+comprehension, a `do`), compiled by the host's GHC 9.14.1 with `-ddump-ds-preopt -ddump-ds -ddump-prep -ddump-stg-final
+-dsuppress-all -dsuppress-uniques`:
+
+| stage | `-O0` | `-O1` |
+|---|---:|---:|
+| `-ddump-ds-preopt` (the desugarer's output) | 219 lines, 429 terms, 390 types, 3 coercions | 218 lines |
+| `-ddump-ds` (after `simpleOptPgm`) | 171 lines, 318 terms, 269 types, 0 coercions | 167 lines |
+| `-ddump-prep` | 244 lines | 355 |
+| `-ddump-stg-final` | 271 lines | 378 |
+
+At `-O0` the whole Core-to-Core pipeline is the desugarer's `simpleOptPgm` (trivial-binding inlining, beta, case of known
+constructor: `Core/SimpleOpt.hs`, 1,612 lines), and the STG is the naive code: `sum $fFoldableList $fNumInt xs'`,
+`even $fIntegralInt`, `enumFromTo $fEnumInt`, the list comprehension a local recursive `ds` over a `case`, constructors
+`I#! [10#]`. The desugarer also emits, for a one-line `data T`, the Typeable binds (`$tcT = TyCon <two Word64
+fingerprints> $trModule (TrNameS "T"#) 0# krep`, MD5 of the package, module and name: `-dno-typeable-binds` drops them;
+a `Show (TypeRep)` needs them to match), `$fEqT = \ @a $dEq -> C:Eq ($c== $dEq) ($c/= $dEq)`, and dictionary bindings
+`$dShow = $fShowT $dShow` that `simpleOptPgm` inlines (without it the STG has 42 more `let`s; semantics unchanged). `-O1`
+adds worker/wrapper, specialisation and inlining, whose effects are speed and, in imprecise cases, which exception or
+trace comes first (`HASKELL-EVAL-SURVEY.md` §1).
+
+## 3. The pieces
+
+For each piece: GHC's modules and size, what a port costs, what a clean reimplementation costs, how it is judged.
+Estimates of the clean sizes are in lines of `.ae` (the native reader was 12,000 `.ae` lines beside a 4,300-line table
+file for 14,500 lines of GHC plus Happy's construction in one session day; a port has been about 0.8 to 1.0 `.ae` lines
+per GHC line for algorithmic code); days are working days of one agent, as the surveys give them, and the type
+checker's are the least certain.
+
+### 3.1 Input: the `GhcPs` dump
+
+The parse trees are `HsModule GhcPs` as the helper's dump of mode `:lines` (spans with GHC's buffer positions,
+`(L span x)`, nodes, names, operator applications still unresolved, `ECP`/`PatBuilder` already disambiguated by the
+reader). Everything the renamer needs is there (SPEC §8.2). The alternative input is repr/haskell's Haskell forms (what
+`convert` makes); they are for tools and for print, they drop the structure the renamer needs to match GHC's (fixity
+resolution order, source spans for `HasCallStack` strings). Not recommended (HFS2).
+
+Preprocessing is the reader's: CPP is the helper's `cpp` verb today (the host's cpp, for 31% of the libraries' files),
+hsc2hs the helper's for 48 modules. A host-free Tier L needs both on Arbace: CPP in traditional mode (repr/c's `pp` is
+cc's preprocessor ported; a `-traditional` mode of it is the cheapest route: about 1 to 2 thousand lines, 3 to 5 days),
+and hsc2hs's `#{size}`/`#{peek}` templates (it compiles a C program to learn offsets: ci could run it, or the offsets
+are tabled per platform: Linux/amd64 and arm64, a risk, §8).
+
+### 3.2 Names, wired-in knowledge, interfaces
+
+GHC: `Builtin/Names` 2,777, `Builtin/Types` 2,948, `Types/Prim` 1,440, `Types/Id/Make` 2,495 (dictionary constructors,
+selectors, wrappers, `$W`, record selectors), `Iface/*` 19,308 (binary `.hi`).
+Needed: the tuples, unboxed tuples and sums, lists, `->`, `~`, `Coercible`, `TYPE`, the literals' types, the class `Num`
+and friends *by name* for literals and defaulting, the primop table (hsi has it from `primops.txt.pp`), and
+for every imported module an **interface**: exports, type constructors (arity, constructors, newtype or data, roles
+ignored), classes (superclasses, methods and types, fundeps, associated types, default-method names, dictionary
+constructor), instances (head, context, dictionary function name, overlap flags, orphans), type family
+equations, data constructors (type, field labels, strictness, wrapper, representation), values (type scheme, arity,
+details: selector, wrapper, primop), fixities, pattern synonyms, pragma-free. Three sources:
+(1) the helper dumps `ModIface` to forms (`--show-iface` text is already compared by the interface level; a forms dump
+is a modest GHC API driver: about 600 Haskell lines, 3 to 4 days) — Tier S;
+(2) read GHC's binary `.hi` natively: `Iface/Binary` 749, `Iface/Type` 2,667, `Iface/Syntax` 3,256 and the Binary
+class and `FastString` table: a format that changes every release, port 5,000 to 7,000 lines, 8 to 12 days: no;
+(3) Arbace's own interface forms written by its own compile of a module (Tier L, and for the user's own modules in Tier
+S): about 800 lines.
+Clean: wired-in tables 1,500 lines, interface forms and environments 1,500, in total 5 to 8 days with (1).
+Judged: interface forms against `--show-iface` after normalisation for (3), the name tables by the renamer's check.
+
+### 3.3 Renamer
+
+GHC: `Rename/` 18,774 lines. Scoping of every binder form, import and export lists (hiding, qualified, `as`,
+instances flowing in), fixity resolution, dependency analysis of bindings (the SCCs that let-polymorphism needs, and
+type declarations', `Rename/Bind`, `GHC.Data.Graph`), record fields (`DuplicateRecordFields`, `NamedFieldPuns`,
+`RecordWildCards` expanded to the fields in scope), `ScopedTypeVariables`' binding, class and instance method
+binding, `deriving` clauses' names, pattern synonyms, `default` declarations, and the rest of the surface the 3.1
+extensions add.
+Port: 15,000 `.ae` lines (the TH half out), 12 to 16 days. Clean: 6,000 to 9,000 lines, 7 to 10 days. The clean route is
+cheap here because the output is checkable *exactly*.
+Judged: the helper's new `rn` mode dumps `HsGroup GhcRn` reduced to the resolved names (each occurrence
+span to `module:occ` or a local unique, fixities applied as a tree, the binding groups), compared token for token with
+the resolved tree of ours over every corpus module (exact; the 1,226 modules plus nofib). First check with no type
+checker at all.
+
+### 3.4 Kinds and types: the elaborating checker
+
+GHC: `Tc/` about 120,000 lines (§2.1); `Errors` and `Validity` and `Splice` and `Arrow` and `Plugin` out, about 85,000
+in. The checker is OutsideIn(X) with implication constraints, deferred unification, a lazy `TcM`, knot-tying
+declarations (`tcTyClDecls` through `fixM`), and a Core that carries types and coercions all the way.
+**What evaluation needs of it**, by the probe and §1: the *elaboration* only — where dictionaries and evidence go —
+not the rejection of wrong programs. Hence a trusting checker:
+
+- bidirectional inference with higher-rank types (Peyton Jones, Vytiniotis, Weirich, Shields, "Practical type inference
+  for arbitrary-rank types", 2007: about 1,000 lines), `let`-generalisation by dependency groups (without
+  `MonoLocalBinds`: Haskell 2010's; with it when GADTs/TypeFamilies are on), class and instance declarations with
+  superclasses, default methods, instance contexts, multi-parameter classes, flexible and overlapping instances,
+  functional dependencies, defaulting (Haskell 2010 §4.3.4 and the `ExtendedDefaultRules`-free default), overloaded
+  literals and strings, `Typeable`/`Coercible`/`KnownNat`/`HasField`/implicit parameters/`HasCallStack` solved built in;
+- no kind checking beyond what dictionary and representation choices need (kinds trusted from annotations, `Type` by
+  default): *without* `PolyKinds`/`DataKinds` the elaborator needs no kinds at all; `Typeable`'s `krep` data needs them
+  for the `$tc` bindings;
+- evidence: each wanted becomes a dictionary term built from instance functions and superclass selectors (`EvBinds`
+  without the evidence-order machinery), with GHC's names;
+- **type-level tier** (Tier L, §6): type families (open, closed, associated, data families) and their reduction in the
+  solver (`Tc/Solver/{Equality,Rewrite}` 4,582 and `FamInstEnv` 1,607 in GHC), GADT local equalities and existentials
+  (implication constraints, but skolem-escape and ambiguity checks dropped), `DataKinds`/`PolyKinds` kind inference
+  (`Tc/Gen/HsType` 4,783, `Tc/TyCl` 12,000: the biggest single piece, trusted where annotations are given: standalone kind
+  signatures are in 11 of `Prelude`'s closure), `QuantifiedConstraints`, pattern synonyms (matcher and builder
+  functions), `UnboxedTuples`/`UnboxedSums`/levity polymorphism (`($) :: forall r a (b :: TYPE r)`: representations
+  need to flow where unarise needs them).
+
+Port (faithful, all but errors): about 85,000 GHC lines; an agent port runs, measured on repr/haskell's, at
+10 to 12 thousand lines a day for pure algorithmic code, and far less for `TcM` code that is mutable-reference-heavy and lazy
+(`fixM`, `unsafeInterleaveIO`, lazy `Bag`s): 60 to 120 days. Not the smallest route, and its output is no easier to judge
+than the clean checker's (the evidence's order differs wherever any detail does).
+Clean, Tier S: about 14,000 to 20,000 `.ae` lines, 20 to 30 days. Tier L adds about 9,000 to 14,000 lines, 20 to 35 days.
+Judged (§4): inferred types of every top-level binding and every instance head against the interfaces GHC wrote
+(alpha-equivalence, constraint order normalised, `forall` order as GHC's ordering rules give it), then runs.
+
+### 3.5 Deriving
+
+GHC: `Tc/Deriv/` 8,097 + `Tc/Deriv.hs` 2,355. GHC *generates source-level bindings* (`GhcPs` trees) for `Eq`, `Ord`,
+`Show`, `Read`, `Enum`, `Bounded`, `Ix`, `Functor`, `Foldable`, `Traversable`, `Data`, `Lift`, `Generic`, `Generic1`,
+`Typeable`, newtype deriving (by coercion: erased, so a dictionary is reused), `DeriveAnyClass`, `DerivingVia`, and infers the
+instance contexts by a fixpoint over the constraints (`Infer` 1,118).
+Port: `Generate` 3,104 + `Functor` 1,481 + `Utils` 1,279 + `Infer` 1,118 (inference of contexts needs the solver)
++ `Generics` 1,115: about 7,000 `.ae` lines, 8 to 12 days for all classes, 5 to 7 for the nine classic ones. The output
+is text GHC prints (`-ddump-deriv`), so a port is checkable exactly; a clean reimplementation would be shorter and its
+output different, so unjudged except by runs (`Show`'s precedences and `Read`'s lexing must be exact: the libraries' and
+nofib's `show` outputs are the check). **Port**, the `GhcPs` it generates goes through our renamer and checker as GHC's does.
+In the libraries: Eq 457, Show 382, Ord 290, Generic 240, Lift 219, Data 209, Read 94, Bounded 91.
+
+### 3.6 Desugarer
+
+GHC: `HsToCore/` less TH, Pmc, ticks, arrows, docs: about 12,000 lines: `Binds` 1,854 (the evidence and the
+`AbsBinds` flattening), `Match` 1,321 + `Constructor` 296 + `Literal` 725 (the pattern-matching compiler, Wadler's chapter in
+SPJ's book, with GHC's grouping and its tweaks), `Expr` 1,268, `ListComp` 665, `Utils` 1,012, `Monad` 625,
+`GuardedRHSs` 162, `Foreign` (C 598, Call 358, Decl 220), `HsToCore.hs` 787. Covers `do` (with `ApplicativeDo` aside), list
+comprehensions (GHC's foldr/build-free `-O0` translation, which the probe shows), records (construction, update, field
+selectors, wildcards), guards, view patterns, bang patterns and strict `let`, `where` and local polymorphism with dictionary
+abstraction, literals (`fromInteger` at known types folded to `I# 3#`), string literals (`unpackCString#`), `newtype`
+patterns, existential dictionaries in constructors, the Typeable binds, pattern synonyms, `foreign import` wrappers.
+Port: 12,000 `.ae` lines, 10 to 14 days; **clean**: 5,000 to 7,000 lines, 8 to 12 days (the match compiler has to come out
+as GHC's does for the diffs to be small, so a clean desugarer is clean only around it).
+Judged: Core at `-ddump-ds-preopt` of GHC (helper `ds` mode, forms) against ours after the **erased normal form** (§4):
+types, coercions, casts and ticks dropped, alpha-renamed, trivial atom bindings inlined, independent bindings sorted.
+
+### 3.7 Core, CorePrep, CoreToStg, Unarise
+
+GHC: `CoreToStg/Prep` 2,858 (ANF, saturation of constructors and primops, `$WCon` workers, floating, `-O0` "no `seq` on
+unlifted lets" details), `CoreToStg` 900 (free variables, update flags, arity, `let-no-escape`), `Stg/Unarise` 1,193,
+`Stg/FVs` 292, `Stg/Syntax` 945, `Core/SimpleOpt` 1,612 (optional), `Core/Tidy` 440 (naming of exported Ids). The types
+`Core/Syntax` 1,500 and `Core/Make` 1,305 reduce to Arbace's Core (HFS4). Judged exactly: `-ddump-stg-final` at `-O0`
+against ours after renaming, per module, when the desugarer matched; hsi runs after. Port: `Prep`, `CoreToStg`,
+`Unarise`, `FVs` with the Core they consume reduced to the untyped one: 5,500 `.ae` lines, 8 to 12 days (the `PrimRep`
+of every binder comes from the checker's zonked types: the one coupling between type inference and STG).
+
+### 3.8 Optimisation: what we do not port
+
+`Core/Opt` 43,545 lines: none. `-O0` is the reference (HFS6). A later, optional, measured piece: `SimpleOpt`'s inliner
+and case-of-known-constructor, a few hundred lines clean, for the 20 to 30% fewer terms of the probe and for hsi's speed.
+A user's program compiled at `-O0` runs slower than the host's `-O1` one and can differ in imprecise-exception and
+`trace` order from it (§1 of the eval survey): a recorded class, not a failure.
+
+### 3.9 Template Haskell, arrows
+
+`TemplateHaskell` appears in 0 files of the libraries and 3 of GHC; `TemplateHaskellQuotes` in 19 (for `Lift` and
+the `template-haskell` package itself: quotes need `HsToCore/Quote` 3,306, `Rename/Splice` 1,101). Splices need the
+front end to *run* Haskell at compile time: hsi inside the front end, over Arbace's own STG of the libraries: only after
+Tier L, and for the testsuite's TH tests (9 files in the library tests): out of scope; `Arrows` 0 files; `RebindableSyntax` 0.
+
+## 4. Judging
+
+Three levels, in the cost order of the eval survey's references; each stage has an oracle from the host's GHC at the
+pin (never at program build time), cached by key:
+
+| stage | oracle | compare | exact? |
+|---|---|---|---|
+| reader | the helper's `parse` | trees, as today (`native-check`) | yes, done |
+| rename | helper `rn`: resolved names, fixities, binding groups | token for token | yes |
+| types | the corpus's `.hi` (`--show-iface`, already compared by repr/haskell's interface level; for Tier S the interface forms of the helper) | top-level types, instance heads, class and data declarations, per module, after alpha and constraint-order normalisation | yes up to the normaliser |
+| deriving | `-ddump-deriv` text | the generated bindings | yes (port) |
+| desugar | `-ddump-ds-preopt` Core (helper `ds`: forms) | erased normal form (§3.6) | up to the normaliser |
+| prep, STG | `-ddump-stg-final` at `-O0` (`stg` mode of HE2 with `-O0`) | renamed, per binding | up to renaming, when ds matched |
+| run | hsi on the host's STG; GHC's native run | stdout, stderr, exit status, `trace` order, per program | yes |
+
+The **run** level is the final judge for every piece, as in the eval survey; the stage oracles localise a failure and
+make the cheap early milestones possible (the renamer and the types are judged with no STG and no hsi). A stage that
+cannot be judged exactly (the evidence's order, dictionary binder names) is judged after a normaliser written once
+(`arbace.hs.norm`, about 600 lines: alpha, sorting of independent bindings, inlining of trivial atoms and
+`$dX = $fY` bindings, erasure) and the normaliser itself is checked on GHC's own output at `-O0` against
+`-O0` with a different unique supply (two GHC runs equal after it).
+Negative controls (GTS81 (a)): a module judged against another module's reference at each stage must fail.
+Corpora: the 1,226 modules (types and rename, which need no run), nofib's 657 files (about 88% in Tier S's
+subset; runs against GHC's), `libraries/*/tests/` (595; 462 with no extension), and the testsuite's `all.T` run tests
+(HE3, a separate pin: the tarball carries none); the synthetic corpus of HE3 gets a layer per feature of §2.2.
+
+## 5. Prior art
+
+All from memory, to verify (a fetch of each project's repository would confirm sizes and licenses; none was made):
+
+- **Typing Haskell in Haskell** (Mark P. Jones, 2000): Haskell 98's type inference with type classes, defaulting,
+  binding groups, in about 500 lines of Haskell; the clearest specification of what Tier S's checker must compute;
+  not a compiler (no elaboration), freely usable. Worth reading as the spec of `HF4`'s core.
+- **MicroHs** (Lennart Augustsson; Apache-2.0 (memory, verify)): a Haskell compiler in Haskell, about 15,000 lines in its
+  `src/MicroHs/`, `TypeCheck.hs` a few thousand lines: type classes by dictionary passing, multi-parameter classes,
+  fundeps, GADT syntax, existentials, higher-rank with annotations, deriving, records, many extensions, its own
+  `Prelude`/`base` (not GHC's) and its own back end (combinators, a small C runtime). It shows that a trusting
+  dictionary-passing elaborator for most of the *common* extensions is about 5,000 lines. Its libraries are not
+  `ghc-internal`, so its output is not hsi's STG nor linkable with GHC's libraries: useful as a design and a source of
+  tests for Tier S, not as a part (HFS1 (d)). It supports a subset of type families only, as far as I remember.
+- **Hugs 98** (BSD-like, memory, verify) and Mark Jones's THIH: the design Tier S follows (dictionary passing, no
+  type-level programming beyond multi-parameter classes with fundeps and rank-2).
+- **Frege** (Ingo Wechsung; BSD-3, memory, verify), **UHC/EHC** (Utrecht; BSD-3; the type checker is attribute
+  grammars), **nhc98/Yhc**: prior Haskell front ends of other designs; the first's checker is a readable
+  small clean one (JVM). **Helium** (Utrecht; GPL: not read for a port) and **jhc** (GPL2: same): clean-room rule.
+- **GHC itself** (BSD-3, `LICENSE.md` already lists the reader's ports of it): the only front end whose libraries are
+  `ghc-internal`; porting is allowed and recorded (origin, path, revision in `doc/ARBACE.md`, license in `LICENSE.md`).
+- Papers (memory, verify): Peterson and Jones, "Implementing type classes" (1993); Jones, "Type classes with
+  functional dependencies" (2000); SPJ et al., "Type checking with open type functions" (2008) and "OutsideIn(X)"
+  (2011); Eisenberg, "System FC with explicit kind equality" (2013); Wadler's chapter on pattern matching in SPJ's
+  "The implementation of functional programming languages" (1987); Marlow and SPJ, "Making a fast curry" (STG).
+
+## 6. Routes and tiers
+
+Four routes to "STG from native parse trees":
+
+- **R1, faithful port of GHC's phases** to Arbace: about 85,000 + 18,000 + 12,000 + 11,000 GHC lines plus the data
+  structures; 250 to 320 days; the result is GHC's front end in Arbace. The only route where the stage dumps agree exactly
+  by construction. Rejected as the *smallest*; the right shape for deriving, the match compiler, CorePrep, CoreToStg, Unarise.
+- **R2, clean trusting elaborator**, GHC's text ported only where it emits checkable text (R1's small parts), types judged
+  by the interfaces: the recommendation. Tiers:
+  - **Tier S** (HF1-HF8): user programs, Haskell 2010 plus the common extensions of §2.2's "simple" column and rank-N,
+    existentials, multi-parameter classes with fundeps, GND, `deriving` of the classic nine, records with their
+    extensions, `HasCallStack`/`Typeable` evidence; libraries by the host's STG and interfaces (data, pinned).
+  - **Tier L** (HF9-HF11): type families, GADTs, DataKinds, PolyKinds, pattern synonyms, `Generic`/`Data`/`Lift`
+    deriving, unboxed tuples and sums with their representations, CPP and hsc2hs, hs-boot cycles: the libraries from source.
+- **R3, GHC's own front end as STG on hsi** (HES21 (a)): the `ghc` library compiled by the host's GHC once (as the
+  libraries are), run by hsi (or compiled by HE8's AOT) with a driver as `tools/hsdump` is. No front-end days (the days
+  go to hsi's completeness: GHC needs the RTS's file, process, `getrusage`, `mmap`, `unsafePerformIO` global state,
+  `Foreign`, hundreds of C symbols, and speed: GHC compiled to STG and interpreted is two orders slower than native, so
+  AOT is needed, and the 1,000+ modules of `ghc` plus its dependencies (`containers`, `process`, `directory`, `filepath`,
+  `ghc-boot`, `ghci` ...) are in the pinned set); the front end is then a *seed*, not derived by hand, and not
+  Arbace-readable in the way CLAUDE.md's "derivation done once by hand" wants. Its cost after HE5: 15 to 30 days
+  (the GHC API driver, the module graph, the missing RTS pieces, speed) plus HE8; the host's GHC is needed once, at the pin.
+- **R4, MicroHs on hsi** (HES21 (b) in the eval survey): its own `base`, so STG is not the judge's and library-linked
+  tests do not apply; rejected as the route, kept as prior art.
+
+Tier S's reasoning (smallest): a user's program in Tier S needs a renamer, an elaborating checker for the subset, deriving,
+a desugarer, CorePrep, CoreToStg and Unarise, interface forms from the host once, and nothing of the type-level tier.
+It runs nofib (88% plain), the libraries' tests (78% plain) and the corpus of `HE3`'s language-core tests that stay in
+the subset. What remains host-dependent in Tier S: the libraries' STG and interfaces (pinned data generated by the host's GHC;
+a program build needs no GHC, a re-pin does). Tier L removes that last dependency.
+
+## 7. Milestones (HF1-HF12)
+
+Working days; each milestone ends with its check green and its records. Dependencies: HF1-HF3 need no hsi; HF8 needs HE4
+(the machine) and the libraries' STG of HE2; the tiers' order is HFS7.
+
+| milestone | content | exit criteria | days |
+|---|---|---|---:|
+| **HF1** oracles and the normaliser | helper modes `rn`, `iface-forms`, `ds`, `prep` (beside HE2's `stg`, at `-O0`); `arbace.hs.norm`; corpora and the references of §4; the controls | every corpus module dumped at each stage, the normaliser's self-check on two GHC runs | 4-6 |
+| **HF2** names and the renamer | wired-in tables, the environments, the `Rename/` surface of Tier S, interface forms read | the 1,226 corpus modules' names and fixities equal GHC's `rn` dump | 12-18 |
+| **HF3** types, Tier S | the elaborating checker of §3.4's first list; defaulting; built-in `Typeable`, `HasCallStack`, `Coercible` as erasure; types of top-level binders | every Tier S module's inferred types equal the `.hi`'s; the Haskell 2010 samples elaborate | 20-30 |
+| **HF4** deriving | the nine classic classes, GND, standalone, `DeriveAnyClass` as GHC generates | `-ddump-deriv` equal on the corpus's derived instances; `show`/`read` runs | 6-10 |
+| **HF5** desugar | the match compiler, binds with evidence, `do`, comprehensions, records, literals, Typeable binds | the Core equal after normalisation on the Tier S corpus, a class per remaining diff | 8-12 |
+| **HF6** to STG | CorePrep, CoreToStg, Unarise, the data-constructor table; ABI with the host's library STG (wrappers, dictionary layout, void arguments) | STG equal to `-O0`'s after renaming on the Tier S corpus | 8-12 |
+| **HF7** first light | `bin/hsi build FILE.hs --front arbace`: the program's STG linked to the libraries' STG, run | nofib's plain programs and the samples: stdout equal to GHC's, every non-pass classed | 5-8 |
+| **HF8** Tier S check | the cells of the row (`read`, `eval`) over the Tier S corpora, controls, essential subset, a gate step with `:parts` | judged by `bin/reap`; the nightly's share | 3-5 |
+| **HF9** type-level tier | type families and fundeps, GADTs, DataKinds/PolyKinds kinds, QuantifiedConstraints, pattern synonyms, unboxed tuples and levity, `Generic`/`Data`/`Lift` | the Prelude closure's types equal the `.hi`'s; its modules elaborate | 20-35 |
+| **HF10** libraries from source | CPP (traditional) and hsc2hs on Arbace, hs-boot cycles, the module graph, foreign import, `ghc-internal` then `base` ... the 41 packages | the packages' STG at `-O0` equal to the host's `-O0`, then libraries from Arbace run the corpus | 15-30 |
+| **HF11** speed | `SimpleOpt`-like inliner, the checker's speed on the compiled build (`ARBACE_AOT=1`) | the 1,226 modules in the nightly's share | 5-10 |
+| **HF12** the milestone | the row without host GHC at build time; `bin/gate --full --clean` | the tag | 2-4 |
+
+Totals: **Tier S (HF1-HF8): 66 to 101 days; with Tier L (HF9-HF12): 108 to 180 days.** HF3, HF9 and HF10 are the
+long poles and the least certain (HF3 by a factor of 1.5 either way). Sonnet and Opus split (the user's): Opus for HF3
+and HF9 (the checker, the solver, GADTs), HF6's ABI, the equality of Core; Sonnet for HF1, the renamer's mechanical
+parts, HF4 and HF5's ports from GHC's text, HF8, HF12's records.
+
+## 8. Risks
+
+- **The checker's scope creeps toward GHC's.** Every extension the libraries use pulls in solver features; Tier S
+  stops at the boundary by taking the libraries as data. The boundary is a *measured* one (§2.2); drift is watched by a
+  corpus of Tier S modules whose extension set is fixed.
+- **ABI with GHC's `-O1` library STG** (Tier S only): dictionary layouts and names, wrappers for strict fields (calling
+  a worker with an unevaluated argument breaks GHC's tag assumptions: hsi does not use tags, but the desugarer must still
+  call `$WCon`), void-argument conventions after unarise, `Typeable` fingerprints (MD5 over package, module and name;
+  needed to equal `$tc` bindings), class-method selector names, specialisations (`$s...`) that exist only inside the
+  library. Mitigation: HF1 dumps the libraries' interfaces *and* a table of their STG top-level binders' arities and
+  representations; HF6 checks every library reference of the corpus against it.
+- **Laziness.** GHC's front end relies on lazy knot-tying (`fixM`, lazy interface loading); an Arbace port is strict:
+  the clean checker's declarations are processed in dependency order with explicit knots (kind and class environments
+  filled in two passes). A reason for R2 over R1.
+- **Representation inference** is the one place the type checker must be exact on the *typed* side: a binder of an
+  unlifted type has a different `PrimRep` and a wrong guess breaks hsi. Tier L's levity polymorphism and `UnboxedSums`
+  sharpen it; Tier S sees them only through library interfaces' types.
+- **Speed.** A checker for `ghc-internal` (94,418 lines) running on Arbace: the corpus nights are a budget (GT8). Only the
+  compiled build is realistic (`ARBACE_AOT=1`); HF11.
+- **CPP and hsc2hs on Arbace** (Tier L): traditional-mode CPP is small; hsc2hs's offsets need a C compiler or a table: ci
+  can run `hsc2hs`'s generated C, or the offsets are recorded per platform from the host (data, pinned).
+- **The judge's normaliser hides real bugs** if made too liberal: it is checked on GHC's own output, the controls fail
+  by design, and the run level is the final word.
+- **GHC drift** (9.14.1 is pinned): each stage's tables (wired-in names, deriving text) are per version; a port of
+  deriving and CorePrep moves with GHC by diff, the clean checker not at all (HFS1).
+- **Sheer length of Tier L** (40 to 70 days beyond Tier S) and of HF9's solver: a stop after Tier S still gives the
+  user programs a GHC-free build, with the host GHC at the pin alone; HFS8 (R3) is the fallback for the libraries.
+
+## Proposed (HFS1-HFS9)
+
+For the user's decision; recommendations only.
+
+- **HFS1 The route.**
+  - Options: (a) R1, the faithful port of GHC's phases: 250 to 320 days, stage dumps agree by construction, no
+    drift to design; (b) R2, the clean trusting elaborator in tiers with faithful ports of the text-emitting parts:
+    Tier S 66 to 101 days, Tier L 108 to 180 in all; (c) R3, GHC's front end run on hsi (HES21 (a)): 15 to 30 days after HE5
+    plus HE8, a seed not derived by hand; (d) R4, MicroHs on hsi or as a base: its own `base`, not the judge's.
+  - *Recommended: (b)*, Tier S first and Tier L after a decision at HF8; (c) is not exclusive and can be measured
+    cheaply after HE5 as an *oracle* (GHC's front end on hsi against Arbace's), HFS8.
+- **HFS2 The front end's input.**
+  - Options: (a) the `GhcPs` dump of the native reader (spans and all; the renamer's natural input); (b) repr/haskell's
+    Haskell forms (`convert`'s output); (c) the forms with a new "renamer-ready" layer.
+  - *Recommended: (a)*: no loss, the reader's `native-check` already proves it equal to GHC's parse.
+- **HFS3 Interfaces of the libraries in Tier S.**
+  - Options: (a) the helper dumps each `ModIface` as forms (about 600 Haskell lines, 3 to 4 days), pinned with the
+    libraries' STG; (b) a native `.hi` reader (5,000 to 7,000 lines, 8 to 12 days, format changes every release); (c)
+    `--show-iface` text parsed (it is lossy for unfoldings and breaks lines by width: the interface level compares it
+    by tokens).
+  - *Recommended: (a)*; (b) only if Tier S must run with no helper at all, which Tier L's own interfaces will anyway.
+- **HFS4 The Core of the front end.**
+  - Options: (a) Arbace's own untyped Core (lambda, application, `let`, `letrec`, `case` with its alternatives, literals,
+    constructor and primop applications), each binder carrying its `PrimRep` list and its name, types gone at the
+    desugarer's input; (b) GHC's typed Core with coercions (`Core/Syntax`, `Type`, `TyCo`, `Coercion`: 18,000 lines more),
+    which makes `Lint` and the simplifier possible and the front end 2.5 times larger.
+  - *Recommended: (a)*; (b) only with R1.
+- **HFS5 What is ported from GHC's text.**
+  - Options: (a) deriving's generators (7,000 `.ae` lines), the match compiler (`Match*`: 2,342), CorePrep (2,858),
+    CoreToStg (900), Unarise (1,193): the parts whose output is checkable text, 11,000 GHC lines, 12,000 `.ae` lines;
+    (b) everything clean; (c) more (`Binds`, `Expr`, `Utils` of the desugarer).
+  - *Recommended: (a)*, (c) where HF5's diffs show it.
+- **HFS6 The optimisation level.**
+  - Options: (a) `-O0` is the reference and the front end has no simplifier; `SimpleOpt`-like inlining later for speed
+    (HF11); (b) `-O1`'s STG as the reference (worker/wrapper, specialisation, `Core/Opt` 43,545 lines: no); (c) `-O0`
+    reference plus a tiny optional inliner from the start.
+  - *Recommended: (a)*; records a class (imprecise exceptions, `trace` order, speed) against the host's `-O1` runs.
+- **HFS7 The order.**
+  - Options: (a) HF1 and HF2 now (no hsi needed; the renamer is judged exactly against the helper), HF3-HF6 beside HE4, HF7 at HE4's
+    first light; (b) HF1-HF8 after HE5 and HE6; (c) Tier L first (the libraries from source) to prove Haskell without GHC for
+    the harder code.
+  - *Recommended: (a)*: the renamer and the type inference (HF2, HF3) are judged by data and cost no night's
+    budget; HE4 sets the order for the rest.
+- **HFS8 GHC's front end on hsi as the oracle or the fallback (R3).**
+  - Options: (a) after HE5, measure it as an oracle (`ghc` library compiled by the host's GHC, the stage dumps from
+    hsi's run of it equal the helper's: a test of hsi and a second oracle) and decide at HF8; (b) adopt it as the
+    standalone front end instead of Tier L (HES21 (a)); (c) never.
+  - *Recommended: (a)*; the choice between (b) and Tier L is the user's after Tier S exists.
+- **HFS9 Reuse and licenses.**
+  - Options: (a) ports of GHC's text under BSD-3 recorded as the reader's are (`doc/ARBACE.md`, `LICENSE.md` extended for
+    each module ported); MicroHs and Hugs read as design only, THIH as the checker's specification, no copying from
+    GPL projects (Helium, jhc); (b) also vendor MicroHs's checker with an Apache-2.0 notice; (c) only GHC.
+  - *Recommended: (a)*; (b) revisited if Tier S's checker stalls.
+
+What to decide first: HFS1 (the route) and HFS7 (when); HFS3 and HFS4 follow from them. HF1 and HF2 are a cheap
+trial with no commitment (about 16 to 24 days): the renamer is judged exactly, and its size re-estimates the checker's.
