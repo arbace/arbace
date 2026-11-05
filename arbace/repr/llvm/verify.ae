@@ -962,7 +962,7 @@
     (let [t (resolve-type (norm-type (first a)))]
       (when (or (= t 'label) (= t 'void) (= t 'opaque) (named-type? t) (and (seq? t) (= 'fn (first t))))
         (verr :parser/arg-type "invalid type for function argument" {:at [:call-arg i]}))))
-  (when (and *caller-varargs* (= (:tail o) :musttail))
+  (when (and *caller-varargs* (= (:tail o) :musttail) (not (:ellipsis o)))
     (verr :parser/musttail "expected '...' at end of argument list for musttail call in varargs function" {:at [:find-last ")"]}))
   (check-attr-placement :ret (:ret-attrs o)) (check-attr-values (:ret-attrs o))
   (doseq [a (nth ps 2)] (let [as (param-attrs a)] (check-attr-placement :param as) (check-attr-values as)))
@@ -1486,6 +1486,17 @@
         (let [[_ rps] (split-inst nb)]
           (when (and (not= (first rps) 'void) (not= (second rps) (result x)))
             (verr :verifier/musttail "musttail call result must be returned" [:inst nxt]))))
+      (when (#{"tailcc" "swifttailcc"} (:cconv o))
+        ;; the tail calling conventions: no ABI attributes on either side, no varargs caller; nothing else checked
+        (let [cc (:cconv o)
+              chk (fn [attrs ctx]
+                    (visiting
+                     (doseq [[n m] [["inalloca" "inalloca"] ["inreg" "inreg"] ["swifterror" "swifterror"] ["preallocated" "preallocated"] ["byref" "byref"]]]
+                       (when (has-attr? attrs n) (verr :verifier/musttail (str m " attribute not allowed in " ctx) :none)))))]
+          (doseq [p (remove #{'&} cps)] (chk (group-items (param-attrs p)) (str cc " musttail caller")))
+          (doseq [a args] (chk (group-items (param-attrs a)) (str cc " musttail callee")))
+          (when cvar? (verr :verifier/musttail (str "cannot guarantee " cc " tail call for varargs function") :none))
+          (throw (ex-info "tailcc done" {::tailcc true}))))
       (when-not intr?
         (when-not (= (count cpl) (count ty-params)) (verr :verifier/musttail "cannot guarantee tail call due to mismatched parameter counts"))
         (doseq [[a c] (map vector cpl ty-params)]
@@ -2857,7 +2868,8 @@
                       (when ('#{call invoke callbr} hd)
                         (check-call-site b defs)
                         (when (and (= hd 'call) (= :musttail (:tail (nth (split-inst b) 2))))
-                          (check-musttail f x b items ii defs)))
+                          (try (check-musttail f x b items ii defs)
+                               (catch arbace.lang.ExceptionInfo e (when-not (::tailcc (ex-data e)) (throw e))))))
                       ;; visitInstruction: self-references, dominance, metadata attachments
                       (let [r (result x) us (uses b)]
                         (doseq [[v t blk] us]
