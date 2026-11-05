@@ -275,6 +275,25 @@
     :class (conj (vec (:path (cls (:id t)))) [:cls (:id t)])
     :enum (conj (vec (:path (enm (:id t)))) [:enum (:id t)])))
 
+(declare mangle-fn)
+
+(defn- local-split
+  "[function rest] when the path is local to a function (its last [:local f] part), else nil."
+  [path]
+  (let [path (vec path)
+        i (last (keep-indexed (fn [i p] (when (= :local (first p)) i)) path))]
+    (when i [(second (nth path i)) (subvec path (inc i))])))
+
+(defn- local-name
+  "<local-name> ::= Z <function encoding> E <entity name> (§5.1.6): the entity's parts after the function, nested
+  when more than one, then `tail` (a function's unqualified name, or nothing for a type)."
+  ^String [f rest ^String tail cq]
+  (let [enc (subs (mangle-fn f) 2)]
+    (str "Z" enc "E"
+         (if (and (= 1 (+ (count rest) (if (seq tail) 1 0))) (not cq))
+           (str (when (seq rest) (part-name (first rest))) tail)
+           (str "N" (when cq "K") (mangle-prefix rest) tail "E")))))
+
 (defn- mangle-named
   "A class or enumeration type's name: a source name at the global scope, else N prefix E; a substitution candidate."
   ^String [t]
@@ -283,6 +302,7 @@
         i (.indexOf ^java.util.List @*subs* k)]
     (cond
       (not (neg? i)) (seq-id i)
+      (local-split parts) (let [[f rest] (local-split parts) s (local-name f rest "" false)] (swap! *subs* conj k) s)
       (= 1 (count parts)) (mangle-prefix parts)
       :else (str "N" (mangle-prefix parts) "E"))))
 
@@ -422,10 +442,12 @@
                                   (seq-id i))))
                             (str "I" (apply str (map-indexed (fn [i a] (str (when-let [t (get (:tn ti) i)] (str "Tn" (mangle-type* t))) (template-arg a))) (:args ti))) "E"))
                        (str out (unqualified-name f variant))))
-             enc (if (empty? path)
-                   (str (when (:internal-l f) "L") (uname ""))
-                   (let [pre (mangle-prefix path)]
-                     (str "N" (when (:cq f) "K") (uname pre) "E")))
+             enc (cond
+                   (empty? path) (str (when (:internal-l f) "L") (uname ""))
+                   ;; a member of a local class
+                   (local-split path) (let [[lf rest] (local-split path)] (local-name lf rest (uname "") (:cq f)))
+                   :else (let [pre (mangle-prefix path)]
+                           (str "N" (when (:cq f) "K") (uname pre) "E")))
              sig (if ti (:tsig ti) (:ty f))]
          (str "_Z" enc
               (when (and ti (not (#{:ctor :dtor :conv} (:kind f)))) (mangle-type* (:ret sig)))

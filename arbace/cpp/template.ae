@@ -54,7 +54,8 @@
 (def ^:dynamic *tmpls* nil)
 
 (defn- same-arg? [a b] (if (and (map? a) (contains? a :val)) (= (:val a) (:val b)) (= a b)))
-(def ^:dynamic *scanned* nil) ; atom #{[:fn id] [:var id]} the pending scan has walked
+(def ^:dynamic *scanned* nil)
+(def ^:dynamic *instance* nil) ; the class specialization being declared, or nil ; atom #{[:fn id] [:var id]} the pending scan has walked
 
 (defn tmpl [tid] (get @*tmpls* tid))
 (defn- upd-tmpl! [tid f & args] (apply swap! *tmpls* update tid f args))
@@ -736,7 +737,7 @@
                                                                     (catch arbace.lang.ExceptionInfo _ true))
                                                            i))
                                               (:bases node))))))
-      (binding [sema/*cutoff* Long/MAX_VALUE]
+      (binding [sema/*cutoff* Long/MAX_VALUE *instance* (when-not explicit? cid)]
         (sema/declare-node! ps (assoc (strip-tparam-kids node) :kind "CXXRecordDecl")))
       ;; the members' definitions: instantiated when used ([temp.inst]/11), linkonce_odr as clang writes them
       (when-not explicit?
@@ -1021,6 +1022,53 @@
 (defn- find-template [scope nm tk]
   (some #(when (and (= :tmpl (:e %)) (= tk (:tk %))) (:id %)) (.get ^java.util.HashMap (:names scope) nm)))
 
+(declare declare-template)
+
+
+(defn- friend!
+  "A friend declaration in a class: a function (or function template) defined there is a member of the innermost
+  enclosing namespace ([class.friend]/6-7), inline, its body's names those of the class; a declaration alone or a
+  friend class adds nothing here (access is not checked)."
+  [scope n]
+  (let [k (first (kids n))
+        ns (loop [s scope] (if (or (nil? s) (= :ns (:kind s))) s (recur (:parent s))))
+        ;; the class's names visible from the body, the namespace's path for mangling
+        fs (new-scope :tparams scope :path (:path ns) :cls nil :internal (:internal ns))]
+    (case (:kind k)
+      "FunctionDecl"
+      (when (some #(= "CompoundStmt" (:kind %)) (kids k))
+        ;; declared in the class's names (its type may name the class's parameters), entered in the namespace, or
+        ;; defining the namespace's earlier declaration of it
+        (let [fid (#'sema/declare-fn! fs k)
+              f (sema/fnd fid)
+              old (some (fn [e] (when (and (= :fn (:e e)) (#'sema/same-sig? (sema/fnd (:id e)) f)) (:id e))) (.get ^java.util.HashMap (:names ns) (:name k)))
+              id (or old fid)]
+          (when old
+            (upd-fn! old assoc :body (:body f) :node k :def-scope fs :param-names (:param-names f) :inline true)
+            (upd-fn! fid dissoc :body))
+          (when-not old (enter! ns (:name k) {:e :fn :id fid :pos (long (or (:_b k) 0))}))
+          (upd-fn! id assoc :def-scope fs :inline true)
+          (when *instance* (upd-fn! id assoc :lazy true))))
+      "FunctionTemplateDecl"
+      (let [pat (first (filter #(= "FunctionDecl" (:kind %)) (kids k)))]
+        ;; each class specialization's friend template is a template of its own (its signature names the class)
+        (when (some #(= "CompoundStmt" (:kind %)) (kids pat))
+          ;; or the definition of the namespace's earlier declaration of the template
+          (if-let [old (some #(when (and (= :tmpl (:e %)) (= :fn (:tk %))
+                                         (let [o (tmpl (:id %))]
+                                           (and (not (some (fn [x] (= "CompoundStmt" (:kind x))) (kids (:pattern o))))
+                                                (= (get-in pat [:type :qualType]) (get-in (:pattern o) [:type :qualType]))
+                                                (= (count (tparams k)) (count (:params o))))))
+                               (:id %))
+                             (.get ^java.util.HashMap (:names ns) (:name k)))]
+            (upd-tmpl! old assoc :pattern pat :params (tparams k) :scope fs :sig nil)
+            (let [tid (next-id)]
+              (swap! *tmpls* assoc tid {:id tid :tk :fn :name (:name k) :scope fs :path (:path ns) :params (tparams k) :pattern pat
+                                        :pos (:_b k) :insts {}})
+              (enter! ns (:name k) {:e :tmpl :tk :fn :id tid :pos (long (or (:_b k) 0))})))))
+      nil)
+    :template))
+
 (defn- explicit-member-spec!
   "An explicit specialization of a member of an implicitly instantiated class template specialization
   ([temp.expl.spec]/14): the specialization's member given this definition, an ordinary (not inline) one."
@@ -1105,7 +1153,7 @@
           qt (get-in pattern [:type :qualType])
           ;; a redeclaration (a declaration, then the definition) is the same template
           old (some #(when (and (= :tmpl (:e %)) (= :fn (:tk %)) (= qt (get-in (:pattern (tmpl (:id %))) [:type :qualType]))
-                                (= (count (tparams n)) (count (:params (tmpl (:id %))))))
+                                (= (map (juxt :kind :qt :pack) (tparams n)) (map (juxt :kind :qt :pack) (:params (tmpl (:id %))))))
                        (:id %))
                     (.get ^java.util.HashMap (:names scope) (:name n)))]
       (if old
@@ -1118,6 +1166,7 @@
             (abi/update-cls! (:cls scope) update :ctor-tmpls (fnil conj []) tid)
             (enter! scope (:name n) {:e :tmpl :tk :fn :id tid :pos (long (or (:_b n) 0))}))))
       :template))
+    "FriendDecl" (friend! scope n)
     ;; an explicit instantiation (template struct A<int>; extern template ...): the definitions clang emits weak_odr are
     ;; emitted here only when used (the names check takes ours among clang's)
     "ExplicitInstantiationDecl" :template
@@ -1217,6 +1266,13 @@
           out (atom [])]
       (doseq [id fns :let [f (sema/fnd id)] :when (:lazy f)]
         (upd-fn! id dissoc :lazy)
+        ;; a specialization declared before its template was defined (a friend's definition in a class instantiated
+        ;; later): its definition taken from the template now, as clang's end-of-unit instantiation sees it
+        (when-let [ti (and (not (:body f)) (:tinst f))]
+          (let [t (tmpl (:tid ti)) pat (:pattern t)]
+            (when-let [body (first (filter #(= "CompoundStmt" (:kind %)) (kids pat)))]
+              (upd-fn! id assoc :body body :node pat :def-scope (bind-scope (:scope t) (:params t) (:args ti) nil)
+                       :param-names (mapv :name (filter #(= "ParmVarDecl" (:kind %)) (kids pat)))))))
         (swap! out conj [:fn id]))
       (doseq [id (:vars @acc) :let [v (sema/var* id)] :when (:pending-def v)]
         (upd-var! id #(-> % (assoc :defined true) (dissoc :pending-def)))
