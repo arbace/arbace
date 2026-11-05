@@ -399,3 +399,37 @@ a time. The AOT runtime's mirror of fixes 4 and 5 (`jdk/ocaml/ocaml/rt`) is the 
 The run corpus 333 to **362 run programs** (543 with a `.reference` in it: 13 moved to the suite), oi **281 to 305 pass**, 0 failing
 (`bin/oi divergences`); the suite corpus 98 to **118 run programs**, **87 to 99 pass**, 0 failing (`bin/oi suite divergences`). The matrix's
 eval cell (`check-oi.edn` + `check-suite-oi.edn`) **368 to 404 pass**, the 6 double-counted programs counted once. oi's essential subset: 58 of 58.
+
+### The night's record commands (after this branch; in this order, the compiled level heavy)
+
+The lists run today merged their rows into the records; the whole corpora were not rerun. A whole run re-records them (the corpus
+files changed: 13 programs moved to the suite, 28 thread programs and 15 suite programs newly run; the runtime and oi changed):
+
+    bin/oi record-ref && bin/oi suite record-ref    # the references of every run program (today: only the newly run ones, by list)
+    bin/oi check --record                           # oi, the run corpus (362 programs)
+    bin/oi suite check --record                     # oi, the suite corpus (118 programs)
+    bin/oi check --aot --record                     # the light level: the runtime changed (Fd, ExtUnix, threads)
+    bin/oi suite check --aot --record
+    O2J_SHARD=20 bin/oi check --aot --level compiled --record        # every run program: 19 shards, about 2.5 h
+    O2J_SHARD=20 bin/oi suite check --aot --level compiled --record
+    bin/oi pins --attest                            # the pins of the new known entries, from those runs' rows
+    bin/oi divergences && bin/oi suite divergences && bin/oi divergences --aot && bin/oi divergences --compiled && bin/oi pins
+    bin/reap record                                 # the OCaml row: eval and AOT cells
+
+### Proposed (OT16-OT19; none decided)
+
+- **OT16 `lib-channels/close_during_flush` until signals.** It needs `Unix.alarm`'s handler to empty a full pipe; without it oi's (and the
+  runtime's) exit flush blocks until the wall cap, 4 × `OI_TIMEOUT` (8 minutes of one job slot a whole run). (a) as built: a known entry,
+  the wall cap paid each whole run; (b) the run corpus's header reading classes the tests that call `Unix.alarm` or `Sys.signal` with
+  `include unix` until fix 7 (a grep of the source, 6 programs, no run); (c) oi's fatal-path flush skips a descriptor whose write would
+  block (a divergence from C's runtime, which blocks too). *Recommended: (b)* until fix 7: no cost a night, and the class says why.
+- **OT17 Threads' scheduling.** As built, threads first take the lock in their creation order and then compete for Go's mutex, which is not
+  FIFO; OCaml's master lock hands over to waiters in order, which racy-output tests print (17 pass, none fails on order today). (a) as built;
+  (b) a ticket lock for the interpreter's lock (FIFO hand-over at every release): half a day, a few percent slower under contention.
+  *Recommended: (a)*, (b) when a test needs it.
+- **OT18 Signals of threads and processes** (`sigprocmask`, `sigwait`, `Thread.sigmask`, `alarm`, `kill`: `lib-systhreads/{eintr,threadsigmask}`,
+  `parallel/catch_break`, `lib-unix/common/sigwait`, `lib-sys/signal`, `close_during_flush`). oi records handlers but delivers no signal
+  (ext_sys.go). (a) in fix 7 (processes and signals), with Go's os/signal delivering to the program's handlers at the calls' polls;
+  (b) by design. *Recommended: (a)*, as the triage's ranking has it.
+- **OT19 `link-test/test` (packs).** (a) a class (`-pack`: a pack is a module of modules oi's units do not have); (b) packs as units
+  (o2j's and oi's linker making `P.M` the pack's fields): 1 test, 1 day. *Recommended: (a)*.
