@@ -1,0 +1,432 @@
+;; Ported from OCaml 5.5.0 (the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+;; fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba): the parts of typing/types.ml, typing/btype.ml,
+;; typing/ctype.ml (levels, unification, generalization, instances, expansion of abbreviations), typing/predef.ml and
+;; typing/printtyp.ml (with out_type.ml and oprint.ml) that the core language needs (doc/ocaml/TYPER.md), whose notices
+;; follow (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;  Xavier Leroy and Jerome Vouillon, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.types
+  "OCaml's types as Arbace data (doc/ocaml/TYPER.md, T1): a type node is an atom holding {:desc :level :id}, its
+  desc a vector ([:Tvar name] [:Tarrow label t1 t2] [:Ttuple [[label t]...]] [:Tconstr path [t...]] [:Tlink t]),
+  a label the Parsetree's ([:Nolabel] [:Labelled s] [:Optional s]); identifiers {:name :stamp} (:global for a
+  compilation unit, :predef for Predef's), paths [:Pident id] or [:Pdot path name]. Levels, unification with
+  the occur check and level updates, generalization, instances and the expansion of abbreviations follow
+  Ctype; the printer follows Printtyp (variables named in order of appearance, the opened Stdlib's prefix
+  left out)."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; Identifiers and paths (typing/ident.ml, typing/path.ml)
+
+(def ^:private stamp (atom 1000))
+(defn reset-stamps! [] (reset! stamp 1000))
+(defn ident-create [name] {:name name :stamp (swap! stamp inc)})
+(defn ident-rename [id] (ident-create (:name id)))
+(defn ident-global [name] {:name name :stamp 0 :global true})
+(defn ident-predef [name n] {:name name :stamp n :predef true})
+(defn unique-name
+  "Ident.unique_name"
+  [id] (str (:name id) "_" (:stamp id)))
+(defn ident-print
+  "Ident.print as -dlambda shows a global (M!) or a predef identifier (Name/stamp!)"
+  [id]
+  (cond (:global id) (str (:name id) "!")
+        (:predef id) (str (:name id) "/" (:stamp id) "!")
+        :else (unique-name id)))
+
+(defn pident [id] [:Pident id])
+(defn pdot [p s] [:Pdot p s])
+(defn path-last [p] (case (p 0) :Pident (:name (p 1)) :Pdot (p 2)))
+(defn path-head [p] (case (p 0) :Pident (p 1) :Pdot (recur (p 1))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Type nodes and levels (types.ml, btype.ml)
+
+(def generic-level 100000000)
+(def current-level (atom 0))
+(def ^:private ids (atom 0))
+
+(defn newty2 [lv d] (atom {:desc d :level lv :id (swap! ids inc)}))
+(defn newty [d] (newty2 @current-level d))
+(defn newgenty [d] (newty2 generic-level d))
+(defn newvar ([] (newty [:Tvar nil])) ([name] (newty [:Tvar name])))
+(defn newgenvar [] (newgenty [:Tvar nil]))
+
+(defn repr [t] (let [d (:desc @t)] (if (= :Tlink (d 0)) (recur (d 1)) t)))
+(defn desc [t] (:desc @(repr t)))
+(defn level [t] (:level @(repr t)))
+(defn set-level! [t l] (swap! t assoc :level l))
+(defn link! [t to] (swap! t assoc :desc [:Tlink to]))
+(defn tvar? [t] (= :Tvar ((desc t) 0)))
+
+(defn begin-def [] (swap! current-level inc))
+(defn end-def [] (swap! current-level dec))
+(defmacro with-local-level
+  "Ctype.with_local_level: body at a fresh level"
+  [& body]
+  `(do (begin-def) (try (do ~@body) (finally (end-def)))))
+
+(defn children [d]
+  (case (d 0)
+    :Tvar []
+    :Tarrow [(d 2) (d 3)]
+    :Ttuple (mapv second (d 1))
+    :Tconstr (d 2)
+    :Tpoly [(d 1)]
+    []))
+
+(defn map-desc [f d]
+  (case (d 0)
+    :Tvar d
+    :Tarrow [:Tarrow (d 1) (f (d 2)) (f (d 3))]
+    :Ttuple [:Ttuple (mapv (fn [[l t]] [l (f t)]) (d 1))]
+    :Tconstr [:Tconstr (d 1) (mapv f (d 2))]
+    :Tpoly [:Tpoly (f (d 1)) (d 2)]
+    d))
+
+(defn is-optional [l] (= :Optional (l 0)))
+(defn label-name [l] (if (= :Nolabel (l 0)) "" (l 1)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Predef (predef.ml): the stamps are Predef's, in its order of creation
+
+(def predef-type-names ["int" "char" "bytes" "float" "bool" "unit" "exn" "eff" "continuation" "array" "list" "option"
+                        "nativeint" "int32" "int64" "lazy_t" "string" "extension_constructor" "floatarray" "iarray"
+                        "atomic_loc"])
+(def predef-exn-names ["Match_failure" "Out_of_memory" "Invalid_argument" "Failure" "Not_found" "Sys_error"
+                       "End_of_file" "Division_by_zero" "Stack_overflow" "Sys_blocked_io" "Assert_failure"
+                       "Undefined_recursive_module" "Continuation_already_taken"])
+
+(def predef-idents
+  (into {} (map-indexed (fn [i n] [n (ident-predef n (inc i))])
+                        (concat predef-type-names predef-exn-names))))
+
+(defn predef-path [n] (pident (predef-idents n)))
+(def path-int (predef-path "int"))
+(def path-char (predef-path "char"))
+(def path-bytes (predef-path "bytes"))
+(def path-float (predef-path "float"))
+(def path-bool (predef-path "bool"))
+(def path-unit (predef-path "unit"))
+(def path-exn (predef-path "exn"))
+(def path-array (predef-path "array"))
+(def path-list (predef-path "list"))
+(def path-option (predef-path "option"))
+(def path-nativeint (predef-path "nativeint"))
+(def path-int32 (predef-path "int32"))
+(def path-int64 (predef-path "int64"))
+(def path-lazy-t (predef-path "lazy_t"))
+(def path-string (predef-path "string"))
+(def path-floatarray (predef-path "floatarray"))
+(def path-match-failure (predef-path "Match_failure"))
+(def path-assert-failure (predef-path "Assert_failure"))
+
+(defn tconstr [p args] (newty [:Tconstr p (vec args)]))
+(defn type-int [] (tconstr path-int []))
+(defn type-char [] (tconstr path-char []))
+(defn type-string [] (tconstr path-string []))
+(defn type-bytes [] (tconstr path-bytes []))
+(defn type-float [] (tconstr path-float []))
+(defn type-bool [] (tconstr path-bool []))
+(defn type-unit [] (tconstr path-unit []))
+(defn type-exn [] (tconstr path-exn []))
+(defn type-list [t] (tconstr path-list [t]))
+(defn type-option [t] (tconstr path-option [t]))
+(defn type-array [t] (tconstr path-array [t]))
+(defn type-int32 [] (tconstr path-int32 []))
+(defn type-int64 [] (tconstr path-int64 []))
+(defn type-nativeint [] (tconstr path-nativeint []))
+
+;; ---------------------------------------------------------------------------------------------
+;; Type declarations: {:path :params [t] :kind [:abstract] | [:variant [cdecl]] | [:record [ldecl] repr] | [:open]
+;;   :manifest t-or-nil :immediate bool :variance [:co|:inv ...]} with descriptions built by `constructors-of` and
+;;   `labels-of` (datarepr.ml)
+
+(defn constructors-of
+  "Datarepr.constructor_descrs: each constructor's description, tags numbered among the constant and the block
+  constructors apart"
+  [path params cdecls]
+  (let [nconst (count (filter #(empty? (:args %)) cdecls))
+        nnon (- (count cdecls) nconst)
+        res (fn [] [:Tconstr path params])]
+    (loop [cs cdecls ic 0 ib 0 acc []]
+      (if (empty? cs)
+        acc
+        (let [c (first cs) const (empty? (:args c))
+              d {:name (:name c) :args (:args c) :arity (count (:args c)) :res-path path :params params
+                 :tag (if const [:Cstr_constant ic] [:Cstr_block ib]) :consts nconst :nonconsts nnon}]
+          (recur (rest cs) (if const (inc ic) ic) (if const ib (inc ib)) (conj acc d)))))))
+
+(defn labels-of
+  "Datarepr.label_descrs: positions, the record's representation (all fields float: Record_float)"
+  [path params ldecls repres]
+  (let [all (vec (map-indexed (fn [i l] {:name (:name l) :arg (:type l) :mut (:mut l) :pos i :res-path path
+                                         :params params :repres repres})
+                              ldecls))]
+    (mapv #(assoc % :all all) all)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Copying and substitution (instances)
+
+(defn- copy-with
+  "Copies the generic part of t (Ctype.instance): each generic node once, the variables fresh at the current level;
+  `subst` maps generic parameter nodes (by identity) to the types replacing them"
+  [t memo]
+  (let [t (repr t)]
+    (if-let [c (get @memo t)]
+      c
+      (if (not= generic-level (level t))
+        t
+        (let [d (desc t)
+              n (newty (if (= :Tvar (d 0)) [:Tvar nil] [:Tvar nil]))]
+          (swap! memo assoc t n)
+          (when-not (= :Tvar (d 0))
+            (swap! n assoc :desc (map-desc #(copy-with % memo) d)))
+          n)))))
+
+(defn instance [t] (copy-with t (atom {})))
+(defn instance-list [ts] (let [m (atom {})] (mapv #(copy-with % m) ts)))
+
+(defn subst
+  "The type t with the parameter nodes params (by identity of their representatives) replaced by args, everything
+  else copied (used to expand abbreviations and to instantiate declarations)"
+  [params args t]
+  (let [m (atom (zipmap (map repr params) args))]
+    (letfn [(go [t]
+              (let [t (repr t)]
+                (if-let [c (get @m t)]
+                  c
+                  (let [d (desc t)]
+                    (if (= :Tvar (d 0))
+                      t
+                      (let [n (newty [:Tvar nil])]
+                        (swap! m assoc t n)
+                        (swap! n assoc :desc (map-desc go d))
+                        n))))))]
+      (go t))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expansion (the environment's declarations are looked up by a function the env namespace sets)
+
+(def ^:dynamic *find-type* (fn [p] nil))
+
+(defn expand-head-opt
+  "Ctype.expand_head: the type with its head abbreviations expanded"
+  [t]
+  (let [t (repr t) d (desc t)]
+    (if (= :Tconstr (d 0))
+      (let [decl (*find-type* (d 1))]
+        (if (and decl (:manifest decl))
+          (recur (subst (:params decl) (d 2) (:manifest decl)))
+          t))
+      t)))
+
+(def expand-head expand-head-opt)
+
+;; ---------------------------------------------------------------------------------------------
+;; Unification (ctype.ml): occur check, level updates, abbreviations expanded on a mismatch
+
+(defn- occur [v t]
+  (let [seen (atom #{})]
+    (letfn [(go [t]
+              (let [t (repr t)]
+                (when-not (@seen t)
+                  (swap! seen conj t)
+                  (when (identical? t v) (throw (ex-info "occur check" {:unify :occur})))
+                  (run! go (children (desc t))))))]
+      (go t))))
+
+(defn update-level
+  "Ctype.update_level: the levels of t's nodes lowered to lv"
+  [lv t]
+  (let [t (repr t)]
+    (when (> (level t) lv)
+      (set-level! t lv)
+      (run! #(update-level lv %) (children (desc t))))))
+
+(defn unify-error [t1 t2] (throw (ex-info "Unify" {:unify :mismatch :t1 t1 :t2 t2})))
+
+(declare unify)
+
+(defn- unify-list [l1 l2]
+  (when-not (= (count l1) (count l2)) (unify-error nil nil))
+  (dorun (map unify l1 l2)))
+
+(defn unify [t1 t2]
+  (let [t1 (repr t1) t2 (repr t2)]
+    (when-not (identical? t1 t2)
+      (let [d1 (desc t1) d2 (desc t2)]
+        (cond
+          (= :Tvar (d1 0)) (do (occur t1 t2) (update-level (level t1) t2) (link! t1 t2))
+          (= :Tvar (d2 0)) (do (occur t2 t1) (update-level (level t2) t1) (link! t2 t1))
+          (and (= :Tconstr (d1 0) (d2 0)) (= (d1 1) (d2 1)))
+          (unify-list (d1 2) (d2 2))
+          (= :Tconstr (d1 0)) (let [e (expand-head t1)]
+                                (if (identical? e t1)
+                                  (if (= :Tconstr (d2 0))
+                                    (let [e2 (expand-head t2)] (if (identical? e2 t2) (unify-error t1 t2) (unify t1 e2)))
+                                    (unify-error t1 t2))
+                                  (unify e t2)))
+          (= :Tconstr (d2 0)) (let [e (expand-head t2)] (if (identical? e t2) (unify-error t1 t2) (unify t1 e)))
+          (and (= :Tarrow (d1 0) (d2 0)) (= (d1 1) (d2 1)))
+          (do (unify (d1 2) (d2 2)) (unify (d1 3) (d2 3)))
+          (and (= :Ttuple (d1 0) (d2 0)) (= (map first (d1 1)) (map first (d2 1))))
+          (unify-list (mapv second (d1 1)) (mapv second (d2 1)))
+          :else (unify-error t1 t2))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Generalization (Ctype.generalize, and the relaxed value restriction's lower_contravariant)
+
+(defn generalize [t]
+  (let [t (repr t)]
+    (when (and (> (level t) @current-level) (not= (level t) generic-level))
+      (set-level! t generic-level)
+      (run! generalize (children (desc t))))))
+
+(defn lower-contravariant
+  "Ctype.lower_contravariant: the variables at contravariant or invariant positions lowered to the current level, so
+  that the relaxed value restriction generalizes only the covariant ones; a declaration's :variance gives its
+  parameters' (:co or :inv; an abstract type's are invariant)"
+  [t]
+  (let [lv @current-level]
+    (letfn [(go [co t]
+              (let [t (repr t) d (desc t)]
+                (when (> (level t) lv)
+                  (if-not co
+                    (update-level lv t)
+                    (case (d 0)
+                      :Tarrow (do (go false (d 2)) (go co (d 3)))
+                      :Ttuple (run! #(go co (second %)) (d 1))
+                      :Tconstr (let [decl (*find-type* (d 1))]
+                                 (if (:manifest decl)
+                                   (go co (expand-head t))
+                                   (let [vs (or (:variance decl) (repeat :inv))]
+                                     (dorun (map (fn [v a] (go (and co (= v :co)) a)) vs (d 2))))))
+                      nil)))))]
+      (go true t))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Immediacy and the classification of types (typeopt.ml)
+
+(defn immediate?
+  "Ctype.immediacy: an int, a char, or a variant whose constructors are all constant"
+  [t]
+  (let [t (expand-head t) d (desc t)]
+    (and (= :Tconstr (d 0))
+         (let [decl (*find-type* (d 1))]
+           (boolean (:immediate decl))))))
+
+(defn value-kind
+  "Typeopt.value_kind as -dlambda prints it: \"[int]\", \"[float]\", \"[int32]\"... or \"\""
+  [t]
+  (let [t (expand-head t) d (desc t)]
+    (cond
+      (immediate? t) "[int]"
+      (not= :Tconstr (d 0)) ""
+      (= (d 1) path-float) "[float]"
+      (= (d 1) path-int32) "[int32]"
+      (= (d 1) path-int64) "[int64]"
+      (= (d 1) path-nativeint) "[nativeint]"
+      :else "")))
+
+(defn maybe-pointer [t] (if (immediate? t) :immediate :pointer))
+
+(defn classify
+  "Typeopt.classify: :int :float :lazy :addr :any"
+  [t]
+  (let [t (expand-head t) d (desc t)]
+    (cond
+      (immediate? t) :int
+      (= :Tvar (d 0)) :any
+      (= :Tconstr (d 0))
+      (let [p (d 1)]
+        (cond (= p path-float) :float
+              (= p path-lazy-t) :lazy
+              (#{path-string path-bytes path-int32 path-int64 path-nativeint path-array path-floatarray} p) :addr
+              :else (let [decl (*find-type* p)]
+                      (if (and decl (#{:variant :record :open} ((:kind decl) 0))) :addr :any))))
+      :else :addr)))
+
+(defn array-kind
+  "Typeopt.array_type_kind: \"gen\" \"addr\" \"int\" \"float\""
+  [t]
+  (let [t (expand-head t) d (desc t)]
+    (if (and (= :Tconstr (d 0)) (= (d 1) path-array))
+      (case (classify (first (d 2))) :any "gen" :float "float" (:addr :lazy) "addr" :int "int")
+      (if (and (= :Tconstr (d 0)) (= (d 1) path-floatarray)) "float" "gen"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The printer (printtyp.ml, out_type.ml, oprint.ml)
+
+(def ^:dynamic *path-name*
+  "The printed name of a type path (Printtyp's shortest path through the opened Stdlib), set by the environment"
+  (fn [p] (path-last p)))
+
+(def ^:private weak-counter (atom 0))
+(def ^:private weak-names (atom {}))
+
+(defn- name-vars
+  "The variables of ts in order of appearance, each named 'a, 'b... (generic ones) or '_weakN (the others)"
+  [ts]
+  (let [order (atom []) seen (atom #{})]
+    (letfn [(go [t] (let [t (repr t)]
+                      (when-not (@seen t)
+                        (swap! seen conj t)
+                        (if (tvar? t) (swap! order conj t) (run! go (children (desc t)))))))]
+      (run! go ts))
+    (loop [vs @order i 0 m {}]
+      (if (empty? vs)
+        m
+        (let [v (first vs)]
+          (if (= generic-level (level v))
+            (recur (rest vs) (inc i) (assoc m v (str "'" (if (< i 26) (char (+ 97 i)) (str (char (+ 97 (mod i 26))) (quot i 26))))))
+            (let [n (or (get @weak-names v) (let [n (str "'_weak" (swap! weak-counter inc))] (swap! weak-names assoc v n) n))]
+              (recur (rest vs) i (assoc m v n)))))))))
+
+(defn type-text [names t prec]
+  ;; prec: 0 top, 1 arrow argument / tuple component, 2 constructor argument
+  (let [t (repr t) d (desc t)
+        paren (fn [p s] (if (> prec p) (str "(" s ")") s))]
+    (case (d 0)
+      :Tvar (get names t "'_")
+      :Tarrow (let [l (d 1)
+                    lab (case (l 0) :Nolabel "" :Labelled (str (l 1) ":") :Optional (str "?" (l 1) ":"))
+                    arg (if (is-optional l)
+                          (let [a (expand-head (d 2)) ad (desc a)]
+                            (if (and (= :Tconstr (ad 0)) (= (ad 1) path-option)) (first (ad 2)) (d 2)))
+                          (d 2))]
+                (paren 0 (str lab (type-text names arg 1) " -> " (type-text names (d 3) 0))))
+      :Ttuple (paren 1 (str/join " * " (map (fn [[l x]] (str (when l (str l ":")) (type-text names x 2))) (d 1))))
+      :Tconstr (let [args (d 2) n (*path-name* (d 1))]
+                 (case (count args)
+                   0 n
+                   1 (str (type-text names (first args) 2) " " n)
+                   (str "(" (str/join ", " (map #(type-text names % 0) args)) ") " n)))
+      "?")))
+
+(defn type-scheme-text
+  "Printtyp.type_scheme's text of t, its variables named afresh"
+  [t]
+  (type-text (name-vars [t]) t 0))
+
+(defn types-text
+  "The texts of several types sharing one naming of their variables"
+  [ts]
+  (let [names (name-vars ts)] (mapv #(type-text names % 0) ts)))
+
+(defn types-text-prec
+  "The texts of ts at precedence prec, one naming of their variables"
+  [ts prec]
+  (let [names (name-vars ts)] (mapv #(type-text names % prec) ts)))

@@ -1,0 +1,556 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; the core language of typing/typecore.ml (expressions, patterns, functions with labelled and optional parameters,
+;; applications as collect_apply_args and type_application order them, let with the relaxed value restriction,
+;; constructors and records disambiguated by the expected type) and the structure items of typing/typemod.ml that
+;; the slice needs (doc/ocaml/TYPER.md), whose notices follow (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;  Xavier Leroy and Jerome Vouillon, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.typecore
+  "The type checker of the core language (doc/ocaml/TYPER.md, T2): the native Parsetree in, a Typedtree out. An
+  expression is {:desc :type :loc}, desc one of [:Texp_ident path vdesc] [:Texp_constant c] [:Texp_let rec [vb]
+  body] [:Texp_function [param] body] [:Texp_apply f [[label arg-or-nil]]] [:Texp_match e [case] partial]
+  [:Texp_try e [case]] [:Texp_tuple [[label e]]] [:Texp_construct cstr [e]] [:Texp_record [[lbl def]] repres
+  init] [:Texp_field e lbl] [:Texp_setfield e lbl e] [:Texp_array [e]] [:Texp_ifthenelse c a b] [:Texp_sequence
+  a b] [:Texp_while c b] [:Texp_for id lo hi dir body] [:Texp_assert e loc]; a constant [:int n] [:char n]
+  [:string s] [:float s] [:int32 n] [:int64 n] [:nativeint n]; patterns as arbace.repr.ocaml.typer.parmatch's."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.env :as env]
+            [arbace.repr.ocaml.typer.parmatch :as pm]
+            [arbace.repr.ocaml.lex :as lex]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+(def type-error env/type-error)
+
+(defn unify! [t1 t2 what]
+  (try (ty/unify t1 t2)
+       (catch arbace.lang.ExceptionInfo e
+         (if (:unify (ex-data e))
+           (type-error (str "This " what " has type " (ty/type-scheme-text t1) " but an expression was expected of type "
+                            (ty/type-scheme-text t2)))
+           (throw e)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Constants
+
+(defn- parse-int [^String s]
+  (let [s (str/replace s "_" "")
+        neg (str/starts-with? s "-") s (if neg (subs s 1) s)
+        [radix digits] (cond (or (str/starts-with? s "0x") (str/starts-with? s "0X")) [16 (subs s 2)]
+                             (or (str/starts-with? s "0o") (str/starts-with? s "0O")) [8 (subs s 2)]
+                             (or (str/starts-with? s "0b") (str/starts-with? s "0B")) [2 (subs s 2)]
+                             :else [10 s])
+        n (.longValue (java.math.BigInteger. ^String digits (int radix)))]
+    (if neg (- n) n)))
+
+(defn constant
+  "Typecore.constant: [const type-fn]"
+  [c]
+  (let [d (:pconst_desc c)]
+    (case (d 0)
+      :Pconst_integer (case (d 2)
+                        nil [[:int (parse-int (d 1))] ty/type-int]
+                        \l [[:int32 (parse-int (d 1))] ty/type-int32]
+                        \L [[:int64 (parse-int (d 1))] ty/type-int64]
+                        \n [[:nativeint (parse-int (d 1))] ty/type-nativeint]
+                        [[:int (parse-int (d 1))] ty/type-int])
+      :Pconst_char [[:char (int (d 1))] ty/type-char]
+      :Pconst_string [[:string (d 1)] ty/type-string]
+      :Pconst_float [[:float (d 1)] ty/type-float])))
+
+;; ---------------------------------------------------------------------------------------------
+;; Environment helpers
+
+(defn add-value [env name id t] (assoc-in env [:values name] {:type t :kind [:reg] :path (ty/pident id) :id id}))
+
+(defn- lid-name [lid] (last (env/lid-parts lid)))
+
+(defn- expected-type-path
+  "The path of the variant or record type the expected type expands to, or nil"
+  [t]
+  (loop [t (ty/repr t)]
+    (let [d (ty/desc t)]
+      (when (= :Tconstr (d 0))
+        (let [decl (env/find-decl (d 1))]
+          (if (and decl (:manifest decl) (not (#{:variant :record} ((:kind decl) 0))))
+            (recur (ty/expand-head t))
+            (d 1)))))))
+
+(defn- choose
+  "Disambiguation (Typecore's NameChoice): the description whose type is the expected one, else the latest"
+  [cands expected what lid]
+  (when (empty? cands) (type-error (str "Unbound " what " " (str/join "." (env/lid-parts lid)))))
+  (let [p (when expected (expected-type-path expected))
+        same (fn [c] (or (= (:res-path c) p)
+                         (let [d (env/find-decl p)]
+                           (and d (:manifest d) (= (expected-type-path (:manifest d)) (:res-path c))))))]
+    (or (when p (first (filter same cands))) (first cands))))
+
+(defn lookup-constr [env lid expected]
+  (choose (env/lookup env :constrs lid) expected "constructor" lid))
+
+(defn lookup-label [env lid expected]
+  (choose (env/lookup env :labels lid) expected "field" lid))
+
+(defn instance-constructor
+  "Ctype.instance_constructor: [args res] as fresh instances"
+  [c]
+  (let [res (ty/newgenty [:Tconstr (:res-path c) (vec (:params c))])
+        ts (ty/instance-list (cons res (:args c)))]
+    [(vec (rest ts)) (first ts)]))
+
+(defn instance-label
+  "[res arg all-args] of a label: the record type, the field's type and every field's, sharing one instance"
+  [l]
+  (let [res (ty/newgenty [:Tconstr (:res-path l) (vec (:params l))])
+        all (:all l)
+        ts (ty/instance-list (concat [res] (map :arg all)))]
+    [(first ts) (nth ts (inc (:pos l))) (vec (rest ts))]))
+
+(defn mkexp [d t loc] {:desc d :type t :loc loc})
+
+;; ---------------------------------------------------------------------------------------------
+;; Patterns (Typecore.type_pat)
+
+(defn- loc-of [x k] (get x k))
+
+(declare type-pat)
+
+(defn- char-or [c1 c2 loc]
+  (let [mk (fn [c] {:ppat_desc [:Ppat_constant {:pconst_desc [:Pconst_char c]}] :ppat_loc loc})]
+    (letfn [(lp [a b] (if (= a b) (mk a) {:ppat_desc [:Ppat_or (mk a) (lp (inc a) b)] :ppat_loc loc}))]
+      (let [c1 (int c1) c2 (int c2)] (if (<= c1 c2) (lp c1 c2) (lp c2 c1))))))
+
+(defn type-pat
+  "The pattern sp at the expected type; its variables conj'ed onto the atom vars as [name id type]"
+  [env sp expected vars]
+  (let [d (:ppat_desc sp) loc (:ppat_loc sp)
+        mk (fn [desc t] {:desc desc :type t :loc loc})]
+    (case (d 0)
+      :Ppat_any (mk [:Tpat_any] expected)
+      :Ppat_var (let [n (:txt (d 1)) id (ty/ident-create n)]
+                  (swap! vars conj [n id expected])
+                  (mk [:Tpat_var id n] expected))
+      :Ppat_alias (let [p (type-pat env (d 1) expected vars) n (:txt (d 2)) id (ty/ident-create n)]
+                    (swap! vars conj [n id expected])
+                    (mk [:Tpat_alias p id n] expected))
+      :Ppat_constant (let [[c tf] (constant (d 1))] (unify! (tf) expected "pattern") (mk [:Tpat_constant c] expected))
+      :Ppat_interval (type-pat env (char-or ((:pconst_desc (d 1)) 1) ((:pconst_desc (d 2)) 1) loc) expected vars)
+      :Ppat_tuple (let [ps (d 1)
+                        ts (mapv (fn [_] (ty/newvar)) ps)]
+                    (unify! (ty/newty [:Ttuple (mapv (fn [[l _] t] [l t]) ps ts)]) expected "pattern")
+                    (mk [:Tpat_tuple (mapv (fn [[l p] t] [l (type-pat env p t vars)]) ps ts)] expected))
+      :Ppat_construct
+      (let [c (lookup-constr env (:txt (d 1)) expected)
+            [targs tres] (instance-constructor c)
+            _ (unify! tres expected "pattern")
+            sarg (when-let [a (d 2)] (second a))
+            sargs (cond
+                    (nil? sarg) []
+                    (and (> (:arity c) 1) (= :Ppat_tuple ((:ppat_desc sarg) 0))) (mapv second ((:ppat_desc sarg) 1))
+                    (and (> (:arity c) 1) (= :Ppat_any ((:ppat_desc sarg) 0))) (vec (repeat (:arity c) sarg))
+                    (and (zero? (:arity c)) (= :Ppat_any ((:ppat_desc sarg) 0))) []
+                    :else [sarg])]
+        (when-not (= (count sargs) (:arity c))
+          (type-error (str "The constructor " (:name c) " expects " (:arity c) " argument(s)")))
+        (mk [:Tpat_construct c (mapv (fn [p t] (type-pat env p t vars)) sargs targs)] expected))
+      :Ppat_record
+      (let [fields (d 1)
+            l0 (lookup-label env (:txt (first (first fields))) expected)
+            [res _ args] (instance-label l0)
+            _ (unify! res expected "pattern")
+            typed (mapv (fn [[lid p]]
+                          (let [l (or (first (filter #(= (:name %) (lid-name (:txt lid))) (:all l0)))
+                                      (type-error (str "Unbound record field " (lid-name (:txt lid)))))]
+                            [l (type-pat env p (nth args (:pos l)) vars)]))
+                        fields)]
+        (mk [:Tpat_record (vec (sort-by (comp :pos first) typed)) (d 2)] expected))
+      :Ppat_array (let [t (ty/newvar)]
+                    (unify! (ty/type-array t) expected "pattern")
+                    (mk [:Tpat_array (mapv #(type-pat env % t vars) (d 1))] expected))
+      :Ppat_or (let [p1 (type-pat env (d 1) expected vars)
+                     v2 (atom [])
+                     p2 (type-pat env (d 2) expected v2)
+                     m (into {} (map (fn [[n id t]] [n [id t]]) @vars))
+                     ren (into {} (map (fn [[n id t]] (let [[id1 t1] (get m n)] (when t1 (unify! t t1 "pattern")) [id id1])) @v2))]
+                 (mk [:Tpat_or p1 (pm/alpha-pat ren p2)] expected))
+      :Ppat_constraint (let [t (ty/instance (env/make-generic! (env/transl-type env (atom {}) (d 2))))]
+                         (unify! t expected "pattern")
+                         (type-pat env (d 1) expected vars))
+      :Ppat_exception (mk [:Tpat_exception (type-pat env (d 1) (ty/type-exn) vars)] expected)
+      :Ppat_lazy (let [t (ty/newvar)]
+                   (unify! (ty/tconstr ty/path-lazy-t [t]) expected "pattern")
+                   (mk [:Tpat_lazy (type-pat env (d 1) t vars)] expected))
+      (type-error (str "pattern " (d 0) " outside the slice")))))
+
+(defn add-pattern-vars [env vars]
+  (reduce (fn [e [n id t]] (add-value e n id t)) env vars))
+
+(defn name-pattern
+  "Typecore.name_pattern: the first pattern that is a variable or an alias names the parameter"
+  [default pats]
+  (or (some (fn [p] (let [d (:desc p)] (case (d 0) :Tpat_var (d 1) :Tpat_alias (d 2) nil))) pats)
+      (ty/ident-create default)))
+
+(defn- split-exn [p]
+  ;; the value part of a computation pattern (nil when it is only an exception pattern)
+  (let [d (:desc p)]
+    (case (d 0)
+      :Tpat_exception nil
+      :Tpat_or (let [a (split-exn (d 1)) b (split-exn (d 2))]
+                 (cond (and a b) (assoc p :desc [:Tpat_or a b]) a a :else b))
+      p)))
+
+(defn partiality
+  "Parmatch.check_partial: :total when the unguarded value patterns are exhaustive"
+  [cases]
+  (let [rows (keep (fn [c] (when-not (:guard c) (when-let [p (split-exn (:lhs c))] [p]))) cases)]
+    (if (pm/satisfiable rows [pm/omega]) :partial :total)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions
+
+(declare type-expect type-function type-let type-cases)
+
+(defn type-exp [env sexp] (type-expect env sexp (ty/newvar)))
+
+(defn- list-labels
+  "Ctype.list_labels: the labels of the arrows of t, and whether it ends in a variable"
+  [t]
+  (loop [t (ty/expand-head t) ls []]
+    (let [d (ty/desc t)]
+      (case (d 0)
+        :Tarrow (recur (ty/expand-head (d 3)) (conj ls (d 1)))
+        :Tvar [ls true]
+        [ls false]))))
+
+(defn- extract-label [name sargs]
+  (loop [hd [] ls sargs]
+    (when (seq ls)
+      (let [[l' _ :as p] (first ls)]
+        (if (= (ty/label-name l') name)
+          [l' (second p) (seq hd) (vec (concat hd (rest ls)))]
+          (recur (conj hd p) (rest ls)))))))
+
+(defn option-some [e t]
+  (let [c (first (filter #(= (:res-path %) ty/path-option) (get-in (env/initial-env) [:constrs "Some"])))]
+    (mkexp [:Texp_construct c [e]] (ty/type-option t) (:loc e))))
+
+(defn option-none [t loc]
+  (let [c (first (filter #(= (:res-path %) ty/path-option) (get-in (env/initial-env) [:constrs "None"])))]
+    (mkexp [:Texp_construct c []] (ty/type-option t) loc)))
+
+(defn- extract-option-type [t]
+  (let [t (ty/expand-head t) d (ty/desc t)]
+    (if (and (= :Tconstr (d 0)) (= (d 1) ty/path-option)) (first (d 2)) (type-error "not an option type"))))
+
+(defn type-application
+  "Typecore.type_application: the arguments in the order of the function's type, an omitted one nil (Omitted ()),
+  an eliminated optional one None; returns [args result-type]"
+  [env funct sargs]
+  (let [fty (:type funct)
+        prim (fn [n] (let [d (:desc funct)] (and (= :Texp_ident (d 0)) (= [:prim n] [(first (:kind (d 2))) (:name (second (:kind (d 2))))]))))]
+    (if (and (= 1 (count sargs)) (= :Nolabel ((ffirst sargs) 0)) (prim "%ignore"))
+      (let [targ (ty/newvar) tret (ty/newvar)]
+        (unify! fty (ty/newty [:Tarrow [:Nolabel] targ tret]) "function")
+        [[[[:Nolabel] (type-expect env (second (first sargs)) targ)]] tret])
+      (let [[ls tvar] (list-labels fty)
+            nonopt (remove ty/is-optional ls)
+            ignore-labels (and (not tvar) (= (count nonopt) (count sargs)) (every? #(= :Nolabel ((first %) 0)) sargs)
+                               (some #(not= :Nolabel (% 0)) nonopt))
+            collected
+            (loop [tyf fty sargs sargs rev []]
+              (if (empty? sargs)
+                [tyf (vec (reverse rev))]
+                (let [tyf' (ty/expand-head tyf) d (ty/desc tyf')]
+                  (if-not (= :Tarrow (d 0))
+                    ;; collect_unknown_apply_args
+                    (let [[l sarg] (first sargs)]
+                      (if (= :Tvar (d 0))
+                        (let [targ (ty/newvar) tres (ty/newvar)]
+                          (unify! tyf' (ty/newty [:Tarrow l targ tres]) "function")
+                          (recur tres (rest sargs) (cons [l [:unknown sarg targ]] rev)))
+                        (type-error "This function is applied to too many arguments")))
+                    (let [l (d 1) name (ty/label-name l) optional (ty/is-optional l)
+                          found (if ignore-labels
+                                  (let [[l' sarg] (first sargs)]
+                                    (if (or (= name (ty/label-name l')) (and (not optional) (= :Nolabel (l' 0))))
+                                      [l' sarg nil (vec (rest sargs))]
+                                      (if (and optional (some #(= :Nolabel ((first %) 0)) sargs)) nil
+                                          (type-error "labels"))))
+                                  (extract-label name sargs))
+                          arg (if found
+                                (let [[l' sarg _ _] found]
+                                  [:known sarg (d 2) (and optional (not (ty/is-optional l')))])
+                                (if (and optional (some #(= :Nolabel ((first %) 0)) sargs))
+                                  [:eliminated (d 2)]
+                                  [:omitted (d 2)]))]
+                      (recur (d 3) (if found (nth found 3) sargs) (cons [l arg] rev)))))))
+            [tret args] collected
+            targs (mapv (fn [[l a]]
+                          (case (a 0)
+                            :unknown [l (type-expect env (a 1) (a 2))]
+                            :known (let [[_ sarg targ wrapped] a]
+                                     [l (if wrapped
+                                          (let [t (extract-option-type targ)]
+                                            (option-some (type-expect env sarg t) t))
+                                          (type-expect env sarg targ))])
+                            :eliminated [l (option-none (ty/instance (extract-option-type (a 1))) nil)]
+                            :omitted [l [:omitted (a 1)]]))
+                        args)
+            tret (reduce (fn [r [l a]] (if (and (vector? a) (= :omitted (a 0))) (ty/newty [:Tarrow l (a 1) r]) r))
+                         tret (reverse targs))]
+        [(mapv (fn [[l a]] [l (if (and (vector? a) (= :omitted (a 0))) nil a)]) targs) tret]))))
+
+(defn type-statement [env sexp] (type-exp env sexp))
+
+(defn- record-repres [l] (:repres l))
+
+(defn type-expect
+  "Typecore.type_expect for the slice"
+  [env sexp expected]
+  (let [d (:pexp_desc sexp) loc (:pexp_loc sexp)
+        ret (fn [desc t] (unify! t expected "expression") (mkexp desc t loc))]
+    (case (d 0)
+      :Pexp_ident (let [lid (:txt (d 1))
+                        v (env/lookup env :values lid)]
+                    (when-not v (type-error (str "Unbound value " (str/join "." (env/lid-parts lid)))))
+                    (ret [:Texp_ident (or (:path v) [:prim]) v] (ty/instance (:type v))))
+      :Pexp_constant (let [[c tf] (constant (d 1))] (ret [:Texp_constant c] (tf)))
+      :Pexp_let (let [[vbs env'] (type-let env (d 1) (d 2))
+                      body (type-expect env' (d 3) expected)]
+                  (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))
+      :Pexp_function (let [[params body t] (type-function env (d 1) (d 3) expected)]
+                       (mkexp [:Texp_function params body] t loc))
+      :Pexp_apply (let [f (type-exp env (d 1))
+                        [args t] (type-application env f (vec (d 2)))]
+                    (ret [:Texp_apply f args] t))
+      :Pexp_match (let [arg (type-exp env (d 1))
+                        cases (type-cases env (:type arg) expected (d 2) true)]
+                    (mkexp [:Texp_match arg cases (partiality cases)] expected loc))
+      :Pexp_try (let [body (type-expect env (d 1) expected)
+                      cases (type-cases env (ty/type-exn) expected (d 2) false)]
+                  (mkexp [:Texp_try body cases] expected loc))
+      :Pexp_tuple (let [ts (mapv (fn [_] (ty/newvar)) (d 1))]
+                    (unify! (ty/newty [:Ttuple (mapv (fn [[l _] t] [l t]) (d 1) ts)]) expected "expression")
+                    (mkexp [:Texp_tuple (mapv (fn [[l e] t] [l (type-expect env e t)]) (d 1) ts)] expected loc))
+      :Pexp_construct
+      (let [c (lookup-constr env (:txt (d 1)) expected)
+            [targs tres] (instance-constructor c)
+            _ (unify! tres expected "expression")
+            sarg (d 2)
+            sargs (cond (nil? sarg) []
+                        (and (> (:arity c) 1) (= :Pexp_tuple ((:pexp_desc sarg) 0))) (mapv second ((:pexp_desc sarg) 1))
+                        :else [sarg])]
+        (when-not (= (count sargs) (:arity c))
+          (type-error (str "The constructor " (:name c) " expects " (:arity c) " argument(s)")))
+        (mkexp [:Texp_construct c (mapv #(type-expect env %1 %2) sargs targs)] tres loc))
+      :Pexp_record
+      (let [fields (d 1) init-s (d 2)
+            init (when init-s (type-exp env init-s))
+            l0 (lookup-label env (:txt (first (first fields))) (or (and init (:type init)) expected))
+            [res _ args] (instance-label l0)
+            _ (unify! res expected "expression")
+            _ (when init (unify! (:type init) res "expression"))
+            given (into {} (map (fn [[lid e]]
+                                  (let [n (lid-name (:txt lid))
+                                        l (or (first (filter #(= (:name %) n) (:all l0)))
+                                              (type-error (str "Unbound record field " n)))]
+                                    [(:pos l) [l lid e]]))
+                                fields))
+            ;; the fields typed in the source order
+            typed (into {} (map (fn [[lid e]]
+                                  (let [[l _ _] (get given (:pos (first (filter #(= (:name %) (lid-name (:txt lid))) (:all l0)))))]
+                                    [(:pos l) (type-expect env e (nth args (:pos l)))]))
+                                fields))
+            defs (mapv (fn [l]
+                         (if-let [e (get typed (:pos l))]
+                           [l [:overridden e]]
+                           (do (when-not init (type-error (str "Some record fields are undefined: " (:name l))))
+                               [l [:kept (nth args (:pos l)) (:mut l)]])))
+                       (:all l0))]
+        (mkexp [:Texp_record defs (:repres l0) init] res loc))
+      :Pexp_field (let [e (type-exp env (d 1))
+                        l (lookup-label env (:txt (d 2)) (:type e))
+                        [res arg _] (instance-label l)]
+                    (unify! (:type e) res "expression")
+                    (ret [:Texp_field e l] arg))
+      :Pexp_setfield (let [e (type-exp env (d 1))
+                           l (lookup-label env (:txt (d 2)) (:type e))
+                           [res arg _] (instance-label l)
+                           _ (unify! (:type e) res "expression")
+                           v (type-expect env (d 3) arg)]
+                       (when-not (:mut l) (type-error (str "The record field " (:name l) " is not mutable")))
+                       (ret [:Texp_setfield e l v] (ty/type-unit)))
+      :Pexp_array (let [t (ty/newvar)]
+                    (unify! (ty/type-array t) expected "expression")
+                    (mkexp [:Texp_array (mapv #(type-expect env % t) (d 1))] expected loc))
+      :Pexp_ifthenelse (let [c (type-expect env (d 1) (ty/type-bool))]
+                         (if (d 3)
+                           (let [a (type-expect env (d 2) expected) b (type-expect env (d 3) expected)]
+                             (mkexp [:Texp_ifthenelse c a b] expected loc))
+                           (let [a (type-expect env (d 2) (ty/type-unit))]
+                             (ret [:Texp_ifthenelse c a nil] (ty/type-unit)))))
+      :Pexp_sequence (let [a (type-statement env (d 1)) b (type-expect env (d 2) expected)]
+                       (mkexp [:Texp_sequence a b] (:type b) loc))
+      :Pexp_while (let [c (type-expect env (d 1) (ty/type-bool)) b (type-statement env (d 2))]
+                    (ret [:Texp_while c b] (ty/type-unit)))
+      :Pexp_for (let [p (:ppat_desc (d 1))
+                      lo (type-expect env (d 2) (ty/type-int))
+                      hi (type-expect env (d 3) (ty/type-int))
+                      [id env'] (case (p 0)
+                                  :Ppat_var (let [id (ty/ident-create (:txt (p 1)))]
+                                              [id (add-value env (:txt (p 1)) id (ty/type-int))])
+                                  :Ppat_any [(ty/ident-create "_for") env]
+                                  (type-error "for loop index"))
+                      body (type-statement env' (d 5))]
+                  (ret [:Texp_for id lo hi (d 4) body] (ty/type-unit)))
+      :Pexp_constraint (let [t (ty/instance (env/make-generic! (env/transl-type env (atom {}) (d 2))))
+                             e (type-expect env (d 1) t)]
+                         (unify! t expected "expression")
+                         e)
+      :Pexp_assert (let [e (type-expect env (d 1) (ty/type-bool))
+                         false? (let [ed (:desc e)] (and (= :Texp_construct (ed 0)) (= "false" (:name (ed 1)))))]
+                     (ret [:Texp_assert e (:pexp_loc sexp)] (if false? (ty/newvar) (ty/type-unit))))
+      (type-error (str "expression " (d 0) " outside the slice")))))
+
+(defn type-cases
+  "Typecore.type_cases: the patterns first, then guards and bodies; computation patterns (exceptions) when allowed"
+  [env targ tres scases computation]
+  (let [typed (mapv (fn [c] (let [vars (atom [])
+                                  p (type-pat env (:pc_lhs c) targ vars)]
+                              [c p @vars]))
+                    scases)]
+    (mapv (fn [[c p vars]]
+            (let [env' (add-pattern-vars env vars)]
+              {:lhs p
+               :guard (when-let [g (:pc_guard c)] (type-expect env' g (ty/type-bool)))
+               :rhs (type-expect env' (:pc_rhs c) tres)}))
+          typed)))
+
+(defn- split-arrow
+  "The argument and result types of an arrow with label l the expected type is, or is unified with"
+  [expected l]
+  (let [t (ty/expand-head expected) d (ty/desc t)]
+    (if (and (= :Tarrow (d 0)) (= (d 1) l))
+      [(d 2) (d 3)]
+      (let [a (ty/newvar) r (ty/newvar)]
+        (unify! (ty/newty [:Tarrow l a r]) expected "function")
+        [a r]))))
+
+(defn type-function
+  "Typecore.type_function: [params body type], a parameter {:kind [:pat p] | [:opt p default] :label :param :partial},
+  the body [:body e] or [:cases cases partial param]"
+  [env sparams sbody expected]
+  (if (empty? sparams)
+    (case (sbody 0)
+      :Pfunction_body (let [e (type-expect env (sbody 1) expected)] [[] [:body e] (:type e)])
+      :Pfunction_cases (let [[targ tres] (split-arrow expected [:Nolabel])
+                             cases (type-cases env targ tres (sbody 1) false)]
+                         [[] [:cases cases (partiality cases) (name-pattern "param" (map :lhs cases))] expected]))
+    (let [sp (first sparams) pd (:pparam_desc sp)]
+      (when-not (= :Pparam_val (pd 0)) (type-error "locally abstract types are outside the slice"))
+      (let [[_ l default spat] pd
+            [targ tret] (split-arrow expected l)
+            [tint dflt] (if default
+                          (let [td (ty/newvar)]
+                            (unify! (ty/type-option td) targ "parameter")
+                            [td (type-expect env default td)])
+                          [targ nil])
+            vars (atom [])
+            p (type-pat env spat tint vars)
+            env' (add-pattern-vars env @vars)
+            [params body _] (type-function env' (rest sparams) sbody tret)
+            param {:kind (if dflt [:opt p dflt] [:pat p]) :label l
+                   :param (if dflt (ty/ident-create "*opt*") (name-pattern "param" [p]))
+                   :partial (partiality [{:lhs p}])}]
+        [(vec (cons param params)) body expected]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; let (Typecore.type_let) with the relaxed value restriction
+
+(defn nonexpansive?
+  "Typecore.is_nonexpansive for the slice"
+  [e]
+  (let [d (:desc e)]
+    (case (d 0)
+      (:Texp_ident :Texp_constant :Texp_function) true
+      :Texp_let (and (every? #(nonexpansive? (:expr %)) (d 2)) (nonexpansive? (d 3)))
+      :Texp_tuple (every? #(nonexpansive? (second %)) (d 1))
+      :Texp_construct (every? nonexpansive? (d 2))
+      :Texp_record (and (every? (fn [[l df]] (and (not (:mut l)) (or (= :kept (df 0)) (nonexpansive? (df 1))))) (d 1))
+                        (or (nil? (d 3)) (nonexpansive? (d 3))))
+      :Texp_field (nonexpansive? (d 1))
+      :Texp_array (empty? (d 1))
+      :Texp_ifthenelse (and (nonexpansive? (d 2)) (or (nil? (d 3)) (nonexpansive? (d 3))))
+      :Texp_sequence (nonexpansive? (d 2))
+      :Texp_apply (and (some nil? (map second (d 2))) (nonexpansive? (d 1))
+                       (every? #(or (nil? %) (nonexpansive? %)) (map second (d 2)))
+                       (= nil (second (first (d 2)))))
+      false)))
+
+(defn type-let
+  "[value-bindings env'] for let [rec]: each {:pat :expr}"
+  [env rec svbs]
+  (let [res (ty/with-local-level
+              (let [pats (mapv (fn [vb] (let [vars (atom [])
+                                              p (type-pat env (:pvb_pat vb) (ty/newvar) vars)]
+                                          [p @vars]))
+                               svbs)
+                    env-rec (if (= rec :Recursive) (reduce (fn [e [_ vs]] (add-pattern-vars e vs)) env pats) env)
+                    exprs (mapv (fn [vb [p _]]
+                                  (let [e (if-let [c (:pvb_constraint vb)]
+                                            (let [cd c] (type-expect env-rec (:pvb_expr vb) (:type p)))
+                                            (type-expect env-rec (:pvb_expr vb) (:type p)))]
+                                    e))
+                                svbs pats)]
+                (doseq [e exprs] (when-not (nonexpansive? e) (ty/lower-contravariant (:type e))))
+                [pats exprs]))
+        [pats exprs] res]
+    (doseq [e exprs] (ty/generalize (:type e)))
+    (doseq [[p _] pats] (ty/generalize (:type p)))
+    [(mapv (fn [[p _] e] {:pat p :expr e}) pats exprs)
+     (reduce (fn [e [_ vs]] (add-pattern-vars e vs)) env pats)]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Structures (Typemod.type_structure for the slice): items and the signature
+
+(defn type-structure
+  "[items sig env]: items [:Tstr_value rec vbs] [:Tstr_eval e] [:Tstr_exception id cstr] [:Tstr_type]; sig the
+  signature's items in order, [:val name id type] [:type [[name path decl]...]] [:exn name id cstr]"
+  [env sitems unit-name]
+  (loop [sitems sitems env env items [] sig []]
+    (if (empty? sitems)
+      [items sig env]
+      (let [d (:pstr_desc (first sitems))
+            drop-name (fn [sig kind name] (vec (remove #(and (= kind (first %)) (= name (second %))) sig)))]
+        (case (d 0)
+          :Pstr_value (let [[vbs env'] (type-let env (d 1) (d 2))
+                            vars (mapcat #(pm/bound-idents-full (:pat %)) vbs)
+                            sig (reduce (fn [s [id n t]] (conj (drop-name s :val n) [:val n id t])) sig vars)]
+                        (recur (rest sitems) env' (conj items [:Tstr_value (d 1) vbs]) sig))
+          :Pstr_eval (let [e (type-statement env (d 1))]
+                       (recur (rest sitems) env (conj items [:Tstr_eval e]) sig))
+          :Pstr_type (let [[env' out] (env/transl-type-decls env (d 2) #(ty/pident (ty/ident-create %)))]
+                       (recur (rest sitems) env' (conj items [:Tstr_type]) (conj sig [:type out])))
+          :Pstr_exception
+          (let [ec (:ptyexn_constructor (d 1)) name (:txt (:pext_name ec)) k (:pext_kind ec)
+                _ (when-not (= :Pext_decl (k 0)) (type-error "exception rebinding is outside the slice"))
+                id (ty/ident-create name)
+                c (env/exn-constructor env name ((k 2) 1) (ty/pident id))
+                env' (update-in env [:constrs name] #(cons c %))]
+            (recur (rest sitems) env' (conj items [:Tstr_exception id c (str unit-name "." name)])
+                   (conj (drop-name sig :exn name) [:exn name id c])))
+          (:Pstr_attribute) (recur (rest sitems) env items sig)
+          (type-error (str "structure item " (d 0) " outside the slice")))))))

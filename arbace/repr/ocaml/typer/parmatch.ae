@@ -1,0 +1,356 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; typing/patterns.ml (heads), and of typing/parmatch.ml the functions the pattern-matching compiler uses (le_pat,
+;; lub, compat, get_mins, set_args, complete_constrs) with the exhaustiveness check behind Typecore's partiality,
+;; whose notices follow (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;             Luc Maranget, projet Moscova, INRIA Rocquencourt
+;;            Gabriel Scherer, projet Partout, INRIA Saclay
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.parmatch
+  "Typed patterns ({:desc :type}, desc [:Tpat_any] [:Tpat_var id name] [:Tpat_alias p id name] [:Tpat_constant c]
+  [:Tpat_tuple [[label p]...]] [:Tpat_construct cstr [p...]] [:Tpat_record [[lbl p]...] closed] [:Tpat_array [p...]]
+  [:Tpat_or p q] [:Tpat_lazy p] [:Tpat_exception p]), their heads (Patterns.Head: [:Any] [:Constant c] [:Construct
+  cstr] [:Tuple n] [:Record [lbl...]] [:Array n] [:Lazy]) and Parmatch's relations on them (doc/ocaml/TYPER.md, T3)."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.env :as env]))
+
+(set! *warn-on-reflection* false)
+
+(declare distinct-by)
+
+(def omega {:desc [:Tpat_any] :type nil})
+(defn omegas [n] (vec (repeat n omega)))
+(defn mkpat [d proto] (assoc proto :desc d))
+
+(defn const-compare [a b]
+  ;; Asttypes constants compare by kind then value; equality is what matters here
+  (if (= a b) 0 (compare (str a) (str b))))
+
+(defn equal-constr
+  "Data_types.equal_constr: same tag (an extension constructor by its path)"
+  [c1 c2]
+  (and (= (:tag c1) (:tag c2)) (= (:res-path c1) (:res-path c2))))
+
+(def may-equal-constr
+  "Data_types.may_equal_constr: extension constructors with different paths may be rebindings of one another"
+  (fn [c1 c2]
+    (and (= (:arity c1) (:arity c2))
+         (let [t1 (:tag c1) t2 (:tag c2)]
+           (if (and (= :Cstr_extension (t1 0)) (= :Cstr_extension (t2 0)))
+             true
+             (= t1 t2))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Heads (patterns.ml)
+
+(defn deconstruct
+  "Head.deconstruct of a simple pattern: [head args]"
+  [p]
+  (let [d (:desc p) h (fn [hd] {:desc hd :type (:type p)})]
+    (case (d 0)
+      :Tpat_any [(h [:Any]) []]
+      :Tpat_var [(h [:Any]) []]
+      :Tpat_constant [(h [:Constant (d 1)]) []]
+      :Tpat_tuple [(h [:Tuple (count (d 1))]) (mapv second (d 1))]
+      :Tpat_construct [(h [:Construct (d 1)]) (vec (d 2))]
+      :Tpat_record [(h [:Record (mapv first (d 1))]) (mapv second (d 1))]
+      :Tpat_array [(h [:Array (count (d 1))]) (vec (d 1))]
+      :Tpat_lazy [(h [:Lazy]) [(d 1)]])))
+
+(defn head-arity [h]
+  (let [d (:desc h)]
+    (case (d 0) :Any 0 :Constant 0 :Tuple (d 1) :Construct (:arity (d 1)) :Record (count (d 1)) :Array (d 1) :Lazy 1)))
+
+(defn to-omega-pattern [h]
+  (let [d (:desc h) p {:type (:type h)}]
+    (case (d 0)
+      :Any (assoc p :desc [:Tpat_any])
+      :Constant (assoc p :desc [:Tpat_constant (d 1)])
+      :Tuple (assoc p :desc [:Tpat_tuple (vec (repeat (d 1) [nil omega]))])
+      :Construct (assoc p :desc [:Tpat_construct (d 1) (omegas (:arity (d 1)))])
+      :Record (assoc p :desc [:Tpat_record (mapv (fn [l] [l omega]) (d 1)) :Closed])
+      :Array (assoc p :desc [:Tpat_array (omegas (d 1))])
+      :Lazy (assoc p :desc [:Tpat_lazy omega]))))
+
+(defn set-args
+  "Parmatch.set_args: q's arguments taken from r, the rebuilt pattern before the rest"
+  [q r]
+  (let [d (:desc q)
+        take-n (fn [n] [(vec (take n r)) (vec (drop n r))])]
+    (case (d 0)
+      :Tpat_tuple (let [[a rest] (take-n (count (d 1)))]
+                    (into [(mkpat [:Tpat_tuple (mapv (fn [[l _] x] [l x]) (d 1) a)] q)] rest))
+      :Tpat_record (let [[a rest] (take-n (count (d 1)))]
+                     (into [(mkpat [:Tpat_record (mapv (fn [[l _] x] [l x]) (d 1) a) (d 2)] q)] rest))
+      :Tpat_construct (let [[a rest] (take-n (count (d 2)))]
+                        (into [(mkpat [:Tpat_construct (d 1) a] q)] rest))
+      :Tpat_array (let [[a rest] (take-n (count (d 1)))] (into [(mkpat [:Tpat_array a] q)] rest))
+      :Tpat_lazy (let [[a rest] (take-n 1)] (into [(mkpat [:Tpat_lazy (first a)] q)] rest))
+      (into [q] r))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Constructors of a type (the signature's completeness)
+
+(defn type-constructors
+  "All the constructors of the variant type of the description, or nil for an extensible one"
+  [c]
+  (when-not (= :Cstr_extension ((:tag c) 0))
+    (let [d (env/find-decl (:res-path c))
+          d (if (and d (:manifest d))
+              (let [t (ty/expand-head (:manifest d)) dd (ty/desc t)] (if (= :Tconstr (dd 0)) (env/find-decl (dd 1)) d))
+              d)]
+      (when (and d (= :variant ((:kind d) 0)))
+        (ty/constructors-of (:path d) (:params d) ((:kind d) 1))))))
+
+(defn complete-constrs
+  "Parmatch.complete_constrs: the constructors of the type not among used, the constant ones first"
+  [c used]
+  (let [all (type-constructors c)
+        others (remove (fn [x] (some #(equal-constr x %) used)) all)]
+    (concat (filter #(zero? (:arity %)) others) (remove #(zero? (:arity %)) others))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Records' arguments (all fields)
+
+(defn records-args [l1 l2]
+  ;; both as full rows by position
+  (let [n (count (:all (ffirst (concat l1 l2)) []))
+        row (fn [l] (let [v (vec (repeat n omega))] (reduce (fn [v [lbl p]] (assoc v (:pos lbl) p)) v l)))]
+    [(row l1) (row l2)]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Compatibility (Parmatch.Compat with may_equal_constr)
+
+(declare compats)
+
+(defn compat [p q]
+  (let [dp (:desc p) dq (:desc q)]
+    (cond
+      (or (#{:Tpat_any :Tpat_var} (dp 0)) (#{:Tpat_any :Tpat_var} (dq 0))) true
+      (= :Tpat_alias (dp 0)) (compat (dp 1) q)
+      (= :Tpat_alias (dq 0)) (compat p (dq 1))
+      (= :Tpat_or (dp 0)) (or (compat (dp 1) q) (compat (dp 2) q))
+      (= :Tpat_or (dq 0)) (or (compat p (dq 1)) (compat p (dq 2)))
+      (= :Tpat_construct (dp 0) (dq 0)) (and (may-equal-constr (dp 1) (dq 1)) (compats (dp 2) (dq 2)))
+      (= :Tpat_constant (dp 0) (dq 0)) (= (dp 1) (dq 1))
+      (= :Tpat_tuple (dp 0) (dq 0)) (and (= (map first (dp 1)) (map first (dq 1)))
+                                          (compats (map second (dp 1)) (map second (dq 1))))
+      (= :Tpat_lazy (dp 0) (dq 0)) (compat (dp 1) (dq 1))
+      (= :Tpat_record (dp 0) (dq 0)) (let [[a b] (records-args (dp 1) (dq 1))] (compats a b))
+      (= :Tpat_array (dp 0) (dq 0)) (and (= (count (dp 1)) (count (dq 1))) (compats (dp 1) (dq 1)))
+      :else false)))
+
+(defn compats [ps qs]
+  (and (= (count ps) (count qs)) (every? true? (map compat ps qs))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Usefulness (the exhaustiveness check): is some value matched by qs and by no row of pss?
+
+(defn- strip [p]
+  (let [d (:desc p)]
+    (case (d 0)
+      :Tpat_var (assoc p :desc [:Tpat_any])
+      :Tpat_alias (recur (d 1))
+      p)))
+
+(defn- head-key [p]
+  (let [d (:desc p)]
+    (case (d 0)
+      :Tpat_constant [:c (d 1)]
+      :Tpat_construct [:k (:tag (d 1)) (:res-path (d 1))]
+      :Tpat_tuple [:t]
+      :Tpat_record [:r]
+      :Tpat_array [:a (count (d 1))]
+      :Tpat_lazy [:l]
+      nil)))
+
+(defn- specialize-row
+  "The row p::ps specialized by the head of q (an omega-pattern of that head), or nil"
+  [q row]
+  (let [p (strip (first row)) ps (rest row)
+        [h _] (deconstruct q) n (head-arity h)
+        pd (:desc p)]
+    (case (pd 0)
+      :Tpat_any [(vec (concat (omegas n) ps))]
+      :Tpat_or (concat (specialize-row q (cons (pd 1) ps)) (specialize-row q (cons (pd 2) ps)))
+      (when (= (head-key p) (head-key q))
+        (let [[ph args] (deconstruct p)
+              qd (:desc q)]
+          (cond
+            (= :Tpat_record (pd 0))
+            (let [all (:all (first (first (pd 1))))
+                  v (reduce (fn [v [l x]] (assoc v (:pos l) x)) (omegas (count all)) (pd 1))]
+              [(vec (concat v ps))])
+            :else [(vec (concat args ps))]))))))
+
+(defn- expand-or-rows [pss]
+  (mapcat (fn [row]
+            (let [p (strip (first row))]
+              (if (= :Tpat_or ((:desc p) 0))
+                (expand-or-rows [(cons ((:desc p) 1) (rest row)) (cons ((:desc p) 2) (rest row))])
+                [(cons p (rest row))])))
+          pss))
+
+(defn- heads-of [pss]
+  (distinct-by head-key (remove #(nil? (head-key %)) (map first (expand-or-rows pss)))))
+
+(defn distinct-by [f xs]
+  (let [seen (atom #{})] (filter (fn [x] (let [k (f x)] (when-not (@seen k) (swap! seen conj k) true))) xs)))
+
+(defn- full-omega [p]
+  ;; the omega-pattern of p's head (a record with all its labels)
+  (let [d (:desc p)]
+    (if (= :Tpat_record (d 0))
+      (let [all (:all (ffirst (d 1)))] (assoc p :desc [:Tpat_record (mapv (fn [l] [l omega]) all) :Closed]))
+      (to-omega-pattern (first (deconstruct p))))))
+
+(defn- complete-sig?
+  "Do the heads (omega-patterns) cover their type's signature?"
+  [hs]
+  (let [d (:desc (first hs))]
+    (case (d 0)
+      (:Tpat_tuple :Tpat_record :Tpat_lazy) true
+      :Tpat_construct (let [all (type-constructors (d 1))]
+                        (and all (= (count all) (count hs))))
+      :Tpat_constant (and (= :char ((d 1) 0)) (= 256 (count hs)))
+      false)))
+
+(defn satisfiable
+  "Parmatch.satisfiable pss qs: some value matches qs and no row of pss"
+  [pss qs]
+  (cond
+    (empty? qs) (empty? pss)
+    :else
+    (let [q (strip (first qs)) qd (:desc q)]
+      (case (qd 0)
+        :Tpat_or (or (satisfiable pss (cons (qd 1) (rest qs))) (satisfiable pss (cons (qd 2) (rest qs))))
+        :Tpat_any
+        (let [hs (map full-omega (heads-of pss))]
+          (if (and (seq hs) (complete-sig? hs))
+            (some (fn [h]
+                    (let [n (head-arity (first (deconstruct h)))]
+                      (satisfiable (mapcat #(specialize-row h %) pss) (concat (omegas n) (rest qs)))))
+                  hs)
+            (satisfiable (keep (fn [row] (when (= :Tpat_any ((:desc (strip (first row))) 0)) (rest row)))
+                               (expand-or-rows pss))
+                         (rest qs))))
+        (let [h (full-omega q)
+              qs' (first (specialize-row h qs))]
+          (boolean (and qs' (satisfiable (mapcat #(specialize-row h %) pss) qs'))))))))
+
+(defn le-pat
+  "Parmatch.le_pat: p is more general than q"
+  [p q]
+  (let [dp (:desc p) dq (:desc q)]
+    (cond
+      (#{:Tpat_var :Tpat_any} (dp 0)) true
+      (= :Tpat_alias (dp 0)) (le-pat (dp 1) q)
+      (= :Tpat_alias (dq 0)) (le-pat p (dq 1))
+      (= :Tpat_constant (dp 0) (dq 0)) (= (dp 1) (dq 1))
+      (= :Tpat_construct (dp 0) (dq 0)) (and (equal-constr (dp 1) (dq 1)) (every? true? (map le-pat (dp 2) (dq 2))))
+      (= :Tpat_tuple (dp 0) (dq 0)) (every? true? (map (fn [[l1 a] [l2 b]] (and (= l1 l2) (le-pat a b))) (dp 1) (dq 1)))
+      (= :Tpat_lazy (dp 0) (dq 0)) (le-pat (dp 1) (dq 1))
+      (= :Tpat_record (dp 0) (dq 0)) (let [[a b] (records-args (dp 1) (dq 1))] (every? true? (map le-pat a b)))
+      (= :Tpat_array (dp 0) (dq 0)) (and (= (count (dp 1)) (count (dq 1))) (every? true? (map le-pat (dp 1) (dq 1))))
+      :else (not (satisfiable [[p]] [q])))))
+
+(defn le-pats [ps qs] (every? true? (map le-pat ps qs)))
+
+(defn get-mins
+  "Parmatch.get_mins"
+  [le ps]
+  (letfn [(select [r ps]
+            (if (empty? ps)
+              r
+              (let [p (first ps) more (rest ps)]
+                (if (some #(le % p) more) (recur r more) (recur (cons p r) more)))))]
+    (vec (select () (select () ps)))))
+
+(declare lub)
+
+(defn- lubs [ps qs] (mapv lub ps qs))
+
+(defn lub
+  "Parmatch.lub: a pattern matching what both match; throws ::empty when they are incompatible"
+  [p q]
+  (let [dp (:desc p) dq (:desc q)
+        empty! #(throw (ex-info "Empty" {::empty true}))]
+    (cond
+      (= :Tpat_alias (dp 0)) (lub (dp 1) q)
+      (= :Tpat_alias (dq 0)) (lub p (dq 1))
+      (#{:Tpat_any :Tpat_var} (dp 0)) q
+      (#{:Tpat_any :Tpat_var} (dq 0)) p
+      (= :Tpat_or (dp 0)) (let [try-lub (fn [a b] (try (lub a b) (catch arbace.lang.ExceptionInfo e
+                                                                     (if (::empty (ex-data e)) nil (throw e)))))
+                                r1 (try-lub (dp 1) q)
+                                r2 (try-lub (dp 2) q)]
+                            (cond (and r1 r2) (assoc q :desc [:Tpat_or r1 r2])
+                                  r1 r1 r2 r2 :else (empty!)))
+      (= :Tpat_or (dq 0)) (lub q p)
+      (and (= :Tpat_constant (dp 0) (dq 0)) (= (dp 1) (dq 1))) p
+      (= :Tpat_tuple (dp 0) (dq 0)) (if (= (map first (dp 1)) (map first (dq 1)))
+                                      (assoc p :desc [:Tpat_tuple (mapv (fn [[l a] [_ b]] [l (lub a b)]) (dp 1) (dq 1))])
+                                      (empty!))
+      (= :Tpat_lazy (dp 0) (dq 0)) (assoc p :desc [:Tpat_lazy (lub (dp 1) (dq 1))])
+      (and (= :Tpat_construct (dp 0) (dq 0)) (equal-constr (dp 1) (dq 1)))
+      (assoc p :desc [:Tpat_construct (dp 1) (lubs (dp 2) (dq 2))])
+      (= :Tpat_record (dp 0) (dq 0))
+      (let [merge-rec (fn mr [l1 l2]
+                        (cond (empty? l1) l2 (empty? l2) l1
+                              :else (let [[a pa] (first l1) [b pb] (first l2)]
+                                      (cond (< (:pos a) (:pos b)) (cons (first l1) (mr (rest l1) l2))
+                                            (< (:pos b) (:pos a)) (cons (first l2) (mr l1 (rest l2)))
+                                            :else (cons [a (lub pa pb)] (mr (rest l1) (rest l2)))))))]
+        (assoc p :desc [:Tpat_record (vec (merge-rec (dp 1) (dq 1))) (dp 2)]))
+      (and (= :Tpat_array (dp 0) (dq 0)) (= (count (dp 1)) (count (dq 1))))
+      (assoc p :desc [:Tpat_array (lubs (dp 1) (dq 1))])
+      :else (empty!))))
+
+(defn empty-ex? [e] (boolean (::empty (ex-data e))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Bound identifiers (Typedtree.pat_bound_idents_full), left to right
+
+(defn bound-idents-full
+  "[[id name type]...]"
+  [p]
+  (let [d (:desc p)]
+    (case (d 0)
+      :Tpat_var [[(d 1) (d 2) (:type p)]]
+      :Tpat_alias (conj (bound-idents-full (d 1)) [(d 2) (d 3) (:type p)])
+      :Tpat_tuple (vec (mapcat (comp bound-idents-full second) (d 1)))
+      :Tpat_construct (vec (mapcat bound-idents-full (d 2)))
+      :Tpat_record (vec (mapcat (comp bound-idents-full second) (d 1)))
+      :Tpat_array (vec (mapcat bound-idents-full (d 1)))
+      :Tpat_or (bound-idents-full (d 1))
+      :Tpat_lazy (bound-idents-full (d 1))
+      :Tpat_exception (bound-idents-full (d 1))
+      [])))
+
+(defn bound-idents [p] (mapv first (bound-idents-full p)))
+
+(defn alpha-pat
+  "Typedtree.alpha_pat: the pattern's variables renamed by the map env (identifier to identifier)"
+  [env p]
+  (let [d (:desc p) r #(alpha-pat env %)]
+    (assoc p :desc
+           (case (d 0)
+             :Tpat_var (if-let [n (get env (d 1))] [:Tpat_var n (d 2)] d)
+             :Tpat_alias (let [q (r (d 1))] (if-let [n (get env (d 2))] [:Tpat_alias q n (d 3)] [:Tpat_alias q (d 2) (d 3)]))
+             :Tpat_tuple [:Tpat_tuple (mapv (fn [[l x]] [l (r x)]) (d 1))]
+             :Tpat_construct [:Tpat_construct (d 1) (mapv r (d 2))]
+             :Tpat_record [:Tpat_record (mapv (fn [[l x]] [l (r x)]) (d 1)) (d 2)]
+             :Tpat_array [:Tpat_array (mapv r (d 1))]
+             :Tpat_or [:Tpat_or (r (d 1)) (r (d 2))]
+             :Tpat_lazy [:Tpat_lazy (r (d 1))]
+             :Tpat_exception [:Tpat_exception (r (d 1))]
+             d))))
