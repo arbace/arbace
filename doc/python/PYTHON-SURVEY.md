@@ -2195,3 +2195,53 @@ Not changed: Go's collector stays at GOGC 400 (GOGC 800 measured 3-7% faster for
   (a linked worktree's and the clean clone's).
 - **The fragment** (`test/gate/crops/python.edn`, the main host's): checked in a scratch merge of `gt9-verbs` with this
   branch; its corrections and the second fragment are queue 212's patch for batch P (report 212).
+
+## As built: 213, Python's oracle records (2026-11-05, the Mac VM, queue 213; ORS12)
+
+The sixth crop of doc/ORACLE-RECORDS-SURVEY.md (ORS1-ORS19 decided; the shared tooling on the main host's `oracle-records-c`,
+the model `oracle-records-scheme`): no Python gate step outside the oracle tier needs python3. Light: recorded and verified on
+samples on the VM; nothing recorded is committed (the main host's night records them).
+
+- **What the steps asked of CPython, and what each became.**
+
+  | Step | Live CPython | Class | Now |
+  |---|---|---|---|
+  | python-read-essential | spec_check.py; corpus.py samples and list; pydump.py tree (originals and prints), tree --full; tokdump.py | A, B, D (the prints) | outcomes; the essential corpora's dumps committed; the print read natively, levels 2, 3, 5 the oracle tier's |
+  | python-front-essential, python-front | corpus.py samples, methods (gen --check), list; pydump.py tree, scopes, tree --full | A, B | outcomes; packs (essential committed) |
+  | pyi-aot-essential | none, but bin/pyi aborted without python3, and bin/pyi-clib aot ran two python3 one-offs | | no python3: need_python per verb; aot_text.ae on stage 0 |
+  | pyi-check-aot | runtime check's smoke runs and REPL session, the Unicode and CJK generators; record-ref --check | A, D | smoke and REPL outcomes; the generators and record-ref --check the oracle tier's |
+  | pyi-wheels | CPython's runs of the samples and the console script, pip --target's layout, a python3 zip one-off; pip-probe | A | outcomes (the layout as lines); zip; pip-probe the oracle tier's |
+  | pyi-bench | CPython per benchmark | A (speed) | the oracle tier's |
+  | python-roundtrip, python-native (python-records.edn) | as python-read-essential over the corpora | B, D | packs; the print native |
+  | pyi-c2j | none | | unchanged |
+
+- **`bin/pyi run` and `bin/pyi python` read the program natively** (arbace.python's `run` without `--dump`: the native reader's
+  dump in mode :full, as `arbace.python.run` reads what a program imports; `PYI_READER=helper` the helper's): checked equal on
+  test/python/pyi samples and a SyntaxError file.
+- **The records** (`tools/pydump/records.bash`, sourced by both scripts): `REPR_PYTHON_ORACLE` records (the default where
+  `test/oracle-records/oracle.bash` is; live without it, so this branch alone behaves as before), live, record, verify.
+  - Class B: one pack a corpus, `python-pydump-CORPUS` (`test/python/records/`), members by kind (`tree/`, `full/`, `scopes/`,
+    `tok/`; each tree, full and tok dump with its TSV row, its run's seconds and RSS 0), keyed `INPUT16:HELPER16`;
+    syntax-errors' generated inputs in its pack; the mutants of lex-check and parse-check their own corpora (`mutants-lex`,
+    `mutants-parse`); the essential corpora (samples, synthetic, errors, lex-errors) committed raw under `essential/`
+    (1,514 files, 1.87 MB; the gate's essential chain needs no store). A missing entry is UNRECORDED, a changed input or
+    helper STALE, a committed file off its manifest REFUSED: each fails the check.
+  - Class A, outcomes: `test/python/records/outcomes/NAME.{out,meta}` (stdout with `$root` as `@ROOT`, the status, the key,
+    `host: :python ID`): spec-check, samples, gen --check's eighteen, `smoke/*.py`, `repl/*.in`, `wheels/*` (the samples'
+    and the console script's runs, the site's directory as `@WHEELS`, and pip's layout).
+  - The corpora listed and counted without python3 (`pyrec_list`, `count_files`: equal to corpus.py's on all nine corpora,
+    and `pins --check` without python3 matched every corpus's recorded files, lines and digest).
+  - The round trips in records mode: the print read by the native reader, `compare --deferred` (levels 1 and 4 judged; 2, 3
+    and 5 the oracle tier's; a known `:code-lines` file not "gone"); `--record` refused (it needs every level: live).
+  - verify mode: python3 runs, each answer compared with its record, ORS6 (a)'s verdict (`oracle_verdict python`), the crossed
+    pair (one file's live dump against another's record) required to differ.
+  - `bin/repr-python records record|verify [--sample N] [CORPUS...|outcomes]`: every record made by the checks in that mode,
+    one pack a corpus made once at the end; recorded twice from nothing on the VM, the packs were byte for byte the same.
+- **The fragment** (gt9's `test/gate/crops/python.edn` and `python-records.edn`, the main host's: queue 213's report holds
+  them and the patch for `test/oracle-records/`): `:python` only on the oracle tier's `python-records-verify`,
+  `python-roundtrip-oracle` and `pyi-oracle`. Checked in a scratch overlay (gt9-verbs, oracle-records-scheme, this branch,
+  212's patch): `bin/gate --full --plan` and `--nightly --plan` show no step on `:python`, and the essential keys are the same
+  with python3 off `PATH`; `bin/gate --oracle --plan` runs the 14 Python oracle rows with python3 and shows them absent
+  without it.
+- **Sizes**, extrapolated from 24 files a corpus: the packs about 410 MB raw, 50 MB xz (stdlib 18, site-packages 11,
+  lib-test 21; scopes besides), within ORS11's 100 MB; committed: the essential dumps 1.9 MB and the manifests about 4 MB.
