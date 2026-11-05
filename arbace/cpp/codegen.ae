@@ -491,6 +491,21 @@
         (begin! l2)
         (val! (list 'phi 'ptr [adj from] ['null here])))))
 
+(defn- null-guarded!
+  "The value of (f) when the pointer `p` is not null, else null."
+  [p f]
+  (let [l1 (new-label "dyn.notnull") l2 (new-label "dyn.end") here (:label @*f*)
+        isnull (val! (list 'icmp :eq 'ptr p 'null))]
+    (condbr! isnull l2 l1)
+    (begin! l1)
+    (let [v (f) from (:label @*f*)]
+      (begin! l2)
+      (val! (list 'phi 'ptr [v from] ['null here])))))
+
+(defn- dyncast-call! [e p]
+  (declare! "__dynamic_cast" 'ptr '[ptr ptr ptr i64] :nounwind true)
+  (call-insn! 'ptr 'ptr (gsym "__dynamic_cast") [['ptr p] ['ptr (eh-typeinfo! {:k :class :id (:from e)})] ['ptr (eh-typeinfo! {:k :class :id (:to e)})] ['i64 (:hint e)]] true))
+
 (defn- cast! [e]
   (let [from (abi/unq (:ty (:e e))) to (abi/unq (:ty e))]
     (case (:ck e)
@@ -650,6 +665,14 @@
                  (emit! '(unreachable))
                  nil))
     :exn-ptr (:exn-adj @*f*)
+    :dyncast (if (:void e)
+               ;; dynamic_cast<void*>: the most derived object, by the vtable's offset to top
+               (let [p (emit-rv (:e e))]
+                 (null-guarded! p (fn [] (let [vp (val! (list 'load 'ptr ['ptr p] :align 8))
+                                               op (val! (list 'getelementptr :inbounds 'i64 ['ptr vp] ['i64 -2]))
+                                               o (val! (list 'load 'i64 ['ptr op] :align 8))]
+                                           (val! (list 'getelementptr :inbounds 'i8 ['ptr p] ['i64 o]))))))
+               (let [p (emit-rv (:e e))] (null-guarded! p #(dyncast-call! e p))))
     :delete (let [p (emit-rv (:e e))
                   et (:to (abi/unq (:ty (:e e))))
                   cid (when (abi/class? (abi/unq et)) (:id (abi/unq et)))
@@ -704,6 +727,23 @@
     :reinterpret-lv (emit-lv (:e e))
     :str (gsym (string-global (:s e)))
     :exn-obj (:exn-adj @*f*)
+    :typeid (if-let [x (:e e)]
+              (let [a (emit-lv x)
+                    vp (val! (list 'load 'ptr ['ptr a] :align 8))
+                    tp (val! (list 'getelementptr :inbounds 'ptr ['ptr vp] ['i64 -1]))]
+                (val! (list 'load 'ptr ['ptr tp] :align 8)))
+              (eh-typeinfo! (:t e)))
+    :dyncast (let [a (emit-lv (:e e))
+                   r (dyncast-call! e a)
+                   bad (new-label "dynamic_cast.bad") ok (new-label "dynamic_cast.end")
+                   z (val! (list 'icmp :eq 'ptr r 'null))]
+               (condbr! z bad ok)
+               (begin! bad)
+               (declare! "__cxa_bad_cast" 'void [])
+               (call-insn! 'void 'void (gsym "__cxa_bad_cast") [] false)
+               (emit! '(unreachable))
+               (close-block!) (start! ok)
+               r)
     :temp (let [t (slot! (:ty e))] (emit-init t (:ty e) (:init e)) (push-temp-cleanup! (:id (abi/unq (:ty e))) t) t)
     :assign (let [v (emit-rv (:r e)) a (emit-lv (:l e))] (store! (:ty e) v a) a)
     :cassign (let [a (emit-lv (:l e)) t (abi/unq (:ty e)) old (load! t a)
@@ -1213,6 +1253,46 @@
                                          :else ['ptr (want-fn! ofid)]))))]
                      x))]
     (add-top! (list 'llvm/global (gsym nm) (list 'array (count slots) 'ptr) (apply list 'array slots) :linkage :linkonce_odr :constant true :align 8))))
+
+(defn- abi-class-global! [^String kind]
+  (when-not (contains? (:declared @*top*) kind)
+    (swap! *top* update :declared conj kind)
+    (add-top! (list 'llvm/global (gsym kind) '(array 0 ptr) :linkage :external)))
+  ['ptr (list 'getelementptr :inbounds 'ptr ['ptr (gsym kind)] ['i64 2])])
+
+(defn eh-typeinfo!
+  "The type_info object of the type `t` (a thrown or caught type): a class's own; a fundamental type's and a pointer
+  to one's in the runtime (external); a pointer to a class's or an enumeration's written here (Itanium §2.9.5)."
+  [t]
+  (let [t (abi/unq t)
+        fundamental? (fn [x] (= :b (:k (abi/unq x))))]
+    (cond
+      (abi/class? t) (typeinfo! (:id t))
+      (or (fundamental? t) (and (abi/ptr? t) (fundamental? (:to t))))
+      (let [nm (str "_ZTI" (abi/mangle-type-name t))]
+        (when-not (contains? (:declared @*top*) nm)
+          (swap! *top* update :declared conj nm)
+          (add-top! (list 'llvm/global (gsym nm) 'ptr :linkage :external :constant true)))
+        (gsym nm))
+      :else
+      (let [mn (abi/mangle-type-name t)
+            nm (str "_ZTI" mn) ts (str "_ZTS" mn)]
+        (when-not (contains? (:declared @*top*) nm)
+          (swap! *top* update :declared conj nm ts)
+          (add-top! (list 'llvm/global (gsym ts) (list 'array (inc (count mn)) 'i8) (list 'c-string (str mn (char 0))) :linkage :linkonce_odr :constant true :align 1))
+          (cond
+            (abi/ptr? t)
+            (let [to (:to t)
+                  inner (eh-typeinfo! to)
+                  vt (abi-class-global! "_ZTVN10__cxxabiv119__pointer_type_infoE")]
+              (add-top! (list 'llvm/global (gsym nm) '(struct ptr ptr i32 ptr)
+                              (list 'struct vt ['ptr (gsym ts)] ['i32 (+ (if (:c to) 1 0) (if (:v to) 2 0))] ['ptr inner])
+                              :linkage :linkonce_odr :constant true :align 8)))
+            (abi/enum? t)
+            (add-top! (list 'llvm/global (gsym nm) '(struct ptr ptr) (list 'struct (abi-class-global! "_ZTVN10__cxxabiv116__enum_type_infoE") ['ptr (gsym ts)])
+                            :linkage :linkonce_odr :constant true :align 8))
+            :else (fail :rtti "type_info of " (pr-str t))))
+        (gsym nm)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Namespace-scope variables

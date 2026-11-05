@@ -331,7 +331,8 @@
            :scope home
            :explicit (boolean (re-find #"^\s*(?:inline\s+|constexpr\s+)*explicit\b" (or (node-text n) "")))
            :defaulted (when (:explicitlyDefaulted n) true) :deleted (boolean (:explicitlyDeleted n))
-           :pos (long (or (:_b n) 0))}
+           :pos (long (or (:_b n) 0))
+           :src *src*}
         old (find-redecl home f)
         id (or old (next-id))
         pinfo {:param-names (mapv :name pn)
@@ -1214,9 +1215,11 @@
         frees (concat (filter #(not (:cls (fnd %))) (map :id (filter #(= :fn (:e %)) (lookup (:scope ctx) nm)))) (adl-fns args nm))
         cands (concat (map (fn [m] [:m m]) members) (map (fn [f] [:f f]) (distinct frees)))]
     (if (empty? cands)
-      (if (= o "=")
-        (fail :assign "no operator=")
-        nil)
+      (cond
+        (= o "=") (fail :assign "no operator=")
+        ;; C++20's rewritten candidate: a != b as !(a == b)
+        (= o "!=") (when-let [c (operator-call ctx "==" args)] {:op :not :e (convert-scalar (rv c) abi/bool* false) :ty abi/bool* :cat :pr})
+        :else nil)
       (let [;; members as functions of the remaining operands with the object, non-members of all
             mviable (when (seq members) (try [(resolve-overload members more l) :m] (catch arbace.lang.ExceptionInfo _ nil)))
             fviable (when (seq frees) (try [(resolve-overload (distinct frees) args nil) :f] (catch arbace.lang.ExceptionInfo _ nil)))]
@@ -1492,6 +1495,31 @@
                       {:op :delete :e e :array (boolean (:isArrayAsWritten n)) :ty abi/void :cat :pr})
     "ExprWithCleanups" (analyze ctx (first (kids n)))
     "LambdaExpr" (lambda-expr ctx n)
+    "CXXTypeidExpr"
+    (let [ti (let [es (lookup-qualified *root* ["std" "type_info"] true)] (:ty (type-entity es)))
+          _ (when-not ti (fail :rtti "typeid without std::type_info"))
+          ti (assoc ti :c true)]
+      (if-let [ta (get-in n [:typeArg :qualType])]
+        {:op :typeid :t (abi/unq (abi/non-ref (resolve-type (:scope ctx) ta))) :ty ti :cat :lv}
+        (let [e (analyze ctx (first (kids n)))
+              cid (class-id (:ty e))]
+          (if (and cid (lv? e) (abi/dynamic? cid))
+            {:op :typeid :e e :ty ti :cat :lv}
+            {:op :comma :l (if (and cid (= :pr (:cat e))) {:op :cast :ck :void :e e :ty abi/void :cat :pr} {:op :cast :ck :void :e e :ty abi/void :cat :pr})
+             :r {:op :typeid :t (abi/unq (:ty e)) :ty ti :cat :lv} :ty ti :cat :lv}))))
+    "CXXDynamicCastExpr"
+    (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
+          e (analyze ctx (first (kids n)))
+          ref (abi/ref? t)
+          src (if ref e (rv e))
+          sc (if ref (class-id (:ty src)) (class-id (:to (abi/unq (:ty src)))))
+          dt (if ref (abi/unq (:to t)) (:to (abi/unq t)))
+          dc (class-id dt)]
+      (cond
+        (and dc sc (or (= dc sc) (abi/derived-from? sc dc))) (cast-expr ctx t e false)
+        (and (not ref) (abi/void? dt)) {:op :dyncast :e src :void true :ty t :cat :pr}
+        :else {:op :dyncast :e src :ref ref :from sc :to dc :ty (if ref dt t) :cat (if ref (if (= :rref (:k t)) :xv :lv) :pr)
+               :hint (if-let [[_ off] (abi/base-path dc sc)] off -2)}))
     "CXXThrowExpr" (if-let [k (first (kids n))]
                      (let [e (analyze ctx k)
                            r (if (abi/class? (abi/unq (:ty e))) e (rv e))
@@ -1752,7 +1780,8 @@
         this-t (when (and cls (not (:static f))) (abi/ptr (cond-> {:k :class :id cls} (:cq f) (assoc :c true))))
         cut (if cls (let [outer (loop [id cls] (let [c (abi/cls id) s (:outer c)] (if (= :class (:kind s)) (recur (:cls s)) c)))] Long/MAX_VALUE) (:pos f))
         ctx {:scope fs :fn-id fid :this-type this-t :statics (atom [])}]
-    (binding [*cutoff* (if cls Long/MAX_VALUE (max (long cut) (long (or (:_b (:body f)) 0))))]
+    (binding [*cutoff* (if cls Long/MAX_VALUE (max (long cut) (long (or (:_b (:body f)) 0))))
+              *src* (or (:src f) *src*)]
       (let [inits (when (= :ctor (:kind f)) (when-not (:implicit f) (ctor-inits ctx f)))
             body (when (:body f) (stmt ctx (:body f)))]
         (upd-fn! fid assoc :params pids :tbody body :tinits inits :nrvo (when body (nrvo-var body)) :statics @(:statics ctx))))))
@@ -1810,6 +1839,37 @@
         (nil? init) (init-for (:ty v) nil ctx :value)
         :else (decl-init ctx vid (assoc (or (:node v) {}) :init (:init-style v) :inner [init] :kind "VarDecl"))))))
 
+(def prelude-typeinfo
+  ;; std::type_info as the Itanium ABI lays it out (§2.9.4: the vptr, then the name) and compares it (§2.9.4: equal
+  ;; names' addresses, else equal strings unless the name starts with *, a type of internal linkage); declared for
+  ;; typeid in place of <typeinfo>'s class, whose bodies the native parser skims (CODEGEN.md §4)
+  "namespace std {
+class type_info {
+public:
+  virtual ~type_info();
+  const char* name() const noexcept { return __name[0] == '*' ? __name + 1 : __name; }
+  bool before(const type_info& __arg) const noexcept { return __builtin_strcmp(name(), __arg.name()) < 0; }
+  bool operator==(const type_info& __arg) const noexcept {
+    return __name == __arg.__name || (__name[0] != '*' && __builtin_strcmp(__name, __arg.__name) == 0);
+  }
+protected:
+  const char* __name;
+};
+}
+")
+
+(defn- strip-positions [x]
+  (cond (map? x) (into {} (for [[k v] x :when (not= k :_b)] [k (strip-positions v)]))
+        (vector? x) (mapv strip-positions x)
+        :else x))
+
+(defn- prelude-nodes []
+  (let [f (java.io.File/createTempFile "cg-prelude" ".cpp")]
+    (try
+      (spit f prelude-typeinfo)
+      (mapv strip-positions (:nodes ((requiring-resolve 'arbace.repr.cpp.native/parse-file) (.getPath f) (.getName f) "c++23" [])))
+      (finally (.delete f)))))
+
 (defn analyze-program
   "The program of the native parse's nodes (its global scope `proot`) of the source text `src`: {:fns {id fn} :vars
   {id var} :order [...] :classes {id class} :enums {...}}."
@@ -1818,6 +1878,9 @@
   (binding [*src* src *fns* (atom {}) *vars* (atom {}) *ids* (atom 0) *order* (atom [])
             abi/*classes* (atom {}) abi/*enums* (atom {}) *proot* proot *root* root *header-cache* (atom {}) *last-anon* (atom nil) *lambda-counts* (atom {})]
     (do
+      (when (re-find #"\btypeid\b|\btype_info\b" src)
+        (binding [*src* prelude-typeinfo]
+          (doseq [n (prelude-nodes)] (declare-node! root n))))
       (doseq [n nodes] (declare-node! root n))
       (doseq [[k id] @*order*]
         (case k
