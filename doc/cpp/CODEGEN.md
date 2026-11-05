@@ -1,7 +1,8 @@
 # C++ without the host's clang: Sema and a code generator (cpp-codegen)
 
 Status: survey, plan, the first slice (G1, branch `cpp-codegen`) and the second (G2, branch `cpp-codegen2`, §4a,
-2026-11-05), for the user's acceptance. Words: **the native parser** is CX11's (`arbace.repr.cpp.parse`, [NATIVE.md](NATIVE.md)), whose tree is
+2026-11-05), templates (G3), the first slice of the headers (G4, branch `cpp-g4`, "G4. The headers" at the end), for the
+user's acceptance. Words: **the native parser** is CX11's (`arbace.repr.cpp.parse`, [NATIVE.md](NATIVE.md)), whose tree is
 clang's AST as data; **clang's route** is cppi as built (CX6-CX7, [LLVM.md](LLVM.md)): `clang++ -O0 -S -emit-llvm`, the IR
 read as LLVM forms by repr/llvm, lowered to C forms by `arbace.cpp.lower`, compiled by gcc `-O0` with the lowered runtime
 and run; **our route** replaces its first step: the native parser, a semantic analysis of our own (`arbace.cpp.sema`)
