@@ -674,3 +674,7 @@ Recommendations carry costs in working days. "Done in fact" rows ask only for ra
 2. **LLS2/LLS13's refinement** (reader side now, the move after codegen's G2): the one change to the plan.
 3. **Ratify** LLS3, LLS5, LLS6, LLS19 (done in fact) and take LLS1, LLS4, LLS7-LLS10, LLS12, LLS14-LLS16 as recommended in one word.
 4. **LLS20**: whether the gate's interim step grows with the verifier and `:full`.
+
+## Decided (2026-11-05, the user)
+
+The decision sheet as recommended: LLS11, the llvm-project tarball fetched once (its SHA-512 pinned); LLS2 and LLS13, the reader side (LL1, LL3, LL4, LL8) now, LL2 and LL5 after C++ codegen's G2; LLS3, LLS5, LLS6 and LLS19 ratified as done; LLS1, LLS4, LLS7-LLS10, LLS12, LLS14-LLS16 as recommended; LLS20, the interim llvm-roundtrip step extended with verify-check and roundtrip --text once its control and essential files exist.
