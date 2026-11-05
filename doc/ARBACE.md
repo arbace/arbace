@@ -85,7 +85,8 @@ code. Three kinds of things live here:
   Apache-2.0), by hand on 2026-11-04, each file's header naming its sources (doc/rust/NATIVE-READER.md);
   the rest of `repr/rust/` is Arbace's own.
   `arbace/rust/front/mir.ae` (MIR forms' reader and printer, after `rustc_middle/src/mir/pretty.rs`), `arbace/rust/back/codegen.ae`
-  (MIR forms to LLVM forms, after `rustc_codegen_ssa/src/mir/`) and `tools/rsdump/mirdata.rs` (the helper's `mir`, `census` and
+  (MIR forms to LLVM forms, after `rustc_codegen_ssa/src/mir/` and `rustc_codegen_llvm/src/intrinsic.rs`), `arbace/rust/back/collect.ae`
+  (the collector's traversal, after `rustc_monomorphize/src/collector.rs`) and `tools/rsdump/mirdata.rs` (the helper's `mir`, `census` and
   `iface` modes, walking rustc_middle's `Body` as `pretty.rs` does) port rustc 1.99.1, the same revision and sources as above, by
   hand on 2026-11-05 (RF1-RF3, doc/rust/FRONTEND-SURVEY.md, "As built: RF1-RF3 (trial)"; LICENSE.md names the files; MIT OR
   Apache-2.0); evaluated from the checkout, not embedded, out of `gate_key` (RFS13).
