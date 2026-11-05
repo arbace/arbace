@@ -333,8 +333,20 @@ void __atomic_store();
 ;; queue 157 (review 130's finding 4): the preprocessor's entry function (arbace.repr.c.pp/stream's :entry) and the entries' first
 ;; tokens, an ArrayList of [seq entry] in seq order, one each time the entry changes (the converter's :entries)
 (def ^:const ENTRY 11) (def ^:const ENTRIES 12)
+;; the nesting bound (the keyed --full of 2026-11-05): the compiled parser reads gcc's limits-*.c (10,000 and more levels of
+;; parentheses, declarators, pointers, case labels, structs), where the evaluated one gave the evaluator's StackOverflowError;
+;; the converter and the checkers after it recurse over such a tree past Go's 1 GB stack, a fatal error that ends the whole
+;; corpus's run. Beyond MAX-NEST nested statements, casts, declarators, pointers, structs and initializers the parse panics
+;; with "stack overflow" as the evaluated parse did (CS60's :eval-depth and :eval-limits classes keep holding them)
+(def ^:const DEPTH 13) (def ^:const MAX-NEST 4000)
 
 (deftype Parser [nx ^ArrayList errs ^ArrayList toks kw ^objects st])
+(defn- nest! [^Parser p]
+  (let [^objects st (.-st p) d (inc (long (or (aget st DEPTH) 0)))]
+    (when (> d MAX-NEST) (throw (StackOverflowError. "the parse nests beyond MAX-NEST")))
+    (aset st DEPTH (Long/valueOf d))))
+(defn- unnest! [^Parser p]
+  (let [^objects st (.-st p)] (aset st DEPTH (Long/valueOf (dec (long (aget st DEPTH)))))))
 
 (defn- slot [^Parser p k] (aget ^objects (.-st p) k))
 (defn- slot! [^Parser p k v] (aset ^objects (.-st p) k v))
@@ -909,6 +921,8 @@ void __atomic_store();
     r))
 
 (defn- statement [^Parser p new-block]
+  (nest! p)
+  (try
   (let [label-decl-ok (slot p LDOK)]
     (slot! p LDOK false)
     (when new-block (new-scope! p))
@@ -933,7 +947,8 @@ void __atomic_store();
                   (in? c :CASE :DEFAULT) (node "Statement" :Case :StatementLabeled :LabeledStatement (labeled-statement p label-decl-ok))
                   :else (unexpected p "statement"))))]
       (when new-block (close-scope! p))
-      r)))
+      r))
+    (finally (unnest! p))))
 
 ;; Arbace (CS194 (a)): C2y's selection statements with a declaration (N3356): `if (int i = 42)`, `if (int i, j; i = 42)`,
 ;; `switch (int i = 42; i)`: an optional init declaration ending in `;`, then the condition, an expression or a declaration
@@ -1196,6 +1211,8 @@ void __atomic_store();
           (unary-expression p lparen tn rparen ctn?)))))
 
 (defn- cast-expression [^Parser p ctn?]
+  (nest! p)
+  (try
   (case (rn p)
     :eof (do (unexpected-eof p) [nil nil])
     \( (let [c (pkct p 1)]
@@ -1211,7 +1228,8 @@ void __atomic_store();
                  [r nil])))
            (or (expression? c) (= c \{)) (let [r (unary-expression p nil nil nil ctn?)] [r r])
            :else (do (unexpected p "cast expression") [nil nil])))
-    (let [r (unary-expression p nil nil nil ctn?)] [r r])))
+    (let [r (unary-expression p nil nil nil ctn?)] [r r]))
+    (finally (unnest! p))))
 
 (binary-level multiplicative-expression cast-expression "MultiplicativeExpression" :MultiplicativeExpression :CastExpression
               {\* :MultiplicativeExpressionMul \/ :MultiplicativeExpressionDiv \% :MultiplicativeExpressionMod})
@@ -1696,6 +1714,8 @@ void __atomic_store();
 (declare designation)
 
 (defn- initializer [^Parser p parent]
+  (nest! p)
+  (try
   (case (rn p)
     :eof (unexpected-eof p)
     \{ (let [r (node "Initializer" :Case :InitializerInitList :Token (sh p))]
@@ -1703,7 +1723,8 @@ void __atomic_store();
          (when (= (rn p) \,) (s! r :Token2 (sh p)))
          (s! r :Token3 (must p \}))
          r)
-    (node "Initializer" :Case :InitializerExpr :AssignmentExpression (assignment-expression p true))))
+    (node "Initializer" :Case :InitializerExpr :AssignmentExpression (assignment-expression p true)))
+    (finally (unnest! p))))
 
 (defn- initializer-list [^Parser p parent]
   (let [r (case (rn p true)
@@ -1788,6 +1809,8 @@ void __atomic_store();
     r))
 
 (defn direct-declarator [^Parser p declare]
+  (nest! p)
+  (try
   (let [r (case (rn p)
             :IDENTIFIER (let [r (node "DirectDeclarator" :Case :DirectDeclaratorIdent :Token (sh p))]
                           (when (std-attr-at? p 0) (s! r :AttributeSpecifierList (attribute-specifier-list-opt p))) ; go-whim
@@ -1798,7 +1821,8 @@ void __atomic_store();
                  (s! r :Token2 (must p \)))
                  r)
             (unexpected p "direct declarator"))]
-    (direct-declarator2 p r declare)))
+    (direct-declarator2 p r declare))
+    (finally (unnest! p))))
 
 (defn- std-attrs-then-suffix?
   "C23 attributes followed by another array or function suffix: they stood after the suffix before them (CS140, CS144)."
@@ -2015,6 +2039,8 @@ void __atomic_store();
             :else (do (unexpected p "type qualifier") (recur r))))))))
 
 (defn- pointer [^Parser p opt]
+  (nest! p)
+  (try
   (let [r (case (rn p)
             :eof (do (unexpected-eof p) :return)
             \* (let [r (node "Pointer" :Case :PointerTypeQual :Token (sh p) :TypeQualifiers (type-qualifier-list p true true))]
@@ -2031,7 +2057,8 @@ void __atomic_store();
                       (s! prev :Pointer q)
                       (s! prev :Case :PointerPtr)
                       (recur q))))
-                r))))
+                r)))
+    (finally (unnest! p))))
 
 ;; 6.7 declaration specifiers
 
@@ -2269,6 +2296,8 @@ void __atomic_store();
 (declare struct-declaration-list struct-or-union)
 
 (defn- struct-or-union-specifier [^Parser p]
+  (nest! p)
+  (try
   (let [sou (struct-or-union p)
         attrs (attribute-specifier-list-opt p)]
     (case (rn p)
@@ -2293,7 +2322,8 @@ void __atomic_store();
                           (when (and *recover* attrs (not= (rn p) \;))
                             (eh-soft! p (str (tpos (tok0 p)) ": unexpected " (rname (ch (tok0 p))) ", expected ';'")))
                           r)))
-      (unexpected p "struct or union specifier"))))
+      (unexpected p "struct or union specifier")))
+    (finally (unnest! p))))
 
 (declare struct-declaration)
 
@@ -2382,6 +2412,8 @@ void __atomic_store();
 (defn- dad-unexpected [^Parser p] (unexpected p "direct abstract declarator"))
 
 (defn- direct-abstract-declarator [^Parser p]
+  (nest! p)
+  (try
   (let [r (case (rn p)
             \[ (let [c (pkc p 1)]
                  (cond
@@ -2431,7 +2463,8 @@ void __atomic_store();
                    (dad-unexpected p))
               (dad-unexpected p))
             r)]
-    (if (= r :return) nil (direct-abstract-declarator2 p r))))
+    (if (= r :return) nil (direct-abstract-declarator2 p r)))
+    (finally (unnest! p))))
 
 (defn- direct-abstract-declarator2 [^Parser p dad]
   (loop [r dad]
@@ -2499,7 +2532,7 @@ void __atomic_store();
   or {:panic msg} where cc would panic."
   [cfg sources ^String main]
   (let [{:keys [errors next layer entry]} (pp/stream cfg sources main)
-        st (object-array 13)
+        st (object-array 14)
         _ (do (aset st SCOPE (new-scope* nil)) (aset st SEQ (Long/valueOf 0)) (aset st LDOK false) (aset st ENTRY entry) (aset st ENTRIES (ArrayList.)))
         p (Parser. next errors (ArrayList.) (keywords (:predefined cfg)) st)]
     (try
