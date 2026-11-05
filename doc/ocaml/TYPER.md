@@ -408,3 +408,7 @@ variants left (typeclass.ae 738, translclass.ae 495, the rest in the existing na
   (c)) and let a host without ocamlc run oi. (a) those two parts of T10 next (about a day), then T11 as decided;
   (b) T11 next as decided (TY6, TY9), T10 after it; (c) the class parameters' constraints and the objects probe's
   rest first. *Recommended: (a)*: it completes the stdlib, the condition TY7 (c) set for dropping ocamlc's library.
+
+## Decided (2026-11-05, the user: TY13-TY15)
+
+TY13 (a): Includeclass with T12; TY14 (a): Tpoly (t, []) for every method type with T11 if its corpus shows a difference; TY15 (a): T10's two stdlib blockers next, then T11 (amending TY9's order).
