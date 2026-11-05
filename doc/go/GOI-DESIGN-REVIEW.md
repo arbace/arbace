@@ -261,3 +261,7 @@ By programs per day, then by what they build for:
 6. **Reclassify the by-design list to the floor** (about 20: foreign code, gc's stale tests, allocation observations,
    `nilptr`), the rest "deferred, with the item above" until built: the matrix's "0 deferred" then rises, which is the honest
    state if Proposed 1 (a) is chosen. *Recommended*: do it as items land, class by class, not at once.
+
+## Decided (2026-11-05, the user)
+
+All six proposals as recommended: (1) gc's flag-diagnostic programs by design for goi, a gc-on-forms cell later; (2) the AOT level's invalid programs reported as not applicable; (3) speed as a check budget; (4) liveness funded; (5) :full forms after it; (6) the by-design list shrunk class by class.
