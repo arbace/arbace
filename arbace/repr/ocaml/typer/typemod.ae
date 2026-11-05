@@ -90,6 +90,31 @@
       [(when n id) mty (if n (assoc-in env [:modules n] entry) env)])))
 
 
+(defn rewrite-items
+  "The signature's types rewritten node by node by rw (values, declarations, exceptions, submodules), the new
+  declarations registered"
+  [rw items]
+  (mapv (fn [item]
+          (case (item 0)
+            :val (assoc item 3 (rw (item 3)))
+            :type [:type (mapv (fn [[n p d]]
+                                 (let [k (:kind d)
+                                       d' (assoc d :manifest (some-> (:manifest d) rw)
+                                                 :kind (case (k 0)
+                                                         :variant [:variant (mapv (fn [c] (cond-> (update c :args #(mapv rw %))
+                                                                                            (:inlined c) (update :inlined (fn [ls] (mapv #(update % :type rw) ls)))))
+                                                                                  (k 1))]
+                                                         :record [:record (mapv #(update % :type rw) (k 1)) (k 2)]
+                                                         k))]
+                                   (env/add-decl! p d')
+                                   [n p d']))
+                               (item 1))]
+            :exn (assoc item 3 (update (item 3) :args #(mapv rw %)))
+            :module (let [m (env/scrape (item 3))]
+                      (if (= :Mty_signature (m 0)) (assoc item 3 [:Mty_signature (rewrite-items rw (m 1))]) item))
+            item))
+        items))
+
 (defn- with-constraint [env items c]
   (case (c 0)
     :Pwith_type
@@ -118,6 +143,32 @@
                 (assoc item 3 (env/strengthen (not (:functor-arg e)) (:mty e) (:path e)))
                 item))
             items))
+    :Pwith_typesubst
+    ;; destructive substitution: the type taken out, its uses replaced by the definition
+    (let [parts (env/lid-parts (:txt (c 1)))
+          _ (when (> (count parts) 1) (type-error "destructive substitutions in a submodule are outside the slice"))
+          n (first parts)
+          tp (some (fn [item] (when (= :type (item 0)) (some (fn [[tn p _]] (when (= tn n) p)) (item 1)))) items)
+          _ (when-not tp (type-error (str "The signature has no type " n)))
+          [_ [[_ _ d']]] (env/transl-type-decls env [(c 2)] (fn [_] [:Pident (ty/ident-create n)]))
+          params (:params d') body (:manifest d')
+          memo (atom {})
+          rw (fn rw [t]
+               (let [t (ty/repr t)]
+                 (or (get @memo t)
+                     (let [d (ty/desc t)]
+                       (cond
+                         (= :Tvar (d 0)) t
+                         (and (= :Tconstr (d 0)) (= (d 1) tp)) (env/make-generic! (ty/subst params (mapv rw (d 2)) body))
+                         :else (let [x (ty/newty2 (ty/level t) [:Tvar nil])]
+                                 (swap! memo assoc t x)
+                                 (swap! x assoc :desc (ty/map-desc rw d))
+                                 x))))))]
+      (rewrite-items rw (vec (keep (fn [item]
+                                     (if (= :type (item 0))
+                                       (let [ds (vec (remove (fn [[tn _ _]] (= tn n)) (item 1)))] (when (seq ds) [:type ds]))
+                                       item))
+                                   items))))
     (type-error (str "the with-constraint " (c 0) " is outside the slice"))))
 
 (defn transl-modtype
@@ -278,7 +329,8 @@
                     :type (do (doseq [[n _ _] (item 1)]
                                 (when-not (get by1 [:type n]) (type-error (str "The type " n " is required but not provided"))))
                               [])
-                    :modtype []))
+                    :modtype []
+                    :hole (type-error "a part of the interface is outside the slice")))
                 sig2))
         n1 (count (filter env/runtime-item? sig1))]
     (if (and (= n1 (count pairs)) (every? (fn [[i [p c]]] (and (= i p) (nil? c))) (map-indexed vector pairs)))

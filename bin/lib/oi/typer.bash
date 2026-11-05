@@ -42,7 +42,8 @@ cmd_typer_check() {
   # the oracle: the committed dumps (TYPER_ORACLE), made by the host's compiler-libs through tools/ocdump; with ocdump present they are
   # dumped afresh and must equal the committed ones (--record rewrites them and the toplevel's outputs)
   local have_ocd=0 st=0
-  if "$root/bin/repr-ocaml" ocdump-build > "$OI_DIR/ocdump-build.log" 2>&1; then have_ocd=1; fi
+  # OI_TYPER_NO_OCDUMP=1: judged on the committed dumps alone, as on a host without compiler-libs
+  if [ -z "${OI_TYPER_NO_OCDUMP:-}" ] && "$root/bin/repr-ocaml" ocdump-build > "$OI_DIR/ocdump-build.log" 2>&1; then have_ocd=1; fi
   if [ $record = 1 ]; then
     [ $have_ocd = 1 ] || { cat "$OI_DIR/ocdump-build.log" >&2; die "typer-check --record needs ocdump (compiler-libs)"; }
     mkdir -p "$TYPER_ORACLE"
