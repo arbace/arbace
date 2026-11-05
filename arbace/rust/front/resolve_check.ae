@@ -1,0 +1,63 @@
+(ns arbace.rust.front.resolve-check
+  "RF5's judge (bin/rust-front resolve-check): each program's resolutions by arbace.rust.front.resolve over the
+  helper's expanded crate (DIR/NAME.exp.edn) against the helper's HIR paths (DIR/NAME.res.edn), per span: equal,
+  differing, missing (the oracle's alone), extra (ours alone); the differences ranked by class; a negative control
+  (one program's resolutions against another's oracle) must differ."
+  (:require [arbace.rust.front.resolve :as rs] [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- read-all [file]
+  (let [rdr (java.io.PushbackReader. (java.io.StringReader. (slurp file)))]
+    (loop [acc []] (let [x (read rdr false ::eof)] (if (= x ::eof) acc (recur (conj acc x)))))))
+
+(defn- res-map [forms] (into {} (for [[_ s rs] forms] [s rs])))
+
+(def ^:private source-dirs ["test/rust/synthetic" "test/rust/sample" "test/rust/eval" "test/rust/front"])
+
+(defn- source-of [n]
+  (some #(let [f (File. (str % "/" n ".rs"))] (when (.exists f) (slurp f))) source-dirs))
+
+(defn- class-of [want got]
+  (let [k (fn [rs] (when rs (str/join "+" (map #(str (first %) (when (#{'def 'local-def} (first %)) (str " " (second %)))) rs))))]
+    (str (or (k want) "-") " => " (or (k got) "-"))))
+
+(defn- compare-maps [want got]
+  (let [ks (sort (distinct (concat (keys want) (keys got))))]
+    (reduce (fn [acc s]
+              (let [w (get want s) g (get got s)]
+                (cond (= w g) (update acc :equal inc)
+                      (nil? g) (-> acc (update :missing inc) (update :diffs conj [s w g]))
+                      (nil? w) (-> acc (update :extra inc) (update :diffs conj [s w g]))
+                      :else (-> acc (update :differ inc) (update :diffs conj [s w g])))))
+            {:equal 0 :missing 0 :extra 0 :differ 0 :diffs []} ks)))
+
+(defn -main [dir & names]
+  (let [std (rs/load-std-names (str dir "/std-names.edn"))
+        verbose (System/getenv "RESOLVE_VERBOSE")
+        ours (atom {})
+        results
+        (vec (for [n names]
+               (let [crate (first (read-all (str dir "/" n ".exp.edn")))
+                     want (res-map (read-all (str dir "/" n ".res.edn")))
+                     got (try (res-map (rs/resolve-crate crate std {:source (when-not (System/getenv "RESOLVE_NO_SOURCE") (source-of n))}))
+                              (catch Throwable e (println "ERROR" n e) {}))
+                     c (compare-maps want got)]
+                 (swap! ours assoc n got)
+                 (assoc c :name n :total (count want)))))
+        tot (fn [k] (reduce + (map k results)))
+        classes (frequencies (for [r results [s w g] (:diffs r)] (class-of w g)))]
+    (doseq [r results]
+      (println (format "%-28s %4d of %4d equal, %d differ, %d missing, %d extra" (:name r) (:equal r) (:total r) (:differ r) (:missing r) (:extra r)))
+      (when verbose
+        (doseq [[s w g] (take 12 (:diffs r))] (println "   " s "want" (pr-str w) "got" (pr-str g)))))
+    (println "classes:")
+    (doseq [[c k] (take 25 (sort-by (comp - val) classes))] (println (format "  %5d  %s" k c)))
+    (println (format "resolve-check: %d of %d paths equal (%d differ, %d missing, %d extra); %d of %d programs fully equal"
+                     (tot :equal) (tot :total) (tot :differ) (tot :missing) (tot :extra)
+                     (count (filter #(and (zero? (:differ %)) (zero? (:missing %)) (zero? (:extra %))) results)) (count results)))
+    (when (>= (count names) 2)
+      (let [[a b] names
+            want (res-map (read-all (str dir "/" b ".res.edn")))
+            c (compare-maps want (get @ours a))]
+        (println "control (" a "against" b "):" (if (empty? (:diffs c)) "PASSED (a bug)" "differs, as it must"))))
+    (System/exit 0)))

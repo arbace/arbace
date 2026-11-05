@@ -1,0 +1,741 @@
+;; Ported from rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's
+;; rust-src-1.99.1-r0, pinned by tools/rsdump/apks.sha256): the essentials of compiler/rustc_resolve/src/
+;; {build_reduced_graph.rs (the def collector's modules and bindings), imports.rs (the import fixpoint, globs),
+;; ident.rs (resolve_ident_in_lexical_scope's order: ribs, modules, the extern prelude, the std prelude, builtin
+;; types), late.rs (ribs for locals, generics and Self; patterns' bindings against unit structs, variants and
+;; consts; partial resolutions)}; rustc is dual-licensed MIT OR Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.resolve
+  "RF5's first slice (doc/rust/FRONTEND-SURVEY.md, \"As built: RF4-RF5 start\"): name resolution over an expanded
+  crate in the helper's dump format (tools/rsdump's --expanded, or arbace.rust.front.expand's output), std's module
+  tree from the helper's --std-names data (RFS4). The result: one (res [l1 c1 l2 c2] [RES...]) per path written in
+  the root file at syntax context 0, as tools/rsdump/front.rs's --resolve writes HIR's paths.
+
+    (load-std-names FILE)                      std's, core's and alloc's modules: path -> {:kind K :children [...]}
+    (resolve-crate CRATE STD-NAMES)            the res forms, sorted by span
+    (resolve-crate CRATE STD-NAMES {:source TEXT})
+                                               with the root file's text, to place definitions' identifiers (the
+                                               dump's identifiers carry no spans)"
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; The dump's shapes
+
+(defn- head [x] (when (seq? x) (first x)))
+(defn- fv
+  "A record's field: (Head :k v ...)"
+  [x k]
+  (when (seq? x)
+    (loop [s (rest x)]
+      (when (seq s)
+        (if (= (first s) k) (second s) (recur (rest s)))))))
+(defn- pos-arg [x i] (when (seq? x) (nth x (inc i) nil)))
+(defn- some-val [x] (when (and (seq? x) (= 'Some (first x))) (second x)))
+(defn- id-name [x] (when (and (seq? x) (= 'id (first x))) (second x)))
+(defn- id-ctxt [x] (if (and (seq? x) (= 'id (first x))) (nth x 2 0) 0))
+(defn- root-span? [s] (and (vector? s) (= 4 (count s))))
+
+(defn- segs [path] (vec (fv path :segments)))
+(defn- seg-name [s] (id-name (fv s :ident)))
+
+;; ---------------------------------------------------------------------------------------------
+;; std's names (the helper's --std-names)
+
+(defn load-std-names
+  "names/mod forms: {path {:kind K :children [{:ns :type|:value|:macro :name :kind :path}]}}"
+  [file]
+  (let [rdr (java.io.PushbackReader. (java.io.StringReader. (slurp file)))]
+    (loop [m {}]
+      (let [x (read rdr false ::eof)]
+        (cond (= x ::eof) m
+              (= 'names/mod (head x))
+              (let [[_ p k kids] x]
+                (recur (assoc m p {:kind k :children (mapv (fn [[ns nm kind path]] {:ns (keyword (name ns)) :name nm :kind kind :path path}) kids)})))
+              :else (recur m))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Positions: the dump's identifiers have no spans; the root file's text places them
+
+(defn- line-starts [^String text]
+  (loop [i 0 acc [0]]
+    (let [j (.indexOf text "\n" (int i))]
+      (if (neg? j) acc (recur (inc j) (conj acc (inc j)))))))
+
+(def ^:dynamic *src* nil)  ; {:text String :cps int[] :lines [code point offsets]}
+
+(defn- src-of [^String text]
+  (let [cps (.toArray (.codePoints text))
+        n (alength cps)
+        starts (loop [i 0 acc [0]] (if (>= i n) acc (recur (inc i) (if (== 10 (aget cps i)) (conj acc (inc i)) acc))))]
+    {:cps cps :lines starts :n n}))
+
+(declare raw-extend)
+
+(defn- word-char? [^long c] (or (Character/isLetterOrDigit (int c)) (== c 95)))
+
+(defn- find-ident
+  "The span [l c l c2] of the first whole-word occurrence of NAME at or after [l c] in the root file"
+  [lc ^String nm]
+  (when (and *src* lc nm)
+    (let [{:keys [^ints cps lines n]} *src*
+          [l c] lc
+          start (+ (long (nth lines (dec (long l)) 0)) (dec (long c)))
+          ncp (.toArray (.codePoints nm))
+          k (alength ncp)
+          n (long n)]
+      (loop [i start]
+        (when (<= (+ i k) n)
+          (if (and (loop [j 0] (or (== j k) (and (== (aget cps (int (+ i j))) (aget ncp j)) (recur (inc j)))))
+                   (or (zero? i) (not (word-char? (aget cps (int (dec i))))))
+                   (or (== (+ i k) n) (not (word-char? (aget cps (int (+ i k)))))))
+            (let [li (loop [a 0 b (dec (count lines))]   ; the last line start <= i
+                       (if (>= a b) a (let [m (quot (+ a b 1) 2)] (if (<= (long (nth lines m)) i) (recur m b) (recur a (dec m))))))
+                  c0 (inc (- i (long (nth lines li))))]
+              (raw-extend [(inc li) c0 (inc li) (+ c0 k)]))
+            (recur (inc i))))))))
+
+(defn- raw-extend
+  "An identifier's span widened over a `r#` before it (the dump writes raw identifiers' names bare)"
+  [sp]
+  (if (and *src* (vector? sp) (= 4 (count sp)))
+    (let [{:keys [^ints cps lines]} *src*
+          [l c l2 c2] sp
+          i (+ (long (nth lines (dec (long l)) 0)) (dec (long c)))]
+      (if (and (>= i 2) (== 35 (aget cps (int (dec i)))) (== 114 (aget cps (int (- i 2)))))
+        [l (- (long c) 2) l2 c2]
+        sp))
+    sp))
+
+(defn- lo-of [s] (when (and (vector? s) (>= (count s) 2)) [(nth s 0) (nth s 1)]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Resolutions
+
+(defn res-form
+  "A resolution as tools/rsdump/front.rs writes it"
+  [r]
+  (case (:t r)
+    :def (list 'def (:kind r) (:path r))
+    :local-def (list 'local-def (:kind r) (:span r))
+    :local (list 'local (:span r))
+    :prim (list 'prim (:name r))
+    :self-ty-alias (list 'self-ty-alias (:span r))
+    :self-ty-param (list 'self-ty-param (:span r))
+    :self-ctor (list 'self-ctor (:span r))
+    :attr (list 'attr (:kind r))
+    :err (list 'err)
+    (list 'err)))
+
+(def ^:private prims
+  #{"bool" "char" "str" "i8" "i16" "i32" "i64" "i128" "isize" "u8" "u16" "u32" "u64" "u128" "usize" "f16" "f32" "f64" "f128"})
+
+(defn- module-kind? [k] (contains? #{"Mod" "Enum" "Trait"} k))
+(defn- type-like? [r]
+  (or (contains? #{:prim :self-ty-alias :self-ty-param} (:t r))
+      (contains? #{"Struct" "Union" "TyAlias" "TyParam" "Enum" "AssocTy" "ForeignTy"} (:kind r))))
+
+;; A local module: {:items (atom {[ns name] res}) :globs (atom [res]) :parent mod :root mod}
+(defn- new-module [parent kind]
+  {:items (atom {}) :globs (atom []) :imports (atom []) :parent parent :kind kind :uid (Object.)})
+
+(def ^:dynamic *std* {})
+(def ^:dynamic *root* nil)
+(def ^:dynamic *prelude* (atom nil))   ; the prelude module's res
+(def ^:dynamic *extern* (atom {}))     ; the extern prelude: name -> res
+
+(defn- std-module-res [path]
+  (when-let [m (get *std* path)] {:t :def :kind (:kind m) :path path}))
+
+(declare module-get)
+
+(defn- glob-get [mres ns nm seen]
+  (some (fn [g] (module-get g ns nm seen)) @(:globs (:mod mres))))
+
+(defn module-get
+  "A name in a module's namespace (a local module's items, then its globs; an extern module's children)"
+  ([mres ns nm] (module-get mres ns nm #{}))
+  ([mres ns nm seen]
+   (cond
+     (:mod mres)
+     (let [m (:mod mres)]
+       (when-not (contains? seen (:uid m))
+         (or (get @(:items m) [ns nm])
+             (glob-get mres ns nm (conj seen (:uid m))))))
+     (= :def (:t mres))
+     (when-let [m (get *std* (:path mres))]
+       (when-let [c (first (filter #(and (= ns (:ns %)) (= nm (:name %))) (:children m)))]
+         {:t :def :kind (:kind c) :path (:path c)}))
+     :else nil)))
+
+(defn- module-like? [r]
+  (or (some? (:mod r)) (and (= :def (:t r)) (module-kind? (:kind r)) (contains? *std* (:path r)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The def collector (build_reduced_graph)
+
+(defn- ident-span-at [item-span nm]
+  (or (find-ident (lo-of item-span) nm) (lo-of item-span)))
+
+(defn- ctor-kind [data]
+  (case (head data) Tuple "Fn" Unit "Const" nil))
+
+(declare collect-items)
+
+(defn- define! [m ns nm r]
+  (swap! (:items m) (fn [items] (if (contains? items [ns nm]) items (assoc items [ns nm] r)))))
+
+(defn- collect-use [m tree prefix]
+  (let [p (into prefix (segs (fv tree :prefix)))
+        k (fv tree :kind)]
+    (case (head k)
+      Simple (swap! (:imports m) conj {:path p :rename (id-name (some-val (second k))) :span (fv (fv tree :prefix) :span)})
+      Glob (swap! (:imports m) conj {:path p :glob true})
+      Nested (doseq [t (fv k :items)] (collect-use m (if (= 'tuple (head t)) (second t) t) p))
+      nil)))
+
+(defn- collect-item [m item]
+  (let [sp (fv item :span)
+        k (fv item :kind)]
+    (case (head k)
+      Fn (let [f (second k) nm (id-name (fv f :ident))]
+           (define! m :value nm {:t :local-def :kind (if (= :assoc (:kind m)) "AssocFn" "Fn") :span (ident-span-at sp nm)}))
+      (Struct Union)
+      (let [[_ ident _ data] k nm (id-name ident) s (ident-span-at sp nm)]
+        (define! m :type nm {:t :local-def :kind (str (head k)) :span s})
+        (when-let [ck (and (= 'Struct (head k)) (ctor-kind data))]
+          (define! m :value nm {:t :local-def :kind (str "Ctor(Struct, " ck ")") :span s})))
+      Enum
+      (let [[_ ident _ edef] k nm (id-name ident) s (ident-span-at sp nm)
+            em (new-module m "Enum")
+            r {:t :local-def :kind "Enum" :span s :mod em}]
+        (doseq [v (fv edef :variants)]
+          (let [vn (id-name (fv v :ident)) vs (ident-span-at (fv v :span) vn)]
+            (define! em :type vn {:t :local-def :kind "Variant" :span vs})
+            (when-let [ck (ctor-kind (fv v :data))]
+              (define! em :value vn {:t :local-def :kind (str "Ctor(Variant, " ck ")") :span vs}))))
+        (define! m :type nm r))
+      Trait
+      (let [t (second k) nm (id-name (fv t :ident)) s (ident-span-at sp nm)
+            tm (new-module m :assoc)]
+        (doseq [it (fv t :items)]
+          (let [ik (fv it :kind)]
+            (case (head ik)
+              Fn (let [n (id-name (fv (second ik) :ident))] (define! tm :value n {:t :local-def :kind "AssocFn" :span (ident-span-at (fv it :span) n)}))
+              Const (let [n (id-name (fv (second ik) :ident))] (define! tm :value n {:t :local-def :kind "AssocConst { is_type_const: false }" :span (ident-span-at (fv it :span) n)}))
+              Type (let [n (id-name (fv (second ik) :ident))] (define! tm :type n {:t :local-def :kind "AssocTy" :span (ident-span-at (fv it :span) n)}))
+              nil)))
+        (define! m :type nm {:t :local-def :kind "Trait" :span s :mod tm}))
+      TyAlias (let [nm (id-name (fv (second k) :ident))] (define! m :type nm {:t :local-def :kind "TyAlias" :span (ident-span-at sp nm)}))
+      Const (let [nm (id-name (fv (second k) :ident))] (define! m :value nm {:t :local-def :kind "Const { is_type_const: false }" :span (ident-span-at sp nm)}))
+      Static (let [st (second k) nm (id-name (fv st :ident))
+                   mut (if (= 'Mut (fv st :mutability)) "Mut" "Not")]
+               (define! m :value nm {:t :local-def :kind (str "Static { safety: Safe, mutability: " mut ", nested: false }") :span (ident-span-at sp nm)}))
+      Mod (let [[_ _safety ident mk] k nm (id-name ident) mm (new-module m "Mod")]
+            (when (= 'Loaded (head mk)) (collect-items mm (second mk)))
+            (define! m :type nm {:t :local-def :kind "Mod" :span (ident-span-at sp nm) :mod mm}))
+      ExternCrate (let [[_ orig ident] k nm (id-name ident) crate (or (some-val orig) nm)]
+                    (when-let [r (std-module-res (if (string? crate) crate (id-name crate)))]
+                      (swap! *extern* assoc nm r)
+                      (define! m :type nm r)))
+      Use (let [tree (second k)]
+            (if (some #(= "prelude_import" (some-> % (fv :kind) second (fv :item) (fv :path) segs first seg-name)) (fv item :attrs))
+              (reset! *prelude* (std-module-res (str/join "::" (map seg-name (segs (fv tree :prefix))))))
+              (collect-use m tree [])))
+      nil)))
+
+(defn collect-items [m items] (doseq [it items] (collect-item m it)) m)
+
+;; ---------------------------------------------------------------------------------------------
+;; Paths
+
+(def ^:dynamic *ribs* [])   ; innermost last: {:locals {[name ctxt] res}} {:types {name res}} {:module m} {:self-type r :self-ctor r}
+
+(defn- module-scope []
+  (or (some #(when (:module %) (:module %)) (rseq *ribs*)) *root*))
+
+(defn- lexical
+  "resolve_ident_in_lexical_scope: ribs (locals and generics), the block and module items, the extern prelude,
+  the std prelude, builtin types"
+  [ns nm ctxt]
+  (or (some (fn [rib]
+              (cond (and (= ns :value) (:locals rib)) (get (:locals rib) [nm ctxt])
+                    (and (= ns :type) (:types rib)) (get (:types rib) nm)
+                    (and (= ns :type) (= nm "Self") (:self-type rib)) (:self-type rib)
+                    (and (= ns :value) (= nm "Self") (:self-ctor rib)) (:self-ctor rib)
+                    (:module rib) (module-get {:mod (:module rib)} ns nm)
+                    :else nil))
+            (rseq *ribs*))
+      (module-get {:mod *root*} ns nm)
+      (when (= ns :type) (get @*extern* nm))
+      (when-let [p @*prelude*] (module-get p ns nm))
+      (when (and (= ns :type) (contains? prims nm)) {:t :prim :name nm})))
+
+(defn- normal-module
+  "The nearest module that is not a block's (self:: in a block names the enclosing module)"
+  [m]
+  (if (and (= "Block" (:kind m)) (:parent m)) (recur (:parent m)) m))
+(defn- parent-module [m] (let [n (normal-module m)] (or (:parent n) n)))
+
+(defn- first-seg [s ns n-segs]
+  (let [nm (seg-name s) ctxt (id-ctxt (fv s :ident))]
+    (case nm
+      "crate" {:t :local-def :kind "Mod" :mod *root*}
+      "self" (if (and (= 1 n-segs) (= ns :value)) (lexical :value "self" ctxt) {:t :local-def :kind "Mod" :mod (normal-module (module-scope))})
+      "super" {:t :local-def :kind "Mod" :mod (parent-module (module-scope))}
+      "{{root}}" :root
+      (lexical ns nm ctxt))))
+
+(defn resolve-path
+  "rustc's resolve_path: {:res R :resolved K} (K the segments resolved; fewer than the path's: a partial resolution)"
+  [path ns]
+  (let [ss (segs path) n (count ss)]
+    (loop [i 0 cur nil]
+      (if (>= i n)
+        {:res cur :resolved n}
+        (let [s (nth ss i) last? (== i (dec n)) sns (if last? ns :type)
+              r (if (zero? i)
+                  (first-seg s sns n)
+                  (cond (= :root cur) (get @*extern* (seg-name s))
+                        (module-like? cur) (or (module-get cur sns (seg-name s))
+                                               (when (and last? (= ns :value) (#{"Enum"} (:kind cur))) nil))
+                        :else nil))]
+          (cond
+            (and r (not= :root r)) (recur (inc i) r)
+            (= :root r) (recur (inc i) :root)
+            (and cur (not= :root cur) (or (type-like? cur) (and (#{"Enum" "Trait"} (:kind cur)))))
+            {:res cur :resolved i}
+            :else {:res nil :resolved i}))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Output
+
+(def ^:dynamic *acc* nil)  ; atom {span [res...]}
+
+(defn- emit! [span r]
+  (when (and (root-span? span) r (map? r))
+    (swap! *acc* update span (fn [v] (let [f (res-form r)] (if (some #{f} v) v (conj (or v []) f)))))))
+
+(defn- prefix-span
+  "The span of a path's first K segments: from its start to the end of segment K's identifier or arguments"
+  [path k]
+  (let [sp (fv path :span) ss (segs path)]
+    (when (root-span? sp)
+      (let [[l c] sp
+            end (loop [i 0 col (long c)]
+                  (if (>= i k)
+                    col
+                    (let [s (nth ss i) nm (seg-name s)
+                          col (if (pos? i) (+ col 2) col)
+                          a (some-val (fv s :args))
+                          as (when a (fv (second a) :span))
+                          col (if (= nm "{{root}}") col (+ col (.codePointCount ^String nm 0 (count nm))))
+                          col (if (root-span? as) (long (nth as 3)) col)]
+                      (recur (inc i) col))))]
+        (if (and (= "{{root}}" (seg-name (first ss))) (pos? k))
+          [l c l (+ (long end) 2)]
+          [l c (nth sp 2) end])))))
+
+(declare walk-expr walk-ty walk-pat walk-block walk-item walk-generic-args walk walk-assoc report-use resolve-imports-of)
+
+(defn- walk-seg-args [path]
+  (doseq [s (segs path)]
+    (when-let [a (some-val (fv s :args))] (walk-generic-args a))))
+
+(defn- report-path [path ns]
+  (let [ss (segs path)
+        {:keys [res resolved]} (resolve-path path ns)
+        res (if (and (nil? res) (= ns :value) (== 1 (count ss)))
+              nil res)]
+    (walk-seg-args path)
+    (cond
+      (nil? res) (emit! (fv path :span) {:t :err})
+      (== resolved (count ss)) (emit! (fv path :span) res)
+      :else (emit! (prefix-span path resolved) res))))
+
+(defn walk-generic-args [a]
+  (case (head a)
+    AngleBracketed
+    (doseq [x (fv (second a) :args)]
+      (case (head x)
+        Arg (let [g (second x)]
+              (case (head g)
+                Type (let [t (second g) k (fv t :kind)]
+                       ;; a const argument written as a path: the type namespace first, then the value namespace
+                       (if (and (= 'Path (head k)) (= 'None (second k)) (== 1 (count (segs (nth k 2))))
+                                (nil? (:res (resolve-path (nth k 2) :type)))
+                                (:res (resolve-path (nth k 2) :value)))
+                         (report-path (nth k 2) :value)
+                         (walk-ty t)))
+                Const (walk-expr (fv (second g) :value))
+                nil))
+        Constraint (walk x)
+        nil))
+    Parenthesized (let [p (second a)] (doseq [t (fv p :inputs)] (walk-ty (if (= 'Param (head t)) (fv t :ty) t))) (walk (fv p :output)))
+    nil))
+
+(defn walk-ty [t]
+  (let [k (fv t :kind)]
+    (case (if (seq? k) (head k) k)
+      Path (do (when-let [q (some-val (second k))] (walk-ty (fv q :ty)))
+               (report-path (nth k 2) :type))
+      ImplicitSelf (emit! (fv t :span) (lexical :type "Self" 0))
+      (walk k))))
+
+(defn- bound-trait [b]
+  (when (= 'Trait (head b)) (report-path (fv (fv (second b) :trait_ref) :path) :type) true))
+
+;; Generic walk: every subform but attributes and token streams
+(defn walk [x]
+  (cond
+    (seq? x)
+    (case (if (keyword? (second x)) (first x) ::variant)
+      Expr (walk-expr x)
+      Ty (walk-ty x)
+      Pat (walk-pat x)
+      Block (walk-block x)
+      Item (walk-item x)
+      (Attribute TokenStream DelimArgs Visibility MacCall) nil
+      PolyTraitRef (report-path (fv (fv x :trait_ref) :path) :type)
+      (loop [s (rest x)]
+        (when (seq s)
+          (if (= :attrs (first s))
+            (recur (nnext s))
+            (do (walk (first s)) (recur (rest s)))))))
+    (vector? x) (doseq [y x] (walk y))
+    :else nil))
+
+;; Patterns: bindings into the current pattern's map, paths reported
+(def ^:dynamic *bindings* nil)   ; atom {[name ctxt] res} of the pattern being walked
+
+(defn- binding-span [pat nm]
+  (let [s (fv pat :span) k (count nm)]
+    (cond (and (root-span? s) (nil? (some-val (nth (fv pat :kind) 3 nil))))
+          (raw-extend [(nth s 2) (- (long (nth s 3)) k) (nth s 2) (nth s 3)])
+          (root-span? s) (or (find-ident (lo-of s) nm) s)
+          :else s)))
+
+(defn walk-pat [p]
+  (let [k (fv p :kind)]
+    (case (head k)
+      Ident (let [[_ mode ident sub] k nm (id-name ident) ctxt (id-ctxt ident)
+                  plain? (= mode '(BindingMode No Not))
+                  r (when (and plain? (nil? (some-val sub))) (lexical :value nm ctxt))
+                  path-like? (and r (= :def-like (cond (re-find #"^Ctor\((Struct|Variant), Const\)" (str (:kind r))) :def-like
+                                                        (re-find #"^Const" (str (:kind r))) :def-like
+                                                        :else nil)))]
+              (if path-like?
+                (emit! (fv p :span) r)
+                (do (when *bindings*
+                      (let [key [nm ctxt]]
+                        (when-not (contains? @*bindings* key)
+                          (swap! *bindings* assoc key {:t :local :span (binding-span p nm)}))))
+                    (when-let [s (some-val sub)] (walk-pat s)))))
+      TupleStruct (let [[_ q path pats] k] (report-path path :value) (doseq [x pats] (walk-pat x)))
+      Path (let [[_ q path] k] (report-path path :value))
+      Struct (let [[_ q path fields] k] (report-path path :type) (doseq [f fields] (walk-pat (fv f :pat))))
+      Or (let [alts (second k)]
+           (walk-pat (first alts))
+           ;; the other alternatives bind the same names: their uses resolve to the first's
+           (let [saved @*bindings*]
+             (doseq [a (rest alts)] (walk-pat a))
+             (reset! *bindings* saved)))
+      (walk k))))
+
+(defn- pat-bindings
+  "Walks a pattern; its bindings as a locals rib"
+  [p]
+  (binding [*bindings* (atom {})]
+    (walk-pat p)
+    {:locals @*bindings*}))
+
+(defmacro ^:private with-rib [rib & body] `(binding [*ribs* (conj *ribs* ~rib)] ~@body))
+
+(defn- walk-cond
+  "An if's or while's condition: its let expressions' bindings, visible in the rest of a && chain; the rib returned"
+  [e]
+  (let [k (fv e :kind)]
+    (case (head k)
+      Let (let [[_ pat init] k]
+            (walk-expr init)
+            (pat-bindings pat))
+      Binary (if (= 'And (fv (second k) :node))
+               (let [r1 (walk-cond (nth k 2))
+                     r2 (with-rib r1 (walk-cond (nth k 3)))]
+                 {:locals (merge (:locals r1) (:locals r2))})
+               (do (walk-expr e) {:locals {}}))
+      Paren (walk-cond (second k))
+      (do (walk-expr e) {:locals {}}))))
+
+(defn walk-expr [e]
+  (let [k (fv e :kind)]
+    (case (head k)
+      Path (do (when-let [q (some-val (second k))] (walk-ty (fv q :ty)))
+               (report-path (nth k 2) :value))
+      Struct (let [se (second k)]
+               (when-let [q (some-val (fv se :qself))] (walk-ty (fv q :ty)))
+               (report-path (fv se :path) :type)
+               (doseq [f (fv se :fields)] (walk-expr (fv f :expr)))
+               (let [r (fv se :rest)] (when (= 'Base (head r)) (walk-expr (second r)))))
+      If (let [[_ c then els] k
+               rib (walk-cond c)]
+           (with-rib rib (walk-block then))
+           (when-let [x (some-val els)] (walk-expr x)))
+      While (let [[_ c body] k rib (walk-cond c)]
+              (with-rib rib (walk-block body)))
+      ForLoop (let [f (second k)]
+                (walk-expr (fv f :iter))
+                (with-rib (pat-bindings (fv f :pat)) (walk-block (fv f :body))))
+      Match (let [[_ scrut arms] k]
+              (walk-expr scrut)
+              (doseq [a arms]
+                (let [rib (pat-bindings (fv a :pat))]
+                  (with-rib rib
+                    (when-let [g (some-val (fv a :guard))] (walk (fv g :cond)))
+                    (when-let [b (some-val (fv a :body))] (walk-expr b))))))
+      Closure (let [c (second k)
+                    d (fv c :fn_decl)
+                    rib (binding [*bindings* (atom {})]
+                          (doseq [prm (fv d :inputs)] (walk-ty (fv prm :ty)) (walk-pat (fv prm :pat)))
+                          {:locals @*bindings*})]
+                (walk (fv d :output))
+                (with-rib rib (walk-expr (fv c :body))))
+      Let (let [[_ pat init] k] (walk-expr init) (walk-pat pat))
+      MethodCall (let [mc (second k)]
+                   (walk-expr (fv mc :receiver))
+                   (when-let [a (some-val (fv (fv mc :seg) :args))] (walk-generic-args a))
+                   (doseq [x (fv mc :args)] (walk-expr x)))
+      Field (walk-expr (second k))
+      Try (do (walk-expr (second k)) (emit! (fv e :span) {:t :local :span nil}))
+      (walk k))))
+
+(defn walk-block [b]
+  (let [stmts (fv b :stmts)
+        items (keep #(let [k (fv % :kind)] (when (= 'Item (head k)) (second k))) stmts)
+        m (when (seq items)
+            (let [m (new-module (module-scope) "Block")] (collect-items m items) m))]
+    (letfn [(go [ss]
+              (when (seq ss)
+                (let [s (first ss) k (fv s :kind)]
+                  (case (head k)
+                    Let (let [l (second k)]
+                          (when-let [t (some-val (fv l :ty))] (walk-ty t))
+                          (let [lk (fv l :kind)]
+                            (case (head lk)
+                              Init (walk-expr (second lk))
+                              InitElse (do (walk-expr (second lk)) (walk-block (nth lk 2)))
+                              nil))
+                          (let [rib (pat-bindings (fv l :pat))]
+                            (with-rib rib (go (rest ss)))))
+                    Item (do (walk-item (second k)) (go (rest ss)))
+                    (do (walk k) (go (rest ss)))))))]
+      (if m
+        (do (resolve-imports-of m)
+            (with-rib {:module m} (go stmts)))
+        (go stmts)))))
+
+(defn- generics-rib* [g]
+  (let [gs (fv g :span)]
+    {:types (into {} (for [p (fv g :params)
+                           :let [k (fv p :kind) nm (id-name (fv p :ident))]
+                           :when (#{'Type 'Const} (head k))]
+                       [nm {:t :local-def :kind (if (= 'Type (head k)) "TyParam" "ConstParam")
+                            :span (or (find-ident (lo-of gs) nm) gs)}]))
+     :generics g}))
+
+(declare with-const-params)
+(defn- generics-rib [g] (with-const-params (generics-rib* g)))
+
+(defn- walk-generics [g]
+  (doseq [p (fv g :params)]
+    ;; a param's inline bounds are lowered to a where predicate whose bounded type is a path to the param
+    (when (and (seq (fv p :bounds)) (= 'Type (head (fv p :kind))))
+      (let [nm (id-name (fv p :ident))] (emit! (:span (lexical :type nm 0)) (lexical :type nm 0))))
+    (doseq [b (fv p :bounds)] (or (bound-trait b) (walk b)))
+    (let [k (fv p :kind)]
+      (case (head k)
+        Type (when-let [d (some-val (fv k :default))] (walk-ty d))
+        Const (walk-ty (fv k :ty))
+        nil)))
+  (walk (fv (fv g :where_clause) :predicates)))
+
+(defn- item-ribs
+  "An item's ribs: the module ribs of the enclosing scope (block items), locals and generics left behind"
+  []
+  (filterv :module *ribs*))
+
+(defn- with-const-params
+  "Const generic params are also values"
+  [rib]
+  (assoc rib :locals (into {} (for [[nm r] (:types rib) :when (= "ConstParam" (:kind r))] [[nm 0] r]))))
+
+(defn- walk-apit
+  "impl Trait in a parameter's type: a synthetic type param, its path at the type's span"
+  [t]
+  (cond (and (seq? t) (= 'Ty (head t)) (= 'ImplTrait (head (fv t :kind))))
+        (emit! (fv t :span) {:t :local-def :kind "TyParam" :span (fv t :span)})
+        (seq? t) (doseq [y (rest t)] (when (or (seq? y) (vector? y)) (walk-apit y)))
+        (vector? t) (doseq [y t] (walk-apit y))))
+
+(defn- walk-fn [f]
+  (let [g (fv f :generics)
+        grib (with-const-params (generics-rib g))]
+    (with-rib grib
+      (walk-generics g)
+      (let [d (fv (fv f :sig) :decl)
+            rib (binding [*bindings* (atom {})]
+                  (doseq [prm (fv d :inputs)]
+                    (walk-apit (fv prm :ty))
+                    (walk-ty (fv prm :ty)) (walk-pat (fv prm :pat)))
+                  {:locals @*bindings*})]
+        (walk (fv d :output))
+        (when-let [b (some-val (fv f :body))]
+          (with-rib rib (walk-block b)))))))
+
+(defn walk-item [item]
+  (let [k (fv item :kind) sp (fv item :span)]
+    (binding [*ribs* (item-ribs)]
+      (case (head k)
+        Fn (walk-fn (second k))
+        (Struct Union) (let [[_ _ g data] k]
+                         (with-rib (generics-rib g) (walk-generics g) (walk data)))
+        Enum (let [[_ _ g edef] k]
+               (with-rib (generics-rib g) (walk-generics g) (walk edef)))
+        Impl (let [im (second k) g (fv im :generics)
+                   self {:self-type {:t :self-ty-alias :span (lo-of sp)} :self-ctor {:t :self-ctor :span (lo-of sp)}}]
+               (with-rib (with-const-params (generics-rib g))
+                 (walk-generics g)
+                 (when-let [h (some-val (fv im :of_trait))] (report-path (fv (fv h :trait_ref) :path) :type))
+                 (walk-ty (fv im :self_ty))
+                 (with-rib self
+                   (doseq [it (fv im :items)] (walk-assoc it)))))
+        Trait (let [t (second k) g (fv t :generics)]
+                (with-rib (generics-rib g)
+                  (walk-generics g)
+                  (with-rib {:self-type {:t :self-ty-param :span (lo-of sp)}}
+                    (doseq [b (fv t :bounds)] (or (bound-trait b) (walk b)))
+                    (doseq [it (fv t :items)] (walk-assoc it)))))
+        TyAlias (let [ta (second k) g (fv ta :generics)]
+                  (with-rib (generics-rib g) (walk-generics g) (when-let [t (some-val (fv ta :ty))] (walk-ty t))))
+        (Const Static) (let [c (second k)] (walk-ty (fv c :ty)) (when-let [e (some-val (fv c :expr))] (walk-expr e)))
+        Mod (let [[_ _ ident mk] k
+                  r (module-get {:mod (module-scope)} :type (id-name ident))]
+              (when (= 'Loaded (head mk))
+                (binding [*ribs* [{:module (:mod r)}]]
+                  (doseq [it (second mk)] (walk-item it)))))
+        Use (report-use item)
+        nil))))
+
+(defn walk-assoc [it]
+  (let [k (fv it :kind)]
+    (binding [*ribs* *ribs*]
+      (case (head k)
+        Fn (walk-fn (second k))
+        Const (let [c (second k)] (walk-ty (fv c :ty)) (when-let [e (some-val (fv c :expr))] (walk-expr e)))
+        Type (let [ta (second k) g (fv ta :generics)]
+                  (with-rib (generics-rib g) (walk-generics g) (doseq [b (fv ta :bounds)] (or (bound-trait b) (walk b)))
+                    (when-let [t (some-val (fv ta :ty))] (walk-ty t))))
+        nil))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Imports (imports.rs): resolved to a fixpoint; each use path reported with its resolution in each namespace
+
+(defn- resolve-import-path
+  "The module of an import's path but its last segment, from the module M"
+  [m path]
+  (binding [*ribs* [{:module m}]]
+    (let [n (count path)]
+      (loop [i 0 cur nil]
+        (if (>= i n)
+          cur
+          (let [s (nth path i) nm (seg-name s)
+                r (if (zero? i)
+                    (case nm
+                      "crate" {:t :local-def :kind "Mod" :mod *root*}
+                      "self" {:t :local-def :kind "Mod" :mod (normal-module m)}
+                      "super" {:t :local-def :kind "Mod" :mod (parent-module m)}
+                      "{{root}}" :root
+                      (or (some #(module-get {:mod %} :type nm) (take-while some? (iterate (fn [mm] (when (= "Block" (:kind mm)) (:parent mm))) m)))
+                          (get @*extern* nm)
+                          (when-let [p @*prelude*] (module-get p :type nm))))
+                    (cond (= :root cur) (get @*extern* nm)
+                          (module-like? cur) (module-get cur :type nm)
+                          :else nil))]
+            (when r (recur (inc i) r))))))))
+
+(defn- import-leaf [m imp]
+  (let [p (:path imp) n (count p)
+        last-nm (seg-name (peek p))]
+    (if (= "self" last-nm)
+      (when-let [r (resolve-import-path m (pop p))] {:type r})
+      (let [base (if (== 1 n) nil (resolve-import-path m (pop p)))]
+        (if (== 1 n)
+          (into {} (for [ns [:type :value :macro]
+                         :let [r (or (when (= ns :type) (get @*extern* last-nm)) (module-get {:mod (parent-module m)} ns last-nm))]
+                         :when r] [ns r]))
+          (when base
+            (into {} (for [ns [:type :value :macro]
+                           :let [r (if (= :root base) (when (= ns :type) (get @*extern* last-nm)) (module-get base ns last-nm))]
+                           :when r] [ns r]))))))))
+
+(defn resolve-imports-of [m]
+  (loop [round 0]
+    (let [changed (atom false)]
+      (doseq [imp @(:imports m) :when (not (:done imp))]
+        (if (:glob imp)
+          (when-let [r (resolve-import-path m (:path imp))]
+            (when (module-like? r)
+              (swap! (:globs m) conj r)
+              (swap! (:imports m) (fn [v] (mapv #(if (identical? % imp) (assoc % :done true) %) v)))
+              (reset! changed true)))
+          (let [rs (import-leaf m imp)]
+            (when (seq rs)
+              (let [nm (or (:rename imp) (let [l (seg-name (peek (:path imp)))] (if (= "self" l) (seg-name (peek (pop (:path imp)))) l)))]
+                (doseq [[ns r] rs] (define! m ns nm r)))
+              (swap! (:imports m) (fn [v] (mapv #(if (identical? % imp) (assoc % :done true :res rs) %) v)))
+              (reset! changed true)))))
+      (when (and @changed (< round 20)) (recur (inc round))))))
+
+(defn- all-modules [m]
+  (cons m (mapcat (fn [r] (when-let [mm (:mod r)] (when (= (:parent mm) m) (all-modules mm)))) (vals @(:items m)))))
+
+(defn- report-use-tree [m tree prefix]
+  (let [p (into prefix (segs (fv tree :prefix)))
+        k (fv tree :kind)]
+    (case (head k)
+      Simple (let [imp (first (filter #(and (= p (:path %)) (not (:glob %))) @(:imports m)))
+                   rs (:res imp)]
+               (doseq [[_ r] (sort-by key (or rs {}))] (emit! (fv (fv tree :prefix) :span) r))
+               (when (empty? rs) (emit! (fv (fv tree :prefix) :span) {:t :err})))
+      Glob (when-let [r (resolve-import-path m p)] (emit! (fv (fv tree :prefix) :span) r))
+      Nested (doseq [t (fv k :items)] (report-use-tree m (if (= 'tuple (head t)) (second t) t) p))
+      nil)))
+
+(defn report-use [item]
+  (when-not (some #(= "prelude_import" (some-> % (fv :kind) second (fv :item) (fv :path) segs first seg-name)) (fv item :attrs))
+    (report-use-tree (module-scope) (second (fv item :kind)) [])))
+
+;; ---------------------------------------------------------------------------------------------
+;; The crate
+
+(defn- span-key [[s _]] (vec s))
+
+(defn resolve-crate
+  ([crate std-names] (resolve-crate crate std-names {}))
+  ([crate std-names {:keys [source]}]
+   (binding [*std* std-names
+             *src* (when source (src-of source))
+             *prelude* (atom nil)
+             *acc* (atom {})]
+    (binding [*extern* (atom {"core" (std-module-res "core")})]
+     (let [root (new-module nil "Mod")]
+       (binding [*root* root]
+         (collect-items root (fv crate :items))
+         ;; the imports of every module, to a fixpoint across modules
+         (dotimes [_ 3] (doseq [m (all-modules root)] (resolve-imports-of m)))
+         (binding [*ribs* [{:module root}]]
+           (doseq [it (fv crate :items)] (walk-item it)))
+         (->> @*acc*
+              (sort-by span-key)
+              (map (fn [[s rs]] (list 'res s (vec (sort-by pr-str rs))))))))))))
