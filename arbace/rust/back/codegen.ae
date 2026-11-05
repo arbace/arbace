@@ -132,7 +132,11 @@
         kind (if (seq? st) (name (first st)) (name st))]
     (case (:kind ly)
       :scalar (symbol (:mem (:scalar ly)))
-      :pair (list 'struct (symbol (:mem (first (:pair ly)))) (symbol (:mem (second (:pair ly)))))
+      :pair (if (#{"adt" "closure"} kind)
+              (let [n (llvm-type-name t) r (llvm-name-ref n)]
+                (when gl (vswap! gl assoc-in [:types r] (list 'llvm/type r (list 'struct (list 'array (:size ly) 'i8)))))
+                r)
+              (list 'struct (symbol (:mem (first (:pair ly)))) (symbol (:mem (second (:pair ly))))))
       (cond
         (:array ly) (list 'array (:count (:array ly)) (backend-type lt gl (second st)))
         (= kind "tuple")
@@ -407,6 +411,16 @@
         "Add" [(:imm sc) (wrap (.add (big a) (big b)))]
         "Sub" [(:imm sc) (wrap (.subtract (big a) (big b)))]
         "Mul" [(:imm sc) (wrap (.multiply (big a) (big b)))]
+        "Div" (when-not (zero? (c (u b) java.math.BigInteger/ZERO))
+                (if (:signed sc)
+                  (when-not (and (= (sg a) (.negate (.pow two (dec bits)))) (= (sg b) (java.math.BigInteger/valueOf -1)))
+                    [(:imm sc) (wrap (.divide (sg a) (sg b)))])
+                  [(:imm sc) (wrap (.divide (u a) (u b)))]))
+        "Rem" (when-not (zero? (c (u b) java.math.BigInteger/ZERO))
+                (if (:signed sc)
+                  (when-not (and (= (sg a) (.negate (.pow two (dec bits)))) (= (sg b) (java.math.BigInteger/valueOf -1)))
+                    [(:imm sc) (wrap (.remainder (sg a) (sg b)))])
+                  [(:imm sc) (wrap (.remainder (u a) (u b)))]))
         "Eq" ["i1" (zero? (c (u a) (u b)))]
         "Ne" ["i1" (not (zero? (c (u a) (u b))))]
         "Lt" ["i1" (neg? (c (key a) (key b)))]
@@ -1498,8 +1512,16 @@
                                        (assign! bb dest {:ty "i64" :v r})
                                        (when target (br-or-merge bb t target)))
                                      "is_val_statically_known"
-                                     (do (assign! bb dest {:ty "i1" :v 'false})
-                                         (when target (br-or-merge bb t target)))
+                                     (let [a0 (first args) l0 (layout lt (ty-of a0))]
+                                       (if (= :scalar (:kind l0))
+                                         (let [sc (:scalar l0) v (operand! bb a0) r (fresh!)
+                                               tn (case (:prim sc) :ptr "p0" :float (:imm sc) (:imm sc))
+                                               nm (symbol "g" (str "llvm.is.constant." tn))]
+                                           (declare! gl nm 'i1 [[(symbol (:imm sc))]])
+                                           (emit! bb (list '= r (list 'call 'i1 nm [[(symbol (:imm sc)) (:v v)]])))
+                                           (assign! bb dest {:ty "i1" :v r}))
+                                         (assign! bb dest {:ty "i1" :v 'false}))
+                                       (when target (br-or-merge bb t target)))
                                      "arith_offset"
                                      (let [pv (operand! bb (first args)) nv (operand! bb (second args))
                                            r (fresh!)]
@@ -1527,7 +1549,7 @@
                                      (let [s (operand! bb (first args)) d (operand! bb (second args)) c (operand! bb (nth args 2))
                                            el (layout lt (second (ty-struct (ty-of (first args)))))
                                            nm (symbol "g" "llvm.memmove.p0.p0.i64")
-                                           bytes (if (number? (:v c)) (* (:size el) (:v c)) (let [r (fresh!)] (emit! bb (list '= r (list 'mul 'i64 (:size el) (:v c)))) r))]
+                                           bytes (if (number? (:v c)) (* (:size el) (:v c)) (let [r (fresh!)] (emit! bb (list '= r (list 'mul :nuw :nsw 'i64 (:size el) (:v c)))) r))]
                                        (declare! gl nm 'void [['ptr] ['ptr] ['i64] ['i1]])
                                        (emit! bb (list 'call 'void nm [['ptr (list :align (:align el)) (:v d)] ['ptr (list :align (:align el)) (:v s)] ['i64 bytes] ['i1 'false]]))
                                        (when target (br-or-merge bb t target)))
@@ -1535,7 +1557,7 @@
                                      (let [d (operand! bb (first args)) v (operand! bb (second args)) c (operand! bb (nth args 2))
                                            el (layout lt (second (ty-struct (ty-of (first args)))))
                                            nm (symbol "g" "llvm.memset.p0.i64")
-                                           bytes (if (number? (:v c)) (* (:size el) (:v c)) (let [r (fresh!)] (emit! bb (list '= r (list 'mul :nuw :nsw 'i64 (:v c) (:size el)))) r))]
+                                           bytes (if (number? (:v c)) (* (:size el) (:v c)) (let [r (fresh!)] (emit! bb (list '= r (list 'mul 'i64 (:size el) (:v c)))) r))]
                                        (declare! gl nm 'void [['ptr] ['i8] ['i64] ['i1]])
                                        (emit! bb (list 'call 'void nm [['ptr (list :align (:align el)) (:v d)] ['i8 (:v v)] ['i64 bytes] ['i1 'false]]))
                                        (when target (br-or-merge bb t target)))
