@@ -17,7 +17,9 @@
 
 arbace_main_checkout() {
   local root=$1 common
-  common=$(cd "$root" && git rev-parse --path-format=absolute --git-common-dir 2> "${TMPDIR:-.}/gate-cache-git.err") \
+  # (git's error, if any, joins the output: then not a directory, the fallback; no file written, unlike
+  # ${TMPDIR:-.}/gate-cache-git.err, which left an empty file in a checkout's root when TMPDIR was unset)
+  common=$(cd "$root" && git rev-parse --path-format=absolute --git-common-dir 2>&1) \
     && [ -d "$common" ] && [ "$(basename "$common")" = .git ] && dirname "$common" || echo "$root"
 }
 

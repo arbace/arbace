@@ -29,6 +29,11 @@
 # HEAVY_LOCK_WAITS). A caller that holds the lock already (flock .tmp/big.lock bin/gate) sets
 # GATE_HEAVY_CMD=env: then ARBACE_HEAVY_HELD=1 for every step, nothing locks again.
 #
+# The memory lanes (GTS227 (a), "As built: GTS227 (a)"): with GATE_LANES=1 (bin/gate --full [--clean] --concurrent)
+# every step of the plan runs under bin/gate-lane in place of GATE_HEAVY_CMD, admitted by its declared :mem-gib
+# (run_one's step_lane) and its index in the plan (ordix), ARBACE_HEAVY_HELD=1 inside (the run holds the big lock);
+# the admission's state and events in LOGS/lanes/.
+
 # Outputs (GT5): a step with :outputs writes into GATE_OUT (.tmp/gate/out/NAME), kept with its pass
 # (STORE/NAME/KEY.out) and put back when it is skipped; a step whose :uses name them reads them under
 # GATE_OUTS, their digests in its key: known at the plan when the producers are skipped, else computed
@@ -185,6 +190,15 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
   [ "$hv" = yes ] || hv=
   rm -f "${logs:?}/${name:?}.start" "${logs:?}/${name:?}.waits"
   [ -n "$hv" ] && read -r -a pre <<< "$GATE_HEAVY_CMD"
+  # GTS227 (a), the memory lanes (GATE_LANES=1: bin/gate --full --concurrent, --full --clean --concurrent): every step of
+  # the plan (run_one's step_lane, its declared :mem-gib) admitted by bin/gate-lane, by its declared memory and its place
+  # in the plan, in place of the heavy lock; the run holds the host's big lock as a whole, so its tools take none
+  # (ARBACE_HEAVY_HELD=1: the admission is the step's, :inner ones too)
+  if [ -n "${GATE_LANES:-}" ] && [ -n "${step_lane:-}" ]; then
+    pre=(env GATE_LANE_DIR="$logs/lanes" GATE_LANE_STEP="$name" GATE_LANE_GIB="$step_lane" GATE_LANE_ORDER="${ordix[$name]:-0}"
+         "$root/bin/gate-lane")
+    hv=yes
+  fi
   # GT7: the step's own run under the audit (audit_step, bin/gate --clean): strace into a FIFO its
   # reducer reads at once (NAME.paths), the namespaces loaded in NAME.loaded; the programs' CPU times
   # (GTS33 (a), bin/lib/limit.bash) in NAME.cpu.tsv
@@ -303,11 +317,12 @@ record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a))
 # the plan's steps, from plan.tsv: NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER HEAVY MEM BUDGET
 # SUMMARY-N SUMMARY-RE WHY AUDIT-CMD OUTPUTS USES KIND CMD
 order=()
-declare -A dec key phase chain needs after heavy memgib budget sum_n sum_re why acmd outputs uses kind cmd
-load_plan() {  # load_plan: plan.tsv into the arrays (again after a second plan: the order anew)
+declare -A dec key phase chain needs after heavy memgib budget sum_n sum_re why acmd outputs uses kind cmd ordix
+load_plan() {  # load_plan: plan.tsv into the arrays (again after a second plan: the order anew; ordix, a step's index in it)
   local n d k p c ne a hv mg bu sn sre w ac ou us ki cm
   order=()
   while IFS=$'\t' read -r n d k p c ne a hv mg bu sn sre w ac ou us ki cm; do
+    ordix[$n]=${#order[@]}
     order+=("$n"); dec[$n]=$d key[$n]=$k phase[$n]=$p chain[$n]=$c needs[$n]=${ne//,/ } after[$n]=$a
     heavy[$n]=$hv memgib[$n]=$mg budget[$n]=$bu sum_n[$n]=$sn sum_re[$n]=$sre why[$n]=$w acmd[$n]=$ac
     outputs[$n]=$ou uses[$n]=${us//,/ } kind[$n]=$ki cmd[$n]=$cm
@@ -372,7 +387,11 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
   if [ "${kind[$n]}" = build ] && [ "$hv" = yes ] && build_cached "$n"; then hv=cached; fi
   for attempt in 1 2 3; do
     if [ "${outputs[$n]}" = yes ]; then rm -rf "${logs:?}/out/$n"; mkdir -p "$logs/out/$n"; fi
-    audit_step=$aud GATE_OUT=$logs/out/$n GATE_OUTS=$logs/out GATE_LIST=$logs/rotation/$n.list GATE_USES="${uses[$n]}" step "$n" "$hv" bash -c "${cmd[$n]}"; st=$?
+    # GATE_FAIL_LINES (review 181 L3): a file the step's judge writes every failure line into, in its log's format (the
+    # log shows the first 40), which rotation_note and judge_note read with the log
+    rm -f "${logs:?}/$n.fail-lines"
+    step_lane=$( [ "$hv" = cached ] || { m=${memgib[$n]:--}; [ "$m" = - ] && m=1; echo "$m"; } ) \
+    audit_step=$aud GATE_OUT=$logs/out/$n GATE_OUTS=$logs/out GATE_LIST=$logs/rotation/$n.list GATE_USES="${uses[$n]}" GATE_FAIL_LINES=$logs/$n.fail-lines step "$n" "$hv" bash -c "${cmd[$n]}"; st=$?
     # GT4: strace -f aborts (ptrace(PTRACE_LISTEN): I/O error) when a traced process dies in a group
     # stop; an aborted trace is no audit and its run no run: again, twice at most
     [ -n "$aud" ] && grep -q '^strace: ptrace' "$logs/$n.log" || break
@@ -415,6 +434,7 @@ rotation_note_locked() {
   as=$(awk -F'\t' '$1 == "failed-as" {print $2}' "$r"); as=${as:-\\1}
   # a judge's failure (judge_note): its log and its own expressions
   [ -z "${4:-}" ] || { re=$4 as=$5; }
+  [ -n "${3:-}" ] || lg=$(fail_source "$n")
   rn=$(awk -F'\t' '$1 == "runs" {print $2}' "$r"); rn=${rn:-$n}
   now=$(date +%s)
   sq=$(( $(cat "$rd/.seq" 2>"$logs/$n.rot.err" || echo 0) + 1 )); echo "$sq" > "$rd/.seq"
@@ -426,13 +446,24 @@ rotation_note_locked() {
   local ids id
   if [ "$2" = fail ] && [ -n "$re" ] && [ -f "$lg" ]; then
     ids=$(sed -nE "s"$'\001'"$re"$'\001'"$as"$'\001''p' "$lg" | grep -Fxf "$logs/rotation/$n.list" | LC_ALL=C sort -u)
-    for id in $ids; do printf '%s\t%s\t%s\tfail\t%s\t%s\n' "$sq" "$now" "$id" "${commit:-unknown}" "${dirty:-unknown}"; done >> "$rd/$part.failed"
+    # one id a line (a name may hold spaces: cxgo's "main with args.c")
+    [ -z "$ids" ] || while IFS= read -r id; do printf '%s\t%s\t%s\tfail\t%s\t%s\n' "$sq" "$now" "$id" "${commit:-unknown}" "${dirty:-unknown}"; done <<< "$ids" >> "$rd/$part.failed"
     [ -n "$ids" ] && echo "   $n: $(echo "$ids" | wc -l) file(s) of $part noted as failed: in its subset until they pass ($rd/$part.failed)" >> "$logs/$n.log"
   elif [ "$2" = pass ] && { [ "$slice" = sub ] || [ "$slice" = whole ]; } && [ -s "$rd/$part.failed" ]; then
     ids=$(awk -F'\t' '$4 == "fail" {print $3}' "$rd/$part.failed" | LC_ALL=C sort -u | grep -Fxf "$logs/rotation/$n.list")
-    for id in $ids; do printf '%s\t%s\t%s\tclear\t%s\t%s\n' "$sq" "$now" "$id" "${commit:-unknown}" "${dirty:-unknown}"; done >> "$rd/$part.failed"
+    [ -z "$ids" ] || while IFS= read -r id; do printf '%s\t%s\t%s\tclear\t%s\t%s\n' "$sq" "$now" "$id" "${commit:-unknown}" "${dirty:-unknown}"; done <<< "$ids" >> "$rd/$part.failed"
   fi
   return 0
+}
+# fail_source NAME: the file a step's failure lines are read from: its log, and when its judge wrote GATE_FAIL_LINES
+# (every failure line, where the log prints the first 40: review 181 L3, a mass regression's files all join the subset
+# at once) the two together, LOGS/NAME.fail-all
+fail_source() {
+  if [ -s "$logs/$1.fail-lines" ]; then
+    cat "$logs/$1.log" "$logs/$1.fail-lines" > "$logs/$1.fail-all" 2>"$logs/$1.fail-all.err"; echo "$logs/$1.fail-all"
+  else
+    echo "$logs/$1.log"
+  fi
 }
 # judge_note NAME (GT8, doc/GATE-SURVEY.md, "As built: GT8 (the tools' lists)"): a failed judge of rotated checks
 # (a step whose :judges {:failed-re ERE :failed-as REPL} the planner wrote as LOGS/rotation/NAME.judges, its :uses'
@@ -444,10 +475,11 @@ judge_note() {
   [ -f "$j" ] && [ -f "$logs/$n.log" ] || return 0
   re=$(awk -F'\t' '$1 == "failed-re" {print $2}' "$j") as=$(awk -F'\t' '$1 == "failed-as" {print $2}' "$j"); as=${as:-\\1}
   [ -n "$re" ] || return 0
+  local src; src=$(fail_source "$n")
   for p in $(awk -F'\t' '$1 == "producer" {print $2}' "$j"); do
     [ -f "$logs/rotation/$p.rot" ] || continue
-    sed -nE "s"$'\001'"$re"$'\001'"$as"$'\001''p' "$logs/$n.log" | grep -qFxf "$logs/rotation/$p.list" || continue
-    rotation_note "$p" fail "$logs/$n.log" "$re" "$as"
+    sed -nE "s"$'\001'"$re"$'\001'"$as"$'\001''p' "$src" | grep -qFxf "$logs/rotation/$p.list" || continue
+    rotation_note "$p" fail "$src" "$re" "$as"
     echo "   $n: failed ids of $p's list noted as its failure (judge_note)" >> "$logs/$n.log"
   done
   return 0
@@ -531,6 +563,8 @@ gate_prune() {  # gate_prune [--dry-run]
   for d in "$store"/*/; do
     [ -d "$d" ] || continue
     n=$(basename "$d"); i=0
+    # the rotation's record is no step's passes: its .seq and .lock are never temporaries (review 181 L7)
+    [ "$n" = _rotation ] && continue
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       i=$((i + 1)); npass=$((npass + 1)); k=${f%.edn}
@@ -555,6 +589,7 @@ gate_prune() {  # gate_prune [--dry-run]
     done <<< "$(ls "$d" | sed -nE 's/^([0-9a-f]+)\.(log|inputs|out)$/\1/p' | sort -u)"
     [ -n "$dry" ] || find "$d" -maxdepth 1 -name '.*' -mmin +1440 -exec rm -rf {} + 2>"$store/.prune.err"
   done
+  rotation_prune "$now" "$days" "$dry"
   echo "gate --prune: $npass passes, $nkeep kept, $((npass - nkeep)) ${dry:+would be }removed ($freed bytes), $norphan left without a record ${dry:+would be }removed in $store"
   for pat in gate javac cover; do
     i=0
@@ -576,6 +611,44 @@ gate_prune() {  # gate_prune [--dry-run]
       [ -n "$dry" ] || rm -rf "${f:?}"
     done <<< "$(ls -dt "$exes"/* 2>"$store/.prune.err")"
   done
+  # ci's prebuilt runtime (doc/C23-SURVEY.md, "As built: ci's prebuilt runtime", CS272 (a)): the checkout's cache of
+  # fragments, a directory per library and key (NAME-KEY); per library the newest 3 kept, an older one removed when a day old
+  local rtc=${CI_RUNTIME:-$root/.tmp/ci-runtime} lib
+  if [ -d "$rtc" ]; then
+    for lib in $(ls "$rtc" | sed -n 's/^\(.*\)-[0-9a-f]\{64\}$/\1/p' | sort -u); do
+      i=0
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        i=$((i + 1)); [ $i -gt 3 ] || continue
+        [ $(( now - $(stat -c %Y "$f") )) -ge 86400 ] || continue
+        echo "gate --prune: ${dry:+would remove }ci's runtime $f"
+        [ -n "$dry" ] || rm -rf "${f:?}"
+      done <<< "$(ls -dt "$rtc/$lib"-* 2>"$store/.prune.err")"
+    done
+  fi
+}
+
+# rotation_prune NOW DAYS [DRY] (review 181 L7): each rotated check's runs, STORE/_rotation/NAME.runs, trimmed to the last
+# ARBACE_GATE_KEEP_RUNS (50) lines and every line younger than DAYS (its EPOCH), under the store's lock (the runner
+# appends to them under it). The period the record is judged over (7 days) is shorter than DAYS, and a slice whose
+# every run is older reads as never run, which the night's choice ranks with the oldest: no decision moves. The failed
+# files' events (NAME.PART.failed) are kept: a failure stands until a later event clears it
+rotation_prune() {
+  local now=$1 days=$2 dry=$3 rd=$store/_rotation keep=${ARBACE_GATE_KEEP_RUNS:-50} f nl kept tot=0 cut=0
+  [ -d "$rd" ] || return 0
+  for f in "$rd"/*.runs; do
+    [ -f "$f" ] || continue
+    nl=$(wc -l < "$f")
+    kept=$(awk -F'\t' -v n="$nl" -v k="$keep" -v since=$(( now - days * 86400 )) 'NR > n - k || $1 >= since' "$f" | wc -l)
+    tot=$((tot + nl)); [ "$kept" -lt "$nl" ] || continue
+    cut=$((cut + nl - kept))
+    echo "gate --prune: ${dry:+would trim }_rotation/${f##*/} ($nl runs, $kept kept)"
+    [ -n "$dry" ] && continue
+    { flock 9 && nl=$(wc -l < "$f") \
+        && awk -F'\t' -v n="$nl" -v k="$keep" -v since=$(( now - days * 86400 )) 'NR > n - k || $1 >= since' "$f" > "$f.tmp.$$" \
+        && mv -f "$f.tmp.$$" "$f"; } 9>>"$rd/.lock"
+  done
+  echo "gate --prune: $tot rotation runs, $cut ${dry:+would be }trimmed in $rd"
 }
 
 # the audit's reducer (GT5, GTS30 (a)): tools/gateaudit, the Go port of test/gate/audit.awk (23 times

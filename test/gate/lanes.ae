@@ -1,0 +1,200 @@
+(ns gate.lanes
+  "The memory lanes (doc/GATE-SURVEY.md, GTS227 (a), \"As built: GTS227 (a)\"): the declarations' check and the
+  lanes' view. Not in any key (it decides nothing of a run: bin/gate-lane admits the steps; this reads and prints).
+
+  -main mem-check ROOT STORE RECORD...
+      every step and part of ROOT's table (GATE_STEPS, else test/gate/steps.edn; expanded with GATE_ALL_PARTS as
+      the planner does) declares :mem-gib (but the :pre steps), and no recorded peak exceeds its declaration by the
+      margin: peak > :mem-gib x 1.1 + 0.5 GiB fails. A peak: the larger of :maxrss-kib and :tree-peak-kib of a pass in
+      STORE (STORE/NAME/KEY.edn; - none) or of a step of a clean record (test/gate/clean-TAG.edn's :steps); a record's
+      step that is a parted step's whole run (an older table's) is held to its parts' largest declaration; a name the
+      table does not know is passed over. A declaration far above its peaks (over twice the largest and 2 GiB) is
+      listed, not failed. Exit 1 on a problem.
+  -main view LOGS STORE BUDGET BIG RECORD...
+      the plan of LOGS/plan.tsv in the lanes: each step's lane (1: :mem-gib at least BIG; 2: the rest) and a schedule
+      simulated by bin/gate-lane's rule (decide, below) with the gate's order of work (the pre steps and the builds one
+      after another, then the essential chains at once, then the full ones, each chain's :start-after), the durations
+      the median of STORE's passes, else the newest RECORD's wall (a part of a step the record ran whole: its share),
+      else none (counted 0, listed); GATE_LANES_PREFER=clean takes the records' first. An estimate: the clean run's
+      audit and cold caches are not in the store's medians."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [gate.plan :as plan]
+            [gate.costs :as costs])
+  (:import (java.io File PushbackReader)))
+
+(defn- read-file [^String f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+(defn- gib [kib] (/ (double (or kib 0)) 1048576.0))
+(defn- peak-of [m]
+  (max (let [x (:maxrss-kib m)] (if (number? x) x 0)) (let [x (:tree-peak-kib m)] (if (number? x) x 0))))
+
+;; ---- the rule (bin/gate-lane's lane_decide, the same)
+
+(defn decide
+  "the waiters admitted now: RUNNING the declared GiB of the steps running, WAITERS [{:name :mem}] in the plan's
+  order; a waiter is admitted when the running and the earlier waiters' GiB and its own fit BUDGET (or nothing is
+  counted yet: alone over the budget) and it is not big (BIG GiB or more) while a big one is counted; every waiter
+  counts, admitted or not (conservative backfill)"
+  [running waiters budget big]
+  (loop [r (reduce + 0 running) bigs (count (filter #(>= % big) running)) ws waiters out []]
+    (if-let [{:keys [name mem]} (first ws)]
+      (let [b? (>= mem big)
+            ok (and (or (zero? r) (<= (+ r mem) budget)) (not (and b? (pos? bigs))))]
+        (recur (+ r mem) (if b? (inc bigs) bigs) (rest ws) (if ok (conj out name) out)))
+      out)))
+
+;; ---- the declarations' check
+
+(defn- table [root]
+  (:steps (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))))
+
+(defn mem-check [root store records]
+  (let [raw (table root)
+        steps (plan/expand-parts raw)
+        decl (into {} (for [s steps] [(str (:name s)) s]))
+        parted (into {} (for [s raw :when (:parts s)]
+                          [(str (:name s)) (reduce max 0 (for [x steps :when (str/starts-with? (str (:name x)) (str (:name s) "."))
+                                                              :let [m (:mem-gib x)] :when (number? m)] m))]))
+        missing (for [s steps :when (not= :pre (:phase s)) :when (not (number? (:mem-gib s)))] (str (:name s)))
+        declared (fn [nm] (if-let [s (decl nm)] (:mem-gib s) (parted nm)))
+        from-store (when (and store (not= store "-"))
+                     (for [nm (concat (keys decl) (keys parted)) p (costs/passes store nm)]
+                       {:name nm :kib (peak-of p) :src (str "the store's pass of " (:date p))}))
+        from-records (for [f records :let [r (try (read-file f) (catch Throwable _ nil))] :when (map? r)
+                           e (:steps r) :when (map? e)]
+                       {:name (:step e) :kib (peak-of e) :src (.getName (File. ^String f))})
+        samples (filter #(number? (declared (:name %))) (concat from-store from-records))
+        under (for [{:keys [name kib src]} samples :let [d (declared name) g (gib kib)]
+                    :when (> g (+ (* d 1.1) 0.5))]
+                (format "%s: declared %s GiB, recorded %.1f GiB (%s)" name d g src))
+        maxp (reduce (fn [m {:keys [name kib]}] (update m name #(max (or % 0) kib))) {} samples)
+        over (for [[nm k] (sort maxp) :let [d (declared nm) g (gib k)] :when (> d (+ (* 2 g) 2))]
+               (format "%s: declared %s GiB, at most %.1f GiB recorded" nm d g))]
+    (println (format "mem-check: %d steps and parts, %d recorded peaks (%d of the store's passes, %d of %d clean records); margin 10%% and 0.5 GiB"
+                     (count steps) (count samples) (count (filter #(str/starts-with? (:src %) "the store") samples))
+                     (count (remove #(str/starts-with? (:src %) "the store") samples)) (count records)))
+    (doseq [m missing] (println (str "   NO :mem-gib  " m)))
+    (doseq [u (distinct under)] (println (str "   UNDER  " u)))
+    (doseq [o over] (println (str "   (far above its peaks: " o ")")))
+    (if (or (seq missing) (seq under))
+      (do (println "mem-check: FAILED") (System/exit 1))
+      (println "mem-check: every declaration holds its recorded peaks"))))
+
+;; ---- the view
+
+(defn- median [xs]
+  (let [v (vec (sort xs))]
+    (when (seq v) (nth v (quot (count v) 2)))))
+
+(defn- durations
+  "name -> [seconds source] for the plan's steps"
+  [names store records]
+  (let [recs (->> records (keep #(try (read-file %) (catch Throwable _ nil))) (filter map?) (sort-by #(str (:date %))))
+        rec-wall (reduce (fn [m r] (into m (for [e (:steps r) :when (number? (:wall-s e))] [(:step e) (:wall-s e)]))) {} recs)
+        nparts (frequencies (keep #(second (re-matches #"([^.]+)\..+" %)) names))
+        prefer-clean (= "clean" (System/getenv "GATE_LANES_PREFER"))]
+    (into {} (for [nm names
+                   :let [st (when (and store (not= store "-")) (median (keep :secs (costs/passes store nm))))
+                         rc (rec-wall nm)
+                         base (second (re-matches #"([^.]+)\..+" nm))
+                         share (when (and base (rec-wall base)) (quot (rec-wall base) (nparts base 1)))
+                         cands (if prefer-clean
+                                 [[rc "clean"] [share "clean share"] [st "store"]]
+                                 [[st "store"] [rc "clean"] [share "clean share"]])]]
+               [nm (or (first (filter #(number? (first %)) cands)) [0 "unmeasured"])]))))
+
+(defn- gnum [x] (let [x (double x)] (if (== x (Math/floor x)) (str (long x)) (format "%.1f" x))))
+(defn- hm [s] (format "%d:%02d" (quot (long s) 3600) (quot (mod (long s) 3600) 60)))
+
+(defn simulate
+  "STEPS [{:name :ix :phase :chain :after :mem :dur :runs?}] in the plan's order: each step's {:start :end}, the
+  pre steps and builds one after another, then each phase's chains at once under decide"
+  [steps budget big]
+  (let [serial (filter #(or (= :pre (:phase %)) (= "build" (:kind %))) steps)
+        [t0 out] (reduce (fn [[t m] s] (let [d (if (:runs? s) (:dur s) 0)] [(+ t d) (assoc m (:name s) {:start t :end (+ t d)})]))
+                         [0 {}] serial)]
+    (loop [phases [:essential :full] t t0 out out peak 0]
+      (if-let [ph (first phases)]
+        (let [ss (remove #(or (= :pre (:phase %)) (= "build" (:kind %))) (filter #(= ph (:phase %)) steps))
+              chains (vec (distinct (map :chain ss)))
+              queues (into {} (for [c chains] [c (vec (filter #(= c (:chain %)) ss))]))
+              ;; the event loop: idle chains' heads wait (after their :start-after's end), decide admits, time moves to the next end
+              [t out peak]
+              (loop [t t qs queues running {} out out peak peak]
+                (let [;; heads that take no time (skipped, not needed) end at once
+                      [qs out] (reduce (fn [[qs out] c]
+                                         (loop [q (qs c) out out]
+                                           (if-let [h (first q)]
+                                             (if (and (not (:runs? h)) (not (running c)))
+                                               (recur (subvec q 1) (assoc out (:name h) {:start t :end t}))
+                                               [(assoc qs c q) out])
+                                             [(assoc qs c q) out])))
+                                       [qs out] chains)
+                      ready? (fn [h] (let [a (:after h)] (or (nil? a) (when-let [e (out a)] (<= (:end e) t)))))
+                      waiters (->> chains
+                                   (keep (fn [c] (let [h (first (qs c))] (when (and h (not (running c)) (ready? h)) (assoc h :c c)))))
+                                   (sort-by :ix))
+                      adm (set (decide (map (comp :mem :s) (vals running)) (map #(select-keys % [:name :mem]) waiters) budget big))
+                      started (filter #(adm (:name %)) waiters)
+                      running (into running (for [h started] [(:c h) {:s h :end (+ t (:dur h))}]))
+                      qs (reduce (fn [qs h] (update qs (:c h) subvec 1)) qs started)
+                      out (into out (for [h started] [(:name h) {:start t :end (+ t (:dur h))}]))
+                      peak (max peak (reduce + 0 (map (comp :mem :s) (vals running))))]
+                  (if (empty? running)
+                    (if (some seq (vals qs))
+                      ;; a head that waits for a :start-after that never ends here: started now
+                      (recur t (into {} (for [[c q] qs] [c (if (and (seq q) (not (ready? (first q)))) (assoc-in q [0 :after] nil) q)])) running out peak)
+                      [t out peak])
+                    (let [tn (reduce min (map :end (vals running)))
+                          done (for [[c r] running :when (= tn (:end r))] c)]
+                      (recur tn qs (apply dissoc running done) out peak)))))]
+          (recur (rest phases) t out peak))
+        {:wall t :at out :peak peak :serial-end t0}))))
+
+(defn view [logs store budget big records]
+  (let [rows (for [l (str/split-lines (slurp (str logs "/plan.tsv")))
+                   :let [[n d _ p c _ a hv mg] (str/split l #"\t")]]
+               {:name n :dec d :phase (keyword p) :chain c :after (when (not= a "-") a) :heavy hv
+                :mem (if (= mg "-") 1 (Double/parseDouble mg))
+                :kind (case d "build" "build" "always" "always" nil)})
+        names (map :name rows)
+        durs (durations names store records)
+        steps (vec (map-indexed (fn [i r] (let [[s src] (durs (:name r))]
+                                            (assoc r :ix i :dur s :src src
+                                                   :runs? (contains? #{"run" "after" "build" "always"} (:dec r)))))
+                                rows))
+        {:keys [wall at peak serial-end]} (simulate steps budget big)
+        ran (filter :runs? steps)
+        lane #(if (>= (:mem %) big) 1 2)]
+    (println (format "lanes (GTS227 (a)): budget %s GiB, lane 1 from %s GiB (one at a time), lane 2 beside it; %d steps run"
+                     (gnum budget) (gnum big) (count ran)))
+    (println "   start  end    lane  GiB  step (duration's source)")
+    (doseq [s (sort-by (fn [s] [(:start (at (:name s))) (:ix s)]) ran)
+            :let [{:keys [start end]} (at (:name s))]]
+      (println (format "   %5s  %5s  %4s  %3s  %s (%s)" (hm start) (hm end)
+                       (if (or (= :pre (:phase s)) (= "build" (:kind s))) "-" (str (lane s)))
+                       (gnum (:mem s)) (:name s)
+                       (if (= "unmeasured" (:src s)) "unmeasured: 0" (str (:src s) ", " (hm (:dur s)))))))
+    (let [l1 (filter #(and (= 1 (lane %)) (not= :pre (:phase %)) (not= "build" (:kind %))) ran)
+          sum (reduce + 0 (map :dur ran))]
+      (println (format "lanes: simulated wall %s (the pre steps and builds %s), serial sum %s; lane 1 %d steps, %s; the declared memory at most %s GiB at once"
+                       (hm wall) (hm serial-end) (hm sum) (count l1) (hm (reduce + 0 (map :dur l1)))
+                       (gnum peak)))
+      (let [un (filter #(= "unmeasured" (:src %)) ran)]
+        (when (seq un) (println (str "lanes: " (count un) " unmeasured (counted 0): " (str/join " " (map :name un)))))))))
+
+(defn -main [& args]
+  (case (first args)
+    "mem-check" (let [[_ root store & records] args] (mem-check root store records))
+    "view" (let [[_ logs store budget big & records] args]
+             (view logs store (Double/parseDouble budget) (Double/parseDouble big) records))
+    "decide" (let [[_ budget big & xs] args
+                   ;; decide BUDGET BIG R:GIB ... W:NAME:GIB ...: the rule alone (the tests')
+                   running (for [x xs :when (str/starts-with? x "R:")] (Double/parseDouble (subs x 2)))
+                   waiters (for [x xs :when (str/starts-with? x "W:") :let [[_ n g] (str/split x #":")]] {:name n :mem (Double/parseDouble g)})]
+               (doseq [n (decide running waiters (Double/parseDouble budget) (Double/parseDouble big))] (println n)))
+    (do (println "usage: gate.lanes mem-check ROOT STORE RECORD... | view LOGS STORE BUDGET BIG RECORD... | decide BUDGET BIG R:GIB... W:NAME:GIB...")
+        (System/exit 2))))

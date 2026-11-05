@@ -12,11 +12,11 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests build-java smoke repl fixpoint goi-table goi-table-size \
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
-  program programs-check programs-essential gate gate-full gate-full-parallel gate-plan gate-costs gate-why gate-audit gate-prune gate-queue corpus-dedup cover-build gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-demos java-check-judge provenance-check reap suite oracle diffcheck generated-check gate-tests verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
+  program programs-check programs-essential gate gate-full gate-full-parallel gate-plan gate-costs gate-why gate-audit gate-prune gate-queue corpus-dedup cover-build gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-full-clean-lanes gate-lanes-plan gate-mem-check gate-demos java-check-judge provenance-check reap suite oracle diffcheck generated-check gate-tests verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-divergences cppi-divergences-aot ci-synth ci-synth-check \
+  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-divergences cppi-divergences-aot ci-synth ci-synth-check ci-runtime \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
-  repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam repr-python-fetch repr-python-pins repr-python-count repr-python-spec-check repr-python-samples repr-python-roundtrip repr-python-record repr-python-check repr-python-text repr-python-text-record pyi-gen pyi-gen-check pyi-record-ref pyi-record-ref-check pyi-scope-check pyi-compile-check pyi-run pyi-runtime-print pyi-runtime-read pyi-runtime-vet pyi-runtime-check check-makefile
+  repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam repr-python-fetch repr-python-pins repr-python-count repr-python-spec-check repr-python-samples repr-python-roundtrip repr-python-record repr-python-check repr-python-text repr-python-text-record pyi-gen pyi-gen-check pyi-record-ref pyi-record-ref-check pyi-scope-check pyi-compile-check pyi-run pyi-repl pyi-repl-check pyi-lib-test pyi-lib-test-oracle pyi-runtime-print pyi-runtime-read pyi-runtime-vet pyi-runtime-check check-makefile
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -112,8 +112,14 @@ gate-clean-plan: ## the clean --full run's plan: every step, every part, an empt
 	bin/gate --full --clean --plan
 gate-pins: ## what a clean run takes from outside its clone, checked by its pins: TamaGo's go, jdk26u and its platform, the system JDK, the frozen jar (bin/gate --pins)
 	bin/gate --pins
-gate-full-concurrent: ## the full gate's chains at once, the big lock held once for the run, the heavy steps on a lock of the gate's own (GTS37 (a); bin/gate --full --concurrent)
+gate-full-concurrent: ## the full gate's chains at once, the big lock held once for the run, each step admitted by its declared memory in two lanes (GTS227 (a); bin/gate --full --concurrent)
 	bin/gate --full --concurrent
+gate-full-clean-lanes: ## the clean run at a tag in the memory lanes: the chains at once, the big steps one at a time, the rest beside (GTS227 (a); bin/gate --full --clean --concurrent; TAG=...)
+	bin/gate --full --clean --concurrent $(if $(TAG),--tag $(TAG))
+gate-lanes-plan: ## the clean run's plan in the lanes, each step's lane and a simulated schedule (bin/gate --full --clean --concurrent --plan)
+	bin/gate --full --clean --concurrent --plan
+gate-mem-check: ## every step's declared :mem-gib against the peaks recorded in the store and the clean records (bin/gate --full --mem-check)
+	bin/gate --full --mem-check
 gate-demos: ## GTS42 (a): a classes file and a j2g comment changed in a scratch worktree, the full plan of each (after the builds it needs), reverted (bin/gate-demos; RECORD=test/gate/clean-TAG.edn)
 	bin/gate-demos $(if $(RECORD),--record $(RECORD))
 gate-queue: ## the host's big-job lock's queue: the tickets of bin/heavy-lock waiting in turn, oldest first (FIFO in front of the flock, GT5; bin/heavy-lock --queue)
@@ -354,6 +360,8 @@ ci-divergences: ## ci's recorded check judged against its classes, test/c/diverg
 	bin/ci divergences
 ci-musl: ## musl 1.2.6 prepared and read into C forms for ci's libc, .tmp/ci-musl/ (bin/ci musl prepare, bin/ci musl read)
 	bin/ci musl prepare && bin/ci musl read
+ci-runtime: ## ci's prebuilt runtime: every musl unit checked and built once into its cached fragment, .tmp/ci-runtime/, the other keys' removed (bin/ci runtime build)
+	bin/ci runtime build
 ci-cirun-build: ## ci's back end (go/arbace/crt, go/arbace/ci) printed and built with tools/cirun, the light path's runner (bin/ci cirun-build)
 	bin/ci cirun-build
 ci-annot: ## a C file's annotations by ci's checker (types, values, layouts, linkage; tools/ccdump's types format), FILE=... (bin/ci annot FILE)
@@ -496,11 +504,23 @@ pyi-record-ref-check: ## PY4: two more runs reproducing every reference of test/
 	bin/pyi record-ref --check
 pyi-scope-check: ## PY5a: every read file's symbol table by pyi's scope analysis equal to CPython's (bin/pyi scope-check; CORPUS=a b)
 	bin/pyi scope-check $(CORPUS)
-pyi-compile-check: ## PY5a: every read file compiled to pyi's IR, the IR verified, compile errors judged on CPython's (bin/pyi compile-check; CORPUS=a b)
-	bin/pyi compile-check $(CORPUS)
+pyi-compile-check: ## PY5a: every read file compiled to pyi's IR, the IR verified, compile errors judged on CPython's (bin/pyi compile-check; CORPUS=a b; FULL=--full: the forms of mode :full)
+	bin/pyi compile-check $(FULL) $(CORPUS)
 
 pyi-run: ## PY5b0: a Python program run by pyi's runtime on goi (bin/pyi run; FILE=prog.py)
 	bin/pyi run $(FILE)
+
+pyi-repl: ## PY5e: pyi's REPL on stdin, python3's basic REPL (bin/pyi repl)
+	bin/pyi repl
+
+pyi-repl-check: ## PY5e: test/python/pyi/*.in fed to pyi's REPL and to python3 -q -i, the sessions equal (bin/pyi repl --check)
+	bin/pyi repl --check
+
+pyi-lib-test: ## PY5e: Lib/test's 11 language-core modules run by pyi, judged per method against 177's references (bin/pyi lib-test)
+	bin/pyi lib-test
+
+pyi-lib-test-oracle: ## PY5e: the lib-test judge's control: the driver run by python3, every method equal (bin/pyi lib-test --oracle)
+	bin/pyi lib-test --oracle
 
 pyi-runtime-print: ## PY5b0: go/arbace/py printed as a Go module into .tmp/repr-python/pyi/runtime to edit (bin/pyi runtime print)
 	bin/pyi runtime print

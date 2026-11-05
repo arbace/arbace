@@ -12,6 +12,7 @@
             [arbace.repr.c.layout :as layout]
             [arbace.repr.c.lex :as lex]
             [arbace.repr.c.parse :as parse]
+            [arbace.repr.c.results :as results]
             [arbace.string :as str])
   (:import [java.util.concurrent Executors Callable]))
 
@@ -237,7 +238,9 @@
         run (read-tsv (str d "/run.tsv"))
         gcc (load-gcc)
         known-all (read-string (slurp known-file))
-        known (get-in known-all [:roundtrip (keyword id)] {})
+        ;; GT8: a partial run (--only) holds the known entries of its files alone to account for them
+        names (results/partial-names work id)
+        known (results/in-run (get-in known-all [:roundtrip (keyword id)] {}) names)
         js (mapv (fn [r] (judge-row r (get obj (first r)) (get run (first r)) (get gcc [id (first r)]) (get known (first r)) run?)) rows)
         failing (filter #(= "fail" (:status %)) js)
         stale (for [[nm _] known :when (not (some #(and (= (:name %) nm) (= (:status %) "known")) js))] nm)
@@ -254,7 +257,12 @@
                   (when run? (str "; l4 " (pr-str (:level4 report)))) "; gcc " (pr-str (:accept report))
                   (when (seq failing) (str "; " (count failing) " failing"))
                   (when (seq stale) (str "; " (count stale) " known entries stale"))
-                  (when (seq unclassed) (str "; " (count unclassed) " of no class"))))
+                  (when (seq unclassed) (str "; " (count unclassed) " of no class"))
+                  (when names (str " (a partial run: " (count names) " listed files)"))))
+    ;; GT8: each failing file as FAIL CORPUS/NAME WHY (the rotation's :failed-re)
+    (results/print-failing id (concat (for [j failing] [(:name j) (str "levels " (str/join "," (map name (:bad j))) ": read " (:read j)
+                                                                         ", l1 " (:l1 j) ", l2 " (:l2 j) ", l3 " (:l3 j) ", l4 " (:l4 j) " " (:detail j))]))
+                              (for [nm stale] [nm "known entry stale"]))
     (if (or (seq failing) (seq stale) (seq unclassed)) 1 0)))
 
 ;; GTS81 (a): the negative controls of the round trip (test/c/controls.edn, :level :roundtrip): the subject's own row (read,
@@ -295,6 +303,8 @@
             [read l1 l2] srow]
         (cond
           (not (and (= read "ok") (= l1 "equal") (= l2 "equal") (= "0" (second sobj)))) :left
+          ;; GT8: a partial run (--only) that does not hold the reference leaves the control
+          (and (results/partial-names work rc) (not (contains? (read-tsv (str rd "/forms.tsv")) rn))) :left
           (not= "0" (first robj)) :not-judged
           :else
           (let [man (read-string (slurp "test/c/corpora.edn"))
@@ -355,6 +365,8 @@
                           (when (and o t) (level2 o t))))]
         (cond
           (not= "pass" (:status own)) :left
+          ;; GT8: a partial run (--only) that does not hold the reference leaves the control
+          (and (results/partial-names work rc) (not (contains? (read-tsv (str rd "/forms.tsv")) rn))) :left
           (nil? crossed-l) :not-judged
           :else
           (let [row (case level
@@ -422,7 +434,7 @@
                   st (reduce max 0 (map #(judge work %) ids))
                   ;; GTS81 (a): the negative controls (test/c/controls.edn, :roundtrip), no row of files.tsv or the counts
                   cs (into (roundtrip-controls work ids) (text-controls work ids))]
-              (doseq [r cs] (println "FAIL" (first r) (nth r 2)))
+              (doseq [r cs] (println (str "FAIL " (first r) "\t" (nth r 2))))
               (shutdown-agents)
               (System/exit (if (seq cs) 1 st)))
     "record" (let [[work & ids] args

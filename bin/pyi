@@ -22,12 +22,24 @@
 #                                  PY5a: every read file's symbol table by arbace.python.scope against CPython's own
 #                                  (tools/pydump/pydump.py scopes): the corpora of test/python/corpora.edn (default:
 #                                  samples synthetic errors stdlib site-packages lib-test), against test/python/scope-known.edn
-#   bin/pyi compile-check [--record] [CORPUS...]
+#   bin/pyi compile-check [--full] [--record] [CORPUS...]
 #                                  PY5a: every read file compiled to pyi's IR (arbace.python.compile) and the IR
-#                                  verified (doc/python/PYI-SPEC.md §4), against test/python/compile-known.edn
+#                                  verified (doc/python/PYI-SPEC.md §4), against test/python/compile-known.edn;
+#                                  --full (PY5b): the forms of mode :full, the runs' (check :compile-full)
 #   bin/pyi run FILE.py            PY5b0: FILE read in mode :full (tools/pydump/pydump.py tree --full: its lines), compiled to
 #                                  the IR and run by pyi's runtime go/arbace/py, interpreted by goi on stage 0 (PY5a's DECISION
 #                                  (a)); the program's stdout, stderr and exit status
+#   bin/pyi run FILE.py ARGS...    PY5e: sys.argv [FILE ARGS...], sys.path [FILE's directory, the pinned tarball's Lib];
+#                                  imports, exec, eval and compile compiled by the host (arbace.python.run, the IR kept in
+#                                  .tmp/repr-python/pyi/ir-cache by the source's and the compiler's SHA-256)
+#   bin/pyi repl [--check]         PY5e: python3's basic REPL (go/arbace/py's repl.go): statements from stdin, prompts on
+#                                  stderr, expression statements' values displayed (sys.displayhook, builtins._); --check:
+#                                  test/python/pyi/*.in fed to it and to python3 -q -i, stdout, status and stderr
+#                                  byte for byte
+#   bin/pyi lib-test [--oracle] [MODULE...]
+#                                  PY5e: Lib/test's language-core modules run by pyi (test/python/libtest.py: unittest's
+#                                  loader, each test's outcome), judged per method against ref-cpython314-lib-test.edn;
+#                                  a module that does not import classed :module-import; --oracle: the driver by python3
 #   bin/pyi runtime print|read|vet|check
 #                                  PY5b0, the runtime's sources (doc/python/PYI-SPEC.md §8): go/arbace/py's Go forms (mode :full,
 #                                  lossless) printed as a Go module into .tmp/repr-python/pyi/runtime (print), edited there,
@@ -35,7 +47,7 @@
 #                                  clean, then go vet and go test by TamaGo's go;
 #                                  check: printed and read again equal to the committed forms, the runtime's operations
 #                                  arbace.python.ir/ops's (runtime-ops), the programs of test/python/pyi/ run by bin/pyi run
-#                                  equal to the oracle's runs (stdout, status, stderr's last line)
+#                                  equal to the oracle's runs (stdout, status, stderr's last line), and repl --check
 # Environment: REPR_PYTHON_SRC as for bin/repr-python (the tarball's source).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -213,17 +225,17 @@ cmd_scope_check() {
 }
 
 cmd_compile_check() {
-  local record="" ids=() rc=0 worst=0 id
-  while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; *) ids+=("$1"); shift ;; esac; done
+  local record="" full="" ids=() rc=0 worst=0 id
+  while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --full) full=1; shift ;; *) ids+=("$1"); shift ;; esac; done
   [ ${#ids[@]} -gt 0 ] || ids=(samples synthetic errors stdlib site-packages lib-test)
   for id in "${ids[@]}"; do
-    local d="$WORK/compile/$id" base t0
+    local d="$WORK/compile${full:+-full}/$id" base t0
     rm -rf "$d"
     base=$(corpus_list "$id" "$d")
     t0=$(date +%s)
-    py pydump.py tree --base "$base" --list "$d/list" --out "$d/dumps" --tsv "$d/dumps.tsv"
+    py pydump.py tree ${full:+--full} --base "$base" --list "$d/list" --out "$d/dumps" --tsv "$d/dumps.tsv"
     rc=0
-    pa_arbace compile-check --corpus "$id" --dumps "$d/dumps" --tsv "$d/dumps.tsv" --known "$root/test/python/compile-known.edn" \
+    pa_arbace compile-check ${full:+--check compile-full} --corpus "$id" --dumps "$d/dumps" --tsv "$d/dumps.tsv" --known "$root/test/python/compile-known.edn" \
       --results "$d/results.edn" --ops "$d/ops.edn" ${record:+--record} || rc=$?
     echo "  $(( $(date +%s) - t0 )) s"
     [ $rc -gt $worst ] && worst=$rc
@@ -231,9 +243,48 @@ cmd_compile_check() {
   return $worst
 }
 
+# stdlib_lib: the pinned tarball's Lib, sys.path's standard library until python/Lib is vendored (PY6; survey §6.6)
+stdlib_lib() {
+  local top="$root/.tmp/repr-python/Python-3.14.10"
+  [ -d "$top/Lib" ] || "$root/bin/repr-python" pins --fetch >/dev/null
+  echo "$top/Lib"
+}
+
+# the host's side of the runtime (arbace.python.run): its work directory and a run's id for its scratch
+pyi_env() { export PYI_ROOT="$root" PYI_WORK="$WORK" PYI_RUN_ID="$$"; }
+
+cmd_repl() {
+  if [ "${1:-}" = --check ]; then repl_check; return; fi
+  pyi_env
+  pa_arbace repl --lib "$(stdlib_lib)"
+}
+
+# repl_check: test/python/pyi/*.in fed to bin/pyi repl and to the oracle's basic REPL (python3 -q -i): stdout, the
+# status and stderr (prompts, tracebacks with their source lines and carets) equal byte for byte
+repl_check() {
+  local p n=0 bad=0 want got
+  for p in "$root"/test/python/pyi/*.in; do
+    n=$((n + 1))
+    want=$(repl_run "$p" python3 -q -i)
+    got=$(repl_run "$p" "$root/bin/pyi" repl)
+    if [ "$want" = "$got" ]; then echo "  pass $(basename "$p")"; else
+      echo "  FAIL $(basename "$p")"; diff <(echo "$want") <(echo "$got") | head -10; bad=$((bad + 1)); fi
+  done
+  echo "repl: $n sessions of test/python/pyi run by pyi's REPL as by the oracle's: $((n - bad)) equal"
+  [ $bad -eq 0 ]
+}
+
+repl_run() {
+  local in=$1 o e rc=0; shift
+  o=$(mktemp "$WORK/smoke.XXXXXX"); e=$(mktemp "$WORK/smoke.XXXXXX")
+  timeout 300 env HOME="$WORK" TMPDIR="$WORK" "$@" < "$in" > "$o" 2> "$e" || rc=$?
+  cat "$o"; echo "status $rc"; cat "$e"
+  rm -f "$o" "$e"
+}
+
 cmd_run() {
-  [ $# -ge 1 ] || die "usage: bin/pyi run FILE.py"
-  local f d name
+  [ $# -ge 1 ] || die "usage: bin/pyi run FILE.py [ARGS...]"
+  local f d name argv0=$1
   case $1 in /*) f=$1 ;; *) f=$caller_pwd/$1 ;; esac
   f=$(cd "$(dirname "$f")" && pwd)/$(basename "$f")
   [ -f "$f" ] || die "no file $1"
@@ -242,8 +293,56 @@ cmd_run() {
   echo "$name" > "$d/list"
   py pydump.py tree --full --base "$(dirname "$f")" --list "$d/list" --out "$d/dumps" --tsv "$d/tsv" >/dev/null
   local rc=0
-  pa_arbace run --dump "$d/dumps/$name.ae" --file "$f" || rc=$?
+  shift
+  pyi_env
+  pa_arbace run --dump "$d/dumps/$name.ae" --file "$f" --lib "$(stdlib_lib)" --argv0 "$argv0" -- "$@" || rc=$?
   rm -rf "$d"
+  return $rc
+}
+
+# lib-test [--oracle] [MODULE...]: Lib/test's language-core modules (corpora.edn) run by pyi through
+# test/python/libtest.py (unittest's loader, each test's outcome), judged per test method against 177's references
+# (test/python/ref-cpython314-lib-test.edn): equal outcomes pass; a module that does not import is one case, its
+# methods classed :module-import with the first error (survey §8.1); anything else fails. --oracle runs the driver
+# by python3 instead (the judge's control: every method equal but the references' :excluded)
+cmd_lib_test() {
+  local oracle="" mods=() m d="$WORK/lib-test" lib rc=0
+  while [ $# -gt 0 ]; do case $1 in --oracle) oracle=1; shift ;; *) mods+=("$1"); shift ;; esac; done
+  [ ${#mods[@]} -gt 0 ] || IFS=, read -ra mods <<< "$(core_modules)"
+  lib=$(stdlib_lib); rm -rf "$d"; mkdir -p "$d"
+  for m in "${mods[@]}"; do
+    if [ -n "$oracle" ]; then
+      (cd "$d" && timeout 900 env PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC PYTHONIOENCODING=utf-8 HOME="$WORK" TMPDIR="$WORK" PYTHONPATH="$lib" \
+        python3 -s -P -B "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err") || true
+    else
+      (cd "$d" && timeout 1800 "$root/bin/pyi" run "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err") || true
+    fi
+    [ -s "$d/$m.out" ] || echo "IMPORT	$(grep -v '^ ' "$d/$m.err" | tail -1)" > "$d/$m.out"
+    awk -F'\t' -v m="$m" -v ref="$REF_LT" '
+      BEGIN {
+        while ((getline l < ref) > 0) {
+          if (l !~ /^\{:id "/) continue
+          id = l; sub(/^\{:id "/, "", id); sub(/".*/, "", id)
+          if (index(id, m "/") != 1 || l ~ /:module true/) continue
+          if (l ~ /:excluded/) { excl[substr(id, length(m) + 2)] = 1; continue }
+          o = l; sub(/.*:outcome :/, "", o); sub(/[ }].*/, "", o)
+          want[substr(id, length(m) + 2)] = o; n++
+        }
+      }
+      $1 == "IMPORT" { imp = $2 }
+      $1 == "CASE" { got[$2] = $3; why[$2] = $4 }
+      END {
+        for (t in want) {
+          if (t in got && got[t] == want[t]) pass++
+          else if (imp != "") classed++
+          else { fail++; if (shown++ < 5) printf "  FAIL %s/%s: %s, CPython %s %s\n", m, t, (t in got ? got[t] : "not run"), want[t], why[t] }
+        }
+        printf "%s\t%d\t%d\t%d\t%d\t%s\n", m, n, pass, classed, fail, imp > "/dev/stderr"
+        printf "lib-test %s: %d methods: %d equal, %d classed :module-import, %d failing%s\n", m, n, pass, classed, fail, (imp != "" ? " (" imp ")" : "")
+        exit (fail > 0)
+      }' "$d/$m.out" 2>> "$d/summary.tsv" || rc=1
+  done
+  awk -F'\t' '{n += $2; p += $3; c += $4; f += $5} END {printf "lib-test: %d modules, %d methods: %d equal, %d classed, %d failing\n", NR, n, p, c, f}' "$d/summary.tsv"
   return $rc
 }
 
@@ -255,6 +354,9 @@ runtime_print() {
   rm -rf "$out"; mkdir -p "$out/py"
   printf 'module arbace\n\ngo 1.27\n' > "$out/go.mod"
   ARBACE_PATH="$root" "$root/bin/repr-go" print "$root/go/arbace/py.ae" "$out/py" >/dev/null
+  # the musl libm port the runtime imports (go/arbace/libm, shared with hsi): printed beside it, not read back
+  mkdir -p "$out/libm"
+  ARBACE_PATH="$root" "$root/bin/repr-go" print "$root/go/arbace/libm.ae" "$out/libm" >/dev/null
 }
 
 runtime_read() {
@@ -300,6 +402,7 @@ cmd_runtime() {
       done
       echo "runtime: $n programs of test/python/pyi run by pyi as by the oracle: $((n - bad)) equal"
       [ $bad -eq 0 ] || rc=1
+      repl_check || rc=1
       return $rc ;;
     *) die "usage: bin/pyi runtime print|read|vet|check" ;;
   esac
@@ -321,6 +424,8 @@ case "${1:-}" in
   scope-check) shift; cmd_scope_check "$@" ;;
   compile-check) shift; cmd_compile_check "$@" ;;
   run) shift; mkdir -p "$WORK"; cmd_run "$@" ;;
+  repl) shift; mkdir -p "$WORK"; cmd_repl "$@" ;;
+  lib-test) shift; mkdir -p "$WORK"; cmd_lib_test "$@" ;;
   runtime) shift; mkdir -p "$WORK"; cmd_runtime "$@" ;;
-  *) sed -n '2,38p' "$0"; exit 2 ;;
+  *) sed -n '2,51p' "$0"; exit 2 ;;
 esac

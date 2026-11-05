@@ -18,7 +18,7 @@
 #                              translated by cf2g (arbace.c.cf2g) into Go over go/arbace/ci and go/arbace/crt, built
 #                              by TamaGo's go in shards and run against gcc 15.2's recorded run and the interpreted
 #                              check's, every non-pass in a class of test/c/divergences-aot.edn or divergences.edn
-#   bin/ci dg [--corpus C,...] [--record] [--judge] [--essential]
+#   bin/ci dg [--corpus C,...] [--only LIST] [--record] [--judge] [--essential]
 #                              the C23 corpus's dg check (bin/lib/ci/dg, its header): gcc 15.2's c23 tests by their
 #                              DejaGnu directives, the checker's errors judged by line and kind
 #   bin/ci aot NODES OUT       a node program (bin/ci nodes') translated by cf2g into OUT/prog.go, a main package
@@ -37,18 +37,21 @@
 #   bin/ci musl read           musl's sources read by repr/c into the forms cache .tmp/ci-musl/forms, indexed
 #   bin/ci musl fresh|ensure   exit 0 when the forms cache was read by this checkout's repr/c (forms/key, CS211); ensure: prepare,
 #                              then read when it was not (bin/ci check and check --aot do)
+#   bin/ci runtime build|key|dir|prune
+#                              ci's prebuilt runtime (doc/C23-SURVEY.md, "As built: ci's prebuilt runtime"): build: every musl
+#                              unit checked and built once into its fragment, cached in .tmp/ci-runtime/musl-KEY/ (CI_RUNTIME;
+#                              CI_THREADS, default 4; a program's build makes the fragments it lacks itself); key: the runtime's key
+#                              (the fragments' format, the target, musl's forms cache's key, ci's checker and builder as loaded); dir: its
+#                              directory; prune: the other keys' directories unused for a day removed (build does too). CI_PREBUILT=0 builds each program with its runtime as before; CI_LINK_CHECK=1 builds both ways
+#                              and requires the same node program
 #   bin/ci cirun-build         ci's back end, go/arbace/crt and go/arbace/ci printed by repr/go, with tools/cirun
 #                              built by TamaGo's go into .tmp/ci/cirun (CI_GO_SRC: a Go tree of the packages instead)
-#   bin/ci cover [--corpus C,...] [--seeds N] [--fresh]
-#                              a prototype, in no gate step (queue 160; bin/lib/ci/cover, its header): the corpora's programs
-#                              run with Go's coverage of ci's back end, reduced by tools/cicover to a subset reaching the same
-#                              blocks (greedy set cover, the deferred classes' programs kept), its check timed against the corpus's
 #   bin/ci diagnose [--std S] [OPTION...] FILE...
 #                              each FILE read by repr/c and checked: the checker's errors (those gcc 15.2 gives)
 #   bin/ci annot [--std S] [OPTION...] FILE...
 #                              each FILE's annotations, in tools/ccdump's types format (arbace.repr.c.annot), and
 #                              its errors
-#   bin/ci annotations [--corpus C,...] [--record]
+#   bin/ci annotations [--corpus C,...] [--only LIST] [--record]
 #                              the checker's check (bin/lib/repr-c/annotations, its header): every file of the
 #                              corpora checked, its annotations equal to cc's checker's item by item where cc
 #                              translates it, its errors none where gcc accepts it, or the file in
@@ -89,7 +92,29 @@ case $cmd in
     out=$TMPDIR/ci-repl-session.out
     (cd "$root" && arbace_tool "$root/test/c/repl/letters.ae") 2>&1 | { grep -v '^Reflection warning\|recur arg\|^Auto-boxing' || true; } > "$out"
     if diff "$root/test/c/repl/letters.out" "$out"; then echo "ci: the REPL session passes"; else echo "ci: the REPL session differs" >&2; exit 1; fi ;;
-  cover) exec "$root/bin/lib/ci/cover" "$@" ;;
+  runtime)
+    "$root/bin/ci" musl ensure
+    case ${1:-} in
+      build) arbace_tool -p "$root" -e "(require 'arbace.c.runtime 'arbace.repr.c.host)" \
+               -e "(let [lib (arbace.c.runtime/library (arbace.repr.c.host/load-host \"$root/test/c/host\") \"$root\") r (arbace.c.runtime/prebuild lib ${CI_THREADS:-4})] (println \"ci runtime:\" (:units r) \"units,\" (:made r) \"fragments made,\" (:items-refused r) \"items refused (an error only when linked), in\" (:dir r)) (shutdown-agents))" ;;
+      key|dir) arbace_tool -p "$root" -e "(require 'arbace.c.runtime 'arbace.repr.c.host)" \
+               -e "(let [lib (arbace.c.runtime/library (arbace.repr.c.host/load-host \"$root/test/c/host\") \"$root\")] (println (if (= \"$1\" \"key\") (:runtime-key lib) (:frag-dir lib))))" ;;
+      prune) ;;
+      *) echo "usage: bin/ci runtime build|key|dir|prune" >&2; exit 2 ;;
+    esac
+    # CS272 (a): build and prune remove the other keys' directories unused for a day (review 187: a younger one may be another
+    # process's, a stage 0's ci or a worktree's; each build marks its key's directory used); bin/gate --prune trims the cache
+    # too: per library the newest 3, an older one when a day old
+    case ${1:-} in
+      build|prune)
+        cur=$("$root/bin/ci" runtime dir 2>"$TMPDIR/ci-runtime-dir.err" | tail -1)
+        case $cur in */musl-*) ;; *) echo "bin/ci runtime: no current directory ($TMPDIR/ci-runtime-dir.err)" >&2; exit 1 ;; esac
+        for d in "$(dirname "$cur")"/musl-*; do
+          [ -d "$d" ] && [ "$d" != "$cur" ] || continue
+          [ -n "$(find "$d" -maxdepth 0 -mmin +1440)" ] || continue
+          echo "ci runtime: removed $d (another key, unused for a day)"; rm -rf "${d:?}"
+        done ;;
+    esac ;;
   cirun-build) exec "$root/bin/lib/ci/cirun-build" "$@" ;;
   annotations) exec "$root/bin/lib/repr-c/annotations" "$@" ;;
   synth)

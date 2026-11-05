@@ -9,14 +9,17 @@
         does not pass is judged against the known file (test/python/scope-known.edn, the round trip's format); --record
         writes it, a file of no class printed and not written, exit 3 (CS265 (a), CS266 (a))
     compile-check --corpus NAME --dumps DIR --tsv FILE --known FILE [--record] [--results FILE] [--ops FILE]
+                  [--check compile-full] (the known file's check name; the dumps of mode :full)
         each dump compiled to pyi's IR (arbace.python.compile) and the IR verified (arbace.python.ir/verify: every
         jump inside its code, every exception handler's range and target, the stack's depth the same on every path
         and never below zero, every local, cell, free and global name declared); the compile errors judged on
         CPython's (the TSV's code column: \"compile-error: MSG\"); --ops writes the count of each operation; the known
         file test/python/compile-known.edn
-    run --dump FILE --file PATH
+    run --dump FILE --file PATH [--lib DIR] [--argv0 ARG] [-- ARGS...]
         PY5b0: the dump (pydump.py tree --full: lines for tracebacks, PY5a's DECISION (a)) compiled and its IR run by
         pyi's runtime go/arbace/py, interpreted by goi (PYI-SPEC.md §7): the program's stdout and stderr, its exit status
+    repl [--lib DIR]
+        PY5e: the REPL (go.arbace.py/Repl, arbace.python.run): python3's basic REPL on stdin, prompts on stderr
     runtime-ops
         PY5b0: the runtime's operations (go/arbace/py's OpNames) against arbace.python.ir/ops; each unimplemented one's
         owner printed by milestone; exit 1 when the two lists differ"
@@ -153,11 +156,33 @@
 
 ;; ---- run ----
 
+(defn- lone-surrogate? [^String s]
+  (let [n (count s)]
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt s i)]
+          (cond (Character/isHighSurrogate c) (if (and (< (inc i) n) (Character/isLowSurrogate (.charAt s (inc i)))) (recur (+ i 2)) true)
+                (Character/isLowSurrogate c) true
+                :else (recur (inc i))))))))
+
+(defn- portable-consts
+  "A code object's constants as the loader reads them: a str with a lone surrogate (which UTF-8 cannot carry) as
+  {:codepoints [CP ...]}, nested code objects likewise"
+  [code]
+  (update code :consts
+          (fn [cs] (mapv (fn [c]
+                           (cond (and (string? c) (lone-surrogate? c))
+                                 {:codepoints (vec (for [i (range (count c))] (int (.charAt ^String c i))))}
+                                 (and (map? c) (:code c)) {:code (portable-consts (:code c))}
+                                 (and (map? c) (:tuple c)) {:tuple (:consts (portable-consts {:consts (:tuple c)}))}
+                                 :else c))
+                         cs))))
+
 (defn ir-text
   "A module's code object as the runtime's loader reads it (PYI-SPEC.md §7.2): pr-str, no print limits"
   [code]
   (binding [*print-length* nil *print-level* nil *print-meta* false *print-namespace-maps* false]
-    (pr-str code)))
+    (pr-str (portable-consts code))))
 
 (defn- runtime-fn [sym]
   (require 'go.arbace.py)
@@ -173,6 +198,10 @@
                       (if (= 'SyntaxError (:class (ex-data e)))
                         (do (binding [*out* *err*] (println (str "SyntaxError: " (:msg (ex-data e))))) (System/exit 1))
                         (throw e))))]
+      ;; PY5e: the runtime's compiler (imports, exec, eval) and sys.argv, sys.path (arbace.python.run)
+      (require 'arbace.python.run)
+      ((resolve 'arbace.python.run/install!) (cons (get opts "--argv0" (get opts "--file")) (get opts :argv))
+       (remove nil? [(.getParent (File. ^String (get opts "--file"))) (get opts "--lib")]))
       (System/exit ((runtime-fn 'RunModule) (ir-text code) (get opts "--file"))))))
 
 (defn- do-runtime-ops [opts]
@@ -221,15 +250,19 @@
                               (catch Throwable e {:level :failed :message (one-line (.getMessage e))}))])))]
     (when-let [o (get opts "--ops")] (spit-mk o (pr-str (into (sorted-map) @ops))))
     (println (str "  instructions " (reduce + 0 (vals @ops)) " of " (count @ops) " kinds"))
-    (judge opts :compile (count files) res (constantly nil) {}
+    (judge opts (keyword (get opts "--check" "compile")) (count files) res (constantly nil) {}
            "The files pyi's compiler (arbace.python.compile) does not compile to verified IR as CPython compiles them (bin/pyi compile-check; doc/python/PYI-SPEC.md §4), by check and corpus.")))
 
 (defn -main [& args]
   (let [[verb & more] args
-        opts (parse-args more #{"--corpus" "--dumps" "--scopes" "--known" "--results" "--out" "--tsv" "--ops" "--file" "--dump"})]
+        [more argv] (split-with #(not= "--" %) more)
+        opts (assoc (parse-args more #{"--corpus" "--dumps" "--scopes" "--known" "--results" "--out" "--tsv" "--ops" "--file" "--dump" "--check"
+                                       "--lib" "--argv0"})
+                    :argv (rest argv))]
     (case verb
       "scope-check" (do-scope-check opts)
       "compile-check" (do-compile-check opts)
       "run" (do-run opts)
+      "repl" (do (require 'arbace.python.run) (System/exit ((resolve 'arbace.python.run/repl) (get opts "--lib"))))
       "runtime-ops" (do-runtime-ops opts)
       (do (println "usage: -m arbace.python scope-check|compile-check|run|runtime-ops ...") (System/exit 2)))))

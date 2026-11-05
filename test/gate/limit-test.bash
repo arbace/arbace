@@ -141,4 +141,11 @@ if sel log-reset; then
   l1=$(grep -n ': > "$cwork/first-timeouts.tsv"' "$root/bin/goi" | head -1 | cut -d: -f1); l2=$(grep -n 'if \[ -s "$cwork/timeouts.txt" \]' "$root/bin/goi" | head -1 | cut -d: -f1)
   [ -n "$l1" ] && [ -n "$l2" ] && [ "$l1" -lt "$l2" ] && ck "log-reset: goi empties first-timeouts.tsv at every run" ok || ck "log-reset: goi" "lines '$l1' '$l2'"
 fi
+# the memory cap (ARBACE_MEM_GIB, 2026-11-03): a program over it fails alone, the default leaves room, 0 lifts it
+( . "$root/bin/lib/limit.bash"
+  ARBACE_MEM_GIB=1 limited_cpu 30 60 python3 -c 'b = bytearray(2 * 1024**3)' 2>"$T/mem.err"; echo "over $?" > "$T/mem.st"
+  v=$(limited_cpu 30 60 bash -c 'ulimit -v'); g=$(limited_cpu 30 60 bash -c 'echo $GOMEMLIMIT'); z=$(ARBACE_MEM_GIB=0 limited_cpu 30 60 bash -c 'ulimit -v')
+  echo "$v $g $z" >> "$T/mem.st" )
+grep -q '^over [1-9]' "$T/mem.st" && ck "mem-cap: a program over ARBACE_MEM_GIB fails alone" ok || ck "mem-cap: over the cap" "$(cat "$T/mem.st")"
+grep -q '^25165824 18432MiB unlimited$' "$T/mem.st" && ck "mem-cap: default 24 GiB, GOMEMLIMIT 18 GiB, 0 lifts it" ok || ck "mem-cap: defaults" "$(tail -1 "$T/mem.st")"
 exit $fail

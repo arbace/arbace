@@ -3279,6 +3279,125 @@ the nightly tier every step over its subset plus a rotating slice, seven nights;
 checking the rotation's record; the C subset rule for every crop; Go's coverage builds kept by key, run at night; synthetic
 corpora against the same references; Java's `speed` curation inside GT8; acceptance as GTS209.
 
+## Decided (2026-11-04, the user): fitting the clean run into one night (GTS227-GTS230)
+
+The analysis (`.tmp/night5/clean-fit.md`, not committed; its estimates): the four crops' clean run serially about
+14.5-18 h (C's four read checks whole, 223 min on the old stage 0; `gate-tests` and C's essential chain; a fresh clone's
+1.35x over the store's medians, Java's levels 1.7x); under 10 h (about 9-9.5 h) only with two memory lanes and Java's
+compiled level on a subset. The user's decisions, each (a):
+
+- **GTS227 Two memory lanes in the clean run.** Lane 1 the big-memory steps one at a time (Java's levels, peaks 48-50 GiB:
+  `java-interp`'s declaration, 2 GiB and not heavy, corrected), lane 2 the small-memory heavy steps beside it (C's seven
+  full checks, 2-9 GiB, CPU-bound); code in `bin/gate` and `bin/lib/gate-run.bash` before the clean run's night.
+- **GTS228 Java's compiled level on its coverage subset** (GTS205 (a)'s rule) in the nightly and clean tiers, from night
+  4's Java compiled coverage; the rest rotates.
+- **GTS229 C's read checks timed after the re-seed** (tokens, tree, annotations, round trip), proxy subsets decided then
+  if they still do not fit.
+- **GTS230 The rotation's record:** one keyed `--full` of the rotated parts on the re-seed's night (a whole run counts for
+  every slice), so the clean run finds the rotation complete.
+
+GTS231-GTS234, decided (a) by the user later the same day: the parked parts kept in the clean run if lane 1 fits; the
+clean clone's caches empty; nothing reused from v2's record; the second night for failures only. Also decided then: the
+re-seed's night runs GTS230's keyed `--full` with the lanes (`--full --concurrent`), and it may run on into the morning
+(keyed: nothing is lost); the clean run the night after.
+
+## As built: GTS227 (a), the memory lanes (write-ahead, branch `gate-lanes`, 2026-11-04)
+
+GTS227 (a) as code, not yet run as a gate (tonight's essential gate on `next` was not touched; no gate ran). Four parts.
+
+**The declarations made true** (`test/gate/steps.edn`'s `:mem-gib`, not in any key). Each step's and part's declaration is now
+at least the largest peak recorded for it: the larger of the largest process's RSS and the process tree's sampled peak, over
+the main store's passes (1,084) and the clean runs' logs (`.tmp/gate-clean/*.logs*/gate/*.mem`, eight runs), 2026-11-04.
+Raised: `java-interp` 2 → 53 (52.4 GiB at the clean run of `1f0cd7b`; now `:heavy true`), `java-compiled-full` 21 → 50 (49.7),
+`repr-java-nojavac` 11 → 34 (its jdk part 33.1), `jrt-convert` 28 → 34 (33.2), `diffcheck` 25 → 31 (30.9), `repr-go` 27 → 30
+(30.0), `suite-aot` 23 → 27 (26.4), `goi` 5 → 14 (13.3), `goi-aot-essential` 1 → 9 (8.8), `goi-check` 2 → 8 (7.9),
+`goi-check-full` 5 → 8 and `goi-aot` 2 → 8 (the whole check's 7.9), `oracle-go` 1 → 5 (4.4), `repr-java` 12 → 16 (15.4),
+`java-compiled` 19 → 22, `programs` 19 → 21, `j2g-edge` 5 → 7, `repr-java-attr` 41 → 43, `repr-java-front` 29 → 31,
+`repr-java-roundtrip` 29 → 30, `javac-tool` 26 → 27, `go-build`, `fixpoint`, `programs-full` 19 → 20, `suite-go` 13 → 14,
+`javac-verify` 8 → 9, `java-check` and `java-fixtures` 1 → 2. Lowered (far above every peak): `java-read` and `java-print` 12 → 4
+(3.5 and 3.0 GiB as whole steps), `c-aot-essential` 6 → 2 (1.8). Per part (a part's `:mem-gib` over its step's, so that a
+small corpus is not taken for its step's largest): repr/java's tree checks' samples 1, baseline 2-3, javac 6-9 (their jdk
+parts the step's), `repr-java-roundtrip.{baseline,samples}` 2 and 1, `repr-java-parse.tests` 3, `repr-go-native`'s parts
+2-24 (its `cmd-*` parts the step's 28). Unmeasured as parts, so from the whole step or C9.2's table: Java's levels' parts,
+C's seven full checks (2-9 GiB), `goi-check-full`. The planner now refuses a non-numeric `:mem-gib` and a step of 16 GiB or
+more without `:heavy` (java-interp's case: outside the lanes it would run beside another heavy step).
+
+**The check that keeps them true**: `bin/gate [--full] --mem-check` (`test/gate/lanes.ae`'s `mem-check`; reads only, keys
+nothing) holds every declaration against the store's passes and the committed clean records (`test/gate/clean-*.edn`): a
+peak over `:mem-gib` x 1.1 + 0.5 GiB fails, as does a step (but `:pre`) without one; a parted step's whole run (an older
+table's record) is held to its parts' largest; a declaration over twice its largest peak and 2 GiB is listed, not failed.
+`test/gate/lanes-test.bash` runs it on the table and the committed clean records (in the gate's `gate-tests`), so a clean
+record committed with a peak over its declaration fails the next gate. Today: 1,166 peaks, none over.
+
+**The scheduler** (`bin/gate-lane`, `bin/lib/gate-run.bash`'s `step`). With `bin/gate --full --concurrent` and the new `bin/gate
+--full --clean --concurrent` (`GATE_LANES=1`), every step of the plan (the builds, the essential and the full checks; the pre
+steps stay one after another) starts through `bin/gate-lane` with its declared `:mem-gib` and its index in the plan. The rule
+(`lane_decide`, a function of the state alone): the waiters in the plan's order; R the declared GiB of the running steps and
+of the waiters looked at so far; a waiter of G GiB is admitted when R + G fits the budget (or R is 0: a step over the budget
+runs alone) and it is not big while a big one is counted; every waiter counts, admitted or not (conservative backfill: a big
+step waiting is never passed by small ones that would delay it). Hence the two lanes: lane 1, the steps of 16 GiB or more
+(`GATE_LANE_BIG_GIB`), one at a time; lane 2, every other step beside it while the sum fits. The budget `GATE_MEM_BUDGET_GIB`
+defaults to MemTotal less `GATE_MEM_RESERVE_GIB` (4): 58 GiB on the 62.7 GiB host. Light steps are admitted too (by their
+declaration, so that the sum is the host's, not the heavy steps' alone). The admission is the lock: the run holds the host's
+big lock once for its whole length (`bin/heavy-lock`, its FIFO; `GATE_CONCURRENT_HELD=1` or `GATE_HEAVY_CMD=env` when the
+caller holds it) and every step runs with `ARBACE_HEAVY_HELD=1`, `:inner` ones too (their declared memory is held for the
+step). `.tmp/heavy`'s slot is the caller's, as before. The state is `.tmp/gate/lanes/` (`run/`, `wait/`, entries pruned by
+their process's start time; `events.tsv`, each wait and admission). The order is deterministic in the sense that the decision
+depends only on who waits and who runs, never on arrival or the poll's race; the actual order is recorded: the clean record
+gains `:lanes {:budget-gib :big-gib}` and, per step, `:mem-gib`, `:lane` and `:start-s` (seconds after the run's start),
+its wall, CPU, peaks and waits as before. In the clean run the essential chains and then the full chains run at once
+(`GATE_FULL_PARALLEL=1`), still audited, every part, the pins and stage 0 first. `GATE_LANES=0` keeps GTS37 (a)'s one heavy
+step at a time for the everyday `--concurrent` (refused with `--clean`); `--clean --concurrent --only` is refused (the
+second night's reruns stay serial).
+
+**The plan's view**: `bin/gate --full [--clean] --concurrent --plan` prints the plan, then each step's lane and a schedule
+simulated by the same rule (`test/gate/lanes.ae`'s `view`: the pre steps and builds one after another, then each phase's
+chains at once with their `:start-after`; durations the median of the main store's passes, else the newest clean record's
+wall, a part of a step the record ran whole getting its share; `GATE_LANES_RECORDS` adds records, a file of estimates among
+them, `GATE_LANES_PREFER=clean` takes the records first), the simulated wall, lane 1's sum and the largest declared sum.
+
+**Tests** (`test/gate/lanes-test.bash`, 21 checks, about 20 s): the rule in both implementations on seven states; five
+synthetic steps (sleeps) through `bin/gate-lane` admitted in the rule's order, never over the budget, one big at a time; a dead
+entry pruned; the runner's `step` admitting through it with `ARBACE_HEAVY_HELD=1` inside, and not without `GATE_LANES`; the
+declarations' check on a made-up table and on the real one; the planner's refusal; the view on a made-up plan (its schedule
+by hand); `bin/gate`'s refused options. Run with the gate's tests it touches (costs, rotation, declared-env, audited,
+gate-tests-test, plan-logic, claude-md, stale-comments, limit, pass-write): passed.
+
+**The estimate** (the view with v2's clean record and a record of estimates, `GATE_LANES_PREFER=clean`: audited, cold walls;
+`gate-tests` 30 min, C's essential chain about 43, C's run checks on their subsets about 20, `c-dg` 11, `goi-check-full` 15,
+`java-interp` on its subset 45, `java-compiled-full` on a subset (GTS228) 100; C's four read checks whole, low 89 min if repr/c
+compiled into the re-seeded stage 0 is 3x faster, high 4.5 h at C9.2's speed): **about 9.6 h** with C's reads low, **about
+12.1 h** with them high (C's chain then the critical path: its 6-9 GiB read steps cannot run beside java-interp's 53 GiB
+within 58), 13.9 h with Java's compiled level whole as well. Lane 1 carries about 6.9 h (8.7 h with compiled whole); the
+declared sum never passes 56 GiB. The C chain first in the plan's order (the table's) would save about 35 min of the high case.
+So GTS229's measurement decides the night: with C's reads under about 2 h the clean run fits 10 h.
+
+**The clean run with the lanes** (night 6, after GTS228's subset and the re-seed; from the main checkout at the candidate):
+
+    .tmp/heavy bin/heavy-lock env GATE_HEAVY_CMD=env bin/gate --full --clean --concurrent --tag arbace-reaps-4-crops-v1
+
+(`.tmp/night5/clean.sh`'s `clean_run` with `--concurrent` added; without the outer `bin/heavy-lock` the gate takes the big
+lock itself, once. The plan first: `bin/gate --full --clean --concurrent --plan`. A failure's second night stays
+`bin/gate --full --clean --tag ... --only failed`, serial.) Risks: an under-declared step is an OOM (the declarations are the
+largest seen, the unmeasured C parts C9.2's); CPU contention lengthens the limited programs' walls (their CPU-time limits
+have wall caps); the audit's strace under concurrency is untried at this scale.
+
+## Decided (2026-11-04, the user): the day and the night (GTS224-GTS226, amending GTS209)
+
+The night shift is nominally 12 hours, 19:00 to 07:00 UTC: gating, testing, working out details and fixing the bugs the
+checks find. The day is for development, design and grand concepts, with sample checks and occasional light gating.
+
+- **GTS224 The nightly tier.** 8 hours of planned runs in the 12-hour night (6 before), 4 hours of slack for the fixes and
+  `--only failed` reruns a night's failures need, so a broken run still ends by 07:00.
+- **GTS225 The clean run.** Within one night (about 10 hours planned: the clean run over GT8's compressed corpora; the
+  whole corpora rotate through the nights), two nights at most (`bin/gate --clean --only` resumes the record; `main`
+  frozen at the candidate between them). A tag's night runs the clean run instead of the nightly. GTS209's acceptance reads
+  so: the four crops' clean run within the night, the nightly within its 8 hours.
+- **GTS226 The staging branch.** By day, merges go to the branch `next` after their sample checks; the night's first step
+  runs the essential gate on `next` and fast-forwards `main` to it (then pushes), so `main` stays gated and the day free of
+  gate runs. The essential gate's 15 minutes stays a goal, off the day's critical path. (Before: the essential gate at each
+  merge into `main`, 2026-10-26.)
+
 ## As built: GT8.4, GT8.7 (write-ahead, branch `gt8-nightly`, 2026-11-03)
 
 GTS202 (a), GTS203 (a), GTS204 (a) in the planner's way: the rotation is data in `test/gate/steps.edn`, decided by
@@ -3428,3 +3547,122 @@ as failed (`judge_note`: its run a failure, its ids into the part's subset). The
 
 **What remains.** The `:subset`s (GT8.3) for repr/go, Java and goi: until then their parts run whole in every tier;
 committed id records (or a `:universe-cmd`) for the oracle, diffcheck and repr/clojure; a part for `suite-aot`.
+
+## As built: GT8.3, C's run checks and Clojure's suite on the cover build (write-ahead, branch `gt8-cover2`, 2026-11-03)
+
+GTS205 (a), GTS206 (a) for the two crops the cover build did not reach: one method, the cover build of the gate's key
+(`bin/arbace-go --gate-build --cover`), a GOCOVERDIR per test under `ARBACE_COVER_DIR`, `bin/cover blocks|classes|subset`.
+`bin/lib/cover.bash` is unchanged (its digest is in the cover key): C's and Clojure's packages were already in the build.
+
+**The hooks.** `bin/ci check` (tool `ci`): the node programs on the cover build's `arbace -m arbace.c.repl run-nodes`
+(CInterp's natives over `arbace/ci`, `arbace/crt`) in place of cirun or `CI_EXE`, the budget `CI_COVER_BUDGET_X` (2)
+times; with `CI_COVER_READ=1` also `ci-read`: each program read, checked and built by a `nodes-list` process of its own on
+the cover build (repr/c, the checker, the builder, musl's link). `bin/ci check --aot` (tool `ci-aot`): each shard built
+with `-cover -coverpkg=arbace/ci,arbace/crt,arbace/shard` and the cover build's hook by an overlay; and `ci-cf2g`: each
+program compiled by a `compile-list` process of its own on the cover build (cf2g with the read). `bin/clojure-tests`
+(tool `clojure`): the eval level on the cover build's `arbace-tests`, a GOCOVERDIR per test namespace's process (run
+`cover`); `--aot` (`clojure-aot`): the compiled suite's program built with `cover_go_flags`, its key and run
+(`aot-cover`) apart (wired, not run yet). `bin/cover blocks --pkgs ERE` keeps a level's part of its crop's packages;
+`bin/cover subset` indexes a classed or kept test that wrote no counters (a program refused before its run: tools/cicover's
+rule, every judged program); `bin/cover classes` reads C's records (`.edn` rows) and C's controls (`:level`);
+`bin/cover clojure-classes RESULTS -o OUT [--aot]` classes the suite per namespace as `bin/reap` does
+(`test/cover/clojure_rows.ae`; a namespace of several classes classed by their set).
+
+**The demonstration** (benchmarksgame, 29 programs; the suite, 83 namespaces; at `cc16ac9b`, cover build 5ebb7b5e):
+
+| level | packages | blocks covered | subset | note |
+|---|---|---|---|---|
+| C run (`ci`) | ci, crt | 868 of 2,051 | 11 | the same 11 as `bin/ci cover`'s cirun and corpora.edn's `:subset` |
+| C run (`ci`) | ci, crt, cinterp, c.cinterp, c.repl | 1,129 of 3,495 | 11 | the same |
+| C AOT (`ci-aot`) | ci, crt | 438 of 2,033 | 8 | within the run level's 11 |
+| C cf2g (`ci-cf2g`) | c.cf2g | 5,078 of 12,062 | 7 | adds fasta-2, nbody-7 |
+| C read (`ci-read`) | repr.c.*, c.check, c.build, c.musl | 45,503 of 161,127 | 17 | |
+| Clojure eval (`clojure`) | arbace/lang, the vendored namespaces, c2j | 71,388 of 237,876 | 63 | 75% of the time |
+
+The back end's union is 13 of 29, every level's 21. The run check under coverage, the read compiled: 130 s (stage 0's
+evaluated `nodes-list` and cirun: 1,113 s); the AOT check with cf2g compiled per program: 151 s (stage 0's shard: 935 s).
+So `bin/ci cover` (cirun built with `-cover`) is superseded: the cover build gives the same subset and its read level.
+Clojure's namespaces reduce little: every process loads every test namespace first (about two thirds of its time) and
+each namespace's own tests reach blocks no other reaches; its eval level is 2 min of wall in the essential gate.
+
+**Decided (the user, 2026-11-03).** (1) `bin/ci cover`, `bin/lib/ci/cover` and `tools/cicover` (cirun's `-cover` path and
+its reducer) removed: the cover build is the one method, `tools/covsubset reduce` the reducer. (2) One subset a level in
+`test/c/corpora.edn`: `:subset-run` (the former `:subset`, queue 161's, until the cover build's are recorded),
+`:subset-read`, `:subset-aot`, `:subset-cf2g` (benchmarksgame's recorded from the demonstration above); `:rotate`'s
+`:subset-key` (c-lists') takes a vector, the keys' union: `c-check` `[:subset-run :subset-read]` (the step reads and runs),
+`c-aot` `[:subset-aot :subset-cf2g]`; a corpus with none of its step's keys runs whole (every c-aot part but benchmarksgame
+until tonight's runs). (3) Clojure's eval suite runs whole; only `--aot` gets a coverage subset.
+
+**The night's runs** (from the worktree, one after another; the cover build first, the checkout's key having moved with
+c-lists; `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 CI_JOBS=4` for bin/ci):
+
+1. `/root/arbace/.tmp/heavy bin/cover build`: about 25 min.
+2. `ARBACE_COVER_DIR=.tmp/cov-night CI_COVER_READ=1 CI_CHECK_WORK=$PWD/.tmp/ci-check-cov bin/ci check`: the 15 run corpora,
+   2,268 programs at benchmarksgame's 4.5 s a program, about 2 to 3 h.
+3. `ARBACE_COVER_DIR=.tmp/cov-night CI_AOT_WORK=$PWD/.tmp/ci-aot-cov bin/ci check --aot`: about 5 s a program, 2.5 to 3.5 h.
+4. `/root/arbace/.tmp/heavy env ARBACE_COVER_DIR=.tmp/cov-night bin/clojure-tests --aot --no-generative -j 16`: the compiled
+   suite's program with the cover flags (j2g's whole program, about 20 GiB), then its run: about 45 min.
+5. `bin/cover blocks .tmp/cov-night --tool T --pkgs ERE -o .tmp/cov-night/L` for each level (ci ci|crt|cinterp and
+   c.cinterp, c.repl; ci-read repr.c, c.check, c.build, c.musl; ci-aot ci|crt; ci-cf2g c.cf2g; clojure-aot the crop), `bin/cover
+   classes` (C: test/c/divergences.edn, and divergences-aot.edn with divergences.edn for the AOT levels, controls
+   `--control-level run`), `bin/cover clojure-classes test/arbace-go-aot-results.edn --aot`, `bin/cover subset` per corpus:
+   minutes. Then the subsets written as each corpus's four keys.
+
+## As built: GT8 (C's read lists) (write-ahead, branch `c-lists`, 2026-11-03)
+
+C's read-level checks take a file list, so GT8.4's rotation reaches them (about 220 of C's 300 full-check minutes).
+
+**The tools.** `--only LIST` (ids `CORPUS/NAME`, blank and `#` lines apart) on `bin/repr-c check --tokens`, `bin/repr-c
+parse-check`, `bin/repr-c roundtrip` and `bin/ci annotations` (`bin/lib/repr-c/only.bash`: an id outside the corpora, or
+not `CORPUS/NAME`, refused, exit 2; exported as `REPR_C_ONLY`), and on `bin/ci dg` (`CI_DG_ONLY`, which `--essential` used
+alone until now). `arbace.repr.c.ppcheck/lists`, the four checks' common lists, keeps a corpus's listed files and writes
+`WORK/CORPUS/only.txt`, the judges' mark of a partial run; a listed name its corpus does not hold fails the lists. Each
+judge (`ppcheck/check`, `parsecheck/check`, `annot/judge`, `rtcheck/judge`) then judges what the run holds
+(`arbace.repr.c.results`'s `partial-names`, `in-run`): a known entry of a file not run is not stale, and a control whose
+reference the partial run does not hold is left, not "not judged" (a whole run keeps the strict rule). Every judge now
+prints each failing file, and each stale entry, as `FAIL CORPUS/NAME WHY` (at most 40 a corpus, `print-failing`): the
+rotation's `:failed-re`. Refused with a list: `--record` (all five), `--record-gcc`, `--resume` (a kept corpus's lists),
+`--mutants-only` (parse-check; a list draws no mutants), `--essential` (dg); `--judge --record` (annotations) and
+`--resume --record` (roundtrip) after a partial run. Tests: `test/c/judge_test.ae`'s `read-lists-only`,
+`read-partial-judges`, `read-only-refusals` (74 assertions with the five control tests). Shown by hand: the four checks on
+`benchmarksgame/{fannkuchredux,fasta-8,fasta}.c` (15 to 30 s each, every control judged and differing), the token check on
+`fannkuchredux.c` alone (its three controls left), `bin/ci dg --only` on three files of two groups (its control judged).
+
+**The planner.** `:rotate`'s `:id-as` (with `:id-re`: the id is the match replaced, `$1/$2`, ids then under `PART/` as
+without `:id-re`): the results files' `"CORPUS FILE"` rows as `CORPUS/FILE`. `:subset-key` (default `:subset`): the corpus
+map's key that holds the subset, since the run corpora's `:subset` (ci's back end, VM 161) is another check's. rotation-test
+56 of 56 (the case: a results file, a subset under its own key, a name with a slash; C's one pattern, a name with spaces).
+
+**The steps.** `:rotate` on `c-tokens`, `c-parse`, `c-annotations`, `c-roundtrip` (universe the check's results file,
+subset `:subset-tokens`, `:subset-parse`, `:subset-annot`, `:subset-roundtrip`, `:always` the controls' two files,
+`benchmarksgame/fannkuchredux.c` and `fasta-8.c`, `:failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"`, below). `c-dg` stays whole: one step over
+seven groups, its control crossing two of them (a part per group would leave it in every part).
+
+**The subsets** (GTS205's rule needs the code under check's coverage: repr/c's lexer, preprocessor, parser, converter,
+printer and arbace.c.check). `bin/ci cover`'s method extends in its reducer (`tools/cicover` takes any `KEY N COUNT`
+profile) but not in its measure: ci's back end is a Go program (cirun) built with `-cover`, while repr/c is Arbace code,
+evaluated on stage 0 or compiled into the executable. Proposed: GTS206 (a)'s cover build of the gate's executable
+(`go build -cover -coverpkg` the `aot_arbace_repr_c_*` and `aot_arbace_c_check*` packages, kept by key), the checks run on
+it compiled (not `ARBACE_PATH_FIRST`), one file a process or `runtime/coverage`'s counters cleared and written around each
+file (`REPR_C_THREADS=1`), then `tools/cicover` with KEEP the controls' files and one file per known class. Until then a
+proxy, computed for one corpus: the tree check's `:subset-parse` of benchmarksgame, the cases and token kinds of cc's
+tree dumps (271 over the 52 files; `REPR_C_PARSE_KEEP=1`), reduced by `tools/cicover`: 9 files, 22% of the nodes (with
+parent-child pairs, 1,287 features, 30 files: too fine). It makes `c-parse.benchmarksgame` rotate in `--nightly`.
+
+**Decided** (the user, 2026-11-03). The proxy subset stays, labelled, until the cover build reaches repr/c. A file name may
+hold spaces (`cxgo/main with args.c`): every C judge (the run checks', cf2g's, dg's and the read checks', their controls
+too) prints `FAIL ID`, a tab, `WHY`, and every C step's `:failed-re` is `^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$` (the id up
+to the tab: the `.rot` file is tab-separated, so no literal tab in the pattern); the runner notes the failed ids one a line
+(`while read`, not word splitting); rotation-test 56 of 56 (one pattern over C's steps; the spaced name noted whole). `c-dg`
+stays one step, unrotated.
+
+**Review 188's fixes** (the Mac's review of `c-lists`, 9adfafe4). The blocker, `test/gate/audited-test-test.bash` taking the
+planner's read of `test/repr/c/parse-check-results.edn` (the rotated `c-parse.benchmarksgame`'s universe) for a bulk read:
+the test now allows every `:universe` the steps table names (read from it), not a path pattern: the planner reads a
+rotated part's universe by design, and a new crop's universe is then allowed without editing the test. The lows: L1 the
+comments; L2 `bin/ci check`, `check --aot` and `bin/ci record-ref` list their corpora with `REPR_C_ONLY` empty; L3 a whole
+`--resume` (roundtrip, annotations) lists a corpus a partial run left again; L4 `bin/ci annotations --judge --only`
+refused; L5 the `:gcc-digest` control not left for a reference outside a partial run (its reference is the recorded
+digest); L6 the planner warns when `:always` names a file of the part its universe lost; L7 every stale entry printed
+after the 40 failures; L8 the refusals' wording; L9 `c-check`'s and `c-aot`'s `:rotate` `:always` their control's two
+files (`benchmarksgame/fannkuchredux.c`, `fasta.c`).

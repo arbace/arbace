@@ -30,7 +30,7 @@ Direction:
   toolchain as forms (`tamago/cmd/`, 2026-10-15).
 - goi, the interpreter of Go forms at the REPL, complete for Go 1.27.1 (GR1-GR10), a milestone on
   main (tag `arbace-interprets-go1.27.1-v1`, 2026-10-20): `$GOROOT/test`'s programs against gc,
-  1,471 of 1,837 pass at the tag (1,620 in `test/goi/check-linux-amd64.edn` since), none fail, the rest in the recorded classes of `bin/goi divergences`
+  1,471 of 1,837 pass at the tag (1,664 in `test/goi/check-linux-amd64.edn` since, 2026-11-04), none fail, the rest in the recorded classes of `bin/goi divergences`
   (doc/go/GOI-SPEC.md, "v1's divergences"); the same in the box on amd64 and in the emulated arm64
   VM. Then REAP, read, eval, AOT and print for Clojure, Java and Go, a milestone on main (tag
   `arbace-reaps-3-crops-v1`, 2026-10-27): the matrix of `bin/reap`, 12 of 12 cells checked, none failing,

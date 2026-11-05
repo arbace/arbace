@@ -18,7 +18,8 @@
 #   cover_cache ROOT [KEY]       where the cover build of ROOT's gate_key is: ARBACE_COVER_CACHE when set, else
 #                                ARBACE_GATE_EXES/cover-KEY20 (beside the gate's builds, KEY20/)
 #   cover_exe ROOT [NAME]        the cover build's NAME (arbace, default, or arbace-tests) at ROOT's key: its path,
-#                                status 1 with a note when it is not built (bin/arbace-go --gate-build --cover)
+#                                status 1 with a note when it is not built (bin/arbace-go --gate-build --cover), or
+#                                when ARBACE_COVER_DIR holds another build's data (cover_claim: RUN/key)
 #   cover_env TOOL ID            when ARBACE_COVER_DIR is set: GOCOVERDIR=DIR for the run of test ID by TOOL (a
 #                                check and its level, java-interp, goi, ...), DIR = ARBACE_COVER_DIR/TOOL/ID with /
 #                                in ID as %, made, ID written into DIR/id; nothing when unset
@@ -70,16 +71,36 @@ cover_cache() {
   echo "$(arbace_gate_exes "$root")/cover-${key:0:20}"
 }
 
+# cover_claim CACHE: ARBACE_COVER_DIR holds one cover build's data (review 182 L5): RUN/key names the build its
+# counters come from (CACHE/key, the cover build's key; else the executable's digest), written by the first check
+# run into it; a check run of another build is refused (status 1), so that no counters of two builds mix and bin/cover
+# blocks reads the packages of the build that ran. Nothing without ARBACE_COVER_DIR
+cover_claim() {
+  [ -n "${ARBACE_COVER_DIR:-}" ] || return 0
+  local k have t
+  k=$(cat "$1/key" 2>"${TMPDIR:-.}/cover-key.err") || k=
+  [ -n "$k" ] || k=exe-$(sha256sum < "$1/amd64/arbace" | cut -c1-64) || return 1
+  mkdir -p "$ARBACE_COVER_DIR" || return 1
+  if [ ! -e "$ARBACE_COVER_DIR/key" ]; then
+    # (two checks starting at once: one link wins, the other compares)
+    t=$ARBACE_COVER_DIR/.key.$$; echo "$k" > "$t" && { ln "$t" "$ARBACE_COVER_DIR/key" 2>"${TMPDIR:-.}/cover-key.err"; rm -f "$t"; }
+  fi
+  have=$(cat "$ARBACE_COVER_DIR/key" 2>"${TMPDIR:-.}/cover-key.err")
+  [ "$have" = "$k" ] && return 0
+  echo "cover: $ARBACE_COVER_DIR holds the data of another cover build (its key ${have:0:12}, this build's ${k:0:12}: $1): a directory of its own for each build" >&2
+  return 1
+}
+
 cover_exe() {
   local root=$1 n=${2:-arbace} c k
   c=$(cover_cache "$root") || return 1
   # its key the checkout's cover key (the gate's, the hook, this file: review 182 finding 5); an
   # ARBACE_COVER_CACHE is taken as given, with a note
   if [ -n "${ARBACE_COVER_CACHE:-}" ]; then
-    [ -x "$c/amd64/$n" ] && { echo "cover: $c/amd64/$n (ARBACE_COVER_CACHE), not compared with the checkout's key" >&2; echo "$c/amd64/$n"; return 0; }
+    [ -x "$c/amd64/$n" ] && { echo "cover: $c/amd64/$n (ARBACE_COVER_CACHE), not compared with the checkout's key" >&2; cover_claim "$c" || return 1; echo "$c/amd64/$n"; return 0; }
   else
     k=$("$root/bin/arbace-go" --cover-key) || return 1
-    [ -x "$c/amd64/$n" ] && [ "$(cat "$c/key" 2>"${TMPDIR:-.}/cover-key.err")" = "$k" ] && { echo "$c/amd64/$n"; return 0; }
+    [ -x "$c/amd64/$n" ] && [ "$(cat "$c/key" 2>"${TMPDIR:-.}/cover-key.err")" = "$k" ] && { cover_claim "$c" || return 1; echo "$c/amd64/$n"; return 0; }
   fi
   echo "cover: no cover build at the checkout's key ($c/amd64/$n; bin/arbace-go --gate-build --cover)" >&2
   return 1
@@ -108,14 +129,54 @@ cover_settle() {
   done
 }
 
+# cover_hook_table: the hook's files, a line each, PACKAGE FILE PIN: the Go package (under GOROOT/src) the cover
+# builds' overlay adds FILE (relative to the checkout) to, as zz_arbace_cover.go: internal/coverage/cfile's hook, its
+# os/signal part (the program's own signal registrations, review 182 L3) and its runtime part (whether a timer is
+# pending, for the deadlock detector, review 182 L2). The cover key (bin/arbace-go's cover_key) and the compiled
+# level's program key (bin/java-check) hash this file and cover.go: the other files are pinned here by their SHA-256
+# (PIN; - for cover.go), so that a change to them moves those keys, not gate_key (bin/arbace-go unchanged); a file
+# that differs from its pin fails cover_go_flags (and test/gate/cover-test.bash): its new digest here
+cover_hook_table() {
+  printf '%s\n' "internal/coverage/cfile tools/covsubset/hook/cover.go -" \
+    "os/signal tools/covsubset/hook/signal/refs.go f69a96aabc678f8b7fdbd8e3cdf81b8a4388f0db1a186ec6e016a9fa962b65a4" \
+    "runtime tools/covsubset/hook/runtime/timers.go 7ee8ebb52ddecc820261b1ab1e7a0f03bbf519796bb2061827797613239bc7c4"
+}
+
+# cover_hook_stale ROOT: the hook's files under ROOT that differ from their pins, a line each (none: status 0)
+cover_hook_stale() {
+  local p f pin bad=0
+  while read -r p f pin; do
+    [ "$pin" = - ] || [ "$(sha256sum < "$1/$f" | cut -c1-64)" = "$pin" ] || { echo "$f"; bad=1; }
+  done <<< "$(cover_hook_table)"
+  return $bad
+}
+
+# cover_overlay ROOT OVERLAY OUT: the cover builds' one overlay (review 195's HIGH: bin/lib/ci/check-aot's shards wrote
+# their own with cover.go alone, and failed on os/signal's ArbaceCoverRefs): OVERLAY (a go build -overlay file,
+# bin/jrt overlay's; empty: none) with every hook file of cover_hook_table added to its Go package as
+# zz_arbace_cover.go, written to OUT; a hook file that differs from its pin refused
+cover_overlay() {
+  local root=$1 overlay=$2 ov=$3 g=${ARBACE_GOROOT:-/root/tamago-go}/src e="" p f sep=""
+  cover_hook_stale "$root" > "$ov.stale" || { echo "cover: the hook's files differ from their pins in bin/lib/cover.bash's cover_hook_table: $(cat "$ov.stale")" >&2; return 1; }
+  rm -f "$ov.stale"
+  if [ -n "$overlay" ]; then
+    while read -r p f _; do e="$e,\n \"$g/$p/zz_arbace_cover.go\": \"$root/$f\""; done <<< "$(cover_hook_table)"
+    sed '$s|}}[[:space:]]*$|'"$e"'}}|' "$overlay" > "$ov"
+  else
+    { printf '{"Replace": {'
+      while read -r p f _; do printf '%s\n "%s/%s/zz_arbace_cover.go": "%s/%s"' "$sep" "$g" "$p" "$root" "$f"; sep=,; done <<< "$(cover_hook_table)"
+      printf '}}\n'; } > "$ov"
+  fi
+  [ "$(grep -c zz_arbace_cover "$ov")" = "$(cover_hook_table | wc -l)" ] || { echo "cover: could not add the hook to ${overlay:-a new overlay}" >&2; return 1; }
+}
+
 # cover_go_flags ROOT PROG WORK OVERLAY OUT: bin/build-go's arguments, one a line, for a cover build of the
-# j2g program PROG printed into WORK with the overlay OVERLAY (bin/jrt overlay's): the overlay with the hook
-# (tools/covsubset/hook/cover.go) added to Go's internal/coverage/cfile, written to OUT, and the cover flags
+# j2g program PROG printed into WORK with the overlay OVERLAY (bin/jrt overlay's): cover_overlay's, written to OUT,
+# and the cover flags
 cover_go_flags() {
   local root=$1 prog=$2 work=$3 overlay=$4 ov=$5 pkgs
   pkgs=$(cover_pkgs "$prog")
   [ -n "$pkgs" ] || { echo "cover: no package of $prog to cover" >&2; return 1; }
-  sed '$s|}}[[:space:]]*$|,\n "'"${ARBACE_GOROOT:-/root/tamago-go}/src/internal/coverage/cfile/zz_arbace_cover.go"'": "'"$root/tools/covsubset/hook/cover.go"'"}}|' "$overlay" > "$ov"
-  grep -q zz_arbace_cover "$ov" || { echo "cover: could not add the hook to $overlay" >&2; return 1; }
+  cover_overlay "$root" "$overlay" "$ov" || return 1
   printf '%s\n' --overlay "$ov" --go-flag -cover --go-flag -covermode=set --go-flag "-coverpkg=$pkgs" --go-flag -tags=arbacecover
 }

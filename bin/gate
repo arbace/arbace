@@ -120,9 +120,24 @@
 #                                   the full gate's steps too, --tsv the rows as TSV
 #        bin/gate --full --concurrent  (GTS37 (a)) --full's chains at once (GATE_FULL_PARALLEL=1) under the
 #                                   host's big lock taken once for the whole run (bin/heavy-lock;
-#                                   GATE_CONCURRENT_HELD=1: the caller holds it), its heavy steps and the
-#                                   tools' heavy processes serialized on a lock of its own
-#                                   (GATE_CONCURRENT_LOCK, default .tmp/gate-concurrent.lock)
+#                                   GATE_CONCURRENT_HELD=1 or GATE_HEAVY_CMD=env: the caller holds it); since
+#                                   GTS227 (a) in the memory lanes: every step admitted by its declared :mem-gib
+#                                   (bin/gate-lane: within GATE_MEM_BUDGET_GIB, default MemTotal less
+#                                   GATE_MEM_RESERVE_GIB 4; the steps of GATE_LANE_BIG_GIB, 16, or more one at a
+#                                   time, lane 1; the rest beside, lane 2; the plan's order decides), its tools
+#                                   taking no lock; GATE_LANES=0: GTS37 (a)'s one heavy step at a time on a lock of
+#                                   its own (GATE_CONCURRENT_LOCK, default .tmp/gate-concurrent.lock)
+#        bin/gate --full --clean --concurrent [--tag TAG]  (GTS227 (a)) the clean run in the memory lanes: as
+#                                   --clean, the big lock taken once around it, the clone's essential and full
+#                                   chains at once, each step admitted as above (the record's :lanes, each step's
+#                                   :mem-gib, :lane and :start-s); not with --only (its reruns stay serial)
+#        bin/gate --full [--clean] --concurrent --plan  the plan with its lanes: each step's lane and a schedule
+#                                   simulated by the same rule (test/gate/lanes.ae's view; durations: the main
+#                                   store's passes, else the clean records', GATE_LANES_RECORDS more of them,
+#                                   GATE_LANES_PREFER=clean the records first)
+#        bin/gate [--full] --mem-check  (GTS227 (a)) every step's :mem-gib against the store's passes' and the
+#                                   committed clean records' peaks: exit 1 on one over its declaration by 10%
+#                                   and 0.5 GiB, or a step without one (test/gate/lanes.ae's mem-check)
 #        (GATE_STEPS: another table, GATE_PROG_UNITS, GATE_JAVAC_PROG_UNITS: the units given: the gate's
 #        own tests, a toy table)
 #   (default)  the essential gate:
@@ -356,10 +371,10 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 caller_host_exe=${ARBACE_HOST_EXE-} # --costs only (it reads, keys nothing): the caller's tools' host
 unset ARBACE_HOST_EXE J2G_GO_EXE REPR_GO_EXE
-usage() { echo "usage: bin/gate [--full|--nightly] [--rerun] | bin/gate --rotation-status [--days N] | bin/gate [--full] --plan [--builds] | bin/gate [--full] --costs [--last N] [--tsv] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed] [--plan] | bin/gate --pins [FILE] | bin/gate --full --concurrent" >&2; exit 2; }
+usage() { echo "usage: bin/gate [--full|--nightly] [--rerun] | bin/gate --rotation-status [--days N] | bin/gate [--full] --plan [--builds] | bin/gate [--full] --costs [--last N] [--tsv] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed] [--plan] | bin/gate --pins [FILE] | bin/gate --full [--clean] --concurrent [--plan] | bin/gate [--full] --mem-check" >&2; exit 2; }
 full= plan_only= why= rerun= audit= prune= dry= clean= clean_tag= pins= pins_out= concurrent= builds= only= outside=
 nightly= rotation_status= rot_days=
-costs= costs_last=5 costs_fmt=text
+costs= costs_last=5 costs_fmt=text mem_check=
 steps_arg=() orig_args=("$@")
 while [ $# -gt 0 ]; do
   case $1 in
@@ -381,6 +396,7 @@ while [ $# -gt 0 ]; do
     --prune) prune=1 ;;
     --dry-run) dry=--dry-run ;;
     --costs) costs=1 ;;
+    --mem-check) mem_check=1 ;;
     --last) [ $# -ge 2 ] && [ "$2" -gt 0 ] 2>/dev/null || usage; costs_last=$2; shift ;;
     --tsv) costs_fmt=tsv ;;
     -*) usage ;;
@@ -401,10 +417,13 @@ elif [ -n "$clean" ] && [ -n "$full" ] && [ "${GATE_CLEAN_WHOLE:-}" != 1 ]; then
   plan_rot=(--rotation subset)
 fi
 [ -n "$builds" ] && [ -z "$plan_only" ] && usage
-[ -n "$clean" ] && { [ -n "$concurrent$audit$why$prune" ] && usage; }
+[ -n "$clean" ] && { [ -n "$audit$why$prune" ] && usage; }
+# GTS227 (a): --concurrent with --clean (the clean run in the memory lanes), with --plan (the plan and its lanes); not --only
+[ -n "$concurrent" ] && [ -n "$only" ] && usage
 [ -n "$only" ] && { [ -n "$clean" ] && [ -z "$plan_only" ] || usage; }
 [ -z "$costs" ] && { [ "$costs_last" != 5 ] || [ "$costs_fmt" != text ]; } && usage
-[ -n "$costs" ] && { [ -n "$plan_only$why$rerun$audit$prune$clean$pins$concurrent$builds$outside" ] && usage; }
+[ -n "$costs" ] && { [ -n "$plan_only$why$rerun$audit$prune$clean$pins$concurrent$builds$outside$mem_check" ] && usage; }
+[ -n "$mem_check" ] && { [ -n "$plan_only$why$rerun$audit$prune$clean$pins$concurrent$builds$outside" ] && usage; }
 
 # --costs (GT8.1, queue 170): the cost table, from the store of passes and the latest run's logs (.tmp/gate/NAME.mem),
 # by test/gate/costs.ae on the tools' host; before the environment's scrub and gate_env: it runs nothing and keys nothing
@@ -414,6 +433,18 @@ if [ -n "$costs" ]; then
   [ -n "$caller_host_exe" ] && export ARBACE_HOST_EXE=$caller_host_exe
   store=${ARBACE_GATE_STORE:-$(arbace_main_checkout "$root")/.tmp/gate-pass}
   arbace_tool -p "$root/test" -m gate.costs costs "$root" "$store" "$root/.tmp/gate" "$mode" "$costs_last" "$costs_fmt"
+  exit
+fi
+# --mem-check (GTS227 (a)): every step's and part's declared :mem-gib against the peaks recorded, the store's passes and
+# the committed clean records (test/gate/clean-*.edn): exit 1 when a step declares none or a recorded peak exceeds its
+# declaration by the margin (test/gate/lanes.ae's mem-check; reads only, keys nothing; test/gate/lanes-test.bash holds
+# the committed records to it)
+if [ -n "$mem_check" ]; then
+  . "$root/bin/lib/gate-cache.bash"
+  . "$root/bin/lib/tools.bash"
+  [ -n "$caller_host_exe" ] && export ARBACE_HOST_EXE=$caller_host_exe
+  store=${ARBACE_GATE_STORE:-$(arbace_main_checkout "$root")/.tmp/gate-pass}
+  GATE_ALL_PARTS=1 arbace_tool -p "$root/test" -m gate.lanes mem-check "$root" "$store" "$root"/test/gate/clean-*.edn
   exit
 fi
 
@@ -442,6 +473,10 @@ gate_keep_env() {
     # review 181, L6: the clock moved only for the gate's own tests, with a store of their own (as GATE_STEPS)
     GATE_NOW) [ -n "${ARBACE_GATE_STORE:-}" ] ;;
     GATE_CONCURRENT_HELD|GATE_CONCURRENT_LOCK|GATE_CPU_LOG|GATE_AUDIT_*) return 0 ;;
+    # GTS227 (a): the memory lanes' scheduling (never what passes)
+    GATE_LANES|GATE_MEM_BUDGET_GIB|GATE_MEM_RESERVE_GIB|GATE_LANE_BIG_GIB|GATE_LANE_POLL) return 0 ;;
+    # (and the --plan view's durations: another store, more records of walls, the records first)
+    GATE_LANES_STORE|GATE_LANES_RECORDS|GATE_LANES_PREFER) return 0 ;;
     GATE_STEPS|GATE_PROG_UNITS|GATE_JAVAC_PROG_UNITS) [ -n "${ARBACE_GATE_STORE:-}" ] ;;
     # queue 085 (report 084 finding 5, GTS112 (b)): a name a step of the table declares in :env, which its key
     # holds (plan.ae: "env NAME=VALUE" or "env NAME unset"): the frozen JVM's FROZEN_CP, FROZEN_TAG and
@@ -720,6 +755,11 @@ clean_launch() {
     only_env=(GATE_CLEAN_ONLY="$only" GATE_CLEAN_BASE="$dir/.tmp/clean-base.edn" GATE_CLEAN_LOGS_ROOT="$base" GATE_CLEAN_LOGS_NAME="$logs_name")
     echo "   --only $only: the steps that failed or changed since test/gate/clean-$tag.edn's runs, merged into it"
   fi
+  # GTS227 (a): the memory lanes (--concurrent): the clone's run schedules its steps by their declared memory, the big
+  # lock held by this run (above) for its whole length
+  local lanes_env=()
+  [ -n "$lanes" ] && lanes_env=(GATE_LANES=1 GATE_HEAVY_CMD=env GATE_MEM_BUDGET_GIB="$GATE_MEM_BUDGET_GIB"
+                                ${GATE_LANE_BIG_GIB:+GATE_LANE_BIG_GIB="$GATE_LANE_BIG_GIB"} ${GATE_LANE_POLL:+GATE_LANE_POLL="$GATE_LANE_POLL"})
   # the frozen jar: the main checkout's (pinned: the clone's pins step checks it), else the clone builds it
   frozen=${FROZEN_JAR:-$main/.tmp/oracle-frozen/arbace-for-java-26-v4.jar}
   [ -f "$frozen" ] || frozen=
@@ -732,7 +772,7 @@ clean_launch() {
   env ${unset[@]+"${unset[@]}"} TMPDIR="$dir/.tmp/tmp" GOCACHE="$dir/.tmp/gocache" GATE_CLEAN_INNER=1 GATE_CLEAN_TAG="$tag" \
       GATE_CLEAN_ROTATION_STATUS="$rot" GATE_CLEAN_ROTATION_EDN="$base/$sha.rotation.edn" ${GATE_CLEAN_WHOLE:+GATE_CLEAN_WHOLE="$GATE_CLEAN_WHOLE"} \
       ARBACE_HEAVY_LOCK="${ARBACE_HEAVY_LOCK:-$main/.tmp/big.lock}" ${frozen:+FROZEN_JAR="$frozen"} ${only_env[@]+"${only_env[@]}"} \
-      "$dir/bin/gate" ${full:+--full} --clean 2>&1 | tee "$base/$sha.out"
+      ${lanes_env[@]+"${lanes_env[@]}"} "$dir/bin/gate" ${full:+--full} --clean 2>&1 | tee "$base/$sha.out"
   st=${PIPESTATUS[0]}
   rm -rf "${out:?}"; mkdir -p "$out"
   for e in txt edn; do [ -f "$base/$sha.rotation.$e" ] && cp "$base/$sha.rotation.$e" "$out/rotation.$e"; done
@@ -800,6 +840,8 @@ clean_record() {
     "${GATE_CLEAN_TAG:-}" "$commit" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mode" "$([ "$status" = 0 ] && echo passed || echo failed)" $(( $(date +%s) - start ))
   printf ' :host {:cpus %s :mem-kib %s :kernel "%s"}\n' "$(nproc)" "$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)" "$(uname -r)"
   printf ' :env {:all-parts true :forms-only true :heavy-cmd "%s"}\n' "$GATE_HEAVY_CMD"
+  # GTS227 (a): the memory lanes' budget and big step, when the run used them (else serial)
+  [ -n "${GATE_LANES:-}" ] && printf ' :lanes {:budget-gib %s :big-gib %s}\n' "$GATE_MEM_BUDGET_GIB" "${GATE_LANE_BIG_GIB:-16}"
   # GT8.4: the rotated parts (review 181, finding 5): :status :complete (the record checked first, its evidence:
   # rotation-status's period, each slice's covering run, from this commit's clean ancestors), :unchecked
   # (GATE_CLEAN_ROTATION=0, the evidence as found), :none (no part rotates: every part ran whole), :whole (GATE_CLEAN_WHOLE=1)
@@ -833,10 +875,16 @@ clean_record() {
     fi
     [ -n "$first" ] || printf '\n  '
     first=
-    printf '{:step "%s" :kind :%s :status %s%s :key "%s" :wall-s %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s :wait-s %s :inner-wait-s %s :audit %s%s%s}' \
+    # GTS227 (a): the step's declared memory, and with the lanes its lane and its start (seconds after the run's start)
+    local lm= mg=${memgib[$n]:--}
+    [ "$mg" = - ] || lm=" :mem-gib $mg"
+    if [ -n "${GATE_LANES:-}" ] && [ -f "$logs/$n.start" ] && [ "$mg" != - ]; then
+      lm="$lm :lane $(awk -v g="$mg" -v b="${GATE_LANE_BIG_GIB:-16}" 'BEGIN {print (g + 0 >= b + 0 ? 1 : 2)}') :start-s $(( $(cat "$logs/$n.start") - start ))"
+    fi
+    printf '{:step "%s" :kind :%s :status %s%s :key "%s" :wall-s %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s :wait-s %s :inner-wait-s %s :audit %s%s%s%s}' \
       "$n" "${kind[$n]:-pre}" "$s" "$ex" "$k" "$(mem_of "$n" wall-s)" "$(mem_of "$n" cpu-s)" "$(mem_of "$n" maxrss-kib)" "$(mem_of "$n" tree-peak-kib)" \
       "$(mem_of "$n" wait-s)" "$(mem_of "$n" inner-wait-s)" "$a" \
-      "$( [ -f "$logs/$n.audit-aborts" ] && echo " :audit-aborts $(cat "$logs/$n.audit-aborts")")" "$prog"
+      "$( [ -f "$logs/$n.audit-aborts" ] && echo " :audit-aborts $(cat "$logs/$n.audit-aborts")")" "$prog" "$lm"
   done
   printf ']}\n'
 }
@@ -854,6 +902,24 @@ rotation_check() {
 if [ -n "$rotation_status" ]; then rotation_check; exit; fi
 if [ -n "$pins" ]; then clean_pins "$pins_out"; exit; fi
 if [ -n "$outside" ]; then outside_pins; exit; fi
+# GTS227 (a), the memory lanes: --concurrent (and --clean --concurrent) schedules every step by its declared :mem-gib
+# (bin/gate-lane: the budget GATE_MEM_BUDGET_GIB, default MemTotal less GATE_MEM_RESERVE_GIB 4; lane 1 the steps of
+# GATE_LANE_BIG_GIB, 16, or more, one at a time; lane 2 the rest beside it), under the host's big lock held once for the
+# whole run (bin/heavy-lock: its FIFO; GATE_CONCURRENT_HELD=1 or GATE_HEAVY_CMD=env: the caller holds it); GATE_LANES=0:
+# GTS37 (a)'s one heavy step at a time on a lock of the gate's own (not with --clean)
+lanes=
+if [ -n "$concurrent" ]; then
+  if [ "${GATE_LANES:-1}" != 0 ]; then
+    lanes=1
+    GATE_MEM_BUDGET_GIB=${GATE_MEM_BUDGET_GIB:-$(awk -v r="${GATE_MEM_RESERVE_GIB:-4}" '/^MemTotal:/ {b = int($2 / 1048576 - r); print (b < 1 ? 1 : b)}' /proc/meminfo)}
+    export GATE_MEM_BUDGET_GIB
+  elif [ -n "$clean" ]; then usage
+  fi
+  if [ -z "$plan_only" ] && [ -z "${GATE_CONCURRENT_HELD:-}" ] && [ "${GATE_HEAVY_CMD:-}" != env ]; then
+    echo "== gate --full$( [ -n "$clean" ] && echo ' --clean') --concurrent: the host's big lock first (${ARBACE_HEAVY_LOCK:-$(main_checkout)/.tmp/big.lock}, in turn)"
+    exec "$root/bin/heavy-lock" env GATE_CONCURRENT_HELD=1 "$root/bin/gate" "${orig_args[@]}"
+  fi
+fi
 if [ -n "$clean" ] && [ -z "${GATE_CLEAN_INNER:-}" ]; then
   if [ -z "$plan_only" ]; then clean_launch; exit; fi
   # --clean --plan: the plan a clean run makes (an empty store and executables' directory, every part,
@@ -865,16 +931,18 @@ fi
 # whole run (bin/heavy-lock: in turn; GATE_CONCURRENT_HELD=1 when the caller holds it already), the
 # heavy steps and the tools' heavy processes serialized on a lock of the gate's own (GATE_CONCURRENT_LOCK,
 # default .tmp/gate-concurrent.lock): one heavy process at a time, the light work beside it
-if [ -n "$concurrent" ]; then
-  [ -n "$plan_only" ] && usage
-  if [ -z "${GATE_CONCURRENT_HELD:-}" ]; then
-    echo "== gate --full --concurrent: the host's big lock first (${ARBACE_HEAVY_LOCK:-$(main_checkout)/.tmp/big.lock}, in turn)"
-    exec "$root/bin/heavy-lock" env GATE_CONCURRENT_HELD=1 "$root/bin/gate" "${orig_args[@]}"
-  fi
-  unset ARBACE_HEAVY_HELD # the private lock below is the one the steps and the tools take
+if [ -n "$concurrent" ] && [ -z "$plan_only" ]; then
   export GATE_FULL_PARALLEL=1
-  GATE_HEAVY_CMD="flock ${GATE_CONCURRENT_LOCK:-$root/.tmp/gate-concurrent.lock}"
+  if [ -n "$lanes" ]; then
+    # the lanes (GTS227 (a)): the admission is the lock; the big lock is this run's, so nothing locks again
+    export GATE_LANES=1; GATE_HEAVY_CMD=env
+  else
+    unset ARBACE_HEAVY_HELD # the private lock below is the one the steps and the tools take
+    GATE_HEAVY_CMD="flock ${GATE_CONCURRENT_LOCK:-$root/.tmp/gate-concurrent.lock}"
+  fi
 fi
+# (the lanes are --concurrent's alone: a GATE_LANES of the caller's environment does not make an ordinary gate use them)
+[ -n "$lanes" ] || [ -n "${GATE_CLEAN_INNER:-}" ] || unset GATE_LANES
 gate_env || { echo "gate: the environment failed" >&2; exit 1; }
 # the clean run itself (GATE_CLEAN_INNER=1, in the clone clean_launch made): passes not read (an empty
 # store, every check run: --rerun), serial, every step under the audit, every part (GTS19 (a)), Java's
@@ -884,6 +952,13 @@ if [ -n "${GATE_CLEAN_INNER:-}" ]; then
   rerun=1 audit_all=1 serial=1
   export GATE_ALL_PARTS=1 JAVA_CHECK_FORMS_ONLY=1 GATE_CPU_LOG=1
   unset GATE_FULL_PARALLEL
+  # GTS227 (a): the clean run in the memory lanes (bin/gate --full --clean --concurrent): the chains at once, every step
+  # admitted by its declared memory (bin/gate-lane), the big lock the launcher's
+  if [ "${GATE_LANES:-}" = 1 ]; then
+    serial=; export GATE_FULL_PARALLEL=1 GATE_LANES GATE_MEM_BUDGET_GIB; GATE_HEAVY_CMD=env
+  else
+    unset GATE_LANES
+  fi
 fi
 
 # GTS83 (a), review 001's fixes: the stage0 step in a linked worktree (git's common dir another checkout's .git).
@@ -939,8 +1014,16 @@ if [ -n "$plan_only$why" ]; then
     rm -f "$d"/*.done
     run_plan "$d"
   else
-    echo "== gate$( [ -n "$nightly" ] && echo ' --nightly' || { [ -n "$full" ] && echo ' --full'; })$( [ -n "$clean" ] && echo ' --clean') --plan: $(git log -1 --format='%h %s'), store $store"
-    run_plan "$d" ${rerun:+--rerun}
+    echo "== gate$( [ -n "$nightly" ] && echo ' --nightly' || { [ -n "$full" ] && echo ' --full'; })$( [ -n "$clean" ] && echo ' --clean')$( [ -n "$concurrent" ] && echo ' --concurrent') --plan: $(git log -1 --format='%h %s'), store $store"
+    run_plan "$d" ${rerun:+--rerun} || exit 1
+    # GTS227 (a): the lanes the run would use, each step's lane and a simulated schedule (durations: the main store's
+    # passes, GATE_LANES_STORE's, else the newest clean record's, the committed ones and GATE_LANES_RECORDS' files, a
+    # record of estimates among them; GATE_LANES_PREFER=clean: the records first)
+    if [ -n "$lanes" ]; then
+      read -r -a extra <<< "${GATE_LANES_RECORDS:-}"
+      arbace_tool -p "$root/test" -m gate.lanes view "$d" "${GATE_LANES_STORE:-$(main_checkout)/.tmp/gate-pass}" \
+        "$GATE_MEM_BUDGET_GIB" "${GATE_LANE_BIG_GIB:-16}" "$root"/test/gate/clean-*.edn ${extra[@]+"${extra[@]}"}
+    fi
   fi
   exit
 fi

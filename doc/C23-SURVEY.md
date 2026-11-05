@@ -4584,3 +4584,135 @@ superseding it: the tag waits for GT8 (doc/GATE-SURVEY.md) and the backlog (doc/
 run of the four crops over GT8's compressed corpora, within GT8's budget: row 12 again, compressed. The keyed `--full` of
 the night of 2026-11-02 was stopped by hand in goi's AOT check (its non-C steps' passes stay in the store at their keys).
 TODO(tag): the clean run's record.
+
+## As built: ci's prebuilt runtime (2026-11-03)
+
+The user, 2026-11-03: ci links a prebuilt, cached runtime keyed by the runtime's sources, so each program checks and builds only
+its own code. The problem as CX8 measured it (branch `cpp-cx8`, doc/cpp/CPP-SURVEY.md, "As built: CX8"): every program's build
+checked and built its whole linked runtime again (about 70 musl units for a `printf`; musl plus libstdc++'s lowered runtime,
+about 18,000 forms, for C++: 56 s of CPU a process, libstdc++'s whole check ~23 h). Branch `ci-prebuilt` from `backlog`
+(`305baaa3`), light tier, ci judged from the checkout's sources (`ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`).
+
+### PB.1 What was built
+
+| part | where | what |
+|---|---|---|
+| fragments | `arbace/c/build.ae`: `unit-fragment`, `link-text`, `read-program` | A checked unit built **alone** into a fragment, plain data: its linking candidates as build-program's linker saw them (each file-scope object definition with its size, alignment and read-only bit; each function definition and alias; in the forms' order) and an **item** per candidate the build would build (an object's initializer, a function's code): its command's text with placeholders for functions and statics (`?fL`, `?sL`: no C name holds a `?`) and its references in the order the build first made them (a function, an object with the size of the declaration that referenced it, a static of its own, a string literal, a static initializer). A key of internal linkage is `[:self NAME]` until the link puts the unit's index in it. `link-text` chooses the definitions by build-program's rules (an initializer over a tentative definition, a strong function over a weak one, a weak object alias not taken over another unit's definition) over **the same keys inserted in the same order**, so its HashMaps iterate as build-program's did, and **replays** the chosen items in build-program's order: each reference allocated and emitted when new to the program, the placeholders replaced by the numbers. The node program is therefore build-program's byte for byte (the names of statics of no name, which print an identity, aside). `build-program` now links its units' fragments; the whole-program build is kept as `build-program-direct`, the reference. `:prune`/`:roots`: a library's unreached candidates cut at the link (`reached`, a `--gc-sections` over the items' references), for the lowered C++ runtime, whose old build cut its forms (arbace.cpp.run's `prune`) |
+| the cache | `arbace/c/runtime.ae` (`arbace.c.runtime`) | `prebuilt`: a library (musl's, or any library of read units with an index) with its fragments made once per process (a delay per unit), read from `.tmp/ci-runtime/NAME-KEY/UNIT.frag` (`CI_RUNTIME`), else checked, built and written through a temporary name (processes race harmlessly); a lowered C++ unit's constructors kept in its fragment. The **key**: the fragments' format, the target (linux-amd64, long double 8), the library's own key (musl: the forms cache's `forms/key`, which covers repr/c, the host, configure's headers and `musl.ae`) and the SHA-256 of `arbace/c/{check,build,run,musl,runtime}.ae` and `arbace/repr/c/annot.ae` **as this process loaded them** (the checkout's with `ARBACE_PATH_FIRST`, else the embedded copy: a stage 0 running its embedded ci never shares fragments with the checkout's ci). `link-text` (the program's units fragmented, musl's closure as before, `arbace.c.musl/closure`, its fragments prebuilt); `CI_PREBUILT=0` the old build, `CI_LINK_CHECK=1` both and their texts required equal (the check's own regression test). Apart from `arbace.c.musl` because `musl.ae`'s source keys the forms cache: a change to the linker must not reread musl (a first version in `musl.ae` did, about 20 minutes) |
+| the callers | `arbace/c/run.ae` (`nodes`, `nodes-list`), `cf2g.ae` (`compile-list`), `repl.ae` | all link through `arbace.c.runtime`; both back ends take the same node program (its text for tools/cirun and CInterp, `read-program`'s commands for cf2g) |
+| the command | `bin/ci runtime build\|key\|dir`, `make ci-runtime` | every musl unit's fragment made ahead (a program's build makes the ones it lacks itself) |
+
+Unchanged: `arbace.c.musl` (the forms cache, its index, the closure, `checked-unit`), the checker, the node program's format, the
+back ends. The musl fragments of the essential check's 44 programs: 172 units, 1.9 MB on disk.
+
+### PB.2 Correctness
+
+| check | result |
+|---|---|
+| `bin/ci check --only test/c/essential-check.txt` with `CI_LINK_CHECK=1` (each of the 44 programs built both ways in the process, the texts compared) | every program equal; exit 0; `results.edn` byte-equal to the base's (`backlog`, a detached worktree); the 46 node programs kept (`CI_KEEP_NODES`) equal to the base's after masking `Object@HEX` |
+| the same without the check, cache warm | exit 0, `results.edn` byte-equal |
+| `bin/ci check --aot --only test/c/essential-aot.txt` | exit 0; compiled against interpreted: 8 both pass, 2 neither, 0 one-sided; `results.edn` byte-equal to the base's; 606 s of CPU against the base's 638 (its time is Go's builds) |
+| `bin/ci dg --essential`, `bin/repr-c check --c23`, `bin/ci repl-session`, `bin/ci c2j-check` | exit 0 each (94 s, 83 s, 19 s, 45 s) |
+| `bin/ci judge-test` (as the gate runs it, without `ARBACE_PATH_FIRST`) | exit 1 with 21 failing assertions, **the same 21 on the base**: stage 0's embedded ci (the seed's) against the tree's tests, not this change (PB.5) |
+
+### PB.3 Speed
+
+C, in one process, each of the essential check's 44 programs read and checked, then linked (`.tmp/bench.ae`): the old build with a
+fresh library per program (musl's units checked and built with each program, as a short process does) against the prebuilt
+runtime, warm:
+
+| | read and check the program | link and build | per program |
+|---|---:|---:|---:|
+| before (`CI_PREBUILT=0`) | 102.2 s | 423.5 s | 11.9 s |
+| after | 95.4 s | 12.8 s | 2.5 s |
+
+The runtime's part goes from 9.6 s to 0.29 s a program (33 times); a program's build from 11.9 s to 2.5 s, what is left its own
+read and check. A one-file `printf` program by `bin/ci nodes`: 32.8 s before, 15.5 s after, of which 13 s is the process's start
+on the evaluated sources. The essential check end to end (15 processes, the runs included): 954 s of CPU and 7m44s before,
+526 s and 5m30s after.
+
+C++, CX8's lowered programs (cpp-cx8's `.tmp/cppi-check/files`, its `.tmp/cppi/runtime/ci`), by `arbace.cpp.run`'s build adapted
+to the prebuilt runtime on a scratch branch `ci-prebuilt-cpp` (cpp-cx8 with this branch merged: `build-linked-prebuilt`, its
+runtime and overrides libraries prebuilt, the C++ units cut at the link by `:prune`): ten programs' ci build, one process each
+mode (`.tmp/cppbench.ae` there):
+
+| program | read and check (old) | build, old | read and check (new) | build, new, cache cold | build, new, cache warm |
+|---|---:|---:|---:|---:|---:|
+| `libstdcxx 27_io/basic_istream/ignore/wchar_t/94749.cc` | 44.4 s | 284.8 s | 40.2 s | 280.5 s | 24.8 s |
+| `libstdcxx 27_io/basic_ostringstream/str/wchar_t/2.cc` | 7.0 s | 75.8 s | 7.0 s | 18.9 s | 24.5 s |
+| `libstdcxx 27_io/basic_ostream/ends/char/1.cc` | 7.8 s | 76.5 s | 8.8 s | 21.3 s | 23.8 s |
+| `libstdcxx 25_algorithms/lower_bound/partitioned.cc` | 23.9 s | 26.1 s | 25.1 s | 14.1 s | 12.0 s |
+| `libstdcxx 22_locale/money_put/put/wchar_t/5.cc` | 12.8 s | 76.7 s | 14.6 s | 23.5 s | 20.8 s |
+| `libstdcxx 26_numerics/random/.../inequal.cc` | 1.9 s | 18.2 s | 2.4 s | 5.4 s | 5.7 s |
+| `libstdcxx 25_algorithms/is_partitioned/2.cc` | 2.8 s | 18.0 s | 3.3 s | 5.4 s | 5.1 s |
+| `libstdcxx 20_util/function/3.cc` | 7.5 s | 20.4 s | 8.4 s | 11.6 s | 5.6 s |
+| `gxx-dg-run DRs/dr2137-1.C` | 1.1 s | 18.1 s | 1.2 s | 5.6 s | 4.7 s |
+| `gxx-dg-run abi/empty24.C` | 1.1 s | 18.2 s | 1.1 s | 5.0 s | 4.8 s |
+| **sum** | | **633 s** | | **390 s** | **132 s** |
+
+Each mode one process over the ten (`GOMEMLIMIT` 6 GiB), so the old build's runtime units are checked once, by the first program
+(285 s), and built again by every program (18-77 s each); the cold prebuilt run makes the fragments of what the first program
+links (280 s, the same checks) and links the others in 5-24 s; warm (a new process, the fragments read from disk), the first
+program's build is 25 s instead of 285 s. Every node program of the ten run by tools/cirun, old against new (warm): the same
+status (0) and standard output, though the node texts differ (the link's prune cuts by the items' references, the old one by the
+forms' names). What is left of the C++ build is the link itself (the node programs are 1.5-7 MB of text).
+
+### PB.4 Proposals (CS270-CS273)
+
+- **CS270 The prebuilt runtime as ci's default.** Options: (a) as built: every ci build links the cached fragments, `CI_PREBUILT=0`
+  the old build, `CI_LINK_CHECK=1` the comparison; (b) opt-in until the full check (`bin/ci check`, all corpora) has run with
+  `CI_LINK_CHECK=1` once. *Recommended: (a)*, with the full comparison run in the next heavy window (C's full checks).
+- **CS271 The link check in the gate.** Options: (a) `c-check-essential` runs with `CI_LINK_CHECK=1` (the old build again in the same process: the
+  essential check took 1,059 s of CPU so, cold, against 954 s before and 526 s warm without it), so a builder change that breaks the equality fails the gate; (b) a separate light step on a few
+  programs; (c) none. *Recommended: (a)*.
+- **CS272 The cache's place and pruning.** The cache is per checkout (`.tmp/ci-runtime/`, 1.9 MB for the essential programs' 172 units;
+  all of musl's 1,335 by extrapolation about 15 MB); each key a directory, old keys left. Options: (a) `bin/ci runtime build` removes the other keys' directories;
+  (b) shared by the worktrees (the main checkout's, as the gate's executables), the key making it safe; (c) as built. *Recommended:
+  (a)*, (b) when C's checks run in many worktrees.
+- **CS273 C++ on the prebuilt runtime.** arbace.cpp.run's build adapted (`ci-prebuilt-cpp`, not for merge as is): the libraries made
+  prebuilt, the constructors from the fragments, `prune` replaced by the link's `:prune`, which cuts by the items' actual references
+  rather than every name the forms mention. Options: (a) take it into `cpp-cx8`'s line (CX9) after this branch merges, its run
+  check's records compared (the pruned programs differ from the old ones' node text, not by design in their runs); (b) keep cppi's
+  form-level prune and cache only musl. *Recommended: (a)*. What remains for C++ is the link itself (5-25 s for node programs of
+  1.5-7 MB: the placeholders' replacement and the text): next, a fragment's replacement table per item instead of a regex, and cf2g
+  translating a unit's functions once.
+
+### Decided (the user, 2026-11-03): CS270-CS273, all as recommended
+
+- **CS270 (a)**: the prebuilt runtime is ci's default (as built); the full check with `CI_LINK_CHECK=1` in the next heavy window.
+- **CS271 (a)**: the gate's `c-check-essential` runs with `CI_LINK_CHECK=1` (`test/gate/steps.edn`).
+- **CS272 (a)**: `bin/ci runtime build` and `bin/ci runtime prune` remove musl's fragments of the other keys; `bin/gate --prune`
+  (`bin/lib/gate-run.bash`'s `gate_prune`, also at the end of every `--full`) trims the checkout's `.tmp/ci-runtime/` as the
+  executables' directories: per library the newest 3 directories kept, an older one removed when a day old.
+- **CS273 (a)**: the C++ adaptation (`ci-prebuilt-cpp`'s `build-linked-prebuilt`) goes to CX8's line, not this branch.
+
+### PB.5 Open
+
+- `bin/ci judge-test` without `ARBACE_PATH_FIRST` failed 21 assertions on `backlog` already (the seed's embedded ci); the gate's
+  `c-judge-test` runs it with the env trio (main since `f9c7e7cd`'s line), as PB.6 does.
+- The full `bin/ci check` and `check --aot` with `CI_LINK_CHECK=1` (all 15 corpora) not run: the heavy tier's.
+- Commits on `ci-prebuilt`: the builder's fragments and link; the runtime cache and its callers; this section. Rebased onto
+  main `f9c7e7cd` (with `mac/178-ci-gaps`): its `obj-align` taken in the fragments (`obj-size` takes the entry, `unit-fragment`'s
+  `:align`) and its `compound-lit-object` with `add-init!`; the Makefile's `.PHONY` line merged.
+
+### PB.6 After the rebase onto main `f9c7e7cd` (with `mac/178-ci-gaps`)
+
+With the checkout's ci (`ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`): `bin/ci check --only test/c/essential-check.txt`
+with `CI_LINK_CHECK=1` exit 0 (523 s; every program's linked node program equal to the old build's), `check --aot --only
+test/c/essential-aot.txt` exit 0 (415 s), `dg --essential` 0 (85 s), `bin/repr-c check --c23` 0 (70 s), `repl-session` 0 (16 s),
+`c2j-check` 0 (39 s), `judge-test` 0 (596 s); `bin/gate-tests`: 32 tests passed.
+
+
+### PB.7 Review 187's two mediums (the Mac, 2026-11-03)
+
+1. A fragment that cannot be written (a full disk, a directory removed by another process) no longer fails the build: the
+   fragment built in memory serves, with a line `ci runtime: the fragment ... not written (...): built in memory` on the standard
+   error (`96f5a73d`; tried with `CI_RUNTIME` under a plain file). `bin/ci runtime build|prune` removes another key's directory
+   only when unused for a day; each build marks its key's directory used (its mtime), so a stage 0's ci or another worktree's
+   running beside keeps its fragments; `bin/gate --prune`'s rule was already the newest 3 and a day.
+2. The key names the ci that ran, not `ARBACE_PATH_FIRST` alone (`baf77aa3`): RT.load runs a namespace through its compiled
+   loader whenever the executable has one and `ARBACE_NO_AOT` is unset, `ARBACE_PATH_FIRST` or not (stage 0 with
+   `ARBACE_PATH_FIRST=1` alone loads the seed's compiled `arbace.c.build`: `Compiler$AOT/loader` true for it, and the checkout's
+   `runtime.ae`, which the old build lacks, fails to load: no fragments made under a wrong key). Each source of the key is now
+   tagged `compiled` (its embedded copy's digest) or `evaluated` (the checkout's under `ARBACE_PATH_FIRST` or a differing tool
+   source under `arbace/repr/`, else the embedded copy).
