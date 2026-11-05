@@ -2844,3 +2844,7 @@ Each under the heavy lock (`bin/heavy-lock CMD`; `CPPI_THREADS=3`, a process up 
 - Two background waiters started on the same condition (one stopped). `python3` for multi-line edits, as CX10.
 - Scratch in the worktree's `.tmp/`: `cppi-check/`, `cppi-aot/` (the runs' work), `cppi/runtime/` (the lowered runtime and its ci library),
   `ci-musl/`, `run-*.log`, `reap*.txt`.
+
+## Decided (2026-11-05, the user: CP220-CP222)
+
+CP220 (a), prebuilt runtime nodes for ci then the whole corpora (with RES34's per-unit path), and (b) until it lands: samples nightly, the whole corpora at the clean run; CP221 (a): the essential C++ run steps stay in the essential gate; CP222 (a): sample records as built.
