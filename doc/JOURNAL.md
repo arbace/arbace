@@ -298,3 +298,24 @@ On branch `night-fix` (from `b2a4911f`), not merged while `--full` ran on main:
   arrows' `HsProc`, `{-# ANN module #-}`, a quasi-quote in a type: the converter's gaps, not the
   reader's). The declarations' port was also run over the corpus's existing dumps, 1,316 of 1,345
   modules, trees equal: wider than the light check intended for this step.
+
+## 2026-11-05: the front end's trial HF1-HF2 (branch `haskell-hf12`, from `haskell-frontend-survey`)
+
+Done by an agent in one session (09:36 to about 11:00 UTC), light on the host (no gate, no build of stage 0, the host's
+GHC 9.14.1 and main's stage 0 `/root/arbace/target/seed/amd64/arbace`), after the user decided HFS1-HFS9 as
+recommended (doc/haskell/FRONTEND-SURVEY.md, "Decided"). Source: `ghc-9.14.1-src.tar.xz` (SHA-256 `2a83779c...101e77`,
+the corpus's pin), read in place: `compiler/GHC/Rename/*.hs`, `compiler/GHC/Hs/*.hs`, `compiler/Language/Haskell/Syntax/*.hs`,
+`compiler/GHC/Types/{Fixity,Avail,Name/Reader}.hs`; BSD-3 (the Glasgow license, LICENSE.md's entry extended, doc/ARBACE.md).
+
+- HF1: `tools/hsdump/HsRn.hs`, the helper's verbs `rn` (GhcRn reduced to the resolved names, operator trees,
+  binding groups, imports, exports) and `iface` (the libraries' interfaces as forms); `bin/repr-haskell rn-dump`, `iface`.
+  Decision: judge sets (each name at each span once), not the tree's multiset, and the groups' order not at all (it
+  depends on GHC's uniques); the names GHC gives no location (`SyntaxExprRn`) are in the facts with the span `nil`.
+  Alternative considered: dump the whole `HsGroup GhcRn` as forms (a reduction would still be needed to compare;
+  the exact tree would force Arbace's renamer to reproduce every extension field). Instances of package modules are
+  not dumped (GHC's API refuses), types are strings: left to HF3.
+- HF2: `arbace/repr/haskell/rename.ae` (1,397 lines), `bin/repr-haskell rename-check` over `test/haskell/rename-check.txt`:
+  95 modules equal (41 samples in `test/haskell/rename/`, 33 modules of ghc-internal, 21 nofib/spectral programs).
+  Decision: the renamer writes the facts of HF1 (judged by data equality) and does not yet build a renamed tree; HF3's
+  first step is to (survey, "As built: HF1-HF2", Proposed 1).
+- Wider sweep and the gaps: see the survey's "As built".
