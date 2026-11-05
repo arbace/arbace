@@ -180,7 +180,8 @@ pyrec_verify_dump() {
 }
 
 # record mode: what the verb dumped, staged per corpus (PYREC_STAGE), packed by pyrec_flush at its end
-PYREC_STAGE=$root/.tmp/repr-python/records-stage.$$
+# (bin/repr-python records record runs several verbs into one stage, PYREC_DEFER_FLUSH set, and packs once at its end)
+PYREC_STAGE=${PYREC_STAGE:-$root/.tmp/repr-python/records-stage.$$}
 pyrec_stage() {
   local kind=$1 corpus=$2 base=$3 list=$4 out=$5 tsv=$6 ext s=$PYREC_STAGE/$1-$2.$RANDOM; ext=$(pyrec_ext "$kind")
   mkdir -p "$s/m/$kind"
@@ -218,7 +219,7 @@ pyrec_src() {
 
 pyrec_flush() {
   [ "$PYREC_MODE" != verify ] || { pyrec_verdict; return $?; }
-  [ "$PYREC_MODE" = record ] && [ -d "$PYREC_STAGE" ] || return 0
+  [ "$PYREC_MODE" = record ] && [ -d "$PYREC_STAGE" ] && [ -z "${PYREC_DEFER_FLUSH:-}" ] || return 0
   local corpus pin man name st c s d
   for corpus in $(cat "$PYREC_STAGE"/*/corpus | LC_ALL=C sort -u); do
     pin=$(pyrec_pin "$corpus"); man=$(oracle_manifest "$pin"); name=python-pydump-$corpus; st=$PYREC_STAGE/pack-$corpus
