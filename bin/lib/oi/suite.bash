@@ -79,19 +79,22 @@ suite_ref_one() {
   suite_stage "$id" "$base" "$units" "$d"
   local names; names=$(suite_names "$units")
   local line="" c
+  mkdir -p "$d/run-byte" "$d/run-opt"; find "$d" -maxdepth 1 -type f -exec cp {} "$d/run-byte/" \; -exec cp {} "$d/run-opt/" \;
   for c in ocamlc ocamlopt; do
     local ext=byte cst=0 st=0 extra
     [ $c = ocamlopt ] && ext=opt
-    extra=$(inc_ref $c "$incs" "$d")
-    (cd "$d" && $c -w -a $flags $extra $names -o "prog.$ext") > "$d/$c.log" 2>&1 || cst=$?
+    # each compiler's program built and run in a copy of the staged directory (a run's files are not the other's, OT9's fixes)
+    local r=$d/run-$ext
+    extra=$(inc_ref $c "$incs" "$r")
+    (cd "$r" && $c -w -a $flags $extra $names -o "prog.$ext") > "$d/$c.log" 2>&1 || cst=$?
     if [ $cst != 0 ]; then line="$line	compile-error	-	0"; continue; fi
-    (cd "$d" && env $env timeout "$TIMEOUT" "./prog.$ext" $args > "$d/$ext.out" 2>&1) || st=$?
+    (cd "$r" && env $env timeout "$TIMEOUT" "./prog.$ext" $args > "$d/$ext.out" 2>&1) || st=$?
     line="$line	$st	$(sha256sum < "$d/$ext.out" | cut -d' ' -f1)	$(wc -c < "$d/$ext.out")"
   done
   local same=false last; last=$(echo "$units" | awk '{print $NF}')
   [ -f "$base/${last%.ml}.reference" ] && cmp -s "$d/byte.out" "$base/${last%.ml}.reference" && same=true
   printf '%s%s\t%s\n' "$id" "$line" "$same"
-  rm -rf "$d/optlib" "$d/prog.byte" "$d/prog.opt"
+  rm -rf "$d/run-byte" "$d/run-opt"
 }
 
 cmd_suite_record_ref() {

@@ -17,6 +17,14 @@
   (field ^:public ^boolean writable)
   (field ^:public ^boolean append)
   (field ^:public ^boolean dir)
+  ;; a pipe's end (Unix.pipe, OT9's fourth fix): its Pipe and whether it is the write end; nonblock: O_NONBLOCK (set_nonblock)
+  (field ^:public ^Pipe pipe)
+  (field ^:public ^boolean pipeW)
+  (field ^:public ^boolean nonblock)
+  ;; the other indexes of the table that hold this entry (Unix.dup, dup2): close frees the entry when none remains
+  (field ^:public ^int extra)
+  ;; the path a file was opened by Unix.openfile with (fstat's), or nil
+  (field ^:public ^String path)
 
   (field ^:public ^:static ^:final ^java.util.ArrayList table (java.util.ArrayList.))
 
@@ -120,6 +128,7 @@
     (let [d (Fd/get fd)]
       (cond (or (nil? d) (not (.-readable d))) (long -9)
             (.-dir d) (long -21)
+            (some? (.-pipe d)) (.read (.-pipe d) buf off len (.-nonblock d))
             :else
             (try
               (let [n (if (nil? (.-raf d)) (.read System/in buf off len) (.read (.-raf d) buf off len))]
@@ -130,6 +139,7 @@
   (method ^:public ^:static write ^long [^long fd ^byte/1 buf ^int off ^int len]
     (let [d (Fd/get fd)]
       (cond (or (nil? d) (not (.-writable d))) (long -9)
+            (some? (.-pipe d)) (.write (.-pipe d) buf off len (.-nonblock d))
             :else
             (try
               (if (nil? (.-raf d))
@@ -144,6 +154,7 @@
     (let [d (Fd/get fd)]
       (cond (nil? d) (long -9)
             (.-dir d) (long 0)
+            (some? (.-pipe d)) (long -29)
             (nil? (.-raf d)) (long -29)
             :else
             (try
@@ -164,7 +175,45 @@
         (long -9)
         (do
           (.set table (unchecked-int fd) nil)
-          (if (nil? (.-raf d))
+          (cond
+            (> (.-extra d) 0) (do (set! (.-extra d) (unchecked-dec-int (.-extra d))) (long 0))
+            (some? (.-pipe d)) (do (.closeEnd (.-pipe d) (.-pipeW d)) (long 0))
+            (nil? (.-raf d))
             (do (when (> (.-std d) 1) (try (.flush (Fd/stream d)) (catch IOException e nil))) (long 0))
+            :else
             (try (.close (.-raf d)) (long 0)
-              (catch IOException e (long (unchecked-negate (Fd/errnoOf e)))))))))))
+              (catch IOException e (long (unchecked-negate (Fd/errnoOf e))))))))))
+
+  ;; the lowest free index of the table for d (the C library's rule for open, dup, pipe)
+  (method ^:public ^:static install ^long [^Fd d]
+    (let [^:mutable ^int i 0]
+      (while (and (< i (.size table)) (not (nil? (.get table i)))) (set! i (unchecked-add-int i 1)))
+      (if (== i (.size table)) (.add table d) (.set table i d))
+      (long i)))
+
+  ;; dup2(2): fd's entry also at index to (the entry there before closed)
+  (method ^:public ^:static dup2 ^long [^long fd ^long to]
+    (let [d (Fd/get fd)]
+      (cond (nil? d) (long -9)
+            (or (< to 0) (> to 65535)) (long -9)
+            (== fd to) to
+            :else
+            (do (when (some? (Fd/get to)) (Fd/close to))
+                (while (<= (.size table) (unchecked-int to)) (.add table nil))
+                (set! (.-extra d) (unchecked-inc-int (.-extra d)))
+                (.set table (unchecked-int to) d)
+                to))))
+
+  ;; Unix.pipe: the read end's and the write end's indexes
+  (method ^:public ^:static pipe ^long/1 []
+    (let [p (Pipe.)
+          r (Fd.)
+          w (Fd.)]
+      (set! (.-pipe r) p)
+      (set! (.-readable r) true)
+      (set! (.-pipe w) p)
+      (set! (.-pipeW w) true)
+      (set! (.-writable w) true)
+      (let [ri (Fd/install r)
+            wi (Fd/install w)]
+        (new long/1 [ri wi])))))

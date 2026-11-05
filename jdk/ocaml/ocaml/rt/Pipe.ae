@@ -1,0 +1,64 @@
+;; A pipe of the Unix library (Unix.pipe; doc/ocaml/DEFERRED-TRIAGE.md, "As built: OT9's next three fixes"): the JVM's API has no
+;; descriptors of the OS, so a pipe is a buffer of the runtime, its two ends entries of Fd's table. Its capacity is Linux's 65,536
+;; bytes; a read of an empty pipe waits while a writer remains (Gil/await: the runtime's lock released), then reads at most what is
+;; there, 0 once every writer closed; a write waits for room while a reader remains, EPIPE when none does; a non-blocking end answers
+;; EAGAIN instead of waiting (when nothing moved). Everything runs under the Gil, so the fields need no lock of their own.
+
+(in-ns 'ocaml.rt)
+
+(defclass ^:public ^:final Pipe
+  (field ^:public ^:static ^:final ^int CAP 65536)
+  (field ^:public ^byte/1 buf)
+  (field ^:public ^int start)
+  (field ^:public ^int count)
+  (field ^:public ^int readers)
+  (field ^:public ^int writers)
+
+  (constructor ^:public [this]
+    (set! (.-buf this) (new byte/1 65536))
+    (set! (.-readers this) 1)
+    (set! (.-writers this) 1))
+
+  ;; read(2): the count, 0 at the end, or -errno
+  (method ^:public read ^long [this ^byte/1 b ^int off ^int len ^boolean nonblock]
+    (label :out
+      (while (and (== count 0) (> writers 0))
+        (when nonblock (break :out (long -11)))
+        (Gil/await))
+      (if (or (== count 0) (== len 0))
+        (long 0)
+        (let [n (if (< len count) len count)]
+          (loop [^int i 0]
+            (when (< i n)
+              (aset b (unchecked-add-int off i) (aget buf (unchecked-remainder-int (unchecked-add-int start i) CAP)))
+              (recur (unchecked-inc-int i))))
+          (set! start (unchecked-remainder-int (unchecked-add-int start n) CAP))
+          (set! count (unchecked-subtract-int count n))
+          (Gil/broadcast)
+          (long n)))))
+
+  ;; write(2): the count or -errno; a blocking end writes all of it
+  (method ^:public write ^long [this ^byte/1 b ^int off ^int len ^boolean nonblock]
+    (let [^:mutable ^int done 0]
+      (label :out
+        (while (< done len)
+          (when (== readers 0) (break :out (if (> done 0) (long done) (long -32))))
+          (if (== count CAP)
+            (do (when nonblock (break :out (if (> done 0) (long done) (long -11))))
+                (Gil/await))
+            (let [room (unchecked-subtract-int CAP count)
+                  want (unchecked-subtract-int len done)
+                  n (if (< want room) want room)]
+              (loop [^int i 0]
+                (when (< i n)
+                  (aset buf (unchecked-remainder-int (unchecked-add-int (unchecked-add-int start count) i) CAP) (aget b (unchecked-add-int (unchecked-add-int off done) i)))
+                  (recur (unchecked-inc-int i))))
+              (set! count (unchecked-add-int count n))
+              (set! done (unchecked-add-int done n))
+              (Gil/broadcast))))
+        (long done))))
+
+  ;; one end closed
+  (method ^:public closeEnd ^void [this ^boolean writeEnd]
+    (if writeEnd (set! writers (unchecked-dec-int writers)) (set! readers (unchecked-dec-int readers)))
+    (Gil/broadcast)))
