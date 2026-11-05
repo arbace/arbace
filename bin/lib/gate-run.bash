@@ -85,6 +85,14 @@ gate_gcc_id() {  # the :gcc host's identity: gcc's --version line, its driver's,
     awk '{print $2}' "$root/test/c/host/headers.sha256" 2>"$TMPDIR/gate-gcc.err" | while read -r h; do
       if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64
 }
+gate_scheme_id() {  # gate_scheme_id CMD VERSION-FLAG FILE...: a Scheme reference's identity (SM9: :chez, :chibi): its version line, its
+  # executable's SHA-256 through its links and the FILEs' (Chez's boot files); none when it is not installed
+  local c=$1 v=$2 x f; shift 2
+  x=$(command -v "$c") || { echo none; return; }
+  { "$c" "$v" 2>&1 | head -1
+    sha256sum < "$(readlink -f "$x")" | cut -c1-64
+    for f in "$@"; do if [ -f "$f" ]; then sha256sum < "$f" | cut -c1-64; else echo "missing $f"; fi; done; } | sha256sum | cut -c1-64
+}
 plan_inputs() {  # plan_inputs DIR: DIR/files.sha256, DIR/hosts.edn and DIR/ancestors.txt
   local d=$1 jdk rel
   mkdir -p "$d"
@@ -137,7 +145,12 @@ javac none
     printf ' :go "%s"\n' "$(sha256sum < "${ARBACE_GOROOT:-/root/tamago-go}/VERSION" | cut -c1-64)"
     # :gcc (the user, 2026-11-02; doc/C23-SURVEY.md, "As built: C's full checks in the gate"): the host's gcc, C's reference,
     # by its --version line, the digests of its driver and of cc1, resolved through their links, and of the headers C's checks read; none without gcc
-    printf ' :gcc "%s"}\n' "$(gate_gcc_id)"; } > "$d/hosts.edn"
+    printf ' :gcc "%s"\n' "$(gate_gcc_id)"
+    # :chez, :chibi (SM9, doc/scheme/SCHEME-SURVEY.md, "As built: SM9 (write-ahead)"): Scheme's references run live by repr/scheme's
+    # read check (Chez 10.3.0, apk chez-scheme-10.3.0-r2: its boot files) and si's chibi-tests (Chibi 0.12.0); the other Scheme
+    # steps judge against their recorded runs
+    printf ' :chez "%s"\n' "$(gate_scheme_id "${CHEZ:-chez}" --version /usr/lib/csv10.3.0/ta6le/petite.boot /usr/lib/csv10.3.0/ta6le/scheme.boot /usr/lib/csv10.3.0/ta6le/chez.boot)"
+    printf ' :chibi "%s"}\n' "$(gate_scheme_id "${CHIBI:-chibi-scheme}" -V)"; } > "$d/hosts.edn"
 }
 run_plan() {  # run_plan DIR [--rerun]: the plan into DIR (plan.tsv, plan/), printed; plan_rot (GT8.4): --night N or --rotation subset
   local d=$1; shift
