@@ -1,0 +1,234 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; lambda/tmc.ml (the tail-modulo-cons transformation: Constr, Dps, Choice, choice, traverse, make_dps_variant) and
+;; lambda/lambda.ml's duplicate_function, whose notice follows (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;             Frédéric Bour
+;;             Gabriel Scherer, projet Partout, INRIA Saclay
+;;             Basile Clément, projet Cambium, INRIA Paris
+;;
+;;   Copyright 2020 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.tmc
+  "Tmc.rewrite (doc/ocaml/TYPER.md, T8): the functions marked [@tail_mod_cons] (their Lfunction's attribute :tmc)
+  rewritten with a destination-passing-style variant NAME_dps. Tail-call expectations are not kept (the dump does
+  not print them); an ambiguous constructor's arguments are refused."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.lambda :as l]
+            [arbace.repr.ocaml.typer.simplif :as s]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+(def ^:private placeholder [:Lconst [:int 24029]])   ; Lambda.dummy_constant, 0xBBBB / 2
+
+;; ---------------------------------------------------------------------------------------------
+;; Lambda.duplicate_function: the bound identifiers made fresh
+
+(defn freshen
+  "Lambda's subst with freshen_bound_variables: every identifier the term binds renamed"
+  [lam]
+  (letfn [(go [m l]
+            (let [r (fn [id] (get m id id))
+                  bind (fn [m ids] (reduce (fn [m id] (assoc m id (ty/ident-rename id))) m ids))]
+              (case (l 0)
+                :Lvar [:Lvar (r (l 1))]
+                :Lmutvar [:Lmutvar (r (l 1))]
+                :Lassign [:Lassign (r (l 1)) (go m (l 2))]
+                :Lconst l
+                :Lfunction (let [m' (bind m (map first (l 2)))]
+                             (-> l (assoc 2 (mapv (fn [[id k]] [(m' id) k]) (l 2))) (assoc 4 (go m' (l 4)))))
+                :Llet (let [m' (bind m [(l 3)])] [:Llet (l 1) (l 2) (m' (l 3)) (go m (l 4)) (go m' (l 5))])
+                :Lmutlet (let [m' (bind m [(l 2)])] [:Lmutlet (l 1) (m' (l 2)) (go m (l 3)) (go m' (l 4))])
+                :Lletrec (let [m' (bind m (map first (l 1)))]
+                           [:Lletrec (mapv (fn [[id d]] [(m' id) (go m' d)]) (l 1)) (go m' (l 2))])
+                :Lstaticcatch (let [[n vs] (l 2) m' (bind m (map first vs))]
+                                [:Lstaticcatch (go m (l 1)) [n (mapv (fn [[id k]] [(m' id) k]) vs)] (go m' (l 3))])
+                :Ltrywith (let [m' (bind m [(l 2)])] [:Ltrywith (go m (l 1)) (m' (l 2)) (go m' (l 3))])
+                :Lfor (let [m' (bind m [(l 1)])] [:Lfor (m' (l 1)) (go m (l 2)) (go m (l 3)) (l 4) (go m' (l 5))])
+                (s/shallow-map #(go m %) l))))]
+    (go {} lam)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Destinations and constructors (Constr)
+
+(defn- assign-to-dst [{:keys [var offset]} lam]
+  [:Lprim (l/prim "setfield_ptr(heap-init)_computed") [[:Lvar var] offset lam]])
+
+(defn- block-prim [{:keys [tag-name mutable]}]
+  ;; the makeblock primitive's printed name with the constructor's flag
+  (assoc (l/prim (str/replace-first tag-name #"^(makeblock|makemutable)" (if mutable "makemutable" "makeblock")) :makeblock)
+         :kind :makeblock))
+
+(defn- constr-apply [c t] [:Lprim (block-prim c) (vec (concat (:before c) [t] (:after c)))])
+
+(defn- with-placeholder [c body]
+  (let [blk (constr-apply (assoc c :mutable true) placeholder)
+        v (ty/ident-create "block")]
+    [:Llet :strict "" v blk (body {:var v :offset (l/lconst-int (count (:before c)))})]))
+
+(defn- delay-impure [block-id c body]
+  (let [bind-list (fn [arg-offset lams k]
+                    (let [pairs (map-indexed (fn [i lam]
+                                               (if (#{:Lvar :Lconst} (lam 0))
+                                                 [nil lam]
+                                                 (let [v (ty/ident-create (str "block" block-id "_arg" (+ arg-offset i)))]
+                                                   [[v lam] [:Lvar v]])))
+                                             lams)
+                          b (k (mapv second pairs))]
+                      (reduce (fn [b [binding _]] (if binding [:Llet :strict "" (first binding) (second binding) b] b))
+                              b (reverse pairs))))]
+    (bind-list 0 (:before c)
+               (fn [vbefore]
+                 (bind-list (inc (count (:before c))) (:after c)
+                            (fn [vafter] (body (assoc c :before vbefore :after vafter))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Dps: {:code (fn [delayed tail dst] ...) :use n}
+
+(defn- write-to-dst [dst delayed t] (assign-to-dst dst (reduce (fn [t c] (constr-apply c t)) t delayed)))
+
+(defn- dps-lambda [v] {:code (fn [delayed _ dst] (write-to-dst dst delayed v)) :use 1})
+(def ^:private dps-unit {:code (fn [_ _ _] nil) :use 0})
+(defn- dps-map [f d] {:code (fn [delayed tail dst] (f ((:code d) delayed tail dst))) :use (:use d)})
+(defn- dps-pair [a b] {:code (fn [delayed tail dst] [((:code a) delayed tail dst) ((:code b) delayed tail dst)])
+                       :use (+ (:use a) (:use b))})
+(defn- dps-run [d] (fn [tail dst] ((:code d) [] tail dst)))
+(defn- reify-delay [dps]
+  {:code (fn [delayed tail dst]
+           (if (empty? delayed)
+             (dps tail dst)
+             (let [[x & xs] delayed]
+               (with-placeholder x (fn [nd] [:Lsequence (write-to-dst dst xs [:Lvar (:var nd)]) (dps tail nd)])))))
+   :use 1})
+(defn- ensures-affine [d] (if (<= (:use d) 1) d (reify-delay (dps-run d))))
+(defn- dps-make [dps] (reify-delay dps))
+(defn- delay-constructor [c d]
+  (let [d (ensures-affine d)]
+    {:code (fn [delayed tail dst]
+             (delay-impure (count delayed) c (fn [c] ((:code d) (cons c delayed) tail dst))))
+     :use (:use d)}))
+
+;; ---------------------------------------------------------------------------------------------
+;; Choice: {:dps :direct (fn []) :calls n :benefits bool}
+
+(defn- ch-lambda [v] {:dps (dps-lambda v) :direct (fn [] v) :calls 0 :benefits false})
+(defn- ch-map [f c] {:dps (dps-map f (:dps c)) :direct (fn [] (f ((:direct c)))) :calls (:calls c) :benefits (:benefits c)})
+(defn- ch-pair [a b] {:dps (dps-pair (:dps a) (:dps b)) :direct (fn [] [((:direct a)) ((:direct b))])
+                      :calls (+ (:calls a) (:calls b)) :benefits (or (:benefits a) (:benefits b))})
+(def ^:private ch-unit {:dps dps-unit :direct (fn [] nil) :calls 0 :benefits false})
+(defn- ch-list [cs]
+  (if (empty? cs) (ch-map (fn [_] []) ch-unit)
+      (ch-map (fn [[v vs]] (vec (cons v vs))) (ch-pair (first cs) (ch-list (rest cs))))))
+(defn- ch-option [c] (if c (ch-map identity c) (ch-map (fn [_] nil) ch-unit)))
+(defn- ch-direct [c] ((:direct c)))
+(defn- ch-dps [c tail dst] ((dps-run (:dps c)) tail dst))
+
+;; ---------------------------------------------------------------------------------------------
+;; The transformation
+
+(defn- fattr [f] (get f 5))
+(defn- candidate [d] (when (and (= :Lfunction (d 0)) (:tmc (fattr d))) d))
+
+(defn- declare-binding [ctx [v dfn]]
+  (if-let [f (candidate dfn)]
+    (assoc ctx v {:arity (count (f 2)) :dps-id (ty/ident-create (str (:name v) "_dps")) :kind (f 1)})
+    ctx))
+
+(defn- llets [lk vk bindings body] (reduce (fn [b [v d]] [:Llet lk vk v d b]) body (reverse bindings)))
+
+(declare traverse traverse-let traverse-letrec)
+
+(defn- choice [ctx tail t]
+  (letfn [(ch [tail t]
+            (case (t 0)
+              (:Lvar :Lmutvar :Lconst :Lfunction :Lassign :Lfor :Lwhile) (ch-lambda (traverse ctx t))
+              :Lprim (choice-prim tail (t 1) (t 2))
+              :Lapply (choice-apply tail t)
+              :Lsequence (let [l1 (traverse ctx (t 1))] (ch-map (fn [l2] [:Lsequence l1 l2]) (ch tail (t 2))))
+              :Lifthenelse (let [l1 (traverse ctx (t 1))]
+                             (ch-map (fn [[a b]] [:Lifthenelse l1 a b]) (ch-pair (ch tail (t 2)) (ch tail (t 3)))))
+              :Lmutlet (let [d (traverse ctx (t 3))] (ch-map (fn [b] [:Lmutlet (t 1) (t 2) d b]) (ch tail (t 4))))
+              :Llet (let [[ctx' bs] (traverse-let ctx (t 3) (t 4))]
+                      (ch-map (fn [b] (llets (t 1) (t 2) bs b)) (choice ctx' tail (t 5))))
+              :Lletrec (let [[ctx' bs] (traverse-letrec ctx (t 1))]
+                         (ch-map (fn [b] [:Lletrec bs b]) (choice ctx' tail (t 2))))
+              :Lswitch (let [sw (t 2) l1 (traverse ctx (t 1))]
+                         (ch-map (fn [[[cs bs] f]]
+                                   [:Lswitch l1 (assoc sw :consts (mapv vector (map first (:consts sw)) cs)
+                                                       :blocks (mapv vector (map first (:blocks sw)) bs) :fail f)])
+                                 (ch-pair (ch-pair (ch-list (mapv #(ch tail (second %)) (:consts sw)))
+                                                   (ch-list (mapv #(ch tail (second %)) (:blocks sw))))
+                                          (ch-option (when (:fail sw) (ch tail (:fail sw)))))))
+              :Lstringswitch (let [l1 (traverse ctx (t 1))]
+                               (ch-map (fn [[cs f]] [:Lstringswitch l1 (mapv vector (map first (t 2)) cs) f])
+                                       (ch-pair (ch-list (mapv #(ch tail (second %)) (t 2)))
+                                                (ch-option (when (t 3) (ch tail (t 3)))))))
+              :Lstaticraise (ch-lambda [:Lstaticraise (t 1) (mapv #(traverse ctx %) (t 2))])
+              :Ltrywith (ch-map (fn [[a b]] [:Ltrywith a (t 2) b]) (ch-pair (ch false (t 1)) (ch tail (t 3))))
+              :Lstaticcatch (ch-map (fn [[a b]] [:Lstaticcatch a (t 2) b]) (ch-pair (ch tail (t 1)) (ch tail (t 3))))))
+          (choice-apply [tail t]
+            (let [f (t 1) sp (when (= :Lvar (f 0)) (get ctx (f 1)))
+                  args (when sp (s/find-exact-application (:kind sp) (:arity sp) (t 2)))]
+              (if args
+                {:dps (dps-make (fn [_ dst] [:Lapply [:Lvar (:dps-id sp)] (vec (concat [[:Lvar (:var dst)] (:offset dst)] args))]))
+                 :direct (fn [] t) :calls 1 :benefits true}
+                (ch-lambda t))))
+          (choice-makeblock [prim args]
+            (let [cs (mapv #(ch false %) args)
+                  with (filter #(pos? (:calls %)) cs)]
+              (cond
+                (empty? with) (ch-lambda [:Lprim prim (mapv ch-direct cs)])
+                (> (count with) 1) (let [tc (ch-map (fn [as] [:Lprim prim as]) (ch-list cs))]
+                                     (assoc tc :dps (dps-make (fn [_ _] (throw (ex-info "Tmc: ambiguous constructor arguments" {}))))))
+                :else (let [i (first (keep-indexed (fn [i c] (when (pos? (:calls c)) i)) cs))
+                            c (cs i)
+                            constr {:tag-name (:name prim) :mutable (str/starts-with? (:name prim) "makemutable")
+                                    :before (mapv ch-direct (subvec cs 0 i)) :after (mapv ch-direct (subvec cs (inc i)))}]
+                        {:direct (fn []
+                                   (if-not (:benefits c)
+                                     (constr-apply constr (ch-direct c))
+                                     (with-placeholder constr (fn [nd] [:Lsequence (ch-dps c false nd) [:Lvar (:var nd)]]))))
+                         :benefits false
+                         :dps (delay-constructor constr (:dps c))
+                         :calls (:calls c)}))))
+          (choice-prim [tail prim args]
+            (cond
+              (= :makeblock (:kind prim)) (choice-makeblock prim args)
+              (= "opaque" (:name prim)) (ch-map (fn [a] [:Lprim prim [a]]) (ch tail (first args)))
+              :else (ch-lambda [:Lprim prim (mapv #(traverse ctx %) args)])))]
+    (ch tail t)))
+
+(defn- make-dps-variant [v inner-ctx outer-ctx f]
+  (let [sp (get inner-ctx v)
+        c (choice outer-ctx true (f 4))
+        direct (assoc f 4 (ch-direct c))
+        dvar (ty/ident-create "dst") doff (ty/ident-create "offset")
+        dps (freshen [:Lfunction :curried (vec (concat [[dvar ""] [doff "[int]"]] (f 2))) (f 3)
+                      (ch-dps c true {:var dvar :offset [:Lvar doff]}) (fattr f)])]
+    [[v direct] [(:dps-id sp) dps]]))
+
+(defn- traverse-let [ctx v dfn]
+  (let [inner (declare-binding ctx [v dfn])]
+    [inner (if-let [f (candidate dfn)] (make-dps-variant v inner ctx f) [[v (traverse ctx dfn)]])]))
+
+(defn- traverse-letrec [ctx bindings]
+  (let [ctx (reduce declare-binding ctx bindings)]
+    [ctx (vec (mapcat (fn [[id d]] (if (candidate d) (make-dps-variant id ctx ctx d) [[id (assoc d 4 (traverse ctx (d 4)))]]))
+                      bindings))]))
+
+(defn traverse [ctx t]
+  (case (t 0)
+    :Llet (let [[ctx' bs] (traverse-let ctx (t 3) (t 4))] (llets (t 1) (t 2) bs (traverse ctx' (t 5))))
+    :Lletrec (let [[ctx' bs] (traverse-letrec ctx (t 1))] [:Lletrec bs (traverse ctx' (t 2))])
+    (s/shallow-map #(traverse ctx %) t)))
+
+(defn rewrite [t] (traverse {} t))
+
+(alter-var-root #'s/*tmc-rewrite* (constantly rewrite))
