@@ -295,6 +295,71 @@
               qs' (first (specialize-row h qs))]
           (boolean (and qs' (satisfiable (mapcat #(specialize-row h %) pss) qs'))))))))
 
+;; ---------------------------------------------------------------------------------------------
+;; Counter-examples (Parmatch.exhaust): the witnesses of non-exhaustiveness, or-patterns at the choice points
+
+(defn- full-match
+  "Parmatch.full_match false: the heads (omega-patterns) cover their type's signature, syntactically (GADT
+  constructors that cannot have the matched type included: Typecore's check of the witnesses filters them)"
+  [hs]
+  (let [d (:desc (first hs))]
+    (case (d 0)
+      (:Tpat_tuple :Tpat_record :Tpat_lazy) true
+      :Tpat_construct (let [all (type-constructors (d 1))] (boolean (and all (= (count all) (count hs)))))
+      :Tpat_constant (and (= :char ((d 1) 0)) (= 256 (count hs)))
+      :Tpat_variant (variant-full-match false hs)
+      false)))
+
+(defn- orify-many
+  "Parmatch.orify_many: the patterns as one left-nested or-pattern"
+  [ps]
+  (reduce (fn [a p] {:desc [:Tpat_or a p] :type (:type p)}) ps))
+
+(defn- build-other
+  "Parmatch.build_other: a pattern matching values the heads do not: the missing constructors of a variant type
+  (Parmatch.pat_of_constrs); for the other heads (constants, arrays, variants, extensions) a wildcard, which
+  Typecore's check accepts as it accepts the constant or the extension constructor build_other makes"
+  [hs]
+  (let [d (:desc (first hs))]
+    (if (and (= :Tpat_construct (d 0)) (type-constructors (d 1)))
+      (orify-many (map (fn [c] {:desc [:Tpat_construct c (omegas (:arity c))] :type (:type (first hs))})
+                       (complete-constrs (d 1) (map #((:desc %) 1) hs))))
+      omega)))
+
+(declare exhaust*)
+
+(defn- specialize-and-exhaust [pss n]
+  (let [pss (expand-or-rows pss)
+        hs (map full-omega (heads-of pss))
+        default (keep (fn [row] (when (= :Tpat_any ((:desc (strip (first row))) 0)) (rest row))) pss)]
+    (if (empty? hs)
+      (map #(cons omega %) (exhaust* default (dec n)))
+      (concat
+       (mapcat (fn [h]
+                 (let [k (head-arity (first (deconstruct h)))]
+                   (map #(set-args h %) (exhaust* (mapcat #(specialize-row h %) pss) (+ k (dec n))))))
+               hs)
+       (lazy-seq
+        (when-not (full-match hs)
+          (let [p (build-other hs)] (map #(cons p %) (exhaust* default (dec n))))))))))
+
+(defn- exhaust* [pss n]
+  (let [pss (map seq pss)]
+    (cond
+      (empty? pss) [(omegas n)]
+      (nil? (first pss)) []
+      (nil? (next pss)) (let [[p & ps] (first pss)]
+                          ;; exhaust_single_row
+                          (concat (map #(cons p %) (exhaust* [ps] (dec n)))
+                                  (lazy-seq (map #(concat % (omegas (dec n))) (specialize-and-exhaust [[p]] 1)))))
+      :else (specialize-and-exhaust pss n))))
+
+(defn exhaust
+  "Parmatch.exhaust None pss 1: a lazy sequence of the witnesses (patterns) no row of pss (rows of one pattern)
+  matches"
+  [pss]
+  (map first (exhaust* pss 1)))
+
 (defn le-pat
   "Parmatch.le_pat: p is more general than q"
   [p q]

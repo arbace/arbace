@@ -434,11 +434,92 @@
       (when (seq exns) (pm/pressure-variants exns)))
     (run! finalize-variants! pats)))
 
+(defn- cex-fail [] (throw (ex-info "counter-example" {:unify :counter-example})))
+
+(defn- cex-unify [t1 t2]
+  (binding [ty/*gadt-equation* add-equation] (ty/unify t1 t2)))
+
+(defn- check-cex
+  "Typecore.check_counter_example_pat in Backtrack_or mode without explosion: the witness p at type t, then (k);
+  an ill-typed choice throws, its changes to the types and to the equations undone by the enclosing alternative"
+  [p t k]
+  (let [d (:desc p)]
+    (case (d 0)
+      (:Tpat_any :Tpat_var) (k)
+      :Tpat_alias (check-cex (d 1) t k)
+      :Tpat_constant (do (cex-unify (case ((d 1) 0) :int (ty/type-int) :char (ty/type-char) :string (ty/type-string)
+                                          :float (ty/type-float) :int32 (ty/type-int32) :int64 (ty/type-int64)
+                                          :nativeint (ty/type-nativeint))
+                                    t)
+                         (k))
+      :Tpat_tuple (let [ts (mapv (fn [_] (ty/newvar)) (d 1))]
+                    (cex-unify (ty/newty [:Ttuple (mapv (fn [[l _] t] [l t]) (d 1) ts)]) t)
+                    ((reduce (fn [k [[_ q] tq]] (fn [] (check-cex q tq k))) k (reverse (map vector (d 1) ts)))))
+      :Tpat_construct (let [c (d 1)
+                            [targs tres] (if (= :Cstr_extension ((:tag c) 0)) (instance-constructor c) (instance-constructor-pattern c))]
+                        (cex-unify tres t)
+                        ((reduce (fn [k [q tq]] (fn [] (check-cex q tq k))) k (reverse (map vector (d 2) targs)))))
+      :Tpat_record (let [l0 (ffirst (d 1))
+                         [res _ args] (instance-label l0)]
+                     (cex-unify res t)
+                     ((reduce (fn [k [l q]] (fn [] (check-cex q (nth args (:pos l)) k))) k (reverse (d 1)))))
+      :Tpat_array (let [te (ty/newvar)]
+                    (cex-unify (ty/type-array te) t)
+                    ((reduce (fn [k q] (fn [] (check-cex q te k))) k (reverse (d 1)))))
+      :Tpat_lazy (let [tl (ty/newvar)]
+                   (cex-unify (ty/tconstr ty/path-lazy-t [tl]) t)
+                   (check-cex (d 1) tl k))
+      :Tpat_or (let [alts (letfn [(flat [p] (if (= :Tpat_or ((:desc p) 0)) (concat (flat ((:desc p) 1)) (flat ((:desc p) 2))) [p]))]
+                            (flat p))]
+                 ;; find_valid_alternative: each branch with the rest of the witness, the first that types wins
+                 (or (some (fn [alt]
+                             (let [n (count @*equations*) r (atom nil)]
+                               (if (ty/try-unify (reset! r (check-cex alt t k)))
+                                 @r
+                                 (do (undo-equations! (drop n @*equations*))
+                                     (swap! *equations* #(vec (take n %)))
+                                     nil))))
+                           alts)
+                     (cex-fail)))
+      ;; polymorphic variants and the rest: accepted as they are
+      (k))))
+
+(defn- counter-example?
+  "Typecore.partial_pred: does the witness p type at the scrutinee's type t (every change undone after)"
+  [p t]
+  (let [ok (atom false) eqs (atom [])]
+    (binding [*equations* eqs]
+      (try
+        (ty/try-unify (check-cex p t (fn [] (reset! ok true)))
+                      (throw (ex-info "undo" {:unify :undo})))
+        (finally (undo-equations! @eqs))))
+    @ok))
+
+(defn- gadt-rows? [rows]
+  (letfn [(go [p] (let [d (:desc p)]
+                    (case (d 0)
+                      :Tpat_construct (or (some? (:res (d 1))) (some go (d 2)))
+                      (:Tpat_alias :Tpat_lazy) (go (d 1))
+                      :Tpat_or (or (go (d 1)) (go (d 2)))
+                      :Tpat_tuple (some go (map second (d 1)))
+                      :Tpat_record (some go (map second (d 1)))
+                      :Tpat_array (some go (d 1))
+                      :Tpat_variant (when (d 2) (go (d 2)))
+                      false)))]
+    (boolean (some #(go (first %)) rows))))
+
 (defn partiality
-  "Parmatch.check_partial: :total when the unguarded value patterns are exhaustive"
-  [cases]
+  "Parmatch.check_partial: :total when the unguarded value patterns are exhaustive; with the scrutinee's type t and
+  GADT constructors among the patterns, Parmatch.exhaust's counter-examples each checked by Typecore's partial_pred
+  (do_check_partial), the match total when none types"
+  [cases & [t]]
   (let [rows (keep (fn [c] (when-not (:guard c) (when-let [p (split-exn (:lhs c))] [p]))) cases)]
-    (if (pm/satisfiable rows [pm/omega]) :partial :total)))
+    (cond
+      (not (pm/satisfiable rows [pm/omega])) :total
+      (and t (seq rows) (gadt-rows? rows))
+      (let [rows (pm/get-mins pm/le-pats rows)]
+        (if (some #(counter-example? % t) (pm/exhaust rows)) :partial :total))
+      :else :partial)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
@@ -677,7 +758,7 @@
                     (ret [:Texp_apply f args] t))
       :Pexp_match (let [arg (type-exp env (d 1))
                         cases (type-cases env (:type arg) expected (d 2) true)]
-                    (mkexp [:Texp_match arg cases (partiality cases)] expected loc))
+                    (mkexp [:Texp_match arg cases (partiality cases (:type arg))] expected loc))
       :Pexp_try (let [body (type-expect env (d 1) expected)
                       cases (type-cases env (ty/type-exn) expected (d 2) false)]
                   (mkexp [:Texp_try body cases] expected loc))
@@ -891,7 +972,7 @@
                                  (unify! (annot-type env c) expected "function"))
                              [targ tres] (split-arrow expected [:Nolabel])
                              cases (type-cases env targ tres (sbody 1) false)]
-                         [[] [:cases cases (partiality cases) (name-pattern "param" (map :lhs cases)) (get sbody 2)] expected]))
+                         [[] [:cases cases (partiality cases targ) (name-pattern "param" (map :lhs cases)) (get sbody 2)] expected]))
     (let [sp (first sparams) pd (:pparam_desc sp)]
       (if (= :Pparam_newtype (pd 0))
         (let [[params body t] (type-newtype env (:txt (pd 1)) (fn [env'] (let [r (type-function env' (rest sparams) sbody (ty/newvar))] [r (r 2)])))]
@@ -913,7 +994,7 @@
             [params body _] (try (type-function env' (rest sparams) sbody tret) (finally (undo-equations! @eqs)))
             param {:kind (if dflt [:opt p dflt] [:pat p]) :label l
                    :param (if dflt (ty/ident-create "*opt*") (name-pattern "param" [p]))
-                   :partial (partiality [{:lhs p}])}]
+                   :partial (partiality [{:lhs p}] (:type p))}]
         [(vec (cons param params)) body expected])))))
 
 (defn type-newtype
