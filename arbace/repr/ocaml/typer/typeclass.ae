@@ -125,7 +125,8 @@
     (let [t (ty/expand-head t) d (ty/desc t)]
       (case (d 0)
         :Tvar (do (ty/link! t (ty/newty2 (ty/level t) [:Tnil])) true)
-        :Tfield (if (= (d 1) dummy-method) false (recur (d 4)))
+        ;; an inherited class's dummy method, hidden (absent), does not keep the object open
+        :Tfield (if (and (= (d 1) dummy-method) (not= :absent (ty/field-kind-repr (d 2)))) false (recur (d 4)))
         :Tnil true))))
 
 (defn public-methods
@@ -534,6 +535,12 @@
       :Pcl_constraint (approx-declaration (d 1))
       (ty/newvar))))
 
+(defn- approx-description [scty]
+  (let [d (:pcty_desc scty)]
+    (if (= :Pcty_arrow (d 0))
+      (ty/newty [:Tarrow (d 1) (if (ty/is-optional (d 1)) (ty/type-option (ty/newvar)) (ty/newvar)) (approx-description (d 3))])
+      (ty/newvar))))
+
 (defn- temp-abbrev [arity]
   (let [params (vec (repeatedly arity ty/newvar))]
     [params (ty/newty [:Tobject (ty/newvar) nil])]))
@@ -547,7 +554,7 @@
 (defn class-declarations
   "Typeclass.class_declarations: [[class-info...] env'], a class-info {:id :name :decl :obj-id :obj-abbr :expr
   :pub-meths :virt}; the environment binds each class, its type and its #-type"
-  [env scls]
+  [env scls & [description]]
   (let [cls (mapv (fn [scl] (let [n (:txt (:pci_name scl))] [scl n (ty/ident-create n) (ty/ident-create n) (ty/ident-create n)])) scls)
         [res env]
         (ty/with-local-level
@@ -556,7 +563,7 @@
                             (let [arity (count (:pci_params scl))
                                   [obj-params obj-ty] (temp-abbrev arity)
                                   [cl-params cl-ty] (temp-abbrev arity)
-                                  constr-type (ty/with-local-level (approx-declaration (:pci_expr scl)))]
+                                  constr-type (ty/with-local-level (if description (approx-description (:pci_expr scl)) (approx-declaration (:pci_expr scl))))]
                               (env/add-decl! [:Pident obj-id] {:path [:Pident obj-id] :params obj-params :kind [:abstract] :manifest obj-ty
                                                                :arity arity :variance (repeat :inv)})
                               {:scl scl :name n :id id :ty-id ty-id :obj-id obj-id :obj-params obj-params :obj-ty obj-ty
@@ -577,7 +584,10 @@
                               (ty/with-local-level
                                 (let [params (mapv (fn [[sty _]] (type-param vars sty)) (:pci_params scl))
                                       n (swap! class-num inc)
-                                      e (binding [*class-vars* vars env/*shared-tyvars* vars] (class-expr (str n) env1 env1 (:pci_virt scl) (:pci_expr scl)))]
+                                      e (binding [*class-vars* vars env/*shared-tyvars* vars]
+                                          (if description
+                                            {:type (class-type env1 (:pci_expr scl))}
+                                            (class-expr (str n) env1 env1 (:pci_virt scl) (:pci_expr scl))))]
                                   (complete-class-signature! (signature-of-class-type (:type e)))
                                   [params e]))
                               typ (:type cl-expr)
