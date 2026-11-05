@@ -370,3 +370,7 @@ the essential gate, all in `--full`. **Recommended: (b)**, with P7.
 ## Decided (2026-11-05, the user)
 
 P1-P7, each as recommended: LLVM forms as the output; the native tree as input now, C++ forms at G6; SysV's classification in G2; nounwind with G2; the headers in dependency order; clang's code (Apache-2.0 with the LLVM exception) ported for templates and the ABI classification only, recorded in LICENSE.md and doc/ARBACE.md; codegen-check essential once C++ has its row.
+
+## Decided (2026-11-05, the user: P8-P10)
+
+P8 (a): G2's remainder with G3; P9 (b): at G3's start, the ABI code compared with llvm-project 23.1.4 (in the main checkout's .tmp/llvm/) and the modelled parts ported, recorded in LICENSE.md, with the template instantiator's port; P10 (b): about 20 samples in the essential gate, all in --full, once C++'s REAP row applies.
