@@ -41,7 +41,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value phase-debug* md-str global-opts md-ops md-int-op? md-int-val)
+(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value phase-debug* md-str global-opts md-ops md-int-op? md-int-val alloc-bytes)
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
@@ -395,7 +395,13 @@
         (when-let [k (and (string? v) (re-matches #"[0-9]+" v) (Long/parseLong v))]
           (when-not (and (pos? k) (zero? (bit-and k (dec k)))) (verr :parser/attr-value "stack alignment is not a power of two" {:at [:attr-val n]})))
         "align"
-        (when (and (integer? v) (pos? v) (not (zero? (bit-and (long v) (dec (long v)))))) (verr :parser/align "alignment is not a power of two" {:at [:attr-val-of n (str v)]}))
+        (do (when (and (integer? v) (pos? v) (not (zero? (bit-and (long v) (dec (long v)))))) (verr :parser/align "alignment is not a power of two" {:at [:attr-val-of n (str v)]}))
+            (when (and (integer? v) (> v 4294967296)) (verr :parser/align "huge alignments are not supported yet" {:at [:attr-val-of n (str v)]})))
+        "allocsize"
+        (let [ns (re-seq #"[0-9]+" (str v))]
+          (when (and (= 2 (count ns)) (= (first ns) (second ns)))
+            (verr :parser/attr-value "'allocsize' indices can't refer to the same parameter"
+                  {:at [:str (fn [toks] (let [i (first (keep-indexed (fn [i t] (when (= (:t t) "allocsize") i)) toks))] (when i (+ i 4))))]})))
         "initializes"
         (let [nums (when (string? v) (mapv #(Long/parseLong %) (re-seq #"-?[0-9]+" v)))
               prs (when nums (partition 2 nums))]
@@ -527,9 +533,35 @@
         (doseq [n ["byval" "byref" "inalloca" "preallocated"]]
           (when-let [a (attr-of attrs n)]
             (when (and (seq? a) (not (sized? (norm-type (second a)))))
-              (verr :verifier/attr-type (str "Attribute '" n "' does not support unsized types!")))))))))
+              (verr :verifier/attr-type (str "Attribute '" n "' does not support unsized types!")))
+            (when (and (= n "byval") (seq? a) (>= (biginteger (alloc-bytes (norm-type (second a)))) (.shiftLeft java.math.BigInteger/ONE 32)))
+              (verr :verifier/attr-type "huge 'byval' arguments are unsupported"))))))))
 
 (defn- fn-has [attrs n] (has-attr? attrs n))
+
+(defn- check-fn-attr-pairs
+  "verifyFunctionAttrs' later pairs: sanitize_realtime, the SME states, target-features."
+  [attrs culprit]
+  (let [has #(fn-has attrs %) shas #(some? (str-attr attrs %))]
+    (when (and (has "sanitize_realtime") (has "sanitize_realtime_blocking"))
+      (verr :verifier/attr-pair "Attributes 'sanitize_realtime and sanitize_realtime_blocking' are incompatible!" culprit))
+    (when (and (shas "aarch64_pstate_sm_enabled") (shas "aarch64_pstate_sm_compatible"))
+      (verr :verifier/attr-pair "Attributes 'aarch64_pstate_sm_enabled and aarch64_pstate_sm_compatible' are incompatible!" culprit))
+    (when (> (count (filter shas ["aarch64_new_za" "aarch64_in_za" "aarch64_inout_za" "aarch64_out_za" "aarch64_preserves_za" "aarch64_za_state_agnostic"])) 1)
+      (verr :verifier/attr-pair "Attributes 'aarch64_new_za', 'aarch64_in_za', 'aarch64_out_za', 'aarch64_inout_za', 'aarch64_preserves_za' and 'aarch64_za_state_agnostic' are mutually exclusive" culprit))
+    (when (> (count (filter shas ["aarch64_new_zt0" "aarch64_in_zt0" "aarch64_inout_zt0" "aarch64_out_zt0" "aarch64_preserves_zt0" "aarch64_za_state_agnostic"])) 1)
+      (verr :verifier/attr-pair "Attributes 'aarch64_new_zt0', 'aarch64_in_zt0', 'aarch64_out_zt0', 'aarch64_inout_zt0', 'aarch64_preserves_zt0' and 'aarch64_za_state_agnostic' are mutually exclusive" culprit))))
+
+(defn- check-target-features
+  "verifyFunctionAttrs' target-features: comma-separated, each flag with + or -."
+  [attrs culprit]
+  (when-let [a (str-attr attrs "target-features")]
+    (let [v (or (second a) "")]
+      (when (seq v)
+        (doseq [fl (str/split v #"," -1)]
+          (if (empty? fl)
+            (.add *errs* (ex-info "target-features attribute should not contain an empty string" {:llvm/verify :verifier/attr-value :ctx *ctx* :culprits [:none] :opts nil}))
+            (when-not (#{\+ \-} (first fl)) (verr :verifier/attr-value (str "target feature '" fl "' must start with a '+' or '-'") culprit))))))))
 
 (defn- vfabi-ok?
   "VFABI::tryDemangleForVFABI's grammar: _ZGV<isa><mask><vlen><parameters>_<scalar name>[(<vector name>)], one parameter
@@ -553,6 +585,7 @@
           (.add *errs* (ex-info (str "invalid value for '" k "' attribute: " (second a)) {:llvm/verify :verifier/attr-value :ctx *ctx* :culprits [:none] :opts nil})))))
     (doseq [a attrs :let [n (aname a)] :when (and n (not (vector? a)) (not-on-fn? n))]
       (verr :verifier/attr-placement (str "Attribute '" (attr-str a) "' does not apply to functions!") (if call? :inst :fn)))
+    (when (and call? (has "denormal_fpenv")) (verr :verifier/attr-misc "denormal_fpenv attribute may not apply to call sites" :inst))
     (when (and (has "noinline") (has "alwaysinline")) (verr :verifier/attr-pair "Attributes 'noinline and alwaysinline' are incompatible!"))
     (when (has "optnone")
       (when-not (has "noinline") (verr :verifier/attr-pair "Attribute 'optnone' requires 'noinline'!"))
@@ -561,6 +594,7 @@
       (when (has "optdebug") (verr :verifier/attr-pair "Attributes 'optdebug and optnone' are incompatible!")))
     (when (and (has "optdebug") (has "optsize")) (verr :verifier/attr-pair "Attributes 'optsize and optdebug' are incompatible!"))
     (when (and (has "optdebug") (has "minsize")) (verr :verifier/attr-pair "Attributes 'minsize and optdebug' are incompatible!"))
+    (check-fn-attr-pairs attrs (if call? :inst :fn))
     (when-let [a (attr-of attrs "allocsize")]
       (let [[e n] (mapv #(Long/parseLong %) (re-seq #"[0-9]+" (str (second a))))]
         (letfn [(chk [k what]
@@ -591,6 +625,7 @@
       (when-not (#{"none" "all" "non-leaf"} (second a)) (verr :verifier/attr-value (str "invalid value for 'sign-return-address' attribute: " (second a)))))
     (when-let [a (str-attr attrs "branch-target-enforcement")]
       (when-not (#{"" "true" "false"} (or (second a) "")) (verr :verifier/attr-value (str "invalid value for 'branch-target-enforcement' attribute: " (second a)))))
+    (check-target-features attrs (if call? :inst :fn))
     (when-let [a (attr-of attrs "allockind")]
       (let [ws (set (map str/trim (str/split (str/replace (str (second a)) "\"" "") #",")))
             k (count (filter ws ["alloc" "realloc" "free"]))]
@@ -653,7 +688,7 @@
       (verr :parser/align "alignment is not a power of two" {:at [:attr-val-of "align" (str a)]}))
     (when (> (long a) 4294967296) (verr :parser/align "huge alignments are not supported yet" {:at [:attr-val-of "align" (str a)]}))))
 
-(declare use-value check-di-parse node-of di-kind callee-of phase-parser* check-uselistorder fp-class-compatible? resolve-type gep-indexed-type sized? token-like?)
+(declare use-value check-di-parse node-of di-kind callee-of phase-parser* check-uselistorder fp-class-compatible? resolve-type gep-indexed-type sized? token-like? check-fn-attr-pairs check-target-features alloc-bytes)
 
 (defn- note-md! [x]
   (letfn [(walk [y] (cond (md-ref? y) (.add *mrefs* y)
@@ -2063,16 +2098,36 @@
           (verr :verifier/md-misc "!amdgpu.expected.active.lanes operand must be an i32 constant" :inst [:mdv x]))))))
 
 (defn- check-function-md
-  "A function's metadata attachments (visitFunction): !prof."
-  [md]
-  (when-let [x (get md '!prof)]
-    (when-let [ops (md-ops x)]
-      (when (< (count ops) 1) (verr :verifier/md-prof "!prof annotations should have at least 1 operand" [:mdv x]))
-      (when-not (md-str (first ops)) (verr :verifier/md-prof "expected string with name of the !prof annotation" [:mdv x]))
-      (when (< (count ops) 2) (verr :verifier/md-prof "!prof annotations should have no less than 2 operands" [:mdv x]))
-      (when-not (#{"function_entry_count" "synthetic_function_entry_count"} (md-str (first ops)))
-        (verr :verifier/md-prof "first operand should be 'function_entry_count' or 'synthetic_function_entry_count'" [:mdv x]))
-      (when-not (md-int-op? (second ops)) (verr :verifier/md-prof "expected integer argument to function_entry_count" [:mdv x])))))
+  "visitFunction's metadata: verifyFunctionMetadata over the attachments (!prof, !kcfi_type; its failure ends it alone),
+  then a declaration's !prof, a definition's single !prof and !kcfi_type."
+  [md decl?]
+  (let [pairs (partition 2 md)]
+    (visiting
+     (doseq [[k x] pairs]
+       (case (str k)
+         "!prof" (when-let [ops (md-ops x)]
+                   (when (< (count ops) 2) (verr :verifier/md-prof "!prof annotations should have no less than 2 operands" [:mdv x]))
+                   (when-not (= "unknown" (md-str (first ops)))
+                     (when (= 'null (first ops)) (verr :verifier/md-prof "first operand should not be null" [:mdv x]))
+                     (when-not (md-str (first ops)) (verr :verifier/md-prof "expected string with name of the !prof annotation" [:mdv x]))
+                     (when-not (#{"function_entry_count" "synthetic_function_entry_count"} (md-str (first ops)))
+                       (verr :verifier/md-prof "first operand should be 'function_entry_count' or 'synthetic_function_entry_count'" [:mdv x]))
+                     (when (= 'null (second ops)) (verr :verifier/md-prof "second operand should not be null" [:mdv x]))
+                     (when-not (md-int-op? (second ops)) (verr :verifier/md-prof "expected integer argument to function_entry_count" [:mdv x]))))
+         "!kcfi_type" (let [ops (md-ops x)]
+                        (when-not (= 1 (count ops)) (verr :verifier/md-misc "!kcfi_type must have exactly one operand" [:mdv x]))
+                        (when (= 'null (first ops)) (verr :verifier/md-misc "!kcfi_type operand must not be null" [:mdv x]))
+                        (when-not (vector? (first ops)) (verr :verifier/md-misc "expected a constant operand for !kcfi_type" [:mdv x]))
+                        (when-not (md-int-op? (first ops)) (verr :verifier/md-misc "expected a constant integer operand for !kcfi_type" [:mdv x]))
+                        (when-not (= 'i32 (norm-type (first (first ops)))) (verr :verifier/md-misc "expected a 32-bit integer constant operand for !kcfi_type" [:mdv x])))
+         nil)))
+    (if decl?
+      (doseq [[k _] pairs] (when (= k '!prof) (verr :verifier/md-prof "function declaration may not have a !prof attachment" :fn)))
+      (let [n (volatile! {})]
+        (doseq [[k x] pairs :when (#{'!prof '!kcfi_type} k)]
+          (vswap! n update k (fnil inc 0))
+          (when (> (long (get @n k)) 1)
+            (verr :verifier/md-misc (str "function must have a single " k " attachment") :fn [:mdv x])))))))
 
 (defn- check-module-flags [forms]
   (let [flags (vec (mapcat #(when (and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.module.flags)) (nth % 2)) forms))
@@ -2115,8 +2170,10 @@
             (when-not (.containsKey ids (md-str rid)) (verr :verifier/md-flags "invalid requirement on flag, flag is not present in module" [:mdv rid])))))))))
 
 (defn- check-errno-tbaa [forms]
-  (doseq [f forms :when (and (= (first f) 'llvm/named-meta) (= (second f) '!llvm.errno.tbaa)) n (nth f 2)]
-    (visiting (check-tbaa-tag n nil))))
+  (doseq [f forms :when (and (= (first f) 'llvm/named-meta) (= (second f) '!llvm.errno.tbaa))]
+    (visiting
+     (when (empty? (nth f 2)) (verr :verifier/md-misc "llvm.errno.tbaa must have at least one operand" [:raw (str (pr/top-str f) "\n\n")]))
+     (doseq [n (nth f 2)] (visiting (check-tbaa-tag n nil))))))
 
 (defn- check-module-ident [forms]
   (doseq [f forms :when (and (= (first f) 'llvm/named-meta) (#{'!llvm.ident '!llvm.commandline} (second f))) n (nth f 2)]
@@ -2644,7 +2701,7 @@
             (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!" [:inst ux]))))
       (check-intrinsic-signature k (:fty (.get *gdefs* k))))
 
-    (check-function-md (apply hash-map (:md o)))))
+    (check-function-md (:md o) (= h 'llvm/declare))))
     (when (= h 'llvm/define)
       (let [blocks (numbered-blocks f)
             g (cfg blocks)
@@ -2903,6 +2960,58 @@
       (verr :verifier/global "Global variable is too large to fit into the address space" :global [:raw (str " " (tstr t))]))
     (check-global-value f o)))
 
+(defn- strip-casts
+  "Value::stripPointerCastsAndAliases over a constant: bitcasts, address space casts and zero getelementptrs left."
+  [v]
+  (loop [v v]
+    (if (and (seq? v) ('#{bitcast addrspacecast} (first v))) (recur (second (strip-flags (rest v)))) v)))
+
+(defn- alias-target [f] (let [a (nth f 3 nil)] (if (vector? a) (second a) a)))
+
+(defn- check-global-alias
+  "Verifier::visitGlobalAlias with visitAliaseeSubExpr: the linkage, the aliasee a global value or a constant expression,
+  pointing to a definition, no cycle, then visitGlobalValue."
+  [forms f]
+  (let [o (global-opts f) l (:linkage o) av (alias-target f)]
+    (when-not (contains? #{nil :external :private :internal :linkonce :linkonce_odr :weak :weak_odr :available_externally} l)
+      (verr :verifier/global "Alias should have private, internal, linkonce, weak, linkonce_odr, weak_odr, external, or available_externally linkage!" :global))
+    (letfn [(sub [seen c]
+              (when (= l :available_externally)
+                (when-not (and (global? c) (= :available_externally (:linkage (global-opts (:form (.get *gdefs* (global-key c)))))))
+                  (verr :verifier/global "available_externally alias must point to available_externally global value" :global)))
+              (if (global? c)
+                (let [d (.get *gdefs* (global-key c)) df (:form d)]
+                  (when (and (not= l :available_externally) df
+                             (or (= 'llvm/declare (first df)) (and (= :global (:kind d)) (nil? (global-init df)))
+                                 (= :available_externally (:linkage (global-opts df)))))
+                    (verr :verifier/global "Alias must point to a definition" :global))
+                  (when (= :alias (:kind d))
+                    (when (contains? seen (global-key c)) (verr :verifier/global "Aliases cannot form a cycle" :global))
+                    (when (#{:weak :linkonce :extern_weak :common} (:linkage (global-opts df)))
+                      (verr :verifier/global "Alias cannot point to an interposable alias" :global))
+                    (sub (conj seen (global-key c)) (alias-target df))))
+                (when (seq? c) (doseq [x (rest c)] (cond (vector? x) (sub seen (second x)) (global? x) (sub seen x))))))]
+      (sub #{(global-key (nth f 1))} av))
+    (check-global-value f o)))
+
+(defn- check-global-ifunc
+  "Verifier::visitGlobalIFunc: visitGlobalValue, its attachments, the linkage, the resolver a function definition
+  returning a pointer."
+  [forms f]
+  (let [o (global-opts f) l (:linkage o)]
+    (check-global-value f o)
+    (doseq [[k _] (partition 2 (:md o))] (when (= k '!prof) (verr :verifier/global "an ifunc may not have a !prof attachment" :global)))
+    (when-not (contains? #{nil :external :private :internal :linkonce :linkonce_odr :weak :weak_odr} l)
+      (verr :verifier/global "IFunc should have private, internal, linkonce, weak, linkonce_odr, weak_odr, or external linkage!" :global))
+    (let [r (loop [r (strip-casts (alias-target f)) seen #{}]
+              (let [d (when (global? r) (.get *gdefs* (global-key r)))]
+                (if (and d (= :alias (:kind d)) (not (seen r))) (recur (strip-casts (alias-target (:form d))) (conj seen r)) r)))
+          d (when (global? r) (.get *gdefs* (global-key r)))]
+      (when-not (and d (= :function (:kind d))) (verr :verifier/global "IFunc must have a Function resolver" :global))
+      (when (or (= 'llvm/declare (first (:form d))) (= :available_externally (:linkage (apply hash-map (drop 4 (:form d))))))
+        (verr :verifier/global "IFunc resolver must be a definition" :global))
+      (when-not (ptr-type? (second (:fty d))) (verr :verifier/global "IFunc resolver must return a pointer" :global)))))
+
 (defn- phase-verifier [forms]
   (let [users (java.util.HashMap.)]
     ;; the function types an intrinsic is called with (its users)
@@ -2916,6 +3025,10 @@
       (verify-function f (into {} users)))
     (doseq [f forms :when (= (first f) 'llvm/global)]
       (visiting (binding [*ctx* {:global f}] (check-global-variable forms f))))
+    (doseq [f forms :when (= (first f) 'llvm/alias)]
+      (visiting (binding [*ctx* {:global f}] (check-global-alias forms f))))
+    (doseq [f forms :when (= (first f) 'llvm/ifunc)]
+      (visiting (binding [*ctx* {:global f}] (check-global-ifunc forms f))))
     (check-module-flags forms)
     (check-module-ident forms)
     (check-errno-tbaa forms)))
