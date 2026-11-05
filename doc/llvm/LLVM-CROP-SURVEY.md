@@ -835,3 +835,7 @@ As LL1's (under `bin/heavy-lock` on the loaded host; `ARBACE_HOST_EXE` unset in 
 3. **The generated tables** (`intr_table.ae`, `di_table.ae`: 0.9 MB and 30 KB, from the pinned tarball with the host's llvm-tblgen
    and python3). (a) Committed, with the two verbs re-run and diffed in the night's vendoring checks. (b) Generated at use from the
    tarball (no committed copy; every verify run would need the tarball and llvm-tblgen). Recommend (a).
+
+## Decided (2026-11-05, the user: LL4's proposals)
+
+LL4's three proposals (a): LL4 closed at these numbers, the remainder classed in test/llvm/divergences-verify.edn after the night's run; the rejection lists and the 420 valid modules as parts of the interim llvm gate step; the generated intrinsic and debug-info tables committed, their regeneration diffed in the night's vendoring checks.
