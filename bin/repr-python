@@ -83,6 +83,12 @@
 #   parse-check's corpora also syntax-errors (PY9:
 #   tools/pydump/syntax_cases.py, CPython's own syntax-error cases from the tarball's Lib/test)
 #   bin/repr-python check          spec-check, samples, then the round trips (:lines, then --text) over the default corpora
+# The oracle (queue 213; doc/ORACLE-RECORDS-SURVEY.md, "As built: Python"; tools/pydump/records.bash): REPR_PYTHON_ORACLE
+# records (the default with the shared tooling, test/oracle-records/oracle.bash: no python3; the originals' dumps, the
+# syntax-errors corpus and the verdicts of spec-check and samples from test/python/records/, a missing or stale entry a
+# failure; the round trips' print read natively, levels 2, 3 and 5 the oracle tier's; pins --check without the oracle's
+# pin, the tests and the rejected files), live (python3 as before: every level; the oracle tier), record (live, and what
+# it answered recorded: the main host, by hand), verify (live, each answer against its record: the oracle tier's verify).
 # Environment: REPR_PYTHON_CORPORA, REPR_PYTHON_PIN_VERSION, REPR_PYTHON_APKS, REPR_PYTHON_SPEC name other copies of
 # test/python/corpora.edn, tools/pydump/PYTHON_VERSION, tools/pydump/apks.sha256, doc/python/SPEC.md (negative controls);
 # REPR_PYTHON_CONTROLS another test/python/controls-read.edn.
@@ -114,8 +120,12 @@ arbace_exe() {
   die "no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)"
 }
 
-# py SCRIPT ARGS...: a script of tools/pydump on the oracle, isolated
+# py SCRIPT ARGS...: a script of tools/pydump on the oracle, isolated; python3 looked for here only (queue 213)
+need_python() { type -P python3 >/dev/null || die "no python3 (the oracle, doc/ALPINE.md): ${1:-this verb} runs it"; }
+python3() { need_python; command python3 "$@"; }
 py() { local s=$1; shift; python3 -I -S -B "$root/tools/pydump/$s" "$@"; }
+# the oracle's records (queue 213): REPR_PYTHON_ORACLE records|live|record, tools/pydump/records.bash
+. "$root/tools/pydump/records.bash"
 
 # rows: test/python/corpora.edn as tab-separated rows (test/python/corpora_rows.ae), read once by load_rows
 ROWS="$WORK/corpora-rows.tsv"
@@ -233,11 +243,22 @@ measure() {
     IFS=, read -ra pa <<< "$paths"; args+=("${pa[@]}")
     if [ "$excl" != - ]; then IFS=, read -ra ea <<< "$excl"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
     local c tests=-
-    c=$(cd "$b" && py corpus.py count "$b" "${args[@]}")
-    if [ "$t" != - ]; then tests=$(cd "$b" && py corpus.py tests "$b" "${args[@]}"); fi
-    printf 'corpus\t%s\t%s\t%s\n' "$id" "$(echo "$c" | tr ' ' '\t')" "$tests"
-    (cd "$b" && py corpus.py rejected "$b" "${args[@]}") | sed "s/^/rejected\t$id\t/"
+    c=$(count_files "$b" "${args[@]}")
+    if type -P python3 >/dev/null; then
+      if [ "$t" != - ]; then tests=$(cd "$b" && py corpus.py tests "$b" "${args[@]}"); fi
+      printf 'corpus\t%s\t%s\t%s\n' "$id" "$(echo "$c" | tr ' ' '\t')" "$tests"
+      (cd "$b" && py corpus.py rejected "$b" "${args[@]}") | sed "s/^/rejected\t$id\t/"
+    else printf 'corpus\t%s\t%s\n' "$id" "$(echo "$c" | tr ' ' '\t')"; fi
   done < <(rows)
+}
+
+# count_files BASE PATH... [--exclude PATH]...: corpus.py count without python3: FILES LINES DIGEST (the SHA-256 of
+# sha256sum's lines of the selected files, in their order)
+count_files() {
+  local b=$1 l; shift
+  pyrec_list "$b" "$@" > "$TMPDIR/count.list"
+  l=$( (cd "$b" && tr '\n' '\0' < "$TMPDIR/count.list" | xargs -0 -r cat) | wc -l)
+  echo "$(wc -l < "$TMPDIR/count.list") $l $( (cd "$b" && tr '\n' '\0' < "$TMPDIR/count.list" | xargs -0 -r sha256sum) | sha256sum | cut -c1-64)"
 }
 
 cmd_count() {
@@ -264,7 +285,10 @@ check_oracle() {
 
 cmd_check() {
   local bad=0 path sha top
-  check_oracle || bad=1
+  # queue 213 (ORS1 (a), as bin/gate --pins for gcc): without python3 the oracle's pin and the corpora's tests and rejected
+  # files (CPython's ast) are the oracle tier's; the files, lines and digests are checked here
+  if type -P python3 >/dev/null; then check_oracle || bad=1
+  else echo "  oracle: no python3 here: its pin, and the corpora's tests and rejected files, are the oracle tier's (bin/repr-python pins --check where python3 is)"; fi
   cmd_fetch | sed 's/^/  /'
   top=$(TOP)
   while IFS=$'\t' read -r kind path sha; do
@@ -273,7 +297,9 @@ cmd_check() {
   done < <(rows)
   grep -q 'PY_VERSION *"3.14.10"' "$top/Include/patchlevel.h" || { echo "  the tarball's PY_VERSION is not 3.14.10"; bad=1; }
   local want have
-  want=$(rows | awk -F'\t' '$1 == "corpus" { print $1 "\t" $2 "\t" $6 "\t" $7 "\t" $8 "\t" $9 } $1 == "rejected"' | LC_ALL=C sort)
+  if type -P python3 >/dev/null; then
+    want=$(rows | awk -F'\t' '$1 == "corpus" { print $1 "\t" $2 "\t" $6 "\t" $7 "\t" $8 "\t" $9 } $1 == "rejected"' | LC_ALL=C sort)
+  else want=$(rows | awk -F'\t' '$1 == "corpus" { print $1 "\t" $2 "\t" $6 "\t" $7 "\t" $8 }' | LC_ALL=C sort); fi
   have=$(measure | LC_ALL=C sort)
   if [ "$want" != "$have" ]; then
     echo "  the corpora's measures differ from test/python/corpora.edn (< recorded, > now):"
@@ -287,7 +313,7 @@ cmd_check() {
   rec=$(rows | awk -F'\t' '$1 == "corpus" && $2 == "site-packages" { print $6 " " $7 " " $8 }')
   for arch in $(arches); do
     [ "$arch" = "$(host_arch)" ] && continue
-    got=$(cd "$WORK/site-packages/$arch" && py corpus.py count . usr/lib/python3.14/site-packages)
+    got=$(count_files "$WORK/site-packages/$arch" usr/lib/python3.14/site-packages)
     if [ "$got" = "$rec" ]; then echo "  site-packages of $arch: the same files, lines and digest"
     else echo "  site-packages of $arch: $got, recorded $rec"; bad=1; fi
   done
@@ -298,12 +324,22 @@ cmd_spec_check() {
   fetch_tarball >/dev/null
   local out="$WORK/spec-check" bad=0
   rm -rf "$out"; mkdir -p "$out"
-  py spec_check.py "$SPEC" "$(TOP)/Parser/Python.asdl" "$out" || bad=1
+  # the oracle's verdict (spec_check.py: the checklist against Python.asdl and CPython's ast, the examples parsed) live or
+  # recorded (queue 213), keyed by the spec, the ASDL and the script; the forms blocks written by awk as the script writes them
+  pyrec_outcome spec-check "$(pyrec_key "$SPEC" "$(TOP)/Parser/Python.asdl" "$root/tools/pydump/spec_check.py")" \
+    command python3 -I -S -B "$root/tools/pydump/spec_check.py" "$SPEC" "$(TOP)/Parser/Python.asdl" "$out" || bad=1
+  awk -v out="$out" '/^```forms$/ { f = sprintf("%s/%03d.forms", out, n++); inb = 1; printf "" > f; next }
+                     inb && /^```$/ { inb = 0; close(f); next } inb { print > f }' "$SPEC"
   "$(arbace_exe)" "$root/test/python/read_forms.ae" "$out" || bad=1
   return $bad
 }
 
-cmd_samples() { (cd "$root/test/python/samples" && py corpus.py samples . .); }
+# samples: every sample parsed and compiled by the oracle, the node classes covered (corpus.py samples), live or recorded
+cmd_samples() {
+  local s="$root/test/python/samples"
+  pyrec_outcome samples "$(pyrec_key "$root/tools/pydump/corpus.py" $(ls "$s"/*.py))" \
+    bash -c 'cd "$1" && command python3 -I -S -B "$2" samples . .' - "$s" "$root/tools/pydump/corpus.py"
+}
 
 
 # ---- PY2: read, print, round trip ----
@@ -332,18 +368,36 @@ timed() {
   return $rc
 }
 
-# dump_parallel BASE LIST OUT TSV: the helper's tree mode over LIST in $JOBS processes, the TSVs concatenated
+# dump_parallel CORPUS BASE LIST OUT TSV: the helper's tree mode (FULL: tree --full) over LIST, in $JOBS processes or from
+# the records (tools/pydump/records.bash), the TSV sorted
 dump_parallel() {
-  local base=$1 list=$2 out=$3 tsv=$4 i
-  local -a mode=(); [ -n "${FULL:-}" ] && mode=(--full)
-  local d; d=$(dirname "$tsv")/split.$(basename "$tsv"); rm -rf "$d"; mkdir -p "$d"
-  split -n "r/$JOBS" -d "$list" "$d/part."
-  for i in "$d"/part.*; do
-    python3 -I -S -B "$root/tools/pydump/pydump.py" tree "${mode[@]}" --base "$base" --list "$i" --out "$out" --tsv "$i.tsv" &
+  PYREC_JOBS=$JOBS pyrec_dump "$([ -n "${FULL:-}" ] && echo full || echo tree)" "$@"
+}
+
+# native_dumps BASE LIST OUT TSV (queue 213): the printed files read by the native reader (records mode: the print's levels
+# that need CPython are the oracle tier's), the TSV in the helper's columns: REL STATUS - - - SHA (level 4's) 0 0 0
+native_dumps() {
+  local base=$1 list=$2 out=$3 tsv=$4
+  parsecheck dump --base "$base" --list "$list" --out "$out" > "$tsv.native"
+  (cd "$base" && tr '\n' '\0' < "$list" | xargs -0 -r sha256sum) | awk '{ r = substr($0, 67); sub(/^\*/, "", r); print r "\t" substr($0, 1, 64) }' > "$tsv.sha"
+  awk -F'\t' -v OFS='\t' 'NR == FNR { sha[$1] = $2; next } { st = ($2 ~ /^refused/) ? $2 : $2; print $1, st, "-", "-", "-", sha[$1], 0, 0, 0 }' "$tsv.sha" "$tsv.native" | LC_ALL=C sort > "$tsv"
+}
+
+# costs TSV...: per stage file (REL ... SECONDS RSS), the stage's seconds, mean, p50, p95, max with its file and peak RSS, as
+# tools/pydump/corpus.py costs prints them (queue 213: awk, no python3)
+costs() {
+  local f first=1
+  printf '['
+  for f in "$@"; do
+    [ $first = 1 ] || printf '\n '; first=0
+    local stage; stage=$(basename "$f"); stage=${stage%.*}
+    if [ ! -s "$f" ]; then printf '{:stage "%s" :files 0}' "$(basename "$f")"; continue; fi
+    awk -F'\t' '{ print $(NF-1) "\t" $1 "\t" $NF }' "$f" | LC_ALL=C sort -t "$(printf '\t')" -k1,1g -k2,2 | awk -F'\t' -v st="$stage" '
+      { s[NR] = $1; r[NR] = $2; tot += $1; if ($3 + 0 > peak) peak = $3 + 0 }
+      END { n = NR; q5 = int(0.5 * n); if (q5 > n - 1) q5 = n - 1; q95 = int(0.95 * n); if (q95 > n - 1) q95 = n - 1
+            printf "{:stage \"%s\" :files %d :seconds %.2f :mean %.4f :p50 %.4f :p95 %.4f :max %.4f :max-file \"%s\" :peak-kib %d}", st, n, tot, tot / n, s[q5 + 1], s[q95 + 1], s[n], r[n], peak }'
   done
-  wait
-  cat "$d"/part.*.tsv | LC_ALL=C sort > "$tsv"
-  rm -rf "$d"
+  printf ']\n'
 }
 
 corpus_base() { # ID -> the base directory and the arguments of corpus.py
@@ -380,27 +434,33 @@ roundtrip_one() {
   if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
   rm -rf "$d"; mkdir -p "$d"
   STAGES="$d/stages.txt"; : > "$STAGES"
-  (cd "$base" && py corpus.py list "$base" "${args[@]}") > "$d/list"
+  pyrec_list "$base" "${args[@]}" > "$d/list"
   only_filter "$d/list" "$id" || { echo "roundtrip $id: no file of --only-list"; return 0; }
-  timed helper-orig dump_parallel "$base" "$d/list" "$d/orig" "$d/helper-orig.tsv"
+  timed helper-orig dump_parallel "$id" "$base" "$d/list" "$d/orig" "$d/helper-orig.tsv" \
+    || { echo "roundtrip $id: FAILED: no reference (the oracle's records, above)"; return 1; }
   if [ -n "$TEXT" ]; then
     # mode :full (PY3): the dumps in mode :full beside the :lines ones, converted, woven, printed from the tokens
-    FULL=1 timed helper-full dump_parallel "$base" "$d/list" "$d/full" "$d/helper-full.tsv"
+    FULL=1 timed helper-full dump_parallel "$id" "$base" "$d/list" "$d/full" "$d/helper-full.tsv" \
+      || { echo "roundtrip --text $id: FAILED: no reference (the oracle's records, above)"; return 1; }
     timed convert-print py_arbace convert-full --dumps "$d/full" --lines "$d/orig" --forms "$d/forms" --printed "$d/printed" \
       --tsv "$d/convert-print.tsv"
   else
     timed convert-print py_arbace convert --dumps "$d/orig" --forms "$d/forms" --printed "$d/printed" --tsv "$d/convert-print.tsv"
   fi
   (cd "$d/printed" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) > "$d/printed.list"
-  timed helper-printed dump_parallel "$d/printed" "$d/printed.list" "$d/cand" "$d/helper-printed.tsv"
+  # the print: the helper's dumps live (levels 2, 3 and 5 judged), the native reader's in records mode (level 1 and 4;
+  # 2, 3 and 5 the oracle tier's, compare --deferred: queue 213)
+  local deferred=""
+  if pyrec_live; then timed helper-printed pyrec_run_helper tree "$d/printed" "$d/printed.list" "$d/cand" "$d/helper-printed.tsv"
+  else deferred=1; timed native-printed native_dumps "$d/printed" "$d/printed.list" "$d/cand" "$d/helper-printed.tsv"; fi
   local rc=0
   timed compare py_arbace compare --corpus "$id" --orig "$d/orig" --cand "$d/cand" --orig-tsv "$d/helper-orig.tsv" \
     --cand-tsv "$d/helper-printed.tsv" --convert-tsv "$d/convert-print.tsv" --known "$known" --results "$d/results.edn" --controls "$CONTROLS_READ" \
-    ${record:+--record} ${TEXT:+--text} ${ONLY:+--partial} \
+    ${record:+--record} ${TEXT:+--text} ${ONLY:+--partial} ${deferred:+--deferred} \
     ${record:+--results-file "$root/test/python/$([ -n "$TEXT" ] && echo full || echo roundtrip)-results.edn"} || rc=$?
   { echo "{:corpus :$id :jobs $JOBS"
     echo " :wall-seconds {$(awk '{ printf "%s\"%s\" %s", (NR > 1 ? " " : ""), $1, $2 }' "$STAGES")}"
-    echo " :per-file $(py corpus.py costs "$d/helper-orig.tsv" ${TEXT:+"$d/helper-full.tsv"} "$d/convert-print.tsv" "$d/helper-printed.tsv")}"; } > "$d/costs.edn"
+    echo " :per-file $(costs "$d/helper-orig.tsv" ${TEXT:+"$d/helper-full.tsv"} "$d/convert-print.tsv" "$d/helper-printed.tsv")}"; } > "$d/costs.edn"
   awk '{ printf "  %-15s %8.2f s\n", $1, $2 }' "$STAGES"
   return $rc
 }
@@ -418,6 +478,7 @@ cmd_roundtrip() {
     esac
   done
   [ ${#ids[@]} -gt 0 ] || ids=(samples stdlib site-packages lib-test)
+  [ -z "$record" ] || pyrec_live || die "roundtrip --record judges every level: the live oracle (REPR_PYTHON_ORACLE=live)"
   fetch_tarball >/dev/null; fetch_apks >/dev/null
   for id in "${ids[@]}"; do
     rc=0; roundtrip_one "$id" "$record" || rc=$?
@@ -451,7 +512,7 @@ cmd_read() {
   for f in "$@"; do cp "$f" "$tmp/src/$(basename "$f")"; done
   (cd "$tmp/src" && ls) > "$tmp/list"
   case $reader in
-    helper) py pydump.py tree --base "$tmp/src" --list "$tmp/list" --out "$tmp/dumps" --tsv "$tmp/dumps.tsv" ;;
+    helper) need_python "read --reader helper"; py pydump.py tree --base "$tmp/src" --list "$tmp/list" --out "$tmp/dumps" --tsv "$tmp/dumps.tsv" ;;
     # PY9b: the native reader (no CPython): the generated parser's dumps, the helper's text
     native) parsecheck dump --base "$tmp/src" --list "$tmp/list" --out "$tmp/dumps" > "$tmp/dumps.tsv" ;;
     *) die "read: --reader helper|native" ;;
@@ -476,24 +537,19 @@ lexcheck() {
     "$(arbace_exe)" -m arbace.repr.python.lexcheck "$@"
 }
 
-# tokdump BASE LIST OUT: the helper's token dumps over LIST in $JOBS processes
+# tokdump CORPUS BASE LIST OUT: the helper's token dumps over LIST in $JOBS processes, or from the records
 tokdump() {
-  local base=$1 list=$2 out=$3 i d
-  d="$out.split"; rm -rf "$d"; mkdir -p "$d"
-  split -n "r/$JOBS" -d "$list" "$d/part."
-  for i in "$d"/part.*; do
-    python3 -I -S -B "$root/tools/pydump/tokdump.py" --base "$base" --list "$i" --out "$out" --tsv "$i.tsv" &
-  done
-  wait
-  cat "$d"/part.*.tsv | LC_ALL=C sort > "$out.tsv"
-  rm -rf "$d"
+  PYREC_JOBS=$JOBS pyrec_dump tok "$1" "$2" "$3" "$4" "$4.tsv"
 }
+# the records' corpus of a check's corpus: the mutants of each check are its own
+rec_corpus() { if [ "$1" = mutants ]; then echo "mutants-$2"; else echo "$1"; fi; }
 
 lex_one() { # ID BASE LIST
   local id=$1 base=$2 list=$3 d="$LEX/$1" rc=0
   rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
   if [ -n "$ONLY" ]; then cp "$list" "$d/list.only"; list="$d/list.only"; only_filter "$list" "$id" || { echo "lex-check $id: no file of --only-list"; return 0; }; fi
-  tokdump "$base" "$list" "$d/ref"
+  tokdump "$(rec_corpus "$id" lex)" "$base" "$list" "$d/ref" \
+    || { echo "lex-check $id: FAILED: no reference (the oracle's records, above)"; return 1; }
   lexcheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$LEX_KNOWN" --controls "$CONTROLS_READ" \
     --jobs "$JOBS" ${record:+--record} ${ONLY:+--partial} ${record:+--results-file "$root/test/python/lex-check-results.edn"} || rc=$?
   return $rc
@@ -528,7 +584,7 @@ cmd_lex_check() {
     local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
     if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
     mkdir -p "$LEX/$id"
-    (cd "${info[0]}" && py corpus.py list "${info[0]}" "${args[@]}") > "$LEX/$id/list"
+    pyrec_list "${info[0]}" "${args[@]}" > "$LEX/$id/list"
     { echo "${info[0]}"; cat "$LEX/$id/list"; } > "$LEX/$id/pool"
     pools+=("$LEX/$id/pool")
     rc=0; lex_one "$id" "${info[0]}" "$LEX/$id/list" || rc=$?
@@ -562,11 +618,30 @@ cmd_pegen() {
   ARBACE_PATH="$root" "$(arbace_exe)" -m arbace.repr.python.pegen $verb $(GRAMMAR_ARGS) "$root/arbace/repr/python/parser.ae"
 }
 
+# syntax_cases DIR: CPython's syntax-error cases written into DIR, their list on stdout: tools/pydump/syntax_cases.py live, or
+# the records' (the corpus's inputs are in its pack, keyed by the script and the tarball's pin: queue 213)
+syntax_cases() {
+  local key; key="src:$(pyrec_sha16 "$root/tools/pydump/syntax_cases.py"):$(pin cpython-3.14.10 sha256 | cut -c1-16)"
+  if pyrec_live; then
+    py syntax_cases.py --src "$(TOP)" --out "$1" > "$1.list"
+    pyrec_stage_src syntax-errors "$1" "$1.list" "$key"
+    if [ "$PYREC_MODE" = verify ]; then
+      # the generated corpus against its record, as a whole
+      local r="$1.rec" d=0; rm -rf "$r"; mkdir -p "$PYREC_VSTATE"
+      if pyrec_src syntax-errors "$r" "$key" > "$r.list" 2>"$r.err" && cmp -s "$1.list" "$r.list" && diff -r "$1" "$r" >/dev/null; then :
+      else d=1; echo "verify: syntax-errors src: DIFFERS from the record"; fi
+      echo "syntax-errors src 1 $d" >> "$PYREC_VSTATE/tally"
+    fi
+    cat "$1.list"
+  else pyrec_src syntax-errors "$1" "$key"; fi
+}
+
 parse_one() { # ID BASE LIST
   local id=$1 base=$2 list=$3 d="$PARSE/$1" rc=0
   rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
   if [ -n "$ONLY" ]; then cp "$list" "$d/list.only"; list="$d/list.only"; only_filter "$list" "$id" || { echo "parse-check $id: no file of --only-list"; return 0; }; fi
-  FULL=$PFULL dump_parallel "$base" "$list" "$d/ref" "$d/ref.tsv"
+  FULL=$PFULL dump_parallel "$(rec_corpus "$id" parse)" "$base" "$list" "$d/ref" "$d/ref.tsv" \
+    || { echo "parse-check $id: FAILED: no reference (the oracle's records, above)"; return 1; }
   parsecheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$PARSE_KNOWN" --controls "$CONTROLS_READ" \
     --jobs "$JOBS" ${record:+--record} ${PFULL:+--full} ${ONLY:+--partial} \
     ${record:+--results-file "$root/test/python/parse-check-results.edn"} || rc=$?
@@ -602,7 +677,7 @@ cmd_parse_check() {
       # CPython's own syntax-error cases (tools/pydump/syntax_cases.py: test_syntax's doctests, the sources the tests'
       # error checks compile), a file each, generated from the pinned tarball's Lib/test
       rm -rf "$PARSE/$id/src"
-      py syntax_cases.py --src "$(TOP)" --out "$PARSE/$id/src" > "$PARSE/$id/list"
+      syntax_cases "$PARSE/$id/src" > "$PARSE/$id/list" || { echo "parse-check $id: FAILED: no corpus (the oracle's records, above)"; worst=1; continue; }
       rc=0; parse_one "$id" "$PARSE/$id/src" "$PARSE/$id/list" || rc=$?
       [ $rc -gt $worst ] && worst=$rc
       continue
@@ -610,7 +685,7 @@ cmd_parse_check() {
     local -a info; mapfile -t info < <(corpus_base "$id")
     local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
     if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
-    (cd "${info[0]}" && py corpus.py list "${info[0]}" "${args[@]}") > "$PARSE/$id/list"
+    pyrec_list "${info[0]}" "${args[@]}" > "$PARSE/$id/list"
     { echo "${info[0]}"; cat "$PARSE/$id/list"; } > "$PARSE/$id/pool"
     pools+=("$PARSE/$id/pool")
     rc=0; parse_one "$id" "${info[0]}" "$PARSE/$id/list" || rc=$?
@@ -641,6 +716,7 @@ cmd_ast_check() {
     esac
   done
   [ ${#ids[@]} -gt 0 ] || ids=(samples lex-errors syntax-errors)
+  need_python "ast-check (astdump.py; not a gate step)"
   fetch_tarball >/dev/null; fetch_apks >/dev/null
   local AST="$WORK/ast"
   for id in "${ids[@]}"; do
@@ -652,7 +728,7 @@ cmd_ast_check() {
       *) local -a info; mapfile -t info < <(corpus_base "$id"); base=${info[0]}
          local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
          if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
-         (cd "$base" && py corpus.py list "$base" "${args[@]}") > "$d/all" ;;
+         pyrec_list "$base" "${args[@]}" > "$d/all" ;;
     esac
     # UTF-8 files only
     (if [ "$limit" != 0 ]; then head -n "$limit" "$d/all"; else cat "$d/all"; fi) | python3 -I -S -B -c '
@@ -683,7 +759,9 @@ cmd_check_all() {
   cmd_spec_check && cmd_samples && cmd_roundtrip && cmd_roundtrip --text
 }
 
-command -v python3 >/dev/null || die "no python3 (the oracle, doc/ALPINE.md)"
+PYREC_VERB="bin/repr-python $*"
+trap pyrec_flush_on_exit EXIT
+pyrec_flush_on_exit() { local rc=$?; pyrec_flush || rc=1; exit $rc; }
 case "${1:-}" in pins|spec-check|roundtrip|lex-check|parse-check|ast-check|check) load_rows ;; esac
 case "${1:-}" in
   pins)
