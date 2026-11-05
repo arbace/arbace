@@ -30,12 +30,18 @@
 (defn- arg [x i] (when (seq? x) (nth x (inc i) nil)))
 (defn- some-val [x] (when (and (seq? x) (= 'Some (first x))) (second x)))
 (defn- id-name [x] (cond (and (seq? x) (= 'id (first x))) (second x) (string? x) x :else nil))
+(def ^:dynamic *mark-crates* {})    ; our expansion's marks -> the crate $crate stands for, or :derive (arbace.rust.front.expand)
+
 (defn- span-of
   "A node's span: [l1 c1 l2 c2] in the root file, :foreign in another file (std's macros: their positions follow the
   root file's in the source map, so they pass every comment of the root file), nil for none"
   [x]
   (let [s (fv x :span)]
     (cond (and (vector? s) (>= (count s) 4)) (subvec s 0 4)
+          ;; our expansion's (span "<expansion>" l1 c1 l2 c2 M): at the root positions its tokens came from, when known
+          (and (seq? s) (= 'span (first s)) (= "<expansion>" (second s)) (pos? (long (nth s 2 0)))) (vec (take 4 (drop 2 s)))
+          ;; a builtin derive's tokens: rustc's spans are the derive's (before the item: no comment printed by them)
+          (and (seq? s) (= 'span (first s)) (= :derive (get *mark-crates* (last s)))) nil
           (and (seq? s) (= 'span (first s))) :foreign
           :else nil)))
 
@@ -176,7 +182,8 @@
   (let [segs (fv p :segments)]
     {:span (span-of p) :res (res-at (span-of p)) :segs (mapv lower-seg segs)
      ;; a path of std's macros: its file names the crate $crate stands for
-     :file (let [s (fv p :span)] (when (and (seq? s) (= 'span (first s))) (second s)))}))
+     :file (let [s (fv p :span)] (when (and (seq? s) (= 'span (first s))) (second s)))
+     :krate (let [s (fv p :span)] (when (and (seq? s) (= 'span (first s))) (let [k (get *mark-crates* (last s))] (when (string? k) k))))}))
 
 (defn- lang-path [name & [args]] {:segs [{:ident name :args args}] :lang true})
 (defn- lang-path* [names] {:segs (mapv (fn [n] {:ident n}) names) :lang true})
@@ -720,12 +727,13 @@
   ;; one item per leaf of a use tree (lower_use_tree), and a ListStem for a nested tree
   (let [k (fv tree :kind)
         path (into prefix (map lower-seg (fv (fv tree :prefix) :segments)))
-        file (or file (let [s (fv (fv tree :prefix) :span)] (when (and (seq? s) (= 'span (first s))) (second s))))]
+        file (or file (let [s (fv (fv tree :prefix) :span)] (when (and (seq? s) (= 'span (first s))) (second s))))
+        krate (let [s (fv (fv tree :prefix) :span)] (when (and (seq? s) (= 'span (first s))) (let [k (get *mark-crates* (last s))] (when (string? k) k))))]
     (case (head k)
       Simple (let [rename (some-val (second k))
                    path (if (= "self" (:ident (peek path))) (pop path) path)]
-               [{:kind :use :use :single :path path :ident (or (id-name rename) (:ident (peek path))) :span sp :attrs attrs :vis vis :file file}])
-      Glob [{:kind :use :use :glob :path path :span sp :attrs attrs :vis vis :file file}]
+               [{:kind :use :use :single :path path :ident (or (id-name rename) (:ident (peek path))) :span sp :attrs attrs :vis vis :file file :krate krate}])
+      Glob [{:kind :use :use :glob :path path :span sp :attrs attrs :vis vis :file file :krate krate}]
       Nested (into [{:kind :use :use :list-stem :path [] :span sp :attrs attrs :vis vis}]
                    (mapcat (fn [t] (use-items (if (= 'tuple (head t)) (second t) t) path sp [] vis file)) (fv k :items)))
       [])))
@@ -812,8 +820,9 @@
              :when (some #(= 'Lifetime (fv % :kind)) (fv (nth k 2) :params))]
          (id-name (second k)))))
 
-(defn lower-crate [crate res & [{:keys [file]}]]
+(defn lower-crate [crate res & [{:keys [file mark-crates]}]]
   (binding [*owners* (atom -1)
+            *mark-crates* (or mark-crates {})
             *source-file* (or file "main.rs")
             *res* res
             *lt-types* (into (disj std-lt-types "PhantomData" "Iter" "Ref") (crate-lt-types (fv crate :items)))]
