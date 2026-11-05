@@ -405,7 +405,10 @@
         "nofpclass"
         (when (and (string? v) (= (str/trim v) "0")) (verr :parser/attr-value "invalid mask value for 'nofpclass'" {:at [:attr-close n]}))
         "range"
-        (when (and (string? v) (not (re-find #"^\s*i[0-9]+\s" v))) (verr :parser/attr-value "the range must have integer type!" {:at [:attr-val n]}))
+        (do (when (and (string? v) (not (re-find #"^\s*i[0-9]+\s" v))) (verr :parser/attr-value "the range must have integer type!" {:at [:attr-val n]}))
+            (when-let [[_ lo hi] (and (string? v) (re-find #"^\s*i[0-9]+\s+(-?[0-9]+)\s*,\s*(-?[0-9]+)\s*$" v))]
+              (when (and (= (bigint lo) (bigint hi)) (not (zero? (bigint lo))))
+                (verr :parser/attr-value "the range represent the empty set but limits aren't 0!" {:at [:attr-close n]}))))
         "uwtable"
         (when-not (#{"sync" "async"} (str/trim (str v))) (verr :parser/attr-value "expected unwind table kind" {:at [:attr-val n]}))
         "allockind"
@@ -775,7 +778,9 @@
                                    (vreset! w (shape it)))))
                              (when (and (seq idxs) (not (sized? (norm-type st)))) (verr :parser/gep "base element of getelementptr must be sized" {:at [:op 1]}))
                              (when-not (gep-indexed-type (norm-type st) idxs) (verr :parser/gep "invalid getelementptr indices" {:at [:op 1]})))
-      (= h 'phi) (when-not (first-class? (norm-type (first ps*))) (verr :parser/phi "phi node must have first class type" {:at [:ty]}))
+      (= h 'phi) (do (when (and (some keyword? ps) (not (fp-class-compatible? (norm-type (first ps*)))))
+                       (verr :parser/phi "fast-math-flags specified for phi without floating-point scalar or vector return type" {:at [:body 0]}))
+                     (when-not (first-class? (norm-type (first ps*))) (verr :parser/phi "phi node must have first class type" {:at [:ty]})))
       (= h 'select) (let [[[ct] [at] [bt]] ps* ct (norm-type ct)]
                       (when (and (some keyword? ps) (not (fp-class-compatible? (norm-type at))))
                         (verr :parser/select "fast-math-flags specified for select without floating-point scalar or vector return type" {:at [:body 0]}))
@@ -988,6 +993,9 @@
       (when (or (and (seq? rt) (= 'fn (first rt))) (#{'void 'label 'metadata 'token 'x86_amx} rt))
         (verr :parser/global-type "invalid type for global variable" {:at [:after (if (:constant o) "constant" "global")]})))
     (when (.containsKey *gdefs* k) (verr :parser/redefinition (str "redefinition of global '@" k "'") {:at [:kind :gname]}))
+    (when-let [ft (.get *gfwd* k)]
+      (when (and (not= ft true) (not= (addrspace (norm-type ft)) (or (:addrspace o) 0)))
+        (verr :parser/forward-type "forward reference and definition of global have different types" {:at [:after (if (:constant o) "constant" "global")]})))
     (when (some? init) (use-value nil init (norm-type t)))
     (check-align (:align o))
     (note-md! (:md o))

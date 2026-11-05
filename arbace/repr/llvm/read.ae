@@ -94,6 +94,8 @@
 ;; top-level form, or a definition's header up to `{`, its labels, instructions, debug records, use-list orders and `}`).
 (def ^:dynamic ^java.util.ArrayList *items* nil)
 (def ^:dynamic *di-expression* false)   ; parsing a DIExpression's operands
+(def ^:dynamic *musttail* false)        ; parsing a musttail call's arguments
+(def ^:dynamic *varargs-fn* false)      ; parsing a varargs function's body
 (declare di-names)
 (def ^:dynamic *pending* nil)   ; when bound (a volatile), an LLParser error inside a function body ends the reading there
 (def ^:dynamic ^"[J" *top* nil)
@@ -489,7 +491,9 @@
                    (let [xs (comma-list parse-md-value)]
                      (expect! "}") (list '! xs))))
              (parse-typed)))
-    :word (if (word? "null") (do (adv!) 'null) (parse-typed))
+    :word (cond (word? "null") (do (adv!) 'null)
+                (word? "metadata") (llerr "invalid metadata-value-metadata roundtrip")
+                :else (parse-typed))
     :eof (llerr "expected metadata operand")
     (parse-typed)))
 
@@ -641,6 +645,8 @@
   "A specialized node, !NAME( at the cursor: (!NAME :key value ...) for its keyed fields in the text's order,
   (!NAME operand ...) for DIExpression's, DIArgList's and DIAssignID's positional operands."
   []
+  (when-not (or (contains? @di-fields-table (text)) (#{"DIExpression" "DIArgList" "DIAssignID"} (text)))
+    (llerr "expected metadata type"))
   (let [head (symbol (str "!" (text))) head-off (tok-start)
         spec (get @di-fields-table (text))
         by-name (into {} (map (fn [[f r t a]] [f [r t a]]) spec))]
@@ -717,6 +723,11 @@
   (expect! "(")
   (if (accept! ")") []
       (let [xs (loop [out []]
+                 (when (punct? "...")
+                   (let [m "unexpected ellipsis in argument list for "]
+                     (cond (not *musttail*) (llerr (str m "non-musttail call"))
+                           (not *varargs-fn*) (llerr (str m "musttail call in non-varargs function"))
+                           :else (refuse "an ellipsis in a musttail call's arguments"))))
                  (let [t (parse-type) as (parse-param-attrs) v (if (= t 'metadata) (parse-md-value) (parse-value t))
                        out (conj out (vec (concat [t] as [v])))]
                    (if (accept! ",") (recur out) out)))]
@@ -830,7 +841,7 @@
             _ (expect! "[")
             ids (if (accept! "]") [] (let [xs (comma-list parse-label)] (expect! "]") xs))]
         (with-opts ['callbr (:type c) (:callee c) (:args c)] (concat [[:to ft] [:indirect ids]] (call-opts c))))
-      (#{"tail" "musttail" "notail"} op) (do (expect! "call") (let [c (parse-call-like)]
+      (#{"tail" "musttail" "notail"} op) (do (expect! "call") (let [c (binding [*musttail* (= op "musttail")] (parse-call-like))]
                                                                 (with-opts ['call (:type c) (:callee c) (:args c)]
                                                                   (cons [:tail (keyword op)] (call-opts c)))))
       (= op "ret") (if (word? "void") (do (adv!) (list 'ret 'void)) (let [[t v] (parse-typed)] (list 'ret t v)))
@@ -939,7 +950,7 @@
                                           (let [s (tok-start)]
                                             (if (accept! "}")
                                               (do (item! s) out)
-                                              (let [o (apply list 'uselistorder (parse-uselistorder))] (item! s) (recur (conj out o))))))]
+                                              (let [o (apply list 'uselistorder (do (when-not (word? "uselistorder") (llerr "expected uselistorder directive")) (parse-uselistorder)))] (item! s) (recur (conj out o))))))]
                                  [(close) os])
         (= (kind) :eof) (llerr "found end of file when expecting more instructions")
         ended (recur (close) nil [] false)
@@ -1086,14 +1097,15 @@
                    (= w "partition") (do (adv!) (recur (conj m [:partition (take-str!)])))
                    (= w "comdat") (recur (conj m [:comdat (parse-comdat-ref)]))
                    (= w "align") (do (adv!) (recur (conj m [:align (take-num!)])))
-                   (= w "prefalign") (do (adv!) (expect! "(") (let [n (take-num!)] (expect! ")") (recur (conj m [:prefalign n]))))
+                   (= w "prefalign") (do (adv!) (expect! "(") (when-not (= (kind) :int) (llerr "expected integer"))
+                                         (let [n (take-num!)] (expect! ")") (recur (conj m [:prefalign n]))))
                    (= w "gc") (do (adv!) (recur (conj m [:gc (take-str!)])))
                    (= w "prefix") (do (adv!) (recur (conj m [:prefix (parse-typed)])))
                    (= w "prologue") (do (adv!) (recur (conj m [:prologue (parse-typed)])))
                    (= w "personality") (do (adv!) (recur (conj m [:personality (parse-typed)])))
                    :else m)))
         md (if define? (parse-fn-md) pre-md)
-        [blocks orders] (when define? (parse-body))]
+        [blocks orders] (when define? (binding [*varargs-fn* (boolean (some #{'&} ps))] (parse-body)))]
     (with-opts (concat [(if define? 'llvm/define 'llvm/declare) nm rt ps])
       (concat (opts-in-order o global-key-order) [[:cconv cc] [:ret-attrs ra]] (opts-in-order o2 global-key-order)
               [[:attrs fa]] more [[:md md] [:body (when define? (vec blocks))] [:uselistorder orders]]))))
@@ -1134,7 +1146,7 @@
     :comdat (let [n (text)] (adv!) (expect! "=") (expect! "comdat") (list 'llvm/comdat n (keyword (take-word!))))
     :meta (let [n (symbol (str "!" (text)))] (adv!) (expect! "=")
             (if (re-matches #"![0-9]+" (str n))
-              (let [d (accept! "distinct") v (parse-md-value)]
+              (let [d (accept! "distinct") _ (when (word? "metadata") (llerr "unexpected type in metadata definition")) v (parse-md-value)]
                 (with-opts ['llvm/meta n v] [[:distinct d]]))
               (do (expect! "!") (expect! "{")
                   (let [xs (if (accept! "}") [] (let [xs (comma-list parse-md-value)] (expect! "}") xs))]
