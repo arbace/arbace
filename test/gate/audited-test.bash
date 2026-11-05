@@ -30,6 +30,11 @@ printf '{:gate "%s" :javac "%s" :prog-units "none" :prog-rest "%s" :javac-prog-u
   $z $z $z $z $z $z $z $z $z > "$t/hosts.edn"
 mkdir -p "$t/store"
 . "$root/bin/lib/tools.bash"
+# GT9 (GTS210 (a)): the table's :host-ids hosts beside, zeros too (bin/gate's gate_host_ids adds those a step names), so that a
+# crop's steps on its own host plan here without this fixture naming it
+for h in $(cd "$root" && arbace_tool -p "$root/test" -m gate.crops host-names "${GATE_STEPS:-$root/test/gate/steps.edn}"); do
+  grep -q ":$h \"" "$t/hosts.edn" || sed -i "\$ s/}\$/ :$h \"$z\"}/" "$t/hosts.edn"
+done
 planned=0
 if (cd "$root" && arbace_tool -p "$root/test" -m gate.plan plan "$root" "$t" "$t/store" full) > "$t/plan.out" 2>&1; then planned=1; fi
 # decl NAME: the step's declaration line of its material

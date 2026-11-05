@@ -23,9 +23,14 @@
   and the builds, which the store does not record), else by the sum, saying which; with full the nightly run (the essential
   and full tiers, the :clean-only parts not) and the clean run (every step and part; the audit's overhead
   not measured) by their serial sums; each crop against its share: its tier's budget less the shared
-  steps' sum, over :crops (the full tier's budget the nightly one less the essential tier's sum)."
+  steps' sum, over :crops (the full tier's budget the nightly one less the essential tier's sum).
+  GT9 (\"As built: GT9 (write-ahead)\"): the crops of :budgets :new-crops are known too, each share weighted by :shares (LLVM IR
+  0.5, C++ and Rust 0.75; GT9.1); a new crop's share binds once every one of its rows of the tier has two passes (GTS222 (a): until
+  then \"measuring\" in place of OVER); its essential chains' walls (the medians' sum a chain, warm) against :chain-s (:chain-s-by
+  a crop; GTS215 (a)); the table's GT9 rules (test/gate/crops.ae's problems) among the problems."
   (:require [arbace.string :as str]
-            [arbace.java.io :as io])
+            [arbace.java.io :as io]
+            [gate.crops :as crops])
   (:import (java.io File PushbackReader)))
 
 (defn- read-file [^String f]
@@ -40,7 +45,7 @@
   (let [crop-of (into {} (for [[c ns] crops n ns] [(str n) c]))]
     (vec (mapcat (fn [s]
                    (let [nm (str (:name s))
-                         base {:step nm :phase (:phase s) :kind (or (:kind s) :check)
+                         base {:step nm :phase (:phase s) :kind (or (:kind s) :check) :chain (str (or (:chain s) nm))
                                :tier (if (= :full (:phase s)) :full :essential)
                                :crop (get crop-of nm)}]
                      (if-let [ps (:parts s)]
@@ -49,14 +54,15 @@
                  steps))))
 
 (defn problems
-  "the :crops' problems: a step in no crop or in two, a name that is no step, an unknown crop"
-  [{:keys [steps crops]}]
+  "the :crops' problems: a step in no crop or in two, a name that is no step, an unknown crop (the four, :shared and
+  :budgets :new-crops are known)"
+  [{:keys [steps crops] :as table}]
   (let [names (map (comp str :name) steps)
         known (set names)
         listed (for [[c ns] crops n ns] [c (str n)])
         freq (frequencies (map second listed))]
     (vec (concat
-          (for [[c _] crops :when (not (#{:clojure :java :go :c :shared} c))] (str ":crops: unknown crop " c))
+          (for [[c _] crops :when (not ((crops/known-crops table) c))] (str ":crops: unknown crop " c))
           (for [[c n] listed :when (not (known n))] (str ":crops " c ": " n " is no step"))
           (for [[n k] freq :when (> k 1)] (str ":crops: " n " is in " k " crops"))
           (for [n names :when (not (freq n))] (str ":crops: " n " is in no crop"))))))
@@ -165,7 +171,9 @@
   (let [table (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
         full? (= mode "full")
         {:keys [crops essential-s nightly-s clean-s] :or {crops 10}} (:budgets table)
-        probs (problems table)
+        probs (into (problems table) (crops/problems root table))
+        newc (set (crops/new-crops table))
+        shares (:shares (:budgets table))
         rows (rows-of table)
         known (set (map :name rows))
         ;; NAME.mem of steps the table does not hold (bin/gate's own pre-step outside)
@@ -188,7 +196,7 @@
         ess-sum (sum-of ess :wall-med)
         ess-measured (when (seq rs) (median (map :wall rs)))
         unmeasured (fn [rs] (count (remove :src rs)))
-        crop-order (vec (distinct (concat [:clojure :java :go :c :shared] (keep :crop rows) [nil])))
+        crop-order (vec (distinct (concat [:clojure :java :go :c :shared] (crops/new-crops table) (keep :crop rows) [nil])))
         sum-line (fn [label rs budget]
                    {:label label :wall (sum-of rs :wall-med) :cpu (sum-of rs :cpu-med) :n (count rs)
                     :unmeasured (unmeasured rs) :budget budget})
@@ -204,9 +212,18 @@
                         tier (if full? [:essential :full] [:essential])
                         :let [rt (filter #(= tier (:tier %)) rc)]
                         :when (seq rt)]
-                    (sum-line (str (if c (name c) "?") " " (name tier)) rt
-                              (when-let [b (tier-budget tier)]
-                                (when (not= c :shared) (/ (double (- b (shared-of tier))) crops)))))
+                    (assoc (sum-line (str (if c (name c) "?") " " (name tier)) rt
+                                     (when-let [b (tier-budget tier)]
+                                       (when (not= c :shared) (* (double (get shares c 1)) (/ (double (- b (shared-of tier))) crops)))))
+                           ;; GTS222 (a): a new crop's share binds once each of its rows has two passes in the store
+                           :measuring (when (newc c)
+                                        (let [k (count (filter #(and (= "store" (:src %)) (>= (:n %) 2)) rt))]
+                                          (when (< k (count rt)) [k (count rt)])))))
+        ;; GTS215 (a): the new crops' essential chains, each the medians' sum of its checks (warm), against :chain-s
+        chain-sums (for [c (crops/new-crops table)
+                         [ch rs] (group-by :chain (filter #(and (= c (:crop %)) (= :essential (:phase %)) (= :check (:kind %))) rows))]
+                     {:label (str (name c) " " ch) :wall (sum-of rs :wall-med) :n (count rs) :unmeasured (unmeasured rs)
+                      :budget (get (:chain-s-by (:budgets table)) c (:chain-s (:budgets table) 120))})
         tier-sums (concat
                    [(assoc (sum-line "essential" ess essential-s)
                            :measured ess-measured :runs rs)]
@@ -225,6 +242,9 @@
         (doseq [s crop-sums]
           (println (str/join "\t" ["crop" (:label s) "-" "-" (:n s) (str (:unmeasured s) " unmeasured")
                                    (tsv-num (:wall s)) "-" (tsv-num (:cpu s)) "-" "-" "-" (tsv-num (:budget s))])))
+        (doseq [s chain-sums]
+          (println (str/join "\t" ["chain" (:label s) "essential" "-" (:n s) (str (:unmeasured s) " unmeasured")
+                                   (tsv-num (:wall s)) "-" "-" "-" "-" "-" (tsv-num (:budget s))])))
         (doseq [s tier-sums]
           (println (str/join "\t" ["tier" (:label s) "-" "-" (:n s) (str (:unmeasured s) " unmeasured")
                                    (tsv-num (:wall s)) "-" (tsv-num (:cpu s)) "-" "-" "-" (tsv-num (:budget s))]))
@@ -251,8 +271,17 @@
                            (if (pos? (:unmeasured s)) (str ", " (:unmeasured s) " unmeasured") "")
                            (if (:budget s)
                              (str "; share " (mmss (:budget s)) " (" (pct (:wall s) (:budget s)) ")"
-                                  (when (> (:wall s) (:budget s)) " OVER"))
+                                  (when (> (:wall s) (:budget s))
+                                    (if-let [[k m] (:measuring s)]
+                                      (str " over, measuring (GTS222: " k " of " m " rows with two passes)")
+                                      " OVER")))
                              ""))))
+        (when (seq chain-sums)
+          (println "the new crops' essential chains (GTS215: each at most its :chain-s of wall, warm; the checks' medians summed):")
+          (doseq [s chain-sums]
+            (println (format "   %-32s %10s  %3d steps%s; limit %s%s" (:label s) (mmss (:wall s)) (:n s)
+                             (if (pos? (:unmeasured s)) (str ", " (:unmeasured s) " unmeasured") "")
+                             (mmss (:budget s)) (if (> (:wall s) (:budget s)) " OVER" "")))))
         (println "per tier, against the budgets:")
         (doseq [s tier-sums
                 :let [measured (:measured s)

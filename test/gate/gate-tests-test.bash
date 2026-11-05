@@ -105,6 +105,10 @@ git -C "$src" ls-files | LC_ALL=C sort | sed 's|^|000000000000000000000000000000
 echo '{:gate "a" :javac "b" :prog-units "pending" :prog-rest "c" :javac-prog-units "pending" :javac-prog-rest "d" :stage0 "e" :frozen "f" :jdk "g" :go "h" :gcc "i"}' > "$scratch/logs/hosts.edn"
 . "$src/bin/lib/tools.bash"
 root=$src
+# GT9 (GTS210 (a)): the table's :host-ids hosts beside (bin/gate's gate_host_ids adds those a step names)
+for h in $(arbace_tool -p "$src/test" -m gate.crops host-names "$src/test/gate/steps.edn"); do
+  grep -q ":$h \"" "$scratch/logs/hosts.edn" || sed -i "\$ s/}\$/ :$h \"x\"}/" "$scratch/logs/hosts.edn"
+done
 arbace_tool -p "$src/test" -m gate.plan plan "$src" "$scratch/logs" "$scratch/store" essential > "$scratch/plan.out" 2>&1
 if grep -q "problem(s)" "$scratch/plan.out"; then bad "the planner rejects the table: $(grep -A5 'problem(s)' "$scratch/plan.out")"
 elif grep -q "^ *run *gate-tests " "$scratch/plan.out"; then ok "the planner accepts the table and plans gate-tests"
