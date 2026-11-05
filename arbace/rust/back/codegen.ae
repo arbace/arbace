@@ -111,14 +111,40 @@
                           b))]
         (if (= nops' nops) nops (recur nops'))))))
 
+(defn const-switch-bits
+  "Body::try_const_mono_switchint: the value a block's switchInt is decided by when its discriminant is a constant, a runtime
+  check, or a local the block's last statement (not a storage marker) assigns a constant; else nil."
+  [blk]
+  (let [t (:term blk)]
+    (when (and t (= "switch" (name (first t))))
+      (let [d (second t)
+            bits-of (fn [o] (case (name (first o))
+                              "const" (let [v (nth o 3)] (when (= "scalar" (name (first v))) (second v)))
+                              "runtime-checks" (case (second o)
+                                                 "UbChecks" 1
+                                                 "OverflowChecks" (if (= "0" (System/getenv "RF_OVERFLOW_CHECKS")) 0 1)
+                                                 0)
+                              nil))]
+        (case (name (first d))
+          ("const" "runtime-checks") (bits-of d)
+          ("copy" "move")
+          (let [p (second d)
+                last-stmt (first (filter #(not (#{"storage-dead" "storage-live"} (name (first (if (= "dbg-stmt" (name (first %))) (second %) %))))) (reverse (:stmts blk))))
+                st (when last-stmt (if (= "dbg-stmt" (name (first last-stmt))) (second last-stmt) last-stmt))]
+            (when (and st (= "assign" (name (first st))) (= p (nth st 1)) (= "use" (name (first (nth st 2)))))
+              (bits-of (second (nth st 2)))))
+          nil)))))
+
 (defn rpo
   "Reverse postorder of the blocks reachable from bb0, rustc's Postorder (last successor first); an edge to a nop landing pad
-  is not followed (mono reachability)."
+  is not followed, nor a switch edge a constant discriminant rules out (mono reachability)."
   ([blocks] (rpo blocks #{}))
   ([blocks nops]
   (let [seen (volatile! #{0}) out (volatile! [])
-        succs (fn [b] (let [t (:term (nth blocks b)) u (unwind-cleanup t)]
-                        (if (and u (nops u)) (vec (remove #(= % u) (successors t))) (successors t))))]
+        succs (fn [b] (let [blk (nth blocks b) t (:term blk) u (unwind-cleanup t)]
+                        (if-let [bits (const-switch-bits blk)]
+                          (let [[_ _ vals other] t] [(or (some (fn [[v tg]] (when (= (bigint v) (bigint bits)) tg)) vals) other)])
+                          (if (and u (nops u)) (vec (remove #(= % u) (successors t))) (successors t)))))]
     (letfn [(visit [b]
               (doseq [s (reverse (succs b))]
                 (when-not (@seen s) (vswap! seen conj s) (visit s)))
