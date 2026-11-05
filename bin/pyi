@@ -107,6 +107,11 @@
 #   bin/pyi bench [--pyi] [--record] [BM...]
 #                                  PY8: pyperformance 1.14.0's pure benchmarks (test/python/bench) run by CPython, compiled and
 #                                  on the loop (--pyi: by pyi on goi too), the milliseconds; --record: bench-aot-linux-ARCH.edn
+#   bin/pyi c2j-check              queue 206 (AFTER-PY11.md §4.4, the re-seed window's light check, as bin/ci c2j-check): the
+#                                  namespaces of arbace/python and arbace/repr/python compiled by c2j alone on stage 0 (no j2g,
+#                                  no Go build), as the build's first pass compiles an embedded namespace; ends "N namespaces:
+#                                  N compiled, 0 failed", each failure "c2j-check: not compiled: SOURCE MESSAGE"; then its
+#                                  negative control, test/python/c2j/pyi/c2j_control.ae, which must fail with its message
 # Environment: REPR_PYTHON_SRC as for bin/repr-python (the tarball's source).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -1178,6 +1183,52 @@ smoke_run() {
   rm -f "$o" "$e"
 }
 
+# c2j_check (queue 206): arbace/python's and arbace/repr/python's namespaces compiled by c2j (arbace.c2j.main/run over
+# the units ARBACE_COMPILE records), no j2g and no Go build, as bin/lib/ci/c2j-check does for ci and repr/c. ARBACE_NO_AOT=1
+# and the rest as there: once the namespaces are embedded compiled (PYS28's re-seed) their compiled loaders would record
+# no units; every source is analyzed afresh. The negative control (GTS81 (a)): test/python/c2j/pyi/c2j_control.ae, a macro
+# expanding to an evaluated fn that closes over a local; c2j must refuse it with "a fn closing over locals as a constant", else
+# the check fails. The log: .tmp/repr-python/pyi/c2j/compile.log.
+cmd_c2j_check() {
+  [ $# = 0 ] || die "usage: bin/pyi c2j-check"
+  local w="$WORK/c2j" nss n f ctl=test/python/c2j/pyi/c2j_control.ae
+  rm -rf "$w"; mkdir -p "$w"
+  nss=$(for f in arbace/python.ae arbace/python/*.ae arbace/repr/python.ae arbace/repr/python/*.ae; do echo "$f"; done \
+          | sed 's/\.ae$//; s|/|.|g; s/_/-/g' | tr '\n' ' ')
+  n=$(echo $nss | wc -w)
+  cat > "$w/compile.ae" <<A
+(doseq [n (quote [$nss pyi.c2j-control])]
+  (try (require n) (catch Throwable e (println "c2j-check: not loaded:" n (.getMessage e)))))
+(require (quote arbace.c2j.main))
+(let [ours? (fn [^String s] (or (.startsWith s "arbace/python/") (.startsWith s "arbace/repr/python/")
+                                (= s "arbace/python.ae") (= s "arbace/repr/python.ae") (= s "pyi/c2j_control.ae")))
+      srcs (vec (distinct (filter ours? (map #(aget ^objects % 0) (arbace.lang.Compiler\$AST/units)))))
+      r (arbace.c2j.main/run "$w/out" srcs)
+      ctl "pyi/c2j_control.ae"
+      failed (dissoc (:failed r) ctl)
+      compiled (remove #{ctl} (:compiled r))]
+  (doseq [[s m] failed] (println "c2j-check: not compiled:" s m))
+  (println "c2j-check:" (+ (count compiled) (count failed)) "namespaces:" (count compiled) "compiled," (count failed) "failed;" (:classes r) "classes")
+  (let [m (get (:failed r) ctl)]
+    (println "c2j-check: negative control" ctl
+             (cond (nil? m) (if (some #{ctl} (:compiled r)) "compiled: control passed" "not loaded: control not judged")
+                   (.contains ^String m "a fn closing over locals as a constant") "refused, as it must"
+                   :else (str "refused with another message: control not judged: " m))))
+  (shutdown-agents)
+  (System/exit 0))
+A
+  local host t0=$SECONDS; host=$(arbace_exe)
+  GOMEMLIMIT=${GOMEMLIMIT:-3GiB} GOGC=200 ARBACE_COMPILE=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 ARBACE_PATH_FIRST=1 \
+    ARBACE_PATH="$root:$root/test/python/c2j" ARBACE_AOT_ROOT="$root" ARBACE_PREPARE="$w/compile.image" \
+    "$host" "$w/compile.ae" > "$w/compile.log" 2>&1 || { tail -20 "$w/compile.log" >&2; die "c2j-check: the host failed (the log: $w/compile.log)"; }
+  grep '^c2j-check:' "$w/compile.log" || true
+  echo "c2j-check: $((SECONDS - t0)) s"
+  grep -q "^c2j-check: not loaded:" "$w/compile.log" && die "c2j-check: a namespace did not load"
+  grep -q "^c2j-check: $n namespaces: $n compiled, 0 failed;" "$w/compile.log" || die "c2j-check: FAILED (expected $n namespaces, all compiled)"
+  grep -q "^c2j-check: negative control .* refused, as it must$" "$w/compile.log" || die "c2j-check: the negative control FAILED"
+  echo "c2j-check: ok ($n namespaces, the negative control refused)"
+}
+
 command -v python3 >/dev/null || die "no python3 (the oracle)"
 case "${1:-}" in
   gen) shift; cmd_gen "$@" ;;
@@ -1195,5 +1246,6 @@ case "${1:-}" in
   check) shift; mkdir -p "$WORK"; if [ "${1:-}" = --aot ]; then shift; cmd_check_aot "$@"; else cmd_check_lib "$@"; fi ;;
   divergences) shift; mkdir -p "$WORK"; cmd_divergences "$@" ;;
   cover) shift; mkdir -p "$WORK"; cmd_cover "$@" ;;
+  c2j-check) shift; mkdir -p "$WORK"; cmd_c2j_check "$@" ;;
   *) sed -n '2,/^# Environment:/p' "$0"; exit 2 ;;
 esac
