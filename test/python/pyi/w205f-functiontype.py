@@ -152,3 +152,57 @@ except TypeError as e:
     print("TypeError", e)
 del stock.__annotations__
 print(stock.__annotate__, stock.__annotations__)
+
+# exec and eval with a dict subclass as the globals or the locals (annotationlib's ForwardRef.evaluate): LOAD_GLOBAL
+# through the mapping, LOAD_NAME's globals step the dict itself, functions defined there keep the mapping
+class Z(dict):
+    def __missing__(self, key):
+        if key.startswith(("z", "q")):
+            return "<" + key + ">"
+        raise KeyError(key)
+
+print(eval("(a, len('xy'), zed)", {}, Z(a=1)))
+print(eval("(a, zed)", Z(a=1)))
+zg = Z(a=1)
+zg["zg"] = zg
+exec("def f():\n    return (a, zz, len('abc'))\nx = f()\nprint(x, f.__globals__ is zg, type(f.__globals__).__name__)", zg)
+print(sorted(k for k in zg if k not in ("__builtins__", "zg")))
+zl = Z()
+exec("y = a\nprint(y, q)", {"a": 2}, zl)
+print(dict(zl))
+try:
+    exec("print(nothere)", Z())
+except NameError as e:
+    print("NameError", e)
+for bad in ([], 5):
+    try:
+        eval("1", bad)
+    except TypeError as e:
+        print("TypeError", e)
+try:
+    exec("1", 5)
+except TypeError as e:
+    print("TypeError", e)
+try:
+    eval("1", {}, 5)
+except TypeError as e:
+    print("TypeError", e)
+
+# Union[...] with an argument whose __eq__ answers truthy for anything: not taken for a duplicate (the hashed set)
+class AlwaysEq:
+    def __eq__(self, other):
+        return True
+    def __hash__(self):
+        return id(self)
+    def __repr__(self):
+        return "AlwaysEq()"
+
+print(typing.Union[str, AlwaysEq()], typing.Union[int, int, str], int | str | int)
+class UF:
+    pipe: str | undefined
+    union: typing.Union[str, undefined]
+print(annotationlib.get_annotations(UF, format=annotationlib.Format.FORWARDREF))
+class CF:
+    x: alias[int, undef]
+print(annotationlib.get_annotations(CF, format=annotationlib.Format.FORWARDREF)["x"].evaluate(
+    format=annotationlib.Format.FORWARDREF, globals={"alias": dict}))
