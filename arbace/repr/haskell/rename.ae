@@ -635,14 +635,30 @@
     (k env)
     (let [s (first stmts) v (lval s) env (assoc env :sp (lsp s))
           more (rest stmts)
+          mdo? (and (:mdo env) (seq? fl) (= 'MDoExpr (first fl)))
           sys (fn [m occ] (when (and fl (not (contains? *exts* "RebindableSyntax")))
                             (emit! nil (ext-name "var" m occ))))]
       (case (con v)
         BindStmt (do (sys "GHC.Internal.Base" ">>=")
+                     (when mdo?
+                       (rn env (arg v 3))
+                       (rn-pat (assoc env :patmode :lookup :mdo nil) (arg v 2)))
                      (when (and fl (not (contains? '#{GuardStmt ListComp} fl)) (not (irrefutable? env (arg v 2))))
                        (sys "GHC.Internal.Control.Monad.Fail" "fail"))
-                     (rn env (arg v 3)) (recur (rn-pat env (arg v 2)) more k [fl]))
+                     (if mdo?
+                       (recur env more k [fl])
+                       (do (rn env (arg v 3)) (recur (rn-pat env (arg v 2)) more k [fl]))))
         LetStmt (recur (rn-local-binds env (arg v 2)) more k [fl])
+        ParStmt (let [blocks (arg v 2)
+                      envs (mapv (fn [b] (rn-stmts env (arg (if (L? b) (lval b) b) 2) identity fl)) blocks)
+                      merged (reduce (fn [e e2] (update e :l merge (:l e2))) env envs)]
+                  (sys "GHC.Internal.Base" "return")
+                  (when (> (count blocks) 1) (sys "GHC.Internal.Control.Monad.Zip" "mzip"))
+                  (recur merged more k [fl]))
+        TransStmt (let [env2 (rn-stmts env (arg v 3) identity fl)]
+                    (rn env2 (arg v 5)) (when (just? (arg v 6)) (rn env2 (just-val (arg v 6))))
+                    (sys "GHC.Internal.Base" "return")
+                    (recur env2 more k [fl]))
         BodyStmt (do (when-not (and (empty? more) (not (contains? '#{GuardStmt ListComp} fl)))
                        (sys "GHC.Internal.Base" ">>"))
                      (when (= fl 'ListComp) (sys "GHC.Internal.Control.Monad" "guard"))
@@ -692,7 +708,21 @@
     HsLam (rn-mg env (arg v 3))
     HsCase (do (rn env (arg v 2)) (rn-mg env (arg v 3)))
     HsLet (rn (rn-local-binds env (arg v 2)) (arg v 3))
-    HsDo (rn-stmts env (lval (arg v 3)) (fn [_] nil) (arg v 2))
+    HsDo (let [fl (arg v 2) stmts (lval (arg v 3))
+               mdo? (= 'MDoExpr (if (seq? fl) (first fl) fl))
+               ;; mdo: the binders of all the statements scope over all of them
+               env1 (if mdo?
+                      (let [pats (vec (mapcat (fn [s] (let [sv (lval s)]
+                                                        (case (con sv)
+                                                          BindStmt [(arg sv 2)]
+                                                          [])))
+                                              stmts))]
+                        (reduce (fn [e [occ n]] (assoc-in e [:l [:v occ]] n)) env (binders-of-pats env pats)))
+                      env)]
+           (when (and mdo? (not (contains? *exts* "RebindableSyntax")))
+             (emit! nil (ext-name "var" "GHC.Internal.Control.Monad.Fix" "mfix"))
+             (emit! nil (ext-name "var" "GHC.Internal.Base" "return")))
+           (rn-stmts (assoc env1 :mdo mdo?) stmts (fn [_] nil) fl))
     HsMultiIf (doseq [g (arg v 2)]
                 (let [gv (lval g)] (rn-stmts env (arg gv 2) (fn [e] (rn e (arg gv 3))) 'GuardStmt)))
     ExprWithTySig (do (rn env (arg v 2))
@@ -915,6 +945,8 @@
                            (case (con bv)
                              FunBind (let [nl (arg bv 2) occ (rdr-occ (lval nl))]
                                        {:b b :defs [[occ (mk occ (lsp nl))]]})
+                             PatSynBind (let [occ (rdr-occ (lval (arg (arg bv 2) 2)))]
+                                          {:b b :defs [[occ (lookup-global "data" occ nil)]]})
                              PatBind {:b b :defs (if (= mode :top)
                                                    (vec (for [[occ _] (binders-of-pats env [(arg bv 2)])] [occ (lookup-global "var" occ nil)]))
                                                    (binders-of-pats env [(arg bv 2)]))}
@@ -952,6 +984,21 @@
                                FunBind (let [occ (rdr-occ (lval (arg bv 2)))]
                                          (rn-funbind benv bv :scoped (get @scoped occ)
                                                      :fname (if (= mode :top) (lookup-global "var" occ nil) (get (:l env1) [:v occ]))))
+                               PatSynBind (let [psb (arg bv 2) nl (arg psb 2)
+                                                n (lookup-global "data" (rdr-occ (lval nl)) nil)
+                                                env2 (rn-pat (assoc benv :patmode nil) (arg psb 4))
+                                                args (arg psb 3)]
+                                            (when n (emit! (lsp nl) n))
+                                            (case (con args)
+                                              PrefixCon (doseq [a (arg args 1)]
+                                                          (when-let [b (get (:l env2) [:v (rdr-occ (lval a))])] (emit! (lsp a) b)))
+                                              InfixCon (doseq [a [(arg args 1) (arg args 2)]]
+                                                         (when-let [b (get (:l env2) [:v (rdr-occ (lval a))])] (emit! (lsp a) b)))
+                                              RecCon (doseq [a (arg args 1)]
+                                                       (let [fl (arg (lval a) 2)]
+                                                         (when-let [b (get (:l env2) [:v (rdr-occ (lval fl))])] (emit! (lsp fl) b))))
+                                              nil)
+                                            (rn env2 (arg psb 5)))
                                PatBind (do (rn-pat (assoc benv :patmode pb) (arg bv 2))
                                            (let [rhs (arg bv 4)] (rn-grhss benv rhs)))
                                (rn benv b))))
@@ -1024,6 +1071,7 @@
             (case (con b)
               FunBind (add! "var" (rdr-occ (lval (arg b 2))) nil)
               PatBind (doseq [[occ _] (binders-of-pats {} [(arg b 2)])] (add! "var" occ nil))
+              PatSynBind (add! "data" (rdr-occ (lval (arg (arg b 2) 2))) nil)
               nil))
           InstD
           (let [i (arg v 2)
