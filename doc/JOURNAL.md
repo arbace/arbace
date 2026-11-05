@@ -506,3 +506,32 @@ smaller parts), each on a branch of its own, held for after the tag (the merge p
 - Results: `bin/hsi runtime check` the same forms; `bin/hsi check` (samples, synthetic) 62 of 63, none unclassed, the controls
   failing; `bin/hsi check --aot` on GT8's essential list 123 of 123, every run the same as on hsi; `bin/hsi repl-session` 7 of
   7 byte for byte, the control failing; `bin/reap --record`, `bin/reap` 20 of 20 cells, 0 problems.
+
+## 2026-11-05: HF5-HF6's first slice, the match compiler and Core to STG (branch `haskell-hf56`, from `haskell-hf3`)
+
+- What: the front end's elaborated program (HF3) made STG in hsi's format and run on hsi. `arbace/repr/haskell/desugar.ae`
+  (HF5: GHC's match compiler for Haskell 2010's patterns, guards, pattern guards, list comprehensions, `refineDefaultAlt`,
+  lambdas collected), `arbace/repr/haskell/tostg.ae` (HF6: CorePrep's A-normal form, saturation, string literals, the
+  data constructors' workers, strict fields, top-level floats; CoreToStg's right-hand sides; Stg/FVs's free variables;
+  Unarise a no-op on Haskell 2010; the module's `stg/data`, dictionary selectors, newtypes and newtype classes erased,
+  `:Main.main`), `arbace/repr/haskell/stgcmp.ae` (the STG judge), `bin/repr-haskell stg-check` (`make
+  repr-haskell-stg-check`), `test/haskell/stg/` (nine programs with a `main`). `typecheck.ae` exposes its constructor,
+  type and class tables (tags, strict marks, flavours) and its record selectors' case no longer scrutinises an unbound
+  variable. Details in doc/haskell/FRONTEND-SURVEY.md, "As built: HF5-HF6 (first slice)".
+- Sources: GHC 9.14.1's `compiler/GHC/HsToCore/Match.hs`, `Match/Constructor.hs`, `Match/Literal.hs`, `GuardedRHSs.hs`,
+  `ListComp.hs`, `compiler/GHC/Core/Utils.hs` (`refineDefaultAlt`), `compiler/GHC/CoreToStg/Prep.hs`, `CoreToStg.hs`,
+  `compiler/GHC/Stg/Unarise.hs`, `Stg/FVs.hs`, `compiler/GHC/Types/Id/Make.hs` (https://downloads.haskell.org/ghc/9.14.1/
+  ghc-9.14.1-src.tar.xz, SHA-256 `2a83779c...101e77`, BSD-3 Glasgow license), followed for their algorithms and output's
+  shape, not translated line by line (a deviation from HFS5 (a), proposed for the user: the survey's proposal 1); the
+  files carry GHC's notice, LICENSE.md and doc/ARBACE.md record them. STG's format: doc/haskell/STG-SPEC.md and
+  `go/arbace/hs/load.ae` of `haskell-integrate`.
+- `haskell-integrate` (7bda6b88b) merged in for hsi; conflicts in the Makefile, `bin/repr-haskell` (the helper's ghc
+  line), this journal and `tools/hsdump/HsDump.hs`, each resolved by keeping both sides.
+- Results: the programs of `test/haskell/stg/` compiled from source by Arbace's front end and run on hsi: 9 of 9 with GHC's
+  `-O0` output byte for byte, the negative control failing; desugared Core equal to GHC's tc dump in 152 of 220 bindings of
+  the typecheck samples (107 before the match compiler); STG equal to GHC's `-O0` dumps in a part of the bindings, the
+  classes in the survey (GHC's simple optimiser, AbsBinds' tuples, the failure join points). Light: hsi's light driver
+  built in the worktree, the libraries' dumps of `haskell-integrate`'s worktree (`HSI_LIBS`), at most 3 GiB a run.
+- Alternatives: a line-by-line port first (HFS5 (a)) was weighed against getting the pipeline end to end in this session;
+  the end-to-end slice was chosen so the run judge exists, and the port is proposed as a choice (port now, or close the
+  judges' classes function by function).
