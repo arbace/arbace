@@ -450,9 +450,37 @@
       (= n "noundef") (= t 'void)
       :else false)))
 
-(defn- sized? [t]
-  (let [t (resolve-type t)]
-    (not (or (= t 'void) (= t 'opaque) (= t 'label) (= t 'metadata) (and (seq? t) (= (first t) 'fn))))))
+(defn- scalable?
+  "Type::isScalableTy: a scalable vector, or an aggregate or a target type (aarch64.svcount, riscv.vector.tuple) holding one."
+  ([t] (scalable? t #{}))
+  ([t seen]
+   (let [rt (resolve-type t)]
+     (cond
+       (contains? seen t) false
+       (and (seq? rt) (= 'vscale (first rt))) true
+       (and (seq? rt) (= 'array (first rt))) (scalable? (nth rt 2) (conj seen t))
+       (and (seq? rt) (#{'struct 'packed} (first rt))) (boolean (some #(scalable? % (conj seen t)) (rest rt)))
+       (and (seq? rt) (= 'target (first rt))) (contains? #{"aarch64.svcount" "riscv.vector.tuple"} (second rt))
+       :else false))))
+
+(defn- sized?
+  "Type::isSized: not void, label, metadata, token, a function or an opaque struct; a struct holding a scalable vector
+  only when all its elements are the same scalable vector; a target type of an unknown name not."
+  ([t] (sized? t #{}))
+  ([t seen]
+   (let [rt (resolve-type t)]
+     (cond
+       (or (#{'void 'opaque 'label 'metadata 'token} rt) (and (seq? rt) (= (first rt) 'fn))) false
+       (and (named-type? rt)) false   ; a name with no definition: an opaque struct
+       (contains? seen t) false
+       (and (seq? rt) (#{'struct 'packed} (first rt)))
+       (let [es (rest rt)]
+         (if (and (seq es) (every? #(= 'vscale (first (shape (resolve-type %)))) es) (apply = (map resolve-type es)))
+           true
+           (every? #(and (not= 'vscale (first (shape (resolve-type %)))) (sized? % (conj seen t))) es)))
+       (and (seq? rt) (= 'array (first rt))) (sized? (nth rt 2) (conj seen t))
+       (and (seq? rt) (= 'target (first rt))) (str/includes? (second rt) ".")
+       :else true))))
 
 (defn- pow2? [k] (and (pos? k) (zero? (bit-and (long k) (dec (long k))))))
 
@@ -756,16 +784,19 @@
       (= h 'alloca) (let [t (resolve-type (norm-type (first (strip-flags ps))))]
                       (when (or (and (seq? t) (= (first t) 'fn)) (#{'void 'label 'metadata 'token 'x86_amx} t))
                         (verr :parser/alloca "invalid type for alloca" {:at [:ty]}))
+                      (when (and (nil? (:align o)) (not (sized? t))) (verr :parser/alloca "Cannot allocate unsized type" {:at [:ty]}))
                       (check-align (:align o)))
       (= h 'landingpad) (doseq [[i c] (map-indexed vector (filter seq? (rest ps)))]
                           (let [[k ct] c ct (resolve-type (norm-type ct))]
                             (when (and (= k 'catch) (seq? ct) (= 'array (first ct))) (verr :parser/landingpad "'catch' clause has an invalid type" {:at [:after "catch"]}))
                             (when (and (= k 'filter) (not (and (seq? ct) (= 'array (first ct))))) (verr :parser/landingpad "'filter' clause has an invalid type" {:at [:after "filter"]}))))
       (= h 'load) (do (when-not (ptr-type? (norm-type (first (second ps)))) (verr :parser/load "load operand must be a pointer to a first class type" {:at [:op 1]}))
+                      (when (and (nil? (:align o)) (not (sized? (norm-type (first ps*))))) (verr :parser/load "loading unsized types is not allowed" {:at [:ty]}))
                       (when (and (:atomic o) (nil? (:align o))) (verr :parser/atomic-align "atomic load must have explicit non-zero alignment"))
                       (check-align (:align o)))
       (= h 'store) (do (when-not (ptr-type? (norm-type (first (second ps)))) (verr :parser/store "store operand must be a pointer" {:at [:op 1]}))
                        (when-not (first-class? (norm-type (first (first ps)))) (verr :parser/store "store operand must be a first class value" {:at [:ty]}))
+                       (when (and (nil? (:align o)) (not (sized? (norm-type (first (first ps)))))) (verr :parser/store "storing unsized types is not allowed" {:at [:ty]}))
                        (when (and (:atomic o) (nil? (:align o))) (verr :parser/atomic-align "atomic store must have explicit non-zero alignment"))
                        (check-align (:align o)))
       (= h 'getelementptr) (let [[st base & idxs] ps*]
@@ -777,6 +808,8 @@
                                    (when (and @w (not= @w (shape it))) (verr :parser/gep "getelementptr vector index has a wrong number of elements" {:at [:op (+ 2 k)]}))
                                    (vreset! w (shape it)))))
                              (when (and (seq idxs) (not (sized? (norm-type st)))) (verr :parser/gep "base element of getelementptr must be sized" {:at [:op 1]}))
+                             (when (let [rt (resolve-type (norm-type st))] (and (seq? rt) (#{'struct 'packed} (first rt)) (scalable? rt)))
+                               (verr :parser/gep "getelementptr cannot target structure that contains scalable vector type" {:at [:op 1]}))
                              (when-not (gep-indexed-type (norm-type st) idxs) (verr :parser/gep "invalid getelementptr indices" {:at [:op 1]})))
       (= h 'phi) (do (when (and (some keyword? ps) (not (fp-class-compatible? (norm-type (first ps*)))))
                        (verr :parser/phi "fast-math-flags specified for phi without floating-point scalar or vector return type" {:at [:body 0]}))
@@ -2440,6 +2473,9 @@
       (let [[_ ps] (split-inst b)] (.put users (global-key c) (conj (vec (.get users (global-key c))) [(call-fty (first ps) (nth ps 2)) x]))))
     (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
       (verify-function f (into {} users)))
+    (doseq [f forms :when (= (first f) 'llvm/global)]
+      (visiting (binding [*ctx* {:global f}]
+        (when (scalable? (norm-type (nth f 2))) (verr :verifier/global "Globals cannot contain scalable types")))))
     (doseq [f forms :when (= (first f) 'llvm/global)]
       (let [[_ _ _ & more] f o (apply hash-map (if (and (seq more) (not (keyword? (first more)))) (rest more) more))]
         (when (and (:comdat o) (#{:external :extern_weak} (:linkage o))) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!"))))
