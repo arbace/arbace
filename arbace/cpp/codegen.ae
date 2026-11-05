@@ -1018,7 +1018,6 @@
               leaves
               (let [[ct cv] (leaves-constant leaves s)]
                 ((if (:internal v) #(swap! *top* assoc-in [:lazy nm] %) add-top!) (apply list 'llvm/global (gsym nm) ct cv (concat link [:align a]))))
-              (:linkonce v) (fail :template-static "a class template's static member initialized dynamically (its guard)")
               :else
               (do (add-top! (apply list 'llvm/global (gsym nm) (if (abi/ref? t) 'ptr (list 'array s 'i8)) (if (abi/ref? t) 'null 'zeroinitializer) (concat link [:align a])))
                   (swap! dyn conj id)))))))
@@ -1028,8 +1027,23 @@
             nm (str "_GLOBAL__sub_I_" file)]
         (binding [*f* state]
           (doseq [id @dyn]
-            (let [v (sema/var* id) t (:ty v) addr (gsym (abi/mangle-var v))]
+            (let [v (sema/var* id) t (:ty v) addr (gsym (abi/mangle-var v))
+                  ;; a template's static member (linkonce_odr, defined in each unit that uses it): initialized once,
+                  ;; behind its guard variable _ZGV..., as clang writes it (CODEGEN.md G3)
+                  guard (when (:linkonce v)
+                          (let [g (str "_ZGV" (subs (abi/mangle-var v) 2))]
+                            (add-top! (list 'llvm/global (gsym g) 'i64 0 :linkage :linkonce_odr :align 8))
+                            g))
+                  done (when guard
+                         (let [l1 (new-label "init") l2 (new-label "init.done")
+                               gv (val! (list 'load 'i8 ['ptr (gsym guard)] :align 8))
+                               c (val! (list 'icmp :eq 'i8 gv 0))]
+                           (condbr! c l1 l2)
+                           (begin! l1)
+                           (emit! (list 'store ['i8 1] ['ptr (gsym guard)] :align 8))
+                           l2))]
               (with-full (emit-init addr t (:ginit v)))
+              (when done (begin! done))
               (let [bt (abi/unq t)]
                 (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
                   (declare! "__cxa_atexit" 'i32 '[ptr ptr ptr])
