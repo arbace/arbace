@@ -53,7 +53,9 @@ if [ "$images" != none ]; then
   for l in "${dirs[@]}"; do [ -d "$l" ] && ia+=(--lib "$l"); done
   "$hsi" image --out "$images" "${ia[@]}" >&2 || { echo "hsi check: hsi image failed" >&2; exit 1; }
 fi
-export root work hsi libs helper helper_hash libdir ref keep images
+# the RTS's headers (HsFFI.h, Rts.h) for a program's own C, as ghc gives its C compiler
+rtsinc=$(ls -d "$libdir"/../lib/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1)
+export root work hsi libs helper helper_hash libdir ref keep images rtsinc
 export HSI_TIMEOUT=${HSI_TIMEOUT:-60}
 # programs that need more than ARBACE_MEM_GIB name their own cap (ID=GIB ...); none today: the deepest stacks, Loop
 # (7.3 GB of RSS) and T16846 (9.7 GB), pass under the default 16 GiB (measured alone, 2026-11-03)
@@ -113,13 +115,21 @@ one() {
   IFS=$'\037' read -r id src main flags ropts name sin kind <<< "$1"
   local res=$work/res/${id//\//_}
   if [ "$main" = - ]; then echo "{:id \"$id\" :result :no-dump :error \"no main file\"}" > "$res"; return 0; fi
-  # the dump's flags: all.T's, less a test's own C, Cmm, assembly and objects (the helper compiles Haskell only; hsi
-  # stops at the C function it would call: the class :test-c)
-  local fl=() f; if [ "$flags" != - ]; then for f in $flags; do
-    case $f in *.c|*.cmm|*.s|*.S|*.o|*.h|*.cpp|*.cc) ;; *) fl+=("$f") ;; esac; done; fi
+  # the dump's flags: all.T's, less a test's own C, Cmm, assembly and objects (the helper compiles Haskell only); its
+  # C files built by ci into a node program hsi loads (HES64 (a), bin/hsi cnodes), with the flags the C reads (-I, -D)
+  local fl=() f cfiles=() cflags=() optc=""; if [ "$flags" != - ]; then for f in $flags; do
+    # -optcX: X for the C compiler, a lone -D, -I or -U joined to the next one's (-optc-D -optcFOO is -DFOO)
+    if [[ $f == -optc* ]]; then
+      f=${f#-optc}
+      if [ -n "$optc" ]; then cflags+=("$optc$f"); optc=""; continue; fi
+      case $f in -D|-I|-U) optc=$f ;; -D*|-I*|-U*) cflags+=("$f") ;; esac
+      continue
+    fi
+    case $f in *.c) cfiles+=("$f") ;; *.o) [ -f "$src/${f%.o}.c" ] && cfiles+=("${f%.o}.c") ;; *.cmm|*.s|*.S|*.h|*.cpp|*.cc) ;; -I*|-D*|-U*) fl+=("$f"); cflags+=("$f") ;; *) fl+=("$f") ;; esac; done; fi
   # the dump's key: the main file, the flags, the helper; a test of several modules: its directory's sources too
   local key prog
   key=$( { echo "$flags $kind"; cat "$src/$main"
+           for f in ${cfiles[@]+"${cfiles[@]}"}; do cat "$src/$f" 2>&1; done
            if [ "$kind" != plain ] && [ "$kind" != compile_and_run ]; then
              (cd "$src" && find . -type f \( -name '*.hs' -o -name '*.lhs' -o -name '*.hs-boot' -o -name '*.c' -o -name '*.h' \) | LC_ALL=C sort | xargs sha256sum)
            fi; } | sha256sum | cut -c1-16)-${helper_hash:0:16}
@@ -137,6 +147,16 @@ one() {
     rm -rf "$prog/obj"; touch "$prog/ok"
   fi
   local la=() l
+  if [ ${#cfiles[@]} -gt 0 ]; then
+    if [ ! -f "$prog/c.ok" ]; then
+      if ! (cd "$src" && "$root/bin/hsi" cnodes "$prog/c.nodes" ${cflags[@]+"${cflags[@]}"} -I"$rtsinc" "${cfiles[@]}") > "$prog/c.log" 2>&1; then
+        local e; e=$(grep -v '^==\|^Reflection\|^$' "$prog/c.log" | tail -n 1 | cut -c1-160 | sed 's/\\/\\\\/g; s/"/\\"/g')
+        echo "{:id \"$id\" :result :hsi :status 3 :message \"hsi: ci: $e\" :dump $td :run 0}" > "$res"; return 0
+      fi
+      touch "$prog/c.ok"
+    fi
+    la+=(--c "$prog/c.nodes")
+  fi
   IFS=: read -r -a dirs <<< "$libs"
   for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
   [ "$images" != none ] && la+=(--image "$images")

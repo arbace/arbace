@@ -1,0 +1,36 @@
+;; bin/hsi cnodes OUT [OPTION...] FILE... (HES64 (a), doc/haskell/HASKELL-EVAL-SURVEY.md "As built: HE6's second half"): a
+;; Haskell program's own C files read by repr/c, checked by ci's checker and linked with what they need of musl (ci's
+;; prebuilt runtime, arbace.c.runtime/link-text) into one node program, OUT, which hsi run --c loads into go/arbace/ci over
+;; the machine's own memory and system calls. hsi's glue (test/haskell/hsi/c/glue.c: musl's flush and allocator) is linked
+;; with them, and a main of nothing (test/haskell/hsi/c/main.c) when the files have none: hsi initializes musl itself
+;; (__init_libc) and calls no main. Run on the tools' host from the checkout (bin/hsi cnodes); the exit status 0, else 1
+;; with ci's reason (read-error, check-error, refused) on the standard error.
+(require '[arbace.c.run :as run]
+         '[arbace.c.runtime :as rt]
+         '[arbace.c.musl :as musl]
+         '[arbace.repr.c.host :as host]
+         '[arbace.string :as str])
+
+(let [[root out & args] *command-line-args*
+      h (host/load-host (str root "/test/c/host"))
+      opts (vec (for [a args :when (str/starts-with? a "-")
+                      ;; GHC's flags for the C compiler: the include paths and defines are the C's, the rest gcc's own
+                      :when (re-find #"^-(I|D|U|std=)" a)]
+                  a))
+      files (vec (remove #(str/starts-with? % "-") args))
+      base (System/getProperty "user.dir")
+      us (mapv #(run/read-unit h opts base %) files)
+      bad (first (remove #(= :ok (:status %)) us))
+      fail (fn [msg] (binding [*out* *err*] (println msg)) (System/exit 1))]
+  (when bad (fail (str (name (:status bad)) ": " (:message bad))))
+  (let [has-main (some #(contains? (musl/unit-defs (:forms (:rd %))) "main") us)
+        glue (cond-> [(run/read-unit h [] base (str root "/test/haskell/hsi/c/glue.c"))]
+               (not has-main) (conj (run/read-unit h [] base (str root "/test/haskell/hsi/c/main.c"))))
+        _ (when-let [b (first (remove #(= :ok (:status %)) glue))] (fail (str "glue: " (name (:status b)) ": " (:message b))))
+        lib (rt/library h root)
+        r (try {:text (rt/link-text lib (into us glue))}
+               (catch arbace.lang.ExceptionInfo e
+                 {:refused (or (:ci/refused (ex-data e)) :error) :message (.getMessage e)}))]
+    (if (:text r)
+      (do (spit out (:text r)) (System/exit 0))
+      (fail (str "refused (" (name (:refused r)) "): " (:message r))))))
