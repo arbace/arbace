@@ -415,7 +415,10 @@
                   ;; a value trait (G4): __is_same(T, U), its arguments types
                   (and (= k :id) (= "(" (peek)) (contains? value-traits t))
                   (let [_ (next!) txt (run "(" ")")]
-                    (trait-value scope t (mapv (fn [a] (list 'cpp/text a)) (split-top-commas txt))))
+                    (trait-value scope t (mapv (fn [^String a] (if (str/ends-with? a "...")
+                                                                 (list 'pack-expand (ct/parse-type (str/trim (subs a 0 (- (count a) 3)))))
+                                                                 (list 'cpp/text a)))
+                                               (split-top-commas txt))))
                   (= k :num) (num t)
                   (= k :chr) (long (int (.charAt ^String t 1)))
                   ;; a call of a constexpr function (an array bound `int[sq(3)]`) on constant arguments
@@ -1193,7 +1196,12 @@
   (or (get-in @*tmpls* [tid :insts args])
       (let [t (tmpl tid)
             ps (bind-scope (:scope t) (:params t) args nil)
+            ;; the template's associated constraints ([temp.constr.decl]/3: its requires-clause, then the trailing one;
+            ;; P14 (b)): not satisfied, no specialization ([temp.deduct]/5, [over.match.viable]/3)
+            _ (when-let [rc (:constraint t)]
+                (when-not (sema/constraint-satisfied? ps rc) (fail :template "constraints not satisfied for " (:name t))))
             fid (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/declare-fn! ps (:pattern t)))
+            _ (when-not fid (fail :template "constraints not satisfied for " (:name t)))
             ;; the specialization is found through its template, not by its name in the parameters' scope
             _ (.remove ^java.util.HashMap (:names ps) (:name (:pattern t)))]
         (upd-fn! fid assoc :lazy true :inline true :keep-def-scope true :tinst {:tid tid :args args :tsig (sym-sig t) :tn (tn-types t)})
@@ -1442,7 +1450,7 @@
                         cands (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))
                                             (= (map (juxt :kind :pack) ps) (map (juxt :kind :pack) (:params (tmpl (:id %))))))
                                       (.get ^java.util.HashMap (:names scope) (:name n)))]
-                    (when (seq cands)
+                    (when (and (seq cands) (not (System/getenv "CPP_NO_REDECL")))
                       (when-let [sig (try (dissoc (sema/resolve-type (bind-scope scope ps nil -1) qt) :cq) (catch arbace.lang.ExceptionInfo _ nil))]
                         (some #(when (= (canonical sig) (canonical (try (sym-sig (tmpl (:id %))) (catch arbace.lang.ExceptionInfo _ nil)))) (:id %)) cands)))))]
       (if old
@@ -1450,7 +1458,7 @@
         (when body? (upd-tmpl! old #(assoc % :pattern pattern :params (tparams n) :sig nil :decls (conj (vec (:decls %)) (:pattern %)))))
         (let [tid (next-id)]
           (swap! *tmpls* assoc tid {:id tid :tk :fn :name (:name n) :scope scope :path (:path scope) :params (tparams n) :pattern pattern
-                                    :pos (:_b n) :insts {}})
+                                    :pos (:_b n) :insts {} :constraint (:requiresClause n)})
           ;; a constructor template is found through its class (class-init's candidates), not by name
           (if ctor?
             (abi/update-cls! (:cls scope) update :ctor-tmpls (fnil conj []) tid)
@@ -1626,5 +1634,6 @@
                              (when (and e (#{:tparam :tdep :tspec} (:k (:ty e))))
                                [{:e :type :ty {:k :tdep :base (:ty e) :names (vec (rest parts))} :pos -1}])))
          :trait-type (fn [scope nm forms] (if (contains? type-traits nm) (trait-type scope nm forms) (fail :type "unknown type " nm)))
+         :trait-text (fn [scope t] (binding [sema/*cutoff* Long/MAX_VALUE] (eval-text scope t)))
          :pending pending
          :wrap (fn [f] (binding [*tmpls* (atom {}) *scanned* (atom #{})] (f)))})

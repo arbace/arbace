@@ -486,10 +486,44 @@
   (let [^java.util.HashMap m (:names scope)]
     (some (fn [e] (when (and (= :fn (:e e)) (same-sig? (fnd (:id e)) f)) (:id e))) (.get m (case (:kind f) :ctor " ctor" :dtor " dtor" (:name f))))))
 
+(defn- noexcept-of
+  "Whether a function type's spelling says noexcept: `noexcept`, `noexcept(true)`, or noexcept(e) of a constant e
+  true ([except.spec]/2; G4: the headers' noexcept(__and_<...>::value), evaluated in `scope`, not noexcept when it
+  cannot be)."
+  [scope ^String qt]
+  (let [qt (or qt "")
+        m (re-matcher #"\bnoexcept\b" qt)]
+    (if-not (.find m)
+      false
+      (let [i (.end m)
+            j (loop [j i] (if (and (< j (count qt)) (Character/isWhitespace (.charAt qt j))) (recur (inc j)) j))]
+        (if (or (>= j (count qt)) (not= \( (.charAt qt j)))
+          true
+          (let [k (loop [k (inc j) d 1] (cond (>= k (count qt)) nil (= \( (.charAt qt k)) (recur (inc k) (inc d))
+                                               (= \) (.charAt qt k)) (if (= d 1) k (recur (inc k) (dec d))) :else (recur (inc k) d)))
+                e (when k (str/trim (subs qt (inc j) k)))]
+            (cond (nil? e) false
+                  (= e "true") true
+                  (= e "false") false
+                  :else (let [v (try (when-let [h (:trait-text @hooks)] (binding [*cutoff* Long/MAX_VALUE] (h scope e)))
+                                     (catch arbace.lang.ExceptionInfo _ nil))]
+                          (and (number? v) (not= 0 (long v)))))))))))
+
+(defn constraint-satisfied?
+  "A constraint expression's satisfaction in `scope` ([temp.constr.constr]: the atomic constraints constant expressions
+  of type bool; a substitution failure or an expression not constant is not satisfied)."
+  [scope rc]
+  (try (not= 0 (long (const-int scope rc)))
+       (catch arbace.lang.ExceptionInfo e
+         (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "constraint not satisfied:" (.getMessage e))))
+         false)))
+
 (defn- declare-fn!
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
-  their declaration."
+  their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
   [scope n]
+  (if (and (:trailingRequiresClause n) (not (constraint-satisfied? scope (:trailingRequiresClause n))))
+    nil
   (let [q (when (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "FunctionDecl" "CXXConversionDecl"} (:kind n)) (qualifier-before n))
         home (if (seq q)
                (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
@@ -507,7 +541,7 @@
            :static (and cid (= "static" (:storageClass n)))
            :virtual (boolean (:virtual n)) :pure (boolean (:pure n))
            :constexpr (boolean (:constexpr n))
-           :noexcept (boolean (re-find #"\bnoexcept\b(?!\s*\(\s*false)" (or qt "")))
+           :noexcept (noexcept-of home qt)
            :noexcept-false (boolean (re-find #"\bnoexcept\s*\(\s*false" (or qt "")))
            :linkage (if (linkage-c? home) :c :cpp)
            :internal (boolean (or (and (not cid) (= "static" (:storageClass n))) (:internal home)))
@@ -539,7 +573,7 @@
           (when (and cid (:virtual f)) (abi/update-cls! cid update :virtuals (fnil conj []) id))
           (when cid (abi/update-cls! cid update :methods (fnil conj []) id))
           (swap! *order* conj [:fn id])))
-    id))
+    id)))
 
 (defn- declare-var!
   [scope n storage]
@@ -554,7 +588,9 @@
         init (first (kids n))
         st (if (:cls home) :member-static storage)]
     (if (and old (seq q))
-      (do (upd-var! old assoc :init init :init-style (:init n) :defined true :def-scope scope) old)
+      (do (upd-var! old assoc :init init :init-style (:init n) :defined true :def-scope scope)
+          (when (header-node? n) (upd-var! old #(cond-> (assoc % :defined false :pending-def true) (not (:internal %)) (assoc :linkonce true))))
+          old)
       (let [id (next-id)
             v {:id id :name (:name n) :ty ty :storage st :init init :init-style (:init n) :path (:path home)
                :linkage (if (linkage-c? home) :c :cpp)
@@ -564,7 +600,10 @@
                :internal (boolean (or (:internal home) (= "static" (:storageClass n)) (and (= st :global) (:c ty) (not= "extern" (:storageClass n)))))
                :def-scope scope
                :pos (long (or (:_b n) 0))}]
-        (swap! *vars* assoc id v)
+        ;; a header's definition: defined when odr-used (G4: clang emits an unused inline variable not at all)
+        (swap! *vars* assoc id (if (and (header-node? n) (:defined v) (= st :global))
+                                 (cond-> (assoc v :defined false :pending-def true) (not (:internal v)) (assoc :linkonce true))
+                                 v))
         (enter! home (:name n) {:e :var :id id :pos (:pos v)})
         (when (:cls home) (abi/update-cls! (:cls home) update :statics (fnil conj []) id))
         (swap! *order* conj [:var id])
@@ -1625,6 +1664,11 @@
          e (binding [*cutoff* Long/MAX_VALUE] (own-names outer nm)) :when (= :fn (:e e))]
      (:id e))))
 
+(def ^:private std-builtins
+  {"move" :cast "forward" :cast "move_if_noexcept" :cast "as_const" :cast "forward_like" :cast "addressof" :addr "__addressof" :addr})
+
+(declare cast-expr)
+
 (defn analyze-call [ctx callee args]
   (case (:op callee)
     :mbound (let [ft (:fty callee)]
@@ -1640,10 +1684,19 @@
                  cands (concat (:fns callee) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
                  _ (when (and (empty? cands) (empty? (:tmpls callee))) (fail :name "unknown name " (:name callee)))
                  fid (resolve-overload cands args obj)
-                 f (fnd fid)]
+                 f (fnd fid)
+                 std-builtin (when (and (= 1 (count args)) (= [[:ns "std"]] (:path f)) (not (:cls f)))
+                               (std-builtins (:name f)))]
+             (cond
+               ;; the standard library's functions clang builds in (Builtins.td's LIBBUILTIN std::move, forward,
+               ;; move_if_noexcept, as_const, addressof, __addressof, forward_like: CodeGen folds the call to its
+               ;; argument, no function emitted, even at -O0; G4)
+               (= std-builtin :cast) (cast-expr ctx (:ret (:ty f)) (first args) true)
+               (= std-builtin :addr) (let [e (first args)] {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr})
+               :else
              (if (and (:cls f) (not (:static f)))
                (method-call ctx fid obj args (not (:qualified callee)))
-               (fn-call ctx fid args)))
+               (fn-call ctx fid args))))
     (let [p (rv callee)
           ft (let [t (abi/unq (:ty p))] (if (abi/ptr? t) (:to t) t))]
       (when-not (abi/fn? ft) (fail :call "call of a non-function"))
@@ -1879,6 +1932,11 @@
   (case (:kind n)
     "IntegerLiteral" (let [t (int-type-of (get-in n [:type :qualType]))] {:op :int :v (let [v (bigint (:value n))] (if (> v Long/MAX_VALUE) (long (- v 18446744073709551616N)) (long v))) :ty t :cat :pr})
     "CharacterLiteral" {:op :int :v (long (:value n)) :ty (int-type-of (get-in n [:type :qualType] "char")) :cat :pr}
+    ;; a type trait's value (G4: the headers' __is_constructible(T, Args...)), its text evaluated by the templates' hook
+    "TypeTraitExpr" (let [t (node-text n)
+                          v (if-let [h (:trait-text @hooks)] (h (:scope ctx) t) (fail :expr "a type trait"))]
+                      (when (map? v) (fail :expr "a dependent type trait " t))
+                      {:op :int :v (long v) :ty (if (re-find #"^\s*__(is|has|reference)_" t) abi/bool* abi/ulong*) :cat :pr})
     "CXXBoolLiteralExpr" {:op :int :v (if (:value n) 1 0) :ty abi/bool* :cat :pr}
     "FloatingLiteral" (let [qt (get-in n [:type :qualType])]
                         {:op :float :v (Double/parseDouble (:value n)) :lit (when (= qt "long double") (:value n))

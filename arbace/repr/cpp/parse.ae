@@ -953,7 +953,7 @@
 
 (declare parse-expr parse-cast-expr parse-postfix parse-primary parse-braced-init parse-compound-stmt parse-lambda
          parse-type-specs parse-abstract-declarator parse-decl-specs parse-statement build-type parse-param-list
-         declare-params! parse-requires-expr skip-requires-clause! parse-init-clause)
+         declare-params! parse-requires-expr skip-requires-clause! requires-clause! parse-init-clause)
 
 (defn- node
   "A node over the tokens b..e."
@@ -2121,7 +2121,7 @@
                   (do (seek! p save) (adv! p)
                       (let [ob (ix p)]
                         ;; G4: the operand parsed for the code generator's decltype, keyed by its text
-                        (when (and *full-headers* (not (skim? p)))
+                        (when (and *full-headers* (not (skim? p)) (not (System/getenv "CPP_NO_DT")))
                           (let [x (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x))))]
                             (when (map? x) (let [^HashMap m (stv p DECLTYPES)] (.put m (str/replace (tok-text p (inc ob) (dec (long (or (some-> (angle-paren-close p ob) long) ob))))
                                                                                                   #"\s+" "") x)))))
@@ -2848,7 +2848,7 @@
                   _ (skip-asm-label! p)
                   virts (virt-specifiers p)
                   as2 (attr-nodes p)
-                  _ (when (is? p "requires") (skip-requires-clause! p))
+                  rc (when (is? p "requires") (requires-clause! p))
                   ev (if (seq virts) (ne (peek virts)) (long (:e d)))
                   [pure dflt del] (when (is? p "=")
                                     (cond (let [^T n (nxt p 1)] (and (identical? :num (.-k n)) (= "0" (.-s n)))) (do (adv! p) (adv! p) [true nil nil])
@@ -2927,6 +2927,7 @@
                             dk (assoc :_dflt dk)
                             del (assoc :explicitlyDeleted true)
                             (:va fs) (assoc :variadic true)
+                            rc (assoc :trailingRequiresClause rc)
                             (:args lp) (assoc :_args (:args lp))))
                   ;; a friend naming a function template's specialization (friend void ns::f<int>();): its arguments
                   n (if (and (:friend ds) (:args lp) (nil? tmpl))
@@ -3203,7 +3204,7 @@
         (adv! p)
         (let [[ps names] (parse-template-params p)
               _ (expect! p ">")
-              _ (when (is? p "requires") (skip-requires-clause! p))]
+              rc (when (is? p "requires") (requires-clause! p))]
           (cond
             (is? p "template") (parse-template-decl p ctx ob (inc depth))
             (is? p "concept")
@@ -3218,7 +3219,7 @@
             :else
             (do (st! p THDR {:names (vec (remove nil? names)) :n (count names) :params ps})
                 (let [ns (try (parse-external-decl p (if (= ctx :member) :member :top)) (finally (st! p THDR nil)))]
-                  (mapv #(wrap-template p % hb ob ps names depth) ns)))))))))
+                  (mapv #(cond-> (wrap-template p % hb ob ps names depth) rc (assoc :requiresClause rc)) ns)))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Namespaces, linkage, using, static_assert, export
@@ -3486,6 +3487,7 @@
 (defn- parse-condition-var [^P p ds base]
   (let [d (parse-declarator p :named)
         qn (:name (last (name-chain d)))
+        _ (when-not qn (perr p "a condition's declarator"))
         nm (name-plain qn)
         ty (build-type base d)
         [x init] (cond (accept! p "=") [(parse-init-clause p) "c"]
@@ -3538,6 +3540,18 @@
       (or (is? p "true") (is? p "false") (identical? :num (tk (cur p)))) (adv! p)
       :else (perr p "a constraint"))
     (when (or (is? p "&&") (is? p "||")) (adv! p) (recur))))
+
+(defn- requires-clause!
+  "A requires-clause at its `requires` (P14 (b), the code generator's mode): skipped as before, and in full-header mode
+  its constraint-logical-or-expression parsed as an expression node (clang's TemplateParameterList::getRequiresClause,
+  FunctionDecl::getTrailingRequiresClause), or nil when it does not parse as one."
+  [^P p]
+  (let [b (ix p)
+        _ (skip-requires-clause! p)
+        e (ix p)]
+    (when (and *full-headers* (not (skim? p)) (not (t= (tok-at p (inc b)) "requires")) (not (System/getenv "CPP_NO_RC")))
+      (let [x (tentatively p (fn [p] (seek! p (inc b)) (let [x (with-gt p true (parse-expr p))] (when (= (ix p) e) x))))]
+        (when (map? x) x)))))
 
 (defn parse-requires-expr [^P p]
   (let [b (ix p)]
@@ -3624,6 +3638,7 @@
 
 (defn- decl-or-decline [^P p ctx]
   (let [b (ix p)]
+    (when (= "2" (System/getenv "CPP_HDR_TRACE")) (binding [*out* *err*] (println "decl at" (.-f (tok-at p b)) (.-o (tok-at p b)))))
     (try (parse-external-decl p ctx)
          (catch arbace.lang.ExceptionInfo x
            (if (:cpp/parse (ex-data x))
@@ -3730,7 +3745,9 @@
                   (let [out (into out (decl-seq p :top))]
                     (if (eof? p) out (do (adv! p) (recur out)))))]
       {:nodes (let [^ArrayList us (stv p USES)
-                    r (when (seq us) (sema/resolve-uses (vec us) year))]
+                    ;; (not in full-header mode: the headers' classes' uses make its graph cyclic; the code generator
+                    ;; decides the exception specifications itself)
+                    r (when (and (seq us) (not *full-headers*)) (sema/resolve-uses (vec us) year))]
                 (if (seq r) (sema/patch-defaulted nodes r) nodes))
        :declines (stv p DECLINES) :reasons (into {} (stv p REASONS)) :root (stv p ROOT) :skim-cache cached
        :decltypes (into {} (stv p DECLTYPES))}))))
