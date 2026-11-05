@@ -1909,3 +1909,10 @@ with Matching, `arbace/repr/ocaml/typer/`; `bin/oi typer-check`, `run-native`). 
 (test/ocaml/typer/, 36) are typed with the toplevel's printed types, translated to Lambda equal to the oracle's raw
 translation, and run on oi with the toplevel's output; modules, formats, objects and the rest are TYPER.md's T7-T12.
 Proposals TY1-TY6 there.
+
+## As built: oi's native front end, T7 and T8 (2026-11-05)
+
+On the branch `ocaml-typer2`: Simplif (T7) and the module system with the stdlib typed natively unit by unit (T8),
+doc/ocaml/TYPER.md §9: 48 of 48 samples equal at every level (types, raw and simplified Lambda, oi's runs), the
+oracle's dumps committed (TY2), the stdlib's units equal natively counted by `bin/oi stdlib-check`, the probe 17 of
+36; proposals TY7-TY10 (TYPER.md §10).

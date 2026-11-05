@@ -309,3 +309,21 @@ long val line). Alternatives considered: a hand-written checker (rejected: Trans
 Typedtree as it is, and equality of Lambda needs their port), translating the Typedtree from the oracle (it keeps
 ocamlc). Next (TYPER.md §6): Simplif (T7), the module system and the stdlib typed natively (T8). Proposals TY1-TY6,
 none decided.
+
+## 2026-11-05: oi's native front end, T7 and T8 (branch ocaml-typer2)
+
+The next steps of TYPER.md in the decided order (TY1-TY6, the user, 2026-11-05), on the branch `ocaml-typer2` from
+`ocaml-typer`, under the day's light rules (main's stage 0, samples, the basic/ probe and the stdlib's units one
+process at a time). Ported from the same pinned tarball (ocaml-5.5.0.tar.xz, SHA-256 fcc6ae66...f015ba; LGPL-2.1 with
+the linking exception, the notices in the files, LICENSE.md and doc/ARBACE.md extended): lambda/simplif.ml (T7),
+lambda/tmc.ml, lambda/translmod.ml, typing/typemod.ml, includemod.ml, mtype.ml, subst.ml, env.ml's module components,
+stdlib/format.ml's engine and typing/oprint.ml's printers (T8). TY1: the raw Lambda judged against -drawlambda, Simplif's
+against -dlambda. TY2: the samples' oracle dumps committed in test/ocaml/typer/oracle/ (516 KB for 48 samples), dumped
+afresh and compared when ocdump is present, judging alone otherwise (`OI_TYPER_NO_OCDUMP=1`). TY5 (c): `bin/oi
+stdlib-check` (make oi-stdlib-check) types bin/oi stdlib's units natively, each coerced to its interface, against bin/oi
+stdlib's Lambda; bin/oi stdlib stays oi's library. Results: test/ocaml/typer/ 48 of 48 (types, raw and simplified Lambda,
+oi's runs; 12 new samples for Simplif, modules, functors, signatures, the stdlib's functors, local modules, first-class
+and recursive modules, inline records, lazy, [@tail_mod_cons]); the stdlib 48 of 71 units equal (the others wait on
+Printf's formats, GADTs, objects, effects, recursive values: T9, T10); the probe 17 of 36 (12 of the 19 others are
+formats). The judge's alternative for the stdlib, recording its 71 units' dumps (TY5 (b)), stays rejected. Proposals
+TY7-TY10 (TYPER.md §10), none decided.
