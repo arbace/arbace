@@ -136,3 +136,19 @@ class Q:
 
 print(annotationlib.get_annotations(Q, format=annotationlib.Format.FORWARDREF))
 print(annotationlib.get_annotations(Q, format=annotationlib.Format.STRING))
+
+# a function's __annotations__ assigned: __annotate__ None after it (func_set_annotations), so annotationlib's
+# formats read the dict (test_annotationlib's test_stock_annotations)
+def stock(a: int, b: str): pass
+
+print(annotationlib.get_annotations(stock, format=annotationlib.Format.STRING))
+stock.__annotations__ = {"a": "stock", "b": "str"}
+print(stock.__annotate__, stock.__annotations__)
+for fmt in (annotationlib.Format.VALUE, annotationlib.Format.FORWARDREF, annotationlib.Format.STRING):
+    print(fmt, annotationlib.get_annotations(stock, format=fmt))
+try:
+    stock.__annotations__ = 1
+except TypeError as e:
+    print("TypeError", e)
+del stock.__annotations__
+print(stock.__annotate__, stock.__annotations__)
