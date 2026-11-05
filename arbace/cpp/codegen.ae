@@ -1,0 +1,1172 @@
+(ns arbace.cpp.codegen
+  "The code generator (doc/cpp/CODEGEN.md §4): arbace.cpp.sema's typed program written as LLVM forms (doc/cpp/LLVM.md)
+  as clang's CodeGen writes its IR at -O0 -- every local in an alloca of the entry block, loads and stores, the
+  objects' members at the Itanium layout's byte offsets, constructors (C2, C1 an alias of a strong one) and destructors
+  (D2, D0 the deleting one, D1 an alias), vtables and type_info objects, virtual calls through the vptr, new and
+  delete (an array cookie when the element has a destructor), the destructors of locals at their scope's exits and of
+  temporaries at their full-expression's end (a flag for a temporary made in a conditional branch), copy elision of
+  prvalues and the named return value, static locals behind their guard, namespace-scope variables' dynamic
+  initialization in a global constructor with their destructors registered by __cxa_atexit. The forms are lowered by
+  arbace.cpp.lower and run as cppi runs clang's (bin/cppi codegen, codegen-check). Calling convention: scalars as
+  clang passes them; a class argument or result by address (CODEGEN.md's P3: SysV's register classes later)."
+  (:require [arbace.cpp.abi :as abi]
+            [arbace.cpp.sema :as sema]
+            [arbace.repr.cpp.native :as native]
+            [arbace.repr.llvm :as llvm]
+            [arbace.cpp.lower :as lower]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def fail abi/fail)
+
+;; ---------------------------------------------------------------------------------------------
+;; The module
+
+(def ^:dynamic *top* nil)      ; atom {:forms [..] :declared #{names} :strings {s name} :emitted #{fid} :queue [fid] :vtables #{cid} :ctors [..]}
+
+(defn gsym [^String s]
+  (if (and (re-matches #"[A-Za-z_$][A-Za-z0-9_$.]*" s) (not (str/includes? s "..")) (not (str/ends-with? s ".")))
+    (symbol "g" s)
+    (list 'g s)))
+
+(defn- add-top! [f] (swap! *top* update :forms conj f))
+
+(defn- declare! [^String nm ret ps & {:keys [va]}]
+  (when-not (contains? (:declared @*top*) nm)
+    (swap! *top* update :declared conj nm)
+    (add-top! (list 'llvm/declare (gsym nm) ret (cond-> (mapv vector ps) va (conj '&))))))
+
+(defn- string-global [^String s]
+  (or (get-in @*top* [:strings s])
+      (let [n (count (:strings @*top*))
+            nm (if (zero? n) ".str" (str ".str." n))]
+        (swap! *top* assoc-in [:strings s] nm)
+        (add-top! (list 'llvm/global (gsym nm) (list 'array (inc (count s)) 'i8) (list 'c-string (str s (char 0)))
+                        :linkage :private :unnamed-addr :unnamed_addr :constant true :align 1))
+        nm)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The function being emitted
+
+(def ^:dynamic *f* nil) ; atom {:blocks [] :label l :insts [] :term bool :n 0 :allocas [] :addr {var addr} :cleanups [] ...}
+
+(defn- tmp [] (symbol (str "%t" (:n (swap! *f* update :n inc)))))
+(defn- new-label [^String hint] (symbol (str "%" hint (:n (swap! *f* update :n inc)))))
+
+(defn- close-block! []
+  (let [s @*f*]
+    (swap! *f* (fn [s] (-> s (update :blocks conj (apply list 'block (:label s) (:insts s))) (assoc :insts [] :label nil))))))
+
+(defn- start! [l] (swap! *f* assoc :label l :insts [] :term false))
+
+(defn- emit! [inst]
+  (when (:term @*f*)
+    ;; code after a terminator: a block no edge reaches
+    (close-block!) (start! (new-label "dead")))
+  (swap! *f* update :insts conj inst)
+  (when (#{'br 'ret 'unreachable 'switch} (first inst)) (swap! *f* assoc :term true))
+  nil)
+
+(defn- val! [form] (let [t (tmp)] (emit! (list '= t form)) t))
+
+(defn- begin!
+  "Ends the current block (with a branch to `l` unless it ended) and starts the block `l`."
+  [l]
+  (when-not (:term @*f*) (emit! (list 'br l)))
+  (close-block!) (start! l))
+
+(defn- br! [l] (emit! (list 'br l)))
+(defn- condbr! [c t e] (emit! (list 'br 'i1 c t e)))
+
+(defn- alloca! [t align]
+  (let [a (tmp)]
+    (swap! *f* update :allocas conj (list '= a (list 'alloca t :align align)))
+    a))
+
+(defn- slot! [ty]
+  (let [[s a] (abi/size-align ty)]
+    (alloca! (if (abi/scalar? (abi/unq ty)) (abi/llvm-type ty) (list 'array s 'i8)) a)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Memory
+
+(defn- load! [ty addr]
+  (let [t (abi/llvm-type ty) a (abi/align-of ty)
+        v (val! (list 'load t ['ptr addr] :align a))]
+    (if (= :bool (abi/bn (abi/underlying (abi/unq ty)))) (val! (list 'trunc 'i8 v 'i1)) v)))
+
+(defn- store! [ty v addr]
+  (let [t (abi/llvm-type ty) a (abi/align-of ty)
+        v (if (= :bool (abi/bn (abi/underlying (abi/unq ty)))) (if (boolean? v) (if v 1 0) (val! (list 'zext 'i1 v 'i8))) v)]
+    (emit! (list 'store [t v] ['ptr addr] :align a))))
+
+(defn- offset! [addr ^long off]
+  (if (zero? off) addr (val! (list 'getelementptr :inbounds 'i8 ['ptr addr] ['i64 off]))))
+
+(defn- memcpy! [dst src ^long n]
+  (declare! "llvm.memcpy.p0.p0.i64" 'void '[ptr ptr i64 i1])
+  (emit! (list 'call 'void (gsym "llvm.memcpy.p0.p0.i64") [['ptr dst] ['ptr src] ['i64 n] ['i1 false]])))
+
+(defn- memset! [dst ^long n]
+  (declare! "llvm.memset.p0.i64" 'void '[ptr i8 i64 i1])
+  (emit! (list 'call 'void (gsym "llvm.memset.p0.i64") [['ptr dst] ['i8 0] ['i64 n] ['i1 false]])))
+
+(defn- elem-type [t] (let [t (abi/unq t)] (if (or (abi/scalar? t) (abi/ref? t)) (abi/llvm-type t) (list 'array (abi/size-of t) 'i8))))
+
+(defn- zero-of [t] (let [l (abi/llvm-type t true)] (cond (= l 'ptr) 'null (#{'float 'double 'x86_fp80} l) (list 'fp "0.000000e+00") (= l 'i1) false :else 0)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Functions referenced
+
+(defn- fn-name ^String [fid] (let [f (sema/fnd fid)] (abi/mangle-fn f (when (#{:ctor :dtor} (:kind f)) 2))))
+
+(defn- class-ret? [f] (abi/class? (abi/unq (:ret (:ty f)))))
+
+(defn- param-ltype [t] (if (or (abi/ref? t) (abi/class? (abi/unq t))) 'ptr (abi/llvm-type t true)))
+
+(defn- fn-sig
+  "[ret-type param-types variadic] of a function as this code generator calls it: sret first, this, the parameters."
+  [f]
+  (let [ty (:ty f)
+        ret (cond (class-ret? f) 'void (abi/ref? (:ret ty)) 'ptr :else (abi/llvm-type (:ret ty) true))]
+    [ret (vec (concat (when (class-ret? f) ['ptr]) (when (and (:cls f) (not (:static f))) ['ptr]) (map param-ltype (:ps ty)))) (:va ty)]))
+
+(defn- want-fn!
+  "The function's symbol, its definition queued (or its declaration written)."
+  [fid]
+  (let [f (sema/fnd fid) nm (fn-name fid)]
+    (when-not (contains? (:wanted @*top*) fid)
+      (swap! *top* update :wanted conj fid)
+      (if (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
+        (swap! *top* update :queue conj fid)
+        (let [[r ps va] (fn-sig f)] (declare! nm r ps :va va))))
+    (gsym nm)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Cleanups: {:addr a :cls id} (a destructor call) or {:array a :n n :cls id}; temporaries of a full-expression
+
+(def ^:dynamic *temps* nil)  ; atom [cleanup ...] of the current full-expression, or nil
+(def ^:dynamic *cond* 0)     ; > 0 inside a conditional branch of the full-expression
+(def ^:dynamic *extend* nil) ; atom: a reference's temporary is lifetime-extended into these cleanups
+
+(declare emit-rv emit-lv emit-into emit-init call-dtor!)
+
+(defn- nontrivial-dtor? [cid] (and cid (not (sema/trivial-dtor? cid))))
+
+(defn- run-cleanup! [c]
+  (if-let [fl (:flag c)]
+    (let [l1 (new-label "cleanup") l2 (new-label "cleanup.done")
+          v (val! (list 'load 'i8 ['ptr fl] :align 1))
+          b (val! (list 'icmp :ne 'i8 v 0))]
+      (condbr! b l1 l2)
+      (begin! l1)
+      (call-dtor! (:cls c) (:addr c))
+      (emit! (list 'store ['i8 0] ['ptr fl] :align 1))
+      (begin! l2))
+    (if (:array c)
+      (let [cid (:cls c) n (long (:n c)) sz (abi/size-of {:k :class :id cid})]
+        (doseq [i (range (dec n) -1 -1)] (call-dtor! cid (offset! (:array c) (* i sz)))))
+      (call-dtor! (:cls c) (:addr c)))))
+
+(defn- push-temp-cleanup! [cid addr]
+  (when (nontrivial-dtor? cid)
+    (cond
+      *extend* (swap! *extend* conj {:addr addr :cls cid})
+      (pos? (long *cond*))
+      (let [fl (alloca! 'i8 1)]
+        (swap! *f* update :entry-stores conj (list 'store ['i8 0] ['ptr fl] :align 1))
+        (emit! (list 'store ['i8 1] ['ptr fl] :align 1))
+        (swap! *temps* conj {:addr addr :cls cid :flag fl}))
+      :else (swap! *temps* conj {:addr addr :cls cid}))))
+
+(defmacro ^:private with-full
+  "Emits a full-expression: its temporaries destroyed at its end, in reverse."
+  [& body]
+  `(let [ts# (atom [])
+         r# (binding [*temps* ts# *cond* 0] ~@body)]
+     (doseq [c# (reverse @ts#)] (run-cleanup! c#))
+     r#))
+
+;; ---------------------------------------------------------------------------------------------
+;; Calls
+
+(defn- vtable-index [cid fid variant]
+  (let [vt (:vtable (abi/cls cid))]
+    (or (first (keep-indexed (fn [i s] (when (and (= (:fn s) fid) (= (:v s) variant)) i)) vt))
+        (fail :virtual "no vtable slot"))))
+
+(defn- arg-values
+  "The LLVM operands of a call's parameters' initializers."
+  [f-ps inits]
+  (vec (map-indexed
+        (fn [i init]
+          (let [p (nth f-ps i nil)]
+            (cond
+              (nil? p) (let [e (:e init)] [(abi/llvm-type (:ty e) true) (emit-rv e)])
+              (abi/ref? p) ['ptr (case (:i init)
+                                   :bind (emit-lv (:e init))
+                                   :bind-temp (let [t (slot! (:ty init))]
+                                                (emit-init t (:ty init) (:init init))
+                                                (push-temp-cleanup! (when (abi/class? (:ty init)) (:id (:ty init))) t)
+                                                (if (:to init) (offset! t (second (abi/base-path (:id (:ty init)) (:to init)))) t)))]
+              (abi/class? (abi/unq p)) (let [t (slot! p)]
+                                         (emit-init t (abi/unq p) init)
+                                         (push-temp-cleanup! (:id (abi/unq p)) t)
+                                         ['ptr t])
+              :else [(abi/llvm-type p true) (emit-rv (:e init))])))
+        inits)))
+
+(defn- vcall-target [cid fid variant obj]
+  (let [vp (val! (list 'load 'ptr ['ptr obj] :align 8))
+        slot (val! (list 'getelementptr :inbounds 'ptr ['ptr vp] ['i64 (vtable-index cid fid variant)]))]
+    (val! (list 'load 'ptr ['ptr slot] :align 8))))
+
+(defn- call!
+  "Calls the function `fid` (the object's address `obj` for a method, `dest` for a class result) with the parameters'
+  initializers; the result's operand (an address for a reference result)."
+  [fid obj inits dest virtual]
+  (let [f (sema/fnd fid)
+        [ret ps va] (fn-sig f)]
+    (cond
+      ;; the trivial special members: a copy of bytes, nothing
+      (and (:trivial f) (= "=" (:op f)))
+      (let [src (case (:i (first inits)) :bind (emit-lv (:e (first inits))) (fail :call "trivial assignment"))]
+        (memcpy! obj src (abi/size-of {:k :class :id (:cls f)}))
+        obj)
+      (and (:trivial f) (= :dtor (:kind f))) nil
+      (and (:trivial f) (= :ctor (:kind f)) (empty? (:ps (:ty f)))) nil
+      :else
+      (let [args (arg-values (:ps (:ty f)) inits)
+            args (vec (concat (when (class-ret? f) [['ptr dest]]) (when (and (:cls f) (not (:static f))) [['ptr obj]]) args))
+            callee (if virtual (vcall-target (:cls f) fid nil obj) (want-fn! fid))
+            fty (if va (list 'fn ret (conj ps '&)) ret)
+            form (list 'call fty callee args)]
+        (if (= 'void ret) (do (emit! form) nil) (val! form))))))
+
+(defn call-dtor!
+  "Calls the class's complete destructor on the object at `addr` (nothing for a trivial one)."
+  [cid addr]
+  (when (nontrivial-dtor? cid)
+    (call! (:dtor (abi/cls cid)) addr [] nil false)))
+
+(defn- icall! [e dest]
+  (let [ft (:fty e)
+        p (emit-rv (:callee e))
+        args (arg-values (:ps ft) (:args e))
+        cret (abi/class? (abi/unq (:ret ft)))
+        ret (cond cret 'void (abi/ref? (:ret ft)) 'ptr :else (abi/llvm-type (:ret ft) true))
+        ps (vec (concat (when cret ['ptr]) (map param-ltype (:ps ft))))
+        args (vec (concat (when cret [['ptr dest]]) args))
+        form (list 'call (if (:va ft) (list 'fn ret (conj ps '&)) ret) p args)]
+    (if (= 'void ret) (do (emit! form) nil) (val! form))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions
+
+(defn- var-addr [id]
+  (or (get-in @*f* [:addr id])
+      (let [v (sema/var* id)]
+        (case (:storage v)
+          (:global :member-static) (gsym (abi/mangle-var v))
+          :static-local (gsym (abi/mangle-local-static (sema/fnd (:fn-of v)) (:name v) (long (:disc v))))
+          (fail :codegen "no address for " (:name v))))))
+
+(defn- base-offset [from to] (second (abi/base-path from to)))
+
+(defn- int-op [o signed]
+  (case o "+" 'add "-" 'sub "*" 'mul "/" (if signed 'sdiv 'udiv) "%" (if signed 'srem 'urem) "&" 'and "|" 'or "^" 'xor
+        "<<" 'shl ">>" (if signed 'ashr 'lshr)))
+(defn- fp-op [o] (case o "+" 'fadd "-" 'fsub "*" 'fmul "/" 'fdiv "%" 'frem))
+
+(defn- arith! [o t a b]
+  (let [lt (abi/llvm-type t true)]
+    (if (abi/floating? t)
+      (val! (list (fp-op o) lt a b))
+      (let [s (abi/signed? t) op (int-op o s)]
+        (val! (if (and s (#{'add 'sub 'mul 'shl} op)) (list op :nsw lt a b) (list op lt a b)))))))
+
+(defn- cmp! [o t a b]
+  (let [lt (abi/llvm-type t true)]
+    (if (abi/floating? t)
+      (val! (list 'fcmp (case o "<" :olt ">" :ogt "<=" :ole ">=" :oge "==" :oeq "!=" :une) lt a b))
+      (let [s (abi/signed? t)]
+        (val! (list 'icmp (case o "<" (if s :slt :ult) ">" (if s :sgt :ugt) "<=" (if s :sle :ule) ">=" (if s :sge :uge) "==" :eq "!=" :ne) lt a b))))))
+
+(defn- fp-const [t ^double v]
+  (if (= :float (abi/bn (abi/unq t)))
+    (list 'fp (str "0x" (str/upper-case (format "%016x" (Double/doubleToRawLongBits (double (float v)))))))
+    (if (= :ldouble (abi/bn (abi/unq t)))
+      (fail :long-double "long double constants")
+      (list 'fp (str "0x" (str/upper-case (format "%016x" (Double/doubleToRawLongBits v))))))))
+
+(defn- int-cast! [from to v]
+  (let [lf (abi/llvm-type from true) lt (abi/llvm-type to true)]
+    (if (= lf lt) v
+        (let [bf (if (= lf 'i1) 1 (Long/parseLong (subs (name lf) 1))) bt (if (= lt 'i1) 1 (Long/parseLong (subs (name lt) 1)))]
+          (cond
+            (> bf bt) (val! (list 'trunc lf v lt))
+            (or (= lf 'i1) (not (abi/signed? from))) (val! (list 'zext lf v lt))
+            :else (val! (list 'sext lf v lt)))))))
+
+(defn- ptr-adjust!
+  "A pointer `v` moved by `off` bytes, a null pointer kept null."
+  [v ^long off]
+  (if (zero? off) v
+      (let [l1 (new-label "cast.notnull") l2 (new-label "cast.end") here (:label @*f*)
+            isnull (val! (list 'icmp :eq 'ptr v 'null))
+            _ (condbr! isnull l2 l1)
+            _ (begin! l1)
+            adj (val! (list 'getelementptr :inbounds 'i8 ['ptr v] ['i64 off]))
+            from (:label @*f*)]
+        (begin! l2)
+        (val! (list 'phi 'ptr [adj from] ['null here])))))
+
+(defn- cast! [e]
+  (let [from (abi/unq (:ty (:e e))) to (abi/unq (:ty e))]
+    (case (:ck e)
+      :void (do (if (abi/class? from) (if (= :pr (:cat (:e e))) (let [t (slot! from)] (emit-into (:e e) t) (push-temp-cleanup! (:id from) t)) (emit-lv (:e e))) (when-not (abi/void? from) (emit-rv (:e e)))) nil)
+      :noop (emit-rv (:e e))
+      :int (int-cast! from to (emit-rv (:e e)))
+      :to-bool (let [v (emit-rv (:e e))]
+                 (cond (abi/floating? from) (val! (list 'fcmp :une (abi/llvm-type from true) v (list 'fp "0.000000e+00")))
+                       (abi/ptr? from) (val! (list 'icmp :ne 'ptr v 'null))
+                       (= :nullptr (abi/bn from)) false
+                       (= 'i1 (abi/llvm-type from true)) v
+                       :else (val! (list 'icmp :ne (abi/llvm-type from true) v 0))))
+      :int->fp (val! (list (if (abi/signed? from) 'sitofp 'uitofp) (abi/llvm-type from true) (emit-rv (:e e)) (abi/llvm-type to true)))
+      :fp->int (val! (list (if (abi/signed? to) 'fptosi 'fptoui) (abi/llvm-type from true) (emit-rv (:e e)) (abi/llvm-type to true)))
+      :fp (let [bf (abi/size-of from) bt (abi/size-of to)]
+            (val! (list (if (< bf bt) 'fpext 'fptrunc) (abi/llvm-type from true) (emit-rv (:e e)) (abi/llvm-type to true))))
+      :base (ptr-adjust! (emit-rv (:e e)) (base-offset (:id (abi/unq (:to from))) (:id (abi/unq (:to to)))))
+      :derived (ptr-adjust! (emit-rv (:e e)) (- (long (base-offset (:id (abi/unq (:to to))) (:id (abi/unq (:to from)))))))
+      :int->ptr (val! (list 'inttoptr (abi/llvm-type from true) (emit-rv (:e e)) 'ptr))
+      :ptr->int (val! (list 'ptrtoint 'ptr (emit-rv (:e e)) (abi/llvm-type to true))))))
+
+(defn- materialize!
+  "A class prvalue's temporary: its address (destroyed at the full-expression's end)."
+  [e]
+  (let [t (slot! (:ty e))]
+    (emit-into e t)
+    (push-temp-cleanup! (:id (abi/unq (:ty e))) t)
+    t))
+
+(defn- short-circuit! [e]
+  (let [land (= :land (:op e))
+        rhs (new-label (if land "land.rhs" "lor.rhs")) end (new-label (if land "land.end" "lor.end"))
+        a (emit-rv (:l e))
+        from (:label @*f*)]
+    (if land (condbr! a rhs end) (condbr! a end rhs))
+    (begin! rhs)
+    (let [b (binding [*cond* (inc (long *cond*))] (emit-rv (:r e))) from2 (:label @*f*)]
+      (begin! end)
+      (val! (list 'phi 'i1 [(not land) from] [b from2])))))
+
+(defn- cond-branches!
+  "A conditional operator: the operands' values from each branch (by `f`), joined by a phi of type `t` (nil: no value)."
+  [e f t]
+  (let [lt (new-label "cond.true") lf (new-label "cond.false") le (new-label "cond.end")
+        c (emit-rv (:c e))]
+    (condbr! c lt lf)
+    (begin! lt)
+    (let [a (binding [*cond* (inc (long *cond*))] (f (:then e))) fa (:label @*f*)]
+      (begin! lf)
+      (let [b (binding [*cond* (inc (long *cond*))] (f (:else e))) fb (:label @*f*)]
+        (begin! le)
+        (when t (val! (list 'phi t [a fa] [b fb])))))))
+
+(defn- incdec! [e]
+  (let [t (abi/unq (:ty e)) a (emit-lv (:e e)) old (load! t a)
+        nv (cond
+             (abi/ptr? t) (val! (list 'getelementptr :inbounds (elem-type (:to t)) ['ptr old] ['i64 (if (= "++" (:o e)) 1 -1)]))
+             (abi/floating? t) (val! (list (if (= "++" (:o e)) 'fadd 'fsub) (abi/llvm-type t true) old (fp-const t 1.0)))
+             (= :bool (abi/bn t)) true
+             :else (arith! (if (= "++" (:o e)) "+" "-") (abi/underlying t) old 1))]
+    (store! t nv a)
+    (if (:post e) old a)))
+
+(defn emit-rv
+  "The operand of the scalar prvalue `e`."
+  [e]
+  (case (:op e)
+    :int (if (= 'i1 (abi/llvm-type (:ty e) true)) (not (zero? (long (:v e)))) (:v e))
+    :float (fp-const (:ty e) (:v e))
+    :null 'null
+    :zero-val (zero-of (:ty e))
+    :load (let [x (:e e)]
+            (if (:raw x)
+              (val! (list 'load 'ptr ['ptr (if (= :var (:op x)) (var-addr (:id x)) (emit-lv x))] :align 8))
+              (load! (:ty e) (emit-lv x))))
+    :cast (cast! e)
+    :decay (emit-lv (:e e))
+    :fnaddr (want-fn! (:fn e))
+    :addr (emit-lv (:e e))
+    :this (val! (list 'load 'ptr ['ptr (:this-slot @*f*)] :align 8))
+    :unop (let [v (emit-rv (:e e)) t (:ty e)]
+            (case (:o e)
+              "+" v
+              "-" (if (abi/floating? t) (val! (list 'fneg (abi/llvm-type t true) v)) (arith! "-" t 0 v))
+              "~" (val! (list 'xor (abi/llvm-type t true) v -1))))
+    :not (val! (list 'xor 'i1 (emit-rv (:e e)) true))
+    :binop (let [a (emit-rv (:l e)) b (emit-rv (:r e))] (arith! (:o e) (:ty e) a b))
+    :cmp (let [a (emit-rv (:l e)) b (emit-rv (:r e))]
+           (if (abi/ptr? (:ct e))
+             (val! (list 'icmp (case (:o e) "==" :eq "!=" :ne "<" :ult ">" :ugt "<=" :ule ">=" :uge) 'ptr a b))
+             (cmp! (:o e) (abi/underlying (:ct e)) a b)))
+    (:land :lor) (short-circuit! e)
+    :cond (cond-branches! e emit-rv (abi/llvm-type (:ty e) true))
+    :ptradd (let [p (emit-rv (:p e)) n (emit-rv (:n e))
+                  n (if (= "-" (:o e)) (val! (list 'sub 'i64 0 n)) n)]
+              (val! (list 'getelementptr :inbounds (elem-type (:to (abi/unq (:ty e)))) ['ptr p] ['i64 n])))
+    :ptrdiff (let [a (val! (list 'ptrtoint 'ptr (emit-rv (:l e)) 'i64)) b (val! (list 'ptrtoint 'ptr (emit-rv (:r e)) 'i64))
+                   d (val! (list 'sub 'i64 a b)) sz (abi/size-of (:to (abi/unq (:ty (:l e)))))]
+               (if (= 1 sz) d (val! (list 'sdiv :exact 'i64 d sz))))
+    :assign (let [a (emit-lv e)] (load! (:ty e) a))
+    :cassign (load! (:ty e) (emit-lv e))
+    :incdec (let [r (incdec! e)] (if (:post e) r (load! (:ty e) r)))
+    :comma (do (emit-rv (:l e)) (emit-rv (:r e)))
+    :call (if (= :pr (:cat e))
+            (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) nil (:virtual e))
+            (load! (:ty e) (emit-lv e)))
+    :icall (if (= :pr (:cat e)) (icall! e nil) (load! (:ty e) (emit-lv e)))
+    :new (let [et (:et e)
+               cid (when (abi/class? (abi/unq et)) (:id (abi/unq et)))
+               sz (abi/size-of et)]
+           (if (:n e)
+             (let [n (emit-rv (:n e))
+                   cookie (nontrivial-dtor? cid)
+                   bytes (val! (list 'mul 'i64 n sz))
+                   bytes (if cookie (val! (list 'add 'i64 bytes 8)) bytes)
+                   _ (declare! "_Znam" 'ptr '[i64])
+                   raw (val! (list 'call 'ptr (gsym "_Znam") [['i64 bytes]]))
+                   p (if cookie (do (emit! (list 'store ['i64 n] ['ptr raw] :align 8)) (offset! raw 8)) raw)
+                   init (:init e)]
+               ;; the elements: the list's, then the rest default-initialized (a loop)
+               (let [items (when (= :list (:i init)) (:items init))
+                     fill (if (= :list (:i init)) (:fill init) init)]
+                 (doseq [[i it] (map-indexed vector items)] (emit-init (offset! p (* i sz)) et it))
+                 (when-not (#{:none} (:i fill))
+                   (let [lc (new-label "new.loop") lb (new-label "new.body") le (new-label "new.end")
+                         ix (alloca! 'i64 8)]
+                     (emit! (list 'store ['i64 (count items)] ['ptr ix] :align 8))
+                     (begin! lc)
+                     (let [i (val! (list 'load 'i64 ['ptr ix] :align 8)) c (val! (list 'icmp :ult 'i64 i n))]
+                       (condbr! c lb le)
+                       (begin! lb)
+                       (emit-init (val! (list 'getelementptr :inbounds (elem-type et) ['ptr p] ['i64 i])) et fill)
+                       (emit! (list 'store ['i64 (val! (list 'add 'i64 i 1))] ['ptr ix] :align 8))
+                       (br! lc)
+                       (begin! le)))))
+               p)
+             (do (declare! "_Znwm" 'ptr '[i64])
+                 (let [p (val! (list 'call 'ptr (gsym "_Znwm") [['i64 sz]]))]
+                   (emit-init p et (:init e))
+                   p))))
+    :delete (let [p (emit-rv (:e e))
+                  et (:to (abi/unq (:ty (:e e))))
+                  cid (when (abi/class? (abi/unq et)) (:id (abi/unq et)))
+                  lnn (new-label "delete.notnull") lend (new-label "delete.end")
+                  isnull (val! (list 'icmp :eq 'ptr p 'null))]
+              (condbr! isnull lend lnn)
+              (begin! lnn)
+              (cond
+                (:array e)
+                (if (nontrivial-dtor? cid)
+                  (let [raw (offset! p -8)
+                        n (val! (list 'load 'i64 ['ptr raw] :align 8))
+                        sz (abi/size-of et)
+                        lc (new-label "delete.loop") lb (new-label "delete.body") ld (new-label "delete.free")
+                        ix (alloca! 'i64 8)]
+                    (emit! (list 'store ['i64 n] ['ptr ix] :align 8))
+                    (begin! lc)
+                    (let [i (val! (list 'load 'i64 ['ptr ix] :align 8)) c (val! (list 'icmp :eq 'i64 i 0))]
+                      (condbr! c ld lb)
+                      (begin! lb)
+                      (let [j (val! (list 'sub 'i64 i 1))]
+                        (emit! (list 'store ['i64 j] ['ptr ix] :align 8))
+                        (call-dtor! cid (val! (list 'getelementptr :inbounds (elem-type et) ['ptr p] ['i64 j])))
+                        (br! lc)))
+                    (begin! ld)
+                    (declare! "_ZdaPvm" 'void '[ptr i64])
+                    (emit! (list 'call 'void (gsym "_ZdaPvm") [['ptr raw] ['i64 (val! (list 'add 'i64 (val! (list 'mul 'i64 sz n)) 8))]])))
+                  (do (declare! "_ZdaPv" 'void '[ptr]) (emit! (list 'call 'void (gsym "_ZdaPv") [['ptr p]]))))
+                (and cid (:dtor (abi/cls cid)) (:virtual (sema/fnd (:dtor (abi/cls cid)))))
+                (let [d (:dtor (abi/cls cid))
+                      target (vcall-target cid d 0 p)]
+                  (emit! (list 'call 'void target [['ptr p]])))
+                :else
+                (do (call-dtor! cid p)
+                    (declare! "_ZdlPvm" 'void '[ptr i64])
+                    (emit! (list 'call 'void (gsym "_ZdlPvm") [['ptr p] ['i64 (abi/size-of et)]]))))
+              (begin! lend)
+              nil)
+    (if (#{:lv :xv} (:cat e))
+      (load! (:ty e) (emit-lv e))
+      (fail :codegen "rvalue " (:op e)))))
+
+(defn emit-lv
+  "The address of the glvalue `e` (a class prvalue materialized)."
+  [e]
+  (case (:op e)
+    :var (var-addr (:id e))
+    :deref (emit-rv (:e e))
+    :field (offset! (emit-lv (:obj e)) (abi/field-offset (:cls e) (:i e)))
+    :base-lv (offset! (emit-lv (:e e)) (base-offset (:id (abi/unq (:ty (:e e)))) (:to e)))
+    :derived-lv (offset! (emit-lv (:e e)) (- (long (base-offset (:to e) (:id (abi/unq (:ty (:e e))))))))
+    :reinterpret-lv (emit-lv (:e e))
+    :str (gsym (string-global (:s e)))
+    :temp (let [t (slot! (:ty e))] (emit-init t (:ty e) (:init e)) (push-temp-cleanup! (:id (abi/unq (:ty e))) t) t)
+    :assign (let [v (emit-rv (:r e)) a (emit-lv (:l e))] (store! (:ty e) v a) a)
+    :cassign (let [a (emit-lv (:l e)) t (abi/unq (:ty e)) old (load! t a)
+                   r (emit-rv (:r e))
+                   nv (if (:ptr e)
+                        (val! (list 'getelementptr :inbounds (elem-type (:to t)) ['ptr old] ['i64 (if (= "-" (:o e)) (val! (list 'sub 'i64 0 r)) r)]))
+                        (let [ct (:ct e)
+                              o (emit-rv {:op :cast :ck (cond (= (abi/unq t) ct) :noop
+                                                              (and (abi/integral? t) (abi/integral? ct)) :int
+                                                              (and (abi/integral? t) (abi/floating? ct)) :int->fp
+                                                              (and (abi/floating? t) (abi/floating? ct)) :fp
+                                                              :else :fp->int)
+                                          :e {:op :raw :v old :ty t} :ty ct})
+                              res (arith! (:o e) (abi/underlying ct) o r)]
+                          (emit-rv {:op :cast :ck (cond (= (abi/unq t) ct) :noop
+                                                        (= :bool (abi/bn t)) :to-bool
+                                                        (and (abi/integral? t) (abi/integral? ct)) :int
+                                                        (and (abi/integral? t) (abi/floating? ct)) :fp->int
+                                                        (and (abi/floating? t) (abi/floating? ct)) :fp
+                                                        :else :int->fp)
+                                    :e {:op :raw :v res :ty ct} :ty t})))]
+               (store! t nv a)
+               a)
+    :incdec (if (:post e) (fail :codegen "postfix as an lvalue") (incdec! e))
+    :comma (do (emit-rv (:l e)) (emit-lv (:r e)))
+    :cond (cond-branches! e emit-lv 'ptr)
+    :call (if (= :pr (:cat e))
+            (materialize! e)
+            (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) nil (:virtual e)))
+    :icall (if (= :pr (:cat e)) (materialize! e) (icall! e nil))
+    :temp-obj (materialize! e)
+    :raw (fail :codegen "raw as an lvalue")
+    (fail :codegen "lvalue " (:op e))))
+
+(alter-var-root #'emit-rv (fn [f] (fn [e] (if (= :raw (:op e)) (:v e) (f e)))))
+
+(defn emit-into
+  "Constructs the class prvalue `e` in the object at `addr`."
+  [e addr]
+  (case (:op e)
+    :temp-obj (emit-init addr (:ty e) (:init e))
+    :call (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) addr (:virtual e))
+    :icall (icall! e addr)
+    :cond (cond-branches! e #(emit-into % addr) nil)
+    :comma (do (emit-rv (:l e)) (emit-into (:r e) addr))
+    (if (#{:lv :xv} (:cat e))
+      (memcpy! addr (emit-lv e) (abi/size-of (:ty e)))
+      (fail :codegen "class prvalue " (:op e)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Initialization
+
+(defn emit-init
+  "Initializes the object of type `t` at `addr` by the initializer `init` (arbace.cpp.sema's)."
+  [addr t init]
+  (let [tu (abi/unq t)]
+    (case (:i init)
+      :none nil
+      :zero (if (abi/scalar? tu) (store! tu (zero-of tu) addr) (memset! addr (abi/size-of tu)))
+      :zero-then (do (memset! addr (abi/size-of tu)) (emit-init addr t (:then init)))
+      :expr (if (abi/class? tu) (emit-into (:e init) addr) (store! tu (emit-rv (:e init)) addr))
+      :ctor (call! (:fn init) addr (:args init) nil false)
+      (:copy :copy-bytes) (memcpy! addr (emit-lv (:e init)) (abi/size-of tu))
+      :string (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
+                (memcpy! addr (gsym (string-global (subs (str s (apply str (repeat n (char 0)))) 0 (dec n)))) n))
+      :bind (store! (abi/ptr abi/void) (emit-lv (:e init)) addr)
+      :bind-temp (let [tt (:ty init) tmpa (slot! tt)]
+                   (emit-init tmpa tt (:init init))
+                   (push-temp-cleanup! (when (abi/class? tt) (:id tt)) tmpa)
+                   (store! (abi/ptr abi/void) (if (:to init) (offset! tmpa (base-offset (:id tt) (:to init))) tmpa) addr))
+      :list (if (abi/arr? tu)
+              (let [et (:of tu) sz (abi/size-of et) n (long (or (:n init) (:n tu) (count (:items init))))]
+                (doseq [[i it] (map-indexed vector (:items init))] (emit-init (offset! addr (* i sz)) et it))
+                (when (< (count (:items init)) n)
+                  (let [fill (:fill init)]
+                    (cond
+                      (#{:none} (:i fill)) nil
+                      (= :zero (:i fill)) (memset! (offset! addr (* (count (:items init)) sz)) (* (- n (count (:items init))) sz))
+                      :else (doseq [i (range (count (:items init)) n)] (emit-init (offset! addr (* i sz)) et fill))))))
+              (let [cid (:id tu) c (abi/cls cid) l (abi/layout cid)
+                    subs (concat (map-indexed (fn [i b] [(nth (:bases l) i) {:k :class :id (:cls b)}]) (:bases c))
+                                 (map-indexed (fn [i f] [(nth (:fields l) i) (:ty f)]) (:fields c)))]
+                (when (abi/dynamic? cid) (fail :codegen "an aggregate with a vptr"))
+                (doseq [[[off st] it] (map vector subs (:items init))] (emit-init (offset! addr off) st it))))
+      (fail :codegen "initializer " (:i init)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Statements
+
+(defn- push-cleanup! [c] (swap! *f* update :cleanups conj c))
+(defn- cleanup-depth [] (count (:cleanups @*f*)))
+(defn- unwind-to! [^long depth]
+  (doseq [c (reverse (subvec (:cleanups @*f*) depth))] (run-cleanup! c)))
+(defn- pop-to! [^long depth] (unwind-to! depth) (swap! *f* update :cleanups #(subvec % 0 depth)))
+
+(declare emit-stmt emit-d0!)
+
+(defn- local-decl! [s]
+  (let [v (sema/var* (:var s))
+        t (:ty v)
+        nrvo (= (:var s) (:nrvo @*f*))
+        addr (if nrvo (:sret @*f*) (slot! (if (abi/ref? t) (abi/ptr abi/void) t)))]
+    (swap! *f* assoc-in [:addr (:var s)] addr)
+    (let [ext (atom [])]
+      (with-full (binding [*extend* ext] (emit-init addr t (:init s))))
+      (doseq [c @ext] (push-cleanup! c)))
+    (when-not nrvo
+      (let [bt (loop [t (abi/unq t)] (if (abi/arr? t) (recur (abi/unq (:of t))) t))]
+        (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
+          (if (abi/arr? (abi/unq t))
+            (push-cleanup! {:array addr :n (quot (abi/size-of t) (abi/size-of bt)) :cls (:id bt)})
+            (push-cleanup! {:addr addr :cls (:id bt)})))))))
+
+(defn- static-local! [vid]
+  (let [v (sema/var* vid)
+        f (sema/fnd (:fn-of v))
+        nm (abi/mangle-local-static f (:name v) (long (:disc v)))
+        t (:ty v)
+        [s a] (abi/size-align t)
+        init (:sinit v)
+        cinit (when (#{:none :zero} (:i init)) (if (abi/scalar? (abi/unq t)) (zero-of t) 'zeroinitializer))
+        cexpr (when (and (= :expr (:i init)) (abi/scalar? (abi/unq t))) (let [e (:e init)] (when (#{:int :float :null} (:op e)) (emit-rv e))))
+        ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8))]
+    (add-top! (list 'llvm/global (gsym nm) ltype (or cinit cexpr (if (abi/scalar? (abi/unq t)) (zero-of t) 'zeroinitializer)) :linkage :internal :align a))
+    (when-not (or cinit cexpr)
+      ;; the guard ([stmt.dcl]/3, Itanium §3.3.2)
+      (let [g (str "_ZGV" (subs nm 2))
+            l1 (new-label "init.check") l2 (new-label "init") l3 (new-label "init.end")]
+        (add-top! (list 'llvm/global (gsym g) 'i64 0 :linkage :internal :align 8))
+        (declare! "__cxa_guard_acquire" 'i32 '[ptr])
+        (declare! "__cxa_guard_release" 'void '[ptr])
+        (let [gv (val! (list 'load 'i8 ['ptr (gsym g)] :align 8 :atomic :acquire))
+              z (val! (list 'icmp :eq 'i8 gv 0))]
+          (condbr! z l1 l3)
+          (begin! l1)
+          (let [r (val! (list 'call 'i32 (gsym "__cxa_guard_acquire") [['ptr (gsym g)]]))
+                c (val! (list 'icmp :ne 'i32 r 0))]
+            (condbr! c l2 l3)
+            (begin! l2)
+            (with-full (emit-init (gsym nm) t init))
+            (let [bt (abi/unq t)]
+              (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
+                (declare! "__cxa_atexit" 'i32 '[ptr ptr ptr])
+                (swap! *top* assoc :dso true)
+                (val! (list 'call 'i32 (gsym "__cxa_atexit") [['ptr (want-fn! (:dtor (abi/cls (:id bt))))] ['ptr (gsym nm)] ['ptr (gsym "__dso_handle")]]))))
+            (emit! (list 'call 'void (gsym "__cxa_guard_release") [['ptr (gsym g)]]))
+            (begin! l3)))))))
+
+(defn- emit-return! [s]
+  (let [f (:fn @*f*)]
+    (cond
+      (:void-e s) (with-full (let [e (:void-e s)] (if (abi/void? (:ty e)) (emit-rv e) (emit-rv e))))
+      (:init s)
+      (let [rt (:ret (:ty f))]
+        (cond
+          (abi/class? (abi/unq rt)) (when-not (and (:nrvo-var s) (= (:nrvo-var s) (:nrvo @*f*)))
+                                      (with-full (emit-init (:sret @*f*) (abi/unq rt) (:init s))))
+          (abi/ref? rt) (with-full (store! (abi/ptr abi/void) (case (:i (:init s)) :bind (emit-lv (:e (:init s))) (fail :return "a reference to a temporary")) (:ret-slot @*f*)))
+          :else (with-full (store! rt (emit-rv (:e (:init s))) (:ret-slot @*f*))))))
+    (unwind-to! 0)
+    (br! (:ret-label @*f*))))
+
+(defn emit-stmt [s]
+  (case (:s s)
+    :null nil
+    :block (if (:flat s)
+             (doseq [x (:items s)] (emit-stmt x))
+             (let [d (cleanup-depth)] (doseq [x (:items s)] (emit-stmt x)) (when-not (:term @*f*) (unwind-to! d)) (swap! *f* update :cleanups #(subvec % 0 d))))
+    :decl (local-decl! s)
+    :static-local (static-local! (:var s))
+    :expr (with-full (let [e (:e s)]
+                       (cond
+                         (and (abi/class? (abi/unq (:ty e))) (= :pr (:cat e))) (materialize! e)
+                         (#{:lv :xv} (:cat e)) (emit-lv e)
+                         :else (emit-rv e))))
+    :copy-bytes (memcpy! (emit-lv (:dst s)) (emit-lv (:src s)) (abi/size-of (:ty (:dst s))))
+    :while (let [lc (new-label "while.cond") lb (new-label "while.body") le (new-label "while.end") d (cleanup-depth)]
+             (begin! lc)
+             (condbr! (with-full (emit-rv (:cond s))) lb le)
+             (begin! lb)
+             (swap! *f* update :loops conj {:break le :continue lc :depth d})
+             (emit-stmt (:body s))
+             (swap! *f* update :loops pop)
+             (when-not (:term @*f*) (br! lc))
+             (close-block!) (start! le))
+    :do (let [lb (new-label "do.body") lc (new-label "do.cond") le (new-label "do.end") d (cleanup-depth)]
+          (begin! lb)
+          (swap! *f* update :loops conj {:break le :continue lc :depth d})
+          (emit-stmt (:body s))
+          (swap! *f* update :loops pop)
+          (begin! lc)
+          (condbr! (with-full (emit-rv (:cond s))) lb le)
+          (begin! le))
+    :for (let [lc (new-label "for.cond") lb (new-label "for.body") li (new-label "for.inc") le (new-label "for.end") d (cleanup-depth)]
+           (begin! lc)
+           (if (:cond s) (condbr! (with-full (emit-rv (:cond s))) lb le) (br! lb))
+           (begin! lb)
+           (swap! *f* update :loops conj {:break le :continue li :depth d})
+           (emit-stmt (:body s))
+           (swap! *f* update :loops pop)
+           (begin! li)
+           (when (:inc s) (with-full (let [e (:inc s)] (if (#{:lv :xv} (:cat e)) (emit-lv e) (emit-rv e)))))
+           (br! lc)
+           (begin! le))
+    :break (let [l (peek (:loops @*f*))] (unwind-to! (:depth l)) (br! (:break l)))
+    :continue (let [l (last (filter :continue (:loops @*f*)))] (unwind-to! (:depth l)) (br! (:continue l)))
+    :return (emit-return! s)
+    :switch (let [v (with-full (emit-rv (:e s)))
+                  le (new-label "sw.end")
+                  cases (atom [])
+                  ;; the labels of the body's cases and default, found first
+                  collect (fn walk [x] (when (map? x)
+                                         (case (:s x)
+                                           :case (do (swap! cases conj [(:v x) (new-label "sw.bb")]) (walk (:body x)))
+                                           :default (do (swap! cases conj [:default (new-label "sw.default")]) (walk (:body x)))
+                                           :switch nil
+                                           (doseq [k [:items :then :else :body]] (let [y (get x k)] (if (vector? y) (doseq [z y] (walk z)) (walk y)))))))
+                  _ (collect (:body s))
+                  dflt (or (some (fn [[k l]] (when (= k :default) l)) @cases) le)
+                  lt (abi/llvm-type (:ty s) true)
+                  d (cleanup-depth)]
+              (emit! (list 'switch lt v dflt (vec (for [[k l] @cases :when (not= k :default)] [lt k l]))))
+              (swap! *f* update :loops conj {:break le :depth d :labels (atom @cases)})
+              (emit-stmt (:body s))
+              (swap! *f* update :loops pop)
+              (begin! le))
+    (:case :default) (let [sw (last (filter :labels (:loops @*f*)))
+                           [[_ l] & more] (deref (:labels sw))]
+                       (reset! (:labels sw) (vec more))
+                       (begin! l)
+                       (emit-stmt (:body s)))
+    :label (let [l (or (get-in @*f* [:user-labels (:name s)]) (let [l (new-label (str "lbl." (:name s)))] (swap! *f* assoc-in [:user-labels (:name s)] l) l))]
+             (begin! l)
+             (emit-stmt (:body s)))
+    :goto (do (when (seq (:cleanups @*f*)) (fail :goto "goto with destructors to run"))
+              (let [l (or (get-in @*f* [:user-labels (:name s)]) (let [l (new-label (str "lbl." (:name s)))] (swap! *f* assoc-in [:user-labels (:name s)] l) l))]
+                (br! l)))
+    (fail :codegen "statement " (:s s))))
+
+;; the if statement
+(defn- emit-if! [s]
+  (let [lt (new-label "if.then") le (new-label "if.else") lend (new-label "if.end")
+        c (with-full (emit-rv (:cond s)))]
+    (condbr! c lt (if (:else s) le lend))
+    (close-block!) (start! lt)
+    (emit-stmt (:then s))
+    (when (:else s)
+      (when-not (:term @*f*) (br! lend))
+      (close-block!) (start! le)
+      (emit-stmt (:else s)))
+    (begin! lend)))
+
+(alter-var-root #'emit-stmt (fn [f] (fn [s] (if (= :if (:s s)) (emit-if! s) (f s)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Functions
+
+(defn- vptr-store! [cid this]
+  (let [vt (:vtable (abi/cls cid))
+        n (+ 2 (count vt))]
+    (swap! *top* update :vtables conj cid)
+    (emit! (list 'store ['ptr (list 'getelementptr :inbounds (list 'array n 'ptr) ['ptr (gsym (str "_ZTV" (abi/mangle-type-name {:k :class :id cid})))] ['i64 0] ['i64 2])]
+                 ['ptr this] :align 8))))
+
+(defn- linkage-of [f]
+  (cond
+    (:internal f) [:linkage :internal]
+    (or (:inline f) (:implicit f) (:defaulted f)) [:linkage :linkonce_odr]
+    :else []))
+
+(defn- emit-fn!
+  "The definition of the function `fid` (a destructor: D2 and, when virtual, D0)."
+  [fid]
+  (let [f (sema/fnd fid)
+        nm (fn-name fid)
+        [ret ps va] (fn-sig f)
+        pnames (vec (map-indexed (fn [i _] (symbol (str "%a" i))) ps))
+        state (atom {:blocks [] :label nil :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores []
+                     :fn f :nrvo (:nrvo f) :ret-label '%return})]
+    (binding [*f* state]
+      (let [k (atom 0)
+            sret (when (class-ret? f) (let [p (nth pnames @k)] (swap! k inc) p))
+            this (when (and (:cls f) (not (:static f))) (let [p (nth pnames @k)] (swap! k inc) p))]
+        (swap! *f* assoc :sret sret)
+        (when this
+          (let [s (alloca! 'ptr 8)]
+            (emit! (list 'store ['ptr this] ['ptr s] :align 8))
+            (swap! *f* assoc :this-slot s)))
+        (doseq [[i pid] (map-indexed vector (:params f))]
+          (let [p (nth pnames (+ @k i)) t (:ty (sema/var* pid))]
+            (cond
+              (abi/ref? t) (let [s (alloca! 'ptr 8)] (emit! (list 'store ['ptr p] ['ptr s] :align 8)) (swap! *f* assoc-in [:addr pid] s))
+              (abi/class? (abi/unq t)) (swap! *f* assoc-in [:addr pid] p)
+              :else (let [s (slot! t)] (store! t p s) (swap! *f* assoc-in [:addr pid] s)))))
+        (when-not (or (= 'void ret) sret)
+          (let [rt (if (abi/ref? (:ret (:ty f))) (abi/ptr abi/void) (:ret (:ty f)))]
+            (swap! *f* assoc :ret-slot (slot! rt) :ret-ty rt)))
+        (when (= "main" nm) (emit! (list 'store ['i32 0] ['ptr (:ret-slot @*f*)] :align 4)))
+        (let [thisv (when this (val! (list 'load 'ptr ['ptr (:this-slot @*f*)] :align 8)))
+              cid (:cls f)]
+          (case (:kind f)
+            :ctor (let [ti (:tinits f)]
+                    (if-let [d (:delegate ti)]
+                      (with-full (emit-init thisv {:k :class :id cid} d))
+                      (do (doseq [[i b] (map-indexed vector (:bases ti))]
+                            (with-full (emit-init (offset! thisv (nth (:bases (abi/layout cid)) i)) {:k :class :id (:base b)} (:init b))))
+                          (when (abi/dynamic? cid) (vptr-store! cid thisv))
+                          (doseq [fi (:fields ti)]
+                            (let [fl (nth (:fields (abi/cls cid)) (:field fi))
+                                  addr (offset! thisv (abi/field-offset cid (:field fi)))]
+                              (if (abi/ref? (:ty fl))
+                                (with-full (emit-init addr (:ty fl) (:init fi)))
+                                (with-full (emit-init addr (:ty fl) (:init fi)))))))))
+            :dtor (do (when (abi/dynamic? cid) (vptr-store! cid thisv))
+                      ;; the bases and members destroyed after the body, as cleanups (a return in the body runs them)
+                      (let [c (abi/cls cid) l (abi/layout cid)]
+                        (doseq [[i b] (map-indexed vector (:bases c))]
+                          (when (nontrivial-dtor? (:cls b)) (push-cleanup! {:addr (offset! thisv (nth (:bases l) i)) :cls (:cls b)})))
+                        (doseq [[i fl] (map-indexed vector (:fields c))]
+                          (let [bt (loop [t (abi/unq (:ty fl))] (if (abi/arr? t) (recur (abi/unq (:of t))) t))]
+                            (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
+                              (if (abi/arr? (abi/unq (:ty fl)))
+                                (push-cleanup! {:array (offset! thisv (nth (:fields l) i)) :n (quot (abi/size-of (:ty fl)) (abi/size-of bt)) :cls (:id bt)})
+                                (push-cleanup! {:addr (offset! thisv (nth (:fields l) i)) :cls (:id bt)})))))))
+            nil)
+          (when-let [as (:tassign f)] (doseq [s as] (emit-stmt s))
+            (store! (abi/ptr abi/void) thisv (:ret-slot @*f*)))
+          (when-let [b (:tbody f)] (emit-stmt b))
+          ;; falling off the end
+          (when-not (:term @*f*)
+            (cond
+              (or (= 'void ret) sret (= "main" nm) (:tassign f)) (do (unwind-to! 0) (br! '%return))
+              :else (emit! '(unreachable))))
+          (close-block!)
+          (start! '%return)
+          (if (or (= 'void ret) sret)
+            (emit! '(ret void))
+            (let [v (load! (:ret-ty @*f*) (:ret-slot @*f*))]
+              (emit! (list 'ret ret v))))
+          (close-block!)))
+      (let [s @state
+            blocks (:blocks s)
+            entry (first blocks)
+            entry (apply list 'block (second entry) (concat (:allocas s) (:entry-stores s) (drop 2 entry)))
+            body (vec (cons entry (rest blocks)))
+            params (mapv (fn [t p] [t p]) ps pnames)]
+        (add-top! (apply list 'llvm/define (gsym nm) ret (cond-> params va (conj '&))
+                         (concat (linkage-of f) [:body body])))
+        ;; the complete object's constructor and destructor: aliases of the base ones for a strong definition
+        (when (and (#{:ctor :dtor} (:kind f)) (empty? (linkage-of f)))
+          (add-top! (list 'llvm/alias (gsym (abi/mangle-fn f 1)) (list 'fn ret (vec ps)) ['ptr (gsym nm)])))
+        (when (and (= :dtor (:kind f)) (:virtual f))
+          (emit-d0! f))))))
+
+(defn emit-d0!
+  "The deleting destructor: D2, then operator delete with the object's size."
+  [f]
+  (let [nm (abi/mangle-fn f 0)]
+    (declare! "_ZdlPvm" 'void '[ptr i64])
+    (add-top! (list 'llvm/define (gsym nm) 'void [['ptr '%a0]] :linkage (if (:internal f) :internal :linkonce_odr)
+                    :body [(list 'block nil
+                                 (list 'call 'void (gsym (fn-name (:id f))) [['ptr '%a0]])
+                                 (list 'call 'void (gsym "_ZdlPvm") [['ptr '%a0] ['i64 (abi/size-of {:k :class :id (:cls f)})]])
+                                 '(ret void))]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Vtables and type_info (Itanium §2.5, §2.9.5)
+
+(defn- typeinfo! [cid]
+  (let [t {:k :class :id cid}
+        mn (abi/mangle-type-name t)
+        ti (str "_ZTI" mn) ts (str "_ZTS" mn)
+        c (abi/cls cid)]
+    (when-not (contains? (:declared @*top*) ti)
+      (swap! *top* update :declared conj ti ts)
+      (add-top! (list 'llvm/global (gsym ts) (list 'array (inc (count mn)) 'i8) (list 'c-string (str mn (char 0))) :linkage :linkonce_odr :constant true :align 1))
+      (let [bases (:bases c)
+            kind (cond (empty? bases) "_ZTVN10__cxxabiv117__class_type_infoE"
+                       (and (= 1 (count bases)) (= :public (:access (first bases))) (zero? (long (first (:bases (abi/layout cid)))))) "_ZTVN10__cxxabiv120__si_class_type_infoE"
+                       :else "_ZTVN10__cxxabiv121__vmi_class_type_infoE")
+            vt [ 'ptr (list 'getelementptr :inbounds 'ptr ['ptr (gsym kind)] ['i64 2])]]
+        (when-not (contains? (:declared @*top*) kind)
+          (swap! *top* update :declared conj kind)
+          (add-top! (list 'llvm/global (gsym kind) '(array 0 ptr) :linkage :external)))
+        (doseq [b bases] (typeinfo! (:cls b)))
+        (case kind
+          "_ZTVN10__cxxabiv117__class_type_infoE"
+          (add-top! (list 'llvm/global (gsym ti) '(struct ptr ptr) (list 'struct vt ['ptr (gsym ts)]) :linkage :linkonce_odr :constant true :align 8))
+          "_ZTVN10__cxxabiv120__si_class_type_infoE"
+          (add-top! (list 'llvm/global (gsym ti) '(struct ptr ptr ptr) (list 'struct vt ['ptr (gsym ts)] ['ptr (gsym (str "_ZTI" (abi/mangle-type-name {:k :class :id (:cls (first bases))})))])
+                          :linkage :linkonce_odr :constant true :align 8))
+          (let [bl (:bases (abi/layout cid))]
+            (add-top! (list 'llvm/global (gsym ti) (apply list 'struct 'ptr 'ptr 'i32 'i32 (mapcat (fn [_] ['ptr 'i64]) bases))
+                            (apply list 'struct vt ['ptr (gsym ts)] ['i32 0] ['i32 (count bases)]
+                                   (mapcat (fn [i b] [['ptr (gsym (str "_ZTI" (abi/mangle-type-name {:k :class :id (:cls b)})))]
+                                                      ['i64 (+ (bit-shift-left (long (nth bl i)) 8) (if (= :public (:access b)) 2 0))]])
+                                           (range) bases))
+                            :linkage :linkonce_odr :constant true :align 8))))))
+    (gsym ti)))
+
+(defn- vtable! [cid]
+  (let [t {:k :class :id cid}
+        nm (str "_ZTV" (abi/mangle-type-name t))
+        vt (:vtable (abi/cls cid))
+        ti (typeinfo! cid)
+        slots (vec (concat [['ptr 'null] ['ptr ti]]
+                           (for [s vt]
+                             (let [f (sema/fnd (:fn s))]
+                               (if (:pure f)
+                                 (do (declare! "__cxa_pure_virtual" 'void []) ['ptr (gsym "__cxa_pure_virtual")])
+                                 (if (= 0 (:v s))
+                                   (do (want-fn! (:fn s)) ['ptr (gsym (abi/mangle-fn f 0))])
+                                   ['ptr (want-fn! (:fn s))]))))))]
+    (add-top! (list 'llvm/global (gsym nm) (list 'array (count slots) 'ptr) (apply list 'array slots) :linkage :linkonce_odr :constant true :align 8))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Namespace-scope variables
+
+(defn- const-leaves
+  "The initializer as constant leaves [[offset llvm-type value] ...] of an object of type `t` at `off`, or nil when it
+  is not a constant (a dynamic initialization then)."
+  [t init ^long off]
+  (let [tu (abi/unq t)]
+    (case (:i init)
+      (:none :zero) []
+      :expr (let [e (:e init)]
+              (when (abi/scalar? tu)
+                (let [lt (abi/llvm-type tu)
+                      v (letfn [(cv [e]
+                                  (case (:op e)
+                                    :int (:v e)
+                                    :float (fp-const (:ty e) (:v e))
+                                    :null 'null
+                                    :decay (when (= :str (:op (:e e))) (gsym (string-global (:s (:e e)))))
+                                    :addr (when (= :var (:op (:e e))) (let [v (sema/var* (:id (:e e)))] (when (#{:global :member-static} (:storage v)) (gsym (abi/mangle-var v)))))
+                                    :fnaddr (want-fn! (:fn e))
+                                    :cast (case (:ck e)
+                                            (:int :noop) (when-let [x (cv (:e e))] (if (number? x)
+                                                                                     (let [bits (* 8 (abi/size-of tu)) m (dec (bit-shift-left 1 (min 63 bits)))]
+                                                                                       (if (= bits 64) x (let [y (bit-and (long x) (bit-or m (if (= bits 64) -1 0)))]
+                                                                                                           (if (and (abi/signed? tu) (>= y (bit-shift-left 1 (dec bits)))) (- y (bit-shift-left 1 bits)) y))))
+                                                                                     x))
+                                            :int->fp (when-let [x (cv (:e e))] (when (number? x) (fp-const tu (double x))))
+                                            :to-bool (when-let [x (cv (:e e))] (when (number? x) (if (zero? (long x)) 0 1)))
+                                            nil)
+                                    :unop (when (= "-" (:o e)) (let [x (cv (:e e))] (when (number? x) (- (long x)))))
+                                    nil))]
+                          (cv e))
+                      v (if (and (= :bool (abi/bn tu)) (boolean? v)) (if v 1 0) v)]
+                  (when (some? v) [[off lt v]]))))
+      :list (if (abi/arr? tu)
+              (let [et (:of tu) sz (abi/size-of et)
+                    ls (map-indexed (fn [i it] (const-leaves et it (+ off (* i sz)))) (:items init))
+                    fill (:fill init)]
+                (when (and (every? some? ls) (#{:none :zero} (:i fill))) (vec (apply concat ls))))
+              (let [cid (:id tu) l (abi/layout cid) c (abi/cls cid)
+                    subs (concat (map-indexed (fn [i b] [(nth (:bases l) i) {:k :class :id (:cls b)}]) (:bases c))
+                                 (map-indexed (fn [i f] [(nth (:fields l) i) (:ty f)]) (:fields c)))
+                    ls (map (fn [[o st] it] (const-leaves st it (+ off (long o)))) subs (:items init))]
+                (when (and (not (abi/dynamic? cid)) (every? some? ls)) (vec (apply concat ls)))))
+      :string (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
+                (vec (map-indexed (fn [i ch] [(+ off i) 'i8 (long (int ch))]) (subs (str s (apply str (repeat n (char 0)))) 0 n))))
+      nil)))
+
+(defn- leaves-constant
+  "[type value] of a packed struct holding the leaves with byte padding, `size` bytes."
+  [leaves ^long size]
+  (loop [ls (sort-by first leaves) pos 0 ts [] vs []]
+    (if (empty? ls)
+      (let [[ts vs] (if (< pos size) [(conj ts (list 'array (- size pos) 'i8)) (conj vs [(list 'array (- size pos) 'i8) 'zeroinitializer])] [ts vs])]
+        [(apply list 'packed ts) (apply list 'packed vs)])
+      (let [[o t v] (first ls)
+            pad (- (long o) pos)
+            [ts vs] (if (pos? pad) [(conj ts (list 'array pad 'i8)) (conj vs [(list 'array pad 'i8) 'zeroinitializer])] [ts vs])
+            sz (case t i8 1 i16 2 i32 4 i64 8 float 4 double 8 ptr 8 x86_fp80 10)]
+        (recur (rest ls) (+ (long o) sz) (conj ts t) (conj vs [t v]))))))
+
+(defn- emit-globals!
+  "Each defined namespace-scope variable: a constant initializer, or zero and a dynamic initialization in
+  _GLOBAL__sub_I_FILE (llvm.global_ctors)."
+  [prog ^String file]
+  (let [dyn (atom [])]
+    (doseq [[k id] (:order prog) :when (= k :var)]
+      (let [v (sema/var* id)]
+        (when (and (:defined v) (not (:extern v)))
+          (let [t (:ty v) [s a] (abi/size-align t)
+                nm (abi/mangle-var v)
+                init (:ginit v)
+                leaves (when-not (abi/ref? t) (const-leaves t init 0))
+                link (if (:internal v) [:linkage :internal] [])]
+            (cond
+              (and leaves (abi/scalar? (abi/unq t)) (<= (count leaves) 1))
+              (add-top! (apply list 'llvm/global (gsym nm) (abi/llvm-type t) (if (seq leaves) (nth (first leaves) 2) (zero-of t)) (concat link [:align a])))
+              leaves
+              (let [[ct cv] (leaves-constant leaves s)] (add-top! (apply list 'llvm/global (gsym nm) ct cv (concat link [:align a]))))
+              :else
+              (do (add-top! (apply list 'llvm/global (gsym nm) (if (abi/ref? t) 'ptr (list 'array s 'i8)) (if (abi/ref? t) 'null 'zeroinitializer) (concat link [:align a])))
+                  (swap! dyn conj id)))))))
+    (when (seq @dyn)
+      (let [state (atom {:blocks [] :label nil :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores []
+                         :fn {:name "init" :ty {:k :fn :ret abi/void :ps []}} :ret-label '%return})
+            nm (str "_GLOBAL__sub_I_" file)]
+        (binding [*f* state]
+          (doseq [id @dyn]
+            (let [v (sema/var* id) t (:ty v) addr (gsym (abi/mangle-var v))]
+              (with-full (emit-init addr t (:ginit v)))
+              (let [bt (abi/unq t)]
+                (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
+                  (declare! "__cxa_atexit" 'i32 '[ptr ptr ptr])
+                  (swap! *top* assoc :dso true)
+                  (val! (list 'call 'i32 (gsym "__cxa_atexit") [['ptr (want-fn! (:dtor (abi/cls (:id bt))))] ['ptr addr] ['ptr (gsym "__dso_handle")]]))))))
+          (emit! '(ret void))
+          (close-block!))
+        (let [s @state blocks (:blocks s) entry (first blocks)
+              entry (apply list 'block (second entry) (concat (:allocas s) (:entry-stores s) (drop 2 entry)))]
+          (add-top! (list 'llvm/define (gsym nm) 'void [] :linkage :internal :body (vec (cons entry (rest blocks)))))
+          (add-top! (list 'llvm/global (gsym "llvm.global_ctors") '(array 1 (struct i32 ptr ptr))
+                          (list 'array ['(struct i32 ptr ptr) (list 'struct ['i32 65535] ['ptr (gsym nm)] ['ptr 'null])])
+                          :linkage :appending)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The module
+
+(defn gen-module
+  "The LLVM forms of the program `prog` (arbace.cpp.sema's analyze-program) of the file named `file`."
+  [prog ^String file]
+  (binding [sema/*fns* (atom (:fns prog)) sema/*vars* (atom (:vars prog))
+            abi/*classes* (atom (:classes prog)) abi/*enums* (atom (:enums prog))
+            *top* (atom {:forms [] :declared #{} :strings {} :wanted #{} :queue [] :vtables #{}})]
+    ;; static locals know their function
+    (doseq [[fid f] (:fns prog)] (doseq [vid (:statics f)] (swap! sema/*vars* assoc-in [vid :fn-of] fid)))
+    (emit-globals! prog file)
+    ;; the definitions: every non-inline function with a body, then what they use
+    (doseq [[k id] (:order prog) :when (= k :fn)]
+      (let [f (sema/fnd id)]
+        (when (and (:tbody f) (not (:inline f)) (not (:implicit f))) (want-fn! id))
+        (when (and (:tbody f) (= "main" (:name f))) (want-fn! id))))
+    (loop []
+      (let [q (:queue @*top*)]
+        (when (seq q)
+          (swap! *top* assoc :queue [])
+          (doseq [fid q]
+            (let [f (sema/fnd fid)]
+              (binding [] (emit-fn! fid))
+              (doseq [vid (:statics f)] nil)))
+          (doseq [cid (:vtables @*top*)]
+            (when-not (contains? (:declared @*top*) (str "vt" cid))
+              (swap! *top* update :declared conj (str "vt" cid))
+              (vtable! cid)))
+          (recur))))
+    (when (:dso @*top*) (add-top! (list 'llvm/global (gsym "__dso_handle") 'i8 :linkage :external :visibility :hidden)))
+    (vec (concat [(list 'llvm/source-filename file)
+                  (list 'llvm/datalayout "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128")
+                  (list 'llvm/triple "x86_64-alpine-linux-musl")]
+                 (:forms @*top*)))))
+
+(defn gen-file
+  "The LLVM forms of the C++ file at `path` (read by the native parser at `std`)."
+  [^String path ^String std]
+  (let [u (native/parse-file path (.getName (java.io.File. path)) std [])
+        _ (when (pos? (long (:declines u 0))) (fail :parse "the native parser declined " (:declines u) " constructs"))
+        src (llvm/latin1 path)
+        prog (sema/analyze-program (:nodes u) (:root u) src)]
+    (gen-module prog (.getName (java.io.File. path)))))
+
+(defn gen-one
+  "Writes OUT/forms.ae (the LLVM forms), OUT/gen.ll (their IR text) and OUT/gen.c (lowered by arbace.cpp.lower), or
+  OUT/gen.refused (the class and the message); the class or nil."
+  [^String path ^String std ^String out]
+  (.mkdirs (java.io.File. out))
+  (try
+    (let [forms (gen-file path std)]
+      (spit (str out "/forms.ae") (llvm/module-text (llvm/ns-name-of "gen.ll") forms))
+      (llvm/spit-latin1 (str out "/gen.ll") (llvm/print-ll forms))
+      (let [r (lower/lower-file forms "gen.c")]
+        (if (:refused r)
+          (do (spit (str out "/gen.refused") (str "lower-" (name (:refused r)) "\t" (str/replace (str (:message r)) #"[\t\n]" " ") "\n")) (:refused r))
+          (do (llvm/spit-latin1 (str out "/gen.c") (:c r)) nil))))
+    (catch Throwable e
+      (let [c (or (:codegen/refused (ex-data e)) :crash)]
+        (spit (str out "/gen.refused") (str (name c) "\t" (str/replace (str (.getMessage e)) #"[\t\n]" " ") "\n"))
+        (when (= c :crash) (binding [*out* *err*] (println path) (.printStackTrace e)))
+        c))))
+
+;; ---------------------------------------------------------------------------------------------
+;; bin/cppi codegen-check: the judge
+
+(defn- defined-names
+  "The global names an IR text defines (functions, variables, aliases), but string literals, llvm.* and the global
+  constructor."
+  [^String ll]
+  (set (for [l (str/split-lines ll)
+             :let [m (or (re-find #"^define [^@]*@(\"[^\"]+\"|[^ (]+)\(" l) (re-find #"^@(\"[^\"]+\"|[^ ]+) = (?!external)" l))]
+             :when m
+             :let [n (second m)]
+             :when (not (or (str/starts-with? n ".str") (str/starts-with? n "llvm.") (str/starts-with? n "_GLOBAL__sub_I_") (str/starts-with? n "__cxx_global_var_init")))]
+         n)))
+
+(defn- slurp? [^String p] (let [f (java.io.File. p)] (when (.exists f) (slurp f))))
+
+(defn judge
+  "Each sample of WORK/list.tsv: the code generator's lowered run against clang's IR lowered (status and stdout
+  equal), its IR run natively against the same, and the names it defines among clang's; the known file's names are
+  expected not to pass (their class given). Writes WORK/results.tsv and WORK/summary.edn; exit 1 on a failure."
+  [^String work ^String known-path]
+  (let [known (or (some-> (slurp? known-path) read-string) {})
+        rows (for [l (str/split-lines (slurp (str work "/list.tsv"))) :when (seq l)] (str/split l #"\t"))
+        res (vec (for [[n] rows]
+                   (let [d (str work "/files/" n "/")
+                         ref-ll (slurp? (str d "x.ll")) gen-ll (slurp? (str d "gen.ll"))
+                         refused (slurp? (str d "gen.refused"))
+                         run (fn [k] [(some-> (slurp? (str d k ".status")) str/trim) (slurp? (str d k ".out"))])
+                         [rs ro] (run "ref") [gs go] (run "gen") [ns no] (run "nat")
+                         missing (when (and ref-ll gen-ll) (sort (remove (defined-names ref-ll) (defined-names gen-ll))))
+                         verdict (cond
+                                   (nil? ref-ll) "no-reference"
+                                   (nil? rs) "reference-failed"
+                                   refused (str "refused:" (first (str/split refused #"\t")))
+                                   (nil? gs) "gen-build-failed"
+                                   (not= [rs ro] [gs go]) "differs"
+                                   (not= [rs ro] [ns no]) "native-differs"
+                                   (seq missing) "names-differ"
+                                   :else "pass")]
+                     {:name n :verdict verdict :status rs :missing (vec missing) :refused refused})))
+        bad (for [r res :when (not= "pass" (:verdict r)) :when (not (contains? known (:name r)))] r)
+        stale (for [[k _] known :when (= "pass" (:verdict (first (filter #(= k (:name %)) res))))] k)]
+    (spit (str work "/results.tsv") (apply str (for [r res] (str (:name r) "\t" (:verdict r) "\t" (str/join " " (:missing r)) "\n"))))
+    (spit (str work "/summary.edn") (pr-str {:total (count res) :pass (count (filter #(= "pass" (:verdict %)) res))
+                                             :known (count (filter #(contains? known (:name %)) res)) :fail (count bad) :stale (vec stale)}))
+    (doseq [r res] (println (format "%-28s %s%s" (:name r) (:verdict r) (if (seq (:missing r)) (str " " (str/join " " (:missing r))) ""))))
+    (println (format "codegen-check: %d of %d pass, %d known, %d failing%s" (count (filter #(= "pass" (:verdict %)) res)) (count res)
+                     (count (filter #(contains? known (:name %)) res)) (count bad) (if (seq stale) (str ", known but passing: " (str/join " " stale)) "")))
+    (when (or (seq bad) (seq stale)) (System/exit 1))))
+
+(defn -main
+  "bin/cppi codegen FILE OUTDIR [--std S]: the file's LLVM forms by the code generator, their IR and their lowering;
+  bin/cppi codegen-list LIST (NAME<tab>PATH<tab>OUTDIR lines)."
+  [verb & args]
+  (case verb
+    "gen" (let [[f out & more] args o (apply hash-map more)
+                c (gen-one f (get o "--std" "c++23") out)]
+            (when c (binding [*out* *err*] (println (str f ": refused (" (name c) "): " (slurp (str out "/gen.refused"))))) (System/exit 3)))
+    "gen-list" (let [[lst] args]
+                 ;; each sample's forms, IR and lowering by the code generator, and clang's IR (x.ll) lowered as the reference (ref.c)
+                 (doseq [l (str/split-lines (slurp lst)) :when (seq l)]
+                   (let [[n p out] (str/split l #"\t")]
+                     (gen-one p "c++23" out)
+                     (when (.exists (java.io.File. (str out "/x.ll")))
+                       (let [r (lower/lower-file (str out "/x.ll") "ref.c")]
+                         (if (:refused r)
+                           (spit (str out "/ref.refused") (str (name (:refused r)) "\n"))
+                           (llvm/spit-latin1 (str out "/ref.c") (:c r)))))))
+                 (println "generated"))
+    "judge" (let [[work known] args] (judge work known))
+    (do (println "codegen: gen FILE OUT [--std S], gen-list LIST") (System/exit 2))))

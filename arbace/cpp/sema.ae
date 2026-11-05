@@ -1,0 +1,1488 @@
+(ns arbace.cpp.sema
+  "The code generator's semantic analysis (doc/cpp/CODEGEN.md §3): the native parser's tree (clang's AST as data,
+  arbace.repr.cpp.native) analyzed as clang's Sema analyzes it for the slice of C++ CODEGEN.md §6 names -- the
+  declarations entered into scopes (namespaces, classes, blocks), every expression typed with its value category and
+  its implicit conversions written out (lvalue-to-rvalue, promotions, the usual arithmetic conversions, decay, the
+  pointer conversions, derived-to-base), names looked up as [basic.lookup] says (unqualified, qualified, class members
+  through the bases, the operators' ADL in the classes' namespaces), overload resolution by the implicit conversion
+  sequences' ranks ([over.match.best], [over.ics.rank]: exact, promotion, conversion, user-defined, ellipsis, with the
+  reference bindings' qualification tie-break), initialization ([dcl.init]: default, value, copy, direct, list and
+  aggregate initialization, reference binding with temporaries materialized), the implicit special members
+  ([class.default.ctor], [class.copy.ctor], [class.dtor]: declared, trivial or defined), virtual functions and their
+  overriders. The result is a program of typed functions and variables that arbace.cpp.codegen writes as LLVM forms.
+  Anything outside the slice is refused: (ex-info ... {:codegen/refused class})."
+  (:require [arbace.cpp.abi :as abi]
+            [arbace.repr.cpp.scope]
+            [arbace.repr.cpp.types :as ct]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def fail abi/fail)
+
+;; ---------------------------------------------------------------------------------------------
+;; State
+
+(def ^:dynamic *src* "")
+(def ^:dynamic *fns* nil)    ; atom {id fn}
+(def ^:dynamic *vars* nil)   ; atom {id var}
+(def ^:dynamic *ids* nil)    ; atom counter
+(def ^:dynamic *order* nil)  ; atom [[:fn id] [:var id] ...] in declaration order (the definitions' emission order)
+
+(defn- next-id [] (swap! *ids* inc))
+(defn fnd [id] (get @*fns* id))
+(defn var* [id] (get @*vars* id))
+(defn- upd-fn! [id f & args] (apply swap! *fns* update id f args))
+(defn- upd-var! [id f & args] (apply swap! *vars* update id f args))
+
+;; A scope: {:kind :ns|:class|:block|:fn :names HashMap(name -> [entity]) :parent scope :path mangling path :cls id
+;;           :usings ArrayList :pos-limited bool}
+(defn- new-scope [kind parent & {:as more}]
+  (merge {:kind kind :names (java.util.HashMap.) :parent parent :usings (java.util.ArrayList.)
+          :path (:path parent [])}
+         more))
+
+(defn- enter! [scope ^String nm e]
+  (when nm
+    (let [^java.util.HashMap m (:names scope)]
+      (.put m nm (conj (or (.get m nm) []) e))))
+  e)
+
+(def ^:dynamic *cutoff* Long/MAX_VALUE) ; a namespace-scope name declared at or after this token is not visible yet
+
+(declare class-lookup)
+
+(defn- own-names [scope ^String nm]
+  (let [es (.get ^java.util.HashMap (:names scope) nm)
+        es (if (= :ns (:kind scope)) (filterv #(< (long (or (:pos %) -1)) (long *cutoff*)) es) es)]
+    (concat es (mapcat #(own-names % nm) (:usings scope)))))
+
+(defn- find-here
+  "The entities `nm` names in `scope` itself (a class: with its bases', [class.member.lookup])."
+  [scope ^String nm]
+  (if (= :class (:kind scope))
+    (seq (map second (class-lookup (:cls scope) nm)))
+    (seq (own-names scope nm))))
+
+(declare header-entities)
+
+(defn lookup
+  "Unqualified lookup: the entities of the first scope outward that declares `nm` (the headers' last, through the
+  native parser's scopes)."
+  [scope ^String nm]
+  (or (loop [s scope] (when s (or (find-here s nm) (recur (:parent s)))))
+      (header-entities [nm])))
+
+;; ---------------------------------------------------------------------------------------------
+;; Classes: members by name, through the bases
+
+(defn class-lookup
+  "[[class-id entity] ...]: the members named `nm` in class `id` or, if none, in its bases (the first base that has
+  them, depth first: single inheritance's answer)."
+  [id ^String nm]
+  (let [c (abi/cls id)
+        own (seq (.get ^java.util.HashMap (:names (:scope c)) nm))]
+    (if own
+      (mapv (fn [e] [id e]) own)
+      (some #(seq (class-lookup (:cls %) nm)) (:bases c)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types from clang's qualType strings
+
+(declare resolve-type-form resolve-type lookup-qualified const-int)
+
+;; ---------------------------------------------------------------------------------------------
+;; The headers' declarations: the native parser skims them into its scopes (arbace.repr.cpp.scope); a C function
+;; (extern "C", its entity's :clink) and a typedef of a builtin or pointer type are taken from there
+
+(def ^:dynamic *proot* nil)   ; the native parser's global scope
+(def ^:dynamic *root* nil)    ; ours
+(def ^:dynamic *header-cache* nil) ; atom {parts entities}
+
+(defn- ptype->type
+  "Our type of the native parser's type map (a builtin's words, a pointer, a named type through its entity)."
+  [t]
+  (let [r (case (:t t)
+            :b (resolve-type-form *root* (ct/builtin-symbol (:w t)))
+            :p (abi/ptr (ptype->type (:of t)))
+            :n (let [e (:ent t)]
+                 (cond (:ty e) (ptype->type (:ty e))
+                       (:target e) (ptype->type (:ty (:target e)))
+                       :else (fail :header-type "header type " (:s t))))
+            (fail :header-type "header type " (pr-str (dissoc t :ent))))]
+    (cond-> r (:c t) (assoc :c true) (:v t) (assoc :v true))))
+
+(defn header-entities
+  "Our entities for the header declaration the parts name ([\"printf\"], [\"std\" \"printf\"]), or nil."
+  [parts]
+  (when *proot*
+    (or (get @*header-cache* parts)
+        (let [pe (loop [s *proot* [p & more] parts]
+                   (when s
+                     (let [e (if (identical? s *proot*) (arbace.repr.cpp.scope/lookup s p) (arbace.repr.cpp.scope/find-in s p))]
+                       (if (empty? more) e (recur (:scope e) more)))))
+              es (when pe
+                   (case (:k pe)
+                     :fn (when (and (:clink pe) (not (:tmpl pe)) (:qt pe))
+                           (when (:ovl pe) (fail :header-overload "an overloaded header function " (last parts)))
+                           (let [id (next-id)
+                                 f {:id id :name (:name pe) :kind :fn :ty (resolve-type *root* (:qt pe)) :linkage :c :path []
+                                    :scope *root* :param-names [] :defaults [] :pos -1 :header true}]
+                             (swap! *fns* assoc id f)
+                             [{:e :fn :id id :pos -1}]))
+                     :type (when (and (:ty pe) (not (:tag pe)) (not (:tmpl pe))) [{:e :type :ty (ptype->type (:ty pe)) :pos -1}])
+                     nil))]
+          (swap! *header-cache* assoc parts es)
+          es))))
+
+(def ^:private builtin-syms
+  {'void :void 'bool :bool 'char :char 'signed-char :schar 'unsigned-char :uchar 'short :short 'unsigned-short :ushort
+   'int :int 'unsigned :uint 'long :long 'unsigned-long :ulong 'long-long :llong 'unsigned-long-long :ullong
+   'float :float 'double :double 'long-double :ldouble 'wchar_t :wchar 'char8_t :char8 'char16_t :char16 'char32_t :char32
+   'std/nullptr_t :nullptr 'nullptr_t :nullptr 'decltype/nullptr :nullptr})
+
+(defn- name-parts [sym] (if (namespace sym) (concat (str/split (namespace sym) #"/") [(name sym)]) [(name sym)]))
+
+(defn- type-entity [es] (first (filter #(= :type (:e %)) es)))
+
+(defn resolve-type-form [scope f]
+  (cond
+    (symbol? f)
+    (if-let [n (builtin-syms f)]
+      (abi/b n)
+      (let [parts (name-parts f)
+            es (if (= 1 (count parts)) (lookup scope (first parts)) (lookup-qualified scope parts))
+            e (type-entity es)]
+        (or (:ty e) (fail :type "unknown type " f))))
+    (seq? f)
+    (case (first f)
+      * (abi/ptr (resolve-type-form scope (second f)))
+      & (abi/lref (resolve-type-form scope (second f)))
+      && (abi/rref (resolve-type-form scope (second f)))
+      const (assoc (resolve-type-form scope (second f)) :c true)
+      volatile (assoc (resolve-type-form scope (second f)) :v true)
+      restrict (resolve-type-form scope (second f))
+      cpp/attributed (resolve-type-form scope (last f))
+      array (abi/arr (when (number? (second f)) (second f)) (resolve-type-form scope (nth f 2)))
+      fn (let [[_ ps r] f
+               va (some #{'&} ps)
+               ps (remove #{'&} ps)
+               ps (if (= ['void] (vec ps)) [] ps)]
+           {:k :fn :ret (resolve-type-form scope r) :ps (mapv #(resolve-type-form scope %) ps) :va (boolean va)})
+      cpp/elaborated (resolve-type-form scope (nth f 2))
+      cpp/global (binding [] (resolve-type-form (loop [s scope] (if (:parent s) (recur (:parent s)) s)) (second f)))
+      (fail :type "type form " (pr-str f)))
+    :else (fail :type "type form " (pr-str f))))
+
+(defn resolve-type
+  "The semantic type of clang's spelling `s` in `scope`."
+  [scope ^String s]
+  (try (resolve-type-form scope (ct/parse-type s))
+       (catch arbace.lang.ExceptionInfo e (if (:codegen/refused (ex-data e)) (throw e) (fail :type "type " s ": " (.getMessage e))))))
+
+(defn- method-const? [^String qt] (boolean (re-find #"\)\s*const(\s|$|&)" qt)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The main file's text: qualifiers the tree does not keep
+
+(defn- node-text ^String [n]
+  (let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset]) l (get-in n [:range :end :tokLen])]
+    (when (and b e) (subs *src* b (min (count *src*) (+ (long e) (long (or l 0))))))))
+
+(defn- qualifier-before
+  "The parts of the nested-name-specifier written before a declaration's name (`int ns::P::get()`: [\"ns\" \"P\"])."
+  [n]
+  (let [b (get-in n [:range :begin :offset]) l (get-in n [:loc :offset])]
+    (when (and b l (< (long b) (long l)))
+      (let [t (subs *src* b l)
+            m (re-find #"((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)+)(~\s*)?$" t)]
+        (when m (vec (map str/trim (remove str/blank? (str/split (second m) #"::")))))))))
+
+(defn- ref-qualifier
+  "A DeclRefExpr's written qualifier's parts and whether it starts with ::."
+  [n]
+  (let [t (node-text n)]
+    (when (and t (str/includes? t "::"))
+      (let [g (str/starts-with? (str/trim t) "::")
+            parts (vec (map str/trim (remove str/blank? (str/split t #"::"))))]
+        [g (vec (butlast parts))]))))
+
+(defn lookup-qualified
+  "The entities of a qualified name's last part, its qualifiers looked up from `scope` (the first unqualified)."
+  ([scope parts] (lookup-qualified scope parts false))
+  ([scope parts global?]
+   (let [root (loop [s scope] (if (:parent s) (recur (:parent s)) s))]
+     (loop [s (if global? root nil) [p & more] parts]
+       (let [es (if s (find-here s p) (lookup scope p))]
+         (if (empty? more)
+           (or (seq es) (when (and (nil? s) (= :ns (:kind scope))) nil) (header-entities parts))
+           (let [e (first (filter #(#{:ns :type} (:e %)) es))
+                 s2 (cond (= :ns (:e e)) (:scope e)
+                          (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e)))
+                          (abi/enum? (:ty e)) (:scope (abi/enm (:id (:ty e))))
+                          :else (fail :lookup "no scope " p))]
+             (recur s2 more))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Declarations
+
+(defn- kids [n] (filter #(and (map? %) (:kind %)) (:inner n)))
+
+(defn- linkage-c? [scope] (:extern-c scope))
+
+(defn- ns-scope! [parent nm anon]
+  (let [k (if anon "" nm)
+        ^java.util.HashMap m (:names parent)
+        old (first (filter #(= :ns (:e %)) (.get m (str " ns " k))))]
+    (if old
+      (:scope old)
+      (let [s (new-scope :ns parent :path (conj (:path parent) (if anon [:anon] [:ns nm])) :internal (or anon (:internal parent)))]
+        (enter! parent (str " ns " k) {:e :ns :scope s :pos -1})
+        (if anon
+          (.add ^java.util.ArrayList (:usings parent) s)
+          (enter! parent nm {:e :ns :scope s :pos -1}))
+        s))))
+
+(declare declare-node! special-members! finish-class!)
+
+(defn- fn-op [^String nm] (when (str/starts-with? nm "operator") (let [o (str/trim (subs nm 8))] (when (seq o) o))))
+
+(defn- param-nodes [n] (filter #(= "ParmVarDecl" (:kind %)) (kids n)))
+
+(defn- same-sig? [f g]
+  (and (= (:name f) (:name g)) (= (:kind f) (:kind g)) (= (boolean (:cq f)) (boolean (:cq g)))
+       (= (mapv abi/unq (:ps (:ty f))) (mapv abi/unq (:ps (:ty g))))))
+
+(defn- find-redecl [scope f]
+  (let [^java.util.HashMap m (:names scope)]
+    (some (fn [e] (when (and (= :fn (:e e)) (same-sig? (fnd (:id e)) f)) (:id e))) (.get m (:name f)))))
+
+(defn- declare-fn!
+  "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
+  their declaration."
+  [scope n]
+  (let [q (when (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "FunctionDecl" "CXXConversionDecl"} (:kind n)) (qualifier-before n))
+        home (if (seq q)
+               (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
+                 (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
+               scope)
+        cid (:cls home)
+        k (case (:kind n) "CXXConstructorDecl" :ctor "CXXDestructorDecl" :dtor "CXXConversionDecl" :conv (if cid :method :fn))
+        qt (get-in n [:type :qualType])
+        ty (assoc (resolve-type home qt) :cq (method-const? qt))
+        ty (dissoc ty :cq)
+        nm (:name n)
+        body (first (filter #(= "CompoundStmt" (:kind %)) (kids n)))
+        pn (param-nodes n)
+        f {:name nm :kind k :cls cid :ty ty :cq (method-const? qt) :op (when nm (fn-op nm))
+           :static (and cid (= "static" (:storageClass n)))
+           :virtual (boolean (:virtual n)) :pure (boolean (:pure n))
+           :linkage (if (linkage-c? home) :c :cpp)
+           :internal (boolean (or (and (not cid) (= "static" (:storageClass n))) (:internal home)))
+           :internal-l (boolean (and (not cid) (= "static" (:storageClass n)) (not (:internal home))))
+           :inline (boolean (or (:inline n) (:constexpr n) (and cid (= scope home))))
+           :path (:path home)
+           :scope home
+           :defaulted (when (:explicitlyDefaulted n) true) :deleted (boolean (:explicitlyDeleted n))
+           :pos (long (or (:_b n) 0))}
+        old (find-redecl home f)
+        id (or old (next-id))
+        pinfo {:param-names (mapv :name pn)
+               :defaults (mapv (fn [p] (first (kids p))) pn)}]
+    (if old
+      (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names] [])))
+                            (some some? (:defaults pinfo)) (assoc :defaults (:defaults pinfo))
+                            body (assoc :body body :node n :def-scope scope :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))
+                                        :inline (or (:inline g) (boolean (:inline n)))))))
+      (do (swap! *fns* assoc id (merge f pinfo {:id id :node n :def-scope scope}
+                                      (when body {:body body :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))})))
+          (enter! home (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)})
+          (when (= k :ctor) (abi/update-cls! cid update :ctors (fnil conj []) id))
+          (when (= k :dtor) (abi/update-cls! cid assoc :dtor id))
+          (when (and cid (:virtual f)) (abi/update-cls! cid update :virtuals (fnil conj []) id))
+          (when cid (abi/update-cls! cid update :methods (fnil conj []) id))
+          (swap! *order* conj [:fn id])))
+    id))
+
+(defn- declare-var!
+  [scope n storage]
+  (let [ty (resolve-type scope (get-in n [:type :qualType]))
+        q (qualifier-before n)
+        home (if (seq q)
+               (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
+                 (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
+               scope)
+        ^java.util.HashMap m (:names home)
+        old (some #(when (= :var (:e %)) (:id %)) (.get m (:name n)))
+        init (first (kids n))
+        st (if (:cls home) :member-static storage)]
+    (if (and old (seq q))
+      (do (upd-var! old assoc :init init :init-style (:init n) :defined true :def-scope scope) old)
+      (let [id (next-id)
+            v {:id id :name (:name n) :ty ty :storage st :init init :init-style (:init n) :path (:path home)
+               :linkage (if (linkage-c? home) :c :cpp)
+               :defined (not (or (= st :member-static) (= "extern" (:storageClass n))))
+               :extern (= "extern" (:storageClass n))
+               :internal-l (boolean (and (= st :global) (not (:cls home)) (or (= "static" (:storageClass n)) (and (:c ty) (not (:extern n)) (not= "extern" (:storageClass n)))) (not (:internal home))))
+               :internal (boolean (or (:internal home) (= "static" (:storageClass n)) (and (= st :global) (:c ty) (not= "extern" (:storageClass n)))))
+               :def-scope scope
+               :pos (long (or (:_b n) 0))}]
+        (swap! *vars* assoc id v)
+        (enter! home (:name n) {:e :var :id id :pos (:pos v)})
+        (when (:cls home) (abi/update-cls! (:cls home) update :statics (fnil conj []) id))
+        (swap! *order* conj [:var id])
+        id))))
+
+(defn- declare-enum! [scope n]
+  (let [id (next-id)
+        nm (:name n)
+        scoped (boolean (:scopedEnumTag n))
+        under (if-let [ft (get-in n [:fixedUnderlyingType :qualType])] (resolve-type scope ft) abi/int*)
+        es (new-scope :enum scope :path (conj (:path scope) [:enum id]))
+        t {:k :enum :id id}]
+    (swap! abi/*enums* assoc id {:id id :name nm :path (:path scope) :under under :scope es :scoped scoped})
+    (when nm (enter! scope nm {:e :type :ty t :pos (long (or (:_b n) 0))}))
+    (loop [[c & more] (filter #(= "EnumConstantDecl" (:kind %)) (kids n)) v 0]
+      (when c
+        (let [v (if-let [x (first (kids c))] (const-int scope x) v)
+              e {:e :enumerator :val v :ty t :pos (long (or (:_b c) 0))}]
+          (enter! es (:name c) e)
+          (when-not scoped (enter! scope (:name c) e))
+          (recur more (inc (long v))))))
+    t))
+
+(defn- declare-class! [scope n]
+  (let [nm (:name n)
+        ^java.util.HashMap m (:names scope)
+        old (when nm (some #(when (and (= :type (:e %)) (abi/class? (:ty %))) (:id (:ty %))) (.get m nm)))
+        id (or old (next-id))
+        cs (or (:scope (abi/cls id)) (new-scope :class scope :cls id :path (conj (:path scope) [:cls id])))
+        t {:k :class :id id}]
+    (when-not old
+      (swap! abi/*classes* assoc id {:id id :name nm :path (:path scope) :scope cs :fields [] :bases [] :outer scope
+                                     :union (= "union" (:tagUsed n))})
+      (when nm (enter! scope nm {:e :type :ty t :pos (long (or (:_b n) 0))})))
+    (when (:completeDefinition n)
+      (when (= "union" (:tagUsed n)) (fail :union "union " nm))
+      (when nm (.put ^java.util.HashMap (:names cs) nm [{:e :type :ty t :pos -1}])) ; the injected-class-name
+      (abi/update-cls! id assoc :complete true
+                       :bases (vec (for [bs (:bases n)]
+                                     (let [bt (resolve-type scope (get-in bs [:type :qualType]))]
+                                       (when (:isVirtual bs) (fail :virtual-base "virtual base"))
+                                       {:cls (:id bt) :access (keyword (or (#{"public" "protected" "private"} (:writtenAccess bs))
+                                                                            (if (= "class" (:tagUsed n)) "private" "public")))}))))
+      (when (> (count (filter #(abi/dynamic? (:cls %)) (:bases (abi/cls id)))) 1) (fail :multiple-inheritance "two dynamic bases"))
+      (when (> (count (:bases (abi/cls id))) 1) (fail :multiple-inheritance "multiple bases"))
+      (let [access (atom (if (= "class" (:tagUsed n)) :private :public))]
+        (doseq [k (kids n)]
+          (case (:kind k)
+            "AccessSpecDecl" (reset! access (keyword (:access k)))
+            "FieldDecl" (let [ft (resolve-type cs (get-in k [:type :qualType]))
+                              i (count (:fields (abi/cls id)))]
+                          (when (:isBitfield k) (fail :bit-field "bit-field"))
+                          (abi/update-cls! id update :fields conj {:name (:name k) :ty ft :init (when (:hasInClassInitializer k) (first (kids k)))
+                                                                   :access @access :i i})
+                          (enter! cs (:name k) {:e :field :cls id :i i :pos -1}))
+            (declare-node! cs k))))
+      (finish-class! id))
+    t))
+
+(defn declare-node!
+  "Enters a declaration node of namespace or class scope."
+  [scope n]
+  (case (:kind n)
+    "NamespaceDecl" (let [s (ns-scope! scope (:name n) (nil? (:name n)))] (doseq [k (kids n)] (declare-node! s k)))
+    "LinkageSpecDecl" (let [s (assoc scope :extern-c (= "C" (:language n)))] (doseq [k (kids n)] (declare-node! s k)))
+    ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl") (declare-fn! scope n)
+    "VarDecl" (declare-var! scope n :global)
+    "CXXRecordDecl" (declare-class! scope n)
+    "EnumDecl" (declare-enum! scope n)
+    ("TypedefDecl" "TypeAliasDecl") (enter! scope (:name n) {:e :type :ty (resolve-type scope (get-in n [:type :qualType])) :pos (long (or (:_b n) 0))})
+    "NamespaceAliasDecl" (let [t (node-text n)
+                               [_ target] (re-find #"=\s*([^;]+);?\s*$" (or t ""))
+                               parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
+                               e (first (filter #(= :ns (:e %)) (lookup-qualified scope parts)))]
+                           (enter! scope (:name n) (assoc e :pos (long (or (:_b n) 0)))))
+    "UsingDirectiveDecl" (let [t (node-text n)
+                               [_ target] (re-find #"namespace\s+([^;]+);?\s*$" (or t ""))
+                               parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
+                               e (first (filter #(= :ns (:e %)) (lookup-qualified scope parts)))]
+                           (.add ^java.util.ArrayList (:usings scope) (:scope e)))
+    "UsingDecl" (let [t (node-text n)
+                      [_ target] (re-find #"using\s+([^;]+);?\s*$" (or t ""))
+                      parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
+                      es (lookup-qualified scope parts)]
+                  (doseq [e es] (enter! scope (last parts) (assoc e :pos (long (or (:_b n) 0))))))
+    ("EmptyDecl" "StaticAssertDecl" "AccessSpecDecl" "FriendDecl") nil
+    (fail :decl "declaration " (:kind n))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Classes completed: special members, virtual functions
+
+(defn- user-ctors [id] (filter #(not (:implicit (fnd %))) (:ctors (abi/cls id))))
+(defn- copy-ctor? [f id]
+  (let [ps (:ps (:ty f))] (and (= :ctor (:kind f)) (= 1 (count ps)) (abi/ref? (first ps)) (= :ref (:k (first ps))) (= id (:id (abi/unq (:to (first ps))))))))
+(defn- move-ctor? [f id]
+  (let [ps (:ps (:ty f))] (and (= :ctor (:kind f)) (= 1 (count ps)) (= :rref (:k (first ps))) (= id (:id (abi/unq (:to (first ps))))))))
+(defn- copy-assign? [f id]
+  (let [ps (:ps (:ty f))] (and (= "operator=" (:name f)) (= 1 (count ps)) (= :ref (:k (first ps))) (= id (:id (abi/unq (:to (first ps))))))))
+(defn- class-like-members [id]
+  (concat (map :cls (:bases (abi/cls id)))
+          (keep (fn [f] (let [t (loop [t (:ty f)] (if (abi/arr? t) (recur (:of t)) t))] (when (abi/class? t) (:id t)))) (:fields (abi/cls id)))))
+
+(defn trivial-dtor? [id]
+  (let [c (abi/cls id) d (when (:dtor c) (fnd (:dtor c)))]
+    (and (or (nil? d) (and (:implicit d) (:trivial d)) (and (:defaulted d) (not (:virtual d)) (:trivial d)))
+         (or (nil? d) (not (:virtual d))))))
+
+(defn trivial-copy? [id]
+  (let [c (abi/cls id)]
+    (and (not (abi/dynamic? id))
+         (every? #(let [f (fnd %)] (or (not (copy-ctor? f id)) (and (or (:implicit f) (:defaulted f)) (:trivial f)))) (:ctors c))
+         (every? trivial-copy? (class-like-members id)))))
+
+(defn- implicit-fn! [id k nm ty & {:as more}]
+  (let [fid (next-id)
+        c (abi/cls id)
+        f (merge {:id fid :name nm :kind k :cls id :ty ty :implicit k :inline true :path (conj (vec (:path c)) [:cls id])
+                  :scope (:scope c) :def-scope (:scope c) :linkage :cpp :param-names (mapv (fn [_] nil) (:ps ty)) :defaults [] :pos -1}
+                 more)]
+    (swap! *fns* assoc fid f)
+    (enter! (:scope c) (case k :ctor " ctor" :dtor " dtor" nm) {:e :fn :id fid :pos -1})
+    (case k
+      :ctor (abi/update-cls! id update :ctors (fnil conj []) fid)
+      :dtor (abi/update-cls! id assoc :dtor fid)
+      nil)
+    (abi/update-cls! id update :methods (fnil conj []) fid)
+    (swap! *order* conj [:fn fid])
+    fid))
+
+(defn- has-ctor-of? [id pred] (some #(pred (fnd %) id) (:ctors (abi/cls id))))
+
+(defn finish-class!
+  "A complete class: its virtual functions (declared or overriding), its implicit special members, its vtable."
+  [id]
+  (let [c (abi/cls id)
+        t {:k :class :id id}
+        cref (abi/lref (assoc t :c true))
+        ;; overriders: a method of a base's virtual function's name and parameters is virtual
+        base-virtuals (fn self [bid] (let [b (abi/cls bid)] (concat (:virtuals b) (mapcat #(self (:cls %)) (:bases b)))))
+        bv (mapcat #(base-virtuals (:cls %)) (:bases c))]
+    (doseq [mid (:methods c)]
+      (let [f (fnd mid)]
+        (when (and (not (:virtual f)) (#{:method :dtor} (:kind f))
+                   (some #(let [g (fnd %)] (and (= (:kind g) (:kind f)) (or (= :dtor (:kind f)) (and (= (:name g) (:name f)) (= (:cq g) (:cq f)) (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps (:ty f)))))))) bv))
+          (upd-fn! mid assoc :virtual true)
+          (abi/update-cls! id update :virtuals (fnil conj []) mid))))
+    ;; the destructor
+    (let [members (class-like-members id)
+          d (:dtor (abi/cls id))
+          nontriv (or (abi/dynamic? id) (some #(not (trivial-dtor? %)) members))]
+      (cond
+        (nil? d) (let [virt (some #(let [b (abi/cls (:cls %))] (and (:dtor b) (:virtual (fnd (:dtor b))))) (:bases c))
+                       fid (implicit-fn! id :dtor (str "~" (:name c)) {:k :fn :ret abi/void :ps [] :va false}
+                                         :trivial (not (or nontriv virt)) :virtual (boolean virt))]
+                   (when virt (abi/update-cls! id update :virtuals (fnil conj []) fid)))
+        (:defaulted (fnd d)) (upd-fn! d assoc :trivial (not (or nontriv (:virtual (fnd d)))))
+        :else nil))
+    ;; the default constructor
+    (when (empty? (:ctors (abi/cls id)))
+      (let [nontriv (or (abi/dynamic? id) (some :init (:fields c))
+                        (some #(let [b (abi/cls %)] (some (fn [x] (let [g (fnd x)] (and (empty? (:ps (:ty g))) (not (:trivial g))))) (:ctors b))) (class-like-members id)))]
+        (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [] :va false} :trivial (not nontriv))))
+    (doseq [x (:ctors (abi/cls id))]
+      (let [g (fnd x)] (when (and (:defaulted g) (empty? (:ps (:ty g))))
+                         (upd-fn! x assoc :trivial (not (or (abi/dynamic? id) (some :init (:fields c))))))))
+    ;; the copy constructor and the copy assignment
+    (when-not (has-ctor-of? id copy-ctor?)
+      (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [cref] :va false} :trivial (trivial-copy? id)))
+    (doseq [x (:ctors (abi/cls id))]
+      (let [g (fnd x)] (when (and (:defaulted g) (copy-ctor? g id)) (upd-fn! x assoc :trivial (trivial-copy? id)))))
+    (when-not (some #(copy-assign? (fnd %) id) (:methods (abi/cls id)))
+      (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [cref] :va false} :op "=" :trivial (trivial-copy? id)))
+    (doseq [x (:methods (abi/cls id))]
+      (let [g (fnd x)] (when (and (:defaulted g) (copy-assign? g id)) (upd-fn! x assoc :trivial (trivial-copy? id)))))
+    (abi/update-cls! id assoc :user-ctor (boolean (seq (filter #(not (:implicit (fnd %))) (:ctors (abi/cls id)))))
+                     :user-dtor (boolean (let [d (:dtor (abi/cls id))] (and d (not (:implicit (fnd d))))))
+                     :user-copy-assign (boolean (some #(let [g (fnd %)] (and (copy-assign? g id) (not (:implicit g)))) (:methods (abi/cls id)))))
+    ;; the vtable: the primary base's slots, overridden, then the new virtual functions (a destructor two slots)
+    (when (abi/dynamic? id)
+      (let [pb (abi/primary-base id)
+            inherited (if pb (:vtable (abi/cls (:cls pb))) [])
+            mine (map fnd (:virtuals (abi/cls id)))
+            overrides? (fn [f slot] (let [g (fnd (:fn slot))]
+                                      (and (= (:kind g) (:kind f))
+                                           (or (= :dtor (:kind f))
+                                               (and (= (:name g) (:name f)) (= (:cq g) (:cq f)) (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps (:ty f)))))))))
+            vt (mapv (fn [slot] (if-let [f (first (filter #(overrides? % slot) mine))] (assoc slot :fn (:id f)) slot)) inherited)
+            new-fs (remove (fn [f] (some #(overrides? f %) inherited)) mine)
+            vt (into vt (mapcat (fn [f] (if (= :dtor (:kind f)) [{:fn (:id f) :v 1} {:fn (:id f) :v 0}] [{:fn (:id f)}])) new-fs))]
+        (abi/update-cls! id assoc :vtable vt)))
+    (abi/layout id)
+    id))
+
+(defn aggregate?
+  "[dcl.init.aggr]/1 (C++20): an array, or a class with no user-declared constructors, no private or protected direct
+  non-static data members, no virtual functions and no virtual, private or protected bases."
+  [t]
+  (or (abi/arr? t)
+      (and (abi/class? t)
+           (let [id (:id t) c (abi/cls id)]
+             (and (not (:user-ctor c)) (not (abi/dynamic? id))
+                  (every? #(= :public (:access %)) (:fields c))
+                  (every? #(= :public (:access %)) (:bases c)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Constant integers (enumerators, array bounds, case labels)
+
+(declare analyze rv)
+
+(defn const-int [scope n]
+  (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} n)))]
+    (letfn [(ev [e]
+              (case (:op e)
+                :int (:v e)
+                :cast (let [v (ev (:e e))] (if (abi/integral? (:ty e)) v (fail :const "constant cast")))
+                :unop (let [v (ev (:e e))] (case (:o e) "-" (- (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (long v)) 1 0)))
+                :binop (let [a (long (ev (:l e))) b (long (ev (:r e)))]
+                         (case (:o e) "+" (+ a b) "-" (- a b) "*" (* a b) "/" (quot a b) "%" (rem a b) "<<" (bit-shift-left a b)
+                               ">>" (bit-shift-right a b) "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)
+                               "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
+                               "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0) "&&" (if (and (not= a 0) (not= b 0)) 1 0)
+                               "||" (if (or (not= a 0) (not= b 0)) 1 0)))
+                :cond (if (zero? (long (ev (:c e)))) (ev (:else e)) (ev (:then e)))
+                :load (let [v (var* (:id (:e e)))] (if (and (:c (:ty v)) (:init v)) (const-int (:def-scope v) (:init v)) (fail :const "not a constant")))
+                (fail :const "constant " (:op e))))]
+      (ev e))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions: typed nodes {:op ... :ty T :cat :lv|:xv|:pr}
+
+(defn- lv? [e] (#{:lv :xv} (:cat e)))
+
+(defn- cast-node [e ck t] {:op :cast :ck ck :e e :ty t :cat :pr})
+
+(defn rv
+  "The prvalue of a glvalue of non-class type (lvalue-to-rvalue), an array's decay, a function's."
+  [e]
+  (let [t (:ty e)]
+    (cond
+      (abi/arr? t) {:op :decay :e e :ty (abi/ptr (:of t)) :cat :pr}
+      (abi/fn? t) {:op :fnaddr :e e :fn (:fn e) :ty (abi/ptr t) :cat :pr}
+      (and (lv? e) (not (abi/class? t))) {:op :load :e e :ty (abi/unq t) :cat :pr}
+      :else e)))
+
+(defn- promote-type [t]
+  (let [t (abi/unq t)]
+    (cond
+      (abi/enum? t) (let [u (abi/underlying t)] (promote-type u))
+      (#{:bool :char :schar :uchar :short :ushort :char8 :char16} (abi/bn t)) abi/int*
+      :else t)))
+
+(def ^:private unsigned-of {:int :uint :long :ulong :llong :ullong})
+
+(defn arith-common
+  "The usual arithmetic conversions' type ([expr.arith.conv])."
+  [a b]
+  (let [a (promote-type a) b (promote-type b)]
+    (cond
+      (or (= :ldouble (abi/bn a)) (= :ldouble (abi/bn b))) (abi/b :ldouble)
+      (or (= :double (abi/bn a)) (= :double (abi/bn b))) abi/double*
+      (or (= :float (abi/bn a)) (= :float (abi/bn b))) abi/float*
+      (= a b) a
+      :else
+      (let [ra (long (abi/int-ranks (abi/bn a))) rb (long (abi/int-ranks (abi/bn b)))
+            ua (contains? abi/unsigned-ns (abi/bn a)) ub (contains? abi/unsigned-ns (abi/bn b))]
+        (cond
+          (= ua ub) (if (>= ra rb) a b)
+          (and ua (>= ra rb)) a
+          (and ub (>= rb ra)) b
+          :else (let [[s u] (if ua [b a] [a b])]
+                  (if (> (abi/size-of s) (abi/size-of u)) s (abi/b (unsigned-of (abi/bn s))))))))))
+
+(defn- null-constant? [e]
+  (or (= :nullptr (abi/bn (:ty e)))
+      (and (= :int (:op e)) (zero? (long (:v e))) (abi/integral? (:ty e)) (not (abi/enum? (:ty e))))))
+
+(defn- class-id [t] (when (abi/class? (abi/unq t)) (:id (abi/unq t))))
+
+(defn convert-scalar
+  "The standard conversion of the prvalue `e` to the scalar type `t` (implicit or, with `explicit?`, a cast's)."
+  [e t explicit?]
+  (let [from (abi/unq (:ty e)) to (abi/unq t)]
+    (cond
+      (= from to) e
+      (abi/void? to) (cast-node e :void to)
+      (= :bool (abi/bn to)) (cast-node e :to-bool to)
+      (and (abi/integral? from) (abi/integral? to)) (if (= (abi/llvm-type from) (abi/llvm-type to)) (cast-node e :noop to) (cast-node e :int to))
+      (and (abi/integral? from) (abi/floating? to)) (cast-node e :int->fp to)
+      (and (abi/floating? from) (abi/integral? to)) (cast-node e :fp->int to)
+      (and (abi/floating? from) (abi/floating? to)) (cast-node e :fp to)
+      (and (abi/ptr? to) (null-constant? e)) {:op :null :ty to :cat :pr}
+      (and (abi/ptr? to) (abi/ptr? from))
+      (let [fc (class-id (:to from)) tc (class-id (:to to))]
+        (cond
+          (and fc tc (abi/derived-from? fc tc)) (cast-node e :base to)
+          (and fc tc explicit? (abi/derived-from? tc fc)) (cast-node e :derived to)
+          :else (cast-node e :noop to)))
+      (and (abi/ptr? to) (abi/integral? from) explicit?) (cast-node e :int->ptr to)
+      (and (abi/integral? to) (abi/ptr? from) explicit?) (cast-node e :ptr->int to)
+      (and (abi/ptr? to) (= :nullptr (abi/bn from))) {:op :null :ty to :cat :pr}
+      :else (fail :conversion "conversion from " (pr-str from) " to " (pr-str to)))))
+
+;; Implicit conversion sequences: {:rank 0 exact, 1 promotion, 2 conversion, 3 user-defined, 4 ellipsis, :sub n}
+
+(declare ctor-candidates resolve-overload)
+
+(defn- std-rank
+  "The rank of the standard conversion from the prvalue type `from` (expression e) to the non-reference type `to`, or nil."
+  [e from to]
+  (let [from (abi/unq from) to (abi/unq to)]
+    (cond
+      (= from to) 0
+      (and (abi/arith? to) (or (abi/arith? from) (and (abi/enum? from) (not (:scoped (abi/enm (:id from)))))))
+      (if (= (promote-type from) to)
+        (if (or (abi/enum? from) (contains? abi/int-ranks (abi/bn from))) 1 2)
+        (if (and (= :float (abi/bn from)) (= :double (abi/bn to))) 1 2))
+      (and (= :bool (abi/bn to)) (or (abi/ptr? from) (abi/arith? from))) 2
+      (and (abi/ptr? to) (null-constant? e)) 2
+      (and (abi/ptr? to) (abi/ptr? from))
+      (let [ft (:to from) tt (:to to)]
+        (cond
+          (and (= (abi/unq ft) (abi/unq tt)) (or (:c tt) (not (:c ft)))) (if (= ft tt) 0 0)
+          (and (abi/void? tt) (or (:c tt) (not (:c ft)))) 2
+          (and (class-id ft) (class-id tt) (abi/derived-from? (class-id ft) (class-id tt)) (or (:c tt) (not (:c ft)))) 2
+          :else nil))
+      :else nil)))
+
+(defn ics
+  "The implicit conversion sequence of the argument `e` (a typed expression or {:op :init-list}) to the parameter type `p`."
+  [e p]
+  (let [pt (abi/non-ref p)
+        at (:ty e)]
+    (cond
+      (= :init-list (:op e))
+      (cond (and (abi/class? pt) (or (aggregate? pt) (seq (ctor-candidates (:id pt))))) {:rank 3}
+            (and (abi/scalar? pt) (<= (count (:items e)) 1)) {:rank (if (seq (:items e)) (or (std-rank (rv (first (:items e))) (:ty (rv (first (:items e)))) pt) 9) 0)}
+            :else nil)
+      (abi/ref? p)
+      (let [same (= (abi/unq at) (abi/unq pt))
+            derived (and (class-id at) (class-id pt) (abi/derived-from? (class-id at) (class-id pt)))
+            cv-ok (or (:c pt) (not (:c at)))]
+        (cond
+          (and (= :ref (:k p)) (lv? e) (= :lv (:cat e)) (or same derived) cv-ok) {:rank (if derived 2 0) :sub (if (and (:c pt) (not (:c at))) 1 0)}
+          (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived)) {:rank (if derived 2 0) :sub -1}
+          (and (= :ref (:k p)) (lv? e) (not (:c pt))) nil
+          (and (= :ref (:k p)) (not (:c pt))) nil
+          ;; a const lvalue reference or an rvalue reference to a temporary
+          (and (= :rref (:k p)) (= :lv (:cat e)) (or same derived)) nil
+          :else (when-let [r (ics (if (lv? e) e e) pt)] (assoc r :sub (if (= :rref (:k p)) -1 (inc (long (or (:sub r) 0))))))))
+      (abi/class? pt)
+      (cond
+        (and (class-id at) (= (class-id at) (:id pt))) {:rank 0}
+        (and (class-id at) (abi/derived-from? (class-id at) (:id pt))) {:rank 2}
+        :else (when (some (fn [cid] (let [f (fnd cid)]
+                                      (and (not (:explicit f)) (>= (count (:ps (:ty f))) 1)
+                                           (<= (- (count (:ps (:ty f))) (count (filter some? (:defaults f)))) 1)
+                                           (let [r (ics e (first (:ps (:ty f))))] (and r (< (long (:rank r)) 3))))))
+                          (ctor-candidates (:id pt)))
+                {:rank 3}))
+      (abi/class? at) nil
+      :else (let [r (std-rank e (:ty (rv e)) pt)] (when r {:rank r})))))
+
+(defn- better-ics? [a b]
+  (or (< (long (:rank a)) (long (:rank b)))
+      (and (= (:rank a) (:rank b)) (< (long (or (:sub a) 0)) (long (or (:sub b) 0))))))
+
+(defn resolve-overload
+  "The best viable function of `cands` (fn ids) for the arguments `args` (typed expressions; `obj` the implicit object
+  argument of a method call, or nil), or a refusal."
+  [cands args obj]
+  (let [viable (for [cid (distinct cands)
+                     :let [f (fnd cid)
+                           ps (:ps (:ty f))
+                           nreq (- (count ps) (count (filter some? (take-last (count ps) (concat (repeat (count ps) nil) (:defaults f))))))
+                           n (count args)]
+                     :when (and (>= n nreq) (or (<= n (count ps)) (:va (:ty f))))
+                     :let [convs (map-indexed (fn [i a] (if (< i (count ps)) (ics a (nth ps i)) {:rank 4})) args)
+                           ;; the implicit object parameter: a const method takes a const object, a non-const prefers a non-const one
+                           oc (if (and obj (:cls f) (not (:static f)) (not= :ctor (:kind f)))
+                                (cond (and (:c (:ty obj)) (not (:cq f))) nil
+                                      (and (:cq f) (not (:c (:ty obj)))) {:rank 0 :sub 1}
+                                      :else {:rank 0 :sub 0})
+                                {:rank 0 :sub 0})]
+                     :when (and oc (every? some? convs))]
+                 [cid (cons oc convs)])
+        better (fn [[_ a] [_ b]] (and (every? true? (map #(not (better-ics? %2 %1)) a b)) (some true? (map better-ics? a b))))
+        best (filter (fn [x] (every? #(or (identical? % x) (better x %)) viable)) viable)]
+    (cond
+      (= 1 (count best)) (ffirst best)
+      (empty? viable) (fail :overload "no viable function among " (count (distinct cands)) " for " (count args) " arguments: " (pr-str (map :ty args)))
+      :else (fail :overload "ambiguous call (" (count viable) " viable)"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Initialization ([dcl.init]): an initializer of an object of type T, written for codegen as
+;;  {:i :none} default-initialization of a trivial type   {:i :zero} zero-initialization
+;;  {:i :expr :e prvalue}  a scalar's value, or a class prvalue constructed in place
+;;  {:i :ctor :fn id :args [...]}  a constructor call   {:i :copy :e glvalue}  a trivial copy
+;;  {:i :list :items [init ...] :fill init}  an array's or an aggregate's elements (bases first)
+;;  {:i :bind :e glvalue}  a reference bound to an object   {:i :bind-temp :init init :ty T}  to a temporary
+
+(declare init-for args-for default-ctor-init)
+
+(defn ctor-candidates [id] (remove #(:deleted (fnd %)) (:ctors (abi/cls id))))
+
+(defn- call-args
+  "The parameters' initializers for a call of `f` with the typed arguments `args` (default arguments analyzed in the
+  function's scope)."
+  [f args ctx]
+  (let [ps (:ps (:ty f))]
+    (vec (concat
+          (map-indexed (fn [i a] (if (< i (count ps)) (init-for (nth ps i) a ctx :copy) (let [a (rv a)]
+                                                                                           (when (abi/class? (:ty a)) (fail :varargs "a class through ..."))
+                                                                                           (let [t (abi/unq (:ty a))]
+                                                                                             {:i :expr :e (cond (= :float (abi/bn t)) (convert-scalar a abi/double* false)
+                                                                                                                (and (abi/integral? t) (not= t (promote-type t))) (convert-scalar a (promote-type t) false)
+                                                                                                                :else a)}))))
+                       args)
+          (for [i (range (count args) (count ps))]
+            (let [d (nth (:defaults f) i nil)]
+              (when-not d (fail :call "missing argument"))
+              (init-for (nth ps i) (binding [*cutoff* Long/MAX_VALUE] (analyze (assoc ctx :scope (:scope f)) d)) ctx :copy)))))))
+
+(defn- class-init
+  "The initialization of an object of class type `t` by the arguments `args` (typed expressions or an init-list)."
+  [t args ctx style]
+  (let [id (:id (abi/unq t))]
+    (cond
+      ;; copy-initialization from a prvalue of the class: in place ([dcl.init]/17.6.1)
+      (and (= 1 (count args)) (not= :init-list (:op (first args))) (= (class-id (:ty (first args))) id) (= :pr (:cat (first args))))
+      {:i :expr :e (first args)}
+      (and (= 1 (count args)) (= :init-list (:op (first args))))
+      (let [l (first args)]
+        (if (aggregate? (abi/unq t))
+          (init-for t l ctx :list)
+          (if (empty? (:items l)) (default-ctor-init id true) (class-init t (:items l) ctx :direct))))
+      (and (empty? args)) (default-ctor-init id (= style :value))
+      :else
+      (let [fid (resolve-overload (ctor-candidates id) args nil)
+            f (fnd fid)]
+        (if (and (:trivial f) (= 1 (count args)))
+          {:i :copy :e (first args) :cls id}
+          {:i :ctor :fn fid :args (call-args f args ctx)})))))
+
+(defn default-ctor-init
+  "Default- (or with `value?` value-) initialization of a class object."
+  [id value?]
+  (let [cands (filter #(let [f (fnd %)] (<= (count (:ps (:ty f))) (count (filter some? (:defaults f))))) (ctor-candidates id))
+        fid (first cands)]
+    (when-not fid (fail :init "no default constructor for " (:name (abi/cls id))))
+    (let [f (fnd fid)]
+      (cond
+        (:trivial f) (if value? {:i :zero} {:i :none})
+        (and value? (or (:implicit f) (:defaulted f))) {:i :zero-then :then {:i :ctor :fn fid :args []}}
+        :else {:i :ctor :fn fid :args (call-args f [] {:scope (:scope f)})}))))
+
+(defn- materialize
+  "A prvalue of class type as a temporary object (an xvalue)."
+  [e]
+  {:op :temp :init {:i :expr :e e} :ty (:ty e) :cat :xv})
+
+(defn init-for
+  "The initializer of an object of type `t` from `src`: nil (none), a typed expression, an init-list node
+  {:op :init-list :items [...]}, or a vector of constructor arguments (direct-initialization); `style` :copy :direct
+  :list :value :default."
+  [t src ctx style]
+  (let [tu (abi/unq t)]
+    (cond
+      (abi/ref? t)
+      (let [e (if (= :init-list (:op src)) (if (= 1 (count (:items src))) (first (:items src)) (fail :init "a list for a reference")) src)
+            e (if (vector? e) (if (= 1 (count e)) (first e) (fail :init "a reference from arguments")) e)
+            pt (:to t)
+            at (:ty e)
+            same (= (abi/unq at) (abi/unq pt))
+            derived (and (class-id at) (class-id pt) (abi/derived-from? (class-id at) (class-id pt)))]
+        (cond
+          (and (lv? e) (or same derived) (or (= :lv (:cat e)) (= :rref (:k t)) (:c pt))
+               (or (not= :rref (:k t)) (not= :lv (:cat e))))
+          {:i :bind :e (if derived {:op :base-lv :e e :to (class-id pt) :ty (assoc (abi/unq pt) :c (:c at)) :cat (:cat e)} e)}
+          (and (= :pr (:cat e)) (or same derived) (abi/class? (abi/unq at)))
+          {:i :bind-temp :init {:i :expr :e e} :ty (abi/unq at) :to (when derived (class-id pt))}
+          (or (:c pt) (= :rref (:k t)))
+          {:i :bind-temp :init (init-for (abi/unq pt) e ctx :copy) :ty (abi/unq pt)}
+          :else (fail :init "a non-const reference to a temporary")))
+      (vector? src)
+      (cond
+        (abi/class? tu) (class-init tu src ctx :direct)
+        (empty? src) {:i :zero}
+        (= 1 (count src)) (init-for t (first src) ctx :direct)
+        :else (fail :init "several values for a scalar"))
+      (nil? src)
+      (cond
+        (abi/class? tu) (default-ctor-init (:id tu) (= style :value))
+        (abi/arr? tu) (let [el (init-for (:of tu) nil ctx style)] (if (#{:none :zero} (:i el)) el {:i :list :items [] :fill el :n (:n tu)}))
+        (= style :value) {:i :zero}
+        :else {:i :none})
+      (= :init-list (:op src))
+      (cond
+        (abi/arr? tu)
+        (let [items (:items src)
+              el (:of tu)]
+          (if (and (= 1 (count items)) (= :str (:op (first items))) (#{:char :schar :uchar} (abi/bn (abi/unq el))))
+            {:i :string :e (first items) :n (:n tu)}
+            {:i :list :items (mapv #(init-for el % ctx :copy) items) :fill (init-for el nil ctx :value) :n (:n tu)}))
+        (and (abi/class? tu) (aggregate? tu))
+        (let [c (abi/cls (:id tu))
+              items (:items src)
+              ;; a single item of the class's own type copies it ([dcl.init.list]/3.2)
+              _ (when (seq (:bases c)) nil)
+              subs (concat (map (fn [b] {:base true :ty {:k :class :id (:cls b)}}) (:bases c)) (map (fn [f] {:ty (:ty f) :field f}) (:fields c)))]
+          (if (and (= 1 (count items)) (not= :init-list (:op (first items))) (= (class-id (:ty (first items))) (:id tu)))
+            (class-init tu [(first items)] ctx :copy)
+            (do (when (> (count items) (count subs)) (fail :init "too many initializers"))
+                {:i :list :cls (:id tu)
+                 :items (vec (map-indexed (fn [i s]
+                                            (if (< i (count items))
+                                              (init-for (:ty s) (nth items i) ctx :copy)
+                                              (if-let [d (:init (:field s))]
+                                                (init-for (:ty s) (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (:scope c) :cls (:id tu) :this-type (abi/ptr tu)} d)) ctx :copy)
+                                                (init-for (:ty s) {:op :init-list :items []} ctx :value))))
+                                          subs))})))
+        (abi/class? tu) (class-init tu [src] ctx :list)
+        :else (case (count (:items src))
+                0 {:i :zero}
+                1 (init-for t (first (:items src)) ctx :copy)
+                (fail :init "several values for a scalar")))
+      (abi/class? tu) (class-init tu [src] ctx style)
+      (abi/arr? tu)
+      (if (= :str (:op src)) {:i :string :e src :n (:n tu)} (fail :init "an array from an expression"))
+      :else
+      (let [e (rv src)]
+        (when (abi/class? (:ty e)) (fail :conversion "a class to a scalar (conversion functions)"))
+        {:i :expr :e (convert-scalar e tu false)}))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Analysis of expressions
+
+(defn- int-type-of [^String qt] (case qt "int" abi/int* "unsigned int" abi/uint* "long" abi/long* "unsigned long" abi/ulong*
+                                  "long long" (abi/b :llong) "unsigned long long" (abi/b :ullong) "char" abi/char* "bool" abi/bool* abi/int*))
+
+(defn decode-string
+  "The bytes of a string literal as clang prints it (\"...\" with C escapes, octal for the others)."
+  ^String [^String s]
+  (let [s (subs s (inc (.indexOf s "\"")) (.lastIndexOf s "\""))
+        sb (StringBuilder.)]
+    (loop [i 0]
+      (when (< i (count s))
+        (let [c (.charAt s i)]
+          (if (= c \\)
+            (let [d (.charAt s (inc i))]
+              (cond
+                (Character/isDigit d) (let [j (loop [j (inc i) k 0] (if (and (< j (count s)) (< k 3) (Character/isDigit (.charAt s j))) (recur (inc j) (inc k)) j))]
+                                        (.append sb (char (Integer/parseInt (subs s (inc i) j) 8))) (recur j))
+                (= d \x) (let [j (loop [j (+ i 2)] (if (and (< j (count s)) (re-matches #"[0-9a-fA-F]" (str (.charAt s j)))) (recur (inc j)) j))]
+                           (.append sb (char (Integer/parseInt (subs s (+ i 2) j) 16))) (recur j))
+                :else (do (.append sb (case d \n \newline \t \tab \r \return \a (char 7) \b (char 8) \f (char 12) \v (char 11) \0 (char 0) d))
+                          (recur (+ i 2)))))
+            (do (.append sb c) (recur (inc i)))))))
+    (str sb)))
+
+(defn- this-expr [ctx]
+  (when-not (:this-type ctx) (fail :this "this outside a method"))
+  {:op :this :ty (:this-type ctx) :cat :pr})
+
+(defn- deref-node [e]
+  (let [e (rv e)]
+    (when-not (abi/ptr? (:ty e)) (fail :deref "* of a non-pointer"))
+    {:op :deref :e e :ty (:to (:ty e)) :cat :lv}))
+
+(defn- to-base-lv
+  "The glvalue `obj` of a derived class seen as its base `bid`."
+  [obj bid]
+  (if (= (class-id (:ty obj)) bid) obj {:op :base-lv :e obj :to bid :ty (assoc {:k :class :id bid} :c (:c (:ty obj))) :cat (:cat obj)}))
+
+(defn- field-node [obj cid i]
+  (let [f (nth (:fields (abi/cls cid)) i)
+        o (to-base-lv obj cid)
+        ft (:ty f)]
+    (if (abi/ref? ft)
+      {:op :deref :e {:op :load :e {:op :field :obj o :cls cid :i i :ty abi/void :cat :lv :raw true} :ty (abi/ptr (:to ft)) :cat :pr} :ty (:to ft) :cat :lv}
+      {:op :field :obj o :cls cid :i i :ty (cond-> ft (and (:c (:ty obj)) (not (:mutable f))) (assoc :c true)) :cat (if (= :lv (:cat obj)) :lv :xv)})))
+
+(defn- var-node [id]
+  (let [v (var* id) t (:ty v)]
+    (if (abi/ref? t)
+      {:op :deref :e {:op :load :e {:op :var :id id :ty t :cat :lv :raw true} :ty (abi/ptr (:to t)) :cat :pr} :ty (:to t) :cat :lv}
+      {:op :var :id id :ty t :cat :lv})))
+
+(defn- entity-expr [ctx es n]
+  (let [e (first es)]
+    (case (:e e)
+      :var (var-node (:id e))
+      :field (field-node (deref-node (this-expr ctx)) (:cls e) (:i e))
+      :enumerator {:op :int :v (:val e) :ty (:ty e) :cat :pr}
+      :fn {:op :fnset :fns (mapv :id (filter #(= :fn (:e %)) es)) :ty {:k :overload} :cat :lv :implicit-this true}
+      (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e)))))
+
+(defn- name-expr [ctx n]
+  (let [nm (get-in n [:referencedDecl :name])
+        [g q] (ref-qualifier n)
+        es (if (or g (seq q))
+             (lookup-qualified (:scope ctx) (conj q nm) g)
+             (lookup (:scope ctx) nm))
+        ;; class members found through a class's scope keep their class
+        es (if (and (seq q) (seq es)) es es)]
+    (when (empty? es) (fail :name "unknown name " nm))
+    (let [es (if (= :class (:kind (:scope ctx))) es es)]
+      (if (and (seq q) (= :field (:e (first es))))
+        (entity-expr ctx es n)
+        (entity-expr ctx es n)))))
+
+(defn- arith-binop [o l r]
+  (let [l (rv l) r (rv r) ct (arith-common (:ty l) (:ty r))]
+    {:op :binop :o o :l (convert-scalar l ct false) :r (convert-scalar r ct false) :ty ct :cat :pr}))
+
+(defn- to-bool [e] (convert-scalar (rv e) abi/bool* false))
+
+(declare operator-call analyze-call)
+
+(defn- class-operand? [e] (or (abi/class? (abi/unq (:ty e))) (abi/enum? (abi/unq (:ty e)))))
+
+(defn- builtin-binop [o l r]
+  (let [lt (:ty (rv l)) rt (:ty (rv r))]
+    (case o
+      ("+" "-")
+      (cond
+        (and (abi/ptr? lt) (abi/integral? rt)) {:op :ptradd :o o :p (rv l) :n (convert-scalar (rv r) abi/long* false) :ty lt :cat :pr}
+        (and (= o "+") (abi/integral? lt) (abi/ptr? rt)) {:op :ptradd :o o :p (rv r) :n (convert-scalar (rv l) abi/long* false) :ty rt :cat :pr}
+        (and (= o "-") (abi/ptr? lt) (abi/ptr? rt)) {:op :ptrdiff :l (rv l) :r (rv r) :ty abi/long* :cat :pr}
+        :else (arith-binop o l r))
+      ("*" "/" "%" "&" "|" "^") (arith-binop o l r)
+      ("<<" ">>") (let [l (rv l) pl (promote-type (:ty l))]
+                    {:op :binop :o o :l (convert-scalar l pl false) :r (convert-scalar (rv r) pl false) :ty pl :cat :pr})
+      ("<" ">" "<=" ">=" "==" "!=")
+      (let [l (rv l) r (rv r)]
+        (cond
+          (or (abi/ptr? lt) (abi/ptr? rt))
+          (let [pt (if (abi/ptr? lt) lt rt)]
+            {:op :cmp :o o :l (convert-scalar l pt false) :r (convert-scalar r pt false) :ct pt :ty abi/bool* :cat :pr})
+          :else (let [ct (arith-common lt rt)]
+                  {:op :cmp :o o :l (convert-scalar l ct false) :r (convert-scalar r ct false) :ct ct :ty abi/bool* :cat :pr})))
+      "&&" {:op :land :l (to-bool l) :r (to-bool r) :ty abi/bool* :cat :pr}
+      "||" {:op :lor :l (to-bool l) :r (to-bool r) :ty abi/bool* :cat :pr}
+      "," {:op :comma :l l :r r :ty (:ty r) :cat (:cat r)}
+      (fail :operator "binary " o))))
+
+(defn- assign-node [ctx l r]
+  (cond
+    (abi/class? (abi/unq (:ty l))) (operator-call ctx "=" [l r])
+    :else (do (when-not (lv? l) (fail :assign "assignment to an rvalue"))
+              {:op :assign :l l :r (convert-scalar (rv r) (abi/unq (:ty l)) false) :ty (:ty l) :cat :lv})))
+
+(defn- compound-node [o l r]
+  (let [lt (abi/unq (:ty l)) r (rv r)]
+    (if (abi/ptr? lt)
+      {:op :cassign :o o :l l :r (convert-scalar r abi/long* false) :ct lt :ty (:ty l) :cat :lv :ptr true}
+      (let [ct (if (#{"<<" ">>"} o) (promote-type lt) (arith-common lt (:ty r)))]
+        {:op :cassign :o o :l l :r (convert-scalar r (if (#{"<<" ">>"} o) ct ct) false) :ct ct :ty (:ty l) :cat :lv}))))
+
+(defn- cast-expr [ctx t e explicit]
+  (cond
+    (abi/void? t) {:op :cast :ck :void :e e :ty abi/void :cat :pr}
+    (abi/ref? t) (let [pt (:to t)
+                       fc (class-id (:ty e)) tc (class-id pt)]
+                   (cond
+                     (and fc tc (abi/derived-from? fc tc)) (to-base-lv e tc)
+                     (and fc tc (abi/derived-from? tc fc)) {:op :derived-lv :e e :to tc :ty pt :cat (if (= :rref (:k t)) :xv :lv)}
+                     :else {:op :reinterpret-lv :e e :ty pt :cat (if (= :rref (:k t)) :xv :lv)}))
+    (abi/class? (abi/unq t)) {:op :temp-obj :init (init-for t [e] ctx :direct) :ty (abi/unq t) :cat :pr}
+    :else (convert-scalar (rv e) t true)))
+
+(defn- method-set-of
+  "[class-id fn-ids] of the members named `nm` of the class of object `obj`."
+  [cid nm]
+  (let [es (class-lookup cid nm)]
+    (when (seq es) [(first (first es)) (mapv (comp :id second) (filter #(= :fn (:e (second %))) es)) (second (first es))])))
+
+(defn- member-expr [ctx n]
+  (let [[objn] (kids n)
+        o (analyze ctx objn)
+        obj (if (:isArrow n) (deref-node o) o)
+        cid (class-id (:ty obj))
+        nm (:name n)]
+    (when-not cid (fail :member "member of a non-class"))
+    (let [[fcid fids e] (method-set-of cid nm)]
+      (cond
+        (nil? e) (fail :member "no member " nm)
+        (= :field (:e e)) (field-node (if (= :pr (:cat obj)) (materialize obj) obj) (:cls e) (:i e))
+        (= :var (:e e)) {:op :comma :l obj :r (var-node (:id e)) :ty (:ty (var* (:id e))) :cat :lv}
+        (= :fn (:e e)) {:op :fnset :fns fids :obj (if (= :pr (:cat obj)) (materialize obj) obj) :ty {:k :overload} :cat :lv}
+        (= :enumerator (:e e)) {:op :int :v (:val e) :ty (:ty e) :cat :pr}
+        :else (fail :member "member " nm)))))
+
+(defn- method-call
+  "A call of the method `fid` on the object glvalue `obj` with the typed arguments."
+  [ctx fid obj args virtual-ok]
+  (let [f (fnd fid)
+        o (when-not (:static f) (to-base-lv obj (:cls f)))]
+    {:op :call :fn fid :obj o :args (call-args f args ctx) :virtual (and virtual-ok (:virtual f) (not (:static f)))
+     :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}))
+
+(defn- fn-call [ctx fid args]
+  (let [f (fnd fid)]
+    {:op :call :fn fid :args (call-args f args ctx)
+     :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}))
+
+(defn- adl-fns
+  "The functions named `nm` in the namespaces of the class arguments' classes ([basic.lookup.argdep], for classes)."
+  [args nm]
+  (distinct
+   (for [a args
+         :let [cid (class-id (:ty a))] :when cid
+         :let [outer (loop [s (:outer (abi/cls cid))] (if (= :ns (:kind s)) s (recur (:parent s))))]
+         e (binding [*cutoff* Long/MAX_VALUE] (own-names outer nm)) :when (= :fn (:e e))]
+     (:id e))))
+
+(defn analyze-call [ctx callee args]
+  (case (:op callee)
+    :fnset (let [ms (mapv fnd (:fns callee))
+                 obj (:obj callee)
+                 any-method (some #(and (:cls %) (not (:static %))) ms)
+                 obj (or obj (when (and (:implicit-this callee) any-method (:this-type ctx)) (deref-node (this-expr ctx))))
+                 cands (concat (:fns callee) (when (and (not (:obj callee)) (not any-method)) (adl-fns args (:name (first ms)))))
+                 fid (resolve-overload cands args obj)
+                 f (fnd fid)]
+             (if (and (:cls f) (not (:static f)))
+               (method-call ctx fid obj args (not (:qualified callee)))
+               (fn-call ctx fid args)))
+    (let [p (rv callee)
+          ft (let [t (abi/unq (:ty p))] (if (abi/ptr? t) (:to t) t))]
+      (when-not (abi/fn? ft) (fail :call "call of a non-function"))
+      {:op :icall :callee p :fty ft
+       :args (vec (map-indexed (fn [i a] (if (< i (count (:ps ft))) (init-for (nth (:ps ft) i) a ctx :copy) {:i :expr :e (rv a)})) args))
+       :ty (abi/non-ref (:ret ft)) :cat (case (:k (:ret ft)) :ref :lv :rref :xv :pr)})))
+
+(defn operator-call
+  "An overloaded operator's call ([over.match.oper]): the members of the first operand's class and the non-members found
+  by unqualified lookup and ADL; nil when none is viable (the built-in operator then)."
+  [ctx o args]
+  (let [nm (str "operator" o)
+        [l & more] args
+        lc (class-id (:ty l))
+        members (when lc (second (method-set-of lc nm)))
+        frees (concat (filter #(not (:cls (fnd %))) (map :id (filter #(= :fn (:e %)) (lookup (:scope ctx) nm)))) (adl-fns args nm))
+        cands (concat (map (fn [m] [:m m]) members) (map (fn [f] [:f f]) (distinct frees)))]
+    (if (empty? cands)
+      (if (= o "=")
+        (fail :assign "no operator=")
+        nil)
+      (let [;; members as functions of the remaining operands with the object, non-members of all
+            mviable (when (seq members) (try [(resolve-overload members more l) :m] (catch arbace.lang.ExceptionInfo _ nil)))
+            fviable (when (seq frees) (try [(resolve-overload (distinct frees) args nil) :f] (catch arbace.lang.ExceptionInfo _ nil)))]
+        (cond
+          (and mviable fviable) (fail :overload "operator " o ": a member and a non-member both viable (not ranked yet)")
+          mviable (method-call ctx (first mviable) l more true)
+          fviable (fn-call ctx (first fviable) args)
+          :else nil)))))
+
+(defn- new-expr [ctx n]
+  (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
+        et (:to t)
+        ks (kids n)
+        [nexpr ks] (if (:isArray n) [(first ks) (rest ks)] [nil ks])
+        initn (first ks)
+        init (cond
+               (nil? initn) (init-for et nil ctx :default)
+               (= "ParenListExpr" (:kind initn)) (init-for et (mapv #(analyze ctx %) (kids initn)) ctx (if (empty? (kids initn)) :value :direct))
+               (= "InitListExpr" (:kind initn)) (init-for et (analyze ctx initn) ctx :list)
+               :else (init-for et [(analyze ctx initn)] ctx :direct))
+        init (if (and (= :ctor (:i init)) (empty? (:args init)) (nil? initn)) init init)]
+    (when (and nexpr initn (not= "InitListExpr" (:kind initn))) nil)
+    {:op :new :ty t :et et :n (when nexpr (convert-scalar (rv (analyze ctx nexpr)) abi/ulong* false))
+     :init (if nexpr (if initn (init-for (abi/arr nil et) (analyze ctx initn) ctx :list) (init-for et nil ctx :default)) init)
+     :cat :pr}))
+
+(defn- dtor-of [cid] (:dtor (abi/cls cid)))
+
+(defn analyze
+  "The typed expression of the tree node `n` in the context `ctx` ({:scope :fn :this-type ...})."
+  [ctx n]
+  (case (:kind n)
+    "IntegerLiteral" (let [t (int-type-of (get-in n [:type :qualType]))] {:op :int :v (let [v (bigint (:value n))] (if (> v Long/MAX_VALUE) (long (- v 18446744073709551616N)) (long v))) :ty t :cat :pr})
+    "CharacterLiteral" {:op :int :v (long (:value n)) :ty (int-type-of (get-in n [:type :qualType] "char")) :cat :pr}
+    "CXXBoolLiteralExpr" {:op :int :v (if (:value n) 1 0) :ty abi/bool* :cat :pr}
+    "FloatingLiteral" (let [qt (get-in n [:type :qualType])]
+                        {:op :float :v (Double/parseDouble (:value n)) :ty (case qt "float" abi/float* "long double" (abi/b :ldouble) abi/double*) :cat :pr})
+    "StringLiteral" (let [s (decode-string (:value n))
+                          t (resolve-type (:scope ctx) (get-in n [:type :qualType]))]
+                      (when-not (= :char (abi/bn (abi/unq (:of t)))) (fail :string "a wide string"))
+                      {:op :str :s s :ty t :cat :lv})
+    "CXXNullPtrLiteralExpr" {:op :null :ty abi/nullptr-t :cat :pr}
+    "GNUNullExpr" {:op :int :v 0 :ty abi/long* :cat :pr}
+    "ParenExpr" (analyze ctx (first (kids n)))
+    "DeclRefExpr" (name-expr ctx n)
+    "CXXThisExpr" (this-expr ctx)
+    "UnaryOperator"
+    (let [o (:opcode n) e (analyze ctx (first (kids n)))]
+      (or (when (and (class-operand? e) (not= o "&")) (operator-call ctx o (if (and (#{"++" "--"} o) (:isPostfix n)) [e {:op :int :v 0 :ty abi/int* :cat :pr}] [e])))
+          (case o
+            "&" (cond (= :fnset (:op e)) (let [f (first (:fns e))] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr})
+                      (lv? e) {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr}
+                      :else (fail :addr "& of an rvalue"))
+            "*" (deref-node e)
+            ("++" "--") (do (when-not (lv? e) (fail :incdec "++ of an rvalue"))
+                            {:op :incdec :o o :post (boolean (:isPostfix n)) :e e :ty (abi/unq (:ty e)) :cat (if (:isPostfix n) :pr :lv)})
+            "!" {:op :not :e (to-bool e) :ty abi/bool* :cat :pr}
+            ("-" "+" "~") (let [r (rv e) pt (promote-type (:ty r))] {:op :unop :o o :e (convert-scalar r pt false) :ty pt :cat :pr})
+            (fail :operator "unary " o))))
+    "BinaryOperator"
+    (let [o (:opcode n) [ln rn] (kids n) l (analyze ctx ln) r (analyze ctx rn)]
+      (if (= o "=")
+        (assign-node ctx l r)
+        (or (when (and (or (class-operand? l) (class-operand? r)) (not= o ",")) (operator-call ctx o [l r]))
+            (builtin-binop o l r))))
+    "CompoundAssignOperator"
+    (let [o (:opcode n) [ln rn] (kids n) l (analyze ctx ln) r (analyze ctx rn)]
+      (or (when (class-operand? l) (operator-call ctx o [l r]))
+          (compound-node (subs o 0 (dec (count o))) l r)))
+    "ConditionalOperator"
+    (let [[c a b] (kids n) c (to-bool (analyze ctx c)) a (analyze ctx a) b (analyze ctx b)]
+      (cond
+        (and (lv? a) (lv? b) (= (:ty a) (:ty b))) {:op :cond :c c :then a :else b :ty (:ty a) :cat :lv}
+        (and (abi/class? (abi/unq (:ty a))) (= (abi/unq (:ty a)) (abi/unq (:ty b))))
+        {:op :cond :c c :then (if (= :pr (:cat a)) a {:op :temp-obj :init (init-for (abi/unq (:ty a)) a ctx :copy) :ty (abi/unq (:ty a)) :cat :pr})
+         :else (if (= :pr (:cat b)) b {:op :temp-obj :init (init-for (abi/unq (:ty b)) b ctx :copy) :ty (abi/unq (:ty b)) :cat :pr}) :ty (abi/unq (:ty a)) :cat :pr}
+        :else (let [a (rv a) b (rv b)
+                    t (cond (and (abi/arith? (:ty a)) (abi/arith? (:ty b))) (arith-common (:ty a) (:ty b))
+                            (abi/ptr? (:ty a)) (:ty a) (abi/ptr? (:ty b)) (:ty b)
+                            (abi/void? (:ty a)) abi/void
+                            :else (abi/unq (:ty a)))]
+                {:op :cond :c c :then (convert-scalar a t false) :else (convert-scalar b t false) :ty t :cat :pr})))
+    "CallExpr"
+    (let [[cn & an] (kids n)
+          callee (analyze ctx cn)
+          args (mapv #(analyze ctx %) an)]
+      (if (and (abi/class? (abi/unq (:ty callee))) (not= :fnset (:op callee)))
+        (or (operator-call ctx "()" (into [callee] args)) (fail :call "no operator()"))
+        (analyze-call ctx (if (and (= :fnset (:op callee)) (str/includes? (or (node-text cn) "") "::")) (assoc callee :qualified true) callee) args)))
+    "MemberExpr" (member-expr ctx n)
+    "ArraySubscriptExpr"
+    (let [[an in] (kids n) a (analyze ctx an) i (analyze ctx in)]
+      (or (when (class-operand? a) (operator-call ctx "[]" [a i]))
+          (let [[p ix] (if (abi/ptr? (:ty (rv a))) [(rv a) (rv i)] [(rv i) (rv a)])]
+            {:op :deref :e {:op :ptradd :o "+" :p p :n (convert-scalar ix abi/long* false) :ty (:ty p) :cat :pr} :ty (:to (:ty p)) :cat :lv})))
+    ("CStyleCastExpr" "CXXStaticCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXFunctionalCastExpr")
+    (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
+          [k] (kids n)
+          t (if (and (#{:xvalue "xvalue"} (:valueCategory n)) (not (abi/ref? t))) (abi/rref t) t)
+          t (if (and (= "lvalue" (:valueCategory n)) (not (abi/ref? t))) (abi/lref t) t)]
+      (if (and (= "CXXFunctionalCastExpr" (:kind n)) (abi/class? (abi/unq t)))
+        {:op :temp-obj :init (init-for t (if (= "InitListExpr" (:kind k)) (analyze ctx k) [(analyze ctx k)]) ctx :direct) :ty (abi/unq t) :cat :pr}
+        (cast-expr ctx t (analyze ctx k) true)))
+    ("CXXTemporaryObjectExpr" "CXXUnresolvedConstructExpr" "CXXConstructExpr")
+    (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
+          args (mapv #(analyze ctx %) (kids n))]
+      (if (abi/class? (abi/unq t))
+        {:op :temp-obj :init (init-for t args ctx (if (empty? args) :value :direct)) :ty (abi/unq t) :cat :pr}
+        (if (empty? args) {:op :zero-val :ty t :cat :pr} (cast-expr ctx t (first args) true))))
+    "CXXScalarValueInitExpr" (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))] {:op :zero-val :ty t :cat :pr})
+    "InitListExpr" {:op :init-list :items (mapv #(analyze ctx %) (kids n)) :ty {:k :init-list}}
+    "UnaryExprOrTypeTraitExpr"
+    (let [t (if-let [at (get-in n [:argType :qualType])] (resolve-type (:scope ctx) at) (:ty (analyze ctx (first (kids n)))))
+          t (abi/non-ref t)]
+      (case (:name n)
+        "sizeof" {:op :int :v (abi/size-of t) :ty abi/ulong* :cat :pr}
+        "alignof" {:op :int :v (abi/align-of t) :ty abi/ulong* :cat :pr}
+        (fail :trait (:name n))))
+    "CXXNewExpr" (new-expr ctx n)
+    "CXXDeleteExpr" (let [e (rv (analyze ctx (first (kids n))))]
+                      {:op :delete :e e :array (boolean (:isArrayAsWritten n)) :ty abi/void :cat :pr})
+    "ExprWithCleanups" (analyze ctx (first (kids n)))
+    (fail :expr "expression " (:kind n))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Statements
+
+(declare stmt)
+
+(defn- local-var! [ctx n storage]
+  (let [ty (resolve-type (:scope ctx) (get-in n [:type :qualType]))
+        id (next-id)
+        st (if (= "static" (:storageClass n)) :static-local storage)
+        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx)}]
+    (swap! *vars* assoc id v)
+    id))
+
+(defn- decl-init
+  "A local declaration's initializer from its node (`:init` c, call or list)."
+  [ctx id n]
+  (let [t (:ty (var* id))
+        init (first (kids n))
+        t (if (and (abi/arr? t) (nil? (:n t)) init)
+            (let [a (analyze ctx init)]
+              (cond (= :init-list (:op a)) (if (and (= 1 (count (:items a))) (= :str (:op (first (:items a))))) (assoc t :n (inc (count (:s (first (:items a)))))) (assoc t :n (count (:items a))))
+                    (= :str (:op a)) (assoc t :n (inc (count (:s a))))
+                    :else t))
+            t)
+        _ (upd-var! id assoc :ty t)]
+    (cond
+      (nil? init) (init-for t nil ctx :default)
+      (= "call" (:init n)) (init-for t (if (= "ParenListExpr" (:kind init)) (mapv #(analyze ctx %) (kids init)) [(analyze ctx init)]) ctx :direct)
+      (= "list" (:init n)) (init-for t (analyze ctx init) ctx :list)
+      :else (let [a (analyze ctx init)] (init-for t a ctx (if (= :init-list (:op a)) :list :copy))))))
+
+(defn- decl-stmt [ctx n]
+  (vec (for [d (kids n)]
+         (case (:kind d)
+           "VarDecl" (let [id (local-var! ctx d :local)
+                           v (var* id)]
+                       (if (= :static-local (:storage v))
+                         (do (swap! (:statics ctx) conj id)
+                             (let [c (count (filter #(= (:name (var* %)) (:name v)) @(:statics ctx)))]
+                               (upd-var! id assoc :disc (dec c) :init-node (first (kids d))))
+                             (let [init (decl-init ctx id d)]
+                               (enter! (:scope ctx) (:name d) {:e :var :id id})
+                               (upd-var! id assoc :sinit init)
+                               {:s :static-local :var id}))
+                         (let [init (decl-init ctx id d)]
+                           (enter! (:scope ctx) (:name d) {:e :var :id id})
+                           {:s :decl :var id :init init})))
+           "CXXRecordDecl" (do (declare-class! (:scope ctx) d) {:s :null})
+           "EnumDecl" (do (declare-enum! (:scope ctx) d) {:s :null})
+           ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "NamespaceAliasDecl") (do (declare-node! (:scope ctx) d) {:s :null})
+           (fail :decl "local declaration " (:kind d))))))
+
+(defn- block-ctx [ctx] (assoc ctx :scope (new-scope :block (:scope ctx))))
+
+(defn- full [e] {:s :expr :e e})
+
+(defn- cond-of [ctx n]
+  (to-bool (analyze ctx n)))
+
+(defn stmt
+  "The typed statement of a tree node."
+  [ctx n]
+  (case (:kind n)
+    nil {:s :null}
+    "CompoundStmt" (let [c (block-ctx ctx)] {:s :block :items (vec (mapcat #(let [x (stmt c %)] (if (vector? x) x [x])) (kids n)))})
+    "DeclStmt" {:s :block :flat true :items (decl-stmt ctx n)}
+    "NullStmt" {:s :null}
+    "ReturnStmt" (let [[e] (kids n)
+                       rt (:ret (:ty (fnd (:fn-id ctx))))]
+                   (cond
+                     (nil? e) {:s :return}
+                     (abi/void? rt) {:s :return :void-e (analyze ctx e)}
+                     :else (let [a (analyze ctx e)
+                                 ;; [class.copy.elision]/3: a returned local is an rvalue first
+                                 a (if (and (= :var (:op a)) (#{:local :param} (:storage (var* (:id a)))) (abi/class? (abi/unq (:ty a))))
+                                     (assoc a :cat :xv :nrvo-var (:id a)) a)]
+                             {:s :return :init (init-for rt a ctx (if (= :init-list (:op a)) :list :copy)) :nrvo-var (:nrvo-var a)})))
+    "IfStmt" (let [c (block-ctx ctx)
+                   ks (vec (:inner n))
+                   ;; clang's IfStmt: [init?] [condvar decl?] cond then else?, the flags say which
+                   [init ks] (if (:hasInit n) [(first ks) (subvec ks 1)] [nil ks])
+                   [cvar ks] (if (:hasVar n) [(first ks) (subvec ks 1)] [nil ks])
+                   init-s (when init (stmt c init))
+                   cvar-s (when cvar (stmt c cvar))
+                   cn (first ks)]
+               {:s :block :items (vec (concat (when init-s [init-s]) (when cvar-s [cvar-s])
+                                              [{:s :if :cond (cond-of c cn) :then (stmt (block-ctx c) (nth ks 1))
+                                                :else (when (:hasElse n) (stmt (block-ctx c) (nth ks 2)))}]))})
+    "WhileStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
+                      [cvar ks] (if (:hasVar n) [(first ks) (subvec ks 1)] [nil ks])]
+                  (when cvar (fail :stmt "a while condition's declaration"))
+                  {:s :while :cond (cond-of c (first ks)) :body (stmt (block-ctx c) (second ks))})
+    "DoStmt" (let [[b cn] (kids n)] {:s :do :body (stmt (block-ctx ctx) b) :cond (cond-of ctx cn)})
+    "ForStmt" (let [c (block-ctx ctx)
+                    [init cvar cn inc body] (:inner n)
+                    init (when (:kind init) (stmt c init))]
+                (when (:kind cvar) (fail :stmt "a for condition's declaration"))
+                {:s :block :items [(or init {:s :null})
+                                   {:s :for :cond (when (:kind cn) (cond-of c cn)) :inc (when (:kind inc) (analyze c inc))
+                                    :body (stmt (block-ctx c) body)}]})
+    "CXXForRangeStmt"
+    (let [c (block-ctx ctx)
+          ks (vec (:inner n))
+          rangen (some #(when (= "DeclStmt" (:kind %)) %) ks)
+          range-e (analyze c (first (kids (first (kids rangen)))))
+          loopd (first (kids (last (filter #(= "DeclStmt" (:kind %)) ks))))
+          body (last ks)
+          at (:ty range-e)]
+      (when-not (abi/arr? (abi/unq at)) (fail :range-for "a range for over a non-array"))
+      ;; for (T x : a) as { T* b = a; T* e = a + N; for (; b != e; ++b) { T x = *b; body } }
+      (let [et (:of at)
+            pt (abi/ptr et)
+            bid (next-id) eid (next-id)
+            _ (swap! *vars* assoc bid {:id bid :name "__begin" :ty pt :storage :local} eid {:id eid :name "__end" :ty pt :storage :local})
+            bvar {:op :var :id bid :ty pt :cat :lv}
+            evar {:op :var :id eid :ty pt :cat :lv}
+            ic (block-ctx c)
+            lid (local-var! ic loopd :local)
+            lt (:ty (var* lid))
+            lt (if (= :auto (:k lt)) et lt)
+            _ (upd-var! lid assoc :ty lt)
+            linit (init-for lt {:op :deref :e (rv bvar) :ty et :cat :lv} ic :copy)
+            _ (enter! (:scope ic) (:name loopd) {:e :var :id lid})]
+        {:s :block :items [{:s :decl :var bid :init {:i :expr :e (rv range-e)}}
+                           {:s :decl :var eid :init {:i :expr :e {:op :ptradd :o "+" :p (rv range-e) :n {:op :int :v (:n at) :ty abi/long* :cat :pr} :ty pt :cat :pr}}}
+                           {:s :for :cond {:op :cmp :o "!=" :l (rv bvar) :r (rv evar) :ct pt :ty abi/bool* :cat :pr}
+                            :inc {:op :incdec :o "++" :post false :e bvar :ty pt :cat :lv}
+                            :body {:s :block :items [{:s :decl :var lid :init linit} (stmt ic body)]}}]}))
+    "BreakStmt" {:s :break}
+    "ContinueStmt" {:s :continue}
+    "SwitchStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
+                       [init ks] (if (:hasInit n) [(first ks) (subvec ks 1)] [nil ks])
+                       _ (when (:hasVar n) (fail :stmt "a switch condition's declaration"))
+                       e (rv (analyze c (first ks)))
+                       pt (promote-type (:ty e))]
+                   {:s :block :items (vec (concat (when init [(stmt c init)])
+                                                  [{:s :switch :e (convert-scalar e pt false) :ty pt :body (stmt (block-ctx c) (second ks))}]))})
+    "CaseStmt" (let [[v body] (kids n)] {:s :case :v (const-int (:scope ctx) v) :body (stmt ctx body)})
+    "DefaultStmt" {:s :default :body (stmt ctx (first (kids n)))}
+    "LabelStmt" {:s :label :name (:name n) :body (stmt ctx (first (kids n)))}
+    "GotoStmt" (let [t (node-text n) [_ l] (re-find #"goto\s+([A-Za-z_][A-Za-z_0-9]*)" (or t ""))] {:s :goto :name l})
+    "AttributedStmt" (stmt ctx (last (kids n)))
+    (if (or (str/ends-with? (str (:kind n)) "Expr") (str/ends-with? (str (:kind n)) "Operator") (str/ends-with? (str (:kind n)) "Literal"))
+      (full (analyze ctx n))
+      (fail :stmt "statement " (:kind n)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Functions' bodies
+
+(defn- ctor-inits
+  "A constructor's mem-initializers as [{:base bid :init} ...] and [{:field i :init} ...] in initialization order."
+  [ctx f]
+  (let [cid (:cls f)
+        c (abi/cls cid)
+        given (into {} (for [i (:inits f)]
+                         (let [k (if-let [b (:baseInit i)] [:base (:id (resolve-type (:scope ctx) (:qualType b)))] [:field (get-in i [:anyInit :name])])
+                               [x] (kids i)]
+                           [k x])))
+        init-of (fn [t x]
+                  (cond
+                    (nil? x) nil
+                    (= "ParenListExpr" (:kind x)) (init-for t (mapv #(analyze ctx %) (kids x)) ctx (if (empty? (kids x)) :value :direct))
+                    (= "InitListExpr" (:kind x)) (init-for t (analyze ctx x) ctx :list)
+                    (= "CXXParenListInitExpr" (:kind x)) (init-for t (mapv #(analyze ctx %) (kids x)) ctx :direct)
+                    :else (init-for t [(analyze ctx x)] ctx :direct)))
+        deleg (get given [:base cid])]
+    (if deleg
+      {:delegate (init-of {:k :class :id cid} deleg)}
+      {:bases (vec (for [b (:bases c)]
+                     (let [t {:k :class :id (:cls b)}
+                           x (get given [:base (:cls b)])]
+                       {:base (:cls b) :init (if (contains? given [:base (:cls b)]) (init-of t x) (init-for t nil ctx :default))})))
+       :fields (vec (for [fl (:fields c)]
+                      (let [x (get given [:field (:name fl)])]
+                        {:field (:i fl)
+                         :init (cond
+                                 (contains? given [:field (:name fl)]) (if (nil? x) (init-for (:ty fl) nil ctx :value) (init-of (:ty fl) x))
+                                 (:init fl) (init-for (:ty fl) (let [d (analyze ctx (:init fl))] (if (= :init-list (:op d)) d d)) ctx (if (= "InitListExpr" (:kind (:init fl))) :list :copy))
+                                 :else (init-for (:ty fl) nil ctx :default))})))})))
+
+(defn- nrvo-var
+  "The local every return statement of the body returns, when there is one ([class.copy.elision]/1.1, as clang's
+  computeNRVO decides it for one variable)."
+  [body-s]
+  (let [rets (atom [])]
+    ((fn walk [s]
+       (when (map? s)
+         (when (= :return (:s s)) (swap! rets conj (:nrvo-var s)))
+         (doseq [k [:items :then :else :body]] (let [x (get s k)] (if (vector? x) (doseq [y x] (walk y)) (walk x))))))
+     body-s)
+    (let [vs (distinct @rets)]
+      (when (and (= 1 (count vs)) (first vs) (= :local (:storage (var* (first vs))))) (first vs)))))
+
+(defn analyze-fn!
+  "Analyzes a function's body (and a constructor's mem-initializers) into :tbody."
+  [fid]
+  (let [f (fnd fid)
+        cls (:cls f)
+        fs (new-scope :fn (or (:def-scope f) (:scope f)))
+        ;; a member's body sees the class's members: its scope is the class's for lookups
+        fs (if cls (assoc fs :parent (:scope (abi/cls cls))) fs)
+        pids (vec (map-indexed (fn [i t]
+                                 (let [id (next-id) nm (nth (:param-names f) i nil)]
+                                   (swap! *vars* assoc id {:id id :name nm :ty t :storage :param :fn fid})
+                                   (when nm (enter! fs nm {:e :var :id id}))
+                                   id))
+                               (:ps (:ty f))))
+        this-t (when (and cls (not (:static f))) (abi/ptr (cond-> {:k :class :id cls} (:cq f) (assoc :c true))))
+        cut (if cls (let [outer (loop [id cls] (let [c (abi/cls id) s (:outer c)] (if (= :class (:kind s)) (recur (:cls s)) c)))] Long/MAX_VALUE) (:pos f))
+        ctx {:scope fs :fn-id fid :this-type this-t :statics (atom [])}]
+    (binding [*cutoff* (if cls Long/MAX_VALUE (max (long cut) (long (or (:_b (:body f)) 0))))]
+      (let [inits (when (= :ctor (:kind f)) (when-not (:implicit f) (ctor-inits ctx f)))
+            body (when (:body f) (stmt ctx (:body f)))]
+        (upd-fn! fid assoc :params pids :tbody body :tinits inits :nrvo (when body (nrvo-var body)) :statics @(:statics ctx))))))
+
+(defn analyze-implicit!
+  "An implicit (or defaulted) special member's definition: params and, for a default constructor, the members'
+  initializers."
+  [fid]
+  (let [f (fnd fid)
+        cls (:cls f)
+        fs (new-scope :fn (:scope (abi/cls cls)))
+        pids (vec (map-indexed (fn [i t] (let [id (next-id)] (swap! *vars* assoc id {:id id :name (str "__p" i) :ty t :storage :param :fn fid}) id)) (:ps (:ty f))))
+        ctx {:scope fs :fn-id fid :this-type (abi/ptr {:k :class :id cls}) :statics (atom [])}
+        f (assoc f :params pids)]
+    (swap! *fns* assoc fid f)
+    (when (and (= :ctor (:kind f)) (empty? (:ps (:ty f))))
+      (binding [*cutoff* Long/MAX_VALUE] (upd-fn! fid assoc :tinits (ctor-inits ctx (assoc f :inits [])))))
+    (when (= :ctor (:kind f))
+      (when (= 1 (count (:ps (:ty f))))
+        ;; the implicit copy: each base and member copied from the source's
+        (let [src (var-node (first pids))
+              src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat :lv}
+              c (abi/cls cls)]
+          (binding [*cutoff* Long/MAX_VALUE]
+            (upd-fn! fid assoc :tinits
+                     {:bases (vec (for [b (:bases c)] {:base (:cls b) :init (init-for {:k :class :id (:cls b)} [(to-base-lv src (:cls b))] ctx :direct)}))
+                      :fields (vec (for [fl (:fields c)]
+                                     {:field (:i fl) :init (let [t (:ty fl)]
+                                                             (if (abi/arr? t) {:i :copy-bytes :e (field-node src cls (:i fl))}
+                                                                 (init-for t [(field-node src cls (:i fl))] ctx :direct)))}))})))))
+    (when (and (= :method (:kind f)) (= "=" (:op f)))
+      (let [src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat :lv}
+            me (deref-node (this-expr ctx))
+            c (abi/cls cls)]
+        (binding [*cutoff* Long/MAX_VALUE]
+          (upd-fn! fid assoc :tassign
+                   (vec (concat (for [b (:bases c)] (full (assign-node ctx (to-base-lv me (:cls b)) (to-base-lv src (:cls b)))))
+                                (for [fl (:fields c)]
+                                  (if (abi/arr? (:ty fl))
+                                    {:s :copy-bytes :dst (field-node me cls (:i fl)) :src (field-node src cls (:i fl))}
+                                    (full (assign-node ctx (field-node me cls (:i fl)) (field-node src cls (:i fl)))))))))))))
+  fid)
+
+;; ---------------------------------------------------------------------------------------------
+;; The program
+
+(defn global-init
+  "A namespace-scope variable's initializer."
+  [vid]
+  (let [v (var* vid)
+        ctx {:scope (or (:def-scope v) (:scope v)) :statics (atom [])}
+        init (:init v)]
+    (binding [*cutoff* Long/MAX_VALUE]
+      (cond
+        (nil? init) (init-for (:ty v) nil ctx :value)
+        :else (decl-init ctx vid (assoc (or (:node v) {}) :init (:init-style v) :inner [init] :kind "VarDecl"))))))
+
+(defn analyze-program
+  "The program of the native parse's nodes (its global scope `proot`) of the source text `src`: {:fns {id fn} :vars
+  {id var} :order [...] :classes {id class} :enums {...}}."
+  [nodes proot ^String src]
+  (let [root (new-scope :ns nil :path [])]
+  (binding [*src* src *fns* (atom {}) *vars* (atom {}) *ids* (atom 0) *order* (atom [])
+            abi/*classes* (atom {}) abi/*enums* (atom {}) *proot* proot *root* root *header-cache* (atom {})]
+    (do
+      (doseq [n nodes] (declare-node! root n))
+      (doseq [[k id] @*order*]
+        (case k
+          :fn (let [f (fnd id)]
+                (cond
+                  (:body f) (analyze-fn! id)
+                  (or (:implicit f) (:defaulted f)) (analyze-implicit! id)
+                  :else nil))
+          :var (let [v (var* id)] (when (:defined v) (upd-var! id assoc :ginit (global-init id))))))
+      {:fns @*fns* :vars @*vars* :order @*order* :classes @abi/*classes* :enums @abi/*enums* :root root}))))

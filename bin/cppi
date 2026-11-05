@@ -32,6 +32,17 @@
 #                               OUT's key against the checkout's (the lowering, repr/llvm, repr/c, eh.c.ae, units.edn and the
 #                               shims, the IR's pin, runtime-build's own steps, gcc's flags, gcc, clang and the tools' host):
 #                               "current", or "stale" and the inputs that differ (exit 1); --print: the checkout's key lines
+#   bin/cppi codegen FILE OUT   FILE compiled without clang (doc/cpp/CODEGEN.md): the native parser, arbace.cpp.sema and
+#                               arbace.cpp.codegen into LLVM forms (OUT/forms.ae, printed as OUT/gen.ll), lowered (OUT/gen.c),
+#                               gcc -O0 with the lowered runtime (--runtime DIR, default .tmp/cppi/runtime) and run: OUT/gen.out,
+#                               OUT/gen.status
+#   bin/cppi codegen-check [LIST] WORK [--runtime DIR]
+#                               each sample of test/cpp/codegen (or LIST: NAME<tab>PATH lines) by both routes: clang's IR
+#                               (clang++ -O0 -S -emit-llvm) lowered and run, and the code generator's forms lowered and run with
+#                               the same runtime (and its IR built by clang++ and run natively): status and stdout equal, every
+#                               name it defines one clang's IR defines; against test/cpp/codegen/known.edn (arbace.cpp.codegen's
+#                               judge: WORK/results.tsv, WORK/summary.edn). The runtime need not be at the checkout's key: both
+#                               routes link the same one
 #   bin/cppi selftest [--accept-skips] [NAME...] the checks' own tests (test/cpp/selftest/NAME.sh: the review 007 cases; ARBACE_HOST_EXE=/bin/true: the dry mode, which skips the tests that need the tools and exits 3, 0 with --accept-skips)
 # The judges are arbace.cpp.check's (apart from the lowering, so they are not in the runtime's key).
 #   bin/cppi lower-check LIST WORK [--jobs N] [--runtime OUT] [--recorded KEY|none|auto]
@@ -359,6 +370,75 @@ lower_check() {
   arbace_tool -m arbace.cpp.check judge "$work" "$root/test/cpp/lower-known.edn" "$root/test/cpp/lower-results.edn" "$recorded"
 }
 
+cg_runtime() { # the runtime a codegen check links: DIR's archives (runtime-build makes them; not rebuilt here)
+  local d=$1
+  [ -f "$d/liblstdc++.a" ] && [ -f "$d/rt.o" ] || { echo "codegen: no runtime in $d (bin/cppi runtime-build $d, or --runtime DIR)" >&2; exit 4; }
+  (cd "$d" && pwd)
+}
+
+cg_run() { # cg_run DIR KIND: KIND.c compiled by gcc with the lowered runtime and run (KIND.out, KIND.status)
+  local d=$1 k=$2
+  [ -f "$d/$k.c" ] || return 0
+  # shellcheck disable=SC2086
+  ( cd "$d" && timeout 300 gcc $GCC_FLAGS $k.c -o $k.exe $CG_LIBS; echo $? > $k-build.status ) 2>&1 | cap "$d/$k-build.log"
+  if [ "$(cat "$d/$k-build.status")" = 0 ]; then
+    ( cd "$d" && ulimit -f 1024 && timeout "${CPPI_RUN_TIMEOUT:-60}" ./$k.exe 2> $k.err | cap $k.out; echo "${PIPESTATUS[0]}" > $k.status )
+  fi
+  rm -f "$d/$k.exe"
+}
+
+cg_native() { # cg_native DIR: the code generator's IR built by clang++ (LLVM's verifier, the native libraries) and run
+  local d=$1
+  [ -f "$d/gen.ll" ] || return 0
+  ( cd "$d" && timeout 300 clang++ gen.ll -o nat.exe -lm; echo $? > nat-build.status ) 2>&1 | cap "$d/nat-build.log"
+  if [ "$(cat "$d/nat-build.status")" = 0 ]; then
+    ( cd "$d" && ulimit -f 1024 && timeout "${CPPI_RUN_TIMEOUT:-60}" ./nat.exe 2> nat.err | cap nat.out; echo "${PIPESTATUS[0]}" > nat.status )
+  fi
+  rm -f "$d/nat.exe"
+}
+export -f cg_run cg_native
+
+codegen_one() {
+  local f=$1 out=$2 rtdir=$root/.tmp/cppi/runtime
+  shift 2
+  while [ $# -gt 0 ]; do case $1 in --runtime) rtdir=$2; shift 2 ;; *) echo "codegen: unknown option $1" >&2; exit 2 ;; esac; done
+  rtdir=$(cg_runtime "$rtdir")
+  mkdir -p "$out"; out=$(cd "$out" && pwd); f=$(cd "$(dirname "$f")" && pwd)/$(basename "$f")
+  rm -f "$out"/gen.*
+  arbace_tool -m arbace.cpp.codegen gen "$f" "$out" || exit $?
+  CG_LIBS="$rtdir/rt.o -Wl,--start-group $rtdir/liblstdc++.a -Wl,--end-group -lm -latomic"; export CG_LIBS
+  cg_run "$out" gen
+  [ -f "$out/gen.status" ] || { echo "codegen: gcc failed on $out/gen.c (gen-build.log)" >&2; exit 1; }
+  cat "$out/gen.out"; echo "codegen: status $(cat "$out/gen.status")" >&2
+}
+
+codegen_check() {
+  local list="" work rtdir=$root/.tmp/cppi/runtime jobs=${CPPI_JOBS:-4}
+  if [ $# -ge 2 ] && [ "${2#--}" = "$2" ]; then list=$1; shift; fi
+  work=$1; shift
+  while [ $# -gt 0 ]; do case $1 in --runtime) rtdir=$2; shift 2 ;; --jobs) jobs=$2; shift 2 ;; *) echo "codegen-check: unknown option $1" >&2; exit 2 ;; esac; done
+  rtdir=$(cg_runtime "$rtdir")
+  mkdir -p "$work"; work=$(cd "$work" && pwd)
+  if [ -n "$list" ]; then grep -v '^#' "$list" | cut -f1,2 > "$work/list.tsv"
+  else for f in "$root"/test/cpp/codegen/*.cpp; do printf '%s\t%s\n' "$(basename "$f" .cpp)" "$f"; done > "$work/list.tsv"; fi
+  grep -q . "$work/list.tsv" || { echo "codegen-check: no sample" >&2; exit 2; }
+  rm -rf "$work/files"; mkdir -p "$work/files"
+  CG_LIBS="$rtdir/rt.o -Wl,--start-group $rtdir/liblstdc++.a -Wl,--end-group -lm -latomic"; export CG_LIBS
+  local t0 t1 t2; t0=$(date +%s)
+  # clang's IR, the reference
+  while IFS=$'\t' read -r n p; do
+    mkdir -p "$work/files/$n"
+    ( cd "$work/files/$n" && timeout 300 clang++ -x c++ -std=c++23 -O0 -S -emit-llvm "$p" -o x.ll ) 2>&1 | cap "$work/files/$n/ir.log"
+  done < "$work/list.tsv"
+  while IFS=$'\t' read -r n p; do printf '%s\t%s\t%s\n' "$n" "$p" "$work/files/$n"; done < "$work/list.tsv" > "$work/gen.tsv"
+  arbace_tool -m arbace.cpp.codegen gen-list "$work/gen.tsv"
+  t1=$(date +%s)
+  cut -f1 "$work/list.tsv" | tr '\n' '\0' | xargs -0 -P "$jobs" -I{} nice bash -c 'd='"$work"'/files/$1; cg_run "$d" ref; cg_run "$d" gen; cg_native "$d"' _ {}
+  t2=$(date +%s)
+  echo "codegen-check: generate and lower $((t1-t0)) s, gcc, clang and runs $((t2-t1)) s" | tee "$work/times.txt"
+  arbace_tool -m arbace.cpp.codegen judge "$work" "$root/test/cpp/codegen/known.edn"
+}
+
 case ${1:-} in
   lower) shift; arbace_tool -m arbace.cpp.lower lower "$@" ;;
   runtime) arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/cpp/rt/eh.c.ae" "$2" ;;
@@ -375,5 +455,7 @@ case ${1:-} in
           *) echo "list: samples, runtime or libstdcxx" >&2; exit 2 ;;
         esac ;;
   lower-check) shift; lower_check "$@" ;;
+  codegen) shift; codegen_one "$@" ;;
+  codegen-check) shift; codegen_check "$@" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
 esac

@@ -1,0 +1,340 @@
+(ns arbace.cpp.abi
+  "The C++ code generator's types and the Itanium C++ ABI's parts it needs (doc/cpp/CODEGEN.md §3, §4): the semantic
+  types of arbace.cpp.sema (maps with :k), the program's classes and enumerations (a registry by id), sizes and
+  alignments on x86-64 (LP64), the class layout of the Itanium ABI (§2.4: the vptr, the primary base, empty bases at
+  offset 0, a non-POD base's tail padding reused) and the Itanium mangling of names (§5.1: nested names, the
+  substitutions S_ S0_ ..., the special members' C1 C2 D0 D1 D2, operators, local statics). Written from the ABI's text
+  (itanium-cxx-abi.github.io/cxx-abi/abi.html) and checked against clang 23's output on the samples; no code ported."
+  (:refer-clojure :exclude [class? fn?])
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn fail [cls & msg] (throw (ex-info (str "codegen: " (apply str msg)) {:codegen/refused cls})))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types: {:k :b :n :int}, {:k :ptr :to T}, {:k :ref :to T}, {:k :rref :to T}, {:k :arr :n N :of T},
+;; {:k :fn :ret T :ps [T] :va bool :cq bool}, {:k :class :id N}, {:k :enum :id N}; any with :c true (const), :v true
+
+(defn b [n] {:k :b :n n})
+(def void (b :void)) (def bool* (b :bool)) (def char* (b :char)) (def int* (b :int)) (def uint* (b :uint))
+(def long* (b :long)) (def ulong* (b :ulong)) (def double* (b :double)) (def float* (b :float)) (def nullptr-t (b :nullptr))
+(defn ptr [t] {:k :ptr :to t})
+(defn lref [t] {:k :ref :to t})
+(defn rref [t] {:k :rref :to t})
+(defn arr [n t] {:k :arr :n n :of t})
+(defn unq [t] (dissoc t :c :v))
+(defn constq [t] (assoc t :c true))
+(defn kind [t] (:k t))
+(defn bn [t] (when (= :b (:k t)) (:n t)))
+(defn void? [t] (= :void (bn t)))
+(defn ref? [t] (#{:ref :rref} (:k t)))
+(defn non-ref [t] (if (ref? t) (:to t) t))
+(defn ptr? [t] (= :ptr (:k t)))
+(defn class? [t] (= :class (:k t)))
+(defn enum? [t] (= :enum (:k t)))
+(defn arr? [t] (= :arr (:k t)))
+(defn fn? [t] (= :fn (:k t)))
+(def int-ranks {:bool 0 :char 1 :schar 1 :uchar 1 :char8 1 :short 2 :ushort 2 :char16 2 :int 3 :uint 3 :char32 3 :wchar 3
+                :long 4 :ulong 4 :llong 5 :ullong 5})
+(def unsigned-ns #{:bool :uchar :ushort :uint :ulong :ullong :char8 :char16 :char32})
+(defn integral? [t] (or (contains? int-ranks (bn t)) (enum? t)))
+(defn floating? [t] (#{:float :double :ldouble} (bn t)))
+(defn arith? [t] (or (contains? int-ranks (bn t)) (floating? t)))
+(defn scalar? [t] (or (arith? t) (enum? t) (ptr? t) (= :nullptr (bn t))))
+(defn same-type? [a b] (= (unq a) (unq b)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The registry: classes and enumerations by id
+
+(def ^:dynamic *classes* nil) ; atom {id class}
+(def ^:dynamic *enums* nil)   ; atom {id enum}
+
+(defn cls [id] (get @*classes* id))
+(defn cls-of [t] (cls (:id (unq t))))
+(defn update-cls! [id f & args] (apply swap! *classes* update id f args))
+(defn enm [id] (get @*enums* id))
+
+(defn underlying [t] (if (enum? t) (or (:under (enm (:id t))) int*) t))
+
+;; ---------------------------------------------------------------------------------------------
+;; Sizes and alignments (x86-64 SysV, LP64)
+
+(def ^:private scalar-size {:bool 1 :char 1 :schar 1 :uchar 1 :char8 1 :short 2 :ushort 2 :char16 2 :int 4 :uint 4 :char32 4
+                            :wchar 4 :long 8 :ulong 8 :llong 8 :ullong 8 :float 4 :double 8 :ldouble 16 :nullptr 8})
+
+(declare layout)
+
+(defn size-align
+  "[size align] of a complete object type."
+  [t]
+  (case (:k t)
+    :b (if-let [s (scalar-size (:n t))] [s s] (fail :type "no size for " (:n t)))
+    :ptr [8 8] (:ref :rref) [8 8]
+    :enum (size-align (underlying t))
+    :arr (let [[s a] (size-align (:of t))] [(* (long s) (long (or (:n t) 0))) a])
+    :class (let [l (layout (:id t))] [(:size l) (:align l)])
+    :fn [1 1]
+    (fail :type "no size for " (pr-str t))))
+
+(defn size-of ^long [t] (long (first (size-align t))))
+(defn align-of ^long [t] (long (second (size-align t))))
+(defn align-up ^long [^long n ^long a] (* a (quot (+ n (dec a)) a)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Class properties
+
+(defn dynamic? "Whether the class has a vptr (virtual functions of its own or a dynamic base)." [id]
+  (let [c (cls id)] (boolean (or (seq (:virtuals c)) (some #(dynamic? (:cls %)) (:bases c))))))
+
+(defn primary-base
+  "The primary base (Itanium §2.4 II.3): the first non-virtual dynamic base."
+  [id]
+  (let [c (cls id)] (first (filter #(and (not (:virtual %)) (dynamic? (:cls %))) (:bases c)))))
+
+(defn empty-class? [id]
+  (let [c (cls id)] (and (empty? (:fields c)) (not (dynamic? id)) (every? #(empty-class? (:cls %)) (:bases c)))))
+
+(defn pod-for-layout?
+  "POD as C++03 defined it, which Itanium's layout uses to decide whether a base's tail padding is reused."
+  [id]
+  (let [c (cls id)]
+    (and (empty? (:bases c)) (not (dynamic? id)) (not (:user-ctor c)) (not (:user-dtor c)) (not (:user-copy-assign c))
+         (every? #(= :public (:access %)) (:fields c))
+         (every? (fn [f] (let [t (loop [t (:ty f)] (if (arr? t) (recur (:of t)) t))]
+                           (and (not (ref? t)) (or (not (class? t)) (pod-for-layout? (:id t))))))
+                 (:fields c)))))
+
+(defn layout
+  "The class's layout: {:size :align :dsize :fields [offsets in order] :bases [offsets in order] :vptr bool}, cached."
+  [id]
+  (or (:layout (cls id))
+      (let [c (cls id)
+            dyn (dynamic? id)
+            pb (primary-base id)
+            ;; the primary base at 0 holds the vptr; else the class's own vptr at 0
+            start (if (and dyn (not pb)) 8 0)
+            init-align (if dyn 8 1)
+            bases (vec (:bases c))
+            pbi (when pb (first (keep-indexed (fn [i b] (when (identical? b pb) i)) bases)))
+            order (if pbi (cons pbi (remove #(= % pbi) (range (count bases)))) (range (count bases)))
+            [off align boffm]
+            (reduce (fn [[off align m] i]
+                      (let [bid (:cls (nth bases i))
+                            bl (layout bid)
+                            ba (long (:align bl))]
+                        (cond
+                          (= i pbi) [(max (long off) (long (if (:pod bl) (:size bl) (:dsize bl)))) (max (long align) ba) (assoc m i 0)]
+                          (empty-class? bid) [off (max (long align) ba) (assoc m i 0)]
+                          :else (let [o (align-up off ba)]
+                                  [(+ o (long (if (:pod bl) (:size bl) (:dsize bl)))) (max (long align) ba) (assoc m i o)]))))
+                    [(long start) (long init-align) {}]
+                    order)
+            boffs (mapv #(get boffm %) (range (count bases)))
+            [off align foffs]
+            (reduce (fn [[off align foffs] f]
+                      (when (:bits f) (fail :bit-field "bit-field " (:name f)))
+                      (let [[s a] (size-align (:ty f))
+                            o (align-up off a)]
+                        [(+ o (long s)) (max (long align) (long a)) (conj foffs o)]))
+                    [off align []]
+                    (:fields c))
+            dsize off
+            size (max 1 (align-up dsize align))
+            l {:size size :align align :dsize dsize :fields foffs :bases boffs :vptr dyn :pod (pod-for-layout? id)}]
+        (update-cls! id assoc :layout l)
+        l)))
+
+(defn field-offset ^long [id ^long i] (long (nth (:fields (layout id)) i)))
+
+(defn base-path
+  "The chain of [class-id base-index] steps from class `from` to its base `to` (nil when `to` is not a base), and the
+  total offset: [steps offset]."
+  [from to]
+  (if (= from to)
+    [[] 0]
+    (some (fn [[i bs]]
+            (when-let [[steps off] (base-path (:cls bs) to)]
+              [(into [[from i]] steps) (+ (long (nth (:bases (layout from)) i)) (long off))]))
+          (map-indexed vector (:bases (cls from))))))
+
+(defn derived-from? [d bse] (and (not= d bse) (some? (base-path d bse))))
+
+;; ---------------------------------------------------------------------------------------------
+;; LLVM types of values
+
+(defn llvm-type
+  "The LLVM type of a scalar value of type `t` in memory (bool i8) or as an operand (`:value`: bool i1)."
+  ([t] (llvm-type t false))
+  ([t value?]
+   (let [t (unq t)]
+     (case (:k t)
+       :b (case (:n t)
+            :void 'void
+            :bool (if value? 'i1 'i8)
+            (:char :schar :uchar :char8) 'i8
+            (:short :ushort :char16) 'i16
+            (:int :uint :char32 :wchar) 'i32
+            (:long :ulong :llong :ullong) 'i64
+            :float 'float :double 'double :ldouble 'x86_fp80
+            :nullptr 'ptr)
+       (:ptr :ref :rref) 'ptr
+       :enum (llvm-type (underlying t) value?)
+       :fn 'ptr
+       (list 'array (size-of t) 'i8)))))
+
+(defn signed? [t] (let [n (bn (underlying (unq t)))] (and (contains? int-ranks n) (not (unsigned-ns n)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Itanium mangling (§5.1)
+
+(def op-codes
+  {"new" "nw" "new[]" "na" "delete" "dl" "delete[]" "da" "+" "pl" "-" "mi" "*" "ml" "/" "dv" "%" "rm" "&" "an" "|" "or"
+   "^" "eo" "=" "aS" "+=" "pL" "-=" "mI" "*=" "mL" "/=" "dV" "%=" "rM" "&=" "aN" "|=" "oR" "^=" "eO" "<<" "ls" ">>" "rs"
+   "<<=" "lS" ">>=" "rS" "==" "eq" "!=" "ne" "<" "lt" ">" "gt" "<=" "le" ">=" "ge" "<=>" "ss" "!" "nt" "&&" "aa" "||" "oo"
+   "++" "pp" "--" "mm" "," "cm" "->*" "pm" "->" "pt" "()" "cl" "[]" "ix" "~" "co"})
+(def unary-op-codes {"+" "ps" "-" "ng" "&" "ad" "*" "de"})
+
+(def ^:private builtin-codes
+  {:void "v" :bool "b" :char "c" :schar "a" :uchar "h" :short "s" :ushort "t" :int "i" :uint "j" :long "l" :ulong "m"
+   :llong "x" :ullong "y" :float "f" :double "d" :ldouble "e" :nullptr "Dn" :wchar "w" :char8 "Du" :char16 "Ds" :char32 "Di"})
+
+(defn- seq-id ^String [^long n]
+  (if (zero? n) "S_"
+      (str "S" (.toUpperCase (Long/toString (dec n) 36)) "_")))
+
+(defn source-name ^String [^String s] (str (count s) s))
+
+(def ^:dynamic ^:private *subs* nil) ; atom: vector of keys
+
+(defn- sub! [k ^String s]
+  (let [v @*subs* i (.indexOf ^java.util.List v k)]
+    (if (neg? i) (do (swap! *subs* conj k) s) (seq-id i))))
+
+(defn- sub-or [k f]
+  (let [i (.indexOf ^java.util.List @*subs* k)]
+    (if (neg? i) (let [s (f)] (swap! *subs* conj k) s) (seq-id i))))
+
+(defn- part-name ^String [p]
+  (case (first p)
+    :ns (source-name (second p))
+    :anon "12_GLOBAL__N_1"
+    :cls (source-name (:name (cls (second p))))
+    :enum (source-name (:name (enm (second p))))))
+
+(defn- mangle-prefix
+  "The prefix of the parts as written inside N ... E: the longest prefix already substituted as its S_, then each
+  further part, every prefix a new substitution candidate."
+  ^String [parts]
+  (let [parts (vec parts)
+        n (count parts)
+        idx (fn [m] (.indexOf ^java.util.List @*subs* [:prefix (subvec parts 0 m)]))
+        best (loop [m n] (when (pos? m) (if (neg? (long (idx m))) (recur (dec m)) m)))
+        start (or best 0)]
+    (loop [i (inc start) out (if best (seq-id (idx best)) "")]
+      (if (> i n)
+        out
+        (let [s (str out (part-name (nth parts (dec i))))]
+          (swap! *subs* conj [:prefix (subvec parts 0 i)])
+          (recur (inc i) s))))))
+
+(defn path-of-type
+  "The scope path naming a class or enumeration type: its enclosing path and itself."
+  [t]
+  (case (:k t)
+    :class (conj (vec (:path (cls (:id t)))) [:cls (:id t)])
+    :enum (conj (vec (:path (enm (:id t)))) [:enum (:id t)])))
+
+(defn- mangle-named
+  "A class or enumeration type's name: a source name at the global scope, else N prefix E; a substitution candidate."
+  ^String [t]
+  (let [parts (path-of-type t)
+        k [:prefix parts]
+        i (.indexOf ^java.util.List @*subs* k)]
+    (cond
+      (not (neg? i)) (seq-id i)
+      (= 1 (count parts)) (do (swap! *subs* conj k) (part-name (first parts)))
+      :else (str "N" (mangle-prefix parts) "E"))))
+
+(declare mangle-type*)
+
+(defn- cvq ^String [t] (str (when (:v t) "V") (when (:c t) "K")))
+
+(defn- mangle-type* ^String [t]
+  (let [q (cvq t)
+        bare (unq t)
+        inner (fn []
+                (case (:k bare)
+                  :b (builtin-codes (:n bare))
+                  :class (mangle-named bare)
+                  :enum (mangle-named bare)
+                  :ptr (sub-or [:t bare] #(str "P" (mangle-type* (:to bare))))
+                  :ref (sub-or [:t bare] #(str "R" (mangle-type* (:to bare))))
+                  :rref (sub-or [:t bare] #(str "O" (mangle-type* (:to bare))))
+                  :arr (sub-or [:t bare] #(str "A" (:n bare) "_" (mangle-type* (:of bare))))
+                  :fn (sub-or [:t bare] #(str "F" (mangle-type* (:ret bare))
+                                              (if (and (empty? (:ps bare)) (not (:va bare))) "v" (apply str (map mangle-type* (:ps bare))))
+                                              (when (:va bare) "z") "E"))))]
+    (if (= "" q)
+      (inner)
+      (let [k [:t t] i (.indexOf ^java.util.List @*subs* k)]
+        (if (neg? i)
+          (let [s (str q (inner))] (swap! *subs* conj k) s)
+          (seq-id i))))))
+
+(defn- bare-params ^String [ps va]
+  (if (and (empty? ps) (not va)) "v" (str (apply str (map mangle-type* ps)) (when va "z"))))
+
+(defn- unqualified-name
+  "A function's unqualified name: its source name, an operator's code, C1/C2/D0/D1/D2 for the special members."
+  ^String [f variant]
+  (case (:kind f)
+    :ctor (str "C" (or variant 2))
+    :dtor (str "D" (or variant 2))
+    :conv (str "cv" (mangle-type* (:ret (:ty f))))
+    (if-let [op (:op f)]
+      (or (when (and (#{"+" "-" "&" "*"} op) (= 1 (+ (count (:ps (:ty f))) (if (:cls f) 1 0))) (not (:static f)))
+            (unary-op-codes op))
+          (op-codes op)
+          (fail :mangle "operator " op))
+      (source-name (:name f)))))
+
+(defn mangle-fn
+  "A function's mangled name (variant: 1 or 2 for a constructor's C1/C2, 0/1/2 for a destructor's D0/D1/D2)."
+  (^String [f] (mangle-fn f nil))
+  (^String [f variant]
+   (cond
+     (= :c (:linkage f)) (:name f)
+     (and (= "main" (:name f)) (empty? (:path f)) (not (:cls f))) "main"
+     :else
+     (binding [*subs* (atom [])]
+       (let [path (vec (:path f))
+             enc (if (empty? path)
+                   (str (when (:internal-l f) "L") (unqualified-name f variant))
+                   (let [pre (mangle-prefix path)]
+                     (str "N" (when (:cq f) "K") pre (unqualified-name f variant) "E")))]
+         (str "_Z" enc (bare-params (:ps (:ty f)) (:va (:ty f)))))))))
+
+(defn mangle-var
+  "A variable's mangled name at namespace or class scope (a global in the global namespace keeps its name; static: L)."
+  ^String [v]
+  (let [path (vec (:path v))]
+    (cond
+      (= :c (:linkage v)) (:name v)
+      (and (empty? path) (not (:internal-l v))) (:name v)
+      :else (binding [*subs* (atom [])]
+              (if (empty? path)
+                (str "_ZL" (source-name (:name v)))
+                (str "_ZN" (mangle-prefix path) (source-name (:name v)) "E"))))))
+
+(defn mangle-local-static
+  "A static local's name in the function f (Itanium §5.1.6: Z encoding E name, the discriminator _N from the second)."
+  ^String [f ^String nm ^long disc]
+  (let [fm (mangle-fn f)
+        enc (if (str/starts-with? fm "_Z") (subs fm 2) fm)]
+    (str "_ZZ" enc "E" (source-name nm) (cond (zero? disc) "" (< disc 11) (str "_" (dec disc)) :else (str "__" (dec disc) "_")))))
+
+(defn mangle-type-name
+  "The mangling of a class type alone (for _ZTV, _ZTI, _ZTS)."
+  ^String [t]
+  (binding [*subs* (atom [])] (mangle-type* t)))
