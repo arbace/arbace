@@ -419,6 +419,24 @@ covers what.
   branch, and its other members keep the code of the members they replace: Copyright (c) Oracle
   and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below), by the rule of B7; the rest of the file is Arbace's own.
+- Permissions, JAAS's core and PKI (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F4 (write-ahead)",
+  "As built: F2 (write-ahead)"; recorded by the rule of B7): the variants
+  `overlay/jdk/variants/Password.ae`, `PasswordCallback.ae`, `LoginContext.ae`, `Configuration.ae`,
+  `FilePermission.ae` (F4), `SignatureAccess.ae`, `X500Principal.ae`, `X500Name.ae`,
+  `SignatureUtil.ae`, `JceKeyProtector.ae`, `PKCS12KeyStore.ae`, `Sun.ae` and `SunEntriesPki.ae` (F2)
+  keep the jdk26u members they replace or add (https://github.com/openjdk/jdk26u at `baf63fb`, the
+  classes' files of `src/java.base/share/classes`) as repr/java converts them, with the changes they
+  name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below); the rest of those files, the variants `Subject.ae`,
+  `PortConfig.ae`, `RegisteredDomain.ae` and `OCSP.ae`, and
+  `overlay/jdk/java.base/jdk/internal/event/EventHelper.java` (with jdk26u's names and signatures),
+  `jdk/internal/jrt/PkiAccess.java` and `sun/security/provider/PkiServices.java` (its service class
+  names are jdk26u's providers') are Arbace's own. Their jdk26u sources join `jdk/forms/` (the
+  closure's files above) once `bin/jrt-convert update` has run: 86 files of permission-sources (69
+  of `src/java.base/share/classes`, 1 of `src/java.base/unix/classes`, 15 of
+  `src/jdk.security.auth/share/classes`, 1 of `src/java.logging/share/classes`) and the 2 security
+  message bundles the build's `CompileProperties` generates, and 219 of pki-sources (218 of
+  `src/java.base/share/classes`, 1 of `src/jdk.security.auth/share/classes`).
 - Other Go-build variants (J2G-SPEC §4.6; recorded by the rule of B7):
   `overlay/jdk/variants/AbstractChronology.ae`, `BitSet.ae`, `CRC32.ae`, `Collectors.ae`,
   `File.ae`, `FileHandler.ae`, `ParseUtil.ae`, `TimeZone.ae`, `TzdbZoneRulesProvider.ae`,
