@@ -140,6 +140,7 @@ oracle_host_id() {  # TOOL
     chez) oracle_scheme_id "${CHEZ:-chez}" --version /usr/lib/csv10.3.0/ta6le/petite.boot /usr/lib/csv10.3.0/ta6le/scheme.boot /usr/lib/csv10.3.0/ta6le/chez.boot ;;
     chibi) oracle_scheme_id "${CHIBI:-chibi-scheme}" -V ;;
     ghc) oracle_ghc_id ;;
+    rustc) oracle_rustc_id ;;
     *) echo "oracle: no identity recipe for $1" >&2; echo none ;;
   esac
 }
@@ -163,12 +164,25 @@ oracle_ghc_id() {  # GT9's :host-ids :ghc recipe (test/gate/crops/haskell.edn, s
       [ $m = 1 ] || echo "missing $g"
     done; } | sha256sum | cut -c1-64
 }
+oracle_rustc_id() {  # GT9's :host-ids :rustc recipe (test/gate/crops/llvm-rust.edn, steps.edn): `rustc --version -v` (all of it), the executable's
+  # SHA-256 through its links, then the SHA-256 of {sysroot}/lib/librustc_driver-*.so (the helper links to it); none without rustc
+  command -v rustc > "$TMPDIR/oracle-rustc.err" || { echo none; return; }
+  local d p m x
+  d=$(rustc --print sysroot 2>"$TMPDIR/oracle-rustc.err")
+  x=$(readlink -f "$(command -v rustc)")
+  { rustc --version -v 2>"$TMPDIR/oracle-rustc.err"
+    sha256sum < "$x" | cut -c1-64
+    m=0
+    for p in "$d"/lib/librustc_driver-*.so; do [ -f "$p" ] && { sha256sum < "$p" | cut -c1-64; m=1; }; done
+    [ $m = 1 ] || echo "missing $d/lib/librustc_driver-*.so"; } | sha256sum | cut -c1-64
+}
 oracle_host_version() {  # TOOL: its version line
   case $1 in
     gcc) gcc --version 2>"$TMPDIR/oracle-gcc.err" | head -1 ;;
     chez) "${CHEZ:-chez}" --version 2>&1 | head -1 ;;
     chibi) "${CHIBI:-chibi-scheme}" -V 2>&1 | head -1 ;;
     ghc) ghc --version 2>"$TMPDIR/oracle-ghc.err" | head -1 ;;
+    rustc) rustc --version 2>"$TMPDIR/oracle-rustc.err" | head -1 ;;
     *) echo unknown ;;
   esac
 }
