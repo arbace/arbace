@@ -863,3 +863,7 @@ choice of strategy). Nothing else of GHC was needed beyond the pinned tarball's 
    next, (a) at HF9.
 4. Deriving in Tier L (the libraries from source, HF10): the base library derives with `Generic`, `Data`, `Lift`
    in places; those instances become HF9's scope, noted here so the Tier S exit is not read as covering them.
+
+## Decided (2026-11-05, the user: HF4's proposals)
+
+HF4's four as recommended: $tag2con/$maxtag inlined until HF5; a haskell-front step, the samples essential and the nofib list in --full; DerivingVia and the strategy keywords next, Generic/Data/Lift at HF9; Tier S's exit does not cover Generic/Data/Lift.
