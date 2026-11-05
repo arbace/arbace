@@ -849,7 +849,7 @@ GHC's STG as from ours: a memory class, not the compiler's. Not covered yet: `n+
 in matches, `seq`, overloaded literal patterns at non-built-in types beyond `(==)` chains, string literals with characters
 beyond ASCII (`unpackCStringUtf8#`), `fromRational` literals at other than `Double` and `Float`, foreign imports, the
 derived instances' bindings (HF4), unboxed tuples (no Unarise work yet), the Typeable bindings (`$trModule`, `$tc`), and
-GHC's top-level floating.
+the desugarer's top-level dictionary bindings.
 
 **On HFS5 (port).** The two files follow GHC's algorithms and reproduce their output's shape where the judges show it,
 but they were written after the algorithms in this session's time, not translated line by line from the tarball's text;

@@ -535,3 +535,13 @@ smaller parts), each on a branch of its own, held for after the tag (the merge p
 - Alternatives: a line-by-line port first (HFS5 (a)) was weighed against getting the pipeline end to end in this session;
   the end-to-end slice was chosen so the run judge exists, and the port is proposed as a choice (port now, or close the
   judges' classes function by function).
+
+## 2026-11-05: HF5-HF6's first slice, later the same session (completing the entry above)
+
+- The same branch, after the entry above: lazy patterns (the elaborator keeps `~p`, the match compiler binds each variable
+  by a selector), a scrutinised variable's case binder in its alternatives, inlined unfoldings beta-reduced, the library
+  classes' dictionary constructors saturated, CorePrep's floats (out of a constructor's arguments, out of a case's
+  scrutinee, a CAF's arguments to the top level), shared failure handlers as join points (`letne`, `:j`, `(##)`), the STG
+  judge comparing free variables as sets. Final numbers: 9 of 9 programs run on hsi with GHC's stdout, the control failing;
+  Core 152 of 220 bindings of the typecheck samples; STG 62 of 83 bindings of the programs equal to GHC's `-O0` dumps;
+  `bin/repr-haskell typecheck-check` still 17 of 17 with the elaborator's changes, its control differing.
