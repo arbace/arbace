@@ -24,20 +24,29 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
-corpora=samples,synthetic only="" jobs=${HSI_JOBS:-3} record="" keep="" aot=""
+. "$root/bin/lib/hsi/records.bash"
+corpora=samples,synthetic only="" jobs=${HSI_JOBS:-3} record="" keep="" aot="" live=${HSI_LIVE:-} dump_only="" record_progs="" verify_progs="" sample=""
 while [ $# -gt 0 ]; do
   case $1 in
+    --live) live=1; shift ;;
+    --dump-only) dump_only=1; live=1; shift ;;
+    --record-progs) record_progs=1; live=1; shift ;;
+    --verify-progs) verify_progs=1; live=1; shift ;;
+    --sample) sample=$2; shift 2 ;;
     --corpus) corpora=$2; shift 2 ;;
     --only) if [[ $2 == @* ]]; then only=,$(grep -v '^#' "${2#@}" | grep . | tr '\n' ',' ); else only=,$2,; fi; shift 2 ;;
     --jobs) jobs=$2; shift 2 ;;
     --record) record=1; shift ;;
     --keep) keep=1; shift ;;
     --aot) aot=1; shift ;;
-    *) echo "usage: bin/hsi check [--corpus C,...] [--only ID,...|@FILE] [--jobs N] [--record] [--keep] [--aot]" >&2; exit 2 ;;
+    *) echo "usage: bin/hsi check [--corpus C,...] [--only ID,...|@FILE] [--jobs N] [--record] [--keep] [--aot] [--live] [--dump-only] [--record-progs] [--verify-progs [--sample N]]" >&2; exit 2 ;;
   esac
 done
 pin=$(cat "$root/tools/hsdump/GHC_VERSION")
-[ "$(ghc --numeric-version)" = "$pin" ] || { echo "hsi check: the host's GHC is not $pin" >&2; exit 1; }
+# GHC is needed only by --live (the helper dumps the programs; HSI_LIVE=1), --dump-only, --record-progs and --verify-progs: the libraries'
+# and the programs' STG are the records' otherwise (ORS12, bin/lib/hsi/records.bash)
+export live
+if [ -n "$live" ]; then [ "$(ghc --numeric-version)" = "$pin" ] || { echo "hsi check: the host's GHC is not $pin" >&2; exit 1; }; fi
 ref=$root/test/haskell/ref-ghc914.edn
 work=$root/.tmp/hsi/check
 # --aot (HE8, the first slice): each program built by bin/hsi aot build (its modules and the library closures a first
@@ -45,15 +54,18 @@ work=$root/.tmp/hsi/check
 # test/haskell/check-hsi-aot.edn
 [ -z "$aot" ] || work=$root/.tmp/hsi/check-aot
 rm -rf "$work"; mkdir -p "$work/res" "$work/out" "$work/run"
-hsi=$("$root/bin/hsi" build)
-libs=${HSI_LIBS:-$root/.tmp/hsi/dumps/stg:$root/.tmp/hsi/dumps-extra/stg:$root/.tmp/hsi/dumps-more/stg}
-"$root/bin/repr-haskell" helper >&2
+hsi=""; if [ -z "$dump_only" ] && [ -z "$verify_progs" ]; then hsi=$("$root/bin/hsi" build); fi
+if [ -n "$dump_only" ] || [ -n "$verify_progs" ]; then libs=""; else libs=$(hsi_libs) || exit 1; fi
 helper=$root/.tmp/hsdump/hsdump
-helper_hash=$(cat "$root"/tools/hsdump/*.hs "$root/tools/hsdump/GHC_VERSION" | sha256sum | cut -c1-64)
-libdir=$(ghc --print-libdir)
+helper_hash=$(hsr_helper_hash)
+libdir=""
+if [ -n "$live" ]; then "$root/bin/repr-haskell" helper >&2; libdir=$(ghc --print-libdir); fi
+progs_pack=""
+if [ -z "$live" ]; then progs_pack=$(hsi_progs_dir) || exit 1; fi  # (--verify-progs is live: it reads the pack itself)
+export progs_pack
 # the libraries' images (HES32 (a), HE4d): made once for the dumps as they are, every run loads them
 images=${HSI_IMAGE:-$root/.tmp/hsi/image}
-if [ "$images" != none ]; then
+if [ "$images" != none ] && [ -z "$dump_only" ] && [ -z "$verify_progs" ]; then
   ia=(); IFS=: read -r -a dirs <<< "$libs"
   for l in "${dirs[@]}"; do [ -d "$l" ] && ia+=(--lib "$l"); done
   "$hsi" image --out "$images" "${ia[@]}" >&2 || { echo "hsi check: hsi image failed" >&2; exit 1; }
@@ -113,6 +125,18 @@ if [ -n "$only" ]; then
 fi
 echo "== hsi check: $(wc -l < "$plan") programs, $jobs at a time" >&2
 
+# prog_key SRC MAIN FLAGS KIND: the program's key (what .tmp/hsi/progs/ID/KEY names and haskell-stg-progs's entries carry): its main
+# file, its flags, and for a test of several modules its directory's sources, then the helper's identity
+prog_key() {
+  local src=$1 main=$2 flags=$3 kind=$4
+  { echo "$flags $kind"; cat "$src/$main"
+    if [ "$kind" != plain ] && [ "$kind" != compile_and_run ]; then
+      (cd "$src" && find . -type f \( -name '*.hs' -o -name '*.lhs' -o -name '*.hs-boot' -o -name '*.c' -o -name '*.h' \) | LC_ALL=C sort | xargs sha256sum)
+    fi; } | sha256sum | cut -c1-16 | tr -d '\n'
+  printf -- '-%s\n' "${helper_hash:0:16}"
+}
+export -f prog_key
+
 one() {
   local id src main flags ropts name sin kind
   IFS=$'\037' read -r id src main flags ropts name sin kind <<< "$1"
@@ -124,23 +148,33 @@ one() {
     case $f in *.c|*.cmm|*.s|*.S|*.o|*.h|*.cpp|*.cc) ;; *) fl+=("$f") ;; esac; done; fi
   # the dump's key: the main file, the flags, the helper; a test of several modules: its directory's sources too
   local key prog
-  key=$( { echo "$flags $kind"; cat "$src/$main"
-           if [ "$kind" != plain ] && [ "$kind" != compile_and_run ]; then
-             (cd "$src" && find . -type f \( -name '*.hs' -o -name '*.lhs' -o -name '*.hs-boot' -o -name '*.c' -o -name '*.h' \) | LC_ALL=C sort | xargs sha256sum)
-           fi; } | sha256sum | cut -c1-16)-${helper_hash:0:16}
+  key=$(prog_key "$src" "$main" "$flags" "$kind")
   prog=$root/.tmp/hsi/progs/$id/$key
   local td=0 t0 t1
+  if [ ! -f "$prog/ok" ] && [ -z "$live" ]; then
+    # the record's STG (ORS12): an entry whose key is not this program's is STALE, an absent one UNRECORDED (both :unrecorded, in no class)
+    local man=$root/test/haskell/records/haskell-stg-progs.tsv pk
+    pk=$(awk -F'\t' -v p="$id/" -v k="$key" 'index($1, p) == 1 {n++; if ($2 != k) bad = 1} END {print (n == 0 ? "none" : (bad ? "stale" : "ok"))}' "$man")
+    if [ "$pk" != ok ]; then
+      echo "{:id \"$id\" :result :unrecorded :error \"$([ "$pk" = none ] && echo UNRECORDED || echo STALE): no current entry in haskell-stg-progs (bin/hsi check --live --dump-only --record-progs)\"}" > "$res"; return 0
+    fi
+    if [ -f "$progs_pack/$id/dump-failed.txt" ]; then
+      echo "{:id \"$id\" :result :no-dump :error \"$(cat "$progs_pack/$id/dump-failed.txt")\"}" > "$res"; return 0
+    fi
+    rm -rf "$root/.tmp/hsi/progs/$id"; mkdir -p "$prog"; cp -r "$progs_pack/$id/stg" "$prog/stg"; touch "$prog/ok"
+  fi
   if [ ! -f "$prog/ok" ]; then
     rm -rf "$root/.tmp/hsi/progs/$id"; mkdir -p "$prog"
     t0=$(date +%s.%N)
     if ! (cd "$src" && timeout 300 "$helper" stg -o "$prog/stg" --libdir "$libdir" --helper-hash "sha256:$helper_hash" --ghc -O0 \
             ${fl[@]+"${fl[@]}"} -outputdir "$prog/obj" --files "$main") > "$prog/dump.log" 2>&1; then
       local e; e=$( (grep -m1 -E 'error' "$prog/dump.log" || tail -n 1 "$prog/dump.log") | cut -c1-160 | sed 's/\\/\\\\/g; s/"/\\"/g')
-      echo "{:id \"$id\" :result :no-dump :error \"$e\"}" > "$res"; rm -rf "$prog/obj"; return 0
+      echo "{:id \"$id\" :result :no-dump :error \"$e\"}" > "$res"; printf '%s' "$e" > "$prog/dump-failed.txt"; rm -rf "$prog/obj"; return 0
     fi
     t1=$(date +%s.%N); td=$(printf '%.2f' "$(echo "$t1 - $t0" | bc)")
     rm -rf "$prog/obj"; touch "$prog/ok"
   fi
+  [ -z "$dump_only" ] || { echo "{:id \"$id\" :result :dumped :dump $td}" > "$res"; return 0; }
   local la=() l
   IFS=: read -r -a dirs <<< "$libs"
   for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
@@ -222,7 +256,78 @@ one() {
   [ -n "$keep" ] || grep -q "^$id " "$root/test/haskell/hsi-controls.txt" || rm -f "$o.stdout" "$o.stderr"
 }
 export -f one
+export dump_only
+
+# ORS12: --verify-progs [--sample N]: N programs (default all) of the plan (evenly spread) dumped again by the helper into .tmp/hsi/check/verify and compared with the
+# pack's STG file for file (ORS6 (a)'s verdict), and the crossed pair (the first program's live dump against the last one's record)
+verify_progs_run() {
+  local n=$1 total ids=() i j row id src main flags ropts name sin kind fl f d ndiff=0 cmpd=0 first="" last="" key
+  mapfile -t rows < "$plan"; total=${#rows[@]}
+  [ "$n" -lt "$total" ] || n=$total
+  for ((i = 0; i < n; i++)); do ids+=("${rows[$(( i * total / n ))]}"); done
+  for row in "${ids[@]}"; do
+    IFS=$'\037' read -r id src main flags ropts name sin kind <<< "$row"
+    [ "$main" != - ] || continue
+    fl=(); if [ "$flags" != - ]; then for f in $flags; do case $f in *.c|*.cmm|*.s|*.S|*.o|*.h|*.cpp|*.cc) ;; *) fl+=("$f") ;; esac; done; fi
+    d=$work/verify/${id//\//_}; rm -rf "$d"; mkdir -p "$d"
+    key=$(prog_key "$src" "$main" "$flags" "$kind")
+    pk=$(awk -F'\t' -v p="$id/" -v k="$key" 'index($1, p) == 1 {n++; if ($2 != k) bad = 1} END {print (n == 0 ? "none" : (bad ? "stale" : "ok"))}' "$root/test/haskell/records/haskell-stg-progs.tsv")
+    if [ "$pk" != ok ]; then echo "verify: $id: $pk"; ndiff=$((ndiff + 1)); cmpd=$((cmpd + 1)); continue; fi
+    cmpd=$((cmpd + 1))
+    if (cd "$src" && timeout 300 "$helper" stg -o "$d/stg" --libdir "$libdir" --helper-hash "sha256:$helper_hash" --ghc -O0 \
+          ${fl[@]+"${fl[@]}"} -outputdir "$d/obj" --files "$main") > "$d/dump.log" 2>&1; then
+      if [ -f "$progs_dir/$id/dump-failed.txt" ]; then echo "verify: $id: DIFFERS (recorded as failing, now compiles)"; ndiff=$((ndiff + 1))
+      elif diff -r "$d/stg" "$progs_dir/$id/stg" > "$d/diff.txt" 2>&1; then echo "verify: $id: equal"
+      else echo "verify: $id: DIFFERS ($d/diff.txt)"; ndiff=$((ndiff + 1)); fi
+      [ -n "$first" ] || first=$d/stg; last=$progs_dir/$id/stg
+    else
+      if [ -f "$progs_dir/$id/dump-failed.txt" ]; then echo "verify: $id: equal (fails as recorded)"
+      else echo "verify: $id: DIFFERS (fails, recorded as compiling)"; ndiff=$((ndiff + 1)); fi
+    fi
+  done
+  oracle_verdict ghc "$root/test/haskell/records/haskell-stg-progs.tsv" "$ndiff" "$cmpd" || return 1
+  if [ -n "$first" ] && [ -n "$last" ] && [ "$first" != "$last" ]; then
+    if diff -r "$first" "$last" > "$work/verify/crossed.diff" 2>&1; then echo "verify: FAILED: the crossed pair is equal: control not judged"; return 1
+    else echo "verify: the crossed pair differs (control passed)"; fi
+  fi
+}
+# --record-progs: each program of the plan (live, dumped by the run just made or the cache) packed into haskell-stg-progs; a program
+# not in the plan keeps its members
+record_progs_run() {
+  local stage=$root/.tmp/hsi/records/progs name man d row id src main flags ropts nm sin kind key prog n=0
+  name=$(oracle_pin_name "$hsi_progs_pin"); man=$(oracle_manifest "$hsi_progs_pin")
+  rm -rf "$stage"; mkdir -p "$stage/$name"; : > "$stage/ids"
+  if [ -f "$man" ] && [ -f "$hsi_progs_pin" ] && d=$(oracle_unpack "$hsi_progs_pin" 2>"$TMPDIR/hsi-records.err"); then
+    cp -a "$d/$name/." "$stage/$name/"; awk -F'\t' '!/^#/ && NF {print $1 "\t" $2}' "$man" > "$stage/ids"
+  fi
+  while IFS= read -r row; do
+    IFS=$'\037' read -r id src main flags ropts nm sin kind <<< "$row"
+    [ "$main" != - ] || continue
+    key=$(prog_key "$src" "$main" "$flags" "$kind"); prog=$root/.tmp/hsi/progs/$id/$key
+    awk -F'\t' -v p="$id/" 'index($1, p) != 1' "$stage/ids" > "$stage/ids.new"; mv "$stage/ids.new" "$stage/ids"
+    rm -rf "${stage:?}/$name/$id"
+    if [ -f "$prog/ok" ]; then
+      mkdir -p "$stage/$name/$id/stg"; cp -r "$prog/stg/." "$stage/$name/$id/stg/"
+      (cd "$stage/$name" && find "$id/stg" -type f | LC_ALL=C sort) | while IFS= read -r m; do printf '%s\t%s\n' "$m" "$key"; done >> "$stage/ids"
+    elif [ -f "$prog/dump-failed.txt" ]; then
+      mkdir -p "$stage/$name/$id"; cp "$prog/dump-failed.txt" "$stage/$name/$id/dump-failed.txt"; printf '%s/dump-failed.txt\t%s\n' "$id" "$key" >> "$stage/ids"
+    else echo "record: $id has no dump (not run)" >&2; continue; fi
+    n=$((n + 1))
+  done < "$plan"
+  [ "$n" -gt 0 ] || { echo "record: no program to record" >&2; return 1; }
+  oracle_make "$hsi_progs_pin" "$stage" "$stage/ids" "bin/hsi check --live --dump-only --record-progs --corpus $corpora${only:+ --only ...}" ghc || return 1
+  rm -rf "$stage"
+}
+if [ -n "$verify_progs" ]; then
+  progs_dir=$(hsi_progs_dir) || exit 1
+  verify_progs_run "${sample:-100000}"; exit $?
+fi
 tr '\n' '\0' < "$plan" | xargs -0 -P "$jobs" -I{} bash -c 'one "$1"' _ {}
+[ -z "$record_progs" ] || record_progs_run || exit 1
+if [ -n "$dump_only" ]; then
+  echo "hsi check: $(cat "$work"/res/* | grep -c ':result :dumped') programs dumped, $(cat "$work"/res/* | grep -c ':result :no-dump') did not compile (their errors recorded too)"
+  exit 0
+fi
 
 out=$work/results.edn
 {
@@ -235,7 +340,7 @@ out=$work/results.edn
   cat "$work"/res/* | sort
 } > "$out"
 total=$(grep -c '^{' "$out" || true)
-for r in pass fail hsi skipped no-dump no-ref; do
+for r in pass fail hsi skipped no-dump no-ref unrecorded dumped; do
   echo "hsi check: $r $(grep -c ":result :$r" "$out" || true)"
 done
 echo "hsi check: $total programs ($out)"
