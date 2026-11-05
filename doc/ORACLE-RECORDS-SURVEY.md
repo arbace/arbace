@@ -1350,3 +1350,7 @@ the essential list's 33 files are 58 KB xz, 1.8 KB a file) about 8 to 12 MB the 
   - Options: (a) as built: C's `:gcc` stays on them until the lowering is retired in favour of `cpp-check`'s ci run; (b) move the gcc half to the oracle tier now (the lowering step then checks forms and the lowered C's reading by repr/c and ci's checker); (c) record gcc's compile of the lowered C (it changes with every lowering change: not recordable).
   - Costs: (a) none, C's agent takes `:gcc` out of its own steps; (b) the lowering's gate step loses its gcc and run levels (ci's run in `cpp-check` covers the run); (c) none works.
   - *Recommended: (a)* now, (b) once `cpp-check-essential` covers every program of `essential-lower.txt`.
+
+## Decided (2026-11-05, the user: ORS24-ORS27)
+
+ORS24 (a), ORS25 (a) for OCaml; ORS26 (b): C++'s night records gxx-dg-run, the samplings and the essential and sampled dump lists (~25 MB), the rest live in the oracle tier; ORS27: :gcc kept on cpp-lower* now, its gcc half to the oracle tier once cpp-check-essential covers essential-lower.txt.
