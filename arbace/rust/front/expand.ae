@@ -36,11 +36,12 @@
 (def ^:dynamic *macros* nil)   ; atom: name -> {:arms [...] :builtin B :name}
 (def ^:dynamic *std* nil)      ; name -> macro def (std's)
 (def ^:private mark-counter (atom 0))
+(def ^:dynamic *frags* nil)    ; atom: placeholder name -> the fragment's tree (names unique in a crate's expansion)
 (defn- fresh-mark [] (swap! mark-counter inc))
 
 (defn- root-src ^Src [] (:src *root*))
 
-(declare unesc remark-1 rep-vars format-args expand-derives items->stream items-text concat-text attr-name)
+(declare cfg-item include-expr unesc remark-1 rep-vars format-args expand-derives items->stream items-text concat-text attr-name)
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Tokens
@@ -116,9 +117,13 @@
           (case (first tr)
             Token (let [[_ tk sp] tr m (apply hash-map (rest tk)) s (:span m)
                         sp (keyword (name sp))]
+                    (if-let [fr (let [k (:kind m)] (and *frags* (seq? k) (= 'Ident (first k)) (get @*frags* (second k))))]
+                      [fr]
                     (if-let [^Tok rt (and (nil? mark) (vector? s) (= 4 (count s)) (root-at s))]
                       [(titem rt 0)]
-                      [(titem (dump-kind->tok (:kind m) sp) (or mark (span-mark s)))]))
+                      [(cond-> (titem (dump-kind->tok (:kind m) sp) (or mark (span-mark s)))
+                         (and (seq? s) (pos? (long (nth s 2))))
+                         (assoc :orig (root-at (vec (take 4 (drop 2 s))))))])))
             Delimited (let [[_ ds dsp delim ts] tr
                             dm (apply hash-map (rest ds)) spm (apply hash-map (rest dsp))
                             kids (dump-tts->items (second ts) mark)]
@@ -144,7 +149,8 @@
 
 (defn- remark-1 [it mark]
   (let [^Tok t (:t it)]
-    (titem (lx/tok (.-kind t) -1 -1 (.-sym t) (.-x t) (.-y t) (.-z t) (.-sp t)) mark)))
+    (assoc (titem (lx/tok (.-kind t) -1 -1 (.-sym t) (.-x t) (.-y t) (.-z t) (.-sp t)) mark)
+           :orig (if (>= (.-lo t) 0) t (:orig it)))))
 
 (defn text->items
   "Rust text as foreign items of MARK (a builtin's template); identifiers __rf_frag_N replaced by (frags N)"
@@ -167,7 +173,7 @@
                       (recur (+ i 2) (conj out (titem (ftok :Ident "$crate" false nil 0 :Alone) mark)))
                       (and (= k :Ident) (str/starts-with? (str (.-sym t)) "__rf_frag_"))
                       (recur (inc i) (conj out (get frags (Long/parseLong (subs (.-sym t) 10)))))
-                      :else (recur (inc i) (conj out (titem (lx/tok k -1 -1 (.-sym t) (.-x t) (.-y t) (.-z t) (.-sp t)) mark))))))))]
+                      :else (recur (inc i) (conj out (titem (lx/tok k -1 -1 (.-sym t) (.-x t) (.-y t) (.-z t) :Alone) mark))))))))]
       (conv 0 (dec (alength toks))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -191,24 +197,25 @@
         _ (.append sb "\n")
         pos (long-array [(inc n0)])
         marks (java.util.ArrayList.)
-        frags (atom {})
         out (java.util.ArrayList.)
         starts (java.util.ArrayList.)
-        place (fn [^String text kind sym x y z sp mark]
+        origs (java.util.ArrayList.)
+        place (fn [^String text kind sym x y z sp mark ^Tok orig]
                 (let [lo (aget pos 0) n (.codePointCount text 0 (.length text))]
                   (.append sb text) (.append sb " ")
-                  (dotimes [_ (inc n)] (.add marks (Long/valueOf (long mark))))
+                  (dotimes [_ (inc n)] (.add marks (Long/valueOf (long mark))) (.add origs orig))
                   (aset pos 0 (+ lo n 1))
                   (lx/tok kind lo (+ lo n) sym x y z sp)))
         add-item (fn [it]
                    (cond
-                     (:frag it) (let [nm (str "__rf_frag_" (count @frags))]
-                                  (swap! frags assoc nm (:ast it))
-                                  (.add out (place nm :Ident nm false nil 0 :Alone 0)))
+                     (:frag it) (let [nm (str "__rf_g" (count @*frags*))]
+                                  (swap! *frags* assoc nm it)
+                                  (.add out (place nm :Ident nm false nil 0 :Alone 0 nil)))
                      :else (let [^Tok t (:t it)]
                              (if (and (>= (.-lo t) 0) (zero? (long (:mark it))))
                                (.add out t)
-                               (.add out (place (tok-text t) (.-kind t) (.-sym t) (.-x t) (.-y t) (.-z t) (.-sp t) (:mark it)))))))]
+                               (.add out (place (tok-text t) (.-kind t) (.-sym t) (.-x t) (.-y t) (.-z t) (.-sp t) (:mark it)
+                                                 (if (>= (.-lo t) 0) t (:orig it))))))))]
     (doseq [it items]
       (.add starts (Long/valueOf (.size out)))
       (let [fl (flat [it] (java.util.ArrayList.))]
@@ -225,7 +232,7 @@
           (cond (contains? open-close k) (.add stk (Long/valueOf i))
                 (contains? #{:CloseParen :CloseBrace :CloseBracket} k)
                 (let [o (long (.remove stk (dec (.size stk))))] (aset mt (int o) (int i)) (aset mt i (int o))))))
-      {:src (lx/source (str sb)) :toks toks :mt mt :n0 n0 :marks (long-array (map long marks)) :frags @frags
+      {:src (lx/source (str sb)) :toks toks :mt mt :n0 n0 :marks (long-array (map long marks)) :origs (.toArray origs)
        :starts (vec starts) :eof (dec cnt)})))
 
 (defn- mark-at ^long [ctx ^long pos]
@@ -234,11 +241,23 @@
 
 (defn- foreign-span [m] (list 'span "<expansion>" 0 0 0 0 m))
 
-(defn- cspan [ctx ^long lo ^long hi]
+(defn- orig-at ^Tok [ctx ^long pos]
+  (let [n0 (long (:n0 ctx)) ^objects os (:origs ctx) i (- pos n0 1)]
+    (when (and (>= i 0) (< i (alength os))) (aget os i))))
+
+(defn- cspan
+  "A span out of an assembled array: the root's [l1 c1 l2 c2]; a foreign one (span \"<expansion>\" l1 c1 l2 c2 M), at
+  the root's position its first and last tokens came from when they did (a user's macro_rules!), else 0s"
+  [ctx ^long lo ^long hi]
   (let [n0 (long (:n0 ctx))]
     (cond (and (zero? lo) (zero? hi)) nil
           (and (< lo n0) (<= hi n0)) (lx/span-vec (:src ctx) lo hi)
-          :else (foreign-span (mark-at ctx (max lo (inc n0)))))))
+          :else (let [m (mark-at ctx (max lo (inc n0)))
+                      ^Tok a (orig-at ctx lo) ^Tok b (orig-at ctx (max lo (dec hi)))]
+                  (if (and a b)
+                    (let [[l1 c1] (lx/span-vec (root-src) (.-lo a) (.-hi a)) [_ _ l2 c2] (lx/span-vec (root-src) (.-lo b) (.-hi b))]
+                      (list 'span "<expansion>" l1 c1 l2 c2 m))
+                    (foreign-span m))))))
 
 (defn- tok-kind-out [^Tok t]
   (case (.-kind t)
@@ -276,20 +295,20 @@
                     (let [segs (:segments (apply hash-map (rest (nth k 2 nil))))]
                       (when (= 1 (count segs))
                         (let [idf (:ident (apply hash-map (rest (first segs))))]
-                          (when (str/starts-with? (str (second idf)) "__rf_frag_") (second idf)))))))
+                          (when (str/starts-with? (str (second idf)) "__rf_g") (second idf)))))))
       Pat (let [k (nth x 2 nil)]
             (when (and (seq? k) (= 'Ident (first k)))
               (let [idf (nth k 2 nil)]
-                (when (and (seq? idf) (str/starts-with? (str (second idf)) "__rf_frag_")) (second idf)))))
+                (when (and (seq? idf) (str/starts-with? (str (second idf)) "__rf_g")) (second idf)))))
       nil)))
 
 (defn cout
   "The parser's tree out of an assembled array, as the dump writes it, the fragments put back"
   [ctx x]
-  (let [^Src src (:src ctx) ed (long (:ed *root*)) frags (:frags ctx)]
+  (let [^Src src (:src ctx) ed (long (:ed *root*)) frags @*frags*]
     (letfn [(o [x]
               (cond (seq? x) (let [y (apply list (map o x))]
-                               (if-let [nm (frag-name y)] (get frags nm y) y))
+                               (if-let [nm (frag-name y)] (if-let [f (get frags nm)] (:ast f) y) y))
                     (vector? x) (mapv o x)
                     (instance? Sp x) (cspan ctx (.-lo ^Sp x) (.-hi ^Sp x))
                     (instance? Id x) (let [^Id i x ^Sp s (.-span i)]
@@ -557,8 +576,24 @@
       "line" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Integer :symbol (str (first (:span call))) :suffix (list 'Some "u32"))) :span (foreign-span m) :attrs [])}
       "column" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Integer :symbol (str (second (:span call))) :suffix (list 'Some "u32"))) :span (foreign-span m) :attrs [])}
       "file" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (:file *root*) :suffix 'None)) :span (foreign-span m) :attrs [])}
+      "include" {:ast (include-expr input)}
       "concat" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (concat-text input) :suffix 'None)) :span (foreign-span m) :attrs [])}
       (throw (ex-info (str "expand: the builtin " nm " is not taken") {:expand true})))))
+
+(defn include-expr
+  "include! in an expression's place: the file (relative to the root's directory) parsed as one expression, its spans
+  written (span \"<include>\" l1 c1 l2 c2 0)"
+  [input]
+  (let [[lit] (str-lit-of (first input))
+        f (File. (.getParentFile (.getAbsoluteFile (File. ^String (:file *root*)))) ^String lit)
+        src (lx/source (slurp f))
+        {:keys [tree toks mt]} (binding [ps/*errs* (java.util.ArrayList.)] (ps/parse-expr-file src (:ed *root*)))
+        e (nat/out tree src toks mt (:ed *root*))]
+    (letfn [(w [x] (cond (and (vector? x) (= 4 (count x)) (every? integer? x)) (apply list 'span "<include>" (conj x 0))
+                         (seq? x) (apply list (map w x))
+                         (vector? x) (mapv w x)
+                         :else x))]
+      (w e))))
 
 (defn items->stream [items]
   (let [ctx (assemble items)] (cstream ctx 0 (:eof ctx))))
@@ -598,7 +633,7 @@
     (dump-tts->items (second (fget args :tokens)) nil)))
 
 (def ^:private std-builtins #{"format_args" "format_args_nl" "const_format_args" "panic" "unreachable" "assert" "stringify"
-                              "line" "column" "file" "concat"})
+                              "line" "column" "file" "concat" "include"})
 
 (declare expand-form)
 
@@ -643,6 +678,8 @@
 
 (defn- expand-item [it]
   (cond
+    (nil? (cfg-item it)) []
+    (not (identical? it (cfg-item it))) (expand-item (cfg-item it))
     (item-kind-mac? it) (vec (mapcat expand-item (expand-mac (second (fget it :kind)) :items)))
     :else (let [[it' derived] (expand-derives it)]
             (into [(expand-form it')] (mapcat expand-item derived)))))
@@ -694,23 +731,24 @@
   (let [acc (atom {})]
     (letfn [(walk [x]
               (cond (seq? x)
-                    (do (when (and (= 'Item (first x)) (seq? (fget x :kind)) (= 'MacroDef (first (fget x :kind))))
+                    (do (when (and (= 'Item (first x)) (= :attrs (second x)) (seq? (fget x :kind)) (= 'MacroDef (first (fget x :kind))))
                           (let [[_ idf md] (fget x :kind)
                                 toks (second (fget (fget md :body) :tokens))]
-                            (swap! acc assoc (second idf) {:name (second idf) :arms (macro-arms (dump-tts->items toks 0))})))
+                            (swap! acc assoc (second idf) {:name (second idf) :arms (macro-arms (dump-tts->items toks nil))})))
                         (doseq [y x] (walk y)))
                     (vector? x) (doseq [y x] (walk y))))]
       (walk crate))
     @acc))
 
-(defn- prelude-items [ed]
+(defn- prelude-items [ed krate]
   (let [m 1]
-    [(list 'Item :attrs [] :span nil :vis (list 'Visibility :kind 'Inherited :span nil) :kind (list 'ExternCrate 'None (id-form "std" m)))
+    [(list 'Item :attrs [] :span nil :vis (list 'Visibility :kind 'Inherited :span nil) :kind (list 'ExternCrate 'None (id-form krate m)))
      (list 'Item :attrs [(list 'Attribute :kind (list 'Normal (list 'NormalAttr :item (list 'AttrItem :unsafety 'Default :path (list 'Path :span nil :segments [(list 'PathSegment :ident (id-form "prelude_import" m) :args 'None)]) :args 'Empty :span nil)))
                                :style 'Outer :span nil)]
            :span nil :vis (list 'Visibility :kind 'Inherited :span nil)
            :kind (list 'Use (list 'UseTree :prefix (list 'Path :span nil :segments (mapv (fn [s] (list 'PathSegment :ident (id-form s m) :args 'None))
-                                                                                          ["std" "prelude" (str "rust_" ed)]))
+                                                                                          (cond->> [krate "prelude" (str "rust_" ed)]
+                                                                                            (= ed 2015) (into ["{{root}}"]))))
                                   :kind (list 'Glob nil))))]))
 
 (defn expand-file
@@ -724,12 +762,13 @@
         crate (nat/out tree src toks mt ed)]
     (binding [*root* {:src src :toks toks :mt mt :by-span by-span :ed ed :file file}
               *std* std-macros
-              *macros* (atom {})]
+              *macros* (atom {})
+              *frags* (atom {})]
       (reset! mark-counter 1)
       (reset! *macros* (collect-user-macros crate))
       (let [items (fget crate :items)
             no-std (some #(= "no_std" (attr-name %)) (fget crate :attrs))
-            items (if no-std items (into (prelude-items ed) items))]
+            items (into (prelude-items ed (if no-std "core" "std")) items)]
         (fset crate :items (expand-form items))))))
 
 (defn- attr-name [a]

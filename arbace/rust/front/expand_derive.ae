@@ -1,9 +1,271 @@
-;; The builtin derives: rustc_builtin_macros/src/deriving/{mod,generic/mod,debug,clone,cmp/*,default,hash}.rs, rustc
-;; 1.99.1 at 58cf8f9c3 (MIT OR Apache-2.0, LICENSE.md); part of arbace.rust.front.expand.
+;; The builtin derives: rustc_builtin_macros/src/deriving/{mod,generic/mod,debug,clone,default,hash,cmp/{eq,partial_eq,
+;; partial_ord,ord}}.rs, rustc 1.99.1 at 58cf8f9c3 (MIT OR Apache-2.0, LICENSE.md): the shapes of their expansions
+;; written as Rust text that the native parser reads (paths through $crate, as cx.std_path builds them; the fields'
+;; types put in as fragments); part of arbace.rust.front.expand.
 
 (in-ns 'arbace.rust.front.expand)
 
+(defn- derive-names
+  "The traits of an item's #[derive(...)] attributes, in order"
+  [attrs]
+  (vec (mapcat (fn [a]
+                 (when (= "derive" (attr-name a))
+                   (let [item (fget (second (fget a :kind)) :item)
+                         toks (second (fget (second (fget item :args)) :tokens))]
+                     (for [t toks :let [k (fget (second t) :kind)] :when (and (seq? k) (= 'Ident (first k)))] (second k)))))
+               attrs)))
+
+(defn- variant-shape
+  "VariantData as [:named [[name ty]...]] [:tuple [ty...]] [:unit]"
+  [data]
+  (cond (= '(Unit) data) [:unit]
+        (and (seq? data) (= 'Unit (first data))) [:unit]
+        (and (seq? data) (= 'Tuple (first data))) [:tuple (mapv #(fget % :ty) (second data))]
+        (and (seq? data) (= 'Struct (first data))) [:named (mapv (fn [f] [(second (second (fget f :ident))) (fget f :ty)]) (fget data :fields))]
+        :else [:unit]))
+
+(defn- simple-path-name [ty]
+  ;; is_simple_path: a path of one segment without arguments
+  (let [k (fget ty :kind)]
+    (when (and (seq? k) (= 'Path (first k)) (= 'None (second k)))
+      (let [segs (fget (nth k 2) :segments)]
+        (when (and (= 1 (count segs)) (= 'None (fget (first segs) :args)))
+          (second (fget (first segs) :ident)))))))
+
+(defn- derive-text
+  "One derive's impls as text, the fields' types as fragments (frags: an atom of N -> {:frag :ty :ast})"
+  [trait {:keys [kind name tparams shape variants copy? ord?]} frags]
+  (let [fr (fn [ty] (let [n (count @frags)] (swap! frags assoc n {:frag :ty :ast ty}) (str "__rf_frag_" n)))
+        self-ty (if (seq tparams) (str name "<" (str/join ", " tparams) ">") name)
+        gens (fn [bound] (if (seq tparams) (str "<" (str/join ", " (map #(str % ": " bound) tparams)) ">") ""))
+        head (fn [attrs unsafe? path bound body]
+               (str "#[automatically_derived] " attrs (if unsafe? "unsafe " "") "impl" (gens bound) " " path " for " self-ty " {" body "}\n"))
+        asserts (fn [path fields-tys]
+                  (let [seen (atom #{})]
+                    (apply str (for [ty fields-tys
+                                     :let [nm (simple-path-name ty)]
+                                     :when (or (nil? nm) (let [new? (not (@seen nm))] (swap! seen conj nm) new?))]
+                                 (str "let _: " path "<" (fr ty) ">; ")))))
+        all-tys (if (= kind :struct)
+                  (let [[k fs] shape] (case k :named (map second fs) :tuple fs []))
+                  (mapcat (fn [[_ [k fs]]] (case k :named (map second fs) :tuple fs [])) variants))
+        fields (fn [[k fs]] (case k :named (map first fs) :tuple (map str (range (count fs))) []))
+        pat (fn [vname [k fs] prefix]
+              (case k
+                :named (str vname " { " (str/join ", " (map-indexed (fn [i [f _]] (str f ": " prefix i)) fs)) " }")
+                :tuple (str vname "(" (str/join ", " (map-indexed (fn [i _] (str prefix i)) fs)) ")")
+                vname))
+        ref-last (fn [xs] (map-indexed (fn [i x] (if (= i (dec (count xs))) (str "&" x) x)) xs))]
+    (case trait
+      "Debug"
+      (let [dbg (fn [nm [k fs :as sh] vals]
+                  (let [n (count vals)]
+                    (case k
+                      :unit (str "$crate::fmt::Formatter::write_str(f, \"" nm "\")")
+                      :tuple (if (<= n 5)
+                               (str "$crate::fmt::Formatter::debug_tuple_field" n "_finish(f, \"" nm "\", " (str/join ", " (ref-last vals)) ")")
+                               (str "{ let values: &[&dyn $crate::fmt::Debug] = &[" (str/join ", " (ref-last vals)) "]; $crate::fmt::Formatter::debug_tuple_fields_finish(f, \"" nm "\", values) }"))
+                      :named (if (<= n 5)
+                               (str "$crate::fmt::Formatter::debug_struct_field" n "_finish(f, \"" nm "\", "
+                                    (str/join ", " (map (fn [f v] (str "\"" f "\", " v)) (map first fs) (ref-last vals))) ")")
+                               (str "{ let names: &'static _ = &[" (str/join ", " (map #(str "\"" (first %) "\"") fs)) "]; "
+                                    "let values: &[&dyn $crate::fmt::Debug] = &[" (str/join ", " (ref-last vals)) "]; "
+                                    "$crate::fmt::Formatter::debug_struct_fields_finish(f, \"" nm "\", names, values) }")))))
+            body (if (= kind :struct)
+                   (dbg name shape (map #(str "&self." %) (fields shape)))
+                   (if (every? #(= :unit (first (second %))) variants)
+                     (str "$crate::fmt::Formatter::write_str(f, match self { "
+                          (str/join " " (map (fn [[v _]] (str name "::" v " => \"" v "\",")) variants)) " })")
+                     (str "match self { "
+                          (str/join " " (map (fn [[v sh]] (str (pat (str name "::" v) sh "__self_") " => "
+                                                               (dbg v sh (map #(str "__self_" %) (range (count (fields sh))))) ","))
+                                             variants))
+                          " }")))]
+        (head "" false "$crate::fmt::Debug" "$crate::fmt::Debug"
+              (str "#[inline] fn fmt(&self, f: &mut $crate::fmt::Formatter) -> $crate::fmt::Result { " body " }")))
+      "Clone"
+      (if (and copy? (empty? tparams))
+        (str (head "#[doc(hidden)] " true "$crate::clone::TrivialClone" "$crate::clone::Clone" " ")
+             (head "" false "$crate::clone::Clone" "$crate::clone::Clone"
+                   (str "#[inline] fn clone(&self) -> " self-ty " { " (asserts "$crate::clone::AssertParamIsClone" all-tys) "*self }")))
+        (let [cl (fn [ctor [k fs :as sh] vals]
+                   (case k
+                     :unit ctor
+                     :tuple (str ctor "(" (str/join ", " (map #(str "$crate::clone::Clone::clone(" % ")") vals)) ")")
+                     :named (str ctor " { " (str/join ", " (map (fn [f v] (str f ": $crate::clone::Clone::clone(" v ")")) (map first fs) vals)) " }")))
+              body (if (= kind :struct)
+                     (cl name shape (map #(str "&self." %) (fields shape)))
+                     (str "match self { "
+                          (str/join " " (map (fn [[v sh]] (str (pat (str name "::" v) sh "__self_") " => "
+                                                               (cl (str name "::" v) sh (map #(str "__self_" %) (range (count (fields sh))))) ","))
+                                             variants))
+                          " }"))]
+          (head "" false "$crate::clone::Clone" "$crate::clone::Clone"
+                (str "#[inline] fn clone(&self) -> " self-ty " { " body " }"))))
+      "Copy" (head "" false "$crate::marker::Copy" "$crate::marker::Copy" " ")
+      "PartialEq"
+      (let [eqs (fn [as bs] (if (empty? as) "true" (str/join " && " (map #(str %1 " == " %2) as bs))))
+            body (if (= kind :struct)
+                   (eqs (map #(str "self." %) (fields shape)) (map #(str "other." %) (fields shape)))
+                   (let [with (filter #(seq (fields (second %))) variants)
+                         discr "let __self_discr = $crate::intrinsics::discriminant_value(self); let __arg1_discr = $crate::intrinsics::discriminant_value(other); "]
+                     (cond
+                       (empty? with) (str discr "__self_discr == __arg1_discr")
+                       :else (str discr "__self_discr == __arg1_discr && match (self, other) { "
+                                  (str/join " " (map (fn [[v sh]] (let [n (count (fields sh))]
+                                                                    (str "(" (pat (str name "::" v) sh "__self_") ", " (pat (str name "::" v) sh "__arg1_") ") => "
+                                                                         (eqs (map #(str "__self_" %) (range n)) (map #(str "__arg1_" %) (range n))) ",")))
+                                                     with))
+                                  (if (< (count with) (count variants)) " _ => true," " _ => unsafe { $crate::intrinsics::unreachable() }")
+                                  " }"))))]
+        (str (head "" false "$crate::marker::StructuralPartialEq" "$crate::cmp::PartialEq" " ")
+             (head "" false "$crate::cmp::PartialEq" "$crate::cmp::PartialEq"
+                   (str "#[inline] fn eq(&self, other: &" self-ty ") -> bool { " body " }"))))
+      "Eq"
+      (head "" false "$crate::cmp::Eq" "$crate::cmp::Eq"
+            (str "#[inline] #[doc(hidden)] #[coverage(off)] fn assert_fields_are_eq(&self) { " (asserts "$crate::cmp::AssertParamIsEq" all-tys) "}"))
+      "Hash"
+      (let [fs (fields shape)
+            body (str/join "; " (map #(str "$crate::hash::Hash::hash(&self." % ", state)") fs))]
+        (head "" false "$crate::hash::Hash" "$crate::hash::Hash"
+              (str "#[inline] fn hash<__H: $crate::hash::Hasher>(&self, state: &mut __H) { " body " }")))
+      "Default"
+      (let [[k fs] shape
+            body (case k
+                   :unit name
+                   :tuple (str name "(" (str/join ", " (repeat (count fs) "$crate::default::Default::default()")) ")")
+                   :named (str name " { " (str/join ", " (map #(str (first %) ": $crate::default::Default::default()") fs)) " }"))]
+        (head "" false "$crate::default::Default" "$crate::default::Default"
+              (str "#[inline] fn default() -> " self-ty " { " body " }")))
+      "PartialOrd"
+      (if (and ord? (empty? tparams))
+        (head "" false "$crate::cmp::PartialOrd" "$crate::cmp::PartialOrd"
+              (str "#[inline] fn partial_cmp(&self, other: &" self-ty ") -> $crate::option::Option<$crate::cmp::Ordering> { "
+                   "$crate::option::Option::Some($crate::cmp::Ord::cmp(self, other)) }"))
+        (let [fs (fields shape)
+              chain (fn chain [fs]
+                      (let [c (str "$crate::cmp::PartialOrd::partial_cmp(&self." (first fs) ", &other." (first fs) ")")]
+                        (if (next fs)
+                          (str "match " c " { $crate::option::Option::Some($crate::cmp::Ordering::Equal) => " (chain (next fs)) ", cmp => cmp, }")
+                          c)))]
+          (head "" false "$crate::cmp::PartialOrd" "$crate::cmp::PartialOrd"
+                (str "#[inline] fn partial_cmp(&self, other: &" self-ty ") -> $crate::option::Option<$crate::cmp::Ordering> { "
+                     (if (seq fs) (chain fs) "$crate::option::Option::Some($crate::cmp::Ordering::Equal)") " }"))))
+      "Ord"
+      (let [fs (fields shape)
+            chain (fn chain [fs]
+                    (let [c (str "$crate::cmp::Ord::cmp(&self." (first fs) ", &other." (first fs) ")")]
+                      (if (next fs)
+                        (str "match " c " { $crate::cmp::Ordering::Equal => " (chain (next fs)) ", cmp => cmp, }")
+                        c)))]
+        (head "" false "$crate::cmp::Ord" "$crate::cmp::Ord"
+              (str "#[inline] fn cmp(&self, other: &" self-ty ") -> $crate::cmp::Ordering { "
+                   (if (seq fs) (chain fs) "$crate::cmp::Ordering::Equal") " }")))
+      (throw (ex-info (str "expand: the derive " trait " is not taken") {:expand true})))))
+
+(defn- no-colon-spans
+  "The builder's generic parameters have no colon span"
+  [x]
+  (cond (and (seq? x) (= 'GenericParam (first x))) (apply list (map no-colon-spans (fset x :colon_span 'None)))
+        (and (seq? x) (= 'Local (first x))) (apply list (map no-colon-spans (fset x :colon_sp 'None)))
+        (seq? x) (apply list (map no-colon-spans x))
+        (vector? x) (mapv no-colon-spans x)
+        :else x))
+
+(defn- expr-stmts
+  "hash.rs' statements are cx.stmt_expr's: Expr statements, without a semicolon"
+  [x]
+  (cond (and (seq? x) (= 'Stmt (first x)) (seq? (fget x :kind)) (= 'Semi (first (fget x :kind))))
+        (fset x :kind (list 'Expr (second (fget x :kind))))
+        (seq? x) (apply list (map expr-stmts x))
+        (vector? x) (mapv expr-stmts x)
+        :else x))
+
 (defn expand-derives
-  "An item's #[derive(...)]: [the item without the attribute, the derived items]"
+  "An item's #[derive(...)]: [the item without the attribute, the derived impls]"
   [it]
-  [it []])
+  (let [attrs (fget it :attrs)
+        names (derive-names attrs)
+        k (fget it :kind)]
+    (if (or (empty? names) (not (seq? k)) (not (#{'Struct 'Enum} (first k))))
+      [it []]
+      (let [[kw idf gens data] k
+            tparams (vec (for [p (fget gens :params) :let [pk (fget p :kind)] :when (and (seq? pk) (= 'Type (first pk)))]
+                           (second (fget p :ident))))
+            info {:kind (if (= 'Struct kw) :struct :enum) :name (second idf) :tparams tparams
+                  :shape (when (= 'Struct kw) (variant-shape data))
+                  :variants (when (= 'Enum kw) (mapv (fn [v] [(second (fget v :ident)) (variant-shape (fget v :data))]) (fget data :variants)))
+                  :copy? (some #{"Copy"} names) :ord? (some #{"Ord"} names)}
+            it' (fset it :attrs (vec (remove #(= "derive" (attr-name %)) attrs)))
+            derived (vec (mapcat (fn [trait]
+                                   (let [m (fresh-mark) frags (atom {})
+                                         text (derive-text trait info frags)]
+                                     (map (if (= trait "Hash") (comp expr-stmts no-colon-spans) no-colon-spans)
+                                          (parse-fragment (text->items text m @frags) :items))))
+                                 names))]
+        [it' derived]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; cfg and cfg_attr on items (rustc_expand/src/config.rs; rustc_attr_parsing's CfgEntry): the predicate evaluated for the
+;; host's target (x86_64-unknown-linux-musl, edition's defaults, not a test build), the attribute left as its trace
+
+(def ^:private cfg-names {"unix" true "debug_assertions" true "panic" "unwind" "target_os" "linux" "target_family" "unix"
+                          "target_arch" "x86_64" "target_pointer_width" "64" "target_endian" "little" "target_env" "musl"
+                          "target_vendor" "unknown" "target_has_atomic" "64"})
+
+(defn- cfg-pred
+  "A cfg predicate from items: [CfgEntry-form value rest-items]"
+  [items]
+  (let [[a b c & r] items
+        nm (tsym a)]
+    (cond
+      (and (#{"all" "any"} nm) (:g b))
+      (let [parts (map cfg-pred (split-commas (:kids b)))
+            vals (map second parts)]
+        [(list (if (= nm "all") 'All 'Any) (mapv first parts) (foreign-span 0))
+         (if (= nm "all") (every? true? vals) (boolean (some true? vals)))
+         (drop 2 items)])
+      (and (= nm "not") (:g b))
+      (let [[e v] (cfg-pred (:kids b))] [(list 'Not e (foreign-span 0)) (not v) (drop 2 items)])
+      (and (#{"true" "false"} nm)) [(list 'Bool (= nm "true") (foreign-span 0)) (= nm "true") (rest items)]
+      (punct-item? b :Eq)
+      (let [v (tsym c)]
+        [(list 'NameValue :name nm :value (list 'Some v) :span (foreign-span 0)) (= v (get cfg-names nm)) (drop 3 items)])
+      :else [(list 'NameValue :name nm :value 'None :span (foreign-span 0)) (true? (get cfg-names nm)) (rest items)])))
+
+(defn- attr-items [a]
+  (let [item (fget (second (fget a :kind)) :item)]
+    (dump-tts->items (second (fget (second (fget item :args)) :tokens)) nil)))
+
+(defn- trace-attr [kind e a] (list 'Attribute :kind (list 'Synthetic (list kind e)) :style (fget a :style) :span (fget a :span)))
+
+(defn- attr-from-items
+  "An attribute written as items (cfg_attr's): name, name = literal"
+  [items a]
+  (let [[n eq lit] items
+        args (if (punct-item? eq :Eq)
+               (list 'Eq :eq_span (foreign-span 0) :expr (parse-fragment [lit] :expr))
+               'Empty)]
+    (list 'Attribute :kind (list 'Normal (list 'NormalAttr :item (list 'AttrItem :unsafety 'Default
+                                                                         :path (list 'Path :span (foreign-span 0) :segments [(list 'PathSegment :ident (list 'id (tsym n) 0) :args 'None)])
+                                                                         :args args :span (foreign-span 0))))
+          :style (fget a :style) :span (fget a :span))))
+
+(defn cfg-item
+  "An item with its cfg and cfg_attr attributes processed: the item or nil when configured out"
+  [it]
+  (let [attrs (fget it :attrs)]
+    (if-not (some #(#{"cfg" "cfg_attr"} (attr-name %)) attrs)
+      it
+      (loop [as attrs out []]
+        (if-let [a (first as)]
+          (case (attr-name a)
+            "cfg" (let [[e v] (cfg-pred (attr-items a))]
+                    (if v (recur (rest as) (conj out (trace-attr 'CfgTrace e a))) nil))
+            "cfg_attr" (let [items (attr-items a)
+                             [e v r] (cfg-pred items)
+                             r (if (punct-item? (first r) :Comma) (rest r) r)]
+                         (recur (rest as) (cond-> (conj out (trace-attr 'CfgAttrTrace e a))
+                                            v (into (map #(attr-from-items % a) (split-commas (vec r)))))))
+            (recur (rest as) (conj out a)))
+          (fset it :attrs out))))))
