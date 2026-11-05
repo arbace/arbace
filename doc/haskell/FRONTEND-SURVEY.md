@@ -871,3 +871,7 @@ they carry GHC's notice and are recorded under its license (LICENSE.md) as deriv
 4. The gate. Options: (a) add `stg-check` to the `--full` step `haskell-front` of HF3's decision 4 (about 2 minutes, light;
    it needs the libraries' STG dumps and hsi's driver: `bin/hsi dumps` and `bin/hsi build`); (b) wait for HF8.
    *Recommended: (a)* once `haskell-integrate` is on main.
+
+## Decided (2026-11-05, the user: HF5-HF6's proposals)
+
+HF5-HF6's four: (1) (b) the match compiler and CorePrep kept as written after GHC's algorithms, GHC functions ported where a diff needs them (amending HFS5's line-by-line port); (2) (a) GHC's SimpleOpt ported into the pipeline; (3) (a) the run corpus a recorded check list after HF4; (4) (a) stg-check in the --full step haskell-front once haskell-integrate is on main.
