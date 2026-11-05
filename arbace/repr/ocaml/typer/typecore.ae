@@ -65,8 +65,8 @@
   (let [d (:pconst_desc c)]
     (case (d 0)
       :Pconst_integer (case (let [x (d 2)] (cond (nil? x) nil (number? x) (char x) (string? x) (first x) :else x))
-                        nil [[:int (parse-int (d 1))] ty/type-int]
-                        \l [[:int32 (parse-int (d 1))] ty/type-int32]
+                        nil [[:int (let [n (parse-int (d 1))] (bit-shift-right (bit-shift-left n 1) 1))] ty/type-int]
+                        \l [[:int32 (long (unchecked-int (parse-int (d 1))))] ty/type-int32]
                         \L [[:int64 (parse-int (d 1))] ty/type-int64]
                         \n [[:nativeint (parse-int (d 1))] ty/type-nativeint]
                         [[:int (parse-int (d 1))] ty/type-int])
@@ -336,7 +336,12 @@
       :Pexp_let (let [[vbs env'] (type-let env (d 1) (d 2))
                       body (type-expect env' (d 3) expected)]
                   (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))
-      :Pexp_function (let [[params body t] (type-function env (d 1) (d 3) expected)]
+      :Pexp_function (let [sbody (if-let [c (d 2)]
+                                   (if (and (= :Pfunction_body ((d 3) 0)) (= :Pconstraint (c 0)))
+                                     [:Pfunction_body {:pexp_desc [:Pexp_constraint ((d 3) 1) (c 1)] :pexp_loc (:pexp_loc ((d 3) 1))}]
+                                     (type-error "this function's body constraint is outside the slice"))
+                                   (d 3))
+                           [params body t] (type-function env (d 1) sbody expected)]
                        (mkexp [:Texp_function params body] t loc))
       :Pexp_apply (let [f (type-exp env (d 1))
                         [args t] (type-application env f (vec (d 2)))]
@@ -535,10 +540,22 @@
                        (= nil (second (first (d 2)))))
       false)))
 
+(defn- vb-constraint
+  "Typecore's vb_pat_constraint and vb_exp_constraint: `let p : t = e` as `let (p : t) = (e : t)`"
+  [vb]
+  (let [c (:pvb_constraint vb)]
+    (if (and c (= :Pvc_constraint (c 0)) (empty? (c 1)) (not= :Ptyp_poly ((:ptyp_desc (c 2)) 0)))
+      (assoc vb :pvb_constraint nil
+             :pvb_pat {:ppat_desc [:Ppat_constraint (:pvb_pat vb) (c 2)] :ppat_loc (:ppat_loc (:pvb_pat vb))}
+             :pvb_expr {:pexp_desc [:Pexp_constraint (:pvb_expr vb) (c 2)] :pexp_loc (:pexp_loc (:pvb_expr vb))})
+      (do (when c (type-error "this let's type constraint is outside the slice"))
+          vb))))
+
 (defn type-let
   "[value-bindings env'] for let [rec]: each {:pat :expr}"
   [env rec svbs]
-  (let [res (ty/with-local-level
+  (let [svbs (mapv vb-constraint svbs)
+        res (ty/with-local-level
               (let [pats (mapv (fn [vb] (let [vars (atom [])
                                               p (type-pat env (:pvb_pat vb) (ty/newvar) vars)]
                                           [p @vars]))

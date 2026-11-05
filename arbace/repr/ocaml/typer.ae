@@ -40,17 +40,23 @@
     (str (str/upper-case (subs b 0 1)) (subs b 1))))
 
 (defn compile-file
-  "{:sig text :lambda form} of a file, or throws"
-  [^String path ^String fname]
+  "{:sig text :lambda form} of a file, or throws; opts :uname (the unit's name), :nopervasives (Stdlib not opened),
+  :intf (the unit has an interface, read by name from the stdlib's directory: the implementation coerced to it)"
+  [^String path ^String fname & {:keys [uname nopervasives intf]}]
   (ty/reset-stamps!)
   (env/reset-modules!)
   (binding [ty/*find-type* env/find-decl ty/*path-name* env/path-name]
     (let [r (parser/parse (read-bytes path) fname :impl)
           _ (when-not (= :ok (first r)) (env/type-error (str "syntax error: " (nth r 2))))
-          uname (unit-name fname)
-          [items sig _] (tm/type-implementation (env/initial-env) (second r) uname)
+          uname (or uname (unit-name fname))
+          env0 (if nopervasives (env/initial-predef) (env/initial-env))
+          [items sig env' full] (tm/type-implementation env0 (second r) uname)
           stext (pt/signature-text sig)]
-      {:sig stext :lambda (tmod/transl-implementation uname items sig)})))
+      (if intf
+        (let [isig (:sig (env/find-unit uname))
+              cc (tm/compunit-coercion env' full isig)]
+          {:sig stext :lambda (tmod/transl-implementation uname items full cc)})
+        {:sig stext :lambda (tmod/transl-implementation uname items sig)}))))
 
 (defn- typed-text [s fname]
   (str "(ocaml/typed\n " (pr-str s) "\n []\n {:file " (pr-str fname) " :ocaml \"5.5.0\"})\n"))
@@ -123,6 +129,42 @@
          (when-let [rep (get opts "--report")] (spit rep (pr-str rs)))
          (System/exit (if (and (= t (count rs)) (= l (count rs)) (= d dn)) 0 1))))))
 
+(defn- stdlib-file [uname]
+  (let [s (cond (str/starts-with? uname "Stdlib__") (subs uname 8) :else uname)]
+    (str (str/lower-case (subs s 0 1)) (subs s 1))))
+
+(defn- do-stdlib-check
+  "The stdlib's units typed and translated natively (TYPER.md, T8): each DIR/unit.ml against LIB/Unit.ae, the
+  oracle's simplified Lambda (bin/oi stdlib's)"
+  [{:keys [opts args]}]
+  (let [dir (get opts "--dir") lib (get opts "--lib") out (get opts "--out")
+        results (atom [])]
+    (binding [env/*stdlib-dir* dir]
+      (doseq [u args]
+        (let [base (stdlib-file u)
+              f (str dir "/" base ".ml")
+              nopervasives (contains? #{"Stdlib" "CamlinternalFormatBasics"} u)
+              intf (.exists (File. (str dir "/" base ".mli")))
+              t0 (System/currentTimeMillis)
+              classic (or (str/ends-with? u "Labels") (= u "Stdlib__Float"))
+              r (try (binding [ty/*classic* classic env/*transparent-modules* (or classic (= u "Stdlib"))]
+                       (compile-file f (str base ".ml") :uname u :nopervasives nopervasives :intf intf))
+                     (catch Throwable t (when (System/getenv "TYPER_TRACE") (.printStackTrace t)) {:error (or (not-empty (.getMessage t)) (str t))}))
+              sprog (when (:lambda r)
+                      (try (simplif/simplify-program (:lambda r)) (catch Throwable t (println "   simplif:" (str t)) nil)))
+              mine (when sprog (read-string (lam/program-text sprog (str base ".ml"))))
+              olam (read-string (slurp (str lib "/" u ".ae")))
+              ok (boolean (and mine (= (lam/canonical mine) (lam/canonical olam))))]
+          (when (and out sprog) (.mkdirs (File. ^String out)) (spit (str out "/" u ".ae") (lam/program-text sprog (str base ".ml"))))
+          (swap! results conj {:unit u :ok ok :error (:error r)})
+          (println (format "%-28s %-4s %5d ms%s" u (if ok "ok" "DIFF") (- (System/currentTimeMillis) t0)
+                           (if (:error r) (str "  error: " (:error r)) "")))
+          (when (and mine (not ok) (get opts "--diff"))
+            (println (lam/first-difference (lam/canonical olam) (lam/canonical mine)))))))
+    (let [rs @results n (count (filter :ok rs))]
+      (println (str "stdlib-check: " (count rs) " units: Lambda equal " n))
+      (System/exit (if (= n (count rs)) 0 1)))))
+
 (defn -main [& args]
   (let [[verb & more] args
         pa (fn [wv] (parse-args more wv))]
@@ -130,4 +172,5 @@
       "types" (do-types (pa #{"--file" "--stdlib"}))
       "lambda" (do-lambda (pa #{"--file" "--stdlib"}))  ; --simplify: after Simplif (-dlambda)
       "check" (do-check (pa #{"--dir" "--oracle" "--report" "--stdlib" "--out"}))
+      "stdlib-check" (do-stdlib-check (pa #{"--dir" "--lib" "--out"}))
       (do (println "usage: -m arbace.repr.ocaml.typer types|lambda|check ...") (System/exit 2)))))
