@@ -798,3 +798,7 @@ resolution with specialization, v0 symbols (the crates' disambiguator hashes), v
 - **RFP4 The gate.** Options: (a) **none until the row fits GT8's budget (as rsi, RES14 (a)); `make rust-front-mir-check` and
   `rust-front-codegen-check` are seconds and light, the corpus coverage about ten minutes**; (b) the two light checks as essential
   steps now. *Recommended: (a)*.
+
+## Decided (2026-11-05, the user: RFP1-RFP4)
+
+All as recommended: the codegen finished on rustc's data first, then layout, the collector with resolution and v0 symbols ported, each judged against the helper; the native-std leg now, the ci leg once the lowered std exists; `bin/rsi run --front mir` as built; no gate step until the row fits GT8's budget. The branch's early commits without trailers are squashed into commits that carry them at its merge (no rewrite of the branch).
