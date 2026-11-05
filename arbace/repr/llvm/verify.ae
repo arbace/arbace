@@ -63,6 +63,13 @@
 ;; Types
 
 (def ^:dynamic *types* {})
+(def ^:dynamic *alloca-as* 0)   ; the data layout's alloca address space (A), program address space (P)
+(def ^:dynamic *prog-as* 0)
+
+(defn dl-as
+  "The address space a data layout string gives with the letter `c` (A, P, G), 0 when it names none."
+  [^String dl c]
+  (or (some #(when-let [m (re-matches (re-pattern (str c "([0-9]+)")) %)] (Long/parseLong (second m))) (str/split (or dl "") #"-")) 0))
 
 (def ^:private fp-bits '{half 16 bfloat 16 float 32 double 64 x86_fp80 80 fp128 128 ppc_fp128 128})
 
@@ -123,7 +130,11 @@
       inttoptr (and same-shape (int-type? ea) (ptr-type? eb))
       addrspacecast (and same-shape (ptr-type? ea) (ptr-type? eb) (not= (addrspace ea) (addrspace eb)))
       bitcast (cond
-                (or (ptr-ish? a) (ptr-ish? b)) (and (ptr-ish? a) (ptr-ish? b) (= (addrspace ea) (addrspace eb)) same-shape)
+                (or (ptr-ish? a) (ptr-ish? b)) (and (ptr-ish? a) (ptr-ish? b) (= (addrspace ea) (addrspace eb))
+                                                    (cond (and (vec-type? a) (vec-type? b)) same-shape
+                                                          (vec-type? a) (= (shape a) ['vector 1])
+                                                          (vec-type? b) (= (shape b) ['vector 1])
+                                                          :else true))
                 :else (and (first-class? a) (first-class? b) (not (aggregate? a)) (not (aggregate? b))
                            (some? (bits a)) (= (bits a) (bits b))))
       true)))
@@ -250,7 +261,7 @@
       (= h 'getelementptr) (mapv typed (rest ps*))
       (= h 'phi) (let [t (norm-type (first ps*))] (vec (mapcat (fn [[v l]] [[v t l] [l 'label]]) (rest ps*))))
       (= h 'select) (mapv typed ps*)
-      (= h 'call) (conj (into (mapv arg (nth ps 2)) bun) [(second ps) 'ptr])
+      (= h 'call) (conj (into (mapv arg (nth ps 2)) bun) [(second ps) (norm-type (list 'ptr (or (:addrspace o) *prog-as*)))])
       (= h 'invoke) (conj (into (into (mapv arg (nth ps 2)) bun) [[(:to o) 'label] [(:unwind o) 'label]]) [(second ps) 'ptr])
       (= h 'callbr) (conj (into (into (mapv arg (nth ps 2)) bun) (map (fn [l] [l 'label]) (cons (:to o) (:indirect o)))) [(second ps) 'ptr])
       (= h 'ret) (if (= (first ps) 'void) [] [[(second ps) (norm-type (first ps))]])
@@ -492,7 +503,7 @@
     (when-let [a (str-attr attrs "sign-return-address")]
       (when-not (#{"none" "all" "non-leaf"} (second a)) (verr :verifier/attr-value (str "invalid value for 'sign-return-address' attribute: " (second a)))))
     (when-let [a (str-attr attrs "branch-target-enforcement")]
-      (when-not (#{"true" "false"} (second a)) (verr :verifier/attr-value (str "invalid value for 'branch-target-enforcement' attribute: " (second a)))))
+      (when-not (#{"" "true" "false"} (or (second a) "")) (verr :verifier/attr-value (str "invalid value for 'branch-target-enforcement' attribute: " (second a)))))
     (when-let [a (attr-of attrs "allockind")]
       (let [ws (set (map str/trim (str/split (str/replace (str (second a)) "\"" "") #",")))
             k (count (filter ws ["alloc" "realloc" "free"]))]
@@ -1057,9 +1068,12 @@
           (when (or (contains? cc-void-ret cc) (contains? cc-shader cc))
             (when (some #(has-attr? % "sret") pattrs) (verr :verifier/cc "Calling convention does not allow sret"))
             (when (not= cc "spir_kernel")
-              (doseq [[a msg] [["byval" "Calling convention disallows byval"] ["preallocated" "Calling convention disallows preallocated"]
-                               ["inalloca" "Calling convention disallows inalloca"] ["byref" "Calling convention disallows stack byref"]]]
-                (when (some #(has-attr? % a) pattrs) (verr :verifier/cc msg)))))
+              (doseq [[i as] (map-indexed vector pattrs)]
+                (doseq [[a msg] [["byval" "Calling convention disallows byval"] ["preallocated" "Calling convention disallows preallocated"]
+                                 ["inalloca" "Calling convention disallows inalloca"]]]
+                  (when (has-attr? as a) (verr :verifier/cc msg)))
+                (when (and (has-attr? as "byref") (= (addrspace (norm-type (first (nth pl i)))) *alloca-as*))
+                  (verr :verifier/cc "Calling convention disallows stack byref")))))
           (when var? (verr :verifier/cc "Calling convention does not support varargs or perfect forwarding!")))
         :else nil))
     (when-not intr?
@@ -1787,7 +1801,14 @@
                     (let [b (body x)]
                       (if (dbg-record? b)
                         nil
-                        (let [loc (get (apply hash-map (:md (nth (split-inst b) 2))) '!dbg)]
+                        (let [loc (get (apply hash-map (:md (nth (split-inst b) 2))) '!dbg)
+                              aid (get (apply hash-map (:md (nth (split-inst b) 2))) '!DIAssignID)]
+                          ;; visitDIAssignIDMetadata: an alloca, a store or an intrinsic's call
+                          (when (and aid (not (or ('#{alloca store} (first b))
+                                                  (let [c (callee-of b)] (and (= 'call (first b)) c (global? c) (intr/recognized? (global-key c)))))))
+                            (binding [*ctx* {:fn f :bb l :inst x}]
+                              (try (verr :di/node "!DIAssignID attached to unexpected instruction kind" :inst [:mdv aid])
+                                   (catch arbace.lang.ExceptionInfo e (.add *errs* e)))))
                           (when (and loc (some? (di-loc-sp loc)) (not= (di-loc-sp loc) sp))
                             (binding [*ctx* {:fn f :bb l :inst x}]
                                         (verr :di/function "!dbg attachment points at wrong subprogram for function"
@@ -2047,6 +2068,8 @@
   at the first; the Verifier's visits go on (`visiting`), the debug info's last."
   [forms]
   (binding [*types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))
+            *alloca-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "A")
+            *prog-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "P")
             *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
             *meta* (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
             *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
@@ -2382,8 +2405,14 @@
         di? #(= "di" (namespace (rule-of %)))
         broken (vec (remove di? es))
         dis (vec (filter di? es))
-        first-e (or pe (first es))]
+        first-e (or pe (first es))
+        ;; a valid module for a target the pin's opt was not built with: opt warns that it has no target machine
+        triple (some #(when (= (first %) 'llvm/triple) (second %)) forms)
+        tm-warning (when (and triple (some #(str/starts-with? triple %) ["dxil" "xtensa" "arc-" "csky" "m68k"]))
+                     (str (prog) ": WARNING: failed to create target machine for '" triple "': unable to get target for '" triple
+                          "', see --version and --triple.\n"))]
     (cond
+      (and (nil? first-e) tm-warning) ["debug" (str/trim-newline tm-warning) "" tm-warning]
       (nil? first-e) ["valid" "" "" ""]
       pe ["invalid" (.getMessage ^Throwable pe) (str (rule-of pe))
           (if src
@@ -2408,7 +2437,7 @@
                                   (str (prog) ": " file ": error: input module is broken!\n"))
                    ver ""
                    :else (str "warning: ignoring invalid debug info in " file "\n"))]
-        [(if (seq broken) "invalid" "debug") (.getMessage ^Throwable first-e) (str (rule-of first-e)) (str body-text tail)])))))
+        [(if (seq broken) "invalid" "debug") (.getMessage ^Throwable first-e) (str (rule-of first-e)) (str body-text tail (when-not (seq broken) tm-warning))])))))
 
 (defn- forms-of-file
   "[forms src spans] of a file: .ae text has no source to point into."
