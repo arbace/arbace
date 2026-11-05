@@ -2245,3 +2245,65 @@ samples on the VM; nothing recorded is committed (the main host's night records 
   without it.
 - **Sizes**, extrapolated from 24 files a corpus: the packs about 410 MB raw, 50 MB xz (stdlib 18, site-packages 11,
   lib-test 21; scopes besides), within ORS11's 100 MB; committed: the essential dumps 1.9 MB and the manifests about 4 MB.
+
+## Design: 216, a register-allocating compiled loop (2026-11-05, the Mac VM, queue 216; the user's (a) on 210's DECISION)
+
+210's profiles were flat: what is left of the compiled code's cost is its design, each instruction a helper call that
+pops its operands off the frame's heap stack (`f.Stack`, a slice: a bounds check and a cleared slot per pop, an append
+per push, a write barrier per pointer stored) and pushes its result there, with `f.Lasti` stored before every
+instruction. The change: `arbace.python.aot` keeps the value stack in Go locals within a basic block and writes the
+frame back only where something may read it. The runtime (eval.go's loop, gen.go, the exception unwinding) is
+unchanged; the compiled code's new helpers take their operands as arguments and return their results (aot.go).
+
+**What may observe a running frame's stack or `f.Lasti`**, read from go/arbace/py at 5b34c021:
+
+| observer | reads | when |
+|---|---|---|
+| exception unwinding (eval.go's runFrames) | `f.Lasti` (the traceback entry `Traceback{Frame, PC: f.Lasti}`, the handler `handlerAt(f.Lasti)`, a handler's pushed lasti); `f.Stack` popped to the handler's depth, then the exception pushed | the compiled function returns an error |
+| a call of a Python function (`*pushFrame`), a class's `__init__` inlined | the arguments on `f.Stack` (callStack, newFrame read them in place); on the callee's return its value pushed on `f.Stack` and the function re-entered at `f.PC` | the function returns |
+| generators' and coroutines' suspension (yield-value, yield-from, the await family: operations run by AotExec) | `f.Stack` kept in the frame while suspended; resumed at `f.PC`, or thrown into at `f.Lasti` (gen.go sets `f.PC = f.Lasti` and re-runs the yield) | the function returns a value with `f.Suspended` |
+| every operation run by AotExec (the rarer ones, the registered ones) | `f.Stack` (operands A items down, e.g. list-extend, dict-merge) | inside the call |
+| a frame object's `f_lineno`, `f_lasti`, `tb_lineno` (tbobj.go, `sys._getframe`, `traceback.extract_stack`, warnings' stack levels) | `f.Lasti` | from code the instruction calls (a dunder method, a property, `__hash__`, a warning) |
+| `f_locals`, `locals()`, `frame.clear` | `f.Fast`, `f.Cells`, `f.LocalsMap`: never the value stack; `frame.clear` of a running frame raises | anytime |
+| the eval breaker (signals, threads' switch) | runs only in runFrames, at a frame's entry and at calls | at a call |
+| per-instruction caches (load-global, load-attr, store-attr) | the instruction's index: load-global read it from `f.Lasti` | inside the call |
+| `sys.settrace`, `sys.setprofile` | nothing: no-ops in pyi (sys.go), so no line event to keep | - |
+
+Code that the instruction calls (a dunder method run by a nested loop, a builtin) runs on its own frame: it cannot
+read this frame's value stack, only its `f_lineno` through `f_back` or `sys._getframe(1)`, and `f_locals`.
+
+**The rules the generator follows:**
+
+1. *The stack's shape is static.* Each instruction's depth is computed as ir/verify computes it (every path the same
+   depth); a method call's load-attr (210's `AotLoadMethod`) pushes one item more up to its call. At any point of the
+   generated code, slots `[0, m)` are in `f.Stack` (whose length is then `m`) and slots `[m, d)` in Go locals `s<slot>`;
+   an instruction that pops a slot below `m` first takes those slots into locals (`f.Stack[k]` read by constant index,
+   then the stack truncated).
+2. *Block starts* are where the runtime may enter the function, or where control merges: instruction 0, the handlers'
+   targets, the jumps' targets, the instruction after a call, every operation run by AotExec and the instruction after
+   it (a yield is re-run at `f.Lasti` when thrown into). At a block start every slot is in `f.Stack`; the code falling
+   into it, or jumping to it, writes its locals back first (one append). The entry switch on `f.PC` lists only the
+   block starts; any other PC is AotBadPC's SystemError, never a silent resumption with a wrong stack.
+3. *Calls and suspensions write everything back*: a call (`AotCall`, `AotCallMethod`), raise, reraise and every
+   AotExec operation (yields among them) run with the whole stack in `f.Stack`, as today. A generator suspended in the
+   middle of an expression (`f(a, (yield x))`) therefore keeps `f`, `a` in its frame across the suspension.
+4. *Exceptions:* an instruction that may raise writes back, on its error path only, the slots its handler keeps (up to
+   the handler's depth of the innermost handler covering it, `handlerAt`'s); the slots above are discarded by the
+   unwinding anyway. No handler: nothing is written back (the frame is left). A handler deeper than the instruction's
+   depth after its pops (never made by the compiler) makes the generator fall back to 210's stack code for that code
+   object.
+5. *Positions:* `f.Lasti` is stored before an instruction that may raise or run Python code (so a traceback, a nested
+   `f_lineno`, a warning's stack level and the per-instruction caches see the instruction's index), and before every
+   return, raise, reraise, call and AotExec operation, as today; an instruction whose only error is an unbound name
+   (load-fast, load-deref, delete-fast, delete-deref) stores it on its error path; the rest (constants, stores to
+   locals, stack shuffles, builds of tuples and lists, `is`, jumps) store nothing. load-global takes its cache's index
+   as a constant. Tracebacks keep their lines: CPython's positions are by instruction, pyi's `co_positions` has lines
+   only (no columns, so no carets: unchanged).
+6. *Fallback:* a code object whose depths do not hold, or that the generator cannot place, is compiled by 210's stack
+   generator (kept, unchanged), so the change is never a refusal.
+
+The proof asked: the tracebacks' lines of sample programs that raise in mid-block, in calls, in nested calls'
+dunders, in generators and coroutines (suspended mid-expression, thrown into, closed) and in handlers, compiled, on
+the loop and on CPython (the caret lines, which pyi does not print, filtered); `make python-essential`,
+`bin/pyi check --aot --no-pyi` on the synthetic sample, 210's check210.sh, `bin/pyi runtime check`; the bench sample's
+table, base and branch back to back with CPython.
