@@ -162,6 +162,42 @@
     (into [[x off]] (mapcat (fn [[i b]] (when-not (:virtual b) (nonvirtual-subobjects (:cls b) (+ off (long (nth (:bases l) i))))))
                             (map-indexed vector (:bases c))))))
 
+(declare layout class-empties)
+
+(defn- field-empties
+  "[[class-id offset] ...] of the empty-class subobjects of a field of type `t` at `off`, as clang's EmptySubobjectMap
+  (RecordLayoutBuilder.cpp) tracks them: a class-typed member as a most-derived object, an array element by element."
+  [t ^long off]
+  (let [t (unq t)]
+    (cond
+      (class? t) (class-empties (:id t) off true)
+      (arr? t) (let [et (loop [x (unq (:of t))] (if (arr? x) (recur (unq (:of x))) x))
+                     n (loop [x t n 1] (if (arr? x) (recur (unq (:of x)) (* n (long (or (:n x) 0)))) n))]
+                 (if (class? et)
+                   (let [e0 (class-empties (:id et) 0 true)]
+                     (if (empty? e0)
+                       []
+                       (let [sz (long (first (size-align et)))]
+                         (vec (mapcat (fn [i] (class-empties (:id et) (+ off (* i sz)) true)) (range (min n 1024)))))))
+                   []))
+      :else [])))
+
+(defn- class-empties
+  "The empty subobjects of class `id` at `off`: `top` true for a member's class (virtual bases too), false for a base
+  subobject (its non-virtual bases and its primary virtual base)."
+  [id ^long off top]
+  (let [c (cls id) l (layout id)
+        own (when (empty-class? id) [[id off]])
+        bs (mapcat (fn [i b] (when-not (:virtual b) (class-empties (:cls b) (+ off (long (nth (:bases l) i))) false)))
+                   (range) (:bases c))
+        pv (let [p (:primary l)] (when (and (:virtual p) (not top)) (class-empties (:cls p) off false)))
+        vb (when top (mapcat (fn [[v vo]] (class-empties v (+ off (long vo)) false)) (:vbases l)))
+        fs (mapcat (fn [f o] (when-not (:bits f) (field-empties (:ty f) (+ off (long o))))) (:fields c) (:fields l))]
+    (vec (concat own bs pv vb fs))))
+
+(defn- can-place? [em lst] (not-any? (fn [[c o]] (contains? (get @em o #{}) c)) lst))
+(defn- place! [em lst] (doseq [[c o] lst] (swap! em update o (fnil conj #{}) c)))
+
 (defn layout
   "The class's layout (Itanium §2.4), cached: {:size :align (the complete object's) :nvsize :nvalign :dsize (the
   non-virtual part's, what a derived class lays out) :fields [offsets] :bitoffs [bit offsets of bit-fields] :bases
@@ -179,6 +215,7 @@
             init-align (if dyn 8 1)
             bases (vec (:bases c))
             pbi (when (and pb (not pbv)) (first (keep-indexed (fn [i b] (when (and (= (:cls b) (:cls pb)) (not (:virtual b))) i)) bases)))
+            em (atom {}) ; the empty subobjects placed so far: {offset #{class-id}} (clang's EmptySubobjectMap)
             order (if pbi (cons pbi (remove #(= % pbi) (range (count bases)))) (range (count bases)))
             [off align boffm]
             (reduce (fn [[off align m] i]
@@ -189,9 +226,13 @@
                             bsz (long (if (:pod bl) (:size bl) (:nvsize bl)))]
                         (cond
                           (:virtual b) [off align m]
-                          (= i pbi) [(max (long off) bsz) (max (long align) ba) (assoc m i 0)]
-                          (empty-class? bid) [off (max (long align) ba) (assoc m i 0)]
-                          :else (let [o (align-up off ba)] [(+ o bsz) (max (long align) ba) (assoc m i o)]))))
+                          (= i pbi) (do (place! em (class-empties bid 0 false)) [(max (long off) bsz) (max (long align) ba) (assoc m i 0)])
+                          (and (empty-class? bid) (can-place? em (class-empties bid 0 false)))
+                          (do (place! em (class-empties bid 0 false)) [off (max (long align) ba) (assoc m i 0)])
+                          :else (let [o (loop [o (align-up off ba)]
+                                          (if (can-place? em (class-empties bid o false)) o (recur (+ o ba))))]
+                                  (place! em (class-empties bid o false))
+                                  [(if (empty-class? bid) off (+ o bsz)) (max (long align) ba) (assoc m i o)]))))
                     [(long start) (long init-align) {}]
                     order)
             boffs (mapv #(get boffm %) (range (count bases)))
@@ -210,7 +251,15 @@
                                         (not= (quot start ua) (quot (+ start w -1) ua)) (align-up start ua)
                                         :else start)]
                             [(if uni (max offb (+ b w)) (+ b w)) (if (:name f) (max (long align) a) align) (conj foffs (* a (quot b ua))) (conj bitoffs b)])
-                          (let [o (align-up (quot (+ start 7) 8) a)]
+                          (let [o (align-up (quot (+ start 7) 8) a)
+                                dsz (quot (+ offb 7) 8)
+                                o (if (or uni (empty? (field-empties (:ty f) 0)))
+                                    o
+                                    (loop [o o]
+                                      (if (can-place? em (field-empties (:ty f) o))
+                                        o
+                                        (recur (if (and (zero? o) (not (zero? dsz))) (align-up dsz a) (+ o a))))))
+                                _ (when-not uni (place! em (field-empties (:ty f) o)))]
                             [(if uni (max offb (* 8 (+ o s))) (* 8 (+ o s))) (max (long align) a) (conj foffs o) (conj bitoffs nil)]))))
                     [(* 8 (long off)) align [] []]
                     (:fields c))
@@ -234,7 +283,11 @@
                       (if (or (.containsKey vbo v) (.contains ^java.util.HashSet ip v))
                         [ds al]
                         (let [vl (layout v)
-                              o (if (empty-class? v) 0 (align-up ds (:nvalign vl)))]
+                              va (long (:nvalign vl))
+                              o (if (and (empty-class? v) (can-place? em (class-empties v 0 false)))
+                                  0
+                                  (loop [o (align-up ds va)] (if (can-place? em (class-empties v o false)) o (recur (+ o va)))))
+                              _ (place! em (class-empties v o false))]
                           (.put vbo v o)
                           (mark! v o)
                           [(if (empty-class? v) ds (+ o (long (:nvsize vl)))) (max (long al) (long (:nvalign vl)))])))
