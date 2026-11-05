@@ -2779,3 +2779,81 @@ generator's item, one resumption per level (resume, run, runFrames' entry, the y
   `check-depths` on, and the 73-program sample with it on: 73 pass, 0 failing, no code object on the stack generator.
 - `make python-essential`: check --aot 21 programs, 20 pass, 1 classed, 0 failing, the control refused.
 - `bin/pyi runtime check`: the seven packages the same forms, the unicodedata and CJK tables equal, runtime-ops equal, 136 programs of test/python/pyi run by pyi as by the oracle: 136 equal, the REPL session 1 equal (40 min at load 4; the check runs the loop, not compiled code: it covers runFrames' new parameter, guardedStep and the free list).
+
+## Design: 220, the diagnostic C modules (2026-11-05, the Mac VM, queue 220; PYS22 (a))
+
+Four of `:c-modules-deferred`'s modules, ported to Go as 204 ported `_csv` and `mmap`: runtime files of `go/arbace/py`,
+function for function from the pinned tarball's C (`Modules/faulthandler.c`, `Python/traceback.c`'s dump functions,
+`Modules/_lsprof.c`, `Modules/termios.c`, `Modules/_tracemalloc.c` and `Python/tracemalloc.c`, with their clinic files),
+the Python halves (`Lib/cProfile.py`, `profile.py`, `pstats.py`, `tracemalloc.py`, `tty.py`) unchanged. In order of
+value, as the brief takes them.
+
+**faulthandler** (1,491 lines of C). Observable: what it writes to a descriptor and the process's exit by the signal.
+- `dump_traceback(file, all_threads)`: `Current thread 0x...`/`Thread 0x...` headers (the thread's name in brackets),
+  `  File "f", line N in name` per frame, most recent first, `_Py_DumpASCII`'s escapes and 500-character truncation,
+  `MAX_FRAME_DEPTH` 100 (`  ...`), `MAX_NTHREADS` 100, `Stack (most recent call first):` for one thread. pyi needs every
+  thread's frame chain: `Thread.Frame` per `*Thread` (threadInfos, the main thread first as CPython's list is newest
+  first). The dump reads another goroutine's chain without its lock, as CPython reads another thread's frames: a frame
+  pointer and an instruction index read whole.
+- `enable(file, all_threads, c_stack)`, `disable`, `is_enabled`; the fatal signals SIGSEGV, SIGFPE, SIGABRT, SIGBUS,
+  SIGILL: `Fatal Python error: Segmentation fault`, a blank line, the dump, `Current thread's C stack trace (most recent
+  call first):` with musl's `  <cannot get C stack on this system>` (no backtrace on musl: CPython on Alpine prints the
+  same), then the previous action restored and the signal raised again: the process dies by it (status -11). On pyi a
+  fatal signal another process sends is caught through os/signal on a channel of faulthandler's own; one pyi raises
+  itself (`_sigsegv`, `_read_null`, `_sigabrt`, `_sigfpe`, `_stack_overflow`) runs the handler in the raising thread
+  first, as the kernel runs a synchronous signal's handler, then dies by the signal with its action set to SIG_DFL by
+  rt_sigaction (Go's own handler would print a Go traceback instead: probed). A real fault in Go code stays Go's panic,
+  pyi's SystemError (guardedStep): there is no C to fault.
+- `dump_traceback_later(timeout, repeat, file, exit)` and `cancel_dump_traceback_later`: a watchdog goroutine, the
+  `Timeout (0:00:00.500000)!` header, `_exit(1)` with exit. `register(signum, file, all_threads, chain)` and
+  `unregister`: a user signal dumps the traceback; chain calls the previous handler (the Python handler of `signal`
+  when one is set). `dump_c_stack`. `-X faulthandler` and `PYTHONFAULTHANDLER` enable it at start (bin/pyi python passes
+  `-X` options to the runtime, `sys._xoptions`).
+- What cannot match: thread ids are pyi's (goroutines have no pthread id; the dump prints the thread's ident as CPython
+  prints `pthread_self`), `Extension modules:` never prints (pyi has no extension modules but its built-in ones, which
+  CPython does not list), `_fatal_error_c_thread` and the `_testcapi` cases (`test_fatal_error`, `test_sigbus`,
+  `test_sigill`) are `_testcapi`'s, and the GIL-disabled cases do not apply.
+
+**_lsprof** (1,158 lines). Since 3.12 it is a `sys.monitoring` tool (PROFILER_ID 2, the name "cProfile"): enable
+registers its callbacks for PY_START, PY_RESUME, PY_THROW, PY_RETURN, PY_YIELD, PY_UNWIND, CALL, C_RETURN and C_RAISE;
+the tests read `sys.monitoring.get_tool(2)` and expect the second profiler's "tool 2 is already in use". So pyi gets
+`sys.monitoring`'s call-family events for real, global events only (`set_events`, `register_callback`, `use_tool_id`,
+`free_tool_id`, `clear_tool_id`, `get_events`; the callbacks run with the thread's tracing flag set, so they raise no
+events themselves); `sys.setprofile` (and `threading.setprofile_all_threads`) is the same events' legacy tool
+(`PY_MONITORING_SYS_PROFILE_ID` 6, as CPython's legacy_tracing.c), `call`/`return`/`c_call`/`c_return`/`c_exception`
+with the frame. The local events, LINE, INSTRUCTION, JUMP, BRANCH and settrace are not this task's (219 owns
+settrace's frame hooks). The hooks:
+- a frame's start and end: runFrames' entry and its pushed frame (PY_START, or PY_RESUME for a resumed generator,
+  PY_THROW for a throw into it), its return (PY_RETURN, PY_YIELD when suspended) and its unwinding (PY_UNWIND). Every
+  Python frame passes there: the loop's, a compiled function's (216's register loop runs its callees by
+  `runDirect` -> `runFrames`), a generator's resumption, exec's and a class body's.
+- a call's CALL and, for a callable that is not a Python function, C_RETURN or C_RAISE after it: callStack, call-ex,
+  `AotCallMethod`, `aotInvoke`, `AotCallV` and `AotCallMethodV`, the call sites of the loop and of compiled code.
+- no cost when off: one load of a global word (the events of all tools, 0 when none) and a branch at each site; the
+  monitored path is a separate function. Measured by `bin/pyi bench`'s sample against the base (210's method).
+- What cannot match: CALL's `instruction_offset` is pyi's (2 x the IR's instruction, as `f_lasti`), timings are Go's
+  monotonic clock, `DISABLE` returned by a callback disables nothing (CPython disables the event at that location: a
+  local event, not built), and a C function is a `*Builtin` (builtin_function_or_method; a method descriptor called
+  unbound is bound to its first argument as `_lsprof`'s `get_cfunc_from_callable`): pyi's built-in implementations of
+  what CPython writes in Python would show as built-ins, and the reverse (none known in the profiled samples).
+
+**termios** (1,399 lines). tcgetattr, tcsetattr, tcsendbreak, tcdrain, tcflush, tcflow, tcgetwinsize, tcsetwinsize
+over the tty ioctls as musl's functions make them (TCGETS, TCSETS+when, TCSBRK, TCFLSH, TCXONC, TIOCGWINSZ/TIOCSWINSZ),
+the struct's bytes by their address as mmap's msync passes one (reflect's Pointer: no unsafe; the `:pointer-syscall`
+class's premise, "Go forms take no pointer", has this way round it); the 216 constants of musl's headers on Linux
+(asm-generic's: amd64 and arm64 alike). test_termios and test_tty need `os.openpty` (absent: `:pointer-syscall`), so it
+comes with termios (/dev/ptmx, TIOCSPTLCK, TIOCGPTN, as musl's openpty). Not on tamago (no tty).
+
+**_tracemalloc** (1,717 lines with Python/tracemalloc.c). CPython hooks its three allocator domains: every
+PyMem/PyObject malloc, realloc and free records (size, traceback of the Python frames) per pointer, and
+`get_object_traceback` finds an object's trace by its address. pyi allocates through Go: no allocator to hook, no
+frees (the collector reclaims without telling). An "allocation" on pyi is decided here as the creation of a Python object
+that CPython's allocator would see, at the runtime's constructors, with CPython's sizes (`sys.getsizeof`'s, the object's
+header and its variable part as 64-bit CPython lays them out); a free is the object's collection, seen by a cleanup
+(`runtime.AddCleanup`) when the collector runs, and `get_traced_memory` runs the collector first so a dropped object's
+size is gone as CPython's refcount frees it. Which numbers can match: the traces' tracebacks (the frames' filenames and
+lines), the count of traces per line for objects made by Python code, `get_object_traceback`; the sizes of bytes, str,
+tuple, list (CPython's over-allocation pattern), dict and int as `sys.getsizeof` gives them. What cannot: CPython's
+internal allocations (frames, code, the interpreter's own buffers, free lists' reuse, the small-int cache), so a
+snapshot's totals and `get_tracemalloc_memory` differ, and a trace never comes from inside a built-in's work on its own
+buffers. Its port is last in the brief's order; how far it got is in "As built: 220".
