@@ -74,13 +74,14 @@
         (vec (keep by (sort seen)))))))
 
 (defn check-one [dir n]
-  (let [bodies (mir/read-dump (slurp (str dir "/" n ".mir.edn")))
+  (let [all (mir/read-all (slurp (str dir "/" n ".mir.edn")))
+        bodies (:bodies all) lt (:layouts all)
         theirs (into {} (keep (fn [f] (when (= 'llvm/define (first f)) (let [x (normalize f)] [(first x) x]))) (llvm/read-ll (str dir "/" n ".ll"))))
         res (for [b (reachable bodies)]
               (let [nm (str/replace (:name b) "::" ".")
                     t (get theirs nm)]
                 (try
-                  (let [o (normalize (cg/codegen-fn b))]
+                  (let [o (normalize (cg/codegen-fn b lt))]
                     [nm (cond (nil? t) "no rustc function" (= o t) :pass :else (diff-text o t))])
                   (catch Throwable e [nm (if-let [u (:codegen/unsupported (ex-data e))] (str "unsupported: " u) (str "error: " (.getMessage e)))]))))]
     res))
@@ -88,15 +89,19 @@
 (defn module-forms
   "A whole module: the header of rustc's IR and the forms of every function reachable from main."
   [dir n]
-  (let [bodies (mir/read-dump (slurp (str dir "/" n ".mir.edn")))
+  (let [all (mir/read-all (slurp (str dir "/" n ".mir.edn")))
+        bodies (:bodies all) lt (:layouts all)
         theirs (llvm/read-ll (str dir "/" n ".ll"))
         header (filter #(#{'llvm/source-filename 'llvm/datalayout 'llvm/triple} (first %)) theirs)]
-    (vec (concat header (map cg/codegen-fn (reachable bodies))))))
+    (let [fns (map (fn [b] (try (cg/codegen-fn b lt) (catch Throwable e (when (:codegen/unsupported (ex-data e)) ::unsupported)))) (reachable bodies))]
+      (when-not (some #{::unsupported} fns)
+        (vec (concat header fns))))))
 
 (defn emit-ll
   "Writes DIR/NAME.ours.ll, our forms printed as IR."
   [dir n]
-  (llvm/spit-latin1 (str dir "/" n ".ours.ll") (llvm/print-ll (module-forms dir n))))
+  (when-let [m (module-forms dir n)]
+    (llvm/spit-latin1 (str dir "/" n ".ours.ll") (llvm/print-ll m))))
 
 (defn -main [dir & names]
   (when (= "--emit" dir)

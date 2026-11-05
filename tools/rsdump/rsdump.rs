@@ -1025,7 +1025,7 @@ fn mir_data<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
     use rustc_hir::ConstContext;
     use rustc_hir::def::DefKind;
     use rustc_middle::mir::Const;
-    use rustc_middle::ty::InstanceKind;
+    use rustc_middle::ty::{InstanceKind, TypeVisitableExt};
     let w = mirdata::W { tcx };
     let mut out = String::new();
     for &def_id in tcx.mir_keys(()) {
@@ -1059,7 +1059,44 @@ fn mir_data<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
             render(tcx.instance_mir(InstanceKind::Item(def_id.to_def_id())), "optimized", false, &mut out);
         }
     }
+    // the layouts of the monomorphic types of the locals
+    let mut tys = std::collections::BTreeMap::new();
+    for &def_id in tcx.mir_keys(()) {
+        let b = if tcx.is_const_fn(def_id) { tcx.optimized_mir(def_id) } else { tcx.instance_mir(InstanceKind::Item(def_id.to_def_id())) };
+        for d in b.local_decls.iter() {
+            collect_ty(tcx, d.ty, &mut tys);
+        }
+    }
+    out.push_str(&mirdata::layouts(tcx, &tys));
     out
+}
+
+/// a type and the types its layout is made of (pointees, elements, fields), for the `mir/layouts` table
+fn collect_ty<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, t: rustc_middle::ty::Ty<'tcx>, tys: &mut std::collections::BTreeMap<String, rustc_middle::ty::Ty<'tcx>>) {
+    use rustc_middle::ty::{self, TypeVisitableExt};
+    if t.has_param() || t.has_non_region_infer() || t.has_aliases() {
+        return;
+    }
+    let key = format!("{}", ty::print::with_no_trimmed_paths!(t));
+    if tys.contains_key(&key) {
+        return;
+    }
+    tys.insert(key, t);
+    match *t.kind() {
+        ty::Ref(_, e, _) | ty::RawPtr(e, _) | ty::Slice(e) | ty::Array(e, _) => collect_ty(tcx, e, tys),
+        ty::Tuple(ts) => {
+            for x in ts.iter() {
+                collect_ty(tcx, x, tys);
+            }
+        }
+        ty::Adt(d, args) if !d.is_enum() => {
+            for f in d.all_fields() {
+                let ft = f.ty(tcx, args).skip_norm_wip();
+                collect_ty(tcx, ft, tys);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn compile(args: &[String]) -> ! {

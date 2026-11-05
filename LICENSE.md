@@ -501,6 +501,16 @@ covers what.
   here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest
   of `native.ae` (the facts, after `tools/rsdump`'s visitor, the dump and the check) and
   `test/rust/native-check.txt` are Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/mir.ae` (the printer) and `arbace/rust/back/codegen.ae` (the first slice of RF3, doc/rust/FRONTEND-SURVEY.md,
+  "As built: RF1-RF3 (trial)"), and the helper's `tools/rsdump/mirdata.rs`: Arbace forms and Rust written after rustc 1.99.1,
+  https://github.com/rust-lang/rust at `58cf8f9c3` (the sources of Alpine's `rustc-dev-1.99.1-r0` and `rust-src-1.99.1-r0`,
+  pinned by `tools/rsdump/apks.sha256`), reading `compiler/rustc_middle/src/mir/{pretty,syntax,terminator,consts,statement}.rs`
+  (the text of MIR: `write_mir_fn`, the `Debug` impls of places, operands, rvalues, statements and terminators, the labels of
+  successors, `fmt_assert_args`) and `compiler/rustc_codegen_ssa/src/mir/{mod,analyze,block,operand,place,rvalue,statement}.rs`
+  (the SSA analysis of locals, the order and merging of blocks, operands, places, rvalues, terminators): copyright the Rust
+  project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here
+  under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the forms' shapes,
+  `doc/rust/MIR.md`, the judges, `bin/rust-front`) is Arbace's own, under the Eclipse Public License 1.0.
 - The non-javac branches of `skip-parens`, `tree-name`, `full-name`, `diamond?` and `class-kind` in
   `arbace/repr/java/tree.ae` (repr/java's interface to the tree, doc/classes/JAVA-FRONTEND-SURVEY.md,
   "As built: JFS66 (b)"): Arbace forms reimplementing, for the native parser's trees,

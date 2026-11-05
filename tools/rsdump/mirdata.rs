@@ -544,3 +544,48 @@ pub fn iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
     }
     out
 }
+
+/// The layouts of the types the bodies' locals have (RF1's `layout` oracle, doc/rust/FRONTEND-SURVEY.md §3.11): one
+/// `(mir/layouts [[ "TEXT" {...}] ...])` form, the monomorphic types of every body's locals, sizes, alignments, the backend
+/// representation and the fields' offsets as `rustc_abi` decided them
+pub fn layouts<'tcx>(tcx: TyCtxt<'tcx>, tys: &std::collections::BTreeMap<String, Ty<'tcx>>) -> String {
+    use rustc_abi::{BackendRepr, FieldsShape, Primitive, Scalar};
+    let prim = |s: Scalar| -> String {
+        let p = match s {
+            Scalar::Initialized { value, .. } | Scalar::Union { value } => value,
+        };
+        let r = match s {
+            Scalar::Initialized { valid_range, .. } => format!(" [{} {}]", valid_range.start, valid_range.end),
+            Scalar::Union { .. } => " nil".to_string(),
+        };
+        match p {
+            Primitive::Int(i, sg) => format!("(int {} {}{})", i.size().bits(), sg, r),
+            Primitive::Float(f) => format!("(float {}{})", f.size().bits(), r),
+            Primitive::Pointer(_) => format!("(ptr{})", r),
+        }
+    };
+    let mut out = String::from("(mir/layouts [");
+    for (text, ty) in tys {
+        let Ok(l) = tcx.layout_of(ty::TypingEnv::fully_monomorphized().as_query_input(*ty)) else { continue };
+        let abi = match l.backend_repr {
+            BackendRepr::Scalar(s) => format!("(scalar {})", prim(s)),
+            BackendRepr::ScalarPair { a, b, b_offset } => format!("(pair {} {} {})", prim(a), prim(b), b_offset.bytes()),
+            BackendRepr::Memory { sized } => format!("(memory {sized})"),
+            _ => "(other)".to_string(),
+        };
+        let fields = match &l.fields {
+            FieldsShape::Primitive => "(primitive)".to_string(),
+            FieldsShape::Union(n) => format!("(union {n})"),
+            FieldsShape::Array { stride, count } => format!("(array {} {})", stride.bytes(), count),
+            FieldsShape::Arbitrary { offsets, .. } => format!("[{}]", join(offsets.iter(), |o| o.bytes().to_string())),
+        };
+        let multi = !matches!(l.variants, rustc_abi::Variants::Single { .. } | rustc_abi::Variants::Empty);
+        let _ = write!(
+            out,
+            "\n [{} {{:size {} :align {} :abi {} :fields {} :variants {} :uninhabited {}}}]",
+            q(text), l.size.bytes(), l.align.abi.bytes(), abi, fields, if multi { ":multiple" } else { ":single" }, l.is_uninhabited()
+        );
+    }
+    out.push_str("])\n");
+    out
+}
