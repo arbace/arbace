@@ -317,6 +317,34 @@
       (list 'rcon (gname (as-data (second e))) [])
       :else (list 'closure :u :fvs [] (expr e)))))
 
+(def ^:dynamic *floats* nil)  ; atom [[name rhs]...]: CorePrep's floats to the top level
+
+(defn- top-rhs
+  "A top-level right-hand side: a CAF's arguments floated to the top level (CorePrep's wantFloatTop: a top-level
+  binding that is not a lambda has its argument bindings floated out as top-level bindings of their own), the last
+  argument's first"
+  [occ e]
+  (let [e (flatten-app e)
+        f (when (head? e 'app) (second e))
+        args (when f (nth e 2))
+        float! (fn [rs] (doseq [[_ b] (reverse rs) :when b]
+                          (let [n (str (clean-occ occ) "_" (first b))] (swap! *floats* conj [b n]))))
+        rename (fn [rs] (mapv (fn [[a b]] (if b (str (clean-occ occ) "_" (first b)) a)) rs))]
+    (cond
+      (or (nil? f) (head? e 'lam) (string-lit? (first args))) (rhs e)
+      (and (head? f 'v) (con-name? (second f)))
+      (let [c (as-data (second f))]
+        (if (and (not (newtype-con? c)) (not (class-of-dcon (second f))) (= (:arity (con-info c)) (count args))
+                 (not (some true? (con-strict c))))
+          (let [rs (mapv atom-of args)] (float! rs) (list 'rcon (gname c) (rename rs)))
+          (rhs e)))
+      (and (head? f 'v) (newtype-selector? (second f))) (rhs e)
+      (or (lv? f) (head? f 'v))
+      (let [rs (mapv atom-of args)]
+        (float! rs)
+        (list 'closure :u :fvs [] (list 'app (if (lv? f) (local-name f) (gname (second f))) (rename rs))))
+      :else (rhs e))))
+
 ;;; ------------------------------------------------------------------------------------------
 ;;; Free variables (Stg/FVs)
 
@@ -401,11 +429,15 @@
           top-names (set (concat (for [[_ b _] prog] (if (lv? b) (local-name b) (gname b)))))
           has-main? (some (fn [[_ b _]] (= b ["ext" "var" (module) "main"])) prog)]
       (binding [*tops* (into top-names [(str "main::" (module) "/main")])]
-        (let [binds (vec (for [[_ b e :as bd] prog
-                               :when (not (and (head? e 'lit) (str/starts-with? (second e) "foreign import")))]
-                           (let [[bn r] (bind-pair bd)
-                                 r (if (= :fvs (nth r 2 nil)) r r)]
-                             (list 'bind bn (first (fv-rhs r))))))
+        (let [binds (vec (mapcat (fn [[_ b e]]
+                                   (binding [*floats* (atom [])]
+                                     (let [n (if (lv? b) (local-name b) (gname b))
+                                           r (top-rhs (if (lv? b) (second b) (nth b 3)) e)]
+                                       ;; the floats' names, internal top-level binders
+                                       (set! *tops* (into *tops* (map second @*floats*)))
+                                       (concat (for [[[_ fr] fname] @*floats*] (list 'bind [fname :L] (first (fv-rhs fr))))
+                                               [(list 'bind [n :L] (first (fv-rhs r)))]))))
+                                 (remove (fn [[_ _ e]] (and (head? e 'lit) (str/starts-with? (second e) "foreign import"))) prog)))
               dfs (data-forms) sels (selectors)
               fix (fn [f] (if (head? f 'bind) (list 'bind (second f) (first (fv-rhs (nth f 2)))) f))]
           (vec (concat [(list 'stg/module {:unit "main" :module (module) :file file :ghc "9.14.1" :helper 4 :flags ["-O0"] :compiler "arbace.repr.haskell.tostg"})]
