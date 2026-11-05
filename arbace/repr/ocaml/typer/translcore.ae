@@ -120,7 +120,10 @@
                          ["max_wosize" "max_wosize"] ["ostype_unix" "ostype_unix"] ["ostype_win32" "ostype_win32"]
                          ["ostype_cygwin" "ostype_cygwin"] ["backend_type" "backend_type"]]]
               [(str "%" k) {:t :p :name (str "sys.constant_" n) :arity 1}]))
-   {"%raise_with_backtrace" {:t :raise-bt} "%frame_pointers" {:t :frame-pointers}
+   (into {} (for [[op ar] [["load" 1] ["exchange" 2] ["cas" 3] ["fetch_add" 2]]
+                  [k extra] [["" 0] ["_field" 1]]]
+              [(str "%atomic_" op k) {:t :atomic :op op :field (= k "_field") :arity (+ ar extra)}]))
+   {"%raise_with_backtrace" {:t :raise-bt} "%frame_pointers" {:t :frame-pointers} "%lazy_force" {:t :lazy-force}
     "%standard_library_default" {:t :p :name "sys.constant_standard_library_default" :arity 1}
     "%nativeint_of_int32" {:t :p :name "nativeint_of_int32" :arity 1} "%nativeint_to_int32" {:t :p :name "int32_of_nativeint" :arity 1}
     "%int64_of_int32" {:t :p :name "int64_of_int32" :arity 1} "%int64_to_int32" {:t :p :name "int32_of_int64" :arity 1}
@@ -216,10 +219,14 @@
     (:raise :identity) 1
     :raise-bt 2
     :frame-pointers 0
+    :lazy-force 1
+    :atomic (:arity prim)
     (:apply :revapply :cmp) 2
     :sys-argv 0
     (:p :array) (:arity prim)
     :external (:arity desc)))
+
+(declare inline-lazy-force)
 
 (defn- lambda-of-prim [prim args]
   (case (:t prim)
@@ -233,6 +240,9 @@
                  [:Lsequence [:Lprim (l/pccall "caml_restore_raw_backtrace") [[:Lvar vexn] (second args)]]
                   [:Lprim (l/praise :reraise) [[:Lvar vexn]]]]])
     :frame-pointers (l/lconst-int 0)
+    :lazy-force (inline-lazy-force (first args))
+    :atomic (let [p (if (= "load" (:op prim)) (l/prim "atomic_load") (l/pccall (str "caml_atomic_" (:op prim) "_field")))]
+              [:Lprim p (if (:field prim) args (into [(first args) (l/lconst-int 0)] (rest args)))])
     :apply [:Lapply (first args) [(second args)]]
     :revapply [:Lapply (second args) [(first args)]]
     [:Lprim (prim-of prim) args]))
@@ -406,7 +416,33 @@
                      (if (and (= :Texp_construct (cd 0)) (= "false" (:name (cd 1))))
                        (failure-block ty/path-assert-failure (d 2))
                        [:Lifthenelse (transl-exp c) l/lambda-unit (failure-block ty/path-assert-failure (d 2))]))
-      :Texp_struct_item (*transl-struct-item* (d 1) (fn [] (transl-exp (d 2)))))))
+      :Texp_struct_item (*transl-struct-item* (d 1) (fn [] (transl-exp (d 2))))
+      :Texp_lazy (let [a (d 1) ad (:desc a)]
+                   ;; Typeopt.classify_lazy_argument
+                   (cond
+                     (or (and (= :Texp_constant (ad 0)) (not= :float ((ad 1) 0)))
+                         (= :Texp_function (ad 0))
+                         (and (= :Texp_construct (ad 0)) (zero? (:arity (ad 1)))))
+                     (transl-exp a)
+                     (= :Texp_constant (ad 0)) [:Lprim (l/prim "makeforwardblock") [(transl-exp a)]]
+                     (= :Texp_ident (ad 0)) (if (#{:any :lazy :float} (ty/classify (:type a)))
+                                              [:Lprim (l/prim "makeforwardblock") [(transl-exp a)]]
+                                              (transl-exp a))
+                     :else [:Lprim (l/prim "makelazyblock")
+                            [[:Lfunction :curried [[(ty/ident-create "param") ""]] "" (transl-exp a)]]])))))
+
+(defn inline-lazy-force
+  "Matching.inline_lazy_force for bytecode (inline_lazy_force_cond)"
+  [arg]
+  (let [idarg (ty/ident-create "lzarg") varg [:Lvar idarg] tag (ty/ident-create "tag")
+        test-tag (fn [t] [:Lprim (l/pintcomp :eq) [[:Lvar tag] (l/lconst-int t)]])
+        force [:Lapply (transl-value-path (get-in (env/find-unit "CamlinternalLazy") [:values "force_lazy_block"]))
+               [[:Lprim (l/prim "opaque") [varg]]]]]
+    [:Llet :strict "" idarg arg
+     [:Llet :alias "" tag [:Lprim (l/pccall "caml_obj_tag") [varg]]
+      [:Lifthenelse (test-tag 250)
+       [:Lprim (l/pfield 0 :pointer true) [varg]]
+       [:Lifthenelse [:Lprim (l/prim "||") [(test-tag 246) (test-tag 244)]] force varg]]]]))
 
 (defn transl-apply
   "Translcore.transl_apply: right-to-left evaluation, out-of-order partial applications as closures"

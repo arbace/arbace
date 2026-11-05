@@ -137,6 +137,32 @@
     (letfn [(lp [a b] (if (= a b) (mk a) {:ppat_desc [:Ppat_or (mk a) (lp (inc a) b)] :ppat_loc loc}))]
       (let [c1 (int c1) c2 (int c2)] (if (<= c1 c2) (lp c1 c2) (lp c2 c1))))))
 
+(defn build-as-type
+  "Typecore.build_as_type: the most general type of what a pattern matches, an alias's variable's type"
+  [p]
+  (let [d (:desc p)]
+    (case (d 0)
+      :Tpat_alias (build-as-type (d 1))
+      :Tpat_tuple (ty/newty [:Ttuple (mapv (fn [[l q]] [l (build-as-type q)]) (d 1))])
+      :Tpat_construct (let [c (d 1)
+                            tyl (mapv build-as-type (d 2))
+                            [targs tres] (instance-constructor c)]
+                        (dorun (map (fn [a t] (ty/unify a t)) targs tyl))
+                        tres)
+      :Tpat_or (let [t1 (build-as-type (d 1)) t2 (build-as-type (d 2))] (ty/unify t2 t1) t1)
+      :Tpat_record (let [ppl (into {} (map (fn [[l q]] [(:pos l) q]) (d 1)))
+                         t (ty/newvar)]
+                     (doseq [lbl (ty/label-all (first (first (d 1))))]
+                       (let [[res arg _] (instance-label lbl)]
+                         (ty/unify t res)
+                         (if (and (not (:mut lbl)) (contains? ppl (:pos lbl)))
+                           (ty/unify (build-as-type (ppl (:pos lbl))) arg)
+                           (let [[res' arg' _] (instance-label lbl)]
+                             (ty/unify arg arg')
+                             (ty/unify (:type p) res')))))
+                     t)
+      (:type p))))
+
 (defn type-pat
   "The pattern sp at the expected type; its variables conj'ed onto the atom vars as [name id type]"
   [env sp expected vars]
@@ -147,9 +173,10 @@
       :Ppat_var (let [n (:txt (d 1)) id (ty/ident-create n)]
                   (swap! vars conj [n id expected])
                   (mk [:Tpat_var id n] expected))
-      :Ppat_alias (let [p (type-pat env (d 1) expected vars) n (:txt (d 2)) id (ty/ident-create n)]
-                    (swap! vars conj [n id expected])
-                    (mk [:Tpat_alias p id n] expected))
+      :Ppat_alias (let [p (type-pat env (d 1) expected vars) n (:txt (d 2)) id (ty/ident-create n)
+                        tv (build-as-type p)]
+                    (swap! vars conj [n id tv])
+                    (mk [:Tpat_alias p id n tv] expected))
       :Ppat_constant (let [[c tf] (constant (d 1))] (unify! (tf) expected "pattern") (mk [:Tpat_constant c] expected))
       :Ppat_interval (type-pat env (char-or ((:pconst_desc (d 1)) 1) ((:pconst_desc (d 2)) 1) loc) expected vars)
       :Ppat_tuple (let [ps (d 1)
@@ -433,6 +460,9 @@
       :Pexp_assert (let [e (type-expect env (d 1) (ty/type-bool))
                          false? (let [ed (:desc e)] (and (= :Texp_construct (ed 0)) (= "false" (:name (ed 1)))))]
                      (ret [:Texp_assert e (:pexp_loc sexp)] (if false? (ty/newvar) (ty/type-unit))))
+      :Pexp_lazy (let [t (ty/newvar)]
+                   (unify! (ty/tconstr ty/path-lazy-t [t]) expected "expression")
+                   (mkexp [:Texp_lazy (type-expect env (d 1) t)] expected loc))
       :Pexp_struct_item (let [[ti env'] (*type-struct-item* env (d 1))
                               body (type-expect env' (d 2) expected)]
                           (mkexp [:Texp_struct_item ti body] (:type body) loc))
@@ -525,6 +555,7 @@
       :Texp_record (and (every? (fn [[l df]] (and (not (:mut l)) (or (= :kept (df 0)) (nonexpansive? (df 1))))) (d 1))
                         (or (nil? (d 3)) (nonexpansive? (d 3))))
       :Texp_field (nonexpansive? (d 1))
+      :Texp_lazy (nonexpansive? (d 1))
       :Texp_struct_item (and (let [ti (d 1)]
                                (case (ti 0)
                                  :Tstr_open true

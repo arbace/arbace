@@ -157,7 +157,14 @@
                             k (when (seq prims) [:prim {:name (first prims) :arity (env/prim-arity (:pval_type v)) :names prims}])
                             item [:val n (ty/ident-create n) t k]]
                         (recur more (add-item env item) (conj items item)))
-          :Psig_type (let [[env' out] (env/transl-type-decls env (d 2) #(ty/pident (ty/ident-create %)))]
+          :Psig_type (let [[env' out]
+                           (try (env/transl-type-decls env (d 2) #(ty/pident (ty/ident-create %)) (d 1))
+                                (catch arbace.lang.ExceptionInfo e
+                                  (if (and env/*lenient* (:ocaml-type-error (ex-data e)))
+                                    ;; a declaration outside the slice in a unit's interface: its types abstract
+                                    (env/transl-type-decls env (mapv #(assoc % :ptype_kind :Ptype_abstract :ptype_manifest nil) (d 2))
+                                                           #(ty/pident (ty/ident-create %)))
+                                    (throw e))))]
                        (recur more env' (conj items [:type out])))
           :Psig_exception (let [ec (:ptyexn_constructor (d 1)) n (:txt (:pext_name ec)) k (:pext_kind ec)
                                 id (ty/ident-create n)
@@ -373,8 +380,8 @@
       :Pmod_ident (let [e (env/lookup-module env (:txt (d 1)))
                         p (:path e)
                         aliasable (not (:functor-arg e))
-                        emty (or (:mty e) (:mty (env/find-module p)))
-                        md {:desc [:Tmod_ident p e] :mty [:Mty_alias p]}]
+                        md {:desc [:Tmod_ident p e] :mty [:Mty_alias p]}
+                        emty (when-not (and alias aliasable) (or (:mty e) (:mty (env/find-module p))))]
                     (cond
                       (and alias aliasable) (do (when (and (:global (ty/path-head p)) (not env/*transparent-modules*)) (swap! env/alias-required conj (:name (ty/path-head p))))
                                                 md)
@@ -433,15 +440,19 @@
                             item [:val n (ty/ident-create n) t
                                   [:prim {:name (first (:pval_prim v)) :arity (env/prim-arity (:pval_type v)) :names (vec (:pval_prim v))}]]]
                         [[:Tstr_primitive] [item] (add-item env item)])
-      :Pstr_type (let [[env' out] (env/transl-type-decls env (d 2) #(ty/pident (ty/ident-create %)))]
+      :Pstr_type (let [[env' out] (env/transl-type-decls env (d 2) #(ty/pident (ty/ident-create %)) (d 1))]
                    [[:Tstr_type] [[:type out]] env'])
       :Pstr_exception
       (let [ec (:ptyexn_constructor (d 1)) n (:txt (:pext_name ec)) k (:pext_kind ec)
-            _ (when-not (= :Pext_decl (k 0)) (type-error "exception rebinding is outside the slice"))
             id (ty/ident-create n)
-            c (env/exn-constructor env n ((k 2) 1) (ty/pident id))
+            [c rebind] (if (= :Pext_rebind (k 0))
+                         ;; Typedecl.transl_extension_constructor's rebinding: the original's arguments, a new path
+                         (let [orig (or (first (env/lookup env :constrs (:txt (k 1))))
+                                        (type-error (str "Unbound constructor " (str/join "." (env/lid-parts (:txt (k 1)))))))]
+                           [(assoc orig :name n :tag [:Cstr_extension (ty/pident id) (empty? (:args orig))]) (second (:tag orig))])
+                         [(env/exn-constructor env n ((k 2) 1) (ty/pident id)) nil])
             item [:exn n id c]]
-        [[:Tstr_exception id c (if rootpath (str rootpath "." n) n)] [item] (add-item env item)])
+        [[:Tstr_exception id c (if rootpath (str rootpath "." n) n) rebind] [item] (add-item env item)])
       :Pstr_module (let [mb (d 1) n (:txt (:pmb_name mb))
                          tm (type-module env (:pmb_expr mb) true (when n (sub-root rootpath n)))
                          id (ty/ident-create (or n "_"))
@@ -470,7 +481,9 @@
   (loop [sitems sitems env env items [] sig []]
     (if (empty? sitems)
       [items sig env]
-      (let [[ti its env'] (type-struct-item env (first sitems) rootpath)]
+      (let [_ (when (System/getenv "TYPER_TRACE")
+                (binding [*out* *err*] (println "item" (some-> (:pstr_loc (first sitems)) first str))))
+            [ti its env'] (type-struct-item env (first sitems) rootpath)]
         (recur (rest sitems) env' (if ti (conj items ti) items) (into sig its))))))
 
 (defn- unit-root
