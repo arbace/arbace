@@ -174,7 +174,12 @@
       (ext-name ns "GHC.Internal.Tuple" (if (= ns "data") occ (str "Tuple" n))))))
 
 (defn- wired-name [ns occ]
-  (or (get wired [ns occ]) (tuple-name ns occ)))
+  (or (get wired [ns occ]) (tuple-name ns occ)
+      (when (= ns "tc")
+        (cond (= occ "List") (ext-name "tc" "GHC.Internal.Types" "List")
+              (= occ "->") (ext-name "tc" "GHC.Internal.Types" "->")
+              (= occ "Unit") (ext-name "tc" "GHC.Internal.Tuple" "Unit")
+              (re-matches #"Tuple[0-9]+" occ) (ext-name "tc" "GHC.Internal.Tuple" occ)))))
 
 (defn lookup-global
   "The name of an occurrence (nskey, occ, qualifier or nil) in the global environment: the entries in
@@ -344,6 +349,26 @@
       (HsOuterExplicit HsForAllInvis HsForAllVis) (arg v 2)
       [])))
 
+(defn rn-tc-name
+  "The name of a declared type constructor or class: always in the type namespace (an operator is a data
+  name for the parser)"
+  [env nl]
+  (when (and (L? nl) (rdr? (lval nl)))
+    (let [r (lval nl)]
+      (occ-at! env (lsp nl) (list 'unqual 'tc (rdr-occ r))))))
+
+(declare free-tvs)
+
+(defn rn-qtvs
+  "A declaration's (HsQTvs ext [tvbs]): the kind variables of the binders' kinds bound implicitly at the
+  declaration's span, then the binders; the env"
+  [env qtvs]
+  (let [tvbs (tvbs-of qtvs)
+        bound (set (keep (fn [t] (some-> (tvb-name t) second rdr-occ)) tvbs))
+        fvs (remove bound (free-tvs env (vec (keep (fn [t] (arg (if (L? t) (lval t) t) 4)) tvbs))))
+        env1 (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o (:sp env)))) env fvs)]
+    (rn-tvbs env1 tvbs)))
+
 (defn free-tvs
   "The type variables of tree x (in order of first occurrence) not bound in env and not bound inside x"
   [env x]
@@ -394,6 +419,14 @@
 (defn- resolve-con [env sp rdr]
   (let [n (occ-at! env sp rdr)] n))
 
+(defn- lit-name [env val]
+  (when-not (contains? *exts* "RebindableSyntax")
+    (case (con val)
+      HsIntegral (ext-name "var" "GHC.Internal.Num" "fromInteger")
+      HsFractional (ext-name "var" "GHC.Internal.Real" "fromRational")
+      HsIsString (ext-name "var" "GHC.Internal.Data.String" "fromString")
+      nil)))
+
 (declare rn-pat-shape rn-expr-shape)
 
 (defn- rn-pats [env pats] (reduce (fn [e p] (rn-pat e p)) env pats))
@@ -435,10 +468,14 @@
                    ps (arg v 3)  ; (HsPS ext type)
                    body (arg ps 2)
                    fvs (free-tvs env1 body)
-                   env2 (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o (lsp body)))) env1 fvs)]
+                   env2 (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o sp))) env1 fvs)]
                (rn env2 body)
                [env2 (leaf sp)])
-      NPat (do (rn env (arg v 2))
+      LitPat (do (when (and (contains? *exts* "OverloadedStrings") (= 'HsString (con (arg v 2))))
+                   (emit! sp (ext-name "var" "GHC.Internal.Data.String" "fromString"))
+                   (emit! nil (ext-name "var" "GHC.Internal.Classes" "==")))
+                 [env (leaf sp)])
+      NPat (do (when-let [n (lit-name env (arg (lval (arg v 2)) 2))] (emit! sp n))
                (when-not (contains? *exts* "RebindableSyntax")
                  (emit! nil (ext-name "var" "GHC.Internal.Classes" "=="))
                  (when (just? (arg v 3)) (emit! nil (ext-name "var" "GHC.Internal.Num" "negate"))))
@@ -528,14 +565,6 @@
 
 (defn rn-expr [env e] (emit-tree! (rn-expr-shape env e)))
 
-(defn- lit-name [env val]
-  (when-not (contains? *exts* "RebindableSyntax")
-    (case (con val)
-      HsIntegral (ext-name "var" "GHC.Internal.Num" "fromInteger")
-      HsFractional (ext-name "var" "GHC.Internal.Real" "fromRational")
-      HsIsString (ext-name "var" "GHC.Internal.Data.String" "fromString")
-      nil)))
-
 (defn rn-stmts
   "Statements in order, each binding for the later ones; k is called with the final env. fl: the flavour
   of a do or comprehension (its implicit names), nil for guards"
@@ -550,9 +579,9 @@
         BindStmt (do (sys "GHC.Internal.Base" ">>=")
                      (rn env (arg v 3)) (recur (rn-pat env (arg v 2)) more k [fl]))
         LetStmt (recur (rn-local-binds env (arg v 2)) more k [fl])
-        BodyStmt (do (when (seq more)
-                       (sys "GHC.Internal.Base" ">>")
-                       (when (= fl 'ListComp) (sys "GHC.Internal.Control.Monad" "guard")))
+        BodyStmt (do (when-not (and (empty? more) (not (contains? '#{GuardStmt ListComp} fl)))
+                       (sys "GHC.Internal.Base" ">>"))
+                     (when (= fl 'ListComp) (sys "GHC.Internal.Control.Monad" "guard"))
                      (rn-node env (lsp s) v) (recur env more k [fl]))
         (do (rn-node env (lsp s) v) (recur env more k [fl]))))))
 
@@ -566,7 +595,7 @@
   (let [env1 (rn-local-binds env (arg grhss 3))]
     (doseq [g (arg grhss 2)]
       (let [gv (lval g)]
-        (rn-stmts (assoc env1 :sp (lsp g)) (arg gv 2) (fn [e] (rn e (arg gv 3))))))))
+        (rn-stmts (assoc env1 :sp (lsp g)) (arg gv 2) (fn [e] (rn e (arg gv 3))) 'GuardStmt)))))
 
 (defn rn-mg [env mg & {:keys [fname]}]
   (doseq [m (lval (arg mg 2))]
@@ -601,26 +630,36 @@
     HsLet (rn (rn-local-binds env (arg v 2)) (arg v 3))
     HsDo (rn-stmts env (lval (arg v 3)) (fn [_] nil) (arg v 2))
     HsMultiIf (doseq [g (arg v 2)]
-                (let [gv (lval g)] (rn-stmts env (arg gv 2) (fn [e] (rn e (arg gv 3))))))
+                (let [gv (lval g)] (rn-stmts env (arg gv 2) (fn [e] (rn e (arg gv 3))) 'GuardStmt)))
     ExprWithTySig (do (rn env (arg v 2)) (rn env (arg v 3)))
     HsWC (rn env (arg v 2))
     HsSig (rn-sig env sp v)
     MG (rn-mg env v)
-    RecordCon (do (occ-at! env (lsp (arg v 2)) (lval (arg v 2)))
-                  (let [rf (arg v 3)] (doseq [f (arg rf 2)] (rn-fieldbind env f))))
+    RecordCon (let [cn (occ-at! env (lsp (arg v 2)) (lval (arg v 2))) rf (arg v 3)
+                    dd (just-val (arg rf 3))
+                    mentioned (set (keep (fn [f] (some-> (arg (lval f) 2) lval (arg 2) lval rdr-occ)) (arg rf 2)))]
+                (doseq [f (arg rf 2)] (rn-fieldbind env f))
+                ;; {..}: each field not mentioned whose name is a variable in scope that is not a field
+                (when dd
+                  (doseq [fname (get @*fields* cn)]
+                    (let [occ (name-occ fname)
+                          var (or (get (:l env) [:v occ])
+                                  (let [g (lookup-global "var" occ nil)] (when (and g (not= g fname) (not= "fld" (name-ns g))) g)))]
+                      (when (and var (not (contains? mentioned occ)))
+                        (use! var) (emit! (lsp dd) fname) (emit! (lsp dd) var))))))
     RecordUpd (do (rn env (arg v 2))
                   (let [u (arg v 3)] (doseq [f (arg u 2)] (rn-fieldbind env f))))
     FieldOcc (field-label! env v)
     HsForAllTy (let [env1 (rn-tvbs env (tvbs-of (arg v 2)))] (rn env1 (arg v 3)))
     HsOpTy (emit-tree! (rn-type-shape env (list 'L sp v)))
     ;; declarations
-    DataDecl (let [env1 (rn-tvbs env (tvbs-of (arg v 3)))]
-               (rn env (arg v 2)) (rn-defn env1 (arg v 5)))
-    SynDecl (let [env1 (rn-tvbs env (tvbs-of (arg v 3)))]
-              (rn env (arg v 2)) (rn env1 (arg v 5)))
+    DataDecl (let [env1 (rn-qtvs env (arg v 3))]
+               (rn-tc-name env (arg v 2)) (rn-defn env1 (arg v 5)))
+    SynDecl (let [env1 (rn-qtvs env (arg v 3))]
+              (rn-tc-name env (arg v 2)) (rn env1 (arg v 5)))
     ClassDecl (rn-class env v)
-    FamilyDecl (let [env1 (rn-tvbs env (tvbs-of (arg v 5)))]
-                 (rn env (arg v 4))
+    FamilyDecl (let [env1 (rn-qtvs env (arg v 5))]
+                 (rn-tc-name env (arg v 4))
                  (rn env1 (arg v 7))
                  (let [info (arg v 2)]
                    (when (= 'ClosedTypeFamily (con info))
@@ -636,6 +675,13 @@
                              (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o sp))) env fvs))]
                 (rn env (arg v 2)) (rn env1 (arg v 5)) (rn env1 (arg v 6)) (rn env1 (arg v 7)))
     WarningD nil
+    ;; a fixity declaration names what this module declares in any namespace
+    FixitySig (doseq [nl (arg v 2)]
+                (let [occ (rdr-occ (lval nl))]
+                  (doseq [[k ns] [[:v "var"] [:d "data"] [:t "tc"]]]
+                    (when-let [n (or (get (:l env) [k occ])
+                                     (let [g (lookup-global ns occ nil)] (when (and g (= (name-mod g) *mod*)) g)))]
+                      (emit! (lsp nl) n)))))
     HsLit (when (and (contains? *exts* "OverloadedStrings") (= 'HsString (con (arg v 2))))
             (emit! sp (ext-name "var" "GHC.Internal.Data.String" "fromString")))
     ;; a field binding outside patterns
@@ -705,12 +751,12 @@
                HsOuterExplicit (rn-tvbs env (arg b 2))
                (let [fvs (free-tvs env [(arg eq 4) (arg eq 6)])]
                  (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o sp))) env fvs)))]
-    (rn env (arg eq 2)) (rn env1 (arg eq 4)) (rn env1 (arg eq 6))))
+    (rn-tc-name env (arg eq 2)) (rn env1 (arg eq 4)) (rn env1 (arg eq 6))))
 
 (defn- rn-class [env v]
   ;; (ClassDecl ext ctx lname qtvs fix fundeps sigs binds ats atdefs docs)
-  (let [env1 (rn-tvbs env (tvbs-of (arg v 4)))]
-    (rn env1 (arg v 2)) (rn env (arg v 3)) (rn env1 (arg v 6))
+  (let [env1 (rn-qtvs env (arg v 4))]
+    (rn env1 (arg v 2)) (rn-tc-name env (arg v 3)) (rn env1 (arg v 6))
     (doseq [s (arg v 7)] (rn env1 s))
     (doseq [b (arg v 8)] (let [bv (lval b)] (if (= 'FunBind (con bv)) (rn-funbind (assoc env1 :sp (lsp b)) bv) (rn env1 b))))
     (rn (assoc env1 :assoc-tvs true) (arg v 9)) (rn env1 (arg v 10))))
@@ -1081,7 +1127,7 @@
             imp-infos (vec (concat
                             (when implicit?
                               [(process-import!
-                                (list 'L (when mname-l (lsp mname-l))
+                                (list 'L (if mname-l (lsp mname-l) (lsp tree))
                                       (list 'ImportDecl (list 'XImportDeclPass nil nil true)
                                             (list 'L nil (list 'mod "Prelude")) 'NoRawPkgQual 'NotBoot 'NotLevelled false
                                             'NotQualified 'Nothing 'Nothing)))])
@@ -1118,7 +1164,7 @@
                      (rn-exports (lval export-l))
                      (if mname-l
                        (mk-avails (map (fn [{:keys [name parent]}] [name parent]) tops))
-                       (let [mn (lookup-global "var" "main" nil)] (if mn [[mn #{}]] []))))
+                       (let [mn (lookup-global "var" "main" nil)] (when mn (emit! nil mn)) (if mn [[mn #{}]] []))))
             avails (if (map? avails) (vec avails) avails)
             avails (mapv (fn [[n k]] [n (set k)]) avails)
             sorted (fn [xs] (vec (sort xs)))]
