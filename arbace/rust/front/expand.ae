@@ -41,7 +41,7 @@
 
 (defn- root-src ^Src [] (:src *root*))
 
-(declare cfg-item include-expr unesc remark-1 rep-vars format-args expand-derives items->stream items-text concat-text attr-name)
+(declare cfg-pred cfg-item include-expr unesc remark-1 rep-vars format-args expand-derives items->stream items-text concat-text attr-name)
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Tokens
@@ -147,10 +147,12 @@
                 :else it))
         items))
 
-(defn- remark-1 [it mark]
-  (let [^Tok t (:t it)]
-    (assoc (titem (lx/tok (.-kind t) -1 -1 (.-sym t) (.-x t) (.-y t) (.-z t) (.-sp t)) mark)
-           :orig (if (>= (.-lo t) 0) t (:orig it)))))
+(defn- remark-1
+  ([it mark] (remark-1 it mark nil))
+  ([it mark sp]
+   (let [^Tok t (:t it)]
+     (assoc (titem (lx/tok (.-kind t) -1 -1 (.-sym t) (.-x t) (.-y t) (.-z t) (or sp (.-sp t))) mark)
+            :orig (if (>= (.-lo t) 0) t (:orig it))))))
 
 (defn text->items
   "Rust text as foreign items of MARK (a builtin's template); identifiers __rf_frag_N replaced by (frags N)"
@@ -426,7 +428,9 @@
                           ci (cur-index p)
                           k (.indexOf ^java.util.List starts (Long/valueOf ci))]
                       (when (neg? k) (throw (ex-info "expand: a fragment ends inside a group" {:expand true})))
-                      [{:frag kind :ast (cout ctx r)} (+ i k)])))
+                      [{:frag kind :ast (let [a (cout ctx r)]
+                                          (if (= kind :block) (list 'Expr :kind (list 'Block a 'None) :span (second (drop-while #(not= :span %) a)) :attrs []) a))}
+                       (+ i k)])))
       (catch arbace.lang.ExceptionInfo e (when-not (:expand (ex-data e)) (throw e)) nil))))
 
 (declare m-seq)
@@ -484,10 +488,11 @@
   (vec (mapcat
         (fn [p]
           (cond
-            (:tok p) [(remark-1 (:tok p) mark)]
+            ;; transcribe.rs: a token of the definition is Alone; a delimiter keeps its spacing but `]` closes Alone
+            (:tok p) [(remark-1 (:tok p) mark :Alone)]
             (:crate p) [(titem (ftok :Ident "$crate" false nil 0 :Alone) mark)]
             (:group p) (let [g (:group p)]
-                         [{:g (:g g) :open (remark-1 (:open g) mark) :close (remark-1 (:close g) mark)
+                         [{:g (:g g) :open (remark-1 (:open g) mark) :close (remark-1 (:close g) mark (when (= :OpenBracket (:g g)) :Alone))
                            :kids (transcribe (:sub p) env mark)}])
             (:var p) (let [b (get env (:var p) ::none)]
                        (cond (= b ::none) [(titem (ftok :Dollar nil nil nil 0 :Alone) mark) (titem (ftok :Ident (:var p) false nil 0 :Alone) mark)]
@@ -498,7 +503,7 @@
                        (apply concat
                               (for [k (range n)]
                                 (let [env' (reduce (fn [e v] (let [b (get env v)] (if (:seq b) (assoc e v (nth (:seq b) k)) e))) env vs)]
-                                  (concat (when (and (pos? k) (:sep p)) [(remark-1 (:sep p) mark)])
+                                  (concat (when (and (pos? k) (:sep p)) [(remark-1 (:sep p) mark :Alone)])
                                           (transcribe (:rep p) env' mark))))))
             :else (throw (ex-info "expand: transcriber element" {:p p}))))
         pats)))
@@ -575,8 +580,10 @@
       "stringify" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (items-text input) :suffix 'None)) :span (foreign-span m) :attrs [])}
       "line" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Integer :symbol (str (first (:span call))) :suffix (list 'Some "u32"))) :span (foreign-span m) :attrs [])}
       "column" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Integer :symbol (str (second (:span call))) :suffix (list 'Some "u32"))) :span (foreign-span m) :attrs [])}
-      "file" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (:file *root*) :suffix 'None)) :span (foreign-span m) :attrs [])}
+      "file" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (.getCanonicalPath (File. ^String (:file *root*))) :suffix 'None)) :span (foreign-span m) :attrs [])}
       "include" {:ast (include-expr input)}
+      "cfg" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Bool :symbol (str (boolean (second (cfg-pred input)))) :suffix 'None))
+                        :span (foreign-span m) :attrs [])}
       "concat" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (concat-text input) :suffix 'None)) :span (foreign-span m) :attrs [])}
       (throw (ex-info (str "expand: the builtin " nm " is not taken") {:expand true})))))
 
@@ -633,7 +640,7 @@
     (dump-tts->items (second (fget args :tokens)) nil)))
 
 (def ^:private std-builtins #{"format_args" "format_args_nl" "const_format_args" "panic" "unreachable" "assert" "stringify"
-                              "line" "column" "file" "concat" "include"})
+                              "line" "column" "file" "concat" "include" "cfg"})
 
 (declare expand-form)
 
@@ -644,7 +651,7 @@
         input (mac-input mac)
         user (get @*macros* nm)
         r (cond user (expand-rules user input)
-                (contains? std-builtins nm) (builtin nm input {:span (fget mac :span)})
+                (contains? std-builtins nm) (builtin nm input {:span (let [sp (fget (fget mac :path) :span)] (if (vector? sp) sp (vec (take 4 (drop 2 sp)))))})
                 (get *std* nm) (expand-rules (get *std* nm) input)
                 :else (throw (ex-info (str "expand: no macro " nm) {:expand true})))]
     (if (map? r)

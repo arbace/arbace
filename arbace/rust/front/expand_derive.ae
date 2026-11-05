@@ -128,8 +128,20 @@
       (head "" false "$crate::cmp::Eq" "$crate::cmp::Eq"
             (str "#[inline] #[doc(hidden)] #[coverage(off)] fn assert_fields_are_eq(&self) { " (asserts "$crate::cmp::AssertParamIsEq" all-tys) "}"))
       "Hash"
-      (let [fs (fields shape)
-            body (str/join "; " (map #(str "$crate::hash::Hash::hash(&self." % ", state)") fs))]
+      (let [body (if (= kind :struct)
+                   (str/join "; " (map #(str "$crate::hash::Hash::hash(&self." % ", state)") (fields shape)))
+                   (let [with (filter #(seq (fields (second %))) variants)
+                         discr "let __self_discr = $crate::intrinsics::discriminant_value(self); $crate::hash::Hash::hash(&__self_discr, state)"]
+                     (if (empty? with)
+                       discr
+                       (str discr "; match self { "
+                            (str/join " " (map (fn [[v sh]] (let [n (count (fields sh))
+                                                                  hs (map #(str "$crate::hash::Hash::hash(__self_" % ", state)") (range n))]
+                                                              (str (pat (str name "::" v) sh "__self_") " => "
+                                                                   (if (= 1 n) (first hs) (str "{ " (str/join "; " hs) " }")) ",")))
+                                               with))
+                            (if (< (count with) (count variants)) " _ => {}" "")
+                            " }"))))]
         (head "" false "$crate::hash::Hash" "$crate::hash::Hash"
               (str "#[inline] fn hash<__H: $crate::hash::Hasher>(&self, state: &mut __H) { " body " }")))
       "Default"
@@ -155,21 +167,34 @@
                 (str "#[inline] fn partial_cmp(&self, other: &" self-ty ") -> $crate::option::Option<$crate::cmp::Ordering> { "
                      (if (seq fs) (chain fs) "$crate::option::Option::Some($crate::cmp::Ordering::Equal)") " }"))))
       "Ord"
-      (let [fs (fields shape)
-            chain (fn chain [fs]
-                    (let [c (str "$crate::cmp::Ord::cmp(&self." (first fs) ", &other." (first fs) ")")]
-                      (if (next fs)
-                        (str "match " c " { $crate::cmp::Ordering::Equal => " (chain (next fs)) ", cmp => cmp, }")
-                        c)))]
+      (let [chain (fn chain [pairs]
+                    (let [[a b] (first pairs) c (str "$crate::cmp::Ord::cmp(" a ", " b ")")]
+                      (if (next pairs)
+                        (str "match " c " { $crate::cmp::Ordering::Equal => " (chain (next pairs)) ", cmp => cmp, }")
+                        c)))
+            body (if (= kind :struct)
+                   (let [fs (fields shape)]
+                     (if (seq fs) (chain (map #(vector (str "&self." %) (str "&other." %)) fs)) "$crate::cmp::Ordering::Equal"))
+                   (let [with (filter #(seq (fields (second %))) variants)
+                         discr "let __self_discr = $crate::intrinsics::discriminant_value(self); let __arg1_discr = $crate::intrinsics::discriminant_value(other); "]
+                     (if (empty? with)
+                       (str discr "$crate::cmp::Ord::cmp(&__self_discr, &__arg1_discr)")
+                       (str discr "match $crate::cmp::Ord::cmp(&__self_discr, &__arg1_discr) { $crate::cmp::Ordering::Equal => match (self, other) { "
+                            (str/join " " (map (fn [[v sh]] (let [n (count (fields sh))]
+                                                              (str "(" (pat (str name "::" v) sh "__self_") ", " (pat (str name "::" v) sh "__arg1_") ") => "
+                                                                   (chain (map #(vector (str "__self_" %) (str "__arg1_" %)) (range n))) ",")))
+                                               with))
+                            (if (< (count with) (count variants)) " _ => $crate::cmp::Ordering::Equal," " _ => unsafe { $crate::intrinsics::unreachable() }")
+                            " }, cmp => cmp, }"))))]
         (head "" false "$crate::cmp::Ord" "$crate::cmp::Ord"
-              (str "#[inline] fn cmp(&self, other: &" self-ty ") -> $crate::cmp::Ordering { "
-                   (if (seq fs) (chain fs) "$crate::cmp::Ordering::Equal") " }")))
+              (str "#[inline] fn cmp(&self, other: &" self-ty ") -> $crate::cmp::Ordering { " body " }")))
       (throw (ex-info (str "expand: the derive " trait " is not taken") {:expand true})))))
 
 (defn- no-colon-spans
   "The builder's generic parameters have no colon span"
   [x]
-  (cond (and (seq? x) (= 'GenericParam (first x))) (apply list (map no-colon-spans (fset x :colon_span 'None)))
+  (cond (= x '(Unsafe UserProvided)) '(Unsafe CompilerGenerated)
+        (and (seq? x) (= 'GenericParam (first x))) (apply list (map no-colon-spans (fset x :colon_span 'None)))
         (and (seq? x) (= 'Local (first x))) (apply list (map no-colon-spans (fset x :colon_sp 'None)))
         (seq? x) (apply list (map no-colon-spans x))
         (vector? x) (mapv no-colon-spans x)
