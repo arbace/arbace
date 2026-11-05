@@ -123,3 +123,71 @@ needs `cpp-native2` merged first. The sample check above is the evidence; its sc
 ## Decided (2026-11-05, the user)
 
 CPR1-CPR4 as recommended: CPR1 (a), the print cell reads the oracle's rejected files natively with the new judge level, after cpp-native2's merge; CPR2 (a), oracle-rejects split after it; CPR3, gxx-objects-location by design now, split by cause at the next re-record; CPR4, -fcoroutines mapped to c++20 for clang with CPR1's re-record.
+
+## As built: CPR1, CPR2, CPR4 (2026-11-05)
+
+On the branch `cpp-cpr1` (from `cpp-print-review`), light tier (stage 0 by `ARBACE_HOST_EXE`, 4 jobs, no gate, no corpus run).
+
+- **The merge.** `cpp-native2` (94d34b82d) merged (d71d82395). Two conflicts, both additive: `bin/repr-cpp` (CX10's `roundtrip-corpus` verb and
+  CX9/CX11's `dg` and `native-check` verbs all kept, `read|print` with CX11's `REPR_CPP_HOST`; the header's `--reader native` line kept under
+  `roundtrip`) and `doc/cpp/CPP-SURVEY.md` (CX9's and CX11's As built sections and CX10's, all kept). `cpp-tree` not merged: the print's level 1
+  compares native with native, the tree check (native against clang's tree) is not needed. One fix the merge called for:
+  `test/cpp/selftest/known-names.sh` knows CX9's corpus `gxx-modules/` (the known file's five modules names were "not qualified").
+- **CPR1, the judge level R** (`bin/lib/repr-cpp/roundtrip`, `arbace/repr/cpp/rtcheck.ae`). A file whose original clang rejects is read natively
+  whatever `--reader` says (rtcheck `run`'s new ORIG argument, the original's dumps: its status and diagnostics are clang's rejection), printed,
+  and its print read natively again (level 1, the two `.ae` texts equal). Then level R (`rtcheck/level-r`): the print fails like the original for
+  both compilers: clang's diagnostics are the oracle's dumps' (`WORK/orig/NAME.err`, `WORK/dump2/NAME.err`), g++'s a `-fsyntax-only
+  -fdiagnostics-plain-output` run with the file's g++ options on the original and on the print (`WORK/diag/{orig,print}/NAME.gxx.{log,status}`);
+  each compiler's status (accepting or not) the same and its errors the same multiset by message (`diag-errors`: the `error:`/`fatal error:` lines
+  from `error:` on, sorted, a `FILE:LINE[:COL]` inside a message dropped). No AST nor objects are made for them (level 4 skipped). The verdicts:
+  level 1 and R hold (and level 5, mode `:full`, when run): **pass**; the native read refused or threw: **oracle-rejects** (as before, the design
+  class); else a failure unless the known file classes the file **:rejected-differs**. results.tsv's read column says `rejected-native` (with
+  `:clang` or `:gxx` when level R fails), the summary counts `:rejected-native` and `:rejected-native-pass`.
+- **CPR2, the split.** `test/cpp/divergences-print.edn`: `:rejected-differs` (deferred: the native parser's, the converter's and the printer's open
+  cases, level 1 or R) beside `:oracle-rejects` (design, now "the native reader cannot read it"); the known file's `:classes` has its text and the
+  judge's `fits` maps it to the levels `:rejected-l1`, `:rejected-r`; `test/reap/main.ae`'s oracle-rejects text says so.
+- **The re-record's tool.** `bin/repr-cpp roundtrip ... --record-known-rejected`: the judge's rows first, then `rtcheck known-rejected` writes the
+  failing rejected-native files (levels 1 or R, no known entry yet) into the known file's `:files` as `:rejected-differs` (a block after `:files {`
+  under a comment naming the key), then the judge again; `bin/repr-cpp dg --corpus modules --record` passes it too (the modules part's round trip
+  reads its rejected importers natively as well).
+- **CPR4.** In the round trip's list (not the corpus lists, so pp-check's tokens are unchanged): a file of g++.dg's `coroutines/` (coroutines.exp
+  gives it `-fcoroutines`) or whose g++ options have `-fcoroutines`, below C++20, is read and compiled by clang at `c++20` (`gnu++20` for gnu++),
+  g++ keeping its standard: `-std=STD -fcoroutines` before its options. Two coroutine files clang now accepts and g++ rejects are the known
+  file's `:orig-fails` (`gxx-dg/coroutines/pr105475.C`, `pr115858.C`, `#{:gxx}`).
+- `test/cpp/selftest/rejected-native.sh`: pass, level R by g++ and by clang (clang accepting the print), the native refusal staying
+  oracle-rejects, the summary's counts, `known-rejected` and the judge then known.
+
+Checked (commands from the worktree, `ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace`):
+- the samples of the oracle's rejected files (from the every-10 lists, `bin/repr-cpp pp-check --corpus C --sample 10 --lists-only`; lists without
+  a key, `bin/repr-cpp roundtrip LIST WORK --no-objects`): the review's seeded 48 (seed 7) and 14 more of g++.dg (6 modules), 4 of g++.old-deja
+  and 4 of c-c++-common, then 100 more of g++.dg (seed 23): **162 files not under `coroutines/`, 144 pass (89%), 18 `rejected-differs` (3 at
+  level 1, 15 at level R), none refused by the native reader**; of the seeded 42 not under `coroutines/`, 40 pass. The 18 are the printer's and
+  the native parser's: `u8` literals at `-fchar8_t` (the print's static assertions fail), `__integer_pack` read as text, an invalid
+  `template enum`, `namespace X alignas`, a top-level `asm` and the like, where the print of an invalid construct is not the original's.
+  About 21 s for 100 files at 4 jobs.
+- `coroutines/` (the 32 recorded rejections of gxx-dg-every-10, with objects): clang at C++20 accepts **19**: 17 pass every level, 2 are the
+  `:orig-fails` above; of the 13 it still rejects, 12 pass at level R, 1 (`ramp-return-a.C`, `-std=c++14`) differs at level 1.
+- `bin/repr-cpp roundtrip-corpus gxx-dg-essential` (the gate's cpp-print-essential): its 2 recorded rejections (`DRs/dr2262.C`,
+  `cpp1y/auto-fn18.C`) pass at level R, 2 improvements; recorded again (`--record-results`, `roundtrip-results/gxx-dg-essential.edn`: 33 files,
+  the two `:pass`); `roundtrip-corpus samples`: 8 pass, 1 known, as before.
+- selftests: known-names, known-levels, results-hold, results-record, results-nonpass, rt-objects, rejected-native: ok.
+
+The measure, by the samples: of the 833 `oracle-rejects` (g++.dg 745, g++.old-deja 88), about **19 leave by CPR4** (clang accepts them, judged at
+every level), and of the rest about **89% (~725) move to pass and ~11% (~90) to `rejected-differs`**, ~0 stay `oracle-rejects`; c-c++-common's 79
+the same way. The exact numbers are the night's re-record.
+
+The night's command (the re-record, a heavy run: the three lists' every-10 and the modules part; about 2,500 files, the rejected ones fast):
+
+    for k in gxx-dg-every-10 gxx-old-deja-every-10 c-c++-common-every-10; do
+      bin/repr-cpp roundtrip-corpus $k --record-oracle --replace-oracle --record-known-rejected --record-results --replace-results
+    done
+    bin/repr-cpp dg --corpus modules --record     # gxx-modules-*: its rejected importers read natively
+
+then `c-c++-common-every-10` out of `test/repr/cpp/roundtrip-results/pending.edn` (its record now exists), the new `:rejected-differs` entries
+read over (each a case for the printer or the native parser), `bin/reap` (C++'s print cell). Until it runs, a whole-list run of a corpus whose
+recorded rejections now pass fails as an improvement (`-all` keys: gxx-modules-all) and a recorded `:oracle-rejects` that is now
+`rejected-differs` fails as a change; the every-10 sample runs count improvements only. CPR3 is unchanged (by design now).
+
+Left: the re-record above; the `:rejected-differs` cases themselves; the native parser's error recovery (a syntax error it rejects stays
+oracle-rejects, none in the samples).
+
