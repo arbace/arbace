@@ -701,3 +701,7 @@ the order they land:
 - **ORS18 The dg record's size.** `test/c/ref-dg-gcc15.edn` will be about 460 KB committed (627 files' diagnostics).
   - Options: (a) committed, within ORS11 (a)'s 3 MB for C (C's records then about 1.5 MB); (b) a pack.
   - *Recommended: (a)*: it is an outcome (class A), read by the essential gate's family, and small.
+
+## Decided (2026-11-05, the user: ORS15-ORS18)
+
+ORS15-ORS18 (a): the library into bin/lib/ excluded from gate_key, and the record judges folded into the embedded c23check and rtcheck, both in the GTS240 change; both packs kept in the store outside the clone; the dg record committed.
