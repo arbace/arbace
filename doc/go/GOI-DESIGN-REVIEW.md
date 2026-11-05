@@ -283,3 +283,15 @@ All six proposals as recommended: (1) gc's flag-diagnostic programs by design fo
   earlier work's `race`, `toolchain` and four speed programs, now recorded).
 - Checked by records alone: `bin/reap` 0 problems after `bin/reap --record` (the matrix record had been stale since the
   earlier commits of this branch); `bin/goi divergences --aot` and `bin/goi divergences` pass.
+
+## As built: the budgets of fibish and fibish_closure, winbatch at AOT (2026-11-05)
+
+- `abi/fibish` and `abi/fibish_closure` measured with `bin/goi check --only` (one at a time, one job, main's gate
+  executable as `GOI_RUN_EXE`, at a trial limit of 300 s): each passes, 24 and 25 s of wall time for the check (read
+  of the corpora included), far under what was feared. Their limits in `test/goi/timeouts.txt` are 60 s (a 2.5 times
+  margin); their known lines are gone from `test/goi/check-known.edn`, their rows `:pass` in `check-linux-amd64.edn`.
+  The class `speed` is empty.
+- `winbatch` at the AOT level (`bin/goi check --aot --only '^winbatch\.go$'`): 1 pass (the `run_env` fix reached it);
+  its line of `test/goi/check-aot-known.edn` is gone, its row `:pass`, the class `toolchain` empty at that level.
+- `bin/reap --record`: Go eval 1,675 pass, 162 not, none over budget; Go AOT 1,691 pass, 146 not. `bin/goi divergences`,
+  `--aot` and `bin/reap`: 0 problems.
