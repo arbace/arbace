@@ -220,7 +220,7 @@ By programs per day, then by what they build for:
 5. Call depth for program mode: 1 program, 0.5-1 d (memory to measure).
 6. `issue8606b`'s comparison order: 1 program, 0.5-1 d.
 7. (done, 2026-11-05, branch `goi-liveness`: "As built: liveness") Liveness (dead-slot clearing) + `uintptrescapes`: 10 programs, the largest real goi feature.
-8. `:full` forms in the checker and interpreter (GC49 (b)): 3 + 7 + 1 programs, 6-9 d, and AOT's `positions`.
+8. (done, 2026-11-05, branch `goi-full-forms`: "As built: :full forms") `:full` forms in the checker and interpreter (GC49 (b)): 3 + 7 + 1 programs, 6-9 d, and AOT's `positions`.
 9. gc in the executable (Proposed 1): ~115 programs, 5-7 d, which also gives types2's two (`no-forms`) and
    the 7 stack-frame programs.
 10. `converthash`, `maymorestack`: 2 programs, 2-3 d.
@@ -372,3 +372,100 @@ executable, with and without `GOI_LIVENESS=0` in the environment.
 ## Decided (2026-11-05, the user)
 
 Proposed 7 (a): goi's adapters registry stays strong; issue54343 stays known until another program needs a weak registry.
+
+## As built: :full forms (2026-11-05, branch `goi-full-forms`)
+
+Item 8 of the ranked plan, funded by the user after liveness: goi's checker and interpreter read repr/go's forms of
+mode `:full` (doc/go/SPEC.md §10.2), which keep every position with its column and the source's spellings. The eleven
+programs the review names pass (the three frames programs, the seven errorcheck ones, the line-directives one), and
+the AOT level's three `positions` programs pass when their `:full` forms are printed back (Proposed 8).
+
+### Where the forms come from
+
+- `bin/goi check`'s errorcheck programs are checked on the corpus `linux-errtest-full` (`bin/repr-go read --full
+  --corpus linux-errtest`, which the AOT level already read; now read at the interpreted level too) when the program
+  has forms there, else as before (`linux-errtest`, the raw forms, gc's syntax errors). A `/*line` directive no longer
+  makes a program unsupported when its forms are `:full`.
+- Its run programs are run from the new corpus `linux-test-full` (`bin/repr-go read --full --corpus linux-test`, 64 s
+  with 32 threads here, kept by the same key as the others). Directory tests stay on `linux-dirtest`.
+- `arbace.go.run` takes a package of `:positions :full` (its package file) through `full-lines` (the raw forms'
+  `raw-lines`, generalized): each form's `:line` is its node's first position's line, `:go/end` its closing brace's,
+  `:go/breaks` its literal children's from `:go/apos`, the `:go/` metadata kept, the first position kept as `:go/raw`.
+
+### The checker (`arbace/go/check/`, evaluated from the checkout: no back-end change)
+
+- **Spellings** (`code_expr.ae`): a literal's text is its parent's `:go/atext` (and `:go/aparens`), found by the
+  literal's identity among the parent's children (`lit-text`; `*lit-parent*`, bound by `with-lit-parent` in
+  `expr-internal`, the statements and the package-level `const` and `var` specs, `:lit-spec`). `expr-str` writes it
+  and an operand records it (`:text`, `operand-str`); `(rune ...)` and `(imaginary ...)` their `:go/text`; `:go/parens`
+  already written, now not doubled where `expr-str` adds its own (`(*T).M`, `(*T)(x)`). types2's `langCompat`
+  (`lang-compat!`, `code_call.ae`): under `-lang` before go1.13 a numeric literal's spelling with `_`, `0b`, `0o` or a
+  hexadecimal float is an error. Programs: `issue19947`, `issue56220`, `issue31747`.
+- **Columns** (`env.ae`): `col-of` (a name's `:name-pos`, else the node's first position); `err!` records the error's
+  column (`:col`, `*col*`); a type parameter's object its `:col`, so `cannot infer S (declared at f.go:9:8)`
+  (`infer.ae`; `issue68292`).
+- **Lines the `:lines` forms lack**: too few values in a struct literal at its closing brace (`:go/end` from `:rbrace`,
+  `issue23732`); an unknown field at its key (a `[k v]` key's own position, or a keyword key's `:go/apos`; `issue24339`);
+  the names inside a multi-line interface type in a tag have their own positions (`funcdup2`, free with the forms).
+- **A final expression statement** (`code_stmt.ae`): mode `:full` writes an implicit return's `:return` position on its
+  function, so a function whose last form is an expression without one ends in an expression statement, not a return
+  (`:no-implicit-return`): `missing return` as gc says it (`return.go`).
+- **Line directives with columns** (`run.ae`'s `line-map`): `//line` at a line's start and `/*line FILE:LINE[:COL]*/`
+  anywhere, gc's updateBase; an error at `[line col]` is mapped by the last directive before it (`issue24339`).
+
+### The interpreter
+
+- **Frames at gc's node positions** (`run.ae`, a program's run only: `*gc-pos*`): a call's line is its `(`, an index or
+  slice expression's its `[` (gc's syntax tree positions them there), so a panic in `v.\n A()` is at `A()`'s line
+  (`devirtualization_nil_panics`).
+- **`/*line` directives** (`key-lines`): in a Go file with one, each form's line is a key of its raw position
+  (line × 1000 + column) and the file gets one `//line` directive per key used (its line the key less one), which the
+  builder's `line-dirs!` and the back end's `CodeLineDirs` already apply (`repl.ae`'s `:line-dirs` takes the file's
+  `:line-keys`): every frame line maps to gc's file and line, positions within a line included (`issue22662`).
+- **A bounds check's line** (`build.ae`'s `at-index-line`, the back end's new node `AtLineI`, `go/arbace/goi/frames.ae`,
+  registered by `test/goi/gen_nodes.ae`): an index or slice expression whose line is not its statement's (`*stmt-line*`,
+  `body-node`'s) evaluates its index operand at its own line, so the panic is at the `[` (`issue29504`: after
+  `/*line :999999:1*/`). An executable without `AtLineI` builds as before.
+
+### Checked (sample, light: main's seed as the host; an executable built for this branch from the gate's j2g program with
+this goi package, `bin/build-go`, as for liveness)
+
+- `bin/goi check --only` on the eleven: all pass (`issue24339` was unsupported, the others known).
+- The errorcheck corpus whole (659 programs, `--list` of `linux-errtest`'s): 538 pass, 112 unsupported, 4 known, 3 skip,
+  0 fail after one fix (`issue43428`, `range2`: parentheses doubled, fixed and rerun: pass); before, 532 pass, 113
+  unsupported, 11 known. 4 s a program on both corpora (the checker evaluated from the checkout).
+- Run programs: two samples of `linux-test` (every 11th from two offsets, 200 run programs): 198 pass, 2 known
+  (`finprofiled`, `nilptr`, as before), no regression; then `bin/goi check --essential` (below).
+- AOT: `GOI_AOT_LAYOUT=full bin/goi check --aot --only` on the three positions programs: 3 pass (printed back to their
+  text by `bin/build-go --layout full`, now accepted).
+- `bin/goi divergences`: 1,694 pass, 143 in 12 classes (the classes `frames` and `line-directives` emptied and removed,
+  `spellings` down to `bug217` and `issue11614`).
+
+The records' rows of the eleven programs are updated (`test/goi/check-linux-amd64.edn`; their lines of
+`check-known.edn` removed); `test/reap/matrix.edn` is left to the night's record. Not run: the whole check.
+
+### The night's command
+
+The checker and the builder are embedded and the back end has a new node, so the gate rebuilds the executables:
+
+    bin/gate --full        # or, for goi alone: bin/goi check --jobs 8 ; bin/goi check --aot --jobs 8 ; bin/goi divergences
+    bin/generated-check    # goi's registry (test/goi/gen_nodes.ae writes AtLineI)
+
+The first `bin/goi check` reads `linux-test-full` (about a minute) and, at the interpreted level, `linux-errtest-full`.
+Expected: 11 programs from known or unsupported to pass, no other change; then `bin/goi check --record` and
+`bin/reap --record`.
+
+### Left and proposed
+
+- `issue11614` (a type literal written whole by types2's syntax printer, `interface{int}`, abridged by goi as go/types
+  does) and `bug217` (two receivers: the forms say another program) stay in `spellings`.
+- The interpreted run reads `:full` forms for every run program: the gc positions above apply to all (a call split over
+  lines now reports its `(`'s line, as gc).
+
+8. **The AOT level's run programs from `:full` forms.** (a) as now: the lines layout of `:lines` forms, the three
+   `positions` programs known (cost 0). (b) every run program built from its `:full` forms printed back to its text
+   (`GOI_AOT_LAYOUT=full` as the default: the three pass, but the level no longer tests the lines layout's line
+   placement on run programs; one more corpus read, already made for the interpreted level). (c) `:full` only for the
+   programs that observe positions: their source names `runtime.Caller`, `runtime.Callers` or a `/*line` directive
+   (a rule, not a list; 0.2 day). *Recommended: (c)*: the positions programs pass and the rest keep testing the lines
+   layout.

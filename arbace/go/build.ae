@@ -42,6 +42,23 @@
   frames\"); an executable built before it does not."
   (delay (try (op "CodeFrame" nil "" "" 0 0 false) true (catch Throwable _ false))))
 
+(def ^:private at-line-i?
+  "Whether goi's back end has AtLineI (mode :full's positions within a statement)."
+  (delay (try (op "AtLineI" nil 0) true (catch Throwable _ false))))
+
+(def ^:dynamic *stmt-line*
+  "The line the statement being built stores in its frame (body-node's), or nil."
+  nil)
+
+(defn- at-index-line
+  "Index operand node x of index or slice node n, evaluated at n's line (its [, mode :full's)
+  when that is not its statement's: gc's line of the bounds check's panic."
+  [x n]
+  (let [l (long (or (:line n) 0))]
+    (if (and x (pos? l) *stmt-line* (pos? (long *stmt-line*)) (not= l (long *stmt-line*)) @code-frames? @at-line-i?)
+      (op "AtLineI" x l)
+      x)))
+
 (def ^:private frame-fn*
   (delay (try (op "FrameFn" nil) true (catch Throwable _ false))))
 
@@ -818,11 +835,11 @@ GR9a)."
   (let [x (:x n) u (t/under (:type x))]
     (cond
       (and (vector? u) (= :slice (nth u 0)))
-      (op "SliceElemP" (exk x :R) (exk (:index n) :I) (desc (nth u 1)) (uidx? (:index n)))
+      (op "SliceElemP" (exk x :R) (at-index-line (exk (:index n) :I) n) (desc (nth u 1)) (uidx? (:index n)))
       (and (vector? u) (= :array (nth u 0)))
-      (op "ArrayElemP" (value-place x) (exk (:index n) :I) (desc (:type x)) (uidx? (:index n)))
+      (op "ArrayElemP" (value-place x) (at-index-line (exk (:index n) :I) n) (desc (:type x)) (uidx? (:index n)))
       (and (vector? u) (= :pointer (nth u 0)))
-      (op "ArrayElemP" (op "DerefP" (exk x :R)) (exk (:index n) :I) (desc (nth u 1)) (uidx? (:index n)))
+      (op "ArrayElemP" (op "DerefP" (exk x :R)) (at-index-line (exk (:index n) :I) n) (desc (nth u 1)) (uidx? (:index n)))
       :else (unsupported! (str "indexing " (tstr (:type x))) "GR3"))))
 
 (defn place
@@ -958,13 +975,15 @@ GR9a)."
          :convert-iface [:R (iface-content (ex (:x n) (:type (:x n))) (:type (:x n)))]
          :field (load-p (field-place n) (:type n))
          :index (if (t/string-type? (:type (:x n)))
-                  [:I (op "IndexS" (exk (:x n) :S) (exk (:index n) :I) (uidx? (:index n)))]
+                  [:I (op "IndexS" (exk (:x n) :S) (at-index-line (exk (:index n) :I) n) (uidx? (:index n)))]
                   (load-p (index-place n) (:type n)))
          :map-index (let [m (:x n) mt (:type m) [_ K V] (t/under mt)
                           kn (elem-node (:key n) K)]
                       [(kind V) (op (str "MapGet" (name (kind V))) (exk m :R) kn (desc mt))])
          :slice (let [x (:x n) u (t/under (:type x))
                       [lo hi mx] (map #(when % (exk % :I)) (concat (:indexes n) (repeat nil)))
+                      ;; the first bound evaluated at the expression's line (at-index-line)
+                      [lo hi mx] (cond lo [(at-index-line lo n) hi mx] hi [lo (at-index-line hi n) mx] :else [lo hi mx])
                       um (uidx-mask (:indexes n))]
                   (cond
                     (t/string-type? (:type x)) [:S (op "SliceString" (exk x :S) lo hi um)]
@@ -2324,7 +2343,7 @@ GR9a)."
   can panic or call store in the frame, for traces: §10.6, GR5, GR5.1)."
   [stmts]
   (let [ss (vec stmts)
-        built (mapv stmt ss)
+        built (mapv #(binding [*stmt-line* (stored-line %)] (stmt %)) ss)
         labels (mapv (fn [s] (cond
                                (= :label (:op s)) (label-code! (:label s))
                                ;; a let's block whose first declaration is labeled (F1)
