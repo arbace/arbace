@@ -263,11 +263,15 @@
             starts (into (sorted-set 0)
                          (concat (map #(nth % 2) handlers)
                                  (keep (fn [[op arg]] (when (:jump (get ir/ops op)) arg)) ins)
-                                 (mapcat (fn [n] (let [[op] (nth ins n)]
-                                                   (cond (exec? n) [n (inc n)]
-                                                         (= op :call) [(inc n)])))
-                                         (range nc))))
+                                 (mapcat (fn [n] (when (exec? n) [n (inc n)])) (range nc))))
             start? (fn [n] (contains? starts n))
+            ;; a call's next instruction: where the stack's way (AotStackCall) re-enters, its label :C<n> taking the
+            ;; frame's slots back into the locals the direct way left there, unless it is a block start (queue 216d)
+            reentries (into (sorted-set) (keep (fn [n] (when (and (= (first (nth ins n)) :call) (< (inc n) nc)
+                                                                   (not (start? (inc n)))
+                                                                   (some? (get depth0 (inc n))))
+                                                          (inc n)))
+                                               (range nc)))
             fuse? (fn [n] (let [[op] (nth ins n) [nop] (get ins (inc n))]
                             (and (#{:to-bool :not} op) (#{:jump-if-false :jump-if-true} nop) (< (+ n 2) nc)
                                  (not (start? (inc n))) (not (contains? mcall-at (inc n))))))
@@ -304,6 +308,45 @@
                        (chk! n false (list 'set! (list 'values (sv lo) 'err) call))
                        (vreset! d (inc lo)))))
             goto-stmts (fn [target] (concat (spill-stmts @m @d) [(list 'goto (lbl target))]))
+            ;; call [k] at n (method? after a method call's load-attr: its two slots then the k arguments) directly
+            ;; from the locals (AotCallV, AotCallMethodV: a compiled callee's frame run by the runtime from here, its
+            ;; value in a local, the locals below kept); the stack's way (AotStackCall: everything written back,
+            ;; AotCall or AotCallMethod, the callee's frame pushed for runFrames, re-entered at n+1)
+            call! (fn [n k kw method?]
+                    (let [lo (- @d (if method? (+ k 2) (inc k)))
+                          nxt (inc n)]
+                      (when-not (or (contains? reentries nxt) (start? nxt)) (fail! (str "no re-entry after " n)))
+                      (take! lo)
+                      (emit! (lasti n))
+                      (let [m0 @m d0 @d
+                            xs (map sv (range lo d0))]
+                        ;; the value into tmp: the stack's way writes back the callable's local as it was
+                        (emit! (list 'set! '(values tmp err)
+                                     (if method?
+                                       (list* 'py/AotCallMethodV 't 'f xs)
+                                       (list* 'py/AotCallV 't 'f (if (integer? kw) kw -1) xs))))
+                        (emit! (list* 'when '(== err py/AotStackCall)
+                                      (concat (spill-stmts m0 d0)
+                                              [(set-pc n)
+                                               (list 'set! 'err (if method?
+                                                                  (list 'py/AotCallMethod 't 'f k)
+                                                                  (list 'py/AotCall 't 'f k (if (integer? kw) kw -1))))
+                                               '(when (!= err nil) (return nil err))
+                                               (list 'goto (if (contains? reentries nxt) (keyword (str "C" nxt)) (lbl nxt)))])))
+                        (vreset! d lo)
+                        (emit! (list* 'when '(!= err nil) (err-path n false '(return nil err))))
+                        (emit! (list 'set! (sv lo) 'tmp))
+                        (vreset! d (inc lo))
+                        (when (contains? reentries nxt)
+                          (let [after (keyword (str "A" nxt))]
+                            (emit! (list 'goto after))
+                            (emit! (list 'label (keyword (str "C" nxt))))
+                            (when check-depths
+                              (emit! (list 'when (list '!= '(len (.-Stack f)) (inc lo))
+                                           (list 'panic (str "aot regs: " (:qualname c) " re-entered at " nxt " depth " (inc lo))))))
+                            (doseq [j (range m0 (inc lo))] (emit! (list 'set! (sv j) (list 'aget '(.-Stack f) j))))
+                            (emit! (list 'py/AotDrop 'f m0))
+                            (emit! (list 'label after)))))))
             truth! (fn [n neg target]
                      ;; the top's truth: to target when it is (not neg)
                      (take! (dec @d))
@@ -344,10 +387,7 @@
                         (recur (inc n)))
 
                     (contains? mcall-at n)
-                    (do (spill-all!)
-                        (emit! (lasti n)) (emit! (set-pc n))
-                        (chk! n false (list 'set! 'err (list 'py/AotCallMethod 't 'f (first arg))))
-                        (let [dn1 (get depth (inc n))] (vreset! m dn1) (vreset! d dn1))
+                    (do (call! n (first arg) nil true)
                         (recur (inc n)))
 
                     (contains? mcalls n)
@@ -454,11 +494,7 @@
                                              (doseq [j (range arg)]
                                                (emit! (list 'set! (push!) (list 'aget 'items (- arg 1 j))))))
                         :get-iter (op1! n 1 ['py/GetIter])
-                        :call (let [[k kw] arg]
-                                (spill-all!)
-                                (emit! (lasti n)) (emit! (set-pc n))
-                                (chk! n false (list 'set! 'err (list 'py/AotCall 't 'f k (if (integer? kw) kw -1))))
-                                (let [dn1 (get depth (inc n))] (vreset! m dn1) (vreset! d dn1)))
+                        :call (let [[k kw] arg] (call! n k kw false))
                         :make-function (let [[k parts] arg
                                              order (filter (set parts) [:defaults :kwdefaults :annotate :closure])
                                              lo (- @d (count order))]
@@ -506,7 +542,8 @@
                            [(tagged 'tmp 'py/Object) (tagged 'err 'error) (tagged 'tb 'bool)
                             (tagged 'items '(slice py/Object))])
               exec-any? (some exec? (range nc))
-              sw (list* 'switch '(.-PC f) (for [n starts :when (< n nc)] (list 'case [n] (list 'goto (lbl n)))))]
+              sw (list* 'switch '(.-PC f) (concat (for [n starts :when (< n nc)] (list 'case [n] (list 'goto (lbl n))))
+                                                  (for [n reentries] (list 'case [n] (list 'goto (keyword (str "C" n)))))))]
           (list 'go/func nm [go-thread go-frame] :results '[py/Object error]
                 (list* 'let (vec (concat ['consts '(.-Consts (.-Code f))]
                                          (mapcat (fn [v] [v (list 'zero (:tag (meta v)))]) vars)))
