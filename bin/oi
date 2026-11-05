@@ -89,6 +89,9 @@ TESTLIB=$OI_DIR/testlib
 # the Unix library's unit (OT9's second fix, OT10 (b)): otherlibs/unix's unix.ml of the pinned tarball, its Lambda dumped by bin/oi stdlib,
 # loaded only by the programs whose header says `include unix`
 UNIXLIB=$OI_DIR/unixlib
+# the threads library's units (OT9's fifth fix): otherlibs/systhreads' thread.ml and event.ml, loaded by the programs that include systhreads
+THREADLIB=$OI_DIR/threadlib
+export UNIXLIB THREADLIB
 EXE=$OI_DIR/bin/oi
 TESTS=$TOP/testsuite/tests
 REFS=$root/test/ocaml/ref-ocaml55.edn
@@ -103,11 +106,25 @@ export GOMAXPROCS=${OI_GOMAXPROCS:-1}
 
 die() { echo "oi: $*" >&2; exit 2; }
 
-# a program's libraries (its header's includes, header.awk's INCS: testing, unix): inc_I INCS, the dump's -I flags; inc_units INCS, the
-# library units it is run with, in link order (Unix, then the testsuite's Testing), one a line
-inc_I() { case " $1 " in *" unix "*) printf -- '-I %s ' "$UNIXLIB" ;; esac; case " $1 " in *" testing "*) printf -- '-I %s ' "$TESTLIB" ;; esac; }
-inc_units() { case " $1 " in *" unix "*) echo "$UNIXLIB/Unix.ae"; echo "$UNIXLIB/UnixLabels.ae" ;; esac; case " $1 " in *" testing "*) echo "$TESTLIB/Testing.ae" ;; esac; }
-export -f inc_I inc_units
+# a program's libraries (its header's includes, header.awk's INCS: testing, unix, systhreads): inc_I INCS, the dump's -I flags; inc_units INCS,
+# the library units it is run with, in link order (Unix, then Thread and Event, then the testsuite's Testing), one a line; inc_ref C INCS DIR,
+# the reference compiler C's (ocamlc or ocamlopt) libraries for a program compiled in DIR (OT9's third fix: one place for both corpora)
+inc_I() { case " $1 " in *" unix "*) printf -- '-I %s ' "$UNIXLIB" ;; esac; case " $1 " in *" systhreads "*) printf -- '-I %s ' "$THREADLIB" ;; esac
+  case " $1 " in *" testing "*) printf -- '-I %s ' "$TESTLIB" ;; esac; }
+inc_units() { case " $1 " in *" unix "*) echo "$UNIXLIB/Unix.ae"; echo "$UNIXLIB/UnixLabels.ae" ;; esac
+  case " $1 " in *" systhreads "*) echo "$THREADLIB/Thread.ae"; echo "$THREADLIB/Event.ae" ;; esac
+  case " $1 " in *" testing "*) echo "$TESTLIB/Testing.ae" ;; esac; }
+inc_ref() {
+  local c=$1 incs=$2 d=$3 x=""
+  case " $incs " in *" unix "*) if [ "$c" = ocamlc ]; then x="-I +unix unix.cma"; else x="-I +unix unix.cmxa"; fi ;; esac
+  case " $incs " in *" systhreads "*) if [ "$c" = ocamlc ]; then x="$x -I +threads threads.cma"; else x="$x -I +threads threads.cmxa"; fi ;; esac
+  case " $incs " in *" testing "*)
+    if [ "$c" = ocamlc ]; then x="$x -I $TESTLIB $TESTLIB/testing.cmo"
+    else mkdir -p "$d/optlib" && cp "$TESTLIB/testing.ml" "$TESTLIB/testing.mli" "$d/optlib/" && x="$x -I $d/optlib $d/optlib/testing.mli $d/optlib/testing.ml"; fi ;;
+  esac
+  echo "$x"
+}
+export -f inc_I inc_units inc_ref
 
 # oi's own level runs a program under limited_cpu: TIMEOUT seconds of CPU and a wall cap of four times that, as o2j_cpu (re-review 042's finding 1:
 # twice was a load band: a program needing more than half the cap in CPU timed out on a host slowed twofold)
@@ -165,7 +182,7 @@ stdlib_flags() {
 stdlib_key() {
   local k s
   k=$(cat "$OCDUMP_KEY") || { echo "oi: key: cannot read ocdump's key $OCDUMP_KEY" >&2; return 1; }
-  s=$(sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli" "$TOP/otherlibs/unix/unix.mli" "$TOP/otherlibs/unix/unix_unix.ml" "$TOP/otherlibs/unix/unixLabels.mli" "$TOP/otherlibs/unix/unixLabels.ml") || { echo "oi: key: the stdlib's sources cannot be read" >&2; return 1; }
+  s=$(sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli" "$TOP/otherlibs/unix/unix.mli" "$TOP/otherlibs/unix/unix_unix.ml" "$TOP/otherlibs/unix/unixLabels.mli" "$TOP/otherlibs/unix/unixLabels.ml" "$TOP/otherlibs/systhreads/thread.ml" "$TOP/otherlibs/systhreads/thread.mli" "$TOP/otherlibs/systhreads/event.ml" "$TOP/otherlibs/systhreads/event.mli") || { echo "oi: key: the stdlib's sources cannot be read" >&2; return 1; }
   { echo "$k"; echo "$s"; cat "$0"; } | sha256sum | cut -d' ' -f1
 }
 
@@ -230,6 +247,14 @@ cmd_stdlib() {
      && ocamlc -w -a -nolabels -c unixLabels.mli unixLabels.ml \
      && "$OCD" --mode lambda --simplify -nolabels -I . --prefix unixLabels --file unixLabels.ml unixLabels.ml > UnixLabels.ae) \
     || die "stdlib: otherlibs/unix's unix.ml"
+  # the threads library's units (OT9's fifth fix): otherlibs/systhreads' thread.ml and event.ml, against unix.cmi (systhreads/Makefile's -I
+  # otherlibs/unix); their cmi the ones the programs are typed against (-I THREADLIB, inc_I)
+  rm -rf "$THREADLIB"; mkdir -p "$THREADLIB"
+  cp "$TOP/otherlibs/systhreads/thread.ml" "$TOP/otherlibs/systhreads/thread.mli" "$TOP/otherlibs/systhreads/event.ml" "$TOP/otherlibs/systhreads/event.mli" "$THREADLIB/"
+  (cd "$THREADLIB" && ocamlc -w -a -I "$UNIXLIB" -c thread.mli thread.ml event.mli event.ml \
+     && "$OCD" --mode lambda --simplify -I "$UNIXLIB" -I . --prefix thread --file thread.ml thread.ml > Thread.ae \
+     && "$OCD" --mode lambda --simplify -I "$UNIXLIB" -I . --prefix event --file event.ml event.ml > Event.ae) \
+    || die "stdlib: otherlibs/systhreads' thread.ml"
   echo "$key" > "$LIB/key"
   echo "oi: stdlib: $(wc -l < "$LIB/order.txt") units, $(du -sh "$LIB" | cut -f1) of Lambda, in $LIB"
 }
@@ -322,6 +347,9 @@ cmd_corpus() {
     b=${r#./}; b=${b%.reference}
     [ -f "$TESTS/$b.ml" ] || continue
     h=$(awk -f "$root/bin/lib/oi/header.awk" "$TESTS/$b.ml")
+    # a program header.awk classes that the suite's reading runs (modules, readonly data files) is the suite corpus's alone (OT9's third
+    # fix): one row a program across the two corpora, the REAP cell counting it once
+    case $h in class*) case $(awk -f "$root/bin/lib/oi/actions.awk" "$TESTS/$b.ml") in run*) continue ;; esac ;; esac
     printf '%s\t%s\n' "$b" "$h" >> "$out"
   done
   echo "oi: corpus: $(wc -l < "$out") programs with a .reference, $(cut -f2 "$out" | grep -c '^run$' || true) run, $(cut -f2 "$out" | grep -c '^class$' || true) classed by their header ($out)"
@@ -358,14 +386,11 @@ ref_one() {
   rm -rf "$d"; mkdir -p "$d"
   cp "$src" "$d/"
   local base; base=$(basename "$id")
-  local libs="" olibs=""
-  case " $incs " in *" unix "*) libs="-I +unix unix.cma"; olibs="-I +unix unix.cmxa" ;; esac
-  case " $incs " in *" testing "*) libs="$libs -I $TESTLIB $TESTLIB/testing.cmo"; olibs="$olibs -I $TESTLIB $TESTLIB/testing.ml" ;; esac
   local line=""
   for c in ocamlc ocamlopt; do
-    local ext=byte cst=0 st=0 extra=$libs
-    [ $c = ocamlopt ] && { ext=opt; extra=$olibs; }
-    if [ $c = ocamlopt ]; then case " $incs " in *" testing "*) mkdir -p "$d/optlib" && cp "$TESTLIB/testing.ml" "$TESTLIB/testing.mli" "$d/optlib/" && extra="${olibs%%-I $TESTLIB*}-I $d/optlib $d/optlib/testing.mli $d/optlib/testing.ml" ;; esac; fi
+    local ext=byte cst=0 st=0 extra
+    [ $c = ocamlopt ] && ext=opt
+    extra=$(inc_ref $c "$incs" "$d")
     (cd "$d" && $c -w -a $flags $extra "$base.ml" -o "$base.$ext") > "$d/$c.log" 2>&1 || cst=$?
     if [ $cst != 0 ]; then line="$line	compile-error	-	0"; continue; fi
     (cd "$d" && env $env timeout "$TIMEOUT" "./$base.$ext" $args > "$d/$ext.out" 2>&1) || st=$?

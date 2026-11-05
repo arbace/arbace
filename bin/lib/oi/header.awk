@@ -38,7 +38,7 @@ END {
           if (f == "-w" || f == "-warn-error") { q++; continue }
           if (f ~ /^-w[+-]/ || f == "-g" || f == "-bin-annot" || f == "-bin-annot-occurrences" || f == "-S" || f == "-function-sections") continue
           if (f == "-inline") { q++; continue }
-          if (f == "-unsafe" || f == "-rectypes" || f == "-no-strict-formats" || f == "-strict-formats" || f == "-principal" || f == "-strict-sequence" || f == "-nolabels" || f == "-nopervasives" || f == "-no-alias-deps") { flags = flags " " f; continue }
+          if (f == "-unsafe" || f == "-rectypes" || f == "-no-strict-formats" || f == "-strict-formats" || f == "-principal" || f == "-strict-sequence" || f == "-nolabels" || f == "-nopervasives" || f == "-no-alias-deps" || f == "-safer-matching") { flags = flags " " f; continue }
           print "class\theader: flags " val; exit
         }
         continue
@@ -53,11 +53,16 @@ END {
       if (lib == "testing") { incs = incs " testing"; continue }
       # the Unix library (OT9's second fix): its unit loaded with the program (bin/oi's inc_units)
       if (lib == "unix") { incs = incs " unix"; continue }
+      # the threads library (OT9's fifth fix): thread.ml and event.ml loaded with unix's units
+      if (lib == "systhreads") { incs = incs " unix systhreads"; continue }
       print "class\theader: include " lib; exit
     }
     if (s ~ /^set [A-Za-z_0-9]+ *= *"/) { e = s; sub(/^set /, "", e); gsub(/ *= */, "=", e); gsub(/"/, "", e); env = env " " e; continue }
     if (s ~ /^unset /) continue
-    if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "hasunix") continue
+    # a later alternative that skips (lib-threads' "{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }"): the run is the
+    # first alternative's, read up to here (OT9's fifth fix); a test whose only branch skips stays a class
+    if (s == "skip" && incs != "") break
+    if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "hasunix" || s == "hassysthreads") continue
     print "class\theader: " s; exit
   }
   print "run\t" trim(flags) "\t" trim(incs) "\t" args "\t" trim(env)

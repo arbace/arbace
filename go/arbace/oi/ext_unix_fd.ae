@@ -1,0 +1,414 @@
+(in-ns 'go.arbace.oi) (go/file "ext_unix_fd.go" :imports [
+    [binary "encoding/binary"]
+    [os "os"]
+    [filepath "path/filepath"]
+    [syscall "syscall"]
+    [time "time"]
+    [unsafe "unsafe"]])
+
+;; The Unix library's descriptors and files (doc/ocaml/DEFERRED-TRIAGE.md, §4 item 4, "As built: OT9's next three fixes"):
+;; otherlibs/unix's caml_unix_* primitives of file descriptors (open, close, read, write, lseek, dup, pipe, the channels of a
+;; descriptor, the flags), of files (truncate, fstat, unlink, rename, links, realpath, chmod, access, utimes, fifos) and of
+;; directories, as the C stubs of OCaml 5.5.0's otherlibs/unix (LGPL-2.1 with the linking exception; read for their
+;; behaviour, written anew over Go's syscall). A Unix.file_descr is the OS's descriptor, an int, as on Unix; oi's channels
+;; already wrap descriptors (ext_io.go), so the channels of a descriptor are those channels. Calls that may block run
+;; outside the interpreter's lock (sysCall, Blocking), so that the other threads and domains run meanwhile. Unix.fork stays
+;; out (OT1 (a)), select and lockf too (not yet ported: :unix-unported).
+
+(go/const ^{:doc "unixBufferSize is UNIX_BUFFER_SIZE of unixsupport.h: the most a read or write moves at once.\n"} unixBufferSize 65536)
+
+(go/func optBool "optBool is a bool option's value (?cloexec, ?follow, ?to_dir), def when None.\n" ^bool [^Value v ^bool def]
+  (when [(values b ok) (assert (* Block) v)] ok
+    (return (!= (AsInt (aget (.-F b) 0)) 0)))
+  def)
+
+(go/func listInts "listInts is the constructors of a list of constant constructors (open_flag list, access_permission list).\n"
+  ^{:tag (slice int)} [^Value v]
+  (let [^{:tag (slice int)} out nil
+        l v]
+    (while true
+      (let [(values b ok) (assert (* Block) l)]
+        (when (not ok)
+          (return out))
+        (set! out (append out (AsInt (aget (.-F b) 0))))
+        (set! l (aget (.-F b) 1))))))
+
+(go/func setCloexec "setCloexec sets or clears fd's FD_CLOEXEC.\n" [^int fd ^bool on]
+  (let [f 0]
+    (when on
+      (set! f syscall/FD_CLOEXEC))
+    (syscall/Syscall syscall/SYS_FCNTL (conv uintptr fd) syscall/F_SETFD (conv uintptr f))))
+
+(go/func unixPath "unixPath is a path argument, Unix_error (ENOENT, fn, path) when it holds a NUL byte (caml_unix_check_path).\n"
+  ^string [^Value v ^string fn]
+  (let [p (GoString v)]
+    (when (not (cSafe v))
+      (RaiseUnixError syscall/ENOENT fn p))
+    p))
+
+(go/type unixDir "unixDir is a Unix.dir_handle: the directory's descriptor and its entries as readdir reads them.\n" (struct
+    ^int fd
+    ^{:tag (slice string)} names
+    ^int pos
+    ^bool closed))
+
+(go/func readDirNames "readDirNames is every entry of the directory fd (getdents64's order, . and .. among them).\n"
+  ^{:tag (slice string)} [^int fd]
+  (let [^{:tag (slice string)} names nil
+        buf (make (slice byte) 8192)]
+    (while true
+      (let [n 0 ^error err nil]
+        (Blocking (fn [] (set! (values n err) (syscall/ReadDirent fd buf))))
+        (when (!= err nil)
+          (RaiseUnixError (errnoOf err) "readdir" ""))
+        (when (<= n 0)
+          (return names))
+        (let [b (subslice buf 0 n)]
+          (while (> (len b) 19)
+            ;; struct linux_dirent64: ino (8), off (8), reclen (2), type (1), the name NUL-terminated
+            (let [reclen (conv int (.Uint16 binary/LittleEndian (subslice b 16 18)))
+                  name (subslice b 19 reclen)
+                  k 0]
+              (while (and (< k (len name)) (!= (aget name k) 0))
+                (inc! k))
+              (set! names (append names (conv string (subslice name 0 k))))
+              (set! b (subslice b reclen)))))))))
+
+(go/func dirOf ^{:tag (* unixDir)} [^Value v] (assert (* unixDir) (.-V (assert (* Custom) v))))
+
+(go/func unixWrite "unixWrite is caml_unix_write (all of it, retried) or caml_unix_single_write (one write).\n"
+  ^Value [^Value fdv ^Value buf ^int ofs ^int n ^bool single ^string fn]
+  (let [fd (AsInt fdv)
+        written 0]
+    (while (> n 0)
+      (let [k n]
+        (when (> k unixBufferSize)
+          (set! k unixBufferSize))
+        (let [chunk (append (lit (slice byte)) (spread (subslice (.-B (assert (* Bytes) buf)) ofs (+ ofs k))))
+              r 0 ^error err nil]
+          (Blocking (fn [] (set! (values r err) (syscall/Write fd chunk))))
+          (when (!= err nil)
+            (let [e (errnoOf err)]
+              (when (and (or (== e syscall/EAGAIN) (== e syscall/EWOULDBLOCK)) (> written 0))
+                (return written))
+              (RaiseUnixError e fn "")))
+          (set! written (+ written r))
+          (set! ofs (+ ofs r))
+          (set! n (- n r))
+          (when single
+            (return written)))))
+    written))
+
+(go/func unixReadInto "unixReadInto reads at most n bytes (and unixBufferSize) from fd: caml_unix_read.\n" ^{:tag (slice byte)} [^int fd ^int n]
+  (when (> n unixBufferSize)
+    (set! n unixBufferSize))
+  (let [chunk (make (slice byte) n)
+        r 0 ^error err nil]
+    (Blocking (fn [] (set! (values r err) (syscall/Read fd chunk))))
+    (when (!= err nil)
+      (RaiseUnixError (errnoOf err) "read" ""))
+    (subslice chunk 0 r)))
+
+(go/func unixStat64 "unixStat64 is Unix.LargeFile.stats: unixStat with an Int64 size.\n" ^Value [^{:tag (* syscall/Stat_t)} st]
+  (let [b (assert (* Block) (unixStat st))]
+    (aset (.-F b) 8 (conv int64 (.-Size st)))
+    b))
+
+(go/func unixFstat "unixFstat is fstat(fd) or Unix_error.\n" ^{:tag (* syscall/Stat_t)} [^Value v]
+  (let [^syscall/Stat_t st (zero syscall/Stat_t)
+        fd (AsInt v)]
+    (when [e (sysCall (fn ^error [] (syscall/Fstat fd (addr st))))] (!= e 0)
+      (RaiseUnixError e "fstat" ""))
+    (addr st)))
+
+(go/func unixSeek "unixSeek is lseek(fd, ofs, cmd): SEEK_SET, SEEK_CUR, SEEK_END in Unix.seek_command's order.\n" ^int64 [^Value fdv ^int64 ofs ^Value cmd]
+  (let [fd (AsInt fdv)
+        whence (AsInt cmd)
+        r (conv int64 0)
+        ^error err nil]
+    (Blocking (fn [] (set! (values r err) (syscall/Seek fd ofs whence))))
+    (when (!= err nil)
+      (RaiseUnixError (errnoOf err) "lseek" ""))
+    r))
+
+(go/func init []
+  (let [r RegisterExt]
+    (r "caml_unix_open" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "open")
+            fl syscall/O_CLOEXEC
+            cloexec false
+            keep false]
+        (set! fl 0)
+        (range [_ f (listInts (aget a 1))]
+          (switch f
+            (case [0] (set! fl (bit-or fl syscall/O_RDONLY)))
+            (case [1] (set! fl (bit-or fl syscall/O_WRONLY)))
+            (case [2] (set! fl (bit-or fl syscall/O_RDWR)))
+            (case [3] (set! fl (bit-or fl syscall/O_NONBLOCK)))
+            (case [4] (set! fl (bit-or fl syscall/O_APPEND)))
+            (case [5] (set! fl (bit-or fl syscall/O_CREAT)))
+            (case [6] (set! fl (bit-or fl syscall/O_TRUNC)))
+            (case [7] (set! fl (bit-or fl syscall/O_EXCL)))
+            (case [8] (set! fl (bit-or fl syscall/O_NOCTTY)))
+            (case [9] (set! fl (bit-or fl syscall/O_DSYNC)))
+            (case [10] (set! fl (bit-or fl syscall/O_SYNC)))
+            (case [11] (set! fl (bit-or fl syscall/O_RSYNC)))
+            (case [13] (set! cloexec true))
+            (case [14] (set! keep true))))
+        (when (and cloexec (not keep))
+          (set! fl (bit-or fl syscall/O_CLOEXEC)))
+        (let [perm (conv uint32 (AsInt (aget a 2)))
+              fd 0 ^error err nil]
+          (Blocking (fn [] (set! (values fd err) (syscall/Open p fl perm))))
+          (when (!= err nil)
+            (RaiseUnixError (errnoOf err) "open" p))
+          fd))))
+    (r "caml_unix_close" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [fd (AsInt (aget a 0))]
+        (when [e (sysCall (fn ^error [] (syscall/Close fd)))] (!= e 0)
+          (RaiseUnixError e "close" ""))
+        Unit)))
+    (r "caml_unix_fsync" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [fd (AsInt (aget a 0))]
+        (when [e (sysCall (fn ^error [] (syscall/Fsync fd)))] (!= e 0)
+          (RaiseUnixError e "fsync" ""))
+        Unit)))
+    (r "caml_unix_read" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [got (unixReadInto (AsInt (aget a 0)) (AsInt (aget a 3)))
+            ofs (AsInt (aget a 2))]
+        (copy (subslice (.-B (assert (* Bytes) (aget a 1))) ofs) got)
+        (len got))))
+    (r "caml_unix_read_bigarray" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [ba (assert (* bigarray) (.-V (assert (* Custom) (aget a 1))))
+            got (unixReadInto (AsInt (aget a 0)) (AsInt (aget a 3)))
+            ofs (AsInt (aget a 2))]
+        (range [i x got]
+          (aset (.-data ba) (+ ofs i) (conv int x)))
+        (len got))))
+    (r "caml_unix_write" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (unixWrite (aget a 0) (aget a 1) (AsInt (aget a 2)) (AsInt (aget a 3)) false "write")))
+    (r "caml_unix_single_write" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (unixWrite (aget a 0) (aget a 1) (AsInt (aget a 2)) (AsInt (aget a 3)) true "single_write")))
+    (r "caml_unix_write_bigarray" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [ba (assert (* bigarray) (.-V (assert (* Custom) (aget a 1))))
+            ofs (AsInt (aget a 2))
+            n (AsInt (aget a 3))
+            buf (make (slice byte) n)]
+        (range [i _ buf]
+          (aset buf i (conv byte (bigInt (aget (.-data ba) (+ ofs i))))))
+        (unixWrite (aget a 0) (addr (lit Bytes :B buf)) 0 n (!= (AsInt (aget a 4)) 0) "write_bigarray"))))
+    (r "caml_unix_inchannel_of_filedescr" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (openChannel (AsInt (aget a 0)) false)))
+    (r "caml_unix_outchannel_of_filedescr" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (openChannel (AsInt (aget a 0)) true)))
+    (r "caml_unix_lseek" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixSeek (aget a 0) (conv int64 (AsInt (aget a 1))) (aget a 2))]
+        (when (> p (conv int64 4611686018427387903))
+          (RaiseUnixError syscall/EOVERFLOW "lseek" ""))
+        (conv int p))))
+    (r "caml_unix_lseek_64" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (unixSeek (aget a 0) (int64Val (aget a 1)) (aget a 2))))
+    (r "caml_unix_truncate" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "truncate")
+            n (conv int64 (AsInt (aget a 1)))]
+        (when [e (sysCall (fn ^error [] (syscall/Truncate p n)))] (!= e 0)
+          (RaiseUnixError e "truncate" p))
+        Unit)))
+    (r "caml_unix_truncate_64" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "truncate")
+            n (int64Val (aget a 1))]
+        (when [e (sysCall (fn ^error [] (syscall/Truncate p n)))] (!= e 0)
+          (RaiseUnixError e "truncate" p))
+        Unit)))
+    (r "caml_unix_ftruncate" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [fd (AsInt (aget a 0))
+            n (conv int64 (AsInt (aget a 1)))]
+        (when [e (sysCall (fn ^error [] (syscall/Ftruncate fd n)))] (!= e 0)
+          (RaiseUnixError e "ftruncate" ""))
+        Unit)))
+    (r "caml_unix_ftruncate_64" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [fd (AsInt (aget a 0))
+            n (int64Val (aget a 1))]
+        (when [e (sysCall (fn ^error [] (syscall/Ftruncate fd n)))] (!= e 0)
+          (RaiseUnixError e "ftruncate" ""))
+        Unit)))
+    (r "caml_unix_fstat" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (unixStat (unixFstat (aget a 0)))))
+    (r "caml_unix_fstat_64" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (unixStat64 (unixFstat (aget a 0)))))
+    (r "caml_unix_stat_64" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "stat")
+            ^syscall/Stat_t st (zero syscall/Stat_t)]
+        (when [e (sysCall (fn ^error [] (syscall/Stat p (addr st))))] (!= e 0)
+          (RaiseUnixError e "stat" p))
+        (unixStat64 (addr st)))))
+    (r "caml_unix_lstat_64" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "lstat")
+            ^syscall/Stat_t st (zero syscall/Stat_t)]
+        (when [e (sysCall (fn ^error [] (syscall/Lstat p (addr st))))] (!= e 0)
+          (RaiseUnixError e "lstat" p))
+        (unixStat64 (addr st)))))
+    (r "caml_unix_isatty" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [^syscall/Termios t (zero syscall/Termios)
+            (values _ _ e) (syscall/Syscall syscall/SYS_IOCTL (conv uintptr (AsInt (aget a 0))) syscall/TCGETS (conv uintptr (unsafe/Pointer (addr t))))]
+        (Bool (== e 0)))))
+    (r "caml_unix_unlink" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "unlink")]
+        (when [e (sysCall (fn ^error [] (syscall/Unlink p)))] (!= e 0)
+          (RaiseUnixError e "unlink" p))
+        Unit)))
+    (r "caml_unix_rename" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "rename")
+            q (unixPath (aget a 1) "rename")]
+        (when [e (sysCall (fn ^error [] (syscall/Rename p q)))] (!= e 0)
+          (RaiseUnixError e "rename" p))
+        Unit)))
+    (r "caml_unix_link" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 1) "link")
+            q (unixPath (aget a 2) "link")]
+        (when [e (sysCall (fn ^error [] (syscall/Link p q)))] (!= e 0)
+          (RaiseUnixError e "link" q))
+        Unit)))
+    (r "caml_unix_realpath" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "realpath")
+            (values abs err) (filepath/Abs p)]
+        (when (!= err nil)
+          (RaiseUnixError (errnoOf err) "realpath" p))
+        (let [(values q err2) (filepath/EvalSymlinks abs)]
+          (when (!= err2 nil)
+            (RaiseUnixError (errnoOf err2) "realpath" p))
+          (Str q)))))
+    (r "caml_unix_chmod" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "chmod")
+            m (conv uint32 (AsInt (aget a 1)))]
+        (when [e (sysCall (fn ^error [] (syscall/Chmod p m)))] (!= e 0)
+          (RaiseUnixError e "chmod" p))
+        Unit)))
+    (r "caml_unix_fchmod" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [fd (AsInt (aget a 0))
+            m (conv uint32 (AsInt (aget a 1)))]
+        (when [e (sysCall (fn ^error [] (syscall/Fchmod fd m)))] (!= e 0)
+          (RaiseUnixError e "fchmod" ""))
+        Unit)))
+    (r "caml_unix_access" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "access")
+            m (conv uint32 0)]
+        ;; R_OK, W_OK, X_OK, F_OK in Unix.access_permission's order
+        (range [_ f (listInts (aget a 1))]
+          (switch f
+            (case [0] (set! m (bit-or m 4)))
+            (case [1] (set! m (bit-or m 2)))
+            (case [2] (set! m (bit-or m 1)))))
+        (when [e (sysCall (fn ^error [] (syscall/Access p m)))] (!= e 0)
+          (RaiseUnixError e "access" p))
+        Unit)))
+    (r "caml_unix_dup" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [(values fd err) (syscall/Dup (AsInt (aget a 1)))]
+        (when (!= err nil)
+          (RaiseUnixError (errnoOf err) "dup" ""))
+        (setCloexec fd (optBool (aget a 0) false))
+        fd)))
+    (r "caml_unix_dup2" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [src (AsInt (aget a 1))
+            dst (AsInt (aget a 2))]
+        (if (== src dst)
+          (let [(values _ _ e) (syscall/Syscall syscall/SYS_FCNTL (conv uintptr src) syscall/F_GETFD 0)]
+            (when (!= e 0)
+              (RaiseUnixError e "dup2" "")))
+          (when [err (syscall/Dup3 src dst 0)] (!= err nil)
+            (RaiseUnixError (errnoOf err) "dup2" "")))
+        (setCloexec dst (optBool (aget a 0) false))
+        Unit)))
+    (r "caml_unix_set_nonblock" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (when [err (syscall/SetNonblock (AsInt (aget a 0)) true)] (!= err nil)
+        (RaiseUnixError (errnoOf err) "set_nonblock" ""))
+      Unit))
+    (r "caml_unix_clear_nonblock" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (when [err (syscall/SetNonblock (AsInt (aget a 0)) false)] (!= err nil)
+        (RaiseUnixError (errnoOf err) "clear_nonblock" ""))
+      Unit))
+    (r "caml_unix_set_close_on_exec" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (setCloexec (AsInt (aget a 0)) true) Unit))
+    (r "caml_unix_clear_close_on_exec" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (setCloexec (AsInt (aget a 0)) false) Unit))
+    (r "caml_unix_mkdir" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "mkdir")
+            m (conv uint32 (AsInt (aget a 1)))]
+        (when [e (sysCall (fn ^error [] (syscall/Mkdir p m)))] (!= e 0)
+          (RaiseUnixError e "mkdir" p))
+        Unit)))
+    (r "caml_unix_rmdir" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "rmdir")]
+        (when [e (sysCall (fn ^error [] (syscall/Rmdir p)))] (!= e 0)
+          (RaiseUnixError e "rmdir" p))
+        Unit)))
+    (r "caml_unix_mkfifo" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "mkfifo")
+            m (conv uint32 (AsInt (aget a 1)))]
+        (when [e (sysCall (fn ^error [] (syscall/Mkfifo p m)))] (!= e 0)
+          (RaiseUnixError e "mkfifo" p))
+        Unit)))
+    (r "caml_unix_readlink" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "readlink")
+            buf (make (slice byte) 4096)
+            n 0 ^error err nil]
+        (Blocking (fn [] (set! (values n err) (syscall/Readlink p buf))))
+        (when (!= err nil)
+          (RaiseUnixError (errnoOf err) "readlink" p))
+        (Str (conv string (subslice buf 0 n))))))
+    (r "caml_unix_symlink" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 1) "symlink")
+            q (unixPath (aget a 2) "symlink")]
+        (when [e (sysCall (fn ^error [] (syscall/Symlink p q)))] (!= e 0)
+          (RaiseUnixError e "symlink" q))
+        Unit)))
+    (r "caml_unix_has_symlink" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool true)))
+    (r "caml_unix_utimes" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "utimes")
+            at (AsFloat (aget a 1))
+            mt (AsFloat (aget a 2))]
+        ;; both 0.0: the current time (utimes (path, NULL))
+        (when (and (== at 0) (== mt 0))
+          (let [now (time/Now)]
+            (set! at (+ (conv float64 (.Unix now)) (/ (conv float64 (.Nanosecond now)) 1e9)))
+            (set! mt at)))
+        (let [ts (lit (slice syscall/Timespec) (syscall/NsecToTimespec (.UnixNano (unixTime at))) (syscall/NsecToTimespec (.UnixNano (unixTime mt))))]
+          (when [e (sysCall (fn ^error [] (syscall/UtimesNano p ts)))] (!= e 0)
+            (RaiseUnixError e "utimes" p)))
+        Unit)))
+    (r "caml_unix_pipe" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (make (slice int) 2)
+            fl 0]
+        (when (optBool (aget a 0) false)
+          (set! fl syscall/O_CLOEXEC))
+        (when [err (syscall/Pipe2 p fl)] (!= err nil)
+          (RaiseUnixError (errnoOf err) "pipe" ""))
+        (Tuple (aget p 0) (aget p 1)))))
+    (r "caml_unix_opendir" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (unixPath (aget a 0) "opendir")
+            fd 0 ^error err nil]
+        (Blocking (fn [] (set! (values fd err) (syscall/Open p (bit-or syscall/O_RDONLY syscall/O_DIRECTORY syscall/O_CLOEXEC) 0))))
+        (when (!= err nil)
+          (RaiseUnixError (errnoOf err) "opendir" p))
+        (addr (lit Custom :Name "_dir" :V (addr (lit unixDir :fd fd :names (readDirNames fd))))))))
+    (r "caml_unix_readdir" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [d (dirOf (aget a 0))]
+        (when (.-closed d)
+          (RaiseUnixError syscall/EBADF "readdir" ""))
+        (when (>= (.-pos d) (len (.-names d)))
+          (RaiseEndOfFile))
+        (inc! (.-pos d))
+        (Str (aget (.-names d) (- (.-pos d) 1))))))
+    (r "caml_unix_rewinddir" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [d (dirOf (aget a 0))]
+        (when (.-closed d)
+          (RaiseUnixError syscall/EBADF "rewinddir" ""))
+        (syscall/Seek (.-fd d) 0 0)
+        (set! (.-names d) (readDirNames (.-fd d)))
+        (set! (.-pos d) 0)
+        Unit)))
+    (r "caml_unix_closedir" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [d (dirOf (aget a 0))]
+        (when (.-closed d)
+          (RaiseUnixError syscall/EBADF "closedir" ""))
+        (set! (.-closed d) true)
+        (syscall/Close (.-fd d))
+        Unit)))
+    ;; Unix._exit: the process ends at once, no at_exit, the channels not flushed
+    (r "caml_unix_exit" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (os/Exit (AsInt (aget a 0)))
+      Unit))))

@@ -80,12 +80,9 @@ suite_ref_one() {
   local names; names=$(suite_names "$units")
   local line="" c
   for c in ocamlc ocamlopt; do
-    local ext=byte cst=0 st=0 extra=""
+    local ext=byte cst=0 st=0 extra
     [ $c = ocamlopt ] && ext=opt
-    if [ -n "$incs" ]; then
-      if [ $c = ocamlc ]; then extra="-I $TESTLIB $TESTLIB/testing.cmo"
-      else mkdir -p "$d/optlib" && cp "$TESTLIB/testing.ml" "$TESTLIB/testing.mli" "$d/optlib/" && extra="-I $d/optlib $d/optlib/testing.mli $d/optlib/testing.ml"; fi
-    fi
+    extra=$(inc_ref $c "$incs" "$d")
     (cd "$d" && $c -w -a $flags $extra $names -o "prog.$ext") > "$d/$c.log" 2>&1 || cst=$?
     if [ $cst != 0 ]; then line="$line	compile-error	-	0"; continue; fi
     (cd "$d" && env $env timeout "$TIMEOUT" "./prog.$ext" $args > "$d/$ext.out" 2>&1) || st=$?
@@ -103,7 +100,8 @@ cmd_suite_record_ref() {
   local out=$S/ref.tsv
   suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' | xargs -0 -n 7 -P "$JOBS" bash -c 'suite_ref_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
-  "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" record-ref "$out" "$S/corpus.tsv" "$SUITE_REFS"
+  # --only, --only-list: the rows run replace theirs, the others are kept (record-ref-only, as bin/oi record-ref's)
+  "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "record-ref${ONLY:+-only}" "$out" "$S/corpus.tsv" "$SUITE_REFS"
   sed -i '1,/^\[$/{/^\[$/!d}' "$SUITE_REFS"
   sed -i '1i ;; ocamlc'"'"'s and ocamlopt'"'"'s runs of the suite corpus (bin/oi suite record-ref; doc/ocaml/OCAML-SURVEY.md, "As built: O7\n;; (write-ahead)"): the testsuite'"'"'s run programs without a .reference or with ocamltest'"'"'s `modules` (the units compiled in\n;; the order listed), and the opam set'"'"'s programs (test/ocaml/opam-programs.tsv: a package'"'"'s library units and a test), each\n;; compiled by the host'"'"'s OCaml 5.5.0 and run; same fields as test/ocaml/ref-ocaml55.edn. Read with the Clojure reader.' "$SUITE_REFS"
 }
@@ -115,7 +113,7 @@ suite_dump() {
   local d=$S/run/$id u n b U
   rm -rf "$d"; mkdir -p "$d"
   suite_stage "$id" "$base" "$units" "$d"
-  local I=""; [ -n "$incs" ] && I="-I $TESTLIB"
+  local I; I=$(inc_I "$incs")
   : > "$d/units.list"
   for u in $units; do
     n=$(basename "${u#=}"); b=${n%.*}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
@@ -135,7 +133,7 @@ suite_oi_one() {
   suite_dump "$id" "$flags" "$incs" "$base" "$units"
   local d=$S/run/$id
   if [ -f "$d/error" ]; then printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(cat "$d/error")"; return; fi
-  local tl=""; [ -n "$incs" ] && tl="$TESTLIB/Testing.ae"
+  local tl; tl=$(inc_units "$incs" | tr '\n' ' ')
   local st=0 t0 t1 note=""
   t0=$(date +%s.%N); times > "$d/cpu0"
   (cd "$d" && limited_cpu "$TIMEOUT" "$(oi_wall)" env $env "$EXE" run "$LIB" $tl $(cat "$d/units.list") -- $args > "$d/oi.out" 2>&1) || st=$?
@@ -218,7 +216,7 @@ cmd_suite_check_aot() {
     local d=$S/run/$id last b
     [ -f "$d/error" ] && continue
     last=$(echo "$units" | awk '{print $NF}'); b=$(basename "${last%.*}")
-    printf '%s\t%s%s\n' "$A/out/$id" "${incs:+$TESTLIB/Testing.ae	}" "$(paste -sd'\t' "$d/units.list")" >> "$tl"
+    printf '%s\t%s%s\n' "$A/out/$id" "$(inc_units "$incs" | sed 's/$/\t/' | tr -d '\n')" "$(paste -sd'\t' "$d/units.list")" >> "$tl"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$d/o2j.out" "$A/out/$id/files.txt" "$d/$(echo "${b:0:1}" | tr a-z A-Z)${b:1}.ae" "$(echo "$args" | tr ' ' '\t')" "$env" >> "$bl"
   done
   o2j progs "$O2J_LIB" "$tl" > "$A/translate.log" 2>&1 || { tail -5 "$A/translate.log"; die "translate"; }

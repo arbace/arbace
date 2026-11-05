@@ -42,7 +42,7 @@ END {
           if (f == "-w" || f == "-warn-error") { q++; continue }
           if (f ~ /^-w[+-]/ || f == "-g" || f == "-bin-annot" || f == "-bin-annot-occurrences" || f == "-S" || f == "-function-sections") continue
           if (f == "-inline") { q++; continue }
-          if (f == "-unsafe" || f == "-rectypes" || f == "-no-strict-formats" || f == "-strict-formats" || f == "-principal" || f == "-strict-sequence" || f == "-nolabels" || f == "-nopervasives" || f == "-no-alias-deps") { flags = flags " " f; continue }
+          if (f == "-unsafe" || f == "-rectypes" || f == "-no-strict-formats" || f == "-strict-formats" || f == "-principal" || f == "-strict-sequence" || f == "-nolabels" || f == "-nopervasives" || f == "-no-alias-deps" || f == "-safer-matching") { flags = flags " " f; continue }
           print "class\theader: flags " val; exit
         }
         continue
@@ -54,7 +54,8 @@ END {
       }
       if (key == "readonly_files") {
         c = split(val, ml, " ")
-        for (q = 1; q <= c; q++) if (ml[q] !~ /^[A-Za-z_0-9.-]+\.(mli?|txt|input|data)$/) { print "class\theader: readonly_files = " val; exit }
+        # a data file of any plain name (OT9's third fix: basic-io-2's test-file-short-lines); a C file stays a class
+        for (q = 1; q <= c; q++) if (ml[q] !~ /^[A-Za-z_0-9.-]+$/ || ml[q] ~ /\.c$/) { print "class\theader: readonly_files = " val; exit }
         continue
       }
       if (key == "ocamlopt_flags" || key == "reason" || key == "exit_status") continue
@@ -65,11 +66,17 @@ END {
     if (s ~ /^include /) {
       lib = trim(substr(s, 9))
       if (lib == "testing") { incs = incs " testing"; continue }
+      # the Unix and threads libraries (OT9's second and fifth fixes), as header.awk's
+      if (lib == "unix") { incs = incs " unix"; continue }
+      if (lib == "systhreads") { incs = incs " unix systhreads"; continue }
       print "class\theader: include " lib; exit
     }
     if (s ~ /^set [A-Za-z_0-9]+ *= *"/) { e = s; sub(/^set /, "", e); gsub(/ *= */, "=", e); gsub(/"/, "", e); env = env " " e; continue }
     if (s ~ /^unset /) continue
-    if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows") continue
+    # a later alternative that skips (lib-threads' "{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }"): the run is the
+    # first alternative's, read up to here (OT9's fifth fix); a test whose only branch skips stays a class
+    if (s == "skip" && incs != "") break
+    if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "hasunix" || s == "hassysthreads") continue
     print "class\theader: " s; exit
   }
   print "run\t" trim(flags) "\t" trim(incs) "\t" args "\t" trim(env) "\t" mods
