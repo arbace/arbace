@@ -1645,3 +1645,167 @@ The user's decision on 205's DECISION (a), 2026-11-05: the constructors now, as 
   `typing._generic_class_getitem`'s `typing._GenericAlias`, so its `__mro_entries__` keeps Generic where CPython's
   returns `()` before a later generic alias. This is not chased here (the brief). It is in no class yet: every
   `class X(Generic[T], SomeABC[T])` stops there.
+
+## As built: 208, the C library cores through ci (PYS22 (a)'s route C): the design, and `_bz2` (2026-11-05, the Mac VM, queue 208)
+
+PYS22 (a) (decided: the user, 2026-11-04) puts the stdlib modules whose core is a C library (`_bz2`, `_lzma`, `_zstd`,
+`_sqlite3`) on Arbace's C crop: the library itself as C, built by ci, and the CPython module's glue in Go over pyi's
+objects. This section is the design (asked first), then what was built: `_bz2` end to end; `_lzma` and `_zstd` probed
+(their libraries through ci), `_sqlite3` designed.
+
+### The design
+
+**The pins.** The versions are CPython 3.14.10's own: `PCbuild/get_externals.bat` names them, and
+`Misc/externals.spdx.json` pins each tarball (python/cpython-source-deps' tags of the upstream releases) by SHA-256.
+They were fetched once into the main checkout's `.tmp/cache/clib/` (`bin/pyi-clib fetch LIB`, the one network step), and
+each digest equals the SPDX pin:
+
+| library | version | tarball (github.com/python/cpython-source-deps/archive/refs/tags/) | SHA-256 | license | size |
+|---|---|---|---|---|---|
+| bzip2 | 1.0.8 | `bzip2-1.0.8.tar.gz` | `ab8d1b0cc087c20d4c32c0e4fcf7d0c733a95da12cedc6d63b3f0a9af07427e2` | bzip2's (BSD-like, 4 clauses) | 7 library files, 5,200 lines |
+| liblzma (xz) | 5.2.5 | `xz-5.2.5.tar.gz` | `a15c168e39e87d750c3dc766edc7f19bdda57dacf01e509678467eace91ad282` | public domain (liblzma; COPYING) | 69 files |
+| zstd | 1.5.7 | `zstd-1.5.7.tar.gz` | `f24b52470d12f466e9fa4fcc94e6c530625ada51d7b36de7fdc6ed7e6f499c8e` | BSD 3-Clause (dual with GPLv2: BSD taken) | 30 files, 33,200 lines |
+| SQLite | 3.50.4 | `sqlite-3.50.4.0.tar.gz` | `fb5ab81f27612b0a7b4861ba655906c76dc85ee969e7a4905d2075aff931e8d0` | public domain | the amalgamation, 262,899 lines, 9.3 MB |
+
+libmpdec (`mpdecimal-4.0.0`, SHA-256 `338fac3fb8cdd60f406b6326431338756f58a8af94229ffd9bf1e7c2b1ad71ca` in the same SPDX file) stays out (PYS22 (a): only if decimal's
+speed is measured to matter). The tests do not pin the versions: test_zstd checks `zstd_version_info` against
+`zstd_version`, nothing else.
+
+**The layers.** For `_bz2`:
+
+- Python: `Lib/bz2.py` and `_compression.py` (BZ2File, `bz2.open`) are the tarball's.
+- `go/arbace/pybz2` (package `arbace/pybz2`): `Modules/_bz2module.c` ported statement for statement over pyi's
+  objects. It is a lazy package as pyexpat's (202e): py's `builtins_bz2_api.go` names it in `lazyModules`, so a run that
+  never imports bz2 loads none of it.
+- `go/arbace/clib` (package `arbace/clib`): the host of a C library inside the Python process. `Open(name, nodes)` makes
+  one `ci.Prog` over a crt address space per library, once per process. It loads the node program, runs its static
+  initializers, seals its read-only data, and initializes musl as `__libc_start_main` would (`__init_libc` with an
+  initial stack laid out as ci's `RunMain` does: the thread pointer, the auxiliary vector). `Call(name, args...)` calls a
+  function by name on the program's one C thread. `Malloc`, `Free`, `Realloc`, `Read`, `Write` and the loads and stores
+  move bytes between Go and C memory.
+- `go/arbace/clib/bzip2` (package `arbace/clib/bzip2`, generated, committed): `Nodes`, the library's node program as
+  text. That is ci's builder's output (`arbace.c.build`, CS120's "node program"): bzip2's seven files, the module's C
+  helper `tools/pyi/clib/bzip2/pybz2.c`, and the part of musl 1.2.6 they reach, linked by `arbace.c.musl`.
+- The back end, one of ci's two, chosen by what the process links:
+  - **interpreted**: ci's nodes (the Loader's `code` commands), on goi (`bin/pyi run`, lib-test);
+  - **compiled**: pyi's AOT links `arbace/clib/bzip2/aot`, cf2g's Go of the same node program
+    (`bin/pyi-clib aot`). Its init calls `clib.RegisterCompiled`, so `Open` sets cf2g's functions as the Funcs'
+    natives. The data and the static initializers are the same text, so both lay memory out alike (CS120 (a)).
+
+**How the glue meets C.**
+
+- **Memory.** The `bz_stream` and the decompressor's input buffer live in the library's C heap (musl's malloc).
+  The glue reads and writes their fields at their offsets; `pybz2_layout` gives the offsets, and the glue checks
+  them once.
+- **Bytes.** A Py_buffer's bytes are copied into C memory for the call. CPython hands libbzip2 the caller's buffer
+  directly; the copy is the one cost the address space adds.
+- **Output.** The output buffer is CPython's `_BlocksOutputBuffer`: blocks of its sizes, the current one in C
+  memory, copied out when the next is allocated. So libbzip2 sees CPython's `avail_out`s, and `max_length` is
+  consumed as CPython consumes it.
+- **Allocator.** libbzip2's default allocator is used (bzalloc NULL, musl's malloc). CPython's is PyMem_RawMalloc;
+  the difference is invisible to Python.
+- **Locks.** The caller holds pyi's GIL around every call: one C thread, and the calls never overlap. CPython's
+  per-object lock and its `Py_BEGIN_ALLOW_THREADS` have no counterpart.
+- **Freeing.** A finalizer (`runtime.SetFinalizer`; goi has no `AddCleanup`, GOI-SPEC GC32) queues
+  `BZ2_bz*End` and the frees on the library (`Lib.Defer`). They run before its next call, under the GIL.
+- **Faults.** A C fault or exit inside the library ends the process as it would end CPython's: 128 + the signal,
+  with a "Fatal Python error" line naming the C frames. `bz_internal_error` writes bzip2's first line and `_exit(3)`s,
+  as the stdio build's assertion does.
+
+**The build, its cost and its keys** (`bin/pyi-clib`, a script of its own; `tools/pyi/clib/LIB/lib.conf`: the URL,
+SHA-256, files and flags):
+
+| step | what | cost on the VM | cached by |
+|---|---|---|---|
+| musl's forms | `bin/ci musl read` (shared with bin/ci) | 8 min once, 3 threads | `.tmp/ci-musl/forms/key` (repr/c, the libc reader, the host, configure's headers) |
+| the node program | `bin/pyi-clib build LIB`: bin/ci nodes, the checkout's builder evaluated (`ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`: a stage 0 runs the `arbace/c` it embeds, which differs), written as `go/arbace/clib/LIB` | bzip2 33 s (10 s embedded) | `Key` (in the package): lib.conf, the glue, the pin, repr/c, `arbace/c/{build,check,run,musl}.ae`, the host, `bin/pyi-clib`, musl's forms key; `build` keeps a committed package of the same key |
+| check | `bin/pyi-clib verify LIB`: built afresh, compared byte for byte | the same | |
+| cf2g | `bin/pyi-clib aot LIB OUT`: the committed node program translated, Main made `setup` and registered | bzip2 3 s, 797 KB of Go, 246 functions | the node program's digest (`OUT/nodes.key`) |
+| AOT's module | bin/pyi's `aot_module` copies ci, crt, clib, clib/bzip2, pybz2 and runs `bin/pyi-clib aot bzip2` | once per runtime key | the runtime key (now with ci, crt, clib, pybz2, bin/pyi-clib) |
+
+**Why the node program is committed.** goi loads a package's forms from the checkout. So a node program made at the
+first import would need musl's forms cache (8 minutes) and the tarball on every machine. Committed, it is 558 KB of
+forms for bzip2; `verify` keeps it honest, as `bin/jrt-convert verify` keeps `jdk/`. cf2g's Go is not committed:
+it is made at the AOT module's build, from the committed text. For SQLite the committed size does not fit (below,
+DECISION 2).
+
+**Speed** (compressing with bzip2 at level 9; gcc 15 -O0 on this aarch64 VM, one run each):
+
+| input | gcc -O0 | cf2g compiled (pyi's AOT) | ci's interpreter compiled (tools/cirun) | ci interpreted by goi (pyi on goi) |
+|---|---:|---:|---:|---:|
+| 20 KB of text | 0.004 s | 0.028 s | 0.16 s | 20.9 s |
+| 200 KB random | 0.030 s | 0.32 s | 2.1 s | (about 200 s) |
+
+On goi, ci itself is interpreted: `arbace/ci` is not in goi's table. That double interpretation is the cost:
+about 1 KB/s. With `arbace/ci` and `arbace/crt` listed in the table (a re-seed carries it), the interpreted path would
+run at cirun's speed, about 130 times faster (DECISION 1).
+
+### As built
+
+- `bin/pyi-clib` (fetch, build, verify, key, aot), `tools/pyi/clib/bzip2/` (lib.conf; `pybz2.c`: `pybz2_layout`,
+  `bz_internal_error`, the `main` that names `__init_libc` so the link keeps it). bzip2 is built with `BZ_NO_STDIO`
+  (the module calls only the six stream functions).
+- `go/arbace/clib/bzip2` (522,914 bytes of node program, 246 functions with code; 558 KB of forms), `go/arbace/clib`
+  (the host, its test: bzip2's stream functions against bzip2(1)'s output), `go/arbace/pybz2` (the glue).
+- py: `builtins_bz2_api.go` (`lazyModules["_bz2"]`). `arbace.python.aot`'s main imports `arbace/pybz2` and
+  `arbace/clib/bzip2/aot`. bin/pyi's runtime print, read, vet and check and its keys cover clib and pybz2; print also
+  prints ci, crt and clib/bzip2 beside them.
+- Out of every executable (gate_key, the audit's `:gate`, gate-key-crops-test), as pyexpat. LICENSE.md: bzip2's
+  license and musl's COPYRIGHT (musl's code is in the node program).
+- Divergences: `:pyio-size-type` (5 BZ2FileTest reads: `_pyio`'s BufferedReader.read takes a float size unchecked,
+  which `_io`'s C refuses first; CPython's own `_pyio` does the same), and `:clib-on-goi` (testThreading and
+  testDecompressLimited, which compress megabytes, past the driver's time on goi only).
+- A REQUEST for 210 (class.ae): "not an acceptable base type" names the type by its tp_name
+  (`'_bz2.BZ2Decompressor'`, as CPython).
+
+**Samples (the VM).**
+
+- Probes against CPython 3.14.10 (`python3 -I -B`): `t2.py` exercises compress and decompress, max_length,
+  unused_data, needs_input, every error message, pickling, flush twice, `bz2.open` in text mode, and subclassing.
+  It is equal on goi and compiled.
+- bzip2 under ci (`tools/cirun`) against gcc: 5 inputs (text, random, repetitive, 1 MB of zeros, runs) at levels
+  1, 5 and 9, compressed and decompressed. All 20 are equal.
+- test_bz2, 102 methods:
+  - on goi: 95 equal, 7 classed, 0 failing (32 minutes, 3 driver runs);
+  - compiled (`bin/pyi aot test/python/libtest_run.py test_bz2 SKIP`, 30 s): 97 equal, the 5 `:pyio-size-type`
+    errors. testThreading's 50 MB and testDecompressLimited pass.
+
+### `_lzma` and `_zstd` (probed), `_sqlite3` (designed)
+
+- **liblzma 5.2.5 builds and runs under ci.** The tarball's `configure` was run once
+  (`--disable-shared --disable-threads --disable-nls`, the tools off) for `config.h`. The 69 files of
+  `src/liblzma`'s `liblzma.la` build into a 1.93 MB node program (3 min 45 s, the checkout's builder). A driver
+  (`lzma_easy_buffer_encode` with CRC64, decoded back) gives the same bytes as the gcc build of the same files at
+  presets 0, 6 and 9 on 4 inputs: 12 of 12. Left for `_lzma`:
+  - the glue, `_lzmamodule.c`'s 1,664 lines: the filter specs to `lzma_filter` chains of option structs in C memory,
+    `_encode_filter_properties` and `_decode_filter_properties`, the formats XZ, ALONE, RAW and AUTO, memlimit;
+  - lib.conf with the configure step (or its `config.h` committed as the glue's).
+  On goi, preset 6's encoder initializes about 94 MB of match finder, which is hopeless interpreted twice: so
+  `_lzma` waits on DECISION 1 for goi, and runs compiled as is.
+- **zstd 1.5.7.**
+  - Its `ZSTD_cpuid` is inline assembly under `__x86_64__` (ci's host is x86_64), and ci refuses a program holding
+    an asm function even when it is never called: `-U__x86_64__ -U__amd64__` takes cpu.h's portable branch, with
+    `ZSTD_NO_INTRINSICS`, `ZSTD_DISABLE_ASM` and `ZSTD_LEGACY_SUPPORT=0`.
+  - The seed-1fe1063f stage 0's embedded builder then refuses `inBuffer_forEndFlush`'s structure-valued conditional
+    ("a conversion from struct ZSTD_inBuffer_s to struct ZSTD_inBuffer_s"). The checkout's builder takes it
+    (queue 178's fix): the reason `bin/pyi-clib` runs the checkout's builder.
+  - The glue is `Modules/_zstd/`'s 2,567 lines: ZstdCompressor, ZstdDecompressor, ZstdDict, the parameters'
+    bounds, `get_frame_info`.
+  - Multithreaded compression (`nbWorkers`) needs pthreads in ci: built without `ZSTD_MULTITHREAD`, as test_zstd
+    expects of such a build ("zstd lib doesn't support MT compression" skips).
+- **`_sqlite3`, designed only.**
+  - Size: the amalgamation is 50 times bzip2. Its node program would be 25-30 MB, cf2g's Go about 40 MB, and one
+    package's `go build` several GB (C6.3: a quarter of musl, 4.3 MB of Go, took 0.8 GB). That is the heavy tier:
+    the main host's, cf2g's Go split into packages (CS122 (a)'s split by directory, here by function groups). It is
+    not committed as forms (DECISION 2) and not interpreted on goi.
+  - The glue: `Modules/_sqlite/`'s 6,563 lines (connection, cursor, statement, row, blob, the adapters' module
+    state). Its callbacks (create_function, aggregates, window functions, collations, the authorizer, the progress
+    and trace handlers) are C calling Go. ci's natives are Go functions the node program calls by name: the C glue
+    declares them extern and the Go glue sets them on the Prog before the first call. They run Python on the same
+    goroutine, under the GIL already held.
+  - The thread model is the open point: SQLite's busy handler sleeps (unixSleep: `usleep`, crt's nanosleep) inside
+    `sqlite3_step`. With one C thread and the GIL held, a second Python thread waiting on a lock the first holds
+    deadlocks. The design: one `ci.Thread` per Python thread, each with its own C stack in the shared address space
+    (ci's Prog has one stack today: a change for the main host), the GIL released only around the library's sleeps
+    (a native for nanosleep), so C never runs in two goroutines at once. SQLite is built `SQLITE_THREADSAFE=1` with
+    its mutexes uncontended, so `sqlite3.threadsafety` is CPython's 3.
