@@ -1645,3 +1645,39 @@ The user's decision on 205's DECISION (a), 2026-11-05: the constructors now, as 
   `typing._generic_class_getitem`'s `typing._GenericAlias`, so its `__mro_entries__` keeps Generic where CPython's
   returns `()` before a later generic alias. This is not chased here (the brief). It is in no class yet: every
   `class X(Generic[T], SomeABC[T])` stops there.
+
+## As built: 205g (typing.Generic's subscription as CPython's; 2026-11-05, the Mac VM, queue 205g)
+
+The user's decision on 205f's decision 1, 2026-11-05: the small fix now (`mac/205-python-generic`, from the
+integration head c3488342, 205f merged), then the pip probe again and where pip stops classed.
+
+- **Generic** (`go/arbace/py/typing.ae`), as CPython 3.14.10's `Objects/typevarobject.c`:
+  - `__class_getitem__` and `__init_subclass__` call typing's `_generic_class_getitem` and `_generic_init_subclass`
+    with the class first and the arguments as given (`call_typing_args_kwargs`; `callTyping`). `Generic[K, V]` is a
+    `typing._GenericAlias`, whose `__mro_entries__` gives `()` before a later generic base, so
+    `class X(Generic[K, V], MutableMapping[K, V])` builds; `__parameters__` comes from `__orig_bases__` as typing
+    computes it, with typing's errors (plain Generic, Generic twice, type variables not listed, ...).
+  - A class statement's type parameters (`class A[T, *Ts]`, the intrinsic SUBSCRIPT_GENERIC) are
+    `_Py_subscript_generic`: a TypeVarTuple unpacked as `typing.Unpack[Ts]`, then `typing._GenericAlias(Generic, params)`.
+  - What typing's `_GenericAlias` asks of the type variables, which pyi's lacked: `__typing_subst__` (TypeVar's and
+    ParamSpec's typing's `_typevar_subst` and `_paramspec_subst`; TypeVarTuple's "Substitution of bare TypeVarTuple is
+    not supported") and `__typing_prepare_subst__` (a TypeVar's own, with its default and "Too few arguments for ...";
+    ParamSpec's and TypeVarTuple's typing's). `*Ts` is `typing.Unpack[Ts]` (`unpack_iter`).
+- **types.GenericAlias' iterator** (`genericaliasobject.c`'s `ga_iter`): `*tuple[int]` is one starred copy, its repr
+  after a star with its arguments and its equality comparing the star first. Before, `iter(tuple[int])` fell back on
+  the sequence protocol over `__getitem__` and never ended: test_genericalias hung at import.
+- Program `test/python/pyi/w205g-generic.py` (42 lines, equal to `python3 -I -B`): urllib3's container shape, ABC
+  subscripts, Protocol, PEP 695 classes with a TypeVarTuple, `__orig_bases__` and `__parameters__`, substitution with
+  defaults, typing's error messages, starred aliases.
+- pip (`bin/pyi wheels pip-probe`): `pip install --no-index` now gets past urllib3's import and stops with
+  `TypeError: _idfunc() takes exactly one argument`: typing.NewType's `__call__ = _idfunc` is called by pyi's slot with
+  the instance first. CPython's slot functions bind only a method descriptor (a builtin function has no `__get__`);
+  pyi's `descrGet` keeps that rule (`methodDescrs`), but `callBound`, which the slots call, has no owner and binds every
+  unbound `Builtin`. New class `:builtin-function-special-method` (divergences.edn); not chased here.
+- Samples (`bin/pyi lib-test-all --fresh`, the VM, before c3488342 / after): test_annotationlib 109 / 112 equal
+  (test_syntax_error, test_pep695_generic_class_with_future_annotations and test_stringized_annotations_with_star_unpack,
+  a timeout before, now pass; 422 s / 27 s); test_type_params 91 / 94 ok (test_types_new_class_no_callback,
+  test_traditional_01, _02); test_genericalias hung at import / 18 equal, 7 classed, 12 failing of 37 (types.GenericAlias'
+  rest: `__unpacked__`, parameters' deduplication and chaining, pickling, a union's `__parameters__`); test_typing still
+  does not import (`cannot create 'typing.TypeAliasType' instances`, the class `:type-params`). No method that passed
+  before fails.
