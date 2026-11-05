@@ -481,8 +481,20 @@
            true
            (every? #(and (not= 'vscale (first (shape (resolve-type %)))) (sized? % (conj seen t))) es)))
        (and (seq? rt) (= 'array (first rt))) (sized? (nth rt 2) (conj seen t))
-       (and (seq? rt) (= 'target (first rt))) (str/includes? (second rt) ".")
+       (and (seq? rt) (= 'target (first rt)))   ; TargetExtType::getLayoutType sized
+       (let [nm (second rt)]
+         (and (not (#{"spirv.IntegralConstant" "spirv.Literal" "amdgpu.stridemark"} nm))
+              (or (str/starts-with? nm "spirv.") (str/starts-with? nm "dx.") (#{"aarch64.svcount" "riscv.vector.tuple" "amdgcn.named.barrier"
+                                                                                  "llvm.test.vectorelement" "wasm.funcref" "wasm.externref"} nm))))
        :else true))))
+
+(defn- token-like?
+  "Type::isTokenLikeTy: token, or a target type of the IsTokenLike property (dx.* but dx.Padding, amdgpu.stridemark)."
+  [t]
+  (let [t (resolve-type t)]
+    (or (= t 'token)
+        (and (seq? t) (= 'target (first t))
+             (let [nm (second t)] (or (and (str/starts-with? nm "dx.") (not= nm "dx.Padding")) (= nm "amdgpu.stridemark")))))))
 
 (defn- pow2? [k] (and (pos? k) (zero? (bit-and (long k) (dec (long k))))))
 
@@ -641,7 +653,7 @@
       (verr :parser/align "alignment is not a power of two" {:at [:attr-val-of "align" (str a)]}))
     (when (> (long a) 4294967296) (verr :parser/align "huge alignments are not supported yet" {:at [:attr-val-of "align" (str a)]}))))
 
-(declare use-value check-di-parse node-of di-kind callee-of phase-parser* check-uselistorder fp-class-compatible? resolve-type gep-indexed-type sized?)
+(declare use-value check-di-parse node-of di-kind callee-of phase-parser* check-uselistorder fp-class-compatible? resolve-type gep-indexed-type sized? token-like?)
 
 (defn- note-md! [x]
   (letfn [(walk [y] (cond (md-ref? y) (.add *mrefs* y)
@@ -1374,8 +1386,10 @@
     (when-not intr?
       (doseq [[pi p] (map-indexed vector pl) :let [t (norm-type (first p)) at (str (pr/type-str t) " " (pr/value-str (if (local? (peek p)) (peek p) (symbol (str "%" pi)))))]]
         (when (= t 'metadata) (verr :verifier/function-type "Function takes metadata but isn't an intrinsic" at :fn))
-        (when (= t 'token) (verr :verifier/function-type "Function takes token but isn't an intrinsic" at :fn)))
-      (when (= rt 'token) (verr :verifier/function-type "Function returns a token but isn't an intrinsic")))
+        (when (token-like? t) (verr :verifier/function-type "Function takes token but isn't an intrinsic" at :fn))
+        (when (= t 'x86_amx) (verr :verifier/function-type "Function takes x86_amx but isn't an intrinsic" at :fn)))
+      (when (token-like? rt) (verr :verifier/function-type "Function returns a token but isn't an intrinsic"))
+      (when (= rt 'x86_amx) (verr :verifier/function-type "Function returns a x86_amx but isn't an intrinsic")))
     (when (and (= h 'llvm/declare) (:personality o))
       (verr :verifier/function-type "Function declaration shouldn't have a personality routine"))))
 
@@ -1610,9 +1624,10 @@
     (when-not direct-intr?
       (doseq [t ptypes]
         (when (= t 'metadata) (verr :verifier/function-type "Function has metadata parameter but isn't an intrinsic"))
-        (when (= t 'token) (verr :verifier/function-type "Function has token parameter but isn't an intrinsic")))
+        (when (token-like? t) (verr :verifier/function-type "Function has token parameter but isn't an intrinsic")))
       (when-not (global? c)
-        (when (= (norm-type (second fty)) 'token) (verr :verifier/function-type "Return type cannot be token for indirect call!" :none))))
+        (when (token-like? (norm-type (second fty))) (verr :verifier/function-type "Return type cannot be token for indirect call!" :none))
+        (when (= 'x86_amx (norm-type (second fty))) (verr :verifier/function-type "Return type cannot be x86_amx for indirect call!" :none))))
     ;; swifterror arguments come from a swifterror alloca or parameter
     (doseq [[i a] (map-indexed vector args) :when (has-attr? (nth pattrs i) "swifterror")]
       (let [v (peek a) k (when (local? v) (local-key v))
@@ -2642,6 +2657,8 @@
                       (when (and (terminator? x) (< ii (dec (count items))))
                         (verr :verifier/terminator-middle "Terminator found in the middle of a basic block!"))
                       (when (and (= hd 'phi) seen-non-phi) (verr :verifier/phi-grouped "PHI nodes not grouped at top of basic block!" :inst :bb))
+                      (when (and (= hd 'phi) (token-like? (norm-type (first (strip-flags (second (split-inst b)))))))
+                        (verr :verifier/phi-grouped "PHI nodes cannot have token type!" :none))
                       (when (= hd 'landingpad)
                         (let [[_ ps] (split-inst b)]
                           (when-not (or (some #{:cleanup} ps) (some seq? ps)) (verr :verifier/landingpad "LandingPadInst needs at least one clause or to be a cleanup."))
