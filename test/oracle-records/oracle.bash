@@ -139,6 +139,7 @@ oracle_host_id() {  # TOOL
           if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64 ;;
     chez) oracle_scheme_id "${CHEZ:-chez}" --version /usr/lib/csv10.3.0/ta6le/petite.boot /usr/lib/csv10.3.0/ta6le/scheme.boot /usr/lib/csv10.3.0/ta6le/chez.boot ;;
     chibi) oracle_scheme_id "${CHIBI:-chibi-scheme}" -V ;;
+    ghc) oracle_ghc_id ;;
     *) echo "oracle: no identity recipe for $1" >&2; echo none ;;
   esac
 }
@@ -150,11 +151,24 @@ oracle_scheme_id() {  # CMD VERSION-FLAG FILE...: bin/lib/gate-run.bash's gate_s
     sha256sum < "$(readlink -f "$x")" | cut -c1-64
     for f in "$@"; do if [ -f "$f" ]; then sha256sum < "$f" | cut -c1-64; else echo "missing $f"; fi; done; } | sha256sum | cut -c1-64
 }
+oracle_ghc_id() {  # GT9's :host-ids :ghc recipe (test/gate/crops/haskell.edn, steps.edn): ghc's --version line, then the SHA-256 of
+  # {libdir}/../bin/ghc-[0-9]* and of {libdir}/package.conf.d/ghc-[0-9]*.conf (a glob with no file: "missing GLOB"); none without ghc
+  command -v ghc > "$TMPDIR/oracle-ghc.err" || { echo none; return; }
+  local d g p m
+  d=$(ghc --print-libdir 2>"$TMPDIR/oracle-ghc.err")
+  { ghc --version 2>"$TMPDIR/oracle-ghc.err" | head -1
+    for g in "$d/../bin/ghc-[0-9]*" "$d/package.conf.d/ghc-[0-9]*.conf"; do
+      m=0
+      for p in $g; do [ -f "$p" ] && { sha256sum < "$p" | cut -c1-64; m=1; }; done
+      [ $m = 1 ] || echo "missing $g"
+    done; } | sha256sum | cut -c1-64
+}
 oracle_host_version() {  # TOOL: its version line
   case $1 in
     gcc) gcc --version 2>"$TMPDIR/oracle-gcc.err" | head -1 ;;
     chez) "${CHEZ:-chez}" --version 2>&1 | head -1 ;;
     chibi) "${CHIBI:-chibi-scheme}" -V 2>&1 | head -1 ;;
+    ghc) ghc --version 2>"$TMPDIR/oracle-ghc.err" | head -1 ;;
     *) echo unknown ;;
   esac
 }
