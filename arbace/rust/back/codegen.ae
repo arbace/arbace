@@ -20,6 +20,9 @@
             {:prim :int :bits bits :signed signed :bool bool :ibits (if bool 1 bits) :lo lo :hi hi
              :imm (if bool "i1" (str "i" bits)) :mem (if bool "i8" (str "i" bits))
              :size (quot bits 8)})
+    "float" (let [bits (second s)]
+              (when-not (#{32 64} bits) (unsupported (str "float of " bits " bits")))
+              {:prim :float :bits bits :ibits bits :imm (if (= 32 bits) "float" "double") :mem (if (= 32 bits) "float" "double") :size (quot bits 8)})
     "ptr" (let [[_ [lo hi]] s] {:prim :ptr :bits 64 :ibits 64 :imm "ptr" :mem "ptr" :size 8 :lo lo :hi hi})
     (unsupported (str "scalar " (first s)))))
 
@@ -328,6 +331,22 @@
         "Ge" ["i1" (>= (c (key a) (key b)) 0)]
         nil))))
 
+(defn- fp-form
+  "LLVM's text of a floating constant: `%e` when that reads back as the same double, else the double's bits in hex (a float
+  is written as the double it widens to); +inf, -inf."
+  [bits pattern]
+  (let [pattern (java.math.BigInteger. (str pattern))
+        d (if (= 32 bits)
+            (double (Float/intBitsToFloat (.intValue pattern)))
+            (Double/longBitsToDouble (.longValue pattern)))]
+    (list 'fp
+          (cond
+            (Double/isNaN d) (str "0x" (.toUpperCase (Long/toHexString (Double/doubleToRawLongBits d))))
+            (Double/isInfinite d) (if (pos? d) "+inf" "-inf")
+            :else (let [t (String/format java.util.Locale/ROOT "%.6e" (object-array [d]))]
+                    (if (= d (Double/parseDouble t)) t
+                        (str "0x" (.toUpperCase (Long/toHexString (Double/doubleToRawLongBits d))))))))))
+
 (defn- const-val
   "A constant operand's value: {:ty :v} or {:pair [...]}, or nil for a zero-sized one; `ag` gives the global of an allocation,
   `ind` the value of a constant held in an allocation at an offset."
@@ -341,6 +360,7 @@
                    :int (if (:bool sc)
                           {:ty "i1" :v (if (zero? bits) 'false 'true)}
                           {:ty (:imm sc) :v (as-num (sext-const (:bits sc) bits))})
+                   :float {:ty (:imm sc) :v (fp-form (:bits sc) bits)}
                    :ptr (unsupported "pointer scalar")))
       "ptr" (let [[_ id off _] v]
               (when-not (zero? off) (unsupported "pointer constant with an offset"))
@@ -723,6 +743,14 @@
                      "Gt" (cmp (if sg :sgt :ugt)) "Ge" (cmp (if sg :sge :uge))
                      (unsupported (str "binop " op))))))
         ;; a shift: the right operand cast to the left's type, masked, then shl / lshr / ashr
+        fbin! (fn [bb op a b sc]
+                (let [t (symbol (:imm sc)) r (fresh!)
+                      ins (fn [nm] (emit! bb (list '= r (list nm t (:v a) (:v b)))) {:ty (:imm sc) :v r})
+                      cmp (fn [c] (emit! bb (list '= r (list 'fcmp c t (:v a) (:v b)))) {:ty "i1" :v r})]
+                  (case op
+                    "Add" (ins 'fadd) "Sub" (ins 'fsub) "Mul" (ins 'fmul) "Div" (ins 'fdiv) "Rem" (ins 'frem)
+                    "Eq" (cmp :oeq) "Ne" (cmp :une) "Lt" (cmp :olt) "Le" (cmp :ole) "Gt" (cmp :ogt) "Ge" (cmp :oge)
+                    (unsupported (str "float binop " op)))))
         shift! (fn [bb op a b sc bsc]
                  (let [t (symbol (:imm sc))
                        bv (cond (= (:ibits sc) (:ibits bsc)) (:v b)
@@ -901,6 +929,7 @@
                     ("use" "use-noretag") (operand! bb (second r))
                     "binop" (let [[_ op a b] r sc (scalar-of-op a)]
                               (cond
+                                (= :float (:prim sc)) (fbin! bb op (operand! bb a) (operand! bb b) sc)
                                 (= op "Offset")
                                 (let [pv (operand! bb a) nv (operand! bb b)
                                       el (layout lt (second (ty-struct (ty-of a))))
@@ -918,11 +947,27 @@
                              (case op
                                "Not" (do (emit! bb (list '= x (list 'xor (symbol (:imm sc)) (:v v) (if (:bool sc) 'true -1))))
                                          {:ty (:imm sc) :v x})
-                               "Neg" (do (emit! bb (list '= x (list 'sub (symbol (:imm sc)) 0 (:v v)))) {:ty (:imm sc) :v x})
+                               "Neg" (if (= :float (:prim sc))
+                                       (do (emit! bb (list '= x (list 'fneg (symbol (:imm sc)) (:v v)))) {:ty (:imm sc) :v x})
+                                       (do (emit! bb (list '= x (list 'sub (symbol (:imm sc)) 0 (:v v)))) {:ty (:imm sc) :v x}))
                                (unsupported (str "unop " op)))))
                     "cast" (let [[_ kind o t] r]
                              (cond
                                (= kind "IntToInt") (cast! bb o (or (:scalar (layout lt t)) (unsupported "cast to a non-scalar")) (scalar-of-op o))
+                               (#{"FloatToFloat" "IntToFloat" "FloatToInt"} kind)
+                               (let [to (or (:scalar (layout lt t)) (unsupported "cast to a non-scalar")) from (scalar-of-op o)
+                                     v (operand! bb o) x (fresh!)]
+                                 (case kind
+                                   "FloatToFloat" (if (= (:bits to) (:bits from))
+                                                    v
+                                                    (do (emit! bb (list '= x (list (if (< (:bits from) (:bits to)) 'fpext 'fptrunc) (symbol (:imm from)) (:v v) (symbol (:imm to)))))
+                                                        {:ty (:imm to) :v x}))
+                                   "IntToFloat" (do (emit! bb (list '= x (list (if (:signed from) 'sitofp 'uitofp) (symbol (:imm from)) (:v v) (symbol (:imm to)))))
+                                                    {:ty (:imm to) :v x})
+                                   "FloatToInt" (let [iname (symbol "g" (str "llvm.fpto" (if (:signed to) "s" "u") "i.sat.i" (:ibits to) "." (if (= 32 (:bits from)) "f32" "f64")))]
+                                                  (declare! gl iname (symbol (:imm to)) [[(symbol (:imm from))]])
+                                                  (emit! bb (list '= x (list 'call (symbol (:imm to)) iname [[(symbol (:imm from)) (:v v)]])))
+                                                  {:ty (:imm to) :v x})))
                                ;; a pointer cast between thin pointers changes nothing in LLVM's opaque pointers
                                (.startsWith ^String kind "PointerCoercion(ReifyFnPointer")
                                (if-let [sym (second (drop-while #(not= :fn-symbol %) o))]
