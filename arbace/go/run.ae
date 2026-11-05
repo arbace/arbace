@@ -89,6 +89,8 @@
             :when (string? p)]
         (get li p p)))))
 
+(declare full-forms? full-lines)
+
 (defn run
   "Runs the program of package file pf (forms root root) with args: its exit status. The
   interpreted packages it imports (a directory test's) are checked, defined and initialized
@@ -97,7 +99,8 @@
   (reset! b/program-mode true)
   ;; os.Args, and goi's program mode from now on (its warnings at the REPL only)
   (b/op "SetOSArgs" (object-array (cons (str (.getName pf)) args)))
-  (let [src (load/package-source {:dir root} nil @repl/config pf)
+  (let [src (cond-> (load/package-source {:dir root} nil @repl/config pf)
+              (full-forms? root pf) (full-lines true))
         _ (when (empty? (:files src)) (fail 125 "unsupported" "no Go files for the configuration"))
         index (delay (dir-test-index pf))
         srcs (atom {})
@@ -128,7 +131,8 @@
     (letfn [(load! [path seen]
               (when-not (or (contains? @srcs path) (repl/listed? path) (contains? seen path))
                 (when-let [^File f (get @index path)]
-                  (let [s (load/package-source {:dir root} path @repl/config f)]
+                  (let [s (cond-> (load/package-source {:dir root} path @repl/config f)
+                            (full-forms? root f) (full-lines true))]
                     (doseq [p (imports-of s)] (load! p (conj seen path)))
                     (when-not (contains? @srcs path)
                       (let [r (check! s extra)]
@@ -142,12 +146,19 @@
         (fail 126 "error" "no main function"))
       (b/op "RunProgram" (object-array (mapcat @inits (init-order))) main))))
 
+(def ^:private ^:dynamic *pos-key*
+  "A function from a raw position [line col] to the :line value a form takes (key-lines'
+  keys), or nil: the line."
+  nil)
+
 (defn- raw-lines
   "Form x of raw forms read from text, the lines mode :lines writes from the positions mode
   :full writes (doc/go/SPEC.md §10.2), as the converter's in-memory forms carry them: each
   form's :line its node's first line (its :go/pos' least; a vector's its children's), not the
   reader's (a vector's, a symbol's, a list's written after its line); a function's :go/end its
-  closing brace's line; a literal child's line its :go/breaks entry, from :go/apos."
+  closing brace's line; a literal child's line its :go/breaks entry, from :go/apos. Each form
+  given a line also keeps its first position as :go/raw [line col]; with *pos-key*, the :line
+  values are its keys of the positions."
   [x]
   (let [walk-meta (fn [m] (cond-> m (contains? m :tag) (update :tag raw-lines)))
         x' (cond
@@ -161,54 +172,134 @@
         ;; (not a comment group's: a node's :doc and :comment); a vector's from its literals and
         ;; children first (a spec's :go/pos may hold its declaration's: an import group's
         ;; first spec, the group's import keyword and parentheses)
-        lines (fn [ps] (keep #(when (vector? %) (first %)) ps))
-        l (or (when (vector? x')
-                (some->> (concat (lines (vals (:go/apos m)))
-                                 (keep #(when (instance? arbace.lang.IMeta %) (:line (meta %))) x'))
-                         seq (apply min)))
-              (when (map? pos) (some->> (apply dissoc pos [:doc :comment]) vals lines seq (apply min))))
+        least (fn [ps] (some->> ps (filter #(and (vector? %) (number? (first %)))) seq
+                                (reduce (fn [a b] (if (neg? (compare (vec (take 2 b)) (vec (take 2 a)))) b a)))))
+        p (or (when (vector? x')
+                (least (concat (vals (:go/apos m))
+                               (keep #(when (instance? arbace.lang.IMeta %) (:go/raw (meta %))) x'))))
+              (when (map? pos) (least (vals (apply dissoc pos [:doc :comment])))))
+        pk (or *pos-key* first)
         ;; a function's closing brace (mode :lines' :go/end), a literal child's line (its
         ;; :go/breaks, from :go/apos)
-        end (when (map? pos) (first (:rbrace pos)))
+        end (when (map? pos) (when-let [r (:rbrace pos)] (when (vector? r) (pk r))))
         apos (:go/apos m)]
-    (if (or l end (seq apos))
+    (if (or p end (seq apos))
       (vary-meta x' (fn [m] (cond-> m
-                              l (assoc :line l)
+                              p (assoc :line (pk p) :go/raw p)
                               end (assoc :go/end end)
-                              (seq apos) (assoc :go/breaks (vec (for [[i p] (sort apos) :when (vector? p)] [i (first p)]))))))
+                              (seq apos) (assoc :go/breaks (vec (for [[i q] (sort apos) :when (vector? q)] [i (pk q)]))))))
       x')))
 
+(defn- directives
+  "gc's line directives of a Go file from its comments (mode :full's go/file :go/comments, [line
+  col text] each; cmd/compile/internal/syntax's updateBase): [line col file base] each, from
+  position [line col] on line base + (l - line) of file (nil: the Go file itself; \"\": ??), in
+  order. A //line comment at a line's start begins at the next line; a /*line comment right
+  after it; FILE:LINE:COL with an empty FILE keeps the file before."
+  [comments]
+  (loop [cs (sort-by #(vec (take 2 %)) comments) prev nil acc []]
+    (if-let [[l c ^String t] (first cs)]
+      (let [[body from] (cond
+                          (and (= 1 (long c)) (str/starts-with? t "//line ")) [(subs t 7) [(inc (long l)) 1]]
+                          (and (str/starts-with? t "/*line ") (str/ends-with? t "*/"))
+                          [(subs t 7 (- (count t) 2)) [l (+ (long c) (count t))]]
+                          :else nil)
+            d (when body
+                (or (when-let [[_ f n _c] (re-find #"^(.*):([0-9]+):([0-9]+)$" body)]
+                      [(if (= "" f) prev f) (Long/parseLong n)])
+                    (when-let [[_ f n] (re-find #"^(.*):([0-9]+)$" body)]
+                      [f (Long/parseLong n)])))]
+        (if (and d (pos? (long (second d))))
+          (recur (rest cs) (first d) (conj acc [(first from) (second from) (first d) (second d)]))
+          (recur (rest cs) prev acc)))
+      acc)))
+
+(defn- key-lines
+  "File entry fi of mode :full's forms whose Go file has /*line directives (positions within a
+  line, which a frame's line alone cannot follow): its forms' lines made keys of their raw
+  positions (line × 1000 + column), and :line-keys, a //line directive for each key used (its
+  line the key less one), which gives the key gc's file and line (the builder's line-dirs!,
+  the back end's CodeLineDirs: GOI-SPEC.md, \"Since v1: frames\"); else fi as raw-lines makes it."
+  [fi]
+  (let [cs (:go/comments (meta (:file fi)))
+        ds (when (some #(str/starts-with? (str (nth % 2)) "/*line ") cs) (directives cs))]
+    (if (empty? ds)
+      (cond-> (update fi :decls (fn [d] (mapv raw-lines d)))
+        (:file fi) (update :file raw-lines)
+        (get-in fi [:opts :imports]) (update-in [:opts :imports] raw-lines))
+      (let [used (java.util.TreeMap.)
+            pk (fn [[l c]]
+                 (let [k (+ (* 1000 (long l)) (min 999 (long c)))]
+                   (when-not (.containsKey used k)
+                     (let [d (last (filter (fn [[dl dc]] (neg? (compare [(long dl) (long dc)] [(long l) (long (inc c))]))) ds))
+                           [f n] (if d [(nth d 2) (+ (long (nth d 3)) (- (long l) (long (first d))))] [nil l])]
+                       (.put used k [(if (nil? f) (:name fi) f) n])))
+                   k))
+            fi (binding [*pos-key* pk]
+                 (cond-> (update fi :decls (fn [d] (mapv raw-lines d)))
+                   (:file fi) (update :file raw-lines)
+                   (get-in fi [:opts :imports]) (update-in [:opts :imports] raw-lines)))]
+        (assoc fi :line-keys (vec (for [[k [f n]] used] {:line (dec (long k)) :text (str "//line " f ":" n)})))))))
+
+(defn- full-forms?
+  "Whether the package file pf (forms root root) is of mode :full (its go/package's :positions)."
+  [root ^File pf]
+  (boolean (re-find #":positions :full" (slurp pf))))
+
+(defn full-lines
+  "Package source src of mode :full's forms (or raw forms), each form given the lines mode
+  :lines writes (raw-lines), its :go/ metadata kept for the checker's columns and spellings.
+  keys: a program's run, whose files with /*line directives take key-lines' keys."
+  ([src] (full-lines src false))
+  ([src keys]
+   (update src :files (fn [fs] (mapv #(if keys
+                                        (key-lines %)
+                                        (cond-> (update % :decls (fn [ds] (mapv raw-lines ds)))
+                                          (:file %) (update :file raw-lines)
+                                          (get-in % [:opts :imports]) (update-in [:opts :imports] raw-lines)))
+                                     fs)))))
+
 (defn- line-map
-  "gc's //line directives of the Go file at path (cmd/compile/internal/syntax's updateBase): a
+  "gc's line directives of the Go file at path (cmd/compile/internal/syntax's updateBase): a
   comment //line FILE:LINE or //line FILE:LINE:COL at a line's start makes the next line LINE of
+  FILE; a comment /*line FILE:LINE[:COL]*/ anywhere makes the position right after it LINE of
   FILE (an empty FILE: \"\", or with COL the file before; a relative FILE joined to the source's
   directory as gc does, which the judge's base name matching takes alike, so written as given).
-  A function of [file line] (the checker's position) to gc's [file line]; nil when the file has
-  no //line directive or has a /*line directive (positions within a line, which the forms do not
-  keep: the harness leaves those programs unsupported)."
+  A function of [file line col] (the checker's position; col nil when unknown: before any
+  directive of its line) to gc's [file line]; nil when the file has no line directive."
   [^String path]
-  (let [ls (vec (str/split-lines (slurp path)))]
-    (when (and (some #(str/starts-with? % "//line ") ls)
-               (not (some #(str/includes? % "/*line ") ls)))
-      (let [;; [directive-line file base]: from the line after directive-line, line base + (l - d - 1) of file
+  (let [text (slurp path)]
+    (when (or (str/includes? text "//line ") (str/includes? text "/*line "))
+      (let [ls (vec (str/split-lines text))
+            ;; [end-line end-col file base]: from position [end-line end-col] on, line base + (l - end-line) of file
             ds (loop [i 0 prev nil acc []]
                  (if (= i (count ls))
                    acc
                    (let [l (nth ls i)
-                         d (when (str/starts-with? l "//line ")
-                             (let [text (subs l 7)]
-                               (or (when-let [[_ f n _c] (re-find #"^(.*):([0-9]+):([0-9]+)$" text)]
-                                     [(if (= "" f) prev f) (Long/parseLong n)])
-                                   (when-let [[_ f n] (re-find #"^(.*):([0-9]+)$" text)]
-                                     [f (Long/parseLong n)]))))]
-                     (if (and d (pos? (long (second d))))
-                       (recur (inc i) (first d) (conj acc [(inc i) (first d) (second d)]))
-                       (recur (inc i) prev acc)))))]
+                         parse (fn [text]
+                                 (or (when-let [[_ f n _c] (re-find #"^(.*):([0-9]+):([0-9]+)$" text)]
+                                       [(if (= "" f) prev f) (Long/parseLong n)])
+                                     (when-let [[_ f n] (re-find #"^(.*):([0-9]+)$" text)]
+                                       [f (Long/parseLong n)])))
+                         ;; the line's directives in order: [end-line end-col file base]
+                         found (concat
+                                 (when (str/starts-with? l "//line ")
+                                   (when-let [d (parse (subs l 7))] [[(+ i 2) 1 d]]))
+                                 (when-not (str/starts-with? l "//")
+                                   (for [m (re-seq #"/\*line ([^*]*)\*/" l)
+                                         :let [d (parse (second m))]
+                                         :when d]
+                                     [(inc i) (+ 1 (.indexOf ^String l ^String (first m)) (count (first m))) d])))
+                         [acc prev] (reduce (fn [[acc prev] [el ec [f n]]]
+                                              (if (pos? (long n)) [(conj acc [el ec f n]) f] [acc prev]))
+                                            [acc prev] found)]
+                     (recur (inc i) prev acc))))]
         (when (seq ds)
-          (fn [file ^long line]
-            (if-let [[dl f n] (last (filter #(> line (long (first %))) ds))]
-              [(or f file) (+ (long n) (- line (long dl) 1))]
-              [file line])))))))
+          (fn [file ^long line col]
+            (let [c (long (or col 0))]
+              (if-let [[el _ f n] (last (filter (fn [[el ec]] (or (> line (long el)) (and (= line (long el)) (>= c (long ec))))) ds))]
+                [(or f file) (+ (long n) (- line (long el)))]
+                [file line]))))))))
 
 (defn errorcheck
   "Checks the package of package file pf (forms root root) without running it (GR7b, the
@@ -229,11 +320,8 @@
   [root ^File pf lang max-errors raw front]
   (let [src (cond-> (load/package-source {:dir root} nil @repl/config pf)
               lang (assoc-in [:config :lang] lang)
-              raw (-> (update :files (fn [fs] (mapv #(cond-> (update % :decls (fn [ds] (mapv raw-lines ds)))
-                                                      (:file %) (update :file raw-lines)
-                                                      (get-in % [:opts :imports]) (update-in [:opts :imports] raw-lines))
-                                                   fs)))
-                      (assoc :answers (java.util.HashMap.))))
+              (or raw (full-forms? root pf)) full-lines
+              raw (assoc :answers (java.util.HashMap.)))
         _ (when (empty? (:files src)) (fail 125 "unsupported" "no Go files for the configuration"))
         _ (no-assembly! src)
         ;; the types written, for gc's size checks after the declarations' (front)
@@ -263,9 +351,11 @@
           lmap (when front (line-map front))
           relocate (fn [^String l]
                      (if-let [[_ f n m] (when lmap (re-find #"(?s)^(.*?):([0-9]+): (.*)$" l))]
-                       (let [[f n] (lmap f (Long/parseLong n))] (str f ":" n ": " m))
+                       (let [[f n] (lmap f (Long/parseLong n) nil)] (str f ":" n ": " m))
                        l))
-          lines (for [e errs] (relocate (str (:file e) ":" (:line e) ": " (vmsg e))))
+          lines (for [e errs]
+                  (let [[f n] (if (and lmap (:line e)) (lmap (:file e) (long (:line e)) (:col e)) [(:file e) (:line e)])]
+                    (str f ":" n ": " (vmsg e))))
           lines (if front
                   (let [_ (require 'arbace.repr.go.syntax)
                         name (.getName (File. ^String front))

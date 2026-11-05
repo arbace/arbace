@@ -554,7 +554,7 @@ aot_build() {
   local src=$1 out=$2 log=$3 fl gf=()
   shift 3
   for fl in "$@"; do gf+=(--go-flag "$fl"); done
-  (cd "$root" && REPR_GO_EXE=$hexe bin/build-go --layout lines ${gf[@]+"${gf[@]}"} --print-cache "$cwork/print-cache" \
+  (cd "$root" && REPR_GO_EXE=$hexe bin/build-go --layout "${aot_layout:-lines}" ${gf[@]+"${gf[@]}"} --print-cache "$cwork/print-cache" \
      -o "$out" --work "$out.work" "$src") > "$log" 2>&1
   local s=$?
   rm -rf "$out.work"
@@ -607,6 +607,11 @@ check_one() {
   g=$goroot/test/$p
   f=$cforms/go/test/$(forms_rel "$p").ae
   [ -f "$f" ] || { printf '%s\terror\tno forms (%s)\n' "$id" "${f#$root/}"; return; }
+  # the forms of mode :full when the program has them (GOI-DESIGN-REVIEW.md, "As built: :full forms"):
+  # positions within a line (/*line directives, a call split over lines), printed back to the original
+  # text at the AOT level
+  local froot=$cforms layout=lines
+  [ -f "$cfull/go/test/$(forms_rel "$p").ae" ] && { froot=$cfull layout=full f=$cfull/go/test/$(forms_rel "$p").ae; }
   action_parse "$p" || { printf '%s\t%s\n' "$id" "$why"; return; }
   ns=$(sed -n '1s/^(ns \([^ )]*\).*/\1/p' "$f")
   # no reference (gc's build failed, its run timed out): its row printed by gc_ref, and the job's status 0
@@ -633,7 +638,7 @@ check_one() {
     rm -rf "$r.src" "$r.exe"; mkdir -p "$(dirname "$r.src/go/test/$(forms_rel "$p")")"
     cp "$f" "$r.src/go/test/$(forms_rel "$p").ae"
     [ -d "${f%.ae}" ] && cp -R "${f%.ae}" "$r.src/go/test/$(forms_rel "$p")"
-    if ! aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
+    if ! aot_layout=$layout aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
       printf '%s\terror\tthe AOT build failed: %s\n' "$id" "$(grep -v '^$' "$r.build.log" | head -2 | tr '\n' ' ' | cut -c1-240)"; return
     fi
     (cd "$goroot/test" && export $(run_env) && limited "$tmo" "$r.exe" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
@@ -641,7 +646,7 @@ check_one() {
   elif [ -n "${box:-}" ]; then
     box_run "$cforms" "$tmo" "$ns" "${f#$cforms/}" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" || st=$?
   else
-    (cd "$goroot/test" && export $(run_env) && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env goi "$p"); } && limited "$tmo" "$rexe" -m arbace.go.run "$cforms" "$ns" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
+    (cd "$goroot/test" && export $(run_env) && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env goi "$p"); } && limited "$tmo" "$rexe" -m arbace.go.run "$froot" "$ns" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
     cover_settle goi "$p"
   fi
   stderr_head "$r.err.raw" > "$r.err"
@@ -878,7 +883,7 @@ check_dir() {
       || { printf '%s\terror\tthe module of the directory'"'"'s forms: %s\n' "$p" "$(tail -1 "$r.root.log" | cut -c1-200)"; return; }
     [ ${#gfl[@]} -gt 0 ] && bflags+=("-gcflags=$module/...=${gfl[*]}")
     [ ${#lfl[@]} -gt 1 ] && bflags+=("-ldflags=${lfl[*]:1}")
-    if ! aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
+    if ! aot_layout=$layout aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
       printf '%s\terror\tthe AOT build failed: %s\n' "$p" "$(grep -v '^$' "$r.build.log" | head -2 | tr '\n' ' ' | cut -c1-240)"; return
     fi
     (cd "$goroot/test" && export $(run_env) && limited "$tmo" "$r.exe" > "$r.out" 2>&1 < "$empty") || st=$?
@@ -977,6 +982,9 @@ check_err() {
   mkdir -p "$(dirname "$r")"
   reason=""
   [ -f "$f" ] || reason=$(awk -F'\t' -v k="$p" '$2 == k { print $1 "\t" $7; exit }' "$etsv")
+  # the forms of mode :full when the program has them (GOI-DESIGN-REVIEW.md, "As built: :full forms"):
+  # columns, the source's spellings, an implicit return told from a final expression statement
+  [ -f "$f" ] && [ -f "$efull/go/test/$(forms_rel "$p").ae" ] && { froot=$efull f=$efull/go/test/$(forms_rel "$p").ae; }
   # gc's syntax errors (GP6): judged alone when one is a syntax error (gc stops after them) or
   # when go/parser rejects the file
   syn=$esyntax/$p.txt rejected=""
@@ -989,8 +997,9 @@ check_err() {
   fi
   # the checker's positions are the forms' lines, mapped by arbace.go.run through the file's //line
   # directives (GOI-SPEC.md, "Since v1: line directives"); a /*line directive sets a position within a
-  # line, which the forms do not keep (gc's syntax's errors above follow both)
-  if grep -qE '/\*line ' "$g"; then
+  # line, which mode :lines does not keep (gc's syntax's errors above follow both): with the forms of
+  # mode :full the checker's errors have their columns and arbace.go.run maps both
+  if [ "$froot" != "$efull" ] && grep -qE '/\*line ' "$g"; then
     printf '%s\tunsupported\tline directives: gc'"'"'s positions follow /*line directives within a line, goi'"'"'s errors the forms'"'"' lines\n' "$p"; return
   fi
   if [ ! -f "$f" ]; then
@@ -1248,12 +1257,17 @@ refresh_corpora() {
     "$root/bin/repr-go" read --corpus linux-test > "$cwork/read.log" 2>&1 || { tail "$cwork/read.log" >&2; return 1; }
     echo "$ckey" > "$cforms.goi-key"
   fi
+  if corpus_stale "$cfull" "$ckey" "$gd/linux-test-programs.txt"; then
+    echo "== bin/repr-go read --full --corpus linux-test (.tmp/goi-check/read-full.log)" >&2
+    "$root/bin/repr-go" read --full --corpus linux-test > "$cwork/read-full.log" 2>&1 || { tail "$cwork/read-full.log" >&2; return 1; }
+    echo "$ckey" > "$cfull.goi-key"
+  fi
   if corpus_stale "$dforms" "$ckey" "$gd/linux-dirtest-list.txt"; then
     echo "== bin/repr-go read --corpus linux-dirtest (.tmp/goi-check/read-dirtest.log)" >&2
     "$root/bin/repr-go" read --corpus linux-dirtest > "$cwork/read-dirtest.log" 2>&1 || { tail "$cwork/read-dirtest.log" >&2; return 1; }
     echo "$ckey" > "$dforms.goi-key"
   fi
-  if [ -n "$aot" ] && { corpus_stale "$efull" "$ckey" "$gd/linux-errtest-programs.txt" || [ ! -f "$efull.tsv" ]; }; then
+  if { corpus_stale "$efull" "$ckey" "$gd/linux-errtest-programs.txt" || [ ! -f "$efull.tsv" ]; }; then
     echo "== bin/repr-go read --full --corpus linux-errtest (.tmp/goi-check/read-errtest-full.log)" >&2
     "$root/bin/repr-go" read --full --corpus linux-errtest > "$gcwork/read-errtest-full.log" 2>&1 \
       || grep -q '^converted [0-9]* of [0-9]* dumps.*, 0 did not read back$' "$gcwork/read-errtest-full.log" \
@@ -1391,6 +1405,7 @@ check() {
   . "$root/bin/lib/host.bash"
   hexe=$(arbace_host_exe) || return 1
   cforms=$root/.tmp/repr-go/forms/linux-test
+  cfull=$root/.tmp/repr-go/forms/linux-test-full
   dforms=$root/.tmp/repr-go/forms/linux-dirtest
   cwork=$root/.tmp/goi-check
   # gc's references, the importcfg and the judge shared by every level and the box
@@ -1492,7 +1507,7 @@ check() {
   export PATH=$goroot/bin:$PATH
   echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
   export -f cover_env cover_settle forms_rel no_forms_row limited limited_cpu program_tmo ref_commit action_parse check_one check_dir check_err check_err_aot run_verdict dir_verdict syn_verdict err_verdict err_aot_verdict controls_of action_of action_words gc_ref gc_ref_fails aot_build aot_dir_root stderr_head gc_env run_env box_run box_input
-  export root goroot rexe hexe cforms dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp gocmp_key esyntax eraw
+  export root goroot rexe hexe cforms cfull dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp gocmp_key esyntax eraw
   local t0=$SECONDS
   # a job that dies prints no row: xargs's status is not the check's (missing_rows reports the program)
   { xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
