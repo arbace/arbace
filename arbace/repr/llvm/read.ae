@@ -532,22 +532,137 @@
     :word (if (type-start?) (parse-typed) (symbol (take-word!)))
     (parse-md-value)))
 
+;; LLParser's fields of the specialized nodes (arbace.repr.llvm.di-table, generated from LLParser.cpp's VISIT_MD_FIELDS by
+;; bin/llvm-corpus di-table): each field's value checked at its token as parseMDField does, unknown and repeated fields,
+;; the required ones at the closing parenthesis.
+
+(def ^:private di-fields-table
+  (delay
+    (require 'arbace.repr.llvm.di-table)
+    (reduce (fn [m l] (let [[k f r t a] (str/split l #" ")] (update m k (fnil conj []) [f (= r "r") t a])))
+            {} (str/split-lines @(resolve 'arbace.repr.llvm.di-table/fields)))))
+
+(defn- di-names [pre] (get @(resolve 'arbace.repr.llvm.di-table/names) pre #{}))
+
+(def ^:private di-consts
+  {"UINT64_MAX" 18446744073709551615N "UINT32_MAX" 4294967295 "UINT16_MAX" 65535 "UINT8_MAX" 255 "INT64_MAX" 9223372036854775807
+   "INT64_MIN" -9223372036854775808 "INT32_MAX" 2147483647 "INT32_MIN" -2147483648 "false" false "true" true})
+
+(defn- di-args
+  "A field type's constructor arguments: numbers, booleans and the limits' names evaluated, the rest as text."
+  [^String a]
+  (if (or (= a "-") (str/starts-with? a "=")) []
+      (mapv (fn [x] (cond (contains? di-consts x) (di-consts x)
+                          (re-matches #"-?[0-9]+" x) (bigint x)
+                          (re-matches #"0x[0-9a-fA-F]+" x) (bigint (java.math.BigInteger. (subs x 2) (int 16)))
+                          :else x))
+            (str/split (subs a 1 (dec (count a))) #","))))
+
+(defn- di-unsigned! [^String f mx]
+  (when-not (and (= (kind) :int) (not (str/starts-with? (text) "-"))) (llerr "expected unsigned integer"))
+  (when (> (bigint (text)) mx) (llerr (str "value for '" f "' too large, limit is " mx))))
+
+(defn- di-signed! [^String f mn mx]
+  (when-not (= (kind) :int) (llerr "expected signed integer"))
+  (let [v (bigint (text))]
+    (when (< v mn) (llerr (str "value for '" f "' too small, limit is " mn)))
+    (when (> v mx) (llerr (str "value for '" f "' too large, limit is " mx)))))
+
+(defn- di-md! [^String f allow-null]
+  (when (and (word? "null") (false? allow-null)) (llerr (str "'" f "' cannot be null"))))
+
+(defn- di-keyword!
+  "A DWARF keyword field: an integer up to `mx`, else a word of the lexer's kind (its prefix) that names one."
+  [^String f mx ^String pre names ^String expected ^String invalid]
+  (if (= (kind) :int)
+    (di-unsigned! f mx)
+    (if (and (= (kind) :word) (if (set? pre) (contains? pre (text)) (str/starts-with? (text) pre)))
+      (when-not (contains? names (text)) (llerr (str invalid " '" (text) "'")))
+      (llerr expected))))
+
+(defn- check-di-value!
+  "parseMDField for one field at the cursor: its type `t` with arguments `a`."
+  [^String f ^String t ^String a]
+  (let [as (di-args a)]
+    (case t
+      "MDUnsignedField" (di-unsigned! f (nth as 1 18446744073709551615N))
+      "LineField" (di-unsigned! f 4294967295)
+      "ColumnField" (di-unsigned! f 65535)
+      "MDSignedField" (di-signed! f (nth as 1 -9223372036854775808) (nth as 2 9223372036854775807))
+      "MDBoolField" (when-not (or (word? "true") (word? "false")) (llerr "expected 'true' or 'false'"))
+      "MDField" (di-md! f (nth as 0 true))
+      "MDSignedOrMDField" (if (= (kind) :int) (di-signed! f (nth as 1 -9223372036854775808) (nth as 2 9223372036854775807)) (di-md! f (nth as 3 true)))
+      "MDUnsignedOrMDField" (if (= (kind) :int) (di-unsigned! f (nth as 1 18446744073709551615N)) (di-md! f (nth as 2 true)))
+      "MDStringField" (do (when-not (= (kind) :str) (llerr "expected string constant"))
+                          (when (and (= (nth as 0 nil) "MDStringField::EmptyIs::Error") (= "" (text))) (llerr (str "'" f "' cannot be empty"))))
+      "MDAPSIntField" (when-not (= (kind) :int) (llerr "expected integer"))
+      "DwarfTagField" (di-keyword! f 65535 "DW_TAG_" (di-names "DW_TAG_") "expected DWARF tag" "invalid DWARF tag")
+      "DwarfAttEncodingField" (di-keyword! f 255 "DW_ATE_" (di-names "DW_ATE_") "expected DWARF type attribute encoding" "invalid DWARF type attribute encoding")
+      "DwarfVirtualityField" (di-keyword! f 2 "DW_VIRTUALITY_" (di-names "DW_VIRTUALITY_") "expected DWARF virtuality code" "invalid DWARF virtuality code")
+      "DwarfLangField" (di-keyword! f 65535 "DW_LANG_" (di-names "DW_LANG_") "expected DWARF language" "invalid DWARF language")
+      "DwarfSourceLangNameField" (di-keyword! f 65535 "DW_LNAME_" (di-names "DW_LNAME_") "expected DWARF source language name" "invalid DWARF source language name")
+      "DwarfCCField" (di-keyword! f 255 "DW_CC_" (di-names "DW_CC_") "expected DWARF calling convention" "invalid DWARF calling convention")
+      "DwarfEnumKindField" (di-keyword! f 1 "DW_APPLE_ENUM_KIND_" (di-names "DW_APPLE_ENUM_KIND_") "expected DWARF enum kind code" "invalid DWARF enum kind code")
+      "DwarfMacinfoTypeField" (di-keyword! f 255 "DW_MACINFO_" #{"DW_MACINFO_define" "DW_MACINFO_undef" "DW_MACINFO_start_file" "DW_MACINFO_end_file" "DW_MACINFO_vendor_ext"}
+                                           "expected DWARF macinfo type" "invalid DWARF macinfo type")
+      "EmissionKindField" (let [ks #{"NoDebug" "FullDebug" "LineTablesOnly" "DebugDirectivesOnly"}] (di-keyword! f 3 ks ks "expected emission kind" "invalid emission kind"))
+      "NameTableKindField" (let [ks #{"Default" "GNU" "None" "Apple"}] (di-keyword! f 3 ks ks "expected nameTable kind" "invalid nameTable kind"))
+      "FixedPointKindField" (let [ks #{"Binary" "Decimal" "Rational"}] (di-keyword! f 2 ks ks "expected fixed-point kind" "invalid fixed-point kind"))
+      nil)))
+
+(defn- check-di-flag!
+  "One atom of a DIFlagField or DISPFlagField: an unsigned integer or a flag the table names."
+  [^String t]
+  (let [sp? (= t "DISPFlagField") pre (if sp? "DISPFlag" "DIFlag")]
+    (cond (and (= (kind) :int) (not (str/starts-with? (text) "-"))) nil
+          (and (= (kind) :word) (str/starts-with? (text) pre) (or sp? (not (str/starts-with? (text) "DISPFlag"))))
+          (when-not (contains? (di-names pre) (text))
+            (llerr (str (if sp? "invalid subprogram debug info flag '" "invalid debug info flag '") (text) "'")))
+          :else (llerr "expected debug info flag"))))
+
 (defn parse-di-node
   "A specialized node, !NAME( at the cursor: (!NAME :key value ...) for its keyed fields in the text's order,
   (!NAME operand ...) for DIExpression's, DIArgList's and DIAssignID's positional operands."
   []
-  (let [head (symbol (str "!" (text)))]
+  (let [head (symbol (str "!" (text))) head-off (tok-start)
+        spec (get @di-fields-table (text))
+        by-name (into {} (map (fn [[f r t a]] [f [r t a]]) spec))]
     (adv!) (expect! "(")
-    (cond
-      (accept! ")") (list head)
-      (= (kind) :label)
-      (let [fs (loop [out []]
-                 (when-not (= (kind) :label) (refuse "expected a field"))
-                 (let [k (keyword (text)) _ (adv!) out (conj out k (parse-di-field))]
-                   (if (accept! ",") (recur out) out)))]
-        (expect! ")") (apply list head fs))
-      :else
-      (let [xs (comma-list parse-di-operand)] (expect! ")") (apply list head xs)))))
+    (let [node
+          (cond
+            (and (punct? ")") (or (nil? spec) (not (some second spec)))) (do (adv!) (list head))
+            (or (= (kind) :label) (and spec (punct? ")")))
+            (let [fs (if (punct? ")") []
+                         (loop [out [] seen #{}]
+                           (when-not (= (kind) :label) (if spec (llerr "expected field label here") (refuse "expected a field")))
+                           (let [fname (text) [_ t a] (get by-name fname)]
+                             (when spec
+                               (when-not t (llerr (str "invalid field '" fname "'")))
+                               (when (contains? seen fname) (llerr (str "field '" fname "' cannot be specified more than once"))))
+                             (adv!)
+                             (when t (if (#{"DIFlagField" "DISPFlagField"} t) (check-di-flag! t) (check-di-value! fname t a)))
+                             (let [v (if (#{"DIFlagField" "DISPFlagField"} t)
+                                       (let [x (parse-di-atom)]
+                                         (if (punct? "|") (loop [o [x]] (if (accept! "|") (recur (conj o (do (check-di-flag! t) (parse-di-atom)))) (apply list '| o))) x))
+                                       (parse-di-field))
+                                   out (conj out (keyword fname) v)]
+                               (if (accept! ",") (recur out (conj seen fname)) out)))))]
+              (when spec
+                (let [have (set (map name (take-nth 2 fs)))]
+                  (when-let [[f] (first (filter (fn [[f r]] (and r (not (have f)))) spec))]
+                    (llerr (str "missing required field '" f "'")))
+                  ;; parseDICompileUnit's language fields
+                  (when (= (name head) "!DICompileUnit")
+                    (when-not (or (have "language") (have "sourceLanguageName"))
+                      (llerr "missing one of 'language' or 'sourceLanguageName', required for !DICompileUnit" head-off))
+                    (when (and (have "language") (have "sourceLanguageName"))
+                      (llerr "can only specify one of 'language' and 'sourceLanguageName' on !DICompileUnit" head-off))
+                    (when (and (have "sourceLanguageVersion") (not (have "sourceLanguageName")))
+                      (llerr "'sourceLanguageVersion' requires an associated 'sourceLanguageName' on !DICompileUnit" head-off)))))
+              (expect! ")") (apply list head fs))
+            :else
+            (let [xs (comma-list parse-di-operand)] (expect! ")") (apply list head xs)))]
+      node)))
 
 (defn- parse-md-attachments
   "`, !name !N` pairs after an instruction or a global: a flat vector [!name md ...]."
