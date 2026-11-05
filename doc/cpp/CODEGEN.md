@@ -421,7 +421,7 @@ The 33 samples `test/cpp/codegen/tmpl-*.cpp` (each with a header comment saying 
 | check (2026-11-05, light) | result |
 |---|---|
 | `bin/cppi codegen-check` over `test/cpp/codegen` (38 + 33) | 71 of 71 pass; generate and lower about 60 s, gcc, clang and runs 7 s |
-| gcc 15.2.0's template run tests (`g++.dg/template`, `g++.old-deja/g++.pt`, `g++.dg/cpp0x`: the `dg-do run` files including no header beyond C's (`stdio`, `stdlib`, `string`, `stddef`, `assert` and their `c` forms) that clang accepts at `-std=c++23`, 288 files; read in place from the pinned tarball's extraction, not committed) | 147 of 288 pass all three levels (51 %): `g++.old-deja/g++.pt` 104 of 143, `g++.dg/template` 17 of 35, `g++.dg/cpp0x` 26 of 110; 10 at this section's first measure, 99 after the first round of fixes; generate and lower about 2.5 minutes, gcc, clang and runs 17 s |
+| gcc 15.2.0's template run tests (`g++.dg/template`, `g++.old-deja/g++.pt`, `g++.dg/cpp0x`: the `dg-do run` files including no header beyond C's (`stdio`, `stdlib`, `string`, `stddef`, `assert` and their `c` forms) that clang accepts at `-std=c++23`, 288 files; read in place from the pinned tarball's extraction, not committed) | 147 of 288 pass all three levels (51 %): `g++.old-deja/g++.pt` 104 of 143, `g++.dg/template` 17 of 35, `g++.dg/cpp0x` 26 of 110; 63 at the first measure of this branch, 99 after the first round of fixes; generate and lower about 2.5 minutes, gcc, clang and runs 17 s |
 | `bin/repr-cpp native-check samples` after repr/cpp's type reader change | 9 of 9 the same, 68 of 68 items |
 | the existing samples refused on templates at G1 (`auto.cpp`, `classes.cpp`, `p1-first.cpp`) | past their templates; refused next on `auto` return types, `try` (G2) and a concept |
 

@@ -209,19 +209,21 @@
                        (re-find #"^(sizeof|alignof)\b" t) abi/ulong*
                        :else (fail :decltype "decltype(" t ")")))
       <> (if-let [h (:template-id @hooks)] (h scope f) (fail :template "template-id " (pr-str f)))
-      cpp/scope (let [t (resolve-type-form scope (second f))]
-                  (if (#{:tparam :tspec :tdep} (:k (abi/unq t)))
+      cpp/scope (loop [t (resolve-type-form scope (second f)) [p & more] (nnext f)]
+                  (cond
+                    (nil? p) t
                     ;; a member of a dependent type in a template's signature (CODEGEN.md G3)
-                    {:k :tdep :base t :names (mapv #(if (symbol? %) (name %) (fail :type "type form " (pr-str f))) (nnext f))}
-                  (if (and (= 1 (count (nnext f))) (seq? (last f)) (= '<> (first (last f))))
+                    (#{:tparam :tspec :tdep} (:k (abi/unq t)))
+                    {:k :tdep :base t :names (mapv #(if (symbol? %) (name %) (fail :type "type form " (pr-str f))) (cons p more))}
+                    (not (abi/class? t)) (fail :type "a scope of a non-class " (pr-str f))
                     ;; a member template's specialization (Outer<int>::Inner<double>): its name found in the class, its
                     ;; arguments resolved here
-                    (do (when-not (abi/class? t) (fail :type "a scope of a non-class " (pr-str f)))
-                        ((:template-id @hooks) scope (apply list '<> {:in (:scope (abi/cls-of t)) :name (second (last f))} (nnext (last f)))))
-                  (let [_ (when-not (abi/class? t) (fail :type "a scope of a non-class " (pr-str f)))
-                      es (lookup-qualified (:scope (abi/cls-of t)) (mapv #(if (symbol? %) (name %) (fail :type "type form " (pr-str f))) (nnext f)) false)
-                      e (type-entity es)]
-                  (or (:ty e) (fail :type "unknown type " (pr-str f)))))))
+                    (and (seq? p) (= '<> (first p)))
+                    (recur ((:template-id @hooks) scope (apply list '<> {:in (:scope (abi/cls-of t)) :name (second p)} (nnext p))) more)
+                    (symbol? p)
+                    (let [e (type-entity (lookup-qualified (:scope (abi/cls-of t)) [(name p)] false))]
+                      (recur (or (:ty e) (fail :type "unknown type " (pr-str f))) more))
+                    :else (fail :type "type form " (pr-str f))))
       cpp/global (binding [] (resolve-type-form (loop [s scope] (if (:parent s) (recur (:parent s)) s)) (second f)))
       (fail :type "type form " (pr-str f)))
     :else (fail :type "type form " (pr-str f))))
@@ -833,7 +835,7 @@
                  [cid (cons oc convs)])
         tiebreak (or (:tiebreak @hooks) (constantly false))
         better (fn [[fa a] [fb b]] (and (every? true? (map #(not (better-ics? %2 %1)) a b))
-                                        (or (some true? (map better-ics? a b)) (tiebreak fa fb))))
+                                        (or (some true? (map better-ics? a b)) (tiebreak fa fb (count args)))))
         best (filter (fn [x] (every? #(or (identical? % x) (better x %)) viable)) viable)]
     (cond
       (= 1 (count best)) (ffirst best)
