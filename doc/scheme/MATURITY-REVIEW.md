@@ -135,6 +135,69 @@ programs, 1,231 checks pass, regressions: none; `bin/si test --si` 61 of 64, 3 k
 Chez runs for the reference) does not carry it, so a program using `include` is not differentially checked until it does and the program is added to
 `test/scheme/si/programs.edn` with a Chez run (`bin/si check --record-ref`); the gate's essential steps were not run (no gate by day).
 
+## 6. As built: SMR2 and SMR3 (2026-11-05, as decided: SMR2 (a), SMR3 (b) then (a))
+
+**SMR2, the list-argument checks** (`go/arbace/scm/prim_control.ae`, `prim_list.ae`, `prim.ae`, `scheme/lib/chezscheme.sls`). Most of what the design
+listed was there already (the machine's `map`, `for-all`, `exists`, `fold-left`, `fold-right` checked their lists' shape through `checkLists`; the
+cyclic and improper clauses of `for-all` and `exists` passed). What the 88 failing clauses of `4.ms` and `5_2.ms` were: (1) `andmap` and `ormap`
+were Scheme definitions in `(chezscheme)` with no checks: now `andmap` is `for-all` and `ormap` is `exists`; (2) the lists Chez calls *altered during
+the operation*: `for-each`, `for-all`, `exists` (and so `andmap`, `ormap`) count the length found at the entry (`checkLists` returns it) and walk
+exactly that many steps through `carsCdrsN`, a tail that is no pair before the count is out raises Chez's "input list was altered during operation"
+(a list that grew is ignored, as Chez's); `map` and `fold-right` do not look (Chez's do not: probed), `fold-left` raises on a tail that is neither a
+pair nor the empty list (`carsCdrsAlt`), a shortened list ends it quietly, as Chez's; `(chezscheme)`'s `for-each` (it returns its last call's value) has the
+same count in its one- and two-list loops; (3) `memp`, `find`, `assp` (`findStep`) now carry the original list, a tortoise and a step count: improper
+list raises "improper list ~s" ("improperly formed alist ~s" for `assp`, also for an element that is no pair), circular "cyclic list ~s" ("cyclic
+alist ~s"), the words of Chez's; `dlMem` and `dlAss` (`memq`, `assq` ...) say "cyclic list ~s" and "cyclic alist ~s" now too; (4) `ArgList` says "~s is circular" for a
+circular list, as Chez does; (5) `iota` is Chez's, a nonnegative fixnum count only (`(iota 3 17)` raises: `(srfi :1)`'s keeps its start and step), and `list-copy`
+is `(append l '())`, which checks the list. Probes against Chez (`chez --script`, the same expression on both, 84 calls of the list procedures on
+circular, improper, mismatched, altered and non-procedure arguments, compared for raising or not): the differences at the start were 24, at the end one:
+a write of a circular result (which si's non-R7RS `write` does not label, a printer matter). `test/scheme/si/programs/list-checks.sps` (40 calls, prints
+`ok` or `raise`) is in `programs.edn` with its Chez run (`bin/si check --record-ref`), in the essential subset, passing as interpreted and as compiled
+(`bin/si aot`, output equal to Chez's).
+
+**SMR3, the mats' reader.** The review's guess of the cascade was wrong in its cause. `test/scheme/mats/run.sps` cuts the text into top-level data
+by counting parentheses (`segments`, `datum-end`), and it took `#;` (the datum comment) for `#` and a `;` line comment, so `#;(error? ...)` ate the
+rest of its line and left the parentheses of the next line unbalanced: `hash.ms` alone had 76 reads that failed for that. Built: (a) `#;` skips the
+datum that follows (top level and inside a datum); (b) resynchronisation: the harness reads datum by datum from a position, and a datum the reader
+refuses is skipped to the next line that begins with `(` in its first column, not to the end of the segment (the old precomputed segments are gone);
+(c) the four syntaxes: `#!eof` and `#!bwp` (new singleton `Bwp`, `value.ae`) as data and `#vfx(`, `#vfl(` as vectors (an element that is no fixnum or no flonum is
+a read error), in `go/arbace/scm/read.ae` under the flag `ChezLex`, off, turned on by the environment variable `SI_CHEZ_LEXICAL` (set, not `""` or `0`), which `bin/si mats`
+sets for the harness: no primitive, so psyntax's boot list and `psyntax.pp.ae` are untouched, and no reader of R7RS, R6RS or of a program changes. The tests:
+`TestReadChezLexical` (`reader_test.ae`). Not done: `#N` before `vu8`, `vfx`, `vfl` and `(` (a counted vector, 9 uses in `6.ms`, `bytevector.ms`),
+`#!base-rtd`, binary floating-point literals, `#&`, `#{...}`, the names `rubout`, `bel`, `377`; no `fxvector` and `flvector` types (a literal reads as a vector, so a mat
+that asks `fxvector?` still stops at an identifier or fails), no weak pairs (`#!bwp` is read, `bwp-object?` is not there).
+
+Read errors after the change, all 68 files of the mats at the reader's level (the harness' own reading, no run): 228 items before, 76 after (record.ms and 7.ms
+newly appear in the 76: 12 and 3, files not in the record), the cause by count: `#!base-rtd` 6, binary floating literals 8, counted `#N...(` 15, `#&` 5, `#{` 14, the
+names 8, the rest single.
+
+**What moved in the mats' classes, on the mats run** (`bin/si mats --record 3.ms 4.ms 5_1.ms 5_2.ms hash.ms`, 171 mats, light, main's stage 0 as host; items before
+(the record at its commit) and after):
+
+| class | before | after |
+|---|---|---|
+| `mats-chez-reader` | 117 | 7 |
+| `mats-error-checks` | 95 | 21 (88 of the 4.ms and 5_2.ms items regained but 2; 12 new in `3.ms`: letrec's restriction, clauses of mats the cascade hid) |
+| `mats-chez-identifier` | 50 | 70 (mats that read now meet an identifier of Chez's own: 14 more mats in `hash.ms`, 3 in `3.ms`, 2 in `5_1.ms`, 1 in `4.ms`) |
+| `mats-returned-false` | 21 | 25 (`hash.ms` `$symbol-hashtable` 17, 23, 28, 39, which read what a clause that did not run made) |
+| other classes | 124 | 124 (unchanged) |
+| mats passing in the five files | 70 | 81 |
+
+`4.ms`: pass 12 to 17, fail 7 to 2; `5_2.ms`: pass 25 to 30, fail 20 to 15; `hash.ms`: 20 mats to 34 (none run: all stop at an identifier); `3.ms`: 14 to 17.
+The classes' regexes in `test/scheme/divergences-corpora.edn` follow (the regained clauses out of `mats-error-checks`, the newly seen ones in); the record
+`test/scheme/check-mats-linux-amd64.edn` is rewritten for these five files only (the partial record of SC182 (b)), the other files' lines are the
+old record's until the night's run. The clauses of `mats-error-checks` in the files not run here (`8.ms`, `5_7.ms`, `fx.ms`, `3.ms`'s older ones) are unchanged
+by this work, except any that used the lists above: the night's whole run shows it.
+
+Checks run (light, `ARBACE_HOST_EXE` main's stage 0, no gate): `bin/si r7rs` 1,216 of 1,225, 9 float-printing, regressions: none; `bin/si srfi` 11 programs, 1,231
+checks pass, regressions: none; `bin/si test --si` 61 of 64, 3 known, 0 failing; `bin/si unit` ok; `bin/si check --only test/scheme/essential-check.txt` 47 of 48
+(the one known, `chez-conditions`), regressions: none. Not measured: the speed on `ecraven`'s `nboyer` and `sboyer` (the added cost is one counter in
+`for-each`, `for-all`, `exists`, one cycle step in `memp`, `find`, `assp`, no new pass over the list; measure with the night's `bin/si ecraven --only`).
+
+**The night's command** (the whole mats run, heavy, a record of every file; main's lock as every heavy run): `bin/heavy-lock bin/si mats --record`, then
+`bin/si check --aot --only si/list-checks` for the AOT record line (here added by hand after a `bin/si aot` run equal to Chez's); the classes
+then show what the unrun files moved (`mats-chez-reader` and `mats-error-checks` first).
+
 ## Proposed (SMR1 onward; none decided)
 
 - **SMR1 include.** (a) keep the built `include`/`include-ci`, add it to `base.chezscheme.sls` and the include sample to `programs.edn` with a Chez run, at the next

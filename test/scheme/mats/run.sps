@@ -52,6 +52,9 @@
         ((char-whitespace? (string-ref s i)) (skip-ws s (+ i 1) n))
         ((char=? (string-ref s i) #\;)
          (let loop ((j i)) (if (or (>= j n) (char=? (string-ref s j) #\newline)) (skip-ws s j n) (loop (+ j 1)))))
+        ;; SMR3: a datum comment #; skips the datum that follows (before, #; was read as # and a ; comment to the end of its line)
+        ((and (< (+ i 1) n) (char=? (string-ref s i) #\#) (char=? (string-ref s (+ i 1)) #\;))
+         (skip-ws s (skip-datum-comment s i n) n))
         ((and (< (+ i 1) n) (char=? (string-ref s i) #\#) (char=? (string-ref s (+ i 1)) #\|))
          (let loop ((j (+ i 2)) (d 1))
            (cond ((>= j n) j)
@@ -60,6 +63,10 @@
                  ((and (< (+ j 1) n) (char=? (string-ref s j) #\#) (char=? (string-ref s (+ j 1)) #\|)) (loop (+ j 2) (+ d 1)))
                  (else (loop (+ j 1) d)))))
         (else i)))
+;; the end of the datum comment at i (i is its #;) and of the datum it comments out
+(define (skip-datum-comment s i n)
+  (let ((k (skip-ws s (+ i 2) n)))
+    (if (>= k n) n (datum-end s k n))))
 (define (delimiter? c) (or (char-whitespace? c) (memv c '(#\( #\) #\[ #\] #\" #\;))))
 (define (datum-end s i n)
   (let ((c (string-ref s i)))
@@ -73,6 +80,7 @@
                          ((char=? c #\") (loop (string-end s (+ j 1) n) d))
                          ((char=? c #\;) (loop (skip-ws s j n) d))
                          ((and (char=? c #\#) (< (+ j 1) n) (char=? (string-ref s (+ j 1)) #\|)) (loop (skip-ws s j n) d))
+                         ((and (char=? c #\#) (< (+ j 1) n) (char=? (string-ref s (+ j 1)) #\;)) (loop (skip-ws s j n) d))
                          ((and (char=? c #\#) (< (+ j 1) n) (char=? (string-ref s (+ j 1)) #\\))
                           ;; a character: #\x then to the next delimiter, at least one character
                           (let cl ((k (+ j 3))) (if (and (< k n) (not (delimiter? (string-ref s k)))) (cl (+ k 1)) (loop k d))))
@@ -214,24 +222,38 @@
                (display " NOTRUN ") (display (message-of (cdr r))) (newline) (line))
         (set! prelude (cons d prelude)))))
 
-(for-each
- (lambda (seg)
-   (set! data (+ data 1))
-   (let* ((str (substring text (car seg) (cdr seg)))
-          (r (guard (e (#t (cons 'bad e))) (cons 'good (read (open-string-input-port str))))))
-     (cond
-       ((eq? (car r) 'bad)
-        (newline) (display "READ ") (display (car seg)) (display " ") (display (message-of (cdr r))) (newline) (line))
-       (else
-        (let ((d (cdr r)))
+;; SMR3: a datum the reader refuses is skipped to the next line that begins with a parenthesis in its first column (Chez's mats
+;; begin every top-level form there), not to the end of the segment the paren count made: a segment that ran on (an unbalanced
+;; or an unread syntax) no longer takes the forms after it along (before, one bad datum made a cascade of READ lines, review
+;; MATURITY-REVIEW.md, 3, SMR3)
+(define (resync s i n)
+  (let loop ((j (+ i 1)))
+    (cond ((>= j n) n)
+          ((and (char=? (string-ref s j) #\() (char=? (string-ref s (- j 1)) #\newline)) j)
+          (else (loop (+ j 1))))))
+
+(let ((n (string-length text)))
+  (let loop ((i 0))
+    (let ((i (skip-ws text i n)))
+      (when (< i n)
+        (set! data (+ data 1))
+        (let* ((e (datum-end text i n))
+               (str (substring text i e))
+               (r (guard (x (#t (cons 'bad x))) (cons 'good (read (open-string-input-port str))))))
           (cond
-            ((and (pair? d) (eq? (car d) 'mat) (pair? (cdr d)))
-             (run-one (cadr d) (cddr d)))
-            ((and (pair? d) (memq (car d) '(mat/cf)))
-             (set! mats (+ mats 1))
-             (newline) (display "MAT ") (write (if (pair? (cdr d)) (cdr d) d)) (display " SKIP mat/cf") (newline) (line))
-            ((def-form? d) (add-def! d))
-            (else #f)))))))
- (segments text))
+            ((eq? (car r) 'bad)
+             (newline) (display "READ ") (display i) (display " ") (display (message-of (cdr r))) (newline) (line)
+             (loop (resync text i n)))
+            (else
+             (let ((d (cdr r)))
+               (cond
+                 ((and (pair? d) (eq? (car d) 'mat) (pair? (cdr d)))
+                  (run-one (cadr d) (cddr d)))
+                 ((and (pair? d) (memq (car d) '(mat/cf)))
+                  (set! mats (+ mats 1))
+                  (newline) (display "MAT ") (write (if (pair? (cdr d)) (cdr d) d)) (display " SKIP mat/cf") (newline) (line))
+                 ((def-form? d) (add-def! d))
+                 (else #f)))
+             (loop e))))))))
 
 (newline) (display "FILE ") (display data) (display " ") (display mats) (newline)
