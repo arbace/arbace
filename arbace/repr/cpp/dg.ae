@@ -1,0 +1,590 @@
+(ns arbace.repr.cpp.dg
+  "C++'s dg check (doc/cpp/CPP-SURVEY.md, \"As built: CX9 (write-ahead)\"; bin/repr-cpp dg, its driver bin/lib/repr-cpp/dg):
+  gcc 15.2.0's g++.dg tests judged by their DejaGnu directives, as C's dg check (arbace.c.dg) judges gcc.dg's. Three parts,
+  each file of g++.dg in at most one: `preprocess` (the files whose `dg-do` is preprocess), `modules` (the rest of
+  `modules/`: read and printed as single translation units by the round trip, bin/lib/repr-cpp/roundtrip) and `dg-error`
+  (the rest of the files with a dg-error directive).
+
+  A file is run as DejaGnu's g++-dg-runtest runs it, at one standard: the file's own -std, else the first of DejaGnu's
+  standard list for the file (g++-dg.exp: the versions its directives mention, then 17 98 26 11 20 14 23) at which its dg-do
+  selector holds, `-std=c++NN` (`-std=gnu++NN` when it has a dg-options line); its options are its dg-options (else g++.dg's
+  default -pedantic-errors -Wno-long-long) and its dg-additional-options, each line whose selector holds at that standard.
+
+  The read of the dg-error part is repr/cpp's: the oracle (clang 23.1.4 through tools/cxxdump) accepts or rejects the
+  unit, and an accepted unit is read into forms (arbace.repr.cpp); a rejection's errors are clang's diagnostics. The
+  preprocess part's read is the shared preprocessor (arbace.repr.c.pp in C++ mode), its errors the port's. The verdict is
+  C's: the errors' lines against the dg-error lines (pass; missed, an expected line without an error; extra, an error on a
+  line that expects none; both; stopped, errors not located in the main file or a fatal error before the expected lines;
+  crash, timeout, refused: no judgment), the messages not compared (clang's wording is not g++'s). g++ 15.2, the
+  reference (CP11 (a)), is run on each file with the same options and its errors by line recorded as data
+  (test/cpp/ref-dg-gxx15.edn): they validate the directives, as gcc's do in C's check. Commands: lists, read, ref, judge."
+  (:require [arbace.c.dg :as cdg]
+            [arbace.repr.c.host :as chost]
+            [arbace.repr.c.pp :as pp]
+            [arbace.repr.cpp :as rc]
+            [arbace.repr.cpp.host :as host]
+            [arbace.string :as str])
+  (:import [java.util.concurrent Executors Callable Future]))
+
+(set! *warn-on-reflection* true)
+
+(def record-file "test/cpp/check-dg-linux-amd64.edn")
+(def preprocess-record-file "test/repr/cpp/dg-preprocess-results.edn")
+(def classes-file "test/cpp/divergences-dg.edn")
+(def ref-file "test/cpp/ref-dg-gxx15.edn")
+(def times-file "test/cpp/dg-times.edn")
+(def corpus "gxx-dg")
+
+(defn- slurp-latin1 ^String [^String path] (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1"))
+(defn- one-line ^String [x] (str/replace (str x) #"[\t\n\r]" " "))
+(defn- exists? [^String p] (.exists (java.io.File. p)))
+(defn- read-edn [^String p dflt] (if (exists? p) (read-string (slurp p)) dflt))
+
+;; ---------------------------------------------------------------------------------------------
+;; The parts
+
+(defn directives
+  "arbace.c.dg's directives of a file, those whose name DejaGnu reads: dg.exp's scan takes `{ dg-NAME` followed by white
+  space (or the closing brace), so a `{ dg-error: ... }` in a comment is no directive."
+  [^String text]
+  (let [lines (str/split-lines text)]
+    (filterv (fn [{:keys [name line]}]
+               (let [l (nth lines (dec (long line)) "")]
+                 (re-find (re-pattern (str "\\{\\s*dg-" (java.util.regex.Pattern/quote name) "(\\s|\\})")) l)))
+             (cdg/directives text))))
+
+(defn part-of
+  "The part of a g++.dg file (its name under g++.dg/ and its text): :preprocess, :modules, :dg-error or nil."
+  [^String nm ^String text]
+  (cond
+    (re-find #"\{\s*dg-do\s+preprocess" text) :preprocess
+    (.startsWith nm "modules/") :modules
+    (re-find #"\{\s*dg-error\b" text) :dg-error
+    :else nil))
+
+;; ---------------------------------------------------------------------------------------------
+;; Selectors at a standard
+
+(defn std-year
+  "The year of a standard's two digits (98 1998, 03 2003, 11 2011 ...)."
+  ^long [v]
+  (let [v (long v)] (if (>= v 90) (+ 1900 v) (+ 2000 v))))
+
+(def ^:private cxx-targets
+  (delay (let [f (java.io.File. "test/cpp/dg-targets.edn")] (if (.exists f) (:effective (read-string (slurp f))) {}))))
+
+(def ^:dynamic *flags* "the run's flags, for the effective targets target-supports.exp decides by check-flags" [])
+
+(defn cxx-atom
+  "A selector's atom for a C++ unit at the standard of year `y`: the effective targets c++NN (at least), c++NN_only and
+  c++NN_down (target-supports.exp), c++ true, c false; concepts (C++20 on, or -fconcepts) and implicit_constexpr
+  (-fimplicit-constexpr) by the run's flags (*flags*); then C++'s table (test/cpp/dg-targets.edn), then C's
+  (arbace.repr.c.host/target-atom, test/c/dg-targets.edn); :unknown when neither lists it (review 196, finding 1)."
+  [y ^String w]
+  (let [y (long y)]
+    (cond
+      (= w "c++") true
+      (= w "c") false
+      (= w "concepts") (or (>= y 2020) (boolean (some #{"-fconcepts"} *flags*)))
+      (= w "implicit_constexpr") (boolean (some #{"-fimplicit-constexpr"} *flags*))
+      (contains? @cxx-targets w) (boolean (get @cxx-targets w))
+      :else
+      (if-let [[_ v sfx] (re-matches #"c\+\+(\d\d|0x|1y|1z|2a|2b|2c)(_only|_down)?" w)]
+        (let [vy (std-year (Long/parseLong (get {"0x" "11" "1y" "14" "1z" "17" "2a" "20" "2b" "23" "2c" "26"} v v)))
+              ;; c++98 and c++03 are one dialect for the effective targets (c++98_only holds at -std=c++03)
+              vy (if (= vy 2003) 1998 vy) yy (if (= y 2003) 1998 y)]
+          (case sfx
+            "_only" (= yy vy)
+            "_down" (<= yy vy)
+            (>= yy vy)))
+        (if (.startsWith w "c++") :unknown (chost/target-atom w))))))
+
+(def ^:dynamic *unknown*
+  "an atom: the names of selectors neither table decides whose value decided a directive (the file is then unsupported)" nil)
+
+(defn holds?
+  "Whether a directive's selector word (`target c++11`, `xfail *-*-*`, nil) holds at year `y`: {:applies :xfail}. A selector
+  whose value an unlisted name leaves open (Kleene's :unknown) names it in *unknown*, which makes the file unsupported
+  (review 196, finding 1: no longer taken to hold, which a `!` turned around)."
+  [y sel]
+  (if (nil? sel)
+    {:applies true :xfail false}
+    (let [t (str/trim (str sel))
+          xf (.startsWith t "xfail")
+          tg (.startsWith t "target")
+          seen (atom #{})
+          atomf (fn [w] (let [v (cxx-atom y w)] (when (= :unknown v) (swap! seen conj w)) v))
+          v (chost/eval-selector (str/trim (subs t (cond xf 5 tg 6 :else 0))) atomf)
+          _ (when (and (= :unknown v) *unknown*) (swap! *unknown* into @seen))
+          v (if (= :unknown v) true (boolean v))]
+      (cond xf {:applies true :xfail v}
+            tg {:applies v :xfail false}
+            :else {:applies true :xfail false}))))
+
+;; ---------------------------------------------------------------------------------------------
+;; DejaGnu's standards and options
+
+(defn std-list
+  "g++-dg.exp's std_list for a file's text (no -std=...++ in it): the versions its `{ dg* c++NN` lines mention, sorted as
+  Tcl's lsort -unique sorts them (as strings), then 17 98 26 11 20 14 23 while fewer than three and above the lowest a
+  dg-do or dg-require-effective-target line names."
+  [^String text]
+  (let [lines (filter #(re-find #"\{ dg.* c\+\+[0-9][0-9]" %) (str/split-lines text))
+        vers (map #(second (re-find #"c\+\+([0-9][0-9])" %)) lines)
+        low (reduce (fn [low [l v]] (if (and (not= v "98") (re-find #"dg-do|dg-require-effective-target" l)) (Long/parseLong v) low))
+                    0 (map vector lines vers))
+        lst (vec (sort (distinct vers)))]
+    (reduce (fn [l v] (let [cmp (if (= v "98") 3 (Long/parseLong v))]
+                        (if (and (< (count l) 3) (not (some #{v} l)) (> cmp (long low))) (conj l v) l)))
+            lst ["17" "98" "26" "11" "20" "14" "23"])))
+
+(def default-flags "g++.dg/dg.exp's DEFAULT_CXXFLAGS" ["-pedantic-errors" "-Wno-long-long"])
+
+(def ^:private drivers
+  (delay (let [f (java.io.File. "test/cpp/dg-drivers.edn")] (if (.exists f) (read-string (slurp f)) {"" {:runner :g++-dg-runtest :flags default-flags}}))))
+
+(defn driver-of
+  "The driver of a g++.dg file (test/cpp/dg-drivers.edn): its nearest directory's that holds an .exp, else dg.exp's;
+  with :dir."
+  [^String nm]
+  (let [parts (vec (butlast (str/split nm #"/")))]
+    (or (some (fn [n] (let [d (str/join "/" (take n parts))] (when-let [v (get @drivers d)] (assoc v :dir d))))
+              (range (count parts) 0 -1))
+        (assoc (get @drivers "") :dir ""))))
+
+(defn- shell-words [^String s]
+  (vec (remove str/blank? (map #(str/replace % "\\\"" "\"") (str/split (str/trim s) #"\s+")))))
+
+(defn options
+  "The options DejaGnu gives a file at year `y` (its dg-options whose selector holds, else the driver's default flags; then
+  its dg-additional-options whose selector holds), ${srcdir} and [srcdir] as `srcdir`: {:opts [...] :dg-options bool}."
+  [ds y ^String srcdir dflt]
+  (let [sub #(shell-words (-> (str %) (str/replace "${srcdir}" srcdir) (str/replace "[srcdir]" srcdir)))
+        own (filter #(and (= (:name %) "options") (:applies (holds? y (second (:words %))))) ds)
+        add (filter #(and (= (:name %) "additional-options") (:applies (holds? y (second (:words %))))) ds)]
+    {:opts (vec (concat (if (seq own) (sub (first (:words (last own)))) dflt)
+                        (mapcat #(sub (first (:words %))) add)))
+     :dg-options (boolean (seq own))}))
+
+;; the options clang is given beside the standard: the ones it reads as g++ does (warnings and their errors, the language
+;; switches both compilers share); the rest are g++'s alone (clang would refuse an unknown -f option)
+(def ^:private clang-ok
+  #"^(-pedantic|-pedantic-errors|-Wpedantic|-w|-W[A-Za-z].*|-ansi|-D.*|-U.*|-I.*|-O[0-3sgz]?|-trigraphs|-fno-exceptions|-fexceptions|-fno-rtti|-frtti|-fchar8_t|-fno-char8_t|-fsized-deallocation|-fno-sized-deallocation|-faligned-new|-fno-aligned-new|-fms-extensions|-fopenmp|-fno-operator-names|-fno-elide-constructors|-fno-threadsafe-statics|-funsigned-char|-fsigned-char|-fshort-wchar|-fno-access-control|-fdollars-in-identifiers|-fno-dollars-in-identifiers|-fno-gnu-keywords|-fgnu-keywords|-fno-implicit-templates|-fdeclspec|-ftemplate-depth=.*|-fconstexpr-depth=.*|-fconstexpr-steps=.*|-fno-weak|-fcoroutines|-fpermissive)$")
+
+(defn own-std?
+  "DejaGnu's search_for \"-std=*++\": a line of the file with -std= and ++ after it (Tcl's glob, `*` crossing spaces)."
+  [^String text]
+  (boolean (some #(re-find #"-std=.*\+\+" %) (str/split-lines text))))
+
+(defn file-run
+  "A file's run at its standard, by its directory's driver (driver-of): {:std \"c++17\" :gxx [args] :clang [args]
+  :unsupported why-or-nil :driver dir}."
+  [^String nm ^String text ds ^String srcdir]
+  (let [drv (driver-of nm)
+        runner (:runner drv)
+        own-std (own-std? text)
+        dos (filter #(= (:name %) "do") ds)
+        prefix (if (re-find #"dg-options" text) "gnu++" "c++")
+        stdlist? (and (#{:g++-dg-runtest :modules} runner) (not own-std))
+        ;; modules.exp's module-init: MOD_STD_LIST, 17 2a 2b, the gnu++ prefix with a dg-options line
+        cands (cond (not stdlist?) [nil] (= runner :modules) ["17" "20" "23"] :else (std-list text))
+        ;; the flags at a candidate standard: the standard's (g++-dg-runtest), the torture option (gcc-dg-runtest), the
+        ;; driver's always-flags, then the file's options
+        flags-at (fn [v] (let [y (if v (std-year (Long/parseLong v)) 2017)
+                               {:keys [opts]} (binding [*flags* (:flags drv)] (options ds y srcdir (vec (:flags drv))))]
+                           (vec (concat (when v [(str "-std=" prefix v)]) (when (:torture drv) [(:torture drv)]) (:always drv) opts))))
+        std-of (fn [all] (or (some-> (last (filter #(.startsWith ^String % "-std=") all)) (subs 5) host/canonical-std) host/default-std))
+        do-holds (fn [v] (let [all (flags-at v) y (host/std-year (std-of all)) d (first dos)]
+                           (binding [*flags* all] (or (nil? d) (:applies (holds? y (second (:words d))))))))
+        ok (seq (filter do-holds cands)) ; a candidate may be nil (no standard flag): seq, not first, says whether one holds
+        v (if ok (first ok) (first cands))
+        all (flags-at v)
+        std (std-of all)
+        y (host/std-year std)
+        fc (host/file-config all std)
+        [unmet skip] (binding [*flags* all]
+                       [(first (remove #(:applies (holds? y (str "target " (first (:words %))))) (filter #(= (:name %) "require-effective-target") ds)))
+                        (first (filter (fn [d] (and (= (:name d) "skip-if")
+                                                    (:applies (holds? y (str "target " (second (:words d)))))
+                                                    (let [inc* (nth (:words d) 2 nil)] (or (nil? inc*) (= (str/trim inc*) "*") (= (str/trim inc*) "")))))
+                                       ds))])]
+    {:std std
+     :driver (:dir drv)
+     :flags all
+     :gxx (vec (remove #(.startsWith ^String % "-std=") (:all-args fc)))
+     :clang (vec (filter #(and (re-matches clang-ok %) (not (#{"-fcoroutines" "-fpermissive"} %))) (:all-args fc)))
+     :dropped (vec (remove #(or (re-matches clang-ok %) (.startsWith ^String % "-std=")) (:all-args fc)))
+     :y y
+     :unsupported (cond
+                    (#{:unmodelled} runner) (str "the driver " (:exp drv) " is not modelled")
+                    (and (seq dos) (not ok)) (str "dg-do " (second (:words (first dos))) " at " (if stdlist? (str/join ", " (map #(str "c++" %) cands)) std))
+                    unmet (str "dg-require-effective-target " (first (:words unmet)))
+                    skip (str "dg-skip-if " (pr-str (second (:words skip))))
+                    :else nil)}))
+
+(defn analyze
+  "A file's directives at year `y` with the run's flags: arbace.c.dg's analysis with the C++ selectors (the expected error
+  lines by line, the xfail ones, a line 0's count, dg-excess-errors), the lines a dg-line names resolved (arbace.c.dg's
+  resolve-line); :allow, the lines where an error is no extra (a dg-message's, which matches any diagnostic, gcc-dg.exp's
+  process-message; a dg-bogus's that is xfail: the message is expected), :prune the dg-prune-output count."
+  [^String text y flags]
+  (let [ds (directives text)
+        names (cdg/line-names ds)]
+    (binding [*flags* flags]
+      (reduce
+       (fn [a {:keys [name line words]}]
+         (cond
+           (= name "do") (if (:action a) a (assoc a :action (keyword (first words))))
+           (contains? cdg/message-kinds name)
+           (let [[_ _ sel spec] words
+                 {:keys [applies xfail]} (holds? y sel)
+                 k (cdg/message-kinds name)
+                 l (cdg/resolve-line spec line names)]
+             (cond
+               (not applies) a
+               (= l :any) (update-in a [:any k] (fnil inc 0))
+               (and xfail (= name "bogus")) (update a :allow (fnil conj []) l)
+               xfail (update-in a [:xfail k] (fnil conj []) l)
+               (= name "message") (-> a (update-in [:expect k] (fnil conj []) l) (update :allow (fnil conj []) l))
+               :else (cond-> (update-in a [:expect k] (fnil conj []) l)
+                       (= k :error) (update-in [:msgs l] (fnil conj []) (str (first words))))))
+           (= name "excess-errors") (assoc a :excess true)
+           (= name "prune-output") (update a :prune (fnil inc 0))
+           :else a))
+       {} ds))))
+
+;; ---------------------------------------------------------------------------------------------
+;; lists
+
+(defn- esc ^String [^String n] (str/replace n "/" "__"))
+
+(defn lists
+  "WORK/PART/dg.edn (each file's run and directives) and WORK/PART/run.tsv (NAME, STD, G++'S ARGS, CLANG'S ARGS) of the
+  part's files under GXXDG (g++.dg's directory), only those of ONLY (a file of names, one a line) when given, every
+  SAMPLEth when given; a modules part writes WORK/modules/roundtrip.list (the round trip's list) instead."
+  [^String work ^String gxxdg ^String part only sample]
+  (let [root (.getCanonicalPath (java.io.File. gxxdg))
+        srcdir (.getParent (java.io.File. root))
+        names (->> (file-seq (java.io.File. root))
+                   (filter #(.isFile ^java.io.File %))
+                   (map #(subs (.getPath ^java.io.File %) (inc (count root))))
+                   (filter #(re-find #"\.(C|cc)$" %))
+                   sort vec)
+        _ (when (not= 18066 (count names))
+            (throw (ex-info (str root " has " (count names) " .C/.cc files, test/cpp/corpora.edn's :gxx-dg counts 18066") {})))
+        texts (into {} (map (fn [n] [n (slurp-latin1 (str root "/" n))]) names))
+        mine (filterv #(= (keyword part) (part-of % (get texts %))) names)
+        n-part (count mine)
+        mine (if only
+               (let [ws (into #{} (remove #(or (str/blank? %) (.startsWith ^String % "#")) (map str/trim (str/split-lines (slurp only)))))]
+                 (filterv #(or (ws %) (ws (str corpus "/" %))) mine))
+               mine)
+        mine (if (and sample (> (long sample) 1)) (vec (take-nth (long sample) mine)) mine)
+        d (str work "/" part)]
+    (.mkdirs (java.io.File. d))
+    (spit (str d "/base.txt") root)
+    (if (= part "modules")
+      ;; the round trip's list: NAME, STD, G++'S ARGS, PATH, THE MODELLED ARGS (bin/lib/repr-cpp/roundtrip)
+      (let [rows (for [n mine
+                       :let [t (get texts n)
+                             r (file-run n t (directives t) srcdir)
+                             ;; modules.exp's MOD_STD_LIST is 17 2a 2b (g++ reads modules at 17 under -fmodules-ts); clang reads
+                             ;; them from C++20: the file's own -std, else 2a, -std=c++20 (gnu++20 with a dg-options line)
+                             r (if (own-std? t) r
+                                   (let [s (if (re-find #"dg-options" t) "gnu++20" "c++20")]
+                                     (assoc r :std s :gxx (vec (remove #(.startsWith ^String % "-std=") (:gxx r))))))
+                             fc (host/file-config (into [(str "-std=" (:std r))] (:gxx r)) (:std r))]]
+                   (str n "\t" (:std r) "\t" (str/join " " (:gxx r)) "\t" root "/" n "\t" (str/join " " (remove #(.startsWith ^String % "-std=") (:args fc))) "\n"))]
+        (spit (str d "/roundtrip.list") (str "#list gxx-modules" (cond only "-only" (and sample (> (long sample) 1)) (str "-every-" sample) :else "-all") "\n" (apply str rows))))
+      (let [unk (atom #{})
+            rows (into (sorted-map)
+                       (for [n mine]
+                         (let [mine-unk (atom #{})]
+                           (binding [*unknown* mine-unk]
+                             (let [t (get texts n)
+                                   ds (directives t)
+                                   r (file-run n t ds srcdir)
+                                   a (analyze t (:y r) (:flags r))
+                                   ;; review 196, finding 1: a directive an unlisted name decides makes the file unsupported
+                                   r (if (and (seq @mine-unk) (not (:unsupported r)))
+                                       (assoc r :unsupported (str "selector names test/cpp/dg-targets.edn does not list: " (str/join " " (sort @mine-unk))))
+                                       r)]
+                               (swap! unk into @mine-unk)
+                               [n (merge (dissoc r :y :flags) (select-keys a [:expect :xfail :any :excess :msgs :allow :prune])
+                                         {:action (or (:action a) :compile)})])))))]
+        (spit (str d "/dg.edn") (str "{\n" (str/join "\n" (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) rows)) "\n}\n"))
+        (spit (str d "/run.tsv")
+              (str/join (for [[n r] rows :when (not (:unsupported r))]
+                          (str n "\t" (:std r) "\t" (str/join " " (:gxx r)) "\t" (str/join " " (:clang r)) "\n"))))
+        (println (str part ": " (count rows) " files" (when (< (count rows) n-part) (str " of " n-part))
+                      ", unsupported " (count (filter (comp :unsupported val) rows))
+                      ", with an expected error " (count (filter #(seq (get-in (val %) [:expect :error])) rows))
+                      "; standards " (pr-str (into (sorted-map) (frequencies (map (comp :std val) rows))))
+                      (when (seq @unk) (str "; selector names neither table lists (their files unsupported): " (pr-str (vec (sort @unk)))))))))
+    (when (= part "modules") (println (str part ": " (count mine) " files" (when (< (count mine) n-part) (str " of " n-part)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; read
+
+(defn errors-of
+  "A compiler's diagnostics (`FILE:LINE:COL: error: ...` lines, clang's or g++'s, or the port's `FILE:LINE:COL: msg`
+  when `port`) as {:status :lines {line n} :other n :fatal line-or-0 :message first-error}, the lines of `main` alone."
+  [^String out ^String main port]
+  (reduce
+   (fn [a ^String l]
+     (if-let [[_ f ln kind] (if port
+                              (when-let [[_ f ln] (re-find #"^(.*?):(\d+):(?:\d+:)? " l)] [nil f ln "error"])
+                              (re-find #"^(.*?):(\d+):(?:\d+:)? (fatal error|error): " l))]
+       (let [mine (= f main)
+             a (if (str/blank? (:message a)) (assoc a :message (one-line (subs l 0 (min 300 (count l))))) a)
+             a (if mine (update-in a [:lines (Long/parseLong ln)] (fnil inc 0)) (update a :other (fnil inc 0)))]
+         (if (and (= kind "fatal error") (zero? (long (:fatal a))))
+           (assoc a :fatal (if mine (Long/parseLong ln) -1))
+           a))
+       (if (and (not port) (re-find #"^[^ :][^ :]*: (fatal error|error): " l))
+         (cond-> (update a :other (fnil inc 0)) (str/blank? (:message a)) (assoc :message (one-line l)))
+         a)))
+   {:lines (sorted-map) :other 0 :fatal 0 :message ""}
+   (str/split-lines out)))
+
+(defn- pool-map [f xs]
+  (let [threads (Integer/parseInt (or (System/getenv "REPR_CPP_THREADS") "4"))
+        pool (Executors/newFixedThreadPool threads)
+        futs (mapv (fn [x] (.submit pool ^Callable (fn [] (f x)))) xs)
+        rs (mapv #(.get ^Future %) futs)]
+    (.shutdown pool)
+    rs))
+
+(defn- read-clang
+  "A dg-error file's read: clang's status and diagnostics (WORK/PART/clang/NAME.{status,err}), and for an accepted
+  unit its forms (arbace.repr.cpp: WORK/PART/forms/NAME.ae)."
+  [^String d ^String root [nm r]]
+  (let [c (str d "/clang/" (esc nm))
+        st (when (exists? (str c ".status")) (str/trim (slurp (str c ".status"))))
+        err (if (exists? (str c ".err")) (slurp-latin1 (str c ".err")) "")
+        secs (when (exists? (str c ".secs")) (Double/parseDouble (str/trim (slurp (str c ".secs")))))
+        t0 (System/nanoTime)
+        res (cond
+              (nil? st) {:status :crash :lines {} :message "no clang run"}
+              (= st "124") {:status :timeout :lines {} :message "clang's dump past its 300 s"}
+              (= st "1") (assoc (errors-of err nm false) :status :rejected)
+              (not= st "0") {:status :crash :lines {} :message (str "cxxdump status " st ": " (one-line (last (remove str/blank? (str/split-lines err)))))}
+              :else
+              (let [e (errors-of err nm false)]
+                (try
+                  (let [src (str root "/" nm)
+                        ;; CX11: --reader native (REPR_CPP_READER=native) reads the accepted unit with the native parser
+                        rd (if (= "native" (System/getenv "REPR_CPP_READER"))
+                             (rc/read-cpp-native src nm (:std r) (into (vec (:clang r)) ["-iquote" (str (.getParent (java.io.File. src)))]))
+                             (rc/read-cpp (str c ".edn") src nm (:std r)))]
+                    (if (:refused rd)
+                      (assoc e :status :refused :message (str (name (:refused rd)) ": " (one-line (:message rd))))
+                      (let [o (java.io.File. (str d "/forms/" nm ".ae"))]
+                        (.mkdirs (.getParentFile o))
+                        (spit o (rc/unit-text rd))
+                        (assoc e :status :accepted))))
+                  (catch Throwable x (assoc e :status :crash :message (str "read: " (one-line x)))))))]
+    [nm (assoc res :secs (+ (double (or secs 0.0)) (/ (- (System/nanoTime) t0) 1e9)))]))
+
+(defn- read-pp
+  "A preprocess file's read: the shared preprocessor's stream and errors (arbace.repr.c.pp in C++ mode, g++'s host data)."
+  [h ^String root [nm r]]
+  (let [t0 (System/nanoTime)
+        res (try
+              (let [fc (host/file-config (into [(str "-std=" (:std r))] (:gxx r)) (:std r))
+                    cfg (host/config h fc root)
+                    p (pp/preprocess cfg nm)
+                    e (errors-of (str/join "\n" (:errors p)) nm true)]
+                (if (:panic p)
+                  (assoc e :status :crash :message (str "panic: " (one-line (first (:errors p)))))
+                  (assoc e :status :ok)))
+              (catch Throwable x {:status :crash :lines {} :message (one-line x)}))]
+    [nm (assoc res :secs (/ (- (System/nanoTime) t0) 1e9))]))
+
+(defn read-cmd [^String work ^String part]
+  (let [d (str work "/" part)
+        root (str/trim (slurp (str d "/base.txt")))
+        dg (read-edn (str d "/dg.edn") {})
+        todo (remove (comp :unsupported val) dg)
+        t0 (System/nanoTime)
+        h (when (= part "preprocess") (host/load-host "test/cpp/host" "gxx"))
+        rs (pool-map (if (= part "preprocess") #(read-pp h root %) #(read-clang d root %)) todo)]
+    (spit (str d "/read.edn") (str "{\n" (str/join "\n" (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) (sort rs))) "\n}\n"))
+    (println (str part ": read " (count rs) " files, " (pr-str (frequencies (map (comp :status second) rs))) ", "
+                  (Math/round (double (/ (- (System/nanoTime) t0) 1e9))) " s"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The reference: g++ 15.2's errors by line
+
+(defn ref-cmd
+  "g++'s kept outputs of the part's run (WORK/PART/gxx/NAME.{txt,status}) as WORK/PART/gxx.edn; with `record`, merged into
+  the committed reference (test/cpp/ref-dg-gxx15.edn: ID -> {:status :error {line n} :other n :fatal l}, the rest kept)."
+  [^String work ^String part record]
+  (let [d (str work "/" part)
+        dg (read-edn (str d "/dg.edn") {})
+        rows (into (sorted-map)
+                   (for [[nm r] dg :when (not (:unsupported r))
+                         :let [g (str d "/gxx/" (esc nm))]
+                         :when (exists? (str g ".status"))]
+                     (let [e (errors-of (slurp-latin1 (str g ".txt")) nm false)]
+                       [(str corpus "/" nm) (cond-> {:status (Long/parseLong (str/trim (slurp (str g ".status")))) :std (:std r) :args (:gxx r)
+                                                     :error (:lines e)}
+                                              (pos? (long (:other e))) (assoc :other (:other e))
+                                              (not (zero? (long (:fatal e)))) (assoc :fatal (:fatal e)))])))]
+    (spit (str d "/gxx.edn") (pr-str rows))
+    (println (str part ": g++'s outputs of " (count rows) " files read, " (count (filter #(pos? (long (:status (val %)))) rows)) " rejected"))
+    (when record
+      (let [old (read-edn ref-file {})
+            all (into (sorted-map) (merge old rows))]
+        (spit ref-file (str ";; g++ 15.2's errors on gcc 15.2.0's g++.dg files as C++'s dg check runs them (bin/repr-cpp dg --record-ref;\n"
+                            ";; doc/cpp/CPP-SURVEY.md, \"As built: CX9 (write-ahead)\"): ID -> {:status (g++'s exit status) :std (the\n"
+                            ";; standard) :args (its options) :error {LINE COUNT} (its errors at the main file's lines) :other (errors elsewhere) :fatal (a fatal\n"
+                            ";; error's line, -1 elsewhere)}. The reference of the directives (CP11 (a), CS14's runs as data). Clojure reader.\n{\n"
+                            (str/join "\n" (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) all)) "\n}\n"))
+        (println "recorded" ref-file (count all) "files")))))
+
+(defn gxx-agrees
+  "Whether g++'s errors are the directives' (arbace.c.dg/gcc-agrees on the recorded reference): :yes, [:differ missing extra
+  ...], or nil when not recorded."
+  [d g]
+  ;; a reference recorded at another standard or with other options than the run's is not this run's (the record is stale for the file)
+  (when (and g (= (:std g) (:std d)) (= (:args g) (:gxx d)))
+    ;; a dg-message's line takes any diagnostic, an error too (review 196, finding 5): as an xfail line for the reference
+    (cdg/gcc-agrees (update-in d [:xfail :error] (fnil into []) (:allow d)) {:error (:error g) :other (:other g 0)
+                       :fatal-other (if (= -1 (:fatal g)) 1 0)})))
+
+;; ---------------------------------------------------------------------------------------------
+;; The verdict
+
+(defn verdict
+  "A read's errors judged against a file's directives: [:pass], or [:fail kind detail] with kind :crash :timeout
+  :refused (no judgment), :missed, :extra, :both, :stopped (C's, arbace.c.dg/verdict: errors outside the main file that
+  no line-0 directive or dg-excess-errors takes, or the expected lines after a fatal error). A dg-error file the oracle
+  accepts (status :accepted) with expected errors says `accepted` in its detail."
+  [dg r]
+  (let [st (:status r)
+        anyn (long (get-in dg [:any :error] 0))
+        stray (long (or (:other r) 0))]
+    (cond
+      (nil? r) [:fail :crash "no read row"]
+      (#{:refused :timeout :crash} st) [:fail st (:message r)]
+      (and (pos? stray) (zero? anyn) (not (:excess dg)))
+      [:fail :stopped (str stray " error" (when (> stray 1) "s") " not located in the main file: " (:message r))]
+      :else
+      (let [exp (set (get-in dg [:expect :error]))
+            allowed (-> exp (into (get-in dg [:xfail :error])) (into (:allow dg)))
+            ours (set (keys (:lines r)))
+            excess (:excess dg)
+            missed (vec (sort (remove ours exp)))
+            extra (vec (sort (remove allowed ours)))
+            n-extra (+ (count extra) stray)
+            extra (if excess [] extra)
+            short0 (and (pos? anyn) (not excess) (< n-extra anyn))
+            extra (if (and (pos? anyn) (<= n-extra anyn)) [] extra)
+            fatal (long (or (:fatal r) 0))
+            acc (if (= st :accepted) "accepted; " "")
+            msg (fn [ls] (str " expecting: " (first (get-in dg [:msgs (first ls)]))))]
+        (cond
+          (and (empty? missed) (empty? extra) (not short0)
+               (or (not excess) (seq ours) (pos? stray)))
+          [:pass]
+          (and (seq missed) (seq extra)) [:fail :both (str "missed " missed " extra " extra " got: " (:message r) (msg missed))]
+          (and (seq missed) (pos? fatal) (every? #(> (long %) fatal) missed))
+          [:fail :stopped (str "missed " missed " after the fatal error at " fatal ": " (:message r) (msg missed))]
+          (seq missed) [:fail :missed (str acc "missed " missed (msg missed))]
+          (seq extra) [:fail :extra (str "extra " extra " got: " (:message r))]
+          short0 [:fail :missed (str acc "line 0 expects " anyn " error" (when (> anyn 1) "s") ", got " n-extra " beyond the expected lines")]
+          :else [:fail :missed (str acc "no error (dg-excess-errors)")])))))
+
+(defn- classify [classes row]
+  (let [s (str (name (nth row 1)) " " (nth row 2))]
+    (some (fn [c] (when (some #(re-find (re-pattern (str %)) s) (:match c)) (:id c))) classes)))
+
+(defn- row-of
+  "A file's row [ID RESULT REASON CLASS?]: the verdict, g++'s disagreement with the directives on a failure."
+  [classes part nm d r g]
+  (let [v (if (:unsupported d) [:unsupported] (verdict d r))
+        ;; the preprocess part's verdicts are the shared preprocessor's: pp-missed, pp-extra, ...
+        v (if (and (= part "preprocess") (= :fail (first v))) (assoc v 1 (keyword (str "pp-" (name (second v))))) v)
+        id (str corpus "/" nm)
+        ga (gxx-agrees d g)
+        row (case (first v)
+              :pass [id :pass (name (:action d))]
+              :unsupported [id :unsupported (str (name (:action d)) " (unsupported: " (:unsupported d) ")")]
+              ;; review 196, finding 3: the reference's disagreement and dg-prune-output are said only on a line verdict; a
+              ;; crash, timeout or refusal is no question of the expectations
+              (let [lv (#{:missed :extra :both :stopped :pp-missed :pp-extra :pp-both :pp-stopped} (second v))]
+                [id :fail (str (name (second v)) ": " (nth v 2)
+                               (when (and lv ga (not= ga :yes)) (str " [g++: " (pr-str (vec (rest ga))) "]"))
+                               (when (and lv (:prune d)) (str " [dg-prune-output " (:prune d) "]")))]))
+        cls (when (= :fail (second row)) (classify classes row))]
+    (cond-> row cls (conj cls))))
+
+(defn judge-cmd
+  "judge WORK [--record] PART...: each file's row against the classes (test/cpp/divergences-dg.edn); the counts by part and
+  class; a failure in no class, a recorded pass that fails now, or a recorded file of the run's set missing from it, fails
+  (status 1). --record rewrites the part's record (test/cpp/check-dg-linux-amd64.edn, the preprocess part's
+  test/repr/cpp/dg-preprocess-results.edn; the rows of files the run did not hold kept) and the per-file seconds
+  (test/cpp/dg-times.edn)."
+  [^String work & args]
+  (let [record (some #{"--record"} args)
+        parts (remove #{"--record"} args)
+        classes (read-edn classes-file [])
+        ref (read-edn ref-file {})
+        failing (atom [])]
+    (doseq [part parts]
+      (let [d (str work "/" part)
+            dg (read-edn (str d "/dg.edn") {})
+            rd (read-edn (str d "/read.edn") {})
+            gx (merge ref (read-edn (str d "/gxx.edn") {}))
+            rows (vec (for [[nm dd] dg] (row-of classes part nm dd (get rd nm) (get gx (str corpus "/" nm)))))
+            rfile (if (= part "preprocess") preprocess-record-file record-file)
+            committed (into {} (map (juxt first identity) (read-edn rfile [])))
+            now (into {} (map (juxt first identity) rows))
+            regress (for [[id r] now :let [o (get committed id)]
+                          :when (and o (= :pass (second o)) (not= :pass (second r)))]
+                      [id :fail (str "regression: recorded pass, now " (name (second r)) " " (nth r 2))])
+            unclassed (filter #(and (= :fail (second %)) (nil? (nth % 3 nil))) rows)
+            by (frequencies (map #(if (= :fail (second %)) (nth % 3 :unclassed) (second %)) rows))
+            u (get by :unsupported 0)
+            secs (into {} (for [[nm r] rd :when (:secs r)] [(str corpus "/" nm) (/ (Math/round (* 100.0 (double (:secs r)))) 100.0)]))]
+        (println (format "%-11s %4d files: pass %d of %d supported%s%s; %.0f s of reads"
+                         part (count rows) (get by :pass 0) (- (count rows) u)
+                         (if (pos? u) (str ", unsupported " u) "")
+                         (apply str (map (fn [[k v]] (str ", " (name k) " " v)) (sort-by (comp - val) (dissoc by :pass :unsupported))))
+                         (double (reduce + (vals secs)))))
+        (let [passes-differ (filter (fn [[nm dd]] (and (= :pass (second (get now (str corpus "/" nm))))
+                                                       (let [ga (gxx-agrees dd (get gx (str corpus "/" nm)))] (and ga (not= ga :yes)))))
+                                    dg)
+              unrec (count (remove #(or (:unsupported (val %)) (let [g (get gx (str corpus "/" (key %)))] (and (= (:std (val %)) (:std g)) (= (:gxx (val %)) (:args g))))) dg))]
+          (println (format "  g++'s reference: %d files not recorded at their standard; %d passes whose directives g++ does not give" unrec (count passes-differ))))
+        (spit (str d "/rows.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
+        (swap! failing into (concat unclassed regress))
+        (when record
+          (let [keep (remove (fn [[id]] (contains? now id)) (vals committed))
+                all (sort-by first (concat keep (map (fn [r] (vec (take 3 r))) rows)))]
+            (spit rfile (str ";; C++'s dg check, the " part " part (bin/repr-cpp dg --record; doc/cpp/CPP-SURVEY.md, \"As built: CX9 (write-ahead)\"):\n"
+                             ";; each g++.dg file, [ID RESULT REASON]: "
+                             (if (= part "preprocess") "the shared preprocessor's errors" "the oracle's (clang 23.1.4) acceptance or errors and repr/cpp's read")
+                             " against the dg-error lines;\n;; its classes test/cpp/divergences-dg.edn. Read with the Clojure reader.\n[\n"
+                             (str/join "\n" (map pr-str all)) "\n]\n"))
+            (let [old (read-edn times-file {})
+                  all (into (sorted-map) (merge old secs))]
+              (spit times-file (str ";; C++'s dg check: each file's seconds (clang's dump and the read, or the shared preprocessor), the last recorded\n"
+                                    ";; run's (bin/repr-cpp dg --record; GT8.1's per-file measure). Read with the Clojure reader.\n{\n"
+                                    (str/join "\n" (map (fn [[k v]] (str (pr-str k) " " v)) all)) "\n}\n")))
+            (println "recorded" rfile)))))
+    (doseq [r (take 40 @failing)] (println "FAIL" (first r) (nth r 2)))
+    (when (seq @failing) (println (count @failing) "failing"))
+    (shutdown-agents)
+    (System/exit (if (seq @failing) 1 0))))
+
+(defn -main [verb & args]
+  (case verb
+    "lists" (let [[work gxxdg part only sample] args]
+              (lists work gxxdg part (when-not (contains? #{nil "-" ""} only) only) (when-not (contains? #{nil "-" ""} sample) (Long/parseLong sample)))
+              (shutdown-agents))
+    "read" (let [[work & parts] args] (doseq [p parts] (read-cmd work p)) (shutdown-agents))
+    "ref" (let [[work part & more] args] (ref-cmd work part (some #{"--record"} more)) (shutdown-agents))
+    "judge" (apply judge-cmd args)
+    (do (println "dg: lists, read, ref or judge") (System/exit 2))))

@@ -1,0 +1,66 @@
+#!/bin/bash
+# repr/cpp's native check (CX11; doc/cpp/NATIVE.md, "The check"): each file of a list (pp-check's gxx.list format: NAME, STD,
+# G++'S ARGS, PATH, THE MODELLED ARGS, tab-separated; `samples` for test/cpp/samples at c++23) read by the oracle (tools/cxxdump into
+# WORK/dump/, cached by key as the round trip's dumps) and by the native parser (arbace.repr.cpp.native), the two units' forms
+# compared item by item (arbace.repr.cpp.ncheck): WORK/results.tsv (name, result, the items of each read, the items that differ,
+# the native declines, a detail), WORK/diff/NAME.txt (the differing items), WORK/native/NAME.ae (the native forms), a summary.
+# Usage: bin/repr-cpp native-check LIST|samples|native|gxx-a|gxx-b|gxx-26|gxx-mod WORK [--jobs N]: samples are test/cpp/samples (c++23), native the parser's
+# own samples test/repr/cpp/native/samples (c++23, one construct of each kind it reads); gxx-a, gxx-b, gxx-26 and gxx-mod are test/repr/cpp/native/'s lists (every 16th of
+# the recorded round-trip passes of g++.dg's every-10th sample, 62 files; every 6th of the rest from the 4th, 163; g++.dg/cpp26's files the
+# oracle reads, at c++26, 38; every 4th of the
+# recorded round-trip passes of g++.dg/modules and the four that differ, 109), their {gcc-15.2.0} an
+# extraction of the pinned tarball (REPR_CPP_GCC_ROOT, else pp-check's .tmp/cpp-gcc, else repr/c's .tmp/repr-c, this checkout's or the main one's).
+# The results are judged against test/repr/cpp/native-known.edn: a file that differs must be listed there with its class (Sema's facts).
+# The light tier: REPR_CPP_THREADS (default 4), GOMAXPROCS=4 and GOMEMLIMIT=1500MiB unless set.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+list=$1 work=$2; shift 2
+jobs=${REPR_CPP_THREADS:-4}
+while [ $# -gt 0 ]; do
+  case $1 in
+    --jobs) jobs=$2; shift 2 ;;
+    *) echo "native-check: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} REPR_CPP_THREADS=$jobs REPR_CPP_HOST=$root/test/cpp/host
+exe=${REPR_CPP_CXXDUMP_EXE:-$root/.tmp/repr-cpp/cxxdump}
+[ -x "$exe" ] || "$root/bin/repr-cpp" cxxdump-build >&2
+cache=${REPR_CPP_CXXDUMP_CACHE:-$root/.tmp/repr-cpp/cxxdump-cache}
+mkdir -p "$work" "$cache"; work=$(cd "$work" && pwd)
+for d in dump diff native; do rm -rf "${work:?}/$d"; done
+mkdir -p "$work/dump"
+# a list's {gcc-15.2.0} is an extraction of the pinned gcc tarball (test/cpp/corpora.edn): REPR_CPP_GCC_ROOT, else pp-check's, else repr/c's
+main=$root
+case $root in */.tmp/worktrees/*) main=${root%%/.tmp/worktrees/*} ;; esac
+gccroot=${REPR_CPP_GCC_ROOT:-}
+if [ -z "$gccroot" ]; then
+  for c in "$root/.tmp/cpp-gcc" "$main/.tmp/cpp-gcc" "$root/.tmp/repr-c" "$main/.tmp/repr-c"; do
+    [ -d "$c/gcc-15.2.0/gcc/testsuite/g++.dg" ] && { gccroot=$c; break; }
+  done
+fi
+case $list in
+  samples) for f in "$root"/test/cpp/samples/*.cpp; do printf '%s\t%s\t%s\t%s\t%s\n' "$(basename "$f")" c++23 "" "$f" ""; done > "$work/list.tsv" ;;
+  native) { echo "#list native"; for f in "$root"/test/repr/cpp/native/samples/*.cpp; do printf '%s\t%s\t%s\t%s\t%s\n' "$(basename "$f")" c++23 "" "$f" ""; done; } > "$work/list.tsv" ;;
+  gxx-a|gxx-b|gxx-26|gxx-mod) list=$root/test/repr/cpp/native/$list.list ;&
+  *) if grep -q '{gcc-15.2.0}' "$list" && [ -z "$gccroot" ]; then
+       echo "native-check: no extraction of gcc 15.2.0's testsuite (REPR_CPP_GCC_ROOT; bin/repr-cpp pp-check extracts one)" >&2; exit 2
+     fi
+     sed "s|{gcc-15.2.0}|$gccroot|g" "$list" > "$work/list.tsv" ;;
+esac
+dump() { # dump NAME STD CARGS PATH: the file's dump under its relative name, in its root
+  local n=$1 std=$2 cargs=$3 p=$4 r od
+  r=${p%"/$n"}; od=$(dirname "$p")
+  cargs=${cargs//-fmodules-ts/}; cargs=${cargs//-fmodules/}
+  mkdir -p "$(dirname "$work/dump/$n")"
+  # shellcheck disable=SC2086
+  (cd "$r" && timeout 300 "$exe" -implicit=false -cache "$cache" -o "$work/dump/$n.edn" -- -x c++ -std=$std $cargs -iquote "$od" "$n") 2> "$work/dump/$n.err"
+  echo $? > "$work/dump/$n.status"
+}
+export -f dump; export exe cache work TMPDIR
+t0=$(date +%s)
+grep -v '^#' "$work/list.tsv" | tr '\t\n' '\037\0' | xargs -0 -P "$jobs" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r n s g p c <<< "$1"; dump "$n" "$s" "$c" "$p"' _ {}
+t1=$(date +%s)
+echo "native-check: dumps $((t1-t0)) s"
+cd "$root" && arbace_tool -m arbace.repr.cpp.ncheck run "$work/list.tsv" "$work"

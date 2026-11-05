@@ -1,0 +1,68 @@
+(ns arbace.repr.cpp.native
+  "repr/cpp's native reader (doc/cpp/NATIVE.md; doc/cpp/CPP-SURVEY.md, CX11): a C++ file read without the oracle --
+  the shared preprocessor (arbace.repr.c.pp in C++ mode, with clang's predefined macros and search list: the forms
+  are the oracle's reading of the file, CP23) and the native parser (arbace.repr.cpp.parse), whose tree is clang's AST
+  as tools/cxxdump writes it, so that arbace.repr.cpp.convert makes the forms from it as from the dump. `parse-file`
+  gives the main file's nodes and the lines of its directives the preprocessor ran (cxxdump's `{:executed ...}`)."
+  (:require [arbace.repr.c.pp :as pp]
+            [arbace.repr.cpp.host :as host]
+            [arbace.repr.cpp.parse :as ps]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn host-dir
+  "The recorded host's directory: REPR_CPP_HOST, else test/cpp/host of the current directory (the checkout's root)."
+  ^String []
+  (or (System/getenv "REPR_CPP_HOST") "test/cpp/host"))
+
+(defn- latin1 ^String [^String path]
+  (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1"))
+
+(defn- line-starts [^String s]
+  (let [v (java.util.ArrayList.)]
+    (.add v (long 0))
+    (dotimes [i (.length s)] (when (= \newline (.charAt s i)) (.add v (long (inc i)))))
+    v))
+
+(defn- line-of ^long [^java.util.ArrayList starts ^long off]
+  (let [i (java.util.Collections/binarySearch starts off)]
+    (if (neg? i) (- (- i) 1) (inc i))))
+
+(defn executed-lines
+  "The lines of the main file's directives the preprocessor ran (its layer's main-file entries)."
+  [layer ^String path ^String src]
+  (let [starts (line-starts src)]
+    (set (for [d layer
+               :when (and (:directive d) (= (:file d) path) (:off d))]
+           (line-of starts (long (:off d)))))))
+
+(defn parse-file
+  "The main file at `path`, named `main` as the oracle names it, read at the standard `std` with the compiler options
+  `args` (-D, -U, -I, ...): {:nodes [clang's nodes of the main file's declarations] :executed #{line ...} :declines n
+  :reasons {why n} :pp-errors [...]}."
+  [^String path ^String main ^String std args]
+  (let [h (host/load-host (host-dir) "clang")
+        std (or (host/canonical-std std) std)
+        fc (host/file-config (vec args) std)
+        ;; the file preprocessed under its name as the oracle was given it (__FILE__'s), from the directory it is relative to
+        [base nm] (if (and (str/ends-with? path (str "/" main)) (not (str/starts-with? main "/")))
+                    [(subs path 0 (- (count path) (count main) 1)) main]
+                    ["." path])
+        cfg (host/config h fc base)
+        t0 (System/nanoTime)
+        r (pp/preprocess cfg nm)
+        t1 (System/nanoTime)
+        src (latin1 path)
+        year (host/std-year (:std fc))
+        gnu (str/starts-with? (:std fc) "gnu")
+        toks (ps/tokens (:tokens r) nm main src (ps/keywords year gnu))
+        _ (when (System/getenv "REPR_CPP_TIME") (binding [*out* *err*] (println (format "repr/cpp native: tokens %.2f s" (/ (- (System/nanoTime) t1) 1e9)))))
+        u (ps/parse-unit toks main src year gnu [(:std fc)])
+        t2 (System/nanoTime)]
+    ;; REPR_CPP_TIME: the preprocessor's and the parser's seconds, the header-skim cache's use (stderr)
+    (when (System/getenv "REPR_CPP_TIME")
+      (binding [*out* *err*]
+        (println (format "repr/cpp native: %s: %d tokens, preprocess %.2f s, parse %.2f s, skim cache %s" main (alength ^objects toks)
+                         (/ (- t1 t0) 1e9) (/ (- t2 t1) 1e9) (or (:skim-cache u) "-")))))
+    (assoc u :executed (executed-lines (:layer r) nm src) :pp-errors (:errors r))))

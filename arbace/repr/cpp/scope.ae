@@ -1,0 +1,110 @@
+(ns arbace.repr.cpp.scope
+  "The native parser's name-kind table (doc/cpp/NATIVE.md, \"Sema's minimum\"; doc/cpp/CPP-SURVEY.md §4.4, CX11): what
+  C++'s grammar needs of semantic analysis to be parsed at all -- whether a name is a type, a template, a namespace, a
+  concept or a value -- kept as clang's Sema keeps it for its Parse (Sema::ClassifyName, isTemplateName), as scopes
+  of declarations entered as the parser meets them: namespaces (reopened, inline, unnamed, aliased, nominated by using
+  directives), classes (their members and bases, the injected class name), enumerations, template parameter lists,
+  function parameters, blocks. Lookup is unqualified (scope by scope outward, a namespace's inline namespaces and
+  nominated namespaces with it, a class's bases) or qualified (in a namespace or a class). What it cannot know is what
+  depends on an instantiation (a member of a dependent base, `T::x` without `typename`): such a name is a value, as
+  the standard says it is. An entity is a map: {:k KIND :name NAME ...}, KIND one of :ns :type :var :fn :concept, with
+  :tmpl true for a template (a class, alias, function or variable template), :scope (a namespace's or a class's
+  members), :params (a class template's parameter names, for the injected class name's printing).")
+
+(set! *warn-on-reflection* true)
+
+;; A scope: its kind (:ns :class :enum :tparams :fparams :block :lookup), its names (a name to its entity), the tag names
+;; a value hides (the `struct stat` rule), the namespaces it nominates (using directives), its inline namespaces, its
+;; parent, the entity it is the scope of, and for a class its bases' scopes.
+(deftype Scope [kind ^java.util.HashMap names ^java.util.HashMap tags ^java.util.ArrayList usings ^java.util.ArrayList inl
+                parent ent ^java.util.ArrayList bases])
+
+(defn new-scope
+  ([kind parent] (new-scope kind parent nil))
+  ([kind parent ent]
+   (Scope. kind (java.util.HashMap.) (java.util.HashMap.) (java.util.ArrayList.) (java.util.ArrayList.) parent ent (java.util.ArrayList.))))
+
+(defn kind-of [^Scope s] (.-kind s))
+(defn parent-of [^Scope s] (.-parent s))
+(defn ent-of [^Scope s] (.-ent s))
+
+(defn type-ent? [e] (= :type (:k e)))
+(defn value-ent? [e] (#{:var :fn} (:k e)))
+
+(defn declare!
+  "Enters `e` under its name in the scope `s`. A value hides a class or enumeration of its name (kept as a tag); a
+  class declared where a value is has only the tag; a redeclaration of a namespace or a class keeps the first (its
+  members); a function overloaded with a function template is a template."
+  [^Scope s e]
+  (let [nm (:name e)
+        ^java.util.HashMap m (.-names s)
+        old (.get m nm)]
+    (cond
+      (nil? nm) nil
+      (nil? old) (do (.put m nm e) (when (and (type-ent? e) (:tag e)) (.put ^java.util.HashMap (.-tags s) nm e)))
+      ;; a class or an enumeration under a value of its name: a tag only
+      (and (type-ent? e) (:tag e) (value-ent? old)) (.put ^java.util.HashMap (.-tags s) nm e)
+      (and (value-ent? e) (type-ent? old) (:tag old)) (do (.put ^java.util.HashMap (.-tags s) nm old) (.put m nm e))
+      (and (= :ns (:k old)) (= :ns (:k e))) nil
+      (and (type-ent? old) (type-ent? e) (:scope old) (not (:scope e))) nil ; a forward declaration after the definition
+      (and (type-ent? old) (type-ent? e) (:scope old) (:scope e) (:incomplete old)) (.put m nm (cond-> e (:tmpl old) (assoc :tmpl true)))
+      (and (type-ent? old) (type-ent? e) (:scope old)) nil
+      (and (= :fn (:k old)) (= :fn (:k e)))
+      (let [m2 (cond-> old (:tmpl e) (assoc :tmpl true) (:nothrow e) (assoc :nothrow true) (:noreturn e) (assoc :noreturn true))]
+        (when-not (= m2 old) (.put m nm m2)))
+      (and (= :var (:k old)) (= :var (:k e)) (:tmpl old)) nil
+      :else (.put m nm e))
+    e))
+
+(defn add-using! [^Scope s ^Scope target] (when (and target (not (some #(identical? % target) (.-usings s)))) (.add ^java.util.ArrayList (.-usings s) target)))
+(defn add-inline! [^Scope s ^Scope child] (when (and child (not (some #(identical? % child) (.-inl s)))) (.add ^java.util.ArrayList (.-inl s) child)))
+(defn add-base! [^Scope s ^Scope b] (when b (.add ^java.util.ArrayList (.-bases s) b)))
+
+(declare find-in)
+
+(defn- find-in*
+  [^Scope s ^String nm tags? ^java.util.IdentityHashMap seen]
+  (when (and s (not (.containsKey seen s)))
+    (.put seen s true)
+    (or (when tags? (.get ^java.util.HashMap (.-tags s) nm))
+        (.get ^java.util.HashMap (.-names s) nm)
+        (some #(find-in* % nm tags? seen) (.-inl s))
+        (some #(find-in* % nm tags? seen) (.-usings s))
+        (some #(find-in* % nm tags? seen) (.-bases s))
+        ;; a lookup scope (an out-of-class member's class, CX11) stands for its entity's scope
+        (when (= :lookup (.-kind s)) (find-in* (:scope (.-ent s)) nm tags? seen)))))
+
+(defn find-in
+  "The entity `nm` names in the scope `s` itself: its own names, its inline namespaces', the namespaces it nominates,
+  its bases' (qualified lookup). `tags?`: a class or enumeration name first (an elaborated type specifier)."
+  ([s nm] (find-in s nm false))
+  ([s nm tags?] (find-in* s nm tags? (java.util.IdentityHashMap.))))
+
+(defn lookup
+  "Unqualified lookup of `nm` from the scope `s` outward."
+  ([s nm] (lookup s nm false))
+  ([s nm tags?]
+   (loop [^Scope s s]
+     (when s
+       (or (find-in s nm tags?) (recur (.-parent s)))))))
+
+(defn enclosing
+  "The nearest scope from `s` outward whose kind is one of `kinds`."
+  [^Scope s kinds]
+  (loop [^Scope s s] (when s (if (contains? kinds (.-kind s)) s (recur (.-parent s))))))
+
+(defn decl-scope
+  "The scope a declaration at `s` enters its name into: the nearest that is not a template parameter list."
+  [^Scope s]
+  (loop [^Scope s s] (when s (if (#{:tparams :lookup} (.-kind s)) (recur (.-parent s)) s))))
+
+(defn ns-scope
+  "The nearest enclosing namespace scope (a friend's or an elaborated forward declaration's home)."
+  [^Scope s]
+  (enclosing s #{:ns}))
+
+(defn names-of [^Scope s] (.-names s))
+(defn tags-of [^Scope s] (.-tags s))
+(defn usings-of [^Scope s] (.-usings s))
+(defn inline-of [^Scope s] (.-inl s))
+(defn bases-of [^Scope s] (.-bases s))
