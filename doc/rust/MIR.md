@@ -77,6 +77,28 @@ bytes: they are rustc's renderings carried in the forms. RF4-RF10 replace the ty
 `-Zunpretty=mir` trims paths (`Arguments` for `std::fmt::Arguments`). The two agree after removing module prefixes on 73 of 74
 programs of the synthetic corpus and the samples; the one that differs is a closure's name. The check judges against the helper's.
 
+## 5b. What a monomorphic dump adds (`--mono-mir`, RF3)
+
+`rsdump rustc --mono-mir FILE` writes the bodies of the mono items rustc collects, each `instance_mir` instantiated at its
+arguments (no `(param ...)` types remain), and the facts the back half takes as data until Arbace's own answers exist:
+
+- a body's `:symbol` (the v0 name), `:track-caller true`, `:spread-arg N` (a `rust-call` function's tuple argument), `:scopes`
+  with `[PARENT INLINED-TEXT INLINED-PARENT CALLSITE-LOC TRACK-CALLER]`, `:alloc-data [["allocN" {...}]...]`: `{:kind :memory :align
+  :mutable :bytes "HEX" :init "01.." :relocs [[OFFSET "allocM"]...]}`, `{:kind :fn :symbol}`, `{:kind :static :symbol}` (a vtable is a
+  `:memory` entry with `:vtable "TEXT"`);
+- a call is `(call F [ARG...] DEST TARGET UNWIND CALLEE FN-LOC SCOPE)`: CALLEE `(callee {:kind K :symbol S :def "PATH" :can-unwind B
+  :track-caller B [:intrinsic NAME] [:external true]})`, K one of `item`, `intrinsic`, `virtual`, `fnptr-shim`, `closure-once-shim`,
+  `vtable-shim`, `reify-shim`, `clone-shim`, `drop-glue`, `drop-glue-empty` (a no-op), `unresolved`; FN-LOC the call's `(loc FILE LINE COL)`;
+  a drop is `(drop PLACE B UNWIND REPLACE? DROP-B GLUE)` with GLUE `(glue {:symbol S})` or nil; an assert has `LOC SCOPE` after its
+  unwind; constants of function-item type carry `:fn-symbol S`, unevaluated constants arrive evaluated, an unsizing cast to a trait object
+  `:vtable "allocN"`, a closure coerced to a function pointer `:fn-symbol S`;
+- after the bodies: `(mir/layouts [["TYPE-TEXT" {:size :align :abi :fields :variants [:discrs] :uninhabited}]...])` (`:abi`
+  `(scalar S)`, `(pair A B B-OFFSET)`, `(memory SIZED)`; a scalar `(int BITS SIGNED [LO HI])`, `(ptr [LO HI])`, `(float BITS [LO HI])`;
+  `:fields` the offsets, `(array STRIDE COUNT)`, `(union N)`, `(primitive)`; `:variants` `(single I)`, `(empty)` or `(multiple {:tag S
+  :tag-field N :encoding (direct)|(niche UNTAGGED FIRST LAST START) :variants [{:offsets :uninhabited}...]})`), `(mir/langsyms
+  {"panic_const_add_overflow" "SYMBOL"...})` and `(mir/entry {:main S :lang-start S :sigpipe N})`; `(mir/external ...)` and
+  `(mir/static ...)` stand for items with no MIR here.
+
 ## 6. Limits of this version
 
 No `built`/`promoted` phases as data; types' structure is partial (`fnptr`, `dyn`, `alias` carry only their text); allocations are

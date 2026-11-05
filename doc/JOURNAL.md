@@ -289,3 +289,34 @@ On branch `night-fix` (from `b2a4911f`), not merged while `--full` ran on main:
   the four editions equal or rejected by both; 1,400 one-edit mutants (seeds 26-28): 254 equal, 1,146 rejected by both,
   none differing; the converter's forms of native dumps byte for byte the helper's. No corpus run, no gate step
   (repr/rust stays out of the gate).
+
+
+## 2026-11-05: the Rust front end's trial, RF1-RF3 (branch `rust-rf13`)
+
+The user decided doc/rust/FRONTEND-SURVEY.md's RFS1-RFS13 as recommended and asked for the trial RF1-RF3 as far as one day allows, light
+on the host (samples, each process under 2 GiB, no gate, no build of stage 0). Merged `rust-re5` (rsi, the synthetic corpus) into
+`rust-rf13` first (a conflict in the Makefile's PHONY list, resolved by union). What was done, in order, and why:
+
+- **RF1**: the helper (`tools/rsdump`, `bin/repr-rust helper`; its apks taken from a worktree's cache, no network) gained, in
+  `tools/rsdump/mirdata.rs` and `rsdump.rs`, the modes `--mir-data` (a crate's MIR bodies as forms, written by walking rustc_middle's
+  `Body` as `mir/pretty.rs` does), `--census`, `--iface` and, for RF3's judging, `--mono-mir` (the mono items rustc collects, each
+  instance's monomorphic MIR under its v0 symbol, callees and drop glue resolved by rustc, allocations, layouts, lang item symbols,
+  the entry wrapper's facts). `bin/rust-front oracles|corpus` runs them over the synthetic corpus and the samples: 77 of 80 build,
+  the new solver gives the same MIR on all 77. Alternatives considered for the data format: Rust's `Debug` text transcoded
+  generically (as the parser's dump) or a hand-written walk; the walk was chosen because the MIR types' `Debug` is pretty text,
+  not structure.
+- **RF2**: `doc/rust/MIR.md` (spec), `arbace/rust/front/mir.ae` (reader and printer, after `rustc_middle/src/mir/pretty.rs`), `bin/rust-front
+  mir-check`: 79 of 79 bodies' dumps printed back equal to the helper's `--mir` text; with its negative control.
+- **RF3**: `arbace/rust/back/codegen.ae` (MIR forms to LLVM forms, after `rustc_codegen_ssa/src/mir/`), `check.ae` (the judge: rustc's
+  `-O0 -Zshare-generics=no -C no-prepopulate-passes` IR against ours after a normalizer, with a negative control), `coverage.ae`
+  (every mono item of 80 programs), `collect.ae` (the collector's traversal against rustc's item set). Layouts, symbols, instance
+  resolution and vtable contents are the helper's data for now. Decisions on the way: the layouts come from `layout_of` (porting
+  rustc_abi's layout is the next piece, judged against the same table); the oracle IR needs `-C no-prepopulate-passes` (the
+  always-inliner runs at -O0 otherwise); `bin/rsi run --front mir` lowers the LLVM forms with rsi's lowering and gcc for `no_std` programs;
+  `bin/rust-front run-native` replaces a std program's own unit by our IR in rsi's native-std link (`RSI_FRONT_IR`, `bin/lib/rsi/link`).
+  Not run: rsi's ci leg and its lowered std (heavy; the day's rule).
+- Results are in the survey's "As built: RF1-RF3 (trial, 2026-11-05)" and `test/rust/front/coverage-2026-11-05.edn`. Sources: rustc 1.99.1
+  `58cf8f9c3` (`compiler/rustc_middle/src/mir/{pretty,syntax,terminator,consts,statement}.rs`,
+  `rustc_codegen_ssa/src/mir/{mod,analyze,block,operand,place,rvalue,statement}.rs`, `rustc_mir_transform/src/remove_noop_landing_pads.rs`,
+  `rustc_monomorphize/src/collector.rs`, `rustc_middle/src/mir/traversal.rs`), the sources of Alpine's `rustc-dev-1.99.1-r0` and
+  `rust-src-1.99.1-r0`; recorded in LICENSE.md and doc/ARBACE.md.
