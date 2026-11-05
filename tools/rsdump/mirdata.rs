@@ -649,11 +649,35 @@ pub fn layouts<'tcx>(tcx: TyCtxt<'tcx>, tys: &std::collections::BTreeMap<String,
             FieldsShape::Array { stride, count } => format!("(array {} {})", stride.bytes(), count),
             FieldsShape::Arbitrary { offsets, .. } => format!("[{}]", join(offsets.iter(), |o| o.bytes().to_string())),
         };
-        let multi = !matches!(l.variants, rustc_abi::Variants::Single { .. } | rustc_abi::Variants::Empty);
+        let variants = match &l.variants {
+            rustc_abi::Variants::Empty => "(empty)".to_string(),
+            rustc_abi::Variants::Single { index } => format!("(single {})", index.index()),
+            rustc_abi::Variants::Multiple { tag, tag_encoding, tag_field, variants } => {
+                let enc = match tag_encoding {
+                    rustc_abi::TagEncoding::Direct => "(direct)".to_string(),
+                    rustc_abi::TagEncoding::Niche { untagged_variant, niche_variants, niche_start } => format!(
+                        "(niche {} {} {} {})",
+                        untagged_variant.index(), niche_variants.start.index(), niche_variants.last.index(), niche_start
+                    ),
+                };
+                let vs = join(variants.iter_enumerated(), |(vi, v)| {
+                    let offs = format!("[{}]", join(v.field_offsets.iter(), |o| o.bytes().to_string()));
+                    format!("{{:offsets {} :uninhabited {}}}", offs, l.is_variant_uninhabited(vi))
+                });
+                format!("(multiple {{:tag {} :tag-field {} :encoding {} :variants [{}]}})", prim(*tag), tag_field.index(), enc, vs)
+            }
+        };
+        let discrs = match l.ty.kind() {
+            ty::Adt(d, _) if d.is_enum() => format!(
+                " :discrs [{}]",
+                join(d.discriminants(tcx), |(_, dv)| dv.val.to_string())
+            ),
+            _ => String::new(),
+        };
         let _ = write!(
             out,
-            "\n [{} {{:size {} :align {} :abi {} :fields {} :variants {} :uninhabited {}}}]",
-            q(text), l.size.bytes(), l.align.abi.bytes(), abi, fields, if multi { ":multiple" } else { ":single" }, l.is_uninhabited()
+            "\n [{} {{:size {} :align {} :abi {} :fields {} :variants {}{} :uninhabited {}}}]",
+            q(text), l.size.bytes(), l.align.abi.bytes(), abi, fields, variants, discrs, l.is_uninhabited()
         );
     }
     out.push_str("])\n");
