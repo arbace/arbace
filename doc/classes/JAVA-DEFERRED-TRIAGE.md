@@ -557,3 +557,7 @@ edge, the build, the runs.
 Docs left for the night, with the numbers: JRT-SOURCES.md's closure list, JRT-NOTES.md (a "java.util.logging"
 section like JC6b's "java.io, zip and jar"), J2G-SPEC §4.1's closure paragraph and §4.4's rename, LICENSE.md's
 `jdk/forms` count ("17 of `src/java.logging/share/classes`"; the variants' entry is written).
+
+## Decided (2026-11-05, the user)
+
+JCS138 (b): System.Logger deferred to F3 (SSLLogger); JCS139 (b) for F5, no localized level-name bundle, (a) at the next rebuild of javac's tool.
