@@ -51,11 +51,13 @@ END {
     if (s ~ /^include /) {
       lib = trim(substr(s, 9))
       if (lib == "testing") { incs = incs " testing"; continue }
+      # the Unix library (OT9's second fix): its unit loaded with the program (bin/oi's inc_units)
+      if (lib == "unix") { incs = incs " unix"; continue }
       print "class\theader: include " lib; exit
     }
     if (s ~ /^set [A-Za-z_0-9]+ *= *"/) { e = s; sub(/^set /, "", e); gsub(/ *= */, "=", e); gsub(/"/, "", e); env = env " " e; continue }
     if (s ~ /^unset /) continue
-    if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows") continue
+    if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "hasunix") continue
     print "class\theader: " s; exit
   }
   print "run\t" trim(flags) "\t" trim(incs) "\t" args "\t" trim(env)

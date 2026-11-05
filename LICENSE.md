@@ -186,8 +186,12 @@ covers what.
   (sys.c, signals.c, gc_ctrl.c, weak.c, finalise.c, backtrace.c, memprof.c, domain.c), `ext_digest.ae`
   (md5.c, blake2.c, bigarray.c's minimal part, the LXM generator of random.ml's runtime), `ext_lex.ae`
   (lexing.c, parsing.c), `ext_bigstring.ae` (bigarray.c), and the parts of `ext.ae`, `ext_domain.ae`,
-  `exn.ae`, `run.ae` and `thread.ae` that follow obj.c, sync.c, domain.c, fiber.c and printexc.c: under the
-  GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below). The test
+  `exn.ae`, `run.ae` and `thread.ae` that follow obj.c, sync.c, domain.c, fiber.c and printexc.c, and `ext_unix.ae`
+  (the Unix library's core, otherlibs/unix's `unixsupport.c`'s error table and the C stubs of the externals unix.ml
+  declares; doc/ocaml/DEFERRED-TRIAGE.md, "As built: OT9's second fix"): under the
+  GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below). The Unix library's
+  OCaml units (`otherlibs/unix/unix.mli`, `unix_unix.ml`, `unixLabels.ml{,i}` of the same tarball, same license) are not
+  copied into the tree: `bin/oi stdlib` compiles them from the pinned tarball into `.tmp/oi/unixlib/`. The test
   data `test/ocaml/oi/testdata/` and the tables in `go/arbace/oi/lexdata*_test.ae` and `parsedata_test.ae`
   are outputs of the host's OCaml 5.5.0 (ocaml, ocamllex, ocamlyacc) over Arbace's own test programs.
 - `jdk/ocaml/` (OCaml's runtime as Java forms, the package `ocaml.rt`; doc/ocaml/OCAML-SURVEY.md, "As built: O6
@@ -199,7 +203,8 @@ covers what.
   (extern.c, intern.c), `ExtIo`, `Channel`, `Fd` (io.c, sys.c's open and close), `ExtSys` (sys.c, signals.c), `ExtGc`
   (gc_ctrl.c, weak.c, finalise.c, backtrace.c, memprof.c), `ExtDigest`, `Blake2` (md5.c, blake2.c), `ExtLxm`
   (the LXM generator), `ExtBigarray`, `BigArray` (bigarray.c's part oi has), `ExtLex` (lexing.c, parsing.c), and the
-  parts of `ExtCore`, `Effects` and `Fiber` that follow obj.c, alloc.c, lazy.c, sync.c, domain.c and fiber.c:
+  parts of `ExtCore`, `Effects` and `Fiber` that follow obj.c, alloc.c, lazy.c, sync.c, domain.c and fiber.c, and `ExtUnix`
+  (oi's `ext_unix.ae`, above):
   under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below).
 - The opam set of the OCaml crop (test/ocaml/corpora.edn, the pins `:opam-NAME`; doc/ocaml/OCAML-SURVEY.md, "As built: O7"):
   sources of ten opam packages, fetched at pinned versions into `.tmp/` and read in place by the checks, **not distributed**

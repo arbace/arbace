@@ -90,6 +90,22 @@
 
 (def ^:dynamic *externals* {})
 
+;; the compiled level (OC93 (a)): a program's own units in a package of their own (ocaml.p<N>), the library's in ocaml.u;
+;; *pkg* the package of the program's units, *own* their names (the globals that name them are theirs, not the library's)
+(def ^:dynamic *pkg* "ocaml.u")
+(def ^:dynamic *own* #{})
+;; the compiled level's files: each unit's file starts (in-ns 'PKG) and its imports, a package's namespace file
+;; (ocaml/u.ae, ocaml/p<N>.ae) apart, as j2g's trees take them (a file whose first form is ns is a package file)
+(def ^:dynamic *in-ns* false)
+
+(defn pkg-of "The package of unit m's class." [m] (if (contains? *own* m) *pkg* "ocaml.u"))
+
+(defn- header-forms [pkg imports]
+  (if *in-ns*
+    (cond-> [(list 'in-ns (list 'quote (symbol pkg)))]
+      imports (conj (list 'import (list 'quote imports))))
+    [(if imports (list 'ns (symbol pkg) (list :import imports)) (list 'ns (symbol pkg)))]))
+
 (defn load-externals! [dir] (alter-var-root #'*externals* (constantly (runtime-externals (io/file dir)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -276,7 +292,11 @@
         lbl (keyword (str "self" (swap! (:n *unit*) inc)))
         ictx {:env env :exits {} :self (when self-id {:id self-id :label lbl :used used :arity arity})}
         b (realize (expr ictx body true))
-        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) b)) b)]
+        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) b)) b)
+        ;; the call depth (OC92 (a)): counted on entry, given back on the way out (an exception's way out is the handler's,
+        ;; trywith-node)
+        r (fresh "r$")
+        b (list 'do (list 'ocaml.rt.Rt/enter) (list 'let [r b] (list 'ocaml.rt.Rt/leave) r))]
     (when (= kind :tupled) (throw (ex-info "tupled function" {})))
     (swap! (:classes *unit*) conj
            (concat
@@ -443,7 +463,7 @@
     (str/starts-with? n "global ")
     (let [g (global-name (subs n 7))]
       (cond (predefs g) (symbol "ocaml.rt.Rt" g)
-            :else (symbol (str "ocaml.u." (class-name g)) "G")))
+            :else (symbol (str (pkg-of g) "." (class-name g)) "G")))
     (#{"&&" "||" "sequand" "sequor"} n) (rt 'b (test-form ctx (list 'prim n args)))
     :else (with-args ctx args (fn [as] (prim-value n as)))))
 
@@ -515,10 +535,13 @@
               (concat (list 'do) (map (fn [v t] (list 'set! v t)) vars ts) [(list 'break label)]))))))
 
 (defn- trywith-node [ctx [body id handler] tail?]
-  (let [e (fresh "e$") s (munge-id id)]
-    (list 'try (expr ctx body false)
-          (list 'catch 'Throwable e
-                (list 'let [s (rt 'exnValue e)] (expr (assoc-in ctx [:env id] s) handler tail?))))))
+  (let [e (fresh "e$") s (munge-id id) d (fresh "d$")]
+    ;; the handler runs at the depth the try was entered at (the calls the exception left were not given back)
+    (list 'let [d 'ocaml.rt.Rt/depth]
+          (list 'try (expr ctx body false)
+                (list 'catch 'Throwable e
+                      (list 'set! 'ocaml.rt.Rt/depth d)
+                      (list 'let [s (rt 'exnValue e)] (expr (assoc-in ctx [:env id] s) handler tail?)))))))
 
 (defn- for-node [ctx [id lo hi dir body]]
   (let [l (fresh "lo$") h (fresh "hi$") i (fresh "i$") s (munge-id id)
@@ -576,7 +599,7 @@
   runtime lacks with their counts."
   [{:keys [name code]}]
   (let [cls (symbol (class-name name))]
-    (binding [*unit* {:class (symbol (str "ocaml.u." cls)) :name name :n (atom 0)
+    (binding [*unit* {:class (symbol (str (pkg-of name) "." cls)) :name name :n (atom 0)
                       :classes (atom []) :consts (atom []) :missing (atom {})}]
       (let [[_ [body]] (node-body code)
             init (realize (expr {:env {} :exits {}} body false))
@@ -588,22 +611,44 @@
                    classes
                    [(list 'method (with-meta 'init {:public true :static true}) (with-meta [] {:tag 'void})
                           (list 'set! 'G init))])]
-        [[(list 'ns 'ocaml.u (list :import (list 'ocaml.rt 'Rt 'Block 'Closure 'Exn)))
-          (realize klass)]
+        [(conj (header-forms (pkg-of name) (list 'ocaml.rt 'Rt 'Block 'Closure 'Exn))
+               (realize klass))
          @(:missing *unit*)]))))
 
 (defn main-forms
   "The program's main class: inits, the units' initialisation in link order as one Runnable, and
   main, Main/run's ending and the status."
   [units]
-  [(list 'ns 'ocaml.u)
-   (list 'defclass (with-meta 'M__main {:public true})
-         (list 'method (with-meta 'inits {:public true :static true}) (with-meta [] {:tag 'Runnable})
-               (concat (list 'lambda 'Runnable [])
-                       (for [u units] (list (symbol (str "ocaml.u." (class-name u)) "init")))
-                       [nil]))
-         (list 'method (with-meta 'main {:public true :static true}) (with-meta [(with-meta 'args {:tag 'String/1})] {:tag 'void})
-               (list 'System/exit (list 'ocaml.rt.Main/run 'args (list 'ocaml.u.M__main/inits)))))])
+  (conj (header-forms *pkg* nil)
+        (list 'defclass (with-meta 'M__main {:public true})
+              (list 'method (with-meta 'inits {:public true :static true}) (with-meta [] {:tag 'Runnable})
+                    (concat (list 'lambda 'Runnable [])
+                            (for [u units] (list (symbol (str (pkg-of u) "." (class-name u)) "init")))
+                            [nil]))
+              (list 'method (with-meta 'main {:public true :static true}) (with-meta [(with-meta 'args {:tag 'String/1})] {:tag 'void})
+                    (list 'System/exit (list 'ocaml.rt.Main/run 'args (list (symbol (str *pkg* ".M__main") "inits"))))))))
+
+(defn shard-forms
+  "The compiled level's dispatcher (OC93 (a)): the class ocaml.u.Shard, whose main runs the program the environment
+  variable O2J_PROG names (a package's last part, p<N>) with the command line, argv.(0) O2J_ARGV0 when set."
+  [pkgs]
+  (let [p (symbol "p$") a (symbol "a0$")]
+    (conj (header-forms "ocaml.u" nil)
+          (list 'defclass (with-meta 'Shard {:public true})
+                (list 'method (with-meta 'main {:public true :static true}) (with-meta [(with-meta 'args {:tag 'String/1})] {:tag 'void})
+                      (list 'let [(with-meta p {:tag 'String}) '(System/getenv "O2J_PROG")
+                                  (with-meta a {:tag 'String}) '(System/getenv "O2J_ARGV0")]
+                            (list 'when (list 'and (list 'some? a) (list '> '(alength args) 0)) (list 'aset 'args 0 a))
+                            (concat (list 'cond)
+                                    (mapcat (fn [pk] [(list '.equals (list 'java-str (last (str/split pk #"\."))) p)
+                                                      (list (symbol (str pk ".M__main") "main") 'args)])
+                                            pkgs)
+                                    [:else (list 'do (list '.println 'System/err (list 'java-str "o2j: no program " p)) '(System/exit 126))])))))))
+
+(defn package-forms
+  "A package's namespace file for the compiled level's trees (j2g skips it: its first form is ns)."
+  [pkg]
+  [(list 'ns (symbol pkg))])
 
 (defn write-forms [^File f forms header]
   (io/make-parents f)
@@ -641,13 +686,8 @@
       (doseq [u prog-units] (run! visit (unit-refs u))))
     (filterv @need lib-order)))
 
-(defn translate-program
-  "A program's units (DUMPS, in order) translated into OD with its main class and OD/files.txt,
-  the files to define in order: the library's units it needs (LO's) first."
-  [lo od dumps]
-  (let [{:keys [order deps]} (read-string (slurp (io/file lo "deps.edn")))
-        us (mapv #(read-dump (io/file %)) dumps)
-        libs (link order deps us)]
+(defn- translate-units [lo od us libs]
+  (do
     (doseq [u us]
       (let [[forms missing] (translate-unit u)]
         (write-forms (io/file od (str (:name u) ".ae")) forms
@@ -659,6 +699,17 @@
                                        (for [u us] (.getPath (io/file od (str (:name u) ".ae"))))
                                        [(.getPath (io/file od "M__main.ae"))]))
                "\n"))))
+
+(defn translate-program
+  "A program's units (DUMPS, in order) translated into OD with its main class and OD/files.txt,
+  the files to define in order: the library's units it needs (LO's) first. PKG (the compiled level, OC93 (a)) the
+  package of its units and main class, else ocaml.u."
+  [lo od dumps & [pkg]]
+  (let [{:keys [order deps]} (read-string (slurp (io/file lo "deps.edn")))
+        us (mapv #(read-dump (io/file %)) dumps)
+        libs (link order deps us)]
+    (binding [*pkg* (or pkg "ocaml.u") *own* (if pkg (set (map :name us)) #{})]
+      (translate-units lo od us libs))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; the command line: o2j unit DUMP OUT, o2j main OUT UNIT...
@@ -693,6 +744,23 @@
                 (try (translate-program lo od dumps)
                      (catch Throwable e
                        (println (str "refused\t" od "\t" (str/replace (str (.getMessage e)) #"\s+" " ")))))))
+    ;; the compiled level (OC93 (a)): clib LAMBDA-DIR OUT-DIR as lib, the units' files in j2g's tree style (*in-ns*);
+    ;; cprogs LIB-OUT LIST: LIST's lines PKG OUT-DIR DUMP... (tabs), each a program as prog's in package PKG (ocaml.p<N>), in
+    ;; the tree style, a refusal as progs'; shard OUT-DIR PKG...: OUT-DIR/ocaml/u/Shard.ae, the dispatcher, and the packages'
+    ;; namespace files OUT-DIR/ocaml/u.ae, OUT-DIR/ocaml/p<N>.ae
+    "clib" (binding [*in-ns* true] (-main "lib" (first args) (second args)))
+    "cprogs" (let [[lo lst] args]
+               (binding [*in-ns* true]
+                 (doseq [line (str/split-lines (slurp lst)) :when (seq line)
+                         :let [[pkg od & dumps] (str/split line #"\t")]]
+                   (try (translate-program lo od dumps pkg)
+                        (catch Throwable e
+                          (println (str "refused\t" od "\t" (str/replace (str (.getMessage e)) #"\s+" " "))))))))
+    "shard" (let [[o & pkgs] args]
+              (binding [*in-ns* true]
+                (write-forms (io/file o "ocaml/u/Shard.ae") (shard-forms pkgs) "The compiled level's dispatcher, by arbace.o2j.")
+                (doseq [p (cons "ocaml.u" pkgs)]
+                  (write-forms (io/file o (str (str/replace p "." "/") ".ae")) (package-forms p) "A package of the compiled level, by arbace.o2j."))))
     "main" (let [[o & units] args]
              (write-forms (io/file o) (main-forms units) "The program's main class, by arbace.o2j."))
     (do (println "usage: o2j lib LAMBDA-DIR OUT-DIR | prog LIB-OUT OUT-DIR DUMP... | unit DUMP OUT [DUMP OUT...] | main OUT UNIT...") (System/exit 2))))
