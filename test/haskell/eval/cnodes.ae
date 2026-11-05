@@ -3,7 +3,10 @@
 ;; prebuilt runtime, arbace.c.runtime/link-text) into one node program, OUT, which hsi run --c loads into go/arbace/ci over
 ;; the machine's own memory and system calls. hsi's glue (test/haskell/hsi/c/glue.c: musl's flush and allocator) is linked
 ;; with them, and a main of nothing (test/haskell/hsi/c/main.c) when the files have none: hsi initializes musl itself
-;; (__init_libc) and calls no main. Run on the tools' host from the checkout (bin/hsi cnodes); the exit status 0, else 1
+;; (__init_libc) and calls no main. --refs FILE: the C functions the Haskell calls (one a line, the dump's static foreign
+;; targets, a capi wrapper's name decoded): those musl defines and the files do not are linked too (qsort for a wrapper's
+;; comparator), through a unit of references written beside OUT. Run on the tools' host from the checkout (bin/hsi
+;; cnodes); the exit status 0, else 1
 ;; with ci's reason (read-error, check-error, refused) on the standard error.
 (require '[arbace.c.run :as run]
          '[arbace.c.runtime :as rt]
@@ -11,7 +14,15 @@
          '[arbace.repr.c.host :as host]
          '[arbace.string :as str])
 
+(defn c-symbol
+  "The C function a static foreign target calls (hsi's cSymbol): a capi wrapper's name, ghczuwrapperZC...ZCname, decoded."
+  [^String s]
+  (if (str/starts-with? s "ghczuwrapperZC")
+    (-> (subs s (+ 2 (.lastIndexOf s "ZC"))) (str/replace "zu" "_") (str/replace "zz" "z"))
+    s))
+
 (let [[root out & args] *command-line-args*
+      [refs-file args] (if (= "--refs" (first args)) [(second args) (drop 2 args)] [nil args])
       h (host/load-host (str root "/test/c/host"))
       opts (vec (for [a args :when (str/starts-with? a "-")
                       ;; GHC's flags for the C compiler: the include paths and defines are the C's, the rest gcc's own
@@ -28,6 +39,20 @@
                (not has-main) (conj (run/read-unit h [] base (str root "/test/haskell/hsi/c/main.c"))))
         _ (when-let [b (first (remove #(= :ok (:status %)) glue))] (fail (str "glue: " (name (:status b)) ": " (:message b))))
         lib (rt/library h root)
+        defined (set (mapcat #(keys (musl/unit-defs (:forms (:rd %)))) us))
+        wanted (when refs-file
+                 (->> (str/split-lines (slurp refs-file)) (map str/trim) (remove str/blank?) (map c-symbol)
+                      (filter #(re-matches #"[A-Za-z_][A-Za-z0-9_]*" %))
+                      (remove defined) (filter #(.containsKey ^java.util.HashMap (:by-name lib) %)) distinct sort))
+        glue (if (seq wanted)
+               (let [f (str out ".refs.c")]
+                 (spit f (str "/* the C functions the Haskell calls that musl defines (bin/hsi cnodes --refs) */\n"
+                              (str/join (for [w wanted] (str "extern void " w "(void);\n")))
+                              "void (*const __hsi_c_refs[])(void) = { " (str/join ", " wanted) " };\n"))
+                 (let [u (run/read-unit h [] base f)]
+                   (when-not (= :ok (:status u)) (fail (str "refs: " (name (:status u)) ": " (:message u))))
+                   (conj glue u)))
+               glue)
         r (try {:text (rt/link-text lib (into us glue))}
                (catch arbace.lang.ExceptionInfo e
                  {:refused (or (:ci/refused (ex-data e)) :error) :message (.getMessage e)}))]
