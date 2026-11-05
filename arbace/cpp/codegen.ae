@@ -151,7 +151,7 @@
 
 (defn- elem-type [t] (let [t (abi/unq t)] (if (or (abi/scalar? t) (abi/ref? t)) (abi/llvm-type t) (list 'array (abi/size-of t) 'i8))))
 
-(defn- zero-of [t] (let [l (abi/llvm-type t true)] (cond (= l 'ptr) 'null (#{'float 'double 'x86_fp80} l) (list 'fp "0.000000e+00") (= l 'i1) false :else 0)))
+(defn- zero-of [t] (let [l (abi/llvm-type t true)] (cond (abi/mfn-ptr? (abi/unq t)) 'zeroinitializer (abi/mptr? (abi/unq t)) -1 (= l 'ptr) 'null (#{'float 'double 'x86_fp80} l) (list 'fp "0.000000e+00") (= l 'i1) false :else 0)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Functions referenced
@@ -410,6 +410,34 @@
   (when (nontrivial-dtor? cid)
     (call! (:dtor (abi/cls cid)) addr [] nil false)))
 
+(defn- mcall!
+  "A call through a pointer to member function (Itanium §2.3): this adjusted, then the function the pointer names, or
+  for an odd pointer the vtable's slot at its offset less one."
+  [e dest]
+  (let [ft (:fty e)
+        obj (emit-lv (:obj e))
+        m (emit-rv (:m e))
+        p (val! (list 'extractvalue ['(struct i64 i64) m] 0))
+        adj (val! (list 'extractvalue ['(struct i64 i64) m] 1))
+        this (val! (list 'getelementptr :inbounds 'i8 ['ptr obj] ['i64 adj]))
+        virt (val! (list 'icmp :ne 'i64 (val! (list 'and 'i64 p 1)) 0))
+        lv (new-label "memptr.virtual") ln (new-label "memptr.nonvirtual") le (new-label "memptr.end")]
+    (condbr! virt lv ln)
+    (begin! lv)
+    (let [vp (val! (list 'load 'ptr ['ptr this] :align 8))
+          slot (val! (list 'getelementptr 'i8 ['ptr vp] ['i64 (val! (list 'sub 'i64 p 1))]))
+          vf (val! (list 'load 'ptr ['ptr slot] :align 8))
+          fv (:label @*f*)]
+      (br! le) (close-block!) (start! ln)
+      (let [nf (val! (list 'inttoptr 'i64 p 'ptr)) fn* (:label @*f*)]
+        (begin! le)
+        (let [callee (val! (list 'phi 'ptr [vf fv] [nf fn*]))
+              args (arg-values (:ps ft) (:args e))
+              cret (abi/class? (abi/unq (:ret ft)))
+              ret (cond cret 'void (abi/ref? (:ret ft)) 'ptr :else (abi/llvm-type (:ret ft) true))
+              args (vec (concat (when cret [['ptr dest]]) [['ptr this]] args))]
+          (call-insn! ret ret callee args false))))))
+
 (defn- icall! [e dest]
   (let [ft (:fty e)
         p (emit-rv (:callee e))
@@ -513,7 +541,9 @@
       :noop (emit-rv (:e e))
       :int (int-cast! from to (emit-rv (:e e)))
       :to-bool (let [v (emit-rv (:e e))]
-                 (cond (abi/floating? from) (val! (list 'fcmp :une (abi/llvm-type from true) v (list 'fp "0.000000e+00")))
+                 (cond (abi/mfn-ptr? from) (val! (list 'icmp :ne 'i64 (val! (list 'extractvalue ['(struct i64 i64) v] 0)) 0))
+                       (abi/mptr? from) (val! (list 'icmp :ne 'i64 v -1))
+                       (abi/floating? from) (val! (list 'fcmp :une (abi/llvm-type from true) v (list 'fp "0.000000e+00")))
                        (abi/ptr? from) (val! (list 'icmp :ne 'ptr v 'null))
                        (= :nullptr (abi/bn from)) false
                        (= 'i1 (abi/llvm-type from true)) v
@@ -575,7 +605,21 @@
   (case (:op e)
     :int (if (= 'i1 (abi/llvm-type (:ty e) true)) (not (zero? (long (:v e)))) (:v e))
     :float (fp-const (:ty e) (:v e))
-    :null 'null
+    :null (if (abi/mptr? (abi/unq (:ty e))) (zero-of (:ty e)) 'null)
+    :mptr-data (:off e)
+    :mptr-fn (let [f (sema/fnd (:fn e))
+                   p (if (:virtual f)
+                       (inc (* 8 (long (vtable-index (:cls f) (:fn e) nil))))
+                       (val! (list 'ptrtoint 'ptr (want-fn! (:fn e)) 'i64)))
+                   a (val! (list 'insertvalue ['(struct i64 i64) 'poison] ['i64 p] 0))]
+               (val! (list 'insertvalue ['(struct i64 i64) a] ['i64 0] 1)))
+    :mptr-adj (let [v (emit-rv (:e e)) off (long (:off e))]
+                (if (abi/mfn-ptr? (abi/unq (:ty e)))
+                  (let [adj (val! (list 'extractvalue ['(struct i64 i64) v] 1))]
+                    (val! (list 'insertvalue ['(struct i64 i64) v] ['i64 (val! (list 'add 'i64 adj off))] 1)))
+                  (let [isnull (val! (list 'icmp :eq 'i64 v -1)) a (val! (list 'add 'i64 v off))]
+                    (val! (list 'select ['i1 isnull] ['i64 -1] ['i64 a])))))
+    :mcall (if (= :pr (:cat e)) (mcall! e nil) (load! (:ty e) (emit-lv e)))
     :zero-val (zero-of (:ty e))
     :load (let [x (:e e)]
             (if (:raw x)
@@ -594,9 +638,21 @@
     :not (val! (list 'xor 'i1 (emit-rv (:e e)) true))
     :binop (let [a (emit-rv (:l e)) b (emit-rv (:r e))] (arith! (:o e) (:ty e) a b))
     :cmp (let [a (emit-rv (:l e)) b (emit-rv (:r e))]
+           (cond
+             (abi/mfn-ptr? (:ct e))
+             ;; equal: the same pointer, and the same adjustment unless both are null (Itanium §2.3)
+             (let [x (fn [v i] (val! (list 'extractvalue ['(struct i64 i64) v] i)))
+                   pa (x a 0) pb (x b 0) aa (x a 1) ab (x b 1)
+                   peq (val! (list 'icmp :eq 'i64 pa pb))
+                   pnull (val! (list 'icmp :eq 'i64 pa 0))
+                   aeq (val! (list 'icmp :eq 'i64 aa ab))
+                   r (val! (list 'and 'i1 peq (val! (list 'or 'i1 pnull aeq))))]
+               (if (= "==" (:o e)) r (val! (list 'xor 'i1 r true))))
+             (abi/mptr? (:ct e)) (val! (list 'icmp (if (= "==" (:o e)) :eq :ne) 'i64 a b))
+             :else
            (if (abi/ptr? (:ct e))
              (val! (list 'icmp (case (:o e) "==" :eq "!=" :ne "<" :ult ">" :ugt "<=" :ule ">=" :uge) 'ptr a b))
-             (cmp! (:o e) (abi/underlying (:ct e)) a b)))
+             (cmp! (:o e) (abi/underlying (:ct e)) a b))))
     (:land :lor) (short-circuit! e)
     :cond (cond-branches! e emit-rv (abi/llvm-type (:ty e) true))
     :ptradd (let [p (emit-rv (:p e)) n (emit-rv (:n e))
@@ -727,6 +783,8 @@
     :reinterpret-lv (emit-lv (:e e))
     :str (gsym (string-global (:s e)))
     :exn-obj (:exn-adj @*f*)
+    :mfield (let [a (emit-lv (:obj e)) o (emit-rv (:m e))] (val! (list 'getelementptr :inbounds 'i8 ['ptr a] ['i64 o])))
+    :mcall (if (= :pr (:cat e)) (materialize! e) (mcall! e nil))
     :typeid (if-let [x (:e e)]
               (let [a (emit-lv x)
                     vp (val! (list 'load 'ptr ['ptr a] :align 8))
@@ -787,6 +845,7 @@
     :temp-obj (emit-init addr (:ty e) (:init e))
     :call (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) addr (:virtual e))
     :icall (icall! e addr)
+    :mcall (mcall! e addr)
     :cond (cond-branches! e #(emit-into % addr) nil)
     :comma (do (emit-rv (:l e)) (emit-into (:r e) addr))
     (if (#{:lv :xv} (:cat e))

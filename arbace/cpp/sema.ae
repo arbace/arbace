@@ -212,6 +212,10 @@
                ps (if (= ['void] (vec ps)) [] ps)]
            {:k :fn :ret (resolve-type-form scope r) :ps (mapv #(resolve-type-form scope %) ps) :va (boolean va)})
       cpp/elaborated (resolve-type-form scope (nth f 2))
+      member-ptr (let [c (resolve-type-form scope (second f))
+                       u (resolve-type-form scope (nth f 2))
+                       u (if (and (abi/fn? u) (or (:c u) (:const (meta (nth f 2))))) (-> u (dissoc :c) (assoc :cq true)) u)]
+                   {:k :mptr :cls (:id c) :to u})
       cpp/global (binding [] (resolve-type-form (loop [s scope] (if (:parent s) (recur (:parent s)) s)) (second f)))
       (fail :type "type form " (pr-str f)))
     :else (fail :type "type form " (pr-str f))))
@@ -626,12 +630,17 @@
                      fs))
       (when (= 1 (count fs)) (first fs)))))
 
+(defn mptr-fn-node [fid]
+  (let [f (fnd fid)]
+    {:op :mptr-fn :fn fid :ty {:k :mptr :cls (:cls f) :to (cond-> (:ty f) (:cq f) (assoc :cq true))} :cat :pr}))
+
 (defn rv
   "The prvalue of a glvalue of non-class type (lvalue-to-rvalue), an array's decay, a function's."
   [e]
   (let [t (:ty e)]
     (cond
       (= :fnset (:op e)) (if-let [f (fn-matching e nil)] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr} e)
+      (= :mptr-fnset (:op e)) (if (= 1 (count (:fns e))) (mptr-fn-node (first (:fns e))) e)
       (abi/arr? t) {:op :decay :e e :ty (abi/ptr (:of t)) :cat :pr}
       (abi/fn? t) {:op :fnaddr :e e :fn (:fn e) :ty (abi/ptr t) :cat :pr}
       (and (= :var (:op e)) (:c t) (abi/integral? t) (:init (var* (:id e))) (not= :local (:storage (var* (:id e)))))
@@ -681,6 +690,11 @@
   (let [e (if (and (= :fnset (:op e)) (abi/ptr? (abi/unq t)) (abi/fn? (:to (abi/unq t))))
             (if-let [f (fn-matching e (:to (abi/unq t)))] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr} (fail :conversion "no function of the set matches"))
             e)
+        e (if (= :mptr-fnset (:op e))
+            (let [mt (abi/unq t)
+                  ok (filter #(let [n (mptr-fn-node %)] (= (:to (:ty n)) (:to mt))) (:fns e))]
+              (if (and (abi/mptr? mt) (seq ok)) (mptr-fn-node (first ok)) (rv e)))
+            e)
         from (abi/unq (:ty e)) to (abi/unq t)]
     (cond
       (= from to) e
@@ -691,6 +705,9 @@
       (and (abi/floating? from) (abi/integral? to)) (cast-node e :fp->int to)
       (and (abi/floating? from) (abi/floating? to)) (cast-node e :fp to)
       (and (abi/ptr? to) (null-constant? e)) {:op :null :ty to :cat :pr}
+      (and (abi/mptr? to) (null-constant? e)) {:op :null :ty to :cat :pr}
+      (and (abi/mptr? to) (abi/mptr? from) (abi/derived-from? (:cls to) (:cls from)))
+      {:op :mptr-adj :e e :off (second (abi/base-path (:cls to) (:cls from))) :ty to :cat :pr}
       (and (abi/ptr? to) (abi/ptr? from))
       (let [fc (class-id (:to from)) tc (class-id (:to to))]
         (cond
@@ -725,6 +742,9 @@
           (and (abi/void? tt) (or (:c tt) (not (:c ft)))) 2
           (and (class-id ft) (class-id tt) (abi/derived-from? (class-id ft) (class-id tt)) (or (:c tt) (not (:c ft)))) 2
           :else nil))
+      (and (abi/mptr? to) (null-constant? e)) 2
+      (and (abi/mptr? to) (abi/mptr? from) (= (:to from) (:to to)) (abi/derived-from? (:cls to) (:cls from))) 2
+      (and (= :bool (abi/bn to)) (abi/mptr? from)) 2
       :else nil)))
 
 (defn conv-fns
@@ -1096,6 +1116,9 @@
       ("<" ">" "<=" ">=" "==" "!=")
       (let [l (rv l) r (rv r)]
         (cond
+          (or (abi/mptr? lt) (abi/mptr? rt))
+          (let [pt (abi/unq (if (abi/mptr? lt) lt rt))]
+            {:op :cmp :o o :l (convert-scalar l pt false) :r (convert-scalar r pt false) :ct pt :ty abi/bool* :cat :pr})
           (or (abi/ptr? lt) (abi/ptr? rt))
           (let [pt (if (abi/ptr? lt) lt rt)]
             {:op :cmp :o o :l (convert-scalar l pt false) :r (convert-scalar r pt false) :ct pt :ty abi/bool* :cat :pr})
@@ -1104,6 +1127,15 @@
       "&&" {:op :land :l (to-bool l) :r (to-bool r) :ty abi/bool* :cat :pr}
       "||" {:op :lor :l (to-bool l) :r (to-bool r) :ty abi/bool* :cat :pr}
       "," {:op :comma :l l :r r :ty (:ty r) :cat (:cat r)}
+      (".*" "->*")
+      (let [obj (if (= o "->*") (deref-node l) l)
+            m (rv r)
+            mt (abi/unq (:ty m))
+            obj (if (= :pr (:cat obj)) (materialize obj) obj)
+            obj (to-base-lv obj (:cls mt))]
+        (if (abi/fn? (:to mt))
+          {:op :mbound :obj obj :m m :fty (:to mt) :ty {:k :overload} :cat :pr}
+          {:op :mfield :obj obj :m m :ty (cond-> (:to mt) (:c (:ty obj)) (assoc :c true)) :cat (if (= :lv (:cat obj)) :lv :xv)}))
       (fail :operator "binary " o))))
 
 (defn- assign-node [ctx l r]
@@ -1187,6 +1219,10 @@
 
 (defn analyze-call [ctx callee args]
   (case (:op callee)
+    :mbound (let [ft (:fty callee)]
+              {:op :mcall :obj (:obj callee) :m (:m callee) :fty ft
+               :args (vec (map-indexed (fn [i a] (if (< i (count (:ps ft))) (init-for (nth (:ps ft) i) a ctx :copy) {:i :expr :e (rv a)})) args))
+               :ty (abi/non-ref (:ret ft)) :cat (case (:k (:ret ft)) :ref :lv :rref :xv :pr)})
     :fnset (let [ms (mapv fnd (:fns callee))
                  obj (:obj callee)
                  any-method (some #(and (:cls %) (not (:static %))) ms)
@@ -1419,6 +1455,23 @@
     "DeclRefExpr" (name-expr ctx n)
     "CXXThisExpr" (this-expr ctx)
     "UnaryOperator"
+    (or
+     ;; &C::m: a pointer to member ([expr.unary.op]/4)
+     (when (and (= "&" (:opcode n)) (= "DeclRefExpr" (:kind (first (kids n)))))
+       (let [k (first (kids n)) [g q] (ref-qualifier k)]
+         (when (seq q)
+           (let [es (lookup-qualified (:scope ctx) (conj q (get-in k [:referencedDecl :name])) g)
+                 e (first es)]
+             (case (:e e)
+               :field (let [qc (class-id (:ty (type-entity (lookup-qualified (:scope ctx) q g))))
+                            f (nth (:fields (abi/cls (:cls e))) (:i e))]
+                        {:op :mptr-data :off (+ (long (second (abi/base-path qc (:cls e)))) (abi/field-offset (:cls e) (:i e)))
+                         :ty {:k :mptr :cls qc :to (:ty f)} :cat :pr})
+               :fn (let [fs (mapv :id (filter #(= :fn (:e %)) es))
+                         ms (filter #(let [f (fnd %)] (and (:cls f) (not (:static f)))) fs)]
+                     (when (seq ms)
+                       {:op :mptr-fnset :fns (vec ms) :ty {:k :overload} :cat :pr}))
+               nil)))))
     (let [o (:opcode n) e (analyze ctx (first (kids n)))]
       (or (when (and (class-operand? e) (not= o "&")) (operator-call ctx o (if (and (#{"++" "--"} o) (:isPostfix n)) [e {:op :int :v 0 :ty abi/int* :cat :pr}] [e])))
           (case o
@@ -1430,11 +1483,13 @@
                             {:op :incdec :o o :post (boolean (:isPostfix n)) :e e :ty (abi/unq (:ty e)) :cat (if (:isPostfix n) :pr :lv)})
             "!" {:op :not :e (to-bool e) :ty abi/bool* :cat :pr}
             ("-" "+" "~") (let [r (rv e) pt (promote-type (:ty r))] {:op :unop :o o :e (convert-scalar r pt false) :ty pt :cat :pr})
-            (fail :operator "unary " o))))
+            (fail :operator "unary " o)))))
     "BinaryOperator"
     (let [o (:opcode n) [ln rn] (kids n) l (analyze ctx ln) r (analyze ctx rn)]
-      (if (= o "=")
-        (assign-node ctx l r)
+      (cond
+        (= o "=") (assign-node ctx l r)
+        (#{".*" "->*"} o) (builtin-binop o l r)
+        :else
         (or (when (and (or (class-operand? l) (class-operand? r)) (not= o ",")) (operator-call ctx o [l r]))
             (builtin-binop o (class->scalar ctx l) (class->scalar ctx r)))))
     "CompoundAssignOperator"
