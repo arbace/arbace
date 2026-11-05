@@ -262,6 +262,11 @@ Prior art:
     `cpp-aot`, parts the recorded corpora samples and runtime (`test/cpp/check{,-aot}-linux-amd64.edn`) and the sampling `--sample 25` of gxx-dg-run
     (`test/cpp/check{,-aot}-every-25-linux-amd64.edn`: a `--sample N` run is held to and `--record`ed into its own record), against g++ 15.2's runs
     `test/cpp/ref-gxx15.edn` (reap's `:ref-corpora`); CX9's `cpp-dg` joins later.
+    Since oracle-records-cpp (2026-11-05; doc/ORACLE-RECORDS-SURVEY.md, "As built: C++ and LLVM IR") none of them names `:cxx`: clang++'s IR is the packs `cpp-ir-*` and
+    `cpp-runtime-ir` (`bin/cppi record-ir`, read unless `CPPI_LIVE=1`), the originals' dumps the packs `cxxdump-KEY` (`bin/repr-cpp record-dumps`, `cxxdump -records`,
+    read unless `REPR_CPP_LIVE=1`), LLVM's originals' `clang -c` and llvm-as digests and opt's answers `test/llvm/records/` (`bin/repr-llvm record-orig`, `record-opt`; the steps
+    `llvm-roundtrip`, `llvm-verify`); the print's levels, the lowering's print object and the parts whose records are the night's are the oracle tier's (`cpp-*-oracle`,
+    `llvm-*-oracle`, `cpp-records-verify`, `llvm-records-verify`; the hosts `:cxx` and `:llvm`).
     OCaml: since O8 repr/ocaml against the host's OCaml 5.5.0 (the host `:ocaml`: ocamlc, ocamlopt, compiler-libs, the oracle `tools/ocdump` built live) and oi's light driver (`go/arbace/oi`) against ocamlc's and ocamlopt's recorded runs, the corpora fetched by pin into the checkout's `.tmp/repr-ocaml`; `--corpus ID` (`bin/repr-ocaml roundtrip`; `opam`, `all`) and `--only-list FILE` (`bin/oi check [--aot]`, `suite check [--aot]`) select parts.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
