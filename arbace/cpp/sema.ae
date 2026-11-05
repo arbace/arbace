@@ -158,7 +158,8 @@
     (if-let [n (builtin-syms f)]
       (abi/b n)
       (let [parts (name-parts f)
-            es (if (= 1 (count parts)) (lookup scope (first parts)) (lookup-qualified scope parts))
+            es (if (= 1 (count parts)) (lookup scope (first parts))
+                   (or (when-let [h (:dependent-name @hooks)] (h scope parts)) (lookup-qualified scope parts)))
             e (type-entity es)]
         (or (:ty e) (fail :type "unknown type " f))))
     (seq? f)
@@ -697,6 +698,10 @@
           :else nil))
       :else nil)))
 
+(defn- arr-unq "A type without its cv-qualifiers, an array's at its elements ([basic.type.qualifier]/3)." [t]
+  (if (abi/arr? t) (assoc (abi/unq t) :of (arr-unq (:of t))) (abi/unq t)))
+(defn- arr-cv "The type whose qualifiers are the type's (an array's elements')." [t] (if (abi/arr? t) (arr-cv (:of t)) t))
+
 (def ^:dynamic *no-user* false) ; inside a user-defined conversion: standard conversions only ([over.best.ics]/4)
 
 (defn ics
@@ -710,9 +715,9 @@
             (and (abi/scalar? pt) (<= (count (:items e)) 1)) {:rank (if (seq (:items e)) (or (std-rank (rv (first (:items e))) (:ty (rv (first (:items e)))) pt) 9) 0)}
             :else nil)
       (abi/ref? p)
-      (let [same (= (abi/unq at) (abi/unq pt))
+      (let [same (= (arr-unq at) (arr-unq pt))
             derived (and (class-id at) (class-id pt) (abi/derived-from? (class-id at) (class-id pt)))
-            cv-ok (or (:c pt) (not (:c at)))]
+            cv-ok (or (:c (arr-cv pt)) (not (:c (arr-cv at))))]
         (cond
           (and (= :ref (:k p)) (lv? e) (= :lv (:cat e)) (or same derived) cv-ok) {:rank (if derived 2 0) :sub (if (and (:c pt) (not (:c at))) 1 0)}
           (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived)) {:rank (if derived 2 0) :sub -1}
@@ -735,7 +740,12 @@
                 {:rank 3}))
       (abi/class? at) nil
       (= :fnset (:op e)) (when (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching e (:to (abi/unq pt)))) {:rank 0})
-      :else (let [r (std-rank e (:ty (rv e)) pt)] (when r {:rank r})))))
+      :else (let [r (std-rank e (:ty (rv e)) pt)
+                  ft (abi/unq (:ty (rv e))) tt (abi/unq pt)]
+              ;; [over.ics.rank]/3.2.6: a pointer's qualification adjustment ranks behind the identity
+              (when r {:rank r :sub (if (and (abi/ptr? ft) (abi/ptr? tt) (= (abi/unq (:to ft)) (abi/unq (:to tt)))
+                                             (or (and (:c (:to tt)) (not (:c (:to ft)))) (and (:v (:to tt)) (not (:v (:to ft))))))
+                                      1 0)})))))
 
 (defn- better-ics? [a b]
   (or (< (long (:rank a)) (long (:rank b)))
@@ -849,7 +859,7 @@
             e (if (vector? e) (if (= 1 (count e)) (first e) (fail :init "a reference from arguments")) e)
             pt (:to t)
             at (:ty e)
-            same (= (abi/unq at) (abi/unq pt))
+            same (= (arr-unq at) (arr-unq pt))
             derived (and (class-id at) (class-id pt) (abi/derived-from? (class-id at) (class-id pt)))]
         (cond
           (and (lv? e) (or same derived) (or (= :lv (:cat e)) (= :rref (:k t)) (:c pt))
@@ -966,7 +976,7 @@
 
 (defn- entity-expr [ctx es n]
   (let [e (first es)]
-    (case (:e e)
+    (case (if (empty? es) :fn (:e e))
       :var (var-node (:id e))
       :field (field-node (deref-node (this-expr ctx)) (:cls e) (:i e))
       :enumerator {:op :int :v (:val e) :ty (:ty e) :cat :pr}
@@ -982,7 +992,8 @@
              (lookup (:scope ctx) nm))
         ;; class members found through a class's scope keep their class
         es (if (and (seq q) (seq es)) es es)]
-    (when (empty? es) (fail :name "unknown name " nm))
+    ;; nothing visible: a call's argument-dependent lookup may still find a function (template)
+    (when (and (empty? es) (or g (seq q))) (fail :name "unknown name " nm))
     (let [e (entity-expr ctx es n)]
       (if (and (seq (:tmpls e)) (str/includes? (or (node-text n) "") "<"))
         (assoc e :targs-text (node-text n) :targs-scope (:scope ctx))

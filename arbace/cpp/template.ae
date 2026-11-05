@@ -40,6 +40,8 @@
 ;; a template-id with such arguments {:k :tspec :tmpl tid :name s :path p :args [...]}.
 
 (def ^:dynamic *tmpls* nil)
+
+(defn- same-arg? [a b] (if (and (map? a) (contains? a :val)) (= (:val a) (:val b)) (= a b)))
 (def ^:dynamic *scanned* nil) ; atom #{[:fn id] [:var id]} the pending scan has walked
 
 (defn tmpl [tid] (get @*tmpls* tid))
@@ -49,7 +51,7 @@
   "Whether a type or argument names a template's parameter."
   [x]
   (cond
-    (map? x) (or (#{:tparam :tparam-v :tspec} (:k x)) (some dependent? (vals x)))
+    (map? x) (or (#{:tparam :tparam-v :tspec :tdep} (:k x)) (some dependent? (vals x)))
     (sequential? x) (some dependent? x)
     :else false))
 
@@ -220,6 +222,7 @@
         (let [a (apply dissoc A qs) old (get @b (:i P))]
           (if (some? old) (= old a) (do (swap! b assoc (:i P) a) true)))))
     (not (dependent? P)) (= P A)
+    (= :tdep (:k P)) true ; a nested-name-specifier's member: a non-deduced context ([temp.deduct.type]/5.1)
     (or (not= (boolean (:c P)) (boolean (:c A))) (not= (boolean (:v P)) (boolean (:v A)))) false
     :else
     (case (:k P)
@@ -239,7 +242,7 @@
                     (and (= (:tmpl c) (:tmpl P)) (= (count (:args P)) (count (:targs c)))
                          (every? true? (map (fn [p a]
                                               (cond (tparam-of? p tid) (let [old (get @b (:i p))]
-                                                                          (if (some? old) (= (:val old) (:val a)) (do (swap! b assoc (:i p) a) true)))
+                                                                          (if (some? old) (same-arg? old a) (do (swap! b assoc (:i p) a) true)))
                                                     (contains? p :val) (= (:val p) (:val a))
                                                     :else (deduce-type b tid p a)))
                                             (:args P) (:targs c))))))
@@ -290,6 +293,13 @@
       (when (> (count forms) (count (:params t))) (fail :template "too many template arguments"))
       (vec (map-indexed (fn [i x] (resolve-arg scope (nth (:params t) i) x)) forms)))))
 
+(defn- add-cv
+  "A with the cv-qualifiers of P (at the elements of an array) added."
+  [A P]
+  (if (and (abi/arr? P) (abi/arr? A))
+    (assoc A :of (add-cv (:of A) (:of P)))
+    (cond-> A (:c P) (assoc :c true) (:v P) (assoc :v true))))
+
 (defn deduce-call
   "[temp.deduct.call]: the template arguments of the function template `t` for the call's typed arguments, after the
   explicit ones; nil when deduction fails. Each P/A pair adjusted as /2-/4 say (a reference's referred type; an
@@ -310,7 +320,8 @@
                           (let [fwd (and (= :rref (:k P)) (tparam-of? (:to P) tid) (not (:c (:to P))) (= :lv (:cat e)))
                                 [P A] (cond
                                         fwd [(:to P) (abi/lref A)]
-                                        (abi/ref? P) [(:to P) A]
+                                        ;; the referred type may be more cv-qualified than A (an array's elements carry it)
+                                        (abi/ref? P) [(:to P) (add-cv A (:to P))]
                                         :else [(abi/unq P) (abi/unq (cond (abi/arr? A) (abi/ptr (:of A))
                                                                           (abi/fn? A) (abi/ptr A)
                                                                           :else A))])
@@ -336,7 +347,11 @@
   "Whether the function template tid1 is more specialized than tid2 for a call with `n` arguments."
   [tid1 tid2 n]
   (let [s1 (take n (:ps (sym-sig (tmpl tid1)))) s2 (take n (:ps (sym-sig (tmpl tid2))))]
-    (and (at-least-as-specialized? tid2 s2 s1) (not (at-least-as-specialized? tid1 s1 s2)))))
+    (let [a (at-least-as-specialized? tid2 s2 s1) b (at-least-as-specialized? tid1 s1 s2)]
+      (or (and a (not b))
+          ;; [temp.deduct.partial]/9: of two references otherwise equal, the lvalue reference's is more specialized
+          (and a b (some true? (map #(and (= :ref (:k %1)) (= :rref (:k %2))) s1 s2))
+               (not (some true? (map #(and (= :rref (:k %1)) (= :ref (:k %2))) s1 s2))))))))
 
 (defn tiebreak
   "[over.match.best]/2.4-2.5 for two candidates no argument ranks apart: a non-template function over a template's
@@ -381,7 +396,7 @@
   [pt args]
   (let [b (atom {}) tid (:id pt)]
     (when (every? true? (map (fn [p a]
-                               (cond (tparam-of? p tid) (let [old (get @b (:i p))] (if (some? old) (= (:val old) (:val a)) (do (swap! b assoc (:i p) a) true)))
+                               (cond (tparam-of? p tid) (let [old (get @b (:i p))] (if (some? old) (same-arg? old a) (do (swap! b assoc (:i p) a) true)))
                                      (contains? p :val) (= (:val p) (:val a))
                                      :else (deduce-type b tid p a)))
                              (:args pt) args))
@@ -542,6 +557,7 @@
                      fid (try (let [ex (explicit-args t (:targs-text callee) (or (:targs-scope callee) (:scope ctx)))]
                                 (when-let [a (deduce-call t ex args)] (instantiate-fn tid a)))
                               (catch arbace.lang.ExceptionInfo e
+                                (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "template" (:name t) "drops out:" (.getMessage e))))
                                 (if (#{:template-pack :template-template} (:codegen/refused (ex-data e))) (throw e) nil)))]
                :when fid]
            fid))))
@@ -719,5 +735,9 @@
          :const-bound (fn [scope f] (let [v (const-form scope f)] (if (map? v) v (long v))))
          :call-candidates (fn [ctx callee args] (when (or (seq (:tmpls callee)) (and (not (:obj callee)) (:name callee))) (call-candidates ctx callee args)))
          :tiebreak tiebreak
+         :dependent-name (fn [scope parts]
+                           (let [es (sema/lookup scope (first parts)) e (first (filter #(= :type (:e %)) es))]
+                             (when (and e (#{:tparam :tdep :tspec} (:k (:ty e))))
+                               [{:e :type :ty {:k :tdep :base (:ty e) :names (vec (rest parts))} :pos -1}])))
          :pending pending
          :wrap (fn [f] (binding [*tmpls* (atom {}) *scanned* (atom #{})] (f)))})
