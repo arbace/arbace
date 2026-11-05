@@ -711,7 +711,6 @@
                                          ;; a base dependent in a template's pattern (CODEGEN.md G3: [temp.dep]/4)
                                          (contains? (:dep-bases (abi/cls id)) bi) (assoc :dependent true))))))
       (let [access (atom (if (= "class" (:tagUsed n)) :private :public))]
-        (when (System/getenv "CPP_USING_TRACE") (binding [*out* *err*] (println "class" nm (mapv :kind (kids n)) (mapv :kind (:inner n)))))
         (doseq [k (kids n)]
           (case (:kind k)
             "AccessSpecDecl" (reset! access (keyword (:access k)))
@@ -791,7 +790,6 @@
                       [_ target] (re-find #"using\s+(?:typename\s+)?([^;]+);?\s*$" (or t ""))
                       parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
                       es (lookup-qualified scope parts (str/starts-with? (str/trim target) "::"))]
-                  (when (System/getenv "CPP_USING_TRACE") (binding [*out* *err*] (println "using" (pr-str t) parts (pr-str (map :e es)))))
                   (doseq [e es] (enter! scope (last parts) (assoc e :pos (long (or (:_b n) 0))))))
     ("EmptyDecl" "StaticAssertDecl" "AccessSpecDecl" "FriendDecl") nil
     (if (str/ends-with? (str (:kind n)) "Attr") nil (fail :decl "declaration " (:kind n))))))
@@ -1403,7 +1401,17 @@
       (let [l (first args)]
         (if (aggregate? (abi/unq t))
           (init-for t l ctx :list)
-          (if (empty? (:items l)) (default-ctor-init id true) (class-init t (:items l) ctx :direct))))
+          (if (empty? (:items l))
+            (default-ctor-init id true)
+            (do
+              ;; ([over.match.list]/1: a class's initializer-list constructors first; std::initializer_list is not
+              ;; built yet, so refused rather than another constructor chosen: G4, std::vector<int> v{1, 2})
+              (when (some #(let [p0 (first (:ps (:ty (fnd %))))
+                                 c (abi/unq (abi/non-ref (or p0 abi/void)))]
+                             (and (abi/class? c) (= "initializer_list" (:name (abi/cls (:id c))))))
+                          (ctor-candidates id))
+                (fail :init "an initializer-list constructor (std::initializer_list)"))
+              (class-init t (:items l) ctx :direct)))))
       (and (empty? args)) (default-ctor-init id (= style :value))
       :else
       (let [fid (try (resolve-overload (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)] (h id args))) args nil)
@@ -1886,7 +1894,6 @@
                       (when-not (and (= 1 (count as)) (abi/ptr? (abi/unq (:ty (rv (first as))))))
                         (fail :new "a placement new other than new (void*) T"))
                       (convert-scalar (rv (first as)) (abi/ptr abi/void) false)))
-        _ (when (System/getenv "CPP_NEW_TRACE") (binding [*out* *err*] (println "new-expr kids:" (mapv :kind ks) (mapv #(mapv :kind (kids %)) ks))))
         init (cond
                (or (nil? initn) nexpr) (init-for et nil ctx :default)
                ;; (its pack expansions spliced: new T(std::forward<Args>(args)...), G4)

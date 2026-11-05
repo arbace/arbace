@@ -679,3 +679,173 @@ Provenance: the layout and the vtable code were read in `clang/lib/AST/RecordLay
 `LayoutBase`, `LayoutField`) and `clang/lib/AST/VTableBuilder.cpp` (`AddMethods`, `ComputeReturnAdjustmentBaseOffset`,
 `ComputeReturnAdjustment`) and `ItaniumMangle.cpp` (`mangleThunk`) of llvm-project 23.1.4 (the pinned tarball); the code
 is a reimplementation of their rules in Arbace's structures, not a port of their text (P6, P9 as built).
+
+## G4. The headers (branch `cpp-g4`, 2026-11-05)
+
+Status: a first slice of G4, built on `cpp-g2fix` (G1-G3 with G2's fixes; P1-P14 decided), for the user's acceptance. P13
+(b) first, then the headers in P5's order: `<cstdio>`, `<utility>` (`std::move`, `std::forward`, `std::swap`, `std::pair`,
+`std::make_pair`) and `<type_traits>`' common traits by our route at all three levels; `<vector>` (`std::vector<int>`:
+`push_back`, `size`, `operator[]`, `back`, iteration) and `<string>` (`std::string` from a literal, `+=`, `c_str`) at the
+run and native levels, their names differing by the always-inline functions clang inlines at `-O0` (G4.5, P16);
+`<memory>`'s `std::unique_ptr` not yet (inheriting constructors). libstdc++ stays unported: its headers (15.2.0,
+`/usr/include/c++/15.2.0`) are parsed and analyzed as the program's own text is.
+
+Contents: G4.1 P13: the written name in the tree · G4.2 The headers parsed in full · G4.3 What the headers asked of the
+analysis · G4.4 The samples and the numbers · G4.5 What is not done · G4.6 The staged plan · G4.7 Proposed.
+
+### G4.1 P13 (b): the written name in the tree
+
+The native parser's `DeclRefExpr` and `MemberExpr` keep the name as written (`arbace.repr.cpp.parse/written-name`):
+`:explicitTemplateArgs` (each explicit template argument's text, as clang's `DeclRefExpr::template_arguments` holds
+them), `:qualifier` (the nested-name-specifier's parts, each with its arguments: `["ns" "Box<int>"]`) and
+`:globalQualifier` (a leading `::`), with `:_wn` marking a node that has them. `arbace.cpp.sema` reads them instead of
+the main file's text: a name's explicit arguments (`written-targs`, for `f<int>(x)`, `v<int>`, `o.as<double>()`), a
+reference's qualifier (`ref-qualifier`), a member access's (`o.A<int>::f`) and a call's qualification. The converter
+does not read the new fields, so the forms are unchanged: `bin/repr-cpp native-check samples` is 9 of 9 the same, 68 of
+68 items, after the change and at the branch's head.
+
+The other readings of a node's text (a declaration's qualifier before its name, `using` declarations, a lambda's
+captures, a partial specialization's arguments) are now of the node's own file (`sema/text-of`: the main file's text,
+or a header's read once, its comments blanked so that the offsets stay), so they work in headers too; a macro token's
+location is its expansion's.
+
+### G4.2 The headers parsed in full
+
+`arbace.repr.cpp.parse/*full-headers*` (the code generator's mode; `arbace.cpp.codegen/gen-file` binds it,
+`CPP_FULL_HEADERS=0` turns it off): the headers' tokens are parsed as the main file's are (bodies, initializers,
+default arguments), no skim and so no skim cache, and their nodes are given to the analysis with the main file's. A
+header construct the parser cannot read is dropped (a declaration) or kept as a `NativeDecline` statement (in a body)
+without counting as the main file's declines (`CPP_HDR_TRACE=1` prints each with its file and offset). The converter's
+mode is unchanged (the headers skimmed for their names).
+
+The analysis takes the header nodes as the program's (`sema/header-node?`: a node whose file is a header's path):
+
+- a header declaration the analysis refuses is dropped, not the program (`declare-node!`; a use of it fails later as
+  an unknown name; `CPP_HDR_TRACE=1` prints each drop and why); on `<utility>` 66 of its declarations are dropped
+  today (variable template partial specializations, `<compare>`'s corners, conversion function templates), 188 with
+  `<vector>`, 463 with `<memory>`;
+- a header's function definition, a header class's implicit and defaulted members, a header's explicit
+  specialization of a member and a header's variable definition are defined only when used (`:lazy`, `:pending-def`:
+  clang emits an inline function or an inline variable only when odr-used); an implicit member of a header class
+  whose subobjects' members are not viable is deleted ([class.copy.ctor]/10), not refused;
+- `<typeinfo>`'s own `std::type_info` replaces the prelude of G2 when the headers are parsed;
+- the C library's functions are the headers' declarations (`extern "C"` in `<stdio.h>`), not the skim's entities.
+
+The traces for the work on headers: `CPP_HDR_TRACE=1` (the parser's declines and the analysis's drops in headers, the
+function whose body failed, an ambiguous call's candidates), `CPP_TMPL_TRACE=1` (templates and constructor templates
+that drop out, constraints not satisfied, decltype operands left dependent), `CPP_FAIL_STACK=TEXT` and
+`CPP_NC_STACK=1` (the stack of a refusal whose message contains TEXT, of a constant evaluation's failure).
+
+On the 128 samples of `test/cpp/codegen` the full parse costs little: generate and lower 119 s against G3's 111 s (the
+headers are `<cstdio>` and `<typeinfo>`); `<utility>` takes about 15 s to parse and analyze, `<memory>` about 50 s.
+
+### G4.3 What the headers asked of the analysis
+
+Each in the general form the standard gives, found by the samples on libstdc++ 15.2.0 at `-std=c++23`:
+
+| what | where | as built |
+|---|---|---|
+| `decltype(e)` ([dcl.type.decltype]) | `__and_`/`__or_`'s bases `decltype(__detail::__and_fn<_Bn...>(0))` | the parser keeps each operand it parses (`:decltypes` of the unit, by its text); sema analyzes it where the type is resolved (unevaluated) and takes the declared type of an id-expression or member access, else `T&`/`T&&`/`T` by the value category |
+| the type-trait builtins (47 of G3.6 and the ones `<type_traits>` uses under `__has_builtin`) | `__bool_constant<__is_same(_Tp, _Up)>`, `using type = __remove_cv(_Tp);` | `arbace.cpp.template`'s table: 61 value traits (`__is_same`, `__is_class`, `__is_constructible`, `__is_convertible`, `__is_trivially_copyable`, `__is_nothrow_constructible`, ...) and 13 transform traits (`__remove_cv`, `__remove_reference`, `__remove_cvref`, `__decay`, `__add_pointer`, `__add_lvalue_reference`, `__underlying_type`, ...), written from [meta]'s definitions with clang's `SemaTypeTraits.cpp` as the model; constructibility and convertibility asked of the analysis (an initialization of `std::declval`'s expressions, the implicit conversion sequence), the nothrow ones by the called functions' exception specifications; dependent in a signature |
+| a functional cast in a constant (`bool(_Bn::value)`) and a pack in a member's qualifier (`__enable_if_t<bool(_Bn::value)>...`) | `__and_fn` | `const-form`, `expand-type-pack` |
+| a dependent template-id's defaults | `enable_if<C>::type` in a signature | completed in a scope binding the dependent arguments |
+| functionally equivalent redeclarations ([temp.over.link]/5) | `<type_traits>`' `_Require<...> swap(_Tp&, _Tp&)` and `<bits/move.h>`'s `typename enable_if<...>::type swap(...)` | one template when the signatures with the templates' own parameters are equal |
+| requires-clauses (P14 (b), the minimum) | `std::pair`'s constructors | the parser keeps a template head's requires-clause (`:requiresClause` on the template node) and a trailing one (`:trailingRequiresClause` on the function) as expression nodes in full-header mode (a requires-expression inside one not yet: the clause is then skipped as before); a function template's specialization and a class specialization's member whose constraint evaluates false (a constant expression after substitution, G2's constant evaluation, a failure not satisfied) are not candidates |
+| `noexcept(e)` ([except.spec]/2) | `swap`'s `_GLIBCXX_NOEXCEPT_IF(...)` | evaluated where the function is declared; not noexcept when it cannot be |
+| `if consteval` ([stmt.if]/4) | `std::__is_constant_evaluated` | the branch of a context not constant-evaluated |
+| the library functions clang builds in (Builtins.td's `LIBBUILTIN`: `std::move`, `forward`, `move_if_noexcept`, `as_const`, `forward_like`, `addressof`, `__addressof`) | everywhere | the call folded to its argument (a cast, an address), no function emitted, as clang's CodeGen does at `-O0`; `std::__is_constant_evaluated()` (always_inline, which clang inlines at `-O0`) folded to false |
+| a template-id after a qualifier in a template's body (`ns::X<T>::v`) | `std::is_integral<T>::value` | its arguments resolved where the name is written (a G3 bug, also outside headers) |
+| `__builtin_va_list`, GNU attributes in a type's spelling | `<stdio.h>`'s `vprintf`, `__attribute__((noreturn))` | x86-64's `__va_list_tag[1]`; the attributes left out of the type |
+| mangling | `swap`'s `enable_if<...>` | `::std::X<...>` as `St X I...E` in a dependent template-id; an unresolved `sr` name as written (no qualifier, a pack's elements one by one) |
+| concepts ([temp.concept]) and requires-expressions ([expr.prim.req]) | `iterator_traits<_Tp*>`'s `requires is_object_v<_Tp>`, `construct_at`'s `requires { ::new((void*)0) _Tp(std::declval<_Args>()...); }`, `__iterator_traits`' concept-ids | the parser keeps a concept's constraint expression (`:constraintExpr`) and a requires-expression's parameters and requirements (simple, type, compound, nested) in full-header mode; a concept-id is its constraint's satisfaction for its arguments, a requires-expression true when each requirement analyzes (a compound one's return-type requirement not checked) |
+| constrained partial specializations, their redeclarations, SFINAE in their arguments ([temp.spec.partial.match]/2) | `iterator_traits<_Tp*>` declared then defined; `__is_allocator<_Alloc, __void_t<..., decltype(...)>>` | one partial specialization per argument list (its definition kept); after deduction its constraint checked and its arguments substituted again (a failure no match); a cv-qualified parameter (`allocator<const _Tp>`) matched by type |
+| a decltype operand that names a template's own parameters or function parameters | `-> decltype(make_move_iterator(__niter_base(__it.base())))`, `using _Dest = decltype(std::__niter_base(__result))` | a trailing return type resolved with the parameters in scope; an operand that does not analyze in a signature a dependent type, analyzed again at the specialization; a signature naming its own template refused inside (no recursion) |
+| deduced return types ([dcl.spec.auto.general]/11) | `auto __to_address(const _Ptr&)` | the callee's body analyzed at the call; `auto` mangled `Da` |
+| placement new ([new.delete.placement]) | `construct_at`'s `::new((void*)p) T(...)` | the reserved form `new (void*) T`: the object constructed at the argument, no operator new called, as clang's CodeGen does |
+| range-based for over a class ([stmt.ranged]/1) | `for (int x : v)` | `auto&& __range`, `begin()`/`end()` members, `!=`, `++`, `*` by overload resolution |
+| operator function templates (non-members by lookup and ADL, members) | `__normal_iterator`'s `operator==`/`operator-`, `ranges::iter_move`'s `operator()` | their specializations among the candidates; C++20's rewritten `!=` from `==` |
+| `operator->` of a class ([over.ref]) | `unique_ptr`'s | applied until a pointer |
+| inline namespaces ([namespace.def]/7) | `std::__cxx11::basic_string` | their members found in the enclosing namespace |
+| a class template's parameters' defaults on an earlier declaration ([temp.param]/12) | `basic_string` (defaults in `<stringfwd.h>`) | kept when the definition comes; a header declaration that named a specialization before it was defined (`typedef basic_string<char> string`, `char_traits<char>` defined later) declared again after the headers |
+| overloaded out-of-line member templates | `basic_string::_M_construct` for input and forward iterators | matched by their spellings with the parameters' names as positions |
+| using-declarations of dependent bases' members | `using std::__is_integer<_Tp>::__value;` | declared in the specialization; the parser's unresolved member expressions keep their names |
+| a defaulted default constructor's triviality ([class.default.ctor]/3) | `vector() = default` over `_Vector_impl`'s | non-trivial when a base's or member's is |
+| `noexcept(e)`, pseudo-destructor calls, `base()` mem-initializers, static_assert in blocks, a parameter's attributes, `__func__`/`__PRETTY_FUNCTION__` | `destroy_at<int>`, `_Vector_impl() : _Tp_alloc_type()` | as the standard says (`__PRETTY_FUNCTION__` approximated by the name: no run reads the headers' assertion strings) |
+| builtins | `__builtin_expect`, `__builtin_constant_p`, `__builtin_is_constant_evaluated`, `__builtin_unreachable`, `__builtin_addressof`, `__builtin_operator_new`/`delete`, `__builtin_{add,sub,mul}_overflow` | their values; the overflow ones' flag false (a divergence on overflow) |
+| the key function ([basic.def.odr], Itanium §5.2.3) | `std::exception`, `std::logic_error` | a header's dynamic class whose key function is not defined here: its vtable and type_info external, the runtime's |
+| the standard abbreviations (Itanium §5.1.8) | `std::allocator` | `Sa`, `Sb` |
+| mangling of constrained templates (clang 23) | `std::pair`'s constructor templates | `Q <expression> E` after the template arguments: operators, calls, unresolved names with their arguments, the template's own parameters by depth and index (`TL0__`); a requires-expression in it left out (the names then differ) |
+
+None of this is a port: the traits and the rest are written from the standard, clang's functions read as the model
+(P6 (a) outside templates and the ABI); libstdc++ is read as input, never copied.
+
+### G4.4 The samples and the numbers
+
+The eight samples `test/cpp/codegen/hdr-*.cpp` (each with a header comment saying what it exercises): `hdr-cstdio`
+(`printf`, `puts`, `snprintf` through `<cstdio>`'s `std::` and global names), `hdr-move` (`std::move`, `std::forward`),
+`hdr-swap` (`std::swap` of ints, an aggregate and a class with its own moves), `hdr-traits` (31 values of
+`<type_traits>`: `true_type`, `integral_constant`, `is_same`, `is_integral`, `is_pointer`, `is_class`, `remove_cv`,
+`remove_reference`, `decay`, `is_enum`, `is_union`, `is_base_of`, `is_polymorphic`, `is_convertible`,
+`is_constructible`, `add_pointer`, `conditional`, `is_reference`, `is_trivially_copyable`), `hdr-pair`
+(`std::pair`'s constrained constructors, `std::make_pair`), `hdr-vector` (`std::vector<int>`) and `hdr-string`
+(`std::string`).
+
+| check (2026-11-05, light) | result |
+|---|---|
+| `bin/repr-cpp native-check samples` after P13 and at the branch's head (the parser's new fields, its full-header mode off for the converter) | 9 of 9 the same, 68 of 68 items |
+| `bin/cppi codegen-check` over `test/cpp/codegen` (G1-G3's 123 samples, now through the headers parsed in full, and the eight `hdr-*`) | 128 of 130 pass all three levels; `hdr-vector` and `hdr-string` pass the run and native levels and are in `known.edn` (class `always-inline`); generate and lower 237-280 s (G3's 123 alone took about 2 minutes skimming); `known.edn` judged: 0 failing, gcc, clang and runs 12 s |
+| the samples that were on clang's route (`test/cpp/samples`, `test/cpp/runtime/samples`: 16 files, `bin/cppi codegen-check` with clang++ -std=c++23) | **5 of 16 pass all three levels** (G2's 2: `bitfields`, `vexing`; now also `auto`, `classes`, `uncaught`); generate and lower 760 s (`<iostream>` parsed in full in most) |
+
+The 11 others by their first refusal: `decls` and `layouts` have no `main` (the reference does not run); `p1-first`
+`std::vector<int> v{1, 2}` (its initializer-list constructor: `std::initializer_list` not built; refused since the last
+run, which chose another constructor and gave the wrong status); `io` and `hello` `<iostream>` (`std::cout` and the
+streams' classes, G5); `atomics` `std::atomic<int>::fetch_add` (`<atomic>`'s builtins); `threads` and
+`thread-throw` `<thread>` (`std::to_string`, `std::thread`'s invocation); `coroutine` `co_yield` (coroutines);
+`ctor-throw` an attribute in an expression (`NativeAttr`); `library` a construct the parser declines in the main
+file.
+
+### G4.5 What is not done
+
+- **Always-inline functions** (`__attribute__((__always_inline__))`, libstdc++'s `_GLIBCXX_ALWAYS_INLINE` on
+  `__normal_iterator`'s operators, `allocator`'s members, `char_traits`' and the like): clang's AlwaysInliner inlines
+  them even at `-O0` and emits none, and the functions only they called are then unused and not emitted either; we
+  emit them, so `hdr-vector` and `hdr-string` pass the run and native levels and differ in their names (their class
+  `always-inline` in `known.edn`; P16). Only `std::__is_constant_evaluated` is folded.
+- **`<memory>`'s `std::unique_ptr`**: `__uniq_ptr_data` inherits `__uniq_ptr_impl`'s constructors (`using
+  __uniq_ptr_impl<_Tp, _Dp>::__uniq_ptr_impl;`); inheriting constructors ([class.inhctor.init], clang's `CI2` mangling)
+  are not built yet.
+- A requires-expression in a constrained template's mangling (`rq ... E`: `construct_at`'s), the constrained
+  parameters' mangling (`Tk`), a compound requirement's return-type requirement, `explicit(bool)` (read as not
+  explicit), the subsumption ordering of constrained overloads (G3b).
+- The overflow builtins' flag (false: no wider arithmetic yet), `__PRETTY_FUNCTION__`'s text.
+- The parser's declines in the headers (`CPP_HDR_TRACE=1`: 12 on `<utility>`, 20 on `<vector>`, 28 on `<memory>`),
+  among them `__extension__ template<>`, `_Tp(-1) < _Tp(0)` in a template argument list, `__make_integer_seq` and
+  `__type_pack_element` (builtin templates), out-of-line nested classes' scope (`class locale::_Impl` naming
+  `facet`), constrained template parameters (`template<__tuple_like _Tp>`); and the analysis's drops (G4.2).
+- `resolve-uses` (the defaulted members' exception specifications the converter writes) is off in full-header mode:
+  the headers' classes make its graph cyclic.
+
+### G4.6 The staged plan
+
+| stage | what | target | estimate |
+|---|---|---|---|
+| **G4a** (this branch) | G4.1-G4.3 | `<cstdio>`, `<utility>`, `<type_traits>` at three levels; `<vector>`, `<string>` at two | done |
+| **G4b** | always-inline functions inlined as clang does at `-O0` (P16); inheriting constructors; the `rq` mangling; the header declines of G4.5; a cache of the full parse (P15) | `hdr-vector`, `hdr-string` at three levels; `<memory>`'s `unique_ptr`; `<algorithm>`, `<cstring>` | 2-3 |
+| **G4c** | `std::initializer_list`, `<atomic>`'s builtins, `<iostream>`'s classes (with G5), coroutines, threads; the recorded `samples` list | the 9 samples with a `main` still on clang's route (G4.4) | 2-3 |
+
+### G4.7 Proposed
+
+**P15. The headers' cost.** The full parse has no cache: `<memory>`'s headers take about 50 s a file before the
+analysis. (a) As built: parse them each time (the samples' light runs). (b) A cache of the full parse's nodes and
+state keyed as the skim cache is (the tokens' digest, the parser's sources), the nodes written with the state's table;
+costs the nodes' size on disk (several MB a header set) and the skim cache's code extended to nodes. (c) Parse a
+header's body only when the analysis needs it (the plan's first wording: the skim's ranges kept, a definition
+re-parsed on use); costs a second parser entry point and the parser's state at each range, but parses only what is
+used. **Recommended: (b)**, in G4b; (c) not: the analysis needs most of `<type_traits>` anyway.
+
+**P16. Always-inline functions.** (a) Inline them in our code generator as clang's AlwaysInliner does at `-O0`
+(their bodies at the call, their names not emitted); costs an inliner over our LLVM forms (renaming, the return as a
+branch). (b) Emit them `internal` and let the names level ignore internal always-inline definitions; costs a judge
+that is no longer "every name ours is clang's". (c) Fold the few the headers use on hot paths (as `__is_constant_evaluated`
+now). **Recommended: (a)**, in G4b: libstdc++ marks its iterators' and allocators' accessors always-inline under
+`_GLIBCXX_ALWAYS_INLINE`; `hdr-vector` and `hdr-string` need it for their names.
