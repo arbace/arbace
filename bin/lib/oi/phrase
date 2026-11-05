@@ -3,18 +3,41 @@
 # host's compiler as the unit Top_N of WORKDIR, the earlier units opened: first as an expression (let it__ =
 # (PHRASE), printed "- : T = V"), else as structure items. Prints "ok" (WORKDIR/top_N.ae the Lambda dump,
 # WORKDIR/top_N.typed the typed dump), or the compiler's error.
+# ORS12 (doc/ORACLE-RECORDS-SURVEY.md, "As built: OCaml"): the answer is read from the committed record test/ocaml/records/repl/ (KEY.status,
+# KEY.ae, KEY.typed, the manifest test/ocaml/records/repl.tsv; KEY the digest of the helper, the opened units and the phrase) unless OI_LIVE=1, which runs ocamlc
+# and ocdump as before and, with OI_REPL_RECORD_DIR, keeps each phrase's answer there (bin/oi repl-check --record)
 set -uo pipefail
 w=$1 n=$2
-ocd=$(cd "$(dirname "$0")/../../.." && pwd)/.tmp/ocdump/ocdump
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+ocd=$root/.tmp/ocdump/ocdump
 cat > "$w/phrase.txt"
 opens=""
-for f in $(ls "$w" | grep -E '^top_[0-9]+\.cmi$' | sort -t_ -k2 -n); do m=${f%.cmi}; opens="$opens open! ${m^} "; done
+for f in $(ls "$w" | grep -E '^top_[0-9]+\.ae$' | sort -t_ -k2 -n); do m=${f%.ae}; opens="$opens open! ${m^} "; done
+key=$({ cat "$root/tools/ocdump/ocdump.ml" "$root/tools/ocdump/OCAML_VERSION"; echo "$opens"; cat "$w/phrase.txt"; } | sha256sum | cut -c1-32)
+rec=$root/test/ocaml/records/repl
+if [ -z "${OI_LIVE:-}" ]; then
+  man=$root/test/ocaml/records/repl.tsv
+  have() { awk -F'\t' -v id="$1" '!/^#/ && $1 == id { print $3 }' "$man" 2>/dev/null | head -1; }
+  want=$(have "$key.status")
+  if [ -z "$want" ] || [ ! -f "$rec/$key.status" ]; then echo "UNRECORDED phrase $n ($key): bin/oi repl-check --record, by hand on a host with ocamlc"; exit 0; fi
+  if [ "$(sha256sum < "$rec/$key.status" | cut -c1-64)" != "$want" ]; then echo "REFUSED phrase $n ($key): $rec/$key.status differs from the manifest"; exit 0; fi
+  if [ "$(head -c 2 "$rec/$key.status")" = ok ]; then
+    for e in ae typed; do
+      [ "$(sha256sum < "$rec/$key.$e" | cut -c1-64)" = "$(have "$key.$e")" ] || { echo "REFUSED phrase $n ($key): $rec/$key.$e differs from the manifest"; exit 0; }
+    done
+    cp "$rec/$key.ae" "$w/top_$n.ae"; cp "$rec/$key.typed" "$w/top_$n.typed"
+  fi
+  cat "$rec/$key.status"; exit 0
+fi
 try() {
   { echo "$opens"; cat; } > "$w/top_$n.ml"
   (cd "$w" && ocamlc -c -w -a -I . "top_$n.ml") > "$w/err.txt" 2>&1
 }
+keep() { [ -z "${OI_REPL_RECORD_DIR:-}" ] || cp "$1" "$OI_REPL_RECORD_DIR/$key.$2"; }
 if ! { echo "let it__ = ("; cat "$w/phrase.txt"; echo ")"; } | try; then
-  if ! cat "$w/phrase.txt" | try; then cat "$w/err.txt"; rm -f "$w/top_$n.ml"; exit 0; fi
+  if ! cat "$w/phrase.txt" | try; then cat "$w/err.txt"; rm -f "$w/top_$n.ml"; [ -z "${OI_REPL_RECORD_DIR:-}" ] || cp "$w/err.txt" "$OI_REPL_RECORD_DIR/$key.status"; exit 0; fi
 fi
 (cd "$w" && "$ocd" --mode types -I . --prefix "top_$n" "top_$n.ml" > "top_$n.typed" && "$ocd" --mode lambda --simplify -I . --prefix "top_$n" "top_$n.ml" > "top_$n.ae")
+keep "$w/top_$n.ae" ae; keep "$w/top_$n.typed" typed
+if [ -n "${OI_REPL_RECORD_DIR:-}" ]; then echo ok > "$OI_REPL_RECORD_DIR/$key.status"; fi
 echo ok

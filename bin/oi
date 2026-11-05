@@ -87,6 +87,8 @@ RESULTS=$root/test/ocaml/check-oi.edn
 CLASSES=$root/test/ocaml/divergences.edn
 GO=${ARBACE_GOROOT:-/root/tamago-go}/bin/go
 JOBS=${OI_JOBS:-3}
+# ORS12 (doc/ORACLE-RECORDS-SURVEY.md, "As built: OCaml"): the Lambda the checks ask of ocamlc and ocdump comes from the records unless OI_LIVE=1
+. "$root/bin/lib/oi/records.bash"
 TIMEOUT=${OI_TIMEOUT:-120}
 export GOMEMLIMIT=${OI_GOMEMLIMIT:-400MiB}
 # the light tier: one thread of Go a program (JOBS programs at once)
@@ -128,6 +130,7 @@ arbace_exe() {
 }
 
 need_tree() {
+  [ -n "${OI_LIVE:-}" ] || { "$root/bin/repr-ocaml" corpus fetch > "$OI_DIR/fetch.log" 2>&1 || { cat "$OI_DIR/fetch.log" >&2; die "corpus fetch"; }; return 0; }
   "$root/bin/repr-ocaml" ocdump-build > "$OI_DIR/ocdump-build.log" 2>&1 || { cat "$OI_DIR/ocdump-build.log" >&2; die "ocdump"; }
   "$root/bin/repr-ocaml" corpus fetch > "$OI_DIR/fetch.log" 2>&1 || { cat "$OI_DIR/fetch.log" >&2; die "corpus fetch"; }
 }
@@ -148,6 +151,8 @@ stdlib_flags() {
 # a part of a key that cannot be had fails the key (re-review 042's finding 4: a failing part ended the group early and the key was the hash of
 # what came before, so a different limit or corpus gave the same key)
 stdlib_key() {
+  # from the records (no ocdump, no ocamlc): the pack's identity
+  [ -n "${OI_LIVE:-}" ] || { echo "pack $(oracle_pin_sha "$OIR_STDLIB")"; return 0; }
   local k s
   k=$(cat "$OCDUMP_KEY") || { echo "oi: key: cannot read ocdump's key $OCDUMP_KEY" >&2; return 1; }
   s=$(sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli") || { echo "oi: key: the stdlib's sources cannot be read" >&2; return 1; }
@@ -158,6 +163,10 @@ cmd_stdlib() {
   mkdir -p "$OI_DIR"; need_tree
   local key; key=$(stdlib_key)
   if [ -f "$LIB/key" ] && [ "$(cat "$LIB/key")" = "$key" ]; then echo "oi: stdlib up to date ($LIB)"; return 0; fi
+  if [ -z "${OI_LIVE:-}" ]; then
+    oir_stdlib_get || die "stdlib: the record is not usable (above)"
+    echo "oi: stdlib: $(wc -l < "$LIB/order.txt") units from the pack $(oracle_pin_name "$OIR_STDLIB"), $(du -sh "$LIB" | cut -f1) of Lambda, in $LIB"; return 0
+  fi
   local b=$OI_DIR/stdlib-build
   rm -rf "$b" "$LIB" "$TESTLIB"; mkdir -p "$b" "$LIB" "$TESTLIB"
   cp "$TOP"/stdlib/*.ml "$TOP"/stdlib/*.mli "$TOP"/stdlib/expand_module_aliases.awk "$b/"
@@ -272,6 +281,30 @@ cmd_run() {
 # toplevel's (test/ocaml/oi/session.ref, recorded by ocaml -noprompt -nopromptcont, the banner left out)
 cmd_repl_check() {
   local out=$OI_DIR/session.out
+  case "${1:-}" in
+    --record|--verify-records)
+      # the session run live (OI_LIVE=1), each phrase's answer kept; --record writes test/ocaml/records/repl/ and its manifest, --verify-records
+      # compares the live answers with them byte for byte (the oracle tier's)
+      local d=$OI_DIR/repl-record f nd=0 n=0 man=$OIR_DIR/repl.tsv
+      export OI_LIVE=1; need_tree; cmd_stdlib > "$OI_DIR/stdlib.log"
+      rm -rf "$d"; mkdir -p "$d"
+      OI_REPL_RECORD_DIR=$d "$0" repl < "$root/test/ocaml/oi/session.ml" > "$out" 2>&1 || true
+      cmp -s "$out" "$root/test/ocaml/oi/session.ref" || die "repl-check: the live output differs from session.ref: nothing recorded"
+      if [ "$1" = --record ]; then
+        rm -rf "$OIR_REPL"; mkdir -p "$OIR_REPL"; cp "$d/"* "$OIR_REPL/"
+        { echo "# committed record repl: ID<TAB>KEY<TAB>SHA256<TAB>SIZE, the file test/ocaml/records/repl/ID (doc/ORACLE-RECORDS-SURVEY.md, As built: OCaml)"
+          echo "# host: :ocaml $(oracle_host_id ocaml) ($(oracle_host_version ocaml))"
+          echo "# made by: bin/oi repl-check --record"; echo "# date: $(date -u +%Y-%m-%d)"
+          for f in $(cd "$OIR_REPL" && ls | LC_ALL=C sort); do
+            printf '%s\t%s\t%s\t%s\n' "$f" "${f%%.*}" "$(sha256sum < "$OIR_REPL/$f" | cut -c1-64)" "$(stat -c %s "$OIR_REPL/$f")"
+          done; } > "$man"
+        echo "oi: repl-check: recorded $(grep -vc '^#' "$man") files, $man"
+      else
+        for f in $(cd "$d" && ls | LC_ALL=C sort); do n=$((n + 1)); cmp -s "$d/$f" "$OIR_REPL/$f" && echo "verify: $f: equal" || { echo "verify: $f: DIFFERS"; nd=$((nd + 1)); }; done
+        oracle_verdict ocaml "$man" "$nd" "$n"
+      fi
+      return ;;
+  esac
   "$0" repl < "$root/test/ocaml/oi/session.ml" > "$out" 2>&1 || true
   if cmp -s "$out" "$root/test/ocaml/oi/session.ref"; then
     echo "oi: repl-check: $(grep -c ';;' "$root/test/ocaml/oi/session.ml") phrases, the output equal to the ocaml toplevel's"
@@ -370,7 +403,7 @@ oi_one() {
   [ -n "$incs" ] && units="$TESTLIB/Testing.ae"
   local I=""; [ -n "$incs" ] && I="-I $TESTLIB"
   cp "$src" "$d/"
-  (cd "$d" && "$OCD" --mode lambda --simplify $flags $I --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae")
+  lambda_prog "$id" "$flags" "$incs" "$d" "$u"
   if grep -q '^(ocaml/error' "$d/$u.ae"; then
     printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(head -c 200 "$d/$u.ae" | tr '\n\t' '  ')"; return
   fi
@@ -420,13 +453,73 @@ cmd_check() {
   opts "$@"
   if [ "$AOT" = 1 ]; then cmd_check_aot; return; fi
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; cmd_build
-  export -f oi_one limited_cpu; export OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT
+  export -f oi_one limited_cpu; export OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root TOP TMPDIR
+  [ -n "${OI_LIVE:-}" ] || oracle_unpack "$OIR_PROGS" > "$TMPDIR/oi-unpack.out" || die "the programs' Lambda pack is not usable"
   local out=$OI_DIR/check.tsv
   selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0 }' | xargs -0 -n 5 -P "$JOBS" bash -c 'oi_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; oi_key "$OI_DIR/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
   [ -n "$ONLY" ] && mode=$mode-only
   "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "$mode" "$out" "$OI_DIR/corpus.tsv" "$REFS" "$RESULTS" "$CLASSES"
+}
+
+# stdlib --record: the stdlib built and dumped live (OI_LIVE=1) and packed, members UNIT.ae, order.txt, Testing.ae, one key
+cmd_record_stdlib() {
+  export OI_LIVE=1; cmd_stdlib
+  local w=$OI_DIR/record-stdlib ids k; rm -rf "$w"; mkdir -p "$w/ocaml-lambda-stdlib"; ids=$w/ids.tsv; k=$(oir_stdlib_key)
+  cp "$LIB/"*.ae "$LIB/order.txt" "$w/ocaml-lambda-stdlib/"; cp "$TESTLIB/Testing.ae" "$w/ocaml-lambda-stdlib/"
+  (cd "$w/ocaml-lambda-stdlib" && ls) | awk -v k="$k" '{ printf "%s\t%s\n", $0, k }' > "$ids"
+  oracle_make "$OIR_STDLIB" "$w" "$ids" "bin/oi stdlib --record" ocaml
+}
+# stdlib --verify: the stdlib built again live and compared with the pack, file by file
+cmd_verify_stdlib() {
+  local u nd=0 f n=0; u=$(oracle_unpack "$OIR_STDLIB") || die "verify: the pack is not usable"
+  export OI_LIVE=1; rm -f "$LIB/key"; cmd_stdlib > "$OI_DIR/stdlib.log"
+  for f in "$LIB/"*.ae; do n=$((n + 1)); b=$(basename "$f"); cmp -s "$f" "$u/ocaml-lambda-stdlib/$b" || { echo "verify: $b DIFFERS"; nd=$((nd + 1)); }; done
+  cmp -s "$TESTLIB/Testing.ae" "$u/ocaml-lambda-stdlib/Testing.ae" || { echo "verify: Testing.ae DIFFERS"; nd=$((nd + 1)); }
+  cmp -s "$LIB/order.txt" "$u/ocaml-lambda-stdlib/order.txt" || { echo "verify: order.txt DIFFERS"; nd=$((nd + 1)); }
+  oracle_verdict ocaml "$(oracle_manifest "$OIR_STDLIB")" "$nd" "$((n + 1))"
+}
+
+# ---- the records (ORS12): bin/oi record-lambda [--only-list FILE | --only RE] | stdlib --record | verify-lambda [--sample N]
+# record-lambda: the selected run programs' Lambda dumped live (OI_LIVE=1: ocamlc and ocdump) into the pack ocaml-lambda-progs, the programs
+# the pack already holds and the selection does not name kept; by hand, on a host with ocamlc (ORS5 (a))
+cmd_record_lambda() {
+  opts "$@"; export OI_LIVE=1
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"
+  local w=$OI_DIR/record-lambda ids id kind flags incs rest n=0
+  rm -rf "$w"; mkdir -p "$w/ocaml-lambda-progs"; ids=$w/ids.tsv; : > "$ids"
+  while IFS=$'\t' read -r id kind flags incs rest; do
+    [ "$kind" = run ] || continue
+    local base u d; base=$(basename "$id"); u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
+    d=$w/work/$id; mkdir -p "$d" "$w/ocaml-lambda-progs/$(dirname "$id")"; cp "$TESTS/$id.ml" "$d/"
+    lambda_prog "$id" "$flags" "$incs" "$d" "$u"
+    cp "$d/$u.ae" "$w/ocaml-lambda-progs/$id.ae"
+    printf '%s.ae\t%s\n' "$id" "$(oir_prog_key "$id" "$flags" "$incs")" >> "$ids"; n=$((n + 1))
+  done < <(selected)
+  [ "$n" -gt 0 ] || die "record-lambda: no program selected"
+  oir_progs_make "$w" "$ids" "bin/oi record-lambda ${ONLY:+--only $ONLY}"
+}
+
+# verify-lambda [--sample N]: the pack's programs' Lambda dumped again live and compared byte for byte (the oracle tier's: ORS6 (a), a moved
+# toolchain reported, not failed)
+cmd_verify_lambda() {
+  local sample=0; [ "${1:-}" = --sample ] && sample=$2
+  export OI_LIVE=1
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"
+  local man; man=$(oracle_manifest "$OIR_PROGS"); [ -f "$man" ] || die "verify-lambda: nothing recorded"
+  local u; u=$(unset OI_LIVE; oracle_unpack "$OIR_PROGS") || die "verify-lambda: the pack is not usable"
+  local w=$OI_DIR/verify-lambda total=0 ndiff=0 id kind flags incs rest base uu d
+  rm -rf "$w"; mkdir -p "$w"
+  while IFS=$'\t' read -r id kind flags incs rest; do
+    [ "$kind" = run ] || continue
+    grep -q "^$id.ae	" "$man" || continue
+    [ "$sample" = 0 ] || [ "$total" -lt "$sample" ] || break
+    total=$((total + 1)); base=$(basename "$id"); uu=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
+    d=$w/$id; mkdir -p "$d"; cp "$TESTS/$id.ml" "$d/"; lambda_prog "$id" "$flags" "$incs" "$d" "$uu"
+    if cmp -s "$d/$uu.ae" "$u/ocaml-lambda-progs/$id.ae"; then echo "verify: $id: equal"; else echo "verify: $id: DIFFERS"; ndiff=$((ndiff + 1)); fi
+  done < "$OI_DIR/corpus.tsv"
+  oracle_verdict ocaml "$man" "$ndiff" "$total"
 }
 
 cmd_divergences() {
@@ -530,7 +623,7 @@ o2j_dump() {
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
   local I=""; [ -n "$incs" ] && I="-I $TESTLIB"
   cp "$src" "$d/"
-  (cd "$d" && "$OCD" --mode lambda --simplify $flags $I --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae" 2> "dump.log")
+  lambda_prog "$id" "$flags" "$incs" "$d" "$u"
   rm -f "$d/$base.cmi" "$d/$base.cmo"
 }
 
@@ -732,12 +825,14 @@ cmd=${1:-}
 [ -n "$cmd" ] || { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2; }
 shift
 case $cmd in
-  stdlib) cmd_stdlib ;;
+  stdlib) if [ "${1:-}" = --record ]; then cmd_record_stdlib; elif [ "${1:-}" = --verify ]; then cmd_verify_stdlib; else cmd_stdlib; fi ;;
+  record-lambda) cmd_record_lambda "$@" ;;
+  verify-lambda) cmd_verify_lambda "$@" ;;
   build) cmd_build ;;
   test) cmd_test ;;
   run) cmd_run "$@" ;;
   repl) cmd_repl ;;
-  repl-check) cmd_repl_check ;;
+  repl-check) cmd_repl_check "$@" ;;
   corpus) cmd_corpus ;;
   key) cmd_corpus > "$OI_DIR/corpus.log"; oi_key "$OI_DIR/corpus.tsv" ;;
   record-ref) cmd_record_ref "$@" ;;
