@@ -132,9 +132,9 @@
                    (refuse :type "the size of " (pr-str t)))
         :else (refuse :type "the size of " (pr-str t))))))
 
-(defn- container-bits ^long [^long n] (cond (<= n 8) 8 (<= n 16) 16 (<= n 32) 32 (<= n 64) 64 (<= n 128) 128 :else (refuse :wide-int "i" n)))
-(def ^:private utype {8 'unsigned-char 16 'unsigned-short 32 'unsigned 64 'unsigned-long 128 'unsigned-__int128})
-(def ^:private stype {8 'signed-char 16 'short 32 'int 64 'long 128 '__int128})
+(defn- container-bits ^long [^long n] (cond (<= n 8) 8 (<= n 16) 16 (<= n 32) 32 (<= n 64) 64 (<= n 128) 128 :else n)) ; LL5: above 128 bits the container is C's _BitInt(N), exactly N bits
+(defn- utype [b] (or ({8 'unsigned-char 16 'unsigned-short 32 'unsigned 64 'unsigned-long 128 'unsigned-__int128} b) (list 'unsigned-bit-int b)))
+(defn- stype [b] (or ({8 'signed-char 16 'short 32 'int 64 'long 128 '__int128} b) (list 'bit-int b)))
 (defn- wide-bits ^long [^long n] (max 32 (container-bits n)))
 
 (declare ctype)
@@ -194,6 +194,14 @@
 (defn- aggregate? [t] (let [t (if (named? t) t t)] (or (named? t) (and (seq? t) ('#{struct packed array vector} (first t))))))
 
 ;; ---------------------------------------------------------------------------------------------
+;; Vectors (LL5, doc/llvm/LLVM-CROP-SURVEY.md "As built: LL5"): a vector value is a C struct whose member `e` is the
+;; array of its lanes; every vector instruction is scalarized into one scalar operation a lane, on the lanes' C expressions.
+
+(defn- vec-type? [t] (let [t (resolve-type t)] (and (seq? t) (= (first t) 'vector))))
+(defn- vec-n ^long [t] (let [n (nth (resolve-type t) 1)] (if (integer? n) (long n) (refuse :vector "a scalable vector " (pr-str t)))))
+(defn- vec-et [t] (nth (resolve-type t) 2))
+
+;; ---------------------------------------------------------------------------------------------
 ;; Constants
 
 (defn- big [x] (biginteger x))
@@ -208,6 +216,7 @@
     (cond
       (<= c 32) (list 'lit 'unsigned (long u))
       (= c 64) (list 'lit 'unsigned-long (bigint u))
+      (> c 128) (list 'lit (list 'unsigned-bit-int c) (bigint u))
       (< (.compareTo u two64) 0) (list 'conv 'unsigned-__int128 (list 'lit 'unsigned-long (bigint u)))
       :else (list 'bit-or (list '<< (list 'conv 'unsigned-__int128 (list 'lit 'unsigned-long (bigint (.shiftRight u 64)))) 64)
                   (list 'lit 'unsigned-long (bigint (.mod u two64)))))))
@@ -303,16 +312,16 @@
 (defn- mask [e ^long w]
   (cond
     (#{8 16 32 64 128} w) e
-    (> w 128) (refuse :wide-int "i" w)
+    (> w 128) e ; a _BitInt(w) wraps at exactly w bits
     :else (list 'bit-and e (int-lit (.subtract (.shiftLeft BigInteger/ONE (int w)) BigInteger/ONE) (cond (<= w 32) 32 (<= w 64) 64 :else 128)))))
 
 (defn- store-bytes
   "An integer type's store size in bytes when it is smaller than its container's (i24: 3 of 4, i40: 5 of 8), else nil:
   LLVM's load and store of the type read and write those bytes only (review 007's finding 4)."
   [^long w]
-  (let [ss (quot (+ w 7) 8)] (when (< ss (quot (container-bits w) 8)) ss)))
+  (let [ss (quot (+ w 7) 8) cb (if (> w 128) (* 16 (quot (+ w 127) 128)) (quot (container-bits w) 8))] (when (< ss cb) ss)))
 
-(declare value gep-expr const-expr)
+(declare value gep-expr const-expr splat-value)
 
 (defn- global-ref
   "The address of a global as a void pointer."
@@ -353,6 +362,8 @@
         ('#{array vector c-string} (first v))
         (list 'compound-lit (ctype t) (apply list 'init elems))
         :else (apply list 'compound-lit (ctype t) elems)))
+    (and (seq? v) (= (first v) 'c-expr)) (second v)
+    (and (seq? v) (= (first v) 'splat)) (splat-value v t)
     (seq? v) (const-expr v t)
     :else (refuse :value "the value " (pr-str v))))
 
@@ -507,7 +518,7 @@
   (let [h (first x) [fl args] (split-flags (rest x))]
     (case h
       (add sub mul udiv sdiv urem srem shl lshr ashr and or xor fadd fsub fmul fdiv frem fneg) (first args)
-      (icmp fcmp) 'i1
+      (icmp fcmp) (if (vec-type? (first args)) (list 'vector (vec-n (first args)) 'i1) 'i1)
       (trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp ptrtoint inttoptr bitcast addrspacecast) (nth args 2)
       alloca 'ptr
       load (second x)
@@ -527,7 +538,7 @@
       va_arg (nth x 2)
       atomicrmw (first (nth x 3))
       cmpxchg (list 'struct (first (nth x 2)) 'i1)
-      shufflevector (refuse :vector "shufflevector")
+      shufflevector (list 'vector (vec-n (first (nth args 2))) (vec-et (first (first args))))
       (refuse :instruction "the result of " h))))
 
 (defn- opts [x] (apply hash-map (drop-while #(not (and (keyword? %) (#{:count :align :addrspace :atomic :syncscope :volatile :md :to :unwind
@@ -554,7 +565,7 @@
    "copysign" "copysign" "pow" "pow" "exp" "exp" "exp2" "exp2" "log" "log" "log2" "log2" "log10" "log10" "sin" "sin" "cos" "cos"
    "fma" "fma" "minnum" "fmin" "maxnum" "fmax" "roundeven" "roundeven" "ldexp" "ldexp" "tan" "tan"})
 
-(defn- intrinsic
+(defn- intrinsic*
   "The statements of an intrinsic call (`res`: its result's C variable or nil)."
   [^String nm args res rt]
   (let [a (fn [i] (let [x (nth args i)] (value (peek x) (first x))))
@@ -601,6 +612,18 @@
       (re-matches #"llvm\.frexp\.(f32|f64|f80)\.i32" nm)
       (let [sfx ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2))]
         [(list 'set! (list '.-f0 res) (list (symbol (str "__builtin_frexp" sfx)) (a 0) (list 'conv '(* int) (list 'addr (list '.-f1 res)))))])
+      ;; LL5: the counts of integers wider than 64 bits (but i128's, above) by 64-bit limbs
+      (and (re-matches #"llvm\.(ctpop|ctlz|cttz)\.i[0-9]+" nm) (> (long (w 0)) 64))
+      (let [wd (w 0)
+            x (uval (a 0) wd) nl (quot (+ wd 63) 64) cb (* 64 nl)
+            limb (fn [k] (list 'conv 'unsigned-long-long (list '>> x (* 64 k))))
+            e (case (nth parts 1)
+                "ctpop" (apply list '+ (map #(list '__builtin_popcountll (limb %)) (range nl)))
+                "ctlz" (reduce (fn [acc k] (list '? (list '!= (limb k) 0) (list '- (list '+ (* 64 (- nl 1 k)) (list '__builtin_clzll (limb k))) (- cb wd)) acc))
+                               wd (range nl))
+                "cttz" (reduce (fn [acc k] (list '? (list '!= (limb k) 0) (list '+ (* 64 k) (list '__builtin_ctzll (limb k))) acc))
+                               wd (reverse (range nl))))]
+        (set-res (list 'conv (ctype rt) e)))
       (re-matches #"llvm\.ctpop\..*" nm) (let [wd (w 0)] (when (> wd 64) (refuse :intrinsic nm)) (set-res (list '__builtin_popcountll (list 'conv 'unsigned-long-long (a 0)))))
       (re-matches #"llvm\.ctlz\..*" nm) (let [wd (w 0)] (when (> wd 64) (refuse :intrinsic nm))
                                           (set-res (list '? (list '== (a 0) 0) wd (list '- (list '__builtin_clzll (list 'conv 'unsigned-long-long (a 0))) (- 64 wd)))))
@@ -623,7 +646,7 @@
       (re-matches #"llvm\.([su])cmp\..*" nm)
       (let [wd (w 0) sgn (= "s" (subs nm 5 6)) v #(if sgn (sval (a %) wd) (uval (a %) wd))]
         (set-res (mask (list '- (list '> (v 0) (v 1)) (list '< (v 0) (v 1))) (int-bits rt))))
-      (re-matches #"llvm\.fsh[lr]\.i(8|16|32|64)" nm)
+      (re-matches #"llvm\.fsh[lr]\.i[0-9]+" nm)
       (let [wd (w 0) l (str/starts-with? (subs nm 5) "fshl")
             x (uval (a 0) wd) y (uval (a 1) wd) c (list '% (uval (a 2) wd) wd)]
         (set-res (mask (list '? (list '== c 0) (if l x y)
@@ -651,6 +674,147 @@
                    (when (nil? vv) (refuse :phi "a phi without the edge from " from))
                    (list 'set! (symbol (str r "$p")) (value (first vv) t)))))
           (list 'goto (label-kw to)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Vectors, LL5: the lanes' operations (a separate section on purpose: C++'s branches share this file)
+
+(defn- lane
+  "The C lvalue of lane i of the vector expression e."
+  [e i] (list 'aget (list '.-e e) i))
+
+(defn- lanes [t] (range (vec-n t)))
+
+(defn icmp-expr
+  "An integer or pointer comparison's C expression on operands a and b (C expressions) of the scalar type t."
+  [pr t va vb]
+  (let [w (int-bits t)
+        [a b] (cond w [va vb] (ptr-type? t) [(list 'conv 'unsigned-long va) (list 'conv 'unsigned-long vb)] :else (refuse :vector "icmp of " (pr-str t)))
+        u #(if w (uval % w) %) s #(if w (sval % w) (list 'conv 'long %))
+        op ({:eq '== :ne '!= :ugt '> :uge '>= :ult '< :ule '<= :sgt '> :sge '>= :slt '< :sle '<=} pr)
+        sg (#{:sgt :sge :slt :sle} pr)]
+    (list op (if sg (s a) (u a)) (if sg (s b) (u b)))))
+
+(defn fcmp-expr
+  "A floating comparison's C expression on operands a and b (C expressions) of the scalar type t."
+  [pr t a b]
+  (when-not (float-type? t) (refuse :vector "fcmp of " (pr-str t)))
+  (let [ord (list 'and (list '== a a) (list '== b b))
+        uno (list 'or (list '!= a a) (list '!= b b))]
+    (case pr
+      :false 0 :true 1 :oeq (list '== a b) :ogt (list '> a b) :oge (list '>= a b) :olt (list '< a b) :ole (list '<= a b)
+      :one (list 'or (list '< a b) (list '> a b)) :ord ord :uno uno
+      :ueq (list 'not (list 'or (list '< a b) (list '> a b))) :ugt (list 'not (list '<= a b)) :uge (list 'not (list '< a b))
+      :ult (list 'not (list '>= a b)) :ule (list 'not (list '> a b)) :une (list '!= a b))))
+
+(defn splat-value
+  "A splat constant `(splat [et v])` of the vector type t."
+  [v t]
+  (let [[et ev] (second v)]
+    (list 'compound-lit (ctype t) (apply list 'init (repeat (vec-n t) (value ev et))))))
+
+(defn- shuffle-indices
+  "The mask's lane indices (nil: an undefined lane, taken as lane 0) of a shufflevector mask value over n lanes."
+  [mv n]
+  (cond
+    (symbol? mv) (vec (repeat n 0))
+    (= (first mv) 'splat) (vec (repeat n (let [k (second (second mv))] (if (integer? k) k 0))))
+    :else (vec (for [[_ k] (rest mv)] (if (integer? k) k 0)))))
+
+(defn- bitcast-bytes
+  "A bitcast through memory (little endian): the bytes of e copied into a variable of the destination type."
+  [e t1 t2]
+  (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$a {:tag (ctype t1)}) e) (list 'c/var (with-meta 'cx$u {:tag (ctype t2)}))]
+                         (list '__builtin_memcpy (list 'addr 'cx$u) (list 'addr 'cx$a) (first (size-align t2)))
+                         'cx$u)))
+
+(defn- vector-bitcast
+  "The statements of a bitcast with a vector on a side: <N x i1> and iN by bits, anything else by memory."
+  [res e t1 t2]
+  (let [bits? (fn [t] (and (vec-type? t) (= (vec-et t) 'i1)))]
+    (cond
+      (and (bits? t1) (int-bits t2))
+      (do (when (> (vec-n t1) 64) (refuse :vector "a bitcast of " (pr-str t1)))
+          [(list 'set! res (list 'conv (ctype t2)
+                                 (apply list 'bit-or (for [i (lanes t1)] (list '<< (list 'conv 'unsigned-long (lane e i)) i)))))])
+      (and (bits? t2) (int-bits t1))
+      (do (when (> (vec-n t2) 64) (refuse :vector "a bitcast to " (pr-str t2)))
+          (vec (for [i (lanes t2)]
+                 (list 'set! (lane res i) (list 'conv 'unsigned-char (list 'bit-and (list '>> (list 'conv 'unsigned-long e) i) 1))))))
+      (or (bits? t1) (bits? t2)) (refuse :vector "a bitcast of " (pr-str t1) " to " (pr-str t2))
+      :else [(list 'set! res (bitcast-bytes e t1 t2))])))
+
+(def ^:private lane-intrinsics
+  #{"fabs" "sqrt" "floor" "ceil" "trunc" "round" "rint" "nearbyint" "copysign" "pow" "exp" "exp2" "log" "log2" "log10" "sin" "cos" "tan"
+    "fma" "fmuladd" "minnum" "maxnum" "roundeven" "smax" "smin" "umax" "umin" "abs" "ctpop" "ctlz" "cttz" "bswap" "fshl" "fshr"
+    "ucmp" "scmp" "is" "ldexp"})
+
+(defn- reduce-stmts
+  "llvm.vector.reduce.OP: the lanes folded in order into res."
+  [^String nm args res]
+  (let [op (nth (str/split nm #"\.") 3)
+        [sx vx] (if (#{"fadd" "fmul"} op) [(first args) (second args)] [nil (first args)])
+        vt (first vx) et (vec-et vt) w (int-bits et) e (value (peek vx) vt)
+        ls (map #(lane e %) (lanes vt))
+        sv #(if (#{"smax" "smin"} op) (sval % w) (uval % w))
+        step (fn [acc l]
+               (case op
+                 "add" (binop 'add et acc l) "mul" (binop 'mul et acc l) "and" (binop 'and et acc l)
+                 "or" (binop 'or et acc l) "xor" (binop 'xor et acc l)
+                 ("smax" "umax") (list '? (list '> (sv acc) (sv l)) acc l)
+                 ("smin" "umin") (list '? (list '< (sv acc) (sv l)) acc l)
+                 "fadd" (list '+ acc l) "fmul" (list '* acc l)
+                 ("fmax" "fmin") (list (symbol (str "__builtin_" op ({"float" "f" "double" "" "x86_fp80" "l"} (name et)))) acc l)
+                 (refuse :intrinsic nm)))]
+    (when (and (not w) (not (float-type? et))) (refuse :intrinsic nm))
+    (vec (cons (list 'set! res (if sx (value (peek sx) (first sx)) (first ls)))
+               (for [l (if sx ls (rest ls))] (list 'set! res (step res l)))))))
+
+(defn- intrinsic
+  "An intrinsic call's statements: the vector forms scalarized, the rest by `intrinsic*`."
+  [^String nm args res rt]
+  (let [parts (str/split nm #"\.")
+        vec-arg (some #(when (vec-type? (first %)) %) args)]
+    (cond
+      (re-matches #"llvm\.vector\.reduce\.[a-z]+\.v.*" nm) (reduce-stmts nm args res)
+      (and res (vec-type? rt) (re-find #"\.v\d+[if]\d+" nm) (lane-intrinsics (nth parts 1)))
+      (let [sc (str/replace nm #"\.v\d+([if]\d+)" ".$1") et (vec-et rt)]
+        (vec (mapcat (fn [i]
+                       (intrinsic* sc (mapv (fn [x] (if (vec-type? (first x)) [(vec-et (first x)) (list 'c-expr (lane (value (peek x) (first x)) i))] x)) args)
+                                   (lane res i) et))
+                     (lanes rt))))
+      :else (intrinsic* nm args res rt))))
+
+(defn- vector-stmts
+  "The C statements of an instruction with vector operands (scalarized), or nil when it has none."
+  [res h fl args]
+  (let [t (first args)]
+    (cond
+      (and ('#{add sub mul udiv sdiv urem srem shl lshr ashr and or xor fadd fsub fmul fdiv frem} h) (vec-type? t))
+      (let [[_ a b] args et (vec-et t) ea (value a t) eb (value b t)]
+        (vec (for [i (lanes t)] (list 'set! (lane res i) (binop h et (lane ea i) (lane eb i))))))
+      (and (= h 'fneg) (vec-type? t))
+      (let [ea (value (second args) t)] (vec (for [i (lanes t)] (list 'set! (lane res i) (list '- (lane ea i))))))
+      (and (= h 'icmp) (vec-type? t))
+      (let [[_ a b] args et (vec-et t) ea (value a t) eb (value b t) pr (last fl)]
+        (vec (for [i (lanes t)] (list 'set! (lane res i) (icmp-expr pr et (lane ea i) (lane eb i))))))
+      (and (= h 'fcmp) (vec-type? t))
+      (let [[_ a b] args et (vec-et t) ea (value a t) eb (value b t) pr (last fl)]
+        (vec (for [i (lanes t)] (list 'set! (lane res i) (fcmp-expr pr et (lane ea i) (lane eb i))))))
+      (and ('#{trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp ptrtoint inttoptr addrspacecast} h)
+           (or (vec-type? t) (vec-type? (nth args 2))))
+      (let [[t1 v t2] args e (value v t1)]
+        (when-not (and (vec-type? t1) (vec-type? t2)) (refuse :vector h " between " (pr-str t1) " and " (pr-str t2)))
+        (vec (for [i (lanes t1)] (list 'set! (lane res i) (cast-expr h (vec-et t1) (lane e i) (vec-et t2))))))
+      (and (= h 'bitcast) (not= t (nth args 2)) (or (vec-type? t) (vec-type? (nth args 2))))
+      (let [[t1 v t2] args] (vector-bitcast res (value v t1) t1 t2))
+      (and (= h 'select) (vec-type? (first (first args))))
+      (let [[c a b] args ec (value (second c) (first c)) ea (typed-value a) eb (typed-value b)]
+        (vec (for [i (lanes (first a))] (list 'set! (lane res i) (list '? (lane ec i) (lane ea i) (lane eb i))))))
+      (= h 'shufflevector)
+      (let [[a b [mt mv]] args n (vec-n (first a)) ea (value (second a) (first a)) eb (value (second b) (first b))
+            ks (shuffle-indices mv (vec-n mt))]
+        (vec (map-indexed (fn [i k] (list 'set! (lane res i) (if (< k n) (lane ea k) (lane eb (- k n))))) ks)))
+      :else nil)))
 
 (defn- call-stmts
   "A call's or an invoke's statements."
@@ -744,8 +908,8 @@
   [pv ct o]
   (list 'conv (list '* (if (:volatile o) (list 'volatile ct) ct)) (typed-value pv)))
 
-(defn- inst-stmts
-  "An instruction's C statements."
+(defn- inst-stmts*
+  "An instruction's C statements (the scalar ones; `inst-stmts` takes the vector ones first, LL5)."
   [x]
   (let [[res x] (if (= (first x) '=) [(local-sym (nth x 1)) (nth x 2)] [nil x])
         o (opts x)
@@ -757,22 +921,8 @@
       (add sub mul udiv sdiv urem srem shl lshr ashr and or xor fadd fsub fmul fdiv frem)
       (let [[t a b] args] (set (binop h t (value a t) (value b t))))
       fneg (let [[t a] args] (when-not (float-type? t) (refuse :vector "fneg of " (pr-str t))) (set (list '- (value a t))))
-      icmp (let [pr (last fl) [t a b] args w (int-bits t) va (value a t) vb (value b t)
-                 [a b] (cond w [va vb] (ptr-type? t) [(list 'conv 'unsigned-long va) (list 'conv 'unsigned-long vb)] :else (refuse :vector "icmp of " (pr-str t)))
-                 u #(if w (uval % w) %) s #(if w (sval % w) (list 'conv 'long %))
-                 op ({:eq '== :ne '!= :ugt '> :uge '>= :ult '< :ule '<= :sgt '> :sge '>= :slt '< :sle '<=} pr)
-                 sg (#{:sgt :sge :slt :sle} pr)]
-             (set (list op (if sg (s a) (u a)) (if sg (s b) (u b)))))
-      fcmp (let [pr (last fl) [t a b] args
-                 _ (when-not (float-type? t) (refuse :vector "fcmp of " (pr-str t)))
-                 a (value a t) b (value b t)
-                 ord (list 'and (list '== a a) (list '== b b))
-                 uno (list 'or (list '!= a a) (list '!= b b))]
-             (set (case pr
-                    :false 0 :true 1 :oeq (list '== a b) :ogt (list '> a b) :oge (list '>= a b) :olt (list '< a b) :ole (list '<= a b)
-                    :one (list 'or (list '< a b) (list '> a b)) :ord ord :uno uno
-                    :ueq (list 'not (list 'or (list '< a b) (list '> a b))) :ugt (list 'not (list '<= a b)) :uge (list 'not (list '< a b))
-                    :ult (list 'not (list '>= a b)) :ule (list 'not (list '> a b)) :une (list '!= a b))))
+      icmp (let [pr (last fl) [t a b] args] (set (icmp-expr pr t (value a t) (value b t))))
+      fcmp (let [pr (last fl) [t a b] args] (set (fcmp-expr pr t (value a t) (value b t))))
       (trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp ptrtoint inttoptr bitcast addrspacecast)
       (let [[t1 v t2] args
             vec? (fn [t] (and (seq? t) (= 'vector (first t))))]
@@ -882,6 +1032,15 @@
       va_arg (refuse :va "the va_arg instruction")
       (extractelement-dynamic shufflevector) (refuse :vector (str h))
       (refuse :instruction "the instruction " h))))
+
+;; LL5: a vector instruction is scalarized (`vector-stmts`), every other one lowered as before
+(defn- inst-stmts
+  "An instruction's C statements."
+  [x]
+  (let [[res x1] (if (= (first x) '=) [(local-sym (nth x 1)) (nth x 2)] [nil x])
+        [fl args] (split-flags (rest x1))]
+    (or (when (and res (not (#{'call 'invoke 'load 'store 'phi 'getelementptr 'alloca} (first x1)))) (vector-stmts res (first x1) fl args))
+        (inst-stmts* x))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Functions

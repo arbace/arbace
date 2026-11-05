@@ -634,7 +634,7 @@ intermediate row (a few hours, LL9's).
 | LL2 the move | not started; see LLS13/LLS2 |
 | LL3 read: the whole grammar | **done in substance** (`llvm-read`) on the 282 and the probes; open: `llvm/test`'s whole as the corpus, the classes file, `bin/repr-llvm check` over it |
 | LL4 the verifier | **done beyond the survey's stage (iii)** (whole stderr); open: `llvm/test`'s rejection corpus (needs the tarball), a few rules |
-| LL5 the lowering's breadth | partial (`cpp-lower-dbg`: debug, `callbr`); vectors, `blockaddress`, `freeze` flags, `ptrtoaddr`, `-O2` intrinsics open |
+| LL5 the lowering's breadth | partial (`cpp-lower-dbg`: debug, `callbr`; vectors and integers wider than 128 bits done, "As built: LL5"); `blockaddress`, `freeze` flags, `ptrtoaddr`, `-O2` intrinsics open |
 | LL6, LL7 llvmi's check, AOT | not started |
 | LL8 `:full` | **done** on the 282 (`llvm-full`); open: `llvm/test`'s files |
 | LL9 the row | not started (the GT9 step is the interim) |
@@ -839,3 +839,43 @@ and `shufflevector` crashed it (now refused `:vector`), `llvm.global_dtors` was 
 ## Decided (2026-11-05, the user: LLS21, LLS22 and llvmi's two)
 
 LLS21 (a): fmodf/fmodl, the __atomic_* family and the function-pointer return width in ci; LLS22 (b) now, the C++ personality left to cppi's check, (a) with LL2; arbace.cpp.lower renamed arbace.llvm.lower once no branch edits it; an essential step of 3 llvmi modules when the row enters the gate, eval nightly, AOT in the clean run.
+
+## As built: LL5 (vectors and integers wider than 128 bits in the lowering), 2026-11-05
+
+Branch `llvm-ll5` (from `llvm-llvmi`); all in `arbace/cpp/lower.ae`, the new functions in two clearly separate blocks (the vector
+section before `call-stmts`, `inst-stmts` wrapping the scalar `inst-stmts*`, `intrinsic` wrapping `intrinsic*`) so C++'s branches merge
+without touching them.
+
+- **Vectors, scalarized.** A vector value was already a C struct with the member `e`, the array of its lanes. `vector-stmts` takes every
+  instruction with a vector operand and writes one scalar operation a lane on the lanes' C expressions (`(aget (.-e v) i)`): the integer
+  and floating binary operators (through `binop`), `fneg`, `icmp` and `fcmp` (the scalar bodies are now `icmp-expr` and `fcmp-expr`; the
+  result type `<N x i1>`), the casts between vectors lane by lane (`cast-expr`), `select` with a vector condition, `shufflevector` (a mask
+  of constants, `zeroinitializer` or a splat; an undefined lane takes lane 0), and `bitcast` (`<N x i1>` and iN by bits, every other by
+  bytes through memory, little endian). `splat` constants are a compound literal of N copies. The vector intrinsics: the elementwise ones
+  (`fabs`, `sqrt`, `smax`, `abs`, `ctpop`, `fshl`, `fma`, ... `lane-intrinsics`) call the scalar intrinsic's lowering per lane (the lane
+  as a `(c-expr E)` operand, which `value` takes), and `llvm.vector.reduce.{add,mul,and,or,xor,smax,smin,umax,umin,fadd,fmul,fmax,fmin}`
+  fold the lanes in order. Not done: scalable vectors (refused `:vector`), `llvm.masked.*`, gather and scatter, the vector `*.with.overflow`
+  and `.sat` intrinsics, vector constant expressions (`add` of two vector constants), a `splat` in a static initializer.
+- **Integers wider than 128 bits as C's `_BitInt(N)`** (`(unsigned-bit-int N)`, ci has it since C23's crop; the literal `(lit (unsigned-bit-int N) n)`),
+  exactly N bits, so no masking: `container-bits` returns N above 128, `utype` and `stype` are functions, `int-lit`, `mask` and `store-bytes`
+  take the case (a load and a store of i200 move its 25 bytes, not the 32 of the C type). `llvm.fshl/fshr` at any width, and `ctpop`, `ctlz`
+  and `cttz` above 64 bits (i128's rules kept) by 64-bit limbs. Still refused: `switch` on more than 64 bits, the overflow intrinsics above
+  128, atomics.
+- **Numbers.** `bin/llvmi check` (whole, 2 min wall on the loaded host, ci with musl's forms): 258 modules, 242 lowered, **229 pass (218
+  before)**, the 29 others in the recorded classes; the `:vector` (10) and `:wide-int` (2) classes are gone from
+  `test/llvm/divergences-eval.edn`. The ten modules of `:vector` and the two of `:wide-int` now pass at eval and AOT but one:
+  `ee.MCJIT.test-interp-vec-arithm_float` lowers and runs up to `frem <N x float>`, which is ci's missing `__builtin_fmodf` (class
+  `ci-builtins`, LLS21 (a)). AOT: `--aot --only` on the thirteen modules (the twelve above and `c-O2.run.ptr-sub-narrow`, whose `splat` it also
+  took), 12 pass, the thirteenth the same `fmodf` fault; their rows in `check-aot-linux-amd64.edn` set from that run (a whole AOT run, 19
+  minutes and heavy, not made: the other rows are unchanged by construction, the change touching only vector and wide-integer code).
+  `bin/llvmi check --record` rewrote `check-eval-linux-amd64.edn`.
+- **gcc as the judge.** The C of the vector modules and of `c-O0.run.builtin-stdc` compiles with gcc (gnu23); the vector ones run the same.
+  `builtin-stdc`, which uses `_BitInt(129)` and `_BitInt(256)` counts, passes on ci against lli but segfaults under gcc at its `_BitInt(129)`
+  line (gcc's own `_BitInt` library; the lowering's C is valid): C++'s `bin/cppi lower-check` is not affected unless a program uses an
+  integer above 128 bits.
+
+### Proposed
+
+1. Add `fmodf`/`fmodl` to ci's `builtin-aliases` (arbace/c/build.ae) with LLS21 (a): the last vector module passes and `frem` in
+   general; recommended, one line and a ci rebuild.
+2. A whole `bin/llvmi check --aot --record` at night (LLVMI_AOT_HEAVY=1) to replace the hand-set AOT rows by a recorded run; recommended.
