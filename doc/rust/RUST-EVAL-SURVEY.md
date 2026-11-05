@@ -999,3 +999,60 @@ night's commands written (RE5.4).
 ## Decided (2026-11-05, the user)
 
 RES35-RES39, each as recommended: the synthetic corpus as a table and templates with the generated files committed; arbace/rust/ out of embed.ae and the keys (built on gt9-build's keys commit); a judge recorded against a non-pin std allowed, re-recorded at night; the coverage subset by greedy cover after the first whole run; programs printing backtrace addresses left out.
+
+## As built: RES34 (write-ahead, 2026-11-05)
+
+Branch `rust-res34` from `rust-re5` (`e573fd86`), by an agent on the main host on the day of a keyed `--full` (light tier: no gate, no
+build of Arbace, no heavy lock, every process under 2 GiB: `GOMEMLIMIT=1800MiB`, one or two threads; stage 0
+`/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated with `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`).
+RES34 (a), the prerequisite of RE6: a library's lowered units translated by cf2g **once per key** into Go packages that every program's
+AOT build links, so that a program's translation and Go build cover its own code alone. Written ahead of the night's whole-std run
+(RES34.6): the day proved it on core (std's `core`, 16 codegen units) and on musl, with C and `no_std` Rust programs.
+
+### RES34.1 The design
+
+**What is translated: a library unit, one Go package each.** The unit is what ci's prebuilt runtime already caches (a musl source, one
+of std's codegen units, a lowered C++ runtime unit: arbace.c.runtime's fragment, PB.1): a unit's fragment is plain data whose items are
+node commands with placeholders (`?fL` a function, `?sL` a static) that the link replaces by the program's numbers. cf2g translates
+each item that is a code command (or an object's initializer) **with its placeholders left symbolic**, read at run time through two
+relocation tables of the unit's package (`R`, the functions' ids; `S`, the statics' indices), so the Go text depends on the unit alone.
+Rejected granularities: per crate (one package of std's 51 MB of IR: one Go compile of everything, no parallelism, any change
+translates the crate again) and per function (a package or a file per function: tens of thousands of Go packages for std, the
+import graph and the link's table per function; the fragment, the cache's unit, is per codegen unit anyway). rustc's codegen units are
+fixed by std's pin and profile (RES17 (b): 110 units at the pin), so a unit is also a stable cache entry.
+
+**The link interface.** The program's link is unchanged: `arbace.c.build/link-text` still makes the node program from the program's
+fragments and the libraries' (its text byte for byte as before: `CI_LINK_CHECK`'s comparison holds), and with `*link-trace*` bound it
+also says which of its lines are a library item replayed (`{LINE [FRAG :f|:o J]}`) and each fragment's placeholders' numbers
+(`:fmaps`, `:smaps`; nil where the link resolved none: a pruned function). `arbace.c.aotlib/program-pre` turns that into cf2g's
+`translate` argument `pre`: such a code command becomes `l.SetCompiled(ID, unitpkg.CJ)` instead of a translated function, such an init
+`unitpkg.IJ` among the program's inits, and once the program is loaded each unit's tables are bound (`unitpkg.Bind(p, R, S)`: two
+`[]int64` literals, -1 for an unresolved placeholder). The data (statics, the functions' table, natives, strings, aliases) stays node
+program text the Loader reads, as on the interpreted path, so memory is laid out as before. Calls: the program's code calls a unit's
+function directly; a unit's code calls through the program's function table (`P.Call(t, F[R[L]], args)`: the link chooses the
+definition, a program's strong definition over a library's weak one, as the C link does), except its own static functions (their
+key is the unit's alone, so the callee is always that item: a direct Go call). An item cf2g refuses stays out of the package (listed in
+the unit's manifest) and is translated with the program, as before.
+
+**Generic instantiations: nothing to do on the library side.** At `-O0` rustc monomorphizes into the program's own codegen unit every
+instance the program needs that the upstream crates did not export; with share-generics (`-O0`'s default) it calls the instances
+upstream already has, by their symbols (§7.1, P1). So an instance is either in std's units (prebuilt, linked by symbol like any
+function) or in the program's IR (translated with the program); the prebuilt library never needs an instance it did not emit. The day's
+`fmt.rs` shows both: 382 functions defined in its own IR (`sort_unstable` for `i64` and for an enum, `Debug` impls, iterator adapters,
+`core::fmt`'s generic glue) and 75 of core's declared, among them generic instances core exported (`NonNull<u128>::from_ref`).
+
+**The key, the cache's place, pruning.** A library's Go key is the units' Go format (`aot-version`), the fragments' key
+(arbace.c.runtime's `runtime-key`: the library's own key, ci's checker and builder as loaded, the target) and the sources the Go is
+made by as this process loaded them (cf2g, aotlib, repr/go's printer). The cache: `.tmp/ci-aot-lib/LIB_KEY16/PKG/{unit.go,manifest.edn}`
+(`CI_AOT_LIB`; `LIB` the fragments' directory's name: `musl`, `rsi_std_LIBKEY12`), each unit written through a temporary name when
+first needed (a program's build makes the units it lacks; `bin/ci aot-lib build`, `arbace.rust.run translate-libs` make all ahead).
+Each use marks its library's directory used; `bin/ci aot-lib prune` keeps per library the newest 3 keys and removes an older one
+unused for a day (CS272 (a)'s rule). A shard's module links the cache as `arbace/cilib` (`bin/lib/ci/check-aot`, `bin/lib/rsi/check`),
+so the import path of a unit is the same in every program and Go's build cache compiles a unit's package once per key too (the same
+file at the same path, `-trimpath`). Go's linker drops a unit's functions no program's table names.
+
+**Where it runs.** `bin/ci check --aot` (cf2g's `compile-list`: `arbace.c.runtime/link-traced`) and `bin/rsi check --aot`
+(`arbace.rust.run/compile-list`: `build-linked-traced`) link the prebuilt units by default; `CI_AOT_LIB_OFF=1` (both) or `RSI_AOT_LIB=0`
+translate the whole node program as before. The gate's C steps run stage 0's embedded ci when the env trio is off (main since
+`d86cb874`): the seed's cf2g predates RES34, so `bin/ci check --aot` takes the prebuilt units after the re-seed that embeds this cf2g
+(or with the trio); nothing breaks before it (the old compile-list never loads aotlib).
