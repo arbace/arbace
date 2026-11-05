@@ -653,7 +653,7 @@ Each fix has a sample in `test/cpp/codegen/` that failed before and passes at al
 `virtual4` showed two more faults behind its native level's failure (`_ZN1BC1Ev`): an out-of-line constructor or
 destructor did not join its in-class declaration (`find-redecl` looked the name up where only functions are entered; the
 call went to the body-less declaration, declared next to the definition, which clang's IR parser refuses), and a member
-declared in the class and defined outside was marked inline (so `linonce_odr`, where clang's is external). Also, the
+declared in the class and defined outside was marked inline (so `linkonce_odr`, where clang's is external). Also, the
 complete-object alias `C1`/`D1` of a strong definition is now written where the complete constructor is called, as clang
 emits it (a class never constructed whole has none). Sample `ctor-outofline`.
 
