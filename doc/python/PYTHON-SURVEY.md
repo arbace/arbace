@@ -2470,3 +2470,60 @@ raising; callees compiled at run time called mid-expression from compiled code, 
 compiled and on the loop against CPython, its known lines recorded on the base (ce1b4e71); 216's check216.sh and
 210's check210.sh; `make python-essential`; `bin/pyi check --aot --no-pyi` on 210's 73-program sample; `bin/pyi runtime
 check`; the bench sample's table, base and branch back to back with CPython.
+
+## As built: 216d, direct calls between compiled functions (2026-11-05, the Mac VM, queue 216d)
+
+Built as "Design: 216d" above: `go/arbace/py` (eval.go: `runFrames(f, direct)`, `enter`, `callDirect`, `runDirect`,
+`directMax` 256, guardedStep running `Code.Native` itself and restoring `t.Frame` and `t.direct` on a panic; aot.go:
+`AotCallV`, `AotCallMethodV`, `AotStackCall`, `stackCall`, `callFunctionV`; frame.go: `Thread.direct`, `frameFreeMax`
+16) and `arbace.python.aot`'s register generator (`call!`: calls and method calls from the locals, the stack's way
+re-entered at `C<n+1>`; with `check-depths` on, the re-entry checks the frame's depth too). The stack generator
+(`code-func`, the fallback) and AotExec's call-ex reach compiled callees through `enter`, directly as well. Generators'
+resumption is unchanged but for step's frame (the design's paragraph: CPython's in-loop resumption not built).
+
+Where the time went (fib(35) compiled, least of 3, the VM): base 2.4-2.6 s; the stack's direct call alone (a nested
+loop per call, the locals still written back) the same; the free list of 16 alone 1.95 s; the calls from the locals
+alone 1.95 s; both 1.42 s (CPython 0.11 s for fib(31), pyi 0.31 -> 0.2 s).
+
+**The table** (wall seconds, the least of 3 rounds; each round runs CPython 3.14 (`python3 -s -B`), the base
+(ce1b4e71, 216's head) and this branch back to back on the same benchmark; the VM's load 3.7-4.3, another agent
+running: differences under 10% are noise; `/root/arbace-mac/.tmp/q216d/table1.tsv`; every output equal to CPython's):
+
+| benchmark | loops | CPython | base | after | base / CPython | after / CPython |
+|---|---:|---:|---:|---:|---:|---:|
+| raytrace | 1 | 0.20 | 0.60 | 0.58 | 3.0x | 2.9x |
+| deltablue | 50 | 0.12 | 0.43 | 0.38 | 3.6x | 3.2x |
+| fannkuch | 1 | 0.29 | 0.61 | 0.61 | 2.1x | 2.1x |
+| generators | 4 | 0.15 | 0.78 | 0.68 | 5.2x | 4.5x |
+| nqueens | 4 | 0.25 | 0.66 | 0.64 | 2.6x | 2.6x |
+| go | 1 | 0.10 | 0.25 | 0.23 | 2.5x | 2.3x |
+| richards | 10 | 0.32 | 0.63 | 0.51 | 2.0x | 1.6x |
+| chaos | 1 | 0.07 | 0.21 | 0.20 | 3.0x | 2.9x |
+| json_dumps | 1 | 0.03 | 0.20 | 0.20 | 6.7x | 6.7x |
+| spectral_norm | 4 | 0.34 | 0.68 | 0.61 | 2.0x | 1.8x |
+| unpack_sequence | 20000 | 0.23 | 0.62 | 0.61 | 2.7x | 2.7x |
+| coroutines | 20 | 0.36 | 0.71 | 0.62 | 2.0x | 1.7x |
+| float | 4 | 0.22 | 0.48 | 0.46 | 2.2x | 2.1x |
+| nbody | 3 | 0.30 | 0.35 | 0.35 | 1.2x | 1.2x |
+| hexiom | 1 | 0.03 | 0.09 | 0.09 | 3.0x | 3.0x |
+| base64 | 1 | 1.60 | 2.96 | 2.96 | 1.8x | 1.8x |
+| bpe_tokeniser | 1 | 3.25 | 6.41 | 5.92 | 2.0x | 1.8x |
+| async_tree | 1 | 0.22 | 1.01 | 0.98 | 4.6x | 4.5x |
+| mdp | 1 | 0.81 | 2.76 | 2.69 | 3.4x | 3.3x |
+| pprint | 1 | 1.40 | 4.70 | 4.24 | 3.4x | 3.0x |
+
+Sum over the 20: CPython 10.29 s, base 25.14 s (2.44x), after 23.56 s (2.29x); median 2.67x -> 2.61x. The call-heavy
+benchmarks gain 10-20% (richards, deltablue, coroutines, spectral_norm, pprint), generators 13% (step's frame), the
+arithmetic and attribute-bound ones nothing; the base is faster here than in 216's table (load 4 against 5-15). What
+is left of a call is its frame (newFrame, bindArgs, freeFrame), the defer of guardedStep, the boxed ints; of a
+generator's item, one resumption per level (resume, run, runFrames' entry, the yield through AotExec).
+
+**The proofs (run, the VM):**
+- `t/check216d.sh` (rec.py, the design's program, 70 output lines): compiled = the loop byte for byte, both = CPython
+  but for the one line recorded on the base (where a recursion through `map` runs out of C levels: pyi's count, 10,001
+  as on the base; CPython's own stack); on the base the same. RecursionError's depth at limits 60-3,000, the
+  tracebacks and the frames' chains equal CPython's.
+- 216's `t/check216.sh` PASS (1 known line, `f_locals`), 210's `t/check210.sh` PASS (10 pass lines); both also with
+  `check-depths` on, and the 73-program sample with it on: 73 pass, 0 failing, no code object on the stack generator.
+- `make python-essential`: check --aot 21 programs, 20 pass, 1 classed, 0 failing, the control refused.
+- `bin/pyi runtime check`: the seven packages the same forms, the unicodedata and CJK tables equal, runtime-ops equal, 136 programs of test/python/pyi run by pyi as by the oracle: 136 equal, the REPL session 1 equal (40 min at load 4; the check runs the loop, not compiled code: it covers runFrames' new parameter, guardedStep and the free list).
