@@ -408,9 +408,11 @@
         "uwtable"
         (when-not (#{"sync" "async"} (str/trim (str v))) (verr :parser/attr-value "expected unwind table kind" {:at [:attr-val n]}))
         "allockind"
+        (if (= "" (str/trim (str v)))
+          (verr :parser/attr-value "expected allockind value" {:at [:attr-close n]})
         (doseq [w (str/split (str/replace (str v) "\"" "") #",")]
           (when-not (contains? #{"alloc" "realloc" "free" "uninitialized" "zeroed" "aligned"} (str/trim w))
-            (verr :parser/attr-value (str "unknown allockind " (str/trim w)) {:at [:attr-val n]})))
+            (verr :parser/attr-value (str "unknown allockind " (str/trim w)) {:at [:attr-val n]}))))
         nil))))
 
 (defn- ptr-scalar? [t] (ptr-type? t))
@@ -601,6 +603,12 @@
 
 (defn- note-md! [x]
   (letfn [(walk [y] (cond (md-ref? y) (.add *mrefs* y)
+                          ;; a tuple's operands are parsed without the function (parseMetadata's PFS null): no local names
+                          (and (seq? y) (= (first y) '!) (vector? (second y)))
+                          (doseq [z (second y)]
+                            (when (and (vector? z) (local? (peek z)))
+                              (verr :parser/local-outside "invalid use of function-local name" {:at [:use (pr/value-str (peek z))]}))
+                            (walk z))
                           (or (seq? y) (vector? y)) (doseq [z y] (walk z))))]
     (walk x)))
 
@@ -660,7 +668,11 @@
                    (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e))))))
                  ('#{array vector} h) (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e)))))
                  (= h 'splat) (let [[et ev] (second v)] (use-value st ev (norm-type et)))
-                 (cast-ops h) (let [[t x] (strip-flags (rest v))] (use-value st x (norm-type t)))
+                 (cast-ops h) (let [[t x t2] (strip-flags (rest v))]
+                                (use-value st x (norm-type t))
+                                (when (and t2 (not (cast-valid? h (norm-type t) (norm-type t2))))
+                                  (verr :parser/cast (str "invalid cast opcode for cast from '" (tstr (norm-type t)) "' to '" (tstr (norm-type t2)) "'")
+                                        {:at [:val {:text (name h)}]})))
                  (bin-ops h) (let [[t a b] (strip-flags (rest v))] (use-value st a (norm-type t)) (use-value st b (norm-type t)))
                  (= h 'ptrauth)
                  (let [[p k d a ds] (rest v) at {:at [:val {:text "ptrauth"}]}]
@@ -679,7 +691,7 @@
   "LLParser's resolution of `v` as a value of type `t` in the function `st` (nil at the top level)."
   [st v t]
   (cond
-    (local? v) (if st (use-local st v t) (verr :parser/local-outside "expected a constant value"))
+    (local? v) (if st (use-local st v t) (verr :parser/local-outside "invalid use of function-local name" {:at [:use (pr/value-str v)]}))
     (global? v) (use-global st v t)
     (= t 'metadata) (note-md! v)
     (md-ref? v) (.add *mrefs* v)
@@ -724,7 +736,14 @@
                      (when-not (cast-valid? h a c)
                        (verr :parser/cast (str "invalid cast opcode for cast from '" (tstr a) "' to '" (tstr c) "'") {:at [:ty]})))
       (= h 'catchpad) (when (= (first ps) 'none) (verr :parser/syntax "expected scope value for catchpad" {:at [:body 2]}))
-      (= h 'alloca) (check-align (:align o))
+      (= h 'alloca) (let [t (resolve-type (norm-type (first (strip-flags ps))))]
+                      (when (or (and (seq? t) (= (first t) 'fn)) (#{'void 'label 'metadata 'token 'x86_amx} t))
+                        (verr :parser/alloca "invalid type for alloca" {:at [:ty]}))
+                      (check-align (:align o)))
+      (= h 'landingpad) (doseq [[i c] (map-indexed vector (filter seq? (rest ps)))]
+                          (let [[k ct] c ct (resolve-type (norm-type ct))]
+                            (when (and (= k 'catch) (seq? ct) (= 'array (first ct))) (verr :parser/landingpad "'catch' clause has an invalid type" {:at [:after "catch"]}))
+                            (when (and (= k 'filter) (not (and (seq? ct) (= 'array (first ct))))) (verr :parser/landingpad "'filter' clause has an invalid type" {:at [:after "filter"]}))))
       (= h 'load) (do (when-not (ptr-type? (norm-type (first (second ps)))) (verr :parser/load "load operand must be a pointer to a first class type" {:at [:op 1]}))
                       (when (and (:atomic o) (nil? (:align o))) (verr :parser/atomic-align "atomic load must have explicit non-zero alignment"))
                       (check-align (:align o)))
@@ -1352,7 +1371,13 @@
                               (or (nil? d)   ; declared by LLParser from the call (implicit), with the intrinsic's attributes
                               (nil? (try (check-intrinsic-signature (global-key c) (:fty d)) nil (catch arbace.lang.ExceptionInfo e (.getMessage e))))))
                      (:imm (intr/lookup (global-key c))))
-          ranges (when intr-pos (:ranges (intr/lookup (global-key c))))]
+          ranges (if intr-pos
+                   (:ranges (intr/lookup (global-key c)))
+                   (into {} (keep-indexed (fn [i p] (when (vector? p)
+                                                      (when-let [r (attr-of (group-items (param-attrs p)) "range")]
+                                                        (when-let [[_ lo hi] (re-find #"^\s*i[0-9]+\s+(-?[0-9]+)\s*,\s*(-?[0-9]+)" (str (second r)))]
+                                                          [i [(bigint lo) (bigint hi)]]))))
+                                          (or dps []))))]
       (doseq [[i a] (map-indexed vector args) :when (< i nparams)]
         (let [call-imm? (has-attr? (nth pattrs i) "immarg")
               callee-imm? (if intr-pos (contains? intr-pos i)
@@ -1701,6 +1726,8 @@
         (when-not (= 3 (count ops)) (verr :verifier/md-flags "incorrect number of operands in module flag" [:mdv f]))
         (let [[b id v] ops]
           (when-not (md-int-op? b) (verr :verifier/md-flags "invalid behavior operand in module flag (expected constant integer)" [:mdv b]))
+          (when (and (= (md-str id) "Linker Options") (not (some #(and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.linker.options)) forms)))
+            (verr :verifier/md-flags "'Linker Options' named metadata no longer supported" :none))
           (let [bv0 (.longValue ^java.math.BigInteger (md-int-val b))
                 ;; AutoUpgrade: an `error` flag of these names is a `min` (`max`) one
                 bv (cond (and (= bv0 1) (#{"PIC Level" "sign-return-address" "sign-return-address-all" "sign-return-address-with-bkey" "branch-target-enforcement"} (md-str id))) 8
@@ -1767,6 +1794,7 @@
 (defn check-di-parse
   "LLParser's checks of a DI node's text: required fields, `distinct`, paired fields."
   [id node distinct?]
+  (when (and (= "DIAssignID" (di-kind node)) (not distinct?)) (verr :parser/di-field "missing 'distinct', required for !DIAssignID()" {:at [:tok 2]}))
   (when-let [k (di-kind node)]
     (when-let [fs (di-fields node)]
       (doseq [r (get di-required k)] (when-not (contains? fs r) (verr :parser/di-field (str "missing required field '" (name r) "'") {:at [:find-last ")"]})))
@@ -2055,7 +2083,7 @@
                      (nil? (try (check-intrinsic-signature k (:fty d)) nil (catch arbace.lang.ExceptionInfo e (.getMessage e))))))
       (let [ptypes (mapv #(norm-type (first %)) (remove #{'&} ps))
             pattrs (mapv #(group-items (param-attrs %)) (remove #{'&} ps))]
-        (check-function-attrs (:ret-attrs o) (norm-type rt) pattrs ptypes (group-items (:attrs o)) (intr/recognized? k) false)))
+        (check-function-attrs (:ret-attrs o) (norm-type rt) pattrs ptypes (group-items (:attrs o)) (str/starts-with? k "llvm.") false)))
     (check-function-header h (norm-type rt) ps o k (:body o))
     (when (str/starts-with? k "llvm.")
       (when (= h 'llvm/define) (verr :verifier/intrinsic-defined "llvm intrinsics cannot be defined!"))
@@ -2628,7 +2656,7 @@
   (let [r (try (forms-of-file path) (catch Throwable e e))
         d (when (instance? Throwable r) (ex-data r))]
     (cond
-      (:llvm/message d)   ; the reader refused where LLParser does, with its message
+      (and (:llvm/message d) (not (vector? r)))   ; the reader refused where LLParser does, with its message
       (let [src (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1")]
         ["invalid" (:llvm/message d) ":parser/syntax" (diag/parse-error-text (prog) path src (long (:llvm/offset d)) (:llvm/message d))])
       (instance? Throwable r)
@@ -2638,9 +2666,11 @@
       (let [[forms src spans e] r d (ex-data e) off (long (:llvm/offset d))
             [pe] (try (binding [*partial* true] (run-phases-parser forms)) (catch Throwable _ [nil]))
             poff (when pe (try (parse-offset src spans forms pe) (catch Throwable _ nil)))]
-        (if (and pe poff (< (long poff) off))
+        (cond
+          (and pe poff (< (long poff) off))
           ["invalid" (.getMessage ^Throwable pe) (str (:llvm/verify (ex-data pe))) (diag/parse-error-text (prog) path src (long poff) (.getMessage ^Throwable pe))]
-          ["invalid" (:llvm/message d) ":parser/syntax" (diag/parse-error-text (prog) path src off (:llvm/message d))]))
+          (:llvm/message d) ["invalid" (:llvm/message d) ":parser/syntax" (diag/parse-error-text (prog) path src off (:llvm/message d))]
+          :else ["unread" (str/replace (str (.getMessage ^Throwable e)) #"[\t\n]" " ") "" ""]))
       :else
       (let [[forms src spans] r]
         (try (diagnose forms src spans path)
