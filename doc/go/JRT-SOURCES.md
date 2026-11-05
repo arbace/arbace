@@ -641,9 +641,9 @@ night's):
   `Cleaner`).
 - **Expected result**: 1,254 lines of `jdk/sources.txt` before the locales' index (907 now): 1,150
   of `share`, 6 `unix`, 41 generated, 54 of jrt's own; about 3.1 MB more forms, +28% on
-  `jdk/forms`' 11.2 MB (the 345 files read by repr/java on javac's tool: 2,398,358 bytes of the
-  `share` files' 355 forms files, the same read without javac byte for byte, and 680,623 of the
-  generated fields').
+  `jdk/forms`' 11.2 MB (the 345 files read by repr/java on javac's tool: 2,397,063 bytes of the
+  `share` files' 356 forms files and 680,623 of the generated fields', the same read without javac
+  byte for byte).
 
 ## The committed forms (standalone S1, 2026-10-12)
 
