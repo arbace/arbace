@@ -69,6 +69,88 @@
 
 (defn- sym [n] (symbol n))
 
+;; ---------------------------------------------------------------- LLVM types of layouts (rustc_codegen_llvm/src/type_of.rs)
+
+(defn- split-top
+  "The top-level comma-separated entries of a generic argument list's text."
+  [^String s]
+  (loop [i 0 depth 0 start 0 out []]
+    (if (>= i (count s))
+      (if (< start (count s)) (conj out (.trim (subs s start))) out)
+      (let [c (.charAt s i)]
+        (cond (#{\< \( \[} c) (recur (inc i) (inc depth) start out)
+              (#{\> \) \]} c) (if (and (= c \>) (> i 0) (= \- (.charAt s (dec i))))
+                                (recur (inc i) depth start out)
+                                (recur (inc i) (dec depth) start out))
+              (and (= c \,) (zero? depth)) (recur (inc i) depth (inc i) (conj out (.trim (subs s start i))))
+              :else (recur (inc i) depth start out))))))
+
+(defn- def-path
+  "The path of a DefId's text (`DefId(2:39279 ~ core[ef30]::mem::MaybeDangling)`): the hash dropped, the local crate's name too."
+  [^String d]
+  (let [m (re-find #"~ (.*)\)$" d)
+        p (str/replace (second m) #"\[[0-9a-f]+\]" "")]
+    (if (.startsWith d "DefId(0:") (let [i (.indexOf p "::")] (if (neg? i) p (subs p (+ i 2)))) p)))
+
+(defn llvm-type-name
+  "The name rustc gives a type's LLVM struct (the type's text with every ADT's path its definition's, no trimming)."
+  [t]
+  (let [text (second t) st (ty-struct t)
+        kind (if (seq? st) (name (first st)) (name st))
+        entries (fn [^String txt] (let [i (.indexOf txt "<")] (when (and (pos? i) (.endsWith txt ">")) (split-top (subs txt (inc i) (dec (count txt)))))))
+        generic (fn [path args txt]
+                  (let [es (entries txt)]
+                    (if (nil? es)
+                      path
+                      (loop [es es as (seq args) out []]
+                        (cond (empty? es) (str path "<" (str/join ", " out) ">")
+                              (.startsWith ^String (first es) "'") (recur (rest es) as (conj out (first es)))
+                              :else (recur (rest es) (next as) (conj out (llvm-type-name (first as)))))))))]
+    (case kind
+      "adt" (let [[_ _ d args] st] (generic (def-path d) args text))
+      "tuple" (str "(" (str/join ", " (map llvm-type-name (rest st))) (when (= 2 (count st)) ",") ")")
+      "array" (str "[" (llvm-type-name (second st)) "; " (nth st 2) "]")
+      "slice" (str "[" (llvm-type-name (second st)) "]")
+      "ref" (str "&" (when (nth st 2) "mut ") (llvm-type-name (second st)))
+      "ptr" (str "*" (if (nth st 2) "mut " "const ") (llvm-type-name (second st)))
+      "never" "!"
+      text)))
+
+(defn- llvm-name-ref [n]
+  (if (re-matches #"[A-Za-z_][A-Za-z0-9_]*" n) (symbol (str "%" n)) (list '% n)))
+
+(defn- padding-filler [size align]
+  (let [u (cond (>= align 8) 8 (>= align 4) 4 (>= align 2) 2 :else 1)]
+    (list 'array (quot size u) (symbol (str "i" (* 8 u))))))
+
+(defn backend-type
+  "The LLVM type form of a type's layout, as rustc's `backend_type` makes it: scalars as their memory type, scalar pairs as
+  anonymous structs, arrays as arrays, tuples as anonymous structs with rustc's padding fillers, other aggregates as named
+  structs (their body here a filler of the right size: the judge compares the types' names, not their bodies; `gl` keeps them)."
+  [lt gl t]
+  (let [ly (layout lt t) st (ty-struct t)
+        kind (if (seq? st) (name (first st)) (name st))]
+    (case (:kind ly)
+      :scalar (symbol (:mem (:scalar ly)))
+      :pair (list 'struct (symbol (:mem (first (:pair ly)))) (symbol (:mem (second (:pair ly)))))
+      (cond
+        (:array ly) (list 'array (:count (:array ly)) (backend-type lt gl (second st)))
+        (= kind "tuple")
+        (let [order (sort-by second (map-indexed (fn [i o] [i o]) (:offsets ly)))
+              [fs off prev]
+              (reduce (fn [[fs off prev] [i o]]
+                        (let [ft (nth st (inc i)) fl (layout lt ft)
+                              fs (if (> o off) (conj fs (padding-filler (- o off) (min prev (:align fl)))) fs)]
+                          [(conj fs (backend-type lt gl ft)) (+ o (:size fl)) (:align fl)]))
+                      [[] 0 (:align ly)] order)
+              fs (if (< off (:size ly)) (conj fs (padding-filler (- (:size ly) off) prev)) fs)]
+          (apply list 'struct fs))
+        (#{"adt" "closure"} kind)
+        (let [n (llvm-type-name t) r (llvm-name-ref n)]
+          (when gl (vswap! gl assoc-in [:types r] (list 'llvm/type r (list 'struct (list 'array (:size ly) 'i8)))))
+          r)
+        :else (unsupported (str "llvm type of " kind))))))
+
 ;; ---------------------------------------------------------------- the CFG
 
 (defn successors
@@ -142,10 +224,11 @@
   "Reverse postorder of the blocks reachable from bb0, rustc's Postorder (last successor first); an edge to a nop landing pad
   is not followed, nor a switch edge a constant discriminant rules out (mono reachability)."
   ([blocks] (rpo blocks #{}))
-  ([blocks nops]
+  ([blocks nops] (rpo blocks nops true))
+  ([blocks nops mono]
   (let [seen (volatile! #{0}) out (volatile! [])
         succs (fn [b] (let [blk (nth blocks b) t (:term blk) u (unwind-cleanup t)]
-                        (if-let [bits (const-switch-bits blk)]
+                        (if-let [bits (when mono (const-switch-bits blk))]
                           (let [[_ _ vals other] t] [(or (some (fn [[v tg]] (when (= (bigint v) (bigint bits)) tg)) vals) other)])
                           (if (and u (nops u)) (vec (remove #(= % u) (successors t))) (successors t)))))]
     (letfn [(visit [b]
@@ -501,7 +584,8 @@
   (vec (concat
         (for [[[ty value align] n] (sort-by (comp name val) (:consts @gl))]
           (list 'llvm/global n ty value :linkage :private :unnamed-addr :unnamed_addr :constant true :align align))
-        (vals (:decls @gl)))))
+        (vals (:decls @gl))
+        (vals (:types @gl)))))
 
 (defn declare!
   [gl name ret params]
@@ -514,10 +598,12 @@
         nops (nop-landing-pads blocks)
         order (rpo blocks nops)
         idom (dominators blocks order)
+        order-all (rpo blocks nops false)
+        idom-all (dominators blocks order-all)
         locs (:locals body)
         lay (mapv #(layout lt (:ty %)) locs)
         spread (:spread-arg body)
-        mem (cond-> (non-ssa-locals body lt order idom) spread (conj spread))
+        mem (cond-> (non-ssa-locals body lt order-all idom-all) spread (conj spread))
         preds (reduce (fn [m b] (reduce (fn [m s] (update m s (fnil conj []) b)) m (successors (:term (nth blocks b))))) {} (range (count blocks)))
         mergeable (fn [t] (let [ss (successors t)] (when (and (= 1 (count ss)) (= 1 (count (get preds (first ss))))) (first ss))))
         allocs (into {} (:alloc-data body))
@@ -706,7 +792,7 @@
                                                       (:v (get-in @st [:vals (second e)])))
                                                 r (fresh!)]
                                             (when-not (:array (:ly pl)) (unsupported "index of a non-array"))
-                                            (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (symbol (:mem (:scalar el))) ['ptr (:ptr pl)] ['i64 idx])))
+                                            (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (backend-type lt gl (second (ty-struct (:ty pl)))) ['ptr (:ptr pl)] ['i64 idx])))
                                             {:ptr r :align (restrict-align (:align pl) (:size el)) :ly el :ty (second (ty-struct (:ty pl)))})
                                   (unsupported (str "place projection " (first e)))))
                               base (:rest base))))
@@ -886,10 +972,9 @@
                                 offs (if (= :multiple (:kind vr)) (:offsets (nth (:vs vr) variant)) (:offsets ly))]
                             (if (:array ly)
                               (let [el (layout lt (second (ty-struct (:ty ly))))]
-                                (when-not (= :scalar (:kind el)) (unsupported "array of non-scalars"))
                                 (doseq [[i o] (map-indexed vector ops)]
                                   (let [v (operand! bb o) r (fresh!)]
-                                    (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (symbol (:mem (:scalar el))) ['ptr (:ptr pl)] ['i64 i])))
+                                    (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (backend-type lt gl (second (ty-struct (:ty ly)))) ['ptr (:ptr pl)] ['i64 i])))
                                     (store-val! bb {:ptr r :align (restrict-align (:align pl) (* i (:size el))) :ly el} v))))
                               (do
                                 (doseq [[i o] (map-indexed vector ops)]
@@ -966,8 +1051,7 @@
                                 (let [pv (operand! bb a) nv (operand! bb b)
                                       el (layout lt (second (ty-struct (ty-of a))))
                                       rr (fresh!)]
-                                  (when-not (= :scalar (:kind el)) (unsupported "Offset of a non-scalar pointee"))
-                                  (emit! bb (list '= rr (apply list 'getelementptr :inbounds (concat (when-not (:signed (scalar-of-op b)) [:nuw]) [(symbol (:mem (:scalar el))) ['ptr (:v pv)] [(symbol (:ty nv)) (:v nv)]]))))
+                                  (emit! bb (list '= rr (apply list 'getelementptr :inbounds (concat (when-not (:signed (scalar-of-op b)) [:nuw]) [(backend-type lt gl (second (ty-struct (ty-of a)))) ['ptr (:v pv)] [(symbol (:ty nv)) (:v nv)]]))))
                                   {:ty "ptr" :v rr})
                                 (#{"Shl" "Shr" "ShlUnchecked" "ShrUnchecked"} op) (shift! bb op (operand! bb a) (operand! bb b) sc (scalar-of-op b))
                                 (#{"AddWithOverflow" "SubWithOverflow" "MulWithOverflow"} op) (overflow! bb op (operand! bb a) (operand! bb b) sc)
