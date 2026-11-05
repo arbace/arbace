@@ -373,9 +373,33 @@
 
 ;; env: {NAME {:mono type} | {:poly type :core term}}
 
+(def ^:dynamic *module* nil)
+(def cls-callstack (ext-name "tc" "GHC.Internal.Stack.Types" "HasCallStack"))
+
+(defn- callstack-term
+  "HasCallStack's evidence at an occurrence of n at span sp, as GHC's solver builds it (an implicit parameter: the
+  call site pushed onto the empty stack)"
+  [n sp]
+  (let [cs (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" "unpackCString#")) [(list 'lit (str (pr-str x) "#"))]))
+        i (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str x "#"))]))
+        cip (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "C:IP")) [x]))
+        [l1 c1 l2 c2] (take-last 4 sp)]
+    (cip (list 'app (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "pushCallStack"))
+               [(list 'app (list 'v (ext-name "var" "GHC.Internal.Tuple" "(,)"))
+                      [(cs (occ n))
+                       (list 'app (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "$WSrcLoc"))
+                             [(cs "main") (cs *module*) (cs (str (str/replace *module* "." "/") ".hs")) (i l1) (i c1) (i l2) (i c2)])])
+                (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "ip"))
+                      [(cip (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "emptyCallStack")))])]))))
+
+(defn- want-at!
+  "The evidence of a predicate of an occurrence: HasCallStack solved at once, the others wanted"
+  [pred n sp]
+  (if (and (= cls-callstack (first pred)) sp) (callstack-term n sp) (want! pred)))
+
 (defn- var-occ
   "An occurrence of a variable or constructor: [type core]"
-  [env n]
+  [env n & [sp]]
   (if-let [e (get env n)]
     (if (:mono e)
       [(:mono e) (or (:core e) (lv n))]
@@ -384,7 +408,7 @@
     (if-let [t (get @*genv* (if (= "data" (nth n 1)) n n))]
       (let [[t preds] (instantiate t)
             core (list 'v (if (= "data" (nth n 1)) (ext-name "var" (nmod n) (occ n)) n))]
-        [t (app* core (mapv want! preds))])
+        [t (app* core (mapv #(want-at! % n sp) preds))])
       (do (error! "no type for " (name-str n)) [(fresh-meta) (list 'v n)]))))
 
 (defn- implicit-name
@@ -467,7 +491,7 @@
   [env e]
   (let [v (lval e)]
     (case (con v)
-      HsVar (var-occ env (nm (arg v 2)))
+      HsVar (var-occ env (nm (arg v 2)) (lsp (arg v 2)))
       HsApp (let [[tf cf] (infer env (arg v 2)) [tx cx] (infer env (arg v 3)) r (fresh-meta)]
               (unify tf (fn-ty tx r))
               [r (app* cf [cx])])
@@ -523,6 +547,34 @@
                      r (fresh-meta)]
                  (unify tf (reduce (fn [acc [t _]] (fn-ty t acc)) r (reverse rs)))
                  [r (app* cf (mapv second rs))])
+      RecordCon (let [cn (nm (arg v 2))
+                      [ct _] (instantiate (get @*genv* cn))
+                      flds (:fields (get @*cons* cn))
+                      [argts res] (loop [t ct as []] (let [t (prune t)] (if (and (= :tc (first t)) (= fun-tc (second t))) (recur (second (nth t 2)) (conj as (first (nth t 2)))) [as t])))
+                      given (into {} (map (fn [fb] (let [fbv (lval fb) f (nm (arg (lval (arg fbv 2)) 2))
+                                                         [t c] (infer env (arg fbv 3))
+                                                         i (.indexOf ^java.util.List flds f)]
+                                                     (when (>= i 0) (unify t (nth argts i)))
+                                                     [f c]))
+                                      (arg (arg v 3) 2)))]
+                  [res (app* (list 'v (ext-name "var" (nmod cn) (occ cn)))
+                             (mapv (fn [f] (or (get given f) (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "recConError")) [(list 'lit (occ f))]))) flds))])
+      RecordUpd (let [[te ce] (infer env (arg v 2))
+                      fbs (arg (arg v 3) 2)
+                      upd (mapv (fn [fb] (let [fbv (lval fb) f (nm (arg (lval (arg fbv 2)) 2))
+                                               [t c] (infer env (arg fbv 3))
+                                               [st _] (instantiate (get @*genv* f))]
+                                           (unify st (fn-ty te t))
+                                           [f c]))
+                                fbs)
+                      cons* (filter (fn [[_ info]] (every? (set (:fields info)) (map first upd))) @*cons*)]
+                  [te (list 'case ce (fresh-lv "wild")
+                            (mapv (fn [[cn info]]
+                                    (let [xs (mapv (fn [f] (fresh-lv (occ f))) (:fields info))
+                                          m (into {} upd)]
+                                      (list 'alt cn xs (app* (list 'v (ext-name "var" (nmod cn) (occ cn)))
+                                                             (mapv (fn [f x] (get m f x)) (:fields info) xs)))))
+                                  cons*))])
       ExprWithTySig (let [[t c] (infer env (arg v 2))
                           sig (arg (arg v 3) 2)
                           [st preds] (instantiate (sig-type sig))]
@@ -846,14 +898,21 @@
         conlist (case (con cs) DataTypeCons (arg cs 2) NewTypeCon [(arg cs 1)] [])]
     (doseq [c conlist]
       (let [cv (lval c) cn (nm (arg cv 2)) det (arg cv 6)
+            cdf-type (fn [f] (hs-type tvs (last (butlast f))))
+            fields (when (= 'RecCon (con det))
+                     (vec (mapcat (fn [f] (let [fv (lval f) t (cdf-type (arg fv 3))]
+                                            (map (fn [fo] [(nm (arg (lval fo) 2)) t]) (arg fv 2))))
+                                  (lval (arg det 1)))))
             argtys (case (con det)
-                     PrefixCon (mapv (fn [f] (hs-type tvs (last (butlast f)))) (last (rest det)))
-                     InfixCon [(hs-type tvs (last (butlast (arg det 1)))) (hs-type tvs (last (butlast (arg det 2))))]
-                     RecCon (vec (mapcat (fn [f] (let [fv (lval f) n (count (arg fv 2))] (repeat n (hs-type tvs (arg fv 3))))) (lval (arg det 1))))
+                     PrefixCon (mapv cdf-type (last (rest det)))
+                     InfixCon [(cdf-type (arg det 1)) (cdf-type (arg det 2))]
+                     RecCon (mapv second fields)
                      [])
             ty (reduce (fn [acc a] (fn-ty a acc)) res (reverse argtys))]
         (swap! *genv* assoc cn [:forall names [] ty])
-        (swap! *cons* assoc cn {:arity (count argtys) :tycon tn})))))
+        ;; a field's selector: forall tvs. T tvs -> field type
+        (doseq [[f t] fields] (swap! *genv* assoc f [:forall names [] (fn-ty res t)]))
+        (swap! *cons* assoc cn {:arity (count argtys) :tycon tn :fields (mapv first fields)})))))
 
 (defn- syn-decl! [d]
   (let [tn (nm (arg d 2)) tvn (qtvs-names (arg d 3))
@@ -1032,7 +1091,7 @@
   [tree]
   (let [{:keys [module decls binds sigs]} (second tree)
         m module]
-    (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0
+    (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
               *genv* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
               *wanteds* (atom []) *evidence* (atom {})]
       (load-ifaces!)
@@ -1046,6 +1105,11 @@
                                [{} []] binds)
             dms (vec (mapcat (fn [t] (when (= 'ClassDecl (con t)) (default-methods env (nm (arg t 3))))) tycl))
             ibs (vec (mapcat #(instance-binds env %) insts))
+            sels (vec (for [[cn info] @*cons* :when (= m (nmod cn)) f (:fields info)]
+                        (let [xs (mapv (fn [g] (fresh-lv (occ g))) (:fields info))]
+                          (list 'bind f (list 'lam [(fresh-lv "ds")]
+                                              (list 'case (list 'lv "ds" "sel") (fresh-lv "wild")
+                                                    [(list 'alt cn xs (nth xs (.indexOf ^java.util.List (:fields info) f)))]))))))
             _ (default! @*wanteds*)
             types (into {} (for [[n e] env :when (and (vector? n) (ext? n) (= m (nmod n)))]
                              [n (zonk (:poly e))]))
@@ -1056,7 +1120,7 @@
         {:module m
          :types (merge types cons-types)
          :syns @*syns*
-         :core (mapv resolve-core (concat core dms ibs))
+         :core (mapv resolve-core (concat core dms ibs sels))
          :errors @*errors*}))))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -1218,7 +1282,7 @@
         syns (merge (:syns r) gsyns)
         ours (:types r)
         keys* (sort-by name-str (filter (fn [n] (and (= (:module r) (nmod n)) (not (str/starts-with? (occ n) "$"))
-                                                     (or (= "var" (nth n 1)) (= "data" (nth n 1)))
+                                                     (contains? #{"var" "data" "fld"} (nth n 1))
                                                      (contains? ours n)))
                                          (keys gtypes)))
         tdiffs (vec (for [n keys* :let [g (canon-type syns (get gtypes n)) o (canon-type syns (get ours n))] :when (not= g o)]
