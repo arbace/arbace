@@ -75,6 +75,8 @@ code. Three kinds of things live here:
   3.14.10's `Python/symtable.c` and `Python/future.c`'s future parse (the release tarball
   https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256 `de414a57...b72032`), by hand on
   2026-11-03, the file carrying its notice (LICENSE.md: the PSF License Agreement); the rest is Arbace's own.
+- `llvm/` (`arbace.llvm.*`: llvmi, LLVM IR's evaluator, `arbace.llvm.run` and its judge `arbace.llvm.check`, and the C forms of the
+  personality-free layer `llvm/rt/none.c.ae`; doc/llvm/LLVM-CROP-SURVEY.md, "As built: llvmi") is Arbace's own.
 - `cpp/` (`arbace.cpp.*`, the C++ crop's eval: the lowering of LLVM forms to C forms, the code generator and its
   semantic analysis; doc/llvm/LOWER.md, doc/cpp/CODEGEN.md) is Arbace's own but for `cpp/template.ae`
   (`arbace.cpp.template`, templates, CODEGEN.md §G3), whose deduction ports parts of clang's
