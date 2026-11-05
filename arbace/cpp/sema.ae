@@ -99,6 +99,15 @@
 (def ^:dynamic *root* nil)    ; ours
 (def ^:dynamic *header-cache* nil) ; atom {parts entities}
 
+(defn- opaque-class
+  "A class the headers declare and the program uses only through pointers (FILE's struct _IO_FILE): incomplete."
+  [^String nm]
+  (or (get @*header-cache* [:opaque nm])
+      (let [id (next-id) t {:k :class :id id}]
+        (swap! abi/*classes* assoc id {:id id :name nm :path [] :scope (new-scope :class *root* :cls id :path [[:cls id]]) :fields [] :bases [] :outer *root*})
+        (swap! *header-cache* assoc [:opaque nm] t)
+        t)))
+
 (defn- ptype->type
   "Our type of the native parser's type map (a builtin's words, a pointer, a named type through its entity)."
   [t]
@@ -108,7 +117,9 @@
             :n (let [e (:ent t)]
                  (cond (:ty e) (ptype->type (:ty e))
                        (:target e) (ptype->type (:ty (:target e)))
+                       (and (:tag e) (#{"struct" "class" "union"} (:tag e))) (opaque-class (:name e))
                        :else (fail :header-type "header type " (:s t))))
+            :elab (if (#{"struct" "class" "union"} (:kw t)) (opaque-class (:s t)) (fail :header-type "header type " (:s t)))
             (fail :header-type "header type " (pr-str (dissoc t :ent))))]
     (cond-> r (:c t) (assoc :c true) (:v t) (assoc :v true))))
 
@@ -130,6 +141,11 @@
                                     :scope *root* :param-names [] :defaults [] :pos -1 :header true}]
                              (swap! *fns* assoc id f)
                              [{:e :fn :id id :pos -1}]))
+                     :var (when (and (:clink pe) (:ty pe) (not (:tmpl pe)))
+                            (let [id (next-id)]
+                              (swap! *vars* assoc id {:id id :name (:name pe) :ty (ptype->type (:ty pe)) :storage :global :path []
+                                                      :linkage :c :defined false :extern true :pos -1 :header true})
+                              [{:e :var :id id :pos -1}]))
                      :type (when (and (:ty pe) (not (:tag pe)) (not (:tmpl pe))) [{:e :type :ty (ptype->type (:ty pe)) :pos -1}])
                      nil))]
           (swap! *header-cache* assoc parts es)
@@ -277,6 +293,8 @@
         f {:name nm :kind k :cls cid :ty ty :cq (method-const? qt) :op (when nm (fn-op nm))
            :static (and cid (= "static" (:storageClass n)))
            :virtual (boolean (:virtual n)) :pure (boolean (:pure n))
+           :noexcept (boolean (re-find #"\bnoexcept\b(?!\s*\(\s*false)" (or qt "")))
+           :noexcept-false (boolean (re-find #"\bnoexcept\s*\(\s*false" (or qt "")))
            :linkage (if (linkage-c? home) :c :cpp)
            :internal (boolean (or (and (not cid) (= "static" (:storageClass n))) (:internal home)))
            :internal-l (boolean (and (not cid) (= "static" (:storageClass n)) (not (:internal home))))
@@ -1233,6 +1251,12 @@
     "CXXDeleteExpr" (let [e (rv (analyze ctx (first (kids n))))]
                       {:op :delete :e e :array (boolean (:isArrayAsWritten n)) :ty abi/void :cat :pr})
     "ExprWithCleanups" (analyze ctx (first (kids n)))
+    "CXXThrowExpr" (if-let [k (first (kids n))]
+                     (let [e (analyze ctx k)
+                           r (if (abi/class? (abi/unq (:ty e))) e (rv e))
+                           t (abi/unq (:ty r))]
+                       {:op :throw :ety t :init (init-for t e ctx :copy) :ty abi/void :cat :pr})
+                     {:op :throw :ty abi/void :cat :pr})
     (fail :expr "expression " (:kind n))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1379,6 +1403,24 @@
     "LabelStmt" {:s :label :name (:name n) :body (stmt ctx (first (kids n)))}
     "GotoStmt" (let [t (node-text n) [_ l] (re-find #"goto\s+([A-Za-z_][A-Za-z_0-9]*)" (or t ""))] {:s :goto :name l})
     "AttributedStmt" (stmt ctx (last (kids n)))
+    "CXXTryStmt" (let [[body & hs] (kids n)]
+                   {:s :try :body (stmt ctx body)
+                    :handlers (vec (for [h hs]
+                                     (let [c (block-ctx ctx)
+                                           ks (kids h)
+                                           vd (when (= "VarDecl" (:kind (first ks))) (first ks))
+                                           b (last ks)]
+                                       (if vd
+                                         (let [id (local-var! c vd :local)
+                                               t (:ty (var* id))
+                                               ct (abi/unq (abi/non-ref t))
+                                               src {:op :exn-obj :ty ct :cat :lv}
+                                               init (cond (abi/ref? t) {:i :bind :e src}
+                                                          (abi/ptr? ct) {:i :expr :e {:op :exn-ptr :ty ct :cat :pr}}
+                                                          :else (init-for t src c :copy))]
+                                           (enter! (:scope c) (:name vd) {:e :var :id id})
+                                           {:ty ct :var id :init init :body (stmt c b)})
+                                         {:body (stmt c b)}))))})
     (if (or (str/ends-with? (str (:kind n)) "Expr") (str/ends-with? (str (:kind n)) "Operator") (str/ends-with? (str (:kind n)) "Literal"))
       (full (analyze ctx n))
       (fail :stmt "statement " (:kind n)))))
@@ -1425,7 +1467,7 @@
     ((fn walk [s]
        (when (map? s)
          (when (= :return (:s s)) (swap! rets conj (:nrvo-var s)))
-         (doseq [k [:items :then :else :body]] (let [x (get s k)] (if (vector? x) (doseq [y x] (walk y)) (walk x))))))
+         (doseq [k [:items :then :else :body :handlers]] (let [x (get s k)] (if (vector? x) (doseq [y x] (walk y)) (walk x))))))
      body-s)
     (let [vs (distinct @rets)]
       (when (and (= 1 (count vs)) (first vs) (= :local (:storage (var* (first vs))))) (first vs)))))

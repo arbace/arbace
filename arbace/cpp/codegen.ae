@@ -32,10 +32,10 @@
 
 (defn- add-top! [f] (swap! *top* update :forms conj f))
 
-(defn- declare! [^String nm ret ps & {:keys [va]}]
+(defn- declare! [^String nm ret ps & {:keys [va nounwind]}]
   (when-not (contains? (:declared @*top*) nm)
     (swap! *top* update :declared conj nm)
-    (add-top! (list 'llvm/declare (gsym nm) ret (cond-> (mapv vector ps) va (conj '&))))))
+    (add-top! (apply list 'llvm/declare (gsym nm) ret (cond-> (mapv vector ps) va (conj '&)) (when nounwind [:attrs [:nounwind]])))))
 
 (defn- string-global [^String s]
   (or (get-in @*top* [:strings s])
@@ -132,6 +132,8 @@
         ret (cond (class-ret? f) 'void (abi/ref? (:ret ty)) 'ptr :else (abi/llvm-type (:ret ty) true))]
     [ret (vec (concat (when (class-ret? f) ['ptr]) (when (and (:cls f) (not (:static f))) ['ptr]) (map param-ltype (:ps ty)))) (:va ty)]))
 
+(declare nothrow-fn?)
+
 (defn- want-fn!
   "The function's symbol, its definition queued (or its declaration written)."
   [fid]
@@ -140,7 +142,7 @@
       (swap! *top* update :wanted conj fid)
       (if (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
         (swap! *top* update :queue conj fid)
-        (let [[r ps va] (fn-sig f)] (declare! nm r ps :va va))))
+        (let [[r ps va] (fn-sig f)] (declare! nm r ps :va va :nounwind (nothrow-fn? f)))))
     (gsym nm)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -149,12 +151,19 @@
 (def ^:dynamic *temps* nil)  ; atom [cleanup ...] of the current full-expression, or nil
 (def ^:dynamic *cond* 0)     ; > 0 inside a conditional branch of the full-expression
 (def ^:dynamic *extend* nil) ; atom: a reference's temporary is lifetime-extended into these cleanups
+(def ^:dynamic *extend-now* false) ; the temporary being pushed is the one a declared reference binds
 
-(declare emit-rv emit-lv emit-into emit-init call-dtor!)
+(declare emit-rv emit-lv emit-into emit-init call-dtor! eh-typeinfo!)
 
 (defn- nontrivial-dtor? [cid] (and cid (not (sema/trivial-dtor? cid))))
 
+(declare call-insn!)
+
 (defn- run-cleanup! [c]
+  (cond
+    (or (:try c) (:terminate c) (:eh-only c) (:delete c)) nil
+    (:end-catch c) (do (declare! "__cxa_end_catch" 'void []) (call-insn! 'void 'void (gsym "__cxa_end_catch") [] true))
+    :else
   (if-let [fl (:flag c)]
     (let [l1 (new-label "cleanup") l2 (new-label "cleanup.done")
           v (val! (list 'load 'i8 ['ptr fl] :align 1))
@@ -167,12 +176,12 @@
     (if (:array c)
       (let [cid (:cls c) n (long (:n c)) sz (abi/size-of {:k :class :id cid})]
         (doseq [i (range (dec n) -1 -1)] (call-dtor! cid (offset! (:array c) (* i sz)))))
-      (call-dtor! (:cls c) (:addr c)))))
+      (call-dtor! (:cls c) (:addr c))))))
 
 (defn- push-temp-cleanup! [cid addr]
   (when (nontrivial-dtor? cid)
     (cond
-      *extend* (swap! *extend* conj {:addr addr :cls cid})
+      (and *extend* *extend-now*) (swap! *extend* conj {:addr addr :cls cid})
       (pos? (long *cond*))
       (let [fl (alloca! 'i8 1)]
         (swap! *f* update :entry-stores conj (list 'store ['i8 0] ['ptr fl] :align 1))
@@ -187,6 +196,121 @@
          r# (binding [*temps* ts# *cond* 0] ~@body)]
      (doseq [c# (reverse @ts#)] (run-cleanup! c#))
      r#))
+
+;; ---------------------------------------------------------------------------------------------
+;; Exceptions (CODEGEN.md §4, as clang's CGException.cpp and CGCleanup.cpp write them at -O0): a call that may unwind
+;; inside a cleanup's or a try's scope is an invoke whose landing pad lists the enclosing handlers' type_infos (innermost
+;; first, up to a catch-all) and `cleanup` when a cleanup runs; the pad stores the exception and the selector, runs the
+;; cleanups from the innermost out, dispatches to a try's handlers by llvm.eh.typeid.for, and resumes past the outermost.
+;; The cleanup stack's entries beside the destructors: {:try handlers} (each {:ti type_info-or-nil :label l}),
+;; {:end-catch true}, {:eh-only true :addr :cls} (a constructed base or member while its constructor runs), {:delete p
+;; :size n} (new's storage while its initializer runs), {:terminate true} (the bottom of a noexcept function).
+
+(def ^:dynamic *no-eh* false) ; inside a landing pad: calls are plain
+
+(defn- eh-state [] (vec (concat (:cleanups @*f*) (when *extend* @*extend*) (when *temps* @*temps*))))
+
+(defn- pad-plan
+  "[clauses cleanup?] of a landing pad for the cleanup stack `state` (clauses: type_info symbols, nil for catch-all)."
+  [state]
+  (loop [cs (rseq state) clauses [] cleanup false]
+    (if-let [c (first cs)]
+      (cond
+        (:try c) (let [hs (:handlers c)
+                       all (some #(nil? (:ti %)) hs)
+                       cl (into clauses (map :ti (if all (concat (take-while :ti hs) [nil]) hs)))]
+                   (if all [cl cleanup] (recur (rest cs) cl cleanup)))
+        (:terminate c) [(conj clauses nil) cleanup]
+        :else (recur (rest cs) clauses true))
+      [clauses cleanup])))
+
+(defn- eh-slots! []
+  (or (:eh-slots @*f*) (let [s [(alloca! 'ptr 8) (alloca! 'i32 4)]] (swap! *f* assoc :eh-slots s) s)))
+
+(defn- run-cleanup-eh! [c]
+  (cond
+    (:eh-only c) (call-dtor! (:cls c) (:addr c))
+    (:delete c) (do (declare! "_ZdlPvm" 'void '[ptr i64] :nounwind true)
+                    (emit! (list 'call 'void (gsym "_ZdlPvm") [['ptr (:delete c)] ['i64 (:size c)]] :attrs [:nounwind])))
+    :else (run-cleanup! c)))
+
+(defn- clang-call-terminate! []
+  (when-not (contains? (:declared @*top*) "__clang_call_terminate")
+    (swap! *top* update :declared conj "__clang_call_terminate")
+    (declare! "__cxa_begin_catch" 'ptr '[ptr] :nounwind true)
+    (declare! "_ZSt9terminatev" 'void [] :nounwind true)
+    (add-top! (list 'llvm/define (gsym "__clang_call_terminate") 'void [['ptr '%a0]] :linkage :linkonce_odr :visibility :hidden
+                    :attrs [:noinline :noreturn :nounwind]
+                    :body [(list 'block nil
+                                 (list '= '%t1 (list 'call 'ptr (gsym "__cxa_begin_catch") [['ptr '%a0]] :attrs [:nounwind]))
+                                 (list 'call 'void (gsym "_ZSt9terminatev") [] :attrs [:noreturn :nounwind])
+                                 '(unreachable))])))
+  (gsym "__clang_call_terminate"))
+
+(defn- eh-walk!
+  "The landing pad's code from the cleanup entries `cs` (innermost first)."
+  [cs es ss]
+  (if-let [c (first cs)]
+    (cond
+      (:try c)
+      ((fn hs! [[h & more]]
+         (cond
+           (nil? h) (eh-walk! (rest cs) es ss)
+           (nil? (:ti h)) (br! (:label h))
+           :else (let [_ (declare! "llvm.eh.typeid.for.p0" 'i32 '[ptr] :nounwind true)
+                       sel (val! (list 'load 'i32 ['ptr ss] :align 4))
+                       id (val! (list 'call 'i32 (gsym "llvm.eh.typeid.for.p0") [['ptr (:ti h)]] :attrs [:nounwind]))
+                       m (val! (list 'icmp :eq 'i32 sel id))
+                       nx (new-label "catch.next")]
+                   (condbr! m (:label h) nx) (close-block!) (start! nx)
+                   (hs! more))))
+       (:handlers c))
+      (:terminate c) (let [e (val! (list 'load 'ptr ['ptr es] :align 8))]
+                       (emit! (list 'call 'void (clang-call-terminate!) [['ptr e]] :attrs [:noreturn :nounwind]))
+                       (emit! '(unreachable)))
+      :else (do (run-cleanup-eh! c) (eh-walk! (rest cs) es ss)))
+    (let [e (val! (list 'load 'ptr ['ptr es] :align 8))
+          s (val! (list 'load 'i32 ['ptr ss] :align 4))
+          a (val! (list 'insertvalue ['(struct ptr i32) 'poison] ['ptr e] 0))
+          b (val! (list 'insertvalue ['(struct ptr i32) a] ['i32 s] 1))]
+      (emit! (list 'resume '(struct ptr i32) b)))))
+
+(defn- landing-pad!
+  "The label of the landing pad for the cleanup stack `state` (written out of line once per state), or nil when no
+  handler or cleanup is active."
+  [state]
+  (let [[clauses cleanup] (pad-plan state)]
+    (when (or (seq clauses) cleanup)
+      (or (get-in @*f* [:pads state])
+          (let [l (new-label "lpad")
+                saved (select-keys @*f* [:label :insts :term :blocks])
+                [es ss] (eh-slots!)]
+            (swap! *f* assoc-in [:pads state] l)
+            (swap! *f* assoc :personality true :blocks [])
+            (start! l)
+            (let [lp (val! (apply list 'landingpad '(struct ptr i32)
+                                  (concat (when cleanup [:cleanup]) (map (fn [ti] (list 'catch 'ptr (or ti 'null))) clauses))))]
+              (emit! (list 'store ['ptr (val! (list 'extractvalue ['(struct ptr i32) lp] 0))] ['ptr es] :align 8))
+              (emit! (list 'store ['i32 (val! (list 'extractvalue ['(struct ptr i32) lp] 1))] ['ptr ss] :align 4)))
+            (binding [*no-eh* true *temps* nil *extend* nil] (eh-walk! (rseq state) es ss))
+            (close-block!)
+            (swap! *f* (fn [f] (-> f (update :pad-blocks (fnil into []) (:blocks f)) (merge saved) (assoc :term (boolean (:term saved))))))
+            l)))))
+
+(defn call-insn!
+  "A call (`ty` the call's type: the return type or a fn type for a variadic callee) that is an invoke when it may
+  unwind inside a cleanup's or a handler's scope; its result's operand (nil for void)."
+  [ret ty callee args nounwind]
+  (let [pad (when-not (or nounwind *no-eh*) (landing-pad! (eh-state)))]
+    (if pad
+      (let [cont (new-label "invoke.cont")
+            inv (list 'invoke ty callee args :to cont :unwind pad)
+            r (if (= 'void ret) (do (emit! inv) nil) (val! inv))]
+        (close-block!) (start! cont) r)
+      (let [form (apply list 'call ty callee args (when nounwind [:attrs [:nounwind]]))]
+        (if (= 'void ret) (do (emit! form) nil) (val! form))))))
+
+(defn- nothrow-fn? [f] (boolean (or (and (= :dtor (:kind f)) (not (:noexcept-false f))) (:noexcept f))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Calls
@@ -240,9 +364,8 @@
       (let [args (arg-values (:ps (:ty f)) inits)
             args (vec (concat (when (class-ret? f) [['ptr dest]]) (when (and (:cls f) (not (:static f))) [['ptr obj]]) args))
             callee (if virtual (vcall-target (:cls f) fid nil obj) (want-fn! fid))
-            fty (if va (list 'fn ret (conj ps '&)) ret)
-            form (list 'call fty callee args)]
-        (if (= 'void ret) (do (emit! form) nil) (val! form))))))
+            fty (if va (list 'fn ret (conj ps '&)) ret)]
+        (call-insn! ret fty callee args (nothrow-fn? f))))))
 
 (defn call-dtor!
   "Calls the class's complete destructor on the object at `addr` (nothing for a trivial one)."
@@ -257,9 +380,8 @@
         cret (abi/class? (abi/unq (:ret ft)))
         ret (cond cret 'void (abi/ref? (:ret ft)) 'ptr :else (abi/llvm-type (:ret ft) true))
         ps (vec (concat (when cret ['ptr]) (map param-ltype (:ps ft))))
-        args (vec (concat (when cret [['ptr dest]]) args))
-        form (list 'call (if (:va ft) (list 'fn ret (conj ps '&)) ret) p args)]
-    (if (= 'void ret) (do (emit! form) nil) (val! form))))
+        args (vec (concat (when cret [['ptr dest]]) args))]
+    (call-insn! ret (if (:va ft) (list 'fn ret (conj ps '&)) ret) p args false)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
@@ -273,6 +395,11 @@
                                      (when-let [f (get-in @*top* [:lazy nm])]
                                        (swap! *top* update :lazy dissoc nm)
                                        (add-top! f))
+                                     ;; a variable defined elsewhere (extern, a header's): declared
+                                     (when (and (:extern v) (not (contains? (:declared @*top*) nm)))
+                                       (swap! *top* update :declared conj nm)
+                                       (add-top! (list 'llvm/global (gsym nm) (if (abi/scalar? (abi/unq (:ty v))) (abi/llvm-type (:ty v)) (list 'array (abi/size-of (:ty v)) 'i8))
+                                                       :linkage :external :align (abi/align-of (:ty v)))))
                                      (gsym nm))
           :static-local (gsym (abi/mangle-local-static (sema/fnd (:fn-of v)) (:name v) (long (:disc v))))
           (fail :codegen "no address for " (:name v))))))
@@ -443,7 +570,7 @@
                    bytes (val! (list 'mul 'i64 n sz))
                    bytes (if cookie (val! (list 'add 'i64 bytes 8)) bytes)
                    _ (declare! "_Znam" 'ptr '[i64])
-                   raw (val! (list 'call 'ptr (gsym "_Znam") [['i64 bytes]]))
+                   raw (call-insn! 'ptr 'ptr (gsym "_Znam") [['i64 bytes]] false)
                    p (if cookie (do (emit! (list 'store ['i64 n] ['ptr raw] :align 8)) (offset! raw 8)) raw)
                    init (:init e)]
                ;; the elements: the list's, then the rest default-initialized (a loop)
@@ -464,9 +591,28 @@
                        (begin! le)))))
                p)
              (do (declare! "_Znwm" 'ptr '[i64])
-                 (let [p (val! (list 'call 'ptr (gsym "_Znwm") [['i64 sz]]))]
+                 (let [p (call-insn! 'ptr 'ptr (gsym "_Znwm") [['i64 sz]] false)
+                       d (count (:cleanups @*f*))]
+                   (when (#{:ctor :expr} (:i (:init e))) (swap! *f* update :cleanups conj {:delete p :size sz}))
                    (emit-init p et (:init e))
+                   (swap! *f* update :cleanups #(subvec % 0 d))
                    p))))
+    :throw (if-let [t (:ety e)]
+             (let [_ (declare! "__cxa_allocate_exception" 'ptr '[i64] :nounwind true)
+                   _ (declare! "__cxa_throw" 'void '[ptr ptr ptr])
+                   x (val! (list 'call 'ptr (gsym "__cxa_allocate_exception") [['i64 (abi/size-of t)]] :attrs [:nounwind]))
+                   _ (emit-init x t (:init e))
+                   ti (eh-typeinfo! t)
+                   cid (when (abi/class? t) (:id t))
+                   d (if (nontrivial-dtor? cid) (want-fn! (:dtor (abi/cls cid))) 'null)]
+               (call-insn! 'void 'void (gsym "__cxa_throw") [['ptr x] ['ptr ti] ['ptr d]] false)
+               (emit! '(unreachable))
+               nil)
+             (do (declare! "__cxa_rethrow" 'void [])
+                 (call-insn! 'void 'void (gsym "__cxa_rethrow") [] false)
+                 (emit! '(unreachable))
+                 nil))
+    :exn-ptr (:exn-adj @*f*)
     :delete (let [p (emit-rv (:e e))
                   et (:to (abi/unq (:ty (:e e))))
                   cid (when (abi/class? (abi/unq et)) (:id (abi/unq et)))
@@ -520,6 +666,7 @@
     :derived-lv (offset! (emit-lv (:e e)) (- (long (base-offset (:to e) (:id (abi/unq (:ty (:e e))))))))
     :reinterpret-lv (emit-lv (:e e))
     :str (gsym (string-global (:s e)))
+    :exn-obj (:exn-adj @*f*)
     :temp (let [t (slot! (:ty e))] (emit-init t (:ty e) (:init e)) (push-temp-cleanup! (:id (abi/unq (:ty e))) t) t)
     :assign (let [v (emit-rv (:r e)) a (emit-lv (:l e))] (store! (:ty e) v a) a)
     :cassign (let [a (emit-lv (:l e)) t (abi/unq (:ty e)) old (load! t a)
@@ -588,7 +735,7 @@
       :bind (store! (abi/ptr abi/void) (emit-lv (:e init)) addr)
       :bind-temp (let [tt (:ty init) tmpa (slot! tt)]
                    (emit-init tmpa tt (:init init))
-                   (push-temp-cleanup! (when (abi/class? tt) (:id tt)) tmpa)
+                   (binding [*extend-now* true] (push-temp-cleanup! (when (abi/class? tt) (:id tt)) tmpa))
                    (store! (abi/ptr abi/void) (if (:to init) (offset! tmpa (base-offset (:id tt) (:to init))) tmpa) addr))
       :list (if (abi/arr? tu)
               (let [et (:of tu) sz (abi/size-of et) n (long (or (:n init) (:n tu) (count (:items init))))]
@@ -615,7 +762,7 @@
   (doseq [c (reverse (subvec (:cleanups @*f*) depth))] (run-cleanup! c)))
 (defn- pop-to! [^long depth] (unwind-to! depth) (swap! *f* update :cleanups #(subvec % 0 depth)))
 
-(declare emit-stmt emit-d0!)
+(declare emit-stmt emit-d0! emit-try!)
 
 (defn- local-decl! [s]
   (let [v (sema/var* (:var s))
@@ -695,6 +842,7 @@
                          (and (abi/class? (abi/unq (:ty e))) (= :pr (:cat e))) (materialize! e)
                          (#{:lv :xv} (:cat e)) (emit-lv e)
                          :else (emit-rv e))))
+    :try (emit-try! s)
     :copy-bytes (memcpy! (emit-lv (:dst s)) (emit-lv (:src s)) (abi/size-of (:ty (:dst s))))
     :while (let [lc (new-label "while.cond") lb (new-label "while.body") le (new-label "while.end") d (cleanup-depth)]
              (begin! lc)
@@ -759,6 +907,32 @@
                 (br! l)))
     (fail :codegen "statement " (:s s))))
 
+;; the try statement: its body in the scope of a {:try handlers} entry; each handler begins the catch, binds its
+;; variable, runs in the scope of an {:end-catch} entry and joins the code after the statement
+(defn- emit-try! [s]
+  (let [d (cleanup-depth)
+        cont (new-label "try.cont")
+        hs (mapv (fn [h] (assoc h :ti (when (:ty h) (eh-typeinfo! (:ty h))) :label (new-label "catch"))) (:handlers s))]
+    (swap! *f* update :cleanups conj {:try true :handlers (mapv #(select-keys % [:ti :label]) hs)})
+    (emit-stmt (:body s))
+    (swap! *f* update :cleanups #(subvec % 0 d))
+    (when-not (:term @*f*) (br! cont))
+    (doseq [h hs]
+      (close-block!) (start! (:label h))
+      (let [[es _] (eh-slots!)
+            _ (declare! "__cxa_begin_catch" 'ptr '[ptr] :nounwind true)
+            x (val! (list 'load 'ptr ['ptr es] :align 8))
+            adj (val! (list 'call 'ptr (gsym "__cxa_begin_catch") [['ptr x]] :attrs [:nounwind]))]
+        (swap! *f* update :cleanups conj {:end-catch true})
+        (when-let [vid (:var h)]
+          (swap! *f* assoc :exn-adj adj)
+          (local-decl! {:var vid :init (:init h)}))
+        (emit-stmt (:body h))
+        (if (:term @*f*)
+          (swap! *f* update :cleanups #(subvec % 0 d))
+          (do (pop-to! d) (br! cont)))))
+    (close-block!) (start! cont)))
+
 ;; the if statement
 (defn- emit-if! [s]
   (let [lt (new-label "if.then") le (new-label "if.else") lend (new-label "if.end")
@@ -804,6 +978,7 @@
             sret (when (class-ret? f) (let [p (nth pnames @k)] (swap! k inc) p))
             this (when (and (:cls f) (not (:static f))) (let [p (nth pnames @k)] (swap! k inc) p))]
         (swap! *f* assoc :sret sret)
+        (when (nothrow-fn? f) (push-cleanup! {:terminate true}))
         (when this
           (let [s (alloca! 'ptr 8)]
             (emit! (list 'store ['ptr this] ['ptr s] :align 8))
@@ -825,14 +1000,16 @@
                     (if-let [d (:delegate ti)]
                       (with-full (emit-init thisv {:k :class :id cid} d))
                       (do (doseq [[i b] (map-indexed vector (:bases ti))]
-                            (with-full (emit-init (offset! thisv (nth (:bases (abi/layout cid)) i)) {:k :class :id (:base b)} (:init b))))
+                            (let [a (offset! thisv (nth (:bases (abi/layout cid)) i))]
+                              (with-full (emit-init a {:k :class :id (:base b)} (:init b)))
+                              (when (nontrivial-dtor? (:base b)) (push-cleanup! {:eh-only true :addr a :cls (:base b)}))))
                           (when (abi/dynamic? cid) (vptr-store! cid thisv))
                           (doseq [fi (:fields ti)]
                             (let [fl (nth (:fields (abi/cls cid)) (:field fi))
-                                  addr (offset! thisv (abi/field-offset cid (:field fi)))]
-                              (if (abi/ref? (:ty fl))
-                                (with-full (emit-init addr (:ty fl) (:init fi)))
-                                (with-full (emit-init addr (:ty fl) (:init fi)))))))))
+                                  addr (offset! thisv (abi/field-offset cid (:field fi)))
+                                  ft (abi/unq (:ty fl))]
+                              (with-full (emit-init addr (:ty fl) (:init fi)))
+                              (when (and (abi/class? ft) (nontrivial-dtor? (:id ft))) (push-cleanup! {:eh-only true :addr addr :cls (:id ft)})))))))
             :dtor (do (when (abi/dynamic? cid) (vptr-store! cid thisv))
                       ;; the bases and members destroyed after the body, as cleanups (a return in the body runs them)
                       (let [c (abi/cls cid) l (abi/layout cid)]
@@ -864,10 +1041,14 @@
             blocks (:blocks s)
             entry (first blocks)
             entry (apply list 'block (second entry) (concat (:allocas s) (:entry-stores s) (drop 2 entry)))
-            body (vec (cons entry (rest blocks)))
+            body (vec (concat [entry] (rest blocks) (:pad-blocks s)))
             params (mapv (fn [t p] [t p]) ps pnames)]
+        (when (:personality s) (declare! "__gxx_personality_v0" 'i32 [] :va true))
         (add-top! (apply list 'llvm/define (gsym nm) ret (cond-> params va (conj '&))
-                         (concat (linkage-of f) [:body body])))
+                         (concat (linkage-of f)
+                                 (when (nothrow-fn? f) [:attrs [:nounwind]])
+                                 (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
+                                 [:body body])))
         ;; the complete object's constructor and destructor: aliases of the base ones for a strong definition
         (when (and (#{:ctor :dtor} (:kind f)) (empty? (linkage-of f)))
           (add-top! (list 'llvm/alias (gsym (abi/mangle-fn f 1)) (list 'fn ret (vec ps)) ['ptr (gsym nm)])))
@@ -934,6 +1115,46 @@
                                    (do (want-fn! (:fn s)) ['ptr (gsym (abi/mangle-fn f 0))])
                                    ['ptr (want-fn! (:fn s))]))))))]
     (add-top! (list 'llvm/global (gsym nm) (list 'array (count slots) 'ptr) (apply list 'array slots) :linkage :linkonce_odr :constant true :align 8))))
+
+(defn- abi-class-global! [^String kind]
+  (when-not (contains? (:declared @*top*) kind)
+    (swap! *top* update :declared conj kind)
+    (add-top! (list 'llvm/global (gsym kind) '(array 0 ptr) :linkage :external)))
+  ['ptr (list 'getelementptr :inbounds 'ptr ['ptr (gsym kind)] ['i64 2])])
+
+(defn eh-typeinfo!
+  "The type_info object of the type `t` (a thrown or caught type): a class's own; a fundamental type's and a pointer
+  to one's in the runtime (external); a pointer to a class's or an enumeration's written here (Itanium §2.9.5)."
+  [t]
+  (let [t (abi/unq t)
+        fundamental? (fn [x] (= :b (:k (abi/unq x))))]
+    (cond
+      (abi/class? t) (typeinfo! (:id t))
+      (or (fundamental? t) (and (abi/ptr? t) (fundamental? (:to t))))
+      (let [nm (str "_ZTI" (abi/mangle-type-name t))]
+        (when-not (contains? (:declared @*top*) nm)
+          (swap! *top* update :declared conj nm)
+          (add-top! (list 'llvm/global (gsym nm) 'ptr :linkage :external :constant true)))
+        (gsym nm))
+      :else
+      (let [mn (abi/mangle-type-name t)
+            nm (str "_ZTI" mn) ts (str "_ZTS" mn)]
+        (when-not (contains? (:declared @*top*) nm)
+          (swap! *top* update :declared conj nm ts)
+          (add-top! (list 'llvm/global (gsym ts) (list 'array (inc (count mn)) 'i8) (list 'c-string (str mn (char 0))) :linkage :linkonce_odr :constant true :align 1))
+          (cond
+            (abi/ptr? t)
+            (let [to (:to t)
+                  inner (eh-typeinfo! to)
+                  vt (abi-class-global! "_ZTVN10__cxxabiv119__pointer_type_infoE")]
+              (add-top! (list 'llvm/global (gsym nm) '(struct ptr ptr i32 ptr)
+                              (list 'struct vt ['ptr (gsym ts)] ['i32 (+ (if (:c to) 1 0) (if (:v to) 2 0))] ['ptr inner])
+                              :linkage :linkonce_odr :constant true :align 8)))
+            (abi/enum? t)
+            (add-top! (list 'llvm/global (gsym nm) '(struct ptr ptr) (list 'struct (abi-class-global! "_ZTVN10__cxxabiv116__enum_type_infoE") ['ptr (gsym ts)])
+                            :linkage :linkonce_odr :constant true :align 8))
+            :else (fail :rtti "type_info of " (pr-str t))))
+        (gsym nm)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Namespace-scope variables
@@ -1037,7 +1258,10 @@
           (close-block!))
         (let [s @state blocks (:blocks s) entry (first blocks)
               entry (apply list 'block (second entry) (concat (:allocas s) (:entry-stores s) (drop 2 entry)))]
-          (add-top! (list 'llvm/define (gsym nm) 'void [] :linkage :internal :body (vec (cons entry (rest blocks)))))
+          (when (:personality s) (declare! "__gxx_personality_v0" 'i32 [] :va true))
+          (add-top! (apply list 'llvm/define (gsym nm) 'void [] :linkage :internal
+                           (concat (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
+                                   [:body (vec (concat [entry] (rest blocks) (:pad-blocks s)))])))
           (add-top! (list 'llvm/global (gsym "llvm.global_ctors") '(array 1 (struct i32 ptr ptr))
                           (list 'array ['(struct i32 ptr ptr) (list 'struct ['i32 65535] ['ptr (gsym nm)] ['ptr 'null])])
                           :linkage :appending)))))))
