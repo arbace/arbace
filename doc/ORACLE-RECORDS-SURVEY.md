@@ -821,3 +821,7 @@ script, `ARBACE_GATE_STORE` a scratch store, `bin/gate --full --plan`):
     whole and git cannot diff.
   - Costs: (a) 1.4 MB in the tree, each helper or corpus change a visible diff; (b) smaller, opaque.
   - *Recommended: (a)*: a helper change is rare (`dump.ss` has not changed since SM2) and a diff of the dumps is the review.
+
+## Decided (2026-11-05, the user: ORS19)
+
+ORS19 (a): the essential subset's Chez dumps stay committed as raw text (1.4 MB), so a helper change shows as a diff.
