@@ -1681,3 +1681,32 @@ integration head c3488342, 205f merged), then the pip probe again and where pip 
   rest: `__unpacked__`, parameters' deduplication and chaining, pickling, a union's `__parameters__`); test_typing still
   does not import (`cannot create 'typing.TypeAliasType' instances`, the class `:type-params`). No method that passed
   before fails.
+
+## As built: 207 (pip on pyi as an eval target, PYS24 (a); 2026-11-05, the Mac VM, queue 207)
+
+From 205g's head (ddc8d58a), the user's decision on 205g's DECISION: (a), callBound given the owner.
+
+- **A built-in function as a class's special method** (`go/arbace/py/attr.ae`'s `callBound`, its 21 callers in
+  `class.ae`, `format.ae`, `bytes.ae`, `math_extra.ae`): `callBound(d, owner, self, args, kwnames)` takes the type of
+  self's MRO the method was found on (`lookupAttr`'s second value; at the `pyDefined` callers, which know it is a class
+  statement's, self's type) and applies `descrGet`'s rule: an unbound `Builtin` found on a class statement's type that is
+  no method descriptor (`methodDescrs`) is called with the arguments alone, as CPython's `lookup_maybe_method` binds
+  only what has `__get__`. `typing.NewType`'s `__call__ = _idfunc` (where pip install stopped since 205g), `class C:
+  __call__ = len`, `__getitem__ = abs`, `__init__ = print` now behave as CPython's; `object.__repr__` or `list.__len__`
+  put in a class still bind. `_typing`'s `ParamSpecArgs` and `ParamSpecKwargs`, classes made in Go with Go methods,
+  register those as method descriptors (as AST's base does). Program `test/python/pyi/w207-builtin-special.py`. The
+  class `:builtin-function-special-method` is removed.
+- **pip** (`bin/pyi wheels pip-probe`, now a check): with that fix pip 26.2.1 (the apks' copy) runs on pyi with no
+  other change. The check runs pip by pyi (`PYI_SITE`) and by `python3 -I -S -B` (runpy) with the same argv and
+  directories: `--version`, `list`, `install --no-index --no-deps --no-compile --target DIR WHEEL` for each of the five
+  pins, `install --no-index --find-links CACHE --no-compile --target DIR` for their five names, `list --path DIR`.
+  Each run's status, stdout and stderr equal CPython's and each installed tree equals file for file (every file's
+  digest, `RECORD`, `INSTALLER`, `REQUESTED`, `direct_url.json`), but two classed differences: stderr's `WARNING:
+  Disabling truststore since ssl support is missing` (pyi has no `_ssl`, class `:ssl`, queue 209's module; no offline
+  verb uses the trust store), and a console script's first line, `#!` and the run's `sys.executable`, with its `RECORD`
+  row's digest and size (csv's `\r\n` rows). `--no-compile` on both sides: pyi compiles to
+  `__pycache__/NAME.arbace-314.pyc`, its own code (class `:pyc-magic`); its `RECORD` row is otherwise pip's (no digest,
+  as CPython's). Two negative controls: CPython's tree with one file changed and CPython's launcher judged against
+  pyi's executable both refused. On the VM (aarch64) about 7 minutes: each pip run takes 30-60 s on pyi.
+- Not done: pip with the network (by the brief), pip's wheel building from an sdist (no pin is an sdist), `pip
+  uninstall` and installing into a site rather than `--target`.
