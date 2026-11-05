@@ -849,3 +849,7 @@ branch). (b) Emit them `internal` and let the names level ignore internal always
 that is no longer "every name ours is clang's". (c) Fold the few the headers use on hot paths (as `__is_constant_evaluated`
 now). **Recommended: (a)**, in G4b: libstdc++ marks its iterators' and allocators' accessors always-inline under
 `_GLIBCXX_ALWAYS_INLINE`; `hdr-vector` and `hdr-string` need it for their names.
+
+## Decided (2026-11-05, the user: P15, P16)
+
+P15 (b): the full parse's nodes cached as the skim cache does, in G4b; P16 (a): always-inline functions inlined in our code generator as clang's AlwaysInliner does at -O0, in G4b.
