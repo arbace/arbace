@@ -53,7 +53,9 @@ cmd_suite_corpus() {
 }
 
 suite_selected() {
-  if [ -n "$ONLY" ]; then grep -E "^[^	]*($ONLY)" "$S/corpus.tsv" || true; else cat "$S/corpus.tsv"; fi
+  if [ -n "$ONLY_LIST" ]; then
+    awk -F'\t' 'FILENAME == ARGV[1] { if ($1 !~ /^#/ && $1 != "") want[$1] = 1; next } $1 in want' "$ONLY_LIST" "$S/corpus.tsv"
+  elif [ -n "$ONLY" ]; then grep -E "^[^	]*($ONLY)" "$S/corpus.tsv" || true; else cat "$S/corpus.tsv"; fi
 }
 
 # suite_stage ID BASE UNITS DIR: the units' files (and a testsuite program's directory) copied into DIR, flat
@@ -160,7 +162,7 @@ cmd_suite_check() {
   suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' | xargs -0 -n 7 -P "$JOBS" bash -c 'suite_oi_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; oi_key "$S/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
-  [ -n "$ONLY" ] && mode=$mode-only
+  { [ -n "$ONLY" ] || [ -n "$ONLY_LIST" ]; } && mode=$mode-only
   "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$SUITE_OI" "$SUITE_OI_CLASSES" || return $?
   if [ "$RECORD" = 1 ]; then
     suite_header "$SUITE_OI" ';; oi'"'"'s results over the suite corpus (bin/oi suite check --record; doc/ocaml/OCAML-SURVEY.md, "As built: O7 (write-ahead)"):
@@ -215,7 +217,7 @@ cmd_suite_check_aot() {
   done
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; aot_key "$S/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
-  [ -n "$ONLY" ] && mode=$mode-only
+  { [ -n "$ONLY" ] || [ -n "$ONLY_LIST" ]; } && mode=$mode-only
   "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$S/oi.tsv" "$SUITE_AOT" "$SUITE_AOT_CLASSES" || return $?
   if [ "$RECORD" = 1 ]; then
     suite_header "$SUITE_AOT" ';; The AOT level'"'"'s results over the suite corpus (bin/oi suite check --aot --record; doc/ocaml/OCAML-SURVEY.md, "As built: O7
