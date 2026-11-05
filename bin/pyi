@@ -107,6 +107,17 @@
 #   bin/pyi bench [--pyi] [--record] [BM...]
 #                                  PY8: pyperformance 1.14.0's pure benchmarks (test/python/bench) run by CPython, compiled and
 #                                  on the loop (--pyi: by pyi on goi too), the milliseconds; --record: bench-aot-linux-ARCH.edn
+#   bin/pyi wheels fetch|install|verify|path|run SCRIPT [ARGS...]|check [NAME...]|pip-probe
+#                                  queue 205 (PYS23-PYS25 (a), survey "As built: 205"): the pinned pure-Python wheels of
+#                                  test/python/wheels.edn; fetch: each into ${REPR_PYTHON_SRC:-.tmp/repr-python}/wheels
+#                                  (the one network step, checked by SHA-256 and size); install: the site site-KEY beside
+#                                  it (lib/, bin/) by arbace.python.wheels, Arbace's own installer (RECORD verified, no
+#                                  pip), its path printed; verify: the wheels against their pins, the site against its
+#                                  RECORDs; path: its lib/, for PYI_SITE (run, python and repl put PYI_SITE's directories
+#                                  on sys.path after the stdlib); run: a console script's launcher; check: install, verify,
+#                                  the layout against the host pip's --target, each pin's sample (test/python/wheels/) and
+#                                  console script by pyi and by python3 -I -S with the same site, two negative controls;
+#                                  pip-probe: the apks' pip on pyi (--version, an offline install), failures classed
 # Environment: REPR_PYTHON_SRC as for bin/repr-python (the tarball's source).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -398,13 +409,18 @@ stdlib_lib() {
   echo "$top/Lib"
 }
 
+# PYI_SITE (queue 205): directories, colon-separated, on sys.path after the stdlib (a site of pinned wheels, bin/pyi
+# wheels install); exported, so pyi's children (sys.executable) see the same site
+site_args=()
+[ -z "${PYI_SITE:-}" ] || site_args=(--site "$PYI_SITE")
+
 # the host's side of the runtime (arbace.python.run): its work directory and a run's id for its scratch
 pyi_env() { export PYI_ROOT="$root" PYI_WORK="$WORK" PYI_RUN_ID="$$" PYI_EXECUTABLE="$root/tools/pyi/python3"; }
 
 cmd_repl() {
   if [ "${1:-}" = --check ]; then repl_check; return; fi
   pyi_env
-  pa_arbace repl --lib "$(stdlib_lib)"
+  pa_arbace repl --lib "$(stdlib_lib)" ${site_args[@]+"${site_args[@]}"}
 }
 
 # repl_check: test/python/pyi/*.in fed to bin/pyi repl and to the oracle's basic REPL (python3 -q -i): stdout, the
@@ -445,7 +461,7 @@ cmd_run() {
   pyi_env
   # in the caller's directory, as python3 runs a program (PY6e's REQUEST 5: lib-test's TESTFN files were made in the
   # checkout's root)
-  (cd "$caller_pwd" && pa_arbace run --dump "$d/dumps/$name.ae" --file "$f" --lib "$(stdlib_lib)" --argv0 "$argv0" -- "$@") || rc=$?
+  (cd "$caller_pwd" && pa_arbace run --dump "$d/dumps/$name.ae" --file "$f" --lib "$(stdlib_lib)" ${site_args[@]+"${site_args[@]}"} --argv0 "$argv0" -- "$@") || rc=$?
   rm -rf "$d"
   return $rc
 }
@@ -525,7 +541,7 @@ PYI_M
   echo $$ > "$d/pid"
   cd "$caller_pwd"
   ARBACE_PATH="$root" GOMEMLIMIT=${PYI_GOMEMLIMIT:-3GiB} GOMAXPROCS=${PYI_THREADS:-4} \
-    exec "$(arbace_exe)" -m arbace.python run --dump "$d/dumps/$name.ae" --file "$src" --lib "$lib" --argv0 "$argv0" -- "$@"
+    exec "$(arbace_exe)" -m arbace.python run --dump "$d/dumps/$name.ae" --file "$src" --lib "$lib" ${site_args[@]+"${site_args[@]}"} --argv0 "$argv0" -- "$@"
 }
 
 # in_group CMD...: CMD in a session and process group of its own (setsid), waited for, then the whole group killed: a
@@ -1179,6 +1195,168 @@ smoke_run() {
 }
 
 command -v python3 >/dev/null || die "no python3 (the oracle)"
+# ---- wheels (queue 205; survey "As built: 205", PYS23-PYS25 (a)) ----
+# the pins test/python/wheels.edn; the wheels fetched once into WHEELS_CACHE/wheels (the one network step), the site
+# WHEELS_CACHE/site-KEY (lib/, bin/) built from the cache alone by arbace.python.wheels (no pip, no Python)
+WHEELS_PINS="${PYI_WHEELS_PINS:-$root/test/python/wheels.edn}"
+WHEELS_CACHE="${REPR_PYTHON_SRC:-$root/.tmp/repr-python}"
+
+wheels_arbace() { ARBACE_PATH="$root" "$(arbace_exe)" -m arbace.python.wheels "$@"; }
+
+# the site's directory: KEY the first 20 characters of the SHA-256 of the pins and the installer's source
+wheels_site() {
+  local key; key=$(cat "$WHEELS_PINS" "$root/arbace/python/wheels.ae" | sha256sum | cut -c1-20)
+  echo "$WHEELS_CACHE/site-$key"
+}
+
+wheels_fetch() {
+  local file url sha bytes rest f n=0 got=0
+  mkdir -p "$WHEELS_CACHE/wheels"
+  while IFS=$'\t' read -r file url sha bytes rest; do
+    n=$((n + 1)); f="$WHEELS_CACHE/wheels/$file"
+    if [ -f "$f" ] && [ "$(sha256sum < "$f" | cut -c1-64)" = "$sha" ]; then continue; fi
+    rm -f "$f.part.$$"
+    curl -fsSL --retry 2 -o "$f.part.$$" "$url" || { rm -f "$f.part.$$"; die "wheels fetch: $url failed"; }
+    [ "$(sha256sum < "$f.part.$$" | cut -c1-64)" = "$sha" ] && [ "$(stat -c %s "$f.part.$$")" = "$bytes" ] \
+      || { rm -f "$f.part.$$"; die "wheels fetch: $file's SHA-256 or size is not the pin's (moving a pin is a recorded decision)"; }
+    mv "$f.part.$$" "$f"; got=$((got + 1))
+  done < <(wheels_arbace list --pins "$WHEELS_PINS")
+  echo "wheels fetch: $n pinned wheels in $WHEELS_CACHE/wheels ($got fetched)"
+}
+
+# wheels_cmp NAME A B: two runs' stdout, status and stderr's last line
+wheels_cmp() {
+  local a=$1 b=$2
+  if cmp -s "$a.out" "$b.out" && [ "$(cat "$a.rc")" = "$(cat "$b.rc")" ] \
+     && [ "$(grep -v '^[[:space:]]*$' "$a.err" | tail -1)" = "$(grep -v '^[[:space:]]*$' "$b.err" | tail -1)" ]; then return 0; fi
+  { diff "$a.out" "$b.out" | head -10; echo "  status $(cat "$a.rc") / $(cat "$b.rc")"; tail -n 2 "$a.err" "$b.err"; } | sed 's/^/    /'
+  return 1
+}
+
+# the oracle's side: python3 -I -S, sys.path [the program's directory, the stdlib, the site's lib]
+wheels_cpython() { # SITE FILE ARGS...
+  python3 -I -S -B -c 'import os, runpy, sys
+f, site = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.dirname(f)); sys.path.append(site); sys.argv = [f] + sys.argv[3:]
+runpy.run_path(f, run_name="__main__")' "$2" "$1" "${@:3}"
+}
+
+wheels_check() {
+  local site W="$WORK/wheels" T="$root/test/python/wheels" bad=0 n=0 file url sha bytes sample script only=("$@")
+  site=$(wheels_site)
+  wheels_arbace install --pins "$WHEELS_PINS" --cache "$WHEELS_CACHE/wheels" --site "$site" || return 1
+  wheels_arbace verify --pins "$WHEELS_PINS" --cache "$WHEELS_CACHE/wheels" --site "$site" || return 1
+  rm -rf "$W"; mkdir -p "$W/runs"
+  # the layout against the host CPython's pip on the same wheels (all at once: their bin/ is one directory)
+  local -a whls=()
+  while IFS=$'\t' read -r file url sha bytes sample script; do whls+=("$WHEELS_CACHE/wheels/$file"); done < <(wheels_arbace list --pins "$WHEELS_PINS")
+  if python3 -I -m pip --version >/dev/null 2>&1; then
+    python3 -I -m pip install -q --no-index --no-deps --no-compile --disable-pip-version-check --root-user-action=ignore \
+      --target "$W/pip" "${whls[@]}" > "$W/pip.log" 2>&1 || { echo "  pip failed: $(tail -1 "$W/pip.log")"; bad=1; }
+    if diff -r -x INSTALLER -x RECORD -x REQUESTED -x direct_url.json -x bin "$W/pip" "$site/lib" > "$W/layout.diff"; then
+      local r d rows=0
+      for r in "$W/pip"/*.dist-info/RECORD; do
+        d=$(basename "$(dirname "$r")")
+        local skip='/(INSTALLER|RECORD|REQUESTED|direct_url\.json),|^\.\./'
+        if ! diff <(tr -d '\r' < "$r" | grep -Ev "$skip" | sort) <(grep -Ev "$skip" "$site/lib/$d/RECORD" | sort) > "$W/record.diff"; then
+          echo "  $d's RECORD differs from pip's:"; head -5 "$W/record.diff" | sed 's/^/    /'; bad=1
+        fi
+        rows=$((rows + $(grep -Evc "$skip" "$site/lib/$d/RECORD")))
+      done
+      [ "$(ls "$W/pip/bin" | sort)" = "$(ls "$site/bin" | sort)" ] || { echo "  the console scripts differ from pip's: $(ls "$W/pip/bin" | tr '\n' ' ')"; bad=1; }
+      echo "  layout: lib/ as pip --target lays it out, $rows RECORD rows equal; scripts $(ls "$site/bin" | tr '\n' ' ')"
+    else echo "  layout: differs from pip --target's:"; head -10 "$W/layout.diff" | sed 's/^/    /'; bad=1; fi
+  else echo "  layout: no pip for python3, not compared"; fi
+  # each pin's sample, and its console script, by pyi and by CPython with the same site
+  while IFS=$'\t' read -r file url sha bytes sample script; do
+    if [ ${#only[@]} -gt 0 ] && ! printf '%s\n' "${only[@]}" | grep -qx "${file%%-*}"; then continue; fi
+    if [ "$sample" != - ]; then
+      n=$((n + 1)); local r="$W/runs/${sample%.py}" c="$W/runs/${sample%.py}.cpython" t0=$SECONDS
+      mkdir -p "$r.d" "$c.d"
+      (cd "$c.d" && PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC wheels_cpython "$site/lib" "$T/$sample" > "$c.out" 2> "$c.err"; echo $? > "$c.rc") || true
+      (cd "$r.d" && PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC PYI_SITE="$site/lib" "$root/bin/pyi" run "$T/$sample" > "$r.out" 2> "$r.err"; echo $? > "$r.rc") || true
+      if wheels_cmp "$c" "$r"; then echo "  pass $sample ($(wc -l < "$r.out") lines, $((SECONDS - t0)) s)"; else echo "  FAIL $sample"; bad=1; fi
+    fi
+    if [ "$script" != - ]; then
+      local name=${script%% *} args=(); [[ $script != *" "* ]] || read -ra args <<< "${script#* }"
+      local r="$W/runs/script-$name" c="$W/runs/script-$name.cpython" mod attr
+      mod=$(sed -n "s/^${name}[[:space:]]*=[[:space:]]*\([^: ]*\):.*/\1/p" "$site/lib/"*.dist-info/entry_points.txt | head -1)
+      attr=$(sed -n "s/^${name}[[:space:]]*=[[:space:]]*[^:]*:\([A-Za-z0-9_.]*\).*/\1/p" "$site/lib/"*.dist-info/entry_points.txt | head -1)
+      (cd "$T" && PYTHONHASHSEED=0 python3 -I -S -B -c "import sys; sys.path.append(sys.argv.pop(1)); sys.argv[0] = '$name'
+from $mod import ${attr%%.*}; sys.exit($attr())" "$site/lib" "${args[@]}" > "$c.out" 2> "$c.err"; echo $? > "$c.rc") || true
+      (cd "$T" && PYTHONHASHSEED=0 PYI_EXECUTABLE="$root/tools/pyi/python3" "$site/bin/$name" "${args[@]}" > "$r.out" 2> "$r.err"; echo $? > "$r.rc") || true
+      if wheels_cmp "$c" "$r"; then echo "  pass the console script $name ${args[*]} (status $(cat "$r.rc"))"; else echo "  FAIL the console script $name"; bad=1; fi
+    fi
+  done < <(wheels_arbace list --pins "$WHEELS_PINS")
+  # the negative controls: a platform wheel and a wheel whose RECORD digest is wrong, each refused, nothing installed
+  local six; six=$(printf '%s\n' "${whls[@]}" | grep '/six-' | head -1)
+  mkdir -p "$W/controls"
+  cp "$six" "$W/controls/six-1.17.0-cp314-cp314-linux_x86_64.whl"
+  python3 -I -S -c 'import sys, zipfile
+src, out = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(src) as a, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as b:
+    for i in a.infolist():
+        data = a.read(i)
+        b.writestr(i, data + b"# tampered\n" if i.filename == "six.py" else data)' "$six" "$W/controls/six-1.17.0-py3-none-any.whl"
+  local w want
+  for w in "six-1.17.0-cp314-cp314-linux_x86_64.whl:are not py3-none-any" "six-1.17.0-py3-none-any.whl:differs from RECORD"; do
+    want=${w#*:}; w=${w%%:*}
+    if wheels_arbace install-one --wheel "$W/controls/$w" --site "$W/controls/site-${want// /-}" > "$W/controls/out" 2>&1; then
+      echo "  FAIL control: $w installed"; bad=1
+    elif grep -q "$want" "$W/controls/out"; then echo "  control refused: $(grep 'pyi wheels:' "$W/controls/out" | sed "s|$W/controls/||")"
+    else echo "  FAIL control: $w refused otherwise: $(tail -1 "$W/controls/out")"; bad=1; fi
+  done
+  if [ $bad = 0 ]; then echo "wheels check: ${#whls[@]} pinned wheels installed by arbace.python.wheels into $site and verified; $n samples equal to CPython's; 2 controls refused"
+  else echo "wheels check: FAILED (runs in $W/runs)"; return 1; fi
+}
+
+# pip on pyi, a probe (PYS24 (a): an eval target, no installer work): the apks' pip 26.2.1 alone on PYI_SITE,
+# pip --version and an offline install of a pinned wheel; each failure's last line and its class
+wheels_pip_probe() {
+  local W="$WORK/wheels/pip-probe" sp="$root/.tmp/repr-python/site-packages/$(uname -m)/usr/lib/python3.14/site-packages" six
+  [ -d "$sp/pip" ] || "$root/bin/repr-python" pins --fetch >/dev/null
+  rm -rf "$W"; mkdir -p "$W/path" "$W/target"; ln -s "$sp/pip" "$W/path/pip"
+  six=$(ls "$WHEELS_CACHE/wheels"/six-*.whl 2>/dev/null | head -1); [ -n "$six" ] || die "wheels pip-probe: run bin/pyi wheels fetch first"
+  local name rc
+  for name in version install; do
+    rc=0
+    case $name in
+      version) (cd "$W" && PYI_SITE="$W/path" "$root/bin/pyi" python -m pip --version > "$W/$name.out" 2> "$W/$name.err") || rc=$? ;;
+      install) (cd "$W" && PYI_SITE="$W/path" "$root/bin/pyi" python -m pip install --no-index --no-deps --no-compile \
+                  --disable-pip-version-check --root-user-action=ignore --target "$W/target" "$six" > "$W/$name.out" 2> "$W/$name.err") || rc=$? ;;
+    esac
+    local last; last=$(grep -v '^[[:space:]]*$' "$W/$name.err" | tail -1)
+    local cls=:ran
+    case $last in
+      *"cannot create 'function' instances"*) cls="the class \"types.FunctionType and types.CellType called\" (divergences.edn): annotationlib's FORWARDREF builds a function for typing.NamedTuple's class body (rich's ColorTriplet)" ;;
+      *"No module named '_csv'"*) cls=":c-module _csv (queue 204's port)" ;;
+      *"No module named '_ssl'"*) cls=":c-module _ssl" ;;
+      *"No module named"*) cls=":missing-module" ;;
+      *Error*) cls=":error" ;;
+    esac
+    [ $rc = 0 ] && cls=:ran
+    echo "  pip $name: status $rc, $cls; stdout: $(head -1 "$W/$name.out"); stderr: ${last:-none}"
+  done
+  echo "wheels pip-probe: a probe, not a check (runs in $W)"
+}
+
+cmd_wheels() {
+  local verb=${1:-}; shift || true
+  case $verb in
+    fetch) wheels_fetch ;;
+    install) local site; site=$(wheels_site)
+             wheels_arbace install --pins "$WHEELS_PINS" --cache "$WHEELS_CACHE/wheels" --site "$site"; echo "$site" ;;
+    verify) wheels_arbace verify --pins "$WHEELS_PINS" --cache "$WHEELS_CACHE/wheels" --site "$(wheels_site)" ;;
+    path) echo "$(wheels_site)/lib" ;;
+    run) [ $# -ge 1 ] || die "usage: bin/pyi wheels run SCRIPT [ARGS...]"
+         local s; s="$(wheels_site)/bin/$1"; shift; [ -x "$s" ] || die "no console script $s (bin/pyi wheels install)"
+         cd "$caller_pwd"; PYI_EXECUTABLE="$root/tools/pyi/python3" exec "$s" "$@" ;;
+    check) mkdir -p "$WORK"; wheels_check "$@" ;;
+    pip-probe) mkdir -p "$WORK"; wheels_pip_probe ;;
+    *) die "usage: bin/pyi wheels fetch|install|verify|path|run SCRIPT [ARGS...]|check [NAME...]|pip-probe" ;;
+  esac
+}
+
 case "${1:-}" in
   gen) shift; cmd_gen "$@" ;;
   record-ref) shift; cmd_record_ref "$@" ;;
@@ -1195,5 +1373,6 @@ case "${1:-}" in
   check) shift; mkdir -p "$WORK"; if [ "${1:-}" = --aot ]; then shift; cmd_check_aot "$@"; else cmd_check_lib "$@"; fi ;;
   divergences) shift; mkdir -p "$WORK"; cmd_divergences "$@" ;;
   cover) shift; mkdir -p "$WORK"; cmd_cover "$@" ;;
+  wheels) shift; cmd_wheels "$@" ;;
   *) sed -n '2,/^# Environment:/p' "$0"; exit 2 ;;
 esac
