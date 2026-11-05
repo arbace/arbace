@@ -1445,8 +1445,10 @@ under the PSF License Agreement (LICENSE.md's entry for them). `Lib/csv.py` and 
       anonymous read-only zero mapping over the old pages (`MAP_FIXED`). The file's pages are released (the
       program's `/proc/self/maps` check), and a Go slice of them that a caller still holds reads zeros instead of
       faulting the process.
-    - *Buffers:* pyi's buffer protocol has no export count, so `close()` and `resize()` never raise BufferError.
-      The DECISION in 204's report covers this.
+    - *Buffers:* pyi's buffer protocol has no export count, so `close()` and `resize()` never raise BufferError
+      (decided: the user, 2026-11-05, 204's DECISION (a)). A memoryview used after its mmap was closed raises ValueError
+      "mmap closed or invalid": memoryview's accessors ask the exporter's `BufferValid()` (`MemoryView.unusable`, the
+      REQUEST commit for PY7's owner). `bytes(view)` then gives `b''`, because `BytesLike` cannot raise.
     - No `sys.audit` event.
   - **Runtime hook:** writableBuffer's last case asks an exporter's `WritableBytes()` (the REQUEST commit in
     `builtins_binascii.ae`), so `memoryview(m)[i] = v` writes into the mapping.
