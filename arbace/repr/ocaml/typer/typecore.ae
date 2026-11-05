@@ -43,6 +43,10 @@
   (fn [env sitem] [titem env'])"
   nil)
 
+(def ^:dynamic *type-object* "Typeclass.type_object: (fn [env sstr] [structure public-methods])" nil)
+(def ^:dynamic *type-send* "Typecore.type_send: (fn [env sobj label] [obj meth type])" nil)
+(def ^:dynamic *type-new* "Typecore's Pexp_new: (fn [env lid] [path class-decl type])" nil)
+
 (defn unify! [t1 t2 what]
   (try (ty/unify t1 t2)
        (catch arbace.lang.ExceptionInfo e
@@ -594,7 +598,38 @@
       :Pexp_ident (let [lid (:txt (d 1))
                         v (env/lookup env :values lid)]
                     (when-not v (type-error (str "Unbound value " (str/join "." (env/lid-parts lid)))))
-                    (ret [:Texp_ident (or (:path v) [:prim]) v] (ty/instance (:type v))))
+                    (case (first (:kind v))
+                      ;; an instance variable, self (Typecore's Val_ivar and Val_self): through the method's self-N
+                      :ivar (let [self (get-in env [:values (str "self-" (nth (:kind v) 2))])]
+                              (ret [:Texp_instvar (:path self) (:id v)] (ty/instance (:type v))))
+                      :self (let [self (get-in env [:values (str "self-" (nth (:kind v) 4))])]
+                              (ret [:Texp_ident (:path self) (assoc v :path (:path self) :id (:id self))] (ty/instance (:type v))))
+                      (ret [:Texp_ident (or (:path v) [:prim]) v] (ty/instance (:type v)))))
+      :Pexp_send (let [[obj meth t] (*type-send* env (d 1) (:txt (d 2)))]
+                   (ret [:Texp_send obj meth] (ty/instance t)))
+      :Pexp_object (let [[cs meths] (*type-object* env (d 1))]
+                     (ret [:Texp_object cs meths env] (:self @(:sign cs))))
+      :Pexp_new (let [[path decl t] (*type-new* env (:txt (d 1)))]
+                  (ret [:Texp_new path decl] t))
+      :Pexp_setinstvar (let [label (:txt (d 1))
+                             v (get-in env [:values label])
+                             _ (when-not (= :ivar (first (:kind v))) (type-error (str "Unbound instance variable " label)))
+                             _ (when-not (= :Mutable (nth (:kind v) 1)) (type-error (str "The instance variable " label " is not mutable")))
+                             e (type-expect env (d 2) (ty/instance (:type v)))
+                             self (get-in env [:values (str "self-" (nth (:kind v) 2))])]
+                         (ret [:Texp_setinstvar (:path self) (:id v) e] (ty/type-unit)))
+      :Pexp_override (let [sp (get-in env [:values "selfpat-*"]) sv (get-in env [:values "self-*"])
+                           _ (when-not (and sp sv (= :self (first (:kind sp)))) (type-error "This object duplication occurs outside a method definition"))
+                           [_ sign _ vars _] (:kind sp)
+                           modifs (mapv (fn [[{lab :txt} se]]
+                                          (let [id (or (get vars lab) (type-error (str "Unbound instance variable " lab)))
+                                                t (nth (get-in @sign [:vars lab]) 2)]
+                                            [id lab (type-expect env se (ty/instance t))]))
+                                        (d 1))]
+                       (ret [:Texp_override (:path sv) modifs] (:type sp)))
+      :Pexp_poly (do (when-let [sty (d 2)]
+                       (unify! (env/transl-type env (atom {}) sty) expected "method"))
+                     (assoc (type-expect env (d 1) expected) :poly true))
       :Pexp_constant (if (and (= :Pconst_string ((:pconst_desc (d 1)) 0)) (format-type? expected))
                        ;; Typecore's "terrible hack for format strings": the literal typed as its format's constructors
                        (type-expect env (assoc (fmt/type-format ((:pconst_desc (d 1)) 1)) :pexp_loc loc) expected)
@@ -612,7 +647,7 @@
                                        (type-error "this function's body constraint is outside the slice")))
                                    (d 3))
                            [params body t] (type-function env (d 1) sbody expected)]
-                       (mkexp [:Texp_function params body] t loc))
+                       (assoc (mkexp [:Texp_function params body] t loc) :env env))
       :Pexp_apply (let [f (type-exp env (d 1))
                         sargs (vec (d 2))
                         pname (let [fd (:desc f)] (when (and (= :Texp_ident (fd 0)) (= :prim (first (:kind (fd 2)))))
@@ -712,7 +747,7 @@
       :Pexp_sequence (let [a (type-statement env (d 1)) b (type-expect env (d 2) expected)]
                        (mkexp [:Texp_sequence a b] (:type b) loc))
       :Pexp_while (let [c (type-expect env (d 1) (ty/type-bool)) b (type-statement env (d 2))]
-                    (ret [:Texp_while c b] (ty/type-unit)))
+                    (assoc (ret [:Texp_while c b] (ty/type-unit)) :env env))
       :Pexp_for (let [p (:ppat_desc (d 1))
                       lo (type-expect env (d 2) (ty/type-int))
                       hi (type-expect env (d 3) (ty/type-int))
@@ -722,7 +757,7 @@
                                   :Ppat_any [(ty/ident-create "_for") env]
                                   (type-error "for loop index"))
                       body (type-statement env' (d 5))]
-                  (ret [:Texp_for id lo hi (d 4) body] (ty/type-unit)))
+                  (assoc (ret [:Texp_for id lo hi (d 4) body] (ty/type-unit)) :env env))
       :Pexp_constraint (let [t (ty/instance (env/make-generic! (env/transl-type env (atom {}) (d 2))))
                              e (type-expect env (d 1) t)]
                          (unify! t expected "expression")

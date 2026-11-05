@@ -422,9 +422,41 @@
             (makearray true))
           (if (= kind "float") (dup (makearray false)) (makearray true))))))))
 
-(defn transl-exp [e]
+(def ^:dynamic *transl-object* "Translcore's transl_object: (fn [structure public-methods env] lambda)" nil)
+(def ^:dynamic *oo-wrap* "Translobj.oo_wrap: (fn [env req thunk] lambda)" (fn [_ _ f] (f)))
+(def ^:dynamic *oo-prim* "Translobj.oo_prim: (fn [name] lambda)" nil)
+(def ^:dynamic *transl-class-path* "A class's value: (fn [path] lambda)" nil)
+(def ^:dynamic *transl-label-init* "Translobj.transl_label_init: (fn [thunk] lambda)" nil)
+
+(declare transl-exp0)
+
+(defn transl-exp
+  "Translcore.transl_exp1: a function, for or while evaluated more than once, its immediate objects' classes cached"
+  [e]
+  (if (#{:Texp_function :Texp_for :Texp_while} ((:desc e) 0))
+    (*oo-wrap* (:env e) true #(transl-exp0 e))
+    (transl-exp0 e)))
+
+(defn- transl-setinstvar [self var expr]
+  [:Lprim (l/prim (str "setfield_" (if (= :immediate (ty/maybe-pointer (:type expr))) "imm" "ptr") "_computed"))
+   [self var (transl-exp expr)]])
+
+(defn transl-exp0 [e]
   (let [d (:desc e)]
     (case (d 0)
+      :Texp_send (let [obj (transl-exp (d 1)) meth (d 2)]
+                   (case (meth 0)
+                     :Tmeth_val [:Lsend :self [:Lvar (meth 1)] obj []]
+                     :Tmeth_name [:Lsend :public (l/lconst-int (ty/hash-variant (meth 1))) obj []]
+                     :Tmeth_ancestor [:Lapply [:Lvar (meth 1)] [(transl-address (meth 2) nil)]]))
+      :Texp_new [:Lapply [:Lprim (l/pfield 0 :pointer true) [(*transl-class-path* (d 1))]] [l/lambda-unit]]
+      :Texp_instvar [:Lprim (l/prim "field_computed") [(transl-address (d 1) nil) [:Lvar (d 2)]]]
+      :Texp_setinstvar (transl-setinstvar (transl-address (d 1) nil) [:Lvar (d 2)] (d 3))
+      :Texp_override (let [cpy (ty/ident-create "copy")]
+                       [:Llet :strict "" cpy [:Lapply (*oo-prim* "copy") [(transl-address (d 1) nil)]]
+                        (reduce (fn [rem [id _ expr]] [:Lsequence (transl-setinstvar [:Lvar cpy] [:Lvar id] expr) rem])
+                                [:Lvar cpy] (reverse (d 2)))])
+      :Texp_object (*transl-object* (d 1) (d 2) (d 3))
       :Texp_ident (let [vd (d 2)]
                     (if (= :prim (first (:kind vd)))
                       (let [p (lookup-primitive (second (:kind vd)))] (mark-used p vd) (binding [*prim-loc* (:loc e)] (transl-primitive vd (:type e))))
@@ -462,7 +494,7 @@
                       [:Lprim (l/pmakeblock 0 false shape) ll]))
       :Texp_construct
       (let [c (d 1) [ll shape] (transl-list-with-shape (d 2)) tag (:tag c)]
-        (case (if (:inlined c) :inlined (tag 0))
+        (case (if (or (:inlined c) (:unboxed c)) :inlined (tag 0))
           :inlined (first ll)
           :Cstr_constant (l/lconst-int (tag 1))
           :Cstr_block (let [cs (map extract-constant ll)]
@@ -571,7 +603,12 @@
 (defn transl-function
   "Translcore.transl_curried_function (bytecode: no tupled functions)"
   [e params body]
-  (let [ret (case (body 0)
+  (let [;; Translcore.fuse_method_arity: a method's self parameter and its own parameters in one function
+        [params body] (let [b (when (= :body (body 0)) (body 1))]
+                        (if (and b (:poly b) (= :Texp_function ((:desc b) 0)))
+                          [(into (vec params) ((:desc b) 1)) ((:desc b) 2)]
+                          [params body]))
+        ret (case (body 0)
               :body (ty/value-kind (:type (body 1)))
               :cases (if-let [c (first (body 1))] (ty/value-kind (:type (:rhs c))) ""))
         [cases-param lbody]

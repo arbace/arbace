@@ -1,0 +1,474 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; lambda/translobj.ml (shared constants, labels, oo_wrap and the tables of classes) and lambda/translclass.ml
+;; (build_object_init, build_class_init, transl_class_rebind, transl_class for bytecode: CamlinternalOO's protocol),
+;; whose notices follow (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;           Jerome Vouillon, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.translclass
+  "Objects and classes to Lambda (doc/ocaml/TYPER.md, T9): Translobj's shared constants and oo_wrap, Translclass's
+  translation of an immediate object or a class (a class {:desc d :env env}, d [:Tcl_structure cs] [:Tcl_ident path
+  decl] [:Tcl_fun pat vals cl partial] [:Tcl_apply cl args] [:Tcl_let rec vbs vals cl] [:Tcl_constraint cl vals meths
+  concrete-meths]) into calls of CamlinternalOO, as bytecode compiles them (debug on: no builtin methods)."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.env :as env]
+            [arbace.repr.ocaml.typer.lambda :as l]
+            [arbace.repr.ocaml.typer.matching :as m]
+            [arbace.repr.ocaml.typer.simplif :as s]
+            [arbace.repr.ocaml.typer.translcore :as tr]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; Translobj
+
+(def ^:private consts "Translobj.consts: structured constant -> identifier" (atom {}))
+
+(defn oo-prim
+  "Translobj.oo_prim: CamlinternalOO's value name"
+  [name]
+  (let [v (env/lookup (env/initial-env) :values [:Ldot {:txt [:Lident "CamlinternalOO"]} {:txt name}])]
+    (when-not v (env/type-error (str "CamlinternalOO." name " not found")))
+    (tr/transl-value-path v)))
+
+(defn share
+  "Translobj.share: a non-empty block constant bound once, at the unit's top"
+  [c]
+  (if (and (= :block (c 0)) (seq (c 2)))
+    (if-let [id (get @consts c)]
+      [:Lvar id]
+      (let [id (ty/ident-create "shared")] (swap! consts assoc c id) [:Lvar id]))
+    [:Lconst c]))
+
+(defn transl-label-init
+  "Translobj.transl_label_init (bytecode): the shared constants bound around the unit's code, in their identifiers'
+  order"
+  [f]
+  (reset! consts {})
+  (let [e (f)
+        bound (sort-by (comp :stamp second) @consts)
+        e (reduce (fn [e [c id]] [:Llet :alias "" id [:Lconst c] e]) e bound)]
+    (reset! consts {})
+    e))
+
+(def ^:dynamic *oo*
+  "Translobj's wrapping state: nil, or an atom {:cache-required :top-env :classes :method-ids}" nil)
+
+(defn oo-wrap
+  "Translobj.oo_wrap_gen: f run with the classes it makes cached in tables bound around its result"
+  [env req f]
+  (if *oo*
+    (if (:cache-required @*oo*)
+      (f)
+      (let [old (:cache-required @*oo*)]
+        (swap! *oo* assoc :cache-required true)
+        (try (f) (finally (swap! *oo* assoc :cache-required old)))))
+    (let [st (atom {:cache-required req :top-env env :classes [] :method-ids #{}})]
+      (binding [*oo* st]
+        (let [lam (f)]
+          (reduce (fn [lam id] [:Llet :strictopt "" id [:Lprim (l/pmakeblock 0 true nil) [l/lambda-unit l/lambda-unit l/lambda-unit]] lam])
+                  lam (:classes @st)))))))
+
+(defn- oo-add-class [id]
+  (swap! *oo* update :classes #(cons id %))
+  [(:top-env @*oo*) (:cache-required @*oo*)])
+
+;; ---------------------------------------------------------------------------------------------
+;; Translclass's helpers
+
+(defn- fattr [f] (get f 5))
+(defn lfunction
+  "Translclass.lfunction: params prepended to a body function that may fuse its arity"
+  [params body]
+  (cond
+    (empty? params) body
+    (and (= :Lfunction (body 0)) (= :curried (body 1)) (:may-fuse-arity (fattr body)) (<= (+ (count params) (count (body 2))) 126))
+    [:Lfunction :curried (into (vec params) (body 2)) "" (body 4) (fattr body)]
+    :else [:Lfunction :curried (vec params) "" body {:may-fuse-arity true}]))
+
+(defn- lapply [f args] (if (= :Lapply (f 0)) [:Lapply (f 1) (into (f 2) args)] [:Lapply f (vec args)]))
+(defn- mkappl [f args] [:Lapply f (vec args)])
+(defn- lsequence [a b] (if (= b l/lambda-unit) a [:Lsequence a b]))
+(defn- lfield [v i] [:Lprim (l/pfield i :pointer true) [[:Lvar v]]])
+(defn- transl-label [lab] (share [:string lab]))
+(defn- transl-meth-list [lst] (if (empty? lst) l/lambda-unit (share [:block 0 (mapv (fn [x] [:string x]) lst)])))
+
+(defn- set-inst-var [obj id expr]
+  [:Lprim (l/prim (str "setfield_" (if (= :immediate (ty/maybe-pointer (:type expr))) "imm" "ptr") "_computed"))
+   [[:Lvar obj] [:Lvar id] (tr/transl-exp expr)]])
+
+(defn- transl-val [tbl create name]
+  (mkappl (oo-prim (if create "new_variable" "get_variable")) [[:Lvar tbl] (transl-label name)]))
+
+(defn- transl-vals [tbl create strict vals rem]
+  (reduce (fn [rem [name id]] [:Llet strict "" id (transl-val tbl create name) rem]) rem (reverse vals)))
+
+(defn- meths-super [tbl meths inh-meths]
+  (vec (keep (fn [[nm id]] (when-let [mid (get meths nm)] [nm id (mkappl (oo-prim "get_method") [[:Lvar tbl] [:Lvar mid]])]))
+             inh-meths)))
+
+(defn- bind-super [tbl [vals meths] cl-init]
+  (transl-vals tbl false :strictopt vals
+               (reduce (fn [rem [_ id def]] [:Llet :strictopt "" id def rem]) cl-init (reverse meths))))
+
+(defn- create-object [cl obj init]
+  (let [obj' (ty/ident-create "self")
+        [inh-init obj-init has-init] (init obj')]
+    (if (= obj-init l/lambda-unit)
+      [inh-init (mkappl (oo-prim (if has-init "create_object_and_run_initializers" "create_object_opt")) [obj [:Lvar cl]])]
+      [inh-init [:Llet :strict "" obj' (mkappl (oo-prim "create_object_opt") [obj [:Lvar cl]])
+                 [:Lsequence obj-init (if-not has-init [:Lvar obj'] (mkappl (oo-prim "run_initializers_opt") [obj [:Lvar obj'] [:Lvar cl]]))]]])))
+
+(defn- name-pattern [default p]
+  (let [d (:desc p)] (case (d 0) :Tpat_var (d 1) :Tpat_alias (d 2) (ty/ident-create default))))
+
+(def ^:dynamic *transl-class-path* "The Lambda of a class's path (its value's address)" nil)
+
+(defn- fun-of [obj-init pat partial]
+  (let [build (fn [params rem]
+                (let [param (name-pattern "param" pat)]
+                  [:Lfunction :curried (vec (cons [param ""] params)) ""
+                   (m/for-function (:loc pat) [:Lvar param] [[pat rem]] partial) {:may-fuse-arity true}]))]
+    (if (and (= :Lfunction (obj-init 0)) (= :curried (obj-init 1)))
+      (build (obj-init 2) (obj-init 4))
+      (build [] obj-init))))
+
+(defn build-object-init
+  "Translclass.build_object_init: [inh-init obj-init]"
+  [cl-table obj params inh-init obj-init cl]
+  (let [d (:desc cl)]
+    (case (d 0)
+      :Tcl_ident (let [oi (ty/ident-create "obj_init")
+                       [envs inh] inh-init
+                       envl (if envs [[:Lprim (l/pfield (inc (count inh)) :pointer true) [[:Lvar envs]]]] [])
+                       path-lam (*transl-class-path* (d 1))]
+                   [[envs (cons [(d 1) path-lam oi] inh)] (mkappl [:Lvar oi] (conj envl obj))])
+      :Tcl_structure
+      (create-object cl-table obj
+                     (fn [obj]
+                       (let [[inh-init obj-init has-init]
+                             (reduce (fn [[inh oi hi] f]
+                                       (case (f 0)
+                                         :Tcf_inherit (let [[inh oi'] (build-object-init cl-table [:Lvar obj] [] inh (fn [_] l/lambda-unit) (f 2))]
+                                                        [inh (lsequence oi' oi) true])
+                                         :Tcf_val (let [[_ _ _ id kind] f]
+                                                    (if (= :concrete (kind 0)) [inh (lsequence (set-inst-var obj id (kind 1)) oi) hi] [inh oi hi]))
+                                         :Tcf_initializer [inh oi true]
+                                         [inh oi hi]))
+                                     [inh-init (obj-init obj) false]
+                                     (reverse (:fields (d 1))))]
+                         [inh-init
+                          (reduce (fn [rem [id expr]] (lsequence [:Lifused id (set-inst-var obj id expr)] rem)) obj-init (reverse params))
+                          has-init])))
+      :Tcl_fun (let [[_ pat vals cl' partial] d
+                     [inh oi] (build-object-init cl-table obj (into (vec vals) params) inh-init obj-init cl')]
+                 [inh (fun-of oi pat partial)])
+      :Tcl_apply (let [[inh oi] (build-object-init cl-table obj params inh-init obj-init (d 1))]
+                   [inh (tr/transl-apply oi (d 2))])
+      :Tcl_let (let [[_ rec vbs vals cl'] d
+                     [inh oi] (build-object-init cl-table obj (into (vec vals) params) inh-init obj-init cl')]
+                 [inh (tr/transl-let rec vbs oi false)])
+      :Tcl_constraint (build-object-init cl-table obj params inh-init obj-init (d 1)))))
+
+(defn- build-object-init-0 [cl-table params cl copy-env subst-env top ids]
+  (let [d (:desc cl)]
+    (if (= :Tcl_let (d 0))
+      (build-object-init-0 cl-table (into (vec (d 3)) params) (d 4) copy-env subst-env top ids)
+      (let [self (ty/ident-create "self")
+            env (ty/ident-create "env")
+            obj (if (empty? ids) l/lambda-unit [:Lvar self])
+            envs (when-not top env)
+            [[_ inh-init] obj-init] (build-object-init cl-table obj params [envs []] copy-env cl)
+            obj-init (if (empty? ids) obj-init (lfunction [[self ""]] obj-init))]
+        [inh-init (lfunction [[env ""]] (subst-env env inh-init obj-init))]))))
+
+(defn- bind-method [tbl lab id cl-init]
+  [:Llet :strict "" id (mkappl (oo-prim "get_method_label") [[:Lvar tbl] (transl-label lab)]) cl-init])
+
+(defn- bind-methods [tbl meths vals cl-init]
+  (let [methl (reverse (seq meths))
+        len (count methl) nvals (count vals)]
+    (cond
+      (and (< len 2) (zero? nvals)) (reduce (fn [ci [lab id]] (bind-method tbl lab id ci)) cl-init meths)
+      (and (zero? len) (< nvals 2)) (transl-vals tbl true :strict vals cl-init)
+      :else
+      (let [ids (ty/ident-create "ids")
+            names (when (pos? nvals) [(transl-meth-list (map first vals))])
+            getter (if (zero? nvals) "get_method_labels" "new_methods_variables")
+            all (vec (concat methl vals))
+            n (count all)]
+        [:Llet :strict "" ids (mkappl (oo-prim getter) (into [[:Lvar tbl] (transl-meth-list (map first methl))] names))
+         (reduce (fn [lam [i [_ id]]] [:Llet :strictopt "" id (lfield ids i) lam]) cl-init (reverse (map-indexed vector all)))]))))
+
+(defn- output-methods [tbl methods lam]
+  (case (count methods)
+    0 lam
+    2 (lsequence (mkappl (oo-prim "set_method") (into [[:Lvar tbl]] methods)) lam)
+    (lsequence (mkappl (oo-prim "set_methods") [[:Lvar tbl] [:Lprim (l/pmakeblock 0 false nil) (vec methods)]]) lam)))
+
+(defn- ignore-cstrs [cl] (let [d (:desc cl)] (if (#{:Tcl_constraint :Tcl_apply} (d 0)) (recur (d 1)) cl)))
+
+(defn build-class-init
+  "Translclass.build_class_init: [inh-init cl-init]"
+  [cla cstr super inh-init cl-init msubst top cl]
+  (let [d (:desc cl)]
+    (case (d 0)
+      :Tcl_ident (let [[[_ path-lam oi] & inh] inh-init]
+                   [inh [:Llet :strict "" oi
+                         (mkappl [:Lprim (l/pfield 1 :pointer true) [path-lam]]
+                                 (cons [:Lvar cla] (when top [[:Lprim (l/pfield 2 :pointer true) [path-lam]]])))
+                         (bind-super cla super cl-init)]])
+      :Tcl_structure
+      (let [cs (d 1)
+            cl-init (bind-super cla super cl-init)
+            [inh cl-init methods values]
+            (reduce (fn [[inh ci methods values] f]
+                      (case (f 0)
+                        :Tcf_inherit (let [ci (output-methods cla methods ci)
+                                           [inh ci] (build-class-init cla false [(f 4) (meths-super cla (:meths cs) (f 5))] inh ci msubst top (f 2))]
+                                       [inh ci [] values])
+                        :Tcf_val (let [[_ name _ id _ over] f] [inh ci methods (if over values (cons [name id] values))])
+                        :Tcf_method (let [[_ name _ kind] f]
+                                      (if (= :concrete (kind 0))
+                                        (let [code (msubst true (tr/transl-exp (kind 1)))]
+                                          [inh ci (vec (concat [[:Lvar (get (:meths cs) name)]] code methods)) values])
+                                        [inh ci methods values]))
+                        :Tcf_initializer [inh [:Lsequence (mkappl (oo-prim "add_initializer") (cons [:Lvar cla] (msubst false (tr/transl-exp (f 1))))) ci]
+                                          methods values]
+                        [inh ci methods values]))
+                    [inh-init cl-init [] ()]
+                    (reverse (:fields cs)))
+            cl-init (output-methods cla methods cl-init)]
+        [inh (bind-methods cla (:meths cs) (vec values) cl-init)])
+      :Tcl_fun (let [[inh ci] (build-class-init cla cstr super inh-init cl-init msubst top (d 3))]
+                 [inh (transl-vals cla true :strictopt (mapv (fn [[id _]] ["" id]) (d 2)) ci)])
+      :Tcl_apply (build-class-init cla cstr super inh-init cl-init msubst top (d 1))
+      :Tcl_let (let [[inh ci] (build-class-init cla cstr super inh-init cl-init msubst top (d 4))]
+                 [inh (transl-vals cla true :strictopt (mapv (fn [[id _]] ["" id]) (d 3)) ci)])
+      :Tcl_constraint
+      (let [[_ cl' vals meths concr] d
+            virt (vec (remove (set concr) meths))
+            concr (vec (sort concr))
+            narrow-args [[:Lvar cla] (transl-meth-list vals) (transl-meth-list virt) (transl-meth-list concr)]
+            cl'' (ignore-cstrs cl')]
+        (if (and (= :Tcl_ident ((:desc cl'') 0)) (seq inh-init))
+          (let [[[_ path-lam oi] & inh] inh-init
+                inhid (ty/ident-create "inh")
+                ofs (inc (count vals))
+                [valids methids] super
+                ci (reduce (fn [init [nm id _]] [:Llet :strictopt "" id (lfield inhid (+ (.indexOf ^java.util.List concr nm) ofs)) init]) cl-init methids)
+                ci (reduce (fn [init [nm id]] [:Llet :strictopt "" id (lfield inhid (inc (.indexOf ^java.util.List vals nm))) init]) ci valids)]
+            [inh [:Llet :strict "" inhid (mkappl (oo-prim "inherits") (conj narrow-args path-lam (l/lconst-int (if top 1 0))))
+                  [:Llet :strictopt "" oi (lfield inhid 0) ci]]])
+          (let [core (fn [ci] (build-class-init cla true super inh-init ci msubst top cl'))]
+            (if cstr
+              (core cl-init)
+              (let [[inh ci] (core [:Lsequence (mkappl (oo-prim "widen") [[:Lvar cla]]) cl-init])]
+                [inh [:Lsequence (mkappl (oo-prim "narrow") narrow-args) ci]]))))))))
+
+(defn- build-class-lets [cl]
+  (let [d (:desc cl)]
+    (if (= :Tcl_let (d 0))
+      (let [[env wrap] (build-class-lets (d 4))]
+        [env (fn [lam] (tr/transl-let (d 1) (d 2) (wrap lam) false))])
+      [(:env cl) identity])))
+
+(defn- get-class-meths [cl]
+  (let [d (:desc cl)]
+    (case (d 0)
+      :Tcl_structure (set (vals (:meths (d 1))))
+      :Tcl_ident #{}
+      :Tcl_fun (get-class-meths (d 3))
+      :Tcl_let (get-class-meths (d 4))
+      (:Tcl_apply :Tcl_constraint) (get-class-meths (d 1)))))
+
+(defn- env-diff
+  "Env.diff: the local value identifiers of env2 not in env1"
+  [env1 env2]
+  (let [old (set (keep :id (vals (:values env1))))]
+    (vec (distinct (keep (fn [v] (when (and (:id v) (not (old (:id v)))) (:id v))) (vals (:values env2)))))))
+
+(defn- free-methods [lam]
+  (let [acc (atom #{})]
+    (letfn [(go [l]
+              (when (and (= :Lsend (l 0)) (= :self (l 1)) (= :Lvar ((l 2) 0))) (swap! acc conj ((l 2) 1)))
+              (s/shallow-iter go go l))]
+      (go lam))
+    @acc))
+
+(def ^:private builtin-tags
+  (zipmap ["get_const" "get_var" "get_env" "get_meth" "set_var" "app_const" "app_var" "app_env" "app_meth"
+           "app_const_const" "app_const_var" "app_const_env" "app_const_meth" "app_var_const" "app_env_const"
+           "app_meth_const" "meth_app_const" "meth_app_var" "meth_app_env" "meth_app_meth" "send_const" "send_var"
+           "send_env" "send_meth"]
+          (range)))
+
+(defn- builtin-meths
+  "Translclass.builtin_meths: a method's code as one of CamlinternalOO's builtin closures, [name args], nil for its
+  Not_found"
+  [self env env2 body]
+  (let [const-path (fn [local p]
+                     (case (p 0)
+                       :Lvar (not (some #{(p 1)} local))
+                       :Lconst true
+                       :Lfunction (and (= :curried (p 1)) (not-any? (s/free-variables (p 4)) local))
+                       false))
+        local (cons env self)
+        cp #(const-path local %)
+        conv (fn [p]
+               (cond
+                 (cp p) ["const" [p]]
+                 (and (= :Lprim (p 0)) (= :field (:kind (p 1))) (= 1 (count (p 2))) (= [:Lvar env] ((p 2) 0)))
+                 ["env" [[:Lvar env2] (l/lconst-int (:pos (p 1)))]]
+                 (and (= :Lsend (p 0)) (= :self (p 1)) (= :Lvar ((p 3) 0)) (some #{((p 3) 1)} self) (empty? (p 4)))
+                 ["meth" [(p 2)]]
+                 :else nil))]
+    (case (body 0)
+      :Llet (if (and (= :Lvar ((body 4) 0)) (some #{((body 4) 1)} self))
+              (builtin-meths (cons (body 3) self) env env2 (body 5))
+              (when-let [[s args] (conv body)] [(str "get_" s) args]))
+      :Lapply (let [f (body 1) as (body 2)]
+                (cond
+                  (and (= 1 (count as)) (cp f)) (when-let [[s args] (conv (as 0))] [(str "app_" s) (into [f] args)])
+                  (and (= 2 (count as)) (cp f) (cp (as 1))) (when-let [[s args] (conv (as 0))] [(str "app_" s "_const") (conj (into [f] args) (as 1))])
+                  (and (= 2 (count as)) (cp f) (cp (as 0))) (when-let [[s args] (conv (as 1))] [(str "app_const_" s) (into [f (as 0)] args)])
+                  :else (when-let [[s args] (conv body)] [(str "get_" s) args])))
+      :Lsend (let [[_ k met obj as] body
+                   self-obj (and (= :Lvar (obj 0)) (some #{(obj 1)} self))]
+               (cond
+                 (and (= :self k) (= :Lvar (met 0)) self-obj (= 1 (count as)))
+                 (when-let [[s args] (conv (as 0))] [(str "meth_app_" s) (into [met] args)])
+                 (and (= :self k) self-obj (empty? as)) ["get_meth" [met]]
+                 (and (= :public k) (empty? as)) (when-let [[s args] (conv obj)] [(str "send_" s) (into [met] args)])
+                 :else (when-let [[s args] (conv body)] [(str "get_" s) args])))
+      :Lfunction nil
+      (when-let [[s args] (conv body)] [(str "get_" s) args]))))
+
+(defn transl-class*
+  "Translclass.transl_class: [lambda kind]"
+  [ids cl-id pub-meths cl vflag]
+  (let [_ [(ty/ident-create "obj_init") (ty/ident-create "self")]
+        tables (ty/ident-create (str (:name cl-id) "_tables"))
+        [top-env req] (oo-add-class tables)
+        top (not req)
+        [cl-env llets] (build-class-lets cl)
+        new-ids (if top [] (env-diff top-env cl-env))
+        env2 (ty/ident-create "env")
+        meth-ids (get-class-meths cl)
+        subst (fn [env lam i0 new-ids']
+                (let [fv (apply disj (s/free-variables lam) @new-ids')]
+                  (swap! *oo* update :method-ids (fn [mi] (reduce disj (into mi (free-methods lam)) meth-ids)))
+                  (let [nids (into (set new-ids) (:method-ids @*oo*))
+                        fv (filter nids fv)]
+                    (swap! new-ids' into (sort-by :stamp fv))
+                    (into {} (map-indexed (fn [i id] [id (lfield env (+ i0 i))]) @new-ids')))))
+        new-ids-meths (atom [])
+        msubst (fn [arr f]
+                 (let [[[self _] & args] (f 2) body (f 4)
+                       env (ty/ident-create "env")
+                       body' (if (empty? new-ids) body (s/subst (subst env body 0 new-ids-meths) body))
+                       builtin (when arr (builtin-meths [self] env env2 (lfunction (vec args) body')))]
+                   (if builtin
+                     (let [[nm args] builtin] (vec (cons (l/lconst-int (builtin-tags nm)) args)))
+                   [(lfunction (vec (cons [self ""] args))
+                               (if-not (contains? (s/free-variables body') env)
+                                 body'
+                                 [:Llet :alias "" env [:Lprim (l/prim "field_computed") [[:Lvar self] [:Lvar env2]]] body']))])))
+        new-ids-init (atom [])
+        env1 (ty/ident-create "env") env1' (ty/ident-create "env'")
+        copy-env (fn [self] (if top l/lambda-unit
+                                [:Lifused env2 [:Lprim (l/prim "setfield_ptr_computed") [[:Lvar self] [:Lvar env2] [:Lvar env1']]]]))
+        subst-env (fn [envs l lam]
+                    (if top
+                      lam
+                      (let [lam (s/subst (subst env1 lam 1 new-ids-init) lam)]
+                        [:Llet :alias "" env1 (if (empty? l) [:Lvar envs] (lfield envs 0))
+                         [:Llet :alias "" env1' (if (empty? @new-ids-init) [:Lvar env1] (lfield env1 0)) lam]])))
+        cla (ty/ident-create "class")
+        [inh-init obj-init] (build-object-init-0 cla [] cl copy-env subst-env top ids)
+        [_ cl-init] (build-class-init cla true [[] []] (reverse inh-init) obj-init msubst top cl)
+        table (ty/ident-create "table")
+        class-init (ty/ident-create (str (:name cl-id) "_init"))
+        env-init (ty/ident-create "env_init")
+        obj-init-id (ty/ident-create "obj_init")
+        pub-meths (vec (sort-by ty/hash-variant pub-meths))
+        ltable (fn [table lam] [:Llet :strict "" table (mkappl (oo-prim "create_table") [(transl-meth-list pub-meths)]) lam])
+        ldirect (fn [] [:Llet :strict "" obj-init-id cl-init
+                        [:Lsequence (mkappl (oo-prim "init_class") [[:Lvar cla]]) (mkappl [:Lvar obj-init-id] [l/lambda-unit])]])]
+    (if (and top (empty? ids))
+      [(llets (ltable cla (ldirect))) :dynamic]
+      (let [concrete (= vflag :Concrete)
+            lclass (fn [mk]
+                     (let [ci (llets [:Lfunction :curried [[cla ""]] "" cl-init {:may-fuse-arity true}])
+                           [lam rk] (mk (s/free-variables ci))]
+                       [[:Llet :strict "" class-init ci lam] rk]))
+            lbody (fn [fv]
+                    (if (not-any? fv ids)
+                      [(mkappl (oo-prim "make_class") [(transl-meth-list pub-meths) [:Lvar class-init]]) :dynamic]
+                      [(ltable table [:Llet :strict "" env-init (mkappl [:Lvar class-init] [[:Lvar table]])
+                                      [:Lsequence (mkappl (oo-prim "init_class") [[:Lvar table]])
+                                       [:Lprim (l/pmakeblock 0 false nil) [(mkappl [:Lvar env-init] [l/lambda-unit]) [:Lvar class-init] l/lambda-unit]]]])
+                       :static]))
+            lbody-virt (fn [lenvs] [[:Lprim (l/pmakeblock 0 false nil) [l/lambda-unit [:Lfunction :curried [[cla ""]] "" cl-init {:may-fuse-arity true}] lenvs]] :static])]
+        (cond
+          (and top concrete) (lclass lbody)
+          top (let [[lam rk] (lbody-virt l/lambda-unit)] [(llets lam) rk])
+          :else
+          (let [envs (ty/ident-create "envs") cached (ty/ident-create "cached")
+                lenvs (if (and (empty? @new-ids-meths) (empty? @new-ids-init) (empty? inh-init)) l/lambda-unit [:Lvar envs])
+                menv (if (empty? @new-ids-meths) l/lambda-unit [:Lprim (l/pmakeblock 0 false nil) (mapv (fn [id] [:Lvar id]) @new-ids-meths)])
+                lenv (if (empty? @new-ids-init) menv [:Lprim (l/pmakeblock 0 false nil) (vec (cons menv (map (fn [id] [:Lvar id]) @new-ids-init)))])
+                linh-envs (mapv (fn [[_ pl _]] [:Lprim (l/pfield 2 :pointer true) [pl]]) (reverse inh-init))
+                make-envs (fn [[lam rk]] [[:Llet :strictopt "" envs (if (empty? linh-envs) lenv [:Lprim (l/pmakeblock 0 false nil) (vec (cons lenv linh-envs))]) lam] rk])
+                def-ids (fn [cla lam] [:Llet :strictopt "" env2 (mkappl (oo-prim "new_variable") [[:Lvar cla] (transl-label "")]) lam])
+                inh-paths (filter (fn [[path _ _]] (some #{(ty/path-head path)} new-ids)) inh-init)
+                inh-keys (mapv (fn [[_ pl _]] [:Lprim (l/pfield 1 :pointer true) [pl]]) inh-paths)
+                lclass2 (fn [lam] [:Llet :strict "" class-init [:Lfunction :curried [[cla ""]] "" (def-ids cla cl-init) {:may-fuse-arity true}] lam])
+                lset (fn [cached i lam] [:Lprim (l/psetfield i :pointer) [[:Lvar cached] lam]])
+                lupdate (cond
+                          (empty? ids) (ltable cla [:Llet :strict "" env-init (def-ids cla cl-init)
+                                                    [:Lsequence (mkappl (oo-prim "init_class") [[:Lvar cla]]) (lset cached 0 [:Lvar env-init])]])
+                          (not concrete) (lset cached 0 [:Lfunction :curried [[cla ""]] "" (def-ids cla cl-init) {:may-fuse-arity true}])
+                          :else (lclass2 (mkappl (oo-prim "make_class_store") [(transl-meth-list pub-meths) [:Lvar class-init] [:Lvar cached]])))
+                lcheck [:Lifthenelse (lfield cached 0) l/lambda-unit lupdate]
+                lcache (fn [[lam rk]]
+                         (let [lam [:Lsequence lcheck lam]]
+                           [(if (empty? inh-keys)
+                              [:Llet :alias "" cached [:Lvar tables] lam]
+                              [:Llet :strict "" cached (mkappl (oo-prim "lookup_tables") [[:Lvar tables] [:Lprim (l/pmakeblock 0 false nil) inh-keys]]) lam])
+                            rk]))
+                [lam rk] (lcache (make-envs (if (empty? ids)
+                                              [(mkappl (lfield cached 0) [lenvs]) :dynamic]
+                                              [[:Lprim (l/pmakeblock 0 false nil)
+                                                (if concrete [(mkappl (lfield cached 0) [lenvs]) (lfield cached 1) lenvs]
+                                                    [l/lambda-unit (lfield cached 0) lenvs])]
+                                               :static])))]
+            [(llets lam) rk]))))))
+
+(defn transl-class
+  "Translclass.transl_class's wrapper: under oo_wrap"
+  [ids cl-id pub-meths cl vflag]
+  (let [r (atom nil)]
+    (let [lam (oo-wrap (:env cl) false (fn [] (let [[lam rk] (transl-class* ids cl-id pub-meths cl vflag)] (reset! r rk) lam)))]
+      [lam @r])))
+
+(defn transl-object
+  "Translcore's Texp_object: the structure as a class of its own"
+  [cs meths env]
+  (let [cl-id (ty/ident-create "object")]
+    (first (transl-class [] cl-id meths {:desc [:Tcl_structure cs] :env env} :Concrete))))
+
+(alter-var-root #'tr/*transl-object* (constantly transl-object))
+(alter-var-root #'tr/*oo-wrap* (constantly oo-wrap))
+(alter-var-root #'tr/*oo-prim* (constantly oo-prim))
+(alter-var-root #'tr/*transl-label-init* (constantly transl-label-init))

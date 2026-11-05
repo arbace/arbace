@@ -1,0 +1,305 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; typing/typeclass.ml (class_structure's two passes, type_object, class declarations and their class expressions)
+;; with the class signatures' operations of typing/ctype.ml (new_class_signature, filter_method_row, add_method,
+;; add_instance_variable, update_class_signature, close_class_signature, hide_private_methods) and Typecore's
+;; object expressions (type_send, filter_method), whose notices follow (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;  Jerome Vouillon, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.typeclass
+  "Objects and classes (doc/ocaml/TYPER.md, T9): a class signature is an atom {:self t :row t :vars {label [mut virt
+  t]} :meths {label [priv virt t]}} (priv :public or [:private kind]); an object or class structure {:self pat
+  :fields [field] :sign sign :meths {label id}}, a field [:Tcf_val label mut id [:concrete e]|[:virtual] over]
+  [:Tcf_method label priv [:concrete e]|[:virtual]] [:Tcf_initializer e] [:Tcf_inherit cl super vars super-meths]
+  [:Tcf_constraint]; the values of a class body: [:self sign meths vars cl-num] (Val_self), [:ivar mut cl-num]
+  (Val_ivar), [:anc meths cl-num] (Val_anc)."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.env :as env]
+            [arbace.repr.ocaml.typer.typecore :as tc]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+(def type-error env/type-error)
+
+;; ---------------------------------------------------------------------------------------------
+;; Class signatures (ctype.ml)
+
+(def dummy-method "*dummy method*")
+
+(defn new-class-signature []
+  (let [row (ty/newvar)]
+    (atom {:self (ty/newty [:Tobject row nil]) :row row :vars {} :meths {}})))
+
+(defn- object-fields [t] (let [d (ty/desc (ty/expand-head t))] (when (= :Tobject (d 0)) (d 1))))
+
+(defn filter-method-row
+  "Ctype.filter_method_row: [priv field-type row] of the method name in a row, the row extended when it is open"
+  [name priv t]
+  (let [t (ty/expand-head t) d (ty/desc t) lv (ty/level t)]
+    (case (d 0)
+      :Tvar (let [field (ty/newty2 lv [:Tvar nil]) row (ty/newty2 lv [:Tvar nil])
+                  kind (if (= :Private priv) (ty/field-private) (ty/field-public))]
+              (ty/link! t (ty/newty2 lv [:Tfield name kind field row]))
+              [(if (= :Private priv) [:private kind] :public) field row])
+      :Tfield (if (= (d 1) name)
+                [(if (= :Public priv)
+                   (do (when (= :private (ty/field-kind-repr (d 2))) (ty/link-kind! (d 2) (atom :public))) :public)
+                   [:private (d 2)])
+                 (d 3) (d 4)]
+                (let [[p f r] (filter-method-row name priv (d 4))]
+                  [p f (ty/newty2 lv [:Tfield (d 1) (d 2) (d 3) r])]))
+      :Tnil (if (or (= name dummy-method) (= :Public priv))
+              (type-error (str "The method " name " cannot be added to a closed object type"))
+              [[:private (atom :absent)] (ty/newty2 lv [:Tvar nil]) t])
+      (type-error "filter_method_row"))))
+
+(defn add-method!
+  "Ctype.add_method"
+  [sign label priv virt t]
+  (let [{:keys [meths row]} @sign]
+    (if-let [[priv' virt' t'] (get meths label)]
+      (let [priv (if (= :public priv')
+                   :public
+                   (if (= :Public priv)
+                     (let [k (second priv')] (when (= :private (ty/field-kind-repr k)) (ty/link-kind! k (atom :public))) :public)
+                     priv'))
+            virt (if (= :Concrete virt') :Concrete virt)]
+        (tc/unify! t t' "method")
+        (swap! sign assoc-in [:meths label] [priv virt t]))
+      (let [[p t' row'] (filter-method-row label priv row)]
+        (tc/unify! t t' "method")
+        (swap! sign assoc :row row')
+        (swap! sign assoc-in [:meths label] [p virt t])))))
+
+(defn add-instance-variable!
+  "Ctype.add_instance_variable"
+  [sign strict label mut virt t]
+  (let [virt (if-let [[mut' virt' t'] (get-in @sign [:vars label])]
+               (do (when strict
+                     (when-not (= mut mut') (type-error (str "The instance variable " label " changes mutability")))
+                     (tc/unify! t t' "instance variable"))
+                   (if (= :Concrete virt') :Concrete virt))
+               virt)]
+    (swap! sign assoc-in [:vars label] [mut virt t])))
+
+(defn update-class-signature!
+  "Ctype.update_class_signature: the methods the self type gained made virtual ones, the private ones made public"
+  [sign]
+  (let [[fields row] (ty/flatten-fields (object-fields (:self @sign)))]
+    (doseq [[lab k t] fields :when (not= lab dummy-method)]
+      (if-let [[priv virt t'] (get-in @sign [:meths lab])]
+        (when (and (vector? priv) (= :public (ty/field-kind-repr k)))
+          (swap! sign assoc-in [:meths lab] [:public virt t']))
+        (case (ty/field-kind-repr k)
+          :public (swap! sign assoc-in [:meths lab] [:public :Virtual t])
+          :private (swap! sign assoc-in [:meths lab] [[:private k] :Virtual t])
+          nil)))
+    (swap! sign assoc :row row)))
+
+(defn hide-private-methods! [sign]
+  (doseq [[_ k _] (first (ty/flatten-fields (object-fields (:self @sign))))]
+    (when (= :private (ty/field-kind-repr k)) (ty/link-kind! k (atom :absent)))))
+
+(defn close-class-signature!
+  "Ctype.close_class_signature: false when the self type has the dummy method"
+  [sign]
+  (loop [t (object-fields (:self @sign))]
+    (let [t (ty/expand-head t) d (ty/desc t)]
+      (case (d 0)
+        :Tvar (do (ty/link! t (ty/newty2 (ty/level t) [:Tnil])) true)
+        :Tfield (if (= (d 1) dummy-method) false (recur (d 4)))
+        :Tnil true))))
+
+(defn public-methods
+  "Btype.public_methods: the public methods' labels, sorted"
+  [sign]
+  (vec (sort (keep (fn [[l [p _ _]]] (when (= :public p) l)) (:meths @sign)))))
+
+(defn method-type [label sign] (nth (get-in @sign [:meths label]) 2))
+
+;; ---------------------------------------------------------------------------------------------
+;; Method calls (Typecore.type_send, Ctype.filter_method)
+
+(defn filter-method
+  "Ctype.filter_method: the type of the public method name of an object type (its row extended when open)"
+  [name t]
+  (let [t (ty/expand-head t) d (ty/desc t)]
+    (case (d 0)
+      :Tvar (let [lv (ty/level t) m (ty/newty2 lv [:Tvar nil])]
+              (ty/link! t (ty/newty2 lv [:Tobject (ty/newty2 lv [:Tfield name (ty/field-public) m (ty/newty2 lv [:Tvar nil])]) nil]))
+              m)
+      :Tobject (loop [f (d 1)]
+                 (let [f (ty/repr f) fd (ty/desc f)]
+                   (case (fd 0)
+                     :Tvar (let [lv (ty/level f) m (ty/newty2 lv [:Tvar nil])]
+                             (ty/link! f (ty/newty2 lv [:Tfield name (ty/field-public) m (ty/newty2 lv [:Tvar nil])]))
+                             m)
+                     :Tfield (if (= (fd 1) name)
+                               (do (when (= :private (ty/field-kind-repr (fd 2))) (ty/link-kind! (fd 2) (atom :public)))
+                                   (when (= :absent (ty/field-kind-repr (fd 2)))
+                                     (type-error (str "This expression has no method " name)))
+                                   (fd 3))
+                               (recur (fd 4)))
+                     (type-error (str "This expression has no method " name)))))
+      (type-error (str "This expression is not an object; it has no method " name)))))
+
+(defn type-send
+  "Typecore.type_send: [obj meth type], meth [:Tmeth_val id] (self's method) [:Tmeth_ancestor id self-path] or
+  [:Tmeth_name label]"
+  [env sobj met]
+  (let [obj (tc/type-exp env sobj)
+        od (:desc obj)
+        k (when (= :Texp_ident (od 0)) (:kind (od 2)))]
+    (case (first k)
+      :self (let [[_ sign meths _ _] k
+                  id (or (get meths met) (type-error (str "This expression has no method " met)))]
+              [obj [:Tmeth_val id] (method-type met sign)])
+      :anc (let [[_ meths cl-num sign] k
+                 id (or (get meths met) (type-error (str "This expression has no method " met)))]
+             [obj [:Tmeth_ancestor id (:path (get-in env [:values (str "self-" cl-num)]))] (method-type met sign)])
+      [obj [:Tmeth_name met] (filter-method met (:type obj))])))
+
+;; ---------------------------------------------------------------------------------------------
+;; Class structures (Typeclass.class_structure)
+
+(defn- make-method
+  "Typeclass.make_method: fun (self-* as self-N) -> expr"
+  [cl-num sexpr]
+  (let [loc (:pexp_loc sexpr)
+        pat {:ppat_desc [:Ppat_alias {:ppat_desc [:Ppat_var {:txt "self-*"}] :ppat_loc loc} {:txt (str "self-" cl-num)}] :ppat_loc loc}]
+    {:pexp_desc [:Pexp_function [{:pparam_desc [:Pparam_val [:Nolabel] nil pat]}] nil [:Pfunction_body sexpr]] :pexp_loc loc}))
+
+(defn- add-value [env name vd] (assoc-in env [:values name] vd))
+
+(def ^:dynamic *class-expr* "class_expr for an inherited class: (fn [cl-num val-env met-env scl] typed-class)" nil)
+
+(defn class-structure
+  "Typeclass.class_structure: final true for an immediate object (its self type closed)"
+  [cl-num virt final val-env met-env scstr]
+  (let [sign (new-class-signature)
+        _ (when-not final
+            (let [[_ t row] (filter-method-row dummy-method :Private (:row @sign))]
+              (tc/unify! t (ty/newty [:Ttuple []]) "self")
+              (swap! sign assoc :row row)))
+        spat (:pcstr_self scstr)
+        spat {:ppat_desc [:Ppat_alias spat {:txt "selfpat-*"}] :ppat_loc (:ppat_loc spat)}
+        pvars (atom [])
+        self-pat (tc/type-pat val-env spat (ty/newvar) pvars)
+        _ (tc/unify! (:type self-pat) (:self @sign) "self pattern")
+        ;; the first pass: instance variables typed, methods declared
+        [fields vars]
+        (reduce
+         (fn [[acc vars] cf]
+           (let [d (:pcf_desc cf)]
+             (case (d 0)
+               :Pcf_inherit
+               (let [[_ over scl super] d
+                     parent (*class-expr* cl-num val-env met-env scl)
+                     psign (:sign parent)]
+                 ;; Ctype.inherit_class_signature
+                 (tc/unify! (:self @sign) (:self @psign) "inherited self")
+                 (doseq [[label [priv virt t]] (:meths @psign)]
+                   (add-method! sign label (if (= :public priv) :Public :Private) virt t))
+                 (doseq [[label [mut virt t]] (:vars @psign)]
+                   (add-instance-variable! sign true label mut virt t))
+                 (let [ivars (mapv (fn [[label _]] [label (ty/ident-create label)]) (sort-by first (:vars @psign)))
+                       super-meths (mapv (fn [l] [l (ty/ident-create l)])
+                                         (reverse (sort (keep (fn [[l [_ v _]]] (when (= :Concrete v) l)) (:meths @psign)))))]
+                   [(conj acc [:inherit over parent (some-> super :txt) ivars super-meths psign])
+                    (into vars ivars)]))
+               :Pcf_val
+               (let [[{label :txt} mut kind] (d 1)]
+                 (if (= :Cfk_virtual (kind 0))
+                   (let [t (env/transl-type val-env (atom {}) (kind 1))]
+                     (add-instance-variable! sign true label mut :Virtual t)
+                     (let [id (or (get vars label) (ty/ident-create label))]
+                       [(conj acc [:virtual-val label mut id (contains? vars label)]) (assoc vars label id)]))
+                   (let [e (tc/type-exp val-env (kind 2))]
+                     (add-instance-variable! sign true label mut :Concrete (:type e))
+                     (let [id (or (get vars label) (ty/ident-create label))]
+                       [(conj acc [:concrete-val label mut id (kind 1) e (contains? vars label)]) (assoc vars label id)]))))
+               :Pcf_method
+               (let [[{label :txt} priv kind] (d 1)]
+                 (if (= :Cfk_virtual (kind 0))
+                   (let [t (env/transl-type val-env (atom {}) (kind 1))]
+                     (add-method! sign label priv :Virtual t)
+                     [(conj acc [:virtual-method label priv]) vars])
+                   (let [sexpr (kind 2)
+                         sexpr (if (= :Pexp_poly ((:pexp_desc sexpr) 0)) sexpr
+                                   {:pexp_desc [:Pexp_poly sexpr nil] :pexp_loc (:pexp_loc sexpr)})
+                         sty ((:pexp_desc sexpr) 2)
+                         t (if sty (env/transl-type val-env (atom {}) sty) (ty/newvar))]
+                     (add-method! sign label priv :Concrete t)
+                     [(conj acc [:concrete-method label priv (kind 1) (make-method cl-num sexpr)]) vars])))
+               :Pcf_constraint [(conj acc [:constraint]) vars]
+               :Pcf_initializer [(conj acc [:initializer (make-method cl-num (d 1))]) vars]
+               :Pcf_attribute [acc vars]
+               (type-error (str "class field " (d 0) " outside the slice")))))
+         [[] {}] (:pcstr_fields scstr))
+        _ (update-class-signature! sign)
+        meths (into (sorted-map) (map (fn [l] [l (ty/ident-create l)]) (sort (keys (:meths @sign)))))
+        _ (when final (when-not (close-class-signature! sign) (type-error "This object has a virtual method")))
+        meths-ref (atom meths)
+        ;; the self pattern's variables as Val_self, the instance variables as Val_ivar
+        met-env (reduce (fn [e [n id t]]
+                          (add-value e n {:type t :kind [:self sign meths vars cl-num] :path [:Pident id] :id id}))
+                        met-env @pvars)
+        ivar-env (fn [e label id]
+                   (let [[mut _ t] (get-in @sign [:vars label])]
+                     (add-value e label {:type t :kind [:ivar mut cl-num] :path [:Pident id] :id id})))
+        ;; the second pass: the methods' and initializers' bodies
+        [tfields _]
+        (reduce
+         (fn [[acc menv] f]
+           (case (f 0)
+             :inherit (let [[_ over parent super ivars super-meths psign] f
+                            menv (reduce (fn [e [l id]] (ivar-env e l id)) menv ivars)
+                            menv (if super
+                                   (add-value menv super {:type (:self @psign) :kind [:anc (into {} super-meths) cl-num sign]
+                                                          :path [:Pident (ty/ident-create super)]})
+                                   menv)]
+                        [(conj acc [:Tcf_inherit over parent super ivars super-meths]) menv])
+             :virtual-val (let [[_ label mut id already] f
+                                menv (if already menv (ivar-env menv label id))]
+                            [(conj acc [:Tcf_val label mut id [:virtual] already]) menv])
+             :concrete-val (let [[_ label mut id over e already] f
+                                 menv (if already menv (ivar-env menv label id))]
+                             [(conj acc [:Tcf_val label mut id [:concrete e] already]) menv])
+             :virtual-method [(conj acc [:Tcf_method (f 1) (f 2) [:virtual]]) menv]
+             :concrete-method (let [[_ label priv over sdef] f
+                                    t (method-type label sign)
+                                    mt (ty/newty [:Tarrow [:Nolabel] (:self @sign) t])
+                                    e (tc/type-expect menv sdef mt)]
+                                [(conj acc [:Tcf_method label priv [:concrete e]]) menv])
+             :constraint [(conj acc [:Tcf_constraint]) menv]
+             :initializer (let [mt (ty/newty [:Tarrow [:Nolabel] (:self @sign) (ty/type-unit)])
+                                e (tc/type-expect menv (f 1) mt)]
+                            [(conj acc [:Tcf_initializer e]) menv])))
+         [[] met-env] fields)]
+    (update-class-signature! sign)
+    {:self self-pat :fields tfields :sign sign :meths @meths-ref}))
+
+(def class-num (atom 0))
+
+(defn type-object
+  "Typeclass.type_object: [structure public-methods]"
+  [env sstr]
+  (let [n (swap! class-num inc)
+        cs (class-structure (str n) :Concrete true env env sstr)]
+    ;; complete_class_signature
+    (update-class-signature! (:sign cs))
+    (hide-private-methods! (:sign cs))
+    [cs (public-methods (:sign cs))]))
+
+(alter-var-root #'tc/*type-object* (constantly type-object))
+(alter-var-root #'tc/*type-send* (constantly type-send))
