@@ -1,0 +1,327 @@
+(in-ns 'go.arbace.py) ^{:go/comments [[13 1 "// Finalization (PYS9 (a); doc/python/PYTHON-SURVEY.md, \"Design: 218\"): pyi has no reference counts, so an object's"] [14 1 "// death is Go's collector's finding. A tracked object (one with weak references, or with a finalizer's work due: a"] [15 1 "// class's __del__, a generator's close, a socket's warning) has a Go finalizer and a record in tracked, keyed by its"] [16 1 "// address and never holding it. Go's finalizer goroutine only moves the dead object into finQueue and sets the eval"] [17 1 "// breaker's bit; the thread holding the GIL drains the queue (handleEvalBreaker, gc.collect). The order is reference"] [18 1 "// counting's (subtype_dealloc): the work first, the Go finalizer set again without it (PEP 442: once only); found"] [19 1 "// unreachable again, the weak references are cleared (in the Go finalizer, under finMu, so no weak reference yields"] [20 1 "// the object after it) and their callbacks called in CPython's list order. Go's heap does not move and an object with"] [21 1 "// a finalizer is kept until the finalizer ran, so a weak reference's hidden address is valid while it is not cleared."] [23 1 "// the work a tracked object's death runs"] [25 23 "// its class's __del__ (slot_tp_finalize)"] [26 23 "// a generator's, coroutine's or async generator's finalization (_PyGen_Finalize)"] [27 23 "// an open socket's ResourceWarning and close (sock_finalize)"] [30 1 "// finTrack is a tracked object's record."] [32 21 "// the object's pointer's element type, to rebuild it from its address"] [33 21 "// its weak references in CPython's order: the basic ref, the basic proxy, then the newest first"] [34 21 "// the work due at its death"] [35 21 "// its identity once hashed (identityHash; an instance keeps it in its own field)"] [38 1 "// finItem is a dead object's turn in the queue: obj and its work, or (obj nil) its weak references' callbacks."] [45 24 "// tracked, finQueue, the weak references' addresses (Go's finalizer goroutine takes it too)"] [48 26 "// the Go finalizers run so far (gc.collect waits until it stays still)"] [49 26 "// a drain is running (under the GIL): a nested one leaves the queue to it"] [51 18 "// PYI_NO_FINALIZERS: nothing tracked (the weak references hold their referents, as before 218)"] [54 1 "// addrOf is o's address (o a pointer: finTrackable)."] [57 1 "// hiddenPtr reads the address *u as a pointer (a weak reference's referent, alive while not cleared)."] [60 1 "// toObject is the object of type *elem at the address *u (a weak reference's referent; finMu held, *u not 0)."] [65 1 "// finTrackable is o's possible tracking: a pointer to a non-empty type of this package (another package's objects"] [66 1 "// may have their own Go finalizer, which a second SetFinalizer would abort on: _bz2's, _sqlite3's, _zstd's)."] [75 1 "// trackLocked is o's record, made (with its Go finalizer) when o has none; finMu held."] [90 1 "// trackWork tracks o (finTrackable) with the work w due at its death."] [101 1 "// goFinalized is the Go finalizer of every tracked object, run on Go's finalizer goroutine: o into the queue."] [127 1 "// drainFinalizers runs the queue under the GIL until it is empty: the number of dead objects handled."] [172 2 "// the record stays (its Go finalizer set again) while weak references, new work or an identity need it"] [185 1 "// weakCallbacks calls the callbacks of a dead object's weak references, in its list's order (PyObject_ClearWeakRefs)."] [199 1 "// runDel is slot_tp_finalize: the class's __del__ called, its exception to sys.unraisablehook."] [210 1 "// finalizeGen is _PyGen_Finalize: an async generator with sys's finalizer hook handed to it; a coroutine never"] [211 1 "// started warns; a suspended generator or coroutine closed."] [231 1 "// warnUnawaitedCoroutine is _PyErr_WarnUnawaitedCoroutine: warnings._warn_unawaited_coroutine(coro), or a plain"] [232 1 "// RuntimeWarning when that failed other than by the warning itself."] [253 1 "// finUnraisable is PyErr_FormatUnraisable from a finalizer (the object None)."] [260 1 "// finRound is one round of gc.collect: Go's collection, a wait until Go's finalizer goroutine has been still for a"] [261 1 "// moment (there is no public barrier), then the drain; the number of dead objects handled."] [278 1 "// finCollect is gc.collect's finalization: rounds until one handles nothing (at most 8), none when nothing is"] [279 1 "// tracked or queued; the number of dead objects handled."] [298 1 "// finalizeSocket is sock_finalize: an open socket warns ResourceWarning \"unclosed %R\" (its source the socket), then"] [299 1 "// its descriptor is closed."] [316 1 "// resourceWarn is PyErr_ResourceWarning(source, 1, msg): warnings.warn(msg, ResourceWarning, 1, source=source)."]] :go/pos {:name [1 9] :package [1 1]} :go/semis [[77 21] [81 27] [105 21] [165 29] [193 51] [205 42] [217 51] [226 24] [235 39] [236 64] [247 92] [255 25] [266 28] [266 55] [268 28] [282 16] [282 27] [305 51] [310 16]]} (go/file "finalize.go" :imports [
+
+
+    ^{:go/apos {1 [4 2]} :go/pos {:lparen [3 8] :rparen [11 1] :tok-pos [3 1]}} [reflect "reflect"]
+    ^{:go/apos {1 [5 2]}} [runtime "runtime"]
+    ^{:go/apos {1 [6 2]}} [sync "sync"]
+    ^{:go/apos {1 [7 2]}} [atomic "sync/atomic"]
+    ^{:go/apos {1 [8 2]}} [syscall "syscall"]
+    ^{:go/apos {1 [9 2]}} [time "time"]
+    ^{:go/apos {1 [10 2]}} [unsafe "unsafe"]])
+
+
+;; Finalization (PYS9 (a); doc/python/PYTHON-SURVEY.md, "Design: 218"): pyi has no reference counts, so an object's
+;; death is Go's collector's finding. A tracked object (one with weak references, or with a finalizer's work due: a
+;; class's __del__, a generator's close, a socket's warning) has a Go finalizer and a record in tracked, keyed by its
+;; address and never holding it. Go's finalizer goroutine only moves the dead object into finQueue and sets the eval
+;; breaker's bit; the thread holding the GIL drains the queue (handleEvalBreaker, gc.collect). The order is reference
+;; counting's (subtype_dealloc): the work first, the Go finalizer set again without it (PEP 442: once only); found
+;; unreachable again, the weak references are cleared (in the Go finalizer, under finMu, so no weak reference yields
+;; the object after it) and their callbacks called in CPython's list order. Go's heap does not move and an object with
+;; a finalizer is kept until the finalizer ran, so a weak reference's hidden address is valid while it is not cleared.
+
+
+^{:go/pos {:doc [23 1] :lparen [24 7] :rparen [28 1] :tok-pos [24 1]}} (go/const "the work a tracked object's death runs\n"
+  [^{:val 1 :go/pos {:name-pos [25 2]}} workDel ^{:go/apos {1 [25 13]} :go/pos {:op-pos [25 15]}} (<< 1 ^{:go/pos {:name-pos [25 18]}} iota)] ; its class's __del__ (slot_tp_finalize)
+  [^{:val 2 :go/pos {:name-pos [26 2]}} workGen] ; a generator's, coroutine's or async generator's finalization (_PyGen_Finalize)
+  [^{:val 4 :go/pos {:name-pos [27 2]}} workSock]) ; an open socket's ResourceWarning and close (sock_finalize)
+
+
+
+^{:go/pos {:doc [30 1] :tok-pos [31 1]}} (go/type ^{:go/pos {:name-pos [31 6]}} finTrack "finTrack is a tracked object's record.\n" ^{:go/pos {:lbrace [31 22] :rbrace [36 1] :struct [31 15]}} (struct
+    ^{:tag ^{:go/pos {:dot [32 15] :name-pos [32 16] :x-pos [32 8]}} reflect/Type :go/pos {:name-pos [32 2]}} elem ; the object's pointer's element type, to rebuild it from its address
+    ^{:tag ^{:go/pos {:lbrack [33 8]}} (slice ^{:go/pos {:star [33 10]}} (* ^{:go/pos {:name-pos [33 11]}} WeakRef)) :go/pos {:name-pos [33 2]}} refs ; its weak references in CPython's order: the basic ref, the basic proxy, then the newest first
+    ^{:tag ^{:go/pos {:name-pos [34 8]}} int :go/pos {:name-pos [34 2]}} work ; the work due at its death
+    ^{:tag ^{:go/pos {:name-pos [35 8]}} int64 :go/pos {:name-pos [35 2]}} ident)) ; its identity once hashed (identityHash; an instance keeps it in its own field)
+
+
+
+^{:go/pos {:doc [38 1] :tok-pos [39 1]}} (go/type ^{:go/pos {:name-pos [39 6]}} finItem "finItem is a dead object's turn in the queue: obj and its work, or (obj nil) its weak references' callbacks.\n" ^{:go/pos {:lbrace [39 21] :rbrace [42 1] :struct [39 14]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [40 6]}} Object :go/pos {:name-pos [40 2]}} obj
+    ^{:tag ^{:go/pos {:star [41 6]}} (* ^{:go/pos {:name-pos [41 7]}} finTrack) :go/pos {:name-pos [41 2]}} tr))
+
+
+^{:go/pos {:lparen [44 5] :rparen [52 1] :tok-pos [44 1]}} (go/var
+  [^{:tag ^{:go/pos {:dot [45 17] :name-pos [45 18] :x-pos [45 13]}} sync/Mutex :go/pos {:name-pos [45 2]}} finMu] ; tracked, finQueue, the weak references' addresses (Go's finalizer goroutine takes it too)
+  [^{:go/pos {:name-pos [46 2]}} tracked ^{:go/pos {:lbrace [46 36] :rbrace [46 37]}} (lit ^{:go/pos {:map [46 15]}} (map ^{:go/pos {:name-pos [46 19]}} uintptr ^{:go/pos {:star [46 27]}} (* ^{:go/pos {:name-pos [46 28]}} finTrack)))]
+  [^{:tag ^{:go/pos {:lbrack [47 13]}} (slice ^{:go/pos {:name-pos [47 15]}} finItem) :go/pos {:name-pos [47 2]}} finQueue]
+  [^{:tag ^{:go/pos {:dot [48 19] :name-pos [48 20] :x-pos [48 13]}} atomic/Int64 :go/pos {:name-pos [48 2]}} finRuns] ; the Go finalizers run so far (gc.collect waits until it stays still)
+  [^{:tag ^{:go/pos {:name-pos [49 13]}} bool :go/pos {:name-pos [49 2]}} finDrains] ; a drain is running (under the GIL): a nested one leaves the queue to it
+  [^{:go/pos {:name-pos [50 2]}} pyPkgPath ^{:go/pos {:dot [50 41] :lparen [50 49] :name-pos [50 42] :rparen [50 50]}} (.PkgPath ^{:go/pos {:lparen [50 29] :rparen [50 40]}} (^{:go/pos {:dot [50 22] :name-pos [50 23] :x-pos [50 15]}} reflect/TypeOf ^{:go/pos {:lbrace [50 38] :rbrace [50 39]}} (lit ^{:go/pos {:name-pos [50 30]}} Instance)))]
+  [^{:tag ^{:go/pos {:name-pos [51 13]}} bool :go/pos {:name-pos [51 2]}} finDisable]) ; PYI_NO_FINALIZERS: nothing tracked (the weak references hold their referents, as before 218)
+
+
+
+^{:go/pos {:doc [54 1] :func [55 1] :lbrace [55 31] :rbrace [55 69] :return [55 33]}} (go/func ^{:go/pos {:name-pos [55 6]}} addrOf "addrOf is o's address (o a pointer: finTrackable).\n" ^{:tag ^{:go/pos {:name-pos [55 23]}} uintptr :go/pos {:closing [55 21] :opening [55 12]}} [^{:tag ^{:go/pos {:name-pos [55 15]}} Object :go/pos {:name-pos [55 13]}} o] ^{:go/pos {:dot [55 58] :lparen [55 66] :name-pos [55 59] :rparen [55 67]}} (.Pointer ^{:go/pos {:lparen [55 55] :rparen [55 57]}} (^{:go/pos {:dot [55 47] :name-pos [55 48] :x-pos [55 40]}} reflect/ValueOf ^{:go/pos {:name-pos [55 56]}} o)))
+
+
+^{:go/pos {:doc [57 1] :func [58 1] :lbrace [58 43] :rbrace [58 90] :return [58 45]}} (go/func ^{:go/pos {:name-pos [58 6]}} hiddenPtr "hiddenPtr reads the address *u as a pointer (a weak reference's referent, alive while not cleared).\n" ^{:tag ^{:go/pos {:dot [58 34] :name-pos [58 35] :x-pos [58 28]}} unsafe/Pointer :go/pos {:closing [58 26] :opening [58 15]}} [^{:tag ^{:go/pos {:star [58 18]}} (* ^{:go/pos {:name-pos [58 19]}} uintptr) :go/pos {:name-pos [58 16]}} u] ^{:go/pos {:star [58 52]}} @^{:go/pos {:lparen [58 70] :rparen [58 88]}} (conv ^{:go/parens [[[58 53] [58 69]]] :go/pos {:star [58 54]}} (* ^{:go/pos {:dot [58 61] :name-pos [58 62] :x-pos [58 55]}} unsafe/Pointer) ^{:go/pos {:lparen [58 85] :rparen [58 87]}} (conv ^{:go/pos {:dot [58 77] :name-pos [58 78] :x-pos [58 71]}} unsafe/Pointer ^{:go/pos {:name-pos [58 86]}} u)))
+
+
+^{:go/pos {:doc [60 1] :func [61 1] :lbrace [61 53] :rbrace [63 1] :return [62 2]}} (go/func ^{:go/pos {:name-pos [61 6]}} toObject "toObject is the object of type *elem at the address *u (a weak reference's referent; finMu held, *u not 0).\n" ^{:tag ^{:go/pos {:name-pos [61 46]}} Object :go/pos {:closing [61 44] :opening [61 14]}} [^{:tag ^{:go/pos {:dot [61 27] :name-pos [61 28] :x-pos [61 20]}} reflect/Type :go/pos {:name-pos [61 15]}} elem ^{:tag ^{:go/pos {:star [61 36]}} (* ^{:go/pos {:name-pos [61 37]}} uintptr) :go/pos {:name-pos [61 34]}} u]
+  ^{:go/pos {:dot [62 54] :lparen [62 55] :rparen [62 62]}} (assert ^{:go/pos {:name-pos [62 56]}} Object ^{:go/pos {:dot [62 42] :lparen [62 52] :name-pos [62 43] :rparen [62 53]}} (.Interface ^{:go/pos {:lparen [62 22] :rparen [62 41]}} (^{:go/pos {:dot [62 16] :name-pos [62 17] :x-pos [62 9]}} reflect/NewAt ^{:go/pos {:name-pos [62 23]}} elem ^{:go/pos {:lparen [62 38] :rparen [62 40]}} (^{:go/pos {:name-pos [62 29]}} hiddenPtr ^{:go/pos {:name-pos [62 39]}} u)))))
+
+
+
+
+^{:go/pos {:doc [65 1] :func [67 1] :lbrace [67 34] :rbrace [73 1] :return [72 2]}} (go/func ^{:go/pos {:name-pos [67 6]}} finTrackable "finTrackable is o's possible tracking: a pointer to a non-empty type of this package (another package's objects\nmay have their own Go finalizer, which a second SetFinalizer would abort on: _bz2's, _sqlite3's, _zstd's).\n" ^{:tag ^{:go/pos {:name-pos [67 29]}} bool :go/pos {:closing [67 27] :opening [67 18]}} [^{:tag ^{:go/pos {:name-pos [67 21]}} Object :go/pos {:name-pos [67 19]}} o]
+  ^{:go/pos {:if [68 2] :lbrace [68 16] :rbrace [70 2]}} (when ^{:go/pos {:name-pos [68 5]}} finDisable
+    ^{:go/apos {1 [69 10]} :go/pos {:return [69 3]}} (return false))
+
+  (let [^{:go/pos {:name-pos [71 2] :tok-pos [71 4]}} t ^{:go/pos {:lparen [71 21] :rparen [71 23]}} (^{:go/pos {:dot [71 14] :name-pos [71 15] :x-pos [71 7]}} reflect/TypeOf ^{:go/pos {:name-pos [71 22]}} o)]
+    ^{:go/ops [[72 37] [72 60]] :go/pos {:op-pos [72 60]}} (and ^{:go/pos {:op-pos [72 18]}} (== ^{:go/pos {:dot [72 10] :lparen [72 15] :name-pos [72 11] :rparen [72 16]}} (.Kind ^{:go/pos {:name-pos [72 9]}} t) ^{:go/pos {:dot [72 28] :name-pos [72 29] :x-pos [72 21]}} reflect/Pointer) ^{:go/apos {2 [72 58]} :go/pos {:op-pos [72 56]}} (> ^{:go/pos {:dot [72 48] :lparen [72 53] :name-pos [72 49] :rparen [72 54]}} (.Size ^{:go/pos {:dot [72 41] :lparen [72 46] :name-pos [72 42] :rparen [72 47]}} (.Elem ^{:go/pos {:name-pos [72 40]}} t)) 0) ^{:go/pos {:op-pos [72 82]}} (== ^{:go/pos {:dot [72 71] :lparen [72 79] :name-pos [72 72] :rparen [72 80]}} (.PkgPath ^{:go/pos {:dot [72 64] :lparen [72 69] :name-pos [72 65] :rparen [72 70]}} (.Elem ^{:go/pos {:name-pos [72 63]}} t)) ^{:go/pos {:name-pos [72 85]}} pyPkgPath))))
+
+
+
+^{:go/pos {:doc [75 1] :func [76 1] :lbrace [76 49] :rbrace [88 1] :return [87 2]}} (go/func ^{:go/pos {:name-pos [76 6]}} trackLocked "trackLocked is o's record, made (with its Go finalizer) when o has none; finMu held.\n" ^{:tag ^{:go/pos {:star [76 39]}} (* ^{:go/pos {:name-pos [76 40]}} finTrack) :go/pos {:closing [76 37] :opening [76 17]}} [^{:tag ^{:go/pos {:name-pos [76 20]}} Object :go/pos {:name-pos [76 18]}} o ^{:tag ^{:go/pos {:name-pos [76 30]}} uintptr :go/pos {:name-pos [76 28]}} a]
+  ^{:go/pos {:if [77 2] :lbrace [77 33] :rbrace [79 2]}} (when [^{:go/pos {:name-pos [77 5] :tok-pos [77 8]}} tr ^{:go/pos {:lbrack [77 18] :rbrack [77 20]}} (aget ^{:go/pos {:name-pos [77 11]}} tracked ^{:go/pos {:name-pos [77 19]}} a)] ^{:go/apos {2 [77 29]} :go/pos {:op-pos [77 26]}} (!= ^{:go/pos {:name-pos [77 23]}} tr nil)
+    ^{:go/pos {:return [78 3]}} (return ^{:go/pos {:name-pos [78 10]}} tr))
+
+  (let [^{:go/pos {:name-pos [80 2] :tok-pos [80 5]}} tr ^{:go/pos {:op-pos [80 8]}} (addr ^{:go/acolon {2 [80 22]} :go/apos {2 [80 18]} :go/pos {:lbrace [80 17] :rbrace [80 48]}} (lit ^{:go/pos {:name-pos [80 9]}} finTrack :elem ^{:go/pos {:dot [80 41] :lparen [80 46] :name-pos [80 42] :rparen [80 47]}} (.Elem ^{:go/pos {:lparen [80 38] :rparen [80 40]}} (^{:go/pos {:dot [80 31] :name-pos [80 32] :x-pos [80 24]}} reflect/TypeOf ^{:go/pos {:name-pos [80 39]}} o))))]
+    ^{:go/pos {:if [81 2] :lbrace [81 32] :rbrace [84 2]}} (when [^{:go/pos {:tok-pos [81 11]}} (values ^{:go/pos {:name-pos [81 5]}} h ^{:go/pos {:name-pos [81 8]}} ok) ^{:go/pos {:lbrack [81 24] :rbrack [81 26]}} (aget ^{:go/pos {:name-pos [81 14]}} identities ^{:go/pos {:name-pos [81 25]}} o)] ^{:go/pos {:name-pos [81 29]}} ok
+      ^{:go/pos {:tok-pos [82 12]}} (set! ^{:go/pos {:dot [82 5] :name-pos [82 6]}} (.-ident ^{:go/pos {:name-pos [82 3]}} tr) ^{:go/pos {:name-pos [82 14]}} h)
+      ^{:go/pos {:lparen [83 9] :rparen [83 23]}} (^{:go/pos {:name-pos [83 3]}} delete ^{:go/pos {:name-pos [83 10]}} identities ^{:go/pos {:name-pos [83 22]}} o))
+
+    ^{:go/pos {:lbrack [85 9] :rbrack [85 11] :tok-pos [85 13]}} (aset ^{:go/pos {:name-pos [85 2]}} tracked ^{:go/pos {:name-pos [85 10]}} a ^{:go/pos {:name-pos [85 15]}} tr)
+    ^{:go/pos {:lparen [86 22] :rparen [86 37]}} (^{:go/pos {:dot [86 9] :name-pos [86 10] :x-pos [86 2]}} runtime/SetFinalizer ^{:go/pos {:name-pos [86 23]}} o ^{:go/pos {:name-pos [86 26]}} goFinalized)
+    ^{:go/pos {:name-pos [87 9]}} tr))
+
+
+
+^{:go/pos {:doc [90 1] :func [91 1] :lbrace [91 33] :rbrace [99 1]}} (go/func ^{:go/pos {:name-pos [91 6]}} trackWork "trackWork tracks o (finTrackable) with the work w due at its death.\n" ^{:go/pos {:closing [91 31] :opening [91 15]}} [^{:tag ^{:go/pos {:name-pos [91 18]}} Object :go/pos {:name-pos [91 16]}} o ^{:tag ^{:go/pos {:name-pos [91 28]}} int :go/pos {:name-pos [91 26]}} w]
+  ^{:go/pos {:if [92 2] :lbrace [92 22] :rbrace [94 2]}} (when ^{:go/pos {:op-pos [92 5]}} (not ^{:go/pos {:lparen [92 18] :rparen [92 20]}} (^{:go/pos {:name-pos [92 6]}} finTrackable ^{:go/pos {:name-pos [92 19]}} o))
+    ^{:go/pos {:return [93 3]}} (return))
+
+  (let [^{:go/pos {:name-pos [95 2] :tok-pos [95 4]}} a ^{:go/pos {:lparen [95 13] :rparen [95 15]}} (^{:go/pos {:name-pos [95 7]}} addrOf ^{:go/pos {:name-pos [95 14]}} o)]
+    ^{:go/pos {:dot [96 7] :lparen [96 12] :name-pos [96 8] :rparen [96 13]}} (.Lock ^{:go/pos {:name-pos [96 2]}} finMu)
+    ^{:go/pos {:tok-pos [97 25]}} (set! ^{:go/pos {:dot [97 19] :name-pos [97 20]}} (.-work ^{:go/pos {:lparen [97 13] :rparen [97 18]}} (^{:go/pos {:name-pos [97 2]}} trackLocked ^{:go/pos {:name-pos [97 14]}} o ^{:go/pos {:name-pos [97 17]}} a)) bit-or ^{:go/pos {:name-pos [97 28]}} w)
+    ^{:go/pos {:dot [98 7] :lparen [98 14] :name-pos [98 8] :rparen [98 15]}} (.Unlock ^{:go/pos {:name-pos [98 2]}} finMu)))
+
+
+
+^{:go/pos {:doc [101 1] :func [102 1] :lbrace [102 28] :rbrace [125 1]}} (go/func ^{:go/pos {:name-pos [102 6]}} goFinalized "goFinalized is the Go finalizer of every tracked object, run on Go's finalizer goroutine: o into the queue.\n" ^{:go/pos {:closing [102 26] :opening [102 17]}} [^{:tag ^{:go/pos {:name-pos [102 20]}} Object :go/pos {:name-pos [102 18]}} o]
+  (let [^{:go/pos {:name-pos [103 2] :tok-pos [103 4]}} a ^{:go/pos {:lparen [103 13] :rparen [103 15]}} (^{:go/pos {:name-pos [103 7]}} addrOf ^{:go/pos {:name-pos [103 14]}} o)]
+    ^{:go/pos {:dot [104 7] :lparen [104 12] :name-pos [104 8] :rparen [104 13]}} (.Lock ^{:go/pos {:name-pos [104 2]}} finMu)
+    ^{:go/pos {:if [105 2] :lbrace [105 33] :rbrace [122 2]}} (when [^{:go/pos {:name-pos [105 5] :tok-pos [105 8]}} tr ^{:go/pos {:lbrack [105 18] :rbrack [105 20]}} (aget ^{:go/pos {:name-pos [105 11]}} tracked ^{:go/pos {:name-pos [105 19]}} a)] ^{:go/apos {2 [105 29]} :go/pos {:op-pos [105 26]}} (!= ^{:go/pos {:name-pos [105 23]}} tr nil)
+      ^{:go/pos {:else-lbrace [108 10] :else-rbrace [118 3] :if [106 3] :lbrace [106 19] :rbrace [108 3]}} (if ^{:go/apos {2 [106 17]} :go/pos {:op-pos [106 14]}} (!= ^{:go/pos {:dot [106 8] :name-pos [106 9]}} (.-work ^{:go/pos {:name-pos [106 6]}} tr) 0)
+        ^{:go/pos {:tok-pos [107 13]}} (set! ^{:go/pos {:name-pos [107 4]}} finQueue ^{:go/pos {:lparen [107 21] :rparen [107 55]}} (^{:go/pos {:name-pos [107 15]}} append ^{:go/pos {:name-pos [107 22]}} finQueue ^{:go/acolon {2 [107 43] 4 [107 50]} :go/apos {2 [107 40] 4 [107 48]} :go/pos {:lbrace [107 39] :rbrace [107 54]}} (lit ^{:go/pos {:name-pos [107 32]}} finItem :obj ^{:go/pos {:name-pos [107 45]}} o :tr ^{:go/pos {:name-pos [107 52]}} tr)))
+        ^{:go/pos {:lbrace [108 10] :rbrace [118 3]}} (do
+          ^{:go/pos {:lparen [109 10] :rparen [109 21]}} (^{:go/pos {:name-pos [109 4]}} delete ^{:go/pos {:name-pos [109 11]}} tracked ^{:go/pos {:name-pos [109 20]}} a)
+          (let ^{:go/apos {1 [110 10]}} [^{:go/pos {:name-pos [110 4] :tok-pos [110 7]}} cb false]
+            ^{:go/pos {:for [111 4] :lbrace [111 30] :range [111 16] :rbrace [114 4] :tok-pos [111 13]}} (range [^{:go/pos {:name-pos [111 8]}} _ ^{:go/pos {:name-pos [111 11]}} r ^{:go/pos {:dot [111 24] :name-pos [111 25]}} (.-refs ^{:go/pos {:name-pos [111 22]}} tr)]
+              ^{:go/apos {2 [112 14]} :go/pos {:tok-pos [112 12]}} (set! ^{:go/pos {:dot [112 6] :name-pos [112 7]}} (.-addr ^{:go/pos {:name-pos [112 5]}} r) 0)
+              ^{:go/pos {:tok-pos [113 8]}} (set! ^{:go/pos {:name-pos [113 5]}} cb ^{:go/pos {:op-pos [113 13]}} (or ^{:go/pos {:name-pos [113 10]}} cb ^{:go/pos {:op-pos [113 27]}} (!= ^{:go/pos {:dot [113 17] :name-pos [113 18]}} (.-callback ^{:go/pos {:name-pos [113 16]}} r) ^{:go/pos {:name-pos [113 30]}} None))))
+
+            ^{:go/pos {:if [115 4] :lbrace [115 10] :rbrace [117 4]}} (when ^{:go/pos {:name-pos [115 7]}} cb
+              ^{:go/pos {:tok-pos [116 14]}} (set! ^{:go/pos {:name-pos [116 5]}} finQueue ^{:go/pos {:lparen [116 22] :rparen [116 48]}} (^{:go/pos {:name-pos [116 16]}} append ^{:go/pos {:name-pos [116 23]}} finQueue ^{:go/acolon {2 [116 43]} :go/apos {2 [116 41]} :go/pos {:lbrace [116 40] :rbrace [116 47]}} (lit ^{:go/pos {:name-pos [116 33]}} finItem :tr ^{:go/pos {:name-pos [116 45]}} tr)))))))
+
+
+      ^{:go/pos {:if [119 3] :lbrace [119 24] :rbrace [121 3]}} (when ^{:go/apos {2 [119 22]} :go/pos {:op-pos [119 20]}} (> ^{:go/pos {:lparen [119 9] :rparen [119 18]}} (^{:go/pos {:name-pos [119 6]}} len ^{:go/pos {:name-pos [119 10]}} finQueue) 0)
+        ^{:go/pos {:dot [120 15] :lparen [120 18] :name-pos [120 16] :rparen [120 34]}} (.Or ^{:go/pos {:name-pos [120 4]}} evalBreaker ^{:go/pos {:name-pos [120 19]}} breakFinalizers)))
+
+
+    ^{:go/pos {:dot [123 7] :lparen [123 14] :name-pos [123 8] :rparen [123 15]}} (.Unlock ^{:go/pos {:name-pos [123 2]}} finMu)
+    ^{:go/apos {2 [124 14]} :go/pos {:dot [124 9] :lparen [124 13] :name-pos [124 10] :rparen [124 15]}} (.Add ^{:go/pos {:name-pos [124 2]}} finRuns 1)))
+
+
+
+^{:go/pos {:doc [127 1] :func [128 1] :lbrace [128 28] :rbrace [149 1]}} (go/func ^{:go/pos {:name-pos [128 6]}} drainFinalizers "drainFinalizers runs the queue under the GIL until it is empty: the number of dead objects handled.\n" ^{:tag ^{:go/pos {:name-pos [128 24]}} int :go/pos {:closing [128 22] :opening [128 21]}} []
+  ^{:go/pos {:if [129 2] :lbrace [129 15] :rbrace [131 2]}} (when ^{:go/pos {:name-pos [129 5]}} finDrains
+    ^{:go/apos {1 [130 10]} :go/pos {:return [130 3]}} (return 0))
+
+  ^{:go/apos {2 [132 14]} :go/pos {:tok-pos [132 12]}} (set! ^{:go/pos {:name-pos [132 2]}} finDrains true)
+  ^{:go/pos {:defer [133 2]}} (defer ^{:go/pos {:lparen [133 36] :rparen [133 37]}} (^{:go/pos {:func [133 8] :lbrace [133 15] :rbrace [133 35]}} (fn ^{:go/pos {:closing [133 13] :opening [133 12]}} [] ^{:go/apos {2 [133 29]} :go/pos {:tok-pos [133 27]}} (set! ^{:go/pos {:name-pos [133 17]}} finDrains false))))
+  (let ^{:go/apos {1 [134 7]}} [^{:go/pos {:name-pos [134 2] :tok-pos [134 4]}} n 0]
+    ^{:go/pos {:for [135 2] :lbrace [135 6] :rbrace [148 2]}} (while true
+      ^{:go/pos {:dot [136 8] :lparen [136 13] :name-pos [136 9] :rparen [136 14]}} (.Lock ^{:go/pos {:name-pos [136 3]}} finMu)
+      (let [^{:go/pos {:name-pos [137 3] :tok-pos [137 5]}} q ^{:go/pos {:name-pos [137 8]}} finQueue]
+        ^{:go/apos {2 [138 14]} :go/pos {:tok-pos [138 12]}} (set! ^{:go/pos {:name-pos [138 3]}} finQueue nil)
+        ^{:go/pos {:dot [139 14] :lparen [139 18] :name-pos [139 15] :rparen [139 35]}} (.And ^{:go/pos {:name-pos [139 3]}} evalBreaker ^{:go/pos {:op-pos [139 19]}} (bit-not ^{:go/pos {:name-pos [139 20]}} breakFinalizers))
+        ^{:go/pos {:dot [140 8] :lparen [140 15] :name-pos [140 9] :rparen [140 16]}} (.Unlock ^{:go/pos {:name-pos [140 3]}} finMu)
+        ^{:go/pos {:if [141 3] :lbrace [141 18] :rbrace [143 3]}} (when ^{:go/apos {2 [141 16]} :go/pos {:op-pos [141 13]}} (== ^{:go/pos {:lparen [141 9] :rparen [141 11]}} (^{:go/pos {:name-pos [141 6]}} len ^{:go/pos {:name-pos [141 10]}} q) 0)
+          ^{:go/pos {:return [142 4]}} (return ^{:go/pos {:name-pos [142 11]}} n))
+
+        ^{:go/pos {:for [144 3] :lbrace [144 24] :range [144 16] :rbrace [147 3] :tok-pos [144 13]}} (range [^{:go/pos {:name-pos [144 7]}} _ ^{:go/pos {:name-pos [144 10]}} it ^{:go/pos {:name-pos [144 22]}} q]
+          ^{:go/pos {:tok-pos [145 5]}} (inc! ^{:go/pos {:name-pos [145 4]}} n)
+          ^{:go/pos {:lparen [146 14] :rparen [146 17]}} (^{:go/pos {:name-pos [146 4]}} runFinItem ^{:go/pos {:name-pos [146 15]}} it))))))
+
+
+
+
+^{:go/pos {:func [151 1] :lbrace [151 29] :rbrace [183 1]}} (go/func ^{:go/pos {:name-pos [151 6]}} runFinItem ^{:go/pos {:closing [151 27] :opening [151 16]}} [^{:tag ^{:go/pos {:name-pos [151 20]}} finItem :go/pos {:name-pos [151 17]}} it]
+  ^{:go/pos {:if [152 2] :lbrace [152 19] :rbrace [155 2]}} (when ^{:go/apos {2 [152 15]} :go/pos {:op-pos [152 12]}} (== ^{:go/pos {:dot [152 7] :name-pos [152 8]}} (.-obj ^{:go/pos {:name-pos [152 5]}} it) nil)
+    ^{:go/pos {:lparen [153 16] :rparen [153 22]}} (^{:go/pos {:name-pos [153 3]}} weakCallbacks ^{:go/pos {:dot [153 19] :name-pos [153 20]}} (.-tr ^{:go/pos {:name-pos [153 17]}} it))
+    ^{:go/pos {:return [154 3]}} (return))
+
+  (let [^{:go/pos {:tok-pos [156 8]}} (values ^{:go/pos {:name-pos [156 2]}} o ^{:go/pos {:name-pos [156 5]}} tr) (values ^{:go/pos {:dot [156 13] :name-pos [156 14]}} (.-obj ^{:go/pos {:name-pos [156 11]}} it) ^{:go/pos {:dot [156 21] :name-pos [156 22]}} (.-tr ^{:go/pos {:name-pos [156 19]}} it))]
+    ^{:go/pos {:dot [157 7] :lparen [157 12] :name-pos [157 8] :rparen [157 13]}} (.Lock ^{:go/pos {:name-pos [157 2]}} finMu)
+    (let [^{:go/pos {:name-pos [158 2] :tok-pos [158 4]}} w ^{:go/pos {:dot [158 9] :name-pos [158 10]}} (.-work ^{:go/pos {:name-pos [158 7]}} tr)]
+      ^{:go/apos {2 [159 12]} :go/pos {:tok-pos [159 10]}} (set! ^{:go/pos {:dot [159 4] :name-pos [159 5]}} (.-work ^{:go/pos {:name-pos [159 2]}} tr) 0)
+      ^{:go/pos {:dot [160 7] :lparen [160 14] :name-pos [160 8] :rparen [160 15]}} (.Unlock ^{:go/pos {:name-pos [160 2]}} finMu)
+      ^{:go/pos {:if [161 2] :lbrace [161 20] :rbrace [163 2]}} (when ^{:go/apos {2 [161 18]} :go/pos {:op-pos [161 15]}} (!= ^{:go/pos {:op-pos [161 6]}} (bit-and ^{:go/pos {:name-pos [161 5]}} w ^{:go/pos {:name-pos [161 7]}} workDel) 0)
+        ^{:go/pos {:lparen [162 9] :rparen [162 11]}} (^{:go/pos {:name-pos [162 3]}} runDel ^{:go/pos {:name-pos [162 10]}} o))
+
+      ^{:go/pos {:if [164 2] :lbrace [164 20] :rbrace [168 2]}} (when ^{:go/apos {2 [164 18]} :go/pos {:op-pos [164 15]}} (!= ^{:go/pos {:op-pos [164 6]}} (bit-and ^{:go/pos {:name-pos [164 5]}} w ^{:go/pos {:name-pos [164 7]}} workGen) 0)
+        ^{:go/pos {:if [165 3] :lbrace [165 34] :rbrace [167 3]}} (when [^{:go/pos {:tok-pos [165 12]}} (values ^{:go/pos {:name-pos [165 6]}} g ^{:go/pos {:name-pos [165 9]}} ok) ^{:go/pos {:dot [165 16] :lparen [165 17] :rparen [165 28]}} (assert ^{:go/pos {:star [165 18]}} (* ^{:go/pos {:name-pos [165 19]}} Generator) ^{:go/pos {:name-pos [165 15]}} o)] ^{:go/pos {:name-pos [165 31]}} ok
+          ^{:go/pos {:lparen [166 15] :rparen [166 17]}} (^{:go/pos {:name-pos [166 4]}} finalizeGen ^{:go/pos {:name-pos [166 16]}} g)))
+
+
+      ^{:go/pos {:if [169 2] :lbrace [169 21] :rbrace [171 2]}} (when ^{:go/apos {2 [169 19]} :go/pos {:op-pos [169 16]}} (!= ^{:go/pos {:op-pos [169 6]}} (bit-and ^{:go/pos {:name-pos [169 5]}} w ^{:go/pos {:name-pos [169 7]}} workSock) 0)
+        ^{:go/pos {:lparen [170 17] :rparen [170 19]}} (^{:go/pos {:name-pos [170 3]}} finalizeSocket ^{:go/pos {:name-pos [170 18]}} o))
+
+      ;; the record stays (its Go finalizer set again) while weak references, new work or an identity need it
+      (let [^{:go/pos {:name-pos [173 2] :tok-pos [173 4]}} a ^{:go/pos {:lparen [173 13] :rparen [173 15]}} (^{:go/pos {:name-pos [173 7]}} addrOf ^{:go/pos {:name-pos [173 14]}} o)]
+        ^{:go/pos {:dot [174 7] :lparen [174 12] :name-pos [174 8] :rparen [174 13]}} (.Lock ^{:go/pos {:name-pos [174 2]}} finMu)
+        ^{:go/pos {:if [175 2] :lbrace [175 22] :rbrace [181 2]}} (when ^{:go/pos {:op-pos [175 16]}} (== ^{:go/pos {:lbrack [175 12] :rbrack [175 14]}} (aget ^{:go/pos {:name-pos [175 5]}} tracked ^{:go/pos {:name-pos [175 13]}} a) ^{:go/pos {:name-pos [175 19]}} tr)
+          ^{:go/pos {:else-lbrace [178 10] :else-rbrace [180 3] :if [176 3] :lbrace [176 57] :rbrace [178 3]}} (if ^{:go/ops [[176 24] [176 40]] :go/pos {:op-pos [176 40]}} (and ^{:go/apos {2 [176 22]} :go/pos {:op-pos [176 19]}} (== ^{:go/pos {:lparen [176 9] :rparen [176 17]}} (^{:go/pos {:name-pos [176 6]}} len ^{:go/pos {:dot [176 12] :name-pos [176 13]}} (.-refs ^{:go/pos {:name-pos [176 10]}} tr)) 0) ^{:go/apos {2 [176 38]} :go/pos {:op-pos [176 35]}} (== ^{:go/pos {:dot [176 29] :name-pos [176 30]}} (.-work ^{:go/pos {:name-pos [176 27]}} tr) 0) ^{:go/apos {2 [176 55]} :go/pos {:op-pos [176 52]}} (== ^{:go/pos {:dot [176 45] :name-pos [176 46]}} (.-ident ^{:go/pos {:name-pos [176 43]}} tr) 0))
+            ^{:go/pos {:lparen [177 10] :rparen [177 21]}} (^{:go/pos {:name-pos [177 4]}} delete ^{:go/pos {:name-pos [177 11]}} tracked ^{:go/pos {:name-pos [177 20]}} a)
+
+            ^{:go/pos {:lparen [179 24] :rparen [179 39]}} (^{:go/pos {:dot [179 11] :name-pos [179 12] :x-pos [179 4]}} runtime/SetFinalizer ^{:go/pos {:name-pos [179 25]}} o ^{:go/pos {:name-pos [179 28]}} goFinalized)))
+
+
+        ^{:go/pos {:dot [182 7] :lparen [182 14] :name-pos [182 8] :rparen [182 15]}} (.Unlock ^{:go/pos {:name-pos [182 2]}} finMu)))))
+
+
+
+^{:go/pos {:doc [185 1] :func [186 1] :lbrace [186 34] :rbrace [197 1]}} (go/func ^{:go/pos {:name-pos [186 6]}} weakCallbacks "weakCallbacks calls the callbacks of a dead object's weak references, in its list's order (PyObject_ClearWeakRefs).\n" ^{:go/pos {:closing [186 32] :opening [186 19]}} [^{:tag ^{:go/pos {:star [186 23]}} (* ^{:go/pos {:name-pos [186 24]}} finTrack) :go/pos {:name-pos [186 20]}} tr]
+  ^{:go/pos {:for [187 2] :lbrace [187 28] :range [187 14] :rbrace [196 2] :tok-pos [187 11]}} (range [^{:go/pos {:name-pos [187 6]}} _ ^{:go/pos {:name-pos [187 9]}} r ^{:go/pos {:dot [187 22] :name-pos [187 23]}} (.-refs ^{:go/pos {:name-pos [187 20]}} tr)]
+    (let [^{:go/pos {:name-pos [188 3] :tok-pos [188 6]}} cb ^{:go/pos {:dot [188 10] :name-pos [188 11]}} (.-callback ^{:go/pos {:name-pos [188 9]}} r)]
+      ^{:go/pos {:if [189 3] :lbrace [189 30] :rbrace [191 3]}} (when ^{:go/pos {:op-pos [189 16]}} (or ^{:go/apos {2 [189 12]} :go/pos {:op-pos [189 9]}} (== ^{:go/pos {:name-pos [189 6]}} cb nil) ^{:go/pos {:op-pos [189 22]}} (== ^{:go/pos {:name-pos [189 19]}} cb ^{:go/pos {:name-pos [189 25]}} None))
+        ^{:go/pos {:tok-pos [190 4]}} (continue))
+
+      ^{:go/pos {:tok-pos [192 14]}} (set! ^{:go/pos {:dot [192 4] :name-pos [192 5]}} (.-callback ^{:go/pos {:name-pos [192 3]}} r) ^{:go/pos {:name-pos [192 16]}} None)
+      ^{:go/pos {:if [193 3] :lbrace [193 64] :rbrace [195 3]}} (when [^{:go/pos {:tok-pos [193 13]}} (values ^{:go/pos {:name-pos [193 6]}} _ ^{:go/pos {:name-pos [193 9]}} err) ^{:go/apos {3 [193 47]} :go/pos {:lparen [193 20] :rparen [193 50]}} (^{:go/pos {:name-pos [193 16]}} Call ^{:go/pos {:name-pos [193 21]}} cb ^{:go/pos {:lbrace [193 33] :rbrace [193 44]}} (lit ^{:go/pos {:lbrack [193 25]}} (slice ^{:go/pos {:name-pos [193 27]}} Object) ^{:go/pos {:dot [193 35] :lparen [193 42] :name-pos [193 36] :rparen [193 43]}} (.object ^{:go/pos {:name-pos [193 34]}} r)) nil)] ^{:go/apos {2 [193 60]} :go/pos {:op-pos [193 57]}} (!= ^{:go/pos {:name-pos [193 53]}} err nil)
+        ^{:go/pos {:lparen [194 17] :rparen [194 86]}} (^{:go/pos {:name-pos [194 4]}} finUnraisable ^{:go/pos {:name-pos [194 18]}} err ^{:go/apos {1 [194 23]} :go/pos {:op-pos [194 74]}} (+ "Exception ignored while calling weakref callback " ^{:go/pos {:lparen [194 82] :rparen [194 85]}} (^{:go/pos {:name-pos [194 75]}} reprOrQ ^{:go/pos {:name-pos [194 83]}} cb)))))))
+
+
+
+
+
+^{:go/pos {:doc [199 1] :func [200 1] :lbrace [200 23] :rbrace [208 1]}} (go/func ^{:go/pos {:name-pos [200 6]}} runDel "runDel is slot_tp_finalize: the class's __del__ called, its exception to sys.unraisablehook.\n" ^{:go/pos {:closing [200 21] :opening [200 12]}} [^{:tag ^{:go/pos {:name-pos [200 15]}} Object :go/pos {:name-pos [200 13]}} o]
+  (let [^{:go/pos {:tok-pos [201 9]}} (values ^{:go/pos {:name-pos [201 2]}} del ^{:go/pos {:name-pos [201 7]}} _) ^{:go/apos {2 [201 33]} :go/pos {:lparen [201 22] :rparen [201 42]}} (^{:go/pos {:name-pos [201 12]}} lookupAttr ^{:go/pos {:dot [201 24] :lparen [201 29] :name-pos [201 25] :rparen [201 30]}} (.Type ^{:go/pos {:name-pos [201 23]}} o) "__del__")]
+    ^{:go/pos {:if [202 2] :lbrace [202 16] :rbrace [204 2]}} (when ^{:go/apos {2 [202 12]} :go/pos {:op-pos [202 9]}} (== ^{:go/pos {:name-pos [202 5]}} del nil)
+      ^{:go/pos {:return [203 3]}} (return))
+
+    ^{:go/pos {:if [205 2] :lbrace [205 55] :rbrace [207 2]}} (when [^{:go/pos {:tok-pos [205 12]}} (values ^{:go/pos {:name-pos [205 5]}} _ ^{:go/pos {:name-pos [205 8]}} err) ^{:go/apos {3 [205 38]} :go/pos {:lparen [205 19] :rparen [205 41]}} (^{:go/pos {:name-pos [205 15]}} Call ^{:go/pos {:name-pos [205 20]}} del ^{:go/pos {:lbrace [205 33] :rbrace [205 35]}} (lit ^{:go/pos {:lbrack [205 25]}} (slice ^{:go/pos {:name-pos [205 27]}} Object) ^{:go/pos {:name-pos [205 34]}} o) nil)] ^{:go/apos {2 [205 51]} :go/pos {:op-pos [205 48]}} (!= ^{:go/pos {:name-pos [205 44]}} err nil)
+      ^{:go/pos {:lparen [206 16] :rparen [206 81]}} (^{:go/pos {:name-pos [206 3]}} finUnraisable ^{:go/pos {:name-pos [206 17]}} err ^{:go/apos {1 [206 22]} :go/pos {:op-pos [206 68]}} (+ "Exception ignored while calling deallocator " ^{:go/pos {:lparen [206 76] :rparen [206 80]}} (^{:go/pos {:name-pos [206 69]}} reprOrQ ^{:go/pos {:name-pos [206 77]}} del))))))
+
+
+
+
+
+^{:go/pos {:doc [210 1] :func [212 1] :lbrace [212 32] :rbrace [229 1]}} (go/func ^{:go/pos {:name-pos [212 6]}} finalizeGen "finalizeGen is _PyGen_Finalize: an async generator with sys's finalizer hook handed to it; a coroutine never\nstarted warns; a suspended generator or coroutine closed.\n" ^{:go/pos {:closing [212 30] :opening [212 17]}} [^{:tag ^{:go/pos {:star [212 20]}} (* ^{:go/pos {:name-pos [212 21]}} Generator) :go/pos {:name-pos [212 18]}} g]
+  ^{:go/pos {:if [213 2] :lbrace [213 20] :rbrace [215 2]}} (when ^{:go/apos {2 [213 16]} :go/pos {:op-pos [213 13]}} (== ^{:go/pos {:dot [213 6] :name-pos [213 7]}} (.-frame ^{:go/pos {:name-pos [213 5]}} g) nil)
+    ^{:go/pos {:return [214 3]}} (return))
+
+  ^{:go/pos {:if [216 2] :lbrace [216 68] :rbrace [221 2]}} (when ^{:go/ops [[216 33] [216 55]] :go/pos {:op-pos [216 55]}} (and ^{:go/pos {:op-pos [216 12]}} (== ^{:go/pos {:dot [216 6] :name-pos [216 7]}} (.-kind ^{:go/pos {:name-pos [216 5]}} g) ^{:go/pos {:name-pos [216 15]}} genAsyncGenerator) ^{:go/apos {2 [216 51]} :go/pos {:op-pos [216 48]}} (!= ^{:go/pos {:dot [216 37] :name-pos [216 38]}} (.-finalizer ^{:go/pos {:name-pos [216 36]}} g) nil) ^{:go/pos {:op-pos [216 58]}} (not ^{:go/pos {:dot [216 60] :name-pos [216 61]}} (.-closed ^{:go/pos {:name-pos [216 59]}} g)))
+    ^{:go/pos {:if [217 3] :lbrace [217 64] :rbrace [219 3]}} (when [^{:go/pos {:tok-pos [217 13]}} (values ^{:go/pos {:name-pos [217 6]}} _ ^{:go/pos {:name-pos [217 9]}} err) ^{:go/apos {3 [217 47]} :go/pos {:lparen [217 20] :rparen [217 50]}} (^{:go/pos {:name-pos [217 16]}} Call ^{:go/pos {:dot [217 22] :name-pos [217 23]}} (.-finalizer ^{:go/pos {:name-pos [217 21]}} g) ^{:go/pos {:lbrace [217 42] :rbrace [217 44]}} (lit ^{:go/pos {:lbrack [217 34]}} (slice ^{:go/pos {:name-pos [217 36]}} Object) ^{:go/pos {:name-pos [217 43]}} g) nil)] ^{:go/apos {2 [217 60]} :go/pos {:op-pos [217 57]}} (!= ^{:go/pos {:name-pos [217 53]}} err nil)
+      ^{:go/pos {:lparen [218 17] :rparen [218 81]}} (^{:go/pos {:name-pos [218 4]}} finUnraisable ^{:go/pos {:name-pos [218 18]}} err ^{:go/apos {1 [218 23]} :go/pos {:op-pos [218 70]}} (+ "Exception ignored while finalizing generator " ^{:go/pos {:lparen [218 78] :rparen [218 80]}} (^{:go/pos {:name-pos [218 71]}} reprOrQ ^{:go/pos {:name-pos [218 79]}} g))))
+
+    ^{:go/pos {:return [220 3]}} (return))
+
+  ^{:go/pos {:if [222 2] :lbrace [222 42] :rbrace [225 2]}} (when ^{:go/pos {:op-pos [222 28]}} (and ^{:go/pos {:op-pos [222 12]}} (== ^{:go/pos {:dot [222 6] :name-pos [222 7]}} (.-kind ^{:go/pos {:name-pos [222 5]}} g) ^{:go/pos {:name-pos [222 15]}} genCoroutine) ^{:go/pos {:op-pos [222 31]}} (not ^{:go/pos {:dot [222 33] :name-pos [222 34]}} (.-started ^{:go/pos {:name-pos [222 32]}} g)))
+    ^{:go/pos {:lparen [223 25] :rparen [223 27]}} (^{:go/pos {:name-pos [223 3]}} warnUnawaitedCoroutine ^{:go/pos {:name-pos [223 26]}} g)
+    ^{:go/pos {:return [224 3]}} (return))
+
+  ^{:go/pos {:if [226 2] :lbrace [226 37] :rbrace [228 2]}} (when [^{:go/pos {:tok-pos [226 12]}} (values ^{:go/pos {:name-pos [226 5]}} _ ^{:go/pos {:name-pos [226 8]}} err) ^{:go/pos {:dot [226 16] :lparen [226 22] :name-pos [226 17] :rparen [226 23]}} (.close ^{:go/pos {:name-pos [226 15]}} g)] ^{:go/apos {2 [226 33]} :go/pos {:op-pos [226 30]}} (!= ^{:go/pos {:name-pos [226 26]}} err nil)
+    ^{:go/pos {:lparen [227 16] :rparen [227 77]}} (^{:go/pos {:name-pos [227 3]}} finUnraisable ^{:go/pos {:name-pos [227 17]}} err ^{:go/apos {1 [227 22]} :go/pos {:op-pos [227 66]}} (+ "Exception ignored while closing generator " ^{:go/pos {:lparen [227 74] :rparen [227 76]}} (^{:go/pos {:name-pos [227 67]}} reprOrQ ^{:go/pos {:name-pos [227 75]}} g)))))
+
+
+
+
+
+^{:go/pos {:doc [231 1] :func [233 1] :lbrace [233 43] :rbrace [251 1]}} (go/func ^{:go/pos {:name-pos [233 6]}} warnUnawaitedCoroutine "warnUnawaitedCoroutine is _PyErr_WarnUnawaitedCoroutine: warnings._warn_unawaited_coroutine(coro), or a plain\nRuntimeWarning when that failed other than by the warning itself.\n" ^{:go/pos {:closing [233 41] :opening [233 28]}} [^{:tag ^{:go/pos {:star [233 31]}} (* ^{:go/pos {:name-pos [233 32]}} Generator) :go/pos {:name-pos [233 29]}} g]
+  (let ^{:go/apos {1 [234 12]}} [^{:go/pos {:name-pos [234 2] :tok-pos [234 9]}} warned false]
+    ^{:go/pos {:if [235 2] :lbrace [235 52] :rbrace [245 2]}} (when [^{:go/pos {:tok-pos [235 12]}} (values ^{:go/pos {:name-pos [235 5]}} w ^{:go/pos {:name-pos [235 8]}} err) ^{:go/apos {1 [235 28]} :go/pos {:lparen [235 27] :rparen [235 38]}} (^{:go/pos {:name-pos [235 15]}} importModule "warnings")] ^{:go/apos {2 [235 48]} :go/pos {:op-pos [235 45]}} (== ^{:go/pos {:name-pos [235 41]}} err nil)
+      ^{:go/pos {:if [236 3] :lbrace [236 77] :rbrace [244 3]}} (when [^{:go/pos {:tok-pos [236 14]}} (values ^{:go/pos {:name-pos [236 6]}} fn ^{:go/pos {:name-pos [236 10]}} err) ^{:go/pos {:lparen [236 24] :rparen [236 63]}} (^{:go/pos {:name-pos [236 17]}} GetAttr ^{:go/pos {:name-pos [236 25]}} w ^{:go/apos {1 [236 35]} :go/pos {:lparen [236 34] :rparen [236 62]}} (^{:go/pos {:name-pos [236 28]}} NewStr "_warn_unawaited_coroutine"))] ^{:go/apos {2 [236 73]} :go/pos {:op-pos [236 70]}} (== ^{:go/pos {:name-pos [236 66]}} err nil)
+        (let [^{:go/pos {:tok-pos [237 11]}} (values ^{:go/pos {:name-pos [237 4]}} _ ^{:go/pos {:name-pos [237 7]}} err) ^{:go/apos {3 [237 36]} :go/pos {:lparen [237 18] :rparen [237 39]}} (^{:go/pos {:name-pos [237 14]}} Call ^{:go/pos {:name-pos [237 19]}} fn ^{:go/pos {:lbrace [237 31] :rbrace [237 33]}} (lit ^{:go/pos {:lbrack [237 23]}} (slice ^{:go/pos {:name-pos [237 25]}} Object) ^{:go/pos {:name-pos [237 32]}} g) nil)]
+          ^{:go/pos {:if [238 4] :lbrace [238 55] :rbrace [240 4]}} (when ^{:go/pos {:op-pos [238 18]}} (or ^{:go/apos {2 [238 14]} :go/pos {:op-pos [238 11]}} (== ^{:go/pos {:name-pos [238 7]}} err nil) ^{:go/pos {:lparen [238 29] :rparen [238 53]}} (^{:go/pos {:name-pos [238 21]}} isRaised ^{:go/pos {:name-pos [238 30]}} err ^{:go/pos {:name-pos [238 35]}} RuntimeWarningType))
+            ^{:go/apos {2 [239 14]} :go/pos {:tok-pos [239 12]}} (set! ^{:go/pos {:name-pos [239 5]}} warned true))
+
+          ^{:go/pos {:if [241 4] :lbrace [241 18] :rbrace [243 4]}} (when ^{:go/apos {2 [241 14]} :go/pos {:op-pos [241 11]}} (!= ^{:go/pos {:name-pos [241 7]}} err nil)
+            ^{:go/pos {:lparen [242 18] :rparen [242 82]}} (^{:go/pos {:name-pos [242 5]}} finUnraisable ^{:go/pos {:name-pos [242 19]}} err ^{:go/apos {1 [242 24]} :go/pos {:op-pos [242 71]}} (+ "Exception ignored while finalizing coroutine " ^{:go/pos {:lparen [242 79] :rparen [242 81]}} (^{:go/pos {:name-pos [242 72]}} reprOrQ ^{:go/pos {:name-pos [242 80]}} g)))))))
+
+
+
+    ^{:go/pos {:if [246 2] :lbrace [246 13] :rbrace [250 2]}} (when ^{:go/pos {:op-pos [246 5]}} (not ^{:go/pos {:name-pos [246 6]}} warned)
+      ^{:go/pos {:if [247 3] :lbrace [247 105] :rbrace [249 3]}} (when [^{:go/pos {:name-pos [247 6] :tok-pos [247 10]}} err ^{:go/apos {3 [247 90]} :go/pos {:lparen [247 21] :rparen [247 91]}} (^{:go/pos {:name-pos [247 13]}} dataWarn ^{:go/pos {:name-pos [247 22]}} RuntimeWarningType ^{:go/apos {1 [247 42] 3 [247 67]} :go/ops [[247 55] [247 66]] :go/pos {:op-pos [247 66]}} (+ "coroutine '" ^{:go/pos {:dot [247 57] :name-pos [247 58]}} (.-Qualname ^{:go/pos {:name-pos [247 56]}} g) "' was never awaited") 1)] ^{:go/apos {2 [247 101]} :go/pos {:op-pos [247 98]}} (!= ^{:go/pos {:name-pos [247 94]}} err nil)
+        ^{:go/pos {:lparen [248 17] :rparen [248 81]}} (^{:go/pos {:name-pos [248 4]}} finUnraisable ^{:go/pos {:name-pos [248 18]}} err ^{:go/apos {1 [248 23]} :go/pos {:op-pos [248 70]}} (+ "Exception ignored while finalizing coroutine " ^{:go/pos {:lparen [248 78] :rparen [248 80]}} (^{:go/pos {:name-pos [248 71]}} reprOrQ ^{:go/pos {:name-pos [248 79]}} g)))))))
+
+
+
+
+
+^{:go/pos {:doc [253 1] :func [254 1] :lbrace [254 43] :rbrace [258 1]}} (go/func ^{:go/pos {:name-pos [254 6]}} finUnraisable "finUnraisable is PyErr_FormatUnraisable from a finalizer (the object None).\n" ^{:go/pos {:closing [254 41] :opening [254 19]}} [^{:tag ^{:go/pos {:name-pos [254 24]}} error :go/pos {:name-pos [254 20]}} err ^{:tag ^{:go/pos {:name-pos [254 35]}} string :go/pos {:name-pos [254 31]}} msg]
+  ^{:go/pos {:if [255 2] :lbrace [255 36] :rbrace [257 2]}} (when [^{:go/pos {:name-pos [255 5] :tok-pos [255 7]}} t ^{:go/pos {:lparen [255 23] :rparen [255 24]}} (^{:go/pos {:name-pos [255 10]}} currentThread)] ^{:go/apos {2 [255 32]} :go/pos {:op-pos [255 29]}} (!= ^{:go/pos {:name-pos [255 27]}} t nil)
+    ^{:go/apos {4 [256 39]} :go/pos {:lparen [256 18] :rparen [256 42]}} (^{:go/pos {:name-pos [256 3]}} writeUnraisable ^{:go/pos {:dot [256 20] :name-pos [256 21]}} (.-Interp ^{:go/pos {:name-pos [256 19]}} t) ^{:go/pos {:name-pos [256 29]}} err ^{:go/pos {:name-pos [256 34]}} msg nil)))
+
+
+
+
+
+^{:go/pos {:doc [260 1] :func [262 1] :lbrace [262 21] :rbrace [276 1] :return [275 2]}} (go/func ^{:go/pos {:name-pos [262 6]}} finRound "finRound is one round of gc.collect: Go's collection, a wait until Go's finalizer goroutine has been still for a\nmoment (there is no public barrier), then the drain; the number of dead objects handled.\n" ^{:tag ^{:go/pos {:name-pos [262 17]}} int :go/pos {:closing [262 15] :opening [262 14]}} []
+  ^{:go/pos {:lparen [263 14] :rparen [274 3]}} (^{:go/pos {:name-pos [263 2]}} allowThreads ^{:go/pos {:func [263 15] :lbrace [263 22] :rbrace [274 2]}} (fn ^{:go/pos {:closing [263 20] :opening [263 19]}} []
+      ^{:go/pos {:lparen [264 13] :rparen [264 14]}} (^{:go/pos {:dot [264 10] :name-pos [264 11] :x-pos [264 3]}} runtime/GC)
+      (let [^{:go/pos {:name-pos [265 3] :tok-pos [265 8]}} last ^{:go/pos {:dot [265 18] :lparen [265 23] :name-pos [265 19] :rparen [265 24]}} (.Load ^{:go/pos {:name-pos [265 11]}} finRuns)]
+        ^{:go/pos {:for [266 3] :lbrace [266 66] :rbrace [273 3]}} (for [^{:go/pos {:tok-pos [266 21]}} (values ^{:go/pos {:name-pos [266 7]}} quiet ^{:go/pos {:name-pos [266 14]}} waited) ^{:go/apos {1 [266 24] 2 [266 27]}} (values 0 0)] ^{:go/pos {:op-pos [266 40]}} (and ^{:go/apos {2 [266 38]} :go/pos {:op-pos [266 36]}} (< ^{:go/pos {:name-pos [266 30]}} quiet 3) ^{:go/apos {2 [266 52]} :go/pos {:op-pos [266 50]}} (< ^{:go/pos {:name-pos [266 43]}} waited 500)) ^{:go/pos {:tok-pos [266 63]}} (inc! ^{:go/pos {:name-pos [266 57]}} waited)
+          ^{:go/pos {:lparen [267 14] :rparen [267 31]}} (^{:go/pos {:dot [267 8] :name-pos [267 9] :x-pos [267 4]}} time/Sleep ^{:go/pos {:dot [267 19] :name-pos [267 20] :x-pos [267 15]}} time/Millisecond)
+          ^{:go/pos {:else-lbrace [270 11] :else-rbrace [272 4] :if [268 4] :lbrace [268 42] :rbrace [270 4]}} (if [^{:go/pos {:name-pos [268 7] :tok-pos [268 11]}} now ^{:go/pos {:dot [268 21] :lparen [268 26] :name-pos [268 22] :rparen [268 27]}} (.Load ^{:go/pos {:name-pos [268 14]}} finRuns)] ^{:go/pos {:op-pos [268 34]}} (!= ^{:go/pos {:name-pos [268 30]}} now ^{:go/pos {:name-pos [268 37]}} last)
+            ^{:go/pos {:tok-pos [269 17]}} (set! (values ^{:go/pos {:name-pos [269 5]}} last ^{:go/pos {:name-pos [269 11]}} quiet) ^{:go/apos {2 [269 24]}} (values ^{:go/pos {:name-pos [269 19]}} now 0))
+
+            ^{:go/pos {:tok-pos [271 10]}} (inc! ^{:go/pos {:name-pos [271 5]}} quiet))))))
+
+
+
+  ^{:go/pos {:lparen [275 24] :rparen [275 25]}} (^{:go/pos {:name-pos [275 9]}} drainFinalizers))
+
+
+
+
+^{:go/pos {:doc [278 1] :func [280 1] :lbrace [280 23] :rbrace [296 1] :return [295 2]}} (go/func ^{:go/pos {:name-pos [280 6]}} finCollect "finCollect is gc.collect's finalization: rounds until one handles nothing (at most 8), none when nothing is\ntracked or queued; the number of dead objects handled.\n" ^{:tag ^{:go/pos {:name-pos [280 19]}} int :go/pos {:closing [280 17] :opening [280 16]}} []
+  (let [^{:go/pos {:name-pos [281 2] :tok-pos [281 4]}} n ^{:go/pos {:lparen [281 22] :rparen [281 23]}} (^{:go/pos {:name-pos [281 7]}} drainFinalizers)]
+    ^{:go/pos {:for [282 2] :lbrace [282 37] :rbrace [294 2]}} (for ^{:go/apos {1 [282 15]}} [^{:go/pos {:name-pos [282 6] :tok-pos [282 12]}} round 0] ^{:go/apos {2 [282 26]} :go/pos {:op-pos [282 24]}} (< ^{:go/pos {:name-pos [282 18]}} round 8) ^{:go/pos {:tok-pos [282 34]}} (inc! ^{:go/pos {:name-pos [282 29]}} round)
+      ^{:go/pos {:dot [283 8] :lparen [283 13] :name-pos [283 9] :rparen [283 14]}} (.Lock ^{:go/pos {:name-pos [283 3]}} finMu)
+      (let [^{:go/pos {:name-pos [284 3] :tok-pos [284 8]}} idle ^{:go/pos {:op-pos [284 29]}} (and ^{:go/apos {2 [284 27]} :go/pos {:op-pos [284 24]}} (== ^{:go/pos {:lparen [284 14] :rparen [284 22]}} (^{:go/pos {:name-pos [284 11]}} len ^{:go/pos {:name-pos [284 15]}} tracked) 0) ^{:go/apos {2 [284 49]} :go/pos {:op-pos [284 46]}} (== ^{:go/pos {:lparen [284 35] :rparen [284 44]}} (^{:go/pos {:name-pos [284 32]}} len ^{:go/pos {:name-pos [284 36]}} finQueue) 0))]
+        ^{:go/pos {:dot [285 8] :lparen [285 15] :name-pos [285 9] :rparen [285 16]}} (.Unlock ^{:go/pos {:name-pos [285 3]}} finMu)
+        ^{:go/pos {:if [286 3] :lbrace [286 11] :rbrace [288 3]}} (when ^{:go/pos {:name-pos [286 6]}} idle
+          ^{:go/pos {:tok-pos [287 4]}} (break))
+
+        (let [^{:go/pos {:name-pos [289 3] :tok-pos [289 5]}} k ^{:go/pos {:lparen [289 16] :rparen [289 17]}} (^{:go/pos {:name-pos [289 8]}} finRound)]
+          ^{:go/pos {:tok-pos [290 5]}} (set! ^{:go/pos {:name-pos [290 3]}} n + ^{:go/pos {:name-pos [290 8]}} k)
+          ^{:go/pos {:if [291 3] :lbrace [291 13] :rbrace [293 3]}} (when ^{:go/apos {2 [291 11]} :go/pos {:op-pos [291 8]}} (== ^{:go/pos {:name-pos [291 6]}} k 0)
+            ^{:go/pos {:tok-pos [292 4]}} (break)))))
+
+
+    ^{:go/pos {:name-pos [295 9]}} n))
+
+
+
+
+^{:go/pos {:doc [298 1] :func [300 1] :lbrace [300 31] :rbrace [314 1]}} (go/func ^{:go/pos {:name-pos [300 6]}} finalizeSocket "finalizeSocket is sock_finalize: an open socket warns ResourceWarning \"unclosed %R\" (its source the socket), then\nits descriptor is closed.\n" ^{:go/pos {:closing [300 29] :opening [300 20]}} [^{:tag ^{:go/pos {:name-pos [300 23]}} Object :go/pos {:name-pos [300 21]}} o]
+  (let [^{:go/pos {:tok-pos [301 9]}} (values ^{:go/pos {:name-pos [301 2]}} so ^{:go/pos {:name-pos [301 6]}} ok) ^{:go/pos {:dot [301 27] :lparen [301 28] :rparen [301 38]}} (assert ^{:go/pos {:star [301 29]}} (* ^{:go/pos {:name-pos [301 30]}} pySocket) ^{:go/pos {:lparen [301 24] :rparen [301 26]}} (^{:go/pos {:name-pos [301 12]}} BuiltinValue ^{:go/pos {:name-pos [301 25]}} o))]
+    ^{:go/pos {:if [302 2] :lbrace [302 22] :rbrace [304 2]}} (when ^{:go/pos {:op-pos [302 9]}} (or ^{:go/pos {:op-pos [302 5]}} (not ^{:go/pos {:name-pos [302 6]}} ok) ^{:go/apos {2 [302 20]} :go/pos {:op-pos [302 18]}} (< ^{:go/pos {:dot [302 14] :name-pos [302 15]}} (.-fd ^{:go/pos {:name-pos [302 12]}} so) 0))
+      ^{:go/pos {:return [303 3]}} (return))
+
+    ^{:go/pos {:if [305 2] :lbrace [305 64] :rbrace [309 2]}} (when [^{:go/pos {:name-pos [305 5] :tok-pos [305 9]}} err ^{:go/pos {:lparen [305 24] :rparen [305 50]}} (^{:go/pos {:name-pos [305 12]}} resourceWarn ^{:go/pos {:name-pos [305 25]}} o ^{:go/apos {1 [305 28]} :go/pos {:op-pos [305 39]}} (+ "unclosed " ^{:go/pos {:lparen [305 47] :rparen [305 49]}} (^{:go/pos {:name-pos [305 40]}} reprOrQ ^{:go/pos {:name-pos [305 48]}} o)))] ^{:go/apos {2 [305 60]} :go/pos {:op-pos [305 57]}} (!= ^{:go/pos {:name-pos [305 53]}} err nil)
+      ^{:go/pos {:if [306 3] :lbrace [306 33] :rbrace [308 3]}} (when ^{:go/pos {:lparen [306 14] :rparen [306 31]}} (^{:go/pos {:name-pos [306 6]}} isRaised ^{:go/pos {:name-pos [306 15]}} err ^{:go/pos {:name-pos [306 20]}} WarningType)
+        ^{:go/pos {:lparen [307 17] :rparen [307 78]}} (^{:go/pos {:name-pos [307 4]}} finUnraisable ^{:go/pos {:name-pos [307 18]}} err ^{:go/apos {1 [307 23]} :go/pos {:op-pos [307 67]}} (+ "Exception ignored while finalizing socket " ^{:go/pos {:lparen [307 75] :rparen [307 77]}} (^{:go/pos {:name-pos [307 68]}} reprOrQ ^{:go/pos {:name-pos [307 76]}} o)))))
+
+
+    ^{:go/pos {:if [310 2] :lbrace [310 26] :rbrace [313 2]}} (when [^{:go/pos {:name-pos [310 5] :tok-pos [310 8]}} fd ^{:go/pos {:dot [310 13] :name-pos [310 14]}} (.-fd ^{:go/pos {:name-pos [310 11]}} so)] ^{:go/apos {2 [310 24]} :go/pos {:op-pos [310 21]}} (>= ^{:go/pos {:name-pos [310 18]}} fd 0)
+      ^{:go/apos {2 [311 11]} :go/pos {:tok-pos [311 9]}} (set! ^{:go/pos {:dot [311 5] :name-pos [311 6]}} (.-fd ^{:go/pos {:name-pos [311 3]}} so) -1)
+      ^{:go/pos {:lparen [312 16] :rparen [312 19]}} (^{:go/pos {:dot [312 10] :name-pos [312 11] :x-pos [312 3]}} syscall/Close ^{:go/pos {:name-pos [312 17]}} fd))))
+
+
+
+
+^{:go/pos {:doc [316 1] :func [317 1] :lbrace [317 52] :rbrace [328 1] :return [327 2]}} (go/func ^{:go/pos {:name-pos [317 6]}} resourceWarn "resourceWarn is PyErr_ResourceWarning(source, 1, msg): warnings.warn(msg, ResourceWarning, 1, source=source).\n" ^{:tag ^{:go/pos {:name-pos [317 46]}} error :go/pos {:closing [317 44] :opening [317 18]}} [^{:tag ^{:go/pos {:name-pos [317 26]}} Object :go/pos {:name-pos [317 19]}} source ^{:tag ^{:go/pos {:name-pos [317 38]}} string :go/pos {:name-pos [317 34]}} msg]
+  (let [^{:go/pos {:tok-pos [318 9]}} (values ^{:go/pos {:name-pos [318 2]}} w ^{:go/pos {:name-pos [318 5]}} err) ^{:go/apos {1 [318 25]} :go/pos {:lparen [318 24] :rparen [318 35]}} (^{:go/pos {:name-pos [318 12]}} importModule "warnings")]
+    ^{:go/pos {:if [319 2] :lbrace [319 16] :rbrace [321 2]}} (when ^{:go/apos {2 [319 12]} :go/pos {:op-pos [319 9]}} (!= ^{:go/pos {:name-pos [319 5]}} err nil)
+      ^{:go/pos {:return [320 3]}} (return ^{:go/pos {:name-pos [320 10]}} err))
+
+    (let [^{:go/pos {:tok-pos [322 9]}} (values ^{:go/pos {:name-pos [322 2]}} f ^:assign ^{:go/pos {:name-pos [322 5]}} err) ^{:go/pos {:lparen [322 19] :rparen [322 37]}} (^{:go/pos {:name-pos [322 12]}} GetAttr ^{:go/pos {:name-pos [322 20]}} w ^{:go/apos {1 [322 30]} :go/pos {:lparen [322 29] :rparen [322 36]}} (^{:go/pos {:name-pos [322 23]}} NewStr "warn"))]
+      ^{:go/pos {:if [323 2] :lbrace [323 16] :rbrace [325 2]}} (when ^{:go/apos {2 [323 12]} :go/pos {:op-pos [323 9]}} (!= ^{:go/pos {:name-pos [323 5]}} err nil)
+        ^{:go/pos {:return [324 3]}} (return ^{:go/pos {:name-pos [324 10]}} err))
+
+      ^{:go/pos {:tok-pos [326 9]}} (set! (values ^{:go/pos {:name-pos [326 2]}} _ ^{:go/pos {:name-pos [326 5]}} err) ^{:go/pos {:lparen [326 15] :rparen [326 106]}} (^{:go/pos {:name-pos [326 11]}} Call ^{:go/pos {:name-pos [326 16]}} f ^{:go/pos {:lbrace [326 27] :rbrace [326 79]}} (lit ^{:go/pos {:lbrack [326 19]}} (slice ^{:go/pos {:name-pos [326 21]}} Object) ^{:go/pos {:lparen [326 34] :rparen [326 38]}} (^{:go/pos {:name-pos [326 28]}} NewStr ^{:go/pos {:name-pos [326 35]}} msg) ^{:go/pos {:name-pos [326 41]}} ResourceWarningType ^{:go/apos {1 [326 69]} :go/pos {:lparen [326 68] :rparen [326 70]}} (^{:go/pos {:name-pos [326 62]}} NewInt 1) ^{:go/pos {:name-pos [326 73]}} source) ^{:go/pos {:lbrace [326 88] :rbrace [326 105]}} (lit ^{:go/pos {:lbrack [326 82]}} (slice ^{:go/pos {:star [326 84]}} (* ^{:go/pos {:name-pos [326 85]}} Str)) ^{:go/apos {1 [326 96]} :go/pos {:lparen [326 95] :rparen [326 104]}} (^{:go/pos {:name-pos [326 89]}} NewStr "source"))))
+      ^{:go/pos {:name-pos [327 9]}} err)))
