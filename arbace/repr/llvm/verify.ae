@@ -41,7 +41,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value phase-debug*)
+(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value phase-debug* md-str global-opts md-ops md-int-op? md-int-val)
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
@@ -1116,8 +1116,15 @@
             (not= n k) (verr :parser/uselistorder (str "wrong number of indexes, expected " n) {:at :start})))))
 
 (defn- implicit-renames
-  "The intrinsics a module calls undeclared, by the names LLParser declares them with (the overload types mangled)."
+  "The intrinsics a module calls undeclared, by the names LLParser declares them with (the overload types mangled); and the
+  declared ones written without their suffixes, remangled (Intrinsic::remangleIntrinsicFunction)."
   [forms]
+  (merge
+   (into {} (for [f forms :when (= (first f) 'llvm/declare) :let [k (global-key (second f))] :when (str/starts-with? k "llvm.")
+                  :let [e (intr/lookup k)] :when (and e (:overloaded e) (= k (:name e)))
+                  :let [fty (:fty (.get *gdefs* k)) m (when fty (intr/mangled-name e fty tstr resolve-type))]
+                  :when (and m (not= m k))]
+              [k m]))
   (into {} (for [k (filter #(str/starts-with? % "llvm.") (keys *gfwd*))
                  :let [e (intr/lookup k)] :when (and e (:overloaded e))
                  :let [fty (first (for [f forms :when (= (first f) 'llvm/define)
@@ -1126,7 +1133,7 @@
                                     (let [[_ ps] (split-inst b)] (call-fty (first ps) (nth ps 2)))))
                        m (when fty (intr/mangled-name e fty tstr resolve-type))]
                  :when (and m (not= m k))]
-             [k m])))
+             [k m]))))
 
 (def ^:dynamic *comdats* nil)
 
@@ -1507,6 +1514,14 @@
         has-gc (some? (:gc fo))]
     (doseq [a args :when (and (vector? a) (= 'x86_amx (norm-type (first a)))) :when (not (local? (peek a)))]
       (verr :verifier/intrinsic-call "const x86_amx is not allowed in argument!" :none))
+    (when (str/starts-with? id "llvm.experimental.constrained.")
+      ;; visitConstrainedFPIntrinsic: the exception behavior, then the rounding mode
+      (let [op (subs id 30) rounding? (not (#{"fcmp" "fcmps" "fptosi" "fptoui" "fpext" "ceil" "floor" "round" "roundeven" "trunc" "lround"
+                                              "llround" "maxnum" "minnum" "maximum" "minimum"} op))
+            n (count args) ex (md-str (peek (nth args (dec n) nil))) rm (when rounding? (md-str (peek (nth args (- n 2) nil))))]
+        (when-not (#{"fpexcept.ignore" "fpexcept.maytrap" "fpexcept.strict"} ex) (verr :verifier/intrinsic-call "invalid exception behavior argument" :inst))
+        (when (and rounding? (not (#{"round.dynamic" "round.tonearest" "round.downward" "round.upward" "round.towardzero" "round.tonearestaway"} rm)))
+          (verr :verifier/intrinsic-call "invalid rounding mode argument" :inst))))
     (case id
       "llvm.assume"
       (do (when (seq (:bundles o)) (when-not (#{1 true} (arg 0)) (verr :verifier/intrinsic-call "assume with operand bundles must have i1 true condition" :inst)))
@@ -1550,6 +1565,26 @@
             (when-not et (verr :verifier/intrinsic-call "gc.statepoint callee argument must have elementtype attribute" :inst))
             (let [ft (norm-type (second et))]
               (when-not (and (seq? ft) (= 'fn (first ft))) (verr :verifier/intrinsic-call "gc.statepoint callee elementtype must be function type" :inst)))))
+      "llvm.va_start" (when-not (some #{'&} (nth f 3)) (verr :verifier/intrinsic-call "va_start called in a non-varargs function" :none))
+      "llvm.threadlocal.address"
+      (let [v (arg 0) d (when (global? v) (.get *gdefs* (global-key v)))]
+        (when-not d (verr :verifier/intrinsic-call "llvm.threadlocal.address first argument must be a GlobalValue" :none))
+        (when-not (:thread-local (global-opts (:form d))) (verr :verifier/intrinsic-call "llvm.threadlocal.address operand isThreadLocal() must be true" :none)))
+      "llvm.reloc.none" (when-not (md-str (arg 0)) (verr :verifier/intrinsic-call "llvm.reloc.none argument must be a metadata string" :inst))
+      "llvm.bswap" (let [t (elem (result-type b))] (when (and (int-type? t) (not (zero? (mod (int-bits t) 16)))) (verr :verifier/intrinsic-call "bswap must be an even number of bytes" :inst)))
+      ("llvm.ucmp" "llvm.scmp")
+      (let [dt (result-type b) st (aty 0)]
+        (when-not (>= (long (or (bits (elem dt)) 0)) 2) (verr :verifier/intrinsic-call "result type must be at least 2 bits wide" :inst))
+        (when-not (= (vec-type? st) (vec-type? dt)) (verr :verifier/intrinsic-call "ucmp/scmp argument and result types must both be either vector or scalar types" :inst))
+        (when (and (vec-type? dt) (not= (shape st) (shape dt))) (verr :verifier/intrinsic-call "return type and arguments must have the same number of elements" :inst)))
+      "llvm.experimental.memset.pattern"
+      (when-not (sized? (aty 1)) (verr :verifier/intrinsic-call "unsized types cannot be used as memset patterns" :inst))
+      "llvm.fptrunc.round"
+      (let [m (arg 1)]
+        (when (nil? m) (verr :verifier/intrinsic-call "missing rounding mode argument" :inst))
+        (when-not (md-str m) (verr :verifier/intrinsic-call "invalid value for llvm.fptrunc.round metadata operand (the operand should be a string)" [:mdv m]))
+        (when-not (#{"round.tonearest" "round.downward" "round.upward" "round.towardzero" "round.tonearestaway"} (md-str m))
+          (verr :verifier/intrinsic-call "unsupported rounding mode argument" :inst)))
       "llvm.experimental.get.vector.length"
       (let [v (arg 1)] (when (and (integer? v) (<= (long v) 0)) (verr :verifier/intrinsic-call "get_vector_length: VF must be positive" :inst)))
       "llvm.structured.alloca"
