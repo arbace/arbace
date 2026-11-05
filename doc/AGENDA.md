@@ -13,10 +13,11 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`a59cc441…`, committed `1fe1063f`,
-  2026-11-02: C9.2's re-seed, embedding C: `arbace/c`, `arbace/repr/c`, `arbace.lang.CInterp`), the program printed by
-  the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by `seed/goroot.sha256`; `bin/seed --verify` passed
-  (stage 0 = G1 = G2 = G3, `606d45e6…`). `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`d5548e72…`, committed `496d3348`,
+  2026-11-05: the re-seed before the tag, C only: the backlog, the digraphs, the crops' Go forms out of the runtime's and
+  javac's keys; before it `a59cc441…`, 2026-11-02, C9.2's, embedding C), the program printed by the Go-hosted fixpoint,
+  its toolchain (TamaGo's go1.27.1) pinned by `seed/goroot.sha256`; `bin/seed --verify` passed (stage 0 = G1 = G2 = G3,
+  `d503777b…`). `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (c2j, j2g, repr/go, repr/clojure, build/go, the suite's runner, ci and repr/c),
   compiled into it; `bin/arbace-go --build` is a Go-hosted build, `--fixpoint` the chain G1 → G2 → G3. The program's
   namespaces are compiled to Go (`ARBACE_AOT=1`, since S6).
@@ -61,7 +62,7 @@ The current state of the work. This file is rewritten as things change. For the 
   `1fe1063f` verified, the records written and classified, CS265-CS268), the keyed `bin/gate --full` with C's full
   checks (TODO(tag): its result). Its record: an audited clean run of the four crops over GT8's compressed corpora, within budget (the user, 2026-11-03).
 
-## Now: the tag `arbace-reaps-4-crops-v1` (as of 2026-11-04, evening)
+## Now: the tag `arbace-reaps-4-crops-v1` (as of 2026-11-05, morning)
 
 The tag waits for GT8 and the backlog (the user, 2026-11-03), and stands on an audited clean run of the four crops over
 GT8's compressed corpora within budget. The backlog is merged; GT8's tooling is on main (dedup, coverage subsets for C,
@@ -84,12 +85,14 @@ The nights to the tag:
 1. **Night 4 (2026-11-04):** `next` gated and `main` fast-forwarded (the day/night decisions, goi's classes and frames:
    1,664 of 1,837); the cover build; Java compiled and Clojure AOT coverage; the first real `bin/gate --nightly`, measured
    by `bin/gate --costs` (`.tmp/night4/`).
-2. **Night 5:** the re-seed window (C only, with the held digraph commit 8dfd5840; the crops' Go forms out of
-   `arbace_runtime_key` and `arbace_javac_key`; the PATH_FIRST trio removed after), `.tmp/night5/reseed.sh`. Its day: the
-   preconditions on `next`.
-3. **Night 6 (and 7 if needed):** the clean run of the four crops, `.tmp/night5/clean.sh`; estimated about 12 hours, over
-   one night's plan: the options to fit it (`.tmp/night5/clean-fit.md`) and the rotation's state in the record are the
-   user's decisions after night 4's numbers. Then the tag, by hand, on the record.
+2. **Night 5 (2026-11-04/05): done.** The re-seed (`.tmp/night5/reseed.sh`, C only, with the digraph commit
+   8dfd5840; the crops' Go forms out of `arbace_runtime_key` and `arbace_javac_key`; the PATH_FIRST trio removed after)
+   passed every step: seed `d5548e72`, verify `d503777b`, main at d86cb874a. The keyed `--full --concurrent` runs from
+   03:14 to at most 16:00.
+3. **Night 6 (and 7 if needed):** `next` gated and fast-forwarded first (with `java-compiled-subset`, GTS228, and
+   `audit-race`, the reducer race of night 5's first gate); GTS229 (C's reads timed) by day from the keyed `--full`'s
+   logs; then the clean run of the four crops, `.tmp/night5/clean.sh`, estimated about 12 hours, over one night's plan
+   (the options to fit it: `.tmp/night5/clean-fit.md`). Then the tag, by hand, on the record.
 
 ## After the tag
 
