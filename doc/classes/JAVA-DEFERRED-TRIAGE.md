@@ -617,3 +617,7 @@ the build tree as CaseFolding's are (`:boot-jdk`), a decision for the user; (4) 
 
 **What is left of F1**: the night's run and the day's classification and records; JCS129 (a)'s scan as Arbace code;
 JCS136 and JCS137 (Proposed).
+
+## Decided (2026-11-05, the user)
+
+JCS136 (a): F1's internal packages made visible at the REPL; JCS137 (a): JCS99 (c)'s 9 status-only tests listed for --record-ref and rerun on the JDK.
