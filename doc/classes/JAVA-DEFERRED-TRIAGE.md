@@ -338,7 +338,10 @@ translated or built. **F4 needs F1** (jca-sources holds `Permission`, `Permissio
 left to F4): its closure was computed against the world plus F1's and F5's lists as their branches hold them
 (by reference: `permission-sources` names none of their files). The branch's hunks in the shared files are
 apart from F1's and F5's (`git merge-tree` of this branch with each: no conflict; F1 with F5 do conflict, in
-`bin/jrt-convert`, `test/jrt/jrt_sources.ae` and this file: "Findings", below).
+`bin/jrt-convert`, `test/jrt/jrt_sources.ae` and this file: "Findings", below). **The branch is not mergeable before its
+night's conversion**, as F1's: its variants name classes `jdk/forms` does not hold yet (Subject, X509Factory ...:
+"a variant for a class not in the inputs", an analysis failure), and `Provider.ae`'s now name
+`Policy.Parameters`, `Configuration.Parameters` and jrt's `PkiServices`, which only the conversion brings.
 
 **What comes in, and how** (jdk26u at `baf63fb`; `test/jrt/jrt_sources.ae`'s `permission-sources`, one
 line in `sources`):
