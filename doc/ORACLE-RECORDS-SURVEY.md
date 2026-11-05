@@ -1173,7 +1173,10 @@ the essential list's 33 files are 58 KB xz, 1.8 KB a file) about 8 to 12 MB the 
 - `bin/repr-llvm record-orig all` (680 modules, 70 s), `record-opt all` (46 s; a first record held a heap address of opt's messages: normalized), `verify-orig`, `verify-opt` with `--sample 10` to `60`: all equal, the crossed pairs differ.
   `roundtrip` over the four hand-written modules with the stubs: 4 of 4 forms equal, 4 originals recorded, 0 prints judged otherwise by the native verifier than opt the original (3.5 s); `verify-check` over 60 probes with the stubs: 59 of 60 verdicts as opt's, 52 of 53 first messages, 59 of 60 whole stderr (the probes' known file holds the rest).
 - `bin/oracle-records verify cpp ir --sample 4`, `verify llvm --sample 30` (23 entries a kind): equal.
-- CHECKESSENTIAL
+- `bin/cppi lower-corpus samples` with the stubs: 16 files, 16 pass, the control differs (26 s). `bin/cppi check --only test/cpp/essential-check.txt` (eval on ci) with the stubs, the lowered runtime built from the pack's IR before:
+  samples 3 pass, runtime 2 pass and `threads` in its recorded class, no REGRESSION, the run control differs as it must; the ci library of the runtime was read in about 25 minutes (2 threads, 2 GiB limit, the host loaded), the programs in a few.
+  `--aot` was not run here.
+- `bin/repr-llvm roundtrip valid` with the stubs (the 4 hand-written modules and the runtime's 198 units' IR from the pack): 202 of 202 forms equal, 202 originals recorded, 0 prints the native verifier judges otherwise than opt the original, rc 0 (3 min 24 s, 4 threads, 12.6 CPU minutes).
 
 ### The plan (scratch overlay)
 
@@ -1199,7 +1202,7 @@ the essential list's 33 files are 58 KB xz, 1.8 KB a file) about 8 to 12 MB the 
 - **The print's levels** of the round trip (clang's dump of Arbace's print, g++ and clang objects) and the lowering's print object are the oracle tier's only: the gate no longer sees them. CX11's native reader of the print, or `cpp-codegen`'s IR, would bring level 1 back; the native substitutes noted: llvm-ll4's verifier on the print (wired in `roundtrip` of repr/llvm; not in cppi's `rt` level) and cpp-codegen's IR (not merged).
 - **`:gcc`** on `cpp-lower-essential` and `cpp-lower` (gcc compiling the lowered C): the survey's "replace by the ci run" is `cpp-check`'s already; the lowering's own gcc stage stays until it is retired (ORS25).
 - Recorded here: samples, runtime, `gxx-dg-essential`, hw, probes, the runtime's IR as modules. Not recorded: the other corpora and the mutants (above). `bin/repr-cpp dg` (CX9), `cpp-native` and `libstdcxx` util IR: not on this branch.
-- `selftest runtime-key` in live mode, `bin/cppi check` past the IR on the packs (heavy; started, see Checked), `bin/repr-llvm roundtrip` over the 198 runtime modules (it reads the unpacked pack: the hand-written four were run).
+- `selftest runtime-key` in live mode, `bin/cppi check --aot` on the packs (heavy), `bin/repr-llvm verify-check valid` and `roundtrip --text` over the runtime's modules (the round trip and 60 probes' verify-check were run).
 - `rsi` (the Rust branch's) still names `:cxx` and `:gcc` for the lowering and `lli`; on merge its steps take `bin/cppi`'s records the same way.
 
 ## Proposed (2026-11-05, C++ and LLVM IR): ORS24-ORS25
