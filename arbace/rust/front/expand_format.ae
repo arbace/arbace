@@ -51,6 +51,7 @@
                   [pos i] (cond (> d p0) [[:index (Long/parseLong (subs raw p0 d)) p0 d] d]
                                 (> w p0) [[:name (subs raw p0 w) p0 w] w]
                                 :else [nil p0])
+                  pos-span (if pos [p0 i] [p0 p0])
                   spec (atom {:align nil :fill nil :sign nil :alternate false :zero-pad false :debug-hex nil :width nil :precision nil :ty ""})
                   i (if (and (< i n) (= \: (.charAt raw i)))
                       (let [i (inc i)
@@ -64,12 +65,12 @@
                                           (do (swap! spec assoc :width [:param 0]) [(+ i 2) true])
                                           (do (swap! spec assoc :zero-pad true) [(inc i) false]))
                                         [i false])
-                            i (if havew i (let [[cnt j] (count-at i)] (when cnt (swap! spec assoc :width cnt)) j))
+                            i (if havew i (let [[cnt j] (count-at i)] (when cnt (swap! spec assoc :width cnt :width-span [i j])) j))
                             i (if (and (< i n) (= \. (.charAt raw i)))
-                                (let [i (inc i)]
+                                (let [dot i i (inc i)]
                                   (if (and (< i n) (= \* (.charAt raw i)))
-                                    (let [k @cur] (swap! cur inc) (swap! spec assoc :precision [:star k]) (inc i))
-                                    (let [[cnt j] (count-at i)] (swap! spec assoc :precision cnt) j)))
+                                    (let [k @cur] (swap! cur inc) (swap! spec assoc :precision [:star k] :precision-span [dot (inc i)]) (inc i))
+                                    (let [[cnt j] (count-at i)] (swap! spec assoc :precision cnt :precision-span [dot j]) j)))
                                 i)
                             i (cond (and (< (inc i) n) (= \x (.charAt raw i)) (= \? (.charAt raw (inc i)))) (do (swap! spec assoc :debug-hex :lower :ty "?") (+ i 2))
                                     (and (< (inc i) n) (= \X (.charAt raw i)) (= \? (.charAt raw (inc i)))) (do (swap! spec assoc :debug-hex :upper :ty "?") (+ i 2))
@@ -79,7 +80,7 @@
                       i)
                   pos (or pos (let [k @cur] (swap! cur inc) [:implicit k]))]
               (when-not (and (< i n) (= \} (.charAt raw i))) (throw (ex-info (str "expand: format string not taken: " raw) {:expand true})))
-              (.add pieces [:arg (assoc @spec :pos pos)])
+              (.add pieces [:arg (assoc @spec :pos pos :pos-span pos-span :place [(dec p0) (inc i)])])
               (recur (inc i)))
             :else (do (.append lit c) (recur (inc i)))))))))
 
@@ -114,6 +115,7 @@
   (let [[fmt-item rest-items] [(first input) (vec (rest input))]
         [cooked raw style ^Tok ftok] (or (str-lit-of fmt-item)
                                          (throw (ex-info "expand: format_args!'s format is not a literal" {:expand true})))
+        remarked? (and (< (.-lo ftok) 0) (:orig fmt-item))
         ^Tok ftok (if (>= (.-lo ftok) 0) ftok (or (:orig fmt-item) ftok))
         source? (>= (.-lo ftok) 0)
         cook (if (= style 'Str) unesc identity)
@@ -125,9 +127,12 @@
         names (atom names0)
         ;; the literal's text starts after its opening quote
         q0 (when source? (+ (.-lo ftok) (if (= style 'Str) 1 (+ 2 (long (.-z ftok))))))
-        inner (fn [off len] (when source? (lx/span-vec (root-src) (+ q0 off) (+ q0 off len))))
-        ospan (fn [] (if source? (list 'Some (foreign-span m)) 'None))
-        lookup (fn [ref kind]
+        ;; spans inside the literal (from_inner): the root's, at the literal's context (a user's macro_rules! marks it)
+        inner (fn [off len] (when source? (let [v (lx/span-vec (root-src) (+ q0 off) (+ q0 off len))]
+                                            (if remarked? (apply list 'span "<expansion>" (conj v (:mark fmt-item))) v))))
+        ospan (fn ([] (if source? (list 'Some (foreign-span m)) 'None))
+                  ([[a b]] (if source? (list 'Some (inner a (- b a))) 'None)))
+        lookup (fn [ref kind sp]
                  (let [idx (case (first ref)
                              (:implicit :index :param :star) (second ref)
                              :name (let [nm (second ref)]
@@ -138,14 +143,14 @@
                                                                                    :span sv :attrs [])))
                                            (swap! names assoc nm i)
                                            i))))]
-                   (list 'FormatArgPosition :index (list 'Ok idx) :kind kind :span (ospan))))
-        cnt (fn [c]
+                   (list 'FormatArgPosition :index (list 'Ok idx) :kind kind :span (ospan sp))))
+        cnt (fn [c sp]
               (case (first c)
                 nil 'None
                 :is (list 'Some (list 'Literal (second c)))
-                :param (list 'Some (list 'Argument (lookup c 'Number)))
-                :name (list 'Some (list 'Argument (lookup c 'Named)))
-                :star (list 'Some (list 'Argument (lookup c 'Implicit)))))
+                :param (list 'Some (list 'Argument (lookup c 'Number sp)))
+                :name (list 'Some (list 'Argument (lookup c 'Named sp)))
+                :star (list 'Some (list 'Argument (lookup c 'Implicit sp)))))
         template (vec (for [[k v] (reduce (fn [acc [k v :as pc]]
                                              (if (and (= k :lit) (= :lit (first (peek acc))))
                                                (conj (pop acc) [:lit (str (second (peek acc)) v)])
@@ -155,11 +160,11 @@
                           (list 'Literal v)
                           (let [pos (:pos v)
                                 ;; make_format_args' order of lookups: the argument, the precision, the width
-                                arg (lookup pos (case (first pos) :implicit 'Implicit :index 'Number :name 'Named))
-                                prec (cnt (:precision v))
-                                wid (cnt (:width v))]
+                                arg (lookup pos (case (first pos) :implicit 'Implicit :index 'Number :name 'Named) (:pos-span v))
+                                prec (cnt (:precision v) (:precision-span v))
+                                wid (cnt (:width v) (:width-span v))]
                             (list 'Placeholder
-                                  (list 'FormatPlaceholder :argument arg :span (ospan)
+                                  (list 'FormatPlaceholder :argument arg :span (ospan (:place v))
                                         :format_trait (or (fmt-traits (:ty v)) 'Display)
                                         :format_options (list 'FormatOptions :width wid :precision prec
                                                               :alignment (case (:align v) \< '(Some Left) \> '(Some Right) \^ '(Some Center) 'None)
@@ -168,7 +173,7 @@
                                                               :alternate (:alternate v) :zero_pad (:zero-pad v)
                                                               :debug_hex (case (:debug-hex v) :lower '(Some Lower) :upper '(Some Upper) 'None))))))))]
     (list 'Expr :kind (list 'FormatArgs
-                            (list 'FormatArgs :span (foreign-span m) :template template
+                            (list 'FormatArgs :span (if (and source? (not remarked?)) (lx/span-vec (root-src) (.-lo ftok) (.-hi ftok)) (foreign-span m)) :template template
                                   :arguments (list 'FormatArguments :arguments @arguments
                                                    :num_unnamed_args (count (filter #(nil? (first %)) explicit))
                                                    :num_explicit_args (count explicit)

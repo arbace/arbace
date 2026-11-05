@@ -210,12 +210,13 @@
         :else x))
 
 (defn- impl-generics-span
-  "A derived impl's generics have the item's generics' span (at the expansion's context)"
-  [d gsp m]
+  "A derived impl's generics have the item's generics' span and where clause's span"
+  [d gsp wsp m]
   (let [k (fget d :kind)]
     (if (and (vector? gsp) (seq? k) (= 'Impl (first k)))
       (let [imp (second k) g (fget imp :generics)]
-        (fset d :kind (list 'Impl (fset imp :generics (fset g :span (conj (vec (take 4 gsp)) m))))))
+        (fset d :kind (list 'Impl (fset imp :generics (cond-> (fset g :span (conj (vec (take 4 gsp)) m))
+                                                         wsp (fset :where_clause (fset (fget g :where_clause) :span wsp)))))))
       d)))
 
 (defn expand-derives
@@ -246,7 +247,7 @@
             derived (vec (mapcat (fn [trait]
                                    (let [m (fresh-mark) frags (atom {})
                                          text (derive-text trait info frags)]
-                                     (map (comp (fn [d] (impl-generics-span d gsp m))
+                                     (map (comp (fn [d] (impl-generics-span d gsp (let [w (fget (fget gens :where_clause) :span)] (when (vector? w) w)) m))
                                                 (if (= trait "Hash") (comp expr-stmts no-colon-spans) no-colon-spans))
                                           (parse-fragment (text->items text m @frags) :items))))
                                  names))]
@@ -260,11 +261,21 @@
                           "target_arch" "x86_64" "target_pointer_width" "64" "target_endian" "little" "target_env" "musl"
                           "target_vendor" "unknown" "target_has_atomic" "64"})
 
+(defn- item-lo-hi [it]
+  (let [^Tok a (or (:t it) (:t (:open it))) ^Tok b (or (:t it) (:t (:close it)))]
+    (when (and a b (>= (.-lo a) 0) (>= (.-lo b) 0)) [(.-lo a) (.-hi b)])))
+
+(defn- items-span [items]
+  (let [a (item-lo-hi (first items)) b (item-lo-hi (last items))]
+    (if (and a b) (lx/span-vec (root-src) (first a) (second b)) (foreign-span 0))))
+
 (defn- cfg-pred
   "A cfg predicate from items: [CfgEntry-form value rest-items]"
   [items]
   (let [[a b c & r] items
-        nm (tsym a)]
+        nm (tsym a)
+        ;; a list's span is its parenthesized group's; a name's or name = value's its tokens'
+        foreign-span (fn [_] (if (:g b) (items-span [b]) (items-span (take (if (punct-item? b :Eq) 3 1) items))))]
     (cond
       (and (#{"all" "any"} nm) (:g b))
       (let [parts (map cfg-pred (split-commas (:kids b)))
@@ -291,12 +302,12 @@
   [items a]
   (let [[n eq lit] items
         args (if (punct-item? eq :Eq)
-               (list 'Eq :eq_span (foreign-span 0) :expr (parse-fragment [lit] :expr))
+               (list 'Eq :eq_span (items-span [eq]) :expr (parse-fragment [lit] :expr))
                'Empty)]
     (list 'Attribute :kind (list 'Normal (list 'NormalAttr :item (list 'AttrItem :unsafety 'Default
-                                                                         :path (list 'Path :span (foreign-span 0) :segments [(list 'PathSegment :ident (list 'id (tsym n) 0) :args 'None)])
-                                                                         :args args :span (foreign-span 0))))
-          :style (fget a :style) :span (fget a :span))))
+                                                                         :path (list 'Path :span (items-span [n]) :segments [(list 'PathSegment :ident (list 'id (tsym n) 0) :args 'None)])
+                                                                         :args args :span (items-span items))))
+          :style (fget a :style) :span (items-span items))))
 
 (defn cfg-item
   "An item with its cfg and cfg_attr attributes processed: the item or nil when configured out"
