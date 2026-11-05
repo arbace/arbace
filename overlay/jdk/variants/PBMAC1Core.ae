@@ -1,0 +1,79 @@
+;; Go-build variant of com.sun.crypto.provider.PBMAC1Core (J2G-SPEC §4.6;
+;; doc/classes/JAVA-DEFERRED-TRIAGE.md, F1): read by j2g only. jdk26u's engineInit (its MAC key's
+;; clearing) reads SharedSecrets' JavaxCryptoSpecAccess, which jrt's SharedSecrets does not hold;
+;; the variant reads it from jrt's jdk.internal.jrt.CryptoAccess, which SecretKeySpec's static
+;; initializer sets (its variant). The replacing members are jdk26u's (baf63fb; Copyright (c) Oracle
+;; and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md) as repr/java converts
+;; them, with the change named; the rest Copyright (c) the Arbace authors; Eclipse Public License
+;; 1.0.
+(in-ns 'com.sun.crypto.provider)
+
+(j2g/variant PBMAC1Core
+  (method ^:protected engineInit :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                         ^Key key
+                                                                                                         ^AlgorithmParameterSpec params]
+    (let [^:mutable ^char/1 passwdChars nil
+          ^:mutable ^byte/1 salt nil
+          ^:mutable ^int iCount 0]
+      (cond
+        (instance? javax.crypto.interfaces.PBEKey key)
+          (let [pbeKey (cast javax.crypto.interfaces.PBEKey key)]
+            (set! passwdChars (.getPassword pbeKey))
+            (set! salt (.getSalt pbeKey))
+            (set! iCount (.getIterationCount pbeKey)))
+        (instance? SecretKey key)
+          (let [^:mutable ^byte/1 passwdBytes nil]
+            (when (or (not (.regionMatches (.getAlgorithm key) true 0 "PBE" 0 3))
+                      (nil? (set! passwdBytes (.getEncoded key))))
+              (throw (InvalidKeyException. "Missing password")))
+            (set! passwdChars (new char/1 (alength passwdBytes)))
+            (loop [^int i 0]
+              (when (< i (alength passwdChars))
+                (aset passwdChars i (unchecked-char (bit-and-int (aget passwdBytes i) 0x7f)))
+                (recur (unchecked-inc-int i))))
+            (Arrays/fill passwdBytes (unchecked-byte 0x00)))
+        :else (throw (InvalidKeyException. "SecretKey of PBE type required")))
+      (let [^:mutable ^PBEKeySpec pbeSpec nil]
+        (try
+          (cond
+            (nil? params)
+              (when (or (nil? salt) (== iCount 0))
+                (throw (InvalidAlgorithmParameterException.
+                         "PBEParameterSpec required for salt and iteration count")))
+            (not (instance? PBEParameterSpec params))
+              (throw (InvalidAlgorithmParameterException. "PBEParameterSpec type required"))
+            :else
+              (let [pbeParams (cast PBEParameterSpec params)]
+                (if (some? salt)
+                    (when-not (Arrays/equals salt (.getSalt pbeParams))
+                      (throw (InvalidAlgorithmParameterException.
+                               "Inconsistent value of salt between key and params")))
+                    (set! salt (.getSalt pbeParams)))
+                (if (not (== iCount 0))
+                    (when-not (== iCount (.getIterationCount pbeParams))
+                      (throw (InvalidAlgorithmParameterException.
+                               "Different iteration count between key and params")))
+                    (set! iCount (.getIterationCount pbeParams)))))
+          (when (< (alength salt) 8)
+            (throw (InvalidAlgorithmParameterException. "Salt must be at least 8 bytes long")))
+          (when (<= iCount 0)
+            (throw (InvalidAlgorithmParameterException. "IterationCount must be a positive number")))
+          (set! pbeSpec (PBEKeySpec. passwdChars salt iCount blockLength))
+          (finally (Arrays/fill passwdChars \u0000)))
+        (let [^:mutable ^PBKDF2KeyImpl s nil
+              ^:mutable ^byte/1 derivedKey nil
+              ^:mutable ^SecretKeySpec cipherKey nil]
+          (try
+            (let [kdf (PBMAC1Core/getKDFImpl kdfAlgo)]
+              (set! s (cast PBKDF2KeyImpl (.engineGenerateSecret kdf pbeSpec)))
+              (set! derivedKey (.getEncoded s))
+              (set! cipherKey (SecretKeySpec. derivedKey kdfAlgo))
+              (.engineInit super cipherKey nil))
+            (catch InvalidKeySpecException ikse
+              (throw (InvalidKeyException. "Cannot construct PBE key" ikse)))
+            (finally
+              (when (some? cipherKey)
+                (.clearSecretKeySpec (jdk.internal.jrt.CryptoAccess/javaxCryptoSpecAccess) cipherKey))
+              (when (some? derivedKey) (Arrays/fill derivedKey (unchecked-byte 0)))
+              (when (some? s) (.clear s))
+              (.clearPassword pbeSpec))))))))
