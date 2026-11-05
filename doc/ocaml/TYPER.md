@@ -361,8 +361,8 @@ OCaml's functions; two new namespaces, the rest into the existing ones:
 
 | set | files | types equal | raw Lambda equal | simplified Lambda equal | oi's run equal |
 |---|---:|---:|---:|---:|---:|
-| `test/ocaml/typer/` (70 samples; t61-t70 new: immediate objects, objects under functions, classes, inheritance, class types, self types, polymorphic methods, class type abbreviations, classes that re-export a class, generalized objects) | 70 | 70 | 70 | 70 | 70 |
-| the stdlib's units (`bin/oi stdlib-check`) | 71 | - | - | 69 | the samples on the native units: 70 of 70 |
+| `test/ocaml/typer/` (71 samples; t61-t71 new: immediate objects, objects under functions, classes, inheritance, class types, self types, polymorphic methods, class type abbreviations, classes that re-export a class, generalized objects, optional class parameters) | 71 | 71 | 71 | 71 | 71 |
+| the stdlib's units (`bin/oi stdlib-check`) | 71 | - | - | 69 | the samples on the native units: 71 of 71 |
 | probe: `testsuite/tests/basic/`'s first 40 files, the 36 ocamlc accepts | 36 | 34 | 34 | 34 | - |
 | probe: run tests with objects and classes (typing-objects-bugs' `*_ok`, typing-poly-bugs' pr5322 pr5673 pr6922, letrec-compilation's class_1 class_2, translprim's sendcache and locs, tool-ocaml/t301-object, parsing/anonymous_class_parameter, typing-recmod's t13ok t16ok, backtrace's methods and names, typing-labels' mixin2 mixin3, typing-extensions/cast, typing-typeparam/newtype, typing-polyvariants-bugs/pr10664, generalized-open/shadowing, regression/pr7426, misc/nucleic, exotic-syntax/exotic, typing-modules-bugs/pr7036_ok) | 29 | 16 | 18 | 18 | - |
 

@@ -392,3 +392,13 @@ CamlinternalFormat and CamlinternalMod wait for T10); the basic/ probe 34 of 36 
 of 23 run tests with objects 12 of 23 equal in Lambda. Alternatives weighed: OCaml's `Tpoly (t, [])` for every method
 type (deferred, TY14: no output found to depend on it); porting Includeclass now (deferred, TY13: only rejected
 programs differ). Proposals TY13-TY15 (TYPER.md §14), none decided.
+
+## 2026-11-05: oi's native front end, T9's objects and classes continued (branch ocaml-objects)
+
+Later the same day, correcting the numbers of the entry above: more of typeclass.ml and translclass.ml (transl_class_rebind
+for classes that apply or re-export another, abbreviate_class_type, optional class parameters with defaults, class
+constraints' fields, self coercions to the class being defined), Typecore.is_nonexpansive for objects and `new`,
+Ctype.normalize_type's object names, the class parameters' `constraint 'a = ...` (Ctype.unalias, tree_of_constraints),
+Btype.link_type's passing of a variable's name, polytypes' pre-univars. Results (TYPER.md §13): test/ocaml/typer/ 71 of
+71 at every level (t69-t71 new); the stdlib still 69 of 71; the basic/ probe 34 of 36; the objects probe, widened to 29
+run tests, 18 of 29 equal in Lambda (16 in their signatures). Proposals TY13-TY15 unchanged.
