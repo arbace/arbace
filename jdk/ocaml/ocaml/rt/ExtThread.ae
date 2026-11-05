@@ -1,0 +1,64 @@
+;; The threads library (doc/ocaml/DEFERRED-TRIAGE.md, §4 item 5, "As built: OT9's next three fixes"), the AOT runtime's mirror of
+;; oi's ext_thread.go: the externals of otherlibs/systhreads' thread.ml (OCaml 5.5.0, LGPL-2.1 with the linking exception). A thread
+;; is a Java thread of its domain under the Gil (the master lock), counted in Effects/domainsRunning while it runs so that Rt/tick
+;; lets the others run; the lock is given up in blocking calls (sleeps, pipes' reads and writes, joins, a mutex's or a condition's
+;; wait). A Thread.t is the block [| id |] (the main thread's id 0), its end a flag join waits on with the lock released. exit in a
+;; thread (Stdlib.exit ran the at_exit functions) ends the process with its status, as a C program's exit does.
+
+(in-ns 'ocaml.rt)
+
+(defclass ^:public ^:final ExtThread
+  (field ^:public ^:static ^long seq 0)
+
+  (method ^:static descr [^TState s]
+    (when (nil? (.-sys s))
+      (if (== (.-id (.-dom s)) 0)
+        (set! (.-sys s) (Block. 0 (new Object/1 [(Long/valueOf 0) Boolean/FALSE])))
+        (do (set! seq (unchecked-inc seq))
+            (set! (.-sys s) (Block. 0 (new Object/1 [(Long/valueOf seq) Boolean/FALSE]))))))
+    (.-sys s))
+
+  (method ^:public ^:static caml_thread_initialize [u] Rt/UNIT)
+  (method ^:public ^:static caml_thread_cleanup [u] Rt/UNIT)
+  (method ^:public ^:static caml_set_current_thread_name [n] Rt/UNIT)
+
+  ;; caml_thread_new f: f () on a new Java thread of the caller's domain; field 1 of the descriptor its end (TRUE once ended)
+  (method ^:public ^:static caml_thread_new [f]
+    (set! seq (unchecked-inc seq))
+    (set! Effects/domainsRunning (unchecked-inc Effects/domainsRunning))
+    (let [d (Block. 0 (new Object/1 [(Long/valueOf seq) Boolean/FALSE]))
+          dom (.-dom (Effects/st))
+          t (Thread. (lambda Runnable []
+                       (Gil/lock)
+                       (let [s (TState. nil dom)]
+                         (set! (.-sys s) d)
+                         (.set Effects/CUR s))
+                       (try
+                         (Rt/ap1 f Rt/UNIT)
+                         (catch Exit x
+                           (Main/flushStd)
+                           (System/exit (.-code x)))
+                         (catch Exn e
+                           (.print System/err (java-str "Thread " (Rt/l (aget (.-f d) 0)) " killed on uncaught exception " (Rt/formatException (.-v e)) "\n"))
+                           (.flush System/err))
+                         (catch Throwable e
+                           (.println System/err (java-str "o2j: Java exception in a thread " e))))
+                       (set! Effects/domainsRunning (unchecked-dec Effects/domainsRunning))
+                       (aset (.-f d) 1 Boolean/TRUE)
+                       (Gil/broadcast)
+                       (Gil/unlock)))]
+      (.setDaemon t true)
+      (.start t)
+      d))
+
+  (method ^:public ^:static caml_thread_self [u] (ExtThread/descr (Effects/st)))
+  (method ^:public ^:static caml_thread_id [d] (aget (.-f (cast Block d)) 0))
+  (method ^:public ^:static caml_thread_yield [u] (Gil/yield) Rt/UNIT)
+  (method ^:public ^:static caml_thread_join [d]
+    (while (not (identical? (aget (.-f (cast Block d)) 1) Boolean/TRUE)) (Gil/await))
+    Rt/UNIT)
+  ;; st_stubs.c's default handler: the message on stderr (thread.ml flushed the channels)
+  (method ^:public ^:static caml_thread_uncaught_exception [exn]
+    (.print System/err (java-str "Thread " (Rt/l (aget (.-f (cast Block (ExtThread/descr (Effects/st)))) 0)) " killed on uncaught exception " (Rt/formatException exn) "\n"))
+    (.flush System/err)
+    Rt/UNIT))
