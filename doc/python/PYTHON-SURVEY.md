@@ -1408,3 +1408,48 @@ over all 71 rewrites `test/python/bench-aot-linux-amd64.edn` (the night's).
 Not taken (the profile's next items, for later): a load-method form in the IR (a method call still makes a bound method
 for the call to unwrap; CPython's LOAD_ATTR method variant), global loads cached by the dicts' keys version, a fused
 to-bool/jump (AotToBool pushes a bool AotTruthy pops), frame reuse for generator frames.
+
+## As built: 205 (pinned wheels and pyi's installer; PYS23-PYS25 (a); 2026-11-05, the Mac VM, queue 205)
+
+### The design
+
+- **The pins** (PYS23 (a)): `test/python/wheels.edn`, read with the Clojure reader, one map per wheel: `:name` (the
+  distribution, PEP 503-normalized), `:version`, `:file` (the wheel's file name, PEP 427), `:sha256` and `:bytes`
+  (PyPI's published digest and size, from `https://pypi.org/pypi/NAME/VERSION/json` on the day the pin was made),
+  `:url` (`files.pythonhosted.org`), `:pinned` (that day), `:sample` (the program of `test/python/wheels/` that exercises
+  it). A pin moves only by a recorded decision, as the tarball's and the apks' do. Only `py3-none-any` wheels are pinned
+  (a compressed tag set such as `py2.py3-none-any` counts: it includes `py3-none-any`, PEP 425); nothing of a wheel is
+  committed but its pin.
+- **The records rule** (as the apks, GTS212 (a)): `bin/pyi wheels fetch` is the only network step: each pinned wheel
+  into the shared cache, `${REPR_PYTHON_SRC:-.tmp/repr-python}/wheels/FILE`, through a temporary name, kept only when
+  its SHA-256 and size are the pin's; a file already there with the pin's digest is not fetched again. Every other verb
+  reads the cache and fails, naming `wheels fetch`, on a missing or different file: no network in the gate or a clean
+  run. CPython's references for programs that use the wheels are its runs with the same site, on the main host (amd64);
+  the VM records nothing.
+- **The installer** (PYS24 (a)): `arbace.python.wheels` (`arbace/python/wheels.ae`), evaluated from the checkout on
+  the tools' host like `arbace.python`, no Python and no pip. It implements the wheel format alone (PEP 427, PEP 491's
+  `.data` schemes, the binary distribution format spec): the zip read by jrt's `java.util.zip.ZipFile` (the program's
+  zlib, jrt's Inflater port); the tag checked first (a wheel that is not `py3-none-any` refused with its tags named);
+  `WHEEL`'s `Wheel-Version` 1.x and `Root-Is-Purelib: true`; `RECORD` parsed as CSV, every file of the archive in it
+  (but `RECORD` and its signatures), every row's file in the archive, each digest (sha256, sha384 or sha512, urlsafe
+  base64 unpadded; md5 and sha1 refused) and size equal; no absolute path, no `..`, no file outside the scheme
+  directories. Then the purelib files (the root, and `NAME.data/purelib|platlib`) laid out under the site's `lib/`,
+  `NAME.data/scripts` under `bin/`, `headers` under `include/NAME/`, `data` at the site's root; `*.dist-info` written as
+  the wheel has it plus `INSTALLER` (`arbace-pyi`) and `RECORD` rewritten with the installed paths and their digests, as
+  pip writes them; `entry_points.txt`'s `console_scripts` as launchers in `bin/`: a shell script that puts its own
+  `../lib` in `PYI_SITE` and runs pyi's `python3` (`tools/pyi/python3`) on the entry point.
+- **The site** (PYS25 (a)): `${REPR_PYTHON_SRC:-.tmp/repr-python}/site-KEY/` (`lib/`, `bin/`), KEY the first 20
+  characters of the SHA-256 of the pins file and the installer's source, so the worktrees share one site per pin set
+  and installer; built in a temporary directory beside it and renamed into place, so a reader sees it whole or not at
+  all. `bin/pyi wheels install` builds it (when absent) and prints its path; `wheels verify` checks every installed
+  file against the site's `RECORD`s and every wheel against its pin.
+- **`sys.path`**: `PYI_SITE` (directories, colon-separated) is appended after the stdlib by `bin/pyi run`, `python`
+  and `repl` (`arbace.python`'s `--site`), as CPython's `site` appends site-packages after the stdlib; the environment
+  carries it to pyi's children (subprocess's `sys.executable`). `.pth` files are not processed (pyi starts with no
+  `site`, as `-S`); the installer refuses a wheel that ships one, so a site never depends on them.
+- **The check**: `bin/pyi wheels check` installs, verifies, compares the layout with the host CPython's pip
+  (`pip install --no-index --no-deps --no-compile --target`, the same wheel: every file byte for byte but the
+  `dist-info`'s `INSTALLER`, `RECORD`, `REQUESTED` and `direct_url.json`), runs each pin's sample by pyi and by
+  `python3 -I -S` with the same site appended to `sys.path` (stdout, status, stderr's last line equal), a console
+  script through its launcher, and two negative controls: a wheel tagged for a platform refused, a wheel whose
+  `RECORD` digest is wrong refused.
