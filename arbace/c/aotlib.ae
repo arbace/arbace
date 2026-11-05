@@ -1,0 +1,188 @@
+(ns arbace.c.aotlib
+  "cf2g's prebuilt libraries (doc/rust/RUST-EVAL-SURVEY.md, \"As built: RES34 (write-ahead)\"; RES34 (a)): a library's units (musl's,
+  a lowered Rust std's or C++ runtime's: any library arbace.c.runtime/prebuilt makes) each translated once by cf2g into a Go
+  package of its own (arbace.c.cf2g/translate-unit: the unit's fragment, its functions' and statics' numbers left to relocation
+  tables), cached on disk by a key (the fragments' key, cf2g's and repr/go's printer's sources as loaded) under
+  .tmp/ci-aot-lib/LIB-KEY/PKG/ (CI_AOT_LIB), so that a program's AOT build translates only its own code: its link (arbace.c.build's
+  *link-trace*) says which code commands are a library unit's items, the program's package calls the unit packages' functions
+  for them (SetCompiled) and fills each unit's relocation tables from the link's numbers (Bind). The Go of a unit is compiled by
+  Go once per key too (Go's build cache: the same file at the same import path).
+
+  The program's module links the cache's root as its directory cilib (import paths arbace/cilib/LIB-KEY/PKG)."
+  (:require [arbace.c.build :as build]
+            [arbace.c.cf2g :as cf2g]
+            [arbace.c.run :as crun]
+            [arbace.c.runtime :as rtm]
+            [arbace.repr.c.host :as host]
+            [arbace.string :as str])
+  (:import (java.io File)
+           (java.util.concurrent ConcurrentHashMap)))
+
+(set! *warn-on-reflection* true)
+
+(def aot-version
+  "The units' Go format: in the key."
+  1)
+
+(def aot-sources
+  "The sources a unit's Go is made by, beyond the fragments' (whose key covers the checker and the builder)."
+  ["arbace/c/cf2g.ae" "arbace/c/aotlib.ae" "arbace/repr/go/print.ae" "arbace/repr/go/print_code.ae"
+   "arbace/repr/go/print_emit.ae" "arbace/repr/go/print_text.ae" "arbace/repr/go/layout.ae"])
+
+(defn- sha256-hex ^String [^String s]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes s "UTF-8"))
+        sb (StringBuilder.)]
+    (doseq [x d] (.append sb (format "%02x" (bit-and 0xff (long x)))))
+    (str sb)))
+
+(defn- bytes-hex ^String [^bytes b]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") b)
+        sb (StringBuilder.)]
+    (doseq [x d] (.append sb (format "%02x" (bit-and 0xff (long x)))))
+    (str sb)))
+
+(defn cache-root ^String [^String root] (or (System/getenv "CI_AOT_LIB") (str root "/.tmp/ci-aot-lib")))
+
+(defn lib-key
+  "A prebuilt library's Go key: the units' Go format, its fragments' key (arbace.c.runtime's: the library's sources, ci's
+  checker and builder) and aot-sources as this process loaded them."
+  ^String [^String root lib]
+  (let [sb @#'arbace.c.runtime/source-bytes]
+    (sha256-hex (str "ci-aot-lib " aot-version "\n"
+                     "fragments " (:runtime-key lib) "\n"
+                     (str/join (for [f aot-sources :let [[how b] (sb root f)]] (str f " " how " " (bytes-hex b) "\n")))))))
+
+(defn lib-dir-name
+  "The library's directory under the cache (and arbace/cilib/): its fragments' directory's name before the key, the Go key's
+  first 16 digits."
+  ^String [^String root lib]
+  (let [fd (.getName (File. ^String (:frag-dir lib)))
+        nm (str/replace fd #"-[0-9a-f]{64}$" "")]
+    (str (str/replace nm #"[^A-Za-z0-9_]" "_") "_" (subs (lib-key root lib) 0 16))))
+
+(defn unit-pkg
+  "A unit's Go package name: u, a digest of its name, its name's last characters made an identifier's."
+  ^String [^String src]
+  (let [h (subs (sha256-hex src) 0 8)
+        t (str/replace src #"[^A-Za-z0-9]" "_")
+        t (if (> (count t) 40) (subs t (- (count t) 40)) t)]
+    (str "u" h "_" t)))
+
+(def ^:private units (ConcurrentHashMap.))   ; [dir src] -> delay of the manifest
+
+(defn- write-atomic [^File f ^String s]
+  (.mkdirs (.getParentFile f))
+  (let [tmp (File. (str (.getPath f) ".tmp" (System/nanoTime) "-" (.getId (Thread/currentThread))))]
+    (spit tmp s)
+    (when-not (.renameTo tmp f) (.delete tmp))))
+
+(defn- make-unit
+  "The unit's Go package in the cache, translated when missing: its manifest {:pkg :path :fns :inits :refused :functions :bytes
+  :seconds}."
+  [^String root lib ^String src]
+  (let [ld (lib-dir-name root lib)
+        pkg (unit-pkg src)
+        dir (File. (str (cache-root root) "/" ld "/" pkg))
+        mf (File. dir "manifest.edn")]
+    (or (when (.exists mf) (try (read-string (slurp mf)) (catch Exception _ nil)))
+        (let [t0 (System/nanoTime)
+              frag (rtm/lib-fragment lib src)
+              path (str "arbace/cilib/" ld "/" pkg)
+              [forms info] (cf2g/translate-unit frag pkg path)
+              text (cf2g/go-text forms)
+              m (assoc info :src src :pkg pkg :path path :bytes (count text)
+                            :seconds (/ (Math/round (/ (- (System/nanoTime) t0) 1e7)) 100.0))]
+          (write-atomic (File. dir "unit.go") text)
+          (write-atomic mf (binding [*print-length* nil *print-level* nil] (pr-str m)))
+          m))))
+
+(defn unit
+  "A library unit's manifest, made once per process (a delay per unit)."
+  [^String root lib ^String src]
+  (let [k [(:frag-dir lib) src]
+        d (or (.get ^ConcurrentHashMap units k) (let [d (delay (make-unit root lib src))] (or (.putIfAbsent ^ConcurrentHashMap units k d) d)))]
+    @d))
+
+(defn program-pre
+  "translate's `pre` of a traced link ({:text :trace :frag-libs}: arbace.c.runtime/link-traced's, arbace.rust.run's): each code
+  command or init that is a library unit's translated item, the unit packages the program imports and their relocation tables
+  (an unresolved placeholder -1). CI_AOT_LIB_OFF=1: none (the whole program translated, as before)."
+  [^String root {:keys [trace frag-libs]}]
+  (if (or (System/getenv "CI_AOT_LIB_OFF") (nil? trace))
+    nil
+    (let [used (java.util.TreeMap.)          ; frag index -> [alias manifest]
+          alias-of (fn [i m] (or (first (.get used i))
+                                 (let [a (:pkg m)] (.put used i [a m]) a)))
+          items (into {} (for [[line [i kind j]] (:items trace)
+                               :let [[lib src] (get frag-libs i)]
+                               :when lib
+                               :let [m (unit root lib src)
+                                     g (get (if (= kind :f) (:fns m) (:inits m)) j)]
+                               :when g]
+                           [line (symbol (alias-of i m) g)]))]
+      {:items items
+       :imports (vec (for [[_ [a m]] used] [a (:path m)]))
+       :binds (vec (for [[i [a _]] used]
+                     [a (mapv #(if (nil? %) -1 %) ((:fmaps trace) i)) (mapv #(if (nil? %) -1 %) ((:smaps trace) i))]))
+       :units (count used)})))
+
+(defn translate-lib
+  "Every unit of a prebuilt library translated (the cache filled ahead), in `threads` threads: {:units :functions :refused :bytes}."
+  [^String root lib srcs threads]
+  (let [q (java.util.concurrent.ConcurrentLinkedQueue. ^java.util.Collection (vec srcs))
+        acc (atom {:units 0 :functions 0 :refused 0 :bytes 0})
+        ws (doall (for [_ (range threads)]
+                    (future
+                      (loop []
+                        (when-let [s (.poll q)]
+                          (let [m (unit root lib s)]
+                            (swap! acc #(-> % (update :units inc) (update :functions + (:functions m))
+                                            (update :refused + (count (:refused m))) (update :bytes + (:bytes m))))
+                            (.remove ^java.util.concurrent.ConcurrentHashMap (:frags lib) s)
+                            (recur)))))))]
+    (doseq [w ws] @w)
+    @acc))
+
+;; ---------------------------------------------------------------------------------------------
+;; C programs (bin/ci aot-lib)
+
+(defn- secs [t0] (format "%.1f" (/ (- (System/nanoTime) t0) 1e9)))
+
+(defn c-compile
+  "One C file read, checked, linked with musl (traced) and translated into OUT/progs/PKG/prog.go: with the prebuilt units (the
+  default) or whole (whole?). A line: PKG STATUS read-seconds link-seconds translate-seconds bytes units."
+  [h ^String out ^String file ^String pkg whole?]
+  (let [root (System/getProperty "user.dir")
+        lib (rtm/library h root)
+        t0 (System/nanoTime)
+        u (crun/read-unit h ["-std=gnu17"] (.getParent (File. file)) (.getName (File. file)))
+        rs (secs t0)]
+    (if (not= :ok (:status u))
+      (println pkg (name (:status u)) (:message u))
+      (let [t1 (System/nanoTime)
+            lt (rtm/link-traced lib [u])
+            ls (secs t1)
+            t2 (System/nanoTime)
+            pre (when-not whole? (program-pre root lt))
+            [forms] (cf2g/translate (build/read-program (:text lt)) pkg (str "arbace/progs/" pkg) pre)
+            text (cf2g/go-text forms)]
+        (.mkdirs (File. (str out "/progs/" pkg)))
+        (spit (str out "/progs/" pkg "/prog.go") text)
+        (println pkg "ok" rs ls (secs t2) (count text) (or (:units pre) 0))))))
+
+(defn -main
+  "c-compile OUT PKG FILE [--whole] ...: C files (PKG FILE pairs) translated as c-compile does; translate-musl THREADS: every musl
+  unit's Go made."
+  [verb & args]
+  (let [root (System/getProperty "user.dir")]
+    (case verb
+      "c-compile" (let [h (host/load-host "test/c/host")
+                        whole? (some #{"--whole"} args)
+                        [out & pairs] (remove #{"--whole"} args)]
+                    (doseq [[pkg f] (partition 2 pairs)] (c-compile h out f pkg whole?)))
+      "translate-musl" (let [h (host/load-host "test/c/host")
+                             lib (rtm/library h root)]
+                         (println (translate-lib root lib (keys (:index lib)) (Long/parseLong (or (first args) "2")))))
+      (do (println "arbace.c.aotlib: c-compile, translate-musl") (System/exit 2)))
+    (shutdown-agents)
+    (System/exit 0)))

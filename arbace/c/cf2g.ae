@@ -112,6 +112,27 @@
 (def ^:dynamic *jumps* nil) ; the innermost {:brk kw :cont kw}
 (def ^:dynamic *lret* :Lret)
 (def ^:dynamic *in-sj* false)
+;; A library unit's translation (translate-unit; doc/rust/RUST-EVAL-SURVEY.md, "As built: RES34 (write-ahead)"): its items'
+;; functions and statics are the fragment's placeholders ?fL and ?sL, each resolved at run time through the unit package's
+;; relocation tables R and S (the program's link fills them, Bind); {:direct {L GO-NAME}}: the unit's own static functions
+;; (their key the unit's alone, so always this item), called directly.
+(def ^:dynamic *reloc* nil)
+
+(defn- placeholder
+  "[f L] or [s L] (the kind a char) of a fragment's placeholder symbol ?fL or ?sL, else nil."
+  [x]
+  (when (symbol? x)
+    (let [^String s (name x)]
+      (when (and (> (count s) 2) (= \? (.charAt s 0)) (#{\f \s} (.charAt s 1)))
+        [(.charAt s 1) (Long/parseLong (subs s 2))]))))
+
+(defn- ref-expr
+  "A function's id or a static's index of a node: its number, or in *reloc* the relocation table's entry."
+  [x]
+  (if-let [[k l] (placeholder x)]
+    (do (when-not *reloc* (refuse :aot-node "an unresolved placeholder " x))
+        (list 'aget (if (= k \f) 'R 'S) l))
+    (lng x)))
 
 (defn- fresh! [prefix type]
   (let [n (:n (swap! *fn* update :n inc))
@@ -244,8 +265,8 @@
                  (let [[s t] (bind :i [s e])] [(conj s (list 'set! sl t)) t])))
       "fp" [[] (list '+ 'base (lng (a 0)))]
       "va" [[] 'vaa]
-      "g" [[] (list 'aget 'G (lng (a 0)))]
-      "fa" [[] (+ 4194304 (* 16 (lng (a 0))))]
+      "g" [[] (list 'aget 'G (ref-expr (a 0)))]
+      "fa" [[] (let [r (ref-expr (a 0))] (if (number? r) (+ 4194304 (* 16 r)) (list '+ 4194304 (list '* 16 r))))]
       "labaddr" (do (swap! *scope* update :addr-taken conj (lng (a 0))) [[] (+ 6291456 (lng (a 0)))])
       "ld" (let [[s e] (ix (a 1))] [s (load-expr (nm (a 0)) e)])
       "st" (let [t (nm (a 0))
@@ -391,7 +412,7 @@
   "(KIND CALLEE [args] SRET SOFF): [stmts call-expr], the callee first, then the arguments right to left."
   [c]
   (let [[_ callee args sret soff] c
-        static (when (= "fnref" (head callee)) (lng (second callee)))
+        static (when (= "fnref" (head callee)) (if (placeholder (second callee)) (second callee) (lng (second callee))))
         [sc ce] (if static [[] nil] (bind :i (ix callee)))
         args (vec args)
         ;; right to left
@@ -414,7 +435,11 @@
                (into [(list 'lit '_ :K \i :I (list '+ 'base (lng soff)))] lits)
                lits)
         argv (apply list 'lit '(slice ci/Arg) lits)
+        pl (when static (placeholder static))
         call (cond
+               (and pl (get (:direct *reloc*) (second pl))) (list (get (:direct *reloc*) (second pl)) 't argv)
+               pl (list '.Call 'P 't (list 'aget 'F (ref-expr static)) argv)
+               (and static (get (:pre-fns @*pkg*) static)) (list (get (:pre-fns @*pkg*) static) 't argv)
                (and static (contains? (:compiled @*pkg*) static)) (list (symbol (str "cf" static)) 't argv)
                static (list '.Call 'P 't (list 'aget 'F static) argv)
                :else (list '.CallAddr 'P 't (ua ce) argv))]
@@ -661,9 +686,12 @@
         params)))
 
 (defn- code-fn
-  "(code ID NI NF FRAME VARIADIC RETF32 PARAMS BODY): the Go function fID and its Code variable CID."
-  [[_ id ni nf frame variadic retf32 params body]]
-  (let [id (lng id) fname (symbol (str "cf" id)) cname (symbol (str "CC" id))]
+  "(code ID NI NF FRAME VARIADIC RETF32 PARAMS BODY): the Go function cfID and its Code variable CCID (a library unit's
+  item: the names given, its id the relocation's)."
+  [[_ id ni nf frame variadic retf32 params body] & [gname]]
+  (let [id (ref-expr id)
+        fname (if gname (symbol gname) (symbol (str "cf" id)))
+        cname (if gname (symbol (str "CC" gname)) (symbol (str "CC" id)))]
     (binding [*fn* (atom {:vars [] :n 0}) *scope* (new-scope) *lret* :Lret *in-sj* false *jumps* nil]
       (let [plits (mapv param-lit params)
             ss (stmt body)
@@ -688,10 +716,11 @@
                      body))]))))
 
 (defn- init-fn
-  "(init STMT) or (init NI NF STMT): the Go function inN, a ci.GoStmt of the program's Inits."
-  [n c]
+  "(init STMT) or (init NI NF STMT): the Go function inN (or the name given: a library unit's), a ci.GoStmt of the
+  program's Inits."
+  [n c & [gname]]
   (let [[ni nf s] (if (= 2 (count c)) [0 0 (second c)] [(lng (nth c 1)) (lng (nth c 2)) (nth c 3)])
-        fname (symbol (str "in" n))]
+        fname (if gname (symbol gname) (symbol (str "in" n)))]
     (binding [*fn* (atom {:vars [] :n 0}) *scope* (new-scope) *lret* :Lret *in-sj* false *jumps* nil]
       (let [ss (finish-scope (conj (vec (stmt s)) (deflabel! :Lret)))
             vars (concat (slot-vars ni nf) (:vars @*fn*) (when (:sj @*fn*) [['retd 'bool]]))
@@ -710,24 +739,32 @@
 
 (defn translate
   "The Go forms of the node program cmds as the package pkg (path PATH, a main package when pkg is main):
-  [forms {:functions n}]. Throws ex-info with :cf2g/refused for a node it cannot express."
-  [cmds pkg path]
-  (binding [*pkg* (atom {:wtypes (sorted-map) :wconsts [] :compiled (set (for [c cmds :when (= "code" (head c))] (lng (second c))))})]
+  [forms {:functions n}]. Throws ex-info with :cf2g/refused for a node it cannot express. `pre` (arbace.c.aotlib's
+  program-pre): the commands that are a prebuilt library unit's items, {:items {INDEX GO-SYMBOL} :imports [[ALIAS PATH] ...]
+  :binds [[ALIAS R S] ...]}: such a code command's function is the unit package's (SetCompiled), such an init its GoStmt, and
+  each unit's relocation tables are bound once the program is loaded."
+  [cmds pkg path & [pre]]
+  (binding [*pkg* (atom {:wtypes (sorted-map) :wconsts []
+                         :compiled (set (for [[i c] (map-indexed vector cmds)
+                                              :when (and (= "code" (head c)) (not (get (:items pre) i)))]
+                                          (lng (second c))))
+                         :pre-fns (into {} (for [[i sym] (:items pre) :let [c (nth cmds i)] :when (= "code" (head c))]
+                                             [(lng (second c)) sym]))})]
     (let [;; the commands in order: runs of data as text, a code a compiled function, an init a GoStmt
-          steps (reduce (fn [acc c]
+          steps (reduce (fn [acc [i c]]
                           (case (head c)
-                            "code" (conj acc [:code c])
-                            "init" (conj acc [:init c])
+                            "code" (conj acc (if-let [sym (get (:items pre) i)] [:pre-code [(lng (second c)) sym]] [:code c]))
+                            "init" (conj acc (if-let [sym (get (:items pre) i)] [:pre-init sym] [:init c]))
                             (if (= :data (first (peek acc)))
                               (conj (pop acc) [:data (conj (second (peek acc)) c)])
                               (conj acc [:data [c]]))))
-                        [] cmds)
+                        [] (map-indexed vector cmds))
           ninit (volatile! -1)
           decls (vec (mapcat (fn [[k x]]
                                (case k
                                  :code (code-fn x)
                                  :init [(init-fn (vswap! ninit inc) x)]
-                                 :data []))
+                                 (:data :pre-code :pre-init) []))
                              steps))
           ndata (volatile! -1) ninit2 (volatile! -1)
           data-vars (vec (keep (fn [[k x]] (when (= k :data) (list 'go/var (symbol (str "D" (vswap! ndata inc))) (text-of x)))) steps))
@@ -736,8 +773,12 @@
                                (case k
                                  :data [(list '.TopText 'l (symbol (str "D" (vswap! ndata inc))))]
                                  :code (let [id (lng (second x))] [(list '.SetCompiled 'l id (symbol (str "cf" id)))])
-                                 :init [(list 'set! '(.-Inits p) (list 'append '(.-Inits p) (list 'lit 'ci/Init :S (list 'conv 'ci/GoStmt (symbol (str "in" (vswap! ninit2 inc)))))))]))
+                                 :pre-code (let [[id sym] x] [(list '.SetCompiled 'l id sym)])
+                                 :init [(list 'set! '(.-Inits p) (list 'append '(.-Inits p) (list 'lit 'ci/Init :S (list 'conv 'ci/GoStmt (symbol (str "in" (vswap! ninit2 inc)))))))]
+                                 :pre-init [(list 'set! '(.-Inits p) (list 'append '(.-Inits p) (list 'lit 'ci/Init :S (list 'conv 'ci/GoStmt x))))]))
                              steps))
+          binds (for [[alias r sm] (:binds pre)]
+                  (list (symbol (str alias) "Bind") 'p (apply list 'lit '(slice int64) r) (apply list 'lit '(slice int64) sm)))
           st @*pkg*
           wvars (for [[sym [n s]] (:wtypes st)] (list 'go/var sym (list 'lit 'crt/WType :N n :Signed s)))
           wcs (for [[sym t text] (:wconsts st)] (list 'go/var sym (list 'ci/MustWide t text)))
@@ -749,7 +790,7 @@
                     (list 'ci/AotMain 'args
                           (apply list 'fn [(with-meta 'p {:tag '(* ci/Prog)}) (with-meta 'l {:tag '(* ci/Loader)})]
                                  '(set! P p) '(set! M (.-M p))
-                                 (concat setup ['(set! F (.-Funcs p)) '(set! G (.StaticsI p))]))))
+                                 (concat setup ['(set! F (.-Funcs p)) '(set! G (.StaticsI p))] binds))))
           ns-sym (symbol (str "go." (str/replace (str path) "/" ".")))
           forms (concat
                  [(list 'ns ns-sym '(:require [arbace.go :as go]))
@@ -757,7 +798,8 @@
                   (list 'in-ns (list 'quote ns-sym))
                   (list 'go/file "prog.go"
                         :doc "A C program compiled by cf2g (arbace.c.cf2g) from its node program.\n"
-                        :imports (vec (concat (when main? '[[os "os"]]) '[[math "math"] [ci "arbace/ci"] [crt "arbace/crt"]])))
+                        :imports (vec (concat (when main? '[[os "os"]]) '[[math "math"] [ci "arbace/ci"] [crt "arbace/crt"]]
+                                              (for [[alias p] (:imports pre)] [(symbol (str alias)) p]))))
                   '(go/var _ math/Pi)
                   '(go/var _ crt/Text)
                   '(go/var ^{:tag (* ci/Prog)} P)
@@ -773,6 +815,76 @@
   ^String [forms]
   (let [pkg (gp/collect-forms forms)]
     (val (first (gp/print-forms pkg {:layout :gofmt :line-directives? false})))))
+
+(defn translate-unit
+  "A library unit's fragment (arbace.c.build/unit-fragment's) translated once into the Go forms of its own package `pkg` (path
+  `path`), linked by programs instead of its code commands (doc/rust/RUST-EVAL-SURVEY.md, \"As built: RES34 (write-ahead)\"):
+  its Jth function candidate's code the function CJ, its Jth object's initializer the GoStmt IJ, each with its placeholders
+  through the relocation tables R and S that Bind sets (the program's link: arbace.c.build's *link-trace*). An item cf2g
+  refuses is left out, listed: the program translates its command itself. [forms {:fns {J NAME} :inits {J NAME} :refused
+  {[:f|:o J] [CLASS MESSAGE]} :functions n}]."
+  [frag pkg path]
+  (let [fcs (vec (:fcands frag))
+        objs (vec (:objs frag))
+        read1 (fn [^String text] (read-string text))
+        self-l (into {} (keep-indexed (fn [l [k _]] (when (and (vector? k) (= :self (first k))) [k l])) (:fns frag)))
+        ;; the unit's own static functions with code: called directly when translated
+        cands (for [[j c] (map-indexed vector fcs)
+                    :when (and (:item c) (some-> ^String (:text (:item c)) (.startsWith "(code ")) (not (:alias c)))]
+                [j c])
+        direct0 (into {} (for [[j c] cands :let [l (get self-l (:k c))] :when l] [l j]))
+        ;; one pass: the items translated with the given static functions called directly, in a fresh package state
+        pass (fn [direct]
+               (binding [*pkg* (atom {:wtypes (sorted-map) :wconsts [] :compiled #{} :pre-fns {}})]
+                 (let [refused (volatile! {})
+                       try1 (fn [k f]
+                              (try (f)
+                                   (catch arbace.lang.ExceptionInfo e
+                                     (if-let [cls (:cf2g/refused (ex-data e))]
+                                       (do (vswap! refused assoc k [cls (.getMessage e)]) nil)
+                                       (throw e)))))
+                       fdecls (binding [*reloc* {:direct (into {} (for [[l j] direct] [l (symbol (str "C" j))]))}]
+                                (vec (for [[j c] cands
+                                           :let [d (try1 [:f j] #(code-fn (read1 (:text (:item c))) (str "C" j)))]
+                                           :when d]
+                                       [j d])))
+                       idecls (binding [*reloc* {:direct {}}]
+                                (vec (for [[j o] (map-indexed vector objs)
+                                           :when (and (:item o) (some-> ^String (:text (:item o)) (.startsWith "(init ")))
+                                           :let [d (try1 [:o j] #(init-fn 0 (read1 (:text (:item o))) (str "I" j)))]
+                                           :when d]
+                                       [j d])))]
+                   [fdecls idecls @*pkg* @refused])))
+        r1 (pass direct0)
+        ;; a refused static function is not called directly (its program translates it under its own id): again without it
+        [fdecls idecls st refused] (let [bad (set (for [[[k j]] (nth r1 3) :when (= k :f)] j))]
+                                     (if (empty? bad) r1 (pass (into {} (remove (fn [[_ j]] (bad j)) direct0)))))]
+    (let [wvars (for [[sym [n s]] (:wtypes st)] (list 'go/var sym (list 'lit 'crt/WType :N n :Signed s)))
+            wcs (for [[sym t text] (:wconsts st)] (list 'go/var sym (list 'ci/MustWide t text)))
+            ns-sym (symbol (str "go." (str/replace (str path) "/" ".")))
+            forms (concat
+                   [(list 'ns ns-sym '(:require [arbace.go :as go]))
+                    (list 'go/package (symbol (str pkg)) :path (str path) :files ["unit.go"])
+                    (list 'in-ns (list 'quote ns-sym))
+                    (list 'go/file "unit.go"
+                          :doc "A library unit's code compiled once by cf2g (arbace.c.cf2g/translate-unit) from its fragment.\n"
+                          :imports '[[math "math"] [ci "arbace/ci"] [crt "arbace/crt"]])
+                    '(go/var _ math/Pi)
+                    '(go/var _ crt/Text)
+                    '(go/var ^{:tag (* ci/Prog)} P)
+                    '(go/var ^{:tag (* crt/Mem)} M)
+                    '(go/var ^{:tag (slice (* ci/Func))} F)
+                    '(go/var ^{:tag (slice int64)} G)
+                    '(go/var ^{:tag (slice int64)} R)
+                    '(go/var ^{:tag (slice int64)} S)
+                    (list 'go/func 'Bind "Bind sets the unit's program and its relocation tables (the program's link).\n"
+                          [(with-meta 'p {:tag '(* ci/Prog)}) (with-meta 'r {:tag '(slice int64)}) (with-meta 's {:tag '(slice int64)})]
+                          '(set! P p) '(set! M (.-M p)) '(set! F (.-Funcs p)) '(set! G (.StaticsI p)) '(set! R r) '(set! S s))]
+                   wvars wcs (mapcat second fdecls) (map second idecls))]
+        [(vec forms) {:fns (into (sorted-map) (for [[j] fdecls] [j (str "C" j)]))
+                      :inits (into (sorted-map) (for [[j] idecls] [j (str "I" j)]))
+                      :refused refused
+                      :functions (count fdecls)}])))
 
 (defn translate-file
   "The node program at nodes-path translated into out-dir/prog.go as package pkg (path path): {:status :ok
