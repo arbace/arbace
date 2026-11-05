@@ -400,6 +400,51 @@ The run corpus 333 to **362 run programs** (543 with a `.reference` in it: 13 mo
 (`bin/oi divergences`); the suite corpus 98 to **118 run programs**, **87 to 99 pass**, 0 failing (`bin/oi suite divergences`). The matrix's
 eval cell (`check-oi.edn` + `check-suite-oi.edn`) **368 to 404 pass**, the 6 double-counted programs counted once. oi's essential subset: 58 of 58.
 
+### The AOT mirror (fixes 4 and 5; branch `ocaml-libs2-aot`, merged)
+
+- `jdk/ocaml/ocaml/rt/ExtUnixFd.ae` mirrors `ext_unix_fd.ae` over `Fd.ae`'s table: open (the flag list), close, read, write, single_write (the
+  64 KiB cap), the bigarray read and write, the channels of a descriptor, lseek, truncate, ftruncate, fstat and the `LargeFile` stats, unlink,
+  rename, realpath, chmod and fchmod (the owner's bits: `java.io.File`'s), access, dup, dup2, the non-blocking flag, mkdir, rmdir, utimes (the
+  modification time), pipe, the directories, `_exit`. Java's limits: no descriptors of the OS, so a pipe is the runtime's own (`Pipe.ae`: a
+  64 KiB buffer two table entries share, a reader waiting under the lock's condition while a writer remains, 0 when none does, `EPIPE` when no
+  reader remains, `EAGAIN` for a non-blocking end); `dup` and `dup2` share an entry with a reference count; `fsync` and the close-on-exec flags
+  do nothing; `isatty` is false; `has_symlink` false, and `link`, `symlink`, `readlink`, `mkfifo` stay `:unix-unported` (jrt's `Files` has no
+  links). No JDK class beyond those the runtime used already.
+- `ExtThread.ae` mirrors `ext_thread.ae`: a Java thread of its domain (`TState` with the parent's `Dom`) under the Gil, counted in
+  `Effects/domainsRunning` while it runs (so `Rt/tick` yields), started in creation order, `join` waiting under the Gil's condition, a
+  thread's fatal error the program's. `exit` in a thread is `System/exit`: right at the compiled level, it would end the light level's batch
+  process (no checked program does it).
+- New classes: `:thread-schedule` (by design, OC11: `lib-threads/tls`, whose ocamlopt run printed the threads in another order than ocamlc's
+  and the `.reference`; `lib-systhreads/testyield`, `Thread.yield`'s hand-off under the runtime's lock) in the four AOT classes files;
+  `lib-systhreads/boundscheck` known gc (its loop waits for 1,000 minor collections, which the runtime's `Gc.quick_stat` counts as zero, OC64 (a)).
+- **A reference bug found by the mirror**: `bin/oi record-ref` ran ocamlc's and ocamlopt's programs in one directory, so the second run met the
+  first one's files (`lib-unix/realpath/test`'s `mkdir "test_dir"` failed with `EEXIST`; `lib-unix/common/append`'s file had grown): each
+  compiler's program now runs in a directory of its own (`ref_one`, `suite_ref_one`); the two rows re-recorded. A whole `record-ref` may move
+  other ocamlopt rows the same way (the night's commands).
+
+| level | fix 3 (the 6 new) | fix 4 | fix 5 |
+|---|---|---|---|
+| AOT, light | 4 pass, 2 `:light-speed` | run corpus 6 of 6 pass; suite `append`, `utimes`, `uexit` pass | run corpus 14 pass of oi's 17 (`tls` schedule, `prodcons2` depth, `boundscheck` gc); suite 2 of 4 (`input_all` `:light-speed`, `testyield` schedule) |
+| AOT, compiled | 5 pass, `memory-model/forbidden` `:compiled-speed` (`aot-compiled-slow.edn`) | 6 of 6, suite 3 of 3 | 15 of 17 (`tls` schedule, `boundscheck` gc); suite 3 of 4 (`testyield` schedule) |
+
+The records: the light level 258 to **279 pass** (run corpus) and 86 to **94** (suite), 0 failing (`bin/oi divergences --aot`, `suite divergences
+--aot`); the compiled level's records 87 to **109 pass** of the run corpus's rows and 3 to **13** of the suite's, 0 failing (`bin/oi divergences
+--compiled`). **A compiled shard of 23 thread programs peaked at 10.8 GB in `bin/build-go`** (605 s; a shard of 8 suite programs 4.0 GB, of 5
+3.6 GB): threads' programs make the shard's package larger than the essential subset's 20 (4.2 GB). The night's `O2J_SHARD=20` must take
+this into account (OT20).
+
+### Checks run (all by list, 2026-11-05)
+
+`bin/oi record-ref --only-list` and `suite record-ref --only-list` (the newly run programs; realpath and append again after the directory fix),
+`bin/oi check --record --only-list` (45 programs: fixes 3 to 5's run-corpus programs and fix 2's 16 unported; 24 pass, 0 failing),
+`bin/oi suite check --record --only-list` (20; 12 pass, 0 failing), `bin/oi check --only-list test/ocaml/essential-check.txt` (58 of 58),
+`bin/oi test` (go vet, go test: ok), the light level `bin/oi check --aot --record --only-list` and `suite check --aot` over the same programs
+(the essential subset: 57 pass and one `:light-speed`, as before), the compiled level `bin/oi check --aot --level compiled --record
+--only-list` (one shard of 1 and one of 23) and `suite check --aot --level compiled` (shards of 5 and 8), `bin/oi divergences`, `suite
+divergences`, `divergences --aot`, `suite divergences --aot`, `divergences --compiled` (0 failing each), `make check-makefile`. **Not run**:
+the gate, any whole corpus, `bin/arbace-go`; the compiled level over the essential subset after the runtime's changes (`Fd`, threads); the
+light and compiled rows of programs outside the lists after the runtime's changes (the night's commands).
+
 ### The night's record commands (after this branch; in this order, the compiled level heavy)
 
 The lists run today merged their rows into the records; the whole corpora were not rerun. A whole run re-records them (the corpus
@@ -410,13 +455,13 @@ files changed: 13 programs moved to the suite, 28 thread programs and 15 suite p
     bin/oi suite check --record                     # oi, the suite corpus (118 programs)
     bin/oi check --aot --record                     # the light level: the runtime changed (Fd, ExtUnix, threads)
     bin/oi suite check --aot --record
-    O2J_SHARD=20 bin/oi check --aot --level compiled --record        # every run program: 19 shards, about 2.5 h
-    O2J_SHARD=20 bin/oi suite check --aot --level compiled --record
+    O2J_SHARD=8 bin/oi check --aot --level compiled --record         # every run program: about 45 shards, 4 to 5 h (OT20: a shard
+    O2J_SHARD=8 bin/oi suite check --aot --level compiled --record   # of thread programs builds in up to 10.8 GB at 23 programs)
     bin/oi pins --attest                            # the pins of the new known entries, from those runs' rows
     bin/oi divergences && bin/oi suite divergences && bin/oi divergences --aot && bin/oi divergences --compiled && bin/oi pins
     bin/reap record                                 # the OCaml row: eval and AOT cells
 
-### Proposed (OT16-OT19; none decided)
+### Proposed (OT16-OT20; none decided)
 
 - **OT16 `lib-channels/close_during_flush` until signals.** It needs `Unix.alarm`'s handler to empty a full pipe; without it oi's (and the
   runtime's) exit flush blocks until the wall cap, 4 × `OI_TIMEOUT` (8 minutes of one job slot a whole run). (a) as built: a known entry,
@@ -433,3 +478,7 @@ files changed: 13 programs moved to the suite, 28 thread programs and 15 suite p
   (b) by design. *Recommended: (a)*, as the triage's ranking has it.
 - **OT19 `link-test/test` (packs).** (a) a class (`-pack`: a pack is a module of modules oi's units do not have); (b) packs as units
   (o2j's and oi's linker making `P.M` the pack's fields): 1 test, 1 day. *Recommended: (a)*.
+- **OT20 The compiled level's shards of thread programs.** A shard of 23 programs, 17 of them threads', peaked at 10.8 GB in its build (gc on
+  one package). (a) `O2J_SHARD=8` for the whole night's run (about 45 shards, 4 to 5 h); (b) shards sized by the programs' translated size
+  (o2j's output bytes), a cap of about 4 GB; (c) OT15 (b), the JDK's classes and the runtime in a package built once. *Recommended: (b)*
+  tonight with a cap, (c) with the gate step.
