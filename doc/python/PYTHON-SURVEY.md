@@ -1453,3 +1453,28 @@ to-bool/jump (AotToBool pushes a bool AotTruthy pops), frame reuse for generator
   `python3 -I -S` with the same site appended to `sys.path` (stdout, status, stderr's last line equal), a console
   script through its launcher, and two negative controls: a wheel tagged for a platform refused, a wheel whose
   `RECORD` digest is wrong refused.
+
+### As built
+
+- `test/python/wheels.edn` pins five wheels from PyPI's JSON API on 2026-11-05: attrs 26.1.0, idna 3.20, packaging
+  26.3, pyflakes 4.1.0 (`py2.py3-none-any`, console script `pyflakes`) and six 1.17.0 (`py2.py3-none-any`); 344 KB in
+  all. attrs, idna and packaging are also among the 20 apks at the same versions: the wheels are their upstream
+  builds. Fetched once on the VM (`bin/pyi wheels fetch`, 2026-11-05) into `.tmp/cache/python/wheels/`.
+- `arbace/python/wheels.ae` as designed; `bin/pyi wheels fetch|install|verify|path|run|check|pip-probe`;
+  `arbace.python`'s `--site` and `PYI_SITE`. `verify` also fails on a file of the site no `RECORD` lists (the first
+  check run found CPython's reference run had written `__pycache__` into the shared site: the oracle runs `-B` since).
+  Installing the five takes well under a second on stage 0.
+- `bin/pyi wheels check` on the VM (aarch64, 1.5 minutes): the layout equal to `pip install --target`'s (110 `RECORD`
+  rows, both console scripts), the five samples (`test/python/wheels/use_*.py`) and pyflakes' console script equal to
+  CPython's, both controls refused.
+- The check found two gaps of pyi's runtime, fixed (go/arbace/py, printed, edited and read back by `bin/pyi runtime`):
+  `typing.Union[X, ...]` had no `__class_getitem__` (packaging failed at import, `tuple[Union[int, str], ...]`), and a
+  subclass of `module` could not be instantiated (six failed at import, `_MovedItems`); `Module` carries its class
+  (`Cls`), a subclass's instance is made empty and filled by `module.__init__`, its attributes looked up generically
+  (its class's descriptors around the dict) and set likewise. Program `test/python/pyi/w205-union-module.py`.
+- pip on pyi (`bin/pyi wheels pip-probe`, the apks' pip 26.2.1): `pip --version` and `pip install --no-index` both stop
+  at import, before csv: pip's vendored rich defines `class ColorTriplet(NamedTuple)`, whose annotations
+  annotationlib's FORWARDREF evaluates through `types.FunctionType(code, globals, ...)`, the recorded class "types.FunctionType
+  and types.CellType called". Any `class X(NamedTuple)` with annotations stops there on pyi.
+- Not done: `.data/scripts`' `#!python` rewritten but no pin exercises it; `bin/pyi aot` does not take `PYI_SITE`;
+  `--build-program`'s `:python {:wheels ...}` (PYS25 (a)'s second half) waits for pyi in the executable (PYS28).
