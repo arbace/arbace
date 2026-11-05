@@ -139,8 +139,34 @@
     ;; R7RS's write: a cyclic irritant is written with labels, not without end
     (lambda (port extract) (r7rs-write x port) (let ((s (extract))) (if (> (string-length s) 160) (substring s 0 160) s)))))
 
+;; SMR6, the stub experiment (SI_MAT_STUB set to anything but "" and "0"): an identifier the expander or the run finds unbound is bound to a
+;; stub that raises "STUBHIT X" and the clause or definition is evaluated again (up to 40 times each), so a mat shows the identifiers it
+;; needs at all ("STUB NAME X" lines, in the order found) and which ones its clauses really call ("STUBHIT X" in a CLAUSE line). Off: nothing changes.
+(define stubbing (let ((v (get-environment-variable "SI_MAT_STUB"))) (and v (not (string=? v "")) (not (string=? v "0")))))
+(define stub-mat "")
+(define stubbed-global '())   ; the identifiers stubbed for the shared environment (the prelude's definitions)
+(define (unbound-name e)
+  (let* ((m (message-of e)) (k (string-length "unbound identifier ")))
+    (and (> (string-length m) k) (string=? (substring m 0 k) "unbound identifier ")
+         (let loop ((j k)) (if (or (= j (string-length m)) (char=? (string-ref m j) #\space)) (string->symbol (substring m k j)) (loop (+ j 1)))))))
+(define (note-stub! x)
+  (newline) (display "STUB ") (write stub-mat) (display " ") (write x) (newline) (line))
+(define (stub-eval expr env2)
+  (if (not stubbing)
+      (eval expr env2)
+      (let loop ((n 0) (done '()))
+        (let ((r (guard (e ((watchdog-error? e) (raise e)) (#t (cons 'bad e))) (cons 'ok (eval expr env2)))))
+          (if (eq? (car r) 'ok)
+              (cdr r)
+              (let ((x (and (< n 40) (unbound-name (cdr r)))))
+                (if (and x (not (memq x done)))
+                    (begin (note-stub! x)
+                           (eval `(define ,x (lambda args (error 'stub ,(string-append "STUBHIT " (symbol->string x))))) env2)
+                           (loop (+ n 1) (cons x done)))
+                    (raise (cdr r)))))))))
+
 (define (def-form? d)
-  (and (pair? d) (memq (car d) '(define define-syntax define-record-type define-values define-structure))))
+  (and (pair? d) (memq (car d) '(define define-syntax define-record-type define-values define-structure module))))
 
 (define (line) (flush-output-port (current-output-port)))
 (define prelude '())   ; the definitions that expand alone, in order, reversed
@@ -153,8 +179,8 @@
   (if (and (pair? c) (memq (car c) '(error? sanitized-error?)) (pair? (cdr c)) (null? (cddr c)))
       (cons 'error (cadr c))
       (if (and (pair? c) (eq? (car c) 'warning?) (pair? (cdr c)) (null? (cddr c)))
-          (cons 'warning (lambda () (eval (cadr c) env2)))
-          (cons 'true (lambda () (eval c env2))))))
+          (cons 'warning (lambda () (stub-eval (cadr c) env2)))
+          (cons 'true (lambda () (stub-eval c env2))))))
 
 (define (watchdog-error? e)
   (and (condition? e) (who-condition? e) (eq? (condition-who e) 'watchdog)))
@@ -163,11 +189,12 @@
   (let ((env2 (new-interaction-environment env)))
     ;; a definition that does not evaluate is left out (the clauses that use it are not run), but not the watchdog's error: a prelude that
     ;; runs past the limit must not pass for a missing identifier (re-review 058, Q3)
-    (for-each (lambda (d) (guard (e ((watchdog-error? e) (raise e)) (#t #f)) (eval d env2))) (reverse prelude))
+    (for-each (lambda (d) (guard (e ((watchdog-error? e) (raise e)) (#t #f)) (stub-eval d env2))) (reverse prelude))
     env2))
 
 (define (run-one name clauses)
   (set! mats (+ mats 1))
+  (set! stub-mat name)
   (newline) (display "BEGIN ") (write name) (newline) (line)
   (cond
     ((member name skip) (newline) (display "MAT ") (write name) (display " SKIP in the skip list") (newline))
@@ -178,7 +205,7 @@
       (if (condition? env2)
        (begin (newline) (display "MAT ") (write name) (display " NOTRUN ") (display (message-of env2)) (newline))
       (let ()
-       (set-evaluator! (lambda (expr) (eval expr env2)))
+       (set-evaluator! (lambda (expr) (stub-eval expr env2)))
        (interaction-environment env2)   ; SC170 (b): (eval x) of a clause evaluates in the mat's environment, as in Chez
        (let loop ((cs clauses) (k 1) (p 0) (f 0) (n 0) (fail #f) (notrun #f))
          (if (null? cs)
@@ -214,9 +241,15 @@
 
 (define (add-def! d)
   (let ((r (timed (lambda ()
-             (guard (e (#t (cons 'notrun e)))
-               (eval `(let () ,@(reverse prelude) ,d (if #f #f)) env)
-               (cons 'ok #f))))))
+             (let loop ((n 0))
+               (let ((r (guard (e ((watchdog-error? e) (raise e)) (#t (cons 'notrun e)))
+                          (eval `(let () ,@(map (lambda (x) `(define ,x (lambda args (error 'stub ,(string-append "STUBHIT " (symbol->string x)))))) stubbed-global)
+                                      ,@(reverse prelude) ,d (if #f #f)) env)
+                          (cons 'ok #f))))
+                 (let ((x (and stubbing (eq? (car r) 'notrun) (< n 40) (unbound-name (cdr r)))))
+                   (if (and x (not (memq x stubbed-global)))
+                       (begin (set! stub-mat "<definition>") (note-stub! x) (set! stubbed-global (cons x stubbed-global)) (loop (+ n 1)))
+                       r))))))))
     (if (eq? (car r) 'notrun)
         (begin (newline) (display "DEF ") (write (if (pair? (cdr d)) (let ((n (cadr d))) (if (pair? n) (car n) n)) d))
                (display " NOTRUN ") (display (message-of (cdr r))) (newline) (line))
