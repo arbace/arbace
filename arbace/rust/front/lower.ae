@@ -1,0 +1,780 @@
+;; Ported from rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's
+;; rust-src-1.99.1-r0, pinned by tools/rsdump/apks.sha256): the essentials of compiler/rustc_ast_lowering/src/
+;; {lib.rs (owners and HIR ids, paths, types, elided lifetimes in signatures, generics), item.rs (items, use trees
+;; split into one item per leaf, impls, traits, functions' implicit self), expr.rs (the desugarings: while, while let,
+;; for, ?, ranges, if conditions' DropTemps, paren removal, closures, assignment), pat.rs (bindings that name unit
+;; structs, variants and constants become paths), block.rs}; rustc is dual-licensed MIT OR Apache-2.0 (LICENSE.md,
+;; "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.lower
+  "RF6's first slice (doc/rust/FRONTEND-SURVEY.md, \"As built: RF6\"): AST to HIR over an expanded crate in the
+  helper's dump format (tools/rsdump's --expanded, or arbace.rust.front.expand's output) with its resolutions
+  (arbace.rust.front.resolve's res forms or the helper's --resolve). The HIR is data: maps with :node (:item, :expr,
+  :pat, :ty, :stmt, :block, ...), :kind, the AST span [l1 c1 l2 c2] (nil for synthesized nodes), :hir-id [OWNER
+  LOCAL] and, on paths, :res. Printed by arbace.rust.front.hir-pretty as -Zunpretty=hir prints.
+
+    (lower-crate CRATE RES)     {:attrs [crate attrs] :items [items] :owners N}; RES: span -> [res ...]"
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; The dump's shapes
+
+(defn- head [x] (when (seq? x) (first x)))
+(defn- fv [x k]
+  (when (seq? x)
+    (loop [s (rest x)]
+      (when (seq s)
+        (if (= (first s) k) (second s) (recur (rest s)))))))
+(defn- arg [x i] (when (seq? x) (nth x (inc i) nil)))
+(defn- some-val [x] (when (and (seq? x) (= 'Some (first x))) (second x)))
+(defn- id-name [x] (cond (and (seq? x) (= 'id (first x))) (second x) (string? x) x :else nil))
+(defn- span-of
+  "A node's span: [l1 c1 l2 c2] in the root file, :foreign in another file (std's macros: their positions follow the
+  root file's in the source map, so they pass every comment of the root file), nil for none"
+  [x]
+  (let [s (fv x :span)]
+    (cond (and (vector? s) (>= (count s) 4)) (subvec s 0 4)
+          (and (seq? s) (= 'span (first s))) :foreign
+          :else nil)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Owners and HIR ids (lib.rs: each item an owner, its nodes numbered in lowering order)
+
+(def ^:dynamic *owner* nil)
+(def ^:dynamic *owners* nil)
+(def ^:dynamic *res* {})
+(def ^:dynamic *sig* false)         ; lowering a function signature: elided lifetimes are fresh ('_)
+(def ^:dynamic *lt-types* #{})      ; types with lifetime parameters (the crate's and std's known ones)
+
+(defn- next-id [] (when *owner* [(first @*owner*) (second (swap! *owner* update 1 inc))]))
+(defn- node [m] (assoc m :hir-id (next-id)))
+(defmacro ^:private with-owner [& body]
+  `(binding [*owner* (atom [(swap! *owners* inc) -1])] ~@body))
+
+;; ---------------------------------------------------------------------------------------------
+;; Attributes (rustc_attr_parsing's parsed forms as -Zunpretty=hir prints them; the rest unparsed)
+
+(defn- tokens-text [ts]
+  (let [toks (if (= 'TokenStream (head ts)) (second ts) ts)]
+    (apply str
+           (for [t toks]
+             (let [tk (second t)]
+               (case (head tk)
+                 Token (let [k (fv tk :kind)]
+                         (cond (seq? k) (case (first k)
+                                          Ident (second k)
+                                          Literal (let [l (second k)] (str (fv l :symbol)))
+                                          Lifetime (second k)
+                                          (str k))
+                               :else (case k Comma ", " Colon ":" Eq " = " PathSep "::" Dot "." (str k))))
+                 Delimited (str "(" (tokens-text (last t)) ")")
+                 (str t)))))))
+
+(defn- attr-path [a]
+  (let [item (fv (second (fv a :kind)) :item)]
+    (str/join "::" (map #(id-name (fv % :ident)) (fv (fv item :path) :segments)))))
+(defn- attr-args [a] (fv (fv (second (fv a :kind)) :item) :args))
+(defn- attr-arg-words [a]
+  (let [args (attr-args a)]
+    (when (= 'Delimited (head args))
+      (let [ts (fv (second args) :tokens)]
+        (vec (keep (fn [t] (let [tk (second t) k (fv tk :kind)] (when (and (seq? k) (= 'Ident (first k))) (second k))))
+                   (if (= 'TokenStream (head ts)) (second ts) ts)))))))
+
+(defn- attr-eq-str [a]
+  (let [args (attr-args a)]
+    (when (= 'Eq (head args))
+      (let [x (fv args :expr)] (some-> (fv (second (fv x :kind)) :symbol) str)))))
+
+(defn- lower-attr [a]
+  (let [k (fv a :kind)]
+    (if (= 'DocComment (head k))
+      {:doc-comment (str (if (= 'Inner (fv a :style)) (if (= 'Line (second k)) "//!" "/*!") (if (= 'Line (second k)) "///" "/**"))
+                         (nth k 2) (when (= 'Block (second k)) "*/"))
+       :immediate true}
+      (let [p (attr-path a) w (attr-arg-words a)]
+        (case p
+          "inline" {:parsed (case (first w) "never" "Inline(Never)" "always" "Inline(Always)" "Inline(Hint)")}
+          "no_mangle" {:parsed "NoMangle"}
+          "unsafe" {:parsed (case (first w) "no_mangle" "NoMangle" (str "Unsafe" w))}
+          "panic_handler" {:parsed "Lang(PanicImpl)"}
+          "no_std" {:parsed "NoStd"}
+          "no_main" {:parsed "NoMain"}
+          "no_core" {:parsed "NoCore"}
+          "prelude_import" {:parsed "PreludeImport"}
+          "automatically_derived" {:parsed "AutomaticallyDerived"}
+          "cold" {:parsed "Cold"}
+          "coverage" {:parsed (str "Coverage(" (str/capitalize (or (first w) "on")) ")")}
+          "feature" {:parsed (str "Feature([" (str/join ", " (map #(str % "#0") w)) "])")}
+          "doc" {:toks (-> ["Doc" "(" "DocAttribute" " " "{"]
+                           (into (mapcat (fn [i f] (concat (when (pos? i) ["," :space]) [f ":" " " "[" "]"]))
+                                         (range) ["aliases" "inline" "cfg" "auto_cfg" "auto_cfg_change" "test_attrs"]))
+                           (into ["}" ")"]))}
+          "repr" {:toks (-> ["Repr" " " "{" "reprs" ":" " " "["]
+                            (into (mapcat (fn [i r]
+                                            (concat (when (pos? i) ["," :space])
+                                                    (cond (#{"u8" "u16" "u32" "u64" "u128" "usize"} r) ["ReprInt" "(" "UnsignedInt" "(" r ")" ")"]
+                                                          (#{"i8" "i16" "i32" "i64" "i128" "isize"} r) ["ReprInt" "(" "SignedInt" "(" r ")" ")"]
+                                                          :else [(str "Repr" (str/capitalize r))])))
+                                          (range) w))
+                            (into ["]" "}"]))}
+          "lang" {:parsed (str "Lang(" (apply str (map str/capitalize (str/split (or (attr-eq-str a) "") #"_"))) ")")}
+          "macro_export" {:parsed "MacroExport {local_inner_macros: false}"}
+          "must_use" {:parsed "MustUse"}
+          ("derive" "rustc_builtin_macro") nil
+          (let [args (attr-args a)]
+            {:unparsed (str p (when (= 'Delimited (head args)) (str "(" (tokens-text (fv (second args) :tokens)) ")")))
+             :immediate true :span (span-of a)}))))))
+
+(defn- lower-attrs
+  "rustc_attr_parsing's order: doc comments and unparsed attributes as they come, the parsed ones after them"
+  [as]
+  (let [xs (keep lower-attr as)]
+    (vec (concat (filter :immediate xs) (remove :immediate xs)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Paths and types
+
+(declare lower-ty lower-expr lower-pat lower-block lower-generic-args lower-format-args bind-pat)
+
+(defn- res-at [span] (get *res* span))
+
+(defn- lower-seg [s]
+  {:ident (id-name (fv s :ident)) :args (lower-generic-args (some-val (fv s :args)) (id-name (fv s :ident)))})
+
+(defn- lower-path [p]
+  (let [segs (fv p :segments)]
+    {:span (span-of p) :res (res-at (span-of p)) :segs (mapv lower-seg segs)}))
+
+(defn- lang-path [name & [args]] {:segs [{:ident name :args args}] :lang true})
+(defn- lang-path* [names] {:segs (mapv (fn [n] {:ident n}) names) :lang true})
+
+(defn- lt-type? [name] (contains? *lt-types* name))
+
+(defn- lower-generic-args [ga seg-name]
+  (cond
+    (nil? ga) (when (and *sig* (lt-type? seg-name)) {:args [{:lifetime "'_" :fresh true}] :constraints []})
+    (= 'AngleBracketed (head ga))
+    (let [a (second ga)
+          items (fv a :args)
+          args (vec (for [x items :when (= 'Arg (head x))]
+                      (let [g (second x)]
+                        (case (head g)
+                          Type {:ty (lower-ty (second g))}
+                          Lifetime (let [n (second (second g))] {:lifetime n :fresh (and *sig* (= n "'_"))})
+                          Const {:const (lower-expr (fv (second g) :value))}
+                          {:ty {:node :ty :kind :err}}))))
+          args (if (and *sig* (lt-type? seg-name) (not-any? :lifetime args)) (into [{:lifetime "'_" :fresh true}] args) args)
+          cons (vec (for [x items :when (= 'Constraint (head x))]
+                      (let [c (second x)]
+                        {:ident (id-name (fv c :ident))
+                         :kind (let [k (fv c :kind)]
+                                 (if (= 'Equality (head k))
+                                   {:eq (lower-ty (second (fv k :term)))}
+                                   {:bounds (vec (map #(lower-ty %) []))}))})))]
+      {:args args :constraints cons})
+    (= 'Parenthesized (head ga))
+    (let [a (second ga)]
+      {:paren true :inputs (mapv #(lower-ty (if (= 'Param (head %)) (fv % :ty) %)) (fv a :inputs))
+       :output (let [o (fv a :output)] (if (= 'Ty (head o)) (lower-ty (second o)) {:node :ty :kind :tup :elts []}))})
+    :else nil))
+
+(defn- lower-mt [mt] {:mutbl (= 'Mut (fv mt :mutbl)) :ty (lower-ty (fv mt :ty))})
+
+(defn- lower-bound [b]
+  (case (head b)
+    Trait (let [p (second b)]
+            {:trait (lower-path (fv (fv p :trait_ref) :path))
+             :polarity (fv (fv p :modifiers) :polarity)
+             :bound-params (vec (fv p :bound_generic_params))})
+    Outlives {:lifetime (second (second b))}
+    {:other true}))
+
+(defn lower-ty [t]
+  (let [k (fv t :kind) sp (span-of t)]
+    (node
+     (merge
+      {:node :ty :span sp}
+      (cond
+        (= 'Infer k) {:kind :infer}
+        (= 'Never k) {:kind :never}
+        (= 'ImplicitSelf k) {:kind :path :path {:segs [{:ident "Self"}]}}
+        :else
+        (case (head k)
+          Path (let [[_ q p] k]
+                 (if (some-val q)
+                   (let [qs (some-val q)]
+                     {:kind :qpath :qself (lower-ty (fv qs :ty)) :position (fv qs :position) :path (lower-path p)})
+                   {:kind :path :path (lower-path p)}))
+          Ref (let [[_ lt mt] k
+                    l (some-val lt)
+                    lname (when l (if (= 'lifetime (head l)) (second l) (second (fv l :ident))))]
+                {:kind :ref :lifetime (cond lname lname *sig* "'_" :else nil) :mt (lower-mt mt)})
+          PinnedRef {:kind :err}
+          Ptr {:kind :ptr :mt (lower-mt (second k))}
+          Slice {:kind :slice :ty (lower-ty (second k))}
+          Array {:kind :array :ty (lower-ty (second k)) :len (lower-expr (fv (nth k 2) :value))}
+          Tup {:kind :tup :elts (mapv lower-ty (second k))}
+          Paren (dissoc (lower-ty (second k)) :hir-id)
+          TraitObject {:kind :dyn :bounds (mapv lower-bound (second k)) :syntax (nth k 2 nil)}
+          ImplTrait {:kind :impl :bounds (mapv lower-bound (second k))}
+          FnPtr (let [f (second k) d (fv f :decl)]
+                  {:kind :fnptr :safety (fv f :safety) :ext (fv f :ext)
+                   :inputs (mapv #(lower-ty (fv % :ty)) (fv d :inputs))
+                   :arg-names (mapv #(let [p (fv % :pat)] (when (= 'Ident (head (fv p :kind))) (id-name (nth (fv p :kind) 2)))) (fv d :inputs))
+                   :output (let [o (fv d :output)] (when (= 'Ty (head o)) (lower-ty (second o))))})
+          {:kind :err}))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Patterns (pat.rs)
+
+(defn- const-like? [rs]
+  (some (fn [r] (and (#{'def 'local-def} (first r))
+                     (let [k (str (second r))] (or (str/starts-with? k "Ctor(") (= k "Const") (= k "AssocConst") (= k "Static")))))
+        rs))
+
+(defn lower-pat [p]
+  (let [k (fv p :kind) sp (span-of p)]
+    (node
+     (merge
+      {:node :pat :span sp}
+      (cond
+        (= 'Wild k) {:kind :wild}
+        (= 'Rest k) {:kind :rest}
+        (= 'Never k) {:kind :never}
+        (= 'Missing k) {:kind :wild}
+        :else
+        (case (head k)
+          Ident (let [[_ bm id sub] k
+                      name (id-name id)]
+                  (if (and (nil? (some-val sub)) (const-like? (res-at sp)) (= bm '(BindingMode No Not)))
+                    {:kind :path :path {:segs [{:ident name}] :res (res-at sp) :span sp}}
+                    {:kind :binding :name name
+                     :by-ref (let [r (second bm)] (when (and (seq? r) (= 'Yes (first r))) (if (= 'Mut (last r)) :mut :not)))
+                     :mutbl (= 'Mut (nth bm 2))
+                     :sub (some-> (some-val sub) lower-pat)}))
+          TupleStruct (let [[_ q pth pats] k] {:kind :tuple-struct :path (lower-path pth) :pats (mapv lower-pat pats)})
+          Struct (let [[_ q pth fields rest] k]
+                   {:kind :struct :path (lower-path pth)
+                    :fields (mapv (fn [f] {:ident (id-name (fv f :ident)) :pat (lower-pat (fv f :pat)) :shorthand (fv f :is_shorthand)
+                                           :span (span-of f)}) fields)
+                    :rest (and rest (not= 'None rest))})
+          Path (let [[_ q pth] k] {:kind :path :path (lower-path pth)})
+          Tuple {:kind :tuple :pats (mapv lower-pat (second k))}
+          Or {:kind :or :pats (mapv lower-pat (second k))}
+          Ref {:kind :ref :pat (lower-pat (second k)) :mutbl (= 'Mut (last k))}
+          Box {:kind :box :pat (lower-pat (second k))}
+          Deref {:kind :deref :pat (lower-pat (second k))}
+          Expr {:kind :lit :expr (lower-expr (second k))}
+          Range (let [[_ a b e] k]
+                  {:kind :range :lo (some-> (some-val a) lower-expr) :hi (some-> (some-val b) lower-expr)
+                   :incl (let [n (fv e :node)] (and (seq? n) (= 'Included (first n))))})
+          Slice {:kind :slice :pats (mapv lower-pat (second k))}
+          Paren (dissoc (lower-pat (second k)) :hir-id)
+          Guard {:kind :guard :pat (lower-pat (second k)) :cond (lower-expr (nth k 2))}
+          {:kind :err}))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions (expr.rs)
+
+(defn- e [m] (node (merge {:node :expr :attrs []} m)))
+(defn- path-e [name sp] (e {:kind :path :path (lang-path name) :span sp}))
+(defn- call-e [f args sp] (e {:kind :call :func f :args args :span sp}))
+(defn- block-of [stmts expr sp & [rules]] (node {:node :block :stmts stmts :expr expr :span sp :rules rules}))
+(defn- block-e [b sp & [label]] (e {:kind :block :block b :label label :span sp}))
+(defn- semi [x] (node {:node :stmt :kind :semi :expr x :span (:span x)}))
+(defn- expr-stmt [x] (node {:node :stmt :kind :expr :expr x :span (:span x)}))
+(defn- arm [pat body & [guard attrs]] (node {:node :arm :pat pat :body body :guard guard :attrs (or attrs []) :span (:span body)}))
+(defn- bind-pat [name mutbl sp] (node {:node :pat :kind :binding :name name :mutbl mutbl :span sp}))
+(defn- lang-struct-pat [name fields sp]
+  (node {:node :pat :kind :struct :path (lang-path name) :span sp
+         :fields (vec (map-indexed (fn [i p] {:ident (str i) :pat p :shorthand false :span (:span p)}) fields))}))
+
+(def ^:private binops
+  {'Add "+" 'Sub "-" 'Mul "*" 'Div "/" 'Rem "%" 'And "&&" 'Or "||" 'BitXor "^" 'BitAnd "&" 'BitOr "|" 'Shl "<<" 'Shr ">>"
+   'Eq "==" 'Lt "<" 'Le "<=" 'Ne "!=" 'Ge ">=" 'Gt ">"})
+(def ^:private assignops
+  {'AddAssign "+=" 'SubAssign "-=" 'MulAssign "*=" 'DivAssign "/=" 'RemAssign "%=" 'BitXorAssign "^=" 'BitAndAssign "&="
+   'BitOrAssign "|=" 'ShlAssign "<<=" 'ShrAssign ">>="})
+
+(defn- lower-lit [l]
+  (let [k (fv l :kind) sym (fv l :symbol) suf (some-val (fv l :suffix))]
+    {:lit-kind (if (seq? k) (first k) k) :raw (when (seq? k) (second k)) :symbol sym :suffix suf}))
+
+(defn- lower-cond
+  "lower_cond: a condition without let wrapped in DropTemps"
+  [c]
+  (let [lc (lower-expr c)
+        has-let (fn has-let [x] (or (= :let (:kind x)) (and (= :binary (:kind x)) (= "&&" (:op x)) (or (has-let (:lhs x)) (has-let (:rhs x))))))]
+    (if (has-let lc) lc (e {:kind :drop-temps :expr lc :span (:span lc)}))))
+
+(defn- label-name [l] (when-let [l (some-val l)] (second (fv l :ident))))
+
+(defn- lower-fn-decl-params [d]
+  (vec (for [p (fv d :inputs)] {:pat (lower-pat (fv p :pat)) :ty (lower-ty (fv p :ty)) :attrs (lower-attrs (fv p :attrs))})))
+
+(defn lower-expr [x]
+  (let [k (fv x :kind) sp (span-of x) attrs (lower-attrs (fv x :attrs))
+        ex (fn [m] (e (assoc m :span sp :attrs attrs)))]
+    (case (if (seq? k) (first k) k)
+      Paren (let [inner (lower-expr (second k))] (update inner :attrs into attrs))
+      Path (let [[_ q p] k]
+             (if (some-val q)
+               (ex {:kind :qpath :qself (lower-ty (fv (some-val q) :ty)) :path (lower-path p) :position (fv (some-val q) :position)})
+               (ex {:kind :path :path (lower-path p)})))
+      Lit (ex {:kind :lit :lit (lower-lit (second k))})
+      Call (ex {:kind :call :func (lower-expr (second k)) :args (mapv lower-expr (nth k 2))})
+      MethodCall (let [m (second k)]
+                   (ex {:kind :method :seg (lower-seg (fv m :seg)) :receiver (lower-expr (fv m :receiver)) :args (mapv lower-expr (fv m :args))}))
+      Binary (let [[_ op a b] k] (ex {:kind :binary :op (binops (fv op :node)) :lhs (lower-expr a) :rhs (lower-expr b)}))
+      Unary (let [[_ op a] k] (ex {:kind :unary :op (case op Deref "*" Not "!" Neg "-") :expr (lower-expr a)}))
+      AddrOf (let [[_ bk m a] k] (ex {:kind :addr-of :raw (= 'Raw bk) :mutbl (= 'Mut m) :expr (lower-expr a)}))
+      Cast (ex {:kind :cast :expr (lower-expr (second k)) :ty (lower-ty (nth k 2))})
+      Type (ex {:kind :type :expr (lower-expr (second k)) :ty (lower-ty (nth k 2))})
+      Field (ex {:kind :field :expr (lower-expr (second k)) :ident (id-name (nth k 2))})
+      Index (ex {:kind :index :expr (lower-expr (second k)) :index (lower-expr (nth k 2))})
+      Tup (ex {:kind :tup :exprs (mapv lower-expr (second k))})
+      Array (ex {:kind :array :exprs (mapv lower-expr (second k))})
+      Repeat (ex {:kind :repeat :expr (lower-expr (second k)) :count (lower-expr (fv (nth k 2) :value))})
+      Assign (ex {:kind :assign :lhs (lower-expr (second k)) :rhs (lower-expr (nth k 2))})
+      AssignOp (let [[_ op a b] k] (ex {:kind :assign-op :op (assignops (fv op :node)) :lhs (lower-expr a) :rhs (lower-expr b)}))
+      Block (let [[_ b l] k] (ex {:kind :block :block (lower-block b) :label (label-name l)}))
+      Let (let [[_ p init] k] (ex {:kind :let :pat (lower-pat p) :init (lower-expr init)}))
+      If (let [[_ c t els] k]
+           (ex {:kind :if :cond (lower-cond c) :then (block-e (lower-block t) (span-of t))
+                :else (some-> (some-val els) lower-expr)}))
+      While (let [[_ c body l] k
+                  ;; loop { if cond { body } else { break } }
+                  brk (e {:kind :break :span sp})
+                  els (block-e (block-of [(semi brk)] nil sp) sp)
+                  ife (e {:kind :if :cond (lower-cond c) :then (block-e (lower-block body) (span-of body)) :else els :span sp})]
+              (ex {:kind :loop :block (block-of [] ife sp) :label (label-name l) :source :while}))
+      Loop (let [[_ b l] k] (ex {:kind :loop :block (lower-block b) :label (label-name l)}))
+      ForLoop (let [f (second k)
+                    head-sp (span-of (fv f :iter))
+                    pat (lower-pat (fv f :pat))
+                    body (lower-block (fv f :body))
+                    iter-pat (bind-pat "iter" true head-sp)
+                    next-call (call-e (path-e "next" head-sp)
+                                      [(e {:kind :addr-of :mutbl true :expr (e {:kind :path :path {:segs [{:ident "iter"}]} :span head-sp}) :span head-sp})] head-sp)
+                    none-arm (arm (lang-struct-pat "None" [] head-sp) (e {:kind :break :span head-sp}))
+                    some-arm (arm (lang-struct-pat "Some" [pat] (:span pat)) (block-e body (span-of (fv f :body))))
+                    match-e (e {:kind :match :expr next-call :arms [none-arm some-arm] :span head-sp :source :for})
+                    loop-e (e {:kind :loop :block (block-of [(expr-stmt match-e)] nil sp) :label (label-name (fv f :label)) :span sp})
+                    into (call-e (path-e "into_iter" head-sp) [(lower-expr (fv f :iter))] head-sp)
+                    outer (e {:kind :match :expr into :arms [(arm iter-pat loop-e)] :span sp :source :for})]
+                (ex {:kind :drop-temps :expr outer}))
+      Match (let [[_ s arms] k]
+              (ex {:kind :match :expr (lower-expr s)
+                   :arms (mapv (fn [a] (node {:node :arm :pat (lower-pat (fv a :pat))
+                                              :guard (some-> (some-val (fv a :guard)) (#(if (= 'Guard (head %)) (fv % :cond) %)) lower-expr)
+                                              :body (lower-expr (some-val (fv a :body))) :attrs (lower-attrs (fv a :attrs)) :span (span-of a)}))
+                               arms)}))
+      Closure (let [c (second k) d (fv c :fn_decl)]
+                (ex {:kind :closure :capture (if (= 'Ref (fv c :capture_clause)) nil :move)
+                     :params (binding [*sig* true] (lower-fn-decl-params d))
+                     :output (let [o (fv d :output)] (when (= 'Ty (head o)) (binding [*sig* true] (lower-ty (second o)))))
+                     :body (lower-expr (fv c :body))}))
+      Try (let [inner (lower-expr (second k))
+                isp (:span inner)
+                unreach [{:unparsed "allow(unreachable_code)"}]
+                branch (call-e (path-e "branch" isp) [inner] isp)
+                residual (bind-pat "residual" false sp)
+                val (bind-pat "val" false sp)
+                brk-arm (arm (lang-struct-pat "Break" [residual] sp)
+                             (e {:kind :ret :expr (call-e (path-e "from_residual" sp) [(e {:kind :path :path {:segs [{:ident "residual"}]} :span sp})] sp)
+                                 :span sp :attrs unreach}))
+                cont-arm (arm (lang-struct-pat "Continue" [val] sp) (e {:kind :path :path {:segs [{:ident "val"}]} :span sp :attrs unreach}))]
+            (ex {:kind :match :expr branch :arms [brk-arm cont-arm] :source :try}))
+      Range (let [[_ a b lim] k
+                  a (some-> (some-val a) lower-expr) b (some-> (some-val b) lower-expr)
+                  closed (and (seq? lim) (= 'Closed (first lim)) true)
+                  closed (or closed (= lim 'Closed))
+                  fld (fn [n x] {:ident n :expr x :shorthand false :span (:span x)})]
+              (cond
+                (and closed a b) (ex {:kind :call :func (path-e "range_inclusive_new" sp) :args [a b]})
+                (and closed b) (ex {:kind :struct :path (lang-path "RangeToInclusive") :fields [(fld "end" b)]})
+                (and a b) (ex {:kind :struct :path (lang-path "Range") :fields [(fld "start" a) (fld "end" b)]})
+                a (ex {:kind :struct :path (lang-path "RangeFrom") :fields [(fld "start" a)]})
+                b (ex {:kind :struct :path (lang-path "RangeTo") :fields [(fld "end" b)]})
+                :else (ex {:kind :path :path (lang-path "RangeFull")})))
+      Struct (let [s (second k) rest (fv s :rest)]
+               (ex {:kind :struct :path (lower-path (fv s :path))
+                    :fields (mapv (fn [f] {:ident (id-name (fv f :ident)) :expr (lower-expr (fv f :expr)) :shorthand (fv f :is_shorthand)
+                                           :span (span-of f)}) (fv s :fields))
+                    :base (when (= 'Base (head rest)) (lower-expr (second rest)))
+                    :rest-default (= rest 'Rest)}))
+      Ret (ex {:kind :ret :expr (some-> (some-val (second k)) lower-expr)})
+      Break (let [[_ l v] k] (ex {:kind :break :label (label-name l) :expr (some-> (some-val v) lower-expr)}))
+      Continue (ex {:kind :continue :label (label-name (second k))})
+      FormatArgs (update (lower-format-args (second k) sp) :attrs into attrs)
+      (ex {:kind :err :ast (if (seq? k) (first k) k)}))))
+
+;; ---------------------------------------------------------------------------------------------
+;; format_args! (format.rs: flatten_format_args, inline_literals, expand_format_args' bytecode)
+
+(defn- fa-template [fa]
+  (vec (for [pc (fv fa :template)]
+         (case (head pc)
+           Literal {:lit (second pc)}
+           Placeholder (let [p (second pc) a (fv p :argument) o (fv p :format_options)
+                             cnt (fn [c] (when-let [c (some-val c)]
+                                           (if (= 'Literal (head c)) {:n (second c)}
+                                               {:arg (let [i (fv (second c) :index)] (if (= 'Ok (head i)) (second i) -1))
+                                                :span (some-val (fv (second c) :span))})))]
+                         {:arg (let [i (fv a :index)] (if (= 'Ok (head i)) (second i) -1))
+                          :span (some-val (fv p :span))
+                          :trait (fv p :format_trait)
+                          :width (cnt (fv o :width)) :precision (cnt (fv o :precision))
+                          :align (some-val (fv o :alignment)) :fill (some-> (some-val (fv o :fill)) second)
+                          :sign (some-val (fv o :sign)) :alternate (fv o :alternate) :zero-pad (fv o :zero_pad)
+                          :debug-hex (some-val (fv o :debug_hex))})))))
+
+(defn- fa-args [fa] (vec (for [a (fv (fv fa :arguments) :arguments)] {:kind (let [k (fv a :kind)] (if (seq? k) (first k) k)) :expr (fv a :expr)})))
+
+(defn- map-indexes [tpl f]
+  (mapv (fn [pc] (if (:lit pc) pc
+                     (cond-> (update pc :arg f)
+                       (:arg (:width pc)) (update-in [:width :arg] f)
+                       (:arg (:precision pc)) (update-in [:precision :arg] f))))
+        tpl))
+
+(defn- peel [x]
+  (let [k (fv x :kind)]
+    (cond (= 'Paren (head k)) (peel (second k))
+          (and (= 'AddrOf (head k)) (= 'Ref (second k))) (peel (nth k 3))
+          :else x)))
+
+(defn- flatten-fa [{:keys [tpl args] :as fa}]
+  (loop [tpl tpl args args i 0]
+    (if (>= i (count tpl))
+      {:tpl tpl :args args}
+      (let [pc (nth tpl i)
+            ai (:arg pc)
+            inner (when (and (not (:lit pc)) (#{'Display 'Debug} (:trait pc)) (<= 0 ai (dec (count args))))
+                    (let [x (peel (:expr (nth args ai)))] (when (= 'FormatArgs (head (fv x :kind))) (second (fv x :kind)))))]
+        (if (and inner (every? (fn [[j q]] (or (= i j) (:lit q) (not= (:arg q) ai))) (map-indexed vector tpl)))
+          (let [itpl (fa-template inner) iargs (fa-args inner)
+                before (subvec args 0 ai) remaining (subvec args (inc ai))
+                old-off (count before) new-off (+ old-off (count iargs))
+                args2 (-> before (into iargs) (into remaining))
+                tpl1 (map-indexes tpl (fn [x] (if (>= x (inc old-off)) (+ (- x (inc old-off)) new-off) x)))
+                ;; the outer indexes past the inner argument: after split_off(arg_index + 1) and pop, offset old_arg_offset
+                tpl1 (map-indexes tpl (fn [x] (if (> x ai) (+ (- x (inc ai)) new-off) x)))
+                itpl (map-indexes itpl #(+ % ai))]
+            (recur (-> (subvec tpl1 0 i) (into itpl) (into (subvec tpl1 (inc i)))) args2 i))
+          (recur tpl args (inc i)))))))
+
+(defn- unescape-lit [^String s]
+  (let [n (count s) sb (StringBuilder.)]
+    (loop [i 0]
+      (if (>= i n) (str sb)
+          (let [c (.charAt s i)]
+            (if (and (= c \\) (< (inc i) n))
+              (let [d (.charAt s (inc i))]
+                (case d
+                  \n (do (.append sb \newline) (recur (+ i 2)))
+                  \t (do (.append sb \tab) (recur (+ i 2)))
+                  \r (do (.append sb \return) (recur (+ i 2)))
+                  \0 (do (.append sb (char 0)) (recur (+ i 2)))
+                  \x (do (.append sb (char (Integer/parseInt (subs s (+ i 2) (+ i 4)) 16))) (recur (+ i 4)))
+                  \u (let [e (.indexOf s "}" (int i))] (.appendCodePoint sb (Integer/parseInt (subs s (+ i 3) e) 16)) (recur (inc e)))
+                  \newline (recur (loop [j (+ i 2)] (if (and (< j n) (Character/isWhitespace (.charAt s j))) (recur (inc j)) j)))
+                  (do (.append sb d) (recur (+ i 2)))))
+              (do (.append sb c) (recur (inc i)))))))))
+
+(def ^:private int-max {"i8" 127 "i16" 32767 "i32" 2147483647 "i64" 9223372036854775807 "isize" 9223372036854775807
+                        "i128" (dec (.shiftLeft BigInteger/ONE 127))
+                        "u8" 255 "u16" 65535 "u32" 4294967295 "u64" 18446744073709551615 "usize" 18446744073709551615
+                        "u128" (dec (.shiftLeft BigInteger/ONE 128))})
+
+(defn- try-inline-lit [x]
+  (let [k (fv x :kind)]
+    (when (= 'Lit (head k))
+      (let [l (second k) lk (fv l :kind) sym (fv l :symbol) suf (some-val (fv l :suffix))]
+        (cond (and (= 'Str lk) (nil? suf)) (unescape-lit sym)
+              (and (seq? lk) (= 'StrRaw (first lk)) (nil? suf)) sym
+              (and (= 'Integer lk) (or (nil? suf) (int-max suf)))
+              (let [t (str/replace sym "_" "")
+                    v (cond (str/starts-with? t "0x") (BigInteger. (subs t 2) 16) (str/starts-with? t "0o") (BigInteger. (subs t 2) 8)
+                            (str/starts-with? t "0b") (BigInteger. (subs t 2) 2) :else (BigInteger. t))]
+                (when (<= (.compareTo v (biginteger (int-max (or suf "i32")))) 0) (str v)))
+              :else nil)))))
+
+(defn- default-opts? [pc]
+  (and (nil? (:width pc)) (nil? (:precision pc)) (nil? (:align pc)) (nil? (:fill pc)) (nil? (:sign pc))
+       (not (:alternate pc)) (not (:zero-pad pc)) (nil? (:debug-hex pc))))
+
+(defn- inline-literals [{:keys [tpl args]}]
+  (let [inl (vec (for [pc tpl]
+                   (if (and (not (:lit pc)) (= 'Display (:trait pc)) (default-opts? pc) (<= 0 (:arg pc) (dec (count args))))
+                     (if-let [s (try-inline-lit (peel (:expr (nth args (:arg pc)))))] {:lit s :inlined (:arg pc)} pc)
+                     pc)))]
+    (if (= inl tpl)
+      {:tpl tpl :args args}
+      (let [used (set (mapcat (fn [pc] (when-not (:lit pc) (keep identity [(:arg pc) (:arg (:width pc)) (:arg (:precision pc))]))) inl))
+            remove (set (for [pc inl :when (:inlined pc) :when (not (used (:inlined pc)))] (:inlined pc)))
+            index-map (vec (reductions + 0 (map #(if (remove %) 0 1) (range (count args)))))]
+        {:tpl (map-indexes (mapv #(dissoc % :inlined) inl) #(if (neg? %) % (nth index-map %)))
+         :args (vec (keep-indexed (fn [i a] (when-not (remove i) a)) args))}))))
+
+(defn- utf8 [^String s] (vec (map #(bit-and (int %) 0xff) (.getBytes s "UTF-8"))))
+(defn- le16 [n] [(bit-and n 0xff) (bit-and (bit-shift-right n 8) 0xff)])
+(defn- le32 [n] [(bit-and n 0xff) (bit-and (bit-shift-right n 8) 0xff) (bit-and (bit-shift-right n 16) 0xff) (bit-and (bit-shift-right n 24) 0xff)])
+
+(def ^:private new-fns
+  {'Display "new_display" 'Debug "new_debug" 'LowerExp "new_lower_exp" 'UpperExp "new_upper_exp" 'Octal "new_octal"
+   'Pointer "new_pointer" 'Binary "new_binary" 'LowerHex "new_lower_hex" 'UpperHex "new_upper_hex"})
+
+(defn- lower-format-args [fa sp]
+  (let [allow-const (empty? (fa-args fa))
+        {:keys [tpl args]} (-> {:tpl (fa-template fa) :args (fa-args fa)} flatten-fa inline-literals)
+        tpl (if (empty? tpl) [{:lit ""}] tpl)
+        argmap (atom [])                 ; [[index type] span] in insertion order
+        insert! (fn [k span] (let [i (first (keep-indexed (fn [i [k2 _]] (when (= k k2) i)) @argmap))]
+                               (or i (do (swap! argmap conj [k span]) (dec (count @argmap))))))
+        fa-span (span-of fa)]
+    (loop [i 0 incomplete "" bc [] implicit 0]
+      (if (< i (count tpl))
+        (let [pc (nth tpl i)]
+          (if (:lit pc)
+            (if (:lit (get tpl (inc i)))
+              (recur (inc i) (str incomplete (:lit pc)) bc implicit)
+              (let [s (str incomplete (:lit pc))]
+                (if (and (= (inc i) (count tpl)) (empty? bc))
+                  (e {:kind :call :span sp
+                      :func (e {:kind :path :path (lang-path* ["format_arguments" (if allow-const "from_str" "from_str_nonconst")]) :span sp})
+                      :args [(e {:kind :lit :lit {:lit-kind 'Str :value s} :span fa-span})]})
+                  (let [bs (utf8 s)
+                        bc (loop [bs bs bc bc]
+                             (if (empty? bs) bc
+                                 (let [len (min (count bs) 65535)]
+                                   (recur (subvec bs len) (-> bc (into (if (< len 0x80) [len] (into [0x80] (le16 len)))) (into (subvec bs 0 len)))))))]
+                    (recur (inc i) "" bc implicit)))))
+            (let [at (count bc)
+                  pos (insert! [(:arg pc) (:trait pc)] (:span pc))
+                  align (case (:align pc) Left 0 Right 1 Center 2 3)
+                  flags (bit-or (or (:fill pc) 32)
+                                (bit-shift-left (if (= 'Plus (:sign pc)) 1 0) 21)
+                                (bit-shift-left (if (= 'Minus (:sign pc)) 1 0) 22)
+                                (bit-shift-left (if (:alternate pc) 1 0) 23)
+                                (bit-shift-left (if (:zero-pad pc) 1 0) 24)
+                                (bit-shift-left (if (= 'Lower (:debug-hex pc)) 1 0) 25)
+                                (bit-shift-left (if (= 'Upper (:debug-hex pc)) 1 0) 26)
+                                (bit-shift-left (if (:width pc) 1 0) 27)
+                                (bit-shift-left (if (:precision pc) 1 0) 28)
+                                (bit-shift-left align 29))
+                  count-of (fn [c] (if (:n c) [false (:n c)] [true (insert! [(:arg c) :usize] (:span c))]))
+                  [b0 extra]
+                  (if (= flags 0x60000020)
+                    [0xC0 []]
+                    (let [[b0 ex] [(bit-or 0xC0 1) (le32 flags)]
+                          [b0 ex] (if-let [wd (:width pc)]
+                                    (let [[ind v] (count-of wd)] (if (or ind (not= v 0)) [(bit-or b0 2 (if ind 16 0)) (into ex (le16 v))] [b0 ex]))
+                                    [b0 ex])
+                          [b0 ex] (if-let [pr (:precision pc)]
+                                    (let [[ind v] (count-of pr)] (if (or ind (not= v 0)) [(bit-or b0 4 (if ind 32 0)) (into ex (le16 v))] [b0 ex]))
+                                    [b0 ex])]
+                      [b0 ex]))
+                  [b0 extra] (if (not= implicit pos) [(bit-or b0 8) (into extra (le16 pos))] [b0 extra])]
+              (recur (inc i) incomplete (-> bc (conj b0) (into extra)) (inc pos)))))
+        ;; done: the bytecode and the arguments
+        (let [bc (conj bc 0)
+              template (e {:kind :lit :lit {:lit-kind 'ByteStr :bytes bc} :span sp})
+              args-path (fn [] (e {:kind :path :path {:segs [{:ident "args"}]} :span sp}))
+              call-new (fn [args-e] (e {:kind :call :span sp :func (e {:kind :path :path (lang-path* ["format_arguments" "new"]) :span sp})
+                                        :args [template (e {:kind :addr-of :expr args-e :span sp})]}))
+              unsafe-block (fn [x] (e {:kind :block :span sp :block (node {:node :block :stmts [] :expr x :span sp :rules :unsafe-generated})}))]
+          (if (empty? args)
+            (unsafe-block (call-new (e {:kind :array :exprs [] :span sp})))
+            (let [lowered (mapv #(lower-expr (:expr %)) args)
+                  tup (e {:kind :tup :span sp :exprs (mapv (fn [x] (e {:kind :addr-of :expr x :span (:span x)})) lowered)})
+                  arr (e {:kind :array :span sp
+                          :exprs (vec (for [[[ai ty] psp] @argmap]
+                                        (if (< -1 ai (count args))
+                                          (e {:kind :call :span sp
+                                              :func (e {:kind :path :path (lang-path* ["format_argument" (if (= ty :usize) "from_usize" (new-fns ty))]) :span sp})
+                                              :args [(e {:kind :field :expr (args-path) :ident (str ai) :span sp})]})
+                                          (e {:kind :err :span sp}))))})
+                  st (fn [x] (node {:node :stmt :kind :let :super true :pat (bind-pat "args" false sp) :init x :span sp}))]
+              (e {:kind :block :span sp
+                  :block (node {:node :block :stmts [(st tup) (st arr)] :expr (unsafe-block (call-new (args-path))) :span sp})}))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Blocks and statements (block.rs)
+
+(declare lower-item)
+
+(defn- lower-stmt [s]
+  (let [k (fv s :kind) sp (span-of s)]
+    (case (head k)
+      Let (let [l (second k) init (fv l :kind)]
+            [(node {:node :stmt :kind :let :span sp :super (some? (some-val (fv l :super_)))
+                    :pat (lower-pat (fv l :pat)) :ty (some-> (some-val (fv l :ty)) lower-ty)
+                    :init (case (head init) (Init InitElse) (lower-expr (second init)) nil)
+                    :els (when (= 'InitElse (head init)) (lower-block (nth init 2)))
+                    :attrs (lower-attrs (fv l :attrs))})])
+      Expr [(node {:node :stmt :kind :expr :expr (lower-expr (second k)) :span sp})]
+      Semi [(node {:node :stmt :kind :semi :expr (lower-expr (second k)) :span sp})]
+      Item (mapv (fn [it] (node {:node :stmt :kind :item :item it :span sp})) (lower-item (second k)))
+      Empty []
+      [(node {:node :stmt :kind :err :span sp})])))
+
+(defn lower-block [b]
+  (let [stmts (vec (mapcat lower-stmt (fv b :stmts)))
+        ;; a trailing expression statement is the block's expression
+        [stmts expr] (if (and (seq stmts) (= :expr (:kind (peek stmts))))
+                       [(pop stmts) (:expr (peek stmts))]
+                       [stmts nil])]
+    (node {:node :block :stmts stmts :expr expr :span (span-of b)
+           :rules (when (let [r (fv b :rules)] (and (seq? r) (= 'Unsafe (first r)))) :unsafe)})))
+
+;; ---------------------------------------------------------------------------------------------
+;; Items (item.rs)
+
+(defn- lower-generics [g]
+  {:params (vec (for [p (fv g :params)]
+                  (let [k (fv p :kind)]
+                    {:name (id-name (fv p :ident))
+                     :kind (cond (= 'Lifetime k) :lifetime (= 'Type (head k)) :type (= 'Const (head k)) :const :else :type)
+                     :default (cond (= 'Type (head k)) (some-> (some-val (fv k :default)) lower-ty)
+                                    (= 'Const (head k)) (some-> (some-val (fv k :default)) (fv :value) lower-expr))
+                     :ty (when (= 'Const (head k)) (lower-ty (fv k :ty)))
+                     :bounds (mapv lower-bound (fv p :bounds))})))
+   :where (vec (for [pr (fv (fv g :where_clause) :predicates)]
+                 (let [k (fv pr :kind)]
+                   (case (head k)
+                     BoundPredicate (let [b (second k)] {:ty (lower-ty (fv b :bounded_ty)) :bounds (mapv lower-bound (fv b :bounds))
+                                                         :bound-params (vec (fv b :bound_generic_params))})
+                     RegionPredicate (let [b (second k)] {:lifetime (second (fv b :lifetime)) :bounds (mapv lower-bound (fv b :bounds))})
+                     {:other true}))))})
+
+(defn- implicit-self [params]
+  ;; the first parameter `self`, `mut self`, `&self`, `&mut self` with an ImplicitSelf type
+  (when-let [p (first params)]
+    (let [ty (fv p :ty) k (fv ty :kind)]
+      (cond (= 'ImplicitSelf k) (if (= 'Mut (nth (second (fv (fv p :pat) :kind)) 2 nil)) :mut :imm)
+            (and (= 'Ref (head k)) (= 'ImplicitSelf (fv (fv (nth k 2) :ty) :kind))) (if (= 'Mut (fv (nth k 2) :mutbl)) :ref-mut :ref-imm)
+            :else nil))))
+
+(defn- lower-fn [f]
+  (let [sig (fv f :sig) d (fv sig :decl) h (fv sig :header)
+        params (binding [*sig* true] (lower-fn-decl-params d))]
+    {:ident (id-name (fv f :ident))
+     :generics (lower-generics (fv f :generics))
+     :header {:constness (if (= 'No (fv h :constness)) nil :const)
+              :safety (let [s (fv h :safety)] (when (and (seq? s) (= 'Unsafe (first s))) :unsafe))
+              :abi (let [x (fv h :ext)]
+                     (cond (= 'Implicit (head x)) "C"
+                           (= 'Explicit (head x)) (let [l (second x)] (fv l :symbol_unescaped))
+                           (= 'Implicit x) "C"
+                           :else nil))}
+     :self (implicit-self (fv d :inputs))
+     :params params
+     :output (let [o (fv d :output)] (when (= 'Ty (head o)) (binding [*sig* true] (lower-ty (second o)))))
+     :body (some-> (some-val (fv f :body)) lower-block)}))
+
+(defn- use-items [tree prefix sp attrs vis]
+  ;; one item per leaf of a use tree (lower_use_tree), and a ListStem for a nested tree
+  (let [k (fv tree :kind)
+        path (into prefix (map lower-seg (fv (fv tree :prefix) :segments)))]
+    (case (head k)
+      Simple (let [rename (some-val (second k))
+                   path (if (= "self" (:ident (peek path))) (pop path) path)]
+               [{:kind :use :use :single :path path :ident (or (id-name rename) (:ident (peek path))) :span sp :attrs attrs :vis vis}])
+      Glob [{:kind :use :use :glob :path path :span sp :attrs attrs :vis vis}]
+      Nested (into [{:kind :use :use :list-stem :path [] :span sp :attrs attrs :vis vis}]
+                   (mapcat (fn [t] (use-items (if (= 'tuple (head t)) (second t) t) path sp [] vis)) (fv k :items)))
+      [])))
+
+(defn- vis-of [it] (let [k (fv (fv it :vis) :kind)] (cond (= 'Public k) :pub (= 'Restricted (head k)) :restricted :else nil)))
+
+(defn- lower-variant-data [d]
+  (case (head d)
+    Struct {:kind :struct :fields (mapv (fn [f] {:ident (id-name (some-val (fv f :ident))) :ty (lower-ty (fv f :ty)) :span (span-of f)
+                                                  :attrs (lower-attrs (fv f :attrs))}) (fv d :fields))}
+    Tuple {:kind :tuple :fields (mapv (fn [f] {:ty (lower-ty (fv f :ty)) :span (span-of f) :attrs (lower-attrs (fv f :attrs))}) (second d))}
+    {:kind :unit}))
+
+(defn- lower-assoc-item [it]
+  (with-owner
+    (let [k (fv it :kind) sp (span-of it) attrs (lower-attrs (fv it :attrs))
+          base {:node :assoc :span sp :attrs attrs :hir-id (next-id)}]
+      (case (head k)
+        Fn (merge base {:kind :fn} (lower-fn (second k)))
+        Const (let [c (second k)] (merge base {:kind :const :ident (id-name (fv c :ident)) :ty (lower-ty (fv c :ty))
+                                               :generics (lower-generics (fv c :generics))
+                                               :expr (some-> (some-val (fv c :body)) lower-expr)}))
+        Type (let [t (second k)] (merge base {:kind :type :ident (id-name (fv t :ident)) :generics (lower-generics (fv t :generics))
+                                             :bounds (mapv lower-bound (fv t :bounds)) :ty (some-> (some-val (fv t :ty)) lower-ty)}))
+        (merge base {:kind :err})))))
+
+(defn lower-item [it]
+  (let [k (fv it :kind) sp (span-of it) attrs (lower-attrs (fv it :attrs)) vis (vis-of it)]
+    (if (= 'Use (head k))
+      (mapv (fn [u] (with-owner (node (assoc u :node :item)))) (use-items (second k) [] sp attrs vis))
+      (with-owner
+        (let [base {:node :item :span sp :attrs attrs :vis vis :hir-id (next-id)}]
+          [(case (head k)
+             ExternCrate (merge base {:kind :extern-crate :orig (some-val (second k)) :ident (id-name (nth k 2))})
+             Fn (merge base {:kind :fn} (lower-fn (second k)))
+             Struct (let [[_ id g d] k] (merge base {:kind :struct :ident (id-name id) :generics (lower-generics g) :data (lower-variant-data d)}))
+             Union (let [[_ id g d] k] (merge base {:kind :union :ident (id-name id) :generics (lower-generics g) :data (lower-variant-data d)}))
+             Enum (let [[_ id g d] k]
+                    (merge base {:kind :enum :ident (id-name id) :generics (lower-generics g)
+                                 :variants (mapv (fn [v] {:ident (id-name (fv v :ident)) :data (lower-variant-data (fv v :data)) :span (span-of v)
+                                                          :attrs (lower-attrs (fv v :attrs))
+                                                          :disr (some-> (some-val (fv v :disr_expr)) (fv :value) lower-expr)})
+                                             (fv d :variants))}))
+             Impl (let [i (second k) ot (some-val (fv i :of_trait))]
+                    (merge base {:kind :impl :generics (lower-generics (fv i :generics))
+                                 :of-trait (when ot {:path (lower-path (fv (fv ot :trait_ref) :path))
+                                                     :safety (let [s (fv ot :safety)] (when (and (seq? s) (= 'Unsafe (first s))) :unsafe))
+                                                     :negative (not= "positive" (fv ot :polarity))})
+                                 :self-ty (lower-ty (fv i :self_ty))
+                                 :items (mapv lower-assoc-item (fv i :items))}))
+             Trait (let [t (second k)]
+                     (merge base {:kind :trait :ident (id-name (fv t :ident)) :generics (lower-generics (fv t :generics))
+                                  :safety (let [s (fv t :safety)] (when (and (seq? s) (= 'Unsafe (first s))) :unsafe))
+                                  :auto (= 'Yes (fv t :is_auto))
+                                  :bounds (mapv lower-bound (fv t :bounds)) :items (mapv lower-assoc-item (fv t :items))}))
+             Const (let [c (second k)] (merge base {:kind :const :ident (id-name (fv c :ident)) :ty (lower-ty (fv c :ty))
+                                                    :generics (lower-generics (fv c :generics))
+                                                    :expr (some-> (some-val (fv c :body)) lower-expr)}))
+             Static (let [s (second k)] (merge base {:kind :static :ident (id-name (fv s :ident)) :ty (lower-ty (fv s :ty))
+                                                     :mutbl (= 'Mut (fv s :mutability)) :expr (some-> (some-val (fv s :expr)) lower-expr)}))
+             TyAlias (let [t (second k)] (merge base {:kind :ty-alias :ident (id-name (fv t :ident)) :generics (lower-generics (fv t :generics))
+                                                      :ty (some-> (some-val (fv t :ty)) lower-ty)}))
+             Mod (let [[_ _ id mk] k]
+                   (merge base {:kind :mod :ident (id-name id)
+                                :items (when (= 'Loaded (head mk)) (vec (mapcat lower-item (second mk))))}))
+             MacroDef (merge base {:kind :macro :ident (id-name (second k)) :def (nth k 2)})
+             ForeignMod (merge base {:kind :foreign-mod :unsupported true})
+             (merge base {:kind :err :ast (head k)}))])))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The crate
+
+(def ^:private std-lt-types
+  "std's types with a lifetime parameter that the corpus names in signatures (their elided lifetimes print '_)"
+  #{"Formatter" "PanicInfo" "Arguments" "Location" "Chars" "CharIndices" "Bytes" "Split" "SplitWhitespace" "Lines"
+    "Iter" "IterMut" "Drain" "Ref" "RefMut" "Peekable" "Cow" "StdoutLock" "StderrLock" "MutexGuard" "Entry"
+    "PhantomData" "Context"})
+
+(defn- crate-lt-types [items]
+  ;; the crate's own structs, enums and unions with a lifetime parameter
+  (set (for [it items
+             :let [k (fv it :kind)]
+             :when (#{'Struct 'Enum 'Union} (head k))
+             :when (some #(= 'Lifetime (fv % :kind)) (fv (nth k 2) :params))]
+         (id-name (second k)))))
+
+(defn lower-crate [crate res]
+  (binding [*owners* (atom -1)
+            *res* res
+            *lt-types* (into (disj std-lt-types "PhantomData" "Iter" "Ref") (crate-lt-types (fv crate :items)))]
+    (let [attrs (lower-attrs (fv crate :attrs))
+          items (vec (mapcat lower-item (fv crate :items)))]
+      {:attrs attrs :items items :owners (inc @*owners*)})))

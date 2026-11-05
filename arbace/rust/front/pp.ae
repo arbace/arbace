@@ -1,0 +1,305 @@
+;; Ported from rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's
+;; rust-src-1.99.1-r0, pinned by tools/rsdump/apks.sha256): compiler/rustc_ast_pretty/src/pp.rs (Oppen's pretty
+;; printer as rustc keeps it: the ring buffer, scan and print stacks, margin 78, min space 60) and pp/ring.rs; and of
+;; compiler/rustc_ast/src/util/comments.rs, gather_comments; rustc is dual-licensed MIT OR Apache-2.0 (LICENSE.md,
+;; "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.pp
+  "RF6: rustc's pretty printer engine (rustc_ast_pretty's pp.rs), shared by the HIR printer
+  (arbace.rust.front.hir-pretty) and later rustc_ast_pretty's. A printer is a mutable map of volatiles:
+
+    (printer)                   a new printer
+    (word p s) (space p) (zerobreak p) (hardbreak p) (nbsp p) (word-space p s) (word-nbsp p s)
+    (ibox p n) (cbox p n) (visual-align p) (end p) (break-offset p n off) (offset p n)
+    (trailing-comma p) (trailing-comma-or-space p)
+    (beginning-of-line? p) (hardbreak-if-not-bol p) (space-if-not-bol p)
+    (eof p)                     the text
+    (gather-comments TEXT)      the source's comments as rustc_ast's gather_comments finds them"
+  (:require [arbace.string :as str])
+  (:import [java.util ArrayList ArrayDeque]))
+
+(def ^:const size-infinity 0xffff)
+(def ^:const margin 78)
+(def ^:const min-space 60)
+
+;; tokens: [:string s] [:break offset blank pre] [:begin indent-style breaks] [:end]
+;; indent-style: [:block off] or [:visual]; breaks :consistent | :inconsistent
+
+(defn printer []
+  {:out (StringBuilder.)
+   :space (volatile! margin)
+   :buf (ArrayList.)           ; entries [token size] (vectors in volatiles for mutation)
+   :first (volatile! 0)        ; ring's offset: index of the first entry
+   :left (volatile! 0)
+   :right (volatile! 0)
+   :scan (ArrayDeque.)         ; indices (absolute)
+   :print (ArrayList.)         ; frames: :fits or [:broken indent breaks]
+   :indent (volatile! 0)
+   :pending (volatile! 0)
+   :last (volatile! nil)})
+
+(defn- buf-empty? [p] (.isEmpty ^ArrayList (:buf p)))
+(defn- buf-push [p e]
+  (let [^ArrayList b (:buf p)]
+    (.add b (volatile! e))
+    (+ @(:first p) (dec (.size b)))))
+(defn- buf-get [p i] (.get ^ArrayList (:buf p) (int (- i @(:first p)))))
+(defn- buf-first [p] (.get ^ArrayList (:buf p) 0))
+(defn- buf-last [p] (let [^ArrayList b (:buf p)] (when-not (.isEmpty b) (.get b (dec (.size b))))))
+(defn- buf-pop-first [p]
+  (let [^ArrayList b (:buf p) e (.remove b 0)]
+    (vswap! (:first p) inc)
+    @e))
+(defn- buf-clear [p]
+  (let [^ArrayList b (:buf p)]
+    (vswap! (:first p) + (.size b))
+    (.clear b)))
+
+(defn- print-string [p ^String s]
+  (let [^StringBuilder out (:out p)]
+    (dotimes [_ @(:pending p)] (.append out \space))
+    (vreset! (:pending p) 0)
+    (.append out s)
+    (vswap! (:space p) - (count s))))
+
+(defn- get-top [p]
+  (let [^ArrayList ps (:print p)]
+    (if (.isEmpty ps) [:broken 0 :inconsistent] (.get ps (dec (.size ps))))))
+
+(defn- print-begin [p [_ istyle breaks] size]
+  (let [^ArrayList ps (:print p)]
+    (if (> size @(:space p))
+      (do (.add ps [:broken @(:indent p) breaks])
+          (vreset! (:indent p) (if (= :visual (first istyle)) (- margin @(:space p)) (+ @(:indent p) (second istyle)))))
+      (.add ps :fits))))
+
+(defn- print-end [p]
+  (let [^ArrayList ps (:print p) f (.remove ps (int (dec (.size ps))))]
+    (when (vector? f) (vreset! (:indent p) (second f)))))
+
+(defn- print-break [p [_ off blank pre] size]
+  (let [top (get-top p)
+        fits (cond (= top :fits) true
+                   (= :consistent (nth top 2)) false
+                   :else (<= size @(:space p)))]
+    (if fits
+      (do (vswap! (:pending p) + blank) (vswap! (:space p) - blank))
+      (let [^StringBuilder out (:out p)]
+        (when pre (.append out (char pre)))
+        (.append out \newline)
+        (let [ind (+ @(:indent p) off)]
+          (vreset! (:pending p) ind)
+          (vreset! (:space p) (max (- margin ind) min-space)))))))
+
+(defn- advance-left [p]
+  (loop []
+    (let [[tok size] @(buf-first p)]
+      (when (>= size 0)
+        (buf-pop-first p)
+        (case (first tok)
+          :string (do (vswap! (:left p) + (count (second tok))) (print-string p (second tok)))
+          :break (do (vswap! (:left p) + (nth tok 2)) (print-break p tok size))
+          :begin (print-begin p tok size)
+          :end (print-end p))
+        (vreset! (:last p) tok)
+        (when-not (buf-empty? p) (recur))))))
+
+(defn- check-stack [p depth]
+  (let [^ArrayDeque ss (:scan p)]
+    (loop [depth depth]
+      (when-let [idx (.peekLast ss)]
+        (let [e (buf-get p idx) [tok size] @e]
+          (case (first tok)
+            :begin (when (pos? depth)
+                     (.pollLast ss) (vreset! e [tok (+ size @(:right p))]) (recur (dec depth)))
+            :end (do (.pollLast ss) (vreset! e [tok 1]) (recur (inc depth)))
+            (do (.pollLast ss) (vreset! e [tok (+ size @(:right p))])
+                (when (pos? depth) (recur depth)))))))))
+
+(defn- check-stream [p]
+  (let [^ArrayDeque ss (:scan p)]
+    (loop []
+      (when (> (- @(:right p) @(:left p)) @(:space p))
+        (when (= (.peekFirst ss) @(:first p))
+          (.pollFirst ss)
+          (let [e (buf-first p)] (vreset! e [(first @e) size-infinity])))
+        (advance-left p)
+        (when-not (buf-empty? p) (recur))))))
+
+(defn- scan-begin [p tok]
+  (let [^ArrayDeque ss (:scan p)]
+    (when (.isEmpty ss) (vreset! (:left p) 1) (vreset! (:right p) 1) (buf-clear p))
+    (.addLast ss (buf-push p [tok (- @(:right p))]))))
+
+(defn end [p]
+  (let [^ArrayDeque ss (:scan p)]
+    (if (.isEmpty ss)
+      (print-end p)
+      (.addLast ss (buf-push p [[:end] -1])))))
+
+(defn- scan-break [p tok]
+  (let [^ArrayDeque ss (:scan p)]
+    (if (.isEmpty ss)
+      (do (vreset! (:left p) 1) (vreset! (:right p) 1) (buf-clear p))
+      (check-stack p 0))
+    (.addLast ss (buf-push p [tok (- @(:right p))]))
+    (vswap! (:right p) + (nth tok 2))))
+
+(defn word [p ^String s]
+  (let [^ArrayDeque ss (:scan p)]
+    (if (.isEmpty ss)
+      (print-string p s)
+      (do (buf-push p [[:string s] (count s)])
+          (vswap! (:right p) + (count s))
+          (check-stream p)))))
+
+(defn offset [p n]
+  (when-let [e (buf-last p)]
+    (let [[tok size] @e]
+      (when (= :break (first tok))
+        (vreset! e [(update tok 1 + n) size])))))
+
+(defn rbox [p indent breaks] (scan-begin p [:begin [:block indent] breaks]))
+(defn ibox [p indent] (rbox p indent :inconsistent))
+(defn cbox [p indent] (rbox p indent :consistent))
+(defn visual-align [p] (scan-begin p [:begin [:visual] :consistent]))
+(defn break-offset [p n off] (scan-break p [:break off n nil]))
+(defn space [p] (break-offset p 1 0))
+(defn zerobreak [p] (break-offset p 0 0))
+(defn hardbreak [p] (break-offset p size-infinity 0))
+(defn nbsp [p] (word p " "))
+(defn word-space [p s] (word p s) (space p))
+(defn word-nbsp [p s] (word p s) (nbsp p))
+(defn popen [p] (word p "("))
+(defn pclose [p] (word p ")"))
+(defn trailing-comma [p] (scan-break p [:break 0 0 \,]))
+(defn trailing-comma-or-space [p] (scan-break p [:break 0 1 \,]))
+
+(defn last-token [p]
+  (if-let [e (buf-last p)] (first @e) @(:last p)))
+(defn replace-last-token-still-buffered [p tok]
+  (let [e (buf-last p)] (vreset! e [tok (second @e)])))
+(defn hardbreak-tok? [tok] (= tok [:break 0 size-infinity nil]))
+(defn beginning-of-line? [p]
+  (let [t (last-token p)] (or (nil? t) (hardbreak-tok? t))))
+(defn hardbreak-if-not-bol [p] (when-not (beginning-of-line? p) (hardbreak p)))
+(defn space-if-not-bol [p] (when-not (beginning-of-line? p) (space p)))
+
+(defn eof [p]
+  (let [^ArrayDeque ss (:scan p)]
+    (when-not (.isEmpty ss) (check-stack p 0) (advance-left p))
+    (str (:out p))))
+
+;; ---------------------------------------------------------------------------------------------
+;; rustc_ast/src/util/comments.rs: gather_comments. A comment: {:style :isolated|:trailing|:mixed|:blank-line
+;; :lines [..] :pos byte-offset}. Over the source's text with rustc_lexer's comment and whitespace tokens; the
+;; text's other tokens are only skipped (strings, chars and raw strings so a // inside them is no comment).
+
+(defn- skip-string [^String s i]
+  ;; at a '"': past the closing quote
+  (loop [j (inc i)]
+    (cond (>= j (count s)) j
+          (= \\ (.charAt s j)) (recur (+ j 2))
+          (= \" (.charAt s j)) (inc j)
+          :else (recur (inc j)))))
+
+(defn- skip-raw-string [^String s i]
+  ;; at r or br: r#*"...."#*
+  (let [j (if (= \b (.charAt s i)) (+ i 2) (inc i))
+        hashes (loop [k j] (if (and (< k (count s)) (= \# (.charAt s k))) (recur (inc k)) (- k j)))
+        open (+ j hashes)
+        close (str "\"" (apply str (repeat hashes "#")))]
+    (let [e (.indexOf s ^String close (int (inc open)))] (if (neg? e) (count s) (+ e (count close))))))
+
+(defn- block-comment-end [^String s i]
+  (loop [j (+ i 2) depth 1]
+    (cond (>= j (count s)) j
+          (and (= \/ (.charAt s j)) (< (inc j) (count s)) (= \* (.charAt s (inc j)))) (recur (+ j 2) (inc depth))
+          (and (= \* (.charAt s j)) (< (inc j) (count s)) (= \/ (.charAt s (inc j))))
+          (if (= depth 1) (+ j 2) (recur (+ j 2) (dec depth)))
+          :else (recur (inc j) depth))))
+
+(defn- lex-trivia
+  "The text's tokens as [kind start end]: :ws, :line-comment, :block-comment, :doc (doc comments, not comments for
+  the printer), :other"
+  [^String s]
+  (let [n (count s)]
+    (loop [i 0 acc (transient [])]
+      (if (>= i n)
+        (persistent! acc)
+        (let [c (.charAt s i)
+              nx (when (< (inc i) n) (.charAt s (inc i)))]
+          (cond
+            (Character/isWhitespace c)
+            (let [j (loop [j i] (if (and (< j n) (Character/isWhitespace (.charAt s j))) (recur (inc j)) j))]
+              (recur j (conj! acc [:ws i j])))
+            (and (= c \/) (= nx \/))
+            (let [e (let [k (.indexOf s "\n" (int i))] (if (neg? k) n k))
+                  t (subs s i e)
+                  doc (or (and (str/starts-with? t "///") (not (str/starts-with? t "////"))) (str/starts-with? t "//!"))]
+              (recur e (conj! acc [(if doc :doc :line-comment) i e])))
+            (and (= c \/) (= nx \*))
+            (let [e (block-comment-end s i)
+                  t (subs s i e)
+                  doc (or (and (str/starts-with? t "/**") (not (str/starts-with? t "/***")) (not= t "/**/")) (str/starts-with? t "/*!"))]
+              (recur e (conj! acc [(if doc :doc :block-comment) i e])))
+            (= c \") (let [e (skip-string s i)] (recur e (conj! acc [:other i e])))
+            (and (or (= c \r) (and (= c \b) (= nx \r)))
+                 (let [j (if (= c \b) (+ i 2) (inc i))]
+                   (and (< j n) (or (= \" (.charAt s j)) (and (= \# (.charAt s j))
+                                                              (let [k (loop [k j] (if (and (< k n) (= \# (.charAt s k))) (recur (inc k)) k))]
+                                                                (and (< k n) (= \" (.charAt s k)))))))))
+            (let [e (skip-raw-string s i)] (recur e (conj! acc [:other i e])))
+            (and (= c \b) (= nx \")) (let [e (skip-string s (inc i))] (recur e (conj! acc [:other i e])))
+            (= c \')
+            ;; a char literal or a lifetime
+            (let [e (cond (and nx (= nx \\)) (let [k (.indexOf s "'" (int (+ i 2)))] (if (neg? k) n (inc k)))
+                          (and (< (+ i 2) n) (= \' (.charAt s (+ i 2)))) (+ i 3)
+                          :else (inc i))]
+              (recur e (conj! acc [:other i e])))
+            :else
+            (let [j (loop [j (inc i)]
+                      (if (and (< j n)
+                               (let [d (.charAt s j)]
+                                 (and (not (Character/isWhitespace d)) (not (#{\/ \" \'} d))
+                                      (Character/isLetterOrDigit (.charAt s (dec j))) (or (Character/isLetterOrDigit d) (= d \_)))))
+                        (recur (inc j)) j))]
+              (recur j (conj! acc [:other i j])))))))))
+
+(defn- all-whitespace-before? [^String s line-start pos]
+  (every? #(Character/isWhitespace (char %)) (subs s line-start pos)))
+
+(defn- split-block-comment-into-lines [^String text col]
+  ;; trim_whitespace_prefix of each line but the first: the first COL characters dropped when all whitespace
+  (let [ls (str/split-lines text)]
+    (vec (cons (first ls)
+               (for [^String l (rest ls)]
+                 (let [k (min col (count l))]
+                   (if (every? #(Character/isWhitespace (char %)) (subs l 0 k)) (subs l k) l)))))))
+
+(defn gather-comments [^String src]
+  (let [toks (lex-trivia src)
+        line-start (fn [pos] (let [k (.lastIndexOf src "\n" (int (dec pos)))] (inc k)))]
+    (loop [ts toks code-to-the-left false acc []]
+      (if-let [[k a b] (first ts)]
+        (case k
+          :ws (let [t (subs src a b)
+                    i0 (.indexOf t "\n")]
+                (if (neg? i0)
+                  (recur (rest ts) code-to-the-left acc)
+                  (recur (rest ts) false
+                         (loop [idx i0 acc acc]
+                           (let [nx (.indexOf t "\n" (int (inc idx)))]
+                             (if (neg? nx) acc (recur nx (conj acc {:style :blank-line :lines [] :pos (+ a nx)}))))))))
+          :block-comment (let [t (subs src a b)
+                               c (when (< b (count src)) (.charAt src b))
+                               right (not (or (= c \return) (= c \newline)))
+                               style (cond right :mixed code-to-the-left :trailing :else :isolated)
+                               col (- a (line-start a))]
+                           (recur (rest ts) code-to-the-left
+                                  (conj acc {:style style :lines (split-block-comment-into-lines t col) :pos a})))
+          :line-comment (recur (rest ts) code-to-the-left
+                               (conj acc {:style (if code-to-the-left :trailing :isolated) :lines [(subs src a b)] :pos a}))
+          :doc (recur (rest ts) code-to-the-left acc)
+          (recur (rest ts) true acc))
+        acc))))

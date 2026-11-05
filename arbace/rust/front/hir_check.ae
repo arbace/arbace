@@ -1,0 +1,81 @@
+(ns arbace.rust.front.hir-check
+  "RF6's judge (bin/rust-front hir-check): each program's HIR by arbace.rust.front.lower over the helper's expanded
+  crate (DIR/NAME.exp.edn) and resolutions (DIR/NAME.res.edn), printed by arbace.rust.front.hir-pretty, against
+  rustc's -Zunpretty=hir text (DIR/NAME.hir.txt, the helper's front oracle): equal byte for byte, else equal with
+  whitespace collapsed (the lowering right, the layout not), else differing; per program the first differing line
+  (HIR_VERBOSE=1), our text in HIR_DUMP=DIR; a negative control (one program's text against another's) must differ.
+  --ours: the native reader, arbace.rust.front.expand and arbace.rust.front.resolve in place of the helper's crate
+  and resolutions (the pipeline)."
+  (:require [arbace.rust.front.lower :as lower] [arbace.rust.front.hir-pretty :as hp] [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- read-all [file]
+  (let [rdr (java.io.PushbackReader. (java.io.StringReader. (slurp file)))]
+    (loop [acc []] (let [x (read rdr false ::eof)] (if (= x ::eof) acc (recur (conj acc x)))))))
+
+(def ^:private source-dirs ["test/rust/synthetic" "test/rust/sample" "test/rust/eval" "test/rust/front"])
+(defn- source-file [n] (some #(let [f (File. (str % "/" n ".rs"))] (when (.exists f) (str f))) source-dirs))
+
+(defn- squash [s] (str/replace (str/trim s) #"\s+" " "))
+
+(defn- first-diff [a b]
+  (let [la (str/split-lines a) lb (str/split-lines b)]
+    (first (for [i (range (max (count la) (count lb)))
+                 :let [x (nth la i nil) y (nth lb i nil)]
+                 :when (not= x y)]
+             [(inc i) x y]))))
+
+(defn- class-of [ours]
+  (cond (str/includes? ours "/*FORMAT_ARGS*/") "format_args! (format.rs not ported)"
+        (str/includes? ours "/*MACRO") "macro_rules! items (print_mac_def)"
+        (str/includes? ours "/*impl Trait*/") "impl Trait"
+        (str/includes? ours "/*ERROR*/") "a construct not lowered"
+        (str/includes? ours "/*") "an item kind not printed"
+        :else nil))
+
+(defn -main [dir & args]
+  (let [ours? (= "--ours" (first args))
+        names (if ours? (rest args) args)
+        verbose (System/getenv "HIR_VERBOSE")
+        dump (System/getenv "HIR_DUMP")
+        std-file (str dir "/std-names.edn")
+        pipeline (when ours?
+                   (require 'arbace.rust.front.expand 'arbace.rust.front.resolve)
+                   {:macros ((resolve 'arbace.rust.front.expand/load-std-macros) std-file)
+                    :names ((resolve 'arbace.rust.front.resolve/load-std-names) std-file)})
+        texts (atom {})
+        results
+        (vec (for [n names
+                   :let [oracle (File. (str dir "/" n ".hir.txt"))]
+                   :when (.exists oracle)]
+               (let [want (slurp oracle)
+                     src (slurp (source-file n))
+                     got (try
+                           (let [[crate res]
+                                 (if ours?
+                                   (let [c ((resolve 'arbace.rust.front.expand/expand-file) (source-file n) (if (= n "edition2015") 2015 2024) (:macros pipeline))
+                                         r ((resolve 'arbace.rust.front.resolve/resolve-crate) c (:names pipeline) {:source src})]
+                                     [c r])
+                                   [(first (read-all (str dir "/" n ".exp.edn")))
+                                    (let [f (File. (str dir "/" n ".res.edn"))] (when (.exists f) (read-all f)))])
+                                 res-map (into {} (for [[_ s rs] res] [s rs]))]
+                             (hp/print-crate (lower/lower-crate crate res-map) src))
+                           (catch Throwable e (str "ERROR " e)))
+                     status (cond (= want got) :equal (= (squash want) (squash got)) :layout :else :differ)]
+                 (swap! texts assoc n got)
+                 (when dump (spit (str dump "/" n ".hir.txt") got))
+                 {:name n :status status :class (when (not= status :equal) (or (class-of got) (when (str/starts-with? got "ERROR") (subs got 0 (min 120 (count got)))) "other"))
+                  :diff (when (not= status :equal) (first-diff want got))})))
+        cnt (fn [s] (count (filter #(= s (:status %)) results)))]
+    (doseq [r results]
+      (println (format "%-28s %s%s" (:name r) (name (:status r)) (if (:class r) (str "  (" (:class r) ")") "")))
+      (when (and verbose (:diff r))
+        (let [[l x y] (:diff r)] (println "    line" l) (println "    want:" (pr-str x)) (println "    got: " (pr-str y)))))
+    (println "classes of the programs not equal:")
+    (doseq [[c k] (sort-by (comp - val) (frequencies (keep :class results)))] (println (format "  %4d  %s" k c)))
+    (println (format "hir-check: %d of %d programs' HIR text equal to -Zunpretty=hir byte for byte, %d more equal but for whitespace, %d differ%s"
+                     (cnt :equal) (count results) (cnt :layout) (cnt :differ) (if ours? " (input: the pipeline)" " (input: the helper's expanded crates and resolutions)")))
+    (when (>= (count results) 2)
+      (let [[a b] (map :name results)]
+        (println "control (" a "against" b "):" (if (= (get @texts a) (slurp (str dir "/" b ".hir.txt"))) "PASSED (a bug)" "differs, as it must"))))
+    (System/exit 0)))
