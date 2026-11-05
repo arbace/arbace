@@ -3800,7 +3800,7 @@ The fragments use them (`test/gate/crops/`): OCaml's `ocaml-roundtrip` (the `:su
 `cpp-roundtrip-dg` (gxx-dg-every-10, its own step: its universe is that results file) and `cpp-lower`'s libstdcxx part (rotated, `:clean-only`);
 Rust's `rust-read-essential` on `test --samples`; the three `:crop-pins` commands exist. Planned in scratch merges (`.tmp/gt9v/scratch.sh`, the
 procedure above with the `gt9v-*` branches): `gate.crops check` 0 problems for ocaml, cpp, llvmrust, scheme; the nightly plan rotates (OCaml: testsuite
-243 + 211, compiler-sources and backend, oi-check.run 28 + 84; C++: gxx-dg 57 + 249); `crops-test` ok.
+243 + 211, compiler-sources and backend, oi-check.run 28 + 84; C++: gxx-dg 57 + 249); all eight fragments with every branch: 0 problems, plans of 47, 317 and 360 rows (355 before; the five slices), all seven chains beside the serial run; `crops-test` ok.
 
 **What the costs become** (estimates, as the table above: replaced by the first two `--nightly` runs, GTS222):
 
