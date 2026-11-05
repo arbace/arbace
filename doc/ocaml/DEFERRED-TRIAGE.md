@@ -555,16 +555,22 @@ find_first_mono,overflow_detection,test_strongly_connected_components}`, `misc/s
 | level | fix 6 | fix 7 | fix 8 |
 |---|---|---|---|
 | eval (oi) | run 5 of 5, suite 2 of 2 | run 9 of 9, suite 2 of 2 | 6 of 7 (`errors_batch` `:compiler-libs-parser`) |
+| AOT, compiled | not run (below) | not run (below) | the 4 utils/ programs pass (one shard); the rest not run |
 | AOT, light | run 5 of 5; suite `getaddrinfo` passes, `recvfrom_unix` known unix (Unix sockets, OT23) | run 8 of 9 (`mctest` `:light-speed`, as before); suite 2 of 2 | 5 of 7 (`stable_matching_test` `:light-speed`, `aot-slow.edn`; `errors_batch` the class) |
 
-The numbers (eval, from the records): the run corpus **305 to 325 pass** of 370 rows' programs (`bin/oi divergences`: 0 failing;
-`:unix-unported` 1 left, `lib-bigarray-file/mapfile`'s `map_file`, fix 11), the suite **99 to 103** (`bin/oi suite divergences`: 0
-failing). The AOT light level: the lists' 20 run programs 18 pass, the suite's 3 of 4.
+The numbers (from the records, all judgments 0 failing): eval, the run corpus **305 to 325 pass** (`:unix-unported` 1 left at eval,
+`lib-bigarray-file/mapfile`'s `map_file`, fix 11), the suite **99 to 103**; the AOT light level, the run corpus **279 to 297**, the suite
+**94 to 97**; the compiled level's records **109 to 113** (the utils/ shard).
 
-**The compiled level was not recorded for these programs today.** A shard of five of the list's socket and thread programs built in
-410 s at a **6.1 GB peak** (j2g 200 s, 3.2 GB): above the day's 4 GB cap, so the run was stopped (the runtime's new classes pull
-java.net's and ProcessBuilder's JDK classes into every shard's package: OT15 (b)/OT20 (c), OT22); a shard of the four utils/ programs
-is the day's only compiled run (below). The night's commands run the whole level.
+**The compiled level's memory.** A shard of the four utils/ programs (no unix) built at a **7.5 GB peak** (j2g 238 s, 3.6 GB; the
+build 454 s): the runtime's Fd referred to Sock, so every shard's package reached Sock and java.net's JDK classes (the essential
+subset's 20 programs built in 4.2 GB before). Fd now holds a socket as an Object with its streams and closer, so that only a program
+that makes a socket reaches Sock (ExtProc and ProcessBuilder were reached only by the spawning programs already); the shard is rebuilt
+after that change below.
+
+**The compiled level was not recorded for fixes 6-7's programs today.** A shard of five of the list's socket and thread programs built
+in 410 s at a **6.1 GB peak** (j2g 200 s, 3.2 GB): above the day's 4 GB cap, so the run was stopped (OT25). The night's commands run
+the whole level.
 
 ### Checks run (all by list, 2026-11-05)
 
@@ -590,8 +596,8 @@ utils/ and ocamlcommon programs):
     bin/oi suite check --record                     # oi, the suite corpus
     bin/oi check --aot --record                     # the light level: the runtime changed
     bin/oi suite check --aot --record
-    O2J_SHARD=8 bin/oi check --aot --level compiled --record         # OT20: shards of 8 (no shard sizing by bytes built yet, below)
-    O2J_SHARD=8 bin/oi suite check --aot --level compiled --record
+    O2J_SHARD=4 bin/oi check --aot --level compiled --record         # shards of 4 (OT25 (a): 6.1 GB for 5 unix programs); each shard's
+    O2J_SHARD=4 bin/oi suite check --aot --level compiled --record   # bytes and peaks in .tmp/o6/compiled/shards.tsv, OT22's measure
     bin/oi pins --attest
     bin/oi divergences && bin/oi suite divergences && bin/oi divergences --aot && bin/oi divergences --compiled && bin/oi pins
     bin/reap record
@@ -603,7 +609,7 @@ directory and the library units it links, counted once a program; `c2_bytes`), w
 every shard's bytes, j2g's and the build's wall seconds and peak memory are written to `.tmp/o6/compiled/shards.tsv` (`c2_measure`).
 No default cap is set: the measure of the day's shards is too small to choose one (OT22).
 
-### Proposed (OT21-OT24; none decided)
+### Proposed (OT21-OT25; none decided)
 
 - **OT21 compiler-libs' parser.** `formatting/errors_batch`, `parsetree/test` and `ast-invariants/test` need parsing/'s units.
   (a) wait for T10 (§5: the typer compiles them natively); (b) now, by the oracle as utils/ is built: `boot/menhir/parser.ml` (the
@@ -617,6 +623,10 @@ No default cap is set: the measure of the day's shards is too small to choose on
   (`lib-unix/unix-socket/recvfrom_unix`). (a) a class by design for the AOT levels (`:unix-java`: Unix sockets, datagrams,
   `getaddrinfo` beyond numeric hosts); (b) the compiled level over Go's syscall (OT15 (b)'s world: the runtime's sockets as Go
   forms): 2 days for 1 program. *Recommended: (a)*.
+- **OT25 The compiled shards of socket and process programs.** Their package holds java.net's or ProcessBuilder's JDK classes on top
+  of the runtime's (6.1 GB for five such programs). (a) shards of at most 3 for the programs that include unix, by OT20 (b)'s bytes
+  once calibrated; (b) OT15 (b)/OT20 (c): the JDK's translated classes in a package built once, shared by the shards; (c) the AOT
+  levels' sockets and processes by design (classes), the runtime without them. *Recommended: (a)* tonight, (b) with the gate step.
 - **OT24 Signals between processes at the AOT levels.** Java receives no OS signal: `kill` of another pid raises `EPERM`, a signal
   from outside is not seen. (a) by design at the AOT levels (no program of the lists needs it); (b) the compiled level over
   os/signal (as oi). *Recommended: (a)*.
