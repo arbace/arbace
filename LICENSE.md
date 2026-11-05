@@ -437,6 +437,32 @@ covers what.
   `src/jdk.security.auth/share/classes`, 1 of `src/java.logging/share/classes`) and the 2 security
   message bundles the build's `CompileProperties` generates, and 219 of pki-sources (218 of
   `src/java.base/share/classes`, 1 of `src/jdk.security.auth/share/classes`).
+- JC9b's small members, charsets, file channels and datagrams (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+  F16 (write-ahead)", "As built: F8 (write-ahead)", "As built: F7 (write-ahead)", "As built: F11 (write-ahead)";
+  recorded by the rule of B7): jdk26u's files (https://github.com/openjdk/jdk26u at `baf63fb`) transcribed with
+  the changes their headers name, `overlay/jdk/java.base/java/util/concurrent/atomic/AtomicIntegerFieldUpdater.java`,
+  `AtomicLongFieldUpdater.java`, `AtomicReferenceFieldUpdater.java` (F16) and `java/nio/channels/FileChannel.java`
+  (F7); `java/nio/DirectByteBuffer.java` and `DirectByteBufferR.java` (F7), derived from the JDK build's generated
+  `HeapByteBuffer.java` and `HeapByteBufferR.java` (`make/modules/java.base/gensrc/GensrcBuffer.gmk` over
+  `src/java.base/share/classes/java/nio/Heap-X-Buffer.java.template`); `java/nio/MappedByteBuffer.java` and
+  `sun/nio/ch/FileChannelImpl.java` (F7), which keep jdk26u's public members' documented behaviour, checks,
+  messages and some of their code, and `java/io/FileInputStream.java` and `FileOutputStream.java`, jdk26u's
+  `getChannel` and the channel's close; the variants `overlay/jdk/variants/Timer.ae`, `PropertyResourceBundle.ae`
+  (F16), `Charset.ae`, `CsStandardCharsets.ae`, `CsStringUTF16.ae`, `GB18030.ae` (F8),
+  `AbstractInterruptibleChannel.ae`, `RandomAccessFile.ae`'s close (F7) and `DatagramSocket.ae` (F11), which keep
+  the jdk26u members they replace as repr/java converts them: Copyright (c) Oracle and/or its affiliates, under
+  the GNU General Public License version 2 with the Classpath Exception (text below); the rest of those files,
+  `overlay/jdk/java.base/jdk/internal/jrt/FieldUpdaters.java`, `java/sql/DriverManager.java` (with jdk26u's
+  names and signatures), the variant `Scanner.ae` (F16), `sun/nio/cs/JrtCharsets.java` (its class names are
+  jdk26u's charsets'), `jdk/internal/jrt/CharsetStrings.java` (F8), `jdk/internal/jrt/HostFileChannels.java`
+  (F7), `java/net/HostDatagramSocketImpl.java`, `jdk/internal/jrt/HostDatagram.java` and the variants
+  `NetworkInterface.ae`, `InterfaceAddress.ae` (F11) are Arbace's own. Their jdk26u sources join `jdk/forms/`
+  once `bin/jrt-convert update` has run: 27 files of small-members-sources (19 of `src/java.base/share/classes`,
+  5 of `src/java.sql/share/classes`, 3 of `src/java.sql.rowset/share/classes`), 42 of charset-sources and the 51
+  charset sources the build's `Spp` and charsetmapping tool generate (charset-gensrc), 23 of channel-sources and
+  35 generated buffers (added-gensrc), and 12 of datagram-sources (11 of `src/java.base/share/classes`, 1 of
+  `src/java.base/unix/classes`); the data `uprops.icu` (ICU's, under the Unicode License V3 as jdk26u's
+  `legal/icu.md` says, beside `ubidi.icu`) and `sun/net/www/content-types.properties`.
 - Other Go-build variants (J2G-SPEC §4.6; recorded by the rule of B7):
   `overlay/jdk/variants/AbstractChronology.ae`, `BitSet.ae`, `CRC32.ae`, `Collectors.ae`,
   `File.ae`, `FileHandler.ae`, `ParseUtil.ae`, `TimeZone.ae`, `TzdbZoneRulesProvider.ae`,
