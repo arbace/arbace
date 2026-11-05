@@ -5,17 +5,22 @@
   the signature as `--mode types` prints it. Run as -m arbace.repr.ocaml.typer VERB ...:
 
     types --file NAME FILE              the signature (Printtyp's text), as (ocaml/typed SIG [] {...})
-    lambda --file NAME FILE             the Lambda program, as (ocaml/lambda (lambda-program ...) {...})
+    lambda --file NAME FILE [--simplify]
+                                        the Lambda program, as (ocaml/lambda (lambda-program ...) {...}); with
+                                        --simplify after Simplif's port (what ocamlc -dlambda prints)
     check --dir DIR --oracle ODIR [--report FILE] NAME...
                                         typer-check: each sample DIR/NAME.ml typed and translated, its signature
                                         against ODIR/NAME.types' and its Lambda against ODIR/NAME.lambda's (equal
                                         up to the identifiers' stamps and the static exits' numbers, both renamed
-                                        in order of appearance), the Lambda written to ODIR/../native/NAME.ae"
+                                        in order of appearance), and Simplif's output against ODIR/NAME.dlambda's
+                                        when it exists; the simplified Lambda written to OUT/Unit.ae, the raw
+                                        to OUT/Unit.raw.ae"
   (:require [arbace.repr.ocaml.typer.types :as ty]
             [arbace.repr.ocaml.typer.env :as env]
             [arbace.repr.ocaml.typer.typecore :as tc]
             [arbace.repr.ocaml.typer.translcore :as tr]
             [arbace.repr.ocaml.typer.lambda :as lam]
+            [arbace.repr.ocaml.typer.simplif :as simplif]
             [arbace.repr.ocaml.parser :as parser]
             [arbace.string :as str])
   (:import [java.io File]))
@@ -108,7 +113,9 @@
 (defn- do-lambda [{:keys [opts args]}]
   (with-stdlib opts
     #(let [f (first args) fname (or (get opts "--file") f)]
-       (print (lam/program-text (:lambda (compile-file f fname)) fname)) (flush))))
+       (print (lam/program-text (cond-> (:lambda (compile-file f fname)) (get opts "--simplify") simplif/simplify-program)
+                                fname))
+       (flush))))
 
 (defn- oracle-sig [^String text]
   (second (read-string text)))
@@ -125,27 +132,40 @@
                olam (read-string (slurp (str odir "/" n ".lambda")))
                types-ok (= (:sig r) osig)
                mine (when (:lambda r) (read-string (lam/program-text (:lambda r) fname)))
-               lam-ok (and mine (= (lam/canonical mine) (lam/canonical olam)))]
+               lam-ok (and mine (= (lam/canonical mine) (lam/canonical olam)))
+               dfile (File. (str odir "/" n ".dlambda"))
+               sprog (when (and (:lambda r) (.exists dfile))
+                       (try (simplif/simplify-program (:lambda r))
+                            (catch Throwable t (println (str "   simplif: " n ": " t)) nil)))
+               smine (when sprog (read-string (lam/program-text sprog fname)))
+               odl (when (.exists dfile) (read-string (slurp dfile)))
+               dl-ok (if odl (boolean (and smine (= (lam/canonical smine) (lam/canonical odl)))) :none)]
            (when (and ndir (:lambda r))
              (.mkdirs (File. ^String ndir))
-             (spit (str ndir "/" (unit-name fname) ".ae") (lam/program-text (:lambda r) fname)))
-           (swap! results conj {:name n :types types-ok :lambda (boolean lam-ok) :error (:error r)})
-           (println (format "%-22s types %-4s lambda %-4s%s" n (if types-ok "ok" "DIFF") (if lam-ok "ok" "DIFF")
+             (spit (str ndir "/" (unit-name fname) ".ae") (lam/program-text (or sprog (:lambda r)) fname))
+             (spit (str ndir "/" (unit-name fname) ".raw.ae") (lam/program-text (:lambda r) fname)))
+           (swap! results conj {:name n :types types-ok :lambda (boolean lam-ok) :dlambda dl-ok :error (:error r)})
+           (println (format "%-24s types %-4s lambda %-4s dlambda %-4s%s" n (if types-ok "ok" "DIFF") (if lam-ok "ok" "DIFF")
+                            (case dl-ok :none "-" true "ok" "DIFF")
                             (if (:error r) (str "  error: " (:error r))
                                 (if types-ok "" (str "\n   mine:   " (pr-str (:sig r)) "\n   oracle: " (pr-str osig))))))
            (when (and mine (not lam-ok) (get opts "--diff"))
-             (println (lam/first-difference (lam/canonical olam) (lam/canonical mine))))))
+             (println (lam/first-difference (lam/canonical olam) (lam/canonical mine))))
+           (when (and odl (not (true? dl-ok)) (get opts "--diff"))
+             (println (if smine (lam/first-difference (lam/canonical odl) (lam/canonical smine)) "  no simplified Lambda")))))
        (let [rs @results
-             t (count (filter :types rs)) l (count (filter :lambda rs))]
-         (println (str "typer-check: " (count rs) " samples: types equal " t ", Lambda equal " l))
+             t (count (filter :types rs)) l (count (filter :lambda rs))
+             dn (count (remove (fn [x] (= :none (:dlambda x))) rs)) d (count (filter (fn [x] (true? (:dlambda x))) rs))]
+         (println (str "typer-check: " (count rs) " samples: types equal " t ", raw Lambda equal " l
+                       ", simplified Lambda equal " d " of " dn))
          (when-let [rep (get opts "--report")] (spit rep (pr-str rs)))
-         (System/exit (if (and (= t (count rs)) (= l (count rs))) 0 1))))))
+         (System/exit (if (and (= t (count rs)) (= l (count rs)) (= d dn)) 0 1))))))
 
 (defn -main [& args]
   (let [[verb & more] args
         pa (fn [wv] (parse-args more wv))]
     (case verb
       "types" (do-types (pa #{"--file" "--stdlib"}))
-      "lambda" (do-lambda (pa #{"--file" "--stdlib"}))
+      "lambda" (do-lambda (pa #{"--file" "--stdlib"}))  ; --simplify: after Simplif (-dlambda)
       "check" (do-check (pa #{"--dir" "--oracle" "--report" "--stdlib" "--out"}))
       (do (println "usage: -m arbace.repr.ocaml.typer types|lambda|check ...") (System/exit 2)))))

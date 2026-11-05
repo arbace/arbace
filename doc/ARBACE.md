@@ -89,7 +89,7 @@ code. Three kinds of things live here:
   (`arbace.repr.ocaml.typer.*`), ports from the same tarball typing/'s types.ml, btype.ml, ctype.ml, predef.ml,
   printtyp.ml, env.ml, typetexp.ml, typedecl.ml, datarepr.ml, patterns.ml, parmatch.ml, typecore.ml and typemod.ml's
   structure items, and lambda/'s lambda.ml helpers, switch.ml, printlambda.ml's names, matching.ml, translcore.ml,
-  translprim.ml and translmod.ml's bytecode structure, for the core language (the slice TYPER.md names), by hand,
+  translprim.ml and translmod.ml's bytecode structure, then (T7) simplif.ml with lambda.ml's traversals, for the core language (the slice TYPER.md names), by hand,
   the files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver

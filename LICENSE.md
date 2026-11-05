@@ -215,13 +215,15 @@ covers what.
   levels, unification, generalization and instances, predef.ml, printtyp.ml with out_type.ml and oprint.ml),
   `env.ae` (typing/env.ml, typetexp.ml, typedecl.ml, datarepr.ml), `parmatch.ae` (typing/patterns.ml, parmatch.ml),
   `typecore.ae` (typing/typecore.ml, typemod.ml's structure items), `lambda.ae` (lambda/lambda.ml's helpers,
-  switch.ml, printlambda.ml's names), `matching.ae` (lambda/matching.ml) and `translcore.ae` (lambda/translcore.ml,
-  translprim.ml, translmod.ml's bytecode structure) are ports of the same OCaml 5.5.0 tarball (SHA-256
+  switch.ml, printlambda.ml's names), `matching.ae` (lambda/matching.ml), `translcore.ae` (lambda/translcore.ml,
+  translprim.ml, translmod.ml's bytecode structure) and `simplif.ae` (lambda/simplif.ml with lambda.ml's traversals,
+  T7) are ports of the same OCaml 5.5.0 tarball (SHA-256
   `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`, Copyright INRIA), by hand on 2026-11-05, the
   files carrying the notices: under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking
   exception (below). `arbace/repr/ocaml/typer.ae` (the driver and the judge) and `bin/lib/oi/typer.bash` are Arbace's own,
   under the Eclipse Public License 1.0; test/ocaml/typer/'s samples are Arbace's own, their `.out` files outputs of the
-  host's OCaml 5.5.0 toplevel.
+  host's OCaml 5.5.0 toplevel, the dumps of `test/ocaml/typer/oracle/` outputs of tools/ocdump on the host's
+  compiler-libs.
 - `jdk/ocaml/` (OCaml's runtime as Java forms, the package `ocaml.rt`; doc/ocaml/OCAML-SURVEY.md, "As built: O6
   (write-ahead)") and `arbace/o2j.ae` (o2j, Lambda to Java forms): the values, the application, the program's
   start (`Block`, `Closure`, `Pap`, `Native`, `Code`, `Exn`, `Exit`, `Fatal`, `I64`, `NInt`, `Custom`, `Rt`, `Main`, `Gil`,
