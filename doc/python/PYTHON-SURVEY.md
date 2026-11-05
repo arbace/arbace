@@ -1478,3 +1478,52 @@ to-bool/jump (AotToBool pushes a bool AotTruthy pops), frame reuse for generator
   and types.CellType called". Any `class X(NamedTuple)` with annotations stops there on pyi.
 - Not done: `.data/scripts`' `#!python` rewritten but no pin exercises it; `bin/pyi aot` does not take `PYI_SITE`;
   `--build-program`'s `:python {:wheels ...}` (PYS25 (a)'s second half) waits for pyi in the executable (PYS28).
+
+## As built: 205f (types.FunctionType's and types.CellType's constructors; 2026-11-05, the Mac VM, queue 205f)
+
+The user's decision on 205's DECISION (a), 2026-11-05: the constructors now, as a follow-up of 205
+(`mac/205-python-functiontype`, from 205's head 87deec00).
+
+- **FunctionType(code, globals, name=None, argdefs=None, closure=None, kwdefaults=None)** (`go/arbace/py/func.ae`'s
+  `functionNew`): CPython 3.14.10's `Objects/funcobject.c` `func_new`. The argument parsing and the checks come in
+  the clinic's order, then `func_new_impl`'s, with their messages (code, globals, name, defaults, closure, kwdefaults,
+  the closure's length as a ValueError, its items as cells). Then `PyFunction_New`: the name, qualname and docstring
+  come from the code, `__module__` from the globals' `__name__`, and the builtins from the globals' `__builtins__`
+  (a module gives its dict; without one, the running frame's builtins).
+- **CellType([contents])**: `cellobject.c`'s `cell_new` (no keywords, at most one argument), `cell_repr`
+  (`<cell at 0x..: empty>`, `<cell at 0x..: int object at 0x..>`) and `cell_richcompare` (the contents compared; an
+  empty cell before anything). Cells are unhashable, as CPython's.
+- **A dict subclass as globals.** `Function.GlobalsMap` and `Frame.GlobalsMap` hold the globals when they are a dict
+  subclass's instance; `Globals` stays its dict.
+  - LOAD_GLOBAL and LOAD_FROM_DICT_OR_GLOBALS go through its `__getitem__`, as CPython's
+    `PyMapping_GetOptionalItem` does on non-exact globals, so annotationlib's `_StringifierDict.__missing__` answers.
+  - LOAD_NAME's globals step uses the dict itself (`_PyEval_LoadName`'s `PyDict_GetItemRef`).
+  - A function made where the globals are such a mapping keeps them (`__globals__` is the mapping).
+  - exec and eval take a dict subclass as globals or locals (the locals through `Frame.LocalsMap`, as a class body's
+    `__prepare__` namespace). eval's globals messages are now `builtin_eval_impl`'s.
+- **What the FunctionType path made visible, also fixed:**
+  - Assigning or deleting a function's `__annotations__` left `__annotate__` set (the attribute slot wrote
+    `__dict__`). It now sets it to None and checks for a dict, as `func_set_annotations`.
+  - A union's arguments are deduplicated as `unionobject.c`'s builder does: a hashable argument by hash, then
+    equality; an unhashable one among the unhashable. Before, `Union[str, undefined]` lost the `_Stringifier`, whose
+    `__eq__` answers anything.
+- Program `test/python/pyi/w205f-functiontype.py` (66 lines, equal to `python3 -I -B`). It covers:
+  - the constructor with closures and every error;
+  - cells;
+  - a `__missing__` globals;
+  - an annotated `typing.NamedTuple`;
+  - annotationlib's FORWARDREF and STRING formats on functions, closures and classes;
+  - `__annotations__` assignment;
+  - exec and eval with mapping namespaces;
+  - the union's deduplication.
+- The class `:function-constructor` (divergences.edn) is narrowed to what is left:
+  - exec's and eval's locals given as a mapping that is not a dict subclass (its match is now
+    `^error locals must be a mapping`);
+  - the audit event `function.__new__` (pyi's `sys.audit` calls no hook);
+  - function's `__text_signature__`.
+- pip (`bin/pyi wheels pip-probe`): `pip --version` runs. `pip install --no-index` stops at urllib3's
+  `class RecentlyUsedContainer(typing.Generic[_KT, _VT], typing.MutableMapping[_KT, _VT])` with "duplicate base class
+  Generic". The cause: pyi's `Generic.__class_getitem__` (`typing.ae`) returns a `types.GenericAlias`, not
+  `typing._generic_class_getitem`'s `typing._GenericAlias`, so its `__mro_entries__` keeps Generic where CPython's
+  returns `()` before a later generic alias. This is not chased here (the brief). It is in no class yet: every
+  `class X(Generic[T], SomeABC[T])` stops there.
