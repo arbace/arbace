@@ -226,11 +226,24 @@
   (let [i (.indexOf ^java.util.List @*subs* k)]
     (if (neg? i) (let [s (f)] (swap! *subs* conj k) s) (seq-id i))))
 
+(def ^:dynamic *dollars* nil) ; atom {:names {class-id name} :counts {key n}}: clang's $_N, numbered as first mangled
+
+(defn- dollar-name!
+  "A closure's name in a function that is not inline: $_N, N counted per enclosing function in the order the closures
+  are first mangled (clang numbers them as its code generator first names them)."
+  ^String [c]
+  (let [a (or *dollars* (atom {}))]
+    (or (get-in @a [:names (:id c)])
+        (let [k (:dollar-key c) n (long (get-in @a [:counts k] 0))
+              nm (source-name (str "$_" n))]
+          (swap! a #(-> % (assoc-in [:names (:id c)] nm) (assoc-in [:counts k] (inc n))))
+          nm))))
+
 (defn- part-name ^String [p]
   (case (first p)
     :ns (source-name (second p))
     :anon "12_GLOBAL__N_1"
-    :cls (source-name (:name (cls (second p))))
+    :cls (let [c (cls (second p))] (or (:mname c) (when (:dollar-key c) (dollar-name! c)) (source-name (:name c))))
     :enum (source-name (:name (enm (second p))))))
 
 (defn- mangle-prefix
@@ -264,6 +277,10 @@
         i (.indexOf ^java.util.List @*subs* k)]
     (cond
       (not (neg? i)) (seq-id i)
+      ;; a local class: Z encoding E name ([local-name], §5.1.6)
+      (= :local (ffirst parts)) (let [r (vec (rest parts))
+                                      s (str "Z" (second (first parts)) "E" (if (= 1 (count r)) (part-name (first r)) (str "N" (mangle-prefix r) "E")))]
+                                  (swap! *subs* conj k) s)
       (= 1 (count parts)) (do (swap! *subs* conj k) (part-name (first parts)))
       :else (str "N" (mangle-prefix parts) "E"))))
 
@@ -296,6 +313,9 @@
 (defn- bare-params ^String [ps va]
   (if (and (empty? ps) (not va)) "v" (str (apply str (map mangle-type* ps)) (when va "z"))))
 
+(defn mangle-params "A parameter list's mangling (v when empty), its own substitutions." ^String [ps]
+  (binding [*subs* (atom [])] (bare-params ps false)))
+
 (defn- unqualified-name
   "A function's unqualified name: its source name, an operator's code, C1/C2/D0/D1/D2 for the special members."
   ^String [f variant]
@@ -317,6 +337,8 @@
    (cond
      (= :c (:linkage f)) (:name f)
      (and (= "main" (:name f)) (empty? (:path f)) (not (:cls f))) "main"
+     ;; a member of a local class (a closure's operator()): Z encoding E, then the name as if at namespace scope
+     (= :local (ffirst (:path f))) (str "_ZZ" (second (first (:path f))) "E" (subs (mangle-fn (assoc f :path (vec (rest (:path f)))) variant) 2))
      :else
      (binding [*subs* (atom [])]
        (let [path (vec (:path f))
@@ -338,11 +360,16 @@
                 (str "_ZL" (source-name (:name v)))
                 (str "_ZN" (mangle-prefix path) (source-name (:name v)) "E"))))))
 
+(defn local-encoding
+  "A function's encoding as a local name's prefix: its mangled name without _Z (main's: 4main)."
+  ^String [f]
+  (let [fm (mangle-fn f)]
+    (cond (str/starts-with? fm "_Z") (subs fm 2) (= "main" fm) "4main" :else (source-name fm))))
+
 (defn mangle-local-static
   "A static local's name in the function f (Itanium §5.1.6: Z encoding E name, the discriminator _N from the second)."
   ^String [f ^String nm ^long disc]
-  (let [fm (mangle-fn f)
-        enc (if (str/starts-with? fm "_Z") (subs fm 2) fm)]
+  (let [enc (local-encoding f)]
     (str "_ZZ" enc "E" (source-name nm) (cond (zero? disc) "" (< disc 11) (str "_" (dec disc)) :else (str "__" (dec disc) "_")))))
 
 (defn mangle-type-name

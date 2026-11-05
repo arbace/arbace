@@ -191,10 +191,11 @@
     (symbol? f)
     (if-let [n (builtin-syms f)]
       (abi/b n)
+      (if (= 'auto f) {:k :auto}
       (let [parts (name-parts f)
             es (if (= 1 (count parts)) (lookup scope (first parts)) (lookup-qualified scope parts))
             e (type-entity es)]
-        (or (:ty e) (fail :type "unknown type " f))))
+        (or (:ty e) (fail :type "unknown type " f)))))
     (seq? f)
     (case (first f)
       * (abi/ptr (resolve-type-form scope (second f)))
@@ -317,7 +318,7 @@
         nm (:name n)
         body (first (filter #(= "CompoundStmt" (:kind %)) (kids n)))
         pn (param-nodes n)
-        f {:name nm :kind k :cls cid :ty ty :cq (method-const? qt) :op (when nm (fn-op nm))
+        f {:name nm :kind k :cls cid :ty ty :cq (method-const? qt) :op (when (and nm (not= k :conv)) (fn-op nm))
            :static (and cid (= "static" (:storageClass n)))
            :virtual (boolean (:virtual n)) :pure (boolean (:pure n))
            :noexcept (boolean (re-find #"\bnoexcept\b(?!\s*\(\s*false)" (or qt "")))
@@ -727,6 +728,26 @@
           :else nil))
       :else nil)))
 
+(defn conv-fns
+  "The conversion functions of class `id` and its bases ([class.conv.fct]), a derived class's hiding a base's of the same
+  name."
+  [id]
+  (let [c (abi/cls id)
+        own (filter #(= :conv (:kind (fnd %))) (:methods c))
+        names (set (map #(:name (fnd %)) own))]
+    (concat own (remove #(names (:name (fnd %))) (mapcat #(conv-fns (:cls %)) (:bases c))))))
+
+(defn- conv-for
+  "The conversion function of class `id` that converts best to the non-class type `t` (explicit ones when
+  `explicit?`), or nil."
+  [id t explicit?]
+  (let [cands (for [fid (conv-fns id)
+                    :let [f (fnd fid)] :when (or explicit? (not (:explicit f)))
+                    :let [rt (abi/non-ref (:ret (:ty f)))
+                          r (if (= (abi/unq rt) (abi/unq t)) 0 (std-rank {:op :call :ty rt} rt t))] :when r]
+                [r fid])]
+    (second (first (sort-by first cands)))))
+
 (def ^:dynamic *no-user* false) ; inside a user-defined conversion: standard conversions only ([over.best.ics]/4)
 
 (defn ics
@@ -763,7 +784,7 @@
                                            (let [r (binding [*no-user* true] (ics e (first (:ps (:ty f)))))] (and r (< (long (:rank r)) 3))))))
                           (ctor-candidates (:id pt)))
                 {:rank 3}))
-      (abi/class? at) nil
+      (abi/class? at) (when (and (not *no-user*) (conv-for (class-id at) pt false)) {:rank 3})
       (= :fnset (:op e)) (when (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching e (:to (abi/unq pt)))) {:rank 0})
       :else (let [r (std-rank e (:ty (rv e)) pt)] (when r {:rank r})))))
 
@@ -805,7 +826,15 @@
 ;;  {:i :list :items [init ...] :fill init}  an array's or an aggregate's elements (bases first)
 ;;  {:i :bind :e glvalue}  a reference bound to an object   {:i :bind-temp :init init :ty T}  to a temporary
 
-(declare init-for args-for default-ctor-init)
+(declare init-for args-for default-ctor-init method-call materialize)
+
+(defn user-conv
+  "The class object `e` converted to the non-class type `t` by a conversion function: the call's value."
+  [ctx e t explicit?]
+  (let [cid (class-id (:ty e))
+        fid (or (conv-for cid t explicit?) (fail :conversion "no conversion function of " (:name (abi/cls cid)) " to " (pr-str t)))
+        obj (if (= :pr (:cat e)) (materialize e) e)]
+    (rv (method-call ctx fid obj [] true))))
 
 (defn ctor-candidates [id] (remove #(:deleted (fnd %)) (:ctors (abi/cls id))))
 
@@ -941,8 +970,7 @@
       (if (= :str (:op src)) {:i :string :e src :n (:n tu)} (fail :init "an array from an expression"))
       :else
       (let [e (rv src)]
-        (when (abi/class? (:ty e)) (fail :conversion "a class to a scalar (conversion functions)"))
-        {:i :expr :e (convert-scalar e tu false)}))))
+        {:i :expr :e (convert-scalar (if (abi/class? (abi/unq (:ty e))) (user-conv ctx e tu false) e) tu false)}))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Analysis of expressions
@@ -970,9 +998,13 @@
             (do (.append sb c) (recur (inc i)))))))
     (str sb)))
 
+(declare capture-field)
+
 (defn- this-expr [ctx]
-  (when-not (:this-type ctx) (fail :this "this outside a method"))
-  {:op :this :ty (:this-type ctx) :cat :pr})
+  (if (:lambda ctx)
+    (capture-field ctx :this)
+    (do (when-not (:this-type ctx) (fail :this "this outside a method"))
+        {:op :this :ty (:this-type ctx) :cat :pr})))
 
 (defn- deref-node [e]
   (let [e (rv e)]
@@ -1001,7 +1033,11 @@
 (defn- entity-expr [ctx es n]
   (let [e (first es)]
     (case (:e e)
-      :var (var-node (:id e))
+      :var (let [v (var* (:id e))]
+             (if (and (:lambda ctx) (#{:local :param} (:storage v)) (not= (:fn v) (:fn-id ctx)))
+               (capture-field ctx (:id e))
+               (var-node (:id e))))
+      :capfield (field-node (deref-node {:op :this :ty (:this-type ctx) :cat :pr}) (:cls (:lambda ctx)) (:i e))
       :field (field-node (deref-node (this-expr ctx)) (:cls e) (:i e))
       :indirect (reduce (fn [o [c i]] (field-node o c i)) (deref-node (this-expr ctx)) (:chain e))
       :enumerator {:op :int :v (:val e) :ty (:ty e) :cat :pr}
@@ -1026,9 +1062,23 @@
   (let [l (rv l) r (rv r) ct (arith-common (:ty l) (:ty r))]
     {:op :binop :o o :l (convert-scalar l ct false) :r (convert-scalar r ct false) :ty ct :cat :pr}))
 
-(defn- to-bool [e] (convert-scalar (rv e) abi/bool* false))
+(defn- to-bool [e]
+  (if (abi/class? (abi/unq (:ty e)))
+    (convert-scalar (user-conv {:scope *root*} e abi/bool* true) abi/bool* false)
+    (convert-scalar (rv e) abi/bool* false)))
 
 (declare operator-call analyze-call)
+
+(defn- class->scalar
+  "A class operand of a built-in operator by its conversion function (the one non-explicit, [over.built]'s candidates
+  narrowed to it); another operand unchanged."
+  [ctx e]
+  (if (abi/class? (abi/unq (:ty e)))
+    (let [fs (filter #(not (:explicit (fnd %))) (conv-fns (class-id (:ty e))))]
+      (if (= 1 (count fs))
+        (user-conv ctx e (abi/unq (abi/non-ref (:ret (:ty (fnd (first fs)))))) false)
+        (fail :conversion "a class operand with " (count fs) " conversion functions")))
+    e))
 
 (defn- class-operand? [e] (or (abi/class? (abi/unq (:ty e))) (abi/enum? (abi/unq (:ty e)))))
 
@@ -1072,6 +1122,8 @@
 
 (defn- cast-expr [ctx t e explicit]
   (cond
+    (and (abi/class? (abi/unq (:ty e))) (not (abi/ref? t)) (not (abi/class? (abi/unq t))) (not (abi/void? t)))
+    (convert-scalar (user-conv ctx e (abi/unq t) true) t true)
     (abi/void? t) {:op :cast :ck :void :e e :ty abi/void :cat :pr}
     (abi/ref? t) (let [pt (:to t)
                        fc (class-id (:ty e)) tc (class-id pt)]
@@ -1199,6 +1251,154 @@
 
 (defn- dtor-of [cid] (:dtor (abi/cls cid)))
 
+;; ---------------------------------------------------------------------------------------------
+;; Lambdas ([expr.prim.lambda]): the closure class (a local class, mangled as clang names it: $_N in a function of
+;; internal or external linkage, Ul<params>E<n>_ in an inline one), a field per capture in the order captured
+;; (explicit, then implicit at first use), its operator() (const unless mutable, the return type deduced from the
+;; first return), for a captureless lambda the conversion to a function pointer and its static __invoke
+
+(declare stmt nrvo-var analyze-implicit!)
+
+(def ^:dynamic *lambda-counts* nil) ; atom {[enclosing-fid kind-key] n}
+
+(defn- split-top
+  "The comma-separated parts of `s` at bracket depth 0."
+  [^String s]
+  (loop [i 0 d 0 start 0 out []]
+    (if (>= i (count s))
+      (let [p (str/trim (subs s start))] (if (seq p) (conj out p) out))
+      (let [c (.charAt s i)]
+        (cond
+          (#{\( \[ \{ \<} c) (recur (inc i) (inc d) start out)
+          (#{\) \] \} \>} c) (recur (inc i) (dec d) start out)
+          (and (= c \,) (zero? d)) (recur (inc i) d (inc i) (conj out (str/trim (subs s start i))))
+          :else (recur (inc i) d start out))))))
+
+(defn- capture-intro [^String text]
+  (let [b (.indexOf text "[")]
+    (loop [i (inc b) d 1]
+      (let [c (.charAt text i)]
+        (cond (= c \[) (recur (inc i) (inc d))
+              (= c \]) (if (= d 1) (subs text (inc b) i) (recur (inc i) (dec d)))
+              :else (recur (inc i) d))))))
+
+(defn capture-field
+  "The expression of a captured entity (a variable's id or :this) inside the lambda of `ctx`: the closure's field,
+  added (with its initializer, analyzed in the enclosing context) on the first use."
+  [ctx k]
+  (let [lam (:lambda ctx)
+        lid (:cls lam)
+        caps (:caps lam)
+        encl (:encl lam)
+        obj (deref-node {:op :this :ty (:this-type ctx) :cat :pr})]
+    (if-let [i (get @caps k)]
+      (let [f (nth (:fields (abi/cls lid)) i)] (if (= :this k) (rv (field-node obj lid i)) (field-node obj lid i)))
+      (let [mode (or (get (:explicit lam) k) (:default lam))
+            v (when (not= :this k) (var* k))]
+        (cond
+          (= :this k)
+          (let [te (this-expr encl)
+                i (count (:fields (abi/cls lid)))]
+            (abi/update-cls! lid update :fields conj {:name nil :ty (:ty te) :access :private :i i :capture true})
+            (swap! caps assoc k i)
+            (swap! (:inits lam) conj [i {:i :expr :e te}])
+            (rv (field-node obj lid i)))
+          (nil? mode)
+          (let [t (:ty v)]
+            (if-let [c (when (and (:c t) (abi/integral? t) (:init-node v)) (try (const-int (:scope encl) (:init-node v)) (catch arbace.lang.ExceptionInfo _ nil)))]
+              {:op :int :v c :ty (abi/unq t) :cat :pr}
+              (fail :lambda "a variable the lambda does not capture: " (:name v))))
+          :else
+          (let [src (entity-expr encl [{:e :var :id k}] nil)
+                i (count (:fields (abi/cls lid)))
+                ft (if (= :ref mode) (abi/lref (:ty src)) (abi/non-ref (:ty v)))]
+            (abi/update-cls! lid update :fields conj {:name nil :ty ft :access :private :i i :capture true})
+            (swap! caps assoc k i)
+            (swap! (:inits lam) conj [i (if (= :ref mode) {:i :bind :e src} (init-for ft src encl :copy))])
+            (field-node obj lid i)))))))
+
+(defn- lambda-expr [ctx n]
+  (let [[rd body] (kids n)
+        md (first (filter #(= "CXXMethodDecl" (:kind %)) (kids rd)))
+        text (node-text n)
+        intro (capture-intro text)
+        head (subs text 0 (max 0 (- (long (get-in body [:range :begin :offset])) (long (get-in n [:range :begin :offset])))))
+        mutable (boolean (re-find #"\)\s*mutable\b" head))
+        pn (param-nodes md)
+        _ (when (some #(re-find #"\bauto\b" (get-in % [:type :qualType] "")) pn) (fail :generic-lambda "a generic lambda"))
+        ps (mapv #(resolve-type (:scope ctx) (get-in % [:type :qualType])) pn)
+        qt (get-in md [:type :qualType])
+        ret (if (re-find #"^auto\s*\(" qt)
+              (if-let [[_ r] (re-find #"->\s*(.+?)\s*$" head)] (resolve-type (:scope ctx) r) {:k :auto})
+              (:ret (resolve-type (:scope ctx) qt)))
+        encl-f (when (:fn-id ctx) (fnd (:fn-id ctx)))
+        inline? (boolean (and encl-f (:inline encl-f) (not (:internal encl-f))))
+        ckey [(:fn-id ctx) (if inline? (abi/mangle-params ps) :dollar)]
+        k (long (or (get @*lambda-counts* ckey) 0))
+        _ (swap! *lambda-counts* assoc ckey (inc k))
+        mname (when inline? (str "Ul" (abi/mangle-params ps) "E" (if (zero? k) "" (dec k)) "_"))
+        path (if encl-f [[:local (abi/local-encoding encl-f)]] [])
+        id (next-id)
+        cs (new-scope :class (:scope ctx) :cls id :path (conj path [:cls id]))
+        t {:k :class :id id}
+        _ (swap! abi/*classes* assoc id {:id id :name nil :mname mname :dollar-key (when-not inline? [:fn (:fn-id ctx)]) :path path :scope cs :fields [] :bases [] :outer (:scope ctx) :lambda true})
+        fid (next-id)
+        base-f {:cls id :inline inline? :internal (not inline?) :path (conj path [:cls id]) :scope cs :def-scope cs :linkage :cpp :defaults [] :pos -1}
+        _ (swap! *fns* assoc fid (merge base-f {:id fid :name "operator()" :kind :method :op "()" :ty {:k :fn :ret ret :ps ps :va false}
+                                                :cq (not mutable) :param-names (mapv :name pn)}))
+        _ (enter! cs "operator()" {:e :fn :id fid :pos -1})
+        _ (abi/update-cls! id update :methods (fnil conj []) fid)
+        _ (swap! *order* conj [:fn fid])
+        ;; the captures written
+        items (if (str/blank? intro) [] (split-top intro))
+        default (some #(case % "=" :copy "&" :ref nil) items)
+        fs (new-scope :fn (:scope ctx))
+        lam {:cls id :caps (atom {}) :inits (atom []) :default default :encl ctx :explicit {}}
+        pids (vec (map-indexed (fn [i pt] (let [pid (next-id) nm (:name (nth pn i))]
+                                            (swap! *vars* assoc pid {:id pid :name nm :ty pt :storage :param :fn fid})
+                                            (when nm (enter! fs nm {:e :var :id pid}))
+                                            pid))
+                               ps))
+        lctx {:scope fs :fn-id fid :this-type (abi/ptr (cond-> t (not mutable) (assoc :c true))) :statics (atom []) :lambda lam}
+        explicit (into {} (for [it items :when (not (#{"=" "&"} it)) :when (not (str/includes? it "="))
+                                :let [byref (str/starts-with? it "&") nm (str/trim (str/replace it #"^&" ""))]]
+                            (cond (= nm "this") [:this :copy]
+                                  (= nm "*this") (fail :lambda "a capture of *this")
+                                  :else (let [e (first (filter #(= :var (:e %)) (lookup (:scope ctx) nm)))]
+                                          (when-not e (fail :lambda "capture of " nm))
+                                          [(:id e) (if byref :ref :copy)]))))
+        lam (assoc lam :explicit explicit)
+        lctx (assoc lctx :lambda lam)
+        ;; explicit captures in their order, then init-captures
+        _ (doseq [it items :when (not (#{"=" "&"} it))]
+            (if-let [[_ amp nm ex] (re-matches #"(?s)(&?)\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(.+)" it)]
+              (fail :lambda "an init-capture")
+              (let [byref (str/starts-with? it "&") nm (str/trim (str/replace it #"^&" ""))]
+                (capture-field lctx (if (= nm "this") :this (:id (first (filter #(= :var (:e %)) (lookup (:scope ctx) nm)))))))))
+        body-s (binding [*cutoff* Long/MAX_VALUE] (stmt lctx body))
+        ret (:ret (:ty (fnd fid)))
+        ret (if (= :auto (:k ret)) abi/void ret)
+        _ (upd-fn! fid #(-> % (assoc-in [:ty :ret] ret) (assoc :params pids :tbody body-s :nrvo (nrvo-var body-s) :statics @(:statics lctx))))
+        _ (finish-class! id)
+        _ (doseq [m (:methods (abi/cls id)) :let [g (fnd m)] :when (:implicit g)]
+            (try (analyze-implicit! m) (catch arbace.lang.ExceptionInfo _ (upd-fn! m assoc :deleted true))))
+        inits (sort-by first @(:inits lam))]
+    (when (empty? inits)
+      ;; the conversion to a pointer to function and the static __invoke it returns
+      (let [ivid (next-id) cvid (next-id) ft {:k :fn :ret ret :ps ps :va false}
+            ipids (vec (for [pt ps] (let [pid (next-id)] (swap! *vars* assoc pid {:id pid :name nil :ty pt :storage :param :fn ivid}) pid)))
+            lv (next-id)
+            _ (swap! *vars* assoc lv {:id lv :name nil :ty t :storage :local :fn ivid})
+            _ (swap! *fns* assoc ivid (merge base-f {:id ivid :name "__invoke" :kind :method :static true :ty ft :param-names []}))
+            call (method-call {:scope cs} fid {:op :var :id lv :ty t :cat :lv} (mapv var-node ipids) false)
+            ret-s (if (abi/void? ret) {:s :return :void-e call} {:s :return :init (init-for ret call {:scope cs} :copy)})]
+        (upd-fn! ivid assoc :params ipids :tbody {:s :block :items [{:s :decl :var lv :init {:i :none}} ret-s]})
+        (swap! *fns* assoc cvid (merge base-f {:id cvid :name "operator function" :kind :conv :cq true :ty {:k :fn :ret (abi/ptr ft) :ps [] :va false}
+                                              :param-names [] :params []
+                                              :tbody {:s :block :items [{:s :return :init {:i :expr :e {:op :fnaddr :fn ivid :ty (abi/ptr ft) :cat :pr}}}]}}))
+        (abi/update-cls! id update :methods (fnil conj []) cvid)))
+    {:op :temp-obj :init {:i :list :cls id :items (mapv second inits) :fields-used (mapv first inits)} :ty t :cat :pr}))
+
 (defn analyze
   "The typed expression of the tree node `n` in the context `ctx` ({:scope :fn :this-type ...})."
   [ctx n]
@@ -1235,7 +1435,7 @@
       (if (= o "=")
         (assign-node ctx l r)
         (or (when (and (or (class-operand? l) (class-operand? r)) (not= o ",")) (operator-call ctx o [l r]))
-            (builtin-binop o l r))))
+            (builtin-binop o (class->scalar ctx l) (class->scalar ctx r)))))
     "CompoundAssignOperator"
     (let [o (:opcode n) [ln rn] (kids n) l (analyze ctx ln) r (analyze ctx rn)]
       (or (when (class-operand? l) (operator-call ctx o [l r]))
@@ -1293,6 +1493,7 @@
     "CXXDeleteExpr" (let [e (rv (analyze ctx (first (kids n))))]
                       {:op :delete :e e :array (boolean (:isArrayAsWritten n)) :ty abi/void :cat :pr})
     "ExprWithCleanups" (analyze ctx (first (kids n)))
+    "LambdaExpr" (lambda-expr ctx n)
     "CXXThrowExpr" (if-let [k (first (kids n))]
                      (let [e (analyze ctx k)
                            r (if (abi/class? (abi/unq (:ty e))) e (rv e))
@@ -1310,9 +1511,22 @@
   (let [ty (resolve-type (:scope ctx) (get-in n [:type :qualType]))
         id (next-id)
         st (if (= "static" (:storageClass n)) :static-local storage)
-        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx)}]
+        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (first (kids n))}]
     (swap! *vars* assoc id v)
     id))
+
+(defn- has-auto? [t] (cond (= :auto (:k t)) true (#{:ref :rref :ptr} (:k t)) (has-auto? (:to t)) :else false))
+
+(defn deduce-auto
+  "The type `t` with its auto deduced from the initializer `e` ([dcl.type.auto.deduct]: a plain auto drops references,
+  top-level cv-qualifiers and decays; auto& keeps the initializer's cv; auto&& is a forwarding reference)."
+  [t e]
+  (case (:k t)
+    :auto (let [et (if (abi/class? (abi/unq (:ty e))) (abi/unq (:ty e)) (abi/unq (:ty (rv e))))] (cond-> et (:c t) (assoc :c true) (:v t) (assoc :v true)))
+    :ref (assoc t :to (if (= :auto (:k (:to t))) (cond-> (:ty e) (:c (:to t)) (assoc :c true)) (deduce-auto (:to t) e)))
+    :rref (if (and (= :auto (:k (:to t))) (= :lv (:cat e))) (abi/lref (:ty e)) (assoc t :to (if (= :auto (:k (:to t))) (:ty e) (deduce-auto (:to t) e))))
+    :ptr (assoc t :to (let [pt (:to (abi/unq (:ty (rv e))))] (if (= :auto (:k (:to t))) (cond-> pt (:c (:to t)) (assoc :c true)) (deduce-auto (:to t) {:op :deref :ty pt :cat :lv}))))
+    t))
 
 (defn- decl-init
   "A local declaration's initializer from its node (`:init` c, call or list)."
@@ -1325,8 +1539,11 @@
                     (= :str (:op a)) (assoc t :n (inc (count (:s a))))
                     :else t))
             t)
+        pre (when (and init (has-auto? t) (not (#{"call" "list"} (:init n)))) (analyze ctx init))
+        t (if pre (deduce-auto t pre) t)
         _ (upd-var! id assoc :ty t)]
     (cond
+      pre (init-for t pre ctx (if (= :init-list (:op pre)) :list :copy))
       (nil? init) (init-for t nil ctx :default)
       (= "call" (:init n)) (init-for t (if (= "ParenListExpr" (:kind init)) (mapv #(analyze ctx %) (kids init)) [(analyze ctx init)]) ctx :direct)
       (= "list" (:init n)) (init-for t (analyze ctx init) ctx :list)
@@ -1369,9 +1586,15 @@
     "DeclStmt" {:s :block :flat true :items (decl-stmt ctx n)}
     "NullStmt" {:s :null}
     "ReturnStmt" (let [[e] (kids n)
-                       rt (:ret (:ty (fnd (:fn-id ctx))))]
+                       rt (:ret (:ty (fnd (:fn-id ctx))))
+                       pre (when (and e (= :auto (:k rt))) (analyze ctx e))
+                       rt (if (= :auto (:k rt))
+                            (let [t (if pre (deduce-auto rt pre) abi/void)] (upd-fn! (:fn-id ctx) assoc-in [:ty :ret] t) t)
+                            rt)]
                    (cond
                      (nil? e) {:s :return}
+                     pre (if (abi/void? rt) {:s :return :void-e pre}
+                             {:s :return :init (init-for rt pre ctx (if (= :init-list (:op pre)) :list :copy))})
                      (abi/void? rt) {:s :return :void-e (analyze ctx e)}
                      :else (let [a (analyze ctx e)
                                  ;; [class.copy.elision]/3: a returned local is an rvalue first
@@ -1416,13 +1639,13 @@
       (let [et (:of at)
             pt (abi/ptr et)
             bid (next-id) eid (next-id)
-            _ (swap! *vars* assoc bid {:id bid :name "__begin" :ty pt :storage :local} eid {:id eid :name "__end" :ty pt :storage :local})
+            _ (swap! *vars* assoc bid {:id bid :name "__begin" :ty pt :storage :local :fn (:fn-id ctx)} eid {:id eid :name "__end" :ty pt :storage :local :fn (:fn-id ctx)})
             bvar {:op :var :id bid :ty pt :cat :lv}
             evar {:op :var :id eid :ty pt :cat :lv}
             ic (block-ctx c)
             lid (local-var! ic loopd :local)
             lt (:ty (var* lid))
-            lt (if (= :auto (:k lt)) et lt)
+            lt (if (has-auto? lt) (deduce-auto lt {:op :deref :e (rv bvar) :ty et :cat :lv}) lt)
             _ (upd-var! lid assoc :ty lt)
             linit (init-for lt {:op :deref :e (rv bvar) :ty et :cat :lv} ic :copy)
             _ (enter! (:scope ic) (:name loopd) {:e :var :id lid})]
@@ -1595,7 +1818,7 @@
   [nodes proot ^String src]
   (let [root (new-scope :ns nil :path [])]
   (binding [*src* src *fns* (atom {}) *vars* (atom {}) *ids* (atom 0) *order* (atom [])
-            abi/*classes* (atom {}) abi/*enums* (atom {}) *proot* proot *root* root *header-cache* (atom {}) *last-anon* (atom nil)]
+            abi/*classes* (atom {}) abi/*enums* (atom {}) *proot* proot *root* root *header-cache* (atom {}) *last-anon* (atom nil) *lambda-counts* (atom {})]
     (do
       (doseq [n nodes] (declare-node! root n))
       (doseq [[k id] @*order*]
