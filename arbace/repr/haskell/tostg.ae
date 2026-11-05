@@ -206,6 +206,10 @@
 
 (defn- string-lit? [a] (and (head? a 'lit) (re-matches #"(?s)\".*\"#?" (second a))))
 
+(def ^:dynamic *joins* nil)   ; atom #{name}: the failure join points (their calls pass the void (##))
+
+(defn- void-atom [] (ext-str "GHC.Internal.Types" "(##)"))
+
 (declare floatable-con)
 
 (defn- atom-of
@@ -213,6 +217,7 @@
   application's own arguments' bindings floated out before it (CorePrep floats out of a value's right-hand side)"
   [a]
   (cond
+    (and (lv? a) (contains? @*joins* (local-name a))) (let [n (fresh "sat")] [n [[n (list 'closure :u :fvs [] (list 'app (local-name a) [(void-atom)]))]]])
     (lv? a) [(local-name a) []]
     (and (head? a 'v) (con-name? (second a)) (newtype-con? (as-data (second a)))) (let [n (fresh "sat")] [n [[n (rhs a)]]])
     (head? a 'v) [(gname (second a)) []]
@@ -284,12 +289,28 @@
 (defn- bind-pair [[_ b e]]
   (let [n (if (lv? b) (local-name b) (gname b))] [[n :L] (rhs e)]))
 
+
+(defn- fail-var? [x] (and (lv? x) (= "fail" (second x))))
+
+(defn- under-closure?
+  "n occurs inside a closure of the STG expression (not a tail call of a join point)"
+  [n x]
+  (letfn [(occ? [y] (cond (= y n) true (coll? y) (some occ? y) :else false))
+          (w [y inside]
+            (cond (and (seq? y) (= 'closure (first y))) (w (nth y 4) true)
+                  (and inside (= y n)) true
+                  (coll? y) (some #(w % inside) y)
+                  :else false))]
+    (w x false)))
+
 (defn expr
   "A Core expression as an STG expression"
   [e]
   (let [e (flatten-app e)]
     (case (first e)
-      lv (list 'app (local-name e) [])
+      lv (if (contains? @*joins* (local-name e))
+           (list 'app (local-name e) [(void-atom)])
+           (list 'app (local-name e) []))
       v (let [g (second e)]
           (if (con-name? g)
             (let [c (as-data g)]
@@ -298,13 +319,21 @@
       lit (first (lit-form (second e)))
       app (app-expr (second e) (nth e 2))
       lam (let [n (fresh "sat")] (list 'let (list 'bind [n :L] (rhs e)) (list 'app n [])))
-      let (reduce (fn [b [_ x e2 :as bd]]
+      let (if (and (= 1 (count (second e))) (fail-var? (second (first (second e)))))
+            ;; a failure handler shared by several alternatives: a join point over the void argument (GHC's
+            ;; mkFailurePair, CoreToStg's let-no-escape), an ordinary closure when a call is under a closure
+            (let [[_ f fe] (first (second e)) fname (local-name f) v (fresh "void")
+                  _ (swap! *joins* conj fname)
+                  body (expr (nth e 2))
+                  join? (not (under-closure? fname body))]
+              (list (if join? 'letne 'let) (list 'bind [fname :L] (list 'closure (if join? :j :r) :fvs [[v :v]] (expr fe))) body))
+          (reduce (fn [b [_ x e2 :as bd]]
                     (if-let [[c args] (floatable-con e2)]
                       (let [rs (mapv atom-of args)]
                         (wrap-binds (vec (mapcat second (reverse rs)))
                                     (list 'let (list 'bind [(local-name x) :L] (list 'rcon (gname c) (mapv first rs))) b)))
                       (let [[bn r] (bind-pair bd)] (list 'let (list 'bind bn r) b))))
-                  (expr (nth e 2)) (reverse (second e)))
+                  (expr (nth e 2)) (reverse (second e))))
       letrec (list 'let (apply list 'rec (map (fn [bd] (let [[bn r] (bind-pair bd)] (list 'bind bn r))) (second e)))
                    (expr (nth e 2)))
       case (if (and (= 1 (count (nth e 3))) (vector? (second (first (nth e 3)))) (newtype-con? (second (first (nth e 3)))))
@@ -410,7 +439,7 @@
                  alts2 (mapv (fn [[_ c bs body]] (let [[b2 f2] (fv-expr body)] [(list 'alt c bs b2) (remove (set (map first bs)) f2)])) alts)
                  afs (remove #{(first b)} (mapcat second alts2))]
              [(list 'case s2 b at (mapv first alts2)) (vec (distinct (concat fs afs)))])
-      let (let [[_ bd body] e]
+      (let letne) (let [[_ bd body] e]
             (if (= 'rec (first bd))
               (let [bs (rest bd) names (set (map (comp first second) bs))
                     rs (map (fn [[_ bn r]] (let [[r2 f] (fv-rhs r)] [(list 'bind bn r2) f])) bs)
@@ -419,7 +448,7 @@
                 [(list 'let (apply list 'rec (map first rs)) b2)
                  (vec (distinct (remove names (concat (mapcat second rs) f2))))])
               (let [[_ bn r] bd [r2 f] (fv-rhs r) [b2 f2] (fv-expr body)]
-                [(list 'let (list 'bind bn r2) b2) (vec (distinct (concat f (remove #{(first bn)} f2))))])))
+                [(list (first e) (list 'bind bn r2) b2) (vec (distinct (concat f (remove #{(first bn)} f2))))])))
       [e []])))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -458,7 +487,7 @@
 (defn module-stg
   "The desugared program as STG forms (a vector of top-level forms, the header first)"
   [r units file]
-  (binding [*r* r *units* units *names* (atom {}) *n* (atom 0) *reps* (atom {})]
+  (binding [*r* r *units* units *names* (atom {}) *n* (atom 0) *reps* (atom {}) *joins* (atom #{})]
     (let [prog (ds/desugar-program r)
           top-names (set (concat (for [[_ b _] prog] (if (lv? b) (local-name b) (gname b)))))
           has-main? (some (fn [[_ b _]] (= b ["ext" "var" (module) "main"])) prog)]
