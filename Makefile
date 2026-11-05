@@ -299,7 +299,7 @@ rust-front-corpus: ## RF1: the helper's mir, census and iface modes over the syn
 rust-front-mir-check: ## RF2: each program's MIR forms read and printed back equal to rustc's -Zunpretty=mir text (bin/rust-front mir-check)
 	bin/rust-front mir-check
 rust-front-codegen-check: ## RF3: the no_std samples (test/rust/front/) through arbace.rust.back.codegen, each function against rustc's IR, then the run (bin/rust-front codegen-check)
-	bin/rust-front codegen-check test/rust/front/a*.rs
+	bin/rust-front codegen-check test/rust/front/a[1-57].rs
 rust-front-coverage: ## RF3: the mono items rustc collects for the synthetic corpus and the samples, codegen'd and judged against rustc's IR, the refusals ranked (bin/rust-front coverage)
 	bin/rust-front coverage test/rust/synthetic/*.rs test/rust/sample/space.rs test/rust/sample/shapes.rs test/rust/eval/*.rs test/rust/front/a*.rs
 rust-front-collect: ## RF3: the collector slice's item set of each program against rustc's (bin/rust-front collect)

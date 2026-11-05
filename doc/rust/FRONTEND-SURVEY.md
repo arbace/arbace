@@ -718,8 +718,9 @@ inline assembly.
 `main` and `lang_start`; for `no_std` programs the functions with plain symbols and the panic handler) by what the bodies use:
 callees (the helper's resolved instances), drop glue, function items and pointers (a closure coerced to a pointer too), the
 functions and statics of the allocations the constants reach (vtables' methods among them), the panic functions the asserts call, the
-personality and terminate functions unwinding needs; after `rustc_monomorphize/src/collector.rs`. **80 of 81 programs' item sets equal
-rustc's** (`bin/rust-front collect`; the one miss, `iterators`, lacks one function item, `min_by_key::compare`). The instances
+personality and terminate functions unwinding needs; after `rustc_monomorphize/src/collector.rs`. **all 81 programs' item sets equal
+rustc's** (`bin/rust-front collect`; the first run missed 6 programs by one to six items each: closures coerced to function
+pointers, a function item held in a local). The instances
 themselves are the helper's (`Instance::try_resolve`): of the 23,287 calls of function items in the corpus's monomorphic bodies
 (`:callee` facts), 15,813 resolve to the very item named (nothing to resolve), 4,413 to another definition (an impl's method or a
 trait's default method: impl selection, RF8's work), 2,809 are intrinsics, 228 drop glue (167 empty), 24 virtual calls.
@@ -737,24 +738,25 @@ final IR of an `#[inline(always)]` callee is inlined into its callers (the first
 
 Results (`test/rust/front/coverage-2026-11-05.edn`, `.tmp/rust-front/mono/*.coverage.edn` per program):
 
-- the six `no_std` samples `a1`-`a7` (integers, structs, tuples, enums, arrays, overflow checks, panics, large aggregates;
+- the six `no_std` samples `a1`-`a5`, `a7` (integers, structs, tuples, enums, arrays, overflow checks, panics, large aggregates;
   `bin/rust-front codegen-check`): **every function equal**, and the programs built from our IR (`bin/rsi run --front mir`: the LLVM forms
   lowered by rsi's lowering to C, gcc `-O0`) give the exit statuses rustc's executables give (5, 212, 41, 17, 45); `a6` (drops,
-  unwinding) 8 of 11 (its `core::ptr::write_volatile` precondition checks need intrinsics);
-- the corpus: **7,117 of 11,453 mono items' functions equal rustc's IR (62.1 %)** over the 81 programs, **12 programs with every
-  item equal** (the six samples, `abort`, `exit-code`, `panic-assert`, `panic-todo`, `panic-unwrap-err`, `trap`). The progress of the
+  unwinding, as a monomorphic dump) 9 of 11;
+- the corpus: **8,023 of 11,453 mono items' functions equal rustc's IR (70.1 %)** over the 81 programs, **13 programs with every
+  item equal** (the six samples, `abort`, `exit-code`, `panic-assert`, `panic-assert-eq`, `panic-todo`, `panic-unwrap-err`, `trap`). The progress of the
   day: the scalar subset 391 of 4,526 (the first run; nine programs were not readable then), then aggregates, enums, unwinding,
-  `track_caller` and the shims, then folding, constants in memory, indirect aggregates and nop landing pads;
-- **runs**: six of those synthetic programs (`abort` 134, `exit-code` 37, `panic-assert`, `panic-todo`, `panic-unwrap-err` 101,
-  `trap` 132) built with their own unit made of our IR, linked with the host's native std as rsi's native-std leg links the oracle's
+  `track_caller` and the shims, then folding, constants in memory, indirect aggregates and nop landing pads (62.1 %), then the bit intrinsics, floats, pointer
+  constants and partly uninitialized allocations;
+- **runs**: seven of those synthetic programs (`abort` 134, `exit-code` 37, `panic-assert`, `panic-assert-eq`, `panic-todo`,
+  `panic-unwrap-err` 101, `trap` 132) built with their own unit made of our IR, linked with the host's native std as rsi's native-std leg links the oracle's
   (`bin/rust-front run-native`, `RSI_FRONT_IR` in `bin/lib/rsi/link`), give rustc's status, stdout and stderr (thread ids
   normalized). These print through `std::io::_print`, exit, trap and panic with a message: the first synthetic programs run from
   Arbace's code generation. rsi's ci leg and its lowered std (`runtime-ci`, minutes and gigabytes) were not run: the day's rule.
-- what blocks the rest, by items (the last run's refusals): `Offset` of non-scalar pointees 396, floats 300, an ABI the slice
-  does not take (`abi other`: vectors) 233, pointer scalars (constants) 224, `ctpop` 132, `ptr_offset_from_unsigned` 107,
-  `size_of_val` 75, arrays of non-scalars 67, `ctlz` 62, the saturating intrinsics 61, then a tail; 1,383 items differ (classes seen:
-  an alloca or a store the other side does not make in functions with drop flags of other shapes, an unreachable block the traversal
-  keeps, parameter attributes of newtype pointers) and 627 are whole programs' reads that failed (counted by item).
+- what blocks the rest, by items (the last run's refusals, `test/rust/front/coverage-2026-11-05.edn`): `Offset` of non-scalar
+  pointees 465 (rustc types them as named structs or byte arrays by rules not ported), an ABI the slice does not take (`abi other`:
+  vectors) 234, arrays of non-scalars 91, `size_of_val` 75, `BoxDerefTransmute` 55, unsizing of other pointers 53, `arith_offset`
+  42, `repeat` 40, a tail; 1,879 items differ (classes seen: an extra alloca or block where rustc's analysis differs, parameter
+  attributes of newtype pointers, `nuw` flags on some arithmetic) and 209 raise errors (bugs of the slice, counted by item).
 
 Findings worth keeping (the surprises of the first runs): the oracle IR needs `-C no-prepopulate-passes`; unsigned `AddWithOverflow`
 is `add` and `icmp ult res, lhs`, unsigned `SubWithOverflow` `sub` and `icmp ult lhs, rhs`, the other four use the intrinsics;
@@ -770,8 +772,8 @@ can fold (shifts, comparisons, int-to-pointer) never reach the IR as instruction
 
 RF1 (6-9 days planned): the modes the table names for RF3's judging are in (`mir`, `iface`, `layout` as the layouts table, the
 mono-items run, the census); `expanded`, `resolve`, `typeck` and `consts` (RF4-RF10's oracles) are not built. RF2 (3-5): done
-in under a day, the spec, reader, printer and check. RF3 (16-26 days): the first day took the code generation from nothing to 43.6 %
-of the mono items of 80 programs and to six programs running; what is left of the 16 to 26 is the remaining codegen
+in under a day, the spec, reader, printer and check. RF3 (16-26 days): the first day took the code generation from nothing to 70.1 %
+of the mono items of 81 programs, the collector's traversal to all 81 item sets, and seven programs to running; what is left of the 16 to 26 is the remaining codegen
 (memory aggregates and `memcpy`, floats, the intrinsics' list, virtual calls, `indirect` constants, about 5 to 8 days by the
 refusal counts), then the pieces the helper still answers: layout (`rustc_abi`, about 2,500 lines), the collector and instance
 resolution with specialization, v0 symbols (the crates' disambiguator hashes), vtable and drop glue and shim MIR from data
