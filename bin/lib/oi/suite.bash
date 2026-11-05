@@ -153,6 +153,7 @@ suite_header() { # LEVEL: replace the first comment block of a results file
 
 cmd_suite_check() {
   opts "$@"
+  if [ "$AOT" = 1 ] && [ "$LEVEL" = compiled ]; then cmd_suite_check_compiled; return; fi
   if [ "$AOT" = 1 ]; then cmd_suite_check_aot; return; fi
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"
   export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
@@ -167,6 +168,36 @@ cmd_suite_check() {
 ;; [PROGRAM RESULT REASON] as test/ocaml/check-oi.edn; the programs: the testsuite'"'"'s run tests O5'"'"'s corpus does not hold and the
 ;; opam set'"'"'s. Judged against ocamlc'"'"'s runs in test/ocaml/ref-suite.edn, classes test/ocaml/divergences-suite.edn.'
   fi
+}
+
+# the compiled level of the suite corpus (OT9's first fix; bin/oi's c2_programs): the units suite_dump dumps translated in the compiled
+# style, built in shards and run alone; test/ocaml/check-suite-aot-compiled.edn, classes divergences-suite-aot-compiled.edn
+cmd_suite_check_compiled() {
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; cmd_aot_clib
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_stage suite_names; export S OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  suite_selected > "$S/selected.tsv"
+  oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
+  C2=$S/compiled; rm -rf "$C2"; mkdir -p "$C2"
+  C2_OVERLAY=$(cd "$root" && ARBACE_HOST_EXE=$(arbace_exe) bin/jrt overlay | tail -1) || die "bin/jrt overlay"
+  suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $7, 0, $8, 0 }' | xargs -0 -n 5 -P 4 bash -c 'suite_dump "$@"' _
+  : > "$C2/cprogs.list"; : > "$C2/progs.tsv"
+  local id kind flags incs args env base units d n=0 out=$C2/check.tsv
+  : > "$out.new"
+  while IFS=$'\037' read -r id kind flags incs args env base units; do
+    d=$S/run/$id
+    if [ -f "$d/error" ]; then printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(cat "$d/error")" >> "$out.new"; continue; fi
+    n=$((n + 1))
+    printf 'ocaml.p%s\t%s\t%s%s\n' "$n" "$d/out" "$(inc_units "$incs" | sed 's/$/\t/' | tr -d '\n')" "$(paste -sd'\t' "$d/units.list")" >> "$C2/cprogs.list"
+    printf '%s\037p%s\037%s\037%s\037%s\037%s\n' "$id" "$n" "$d" "$args" "$env" "$(tail -1 "$d/units.list")" >> "$C2/progs.tsv"
+  done < <(suite_selected | awk -F'\t' '$2 == "run"' | tr '\t' '\037')
+  c2_programs "$out.new"
+  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
+  [ "${O2J_KEEP:-}" = 1 ] || rm -f "$C2"/s*/prog
+  local mode=judge; [ "$RECORD" = 1 ] && mode=record
+  [ -n "$ONLY" ] && mode=$mode-only
+  O2J_LEVEL=compiled O2J_KNOWN=$root/test/ocaml/aot-compiled-known.edn O2J_SLOW=$root/test/ocaml/aot-compiled-slow.edn \
+    "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$S/oi.tsv" \
+    "$root/test/ocaml/check-suite-aot-compiled.edn" "$root/test/ocaml/divergences-suite-aot-compiled.edn"
 }
 
 cmd_suite_check_aot() {

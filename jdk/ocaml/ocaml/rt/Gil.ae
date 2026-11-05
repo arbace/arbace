@@ -16,10 +16,17 @@
     (let [v (.get saved)]
       (set! Rt/depth (if (nil? v) 0 (.intValue (cast Integer v))))))
 
+  ;; the threads waiting for the lock, and the times it was taken (yield's)
+  (field ^:static ^int waiting 0)
+  (field ^:static ^long turn 0)
+
   (method ^:public ^:static lock ^void []
     (locking lk
+      (set! waiting (unchecked-inc-int waiting))
       (while held (.wait lk))
+      (set! waiting (unchecked-dec-int waiting))
       (set! held true)
+      (set! turn (unchecked-inc turn))
       (Gil/restore)))
 
   (method ^:public ^:static unlock ^void []
@@ -35,14 +42,28 @@
       (set! held false)
       (.notifyAll lk)
       (.wait lk)
+      (set! waiting (unchecked-inc-int waiting))
       (while held (.wait lk))
+      (set! waiting (unchecked-dec-int waiting))
       (set! held true)
+      (set! turn (unchecked-inc turn))
       (Gil/restore)))
 
   (method ^:public ^:static broadcast ^void []
     (locking lk (.notifyAll lk)))
 
+  ;; lets a thread that waits for the lock run first, if one does: the lock given up until another thread took it (turn moved)
+  ;; and gave it back (a plain unlock and lock would take it again before the waiting thread wakes)
   (method ^:public ^:static yield ^void []
-    (Gil/unlock)
-    (Thread/yield)
-    (Gil/lock)))
+    (locking lk
+      (when (> waiting 0)
+        (Gil/save)
+        (let [t turn]
+          (set! held false)
+          (.notifyAll lk)
+          (set! waiting (unchecked-inc-int waiting))
+          (while (or held (== turn t)) (.wait lk))
+          (set! waiting (unchecked-dec-int waiting))
+          (set! held true)
+          (set! turn (unchecked-inc turn))
+          (Gil/restore))))))

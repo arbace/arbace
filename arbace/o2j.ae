@@ -261,10 +261,15 @@
     (if (and tail? self (= 'var (hd f)) (= (second f) (:id self)) (= (count args) (:arity self)))
       (do (reset! (:used self) true)
           (with-args ctx args (fn [as] (apply list 'continue (:label self) as))))
+      ;; a tail call of another function of the letrec group (OC84 (c)): a TailCall the group function's entry bounces
+      (if (and tail? (:group ctx) (= 'var (hd f)) (= (get (:group ctx) (second f)) (count args)))
+        (do (reset! (:tails ctx) true)
+            (with-args ctx (into [f] args)
+                       (fn [as] (list 'new 'ocaml.rt.TailCall (first as) (list 'new 'Object/1 (vec (rest as)))))))
       ;; arguments right to left, then the function
       (if (simple? f)
         (with-args ctx args (fn [as] (call-form (expr ctx f false) as)))
-        (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as))))))))
+        (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as)))))))))
 
 ;; ---- functions
 
@@ -278,7 +283,7 @@
 (defn- closure-class!
   "Defines the member class of function node f (its free variables fields, self-id's references
   `this`); returns [class-sym free-ids]."
-  [ctx f self-id]
+  [ctx f self-id & [group]]
   (let [[kind ps _ body] (node-body f)
         cls (fresh "F")
         free (remove #(= % self-id) (free-ids f))
@@ -290,9 +295,21 @@
                    (when self-id {self-id 'this}))
         used (atom false)
         lbl (keyword (str "self" (swap! (:n *unit*) inc)))
-        ictx {:env env :exits {} :self (when self-id {:id self-id :label lbl :used used :arity arity})}
+        tails (atom false)
+        ictx {:env env :exits {} :self (when self-id {:id self-id :label lbl :used used :arity arity})
+              :group (not-empty (dissoc group self-id)) :tails tails}
         b (realize (expr ictx body true))
-        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) b)) b)
+        ;; a self tail call's loop ticks each turn (Rt/tick: other domains get the lock)
+        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) (list 'do (list 'ocaml.rt.Rt/tick) b))) b)
+        ;; a function of a letrec group of several (OC84 (c)): its body the method tb, which returns a TailCall for a tail call
+        ;; of another of the group; its entry calls tb and bounces (Rt/bounce: each TailCall's function's tb in turn, in one
+        ;; frame). Every function of such a group has a tb, being a TailCall's target or not
+        _ (when (:group ictx) (reset! tails true))
+        a (symbol "args$")
+        tb (when @tails
+             (list 'method (with-meta 'tb {:public true}) ['this (with-meta a {:tag 'Object/1})]
+                   (list 'let (vec (mapcat (fn [i p] [p (list 'aget a i)]) (range) params)) b)))
+        b (if @tails (list 'ocaml.rt.Rt/bounce (list '.tb 'this (list 'new 'Object/1 params))) b)
         ;; the call depth (OC92 (a)): counted on entry, given back on the way out (an exception's way out is the handler's,
         ;; trywith-node)
         r (fresh "r$")
@@ -305,7 +322,8 @@
             [(concat (list 'constructor (with-meta (into ['this] fields) {:public true})
                            (list 'super. arity))
                      (for [fl fields] (list 'set! (list (symbol (str ".-" fl)) 'this) fl)))
-             (method-for arity params b)]))
+             (method-for arity params b)]
+            (when tb [tb])))
     [cls free]))
 
 (defn- function-node [ctx f]
@@ -317,7 +335,9 @@
         idset (set ids)
         syms (into {} (for [id ids] [id (munge-id id)]))
         ctx2 (update ctx :env merge syms)
-        made (for [[id f] bs] (let [[cls free] (closure-class! ctx2 f id)] [id cls free]))
+        ;; the group's functions and their arities (OC84 (c): their tail calls of each other bounce)
+        group (into {} (for [[id f] bs :when (= 'function (hd f))] [id (count (second (node-body f)))]))
+        made (for [[id f] bs] (let [[cls free] (closure-class! ctx2 f id group)] [id cls free]))
         made (doall made)]
     (list 'let (vec (mapcat (fn [[id cls free]]
                               [(syms id) (apply list (symbol (str cls "."))
@@ -549,6 +569,7 @@
     (list 'let [l (expr ctx lo false) h (expr ctx hi false)]
           (list 'when (list (if up '<= '>=) (rt 'l l) (rt 'l h))
                 (list 'loop [(with-meta i {:tag 'long}) (rt 'l l)]
+                      (list 'ocaml.rt.Rt/tick)
                       (list 'let [s (list 'Long/valueOf i)] (expr (assoc-in ctx [:env id] s) body false))
                       (list 'when (list 'not (list '== i (rt 'l h)))
                             (list 'recur (list (if up 'unchecked-inc 'unchecked-dec) i)))))
@@ -577,7 +598,7 @@
       ifthenelse (let [[c t f] b] (list 'if (test-form ctx c) (expr ctx t tail?) (expr ctx f tail?)))
       sequence (let [xs (flatten-seq x)]
                  (concat (list 'do) (map #(expr ctx % false) (butlast xs)) [(expr ctx (last xs) tail?)]))
-      while (let [[c body] b] (list 'do (list 'while (test-form ctx c) (expr ctx body false)) UNIT))
+      while (let [[c body] b] (list 'do (list 'while (test-form ctx c) (list 'ocaml.rt.Rt/tick) (expr ctx body false)) UNIT))
       for (for-node ctx b)
       assign (let [[id e] b] (list 'do (list 'set! (lookup ctx id) (expr ctx e false)) UNIT))
       send (let [[kind m o args] b

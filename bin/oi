@@ -50,6 +50,12 @@
 #                                  a program stopped by the batch's wall-clock limit runs again alone under limited_cpu (OI_TIMEOUT seconds of
 #                                  CPU, the wall cap four times), the programs with an environment likewise; a timeout is the speed class only for
 #                                  the programs of test/ocaml/aot-slow.edn (oi's: oi-slow.edn); a recorded program with no row is GONE
+#   bin/oi check --aot --level compiled [--record] [--only RE | --only-list FILE]
+#                                  OT9's first fix (doc/ocaml/DEFERRED-TRIAGE.md, "As built: OT9's first fix"): the compiled level, the
+#                                  programs translated by o2j (clib, cprogs: a package ocaml.p<N> a program) and by j2g over the JDK's forms
+#                                  alone, in shards of O2J_SHARD programs (default 8) built by bin/build-go, each run alone; against ocamlopt's
+#                                  runs and oi's: test/ocaml/check-aot-compiled.edn, classes divergences-aot-compiled.edn (O2J_KEEP=1 keeps the
+#                                  shards' executables); bin/oi divergences --compiled judges its record alone
 #   bin/oi suite corpus|record-ref|check [--aot] [--record]|divergences [--aot]|actions|roles|expect|rollup [--record]
 #                                  O7 (survey, "As built: O7 (write-ahead)"; bin/lib/oi/suite.bash, testsuite.bash): the
 #                                  programs of the testsuite O5's corpus does not hold (no .reference, or ocamltest's modules:
@@ -452,6 +458,10 @@ cmd_check() {
 
 cmd_divergences() {
   cmd_pins || return 1
+  # the compiled level's record (OT9's first fix) against its classes
+  if [ "${1:-}" = --compiled ]; then
+    "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" divergences "$C2_RESULTS" "$C2_CLASSES"; return
+  fi
   if [ "${1:-}" = --aot ]; then
     "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" divergences "$root/test/ocaml/check-aot.edn" "$root/test/ocaml/divergences-aot.edn"; return
   fi
@@ -579,7 +589,8 @@ o2j_shard() {
     fi
     # the programs of left without a result
     awk -F'\t' 'NR==FNR { done[$1] = 1; next } !($1 in done)' "$res" "$left" > "$left.new"
-    if [ "$st" != 0 ] && [ "$st" != 3 ] && [ -s "$left.new" ]; then
+    # status 4: a program left domains running, the batch ended after its row (test/ocaml/o2j/run.ae); the rest in a new process
+    if [ "$st" != 0 ] && [ "$st" != 3 ] && [ "$st" != 4 ] && [ -s "$left.new" ]; then
       printf '%s\tcrash %s\t0\n' "$(head -1 "$left.new" | cut -f1)" "$st" >> "$res"
       tail -5 "$left.log" | tr '\n\t' '  ' >> "$O2J/crash.log"; echo >> "$O2J/crash.log"
       tail -n +2 "$left.new" > "$left"
@@ -688,14 +699,14 @@ c2_build() {
   done
   o2j shard "$s/forms" $(printf 'ocaml.%s ' "$@") > "$s/shard.log" 2>&1 || { echo "o2j shard: $(tail -1 "$s/shard.log")" > "$s/why"; return 1; }
   (cd "$root" && J2G_GO_EXE=$(arbace_exe) GOMAXPROCS=${O2J_BUILD_PROCS:-4} J2G_JOBS=2 GOMEMLIMIT=${O2J_J2G_MEM:-1700MiB} \
-     bin/j2g --jdk jdk/forms --input "$s/forms" --root 'ocaml.u.Shard#main' --main test/ocaml/o2j/main --out "$s/j2g") > "$s/j2g.log" 2>&1 \
+     /usr/bin/time -f '%e s %M KB' -o "$s/j2g.time" bin/j2g --jdk jdk/forms --input "$s/forms" --root 'ocaml.u.Shard#main' --main test/ocaml/o2j/main --out "$s/j2g") > "$s/j2g.log" 2>&1 \
     || { echo "j2g: $(grep -v '^\s' "$s/j2g.log" | tail -1 | head -c 200)" > "$s/why"; return 1; }
   # a class of the program's that j2g could not analyze (its report's failures name ocaml/ classes) is the shard's failure
   if grep -q '"class ocaml/[^"]*failed analysis' "$s/j2g/report.edn"; then
     echo "j2g: $(grep -o '"class ocaml/[^"]*: analysis failed[^"]*"' "$s/j2g/report.edn" | sort -u | head -1 | head -c 200)" > "$s/why"; return 1
   fi
   (cd "$root" && REPR_GO_EXE=$(arbace_exe) GOMAXPROCS=${O2J_BUILD_PROCS:-4} GOFLAGS=-p=2 GOMEMLIMIT=1800MiB GOCACHE=$O2J/gocache \
-     bin/build-go --line-file --arch amd64 --work "$s/work" -o "$s/prog" --overlay "$C2_OVERLAY" --root "$root/x509roots" \
+     /usr/bin/time -f '%e s %M KB' -o "$s/build.time" bin/build-go --line-file --arch amd64 --work "$s/work" -o "$s/prog" --overlay "$C2_OVERLAY" --root "$root/x509roots" \
      --main arbace/cmd/ocamlprog "$s/j2g/prog") > "$s/build.log" 2>&1 \
     || { echo "build: $(grep -v '^\s' "$s/build.log" | tail -1 | head -c 200)" > "$s/why"; return 1; }
   rm -rf "$s/work" "$s/forms"
@@ -710,6 +721,39 @@ c2_shard() {
   local h=$(($# / 2))
   c2_shard "${s}a" "${@:1:$h}"
   c2_shard "${s}b" "${@:$((h + 1))}"
+}
+
+# c2_programs OUT: the programs of C2/cprogs.list (PKG OUT-DIR UNIT..., tabs) and C2/progs.tsv (ID PKG DIR ARGS ENV ARGV0, by \037: read
+# collapses empty fields between tabs) translated
+# (o2j cprogs), built in shards and each run alone, its row appended to OUT (ID STATUS SHA BYTES SECONDS NOTE)
+c2_programs() {
+  local outnew=$1 id p d args env a0
+  o2j cprogs "$C2_LIB" "$C2/cprogs.list" > "$C2/translate.log" 2>&1 || { tail -5 "$C2/translate.log"; die "translate"; }
+  # the shards (programs o2j refused stay out)
+  : > "$C2/built.tsv"; : > "$C2/refused.tsv"
+  local size=${O2J_SHARD:-8} k=0 pkgs=()
+  while IFS=$'\037' read -r id p d args env a0; do
+    grep -q -F "refused	$d/out	" "$C2/translate.log" && continue
+    pkgs+=("$p")
+    if [ ${#pkgs[@]} = "$size" ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; pkgs=(); fi
+  done < "$C2/progs.tsv"
+  if [ ${#pkgs[@]} -gt 0 ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; fi
+  # the runs: each program alone, in its directory (C2/run/ID), argv.(0) its dump as the light level's
+  local prog st t0 t1 note r kv
+  while IFS=$'\037' read -r id p d args env a0; do
+    r=$(grep -m1 -F "refused	$d/out	" "$C2/translate.log" | cut -f3 || true)
+    [ -n "$r" ] || r=$(awk -F'\t' -v p="$p" '$1 == p {print $2}' "$C2/refused.tsv" | head -1)
+    if [ -n "$r" ]; then printf '%s\t-\t-\t0\t0\trefused: %s\n' "$id" "$r" >> "$outnew"; continue; fi
+    prog=$(awk -F'\t' -v p="$p" '{ n = split($2, a, " "); for (i = 1; i <= n; i++) if (a[i] == p) print $1 }' "$C2/built.tsv" | head -1)
+    st=0; t0=$(date +%s.%N); times > "$d/cpu0"
+    (cd "$d" && for kv in $env; do export "$kv"; done
+     O2J_PROG=$p O2J_ARGV0=$a0 GOMAXPROCS=1 GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} limited_cpu "$TIMEOUT" "$(oi_wall)" "$prog" $args > "$d/o2j.out" 2>&1) || st=$?
+    t1=$(date +%s.%N); times > "$d/cpu1"
+    st=$(oi_status "$st" "$(oi_cpu_secs "$d/cpu0" "$d/cpu1")")
+    note=$(grep -a -m1 -o 'o2j: .*' "$d/o2j.out" | head -c 300 | tr '\t' ' ' || true)
+    [ "$st" = 124 ] && note="timeout ${TIMEOUT}s of CPU"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/o2j.out" | cut -d' ' -f1)" "$(wc -c < "$d/o2j.out")" "$(echo "$t1 - $t0" | bc)" "$note" >> "$outnew"
+  done < "$C2/progs.tsv"
 }
 
 cmd_check_compiled() {
@@ -730,37 +774,11 @@ cmd_check_compiled() {
     grep -q '^(ocaml/error' "$d/$u.ae" && continue
     n=$((n + 1))
     printf 'ocaml.p%s\t%s\t%s%s\n' "$n" "$d/out" "$(inc_units "$incs" | sed 's/$/\t/' | tr -d '\n')" "$d/$u.ae" >> "$C2/cprogs.list"
-    printf '%s\tp%s\t%s\t%s\t%s\n' "$id" "$n" "$d" "$args" "$env" >> "$C2/progs.tsv"
+    printf '%s\037p%s\037%s\037%s\037%s\037%s\n' "$id" "$n" "$d" "$args" "$env" "$d/$u.ae" >> "$C2/progs.tsv"
   done < <(awk -F'\t' '$2 == "run"' "$C2/selected.tsv" | tr '\t' '\037')
-  o2j cprogs "$C2_LIB" "$C2/cprogs.list" > "$C2/translate.log" 2>&1 || { tail -5 "$C2/translate.log"; die "translate"; }
-  # the shards (programs o2j refused stay out)
-  : > "$C2/built.tsv"; : > "$C2/refused.tsv"
-  local size=${O2J_SHARD:-8} k=0 pkgs=()
-  while IFS=$'\t' read -r id p d args env; do
-    grep -q -F "refused	$d/out	" "$C2/translate.log" && continue
-    pkgs+=("$p")
-    if [ ${#pkgs[@]} = "$size" ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; pkgs=(); fi
-  done < "$C2/progs.tsv"
-  if [ ${#pkgs[@]} -gt 0 ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; fi
-  # the runs: each program alone, in its directory (C2/run/ID), argv.(0) its dump as the light level's
-  local out=$C2/check.tsv prog st t0 t1 note r kv
+  local out=$C2/check.tsv
   : > "$out.new"
-  while IFS=$'\t' read -r id p d args env; do
-    base=$(basename "$id"); u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
-    r=$(grep -m1 -F "refused	$d/out	" "$C2/translate.log" | cut -f3 || true)
-    [ -n "$r" ] || r=$(awk -F'\t' -v p="$p" '$1 == p {print $2}' "$C2/refused.tsv" | head -1)
-    if [ -n "$r" ]; then printf '%s\t-\t-\t0\t0\trefused: %s\n' "$id" "$r" >> "$out.new"; continue; fi
-    prog=$(awk -F'\t' -v p="$p" '{ n = split($2, a, " "); for (i = 1; i <= n; i++) if (a[i] == p) print $1 }' "$C2/built.tsv" | head -1)
-    st=0; t0=$(date +%s.%N); times > "$d/cpu0"
-    (cd "$d" && for kv in $env; do export "$kv"; done
-     O2J_PROG=$p O2J_ARGV0=$d/$u.ae GOMAXPROCS=1 GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} limited_cpu "$TIMEOUT" "$(oi_wall)" "$prog" $args > "$d/o2j.out" 2>&1) || st=$?
-    t1=$(date +%s.%N); times > "$d/cpu1"
-    st=$(oi_status "$st" "$(oi_cpu_secs "$d/cpu0" "$d/cpu1")")
-    note=$(grep -a -m1 -o 'o2j: .*' "$d/o2j.out" | head -c 300 | tr '\t' ' ' || true)
-    [ "$st" = 124 ] && note="timeout ${TIMEOUT}s of CPU"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/o2j.out" | cut -d' ' -f1)" "$(wc -c < "$d/o2j.out")" "$(echo "$t1 - $t0" | bc)" "$note" >> "$out.new"
-    rm -f "$d/$u.ae"
-  done < "$C2/progs.tsv"
+  c2_programs "$out.new"
   # the dumps the oracle refused
   awk -F'\t' '$2 == "run" {print $1}' "$C2/selected.tsv" | while read -r id; do
     base=$(basename "$id"); u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}; d=$C2/run/$id
