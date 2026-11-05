@@ -52,6 +52,12 @@ stats xs = (mean, sqrt var)
     mean = sum xs / n
     var = sum [(x - mean) ^ (2 :: Int) | x <- xs] / n
 
+lazyConst :: (Int, Int) -> Int
+lazyConst ~(_, _) = 1
+
+swapL :: (a, b) -> (b, a)
+swapL ~(a, b) = (b, a)
+
 main :: IO ()
 main = do
   mapM_ (putStrLn . uncurry grade) [(95, 99), (95, 10), (10, 95), (1, 2)]
@@ -66,3 +72,4 @@ main = do
   print sd
   print (words "a bc  def", unwords ["x", "y"], zip3 [1 :: Int ..] "ab" [True, False])
   print (concatMap (replicate 2) "abc", show (-5 :: Int), [minBound, maxBound :: Int])
+  print (lazyConst undefined, swapL (1 :: Int, 'z'))
