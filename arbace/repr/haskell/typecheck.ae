@@ -150,6 +150,8 @@
   (doseq [i (metas-of t)]
     (swap! *metas* update i (fn [m] (assoc m :level (min (:level m) lvl))))))
 
+(declare want! instantiate)
+
 (defn unify [a b]
   (let [a (prune a) b (prune b)]
     (cond
@@ -157,6 +159,9 @@
       (= :mv (first a)) (do (adjust-levels! b (:level (get @*metas* (second a))))
                             (swap! *metas* assoc-in [(second a) :ref] b) true)
       (= :mv (first b)) (unify b a)
+      ;; a higher-rank argument (runST's forall s. ST s a): trusted, its variables instantiated (no escape check)
+      (= :forall (first a)) (let [[t ps] (instantiate a)] (doseq [p ps] (want! p)) (unify t b))
+      (= :forall (first b)) (unify b a)
       (and (= :tc (first a)) (get @*syns* (second a)) (not= a (expand a))) (unify (expand a) b)
       (and (= :tc (first b)) (get @*syns* (second b)) (not= b (expand b))) (unify a (expand b))
       (and (= :tc (first a)) (= :tc (first b)) (= (second a) (second b)) (= (count (nth a 2)) (count (nth b 2))))
@@ -206,6 +211,7 @@
 (def ^:dynamic *insts* nil)     ; atom [{:dfun NAME :tvs :ctx :head pred}]
 (def ^:dynamic *cons* nil)      ; atom {NAME {:arity n :tycon NAME :fields [...]}}
 (def iface-cache (atom {}))
+(def ^:dynamic *unfoldings* nil) ; atom {NAME core}: the INLINE default methods' unfoldings (hsiface/unfoldings)
 
 (defn- strs [n] (vec (map #(if (symbol? %) (name %) %) n)))
 
@@ -262,7 +268,10 @@
     (let [forms (read-forms (slurp f))
           by (into {} (map (fn [x] [(first x) x]) forms))]
       (add-things! (second (get by 'hsiface/things)))
-      (add-instances! (second (get by 'hsiface/instances))))))
+      (add-instances! (second (get by 'hsiface/instances)))
+      (when *unfoldings*
+        (doseq [u (second (get by 'hsiface/unfoldings))]
+          (swap! *unfoldings* assoc (strs (second u)) (nth u 2)))))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Evidence
@@ -380,7 +389,7 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Expressions
 
-(declare infer tc-local-binds infer-matches tc-pat infer-grhss rename-mono reduce-by-instance substitute)
+(declare want! infer tc-local-binds infer-matches tc-pat infer-grhss rename-mono reduce-by-instance substitute)
 
 ;; env: {NAME {:mono type} | {:poly type :core term}}
 
@@ -683,7 +692,7 @@
                  [lt lc] (overlit (list 'HsOverLit nil (lval (arg v 2))))]
              (unify lt t)
              (unify te (fn-ty t (fn-ty t (con-ty tc-bool))))
-             [env (list 'plit ce lc)])
+             [env (list 'plit ce lc t)])
       LitPat (let [[lt lc] (hslit v)] (unify lt t) [env (list 'plit lc)])
       SigPat (let [sig (arg (arg v 3) 2)
                    st (hs-type {} sig)]
@@ -1100,8 +1109,10 @@
                     [cm (if b
                           (check-method env b (method-type mn cls ts) givens params)
                           (if-let [dm (get (:defaults info) mn)]
-                            (let [d (if (empty? params) (list 'v dfun) (list 'app (list 'v dfun) params))]
-                              (if (empty? params) (list 'app (list 'v dm) [d]) (list 'lam params (list 'app (list 'v dm) [d]))))
+                            ;; a default method with an INLINE pragma is inlined, as GHC does even at -O0
+                            (let [d (if (empty? params) (list 'v dfun) (list 'app (list 'v dfun) params))
+                                  f (or (get @*unfoldings* dm) (list 'v dm))]
+                              (if (empty? params) (list 'app f [d]) (list 'lam params (list 'app f [d]))))
                             (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "noMethodBindingError")) [(list 'lit (occ mn))])))]))
         supers (for [[sc sts] (:supers info)]
                  (or (solve-pred [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)] (vec (remove #(= [cls ts] (first %)) givens)) 0)
@@ -1165,6 +1176,13 @@
     (and (seq? c) (= 'ev (first c))) (let [t (get @*evidence* (second c))]
                                        (if t (resolve-core t) (list 'unsolved (second c))))
     (and (seq? c) (= 'olit (first c))) (let [[_ kind val ty ev f] c] (resolve-core (lit-core kind val ty ev f)))
+    ;; GHC's tidyNPat: a numeric literal pattern at a type with built-in literals is matched directly, no (==)
+    (and (seq? c) (= 'plit (first c)) (= 4 (count c)))
+    (let [t (expand (zonk (nth c 3)))]
+      (if (and (= :tc (first t)) (contains? #{"Int" "Word" "Char" "Double" "Float"} (occ (second t)))
+               (contains? #{"GHC.Internal.Types"} (nmod (second t))))
+        (list 'plit (resolve-core (nth c 2)))
+        (list 'plit (resolve-core (nth c 1)) (resolve-core (nth c 2)))))
     (seq? c) (let [c' (apply list (map resolve-core c))]
                ;; flatten (app (app f a) b)
                (if (and (= 'app (first c')) (seq? (second c')) (= 'app (first (second c'))))
@@ -1183,7 +1201,7 @@
         m module]
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
               *genv* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
-              *wanteds* (atom []) *evidence* (atom {})]
+              *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {})]
       (load-ifaces!)
       (let [tycl (for [d decls :let [v (lval d)] :when (= 'TyClD (con v))] (arg v 2))
             _ (doseq [t tycl] (case (con t) SynDecl (syn-decl! t) nil))
@@ -1312,7 +1330,9 @@
 (defn- dict-term? [x]
   (and (seq? x)
        (case (first x)
-         v (dict-name? (nth (vec (second x)) 3 ""))
+         ;; a name as a vector, or as the judge's normalised text (ext ns "M" "occ")
+         v (let [n (second x)]
+             (dict-name? (if (string? n) (or (second (re-find #"\"([^\"]*)\"\)$" n)) "") (str (nth (vec n) 3 "")))))
          lv (str/starts-with? (str (second x)) "$d")
          app (and (dict-term? (second x)) (every? dict-term? (nth x 2)))
          false)))

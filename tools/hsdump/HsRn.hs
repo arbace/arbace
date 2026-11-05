@@ -50,7 +50,8 @@ import GHC.Core.Type (Type, PredType)
 import GHC.Unit.Module.ModIface
 import GHC.Core.Coercion.Axiom (CoAxiom(..), CoAxBranch(..), fromBranches, Role(..))
 import GHC.Core.FamInstEnv (FamInst(..), famInstEnvElts)
-import GHC.Types.Id (idArity, idDmdSig, isDataConWorkId, isDFunId)
+import GHC.Types.Id (idArity, idDmdSig, isDataConWorkId, isDFunId, realIdUnfolding)
+import GHC.Core (maybeUnfoldingTemplate)
 import GHC.Types.Var (isTyVar, isCoVar, Var, varUnique)
 import GHC.Core (CoreExpr, Expr(..), Bind(..), Alt(..), AltCon(..), CoreBind)
 import GHC.Types.Literal (Literal(..))
@@ -327,6 +328,13 @@ ifaceOf outDir m = do
       let insts = instEnvElts (eps_inst_env eps)
       let dnames = nubNames [n | a <- mi_exports iface, n <- availNames a, nameModule_maybe n == Just m]
       things <- fmap catMaybes (mapM lookupName dnames)
+      -- the default methods' unfoldings: GHC gives every default method a compulsory unfolding (GHC.Tc.TyCl.Instance,
+      -- Note [INLINE and default methods]), inlined into an instance's missing method even at -O0, so the elaborator
+      -- needs it: (dm-unfolding NAME CORE), the Core erased as the tc verb's
+      let dmNames = [ n | ATyCon tc <- things, Just cls <- [tyConClass_maybe tc], (_, Just (n, _)) <- classOpItems cls ]
+      dms <- fmap catMaybes (mapM lookupName dmNames)
+      let unfoldings = [ "(dm-unfolding " ++ nameF (getName i) ++ " " ++ coreF e ++ ")"
+                       | AnId i <- dms, Just e <- [maybeUnfoldingTemplate (realIdUnfolding i)] ]
       let mn = moduleNameString (moduleName m)
           exps = map availF (mi_exports iface)
           fixes = sortOn fst [ (occNameString o, "(fixity " ++ nsOf o ++ " " ++ esc (occNameString o) ++ " " ++ show p ++ " " ++ dirS d ++ ")")
@@ -344,6 +352,7 @@ ifaceOf outDir m = do
           hPutStrLn h ("(hsiface/things [" ++ intercalate "\n  " (sort (map thingF defined)) ++ "])")
           hPutStrLn h ("(hsiface/instances [" ++ intercalate "\n  " (sort [ "(instance " ++ nameF (getName (is_dfun i)) ++ " " ++ typeF (varType (is_dfun i)) ++ ")"
                                                                       | i <- insts, nameModule_maybe (getName (is_dfun i)) == Just m ]) ++ "])")
+          hPutStrLn h ("(hsiface/unfoldings [" ++ intercalate "\n  " (sort unfoldings) ++ "])")
           hPutStrLn h ("(hsiface/fam-instances [" ++ intercalate "\n  " (sort [ famInstF fi | fi <- famInstEnvElts (eps_fam_inst_env eps), nameModule_maybe (getName (fi_axiom fi)) == Just m ]) ++ "])")
       return (True, nubMods [nameModule n | a <- mi_exports iface, n <- availNames a, not (isInternalName n), not (isSystemName n), isExternalName n])
   where unitString' = pprS . moduleUnit
