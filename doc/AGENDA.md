@@ -144,6 +144,16 @@ The nights to the tag:
   7. Haskell's REAP row (`haskell-row`; started).
   8. OCaml's deferred cases triaged (190 at eval, 219 at AOT).
   9. LLVM IR's REAP row (`llvm-row`; started).
+- **The bottom crops, third round (the user, 2026-11-05):**
+  1. OCaml OT9 fixes 6-8: sockets, processes and signals (OT18), compiler-libs (`ocaml-libs3`; started).
+  2. OCaml T11, the run corpus and the REPL on the native path (after T10, running on `ocaml-t10`).
+  3. C++ CPR1: the print cell reads the oracle's rejections natively, with cpp-native2 merged; CPR4 at its re-record (`cpp-cpr1`;
+     started).
+  4. C++ G4, the library headers (`cpp-g4`; running).
+  5. Haskell HF5/HF6: the match compiler, CorePrep, CoreToStg and Unarise ported; programs run on hsi from our STG
+     (`haskell-hf56`; started).
+  6. LLVM LLS21: the ci builtins and the function pointer's return width (`ci-lls21`; started).
+  7. Rust: a night script for rsi's records (runtime-ci, aot-lib, check and check --aot, record-ref).
 
 ## Open
 
