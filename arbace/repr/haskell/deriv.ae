@@ -386,18 +386,32 @@
     nil))
 
 (defn classify
-  "A field type seen from var: :triv, :var, [:app fun arg] (the variable in the last argument only) or :bad"
+  "A field type seen from var: :triv, :var, [:app fun arg] (the variable in the last argument only), [:tup types]
+  (a tuple) or :bad"
   [var t]
   (cond
     (not (ty-contains? var t)) :triv
     (= t [:tv var]) :var
+    (and (= :tc (first t)) (re-find #"^Tuple[0-9]+$" (str (occ-of (second t))))) [:tup (nth t 2)]
     :else (let [[f a] (split-app t)]
             (cond (nil? f) :bad
                   (ty-contains? var f) :bad
-                  (and (= :tc (first t)) (re-find #"Tuple|Unit|FUN" (str (occ-of (second t))))) :bad
+                  (and (= :tc (first t)) (re-find #"Unit|FUN" (str (occ-of (second t))))) :bad
                   :else [:app f a]))))
 
+(defn ok?
+  "A field type the Functor-like generators handle, at every depth"
+  [var t]
+  (let [k (classify var t)]
+    (cond (= k :bad) false
+          (and (vector? k) (= :tup (first k))) (every? #(ok? var %) (second k))
+          (vector? k) (ok? var (nth k 2))
+          :else true)))
+
 (defn- supply [] (let [n (atom 0)] (fn [] (lname (str "y" (swap! n inc))))))
+
+(defn- tup-names [fresh n] (vec (repeatedly n fresh)))
+(defn- tup-pat [names] (tp (map (fn [n] (L* (list 'VarPat nil (nmx n)))) names)))
 
 (defn- bs-pat [c] (con-pat c (as-names "b" (:arity c))))
 
@@ -405,7 +419,7 @@
   (let [fmap (gv base "fmap") repl (gv base "<$")
         f (v* (lname "f")) z (v* (lname "z"))
         kinds (fn [c] (mapv #(classify var %) (:tys c)))]
-    (when (every? (fn [c] (every? #(not= :bad %) (kinds c))) cons)
+    (when (every? (fn [c] (every? #(ok? var %) (:tys c))) cons)
       (let [mk (fn [replace?]
                  (fn [c]
                    (let [fresh (supply)
@@ -413,6 +427,8 @@
                               (let [k (classify var t)]
                                 (cond (= k :triv) x
                                       (= k :var) (if replace? z (ap* f x))
+                                      (= :tup (first k)) (let [ns (tup-names fresh (count (second k)))]
+                                                           (hcase x [[(tup-pat ns) (tuple* (map (fn [t n] (go t (v* n))) (second k) ns))]]))
                                       :else (let [[_ _ a] k]
                                               (if (= a [:tv var])
                                                 (if replace? (ap* (v* repl) z x) (ap* (v* fmap) f x))
@@ -434,23 +450,42 @@
   (let [foldr-r (gv foldable-m "foldr") foldmap-r (gv foldable-m "foldMap") null-r (gv foldable-m "null") all-r (gv foldable-m "all")
         mempty (gv base "mempty") mappend (gv base "mappend")
         f (v* (lname "f")) z (v* (lname "z"))]
-    (when (and (seq cons) (every? (fn [c] (every? #(not= :bad (classify var %)) (:tys c))) cons))
+    (when (and (seq cons) (every? (fn [c] (every? #(ok? var %) (:tys c))) cons))
       (let [fresh (supply)
             ;; foldr: parts are \x z -> ...
             fr-part (fn fr [t]
                       (let [k (classify var t)]
                         (cond (= k :triv) nil
                               (= k :var) f
+                              (= :tup (first k))
+                              (let [ns (tup-names fresh (count (second k))) x (fresh) zz (fresh)
+                                    ps (map (fn [t n] (when-let [p (fr t)] (ap* p (v* n)))) (second k) ns)]
+                                (lam* [(vp (nth x 2)) (vp (nth zz 2))]
+                                      (hcase (v* x) [[(tup-pat ns) (reduce (fn [acc e] (ap* e acc)) (v* zz) (reverse (keep identity ps)))]])))
                               :else (let [[_ _ a] k gg (fr a)]
                                       (when gg (let [x (fresh) zz (fresh)]
                                                  (lam* [(vp (nth x 2)) (vp (nth zz 2))] (ap* (v* foldr-r) gg (v* zz) (v* x)))))))))
             fm-part (fn fm [t]
                       (let [k (classify var t)]
                         (cond (= k :triv) nil (= k :var) f
+                              (= :tup (first k))
+                              (let [ns (tup-names fresh (count (second k))) x (fresh)
+                                    xs (keep identity (map (fn [t n] (when-let [p (fm t)] (ap* p (v* n)))) (second k) ns))]
+                                (lam* [(vp (nth x 2))]
+                                      (hcase (v* x) [[(tup-pat ns) (reduce (fn [acc e] (ap* (v* mappend) e acc)) (last xs) (reverse (butlast xs)))]])))
                               :else (let [[_ _ a] k gg (fm a)] (when gg (ap* (v* foldmap-r) gg))))))
             null-part (fn nl [t]
                         (let [k (classify var t)]
                           (cond (= k :triv) :is-null (= k :var) :not-null
+                                (= :tup (first k))
+                                (let [rs (map nl (second k))]
+                                  (if (some #(= :not-null %) rs)
+                                    :not-null
+                                    (let [ns (tup-names fresh (count rs)) x (fresh)
+                                          xs (keep identity (map (fn [r n] (when (vector? r) (ap* (second r) (v* n)))) rs ns))]
+                                      (if (empty? xs) :is-null
+                                          [:null (lam* [(vp (nth x 2))]
+                                                       (hcase (v* x) [[(tup-pat ns) (reduce (fn [acc e] (op* e and-rdr acc)) (last xs) (reverse (butlast xs)))]]))]))))
                                 :else (let [[_ _ a] k r (nl a)]
                                         (case r :not-null [:null (v* null-r)] :is-null :is-null
                                           [:null (ap* (v* all-r) (second r))])))))
@@ -471,26 +506,33 @@
 
 (defn gen-traversable [{:keys [cons var]}]
   (let [trav (gv trav-m "traverse") pure (gv base "pure") fmap (gv base "fmap") liftA2 (gv base "liftA2") ap (gv base "<*>")
-        f (v* (lname "f"))]
-    (when (every? (fn [c] (every? #(not= :bad (classify var %)) (:tys c))) cons)
+        f (v* (lname "f")) fresh (supply)
+        ;; GHC's mkApCon: the components with a part are traversed, the value rebuilt under the applicative
+        ap-con (fn [as ps build]
+                 (let [just? (map some? ps)
+                       xs (vec (keep identity (map (fn [p a] (when p (ap* p a))) ps as)))
+                       bs (vec (keep identity (map (fn [j i] (when j (lname (str "b" (inc i))))) just? (range))))
+                       vars (map (fn [j a i] (if j (v* (lname (str "b" (inc i)))) a)) just? as (range))
+                       con-expr (if (empty? xs) (build as)
+                                    (lam* (map #(L* (list 'VarPat nil (nmx %))) bs) (build vars)))]
+                   (cond (empty? xs) (ap* (v* pure) con-expr)
+                         (= 1 (count xs)) (ap* (v* fmap) con-expr (first xs))
+                         :else (reduce (fn [acc x] (ap* (v* ap) acc x))
+                                       (ap* (v* liftA2) con-expr (first xs) (second xs)) (drop 2 xs)))))]
+    (when (every? (fn [c] (every? #(ok? var %) (:tys c))) cons)
       (let [part (fn pt [t]
                    (let [k (classify var t)]
                      (cond (= k :triv) nil (= k :var) f
+                           (= :tup (first k))
+                           (let [ns (tup-names fresh (count (second k))) x (fresh)
+                                 ps (map pt (second k))]
+                             (lam* [(vp (nth x 2))]
+                                   (hcase (v* x) [[(tup-pat ns) (ap-con (map v* ns) ps #(tuple* %))]])))
                            :else (let [[_ _ a] k gg (pt a)] (when gg (ap* (v* trav) gg))))))
             clause (fn [c]
-                     (let [as (as-names "a" (:arity c))
-                           ps (map part (:tys c))
-                           just? (map some? ps)
-                           xs (vec (keep identity (map (fn [p a] (when p (ap* p (v* a)))) ps as)))
-                           bs (vec (keep identity (map (fn [j i] (when j (lname (str "b" (inc i))))) just? (range))))
-                           vars (map (fn [j a i] (if j (v* (lname (str "b" (inc i)))) (v* a))) just? as (range))
-                           con-expr (if (empty? xs) (apply ap* (v* (:name c)) (map v* as))
-                                        (lam* (map #(L* (list 'VarPat nil (nmx %))) bs) (apply ap* (v* (:name c)) vars)))
-                           rhs (cond (empty? xs) (ap* (v* pure) con-expr)
-                                     (= 1 (count xs)) (ap* (v* fmap) con-expr (first xs))
-                                     :else (reduce (fn [acc x] (ap* (v* ap) acc x))
-                                                   (ap* (v* liftA2) con-expr (first xs) (second xs)) (drop 2 xs)))]
-                       [[(vp "f") (con-pat c as)] rhs]))]
+                     (let [as (as-names "a" (:arity c))]
+                       [[(vp "f") (con-pat c as)]
+                        (ap-con (map v* as) (map part (:tys c)) #(apply ap* (v* (:name c)) %))]))]
         [(funbind trav (map clause cons))]))))
 
 (def generators
@@ -506,4 +548,7 @@
   "The type constructors (partial applications) a Functor-like instance needs an instance of for a field type:
   GHC's deepSubtypesContaining"
   [var t]
-  (let [k (classify var t)] (if (vector? k) (cons (second k) (fun-subtypes var (nth k 2))) [])))
+  (let [k (classify var t)]
+    (cond (and (vector? k) (= :tup (first k))) (vec (mapcat #(fun-subtypes var %) (second k)))
+          (vector? k) (cons (second k) (fun-subtypes var (nth k 2)))
+          :else [])))
