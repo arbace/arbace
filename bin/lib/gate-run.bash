@@ -105,6 +105,20 @@ gate_ocaml_id() {  # the :ocaml host's identity (O8): OCaml's reference and orac
              "$w/stdlib.cma" "$w/stdlib.cmxa" "$w/stdlib.a"; do
       if [ -f "$f" ]; then sha256sum < "$f" | cut -c1-64; else echo "missing $f"; fi; done; } | sha256sum | cut -c1-64
 }
+gate_cxx_id() {  # the :cxx host's identity (CX10): g++'s and clang++'s --version lines, the digests of their drivers, cc1plus and clang's
+  # binary, resolved through their links, and of the headers C++'s checks read (test/cpp/host/headers.sha256's: libstdc++'s, musl's); none
+  # without either compiler
+  local g c p
+  g=$(command -v g++) && c=$(command -v clang++) || { echo none; return; }
+  g=$(readlink -f "$g"); c=$(readlink -f "$c"); p=$(readlink -f "$(g++ -print-prog-name=cc1plus 2>"$TMPDIR/gate-cxx.err")" 2>"$TMPDIR/gate-cxx.err")
+  { g++ --version 2>"$TMPDIR/gate-cxx.err" | head -1
+    clang++ --version 2>"$TMPDIR/gate-cxx.err" | head -1
+    sha256sum < "$g" | cut -c1-64
+    if [ -f "$p" ]; then sha256sum < "$p" | cut -c1-64; else echo "no cc1plus"; fi
+    sha256sum < "$c" | cut -c1-64
+    awk '{print $2}' "$root/test/cpp/host/headers.sha256" 2>"$TMPDIR/gate-cxx.err" | while read -r h; do
+      if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64
+}
 plan_inputs() {  # plan_inputs DIR: DIR/files.sha256, DIR/hosts.edn and DIR/ancestors.txt
   local d=$1 jdk rel
   mkdir -p "$d"
@@ -165,7 +179,9 @@ javac none
     printf ' :chibi "%s"\n' "$(gate_scheme_id "${CHIBI:-chibi-scheme}" -V)"
     # :ocaml (O8; doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)"): the host's OCaml 5.5.0, repr/ocaml's oracle (tools/ocdump on
     # compiler-libs) and oi's references (ocamlc's and ocamlopt's runs); the steps judge against the recorded runs, the helper live
-    printf ' :ocaml "%s"}\n' "$(gate_ocaml_id)"; } > "$d/hosts.edn"
+    printf ' :ocaml "%s"\n' "$(gate_ocaml_id)"
+    # :cxx (CX10; doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"): the host's g++ and clang++, C++'s references and oracle
+    printf ' :cxx "%s"}\n' "$(gate_cxx_id)"; } > "$d/hosts.edn"
 }
 run_plan() {  # run_plan DIR [--rerun]: the plan into DIR (plan.tsv, plan/), printed; plan_rot (GT8.4): --night N or --rotation subset
   local d=$1; shift

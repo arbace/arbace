@@ -51,9 +51,20 @@
   "Files `n` of `of` (1-based) of a corpus' sorted list, or all: --sample N takes every Nth file."
   [files sample] (if (and sample (> (long sample) 1)) (vec (take-nth (long sample) files)) files))
 
+(defn- only-names
+  "The names of corpus ID in an --only list (CX10: one CORPUS/NAME a line, `#` comments and blank lines skipped), or nil."
+  [^String f ^String id]
+  (let [pre (str id "/")]
+    (vec (for [l (str/split-lines (slurp f))
+               :let [l (str/trim l)]
+               :when (and (seq l) (not (str/starts-with? l "#")) (str/starts-with? l pre))]
+           (subs l (count pre))))))
+
 (defn lists
   "Writes WORK/CORPUS/files.edn (the entries), base.txt, gxx.list and clang.list for each corpus id; `roots` maps
-  a :root to its directory, `sample` keeps every Nth file."
+  a :root to its directory, `sample` keeps every Nth file. CX10: `sample` a map {:only FILE :key K} keeps the files FILE
+  names under the corpus (CORPUS/NAME a line; a name not in the corpus refused), the round trip's list headed
+  `#list CORPUS-K`, and marks the corpus' run a subset (WORK/CORPUS/subset.txt: its known entries held only for its files)."
   [^String work roots sample ids]
   (let [man (read-string (slurp corpora-file))]
     (doseq [id ids]
@@ -67,7 +78,10 @@
             _ (when (and (:count corpus) (not= (long (:count corpus)) (count all)))
                 (throw (ex-info (str id ": the tree " dir " has " (count all) " files, the manifest counts " (:count corpus)
                                      " (a partial extraction?)") {})))
-            files (shard-of all sample)
+            only (when (map? sample) (only-names (:only sample) id))
+            _ (when-let [bad (seq (remove (set all) only))]
+                (throw (ex-info (str id ": --only names files the corpus does not have: " (str/join " " (take 5 bad))) {})))
+            files (if (map? sample) (vec (filter (set only) all)) (shard-of all sample))
             corpus (assoc corpus :absolute (or (:absolute corpus) (= (:root (:where corpus)) :gcc-15.2.0)))
             subst (fn [as] (mapv (fn [^String a] (reduce-kv (fn [a k v] (str/replace a (str "{" (name k) "}") (str v))) a roots)) as))
             corpus (update (update corpus :cxx-args subst) :cxx-args-for (fn [fs] (mapv #(update % :args subst) fs)))
@@ -84,7 +98,12 @@
         ;; re-review 032's F4: the same list under a header naming its corpus for the round trip's oracle record (the key of
         ;; test/repr/cpp/roundtrip-oracle.edn: the id, every Nth file or all)
         (spit (str d "/roundtrip.list")
-              (str "#list " id (if (and sample (> (long sample) 1)) (str "-every-" sample) "-all") "\n" (slurp (str d "/gxx.list"))))
+              (str "#list " id (cond (map? sample) (str "-" (:key sample "only"))
+                                     (and sample (> (long sample) 1)) (str "-every-" sample)
+                                     :else "-all")
+                   "\n" (slurp (str d "/gxx.list"))))
+        (let [m (java.io.File. (str d "/subset.txt"))]
+          (if (map? sample) (spit m (str (:only sample) "\n")) (.delete m)))
         (println (str id ": " (count files) " files" (when (> (count all) (count files)) (str " of " (count all)))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -109,6 +128,16 @@
               (= (.-ch t) :IDENTIFIER) [(cpc/norm-ident (.-src t))]
               :else [(.-src t)]))
           (:tokens r)))
+
+(defn unplaced
+  "CX10: the texts with the corpus' directory BASE written {base}: a file read by its absolute name (the corpora read in place
+  from gcc's tarball, :absolute) expands __FILE__ (assert's message) to a string of the checkout's path, which the recorded
+  digests must not hold (CX2's held /root/arbace/.tmp/worktrees/cpp-cx2/..., so 9 files of g++.dg's tenth failed in every
+  other checkout and in the gate's clean clone)."
+  [texts ^String base]
+  (if (str/blank? base)
+    texts
+    (map (fn [^String t] (if (str/includes? t base) (str/replace t base "{base}") t)) texts)))
 
 (defn gxx-texts
   "The tokens of g++ -E -P's output `text` (lexed in C++ mode, `mask`, but without user-defined literals,
@@ -213,7 +242,7 @@
   (let [g (read-or-nil (str d "/gxx/" nm ".i"))]
     (cond (nil? g) nil
           (not= (status-of d (str "gxx/" nm)) "0") :rejected
-          :else (tokens-digest (gxx-texts g mask)))))
+          :else (tokens-digest (unplaced (gxx-texts g mask) (str/trim (or (read-or-nil (str d "/base.txt")) "")))))))
 
 (defn clang-digest
   "clang's raw tokens' digest of a file of WORK/ID (WORK/ID/clang/NAME.raw), :rejected when clang did not run, nil when absent."
@@ -249,7 +278,7 @@
         [pp-st dg]
         (when (levels "pp")
           (let [r (try (pp/preprocess cfg (:read e)) (catch Throwable x {:tokens [] :errors [(str x)] :panic true :crash (str x)}))
-                dg (tokens-digest (port-texts r))
+                dg (tokens-digest (unplaced (port-texts r) base))
                 _ (let [^java.io.File o (java.io.File. (str d "/port/" nm ".txt"))]
                     (.mkdirs (.getParentFile o))
                     (spit o (str (str/join "\n" (port-texts r)) "\n" (str/join "\n" (map #(str "#error " %) (:errors r))) "\n")))
@@ -291,8 +320,10 @@
                              :when (not (.exists (java.io.File. (str base "/" nm))))]
                          nm))
         vanished (vec (distinct vanished))
-        stale (concat (for [[nm _] known-pp :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 2) "known"))) rs))] [:pp nm])
-                      (for [[nm _] known-lex :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 1) "known"))) rs))] [:lex nm]))
+        ;; CX10: a subset's run (--only, WORK/ID/subset.txt) holds the known entries of its own files alone
+        in-run? (if (.exists (java.io.File. (str d "/subset.txt"))) (set (map :name entries)) (constantly true))
+        stale (concat (for [[nm _] known-pp :when (in-run? nm) :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 2) "known"))) rs))] [:pp nm])
+                      (for [[nm _] known-lex :when (in-run? nm) :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 1) "known"))) rs))] [:lex nm]))
         bytes (reduce + (map #(.length (java.io.File. (str base "/" (:name %)))) entries))]
     (spit (str d "/files.tsv") (str/join (map #(str (str/join "\t" %) "\n") rs)))
     (spit (str d "/differ.txt") (str/join (map #(str (first %) "\tlex " (nth % 1) "\tpp " (nth % 2) "\n") (distinct (concat lex-fail pp-fail)))))
@@ -447,10 +478,10 @@
   (let [d (str work "/" id)
         e (first (filter #(= (:name %) nm) (read-string (slurp (str d "/files.edn")))))
         mask (host/feature-mask (:std (:fc e)) (:trigraphs (:fc e)) (:modules (:fc e)))
-        g (vec (gxx-texts (or (read-or-nil (str d "/gxx/" nm ".i")) "") mask))
         base (str/trim (slurp (str d "/base.txt")))
+        g (vec (unplaced (gxx-texts (or (read-or-nil (str d "/gxx/" nm ".i")) "") mask) base))
         r (pp/preprocess (host/config (host/load-host "test/cpp/host" "gxx") (:fc e) base) (:read e))
-        p (vec (port-texts r))
+        p (vec (unplaced (port-texts r) base))
         errs (map #(str "#error " %) (:errors r))
         n (max (count g) (count p))
         i (first (for [i (range n) :when (not= (get g i) (get p i))] i))]
@@ -478,6 +509,39 @@
       (println " clang:" (pr-str (subvec c (max 0 (- i 3)) (min (count c) (+ i 4)))))
       (println " port :" (pr-str (subvec p (max 0 (- i 3)) (min (count p) (+ i 4))))))))
 
+(defn record-results
+  "CX10 (CS240 (a)'s analogue): the results of the corpora `ids` from WORK/ID/files.tsv into FILE, one row a file
+  [\"CORPUS/NAME\" RESULT REASON] (bin/reap's :c-known with :id-sep \"/\"; the rotation's universe, GT8.4): :pass when every level
+  checked agrees or both reject, :known when one is known, else the run's status (no record is written from a run with one);
+  the other corpora's rows kept. A subset's run (--only) is refused: the record is of whole corpora at their recorded sampling."
+  [^String work ^String file ids]
+  (doseq [id ids]
+    (when (.exists (java.io.File. (str work "/" id "/subset.txt")))
+      (throw (ex-info (str "record-results: " id "'s run is a subset (--only): not recorded") {}))))
+  (let [ok #{"agree" "both-reject" "-"}
+        rows (vec (for [id ids
+                        l (str/split-lines (slurp (str work "/" id "/files.tsv"))) :when (seq l)
+                        :let [[nm lx pp] (str/split l #"\t")]]
+                    [(str id "/" nm)
+                     (cond (and (ok lx) (ok pp)) :pass
+                           (and (#{"known" "agree" "both-reject" "-"} lx) (#{"known" "agree" "both-reject" "-"} pp)) :known
+                           :else :fail)
+                     (str "lex " lx ", pp " pp)]))
+        bad (filter #(= :fail (second %)) rows)
+        _ (when (seq bad) (throw (ex-info (str "record-results: " (count bad) " failing files, not recorded: " (str/join " " (map first (take 5 bad)))) {})))
+        pre (set (map #(str % "/") ids))
+        old (let [f (java.io.File. file)]
+              (if (.exists f)
+                (remove (fn [[i]] (some #(str/starts-with? i %) pre)) (read-string (slurp f)))
+                []))
+        all (sort-by first (concat old rows))]
+    (spit file (str ";; bin/repr-cpp pp-check's results (doc/cpp/CPP-SURVEY.md, \"As built: CX10 (write-ahead)\"): every file of the corpora's\n"
+                    ";; recorded runs (cpp-lexical whole, gxx-dg every 10th, libstdcxx-headers every 8th), [\"CORPUS/NAME\" RESULT REASON], RESULT\n"
+                    ";; :pass or :known (test/repr/cpp/pp-check-known.edn), the reason the levels' statuses. Written by bin/repr-cpp pp-check\n"
+                    ";; --record-results from a run with no failing file; read by bin/reap (the C++ read cell's passes). Read with the Clojure reader.\n"
+                    "[\n" (str/join (map #(str (pr-str %) "\n") all)) "]\n"))
+    (println (str "recorded " file ": " (count rows) " rows of " (str/join ", " ids) ", " (count (filter #(= :pass (second %)) rows)) " pass"))))
+
 (defn -main [cmd & args]
   (case cmd
     "lexdiff" (apply lexdiff-main args)
@@ -491,4 +555,5 @@
               (System/exit st))
     "record" (let [[work & ids] args] (record work ids))
     "record-known" (let [[work & ids] args] (record-known work ids))
+    "record-results" (let [[work file & ids] args] (record-results work file ids))
     (do (println "ppcheck: pp, lex, lists, check, record or record-known") (System/exit 2))))

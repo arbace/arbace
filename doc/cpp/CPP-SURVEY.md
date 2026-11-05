@@ -2478,3 +2478,373 @@ line tables' directory and file tables are now equal (the map's part), but its l
 inside functions, the class's own cause. `roundtrip-results/gxx-dg-every-10.edn` still records arm-fp16-ops-1.C as `[:known :objects-differ]`: a run of
 the list counts it as an improvement until the record is made again (`--record-results`, a whole-list run). F3 (`$pm` unquoted) is left: no corpus path
 has a space or `=`.
+
+## As built: CX8 (write-ahead) (2026-11-03)
+
+On the branch `cpp-cx8` from main's a25d12d1, light tier (stage 0 by `ARBACE_HOST_EXE`, the main checkout's; its `arbace/c` is compiled in
+`target/seed/aot` from sources unchanged since, so ci here is the checkout's ci; `arbace/cpp`, repr/llvm and repr/cpp are evaluated from the checkout).
+Spec: doc/cpp/LLVM.md §11.
+
+- **Built.** `bin/cppi run|check|check --aot|divergences [--aot]|record-ref|runtime-ci` (`bin/lib/cppi/`), `arbace.cpp.run` (the lowered runtime read as
+  ci's library, a static link by archive rule, the runtime's units cut to what a program reaches, constructors through musl's `_init`, ci-only
+  macros for gcc's `__atomic_*` and the math builtins ci lacks, ci's overrides `test/cpp/runtime/ci/*.c`: `__snprintf_lite`), the judges
+  `arbace.cpp.check/run-judge` and `divergences`. The lowering: literal struct types named by content, an aggregate `select` as an `if`, a
+  `va_list` passed by value (gcc judges the same C: `lower-check` samples 16 of 16). Corpora (`bin/lib/cppi/lists.bash`): samples, runtime,
+  libstdcxx (3,504 run tests), gxx-dg-run (g++.dg's `dg-do run`, ~1,680 after the selectors; not modules/ or contracts/). `--only`, `--sample`,
+  `--corpus` from the start; per-program seconds (IR, lowering, ci's build, run) in `test/cpp/check{,-aot}-times-linux-amd64.edn`.
+- **Records.** `test/cpp/ref-gxx15.edn` (g++ 15.2 -O0: samples, runtime, every 25th of libstdcxx and gxx-dg-run, 224 programs);
+  `test/cpp/check-linux-amd64.edn` and `check-aot-linux-amd64.edn` for samples and runtime (14 programs: 9 pass, 5 in classes, the same compiled);
+  the sampled corpora are subsets and not recorded (C's rule).
+- **Numbers (eval, before the last fixes).** libstdcxx every 25th: 140, 127 pass, 13 non-pass; gxx-dg-run every 25th: 67, 60 pass, 6 oracle-rejected,
+  1 oracle-text. Classes: threads, long-double, ci-compound-literal, speed, oracle-text, musl-unread, atomic-generic, oracle-rejected
+  (`test/cpp/divergences.edn`, `check-known.edn`). A rerun with the math macros and the `__snprintf_lite` override was in progress at hand-back.
+- **Cost.** ci's build dominates: libstdcxx averages 12 s lowering + 59 s build a program (thread-seconds, 3 threads, ~10 GB a process); gxx-dg-run
+  4 s. Whole corpora: libstdcxx ~23 h at 3 threads, gxx-dg-run ~40 min, refs ~1 h; AOT ~30-60 s a program more. Far beyond GT8's 35 min: see the
+  report's proposals (a ci library of prebuilt nodes; parallel processes).
+
+## As built: CX9 (write-ahead) (2026-11-03)
+
+On the branch `cpp-cx9` from main's a25d12d1, in the light tier (stage 0 by `ARBACE_HOST_EXE`, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no build of
+Arbace's executables). By day the dg-error part ran over seven directories, the preprocess part whole and the modules part every 10th; the whole
+corpora are tonight's (CX9.4). Nothing embedded changed (repr/cpp is evaluated from the checkout): no re-seed.
+
+### CX9.1 What was built
+
+- **`bin/repr-cpp dg`** (`bin/lib/repr-cpp/dg`, `arbace.repr.cpp.dg`; `make repr-cpp-dg` is CX10's): g++.dg's DejaGnu tests in three parts, each file
+  in at most one, chosen in this order: **preprocess** (a `dg-do preprocess`: 71 files, 32 of them in `modules/`), **modules** (the rest of
+  `modules/`: 1,181 files) and **dg-error** (the rest of the files with a `dg-error` directive: 4,597). `--corpus PART,...`, `--dirs D,...`
+  (g++.dg's directories, `.` its top level), `--only LIST`, `--sample N`, `--record`, `--record-ref`, `--judge`; per-file seconds in
+  `test/cpp/dg-times.edn` (GT8.1).
+- **How a file is run** (DejaGnu's g++-dg-runtest, gcc's `lib/g++-dg.exp`): at one standard, the file's own `-std`, else the first of DejaGnu's
+  `std_list` for it (the versions its `{ dg* c++NN` lines mention, as Tcl sorts them, then 17 98 26 11 20 14 23 to three, above the lowest a dg-do
+  or dg-require-effective-target line names) at which its dg-do selector holds, `-std=c++NN` (`gnu++NN` with a dg-options line); its options are its
+  dg-options whose selector holds, else g++.dg's `-pedantic-errors -Wno-long-long` (`dg.exp`), then its dg-additional-options. The selectors are C's
+  evaluator (`arbace.repr.c.host/eval-selector`) with the C++ atoms: `c++NN`, `c++NN_only`, `c++NN_down` (and `0x`..`2c`) at the run's standard, `c++`
+  true, `c` false, the rest C's targets table (an unlisted name holds and is listed by the run). A false dg-do selector at every standard of the
+  list, a dg-require-effective-target or an unconditional dg-skip-if that holds: `:unsupported`.
+- **dg-error**: the oracle, clang 23.1.4 through `tools/cxxdump` (`-ferror-limit=0 -Wno-unknown-warning-option`; the options clang reads as g++ does
+  are passed, g++'s own dropped: `-fconcepts`, `-fcontracts`, `-fgnu-tm`, `-fpermissive`, `-fmodules-ts`...), accepts the unit, and repr/cpp then
+  reads it into forms (`arbace.repr.cpp/read-cpp`, the converter: a refusal is `refused`), or rejects it (cxxdump's status 1) with its errors. The
+  errors' lines in the main file against the dg-error lines, C's verdicts (`arbace.c.dg`'s, without the read-error rule, which is C's parser's):
+  `pass`; `missed` (`missed: accepted; ...` when the oracle accepted); `extra`; `both`; `stopped` (errors outside the main file that no line-0
+  directive or dg-excess-errors takes, or the expected lines after a fatal error); `crash`, `timeout`, `refused`. Positions are lines; the
+  messages are not compared (clang's wording is not g++'s).
+- **preprocess**: the shared preprocessor (`arbace.repr.c.pp` in C++ mode, g++'s host data) on each file, its errors judged the same way (kinds
+  `pp-missed`, `pp-extra`, ...). The token stream stays pp-check's (its g++ -E digests).
+- **modules**: each file read and printed alone, a single translation unit (CP13 (a)), at modules.exp's `MOD_STD_LIST` entry 2a (`-std=c++20`,
+  `gnu++20` with dg-options; clang has no modules before C++20) unless the file names a standard: the round trip (`bin/lib/repr-cpp/roundtrip
+  --no-objects`, key `gxx-modules-every-N` / `gxx-modules-all`, names `gxx-modules/modules/NAME`). The converter and printer gained the module
+  forms (SPEC §15, "As built (CX9)"): `ExportDecl` as `(cpp/export ...)` or `^:export` on the declaration, the module declarations and imports read
+  from the text (clang's AST has none for a module declaration), `module;`, `module :private;`, partitions, header units.
+- **The reference** (CP11 (a)): g++ 15.2 run on each dg-error and preprocess file with the same options (`-S`, `-E`), `--record-ref` only, its
+  errors by line kept in `test/cpp/ref-dg-gxx15.edn` with the standard (a record at another standard is not used). A failure whose directives g++
+  does not give either says so (` [g++: [MISSING EXTRA ...]]`) and is classed `gxx-disagrees`.
+- **Records**: `test/cpp/check-dg-linux-amd64.edn` (dg-error rows `[ID RESULT REASON]`, ID `gxx-dg/NAME`), `test/repr/cpp/dg-preprocess-results.edn`
+  (the preprocess part's), classes `test/cpp/divergences-dg.edn` (both parts), `test/cpp/ref-dg-gxx15.edn`, `test/cpp/dg-times.edn`; the modules
+  part's in the round trip's files: `test/repr/cpp/roundtrip-oracle.edn` (entry `gxx-modules-every-10`), `roundtrip-results/gxx-modules-every-10.edn`,
+  `roundtrip-known.edn`. The judge fails an unclassed failure, a recorded pass that does not pass, a crash or a timeout; `--record` keeps the rows of
+  files the run did not hold.
+
+### CX9.2 Numbers (the day's runs)
+
+| part | files run | pass | non-pass by class |
+|---|---:|---:|---|
+| dg-error, `DRs eh parse template cpp23 cpp26 lookup` (1,277 of 4,597) | 1,275 supported, 2 unsupported | 1,001 | clang-fewer-errors 65, clang-extra 65, clang-accepts 62, clang-other-lines 51, gxx-disagrees 22, clang-pedantic 8, clang-elsewhere 1 |
+| preprocess (all 71) | 70 supported, 1 unsupported | 38 | pp-diag 24, gxx-disagrees 7, pp-extra 1 |
+| modules, every 10th (119 of 1,181) | 119 | 39 | the oracle's rejections 79 (recorded: 52 `module '...' not found`, 23 a header unit not known, 4 the tests' own errors), known 1 (`tpl-friend-3_a.C`, `:ast-differs`) |
+
+The oracle read the dg-error files in 63 s cold (17 s from cxxdump's cache), 4 jobs; the reads 2 s; g++'s reference 11 s. Of the 1,275, clang
+rejected 1,202 and accepted 73 (all 73 read into forms). The modules sample took 18 s (40 units read, all forms equal again, 39 ASTs equal, `:full`
+byte for byte for all 40). The converter's module change against the recorded round trip of `gxx-dg-every-10` (1,807 files, `--no-objects`,
+8 min cold): no regression, 0 new rejections; the judge's 53 "improvements" are 49 files known at the objects level, which `--no-objects` does
+not run, 3 recorded rejections the oracle no longer gives (`:oracle-stale` 3, read and passing now) and one `print-rejected` file that passes
+(5 left of 6). Tonight's run with objects says which stand, and records them.
+
+### CX9.3 The classes
+
+The `clang-*` classes are of the design (CP2 (a), CP3 (a): repr/cpp has no Sema, the errors are clang's and the expectations g++'s), named by how the
+oracle's errors differ; `gxx-disagrees` (the reference does not give the directives' errors at this standard on this host) is the harness's
+gap, deferred (review 196, the user's decision; CX9.8), and so are `prune-output` and `oracle-crash`; `clang-pedantic`
+(`-Werror,-W...extensions` that g++ only warns about), `clang-accepts`, `clang-other-lines`, `clang-fewer-errors`, `clang-extra`, `clang-elsewhere`;
+`read-refused` is the converter's gap (none today); the preprocess part's `pp-diag` and `pp-extra` are deferred (cpplib's checks the port does
+not make: UCNs and UTF-8, NFC, #elifdef and #warning before C++23 under -pedantic-errors, the module directives' macro rules). They are classes by
+the verdict's kind, coarse: the clang messages behind them are a long tail (the 65 extra files: about 50 different first messages). CP216.
+
+### CX9.4 Tonight (whole corpora; light tier, 4 jobs; estimates from the day's rates)
+
+- `bin/repr-cpp dg --corpus dg-error --record-ref --record` (4,597 files: the oracle about 4 min cold, g++ about 1 min, the reads seconds): about 6 min.
+- `bin/repr-cpp dg --corpus preprocess --record-ref --record` (71): under 30 s.
+- `bin/repr-cpp dg --corpus modules --record` (1,181 files, key `gxx-modules-all`): about 3 min.
+- `bin/repr-cpp roundtrip LIST WORK --record-results --replace-results` of `gxx-dg-every-10` with objects (the 53 improvements recorded): about 15 min.
+
+About 25 minutes in all, inside C++'s 35 nightly minutes (GTS201 (a)) only if the round trip is the night's alone; the dg check's own share is
+about 11 minutes.
+
+### CX9.5 Not done, and why
+
+- Columns (`dg-error "30:..."`), messages and warnings are not judged (CP212, CP213). Modules' dg-error lines are not judged: a file of `modules/`
+  is a single-TU read (CP215). No negative control yet (CP214: CX8's `test/cpp/controls.edn` is its file). The whole corpora: tonight.
+
+### CX9.6 Proposals (CP210-CP216)
+
+- **CP210 The standards a dg file is judged at.** (a) one, as built (the file's own, else the first of DejaGnu's list whose dg-do holds); (b) every
+  standard of DejaGnu's list, as DejaGnu runs it (about three times the time, 15 to 20 min a night); (c) gnu++17 for all, as the other corpora.
+  *Recommended: (a)* now, (b) when the budget allows: a file's expectations are often per standard.
+- **CP211 clang's options.** (a) the allowlist as built, g++'s own options dropped (their effect in `clang-accepts`); (b) mapped where clang has an
+  equivalent (`-fpermissive` → `-Wno-error=...` per diagnostic, `-fgnu-tm` none). *Recommended: (a)*.
+- **CP212 Messages.** (a) positions only, as built; (b) a wording table g++ → clang by family, as C's CS200. *Recommended: (a)*: two compilers'
+  wordings, a table without an end.
+- **CP213 Columns.** (a) lines only; (b) a `dg-error "COL:..."` column checked too. *Recommended: (a)*.
+- **CP214 A negative control** (GTS81 (a)). (a) a dg control in `test/cpp/controls.edn` (a file's errors judged against another's directives, must fail),
+  built at CX10 with the gate step; (b) none. *Recommended: (a)*.
+- **CP215 Modules beyond one unit.** (a) as built: importers the oracle's recorded rejections; (b) compiled interfaces: the `dg-module-cmi` units
+  precompiled by clang (`--precompile`) in the tests' order, `-fmodule-file=` for their importers, then their dg-error lines judged too.
+  *Recommended: (a)* for v1 (CP13 (a)), (b) later.
+- **CP216 The classes' grain.** (a) by the verdict's kind, as built; (b) split by clang's message families after the whole run (narrowing,
+  incomplete types, templates, lookup ...). *Recommended: (b)* after tonight, so a class names a cause.
+
+### CX9.7 Shipped files, scratch
+
+New: `arbace/repr/cpp/dg.ae`, `bin/lib/repr-cpp/dg`, `test/cpp/{check-dg-linux-amd64,divergences-dg,ref-dg-gxx15,dg-times}.edn`,
+`test/repr/cpp/dg-preprocess-results.edn`, `test/repr/cpp/roundtrip-results/gxx-modules-every-10.edn`. Changed: `arbace/repr/cpp/convert.ae`, `print.ae`
+(the module forms), `bin/repr-cpp` (`dg`), `test/repr/cpp/roundtrip-{known,oracle}.edn`, `doc/cpp/SPEC.md` §15. Scratch: `.tmp/repr-cpp-dg/`,
+`.tmp/cx9/` of the worktree.
+
+### CX9.8 Review 196's fixes (2026-11-03)
+
+The Mac VM's review 196 (`reports/196-review-cx9.md`, on 78f52fc8) found four highs; the user decided its question (`gxx-disagrees` is the
+harness's gap, deferred, not design). Fixed on `cpp-cx9`:
+
+- **H1, effective targets**: `test/cpp/dg-targets.edn`, C++'s table before C's (the 33 names the lists named, each from target-supports.exp's
+  proc or its probe run with g++ 15.2 on the host); `concepts` (C++20 on, or `-fconcepts`) and `implicit_constexpr` (`-fimplicit-constexpr`)
+  from the run's flags, as check-flags does. A directive an unlisted name decides (Kleene's unknown) makes its file unsupported, the
+  name in the reason: none left but a `{ dg-error: ...}` comment, which is no directive (DejaGnu's scan wants white space after the
+  name; the check's `directives` now does too). `concepts/abbrev5.C` runs at c++26, `ext/packed3.C` expects its three errors,
+  `cpp0x/static_assert9.C` runs.
+- **H2, the directories' drivers**: `test/cpp/dg-drivers.edn`, the 32 `.exp` files of g++.dg read: each file is run by its nearest
+  directory's driver (g++-dg-runtest with its default flags: gomp `-fopenmp`, goacc `-fopenacc`, tls and tm dg.exp's, dfp `""` ...;
+  once: coroutines' `-std=c++20`; gcc-dg-runtest's first torture option `-O0`: torture, asan, tsan; modules.exp's 17 2a 2b for
+  its preprocess files); the drivers not modelled (pch, plugin, debug, special, lto, compat, vect, graphite, ...) make their files
+  unsupported. `[srcdir]` is substituted as `${srcdir}`; the own-standard test is DejaGnu's per-line glob.
+- **H3**: the reference's ` [g++: ...]` (and the new ` [dg-prune-output N]`) only on a line verdict; `gxx-disagrees` anchored on the line
+  kinds and `:kind :deferred`. The oracle's own crashes (two gomp files: clang segfaults under `-fopenmp`) have their class,
+  `oracle-crash` (deferred), anchored on cxxdump's "clang failed (not a rejection): signal:".
+- **H4, dg-line**: C's `arbace.c.dg` resolves `dg-line` names (`line-names`, `resolve-line`'s third argument), its own commit on
+  `c-dg-line` (off main, with the judge test `dg-line-names`), taken here; the dg check loads the checkout's `arbace.c.dg`
+  (`arbace_tool -s`: it is embedded in stage 0). None of C's 627 recorded dg files uses dg-line: C's records do not move.
+- **Mediums**: an error on a `dg-message` line (any diagnostic) or on an xfail `dg-bogus` line is no extra (`:allow`), for the oracle
+  and for the reference; `dg-prune-output` files' line failures are said and classed apart (`prune-output`, deferred: messages are
+  not compared, the regex cannot be applied); module lines inside a conditional group or a directive's continuation are not read;
+  `(cpp/module)`, `(cpp/module-private)` and EmptyDecl's `(c/null)` are constructed lists (a quoted literal carried convert.ae's
+  `:line`, which the layout reads). g++'s kept diagnostics are grepped as text (`grep -a`: a file with invalid UTF-8 was "binary").
+  The reference records its options beside its standard; a record of other options is not used.
+- Not fixed (lows): the one standard picked on dg-do alone (not skip-if), `-ansi` not read as a standard, `-fsyntax-only` acceptance
+  of units clang rejects at code generation, the class not recorded in the row.
+
+The day's numbers after the fixes (the records rewritten from scratch; the dg-error run over `DRs eh parse template cpp23 cpp26 lookup
+gomp coroutines`, 1,549 files): **1,143 of 1,546 supported pass**, 3 unsupported; clang-fewer-errors 112, clang-other-lines 88,
+clang-accepts 84, clang-extra 84, prune-output 17, clang-pedantic 8, gxx-disagrees 4, clang-elsewhere 4, oracle-crash 2.
+Preprocess (71): 38 of 70 pass, pp-diag 28, gxx-disagrees 3, pp-extra 1. Modules every 10th: as before (39 pass, 79 recorded
+rejections, 1 known). The whole corpora tonight as CX9.4 lists, after these fixes.
+
+## As built: CX10 (write-ahead) (2026-11-03)
+
+On the branch `cpp-cx10` from main `a25d12d1`, held until after `arbace-reaps-4-crops-v1` and merged then as the fifth row (its own milestone tag later).
+Light tier only (stage 0 by `ARBACE_HOST_EXE`, 4 threads, `GOMEMLIMIT=1500MiB`; no gate run, no executable built, no heavy lock). CX8 (eval, AOT) and CX9
+(dg) are built beside it on `cpp-cx8` and `cpp-cx9`; their records are wired by name and absent here.
+
+### CX10.1 The row
+
+| cell | sources | classes | state here |
+|---|---|---|---|
+| `[:cpp :read]` | `bin/repr-cpp pp-check` (`test/repr/cpp/pp-check-known.edn`, `:sections [:pp :lex]`, `:per-file`, `:id-sep "/"`, results `pp-check-results.edn`); `bin/cppi dg` (`test/cpp/check-dg-linux-amd64.edn`, `:until "CX9"`, classes `divergences-dg.edn`) | `test/cpp/divergences-read.edn` (5) | **1,903 / 30 / 1** |
+| `[:cpp :eval]` | `bin/cppi check` (`test/cpp/check-linux-amd64.edn`, `:ref-runs test/cpp/ref-gxx15.edn`, `:until "CX8"`); beside: `bin/cppi lower-check` (`test/cpp/lower-results.edn`, `lower-known.edn`, reader `:cpp-lower`, classes `divergences-lower.edn`) | `test/cpp/divergences.edn` (CX8's) | no check yet (CX8); beside 250 of 250 |
+| `[:cpp :aot]` | `bin/cppi check --aot` (`test/cpp/check-aot-linux-amd64.edn`, `:same-cases` the eval record, `:until "CX8"`) | `divergences-aot.edn` then `divergences.edn` (CX8's) | no check yet (CX8) |
+| `[:cpp :print]` | `bin/repr-cpp roundtrip`: the recorded lists `test/repr/cpp/roundtrip-results/*.edn` (reader `:cpp-roundtrip :part :recorded`; the `-essential` records not counted again) and the known file's files no record holds (`:part :unrecorded`, passes not recorded) | `test/cpp/divergences-print.edn` (8) | **1,203+ / 914 / 68** |
+
+`bin/reap`: **18 of 20 cells checked, 2 with no check yet, 0 problems**; `test/reap/matrix.edn` recorded. Built in `test/reap/main.ae`: the readers `:cpp-roundtrip` (a recorded list's
+`:pass`, `[:known CLASS]`, `:oracle-rejects`, `:oracle-fails`; problems: a summary's count not its files', a file in two records, a recorded class the known file names otherwise;
+a recorded known file the known file no longer lists counted and said, `gxx-dg/ext/arm-fp16/arm-fp16-ops-1.C` today, an improvement until gxx-dg-every-10's next
+`--record-results`) and `:cpp-lower`; `:c-known`'s `:id-sep`; a source with `:until` whose `:file` is missing is "not yet" even when its references (`:ref-runs`, `:same-cases`)
+are missing too (C++'s eval and AOT wait for CX8's record and its references alike). Tested on a scratch copy (`REAP_ROOT`, stand-in records, not committed): the three
+cells with records checked and their `:until`s reported stale; the eval record without `ref-gxx15.edn` a problem; a non-pass in no class a problem; a stand-in results file of
+the token check counted. The classes' kinds are CX10's (as C8's were): a judge's property, the oracle's rejection, a file outside C++ and what the compilers settle by
+design; the converter's, the printer's, the lexer's and the oracle's failures deferred.
+
+### CX10.2 Two path bugs found and fixed
+
+- **The token check's digests held a worktree's path.** A file read by its absolute name (the corpora read in place from gcc's tarball) expands `__FILE__` (assert's
+  message) to the checkout's path; CX2 recorded `pp-gxx.sha256` in `cpp-cx2`'s worktree, so 9 files of g++.dg's tenth and 10 headers failed in every other checkout and in
+  the gate's clean clone (found running the tenth here). The judge now writes the corpus' directory `{base}` on both sides (`ppcheck/unplaced`); `--record` again of the two
+  samplings moved exactly those 19 lines (the lexical corpus, read relatively, and `lex-clang.sha256` and the option deltas unchanged).
+- **The lowered runtime's IR pin held a worktree's path.** The two shims' IR (`assert_fail.cc`, `random.cc`) names its source in the module ID and `source_filename`, which
+  `-ffile-prefix-map` does not touch; `test/cpp/runtime/ir.sha256` held `cpp-cx7`'s path, so `runtime-build` refused in any other checkout. `rt_ir` writes those two lines
+  relative to the checkout; the pin's two lines recorded again (`--update`, the other 196 unchanged).
+- Both scripts and `bin/cppi` and `bin/repr-cpp` find the main checkout from the clean run's clone too (`.tmp/gate-clean/SHA`, as C's since queue 150).
+
+### CX10.3 The gate
+
+Essential, one chain `cpp-essential`, on stage 0 with `:cxx` (new host: g++'s and clang++'s version lines, their drivers', cc1plus's and clang's digests, the headers
+`test/cpp/host/headers.sha256` names; `bin/lib/gate-run.bash`, so every key moves once, at the merge with GT8's planner change):
+
+| step | command | subset | measured here |
+|---|---|---|---|
+| `cpp-read-essential` | `bin/repr-cpp pp-check --essential` | `test/cpp/essential-read.txt`: the lexical corpus (19), of g++.dg one file per known class, 2 both-reject, every 70th of the tenth (31), 3 headers (one known) | 9 s |
+| `cpp-print-essential` | `bin/repr-cpp roundtrip-corpus gxx-dg-essential && ... samples` | `test/cpp/essential-print.txt`: 33 of g++.dg's tenth (each known class, the CP95 (b) file, 2 oracle rejections, an `:orig-fails` pass, every 40th pass), held to its own records (`roundtrip-oracle.edn`'s `gxx-dg-essential`, `roundtrip-results/gxx-dg-essential.edn`); the 9 samples keyless | 21 s cold, 10 s warm; samples 35 s |
+| `cpp-lower-essential` | `bin/cppi lower-essential` | `test/cpp/essential-lower.txt`: 6 programs, the negative control's pair among them | 6 of 6, the control differs; 27 s warm (native 6, Arbace 19, gcc and runs 2), 3.6 min with the runtime built (198 of 198) |
+
+`--full`, chain `cpp-full`, last: `cpp-selftest`; `cpp-tokens` (parts `cpp-lexical`, `gxx-dg` at `--sample 10`, `libstdcxx-headers` at `--sample 8`: 2, 52, 62 s);
+`cpp-roundtrip` (parts `gxx-dg-every-10` about 8 min (CP124's run), `gxx-old-deja-every-10`, `c-c++-common-every-10`, `libstdcxx-testsuite-every-40` (both pending in
+`pending.edn`), `samples`); `cpp-lower` (`bin/cppi lower-corpus samples`, `libstdcxx-every-15th`: 40 s and about 16 min, plus 4 min when the runtime is stale). New
+verbs: `pp-check --only FILE|--essential|--record-results|--lists-only`, `bin/repr-cpp roundtrip-corpus KEY`, `bin/cppi lower-corpus KEY`, `lower-essential`, `list essential`;
+rtcheck takes `-essential` and `-only` keys as of their corpus. `bin/gate --pins` adds `bin/repr-cpp pins check` and `host check` (`:cpp` in the pins map). `bin/gate --plan`
+and `--full --plan` accept the table (essential 3 new steps, full 4 steps in 12 parts). Makefile: `cpp-essential`, `repr-cpp-pp-essential`, `repr-cpp-roundtrip-essential`,
+`repr-cpp-roundtrip-corpus`, `repr-cpp-pp-record-results`, `cppi-lower-corpus`, `cppi-lower-essential`; `make check-makefile` passes.
+
+**Against C++'s share (GTS201 (a): 35 min nightly, 2.4 h clean).** Essential: about 1.5 min warm, 6 min cold, its own chain beside C's. Nightly, every part whole, without
+CX8/CX9: about 30-35 min (selftest unmeasured), at the share before CX8's check and AOT and CX9's dg arrive; so the rotation (GT8.4) is needed from the start for
+`cpp-lower.libstdcxx-every-15th` (16 of the 35 min), `cpp-roundtrip.gxx-dg-every-10` and CX8's two levels (CX10.5). Clean: within 2.4 h on today's lists.
+
+### CX10.4 What waits on CX8 and CX9
+
+- Records: `test/cpp/check-linux-amd64.edn`, `check-aot-linux-amd64.edn`, `ref-gxx15.edn`, `divergences.edn`, `divergences-aot.edn` (CX8), `check-dg-linux-amd64.edn`,
+  `divergences-dg.edn` (CX9). With them: drop the three `:until`s in `test/reap/cells.edn` (else reap reports them stale), `bin/reap --record`.
+- Steps, to add with their commands (C's shapes): essential `cpp-check-essential` (`bin/cppi check --only test/cpp/essential-check.txt`) and `cpp-aot-essential`
+  (`--aot`, one shard) in the chain `cpp-essential`; `--full` `cpp-check`, `cpp-aot` (a part a run corpus, `--corpus {part}`), `cpp-dg` (whole, its control).
+  Hosts `[:stage0 :go :cxx :gcc]` (and `:prog` when ci runs on the gate's executable as C's `c-check`).
+
+### CX10.5 Proposals (CP180-CP184; none decided)
+
+- **CP180 Embedding C++ (a re-seed).** The row needs none: every cell is judged from records, and the checks run evaluated on stage 0. The cost is speed: the lowering
+  is about 14 s a file a thread evaluated (CP87), so CX8's check over its run corpora and the libstdc++ list take most of the nightly share. CS250's decision (the user,
+  2026-11-02) puts C++'s embedding at a later re-seed, when its row comes. Options: (a) embed `arbace/repr/llvm`, `arbace/cpp` and `arbace/repr/cpp` at the first re-seed
+  after `arbace-reaps-4-crops-v1` (as C9.1: `embed.ae`'s exclusions, `arbace_embedded_sources`, `:tools`, the audit's `:gate`, `gate_key`; a `cpp-c2j` essential step first, as
+  C's `c-c2j`, proving c2j compiles them); (b) the hot part only (`repr/llvm`, `cpp/lower`); (c) none for v1, the budget met by subsets. *Recommended: (a)*, with the `cpp-c2j`
+  step before the window.
+- **CP181 The rotation for C++.** GT8.4's `:rotate` needs a list's `--only` and a record of one `["PART/NAME" ...]` row a line. Today `pp-check --only` takes such lists and
+  `pp-check-results.edn` is such a record; the round trip's and the lowering's records are maps. Options: (a) `:rotate` on `cpp-tokens` now (universe `pp-check-results.edn`,
+  `:subset` in `test/cpp/corpora.edn`), then `roundtrip-corpus` and `lower-corpus` taking `--only` and their records written one row a line too (or a reader in the planner);
+  (b) the lists sampled more thinly instead. *Recommended: (a)*, the subsets by GTS205's rule (the lowering's blocks, the classes, the controls).
+- **CP182 The token check's passes.** As CS240 for C: (a) `--record-results` at each `--record` of the samplings (built: `make repr-cpp-pp-record-results`, 1,903 passes);
+  (b) the known file only. *Recommended: (a)*.
+- **CP183 The kinds of CX10's classes** (`divergences-read`, `-print`, `-lower`). Options: (a) as chosen (CX10.1); (b) `:oracle-rejects` deferred until CX9 judges the error
+  tests at read. *Recommended: (a)*.
+- **CP184 The samples' round-trip key** (CP163 (b)'s remaining part). The samples run keyless (not held). Options: (a) `bin/cppi list samples` heads `#list samples-all` for the
+  round trip, with its oracle and results records; (b) as built. *Recommended: (a)*, a two-file record.
+
+### CX10.6 Heavy list (for the night) and slips
+
+- Night: `bin/gate --full` over C++'s parts once (the round trip's pending corpora `c-c++-common-every-10` and `libstdcxx-testsuite-every-40` are recorded with
+  `--record-results`, CP170 (b), and leave `pending.edn`); `cpp-selftest`'s time; the essential gate's first run (keys every step anew: `gate-run.bash`).
+- Slips: two commands redirected to `/dev/null` (a probe of `bin/repr-cpp pins check`'s status, a wait loop's `cat`); `bin/cppi` edited while a background
+  `runtime-build` ran it (its tail failed after 198 of 198; run again), and a second `lower-essential` started while the first chain's still ran on the same runtime
+  directory (four units crashed; run again alone: 6 of 6); `python3` for multi-line edits.
+- Scratch: `.tmp/reap-scratch/` (the stand-in records), `.tmp/repr-cpp-check/`, `.tmp/repr-cpp-roundtrip/`, `.tmp/cppi/` in the worktree.
+
+## As built: cppi-check (2026-11-05)
+
+On the branch `cppi-check` from `cpp-cx10` (5889aa52), with `cpp-cx8` (6d16c65a) and `cpp-cx9` (b2117cc6) merged into it, then main
+(d86cb874: the re-seed d5548e72, whose stage 0 embeds the tree's ci and repr/c). Round two of the day's light tier: stage 0 by
+`ARBACE_HOST_EXE` (main's), no gate run but `costs-test`, no executable built; the run checks at `CPPI_THREADS=2 CPPI_JOBS=4
+CPPI_CI_MEMLIMIT=4GiB`. Goal: C++'s eval and AOT cells checked, from CX8's records and a sampling recorded here.
+
+### The merges
+
+- **cpp-cx8 into cpp-cx10.** Conflicts both sides (the Makefile's `.PHONY`, `bin/cppi`'s verbs, `bin/lib/gate-run.bash`'s `gate_cxx_id`
+  and the plan's `ancestors.txt`, `test/gate/steps.edn`: CX10's steps and GT8's `:crops`, now with a crop `:cpp`, which
+  `test/gate/costs.ae` knows). The runtime's IR pin (`test/cpp/runtime/ir.sha256`): CX8 and CX10 fixed the same bug two ways (CX8 names the
+  shim relative to the tarball's root, CX10 rewrites the absolute path in the IR's first two lines); with CX8's `rt_ir` the shims' IR names
+  `../../../../test/cpp/runtime/shims/X`, the same in every checkout, and CX10's rewrite matches nothing: the pin's two lines are CX8's
+  (`runtime-build`: 198 of 198 against them here).
+- **cpp-cx9.** Both sides (`bin/repr-cpp`'s verbs, `test/c/judge_test.ae`'s tests, this file's sections).
+- **main.** Needed: main's stage 0 (the re-seed) embeds repr/c compiled; the branch's older copy, loaded from the checkout beside it, made
+  `runtime-ci` fail on every unit (`ClassCastException: arbace.repr.c.lex.Tok cannot be cast to arbace.repr.c.lex.Tok`). After the merge the
+  checkout's repr/c and ci are main's, the embedded ones. Conflicts both sides (the Makefile, `judge_test.ae`, `steps.edn`: c-roundtrip's
+  `:rotate`, then C++'s steps).
+
+### What was built
+
+- **A sampling's own record.** `bin/cppi check [--aot] --sample N` (no `--only`) is no longer only a subset: it is judged against
+  `test/cpp/check[-aot]-every-N-linux-amd64.edn` (its absent rows fail, as a whole corpus's do) and `--record` writes it (with its times,
+  `-every-N-times-`); `--judge` reads N from the run's `subset` marker; `bin/cppi divergences [--aot] [--sample N]`. `--only` stays a subset
+  (CI_SUBSET, no record). `arbace.cpp.check/run-judge`'s `--sample N`; the AOT level's interpreted column reads the eval record of the same
+  sampling. Why: the reference (`test/cpp/ref-gxx15.edn`, CX8) holds every 25th program of libstdcxx and gxx-dg-run, and C's rule (a subset is
+  not recorded) left 207 of its 224 programs judged by no record.
+- **The cells** (`test/reap/cells.edn`): eval's sources the whole corpora's record (`check-linux-amd64.edn`: samples, runtime) and the
+  sampling's (`check-every-25-linux-amd64.edn`: gxx-dg-run), each `:ref-runs test/cpp/ref-gxx15.edn` with `:ref-corpora` (new in
+  `test/reap/main.ae`'s `case-problems`: only the reference's cases of those corpora are wanted); AOT's the two compiled records, each
+  `:same-cases` its eval record; the `:until`s gone (CX8's and CX9's records exist). CX9's dg source named by its command, `bin/repr-cpp dg`.
+- **Classes.** `test/cpp/divergences-dg.edn` `:dg-unsupported` (31 files of CX9's record whose selector is false here or whose `.exp` driver is
+  not modelled; C's class of the name, CS195 (a); design); `test/cpp/divergences-print.edn` `:read-refused` (CX9's two modules files the
+  converter refuses; deferred, as the read level's class). The run classes are CX8's (`divergences.edn`, `divergences-aot.edn` empty).
+- **reap's round-trip reader** counts no `CORPUS-every-N.edn` beside `CORPUS-all.edn` (CX9's `gxx-modules-all` holds `gxx-modules-every-10`'s
+  119 files with equal verdicts: 119 "in 2 records" problems before).
+- **The negative controls** (GTS81 (a)): CX8's `_control/run/bitfields-vs-io` (samples) and the sampling's
+  `_control/run/no-elide2-vs-dr2137-1` (`gxx-dg-run/init/no-elide2.C`'s run, 15 bytes, against `DRs/dr2137-1.C`'s g++ run, empty), each
+  judged by `run-judge` at eval and AOT: "differs, as a control must".
+- **Gate steps** (`test/gate/steps.edn`, crop `:cpp`): essential `cpp-check-essential` and `cpp-aot-essential` (`bin/cppi check [--aot] --only
+  test/cpp/essential-check.txt`: 6 light programs, the control's subject among them, one recorded non-pass of class threads) after
+  `cpp-lower-essential` in the chain `cpp-essential`; `--full` `cpp-check` and `cpp-aot`, parts `samples-runtime` and `gxx-dg-run-every-25`.
+  Not run here (no `bin/gate`); `bin/gate --plan` needs this seed's stage 0 in the worktree (refused: "not building one here").
+
+### Numbers (this branch, this host)
+
+| run (this branch, warm unless said) | programs | result | wall | peak RSS |
+|---|---|---|---|---|
+| `bin/cppi check` (samples, runtime; first run: runtime-build, its ci library, musl read) | 14 | 10 pass, threads 3, long-double 1: CX8's record exactly; the control differs | 25.6 min (about 14 warm) | 7.5 GB |
+| `bin/cppi check --corpus gxx-dg-run --sample 25 --record` | 67 | 60 pass, oracle-rejected 6, oracle-text 1 (CX8's numbers); the control differs | 4.2 min | 3.0 GB |
+| `bin/cppi check --aot` | 14 | the same 10 and 4; compiled and interpreted agree on all 14 | 13.7 min | 4.8 GB |
+| `bin/cppi check --aot --corpus gxx-dg-run --sample 25 --record` | 67 | 60 pass, the same 7; agree on all 67 | 21.4 min | 4.0 GB |
+| `bin/cppi check --only test/cpp/essential-check.txt` | 6 | 5 pass, threads 1; the control differs | 60 s | 2.7 GB |
+| `bin/cppi check --aot --only test/cpp/essential-check.txt` | 6 | the same | 2.4 min | 3.8 GB |
+
+The sampling's judge, tampered record (`--judge`, restored after): a recorded pass that now fails is a REGRESSION and a recorded row the run
+lacks "absent from the run", both FAIL, exit 1. `bin/reap` (recorded, `test/reap/matrix.edn`): **20 of 20 cells checked, 0 problems**;
+C++ read 5,262 / 1,192 / 77, **eval 70 / 8 / 3**, **AOT 70 / 8 / 3** (each: the whole corpora samples and runtime, 10 / 1 / 3, and the
+sampling of gxx-dg-run, 60 / 7 / 0), print 1,625+ / 1,665 / 76. `test/gate/costs-test.bash` passes; `make check-makefile` passes.
+
+### The night (whole corpora; commands and expected outcomes)
+
+Each under the heavy lock (`bin/heavy-lock CMD`; `CPPI_THREADS=3`, a process up to about 10 GB on libstdcxx, CX8's measure), in this order:
+
+1. `bin/cppi check --corpus libstdcxx --sample 25 --record`, then `--aot`: 141 programs; expected about 127 pass and the rest in
+   CX8's classes (threads, long-double, speed, atomic-generic, va-arg), no UNCLASSED; about 50 min and 1.5 h. Then add `"libstdcxx"` to the
+   sampling sources' `:ref-corpora` and names in `test/reap/cells.edn` and the parts `libstdcxx-every-25` to `cpp-check` and `cpp-aot`,
+   `bin/reap --record`.
+2. The whole of gxx-dg-run: `bin/cppi record-ref --corpus gxx-dg-run` (g++'s runs of ~1,680 programs, about 1 h), then `bin/cppi check
+   --corpus gxx-dg-run --record` (about 40 min) and `--aot` (about 8 h at 21 min per 67: a night of its own). Expected: about 9 in 10 pass,
+   oracle-rejected about 1 in 10, a few oracle-text (`test/cpp/check-known.edn`). Then gxx-dg-run moves from the sampling's sources to the whole
+   corpora's (`:ref-corpora ["samples" "runtime" "gxx-dg-run"]`; the every-25 record of it is a subset and is dropped, with its part).
+3. libstdcxx whole (3,504 programs, about 23 h at 3 threads, CX8): not a night's; it waits for CP220.
+
+### Proposed (CP220-CP222; none decided)
+
+- **CP220 The run checks' cost.** ci's build holds the lowered runtime's checked units in each build process (7.5 GB at samples' peak, about
+  10 GB on libstdcxx) and dominates (CX8: 59 s a libstdcxx program). Options: (a) a ci library of prebuilt nodes for the runtime (CX8's report:
+  built once per runtime key, linked by reference), then the whole corpora; (b) the samplings only (every 25th) in the nightly, the whole
+  corpora at the clean run; (c) the samplings only, for good. Costs: (a) a change to ci's builder (arbace.c), days; (b) the clean run grows by
+  a day for libstdcxx; (c) the cells stay partial. *Recommended: (a), with (b) until it lands.*
+- **CP221 The essential subset's place.** `cpp-check-essential` and `cpp-aot-essential` add about 3.5 min warm (7 more when the runtime is
+  stale) to the chain `cpp-essential` (about 1.5 min before), beside C's chain. Options: (a) as built, in the essential gate; (b) in `--full`
+  only. *Recommended: (a)*: the share (GTS201 (a)) holds it, and a lowering change is caught at merge.
+- **CP222 A sampling's record.** Options: (a) as built: `--sample N` held to `check-every-N`, written by `--record`; (b) C's rule (no record
+  of a subset), the reference cut to the whole corpora recorded. *Recommended: (a)*: the reference already holds the sampling's runs, and the
+  cell counts what is recorded (185's DECISION (a)).
+
+### Left
+
+- CX9's `cpp-dg` gate step (CX10.4) and `cpp-c2j` (CP180): not here.
+- The gate steps are written and parse (`costs-test`); no `bin/gate --plan` here (this seed's stage 0 is not the worktree's). The first gate
+  run keys them.
+
+### Slips, scratch
+
+- `bin/lib/cppi/check` edited while the first background `bin/cppi check` ran it (bash reads its script as it goes): stopped (TaskStop)
+  before its runtime-build finished, run again after.
+- Two background waiters started on the same condition (one stopped). `python3` for multi-line edits, as CX10.
+- Scratch in the worktree's `.tmp/`: `cppi-check/`, `cppi-aot/` (the runs' work), `cppi/runtime/` (the lowered runtime and its ci library),
+  `ci-musl/`, `run-*.log`, `reap*.txt`.
+
+## Decided (2026-11-05, the user: CP220-CP222)
+
+CP220 (a), prebuilt runtime nodes for ci then the whole corpora (with RES34's per-unit path), and (b) until it lands: samples nightly, the whole corpora at the clean run; CP221 (a): the essential C++ run steps stay in the essential gate; CP222 (a): sample records as built.

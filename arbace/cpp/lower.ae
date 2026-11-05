@@ -151,6 +151,9 @@
   [t]
   (let [bytes (long (nth t 1)) al (loop [p 1] (if (>= p bytes) p (recur (* 2 p))))]
     [(* al (quot (+ bytes al -1) al)) al]))
+(defn- sha256-hex ^String [^String s]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes s "UTF-8"))]
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) d))))
 
 (defn- struct-tag
   "The C struct tag that stands for an aggregate LLVM type, its definition added (members first) on first use."
@@ -160,7 +163,9 @@
             d (if named (get *types* t) t)
             tag (if named
                   (symbol (str "t$" (esc (lname-str t))))
-                  (symbol (str "lt$" (:n (swap! *structs* update :n inc)))))]
+                  ;; a literal type named by its content (CX8): units name the same type alike, as ci's builder, which
+                  ;; resolves a function's type across the program's units, needs (CX6-CX7: a number per unit)
+                  (symbol (str "lt$" (subs (sha256-hex (pr-str t)) 0 16))))]
         (swap! *structs* assoc-in [:tags t] tag)
         (if (or (nil? d) (= d 'opaque))
           (swap! *structs* update :defs conj (list 'c/struct tag))
@@ -785,7 +790,11 @@
       (let [info (when gname (get *globals* gname))
             arg-exprs (vec (for [a args]
                              (let [bt (param-attr a :byval) v (typed-value [(first a) (peek a)])]
-                               (if bt (list 'deref (list 'conv (list '* (ctype bt)) v)) v))))
+                               (cond bt (list 'deref (list 'conv (list '* (ctype bt)) v))
+                                     ;; a va_list's storage passed (vsnprintf's ap): the va_list, which C's array type decays to
+                                     ;; the same address for gcc, and which ci, whose va_list is a pointer of its own, needs (CX8)
+                                     (contains? (:va-lists @*fn*) v) (list 'deref (list 'conv '(* __builtin_va_list) v))
+                                     :else v))))
             call-sig [rt (vec (map first args)) (boolean variadic) (vec (map #(param-attr % :byval) args))]
             direct (and info (= (:kind info) :fn)
                         (let [[drt dps dvar dbv] (:sig info)]
@@ -974,7 +983,11 @@
       (trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp ptrtoint inttoptr bitcast addrspacecast)
       (let [[t1 v t2] args] (set (cast-expr h t1 (value v t1) t2)))
       alloca (let [[t] args [s a] (size-align t) cnt (:count o) al (max (long a) (long (or (:align o) 1)))
-                   entry (:entry-block @*fn*)]
+                   entry (:entry-block @*fn*)
+                   ;; a va_list (x86-64's [1 x %struct.__va_list_tag]): its address passed to a call is the va_list itself (CX8)
+                   _ (when (and (seq? t) (= 'array (first t)) (= 1 (second t)) (named? (nth t 2))
+                                (= "struct.__va_list_tag" (lname-str (nth t 2))))
+                       (swap! *fn* update :va-lists (fnil conj #{}) res))]
                (if (and entry (or (nil? cnt) (integer? (second cnt))))
                  (let [n (* (long s) (long (if cnt (second cnt) 1))) m (symbol (str res "$m"))]
                    (swap! *fn* update :allocas conj (with-meta m {:tag (list 'array (max n 1) 'unsigned-char) :c/alignas al}))
@@ -1015,11 +1028,18 @@
                   [(list '__builtin_memcpy (typed-value pv) (list 'addr (list 'compound-lit bt (value-bits (first v) (typed-value v)))) n)])
                 :else
                 [(list 'set! (list 'deref (list 'conv (list '* ct) (typed-value pv))) (typed-value v))]))
-      getelementptr (let [[st base & idxs] args] (set (gep-expr st (typed-value base) (take-while vector? idxs))))
+      getelementptr (let [[st base & idxs] args
+                          is (take-while vector? idxs)]
+                      (when (and (contains? (:va-lists @*fn*) (typed-value base)) (every? #(= 0 (second %)) is))
+                        (swap! *fn* update :va-lists conj res))
+                      (set (gep-expr st (typed-value base) is)))
       phi []
       select (let [[c a b] args]
                (when (and (seq? (first c)) (= (first (first c)) 'vector)) (refuse :vector "select on a vector"))
-               (set (list '? (typed-value c) (typed-value a) (typed-value b))))
+               (if (seq? (resolve-type (first a)))
+                 ;; an aggregate select as an if (CX8): ci's builder refuses a struct-valued conditional operator
+                 [(list 'if (typed-value c) (list 'set! res (typed-value a)) (list 'set! res (typed-value b)))]
+                 (set (list '? (typed-value c) (typed-value a) (typed-value b)))))
       (call invoke) (call-stmts x res)
       landingpad (landingpad-stmts x res)
       extractvalue (let [[[t a] & is] (rest x)]

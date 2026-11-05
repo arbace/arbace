@@ -307,6 +307,11 @@
 
 (defn- prefix-words [n] (set (keep (fn [[k t]] (when (= k :id) t)) (prefix-tokens n))))
 
+(def ^:private qualifier-keywords
+  #{"struct" "class" "union" "enum" "typename" "friend" "template" "using" "namespace" "return" "new" "delete" "operator" "void" "bool"
+    "char" "int" "long" "short" "signed" "unsigned" "float" "double" "auto" "const" "volatile" "static" "extern" "inline" "virtual"
+    "explicit" "constexpr" "consteval" "constinit" "typedef" "export"})
+
 (defn- qualifier
   "The qualifier written before a declaration's name (`S::` of `int S::f()`), as name parts' text, or nil."
   ^String [n]
@@ -325,9 +330,11 @@
                              :else (recur (dec k) d)))
                      j)
                 k (when j2 (loop [k (long j2)] (if (and (pos? k) (let [c (.charAt s (int (dec k)))] (or (Character/isLetterOrDigit c) (= c \_) (> (int c) 127)))) (recur (dec k)) k)))]
-            (if (and k (< k j2))
-              (recur k k)
-              (when start (str/replace (subs s (int start) (int (:offset l))) #"\s+" ""))))
+            (cond
+              ;; a keyword before the :: is no qualifier: the :: is the global one (`friend struct ::X`, CX9's modules part)
+              (and k (< k j2) (= j2 j) (qualifier-keywords (subs s (int k) (int j2)))) (str/replace (subs s (int (- i 2)) (int (:offset l))) #"\s+" "")
+              (and k (< k j2)) (recur k k)
+              :else (when start (str/replace (subs s (int start) (int (:offset l))) #"\s+" ""))))
           (when start (str/replace (subs s (int start) (int (:offset l))) #"\s+" "")))))))
 
 (defn- decl-name
@@ -1336,6 +1343,27 @@
         (catch arbace.lang.ExceptionInfo _ r))
       r)))
 
+;; CX9's modules part: an explicit specialization's written template arguments (`template <> void f<int>() {}`: no parameter
+;; deduces T), the template-id read from the text after the name
+(defn- spec-fn-name [n]
+  (when (some #(= (kind %) "TemplateArgument") (kids n))
+    (when-let [l (plain (:loc n))]
+      (let [s ^String *src*
+            nm ^String (:name n)
+            o (long (:offset l))
+            e (+ o (count nm))]
+        (when (and (re-matches #"[A-Za-z_][A-Za-z0-9_]*" nm) (<= e (count s)) (= nm (subs s (int o) (int e))))
+          (let [i (loop [i e] (if (and (< i (count s)) (Character/isWhitespace (.charAt s (int i)))) (recur (inc i)) i))]
+            (when (and (< i (count s)) (= \< (.charAt s (int i))))
+              (when-let [j (loop [j i d 0]
+                             (when (< j (count s))
+                               (let [c (.charAt s (int j))]
+                                 (cond (#{\( \) \{ \} \;} c) (if (and (= c \() (pos? d)) (recur (inc j) d) (when (pos? d) (when-not (#{\{ \} \;} c) (recur (inc j) d))))
+                                       (= c \<) (recur (inc j) (inc d))
+                                       (= c \>) (if (= d 1) (inc j) (recur (inc j) (dec d)))
+                                       :else (recur (inc j) d)))))]
+                (name-of (str (qualifier n) (subs s (int o) (int j))))))))))))
+
 (defn fn-form [n]
   (let [k (kind n)
         ft (type-of (qt n))
@@ -1368,6 +1396,7 @@
             m (if (re-find #"\bnoexcept\b" (let [t (-> (or (ntext n) "") (str/replace #"//[^\n]*" "") (str/replace #"(?s)/\*.*?\*/" "")) i (.indexOf ^String t "{")] (if (neg? i) t (subs t 0 i)))) m (dissoc m :noexcept))]
         (addm f (cond-> (dissoc m :const :volatile :cpp/ref) declare? (assoc :cpp/declare true))))
       (let [nm (or (decl-name n) (gap :fn "a name"))
+            nm (or (spec-fn-name n) nm)
             ;; a conversion function's name is its return type, qualifiers included (clang's name drops them)
             nm (if (and (= k "CXXConversionDecl") (seq? nm) (= (first nm) 'operator) (= (second nm) 'conv) r (not= r (nth nm 2 nil)))
                  (with-meta (list 'operator 'conv r) (meta nm))
@@ -1386,7 +1415,7 @@
             (:isVirtual b) (assoc :virtual true))]
     (addm t m)))
 
-(declare members)
+(declare members items-of)
 
 (defn record-form [n ctx]
   (let [tag (symbol (str "cpp/" (:tagUsed n)))
@@ -1595,7 +1624,11 @@
                            (try (type-of (str/trim (-> w (str/replace #"^friend\s+" "") (str/replace #";\s*$" ""))))
                                 (catch arbace.lang.ExceptionInfo _ nil))))
                        (type-of (:qualType t))))]
-            [(list 'cpp/friend (first (decl-forms (first (kids n)) ctx)))])
+            ;; a friend naming a function template's specialization (`friend void ns::f<int>();`, CX9's modules part) is its
+            ;; declaration, the pattern clang links it to aside; a friend without forms is a gap, never (cpp/friend nil)
+            (let [d (first (kids n))
+                  d (if (and (= (kind d) "FunctionDecl") (contains? d :TemplateInstantiationPattern)) (dissoc d :TemplateInstantiationPattern) d)]
+              [(list 'cpp/friend (or (first (decl-forms d ctx)) (gap :friend "a declaration without forms")))]))
           ("FunctionTemplateDecl" "ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl") [(template-form n ctx)]
           "ClassTemplateSpecializationDecl"
           (let [nm (decl-name n)
@@ -1622,6 +1655,9 @@
                        j))
                 outer (butlast (outer-headers t))
                 ki (or (first (filter #(#{"struct" "class" "union"} (tt ts %)) (range he (count ts)))) (gap :template "a partial specialization's keyword"))
+                ;; a requires-clause between the headers and the keyword is not read yet, as template-form's (CX9's modules part:
+                ;; its constraint expression is a child of the node, which record-form would write as a member)
+                _ (when (some #(= "requires" (tt ts %)) (range he ki)) (gap :template "a partial specialization's requires clause"))
                 ;; skip attributes between the keyword and the name
                 ni (loop [j (inc ki)]
                      (cond (= "[" (tt ts j)) (let [e (loop [k j d 0] (let [x (tt ts k)] (cond (nil? x) k (= x "[") (recur (inc k) (inc d)) (= x "]") (if (= d 1) (inc k) (recur (inc k) (dec d))) :else (recur (inc k) d))))] (recur e))
@@ -1671,7 +1707,19 @@
                         (list 'c/var (vary-meta nm assoc :tag (esc-name ty))))))
                 f (list 'cpp/instantiate f)]
             [(if ext (vary-meta f assoc :extern true) f)])
-          "EmptyDecl" ['(c/null)]
+          "EmptyDecl" [(list 'c/null)] ; a constructed list: a quoted one carries this file's :line, which the layout reads (review 196, finding 7)
+          ;; CX9, modules (SPEC §15): an export block's members in (cpp/export ...), one exported declaration's forms with
+          ;; ^:export on the first; an import is the text's (module-lines), its node dropped
+          "ExportDecl"
+          ;; its begin is enough (clang leaves the end of `export template <...> using T = Ts...[I];` empty)
+          (let [b (or (:offset (plain (:begin (:range n)))) (gap :module "an export in a macro"))
+                braced (re-find #"^export\s*\{" (text-at b (min (count *src*) (+ (long b) 64))))]
+            (if braced
+              [(apply list 'cpp/export (members n))]
+              ;; the members as items, so that `export typedef struct {...} T;` keeps the class and its declarator one group (CP75 (b))
+              (let [fs (vec (mapcat :fs (items-of (kids n) ctx)))]
+                (if (seq fs) (assoc fs 0 (vary-meta (first fs) assoc :export true)) (gap :module "an empty export")))))
+          "ImportDecl" []
           [(text-form n k true)])
         (catch arbace.lang.ExceptionInfo e
           (if (:cpp/gap (ex-data e)) [(text-form n (str k "/" (name (:cpp/gap (ex-data e)))) true)] (throw e))))))))
@@ -1808,7 +1856,8 @@
   (let [ctx (if (= (kind n) "CXXRecordDecl") :member :top)
         its (items-of (remove #(and (= (kind %) "CXXRecordDecl") (implicit? %)) (kids n)) ctx)
         [b e] (extent n)]
-    (binding [*directives* (filter (fn [d] (and b (< (long b) (long (:off d)) (long e)))) *directives*)]
+    ;; a module declaration or import is a top-level line (CX9): none inside a declaration context
+    (binding [*directives* (filter (fn [d] (and b (not (:module d)) (< (long b) (long (:off d)) (long e)))) *directives*)]
       (place its))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1854,6 +1903,56 @@
       (= v "pragma") (list 'c/pragma (str/trim (subs t (+ (.indexOf t "pragma") 6))))
       :else (list 'c/directive (utf8 t)))))
 
+(defn module-lines
+  "CX9 (SPEC §15): the main file's module declarations and imports (`export module a.b:p;`, `module;`, `module :private;`,
+  `export import a.b;`, `import :p;`, `import <h>;`), each a line of its own outside comments: [{:off :end :form}], placed
+  between the items as the directives are. One the forms do not spell is a text form."
+  [^String s]
+  ;; a line whose ; a macro writes (`module :private SEMI`, pmp-6.C) is matched to its end and kept as a text form
+  (let [m (re-matcher #"(?m)^[ \t]*((export[ \t]+)?(module|import)\b[^;\n{}]*;|(export[ \t]+)?(?:module|import)[ \t]+[:A-Za-z_<\"][^;\n{}()=,/]*?(?=[ \t]*(?://[^\n]*)?$))" s)
+        cmts (let [v (java.util.ArrayList.)]
+               (loop [i 0]
+                 (when (< i (.length s))
+                   (let [c (.charAt s i)]
+                     (cond
+                       (and (= c \/) (< (inc i) (.length s)) (= \* (.charAt s (inc i))))
+                       (let [e (.indexOf s "*/" (int (+ i 2))) e (if (neg? e) (.length s) (+ e 2))] (.add v [i e]) (recur e))
+                       (and (= c \/) (< (inc i) (.length s)) (= \/ (.charAt s (inc i))))
+                       (let [e (.indexOf s "\n" (int i)) e (if (neg? e) (.length s) e)] (.add v [i e]) (recur e))
+                       (= c \") (let [e (loop [j (inc i)] (cond (>= j (.length s)) j (= \\ (.charAt s j)) (recur (+ j 2)) (#{\" \newline} (.charAt s j)) (inc j) :else (recur (inc j))))]
+                                  (recur (long e)))
+                       :else (recur (inc i))))))
+               v)
+        in-cmt? (fn [o] (some (fn [[b e]] (and (<= (long b) (long o)) (< (long o) (long e)))) cmts))
+        ;; review 196, finding 6: a line inside a conditional group (whether its group is taken is the preprocessor's, which
+        ;; the dump does not say for a line that is no directive) or continuing a directive is not read
+        conds (vec (keep (fn [d] (case (:verb d) ("if" "ifdef" "ifndef") [(:off d) 1] "endif" [(:off d) -1] nil)) (directive-lines s)))
+        in-cond? (fn [o] (pos? (long (reduce (fn [n [d k]] (if (< (long d) (long o)) (+ (long n) (long k)) n)) 0 conds))))
+        continued? (fn [o] (let [i (.lastIndexOf s "\n" (int (dec (long o))))] (and (pos? i) (= \\ (.charAt s (dec i))))))]
+    (loop [out []]
+      (if (.find m)
+        (let [b (.start m 1) e (.end m 1) t (.group m 1)
+              ex (boolean (.group m 2))
+              body (str/trim (subs t (+ (if ex (.length (.group m 2)) 0) (count (.group m 3))) (dec (count t))))
+              id #"[A-Za-z_][A-Za-z_0-9]*(?:\.[A-Za-z_][A-Za-z_0-9]*)*"
+              f (if (= (.group m 3) "module")
+                  (cond
+                    (and (= body "") (not ex)) (list 'cpp/module)
+                    (and (re-matches #":\s*private" body) (not ex)) (list 'cpp/module-private)
+                    (re-matches id body) (list 'cpp/module (symbol body))
+                    :else (when-let [[_ a p] (re-matches #"([A-Za-z_][\w.]*)\s*:\s*([A-Za-z_][\w.]*)" body)]
+                            (when (and (re-matches id a) (re-matches id p)) (list 'cpp/module (symbol a) :partition (symbol p)))))
+                  (cond
+                    (re-matches id body) (list 'cpp/import (symbol body))
+                    (re-matches #"<[^>\s]+>|\"[^\"]+\"" body) (list 'cpp/import body)
+                    :else (when-let [[_ p] (re-matches #":\s*([A-Za-z_][\w.]*)" body)]
+                            (when (re-matches id p) (list 'cpp/import :partition (symbol p))))))
+              f (cond (nil? f) (list 'cpp/text (utf8 t))
+                      ex (vary-meta f assoc :export true)
+                      :else f)]
+          (recur (if (or (in-cmt? b) (in-cond? b) (continued? b)) out (conj out {:off b :end e :form f :module true}))))
+        out))))
+
 (defn active-directives
   "The directives the print keeps: those outside every conditional group, and those inside an executed one that are
   not conditionals themselves (`executed`, the lines of the main file's directives the preprocessor executed, as
@@ -1880,7 +1979,7 @@
   [nodes ^String src ^String main executed]
   (let [texts (atom {})]
     (binding [*src* src *main* main *texts* texts
-              *directives* (active-directives src executed)
+              *directives* (vec (sort-by :off (concat (active-directives src executed) (module-lines src))))
               *line-dirs* (vec (for [d (directive-lines src) :when (and (= "line" (:verb d)) (zero? (long (:depth d))))
                                      :let [m (re-find #"^#\s*line\s+(\d[\d']*)" (:text d))] :when m]
                                  [(:end d) (Long/parseLong (str/replace (second m) "'" ""))]))]
