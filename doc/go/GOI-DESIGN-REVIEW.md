@@ -368,3 +368,7 @@ executable, with and without `GOI_LIVENESS=0` in the environment.
   statement's end only (cleared with it, as a temporary, when they are one; header variables stay to the function's
   end): a header variable that holds a pointer across a long loop body is later than gc.
 - Cells in loops: a per-iteration variable is not in a list's declarations, so it is not cleared.
+
+## Decided (2026-11-05, the user)
+
+Proposed 7 (a): goi's adapters registry stays strong; issue54343 stays known until another program needs a weak registry.
