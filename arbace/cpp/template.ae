@@ -866,7 +866,9 @@
                                   (= c \<) (if (= d 1) i (recur (dec i) (dec d)))
                                   :else (recur (dec i) d)))))]
                 (when i (when-let [m (re-find #"([A-Za-z_][A-Za-z_0-9]*)\s*$" (subs t 0 i))]
-                          [(second m) (str (second m) (subs t i))]))))))))))
+                          ;; the whole nested-name-specifier (S::Y<char>), outer parts plain names
+                          (let [pre (re-find #"((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)*)$" (subs t 0 (- i (count (first m)))))]
+                            [(second m) (str (str/replace (or (second pre) "") #"\s" "") (second m) (subs t i))])))))))))))
 
 (defn- attach-one! [tid cid o]
   (let [t (tmpl tid)
@@ -976,8 +978,9 @@
 (defn- explicit-fn-spec!
   "An explicit specialization of a function template (template <> R f<args>(...) {...}): its template found by name
   and its arguments from the TemplateArgument kids and deduction from its type ([temp.deduct.decl])."
-  [scope n]
-  (let [ts (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))) (sema/lookup scope (:name n)))
+  [scope n & [cid]]
+  (let [ts (filter #(and (= :tmpl (:e %)) (= :fn (:tk %)))
+                   (if cid (.get ^java.util.HashMap (:names scope) (:name n)) (sema/lookup scope (:name n))))
         targs (filter #(= "TemplateArgument" (:kind %)) (kids n))
         try1 (fn [e]
                (let [t (tmpl (:id e))]
@@ -988,10 +991,17 @@
                      (when (deduce-type b (:id t) (sym-sig t) ty)
                        (when-let [args (finish-deduction t @b)] [t args])))
                    (catch arbace.lang.ExceptionInfo _ nil))))
-        [t args] (or (some try1 ts) (fail :template "no template for the explicit specialization " (:name n)))
-        ps (new-scope :tparams scope :internal (:internal scope))
+        ;; of the templates it could specialize, the most specialized ([temp.deduct.decl]/1, [temp.func.order])
+        found (keep try1 ts)
+        np (count (:ps (dissoc (sema/resolve-type scope (get-in n [:type :qualType])) :cq)))
+        best (filter (fn [[t _]] (every? (fn [[u _]] (or (= (:id t) (:id u)) (more-specialized-fn? (:id t) (:id u) np))) found)) found)
+        [t args] (or (first best) (first found) (fail :template "no template for the explicit specialization " (:name n)))
+        ps (if cid
+             (new-scope :tparams scope :cls cid :path (:path scope) :internal (:internal scope))
+             (new-scope :tparams scope :internal (:internal scope)))
         fid (#'sema/declare-fn! ps n)
-        _ (.remove ^java.util.HashMap (:names ps) (:name n))]
+        _ (.remove ^java.util.HashMap (:names ps) (:name n))
+        _ (when cid (upd-fn! fid assoc :inline (boolean (:inline n))))]
     (upd-fn! fid assoc :tinst {:tid (:id t) :args args :tsig (sym-sig t) :tn (tn-types t)} :keep-def-scope true)
     (upd-tmpl! (:id t) assoc-in [:insts args] fid)
     :template))
@@ -1214,7 +1224,13 @@
         (and (#{"FunctionDecl" "CXXMethodDecl"} (:kind n))
              (or (some #(= "TemplateArgument" (:kind %)) (kids n)) (re-find #"^\s*template\s*<\s*>" text))
              (not (ool-class-name n)))
-        (explicit-fn-spec! scope n)
+        ;; a member template's of a class named by a plain qualifier (template <> void S1::f(int*))
+        (if-let [q (seq (#'sema/qualifier-before n))]
+          (let [e (first (filter #(= :type (:e %)) (sema/lookup-qualified scope (vec q))))]
+            (if (and e (abi/class? (:ty e)))
+              (explicit-fn-spec! (:scope (abi/cls (:id (:ty e)))) n (:id (:ty e)))
+              (explicit-fn-spec! scope n)))
+          (explicit-fn-spec! scope n))
         ;; a member of a class template defined outside it
         (and (re-find #"^\s*template\s*<\s*[^>\s]" text) (ool-class-name n))
         (let [cn (ool-class-name n)
@@ -1223,6 +1239,12 @@
           (upd-tmpl! tid update :ool conj o)
           (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-one! tid cid o)))
           :template)
+        ;; an explicit specialization of a member template of a class specialization (template <> template <> R A<int>::f<7>(...))
+        (re-find #"^\s*template\s*<\s*>\s*template\s*<\s*>" text)
+        (let [[_ qt] (or (ool-qualifier n) (fail :template "an explicit specialization's qualifier"))
+              cls (sema/resolve-type scope qt)]
+          (when-not (abi/class? cls) (fail :template "an explicit specialization of a member of " qt))
+          (explicit-fn-spec! (:scope (abi/cls (:id cls))) n (:id cls)))
         (re-find #"^\s*template\s*<\s*>\s*template" text) (fail :template "an explicit specialization of a member template")
         ;; an explicit specialization of a member of a class template's specialization (template <> int Box<int>::get())
         (re-find #"^\s*template\s*<\s*>" text) (explicit-member-spec! scope n)
