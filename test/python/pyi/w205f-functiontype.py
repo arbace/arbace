@@ -51,6 +51,10 @@ except NameError as e:
     print("NameError", e)
 print(types.CellType(1) == types.CellType(1), types.CellType(1) < types.CellType(2), empty < types.CellType(0),
       empty == types.CellType(), types.CellType(3) > empty, types.CellType(1) != types.CellType(1))
+try:
+    hash(empty)
+except TypeError as e:
+    print("TypeError", e)
 print(type(empty).__name__, repr(empty).startswith("<cell at 0x"), repr(empty).endswith(": empty>"),
       repr(c2).endswith(": int object at 0x" + repr(c2).rsplit("0x", 1)[1]), " int object at " in repr(c2))
 
