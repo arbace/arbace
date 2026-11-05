@@ -249,20 +249,29 @@ rnVerb libdir flags outDir files = runGhc (Just libdir) $ do
               ++ (case ideclImportList d of Just (EverythingBut, _) -> "true"; _ -> "false") ++ " "
               ++ (case ideclExt d of XImportDeclPass _ _ imp -> if imp then "true" else "false") ++ ")"
             allOccs = map snd (sort (o1 ++ o2 ++ o3))
+            groupsInOrder = g1 ++ g2 ++ g3 ++ tyclGs
         liftIO $ do
           createDirectoryIfMissing True (takeDirectory out)
           withFile out WriteMode $ \h -> do
             hSetEncoding h utf8
             hPutStrLn h ("(hsrn/module " ++ esc mn ++ ")")
             hPutStrLn h ("(hsrn/imports " ++ vec (map impF imps) ++ ")")
+            -- the occurrences, operator trees and groups are sets: sorted, each once (the renamer keeps a
+            -- name at both a binder's FunBind and its FunRhs, the tree's duplicates carry nothing)
             hPutStrLn h ("(hsrn/occs [" ++ intercalate "\n  " (nubSorted allOccs) ++ "])")
-            hPutStrLn h ("(hsrn/ops [" ++ intercalate "\n  " (map snd (sort (p1 ++ p2 ++ p3))) ++ "])")
-            hPutStrLn h ("(hsrn/groups [" ++ intercalate "\n  " (g1 ++ g2 ++ g3 ++ tyclGs) ++ "])")
+            hPutStrLn h ("(hsrn/ops [" ++ intercalate "\n  " (nubSorted (map snd (sort (p1 ++ p2 ++ p3)))) ++ "])")
+            hPutStrLn h ("(hsrn/groups [" ++ intercalate "\n  " (sort groupsInOrder) ++ "])")
+            -- GHC's order of the groups (the dependency analysis' order depends on the uniques of its
+            -- names): reported by the check, not judged
+            hPutStrLn h ("(hsrn/group-order [" ++ intercalate "\n  " groupsInOrder ++ "])")
             hPutStrLn h ("(hsrn/exports [" ++ intercalate "\n  " exps ++ "])")
         return True
   return (and ok)
   where
-    nubSorted = id
+    nubSorted :: [String] -> [String]
+    nubSorted (a : b : r) | a == b = nubSorted (b : r)
+                          | otherwise = a : nubSorted (b : r)
+    nubSorted r = r
 
 
 -- ----------------------------------------------------------------------------------------
