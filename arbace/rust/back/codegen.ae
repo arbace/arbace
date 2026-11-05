@@ -33,6 +33,7 @@
           zst (and (zero? (:size e)) (= ak "memory"))]
       (cond-> {:size (:size e) :align (:align e) :ty t
                :offsets (when (vector? (:fields e)) (:fields e))
+               :array (let [f (:fields e)] (when (and (seq? f) (= "array" (name (first f)))) {:stride (second f) :count (nth f 2)}))
                :kind (cond zst :zst
                            (= ak "scalar") :scalar
                            (= ak "pair") :pair
@@ -123,6 +124,7 @@
             (case (proj-kind e)
               "deref" (pointee-type t)
               "field" (nth e 2)
+              "index" (second (ty-struct t))
               (unsupported (str "projection " (first e)))))
           (:ty (nth (:locals body) (place-local p)))
           (place-projs p)))
@@ -408,6 +410,14 @@
                                                 off (nth (:offsets (:ly pl)) fi)
                                                 fl (layout lt t)]
                                             {:ptr (gep! bb (:ptr pl) off) :align (restrict-align (:align pl) off) :ly fl :ty t})
+                                  "index" (let [el (layout lt (second (ty-struct (:ty pl))))
+                                                idx (if (contains? mem (second e))
+                                                      (:v (load-scalar! bb (:scalar (nth lay (second e))) (get-in @st [:allocas (second e)]) (:align (nth lay (second e)))))
+                                                      (:v (get-in @st [:vals (second e)])))
+                                                r (fresh!)]
+                                            (when-not (:array (:ly pl)) (unsupported "index of a non-array"))
+                                            (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (symbol (:mem (:scalar el))) ['ptr (:ptr pl)] ['i64 idx])))
+                                            {:ptr r :align (restrict-align (:align pl) (:size el)) :ly el :ty (second (ty-struct (:ty pl)))})
                                   (unsupported (str "place projection " (first e)))))
                               base (:rest base))))
         ;; field of an SSA pair/scalar value
@@ -522,14 +532,20 @@
                               (unsupported "aggregate into an SSA local"))))
         aggregate-into! (fn [bb pl ops]
                           (let [ly (:ly pl) offs (:offsets ly)]
-                            (when-not offs (unsupported "aggregate of an array"))
+                            (if (:array ly)
+                              (let [el (layout lt (second (ty-struct (:ty ly))))]
+                                (when-not (= :scalar (:kind el)) (unsupported "array of non-scalars"))
+                                (doseq [[i o] (map-indexed vector ops)]
+                                  (let [v (operand! bb o) r (fresh!)]
+                                    (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (symbol (:mem (:scalar el))) ['ptr (:ptr pl)] ['i64 i])))
+                                    (store-val! bb {:ptr r :align (restrict-align (:align pl) (* i (:size el))) :ly el} v))))
                             (doseq [[i o] (map-indexed vector ops)]
                               (let [v (operand! bb o)
                                     off (nth offs i)
                                     ft (ty-of o)
                                     fl (layout lt ft)]
                                 (when v
-                                  (store-val! bb {:ptr (gep! bb (:ptr pl) off) :align (restrict-align (:align pl) off) :ly fl} v))))))
+                                  (store-val! bb {:ptr (gep! bb (:ptr pl) off) :align (restrict-align (:align pl) off) :ly fl} v)))))))
         rvalue! (fn [bb r]
                   (case (name (first r))
                     ("use" "use-noretag") (operand! bb (second r))

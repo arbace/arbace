@@ -133,7 +133,10 @@ impl<'tcx> W<'tcx> {
     fn constant(&self, c: &ConstOperand<'tcx>) -> String {
         let text = c.to_string();
         let v = match c.const_ {
-            Const::Ty(_, k) => format!("(tyconst {})", q(&k.to_string())),
+            Const::Ty(_, k) => match c.const_.try_to_scalar_int() {
+                Some(i) => format!("(scalar {} {})", i.to_bits_unchecked(), i.size().bytes()),
+                None => format!("(tyconst {})", q(&k.to_string())),
+            },
             Const::Unevaluated(u, _) => format!(
                 "(unevaluated {} {} {})",
                 q(&self.path(u.def)),
