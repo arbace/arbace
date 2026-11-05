@@ -45,6 +45,13 @@
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
+(declare verr)
+
+(defn- soft!
+  "CheckFailed: the failure recorded, the check goes on."
+  [rule msg & culprits]
+  (try (apply verr rule msg culprits) (catch arbace.lang.ExceptionInfo e (.add *errs* e))))
+
 (defn- verr
   "Throws the check's failure: its rule, LLVM's message, and what the message prints after it (the culprits: strings,
   :inst the instruction visited, :fn the function as `ptr @f`, :bb its block, or a form of the module) and, for a
@@ -539,12 +546,26 @@
 
 (defn- fn-has [attrs n] (has-attr? attrs n))
 
+(def ^:dynamic *any-writable* false)   ; a parameter of the function type checked has writable
+
+(defn- argmem-mod?
+  "isModSet of a memory(...) attribute's argmem effect (no attribute: readwrite)."
+  [attrs]
+  (if-let [m (first (filter #(and (seq? %) (= (aname %) "memory")) attrs))]
+    (let [items (map str/trim (str/split (str (second m)) #","))
+          dflt (first (remove #(str/includes? % ":") items))
+          arg (some #(when (str/starts-with? % "argmem:") (str/trim (subs % 7))) items)]
+      (boolean (#{"write" "readwrite"} (or arg dflt "none"))))
+    true))
+
 (defn- check-fn-attr-pairs
-  "verifyFunctionAttrs' later pairs: sanitize_realtime, the SME states, target-features."
+  "verifyFunctionAttrs' later pairs: sanitize_realtime, writable and memory, the SME states."
   [attrs culprit]
   (let [has #(fn-has attrs %) shas #(some? (str-attr attrs %))]
     (when (and (has "sanitize_realtime") (has "sanitize_realtime_blocking"))
       (verr :verifier/attr-pair "Attributes 'sanitize_realtime and sanitize_realtime_blocking' are incompatible!" culprit))
+    (when (and *any-writable* (not (argmem-mod? attrs)))
+      (verr :verifier/attr-pair "Attribute writable and memory without argmem: write are incompatible!" culprit))
     (when (and (shas "aarch64_pstate_sm_enabled") (shas "aarch64_pstate_sm_compatible"))
       (verr :verifier/attr-pair "Attributes 'aarch64_pstate_sm_enabled and aarch64_pstate_sm_compatible' are incompatible!" culprit))
     (when (> (count (filter shas ["aarch64_new_za" "aarch64_in_za" "aarch64_inout_za" "aarch64_out_za" "aarch64_preserves_za" "aarch64_za_state_agnostic"])) 1)
@@ -617,20 +638,32 @@
     (when-let [a (str-attr attrs "frame-pointer")]
       (when-not (#{"all" "non-leaf" "none" "reserved" "non-leaf-no-reserve"} (second a))
         (verr :verifier/attr-value (str "invalid value for 'frame-pointer' attribute: " (second a)))))
-    (doseq [k ["patchable-function-prefix" "patchable-function-entry" "warn-stack-size"]]
-      (when-let [a (str-attr attrs k)]
-        (when-not (re-matches #"[0-9]+" (str (second a)))
-          (verr :verifier/attr-value (str "\"" k "\" takes an unsigned integer: " (second a))))))
-    (when-let [a (str-attr attrs "sign-return-address")]
-      (when-not (#{"none" "all" "non-leaf"} (second a)) (verr :verifier/attr-value (str "invalid value for 'sign-return-address' attribute: " (second a)))))
-    (when-let [a (str-attr attrs "branch-target-enforcement")]
-      (when-not (#{"" "true" "false"} (or (second a) "")) (verr :verifier/attr-value (str "invalid value for 'branch-target-enforcement' attribute: " (second a)))))
+    (let [me (if call? :inst :fn)
+          u32? (fn [v] (and (re-matches #"[0-9]+" (str v)) (< (bigint v) 4294967296)))]
+      ;; checkUnsignedBaseTenFuncAttr and the branch protection values: CheckFailed, the checks go on
+      (doseq [k ["patchable-function-prefix" "patchable-function-entry"]]
+        (when-let [a (str-attr attrs k)]
+          (when-not (u32? (second a)) (soft! :verifier/attr-value (str "\"" k "\" takes an unsigned integer: " (second a)) me))))
+      (when-let [a (str-attr attrs "patchable-function-entry-section")]
+        (when (= "" (or (second a) "")) (verr :verifier/attr-value "\"patchable-function-entry-section\" must not be empty" :none)))
+      (when-let [a (str-attr attrs "warn-stack-size")]
+        (when-not (u32? (second a)) (soft! :verifier/attr-value (str "\"warn-stack-size\" takes an unsigned integer: " (second a)) me)))
+      (when-let [a (str-attr attrs "sign-return-address")]
+        (when-not (#{"none" "all" "non-leaf"} (second a)) (soft! :verifier/attr-value (str "invalid value for 'sign-return-address' attribute: " (second a)) me)))
+      (when-let [a (str-attr attrs "sign-return-address-key")]
+        (when-not (#{"a_key" "b_key"} (second a)) (soft! :verifier/attr-value (str "invalid value for 'sign-return-address-key' attribute: " (second a)) me))
+        (when-not (str-attr attrs "sign-return-address") (soft! :verifier/attr-value "'sign-return-address-key' present without `sign-return-address`" :none)))
+      (doseq [k ["branch-target-enforcement" "branch-protection-pauth-lr" "guarded-control-stack"]]
+        (when-let [a (str-attr attrs k)]
+          (when-not (#{"" "true" "false"} (or (second a) "")) (soft! :verifier/attr-value (str "invalid value for '" k "' attribute: " (second a)) me)))))
     (check-target-features attrs (if call? :inst :fn))
     (when-let [a (attr-of attrs "allockind")]
       (let [ws (set (map str/trim (str/split (str/replace (str (second a)) "\"" "") #",")))
             k (count (filter ws ["alloc" "realloc" "free"]))]
         (when-not (= k 1) (verr :verifier/attr-value "'allockind()' requires exactly one of alloc, realloc, and free" :none))
-        (when (and (ws "zeroed") (ws "uninitialized")) (verr :verifier/attr-value "'allockind()' can't be both zeroed and uninitialized" :none))))
+        (when (and (ws "free") (some ws ["uninitialized" "zeroed" "aligned"]))
+          (soft! :verifier/attr-value "'allockind(\"free\")' doesn't allow uninitialized, zeroed, or aligned modifiers." :none))
+        (when (and (ws "zeroed") (ws "uninitialized")) (soft! :verifier/attr-value "'allockind()' can't be both zeroed and uninitialized" :none))))
     (when (and (has "jumptable") (not call?)) (verr :verifier/attr-value "Attribute 'jumptable' requires 'unnamed_addr'"))))
 
 (defn- check-function-attrs
@@ -667,8 +700,9 @@
             (.add saw n)))
         (when (has-attr? attrs "inalloca")
           (when-not (= i (dec (count ptypes))) (verr :verifier/attr-misc "inalloca isn't on the last parameter!")))))
-    (when (seq fattrs)
-      (check-fn-attr-values fattrs ptypes call?)))))
+    (when (or (seq fattrs) (some #(has-attr? % "writable") pattrs))
+      (binding [*any-writable* (boolean (some #(has-attr? % "writable") pattrs))]
+        (check-fn-attr-values fattrs ptypes call?))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Phase 1: LLParser's checks
@@ -3528,7 +3562,8 @@
   [x]
   (cond
     (and (seq? x) (di-kind x) (get @di-print-order (di-kind x)))
-    (let [order (get @di-print-order (di-kind x))
+    (let [order (vec (vals (into (array-map) (map (fn [[f md]] [f [f md]]) (reverse (get @di-print-order (di-kind x)))))))
+          order (vec (reverse order))
           x (if (and (= "DISubprogram" (di-kind x)) (not (contains? (apply hash-map (rest x)) :spFlags)))
               ;; DISubprogram::toSPFlags: the legacy fields as the spFlags the writer prints
               (let [fs (apply hash-map (rest x))
@@ -3594,7 +3629,7 @@
     (and (vector? c) (= (first c) :global)) (global-operand (second c))
     (and (vector? c) (= (first c) :md)) (if-let [f (get metaforms (second c))] (md-form-text f) (str (second c)))
     (and (vector? c) (= (first c) :mdv)) (let [v (second c)]
-                                           (cond (nil? v) "null"
+                                           (cond (or (nil? v) (= v 'null)) nil
                                                  (and (symbol? v) (get metaforms v)) (md-form-text (get metaforms v))
                                                  (vector? v) (pr/typed-str (canon-fps v))
                                                  :else (pr/md-str v)))
@@ -3612,7 +3647,7 @@
   (let [d (ex-data e) ctx (:ctx d)
         cs (cond (= [:none] (:culprits d)) [] (seq (:culprits d)) (:culprits d) :else (default-culprits ctx))]
     (binding [*ctx* ctx]
-      (apply str (.getMessage ^Throwable e) "\n" (map #(if (and (vector? %) (= :raw (first %))) (second %) (str (diag/renumber (culprit-text % ctx metaforms) slots) "\n")) cs)))))
+      (apply str (.getMessage ^Throwable e) "\n" (map #(if (and (vector? %) (= :raw (first %))) (second %) (when-let [t (culprit-text % ctx metaforms)] (str (diag/renumber t slots) "\n"))) cs)))))
 
 (defn- parse-offset
   "The offset in the text of a parser error: its item and hint."
