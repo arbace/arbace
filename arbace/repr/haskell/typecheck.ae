@@ -406,6 +406,8 @@
 
 (def ^:dynamic *module* nil)
 (def ^:dynamic *derivs* nil)     ; atom [{:cls :tn :names :res :desc}]: the stock deriving requests of the module
+(def ^:dynamic *ddescs* nil)     ; atom {TYCON {:desc :names}}: the module's data types as deriving sees them
+(def ^:dynamic *exts* #{})
 (def ^:dynamic *fixities* nil)   ; atom {CON [PREC ASSOC]}
 (def cls-callstack (ext-name "tc" "GHC.Internal.Stack.Types" "HasCallStack"))
 
@@ -1048,8 +1050,12 @@
               cls (when (= 'HsTyVar (con body)) (nm (arg body 3)))]
           (when cls
             (cond
-              (contains? deriv/generators (occ cls))
-              (swap! *derivs* conj {:cls cls :tn tn :names names :res res :desc desc})
+              (or (contains? deriv/generators (occ cls))
+                  (and (:newtype? desc) (contains? *exts* "GeneralizedNewtypeDeriving") (not (contains? #{"Show" "Read"} (occ cls)))))
+              (let [ctor? (and (contains? constructor-classes (occ cls)) (seq names))]
+                (swap! *derivs* conj {:cls cls :tn tn :tvs (if ctor? (vec (butlast names)) names)
+                                      :ts [(if ctor? [:tc tn (mapv (fn [x] [:tv x]) (butlast names))] res)]
+                                      :ctor? ctor? :desc (assoc desc :var (last names)) :stock? (contains? deriv/generators (occ cls))}))
               (and (contains? constructor-classes (occ cls)) (seq names))
               ;; a class of type constructors (Functor, Monad...): the head drops the last parameter
               (swap! *insts* conj {:dfun (ext-name "var" m (str "$f" (occ cls) (occ tn)))
@@ -1059,7 +1065,8 @@
               (swap! *insts* conj {:dfun (ext-name "var" m (str "$f" (occ cls) (occ tn)))
                                    :tvs names
                                    :ctx (vec (for [[n x] (map vector tvn names) :when (contains? used n)] [cls [[:tv x]]]))
-                                   :head [cls [res]]}))))))))
+                                   :head [cls [res]]}))))))
+    (swap! *ddescs* assoc tn {:desc {:tn tn :cons @descs :fix @*fixities* :newtype? (= 'NewTypeCon (con cs))} :names names})))
 
 (defn- simplify-pred
   "GHC's context simplification of a derived instance's constraint: reduced by the instances to constraints on type
@@ -1098,6 +1105,55 @@
             :gnd (when (and (:newtype? (:desc r)) (contains? #{"Eq" "Ord" "Ix" "Bounded"} (occ (:cls r))))
                    (first (:tys (first (:cons (:desc r))))))
             :binds (deriv/derive-binds (occ (:cls r)) (:desc r))}))))
+
+(defn- standalone-requests
+  "The standalone deriving declarations (deriving instance ctx => C (T a)) of the module as requests"
+  [decls]
+  (vec (for [d decls :let [v (lval d)] :when (and (= 'DerivD (con v)) (= 'DerivDecl (con (arg v 2))))
+             :let [dd (arg v 2) st (sig-type (arg (arg dd 2) 2)) head (nth st 3)
+                   cls (second head) ts (nth head 2) t0 (first ts)
+                   tn (when (= :tc (first t0)) (second t0))
+                   info (get @*ddescs* tn)]
+             :when (and info (= :tc (first head)))]
+         {:cls cls :tn tn :tvs (:names st) :ts ts :ctx (nth st 2) :ctor? (contains? constructor-classes (occ cls))
+          :desc (assoc (:desc info) :var (last (:names info))) :stock? (contains? deriv/generators (occ cls)) :standalone? true})))
+
+(defn- derive-all!
+  "The derived instances of the module (deriving clauses and standalone declarations): their heads entered, the
+  contexts inferred by fixpoint, their bindings generated; the newtype strategy for a newtype's Eq, Ord, Ix, Bounded
+  (GHC's std_class_via_coercible) and, with GeneralizedNewtypeDeriving, every class but Show and Read"
+  [m decls]
+  (let [reqs (into @*derivs* (standalone-requests decls))
+        dfun (fn [r] (ext-name "var" m (str "$f" (occ (:cls r)) (occ (:tn r)))))
+        gnd-of (fn [r]
+                 (when (and (:newtype? (:desc r)) (not (:standalone? r))
+                            (or (contains? #{"Eq" "Ord" "Ix" "Bounded"} (occ (:cls r)))
+                                (and (contains? *exts* "GeneralizedNewtypeDeriving") (not (contains? #{"Show" "Read"} (occ (:cls r)))))))
+                   (let [t (first (:tys (first (:cons (:desc r)))))]
+                     (if (:ctor? r)
+                       (case (first t) :tc [:tc (second t) (vec (butlast (nth t 2)))] :app (nth t 1) t)
+                       t))))
+        ctx-of (fn [r]
+                 (cond
+                   (:standalone? r) (:ctx r)
+                   (gnd-of r) (vec (simplify-pred [(:cls r) [(gnd-of r)]]))
+                   (= "Enum" (occ (:cls r))) []
+                   (:ctor? r) (vec (distinct (mapcat (fn [c] (mapcat (fn [t] (mapcat (fn [f] (simplify-pred [(:cls r) [f]]))
+                                                                                    (deriv/fun-subtypes (:var (:desc r)) t)))
+                                                                    (:tys c)))
+                                                     (:cons (:desc r)))))
+                   :else (vec (distinct (mapcat (fn [c] (mapcat (fn [t] (simplify-pred [(:cls r) [t]])) (:tys c)))
+                                                (:cons (:desc r)))))))]
+    (doseq [r reqs] (swap! *insts* conj {:dfun (dfun r) :tvs (:tvs r) :ctx (if (:standalone? r) (:ctx r) []) :head [(:cls r) (:ts r)]}))
+    (dotimes [_ 5]
+      (doseq [r reqs :when (not (:standalone? r))]
+        (let [ctx (ctx-of r)]
+          (swap! *insts* (fn [is] (mapv (fn [i] (if (= (:dfun i) (dfun r)) (assoc i :ctx ctx) i)) is))))))
+    (vec (for [r reqs]
+           {:dfun (dfun r) :tvs (:tvs r) :ctx (:ctx (some #(when (= (:dfun %) (dfun r)) %) @*insts*))
+            :cls (:cls r) :ts (:ts r)
+            :gnd (gnd-of r)
+            :binds (when-not (gnd-of r) (deriv/derive-binds (occ (:cls r)) (:desc r)))}))))
 
 (defn- syn-decl! [d]
   (let [tn (nm (arg d 2)) tvn (qtvs-names (arg d 3))
@@ -1206,8 +1262,12 @@
                           ;; the newtype strategy: the representation type's method, coerced
                           (let [d (or (solve-pred [cls [(subst skol gnd)]] givens 0)
                                       (do (error! "no representation dictionary " (occ cls)) (list 'lit "?")))
-                                c (list 'app (list 'v mn) [d])]
-                            (if (empty? params) c (list 'lam params c)))
+                                mty (method-type mn cls ts)
+                                ;; the method's own constraints stay parameters of the coerced method
+                                iparams (if (= :forall (first mty)) (mapv dict-param (nth mty 2)) [])
+                                c (list 'app (list 'v mn) (into [d] iparams))
+                                ps (into params iparams)]
+                            (if (empty? ps) c (list 'lam ps c)))
                           (if b
                           (binding [*self-givens* self-givens] (check-method env b (method-type mn cls ts) givens params))
                           (if-let [dm (get (:defaults info) mn)]
@@ -1311,7 +1371,7 @@
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
               *genv* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {})
-              *derivs* (atom []) *fixities* (atom {})]
+              *derivs* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))]
       (load-ifaces!)
       (doseq [s sigs :let [sv (lval s)] :when (= 'FixSig (con sv))
               :let [fs (arg sv 2) fx (arg fs 3)] n (arg fs 2)]
@@ -1326,7 +1386,7 @@
                                 (list 'bind n (list 'lit (str "foreign import " (occ n)))))))
             insts (vec (for [d decls :let [v (lval d)] :when (and (= 'InstD (con v)) (= 'ClsInstD (con (arg v 2))))]
                          (inst-decl! m (arg (arg v 2) 2))))
-            insts (into insts (derive-all! m))
+            insts (into insts (derive-all! m decls))
             top-sigs (sigs-of sigs)
             [env core] (reduce (fn [[env out] g] (let [[env1 bs] (tc-group env [(arg g 1) (arg g 2)] top-sigs true)] [env1 (into out bs)]))
                                [{} []] binds)

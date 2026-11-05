@@ -365,10 +365,141 @@
      (funbind (gv read-m "readList") [[[] (v* (gv read-m "readListDefault"))]])
      (funbind (gv read-m "readListPrec") [[[] (v* (gv read-m "readListPrecDefault"))]])]))
 
+
+;;; Functor, Foldable, Traversable --------------------------------------------------------------
+;;; GHC's functorLikeTraverse over a field's type with the last type variable of the data type: the variable itself,
+;;; a type constructor applied with the variable only in its last argument (the nested case); tuples and function
+;;; types are not generated (the class is left to its defaults then, recorded in the survey)
+
+(defn- ty-contains? [var t] (boolean (some #(= [:tv var] %) (tree-seq vector? seq t))))
+
+(defn- split-app
+  "A type application T args... / f x: [fun last-arg], nil when not an application"
+  [t]
+  (case (first t)
+    :tc (when (seq (nth t 2)) [[:tc (second t) (vec (butlast (nth t 2)))] (last (nth t 2))])
+    :app [(nth t 1) (nth t 2)]
+    nil))
+
+(defn classify
+  "A field type seen from var: :triv, :var, [:app fun arg] (the variable in the last argument only) or :bad"
+  [var t]
+  (cond
+    (not (ty-contains? var t)) :triv
+    (= t [:tv var]) :var
+    :else (let [[f a] (split-app t)]
+            (cond (nil? f) :bad
+                  (ty-contains? var f) :bad
+                  (and (= :tc (first t)) (re-find #"Tuple|Unit|FUN" (str (occ-of (second t))))) :bad
+                  :else [:app f a]))))
+
+(defn- supply [] (let [n (atom 0)] (fn [] (lname (str "y" (swap! n inc))))))
+
+(defn- bs-pat [c] (con-pat c (as-names "b" (:arity c))))
+
+(defn gen-functor [{:keys [cons var]}]
+  (let [fmap (gv base "fmap") repl (gv base "<$")
+        f (v* (lname "f")) z (v* (lname "z"))
+        kinds (fn [c] (mapv #(classify var %) (:tys c)))]
+    (when (every? (fn [c] (every? #(not= :bad %) (kinds c))) cons)
+      (let [mk (fn [replace?]
+                 (fn [c]
+                   (let [fresh (supply)
+                         go (fn go [t x]
+                              (let [k (classify var t)]
+                                (cond (= k :triv) x
+                                      (= k :var) (if replace? z (ap* f x))
+                                      :else (let [[_ _ a] k]
+                                              (if (= a [:tv var])
+                                                (if replace? (ap* (v* repl) z x) (ap* (v* fmap) f x))
+                                                (let [y (fresh)]
+                                                  (ap* (v* fmap) (lam* [(vp (nth y 2))] (go a (v* y))) x)))))))
+                         args (map (fn [t b] (go t (v* b))) (:tys c) (as-names "b" (:arity c)))]
+                     [[(vp (if replace? "z" "f")) (bs-pat c)] (apply ap* (v* (:name c)) args)])))]
+        [(funbind fmap (map (mk false) cons)) (funbind repl (map (mk true) cons))]))))
+
+(defn- fold-part
+  "A field's Foldable/Traversable part: nil (trivial) or a function expression taking the variable's function"
+  [var t g-var wrap]
+  (let [k (classify var t)]
+    (cond (= k :triv) nil
+          (= k :var) g-var
+          :else (let [[_ _ a] k inner (fold-part var a g-var wrap)] (when inner (wrap inner))))))
+
+(defn gen-foldable [{:keys [cons var]}]
+  (let [foldr-r (gv foldable-m "foldr") foldmap-r (gv foldable-m "foldMap") null-r (gv foldable-m "null") all-r (gv foldable-m "all")
+        mempty (gv base "mempty") mappend (gv base "mappend")
+        f (v* (lname "f")) z (v* (lname "z"))]
+    (when (and (seq cons) (every? (fn [c] (every? #(not= :bad (classify var %)) (:tys c))) cons))
+      (let [fresh (supply)
+            ;; foldr: parts are \x z -> ...
+            fr-part (fn fr [t]
+                      (let [k (classify var t)]
+                        (cond (= k :triv) nil
+                              (= k :var) f
+                              :else (let [[_ _ a] k gg (fr a)]
+                                      (when gg (let [x (fresh) zz (fresh)]
+                                                 (lam* [(vp (nth x 2)) (vp (nth zz 2))] (ap* (v* foldr-r) gg (v* zz) (v* x)))))))))
+            fm-part (fn fm [t]
+                      (let [k (classify var t)]
+                        (cond (= k :triv) nil (= k :var) f
+                              :else (let [[_ _ a] k gg (fm a)] (when gg (ap* (v* foldmap-r) gg))))))
+            null-part (fn nl [t]
+                        (let [k (classify var t)]
+                          (cond (= k :triv) :is-null (= k :var) :not-null
+                                :else (let [[_ _ a] k r (nl a)]
+                                        (case r :not-null [:null (v* null-r)] :is-null :is-null
+                                          [:null (ap* (v* all-r) (second r))])))))
+            foldr-clause (fn [c] (let [xs (keep identity (map (fn [t b] (when-let [p (fr-part t)] (ap* p (v* b)))) (:tys c) (as-names "b" (:arity c))))]
+                                   [[(vp "f") (vp "z") (bs-pat c)] (reduce (fn [acc x] (ap* x acc)) z (reverse xs))]))
+            foldmap-clause (fn [c] (let [xs (keep identity (map (fn [t b] (when-let [p (fm-part t)] (ap* p (v* b)))) (:tys c) (as-names "b" (:arity c))))]
+                                     [[(vp "f") (bs-pat c)]
+                                      (if (empty? xs) (v* mempty)
+                                          (reduce (fn [acc x] (ap* (v* mappend) x acc)) (last xs) (reverse (butlast xs))))]))
+            null-clause (fn [c] (let [ps (mapv null-part (:tys c))]
+                                  (if (some #(= :not-null %) ps)
+                                    [[(cp (:name c) (repeat (:arity c) wp))] false-e]
+                                    (let [xs (keep identity (map (fn [p b] (when (vector? p) (ap* (second p) (v* b)))) ps (as-names "b" (:arity c))))]
+                                      [[(bs-pat c)] (if (empty? xs) true-e (reduce (fn [acc x] (op* x and-rdr acc)) (last xs) (reverse (butlast xs))))]))))]
+        [(funbind foldr-r (map foldr-clause cons))
+         (funbind foldmap-r (map foldmap-clause cons))
+         (funbind null-r (map null-clause cons))]))))
+
+(defn gen-traversable [{:keys [cons var]}]
+  (let [trav (gv trav-m "traverse") pure (gv base "pure") fmap (gv base "fmap") liftA2 (gv base "liftA2") ap (gv base "<*>")
+        f (v* (lname "f"))]
+    (when (every? (fn [c] (every? #(not= :bad (classify var %)) (:tys c))) cons)
+      (let [part (fn pt [t]
+                   (let [k (classify var t)]
+                     (cond (= k :triv) nil (= k :var) f
+                           :else (let [[_ _ a] k gg (pt a)] (when gg (ap* (v* trav) gg))))))
+            clause (fn [c]
+                     (let [as (as-names "a" (:arity c))
+                           ps (map part (:tys c))
+                           just? (map some? ps)
+                           xs (vec (keep identity (map (fn [p a] (when p (ap* p (v* a)))) ps as)))
+                           bs (vec (keep identity (map (fn [j i] (when j (lname (str "b" (inc i))))) just? (range))))
+                           vars (map (fn [j a i] (if j (v* (lname (str "b" (inc i)))) (v* a))) just? as (range))
+                           con-expr (if (empty? xs) (apply ap* (v* (:name c)) (map v* as))
+                                        (lam* (map #(L* (list 'VarPat nil (nmx %))) bs) (apply ap* (v* (:name c)) vars)))
+                           rhs (cond (empty? xs) (ap* (v* pure) con-expr)
+                                     (= 1 (count xs)) (ap* (v* fmap) con-expr (first xs))
+                                     :else (reduce (fn [acc x] (ap* (v* ap) acc x))
+                                                   (ap* (v* liftA2) con-expr (first xs) (second xs)) (drop 2 xs)))]
+                       [[(vp "f") (con-pat c as)] rhs]))]
+        [(funbind trav (map clause cons))]))))
+
 (def generators
-  {"Eq" gen-eq "Ord" gen-ord "Show" gen-show "Read" gen-read "Enum" gen-enum "Bounded" gen-bounded "Ix" gen-ix})
+  {"Eq" gen-eq "Ord" gen-ord "Show" gen-show "Read" gen-read "Enum" gen-enum "Bounded" gen-bounded "Ix" gen-ix
+   "Functor" gen-functor "Foldable" gen-foldable "Traversable" gen-traversable})
 
 (defn derive-binds
   "The bindings of class CLS (its occurrence name) for the described type, or nil"
   [cls desc]
   (when-let [g (get generators cls)] (g desc)))
+
+(defn fun-subtypes
+  "The type constructors (partial applications) a Functor-like instance needs an instance of for a field type:
+  GHC's deepSubtypesContaining"
+  [var t]
+  (let [k (classify var t)] (if (vector? k) (cons (second k) (fun-subtypes var (nth k 2))) [])))
