@@ -688,7 +688,7 @@
       (verr :parser/align "alignment is not a power of two" {:at [:attr-val-of "align" (str a)]}))
     (when (> (long a) 4294967296) (verr :parser/align "huge alignments are not supported yet" {:at [:attr-val-of "align" (str a)]}))))
 
-(declare use-value check-di-parse node-of di-kind callee-of phase-parser* check-uselistorder fp-class-compatible? resolve-type gep-indexed-type sized? token-like? check-fn-attr-pairs check-target-features alloc-bytes)
+(declare use-value check-di-parse node-of di-kind callee-of phase-parser* check-uselistorder fp-class-compatible? resolve-type gep-indexed-type sized? token-like? check-fn-attr-pairs check-target-features alloc-bytes call-fty strip-casts)
 
 (defn- note-md! [x]
   (letfn [(walk [y] (cond (md-ref? y) (.add *mrefs* y)
@@ -872,6 +872,10 @@
                        (verr :parser/phi "fast-math-flags specified for phi without floating-point scalar or vector return type" {:at [:body 0]}))
                      (when-not (first-class? (norm-type (first ps*))) (verr :parser/phi "phi node must have first class type" {:at [:ty]})))
       (= h 'select) (let [[[ct] [at] [bt]] ps* ct (norm-type ct)]
+                      (when (and (vec-type? ct) (= 'i1 (elem ct)))
+                        (when-not (vec-type? (norm-type at)) (verr :parser/select "selected values for vector select must be vectors" {:at [:ty]}))
+                        (when-not (= (shape ct) (shape (norm-type at)))
+                          (verr :parser/select "vector select requires selected vectors to have the same vector length as select condition" {:at [:ty]})))
                       (when (and (some keyword? ps) (not (fp-class-compatible? (norm-type at))))
                         (verr :parser/select "fast-math-flags specified for select without floating-point scalar or vector return type" {:at [:body 0]}))
                       (cond
@@ -952,6 +956,8 @@
 (defn- parse-call-attrs
   "LLParser's attribute checks of a call's text: return value, arguments, function attributes."
   [ps o]
+  (when (and (seq (:fmf o)) (not (fp-class-compatible? (norm-type (second (call-fty (first ps) (nth ps 2)))))))
+    (verr :parser/call "fast-math-flags specified for call without floating-point scalar or vector return type" {:at [:find "call"]}))
   (doseq [[i a] (map-indexed vector (nth ps 2))]
     (let [t (resolve-type (norm-type (first a)))]
       (when (or (= t 'label) (= t 'void) (= t 'opaque) (named-type? t) (and (seq? t) (= 'fn (first t))))
@@ -1183,7 +1189,8 @@
         (llvm/define llvm/declare) (parse-function f)
         llvm/global (parse-global f)
         (llvm/alias llvm/ifunc) (parse-alias f)
-        llvm/meta (do (.add *mdefs* (second f)) (note-md! (drop 2 f)) (check-di-parse (second f) (nth f 2) (:distinct (apply hash-map (drop 3 f)))))
+        llvm/meta (do (when (.contains *mdefs* (second f)) (verr :parser/redefinition "Metadata id is already used" {:at [:next]}))
+                      (.add *mdefs* (second f)) (note-md! (drop 2 f)) (check-di-parse (second f) (nth f 2) (:distinct (apply hash-map (drop 3 f)))))
         llvm/named-meta (do (doseq [[oi op] (map-indexed vector (nth f 2))]
                               (cond
                                 (md-ref? op) nil
@@ -1581,7 +1588,13 @@
                                        (when-not (and (ptr-type? (t 0)) (ptr-type? (t 1))) (verr :verifier/intrinsic-call "arguments to separate_storage assumptions should be pointers" :inst)))
                 (verr :verifier/intrinsic-call "tags must be valid attribute names" :inst)))))
       ("llvm.gcroot" "llvm.gcwrite" "llvm.gcread")
-      (when-not has-gc (verr :verifier/intrinsic-call "Enclosing function does not use GC." :inst))
+      (do (when (= id "llvm.gcroot")
+            (let [a0 (strip-casts (arg 0)) d (when (local? a0) (.get ^java.util.Map defs (local-key a0)))]
+              (when-not (and d (= 'alloca (first (nth d 2)))) (verr :verifier/intrinsic-call "llvm.gcroot parameter #1 must be an alloca." :inst))
+              (when (local? (arg 1)) (verr :verifier/intrinsic-call "llvm.gcroot parameter #2 must be a constant." :inst))
+              (when (and (not (ptr-type? (norm-type (first (strip-flags (second (split-inst (nth d 2)))))))) (= 'null (arg 1)))
+                (verr :verifier/intrinsic-call "llvm.gcroot parameter #1 must either be a pointer alloca, or argument #2 must be a non-null constant." :inst))))
+          (when-not has-gc (verr :verifier/intrinsic-call "Enclosing function does not use GC." :inst)))
       "llvm.localescape"
       (do (when-not (zero? (long (or (:bi *ctx*) 0))) (verr :verifier/intrinsic-call "llvm.localescape used outside of entry block" :inst))
           (when (:localescape @*fn-seen*) (verr :verifier/intrinsic-call "multiple calls to llvm.localescape in one function" :inst))
@@ -1628,6 +1641,44 @@
       ("llvm.nvvm.setmaxnreg.inc.sync.aligned.u32" "llvm.nvvm.setmaxnreg.dec.sync.aligned.u32")
       (let [v (arg 0)] (when (and (integer? v) (not (zero? (mod (long v) 8)))) (verr :verifier/intrinsic-call "reg_count argument to nvvm.setmaxnreg must be in multiples of 8" :none)))
       nil)))
+
+(defn- asm-constraints
+  "InlineAsm::ParseConstraints, as far as the Verifier needs: each constraint's kind (:input, :output, :clobber, :label) and
+  whether it is indirect, the string split at commas outside braces."
+  [^String cs]
+  (let [parts (loop [i 0 d 0 cur (StringBuilder.) out []]
+                (if (>= i (count cs))
+                  (conj out (str cur))
+                  (let [ch (.charAt cs (int i))]
+                    (cond (= ch \{) (recur (inc i) (inc d) (.append cur ch) out)
+                          (= ch \}) (recur (inc i) (dec d) (.append cur ch) out)
+                          (and (= ch \,) (zero? d)) (recur (inc i) d (StringBuilder.) (conj out (str cur)))
+                          :else (recur (inc i) d (.append cur ch) out)))))]
+    (vec (for [p parts :when (seq p)]
+           (let [k (cond (str/starts-with? p "~") :clobber (str/starts-with? p "=") :output (str/starts-with? p "!") :label :else :input)
+                 body (cond-> p (#{:output :clobber :label} k) (subs 1))
+                 body (if (str/starts-with? body "&") (subs body 1) body)]
+             {:kind k :indirect (str/starts-with? body "*")})))))
+
+(defn- check-inline-asm-call
+  "Verifier::verifyInlineAsmCall: an indirect constraint's operand a pointer with elementtype, only those with it; label
+  constraints only on callbr, as many as its indirect destinations."
+  [h c args pattrs o]
+  (let [cons (asm-constraints (nth c 2 ""))]
+    (loop [cs cons i 0 labels 0]
+      (if-let [ci (first cs)]
+        (cond
+          (= :label (:kind ci)) (recur (rest cs) i (inc labels))
+          (not (or (= :input (:kind ci)) (and (= :output (:kind ci)) (:indirect ci)))) (recur (rest cs) i labels)
+          :else
+          (do (if (:indirect ci)
+                (do (when-not (ptr-type? (norm-type (first (nth args i nil)))) (verr :verifier/call "Operand for indirect constraint must have pointer type" :inst))
+                    (when-not (has-attr? (nth pattrs i []) "elementtype") (verr :verifier/call "Operand for indirect constraint must have elementtype attribute" :inst)))
+                (when (has-attr? (nth pattrs i []) "elementtype") (verr :verifier/call "Elementtype attribute can only be applied for indirect constraints" :inst)))
+              (recur (rest cs) (inc i) labels)))
+        (if (= h 'callbr)
+          (when-not (= labels (count (:indirect o))) (verr :verifier/call "Number of label constraints does not match number of callbr dests" :inst))
+          (when-not (zero? labels) (verr :verifier/call "Label constraints can only be used with callbr" :inst)))))))
 
 (defn- check-call-site
   "visitCallBase after the arguments' types: the calling convention, the attributes of the call, immediate arguments,
@@ -1712,6 +1763,7 @@
                   (verr :verifier/attr-misc "swifterror argument for call has mismatched parameter" (pr/typed-str [(norm-type (first param)) v]) :inst))
           :else (verr :verifier/attr-misc "swifterror argument should come from an alloca or parameter" (pr/typed-str [(norm-type (first a)) v]) :inst))))
     (when direct-intr? (visiting (check-intrinsic-call (global-key c) b defs)))
+    (when (and (seq? c) (= 'asm (first c))) (visiting (check-inline-asm-call h c args pattrs o)))
     (check-bundles (:bundles o) defs (global? c) (norm-type (second fty))
                    (or (has-attr? fattrs "noreturn")
                        (when-let [d (when (global? c) (.get *gdefs* (global-key c)))]
