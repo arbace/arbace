@@ -418,3 +418,25 @@ validity check (rejected programs, TY16), check_counter_example_pat's Refine_or 
 examples are checked only when the usefulness check finds a match with GADT constructors partial. Alternatives weighed:
 replacing the usefulness check by exhaust and the counter-example check for every match, as OCaml does (deferred,
 TY17 (b): the same answers, more work per match). Proposals TY16-TY18 (TYPER.md §16), none decided.
+
+## 2026-11-05: oi's native front end, T11: the run corpus and the toplevel on the native path (branch ocaml-t11)
+
+From `ocaml-t10`, with `ocaml-native-lib` (TY18, the native library) merged at fbc7f2ced (conflicts in
+`arbace/repr/ocaml/typer.ae`, the new verbs `phrase` and `canon-equal`/`stdlib-build` side by side, and in
+`bin/lib/oi/typer.bash`'s header). `bin/oi check --native` types and translates each program of the run corpus with Arbace's
+typer and runs it on oi on the native library, judged against ocamlc's recorded runs on its own record
+(`test/ocaml/check-oi-native.edn`, classes `test/ocaml/divergences-native.edn` before `divergences.edn`'s, known programs
+`test/ocaml/oi-known-native.edn`) and compared row by row with ocamlc's path (`check-oi.edn`); `--only-list` added for both paths.
+`bin/oi repl --native` and `repl-check --native` type each phrase with the typer's new verb `phrase` (the earlier phrases' signatures
+kept as `top_N.mli` and read natively), the session 24 of 24 phrases equal to the ocaml toplevel's. `bin/oi typer-probe` compares the
+corpus's signatures and Lambda with the oracle's (TY11, TY12, TY14, TY17's observations, TYPER.md §18). The typer's fixes the corpus
+found, ported from OCaml 5.5.0's tarball (SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba): ocdump's printing
+of string constants (UTF-8 text when valid, else bytes), Pexp_unreachable (typecore.ml's case, translcore.ml's filters), Typeopt's kind
+of an empty variant, transl_apply's List.fold_right over the protected arguments, Parmatch.orify_many of no constructors,
+Typecore's innermost_location for assert, parser.mly's Clflags.unsafe for the indexing operators, Printtyp's unshortened path of a type
+extension. Results: oi's essential directories (basic/, effects/) 56 of 56 natively; the whole run corpus run in four lists (light:
+three programs at once), the native path passes 244 of the 309 run programs where ocamlc's path passes 273, the 29 others
+in the typer's classes (effect syntax 12, outside the slice 8, type errors 5, recursive lazy values 2, a format 1, recursive modules'
+shapes 1), none failing; the repl session 24 of 24. Alternatives weighed: one typer process for many programs (faster, but one hang or
+crash takes the batch; a process a program kept, TY20 for the toplevel); making the native path `bin/oi check`'s default now (TY19,
+proposed, not done: the oracle's record stays the reference). Proposals TY19-TY22 (TYPER.md §19), none decided.

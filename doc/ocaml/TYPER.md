@@ -22,9 +22,9 @@ compiler-libs:
 
 | use | today | after this slice |
 |---|---|---|
-| a program's Lambda (`bin/oi run`, `check`) | `ocdump --mode lambda --simplify` | `bin/oi run-native`: Arbace (the core language and the module system; Simplif's output since T7) |
+| a program's Lambda (`bin/oi run`, `check`) | `ocdump --mode lambda --simplify` | `bin/oi run-native`: Arbace (the core language and the module system; Simplif's output since T7); `bin/oi check --native` over the run corpus (T11, §18) |
 | the stdlib's Lambda (`bin/oi stdlib`) | ocamlc builds the `.cmi`, ocdump dumps each unit | still ocamlc's (TY5, TY7 (c)); `bin/oi stdlib-check` types the 71 units natively, all equal (T8, T9, T10's blockers, §15) |
-| the toplevel's phrases (`bin/oi repl`, `bin/lib/oi/phrase`) | ocdump types and lowers each phrase | unchanged (T11) |
+| the toplevel's phrases (`bin/oi repl`, `bin/lib/oi/phrase`) | ocdump types and lowers each phrase | `bin/oi repl --native` (`bin/lib/oi/phrase-native`): Arbace types and translates each phrase (T11, §18) |
 | the judge (types, Lambda, runs) | ocdump `--mode types`, `--mode lambda`, the toplevel | unchanged: the oracle stays the judge |
 
 The stdlib's *interfaces* are read natively already: the typer reads `stdlib/*.mli` of the pinned tarball with the native
@@ -137,7 +137,7 @@ of these, in `test/ocaml/divergences.edn`'s format:
 | T8 the module system | Typemod (structures, signatures, inclusion and coercions, strengthening, applicative paths), functors (`Map.Make`, `Set.Make`, `Hashtbl.Make`), `open`/`include`/local opens, recursive modules; Translmod complete; then the stdlib's own `.ml` typed and translated natively | `bin/oi stdlib --native`: every unit's Lambda equal to the oracle's (canonical), oi's check on it unchanged | the module system done, the stdlib 64 of 71 (§9); the rest wait on T9's objects and variants and T10 |
 | T9 formats, variants, objects | `format6` typing of literals (Typecore's `type_format`, CamlinternalFormatBasics), polymorphic variants (rows, `Tvariant`, Matching's `divide_variant`), objects and classes (Typeclass, Translobj, Translclass) | the testsuite's `basic/` and `typing-objects/` run programs through the native path | formats done (§9), polymorphic variants done (§11); objects and classes done (§13) |
 | T10 the rest of the core | GADTs and locally abstract types, existentials, first-class modules, effect handlers (`transl_handler`), lazy and array patterns, inline records, labelled tuples, `let` operators, optional-argument elimination | the probe's refusals gone | 6-10 |
-| T11 the corpus and the toplevel | `bin/oi check --native` over the run corpus with the classes of §5; `bin/oi repl --native` (phrases typed here, Genprintval's value printing from types) | none failing, every non-pass classed; repl-check without ocamlc | 4-6 |
+| T11 the corpus and the toplevel | `bin/oi check --native` over the run corpus with the classes of §5; `bin/oi repl --native` (phrases typed here, Genprintval's value printing from types) | none failing, every non-pass classed; repl-check without ocamlc | done (§18): 244 of 309 natively, ocamlc's path 273, the 29 others classed; the session 24 of 24 |
 | T12 errors | typing errors as ocamlc reports them (Location's report, Printtyp's explanations), the testsuite's expect tests' type errors | the error tests' messages equal | 5-8 |
 
 Total beyond this slice: about 31 to 49 days, within the survey's 15-30 for a checker plus the stdlib and objects.
@@ -524,3 +524,98 @@ TY16 (a): the validity check with T12; TY17 (a): Refine_or and wildcard expansio
 What is left: the AOT path (`aot-lib`) over the native library and the gates' keys (`ocaml-o8` declares oi's steps' inputs: they must
 list `arbace/repr/ocaml` and `arbace/repr/ocaml/typer` for the library) were not run here (light day, no AOT); the oracle's
 `ocdump` still types the programs of `check`, `suite` and `repl` (T11 and T12 are what retire it).
+
+## 18. As built: T11, the run corpus and the toplevel on the native path (2026-11-05, branch `ocaml-t11`, from `ocaml-t10`, `ocaml-native-lib` merged)
+
+TY18's library merged (conflicts in `arbace/repr/ocaml/typer.ae`, both new verbs kept, and in `bin/lib/oi/typer.bash`'s header);
+every run below is on the native library (`bin/oi stdlib`'s), so neither the programs nor the library come from ocamlc.
+
+- **`bin/oi check --native [--record] [--jobs N] [--only RE | --only-list FILE]`**: each program of the run corpus typed and
+  translated by Arbace (`arbace.repr.ocaml.typer lambda --simplify`, one stage-0 process a program, one Go thread and 1.2 GB each,
+  three at once), the programs that use lib/testing against its interface (`--include`), run on oi exactly as `bin/oi check` runs
+  ocdump's Lambda, and judged by `test/ocaml/oi_check.ae` against ocamlc's recorded runs (`ref-ocaml55.edn`), twice: on its own
+  record, `test/ocaml/check-oi-native.edn` (`--record` writes it; with `--only`/`--only-list` the rows merge), with the native
+  classes `test/ocaml/divergences-native.edn` before `divergences.edn`'s and the native known programs
+  `test/ocaml/oi-known-native.edn` after `oi-known.edn`'s (merged in `.tmp/oi/native-judge/`, where the judge looks for them), and
+  the negative control of `check-oi.edn` repeated for it; then against ocamlc's path, `check-oi.edn`, every row that differs a
+  `CHANGED` line. A row's reason is the typer's message alone (Arbace's "Execution error ... at" and report path left out).
+  `--only-list FILE` (one id a line) is new for both paths. Flags: `-nolabels` is the typer's `--nolabels` (classic mode),
+  `-unsafe` its `--unsafe` (parser.mly's Clflags.unsafe: the indexing operators read as `Array.unsafe_get` and the like, a dynamic
+  var of `arbace.repr.ocaml.actions`), `-no-strict-formats` nothing (the format parser's legacy behaviour is the port's only one);
+  any other flag is a row of the class `typer-flag`.
+- **`bin/oi repl --native`, `bin/oi repl-check --native`**: each phrase typed and translated by the verb `phrase` (via
+  `bin/lib/oi/phrase-native`, the protocol of `bin/lib/oi/phrase`: first as `let it__ = (PHRASE)`, else as structure items, the unit
+  Top_N with the earlier units opened), its signature written as `top_N.mli` beside its Lambda, so the next phrase finds Top_N as it
+  finds the stdlib's units (`--include` of the work directory, read natively). The toplevel's printer (oi's `printSig`, values from
+  the signature's types, OC12 (a)) is unchanged. A type extension's path is now printed as Printtyp.tree_of_type_extension prints it,
+  not shortened (`type _ Stdlib.Effect.t += Ask : int Effect.t`), the one line the session differed in.
+- **`bin/oi typer-probe`** (for TY11, TY12, TY14, TY17's observations): the run corpus's programs without flags copied flat
+  (`DIR__BASE.ml`) with the oracle's three dumps beside them, and the typer's `check` over them in one process (`.tmp/oi/probe/check.txt`).
+- **The typer's fixes the corpus found** (each ported from the same tarball, SHA-256 fcc6ae66...f015ba): string constants printed as
+  ocdump prints them (the bytes as UTF-8 text when valid, `String.is_valid_utf_8`, else a vector of the bytes: "é", `"\xff"`;
+  `lib-string`, `lib-buffer`, `lib-uchar`, `lib-bytes-utf`, `lib-scanf` failed on it); refutation cases (`| p -> .`,
+  Pexp_unreachable: typed with the expected type, counted in the match's partiality, left out by Translcore's four filters; its
+  refutation check is not ported, TY17's kin); an empty variant's value kind `[int]` (Typeopt); transl_apply's protected arguments
+  wrapped right to left (`List.fold_right` over `!defs`: `labels_evaluation_order`); Parmatch.orify_many of no constructors (a
+  wildcard: `robustmatch`); an assert's location the innermost of its location stack (Typecore's innermost_location:
+  `assert_location`); the typer's options `--include`, `--nolabels`, `--unsafe`, `--intf`.
+
+**Results (2026-11-05, stage 0 of main, the native library; 3 programs at once, each process under 1.5 GB)**:
+
+| list | programs | native path passes | ocamlc's path passes (check-oi.edn) | native non-passes that pass on ocamlc's path, by class |
+|---|---:|---:|---:|---|
+| oi's essential directories, basic/ and effects/ (OC67) | 56 | 56 | 56 | none |
+| slice 1 of the rest (`.tmp/t11/slice00`) | 81 | 58 | 75 | typer-effect-syntax 12, typer-letrec-lazy 2, typer-outside-slice 2, typer-known 1 |
+| slice 2 | 95 | 73, then 75 with the flags | 86 | typer-flag 10 (then none: `-unsafe` and `-no-strict-formats` passed), typer-outside-slice 2, typer-format-typing 1, typer-type-error 2 |
+| slice 3 | 77 | 48, then 50 | 56 | typer-outside-slice 4, typer-type-error 3, assert's location (then fixed) |
+| **the run corpus, all 309 run programs (`test/ocaml/check-oi-native.edn`)** | **309** | **244** | **273** | **29: typer-effect-syntax 12, typer-outside-slice 8 (let operators 1, open of a structure 2, functor applications in paths 1, a class's local open 1, `%loc_FUNCTION` 2, recursive modules 1), typer-type-error 5, typer-letrec-lazy 2, typer-format-typing 1, typer-known 1 (recursive_module_init)** |
+
+None failing: every native non-pass is in a class (the judgment of `check-oi-native.edn`), and no program passes natively that fails on
+ocamlc's path. The type errors are gaps of the port: constructor disambiguation by the expected type (`Unbound constructor Normal`,
+`Marshal`, `Custom` in statmemprof's 5, already classed `gc-and-memory` on ocamlc's path), a format's `'_weak1 list` against
+`Format.Args.t`/`Printf.Args.t` (the two tlprintf), a first-class module's `Set.elt`, a modular explicit's signature, and
+`prim-revapply`'s "applied to too many arguments" (`@@`/`|>` over an unknown arity). The rows were run in four lists and the
+non-passes again after the fixes (`--record --only-list`, merged into one record). The toplevel: `bin/oi repl-check --native`
+24 of 24 phrases equal to the ocaml toplevel's (3 min: one process a phrase), `bin/oi repl-check` (ocamlc's phrases on the native
+library) equal too. `bin/oi typer-check` 73 of 73 at every level after the fixes; `bin/oi stdlib-check` 71 of 71 units equal to ocamlc's, lib/testing
+equal, the samples 73 of 73 on the library.
+
+**The corpus's observations (TY11, TY12, TY14, TY17; `bin/oi typer-probe`, 272 programs without flags that ocamlc accepts)**:
+types equal 226, raw Lambda equal 217, simplified Lambda equal 218; of the signatures that differ, 10 with their Lambda equal:
+
+- *TY11, sharing*: `misc/hamming` prints `'b lcons lazy_t` where OCaml prints `'b lcons Lazy.t` (as §15's sample did) and
+  `typing-labels/mixin` `string` for `Subst.key`: unify3's links. Both run equal.
+- *TY12, names*: no scope difference (no row named or unnamed differently); the names that differ are Printtyp's choice of a path
+  among equal ones: `statmemprof/*` print `Gc.Memprof.t` where OCaml prints the local alias `MP.t` (Printtyp's best_type_path
+  through module aliases), `lib-hashtbl/htbl` `H.key` for `M.key` (the strengthened path of the other functor argument),
+  `lib-queue`, `lib-stack` `Queue.t` for `Stdlib__Queue.t` (an `include` of the unit's own type), `basic/sets` an abstract `t` for
+  `Set.Make(SetOrd(BaseSet)).t` (applicative paths in a printed signature). TY21.
+- *TY14, Tpoly*: no method type differs; `basic/patmatch` prints a record field's explicit polytype `'a. 'a cell -> 'b -> 'b` as
+  `'_ cell -> 'b -> 'b` (a Tpoly field's variables printed after unification; TY22).
+- *TY17, partiality*: no match's partiality differs in the corpus (no Match_failure handler added or missing). The Lambda that
+  differs with equal signatures is: the required globals listing `Stdlib` when only its submodules are used (12 programs, harmless:
+  oi links the library), Matching's names and exits (`misc/gpr1370`, `match-exception/nested_handlers`, both run equal), an assert's
+  location one column off (`parsing/assert_location`), and recursive modules' shapes (`basic-modules/recursive_module_init`, the
+  one that fails: `oi-known-native.edn`). Refine_or and the explosion of wildcards stay unported (TY17 (a)'s condition does not hold).
+- Also: the externals' `[@@unboxed] [@@noalloc]` are not printed in a signature (`weak-ephe-final/ephetest3`), a module type's
+  `+!'a t` (variance and injectivity) prints `'a t` (`typing-labels/mixin*`).
+
+**The night's whole-corpus command**: `bin/oi check --native --record` (all 309 run programs, about 22 minutes at three jobs on a
+quiet host; light: one Go thread and 1.2 GB a process), then `bin/oi typer-probe` (2 minutes). Speed: a program costs about 8 s of
+which the typer's load is most (stage 0 evaluates the typer's namespaces each time); the REPL about 8 s a phrase (TY20).
+
+## 19. Proposed (TY19-TY22; options with costs, a recommendation each, none decided)
+
+- **TY19 The default of `bin/oi check`.** (a) make the native path the default now, `--ocdump` the oracle's, `check-oi.edn`
+  re-recorded from the native path (its CHANGED rows become classed non-passes: the effect syntax, the flags, ...); (b) keep the two
+  side by side, `check-oi.edn` ocamlc's and `check-oi-native.edn` the native path's, until the native rows equal ocamlc's but for the
+  classes owned by milestones already decided (T10's effect syntax, let operators); then (a). *Recommended: (b)*: the oracle's record
+  stays the reference the native one is compared with; the gate's ocaml steps (OC120 (b)) can carry both.
+- **TY20 The toplevel's speed.** One stage-0 process a phrase costs about 8 s (the typer's load). (a) one typer process a session
+  (the phrase verb reading phrases from a pipe, the units' signatures kept in memory: about half a day); (b) keep a process a phrase.
+  *Recommended: (a)*, with T12 (errors at the toplevel are T12's).
+- **TY21 Printtyp's paths.** The corpus's printed names differ by path choice (best_type_path through aliases, strengthened and
+  applicative paths), not scopes. (a) port Printtyp's printing environment and short paths with T12, where printed types are judged;
+  (b) now (about a day). *Recommended: (a)*; TY12 (a)'s scopes stay unneeded.
+- **TY22 Polytypes in record fields and sharing.** (a) TY11 (a)'s unify3 links with Typecore's levels, and a Tpoly field's printing,
+  with T12; (b) now (about a day); (c) not at all (the runs are equal). *Recommended: (a)*.
