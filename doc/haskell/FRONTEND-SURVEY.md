@@ -834,7 +834,7 @@ choice of strategy). Nothing else of GHC was needed beyond the pinned tarball's 
   inlining differences of GHC's simple optimiser; k-nucleotide, reverse-complement, threads005: unboxed tuples, a
   newtype-derived instance of a C type, `printf`), none new, and the derived instances of the nofib programs (their
   `Eq`, `Ord`, `Show`, `Read`, `Enum`, `Ix`, `Bounded` instances, which HF3 left as "GHC only") now judged: the
-  constraints programs went from 36 to 57 evidence bindings. What the judge found while matching GHC: the order of an
+  (spectral/constraints went from 36 to 57 judged evidence bindings). What the judge found while matching GHC: the order of an
   inferred context (last occurrence kept), the newtype strategy for `Eq`, `Ord`, `Ix`, `Bounded` without any
   extension, a coerced method as a binding of its own except when its dictionary is the instance's parameter,
   GHC's choice of strategy with both `GeneralizedNewtypeDeriving` and `DeriveAnyClass` on, `foldMap`/`null` and the
