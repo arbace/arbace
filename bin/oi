@@ -27,6 +27,9 @@
 #                                  samples run again
 #   bin/oi repl                    the toplevel: phrases on stdin, each typed and lowered by the oracle,
 #                                  run on oi, its values printed with their types (OC12 (a))
+#   bin/oi repl --native, repl-check --native
+#                                  the same on the native path (TYPER.md, T11): each phrase typed and translated by Arbace's
+#                                  typer (bin/lib/oi/phrase-native), run on the native library; no ocamlc
 #   bin/oi repl-check              test/ocaml/oi/session.ml through the toplevel, the output equal to the ocaml
 #                                  toplevel's recorded in test/ocaml/oi/session.ref
 #   bin/oi corpus                  the run corpus: the testsuite's .ml files with a .reference, each
@@ -277,8 +280,8 @@ cmd_run() {
 # the recorded session: test/ocaml/oi/session.ml through the toplevel, its output against the ocaml
 # toplevel's (test/ocaml/oi/session.ref, recorded by ocaml -noprompt -nopromptcont, the banner left out)
 cmd_repl_check() {
-  local out=$OI_DIR/session.out
-  "$0" repl < "$root/test/ocaml/oi/session.ml" > "$out" 2>&1 || true
+  local out=$OI_DIR/session${1:+-native}.out
+  "$0" repl ${1:-} < "$root/test/ocaml/oi/session.ml" > "$out" 2>&1 || true
   if cmp -s "$out" "$root/test/ocaml/oi/session.ref"; then
     echo "oi: repl-check: $(grep -c ';;' "$root/test/ocaml/oi/session.ml") phrases, the output equal to the ocaml toplevel's"
   else
@@ -289,8 +292,14 @@ cmd_repl_check() {
 cmd_repl() {
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build
   local w; w=$(mktemp -d "$OI_DIR/repl.XXXXXX")
-  local st=0
-  "$EXE" repl "$LIB" "$w" "$root/bin/lib/oi/phrase" || st=$?
+  local st=0 lib=$LIB phrase=$root/bin/lib/oi/phrase
+  # --native (T11, doc/ocaml/TYPER.md): each phrase typed and translated by Arbace's typer, run on the native library
+  if [ "${1:-}" = --native ]; then
+    lib=${OI_LIB_NATIVE:-$OI_DIR/lib-native}; phrase=$root/bin/lib/oi/phrase-native
+    [ -f "$lib/order.txt" ] || die "repl --native: no native library $lib (bin/oi stdlib-check)"
+    export ARBACE_HOST_EXE=$(arbace_exe)
+  fi
+  "$EXE" repl "$lib" "$w" "$phrase" || st=$?
   rm -rf "$w"
   exit $st
 }
@@ -311,11 +320,13 @@ cmd_corpus() {
 }
 
 opts() {
-  ONLY=""; RECORD=0; AOT=0
+  ONLY=""; ONLY_LIST=""; RECORD=0; AOT=0; NATIVE=0
   while [ $# -gt 0 ]; do
     case $1 in
       --jobs) JOBS=$2; OPT_JOBS=$2; shift 2 ;;
       --only) ONLY=$2; shift 2 ;;
+      --only-list) ONLY_LIST=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); [ -f "$ONLY_LIST" ] || die "no list $2"; shift 2 ;;
+      --native) NATIVE=1; shift ;;
       --record) RECORD=1; shift ;;
       --aot) AOT=1; shift ;;
       *) die "unknown option $1" ;;
@@ -324,7 +335,9 @@ opts() {
 }
 
 selected() {
-  if [ -n "$ONLY" ]; then grep -E "^[^	]*($ONLY)" "$OI_DIR/corpus.tsv" || true; else cat "$OI_DIR/corpus.tsv"; fi
+  if [ -n "$ONLY_LIST" ]; then
+    awk -F'\t' 'FILENAME == ARGV[1] { if ($1 !~ /^#/ && $1 != "") want[$1] = 1; next } $1 in want' "$ONLY_LIST" "$OI_DIR/corpus.tsv"
+  elif [ -n "$ONLY" ]; then grep -E "^[^	]*($ONLY)" "$OI_DIR/corpus.tsv" || true; else cat "$OI_DIR/corpus.tsv"; fi
 }
 
 # ref_one ID FLAGS INCS ARGS ENV: compile and run the original with ocamlc and ocamlopt
@@ -363,7 +376,7 @@ cmd_record_ref() {
 # oi_one ID FLAGS INCS ARGS ENV: dump and run on oi; "ID<TAB>STATUS<TAB>SHA<TAB>BYTES<TAB>SECONDS<TAB>NOTE"
 oi_one() {
   local id=$1 flags=$2 incs=$3 args=$4 env=$5
-  local d=$OI_DIR/run/$id src=$TESTS/$id.ml
+  local d=${RUN_DIR:-$OI_DIR/run}/$id src=$TESTS/$id.ml
   rm -rf "$d"; mkdir -p "$d"
   local base; base=$(basename "$id")
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
@@ -371,13 +384,30 @@ oi_one() {
   [ -n "$incs" ] && units="$TESTLIB/Testing.ae"
   local I=""; [ -n "$incs" ] && I="-I $TESTLIB"
   cp "$src" "$d/"
-  (cd "$d" && "$OCD" --mode lambda --simplify $flags $I --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae")
+  if [ "${NATIVE:-0}" = 1 ]; then
+    # T11 (doc/ocaml/TYPER.md): typed and translated by Arbace's typer, no ocamlc; the flags it does not model are a note of the row
+    local nf="" f
+    for f in $flags; do
+      case $f in
+        -nolabels) nf="$nf --nolabels" ;;
+        *) printf '%s\t-\t-\t0\t0\tdump: typer: flag %s not modelled\n' "$id" "$f"; return ;;
+      esac
+    done
+    local inc=""; [ -n "$incs" ] && inc="--include $TESTLIB"
+    if ! (cd "$d" && typer_ns lambda --simplify --stdlib "$TOP/stdlib" $inc $nf --file "$base.ml" "$base.ml" > "$u.ae" 2> typer.err); then
+      printf '%s\t-\t-\t0\t0\tdump: typer: %s\n' "$id" "$(grep -a -v '^\s*at ' "$d/typer.err" | head -c 200 | tr '\n\t' '  ')"; return
+    fi
+    [ -n "$incs" ] && units="$TESTLIB_NATIVE/Testing.ae"
+  else
+    (cd "$d" && "$OCD" --mode lambda --simplify $flags $I --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae")
+  fi
   if grep -q '^(ocaml/error' "$d/$u.ae"; then
     printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(head -c 200 "$d/$u.ae" | tr '\n\t' '  ')"; return
   fi
   local st=0 t0 t1
   t0=$(date +%s.%N); times > "$d/cpu0"
-  (cd "$d" && limited_cpu "$TIMEOUT" "$(oi_wall)" env $env "$EXE" run "$LIB" $units "$u.ae" -- $args > "$d/oi.out" 2>&1) || st=$?
+  local lib=$LIB; [ "${NATIVE:-0}" = 1 ] && lib=$LIB_NATIVE
+  (cd "$d" && limited_cpu "$TIMEOUT" "$(oi_wall)" env $env "$EXE" run "$lib" $units "$u.ae" -- $args > "$d/oi.out" 2>&1) || st=$?
   t1=$(date +%s.%N); times > "$d/cpu1"
   local note=""
   note=$(grep -a -m1 -o 'oi: .*' "$d/oi.out" | head -c 300 | tr '\t' ' ' || true)
@@ -420,6 +450,7 @@ oi_rows_for() {
 cmd_check() {
   opts "$@"
   if [ "$AOT" = 1 ]; then cmd_check_aot; return; fi
+  if [ "$NATIVE" = 1 ]; then cmd_check_native; return; fi
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; cmd_build
   export -f oi_one limited_cpu; export OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT
   local out=$OI_DIR/check.tsv
@@ -729,8 +760,9 @@ case $cmd in
   run-native) cmd_run_native "$@" ;;
   typer-check) cmd_typer_check "$@" ;;
   stdlib-check) cmd_stdlib_check "$@" ;;
-  repl) cmd_repl ;;
-  repl-check) cmd_repl_check ;;
+  typer-probe) cmd_typer_probe "$@" ;;
+  repl) cmd_repl "$@" ;;
+  repl-check) cmd_repl_check "$@" ;;
   corpus) cmd_corpus ;;
   key) cmd_corpus > "$OI_DIR/corpus.log"; oi_key "$OI_DIR/corpus.tsv" ;;
   record-ref) cmd_record_ref "$@" ;;

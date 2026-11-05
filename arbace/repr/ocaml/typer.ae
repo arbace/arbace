@@ -5,7 +5,8 @@
   the signature as `--mode types` prints it. Run as -m arbace.repr.ocaml.typer VERB ...:
 
     types --file NAME FILE              the signature (Printtyp's text), as (ocaml/typed SIG [] {...})
-    lambda --file NAME FILE [--simplify]
+    lambda --file NAME FILE [--simplify] [--include DIR:DIR...] [--nolabels] [--intf]
+                                        (--intf: coerced to the unit's .mli, found as the stdlib's or an include's)
                                         the Lambda program, as (ocaml/lambda (lambda-program ...) {...}); with
                                         --simplify after Simplif's port (what ocamlc -dlambda prints)
     check --dir DIR --oracle ODIR [--report FILE] NAME...
@@ -75,7 +76,10 @@
               :else (recur more opts (conj pos a)))))))
 
 (defn- with-stdlib [opts f]
-  (binding [env/*stdlib-dir* (or (get opts "--stdlib") env/*stdlib-dir*)] (f)))
+  (binding [env/*stdlib-dir* (or (get opts "--stdlib") env/*stdlib-dir*)
+            env/*include-dirs* (if-let [i (get opts "--include")] (vec (remove empty? (str/split i #":"))) [])
+            ty/*classic* (boolean (get opts "--nolabels"))]
+    (f)))
 
 (defn- do-types [{:keys [opts args]}]
   (with-stdlib opts
@@ -85,7 +89,8 @@
 (defn- do-lambda [{:keys [opts args]}]
   (with-stdlib opts
     #(let [f (first args) fname (or (get opts "--file") f)]
-       (print (lam/program-text (cond-> (:lambda (compile-file f fname)) (get opts "--simplify") simplif/simplify-program)
+       (print (lam/program-text (cond-> (:lambda (compile-file f fname :intf (boolean (get opts "--intf"))))
+                                  (get opts "--simplify") simplif/simplify-program)
                                 fname))
        (flush))))
 
@@ -169,12 +174,44 @@
       (println (str "stdlib-check: " (count rs) " units: Lambda equal " n))
       (System/exit (if (= n (count rs)) 0 1)))))
 
+(defn- do-phrase
+  "T11, the toplevel on the native path (bin/lib/oi/phrase-native, bin/oi repl --native): phrase N of a session,
+  DIR/phrase.txt, typed and translated as the unit Top_N of DIR with the earlier phrases' units opened (each found
+  by DIR/top_K.mli, the signature text this verb wrote for it): first as an expression (let it__ = (PHRASE)), else
+  as structure items, as bin/lib/oi/phrase does with ocamlc. On success DIR/top_N.ae (the simplified Lambda),
+  DIR/top_N.typed (the signature, as the oracle's --mode types), DIR/top_N.mli and \"ok\"; else the error's text."
+  [{:keys [opts args]}]
+  (let [dir (get opts "--dir") n (get opts "--n")
+        phrase (slurp (str dir "/phrase.txt"))
+        tops (->> (.list (File. ^String dir))
+                  (keep #(when-let [[_ k] (re-matches #"top_(\d+)\.mli" %)] (Long/parseLong k)))
+                  sort)
+        opens (apply str (for [k tops] (str "open! Top_" k " ")))
+        fname (str "top_" n ".ml")
+        path (str dir "/" fname)
+        try1 (fn [text]
+               (spit path (str opens "\n" text))
+               (try (binding [env/*stdlib-dir* (or (get opts "--stdlib") env/*stdlib-dir*)
+                              env/*include-dirs* [dir]]
+                      (compile-file path fname))
+                    (catch Throwable t {:error (or (not-empty (.getMessage t)) (str t))})))
+        r (let [r (try1 (str "let it__ = (\n" phrase "\n)\n"))]
+            (if (:error r) (try1 phrase) r))]
+    (if (:error r)
+      (do (.delete (File. ^String path)) (println (str "Error: " (:error r))))
+      (do (spit (str dir "/top_" n ".ae") (lam/program-text (simplif/simplify-program (:lambda r)) fname))
+          (spit (str dir "/top_" n ".typed") (typed-text (:sig r) fname))
+          (spit (str dir "/top_" n ".mli") (str (:sig r) "\n"))
+          (println "ok")))
+    (flush)))
+
 (defn -main [& args]
   (let [[verb & more] args
         pa (fn [wv] (parse-args more wv))]
     (case verb
       "types" (do-types (pa #{"--file" "--stdlib"}))
-      "lambda" (do-lambda (pa #{"--file" "--stdlib"}))  ; --simplify: after Simplif (-dlambda)
-      "check" (do-check (pa #{"--dir" "--oracle" "--report" "--stdlib" "--out"}))
+      "lambda" (do-lambda (pa #{"--file" "--stdlib" "--include"}))  ; --simplify: after Simplif (-dlambda)
+      "check" (do-check (pa #{"--dir" "--oracle" "--report" "--stdlib" "--out" "--include"}))
+      "phrase" (do-phrase (pa #{"--dir" "--n" "--stdlib"}))
       "stdlib-check" (do-stdlib-check (pa #{"--dir" "--lib" "--out"}))
       (do (println "usage: -m arbace.repr.ocaml.typer types|lambda|check ...") (System/exit 2)))))
