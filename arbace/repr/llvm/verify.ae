@@ -75,7 +75,8 @@
 (def ^:dynamic ^java.util.Map *gfwd* nil)    ; global name referenced before its definition -> true
 (def ^:dynamic ^java.util.Set *mdefs* nil)   ; !N defined
 (def ^:dynamic ^java.util.Set *mrefs* nil)   ; !N referenced
-(def ^:dynamic *all-forms* [])   ; the module's forms (the Verifier's module-wide lookups)
+(def ^:dynamic *all-forms* [])
+(def ^:dynamic *cur-fn* nil)   ; the name of the function LLParser is parsing   ; the module's forms (the Verifier's module-wide lookups)
 (def ^:dynamic *distinct* #{})   ; the ids of the distinct nodes
 (def ^:dynamic *partial* false)
 (def ^:dynamic *dbg-format* nil)   ; LLParser's SeenOldDbgInfoFormat / SeenNewDbgInfoFormat (a volatile of #{:old :new})   ; the forms end at an LLParser error the reader met: no end-of-function/module checks
@@ -795,6 +796,8 @@
     (= v 'none) (when-not (= t 'token) (verr :parser/constant-type "invalid type for none constant" {:at [:val {:text "none"}]}))
     (and (seq? v) ('#{struct packed} (first v)) (not (vector? (second v))) (empty? (rest v))) nil
     (seq? v) (let [h (first v)]
+               (when (and (= h 'blockaddress) st *cur-fn* (global? (second v)) (= (global-key (second v)) *cur-fn*) (local? (nth v 2 nil)))
+                 (use-local st (nth v 2) 'label))
                (cond
                  ('#{struct packed} h)
                  (let [rt (resolve-type t) at {:at [:str value-brace]}]
@@ -840,6 +843,18 @@
                  :else nil))
     :else nil))
 
+(defn- check-constexpr-type
+  "ValID::t_Constant: a constant expression's own type against the expected one (after the expression's own checks)."
+  [v t]
+  (when (and (seq? v) (symbol? (first v)))
+    (let [h (first v)
+          ct (cond (cast-ops h) (norm-type (nth (strip-flags (rest v)) 2 nil))
+                   (bin-ops h) (norm-type (first (strip-flags (rest v))))
+                   :else nil)]
+      (when (and ct (not= ct (norm-type t)))
+        (verr :parser/constant-type (str "constant expression type mismatch: got type '" (tstr ct) "' but expected '" (tstr (norm-type t)) "'")
+              {:at [:val {:text (name h)}]})))))
+
 (defn use-value
   "LLParser's resolution of `v` as a value of type `t` in the function `st` (nil at the top level)."
   [st v t]
@@ -849,7 +864,7 @@
     (= t 'metadata) (note-md! v)
     (md-ref? v) (.add *mrefs* v)
     (and (seq? v) (symbol? (first v)) (str/starts-with? (name (first v)) "!")) (note-md! v)
-    :else (use-const st v t)))
+    :else (do (use-const st v t) (check-constexpr-type v t))))
 
 (defn- define-value [^Fn st x t kind]
   (let [k (when x (local-key x))]
@@ -1130,7 +1145,7 @@
                 {:at [:mod-find (pr/global-str nm)]}))))
     (.put *gdefs* k {:kind :function :fty (list 'fn (norm-type rt) (mapv #(if (= % '&) % (norm-type (first %))) ps)) :form f})
     (.remove *gfwd* k)
-    (when (= what :define) (binding [*caller-varargs* (boolean (some #{'&} ps))] (parse-body st f (norm-type rt))))))
+    (when (= what :define) (binding [*caller-varargs* (boolean (some #{'&} ps)) *cur-fn* k] (parse-body st f (norm-type rt))))))
 
 (defn- parse-global [f]
   (let [[h nm t & more] f
@@ -3038,7 +3053,12 @@
               ;; checked by visitCallBase and again by visitInvokeInst
               (try (go) (catch arbace.lang.ExceptionInfo e (.add *errs* e)))
               (go)))))
-                      (when ('#{call invoke callbr} hd)
+                      (when (and ('#{call invoke callbr} hd)
+                                 ;; the debug intrinsics' calls become records, AutoUpgrade's old forms new calls: neither is checked as written
+                                 (not (when-let [c (callee-of b)]
+                                        (and (global? c)
+                                             (or (re-find #"^llvm\.dbg\.(declare|value|assign|label)" (global-key c))
+                                                 (let [d (.get *gdefs* (global-key c))] (and d (old-form-decl? (global-key c) (:fty d)))))))))
                         (check-call-site b defs)
                         (when (and (= hd 'call) (= :musttail (:tail (nth (split-inst b) 2))))
                           (try (check-musttail f x b items ii defs)
