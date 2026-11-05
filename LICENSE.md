@@ -198,6 +198,15 @@ covers what.
   `Modules/clinic/_csv.c.h`, and of `Modules/mmapmodule.c`'s UNIX paths with `Modules/clinic/mmapmodule.c.h`, from the same release
   tarball, by hand on 2026-11-05: Copyright (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF
   License Agreement for Python 3.14 (text below).
+- `go/arbace/py/builtins_ssl.ae`, `builtins_ssl_cert.ae` and `builtins_ssl_conn.ae` (queue 209, PYS22 (a): pyi's module
+  `_ssl` over Go's crypto/tls; doc/python/PYTHON-SURVEY.md, "As built: 209"): written after CPython 3.14.10's
+  `Modules/_ssl.c`, `Modules/clinic/_ssl.c.h`, `Modules/_ssl/cert.c` and `Modules/_ssl/distrusted_spki.h` (its digests
+  copied), from the same release tarball, by hand on 2026-11-05: Copyright (c) 2001 Python Software Foundation, All
+  Rights Reserved, under the PSF License Agreement for Python 3.14 (text below). The OIDs, NIDs and names of
+  `sslObjects` and the alert reasons are the values OpenSSL 3.5 gives for them (facts of its interface, read through
+  CPython's `_ssl.txt2obj`); the pipe adapter, the cipher-string evaluator and the DER walker are Arbace's own, under the
+  Eclipse Public License 1.0, as are the test certificates `test/python/pyi/ssl/` (made on 2026-11-05 with
+  `openssl req`/`x509`).
 - `go/arbace/oi.ae` and `go/arbace/oi/` (oi, the interpreter of OCaml's Lambda; doc/ocaml/OCAML-SURVEY.md, "As
   built: O5 (write-ahead)"): the interpreter's core (values, the compiler of Lambda, application, exceptions,
   effects, the toplevel) is Arbace's own, under the Eclipse Public License 1.0; the externals are ports to Go
