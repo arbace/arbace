@@ -210,7 +210,7 @@
       id (swap! *genv* assoc (strs (nth t 1)) (conv-type (nth t 3)))
       datacon (let [n (strs (nth t 1)) ty (conv-type (nth t 5))]
                 (swap! *genv* assoc n ty)
-                (swap! *cons* assoc n {:arity (nth t 3) :fields (vec (nth t 4))}))
+                (swap! *cons* assoc n {:arity (nth t 3) :fields (mapv #(ext-name "fld" (nmod n) %) (nth t 4))}))
       class (let [n (strs (nth t 1)) info (nth t 5 {})
                   tvs (vec (:tvs info))
                   supers (vec (keep (fn [f] (let [p (conv-type f)] (when (= :tc (first p)) [(second p) (nth p 2)]))) (nth t 4)))]
@@ -595,14 +595,40 @@
     RecCon []
     []))
 
-(defn tc-pat [env p t]
-  (let [v (lval p)]
-    (case (con v)
-      VarPat (let [n (nm (arg v 2))] [(assoc env n {:mono t}) (lv n)])
-      WildPat [env (list 'pwild)]
-      (ParPat BangPat LazyPat) (tc-pat env (arg v 2) t)
-      AsPat (let [n (nm (arg v 2)) [env1 pc] (tc-pat (assoc env n {:mono t}) (arg v 3) t)] [env1 (list 'pas (lv n) pc)])
-      ConPat (let [cn (nm (arg v 2))
+(defn- con-arg-types
+  "A constructor's argument types and result, instantiated"
+  [cn]
+  (let [[ity _] (instantiate (or (get @*genv* cn) (fresh-meta)))]
+    (loop [t ity as []]
+      (let [t (expand (prune t))]
+        (if (and (= :tc (first t)) (= fun-tc (second t)))
+          (recur (second (nth t 2)) (conj as (first (nth t 2))))
+          [as t])))))
+
+(defn- tc-rec-pat
+  "A record pattern C {f = p, f, ..}: the fields matched by name, a pun's variable and a wildcard's at the field's type"
+  [env v t]
+  (let [cn (nm (arg v 2)) rf (arg (arg v 3) 1)
+        flds (:fields (get @*cons* cn))
+        [as res] (con-arg-types cn)
+        ty-of (fn [f] (let [i (.indexOf ^java.util.List flds f)] (if (>= i 0) (nth as i) (fresh-meta))))
+        _ (unify res t)
+        [env pats] (reduce (fn [[env pats] fb]
+                             (let [fbv (lval fb) lbl (lval (arg (lval (arg fbv 2)) 2))
+                                   [f x] (if (= 'rn/names (first lbl)) (second lbl) [(second lbl) nil])
+                                   ft (ty-of f)]
+                               (if (true? (arg fbv 4))
+                                 [(assoc env x {:mono ft}) (assoc pats f (lv x))]
+                                 (let [[env1 pc] (tc-pat env (arg fbv 3) ft)] [env1 (assoc pats f pc)]))))
+                           [env {}] (arg rf 2))
+        dd (arg rf 3)
+        env (if (and (seq? dd) (= 'Just (first dd)) (seq? (lval (second dd))) (= 'rn/dotdot (first (lval (second dd)))))
+              (reduce (fn [e [f x]] (assoc e x {:mono (ty-of f)})) env (partition 2 (nth (lval (second dd)) 2)))
+              env)]
+    [env (list 'pcon cn (mapv (fn [f] (get pats f (list 'pwild))) flds))]))
+
+(defn- tc-con-pat [env v t]
+  (let [cn (nm (arg v 2))
                    ct (get @*genv* cn)
                    [ity _] (instantiate (or ct (fresh-meta)))
                    args (pat-args (arg v 3))
@@ -616,7 +642,18 @@
                                           [env [] ity] args)]
                (when-not ct (error! "no constructor type for " (pr-str cn)))
                (unify res t)
-               [env' (list 'pcon cn pcs)])
+               [env' (list 'pcon cn pcs)]))
+
+(defn tc-pat [env p t]
+  (let [v (lval p)]
+    (case (con v)
+      VarPat (let [n (nm (arg v 2))] [(assoc env n {:mono t}) (lv n)])
+      WildPat [env (list 'pwild)]
+      (ParPat BangPat LazyPat) (tc-pat env (arg v 2) t)
+      AsPat (let [n (nm (arg v 2)) [env1 pc] (tc-pat (assoc env n {:mono t}) (arg v 3) t)] [env1 (list 'pas (lv n) pc)])
+      ConPat (if (= 'RecCon (con (arg v 3)))
+               (tc-rec-pat env v t)
+               (tc-con-pat env v t))
       TuplePat (let [ps (arg v 2) ts (mapv (fn [_] (fresh-meta)) ps)
                      [env' pcs] (reduce (fn [[env pcs] [p1 t1]] (let [[e c] (tc-pat env p1 t1)] [e (conj pcs c)])) [env []] (map vector ps ts))]
                  (unify t [:tc (tuple-tc (count ps)) ts])
@@ -625,9 +662,10 @@
                     [env' pcs] (reduce (fn [[env pcs] p1] (let [[e c] (tc-pat env p1 a)] [e (conj pcs c)])) [env []] (arg v 2))]
                 (unify t (list-ty a))
                 [env' (list 'plist pcs)])
-      NPat (let [[lt lc] (overlit (list 'HsOverLit nil (lval (arg v 2))))
-                 eqn (implicit-name v "==" (ext-name "var" "GHC.Internal.Classes" "=="))
-                 [te ce] (var-occ env eqn)]
+      ;; GHC's tcNPat: the equality first, then the literal
+      NPat (let [eqn (implicit-name v "==" (ext-name "var" "GHC.Internal.Classes" "=="))
+                 [te ce] (var-occ env eqn)
+                 [lt lc] (overlit (list 'HsOverLit nil (lval (arg v 2))))]
              (unify lt t)
              (unify te (fn-ty t (fn-ty t (con-ty tc-bool))))
              [env (list 'plit ce lc)])
@@ -750,10 +788,10 @@
                              (recur (concat sws (rest ws)) out))
                            (recur (rest ws) (conj out (assoc w :pred [c ts])))))))
         local (fn [w] (some inner? (mapcat metas-of (second (:pred w)))))
-        [cands outer] [(filter local simplified) (remove local simplified)]
+        [cands outer] [(vec (filter local simplified)) (vec (remove local simplified))]
         quant? (fn [w] (and (not restricted) (every? (set ty-metas) (filter inner? (mapcat metas-of (second (:pred w)))))))
-        q (filter quant? cands)
-        deferred (concat outer (remove quant? cands))
+        q (vec (filter quant? cands))
+        deferred (vec (concat outer (remove quant? cands)))
         ;; the metas of deferred wanteds are not generalised
         _ (doseq [w deferred t (second (:pred w))] (adjust-levels! t *level*))
         _ (doseq [w deferred] (swap! *wanteds* conj w))
@@ -914,7 +952,23 @@
         (swap! *genv* assoc cn [:forall names [] ty])
         ;; a field's selector: forall tvs. T tvs -> field type
         (doseq [[f t] fields] (swap! *genv* assoc f [:forall names [] (fn-ty res t)]))
-        (swap! *cons* assoc cn {:arity (count argtys) :tycon tn :fields (mapv first fields)})))))
+        (swap! *cons* assoc cn {:arity (count argtys) :tycon tn :fields (mapv first fields)})))
+    ;; the derived instances (HF4 generates their bindings; here their entries in the instance table): stock
+    ;; deriving's context approximated as GHC infers it for Haskell 2010's classes, the class at each parameter
+    ;; that occurs in a field
+    (let [used (set (for [c conlist x (tree-seq coll? seq (lval c))
+                          :when (and (seq? x) (= 'rn/name (first x)) (= "tv" (nth (second x) 1)))] (second x)))]
+      (doseq [cl (arg defn* 6) :let [cv (lval cl)] :when (= 'HsDerivingClause (con cv))
+              :let [dct (lval (arg cv 3))
+                    sigs (case (con dct) DctMulti (arg dct 2) DctSingle [(arg dct 2)] [])]
+              sg sigs]
+        (let [body (lval (arg (lval sg) 3))
+              cls (when (= 'HsTyVar (con body)) (nm (arg body 3)))]
+          (when cls
+            (swap! *insts* conj {:dfun (ext-name "var" m (str "$f" (occ cls) (occ tn)))
+                                 :tvs names
+                                 :ctx (vec (for [[n x] (map vector tvn names) :when (contains? used n)] [cls [[:tv x]]]))
+                                 :head [cls [res]]})))))))
 
 (defn- syn-decl! [d]
   (let [tn (nm (arg d 2)) tvn (qtvs-names (arg d 3))
@@ -1323,13 +1377,19 @@
 
 (def typeable-prefixes ["$tc" "$krep" "$trModule" "$tr"])
 
+(defn- core-binds-raw
+  "Top-level bindings [[binder rhs]...], rec groups flattened"
+  [binds]
+  (vec (for [b (mapcat (fn [x] (if (= 'rec (first x)) (second x) [x])) binds)] [(second b) (nth b 2)])))
+
 (defn- core-binds
   "Top-level bindings by key (the binder's name text, or the local occ): [[key core]...], rec groups flattened,
   the Typeable bindings dropped"
   [binds]
   (vec (for [b (mapcat (fn [x] (if (= 'rec (first x)) (second x) [x])) binds)
              :let [n (second b) o (if (= 'lv (first n)) (str (second n)) (nth (vec (map #(if (symbol? %) (name %) %) n)) 3))]
-             :when (not-any? #(str/starts-with? o %) typeable-prefixes)]
+             :when (not-any? #(str/starts-with? o %) typeable-prefixes)
+             :when (not (and (= 'lv (first n)) (str/starts-with? o "$d")))]
          [(if (= 'lv (first n)) (str "local " o) o) (nth b 2)])))
 
 (defn compare-with-ghc
@@ -1349,7 +1409,11 @@
                                                            (not (str/starts-with? (occ n) "$")) (not (contains? ours n))
                                                            (not (re-matches #"C:.*" (occ n))))]
                              (name-str n))))
-        gcore (into {} (core-binds (second (first (filter #(= 'hstc/core (first %)) forms)))))
+        gbinds (core-binds-raw (second (first (filter #(= 'hstc/core (first %)) forms))))
+        ;; GHC floats a module's constant dictionaries to the top level (local $dNum = $fNumInt ...): inlined
+        gdicts (into {} (for [[x rhs] gbinds :when (and (= 'lv (first x)) (str/starts-with? (str (second x)) "$d"))] [x rhs]))
+        gcore (into {} (for [[k c] (core-binds (map (fn [[x rhs]] (list 'bind x rhs)) gbinds))]
+                         [k (loop [c c i 0] (let [c2 (substitute gdicts c)] (if (or (= c2 c) (> i 5)) c (recur c2 (inc i)))))]))
         ocore (into {} (core-binds (:core r)))
         ;; a local ($c...) binding's key is its occurrence: instance methods of the same name in two instances collide,
         ;; compared as multisets of their evidence
