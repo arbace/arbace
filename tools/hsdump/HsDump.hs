@@ -24,6 +24,11 @@
 --       one OUTDIR/FILE.hspp per module: the text GHC parses (CPP's output, unlit's, hsc2hs's),
 --       which repr/haskell's native reader reads (arbace.repr.haskell.native), and
 --       OUTDIR/FILE.hspp.edn, the dump's (hsdump/config {...}) of it (the preprocessing's keys)
+--   hsdump rn    -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] FILE...
+--   hsdump iface -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] MODULE...
+--       HF1 (doc/haskell/FRONTEND-SURVEY.md, "As built: HF1-HF2"), in HsRn.hs: GHC's renamer's output reduced to the
+--       resolved names, operator trees, binding groups, imports and exports (OUTDIR/FILE.rn.edn), and the libraries'
+--       interfaces (OUTDIR/MODULE.iface.edn)
 -- FILE is relative to the current directory (the package's directory: it is the file name of
 -- every span). R6: an .hsc FILE is run through the host's hsc2hs first (--hsc2hs-arg A, repeated:
 -- its arguments; the output X.hs written beside X.hsc, as Cabal's build writes it, recorded in
