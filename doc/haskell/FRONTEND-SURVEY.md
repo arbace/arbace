@@ -615,3 +615,133 @@ checker (HF3) is not re-estimated here; its judging data is better than the surv
    yet, add the step with the type checker's.
 4. Groups' order: keep it unjudged (recommended: any topological order serves the checker); or port GHC's
    `stronglyConnCompFromEdgedVerticesUniq` with names' uniques (not stable: no).
+
+## As built: HF3 (start) (2026-11-05, branch `haskell-hf3`)
+
+HF3's start as the user's decisions above give it: HF1-HF2's proposals 1 and 2, then the trusting elaborator's first
+slice. Light on the host (samples and single-file nofib programs; main's stage 0 as the tools' host, the helper at `-O0`).
+
+**1. The renamed tree** (proposal 1 (a)). `rename.ae`'s walk now records, beside the facts, what a tree needs, keyed by
+the parse tree's own objects (identity, not spans): each RdrName object the Names it resolved to, each maximal operator
+application's final shape (its leaves carry their subtrees), the implicit names a node carries (literals' `fromInteger`,
+`do`'s `>>=`, `NPat`'s `==` and `negate`, with their spans) and each list of value bindings' SCCs. After the walk
+`rtree` substitutes them: `(L sp (rn/name NAME))` (`rn/names` where one place names two: a pun), operator applications
+rebuilt by their fixities (`(OpApp (rn/fixity P D) L OP R)`, `NegApp`, infix `ConPat`, `HsOpTy`), `(rn/implicit [NAME...]
+[SPAN...])` appended to a node, `(ValBindsRn [(rn/group rec|nonrec [BIND...])...] SIGS)`, a record wildcard's fields
+and variables as `(rn/dotdot ...)`, and the module as `(rn/module {:module :decls :binds :sigs :export-list :exports
+:imports})`. The facts are its projection: `tree-names` collects every located name of the tree (with the implicit
+names, the wildcards' and the import items'), and `rename-check` now also requires the tree's names to be among the
+facts and reports the facts the tree does not carry. Result: **101 of 101 modules equal** as before (47 samples, 33
+ghc-internal modules, 21 nofib programs), every one with its tree's names equal to its located facts (none outside,
+none absent); `-o` writes `NAME.rn-tree.edn` beside `NAME.rn.edn`.
+
+**2. Interfaces** (proposal 2). The helper's `iface` verb (`tools/hsdump/HsRn.hs`) gains a trailing map on each thing,
+the positional fields unchanged: type constructors' roles, arity, a synonym's `[tvs rhs]`, a family's flavour and a
+closed family's equations (`(eqn [tv...] [lhs...] rhs)`); classes' type variables, fundeps, each method's default
+method name (`$dm...`, from `classOpItems`), associated types and roles; constructors' source and implementation bangs
+and tag; ids' arity and strictness signature; and `(hsiface/fam-instances [...])`, the module's family instances
+(the external package state's, as for class instances). A type variable is now written with its unique (`"a#123"`):
+GHC's inferred types name many variables `t`, which made the forms ambiguous. A new verb, `tc` (`bin/repr-haskell
+tc-dump`), writes per module `FILE.tc.edn`: the module's things with their types in the same forms, its instances, its
+family instances and its desugared Core (`desugarModule`, `-O0`: `-ddump-ds`'s program, after the simple optimiser) with
+the types erased (`(v NAME) (lv "occ" UNIQUE) (lit "text") (app F [ARG...]) (lam [B...] E) (let ...) (letrec ...)
+(case E B [(alt CON [B...] E)...])`, type and coercion arguments and binders dropped, casts and ticks read through).
+The renamer's own interface of a module (`--local`) now also carries `(hsiface/things [...])` as far as the renamer
+knows them, types left `nil`: type constructors with their constructors, constructors with arity, fields and source
+bangs, classes with their methods, fundeps and default methods (`local-things`); the elaborator writes the typed
+interface (`typecheck.ae`'s `iface-text`, `--local`): ids, selectors, constructors, classes with method types and
+superclasses, synonyms and instances, read back for the modules that import it (samples `T14Lib`, `T15Use`). Proposals 3
+and 4: `rename-check` is not in the gate yet (with this step, Proposed below), the groups' order stays unjudged.
+
+**3. The elaborator's first slice** (`arbace/repr/haskell/typecheck.ae`, 1,531 lines, namespace
+`arbace.repr.haskell.typecheck`; `bin/repr-haskell typecheck-check`, `make repr-haskell-typecheck-check`). Clean (HFS1
+(b)), no GHC code ported (GHC's `Tc/` and Jones's "Typing Haskell in Haskell" read as the specification):
+
+- input: the renamed tree and the interfaces (every `NAME.iface.edn` of the directories: values' types, classes,
+  instances, constructors, synonyms; the wired-in `[]`, `(:)`, `()` and tuples added);
+- types `[:tc NAME args]`, `[:tv]`, metas with levels (Rémy's generalisation), `[:app]`, `[:forall tvs preds body]`,
+  synonyms expanded on unification and in instance heads and wanteds; deep instantiation of prenex types (a class
+  method's `forall f. C f => forall a. ...`);
+- inference over the renamed tree's Haskell 2010 core: variables, constructors, application, operators by their
+  rebuilt trees, negation, sections, lambdas and `case` by their match groups, `if`, `let`/`where`, `do` (`>>=`, `>>`),
+  list comprehensions, arithmetic sequences, lists, tuples, literals (overloaded integers and fractions, strings,
+  chars), signatures on expressions, records (fields, construction, update, selectors, record and wildcard patterns),
+  every Haskell 2010 pattern (variables, wildcards, as, lazy, bang, constructors prefix, infix and record, tuples, lists,
+  `NPat`, literals, signatures), guards and pattern guards;
+- binding groups by the renamer's SCCs: the unsigned binders inferred together and generalised (the constraints whose
+  variables are all quantified become dictionary parameters, a constraint a superclass of another implies dropped
+  (GHC's `mkMinimalBySCs`), the others deferred with their variables kept monomorphic, constraints with a known head
+  reduced by an instance first); the monomorphism restriction's rule 1 (a pattern binding or an argument-less one
+  quantifies no constraint); the signed binders checked against their signature with its givens (closed under
+  superclasses, `$pNCls`); a pattern binding binds every variable of its pattern;
+- classes and instances as dictionaries with GHC's names: `C:Cls` applied to the superclass dictionaries and the
+  methods, `$fClsT` (an instance with a context a function of its dictionaries, each superclass a binding `$cpNCls` of its
+  own), `$cop` methods checked at the instance head with the method's own forall skolemised, missing methods from the
+  class's `$dmop` applied to the instance's dictionary, default methods `$dmop` over the class's dictionary; derived
+  instances entered in the instance table (their bindings are HF4's; constructor classes' heads drop the last parameter);
+- defaulting (Haskell 2010 §4.3.4): a meta whose constraints are all standard classes, one numeric, gets the first of
+  `Integer`, `Double` satisfying them; `HasCallStack` solved at its call site as GHC's solver builds it (`pushCallStack`
+  of the name and `SrcLoc` onto `emptyCallStack`); constraints grouped by class in their first order;
+- output: each top-level binder's type and the elaborated program in the `tc` verb's Core vocabulary, dictionaries
+  passed (GHC's AbsBinds shape: `\dicts -> letrec mono = ... in mono` for a recursive group), pattern matching left
+  as `(match ...)`/`(clause ...)` for HF5's match compiler, overloaded literals folded at `Int`, `Integer` and
+  `Double` as GHC's desugarer folds them.
+
+The judge (`compare-with-ghc`, against the `tc` verb): (a) **types**: every binder, constructor, worker, selector and
+method of the module, canonical forms compared (synonyms expanded, foralls dropped, variables renamed by first
+occurrence, constraints sorted, multiplicities ignored), a binder GHC has and the elaborator lacks a failure; (b)
+**evidence**: per top-level binding (an instance method keyed by its dictionary function), the sorted applications of a
+name to dictionary terms, after a little of GHC's simple optimiser on both sides (a once-used let inlined, a dead one
+dropped, a lambda applied to trivial arguments beta-reduced: the `-O0` desugarer's output is after `simpleOptPgm`),
+GHC's floated top-level dictionaries (`$dNum = $fNumInt`) and let-bound ones inlined, local binders renamed by
+place; (c) **Core** equal after the same normalisation: reported, not judged (the match compiler is HF5's). The
+**negative control** (`--control true`: defaulting's order reversed, superclass-implied constraints kept) must differ
+from GHC on some module, else the check fails.
+
+**Results** (2026-11-05): `bin/repr-haskell typecheck-check` over the 16 samples of `test/haskell/typecheck/` (Haskell
+2010: basic polymorphism, classes with superclasses and defaults, defaulting and the monomorphism restriction, local
+polymorphism, monads, higher-kinded classes, a user `State` monad, constructor classes, local recursion and list
+comprehensions, imports of base, records, a `Num` instance and literals at it, a cross-module library and its user, the
+restriction's ambiguity case): **16 of 16 equal**, types 194 of 194, evidence 202 of 202 bindings, Core equal in 77 of
+202 (the rest is the match compiler's shape); the control differs on 7 of 16. In 26 s for the 16 (most of it reading
+the interfaces once per module), at most 600 MB. Wider, run by hand: the 21 nofib/spectral programs of rename-check,
+**17 of 21 equal** (types 668 of 668 binders), up to 1,124 lines (`simple`, 125 bindings, 6.6 s); the four others in two
+classes: GHC inlines a library default method with an `INLINE` pragma into the instance's method (`Num`'s `(-)`,
+`Floating`'s `(**)`, `RealFrac`'s `floor`...: atom, power, exact-reals; the elaborator applies `$dm-`, the evidence is
+the same dictionary, applied once instead of at each inlined use), and the order of two constraints of the same class
+(life's `elt`: `(Ord a, Num a1, Num a)` against ours `(Ord a, Num a, Num a1)`). Bugs the programs found that the
+samples did not: a lazy `filter` that read the metas' levels after their adjustment (the ambiguous constraints of a
+binding were quantified), NPat's equality before the literal, record patterns, derived instances, synonyms in
+instance heads (`State Env`), instance methods of the same name in two instances.
+
+**Not covered yet** (beyond this slice of Tier S): the deriving bindings (HF4: their instances are in the table), the
+match compiler, CorePrep, CoreToStg (HF5, HF6: so no program runs on hsi from Arbace's own STG yet, and this branch does
+not carry hsi), higher-rank types, multi-parameter classes and fundeps' improvement, flexible and overlapping instances,
+GADTs, existentials, type families, kinds, `Typeable`/`Coercible` evidence, implicit parameters but `HasCallStack`,
+`mdo`, `ApplicativeDo`, `RebindableSyntax`, a signature's own givens of `HasCallStack`, the class `Read`'s defaulting
+cases beyond the standard rule, error messages.
+
+**On the estimates.** The survey gave HF3 20 to 30 working days for 14,000 to 20,000 lines (Tier S). The first slice,
+Haskell 2010 with classes, is 1,531 lines and took this session (about an hour of the agent's wall clock after the
+renamed tree): the checker's core is small; the remaining cost is in the extensions of the list above and in matching
+GHC's choices exactly where they leave no trace in the types (the two classes above).
+
+**Proposed** (the user decides).
+
+1. The judge of HF3. Options: (a) types and evidence as built, full Core equality from HF5 (the match compiler) on;
+   (b) port GHC's match compiler now (`HsToCore/Match*`, about 2,300 lines) so Core is judged from HF3. *Recommended:
+   (a)*, HF5 is where the port belongs (HFS5 (a)).
+2. Default methods with `INLINE` (atom, power, exact-reals). Options: (a) the `iface` verb dumps the unfoldings of
+   `INLINE` default methods (the library's `$dm...` as erased Core, a few dozen in base) and the elaborator inlines them
+   as GHC does (half a day, needed for HF5's Core equality anyway); (b) record the class and leave it. *Recommended: (a)*.
+3. The order of constraints of the same class (life). Options: (a) a recorded class until the solver keeps GHC's order
+   (the inert set's insertion order: needs the solver's work-list order, not GHC's uniques); (b) compare dictionary
+   parameters as a multiset per class (hides real misplacements). *Recommended: (a)*.
+4. The gate step of decision 3: rename-check with the type checker's. Options: (a) one `--full` step `haskell-front`
+   running `bin/repr-haskell rename-check` and `typecheck-check` (about 4 minutes, at most 600 MB, the host's GHC at
+   its pin for the helper; the crop's other rows stay out until GT8's budget); (b) an essential step (samples only,
+   about 1 minute); (c) wait for HF8. *Recommended: (a)*, after the user's night review of this branch.
+5. HF3's next steps, in order: classes beyond Haskell 2010 (multi-parameter, flexible and overlapping instances,
+   fundeps), higher-rank and scoped type variables, existentials and GADTs' local equalities, then the type-level tier
+   (HF9). Alternative: HF4 (deriving, a port) first, to make the nofib programs' derived instances judged too.
+   *Recommended:* HF4 next (a port, mechanical, Sonnet), then the extensions as the corpora's measured needs order them.

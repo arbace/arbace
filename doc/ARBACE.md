@@ -59,7 +59,9 @@ code. Three kinds of things live here:
   `rename.ae`, the renamer of the front end (doc/haskell/FRONTEND-SURVEY.md, HF2), ports `mkOpAppRn`, `mkNegAppRn`,
   `mkConOpPatRn`, `mkHsOpTyRn` of `compiler/GHC/Rename/HsType.hs` and `compareFixity` of `compiler/GHC/Types/Fixity.hs`
   from the same tarball on 2026-11-05, reading the rest of `compiler/GHC/Rename/` as the specification, the file
-  carrying GHC's notice; the helper's `rn` and `iface` verbs, `tools/hsdump/HsRn.hs`, are Arbace's own),
+  carrying GHC's notice; the helper's `rn`, `iface` and `tc` verbs, `tools/hsdump/HsRn.hs`, are Arbace's own;
+  `typecheck.ae`, the front end's elaborator (HF3's first slice, 2026-11-05), is Arbace's own, written anew with GHC's
+  `compiler/GHC/Tc/` and Jones's "Typing Haskell in Haskell" (1999) read as the specification, no code ported),
   `repr/c/` (repr/c, C's bridge,
   `arbace.repr.c.*`; doc/C23-SURVEY.md, doc/c/SPEC.md: its lexer and preprocessor, `repr/c/lex.ae` and
   `pp.ae`, are ports of modernc.org/cc/v4 v4.29.7 as go-whim carries it, https://github.com/arbace/go-whim
