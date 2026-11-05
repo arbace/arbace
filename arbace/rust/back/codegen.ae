@@ -117,6 +117,8 @@
 (defn- place-projs [p] (drop 2 p))
 (defn- proj-kind [e] (name (first e)))
 
+(defn- stmt-of [s] (if (= "dbg-stmt" (name (first s))) (second s) s))
+
 (defn place-type
   "The type form of a place: the local's type, a deref's pointee, a field's type."
   [body p]
@@ -183,13 +185,14 @@
     (doseq [a (range 1 (inc (:args body)))] (define! a [:arg]))
     (doseq [b order]
       (let [bb (nth blocks b)]
-        (doseq [[i s] (map-indexed vector (:stmts bb))]
+        (doseq [[i s0] (map-indexed vector (:stmts bb)) :let [s (stmt-of s0)]]
           (let [loc [b i]]
             (case (name (first s))
               "assign" (let [[_ p r] s]
                          (if (empty? (place-projs p)) (define! (place-local p) [:assign loc]) (visit-place p :store loc))
                          (visit-rvalue r loc))
-              ("storage-live" "storage-dead" "nop" "fake-read" "place-mention") nil
+              ("storage-live" "storage-dead" "nop" "fake-read" "place-mention" "const-eval-counter" "bidh") nil
+              "assume" (visit-operand (second s) loc)
               (unsupported (str "statement " (first s))))))
         (let [loc [b (count (:stmts bb))] t (:term bb)]
           (case (name (first t))
@@ -254,7 +257,7 @@
                  (case (:prim sc)
                    :int (if (:bool sc)
                           {:ty "i1" :v (if (zero? bits) 'false 'true)}
-                          {:ty (:imm sc) :v (as-num (if (:signed sc) (sext-const (:bits sc) bits) (java.math.BigInteger. (str bits))))})
+                          {:ty (:imm sc) :v (as-num (sext-const (:bits sc) bits))})
                    (unsupported "pointer const")))
       "zst" nil
       (unsupported (str "const " (first v))))))
@@ -266,6 +269,23 @@
 (defn fn-callee-of [f] (fn-callee f))
 
 (defn callee-symbol [path] (symbol "g" (str/replace path "::" ".")))
+
+(defn body-symbol
+  "The symbol a body's function is defined under: rustc's own when the dump is of a monomorphic instance."
+  [body]
+  (if (:symbol body) (symbol "g" (:symbol body)) (callee-symbol (:name body))))
+
+(defn call-symbol
+  "The symbol a call's function operand names: the resolved instance's when the call carries it (a monomorphic dump), else
+  the path of the item."
+  [f callee]
+  (cond
+    (and (seq? callee) (= "callee" (name (first callee))))
+    (let [c (second callee)]
+      (case (:kind c)
+        "item" (symbol "g" (:symbol c))
+        (unsupported (str "callee of kind " (:kind c)) {:callee c})))
+    :else (callee-symbol (fn-callee f))))
 
 (defn- sc-attrs
   "The attributes of a scalar passed as a parameter or argument: [:zeroext] for bool."
@@ -285,6 +305,15 @@
                             [nm]))])
     :pair (mapv (fn [sc nm] (vec (concat [(symbol (:imm sc))] (sc-attrs sc) [nm]))) (take 2 (:pair l)) names-or-vals)
     (unsupported "memory aggregate as a parameter")))
+
+(defn ret-attrs-of
+  "The attributes of a returned value: zeroext for bool, align for a reference."
+  [lt t l]
+  (case (:kind l)
+    :scalar (cond (:bool (:scalar l)) [:zeroext]
+                  (and (= :ptr (:prim (:scalar l))) (ref-type? t))
+                  (let [pl (layout lt (pointee-type t))] (when-not (zst? pl) [(list :align (:align pl))])))
+    nil))
 
 (defn llvm-type [l]
   (case (:kind l)
@@ -492,10 +521,11 @@
         overflow! (fn [bb op a b sc]
                     (let [t (symbol (:imm sc))
                           base (case op "AddWithOverflow" "add" "SubWithOverflow" "sub" "MulWithOverflow" "mul")]
-                      (if (and (= base "sub") (not (:signed sc)))
+                      (if (and (#{"sub" "add"} base) (not (:signed sc)))
                         (let [r (fresh!) f (fresh!)]
-                          (emit! bb (list '= r (list 'sub t (:v a) (:v b))))
-                          (emit! bb (list '= f (list 'icmp :ult t (:v a) (:v b))))
+                          (emit! bb (list '= r (list (symbol base) t (:v a) (:v b))))
+                          ;; unsigned: the wrapped result against an operand (add) or the operands (sub)
+                          (emit! bb (list '= f (if (= base "sub") (list 'icmp :ult t (:v a) (:v b)) (list 'icmp :ult t r (:v a)))))
                           {:pair [{:ty (:imm sc) :v r} {:ty "i1" :v f}]})
                         (let [iname (symbol "g" (str "llvm." (if (:signed sc) "s" "u") base ".with.overflow.i" (:ibits sc)))
                               rt (list 'struct t 'i1)
@@ -567,8 +597,8 @@
                     "ref" (let [pl (place-of! bb (nth r 2))] {:ty "ptr" :v (:ptr pl)})
                     (unsupported (str "rvalue " (first r)))))
         statement! (fn [bb s]
-                     (case (name (first s))
-                       "assign" (let [[_ p r] s
+                     (case (name (first (stmt-of s)))
+                       "assign" (let [[_ p r] (stmt-of s)
                                       dly (layout lt (place-type body p))
                                       l (place-local p)
                                       ssa-dest (and (empty? (place-projs p)) (not (contains? mem l)))]
@@ -645,7 +675,7 @@
                                        nil)))
                         "switch" (let [[_ d vals other] t
                                        dv (operand! bb d) sc (scalar-of-op d)
-                                       key (fn [v] (if (:signed sc) (long (sext-const (:bits sc) v)) (long v)))]
+                                       key (fn [v] (as-num (sext-const (:bits sc) v)))]
                                    (if (= 1 (count vals))
                                      (let [[v target] (first vals)
                                            lt* (llbb! target) lf (llbb! other)]
@@ -659,14 +689,14 @@
                                      (let [ld (llbb! other)
                                            cases (mapv (fn [[v target]] [(symbol (:ty dv)) (key v) (llbb! target)]) vals)]
                                        (emit! bb (list 'switch (symbol (:ty dv)) (:v dv) ld cases)))))
-                        "call" (let [[_ f args dest target] t
-                                     callee (fn-callee f)
+                        "call" (let [[_ f args dest target _ callee-info] t
+                                     callee (call-symbol f callee-info)
                                      argfs (vec (mapcat #(arg-forms bb %) args))
                                      dl (nth lay (place-local dest))
                                      dl (if (seq (place-projs dest)) (layout lt (place-type body dest)) dl)
                                      ret (llvm-type dl)
-                                     ret-attrs (when (and (= :scalar (:kind dl)) (:bool (:scalar dl))) [:ret-attrs [:zeroext]])
-                                     callf (concat (list 'call ret (callee-symbol callee) argfs) ret-attrs)]
+                                     ret-attrs (when-let [ra (ret-attrs-of lt (place-type body dest) dl)] [:ret-attrs ra])
+                                     callf (concat (list 'call ret callee argfs) ret-attrs)]
                                  (case (:kind dl)
                                    :zst (emit! bb (apply list callf))
                                    :scalar (let [r (fresh!)]
@@ -716,5 +746,5 @@
             start-code (into (:start s) (get-in s [:bbs "start"]))
             bbs (for [nm (:bb-order s)] (list* 'block (symbol (str "%" nm)) (if (= nm "start") start-code (get-in s [:bbs nm]))))
             rl (first lay)]
-        (apply list 'llvm/define (callee-symbol (:name body)) (llvm-type rl) params
-               (concat (when (and (= :scalar (:kind rl)) (:bool (:scalar rl))) [:ret-attrs [:zeroext]]) [:body (vec bbs)]))))))
+        (apply list 'llvm/define (body-symbol body) (llvm-type rl) params
+               (concat (when-let [ra (ret-attrs-of lt (:ret body) rl)] [:ret-attrs ra]) [:body (vec bbs)]))))))

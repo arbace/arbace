@@ -940,6 +940,7 @@ struct Compile {
     mir_data: Option<String>,
     census: Option<String>,
     iface: Option<String>,
+    mono: Option<String>,
 }
 
 fn write_mir<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, w: &mut dyn std::io::Write) -> std::io::Result<()> {
@@ -1006,6 +1007,9 @@ impl Callbacks for Compile {
             write_mir(tcx, &mut out).unwrap_or_else(|e| panic!("rsdump: MIR of {p}: {e}"));
             write_file(p, &String::from_utf8_lossy(&out));
         }
+        if let Some(p) = &self.mono {
+            write_file(p, &mono_mir(tcx));
+        }
         if let Some(p) = &self.iface {
             write_file(p, &mirdata::iface(tcx));
         }
@@ -1026,7 +1030,7 @@ fn mir_data<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
     use rustc_hir::def::DefKind;
     use rustc_middle::mir::Const;
     use rustc_middle::ty::{InstanceKind, TypeVisitableExt};
-    let w = mirdata::W { tcx };
+    let w = mirdata::W { tcx, mono: false };
     let mut out = String::new();
     for &def_id in tcx.mir_keys(()) {
         let mut one = |b: &rustc_middle::mir::Body<'tcx>, ph: &str, ctfe: bool, out: &mut String| {
@@ -1071,6 +1075,48 @@ fn mir_data<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
     out
 }
 
+/// `--mono-mir FILE` (RF3's oracle for the collector): the mono items rustc collects (`collect_and_partition_mono_items`),
+/// each function instance's monomorphic MIR (`instance_mir` instantiated at its arguments) with its symbol, the callees of its
+/// calls resolved (`Instance::try_resolve`) with theirs, and the layouts of the locals' types
+fn mono_mir<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
+    use rustc_middle::mono::MonoItem;
+    use rustc_middle::ty::{self, TypeVisitableExt};
+    let w = mirdata::W { tcx, mono: true };
+    let env = ty::TypingEnv::fully_monomorphized();
+    let parts = tcx.collect_and_partition_mono_items(());
+    let mut out = String::new();
+    let mut tys = std::collections::BTreeMap::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for cgu in parts.codegen_units {
+        for (item, data) in cgu.items_in_deterministic_order(tcx) {
+            let MonoItem::Fn(inst) = item else {
+                if let MonoItem::Static(d) = item {
+                    out.push_str(&format!("(mir/static {{:symbol {} :def {}}})\n", mirdata::q(&tcx.symbol_name(ty::Instance::mono(tcx, d)).name.to_string()), mirdata::q(&format!("{d:?}"))));
+                }
+                continue;
+            };
+            let sym = tcx.symbol_name(inst).name.to_string();
+            if !seen.insert(sym.clone()) {
+                continue;
+            }
+            if matches!(inst.def, ty::InstanceKind::Intrinsic(_)) || (matches!(inst.def, ty::InstanceKind::Item(d) if !tcx.is_mir_available(d))) {
+                out.push_str(&format!("(mir/external {{:symbol {} :def {}}})\n", mirdata::q(&sym), mirdata::q(&format!("{inst}"))));
+                continue;
+            }
+            let body = tcx.instance_mir(inst.def);
+            let mono = inst.instantiate_mir_and_normalize_erasing_regions(tcx, env, ty::EarlyBinder::bind(tcx, body.clone()));
+            for d in mono.local_decls.iter() {
+                collect_ty(tcx, d.ty, &mut tys);
+            }
+            let _ = data;
+            out.push_str(&w.body_sym(&mono, "optimized", false, Some(&sym)));
+            out.push('\n');
+        }
+    }
+    out.push_str(&mirdata::layouts(tcx, &tys));
+    out
+}
+
 /// a type and the types its layout is made of (pointees, elements, fields), for the `mir/layouts` table
 fn collect_ty<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, t: rustc_middle::ty::Ty<'tcx>, tys: &mut std::collections::BTreeMap<String, rustc_middle::ty::Ty<'tcx>>) {
     use rustc_middle::ty::{self, TypeVisitableExt};
@@ -1100,7 +1146,7 @@ fn collect_ty<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, t: rustc_middle::ty::Ty
 }
 
 fn compile(args: &[String]) -> ! {
-    let mut c = Compile { hir: None, mir: None, mir_data: None, census: None, iface: None };
+    let mut c = Compile { hir: None, mir: None, mir_data: None, census: None, iface: None, mono: None };
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -1110,6 +1156,10 @@ fn compile(args: &[String]) -> ! {
             }
             "--mir" => {
                 c.mir = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--mono-mir" => {
+                c.mono = args.get(i + 1).cloned();
                 i += 2
             }
             "--iface" => {

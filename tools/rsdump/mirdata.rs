@@ -35,6 +35,8 @@ fn join<T>(xs: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
 
 pub struct W<'tcx> {
     pub tcx: TyCtxt<'tcx>,
+    /// bodies of monomorphic instances: a call's callee is resolved (rustc's `Instance::try_resolve`) and its symbol given
+    pub mono: bool,
 }
 
 impl<'tcx> W<'tcx> {
@@ -263,6 +265,56 @@ impl<'tcx> W<'tcx> {
         }
     }
 
+    /// The instance a call resolves to, in a monomorphic body: `(callee {:kind K :symbol S})`, or nil
+    fn callee(&self, func: &Operand<'tcx>) -> String {
+        if !self.mono {
+            return "nil".into();
+        }
+        let tcx = self.tcx;
+        let Some((def, args)) = func.const_fn_def() else { return "nil".into() };
+        let env = ty::TypingEnv::fully_monomorphized();
+        let args = tcx.erase_and_anonymize_regions(args);
+        match ty::Instance::try_resolve(tcx, env, def, args) {
+            Ok(Some(i)) => {
+                let kind = match i.def {
+                    ty::InstanceKind::Item(_) => "item",
+                    ty::InstanceKind::Intrinsic(_) => "intrinsic",
+                    ty::InstanceKind::Virtual(..) => "virtual",
+                    ty::InstanceKind::Shim(k) => match k {
+                        ty::ShimKind::VTable(_) => "vtable-shim",
+                        ty::ShimKind::Reify(..) => "reify-shim",
+                        ty::ShimKind::FnPtr(..) => "fnptr-shim",
+                        ty::ShimKind::ClosureOnce { .. } => "closure-once-shim",
+                        ty::ShimKind::DropGlue(..) => "drop-glue",
+                        ty::ShimKind::Clone(..) => "clone-shim",
+                        _ => "shim",
+                    },
+                    _ => "other",
+                };
+                let sym = if matches!(i.def, ty::InstanceKind::Intrinsic(_) | ty::InstanceKind::Virtual(..)) { String::new() } else { tcx.symbol_name(i).name.to_string() };
+                let intr = if let ty::InstanceKind::Intrinsic(d) = i.def { tcx.intrinsic(d).map(|x| x.name.as_str().to_string()) } else { None };
+                format!("(callee {{:kind {} :symbol {} :def {}{}{}}})", q(kind), q(&sym), q(&self.path(i.def_id())),
+                    intr.map(|n| format!(" :intrinsic {}", q(&n))).unwrap_or_default(),
+                    if tcx.is_mir_available(i.def_id()) || !matches!(i.def, ty::InstanceKind::Item(_)) { "" } else { " :external true" })
+            }
+            _ => "(callee {:kind \"unresolved\"})".into(),
+        }
+    }
+
+    /// The drop glue a `Drop` terminator calls in a monomorphic body: the symbol of `drop_in_place::<T>`, or nil
+    fn drop_glue(&self, place: &Place<'tcx>, b_: &Body<'tcx>) -> String {
+        if !self.mono {
+            return "nil".into();
+        }
+        let tcx = self.tcx;
+        let ty = place.ty(&b_.local_decls, tcx).ty;
+        let i = ty::Instance::resolve_drop_glue(tcx, ty);
+        if matches!(i.def, ty::InstanceKind::Shim(ty::ShimKind::DropGlue(_, None))) {
+            return "nil".into();
+        }
+        format!("(glue {{:symbol {}}})", q(&tcx.symbol_name(i).name.to_string()))
+    }
+
     /// `(loc "FILE" LINE COL)`: what `span_as_caller_location` gives the panic location of an assertion
     fn caller_location(&self, span: rustc_span::Span) -> String {
         let topmost = span.ctxt().outer_expn().expansion_cause().unwrap_or(span);
@@ -271,7 +323,7 @@ impl<'tcx> W<'tcx> {
         format!("(loc {} {} {})", q(&name), caller.line, caller.col_display + 1)
     }
 
-    fn terminator(&self, t: &Terminator<'tcx>) -> String {
+    fn terminator(&self, t: &Terminator<'tcx>, b_: &Body<'tcx>) -> String {
         use TerminatorKind::*;
         let b = |x: &BasicBlock| x.index().to_string();
         let ob = |x: &Option<BasicBlock>| x.map(|y| y.index().to_string()).unwrap_or("nil".into());
@@ -287,12 +339,12 @@ impl<'tcx> W<'tcx> {
             Return => "(return)".into(),
             Unreachable => "(unreachable)".into(),
             Drop { place, target, unwind, replace, drop } => format!(
-                "(drop {} {} {} {} {})",
-                self.place(place), b(target), self.unwind(unwind), replace, ob(drop)
+                "(drop {} {} {} {} {} {})",
+                self.place(place), b(target), self.unwind(unwind), replace, ob(drop), self.drop_glue(place, b_)
             ),
             Call { func, args: a, destination, target, unwind, .. } => format!(
-                "(call {} {} {} {} {})",
-                self.operand(func), args(a), self.place(destination), ob(target), self.unwind(unwind)
+                "(call {} {} {} {} {} {})",
+                self.operand(func), args(a), self.place(destination), ob(target), self.unwind(unwind), self.callee(func)
             ),
             TailCall { func, args: a, .. } => format!("(tailcall {} {})", self.operand(func), args(a)),
             Assert { cond, expected, msg, target, unwind } => format!(
@@ -345,6 +397,10 @@ impl<'tcx> W<'tcx> {
     }
 
     pub fn body(&self, b: &Body<'tcx>, phase: &str, ctfe: bool) -> String {
+        self.body_sym(b, phase, ctfe, None)
+    }
+
+    pub fn body_sym(&self, b: &Body<'tcx>, phase: &str, ctfe: bool, symbol: Option<&str>) -> String {
         let tcx = self.tcx;
         let def = b.source.def_id();
         let mut o = String::new();
@@ -356,6 +412,9 @@ impl<'tcx> W<'tcx> {
             let _ = write!(o, " :promoted {}", p.index());
         }
         let _ = write!(o, " :instance {}", q(&format!("{:?}", b.source.instance)));
+        if let Some(sy) = symbol {
+            let _ = write!(o, " :symbol {}", q(sy));
+        }
         let name = ty::print::with_forced_impl_filename_line!(tcx.def_path_str(def));
         let _ = write!(o, " :name {}", q(&name));
         let kind = {
@@ -408,7 +467,7 @@ impl<'tcx> W<'tcx> {
                     " :composite {{:ty {} :proj [{}]}}",
                     self.ty(f.ty),
                     join(f.projection.iter(), |e| self.place(&Place { local: Local::from_u32(0), projection: tcx.mk_place_elems(&[*e]) })
-                        .trim_start_matches("(place 0 ").trim_end_matches(')').to_string())
+                        .strip_prefix("(place 0 ").and_then(|x| x.strip_suffix(')')).unwrap_or("").to_string())
                 ),
                 None => String::new(),
             };
@@ -426,7 +485,7 @@ impl<'tcx> W<'tcx> {
                 bb.is_cleanup,
                 join(bb.statements.iter(), |s| self.statement(s)),
                 join(bb.after_last_stmt_debuginfos.iter(), |d| q(&format!("{d:?}"))),
-                bb.terminator.as_ref().map(|t| self.terminator(t)).unwrap_or("nil".into())
+                bb.terminator.as_ref().map(|t| self.terminator(t, b)).unwrap_or("nil".into())
             );
         }
         o.push(']');
@@ -505,7 +564,7 @@ pub fn census<'tcx>(tcx: TyCtxt<'tcx>) -> String {
 /// trait refs (std's interface format for RF7's judge, doc/rust/FRONTEND-SURVEY.md §3.5)
 pub fn iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
     use rustc_hir::def::DefKind;
-    let w = W { tcx };
+    let w = W { tcx, mono: false };
     let mut out = String::new();
     for local in tcx.iter_local_def_id() {
         let d = local.to_def_id();
