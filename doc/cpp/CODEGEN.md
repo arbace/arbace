@@ -298,8 +298,10 @@ specialization's arguments, which are read from the main file's text at the node
    to the template, a pack to a pack entity). That is what clang's TreeTransform does by substitution; here no tree is
    transformed and no dependent node needs a case of its own: `CXXUnresolvedConstructExpr` is analyzed as a construction,
    a dependent call as a call, `T::type` as a qualified name, all at the instantiation. Two-phase lookup's first phase is
-   approximated by the cutoff G1 already has: a function template's body sees the names declared before its definition
-   (and ADL at the call adds the arguments' namespaces' functions and function templates).
+   approximated: a function template's body sees the names declared before its definition (G1's cutoff), ADL at the
+   call adds the arguments' namespaces' functions and function templates, and an unqualified name in a class
+   specialization does not look into a base that was dependent in the pattern ([temp.dep]/4: `this->f()` and
+   qualified names do).
 2. **A template's signature has its parameters as types.** For deduction, ordering and mangling, a function template's
    declared type is resolved in a scope where each parameter stands for itself: `{:k :tparam :i i :tid tid}` (a type),
    `{:k :tparam-v ...}` (a value: an array bound, an argument), `{:k :ttp ...}` (a template), and the dependent forms
@@ -331,18 +333,28 @@ specialization's arguments, which are read from the main file's text at the node
    [temp.alias]/2 says); variable templates declare a variable per specialization (folded where used as a constant,
    defined when odr-used); `if constexpr` evaluates its condition and analyzes the taken branch only; constructor
    templates are candidates of a class's initialization; member templates and member class templates live in their
-   class's scope; out-of-line members of a class template are attached to each specialization of the primary, their own
-   header's names bound.
+   class's scope; out-of-line members of a class template are attached to each specialization of the primary (or of
+   the partial specialization their qualifier's arguments name), their own header's names bound, out-of-line member
+   templates likewise; explicit specializations of members and of member templates of a class specialization replace
+   the member's definition; a friend function (or function template) defined in a class is a member of the enclosing
+   namespace whose body sees the class's names, each class specialization's hidden friends their own; classes and
+   enumerations local to a function (a function template's included) mangle as local names; a pointer or reference
+   non-type parameter is bound to the function or variable its argument names; a template template parameter to the
+   template; a class template's static member initialized dynamically runs behind its guard variable.
 
 The hooks sema calls (`arbace.cpp.sema/hooks`, installed by `arbace.cpp.template`): `:declare` (a template's nodes),
 `:template-id` (`(<> name args...)`), `:dependent-name` (`T::x` in a signature), `:const-bound` (an array bound),
 `:call-candidates`, `:ctor-candidates`, `:tiebreak`, `:pack-expand` (types), `:expand-pack` (expressions),
 `:var-template`, `:pending`, `:wrap` (the templates' state around an analysis). Sema itself changed where G3 needed the
-general rule: reference collapsing, a parameter's array or function type adjusted to a pointer ([dcl.fct]/5), the
+general rule (the slice's samples and the corpus found these; they hold for non-templates too): reference collapsing, a parameter's array or function type adjusted to a pointer ([dcl.fct]/5), the
 qualification adjustment's rank ([over.ics.rank]/3.2.6), an array's cv at its elements in reference binding, `if
 constexpr`, `sizeof...`, comparisons and logical operators in constant evaluation, a constant local's initializer
-kept, value-initialization by `T()`, a qualified name whose parts are template-ids split at the top level only, the
-analysis of a program as a worklist (declarations, then each round's pending definitions). repr/cpp's type reader
+kept, value-initialization by `T()`, a qualified name whose parts are template-ids split at the top level only (`o.A<int>::f`,
+`using ::f`), `*p` of a function pointer called, `o.k` of a constant static member folded (not an odr-use), an implicit
+destructor trivial whatever the vptr ([class.dtor]/8), an unknown name left to argument-dependent lookup,
+`__builtin_abort` (clang calls `abort`), `decltype(nullptr)` and `decltype(sizeof ...)` (the headers' `nullptr_t` and
+`size_t`), a function's local classes' path, the analysis of a program as a worklist (declarations, then each round's
+pending definitions); codegen: a linkonce_odr static member and its guard. repr/cpp's type reader
 (`arbace.repr.cpp.types`) now ends a template argument at a `,` or `>` outside parentheses only (`X<(a > b)>`).
 
 ### G3.4 Ported and written (P6 (b))
@@ -370,7 +382,11 @@ specialization with its template's signature and return type (`_Z4max2IiET_S0_S0
 templates (`_ZNK2ns3BoxIiE2asIdEET_v`), constructor templates (`_ZN4PairIliEC2IicEERKS_IT_T0_E`); dependent member
 types (`N9enable_ifIX...EiE4typeE`) and expressions (`Xsr6is_intIT_EE5valueE`, `XntsrT_5valueE`, `XgtplT_Li1ELi2EE`);
 packs (`IJidcEE`, `DpT_`); template template arguments and parameters (`I1DE`, `T_IiE`); variable template
-specializations (`_Z5widthIlE`).
+specializations (`_Z5widthIlE`); a function template's argument for a non-type parameter of dependent type, its
+parameter written first as `ItaniumMangle.cpp`'s `needToMangleTemplateParam` says (`IiTnT_Li42EE`, a pack's
+`TpTnT_`), a non-type parameter as an argument (`XT0_E`); a function's or variable's address and a reference
+(`XadL_Z1FiEE`, `L_Z2gvE`, a null pointer `LPv0E`); local names (`_ZZ1fILi3EEivEN1S1gEv`); guard variables of template
+statics (`_ZGVN1XIiE4flagE`).
 
 ### G3.6 What the libstdc++ headers demand first
 
@@ -399,36 +415,45 @@ The slice's `tmpl-utility.cpp`, `tmpl-traits.cpp` and `tmpl-enable-if.cpp` are t
 
 ### G3.7 The check and the numbers
 
-The 32 samples `test/cpp/codegen/tmpl-*.cpp` (each with a header comment saying what it exercises) are judged by
+The 33 samples `test/cpp/codegen/tmpl-*.cpp` (each with a header comment saying what it exercises) are judged by
 `bin/cppi codegen-check` with G1's 38, all three levels (run, native, names), against the empty known file.
 
 | check (2026-11-05, light) | result |
 |---|---|
-| `bin/cppi codegen-check` over `test/cpp/codegen` (38 + 32) | 70 of 70 pass; generate and lower about 50 s, gcc, clang and runs 6 s |
-| gcc 15.2.0's template run tests (`g++.dg/template`, `g++.old-deja/g++.pt`, `g++.dg/cpp0x`: the `dg-do run` files including no header beyond C's that clang accepts at `-std=c++23`, 288 files; read in place from the pinned tarball's extraction, not committed) | GXX_RESULT |
+| `bin/cppi codegen-check` over `test/cpp/codegen` (38 + 33) | 71 of 71 pass; generate and lower about 60 s, gcc, clang and runs 7 s |
+| gcc 15.2.0's template run tests (`g++.dg/template`, `g++.old-deja/g++.pt`, `g++.dg/cpp0x`: the `dg-do run` files including no header beyond C's (`stdio`, `stdlib`, `string`, `stddef`, `assert` and their `c` forms) that clang accepts at `-std=c++23`, 288 files; read in place from the pinned tarball's extraction, not committed) | 147 of 288 pass all three levels (51 %): `g++.old-deja/g++.pt` 104 of 143, `g++.dg/template` 17 of 35, `g++.dg/cpp0x` 26 of 110; 10 at this section's first measure, 99 after the first round of fixes; generate and lower about 2.5 minutes, gcc, clang and runs 17 s |
 | `bin/repr-cpp native-check samples` after repr/cpp's type reader change | 9 of 9 the same, 68 of 68 items |
 | the existing samples refused on templates at G1 (`auto.cpp`, `classes.cpp`, `p1-first.cpp`) | past their templates; refused next on `auto` return types, `try` (G2) and a concept |
 
-GXX_CLASSES
+The corpus's 141 others, by what stops them (each file's first refusal or its verdict):
+
+| class | files | whose |
+|---|---|---|
+| inheritance (virtual and multiple bases), unions, exceptions, lambdas, conversion functions and their templates, member pointers, `auto` | 54 | G2's areas |
+| the core analysis: initialization corners (`ImplicitValueInitExpr`, `CXXDefaultInitExpr`, aggregates, references to temporaries), constant evaluation (`constexpr` functions), range `for` over a class, `this` in a default member initializer | 27 | G1/G2 (sema) |
+| builtins (`__builtin_memset`, `__builtin_operator_new`, `__builtin_addressof`), `__PRETTY_FUNCTION__`, attributes in types, user-defined literals, statement expressions, the parser's declines | 23 | G4 and repr/cpp |
+| templates' remaining corners: G3.8's (pointer arguments of subobjects, explicit packs extended, a template template argument `T::template B`, a member template-id of three levels) and overload-resolution failures inside templates (initializer lists, deduction from `const T` arrays) | 20 | G3b-G3c |
+| wrong results: names clang folds away (`constexpr` objects and functions clang evaluates, a static local's constant initialization: 7), a user `operator new` or `C1` called natively (`new1`, `new11`, `virtual4`, `rv-life`: the native level), addresses printed (`t39`), `constexpr` odr-use (2), a function-try-block (`fntry1`, G2) | 16 | mostly G2's constant evaluation; none in the template machinery's names |
+| other (the reference failed, a declaration kind) | 2 | |
 
 ### G3.8 What is not done (refused with a class)
 
-Concepts and `requires` (`ConceptDecl`, constrained parameters), class template argument deduction, `explicit(bool)`,
-conversion function templates (with G2's conversion functions), templates' friends (`friend` functions defined in a
-class template), explicit specializations of member templates (`template <> template <> ...`), pointer and reference
-non-type parameters (`template <void (*F)(int)>`, `template <const char *N>`), defaults of template template parameters,
-`decltype` and `auto` (deduced return types: G2's `auto`), a class template's static member initialized dynamically (its
-guard variable, `_ZGV...`), packs in partial specializations and in a class's pattern beyond a trailing parameter,
-dependent expressions of kinds beyond G3.5's (calls, casts in signatures), and two-phase lookup's exact first phase.
+Concepts and `requires` (the native tree keeps a `ConceptDecl`'s parameters but not its constraint, and no
+requires-clause or requirement: P11), class template argument deduction, `explicit(bool)`, conversion function templates
+(with G2's conversion functions), defaults of template template parameters, `decltype` beyond `nullptr` and `sizeof`
+(with G2's `auto`), the address of an array or of a subobject as a template argument (`XadsoiL_Z3arrEEE`), a dependent
+expression in a signature beyond G3.5's kinds (calls, casts), explicit pack arguments extended by deduction
+(`foo<int>(2, 3, 4)` for `template <class... T>`), the trailing requires-clause's and constrained parameters' mangling
+(`Q...E`, `Tk`), packs of different lengths in one expansion, two-phase lookup's exact first phase (G3.3, 1).
 
 ### G3.9 The staged plan
 
 | stage | what | target | estimate |
 |---|---|---|---|
-| **G3a** (this branch) | G3.3-G3.5 as built | 32 samples; the gcc corpus as measured | done |
-| **G3b** | the refusals of G3.8 that the corpus counts most: pointer and reference non-type parameters, friends of class templates, member templates' explicit specializations, template template defaults, `decltype` in signatures (with G2's `auto`), guarded statics of templates | 80 % of the gcc template corpus that needs nothing of G2 | 1-2 |
-| **G3c** | concepts (`SemaConcept.cpp`'s satisfaction, constrained overloads ordered by subsumption, `requires` expressions), CTAD (`SemaTemplateDeductionGuide.cpp`), `explicit(bool)`, `noexcept(expr)` | the libstdc++ 15 constructs of G3.6 at `-std=c++23` | 2-3 |
-| **G3d** | with G4: header bodies parsed, each node's text from its own file, the type-trait builtins | `<utility>` and `<type_traits>` samples by our route | with G4 |
+| **G3a** (this branch) | G3.3-G3.5 as built | 32 samples (all pass); the gcc corpus as measured (G3.7), its template-specific refusals nearly gone | done |
+| **G3b** | concepts after P11: the parser's constraint nodes, `SemaConcept.cpp`'s satisfaction (atomic constraints evaluated as constant expressions, `requires` expressions' requirements checked by analysis as SFINAE), constrained overloads ordered by subsumption (normal forms, `IsAtLeastAsConstrained`), `Q`/`Tk` mangling; `explicit(bool)`, `noexcept(expr)` | `p1-first.cpp`; the libstdc++ 15 constructs of G3.6 at `-std=c++23` | 2-3 |
+| **G3c** | CTAD (`SemaTemplateDeductionGuide.cpp`: implicit guides from constructors, user guides), conversion function templates with G2's conversions, `decltype` and `auto` with G2 | the corpus files refused on these | 1-2 |
+| **G3d** | with G4: header bodies parsed, each node's text from its own file (P10), the type-trait builtins of G3.6 | `<utility>` and `<type_traits>` samples by our route | with G4 |
 
 ### G3.10 Proposed
 
@@ -450,6 +475,15 @@ cases. **Recommended: (a)**, revisited if the corpus finds a program whose meani
 native parser records them in its tree (a `TemplateArgument` list on `DeclRefExpr` and `MemberExpr`, the explicit arguments clang's
 `DeclRefExpr::template_arguments` holds): no text reading, headers work as the main file; costs a parser change
 and native-check's comparison of the new field. **Recommended: (b) before G4**, which needs it for the headers.
+
+**P11. Concepts' input.** (a) Read constraints from the main file's text, as explicit arguments are now: needs an
+expression parser of text (only constant expressions are read today) and fails in headers. (b) The native parser keeps
+what clang's dump keeps: a `ConceptDecl`'s constraint expression, a template's requires-clause and a function's trailing
+one (`TemplateParameterList::getRequiresClause`, `FunctionDecl::getTrailingRequiresClause`), a constrained parameter's
+`TypeConstraint`, `RequiresExpr` with its parameters and requirements (simple, type, compound, nested); costs a
+parser change, its native-check against cxxdump (the oracle's dumper, extended where it does not write them yet) and
+the converter's forms for them.
+**Recommended: (b)**, with P10 (b): both are the native tree carrying what the analysis needs instead of the text.
 
 ### G3.11 Sources
 
