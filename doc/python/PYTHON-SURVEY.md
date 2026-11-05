@@ -2245,3 +2245,77 @@ samples on the VM; nothing recorded is committed (the main host's night records 
   without it.
 - **Sizes**, extrapolated from 24 files a corpus: the packs about 410 MB raw, 50 MB xz (stdlib 18, site-packages 11,
   lib-test 21; scopes besides), within ORS11's 100 MB; committed: the essential dumps 1.9 MB and the manifests about 4 MB.
+
+## As built: 215, `_zstd`'s glue, and `_sqlite3` measured (2026-11-05, the Mac VM, queue 215; 208's remainder, 208z)
+
+- **`go/arbace/pyzstd`** (package `arbace/pyzstd`): CPython 3.14.10's `Modules/_zstd/` (`_zstdmodule.c`, `compressor.c`,
+  `decompressor.c`, `zstddict.c`, `buffer.h`, the clinic files' argument parsing; 2,567 + 1,176 lines) ported statement for
+  statement over zstd 1.5.7's committed node program (`go/arbace/clib/zstd`), through `arbace/clib` as `_bz2` and `_lzma`
+  are. ZstdCompressor (levels, options, the three end directives, `set_pledged_input_size`, `last_mode`), ZstdDecompressor
+  (`max_length`, `needs_input`, `eof`, `unused_data`, the unconsumed input kept in C memory with CPython's
+  `in_begin`/`in_end`), ZstdDict (`dict_id`, `dict_content`, `as_digested_dict`, `as_undigested_dict`, `as_prefix`, its
+  digested ZSTD_CDicts by level and its ZSTD_DDict), `train_dict`, `finalize_dict` (through `pyzstd_finalize`),
+  `get_param_bounds` (through `pyzstd_bounds`), `get_frame_size`, `get_frame_info`, `set_parameter_types`, ZstdError and the
+  constants (the version, `ZSTD_CLEVEL_DEFAULT` and `ZSTD_DStreamOutSize` asked of the library). ZSTD_inBuffer and
+  ZSTD_outBuffer are C structs in the library's memory, laid out by `pyzstd_layout`. Lazy as `_lzma`
+  (`builtins_zstd_api.go`); compiled, aot.ae's main links `arbace/pyzstd` and cf2g's `arbace/clib/zstd/aot`
+  (`bin/pyi-clib aot zstd`: 8.8 MB of Go, 60 s, 1.8 GB). `compression.zstd` is the tarball's Python over it.
+- **No threads.** zstd is built without `ZSTD_MULTITHREAD`: `nb_workers`' bounds are (0, 0), test_zstd's three
+  multithreaded tests skip as on CPython over such a libzstd. The GIL is held around every library call; the objects'
+  PyMutex locks are the GIL.
+- **The reference.** Alpine's python3 3.14.10 has no `_zstd`, so `ref-cpython314-lib-test-all.edn` records test_zstd as a
+  skipped module (no methods). `tools/pyi/clib/refmod.bash zstd OUT` builds CPython's own `Modules/_zstd` by the host's cc
+  as an extension of the oracle's python3 (its pyconfig.h, the tarball's Include/) over the same pinned zstd with
+  lib.conf's flags, kept by key (8.6 s); `bin/pyi record-ref lib-test-all` puts it on the reference's PYTHONPATH. Not in
+  `bin/pyi-clib` nor `tools/pyi/clib/zstd/`, which are in the node program's key.
+- **zstd's node program rebuilt** with `-DNDEBUG` (CPython's release flags): divsufsort.c's `assert` had put `__FILE__`,
+  the building checkout's absolute path, into the node program, so `bin/pyi-clib verify zstd` could only pass in the
+  checkout that built it (q208's worktree). The rebuild also refreshes its `Key`, which 213's change to `bin/pyi-clib`
+  (6e159c3b) had left stale for all three libraries (bzip2's and xz's still are: `bin/pyi-clib build bzip2`, `build xz`).
+- **`py`: "cannot set ... attribute of immutable type" names tp_name** (`compression.zstd.ZstdCompressor`,
+  `collections.deque`; builtins bare), as CPython.
+- **`:pyio-buffered`**: `_pyio`'s BufferedReader `_readinto` computes `avail` without what it wrote already (an upstream
+  `_pyio` bug) and its `seek` does not check `raw.seekable()`; CPython with `io = _pyio` fails the same two test_zstd tests.
+- **Samples (the VM, run).**
+  - `z1.py` (every entry of `_zstd` and `compression.zstd`: levels, options and their errors, incremental modes,
+    pledged sizes, `max_length`, chunked input, skippable and multiple frames, trained, finalized, raw, digested,
+    undigested and prefix dictionaries, pickling, subclassing, immutability, ZstdFile in binary and text): 76 lines
+    equal to CPython over the reference `_zstd`, compiled (`bin/pyi aot`).
+  - `z0.py` (z1 without the dictionary training, smaller inputs): 67 lines equal on goi, 35 s with the start.
+  - test_zstd compiled (`bin/pyi aot test/python/libtest_run.py test_zstd SKIP`): 121 methods, 119 as CPython's (116 ok,
+    3 skipped: the multithreaded ones, as CPython's), 2 `:pyio-buffered`; 9 s with the module built.
+  - test_zstd on goi (the driver under `bin/pyi run`, 40 minutes' cap): 19 methods ran in the cap, all as CPython's;
+    setUpModule (130 KB compressed with a checksum, a dictionary trained on 300 samples) and the 3-byte chunked
+    decompressions dominate. ci interpreted under goi (`:clib-on-goi`, 208's DECISION 1 (a)): about 10 KB/s for zstd's
+    compressor (20 KB in 2.1 s), so the whole module takes hours on goi until the re-seed lists arbace/ci and arbace/crt.
+- **`_sqlite3`: the amalgamation through ci, measured.** `tools/pyi/clib/sqlite/` (lib.conf: sqlite-3.50.4.0, the
+  SPDX pin; `NDEBUG`, `SQLITE_THREADSAFE=0`, `SQLITE_OMIT_LOAD_EXTENSION`, `SQLITE_DEFAULT_MEMSTATUS=0`,
+  `SQLITE_DISABLE_INTRINSIC`, and `__atomic_load_n`/`__atomic_store_n` as plain loads and stores; `pysqlite.c`, the
+  entry). `bin/pyi-clib verify sqlite` (the build into `.tmp/pyi-clib/sqlite/verify`, nothing committed): 6 min 36 s,
+  6.7 GB peak, a node program of 5,481,087 bytes and 4,012 functions (5.8 MB of forms): not 208's estimate of 25-30 MB.
+  The amalgamation's 262,899 lines are 99,911 preprocessed (zstd's 30 files: 91,084), and gcc -O0's text is 1.13 MB
+  (zstd's 1.31 MB): SQLite costs about what zstd costs. Through `arbace/clib` (ci's interpreter compiled, a scratch Go
+  program) `sqlite3_open(":memory:")`, a table, 200 inserts in a transaction, an index, an error ("no such column"),
+  and an aggregate query with a `filter` clause print what gcc's build of the same files prints (205 statements in
+  90 ms). Two things ci lacks, met on the way: the `__atomic` builtins (the first build faulted in `sqlite3_open` on
+  "undefined function `__atomic_store_n`"), and an answer of 0 for `__has_extension(c_atomic)` (its preprocessor
+  answers as the reference compiler, so `SQLITE_DISABLE_INTRINSIC` alone kept SQLite's atomics).
+- **`_sqlite3`'s plan** (not built; the glue is `Modules/_sqlite/`'s 6,563 lines plus 2,826 of clinic, about 3.5 times
+  `_zstd`'s):
+  1. Where the node program lives: committed as forms like zstd's (5.8 MB), or built into a keyed cache (208's
+     DECISION 2 (a), decided on the 25-30 MB estimate). The DECISION in 215's report.
+  2. Callbacks: `create_function`, aggregates, window functions, collations, the authorizer, progress and trace
+     handlers are C calling Go. ci's natives are Go functions the node program calls by name (`ci.Natives`):
+     `pysqlite.c` declares extern trampolines (`pysqlite_func`, `pysqlite_step`, `pysqlite_final`,
+     `pysqlite_collation`, `pysqlite_authorizer`, ...) whose addresses the glue passes to SQLite, and the Go glue
+     registers them before `clib.Open`; the first probe is that ci takes the address of an extern native.
+  3. The port, file by file as CPython's: module.c (constants, adapters' registry, `connect`), connection.c,
+     cursor.c, statement.c, row.c, blob.c, microprotocols.c, prepare_protocol.c, util.c; `Lib/sqlite3` is the
+     tarball's.
+  4. Threads: the first slice is `SQLITE_THREADSAFE=0` (`sqlite3.threadsafety` 0, which test_dbapi accepts) under
+     the GIL, one C thread; a busy handler then sleeps holding the GIL, so a test where another Python thread holds
+     the lock ends in "database is locked" after the timeout instead of waiting: a class until 208's design (a
+     `ci.Thread` per Python thread, the GIL released around the library's sleeps; a ci change, the main host's).
+  5. Proof: test_sqlite3's sample compiled against the CPython reference. Alpine's python3 has `_sqlite3`, but over
+     the system's SQLite 3.54.1, not the pinned 3.50.4 (`sqlite3.sqlite_version`, and the tests that branch on it):
+     the reference's `_sqlite3` then built by `tools/pyi/clib/refmod.bash` over the pinned amalgamation, as `_zstd`'s.
