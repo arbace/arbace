@@ -774,7 +774,7 @@ can fold (shifts, comparisons, int-to-pointer) never reach the IR as instruction
 ### RF3b: the codegen on rustc's data, second round (2026-11-05, branch `rust-rf3b`)
 
 RFP1 (a) decided: finish the codegen on rustc's data before replacing the oracle's answers. One day's second pass over the refusals
-and the differing items of the first coverage file: **10,432 of 11,453 mono items' functions equal rustc's IR (91.1 %)**, from 8,342
+and the differing items of the first coverage file: **10,433 of 11,453 mono items' functions equal rustc's IR (91.1 %)**, from 8,342
 (72.8 %), over the same 81 programs (`test/rust/front/coverage-2026-11-05b.edn`, the record; the first file stays), no program lost an
 item (checked per program on each of the 20 runs of the day: the coverage over the 81 programs is 6 minutes at about 1.5 GiB), **40
 programs with every item equal** (13 before) and the six `no_std` samples still 46 of 46 equal with their runs' exit statuses
@@ -811,12 +811,12 @@ What was built (in `arbace/rust/back/codegen.ae`, `check.ae`, `coverage.ae`):
   is found through tuples, closure captures, spread tuples' elements and a Box inside a wrapper; `undef`, not `poison`, for the
   missing component of a pair.
 
-What blocks the rest (the refusals of `coverage-2026-11-05b.edn`, by items): 546 differ, **234 `abi other`: the vector ABI** (hashbrown's
+What blocks the rest (the refusals of `coverage-2026-11-05b.edn`, by items): 565 differ, **234 `abi other`: the vector ABI** (hashbrown's
 SSE2 group and `simd_*`: the helper dumps `(other)` with no element type or lane count, so the layout of `__m128i` and `Simd<T, N>`
 is unknown), **31 virtual calls** (the callee carries the trait method's path but not the vtable slot), 34 transmutes between
 other layouts, 26 other unsizings, 25 `subslice` places, 23 `typed_swap_nonoverlapping` (a call of the fallback instance whose symbol
-needs v0 mangling of the type's arguments), 23 errors (bugs, counted by item), 13 `catch_unwind`, a tail of constants, `tlsref`
-and float intrinsics. The 546 differing items fall in classes seen by their first differing line: block order (54: rustc creates the
+needs v0 mangling of the type's arguments), 3 errors, 13 `catch_unwind`, a tail of constants, `tlsref`
+and float intrinsics. The 565 differing items fall in classes seen by their first differing line: block order (54: rustc creates the
 `unreachable` block of an `invoke` before the cleanup's resume block; ours creates it last), the order and sizes of allocas where
 rustc's analysis keeps a different set of locals in memory (about 70), drop glue and `Drop` of `dyn` through the vtable (48, one
 program), vtable shims' parameter attributes (17: rustc gives `align 8` to some `*mut Closure` self parameters and not to others, a
@@ -839,7 +839,7 @@ of the mono items of 81 programs, the collector's traversal to all 81 item sets,
 resolution with specialization, v0 symbols (the crates' disambiguator hashes), vtable and drop glue and shim MIR from data
 (about 8 to 12 days). The estimate stands; the exactness of the judge is what the day showed. After the second day (RF3b) the codegen's
 refusals that need only rustc's data are done but for the transmutes, unsizings and subslices; the two big ones need the helper to
-dump more (the vector layouts, the vtable slots), RFP5 below; the 546 differing items need about 2 more days by the classes above.
+dump more (the vector layouts, the vtable slots), RFP5 below; the 565 differing items need about 2 more days by the classes above.
 
 ### Proposed (RF-trial)
 
@@ -867,7 +867,7 @@ dump more (the vector layouts, the vtable slots), RFP5 below; the 546 differing 
   (`InstanceKind::Virtual(_, idx)`, `layout.backend_repr` of vectors with the element and count, field types of every ADT layout), rebuild
   the helper once (rustc-dev from the pinned apk, a heavy build: one night's lane), regenerate the 81 dumps (`COVERAGE_REDUMP=1`, about
   15 minutes), then port the vector ABI and the virtual calls: about 1 day**; (b) port layout (`rustc_abi`, 8 to 12 days of RF3) first,
-  which answers all three natively; (c) leave them as recorded classes and go on to the 546 differing items (about 2 days) and RF3's
+  which answers all three natively; (c) leave them as recorded classes and go on to the 565 differing items (about 2 days) and RF3's
   replacement of the oracle's answers. *Recommended: (a) in the night's heavy lane, (c) meanwhile.*
 
 ## Decided (2026-11-05, the user: RFP1-RFP4)
