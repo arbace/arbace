@@ -41,7 +41,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value phase-debug* md-str global-opts md-ops md-int-op? md-int-val alloc-bytes)
+(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value phase-debug* md-str global-opts md-ops md-int-op? md-int-val alloc-bytes dl-ptr-bits)
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
@@ -1644,6 +1644,12 @@
         (when-not (md-str m) (verr :verifier/intrinsic-call "invalid value for llvm.fptrunc.round metadata operand (the operand should be a string)" [:mdv m]))
         (when-not (#{"round.tonearest" "round.downward" "round.upward" "round.towardzero" "round.tonearestaway"} (md-str m))
           (verr :verifier/intrinsic-call "unsupported rounding mode argument" :inst)))
+      ("llvm.preserve.array.access.index" "llvm.preserve.struct.access.index" "llvm.aarch64.ldaxr" "llvm.aarch64.ldxr" "llvm.arm.ldaex" "llvm.arm.ldrex")
+      (when-not (attr-of (group-items (param-attrs (nth args 0 []))) "elementtype")
+        (verr :verifier/intrinsic-call "Intrinsic requires elementtype attribute on first argument." :inst))
+      ("llvm.aarch64.stlxr" "llvm.aarch64.stxr" "llvm.arm.stlex" "llvm.arm.strex")
+      (when-not (attr-of (group-items (param-attrs (nth args 1 []))) "elementtype")
+        (verr :verifier/intrinsic-call "Intrinsic requires elementtype attribute on second argument." :inst))
       "llvm.experimental.get.vector.length"
       (let [v (arg 1)] (when (and (integer? v) (<= (long v) 0)) (verr :verifier/intrinsic-call "get_vector_length: VF must be positive" :inst)))
       "llvm.structured.alloca"
@@ -1903,26 +1909,54 @@
       (and (<= (.compareTo lo x) 0) (neg? (.compareTo x hi)))
       (or (>= (.compareTo x lo) 0) (neg? (.compareTo x hi))))))
 
-(defn- check-range-md [x rt]
-  (let [ops (md-ops x)]
-    (when ops
-      (when (empty? ops) (verr :verifier/md-range "It should have at least one range!" [:mdv x]))
-      (when (odd? (count ops)) (verr :verifier/md-range "Unfinished range!" [:mdv x]))
-      (let [w (when (int-type? (elem rt)) (int-bits (elem rt)))]
-        (loop [pairs (partition 2 ops) last nil]
-          (when-let [[lo hi] (first pairs)]
+(defn- range-segments
+  "A ConstantRange [lo, hi) modulo 2^w as non-wrapping segments."
+  [lo hi w]
+  (let [m (.shiftLeft java.math.BigInteger/ONE (int w))]
+    (cond (< (compare lo hi) 0) [[lo hi]]
+          :else [[lo m] [java.math.BigInteger/ZERO hi]])))
+
+(defn- ranges-intersect? [[a1 a2] [b1 b2] w]
+  (some (fn [[x1 x2]] (some (fn [[y1 y2]] (and (< (compare x1 y2) 0) (< (compare y1 x2) 0))) (range-segments b1 b2 w))) (range-segments a1 a2 w)))
+
+(defn- check-range-md
+  "Verifier::verifyRangeLikeMetadata over `x` for a value of type `rt`: `kind` :range (default), :absolute-symbol or
+  :noalias-addrspace; `me` the value's culprit (:inst, :global)."
+  ([x rt] (check-range-md x rt :range :inst))
+  ([x rt kind me]
+  (when-let [ops (md-ops x)]
+    (when (odd? (count ops)) (verr :verifier/md-range "Unfinished range!" [:mdv x]))
+    (when (empty? ops) (verr :verifier/md-range "It should have at least one range!" [:mdv x]))
+    (let [pairs (vec (partition 2 ops))
+          w-of (fn [op] (int-bits (norm-type (first op))))
+          um (fn [v w] (bi-mod v w))
+          sg (fn [v w] (let [u (um v w)] (if (>= (.bitLength ^java.math.BigInteger u) w) (.subtract ^java.math.BigInteger u (.shiftLeft java.math.BigInteger/ONE (int w))) u)))]
+      (loop [i 0 last nil]
+        (when (< i (count pairs))
+          (let [[lo hi] (nth pairs i)]
             (when-not (md-int-op? lo) (verr :verifier/md-range "The lower limit must be an integer!" :none))
             (when-not (md-int-op? hi) (verr :verifier/md-range "The upper limit must be an integer!" :none))
-            (when-not (and (= (norm-type (first lo)) (elem rt)) (= (norm-type (first hi)) (elem rt)))
-              (verr :verifier/md-range "Range types must match instruction type!"))
-            (let [l (md-int-val lo) h (md-int-val hi)]
-              (when (= (bi-mod l w) (bi-mod h w)) (verr :verifier/md-range "Range must not be empty!" [:mdv x]))
+            (when-not (= (norm-type (first lo)) (norm-type (first hi))) (verr :verifier/md-range "Range pair types must match!" me))
+            (if (= kind :noalias-addrspace)
+              (when-not (= 'i32 (norm-type (first hi))) (verr :verifier/md-range "noalias.addrspace type must be i32!" me))
+              (when-not (= (norm-type (first hi)) (elem rt)) (verr :verifier/md-range "Range types must match instruction type!" me)))
+            (let [w (w-of lo) l (um (md-int-val lo) w) h (um (md-int-val hi) w)
+                  maxv (.subtract (.shiftLeft java.math.BigInteger/ONE (int w)) java.math.BigInteger/ONE)]
+              (when (and (= l h) (not= l maxv) (not (zero? (.signum ^java.math.BigInteger l))))
+                (verr :verifier/md-range "The upper and lower limits cannot be the same value" me))
+              (when (or (and (= l h) (zero? (.signum ^java.math.BigInteger l))) (and (= l h) (= l maxv) (not= kind :absolute-symbol)))
+                (verr :verifier/md-range "Range must not be empty!" [:mdv x]))
               (when last
                 (let [[ll lh] last]
-                  (when (or (md-in-range? ll lh l w) (md-in-range? l h ll w)) (verr :verifier/md-range "Intervals are overlapping" [:mdv x]))
-                  (when-not (> l ll) (verr :verifier/md-range "Intervals are not in order" [:mdv x]))
-                  (when (= (bi-mod l w) (bi-mod lh w)) (verr :verifier/md-range "Intervals are contiguous" [:mdv x]))))
-              (recur (rest pairs) [l h]))))))))
+                  (when (ranges-intersect? [l h] [ll lh] w) (verr :verifier/md-range "Intervals are overlapping" [:mdv x]))
+                  (when-not (> (compare (sg l w) (sg ll w)) 0) (verr :verifier/md-range "Intervals are not in order" [:mdv x]))
+                  (when (or (= lh l) (= h ll)) (verr :verifier/md-range "Intervals are contiguous" [:mdv x]))))
+              (recur (inc i) [l h])))))
+      (when (> (count pairs) 2)
+        (let [[[flo fhi] [llo lhi]] [(first pairs) (peek pairs)] w (w-of flo)
+              f [(um (md-int-val flo) w) (um (md-int-val fhi) w)] l [(um (md-int-val llo) w) (um (md-int-val lhi) w)]]
+          (when (ranges-intersect? f l w) (verr :verifier/md-range "Intervals are overlapping" [:mdv x]))
+          (when (or (= (second f) (first l)) (= (second l) (first f))) (verr :verifier/md-range "Intervals are contiguous" [:mdv x]))))))))
 
 (defn- tbaa-scalar?
   "TBAAVerifier's IsScalarTBAANodeImpl: a name, its parent and an optional zero offset, the parents scalar up to a root."
@@ -2038,8 +2072,7 @@
                 (when-not (zero? (bit-and v (bit-not 1023))) (verr :verifier/md-misc "Invalid value for 'nofpclass' test mask" [:mdv x] :inst)))))))
     (when-let [x (get md '!noalias.addrspace)]
       (when-not ('#{load store atomicrmw cmpxchg call} hd) (verr :verifier/md-misc "noalias.addrspace are only for memory operations!"))
-      (sub (fn [] (when-let [ops (md-ops x)]
-              (doseq [op ops] (when-not (and (vector? op) (= 'i32 (norm-type (first op)))) (verr :verifier/md-misc "noalias.addrspace type must be i32!")))))))
+      (sub (fn [] (check-range-md x rt :noalias-addrspace :inst))))
     (when (get md '!invariant.group)
       (when-not ('#{load store} hd) (verr :verifier/md-misc "invariant.group metadata is only for loads and stores")))
     (when (get md '!invariant.load)
@@ -2735,6 +2768,32 @@
 
 (declare check-intrinsic-signature callee-of old-form-decl?)
 
+(defn- type-culprit
+  "A type as the Verifier writes a culprit type: a space and the type, a named struct with its definition, no newline."
+  [t]
+  [:raw (str " " (if (named-type? t) (str (pr/type-str t) " = type " (let [b (get *types* t)] (if (= b 'opaque) "opaque" (tstr b)))) (tstr t)))])
+
+(defn- check-load-store
+  "Verifier::visitLoadInst and visitStoreInst: alignment, sizedness, an atomic access's ordering, type and size, a
+  non-atomic one's synchronization scope."
+  [hd b]
+  (let [[_ ps o] (split-inst b)
+        t (norm-type (if (= hd 'load) (first ps) (first (first ps))))
+        what (if (= hd 'load) "load" "store")
+        ord (:atomic o)]
+    (when (and (integer? (:align o)) (> (long (:align o)) 4294967296)) (verr :verifier/load-store "huge alignment values are unsupported"))
+    (when-not (sized? t) (verr :verifier/load-store (str (if (= hd 'load) "loading" "storing") " unsized types is not allowed")))
+    (if (:atomic o)
+      (do (when (if (= hd 'load) (#{:release :acq_rel} ord) (#{:acquire :acq_rel} ord))
+            (verr :verifier/load-store (if (= hd 'load) "Load cannot have Release ordering" "Store cannot have Acquire ordering")))
+          (let [e (resolve-type (elem t))]
+            (when-not (or (int-type? e) (ptr-type? e) (byte-type? e) (fp-type? e))
+              (verr :verifier/load-store (str "atomic " what " operand must have integer, byte, pointer, floating point, or vector type!") (type-culprit t) :inst))
+            (when-let [z (bits t)]
+              (when (< (long z) 8) (verr :verifier/load-store "atomic memory access' size must be byte-sized" (type-culprit t) :inst))
+              (when-not (pow2? z) (verr :verifier/load-store "atomic memory access' operand must have a power-of-two size" (type-culprit t) :inst)))))
+      (when (:syncscope o) (verr :verifier/load-store (str "Non-atomic " what " cannot have SynchronizationScope specified"))))))
+
 (defn- verify-function
   "The Verifier's rules over one definition (visitFunction, visitBasicBlock and the instructions' visitors)."
   [f users]
@@ -2830,6 +2889,7 @@
                           (when-not (= x (first (remove #(= 'phi (first (body %))) insts)))
                             (verr :verifier/landingpad "LandingPadInst not the first non-PHI instruction in the block."))))
                       (check-funclet hd b x bi blocks items insts g defs (some? (:personality o)))
+                      (when ('#{load store} hd) (check-load-store hd b))
                       ;; visitCallBase
                       (when-let [c (callee-of b)]
                         (when (and (global? c) (str/starts-with? (global-key c) "llvm."))
@@ -2898,7 +2958,16 @@
                             (verr :verifier/unwind-dest "The unwind destination does not have an exception handling instruction!"))))
                       ))
                       (recur (inc ii) (or seen-non-phi (not= hd 'phi))))))))))
-        (visiting (binding [*ctx* {:fn f}] (check-sibling-unwinds blocks g defs)))))))
+        (visiting (binding [*ctx* {:fn f}] (check-sibling-unwinds blocks g defs)))
+        ;; verifyNoAliasScopeDecl: each llvm.experimental.noalias.scope.decl's scope list one scope (its first failure ends it)
+        (visiting
+         (doseq [[_ l & items] blocks x items :let [b (body x) c (callee-of b)]
+                 :when (and c (global? c) (= (global-key c) "llvm.experimental.noalias.scope.decl"))]
+           (binding [*ctx* {:fn f :bb l :inst x}]
+             (let [m (peek (first (nth (second (split-inst b)) 2)))]
+               (when-not (or (md-ref? m) (and (seq? m) (= '! (first m)) (vector? (second m))))
+                 (verr :verifier/intrinsic-call "!id.scope.list must point to an MDNode" :inst))
+               (when-not (= 1 (count (md-ops m))) (verr :verifier/intrinsic-call "!id.scope.list must point to a list with a single scope" :inst))))))))))
 
 (defn- global-opts [f]
   (let [[_ _ _ & more] f] (apply hash-map (if (and (seq more) (not (keyword? (first more)))) (rest more) more))))
@@ -2959,6 +3028,8 @@
           (when-not (ptr-type? (norm-type (first op))) (verr :verifier/global "associated value must be pointer typed" me [:mdv a]))
           (when (and (global? (second op)) (= (global-key (second op)) k))
             (verr :verifier/global "global values should not associate to themselves" me [:mdv a])))))
+    (when-let [a (get md '!absolute_symbol)]
+      (visiting (check-range-md a (symbol (str "i" (dl-ptr-bits (or (:addrspace o) 0)))) :absolute-symbol me)))
     (doseq [[mk r] (partition 2 (:md o)) :when (= mk '!implicit.ref)]
       (when decl? (verr :verifier/global "ref metadata must not be placed on a declaration" me))
       (let [ops (md-ops r)]
