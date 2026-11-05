@@ -30,8 +30,16 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Identifiers and paths (typing/ident.ml, typing/path.ml)
 
-(def ^:private stamp (atom 1000))
+(def stamp (atom 1000))
 (defn reset-stamps! [] (reset! stamp 1000))
+(def unit-stamp-base "The stamps of the identifiers of the stdlib's interfaces, apart from a program's" 100000000)
+(def unit-stamp (atom unit-stamp-base))
+(defmacro with-unit-stamps
+  "body with identifiers stamped in the units' range (the units' interfaces outlive a program's stamps)"
+  [& body]
+  `(let [saved# @stamp]
+     (reset! stamp @unit-stamp)
+     (try (do ~@body) (finally (reset! unit-stamp @stamp) (reset! stamp saved#)))))
 (defn ident-create [name] {:name name :stamp (swap! stamp inc)})
 (defn ident-rename [id] (ident-create (:name id)))
 (defn ident-global [name] {:name name :stamp 0 :global true})
@@ -392,8 +400,11 @@
 (def ^:private weak-counter (atom 0))
 (def ^:private weak-names (atom {}))
 
+(defn- letter-of-int [i] (str (char (+ 97 (mod i 26))) (let [n (quot i 26)] (if (zero? n) "" n))))
+
 (defn name-vars
-  "The variables of ts in order of appearance, each named 'a, 'b... (generic ones) or '_weakN (the others)"
+  "Out_type's Variable_names: the variables of ts in order of appearance, a named one by its name (suffixed when
+  taken), the other generic ones 'a, 'b... skipping the names in use, the others '_weakN"
   [ts]
   (let [order (atom []) seen (atom #{})]
     (letfn [(go [t] (let [t (repr t)]
@@ -401,14 +412,20 @@
                         (swap! seen conj t)
                         (if (tvar? t) (swap! order conj t) (run! go (children (desc t)))))))]
       (run! go ts))
-    (loop [vs @order i 0 m {}]
-      (if (empty? vs)
-        m
-        (let [v (first vs)]
-          (if (= generic-level (level v))
-            (recur (rest vs) (inc i) (assoc m v (str "'" (if (< i 26) (char (+ 97 i)) (str (char (+ 97 (mod i 26))) (quot i 26))))))
-            (let [n (or (get @weak-names v) (let [n (str "'_weak" (swap! weak-counter inc))] (swap! weak-names assoc v n) n))]
-              (recur (rest vs) i (assoc m v n)))))))))
+    (let [named (set (keep #((desc %) 1) @order))
+          counter (atom 0)]
+      (loop [vs @order m {} used #{}]
+        (if (empty? vs)
+          m
+          (let [v (first vs) nm ((desc v) 1)]
+            (cond
+              (not= generic-level (level v))
+              (let [n (or (get @weak-names v) (let [n (str "'_weak" (swap! weak-counter inc))] (swap! weak-names assoc v n) n))]
+                (recur (rest vs) (assoc m v n) used))
+              nm (let [n (if (used nm) (first (remove used (map #(str nm %) (iterate inc 1)))) nm)]
+                   (recur (rest vs) (assoc m v (str "'" n)) (conj used n)))
+              :else (let [n (loop [] (let [n (letter-of-int @counter)] (swap! counter inc) (if (or (named n) (used n)) (recur) n)))]
+                      (recur (rest vs) (assoc m v (str "'" n)) (conj used n))))))))))
 
 (defn type-text [names t prec]
   ;; prec: 0 top, 1 arrow argument / tuple component, 2 constructor argument
