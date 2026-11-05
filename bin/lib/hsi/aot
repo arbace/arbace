@@ -1,0 +1,129 @@
+#!/bin/bash
+# bin/hsi aot build|run (HE8, doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE8 (write-ahead)"): Haskell's AOT level's
+# first slice. A program's STG compiled to Go over hsi's machine (go/arbace/hs/aot.ae): hsi aot writes every closure of
+# the program's modules and the library modules a list names (a run's HSI_AOT_MODULES: the closures it entered, by
+# module) as Go packages arbace/aot/ID over the machine's exported API (go/arbace/hs/aotapi.ae), the libraries' generated
+# once per runtime and image and compiled once by Go's build cache, and TamaGo's go builds them with hsi's runtime (bin/hsi
+# build's module) into an executable that is hsi with those modules compiled: each installed by its tree's shape when first entered, every
+# other closure interpreted as before (the libraries' images and the program's dumps still loaded: the declarations,
+# constructors and globals come from them).
+#
+#   bin/hsi aot build --prog STGDIR [--closures FILE] --out DIR
+#                                  the program of STGDIR (its dumps, unit main) and FILE's library closures compiled
+#                                  and built into DIR/hsi-aot, its path printed; kept by the generated files' and the
+#                                  runtime's digests (DIR/key); the build's peak held near 1.5 GiB (GOMEMLIMIT, -p 2)
+#                                  (a library package over HSI_AOT_MAX_KB, default 4096, left interpreted: the compile's
+#                                  memory)
+#   bin/hsi aot run FILE.hs [ARG...]
+#                                  FILE dumped at -O0 as bin/hsi run dumps it, run once on hsi with an empty stdin to
+#                                  list the library closures it enters (the profile: which closures are compiled, never
+#                                  what a run computes), built, then run with the arguments and stdin; --stats's lines
+#                                  on stderr (HSI_STATS=1)
+# Environment: HSI_LIBS, HSI_IMAGE as bin/hsi run's; HSI_AOT_TRACE=1 (the installs on stderr), HSI_AOT_LIMIT=N (the first
+# N installed only), HSI_AOT_NO=Kind,... (node kinds the generator leaves to the interpreter): a divergence's bisection.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+WORK=$root/.tmp/hsi
+die() { echo "hsi aot: $*" >&2; exit 1; }
+
+libargs() {
+  la=()
+  local l dirs
+  IFS=: read -r -a dirs <<< "${HSI_LIBS:-$WORK/dumps/stg:$WORK/dumps-extra/stg:$WORK/dumps-more/stg}"
+  for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
+  img=${HSI_IMAGE:-$WORK/image}
+  if [ "$img" != none ]; then "$hsi" image --out "$img" "${la[@]}" > "$TMPDIR/hsi-aot-image.$$" 2>&1 || { cat "$TMPDIR/hsi-aot-image.$$" >&2; die "hsi image"; }; rm -f "$TMPDIR/hsi-aot-image.$$"; la+=(--image "$img"); fi
+}
+
+# aot_build STGDIR CLOSURES OUT: OUT/hsi-aot. The program's modules generated into OUT/gen, a package each; the library
+# modules CLOSURES names (whole modules: a package's text depends only on the module's image and the generator, so Go's
+# build cache compiles it once for every program) generated once into .tmp/hsi/aot/lib/KEY/ID, KEY the runtime's and the
+# image's digests
+aot_build() {
+  local prog=$1 cl=$2 out=$3 gen mod key rk lib=$WORK/aot/lib
+  mkdir -p "$out" "$lib"; out=$(cd "$out" && pwd); gen=$out/gen mod=$out/mod
+  rk=$(cut -c1-16 "$WORK/bin/key")
+  rm -rf "${gen:?}"; mkdir -p "$gen"
+  "$hsi" aot "${la[@]}" --prog "$prog" --out "$gen" > "$out/aot.log" 2>&1 || { cat "$out/aot.log" >&2; die "hsi aot failed"; }
+  # the library modules: those of CLOSURES's lines, their packages generated when not cached
+  local m id unit md imgf ik miss=$out/missing.txt
+  : > "$miss"; : > "$out/libs.txt"
+  if [ -n "$cl" ] && [ -s "$cl" ]; then
+    while read -r m; do
+      [ -n "$m" ] || continue
+      unit=${m%%:*}; md=${m#*:}; id=$(printf '%s' "$m" | sed 's/[^a-zA-Z0-9]/_/g')
+      imgf=$img/${unit//\//_}/$md.img
+      if [ -f "$imgf" ]; then ik=$(sha256sum < "$imgf" | cut -c1-16); else ik=noimage; fi
+      echo "$id $lib/$rk-$ik/$id" >> "$out/libs.txt"
+      [ -f "$lib/$rk-$ik/$id/aot.go" ] || echo "$m $rk-$ik $id" >> "$miss"
+    done < <(cut -d' ' -f1 "$cl" | grep -v '^main:' | LC_ALL=C sort -u)
+  fi
+  if [ -s "$miss" ]; then
+    # one generation at a time: two programs of a check may miss the same module
+    exec 9> "$lib/.lock"; flock 9
+    local st=$out/lib-staging k
+    rm -rf "${st:?}"; mkdir -p "$st"
+    cut -d' ' -f1 "$miss" > "$out/missing-mods.txt"
+    "$hsi" aot "${la[@]}" --modules "$out/missing-mods.txt" --out "$st" > "$out/aot-lib.log" 2>&1 || { cat "$out/aot-lib.log" >&2; die "hsi aot (libraries) failed"; }
+    while read -r m k id; do
+      [ -f "$lib/$k/$id/aot.go" ] && continue
+      mkdir -p "$lib/$k"; rm -rf "${lib:?}/$k/$id"; mv "$st/$id" "$lib/$k/$id"
+    done < "$miss"
+    rm -rf "${st:?}"
+    flock -u 9; exec 9>&-
+  fi
+  # a library package larger than HSI_AOT_MAX_KB (default 4096: Go's compiler takes about 2 GB on 5 MB, 3 GB on 9.5 MB)
+  # is left interpreted, listed in OUT/libs-skipped.txt (the night's builds raise the limit)
+  local max=${HSI_AOT_MAX_KB:-4096} sz
+  : > "$out/libs-skipped.txt"
+  while read -r id d; do
+    sz=$(( $(wc -c < "$d/aot.go") / 1024 ))
+    if [ "$sz" -gt "$max" ]; then echo "$id $sz" >> "$out/libs-skipped.txt"; else echo "$id $d"; fi
+  done < "$out/libs.txt" > "$out/libs.kept"; mv "$out/libs.kept" "$out/libs.txt"
+  key=$( { cat "$WORK/bin/key"; (cd "$gen" && find . -name '*.go' | LC_ALL=C sort | xargs sha256sum); cat "$out/libs.txt"; } | sha256sum | cut -c1-64)
+  if [ -x "$out/hsi-aot" ] && [ "$(cat "$out/key" 2> "$out/key.err")" = "$key" ]; then echo "$out/hsi-aot"; return; fi
+  rm -rf "${mod:?}"; cp -r "$WORK/bin/mod" "$mod"
+  mkdir -p "$mod/aot"; cp -r "$gen"/. "$mod/aot/"
+  local d
+  while read -r id d; do cp -r "$d" "$mod/aot/$id"; done < "$out/libs.txt"
+  { echo "package main"; echo
+    for d in "$mod"/aot/*/; do echo "import _ \"arbace/aot/$(basename "$d")\""; done; } > "$mod/hs/cmd/hsi/aot_link.go"
+  (cd "$mod" && GOCACHE=$WORK/bin/gocache GOFLAGS=-p=2 GOMAXPROCS=4 GOMEMLIMIT=1536MiB CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off \
+     "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -trimpath -o "$out/hsi-aot.new" ./hs/cmd/hsi) > "$out/build.log" 2>&1 \
+    || { tail -20 "$out/build.log" >&2; die "go build failed ($out/build.log)"; }
+  mv -f "$out/hsi-aot.new" "$out/hsi-aot"; echo "$key" > "$out/key"; rm -rf "${mod:?}"
+  echo "$out/hsi-aot"
+}
+
+sub=${1:-}; [ $# -gt 0 ] && shift
+hsi=$("$root/bin/hsi" build)
+case $sub in
+  build)
+    prog="" cl="" out=""
+    while [ $# -gt 0 ]; do
+      case $1 in --prog) prog=$2; shift 2 ;; --closures) cl=$2; shift 2 ;; --out) out=$2; shift 2 ;; *) die "usage: bin/hsi aot build --prog STGDIR [--closures FILE] --out DIR" ;; esac
+    done
+    [ -n "$prog" ] && [ -n "$out" ] || die "usage: bin/hsi aot build --prog STGDIR [--closures FILE] --out DIR"
+    libargs; aot_build "$prog" "$cl" "$out" ;;
+  run)
+    [ $# -ge 1 ] || die "usage: bin/hsi aot run FILE.hs [ARG...]"
+    f=$1; shift
+    [ "$(ghc --numeric-version)" = "$(cat "$root/tools/hsdump/GHC_VERSION")" ] || die "the host's GHC is not tools/hsdump/GHC_VERSION's"
+    "$root/bin/repr-haskell" helper >&2
+    hh=$(cat "$root"/tools/hsdump/*.hs "$root/tools/hsdump/GHC_VERSION" | sha256sum | cut -c1-64)
+    n=$(basename "$f" .hs)
+    d=$WORK/aot/run/$n; rm -rf "${d:?}"; mkdir -p "$d"
+    (cd "$(dirname "$f")" && "$root/.tmp/hsdump/hsdump" stg -o "$d/stg" --libdir "$(ghc --print-libdir)" --helper-hash "sha256:$hh" --ghc -O0 \
+       -outputdir "$d/obj" --files "$(basename "$f")") > "$d/dump.log" 2>&1 || { cat "$d/dump.log" >&2; exit 1; }
+    libargs
+    : > "$d/empty"
+    HSI_AOT_MODULES=$d/closures.txt "$hsi" run "${la[@]}" --prog "$d/stg" --name "$n" -- "$@" < "$d/empty" > "$d/profile.out" 2>&1 || true
+    exe=$(aot_build "$d/stg" "$d/closures.txt" "$d")
+    st=0; mem=${ARBACE_MEM_GIB:-16}
+    stats=(); [ -n "${HSI_STATS:-}" ] && stats=(--stats)
+    (ulimit -v $((mem * 1048576)); export GOMEMLIMIT=$((mem * 768))MiB
+     exec "$exe" run "${la[@]}" --prog "$d/stg" --name "$n" "${stats[@]}" -- "$@") || st=$?
+    exit $st ;;
+  *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
