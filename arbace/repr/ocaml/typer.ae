@@ -137,6 +137,90 @@
   (let [s (cond (str/starts-with? uname "Stdlib__") (subs uname 8) :else uname)]
     (str (str/lower-case (subs s 0 1)) (subs s 1))))
 
+(defn- unit-of-base
+  "The unit name of a stdlib file's base (stdlib/Makefile's PREFIX_MODULE): stdlib, camlinternal* as they are, the rest
+  with the Stdlib__ prefix"
+  [^String m]
+  (let [cap (str (str/upper-case (subs m 0 1)) (subs m 1))]
+    (cond (= m "stdlib") "Stdlib" (str/starts-with? m "camlinternal") cap :else (str "Stdlib__" cap))))
+
+(defn- compile-unit
+  "A stdlib unit U (in DIR) typed and translated with the flags stdlib/Compflags gives it: {:base :prog :error}, :prog
+  after Simplif"
+  [dir ^String u]
+  (let [base (stdlib-file u)
+        f (str dir "/" base ".ml")
+        nopervasives (contains? #{"Stdlib" "CamlinternalFormatBasics"} u)
+        intf (.exists (File. (str dir "/" base ".mli")))
+        classic (or (str/ends-with? u "Labels") (= u "Stdlib__Float"))
+        r (try (binding [ty/*classic* classic env/*transparent-modules* (or classic (= u "Stdlib"))]
+                 (compile-file f (str base ".ml") :uname u :nopervasives nopervasives :intf intf))
+               (catch Throwable t (when (System/getenv "TYPER_TRACE") (.printStackTrace t)) {:error (or (not-empty (.getMessage t)) (str t))}))
+        sprog (when (:lambda r)
+                (try (simplif/simplify-program (:lambda r)) (catch Throwable t (println "   simplif:" (str t)) nil)))]
+    {:base base :prog sprog :error (:error r)}))
+
+(defn- link-order
+  "The stdlib's link order from the units' required globals (the modules whose values a unit uses: what ocamlc links
+  before it, the header of its Lambda program), DEPS {unit #{unit}}; every unit but CamlinternalFormatBasics and Stdlib
+  also depends on Stdlib (the opened default). Kahn's algorithm, the smallest ready unit first."
+  [units deps]
+  (let [uset (set units)
+        deps (into {} (for [u units]
+                        [u (cond-> (disj (set (filter uset (get deps u))) u)
+                             (not (contains? #{"Stdlib" "CamlinternalFormatBasics"} u)) (conj "Stdlib"))]))]
+    (loop [done [] left uset]
+      (if (empty? left)
+        [done deps]
+        (let [ready (sort (filter (fn [u] (every? (set done) (get deps u))) left))]
+          (when (empty? ready) (throw (ex-info (str "a cycle among " (pr-str (sort left))) {})))
+          (recur (conj done (first ready)) (disj left (first ready))))))))
+
+(defn- do-stdlib-build
+  "oi's library made natively (TYPER.md, TY18): every unit of --bases (stdlib/StdlibModules' set) in --dir typed and
+  translated (typing reads the interfaces by name, so in any order), its simplified Lambda written to --out/Unit.ae;
+  the link order computed from the Lambdas' required globals, written to --out/order.txt; with --testing NAME (a
+  NAME.ml and .mli in --dir), that unit's Lambda to --testing-out"
+  [{:keys [opts]}]
+  (let [dir (get opts "--dir") out (get opts "--out")
+        bases (str/split (str/trim (slurp (get opts "--bases"))) #"\s+")
+        units (map unit-of-base bases)
+        deps (atom {}) bad (atom 0)]
+    (.mkdirs (File. ^String out))
+    (binding [env/*stdlib-dir* dir]
+      (doseq [u units]
+        (let [t0 (System/currentTimeMillis)
+              {:keys [base prog error]} (compile-unit dir u)]
+          (if prog
+            (let [text (lam/program-text prog (str base ".ml"))]
+              ;; (ocaml/lambda (lambda-program NAME SIZE [required globals] BODY) {...})
+              (swap! deps assoc u (set (nth (second (read-string text)) 3)))
+              (spit (str out "/" u ".ae") text))
+            (swap! bad inc))
+          (println (format "%-28s %-5s %5d ms%s" u (if prog "built" "FAIL") (- (System/currentTimeMillis) t0)
+                           (if error (str "  error: " error) "")))))
+      (when-let [t (get opts "--testing")]
+        (let [r (try (binding [env/*transparent-modules* false]
+                       (compile-file (str dir "/" t ".ml") (str t ".ml") :intf true))
+                     (catch Throwable e {:error (or (not-empty (.getMessage e)) (str e))}))]
+          (if (:lambda r)
+            (do (.mkdirs (File. ^String (get opts "--testing-out")))
+                (spit (str (get opts "--testing-out") "/" (unit-name (str t ".ml")) ".ae")
+                      (lam/program-text (simplif/simplify-program (:lambda r)) (str t ".ml")))
+                (println (str t " built")))
+            (do (swap! bad inc) (println (str t " FAIL  error: " (:error r))))))))
+    (if (pos? @bad)
+      (System/exit 1)
+      (let [[order deps] (link-order units @deps)
+            pos (zipmap order (range))
+            official (zipmap (map unit-of-base bases) (range))
+            viol (for [[u ds] deps d ds :when (> (official d) (official u))] [u d])]
+        (spit (str out "/order.txt") (str (str/join "\n" order) "\n"))
+        (println (str "stdlib-build: " (count order) " units, link order computed from the required globals; StdlibModules' order "
+                      (if (empty? viol) "satisfies every dependency" (str "violates " (pr-str viol)))
+                      "; the computed order " (if (= order (map unit-of-base bases)) "is StdlibModules'" "differs from it")))
+        (System/exit 0)))))
+
 (defn- do-stdlib-check
   "The stdlib's units typed and translated natively (TYPER.md, T8): each DIR/unit.ml against LIB/Unit.ae, the
   oracle's simplified Lambda (bin/oi stdlib's)"
@@ -145,29 +229,27 @@
         results (atom [])]
     (binding [env/*stdlib-dir* dir]
       (doseq [u args]
-        (let [base (stdlib-file u)
-              f (str dir "/" base ".ml")
-              nopervasives (contains? #{"Stdlib" "CamlinternalFormatBasics"} u)
-              intf (.exists (File. (str dir "/" base ".mli")))
-              t0 (System/currentTimeMillis)
-              classic (or (str/ends-with? u "Labels") (= u "Stdlib__Float"))
-              r (try (binding [ty/*classic* classic env/*transparent-modules* (or classic (= u "Stdlib"))]
-                       (compile-file f (str base ".ml") :uname u :nopervasives nopervasives :intf intf))
-                     (catch Throwable t (when (System/getenv "TYPER_TRACE") (.printStackTrace t)) {:error (or (not-empty (.getMessage t)) (str t))}))
-              sprog (when (:lambda r)
-                      (try (simplif/simplify-program (:lambda r)) (catch Throwable t (println "   simplif:" (str t)) nil)))
+        (let [t0 (System/currentTimeMillis)
+              {:keys [base prog error]} (compile-unit dir u)
+              sprog prog
               mine (when sprog (read-string (lam/program-text sprog (str base ".ml"))))
               olam (read-string (slurp (str lib "/" u ".ae")))
               ok (boolean (and mine (= (lam/canonical mine) (lam/canonical olam))))]
           (when (and out sprog) (.mkdirs (File. ^String out)) (spit (str out "/" u ".ae") (lam/program-text sprog (str base ".ml"))))
-          (swap! results conj {:unit u :ok ok :error (:error r)})
+          (swap! results conj {:unit u :ok ok :error error})
           (println (format "%-28s %-4s %5d ms%s" u (if ok "ok" "DIFF") (- (System/currentTimeMillis) t0)
-                           (if (:error r) (str "  error: " (:error r)) "")))
+                           (if error (str "  error: " error) "")))
           (when (and mine (not ok) (get opts "--diff"))
             (println (lam/first-difference (lam/canonical olam) (lam/canonical mine)))))))
     (let [rs @results n (count (filter :ok rs))]
       (println (str "stdlib-check: " (count rs) " units: Lambda equal " n))
       (System/exit (if (= n (count rs)) 0 1)))))
+
+(defn- do-canon-equal
+  "Two Lambda files equal up to the identifiers' stamps and the static exits' numbers (exit status 0 when they are)"
+  [{:keys [args]}]
+  (let [[a b] (map #(lam/canonical (read-string (slurp %))) args)]
+    (System/exit (if (= a b) 0 1))))
 
 (defn -main [& args]
   (let [[verb & more] args
@@ -177,4 +259,6 @@
       "lambda" (do-lambda (pa #{"--file" "--stdlib"}))  ; --simplify: after Simplif (-dlambda)
       "check" (do-check (pa #{"--dir" "--oracle" "--report" "--stdlib" "--out"}))
       "stdlib-check" (do-stdlib-check (pa #{"--dir" "--lib" "--out"}))
+      "canon-equal" (do-canon-equal (pa #{}))
+      "stdlib-build" (do-stdlib-build (pa #{"--dir" "--out" "--bases" "--testing" "--testing-out"}))
       (do (println "usage: -m arbace.repr.ocaml.typer types|lambda|check ...") (System/exit 2)))))
