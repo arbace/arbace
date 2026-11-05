@@ -1232,15 +1232,10 @@
                   :let [fty (:fty (.get *gdefs* k)) m (when fty (intr/mangled-name e fty tstr resolve-type))]
                   :when (and m (not= m k))]
               [k m]))
+  ;; an implicit declaration is made per call, by its own function type (getOrInsertDeclaration with its overload types)
   (into {} (for [k (filter #(str/starts-with? % "llvm.") (keys *gfwd*))
-                 :let [e (intr/lookup k)] :when (and e (:overloaded e))
-                 :let [fty (first (for [f forms :when (= (first f) 'llvm/define)
-                                        blk (:body (apply hash-map (drop 4 f))) x (drop 2 blk)
-                                        :let [b (body x) c (callee-of b)] :when (and c (global? c) (= (global-key c) k))]
-                                    (let [[_ ps] (split-inst b)] (call-fty (first ps) (nth ps 2)))))
-                       m (when fty (intr/mangled-name e fty tstr resolve-type))]
-                 :when (and m (not= m k))]
-             [k m]))))
+                 :let [e (intr/lookup k)] :when (and e (:overloaded e))]
+             [k :per-call]))))
 
 (def ^:dynamic *comdats* nil)
 
@@ -1718,6 +1713,18 @@
       ("llvm.aarch64.stlxr" "llvm.aarch64.stxr" "llvm.arm.stlex" "llvm.arm.strex")
       (when-not (attr-of (group-items (param-attrs (nth args 1 []))) "elementtype")
         (verr :verifier/intrinsic-call "Intrinsic requires elementtype attribute on second argument." :inst))
+      "llvm.aarch64.prefetch"
+      (let [lt (fn [i n msg] (when (and (integer? (arg i)) (>= (long (arg i)) n)) (verr :verifier/intrinsic-call msg :inst)))]
+        (lt 1 2 "write argument to llvm.aarch64.prefetch must be 0 or 1")
+        (lt 2 4 "target argument to llvm.aarch64.prefetch must be 0-3")
+        (lt 3 2 "stream argument to llvm.aarch64.prefetch must be 0 or 1")
+        (lt 4 2 "isdata argument to llvm.aarch64.prefetch must be 0 or 1"))
+      "llvm.aarch64.range.prefetch"
+      (let [lt (fn [i n msg] (when (and (integer? (arg i)) (>= (long (arg i)) n)) (verr :verifier/intrinsic-call msg :inst)))]
+        (lt 1 2 "write argument to llvm.aarch64.range.prefetch must be 0 or 1")
+        (lt 2 2 "stream argument to llvm.aarch64.range.prefetch must be 0 or 1"))
+      "llvm.sponentry"
+      (when-not (= (addrspace (result-type b)) *alloca-as*) (verr :verifier/intrinsic-call "llvm.sponentry must return a pointer to the stack" :inst))
       "llvm.experimental.get.vector.length"
       (let [v (arg 1)] (when (and (integer? v) (<= (long v) 0)) (verr :verifier/intrinsic-call "get_vector_length: VF must be positive" :inst)))
       "llvm.structured.alloca"
@@ -3635,11 +3642,22 @@
   (let [o (global-opts f) as (or (:addrspace o) 0)]
     (str (if (and (integer? as) (pos? as)) (str "ptr addrspace(" as ")") "ptr") " " (pr/global-str (nth f 1)))))
 
+(defn- rename-callee
+  "A call to an implicitly declared overloaded intrinsic with the name its own type mangles."
+  [x]
+  (let [b (body x) c (callee-of b)]
+    (if (and c (global? c) (= :per-call (get *renames* (global-key c))))
+      (let [[_ ps] (split-inst b) e (intr/lookup (global-key c))
+            m (when e (intr/mangled-name e (call-fty (first ps) (nth ps 2)) tstr resolve-type))
+            b2 (if m (apply list (assoc (vec b) 2 (symbol "g" m))) b)]
+        (if (= (first x) '=) (list '= (second x) b2) b2))
+      x)))
+
 (defn- canon-ptr0
   "`ptr addrspace(0)` written as `ptr`, as the AsmWriter prints it; an implicitly declared intrinsic by its mangled name."
   [x]
   (cond (and (seq? x) (= (first x) 'ptr) (= (second x) 0) (= 2 (count x))) 'ptr
-        (and (global? x) (contains? *renames* (global-key x))) (symbol "g" (get *renames* (global-key x)))
+        (and (global? x) (string? (get *renames* (global-key x)))) (symbol "g" (get *renames* (global-key x)))
         (seq? x) (apply list (map canon-ptr0 x))
         (vector? x) (mapv canon-ptr0 x)
         (map? x) (into (empty x) (map (fn [[k v]] [k (canon-ptr0 v)]) x))
@@ -3714,7 +3732,7 @@
   [c ctx metaforms]
   (cond
     (string? c) c
-    (= c :inst) (let [x (canon-fps (number-groups (canon-attr-order (with-default-align (canon-ptr0 (:inst ctx)))))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
+    (= c :inst) (let [x (canon-fps (number-groups (canon-attr-order (with-default-align (canon-ptr0 (rename-callee (:inst ctx))))))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
     (= c :fn) (fn-operand (:fn ctx))
     (= c :decl) (let [f (:fn ctx) o (apply hash-map (drop 4 f))
                         as (cond->> (group-items (:attrs o)) (own-intrinsic? f) (remove #(= (aname %) "mustprogress")))]
@@ -3728,7 +3746,7 @@
                                                  (and (symbol? v) (get metaforms v)) (md-form-text (get metaforms v))
                                                  (vector? v) (pr/typed-str (canon-fps v))
                                                  :else (pr/md-str v)))
-    (and (vector? c) (= (first c) :inst)) (let [x (canon-fps (number-groups (canon-attr-order (with-default-align (canon-ptr0 (second c)))))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
+    (and (vector? c) (= (first c) :inst)) (let [x (canon-fps (number-groups (canon-attr-order (with-default-align (canon-ptr0 (rename-callee (second c))))))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
     (and (vector? c) (= (first c) :fn)) (fn-operand (second c))
     (and (vector? c) (= (first c) :bb)) (label-text (second c))
     :else (str c)))
