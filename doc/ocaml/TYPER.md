@@ -3,13 +3,14 @@
 Status: the first slice (T1-T6) on the branch `ocaml-typer`, then T7 (Simplif) and T8 (the module system, the stdlib
 typed natively unit by unit, with GADTs, formats and type extensions pulled forward from T9-T10 for it) on
 `ocaml-typer2`, 2026-11-05 (§9, "As built: T7 and T8"), then T9's polymorphic variants on `ocaml-polyvar` (TY9 (b);
-§11, "As built: T9's polymorphic variants"). From `ocaml-native`, whose
+§11, "As built: T9's polymorphic variants"), then the rest of T9, objects and classes, on `ocaml-objects` (§13, "As
+built: T9's objects and classes"). From `ocaml-native`, whose
 native reader gives the Parsetree as Arbace data. The route of OC4 (b) (doc/ocaml/OCAML-SURVEY.md §6.4): port OCaml 5.5.0's `typing/` and
 `lambda/`'s Translcore with Matching, so that the native Parsetree becomes Lambda in Arbace and oi stops needing the
 host's `ocamlc` for a program. Light rules (the day's): no gate, no Arbace build, no re-seed; every run on main's stage 0
 (`ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace`), one process under 1.5 GB, samples only. Nothing here is
 TY1-TY6 (§8) were decided by the user (below §8); the proposals of T7-T8 are TY7-TY10 (§10), decided; those of T9's
-polymorphic variants TY11-TY12 (§12).
+polymorphic variants TY11-TY12 (§12), decided; those of T9's objects and classes TY13-TY15 (§14).
 
 ## 1. What needs ocamlc today, and what the slice removes
 
@@ -19,7 +20,7 @@ compiler-libs:
 | use | today | after this slice |
 |---|---|---|
 | a program's Lambda (`bin/oi run`, `check`) | `ocdump --mode lambda --simplify` | `bin/oi run-native`: Arbace (the core language and the module system; Simplif's output since T7) |
-| the stdlib's Lambda (`bin/oi stdlib`) | ocamlc builds the `.cmi`, ocdump dumps each unit | still ocamlc's (TY5, TY7 (c)); `bin/oi stdlib-check` types 66 of the 71 units natively, equal (T8, T9's variants) |
+| the stdlib's Lambda (`bin/oi stdlib`) | ocamlc builds the `.cmi`, ocdump dumps each unit | still ocamlc's (TY5, TY7 (c)); `bin/oi stdlib-check` types 69 of the 71 units natively, equal (T8, T9) |
 | the toplevel's phrases (`bin/oi repl`, `bin/lib/oi/phrase`) | ocdump types and lowers each phrase | unchanged (T11) |
 | the judge (types, Lambda, runs) | ocdump `--mode types`, `--mode lambda`, the toplevel | unchanged: the oracle stays the judge |
 
@@ -130,7 +131,7 @@ of these, in `test/ocaml/divergences.edn`'s format:
 | T1-T6 (this) | types, env, parmatch, typecore, lambda (Switch), matching, translcore; driver and check | 36 of 36 samples: types, Lambda, oi runs | done |
 | T7 Simplif | `lambda/simplif.ml`: `simplify_exits`, `simplify_lets` (`mutlet`), `simplify_local_functions`; the judge against `-dlambda` too | the samples equal to `ocdump --simplify` | done (§9) |
 | T8 the module system | Typemod (structures, signatures, inclusion and coercions, strengthening, applicative paths), functors (`Map.Make`, `Set.Make`, `Hashtbl.Make`), `open`/`include`/local opens, recursive modules; Translmod complete; then the stdlib's own `.ml` typed and translated natively | `bin/oi stdlib --native`: every unit's Lambda equal to the oracle's (canonical), oi's check on it unchanged | the module system done, the stdlib 64 of 71 (§9); the rest wait on T9's objects and variants and T10 |
-| T9 formats, variants, objects | `format6` typing of literals (Typecore's `type_format`, CamlinternalFormatBasics), polymorphic variants (rows, `Tvariant`, Matching's `divide_variant`), objects and classes (Typeclass, Translobj, Translclass) | the testsuite's `basic/` and `typing-objects/` run programs through the native path | formats done (§9), polymorphic variants done (§11); objects and classes left |
+| T9 formats, variants, objects | `format6` typing of literals (Typecore's `type_format`, CamlinternalFormatBasics), polymorphic variants (rows, `Tvariant`, Matching's `divide_variant`), objects and classes (Typeclass, Translobj, Translclass) | the testsuite's `basic/` and `typing-objects/` run programs through the native path | formats done (§9), polymorphic variants done (§11); objects and classes done (§13) |
 | T10 the rest of the core | GADTs and locally abstract types, existentials, first-class modules, effect handlers (`transl_handler`), lazy and array patterns, inline records, labelled tuples, `let` operators, optional-argument elimination | the probe's refusals gone | 6-10 |
 | T11 the corpus and the toplevel | `bin/oi check --native` over the run corpus with the classes of §5; `bin/oi repl --native` (phrases typed here, Genprintval's value printing from types) | none failing, every non-pass classed; repl-check without ocamlc | 4-6 |
 | T12 errors | typing errors as ocamlc reports them (Location's report, Printtyp's explanations), the testsuite's expect tests' type errors | the error tests' messages equal | 5-8 |
@@ -340,3 +341,68 @@ Size: about 8,100 lines of Arbace under `arbace/repr/ocaml/typer/` (and the driv
 ## Decided (2026-11-05, the user: TY11, TY12)
 
 TY11 (b): sharing in unification waits for T11's corpus; TY12 (a): scopes ported with T11 if the corpus shows differing names.
+
+## 13. As built: T9's objects and classes (2026-11-05, branch `ocaml-objects`)
+
+The rest of T9, from `ocaml-polyvar`. Ported from the same tarball (SHA-256 fcc6ae66...f015ba), each port following
+OCaml's functions; two new namespaces, the rest into the existing ones:
+
+| namespace | OCaml 5.5.0 sources | what |
+|---|---|---|
+| `typer.types` | `types.ml`'s Tobject, Tfield, Tnil, field kinds (shared cells, linked), Tpoly and Tunivar; `ctype.ml`'s flatten_fields, associate_fields, build_fields, object_row, opened_object, make_rowvar, unify_fields, unify_kind, the Tfield/Tnil cases of unify3, instance_poly, subtype_fields, build_subtype on objects (a class abbreviation's #-type, named when its methods are unchanged), unify2's expansion of an abbreviation that drops a parameter; `out_type.ml`'s object proxies and loops | object types and their unification; an object unified with an abbreviation linked to the abbreviation, as unify3 links |
+| `typer.typeclass` (new) | `typing/typeclass.ml` (class_structure's two passes with make_method, type_object, class_expr, class_type, class_declarations with initial_env's temporary abbreviations, class_infos' object and #-type abbreviations and constructor type, class_type_declarations, class descriptions), `ctype.ml`'s class signatures (new_class_signature, filter_method_row, add_method, add_instance_variable, inherit_class_signature, update_class_signature, hide_private_methods, close_class_signature, add_dummy_method, instance_class, limited_generalize, set_object_name), `typecore.ml`'s type_send and filter_method, type_class_arg_pattern | classes, inheritance (`as super`), virtual and private methods and instance variables, initializers, class parameters, applications and lets, class constraints, recursive classes (`and`), class types and their abbreviations, polymorphic methods |
+| `typer.typecore` | `typecore.ml`'s Pexp_send, Pexp_object, Pexp_new, instance variables and self (Val_ivar, Val_self through `self-N`), Pexp_setinstvar, Pexp_override, Pexp_poly (a method's polytype instantiated) | |
+| `typer.env` | `typetexp.ml`'s Ptyp_object (fields folded, inherited object types), Ptyp_class (`#c`), transl_poly_type (`'a. t` as a polytype); classes and class types as module components; `[@@unboxed]` one-constructor variants (Dynarray's `Pack`) | |
+| `typer.translclass` (new) | `lambda/translobj.ml` (share, oo_prim, transl_label_init, oo_wrap_gen and the classes' tables), `lambda/translclass.ml` (build_object_init, build_class_init, bind_methods, output_methods, builtin_meths, transl_class with its cached-table case under a function, transl_class_bindings with Value_rec_compiler's dummy blocks for static classes) | the object and class initialisers as calls of CamlinternalOO, bytecode's (no method caches) |
+| `typer.translcore`, `typer.translmod`, `typer.simplif`, `typer.lambda`, `typer.tmc` | `translcore.ml`'s Texp_send, Texp_new, Texp_instvar, Texp_setinstvar, Texp_override, Texp_object, transl_exp1's oo_wrap and fuse_method_arity; `translprim.ml`'s %send, %sendself, %sendcache; `translmod.ml`'s Tstr_class and its order (a structure's let bindings and classes translated before the rest); `simplif.ml`'s Lifused; Lambda's Lsend | |
+| `typer.printtyp` | `out_type.ml`'s tree_of_typobject, tree_of_class_type, tree_of_class_declaration and tree_of_cltype_declaration, `oprint.ml`'s Otyp_object, Otyp_class, Otyp_poly, Osig_class, Osig_class_type | `< m : t; .. >`, `#c`, `'a. t`, `class ['a] c : 'a -> object ('b) ... end`, `class type ... = ...`, `and` |
+
+**Results (2026-11-05, stage 0 of main, one process under 1.5 GB)**:
+
+| set | files | types equal | raw Lambda equal | simplified Lambda equal | oi's run equal |
+|---|---:|---:|---:|---:|---:|
+| `test/ocaml/typer/` (68 samples; t61-t68 new: immediate objects, objects under functions, classes, inheritance, class types, self types, polymorphic methods, class type abbreviations) | 68 | 68 | 68 | 68 | 68 |
+| the stdlib's units (`bin/oi stdlib-check`) | 71 | - | - | 69 | the samples on the native units: 67 of 67 (t68 added after the run) |
+| probe: `testsuite/tests/basic/`'s first 40 files, the 36 ocamlc accepts | 36 | 34 | 34 | 34 | - |
+| probe: run tests with objects and classes (typing-objects-bugs' `*_ok`, typing-poly-bugs' pr5322 pr5673 pr6922, letrec-compilation's class_1 class_2, translprim/sendcache, tool-ocaml/t301-object, parsing/anonymous_class_parameter, typing-recmod's t13ok t16ok, backtrace/methods, typing-labels' mixin2 mixin3, typing-extensions/cast, typing-typeparam/newtype, typing-polyvariants-bugs/pr10664, generalized-open/shadowing) | 23 | 10 | 12 | 12 | - |
+
+The stdlib's new units: CamlinternalOO and Oo (object types, `%sendself`), Dynarray (an immediate object under a
+function, a class whose table is cached; also `[@@unboxed]` and unify2's expansion of the phantom abbreviation `'stamp
+dummy = < >`). The 2 left: CamlinternalFormat (GADT-aware exhaustiveness, T10) and CamlinternalMod (recursive values,
+TY10 (a): T10). The basic/ probe's objects and includestruct are equal now (includestruct also needed an include to
+rename an exception's constructor); its 2 others are recursive values (recvalues, tailcalls), and patmatch's and sets'
+signatures differ as before (§11). The objects probe's 11 whose Lambda is not equal: class_2 (recursive values, T10);
+newtype (a toplevel test whose phrases OCaml rejects); pr5156_ok (a class parameter constrained to the self type
+through an abbreviation); pr10664 (a universal variable aliased to a row, `'ab. ([< `A | `B ] as 'ab) -> 'ab`); pr5673,
+pr6922, mixin2, mixin3, yamagata021012_ok (constraints on class parameters and class types through `#`-types and rows);
+t16ok (a class in a recursive module's signature); shadowing (`open struct ... end`, T8's slice). Of the 12 whose
+Lambda is equal, 2 signatures differ by a class parameter's `constraint 'a = ...` (pr4766_ok, t13ok: OCaml's
+tree_of_constraints, not ported) and cast's by a toplevel phrase OCaml rejects.
+
+Faithfulness notes. Method types are polytypes only when written `'a. t` (OCaml makes every method type `Tpoly (t, [])`
+and its printer and generalization see through it): no accepted program's output was found to depend on it. Two
+polytypes unify by pairing their universal variables as fresh variables (Ctype's univar pairs and its escape checks
+are not ported). Includeclass (the matching of a class against a class type in a signature or a constraint) is not
+ported: the class type given wins, as for a program OCaml accepts. Typeclass's type_approx (the first pass's
+approximation of method bodies) is not ported: methods are typed in the second pass against the declared or fresh
+types. A dummy method hidden by complete_class_signature is skipped when an object is closed and when a row meets a
+closed one. The class tables' and builtin methods' Lambda is bytecode's with OCaml's `-g` off for builtin methods
+(Translclass uses them unless `Clflags.debug`), as the oracle compiles.
+
+Size: about 9,900 lines of Arbace under `arbace/repr/ocaml/typer/` (and the driver, 179), about 1,800 more than T9's
+variants left (typeclass.ae 738, translclass.ae 495, the rest in the existing namespaces).
+
+## 14. Proposed (TY13-TY15; options with costs, a recommendation each, none decided)
+
+- **TY13 Includeclass.** The class matching of a signature's class specification or a class constraint is not
+  checked (§13). (a) port `typing/includeclass.ml` and Ctype.match_class_types with T12, where its errors are reported;
+  (b) now (about half a day: the class type comparison and its moregeneral); (c) never, the oracle stays the judge of
+  rejected programs. *Recommended: (a)*: only rejected programs differ.
+- **TY14 Every method type a polytype.** (a) represent a monomorphic method's type as `Tpoly (t, [])` as OCaml does,
+  with T11 if its corpus shows a printed type or a generalization that differs; (b) now (about half a day: every
+  method type's producer and consumer, the samples and the stdlib re-judged); (c) not at all. *Recommended: (a)*.
+- **TY15 What comes next.** The stdlib is 69 of 71 natively; its last 2 units need T10's GADT-aware exhaustiveness
+  (CamlinternalFormat) and recursive values (CamlinternalMod, TY10 (a)), which would make oi's library native (TY7
+  (c)) and let a host without ocamlc run oi. (a) those two parts of T10 next (about a day), then T11 as decided;
+  (b) T11 next as decided (TY6, TY9), T10 after it; (c) the class parameters' constraints and the objects probe's
+  rest first. *Recommended: (a)*: it completes the stdlib, the condition TY7 (c) set for dropping ocamlc's library.

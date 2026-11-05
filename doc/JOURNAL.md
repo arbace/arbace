@@ -369,3 +369,26 @@ a ground coercion that one unification cannot make is made by its constraints. S
 unification) and TY12 (scopes), TYPER.md §12; the entry above's TY12 (subtype) is withdrawn and its TY13 is TY12. Also
 `let p : 'a. t = e`, and two more samples (t59, t60): test/ocaml/typer/ 60 of 60 at every level; the stdlib still 66 of
 71, the basic/ probe 32 of 36.
+
+## 2026-11-05: oi's native front end, T9's objects and classes (branch ocaml-objects)
+
+The rest of T9, on the branch `ocaml-objects` from `ocaml-polyvar`, under the day's light rules (main's stage 0,
+samples and single units, one process under 1.5 GB). Ported from the same pinned tarball (ocaml-5.5.0.tar.xz,
+SHA-256 fcc6ae66...f015ba; LGPL-2.1 with the linking exception, the notices in the files, LICENSE.md and doc/ARBACE.md
+extended): typing/typeclass.ml (class_structure, type_object, class_expr, class_type, class_declarations,
+class_type_declarations) into the new `arbace/repr/ocaml/typer/typeclass.ae`, with ctype.ml's class signatures,
+object fields (unify_fields, filter_method, filter_method_row), instance_class, limited_generalize, subtype_fields and
+build_subtype on objects; types.ml's Tobject, Tfield, field kinds, Tpoly and Tunivar; typetexp.ml's Ptyp_object,
+Ptyp_class and transl_poly_type; typecore.ml's object expressions (type_send, instance variables, self, overrides,
+Pexp_poly); out_type.ml's and oprint.ml's object types and class declarations; lambda/translobj.ml and translclass.ml
+into the new `typer/translclass.ae` (shared constants, oo_wrap, the object and class initialisers, builtin methods,
+cached class tables, Value_rec_compiler's dummy blocks for static classes); translcore.ml's object expressions and
+fuse_method_arity, translprim.ml's %send primitives, simplif.ml's Lifused. Along the way: Ctype.unify2's expansion of an
+abbreviation that drops a parameter, unify3's link of an object to the abbreviation it meets, `[@@unboxed]` variants,
+an include renaming an exception's constructor, and a structure's let bindings translated before the rest (the order
+of Translobj's shared constants). Results (TYPER.md §13): test/ocaml/typer/ 68 of 68 at every level (8 new samples,
+t61-t68, their oracle dumps committed); the stdlib 69 of 71 units equal natively (CamlinternalOO, Oo and Dynarray new;
+CamlinternalFormat and CamlinternalMod wait for T10); the basic/ probe 34 of 36 (objects and includestruct new); a probe
+of 23 run tests with objects 12 of 23 equal in Lambda. Alternatives weighed: OCaml's `Tpoly (t, [])` for every method
+type (deferred, TY14: no output found to depend on it); porting Includeclass now (deferred, TY13: only rejected
+programs differ). Proposals TY13-TY15 (TYPER.md §14), none decided.
