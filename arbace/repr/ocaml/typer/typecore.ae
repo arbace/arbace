@@ -33,6 +33,10 @@
 
 (def type-error env/type-error)
 
+(def ^:dynamic *type-package*
+  "Typemod.type_package: (fn [env smod package-type] typed-module), the module coerced to the package's type"
+  nil)
+
 (def ^:dynamic *type-struct-item*
   "Typemod's typing of a structure item for an expression's local open, module or exception (Pexp_struct_item):
   (fn [env sitem] [titem env'])"
@@ -176,6 +180,14 @@
         mk (fn [desc t] {:desc desc :type t :loc loc})]
     (case (d 0)
       :Ppat_any (mk [:Tpat_any] expected)
+      :Ppat_unpack (let [n (or (:txt (d 1)) "_") id (ty/ident-create n)
+                         _ (when-let [pt (get d 2)]
+                             (unify! (ty/instance (env/make-generic! (env/transl-type env (atom {}) {:ptyp_desc [:Ptyp_package pt]})))
+                                     expected "pattern"))]
+                     (when-not (= :Tpackage ((ty/desc (ty/expand-head expected)) 0))
+                       (type-error "The type of this packed module cannot be inferred"))
+                     (when (:txt (d 1)) (swap! vars conj [n id expected :module]))
+                     (mk [:Tpat_var id n] expected))
       :Ppat_var (let [n (:txt (d 1)) id (ty/ident-create n)]
                   (swap! vars conj [n id expected])
                   (mk [:Tpat_var id n] expected))
@@ -232,8 +244,16 @@
                    (mk [:Tpat_lazy (type-pat env (d 1) t vars)] expected))
       (type-error (str "pattern " (d 0) " outside the slice")))))
 
-(defn add-pattern-vars [env vars]
-  (reduce (fn [e [n id t]] (add-value e n id t)) env vars))
+(defn add-pattern-vars
+  "The environment with a pattern's variables, a (module M) pattern's a module of its package's type, its address the
+  variable"
+  [env vars]
+  (reduce (fn [e [n id t m]]
+            (if m
+              (assoc-in e [:modules n] (env/add-module! id {:path [:Pident id] :mty (env/modtype-of-package (ty/expand-head t))
+                                                            :addr [:var id]}))
+              (add-value e n id t)))
+          env vars))
 
 (defn name-pattern
   "Typecore.name_pattern: the first pattern that is a variable or an alias names the parameter"
@@ -466,6 +486,14 @@
       :Pexp_assert (let [e (type-expect env (d 1) (ty/type-bool))
                          false? (let [ed (:desc e)] (and (= :Texp_construct (ed 0)) (= "false" (:name (ed 1)))))]
                      (ret [:Texp_assert e (:pexp_loc sexp)] (if false? (ty/newvar) (ty/type-unit))))
+      :Pexp_pack (let [t (if-let [pt (d 2)]
+                           (env/transl-type env (atom {}) {:ptyp_desc [:Ptyp_package pt]})
+                           (ty/expand-head expected))
+                       td (ty/desc t)]
+                   (when-not (= :Tpackage (td 0)) (type-error "This module packing's signature cannot be inferred"))
+                   (let [tm (*type-package* env (d 1) t)]
+                     (unify! t expected "expression")
+                     (mkexp [:Texp_pack tm] t loc)))
       :Pexp_lazy (let [t (ty/newvar)]
                    (unify! (ty/tconstr ty/path-lazy-t [t]) expected "expression")
                    (mkexp [:Texp_lazy (type-expect env (d 1) t)] expected loc))
@@ -562,6 +590,7 @@
                         (or (nil? (d 3)) (nonexpansive? (d 3))))
       :Texp_field (nonexpansive? (d 1))
       :Texp_lazy (nonexpansive? (d 1))
+      :Texp_pack (nonexpansive-mod? (d 1))
       :Texp_struct_item (and (let [ti (d 1)]
                                (case (ti 0)
                                  :Tstr_open true

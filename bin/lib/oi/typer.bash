@@ -8,6 +8,9 @@
 #                                  dump; then each native simplified Lambda run on oi against the sample's NAME.out (the ocaml
 #                                  toplevel's run of the file; skipped without ocdump: oi's stdlib still needs ocamlc). --record
 #                                  rewrites the dumps and the outputs
+#   bin/oi stdlib-check [UNIT...]            the stdlib's units (bin/oi stdlib's build directory, its .mli read natively) typed and
+#                                  translated by Arbace, each simplified Lambda against bin/oi stdlib's (canonical form); then a
+#                                  library with the equal units native (.tmp/oi/lib-native) and the typer's samples run on oi on it
 #   bin/oi run-native FILE.ml [ARG...]       FILE typed and translated by Arbace (no ocamlc for the program) and run on oi with the
 #                                  stdlib's Lambda (bin/oi stdlib's, still the oracle's: TYPER.md, T8)
 
@@ -83,4 +86,32 @@ cmd_run_native() {
   "$EXE" run "$LIB" "$d/$u.ae" -- "$@" || st=$?
   rm -rf "$d"
   exit $st
+}
+
+cmd_stdlib_check() {
+  local units=("$@") st=0
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build
+  [ ${#units[@]} -gt 0 ] || mapfile -t units < "$LIB/order.txt"
+  local nat=$OI_DIR/stdlib-native nlib=$OI_DIR/lib-native
+  rm -rf "$nat" "$nlib"; mkdir -p "$nat"
+  local exe; exe=$(arbace_exe)
+  ARBACE_PATH="$root" GOMEMLIMIT=${OI_TYPER_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${OI_TYPER_THREADS:-2} "$exe" -m arbace.repr.ocaml.typer \
+    stdlib-check --dir "$OI_DIR/stdlib-build" --lib "$LIB" --out "$nat" "${units[@]}" | tee "$OI_DIR/stdlib-check.txt" || st=1
+  cp -r "$LIB" "$nlib"
+  local u n=0
+  for u in $(awk '$2 == "ok" {print $1}' "$OI_DIR/stdlib-check.txt"); do cp "$nat/$u.ae" "$nlib/$u.ae"; n=$((n + 1)); done
+  echo "oi: stdlib-check: $n units native in $nlib"
+  # the typer's samples, natively translated, run on the library with the native units
+  local w=$OI_DIR/typer-native; rm -rf "$w"; mkdir -p "$w/native" "$w/run"
+  typer_ns check --dir "$TYPER_DIR" --oracle "$TYPER_ORACLE" --out "$w/native" --stdlib "$TOP/stdlib" \
+    $(cd "$TYPER_DIR" && ls *.ml | sed 's/\.ml$//') > "$w/check.txt" || true
+  local ok=0 bad=0 name
+  for f in "$TYPER_DIR"/*.ml; do
+    name=$(basename "$f" .ml); u=$(unit_of "$name")
+    [ -f "$w/native/$u.ae" ] || { bad=$((bad + 1)); continue; }
+    GOMAXPROCS=1 "$EXE" run "$nlib" "$w/native/$u.ae" > "$w/run/$name.out" 2>&1 || true
+    if cmp -s "$w/run/$name.out" "$TYPER_DIR/$name.out"; then ok=$((ok + 1)); else bad=$((bad + 1)); echo "oi: stdlib-check: $name: oi's output differs on the native units"; fi
+  done
+  echo "oi: stdlib-check: the typer's samples on the native units: $ok equal to the toplevel's output, $bad differ"
+  [ $bad = 0 ] && return $st
 }
