@@ -7,6 +7,7 @@
   runtime is the client crop's (C++'s lowered libsupc++, bin/cppi), not linked on ci yet (LLS15)."
   (:require [arbace.string :as str]
             [arbace.repr.llvm :as llvm]
+            [arbace.repr.c :as rc]
             [arbace.cpp.lower :as lower]))
 
 (set! *warn-on-reflection* true)
@@ -69,6 +70,50 @@
     (vec (for [f (map untyped forms)]
            (if (and (seq? f) (= 'llvm/define (first f)) (some #{:body} f)) (number-define f) f)))))
 
+(defn- init-attr
+  "A c/defn name's constructor or destructor attribute: [kind priority] (65535 when it has none), or nil."
+  [m]
+  (some (fn [a] (when (seq? a)
+                  (some (fn [x] (cond ('#{constructor destructor} x) [(keyword (name x)) 65535]
+                                      (and (vector? x) ('#{constructor destructor} (first x))) [(keyword (name (first x))) (long (second x))]))
+                        (rest a))))
+        (:c/decl-attrs m)))
+
+(defn- run-inits
+  "ci's builder runs no __attribute__((constructor)) or ((destructor)) function (gcc's startup does): the lowering's
+  cx$ctor$N and cx$dtor$N wrappers lose the attribute, and main calls the constructors first, by priority, and registers the
+  destructors with atexit so that exit runs them by priority, the lowest last."
+  [forms]
+  (let [inits (for [f forms :when (and (seq? f) (= 'c/defn (first f))) :let [a (init-attr (meta (second f)))] :when a]
+                [(first a) (second a) (second f)])
+        ctors (map #(nth % 2) (sort-by second (filter #(= :constructor (first %)) inits)))
+        dtors (map #(nth % 2) (sort-by second (filter #(= :destructor (first %)) inits)))
+        strip (fn [f] (if (and (seq? f) (= 'c/defn (first f)) (init-attr (meta (second f))))
+                        (apply list 'c/defn (vary-meta (second f) dissoc :c/decl-attrs) (drop 2 f))
+                        f))]
+    (if (empty? inits)
+      forms
+      (vec (mapcat (fn [f]
+                     (if (and (seq? f) (= 'c/defn (first f)) (= 'main (second f)))
+                       [(list 'c/declare 'atexit (with-meta ['(* (fn [void] void))] {:tag 'int}))
+                        (apply list 'c/defn (second f) (nth f 2)
+                               (concat (map list ctors) (map #(list 'atexit %) dtors) (drop 3 f)))]
+                       [(strip f)]))
+                   forms)))))
+
+(defn- lower-c
+  "The module's C text by the shared lowering (arbace.cpp.lower's lower-file, with run-inits between the forms and the print)."
+  [forms ^String c-name]
+  (try
+    (let [[ff cs] (lower/lower-module forms c-name)
+          ns (str "c.llvmi." (str/replace (str/replace c-name #"\.c$" "") #"[^A-Za-z0-9_]" "_"))
+          [ff2 cs2] (rc/read-unit-text (lower/c-forms-text ns ff cs))]
+      {:c (rc/print-c ff2 (run-inits cs2))})
+    (catch Throwable e
+      (if-let [c (or (:lower/refused (ex-data e)) (:llvm/refused (ex-data e)))]
+        {:refused c :message (.getMessage e)}
+        {:refused :crash :message (str e)}))))
+
 (defn lower-one
   "The module at `ll` as one C text: {:c text} or {:refused class :message m}. `layer` is the layer's C text."
   [^String ll ^String c-name ^String layer]
@@ -79,7 +124,7 @@
       (unwinds? forms)
       {:refused :personality :message "the module unwinds (a personality, invoke, landingpad or resume): its runtime is the client crop's"}
       :else
-      (let [r (lower/lower-file forms c-name)]
+      (let [r (lower-c forms c-name)]
         (if (:refused r)
           (update r :message #(str/replace (str %) #"\s+" " "))
           {:c (str (:c r) "\n/* llvmi: the personality-free layer (" layer-path ") */\n" layer)})))))

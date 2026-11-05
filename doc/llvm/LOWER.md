@@ -29,7 +29,7 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
   called by a C `main` that checks for an uncaught exception. No other name is the lowering's own: since CX7 the Itanium
   ABI's entry points (`__cxa_throw` ...) are libsupc++'s, lowered (§10); CX6 renamed them to a hand-written runtime's.
 - **Functions.** One `c/defn` per define (linkage: `internal`/`private` static, `linkonce`/`weak` `__attribute__((weak))`,
-  `available_externally` a declaration only), prototypes first; `llvm.global_ctors` as `constructor` wrappers (§8). The
+  `available_externally` a declaration only), prototypes first; `llvm.global_ctors` as `constructor` wrappers (§8), and since llvmi (2026-11-05) `llvm.global_dtors` as `destructor` wrappers (`cx$dtor$N`; ci runs neither attribute, so llvmi's `arbace.llvm.run` strips them and has `main` call the constructors and register the destructors with `atexit`). The
   IR is already lowered to the ABI, so C's parameter and return types reproduce its calls: `byval(T)` parameters are
   the struct by value (the body takes its address), `sret` a pointer, coerced aggregates C structs of the same members.
 - **Bodies.** A C variable per SSA value, declared at the top (so `goto` never jumps into a scope); each block a
@@ -57,7 +57,8 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
   `va_list` the IR allocated), `stacksave`/`stackrestore`, the `*.with.overflow` family (`__builtin_*_overflow`),
   `smax`/`smin`/`umax`/`umin`, `abs`, `ctpop`/`ctlz`/`cttz` (`i128` by halves), `bswap`, `fmuladd` (unfused, as clang's
   x86-64 code), `frexp` (`__builtin_frexp*` into the result's two fields), `x86.sse2.pause` (nothing),
-  `eh.typeid.for` (a number per type_info), the math functions (`fabs`, `sqrt`, `floor`, ... as `__builtin_*`). Others
+  `eh.typeid.for` (a number per type_info), since llvmi `scmp`/`ucmp` (C23's three-way comparisons at `-O2`), `fshl`/`fshr` on
+  8 to 64 bits, `lround`/`llround`/`lrint`/`llrint` (`__builtin_l*`), the math functions (`fabs`, `sqrt`, `floor`, ... as `__builtin_*`). Others
   are refused (`:intrinsic`), `llvm.coro.*` among them (`:coroutine`; clang's `-O0` pipeline runs CoroSplit, so the
   IR it writes holds none: the coroutine sample lowers and runs).
 - **Constants**: integers as `(lit unsigned N)`/`(lit unsigned-long N)` (an `i128` by shifts), doubles as their

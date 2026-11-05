@@ -619,6 +619,20 @@
                  (bit-test m 5) (conj (term 4 true)) (bit-test m 6) (conj (term 4 false)) (bit-test m 7) (conj (term 3 false))
                  (bit-test m 8) (conj (term 2 false)) (bit-test m 9) (conj (term 1 false)))]
         (set-res (if (empty? ts) 0 (apply list 'or ts))))
+      ;; llvmi (doc/llvm/LLVM-CROP-SURVEY.md, "As built: llvmi"): C23's and -O2's three-way comparisons, funnel shifts and rounding
+      (re-matches #"llvm\.([su])cmp\..*" nm)
+      (let [wd (w 0) sgn (= "s" (subs nm 5 6)) v #(if sgn (sval (a %) wd) (uval (a %) wd))]
+        (set-res (mask (list '- (list '> (v 0) (v 1)) (list '< (v 0) (v 1))) (int-bits rt))))
+      (re-matches #"llvm\.fsh[lr]\.i(8|16|32|64)" nm)
+      (let [wd (w 0) l (str/starts-with? (subs nm 5) "fshl")
+            x (uval (a 0) wd) y (uval (a 1) wd) c (list '% (uval (a 2) wd) wd)]
+        (set-res (mask (list '? (list '== c 0) (if l x y)
+                             (if l (list 'bit-or (list '<< x c) (list '>> y (list '- wd c)))
+                                   (list 'bit-or (list '<< x (list '- wd c)) (list '>> y c))))
+                       wd)))
+      (re-matches #"llvm\.(l|ll)(round|rint)\.i(32|64)\.(f32|f64|f80)" nm)
+      (let [[_ l op _ ft] (re-matches #"llvm\.(l|ll)(round|rint)\.i(32|64)\.(f32|f64|f80)" nm)]
+        (set-res (list (symbol (str "__builtin_" l op ({"f32" "f" "f64" "" "f80" "l"} ft))) (a 0))))
       (re-matches #"llvm\.fmuladd\..*" nm) (set-res (list '+ (list '* (a 0) (a 1)) (a 2)))
       (re-matches #"llvm\.eh\.typeid\.for.*" nm) (set-res (int-lit (typeid (peek (nth args 0))) 32))
       (and (re-matches #"llvm\.([a-z0-9]+)\.(f32|f64|f80)" nm) (math-fns (nth parts 1)))
@@ -941,8 +955,10 @@
         _ (when (and dl (not= dl expected-layout)) (refuse :datalayout "the data layout " dl))
         ctors (some #(when (and (= (first %) 'llvm/global) (= (gname-str (second %)) "llvm.global_ctors")) %) forms)
         ctor-list (when ctors (vec (for [[_ [_ [_ prio] [_ fv]]] (rest (nth ctors 3))] [(gname-str fv) prio])))
-        _ (when (some #(and (= (first %) 'llvm/global) (= (gname-str (second %)) "llvm.global_dtors")) forms) (refuse :dtors "llvm.global_dtors"))
-        special #{"llvm.global_ctors" "llvm.used" "llvm.compiler.used" "llvm.global.annotations"}
+        ;; llvm.global_dtors (C's __attribute__((destructor)); llvmi's ExecutionEngine tests): each a C destructor that calls the function
+        dtors (some #(when (and (= (first %) 'llvm/global) (= (gname-str (second %)) "llvm.global_dtors")) %) forms)
+        dtor-list (when dtors (vec (for [[_ [_ [_ prio] [_ fv]]] (rest (nth dtors 3))] [(gname-str fv) prio])))
+        special #{"llvm.global_ctors" "llvm.global_dtors" "llvm.used" "llvm.compiler.used" "llvm.global.annotations"}
         globals (into {} (for [f forms
                                :when (#{'llvm/global 'llvm/declare 'llvm/define 'llvm/alias} (first f))
                                :let [s (gname-str (second f))]
@@ -1015,6 +1031,12 @@
                                    (with-meta ['void] {:tag 'void})
                                    (list (:c info))
                                    '(when cx$pending (cx$uncaught)))))
+            dtor-defs (vec (for [[i [s prio]] (map-indexed vector dtor-list) :let [info (get globals s)] :when info]
+                             (list 'c/defn (with-meta (symbol (str "cx$dtor$" i))
+                                             {:static true :c/decl-attrs [(list '__attribute__ (if (= prio 65535) 'destructor ['destructor prio]))]})
+                                   (with-meta ['void] {:tag 'void})
+                                   (list (:c info))
+                                   '(when cx$pending (cx$uncaught)))))
             main (get globals "main")
             wrapper (when (and main (= (:kind main) :fn) (= (first (:form main)) 'llvm/define))
                       (let [[_ ps] (:sig main) n (count ps)
@@ -1029,7 +1051,7 @@
                   (list 'c/declare 'cx$resume (with-meta [(with-meta 'o {:tag '(* void)})] {:tag 'void}))
                   (list 'c/declare 'cx$uncaught (with-meta ['void] {:tag 'void}))]]
         [(list 'c/file c-name :std :gnu23)
-         (vec (concat (:defs @*structs*) head protos aliases (keep first gvars) (keep second gvars) defs ctor-defs (when wrapper [wrapper])))]))))
+         (vec (concat (:defs @*structs*) head protos aliases (keep first gvars) (keep second gvars) defs ctor-defs dtor-defs (when wrapper [wrapper])))]))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; bin/cppi lower
