@@ -524,3 +524,7 @@ stripped) showing every essential and nightly step runnable, and the oracle tier
       for `check --aot --no-pyi`; bin/repr-haskell and bin/repr-rust probe ghc and rustc at start).
     - (b) As built.
   - *Recommended: (a)*: it is a precondition of every crop's migration.
+
+## Decided (2026-11-05, the user)
+
+ORS1-ORS14, each (a) as recommended: no gate tier needs a host toolchain, the oracle tier required per tag; outcomes committed, packs outside the clone, the essential dumps committed; the store .tmp/oracle-packs mirrored to the Mac's bare repository as an orphan branch; records in :inputs, packs in the pins, toolchain hosts on oracle steps only; records by hand only; a moved toolchain reported, not failed; crossed-pair and tampered-pack controls; class D to native substitutes where sound, else the oracle tier; headers packed; a program without a record fails; 100 MB a crop, 500 MB in all; the migration after the tag in the order C, Scheme, Haskell, Rust, OCaml, Python, C++ and LLVM; oracle-go's runner off the frozen JVM later; tools look for a toolchain only when a missing record needs one.
