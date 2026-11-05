@@ -1,0 +1,374 @@
+(ns arbace.repr.haskell.deriv
+  "Deriving for Arbace's Haskell front end (doc/haskell/FRONTEND-SURVEY.md, HF4, HFS5 (a)): the instance bindings GHC
+  9.14.1's deriving generates for the Haskell 2010 classes (Eq, Ord, Show, Read, Enum, Bounded, Ix) and for Functor,
+  Foldable and Traversable, as renamed-tree bindings the elaborator (arbace.repr.haskell.typecheck) then types like any
+  instance's methods.
+
+  Ported from GHC 9.14.1 (https://gitlab.haskell.org/ghc/ghc, tag ghc-9.14.1-release), BSD-3-Clause, the notices in
+  LICENSE.md and doc/ARBACE.md:
+    compiler/GHC/Tc/Deriv/Generate.hs    gen_Eq_binds, gen_Ord_binds (mkOrdOpRhs, mkInnerRhs, mkCompareFields),
+                                         gen_Enum_binds, gen_Bounded_binds, gen_Ix_binds, gen_Read_binds,
+                                         gen_Show_binds
+    compiler/GHC/Tc/Deriv/Functor.hs     gen_Functor_binds, gen_Foldable_binds, gen_Traversable_binds
+  The generators build the same expression trees as GHC's (the same method names, the same case structure, the same
+  class methods at the fields), in the renamed tree's forms instead of GhcPs. Where GHC generates primops on unboxed
+  tags (dataToTag#, tagToEnum#, ==#, -#) the tree has two nodes the elaborator types: (DerivTag e), an Int, and
+  (DerivTag2Con [CON...] e), the constructor of that tag; GHC's comparisons of tags are the Int comparisons
+  GHC.Classes' eqInt, ltInt...; the auxiliary bindings ($tag2con_T, $maxtag_T) are inlined at their uses.")
+
+;;; ------------------------------------------------------------------------------------------
+;;; Builders: the renamed tree's expression, pattern and binding nodes, spans all zero
+
+(def ^:private sp [0 0 0 0])
+(defn- L* [x] (list 'L sp x))
+(defn- gv [m o] ["ext" "var" m o])
+(defn- dc [m o] ["ext" "data" m o])
+(defn- lname [o] ["loc" "v" o 0 0 0 0])
+
+(defn- nmx [n] (L* (list 'rn/name n)))
+(defn- v* [n] (L* (list 'HsVar nil (nmx n))))
+(defn- ap* [f & xs] (reduce (fn [f x] (L* (list 'HsApp nil f x))) f xs))
+(defn- op* [l op r] (L* (list 'OpApp nil l (v* op) r)))
+(defn- int* [n] (L* (list 'HsLit nil (list 'HsInt nil n))))
+(defn- str* [s] (L* (list 'HsLit nil (list 'HsString nil s))))
+(defn- par* [e] e)
+(defn- hlist [es] (L* (list 'ExplicitList nil (vec es))))
+(defn- tuple* [es] (L* (list 'ExplicitTuple nil (mapv (fn [e] (L* (list 'Present nil e))) es))))
+(defn- if* [c t e] (L* (list 'HsIf nil c t e)))
+
+(defn- vp [o] (L* (list 'VarPat nil (nmx (lname o)))))
+(def ^:private wp (L* (list 'WildPat nil)))
+(defn- cp [cn pats] (L* (list 'ConPat nil (nmx cn) (list 'PrefixCon [] (vec pats)))))
+(defn- tp [pats] (L* (list 'TuplePat nil (vec pats))))
+(defn- lp [n] (L* (list 'LitPat nil (list 'HsInt nil n))))
+(defn- asp [o p] (L* (list 'AsPat nil (nmx (lname o)) p)))
+
+(defn- grhss [e] (list 'GRHSs nil [(L* (list 'GRHS nil [] e))] nil))
+(defn- match* [pats e] (L* (list 'Match nil nil (L* (vec pats)) (grhss e))))
+(defn- mg* [matches] (list 'MG nil (L* (vec matches))))
+(defn- hcase [e alts] (L* (list 'HsCase nil e (mg* (map (fn [[p b]] (match* [p] b)) alts)))))
+(defn- funbind [name clauses] (L* (list 'FunBind nil (nmx name) (mg* (map (fn [[ps e]] (match* ps e)) clauses)))))
+(defn- do* [stmts] (L* (list 'HsDo nil 'DoExpr (L* (vec stmts)))))
+(defn- bind* [p e] (L* (list 'BindStmt nil p e)))
+(defn- body* [e] (L* (list 'BodyStmt nil e)))
+(defn- last* [e] (L* (list 'LastStmt nil e)))
+(defn- comp* [stmts] (L* (list 'HsDo nil 'ListComp (L* (vec stmts)))))
+(defn- lam* [pats e] (L* (list 'HsLam nil nil (mg* [(match* pats e)]))))
+
+(defn- tag* [e] (L* (list 'DerivTag e)))
+(defn- tag2con* [cons e] (L* (list 'DerivTag2Con cons e)))
+(defn- prim* [op & xs] (L* (list 'DerivPrim op (vec xs))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; GHC's names (GHC.Builtin.Names, PrelNames)
+
+(def ^:private classes "GHC.Internal.Classes")
+(def ^:private types "GHC.Internal.Types")
+(def ^:private base "GHC.Internal.Base")
+(def ^:private show-m "GHC.Internal.Show")
+(def ^:private enum-m "GHC.Internal.Enum")
+(def ^:private read-m "GHC.Internal.Read")
+(def ^:private readprec-m "GHC.Internal.Text.ParserCombinators.ReadPrec")
+(def ^:private lex-m "GHC.Internal.Text.Read.Lex")
+(def ^:private ix-m "GHC.Internal.Ix")
+(def ^:private foldable-m "GHC.Internal.Data.Foldable")
+(def ^:private trav-m "GHC.Internal.Data.Traversable")
+
+(def eq-rdr (gv classes "=="))
+(def and-rdr (gv classes "&&"))
+(def not-rdr (gv classes "not"))
+(def compare-rdr (gv classes "compare"))
+(def lt-rdr (gv classes "<"))
+(def le-rdr (gv classes "<="))
+(def gt-rdr (gv classes ">"))
+(def ge-rdr (gv classes ">="))
+(def true-c (dc types "True"))
+(def false-c (dc types "False"))
+(def lt-c (dc types "LT"))
+(def eq-c (dc types "EQ"))
+(def gt-c (dc types "GT"))
+(def true-e (v* true-c))
+(def false-e (v* false-c))
+
+(defn- occ-of [n] (if (= "ext" (nth n 0)) (nth n 3) (nth n 2)))
+(defn- sym? [s] (and (seq s) (not (Character/isLetter ^char (first s))) (not= \_ (first s))))
+(defn- wrap-parens [s] (if (sym? s) (str "(" s ")") s))
+(defn- wrap-backquotes [s] (if (sym? s) s (str "`" s "`")))
+
+(defn- as-names [pfx n] (mapv #(lname (str pfx (inc %))) (range n)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The type's description: {:tn NAME :cons [{:name CON :arity N :labels [FIELD...] :infix? B :tys [TYPE...]}...]
+;;; :fix {CON [PREC ASSOC]}}
+
+(defn- nullary? [c] (zero? (:arity c)))
+(defn- con-pat [c vars] (cp (:name c) (map #(L* (list 'VarPat nil (nmx %))) vars)))
+
+;;; Eq ----------------------------------------------------------------------------------------
+
+(defn gen-eq [{:keys [cons]}]
+  (let [a (lname "a") b (lname "b") ah (lname "a#") bh (lname "b#")
+        untag2 (fn [e] (hcase (tag* (v* a)) [[(vp "a#") (hcase (tag* (v* b)) [[(vp "b#") e]])]]))
+        nested (fn [c as bs]
+                 (if (zero? (count as))
+                   true-e
+                   (reduce (fn [acc x] (op* x and-rdr acc))
+                           (let [xs (map (fn [x y] (op* (v* x) eq-rdr (v* y))) as bs)]
+                             (last xs))
+                           (reverse (butlast (map (fn [x y] (op* (v* x) eq-rdr (v* y))) as bs))))))
+        pats-etc (fn [c] (let [as (as-names "a" (:arity c)) bs (as-names "b" (:arity c))]
+                           [(con-pat c as) (hcase (v* b) [[(con-pat c bs) (nested c as bs)]])]))
+        non-nullary (remove nullary? cons)
+        clauses
+        (cond
+          (empty? cons) []
+          (= 1 (count cons)) (let [c (first cons) as (as-names "a" (:arity c)) bs (as-names "b" (:arity c))]
+                               [[[(con-pat c as) (con-pat c bs)] (nested c as bs)]])
+          (every? nullary? cons) [[[(vp "a") (vp "b")]
+                                   (untag2 (ap* (v* (gv classes "eqInt")) (v* ah) (v* bh)))]]
+          :else [[[(vp "a") (vp "b")]
+                  (hcase (untag2 (ap* (v* (gv classes "neInt")) (v* ah) (v* bh)))
+                         [[(cp true-c []) false-e]
+                          [wp (hcase (v* a)
+                                     (concat (map pats-etc non-nullary)
+                                             (when (seq non-nullary) [[wp true-e]])))]])]])]
+    [(funbind eq-rdr (if (empty? cons) [[[wp wp] true-e]] clauses))]))
+
+;;; Ord ---------------------------------------------------------------------------------------
+
+(defn gen-ord [{:keys [cons]}]
+  (if (empty? cons)
+    [(funbind compare-rdr [[[wp wp] (v* eq-c)]])]
+    (let [a (lname "a") b (lname "b")
+          n (count cons)
+          first-con (first cons) last-con (last cons)
+          tag-of (fn [c] (.indexOf ^java.util.List (mapv :name cons) (:name c)))
+          first-tag 0 last-tag (dec n)
+          single? (= 1 n)
+          nullary-cons (filter nullary? cons) non-nullary (remove nullary? cons)
+          lt-result (fn [op] (case op :compare (v* lt-c) :lt true-e))
+          eq-result (fn [op] (case op :compare (v* eq-c) :lt false-e))
+          gt-result (fn [op] (case op :compare (v* gt-c) :lt false-e))
+          op-rdr (fn [op] (case op :compare compare-rdr :lt lt-rdr))
+          compare-fields
+          (fn [op c]
+            (let [k (:arity c) as (as-names "a" k) bs (as-names "b" k)]
+              (letfn [(go [as bs]
+                        (cond (empty? as) (eq-result op)
+                              (empty? (rest as)) (op* (v* (first as)) (op-rdr op) (v* (first bs)))
+                              :else (hcase (ap* (v* compare-rdr) (v* (first as)) (v* (first bs)))
+                                           [[(cp lt-c []) (lt-result op)]
+                                            [(cp eq-c []) (go (rest as) (rest bs))]
+                                            [(cp gt-c []) (gt-result op)]])))]
+                (go as bs))))
+          inner-eq-alt (fn [op c] [(con-pat c (as-names "b" (:arity c))) (compare-fields op c)])
+          wild-con-pat (fn [c] (cp (:name c) (repeat (:arity c) wp)))
+          inner-rhs
+          (fn [op c]
+            (let [tag (tag-of c) tag-lit (int* tag)]
+              (cond
+                single? (hcase (v* b) [(inner-eq-alt op c)])
+                (= tag first-tag) (hcase (v* b) [(inner-eq-alt op c) [wp (lt-result op)]])
+                (= tag last-tag) (hcase (v* b) [(inner-eq-alt op c) [wp (gt-result op)]])
+                (= tag (inc first-tag)) (hcase (v* b) [[(wild-con-pat first-con) (gt-result op)] (inner-eq-alt op c) [wp (lt-result op)]])
+                (= tag (dec last-tag)) (hcase (v* b) [[(wild-con-pat last-con) (lt-result op)] (inner-eq-alt op c) [wp (gt-result op)]])
+                (> tag (quot last-tag 2))
+                (hcase (tag* (v* b)) [[(vp "b#") (if* (ap* (v* (gv classes "ltInt")) (v* (lname "b#")) tag-lit)
+                                                      (gt-result op)
+                                                      (hcase (v* b) [(inner-eq-alt op c) [wp (lt-result op)]]))]])
+                :else
+                (hcase (tag* (v* b)) [[(vp "b#") (if* (ap* (v* (gv classes "gtInt")) (v* (lname "b#")) tag-lit)
+                                                      (lt-result op)
+                                                      (hcase (v* b) [(inner-eq-alt op c) [wp (gt-result op)]]))]]))))
+          op-alt (fn [op c] [(con-pat c (as-names "a" (:arity c))) (inner-rhs op c)])
+          tag-cmp (fn [op]
+                    (let [ah (v* (lname "a#")) bh (v* (lname "b#"))
+                          body (case op
+                                 :compare (if* (ap* (v* (gv classes "ltInt")) ah bh) (v* lt-c)
+                                               (if* (ap* (v* (gv classes "eqInt")) ah bh) (v* eq-c) (v* gt-c)))
+                                 :lt (ap* (v* (gv classes "ltInt")) ah bh))]
+                      (hcase (tag* (v* a)) [[(vp "a#") (hcase (tag* (v* b)) [[(vp "b#") body]])]])))
+          op-rhs (fn [op]
+                   (cond
+                     (<= (count nullary-cons) 2) (hcase (v* a) (map #(op-alt op %) cons))
+                     (empty? non-nullary) (tag-cmp op)
+                     :else (hcase (v* a) (concat (map #(op-alt op %) non-nullary) [[wp (tag-cmp op)]]))))
+          mk-op (fn [op rdr] (funbind rdr [[[(vp "a") (vp "b")] (op-rhs op)]]))
+          negate (fn [e] (ap* (v* not-rdr) e))
+          others (when (or (<= (- last-tag first-tag) 2) (empty? non-nullary))
+                   [(mk-op :lt lt-rdr)
+                    (funbind le-rdr [[[(vp "a") (vp "b")] (negate (ap* (v* lt-rdr) (v* b) (v* a)))]])
+                    (funbind gt-rdr [[[(vp "a") (vp "b")] (ap* (v* lt-rdr) (v* b) (v* a))]])
+                    (funbind ge-rdr [[[(vp "a") (vp "b")] (negate (ap* (v* lt-rdr) (v* a) (v* b)))]])])]
+      (into [(mk-op :compare compare-rdr)] others))))
+
+;;; Show --------------------------------------------------------------------------------------
+
+(defn gen-show [{:keys [cons fix]}]
+  (let [showsprec (gv show-m "showsPrec") show-string (gv show-m "showString") show-paren (gv show-m "showParen")
+        show-space (gv show-m "showSpace") comma-space (gv show-m "showCommaSpace") compose (gv base ".")
+        mk-showstring (fn [s] (ap* (v* show-string) (str* s)))
+        pats-etc
+        (fn [c]
+          (let [k (:arity c) bs (as-names "b" k)
+                con-str (occ-of (:name c)) op-con-str (wrap-parens con-str)
+                labels (:labels c) record? (seq labels)
+                infix? (:infix? c)
+                prec (if infix? (first (get fix (:name c) [9 'InfixL])) 10)
+                prec1 (inc prec)
+                arg-prec (if record? 0 prec1)
+                show-arg (fn [b] (ap* (v* showsprec) (int* arg-prec) (v* b)))
+                show-args (map show-arg bs)
+                thingies (cond
+                           infix? [(first show-args) (mk-showstring (str " " (wrap-backquotes con-str) " ")) (second show-args)]
+                           record? (concat [(mk-showstring (str op-con-str " {"))]
+                                           (apply concat (interpose [(v* comma-space)]
+                                                                    (map (fn [l a] [(mk-showstring (str (wrap-parens (occ-of l)) " = ")) a]) labels show-args)))
+                                           [(mk-showstring "}")])
+                           :else (concat [(mk-showstring (str op-con-str " "))] (interpose (v* show-space) show-args)))
+                nested (reduce (fn [acc x] (ap* (v* compose) x acc)) (last thingies) (reverse (butlast thingies)))]
+            (if (zero? k)
+              [[wp (con-pat c [])] (mk-showstring op-con-str)]
+              [[(vp "a") (con-pat c bs)]
+               (ap* (v* show-paren) (op* (v* (lname "a")) ge-rdr (int* prec1)) nested)])))]
+    [(funbind showsprec (map (fn [c] (let [[ps e] (pats-etc c)] [ps e])) cons))]))
+
+;;; Bounded -----------------------------------------------------------------------------------
+
+(defn gen-bounded [{:keys [cons]}]
+  (let [minb (gv enum-m "minBound") maxb (gv enum-m "maxBound")]
+    (if (every? nullary? cons)
+      [(funbind minb [[[] (v* (:name (first cons)))]])
+       (funbind maxb [[[] (v* (:name (last cons)))]])]
+      (let [c (first cons)]
+        [(funbind minb [[[] (apply ap* (v* (:name c)) (repeat (:arity c) (v* minb)))]])
+         (funbind maxb [[[] (apply ap* (v* (:name c)) (repeat (:arity c) (v* maxb)))]])]))))
+
+;;; Enum --------------------------------------------------------------------------------------
+
+(defn gen-enum [{:keys [tn cons]}]
+  (let [occ-nm (occ-of tn) names (mapv :name cons) maxtag (dec (count cons))
+        t2c (fn [e] (tag2con* names e))
+        ah (v* (lname "a#")) bh (v* (lname "b#"))
+        untag (fn [pairs body] (reduce (fn [acc [x h]] (hcase (tag* (v* (lname x))) [[(vp h) acc]])) body (reverse pairs)))
+        plus (gv "GHC.Internal.Num" "+")
+        map-r (gv base "map")
+        eft (gv enum-m "enumFromTo") eftt (gv enum-m "enumFromThenTo")
+        a (v* (lname "a"))]
+    [(funbind (gv enum-m "succ")
+              [[[(vp "a")] (untag [["a" "a#"]]
+                                  (if* (ap* (v* eq-rdr) (int* maxtag) ah)
+                                       (ap* (v* (gv enum-m "succError")) (str* occ-nm))
+                                       (t2c (ap* (v* plus) ah (int* 1)))))]])
+     (funbind (gv enum-m "pred")
+              [[[(vp "a")] (untag [["a" "a#"]]
+                                  (if* (ap* (v* eq-rdr) (int* 0) ah)
+                                       (ap* (v* (gv enum-m "predError")) (str* occ-nm))
+                                       (t2c (ap* (v* plus) ah (int* -1)))))]])
+     (funbind (gv enum-m "toEnum")
+              [[[(vp "a")] (let [to-word (fn [e] (ap* (v* (gv enum-m "enumIntToWord")) e))]
+                             (if* (ap* (v* le-rdr) (to-word a) (to-word (int* maxtag)))
+                                  (t2c a)
+                                  (ap* (v* (gv enum-m "toEnumError")) (str* occ-nm) a (tuple* [(int* 0) (int* maxtag)]))))]])
+     (funbind (gv enum-m "enumFrom")
+              [[[(vp "a")] (untag [["a" "a#"]]
+                                  (ap* (v* map-r) (lam* [(vp "t")] (t2c (v* (lname "t")))) (ap* (v* eft) ah (int* maxtag))))]])
+     (funbind (gv enum-m "enumFromThen")
+              [[[(vp "a") (vp "b")]
+                (untag [["a" "a#"] ["b" "b#"]]
+                       (ap* (v* map-r) (lam* [(vp "t")] (t2c (v* (lname "t"))))
+                            (ap* (v* eftt) ah bh (if* (ap* (v* gt-rdr) ah bh) (int* 0) (int* maxtag)))))]])
+     (funbind (gv enum-m "fromEnum") [[[(vp "a")] (untag [["a" "a#"]] ah)]])]))
+
+;;; Ix ----------------------------------------------------------------------------------------
+
+(defn gen-ix [{:keys [cons]}]
+  (let [range-r (gv ix-m "range") ui (gv ix-m "unsafeIndex") inr (gv ix-m "inRange") urs (gv ix-m "unsafeRangeSize")
+        names (mapv :name cons)
+        untag (fn [pairs body] (reduce (fn [acc [x h]] (hcase (tag* (v* (lname x))) [[(vp h) acc]])) body (reverse pairs)))
+        ah (v* (lname "a#")) bh (v* (lname "b#")) ch (v* (lname "c#")) dh (v* (lname "d#"))
+        eft (gv enum-m "enumFromTo") map-r (gv base "map")
+        t2c (fn [e] (tag2con* names e))]
+    (if (every? nullary? cons)
+      [(funbind range-r [[[(tp [(vp "a") (vp "b")])]
+                          (untag [["a" "a#"] ["b" "b#"]]
+                                 (ap* (v* map-r) (lam* [(vp "t")] (t2c (v* (lname "t")))) (ap* (v* eft) ah bh)))]])
+       (funbind ui [[[(asp "c" (tp [(vp "a") wp])) (vp "d")]
+                     (untag [["a" "a#"] ["d" "d#"]]
+                            (hcase (prim* "-#" dh ah) [[(vp "c") (v* (lname "c"))]]))]])
+       (funbind inr [[[(tp [(vp "a") (vp "b")]) (vp "c")]
+                      (untag [["a" "a#"] ["b" "b#"] ["c" "c#"]]
+                             (ap* (v* and-rdr) (ap* (v* (gv classes "geInt")) ch ah) (ap* (v* (gv classes "leInt")) ch bh)))]])]
+      (let [c (first cons) k (:arity c)
+            as (as-names "a" k) bs (as-names "b" k) cs (as-names "c" k)
+            pat (fn [xs] (con-pat c xs))
+            pair (fn [l u] (tuple* [(v* l) (v* u)]))
+            mk-one (fn [l u i] (ap* (v* ui) (pair l u) (v* i)))
+            mk-index (fn mk [triples]
+                       (cond (empty? triples) (int* 0)
+                             (empty? (rest triples)) (apply mk-one (first triples))
+                             :else (let [[l u i] (first triples)]
+                                     (op* (apply mk-one (first triples)) (gv "GHC.Internal.Num" "+")
+                                          (op* (ap* (v* urs) (pair l u)) (gv "GHC.Internal.Num" "*") (mk (rest triples)))))))]
+        [(funbind range-r [[[(tp [(pat as) (pat bs)])]
+                            (comp* (concat (map (fn [a b cc] (bind* (L* (list 'VarPat nil (nmx cc))) (ap* (v* range-r) (pair a b)))) as bs cs)
+                                           [(last* (apply ap* (v* (:name c)) (map v* cs)))]))]])
+         (funbind ui [[[(tp [(pat as) (pat bs)]) (pat cs)] (mk-index (reverse (map vector as bs cs)))]])
+         (funbind inr [[[(tp [(pat as) (pat bs)]) (pat cs)]
+                        (if (zero? k) true-e
+                            (reduce (fn [acc x] (op* acc and-rdr x)) 
+                                    (map (fn [a b cc] (ap* (v* inr) (pair a b) (v* cc))) as bs cs)))]])]))))
+
+;;; Read --------------------------------------------------------------------------------------
+
+(defn gen-read [{:keys [cons fix]}]
+  (let [prec-r (gv readprec-m "prec") step-r (gv readprec-m "step") reset-r (gv readprec-m "reset")
+        alt-r (gv readprec-m "+++") pfail-r (gv readprec-m "pfail")
+        readprec (gv read-m "readPrec") expect (gv read-m "expectP") choose (gv read-m "choose")
+        ret (gv base "return")
+        lexc (fn [c s] (ap* (v* (dc lex-m c)) (str* s)))
+        bind-lex (fn [lx] (body* (ap* (v* expect) lx)))
+        ident-h (fn [s] (if (and (> (count s) 1) (= \# (last s)))
+                          [(bind-lex (lexc "Ident" (subs s 0 (dec (count s))))) (bind-lex (lexc "Symbol" "#"))]
+                          [(bind-lex (lexc "Ident" s))]))
+        match-con (fn [s] (if (sym? s) [(bind-lex (lexc "Symbol" s))] (ident-h s)))
+        result (fn [c as] (ap* (v* ret) (apply ap* (v* (:name c)) (map v* as))))
+        mk-parser (fn [p stmts body] (ap* (v* prec-r) (int* p) (do* (concat stmts [(body* body)]))))
+        read-arg (fn [a] (bind* (L* (list 'VarPat nil (nmx a))) (ap* (v* step-r) (v* readprec))))
+        read-nonnull
+        (fn [c]
+          (let [k (:arity c) as (as-names "a" k) s (occ-of (:name c)) body (result c as)
+                prefix-con (if (sym? s) [(bind-lex (lexc "Punc" "(")) (bind-lex (lexc "Symbol" s)) (bind-lex (lexc "Punc" ")"))] (ident-h s))
+                infix-con (if (sym? s) [(bind-lex (lexc "Symbol" s))] (concat [(bind-lex (lexc "Punc" "`"))] (ident-h s) [(bind-lex (lexc "Punc" "`"))]))
+                prec (first (get fix (:name c) [9 'InfixL]))]
+            (cond
+              (:infix? c) (mk-parser prec (concat [(read-arg (first as))] infix-con [(read-arg (second as))]) body)
+              (seq (:labels c))
+              (mk-parser 11 (concat prefix-con [(bind-lex (lexc "Punc" "{"))]
+                                    (apply concat (interpose [(bind-lex (lexc "Punc" ","))]
+                                                             (map (fn [l a] (let [ls (occ-of l)]
+                                                                              [(bind* (L* (list 'VarPat nil (nmx a)))
+                                                                                      (ap* (ap* (v* (gv read-m (if (sym? ls) "readSymField" "readField")))
+                                                                                                (str* ls))
+                                                                                           (ap* (v* reset-r) (v* readprec))))]))
+                                                                  (:labels c) as)))
+                                    [(bind-lex (lexc "Punc" "}"))]) body)
+              :else (mk-parser 10 (concat prefix-con (map read-arg as)) body))))
+        nullary (filter nullary? cons) nonnull (remove nullary? cons)
+        read-nullary (cond (empty? nullary) []
+                           (= 1 (count nullary)) [(do* (concat (match-con (occ-of (:name (first nullary)))) [(body* (result (first nullary) []))]))]
+                           :else [(ap* (v* choose) (hlist (map (fn [c] (tuple* [(str* (occ-of (:name c))) (result c [])])) nullary)))])
+        alts (concat read-nullary (map read-nonnull nonnull))
+        rhs (if (empty? cons) (v* pfail-r)
+                (ap* (v* (gv read-m "parens")) (reduce (fn [acc x] (op* x alt-r acc)) (last alts) (reverse (butlast alts)))))]
+    [(funbind readprec [[[] rhs]])
+     (funbind (gv read-m "readList") [[[] (v* (gv read-m "readListDefault"))]])
+     (funbind (gv read-m "readListPrec") [[[] (v* (gv read-m "readListPrecDefault"))]])]))
+
+(def generators
+  {"Eq" gen-eq "Ord" gen-ord "Show" gen-show "Read" gen-read "Enum" gen-enum "Bounded" gen-bounded "Ix" gen-ix})
+
+(defn derive-binds
+  "The bindings of class CLS (its occurrence name) for the described type, or nil"
+  [cls desc]
+  (when-let [g (get generators cls)] (g desc)))

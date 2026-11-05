@@ -21,7 +21,8 @@
   No GHC code is ported here; THIH (Jones, \"Typing Haskell in Haskell\", 1999) and GHC's Tc/ were read as the
   specification of the behaviour."
   (:require [arbace.string :as str]
-            [arbace.set :as set])
+            [arbace.set :as set]
+            [arbace.repr.haskell.deriv :as deriv])
   (:import [java.io File]))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -404,6 +405,8 @@
 ;; env: {NAME {:mono type} | {:poly type :core term}}
 
 (def ^:dynamic *module* nil)
+(def ^:dynamic *derivs* nil)     ; atom [{:cls :tn :names :res :desc}]: the stock deriving requests of the module
+(def ^:dynamic *fixities* nil)   ; atom {CON [PREC ASSOC]}
 (def cls-callstack (ext-name "tc" "GHC.Internal.Stack.Types" "HasCallStack"))
 
 (defn- callstack-term
@@ -522,6 +525,7 @@
         LetStmt (let [[env1 bs] (tc-local-binds env (arg v 2))] (recur env1 (rest ss) (conj quals (list 'qlet bs))))
         (do (error! "qualifier not handled: " (con v)) [(fresh-meta) (list 'lit "?")])))))
 
+(declare con-arg-types)
 (defn infer
   "An expression's type and core"
   [env e]
@@ -612,6 +616,16 @@
                                       (list 'alt cn xs (app* (list 'v (ext-name "var" (nmod cn) (occ cn)))
                                                              (mapv (fn [f x] (get m f x)) (:fields info) xs)))))
                                   cons*))])
+      ;; deriving's nodes (arbace.repr.haskell.deriv): a constructor's tag as an Int, the constructor of a tag, a primop on Ints
+      DerivTag (let [[_ c] (infer env (arg v 1))]
+                 [(con-ty tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Magic" "dataToTag#")) [c])])
+      DerivTag2Con (let [[t c] (infer env (arg v 2))
+                         [_ res] (con-arg-types (first (arg v 1)))]
+                     (unify t (con-ty tc-int))
+                     [res (list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" "tagToEnum#")) [c])])
+      DerivPrim (let [rs (mapv #(infer env %) (arg v 2))]
+                  (doseq [[t _] rs] (unify t (con-ty tc-int)))
+                  [(con-ty tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" (arg v 1))) (mapv second rs))])
       ExprWithTySig (let [[t c] (infer env (arg v 2))
                           sig (arg (arg v 3) 2)
                           [st preds] (instantiate (sig-type sig))]
@@ -1001,7 +1015,8 @@
         tvs (zipmap tvn (map (fn [x] [:tv x]) names))
         res [:tc tn (mapv (fn [x] [:tv x]) names)]
         defn* (arg d 5) cs (arg defn* 5)
-        conlist (case (con cs) DataTypeCons (arg cs 2) NewTypeCon [(arg cs 1)] [])]
+        conlist (case (con cs) DataTypeCons (arg cs 2) NewTypeCon [(arg cs 1)] [])
+        descs (atom [])]
     (doseq [c conlist]
       (let [cv (lval c) cn (nm (arg cv 2)) det (arg cv 6)
             cdf-type (fn [f] (hs-type tvs (last (butlast f))))
@@ -1018,12 +1033,13 @@
         (swap! *genv* assoc cn [:forall names [] ty])
         ;; a field's selector: forall tvs. T tvs -> field type
         (doseq [[f t] fields] (swap! *genv* assoc f [:forall names [] (fn-ty res t)]))
+        (swap! descs conj {:name cn :arity (count argtys) :labels (mapv first fields) :infix? (= 'InfixCon (con det)) :tys argtys})
         (swap! *cons* assoc cn {:arity (count argtys) :tycon tn :fields (mapv first fields)})))
-    ;; the derived instances (HF4 generates their bindings; here their entries in the instance table): stock
-    ;; deriving's context approximated as GHC infers it for Haskell 2010's classes, the class at each parameter
-    ;; that occurs in a field
+    ;; the derived instances: the stock classes' requests are kept for derive-all! (HF4), the others enter the table
+    ;; with the context approximated as before
     (let [used (set (for [c conlist x (tree-seq coll? seq (lval c))
-                          :when (and (seq? x) (= 'rn/name (first x)) (= "tv" (nth (second x) 1)))] (second x)))]
+                          :when (and (seq? x) (= 'rn/name (first x)) (= "tv" (nth (second x) 1)))] (second x)))
+          desc {:tn tn :cons @descs :fix @*fixities* :newtype? (= 'NewTypeCon (con cs))}]
       (doseq [cl (arg defn* 6) :let [cv (lval cl)] :when (= 'HsDerivingClause (con cv))
               :let [dct (lval (arg cv 3))
                     sigs (case (con dct) DctMulti (arg dct 2) DctSingle [(arg dct 2)] [])]
@@ -1031,15 +1047,57 @@
         (let [body (lval (arg (lval sg) 3))
               cls (when (= 'HsTyVar (con body)) (nm (arg body 3)))]
           (when cls
-            (if (and (contains? constructor-classes (occ cls)) (seq names))
+            (cond
+              (contains? deriv/generators (occ cls))
+              (swap! *derivs* conj {:cls cls :tn tn :names names :res res :desc desc})
+              (and (contains? constructor-classes (occ cls)) (seq names))
               ;; a class of type constructors (Functor, Monad...): the head drops the last parameter
               (swap! *insts* conj {:dfun (ext-name "var" m (str "$f" (occ cls) (occ tn)))
                                    :tvs (vec (butlast names)) :ctx []
                                    :head [cls [[:tc tn (mapv (fn [x] [:tv x]) (butlast names))]]]})
+              :else
               (swap! *insts* conj {:dfun (ext-name "var" m (str "$f" (occ cls) (occ tn)))
                                    :tvs names
                                    :ctx (vec (for [[n x] (map vector tvn names) :when (contains? used n)] [cls [[:tv x]]]))
                                    :head [cls [res]]}))))))))
+
+(defn- simplify-pred
+  "GHC's context simplification of a derived instance's constraint: reduced by the instances to constraints on type
+  variables"
+  [[c ts :as p]]
+  (let [t (expand (zonk (first ts)))]
+    (case (first t)
+      :tv [p]
+      :tc (if-let [[i m] (some (fn [i] (when (= (first (:head i)) c)
+                                         (when-let [m (match-ty (set (:tvs i)) {} (first (second (:head i))) t)] [i m])))
+                               @*insts*)]
+            (vec (mapcat (fn [[pc pts]] (simplify-pred [pc (mapv #(subst m %) pts)])) (:ctx i)))
+            (if (some #(= :tv (first %)) (tree-seq vector? seq t)) [p] []))
+      [p])))
+
+(defn- derive-all!
+  "The derived instances of the module: their heads entered, the contexts inferred by fixpoint, their bindings generated"
+  [m]
+  (let [reqs @*derivs*
+        dfun (fn [r] (ext-name "var" m (str "$f" (occ (:cls r)) (occ (:tn r)))))
+        ctx-of (fn [r]
+                 (if (contains? #{"Enum"} (occ (:cls r)))
+                   []
+                   (vec (distinct (mapcat (fn [c] (mapcat (fn [t] (simplify-pred [(:cls r) [t]])) (:tys c)))
+                                          (:cons (:desc r)))))))]
+    (doseq [r reqs] (swap! *insts* conj {:dfun (dfun r) :tvs (:names r) :ctx [] :head [(:cls r) [(:res r)]]}))
+    (dotimes [_ 5]
+      (doseq [r reqs]
+        (let [ctx (ctx-of r)]
+          (swap! *insts* (fn [is] (mapv (fn [i] (if (= (:dfun i) (dfun r)) (assoc i :ctx ctx) i)) is))))))
+    (vec (for [r reqs]
+           {:dfun (dfun r) :tvs (:names r) :ctx (:ctx (some #(when (= (:dfun %) (dfun r)) %) @*insts*))
+            :cls (:cls r) :ts [(:res r)]
+            ;; a newtype's Eq, Ord, Ix and Bounded by the newtype strategy as GHC chooses it (the methods of the
+            ;; representation type's instance, coerced); the others stock
+            :gnd (when (and (:newtype? (:desc r)) (contains? #{"Eq" "Ord" "Ix" "Bounded"} (occ (:cls r))))
+                   (first (:tys (first (:cons (:desc r))))))
+            :binds (deriv/derive-binds (occ (:cls r)) (:desc r))}))))
 
 (defn- syn-decl! [d]
   (let [tn (nm (arg d 2)) tvn (qtvs-names (arg d 3))
@@ -1129,7 +1187,7 @@
 
 (defn- instance-binds
   "An instance's dictionary function and its methods, as GHC's desugarer gives them"
-  [env {:keys [dfun tvs ctx cls ts binds]}]
+  [env {:keys [dfun tvs ctx cls ts binds gnd]}]
   (let [skol (zipmap tvs (map (fn [x] [:tv (str "sk_" x)]) tvs))
         ts (mapv #(subst skol %) ts)
         ctx (mapv (fn [[c xs]] [c (mapv #(subst skol %) xs)]) ctx)
@@ -1144,14 +1202,20 @@
         methods (for [mn (:methods info)]
                   (let [cm (fresh-lv (str "$c" (occ mn)))
                         b (get defined (occ mn))]
-                    [cm (if b
+                    [cm (if gnd
+                          ;; the newtype strategy: the representation type's method, coerced
+                          (let [d (or (solve-pred [cls [(subst skol gnd)]] givens 0)
+                                      (do (error! "no representation dictionary " (occ cls)) (list 'lit "?")))
+                                c (list 'app (list 'v mn) [d])]
+                            (if (empty? params) c (list 'lam params c)))
+                          (if b
                           (binding [*self-givens* self-givens] (check-method env b (method-type mn cls ts) givens params))
                           (if-let [dm (get (:defaults info) mn)]
                             ;; a default method with an INLINE pragma is inlined, as GHC does even at -O0
                             (let [d (if (empty? params) (list 'v dfun) (list 'app (list 'v dfun) params))
                                   f (or (get @*unfoldings* dm) (list 'v dm))]
                               (if (empty? params) (list 'app f [d]) (list 'lam params (list 'app f [d]))))
-                            (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "noMethodBindingError")) [(list 'lit (occ mn))])))]))
+                            (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "noMethodBindingError")) [(list 'lit (occ mn))]))))]))
         supers (for [[sc sts] (:supers info)]
                  (or (solve-pred [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)] (super-closure (mapv vector ctx params)) 0)
                      (do (error! "no superclass dictionary " (occ sc)) (list 'lit "?"))))
@@ -1246,8 +1310,12 @@
         m module]
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
               *genv* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
-              *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {})]
+              *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {})
+              *derivs* (atom []) *fixities* (atom {})]
       (load-ifaces!)
+      (doseq [s sigs :let [sv (lval s)] :when (= 'FixSig (con sv))
+              :let [fs (arg sv 2) fx (arg fs 3)] n (arg fs 2)]
+        (swap! *fixities* assoc (nm n) [(nth fx 1) (nth fx 2)]))
       (let [tycl (for [d decls :let [v (lval d)] :when (= 'TyClD (con v))] (arg v 2))
             _ (doseq [t tycl] (case (con t) SynDecl (syn-decl! t) nil))
             _ (doseq [t tycl] (case (con t) DataDecl (data-decl! m t) ClassDecl (class-decl! m t) nil))
@@ -1258,6 +1326,7 @@
                                 (list 'bind n (list 'lit (str "foreign import " (occ n)))))))
             insts (vec (for [d decls :let [v (lval d)] :when (and (= 'InstD (con v)) (= 'ClsInstD (con (arg v 2))))]
                          (inst-decl! m (arg (arg v 2) 2))))
+            insts (into insts (derive-all! m))
             top-sigs (sigs-of sigs)
             [env core] (reduce (fn [[env out] g] (let [[env1 bs] (tc-group env [(arg g 1) (arg g 2)] top-sigs true)] [env1 (into out bs)]))
                                [{} []] binds)
