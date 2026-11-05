@@ -758,3 +758,72 @@ All under `bin/heavy-lock` if run on the loaded host; `ARBACE_HOST_EXE` unset in
 ## Decided (2026-11-05, the user: after LL1)
 
 Both as recommended: (1) LL4 closed as a corpus loop over the wrongly accepted rejections and the false errors, the full loop (opt's messages) for Assembler/ and Verifier/, acceptance only for the target directories; (2) GT9's interim llvm-roundtrip step takes llvm-test-valid.list (300 modules) as a part.
+
+## As built: LL4, the corpus loop (2026-11-05)
+
+Branch `llvm-ll4` from `llvm-ll1`. Light runs only (main's keyed `--full`, then tonight's gate): every process under 2 GiB,
+`ARBACE_HOST_EXE` the main checkout's stage 0, the lists a few hundred files, opt the pin's `/usr/lib/llvm23/bin/opt`. The rules,
+the tables and the machinery are doc/llvm/SPEC.md §6.2.3; the sources read are llvm-project 23.1.4's (the pinned tarball, LLS11),
+`lib/IR/{Verifier,Intrinsics,AutoUpgrade,Type,Attributes,AsmWriter,DebugInfoMetadata}.cpp`, `lib/AsmParser/{LLParser,LLLexer}.cpp`,
+`include/llvm/IR/Intrinsics*.td`, `DebugInfoFlags.def`, `include/llvm/BinaryFormat/Dwarf.{def,h}` (extracted into the worktree's
+`.tmp/`; no other network). Two tables are generated from them and committed: `arbace/repr/llvm/intr_table.ae` (`bin/llvm-corpus
+intrinsics`, the pin's `llvm-tblgen --dump-json` over Intrinsics.td: 16,423 intrinsics) and `di_table.ae` (`bin/llvm-corpus
+di-table`: 246 fields of 29 node kinds, 234 print fields, the DWARF names, flags and op codes).
+
+**The samples, before and after** (`bin/llvm-corpus verify-record LIST WORK OUT`; the records `test/llvm/llvm-test-*-verify.tsv`,
+NAME, opt's verdict, Arbace's, verdicts same, first messages same, whole stderr same):
+
+| list | files | verdicts as opt's | first messages | whole stderr |
+|---|---|---|---|---|
+| `llvm-test-valid.list` (LL1's 300 valid) | 300 | 277 → **300** | | 277 → **300** |
+| `llvm-test-reject.list` (LL1's 200 rejections) | 200 | 77 → **195** | 60 → **188** | 43 → **182** |
+| `llvm-test-split.list` (60 sections) | 60 | 57 → **60** | | 57 → **60** |
+| `llvm-test-reject-av.list` (new: every Assembler/ and Verifier/ rejection opt rejects) | 578 | 227 → **553** (95.7 %) | 184 → **517** | 133 → **495** (85.6 %) |
+| `llvm-test-reject-other.list` (new: the other directories', acceptance only) | 179 | 43 → **175** (97.8 %) | 25 → 162 | 24 → 161 |
+
+The tests' own declarations (`bin/llvm-corpus reject-check`, an `error:` in a CHECK-style line): of the 200, 67 declare one, opt
+prints it in 65, Arbace's verify now in **63** (17 before); of the 578, 190 declare, opt 188, Arbace **172**; of the 179, 27, opt 16,
+Arbace 12. The reader side holds: `roundtrip` over the 300 valid: forms **300 of 300**, bitcode 300 of 300, objects 252 (48 `none`);
+`roundtrip --text` 300 of 300 byte for byte; `test/llvm/essential.txt` 43 of 43 forms, the control fails as it must. The regression
+sets of LL4b/c: the probes (`test/llvm/probes.list`) verdicts 472 → **474** of 478, whole stderr 470 → **471** (the rest the classes of
+`probes-known.tsv`); 269 mutants of the 300 valid (`bin/repr-llvm mutants .tmp/valid.abs OUT 300 700000`, held out, generated once):
+verdicts 252 → **268** of 269, whole stderr 226 → **251**.
+
+The 25 Assembler/ and Verifier/ rejections Arbace still takes (or cannot read): the AMDGPU intrinsics' and allocas' rules (9, Verifier/
+AMDGPU), the vector-predication, vector insert/extract, `get_dynamic_area_offset`, statepoint relocation (2), `callbr` intrinsic,
+memprof, `modular-format`, funclet-token, logical-pointer, structured-gep and non-byte vector GEP rules (one each), `DILocation not
+allowed within this metadata node`, and three of the lexer (`*/` at the top level, `u0x` integers, inline asm constraints). Of the
+other directories': `dso_local_equivalent`, a DIAssignID operand, `amdhsa_code_object_version` in a constant, the darwin `CC`. The 58 with
+the verdict and first message right but not the rest of the output: mostly later messages of the same families (statepoints, matrix,
+convergence, the use-list order of two users of one intrinsic, a node opt prints by its address).
+
+### The night's runs (commands and what to expect)
+
+As LL1's (under `bin/heavy-lock` on the loaded host; `ARBACE_HOST_EXE` unset in the gate):
+
+| what | command | expected |
+|---|---|---|
+| the lists | `bin/llvm-corpus full-lists; bin/llvm-corpus reject-lists` | 578 and 179 files; `git diff test/llvm/llvm-test-reject-{av,other}.list` empty |
+| the tables | `bin/llvm-corpus intrinsics; bin/llvm-corpus di-table` | `git diff arbace/repr/llvm/{intr,di}_table.ae` empty (llvm-tblgen and python3 of the host) |
+| the records | `bin/llvm-corpus verify-record LIST WORK test/llvm/llvm-test-NAME-verify.tsv` for valid, reject, split, reject-av, reject-other (resolved by `bin/llvm-corpus resolve`) | `git diff test/llvm/*-verify.tsv` empty; under a minute each at 4 threads |
+| every rejection test | `bin/repr-llvm verify-check .tmp/llvm/lists/reject.list WORK` | 1,706 files: the 757 opt rejects as the two records (verdicts about 96 %), the rest (`not llc`, passes' rejections opt -passes=verify takes) `valid`/`valid` |
+| the valid corpus | `bin/repr-llvm verify-check LIST WORK` over `.tmp/llvm/lists/input.list` in shards of 2,000 (`split -l`) | the sample's 300 of 300 predicts few false errors; each one a class of `test/llvm/divergences-verify.edn` or a rule to fix |
+| the mutants | `bin/repr-llvm mutants .tmp/valid.abs OUT 600 800000` then `verify-check` | about 99 % verdicts, 93 % whole stderr (the 269 held out) |
+
+### Proposed
+
+1. **LL4's close** (LLS6). (a) Close LL4 at these numbers: the A/V rejections at 95.7 % of verdicts and 85.6 % of opt's whole
+   stderr, the target directories at 97.8 % of verdicts, the valid sample 300 of 300; the rest classed after the night's whole-corpus
+   run in `test/llvm/divergences-verify.edn` (`:target-intrinsic`, `:intrinsic-family`, `:md-debug-locs`, `:lexer`, `:use-list-order`,
+   `:printed-address`), ported when a client crop needs them. Cost: the classing, an hour, after the night. (b) One more day for
+   the target intrinsics (AMDGPU, NVPTX, the vector-predication and matrix families) and the rest of the first-message-only list:
+   about 1 day for A/V verdicts near 99 % and whole stderr near 95 %. Recommend (a): the residue is target-specific, and LL2's
+   lowering, not the verifier, is the row's next need.
+2. **The rejection lists as the interim llvm step's parts** (GT9, LLS20). (a) Add `llvm-test-reject.list`, `-reject-av.list` and
+   `-reject-other.list` as parts of the interim `llvm-roundtrip` step's verify check, their records the expected outputs (957 files,
+   about 1.5 minutes at 4 threads, under 2 GiB a process; opt of the pin as the reference, which the step already needs). (b) Only
+   the 300 valid modules (as decided after LL1) until LL4 closes. Recommend (a): the rejection tests are what moved; without them a
+   regression of the verifier's rules is seen only by hand.
+3. **The generated tables** (`intr_table.ae`, `di_table.ae`: 0.9 MB and 30 KB, from the pinned tarball with the host's llvm-tblgen
+   and python3). (a) Committed, with the two verbs re-run and diffed in the night's vendoring checks. (b) Generated at use from the
+   tarball (no committed copy; every verify run would need the tarball and llvm-tblgen). Recommend (a).
