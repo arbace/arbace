@@ -474,3 +474,7 @@ in parmatch.ae and typecore.ae.
   ocamlc (about half a day: the link order from stdlib/Makefile without ocamlc, the testsuite's lib/testing too, the
   check that the two libraries stay equal); (b) with T11, whose corpus runs would use it; (c) keep ocamlc's library.
   *Recommended: (a)*, before T11: it is what T8-T10's stdlib work was for.
+
+## Decided (2026-11-05, the user: TY16-TY18)
+
+TY16 (a): the validity check with T12; TY17 (a): Refine_or and wildcard expansion with T11 if its corpus needs them; TY18 (a): the native units become oi's library now, before T11 (ocamlc stays the oracle).
