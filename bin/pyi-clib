@@ -1,0 +1,165 @@
+#!/bin/bash
+# pyi's C library cores (queue 208; doc/python/PYTHON-SURVEY.md, "As built: 208"; PYS22 (a), doc/python/AFTER-PY11.md
+# §1.7): the stdlib modules whose core is a C library (_bz2 over bzip2) run the library itself, built by ci's builder
+# (bin/ci nodes: repr/c's read, arbace.c.check, arbace.c.build, linked with musl 1.2.6's forms) into one node program,
+# with the module's glue in Go over pyi's objects (go/arbace/pybz2) calling it through go/arbace/clib. Each library
+# is a directory of tools/pyi/clib/ (lib.conf: its tarball's URL and SHA-256, its files and flags; its C glue).
+#
+#   bin/pyi-clib fetch LIB       the tarball fetched once into the main checkout's .tmp/cache/clib/ (the one network
+#                                step), checked by lib.conf's SHA-256
+#   bin/pyi-clib build LIB       the node program built (the tarball extracted into .tmp/pyi-clib/LIB/src) and
+#                                written as go/arbace/clib/LIB (package arbace/clib/LIB: Nodes, the node program's
+#                                text, and Key, its build's key), kept by the key: lib.conf, the glue, the tarball's
+#                                pin, repr/c's, ci's builder's and musl's reader's sources and the musl forms' key; the
+#                                checkout's builder runs (evaluated, not a stage 0's embedded copy)
+#   bin/pyi-clib verify LIB      built afresh into .tmp/pyi-clib/LIB/verify and compared with the committed forms
+#   bin/pyi-clib key LIB         the build's key
+#   bin/pyi-clib aot LIB OUT     the committed node program translated by cf2g (arbace.c.cf2g) into OUT/prog.go, the
+#                                package arbace/clib/LIB/aot whose init registers its compiled functions with
+#                                arbace/clib (pyi's AOT links it: the library compiled), kept by the Nodes' digest
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+die() { echo "pyi-clib: $*" >&2; exit 1; }
+cmd=${1:-}; lib=${2:-}
+[ -n "$cmd" ] && [ -n "$lib" ] || { sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2; }
+dir=$root/tools/pyi/clib/$lib
+[ -f "$dir/lib.conf" ] || die "no library $lib (tools/pyi/clib/$lib/lib.conf)"
+url= sha256= top= cflags= sources= glue= includes=
+. "$dir/lib.conf"
+work=$root/.tmp/pyi-clib/$lib
+cmain=${root%%/.tmp/gate-clean/*}; cmain=${cmain%%/.tmp/worktrees/*}
+cache=${PYI_CLIB_CACHE:-$cmain/.tmp/cache/clib}
+tb=$cache/$(basename "$url")
+
+fetch() {
+  mkdir -p "$cache"
+  if [ ! -f "$tb" ]; then
+    wget -q -O "$tb.part" "$url" || { rm -f "$tb.part"; die "fetching $url failed"; }
+    mv "$tb.part" "$tb"
+  fi
+  echo "$sha256  $tb" | sha256sum -c --quiet || die "$tb does not match lib.conf's pin"
+}
+
+key() {
+  "$root/bin/ci" musl prepare >/dev/null
+  { echo "$sha256"
+    (cd "$root" && find "tools/pyi/clib/$lib" arbace/repr/c.ae arbace/repr/c arbace/c/build.ae arbace/c/check.ae \
+       arbace/c/run.ae arbace/c/musl.ae test/c/host bin/pyi-clib -type f | LC_ALL=C sort | xargs sha256sum)
+    "$root/bin/lib/ci/musl" key; } | sha256sum | cut -c1-64
+}
+
+# build_into OUT: the node program written as Go (OUT/go/LIB/nodes.go) and read into forms (OUT/forms)
+build_into() {
+  local out=$1 k src
+  k=$(key)
+  fetch
+  "$root/bin/ci" musl ensure >/dev/null
+  rm -rf "$work/src"; mkdir -p "$work/src"
+  tar -xzf "$tb" -C "$work/src"
+  src=$work/src/$top
+  local files=() f
+  for f in $glue; do files+=("$dir/$f"); done
+  for f in $sources; do files+=("$src/$f"); done
+  # the include path: the glue's directory first (a library's configured config.h lives there), the tarball's top,
+  # then lib.conf's includes (directories of the tarball)
+  local incs=(-I"$dir" -I"$src")
+  for f in $includes; do incs+=(-I"$src/$f"); done
+  rm -rf "$out"; mkdir -p "$out/go/clib/$lib"
+  # shellcheck disable=SC2086
+  # the checkout's builder, evaluated (a stage 0 embeds the arbace/c it was built from, which the key does not name:
+  # RULES' ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1, about 5 times slower)
+  ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 \
+  "$root/bin/ci" nodes $cflags "${incs[@]}" -o "$out/$lib.nodes" "${files[@]}" > "$out/nodes.log" 2>&1 \
+    || { grep -v '^Reflection\|^Auto-boxing\|recur arg' "$out/nodes.log" >&2; die "ci's builder refused $lib"; }
+  printf 'module arbace\n\ngo 1.27\n' > "$out/go/go.mod"
+  python3 -I -S -B - "$out/$lib.nodes" "$out/go/clib/$lib/nodes.go" "$lib" "$k" "$sha256" "$url" <<'PY'
+import sys
+nodes, out, lib, key, sha, url = sys.argv[1:]
+text = open(nodes, 'rb').read().decode('ascii')
+# a static's fifth field is a name the loader ignores; for an anonymous object (a static local, a compound literal,
+# a temporary) the builder prints its key's identity ("java.lang.Object@HEX"), which depends on the executable that
+# ran the builder: one stable word instead, so the committed node program is the same from any host
+import re
+text = re.sub(r'"java\.lang\.Object@[0-9a-f]+"', '"anon"', text)
+def q(s):
+    r = []
+    for c in s:
+        o = ord(c)
+        if c == '\\': r.append('\\\\')
+        elif c == '"': r.append('\\"')
+        elif c == '\n': r.append('\\n')
+        elif o < 32 or o == 127: r.append('\\x%02x' % o)
+        else: r.append(c)
+    return '"' + ''.join(r) + '"'
+lines = text.split('\n')
+with open(out, 'w') as f:
+    f.write('// Code generated by bin/pyi-clib build %s; DO NOT EDIT.\n\n' % lib)
+    f.write('// Package %s is the C library %s as ci\'s node program (arbace.c.build\'s output, linked with musl 1.2.6), for\n' % (lib, lib))
+    f.write('// arbace/clib: built by ci\'s builder from %s (SHA-256 %s) and the C glue of\n// tools/pyi/clib/%s (queue 208; doc/python/PYTHON-SURVEY.md, "As built: 208"). Its licenses: LICENSE.md.\n' % (url, sha, lib))
+    f.write('package %s\n\n' % lib)
+    f.write('// Key is the build\'s key (bin/pyi-clib key %s).\nconst Key = "%s"\n\n' % (lib, key))
+    f.write('// Nodes is the node program\'s text, one command a line (one literal).\nvar Nodes = ')
+    f.write(q(text))
+    f.write('\n')
+PY
+  (cd "$out/go" && "$root/bin/repr-go" read --goos linux --goarch amd64 --out "$out/forms" "./clib/$lib") > "$out/read.log" 2>&1 \
+    || { cat "$out/read.log" >&2; die "the node program's Go does not read"; }
+  echo "$k" > "$out/key"
+}
+
+case $cmd in
+  fetch) fetch; echo "$tb" ;;
+  key) key ;;
+  build)
+    k=$(key)
+    if [ -f "$root/go/arbace/clib/$lib.ae" ] && grep -q "$k" "$root/go/arbace/clib/$lib/nodes.ae" 2>/dev/null; then
+      echo "go/arbace/clib/$lib is the build of key $k: kept"; exit 0
+    fi
+    build_into "$work/build"
+    mkdir -p "$root/go/arbace/clib"
+    rm -rf "$root/go/arbace/clib/$lib" "$root/go/arbace/clib/$lib.ae"
+    cp -r "$work/build/forms/go/arbace/clib/$lib" "$work/build/forms/go/arbace/clib/$lib.ae" "$root/go/arbace/clib/"
+    echo "go/arbace/clib/$lib built ($(wc -c < "$work/build/$lib.nodes") bytes of node program, key $k)" ;;
+  verify)
+    build_into "$work/verify"
+    if diff -r "$root/go/arbace/clib/$lib" "$work/verify/forms/go/arbace/clib/$lib" >/dev/null \
+       && cmp -s "$root/go/arbace/clib/$lib.ae" "$work/verify/forms/go/arbace/clib/$lib.ae"; then
+      echo "pyi-clib: go/arbace/clib/$lib is the build's, byte for byte"
+    else
+      echo "pyi-clib: go/arbace/clib/$lib DIFFERS from the build (diff -r go/arbace/clib/$lib $work/verify/forms/go/arbace/clib/$lib)"; exit 1
+    fi ;;
+  aot)
+    out=${3:?bin/pyi-clib aot LIB OUT}
+    mkdir -p "$out"
+    nk=$(sha256sum < "$root/go/arbace/clib/$lib/nodes.ae" | cut -c1-64)
+    if [ -f "$out/prog.go" ] && [ "$(cat "$out/nodes.key" 2>/dev/null)" = "$nk" ]; then exit 0; fi
+    n=$work/aot.nodes
+    rm -rf "$work/aot-src"; mkdir -p "$work/aot-src"
+    ARBACE_PATH="$root" "$root/bin/repr-go" print "$root/go/arbace/clib/$lib.ae" "$work/aot-src" >/dev/null
+    python3 -I -S -B - "$work/aot-src/nodes.go" "$n" <<'PY'
+import sys, re, ast
+# the node program's text: the string literals of Nodes' concatenation, in order (Go's escapes are Python's here)
+src = open(sys.argv[1]).read()
+src = src[src.index('var Nodes'):]
+open(sys.argv[2], 'w').write(''.join(ast.literal_eval(m.group(0)) for m in re.finditer(r'"(?:[^"\\\n]|\\.)*"', src)))
+PY
+    (cd "$root" && arbace_tool -m arbace.c.cf2g translate "$n" "$out" aot "arbace/clib/$lib/aot") > "$work/aot.log" 2>&1 \
+      || { cat "$work/aot.log" >&2; die "cf2g refused $lib"; }
+    # the library's setup: cf2g's Main runs a program (ci.AotMain); a library's package registers its setup instead
+    python3 -I -S -B - "$out/prog.go" "$lib" <<'PY'
+import sys, re
+p, lib = sys.argv[1:]
+s = open(p).read()
+m = re.search(r'\nfunc Main\(args \[\]string\) \{\n\tci\.AotMain\(args, func\(p \*ci\.Prog, l \*ci\.Loader\) \{\n(.*?)\n\t\}\)\n\}\n', s, re.S)
+if not m:
+    sys.exit('pyi-clib: cf2g\'s Main not found in ' + p)
+body = m.group(1).replace('\n\t\t', '\n\t')
+s = s[:m.start()] + '\n// setup loads the library\'s data and sets its compiled functions (cf2g\'s Main\'s, without running it).\nfunc setup(p *ci.Prog, l *ci.Loader) {\n' + body.replace('\t\t', '\t', 1) + '\n}\n\nfunc init() { clib.RegisterCompiled("' + lib + '", setup) }\n' + s[m.end():]
+s = s.replace('import (\n', 'import (\n\t"arbace/clib"\n', 1)
+open(p, 'w').write(s)
+PY
+    echo "$nk" > "$out/nodes.key" ;;
+  *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac
