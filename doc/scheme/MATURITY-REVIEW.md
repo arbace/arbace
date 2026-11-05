@@ -146,3 +146,7 @@ Chez runs for the reference) does not carry it, so a program using `include` is 
 - **SMR6 the Chez identifier tail.** (a) the stub experiment first (half a day), then the simple identifiers; (b) leave the class. *Recommended: (a)*.
 - **SMR7 speed.** (a) direct entry and fixnum fast paths (5 to 8 days) before the Scheme tag; (b) after the tag with the AOT's heavy window; (c) leave. *Recommended: (b)*.
 - **SMR8 mutable interaction environment.** (a) `eval` of `define` into `(interaction-environment)` (a top-level record of the machine, 1 day); (b) leave: R7RS programs do not need it. *Recommended: (b) until a corpus needs it*.
+
+## Decided (2026-11-05, the user)
+
+SMR1-SMR8 as recommended: include in the Chez variant with a program and its Chez run at the next night; the list-argument checks; the mats' reader resynchronised, then Chez's four syntaxes; string->number's extended syntax and the precision argument first; denormals printed without Chez's |N suffix in R7RS mode, Chez's digits kept; the identifier stub experiment, then the simple identifiers; si's speed after the tag; the mutable interaction environment left until a corpus needs it.
