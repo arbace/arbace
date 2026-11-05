@@ -55,9 +55,57 @@
                (when parens (f/text ")"))))
       (simple-out-type names t))))
 
+(defn- alias-of
+  "Out_type's aliases: [:alias name] for a row printed with `as 'a` (the first time), [:var name] after it, nil"
+  [names t]
+  (let [px (ty/type-proxy t)]
+    (when (and (not= px t) (contains? (::ty/aliased names) px))
+      (if (contains? @(::ty/printed names) px)
+        [:var (get names px "'_")]
+        (do (swap! (::ty/printed names) conj px) [:alias (get names px "'_")])))))
+
+(defn- variant-doc
+  "Out_type.tree_of_typexp's Tvariant and Oprint's Otyp_variant"
+  [names row]
+  (let [row (ty/row-repr row)
+        closed (:closed row)
+        ;; Ctype.normalize_type: the fields sorted, the absent ones dropped
+        fields (ty/sort-row-fields (remove (fn [[_ f]] (ty/absent? f)) (:fields row)))
+        present (filter (fn [[_ f]] (= :Rpresent ((ty/field-view f) 0))) fields)
+        all-present (= (count present) (count fields))
+        tags (when-not all-present (map first present))
+        nm (:name row)
+        prefix (if closed (if (nil? tags) " " "< ") (if (nil? tags) "> " "? "))
+        field-doc (fn [[l f]]
+                    (let [v (ty/field-view f)
+                          [amp ts] (case (v 0)
+                                     :Rpresent [false (if (v 1) [(v 1)] [])]
+                                     :Reither (if (and (v 1) (empty? (v 2))) [false []] [(boolean (v 1)) (v 2)])
+                                     [false []])]
+                      (f/box :hv 2 (f/text (str "`" l))
+                             (cond amp (f/docs (f/text " of") f/sp (f/text "&") f/sp)
+                                   (seq ts) (f/docs (f/text " of") f/sp)
+                                   :else [])
+                             (typlist #(out-type names %) " &" ts))))
+        body (if (and nm (ty/nameable-row row))
+               (simple-out-type names (ty/newty [:Tconstr (first nm) (vec (second nm))]))
+               (f/join (f/docs (f/brk 1 -2) (f/text "| ")) (map field-doc fields)))]
+    (if (and nm (ty/nameable-row row) closed all-present)
+      body
+      (f/box :hov 0 (f/text (str "[" prefix))
+             (f/box :hv 0 (f/box :hv 0 body)
+                    (if (seq tags)
+                      (f/docs (f/brk 1 -2) (f/text "> ") (f/box :hov 0 (f/join f/sp (map #(f/text (str "`" %)) tags))))
+                      []))
+             f/sp (f/text "]")))))
+
 (defn simple-out-type [names t]
-  (let [t (ty/repr t) d (ty/desc t)]
-    (case (d 0)
+  (let [t (ty/repr t) d (ty/desc t)
+        al (when (= :Tvariant (d 0)) (alias-of names t))]
+    (case (if al (al 0) (d 0))
+      :var (f/text (al 1))
+      :alias (f/box :b 1 (f/text "(") (f/box :b 0 (variant-doc names (d 1)) f/sp (f/text (str "as " (al 1)))) (f/text ")"))
+      :Tvariant (variant-doc names (d 1))
       :Tvar (f/text (get names t "'_"))
       :Tconstr (f/box :b 0 (typargs names (d 2)) (f/text (ty/*path-name* (d 1))))
       (:Tarrow :Ttuple) (f/box :b 1 (f/text "(") (out-type names t) (f/text ")"))
@@ -79,7 +127,13 @@
         (f/box :b 0 (f/text (label-text l)) (out-type-2 names a true) (f/text " ->") f/sp (out-type-1 names (d 3))))
       (out-type-2 names t false))))
 
-(defn out-type [names t] (out-type-1 names t))
+(defn out-type [names t]
+  (let [t (ty/repr t) d (ty/desc t)
+        al (when (= :Tvariant (d 0)) (alias-of names t))]
+    (case (when al (al 0))
+      :var (f/text (al 1))
+      :alias (f/box :b 0 (variant-doc names (d 1)) f/sp (f/text (str "as " (al 1))))
+      (out-type-1 names t))))
 
 (defn type-scheme-doc [t] (out-type (ty/name-vars [t]) t))
 
@@ -131,6 +185,11 @@
                                      (f/text ")"))
                               f/sp (f/text name)))
         manifest (:manifest decl)
+        ;; Printtyp.tree_of_type_decl's hack: a variant's own name hidden in its declaration
+        manifest (let [md (when manifest (ty/desc manifest))]
+                   (if (and md (= :Tvariant (md 0)) (= (:path decl) (first (ty/row-name (md 1)))))
+                     (ty/newgenty [:Tvariant (ty/set-row-name (md 1) nil)])
+                     manifest))
         k (:kind decl)
         priv (if (:private decl) " private" "")
         name-params (f/docs (f/text (str kwd " ")) type-defined (when (and manifest (not= :abstract (k 0)))

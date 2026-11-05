@@ -64,11 +64,13 @@
       :Tpat_construct [(h [:Construct (d 1)]) (vec (d 2))]
       :Tpat_record [(h [:Record (mapv first (d 1))]) (mapv second (d 1))]
       :Tpat_array [(h [:Array (count (d 1))]) (vec (d 1))]
+      :Tpat_variant [(h [:Variant (d 1) (some? (d 2)) (d 3)]) (if (d 2) [(d 2)] [])]
       :Tpat_lazy [(h [:Lazy]) [(d 1)]])))
 
 (defn head-arity [h]
   (let [d (:desc h)]
-    (case (d 0) :Any 0 :Constant 0 :Tuple (d 1) :Construct (:arity (d 1)) :Record (count (d 1)) :Array (d 1) :Lazy 1)))
+    (case (d 0) :Any 0 :Constant 0 :Tuple (d 1) :Construct (:arity (d 1)) :Record (count (d 1)) :Array (d 1) :Lazy 1
+      :Variant (if (d 2) 1 0))))
 
 (defn to-omega-pattern [h]
   (let [d (:desc h) p {:type (:type h)}]
@@ -79,6 +81,7 @@
       :Construct (assoc p :desc [:Tpat_construct (d 1) (omegas (:arity (d 1)))])
       :Record (assoc p :desc [:Tpat_record (mapv (fn [l] [l omega]) (d 1)) :Closed])
       :Array (assoc p :desc [:Tpat_array (omegas (d 1))])
+      :Variant (assoc p :desc [:Tpat_variant (d 1) (when (d 2) omega) (d 3)])
       :Lazy (assoc p :desc [:Tpat_lazy omega]))))
 
 (defn set-args
@@ -95,6 +98,9 @@
                         (into [(mkpat [:Tpat_construct (d 1) a] q)] rest))
       :Tpat_array (let [[a rest] (take-n (count (d 1)))] (into [(mkpat [:Tpat_array a] q)] rest))
       :Tpat_lazy (let [[a rest] (take-n 1)] (into [(mkpat [:Tpat_lazy (first a)] q)] rest))
+      :Tpat_variant (if (d 2)
+                      (let [[a rest] (take-n 1)] (into [(mkpat [:Tpat_variant (d 1) (first a) (d 3)] q)] rest))
+                      (into [q] r))
       (into [q] r))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -145,6 +151,8 @@
       (= :Tpat_tuple (dp 0) (dq 0)) (and (= (map first (dp 1)) (map first (dq 1)))
                                           (compats (map second (dp 1)) (map second (dq 1))))
       (= :Tpat_lazy (dp 0) (dq 0)) (compat (dp 1) (dq 1))
+      (= :Tpat_variant (dp 0) (dq 0)) (and (= (dp 1) (dq 1))
+                                           (cond (and (dp 2) (dq 2)) (compat (dp 2) (dq 2)) (or (dp 2) (dq 2)) false :else true))
       (= :Tpat_record (dp 0) (dq 0)) (let [[a b] (records-args (dp 1) (dq 1))] (compats a b))
       (= :Tpat_array (dp 0) (dq 0)) (and (= (count (dp 1)) (count (dq 1))) (compats (dp 1) (dq 1)))
       :else false)))
@@ -171,6 +179,7 @@
       :Tpat_record [:r]
       :Tpat_array [:a (count (d 1))]
       :Tpat_lazy [:l]
+      :Tpat_variant [:v (d 1)]
       nil)))
 
 (defn- specialize-row
@@ -213,15 +222,54 @@
       (let [all (ty/label-all (ffirst (d 1)))] (assoc p :desc [:Tpat_record (mapv (fn [l] [l omega]) all) :Closed]))
       (to-omega-pattern (first (deconstruct p))))))
 
+(defn- possible-constructor?
+  "Can a value of type t be built by the GADT constructor c? Its result type unified with t, locally abstract types
+  equated (pattern mode), then undone"
+  [c t]
+  (let [ok (atom false)]
+    (ty/try-unify
+     (binding [ty/*gadt-equation* (fn [t1 t2]
+                                    (let [local (fn [t] (when t (let [d (ty/desc t)]
+                                                                  (and (= :Tconstr (d 0)) (:local-abstract (env/find-decl (d 1)))))))]
+                                      (boolean (or (local t1) (local t2)))))]
+       (ty/unify (ty/instance (:res c)) t))
+     (reset! ok true)
+     (throw (ex-info "undo" {:unify :undo})))
+    @ok))
+
+(defn variant-row-of
+  "Patterns.Head's type_row: the row of the variant pattern's type"
+  [p]
+  (let [d (ty/desc (ty/expand-head (:type p)))] (when (= :Tvariant (d 0)) (d 1))))
+
+(defn- variant-full-match
+  "Parmatch.full_match for variant heads: closing considers the row closed (its unmatched undecided tags dropped)"
+  [closing hs]
+  (let [tags (set (map #((:desc %) 1) hs))
+        row (variant-row-of (first hs))]
+    (boolean
+     (and row
+          (if (and closing (not (ty/fixed-explanation row)))
+            (every? (fn [[tag f]] (let [v (ty/field-view f)]
+                                    (case (v 0) :Rabsent true :Reither (or (not (v 3)) (tags tag)) (tags tag))))
+                    (ty/row-fields row))
+            (and (ty/row-closed row) (every? (fn [[tag f]] (or (ty/absent? f) (tags tag))) (ty/row-fields row))))))))
+
 (defn- complete-sig?
   "Do the heads (omega-patterns) cover their type's signature?"
   [hs]
   (let [d (:desc (first hs))]
     (case (d 0)
       (:Tpat_tuple :Tpat_record :Tpat_lazy) true
-      :Tpat_construct (let [all (type-constructors (d 1))]
+      :Tpat_construct (let [all (type-constructors (d 1))
+                            ;; GADT constructors whose result type cannot be the matched one left out (Typecore's
+                            ;; check of Parmatch's counter-examples, at the constructors' level)
+                            all (if (and (some :res all) (:type (first hs)))
+                                  (filter (fn [c] (or (nil? (:res c)) (possible-constructor? c (:type (first hs))))) all)
+                                  all)]
                         (and all (= (count all) (count hs))))
       :Tpat_constant (and (= :char ((d 1) 0)) (= 256 (count hs)))
+      :Tpat_variant (variant-full-match false hs)
       false)))
 
 (defn satisfiable
@@ -259,6 +307,7 @@
       (= :Tpat_construct (dp 0) (dq 0)) (and (equal-constr (dp 1) (dq 1)) (every? true? (map le-pat (dp 2) (dq 2))))
       (= :Tpat_tuple (dp 0) (dq 0)) (every? true? (map (fn [[l1 a] [l2 b]] (and (= l1 l2) (le-pat a b))) (dp 1) (dq 1)))
       (= :Tpat_lazy (dp 0) (dq 0)) (le-pat (dp 1) (dq 1))
+      (= :Tpat_variant (dp 0) (dq 0)) (and (= (dp 1) (dq 1)) (or (nil? (dp 2)) (and (dq 2) (le-pat (dp 2) (dq 2)))))
       (= :Tpat_record (dp 0) (dq 0)) (let [[a b] (records-args (dp 1) (dq 1))] (every? true? (map le-pat a b)))
       (= :Tpat_array (dp 0) (dq 0)) (and (= (count (dp 1)) (count (dq 1))) (every? true? (map le-pat (dp 1) (dq 1))))
       :else (not (satisfiable [[p]] [q])))))
@@ -301,6 +350,8 @@
                                       (assoc p :desc [:Tpat_tuple (mapv (fn [[l a] [_ b]] [l (lub a b)]) (dp 1) (dq 1))])
                                       (empty!))
       (= :Tpat_lazy (dp 0) (dq 0)) (assoc p :desc [:Tpat_lazy (lub (dp 1) (dq 1))])
+      (and (= :Tpat_variant (dp 0) (dq 0)) (= (dp 1) (dq 1)) (= (some? (dp 2)) (some? (dq 2))))
+      (assoc p :desc [:Tpat_variant (dp 1) (when (dp 2) (lub (dp 2) (dq 2))) (dp 3)])
       (and (= :Tpat_construct (dp 0) (dq 0)) (equal-constr (dp 1) (dq 1)))
       (assoc p :desc [:Tpat_construct (dp 1) (lubs (dp 2) (dq 2))])
       (= :Tpat_record (dp 0) (dq 0))
@@ -333,6 +384,7 @@
       :Tpat_array (vec (mapcat bound-idents-full (d 1)))
       :Tpat_or (bound-idents-full (d 1))
       :Tpat_lazy (bound-idents-full (d 1))
+      :Tpat_variant (if (d 2) (bound-idents-full (d 2)) [])
       :Tpat_exception (bound-idents-full (d 1))
       [])))
 
@@ -352,5 +404,56 @@
              :Tpat_array [:Tpat_array (mapv r (d 1))]
              :Tpat_or [:Tpat_or (r (d 1)) (r (d 2))]
              :Tpat_lazy [:Tpat_lazy (r (d 1))]
+             :Tpat_variant [:Tpat_variant (d 1) (some-> (d 2) r) (d 3)]
              :Tpat_exception [:Tpat_exception (r (d 1))]
              d))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Closing the rows of variant patterns (Parmatch.pressure_variants, close_variant)
+
+(defn close-variant
+  "Parmatch.close_variant: the row closed, its unmatched undecided tags absent"
+  [row]
+  (let [r (ty/row-repr row)
+        [name static] (reduce (fn [[nm st] [_ f]]
+                                (let [v (ty/field-view f)]
+                                  (if (= :Reither (v 0))
+                                    (if (v 3) [nm false] (do (ty/link-row-field-ext! f ty/rf-absent) [nil st]))
+                                    [nm st])))
+                              [(:name r) true] (:fields r))]
+    (when (or (not (:closed r)) (not (identical? name (:name r))))
+      (let [more' (if static (ty/newgenty [:Tnil]) (ty/newgenvar))]
+        (ty/unify (:more r) (ty/newgenty [:Tvariant (ty/create-row [] more' true (:fixed r) name)]))))))
+
+(defn- pressure*
+  "Parmatch.pressure_variants: closing (tdefs given) closes each variant row whose matrix has no default; the result,
+  without closing, whether the matrix is exhaustive"
+  [closing pss]
+  (cond
+    (empty? pss) false
+    (empty? (first pss)) true
+    :else
+    (let [pss (expand-or-rows pss)
+          heads (heads-of pss)
+          default (keep (fn [row] (when (= :Tpat_any ((:desc (first row)) 0)) (rest row))) pss)]
+      (if (empty? heads)
+        (pressure* closing default)
+        (let [constrs (map (fn [h] (let [q (full-omega h)] [h (vec (mapcat #(specialize-row q %) pss))])) heads)
+              try-non-omega (fn [cs] (reduce (fn [acc [_ m]] (let [ok (pressure* closing m)] (and ok acc))) true (vec cs)))
+              hs (map full-omega heads)
+              full (fn [c] (if (= :Tpat_variant ((:desc (first hs)) 0)) (variant-full-match c hs) (complete-sig? hs)))]
+          (cond
+            (full (not closing)) (try-non-omega constrs)
+            (not closing) (pressure* false default)
+            :else
+            (let [ok (try-non-omega constrs)]
+              (when (= :Tpat_variant ((:desc (first heads)) 0))
+                (let [row (variant-row-of (first heads))]
+                  (when-not (or (nil? row) (ty/fixed-explanation row) (pressure* false default))
+                    (close-variant row))))
+              ok)))))))
+
+(defn pressure-variants
+  "Parmatch.pressure_variants env patl"
+  [pats]
+  (pressure* true (mapv (fn [p] [p omega]) pats)))

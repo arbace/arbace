@@ -75,9 +75,158 @@
 (defn repr [t] (let [d (:desc @t)] (if (= :Tlink (d 0)) (recur (d 1)) t)))
 (defn desc [t] (:desc @(repr t)))
 (defn level [t] (:level @(repr t)))
-(defn set-level! [t l] (swap! t assoc :level l))
-(defn link! [t to] (swap! t assoc :desc [:Tlink to]))
+(def ^:dynamic *trail* "Btype's snapshots: an atom of [cell old-value] while a unification may be backtracked" nil)
+(defn log-change! [a] (when *trail* (swap! *trail* conj [a @a])))
+(defmacro try-unify
+  "Btype.snapshot and backtrack around body: true when body ran, else (an exception of unification) every change it
+  made undone and false"
+  [& body]
+  `(let [trail# (atom ()) outer# *trail*]
+     (try (binding [*trail* trail#] ~@body)
+          (when outer# (swap! outer# #(concat @trail# %)))
+          true
+          (catch arbace.lang.ExceptionInfo e#
+            (if (:unify (ex-data e#))
+              (do (doseq [[a# v#] @trail#] (reset! a# v#)) false)
+              (throw e#))))))
+(defn set-level! [t l] (log-change! t) (swap! t assoc :level l))
+(defn link! [t to] (log-change! t) (swap! t assoc :desc [:Tlink to]))
 (defn tvar? [t] (= :Tvar ((desc t) 0)))
+;; ---------------------------------------------------------------------------------------------
+;; Rows of polymorphic variants (types.ml's row_desc and row_field, btype.ml): [:Tvariant row], row {:fields [[label
+;;   field]...] :more t :closed bool :fixed nil-or-explanation :name nil-or-[path args]}; a field [:RFpresent t-or-nil]
+;;   [:RFabsent] or [:RFeither {:no-arg :arg-type [t...] :matched :ext atom}], the ext a cell (nil: RFnone) that
+;;   unification links to another field; a static row's more is [:Tnil]
+
+(defn create-row [fields more closed fixed name]
+  {:fields (vec fields) :more more :closed (boolean closed) :fixed fixed :name name})
+
+(defn rf-present [t] [:RFpresent t])
+(def rf-absent [:RFabsent])
+(defn row-field-ext
+  "Types.row_field_ext: the unlinked cell at the end of an RFeither's chain"
+  [f]
+  (when-not (= :RFeither (f 0)) (throw (ex-info "Types.row_field_ext" {})))
+  (let [e (:ext (f 1))] (if-let [v @e] (recur v) e)))
+(defn rf-either
+  "Types.rf_either: tl the argument types; use-ext-of a field whose cell it shares"
+  [tl no-arg matched & [use-ext-of]]
+  [:RFeither {:no-arg (boolean no-arg) :arg-type (vec tl) :matched (boolean matched)
+              :ext (if use-ext-of (row-field-ext use-ext-of) (atom nil))}])
+(defn rf-either-of [t] (if t (rf-either [t] false false) (rf-either [] true false)))
+
+(defn- row-field-repr-aux [tl f]
+  (case (f 0)
+    :RFeither (let [m (f 1) v @(:ext m)]
+                (if (nil? v) [:RFeither (assoc m :arg-type (into (vec tl) (:arg-type m)))] (recur (into (vec tl) (:arg-type m)) v)))
+    :RFpresent (if (and (f 1) (seq tl)) [:RFpresent (first tl)] f)
+    f))
+
+(defn field-view
+  "Types.row_field_repr: [:Rpresent t-or-nil] [:Reither no-arg tl matched] [:Rabsent]"
+  [f]
+  (let [f (row-field-repr-aux [] f)]
+    (case (f 0)
+      :RFeither (let [m (f 1)] [:Reither (:no-arg m) (:arg-type m) (:matched m)])
+      :RFpresent [:Rpresent (f 1)]
+      :RFabsent [:Rabsent])))
+
+(defn absent? [f] (= :Rabsent ((field-view f) 0)))
+(defn eq-row-field-ext [f1 f2] (identical? (row-field-ext f1) (row-field-ext f2)))
+(declare log-change!)
+(defn link-row-field-ext!
+  "Types.link_row_field_ext: the field inside linked to v"
+  [inside v]
+  (let [e (row-field-ext inside)] (log-change! e) (reset! e v)))
+
+(defn row-fields
+  "Types.row_fields: the fields along the row's chain of more"
+  [row]
+  (let [m (desc (:more row))]
+    (if (= :Tvariant (m 0)) (into (:fields row) (row-fields (m 1))) (:fields row))))
+(defn row-repr-no-fields [row] (let [m (desc (:more row))] (if (= :Tvariant (m 0)) (recur (m 1)) row)))
+(defn row-more [row] (:more (row-repr-no-fields row)))
+(defn row-closed [row] (:closed (row-repr-no-fields row)))
+(defn row-fixed [row] (:fixed (row-repr-no-fields row)))
+(defn row-name [row] (:name (row-repr-no-fields row)))
+(defn row-repr
+  "Types.row_repr: the row with all its fields"
+  [row]
+  (assoc (row-repr-no-fields row) :fields (row-fields row)))
+(defn set-row-name [row name] (assoc (row-repr row) :name name))
+(defn get-row-field
+  "Types.get_row_field: the tag's field, rf-absent when the row has none"
+  [tag row]
+  (or (some (fn [[l f]] (when (= l tag) f)) (row-fields row)) rf-absent))
+
+(defn fixed-explanation
+  "Btype.fixed_explanation: the row's fixed explanation, or a reified row (its more a constructor)"
+  [row]
+  (or (row-fixed row)
+      (let [m (desc (row-more row))] (when (= :Tconstr (m 0)) [:Reified (m 1)]))))
+(defn static-row
+  "Btype.static_row: closed, and no field undecided"
+  [row]
+  (and (row-closed row) (every? (fn [[_ f]] (not= :Reither ((field-view f) 0))) (row-fields row))))
+
+(defn hash-variant
+  "Btype.hash_variant: the tag's hash, 31 bits made signed"
+  [^String s]
+  (let [a (reduce (fn [acc ch] (bit-and (+ (* 223 acc) (long (int ch))) 0x7FFFFFFF)) 0 s)]
+    (if (> a 0x3FFFFFFF) (- a (bit-shift-left 1 31)) a)))
+
+(defn sort-row-fields [fs] (vec (sort-by first fs)))
+
+(defn merge-row-fields
+  "Ctype.merge_row_fields: [only-in-1 only-in-2 [[label f1 f2]...]]"
+  [fi1 fi2]
+  (cond
+    (or (empty? fi1) (empty? fi2)) [fi1 fi2 []]
+    (and (= 1 (count fi1)) (not (some #(= (ffirst fi1) (first %)) fi2))) [fi1 fi2 []]
+    (and (= 1 (count fi2)) (not (some #(= (ffirst fi2) (first %)) fi1))) [fi1 fi2 []]
+    :else
+    (loop [r1 [] r2 [] pairs () a (seq (sort-row-fields fi1)) b (seq (sort-row-fields fi2))]
+      (cond
+        (nil? a) [r1 (into (vec (reverse r2)) b) pairs]
+        (nil? b) [(into (vec (reverse r1)) a) (vec r2) pairs]
+        :else (let [[l1 f1 :as p1] (first a) [l2 f2 :as p2] (first b) c (compare l1 l2)]
+                (cond (zero? c) (recur r1 r2 (cons [l1 f1 f2] pairs) (next a) (next b))
+                      (neg? c) (recur (cons p1 r1) r2 pairs (next a) b)
+                      :else (recur r1 (cons p2 r2) pairs a (next b))))))))
+
+(defn filter-row-fields
+  "Ctype.filter_row_fields: the absent fields dropped, the undecided unmatched ones made absent when erase"
+  [erase fields]
+  (vec (keep (fn [[_ f :as p]]
+               (let [v (field-view f)]
+                 (case (v 0)
+                   :Rabsent nil
+                   :Reither (if (and erase (not (v 3))) (do (link-row-field-ext! f rf-absent) nil) p)
+                   p)))
+             fields)))
+
+(defn row-children
+  "Btype.iter_row and the row's more: the types inside a row"
+  [row]
+  (let [row (row-repr row)
+        ts (mapcat (fn [[_ f]] (let [v (field-view f)]
+                                 (case (v 0) :Rpresent (if (v 1) [(v 1)] []) :Reither (v 2) [])))
+                   (:fields row))]
+    (vec (concat ts (when-let [[_ args] (:name row)] args) [(:more row)]))))
+
+(defn map-row
+  "Ctype.copy_row: the row's types mapped by f, keep sharing the undecided fields' cells, more the new row variable"
+  [f row keep more]
+  (let [row (row-repr row)]
+    (create-row (mapv (fn [[l fi]]
+                        [l (let [v (field-view fi)]
+                             (case (v 0)
+                               :Rpresent (rf-present (some-> (v 1) f))
+                               :Reither (rf-either (mapv f (v 2)) (v 1) (v 3) (when keep fi))
+                               rf-absent))])
+                      (:fields row))
+                more (:closed row) (:fixed row)
+                (when-let [[p args] (:name row)] [p (mapv f args)]))))
 
 (defn begin-def [] (swap! current-level inc))
 (defn end-def [] (swap! current-level dec))
@@ -94,6 +243,7 @@
     :Tconstr (d 2)
     :Tpoly [(d 1)]
     :Tpackage (mapv second (d 2))
+    :Tvariant (row-children (d 1))
     []))
 
 (defn map-desc [f d]
@@ -104,6 +254,7 @@
     :Tconstr [:Tconstr (d 1) (mapv f (d 2))]
     :Tpoly [:Tpoly (f (d 1)) (d 2)]
     :Tpackage [:Tpackage (d 1) (mapv (fn [[n t]] [n (f t)]) (d 2))]
+    :Tvariant (let [row (d 1)] [:Tvariant (map-row f row false (f (row-more row)))])
     d))
 
 (defn is-optional [l] (= :Optional (l 0)))
@@ -212,11 +363,20 @@
       (if (not= generic-level (level t))
         t
         (let [d (desc t)
-              n (newty (if (= :Tvar (d 0)) [:Tvar nil] [:Tvar nil]))]
-          (swap! memo assoc t n)
-          (when-not (= :Tvar (d 0))
-            (swap! n assoc :desc (map-desc #(copy-with % memo) d)))
-          n)))))
+              rowkey (when (= :Tvariant (d 0)) (let [m (repr (row-more (d 1)))] (when (= :Tvar ((desc m) 0)) [::row m])))]
+          (if-let [c (and rowkey (get @memo rowkey))]
+            c
+            (let [n (newty [:Tvar nil])]
+              (swap! memo assoc t n)
+              (when rowkey (swap! memo assoc rowkey n))
+              (when-not (= :Tvar (d 0))
+                (swap! n assoc :desc
+                       (if (= :Tvariant (d 0))
+                         ;; Ctype.copy: a row variable not generic kept, with the undecided fields' cells
+                         (let [row (d 1) more (repr (row-more row)) keep (not= generic-level (level more))]
+                           [:Tvariant (map-row #(copy-with % memo) row keep (if keep more (copy-with more memo)))])
+                         (map-desc #(copy-with % memo) d))))
+              n)))))))
 
 (defn instance [t] (copy-with t (atom {})))
 (defn instance-list [ts] (let [m (atom {})] (mapv #(copy-with % m) ts)))
@@ -292,7 +452,7 @@
   (when-not (and *gadt-equation* t1 t2 (*gadt-equation* t1 t2))
     (throw (ex-info "Unify" {:unify :mismatch :t1 t1 :t2 t2}))))
 
-(declare unify)
+(declare unify unify-row)
 
 (defn- unify-list [l1 l2]
   (when-not (= (count l1) (count l2)) (unify-error nil nil))
@@ -322,7 +482,179 @@
           (unify-list (mapv second (d1 2)) (mapv second (d2 2)))
           (and (= :Ttuple (d1 0) (d2 0)) (= (map first (d1 1)) (map first (d2 1))))
           (unify-list (mapv second (d1 1)) (mapv second (d2 1)))
+          (= :Tvariant (d1 0) (d2 0)) (unify-row (d1 1) (d2 1))
+          (= :Tnil (d1 0) (d2 0)) nil
           :else (unify-error t1 t2))))))
+
+(defn- unify-row-field
+  "Ctype.unify_row_field"
+  [fixed1 fixed2 rm1 rm2 l f1 f2]
+  (let [either-fixed (or fixed1 fixed2)
+        if-not-fixed (fn [fx thunk] (if fx (unify-error nil nil) (thunk)))]
+    (when-not (identical? f1 f2)
+      (let [v1 (field-view f1) v2 (field-view f2) k1 (v1 0) k2 (v2 0)]
+        (cond
+          (and (= :Rpresent k1 k2) (v1 1) (v2 1)) (unify (v1 1) (v2 1))
+          (and (= :Rpresent k1 k2) (nil? (v1 1)) (nil? (v2 1))) nil
+          (= :Reither k1 k2)
+          (when-not (eq-row-field-ext f1 f2)
+            (let [[_ c1 tl1 m1] v1 [_ c2 tl2 m2] v2
+                  no-arg (or c1 c2) matched (or m1 m2)]
+              (if (and either-fixed (not no-arg) (= (count tl1) (count tl2)))
+                (let [f (rf-either [] no-arg matched)]
+                  (link-row-field-ext! f1 f) (link-row-field-ext! f2 f)
+                  (dorun (map unify tl1 tl2)))
+                (let [redo (and (or m1 m2 either-fixed)
+                                (let [tl (concat tl1 tl2)]
+                                  (when (seq tl)
+                                    (when no-arg (unify-error nil nil))
+                                    (let [exts [(row-field-ext f1) (row-field-ext f2)]]
+                                      (run! #(unify (first tl) %) (rest tl))
+                                      (boolean (some #(some? @%) exts))))))]
+                  (if redo
+                    (unify-row-field fixed1 fixed2 rm1 rm2 l f1 f2)
+                    (let [remq (fn [tl other] (vec (remove (fn [t] (some #(identical? (repr t) (repr %)) other)) tl)))
+                          tl1' (remq tl1 tl2) tl2' (remq tl2 tl1)]
+                      (run! #(update-level (level rm2) %) tl1')
+                      (run! #(update-level (level rm1) %) tl2')
+                      (let [f1' (rf-either tl2' no-arg matched)
+                            f2' (rf-either tl1' no-arg matched f1')]
+                        (link-row-field-ext! f1 f1') (link-row-field-ext! f2 f2'))))))))
+          (and (= :Reither k1) (not (v1 3)) (= :Rabsent k2)) (if-not-fixed fixed1 #(link-row-field-ext! f1 f2))
+          (and (= :Rabsent k1) (= :Reither k2) (not (v2 3))) (if-not-fixed fixed2 #(link-row-field-ext! f2 f1))
+          (= :Rabsent k1 k2) nil
+          (and (= :Reither k1) (not (v1 1)) (= :Rpresent k2) (v2 1))
+          (if-not-fixed fixed1 #(do (link-row-field-ext! f1 f2) (update-level (level rm1) (v2 1)) (run! (fn [t] (unify t (v2 1))) (v1 2))))
+          (and (= :Rpresent k1) (v1 1) (= :Reither k2) (not (v2 1)))
+          (if-not-fixed fixed2 #(do (link-row-field-ext! f2 f1) (update-level (level rm2) (v1 1)) (run! (fn [t] (unify (v1 1) t)) (v2 2))))
+          (and (= :Reither k1) (v1 1) (empty? (v1 2)) (= :Rpresent k2) (nil? (v2 1))) (if-not-fixed fixed1 #(link-row-field-ext! f1 f2))
+          (and (= :Rpresent k1) (nil? (v1 1)) (= :Reither k2) (v2 1) (empty? (v2 2))) (if-not-fixed fixed2 #(link-row-field-ext! f2 f1))
+          :else (unify-error nil nil))))))
+
+(defn unify-row
+  "Ctype.unify_row: the fields of each row missing in the other added to it (its more linked to a row of them), the
+  common ones unified"
+  [row1 row2]
+  (let [r1row (row-repr row1) r2row (row-repr row2)
+        rm1 (repr (:more r1row)) rm2 (repr (:more r2row))]
+    (when-not (identical? rm1 rm2)
+      (let [[r1 r2 pairs] (merge-row-fields (:fields r1row) (:fields r2row))
+            _ (when (and (seq r1) (seq r2))
+                (let [h (into {} (map (fn [[l _]] [(hash-variant l) l]) r1))]
+                  (doseq [[l _] r2] (when-let [l' (h (hash-variant l))] (when (not= l l') (unify-error nil nil))))))
+            fixed1 (fixed-explanation row1) fixed2 (fixed-explanation row2)
+            more (cond (and fixed1 fixed2) (if (< (level rm2) (level rm1)) rm2 rm1)
+                       fixed1 rm1 fixed2 rm2
+                       :else (newty2 (min (level rm1) (level rm2)) [:Tvar nil]))
+            fixed (or fixed1 fixed2)
+            c1 (:closed r1row) c2 (:closed r2row)
+            closed (or c1 c2)
+            keep (fn [sw] (every? (fn [[_ a b]] (let [[a b] (sw a b)] (or (absent? a) (not (absent? b))))) pairs))
+            empty (fn [fs] (every? (fn [[_ f]] (absent? f)) fs))
+            _ (when (and closed (or (empty r1) c2) (or (empty r2) c1)
+                         (every? (fn [[_ a b]] (or (absent? a) (absent? b))) pairs))
+                (unify-error nil nil))
+            n1 (:name r1row) n2 (:name r2row)
+            name (cond (and n1 (or c1 (empty r2)) (or (not c2) (and (keep (fn [a b] [a b])) (empty r1)))) n1
+                       (and n2 (or c2 (empty r1)) (or (not c1) (and (keep (fn [a b] [b a])) (empty r2)))) n2
+                       :else nil)
+            set-more (fn [row rest]
+                       (let [rest (if closed (filter-row-fields (row-closed row) rest) rest)
+                             fx (fixed-explanation row)]
+                         (if fx
+                           (when (or (and closed (not (row-closed row))) (seq rest)) (unify-error nil nil))
+                           (when (and (seq rest) (row-closed row)) (unify-error nil nil)))
+                         (let [rm (repr (row-more row))]
+                           (if fx
+                             (when-not (identical? (repr more) rm) (if (tvar? rm) (link! rm more) (unify rm more)))
+                             (let [t (newty2 generic-level [:Tvariant (create-row rest more closed fixed name)])]
+                               (update-level (level rm) t)
+                               (link! rm t))))))]
+        (set-more row2 r1)
+        (set-more row1 r2)
+        (doseq [[l a b] pairs] (unify-row-field fixed1 fixed2 rm1 rm2 l a b))
+        (when (static-row row1)
+          (let [rm (repr (row-more row1))] (when (tvar? rm) (link! rm (newty2 (level rm) [:Tnil])))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Coercions (Ctype.build_subtype, enlarge_type)
+
+(defn- expand-abbrev-once [t]
+  (let [d (desc t) decl (*find-type* (d 1))] (subst (:params decl) (d 2) (:manifest decl))))
+
+(defn- build-subtype
+  "Ctype.build_subtype without objects: [supertype change], change 0 Unchanged, 1 Equiv, 2 Changed"
+  [visited posi level t]
+  (let [t (repr t) d (desc t)
+        pred-expand (fn [n] (if (and (even? n) (pos? n)) (dec n) n))
+        pred-enlarge (fn [n] (if (odd? n) (dec n) n))]
+    (case (d 0)
+      :Tarrow (if (visited t)
+                [t 0]
+                (let [v (conj visited t)
+                      [t1 c1] (build-subtype v (not posi) level (d 2))
+                      [t2 c2] (build-subtype v posi level (d 3))
+                      c (max c1 c2)]
+                  (if (pos? c) [(newty [:Tarrow (d 1) t1 t2]) c] [t 0])))
+      :Ttuple (if (visited t)
+                [t 0]
+                (let [v (conj visited t)
+                      rs (mapv (fn [[_ x]] (build-subtype v posi level x)) (d 1))
+                      c (reduce max 0 (map second rs))]
+                  (if (pos? c) [(newty [:Ttuple (mapv (fn [[l _] [x _]] [l x]) (d 1) rs)]) c] [t 0])))
+      :Tconstr (let [decl (*find-type* (d 1))]
+                 (cond
+                   (and (pos? level) decl (:manifest decl))
+                   (let [[t' c] (build-subtype visited posi (pred-expand level) (expand-abbrev-once t))]
+                     (if (pos? c) [t' c] [t 0]))
+                   (or (visited t) (nil? decl)) [t 0]
+                   :else
+                   (let [v (conj visited t)
+                         rs (mapv (fn [var a] (if (= var :co) (build-subtype v posi level a) [a 0]))
+                                  (or (:variance decl) (repeat :inv)) (d 2))
+                         c (reduce max 0 (map second rs))]
+                     (if (pos? c) [(newty [:Tconstr (d 1) (mapv first rs)]) c] [t 0]))))
+      :Tvariant (let [row (d 1)]
+                  (if (or (visited t) (not (static-row row)))
+                    [t 0]
+                    (let [level' (pred-enlarge level)
+                          v (if (< level' level) #{t} (conj visited t))
+                          fs (mapv (fn [[l f :as orig]]
+                                     (let [fv (field-view f)]
+                                       (if-let [x (fv 1)]
+                                         (let [[x' c] (build-subtype v posi level' x)]
+                                           [[l (if (and posi (pos? level)) (rf-either-of x') (rf-present x'))] c])
+                                         (if posi [[l (rf-either-of nil)] 0] [orig 0]))))
+                                   (filter-row-fields false (row-fields row)))
+                          c (reduce max 0 (map second fs))]
+                      [(newty [:Tvariant (create-row (mapv first fs) (newvar) posi nil (when-not (pos? c) (row-name row)))]) 2])))
+      :Tnil (if posi [(newvar) 2] [t 0])
+      [t 0])))
+
+(defn enlarge-type
+  "Ctype.enlarge_type: the supertypes of t made flexible (two expansions)"
+  [t]
+  (first (build-subtype #{} true 4 t)))
+
+(defn free-vars?
+  "Ctype.closed_type_expr's negation: some variable (a row's too) in t"
+  [t]
+  (let [seen (atom #{})]
+    (letfn [(go [t] (let [t (repr t)]
+                      (when-not (@seen t)
+                        (swap! seen conj t)
+                        (or (tvar? t) (some go (children (desc t)))))))]
+      (boolean (go t)))))
+
+(defn generalizable?
+  "Ctype.generalizable: some node of t above level lv"
+  [lv t]
+  (let [seen (atom #{})]
+    (letfn [(go [t] (let [t (repr t)]
+                      (when-not (@seen t)
+                        (swap! seen conj t)
+                        (or (> (level t) lv) (some go (children (desc t)))))))]
+      (boolean (go t)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Generalization (Ctype.generalize, and the relaxed value restriction's lower_contravariant)
@@ -352,6 +684,7 @@
                                    (go co (expand-head t))
                                    (let [vs (or (:variance decl) (repeat :inv))]
                                      (dorun (map (fn [v a] (go (and co (= v :co)) a)) vs (d 2))))))
+                      :Tvariant (run! #(go co %) (children d))
                       nil)))))]
       (go true t))))
 
@@ -423,21 +756,78 @@
 
 (defn- letter-of-int [i] (str (char (+ 97 (mod i 26))) (let [n (quot i 26)] (if (zero? n) "" n))))
 
+(defn nameable-row
+  "Out_type.nameable_row: a row printed by its name"
+  [row]
+  (and (row-name row)
+       (every? (fn [[_ f]] (let [v (field-view f)]
+                             (or (not= :Reither (v 0))
+                                 (and (row-closed row) (if (v 1) (empty? (v 2)) (= 1 (count (v 2))))))))
+               (row-fields row))))
+
+(defn printer-children
+  "Out_type.printer_iter_type_expr: the parts of a type its printer prints (a row's name's arguments, or its fields'
+  types, never its more)"
+  [t]
+  (let [d (desc t)]
+    (if (= :Tvariant (d 0))
+      (let [row (d 1)]
+        (if (nameable-row row)
+          (second (row-name row))
+          (vec (mapcat (fn [[_ f]] (let [v (field-view f)]
+                                     (case (v 0) :Rpresent (if (v 1) [(v 1)] []) :Reither (v 2) [])))
+                       (row-fields row)))))
+      (children d))))
+
+(defn type-proxy
+  "Btype.proxy: an open row's more stands for the row"
+  [t]
+  (let [t (repr t) d (desc t)]
+    (if (and (= :Tvariant (d 0)) (not (static-row (d 1)))) (repr (row-more (d 1))) t)))
+
+(defn- mark-loops
+  "Out_type.mark_loops (with alias_nongen_row for a type scheme): the proxies printed with an alias, an open row met
+  twice or a weak one"
+  [ts]
+  (let [aliased (atom #{}) objects (atom #{})]
+    (letfn [(go [visited t]
+              (let [t (repr t) px (type-proxy t) d (desc t)]
+                (when (and (= :Tvariant (d 0)) (not= px t) (tvar? px) (not= generic-level (level px)))
+                  (swap! aliased conj px))
+                (if (and (visited px) (not (#{:Tvar :Tpoly} (d 0))))
+                  (swap! aliased conj px)
+                  (let [visited (conj visited px)]
+                    (if (= :Tvariant (d 0))
+                      (if (@objects px)
+                        (swap! aliased conj px)
+                        (do (when-not (static-row (d 1)) (swap! objects conj px))
+                            (run! #(go visited %) (printer-children t))))
+                      (run! #(go visited %) (printer-children t)))))))]
+      (run! #(go #{} %) ts))
+    @aliased))
+
 (defn name-vars
   "Out_type's Variable_names: the variables of ts in order of appearance, a named one by its name (suffixed when
-  taken), the other generic ones 'a, 'b... skipping the names in use, the others '_weakN"
+  taken), the other generic ones 'a, 'b... skipping the names in use, the others '_weakN; an aliased row's proxy
+  named where the row is first printed (the map's ::aliased, ::printed the proxies already printed)"
   [ts]
-  (let [order (atom []) seen (atom #{})]
-    (letfn [(go [t] (let [t (repr t)]
-                      (when-not (@seen t)
-                        (swap! seen conj t)
-                        (if (tvar? t) (swap! order conj t) (run! go (children (desc t)))))))]
+  (let [order (atom []) seen (atom #{})
+        aliased (mark-loops ts)]
+    (letfn [(go [t] (let [t (repr t) px (type-proxy t)]
+                      (if (and (aliased px) (not= px t))
+                        (when-not (@seen px)
+                          (swap! seen conj px)
+                          (swap! order conj px)
+                          (run! go (printer-children t)))
+                        (when-not (@seen t)
+                          (swap! seen conj t)
+                          (if (tvar? t) (swap! order conj t) (run! go (printer-children t)))))))]
       (run! go ts))
     (let [named (set (keep #((desc %) 1) @order))
           counter (atom 0)]
       (loop [vs @order m {} used #{}]
         (if (empty? vs)
-          m
+          (assoc m ::aliased aliased ::printed (atom #{}))
           (let [v (first vs) nm ((desc v) 1)]
             (cond
               (not= generic-level (level v))
@@ -467,6 +857,16 @@
                    0 n
                    1 (str (type-text names (first args) 2) " " n)
                    (str "(" (str/join ", " (map #(type-text names % 0) args)) ") " n)))
+      :Tvariant (let [row (row-repr (d 1))
+                      fs (remove (fn [[_ f]] (and (:closed row) (absent? f))) (:fields row))
+                      present (filter (fn [[_ f]] (= :Rpresent ((field-view f) 0))) fs)]
+                  (str "[" (if (:closed row) (if (= (count present) (count fs)) " " "< ") (if (= (count present) (count fs)) "> " "? "))
+                       (str/join " | " (map (fn [[l f]] (let [v (field-view f)
+                                                              ts (case (v 0) :Rpresent (if (v 1) [(v 1)] []) :Reither (v 2) [])]
+                                                          (str "`" l (when (seq ts) (str " of " (str/join " & " (map #(type-text names % 1) ts)))))))
+                                            fs))
+                       (when (not= (count present) (count fs)) (str " > " (str/join " " (map #(str "`" (first %)) present))))
+                       " ]"))
       "?")))
 
 (defn type-scheme-text

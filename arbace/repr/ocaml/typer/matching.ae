@@ -132,6 +132,7 @@
               :Array (yesif (= (dd 1) (pd 1)))
               :Tuple (yesif (= (dd 1) (pd 1)))
               :Record (yesif (= (count (dd 1)) (count (pd 1))))
+              :Variant (yesif (and (= (dd 1) (pd 1)) (= (dd 2) (pd 2))))
               :Lazy (yes)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -331,6 +332,7 @@
       :Tuple (#{:Tuple :Any} (h 0))
       :Record (#{:Record :Any} (h 0))
       :Array (= :Array (h 0))
+      :Variant (= :Variant (h 0))
       :Lazy (= :Lazy (h 0)))))
 
 (defn- or? [p] (= :Tpat_or (ptag p)))
@@ -510,6 +512,25 @@
 
 (defn- divide-constructor [ctx pmt]
   (divide get-expr-args-constr pm/equal-constr (fn [p] ((:desc p) 1)) (fn [p rem] (vec (concat ((:desc p) 2) rem))) ctx pmt))
+
+(defn- variant-row
+  "A variant head's row: the pattern's (finalize_variant's), else its type's"
+  [p]
+  (or (when-let [r ((:desc p) 3)] @r) (pm/variant-row-of p)))
+
+(defn- divide-variant
+  "Matching.divide_variant: cells by tag (Cstr_constant or Cstr_block of its hash), a tag absent from the row dropped"
+  [row ctx pmt]
+  (let [cases (filterv (fn [[r _]] (not (ty/absent? (ty/get-row-field ((:desc (simple-head (first r))) 1) row))))
+                       (:cases pmt))]
+    (divide (fn [head {:keys [arg mut]} rem]
+              (if ((:desc head) 2)
+                (vec (cons {:arg [:Lprim (l/pfield 1 :pointer false) [arg]] :kind :alias :mut mut} rem))
+                rem))
+            =
+            (fn [p] (let [d (:desc p) h (ty/hash-variant (d 1))] (if (d 2) [:Cstr_block h] [:Cstr_constant h])))
+            (fn [p rem] (if-let [a ((:desc p) 2)] (vec (cons a rem)) rem))
+            ctx (assoc pmt :cases cases))))
 
 (defn- divide-constant [ctx pmt]
   (divide (fn [_ _ rem] rem) = (fn [p] ((:desc p) 1)) (fn [_ rem] rem) ctx pmt))
@@ -755,6 +776,42 @@
           (assoc sw :consts (rm (:consts sw)) :blocks (rm (:blocks sw)) :fail (l/make-exit imax)))
         sw))))
 
+(defn- combine-variant
+  "Matching.combine_variant: constant tags by a test sequence or a switch on the hash, the others on their first
+  field, separated by isint"
+  [arg row partial ctx d [tll total1 _]]
+  (let [row (ty/row-repr row)
+        num-constr (if (:closed row)
+                     (count (remove (fn [[_ f]] (let [v (ty/field-view f)]
+                                                  (or (= :Rabsent (v 0)) (and (= :Reither (v 0)) (v 1) (seq (v 2))))))
+                                    (:fields row)))
+                     Long/MAX_VALUE)
+        int-or-block (fn [a if-int if-block] [:Lifthenelse [:Lprim (l/prim "isint") [a]] if-int if-block])
+        sig-complete (= (count tll) num-constr)
+        one-action (same-actions tll)
+        [fail local-jumps] (if (or sig-complete (= :total (:current partial)))
+                             [nil (jumps-empty :total)]
+                             (mk-failaction-neg partial ctx d))
+        [consts nonconsts] (split-cases tll)
+        constr-switch (fn [] (let [v (ty/ident-create "variant")]
+                               [:Llet :alias "" v [:Lprim (l/pfield 0 :pointer false) [arg]]
+                                (call-switcher fail [:Lvar v] Long/MIN_VALUE Long/MAX_VALUE nonconsts)]))
+        lam (if (and (nil? fail) one-action)
+              one-action
+              (cond
+                (and (= 1 (count consts) (count nonconsts)) (nil? fail))
+                (int-or-block arg (second (first consts)) (second (first nonconsts)))
+                (empty? nonconsts)
+                (let [lam (let [[cases st] (if fail (as-interval-canfail fail Long/MIN_VALUE Long/MAX_VALUE consts)
+                                               (as-interval-nofail consts))]
+                            (l/test-sequence arg cases st))]
+                  (if fail (int-or-block arg lam fail) lam))
+                (empty? consts)
+                (let [lam (constr-switch)] (if fail (int-or-block arg fail lam) lam))
+                :else
+                (int-or-block arg (call-switcher fail arg Long/MIN_VALUE Long/MAX_VALUE consts) (constr-switch))))]
+    [lam (jumps-union local-jumps total1)]))
+
 (defn- combine-constructor [arg cstr partial ctx d [dll total1 pats]]
   (if (= :Cstr_extension ((:tag cstr) 0))
     ;; combine_extension_constructor
@@ -963,6 +1020,8 @@
             :Constant (ctest divide-constant (fn [c dd cdiv] (combine-constant arg (d 1) arg-partial c dd cdiv)))
             :Construct (ctest divide-constructor (fn [c dd cdiv] (combine-constructor arg (d 1) arg-partial c dd cdiv)))
             :Lazy (compile-no-test #(divide-lazy ph %1 %2) ctx-combine partial ctx pmt)
+            :Variant (let [row (or (some-> (d 3) deref) (pm/variant-row-of ph))]
+                       (ctest #(divide-variant row %1 %2) (fn [c dd cdiv] (combine-variant arg row arg-partial c dd cdiv))))
             :Array (let [kind (ty/array-kind (:type ph))]
                      (ctest #(divide-array kind %1 %2) (fn [c dd cdiv] (combine-array arg kind arg-partial c dd cdiv))))
             (throw (ex-info (str "Matching: " (d 0) " patterns are outside the slice") {:ocaml-type-error "matching"}))))

@@ -77,7 +77,8 @@
 
 (def ^:private primitives
   (merge
-   {"%identity" {:t :identity} "%ignore" {:t :p :name "ignore" :arity 1} "%revapply" {:t :revapply} "%apply" {:t :apply}
+   {"%loc_LINE" {:t :loc :k :line} "%loc_FILE" {:t :loc :k :file} "%loc_LOC" {:t :loc :k :loc} "%loc_POS" {:t :loc :k :pos}
+    "%identity" {:t :identity} "%ignore" {:t :p :name "ignore" :arity 1} "%revapply" {:t :revapply} "%apply" {:t :apply}
     "%field0" {:t :field :pos 0} "%field1" {:t :field :pos 1}
     "%setfield0" {:t :setfield :pos 0} "%setfield1" {:t :setfield :pos 1}
     "%makeblock" {:t :makeblock :mut false} "%makemutable" {:t :makeblock :mut true}
@@ -252,13 +253,31 @@
     :atomic (:arity prim)
     (:apply :revapply :cmp) 2
     :sys-argv 0
+    :loc (:arity desc)
     (:p :array :bigarray) (:arity prim)
     :external (:arity desc)))
 
 (declare inline-lazy-force)
 
+(def ^:dynamic *prim-loc* "The location of the primitive's use (Translprim's loc)" nil)
+(declare pos-info)
+
+(defn- lambda-of-loc
+  "Translprim.lambda_of_loc"
+  [k]
+  (let [loc *prim-loc*
+        [file lnum cnum] (pos-info loc)
+        enum (+ (- (lex/pos-cnum (second loc)) (lex/pos-cnum (first loc))) cnum)]
+    (case k
+      :pos [:Lconst [:block 0 [[:string file] [:int lnum] [:int cnum] [:int enum]]]]
+      :file [:Lconst [:string file]]
+      :loc [:Lconst [:string (format "File \"%s\", line %d, characters %d-%d" file lnum cnum enum)]]
+      :line (l/lconst-int lnum))))
+
 (defn- lambda-of-prim [prim args]
   (case (:t prim)
+    :loc (let [lam (lambda-of-loc (:k prim))]
+           (if (empty? args) lam [:Lprim (l/pmakeblock 0 false nil) [lam (first args)]]))
     :sys-argv [:Lprim (l/pccall "caml_sys_argv") [(l/lconst-int 0)]]
     :raise (let [a (first args)
                  k (if (and (= :regular (:k prim)) (= :Lvar (a 0)) (@try-ids (a 1))) :reraise (:k prim))]
@@ -404,7 +423,7 @@
     (case (d 0)
       :Texp_ident (let [vd (d 2)]
                     (if (= :prim (first (:kind vd)))
-                      (let [p (lookup-primitive (second (:kind vd)))] (mark-used p vd) (transl-primitive vd (:type e)))
+                      (let [p (lookup-primitive (second (:kind vd)))] (mark-used p vd) (binding [*prim-loc* (:loc e)] (transl-primitive vd (:type e))))
                       (transl-value-path vd)))
       :Texp_constant (lambda-of-const (d 1))
       :Texp_let (transl-let (d 1) (d 2) (transl-exp (d 3)) false)
@@ -423,7 +442,7 @@
                 hcc (boolean (some (fn [a] (let [ad (:desc a)] (and (= :Texp_construct (ad 0)) (= :Cstr_constant ((:tag (ad 1)) 0)))))
                                    (when (= 2 (count arg-exps)) arg-exps)))
                 prim (specialize (:type f) hcc p)
-                lam (lambda-of-prim prim largs)]
+                lam (binding [*prim-loc* (:loc e)] (lambda-of-prim prim largs))]
             (if (empty? extra) lam (transl-apply lam extra)))
           (transl-apply (transl-exp f) args)))
       :Texp_match (transl-match e (d 1) (d 2) (d 3))
@@ -447,6 +466,13 @@
                           [:Lprim (l/pmakeblock (tag 1) false shape) ll]))
           :Cstr_extension (let [lam (transl-extension-path (tag 1))]
                             (if (tag 2) lam [:Lprim (l/pmakeblock 0 false (vec (cons "" shape))) (vec (cons lam ll))]))))
+      :Texp_variant (let [tag (ty/hash-variant (d 1))]
+                      (if-let [arg (d 2)]
+                        (let [lam (transl-exp arg)]
+                          (if-let [c (extract-constant lam)]
+                            [:Lconst [:block 0 [[:int tag] c]]]
+                            [:Lprim (l/pmakeblock 0 false nil) [(l/lconst-int tag) lam]]))
+                        (l/lconst-int tag)))
       :Texp_record (transl-record (:loc e) (d 1) (d 2) (d 3))
       :Texp_extension_constructor (transl-extension-path (d 1))
       :Texp_atomic_loc (let [r (d 1) lbl (d 2)]

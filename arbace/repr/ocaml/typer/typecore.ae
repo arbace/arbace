@@ -222,6 +222,30 @@
                      t)
       (:type p))))
 
+(defn build-or-pat
+  "Typecore.build_or_pat: #t as the or-pattern of its static row's tags, [path pattern]"
+  [env lid]
+  (let [path (env/lookup env :types lid)
+        _ (when-not path (type-error (str "Unbound type constructor " (str/join "." (env/lid-parts lid)))))
+        decl (env/find-decl path)
+        tyl (mapv (fn [_] (ty/newvar)) (:params decl))
+        e (ty/desc (ty/expand-head (ty/tconstr path tyl)))
+        _ (when-not (and (= :Tvariant (e 0)) (ty/static-row (e 1)))
+            (type-error (str "The type " (str/join "." (env/lid-parts lid)) " is not a variant type")))
+        [pats fields] (reduce (fn [[pats fields] [l f]]
+                                (let [v (ty/field-view f)]
+                                  (if (= :Rpresent (v 0))
+                                    (if-let [t (v 1)]
+                                      [(cons [l {:desc [:Tpat_any] :type t}] pats) (cons [l (ty/rf-either [t] false true)] fields)]
+                                      [(cons [l nil] pats) (cons [l (ty/rf-either [] true true)] fields)])
+                                    [pats fields])))
+                              [() ()] (ty/row-fields (e 1)))
+        fields (vec (reverse fields))
+        t (ty/newty [:Tvariant (ty/create-row fields (ty/newvar) false nil [path tyl])])
+        pats (map (fn [[l p]] {:desc [:Tpat_variant l p (atom nil)] :type t}) pats)]
+    (when (empty? pats) (type-error (str "The type " (str/join "." (env/lid-parts lid)) " is not a variant type")))
+    [path (reduce (fn [p p0] {:desc [:Tpat_or p0 p] :type t}) (first pats) (rest pats))]))
+
 (defn type-pat
   "The pattern sp at the expected type; its variables conj'ed onto the atom vars as [name id type]"
   [env sp expected vars]
@@ -295,6 +319,15 @@
                          (let [t (ty/instance (env/make-generic! (env/transl-type env (atom {}) (d 2))))]
                            (unify! t expected "pattern")
                            (type-pat env (d 1) expected vars)))
+      :Ppat_variant (let [tag (d 1) sarg (d 2)
+                          ;; Typecore.solve_Ppat_variant: an undecided tag, matched
+                          arg-type (when sarg (ty/newvar))
+                          row (ty/create-row [[tag (ty/rf-either (if arg-type [arg-type] []) (nil? sarg) true)]] (ty/newvar) false nil nil)]
+                      (unify! (ty/newty [:Tvariant row]) expected "pattern")
+                      (mk [:Tpat_variant tag (when sarg (type-pat env sarg arg-type vars)) (atom nil)] expected))
+      :Ppat_type (let [[_ p] (build-or-pat env (:txt (d 1)))]
+                   (unify! (:type p) expected "pattern")
+                   p)
       :Ppat_exception (mk [:Tpat_exception (type-pat env (d 1) (ty/type-exn) vars)] expected)
       :Ppat_lazy (let [t (ty/newvar)]
                    (unify! (ty/tconstr ty/path-lazy-t [t]) expected "pattern")
@@ -318,7 +351,7 @@
   (or (some (fn [p] (let [d (:desc p)] (case (d 0) :Tpat_var (d 1) :Tpat_alias (d 2) nil))) pats)
       (ty/ident-create default)))
 
-(defn- split-exn [p]
+(defn split-exn [p]
   ;; the value part of a computation pattern (nil when it is only an exception pattern)
   (let [d (:desc p)]
     (case (d 0)
@@ -326,6 +359,61 @@
       :Tpat_or (let [a (split-exn (d 1)) b (split-exn (d 2))]
                  (cond (and a b) (assoc p :desc [:Tpat_or a b]) a a :else b))
       p)))
+
+(defn- subpatterns [p]
+  (let [d (:desc p)]
+    (case (d 0)
+      (:Tpat_alias :Tpat_lazy :Tpat_exception) [(d 1)]
+      (:Tpat_tuple :Tpat_record) (mapv second (d 1))
+      :Tpat_construct (d 2)
+      :Tpat_variant (if (d 2) [(d 2)] [])
+      :Tpat_array (d 1)
+      :Tpat_or [(d 1) (d 2)]
+      [])))
+
+(defn- has-variants? [p] (or (= :Tpat_variant ((:desc p) 0)) (boolean (some has-variants? (subpatterns p)))))
+
+(defn- finalize-variant!
+  "Typecore.finalize_variant: an undecided tag of an open row made present, a matched one unmatched; the pattern's row
+  recorded for Matching"
+  [p]
+  (let [[_ tag opat r] (:desc p)
+        e (ty/desc (ty/expand-head (:type p)))]
+    (when (= :Tvariant (e 0))
+      (let [row (e 1) f (ty/get-row-field tag row) v (ty/field-view f)]
+        (reset! r row)
+        (when (= :Reither (v 0))
+          (let [[_ c tl m] v]
+            (cond
+              (and c (empty? tl) (not (ty/row-closed row))) (ty/link-row-field-ext! f (ty/rf-present nil))
+              (and (not c) (seq tl) (not (ty/row-closed row)))
+              (do (ty/link-row-field-ext! f (ty/rf-present (first tl)))
+                  (run! #(unify! (:type opat) % "pattern") tl))
+              (and m (not (ty/fixed-explanation row))) (ty/link-row-field-ext! f (ty/rf-either [] c false))
+              :else nil)))))))
+
+(defn- finalize-variants! [p]
+  (when (= :Tpat_variant ((:desc p) 0)) (finalize-variant! p))
+  (run! finalize-variants! (subpatterns p)))
+
+(declare split-exn)
+
+(defn pressure-variants!
+  "Typecore's polymorphic variant processing of a match's patterns: Parmatch.pressure_variants (the computation
+  patterns' value and exception parts apart), then finalize_variants"
+  [pats]
+  (when (some has-variants? pats)
+    (let [vals (keep split-exn pats)
+          exns (keep (fn [p] (letfn [(ex [p] (let [d (:desc p)]
+                                               (case (d 0)
+                                                 :Tpat_exception (d 1)
+                                                 :Tpat_or (let [a (ex (d 1)) b (ex (d 2))] (cond (and a b) (assoc p :desc [:Tpat_or a b]) a a :else b))
+                                                 nil)))]
+                               (ex p)))
+                     pats)]
+      (pm/pressure-variants vals)
+      (when (seq exns) (pm/pressure-variants exns)))
+    (run! finalize-variants! pats)))
 
 (defn partiality
   "Parmatch.check_partial: :total when the unguarded value patterns are exhaustive"
@@ -517,7 +605,18 @@
                            [params body t] (type-function env (d 1) sbody expected)]
                        (mkexp [:Texp_function params body] t loc))
       :Pexp_apply (let [f (type-exp env (d 1))
-                        [args t] (type-application env f (vec (d 2)))]
+                        sargs (vec (d 2))
+                        pname (let [fd (:desc f)] (when (and (= :Texp_ident (fd 0)) (= :prim (first (:kind (fd 2)))))
+                                                    (:name (second (:kind (fd 2))))))
+                        nolabels (and (= 2 (count sargs)) (every? #(= :Nolabel ((first %) 0)) sargs))
+                        ;; Typecore's application operators: x |> f and f @@ x typed as f x
+                        [f sargs] (cond
+                                    (and nolabels (= pname "%revapply") (inferred? (second (second sargs))))
+                                    [(type-exp env (second (second sargs))) [(first sargs)]]
+                                    (and nolabels (= pname "%apply") (inferred? (second (first sargs))))
+                                    [(type-exp env (second (first sargs))) [(second sargs)]]
+                                    :else [f sargs])
+                        [args t] (type-application env f sargs)]
                     (ret [:Texp_apply f args] t))
       :Pexp_match (let [arg (type-exp env (d 1))
                         cases (type-cases env (:type arg) expected (d 2) true)]
@@ -539,6 +638,17 @@
         (when-not (= (count sargs) (:arity c))
           (type-error (str "The constructor " (:name c) " expects " (:arity c) " argument(s)")))
         (mkexp [:Texp_construct c (mapv #(type-expect env %1 %2) sargs targs)] tres loc))
+      :Pexp_variant
+      (let [l (d 1) sarg (d 2)
+            e (ty/desc (ty/expand-head expected))
+            known (when (and sarg (= :Tvariant (e 0)))
+                    (let [v (ty/field-view (ty/get-row-field l (e 1)))] (when (and (= :Rpresent (v 0)) (v 1)) (v 1))))]
+        (if known
+          ;; the expected type's argument propagated (Typecore's first case)
+          (mkexp [:Texp_variant l (type-argument env sarg known)] expected loc)
+          (let [arg (when sarg (type-exp env sarg))
+                t (ty/newty [:Tvariant (ty/create-row [[l (ty/rf-present (:type arg))]] (ty/newvar) false nil nil)])]
+            (ret [:Texp_variant l arg] t))))
       :Pexp_record
       (let [fields (d 1) init-s (d 2)
             init (when init-s (type-exp env init-s))
@@ -619,11 +729,22 @@
                    (let [tm (*type-package* env (d 1) t)]
                      (unify! t expected "expression")
                      (mkexp [:Texp_pack tm] t loc)))
-      :Pexp_coerce (let [t2 (ty/instance (env/make-generic! (env/transl-type env (atom {}) (d 3))))
+      :Pexp_coerce (let [t2g (env/make-generic! (env/transl-type env (atom {}) (d 3)))
                          e (if-let [t1s (d 2)]
+                             ;; (e : t1 :> t2): Ctype.subtype t1 t2 is not checked (the program is one ocamlc accepts)
                              (type-expect env (d 1) (ty/instance (env/make-generic! (env/transl-type env (atom {}) t1s))))
-                             (type-exp env (d 1)))]
-                     ;; the subtyping check (Ctype.subtype) is not made: the program is one ocamlc accepts
+                             ;; Typecore.type_coerce: a ground coercion tried as one unification with the enlarged
+                             ;; type (Ctype.subtype's constraints, when it fails, are not ported); else the argument
+                             ;; unified with the enlarged type
+                             (let [lv @ty/current-level
+                                   [e gen] (ty/with-local-level (let [e (type-exp env (d 1))] [e (ty/generalizable? lv (:type e))]))
+                                   _ (ty/update-level lv (:type e))
+                                   at (:type e)]
+                               (if (and (not (ty/free-vars? at)) (not (ty/free-vars? t2g)))
+                                 (when-not gen (ty/try-unify (ty/unify at (ty/enlarge-type (ty/instance t2g)))))
+                                 (unify! at (ty/enlarge-type (ty/instance t2g)) "expression"))
+                               e))
+                         t2 (ty/instance t2g)]
                      (unify! t2 expected "expression")
                      (assoc e :type t2))
       :Pexp_newtype (let [e (type-newtype env (:txt (d 1)) (fn [env'] (let [e (type-exp env' (d 2))] [e (:type e)])))]
@@ -665,7 +786,8 @@
                                   now (mapv (fn [[path _]] [path (env/find-decl path)]) done)]
                               (undo-equations! done)
                               [c p @vars [done now]]))
-                    scases)]
+                    scases)
+        _ (pressure-variants! (mapv second typed))]
     (mapv (fn [[c p vars [before now]]]
             (let [env' (add-pattern-vars env vars)]
               (doseq [[path decl] now] (env/add-decl! path decl))
@@ -713,6 +835,7 @@
                               [targ nil]))
             vars (atom []) eqs (atom [])
             p (binding [*equations* eqs] (type-pat env spat tint vars))
+            _ (pressure-variants! [p])
             env' (add-pattern-vars env @vars)
             ;; a GADT parameter's equations hold over the rest of the function
             [params body _] (try (type-function env' (rest sparams) sbody tret) (finally (undo-equations! @eqs)))
@@ -777,6 +900,7 @@
       :Texp_let (and (every? #(nonexpansive? (:expr %)) (d 2)) (nonexpansive? (d 3)))
       :Texp_tuple (every? #(nonexpansive? (second %)) (d 1))
       :Texp_construct (every? nonexpansive? (d 2))
+      :Texp_variant (or (nil? (d 2)) (nonexpansive? (d 2)))
       :Texp_record (and (every? (fn [[l df]] (and (not (:mut l)) (or (= :kept (df 0)) (nonexpansive? (df 1))))) (d 1))
                         (or (nil? (d 3)) (nonexpansive? (d 3))))
       :Texp_field (nonexpansive? (d 1))
@@ -870,6 +994,7 @@
                                               p (type-pat env (:pvb_pat vb) (ty/newvar) vars)]
                                           [p @vars]))
                                svbs)
+                    _ (doseq [[p _] pats] (pressure-variants! [p]))
                     env-rec (if (= rec :Recursive) (reduce (fn [e [_ vs]] (add-pattern-vars e vs)) env pats) env)
                     exprs (mapv (fn [vb [p _]]
                                   (let [e (if-let [c (:pvb_constraint vb)]
