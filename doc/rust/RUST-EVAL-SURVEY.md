@@ -995,3 +995,7 @@ night's commands written (RE5.4).
 - **RES39 Output with addresses.** A run that prints a backtrace (std's abort after a double panic) has addresses neither side can
   match. Options: (a) **leave such programs out of the corpus (as built) and class a UI program that prints one**; (b) normalize
   `0x[0-9a-f]+` frames in `plan_norm` for both sides (run-program's too: RR5's). *Recommended: (a).*
+
+## Decided (2026-11-05, the user)
+
+RES35-RES39, each as recommended: the synthetic corpus as a table and templates with the generated files committed; arbace/rust/ out of embed.ae and the keys (built on gt9-build's keys commit); a judge recorded against a non-pin std allowed, re-recorded at night; the coverage subset by greedy cover after the first whole run; programs printing backtrace addresses left out.
