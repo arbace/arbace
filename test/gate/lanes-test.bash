@@ -13,6 +13,8 @@
 # Seconds, no build, no gate run. Usage: test/gate/lanes-test.bash
 # needs: exe (gate.lanes and the planner on stage 0)
 set -u
+# the gate's own run (bin/gate --clean's audit_step, GATE_CLEAN_INNER, audit_all) is not the fabricated runner's
+unset audit_step audit_all GATE_CLEAN_INNER
 here=$(cd "$(dirname "$0")/../.." && pwd)
 : "${ARBACE_HOST_EXE:?set ARBACE_HOST_EXE to stage 0 (a tool must not build one here)}"
 mkdir -p "${TMPDIR:-$here/.tmp/tmp}"
