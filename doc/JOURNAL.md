@@ -357,3 +357,52 @@ smaller parts), each on a branch of its own, held for after the tag (the merge p
   overflow into the day allowed).
 - **Merged into `next` (2026-11-05 morning):** `java-compiled-subset` and `audit-race`, for tonight's gate before the
   clean run.
+
+## 2026-11-05: the day's deep-thinking work, held for after the tag; the user's decisions
+
+The user asked for high-thinking work by day: the crops more mature, more complete, less dependent on the host's packages,
+with no heavy load on the host. Seven agents (four on Opus, three on Sonnet) worked on branches with sample checks only;
+everything is held for after `arbace-reaps-4-crops-v1` and pushed to `mac`.
+
+- **OCaml without `ocamlc`** (`ocaml-typer`, OC4 (b)'s route): OCaml 5.5.0's typing/ and lambda/ (Matching, Switch) ported,
+  about 3,900 lines, `doc/ocaml/TYPER.md`. On 36 samples the native Parsetree's types equal the toplevel's, the raw Lambda
+  equals `-drawlambda`, and oi's output equals the toplevel's. T7-T12 are left, about 31-49 days.
+- **C++ without clang** (`cpp-codegen`): `arbace/cpp/{abi,sema,codegen}.ae`, written from the standard and the Itanium
+  ABI, `doc/cpp/CODEGEN.md`. 38 samples run on cppi like clang's IR, clang accepts our IR, and the mangled names are
+  clang's. Templates and the library come next (G2-G6).
+- **Java's deferred cases triaged** (`java-deferred-triage`, `doc/classes/JAVA-DEFERRED-TRIAGE.md`): 24 root causes, ranked by
+  tests per day. The JCA alone blocks 176 eval and 168 AOT tests.
+- **Go's by-design cases reviewed** (`go-design-review`, `doc/go/GOI-DESIGN-REVIEW.md`): AOT already passes 156 of goi's
+  168 non-passes. `-race`, `GOROOT` and speed budgets bring eval to 1,673 / 164 on sample runs; the whole check is the
+  night's.
+- **Rust's eval, RE5** (`rust-re5`): the synthetic corpus (67 programs), the judge's self-test and the essential list. No
+  program ran on ci by day: there is no UI source or rust-src on the host, and std for ci is a night job.
+- **Haskell's hsi, HE5-HE7** (`haskell-he5`): running.
+- **GT9 built** (`gt9-build`): the hosts as data, the crops' pins, night concurrency for light crop chains, the costs per
+  crop, the crop rules, and per-batch step fragments. Also the keys commit, PYS30 (a): one exclusion list
+  (`arbace_crop_paths`) for gate_key, the runtime key and the javac key, so later crop batches no longer rekey the heavy
+  steps.
+- **The merge plan rehearsed** (`.tmp/tag-v2/merge-plan-rehearsal-1105.md`): 26 of 44 steps conflict. The night cost
+  drops sharply once the keys commit lands in batch 1.
+
+**Decided by the user (2026-11-05), all as recommended:**
+
+| area | proposals | where |
+|---|---|---|
+| Go | GOI-DESIGN-REVIEW's six | `doc/go/GOI-DESIGN-REVIEW.md` |
+| Java | JCS128-JCS135 (JC9, then JC9b) | `doc/classes/JAVA-DEFERRED-TRIAGE.md` |
+| OCaml | TY1-TY6 | `doc/ocaml/TYPER.md` |
+| Rust | RES35-RES39 | `doc/rust/RUST-EVAL-SURVEY.md` |
+| C++ | P1-P7 (clang's code ported only for templates and the ABI classification) | `doc/cpp/CODEGEN.md` |
+| the gate | GTS240-GTS245 | `doc/GATE-SURVEY.md`, "As built: GT9 (write-ahead)" |
+
+Each branch's doc records it.
+
+**The keyed `--full` (03:14-08:39):** 201 steps passed and 9 failed, on three causes:
+- **GT8.4's change to repr/clojure** (a11cf22a, 11-03) broke `repr-clojure`'s test and `java-fixtures`' provenance.
+- **HugeToString needs memory beyond the check's 24 GiB cap**, failing `java-judge` and `java-held`; it is now classed in
+  `:memory-limit`.
+- **C's five steps:** the new seed's compiled parser reads gcc's `limits-*.c`, which the evaluated parser refused. The
+  converter then overflowed Go's 1 GB stack, a fatal error that ended the corpus's run. A nesting bound in the parser
+  (4,000) now fails such a file the old way. Until the next re-seed, stage 0 evaluates the changed parser from the
+  checkout: torture-compile's parse check took 178 s, against 132 s compiled.
