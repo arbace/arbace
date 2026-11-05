@@ -325,11 +325,11 @@
 
 (defn resolve-arg
   "A template argument's form for the parameter `p` in `scope`."
-  [scope p f]
+  [scope p f & [pscope]]
   (case (:kind p)
     :type (if (and (seq? f) (= 'cpp/text (first f))) (sema/resolve-type scope (second f)) (sema/resolve-type-form scope f))
     :template (template-arg-of scope f)
-    (let [pt (param-type scope p)]
+    (let [pt (param-type (or pscope scope) p)]
       (if (or (abi/ptr? pt) (abi/ref? pt))
         (decl-arg scope pt f)
         (value-arg (const-form scope f) (:name p) pt)))))
@@ -423,7 +423,10 @@
                               (expand-type-pack scope (second f))
                               (let [packs (packs-named scope [(name (second f))])]
                                 (if (seq packs) (vec (:elems (second (first packs)))) [(value-arg (const-form scope (second f)) nil (param-type scope p))])))
-                            [(resolve-arg scope p f)])]
+                            ;; a non-type parameter's type may name the parameters before it (template <class T, T v>)
+                            [(resolve-arg scope p f (let [i (min (count out) (dec np))]
+                                                      (try (bind-scope (:scope t) (subvec ps 0 i) (subvec out 0 i) nil)
+                                                           (catch arbace.lang.ExceptionInfo _ nil))))])]
                    (recur (rest fs) (into out xs)))
                  out))]
     (when (and (not pack?) (> (count args) np)) (fail :template "too many template arguments for " (:name t)))
@@ -908,7 +911,7 @@
   (template <class T, T v>: Tn T_), else nil."
   [t]
   (let [ss (sym-scope t)]
-    (mapv (fn [p] (when (= :value (:kind p)) (let [ty (param-type ss p)] (when (dependent? ty) ty)))) (:params t))))
+    (mapv (fn [p] (when (= :value (:kind p)) (let [ty (param-type ss p)] (when (dependent? ty) {:ty ty :pack (:pack p)})))) (:params t))))
 
 (defn- name-pack-params!
   "A specialization's parameters from a function parameter pack (Ts... ts): their names, the pack's name standing for
@@ -938,6 +941,10 @@
             _ (.remove ^java.util.HashMap (:names ps) (:name (:pattern t)))]
         (upd-fn! fid assoc :lazy true :inline true :keep-def-scope true :tinst {:tid tid :args args :tsig (sym-sig t) :tn (tn-types t)})
         (name-pack-params! fid (:pattern t))
+        (when-let [decls (seq (:decls t))]
+          (let [f (sema/fnd fid)
+                alt (for [d decls] (mapv #(first (kids %)) (filter #(= "ParmVarDecl" (:kind %)) (kids d))))]
+            (upd-fn! fid assoc :defaults (vec (map-indexed (fn [i x] (or x (some #(get % i) alt))) (:defaults f))))))
         (upd-tmpl! tid assoc-in [:insts args] fid)
         fid)))
 
@@ -1159,7 +1166,8 @@
                        (:id %))
                     (.get ^java.util.HashMap (:names scope) (:name n)))]
       (if old
-        (when body? (upd-tmpl! old assoc :pattern pattern :params (tparams n) :sig nil))
+        ;; the definition replaces the declaration; the declarations' default arguments are kept ([dcl.fct.default]/4)
+        (when body? (upd-tmpl! old #(assoc % :pattern pattern :params (tparams n) :sig nil :decls (conj (vec (:decls %)) (:pattern %)))))
         (let [tid (next-id)]
           (swap! *tmpls* assoc tid {:id tid :tk :fn :name (:name n) :scope scope :path (:path scope) :params (tparams n) :pattern pattern
                                     :pos (:_b n) :insts {}})
