@@ -16,6 +16,10 @@ Pieces:
 
 All three are tools' namespaces evaluated from the checkout on the tools' host (stage 0); nothing is embedded.
 
+Since cpp-codegen (2026-11-05, [CODEGEN.md](CODEGEN.md)) a second producer of LLVM forms: `arbace.cpp.codegen` writes
+them from the native parser's tree with a semantic analysis of its own (`arbace.cpp.sema`), no clang; the lowering and
+the runtime take them as they take clang's (`bin/cppi codegen`, `codegen-check`).
+
 ## 1. Principles
 
 1. **The text's grammar, LangRef's, as clang 23 writes it at `-O0`.** One form per top-level entity in the text's
