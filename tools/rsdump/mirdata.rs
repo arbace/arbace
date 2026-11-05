@@ -306,6 +306,14 @@ impl<'tcx> W<'tcx> {
                         }
                     }
                 }
+                // a closure coerced to a function pointer: the symbol of the shim that pointer calls
+                if self.mono && matches!(k, CastKind::PointerCoercion(rustc_middle::ty::adjustment::PointerCoercion::ClosureFnPointer(_), _)) {
+                    if let ty::Closure(d, a) = *o.ty(&b_.local_decls, self.tcx).kind() {
+                        let a = self.tcx.erase_and_anonymize_regions(a);
+                        let i = ty::Instance::resolve_closure(self.tcx, d, a, ty::ClosureKind::FnOnce);
+                        vt = format!(" :fn-symbol {}", q(&self.tcx.symbol_name(i).name.to_string()));
+                    }
+                }
                 format!("(cast {} {} {}{})", q(&format!("{k:?}")), self.operand(o), self.ty(*t), vt)
             }
             Rvalue::BinaryOp(op, ab) => format!("(binop {} {} {})", q(&format!("{op:?}")), self.operand(&ab.0), self.operand(&ab.1)),
