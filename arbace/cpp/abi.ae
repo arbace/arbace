@@ -87,13 +87,52 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Class properties
 
-(defn dynamic? "Whether the class has a vptr (virtual functions of its own or a dynamic base)." [id]
-  (let [c (cls id)] (boolean (or (seq (:virtuals c)) (some #(dynamic? (:cls %)) (:bases c))))))
+(defn vbases
+  "The class's virtual bases, direct and indirect, in inheritance graph order (Itanium §2.4 II.4: a pre-order of the
+  bases, each virtual base where first met)."
+  [id]
+  (let [seen (java.util.LinkedHashSet.)]
+    ((fn walk [x] (doseq [b (:bases (cls x))] (when (:virtual b) (.add seen (:cls b))) (walk (:cls b)))) id)
+    (vec seen)))
+
+(defn dynamic? "Whether the class has a vptr (virtual functions of its own, a dynamic base, a virtual base)." [id]
+  (let [c (cls id)] (boolean (or (seq (:virtuals c)) (some :virtual (:bases c)) (some #(dynamic? (:cls %)) (:bases c))))))
+
+(declare layout)
+
+(defn nearly-empty? "A dynamic class with no data but its vptr (§2.4 II.3)." [id]
+  (and (dynamic? id) (= 8 (long (:nvsize (layout id))))))
+
+(defn- indirect-primaries
+  "The virtual bases that are the primary base of a base class of `id` (its hierarchy's, `id` aside)."
+  [id]
+  (let [out (java.util.HashSet.)]
+    ((fn walk [x] (doseq [b (:bases (cls x))]
+                    (let [pb (:primary (layout (:cls b)))] (when (:virtual pb) (.add out (:cls pb))))
+                    (walk (:cls b))))
+     id)
+    out))
 
 (defn primary-base
-  "The primary base (Itanium §2.4 II.3): the first non-virtual dynamic base."
+  "The primary base (Itanium §2.4 II.3): the first non-virtual dynamic base, else the first nearly empty virtual base
+  (in the inheritance graph's pre-order) that is not an indirect primary base, else the first nearly empty one: the
+  base's entry ({:cls :virtual ...}) or nil."
   [id]
-  (let [c (cls id)] (first (filter #(and (not (:virtual %)) (dynamic? (:cls %))) (:bases c)))))
+  (let [c (cls id)]
+    (or (first (filter #(and (not (:virtual %)) (dynamic? (:cls %))) (:bases c)))
+        (when (dynamic? id)
+          (let [ip (indirect-primaries id)
+                first-ne (atom nil)
+                found ((fn sel [x]
+                         (some (fn [b]
+                                 (or (when (and (:virtual b) (nearly-empty? (:cls b)))
+                                       (if (.contains ^java.util.HashSet ip (:cls b))
+                                         (do (when-not @first-ne (reset! first-ne b)) nil)
+                                         b))
+                                     (when (seq (vbases (:cls b))) (sel (:cls b)))))
+                               (:bases (cls x))))
+                       id)]
+            (when-let [b (or found @first-ne)] {:cls (:cls b) :virtual true}))))))
 
 (defn empty-class? [id]
   (let [c (cls id)] (and (empty? (:fields c)) (not (dynamic? id)) (every? #(empty-class? (:cls %)) (:bases c)))))
@@ -108,29 +147,43 @@
                            (and (not (ref? t)) (or (not (class? t)) (pod-for-layout? (:id t))))))
                  (:fields c)))))
 
+(defn- nonvirtual-subobjects
+  "[[class-id offset] ...] of the non-virtual subtree of class `x` at `off` (itself first)."
+  [x ^long off]
+  (let [c (cls x) l (layout x)]
+    (into [[x off]] (mapcat (fn [[i b]] (when-not (:virtual b) (nonvirtual-subobjects (:cls b) (+ off (long (nth (:bases l) i))))))
+                            (map-indexed vector (:bases c))))))
+
 (defn layout
-  "The class's layout: {:size :align :dsize :fields [offsets in order] :bases [offsets in order] :vptr bool}, cached."
+  "The class's layout (Itanium §2.4), cached: {:size :align (the complete object's) :nvsize :nvalign :dsize (the
+  non-virtual part's, what a derived class lays out) :fields [offsets] :bitoffs [bit offsets of bit-fields] :bases
+  [offsets of the non-virtual bases, nil for virtual ones] :vbases {class-id offset} (in a complete object) :vptr bool
+  :primary {:cls :virtual}}."
   [id]
   (or (:layout (cls id))
       (let [c (cls id)
             dyn (dynamic? id)
+            ;; a placeholder while the primary base is chosen (nearly-empty? asks a base's layout, never this one's)
             pb (primary-base id)
-            ;; the primary base at 0 holds the vptr; else the class's own vptr at 0
-            start (if (and dyn (not pb)) 8 0)
+            pbv (:virtual pb)
+            ;; a non-virtual primary base at 0 holds the vptr; else the class's own vptr at 0 (shared with a virtual primary)
+            start (if (and dyn (or (nil? pb) pbv)) 8 0)
             init-align (if dyn 8 1)
             bases (vec (:bases c))
-            pbi (when pb (first (keep-indexed (fn [i b] (when (identical? b pb) i)) bases)))
+            pbi (when (and pb (not pbv)) (first (keep-indexed (fn [i b] (when (and (= (:cls b) (:cls pb)) (not (:virtual b))) i)) bases)))
             order (if pbi (cons pbi (remove #(= % pbi) (range (count bases)))) (range (count bases)))
             [off align boffm]
             (reduce (fn [[off align m] i]
-                      (let [bid (:cls (nth bases i))
+                      (let [b (nth bases i)
+                            bid (:cls b)
                             bl (layout bid)
-                            ba (long (:align bl))]
+                            ba (long (:nvalign bl))
+                            bsz (long (if (:pod bl) (:size bl) (:nvsize bl)))]
                         (cond
-                          (= i pbi) [(max (long off) (long (if (:pod bl) (:size bl) (:dsize bl)))) (max (long align) ba) (assoc m i 0)]
+                          (:virtual b) [off align m]
+                          (= i pbi) [(max (long off) bsz) (max (long align) ba) (assoc m i 0)]
                           (empty-class? bid) [off (max (long align) ba) (assoc m i 0)]
-                          :else (let [o (align-up off ba)]
-                                  [(+ o (long (if (:pod bl) (:size bl) (:dsize bl)))) (max (long align) ba) (assoc m i o)]))))
+                          :else (let [o (align-up off ba)] [(+ o bsz) (max (long align) ba) (assoc m i o)]))))
                     [(long start) (long init-align) {}]
                     order)
             boffs (mapv #(get boffm %) (range (count bases)))
@@ -153,26 +206,55 @@
                             [(if uni (max offb (* 8 (+ o s))) (* 8 (+ o s))) (max (long align) a) (conj foffs o) (conj bitoffs nil)]))))
                     [(* 8 (long off)) align [] []]
                     (:fields c))
-            dsize (quot (+ (long offb) 7) 8)
+            nvsize (quot (+ (long offb) 7) 8)
+            nvalign align
+            pre {:nvsize nvsize :nvalign nvalign :dsize nvsize :fields foffs :bitoffs bitoffs :bases boffs :vptr dyn
+                 :pod (pod-for-layout? id) :primary pb}
+            _ (update-cls! id assoc :layout (assoc pre :size (max 1 (align-up nvsize nvalign)) :align nvalign :vbases {} :partial true))
+            ;; the virtual bases of the complete object: each indirect primary base where its class's subobject is,
+            ;; the others after the non-virtual part in inheritance graph order
+            ip (indirect-primaries id)
+            vbo (java.util.LinkedHashMap.)
+            mark! (fn [x ^long xoff]
+                    (doseq [[y yoff] (nonvirtual-subobjects x xoff)]
+                      (let [p (:primary (layout y))]
+                        (when (and (:virtual p) (not (.containsKey vbo (:cls p)))) (.put vbo (:cls p) yoff)))))
+            _ (when pbv (.put vbo (:cls pb) 0))
+            _ (mark! id 0)
+            [dsize align]
+            (reduce (fn [[ds al] v]
+                      (if (or (.containsKey vbo v) (.contains ^java.util.HashSet ip v))
+                        [ds al]
+                        (let [vl (layout v)
+                              o (if (empty-class? v) 0 (align-up ds (:nvalign vl)))]
+                          (.put vbo v o)
+                          (mark! v o)
+                          [(if (empty-class? v) ds (+ o (long (:nvsize vl)))) (max (long al) (long (:nvalign vl)))])))
+                    [nvsize nvalign]
+                    (vbases id))
             size (max 1 (align-up dsize align))
-            l {:size size :align align :dsize dsize :fields foffs :bitoffs bitoffs :bases boffs :vptr dyn :pod (pod-for-layout? id)}]
+            l (assoc pre :size size :align align :vbases (into {} vbo))]
         (update-cls! id assoc :layout l)
         l)))
 
 (defn field-offset ^long [id ^long i] (long (nth (:fields (layout id)) i)))
 
 (defn base-path
-  "The chain of [class-id base-index] steps from class `from` to its base `to` (nil when `to` is not a base), and the
-  total offset: [steps offset]."
+  "The way from class `from` to its base `to`: [steps offset vbase] -- the [class-id base-index] steps, and the offset of
+  `to` from `from` when no step is virtual (vbase nil), else from the last virtual base on the way (vbase its id); nil
+  when `to` is not a base."
   [from to]
   (if (= from to)
-    [[] 0]
+    [[] 0 nil]
     (some (fn [[i bs]]
-            (when-let [[steps off] (base-path (:cls bs) to)]
-              [(into [[from i]] steps) (+ (long (nth (:bases (layout from)) i)) (long off))]))
+            (when-let [[steps off vb] (base-path (:cls bs) to)]
+              [(into [[from i]] steps)
+               (cond vb off (:virtual bs) off :else (+ (long (nth (:bases (layout from)) i)) (long off)))
+               (or vb (when (:virtual bs) (:cls bs)))]))
           (map-indexed vector (:bases (cls from))))))
 
 (defn derived-from? [d bse] (and (not= d bse) (some? (base-path d bse))))
+(defn has-vbases? [id] (boolean (seq (vbases id))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; LLVM types of values

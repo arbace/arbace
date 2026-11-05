@@ -156,7 +156,18 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Functions referenced
 
-(defn- fn-name ^String [fid] (let [f (sema/fnd fid)] (abi/mangle-fn f (when (#{:ctor :dtor} (:kind f)) 2))))
+(defn vb-class? [cid] (boolean (and cid (abi/has-vbases? cid))))
+
+(defn- fn-variant
+  "A constructor's or destructor's variant: 1 (complete object) or 2 (base object) for a class with virtual bases, else
+  2 (the complete one an alias of it)."
+  [f v]
+  (when (#{:ctor :dtor} (:kind f)) (if (and (vb-class? (:cls f)) (= 1 v)) 1 2)))
+
+(defn- fn-name ^String [fid & [v]] (let [f (sema/fnd fid)] (abi/mangle-fn f (fn-variant f (or v 2)))))
+
+(defn- takes-vtt? "The base-object constructor or destructor of a class with virtual bases: a VTT after this." [f v]
+  (and (#{:ctor :dtor} (:kind f)) (vb-class? (:cls f)) (= 2 (fn-variant f v))))
 
 ;; The calling convention (CODEGEN.md's P3, decided (b)): scalars and references as clang passes them; a class whose
 ;; copy and destruction are trivial by the SysV psABI's classes (arbace.cpp.abi/classify-class) in up to two registers'
@@ -179,11 +190,11 @@
 
 (defn sig-plan
   "{:ret llvm-type :ret-k :sret|:regs|:ignore|:direct :ret-parts :ps [llvm-types] :params [{:k :direct|:regs|:ind|:ignore
-  :parts}]} of a function type (`this?`: a method's object first)."
-  [ret-t ps-t this?]
+  :parts}]} of a function type (`this?`: a method's object first; `vtt?`: a VTT after it)."
+  [ret-t ps-t this? & [vtt?]]
   (let [rc (when (abi/class? (abi/unq ret-t)) (class-pass ret-t))
         ret-k (cond (nil? rc) :direct (= :ind rc) :sret (= :ignore rc) :ignore :else :regs)
-        ints (atom (- 6 (if (= ret-k :sret) 1 0) (if this? 1 0)))
+        ints (atom (- 6 (if (= ret-k :sret) 1 0) (if this? 1 0) (if vtt? 1 0)))
         sses (atom 8)
         params (vec (for [t ps-t]
                       (cond
@@ -206,9 +217,9 @@
     {:ret (case ret-k :direct (if (abi/ref? ret-t) 'ptr (abi/llvm-type ret-t true)) (:sret :ignore) 'void
                 :regs (if (= 1 (count rc)) (part-ltype (first rc)) (apply list 'struct (map part-ltype rc))))
      :ret-k ret-k :ret-parts (when (= ret-k :regs) rc)
-     :ps (vec (concat (when (= ret-k :sret) ['ptr]) (when this? ['ptr])
+     :ps (vec (concat (when (= ret-k :sret) ['ptr]) (when this? ['ptr]) (when vtt? ['ptr])
                       (mapcat (fn [p] (case (:k p) :regs (map part-ltype (:parts p)) :ignore [] [(:t p)])) params)))
-     :pattrs (vec (concat (when (= ret-k :sret) [[]]) (when this? [[]])
+     :pattrs (vec (concat (when (= ret-k :sret) [[]]) (when this? [[]]) (when vtt? [[]])
                           (mapcat (fn [p] (case (:k p) :regs (map (constantly []) (:parts p)) :ignore [] [(vec (:attrs p))])) params)))
      :params params}))
 
@@ -217,10 +228,10 @@
 (defn- param-ltype [t] (if (or (abi/ref? t) (abi/class? (abi/unq t))) 'ptr (abi/llvm-type t true)))
 
 (defn- fn-sig
-  "[ret-type param-types variadic plan] of a function as this code generator calls it: sret first, this, the
-  parameters."
-  [f]
-  (let [plan (sig-plan (:ret (:ty f)) (:ps (:ty f)) (boolean (and (:cls f) (not (:static f)))))]
+  "[ret-type param-types variadic plan] of a function (its variant `v`) as this code generator calls it: sret first,
+  this, the VTT, the parameters."
+  [f & [v]]
+  (let [plan (sig-plan (:ret (:ty f)) (:ps (:ty f)) (boolean (and (:cls f) (not (:static f)))) (takes-vtt? f v))]
     [(:ret plan) (:ps plan) (:va (:ty f)) plan]))
 
 (declare val! emit! alloca! memcpy!)
@@ -247,14 +258,15 @@
 (declare nothrow-fn?)
 
 (defn- want-fn!
-  "The function's symbol, its definition queued (or its declaration written)."
-  [fid]
-  (let [f (sema/fnd fid) nm (fn-name fid)]
-    (when-not (contains? (:wanted @*top*) fid)
-      (swap! *top* update :wanted conj fid)
+  "The function's symbol (a constructor's or destructor's variant `v`), its definition queued (or its declaration
+  written)."
+  [fid & [v]]
+  (let [f (sema/fnd fid) v (fn-variant f (or v 2)) nm (fn-name fid v)]
+    (when-not (contains? (:wanted @*top*) [fid v])
+      (swap! *top* update :wanted conj [fid v])
       (if (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
-        (swap! *top* update :queue conj fid)
-        (let [[r ps va plan] (fn-sig f)] (declare! nm r ps :va va :nounwind (nothrow-fn? f) :pattrs (:pattrs plan)))))
+        (swap! *top* update :queue conj [fid v])
+        (let [[r ps va plan] (fn-sig f v)] (declare! nm r ps :va va :nounwind (nothrow-fn? f) :pattrs (:pattrs plan)))))
     (gsym nm)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -282,13 +294,13 @@
           b (val! (list 'icmp :ne 'i8 v 0))]
       (condbr! b l1 l2)
       (begin! l1)
-      (call-dtor! (:cls c) (:addr c))
+      (call-dtor! (:cls c) (:addr c) (:vtt c))
       (emit! (list 'store ['i8 0] ['ptr fl] :align 1))
       (begin! l2))
     (if (:array c)
       (let [cid (:cls c) n (long (:n c)) sz (abi/size-of {:k :class :id cid})]
         (doseq [i (range (dec n) -1 -1)] (call-dtor! cid (offset! (:array c) (* i sz)))))
-      (call-dtor! (:cls c) (:addr c))))))
+      (call-dtor! (:cls c) (:addr c) (:vtt c))))))
 
 (defn- push-temp-cleanup! [cid addr]
   (when (nontrivial-dtor? cid)
@@ -319,6 +331,7 @@
 ;; :size n} (new's storage while its initializer runs), {:terminate true} (the bottom of a noexcept function).
 
 (def ^:dynamic *no-eh* false) ; inside a landing pad: calls are plain
+(def ^:dynamic *as-base* nil) ; {:vtt v}: the next constructor or destructor called is a base subobject's
 
 (defn- eh-state [] (vec (concat (:cleanups @*f*) (when *extend* @*extend*) (when *temps* @*temps*))))
 
@@ -341,7 +354,7 @@
 
 (defn- run-cleanup-eh! [c]
   (cond
-    (:eh-only c) (call-dtor! (:cls c) (:addr c))
+    (:eh-only c) (call-dtor! (:cls c) (:addr c) (:vtt c))
     (:delete c) (do (declare! "_ZdlPvm" 'void '[ptr i64] :nounwind true)
                     (emit! (list 'call 'void (gsym "_ZdlPvm") [['ptr (:delete c)] ['i64 (:size c)]] :attrs [:nounwind])))
     :else (run-cleanup! c)))
@@ -461,7 +474,7 @@
 (defn- emit-call!
   "A call by the plan (sig-plan) of the function type `ft`: the parameters' initializers' operands coerced, the object
   `obj`, the result's (a class's into `dest`)."
-  [plan callee va ft inits obj dest nounwind]
+  [plan callee va ft inits obj dest nounwind & [vtt]]
   (let [vals (arg-values (:ps ft) inits)
         args (vec (apply concat
                          (map-indexed (fn [i [t v]]
@@ -471,7 +484,7 @@
                                             :ignore []
                                             [(vec (concat [t] (:attrs pp) [v]))])))
                                       vals)))
-        args (vec (concat (when (= :sret (:ret-k plan)) [['ptr dest]]) (when obj [['ptr obj]]) args))
+        args (vec (concat (when (= :sret (:ret-k plan)) [['ptr dest]]) (when obj [['ptr obj]]) (when vtt [['ptr vtt]]) args))
         ret (:ret plan)
         fty (if va (list 'fn ret (conj (:ps plan) '&)) ret)
         r (call-insn! ret fty callee args nounwind)]
@@ -488,7 +501,10 @@
   initializers; the result's operand (an address for a reference result)."
   [fid obj inits dest virtual]
   (let [f (sema/fnd fid)
-        [ret ps va] (fn-sig f)]
+        ;; a base subobject's constructor or destructor (*as-base*: its VTT): the base-object variant
+        ab (when (#{:ctor :dtor} (:kind f)) *as-base*)
+        v (if (and ab (vb-class? (:cls f))) 2 1)
+        [ret ps va] (fn-sig f v)]
     (cond
       ;; the trivial special members: a copy of bytes, nothing
       (and (:trivial f) (= "=" (:op f)))
@@ -498,15 +514,19 @@
       (and (:trivial f) (= :dtor (:kind f))) nil
       (and (:trivial f) (= :ctor (:kind f)) (empty? (:ps (:ty f)))) nil
       :else
-      (let [plan (nth (fn-sig f) 3)
-            callee (if virtual (vcall-target (:cls f) fid nil obj) (want-fn! fid))]
-        (emit-call! plan callee va (:ty f) inits (when (and (:cls f) (not (:static f))) obj) dest (nothrow-fn? f))))))
+      (let [plan (nth (fn-sig f v) 3)
+            callee (if virtual (vcall-target (:cls f) fid nil obj) (want-fn! fid v))]
+        (binding [*as-base* nil]
+          (emit-call! plan callee va (:ty f) inits (when (and (:cls f) (not (:static f))) obj) dest (nothrow-fn? f)
+                      (when (takes-vtt? f v) (:vtt ab))))))))
 
 (defn call-dtor!
-  "Calls the class's complete destructor on the object at `addr` (nothing for a trivial one)."
-  [cid addr]
+  "Calls the class's complete destructor on the object at `addr` (nothing for a trivial one); with `vtt`, a base
+  subobject's (the base-object destructor of a class with virtual bases)."
+  [cid addr & [vtt]]
   (when (nontrivial-dtor? cid)
-    (call! (:dtor (abi/cls cid)) addr [] nil false)))
+    (binding [*as-base* (when vtt {:vtt vtt})]
+      (call! (:dtor (abi/cls cid)) addr [] nil false))))
 
 (defn- mcall!
   "A call through a pointer to member function (Itanium §2.3): this adjusted, then the function the pointer names, or
@@ -559,6 +579,14 @@
           (fail :codegen "no address for " (:name v))))))
 
 (defn- base-offset [from to] (second (abi/base-path from to)))
+
+(declare vbase-addr!)
+
+(defn- base-addr!
+  "The address of the base `to` of the object of class `from` at `addr` (a virtual base's by the vtable's vbase offset)."
+  [addr from to]
+  (let [[_ off vb] (abi/base-path from to)]
+    (if vb (offset! (vbase-addr! addr from vb) off) (offset! addr off))))
 
 (defn- int-op [o signed]
   (case o "+" 'add "-" 'sub "*" 'mul "/" (if signed 'sdiv 'udiv) "%" (if signed 'srem 'urem) "&" 'and "|" 'or "^" 'xor
@@ -641,7 +669,17 @@
       :fp->int (val! (list (if (abi/signed? to) 'fptosi 'fptoui) (abi/llvm-type from true) (emit-rv (:e e)) (abi/llvm-type to true)))
       :fp (let [bf (abi/size-of from) bt (abi/size-of to)]
             (val! (list (if (< bf bt) 'fpext 'fptrunc) (abi/llvm-type from true) (emit-rv (:e e)) (abi/llvm-type to true))))
-      :base (ptr-adjust! (emit-rv (:e e)) (base-offset (:id (abi/unq (:to from))) (:id (abi/unq (:to to)))))
+      :base (let [fc (:id (abi/unq (:to from))) tc (:id (abi/unq (:to to))) [_ off vb] (abi/base-path fc tc)]
+              (if vb
+                (let [v (emit-rv (:e e))
+                      l1 (new-label "cast.notnull") l2 (new-label "cast.end") here (:label @*f*)
+                      isnull (val! (list 'icmp :eq 'ptr v 'null))]
+                  (condbr! isnull l2 l1)
+                  (begin! l1)
+                  (let [adj (base-addr! v fc tc) from (:label @*f*)]
+                    (begin! l2)
+                    (val! (list 'phi 'ptr [adj from] ['null here]))))
+                (ptr-adjust! (emit-rv (:e e)) off)))
       :derived (ptr-adjust! (emit-rv (:e e)) (- (long (base-offset (:id (abi/unq (:to to))) (:id (abi/unq (:to from)))))))
       :int->ptr (val! (list 'inttoptr (abi/llvm-type from true) (emit-rv (:e e)) 'ptr))
       :ptr->int (val! (list 'ptrtoint 'ptr (emit-rv (:e e)) (abi/llvm-type to true))))))
@@ -867,7 +905,7 @@
     :var (var-addr (:id e))
     :deref (emit-rv (:e e))
     :field (field-place (emit-lv (:obj e)) (:cls e) (:i e))
-    :base-lv (offset! (emit-lv (:e e)) (base-offset (:id (abi/unq (:ty (:e e)))) (:to e)))
+    :base-lv (base-addr! (emit-lv (:e e)) (:id (abi/unq (:ty (:e e)))) (:to e))
     :derived-lv (offset! (emit-lv (:e e)) (- (long (base-offset (:to e) (:id (abi/unq (:ty (:e e))))))))
     :reinterpret-lv (emit-lv (:e e))
     :str (gsym (string-global (:s e)))
@@ -1176,48 +1214,249 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Functions
 
-;; The vtable group (Itanium §2.5.2): the primary vtable, then a secondary one for each dynamic base subobject that is
-;; not a primary base, in a pre-order of the bases; a secondary vtable's slots are its class's with each function
-;; replaced by its final overrider in the complete class, through a this-adjusting thunk when the overrider's
-;; subobject is elsewhere
-
-(defn vtable-group
-  "[{:cls :off :chain [[cls off] ...]} ...] of the class `cid`: its vtables' subobjects in order."
-  [cid]
-  (let [out (atom [{:cls cid :off 0 :chain [[cid 0]]}])]
-    ((fn walk [x ^long off chain]
-       (let [c (abi/cls x) l (abi/layout x) pb (abi/primary-base x)]
-         (doseq [[i b] (map-indexed vector (:bases c))]
-           (let [bid (:cls b) bo (+ off (long (nth (:bases l) i))) ch (conj chain [bid bo])]
-             (when (abi/dynamic? bid)
-               (when-not (identical? b pb) (swap! out conj {:cls bid :off bo :chain ch}))
-               (walk bid bo ch))))))
-     cid 0 [[cid 0]])
-    @out))
+;; Vtables (Itanium §2.5, §2.6; in the structure of clang's ItaniumVTableBuilder and VTTBuilder): a vtable group is
+;; the primary vtable of a class, the secondary vtables of its dynamic non-virtual bases that are not primary, then the
+;; vtables of its virtual bases that are no class's primary base; each vtable is its vcall and vbase offsets (the first
+;; closest to the address point), the offset to top, the type_info, then the slots of its class's primary chain with
+;; each function's final overrider in the most derived class, reached through a this-adjusting thunk (non-virtual, or
+;; virtual by a vcall offset when the way from the overrider down to the slot's class crosses a virtual base). A class
+;; with virtual bases has a VTT (§2.6.2) and construction vtables (§2.6.4) for its bases that have virtual bases; its
+;; base-object constructor and destructor take a VTT and set the vptrs from it.
 
 (defn- overrides-fn? [f g]
   (and (= (:kind g) (:kind f))
        (or (= :dtor (:kind f))
            (and (= (:name g) (:name f)) (= (boolean (:cq g)) (boolean (:cq f))) (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps (:ty f))))))))
 
+(defn- subobjects
+  "The subobjects of class `m` placed at `moff` in the layout class `lid`: [{:cls :off (in lid) :vroot (the virtual
+  base it lies in, or nil) :anc #{[cls off] of its non-virtual ancestors}} ...]."
+  [m lid ^long moff]
+  (let [lvb (:vbases (abi/layout lid)) out (atom []) seen (java.util.HashSet.)]
+    ((fn nv [x ^long off vroot anc]
+       (swap! out conj {:cls x :off off :vroot vroot :anc anc})
+       (let [l (abi/layout x)]
+         (doseq [[i b] (map-indexed vector (:bases (abi/cls x)))]
+           (if (:virtual b)
+             (when (.add seen (:cls b)) (nv (:cls b) (long (get lvb (:cls b))) (:cls b) #{}))
+             (nv (:cls b) (+ off (long (nth (:bases l) i))) vroot (conj anc [x off]))))))
+     m moff nil #{})
+    @out))
+
+(defn- contains-sub? [x s]
+  (or (and (= (:cls x) (:cls s)) (= (:off x) (:off s)))
+      (contains? (:anc s) [(:cls x) (:off x)])
+      (boolean (and (:vroot s) (abi/derived-from? (:cls x) (:vroot s))))))
+
+(defn- find-sub [subs cls off] (or (first (filter #(and (= cls (:cls %)) (= off (:off %))) subs)) {:cls cls :off off :anc #{}}))
+
 (defn- final-overrider
-  "[fid offset] of the final overrider of the slot function `fid` in a vtable of the subobject the chain ends at."
-  [chain fid]
-  (let [g (sema/fnd fid)]
-    (or (some (fn [[x off]] (some #(when (overrides-fn? (sema/fnd %) g) [% off]) (:virtuals (abi/cls x)))) (butlast chain))
-        [fid (second (last chain))])))
+  "[fid subobject] of the final overrider of `g` (declared in the subobject `s`) among `subs`."
+  [subs gid s]
+  (let [g (sema/fnd gid)
+        cands (keep (fn [x] (when (contains-sub? x s)
+                              (if (and (= (:cls x) (:cls g)) (= (:off x) (:off s)))
+                                [gid x]
+                                (when-let [o (first (filter #(overrides-fn? (sema/fnd %) g) (:virtuals (abi/cls (:cls x)))))] [o x]))))
+                    subs)]
+    (or (first (filter (fn [[_ x]] (every? (fn [[_ y]] (contains-sub? x y)) cands)) cands))
+        (first cands)
+        [gid s])))
+
+(defn- offset-comps
+  "The vcall and vbase offsets of the vtable of the subobject `base` ({:cls :off}, in the layout class `lid`; `virt`:
+  a virtual base in it), closest to the address point first, and the vcall offsets' places: {:comps [{:k :vbase|:vcall
+  :val n}] :vcalls [[fid offset-offset] ...] :vbos {class-id offset-offset}}. `subs` nil: the places alone."
+  [subs lid base virt]
+  (let [comps (atom []) seen (java.util.HashSet.) vcalls (atom []) vbos (atom {})
+        lvb (:vbases (abi/layout lid))
+        cur (fn [] (- (* 8 (+ 3 (count @comps)))))]
+    (letfn [(vbase-offsets [x ^long real]
+              (doseq [b (:bases (abi/cls x))]
+                (when (and (:virtual b) (.add seen (:cls b)))
+                  (swap! vbos assoc (:cls b) (cur))
+                  (swap! comps conj {:k :vbase :val (- (long (get lvb (:cls b) 0)) real)}))
+                (vbase-offsets (:cls b) real)))
+            (vcall-offsets [x ^long xoff ^long vboff]
+              (let [l (abi/layout x) pb (:primary l)]
+                (when (and pb (not (:virtual pb))) (vcall-offsets (:cls pb) xoff vboff))
+                (doseq [mid (:methods (abi/cls x)) :let [g (sema/fnd mid)] :when (:virtual g)
+                        :when (not-any? #(overrides-fn? g (sema/fnd (first %))) @vcalls)]
+                  (let [oo (cur)
+                        val (if subs (- (long (:off (second (final-overrider subs mid (find-sub subs x xoff))))) vboff) 0)]
+                    (swap! vcalls conj [mid oo])
+                    (swap! comps conj {:k :vcall :val val})))
+                (doseq [[i b] (map-indexed vector (:bases (abi/cls x)))
+                        :when (and (not (:virtual b)) (not (and pb (not (:virtual pb)) (= (:cls pb) (:cls b)))))]
+                  (vcall-offsets (:cls b) (+ xoff (long (nth (:bases l) i))) vboff))))
+            (both [x ^long xoff virt ^long real]
+              (let [pb (:primary (abi/layout x))]
+                (when pb (both (:cls pb) (if (:virtual pb) (long (get lvb (:cls pb) 0)) xoff) (:virtual pb) real))
+                (vbase-offsets x real)
+                (when virt (vcall-offsets x xoff real))))]
+      (both (:cls base) (long (:off base)) virt (long (:off base)))
+      {:comps @comps :vcalls @vcalls :vbos @vbos})))
+
+(defn- vbase-offset-offset
+  "Where the vtable of class `cid` holds the offset of its virtual base `vb` (bytes from the address point)."
+  [cid vb]
+  (or (get (:vbos (offset-comps nil cid {:cls cid :off 0} false)) vb) (fail :codegen "no vbase offset")))
+
+(defn vbase-addr!
+  "The address of the virtual base `vb` of the object of class `cid` at `addr`: by the vbase offset of its vtable."
+  [addr cid vb]
+  (let [vp (val! (list 'load 'ptr ['ptr addr] :align 8))
+        slot (val! (list 'getelementptr 'i8 ['ptr vp] ['i64 (vbase-offset-offset cid vb)]))
+        o (val! (list 'load 'i64 ['ptr slot] :align 8))]
+    (val! (list 'getelementptr :inbounds 'i8 ['ptr addr] ['i64 o]))))
+
+(defn- vcall-offset-offset
+  "The place of `gid`'s vcall offset in the vtable of the virtual base `vb`."
+  [vb gid]
+  (let [g (sema/fnd gid)]
+    (or (some (fn [[fid oo]] (when (overrides-fn? g (sema/fnd fid)) oo)) (:vcalls (offset-comps nil vb {:cls vb :off 0} true)))
+        (fail :codegen "no vcall offset"))))
+
+(defn- primary-chain [x] (cons x (when-let [pb (:primary (abi/layout x))] (primary-chain (:cls pb)))))
+
+(defn vt-group
+  "The vtable group of class `m` at `moff` in the layout class `lid` (a construction vtable group when they differ):
+  {:items [component ...] :aps {[cls off] index of its address point}}; a component [:off n], [:rtti cid] or [:fn fid
+  variant adjustment] (adjustment nil, {:nv n} or {:nv n :v oo}), [:pure]."
+  [m lid ^long moff]
+  (let [subs (subobjects m lid moff)
+        construction? (not= m lid)
+        lvb (:vbases (abi/layout lid))
+        pvbs (set (keep #(let [p (:primary (abi/layout (:cls %)))] (when (:virtual p) (:cls p))) subs))
+        items (atom []) aps (atom {})]
+    (letfn [(table! [x ^long xoff mv virt]
+              (let [{:keys [comps]} (offset-comps subs lid {:cls x :off xoff} virt)
+                    pre (concat (reverse (map (fn [c] [:off (:val c)]) comps)) [[:off (- moff xoff)] [:rtti m]])
+                    ap (+ (count @items) (count pre))
+                    slots (for [sl (:vtable (abi/cls x))]
+                            (let [gid (:fn sl) g (sema/fnd gid)
+                                  [ofid ox] (final-overrider subs gid (find-sub subs (:cls g) xoff))
+                                  of (sema/fnd ofid)]
+                              (cond
+                                (:pure of) [:pure]
+                                (= (long (:off ox)) xoff) [:fn ofid (:v sl) nil]
+                                :else (let [[_ off vb] (abi/base-path (:cls ox) (:cls g))]
+                                        [:fn ofid (:v sl) (if vb {:nv (- (long off)) :v (vcall-offset-offset vb gid)} {:nv (- (long (:off ox)) xoff)})]))))]
+                (swap! items into (concat pre slots))
+                (doseq [c (primary-chain x)] (swap! aps assoc [c xoff] ap))
+                (secondary! x xoff mv)))
+            (secondary! [x ^long xoff mv]
+              (let [l (abi/layout x) pb (:primary l)]
+                (doseq [[i b] (map-indexed vector (:bases (abi/cls x)))
+                        :when (and (not (:virtual b)) (abi/dynamic? (:cls b)) (or (not construction?) mv (abi/has-vbases? (:cls b))))]
+                  (let [bo (+ xoff (long (nth (:bases l) i)))]
+                    (if (and pb (not (:virtual pb)) (= (:cls pb) (:cls b)))
+                      (secondary! (:cls b) bo mv)
+                      (table! (:cls b) bo mv false))))))
+            (vbase-tables! [x ^java.util.HashSet seen]
+              (doseq [b (:bases (abi/cls x))]
+                (when (and (:virtual b) (abi/dynamic? (:cls b)) (not (pvbs (:cls b))) (.add seen (:cls b)))
+                  (table! (:cls b) (long (get lvb (:cls b))) true true))
+                (when (abi/has-vbases? (:cls b)) (vbase-tables! (:cls b) seen))))]
+      (table! m moff false (and construction? (contains? lvb m) (= moff (long (get lvb m)))))
+      (vbase-tables! m (java.util.HashSet.))
+      {:items @items :aps @aps})))
+
+(def ^:private vt-cache (atom {}))
+(defn- group-of [m lid moff]
+  (let [k [m lid moff (System/identityHashCode @abi/*classes*)]]
+    (or (get @vt-cache k) (let [g (vt-group m lid moff)] (swap! vt-cache assoc k g) g))))
 
 (defn- vtable-name ^String [cid] (str "_ZTV" (abi/mangle-type-name {:k :class :id cid})))
+(defn- ctor-vtable-name ^String [m lid moff]
+  (str "_ZTC" (abi/mangle-type-name {:k :class :id lid}) moff "_" (abi/mangle-type-name {:k :class :id m})))
+(defn- group-name [[m lid moff]] (if (= m lid) (vtable-name m) (ctor-vtable-name m lid moff)))
 
-(defn- vptr-store! [cid this]
-  (let [group (vtable-group cid)
-        sizes (map #(+ 2 (count (:vtable (abi/cls (:cls %))))) group)
-        total (reduce + sizes)
-        starts (reductions + 0 sizes)]
-    (swap! *top* update :vtables conj cid)
-    (doseq [[g start] (map vector group starts)]
-      (emit! (list 'store ['ptr (list 'getelementptr :inbounds (list 'array total 'ptr) ['ptr (gsym (vtable-name cid))] ['i64 0] ['i64 (+ (long start) 2)])]
-                   ['ptr (offset! this (:off g))] :align 8)))))
+(defn- address-point
+  "The constant address of the address point of the subobject `sub` ([cls off]) in the group [m lid moff]."
+  [grp sub]
+  (let [g (apply group-of grp)
+        i (or (get (:aps g) sub) (fail :codegen "no address point for " (pr-str sub)))]
+    (swap! *top* update :groups (fnil conj #{}) grp)
+    (list 'getelementptr :inbounds (list 'array (count (:items g)) 'ptr) ['ptr (gsym (group-name grp))] ['i64 0] ['i64 i])))
+
+(defn vtt-layout
+  "The VTT of class `cid` (§2.6.2, as clang's VTTBuilder): {:entries [{:grp [m lid moff] :sub [cls off]}] :sub-vtts
+  {[cls off] index} :sec {[cls off] index} (the top level's secondary virtual pointers)}."
+  [cid]
+  (let [entries (atom []) subidx (atom {}) secidx (atom {})
+        lvb (:vbases (abi/layout cid))]
+    (letfn [(add! [grp sub top] (when top (swap! secidx assoc sub (count @entries))) (swap! entries conj {:grp grp :sub sub}))
+            (layout-vtt [b ^long boff virt primary?]
+              (let [grp (if primary? [cid cid 0] [b cid boff])]
+                (when-not primary? (swap! subidx assoc [b boff] (count @entries)))
+                (add! grp [b boff] false)
+                (secondary-vtts b boff)
+                (when (abi/has-vbases? b) (sec-vptrs b boff virt grp (java.util.HashSet.) primary?))
+                (when primary? (virtual-vtts b (java.util.HashSet.)))))
+            (secondary-vtts [b ^long boff]
+              (let [l (abi/layout b)]
+                (doseq [[i x] (map-indexed vector (:bases (abi/cls b))) :when (and (not (:virtual x)) (abi/has-vbases? (:cls x)))]
+                  (layout-vtt (:cls x) (+ boff (long (nth (:bases l) i))) false false))))
+            (sec-vptrs [x ^long xoff mv grp ^java.util.HashSet vbs top]
+              (when (or (abi/has-vbases? x) mv)
+                (let [l (abi/layout x) pb (:primary l)]
+                  (doseq [[i b] (map-indexed vector (:bases (abi/cls x))) :when (abi/dynamic? (:cls b))]
+                    (let [[bo bmv nvp] (if (:virtual b)
+                                         (when (.add vbs (:cls b)) [(long (get lvb (:cls b))) true false])
+                                         [(+ xoff (long (nth (:bases l) i))) mv (boolean (and pb (not (:virtual pb)) (= (:cls pb) (:cls b))))])]
+                      (when bo
+                        (when (and (not nvp) (or (abi/has-vbases? (:cls b)) bmv)) (add! grp [(:cls b) bo] top))
+                        (sec-vptrs (:cls b) bo bmv grp vbs top)))))))
+            (virtual-vtts [x ^java.util.HashSet seen]
+              (doseq [b (:bases (abi/cls x))]
+                (when (and (:virtual b) (abi/has-vbases? (:cls b)) (.add seen (:cls b)))
+                  (layout-vtt (:cls b) (long (get lvb (:cls b))) true false))
+                (when (abi/has-vbases? (:cls b)) (virtual-vtts (:cls b) seen))))]
+      (layout-vtt cid 0 false true)
+      {:entries @entries :sub-vtts @subidx :sec @secidx})))
+
+(defn- vtt-name ^String [cid] (str "_ZTT" (abi/mangle-type-name {:k :class :id cid})))
+
+(defn- vtt-ref
+  "A pointer to the VTT entry `i` of class `cid`: in its own VTT (the complete object's constructor and destructor),
+  else at the VTT parameter `vtt`."
+  [cid vtt i]
+  (if vtt
+    (if (zero? (long i)) vtt (val! (list 'getelementptr :inbounds 'ptr ['ptr vtt] ['i64 i])))
+    (do (swap! *top* update :vtts (fnil conj #{}) cid)
+        (list 'getelementptr :inbounds (list 'array (count (:entries (vtt-layout cid))) 'ptr) ['ptr (gsym (vtt-name cid))] ['i64 0] ['i64 i]))))
+
+(defn- vptr-list
+  "The vptrs a constructor of class `cid` sets (clang's getVTablePointers): [{:cls :off :vb :vboff}] (vb the nearest
+  virtual base on the way, vboff the offset from it)."
+  [cid]
+  (let [out (atom []) seen (java.util.HashSet.) lvb (:vbases (abi/layout cid))]
+    ((fn walk [x ^long off vb ^long vboff nvprimary]
+       (when-not nvprimary (swap! out conj {:cls x :off off :vb vb :vboff vboff}))
+       (let [l (abi/layout x) pb (:primary l)]
+         (doseq [[i b] (map-indexed vector (:bases (abi/cls x))) :when (abi/dynamic? (:cls b))]
+           (if (:virtual b)
+             (when (.add seen (:cls b)) (walk (:cls b) (long (get lvb (:cls b))) (:cls b) 0 false))
+             (let [o (long (nth (:bases l) i))]
+               (walk (:cls b) (+ off o) vb (+ vboff o) (boolean (and pb (not (:virtual pb)) (= (:cls pb) (:cls b))))))))))
+     cid 0 nil 0 false)
+    @out))
+
+(defn- init-vptrs!
+  "Sets the vptrs of the object of class `cid` at `this` (in a base-object constructor or destructor of a class with
+  virtual bases, from the VTT `vtt`)."
+  [cid this vtt]
+  (let [lay (when vtt (vtt-layout cid))]
+    (doseq [{:keys [cls off vb vboff]} (vptr-list cid)]
+      (let [addr (if (and vb vtt) (offset! (vbase-addr! this cid vb) vboff) (offset! this off))
+            vi (when (and vtt (or (abi/has-vbases? cls) vb)) (if (and (= cls cid) (zero? (long off))) 0 (get (:sec lay) [cls off])))
+            v (if vi
+                (val! (list 'load 'ptr ['ptr (vtt-ref cid vtt vi)] :align 8))
+                (address-point [cid cid 0] [cls off]))]
+        (emit! (list 'store ['ptr v] ['ptr addr] :align 8))))))
+
+(defn- vptr-store! [cid this] (init-vptrs! cid this nil))
 
 (defn- linkage-of [f]
   (cond
@@ -1226,11 +1465,14 @@
     :else []))
 
 (defn- emit-fn!
-  "The definition of the function `fid` (a destructor: D2 and, when virtual, D0)."
-  [fid]
+  "The definition of the function `fid` (a constructor's or destructor's variant `v`; a virtual destructor's D0 with
+  its base-object or complete one)."
+  [fid v]
   (let [f (sema/fnd fid)
-        nm (fn-name fid)
-        [ret ps va plan] (fn-sig f)
+        nm (fn-name fid v)
+        vtt? (takes-vtt? f v)
+        vbc (vb-class? (:cls f))
+        [ret ps va plan] (fn-sig f v)
         pnames (vec (map-indexed (fn [i _] (symbol (str "%a" i))) ps))
         state (atom {:blocks [] :label '%entry :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores []
                      :fn f :nrvo (:nrvo f) :ret-label '%return})]
@@ -1240,8 +1482,9 @@
                    :sret (let [p (nth pnames @k)] (swap! k inc) p)
                    (:regs :ignore) (slot! (abi/unq (:ret (:ty f))))
                    nil)
-            this (when (and (:cls f) (not (:static f))) (let [p (nth pnames @k)] (swap! k inc) p))]
-        (swap! *f* assoc :sret sret)
+            this (when (and (:cls f) (not (:static f))) (let [p (nth pnames @k)] (swap! k inc) p))
+            vttp (when vtt? (let [p (nth pnames @k)] (swap! k inc) p))]
+        (swap! *f* assoc :sret sret :vtt vttp)
         (when (nothrow-fn? f) (push-cleanup! {:terminate true}))
         (when this
           (let [s (alloca! 'ptr 8)]
@@ -1266,25 +1509,42 @@
         (let [thisv (when this (val! (list 'load 'ptr ['ptr (:this-slot @*f*)] :align 8)))
               cid (:cls f)]
           (case (:kind f)
-            :ctor (let [ti (:tinits f)]
+            :ctor (let [ti (:tinits f)
+                        lay (when vbc (vtt-layout cid))
+                        ;; a base's VTT: its sub-VTT in this class's (own, or the one passed)
+                        sub-vtt (fn [b off] (when (vb-class? b) (vtt-ref cid vttp (get (:sub-vtts lay) [b off]))))]
                     (if-let [d (:delegate ti)]
-                      (with-full (emit-init thisv {:k :class :id cid} d))
-                      (do (doseq [[i b] (map-indexed vector (:bases ti))]
-                            (let [a (offset! thisv (nth (:bases (abi/layout cid)) i))]
-                              (with-full (emit-init a {:k :class :id (:base b)} (:init b)))
-                              (when (nontrivial-dtor? (:base b)) (push-cleanup! {:eh-only true :addr a :cls (:base b)}))))
-                          (when (abi/dynamic? cid) (vptr-store! cid thisv))
+                      (with-full (binding [*as-base* (when vtt? {:vtt vttp})] (emit-init thisv {:k :class :id cid} d)))
+                      (do (when (and vbc (not vtt?))
+                            ;; the complete object's constructor: the virtual bases first ([class.base.init]/13)
+                            (doseq [b (:vbases ti)]
+                              (let [off (long (get (:vbases (abi/layout cid)) (:base b)))
+                                    a (offset! thisv off)]
+                                (with-full (binding [*as-base* {:vtt (sub-vtt (:base b) off)}] (emit-init a {:k :class :id (:base b)} (:init b))))
+                                (when (nontrivial-dtor? (:base b)) (push-cleanup! {:eh-only true :addr a :cls (:base b) :vtt (sub-vtt (:base b) off)})))))
+                          (doseq [b (:bases ti)]
+                            (let [off (long (nth (:bases (abi/layout cid)) (:idx b)))
+                                  a (offset! thisv off)
+                                  sv (sub-vtt (:base b) off)]
+                              (with-full (binding [*as-base* {:vtt sv}] (emit-init a {:k :class :id (:base b)} (:init b))))
+                              (when (nontrivial-dtor? (:base b)) (push-cleanup! {:eh-only true :addr a :cls (:base b) :vtt sv}))))
+                          (when (abi/dynamic? cid) (init-vptrs! cid thisv vttp))
                           (doseq [fi (:fields ti)]
                             (let [fl (nth (:fields (abi/cls cid)) (:field fi))
                                   addr (field-place thisv cid (:field fi))
                                   ft (abi/unq (:ty fl))]
                               (with-full (emit-init addr (:ty fl) (:init fi)))
                               (when (and (abi/class? ft) (nontrivial-dtor? (:id ft))) (push-cleanup! {:eh-only true :addr addr :cls (:id ft)})))))))
-            :dtor (do (when (abi/dynamic? cid) (vptr-store! cid thisv))
+            :dtor (when-not (and vbc (not vtt?)) ; a complete-object destructor with virtual bases calls the base-object one
+                    (when (abi/dynamic? cid) (init-vptrs! cid thisv vttp))
                       ;; the bases and members destroyed after the body, as cleanups (a return in the body runs them)
-                      (let [c (abi/cls cid) l (abi/layout cid)]
-                        (doseq [[i b] (map-indexed vector (:bases c))]
-                          (when (nontrivial-dtor? (:cls b)) (push-cleanup! {:addr (offset! thisv (nth (:bases l) i)) :cls (:cls b)})))
+                      (let [c (abi/cls cid) l (abi/layout cid)
+                            lay (when vbc (vtt-layout cid))]
+                        (doseq [[i b] (map-indexed vector (:bases c)) :when (not (:virtual b))]
+                          (when (nontrivial-dtor? (:cls b))
+                            (let [off (long (nth (:bases l) i))]
+                              (push-cleanup! {:addr (offset! thisv off) :cls (:cls b)
+                                              :vtt (when (vb-class? (:cls b)) (vtt-ref cid vttp (get (:sub-vtts lay) [(:cls b) off])))}))))
                         (doseq [[i fl] (map-indexed vector (:fields c))]
                           (let [bt (loop [t (abi/unq (:ty fl))] (if (abi/arr? t) (recur (abi/unq (:of t))) t))]
                             (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
@@ -1294,7 +1554,15 @@
             nil)
           (when-let [as (:tassign f)] (doseq [s as] (emit-stmt s))
             (store! (abi/ptr abi/void) thisv (:ret-slot @*f*)))
-          (when-let [b (:tbody f)] (emit-stmt b))
+          (if (and (= :dtor (:kind f)) vbc (not vtt?))
+            ;; the complete object's destructor of a class with virtual bases: the base-object one with the class's
+            ;; VTT, then the virtual bases in reverse
+            (do (call-dtor! cid thisv (vtt-ref cid nil 0))
+                (let [lay (vtt-layout cid)]
+                  (doseq [vb (reverse (abi/vbases cid)) :when (nontrivial-dtor? vb)]
+                    (let [off (long (get (:vbases (abi/layout cid)) vb))]
+                      (call-dtor! vb (offset! thisv off) (when (vb-class? vb) (vtt-ref cid nil (get (:sub-vtts lay) [vb off]))))))))
+            (when-let [b (:tbody f)] (emit-stmt b)))
           ;; falling off the end
           (when-not (:term @*f*)
             (cond
@@ -1327,9 +1595,11 @@
                                  (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
                                  [:body body])))
         ;; the complete object's constructor and destructor: aliases of the base ones for a strong definition
-        (when (and (#{:ctor :dtor} (:kind f)) (empty? (linkage-of f)))
+        (when (and (#{:ctor :dtor} (:kind f)) (empty? (linkage-of f)) (not vbc))
           (add-top! (list 'llvm/alias (gsym (abi/mangle-fn f 1)) (list 'fn ret (vec ps)) ['ptr (gsym nm)])))
-        (when (and (= :dtor (:kind f)) (:virtual f))
+        (when (and (= :dtor (:kind f)) (:virtual f) (= 2 (fn-variant f 1)))
+          (emit-d0! f))
+        (when (and (= :dtor (:kind f)) (:virtual f) vbc (= v 1))
           (emit-d0! f))))))
 
 (defn emit-d0!
@@ -1339,7 +1609,7 @@
     (declare! "_ZdlPvm" 'void '[ptr i64])
     (add-top! (list 'llvm/define (gsym nm) 'void [['ptr '%a0]] :linkage (if (:internal f) :internal :linkonce_odr)
                     :body [(list 'block nil
-                                 (list 'call 'void (gsym (fn-name (:id f))) [['ptr '%a0]])
+                                 (list 'call 'void (want-fn! (:id f) 1) [['ptr '%a0]])
                                  (list 'call 'void (gsym "_ZdlPvm") [['ptr '%a0] ['i64 (abi/size-of {:k :class :id (:cls f)})]])
                                  '(ret void))]))))
 
@@ -1356,7 +1626,8 @@
       (add-top! (list 'llvm/global (gsym ts) (list 'array (inc (count mn)) 'i8) (list 'c-string (str mn (char 0))) :linkage :linkonce_odr :constant true :align 1))
       (let [bases (:bases c)
             kind (cond (empty? bases) "_ZTVN10__cxxabiv117__class_type_infoE"
-                       (and (= 1 (count bases)) (= :public (:access (first bases))) (zero? (long (first (:bases (abi/layout cid)))))) "_ZTVN10__cxxabiv120__si_class_type_infoE"
+                       (and (= 1 (count bases)) (= :public (:access (first bases))) (not (:virtual (first bases)))
+                            (zero? (long (first (:bases (abi/layout cid)))))) "_ZTVN10__cxxabiv120__si_class_type_infoE"
                        :else "_ZTVN10__cxxabiv121__vmi_class_type_infoE")
             vt [ 'ptr (list 'getelementptr :inbounds 'ptr ['ptr (gsym kind)] ['i64 2])]]
         (when-not (contains? (:declared @*top*) kind)
@@ -1369,22 +1640,29 @@
           "_ZTVN10__cxxabiv120__si_class_type_infoE"
           (add-top! (list 'llvm/global (gsym ti) '(struct ptr ptr ptr) (list 'struct vt ['ptr (gsym ts)] ['ptr (gsym (str "_ZTI" (abi/mangle-type-name {:k :class :id (:cls (first bases))})))])
                           :linkage :linkonce_odr :constant true :align 8))
-          (let [bl (:bases (abi/layout cid))]
+          (let [bl (:bases (abi/layout cid))
+                ;; §2.9.5's flags: a class met twice on non-virtual ways (non-diamond repeat), a virtual base met twice (diamond)
+                counts (frequencies ((fn walk [x] (mapcat (fn [b] (cons [(:cls b) (boolean (:virtual b))] (walk (:cls b)))) (:bases (abi/cls x)))) cid))
+                flags (bit-or (if (some (fn [[[_ v] n]] (and (not v) (> (long n) 1))) counts) 1 0)
+                              (if (some (fn [[[_ v] n]] (and v (> (long n) 1))) counts) 2 0))]
             (add-top! (list 'llvm/global (gsym ti) (apply list 'struct 'ptr 'ptr 'i32 'i32 (mapcat (fn [_] ['ptr 'i64]) bases))
-                            (apply list 'struct vt ['ptr (gsym ts)] ['i32 0] ['i32 (count bases)]
+                            (apply list 'struct vt ['ptr (gsym ts)] ['i32 flags] ['i32 (count bases)]
                                    (mapcat (fn [i b] [['ptr (gsym (str "_ZTI" (abi/mangle-type-name {:k :class :id (:cls b)})))]
-                                                      ['i64 (+ (bit-shift-left (long (nth bl i)) 8) (if (= :public (:access b)) 2 0))]])
+                                                      ['i64 (+ (bit-shift-left (long (if (:virtual b) (vbase-offset-offset cid (:cls b)) (nth bl i))) 8)
+                                                               (if (= :public (:access b)) 2 0) (if (:virtual b) 1 0))]])
                                            (range) bases))
                             :linkage :linkonce_odr :constant true :align 8))))))
     (gsym ti)))
 
 (defn- thunk!
-  "The this-adjusting thunk (`_ZThn<k>_` for -k, `_ZTh<k>_` for +k) that calls the function `fid` (the destructor
-  variant `v`) with this moved by `adj` bytes."
-  [fid v ^long adj]
+  "The this-adjusting thunk of the function `fid` (the destructor variant `v`): `_ZTh<nv>_` (this moved by nv bytes)
+  or `_ZTv<nv>_<oo>_` (moved by nv, then by the vcall offset at oo in its vtable), n for a negative number."
+  [fid v adj]
   (let [f (sema/fnd fid)
-        target (cond (= 0 v) (do (want-fn! fid) (gsym (abi/mangle-fn f 0))) :else (want-fn! fid))
-        nm (str "_ZTh" (if (neg? adj) (str "n" (- adj)) adj) "_" (subs (abi/mangle-fn f (if (= :dtor (:kind f)) (or v 1) nil)) 2))]
+        num (fn [n] (if (neg? (long n)) (str "n" (- (long n))) (str n)))
+        target (cond (= 0 v) (do (want-fn! fid 1) (gsym (abi/mangle-fn f 0))) :else (want-fn! fid 1))
+        nm (str (if (:v adj) (str "_ZTv" (num (:nv adj)) "_" (num (:v adj)) "_") (str "_ZTh" (num (:nv adj)) "_"))
+                (subs (abi/mangle-fn f (if (= :dtor (:kind f)) (or v 1) nil)) 2))]
     (when-not (contains? (:declared @*top*) nm)
       (swap! *top* update :declared conj nm)
       (let [[ret ps va plan] (if (= :dtor (:kind f)) ['void '[ptr] false {:pattrs [[]]}] (fn-sig f))
@@ -1392,32 +1670,46 @@
             pn (vec (map-indexed (fn [i _] (symbol (str "%a" i))) ps))
             ti (if sret 1 0)
             pa (:pattrs plan)
-            args (vec (map-indexed (fn [i [t p]] (vec (concat [t] (nth pa i nil) [(if (= i ti) '%t1 p)]))) (map vector ps pn)))
+            adj-insts (concat [(list '= '%t1 (list 'getelementptr :inbounds 'i8 ['ptr (nth pn ti)] ['i64 (:nv adj)]))]
+                              (when (:v adj)
+                                [(list '= '%t3 (list 'load 'ptr ['ptr '%t1] :align 8))
+                                 (list '= '%t4 (list 'getelementptr 'i8 ['ptr '%t3] ['i64 (:v adj)]))
+                                 (list '= '%t5 (list 'load 'i64 ['ptr '%t4] :align 8))
+                                 (list '= '%t6 (list 'getelementptr :inbounds 'i8 ['ptr '%t1] ['i64 '%t5]))]))
+            this2 (if (:v adj) '%t6 '%t1)
+            args (vec (map-indexed (fn [i [t p]] (vec (concat [t] (nth pa i nil) [(if (= i ti) this2 p)]))) (map vector ps pn)))
             call (list 'call (if va (list 'fn ret (conj ps '&)) ret) target args)]
         (add-top! (apply list 'llvm/define (gsym nm) ret (mapv (fn [t a p] (vec (concat [t] a [p]))) ps pa pn) :linkage (if (:internal f) :internal :linkonce_odr)
                          (concat (when (nothrow-fn? f) [:attrs [:nounwind]])
-                                 [:body [(list 'block nil
-                                               (list '= '%t1 (list 'getelementptr :inbounds 'i8 ['ptr (nth pn ti)] ['i64 adj]))
-                                               (if (= 'void ret) call (list '= '%t2 call))
-                                               (if (= 'void ret) '(ret void) (list 'ret ret '%t2)))]])))))
+                                 [:body [(apply list 'block nil
+                                                (concat adj-insts
+                                                        [(if (= 'void ret) call (list '= '%t2 call))
+                                                         (if (= 'void ret) '(ret void) (list 'ret ret '%t2))]))]])))))
     (gsym nm)))
 
-(defn- vtable! [cid]
-  (let [nm (vtable-name cid)
-        ti (typeinfo! cid)
-        slots (vec (for [g (vtable-group cid)
-                         x (concat [['ptr (if (zero? (long (:off g))) 'null (list 'inttoptr 'i64 (- (long (:off g))) 'ptr))] ['ptr ti]]
-                                   (for [s (:vtable (abi/cls (:cls g)))]
-                                     (let [[ofid ooff] (final-overrider (:chain g) (:fn s))
-                                           f (sema/fnd ofid)
-                                           adj (- (long ooff) (long (:off g)))]
-                                       (cond
-                                         (:pure f) (do (declare! "__cxa_pure_virtual" 'void []) ['ptr (gsym "__cxa_pure_virtual")])
-                                         (not (zero? adj)) ['ptr (thunk! ofid (:v s) adj)]
-                                         (= 0 (:v s)) (do (want-fn! ofid) ['ptr (gsym (abi/mangle-fn f 0))])
-                                         :else ['ptr (want-fn! ofid)]))))]
-                     x))]
-    (add-top! (list 'llvm/global (gsym nm) (list 'array (count slots) 'ptr) (apply list 'array slots) :linkage :linkonce_odr :constant true :align 8))))
+(defn- group! [grp]
+  (let [[m lid moff] grp
+        g (apply group-of grp)
+        ti (typeinfo! m)
+        slots (vec (for [it (:items g)]
+                     (case (first it)
+                       :off ['ptr (if (zero? (long (second it))) 'null (list 'inttoptr 'i64 (second it) 'ptr))]
+                       :rtti ['ptr ti]
+                       :pure (do (declare! "__cxa_pure_virtual" 'void []) ['ptr (gsym "__cxa_pure_virtual")])
+                       :fn (let [[_ fid v adj] it f (sema/fnd fid)]
+                             (cond
+                               adj ['ptr (thunk! fid v adj)]
+                               (= 0 v) (do (want-fn! fid 1) ['ptr (gsym (abi/mangle-fn f 0))])
+                               :else ['ptr (want-fn! fid 1)])))))]
+    (add-top! (list 'llvm/global (gsym (group-name grp)) (list 'array (count slots) 'ptr) (apply list 'array slots) :linkage :linkonce_odr :constant true :align 8))))
+
+(defn- vtt! [cid]
+  (let [{:keys [entries]} (vtt-layout cid)]
+    (add-top! (list 'llvm/global (gsym (vtt-name cid)) (list 'array (count entries) 'ptr)
+                    (apply list 'array (for [e entries] ['ptr (address-point (:grp e) (:sub e))]))
+                    :linkage :linkonce_odr :constant true :align 8))))
+
+(defn- vtable! [cid] (group! [cid cid 0]))
 
 (defn- abi-class-global! [^String kind]
   (when-not (contains? (:declared @*top*) kind)
@@ -1579,6 +1871,7 @@
             abi/*classes* (atom (:classes prog)) abi/*enums* (atom (:enums prog))
             *top* (atom {:forms [] :declared #{} :strings {} :wanted #{} :queue [] :vtables #{}})
             abi/*dollars* (atom {})]
+    (reset! vt-cache {})
     ;; static locals know their function
     (doseq [[fid f] (:fns prog)] (doseq [vid (:statics f)] (swap! sema/*vars* assoc-in [vid :fn-of] fid)))
     (emit-globals! prog file)
@@ -1592,14 +1885,16 @@
       (let [q (:queue @*top*)]
         (when (seq q)
           (swap! *top* assoc :queue [])
-          (doseq [fid q]
-            (let [f (sema/fnd fid)]
-              (binding [] (emit-fn! fid))
-              (doseq [vid (:statics f)] nil)))
-          (doseq [cid (:vtables @*top*)]
-            (when-not (contains? (:declared @*top*) (str "vt" cid))
-              (swap! *top* update :declared conj (str "vt" cid))
-              (vtable! cid)))
+          (doseq [[fid v] q] (emit-fn! fid v))
+          ;; the vtable groups and VTTs the code refers to (their functions queued in turn)
+          (loop []
+            (let [todo (concat (for [g (:groups @*top*) :when (not (contains? (:declared @*top*) [:group g]))] [:group g])
+                               (for [c (:vtts @*top*) :when (not (contains? (:declared @*top*) [:vtt c]))] [:vtt c]))]
+              (when (seq todo)
+                (doseq [[k x :as key] todo]
+                  (swap! *top* update :declared conj key)
+                  (if (= k :group) (group! x) (vtt! x)))
+                (recur))))
           (recur))))
     (when (:dso @*top*) (add-top! (list 'llvm/global (gsym "__dso_handle") 'i8 :linkage :external :visibility :hidden)))
     (vec (concat [(list 'llvm/source-filename file)
