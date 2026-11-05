@@ -2,7 +2,8 @@
 ;; rules; phase 2's Charset shim (sun.nio.cs.UTF_8, ISO_8859_1) uses them too.
 (in-ns 'go.arbace.jrt)
 
-(go/file "codec.go")
+(go/file "codec.go"
+  :imports [[strings "strings"]])
 
 (go/func DecodeUTF8
   "DecodeUTF8 is Java's UTF-8 decoding with replacement (String.decodeUTF8_UTF16): malformed
@@ -136,18 +137,38 @@ subsequence, as JDK 26 consumes them), surrogates encoded in 3 bytes too.\n"
   [^{:val 5} csUTF16BE]
   [^{:val 6} csUTF16LE])
 
-(go/func charsetOf "charsetOf: jrt's charsets by Java's names and aliases (case-insensitive; charset.ae).\n"
-  ^int [^{:tag (* String)} name]
-  (let [cs (lookupCharset (.String name))]
-    (when (== cs nil)
-      (return csUnknown))
-    (.-kind (.Self_Charset cs))))
+(go/var ^{:tag (map string int)} charsetKinds
+  (lit (map string int)
+       ["utf-8" csUTF8] ["utf8" csUTF8] ["unicode-1-1-utf-8" csUTF8]
+       ["iso-8859-1" csLatin1] ["819" csLatin1] ["8859_1" csLatin1] ["ibm-819" csLatin1] ["ibm819" csLatin1]
+       ["iso8859-1" csLatin1] ["iso8859_1" csLatin1] ["iso_8859-1" csLatin1] ["iso_8859-1:1987" csLatin1]
+       ["iso_8859_1" csLatin1] ["cp819" csLatin1] ["csisolatin1" csLatin1] ["iso-ir-100" csLatin1]
+       ["l1" csLatin1] ["latin1" csLatin1]
+       ["us-ascii" csASCII] ["646" csASCII] ["ansi_x3.4-1968" csASCII] ["ansi_x3.4-1986" csASCII]
+       ["ascii" csASCII] ["ibm367" csASCII] ["iso646-us" csASCII] ["iso_646.irv:1991" csASCII]
+       ["ascii7" csASCII] ["cp367" csASCII] ["csascii" csASCII] ["iso-ir-6" csASCII]
+       ["iso_646.irv:1983" csASCII] ["us" csASCII]
+       ["utf-16" csUTF16] ["utf_16" csUTF16] ["unicodebig" csUTF16] ["unicode" csUTF16] ["utf16" csUTF16]
+       ["utf-16be" csUTF16BE] ["iso-10646-ucs-2" csUTF16BE] ["utf_16be" csUTF16BE]
+       ["unicodebigunmarked" csUTF16BE] ["x-utf-16be" csUTF16BE]
+       ["utf-16le" csUTF16LE] ["utf_16le" csUTF16LE] ["unicodelittleunmarked" csUTF16LE] ["x-utf-16le" csUTF16LE]))
 
-(go/func DecodeBytes
-  "DecodeBytes decodes with the named charset (UTF-8, ISO-8859-1, US-ASCII: bytes above 0x7F
-become U+FFFD; UTF-16, UTF-16BE, UTF-16LE); UnsupportedEncodingException for others.\n"
-  ^{:tag (slice uint16)} [^{:tag (slice int8)} b ^{:tag (* String)} name]
-  (switch (charsetOf name)
+(go/func charsetOf
+  "charsetOf: the kind of the charsets jrt codes itself (UTF-8, ISO-8859-1, US-ASCII, UTF-16, UTF-16BE,
+UTF-16LE) by Java's names and aliases, case-insensitive; csUnknown for any other, which String's name
+overloads give to the charset classes (charset.ae). A table of its own: the charset classes are
+jdk26u's in a j2g program.\n"
+  ^int [^{:tag (* String)} name]
+  (let [(values k ok) (aget charsetKinds (strings/ToLower (.String name)))]
+    (when ok
+      (return k))
+    csUnknown))
+
+(go/func decodeKind
+  "decodeKind decodes with a charset jrt codes itself (UTF-8, ISO-8859-1, US-ASCII: bytes above 0x7F
+become U+FFFD; UTF-16, UTF-16BE, UTF-16LE); nil for another kind.\n"
+  ^{:tag (slice uint16)} [^{:tag (slice int8)} b ^int kind]
+  (switch kind
     (case [csUTF8] (return (DecodeUTF8 b)))
     (case [csLatin1]
       (let [v (make (slice uint16) (len b))]
@@ -163,6 +184,15 @@ become U+FFFD; UTF-16, UTF-16BE, UTF-16LE); UnsupportedEncodingException for oth
     (case [csUTF16] (return (decodeUTF16 b 0)))
     (case [csUTF16BE] (return (decodeUTF16 b 1)))
     (case [csUTF16LE] (return (decodeUTF16 b 2))))
+  nil)
+
+(go/func DecodeBytes
+  "DecodeBytes decodes with the named charset of jrt's table (charsetOf); UnsupportedEncodingException
+for others.\n"
+  ^{:tag (slice uint16)} [^{:tag (slice int8)} b ^{:tag (* String)} name]
+  (let [kind (charsetOf name)]
+    (when (!= kind csUnknown)
+      (return (decodeKind b kind))))
   (panic (UnsupportedEncodingException_New_String name)))
 
 (go/func decodeUTF16
@@ -231,20 +261,19 @@ little-endian; an unpaired surrogate becomes the replacement U+FFFD.\n"
           :else (put c))))
     dst))
 
-(go/func EncodeBytes
-  "EncodeBytes encodes with the named charset; unmappable characters become '?' (a surrogate
-pair one '?').\n"
-  ^{:tag (slice int8)} [^{:tag (slice uint16)} v ^{:tag (* String)} name]
-  (let [cs (charsetOf name)
-        limit (conv rune 0xff)]
-    (switch cs
-      (case [csUTF8] (return (EncodeUTF8 v)))
-      (case [csUTF16] (return (encodeUTF16 v 0)))
-      (case [csUTF16BE] (return (encodeUTF16 v 1)))
-      (case [csUTF16LE] (return (encodeUTF16 v 2)))
+(go/func encodeKind
+  "encodeKind encodes with a charset jrt codes itself; unmappable characters become '?' (a surrogate
+pair one '?'). ok is false for another kind.\n"
+  [^{:tag (slice uint16)} v ^int kind] :results [(slice int8) bool]
+  (let [limit (conv rune 0xff)]
+    (switch kind
+      (case [csUTF8] (return (EncodeUTF8 v) true))
+      (case [csUTF16] (return (encodeUTF16 v 0) true))
+      (case [csUTF16BE] (return (encodeUTF16 v 1) true))
+      (case [csUTF16LE] (return (encodeUTF16 v 2) true))
       (case [csASCII] (set! limit 0x7f))
       (case [csLatin1])
-      (default (panic (UnsupportedEncodingException_New_String name))))
+      (default (return nil false)))
     (let [dst (make (slice int8) 0 (len v))]
       (for [i 0] (< i (len v)) (inc! i)
         (let [c (conv rune (aget v i))]
@@ -253,4 +282,13 @@ pair one '?').\n"
             (and (isHighSurrogate (conv uint16 c)) (< (+ i 1) (len v)) (isLowSurrogate (aget v (+ i 1))))
             (do (set! dst (append dst \?)) (inc! i))
             :else (set! dst (append dst \?)))))
-      dst)))
+      (return dst true))))
+
+(go/func EncodeBytes
+  "EncodeBytes encodes with the named charset of jrt's table (charsetOf); unmappable characters become
+'?' (a surrogate pair one '?'); UnsupportedEncodingException for others.\n"
+  ^{:tag (slice int8)} [^{:tag (slice uint16)} v ^{:tag (* String)} name]
+  (let [(values dst ok) (encodeKind v (charsetOf name))]
+    (when ok
+      (return dst)))
+  (panic (UnsupportedEncodingException_New_String name)))
