@@ -119,6 +119,7 @@
     (= :template (:kind p)) (if (:tmpl a) {:e :tmpl :tk :class :id (:tmpl a) :pos -1} {:e :ttp :i (:i a) :tid (:tid a) :pos -1})
     (contains? a :val) {:e :enumerator :val (:val a) :ty (:ty a) :pos -1}
     (= :tparam-v (:k a)) {:e :nttp :i (:i a) :tid (:tid a) :pos -1}
+    (contains? a :decl) {:e :declconst :decl (:decl a) :ty (:ty a) :null (:null a) :pos -1}
     :else {:e :texpr :x a :pos -1}))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -287,13 +288,50 @@
               (fail :template "not a template: " nm))
       (fail :template "not a template: " nm))))
 
+(defn- decl-arg
+  "The argument of a pointer or reference non-type parameter of type `pt` ([temp.arg.nontype]): a function or a
+  variable named (&F, F, &v, v for a reference), {:decl [:fn|:var id] :ty pt :mangled s}, or a null pointer; in a
+  signature a parameter passed on."
+  [scope pt f]
+  (let [text (cond (symbol? f) (str/replace (str f) "/" "::")
+                   (and (seq? f) (= 'cpp/text (first f))) (second f)
+                   (nil? f) "nullptr"
+                   :else (fail :template "a pointer argument " (pr-str f)))
+        text (str/trim text)
+        amp (str/starts-with? text "&")
+        nm (str/trim (if amp (subs text 1) text))]
+    (if (#{"nullptr" "0"} nm)
+      {:decl [:null] :null true :ty pt}
+      (let [parts (vec (map str/trim (str/split nm #"::")))
+            es (if (= 1 (count parts)) (sema/lookup scope (first parts)) (sema/lookup-qualified scope parts))
+            e (first es)]
+        (case (:e e)
+          :nttp {:k :tparam-v :i (:i e) :tid (:tid e)}
+          :declconst {:decl (:decl e) :ty pt :mangled (:mangled e) :ref (boolean (abi/ref? pt))}
+          :fn (let [want (if (abi/ptr? pt) (:to pt) (:to pt))
+                    fid (or (some #(let [g (sema/fnd (:id %))]
+                                     (when (and (= :fn (:e %)) (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps want))) (= (abi/unq (:ret (:ty g))) (abi/unq (:ret want))))
+                                       (:id %)))
+                                  es)
+                            (fail :template "no function " nm " of the parameter's type"))]
+                {:decl [:fn fid] :ty pt :mangled (abi/mangle-fn (sema/fnd fid)) :ref (boolean (abi/ref? pt))})
+          :var (let [v (sema/var* (:id e))
+                     _ (when (abi/arr? (:ty v)) (fail :template "an array's address as an argument"))
+                     m (abi/mangle-var v)]
+                 {:decl [:var (:id e)] :ty pt :ref (boolean (abi/ref? pt))
+                  :mangled (if (str/starts-with? m "_Z") m (str "_Z" (abi/source-name m)))})
+          (fail :template "a pointer argument " text))))))
+
 (defn resolve-arg
   "A template argument's form for the parameter `p` in `scope`."
   [scope p f]
   (case (:kind p)
     :type (if (and (seq? f) (= 'cpp/text (first f))) (sema/resolve-type scope (second f)) (sema/resolve-type-form scope f))
     :template (template-arg-of scope f)
-    (value-arg (const-form scope f) (:name p) (param-type scope p))))
+    (let [pt (param-type scope p)]
+      (if (or (abi/ptr? pt) (abi/ref? pt))
+        (decl-arg scope pt f)
+        (value-arg (const-form scope f) (:name p) pt)))))
 
 (defn- node-arg
   "A TemplateArgument node's argument for the parameter `p` (an explicit specialization's)."

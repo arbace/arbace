@@ -545,7 +545,8 @@
     ;; the destructor
     (let [members (class-like-members id)
           d (:dtor (abi/cls id))
-          nontriv (or (abi/dynamic? id) (some #(not (trivial-dtor? %)) members))]
+          ;; [class.dtor]/8: trivial unless virtual or a base's or member's is not (a vptr alone does not make it so)
+          nontriv (some #(not (trivial-dtor? %)) members)]
       (cond
         (nil? d) (let [virt (some #(let [b (abi/cls (:cls %))] (and (:dtor b) (:virtual (fnd (:dtor b))))) (:bases c))
                        fid (implicit-fn! id :dtor (str "~" (:name c)) {:k :fn :ret abi/void :ps [] :va false}
@@ -654,7 +655,8 @@
     (cond
       (= :fnset (:op e)) (if-let [f (fn-matching e nil)] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr} e)
       (abi/arr? t) {:op :decay :e e :ty (abi/ptr (:of t)) :cat :pr}
-      (abi/fn? t) {:op :fnaddr :e e :fn (:fn e) :ty (abi/ptr t) :cat :pr}
+      ;; a function lvalue: its address; *p of a function pointer p: p itself
+      (abi/fn? t) (if (= :deref (:op e)) (:e e) {:op :fnaddr :e e :fn (:fn e) :ty (abi/ptr t) :cat :pr})
       (and (= :var (:op e)) (:c t) (abi/integral? t) (:init (var* (:id e))) (not= :local (:storage (var* (:id e)))))
       (let [v (var* (:id e))
             c (try (const-int (or (:def-scope v) *root*) (:init v)) (catch arbace.lang.ExceptionInfo _ nil))]
@@ -1030,6 +1032,13 @@
       :var (var-node (:id e))
       :field (field-node (deref-node (this-expr ctx)) (:cls e) (:i e))
       :enumerator {:op :int :v (:val e) :ty (:ty e) :cat :pr}
+      ;; a pointer or reference non-type template parameter bound to a function or a variable (CODEGEN.md G3)
+      :declconst (let [[k id] (:decl e) t (:ty e)]
+                   (cond
+                     (:null e) {:op :null :ty t :cat :pr}
+                     (abi/ref? t) (if (= k :var) (var-node id) (fail :template "a reference to a function as an argument"))
+                     (= k :fn) {:op :fnaddr :fn id :ty t :cat :pr}
+                     :else {:op :addr :e (var-node id) :ty t :cat :pr}))
       (:fn :tmpl) (if (and (= :tmpl (:e e)) (= :var (:tk e)))
                     (if-let [h (:var-template @hooks)] (var-node (h ctx e n)) (fail :template "a variable template"))
                     {:op :fnset :fns (mapv :id (filter #(= :fn (:e %)) es)) :tmpls (mapv :id (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))) es))
