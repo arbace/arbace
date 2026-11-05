@@ -519,9 +519,10 @@ API; `bin/repr-haskell rn-dump`, `iface`):
   modules that define the names (the closure of `Prelude` is 50 modules, 389 KB; `hsiface/exports` as avails with the
   defining module of each name, `hsiface/fixities`, `hsiface/things`: every thing the module defines and exports as
   `datacon`, `tycon` (kind, data/newtype/synonym/family, constructors), `class` (superclasses, methods with types), `id`
-  (type), the types as GHC prints them). **Not dumped:** instances (`getModuleInfo` is "unimplemented" for a package
-  module's instances and `mi_insts` panics on a loaded interface: HF3's loader reads them, see below) and structured
-  types (strings only).
+  (type), the types as GHC prints them). Every type is also a structured form
+  (`tv`, `tycon-app`, `app`, `fun`, `forall` with its kind, `lit`), and `hsiface/instances` lists the instances a
+  module defines (`getModuleInfo` is "unimplemented" for a package module's instances and `mi_insts` panics on a
+  loaded interface, so they are read from the external package state, each by its dictionary function's type).
 
 **HF2, the renamer** (`arbace/repr/haskell/rename.ae`, 1,397 lines with the notice, namespace
 `arbace.repr.haskell.rename`; `bin/repr-haskell rename-check`): the native reader's `GhcPs` trees in, the same forms as
@@ -539,10 +540,10 @@ fixity resolution (operator applications, negation, sections, infix constructor 
 class-level fixity declarations), binding groups by SCC (values and type/class declarations, instances as groups of their
 own), wired-in names (`[]`, `:`, tuples, `()`, `->`), class methods in instances resolved through the class.
 
-**Results** (2026-11-05, stage 0 as host, the helper built `-O0`): `bin/repr-haskell rename-check` over **95 modules,
-all equal**, imports, occurrences, operator trees, binding groups and exports, in 2 min 25 s with the helper's runs
+**Results** (2026-11-05, stage 0 as host, the helper built `-O0`): `bin/repr-haskell rename-check` over **101 modules,
+all equal**, imports, occurrences, operator trees, binding groups and exports, in 2 min 25 s to 4 min with the helper's runs
 (the renamer itself 1 to 1.6 s a module on stage 0's evaluator, at most 430 MB: `Data/OldList.hs`, 2,145 lines, 3,386
-occurrences, 1.6 s): 41 samples written for it (`test/haskell/rename/`: fixities, sections, records, classes,
+occurrences, 1.6 s): 47 samples written for it (`test/haskell/rename/`: fixities, sections, records, classes,
 imports and exports across modules, `where`/`let`/guards, GADTs and existentials, type families, type operators,
 deriving, literals, RULES...), 33 modules of ghc-internal's source (`Data/{Maybe,Functor,Function,Ord,Monoid,
 OldList,Bits,List,String,...}`, `Control/{Monad,Arrow,Category}`, `Arr`, `Ix`, `Numeric`, `Text/Read/Lex`, `CString`,
@@ -552,14 +553,19 @@ names both the type and the constructor of its spelling; a method exported alone
 of a nested `let` flow to the enclosing binding's group; RULES and the spans of implicit binders in `SPECIALISE`, standalone deriving and expression signatures;
 `FixitySig` names every namespace the module declares; a GADT constructor does not see the declaration's variables.
 The order of the groups (`group-order`) is reported, not judged: GHC's order of independent bindings is reverse source
-order and depends on its uniques (equal in 25 of the 95 modules with Tarjan's algorithm visiting the nodes last to first).
-Two samples that GHC itself loads and the renamer does not yet cover are kept in `test/haskell/rename/gaps/`.
+order and depends on its uniques (equal in about a quarter of the modules with Tarjan's algorithm visiting the nodes last to first).
+**Wider sweeps** (run by hand, not committed as checks; each module alone in its own session): every CPP-free
+module of ghc-internal (268 files, 138 accepted by GHC standalone with no CPP: all equal once the bugs the sweep
+found were fixed: DataKinds constructors in types, unboxed unit, record and bundled pattern synonyms, wildcard
+exports, imported constructors' fields for `{..}`, injectivity result variables, `deriving via`), 60 modules of
+mtl, transformers' neighbours, array, stm, parsec, xhtml and containers (the rest CPP or not loadable alone), and
+36 more nofib programs (`imaginary`, `real`, `shootout`, `gc`...; the 3 differences are the harness's: the
+interface of an `Unsafe` module not dumped in that run).
 
-**Not covered yet** (all outside Tier S's common subset, none attempted): pattern synonyms and their signatures,
-`mdo`/`rec`, parallel and transform comprehensions, implicit parameters, arrows, Template Haskell and quasi-quotes,
+**Not covered yet** (outside Tier S's common subset): arrows, Template Haskell and quasi-quotes,
 `RebindableSyntax`'s in-scope names, `OverloadedRecordDot` and labels, `DuplicateRecordFields`' disambiguation by
-constructor, instance-method irrefutability beyond single-constructor types (`fail` is added by `isIrrefutableHsPat`'s
-rule as far as constructors' sibling counts are known), role annotations, warnings and errors (a name not in scope is
+constructor, `rec` blocks of explicit `RecStmt`, the exact `fail` rule for exotic patterns (single-constructor
+types only), role annotations, warnings and errors (a name not in scope is
 recorded, not reported in GHC's words), CPP and hsc2hs modules (the reader still needs the helper's `cpp` verb: the
 two ghc-internal modules with `#include` were left out), `Data/Foldable.hs` (GHC itself cannot load it standalone:
 its derivings need the package's constructors).
@@ -569,7 +575,7 @@ wall clock (the survey's days are working days of one agent: 4 to 6 for HF1, 12 
 10 on the clean one, 16 to 24 for the trial): 1,400 lines against
 `Rename/`'s 18,774 (7%), for a subset that renames the Prelude's own sources and 21 real programs equal to GHC's.
 The clean route's estimate (6,000 to 9,000 lines) is high by a factor of three for Tier S: a complete Tier S renamer
-(with pattern synonyms, `mdo`, the rest of the list above and error messages) is about 2,500 to 3,500 lines. The type
+(with pattern synonyms, `mdo`, the rest of the list above and error messages) is about 2,000 to 3,000 lines. The type
 checker (HF3) is not re-estimated here; its judging data is better than the survey assumed (the nil-span names above).
 
 **What HF3 (the type checker) should start from.**
@@ -579,10 +585,8 @@ checker (HF3) is not re-estimated here; its judging data is better than the surv
    bindings regrouped in their SCCs (nested `let`s as groups), and the implicit-name slots (`negate`, `>>=`, `fromInteger`...
    as the nil-span facts show them) kept on their nodes. The facts stay as a projection of it, so `rename-check` keeps
    judging it. About 400 lines.
-2. The interface dump needs structured types and the instances (HF1 left both): `getModuleInfo` does not give a
-   package module's instances; read them from the `.hi` through `readIface`/`typecheckIface` or by `lookupGlobalName`
-   over the class instances (`getInstancesForTyCon`), and dump types as forms (`TyCon` applications, `forall`,
-   constraints, kinds, with roles and arity) instead of GHC's printed text. About 2 to 3 days, and the local
+2. The interface dump now has structured types and instances; HF3 still needs roles, arity details, type family
+   equations, fundeps, default-method names and strictness (a few more fields of the same verb), and the local
    modules' own interfaces (`iface-text` writes exports and fixities only) must carry the same.
 3. The `hsrn` facts are the contract of the front end's boundary with GHC's data: each `ext` name of the facts is a
    key of the interface dump (`hsiface/things`), so the checker can be judged name by name against `-ddump-tc` /
@@ -593,8 +597,8 @@ checker (HF3) is not re-estimated here; its judging data is better than the surv
 1. HF3 starts with step 1 above (the renamed tree). Option (a) rebuild the tree inside `rename.ae` (recommended: the
    walk exists, 400 lines, the facts remain the check); option (b) a second pass over the facts and the `GhcPs` tree
    (no change to the judged code, but the structure is walked twice and the spans become the join key: fragile).
-2. The interface dump of HF1 gets structured types and instances before HF3 (recommended, 2 to 3 days: the types as
-   forms with their kinds) or HF3 parses the printed types (cheaper now, lossy for kinds and visibility: not recommended).
+2. Extend the interface dump with the rest of what the checker reads (roles, family equations, fundeps, defaults,
+   strictness) and make the renamer write the same for the program's own modules (recommended, about a day).
 3. Whether `rename-check` joins the gate: it runs in 2.5 minutes, light (no process above 450 MB, the helper's
    `-O0` build apart); the Haskell crop is out of `--full` until its rows fit GT8's budget, so recommended: not
    yet, add the step with the type checker's.

@@ -315,7 +315,7 @@ the corpus's pin), read in place: `compiler/GHC/Rename/*.hs`, `compiler/GHC/Hs/*
   the exact tree would force Arbace's renamer to reproduce every extension field). Instances of package modules are
   not dumped (GHC's API refuses), types are strings: left to HF3.
 - HF2: `arbace/repr/haskell/rename.ae` (1,397 lines), `bin/repr-haskell rename-check` over `test/haskell/rename-check.txt`:
-  95 modules equal (41 samples in `test/haskell/rename/`, 33 modules of ghc-internal, 21 nofib/spectral programs).
+  101 modules equal (47 samples in `test/haskell/rename/`, 33 modules of ghc-internal, 21 nofib/spectral programs).
   Decision: the renamer writes the facts of HF1 (judged by data equality) and does not yet build a renamed tree; HF3's
   first step is to (survey, "As built: HF1-HF2", Proposed 1).
-- Wider sweep and the gaps: see the survey's "As built".
+- Wider sweeps (ghc-internal alone, mtl/parsec/containers..., 36 more nofib programs) found and fixed a dozen cases; see the survey's "As built". Instances and structured types were added to `iface` afterwards.
