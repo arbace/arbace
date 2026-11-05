@@ -119,6 +119,21 @@ The nights to the tag:
   8. GT9 built on a branch (GTS210-GTS223 (a)): the crops' gate steps and keys, checked by `--plan` and gate-tests
      (`gt9-build`; started).
   9. The merge plan's batches 0-5 rehearsed against `next`: conflicts, key changes, order, nights.
+- **The second round (the user, 2026-11-05):**
+  1. The crops' oracles recorded as data, no gate needing a host toolchain: the design (`oracle-records`; started).
+  2. OCaml's typer T7 (Simplif) and T8 (the module system, the stdlib typed natively) (`ocaml-typer2`; started).
+  3. C++'s codegen G2: exceptions, lambdas, multiple and virtual inheritance, bit-fields, unions, member pointers, SysV
+     passing (`cpp-codegen2`; started).
+  4. Haskell without GHC: a survey of the smallest route from the native reader to STG (HES21 (b)).
+  5. Java JC9 F1, the JCA: closures, overlays, edge and judging areas prepared for the night's conversion
+     (`java-jc9-jca`; started).
+  6. goi's liveness: dead slots and `uintptrescapes`.
+  7. Scheme's maturity review: R7RS-small's and the corpora's SRFIs' gaps ranked.
+  8. GT9's missing verbs: `--only-list`, `--cmi-only`, `--no-expect`, `test --samples`, `pins check`, C++ and OCaml subsets
+     (`gt9-verbs`; started).
+  9. The re-seed window W prepared: eval-speed rebased, pyi's embedding planned, the two nights scripted (`window-w`;
+     started).
+  10. LLVM IR's LLS1-LLS19: a decision sheet with fresh recommendations.
 
 ## Open
 
