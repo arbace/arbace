@@ -532,6 +532,14 @@
   "The function attributes' own rules (verifyFunctionAttrs after its param loop); `call?`: a call site's."
   [attrs ptypes call?]
   (let [has #(fn-has attrs %)]
+    ;; verifyAttributeTypes: the string bool attributes' values (Attributes.td's StrBoolAttr)
+    (doseq [k ["less-precise-fpmad" "no-signed-zeros-fp-math" "no-jump-tables" "no-inline-line-tables" "profile-sample-accurate"
+               "use-sample-profile" "loader-replaceable"]]
+      (when-let [a (str-attr attrs k)]
+        (when-not (#{"" "true" "false"} (or (second a) ""))
+          (.add *errs* (ex-info (str "invalid value for '" k "' attribute: " (second a)) {:llvm/verify :verifier/attr-value :ctx *ctx* :culprits [:none] :opts nil})))))
+    (doseq [a attrs :let [n (aname a)] :when (and n (not (vector? a)) (not-on-fn? n))]
+      (verr :verifier/attr-placement (str "Attribute '" (attr-str a) "' does not apply to functions!") (if call? :inst :fn)))
     (when (and (has "noinline") (has "alwaysinline")) (verr :verifier/attr-pair "Attributes 'noinline and alwaysinline' are incompatible!"))
     (when (has "optnone")
       (when-not (has "noinline") (verr :verifier/attr-pair "Attribute 'optnone' requires 'noinline'!"))
@@ -1128,6 +1136,20 @@
                                 (and (seq? op) (= (first op) '!) (string? (second op))) (verr :parser/syntax "expected integer" {:at [:plus [:brace-item oi 0] 1]})))
                             (note-md! (nth f 2)))
         llvm/attributes (do (check-attr-placement :fn (nth f 2)) (check-attr-values (nth f 2)))
+        llvm/type (let [me (second f) seen (java.util.HashSet.)]
+                    ;; StructType::checkBody: the body may not reach the type itself through the bodies set so far
+                    (letfn [(walk [t]
+                              (cond
+                                (= t me) (verr :parser/type (str "identified structure type '" (subs (pr/type-str me) 1) "' is recursive") {:at [:next]})
+                                (named-type? t) (when (and (contains? @*comdats* [:type t]) (.add seen t)) (walk (get *types* t)))
+                                (seq? t) (case (first t)
+                                           (struct packed) (doseq [e (rest t)] (walk e))
+                                           (array vector vscale) (walk (nth t 2))
+                                           fn (do (walk (second t)) (doseq [e (nth t 2) :when (not= e '&)] (walk e)))
+                                           nil)
+                                :else nil))]
+                      (let [b (norm-type (nth f 2))] (when (and (seq? b) (#{'struct 'packed} (first b))) (walk b))))
+                    (vswap! *comdats* conj [:type me]))
         llvm/comdat (if (contains? @*comdats* (second f))
                       (verr :parser/redefinition (str "redefinition of comdat '$" (second f) "'") {:at :start})
                       (vswap! *comdats* conj (second f)))
