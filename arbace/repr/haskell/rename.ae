@@ -160,8 +160,11 @@
   (let [forms (read-forms text)
         by (into {} (map (fn [f] [(first f) f]) forms))
         exps (second (get by 'hsiface/exports))
-        fixes (second (get by 'hsiface/fixities))]
-    {:exports (mapv (fn [a] [(strs (nth a 1)) (mapv strs (nth a 2))]) exps)
+        fixes (second (get by 'hsiface/fixities))
+        things (second (get by 'hsiface/things))]
+    {:cons (into {} (for [t things :when (and (seq? t) (= 'datacon (first t)) (seq (nth t 4)))]
+                      [(strs (nth t 1)) (vec (nth t 4))]))
+     :exports (mapv (fn [a] [(strs (nth a 1)) (mapv strs (nth a 2))]) exps)
      :fixities (into {} (map (fn [f] [[(name (nth f 1)) (nth f 2)] [(nth f 3) (name (nth f 4))]]) fixes))}))
 
 (defn load-iface
@@ -211,8 +214,17 @@
     (let [n (dec (count occ))]
       (ext-name ns "GHC.Internal.Tuple" (if (= ns "data") occ (str "Tuple" n))))))
 
+(defn con-fields
+  "The field Names of a data constructor: this module's, else its defining module's interface's"
+  [n]
+  (or (get @*fields* n)
+      (when (and n (ext? n))
+        (when-let [i (load-iface (name-mod n))]
+          (some->> (get (:cons i) n) (mapv #(ext-name "fld" (name-mod n) %)))))))
+
 (defn- wired-name [ns occ]
   (or (get wired [ns occ]) (tuple-name ns occ)
+      (when (and (= ns "data") (str/starts-with? occ "(#")) (ext-name "data" "GHC.Internal.Types" occ))
       (when (= ns "tc")
         (cond (= occ "List") (ext-name "tc" "GHC.Internal.Types" "List")
               (= occ "->") (ext-name "tc" "GHC.Internal.Types" "->")
@@ -244,6 +256,8 @@
         (when (= 'exact (first r)) (wired-name ns occ))
         (lookup-global ns occ q)
         (wired-name ns occ)
+        ;; DataKinds: a type-level occurrence of a data constructor
+        (when (and (= ns "tc") (not (lookup-local env "tc" occ))) (lookup-global "data" occ q))
         (do (error! "not in scope: " ns " " (when q (str q ".")) occ) nil))))
 
 (defn- occ-at!
@@ -549,7 +563,7 @@
                                      (let [b (loc-name "var" occ (lsp dd))]
                                        (emit! (lsp dd) fname) (emit! (lsp dd) b)
                                        (assoc-in e [:l [:v occ]] b)))))
-                               env1 (get @*fields* n))
+                               env1 (con-fields n))
                        env1)]
             [env2 (leaf sp)])
           ;; PrefixCon [pats] (or type arguments first)
@@ -740,7 +754,7 @@
                 (doseq [f (arg rf 2)] (rn-fieldbind env f))
                 ;; {..}: each field not mentioned whose name is a variable in scope that is not a field
                 (when dd
-                  (doseq [fname (get @*fields* cn)]
+                  (doseq [fname (con-fields cn)]
                     (let [occ (name-occ fname)
                           var (or (get (:l env) [:v occ])
                                   (let [g (lookup-global "var" occ nil)] (when (and g (not= g fname) (not= "fld" (name-ns g))) g)))]
@@ -997,10 +1011,14 @@
                                               InfixCon (doseq [a [(arg args 1) (arg args 2)]]
                                                          (when-let [b (get (:l env2) [:v (rdr-occ (lval a))])] (emit! (lsp a) b)))
                                               RecCon (doseq [a (arg args 1)]
-                                                       (let [fl (arg (lval a) 2)]
-                                                         (when-let [b (get (:l env2) [:v (rdr-occ (lval fl))])] (emit! (lsp fl) b))))
+                                                       (field-label! benv (arg a 1))
+                                                       (let [vl (arg a 2)]
+                                                         (when-let [b (get (:l env2) [:v (rdr-occ (lval vl))])] (emit! (lsp vl) b))))
                                               nil)
-                                            (rn env2 (arg psb 5)))
+                                            ;; the builder's name is not a use of the synonym itself
+                                            (let [tmp (atom #{})]
+                                              (binding [*uses* tmp] (rn env2 (arg psb 5)))
+                                              (doseq [u (disj @tmp n)] (use! u))))
                                PatBind (do (rn-pat (assoc benv :patmode pb) (arg bv 2))
                                            (let [rhs (arg bv 4)] (rn-grhss benv rhs)))
                                (rn benv b))))
@@ -1073,7 +1091,11 @@
             (case (con b)
               FunBind (add! "var" (rdr-occ (lval (arg b 2))) nil)
               PatBind (doseq [[occ _] (binders-of-pats {} [(arg b 2)])] (add! "var" occ nil))
-              PatSynBind (add! "data" (rdr-occ (lval (arg (arg b 2) 2))) nil)
+              PatSynBind (do (add! "data" (rdr-occ (lval (arg (arg b 2) 2))) nil)
+                             (let [args (arg (arg b 2) 3)]
+                               (when (= 'RecCon (con args))
+                                 (doseq [a (arg args 1)]
+                                   (add! "fld" (rdr-occ (lval (arg (arg a 1) 2))) nil)))))
               nil))
           InstD
           (let [i (arg v 2)
@@ -1149,10 +1171,12 @@
           IEThingWith (let [[nsp rdr] (ie-name (arg v 2))]
                         (when-let [n (occ-at! env nsp rdr)]
                           (let [kids (keep (fn [w] (let [[ksp krdr] (ie-name w)
-                                                         k (find-child n (rdr-occ krdr))]
+                                                         k (or (find-child n (rdr-occ krdr)) (lookup-global "data" (rdr-occ krdr) nil) (lookup-global "var" (rdr-occ krdr) nil))]
                                                      (when k (emit! ksp k) k)))
                                            (arg v 4))]
-                            (swap! acc conj [n (set kids)]))))
+                            (swap! acc conj [n (into (set kids)
+                                                     (when (not= 'NoIEWildcard (arg v 3))
+                                                       (filter in-scope? (children-of n))))]))))
           IEModuleContents
           (let [mname (modname (lval (arg v 2)))
                 es (for [[_ es] @*genv* e es :when (and (:unq e) (contains? (:quals e) mname))] e)]
@@ -1200,7 +1224,9 @@
                        :let [[ksp krdr] (ie-name w) k (first (filter #(= (name-occ %) (rdr-occ krdr)) kids))]
                        :when k]
                    {:name k :parent n :emit [ksp k]})]
-          (into [{:name n :parent nil :emit [nsp n]}] ks))
+          (into [{:name n :parent nil :emit [nsp n]}]
+                (concat ks (when (not= 'NoIEWildcard (arg v 3))
+                             (map (fn [k] {:name k :parent n}) kids)))))
         [])
       [])))
 
