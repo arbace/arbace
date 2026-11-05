@@ -46,6 +46,7 @@ extern crate rustc_hir;
 extern crate rustc_hir_pretty;
 extern crate rustc_interface;
 extern crate rustc_lexer;
+extern crate rustc_abi;
 extern crate rustc_middle;
 extern crate rustc_parse;
 extern crate rustc_session;
@@ -60,6 +61,8 @@ use rustc_errors::emitter::SilentEmitter;
 use rustc_interface::interface::Compiler;
 use rustc_session::parse::ParseSess;
 use std::fmt::Write;
+
+mod mirdata;
 
 const PIN: &str = include_str!("RUSTC_VERSION");
 
@@ -934,6 +937,9 @@ fn write_file(path: &str, text: &str) {
 struct Compile {
     hir: Option<String>,
     mir: Option<String>,
+    mir_data: Option<String>,
+    census: Option<String>,
+    iface: Option<String>,
 }
 
 fn write_mir<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, w: &mut dyn std::io::Write) -> std::io::Result<()> {
@@ -1000,12 +1006,64 @@ impl Callbacks for Compile {
             write_mir(tcx, &mut out).unwrap_or_else(|e| panic!("rsdump: MIR of {p}: {e}"));
             write_file(p, &String::from_utf8_lossy(&out));
         }
+        if let Some(p) = &self.iface {
+            write_file(p, &mirdata::iface(tcx));
+        }
+        if let Some(p) = &self.census {
+            write_file(p, &mirdata::census(tcx));
+        }
+        if let Some(p) = &self.mir_data {
+            write_file(p, &mir_data(tcx));
+        }
         Compilation::Continue
     }
 }
 
+/// `--mir-data FILE` (RF1, tools/rsdump/mirdata.rs): the bodies `write_mir` prints, as forms, in the
+/// same order and with the same choices of body
+fn mir_data<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
+    use rustc_hir::ConstContext;
+    use rustc_hir::def::DefKind;
+    use rustc_middle::mir::Const;
+    use rustc_middle::ty::InstanceKind;
+    let w = mirdata::W { tcx };
+    let mut out = String::new();
+    for &def_id in tcx.mir_keys(()) {
+        let mut one = |b: &rustc_middle::mir::Body<'tcx>, ph: &str, ctfe: bool, out: &mut String| {
+            out.push_str(&w.body(b, ph, ctfe));
+            out.push('\n');
+        };
+        let mut render = |body: &rustc_middle::mir::Body<'tcx>, ph: &str, ctfe: bool, out: &mut String| {
+            one(body, ph, ctfe, out);
+            for p in tcx.promoted_mir(def_id) {
+                one(p, ph, ctfe, out);
+            }
+        };
+        if matches!(tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn)
+            && matches!(tcx.hir_body_const_context(def_id), Some(ConstContext::Const { .. }))
+        {
+            render(tcx.mir_for_ctfe(def_id), "ctfe", true, &mut out);
+        } else if tcx.is_const_fn(def_id) {
+            render(tcx.optimized_mir(def_id), "optimized", false, &mut out);
+            one(tcx.mir_for_ctfe(def_id), "ctfe", true, &mut out);
+        } else if let Some((val, ty)) = tcx.trivial_const(def_id) {
+            let name = {
+                let _g = rustc_middle::ty::print::ForcedImplGuard::new();
+                tcx.def_path_str(def_id)
+            };
+            out.push_str(&format!(
+                "(mir/trivial-const {{:def {} :ty {} :text {}}})\n",
+                mirdata::q(&name), w.ty(ty), mirdata::q(&format!("const {}: {} = const {};", name, ty, Const::Val(val, ty)))
+            ));
+        } else {
+            render(tcx.instance_mir(InstanceKind::Item(def_id.to_def_id())), "optimized", false, &mut out);
+        }
+    }
+    out
+}
+
 fn compile(args: &[String]) -> ! {
-    let mut c = Compile { hir: None, mir: None };
+    let mut c = Compile { hir: None, mir: None, mir_data: None, census: None, iface: None };
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -1015,6 +1073,18 @@ fn compile(args: &[String]) -> ! {
             }
             "--mir" => {
                 c.mir = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--iface" => {
+                c.iface = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--census" => {
+                c.census = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--mir-data" => {
+                c.mir_data = args.get(i + 1).cloned();
                 i += 2
             }
             "--" => {

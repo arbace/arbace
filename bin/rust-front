@@ -1,0 +1,61 @@
+#!/bin/bash
+# The Rust front end's trial (doc/rust/FRONTEND-SURVEY.md, "As built: RF1-RF2"): RF1's oracles from the
+# helper's new modes (tools/rsdump/mirdata.rs) and RF2's MIR forms check. Light: one process per file.
+#
+#   bin/rust-front oracles [-o DIR] [--next-solver] FILE.rs...
+#                          rsdump rustc's --mir (rustc's -Zunpretty=mir text), --mir-data (the forms), --census,
+#                          --iface per file into DIR/NAME.{mir.txt,mir.edn,census.edn,iface.edn} (default
+#                          .tmp/rust-front/oracles); --next-solver: -Znext-solver=globally, into DIR/next/
+#   bin/rust-front corpus  the synthetic corpus and the samples (test/rust/synthetic, sample, eval)
+#                          through oracles and again with the next solver; the census summed and the
+#                          solvers' MIR compared into .tmp/rust-front/census.edn
+#   bin/rust-front mir-check [FILE.rs...]
+#                          RF2: each body of the MIR forms read and printed back (arbace.rust.front.mir) equal
+#                          to the oracle's text; the negative control (a changed body) must differ
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+helper=$root/.tmp/repr-rust/rsdump
+work=$root/.tmp/rust-front
+export RUSTC_BOOTSTRAP=1
+oracles() {
+  local out=$work/oracles solver="" f n
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -o) out=$2; shift 2 ;;
+      --next-solver) solver="-Znext-solver=globally"; shift ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$solver" ] && out=$out/next
+  mkdir -p "$out"
+  for f in "$@"; do
+    n=$(basename "$f" .rs)
+    f=$(realpath "$f")
+    local ed=2024 ct=bin
+    grep -q "fn main" "$f" || ct=lib
+    [ "$n" = edition2015 ] && ed=2015
+    (ulimit -v 4000000; cd "$out" && "$helper" rustc --mir "$n.mir.txt" --mir-data "$n.mir.edn" --census "$n.census.edn" --iface "$n.iface.edn" \
+       -- --edition $ed --crate-type $ct -A warnings $solver -o "$n.bin" "$f" > "$n.log" 2>&1) || { echo "oracles: $f failed (see $out/$n.log)" >&2; rm -f "$out/$n.mir.txt"; }
+    rm -f "$out/$n.bin"
+  done
+}
+case ${1:-} in
+  oracles) shift; oracles "$@" ;;
+  corpus)
+    files=$(ls "$root"/test/rust/synthetic/*.rs "$root"/test/rust/sample/*.rs "$root"/test/rust/eval/*.rs)
+    oracles $files
+    oracles --next-solver $files
+    ok=0 bad=0 same=0 diff=0
+    for f in $files; do
+      n=$(basename "$f" .rs)
+      if [ -f "$work/oracles/$n.mir.txt" ]; then
+        ok=$((ok+1))
+        if [ -f "$work/oracles/next/$n.mir.txt" ] && cmp -s "$work/oracles/$n.mir.txt" "$work/oracles/next/$n.mir.txt"; then same=$((same+1)); else diff=$((diff+1)); echo "next solver differs: $n"; fi
+      else bad=$((bad+1)); echo "no oracle: $n"; fi
+    done
+    echo "oracles: $ok built, $bad failed; next solver: $same same MIR, $diff differ"
+    ;;
+  mir-check) shift; arbace_tool -m arbace.rust.front.mir-check "$@" ;;
+  *) sed -n 2,16p "$0" >&2; exit 2 ;;
+esac
