@@ -73,4 +73,11 @@ class R:
 show(lambda: b.__setitem__(2 * mmap.PAGESIZE - 1, R()))
 print(len(b))
 print(sorted(k for k in vars(mmap) if k.isupper()))
+# a memoryview of an mmap: written through, sliced, released, then the mmap closed (CPython refuses the close while a view
+# is exported; pyi counts no exports, so a view used after the close raises ValueError "mmap closed or invalid": not
+# comparable here, the queue 204 report's probe)
+w = mmap.mmap(-1, 16)
+v = memoryview(w); v[1] = 66; v[2:4] = b'CD'; print(w[:5], bytes(v[1:4]), len(v), v[3])
+v.release(); w.close(); print(w.closed)
+show(lambda: v[0])
 import shutil; shutil.rmtree(d)
