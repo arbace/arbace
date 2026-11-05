@@ -88,7 +88,7 @@ arbace_version() {
 # arbace_embedded_sources ROOT: Arbace's sources a shipped build reads, one path a line, sorted
 # (doc/GATE-SURVEY.md, GTS5 (a), "As built: GT1-GT3"): arbace/ less the namespaces no executable
 # embeds and nothing of the build reads, repr/java, repr/haskell, repr/rust, repr/ocaml (repr/c and ci's arbace/c are embedded since C9),
-# repr/scheme and scheme, repr/python and pyi's arbace/python (PYS18 (a)), repr/cpp, repr/llvm and arbace/cpp (arbace/j2g/embed.ae's excluded; javac's tool embeds
+# repr/scheme and scheme, repr/python and pyi's arbace/python (PYS18 (a)), repr/cpp, repr/llvm, arbace/cpp and llvmi's arbace/llvm (arbace/j2g/embed.ae's excluded; javac's tool embeds
 # repr/java itself: bin/arbace-go's reader_key names it)
 arbace_embedded_sources() {
   (cd "$1" && find arbace -type f ! -path arbace/repr/java.ae ! -path 'arbace/repr/java/*' \
@@ -98,7 +98,7 @@ arbace_embedded_sources() {
        ! -path arbace/repr/scheme.ae ! -path 'arbace/repr/scheme/*' ! -path 'arbace/scheme/*' \
        ! -path arbace/repr/python.ae ! -path 'arbace/repr/python/*' ! -path arbace/python.ae ! -path 'arbace/python/*' \
        ! -path arbace/repr/cpp.ae ! -path 'arbace/repr/cpp/*' ! -path arbace/repr/llvm.ae ! -path 'arbace/repr/llvm/*' \
-       ! -path 'arbace/cpp/*' | LC_ALL=C sort)
+       ! -path 'arbace/cpp/*' ! -path 'arbace/llvm/*' | LC_ALL=C sort)
 }
 
 # arbace_aot_key ROOT: the key of a build's compiled namespaces (bin/arbace-go's aot_key, the

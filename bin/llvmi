@@ -1,0 +1,223 @@
+#!/bin/bash
+# llvmi, LLVM IR's evaluator (doc/llvm/LLVM-CROP-SURVEY.md §5, §7; "As built: llvmi (LL2's run, LL6, LL7)"): an IR module
+# read as LLVM forms by repr/llvm, lowered to C forms by the shared lowering (arbace.cpp.lower, doc/llvm/LOWER.md), printed
+# as C with the personality-free layer (arbace/llvm/rt/none.c.ae) as one translation unit (arbace.llvm.run), then run by
+# ci (eval: C's checker, its builder with musl 1.2.6 as C forms, tools/cirun) or translated by cf2g into Go and built by
+# TamaGo's go (AOT). The judge: the module's own run by LLVM 23's lli (the host's llvm23, LLS8 as the brief of 2026-11-05
+# took it: the same module, not a build of its source), status, stdout and stderr, recorded as data
+# (test/llvm/ref-lli23.edn), so the check runs without lli. All on the tools' host, light (each process under 2 GiB).
+#
+#   bin/llvmi lower FILE.ll [-o OUT.c]   FILE lowered into one C unit (default FILE.c); exit 3 when refused
+#   bin/llvmi run FILE.ll [-- ARG...]    FILE lowered and run by ci; the program's status is the command's
+#   bin/llvmi modules [--corpus C,...] [WORK]
+#                                        the corpora's modules into WORK/modules.tsv (ID PATH IR-SHA256): ee (llvm/test/ExecutionEngine's
+#                                        modules lli runs plainly, read in place from $LLVM_SRC), c-O0 and c-O2 (test/c/synth's and
+#                                        test/c/run's programs through clang 23 -S -emit-llvm at -O0 and -O2, into WORK/ir/), cpp (C++'s
+#                                        samples and runtime samples through clang++ -O0)
+#   bin/llvmi record-ref [--corpus C,...] [--only LIST]
+#                                        lli's runs (empty stdin, no arguments, 10 s) recorded into test/llvm/ref-lli23.edn (--only:
+#                                        those ids rewritten, the others kept)
+#   bin/llvmi check [--aot] [--corpus C,...] [--only LIST] [--record] [--judge]
+#                                        every module lowered, run by ci (--aot: built by cf2g and go) and judged against the reference:
+#                                        rows [ID RESULT REASON] in WORK/results.edn (WORK .tmp/llvmi/eval or .tmp/llvmi/aot), every
+#                                        non-pass in a class of test/llvm/divergences-eval.edn (--aot: divergences-aot.edn, then eval's),
+#                                        a recorded pass that does not pass a failure, the negative controls of test/llvm/controls.edn
+#                                        (a subject's run judged against another module's reference) failing as they must; --record
+#                                        rewrites test/llvm/check-eval-linux-amd64.edn (--aot: check-aot-linux-amd64.edn), not with --only;
+#                                        --judge: the last run judged again
+#   bin/llvmi divergences [--aot]        the recorded check judged against its classes, nothing run
+# LLVMI_JOBS (default 3) programs at once, LLVMI_THREADS (default 2) the Arbace processes' threads, LLVMI_SHARD (default 40) AOT's
+# programs a Go build; GOMEMLIMIT 1500MiB.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+main=$root
+case $root in */.tmp/worktrees/*) main=${root%%/.tmp/worktrees/*} ;; esac
+export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
+llvm_bin=${LLVM_BIN:-/usr/lib/llvm23/bin}
+lli=$llvm_bin/lli
+src=${LLVM_SRC:-$main/.tmp/llvm/src}/llvm-project-23.1.4.src
+jobs=${LLVMI_JOBS:-3} threads=${LLVMI_THREADS:-2}
+all_corpora=ee,c-O0,c-O2,cpp
+ref=$root/test/llvm/ref-lli23.edn
+quiet() { grep -v '^Reflection warning\|recur arg for primitive\|^Auto-boxing' || true; }
+tool() { # an Arbace tool on the tools' host, its compiler's warnings filtered out of stderr
+  local e st; e=$(mktemp "$TMPDIR/llvmi-err.XXXXXX")
+  (cd "$root" && arbace_tool -p "$root" "$@") 2> "$e"; st=$?
+  quiet < "$e" >&2; rm -f "$e"; return $st
+}
+
+# modules WORK CORPORA: WORK/modules.tsv
+modules() {
+  local work=$1 corpora=$2 c f n
+  mkdir -p "$work/ir"
+  : > "$work/modules.tsv"
+  IFS=, read -r -a cs <<< "$corpora"
+  for c in "${cs[@]}"; do
+    case $c in
+      ee)
+        [ -d "$src/llvm/test/ExecutionEngine" ] || { echo "llvmi: no $src/llvm/test (bin/llvm-corpus extract)" >&2; exit 1; }
+        # a module with a main whose first RUN line is a plain lli run (no extra modules, no remote target, no lazy JIT, no `not`)
+        (cd "$src/llvm/test" && grep -l 'define.*@main' -r ExecutionEngine --include='*.ll' | LC_ALL=C sort) | while read -r f; do
+          r=$(grep -m1 '^; RUN:' "$src/llvm/test/$f")
+          case $r in *extra-module*|*remote*|*orc-lazy*|*'jit-kind=orc '*|*' not '*|*'<'*) continue ;; esac
+          case $r in '; RUN: %lli'*|'; RUN:  %lli'*|'; RUN: lli'*) ;; *) continue ;; esac
+          n=ee.$(echo "${f#ExecutionEngine/}" | sed 's/\.ll$//; s|/|.|g')
+          printf '%s\t%s\n' "$n" "$src/llvm/test/$f"
+        done >> "$work/modules.tsv" ;;
+      c-O0|c-O2)
+        for f in "$root"/test/c/synth/*.c "$root"/test/c/run/*.c; do
+          n=$c.$(basename "$(dirname "$f")").$(basename "$f" .c)
+          (cd "$root" && clang -${c#c-} -S -emit-llvm -std=gnu23 -w -I test/c/synth -ffile-prefix-map="$root/"= \
+             -o "$work/ir/$n.ll" "${f#$root/}") 2> "$work/ir/$n.clang.log" || { rm -f "$work/ir/$n.ll"; continue; }
+          printf '%s\t%s\n' "$n" "$work/ir/$n.ll"
+        done >> "$work/modules.tsv" ;;
+      cpp)
+        for f in "$root"/test/cpp/samples/*.cpp "$root"/test/cpp/runtime/samples/*.cpp; do
+          case $f in */runtime/samples/*) n=cpp.runtime.$(basename "$f" .cpp) ;; *) n=cpp.samples.$(basename "$f" .cpp) ;; esac
+          (cd "$root" && clang++ -O0 -S -emit-llvm -std=c++23 -w -ffile-prefix-map="$root/"= -o "$work/ir/$n.ll" "${f#$root/}") \
+            2> "$work/ir/$n.clang.log" || { rm -f "$work/ir/$n.ll"; continue; }
+          grep -q '^define .*@main(' "$work/ir/$n.ll" || continue  # a sample without a main is not run-capable
+          printf '%s\t%s\n' "$n" "$work/ir/$n.ll"
+        done >> "$work/modules.tsv" ;;
+      *) echo "llvmi: no corpus $c ($all_corpora)" >&2; exit 2 ;;
+    esac
+  done
+  # the IR's digest: a reference recorded from other IR (another clang) is stale, not a divergence
+  while IFS=$'\t' read -r n f; do printf '%s\t%s\t%s\n' "$n" "$f" "$(sha256sum < "$f" | cut -d' ' -f1)"; done < "$work/modules.tsv" > "$work/modules.tsv.new"
+  mv "$work/modules.tsv.new" "$work/modules.tsv"
+}
+
+only_filter() { # WORK LIST: keep the ids of LIST in WORK/modules.tsv
+  [ -n "$2" ] || return 0
+  awk -F'\t' 'FILENAME == ARGV[1] { if ($0 !~ /^#/ && NF) w[$1] = 1; next } ($1 in w)' "$2" "$1/modules.tsv" > "$1/modules.tsv.new"
+  mv "$1/modules.tsv.new" "$1/modules.tsv"
+}
+
+# run1 ID EXE [ARG...]: one run in a scratch directory (empty stdin, 10 s): ID STATUS OUT-SHA OUT-BYTES ERR-SHA ERR-BYTES ERR-FIRST
+run1() {
+  local id=$1 rd st; shift
+  rd=$(mktemp -d "$TMPDIR/llvmi-run.XXXXXX")
+  : > "$rd/in"
+  { (cd "$rd" && timeout 10 "$@" < in > out 2> err); } 2> "$rd/sh"; st=$?
+  [ $st = 124 ] && st=timeout
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$rd/out" | cut -d' ' -f1)" "$(wc -c < "$rd/out")" \
+    "$(sha256sum < "$rd/err" | cut -d' ' -f1)" "$(wc -c < "$rd/err")" "$(head -1 "$rd/err" | cut -c1-200 | tr '\t' ' ')"
+  rm -rf "$rd"
+}
+export -f run1
+
+cmd=${1:-}; [ $# -gt 0 ] && shift
+case $cmd in
+  lower)
+    f=$1 o=${3:-${1%.ll}.c}
+    [ "${2:-}" = -o ] || o=${1%.ll}.c
+    tool -m arbace.llvm.run lower "$(cd "$(dirname "$f")" && pwd)/$(basename "$f")" "$(cd "$(dirname "$o")" && pwd)/$(basename "$o")" ;;
+  run)
+    f=$(cd "$(dirname "$1")" && pwd)/$(basename "$1"); shift
+    [ "${1:-}" = -- ] && shift
+    c=$TMPDIR/llvmi-$$-$(basename "$f" .ll).c
+    tool -m arbace.llvm.run lower "$f" "$c" || exit $?
+    "$root/bin/ci" run "$c" -- "$@"; st=$?
+    rm -f "$c"; exit $st ;;
+  modules)
+    corpora=$all_corpora
+    [ "${1:-}" = --corpus ] && { corpora=$2; shift 2; }
+    work=${1:-$root/.tmp/llvmi/modules}
+    modules "$work" "$corpora"; echo "llvmi: $(wc -l < "$work/modules.tsv") modules in $work/modules.tsv" ;;
+  record-ref)
+    corpora=$all_corpora only=
+    while [ $# -gt 0 ]; do
+      case $1 in --corpus) corpora=$2; shift 2 ;; --only) only=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;; *) echo "llvmi record-ref: $1?" >&2; exit 2 ;; esac
+    done
+    work=$root/.tmp/llvmi/ref
+    rm -rf "$work"; modules "$work" "$corpora"; only_filter "$work" "$only"
+    cut -f1,2 "$work/modules.tsv" | tr '\t' '\n' | xargs -d '\n' -n 2 -P "$jobs" bash -c 'run1 "$1" '"$lli"' "$2"' _ > "$work/lli.tsv"
+    "$lli" --version | grep -m1 -i 'version' > "$work/lli.version"
+    LLVM_BIN=$llvm_bin tool -m arbace.llvm.check record-ref "$work" "$ref" ${only:+--only} ;;
+  check)
+    aot= corpora=$all_corpora only= record= judge=
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --aot) aot=1; shift ;;
+        --corpus) corpora=$2; shift 2 ;;
+        --only) only=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+        --record) record=1; shift ;;
+        --judge) judge=1; shift ;;
+        *) sed -n '21,29p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+      esac
+    done
+    level=eval; [ -n "$aot" ] && level=aot
+    work=${LLVMI_WORK:-$root/.tmp/llvmi/$level}
+    if [ -z "$judge" ]; then
+      rm -rf "$work"; mkdir -p "$work"
+      modules "$work" "$corpora"; only_filter "$work" "$only"
+      if [ -n "$only" ] || [ "$corpora" != "$all_corpora" ]; then echo "${only:-all} $corpora" > "$work/subset"; fi
+      "$root/bin/ci" musl prepare > "$work/musl.log" 2>&1 || { cat "$work/musl.log" >&2; exit 1; }
+      t0=$(date +%s)
+      tool -m arbace.llvm.run lower-list "$work/modules.tsv" "$work/c" "$threads"
+      t1=$(date +%s)
+      awk -F'\t' '$2 == "ok" {print $1 "\t'"$work"'/c\tgnu23\t\t" $1 ".c"}' "$work/c/lower.tsv" > "$work/build.list"
+      if [ -z "$aot" ]; then
+        { [ -n "${CIRUN:-}" ] && [ -x "$CIRUN" ]; } || "$root/bin/ci" cirun-build --ensure > "$work/cirun-build.log" 2>&1 || { cat "$work/cirun-build.log" >&2; exit 1; }
+        cirun=${CIRUN:-$root/.tmp/ci/cirun}
+        mkdir -p "$work/nodes"
+        tool -m arbace.c.run test/c/host nodes-list "$work/nodes" "$work/build.list" "$threads" > "$work/nodes.log" 2>&1
+        cp "$work/nodes/nodes.tsv" "$work/build.tsv" 2>/dev/null || : > "$work/build.tsv"
+        t2=$(date +%s)
+        awk -F'\t' '$2 == "ok" {print $1}' "$work/build.tsv" | xargs -d '\n' -P "$jobs" -I{} bash -c 'run1 "$1" '"$cirun"' "$2/$1.nodes"' _ {} "$work/nodes" > "$work/run.tsv"
+      else
+        go=${ARBACE_GOROOT:-/root/tamago-go}/bin/go
+        mod=$work/mod
+        "$root/bin/ci" cirun-build --ensure > "$work/cirun-build.log" 2>&1 || { cat "$work/cirun-build.log" >&2; exit 1; }
+        : > "$work/build.tsv"; : > "$work/run.tsv"; : > "$work/go-errors.tsv"
+        split -l "${LLVMI_SHARD:-40}" -d -a 3 "$work/build.list" "$work/shard."
+        for s in "$work"/shard.[0-9][0-9][0-9]; do
+          [ -f "$s" ] || continue
+          rm -rf "$mod"; mkdir -p "$mod/progs" "$mod/shard"
+          cp -r "$root/.tmp/ci/go/ci" "$root/.tmp/ci/go/crt" "$mod/"
+          printf 'module arbace\n\ngo 1.27\n' > "$mod/go.mod"
+          awk -F'\t' '{ print $0 "\tp" NR }' "$s" > "$s.list"
+          tool -m arbace.c.cf2g compile-list test/c/host "$mod" "$s.list" "$threads" > "$s.compile.log" 2>&1
+          [ -f "$mod/nodes.tsv" ] && grep . "$mod/nodes.tsv" >> "$work/build.tsv"
+          awk -F'\t' 'FILENAME == ARGV[1] { if ($2 == "ok") ok[$1] = 1; next } ($1 in ok) { print $1 "\t" $6 }' "$mod/nodes.tsv" "$s.list" > "$s.built"
+          [ -s "$s.built" ] || continue
+          gen_main() {
+            { echo 'package main'; echo; echo 'import ('; echo '	"os"'
+              cut -f2 "$s.built" | while read -r p; do echo "	$p \"arbace/progs/$p\""; done
+              echo ')'; echo; echo 'func main() {'; echo '	switch os.Args[1] {'
+              cut -f2 "$s.built" | while read -r p; do echo "	case \"$p\":"; echo "		$p.Main(os.Args[2:])"; done
+              echo '	}'; echo '	println("llvmi aot: internal: no package", os.Args[1])'; echo '	os.Exit(70)'; echo '}'; } > "$mod/shard/main.go"
+          }
+          gen_main
+          gb() { (cd "$mod" && CGO_ENABLED=0 GOFLAGS=-mod=mod GOCACHE=${LLVMI_GOCACHE:-$root/.tmp/gocache} GOMAXPROCS=4 "$go" build -p 2 -trimpath "$@"); }
+          if ! gb -o "$work/shard.exe" ./shard > "$s.build.log" 2>&1; then
+            # each package alone: those whose Go does not compile taken out
+            cut -f2 "$s.built" | while read -r p; do
+              if ! gb -o "$work/pkg.a" "./progs/$p" > "$s.$p.log" 2>&1; then
+                i=$(awk -F'\t' -v p="$p" '$2 == p {print $1}' "$s.built")
+                printf '%s\t%s\n' "$i" "$(grep -m1 'prog.go' "$s.$p.log" | cut -c1-200 | tr '\t' ' ')" >> "$work/go-errors.tsv"
+              fi
+              rm -f "$work/pkg.a" "$s.$p.log"
+            done
+            awk -F'\t' 'FILENAME == ARGV[1] { bad[$1] = 1; next } !($1 in bad)' "$work/go-errors.tsv" "$s.built" > "$s.built.new" && mv "$s.built.new" "$s.built"
+            gen_main
+            [ -s "$s.built" ] && gb -o "$work/shard.exe" ./shard >> "$s.build.log" 2>&1
+          fi
+          [ -x "$work/shard.exe" ] && awk -F'\t' '{print $1 "\n" $2}' "$s.built" | xargs -d '\n' -n 2 -P "$jobs" bash -c 'run1 "$1" '"$work"'/shard.exe "$2"' _ >> "$work/run.tsv"
+          rm -rf "$work/shard.exe" "$mod"
+          echo "llvmi aot: $(basename "$s"): $(wc -l < "$s") programs, $(wc -l < "$s.built") built"
+        done
+        t2=$(date +%s)
+      fi
+      t3=$(date +%s)
+      printf 'lower %s\nbuild %s\nrun %s\n' "$((t1 - t0))" "$((t2 - t1))" "$((t3 - t2))" > "$work/seconds"
+    fi
+    rec=$root/test/llvm/check-$level-linux-amd64.edn
+    tool -m arbace.llvm.check judge "$work" "$level" "$ref" "$rec" "$root/test/llvm/controls.edn" ${record:+--record} ;;
+  divergences)
+    level=eval; [ "${1:-}" = --aot ] && level=aot
+    tool -m arbace.llvm.check divergences "$level" "$root/test/llvm/check-$level-linux-amd64.edn" ;;
+  *) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac
