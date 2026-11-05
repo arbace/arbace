@@ -219,7 +219,7 @@ By programs per day, then by what they build for:
 4. `weak` import for errorcheck: 1 program, 0.5 d. AOT `-complete` empty `.s`: 1 program, 0.5 d.
 5. Call depth for program mode: 1 program, 0.5-1 d (memory to measure).
 6. `issue8606b`'s comparison order: 1 program, 0.5-1 d.
-7. Liveness (dead-slot clearing) + `uintptrescapes`: ~10 programs, 5-8 d: the largest real goi feature.
+7. (done, 2026-11-05, branch `goi-liveness`: "As built: liveness") Liveness (dead-slot clearing) + `uintptrescapes`: 10 programs, the largest real goi feature.
 8. `:full` forms in the checker and interpreter (GC49 (b)): 3 + 7 + 1 programs, 6-9 d, and AOT's `positions`.
 9. gc in the executable (Proposed 1): ~115 programs, 5-7 d, which also gives types2's two (`no-forms`) and
    the 7 stack-frame programs.
@@ -265,3 +265,106 @@ By programs per day, then by what they build for:
 ## Decided (2026-11-05, the user)
 
 All six proposals as recommended: (1) gc's flag-diagnostic programs by design for goi, a gc-on-forms cell later; (2) the AOT level's invalid programs reported as not applicable; (3) speed as a check budget; (4) liveness funded; (5) :full forms after it; (6) the by-design list shrunk class by class.
+
+## As built: liveness (2026-11-05, branch `goi-liveness`)
+
+Item 7 of the ranked plan, funded by the user's decision (4): dead-slot liveness and `//go:uintptrescapes`. Ten of the
+programs that were known for them now pass (the review counted about ten); `issue54343` and `finprofiled` do not (below).
+
+### What gc does and what goi did
+
+gc's collector sees a variable only up to its last use (the liveness maps), and a pointer converted to `uintptr` in the
+arguments of a `//go:uintptrescapes` function stays alive for the call. goi's frames are windows of per-thread slices:
+every variable's slot lived to the function's end, a popped callee's window kept its values until another call
+overwrote them (the collector scans the whole backing array), temporaries kept their values, and Go's own liveness
+ended a Go frame (a deferred or `go` call's `mini` frame) at the call. A finalizer therefore ran later than gc's.
+
+### The design
+
+Three mechanisms, the first two a plan made by the builder before a function's body is built (`arbace.go.build`,
+`plan-fn`, "Liveness" in build.ae, loaded from the checkout like the rest of `arbace/go/`), the third in the back end:
+
+1. **Last uses.** A per-function pass over the checked tree: the candidates are the parameters, the receiver and the
+   locals held in an R or S slot or in a cell (named results never: they are live to the end); a function with a
+   `goto` is not planned. For each statement list (the function's body, a block, a let's rest, a clause's body, a loop's
+   body) the pass finds, for each variable that is dead when the list falls out of scope, the statement of its last
+   use; there the statement is followed by a `ClearSlots` of those slots (R, S and the C slot of a cell: the closures
+   and pointers that hold the cell keep it). The pass descends into the sub-lists of a compound statement (if, switch,
+   select, a block; a loop's body only for the variables its own list declares, since an outer one lives across
+   iterations). A variable only the declarations of a let use is cleared when they have run, a parameter the body never
+   names at entry (`:start`), the argument slot of a parameter that moved into a cell after its copy. Terminal
+   statements (return, break, continue) get no clear. A variable that is used once, by one argument of a call in a
+   simple statement (expression, assignment, return, send, increment), is **moved**: `KillR`/`KillS` evaluate the
+   argument and clear the slot, so the callee's frame holds the value alone while it runs (`g(h)`, `g(&s)`,
+   `runtime.KeepAlive(s)`). `runtime.KeepAlive(x)` needs nothing of its own: it is a use of `x`.
+2. **Temporaries.** The R and S slots a statement's building allocates as temporaries (`temp!`: the several results of
+   a call, a switch's tag, comma-ok values, the pointers `//go:uintptrescapes` holds) are logged for that statement
+   and cleared after it, declarations of a let included.
+3. **Popped windows.** `Thread.restore` clears the R, S and C windows it pops (they held the callee's variables and
+   results; a panic that unwinds several frames is cleared at the recovering call's restore).
+
+`//go:uintptrescapes`: the checker gives a function's object `:uintptrescapes` from the form's metadata
+(`^:go/uintptrescapes`, `check/decl.ae`); a call of such a function (static, method, closure of a named function) holds
+the operand of each argument `uintptr(unsafe.Pointer-expression)` in a caller slot for the call (set before, cleared
+after it: `ThenT`/`ThenI` around the call node); a `defer` or `go` call also stores it in a hidden slot of its own frame,
+and its call node reads the hidden slots again after the call, so that Go's liveness keeps the frame (and them) to
+the call's end.
+
+New back-end nodes (`go/arbace/goi/frame.ae`, registered in the generated `registry.ae`, table in
+`test/goi/gen_nodes.ae`): `ClearSlots rs ss cs`, `KillR x rs ss cs`, `KillS x rs ss cs`; `restore`'s clearing. An
+executable without them still runs the builder (it clears R and S variable slots with `SetR`/`SetS`, moves nothing,
+clears no temporaries and no cells: `clear-op?`). `GOI_LIVENESS=0` turns the plan and the temporaries' clearing off
+(the `uintptrescapes` calls stay), for a measurement; `GOI_LIVENESS_TRACE=1` prints each function's plan to standard
+error.
+
+One trap found on the way, worth knowing: Arbace's `assoc` over a key whose old value is a node (a Go func) compares
+the old and the new value with Go's `!=`, which panics for two funcs ("comparing uncomparable type goi.T"); a node map
+is made afresh instead of updated (`keep-call`).
+
+### Checked (sample, light: main's seed as the host, an executable built for this branch from the gate's j2g program with
+the changed goi package, `bin/build-go`, no j2g run; main's executables have no new nodes)
+
+- `bin/goi check --only` on the programs of the item: `fixedbugs/issue27518b`, `issue32477`, `issue46725`, `issue57823`,
+  `issue24491a`, `issue24491b`, `stackobj`, `stackobj3`, `typeparam/chans`, `typeparam/chansimp` pass (they were known);
+  `uintptrescapes.go` (rundir), `uintptrescapes3.go`, `stackobj2.go` pass as before. Still known: `fixedbugs/issue54343`
+  (the method value held by a global `m` is kept after `m = nil` by `adapters`, goi's strong registry of the Go funcs
+  made from closures, `go/arbace/goi/func.ae`: its reason is rewritten) and `finprofiled.go` (a million interpreted
+  iterations and the memory profile: speed and allocation, not liveness). `live_uintptrkeepalive`, `uintptrescapes2`,
+  `uintptrkeepalive` are errorcheck programs with `-m`, `-l`, `-std` (unsupported, as before).
+- Regression: 152 other `run` and `rundir` programs of the essential list (every 8th, from two offsets of the 606
+  `run` and `rundir` programs): `bin/goi check --only`: 152 pass, none fail, no regression against the record (18 s).
+- Speed (a call-heavy program: a pointer-argument recursion over a 200-node list, 12,000 times, and `fib(33)`; CPU
+  seconds of seven runs): an executable with the old goi package and `GOI_LIVENESS=0` min 2.96 / median 3.3; the new one
+  with `GOI_LIVENESS=0` (the popped windows' clearing alone) 2.80-2.84 / 3.2-3.3; the new one with the plan 2.92 /
+  3.3-3.5. No measurable cost on this sample (the noise of the host is about 10%): a call clears three small
+  windows with `clear` (memclr), and the plan adds a node only where a variable dies after a statement that has
+  other work.
+
+The record rows of the programs run are updated (`test/goi/check-linux-amd64.edn`, their lines of
+`check-known.edn` removed); the class `memory` of `divergences.edn` says what is left. Not run: the whole check.
+
+### The night's command
+
+The code is in goi's back end, so the gate rebuilds the executables (`gate_key` takes `go/` and `arbace/`):
+
+    bin/gate --full        # or, for goi alone: bin/goi check --jobs 8 ; bin/goi check --aot --jobs 8 ; bin/goi divergences
+    bin/generated-check    # goi's registry (test/goi/gen_nodes.ae writes the three new factories)
+
+and, on the record, `bin/goi check --record` after a pass that keeps these 10: the expected change of
+`bin/goi divergences` is 10 fewer known programs (7 remain in the class `memory`: `issue54343`, `finprofiled` and the
+allocation programs). The comparison of speed for the night: the time of `bin/goi check --essential` on the gate's
+executable, with and without `GOI_LIVENESS=0` in the environment.
+
+### Left and proposed
+
+- `issue54343`: make `adapters` (func.ae) weak: key by `uintptr` and value by `weak.Pointer[Closure]`, entries dropped by
+  `runtime.AddCleanup` on the funcval; or a `Bound`'s Go func made without the registry. 0.5-1 day, 1 program;
+  a risk to goi's func identity (`closureOf`), so not done unasked. *Proposed 7: (a) leave, (b) do it. Recommended (a)*
+  until another program needs it.
+- Moves for a let's declarations (`y := f(x)` clears `x` when the declaration has run, not as the argument is evaluated)
+  and for method receivers (`h.check()`: after the call). A call that spends its time in a callee that holds the value
+  through a receiver slot of the caller keeps it alive longer than gc: no program here needs it.
+- Variables declared in an `if`, `for` or `switch` header, and the type switch's subject temporary, live to the
+  statement's end only (cleared with it, as a temporary, when they are one; header variables stay to the function's
+  end): a header variable that holds a pointer across a long loop body is later than gc.
+- Cells in loops: a per-iteration variable is not in a list's declarations, so it is not cleared.
