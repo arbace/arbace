@@ -2377,3 +2377,148 @@ as by design.
 - **`:ssl-finalization` stays PYS9's.** Its 4 test_ssl methods and 8 asyncio methods need an SSL object freed by
   `gc.collect()`.
 - **The engine goroutine of an abandoned SSL object is not ended.** This is 209's Low; it needs the same finalizer.
+## Design: 216, a register-allocating compiled loop (2026-11-05, the Mac VM, queue 216; the user's (a) on 210's DECISION)
+
+210's profiles were flat: what is left of the compiled code's cost is its design, each instruction a helper call that
+pops its operands off the frame's heap stack (`f.Stack`, a slice: a bounds check and a cleared slot per pop, an append
+per push, a write barrier per pointer stored) and pushes its result there, with `f.Lasti` stored before every
+instruction. The change: `arbace.python.aot` keeps the value stack in Go locals within a basic block and writes the
+frame back only where something may read it. The runtime (eval.go's loop, gen.go, the exception unwinding) is
+unchanged; the compiled code's new helpers take their operands as arguments and return their results (aot.go).
+
+**What may observe a running frame's stack or `f.Lasti`**, read from go/arbace/py at 5b34c021:
+
+| observer | reads | when |
+|---|---|---|
+| exception unwinding (eval.go's runFrames) | `f.Lasti` (the traceback entry `Traceback{Frame, PC: f.Lasti}`, the handler `handlerAt(f.Lasti)`, a handler's pushed lasti); `f.Stack` popped to the handler's depth, then the exception pushed | the compiled function returns an error |
+| a call of a Python function (`*pushFrame`), a class's `__init__` inlined | the arguments on `f.Stack` (callStack, newFrame read them in place); on the callee's return its value pushed on `f.Stack` and the function re-entered at `f.PC` | the function returns |
+| generators' and coroutines' suspension (yield-value, yield-from, the await family: operations run by AotExec) | `f.Stack` kept in the frame while suspended; resumed at `f.PC`, or thrown into at `f.Lasti` (gen.go sets `f.PC = f.Lasti` and re-runs the yield) | the function returns a value with `f.Suspended` |
+| every operation run by AotExec (the rarer ones, the registered ones) | `f.Stack` (operands A items down, e.g. list-extend, dict-merge) | inside the call |
+| a frame object's `f_lineno`, `f_lasti`, `tb_lineno` (tbobj.go, `sys._getframe`, `traceback.extract_stack`, warnings' stack levels) | `f.Lasti` | from code the instruction calls (a dunder method, a property, `__hash__`, a warning) |
+| `f_locals`, `locals()`, `frame.clear` | `f.Fast`, `f.Cells`, `f.LocalsMap`: never the value stack; `frame.clear` of a running frame raises | anytime |
+| the eval breaker (signals, threads' switch) | runs only in runFrames, at a frame's entry and at calls | at a call |
+| per-instruction caches (load-global, load-attr, store-attr) | the instruction's index: load-global read it from `f.Lasti` | inside the call |
+| `sys.settrace`, `sys.setprofile` | nothing: no-ops in pyi (sys.go), so no line event to keep | - |
+
+Code that the instruction calls (a dunder method run by a nested loop, a builtin) runs on its own frame: it cannot
+read this frame's value stack, only its `f_lineno` through `f_back` or `sys._getframe(1)`, and `f_locals`.
+
+**The rules the generator follows:**
+
+1. *The stack's shape is static.* Each instruction's depth is computed as ir/verify computes it (every path the same
+   depth); a method call's load-attr (210's `AotLoadMethod`) pushes one item more up to its call. At any point of the
+   generated code, slots `[0, m)` are in `f.Stack` (whose length is then `m`) and slots `[m, d)` in Go locals `s<slot>`;
+   an instruction that pops a slot below `m` first takes those slots into locals (`f.Stack[k]` read by constant index,
+   then the stack truncated).
+2. *Block starts* are where the runtime may enter the function, or where control merges: instruction 0, the handlers'
+   targets, the jumps' targets, the instruction after a call, every operation run by AotExec and the instruction after
+   it (a yield is re-run at `f.Lasti` when thrown into). At a block start every slot is in `f.Stack`; the code falling
+   into it, or jumping to it, writes its locals back first (one append). The entry switch on `f.PC` lists only the
+   block starts; any other PC is AotBadPC's SystemError, never a silent resumption with a wrong stack.
+3. *Calls and suspensions write everything back*: a call (`AotCall`, `AotCallMethod`), raise, reraise and every
+   AotExec operation (yields among them) run with the whole stack in `f.Stack`, as today. A generator suspended in the
+   middle of an expression (`f(a, (yield x))`) therefore keeps `f`, `a` in its frame across the suspension.
+4. *Exceptions:* an instruction that may raise writes back, on its error path only, the slots its handler keeps (up to
+   the handler's depth of the innermost handler covering it, `handlerAt`'s); the slots above are discarded by the
+   unwinding anyway. No handler: nothing is written back (the frame is left). A handler deeper than the instruction's
+   depth after its pops (never made by the compiler) makes the generator fall back to 210's stack code for that code
+   object.
+5. *Positions:* `f.Lasti` is stored before an instruction that may raise or run Python code (so a traceback, a nested
+   `f_lineno`, a warning's stack level and the per-instruction caches see the instruction's index), and before every
+   return, raise, reraise, call and AotExec operation, as today; an instruction whose only error is an unbound name
+   (load-fast, load-deref, delete-fast, delete-deref) stores it on its error path; the rest (constants, stores to
+   locals, stack shuffles, builds of tuples and lists, `is`, jumps) store nothing. load-global takes its cache's index
+   as a constant. Tracebacks keep their lines: CPython's positions are by instruction, pyi's `co_positions` has lines
+   only (no columns, so no carets: unchanged).
+6. *Fallback:* a code object whose depths do not hold, or that the generator cannot place, is compiled by 210's stack
+   generator (kept, unchanged), so the change is never a refusal.
+
+The proof asked: the tracebacks' lines of sample programs that raise in mid-block, in calls, in nested calls'
+dunders, in generators and coroutines (suspended mid-expression, thrown into, closed) and in handlers, compiled, on
+the loop and on CPython (the caret lines, which pyi does not print, filtered); `make python-essential`,
+`bin/pyi check --aot --no-pyi` on the synthetic sample, 210's check210.sh, `bin/pyi runtime check`; the bench sample's
+table, base and branch back to back with CPython.
+
+## As built: 216, the register-allocating compiled loop (2026-11-05, the Mac VM, queue 216)
+
+Built as "Design: 216" above: `arbace.python.aot`'s register generator (`reg-func`) beside 210's stack generator
+(`code-func`, kept as the fallback for a code object whose stack's shape is not static: none of the samples' code
+objects needed it, the compile logs print "aot: the stack generator for ..." when one does), and aot.go's helpers that
+take operands as arguments (`AotDrop`, `AotSpill`, `AotLoadGlobalV` with its cache's index a constant, `AotLoadMethodV`,
+`AotNext`, `AotTruthy2`, ...; the old helpers stay for the fallback). In the generated function the slots are Go locals
+`s<slot>` declared once at its top (gotos cross no declaration), the entry switch lists only the block starts, an
+instruction's error path writes back the handler's slots and stores `f.Lasti` when the instruction stores it nowhere
+else. `check-depths` (off) makes each block start check the frame's depth; the samples below ran once with it on.
+Locals are never cached in Go variables (load-fast reads `f.Fast` every time, store-fast writes it at once), so
+`f_locals` and the frame's other readers see what they saw before.
+
+A function before and after (`x = a + b * 2` in a function): `AotLoadFast(f,0)`, `AotLoadFast(f,1)`, `AotConst`,
+`AotBinary(f, BinMul)`, `AotBinary(f, BinAdd)`, `AotStoreFast` over `f.Stack`, `f.Lasti` stored six times; now
+`s0 = f.Fast[0]`, `s1 = f.Fast[1]`, `s2 = consts[0]`, `f.Lasti = 3; s1, err = py.BinaryOp(py.BinMul, s1, s2)`,
+`f.Lasti = 4; s0, err = py.BinaryOp(py.BinAdd, s0, s1)`, `py.AotStoreFastV(f, 4, s0)`, the frame's stack untouched.
+
+**The table** (the process's wall seconds, the least of 3 rounds; each round runs CPython, the base and this branch back
+to back on the same benchmark; the VM's load 5-9, two other agents running: differences under 10% are noise; CPython
+3.14.10 `python3 -s -B`; base 5b34c021 (210's runtime and generator), after this branch's head; loops as
+test/python/bench/benchmarks.tsv; `/root/arbace-mac/.tmp/q210r/table1.tsv`):
+
+| benchmark | loops | CPython | base | after | base / CPython | after / CPython |
+|---|---:|---:|---:|---:|---:|---:|
+| raytrace | 1 | 0.20 | 0.70 | 0.61 | 3.5x | 3.0x |
+| deltablue | 50 | 0.12 | 0.49 | 0.44 | 4.1x | 3.7x |
+| fannkuch | 1 | 0.29 | 0.83 | 0.70 | 2.9x | 2.4x |
+| generators | 4 | 0.16 | 0.79 | 0.77 | 4.9x | 4.8x |
+| nqueens | 4 | 0.26 | 0.75 | 0.67 | 2.9x | 2.6x |
+| go | 1 | 0.10 | 0.31 | 0.26 | 3.1x | 2.6x |
+| richards | 10 | 0.34 | 0.78 | 0.71 | 2.3x | 2.1x |
+| chaos | 1 | 0.08 | 0.25 | 0.23 | 3.1x | 2.9x |
+| json_dumps | 1 | 0.03 | 0.22 | 0.21 | 7.3x | 7.0x |
+| spectral_norm | 4 | 0.35 | 0.83 | 0.70 | 2.4x | 2.0x |
+| unpack_sequence | 20000 | 0.23 | 0.85 | 0.63 | 3.7x | 2.7x |
+| coroutines | 20 | 0.36 | 0.82 | 0.78 | 2.3x | 2.2x |
+| float | 4 | 0.22 | 0.55 | 0.48 | 2.5x | 2.2x |
+| nbody | 3 | 0.30 | 0.60 | 0.35 | 2.0x | 1.2x |
+| hexiom | 1 | 0.03 | 0.09 | 0.09 | 3.0x | 3.0x |
+| base64 | 1 | 1.58 | 3.78 | 3.01 | 2.4x | 1.9x |
+| bpe_tokeniser | 1 | 3.26 | 7.07 | 6.48 | 2.2x | 2.0x |
+| async_tree | 1 | 0.23 | 1.14 | 1.03 | 5.0x | 4.5x |
+| mdp | 1 | 0.82 | 3.26 | 3.08 | 4.0x | 3.8x |
+| pprint | 1 | 1.39 | 5.07 | 4.81 | 3.6x | 3.5x |
+
+Sum over the 20: CPython 10.35 s, base 29.18 s (2.82x), after 26.04 s (2.52x); median 3.05x -> 2.67x. The register
+generator pays most where the code is arithmetic and stack shuffling between few calls (nbody 2.0x -> 1.2x,
+unpack_sequence 3.7x -> 2.7x, base64 2.4x -> 1.9x, spectral_norm, fannkuch); call-, attribute- and generator-heavy
+benchmarks gain 5-15%: their profiles are now the runtime's (attribute caches, newFrame and freeFrame, runFrames'
+return for every Python call, a nested run for every generator resumption from Go), which this change leaves alone.
+
+**The proofs (run, the VM):**
+- Tracebacks' positions: `t/check216.sh` (the report's appendix) compiles `tb.py` (exceptions mid-block in multi-line
+  expressions, an unbound local, a dunder and a property called mid-expression reading `sys._getframe(1).f_lineno`, a
+  recursion, a generator suspended mid-expression then raising, thrown into and closed, a coroutine raising after a
+  suspension, nested handlers with `with` and `finally`, a warning's stack level, the uncaught exception's traceback, a
+  callee writing its caller's local through `f_locals`) and runs it compiled and on the loop: the compiled output is the
+  loop's byte for byte, and both differ from CPython's (the caret lines filtered: pyi has no columns) only in the 16
+  known lines of one pre-existing class, the compiler's (the next paragraph) and `f_locals`' write-through.
+- `make python-essential`: check --aot 21 programs, 20 pass, 1 classed (as-pyi), 0 failing, the control refused.
+- `bin/pyi check --aot --no-pyi --only-list` of 210's 73-program sample, with `check-depths` on: 73 pass, 0 failing.
+- 210's `check210.sh` (edge, meth, mixed, nums, frames): PASS, compiled and on the loop.
+- `bin/pyi runtime check`: the seven packages the same forms, the tables and runtime-ops equal, 135 of 136 programs equal (e-executable.py timed out at load 15, its subprocesses on goi; run alone, `bin/pyi run` = CPython, 2 min 17 s), the REPL session equal (the check does not run compiled code: the runtime's change is aot.go's additions).
+
+**Found on the way (pre-existing, not the compiled loop's):** pyi's compiler (arbace.python.compile) sets an
+instruction's line per statement (`stmt*!`'s `:line`), so in a multi-line expression every instruction has the
+statement's first line where CPython locates each sub-expression's instructions at the sub-expression (`b.missing` on
+the next line of `y = (x +`, the third item of a list display, a call's argument); tracebacks, `f_lineno` and warnings
+show the first line. And pyi's `frame.f_locals` is a snapshot, not PEP 667's write-through proxy. Both are the loop's too.
+
+## After 216's decisions (2026-11-05 evening, the user: 1 (a), 2 (a))
+
+- **2 (a), per-expression lines (8f23d75e):** arbace.python.compile's `expr!` sets the expression's line while it
+  compiles and restores the statement's after (CPython's codegen locates each instruction at the node that emits it).
+  Tracebacks, `f_lineno` and warnings' stack levels in multi-line expressions are now CPython's: of tb.py's 16 known
+  diff lines 15 are gone (the one left is `frame.f_locals`' write-through, pre-existing). Every module's IR changes
+  (its line table only). Checked (run, the VM): `t/check216.sh` PASS (1 known), `t/check210.sh` PASS,
+  `make python-essential` 0 failing, `bin/pyi runtime check` 136 of 136 programs equal and the REPL equal,
+  `bin/pyi lib-test --aot test_exceptions` 109 methods, 0 failing. The main host's night: `bin/pyi check --aot --record`
+  and Lib/test's traceback-sensitive modules (test_traceback, test_exceptions, test_warnings, test_sys_settrace,
+  test_dis, test_compile, test_code, test_frame, test_inspect, test_doctest, test_pdb).
+- **1 (a), direct calls between compiled functions** (210's option (b)): the next step, a follow-up after 216's merge.
