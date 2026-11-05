@@ -631,7 +631,12 @@
     HsDo (rn-stmts env (lval (arg v 3)) (fn [_] nil) (arg v 2))
     HsMultiIf (doseq [g (arg v 2)]
                 (let [gv (lval g)] (rn-stmts env (arg gv 2) (fn [e] (rn e (arg gv 3))) 'GuardStmt)))
-    ExprWithTySig (do (rn env (arg v 2)) (rn env (arg v 3)))
+    ExprWithTySig (do (rn env (arg v 2))
+                      (let [wc (arg v 3) sig (arg wc 2)]
+                        (rn-sig (assoc env :sp (lsp sig)) sp (lval sig))))
+    DerivDecl (let [wc (arg v 2) sig (arg wc 2)]
+                (rn-sig (assoc env :sp (lsp sig)) sp (lval sig))
+                (rn env (arg v 3)))
     HsWC (rn env (arg v 2))
     HsSig (rn-sig env sp v)
     MG (rn-mg env v)
@@ -654,7 +659,7 @@
     HsOpTy (emit-tree! (rn-type-shape env (list 'L sp v)))
     ;; declarations
     DataDecl (let [env1 (rn-qtvs env (arg v 3))]
-               (rn-tc-name env (arg v 2)) (rn-defn env1 (arg v 5)))
+               (rn-tc-name env (arg v 2)) (rn-defn env env1 (arg v 5)))
     SynDecl (let [env1 (rn-qtvs env (arg v 3))]
               (rn-tc-name env (arg v 2)) (rn env1 (arg v 5)))
     ClassDecl (rn-class env v)
@@ -675,6 +680,22 @@
                              (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o sp))) env fvs))]
                 (rn env (arg v 2)) (rn env1 (arg v 5)) (rn env1 (arg v 6)) (rn env1 (arg v 7)))
     WarningD nil
+    SpecSig (let [nl (arg v 2)]
+              (rn env nl)
+              (doseq [t (arg v 3)]
+                (rn-sig (assoc env :sp (lsp t)) (combine (lsp nl) (lsp t)) (lval t))))
+    HsRule (let [bs (arg v 4) bndrs (arg bs 3)
+                 sigtys (vec (keep (fn [b] (let [bv (lval b)] (when (= 'RuleBndrSig (con bv)) (arg bv 3)))) bndrs))
+                 fvs (free-tvs env sigtys)
+                 env (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o (:sp env)))) env fvs)
+                 env1 (reduce (fn [e b]
+                                (let [bv (lval b) nl (arg bv 2) occ (rdr-occ (lval nl))
+                                      n (loc-name "var" occ (lsp nl))]
+                                  (emit! (lsp nl) n)
+                                  (when (= 'RuleBndrSig (con bv)) (rn e (arg bv 3)))
+                                  (assoc-in e [:l [:v occ]] n)))
+                              (rn-tvbs env (or (just-val (arg bs 2)) [])) bndrs)]
+             (rn env1 (arg v 5)) (rn env1 (arg v 6)))
     ;; a fixity declaration names what this module declares in any namespace
     FixitySig (doseq [nl (arg v 2)]
                 (let [occ (rdr-occ (lval nl))]
@@ -734,13 +755,16 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Declarations
 
-(defn- rn-defn [env d]
-  ;; (HsDataDefn ext ctx ctype ksig cons derivs)
+(defn- rn-defn
+  "(HsDataDefn ext ctx ctype ksig cons derivs); env1 has the declaration's type variables, which a GADT
+  constructor's signature does not see"
+  [env0 env d]
   (rn env (arg d 2)) (rn env (arg d 4))
-  (let [cs (arg d 5)]
+  (let [cs (arg d 5)
+        cenv (fn [c] (if (= 'ConDeclGADT (con (lval c))) env0 env))]
     (case (con cs)
-      DataTypeCons (doseq [c (arg cs 2)] (rn env c))
-      NewTypeCon (rn env (arg cs 1))
+      DataTypeCons (doseq [c (arg cs 2)] (rn (cenv c) c))
+      NewTypeCon (rn (cenv (arg cs 1)) (arg cs 1))
       nil))
   (rn env (arg d 6)))
 
@@ -868,6 +892,7 @@
                                            (let [rhs (arg bv 4)] (rn-grhss benv rhs)))
                                (rn benv b))))
                          @uses)))
+        _ (doseq [r results u r] (use! u))
         names-of (fn [i] (map second (:defs (nth bind-info i))))
         defset (mapv (fn [i] (set (names-of i))) (range (count bind-info)))
         edges (fn [i] (vec (for [j (range (count bind-info)) :when (seq (set/intersection (nth results i) (nth defset j)))] j)))
@@ -978,7 +1003,10 @@
       (let [v (lval it)]
         (case (con v)
           IEVar (let [[nsp rdr] (ie-name (arg v 2))]
-                  (when-let [n (occ-at! env nsp rdr)] (swap! acc conj [n #{}])))
+                  (when-let [n (occ-at! env nsp rdr)]
+                    ;; a method or field exported alone belongs to its parent's avail
+                    (let [par (some (fn [e] (when (= (:name e) n) (:parent e))) (get @*genv* [(nskey (name-ns n)) (name-occ n)]))]
+                      (swap! acc conj (if par [par #{n}] [n #{}])))))
           IEThingAbs (let [[nsp rdr] (ie-name (arg v 2))]
                        (when-let [n (occ-at! env nsp rdr)] (swap! acc conj [n #{}])))
           IEThingAll (let [[nsp rdr] (ie-name (arg v 2))]
@@ -1208,13 +1236,16 @@
 (defn- base-name [^String f] (.getName (File. f)))
 
 (defn rename-file
-  "Rename a dump file; writes the output beside the named directories; the result map"
-  [f out local]
+  "Rename a dump file; writes the output beside the named directories; the result map. The output is named
+  by the dump's path below root (default: its file name)"
+  [f out local & [root]]
   (let [r (rename-module (read-dump f))
-        nm (let [b (base-name f)] (if (str/ends-with? b ".edn") (subs b 0 (- (count b) 4)) b))]
+        b (if (and root (str/starts-with? f (str root "/"))) (subs f (inc (count root))) (base-name f))
+        nm (if (str/ends-with? b ".edn") (subs b 0 (- (count b) 4)) b)]
     (when out
-      (.mkdirs (File. ^String out))
-      (spit (str out "/" nm ".rn.edn") (output-text r)))
+      (let [o (File. (str out "/" nm ".rn.edn"))]
+        (.mkdirs (.getParentFile o))
+        (spit o (output-text r))))
     (when local
       (.mkdirs (File. ^String local))
       (spit (str local "/" (:module r) ".iface.edn") (iface-text r))
@@ -1256,12 +1287,12 @@
     (binding [*ifdirs* dirs]
       (case verb
         "rn" (do (doseq [f pos]
-                   (let [r (rename-file f (get opts "-o") (get opts "--local"))]
+                   (let [r (rename-file f (get opts "-o") (get opts "--local") (get opts "--root"))]
                      (println "renamed" (:module r) (count (:occs r)) "occs" (count (:errors r)) "errors")
                      (doseq [e (take 5 (:errors r))] (println "  " e))))
                  (System/exit 0))
         "check" (let [res (vec (for [f pos]
-                                 (let [r (rename-file f (get opts "-o") (get opts "--local"))
+                                 (let [r (rename-file f (get opts "-o") (get opts "--local") (get opts "--root"))
                                        gf (str (get opts "--ghc") "/" (:name r) ".rn.edn")
                                        c (compare-with-ghc r gf)]
                                    (println (name (:status c)) (:name r) (if (:order-equal c) "" "(group order differs)")

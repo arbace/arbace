@@ -53,6 +53,9 @@ import GHC.Unit.Module.Graph (mgModSummaries)
 import GHC.Data.FastString (unpackFS)
 import GHC.Utils.Panic (handleGhcException)
 
+import Control.Exception (SomeException)
+import GHC.Driver.Monad (reifyGhc, reflectGhc)
+import Control.Exception (try)
 import Control.Monad (forM_, forM, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Data hiding (Fixity, tyConName)
@@ -283,12 +286,17 @@ pprS = unwords . words . showSDocUnsafe . O.ppr
 ifaceVerb :: FilePath -> [String] -> FilePath -> Bool -> [String] -> IO Bool
 ifaceVerb libdir flags outDir closure mods = runGhc (Just libdir) $ do
   setup libdir flags
-  ms <- forM mods $ \mn -> findModule (mkModuleName mn) Nothing
+  ms <- fmap catMaybes $ forM mods $ \mn ->
+    safely (\e -> liftIO (hPutStrLn stderr ("hsdump: " ++ mn ++ ": " ++ takeWhile (/= '\n') e)) >> return Nothing)
+           (Just <$> findModule (mkModuleName mn) Nothing)
   let loop _ [] = return True
       loop seen (m : rest)
         | moduleNameString (moduleName m) `elem` seen = loop seen rest
         | otherwise = do
-            (ok, defs) <- ifaceOf outDir m
+            (ok, defs) <- safely (\e -> do
+                            liftIO (hPutStrLn stderr ("hsdump: " ++ moduleNameString (moduleName m) ++ ": " ++ takeWhile (/= '\n') e))
+                            return (False, []))
+                          (ifaceOf outDir m)
             ok' <- loop (moduleNameString (moduleName m) : seen) (if closure then rest ++ defs else rest)
             return (ok && ok')
   loop [] ms
@@ -347,3 +355,11 @@ nubMods = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
 
 dn :: LTyClDecl GhcRn -> Name
 dn = tcdName . unLoc
+
+-- run a Ghc action, a failure (an exception, e.g. a module without an interface) answered by the handler
+safely :: (String -> Ghc a) -> Ghc a -> Ghc a
+safely h act = do
+  r <- reifyGhc (\sess -> try (reflectGhc act sess))
+  case r of
+    Right a -> return a
+    Left (e :: SomeException) -> h (show e)
