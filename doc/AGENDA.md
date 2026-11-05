@@ -134,6 +134,16 @@ The nights to the tag:
   9. The re-seed window W prepared: eval-speed rebased, pyi's embedding planned, the two nights scripted (`window-w`;
      started).
   10. LLVM IR's LLS1-LLS19: a decision sheet with fresh recommendations.
+- **For the bottom crops (the user, 2026-11-05; C++, Rust, Haskell, OCaml, LLVM IR):**
+  1. Rust without rustc: a survey of the route from the native reader to rsi's IR (`rust-frontend-survey`; started).
+  2. RES34: std translated once per key by cf2g, designed and proved on one crate (`rust-res34`; started).
+  3. Rust's REAP row: read and print cells from the round trips (`rust-row`; started, with 7 and 9).
+  4. C++'s eval and AOT cells: `bin/cppi check` over g++'s run corpus, its classes and record (`cppi-check`; started).
+  5. C++ print's 914 by-design cases reviewed.
+  6. Haskell HE8: AOT, STG to Go forms, designed with a first slice (`haskell-he8`; started).
+  7. Haskell's REAP row (`haskell-row`; started).
+  8. OCaml's deferred cases triaged (190 at eval, 219 at AOT).
+  9. LLVM IR's REAP row (`llvm-row`; started).
 
 ## Open
 
