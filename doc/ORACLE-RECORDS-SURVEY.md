@@ -528,3 +528,176 @@ stripped) showing every essential and nightly step runnable, and the oracle tier
 ## Decided (2026-11-05, the user)
 
 ORS1-ORS14, each (a) as recommended: no gate tier needs a host toolchain, the oracle tier required per tag; outcomes committed, packs outside the clone, the essential dumps committed; the store .tmp/oracle-packs mirrored to the Mac's bare repository as an orphan branch; records in :inputs, packs in the pins, toolchain hosts on oracle steps only; records by hand only; a moved toolchain reported, not failed; crossed-pair and tampered-pack controls; class D to native substitutes where sound, else the oracle tier; headers packed; a program without a record fails; 100 MB a crop, 500 MB in all; the migration after the tag in the order C, Scheme, Haskell, Rust, OCaml, Python, C++ and LLVM; oracle-go's runner off the frozen JVM later; tools look for a toolchain only when a missing record needs one.
+
+## As built: the tooling and C (write-ahead, 2026-11-05)
+
+The migration's first two parts in ORS12's order, on branch `oracle-records-c` (from `oracle-records`), light: every record and
+verify below was made on a few small corpora's files; the whole recording is the night's (its commands below). The commits, in
+the order they land:
+
+| Commit | What | Rekeys |
+|---|---|---|
+| `c3892e875` | the shared tooling | nothing (no step reads it yet) |
+| `c60cb208c` | C's installed headers and musl's configured tree as packs; tools/ccdump reads the headers' pack | C's steps |
+| `9f53d55a7` | gcc's dg diagnostics as a record | C's steps |
+| `81d57166c` | the round trip's and C23's originals as records (CS77 (a), CS79 (a)) | C's steps |
+| `4aef699f9` | `bin/repr-c check` asks gcc's include directory only when gcc runs | C's steps |
+| `aefac28af` | `steps.edn`: C's steps judge from the records, `:gcc` off their `:hosts`; the oracle tier's three steps | C's steps, `gate-tests`, `reap` |
+| `3a711db67` | `bin/gate --pins`: no gcc is no failure | nothing (bin/gate's pins are in no key) |
+| `fe436f366` | `--record-orig` records alone | C's steps |
+| `d3737b220` | **separate:** the planner's `:phase :oracle`, `bin/gate --oracle`, absent steps | every step (the planner and the runner are in every key): lands with GTS240 |
+| `dbc9a76c2` | **separate:** repr/c's preprocessor reads the headers' pack | gate_key (arbace.repr.c.pp is embedded): every build and the steps on them; lands with GTS240 |
+
+### The shared tooling (ORS2-ORS7)
+
+- **The library**, `test/oracle-records/oracle.bash`, not `bin/lib/oracle.bash` as §6 named it: `bin/arbace-go`'s gate_key hashes
+  `bin/lib/` but the crops' and the repr checks' directories, so a new file there rekeys every build. Moving it there, with its
+  exclusion from gate_key, belongs to the next change that rekeys every build (ORS15 below).
+  - Packs: a deterministic tar.xz (the seed's recipe: sorted, POSIX, mtime 0, owner 0, modes 0644/0755, `xz -9e -T1`), its pin
+    `test/CROP/records/NAME.sha256` and manifest `NAME.tsv` beside it (`# ` header lines: the pack, `host: :gcc IDENTITY
+    (VERSION)`, the command, the date; then `ID<TAB>KEY<TAB>SHA256<TAB>SIZE`, the member `NAME/ID`). Re-packing the same tree gives
+    the same bytes (checked: `c-headers-gcc15` and `c-musl-1.2.6-x86_64` packed twice, the same SHA-256).
+  - The store: `ARBACE_ORACLE_PACKS`, by default the main checkout's `.tmp/oracle-packs/` (`NAME/SHA256.tar.xz`, every version
+    kept; `unpacked/SHA256/NAME/`). `oracle_unpack` checks the pack's bytes against the pin and every member against the manifest
+    (no member missing, none extra) at every unpack; `oracle_get PIN ID` checks the member it returns (exit 3: unrecorded, ORS10
+    (a); 1: refused; 2: absent).
+  - `oracle_host_id gcc`: the same recipe as `bin/lib/gate-run.bash`'s `gate_gcc_id` (the runner keeps its own copy: changing
+    it rekeys every step). `oracle_verdict`: ORS6 (a)'s rule (entries differing under the identity the record names fail; under
+    another identity "toolchain moved", reported with the count, exit 0).
+- **`bin/oracle-records`**: `list`, `record CROP KIND [--corpus C]`, `verify CROP [KIND...] [--corpus C] [--sample N]` (absent
+  where the kind's host is none), `pack`, `unpack`, `pins`, `controls`, `check` (pins and controls), `mirror [--push]`, `fetch
+  NAME...`. The kinds are data, `test/oracle-records/kinds.edn` (C's nine: `headers`, `host`, `musl`, `dg`, `c23-syntax`,
+  `roundtrip-orig`, `parse-gcc`, `runs`, `tokens`; the last two have no `:verify` yet, `parse-gcc` is verified by
+  `roundtrip-orig`'s). Makefile: `oracle-records-list`, `-check`, `-verify`, `-record`, `-mirror`.
+- **The mirror (ORS3 (a))**: `bin/oracle-records mirror` prints the commands (`git init --bare STORE/mirror.git`, one commit a
+  pinned pack on the orphan branch `oracle-packs` through `git hash-object`/`update-index`/`commit-tree`, its remote `mac` the
+  main checkout's, `git -C STORE/mirror.git push mac oracle-packs`); `--push` runs them. Not pushed today.
+- **The controls (ORS7 (a))**: the tampered pack `test/oracle-records/controls/tampered.{tar.xz,sha256,tsv}` (two members, one a
+  byte off its manifest's digest; its bytes as pinned): `bin/oracle-records controls` requires `oracle_unpack` and `oracle_get` to
+  refuse it and its untampered member to be taken; it runs in `bin/oracle-records check`, the first command of `c-dg-essential`,
+  and in `bin/gate --pins`. The crossed pairs are in each verify: dg's (one file's live output against another's entry), C23's
+  (a file gcc rejects afresh against a line it accepts), the round trip's originals' (one object afresh against another's
+  member); each must differ, else the verify fails.
+- **`bin/gate --pins`** checks every pinned pack in the store with its members, and the control; no gcc on the host is no
+  failure there (its `test/c/host/` check is the oracle tier's).
+
+### C
+
+- **The installed headers (ORS9 (a))**, the pack `c-headers-gcc15`: gcc's include directory whole, musl-dev's and
+  fortify-headers' `/usr/include` files (apk's lists) and every header `test/c/host/headers.sha256` names (gmp-dev's and
+  pcre2-dev's one each among them), 379 headers and `roots.txt` (search.txt's three directories), 3.5 MB raw, **291 KB xz**
+  (`bin/repr-c host pack`; `host verify-pack`; the headers list's 198 digests are the pack's, checked). `ARBACE_C_SYSROOT` names
+  its directory (`bin/lib/repr-c/sysroot.bash`'s `c_sysroot`, in `bin/ci` and `bin/repr-c`: the store's pack unpacked, else the
+  same members staged from the host's files when each has the manifest's digest, else a refusal; `/` the host's own). A name
+  under the roots is read from it alone and keeps its own name in every output: tools/ccdump through cc's `Config.FS` (a name the
+  pack lacks opens as an unreadable directory, so cc's fallback to `os.Open` never reaches the host), repr/c's preprocessor in
+  `dbc9a76c2` (until it lands, `c_sysroot` requires the host's headers to be the pack's).
+- **musl's configured tree**, the pack `c-musl-1.2.6-x86_64`: configure's four products (`config.mak`, `obj/include/bits/
+  {alltypes,syscall}.h`, `obj/src/internal/version.h`), **6.6 KB xz** (`bin/ci musl pack`, `verify-pack`); `bin/ci musl prepare`
+  takes them from the pack, and configures with gcc only when the store lacks it (ORS14 (a)). The tree prepared from the pack is
+  configure's file for file, and musl's forms cache key is the same as the main checkout's (checked).
+- **gcc's dg diagnostics**, `test/c/ref-dg-gcc15.edn` (`test/c/dgref.ae`): one map a file, `:sha256` of its bytes, `:action`,
+  `:opts`, `:status` and `:diag` (gcc-diag.bash's lines, each byte a character, `\uXXXX` outside 0x20-0x7e). `bin/ci dg` reads it
+  in place of gcc (a file with no entry, or whose bytes or dg-options differ, fails: ORS10 (a)); `--record-ref`, `--verify-ref
+  [--sample N]`, `--live`. Recorded here: gcc-va-opt and gcc-cpp-c23, 28 of 627 files (the materialized outputs byte for byte
+  the live gcc's, the non-ASCII `c23-ucnid-1-utf8.c` among them).
+- **C23's acceptance (CS79 (a))**, `test/c/c23/ref-syntax-gcc15.tsv`: all 62 files recorded. `bin/repr-c check --c23` by default:
+  judge 1 from the record, levels 1-2 (`--no-gcc`), judges 3 and 5's objects and the control's objects deferred
+  (`test/c/c23records.ae`, the records mode of the embedded `arbace.repr.c.c23check`, ORS16); `--oracle` every judge with gcc;
+  `--record-ref`, `--verify-ref`.
+- **The round trip's originals (CS77 (a) generalized)**: per corpus the pack `c-roundtrip-orig-CORPUS` (`test/repr/c/records/`):
+  each original's `NAME.cc` (gcc's compile status, its run's: a status, `link` or `-`), `NAME.o`, `NAME.stdout`, keyed by the
+  original's bytes, standard and options. `bin/repr-c roundtrip` reads them in place of compiling the originals and compiles,
+  links and runs the print alone (the corpora not packed yet: the originals compiled as before); `--record-orig` (gcc alone,
+  minutes), `--verify-orig [--sample N]` (with `parse-gcc.tsv`'s acceptance afresh), `--no-gcc` (levels 1-2 and the acceptance,
+  no gcc at all; the known entries of `:objects`, `:objects-macro-body`, `:run-address` and `:print-grammar` that pass the rest
+  deferred, not stale: the embedded judge's own `--no-gcc` is ORS16's). Recorded here: benchmarksgame, 52 originals, 121 members,
+  **34 KB xz**; its `obj.tsv` and `run.tsv` from the pack are the main checkout's last live run's line for line.
+- **The steps** (`aefac28af`): `:gcc` off twelve steps, the packs' pins in their `:pins`, `test/oracle-records/` and
+  `bin/oracle-records` in the `:c` group; `c-dg-essential` runs `bin/oracle-records check` first; `c-roundtrip` runs `--no-gcc`.
+  The oracle tier's `c-c23-oracle` (`bin/repr-c check --c23 --oracle`), `c-roundtrip-oracle` (the print's levels 3-4, a part a
+  corpus) and `c-records-verify` (`bin/oracle-records verify c --sample 8`) keep `:gcc`: in `--full` at `aefac28af`, `:phase
+  :oracle` with `d3737b220`.
+
+  | Step | `:hosts` before | after |
+  |---|---|---|
+  | c-dg-essential, c-c23, c-dg, c-roundtrip | `[:stage0 :gcc]` | `[:stage0]` |
+  | c-check-essential, c-aot-essential, c-judge-test, c-aot, c-annotations, c-tokens, c-parse | `[:stage0 :go :gcc]` | `[:stage0 :go]` |
+  | c-check | `[:prog :stage0 :go :gcc]` | `[:prog :stage0 :go]` |
+  | c-c2j | `[:stage0]` | unchanged |
+  | c-c23-oracle, c-records-verify, c-roundtrip-oracle (20 parts) | | `[:stage0 :gcc]` |
+
+### What was checked (light, in the worktree, main's stage 0)
+
+- `bin/gate --full --plan` at `aefac28af`: 250 steps; intersecting each step's material (`.tmp/gate-plan/plan/NAME.inputs`) with
+  the files changed since `3f800b868`, the steps that move are C's sixteen (with the three new), `gate-tests` (`bin/gate`,
+  `steps.edn` and the C scripts are its inputs) and `reap` (it reads `test/c/` and `test/repr/c/`'s records): nothing else, and no
+  build (no file of gate_key changed). 22 `host gcc` lines remain, the oracle tier's 22 steps.
+- `bin/gate --full --plan` with gcc off `PATH` (a directory of links to every executable but gcc's): 228 steps, every C step
+  `run`, none on `:gcc`. `bin/gate --oracle --plan` at `d3737b220`: with gcc the 22 oracle steps `run`; without it all 22
+  `absent` ("host :gcc none here").
+- With gcc off `PATH` and the packs from the store: `bin/ci musl prepare` (the pack's products), `bin/ci dg --essential` (92 of 92,
+  no execve of gcc or cc1 under strace), `bin/repr-c check --c23` (59 pass, 3 expected, the control's four refused) and `bin/ci
+  repl-session` pass; with `dbc9a76c2`, `bin/repr-c pp` opens no file under `/usr/include` or `/usr/lib/gcc` (strace), its stream
+  the host-read one byte for byte, as tools/ccdump's pp and types dumps are.
+- `bin/ci check --only test/c/essential-check.txt` (45 programs) and `bin/ci check --aot --only test/c/essential-aot.txt` (11) pass
+  on the packs; `bin/ci dg --corpus gcc-va-opt,gcc-cpp-c23` from the record judges as the live run; with gcc-embed added, its 47
+  files fail as unrecorded and the run fails; `bin/repr-c roundtrip --corpus benchmarksgame` (pack), `--no-gcc` (no gcc execve
+  under strace) and `--verify-orig --sample 6` (20 entries equal, the crossed pair differs); `bin/oracle-records verify c headers
+  musl c23-syntax host` (all equal, the C23 crossed pair differs); `bin/oracle-records check` (the two packs, the control refused).
+- `bin/ci judge-test` (the judges' unit tests, `c-judge-test`'s command) with `dbc9a76c2`: 104 tests, 464 assertions, none failing.
+
+### The night's recording (by hand, on the host with gcc; ORS5 (a): a commit of its own naming `:gcc b0a52aaa52e07744`)
+
+1. The packs into the main store (deterministic, so either): `cp -a .tmp/worktrees/oracle-records-c/.tmp/oracle-packs/c-*
+   /root/arbace/.tmp/oracle-packs/`, or in the merged checkout `bin/repr-c host pack` (expected `oracle: packed c-headers-gcc15:
+   380 members, 291196 bytes xz, 385f97364c71…`) and `bin/ci musl pack` (`4 members, 6592 bytes xz, 60a22151b385…`); then
+   `bin/oracle-records check` (both in the store, the control refused). **Before the first gate of the merge**: `c-dg-essential`
+   fails without them.
+2. `bin/oracle-records record c dg` (= `bin/ci dg --record-ref`, the seven groups): gcc on 627 files, about 8 minutes at 4 jobs;
+   expected `recorded test/c/ref-dg-gcc15.edn: 627 files of gcc-c23,…, 627 in all`, about 460 KB (332 KB of diagnostics in
+   the main checkout's last run); then its judgment, the same totals as `test/c/check-dg-linux-amd64.edn`'s.
+3. The originals of the round trip, a corpus at a time: `bin/repr-c roundtrip --record-orig --corpus C` for the 19 corpora
+   other than benchmarksgame (4,804 files; gcc alone, minutes each, torture-compile and torture-execute the largest); expected
+   19 more pins in `test/repr/c/records/`, the objects about 15 MB raw, about 3-5 MB xz in all.
+4. `bin/oracle-records verify c` (every entry, no `--sample`): every kind `all equal`, each crossed pair differing.
+5. `bin/gate --oracle` (after `d3737b220`; before it, the three steps run in `--full`): `c-c23-oracle`, the 20
+   `c-roundtrip-oracle` parts and `c-records-verify` pass. Then `bin/gate --full`: C's steps on the records.
+6. `bin/oracle-records mirror --push`, when the user agrees: the packs to the Mac's bare repository's `oracle-packs`.
+
+### Left
+
+- The night's recording above; until it, `c-dg` fails on 599 unrecorded files and `c-records-verify` on the 19 corpora with no
+  originals' pack (`c-roundtrip-oracle` compiles their originals as before).
+- The oracle record at a tag (`test/gate/oracle-TAG.edn`, §3.6) is not written by `bin/gate --oracle` yet; the nightly rotation
+  over a manifest (§3.4) is `--sample N`'s even spread, not GT8's rotation.
+- Not migrated here: `runs` (`ref-gcc15.edn`) and `tokens` (`pp-gcc.sha256`) have no verify verb yet; `bin/lib/ci/record-ref`
+  and `--record`'s gcc runs are by hand only, as before.
+
+## Proposed (2026-11-05, the tooling and C): ORS15-ORS18
+
+- **ORS15 The library's place.** `test/oracle-records/oracle.bash` today, because a new file in `bin/lib/` rekeys every build.
+  - Options: (a) move it to `bin/lib/oracle.bash` with its exclusion from gate_key (`bin/arbace-go`'s two find lists) in the commit
+    that lands with GTS240, `gate_gcc_id` then sourced from it (one recipe); (b) leave it in `test/oracle-records/`.
+  - Costs: (a) one more rekey-free move at that change, and one place for the identity recipe; (b) nothing, but a library
+    outside `bin/lib/`.
+  - *Recommended: (a)*.
+- **ORS16 The records modes of the embedded judges.** C23's records judge (`test/c/c23records.ae`) and the round trip's
+  `--no-gcc` deferral (in `bin/lib/repr-c/roundtrip`, over the judge's output) stand in for `arbace.repr.c.c23check` and
+  `arbace.repr.c.rtcheck`, which are embedded (gate_key).
+  - Options: (a) fold them into the two namespaces (a `--records`/`--no-gcc` argument, the deferral by class in `judge-row`) in
+    the gate_key commit that lands with GTS240, the stand-ins removed; (b) keep the stand-ins.
+  - Costs: (a) half a day, one gate_key change shared with `dbc9a76c2`; (b) two judges of C23 to keep in step, and a judgment
+    over the judge's printed lines.
+  - *Recommended: (a)*.
+- **ORS17 gcc's headers outside the clone.** ORS2 (a) commits the essential subsets' dumps so that a fresh clone runs the essential
+  gate with nothing external but its corpora; the headers pack holds gcc's include directory (GPL-3.0 with the GCC Runtime
+  Library Exception) and musl's headers (MIT).
+  - Options: (a) both packs stay in the store, a pinned external of the essential gate as gcc's tarball already is; (b) commit
+    musl's configured products (6.6 KB, MIT) and keep the headers pack in the store; (c) commit both.
+  - Costs: (a) the essential gate needs the store (or the host's own files, staged when each is the pack's); (b) as (a) for the
+    headers; (c) 3.5 MB of GPL-covered headers in the tree, which the vendoring rule keeps out.
+  - *Recommended: (a)*.
+- **ORS18 The dg record's size.** `test/c/ref-dg-gcc15.edn` will be about 460 KB committed (627 files' diagnostics).
+  - Options: (a) committed, within ORS11 (a)'s 3 MB for C (C's records then about 1.5 MB); (b) a pack.
+  - *Recommended: (a)*: it is an outcome (class A), read by the essential gate's family, and small.
