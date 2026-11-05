@@ -1,0 +1,67 @@
+;; bin/pyi table-check (queue 214; doc/python/PYTHON-SURVEY.md, "As built: 214"; PYS28 (a), doc/W-WINDOW.md §5): pyi's runtime
+;; listed in goi's table, checked without an executable, as bin/oi table-check does for oi (test/ocaml/table_check.ae on embed-gaps).
+;; Run on stage 0 (ARBACE_PATH at the checkout, cwd the checkout) with the configurations as bin/goi table gives them:
+;;   EXE table_check.ae LIST OUT PKGS --config GOOS/GOARCH=ROOT[,OVERLAY]...
+;; PKGS: the packages, comma-separated (arbace/libm,arbace/py, and arbace/crt,arbace/ci: 208's DECISION 1 (a)).
+;; 1. LIST (go/arbace/gotable.edn) lists each, and the generator takes it as a package of the program's own go/
+;;    (arbace.go.table/program-path?);
+;; 2. goi's checker checks each package in every configuration (its files as the configuration's build constraints select
+;;    them): no error, each configuration's file count printed;
+;; 3. with --tables, the generator (arbace.go.table/run) makes the table and the digests of a list of PKGS alone into OUT:
+;;    every configuration with members, none skipped (report.edn), the members' counts printed.
+(require '[arbace.string :as str] '[arbace.go.table :as table] '[arbace.go.check :as ck])
+
+(let [[list-file out pkgs & more] *command-line-args*
+      tables? (some #{"--tables"} more)
+      opts (table/parse-args (concat ["--list" list-file "--out" out] (remove #{"--tables"} more)))
+      list-cfg (read-string (slurp list-file))
+      ps (str/split pkgs #",")
+      fails (atom 0)
+      fail! (fn [& xs] (swap! fails inc) (apply println "FAIL" xs))]
+  (doseq [p ps]
+    (if (some #{p} (:packages list-cfg))
+      (println "listed:" p "in" list-file)
+      (fail! p "is not in" list-file "'s :packages"))
+    (when-not (table/program-path? p) (fail! p "is not a package of the program's go/ (arbace.go.table/program-path?)")))
+  ;; 2. the checker, a configuration at a time (as load-env checks a listed package); one session a configuration, the
+  ;; packages in order (libm before py: py's imports from its cache)
+  (doseq [{:keys [cfg root]} (:configs opts)]
+    (let [config (merge {:goos (:goos cfg) :goarch (:goarch cfg)}
+                        (if (= "amd64" (:goarch cfg)) {:goamd64 "v1"} {:goarm64 "v8.0"}))
+          src-of (fn [path _] (#'table/source-of root path config))
+          s (ck/session src-of)
+          c (str (:goos cfg) "/" (:goarch cfg))]
+      (doseq [p ps]
+        (let [t0 (System/currentTimeMillis)
+              src (src-of p nil)
+              cp (binding [arbace.go.check.env/*pkg* (volatile! {:path "arbace/gotable"})
+                           arbace.go.check.types/*resolve-named* arbace.go.check.decl/resolve-named!
+                           arbace.go.check.types/*method-obj* arbace.go.check.decl/method-data!
+                           arbace.go.check.types/*subst-method* arbace.go.check.decl/subst-method]
+                   (ck/ensure-package s p nil []))
+              errs (when cp (:errors (:result @cp)))]
+          (cond
+            (nil? cp) (fail! c "no files of" p)
+            (seq errs) (do (fail! c (count errs) "errors of goi's checker in" p)
+                           (doseq [{:keys [file line msg]} (take (Long/parseLong (or (System/getenv "PYI_TABLE_ERRORS") "30")) errs)] (println (str "  " file ":" line ": " msg))))
+            :else (println (str "checked: " p " in " c ", " (count (:files src)) " files, no error, "
+                                (quot (- (System/currentTimeMillis) t0) 1000) " s")))))))
+  ;; 3. the generator over a list of PKGS alone
+  (when tables?
+    (let [l (str out ".list.edn")]
+      (spit l (pr-str (assoc list-cfg :packages ps)))
+      (table/run (assoc opts :list-file l))
+      (let [r (read-string (slurp (str out "/report.edn")))
+            ms (:members r)]
+        (doseq [c (:configs r)]
+          (let [m (get ms c)]
+            (if (and m (pos? (:funcs m)))
+              (println (str "table: " c " " (pr-str m)))
+              (fail! "table:" c "has no members of" pkgs))))
+        (when (seq (:skipped r)) (fail! "table: skipped" (pr-str (:skipped r))))
+        (when (not= (count (:configs r)) (count (:configs opts))) (fail! "table: configurations" (pr-str (:configs r)))))))
+  (shutdown-agents)
+  (if (zero? @fails)
+    (do (println "table-check: ok (" pkgs "listed, checked" (if tables? "and tabled" "") "in" (count (:configs opts)) "configurations)")
+        (System/exit 0))
+    (do (println "table-check:" @fails "failures") (System/exit 1))))
