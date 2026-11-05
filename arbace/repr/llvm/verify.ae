@@ -1819,6 +1819,11 @@
       (when-not (global? c)
         (when (token-like? (norm-type (second fty))) (verr :verifier/function-type "Return type cannot be token for indirect call!" :none))
         (when (= 'x86_amx (norm-type (second fty))) (verr :verifier/function-type "Return type cannot be x86_amx for indirect call!" :none))))
+    ;; an inalloca argument's alloca is an inalloca one
+    (doseq [[i a] (map-indexed vector args) :when (has-attr? (nth pattrs i) "inalloca")]
+      (let [v (strip-casts (peek a)) d (when (local? v) (.get ^java.util.Map defs (local-key v)))]
+        (when (and d (= 'alloca (first (nth d 2))) (not (some #{:inalloca} (second (split-inst (nth d 2))))))
+          (verr :verifier/attr-misc "inalloca argument for call has mismatched alloca" [:inst (nth d 3)] :inst))))
     ;; swifterror arguments come from a swifterror alloca or parameter
     (doseq [[i a] (map-indexed vector args) :when (has-attr? (nth pattrs i) "swifterror")]
       (let [v (peek a) k (when (local? v) (local-key v))
@@ -2288,6 +2293,15 @@
         (when-not (= 3 (count ops)) (verr :verifier/md-flags "incorrect number of operands in module flag" [:mdv f]))
         (let [[b id v] ops]
           (when-not (md-int-op? b) (verr :verifier/md-flags "invalid behavior operand in module flag (expected constant integer)" [:mdv b]))
+          (when (= (md-str id) "CG Profile")
+            (doseq [e (md-ops v)]
+              (visiting
+               (let [ops (md-ops e)]
+                 (when-not (and ops (= 3 (count ops))) (verr :verifier/md-flags "expected a MDNode triple" [:mdv e]))
+                 (doseq [fo (take 2 ops) :when (not= fo 'null)]
+                   (when-not (and (vector? fo) (let [g (strip-casts (second fo))] (and (global? g) (= :function (:kind (.get *gdefs* (global-key g)))))))
+                     (verr :verifier/md-flags "expected a Function or null" [:mdv fo])))
+                 (when-not (md-int-op? (nth ops 2)) (verr :verifier/md-flags "expected an integer constant" [:mdv (nth ops 2)]))))))
           (when (and (= (md-str id) "Linker Options") (not (some #(and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.linker.options)) forms)))
             (verr :verifier/md-flags "'Linker Options' named metadata no longer supported" :none))
           (let [bv0 (.longValue ^java.math.BigInteger (md-int-val b))
@@ -3172,6 +3186,13 @@
     (when (and (integer? (:align o)) (> (long (:align o)) 4294967296)) (verr :verifier/global "huge alignment values are unsupported" :global))
     (when (some? init)
       (when-not (sized? t) (verr :verifier/global "Global variable initializer must be sized" :global))
+      (letfn [(walk [y] (cond (and (seq? y) (= 'ptrauth (first y)))
+                              (let [ds (nth y 5 nil)]
+                                (when (and ds (not (or (global? (second ds)) (= 'null (second ds)))))
+                                  (verr :verifier/global "signed ptrauth constant deactivation symbol must be a global value or null" :none))
+                                (doseq [z (rest y)] (walk z)))
+                              (or (seq? y) (vector? y)) (doseq [z y] (walk z))))]
+        (walk init))
       (when (= (:linkage o) :common)
         (when-not (#{'zeroinitializer 'null 0 false} init) (verr :verifier/global "'common' global must have a zero initializer!" :global))
         (when (:constant o) (verr :verifier/global "'common' global may not be marked constant!" :global))
