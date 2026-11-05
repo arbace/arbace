@@ -246,6 +246,8 @@ check a list of programs (`--only-list`), the compiled level's builds one shard 
 | run corpus, the light level's 24 (26 speed and 3 depth, less the suite's 5) | **23 pass**, 1 `:compiled-depth` (`parallel/test_issue_11094`: its 100,000 nested effect handlers overflow 200,000 calls; it passes at 1,000,000, OT11) |
 | suite corpus, the light level's 5 | **3 pass** (`lib-dynarray/test`, `lib-floatarray/floatarray`, `lib-random/chi2`), `callback/test_gc_alarm` known gc (its alarm is a finaliser, never run: OC68 (a)), `opam/uutf/test_uutf` `:compiled-speed` (120 s of CPU; slow at oi too) after a bug fix (below) |
 | **the 29 together** | **26 pass**, 3 classed (depth, gc, speed); the AOT cell's 29 deferred programs (OT8) become 26 passes and 3 non-passes in a class |
+| oi's essential subset (`test/ocaml/essential-check.txt`, 58 programs, shards of 20) | **58 pass**, all 58 the same as oi (the light level: 57 and one `:light-speed`); a shard of 20: j2g 120 to 160 s, 2.5 to 2.7 GB; the build 120 to 180 s, 3.2 to 4.2 GB |
+| the record, `check-aot-compiled.edn` | 91 programs (the 24, the 10 Unix ones, the 58 less one in both lists): **87 pass**, 4 classed, 0 failing |
 | against oi | 22 of the 24 the same, 2 differ (the depth program, and `basic/tailcalls`' timing) |
 | a shard of 8 programs | j2g 140 to 235 s, 2.5 to 3.6 GB peak (`GOMEMLIMIT=1700MiB`, 4 Go threads); `bin/build-go` 160 to 220 s, **3.2 to 4.2 GB** peak (gc compiling the shard's one large package `arbace/lang`: 1,640 classes, the JDK's translations with OCaml's); a program 0.1 to 97 s |
 | the slowest | `lazy/lazy7` 97 s, `lazy/lazy5` 65 s, `basic/tailcalls` 54 s, `lazy/lazy3` 47 s of wall time (under the 120 s of CPU) |
@@ -286,6 +288,8 @@ The run corpus: 309 to **333 run programs**; oi **273 to 281 pass** (`bin/oi div
 `--record`; the 10 failing and the depth program again; the 10 Unix programs), `bin/oi suite check --aot --level compiled --only-list` (the
 5, `--record`; 2 again after the blit fix), `bin/oi test` (go vet, go test: ok, after each change of oi), `bin/oi divergences --compiled` (30 pass of 34,
 0 failing; the suite's 3 of 5, 0 failing), `bin/oi divergences`, `divergences --aot`,
+`bin/oi check --aot --only-list test/ocaml/essential-check.txt` (the light level after the runtime's changes: no row changed),
+`O2J_SHARD=20 bin/oi check --aot --level compiled --only-list test/ocaml/essential-check.txt --record` (58 pass), `make check-makefile`,
 `bin/oi run`/`aot-run` probes (depth, mutual tail calls, a domain spinning, the Unix core against ocamlopt's output byte for byte), an MD5
 check against `md5sum`. **Not run**: the gate, any corpus run, `bin/arbace-go`; the light records of the programs that do not include unix
 were not rerun after the runtime's changes (the tick, the letrec groups' `tb`, `Md5`), nor oi's after `ext_unix` (the night's runs below).
@@ -296,8 +300,9 @@ were not rerun after the runtime's changes (the tick, the letrec groups' `tb`, `
     bin/oi suite check --record                   # oi, the suite corpus
     bin/oi check --aot --record                   # the light level: the runtime changed (tick, tb, Md5)
     bin/oi suite check --aot --record
-    O2J_SHARD=8 bin/oi check --aot --level compiled --record        # the compiled level, every run program: 42 shards, about 4 h at 6 min a shard
-    O2J_SHARD=8 bin/oi suite check --aot --level compiled --record  # and the suite's
+    O2J_SHARD=20 bin/oi check --aot --level compiled --record        # the compiled level, every run program: 17 shards, about 2 h (a shard of 20
+                                                                     # costs as one of 8: j2g 2.7 GB, the build 4.2 GB at most)
+    O2J_SHARD=20 bin/oi suite check --aot --level compiled --record  # and the suite's
     bin/oi divergences && bin/oi divergences --aot && bin/oi divergences --compiled && bin/oi pins
 
 then OT8 (a)'s matrix change: `test/reap/cells.edn`'s OCaml AOT cell from `check-aot-compiled.edn` and `check-suite-aot-compiled.edn` (with
