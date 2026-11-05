@@ -777,6 +777,21 @@ c2_shard() {
   c2_shard "${s}b" "${@:$((h + 1))}"
 }
 
+# c2_bytes PKG DIR: the bytes of program PKG's translated forms (DIR/out) and of the library units it links (cprogs.list's row)
+c2_bytes() {
+  local n u t=0
+  n=$(du -sb "$2/out" 2>/dev/null | cut -f1); t=${n:-0}
+  for u in $(awk -F'\t' -v p="$1" '$1 == p { for (i = 3; i < NF; i++) print $i }' "$C2/cprogs.list"); do
+    n=$(du -sb "$C2_LIB/$(basename "$u" .ae)" 2>/dev/null | cut -f1); t=$((t + ${n:-0}))
+  done
+  echo "$t"
+}
+
+# c2_measure SHARD-DIR BYTES: the shard's row of C2/shards.tsv (its bytes, j2g's and the build's wall seconds and peak KB)
+c2_measure() {
+  printf '%s\t%s\t%s\t%s\n' "$(basename "$1")" "$2" "$(cat "$1/j2g.time" 2>/dev/null | tr '\n' ' ')" "$(cat "$1/build.time" 2>/dev/null | tr '\n' ' ')" >> "$C2/shards.tsv"
+}
+
 # c2_programs OUT: the programs of C2/cprogs.list (PKG OUT-DIR UNIT..., tabs) and C2/progs.tsv (ID PKG DIR ARGS ENV ARGV0, by \037: read
 # collapses empty fields between tabs) translated
 # (o2j cprogs), built in shards and each run alone, its row appended to OUT (ID STATUS SHA BYTES SECONDS NOTE)
@@ -785,13 +800,21 @@ c2_programs() {
   o2j cprogs "$C2_LIB" "$C2/cprogs.list" > "$C2/translate.log" 2>&1 || { tail -5 "$C2/translate.log"; die "translate"; }
   # the shards (programs o2j refused stay out)
   : > "$C2/built.tsv"; : > "$C2/refused.tsv"
-  local size=${O2J_SHARD:-8} k=0 pkgs=()
+  # OT20 (b): a shard ends at O2J_SHARD programs or, when O2J_SHARD_BYTES is set, before its programs' translated forms (their
+  # out directories, the library units they link counted once a program) pass that many bytes; each shard's bytes and its j2g's and
+  # build's peaks are written to C2/shards.tsv, the measure a cap is chosen by
+  local size=${O2J_SHARD:-8} cap=${O2J_SHARD_BYTES:-0} k=0 pkgs=() bytes=0 b
+  : > "$C2/shards.tsv"
   while IFS=$'\037' read -r id p d args env a0; do
     grep -q -F "refused	$d/out	" "$C2/translate.log" && continue
-    pkgs+=("$p")
-    if [ ${#pkgs[@]} = "$size" ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; pkgs=(); fi
+    b=$(c2_bytes "$p" "$d")
+    if [ "$cap" -gt 0 ] && [ ${#pkgs[@]} -gt 0 ] && [ $((bytes + b)) -gt "$cap" ]; then
+      k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; pkgs=(); bytes=0
+    fi
+    pkgs+=("$p"); bytes=$((bytes + b))
+    if [ ${#pkgs[@]} = "$size" ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; pkgs=(); bytes=0; fi
   done < "$C2/progs.tsv"
-  if [ ${#pkgs[@]} -gt 0 ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; fi
+  if [ ${#pkgs[@]} -gt 0 ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; fi
   # the runs: each program alone, in its directory (C2/run/ID), argv.(0) its dump as the light level's
   local prog st t0 t1 note r kv
   while IFS=$'\037' read -r id p d args env a0; do
