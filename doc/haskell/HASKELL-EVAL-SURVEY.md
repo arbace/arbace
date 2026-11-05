@@ -1541,8 +1541,11 @@ trees' `eval`, not a second machine.
   `GOMEMLIMIT=1536MiB`). The largest library package of the samples is `GHC.Internal.Classes` (5.8 MB: the tuples' derived
   instances), about 2 GB to compile, once.
 - **Forms.** The generator writes Go text (the packages `arbace/aot/ID`) that TamaGo's go builds with the runtime printed
-  from its forms; reading them into Go forms first (repr/go's native reader, then `arbace.build.go` as goi's `check --aot`
-  builds) adds a round trip for no new check at this slice's size, and is HES72's.
+  from its forms. The route through Go forms was tried once on Nfib's 20 packages (4.8 MB of Go): read by repr/go's native
+  reader (`bin/repr-go read --goos linux --goarch amd64`, mode `:lines`) in 2 min 39 s at 5.3 GB of RSS, printed back package
+  by package (`bin/repr-go print`) in 25 s, built with the runtime and run: the same output, 67 closures installed, the
+  printed text differing from the generated only in what mode `:lines` drops (the header comment, the shapes' hexadecimal
+  spelling, blank lines). It works, at a cost a day's light work cannot pay per program: HES72.
 - **Expected speed.** §7 expected 3 to 10 times hsi on call-heavy code. Measured on `nfib 32` (`-O0`: every `<`, `-`, `+` a
   dictionary method call): 1.2 times hsi, below §7's estimate (Results). The rest of the time is the machine's: frames pushed and popped, thunks allocated and
   updated, `Int#` boxed in interfaces, the bounces; HES73's typed locals and direct calls are the next factor.
@@ -1629,7 +1632,8 @@ trees' `eval`, not a second machine.
 - **HES72 Forms.** (a) the generator's Go read into Go forms by repr/go's native reader and built by `arbace.build.go` (goi's
   `check --aot`'s route), the forms committed for nothing (generated); (b) the generator writes Go forms itself (as c2j writes
   Java forms): the generator in Arbace over the dumps' forms; (c) Go text built directly (as built). *Recommended: (a)* at
-  HE8's end, for the row's AOT cell to be "STG → Go forms" literally; (b) only if the generator moves to Arbace for HE7's
+  HE8's end, for the row's AOT cell to be "STG → Go forms" literally, for the libraries' packages once per key (read at night:
+  5.3 GB for 4.8 MB of Go, so the 337 MB of all modules a package at a time under the heavy lock); (b) only if the generator moves to Arbace for HE7's
   REPL anyway.
 - **HES73 Speed before size.** (a) typed locals for unlifted binders and direct calls between compiled closures (above),
   measured on nfib and nofib's `:speed` nine; (b) size first (a smaller expansion per node, e.g. the continuations' common
