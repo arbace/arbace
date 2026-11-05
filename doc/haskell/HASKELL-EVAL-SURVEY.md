@@ -1523,31 +1523,45 @@ trees' `eval`, not a second machine.
   emitted too (HES71). Two latent nondeterminisms found on the way: `live.go`'s kill lists were in a map's order (images'
   bytes and shapes differed run to run: sorted now), and a string literal's or label's address is a number of the
   generating process (never a constant now: read from the node).
-- **What is compiled.** Every closure of the program's modules, and the library closures a list names; `bin/hsi aot`'s list
-  is a profile, the closures a first run on hsi entered (`HSI_AOT_MODULES`), which decides only what is compiled, never what
-  a run computes (a closure not listed is interpreted). Whole library modules are §7's plan, held back by the Go compiler on
-  one package: 21 whole modules of `ghc-internal` (4,206 closures, 9.2 MB of Go) peaked at 5.2 GB of RSS and 24 s; Nfib's 69
-  closures (0.9 MB) 0.7 GB and 5 s; LibMisc's 981 (4.1 MB) 1.5 GB and 10 s under the memory limit. Hence HES70: a Go package
-  per module.
+- **What is compiled, and the libraries once per key.** Every closure of the program's modules, and the library modules a
+  list names: `bin/hsi aot`'s list is a profile, the modules whose closures a first run on hsi entered (`HSI_AOT_MODULES`),
+  which decides only what is compiled, never what a run computes (a module not listed is interpreted). Each Haskell module is
+  a Go package of its own, `arbace/aot/ID` (ID the module's key, `ghc_internal_GHC_Internal_Base`), over the machine's
+  exported API (`go/arbace/hs/aotapi.ae`: the return registers, the argument buffers, `PushCase`, `Enter`, `AotApp`, the
+  allocation helpers and the nodes' accessors, small enough for Go to inline across packages). A library module's package
+  depends only on the module's image and the generator: it is generated once per (runtime digest, image digest) into
+  `.tmp/hsi/aot/lib/KEY/ID` and compiled once by Go's build cache, and every program links the packages it needs by blank
+  imports (`hs/cmd/hsi/aot_link.go`); a program's own modules are its only packages compiled per program. Why a package per
+  module, measured: the first slice put every closure into package `hs` itself, and the Go compiler on one package of 21
+  whole `ghc-internal` modules (4,206 closures, 9.2 MB of Go) peaked at 5.2 GB of RSS; then, with the closures selected by
+  the profile alone, a synthetic program's main module (one closure of a thousand nested closures, 2.9 MB) still took 5.6 GB,
+  because each closure's functions were Go closure literals inside one installer function: now each is a method of a struct
+  of the captured nodes and globals, a function of its own for the compiler (the same program 1.5 GB under
+  `GOMEMLIMIT=1536MiB`). The largest library package of the samples is `GHC.Internal.Classes` (5.8 MB: the tuples' derived
+  instances), about 2 GB to compile, once.
 - **Forms.** The generator writes Go text (files of package `arbace/hs`) that TamaGo's go builds with the runtime printed
   from its forms; reading them into Go forms first (repr/go's native reader, then `arbace.build.go` as goi's `check --aot`
   builds) adds a round trip for no new check at this slice's size, and is HES72's.
 - **Expected speed.** §7 expected 3 to 10 times hsi on call-heavy code. Measured on `nfib 32` (`-O0`: every `<`, `-`, `+` a
-  dictionary method call): XXSPEED. The rest of the time is the machine's: frames pushed and popped, thunks allocated and
+  dictionary method call): 1.2 times hsi, below §7's estimate (Results). The rest of the time is the machine's: frames pushed and popped, thunks allocated and
   updated, `Int#` boxed in interfaces, the bounces; HES73's typed locals and direct calls are the next factor.
 
 ### What is in the tree
 
-- **`go/arbace/hs/aot.ae`**: the generator (`(*Machine).GenAOT`, `aotGen`), the runtime half (`goCode`, `aotRegister`,
-  `aotInstall`, `aotCollect`, `aotShape`, `aotApp`), the profile (`HSI_AOT_MODULES`, `EnteredModules`) and the bisection's
+- **`go/arbace/hs/aot.ae`**: the generator (`(*Machine).GenAOT`, `aotGen`: a package per module, a struct of captures and
+  its methods per closure), the runtime half (`goCode`, `aotRegister`, `aotInstall`, `aotCollect`, `aotShape`, `aotApp`);
+  **`go/arbace/hs/aotapi.ae`**, the machine's exported API to the generated packages; the profile (`HSI_AOT_MODULES`, `EnteredModules`) and the bisection's
   switches (`HSI_AOT_LIMIT=N`: the first N installs only; `HSI_AOT_NO=Kind,...`: node kinds left to their nodes). The hooks
   elsewhere: `compileTop` calls `aotInstall` after compiling or decoding a closure (`load.ae`), `CaseE` has the field `k`
   and `cont` calls it (`nodes.ae`), the collector's walk reads a `goCode`'s tree (`rts.ae`), the kill lists sorted
   (`live.ae`).
 - **`test/haskell/hsi/cmd/aot.ae`**: `hsi aot [--lib DIR... --image DIR --modules FILE] [--prog DIR] --out DIR`; `hsi run`'s
   `--stats` counts the installed and refused closures.
-- **`bin/hsi aot build --prog STGDIR [--closures FILE] --out DIR`** (`bin/lib/hsi/aot`): generated, then built with the runtime
-  module `bin/hsi build` printed, into `DIR/hsi-aot`, kept by the generated files' and the runtime's digests;
+- **`bin/hsi aot build --prog STGDIR [--closures FILE] --out DIR`** (`bin/lib/hsi/aot`): the program's packages generated into
+  `DIR/gen`, the library modules FILE names taken from `.tmp/hsi/aot/lib/` or generated there once (under a lock), a library
+  package over `HSI_AOT_MAX_KB` (default 4,096) left interpreted for the compile's memory (listed in `DIR/libs-skipped.txt`),
+  then built with the runtime module `bin/hsi build` printed, into `DIR/hsi-aot`, kept by the generated files' and the
+  runtime's digests;
   **`bin/hsi aot run FILE.hs [ARG...]`**: dumped, profiled on hsi with an empty stdin, built, run with the arguments and stdin.
 - **`bin/hsi check --aot`**: each program profiled on hsi in a copy of its directory with its stdin and arguments, built, and
   run on its executable as `check` runs hsi, judged against the same references and classes (`:aot-build` its build's
@@ -1555,14 +1569,41 @@ trees' `eval`, not a second machine.
 
 ### Results
 
-XXRESULTS
+- **`bin/hsi check --aot` over the samples and the synthetic corpus** (the samples but Loop, whose 7 GB stack is a night's run;
+  with HE8's new sample `Classes`: user classes with superclasses, default methods, existentials, constructor classes over
+  `Stack` and `Queue`, an instance context on pairs and a polymorphic recursion, equal on hsi too): **61 of 62 equal** to GHC's
+  runs (status, stdout and stderr byte for byte), the 62nd `AsyncRerun` in its class `:async-revert` as on hsi; none
+  unclassed, the controls failing as they must; with the four nofib programs below, 66 programs recorded in
+  `test/haskell/check-hsi-aot.edn`, each also against its own run on hsi (the profile's run, the same stdin, arguments and
+  limits: `:vs-hsi`, diffcheck's kind): **all 66 the same** as hsi's (status, stdout, stderr), and `:hsi-run` beside `:run`
+  the two levels' seconds of the same run. Every closure the runs
+  entered in the compiled modules was installed (none refused by shape) but those of `GHC.Internal.Classes`, whose 5.8 MB
+  package is over the day's `HSI_AOT_MAX_KB`.
+- **The builds**: the check's first pass at 1 job, every library package compiled for the first time, 23 minutes of builds
+  for 62 programs (the 211 library modules the samples and the synthetic programs enter: 85 MB of Go); the second pass, those
+  packages from Go's build cache, the program's own packages alone compiled: 0.4 to 15 s a program (the synthetic programs'
+  main modules, up to 3 MB of Go each, the longest), the peak of one compile about 1.5 GB (2.8 GB for `Data.Sequence.Internal`
+  before the size limit). Each run's own time is a fraction of a second, as on hsi.
+- **Every module of the libraries generated** (`hsi aot --modules` over the 1,320 modules of the 41 packages, no build): 88,465
+  closures, **none refused**, 337 MB of Go in 2 min 22 s at 1.9 GB of RSS; 8 modules over 4 MB (60 MB together; the largest
+  `Distribution.Simple.Configure` 14.6 MB, `GHC.Internal.TH.Syntax` 10.1 MB, `Data.Sequence.Internal` 9.5 MB, `GHCi.Message`
+  8.7 MB, `GHC.Internal.Classes` 5.8 MB).
+- **Speed** (the same host, one after the other, wall seconds): `nfib 32` (Nfib, `-O0`) hsi 5.7-6.0 s, compiled 4.7-4.8 s
+  (1.2 times; 176 million bounces of the trampoline on hsi, 46 million compiled; GHCi 3.6 s, GHC's `-O0` code 0.32 s, HE4d's
+  figures); four of nofib's programs that pass on hsi, each run by `bin/hsi check` then `check --aot` (their CPU limits, their arguments): `imaginary/tak` 25.1 → 21.5 s (1.17), `imaginary/rfib` 25.5 → 20.8 s (1.23), `spectral/fibheaps` 29.7 → 28.2 s (1.05), `spectral/sphere` 22.1 → 20.3 s (1.09), all four equal to GHC's runs compiled too. A profile of the compiled nfib: 42 % in the machine's returns (`ret`, `pop`, the case frames' arena),
+  15 % in `aotApp`, 16 % allocating thunks, the generated functions themselves a few percent: the dispatch hsi spent is gone,
+  and what is left is the machine's frames and heap, which compiled code shares by design (§7's estimate of 3 to 10 times
+  assumed the frames and boxing cheaper than they are). HES73 is where the next factor is. Tried and left out: returning a
+  value straight into a compiled case's continuation from the compiled code (no bounce of the trampoline, at most 32 calls
+  deep): no measurable gain on nfib, the frame's pop and the arena's reset being the cost, not the bounce. (The recorded
+  `:run` and `:hsi-run` of the nofib four were measured later on a host three times as loaded: 1.04 to 1.23 times there too.)
 
 ### The rest of HE8 (re-estimated: 8 to 12 days)
 
-1. **The libraries compiled once per key** (HES70; 3-4 days): a Go package per module over an exported runtime API, generated
-   into `.tmp/hsi/aot/lib/KEY/` by the module's dump digest and the generator's, compiled once by Go's build cache; the 41
-   packages' 1,320 modules generated and built at night (their size measured first: the 21 modules above extrapolate to some
-   hundreds of MB of Go: HES73's code size matters before it).
+1. **The libraries whole** (HES70; 2-3 days): the package per module is built (above); left: the 41 packages' 1,320 modules
+   generated and compiled at night once per key (their total size measured first: the samples' 160-odd modules are about
+   85 MB of Go (211 modules); all 1,320 modules are 337 MB; the largest, `Data.Sequence.Internal` 9.5 MB, takes about 3 GB to compile: HES73's code size), a
+   program then needing no profile, and hsi itself linking them (HES14 (b)).
 2. **The metadata emitted** (HES71; 2 days): data declarations, globals, string literals and labels as Go, so a compiled
    program loads no dump or image; then hsi with compiled libraries (HES14 (b)) is the same packages linked into hsi.
 3. **Speed** (HES73; 2-3 days): `Int#`/`Word#`/`Double#` binders as typed Go locals (no interface boxing between primops),
@@ -1573,13 +1614,12 @@ XXRESULTS
 
 ### Proposed (HES70 onward; HES65-HES69 left to HE6's branch)
 
-- **HES70 The libraries' code.** (a) one Go package per Haskell module (`arbace/hs/aot/UNIT/MODULE`), over an exported
-  runtime API of the machine (the frame, the atoms' accessors, `aotApp`, `pushCase`, `enter`, the allocation helpers;
-  `hs` stays the one implementation), generated once per (dump digest, generator digest) and compiled by Go's build cache
-  once, every program linking the packages it needs: §7's "compiled once per pin", the compile's memory per module (the
-  largest, `Data.Text.Internal.Encoding`'s one closure of 2,700 cases, about 1 MB of Go); (b) one package per program with
-  its profiled closures (as built): no API, but every program recompiles its share; (c) the libraries interpreted, the
-  program compiled. *Recommended: (a)*; (b) stays the check's fallback until (a) lands.
+- **HES70 The libraries whole.** (a) every module of the 41 packages generated and compiled at night once per (runtime,
+  image) key, the packages kept in `.tmp/hsi/aot/lib` and Go's build cache, `HSI_AOT_MAX_KB` raised for the night (the
+  largest packages take 3 GB to compile: under the heavy lock), every program and hsi itself (HES14 (b)) linking all of them,
+  no profile; (b) the profile's modules only (as built): a program's first build compiles the modules no earlier program
+  needed; (c) a size budget per module first (HES73 (b)), then (a). *Recommended: (a)* with (c)'s measure first: the total
+  size of the 1,320 modules' Go decides whether one build of all of them fits a night.
 - **HES71 The metadata.** (a) the generator emits each module's data declarations, globals, string literals and labels, and
   its trees' constants, so a compiled program needs no dump, no image and no loader at run time (a standalone executable, as
   Go's AOT gives); (b) keep loading them (as built). *Recommended: (a)*, after HES70.

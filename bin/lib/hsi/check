@@ -156,16 +156,19 @@ one() {
   if awk '/^ *\{:id :skipped/ {s=1; next} /^ *\{:id :/ {s=0} s' "$root/test/haskell/divergences.edn" | grep -qF "\"$id\""; then
     rm -rf "$w"; echo "{:id \"$id\" :result :skipped :dump $td :run 0}" > "$res"; return 0
   fi
-  local exe=$hsi ab=0
+  local exe=$hsi ab=0 pst=0 hrun=0
   if [ -n "$aot" ]; then
     # the profile: the closures a run on hsi enters (in a copy of the directory of its own, the same stdin and
     # arguments), then the program's executable built with them compiled (bin/hsi aot build, kept by key)
     local pw=$w.profile pcmd
     rm -rf "${pw:?}"; mkdir -p "$pw"; cp -r "$src"/. "$pw"/ 2> "$pw.cp.log" || true; rm -f "$pw.cp.log"; : > "$pw/.empty"
     pcmd="exec $(printf '%q ' "$hsi" run "${la[@]}" --prog "$prog/stg" --name "$name" --) $ro"
+    # (its run is hsi's: kept to compare the compiled run with, :vs-hsi, and its seconds, :hsi-run)
+    local pt0 pt1; pt0=$(date +%s.%N); pst=0
     (cd "$pw" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$pw" HSI_AOT_MODULES="$prog/aot-closures.txt" \
-       timeout -s KILL $((HSI_TIMEOUT * 3)) sh -c "ulimit -v $((${ARBACE_MEM_GIB:-16} * 1048576)); ulimit -t $HSI_TIMEOUT; $pcmd" \
-       < "$pw/$stdin" > "$prog/aot-profile.log" 2>&1) || true
+       timeout -s KILL $((HSI_TIMEOUT * 3)) sh -c "ulimit -v $((${ARBACE_MEM_GIB:-16} * 1048576)); export GOMEMLIMIT=$((${ARBACE_MEM_GIB:-16} * 768))MiB; ulimit -t $HSI_TIMEOUT; $pcmd" \
+       < "$pw/$stdin" > "$prog/aot-hsi.stdout" 2> "$prog/aot-hsi.stderr") || pst=$?
+    pt1=$(date +%s.%N); hrun=$(printf '%.2f' "$(echo "$pt1 - $pt0" | bc)")
     rm -rf "${pw:?}"
     [ -f "$prog/aot-closures.txt" ] || : > "$prog/aot-closures.txt"
     local t2 t3; t2=$(date +%s.%N)
@@ -191,7 +194,14 @@ one() {
   so=$(sha256sum < "$o.stdout" | cut -c1-64); se=$(sha256sum < "$o.stderr" | cut -c1-64)
   rl=$(grep -F "{:id \"$id\" " "$ref" || true)
   local secs; secs=$(printf '%.2f' "$(echo "$t1 - $t0" | bc)")
-  local tm=":dump $td :run $secs"; [ -z "$aot" ] || tm="$tm :aot-build $ab"
+  local tm=":dump $td :run $secs"
+  if [ -n "$aot" ]; then
+    # the compiled run against hsi's (diffcheck's kind): status, stdout and stderr
+    local vs=same
+    { [ "$st" = "$pst" ] && [ "$so" = "$(sha256sum < "$prog/aot-hsi.stdout" | cut -c1-64)" ] &&
+      [ "$se" = "$(sha256sum < "$prog/aot-hsi.stderr" | cut -c1-64)" ]; } || vs=differs
+    tm="$tm :aot-build $ab :hsi-run $hrun :vs-hsi :$vs"
+  fi
   echo "$st" > "$o.status"
   if [ -z "$rl" ]; then echo "{:id \"$id\" :result :no-ref $tm}" > "$res"; return 0; fi
   rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$rl")
@@ -220,7 +230,7 @@ out=$work/results.edn
   echo ";; (test/haskell/ref-ghc914.edn): :pass (status, stdout and stderr byte for byte), :fail (:differs), :hsi (hsi stopped:"
   echo ";; its message), :no-dump (the helper's first error), :no-ref; :dump the helper's seconds (0: cached), :run hsi's wall"
   echo ";; seconds (GT8)."
-  [ -z "$aot" ] || echo ";; --aot (HE8): each program run on its executable from bin/hsi aot build (its modules and the library modules its run on hsi entered compiled to Go); :aot-build the build's seconds."
+  [ -z "$aot" ] || echo ";; --aot (HE8): each program run on its executable from bin/hsi aot build (its modules and the library modules its run on hsi entered compiled to Go); :aot-build the build's seconds, :hsi-run the seconds of the same run on hsi (the profile's), :vs-hsi the compiled run's status, stdout and stderr against hsi's (:same, :differs)."
   echo ";; corpora: $corpora"
   cat "$work"/res/* | sort
 } > "$out"
