@@ -213,6 +213,29 @@
                                          :else (mapv declval-node args))
                                   {:scope scope :statics (atom [])} (cond (empty? args) :value (= 1 (count args)) :direct :else :direct)))))
 
+(declare walk-refs)
+
+(defn- calls-nothrow?
+  "Whether every function an analyzed initialization or expression calls is noexcept (an implicit or defaulted special
+  member counted so: the trivial and the implicit ones of the samples' classes)."
+  [x]
+  (let [acc (atom {:fns #{} :vars #{} :classes #{}})]
+    (walk-refs acc x)
+    (every? (fn [id] (let [f (sema/fnd id)] (or (:noexcept f) (:implicit f) (:defaulted f)))) (:fns @acc))))
+
+
+(defn- trait-nothrow-constructible? [scope t args]
+  (and (trait-constructible? scope t args)
+       (try (calls-nothrow? (sema/init-for t (cond (empty? args) nil
+                                                   (= 1 (count args)) (if (abi/class? (abi/unq t)) [(declval-node (first args))] (declval-node (first args)))
+                                                   :else (mapv declval-node args))
+                                           {:scope scope :statics (atom [])} (if (empty? args) :value :direct)))
+            (catch arbace.lang.ExceptionInfo _ false))))
+
+(defn- trait-nothrow-assignable? [scope t u]
+  (try (calls-nothrow? (#'sema/assign-node {:scope scope :statics (atom [])} (declval-node t) (declval-node u)))
+       (catch arbace.lang.ExceptionInfo _ false)))
+
 (defn- trait-convertible? [scope from to]
   (cond (abi/void? (abi/unq to)) (abi/void? (abi/unq from))
         (or (abi/fn? to) (abi/arr? to)) false
@@ -272,7 +295,7 @@
    "__is_convertible_to" (fn [scope [f t]] (trait-convertible? scope f t))
    "__is_nothrow_convertible" (fn [scope [f t]] (trait-convertible? scope f t))
    "__is_constructible" (fn [scope [t & as]] (trait-constructible? scope t as))
-   "__is_nothrow_constructible" (fn [scope [t & as]] (trait-constructible? scope t as))
+   "__is_nothrow_constructible" (fn [scope [t & as]] (trait-nothrow-constructible? scope t as))
    "__is_trivially_constructible"
    (fn [scope [t & as]]
      (and (trait-constructible? scope t as)
@@ -282,7 +305,7 @@
                   (and (= 1 (count as)) (= u (abi/unq (abi/non-ref (first as))))) (sema/trivial-copy? (:id u))
                   :else false))))
    "__is_assignable" (fn [scope [t u]] (trait-assignable? scope t u))
-   "__is_nothrow_assignable" (fn [scope [t u]] (trait-assignable? scope t u))
+   "__is_nothrow_assignable" (fn [scope [t u]] (trait-nothrow-assignable? scope t u))
    "__is_trivially_assignable" (fn [scope [t u]] (and (trait-assignable? scope t u)
                                                       (let [c (abi/unq (abi/non-ref t))] (or (not (abi/class? c)) (sema/trivial-copy? (:id c))))))
    "__is_destructible" (fn [_ [a]] (not (or (abi/void? (abi/unq a)) (abi/fn? a) (and (abi/arr? a) (nil? (:n a))))))
@@ -979,7 +1002,7 @@
         cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]))
         first-fn (inc (long @sema/*ids*))]
     (swap! abi/*classes* assoc cid {:id cid :name (:name t) :path (:path ps) :scope cs :fields [] :bases [] :outer ps
-                                    :union (= "union" (:tagUsed node)) :tmpl tid :targs args})
+                                    :union (= "union" (:tagUsed node)) :tmpl tid :targs args :header (sema/header-node? node)})
     (enter! ps (:name t) {:e :type :ty {:k :class :id cid} :pos -1})
     (upd-tmpl! tid assoc-in [:insts args] cid)
     (when (:completeDefinition node)
@@ -1382,7 +1405,9 @@
         (upd-fn! fid #(-> % (assoc :body (first (filter (fn [k] (= "CompoundStmt" (:kind k))) (kids n))) :node n :def-scope scope
                                    :inits (filter (fn [k] (= "CXXCtorInitializer" (:kind k))) (kids n)) :param-names (mapv :name pn)
                                    :inline (boolean (:inline n)) :spec-member true)
-                          (dissoc :lazy :keep-def-scope :analyzed)))))
+                          (dissoc :lazy :keep-def-scope :analyzed)
+                          ;; a header's: analyzed when used (G4)
+                          (cond-> (sema/header-node? n) (assoc :lazy true))))))
     :template))
 
 (defn- attach-member-template!
@@ -1394,11 +1419,13 @@
         params (tparams n)
         mid (some #(when (and (= :tmpl (:e %)) (= :fn (:tk %)) (= (count params) (count (:params (tmpl (:id %)))))) (:id %))
                   (.get ^java.util.HashMap (:names (:scope c)) (:name n)))]
-    (when-not mid (fail :template "no member template " (:name n) " to define"))
+    (when-not (or mid (sema/header-node? n)) (fail :template "no member template " (:name n) " to define"))
+    ;; (a header's whose declaration in the class was dropped: none to define, G4)
+    (when mid
     (upd-tmpl! mid assoc :pattern (first (filter #(#{"FunctionDecl" "CXXMethodDecl"} (:kind %)) (kids n))) :params params :sig nil
                :scope (if (seq (:pnames o))
                         (bind-scope (:scope c) (mapv (fn [nm p] {:name nm :kind (:kind p)}) (:pnames o) outer-params) (:targs c) nil)
-                        (:scope c)))))
+                        (:scope c))))))
 
 (defn- ool-member-template!
   "template <class T> template <class U> R A<T>::f(U) {...}: the member template's definition for each specialization
@@ -1583,7 +1610,9 @@
       (doseq [v (:statics f)] (walk-refs acc (:sinit (sema/var* v)))))
     (doseq [[id v] @sema/*vars*]
       (when (and (:ginit v) (not (contains? @*scanned* [:var id]))) (swap! *scanned* conj [:var id]) (walk-refs acc (:ginit v)))
-      (let [t (loop [t (abi/non-ref (:ty v))] (if (abi/arr? t) (recur (:of t)) t))] (when (abi/class? (abi/unq t)) (swap! acc update :classes conj (:id t)))))
+      ;; (a variable not defined, a header's not used among them, uses no class's members: G4)
+      (when-not (or (:pending-def v) (and (#{:global :member-static} (:storage v)) (not (:defined v))))
+        (let [t (loop [t (abi/non-ref (:ty v))] (if (abi/arr? t) (recur (:of t)) t))] (when (abi/class? (abi/unq t)) (swap! acc update :classes conj (:id t))))))
     (let [classes (reduce into #{} (map class-closure (:classes @acc)))
           fns (into (:fns @acc)
                     (mapcat (fn [cid] (let [c (abi/cls cid)] (concat (when (:dtor c) [(:dtor c)]) (when (abi/dynamic? cid) (keep :fn (:vtable c)))))) classes))
@@ -1619,8 +1648,14 @@
          :tiebreak tiebreak
          :ctor-candidates (fn [cid args]
                             (vec (for [tid (:ctor-tmpls (abi/cls cid))
-                                       :let [fid (try (when-let [a (deduce-call (tmpl tid) [] args)] (instantiate-fn tid a))
-                                                      (catch arbace.lang.ExceptionInfo _ nil))]
+                                       :let [fid (try (let [a (deduce-call (tmpl tid) [] args)]
+                                                        (when (and (nil? a) (System/getenv "CPP_TMPL_TRACE"))
+                                                          (binding [*out* *err*] (println "constructor template of" (:name (abi/cls cid)) "does not deduce")))
+                                                        (when a (instantiate-fn tid a)))
+                                                      (catch arbace.lang.ExceptionInfo e
+                                                        (when (System/getenv "CPP_TMPL_TRACE")
+                                                          (binding [*out* *err*] (println "constructor template of" (:name (abi/cls cid)) "drops out:" (.getMessage e))))
+                                                        nil))]
                                        :when fid
                                        ;; [class.copy.ctor]/5: never instantiated to the signature X(X)
                                        :let [ps (:ps (:ty (sema/fnd fid)))]

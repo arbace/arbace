@@ -345,6 +345,26 @@
   [l]
   (if (:offset l) l (:expansionLoc l)))
 
+(defn- blank-comments
+  "A header's text with its comments blanked (spaces, its newlines kept: the offsets unchanged), so that the analysis's
+  readings of a node's text (a partial specialization's arguments) see no comment (G4); string and character literals
+  kept."
+  ^String [^String t]
+  (let [sb (StringBuilder. t) n (count t)]
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt t i)]
+          (cond
+            (or (= c \") (= c \')) (recur (loop [j (inc i)] (cond (>= j n) j (= \\ (.charAt t j)) (recur (+ j 2)) (= c (.charAt t j)) (inc j) (= \newline (.charAt t j)) j :else (recur (inc j)))))
+            (and (= c \/) (< (inc i) n) (= \/ (.charAt t (inc i))))
+            (recur (loop [j i] (if (or (>= j n) (= \newline (.charAt t j))) j (do (.setCharAt sb j \space) (recur (inc j))))))
+            (and (= c \/) (< (inc i) n) (= \* (.charAt t (inc i))))
+            (recur (loop [j i] (cond (>= j n) j
+                                     (and (= \* (.charAt t j)) (< (inc j) n) (= \/ (.charAt t (inc j)))) (do (.setCharAt sb j \space) (.setCharAt sb (inc j) \space) (+ j 2))
+                                     :else (do (when-not (= \newline (.charAt t j)) (.setCharAt sb j \space)) (recur (inc j))))))
+            :else (recur (inc i))))))
+    (.toString sb)))
+
 (defn text-of
   "The text of the file `file` names in the tree's locations: the main file's *src*, a header's read once (G4: header
   bodies are parsed, so their nodes' text is their own file's)."
@@ -354,7 +374,7 @@
     (or (get @file-texts file)
         (let [f (java.io.File. ^String file)]
           (if (.isFile f)
-            (let [t (String. (java.nio.file.Files/readAllBytes (.toPath f)) "ISO-8859-1")]
+            (let [t (blank-comments (String. (java.nio.file.Files/readAllBytes (.toPath f)) "ISO-8859-1"))]
               (swap! file-texts assoc file t)
               t)
             *src*)))))
@@ -566,7 +586,7 @@
                             (and body (header-node? n)) (assoc :lazy true))))
       (do (swap! *fns* assoc id (merge f pinfo {:id id :node n :def-scope scope}
                                       (when body {:body body :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))})
-                                      (when (and body (header-node? n)) {:lazy true})))
+                                      (when (and (or body (:explicitlyDefaulted n)) (header-node? n)) {:lazy true})))
           (enter! home (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)})
           (when (= k :ctor) (abi/update-cls! cid update :ctors (fnil conj []) id))
           (when (= k :dtor) (abi/update-cls! cid assoc :dtor id))
@@ -637,7 +657,7 @@
         t {:k :class :id id}]
     (when-not old
       (swap! abi/*classes* assoc id {:id id :name nm :path (:path scope) :scope cs :fields [] :bases [] :outer scope
-                                     :union (= "union" (:tagUsed n))})
+                                     :union (= "union" (:tagUsed n)) :header (header-node? n)})
       (when nm (enter! scope nm {:e :type :ty t :pos (long (or (:_b n) 0))})))
     (when (:completeDefinition n)
       (when nm (.put ^java.util.HashMap (:names cs) nm [{:e :type :ty t :pos -1}])) ; the injected-class-name
@@ -681,7 +701,7 @@
   (if (header-node? n)
     (try (declare-node*! scope n)
          (catch arbace.lang.ExceptionInfo e
-           (if (:codegen/refused (ex-data e))
+           (if (or (:codegen/refused (ex-data e)) (:codegen/not-constant (ex-data e)))
              (do (when *header-drops* (swap! *header-drops* conj [(:kind n) (:name n) (.getMessage e)]))
                  (when (System/getenv "CPP_HDR_TRACE")
                    (binding [*out* *err*] (println "header drop:" (:kind n) (:name n) (get-in n [:range :begin :offset]) (.getMessage e))))
@@ -749,6 +769,8 @@
         c (abi/cls id)
         f (merge {:id fid :name nm :kind k :cls id :ty ty :implicit k :inline true :path (conj (vec (:path c)) [:cls id])
                   :scope (:scope c) :def-scope (:scope c) :linkage :cpp :param-names (mapv (fn [_] nil) (:ps ty)) :defaults [] :pos -1}
+                 ;; a header class's implicit members analyzed when used (G4)
+                 (when (:header c) {:lazy true})
                  more)]
     (swap! *fns* assoc fid f)
     (enter! (:scope c) (case k :ctor " ctor" :dtor " dtor" nm) {:e :fn :id fid :pos -1})
@@ -1317,7 +1339,11 @@
           (if (empty? (:items l)) (default-ctor-init id true) (class-init t (:items l) ctx :direct))))
       (and (empty? args)) (default-ctor-init id (= style :value))
       :else
-      (let [fid (resolve-overload (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)] (h id args))) args nil)
+      (let [fid (try (resolve-overload (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)] (h id args))) args nil)
+                     (catch arbace.lang.ExceptionInfo e
+                       (if (and (System/getenv "CPP_HDR_TRACE") (:codegen/refused (ex-data e)))
+                         (fail (:codegen/refused (ex-data e)) (.getMessage e) " (constructing " (:name (abi/cls id)) ")")
+                         (throw e))))
             f (fnd fid)]
         (if (and (:trivial f) (= 1 (count args)))
           {:i :copy :e (first args) :cls id}
@@ -1692,6 +1718,10 @@
                ;; move_if_noexcept, as_const, addressof, __addressof, forward_like: CodeGen folds the call to its
                ;; argument, no function emitted, even at -O0; G4)
                (= std-builtin :cast) (cast-expr ctx (:ret (:ty f)) (first args) true)
+               ;; std::__is_constant_evaluated(), always_inline: clang inlines it even at -O0 (the AlwaysInliner),
+               ;; its run-time value false; no function emitted (G4)
+               (and (empty? args) (= [[:ns "std"]] (:path f)) (= "__is_constant_evaluated" (:name f)))
+               {:op :int :v 0 :ty abi/bool* :cat :pr}
                (= std-builtin :addr) (let [e (first args)] {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr})
                :else
              (if (and (:cls f) (not (:static f)))
@@ -2494,7 +2524,18 @@ protected:
                                     (and (:body f) (not (:tbody f))) (do (upd-fn! id assoc :analyzed true) (analyze-fn! id))
                                     ;; (a closure's implicit members are analyzed, or deleted, where the lambda is)
                                     (and (or (:implicit f) (:defaulted f)) (not (:params f)) (not (:deleted f)))
-                                    (do (upd-fn! id assoc :analyzed true) (analyze-implicit! id))
+                                    (do (upd-fn! id assoc :analyzed true)
+                                        ;; a defaulted member whose subobjects' members are not viable is deleted
+                                        ;; ([class.copy.ctor]/10, [class.default.ctor]/2; G4: the headers' classes)
+                                        (try (analyze-implicit! id)
+                                             (catch arbace.lang.ExceptionInfo e
+                                               (when (System/getenv "CPP_HDR_TRACE")
+                                                 (binding [*out* *err*] (println "implicit member failed:" (:name (fnd id)) (:implicit (fnd id)) (:name (abi/cls (:cls (fnd id)))) (:header (abi/cls (:cls (fnd id)))) (.getMessage e))))
+                                               (if (and (:implicit (fnd id))
+                                                        (or (= :overload (:codegen/refused (ex-data e)))
+                                                            (and (:codegen/refused (ex-data e)) (:header (abi/cls (:cls (fnd id)))))))
+                                                 (upd-fn! id assoc :deleted true :tinits nil)
+                                                 (throw e)))))
                                     :else nil)))
                           :var (let [v (var* id)] (when (and (:defined v) (not (:ginit v))) (upd-var! id assoc :ginit (global-init id))))))]
            (loop [i 0]
