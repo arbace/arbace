@@ -13,7 +13,7 @@ scripts kept in this worktree's `.tmp/src/` (`files.pl`, `closure.pl`, not commi
 art, licenses, papers) is marked "(memory, verify)".
 
 Contents: Summary · 1 What the front end must produce · 2 Measurements · 3 The pieces · 4 Judging · 5 Prior art ·
-6 Routes and tiers · 7 Milestones HF1-HF12 · 8 Risks · Proposed (HFS1-HFS9).
+6 Routes and tiers · 7 Milestones HF1-HF12 · 8 Risks · Proposed (HFS1-HFS9) · Decided · As built: HF1-HF2 · As built: HF3 (start).
 
 ## Summary
 
@@ -492,7 +492,18 @@ trial with no commitment (about 16 to 24 days): the renamer is judged exactly, a
 
 ## Decided (2026-11-05, the user)
 
-HFS1-HFS9 as recommended: HFS1 (b), a clean trusting elaborator in two tiers (S, then L) with faithful ports of the text-emitting parts; the GhcPs dump as input; the libraries' interfaces dumped as forms for Tier S; Arbace's own untyped Core; only deriving, the match compiler, CorePrep, CoreToStg and Unarise ported; -O0 the reference; HF1-HF2 now as a trial; GHC's front end on hsi measured after HE5, decided at HF8; GHC's ported text under BSD-3 recorded.
+Two decisions of the same day.
+
+**HFS1-HFS9** (the survey's proposals): as recommended: a trusting elaborator in tiers (S, then L), the
+`-O0` STG the reference. In full: HFS1-HFS9 as recommended: HFS1 (b), a clean trusting elaborator in two tiers (S, then L) with faithful ports of the text-emitting parts; the GhcPs dump as input; the libraries' interfaces dumped as forms for Tier S; Arbace's own untyped Core; only deriving, the match compiler, CorePrep, CoreToStg and Unarise ported; -O0 the reference; HF1-HF2 now as a trial; GHC's front end on hsi measured after HE5, decided at HF8; GHC's ported text under BSD-3 recorded.
+
+**HF1-HF2's four proposals** (below, "As built: HF1-HF2", "Proposed"): as recommended:
+1. the renamer builds the renamed tree inside `rename.ae`, the facts kept as a projection of it that `rename-check`
+   judges (option (a));
+2. the interface dump gains roles, family equations, fundeps, default methods and strictness, and the renamer writes
+   the same for the program's own modules;
+3. `rename-check` enters the gate with the type checker's step, not before;
+4. the binding groups' order stays unjudged (any topological order serves the checker).
 
 ## As built: HF1-HF2 (2026-11-05, branch `haskell-hf12`)
 
