@@ -3815,3 +3815,7 @@ night rekeys them anyway (cx9's `arbace/c/dg.ae`, the rows' `bin/arbace-go` and 
   require Arbace-free pins verbs. *Recommended: (a).*
 - **GTS245 The hosts' cost in every plan.** A plan with every crop gated hashes the eight crop hosts (3.6 s). (a) Accept; (b) cache
   an identity by its files' sizes and mtimes. *Recommended: (a).*
+
+## Decided (2026-11-05, the user)
+
+GTS240-GTS245, each as recommended: the hosts wrapper and concurrency into gate-run.bash with the runner's next all-rekeying change; the six arbace/ steps narrowed by :crop-out after a night --audit; the real controls built and the two waivers accepted; the planner's requests batched with GTS240; crop pins verbs needing stage 0 run after it in the clean run; 3.6 s a plan for the hosts' identities accepted.
