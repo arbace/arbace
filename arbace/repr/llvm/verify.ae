@@ -41,7 +41,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value phase-debug* md-str global-opts md-ops md-int-op? md-int-val alloc-bytes dl-ptr-bits)
+(declare label-text parse-offset check-intrinsic-call verify-function* check-global-value phase-debug* md-str global-opts md-ops md-int-op? md-int-val alloc-bytes dl-ptr-bits canon-fps dl-index-bits)
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
@@ -104,7 +104,7 @@
 (defn- int-bits ^long [t] (Long/parseLong (subs (name t) 1)))
 (defn- fp-type? [t] (contains? fp-bits t))
 (defn- ptr-type? [t] (or (= t 'ptr) (and (seq? t) (= (first t) 'ptr))))
-(defn- vec-type? [t] (and (seq? t) (#{'vector 'vscale} (first t))))
+(defn- vec-type? [t] (boolean (and (seq? t) (#{'vector 'vscale} (first t)))))
 (defn- elem [t] (if (vec-type? t) (nth t 2) t))
 (defn- int-ish? [t] (int-type? (elem t)))
 (defn- fp-ish? [t] (fp-type? (elem t)))
@@ -1482,17 +1482,19 @@
 (defn- abi-attrs
   "The parameter attributes that change the ABI (Verifier's getParameterABIAttributes), as comparable values."
   [attrs]
-  (set (keep (fn [a] (let [n (aname a)]
-                       (when (#{"sret" "byval" "inalloca" "inreg" "alignstack" "swiftself" "swiftasync" "swifterror" "preallocated" "byref"} n)
-                         (if (seq? a) [n (let [v (second a)] (if (type-attrs n) (norm-type v) v))] n))))
-             attrs)))
+  (let [byv (some #(#{"byval" "byref"} (aname %)) attrs)]
+    (set (keep (fn [a] (let [n (aname a)]
+                         (when (or (#{"sret" "byval" "inalloca" "inreg" "alignstack" "swiftself" "swiftasync" "swifterror" "preallocated" "byref"} n)
+                                   (and byv (= n "align")))   ; the alignment of a byval or byref parameter
+                           (if (seq? a) [n (let [v (second a)] (if (type-attrs n) (norm-type v) v))] n))))
+               attrs))))
 
 (defn- value-culprit
   "What the Verifier prints for a value: an instruction whole, any other as an operand with its type."
   [t v defs]
   (if-let [[_ _ _ dx] (when (and defs (local? v)) (.get ^java.util.Map defs (local-key v)))]
     [:inst dx]
-    (str (pr/type-str t) " " (pr/value-str v))))
+    (pr/typed-str (canon-fps [t v]))))
 
 (defn- check-musttail
   "Verifier::verifyMustTailCall: the call `x` (item `ii` of `items`) in the function whose header is `f`."
@@ -2971,10 +2973,10 @@
                             (when (re-find #"^llvm\.ptrmask\." (global-key c))
                               (let [[a m] (map #(norm-type (first %)) (nth ps 2))]
                                 (when-not (ptr-ish? a) (verr :verifier/intrinsic-call "llvm.ptrmask intrinsic first argument must be pointer or vector of pointers"))
-                                (when (and (ptr-ish? a) (int-ish? m) (not= (int-bits (elem m)) 64))
-                                  (verr :verifier/intrinsic-call "llvm.ptrmask intrinsic second argument bitwidth must match pointer index type size of first argument"))
                                 (when-not (= (vec-type? a) (vec-type? m)) (verr :verifier/intrinsic-call "llvm.ptrmask intrinsic arguments must be both scalars or both vectors"))
-                                (when (and (vec-type? a) (not= (nth a 1) (nth m 1))) (verr :verifier/intrinsic-call "llvm.ptrmask intrinsic arguments must have the same number of elements"))))
+                                (when (and (vec-type? a) (not= (shape a) (shape m))) (verr :verifier/intrinsic-call "llvm.ptrmask intrinsic arguments must have the same number of elements"))
+                                (when-not (= (dl-index-bits (addrspace (elem a))) (bits (elem m)))
+                                  (verr :verifier/intrinsic-call "llvm.ptrmask intrinsic second argument bitwidth must match pointer index type size of first argument"))))
                             (when (re-find #"^llvm\.is\.fpclass\." (global-key c))
                               (let [m (peek (second (nth ps 2)))]
                                 (when (and (integer? m) (or (neg? m) (> m 1023)))
@@ -3051,6 +3053,15 @@
   [as]
   (or (some #(when-let [m (re-matches #"p([0-9]*):([0-9]+).*" %)]
                (when (= (long (if (= "" (second m)) 0 (Long/parseLong (second m)))) (long as)) (Long/parseLong (nth m 2))))
+            (str/split (or *dl-str* "") #"-"))
+      64))
+
+(defn- dl-index-bits
+  "The data layout's index size in bits for address space `as` (p[N]:SIZE:ABI:PREF:IDX), the pointer size when not given."
+  [as]
+  (or (some #(when-let [m (re-matches #"p([0-9]*):([0-9]+)(?::[0-9]+)?(?::[0-9]+)?(?::([0-9]+))?" %)]
+               (when (= (long (if (= "" (second m)) 0 (Long/parseLong (second m)))) (long as))
+                 (Long/parseLong (or (nth m 3) (nth m 2)))))
             (str/split (or *dl-str* "") #"-"))
       64))
 
@@ -3504,6 +3515,9 @@
                 (and (seq? y) (= (first y) 'fp) (string? (second y)) (#{'float 'double} @ty)) (list 'fp (canon-fp (second y) @ty))
                 (and (seq? y) (= (first y) '*)) (norm-type y)
                 (seq? y) (apply list (map walk y))
+                ;; a vector of null pointers is a splat of ptr null (ConstantPointerNull's vectors)
+                (and (vector? y) (= 2 (count y)) (= 'zeroinitializer (second y)) (vec-type? (norm-type (first y))) (ptr-type? (elem (norm-type (first y)))))
+                [(first y) (list 'splat [(elem (norm-type (first y))) 'null])]
                 (vector? y) (mapv walk y)
                 :else y))]
       (walk x))))
