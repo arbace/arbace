@@ -50,6 +50,12 @@
 #   bin/repr-ocaml roundtrip --cmi [CORPUS...]    O3: and the .cmi level: each file compiled by ocamlc -c from the original's
 #                                 directory and from the print's, the .cmi bytes equal (a file the original does not compile
 #                                 alone is counted: its first error is in .tmp/repr-ocaml/rt/NAME/cmi/skipped.txt)
+#   bin/repr-ocaml roundtrip --cmi-only [CORPUS...]   GT9: only the .cmi level (the helper's dump, mode :full's print and cmp, ocamlc on the
+#                                 originals and the prints): not the tree level, the :lines print and its redump; the corpus's other
+#                                 part runs the tree level (gate: stdlib and samples run --cmi whole, the rest tree level and, in the clean run, --cmi-only)
+#   bin/repr-ocaml roundtrip --only-list FILE [CORPUS...]   GT9: only the files FILE lists (ids CORPUS/FILE one a line, as test/ocaml/
+#                                 read-results.edn names them), each corpus its own; every judge leaves out what was not run; the floors are
+#                                 not checked; not with --record, --record-results or --spec (the gate's rotation, GTS223)
 #   bin/repr-ocaml roundtrip --cmi-lines [CORPUS...]  and the :lines print's .cmi with -no-keep-locs equal to the original's
 #                                 with -no-keep-locs
 #   bin/repr-ocaml types|lambda|dumps [--jobs N] [--loc] [--simplify] [CORPUS...]
@@ -101,6 +107,8 @@ DEFAULT_DUMPS_CORPORA=(samples stdlib compiler-sources compiler-backend whiml te
 DEFAULT_RT_CORPORA=(stdlib compiler-sources compiler-backend samples)
 floor() {
   local kind=$1 c=$2 n=$3 want
+  # GT9: a run of an --only-list's files counts less than the corpus: nothing to compare with the floor, nothing recorded
+  if [ -n "${ONLY_LIST:-}" ]; then echo "  floor $kind $c: $n, a partial run (--only-list), not checked"; return 0; fi
   # a corpus compiles at least one file, and --record does not record a count of 0 (re-review 049)
   if [ "$n" -le 0 ]; then echo "  FLOOR $kind $c: $n, nothing compiles"; return 1; fi
   if [ "${RECORD:-}" = 1 ]; then
@@ -370,6 +378,15 @@ rt_one() {
   local t0=$SECONDS
   OUT="$w/orig" SUF=.ae xargs -a "$list" -P "$jobs" -n 1 bash -c 'dump_one "$0"'
   local t1=$SECONDS
+  # GT9 --cmi-only: only the .cmi level (mode :full's print, then ocamlc on the originals and the prints): the :lines print, its
+  # redump and the tree comparison are the corpus's other part's
+  if [ -n "${CMI_ONLY:-}" ]; then
+    echo "  $name: dump $((t1 - t0)) s (--cmi-only: the tree level left out)"
+    local rc=0
+    rt_text "$name" "$base" "$list" || rc=1
+    rt_cmi "$name" "$base" "$list" || rc=1
+    return $rc
+  fi
   rt_arbace print --root "$w/orig" -o "$w/printed" > "$w/print.log" || { tail -20 "$w/print.log"; }
   local t2=$SECONDS
   # the printed file's dump: its name is the original's
@@ -609,12 +626,19 @@ cmd_roundtrip() {
       --record-results) TEXT=1; RESULTS=1 ;;
       --corpus) shift; ids+=("$1") ;;
       --cmi) TEXT=1; CMI=1 ;;
+      --cmi-only) TEXT=1; CMI=1; CMI_ONLY=1 ;;
+      --only-list) shift; ONLY_LIST=$1 ;;
       --cmi-lines) TEXT=1; CMI=1; CMI_LINES=1 ;;
       *) ids+=("$1") ;;
     esac
     shift
   done
   [ ${#ids[@]} = 0 ] && [ -z "$spec" ] && ids=("${DEFAULT_RT_CORPORA[@]}")
+  if [ -n "${ONLY_LIST:-}" ]; then
+    [ -f "$ONLY_LIST" ] || { echo "repr-ocaml: --only-list $ONLY_LIST: no such file" >&2; return 2; }
+    if [ "${RECORD:-}" = 1 ] || [ -n "${RESULTS:-}" ]; then echo "repr-ocaml: --only-list with --record or --record-results would drop the rows it did not run" >&2; return 2; fi
+    spec=""
+  fi
   # O8: the names `opam` (the ten :opam-* corpora) and `all` (every corpus of test/ocaml/corpora.edn), for the gate's parts
   local x ex=()
   for x in "${ids[@]}"; do
@@ -628,8 +652,23 @@ cmd_roundtrip() {
   for id in "${ids[@]}"; do
     list="$root/.tmp/repr-ocaml/rt-$id.list"; mkdir -p "$(dirname "$list")"
     corpus_list "$id" > "$list"
+    # GT9 --only-list FILE: the ids CORPUS/FILE (as test/ocaml/read-results.edn names them) the run is limited to; a corpus with none
+    # of them is not run; the judges leave out what the run did not run (compare and full judge the dumps present, floors are not checked)
+    if [ -n "${ONLY_LIST:-}" ]; then
+      sed "s|^|$id/|" "$list" | grep -Fxf "$ONLY_LIST" | sed "s|^$id/||" > "$list.only" || true
+      mv "$list.only" "$list"
+      [ -s "$list" ] || { echo "== $id: no file of $ONLY_LIST"; continue; }
+    fi
     echo "== $id ($(wc -l < "$list") files)"
-    local one=0; rt_one "$id" "$CORPUS_BASE" "$list" || { bad=1; one=1; }
+    local one=0 flog="$root/.tmp/repr-ocaml/rt-$id.out" st
+    mkdir -p "$(dirname "$flog")"
+    set +e; rt_one "$id" "$CORPUS_BASE" "$list" 2>&1 | tee "$flog"; st=${PIPESTATUS[0]}; set -e
+    [ "$st" = 0 ] || { bad=1; one=1; }
+    # GT9: the failed files as ids, one a line, for the gate's rotation (:failed-re "^FAILED (.+)$"): CORPUS/FILE as the records name them
+    if [ "$st" != 0 ]; then
+      sed -nE -e 's/^(DIFF|UNSTABLE|FAIL|UNEXPECTED REJECT) ([^ ]+).*$/\2/p' -e 's/^ *(CMI|CMP) differs: ([^ ]+)$/\2/p' \
+        -e 's/^GONE \(listed, no longer occurs\) ([^ ]+).*$/\1/p' "$flog" | LC_ALL=C sort -u | sed "s|^|FAILED $id/|"
+    fi
     # O8 (--record-results): the corpus's rows of the read and print levels' records, from a run that passed
     if [ "${RESULTS:-}" = 1 ]; then
       if [ $one = 0 ]; then
