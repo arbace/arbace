@@ -1594,6 +1594,64 @@ four negative controls failing as they must.
 
 HES65: the stub writer a separate step now (a), folded into the helper at the next helper change that re-keys the dumps (b); HES66 (a): record-ref compiles the Haskell before the C; HES67 (a): Cmm a class until HE8; HES68 (a): C threads a class until ci has threads.
 
+## As built: HE7 (write-ahead)
+
+Built 2026-11-05 on branch `haskell-he7` from `haskell-he6`, light work by day (no gate, no lock, the main checkout's stage 0,
+sessions of a few lines). Nothing of Haskell is in `gate_key` or a gate step (HES19 (a)). The design of "HE7: the REPL" held
+as written: `hscCompileCoreExprHook` is enough, and the spike (`1 + 1`) came out at once.
+
+- **The session server `tools/hsrepl/Repl.hs`** (`bin/hsi repl-build`: the host's ghc, `-package ghc -package ghci`, with
+  `tools/hsdump/Stg.hs`'s serializer, kept by its sources' digest in `.tmp/hsi/hsrepl/`). A GHC API session as `ghc
+  --interactive` keeps it (Prelude imported; ExtendedDefaultRules on, the monomorphism restriction off, implicit qualified
+  imports on, as GHCi.UI sets them), a line protocol on stdin and stdout (`STMT N TEXT`, `SETUP`, `COMMIT`, `ABORT`; replies
+  `OUT`, `ERR`, `RUN MODULE NAME...`, `OK`, `FAIL`). A statement is parsed (`hscParseStmtWithLocation`) and goes through
+  `hscParsedStmt`, as `execStmt'` does, so the typechecker, the desugarer, `it`, the defaulting and the diagnostics are GHC's own.
+  The one step GHCi leaves to its interpreter, `hscCompileCoreExpr`, is the hook: it simplifies, tidies and prepares the
+  Core as `hscCompileCoreExpr'` does, runs `coreToStg` and `stg2stg` (not for bytecode: the code generator's STG, as the
+  dumps), and writes the STG with the helper's serializer as the module `GhciStmtN` of unit main whose `stmt` is the
+  expression (an `IO [HValue]`); a placeholder `ForeignHValue` is returned. The interactive modules (`interactive:GhciN`)
+  are named unit `main` in the dumps (`Stg.hs`'s `unitName`; no dump of a normal build has such a name, so none changes).
+  After the run the host answers `COMMIT` (the final context: `extendInteractiveContextWithIds`, as `handleRunStatus`) or
+  `ABORT` (an exception: the context stays, so `it` after `1 `div` 0` is out of scope, as GHCi's).
+- **Declarations** (`data`, `class`, `instance`, equations at top level): a line that does not parse as a statement is parsed as
+  declarations (GHCi's order), compiled as `hscParsedDecls` does up to the tidied Core, then prepared, converted to STG and
+  written as the whole module `GhciN` (its data types as `stg/data` forms), the context extended with the new things; hsi
+  finds the names by module. `:t` and `:k` are answered by the server alone (`exprType TM_Inst`, `typeKind`), `import` by
+  `parseImportDecl` and `setContext`.
+- **The statement wrapper**: at start the server compiles `SETUP`, a `let hsiStep__ = \act -> try act >>= ...` in an
+  environment of its own (module `Ghci900`, imports of its own, dropped after), whose value hsi keeps: every statement runs
+  under it, stdout flushed after it (GHCi's stdout is unbuffered), an exception's message written to stderr as GHCi's
+  (`*** Exception: ` and `displayException`, the backtrace's context) and the statement's values not bound.
+- **hsi's side** (`go/arbace/hs/repl.ae`, `test/haskell/hsi/cmd/main.ae`'s `repl`; the Go text edited by `bin/hsi runtime print`
+  and read back by `runtime read`): `Machine.ReplEval` runs an IO action on a thread of its own to its end, `ReplBind` makes the
+  values a statement bound globals named by the interactive module (`main:Ghci3/x`, GHCi's `extendLoadedEnv`: the next STG
+  finds them by name), `ReplGlobal`, `ReplList`; the driver prints GHCi's banner, the prompt `ghci> ` before each line and
+  `Leaving GHCi.` at the end, on stdout as `ghc --interactive` does with a piped stdin. `:q` ends.
+- **`bin/hsi repl [DIR]`** and **`bin/hsi repl-session [--record] [FILE.in...]`**: `test/haskell/repl/*.in` (seven sessions: basic
+  expressions and `it`, IO actions and `x <- ...`, `:t`/`:k`, imports, exceptions and errors, definitions accumulating across
+  lines, and a mixed one with a `data` declaration and a parse error) run through the REPL, stdout compared byte for byte with
+  `NAME.out`, the transcript of `ghc --interactive -ignore-dot-ghci` on the same input (`--record`, the host's GHC 9.14.1);
+  `NAME.err` is GHCi's stderr, compared line for line and reported, not judged (its source locations and context lines). The
+  negative control: each run judged against the next session's transcript must differ (7 of 7 do).
+- **Results** (HSI_EXE the build of the edited Go text, the libraries from the images of HE4d): 7 of 7 sessions byte for byte
+  (about 0.7 s a session once the images exist); the cold start (session server compile) is the helper's build, about 4 minutes
+  once.
+- **Left**: multi-line input (`:{ ... :}`), the other `:` commands (`:i`, `:info`, `:l`, `:load` of a module, `:set`, `:browse`,
+  `:main`), tab-completion and the history (a tty), `ExitCode` exceptions (GHCi's catch), `-fbreak-on-exception` and the debugger
+  (a bytecode feature), Template Haskell in a statement (needs the interpreter), `stdin` read by the program and by the REPL
+  alike is shared but its echo is not checked, and the stderr comparison is not judged (HES69). The committed forms
+  were read from the Go text by `bin/hsi runtime read`; `bin/hsi runtime check` was not run by day.
+
+### Proposed (HES69)
+
+- **HES69 Judging the REPL's stderr.** (a) as built: stdout byte for byte, stderr reported; (b) stderr judged too, line for
+  line after normalising `<interactive>:L:C` and `GhciN` numbers, once the exception text matches in every case; (c) stderr
+  byte for byte. *Recommended: (b)* when `:i` and `:load` are in, the diagnostics' text being GHC's own.
+
+## Decided (2026-11-05, the user: HES69)
+
+HES69 (b): the REPL's stderr judged too, line for line after normalising positions and GhciN, once :i and :load exist.
+
 ## As built: HE8 (write-ahead)
 
 Built 2026-11-05 on branch `haskell-he8` from `haskell-he5` (`a7fafe0b`), on the host's GHC 9.14.1, TamaGo's go and the main
