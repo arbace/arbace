@@ -389,7 +389,7 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Expressions
 
-(declare want! infer tc-local-binds infer-matches tc-pat infer-grhss rename-mono reduce-by-instance substitute)
+(declare occurrences wrap-lets want! infer tc-local-binds infer-matches tc-pat infer-grhss rename-mono reduce-by-instance substitute)
 
 ;; env: {NAME {:mono type} | {:poly type :core term}}
 
@@ -494,7 +494,7 @@
                    [r (app* cb [ce (list 'lam [pc] cr)])]))
       LetStmt (let [[env1 binds] (tc-local-binds env (arg v 2))
                     [tr cr] (infer-stmts env1 more)]
-                [tr (reduce (fn [body b] (list 'let [b] body)) cr (reverse binds))])
+                [tr (wrap-lets binds cr)])
       (do (error! "statement not handled: " (con v)) [(fresh-meta) (list 'lit "?")]))))
 
 (defn- infer-listcomp
@@ -550,7 +550,7 @@
                                                    (list 'alt (ext-name "data" "GHC.Internal.Types" "True") [] ct)])])
       HsLet (let [[env1 binds] (tc-local-binds env (arg v 2))
                   [t c] (infer env1 (arg v 3))]
-              [t (reduce (fn [body b] (list 'let [b] body)) c (reverse binds))])
+              [t (wrap-lets binds c)])
       HsDo (let [fl (arg v 2)]
              (case (if (seq? fl) (first fl) fl)
                DoExpr (infer-stmts env (lval (arg v 3)))
@@ -727,7 +727,7 @@
                        (if (empty? gs) c (list 'guarded gs c))))
                    (arg grhss 2))
         body (if (and (= 1 (count alts)) (not (and (seq? (first alts)) (= 'guarded (first (first alts)))))) (first alts) (list 'guards alts))]
-    (reduce (fn [b x] (list 'let [x] b)) body (reverse binds))))
+    (wrap-lets binds body)))
 
 (defn infer-matches
   "A match group (MG origin (L sp [Match...])): [type core]; ctx {:scrut [t c] :res r} for a case"
@@ -811,7 +811,7 @@
                                  sws (mapv (fn [p] {:ev (fresh-id) :pred p}) subs)]
                              (swap! *evidence* assoc (:ev w)
                                     (if (empty? sws) (list 'v dfun) (list 'app (list 'v dfun) (mapv #(list 'ev (:ev %)) sws))))
-                             (recur (concat sws (rest ws)) out))
+                             (recur (concat (rest ws) sws) out))
                            (recur (rest ws) (conj out (assoc w :pred [c ts])))))))
         local (fn [w] (some inner? (mapcat metas-of (second (:pred w)))))
         [cands outer] [(vec (filter local simplified)) (vec (remove local simplified))]
@@ -948,9 +948,20 @@
   [env lb]
   (if (= 'HsValBinds (con lb))
     (let [vb (arg lb 2) groups (arg vb 1) sigs (sigs-of (arg vb 2))]
-      (reduce (fn [[env out] g] (let [[env1 bs] (tc-group env [(arg g 1) (arg g 2)] sigs false)] [env1 (into out bs)]))
+      (reduce (fn [[env out] g] (let [[env1 bs] (tc-group env [(arg g 1) (arg g 2)] sigs false)]
+                                  ;; a recursive group stays one letrec (nested lets would hide its inner uses)
+                                  [env1 (if (and (= 'rec (arg g 1))
+                                                 (some (fn [b] (some (fn [b2] (pos? (occurrences (second b2) (nth b 2)))) bs)) bs))
+                                          (conj out (list 'rec-group bs))
+                                          (into out bs))]))
               [env []] groups))
     [env []]))
+
+(defn- wrap-lets
+  "Local bindings around a body: a let per binding, a letrec per recursive group"
+  [binds body]
+  (reduce (fn [body b] (if (= 'rec-group (first b)) (list 'letrec (second b) body) (list 'let [b] body)))
+          body (reverse binds)))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Declarations: data types, classes, instances
@@ -1228,6 +1239,7 @@
         {:module m
          :types (merge types cons-types)
          :syns @*syns*
+         :exported (set (mapcat (fn [[n kids]] (cons n kids)) (:exports (second tree))))
          :cons (into {} (filter (fn [[n _]] (= m (nmod n))) @*cons*))
          :classes (into {} (for [[n info] @*classes* :when (= m (nmod n))] [n (dissoc info :binds)]))
          :insts (vec (filter (fn [i] (= m (nmod (:dfun i)))) @*insts*))
@@ -1379,7 +1391,7 @@
         :else 0))
 
 (defn- substitute [m c]
-  (cond (and (seq? c) (= 'lv (first c)) (contains? m c)) (get m c)
+  (cond (and (seq? c) (contains? '#{lv v} (first c)) (contains? m c)) (get m c)
         (seq? c) (apply list (map #(substitute m %) c))
         (vector? c) (mapv #(substitute m %) c)
         :else c))
@@ -1462,7 +1474,44 @@
                                     (nth (vec (map #(if (symbol? %) (name %) %) n)) 3))]
              :when (not-any? #(str/starts-with? o %) typeable-prefixes)
              :when (not (and (= 'lv (first n)) (str/starts-with? o "$d")))]
-         [(if (= 'lv (first n)) (str "local " o) o) (nth b 2)]))))
+         ;; GHC's :Main.main (runMainIO main) apart from the program's main
+         [(cond (= 'lv (first n)) (str "local " o)
+                (str/starts-with? (str (nth (vec (map #(if (symbol? %) (name %) %) n)) 2)) ":") (str ":" o)
+                :else o)
+          (nth b 2)]))))
+
+(defn- occurrences-outside-lam
+  "[count under-lambda?] of the occurrences of x in c"
+  [x c]
+  (let [n (atom 0) lam (atom false)]
+    (letfn [(w [c in-lam]
+              (cond (= x c) (do (swap! n inc) (when in-lam (reset! lam true)))
+                    (and (seq? c) (= 'lam (first c))) (doseq [y (rest c)] (w y true))
+                    (coll? c) (doseq [y c] (w y in-lam))
+                    :else nil))]
+      (w c false))
+    [@n @lam]))
+
+(defn inline-once
+  "GHC's simpleOptPgm on our top-level bindings: a binding of the module not exported, not recursive, occurring
+  once in all the others and not under a lambda, inlined there (the desugarer's output of a headerless Main has its
+  helpers inlined so); repeated to the fixpoint"
+  [binds exported m]
+  (loop [bs (vec binds) i 0]
+    (let [cand (first (for [[j b] (map-indexed vector bs)
+                            :let [n (second b)]
+                            :when (and (vector? n) (= m (nth n 2)) (= "var" (nth n 1)) (not (contains? exported n))
+                                       (not (str/starts-with? (nth n 3) "$")))
+                            :let [x (list 'v n)]
+                            :when (zero? (occurrences x (nth b 2)))
+                            :let [uses (keep-indexed (fn [k b2] (when (not= k j) (let [[c l] (occurrences-outside-lam x (nth b2 2))] (when (pos? c) [k c l])))) bs)]
+                            :when (and (= 1 (count uses)) (= 1 (second (first uses))) (not (nth (first uses) 2)))]
+                        [j (first (first uses))]))]
+      (if (and cand (< i 500))
+        (let [[j k] cand b (nth bs j) x (list 'v (second b))
+              bs2 (assoc bs k (let [b2 (nth bs k)] (list 'bind (second b2) (substitute {x (nth b 2)} (nth b2 2)))))]
+          (recur (vec (concat (subvec bs2 0 j) (subvec bs2 (inc j)))) (inc i)))
+        bs))))
 
 (defn compare-with-ghc
   "Our elaboration against the tc verb's dump: {:types {:equal n :diff [...]} :evidence {:equal n :diff [...]} :core-equal n}"
@@ -1486,7 +1535,7 @@
         gdicts (into {} (for [[x rhs] gbinds :when (and (= 'lv (first x)) (str/starts-with? (str (second x)) "$d"))] [x rhs]))
         gcore (into {} (for [[k c] (core-binds (map (fn [[x rhs]] (list 'bind x rhs)) gbinds))]
                          [k (loop [c c i 0] (let [c2 (substitute gdicts c)] (if (or (= c2 c) (> i 5)) c (recur c2 (inc i)))))]))
-        ocore (into {} (core-binds (:core r)))
+        ocore (into {} (core-binds (inline-once (:core r) (:exported r) (:module r))))
         ;; a local ($c...) binding's key is its occurrence: instance methods of the same name in two instances collide,
         ;; compared as multisets of their evidence
         ckeys (sort (set/intersection (set (keys gcore)) (set (keys ocore))))
