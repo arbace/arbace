@@ -634,3 +634,7 @@ the converter's forms for them.
   part), `clang/LICENSE.TXT`; extracted from the pinned tarball into the worktree's `.tmp/llvm/`.
 - gcc 15.2.0's testsuite (the tarball pinned for repr/c, extracted in `.tmp/repr-c/`): the corpus of G3.7, read as input.
 - libstdc++ 15.2.0's headers on the host (G3.6), read as input.
+
+## Decided (2026-11-05, the user: P11-P14)
+
+P11 (b): gcc's template run corpus list committed with a recorded-results file as a regression check; P12 (a): instantiation by re-analysis; P13 (b): the native parser records explicit template arguments, before G4; P14 (b): the native parser keeps constraints and requires-expressions.
