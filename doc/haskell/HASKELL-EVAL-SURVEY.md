@@ -1940,3 +1940,7 @@ every `<` on `Int` (`ltInt`) ran as nodes. The generated functions themselves we
 - **HES75 The essential list's AOT peak.** The check's first pass compiles every library package afresh after a runtime
   change (710 s, 2.5 GB at 2 jobs, a build of `GHC.Internal.Base`-sized packages); (a) the library packages compiled once per
   runtime key at night (HES70 (a)'s run) before a day's check; (b) as built. *Recommended: (a)*, with HES70.
+
+## Decided (2026-11-05, the user: HES74, HES75)
+
+HES74: (c) -O1 STG for the compiled level first (evaluation-order-dependent programs a class), then (a) frameless evaluation of a compiled case's scrutinee; HES75 (a): the library packages compiled once per runtime key at night with HES70.
