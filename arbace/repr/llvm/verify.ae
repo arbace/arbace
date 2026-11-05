@@ -2345,6 +2345,37 @@
 
 (declare check-di-node*)
 
+(defn- expr-elements
+  "A DIExpression's elements as numbers (its DW_OP names by their codes)."
+  [node]
+  (let [codes @(resolve 'arbace.repr.llvm.di-table/op-codes)]
+    (mapv (fn [x] (cond (integer? x) x (symbol? x) (get codes (name x) -1) :else -1)) (rest node))))
+
+(defn- expr-valid?
+  "DIExpression::isValid (DebugInfoMetadata.cpp): each operation in range with its operands; register operations end
+  the check; fragment last, stack_value last or before a fragment, swap not alone, entry_value first (after an arg 0)
+  with argument 1."
+  [els]
+  (let [n (count els)
+        size (fn [op] (cond (<= 112 op 143) 2
+                            (#{4097 4096 4102 4103 146} op) 3
+                            (#{16 17 148 35 4098 4099 4101 144} op) 2
+                            :else 1))
+        ok-ops #{4100 4097 4101 4098 4102 4103 16 35 34 28 30 27 29 33 26 39 36 37 38 6 148 24 48 32 18 144 146 151 20 23 17 41 46 42 45 44 43 31 25}]
+    (loop [i (long 0)]
+      (if (>= i n) true
+          (let [op (long (nth els i)) sz (long (size op))]
+            (cond
+              (> (+ i sz) n) false
+              (or (<= 80 op 111) (<= 112 op 143)) true
+              (= op 4096) (= (+ i sz) n)
+              (= op 159) (if (= (+ i sz) n) (recur (+ i sz)) (if (= 4096 (nth els (+ i sz) nil)) (recur (+ i sz)) false))
+              (= op 22) (if (= n 1) false (recur (+ i sz)))
+              (= op 4099) (let [first-op (if (and (= 4101 (nth els 0 nil)) (= 0 (nth els 1 nil))) 2 0)]
+                            (and (= i first-op) (= 1 (nth els (inc i) nil))))
+              (contains? ok-ops op) (recur (+ i sz))
+              :else false))))))
+
 (defn- check-di-type-node
   "visitDIDerivedType, visitDICompositeType, visitDISubrange, visitDIGenericSubrange, visitDISubroutineType and
   visitDIBasicType (with visitDIType and visitDIScope) over the node `id`; true when the node is one of these kinds."
@@ -2440,6 +2471,10 @@
         (when-not (given (:stride fs)) (fail "GenericSubrange must contain stride" me))
         (when-not (vx? (:stride fs)) (fail "Stride must be signed constant or DIVariable or DIExpression" me))
         true)
+      "DIExpression"
+      (do (when-not (expr-valid? (expr-elements node))
+            (verr :di/node "invalid expression" [:raw (str "!DIExpression(" (str/join ", " (expr-elements node)) ")\n")]))
+          true)
       "DISubroutineType"
       (do (di-type)
           (when (given (:types fs))
@@ -2700,6 +2735,8 @@
                        (visiting (binding [*ctx* {:fn f :bb l :inst x}]
                         (when-not (= "DILocalVariable" (di-kind vn)) (verr :di/record "invalid #dbg record variable" :inst [:mdv var] :bb :fn))
                         (when-not (= "DIExpression" (di-kind en)) (verr :di/record "invalid #dbg record expression" :inst [:mdv expr] :bb :fn))
+                        (when-not (expr-valid? (expr-elements en))
+                          (verr :di/node "invalid expression" [:raw (str "!DIExpression(" (str/join ", " (expr-elements en)) ")\n")]))
                         (when (and (= "DILocation" (di-kind ln)) (some? (di-sp (:scope (di-fields ln)))) (some? (di-sp (:scope (di-fields vn)))) (not= (di-sp (:scope (di-fields vn))) (di-sp (:scope (di-fields ln)))))
                           (verr :di/record "mismatched subprogram between #dbg record variable and DILocation"
                                 :inst :bb :fn [:mdv var] [:mdv (di-sp (:scope (di-fields vn)))] [:mdv loc] [:mdv (di-sp (:scope (di-fields ln)))] :bb :fn))
