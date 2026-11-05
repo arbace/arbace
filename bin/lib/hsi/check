@@ -24,7 +24,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
-corpora=samples,synthetic only="" jobs=${HSI_JOBS:-3} record="" keep=""
+corpora=samples,synthetic only="" jobs=${HSI_JOBS:-3} record="" keep="" aot=""
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) corpora=$2; shift 2 ;;
@@ -32,13 +32,18 @@ while [ $# -gt 0 ]; do
     --jobs) jobs=$2; shift 2 ;;
     --record) record=1; shift ;;
     --keep) keep=1; shift ;;
-    *) echo "usage: bin/hsi check [--corpus C,...] [--only ID,...|@FILE] [--jobs N] [--record] [--keep]" >&2; exit 2 ;;
+    --aot) aot=1; shift ;;
+    *) echo "usage: bin/hsi check [--corpus C,...] [--only ID,...|@FILE] [--jobs N] [--record] [--keep] [--aot]" >&2; exit 2 ;;
   esac
 done
 pin=$(cat "$root/tools/hsdump/GHC_VERSION")
 [ "$(ghc --numeric-version)" = "$pin" ] || { echo "hsi check: the host's GHC is not $pin" >&2; exit 1; }
 ref=$root/test/haskell/ref-ghc914.edn
 work=$root/.tmp/hsi/check
+# --aot (HE8, the first slice): each program built by bin/hsi aot build (its modules and the library closures a first
+# run on hsi entered compiled to Go) and run on its executable; results into .tmp/hsi/check-aot, --record into
+# test/haskell/check-hsi-aot.edn
+[ -z "$aot" ] || work=$root/.tmp/hsi/check-aot
 rm -rf "$work"; mkdir -p "$work/res" "$work/out" "$work/run"
 hsi=$("$root/bin/hsi" build)
 libs=${HSI_LIBS:-$root/.tmp/hsi/dumps/stg:$root/.tmp/hsi/dumps-extra/stg:$root/.tmp/hsi/dumps-more/stg}
@@ -53,7 +58,7 @@ if [ "$images" != none ]; then
   for l in "${dirs[@]}"; do [ -d "$l" ] && ia+=(--lib "$l"); done
   "$hsi" image --out "$images" "${ia[@]}" >&2 || { echo "hsi check: hsi image failed" >&2; exit 1; }
 fi
-export root work hsi libs helper helper_hash libdir ref keep images
+export root work hsi libs helper helper_hash libdir ref keep images aot
 export HSI_TIMEOUT=${HSI_TIMEOUT:-60}
 # programs that need more than ARBACE_MEM_GIB name their own cap (ID=GIB ...); none today: the deepest stacks, Loop
 # (7.3 GB of RSS) and T16846 (9.7 GB), pass under the default 16 GiB (measured alone, 2026-11-03)
@@ -147,17 +152,38 @@ one() {
   local stdin=.empty; [ "$sin" != - ] && stdin=$sin
   local ro=""; [ "$ropts" != - ] && ro=${ropts//\/dev\/null/.empty}
   [[ $ro == *"<"* ]] && stdin=.empty
-  local cmd; cmd="exec $(printf '%q ' "$hsi" run "${la[@]}" --prog "$prog/stg" --name "$name" --) $ro"
+  # a test all.T skips unconditionally (the class :skipped) is not run: its 180 s at the wall cap spared (review 189, L8)
+  if awk '/^ *\{:id :skipped/ {s=1; next} /^ *\{:id :/ {s=0} s' "$root/test/haskell/divergences.edn" | grep -qF "\"$id\""; then
+    rm -rf "$w"; echo "{:id \"$id\" :result :skipped :dump $td :run 0}" > "$res"; return 0
+  fi
+  local exe=$hsi ab=0 pst=0 hrun=0
+  if [ -n "$aot" ]; then
+    # the profile: the closures a run on hsi enters (in a copy of the directory of its own, the same stdin and
+    # arguments), then the program's executable built with them compiled (bin/hsi aot build, kept by key)
+    local pw=$w.profile pcmd
+    rm -rf "${pw:?}"; mkdir -p "$pw"; cp -r "$src"/. "$pw"/ 2> "$pw.cp.log" || true; rm -f "$pw.cp.log"; : > "$pw/.empty"
+    pcmd="exec $(printf '%q ' "$hsi" run "${la[@]}" --prog "$prog/stg" --name "$name" --) $ro"
+    # (its run is hsi's: kept to compare the compiled run with, :vs-hsi, and its seconds, :hsi-run)
+    local pt0 pt1; pt0=$(date +%s.%N); pst=0
+    (cd "$pw" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$pw" HSI_AOT_MODULES="$prog/aot-closures.txt" \
+       timeout -s KILL $((HSI_TIMEOUT * 3)) sh -c "ulimit -v $((${ARBACE_MEM_GIB:-16} * 1048576)); export GOMEMLIMIT=$((${ARBACE_MEM_GIB:-16} * 768))MiB; ulimit -t $HSI_TIMEOUT; $pcmd" \
+       < "$pw/$stdin" > "$prog/aot-hsi.stdout" 2> "$prog/aot-hsi.stderr") || pst=$?
+    pt1=$(date +%s.%N); hrun=$(printf '%.2f' "$(echo "$pt1 - $pt0" | bc)")
+    rm -rf "${pw:?}"
+    [ -f "$prog/aot-closures.txt" ] || : > "$prog/aot-closures.txt"
+    local t2 t3; t2=$(date +%s.%N)
+    exe=$(HSI_LIBS=$libs HSI_IMAGE=$images "$root/bin/lib/hsi/aot" build --prog "$prog/stg" --closures "$prog/aot-closures.txt" --out "$prog/aot" 2> "$prog/aot-build.err") || {
+      local e; e=$(head -c 160 "$prog/aot-build.err" | tr '\n' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g')
+      rm -rf "$w"; echo "{:id \"$id\" :result :hsi :status 3 :message \"hsi aot: $e\" :dump $td :run 0}" > "$res"; return 0; }
+    t3=$(date +%s.%N); ab=$(printf '%.2f' "$(echo "$t3 - $t2" | bc)")
+  fi
+  local cmd; cmd="exec $(printf '%q ' "$exe" run "${la[@]}" --prog "$prog/stg" --name "$name" --) $ro"
   local o=$work/out/${id//\//_} st=0
   # the memory cap (bin/lib/limit.bash's ARBACE_MEM_GIB, default 16 GiB: ulimit -v at it, GOMEMLIMIT at three
   # quarters), so a leaking program fails alone; the deep-stack programs name their own (HSI_MEM_CAPS, ID=GIB)
   local mem=${ARBACE_MEM_GIB:-16} c
   for c in $HSI_MEM_CAPS; do [ "${c%%=*}" = "$id" ] && mem=${c#*=}; done
   local memlim=""; [ "$mem" = 0 ] || memlim="ulimit -v $((mem * 1048576)); export GOMEMLIMIT=$((mem * 768))MiB; "
-  # a test all.T skips unconditionally (the class :skipped) is not run: its 180 s at the wall cap spared (review 189, L8)
-  if awk '/^ *\{:id :skipped/ {s=1; next} /^ *\{:id :/ {s=0} s' "$root/test/haskell/divergences.edn" | grep -qF "\"$id\""; then
-    rm -rf "$w"; echo "{:id \"$id\" :result :skipped :dump $td :run 0}" > "$res"; return 0
-  fi
   t0=$(date +%s.%N)
   (cd "$w" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$w" \
      timeout -s KILL $((HSI_TIMEOUT * 3)) sh -c "${memlim}ulimit -t $HSI_TIMEOUT; $cmd" \
@@ -169,6 +195,13 @@ one() {
   rl=$(grep -F "{:id \"$id\" " "$ref" || true)
   local secs; secs=$(printf '%.2f' "$(echo "$t1 - $t0" | bc)")
   local tm=":dump $td :run $secs"
+  if [ -n "$aot" ]; then
+    # the compiled run against hsi's (diffcheck's kind): status, stdout and stderr
+    local vs=same
+    { [ "$st" = "$pst" ] && [ "$so" = "$(sha256sum < "$prog/aot-hsi.stdout" | cut -c1-64)" ] &&
+      [ "$se" = "$(sha256sum < "$prog/aot-hsi.stderr" | cut -c1-64)" ]; } || vs=differs
+    tm="$tm :aot-build $ab :hsi-run $hrun :vs-hsi :$vs"
+  fi
   echo "$st" > "$o.status"
   if [ -z "$rl" ]; then echo "{:id \"$id\" :result :no-ref $tm}" > "$res"; return 0; fi
   rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$rl")
@@ -197,6 +230,7 @@ out=$work/results.edn
   echo ";; (test/haskell/ref-ghc914.edn): :pass (status, stdout and stderr byte for byte), :fail (:differs), :hsi (hsi stopped:"
   echo ";; its message), :no-dump (the helper's first error), :no-ref; :dump the helper's seconds (0: cached), :run hsi's wall"
   echo ";; seconds (GT8)."
+  [ -z "$aot" ] || echo ";; --aot (HE8): each program run on its executable from bin/hsi aot build (its modules and the library modules its run on hsi entered compiled to Go); :aot-build the build's seconds, :hsi-run the seconds of the same run on hsi (the profile's), :vs-hsi the compiled run's status, stdout and stderr against hsi's (:same, :differs)."
   echo ";; corpora: $corpora"
   cat "$work"/res/* | sort
 } > "$out"
@@ -227,15 +261,16 @@ while IFS= read -r line; do
 done < <(grep '^{' "$out" | grep -v ':result :pass')
 echo "hsi check: $unclassed not passing in no class of test/haskell/divergences.edn"
 if [ -n "$record" ]; then
-  rec=$root/test/haskell/check-hsi.edn
+  rec=$root/test/haskell/check-hsi.edn; [ -z "$aot" ] || rec=$root/test/haskell/check-hsi-aot.edn
   # the other programs' lines kept (another corpus's, or those --only left out)
   { grep '^;;' "$out" | grep -v '^;; corpora:'
     echo ";; corpora: $(cat "$out" $([ -f "$rec" ] && echo "$rec") | grep -h "^;; corpora:" | sed 's/^;; corpora: //' | tr ',' '\n' | sort -u | grep . | paste -sd, -)"
     { grep '^{' "$out"
-      [ -f "$rec" ] && grep '^{' "$rec" | while IFS= read -r l; do
-        i=$(sed 's/^{:id "\([^"]*\)".*/\1/' <<< "$l"); grep -qF "{:id \"$i\" " "$out" || echo "$l"; done
+      # (an if: under pipefail a missing record's false test failed the first --record)
+      if [ -f "$rec" ]; then grep '^{' "$rec" | while IFS= read -r l; do
+        i=$(sed 's/^{:id "\([^"]*\)".*/\1/' <<< "$l"); grep -qF "{:id \"$i\" " "$out" || echo "$l"; done; fi
     } | sort; } > "$rec.part"
-  mv "$rec.part" "$rec"; echo "hsi check: recorded test/haskell/check-hsi.edn"
+  mv "$rec.part" "$rec"; echo "hsi check: recorded ${rec#"$root"/}"
 fi
 # the negative controls (test/haskell/hsi-controls.txt): a subject's run judged against another program's reference
 cbad=0 cran=0
