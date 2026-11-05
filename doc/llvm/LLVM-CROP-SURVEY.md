@@ -835,3 +835,7 @@ and `shufflevector` crashed it (now refused `:vector`), `llvm.global_dtors` was 
 4. **The essential tier** (§11.2): three llvmi modules on ci (a C module, an ExecutionEngine module, a constructor module, about 10 s) as an
    essential gate step beside the interim llvm-roundtrip step, once the row enters the gate; the eval check (90 s) nightly, AOT (19 min) in
    the clean run.
+
+## Decided (2026-11-05, the user: LLS21, LLS22 and llvmi's two)
+
+LLS21 (a): fmodf/fmodl, the __atomic_* family and the function-pointer return width in ci; LLS22 (b) now, the C++ personality left to cppi's check, (a) with LL2; arbace.cpp.lower renamed arbace.llvm.lower once no branch edits it; an essential step of 3 llvmi modules when the row enters the gate, eval nightly, AOT in the clean run.
