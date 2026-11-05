@@ -175,8 +175,15 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The def collector (build_reduced_graph)
 
-(defn- ident-span-at [item-span nm]
-  (or (find-ident (lo-of item-span) nm) (lo-of item-span)))
+(defn- id-span
+  "An identifier's own span when the dump carries it ((id NAME CTXT [l1 c1 l2 c2]): arbace.rust.front.expand writes the
+  root file's identifiers of a macro's output so, where the item's span is the macro's)"
+  [x]
+  (when (seq? x) (let [s (nth x 3 nil)] (when (root-span? s) s))))
+
+(defn- ident-span-at [item-span nmf]
+  (let [nm (if (seq? nmf) (id-name nmf) nmf)]
+    (or (id-span nmf) (find-ident (lo-of item-span) nm) (lo-of item-span))))
 
 (defn- ctor-kind [data]
   (case (head data) Tuple "Fn" Unit "Const" nil))
@@ -200,41 +207,41 @@
         k (fv item :kind)]
     (case (head k)
       Fn (let [f (second k) nm (id-name (fv f :ident))]
-           (define! m :value nm {:t :local-def :kind (if (= :assoc (:kind m)) "AssocFn" "Fn") :span (ident-span-at sp nm)}))
+           (define! m :value nm {:t :local-def :kind (if (= :assoc (:kind m)) "AssocFn" "Fn") :span (ident-span-at sp (fv f :ident))}))
       (Struct Union)
-      (let [[_ ident _ data] k nm (id-name ident) s (ident-span-at sp nm)]
+      (let [[_ ident _ data] k nm (id-name ident) s (ident-span-at sp ident)]
         (define! m :type nm {:t :local-def :kind (str (head k)) :span s})
         (when-let [ck (and (= 'Struct (head k)) (ctor-kind data))]
           (define! m :value nm {:t :local-def :kind (str "Ctor(Struct, " ck ")") :span s})))
       Enum
-      (let [[_ ident _ edef] k nm (id-name ident) s (ident-span-at sp nm)
+      (let [[_ ident _ edef] k nm (id-name ident) s (ident-span-at sp ident)
             em (new-module m "Enum")
             r {:t :local-def :kind "Enum" :span s :mod em}]
         (doseq [v (fv edef :variants)]
-          (let [vn (id-name (fv v :ident)) vs (ident-span-at (fv v :span) vn)]
+          (let [vn (id-name (fv v :ident)) vs (ident-span-at (fv v :span) (fv v :ident))]
             (define! em :type vn {:t :local-def :kind "Variant" :span vs})
             (when-let [ck (ctor-kind (fv v :data))]
               (define! em :value vn {:t :local-def :kind (str "Ctor(Variant, " ck ")") :span vs}))))
         (define! m :type nm r))
       Trait
-      (let [t (second k) nm (id-name (fv t :ident)) s (ident-span-at sp nm)
+      (let [t (second k) nm (id-name (fv t :ident)) s (ident-span-at sp (fv t :ident))
             tm (new-module m :assoc)]
         (doseq [it (fv t :items)]
           (let [ik (fv it :kind)]
             (case (head ik)
-              Fn (let [n (id-name (fv (second ik) :ident))] (define! tm :value n {:t :local-def :kind "AssocFn" :span (ident-span-at (fv it :span) n)}))
+              Fn (let [n (id-name (fv (second ik) :ident))] (define! tm :value n {:t :local-def :kind "AssocFn" :span (ident-span-at (fv it :span) (fv (second ik) :ident))}))
               Const (let [n (id-name (fv (second ik) :ident))] (define! tm :value n {:t :local-def :kind "AssocConst { is_type_const: false }" :span (ident-span-at (fv it :span) n)}))
               Type (let [n (id-name (fv (second ik) :ident))] (define! tm :type n {:t :local-def :kind "AssocTy" :span (ident-span-at (fv it :span) n)}))
               nil)))
         (define! m :type nm {:t :local-def :kind "Trait" :span s :mod tm}))
-      TyAlias (let [nm (id-name (fv (second k) :ident))] (define! m :type nm {:t :local-def :kind "TyAlias" :span (ident-span-at sp nm)}))
-      Const (let [nm (id-name (fv (second k) :ident))] (define! m :value nm {:t :local-def :kind "Const { is_type_const: false }" :span (ident-span-at sp nm)}))
+      TyAlias (let [nm (id-name (fv (second k) :ident))] (define! m :type nm {:t :local-def :kind "TyAlias" :span (ident-span-at sp (fv (second k) :ident))}))
+      Const (let [nm (id-name (fv (second k) :ident))] (define! m :value nm {:t :local-def :kind "Const { is_type_const: false }" :span (ident-span-at sp (fv (second k) :ident))}))
       Static (let [st (second k) nm (id-name (fv st :ident))
                    mut (if (= 'Mut (fv st :mutability)) "Mut" "Not")]
-               (define! m :value nm {:t :local-def :kind (str "Static { safety: Safe, mutability: " mut ", nested: false }") :span (ident-span-at sp nm)}))
+               (define! m :value nm {:t :local-def :kind (str "Static { safety: Safe, mutability: " mut ", nested: false }") :span (ident-span-at sp (fv st :ident))}))
       Mod (let [[_ _safety ident mk] k nm (id-name ident) mm (new-module m "Mod")]
             (when (= 'Loaded (head mk)) (collect-items mm (second mk)))
-            (define! m :type nm {:t :local-def :kind "Mod" :span (ident-span-at sp nm) :mod mm}))
+            (define! m :type nm {:t :local-def :kind "Mod" :span (ident-span-at sp ident) :mod mm}))
       ExternCrate (let [[_ orig ident] k nm (id-name ident) crate (or (some-val orig) nm)]
                     (when-let [r (std-module-res (if (string? crate) crate (id-name crate)))]
                       (swap! *extern* assoc nm r)
@@ -541,7 +548,7 @@
                            :let [k (fv p :kind) nm (id-name (fv p :ident))]
                            :when (#{'Type 'Const} (head k))]
                        [nm {:t :local-def :kind (if (= 'Type (head k)) "TyParam" "ConstParam")
-                            :span (or (find-ident (lo-of gs) nm) gs)}]))
+                            :span (or (id-span (fv p :ident)) (find-ident (lo-of gs) nm) gs)}]))
      :generics g}))
 
 (declare with-const-params)
