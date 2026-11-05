@@ -204,9 +204,10 @@ covers what.
   copied), from the same release tarball, by hand on 2026-11-05: Copyright (c) 2001 Python Software Foundation, All
   Rights Reserved, under the PSF License Agreement for Python 3.14 (text below). The OIDs, NIDs and names of
   `sslObjects` and the alert reasons are the values OpenSSL 3.5 gives for them (facts of its interface, read through
-  CPython's `_ssl.txt2obj`); the pipe adapter, the cipher-string evaluator and the DER walker are Arbace's own, under the
+  CPython's `_ssl.txt2obj`; queue 217 added the alerts of the verification codes, the security levels' bits and the
+  cipher-string rules as OpenSSL 3.5 shows them through CPython); the pipe adapter, the cipher-string evaluator and the DER walker are Arbace's own, under the
   Eclipse Public License 1.0, as are the test certificates `test/python/pyi/ssl/` (made on 2026-11-05 with
-  `openssl req`/`x509`).
+  `openssl req`/`x509`; `ssl/levels/` by queue 217 the same way).
 - `go/arbace/oi.ae` and `go/arbace/oi/` (oi, the interpreter of OCaml's Lambda; doc/ocaml/OCAML-SURVEY.md, "As
   built: O5 (write-ahead)"): the interpreter's core (values, the compiler of Lambda, application, exceptions,
   effects, the toplevel) is Arbace's own, under the Eclipse Public License 1.0; the externals are ports to Go
