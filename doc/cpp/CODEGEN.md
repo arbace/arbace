@@ -549,12 +549,14 @@ The 33 samples `test/cpp/codegen/tmpl-*.cpp` (each with a header comment saying 
 
 | check (2026-11-05, light) | result |
 |---|---|
-| `bin/cppi codegen-check` over `test/cpp/codegen` (38 + 33) | 71 of 71 pass; generate and lower about 60 s, gcc, clang and runs 7 s |
-| gcc 15.2.0's template run tests (`g++.dg/template`, `g++.old-deja/g++.pt`, `g++.dg/cpp0x`: the `dg-do run` files including no header beyond C's (`stdio`, `stdlib`, `string`, `stddef`, `assert` and their `c` forms) that clang accepts at `-std=c++23`, 288 files; read in place from the pinned tarball's extraction, not committed) | 147 of 288 pass all three levels (51 %): `g++.old-deja/g++.pt` 104 of 143, `g++.dg/template` 17 of 35, `g++.dg/cpp0x` 26 of 110; 63 at the first measure of this branch, 99 after the first round of fixes; generate and lower about 2.5 minutes, gcc, clang and runs 17 s |
+| `bin/cppi codegen-check` over `test/cpp/codegen` (38 + 33, before the merge with G2) | 71 of 71 pass; generate and lower about 60 s, gcc, clang and runs 7 s |
+| the same after the merge (G2's 82 with G1's, G3's 33) | 115 of 115 pass; generate and lower about 2 minutes, gcc, clang and runs 11 s |
+| gcc 15.2.0's template run tests (`g++.dg/template`, `g++.old-deja/g++.pt`, `g++.dg/cpp0x`: the `dg-do run` files including no header beyond C's (`stdio`, `stdlib`, `string`, `stddef`, `assert` and their `c` forms) that clang accepts at `-std=c++23`, 288 files; read in place from the pinned tarball's extraction, not committed) | 147 of 288 pass all three levels (51 %): `g++.old-deja/g++.pt` 104 of 143, `g++.dg/template` 17 of 35, `g++.dg/cpp0x` 26 of 110; 63 at the first measure of this branch, 99 after the first round of fixes; generate and lower about 2.5 minutes, gcc, clang and runs 17 s. After the merge with G2: **169 of 288 (58.7 %)**: `g++.old-deja/g++.pt` 112, `g++.dg/template` 20, `g++.dg/cpp0x` 37 (G2's branch alone: 21 of 288; no file passing on either branch fails merged) |
 | `bin/repr-cpp native-check samples` after repr/cpp's type reader change | 9 of 9 the same, 68 of 68 items |
 | the existing samples refused on templates at G1 (`auto.cpp`, `classes.cpp`, `p1-first.cpp`) | past their templates; refused next on `auto` return types, `try` (G2) and a concept |
 
-The corpus's 141 others, by what stops them (each file's first refusal or its verdict):
+The corpus's 141 others before the merge, by what stops them (each file's first refusal or its verdict; after the merge
+119 remain, G2's classes the most reduced):
 
 | class | files | whose |
 |---|---|---|
@@ -564,6 +566,12 @@ The corpus's 141 others, by what stops them (each file's first refusal or its ve
 | templates' remaining corners: G3.8's (pointer arguments of subobjects, explicit packs extended, a template template argument `T::template B`, a member template-id of three levels) and overload-resolution failures inside templates (initializer lists, deduction from `const T` arrays) | 20 | G3b-G3c |
 | wrong results: names clang folds away (`constexpr` objects and functions clang evaluates, a static local's constant initialization: 7), a user `operator new` or `C1` called natively (`new1`, `new11`, `virtual4`, `rv-life`: the native level), addresses printed (`t39`), `constexpr` odr-use (2), a function-try-block (`fntry1`, G2) | 16 | mostly G2's constant evaluation; none in the template machinery's names |
 | other (the reference failed, a declaration kind) | 2 | |
+
+After the merge the wrong results are 26, all but three on G2's branch alone too or newly reachable through G2's
+inheritance: `temp-extend1` (a temporary bound through a subobject, `B().i[0]`, destroyed early: G2's branch regressed
+G1 there), `constexpr-static4`, `mi1` (an empty base's offset among virtual bases: 16 where clang has 24), `virtual4`
+(an extern global declared before its definition, lowered twice); a construction vtable's name now shares its
+substitutions (`_ZTC12ECPrivateKeyI4EC2NE0_11ECPublicKeyIS0_E`, found by `mi1`).
 
 ### G3.8 What is not done (refused with a class)
 
