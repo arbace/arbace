@@ -1099,3 +1099,137 @@ fixed, a stub `cpp-runtime`, and `steps.edn` with GT9's fragment (its LLVM step 
 ## Decided (2026-11-05, the user: ORS22, ORS23)
 
 ORS22 (a): as built, the larger corpora live in the oracle tier, the UI suite's IR pack recorded at night, rust-native's native-check with its merge; ORS23 (a): the packs name rustc's identity only.
+
+## As built: OCaml (write-ahead, 2026-11-05)
+
+ORS12's fifth crop, on branch `oracle-records-ocaml` (from `oracle-records-rust`, with `ocaml-o8` merged: OCaml's REAP row, the gate steps, `bin/oi check --only-list`,
+`judges-test`, the essential subset `test/ocaml/essential-check.txt`). `ocaml-libs2` is a descendant of `ocaml-o8` (22 commits more: libraries, not steps), so it was not needed; the typer
+line (`ocaml-typer2`, `ocaml-t10`) is not merged. The merge's conflicts, resolved as both sides: `CLAUDE.md` (Scheme's paragraphs kept, OCaml's added beside each), `Makefile` (the oracle-records targets
+and the `reap` line, "C, Scheme, OCaml"), `bin/lib/gate-run.bash` (`gate_scheme_id` and `gate_ocaml_id` both, `hosts.edn` printing `:chez`, `:chibi`, then `:ocaml`; the `ancestors.txt` line of the
+branch kept), `test/gate/audited-test.bash` and `gate-tests-test.bash` (their fabricated `hosts.edn` with `:ocaml`), `test/gate/steps.edn` (o8's groups `:ocaml`, `:ocaml-run`, `:ocaml-aot`, its steps
+after the C steps, the `reap` step's inputs and summary with both rows), `test/reap/cells.edn`, `main.ae`, `matrix.edn` (Scheme's, Haskell's and Rust's rows kept, OCaml's cells appended; the `:ocaml` reader
+beside `:scheme` and `:rust-lower`). `bin/reap` after the merge: 31 of 32 cells checked (Rust AOT "no check yet"), problems only the Java eval and AOT rows' one-test drift (`pass 1847, recorded 1848`),
+which this branch did not touch. `test/gate/costs-test.bash` fails on o8's steps (they are in no `:crops` crop: GT9's `:budgets :new-crops` is what admits `:ocaml`, and it is not on this branch);
+the same on `ocaml-o8`. Light: the helper `tools/ocdump` built here (1 s), the pinned tarball copied from another worktree's `.tmp` (no network), every record made on this host's OCaml 5.5.0;
+the opam set's rows need the packages' tarballs (present here) and were recorded too. Read: GT9's fragment (`git show gt9-verbs:test/gate/crops/ocaml.edn`), `bin/oi`, `bin/lib/oi/*`,
+`bin/repr-ocaml`.
+
+### What the steps asked of ocamlc and ocdump, and what each became
+
+| Step | Live call | Class | Now |
+|---|---|---|---|
+| oi-essential (`bin/oi test`, `repl-check`, `check --only-list`) | `ocamlc -c` of the stdlib in dependency order and ocdump `--mode lambda --simplify` per unit (`bin/oi stdlib`); ocdump per run program (`oi_one`); `ocamlc -c` and ocdump `--mode types|lambda` per REPL phrase (`bin/lib/oi/phrase`) | C | packs `ocaml-lambda-stdlib` (73 members) and `ocaml-lambda-progs` (309), the REPL's phrases committed (`test/ocaml/records/repl/`, 72 files, 18 KB); `:ocaml` off |
+| oi-check, oi-aot, oi-suite-aot (the run corpus and the suite) | the same per program; the suite's units `ocamlc -c` in link order (their `.cmi` for the next) and ocdump per unit (`suite_dump`) | C | the packs above and `ocaml-lambda-suite` (98 programs, 434 members); `:ocaml` off. ocamlc's and ocamlopt's runs are `ref-ocaml55.edn` and `ref-suite.edn` (A) already |
+| ocaml-read-essential, ocaml-roundtrip (stdlib, samples), `--spec`, `spec-check` | ocdump's parse dump and `--mode tokens` of every original; the same of the spec's 218 examples; the print's parse dump (the tree level's compare); `ocamlc -c` of the original and of the print (the `.cmi` level) | B for the originals; D for the print | packs `ocaml-dumps-{samples,stdlib,spec}`; the text level (mode `:full` printed back, byte for byte) and the print run from them; `:ocaml` off. The print's redump and the `.cmi` level are the oracle tier's |
+| ocaml-dumps | `ocamlc -c` plus ocdump `--mode types|lambda` per corpus, each twice | B (a test of the helper itself) | the oracle tier's `ocaml-dumps-oracle`, unchanged |
+| ocaml-judges | the judges' synthetic cases (no toolchain), the floors, the key, the OI column; the expect action's cases (the expect tool built by `ocamlc -linkall`); `repr_levels_test` and the dumps' determinism (ocdump) | none; C and A; B | `bin/oi judges-test --records` (the first four, no toolchain); the rest `ocaml-judges-oracle` (`bin/oi judges-test`) |
+| oi-divergences | none | | unchanged |
+| ocaml-roundtrip (compiler-sources, compiler-backend, testsuite, whiml, opam) | as the stdlib's | B, D | no packs yet: the oracle tier's `ocaml-roundtrip-oracle` runs them live (the night's `record-dumps` brings them back, ORS24) |
+
+Not steps and not migrated: `bin/oi record-ref`, `suite record-ref` (ocamlc's and ocamlopt's runs, A: the records themselves), `bin/oi suite expect` (class A against `ref-expect.edn`, live), `bin/repr-ocaml corpus check`
+(already `bin/gate --pins`' in GT9), the typed and Lambda dumps of `dumps` (B, the dumper's own test), ocaml-native (not merged).
+
+### What the tooling is
+
+- **The identity `:ocaml`** in `test/oracle-records/oracle.bash` (`oracle_ocaml_id`): `gate_ocaml_id`'s recipe (O8; GT9's `:host-ids :ocaml` is the same): ocamlc's and ocamlopt's version lines, their executables' SHA-256
+  through the links, compiler-libs' `ocamlcommon` (`.cmxa`, `.a`, `.cma`) and the stdlib's archives; here `:ocaml c7205b33cdf0c5f6`, OCaml 5.5.0 (Alpine). It equals `gate_ocaml_id`'s output.
+- **`bin/lib/oi/records.bash`** (in `bin/lib/oi/`, out of `gate_key`): `oir_member PIN ID KEY` (UNRECORDED, STALE, REFUSED, absent pack), `lambda_prog`, `oir_stdlib_get`, `oir_pack_make` (a partial recording keeps the old pack's
+  other members). `OI_LIVE=1` runs ocamlc and ocdump as before; without it `bin/oi` needs neither: `need_tree` fetches the tarball only, `stdlib_key` is the pack's identity.
+- **`bin/oi stdlib --record | --verify`**: `ocaml-lambda-stdlib` (members `UNIT.ae`, `order.txt`, `Testing.ae`; one key: the helper's source, `OCAML_VERSION`, the tarball's pin); `cmd_stdlib` unpacks it into `.tmp/oi/lib` and `testlib`.
+- **`bin/oi record-lambda [--only-list FILE | --only RE]`, `verify-lambda [--sample N]`**: `ocaml-lambda-progs`, a member `ID.ae` for every run program, keyed by the program's source, its flags and library and the helper
+  (the first recording keyed 26 programs wrong: `IFS=$'\t' read` collapses empty fields, the flags and the library shifted; found by `judges_test`'s `subst1` case as STALE and fixed with the `\037` separator the file already used elsewhere;
+  all 309 made again). `check`, `check --aot` and `suite check` unpack the pack once before their parallel children.
+- **`bin/oi suite record-lambda`**: `ocaml-lambda-suite`, members `ID/units.list`, `ID/U.ae` or `ID/error`, a key per program (the units' sources); `suite_dump` reads it unless `OI_LIVE=1`. No `:verify` for this kind
+  (the record command on a scratch store is the verify; listed as such in `kinds.edn`).
+- **`bin/oi repl-check --record | --verify-records`**: `bin/lib/oi/phrase` answers from `test/ocaml/records/repl/KEY.{status,ae,typed}` (KEY: the helper, the opened units, the phrase), manifest `repl.tsv`; UNRECORDED or REFUSED print as the
+  compiler's error and the session differs from `session.ref`, so the check fails.
+- **`bin/repr-ocaml record-dumps [CORPUS...]`, `verify-dumps [--sample N]`**: packs `ocaml-dumps-CORPUS` (members `parse/REL.ae`, `tokens/REL.ae`; the spec's `parse/` and `check/ID.dump`), one key a file; `dump_one`, `layout_one`
+  and `spec-check` read them unless `REPR_OCAML_LIVE=1`; an unusable record is named in a file and fails the step (never an `(ocaml/error` a known reject could hide behind). `roundtrip --oracle` is the live run, including the print's
+  redump and the `.cmi` level; in the records mode those two are reported as the oracle tier's. The verifies run a crossed pair (the first live output against the last record: must differ).
+- **`bin/oi judges-test --records`**: `judges_test` with `OI_JUDGES_NO_LIVE=1` (the expect action's 7 cases left out and counted as run), `floors_test`, `oi_key_test` (its live-key case under `OI_LIVE=1`; its scratch root takes
+  `test/oracle-records/` too), `aot_oi_column_test`; without `--records` every test, the helper's and the expect tool's too.
+- Kinds in `test/oracle-records/kinds.edn`: `ocaml lambda-stdlib` (C), `lambda-progs` (C), `lambda-suite` (C), `repl` (C, committed), `dumps` (B), `roundtrip` (D, nothing to record). Makefile targets `oi-*-record`, `oi-*-verify`,
+  `repr-ocaml-record-dumps`, `repr-ocaml-verify-dumps`, `repr-ocaml-oracle`, `ocaml-judges-records`.
+
+### Sizes (ORS11)
+
+| Pack | Members | Raw | xz | Ratio |
+|---|---|---|---|---|
+| `ocaml-lambda-stdlib` | 73 | 5.56 MB | 242,796 | 23x |
+| `ocaml-lambda-progs` | 309 | 13.1 MB | 403,140 | 33x |
+| `ocaml-lambda-suite` | 434 | 23.6 MB | 359,028 | 66x |
+| `ocaml-dumps-stdlib` | 300 | 8.47 MB | 506,864 | 17x |
+| `ocaml-dumps-samples` | 16 | 66 KB | 8,996 | 7x |
+| `ocaml-dumps-spec` | 436 | 66 KB | 7,880 | 8x |
+
+The packs total 1.5 MB, far inside ORS11's 100 MB a crop. The committed side: the manifests (265 KB for six packs) and the REPL's record (72 files, 18.5 KB raw), under 0.4 MB, inside 3 MB. The survey's estimates were high
+(the run corpus has 309 programs, not 2,400; the stdlib's Lambda 5.5 MB as estimated). The other corpora's dumps (compiler-sources, compiler-backend, testsuite, whiml, opam: the survey's 76 MB of parse and token dumps in all)
+by the stdlib's ratio would be about 5 MB.
+
+### The plan (scratch overlay)
+
+`.tmp/ov2/` here: this branch's tree (`git archive`), `before` its `steps.edn` as merged (ocaml-o8's steps, with the two `:rotate` maps taken out: their subsets name `run/ID` where the record's ids are bare, a mismatch of o8 with this tree's
+planner, GT9's `:id-re` answers it), `after` with o8's OCaml steps replaced by `test/gate/crops/ocaml.edn`'s steps and group (the fragment's own `controls` and `crops` sections are GT9's planner's); `bin/gate --full --oracle --plan`
+on each, stage 0 linked from the main checkout, the hosts each step names read from the plan's `plan/STEP.inputs`:
+
+| Step | hosts before (o8) | hosts after |
+|---|---|---|
+| oi-essential | `stage0 go ocaml` | `stage0 go` |
+| oi-divergences | `stage0` | `stage0` |
+| ocaml-read-essential | `stage0 ocaml` | `stage0` |
+| ocaml-roundtrip | 7 parts, `stage0 ocaml` | `.stdlib`, `.samples`: `stage0` |
+| oi-check, oi-aot, oi-suite-aot | `stage0 go ocaml` | `stage0 go` |
+| ocaml-judges | `stage0 go ocaml` | `stage0 go` |
+| ocaml-dumps | `stage0 ocaml` | gone from the gate: `ocaml-dumps-oracle` |
+| (new, `:phase :oracle`) | | `ocaml-roundtrip-oracle` (parts samples, stdlib; the compiler, testsuite, whiml and opam parts `:clean-only`), `ocaml-dumps-oracle`, `ocaml-judges-oracle` (`stage0 go ocaml`), `ocaml-records-verify` (`stage0 ocaml`) |
+
+- No OCaml step outside the oracle tier names `:ocaml` after the fragment (the `host` lines of every `oi-*`, `ocaml-*` input).
+- With a stub `ocamlc` and `ocamlopt` first on `PATH` (printing 9.99.9) every key of the gate's OCaml steps is unchanged (`oi-essential` `a41420f20a55`, `ocaml-read-essential` `56b2d64db78d`, `oi-check.run` `f00fa2cd7663`,
+  `oi-aot.run`, `oi-suite-aot.suite`, `ocaml-roundtrip.stdlib`, `ocaml-judges`, `oi-divergences`), the four oracle steps' keys change (`ocaml-records-verify` `26aabc633d2c` to `f37b2f001f64`). The `before` side was not re-run under the stub.
+- The negative controls named by GT9's fragment (`test/ocaml/controls.txt`, `roundtrip-controls.txt`): the first is here; `roundtrip-controls.txt` is `crop-controls-ocaml`'s, which merges with the fragment.
+
+### Checked (light, in the worktree, main's stage 0)
+
+- With `ocamlc` and `ocamlopt` stubs (exit 99) first on `PATH` and `.tmp/ocdump` moved away (so no ocdump either): `bin/oi check --only-list test/ocaml/essential-check.txt` (58 programs: 58 pass, the control differs), `bin/oi repl-check`
+  (24 phrases equal), `bin/oi check --aot --only-list` of four programs, `bin/oi suite check --only-list` of two suite programs, and the repr/ocaml step's commands (`roundtrip --text samples stdlib`, `--spec`, `spec-check`, `embed-check`: samples
+  8 and stdlib 148 of 150 text equal, the 2 the parse rejects as classed, 218 of 218 spec examples equal), 1 min 8 s.
+- `bin/oi judges-test --records` under the same stubs: see Left.
+- `bin/oi stdlib --verify` (the stdlib built afresh by ocamlc: 72 entries equal), `bin/oi verify-lambda --sample 5` and `bin/repr-ocaml verify-dumps --sample 4 samples` (equal, crossed pairs differ), `bin/oi repl-check --verify-records`
+  (72 equal), `bin/oracle-records verify ocaml lambda-stdlib lambda-progs repl dumps --sample 6` (all equal, `:ocaml c7205b33cdf0c5f6`), `bin/oracle-records pins` (the six packs found with their members, the tampered-pack control refused),
+  `roundtrip --oracle --cmi samples` (the live levels still pass: 8 equal, 1 `.cmi` equal).
+- A source of `test/ocaml/samples/` changed by one comment: `roundtrip samples` fails (`STALE parse/ops.ml.ae`). The whole run corpus (309 programs) and the whole suite corpus (98 programs) were recorded here; their whole checks were not run (heavy).
+- Not run: any gate (the plans only), any build of the executable, `bin/oi check` past samples, the whole `suite check`, the opam corpora's dumps (no pack).
+
+### The night's commands
+
+1. `bin/oi stdlib --verify`, `bin/oi verify-lambda`, `bin/oi suite record-lambda` again (the suite has no verify), `bin/repr-ocaml verify-dumps` on a host whose OCaml moved (reported, not failed).
+2. The other corpora's dumps: `bin/repr-ocaml record-dumps compiler-sources compiler-backend testsuite whiml opam-astring ...` (`roundtrip ... all` names the opam corpora; about 5 MB of packs by the ratios); then move their
+   `ocaml-roundtrip` parts from the oracle tier to the gate in the fragment (pins named, as stdlib's).
+3. `bin/oracle-records verify ocaml --sample 8` and, once, `bin/oracle-records verify ocaml lambda-stdlib lambda-progs repl dumps` whole; a commit of its own naming `:ocaml c7205b33cdf0c5f6` for the records and pins (ORS5 (a));
+   `bin/oracle-records mirror --push` once the user agrees (six packs, 1.5 MB).
+4. After the merge with gt9-verbs: `bin/gate --full --plan` shows the steps without `:ocaml`, `bin/gate --oracle` the four; run `bin/gate --audit oi-essential ocaml-read-essential oi-check` to see that no step reads ocamlc.
+
+### Left
+
+- The oi-native typer line (`ocaml-typer2` .. `ocaml-t10`) is not merged: when `bin/oi` types natively the stdlib and the programs, the Lambda packs become checks of it (class C to N), not necessities; recorded here because the Lambda
+  is what the gate still reads (the typer yields typed trees, Lambda comes from ocdump's `Translcore`/`Simplif`).
+- The tree level of the round trip (the print read by ocdump) and the `.cmi` level are not in the gate any more: the survey's class D, the oracle tier's. The native parser (ocaml-native) is the substitute that gives the tree level back (ORS25).
+- `bin/oi suite expect` (class A against `ref-expect.edn`, the expect tool built by `ocamlc -linkall`) and `record-ref` need ocamlc: the oracle tier's `ocaml-judges-oracle`; `suite expect` is not a record of its own.
+- The stdlib's and the REPL's verifies run no crossed pair (one pack, one session); the programs', the suite's by record and the dumps' do.
+- `GT9`'s `:rotate` (subsets of the AOT levels and the round trip) is not in the fragment: the records make a whole check cost what the run costs, the rotation's budget is the planner's (gt9v-ocaml's `--only-list` verbs for
+  `repr-ocaml` are not here).
+- Records are keyed by the helper's source and the corpora's pins, not by Arbace's code: a change to `tools/ocdump/ocdump.ml` stales every Lambda and dump record (STALE until the night's re-record, by hand).
+
+## Proposed (2026-11-05, OCaml): ORS24-ORS25
+
+- **ORS24 The larger corpora's dumps.** compiler-sources, compiler-backend, testsuite, whiml and opam have no packs here; the compiler's two are not essential and their round trips are the oracle tier's today.
+  - Options: (a) as built: record them at the night (`record-dumps`, about 5 MB), then the gate's `ocaml-roundtrip` takes all seven parts from the packs, the print's tree level and the `.cmi` level staying the oracle tier's; (b) leave them live in
+    the oracle tier for good; (c) record the dumps and rotate (GT8.4-style) the parts.
+  - Costs: (a) a night's run (minutes on a host with ocamlc), 5 MB of packs, the fragment's parts edited; (b) the compiler's text level checked only at night; (c) a subset list to keep.
+  - *Recommended: (a)*: the packs are small (the ratios of the stdlib's), and the text level is the check that costs the gate nothing but CPU.
+- **ORS25 The tree level without ocdump.** The print's parse by ocdump (class D) was the round trip's strongest per-merge check; it is now once a night. ocaml-native (`arbace.repr.ocaml.native`, ports of OCaml's lexer and parser) would read the print
+  natively (survey class N, ORS8 (a)).
+  - Options: (a) as built, the oracle tier only, then merge ocaml-native and let `ocaml-roundtrip` compare the print's native parse with the original's recorded dump; (b) keep `:ocaml` on `ocaml-read-essential` for the redump until then;
+    (c) a second pack of the print's dumps (a record of Arbace's own output: stale at every printer change).
+  - Costs: (a) the tree level not per merge for a while; (b) the essential step on a toolchain, the reason of this migration; (c) a record of a product, not an oracle, re-recorded often.
+  - *Recommended: (a)*, as ORS20 for Haskell: the native reader is the substitute that makes the level free again.
