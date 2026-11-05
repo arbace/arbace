@@ -109,19 +109,32 @@
              "]\n"))
   (println (str "wrote " file " (" (count rows) " rows)")))
 
-(defn- cmd-roundtrip [args]
-  (let [record (some #{"--record"} args)
+(defn- cmd-roundtrip
+  "roundtrip [--record] [--only-list FILE] DIR. GT9: --only-list names the files to run, one key a line as test/scheme/roundtrip-results.edn
+  writes them (CORPUS/PATH, probe/ID); no other file is read, and a failing file's key is printed as `FAILED KEY` for the gate's rotation."
+  [args0]
+  (let [oi (.indexOf ^java.util.List (vec args0) "--only-list")
+        only (when (>= oi 0) (nth (vec args0) (inc oi)))
+        args (if only (concat (take oi args0) (drop (+ oi 2) args0)) args0)
+        record (some #{"--record"} args)
+        _ (when (and only record) (println "roundtrip: --only-list is a partial run: no --record") (System/exit 2))
         dir (first (remove #{"--record"} args))
         files (concat (mapcat (fn [f] (str/split (slurp (str dir "/" f)) #"\n"))
                               (sort (filter #(.startsWith ^String % "files-") (.list (java.io.File. ^String dir)))))
                       (sort (map #(str dir "/probes/" %) (.list (java.io.File. (str dir "/probes"))))))
         files (remove empty? files)
+        key-of (when (or record only)
+                 (let [m (into {} (for [c (remove #(false? (:check %)) (:corpora (read-string (slurp (str (root) "/test/scheme/corpora.edn")))))
+                                        [k p] (ck/corpus-files (root) c)] [p k]))
+                       pd (str dir "/probes/")]
+                   (fn [^String p] (or (m p) (when (.startsWith p pd) (str "probe/" (subs p (count pd) (- (count p) 3)))) p))))
+        files (if only
+                (let [want (set (remove empty? (str/split-lines (slurp only))))]
+                  (when (empty? want) (println "roundtrip: --only-list names no file") (System/exit 2))
+                  (filter #(contains? want (key-of %)) files))
+                files)
         t0 (System/currentTimeMillis)
-        bad (atom 0) bytes (atom 0) rows (atom [])
-        key-of (when record (let [m (into {} (for [c (remove #(false? (:check %)) (:corpora (read-string (slurp (str (root) "/test/scheme/corpora.edn")))))
-                                                   [k p] (ck/corpus-files (root) c)] [p k]))
-                                  pd (str dir "/probes/")]
-                              (fn [^String p] (or (m p) (when (.startsWith p pd) (str "probe/" (subs p (count pd) (- (count p) 3)))) p))))]
+        bad (atom 0) bytes (atom 0) rows (atom [])]
     (doseq [f files]
       (let [text (slurp f)
             t (System/currentTimeMillis)
@@ -129,7 +142,7 @@
             ms (- (System/currentTimeMillis) t)]
         (swap! bytes + (count (.getBytes ^String text "UTF-8")))
         (when (> ms 5000) (println (str "slow " f " " ms " ms")))
-        (when r (swap! bad inc) (println "FAIL" f (pr-str r)))
+        (when r (swap! bad inc) (println "FAIL" f (pr-str r)) (when only (println (str "FAILED " (key-of f)))))
         (when record (swap! rows conj [(key-of f) (if r :fail :pass) (if r (pr-str r) "")]))))
     (when record
       (write-results (str (root) "/test/scheme/roundtrip-results.edn")
