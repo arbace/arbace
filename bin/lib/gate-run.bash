@@ -93,6 +93,18 @@ gate_scheme_id() {  # gate_scheme_id CMD VERSION-FLAG FILE...: a Scheme referenc
     sha256sum < "$(readlink -f "$x")" | cut -c1-64
     for f in "$@"; do if [ -f "$f" ]; then sha256sum < "$f" | cut -c1-64; else echo "missing $f"; fi; done; } | sha256sum | cut -c1-64
 }
+gate_ocaml_id() {  # the :ocaml host's identity (O8): OCaml's reference and oracle, ocamlc's and ocamlopt's version lines, the digests of
+  # their executables resolved through their links, of compiler-libs' libraries (tools/ocdump's) and of the installed stdlib's archives
+  # (what the references' and the helper's compilations link); none without ocamlc
+  local c o w f
+  c=$(command -v ocamlc) && o=$(command -v ocamlopt) || { echo none; return; }
+  w=$(ocamlc -where 2>"$TMPDIR/gate-ocaml.err")
+  { ocamlc -version 2>"$TMPDIR/gate-ocaml.err"; ocamlopt -version 2>"$TMPDIR/gate-ocaml.err"
+    sha256sum < "$(readlink -f "$c")" | cut -c1-64; sha256sum < "$(readlink -f "$o")" | cut -c1-64
+    for f in "$w/compiler-libs/ocamlcommon.cmxa" "$w/compiler-libs/ocamlcommon.a" "$w/compiler-libs/ocamlcommon.cma" \
+             "$w/stdlib.cma" "$w/stdlib.cmxa" "$w/stdlib.a"; do
+      if [ -f "$f" ]; then sha256sum < "$f" | cut -c1-64; else echo "missing $f"; fi; done; } | sha256sum | cut -c1-64
+}
 plan_inputs() {  # plan_inputs DIR: DIR/files.sha256, DIR/hosts.edn and DIR/ancestors.txt
   local d=$1 jdk rel
   mkdir -p "$d"
@@ -150,7 +162,10 @@ javac none
     # read check (Chez 10.3.0, apk chez-scheme-10.3.0-r2: its boot files) and si's chibi-tests (Chibi 0.12.0); the other Scheme
     # steps judge against their recorded runs
     printf ' :chez "%s"\n' "$(gate_scheme_id "${CHEZ:-chez}" --version /usr/lib/csv10.3.0/ta6le/petite.boot /usr/lib/csv10.3.0/ta6le/scheme.boot /usr/lib/csv10.3.0/ta6le/chez.boot)"
-    printf ' :chibi "%s"}\n' "$(gate_scheme_id "${CHIBI:-chibi-scheme}" -V)"; } > "$d/hosts.edn"
+    printf ' :chibi "%s"\n' "$(gate_scheme_id "${CHIBI:-chibi-scheme}" -V)"
+    # :ocaml (O8; doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)"): the host's OCaml 5.5.0, repr/ocaml's oracle (tools/ocdump on
+    # compiler-libs) and oi's references (ocamlc's and ocamlopt's runs); the steps judge against the recorded runs, the helper live
+    printf ' :ocaml "%s"}\n' "$(gate_ocaml_id)"; } > "$d/hosts.edn"
 }
 run_plan() {  # run_plan DIR [--rerun]: the plan into DIR (plan.tsv, plan/), printed; plan_rot (GT8.4): --night N or --rotation subset
   local d=$1; shift

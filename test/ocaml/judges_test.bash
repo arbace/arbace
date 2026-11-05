@@ -182,4 +182,4 @@ out=$(cd "$root" && OI_PINS_RUNS=$R OI_PINS_FAKE_KEY=fake1 OI_PINS_ATTESTED=$W/p
 expect "pins: a header key that is not the current run's is noted" 0 'note: the attested rows of the oi program run come from key bbbbbbbbbbbb, the current key is fake1' "$out" $st
 out=$(cd "$root" && OI_PINS_RUNS=$W/no-runs OI_PINS_FAKE_KEY=fake1 OI_PINS_ATTESTED=$W/pins.oldkey bin/oi pins 2>&1); st=$?
 expect "pins: with no run present nothing is compared" 0 '^oi: pins: 39 pins, each attested' "$out" $st
-echo "$out" | grep -q 'note:' && { echo "FAIL pins: a note with no run present"; bad=1; }
+if echo "$out" | grep -q 'note:'; then echo "FAIL pins: a note with no run present"; bad=1; fi

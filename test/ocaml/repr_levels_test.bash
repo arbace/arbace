@@ -17,10 +17,13 @@ printf 'let x = 1\n' > "$W/x.ml"
 
 # floors: the function of bin/repr-ocaml
 FLOORS=$W/floors.tsv; eval "$(sed -n '/^floor() {/,/^}/p' "$root/bin/repr-ocaml")"
+# with the default corpora's lists it reads (re-review 042's finding 3)
+eval "$(grep -E '^DEFAULT_(DUMPS|RT)_CORPORA=' "$root/bin/repr-ocaml")"
 RECORD=1 floor cmi-compiled demo 10 > /dev/null
 out=$(floor cmi-compiled demo 10); expect "floor: the recorded count passes" 0 '^$' "$out" $?
 out=$(floor cmi-compiled demo 9); expect "floor: a drop fails" 1 'below the recorded 10' "$out" $?
-out=$(floor cmi-compiled other 9); expect "floor: no count recorded fails" 1 'no count recorded' "$out" $?
+# a corpus of the default invocations with no row (re-review 030's finding 2: another corpus is not checked, floors_test's case)
+out=$(floor cmi-compiled stdlib 9); expect "floor: no count recorded fails" 1 'no count recorded' "$out" $?
 
 # compare --record: a file the printer did not print is not recorded
 echo '{}' > "$W/known.edn"
