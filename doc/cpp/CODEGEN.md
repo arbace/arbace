@@ -1,7 +1,7 @@
 # C++ without the host's clang: Sema and a code generator (cpp-codegen)
 
-Status: survey, plan and a first slice, on the branch `cpp-codegen` from `cpp-sema` (2026-11-05), for the user's
-acceptance. Words: **the native parser** is CX11's (`arbace.repr.cpp.parse`, [NATIVE.md](NATIVE.md)), whose tree is
+Status: survey, plan, the first slice (G1, branch `cpp-codegen`) and the second (G2, branch `cpp-codegen2`, §4a,
+2026-11-05), for the user's acceptance. Words: **the native parser** is CX11's (`arbace.repr.cpp.parse`, [NATIVE.md](NATIVE.md)), whose tree is
 clang's AST as data; **clang's route** is cppi as built (CX6-CX7, [LLVM.md](LLVM.md)): `clang++ -O0 -S -emit-llvm`, the IR
 read as LLVM forms by repr/llvm, lowered to C forms by `arbace.cpp.lower`, compiled by gcc `-O0` with the lowered runtime
 and run; **our route** replaces its first step: the native parser, a semantic analysis of our own (`arbace.cpp.sema`)
@@ -9,7 +9,7 @@ and a code generator (`arbace.cpp.codegen`) write the LLVM forms, and the rest o
 route on the same program: the same status and standard output (§5).
 
 Contents: 1 What clang does that we need · 2 The decisions the design rests on · 3 Sema as built · 4 CodeGen as built ·
-5 The check and the numbers · 6 The staged plan · 7 Proposed · 8 Sources.
+4a G2 as built · 5 The check and the numbers · 6 The staged plan · 7 Proposed · 8 Sources.
 
 ## 1. What clang's Sema and CodeGen do that we need
 
@@ -74,10 +74,8 @@ libstdcxx`, the recorded every-15th list, 234 files): 229 include a C++ library 
    gives it (the check requires every defined name to be one clang's IR defines, §5), so that our objects link with the
    lowered runtime and later with clang's objects. What differs from clang's IR is free: value names, block order,
    attributes (none are written: the lowering then tests the pending flag after every call, correct and slower).
-6. **The calling convention is clang's for scalars and references; a class passes by address** (the caller's copy for
-   an argument, `sret` for a result) whatever its size. Inside one program that is consistent; against code compiled by
-   clang a trivially copyable class of up to 16 bytes passes in registers (SysV's classes). The slice calls nothing of
-   that kind (the C library takes scalars and pointers). P3.
+6. **The calling convention is clang's**: scalars and references as clang passes them; since G2 (P3 (b)) a class by
+   the SysV psABI's classification (§4a), so that our functions and clang's call each other.
 
 ## 3. Sema as built (`arbace.cpp.sema`, `arbace.cpp.abi`)
 
@@ -142,10 +140,86 @@ libstdcxx`, the recorded every-15th list, 234 files): 229 include a C++ library 
   with `__cxa_atexit`; static locals constant or behind their guard (`__cxa_guard_acquire`/`release`, the acquire load of
   the guard byte), named `_ZZ...E` with their discriminators.
 
-Not in the slice (refused with a class, `{:codegen/refused CLASS}`, written to `gen.refused`): templates, exceptions
+Not in G1 (refused with a class, `{:codegen/refused CLASS}`, written to `gen.refused`): templates, exceptions
 (`throw`, `try`), lambdas, `<iostream>` and every C++ library header, bit-fields, unions, multiple and virtual
 inheritance, conversion functions, member pointers, `long double` constants, a class through `...`, `goto` across
-destructors, a `while` condition's declaration.
+destructors, a `while` condition's declaration. G2 (§4a) took on all of these but templates, the C++ library headers, a
+class through `...`, `goto` across destructors and a `while` condition's declaration.
+
+## 4a. G2 as built (branch `cpp-codegen2`)
+
+Everything below is checked by `bin/cppi codegen-check` (§5) against clang's route; nothing of clang or libstdc++ is
+ported (§8): the rules are the standard's, the Itanium ABI's and the SysV psABI's, clang's functions the models whose
+names are kept, clang's IR the oracle.
+
+- **Exceptions** (`CGException.cpp`, `CGCleanup.cpp` as models). The cleanup stack of §4 also holds `{:try handlers}`,
+  `{:end-catch}`, `{:eh-only}` (a base or member a constructor has built: destroyed only on the unwind path),
+  `{:delete}` (new's storage while its initializer runs) and `{:terminate}` (the bottom of a noexcept function or a
+  destructor). A call that may unwind is an `invoke` when the stack holds a cleanup or a handler, else a plain `call`
+  (the lowering's pending flag returns it, LLVM.md §8); the landing pad of a stack state is written once, out of line:
+  `landingpad` with the enclosing handlers' type_infos innermost first up to a catch-all and `cleanup` when a cleanup
+  runs, the exception and selector stored, the cleanups run innermost first, each try's handlers dispatched by
+  `llvm.eh.typeid.for.p0`, `resume` past the outermost. A handler begins with `__cxa_begin_catch` and binds its variable
+  (a reference to the adjusted object, a pointer's value, a copy), runs under `{:end-catch}`. `throw` allocates with
+  `__cxa_allocate_exception`, constructs the object (copy-initialization), calls `__cxa_throw` with the type_info and the
+  complete destructor; `throw;` calls `__cxa_rethrow`. A noexcept function's or a destructor's calls unwind into a pad
+  that calls `__clang_call_terminate` (written as clang writes it). type_infos of fundamental types and pointers to them
+  are the runtime's; of classes, pointers to classes and enumerations written here. P4 (b): `nounwind` on noexcept
+  functions, destructors, the C library functions clang knows as nothrow builtins (`memcpy`, `strcmp`, ...) and the
+  runtime's nothrow entry points, at their declarations, definitions and calls.
+- **Lambdas** ([expr.prim.lambda]): a local closure class, a field per capture in clang's order (explicit, init-captures,
+  then implicit at first use), by value (copy-initialized) or by reference, `this`, `[=]`, `[&]`, `mutable`, return
+  types deduced from the first `return`; a captureless lambda's conversion to a function pointer and its static
+  `__invoke`; the names clang gives: `$_N` numbered per enclosing function in the order the code generator first names
+  them (clang numbers them so), `Ul<params>E<n>_` in an inline function's or a closure's body. Local entities are
+  mangled as local names (`Z<encoding>E`, a constructor's under its C1). Generic lambdas are refused (G3).
+- **Bit-fields and unions**: the SysV layout (a bit-field never crosses its type's alignment, zero-width and unnamed
+  ones), loads and stores of the storage unit with masks and shifts (signed extraction by shifts), bit-fields in
+  aggregates, constructors and copies; unions at offset 0, their first member aggregate-initialized; anonymous unions
+  and structs in classes and blocks (their members named in the enclosing scope), mem-initializers of their members,
+  unnamed classes and enumerations as members' types.
+- **Conversion functions** ([class.conv.fct]): user-defined conversions to non-class types in initialization, in
+  arguments (rank user-defined), in contextual conversions to bool (explicit ones too), in built-in operators,
+  subscripts, switches and compound assignments, by casts; a base's inherited. C++20's rewritten `!=` (as `!(a == b)`).
+- **Multiple inheritance**: vtable groups (the primary vtable, a secondary one per dynamic non-virtual base that is not
+  primary), this-adjusting thunks (`_ZThn16_...`, D1 and D0 thunks), every vptr stored, conversions with offsets (null
+  kept null), member lookup through several bases with dominance.
+- **Virtual inheritance** (Itanium §2.4-§2.6; clang's `RecordLayoutBuilder`, `ItaniumVTableBuilder`, `VTTBuilder`,
+  `CGClass.cpp` as models): the layout with the non-virtual size, virtual bases after the non-virtual part in
+  inheritance graph order, nearly empty virtual primary bases, indirect primary bases shared; vtables with vcall and
+  vbase offsets, virtual thunks (`_ZTv0_n24_...`), the slots of a virtual primary base a layout does not share left
+  unused (clang's IsOverriderUsed), construction vtable groups (`_ZTC1D16_1C`) and VTTs (`_ZTT1D`, §2.6.2's order);
+  complete-object (C1, D1) and base-object (C2, D2, taking the VTT) constructors and destructors written apart, the
+  virtual bases initialized by the complete object's constructor in clang's order and destroyed by its destructor in
+  reverse, the vptrs of a base-object constructor or destructor set from the VTT (a virtual base's address from the
+  vtable's vbase offset); an abstract class's complete destructor traps, as clang's; the type_info flags for virtual and
+  repeated bases.
+- **Pointers to members** (Itanium §2.3): data members as offsets (null -1), member functions as {ptr, adj} (a virtual
+  one's ptr 1 + its vtable offset), `.*` and `->*`, calls through them (the virtual branch through the vtable), null,
+  comparisons, conversions from a base's to a derived class's, the `M` mangling.
+- **RTTI**: `typeid` of a polymorphic glvalue (the vtable's type_info), of a type, of another expression; `std::type_info`
+  declared by a prelude of our own as the ABI lays it out and compares it (§2.9.4; `name`, `==`, `before`), in place of
+  `<typeinfo>`'s class whose bodies the native parser skims; `dynamic_cast` down, across and to `void*` (by the offset to
+  top) through `__dynamic_cast` with clang's hints, a failing reference cast by `__cxa_bad_cast`. `St` in the mangling.
+- **SysV x86-64 classification** (P3 (b); the psABI §3.2.3 in the structure of clang's `X86_64ABIInfo::classify`, its
+  Lo/Hi eightbytes, merge and post-merge): a trivially copyable class of up to 16 bytes in one or two eightbytes
+  (INTEGER as i8-i64 by its data's extent, SSE as float or double; clang's `<2 x float>` written as double and its i24 as
+  i32, the same registers), as separate arguments and as a return value of one type or a struct of two; an empty class
+  not passed; a MEMORY class `byval` (as is one for which the six integer or eight SSE registers no longer suffice); a
+  non-trivial class by the address of the caller's copy, its result by `sret`. Checked by hand against clang-compiled
+  callers (`sysvabi.cpp`'s functions compiled by our route, its `main` by clang, linked: the same output).
+- **Constant evaluation** (`ExprConstant.cpp` as the model): constexpr functions with parameters, locals, conditions,
+  loops and assignments evaluated where clang folds them -- globals' initializers (constant initialization), constexpr
+  and const integral locals, enumerators, case labels; called at run time elsewhere. Globals of classes whose implicit
+  default constructor only stores constants are constant objects with their vptrs (clang's), a destructor registered
+  all the same; destructors with trivial bodies leave the vptrs alone (clang's CanSkipVTablePointerInitialization).
+- **`long double`**: constants exact to the bit from the literal's decimal (LLVM 23's `f0x` spelling), x87 arithmetic.
+  The lowering (clang's route too) now takes clang's decimal x86_fp80 constants as long double literals: before, a
+  constant without a double (`1e-4000L`) became 0 or inf through a double (`arbace.cpp.lower/fp-lit`).
+- Smaller: block-scope function declarations; `std::` names only the headers declare (`std::printf`); the headers' C
+  variables (`stdout`) and opaque structs (`FILE`); the libc builtins (`__builtin_memcpy`, ...); attributes in classes;
+  `auto` locals deduced; internal functions written only when used, as clang defers them; deleting destructors written
+  when a vtable refers to them.
 
 ## 5. The check and the numbers
 
@@ -163,12 +237,20 @@ DIR]` takes each sample of `test/cpp/codegen/` by both routes and judges (arbace
 The runtime is the lowered one `bin/cppi runtime-build` makes (CX7); the check does not rebuild it and does not require
 it at the checkout's key, since both routes link the same archives.
 
-The samples (38; `test/cpp/codegen/*.cpp`, each with a header comment saying what it exercises): arithmetic, control
-flow, overloads, pointers, references, aggregates, methods, constructors, destructors, inheritance, virtual functions,
-new/delete, namespaces, operators, enumerations, globals, strings, a linked list, a stack (rule of three), shapes,
-sorting, bits, a matrix class, a bank, recursion, conversions, temporaries, static members, the exit status, a ring
-buffer, shadowing, characters, virtual calls during construction and destruction, the Itanium layout, arrays of
-objects, const overloads with a nested class, default arguments, static locals.
+The samples (82; `test/cpp/codegen/*.cpp`, each with a header comment saying what it exercises). G1's 38: arithmetic,
+control flow, overloads, pointers, references, aggregates, methods, constructors, destructors, inheritance, virtual
+functions, new/delete, namespaces, operators, enumerations, globals, strings, a linked list, a stack (rule of three),
+shapes, sorting, bits, a matrix class, a bank, recursion, conversions, temporaries, static members, the exit status, a
+ring buffer, shadowing, characters, virtual calls during construction and destruction, the Itanium layout, arrays of
+objects, const overloads with a nested class, default arguments, static locals. G2's 44: exceptions (`eh-basic`,
+`eh-cleanup`, `eh-rethrow`, `eh-hierarchy`, `eh-ctor`, `eh-noexcept`, `eh-uncaught`, `eh-temps`, `eh-stack`,
+`eh-arrays`, `eh-nested-try`, `eh-dtor-order`, `eh-lambda`, `eh-terminate`, `eh-rethrow-types`), lambdas (`lambdas`,
+`lambda-capture`, `lambda-stateful`, `lambda-members`), bit-fields and unions (`bitfields2`, `bits-flags`, `unions`,
+`union-variant`), conversion functions (`convfns`, `convfns-ops`), multiple inheritance (`multiple`, `diamondless`,
+`mi-casts`, `covariant`), virtual inheritance (`virtual-bases`, `virtual-interface`, `virtual-deep`,
+`virtual-construct`, `virtual-eh`), pointers to members (`memberptrs`, `memberptr-dispatch`), RTTI (`rtti`,
+`rtti-cross`), the SysV classification (`sysvabi`, `sysv-mixed`), constant evaluation (`constexpr`), `long double`
+(`longdouble`), and two programs over all of it (`inventory`, `mixed-features`).
 
 | check (2026-11-05, light, 4 jobs) | result |
 |---|---|
@@ -176,8 +258,15 @@ objects, const overloads with a nested class, default arguments, static locals.
 | the existing samples (`test/cpp/samples`, `test/cpp/runtime/samples`; 16 files, our route alone) | 0 of 16: each refused in its first class beyond the slice, below (4 min 53 s: the headers' skim dominates) |
 | the libstdc++ testsuite's recorded list (234 files) | not run: 229 need C++ library headers and templates (§1) |
 | `bin/repr-cpp native-check samples` after the parser's change | 9 of 9 the same, 68 of 68 items (as on `cpp-sema`) |
+| G2 (`cpp-codegen2`, 2026-11-05, light, 4 jobs): `bin/cppi codegen-check` over `test/cpp/codegen` | 82 of 82 pass all three levels (`known.edn` empty); generate and lower 70-85 s, gcc, clang and runs 6 s |
+| G2: the existing samples again (16 files, our route) | 2 of 16 run by our route, as clang's: `samples/bitfields.cpp`, `samples/vexing.cpp`; the other 14 below (3 min 53 s, the headers' skim dominating) |
 
-The existing samples' first refusals, the work G2-G4 take on: templates (`auto.cpp` a function template, `classes.cpp`
+The existing samples' first refusals after G2: templates (`auto.cpp` a function template, `classes.cpp`, `layouts.cpp`
+and `p1-first.cpp` class templates, `decls.cpp` an alias template; `decls.cpp` and `layouts.cpp` have no `main`, so
+clang's route does not run them either), the C++ library (`atomics.cpp` and `io.cpp`'s `std::atomic<int>` and
+`std::vector<int>`, `hello.cpp`'s `std::string`, `ctor-throw.cpp`, `uncaught.cpp`, `thread-throw.cpp`, `threads.cpp`
+and `coroutine.cpp`'s classes of `<stdexcept>`, `<thread>`, `<coroutine>`), a construct the native parser declines
+(`library.cpp`): G3 and G4's work. Before G2 (G1's record): templates (`auto.cpp` a function template, `classes.cpp`
 and `p1-first.cpp` class templates, `atomics.cpp` and `io.cpp` `std::atomic<int>` and `std::vector<int>`), the C++ library
 (`coroutine.cpp`, `ctor-throw.cpp`, `hello.cpp`, `thread-throw.cpp`, `threads.cpp`: `std::` names from `<iostream>` and the
 others), bit-fields (`bitfields.cpp`, `decls.cpp`, `layouts.cpp`), exceptions (`uncaught.cpp`'s `throw`), a block-scope
@@ -192,7 +281,7 @@ equals clang's route. Estimates in sessions of this size (a slice like this one:
 | stage | what | samples / coverage target | estimate |
 |---|---|---|---|
 | **G1** (this branch) | C-like C++ and classes: §3, §4 | 38 samples; 0 of the recorded lists | done |
-| **G2** | the rest of the core language without templates: exceptions (`throw`, `try`/`catch` by type_info, `invoke` and landing pads as clang writes them, cleanups on the unwind path, `noexcept`), lambdas (closure classes), bit-fields, unions, multiple and virtual inheritance (thunks, VTTs, construction vtables), conversion functions, member pointers, `dynamic_cast` and `typeid`, `long double`, SysV's argument classes (P3), `constexpr` functions evaluated | 60 samples; the recorded `samples` list's files that use no library header beyond C's | 2-3 |
+| **G2** (branch `cpp-codegen2`, §4a: done but covariant returns' return adjustment, generic lambdas, constexpr array bounds) | the rest of the core language without templates: exceptions (`throw`, `try`/`catch` by type_info, `invoke` and landing pads as clang writes them, cleanups on the unwind path, `noexcept`), lambdas (closure classes), bit-fields, unions, multiple and virtual inheritance (thunks, VTTs, construction vtables), conversion functions, member pointers, `dynamic_cast` and `typeid`, `long double`, SysV's argument classes (P3), `constexpr` functions evaluated | 60 samples; the recorded `samples` list's files that use no library header beyond C's | 2-3 |
 | **G3** | templates: class and function templates instantiated on use (deduction from calls, explicit arguments, defaults, partial specializations and their partial ordering, packs, SFINAE, `if constexpr`, concepts), the substitution of the native trees' dependent nodes (`UnresolvedLookupExpr`, `CXXDependentScopeMemberExpr`), template mangling (`I...E`, `T_`, the substitutions of template prefixes) | 80 samples with templates of their own; testsuite files with no library header | 4-6 |
 | **G4** | the headers: the native parser parses the headers' bodies (not skims) when a definition is instantiated or inline; libstdc++'s demands of §1 (type traits' builtins, inline namespaces and abi tags, `__builtin_*`); `<cstdio>`, `<cstring>`, `<utility>`, `<memory>`, `<vector>`, `<string>`, `<algorithm>` first (P5) | the recorded `samples` list (16) by our route; 30 % of `libstdcxx-every-15th` | 6-10 |
 | **G5** | `<iostream>`, `<sstream>`, `<locale>`, `<map>`, `<unordered_map>`, `<functional>`, `<random>`, `<regex>`, `<filesystem>`; the runtime's own units by our route (libsupc++ and libstdc++-v3/src compiled without clang: the lowered runtime clang-free) | 80 % of `libstdcxx-every-15th`; the runtime's units | 8-12 |
@@ -237,6 +326,29 @@ exception, recorded in LICENSE.md and doc/ARBACE.md; costs reading C++ of clang'
 it). (b) `bin/cppi codegen-check` as an essential step once C++'s crop has a row in `bin/reap` (light: about 40 s).
 **Recommended: (b) at the crop's REAP row.**
 
+**P8. G2's remainder.** Left out of G2: (1) covariant return types whose return needs an adjustment (a thunk with a
+return adjustment, `_ZTc...`); (2) generic lambdas (they are templates); (3) array bounds given by a constexpr call
+(the native parser keeps such a bound as text in the declaration's type, `int[sq(3)]`); (4) a namespace-scope lambda's
+`$_N` (clang numbers it in an order not yet understood: the TU's lambdas before it, less one); (5) `goto` across
+destructors, a `while` condition's declaration, a class through `...` (G1's). Options: (a) each with G3, when templates
+bring their own thunks and the native parser's bounds are expressions (about half a day all told); (b) now, before G3
+(the same cost, nothing waits for them). **Recommended: (a)**: none of the recorded lists' files needs them before the
+headers do.
+
+**P9. The code generator's provenance.** G2 follows clang's functions closely in structure (ItaniumVTableBuilder's
+vcall and vbase offsets and IsOverriderUsed, VTTBuilder's order, X86_64ABIInfo::classify's eightbytes) but is written
+from the Itanium ABI, the psABI and clang's IR on the samples: clang's source is not on the host (no llvm-project tree;
+the brief allowed no fetch), so nothing could be ported and nothing is recorded in LICENSE.md. (a) Keep it so; the
+names in the comments say which of clang's functions each part models (as built). (b) Fetch llvm-project at
+`llvmorg-23.1.4` (pinned by its tarball's SHA-256 in `test/cpp/corpora.edn`'s style) and compare each modelled part
+with clang's code line by line, porting where ours differs, recorded in LICENSE.md (Apache-2.0 with the LLVM
+exception) and doc/ARBACE.md as P6 allows; about half a day, worth it before G3's instantiator, which P6 ports anyway.
+**Recommended: (b) at the start of G3**, together with the template instantiator's port.
+
+**P10. codegen-check's cost.** 82 samples take about 70-85 s light (4 jobs) to generate and lower, 6 s to compile and
+run. (a) All in the essential step when P7 (b) applies. (b) An essential subset (one sample per area, about 20, 25 s) in
+the essential gate, all in `--full`. **Recommended: (b)**, with P7.
+
 ## 8. Sources
 
 - The standard: ISO/IEC 14882:2024 (C++23), clauses as cited ([basic.lookup], [over.match], [over.ics.rank],
@@ -244,7 +356,13 @@ it). (b) `bin/cppi codegen-check` as an essential step once C++'s crop has a row
 - The Itanium C++ ABI, itanium-cxx-abi.github.io/cxx-abi/abi.html: §2.4 (layout), §2.5 (vtables), §2.9.5 (type_info),
   §3.3.2 (guards), §5.1 (mangling).
 - clang at `llvmorg-23.1.4` (https://github.com/llvm/llvm-project, the oracle's version): the files of §1 named as the
-  models; nothing ported in this slice. Its output (`clang++ -O0 -S -emit-llvm` on the samples) is the oracle.
+  models, G2's also `RecordLayoutBuilder.cpp`, `VTableBuilder.cpp` (ItaniumVTableBuilder, VCallAndVBaseOffsetBuilder),
+  `CGVTT.cpp`/`VTTBuilder.cpp`, `CGClass.cpp` (getVTablePointers, CanSkipVTablePointerInitialization),
+  `Targets/X86.cpp` (X86_64ABIInfo::classify), `ExprConstant.cpp`; nothing ported (P9). Its output (`clang++ -O0 -S
+  -emit-llvm` on the samples) is the oracle.
+- The System V x86-64 psABI (gitlab.com/x86-psABIs/x86-64-ABI), §3.2.3 (parameter passing).
+- The lowering's change: `arbace/cpp/lower.ae`'s `fp-lit` takes a decimal x86_fp80 constant as a long double literal.
+- The native parser's change on `cpp-codegen2`: a variable's entity keeps its C linkage (`:clink`), as functions' did.
 - The native parser's change: `arbace/repr/cpp/parse.ae` keeps a function entity's printed type (`:qt`) and its C linkage
   (`:clink`, the dynamic `*linkage*` bound in `parse-linkage`); the tree and the forms are unchanged.
 
