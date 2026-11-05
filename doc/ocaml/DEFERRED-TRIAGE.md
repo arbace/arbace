@@ -522,9 +522,12 @@ tools' host), each check a list of programs (`--only-list`), the records merged.
   `setsid`, `nice`. A pending signal whose action is the default one, once unblocked, is raised again with that action. `exit` in a
   domain now ends the process (it was an internal error: `parallel/mctest`, which also needed `select`).
 - AOT runtime: Java receives no signal of the OS, so `ExtSignal.ae` mirrors the signals a program sends itself (`kill` of its own pid,
-  `alarm`'s timer thread), delivered at `Rt/tick` and at the end of `kill` and `sigprocmask`; one mask for the process. `ExtProc.ae`:
-  `spawn` over ProcessBuilder (a redirection to the runtime's own pipe pumped by a thread holding the pipe's end), `waitpid`, `wait`.
-  The interruption of a blocking call, per-thread masks and signals between processes stay oi's.
+  `alarm`'s timer thread, counted among the running domains while armed so that the ticks let it in), delivered at `Rt/tick` and at the
+  end of `kill` and `sigprocmask`; one mask a thread (TState's `sigmask`, inherited by threads and domains); a runtime pipe's wait is
+  interrupted by a signal its thread takes (Pipe: the handlers run, `EINTR`; Channel's flush retries). `ExtProc.ae`: `spawn` over
+  ProcessBuilder (a redirection to the runtime's own pipe pumped by a thread holding the pipe's end), `waitpid`, `wait`. The
+  interruption of sleeps and sockets, and signals between processes, stay oi's (OT24). The runtime's `recommended_domain_count` is
+  oi's 1 (it said 128, above the host's processors: `parallel/recommended_domain_count_unix`).
 - `lib-unix/kill/unix_kill`'s platform filter `not_macos_amd64_tsan` is read (header.awk, actions.awk): one more run program.
 - OT16 (b) was not built: fix 7 makes it moot (`close_during_flush` passes; its known entry is dropped from `oi-known.edn`).
 
@@ -553,6 +556,27 @@ find_first_mono,overflow_detection,test_strongly_connected_components}`, `misc/s
 |---|---|---|---|
 | eval (oi) | run 5 of 5, suite 2 of 2 | run 9 of 9, suite 2 of 2 | 6 of 7 (`errors_batch` `:compiler-libs-parser`) |
 | AOT, light | run 5 of 5; suite `getaddrinfo` passes, `recvfrom_unix` known unix (Unix sockets, OT23) | run 8 of 9 (`mctest` `:light-speed`, as before); suite 2 of 2 | 5 of 7 (`stable_matching_test` `:light-speed`, `aot-slow.edn`; `errors_batch` the class) |
+
+The numbers (eval, from the records): the run corpus **305 to 325 pass** of 370 rows' programs (`bin/oi divergences`: 0 failing;
+`:unix-unported` 1 left, `lib-bigarray-file/mapfile`'s `map_file`, fix 11), the suite **99 to 103** (`bin/oi suite divergences`: 0
+failing). The AOT light level: the lists' 20 run programs 18 pass, the suite's 3 of 4.
+
+**The compiled level was not recorded for these programs today.** A shard of five of the list's socket and thread programs built in
+410 s at a **6.1 GB peak** (j2g 200 s, 3.2 GB): above the day's 4 GB cap, so the run was stopped (the runtime's new classes pull
+java.net's and ProcessBuilder's JDK classes into every shard's package: OT15 (b)/OT20 (c), OT22); a shard of the four utils/ programs
+is the day's only compiled run (below). The night's commands run the whole level.
+
+### Checks run (all by list, 2026-11-05)
+
+`bin/oi record-ref --only-list` (`unix_kill`; the fix 8 programs), `bin/oi check --record --only-list` (fixes 6-7's 15 run programs:
+14 pass, then `unix_kill`; fix 8's 7: 6 pass), `bin/oi suite check --record --only-list` (4 of 4), `bin/oi check --only-list
+test/ocaml/essential-check.txt` (58 of 58), `bin/oi test` (go vet, go test: ok), `bin/oi divergences`, `suite divergences` (0 failing),
+`bin/oi check --aot --record --only-list` (the 21: 18 pass, `mctest` slow, `stable_matching_test` timed out, then rerun alone with
+`aot-slow.edn`), `bin/oi suite check --aot --record --only-list` (3 of 4, `recvfrom_unix` rerun with its known entry), `bin/oi check
+--aot --only-list test/ocaml/essential-check.txt` (57 pass, 1 `:light-speed`: as before, no regression from the runtime's changes),
+`bin/oi check --aot --level compiled` (one shard of five stopped at its 6.1 GB build; one shard of the four utils/ programs, below),
+`bin/oi run`-level probes of the runtime (`test/ocaml/o2j/run.ae --batch` on single programs). **Not run**: the gate, any whole
+corpus, `bin/arbace-go`; the compiled level of the fixes 6-7 programs and of the suite's.
 
 ### The night's record commands (after this branch; in this order, the compiled level heavy)
 
