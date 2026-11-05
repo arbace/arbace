@@ -345,7 +345,7 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Types
 
-(declare rn rn-l rn-pat rn-binds rn-expr rn-type-shape rn-fieldbind rn-defn rn-class rn-instance rn-fameqn rn-local-binds rn-node name-of-tycl rn-grhss)
+(declare children-of rn rn-l rn-pat rn-binds rn-expr rn-type-shape rn-fieldbind rn-defn rn-class rn-instance rn-fameqn rn-local-binds rn-node name-of-tycl rn-grhss)
 
 (defn- name-rdr-of
   "The rdr inside (L sp rdr)"
@@ -603,6 +603,30 @@
 
 (defn rn-expr [env e] (emit-tree! (rn-expr-shape env e)))
 
+(defn- irrefutable?
+  "isIrrefutableHsPat: the pattern cannot fail (variables, wildcards, lazy patterns, tuples and constructors of
+  single-constructor types over irrefutable patterns)"
+  [env p]
+  (let [v (lval p)]
+    (case (con v)
+      (WildPat VarPat LazyPat) true
+      (AsPat) (irrefutable? env (arg v 3))
+      (BangPat ParPat) (irrefutable? env (arg v 2))
+      SigPat (irrefutable? env (arg v 2))
+      TuplePat (every? #(irrefutable? env %) (arg v 2))
+      ConPat
+      (let [cl (arg v 2) det (arg v 3)
+            n (binding [*errors* nil] (resolve-rdr env (lval cl)))
+            par (when n (some (fn [e] (when (= (:name e) n) (:parent e))) (get @*genv* [(nskey (name-ns n)) (name-occ n)])))
+            single? (or (= n (ext-name "data" "GHC.Internal.Tuple" "()"))
+                        (and par (= 1 (count (filter #(= "data" (name-ns %)) (children-of par))))))
+            args (case (con det)
+                   InfixCon [(arg det 1) (arg det 2)]
+                   RecCon (keep (fn [f] (let [fb (lval f)] (when-not (true? (arg fb 4)) (arg fb 3)))) (arg (arg det 1) 2))
+                   (let [x (last (rest det))] (if (vector? x) x [])))]
+        (boolean (and single? (every? #(irrefutable? env %) args))))
+      false)))
+
 (defn rn-stmts
   "Statements in order, each binding for the later ones; k is called with the final env. fl: the flavour
   of a do or comprehension (its implicit names), nil for guards"
@@ -615,6 +639,8 @@
                             (emit! nil (ext-name "var" m occ))))]
       (case (con v)
         BindStmt (do (sys "GHC.Internal.Base" ">>=")
+                     (when (and fl (not (contains? '#{GuardStmt ListComp} fl)) (not (irrefutable? env (arg v 2))))
+                       (sys "GHC.Internal.Control.Monad.Fail" "fail"))
                      (rn env (arg v 3)) (recur (rn-pat env (arg v 2)) more k [fl]))
         LetStmt (recur (rn-local-binds env (arg v 2)) more k [fl])
         BodyStmt (do (when-not (and (empty? more) (not (contains? '#{GuardStmt ListComp} fl)))
@@ -1092,9 +1118,9 @@
   (add-gre! name quals unq parent))
 
 (defn- import-item-names
-  "The names an import item selects from the avails [[N kids]...]: [{:name :parent :emit-sp...}] plus
-  the occurrence emissions [[sp name]]"
-  [avails item]
+  "The names an import item selects from the avails [[N kids]...]: [{:name :parent :emit [sp name]}]; a
+  hiding item names a type and a data constructor of its spelling"
+  [avails item hiding?]
   (let [v (lval item)
         [nsp rdr] (ie-name (arg v 2))
         occ (rdr-occ rdr)
@@ -1107,10 +1133,12 @@
         (if hit [hit] []))
       IEThingAbs
       (let [hit (find-top (fn [n] (and (= "tc" (name-ns n)) (= (name-occ n) occ))))
-            dc (find-top (fn [n] (and (not= "tc" (name-ns n)) (= (name-occ n) occ))))]
-        (cond hit [{:name (first hit) :parent nil :emit [nsp (first hit)]}]
-              dc [{:name (first dc) :parent nil :emit [nsp (first dc)]}]
-              :else []))
+            dcs (concat
+                 (for [[n _] all :when (and (not= "tc" (name-ns n)) (= (name-occ n) occ))] {:name n :parent nil :emit [nsp n]})
+                 (for [[n kids] all k kids :when (and (= "data" (name-ns k)) (= (name-occ k) occ))] {:name k :parent n :emit [nsp k]}))]
+        (cond (and hit hiding?) (into [{:name (first hit) :parent nil :emit [nsp (first hit)]}] dcs)
+              hit [{:name (first hit) :parent nil :emit [nsp (first hit)]}]
+              :else (vec (take 1 dcs))))
       IEThingAll
       (if-let [[n kids] (find-top (fn [n] (and (= "tc" (name-ns n)) (= (name-occ n) occ))))]
         (into [{:name n :parent nil :emit [nsp n]}] (map (fn [k] {:name k :parent n}) kids))
@@ -1139,8 +1167,8 @@
         avails (:exports i)]
     (when-not i (error! "no interface for " m))
     (doseq [[n kids] avails] (note-children! n kids))
-    (let [sel (when (and lst (not hiding?)) (mapcat #(import-item-names avails %) items))
-          hid (when hiding? (mapcat #(import-item-names avails %) items))
+    (let [sel (when (and lst (not hiding?)) (mapcat #(import-item-names avails % false) items))
+          hid (when hiding? (mapcat #(import-item-names avails % true) items))
           hidden (set (map :name hid))
           ;; hiding C also hides the data constructor C
           hidden-occs (set (map (fn [h] (name-occ (:name h))) hid))
