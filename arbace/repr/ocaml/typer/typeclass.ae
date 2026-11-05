@@ -640,32 +640,63 @@
       [res env])))
 
 (defn class-type-declarations
-  "Typeclass.class_type_declarations: [[info...] env'], info {:name :ty-id :obj-id :decl}"
+  "Typeclass.class_type_declarations: [[info...] env'], info {:name :ty-id :obj-id :decl}; the object types' temporary
+  abbreviations bound while the class types are typed (recursive references)"
   [env scls]
-  (let [res
-        (mapv (fn [scl]
-                (let [n (:txt (:pci_name scl)) ty-id (ty/ident-create n) obj-id (ty/ident-create n)
-                      vars (atom {})
-                      [params typ] (ty/with-local-level
-                                     (let [params (mapv (fn [[sty _]] (type-param vars sty)) (:pci_params scl))
-                                           t (binding [*class-vars* vars env/*shared-tyvars* vars] (class-type env (:pci_expr scl)))]
-                                       (complete-class-signature! (signature-of-class-type t))
-                                       [params t]))
-                      _ (limited-generalize-class-type! params typ)
-                      sign (signature-of-class-type typ)
-                      obj-path [:Pident obj-id]
-                      [obj-params obj-type] (instance-class params typ)
-                      _ (tc/unify! (ty/object-row (self-type obj-type)) (ty/newty [:Tnil]) "class type")
-                      obj-ty (self-type obj-type)
-                      _ (set-object-name! obj-path params (:self @sign))
-                      [hparams hty] (let [ts (ty/instance-list (concat params [(:self @sign)]))] [(vec (butlast ts)) (last ts)])
-                      _ (set-object-name! obj-path hparams hty)
-                      decl {:params params :type typ :path obj-path :virt (:pci_virt scl) :hash {:params hparams :manifest hty}}]
-                  (run! ty/generalize (concat obj-params [obj-ty] hparams [hty]))
-                  (env/add-decl! obj-path {:path obj-path :params obj-params :kind [:abstract] :manifest obj-ty
-                                           :arity (count obj-params) :variance (repeat :inv) :class-ghost true :hash (:hash decl)})
-                  {:name n :ty-id ty-id :obj-id obj-id :decl decl}))
-              scls)]
+  (let [pre (mapv (fn [scl]
+                    (let [n (:txt (:pci_name scl)) ty-id (ty/ident-create n) obj-id (ty/ident-create n)
+                          arity (count (:pci_params scl))
+                          [obj-params obj-ty] (temp-abbrev arity)
+                          [cl-params cl-ty] (temp-abbrev arity)
+                          obj-path [:Pident obj-id]]
+                      (env/add-decl! obj-path {:path obj-path :params obj-params :kind [:abstract] :manifest obj-ty
+                                               :arity arity :variance (repeat :inv)})
+                      {:scl scl :name n :ty-id ty-id :obj-id obj-id :obj-params obj-params :obj-ty obj-ty
+                       :cl-params cl-params :cl-ty cl-ty}))
+                  scls)
+        env1 (reduce (fn [e c]
+                       (-> e (assoc-in [:types (:name c)] [:Pident (:obj-id c)])
+                           (assoc-in [:cltypes (:name c)] {:path [:Pident (:ty-id c)]
+                                                           :decl {:params (:cl-params c) :type [:Cty_signature (new-class-signature)]
+                                                                  :path [:Pident (:obj-id c)]
+                                                                  :hash {:params (:cl-params c) :manifest (:cl-ty c)}}})))
+                     env pre)
+        res
+        (ty/with-local-level
+          (mapv (fn [c]
+                  (let [scl (:scl c) vars (atom {})
+                        [params typ] (ty/with-local-level
+                                       (let [params (mapv (fn [[sty _]] (type-param vars sty)) (:pci_params scl))
+                                             t (binding [*class-vars* vars env/*shared-tyvars* vars] (class-type env1 (:pci_expr scl)))]
+                                         (complete-class-signature! (signature-of-class-type t))
+                                         [params t]))
+                        _ (limited-generalize-class-type! params typ)
+                        sign (signature-of-class-type typ)
+                        obj-path [:Pident (:obj-id c)]
+                        [obj-params' obj-type] (instance-class params typ)
+                        constr (ty/newty [:Tconstr obj-path (:obj-params c)])
+                        _ (do (tc/unify! (ty/object-row (self-type obj-type)) (ty/newty [:Tnil]) "class type")
+                              (dorun (map #(tc/unify! %1 %2 "class type parameters") (:obj-params c) obj-params'))
+                              (let [si (ty/repr (self-type obj-type)) sd (ty/desc si)
+                                    e (ty/expand-head constr) ed (ty/desc e)]
+                                (ty/link! si constr)
+                                (ty/unify-fields (sd 1) (ed 1))))
+                        _ (set-object-name! obj-path params (:self @sign))
+                        [cl-params' cl-type] (instance-class params typ)
+                        _ (do (dorun (map #(tc/unify! %1 %2 "class type parameters") (:cl-params c) cl-params'))
+                              (tc/unify! (self-type cl-type) (:cl-ty c) "class type"))
+                        [hparams hty] (let [ts (ty/instance-list (concat params [(:self @sign)]))] [(vec (butlast ts)) (last ts)])
+                        _ (set-object-name! obj-path hparams hty)
+                        decl {:params params :type typ :path obj-path :virt (:pci_virt scl) :hash {:params hparams :manifest hty}}]
+                    (assoc c :decl decl)))
+                pre))]
+    (doseq [c res]
+      (generalize-class-type! (:params (:decl c)) (:type (:decl c)))
+      (run! ty/generalize (:obj-params c)) (ty/generalize (:obj-ty c))
+      (run! ty/generalize (:params (:hash (:decl c)))) (ty/generalize (:manifest (:hash (:decl c))))
+      (let [obj-path [:Pident (:obj-id c)]]
+        (env/add-decl! obj-path {:path obj-path :params (:obj-params c) :kind [:abstract] :manifest (:obj-ty c)
+                                 :arity (count (:obj-params c)) :variance (repeat :inv) :class-ghost true :hash (:hash (:decl c))})))
     [res (reduce (fn [e c] (-> e (assoc-in [:types (:name c)] [:Pident (:obj-id c)])
                                (assoc-in [:cltypes (:name c)] {:path [:Pident (:ty-id c)] :decl (:decl c)})))
                  env res)]))
