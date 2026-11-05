@@ -619,3 +619,7 @@ which the typer's load is most (stage 0 evaluates the typer's namespaces each ti
   (b) now (about a day). *Recommended: (a)*; TY12 (a)'s scopes stay unneeded.
 - **TY22 Polytypes in record fields and sharing.** (a) TY11 (a)'s unify3 links with Typecore's levels, and a Tpoly field's printing,
   with T12; (b) now (about a day); (c) not at all (the runs are equal). *Recommended: (a)*.
+
+## Decided (2026-11-05, the user: TY19-TY22)
+
+TY19 (b): ocamlc's and the native records side by side until the native non-passes are decided milestones' classes; TY20-TY22 (a) with T12 (one typer process per REPL session, Printtyp's short paths, unify3 sharing and record-field polytypes).
