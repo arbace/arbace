@@ -370,7 +370,7 @@ thingF t = case t of
         "(class " ++ nameF (getName tc) ++ " " ++ vec (map (esc . pprS) (classSCTheta cls)) ++ " "
           ++ vec [ "(" ++ nameF (getName op) ++ " " ++ esc (pprS (varType op)) ++ " " ++ typeF (varType op) ++ ")" | op <- classMethods cls ]
           ++ " " ++ vec (map typeF (classSCTheta cls))
-          ++ " {:tvs " ++ vec (map (esc . occNameString . getOccName) (classTyVars cls))
+          ++ " {:tvs " ++ vec (map (esc . tvNameU) (classTyVars cls))
           ++ " :fundeps " ++ vec [ vec [vec (map (esc . occNameString . getOccName) l), vec (map (esc . occNameString . getOccName) r)] | (l, r) <- snd (classTvsFds cls) ]
           ++ " :defaults " ++ vec [ "[" ++ nameF (getName op) ++ " " ++ (case dm of Nothing -> "nil"; Just (n, _) -> nameF n) ++ "]" | (op, dm) <- classOpItems cls ]
           ++ " :ats " ++ vec (map (nameF . getName) (classATs cls))
@@ -381,7 +381,7 @@ thingF t = case t of
           ++ " " ++ vec (map (nameF . getName) (tyConDataCons tc)) ++ " " ++ typeF (tyConKind tc)
           ++ " {:roles " ++ rolesF tc ++ " :arity " ++ show (tyConArity tc)
           ++ (case synTyConDefn_maybe tc of
-                Just (tvs, rhs) -> " :synonym [" ++ vec (map (esc . occNameString . getOccName) tvs) ++ " " ++ typeF rhs ++ "]"
+                Just (tvs, rhs) -> " :synonym [" ++ vec (map (esc . tvNameU) tvs) ++ " " ++ typeF rhs ++ "]"
                 Nothing -> "")
           ++ (case famTyConFlav_maybe tc of
                 Just (ClosedSynFamilyTyCon (Just ax)) -> " :family closed :equations " ++ vec (map branchF (fromBranches (co_ax_branches ax)))
@@ -394,14 +394,14 @@ thingF t = case t of
           ++ "})"
   ACoAxiom _ -> "(axiom)"
 
--- a type as forms: (tv "a"), (tycon-app NAME [args]), (app f x), (fun c|t MULT ARG RES) (c: a constraint arrow),
+-- a type as forms: (tv "a#UNIQUE"), (tycon-app NAME [args]), (app f x), (fun c|t MULT ARG RES) (c: a constraint arrow),
 -- (forall "a" required|specified|inferred KIND BODY), (lit N|"s")
 typeF :: Type -> String
 typeF ty = case ty of
-  TyVarTy v -> "(tv " ++ esc (occNameString (getOccName v)) ++ ")"
+  TyVarTy v -> "(tv " ++ esc (tvNameU v) ++ ")"
   AppTy f x -> "(app " ++ typeF f ++ " " ++ typeF x ++ ")"
   TyConApp tc args -> "(tycon-app " ++ nameF (getName tc) ++ " " ++ vec (map typeF args) ++ ")"
-  ForAllTy (Bndr tv fl) body -> "(forall " ++ esc (occNameString (getOccName tv)) ++ " " ++ flagS (pprS fl) ++ " " ++ typeF (varType tv) ++ " " ++ typeF body ++ ")"
+  ForAllTy (Bndr tv fl) body -> "(forall " ++ esc (tvNameU tv) ++ " " ++ flagS (pprS fl) ++ " " ++ typeF (varType tv) ++ " " ++ typeF body ++ ")"
   FunTy af m a r -> "(fun " ++ (if isInvisibleFunArg af then "c" else "t") ++ " " ++ typeF m ++ " " ++ typeF a ++ " " ++ typeF r ++ ")"
   LitTy (NumTyLit n) -> "(lit " ++ show n ++ ")"
   LitTy (StrTyLit s) -> "(lit " ++ esc (unpackFS s) ++ ")"
@@ -410,13 +410,18 @@ typeF ty = case ty of
   CoercionTy _ -> "(coercion)"
   where flagS str | "Inferred" `isPrefixOf` str = "inferred" | "Required" `isPrefixOf` str = "required" | otherwise = "specified"
 
+-- a type variable: its occurrence name and its unique ("t#123"), so that variables of the same name stay apart
+-- (GHC's inferred types name many "t"); the unique is stable within one dump only
+tvNameU :: Var -> String
+tvNameU v = occNameString (getOccName v) ++ "#" ++ show (getKey (varUnique v))
+
 rolesF :: TyCon -> String
 rolesF tc = vec (map roleS (tyConRoles tc))
   where roleS r = case r of Nominal -> "nominal"; Representational -> "representational"; Phantom -> "phantom"
 
 -- an equation of a family: (eqn [tv...] [lhs...] rhs)
 branchF :: CoAxBranch -> String
-branchF b = "(eqn " ++ vec (map (esc . occNameString . getOccName) (cab_tvs b)) ++ " " ++ vec (map typeF (cab_lhs b)) ++ " " ++ typeF (cab_rhs b) ++ ")"
+branchF b = "(eqn " ++ vec (map (esc . tvNameU) (cab_tvs b)) ++ " " ++ vec (map typeF (cab_lhs b)) ++ " " ++ typeF (cab_rhs b) ++ ")"
 
 famInstF :: FamInst -> String
 famInstF fi = "(fam-instance " ++ nameF (getName (fi_axiom fi)) ++ " " ++ nameF (fi_fam fi) ++ " " ++ vec (map typeF (fi_tys fi)) ++ " " ++ typeF (fi_rhs fi) ++ ")"
