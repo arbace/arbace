@@ -285,7 +285,7 @@ namespaces (§2's table), each port following OCaml's functions:
 | namespace | OCaml 5.5.0 sources | what |
 |---|---|---|
 | `typer.types` | `types.ml` (row_desc, row_field with its `ext` cells, row_fields, row_repr, get_row_field, rf_either, link_row_field_ext), `btype.ml` (hash_variant, static_row, fixed_explanation, proxy), `ctype.ml` (merge_row_fields, filter_row_fields, unify_row, unify_row_field, copy_row and copy's sharing of a row by its more, occur_rec through rows and abbreviations, unify3's link of a row before its unification, memorized abbreviations, build_subtype and enlarge_type, subtype_rec and subtype_row (without objects, functors and universal variables), immediacy of rows, lower_contravariant's visited table), `out_type.ml` (nameable_row, printer_iter_type_expr, mark_loops with alias_nongen_row) | a row `[:Tvariant {:fields :more :closed :fixed :name}]`, a field `[:RFpresent t]` `[:RFabsent]` `[:RFeither {:no-arg :arg-type :matched :ext}]`; Btype's snapshots and backtrack (`*trail*`, `try-unify`) for unifications that may fail |
-| `typer.env` | `typetexp.ml`'s Ptyp_variant (tags by hash, inheritance of static rows, `[< ... > ...]`) and Ptyp_alias, `btype.ml`'s set_static_row_name, `typedecl.ml`'s constraints (`as 'a`, `constraint`), checked at a constrained type's uses | |
+| `typer.env` | `typetexp.ml`'s Ptyp_variant (tags by hash, inheritance of static rows, `[< ... > ...]`) and Ptyp_alias, `btype.ml`'s set_static_row_name, `typedecl.ml`'s constraints (`as 'a`, `constraint`), checked at a constrained type's uses; a declaration whose manifest the lenient reading of an interface cannot translate (MoreLabels' `with type 'a t = 'a Map.Make(Ord).t`) made abstract rather than an opaque abbreviation that loses its parameters | |
 | `typer.typecore` | `typecore.ml`'s Pexp_variant, solve_Ppat_variant, build_or_pat (`#t` patterns), finalize_variant, build_as_type of variants, the polymorphic variant processing of type_cases, type_function's parameters and type_let, type_coerce (`(e : t1 :> t2)` checked by Ctype.subtype; a ground coercion tried as one unification with the enlarged type, else made by subtype's constraints; else the argument unified with the enlarged type), the application operators `|>` and `@@` typed as applications (Pexp_apply's `%revapply`/`%apply`), a function's cases with a type constraint, `let p : 'a. t = e` | |
 | `typer.parmatch` | `parmatch.ml`'s variant heads, full_match (closing or not), close_variant, pressure_variants; GADT constructors whose result type cannot be the matched one left out of a signature's completeness | |
 | `typer.matching`, `typer.lambda` | `matching.ml`'s divide_variant, combine_variant (test sequences, switches on the hashes, isint splits), `switch.ml`'s test_sequence | |
@@ -297,8 +297,9 @@ namespaces (§2's table), each port following OCaml's functions:
 | set | files | types equal | raw Lambda equal | simplified Lambda equal | oi's run equal |
 |---|---:|---:|---:|---:|---:|
 | `test/ocaml/typer/` (60 samples; t53-t60 new: inferred rows, abbreviations and `#t`, coercions, Matching on variants, modules and recursive rows, recursive types through abbreviations and constraints, mixed forms) | 60 | 60 | 60 | 60 | 60 |
-| the stdlib's units (`bin/oi stdlib-check`) | 71 | - | - | 66 | the samples on the native units: 58 of 58 (before t59-t60) |
+| the stdlib's units (`bin/oi stdlib-check`) | 71 | - | - | 66 | the samples on the native units: 60 of 60 |
 | probe: `testsuite/tests/basic/`'s first 40 files, the 36 ocamlc accepts as programs | 36 | 32 | 32 | 32 | - |
+| probe: opam's uutf (`src/uutf.ml`, one unit over the stdlib, a heavy user of polymorphic variants) | 1 | 0 | 1 | 1 | - |
 | probe: other run tests with polymorphic variants (basic-more/robustmatch, typing-labels/mixin, typing-modules-bugs/pr5914_ok, pr6985_ok, pr7601_ok, pr7601a_ok, typing-polyvariants-bugs/pr4933_ok, pr7199_ok, privrowsabate_ok, translprim/ref_spec) | 10 | 5 | 6 | 6 | - |
 
 The stdlib's new units: CamlinternalFormatBasics and Format (Format also needed `|>`'s typing). The basic/ probe's
@@ -308,8 +309,8 @@ exhaustiveness over a tuple of GADTs: Typecore's check of Parmatch's counter-exa
 values, TY10 (a): T10). The basic/ probe's 4 others: a class, an object, `recvalues` and `tailcalls` (recursive values);
 `patmatch`'s and `sets`' signatures differ (a polymorphic record field, T10; a functor application's printed path,
 `type t = Set.Make(SetOrd(BaseSet)).t`, T8's printer), their Lambda equal. The other probe's not equal: robustmatch
-(GADT tuples' exhaustiveness, T10), mixin (MoreLabels' `type +!'a t` read as outside the slice, and two printed types
-sharing differently: TY11), pr5914_ok and privrowsabate_ok (constraints recursive through a row, private rows in a
+(GADT tuples' exhaustiveness, T10), mixin (MoreLabels' `Map.Make` result, `type +!'a t`, printed without its
+variance, and printed types sharing differently: TY11), pr5914_ok and privrowsabate_ok (constraints recursive through a row, private rows in a
 functor's parameter: refused), pr6985_ok, pr4933_ok (private abbreviations' and module types' printing).
 
 Faithfulness notes: unification links a row to the other before unifying their fields (Ctype.unify3) but links no
@@ -321,11 +322,16 @@ Size: about 8,100 lines of Arbace under `arbace/repr/ocaml/typer/` (and the driv
 ## 12. Proposed (TY11-TY12; options with costs, a recommendation each, none decided)
 
 - **TY11 Sharing in unification.** OCaml's unify3 links every non-variable type to the other before unifying their
-  parts; the port does it for rows only, so a printed type can show the other node of an equal pair (mixin:
-  `Subst.key` where OCaml prints `string`'s alias, `('a expr as 'a) expr` for `('a expr as 'a)`). (a) link every
-  type as unify3 does (about half a day: every sample and the stdlib re-judged, the expansions' memo checked); (b) when
-  T11's corpus shows the difference in its classes; (c) not at all. *Recommended: (b)*, as (a) risks the 60 samples'
-  printed types for a case the corpus may not have.
+  parts; the port does it for rows only, so a printed type can show the other node of an equal pair: uutf's
+  `val src : decoder -> Bytes.t -> ...` prints `bytes` here (its Lambda equal), mixin prints `string` where OCaml
+  prints `Subst.key` and `('a expr as 'a) expr` for `('a expr as 'a)`. Tried on this branch and taken back: with
+  unify2_expand and unify3 ported as they are (both heads expanded, the first linked to the second, no link in a GADT
+  pattern nor under a GADT equation) uutf's signature became equal and the 60 samples stayed equal, but basic/'s
+  `boxedints` printed `Int32.t` where OCaml prints `int32` (`let f (a : int32) = Int32.unsigned_compare a a`): OCaml's
+  levels keep a constrained pattern's type apart from its uses (map_half_typed_cases' generalization of the patterns),
+  which the port's levels do not reproduce. (a) port unify3's links with that part of Typecore's levels (about a day:
+  type_cases' and type_function's levels, every sample and the stdlib re-judged); (b) with T11, its corpus's classes
+  showing how often it matters; (c) not at all. *Recommended: (b)*.
 - **TY12 Scopes.** OCaml drops a row's name when update_level lowers it below its type's scope, and checks escapes by
   scopes; the port approximates the first (rows built by enlarge_type and build_as_type unnamed) and has no escape
   check. (a) port Ident's scopes and update_scope with T11 if its corpus shows printed names differing; (b) now (about
