@@ -189,3 +189,7 @@ programs and `callstack`/`boundscheck`/`moved_while_blocking` (backtraces and co
 If OT1-OT9 are accepted and items 1-11 built (about 61 days): eval 360 + at most 109 = **469 pass** at best, 114 + 79 = **193 by design**, 2 deferred; AOT 337 + at most 138
 = **475**, 108 + 79 = **187 by design**, 5 deferred. With the 0.7 factor on the new passes: eval about **436**, AOT about **434**, the 30% that fail on a behaviour staying deferred (about 33 and 41).
 The first five alone, 19 days: eval 360 to about 400, AOT 337 to about 395.
+
+## Decided (2026-11-05, the user)
+
+OT1-OT10 as recommended: Unix.fork, the compiler-output tests, ocamltest's tools and subprocess tests, runtime events, Dynlink, the 21 C-stub tests on the runtime's internals and Marshal's closures by design (the 20 on the stable API to a ci shim later); the AOT cell judged at the compiled level; the library order of §4 (superseding OC63); library units loaded on demand.
