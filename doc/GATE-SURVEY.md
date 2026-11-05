@@ -3666,3 +3666,152 @@ refused; L5 the `:gcc-digest` control not left for a reference outside a partial
 digest); L6 the planner warns when `:always` names a file of the part its universe lost; L7 every stale entry printed
 after the 40 failures; L8 the refusals' wording; L9 `c-check`'s and `c-aot`'s `:rotate` `:always` their control's two
 files (`benchmarksgame/fannkuchredux.c`, `fasta.c`).
+
+## As built: GT9 (write-ahead, branch `gt9-build`, 2026-11-05)
+
+GT9 ("GT9: the crops' gate", on `gate-crops`, GTS210-GTS223 decided (a) by the user, 2026-11-04) built in the light tier: no
+gate run, only `bin/gate --plan`, `--full --plan`, `--nightly --plan` and the gate's own light tests. Four commits on `next`
+(`67031fa2`):
+
+1. **The tooling** (`0a7e7fbb`), generic, in no key of the four crops (the runner `bin/lib/gate-run.bash`, `gate-cache.bash` and
+   the planner `test/gate/plan.ae` are in every key: none of them is touched):
+   - **GTS210 (a), the hosts as data.** `test/gate/steps.edn`'s `:host-ids`: a host, a vector of items `[OP ARG ...]` (`:require`,
+     `:version`, `:version-any`, `:lines`, `:exe`, `:prog`, `:dir`, `:file`, `:digest-list`; `${NAME:-DEFAULT}` from the environment).
+     The identity is the SHA-256 of the items' lines, `none` when a `:require` command is missing. `bin/gate`'s `gate_host_id`
+     computes it; `gate_host_ids` adds to the plan's `hosts.edn` the table's hosts that a step names and `plan_inputs` does not
+     write (`test/gate/crops.ae`'s `host-recipes` prints their recipes from stage 0). `bin/gate` wraps the runner's
+     `plan_inputs` (every plan: `run_plan`, the audit's, the clean run's). Nine hosts: `:gcc` (the recipe of `gate_gcc_id` item for
+     item, the same identity, `crops-test`), `:cxx`, `:ocaml`, `:chez`, `:chibi` (the identities of `cpp-cx10`'s `gate_cxx_id`,
+     `ocaml-o8`'s `gate_ocaml_id` and `scheme-sm9`'s `gate_scheme_id`, equal on this host, checked 2026-11-05), and the new
+     `:llvm`, `:ghc`, `:rustc`, `:python`. All eight crop hosts computed in 3.6 s (2 s of it `librustc_driver`'s 70 MB); on `next`
+     none is computed (no step names one), so `hosts.edn` is byte for byte as before. The test fixtures
+     (`audited-test`, `gate-tests-test`) take the table's hosts, so a crop's merge edits neither.
+   - **GTS211 (a), the pins.** `:crop-pins`, one `[CROP "WHAT" "COMMAND"]` a line, read by `bin/gate`'s awk (the clean run's pins
+     step runs before stage 0 exists; `crops-test` checks the awk reading equals `gate.crops pins`). `bin/gate --pins` runs the
+     commands of the crops that have a step in `:crops` and records them in its map as `:crops [...]` (absent while none is
+     gated: `--pins`' output on `next` is as before).
+   - **GTS216 (a), the night's light chains.** In `bin/gate --full` and `--nightly` (not the clean run, not `--concurrent`, whose
+     lanes run every chain at once; `GATE_CROPS_CONCURRENT=0` off) a `:full` chain runs beside the serial run when every step is a
+     new crop's, none `:heavy`, each declares at most `:night-concurrent :max-step-gib` (4), its `:needs` stay in the chain or
+     outside the full phase and no other chain needs it; admitted in order while the chains' peaks sum to at most `:max-gib` (24).
+     `gate.crops concurrent` decides it (in `bin/gate`, unkeyed: the order decides no outcome); `--plan` says which chains.
+   - **GT9.1, GTS215, GTS222 in `--costs`.** `:budgets :new-crops` (the seven), `:shares` (C++ and Rust 0.75, LLVM IR 0.5; the four
+     and the seven sum to `:crops` 10), `:chain-s` 120 (`:chain-s-by {:llvm 60}`), `:essential-mem-gib` 3. `bin/gate --costs`
+     knows the new crops, weights their shares, says "over, measuring (GTS222: K of N rows with two passes)" in place of OVER
+     until each row of the crop's tier has two passes, and prints each new crop's essential chains against their limit.
+   - **The GT9 rules** (`gate.crops check`, also among `--costs`' problems and checked on `steps.edn` by `crops-test`): every new
+     crop's step declares `:mem-gib`; its essential checks at most 3 GiB and never `:heavy` (GTS215); every check names its negative
+     control in `:controls` (GTS218: a file among the step's `:inputs`, or `{:waived "WHY"}`); `:host-ids`' ops and files,
+     `:crop-pins`' crops, the shares' sum.
+   - **The fragments' splice** (`gate.crops splice TABLE FRAGMENT`): a fragment's sections (`;;@ groups`, `steps`, `crops`,
+     `controls`) put above `steps.edn`'s markers; a crop already in `:crops` gets the fragment's names appended to its vector.
+2. **The keys commit** (`100f8e0b`; PYS30 (a), the user 2026-11-04, the merge rehearsal's §2): one list,
+   `bin/lib/version.bash`'s `arbace_crop_paths` (48 `find -path` patterns: the crops' namespaces repr/{haskell, rust, ocaml,
+   scheme, python, cpp, llvm} and `arbace/{scheme,python,cpp,rust}`, their Go forms `go/arbace/{oi,scm,scminterp,py,expat,pyexpat,
+   hs,libm}`, OCaml's `jdk/ocaml/`, and `bin/lib/{oi,repr-cpp,cppi,rsi,hsi,si,pyi,repr-haskell,repr-rust,repr-ocaml,repr-scheme,
+   repr-python,repr-llvm}`), left out by `gate_key`, `gate_rest_key`, `arbace_runtime_key`, `arbace_embedded_sources`,
+   `arbace_javac_key` and `arbace_javac_rest_key`. `arbace/j2g/embed.ae`'s `excluded` gains `arbace/rust` (rsi's, not on `next`);
+   `test/gate/audit.ae`'s four hosts take the list (`crop-rules`). `gate-key-crops-test` (256 checks): a new file under each of the
+   48 patterns moves none of the three keys, a change to an embedded path (the runtime, jrt, ci, an embedded namespace, the JDK's
+   forms) moves those that hash it, repr/java moves the javac key alone, and embed.ae and the audit name the list alike; run against
+   the old `version.bash` it fails 12 checks. **What moves once** (computed on `next`'s tree, the keys' file lists before and after):
+   - `gate_key` and `gate_rest_key`: their file lists are identical before and after; they move once by the bytes of
+     `bin/lib/version.bash` and `bin/arbace-go` themselves. Every step on `:gate` and `:prog` reruns once (a rebuild of the
+     executables, about 8 min, and the night's checks on them).
+   - `arbace_runtime_key`: 1,461 → 1,424 files, `jdk/ocaml/` out (37 files, o2j's Java, no executable's): the compiled namespaces'
+     key (`aot.key`) moves once, so that night's build takes the two-run path (+3 min).
+   - `arbace_javac_key`: 4,990 → 4,888 files (the crops' namespaces, `jdk/ocaml/`, `bin/lib/oi`, `bin/lib/repr-cpp`): javac's tool
+     rebuilds once and every step on `:javac` and `:javac-prog` reruns once.
+   - Steps on stage 0 alone (C's light and full checks, Java's judgment, reap, provenance) keep their keys: `bin/gate --full --plan`
+     rekeys 100 of 228 steps at the plan (the `:prog` steps whose build is pending show as unchanged and rekey once it is made).
+   From then on a crop's commit under the list moves none of the three keys. Measured in the scratch merges below: with o8, sm9 and
+   the crops' controls overlaid, no step on `:javac` or `:gate` changes key.
+3. **The fragments** (`34ec256f`, then their fixes): `test/gate/crops/*.edn`, each for its merge plan batch, checked in a scratch
+   merge (below).
+
+### The per-crop steps (test/gate/crops/*.edn)
+
+Each fragment is GT9.4's block made to fit the branches as they are: only verbs that exist on the branch it applies to (GT9.4's
+`NEW` verbs, `--only-list`s and id records stay out, as `:clean-only` parts or not at all, until they exist), GTS213 (a)'s rebase
+done in the fragment (OC161's `:prefix` and SC233's record reading become an `:id-re` of one group, ids bare as the subsets name
+them), each crop's `:crops` entry, its controls, and no step's host but the table's. To apply after a batch's merges:
+
+    arbace_tool -p test -m gate.crops splice test/gate/steps.edn test/gate/crops/CROP.edn > .tmp/steps.edn && mv .tmp/steps.edn test/gate/steps.edn
+
+and in the merge take `next`'s side of `bin/lib/gate-run.bash` (the branches' `gate_*_id` functions are `:host-ids` entries),
+of `test/gate/audited-test.bash` and `gate-tests-test.bash` (their fixtures follow the table), and of the branches' `steps.edn`
+hunks but `reap`'s (its `:inputs` and `:summary` per row), which stay. `bin/gate --plan` and `--full --plan` after, then
+`gate.crops check`.
+
+| fragment | batch | essential (chain wall, warm) | nightly, worst case | share | clean | share | notes |
+|---|---|---|---|---|---|---|---|
+| `ocaml.edn` (o8) | 1 | 1.4 min measured (o8) | 48 *est.* (o8's --cmi on every corpus, judges with expect, oi check whole) | 32.4 | 55 *est.* | 130 | 35 once `--cmi-only`, `--no-expect` and `:subset-oi` exist (GT9.4); OVER until then |
+| `scheme.edn` (sm9) | 1 | 1.7 measured | 23 *est.* (SM9) | 32.4 | 30 *est.* | 130 | ecraven and mats rotated (checked: `.sub` and a slice planned) |
+| `cpp.edn` (cx8, cx9, cx10) | 1 | 1.5 measured + ci samples *est.* 1 = 2.5 | 33 *est.* | 24.3 | 55 *est.* | 97 | the lowering's libstdcxx 15th, the compiled runtime programs and dg's modules `:clean-only` until subsets; `cpp-runtime` a build step |
+| `llvm-rust.edn` (re4, llvm-read) | 2 | Rust 1.7 *est.* (test 58 s, three ci programs) | Rust 22 *est.*; LLVM 1-2 | 24.3; 16.2 | Rust 40 + rsi-aot 18 *est.*; LLVM 5 | 97; 65 | library, compiler and crates' round trips `:clean-only` until `--only-list`; LLVM's list is LL1's |
+| `natives.edn` (ocaml-native, rust-native) | 3 | +10 s each *est.* | OCaml +3, Rust +1 | | | | joins the crops' chains and vectors |
+| `haskell.edn` (he4d, haskell-native) | 4 | 1.2 *est.* (37 + 21 + 4 + 10 s) | 12.5 *est.* (round trips 10, hsi 2.3 at 8 jobs, heavy, its own chain) | 32.4 | 50 *est.* | 130 | |
+| `cpp-native.edn` | 5 | +10 s *est.* | +2 (977 files in 101 s) | | | | |
+| `python.edn` (mac/201) | P | 0.7 (VM) | 30 *est.* (VM) | 32.4 | 60 *est.* | 130 | the round trips and parse-check wait for R1's controls |
+
+The nightly figures are worst cases (every step run); the tier is keyed (GTS202 (a)) and the crops' light chains run beside
+the serial run (GTS216 (a)), so their wall is not the four crops'. Every figure but the measured is to be replaced by the first
+two `--nightly` runs after the batch (GTS222 (a)): `--costs` says "measuring" until then.
+
+**The scratch merges** (`.tmp/gt9/scratch.sh` in the worktree: a temporary worktree of `gt9-build`, the branches' changed files
+overlaid (not `test/gate/`, the runner, docs, CLAUDE.md, the Makefile), the fragments spliced, `gate.crops check`, the three
+plans, every key compared with `gt9-build`'s own plan, the worktree removed). Results, 2026-11-05, against `gt9-build` with the keys commit:
+
+| scratch | branches overlaid | `gate.crops check` | plans (essential, full, nightly rows) | concurrent chains | keys of the four crops' and shared steps that change |
+|---|---|---|---|---|---|
+| ocaml | o8, crop-controls | 0 problems | 29, 243, 279 | ocaml-full | reap and c-judge-test (o8's `test/reap/`), and the six steps declaring `"arbace/"` (GTS241) |
+| scheme | sm9, crop-controls | 0 | 29, 249, 285 | scheme-full | the same |
+| cpp | cx8, cx9, cx10, crop-controls | 0 | 31, 251, ... | cpp-full | also everything on `:gate`, `:prog` and C's steps: cx9's `arbace/c/dg.ae` and `test/c/judge_test.ae` (C's own code, embedded) |
+| llvmrust | cx8-10, re4, llvm-read, crop-controls | 0 | 33, 262, ... | cpp-full, llvm-full (rust-full once rsi-aot left its chain) | as cpp |
+| natives | o8, cx8-10, re4, llvm-read, ocaml-native, rust-native, the controls | 0 | 38, 279, ... | ocaml-full, cpp-full, rust-full, llvm-full | as cpp |
+| haskell | he4d, haskell-native, the controls | 0 | 28, ... | haskell-full | also everything on `:gate` and `:prog`: he4d's `bin/arbace-go` |
+| cppnative | cx8-10, cpp-native2, the controls | 0 | 32, 251, ... | cpp-full | as cpp |
+| python | mac/201-python-py7-py11 | 0 | 29, 235, ... | python-full | as ocaml (none of `:gate`'s: Python's `bin/arbace-go` hunk is not on this branch head) |
+| all | every branch above | 0 | 47, 317, 355 | all seven (peaks 23 GiB of 24) | the union of the above |
+
+Found and fixed on the way: OCaml's AOT rotations needed an `:id-re` of one group (the planner refused the subsets' bare names
+against the default reading); Python's rotated steps (`pyi-check-aot-goi`, `pyi-check`) need amd64 records that batch P's night
+writes (the planner refuses a missing universe), so they wait for that night; `rsi-aot` (6 GiB) left `rust-full` for a chain of its
+own; the splice appends a later batch's steps to a gated crop's vector. In every scratch no step on `:javac` changes key through a
+crop's files (before the keys commit, o8's overlay alone moved the javac key and every repr/java step).
+
+### The night commands
+
+Per batch, after its merges and the splice (the day's sample checks first: `bin/gate --plan`, `--full --plan`, `gate.crops
+check`, `test/gate/crops-test.bash`, `test/gate/gate-key-crops-test.bash`):
+
+    bin/gate --pins                       # the gated crops' pins verbs (GTS211), with the four's
+    bin/gate --nightly                    # the crops' light chains beside the serial run (the plan names them)
+    bin/gate --full --costs --last 2      # after the second night: the crops' rows measured, their shares binding (GTS222)
+
+The keys commit's own night is a rekey of the executables, javac's tool and their steps (above), best merged with batch 1, whose
+night rekeys them anyway (cx9's `arbace/c/dg.ae`, the rows' `bin/arbace-go` and `bin/goi` edits).
+
+### Proposed (none decided)
+
+- **GTS240 The move into the runner.** The hosts' wrapper, `gate_host_id` and the concurrent chains live in `bin/gate` so that GT9
+  rekeys nothing. (a) Move them into `bin/lib/gate-run.bash` (and drop `gate_gcc_id`: `:gcc` from the table, the same identity)
+  with the runner's next change that rekeys every step anyway; cost: none beyond that change. (b) Leave them in `bin/gate`; cost:
+  a host's recipe code outside the keyed logic (a bug in it changes identities, which is what rekeys, but no key names the code).
+  *Recommended: (a).*
+- **GTS241 The steps that declare all of `arbace/`.** `java-compiled` (heavy, 22 GiB), `suite-aot-essential`, `suite-aot`, `j2g-edge`,
+  `repr-clojure` and `gate-tests` declare `"arbace/"` whole, so every crop commit under the list reruns them (seen in every scratch
+  merge). (a) A group `:crop-out` with the list's rules, appended to their `:inputs`, after `bin/gate --audit` of each confirms
+  it reads no crop file (night, the audit's cost: those steps' runtime under strace); cost: one rekey of the six. (b) Leave them;
+  cost: about 1.5 h of step seconds a night with a crop commit. *Recommended: (a), the night after the keys commit.*
+- **GTS242 The waived controls.** C++'s token oracle and dg, Scheme's ecraven, mats and R7RS/SRFI suites, Rust's behaviour levels
+  enter with `{:waived ...}` (no cheap crossed pair; GT9.8's "Not covered"). (a) A control each before the rotation's first full
+  week (C++'s dg: CP214's pair; Scheme's ecraven and mats: a benchmark's output judged against another's reference); (b) accept
+  the waivers. *Recommended: (a) for dg, ecraven and mats; (b) for the token oracle and Rust's behaviour levels.*
+- **GTS243 The planner's requests.** Python's `:slice-re` (PY11-PREP's REQUEST cc463c8d) and GT9.4's `{only}`-shaped universes
+  need `test/gate/plan.ae`. (a) Batch them with GTS240's runner change (one rekey); (b) one at a time. *Recommended: (a).*
+- **GTS244 Pins verbs that need stage 0.** `bin/hsi pins --check` evaluates on stage 0; in the clean run's pins step (before stage
+  0) it would build it. (a) The clean run runs the crops' pins after stage 0 (a second pins step, `bin/gate --pins --crops`); (b)
+  require Arbace-free pins verbs. *Recommended: (a).*
+- **GTS245 The hosts' cost in every plan.** A plan with every crop gated hashes the eight crop hosts (3.6 s). (a) Accept; (b) cache
+  an identity by its files' sizes and mtimes. *Recommended: (a).*
