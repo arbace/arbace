@@ -1,0 +1,67 @@
+;; Go-build variant of java.util.logging.Logger (J2G-SPEC §4.6; doc/classes/JAVA-DEFERRED-TRIAGE.md,
+;; "As built: F5 (write-ahead)"): read by j2g only.
+;; - The caller-sensitive methods (getLogger(String), getLogger(String, String),
+;;   getAnonymousLogger(String)) have no caller: Reflection.getCallerClass is not in the Go build.
+;;   They pass none, as the JDK's own null-caller paths do (LogManager.demandLogger takes a null
+;;   caller as no module): a logger asked for by name is a user logger, never a system one (the
+;;   JDK makes a system logger only for a caller of the bootstrap or platform loader, and no class
+;;   of the Go build's world asks Logger.getLogger), and its bundle is looked up without a module.
+;; - demandLogger tests the caller's module only when there is a caller, by the JDK's test
+;;   (DefaultLoggerFinder.isSystem: VM.isSystemDomainLoader of the module's loader; jdk.internal.logger
+;;   is not in the Go build).
+;; - findResourceBundle looks bundles up by ResourceBundle.getBundle(name, locale): jrt's
+;;   ResourceBundle has one registry of classes and no class loaders or modules
+;;   (overlay/jdk/java.base/java/util/ResourceBundle.java), so the JDK's three lookups (the context
+;;   loader's unnamed module, the caller's module, the module's loader) are one; the cache of the
+;;   last bundle is the JDK's. RbAccess (SharedSecrets' JavaUtilResourceBundleAccess) is cut.
+;; The replacing members keep jdk26u's code where they keep it (baf63fb,
+;; src/java.logging/share/classes/java/util/logging/Logger.java; Copyright (c) Oracle and/or its
+;; affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace
+;; authors; Eclipse Public License 1.0.
+(in-ns 'java.util.logging)
+
+(j2g/variant Logger$RbAccess
+  (j2g/cut (field ^:static ^:final ^JavaUtilResourceBundleAccess RB_ACCESS)))
+
+(j2g/variant Logger
+  (method ^:private ^:static demandLogger ^Logger [^String name ^String resourceBundleName
+                                                   ^{:tag (Class ?)} caller]
+    (let [manager (LogManager/getLogManager)]
+      (when-not SystemLoggerHelper/disableCallerCheck
+        (when (and (some? caller)
+                   (jdk.internal.misc.VM/isSystemDomainLoader (.getClassLoader (.getModule caller))))
+          (return (.demandSystemLogger manager name resourceBundleName caller))))
+      (.demandLogger manager name resourceBundleName caller)))
+
+  (method ^:public ^:static getLogger ^Logger [^String name]
+    (Logger/getLogger name (cast Class nil)))
+
+  (method ^:public ^:static getLogger ^Logger [^String name ^String resourceBundleName]
+    (Logger/getLogger name resourceBundleName (cast Class nil)))
+
+  (method ^:public ^:static getAnonymousLogger ^Logger [^String resourceBundleName]
+    (let [manager (LogManager/getLogManager)]
+      (.drainLoggerRefQueueBounded manager)
+      (let [result (Logger. nil resourceBundleName (cast Module nil) manager false)]
+        (set! (.-anonymous result) true)
+        (let [root (.getLogger manager "")] (.doSetParent result root) result))))
+
+  (method ^:private ^:synchronized findResourceBundle ^ResourceBundle [this ^String name
+                                                                       ^boolean useCallersModule]
+    (when (some? name)
+      (let [currentLocale (Locale/getDefault)
+            lb loggerBundle
+            ^:mutable catalog (.catalog this)]
+        (cond
+          (and (some? (.-userBundle lb)) (.equals name (.-resourceBundleName lb))) (.-userBundle lb)
+          (and (and (some? catalog) (.equals currentLocale catalogLocale))
+               (.equals name catalogName))
+            catalog
+          :else
+            (try
+              (set! catalog (ResourceBundle/getBundle name currentLocale))
+              (set! catalogRef (WeakReference. catalog))
+              (set! catalogName name)
+              (set! catalogLocale currentLocale)
+              catalog
+              (catch MissingResourceException ex nil)))))))

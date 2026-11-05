@@ -1,0 +1,159 @@
+;; Go-build variant of java.util.logging.FileHandler (J2G-SPEC §4.6; doc/classes/JAVA-DEFERRED-TRIAGE.md,
+;; "As built: F5 (write-ahead)"): read by j2g only. (Named LoggingFileHandler.ae: FileHandler.ae is
+;; sun.net.www.protocol.file.Handler's.)
+;; - The lock file is held by an open output stream, not a FileChannel's lock: FileChannel and its
+;;   FileLock are not in the Go build (F7). openFiles keeps the JDK's protocol (CREATE_NEW, else an
+;;   existing regular lock file in a writable directory opened for appending) and its in-process
+;;   table of locks (`locks`), which alone decides availability: an existing lock file that no
+;;   handler of this process holds is taken, as the JDK takes one whose FileLock it obtains (a lock
+;;   left by a dead process). Two processes sharing a pattern are not excluded from each other.
+;; - generate's %h has no set-UID check (VM.isSetUID is not jrt's; the Go build never runs set-UID).
+;; The replacing members keep jdk26u's code where they keep it (baf63fb,
+;; src/java.logging/share/classes/java/util/logging/FileHandler.java; Copyright (c) Oracle and/or its
+;; affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace
+;; authors; Eclipse Public License 1.0.
+(in-ns 'java.util.logging)
+
+(j2g/variant FileHandler
+  (j2g/cut (field ^:private ^FileChannel lockFileChannel))
+
+  (j2g/add (field ^:private ^OutputStream lockFileStream))
+
+  (method ^:private openFiles :throws [IOException] ^void [this]
+    (let [manager (LogManager/getLogManager)]
+      (when (< count 1) (throw (IllegalArgumentException. (java-str "file count = " count))))
+      (when (< limit 0) (set! limit 0))
+      (java-assert (some? pattern) "pattern should not be null")
+      (java-assert (not (.isEmpty pattern)) "pattern should not be empty")
+      (let [em (InitializationErrorManager.)]
+        (.setErrorManager this em)
+        (let [^:mutable ^int unique -1]
+          (while true
+            (set! unique (unchecked-inc-int unique))
+            (when (> unique maxLocks)
+              (throw (IOException. (java-str "Couldn't get lock for " pattern))))
+            (set! lockFileName (java-str (.toString (.generate this pattern 0 unique)) ".lck"))
+            (locking locks
+              (when-not (.contains locks lockFileName)
+                (let [lockFilePath (Paths/get lockFileName (new String/1 []))
+                      ^:mutable ^OutputStream stream nil
+                      ^:mutable ^int retries -1]
+                  (while (and (nil? stream)
+                              (< (let [old-1 retries]
+                                   (set! retries (unchecked-inc-int retries))
+                                   old-1)
+                                 1))
+                    (try
+                      (set! stream
+                            (Files/newOutputStream lockFilePath
+                                                   (new
+                                                     OpenOption/1
+                                                     [StandardOpenOption/CREATE_NEW
+                                                      StandardOpenOption/WRITE])))
+                      (catch AccessDeniedException ade
+                        (when-not (and (Files/isRegularFile lockFilePath LinkOption/NOFOLLOW_LINKS)
+                                       (.isParentWritable this lockFilePath))
+                          (throw ade)))
+                      (catch FileAlreadyExistsException ix
+                        (if (and (Files/isRegularFile lockFilePath LinkOption/NOFOLLOW_LINKS)
+                                 (.isParentWritable this lockFilePath))
+                            (try
+                              (set! stream
+                                    (Files/newOutputStream
+                                      lockFilePath
+                                      (new OpenOption/1
+                                           [StandardOpenOption/WRITE StandardOpenOption/APPEND])))
+                              (catch NoSuchFileException x)
+                              (catch IOException x (break)))
+                            (break)))))
+                  (when (some? stream)
+                    (set! lockFileStream stream)
+                    (.add locks lockFileName)
+                    (break))))))
+          (set! files (new File/1 count))
+          (loop [^int i 0]
+            (when (< i count)
+              (aset files i (.generate this pattern i unique))
+              (recur (unchecked-inc-int i))))
+          (if append (.open this (aget files 0) true) (.rotate this))
+          (let [ex (.-lastException em)]
+            (when (some? ex)
+              (cond
+                (instance? IOException ex) (throw (cast IOException ex))
+                (instance? SecurityException ex) (throw (cast SecurityException ex))
+                :else (throw (IOException. (java-str "Exception: " ex)))))
+            (.setErrorManager this (ErrorManager.)))))))
+
+  (method ^:static generate :throws [IOException] ^File [^String pat ^int count ^int generation
+                                                         ^int unique]
+    (let [path (Paths/get pat (new String/1 []))
+          ^:mutable ^Path result nil
+          ^:mutable sawg false
+          ^:mutable sawu false
+          ^:mutable word (StringBuilder.)
+          ^:mutable ^Path prev nil]
+      (for-each [^Path elem path]
+        (when (some? prev)
+          (set! prev (.resolveSibling prev (.toString word)))
+          (set! result (if (nil? result) prev (.resolve result prev))))
+        (let [pattern (.toString elem)
+              ^:mutable ^int ix 0]
+          (.setLength word 0)
+          (while (< ix (.length pattern))
+            (let [ch (.charAt pattern ix)]
+              (set! ix (unchecked-inc-int ix))
+              (let [^:mutable ^char ch2 0]
+                (when (< ix (.length pattern))
+                  (set! ch2 (Character/toLowerCase (.charAt pattern ix))))
+                (when (== ch \%)
+                  (cond
+                    (== ch2 \t)
+                      (let [^:mutable tmpDir (System/getProperty "java.io.tmpdir")]
+                        (when (nil? tmpDir) (set! tmpDir (System/getProperty "user.home")))
+                        (set! result (Paths/get tmpDir (new String/1 [])))
+                        (set! ix (unchecked-inc-int ix))
+                        (.setLength word 0)
+                        (continue))
+                    (== ch2 \h)
+                      (do
+                        (set! result (Paths/get (System/getProperty "user.home") (new String/1 [])))
+                        (set! ix (unchecked-inc-int ix))
+                        (.setLength word 0)
+                        (continue))
+                    (== ch2 \g)
+                      (do
+                        (set! word (.append word generation))
+                        (set! sawg true)
+                        (set! ix (unchecked-inc-int ix))
+                        (continue))
+                    (== ch2 \u)
+                      (do
+                        (set! word (.append word unique))
+                        (set! sawu true)
+                        (set! ix (unchecked-inc-int ix))
+                        (continue))
+                    :else
+                      (when (== ch2 \%)
+                        (set! word (.append word \%))
+                        (set! ix (unchecked-inc-int ix))
+                        (continue))))
+                (set! word (.append word ch)))))
+          (set! prev elem)))
+      (when (and (> count 1) (not sawg)) (set! word (.append (.append word \.) generation)))
+      (when (and (> unique 0) (not sawu)) (set! word (.append (.append word \.) unique)))
+      (cond
+        (not (.isEmpty word))
+          (let [n (.toString word)
+                ^Path p (if (nil? prev) (Paths/get n (new String/1 [])) (.resolveSibling prev n))]
+            (set! result (if (nil? result) p (.resolve result p))))
+        (nil? result) (set! result (Paths/get "" (new String/1 []))))
+      (if (nil? (.getRoot path)) (.toFile result) (.toFile (.resolve (.getRoot path) result)))))
+
+  (method ^:public ^:synchronized close ^void [this]
+    (.close super)
+    (when (some? lockFileName)
+      (try (.close lockFileStream) (catch Exception ex))
+      (locking locks (.remove locks lockFileName))
+      (.delete (File. lockFileName))
+      (set! lockFileName nil)
+      (set! lockFileStream nil))))
