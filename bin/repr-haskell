@@ -128,6 +128,10 @@
 #   bin/repr-haskell tc-dump [-o DIR] FILE... [--ghc FLAG...]
 #                                 HF3: GHC's typed output (the helper's tc verb): the module's things with their types in the
 #                                 iface verb's forms, its instances, its desugared Core (-O0) with the types erased, DIR/FILE.tc.edn
+#   bin/repr-haskell stg-check [DIR]
+#                                 HF5-HF6: the match compiler, CorePrep, CoreToStg over DIR's S*.hs (default test/haskell/stg):
+#                                 Core against the tc dump, STG against GHC's -O0 STG, each program run on hsi from our STG
+#                                 against GHC's output (HSI_LIBS: the libraries' STG dumps)
 #   bin/repr-haskell typecheck-check [DIR]
 #                                 HF3: the elaborator (arbace.repr.haskell.typecheck) against the tc dump over DIR's T*.hs
 #                                 (default test/haskell/typecheck): types and evidence equal, the negative control differs
@@ -742,6 +746,47 @@ rename_check() {
   return $st
 }
 
+# stg_check [DIR]: HF5-HF6 (doc/haskell/FRONTEND-SURVEY.md, "As built: HF5-HF6"): every S*.hs of DIR (default
+# test/haskell/stg, Haskell 2010 programs with a main) read natively, renamed, elaborated, desugared by the match
+# compiler (arbace.repr.haskell.desugar) and translated to STG (arbace.repr.haskell.tostg); the desugared Core judged
+# against the helper's tc verb (Core in full, after the judge's normalisation), our STG compared with GHC's -O0 STG
+# (the helper's stg mode) by arbace.repr.haskell.stgcmp, and the final judge: each program run on hsi from our STG
+# (bin/hsi's driver, the libraries' dumps of HSI_LIBS) against GHC's -O0 build's output. Light: seconds a program.
+# Work in .tmp/repr-haskell/stg-check/
+stg_check() {
+  local d=${1:-$root/test/haskell/stg} w=$rh/stg-check files trees=() f st=0 n pass=0 total=0
+  rm -rf "${w:?}"; mkdir -p "$w"
+  files=($(cd "$d" && ls S*.hs))
+  "$helper" iface --libdir "$libdir" -o "$w/if" --ghc -XHaskell2010 --files Prelude Data.List Data.Maybe Data.Char Control.Monad > "$w/if.log" 2>&1 || true
+  local libs=${HSI_LIBS:-$root/.tmp/hsi/dumps/stg}
+  # every program is a module Main: one at a time
+  for f in "${files[@]}"; do
+    n=${f%.hs}
+    (cd "$d" && "$helper" tc --libdir "$libdir" -o "$w/ghc" --ghc -XHaskell2010 -i. --files "$f") > "$w/$n.ghc.log" 2>&1 || { tail -5 "$w/$n.ghc.log" >&2; st=1; continue; }
+    (cd "$d" && "$helper" rn --libdir "$libdir" -o "$w/rn" --ghc -XHaskell2010 -i. --files "$f") > "$w/$n.rn.log" 2>&1 || { tail -5 "$w/$n.rn.log" >&2; st=1; continue; }
+    (cd "$d" && arbace_tool -m arbace.repr.haskell.native read -o "$w/nd" --flags "-XHaskell2010" "$f" > "$w/$n.read.log") || { tail -5 "$w/$n.read.log" >&2; st=1; continue; }
+    arbace_tool -m arbace.repr.haskell.rename check --ifaces "$w/if" --local "$w/ifl-$n" --ghc "$w/rn" -o "$w/tree" "$w/nd/$f.edn" > "$w/$n.rename.txt" 2>&1 || st=1
+    grep '^rename-check:' "$w/$n.rename.txt"
+    arbace_tool -m arbace.repr.haskell.tostg compile --ifaces "$w/if" --local "$w/tifl-$n" --libs "${libs//:/,}" --ghc "$w/ghc" -o "$w/stg" "$w/tree/$f.rn-tree.edn" | tee -a "$w/compile.txt"
+  done
+  local exe; exe=$("$root/bin/hsi" build)
+  local img=${HSI_IMAGE:-$root/.tmp/hsi/image} la=() l
+  IFS=: read -r -a dirs <<< "$libs"; for l in "${dirs[@]}"; do la+=(--lib "$l"); done
+  "$exe" image --out "$img" "${la[@]}" 2> "$w/image.log" || { cat "$w/image.log" >&2; return 1; }
+  for f in "${files[@]}"; do
+    n=${f%.hs}; total=$((total + 1))
+    mkdir -p "$w/ref/$n"
+    (cd "$d" && "$helper" stg -o "$w/ref/$n" --libdir "$libdir" --ghc -O0 -outputdir "$w/ref/$n/obj" -o "$w/ref/$n/prog" --files "$f") > "$w/ref/$n.log" 2>&1 || true
+    (cd "$d" && ghc -O0 -outputdir "$w/ref/$n/gobj" -o "$w/ref/$n/ghc-prog" "$f") > "$w/ref/$n.ghc.log" 2>&1 && "$w/ref/$n/ghc-prog" > "$w/ref/$n.out" 2>&1 || true
+    arbace_tool -m arbace.repr.haskell.stgcmp "$w/ref/$n/Main.stg.ae" "$w/stg/$n/Main.stg.ae" > "$w/$n.stgcmp" 2>&1 || true
+    (ulimit -v $((${ARBACE_MEM_GIB:-3} * 1048576)); timeout 60 "$exe" run "${la[@]}" --image "$img" --prog "$w/stg/$n" --name "$n" > "$w/$n.out" 2> "$w/$n.err") || true
+    if cmp -s "$w/$n.out" "$w/ref/$n.out"; then pass=$((pass + 1)); echo "run ok $n ($(head -1 "$w/$n.stgcmp"))"
+    else echo "run FAIL $n ($(head -1 "$w/$n.stgcmp")): $(head -c 300 "$w/$n.err" | tr '\n' ' ')"; st=1; fi
+  done
+  echo "stg-check: $pass of $total programs run on hsi from Arbace's STG with GHC's output"
+  return $st
+}
+
 # typecheck_check [DIR]: the elaborator's check (HF3; doc/haskell/FRONTEND-SURVEY.md, "As built: HF3 (start)"): every
 # T*.hs of DIR (default test/haskell/typecheck, Haskell 2010) read natively, renamed (rename-check's judge first), elaborated
 # by arbace.repr.haskell.typecheck and judged against the helper's tc verb (GHC's types of the module's things, its
@@ -881,6 +926,7 @@ case $cmd in
            while [ $# -gt 0 ]; do case $1 in --ghc) shift; flags=("$@"); break ;; *) files+=("$1"); shift ;; esac; done
            hsdump tc -o "$out" --ghc "${flags[@]}" --files "${files[@]}" ;;
   typecheck-check) ghc_check; build; typecheck_check "$@" ;;
+  stg-check) ghc_check; build; stg_check "$@" ;;
   test) exec "$root/bin/lib/repr-haskell/test" "$@" ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

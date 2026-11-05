@@ -210,7 +210,8 @@
 (def ^:dynamic *genv* nil)      ; atom {NAME type}: the values' types (ids, methods, constructors)
 (def ^:dynamic *classes* nil)   ; atom {NAME {:tvs [...] :supers [pred...] :methods [NAME...]}}
 (def ^:dynamic *insts* nil)     ; atom [{:dfun NAME :tvs :ctx :head pred}]
-(def ^:dynamic *cons* nil)      ; atom {NAME {:arity n :tycon NAME :fields [...]}}
+(def ^:dynamic *cons* nil)      ; atom {NAME {:arity n :tycon NAME :fields [...] :tag n}}
+(def ^:dynamic *tycons* nil)    ; atom {TYCON {:flavour data|newtype :cons [NAME...]}} (HF5-HF6: the match compiler's and STG's)
 (def iface-cache (atom {}))
 (def ^:dynamic *unfoldings* nil) ; atom {NAME core}: the INLINE default methods' unfoldings (hsiface/unfoldings)
 
@@ -226,14 +227,19 @@
       id (swap! *genv* assoc (strs (nth t 1)) (conv-type (nth t 3)))
       datacon (let [n (strs (nth t 1)) ty (conv-type (nth t 5))]
                 (swap! *genv* assoc n ty)
-                (swap! *cons* assoc n {:arity (nth t 3) :fields (mapv #(ext-name "fld" (nmod n) %) (nth t 4))}))
+                (swap! *cons* update n merge {:arity (nth t 3) :fields (mapv #(ext-name "fld" (nmod n) %) (nth t 4))
+                                              :strict (mapv #(= "HsStrict" %) (:impl-bangs (nth t 6 {})))}))
       class (let [n (strs (nth t 1)) info (nth t 5 {})
                   tvs (vec (:tvs info))
                   supers (vec (keep (fn [f] (let [p (conv-type f)] (when (= :tc (first p)) [(second p) (nth p 2)]))) (nth t 4)))]
               (doseq [[mn _ mty] (nth t 3)] (swap! *genv* assoc (strs mn) (conv-type mty)))
               (swap! *classes* assoc n {:tvs tvs :supers supers :methods (mapv (comp strs first) (nth t 3))
                                         :defaults (into {} (keep (fn [[m d]] (when d [(strs m) (strs d)])) (:defaults info)))}))
-      tycon (let [info (nth t 6 {})]
+      tycon (let [info (nth t 6 {}) tn (strs (nth t 1))]
+              (when (and *tycons* (contains? '#{data newtype} (nth t 3)))
+                (swap! *tycons* assoc tn {:flavour (nth t 3) :cons (mapv strs (nth t 4))})
+                (doseq [[i c] (map-indexed vector (nth t 4))]
+                  (swap! *cons* update (strs c) assoc :tycon tn :tag (inc i))))
               (when-let [[tvs rhs] (:synonym info)]
                 (swap! *syns* assoc (strs (nth t 1)) [(vec tvs) (conv-type rhs)])))
       nil)))
@@ -252,6 +258,14 @@
   "The wired-in constructors the interfaces do not list: [] and (:), (), the tuples"
   []
   (let [a [:tv "a"]]
+    (when *tycons*
+      (swap! *tycons* assoc list-tc {:flavour 'data :cons [(ext-name "data" "GHC.Internal.Types" "[]") (ext-name "data" "GHC.Internal.Types" ":")]})
+      (swap! *cons* assoc (ext-name "data" "GHC.Internal.Types" "[]") {:arity 0 :tycon list-tc :tag 1 :fields []})
+      (swap! *cons* assoc (ext-name "data" "GHC.Internal.Types" ":") {:arity 2 :tycon list-tc :tag 2 :fields []})
+      (doseq [n (cons 0 (range 2 8))]
+        (let [c (ext-name "data" "GHC.Internal.Tuple" (occ (tuple-con n)))]
+          (swap! *tycons* assoc (tuple-tc n) {:flavour 'data :cons [c]})
+          (swap! *cons* assoc c {:arity n :tycon (tuple-tc n) :tag 1 :fields []}))))
     (swap! *genv* assoc (ext-name "data" "GHC.Internal.Types" "[]") [:forall ["a"] [] (list-ty a)])
     (swap! *genv* assoc (ext-name "data" "GHC.Internal.Types" ":") [:forall ["a"] [] (fn-ty a (fn-ty (list-ty a) (list-ty a)))])
     (swap! *genv* assoc (ext-name "data" "GHC.Internal.Tuple" "()") [:tc (tuple-tc 0) []])
@@ -1002,6 +1016,9 @@
         res [:tc tn (mapv (fn [x] [:tv x]) names)]
         defn* (arg d 5) cs (arg defn* 5)
         conlist (case (con cs) DataTypeCons (arg cs 2) NewTypeCon [(arg cs 1)] [])]
+    (when *tycons*
+      (swap! *tycons* assoc tn {:flavour (if (= 'NewTypeCon (con cs)) 'newtype 'data)
+                                :cons (mapv (fn [c] (nm (arg (lval c) 2))) conlist)}))
     (doseq [c conlist]
       (let [cv (lval c) cn (nm (arg cv 2)) det (arg cv 6)
             cdf-type (fn [f] (hs-type tvs (last (butlast f))))
@@ -1018,7 +1035,14 @@
         (swap! *genv* assoc cn [:forall names [] ty])
         ;; a field's selector: forall tvs. T tvs -> field type
         (doseq [[f t] fields] (swap! *genv* assoc f [:forall names [] (fn-ty res t)]))
-        (swap! *cons* assoc cn {:arity (count argtys) :tycon tn :fields (mapv first fields)})))
+        (swap! *cons* assoc cn {:arity (count argtys) :tycon tn :fields (mapv first fields)
+                                :tag (inc (.indexOf ^java.util.List (mapv (fn [c] (nm (arg (lval c) 2))) conlist) cn))
+                                :strict (vec (for [x (case (con det)
+                                                       PrefixCon (last (rest det))
+                                                       InfixCon [(arg det 1) (arg det 2)]
+                                                       RecCon (mapcat (fn [f] (let [fv (lval f)] (repeat (count (arg fv 2)) (arg fv 3)))) (lval (arg det 1)))
+                                                       [])]
+                                                   (boolean (some #(and (seq? %) (= 'HsBangTy (first %)) (some #{'SrcStrict} (flatten (seq %)))) (tree-seq coll? seq x)))))})))
     ;; the derived instances (HF4 generates their bindings; here their entries in the instance table): stock
     ;; deriving's context approximated as GHC infers it for Haskell 2010's classes, the class at each parameter
     ;; that occurs in a field
@@ -1246,7 +1270,7 @@
         m module]
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
               *genv* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
-              *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {})]
+              *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})]
       (load-ifaces!)
       (let [tycl (for [d decls :let [v (lval d)] :when (= 'TyClD (con v))] (arg v 2))
             _ (doseq [t tycl] (case (con t) SynDecl (syn-decl! t) nil))
@@ -1264,9 +1288,9 @@
             dms (vec (mapcat (fn [t] (when (= 'ClassDecl (con t)) (default-methods env (nm (arg t 3))))) tycl))
             ibs (vec (mapcat #(instance-binds env %) insts))
             sels (vec (for [[cn info] @*cons* :when (= m (nmod cn)) f (:fields info)]
-                        (let [xs (mapv (fn [g] (fresh-lv (occ g))) (:fields info))]
-                          (list 'bind f (list 'lam [(fresh-lv "ds")]
-                                              (list 'case (list 'lv "ds" "sel") (fresh-lv "wild")
+                        (let [xs (mapv (fn [g] (fresh-lv (occ g))) (:fields info)) ds (fresh-lv "ds")]
+                          (list 'bind f (list 'lam [ds]
+                                              (list 'case ds (fresh-lv "wild")
                                                     [(list 'alt cn xs (nth xs (.indexOf ^java.util.List (:fields info) f)))]))))))
             _ (default! @*wanteds*)
             types (into {} (for [[n e] env :when (and (vector? n) (ext? n) (= m (nmod n)))]
@@ -1283,6 +1307,9 @@
          :classes (into {} (for [[n info] @*classes* :when (= m (nmod n))] [n (dissoc info :binds)]))
          :insts (vec (filter (fn [i] (= m (nmod (:dfun i)))) @*insts*))
          :core (mapv resolve-core (concat fimports core dms ibs sels))
+         ;; the tables HF5-HF6 need (the match compiler's constructor families, STG's data and dictionaries)
+         :all-cons @*cons* :tycons @*tycons*
+         :all-classes (into {} (for [[n info] @*classes*] [n (dissoc info :binds)]))
          :errors @*errors*}))))
 
 ;;; ------------------------------------------------------------------------------------------
