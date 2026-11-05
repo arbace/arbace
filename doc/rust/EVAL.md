@@ -46,6 +46,9 @@ budget, RES14 (a)):
 | `runtime-ci [OUT]` | std's lowered units, the layer and compiler_builtins read as ci's libraries, ci's ports (§9) | RE4 |
 | `run [--edition E] FILE.rs [-- ARG...]`, `check [--aot] [--corpus samples,ui] [--set S] [--only LIST] [--sample N [--offset K]] [--record]`, `divergences [--aot]`, `record-ref [--sample N] [--only LIST]` | ci; cf2g; the classes; the judge's runs recorded (§9) | RE4 |
 | `lower-unit [FILE.ll...]` | the lowering's unit cases (`test/rust/lower/`) against lli | RE4 |
+| `synthetic [generate\|check\|ref]` | the synthetic corpus (§6, `test/rust/synthetic/`) generated from `test/rust/synthetic.edn` and its templates; checked as committed; its expected statuses against the judge's runs | RE5 |
+| `judge-test` | the check's judge without ci: the samples and the synthetic corpus judged from the judge's own runs (all pass), one output changed (fails), the controls differing; seconds | RE5 |
+| `check --essential`; `list`/`record-ref`/`check --corpus samples,synthetic,ui` | the nightly's essential programs (`test/rust/essential.txt`); the synthetic corpus as a corpus of the check | RE5 |
 
 The pieces: `arbace/rust/lower.ae` (`arbace.rust.lower`: the driver over the lowering, the native-std leg's substitution),
 `arbace/rust/check.ae` (`arbace.rust.check`: the sets, the plan's filter, the judge), `arbace/rust/rt/native.c.ae` (§4's layer),
@@ -151,9 +154,19 @@ single-threaded and spawns no process.
 
 rsi's own samples (`test/rust/eval/`, `bin/rsi list --set samples`): `intrinsics.rs` (§5's intrinsics at several widths, i128),
 `vectors.rs` (HashMap, HashSet, `core::simd`), `panics.rs` (catch_unwind's payloads, overflow checks, nested catches,
-`process::exit`). The synthetic corpus by construct (GT8.6, GTS207 (a)) is RE5's: its generator writes programs by the
-Reference's chapters (expressions, patterns, traits and `dyn`, closures and iterators, panics and drops, integer overflow at every
-width, i128, floats' formatting, slices and strings, collections, `fmt`), each printing what it computes, a few hundred files.
+`process::exit`). **The synthetic corpus** by construct (GT8.6, GTS207 (a); RE5, RES35): `bin/rsi synthetic` writes
+`test/rust/synthetic/*.rs` from the table `test/rust/synthetic.edn` (`{:id :template :status :params}`) and the templates
+`test/rust/synthetic-templates/*.tmpl` (`@NAME@` replaced by the row's params), `arbace.rust.synthetic`; the files are committed
+(`check` requires them to be what the table gives). 67 programs at RE5: integer operations at each of the 12 widths (`int-ops`:
+checked, wrapping, saturating and overflowing arithmetic, bit counts, rotations, byte swaps, shifts, radix parsing, formatting of
+the extremes, casts to floats), floats' formatting and operations at f32 and f64, 15 handwritten programs by chapter (patterns,
+traits and `dyn`, closures, iterators, drops and unwinding, strings and unicode, collections, `fmt`, i128, casts at every width pair,
+`Rc`/`RefCell`, algorithms, errors, generics and lifetimes, structs/enums/unions/statics), 15 integer-overflow panics (each operator,
+at several widths) and 19 other panics (index, unwrap, expect, `RefCell`, string boundary, `assert_eq!`, slice range, ...) with
+status 101 and the message, and the exits: `process::exit(37)`, `main` returning `Err` (1), `abort` (134), the trap (132). Every
+program prints what it computes, with no input, time or hash order (maps are sorted before printing). A program is a row of the
+check's corpus `synthetic` (prefix `test/rust/synthetic`); the table's `:status` is what rustc's run gives
+(`bin/rsi synthetic ref` compares it with `test/rust/ref-rustc-1.99.1.edn`).
 
 ## 7. The judgment and the classes
 
@@ -260,4 +273,11 @@ whose judge runs differ and that does not pass is `:nondet` (not a failure); eve
 `test/rust/divergences.edn` (AOT: `divergences-aot.edn` first) or fails the check; the record `test/rust/check-linux-amd64.edn`
 (`check-aot-linux-amd64.edn`) holds `[ID RESULT REASON]`, a recorded pass that fails is a regression; the per-program seconds
 (IR, lowering, ci's build, run) in `test/rust/check{,-aot}-times-linux-amd64.edn` (GT8, GTS205); the negative control
-`test/rust/controls.edn` (GTS81 (a)). `--only LIST`, `--sample N --offset K`, `--set` choose subsets (never `--record`ed).
+`test/rust/controls.edn` (GTS81 (a)). `--only LIST`, `--sample N --offset K`, `--set` choose subsets (never `--record`ed); `--essential` is `--only test/rust/essential.txt`.
+
+**Signals** (RE5, closing RE4's open mapping): rustc's `llvm.trap` (`core::intrinsics::abort`, an `unreachable` the code reaches) is a
+`ud2`, SIGILL, status 132 in the judge's run (`128 + signal`, as the shell reports it); the lowering makes it `__builtin_trap`, which
+gcc compiles to `ud2` (132) and ci raises as `Fault{SIGILL}` (`go/arbace/ci/natives.ae`), which `RunMain` reports as 128 + 4. The
+mapping is the identity, no judge rule is needed (checked: `bin/ci run` of a C program gives 132 for `__builtin_trap`, 134 for `abort`,
+as gcc's; the synthetic programs `trap.rs` and `abort.rs` are the Rust cases, rustc's 132 and 134). `std::process::abort` and
+std's own aborts (a panic in a drop while unwinding, a panic that cannot unwind) are `abort()`, 134 (rustc's run: checked natively; on ci not yet run).

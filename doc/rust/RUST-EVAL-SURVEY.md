@@ -909,3 +909,89 @@ conventions and harmless; redone with files. The first runtime-ci read (about 97
 memory pressure; read-lib now resumes an interrupted read. The day's AOT run was stopped and restarted under `.tmp/heavy` at the
 coordinator's resource note. Scratch in the worktree's `.tmp/`: `rsi/` (std's build, the lowered runtime with `ci/`), `ci-runtime/`,
 `ci-musl/`, `rsi-check/`, `rsi-check-f/`, `rsi-aot/`, `rsi-ref/`, `t1/`, `t2/`, `cb/`, `cppsame/` (the C++ comparison), `base-unit/`.
+
+## As built: RE5 (write-ahead, 2026-11-05)
+
+Branch `rust-re5` from `rust-re4` (`5ea3caa2`), by an agent on the main host during the day's keyed `--full` (light tier: no gate, no
+build, no heavy lock; stage 0 `/root/arbace/target/seed/amd64/arbace`, checkout sources evaluated with `ARBACE_PATH_FIRST=1
+ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`; processes under 2 GiB). **What the day could not do**: no program ran on ci. The UI suite's source
+(`bin/repr-rust corpus fetch rustc-1.99.1-ui`) and `rust-src` are not on the host and the day had no network; std's lowered ci library
+(`bin/rsi runtime-ci`: about 100 minutes, a 7 GiB process) is far over the day's limits; and `bin/rsi lower-check` stopped itself at the
+light tier's disk rule (the disk at 83%, `RSI_DISK_MAX` 80). So RE5's exit criterion (the check over the UI programs and the synthetic
+corpus, none failing, every non-pass in a class) is **not met**; its machinery and the corpus are built, proved without ci, and the
+night's commands written (RE5.4).
+
+### RE5.1 What was built
+
+| piece | file | what |
+|---|---|---|
+| the verbs | `bin/rsi run`, `check`, `divergences`, `record-ref` were RE4's (§RE4.1); RE5 adds `synthetic [generate\|check\|ref]`, `judge-test`, `check --essential`, and the corpus `synthetic` in `list`, `record-ref`, `check`, `lower-check` (programs of the checkout need no UI source tree) | the records' format is RE4's: `test/rust/ref-rustc-1.99.1.edn`, `test/rust/check{,-aot}-linux-amd64.edn`, `check{,-aot}-times-linux-amd64.edn`, classes `divergences{,-aot}.edn`, `check-known.edn`, `check-budget.edn` |
+| the synthetic corpus (GT8.6, GTS207 (a)) | `arbace/rust/synthetic.ae`, `test/rust/synthetic.edn` (67 rows), `test/rust/synthetic-templates/` (23 templates), `test/rust/synthetic/` (the generated programs, committed) | EVAL.md §6; every program compiles with rustc 1.99.1 at `-O0` under the plan's flags, runs deterministically (two runs equal but the thread id the judge's normalization removes), and gives the status of its row |
+| the judge's runs | `test/rust/ref-rustc-1.99.1.edn` | the 67 and the 5 samples recorded (165 maps with the UI sample's 93); the 5 samples' digests came out as before |
+| the controls (GTS81 (a)) | `test/rust/controls.edn` | three more: i32 against i64's run, two panics' stderr, the trap's status against the abort's |
+| the judge's test | `bin/rsi judge-test`, `arbace.rust.check/make-fake` | without ci: the samples and the synthetic corpus as built and run with the judge's own results (72 of 72 pass, the 4 controls differ), then `fmt.rs`'s output changed (it fails, `differ stdout`); 34 s on stage 0 |
+| the essential list | `test/rust/essential.txt`, `check --essential` | 13 programs, one per class of what the lowering and ci do; the coverage subset proper (GTS205) is chosen from the first whole run's records (RES38) |
+| Makefile | `rsi-synthetic`, `rsi-synthetic-check`, `rsi-judge-test`, `rsi-check-essential` | |
+| doc | EVAL.md §2 (verbs), §6 (the corpus), §9 (the signals) | |
+
+### RE5.2 Results
+
+- **SIGILL (RE4's open mapping)**: none needed. rustc's trap is a `ud2` and status 132 (`128 + signal`); the lowering's `__builtin_trap`
+  is 132 on gcc and on ci (`Fault{SIGILL}` reported as 128 + 4); `abort` is 134 on both. Checked: `bin/ci run` of a C program: 132 for
+  the trap, 134 for `abort()`; rustc: `std::process::abort` 134, `core::intrinsics::abort` 132. The Rust cases on ci (`trap.rs`, `abort.rs`)
+  are in the essential list.
+- **The corpus against rustc**: `bin/rsi synthetic ref`: 67 programs, 0 against the judge, 0 nondeterministic (statuses: 0 in 29, 101 in
+  34, 1, 37, 132, 134). `bin/rsi synthetic check`: 67 programs, 0 stale.
+- **Judge**: `bin/rsi judge-test` passes (above).
+- The synthetic programs were first drafted with 7 rustc errors (macro syntax, borrows in one `println!`), fixed in the templates; one
+  drafted program (a panic in a drop while unwinding) was left out: std prints a backtrace with addresses on that abort, which no
+  normalization of run-program's covers (RES39).
+- The judge's runs of the day were recorded against the older std build the host had (`/root/arbace/.tmp/rsi/std`, 103 units, from the
+  RE3 day's first profile), not the pin's 110 units (`test/rust/runtime/ir.sha256`; `rust-src` was not at hand to build it): the 5
+  samples' digests are the same as recorded at RE4 against the pin's, and the night's `record-ref` records everything again.
+
+### RE5.3 What is left of RE5 and after
+
+- RE5: the whole check on ci (RE5.4): the UI programs and the synthetic corpus, classes and fixes for what comes out; the costs against
+  §10.2 (RE4.3 measured the UI sample: ci's build about 13 s a program warm); the coverage subset chosen from the records (RES38).
+- RE6 (AOT): not started. RE4 measured cf2g's translation of a node program with the linked std at about 1,000 s (`panics.rs`); RES34 (a),
+  std's fragments translated once per key into a Go package the programs call, precedes any UI program's AOT, and the synthetic
+  corpus's AOT with it (the essential list is the first AOT subset). RE7 (the REPL) and RE8 (auxiliaries) wait on RE5-RE6.
+
+### RE5.4 Night commands (through `/root/arbace/.tmp/heavy`, at most 4 jobs; the checkout's `.tmp/` with the UI source and std)
+
+1. `bin/repr-rust corpus fetch rustc-1.99.1-ui` (network), `bin/rsi std-build` (the pin's std), `bin/rsi runtime-build`, then
+   `/root/arbace/.tmp/heavy bin/rsi runtime-ci` (about 100 minutes; keyed, resumable).
+2. `bin/rsi synthetic check && bin/rsi judge-test` (seconds): the corpus and the judge.
+3. `/root/arbace/.tmp/heavy bin/rsi record-ref` (every UI program, the samples and the synthetic corpus, three runs each: minutes), then
+   `bin/rsi synthetic ref`.
+4. `/root/arbace/.tmp/heavy bin/rsi check --essential` first (13 programs, about 4 to 10 minutes warm): any non-pass is a class or a
+   fix before the rest; then `/root/arbace/.tmp/heavy bin/rsi check --corpus samples,synthetic --record` (72 programs, about 20
+   minutes warm), then `/root/arbace/.tmp/heavy bin/rsi check --corpus ui --record` (about 5.5 h at 3 threads: RE4.5's), then
+   `bin/rsi divergences`.
+5. AOT, after RES34: `bin/rsi check --aot --essential`, then the samples and the synthetic corpus in shards.
+
+### RE5.5 Proposals (RES35-RES39)
+
+- **RES35 The synthetic corpus's shape.** Options: (a) **as built: a table and templates, 67 programs, committed generated files (the
+  files read as the programs; `check` keeps them honest)**; (b) the generator writes files at each run, nothing committed (the corpus
+  is then no program of the record, the ids move); (c) grow it to the few hundred of EVAL.md §6 by more tables (floats at more values,
+  `fmt` specs, integer ops by pair) once the 67 run on ci. *Recommended: (a), then (c) in the order the classes show where ci or the
+  lowering fail.*
+- **RES36 The Rust crop's namespaces and the gate's key.** `arbace/rust/*.ae` (the lowering driver, run.ae, check.ae, synthetic.ae)
+  are not in `arbace/j2g/embed.ae`'s exclusions or `bin/lib/version.bash`'s, unlike `arbace/cpp/` and `arbace/repr/{rust,cpp,llvm}`: at a
+  merge they would be embedded and compiled by c2j into every executable (and a change to them moves `gate_key`). Options: (a)
+  **exclude `arbace/rust/` beside `arbace/cpp/` in both until a re-seed embeds the crop (CX10's plan)**; (b) embed now. *Recommended: (a);
+  not done here (embed.ae and version.bash are the gate's, and main's keyed run is in flight).*
+- **RES37 The judge's std.** The reference runs are recorded against std's build at the pin; a host without the pin's build (the day's)
+  records against any build and says so. Options: (a) **as built: the night's `record-ref` records against the pin and rewrites every
+  map**; (b) `record-ref` refuses a std not at the pin (as `std_current` does when it may build one) with a flag to override, the record
+  marking the maps. *Recommended: (a); the digests agree today.*
+- **RES38 The coverage subset.** GTS205's rule (every block of the lowering, of ci and of cf2g reached, every class, the controls, every
+  deferred program) needs per-program coverage data this check does not yet write. Options: (a) **the first whole run writes each
+  program's features (the intrinsics of `x/intrinsics.txt`, the lowering's constructs, the classes) beside its times, and a greedy
+  cover over them makes `test/rust/subset.txt`, as C's rule did (229 of 3,582)**; (b) `essential.txt` plus every 40th UI program, rotated
+  (GTS203). *Recommended: (a) after the first run; (b) meanwhile.*
+- **RES39 Output with addresses.** A run that prints a backtrace (std's abort after a double panic) has addresses neither side can
+  match. Options: (a) **leave such programs out of the corpus (as built) and class a UI program that prints one**; (b) normalize
+  `0x[0-9a-f]+` frames in `plan_norm` for both sides (run-program's too: RR5's). *Recommended: (a).*

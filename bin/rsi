@@ -13,7 +13,7 @@
 #                               the UI suite's programs (test/rust/corpus-rustc-1.99.1-ui.edn's :programs, RR5) as
 #                               run-program's plan (default the standard output): the set (EVAL.md §6,
 #                               test/rust/eval-programs.edn: threads, process and net set apart; run: the rest; default all),
-#                               every Nth line from the Kth (default 1, 0), those whose id REGEX finds; samples: rsi's own (test/rust/eval/,
+#                               every Nth line from the Kth (default 1, 0), those whose id REGEX finds; samples, synthetic: rsi's own (test/rust/eval/, test/rust/synthetic/,
 #                               built from the checkout)
 #   bin/rsi sets                test/rust/eval-programs.edn made again: each program's file searched for threads, processes and
 #                               sockets (the source tree of the corpus fetched by bin/repr-rust corpus fetch rustc-1.99.1-ui)
@@ -32,6 +32,12 @@
 #                               and xgetbv answered, the functions the lowering does not take made stubs, OUT/stubbed.tsv), lowered,
 #                               compiled by gcc -O0 and archived by crate (OUT/lib/libCRATE.a), the pending-flag layer
 #                               (arbace/rust/rt/eh.c.ae) as OUT/rt.o; OUT/results.tsv, OUT/key (default OUT .tmp/rsi/runtime)
+#   bin/rsi synthetic [generate|check|ref]
+#                               RE5: the synthetic corpus (test/rust/synthetic/) generated from test/rust/synthetic.edn and
+#                               test/rust/synthetic-templates/; check: the committed files are what they give; ref: the table's
+#                               expected statuses against the judge's runs (test/rust/ref-rustc-1.99.1.edn)
+#   bin/rsi judge-test          RE5: the check's judge without ci (the samples and the synthetic corpus judged from the judge's own
+#                               runs, one output changed, the controls)
 #   bin/rsi lower-unit [FILE.ll...]
 #                               the lowering's unit cases (default test/rust/lower/*.ll): each IR run by lli (LLI, default
 #                               /usr/lib/llvm23/bin/lli) and lowered, compiled by gcc -O0 with the pending-flag layer and run,
@@ -64,10 +70,12 @@ list() {
   while [ $# -gt 0 ]; do case $1 in --set) set=$2; shift 2 ;; --sample) n=$2; shift 2 ;; --offset) off=$2; shift 2 ;; --only) only=$2; shift 2 ;; -o) out=$2; shift 2 ;;
     *) echo "list: unknown option $1" >&2; exit 2 ;; esac; done
   [ -z "$out" ] || mkdir -p "$(dirname "$out")"
-  if [ "$set" = samples ]; then # rsi's own samples (test/rust/eval/*.rs, edition 2021, built from the checkout)
-    local f us=$'\x1f' text=""
-    for f in "$root"/test/rust/eval/*.rs; do
-      f=test/rust/eval/$(basename "$f"); text+="$f$us$f${us}2021$us$us$us$us"$'\n'
+  if [ "$set" = samples ] || [ "$set" = synthetic ]; then # rsi's own programs (test/rust/eval/*.rs, test/rust/synthetic/*.rs: edition 2021, built from the checkout)
+    local f dir=eval us=$'\x1f' text=""
+    [ "$set" = synthetic ] && dir=synthetic
+    for f in "$root"/test/rust/$dir/*.rs; do
+      [ -f "$f" ] || continue
+      f=test/rust/$dir/$(basename "$f"); text+="$f$us$f${us}2021$us$us$us$us"$'\n'
     done
     if [ -n "$out" ]; then printf '%s' "$text" > "$out"; else printf '%s' "$text"; fi
     return 0
@@ -306,10 +314,10 @@ lower_check() {
   while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; --record) record=1; shift ;; --leg) leg=$2; shift 2 ;; --runtime) rtdir=$2; shift 2 ;;
     *) echo "lower-check: unknown option $1" >&2; exit 2 ;; esac; done
   case $leg in lowered|native) ;; *) echo "lower-check: --leg lowered or native" >&2; exit 2 ;; esac
-  need_src
+  case $(head -1 "$plan") in test/rust/eval/*|test/rust/synthetic/*) ;; *) need_src ;; esac
   grep -q . "$plan" || { echo "lower-check: $plan has no program" >&2; exit 2; }
   # rsi's samples are built from the checkout (bin/rsi list --set samples)
-  case $(head -1 "$plan") in test/rust/eval/*) src=$root ;; esac
+  case $(head -1 "$plan") in test/rust/eval/*|test/rust/synthetic/*) src=$root ;; esac
   disk_ok
   mkdir -p "$work"; work=$(cd "$work" && pwd)
   rm -rf "$work/files" "$work/jobs" "$work/diffs" "$work/results.tsv" "$work/summary.edn"
@@ -370,15 +378,28 @@ case ${1:-} in
     done
     rm -rf "$ud"; exit $ubad ;;
   record-ref) shift
-    rplan=$TMPDIR/rsi-ref-plan.$$; rset=all rsample=1 roff=0 ronly="" rcorp=samples,ui
+    rplan=$TMPDIR/rsi-ref-plan.$$; rset=all rsample=1 roff=0 ronly="" rcorp=samples,synthetic,ui
     while [ $# -gt 0 ]; do case $1 in --corpus) rcorp=$2; shift 2 ;; --set) rset=$2; shift 2 ;; --sample) rsample=$2; shift 2 ;; --offset) roff=$2; shift 2 ;;
       --only) ronly=$2; shift 2 ;; *) echo "record-ref: unknown option $1" >&2; exit 2 ;; esac; done
     : > "$rplan"
     case ",$rcorp," in *,samples,*) list --set samples >> "$rplan" ;; esac
+    case ",$rcorp," in *,synthetic,*) list --set synthetic >> "$rplan" ;; esac
     case ",$rcorp," in *,ui,*) need_src; list --set "$rset" --sample "$rsample" --offset "$roff" >> "$rplan" ;; esac
     if [ -n "$ronly" ]; then grep -v '^#' "$ronly" | grep . > "$rplan.ids"; awk -F'\x1f' 'BEGIN { while ((getline l < ARGV[2]) > 0) w[l] = 1; ARGV[2] = "" } ($1 in w)' "$rplan" "$rplan.ids" > "$rplan.only"; mv "$rplan.only" "$rplan"; rm -f "$rplan.ids"; fi
     std_current "${RSI_STD_DIR:-$root/.tmp/rsi/std}" || ( std_build )
     "$root/bin/lib/rsi/record-ref" "$rplan" "${RSI_REF_WORK:-$root/.tmp/rsi-ref}"; st=$?; rm -f "$rplan"; exit $st ;;
+  synthetic) shift; v=${1:-generate}; [ $# -gt 0 ] && shift; v=${v#--}; cd "$root" && GOMEMLIMIT=1GiB arbace_tool -m arbace.rust.synthetic "$v" "$@" ;;
+  judge-test) shift # the check's judge without ci (RE5): every program of the samples and the synthetic corpus judged from the judge's own recorded run (all pass),
+    # then with one program's output changed (it must fail), the controls differing
+    cd "$root"; jw=$(mktemp -d "$TMPDIR/rsi-judge-test.XXXXXX"); jbad=0
+    export GOMEMLIMIT=1GiB
+    arbace_tool -m arbace.rust.check make-fake "$jw" - samples synthetic
+    if arbace_tool -m arbace.rust.check run-judge "$jw" eval samples synthetic > "$jw/same.out" 2>&1; then echo "judge-test: the judge's own runs pass"; else echo "judge-test: the judge's own runs DO NOT pass"; cat "$jw/same.out"; jbad=1; fi
+    grep -q 'differs, as a control must' "$jw/same.out" || { echo "judge-test: no control reported as differing"; jbad=1; }
+    arbace_tool -m arbace.rust.check make-fake "$jw" test/rust/synthetic/fmt.rs samples synthetic
+    if arbace_tool -m arbace.rust.check run-judge "$jw" eval samples synthetic > "$jw/mut.out" 2>&1; then echo "judge-test: a changed output PASSES"; jbad=1
+    elif grep -q 'FAIL test/rust/synthetic/fmt.rs differ stdout' "$jw/mut.out"; then echo "judge-test: a changed output fails, as it must"; else echo "judge-test: the changed output failed otherwise"; cat "$jw/mut.out"; jbad=1; fi
+    rm -rf "$jw"; exit $jbad ;;
   check) shift; exec "$root/bin/lib/rsi/check" "$@" ;;
   run) shift; exec "$root/bin/lib/rsi/run" "$@" ;;
   divergences) shift; lvl=eval; [ "${1:-}" = --aot ] && lvl=aot; GOMEMLIMIT=1GiB arbace_tool -m arbace.rust.check divergences "$lvl" ;;
