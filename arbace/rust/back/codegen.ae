@@ -361,7 +361,9 @@
                           {:ty "i1" :v (if (zero? bits) 'false 'true)}
                           {:ty (:imm sc) :v (as-num (sext-const (:bits sc) bits))})
                    :float {:ty (:imm sc) :v (fp-form (:bits sc) bits)}
-                   :ptr (unsupported "pointer scalar")))
+                   :ptr (if (zero? (.signum (java.math.BigInteger. (str bits))))
+                          {:ty "ptr" :v 'null}
+                          {:ty "ptr" :v (list 'inttoptr 'i64 (as-num (sext-const 64 bits)) 'ptr)})))
       "ptr" (let [[_ id off _] v]
               (when-not (zero? off) (unsupported "pointer constant with an offset"))
               {:ty "ptr" :v (ag id)})
@@ -999,6 +1001,12 @@
                                          ;; a constant expression, not an instruction
                                          {:ty "ptr" :v (list 'inttoptr (symbol (:imm (:scalar fl))) (:v v) 'ptr)}
                                          (let [r (fresh!)] (emit! bb (list '= r (list 'inttoptr (symbol (:imm (:scalar fl))) (:v v) 'ptr))) {:ty "ptr" :v r}))
+                                       (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= (:bits (:scalar fl)) (:bits (:scalar tl)))
+                                            (#{:int :float} (:prim (:scalar fl))) (#{:int :float} (:prim (:scalar tl))))
+                                       ;; the same bits in another scalar class
+                                       (if (number? (:v v))
+                                         (unsupported "transmute of a constant between int and float")
+                                         (let [r (fresh!)] (emit! bb (list '= r (list 'bitcast (symbol (:imm (:scalar fl))) (:v v) (symbol (:imm (:scalar tl)))))) {:ty (:imm (:scalar tl)) :v r}))
                                        :else (unsupported "Transmute between these layouts")))
                                :else (unsupported (str "cast " kind))))
                     "rawptr" (let [p (nth r 2) projs (place-projs p)]
@@ -1316,8 +1324,37 @@
                                                  (call! (if (= intrinsic "rotate_left") "fshl" "fshr") [[ity (:v x)] [ity (:v x)] [ity (:v shc)]])))]
                                        (assign! bb dest v)
                                        (when target (br-or-merge bb t target)))
-                                     (unsupported (str "intrinsic " intrinsic)))
-                                 (let [callee (if (or (nil? (nth f 0 nil)) (not= "const" (name (first f))))
+                                     ("ptr_offset_from_unsigned" "ptr_offset_from")
+                                     (let [a (operand! bb (first args)) b (operand! bb (second args))
+                                           el (layout lt (second (ty-struct (ty-of (first args)))))
+                                           ra (fresh!) rb (fresh!) d (fresh!) r (fresh!)
+                                           unsigned? (= intrinsic "ptr_offset_from_unsigned")]
+                                       (emit! bb (list '= ra (list 'ptrtoint 'ptr (:v a) 'i64)))
+                                       (emit! bb (list '= rb (list 'ptrtoint 'ptr (:v b) 'i64)))
+                                       (emit! bb (list '= d (if unsigned? (list 'sub :nuw 'i64 ra rb) (list 'sub 'i64 ra rb))))
+                                       (emit! bb (list '= r (list (if unsigned? 'udiv 'sdiv) :exact 'i64 d (:size el))))
+                                       (assign! bb dest {:ty "i64" :v r})
+                                       (when target (br-or-merge bb t target)))
+                                     "is_val_statically_known"
+                                     (do (assign! bb dest {:ty "i1" :v 'false})
+                                         (when target (br-or-merge bb t target)))
+                                     "write_bytes"
+                                     (let [d (operand! bb (first args)) v (operand! bb (second args)) c (operand! bb (nth args 2))
+                                           el (layout lt (second (ty-struct (ty-of (first args)))))
+                                           nm (symbol "g" "llvm.memset.p0.i64")
+                                           bytes (if (number? (:v c)) (* (:size el) (:v c)) (let [r (fresh!)] (emit! bb (list '= r (list 'mul 'i64 (:size el) (:v c)))) r))]
+                                       (declare! gl nm 'void [['ptr] ['i8] ['i64] ['i1]])
+                                       (emit! bb (list 'call 'void nm [['ptr (list :align (:align el)) (:v d)] ['i8 (:v v)] ['i64 bytes] ['i1 'false]]))
+                                       (when target (br-or-merge bb t target)))
+                                     (if-let [[_ fname w] (re-matches #"(fabs|sqrt|sin|cos|exp|exp2|log|log2|log10|floor|ceil|trunc|round|rint|nearbyint|roundeven)f(32|64)" intrinsic)]
+                                       (let [ft (if (= w "32") 'float 'double) iname (symbol "g" (str "llvm." fname ".f" w))
+                                             x (operand! bb (first args)) r (fresh!)]
+                                         (declare! gl iname ft [[ft]])
+                                         (emit! bb (list '= r (list 'call ft iname [[ft (:v x)]])))
+                                         (assign! bb dest {:ty (name ft) :v r})
+                                         (when target (br-or-merge bb t target)))
+                                       (unsupported (str "intrinsic " intrinsic))))
+                                 (let [callee (if (and (not= "const" (name (first f))) (not (and ci (= "item" (:kind ci)))))
                                                 (let [v (operand! bb f)] (:v v))
                                                 (call-symbol f callee-info))
                                      can-unwind (if (and (seq? callee-info) (map? (second callee-info))) (:can-unwind (second callee-info)) true)

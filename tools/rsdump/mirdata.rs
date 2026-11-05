@@ -404,12 +404,14 @@ impl<'tcx> W<'tcx> {
     }
 
     /// The instance a call resolves to, in a monomorphic body: `(callee {:kind K :symbol S})`, or nil
-    fn callee(&self, func: &Operand<'tcx>) -> String {
+    fn callee(&self, func: &Operand<'tcx>, b_: &Body<'tcx>) -> String {
         if !self.mono {
             return "nil".into();
         }
         let tcx = self.tcx;
-        let Some((def, args)) = func.const_fn_def() else { return "nil".into() };
+        let fty = func.ty(&b_.local_decls, tcx);
+        let ty::FnDef(def, args) = *fty.kind() else { return "nil".into() };
+        let args = args.skip_binder();
         let env = ty::TypingEnv::fully_monomorphized();
         let args = tcx.erase_and_anonymize_regions(args);
         match ty::Instance::try_resolve(tcx, env, def, args) {
@@ -496,7 +498,7 @@ impl<'tcx> W<'tcx> {
             ),
             Call { func, args: a, destination, target, unwind, fn_span, .. } => format!(
                 "(call {} {} {} {} {} {} {} {})",
-                self.operand(func), args(a), self.place(destination), ob(target), self.unwind(unwind), self.callee(func),
+                self.operand(func), args(a), self.place(destination), ob(target), self.unwind(unwind), self.callee(func, b_),
                 self.caller_location(*fn_span), t.source_info.scope.index()
             ),
             TailCall { func, args: a, .. } => format!("(tailcall {} {})", self.operand(func), args(a)),
