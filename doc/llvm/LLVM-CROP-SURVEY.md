@@ -763,7 +763,10 @@ Both as recommended: (1) LL4 closed as a corpus loop over the wrongly accepted r
 
 Branch `llvm-llvmi` from `llvm-ll4`, with `cpp-g2fix` (C++ codegen's G2 and its fixes: the settled lowering), `llvm-row` (the REAP row) and main
 (the re-seed d5548e72, whose stage 0 embeds main's repr/c) merged in. Light runs only: `ARBACE_HOST_EXE` the main checkout's stage 0, every
-Arbace process `GOMEMLIMIT=1500MiB`; the whole eval check's peak RSS 0.9 GB (busybox `time -v` over the check).
+Arbace process `GOMEMLIMIT=1500MiB`; peak RSS (busybox `time -v`): the eval check 0.9 GB; AOT's translation (`compile-list`, 2 threads) 0.8 GB a
+shard of 40 (1.6 GB for all 230 at once), Go's compiler at most 0.55 GB a package but for two, `c-O{0,2}.synth.lib-musl-tables` (11 MB of Go
+each, musl's tables), 2.9 GB: those two are `test/llvm/aot-heavy.txt`, built only with `LLVMI_AOT_HEAVY=1` (the night's run; the record's rows
+come from such a run), their recorded rows kept by a light run.
 
 **The route** (LLS7 (a)): `bin/llvmi` over `arbace.llvm.run` and `arbace.llvm.check` (`arbace/llvm/`, out of the embedded sources and
 `gate_key` like `arbace/cpp/`). An IR module is read by repr/llvm, normalized for the lowering (`arbace.llvm.run/normalize`: typed
@@ -797,7 +800,7 @@ units have no `main`: read and lowered by `bin/cppi runtime-build`, not run here
 | level | modules | lowered | pass | not passing, in classes | seconds (lower / build / run) |
 |---|---:|---:|---:|---|---|
 | eval (`bin/llvmi check`) | 258 | 230 | **218** | 40: personality 13, vector 10, ci-builtins 5, wide-int 2, crash-report 2, ub-refinement 2, abi-punning 2, argv0, datalayout, target-type, va-arg | 81 s wall: 15 / 33 / 6 |
-| AOT (`bin/llvmi check --aot`) | 258 | 230 | **AOT_PASS** | AOT_CLASSES | AOT_SECONDS |
+| AOT (`bin/llvmi check --aot`) | 258 | 230 | **218** | the same 40 in the same classes (none of AOT's own) | 18.7 min wall: 14 s lowering, then 6 shards of translation, `go build` and runs, 1,075 s |
 
 None failing; every non-pass in a class; the controls fail as they must. What the check found and fixed in the lowering: the vector casts
 and `shufflevector` crashed it (now refused `:vector`), `llvm.global_dtors` was refused (now `destructor` wrappers), and the intrinsics
@@ -811,7 +814,7 @@ and `shufflevector` crashed it (now refused `:vector`), `llvm.global_dtors` was 
 |---|---|---|
 | the references | `bin/llvmi record-ref` (after `bin/llvm-corpus extract`) | `258 runs recorded`; `git diff test/llvm/ref-lli23.edn` empty but `test-interp-variable-arguments`'s stdout (lli's own nondeterminism; the module is refused `:va-arg`) |
 | eval | `bin/llvmi check` (`make llvmi-check`) | about 90 s, under 1 GB: 218 pass, 40 in classes, the controls 3 judged 0 passing, exit 0 |
-| AOT | `bin/llvmi check --aot` (`make llvmi-check-aot`) | about 12 minutes (6 shards), the same 218 |
+| AOT | `LLVMI_AOT_HEAVY=1 bin/llvmi check --aot --record` (`make llvmi-check-aot`, without the heavy two) | about 19 minutes (6 shards), the same 218; `git diff test/llvm/check-aot-linux-amd64.edn` empty; one `go build` at 2.9 GB |
 | the classes alone | `bin/llvmi divergences [--aot]` | exit 0 |
 | the matrix | `bin/reap` | the LLVM row's four cells checked |
 
@@ -830,5 +833,5 @@ and `shufflevector` crashed it (now refused `:vector`), `llvm.global_dtors` was 
 3. **LL2's rename** (`arbace.cpp.lower` to `arbace.llvm.lower`): still not done, since C++'s codegen branches edit the file; recommend doing it
    by `git mv` and a one-line `require` change in each client after C++'s next merge to main, when no branch holds an edit of it.
 4. **The essential tier** (§11.2): three llvmi modules on ci (a C module, an ExecutionEngine module, a constructor module, about 10 s) as an
-   essential gate step beside the interim llvm-roundtrip step, once the row enters the gate; the eval check (90 s) nightly, AOT (12 min) in
+   essential gate step beside the interim llvm-roundtrip step, once the row enters the gate; the eval check (90 s) nightly, AOT (19 min) in
    the clean run.
