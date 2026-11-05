@@ -758,3 +758,77 @@ All under `bin/heavy-lock` if run on the loaded host; `ARBACE_HOST_EXE` unset in
 ## Decided (2026-11-05, the user: after LL1)
 
 Both as recommended: (1) LL4 closed as a corpus loop over the wrongly accepted rejections and the false errors, the full loop (opt's messages) for Assembler/ and Verifier/, acceptance only for the target directories; (2) GT9's interim llvm-roundtrip step takes llvm-test-valid.list (300 modules) as a part.
+
+## As built: llvmi (LL2's run, LL6, LL7), 2026-11-05
+
+Branch `llvm-llvmi` from `llvm-ll4`, with `cpp-g2fix` (C++ codegen's G2 and its fixes: the settled lowering), `llvm-row` (the REAP row) and main
+(the re-seed d5548e72, whose stage 0 embeds main's repr/c) merged in. Light runs only: `ARBACE_HOST_EXE` the main checkout's stage 0, every
+Arbace process `GOMEMLIMIT=1500MiB`; the whole eval check's peak RSS 0.9 GB (busybox `time -v` over the check).
+
+**The route** (LLS7 (a)): `bin/llvmi` over `arbace.llvm.run` and `arbace.llvm.check` (`arbace/llvm/`, out of the embedded sources and
+`gate_key` like `arbace/cpp/`). An IR module is read by repr/llvm, normalized for the lowering (`arbace.llvm.run/normalize`: typed
+pointers `(* T)` as `ptr`, as LLVM 23 reads them; LLParser's implicit numbers of unnamed arguments, blocks and value instructions
+written in, which old `llvm/test` files rely on and clang never writes), lowered by the shared lowering (`arbace.cpp.lower`, LOWER.md;
+the move to `arbace.llvm.lower` is left to LL2's rename, below), printed by repr/c with **the personality-free layer**
+`arbace/llvm/rt/none.c.ae` appended (§5.3's "none": `cx$pending` never raised, `cx$resume`/`cx$uncaught` abort, the renamed `atexit`,
+`at_quick_exit`, `__cxa_atexit` and `pthread_create` passed to musl), so a module is **one C translation unit that links with musl
+alone**; a module that unwinds (a personality, `invoke`, `landingpad`, `resume`) is refused `:personality`. ci runs no
+`__attribute__((constructor))`/`((destructor))` function, so llvmi strips them from the lowering's `cx$ctor$N`/`cx$dtor$N` and `main` calls
+the constructors by priority and registers the destructors with `atexit`. Eval: `arbace.c.run`'s `nodes-list` builds the node programs
+(musl's prebuilt runtime), `tools/cirun` runs them. AOT (§7): `arbace.c.cf2g`'s `compile-list` translates them into Go packages over
+`go/arbace/ci` and `go/arbace/crt`, built by TamaGo's go in shards of 40 (one executable a shard, as `bin/ci check --aot`).
+
+**The judge** (LLS8, as the brief took it): lli 23's run of the same module (the host's `/usr/lib/llvm23/bin/lli`; empty stdin, no
+arguments, 10 s), status, stdout and stderr by SHA-256, recorded as data (`test/llvm/ref-lli23.edn`, `bin/llvmi record-ref`), so the check
+needs no lli; each entry also records the module's digest (a reference from other IR is `:stale-ref`, not a divergence) and, as a second
+opinion, whether clang 23 `-O0`'s build of the module agrees with lli (`:clang`: 240 `:same`, 14 `:no-build`, 4 `:differs`: argv[0],
+environment, a 32-bit data layout, and `test-interp-variable-arguments`, whose output is not deterministic under lli either).
+Rows `[ID RESULT REASON]` (goi's format) in `test/llvm/check-eval-linux-amd64.edn` and `check-aot-linux-amd64.edn`; classes in GR10's format,
+`test/llvm/divergences-eval.edn` (AOT: `divergences-aot.edn` first, empty, then eval's); a recorded pass that does not pass fails; the
+negative controls `test/llvm/controls.edn` (three: a subject's run against another module's reference) must fail, and do.
+
+**The corpus** (`bin/llvmi modules`, 258 modules): `ee`, `llvm/test/ExecutionEngine`'s 80 modules with a `main` whose first RUN line is a
+plain lli run (read in place from the main checkout's `.tmp/llvm/src`); `c-O0` and `c-O2`, test/c's `synth` and `run` programs through clang 23
+`-S -emit-llvm` (81 of 97 each; 16 are gcc's dialect clang rejects); `cpp`, C++'s samples and runtime samples with a `main` (16). The C++ runtime's
+units have no `main`: read and lowered by `bin/cppi runtime-build`, not run here.
+
+**Numbers** (eval and AOT the same modules, the same results):
+
+| level | modules | lowered | pass | not passing, in classes | seconds (lower / build / run) |
+|---|---:|---:|---:|---|---|
+| eval (`bin/llvmi check`) | 258 | 230 | **218** | 40: personality 13, vector 10, ci-builtins 5, wide-int 2, crash-report 2, ub-refinement 2, abi-punning 2, argv0, datalayout, target-type, va-arg | 81 s wall: 15 / 33 / 6 |
+| AOT (`bin/llvmi check --aot`) | 258 | 230 | **AOT_PASS** | AOT_CLASSES | AOT_SECONDS |
+
+None failing; every non-pass in a class; the controls fail as they must. What the check found and fixed in the lowering: the vector casts
+and `shufflevector` crashed it (now refused `:vector`), `llvm.global_dtors` was refused (now `destructor` wrappers), and the intrinsics
+`scmp`/`ucmp`, `fshl`/`fshr` and `l(l)round`/`l(l)rint` (C23's `<stdbit.h>` and `-O2` code) are in its table (LOWER.md §7).
+
+**The REAP row**: `test/reap/cells.edn`'s `[:llvm :eval]` and `[:llvm :aot]` read the two records (the `:until` gone).
+
+### The night's runs (commands and what to expect)
+
+| what | command | expected |
+|---|---|---|
+| the references | `bin/llvmi record-ref` (after `bin/llvm-corpus extract`) | `258 runs recorded`; `git diff test/llvm/ref-lli23.edn` empty but `test-interp-variable-arguments`'s stdout (lli's own nondeterminism; the module is refused `:va-arg`) |
+| eval | `bin/llvmi check` (`make llvmi-check`) | about 90 s, under 1 GB: 218 pass, 40 in classes, the controls 3 judged 0 passing, exit 0 |
+| AOT | `bin/llvmi check --aot` (`make llvmi-check-aot`) | about 12 minutes (6 shards), the same 218 |
+| the classes alone | `bin/llvmi divergences [--aot]` | exit 0 |
+| the matrix | `bin/reap` | the LLVM row's four cells checked |
+
+### Proposed
+
+1. **LLS21 ci's gaps the row found.** The lowering writes what gcc takes and ci's builder lacks: `__builtin_fmodf`/`fmodl` (`frem` on float and
+   long double: `builtin-aliases` has `fmod` only) and gcc's `__atomic_*` builtins (`__atomic_fetch_add` ...); and ci converts a lowered
+   comparator's `unsigned` result to the `int` of musl's `qsort` call as a value (`abi-punning`: gcc reads the same register). (a) add the
+   aliases and the `__atomic_*` family to ci (C's crop, `arbace/c/build.ae`, about 0.5 day) and, for the punning, have ci truncate a call's
+   result through a function pointer to the pointer's return width (C's crop, 0.5 day; or (a') the lowering types i32 results of address-taken
+   functions as `int`, which changes C++'s records); (b) keep them as classes. Recommend (a): 7 of the 40 go, C's own corpora gain.
+2. **LLS22 the C++ personality on ci.** 13 modules are refused `:personality`. (a) link C++'s lowered runtime (`bin/cppi runtime-build`'s
+   libsupc++ and libstdc++ as C forms) into ci's build for such modules, the way `arbace.cpp.run` (branch `cppi-check`) does for cppi: one
+   runtime per key, cached (1-2 days, the memory of a ci build of libstdc++ to measure); (b) leave them to cppi's own check (LLS15 (a): the
+   producer tests itself). Recommend (b) now, (a) with LL2's split of the layer.
+3. **LL2's rename** (`arbace.cpp.lower` to `arbace.llvm.lower`): still not done, since C++'s codegen branches edit the file; recommend doing it
+   by `git mv` and a one-line `require` change in each client after C++'s next merge to main, when no branch holds an edit of it.
+4. **The essential tier** (§11.2): three llvmi modules on ci (a C module, an ExecutionEngine module, a constructor module, about 10 s) as an
+   essential gate step beside the interim llvm-roundtrip step, once the row enters the gate; the eval check (90 s) nightly, AOT (12 min) in
+   the clean run.
