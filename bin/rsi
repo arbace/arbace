@@ -56,6 +56,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
+. "$root/test/oracle-records/oracle.bash"
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
 corpus=$root/test/rust/corpus-rustc-1.99.1-ui.edn
 srcroot=$root/.tmp/repr-rust/src/rustc-1.99.1-src
@@ -171,6 +172,52 @@ std_build() {
   sha256sum < "$sb/ir.sha256" | cut -d' ' -f1 > "$sb/key"
 }
 
+# ---- std's IR as a record (ORS12): the pack rust-std-ir (test/rust/records/), the members CRATE/UNIT.ll of std-build's ir/, keyed by the std
+# pin (the apk's SHA-256, std.edn, the committed ir.sha256); a host with no rustc reads it instead of building std (RSI_LIVE=1: builds)
+std_pin() { echo "$root/test/rust/records/rust-std-ir.sha256"; }
+std_key() { cat "$root/tools/rsdump/apks.sha256" "$root/test/rust/runtime/std.edn" "$root/test/rust/runtime/ir.sha256" | sha256sum | cut -c1-64; }
+std_ir_current() { # SB: its ir/ at the committed pin (no sysroot needed)
+  local sb=$1
+  [ -f "$sb/ir.sha256" ] && [ -d "$sb/ir" ] && cmp -s "$sb/ir.sha256" "$root/test/rust/runtime/ir.sha256" &&
+    [ "$(cd "$sb/ir" && find . -name '*.ll' | wc -l)" = "$(wc -l < "$sb/ir.sha256")" ]
+}
+std_ir_get() { # SB: the pack's members into SB/ir, the units' digests those of ir.sha256, the pack's key the std pin's
+  local sb=$1 pin man name u
+  pin=$(std_pin); name=$(oracle_pin_name "$pin"); man=$(oracle_manifest "$pin")
+  [ -f "$pin" ] && [ -f "$man" ] || { echo "rsi: UNRECORDED: no $pin (bin/rsi std-record, by hand on a host with rustc)" >&2; return 1; }
+  if [ -n "$(awk -F'\t' -v k="$(std_key)" '!/^#/ && NF && $2 != k {print "x"; exit}' "$man")" ]; then
+    echo "rsi: STALE: $man: the apk, std.edn or ir.sha256 changed since the record (bin/rsi std-record)" >&2; return 1
+  fi
+  u=$(oracle_unpack "$pin") || return 1
+  rm -rf "$sb/ir" "$sb/ir.sha256"; mkdir -p "$sb/ir"
+  cp -r "$u/$name/." "$sb/ir/"
+  (cd "$sb/ir" && find . -name '*.ll' | LC_ALL=C sort | sed 's|^\./||' | while read -r f; do printf '%s  %s\n' "$(sha256sum < "$f" | cut -d' ' -f1)" "$f"; done) > "$sb/ir.sha256"
+  cmp -s "$sb/ir.sha256" "$root/test/rust/runtime/ir.sha256" || { echo "rsi: the pack's units are not test/rust/runtime/ir.sha256's: refused" >&2; return 1; }
+}
+std_record() { # the live std's IR packed (bin/rsi std-build first), by hand
+  local sb=${RSI_STD_DIR:-$root/.tmp/rsi/std} pin name stage
+  std_current "$sb" || { echo "rsi std-record: no std build at the pin in $sb (bin/rsi std-build)" >&2; return 1; }
+  pin=$(std_pin); name=$(oracle_pin_name "$pin"); stage=$root/.tmp/rsi/std-record
+  rm -rf "$stage"; mkdir -p "$stage/$name"; cp -r "$sb/ir/." "$stage/$name/"
+  (cd "$stage/$name" && find . -name '*.ll' | LC_ALL=C sort | sed 's|^\./||') | while IFS= read -r f; do printf '%s\t%s\n' "$f" "$(std_key)"; done > "$stage/ids"
+  oracle_make "$pin" "$stage" "$stage/ids" "bin/rsi std-record" rustc || return 1
+  rm -rf "$stage"
+}
+std_verify() { # std built afresh in a scratch directory, its IR against the pack's members byte for byte (ORS6 (a)'s verdict), the crossed pair
+  local sb=$root/.tmp/rsi/std-verify pin name man u nd=0 n=0 f first="" last=""
+  pin=$(std_pin); name=$(oracle_pin_name "$pin"); man=$(oracle_manifest "$pin")
+  u=$(oracle_unpack "$pin") || return 1
+  ( RSI_STD_DIR=$sb std_build ) > "$root/.tmp/rsi/std-verify.log" 2>&1 || { tail -5 "$root/.tmp/rsi/std-verify.log" >&2; return 1; }
+  while IFS= read -r f; do
+    n=$((n + 1)); [ -n "$first" ] || first=$sb/ir/$f; last=$u/$name/$f
+    if [ ! -f "$u/$name/$f" ]; then echo "verify: $name/$f: UNRECORDED"; nd=$((nd + 1))
+    elif cmp -s "$sb/ir/$f" "$u/$name/$f"; then :; else echo "verify: $name/$f: DIFFERS"; nd=$((nd + 1)); fi
+  done < <(cd "$sb/ir" && find . -name '*.ll' | LC_ALL=C sort | sed 's|^\./||')
+  oracle_verdict rustc "$man" "$nd" "$n" || return 1
+  if [ "$n" -ge 2 ] && cmp -s "$first" "$last"; then echo "verify: FAILED: the crossed pair is equal: control not judged"; return 1
+  elif [ "$n" -ge 2 ]; then echo "verify: the crossed pair differs (control passed)"; fi
+}
+
 std_current() { # std's build at the checkout's pin: its ir.sha256 the committed one, its sysroot there
   local sb=$1
   [ -f "$sb/ir.sha256" ] && [ -d "$sb/sysroot" ] && cmp -s "$sb/ir.sha256" "$root/test/rust/runtime/ir.sha256"
@@ -209,7 +256,8 @@ export -f rt_unit; export GCC_FLAGS
 runtime_build() { # bin/rsi runtime-build [OUT] [--jobs N]: std's IR lowered (EVAL.md §8)
   local out=$root/.tmp/rsi/runtime jobs=${RSI_JOBS:-4} sb=${RSI_STD_DIR:-$root/.tmp/rsi/std}
   while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; -*) echo "runtime-build: unknown option $1" >&2; exit 2 ;; *) out=$1; shift ;; esac; done
-  std_current "$sb" || ( std_build )
+  # std's IR: at the pin already, or the pack's (no rustc), or built (RSI_LIVE=1, or no pack)
+  std_ir_current "$sb" || { [ -z "${RSI_LIVE:-}" ] && std_ir_get "$sb"; } || std_current "$sb" || ( std_build )
   disk_ok
   mkdir -p "$out"; out=$(cd "$out" && pwd)
   rm -rf "$out/units" "$out/lib" "$out/key" "$out/key.txt"; mkdir -p "$out/units" "$out/lib"
@@ -358,6 +406,8 @@ case ${1:-} in
   sets) sets ;;
   std-build) shift; std_build "$@" ;;
   runtime-build) shift; runtime_build "$@" ;;
+  std-record) std_record ;;
+  std-verify) std_verify ;;
   lower-check) shift; lower_check "$@" ;;
   runtime-ci) shift; runtime_ci "$@" ;;
   lower-unit) shift # the lowering's unit cases (test/rust/lower/*.ll, or FILE.ll...): each run by lli and lowered, compiled by gcc -O0 and run, the outputs equal

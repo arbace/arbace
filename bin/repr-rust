@@ -37,6 +37,15 @@
 #                                 run the helper on files (relative to the current directory; their
 #                                 path is the name of every span): DIR/FILE.edn each (default
 #                                 .tmp/repr-rust/out), edition 2024 by default
+#   ORS12 (doc/ORACLE-RECORDS-SURVEY.md, "As built: Rust"): the corpus's originals' dumps (both modes) and trees are the packs
+#                                 rust-{dumps,dumps-full,trees}-CORPUS (test/rust/records/): read --corpus and the round trip's originals read
+#                                 them (no helper, no rustc; the rust-src apk for the files the dumps name), REPR_RUST_LIVE=1 runs the helper;
+#                                 `dump --corpus` is always live
+#   bin/repr-rust record-corpus [CORPUS]
+#                                 the originals dumped and parsed by the helper and packed (by hand, a commit of its own naming :rustc's
+#                                 identity; REPR_RUST_ONLY_CRATES="core alloc" selects crates, the others kept from the packs)
+#   bin/repr-rust verify-corpus [--sample N] [CORPUS]
+#                                 the live outputs against the packs' members byte for byte (ORS6 (a)'s verdict, the crossed pair)
 #   bin/repr-rust read [--full] [-o DIR] [--crate NAME --crate-type T --ns-root NS] DUMP.edn...
 #                                 convert dumps to Rust forms: one .ae per file under DIR (default
 #                                 .tmp/repr-rust/forms/files), each read back and compared; plain
@@ -104,7 +113,10 @@
 #                                 other, all: the five. A crate set's interface level is Cargo's
 #                                 (crates_docs: the lock test/rust/CORPUS.lock, a directory source
 #                                 of the pinned .crate files)
-#   bin/repr-rust test            the spec's cases (test/rust/; bin/lib/repr-rust/test): the reader's
+#   bin/repr-rust test [--oracle | --record | --verify-records]
+#                                 the spec's cases (test/rust/; bin/lib/repr-rust/test), on the records (test/rust/records/test/: no rustc; the
+#                                 checks that judge rustc's reading of the printed files are listed as skipped), --oracle with rustc live;
+#                                 the cases: the reader's
 #                                 samples, the worked example converted and its round trip, the
 #                                 interface level's cases, mode :full's cases, edition 2015's, the
 #                                 pretty layout's, the behaviour level's, the lowered and code levels'
@@ -119,6 +131,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
 . "$root/bin/lib/tools.bash"
+. "$root/bin/lib/repr-rust/records.bash"
 work=$root/.tmp/repr-rust
 helper=$work/rsdump
 apks=$work/apks
@@ -155,6 +168,7 @@ apks_fetch() {
     local sha f name
     while read -r sha f; do
       name=${f%-*-r*.apk}
+      [ -z "${REPR_RUST_APK_ONLY:-}" ] || [ "$name" = "$REPR_RUST_APK_ONLY" ] || continue
       if { [ ! -f "$apks/$f" ] || [ "$(sha256sum < "$apks/$f" | cut -c1-64)" != "$sha" ]; } &&
          [ -n "${REPR_RUST_APKS:-}" ] && [ -f "$REPR_RUST_APKS/$f" ] &&
          [ "$(sha256sum < "$REPR_RUST_APKS/$f" | cut -c1-64)" = "$sha" ]; then
@@ -180,6 +194,11 @@ apks_fetch() {
       fi
     done < "$root/tools/rsdump/apks.sha256"
   ) 8> "$work/fetch.lock"
+}
+
+# prepare: what a verb that reads the corpus's records needs: the helper built (REPR_RUST_LIVE=1), else the corpus's source alone (rust-src's apk, pinned)
+prepare() {
+  if [ -n "${REPR_RUST_LIVE:-}" ]; then build; else mkdir -p "$work"; REPR_RUST_APK_ONLY=rust-src apks_fetch; fi
 }
 
 helper_hash() {
@@ -221,8 +240,10 @@ corpus_file() {
 edition_plan() {
   local f
   f=$(corpus_file "$1")
-  arbace_tool -e "(let [c (read-string (slurp \"$f\"))]
-    (doseq [[ed ks] (sort-by key (group-by :edition (:crates c)))
+  arbace_tool -e "(let [c (read-string (slurp \"$f\"))
+        only (set (.split (or (System/getenv \"REPR_RUST_ONLY_CRATES\") \"\") \" \"))
+        crate-wanted? (fn [n] (or (contains? only \"\") (contains? only n)))]
+    (doseq [[ed ks] (sort-by key (group-by :edition (filter #(crate-wanted? (str (:name %))) (:crates c))))
             :let [xs (set (mapcat :include-expr-files ks)) fs (remove xs (mapcat :files ks))]
             [e fs] [[ed fs] [(str ed \"+expr\") (filter xs (mapcat :files ks))]] :when (seq fs)]
       (println (str ed \"\t\" e \"\t\" (apply str (interpose \" \" fs))))))"
@@ -232,8 +253,9 @@ edition_plan() {
 corpus_plan() {
   local f
   f=$(corpus_file "$1")
-  arbace_tool -e "(let [c (read-string (slurp \"$f\"))]
-    (doseq [k (:crates c)]
+  arbace_tool -e "(let [c (read-string (slurp \"$f\"))
+        only (set (.split (or (System/getenv \"REPR_RUST_ONLY_CRATES\") \"\") \" \"))]
+    (doseq [k (:crates c) :when (or (contains? only \"\") (contains? only (str (:name k))))]
       (println (str (:name k) \"\t\" (:edition k) \"\t\" (apply str (interpose \" \" (:files k)))))))"
 }
 
@@ -346,9 +368,15 @@ run_helper() {
   printf '%s\n' "$@" | xargs -r -P "$jobs" -n 8 "$helper" "$verb" "${flags[@]}" -o "$out" --edition "$ed" --helper-hash "sha256:$(helper_hash)"
 }
 
-# dump_corpus CORPUS OUT [--full]: the helper's dumps of the corpus (with --full, its tokens and
-# comments too: mode :full, SPEC §9.2)
+# dump_corpus CORPUS OUT [--full]: the corpus's dumps (with --full, its tokens and comments too: mode :full, SPEC §9.2): the records'
+# (the pack rust-dumps[-full]-CORPUS, ORS12), REPR_RUST_LIVE=1 the helper's
 dump_corpus() {
+  if [ -n "${REPR_RUST_LIVE:-}" ]; then dump_corpus_live "$@"; return; fi
+  local kind=dumps; [ "${3:-}" = --full ] && kind=dumps-full
+  rm -rf "$2" "$2.err"; mkdir -p "$2"; : > "$2.err"
+  corpus_records_get "$1" "$kind" "$2"
+}
+dump_corpus_live() {
   local c=$1 out=$2 name ed files dump_full=0
   [ "${3:-}" = --full ] && dump_full=1
   rm -rf "$out" "$out.err"; mkdir -p "$out"
@@ -359,6 +387,116 @@ dump_corpus() {
     (cd "$srcroot" && run_helper dump "$out" "$ed" $files) 2>> "$out.err" || true
   done < "$pl"
   rm -f "$pl"
+}
+
+# ---- the corpus's records (ORS12): three packs rust-KIND-CORPUS (test/rust/records/), KIND one of dumps (the helper's dump, mode :lines),
+# dumps-full (--full) and trees (the helper's tree of the original files, FILE.tree and FILE.lines), the members FILE.edn, FILE.tree and
+# FILE.lines (FILE relative to the corpus's source root: the helper's own layout), the dumps' :abs written @SRC@/FILE (the converter reads
+# the file it names: corpus_records_get puts the source root back); a member keyed per crate by rs_member_key: the corpus's source pin, the
+# helper's identity, the kind and the crate's plan line (name, edition, files). REPR_RUST_ONLY_CRATES="core alloc" selects crates.
+corpus_kinds="dumps dumps-full trees"
+corpus_pin() { echo "$root/test/rust/records/rust-$2-$1.sha256"; } # CORPUS KIND
+corpus_srcpin() { # CORPUS: the corpus's source's SHA-256 (the apk's, the tarball's), else its name
+  arbace_tool -e "(let [c (read-string (slurp \"$(corpus_file "$1")\"))]
+    (println (or (:sha256 (:apk c)) (:sha256 (:tarball c)) (:name c))))"
+}
+rs_member_key() { # CORPUS KIND PLAN-LINE
+  { corpus_srcpin "$1"; rsr_helper_hash; echo "$2"; printf '%s\n' "$3"; } | sha256sum | cut -c1-64
+}
+# corpus_member_plan CORPUS KIND: ID<TAB>KEY for every member of the selected crates
+corpus_member_plan() {
+  local c=$1 kind=$2 pl name ed files f line k
+  pl=$(mktemp "$TMPDIR/repr-rust-mplan.XXXXXX"); corpus_plan "$c" > "$pl"
+  while IFS=$'\t' read -r name ed files; do
+    line=$(printf '%s\t%s\t%s' "$name" "$ed" "$files"); k=$(rs_member_key "$c" "$kind" "$line")
+    for f in $files; do
+      case $kind in trees) printf '%s.tree\t%s\n%s.lines\t%s\n' "$f" "$k" "$f" "$k" ;; *) printf '%s.edn\t%s\n' "$f" "$k" ;; esac
+    done
+  done < "$pl"
+  rm -f "$pl"
+}
+# corpus_records_get CORPUS KIND OUT: the selected crates' members into OUT, their keys checked, :abs put back
+corpus_records_get() {
+  local c=$1 kind=$2 out=$3 pin man name u plan bad
+  pin=$(corpus_pin "$c" "$kind"); name=$(oracle_pin_name "$pin"); man=$(oracle_manifest "$pin")
+  [ -f "$pin" ] && [ -f "$man" ] || { echo "UNRECORDED: no $pin (bin/repr-rust record-corpus, by hand on a host with rustc; REPR_RUST_LIVE=1 runs the helper)" >&2; return 1; }
+  u=$(oracle_unpack "$pin") || return 1
+  plan=$(mktemp "$TMPDIR/repr-rust-recplan.XXXXXX"); corpus_member_plan "$c" "$kind" > "$plan"
+  bad=$(awk -F'\t' 'FILENAME == ARGV[1] { k[$1] = $2; next }
+                    !/^#/ && NF { m[$1] = $2 } END { for (i in k) { if (!(i in m)) { print "UNRECORDED " i; exit } if (m[i] != k[i]) { print "STALE " i; exit } } }' "$plan" "$man")
+  if [ -n "$bad" ]; then echo "$bad ($name: the corpus's source, the helper or the corpus's plan changed since the record, or the crate was not recorded; bin/repr-rust record-corpus)" >&2; rm -f "$plan"; return 1; fi
+  mkdir -p "$out"
+  cut -f1 "$plan" | while IFS= read -r f; do mkdir -p "$out/$(dirname "$f")"; cp "$u/$name/$f" "$out/$f"; done
+  rm -f "$plan"
+  case $kind in dumps*) find "$out" -name '*.edn' -print0 | xargs -0 -r sed -i "s|:abs \"@SRC@/|:abs \"$srcroot/|" ;; esac
+}
+# corpus_live_kind CORPUS KIND DEST: the helper's outputs of KIND for the selected crates into DEST (live); the dumps' :abs normalized
+corpus_live_kind() {
+  local c=$1 kind=$2 dest=$3 pl name ed files
+  rm -rf "$dest"; mkdir -p "$dest"
+  case $kind in
+    dumps) dump_corpus_live "$c" "$dest" ;;
+    dumps-full) dump_corpus_live "$c" "$dest" --full ;;
+    trees)
+      pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX"); edition_plan "$c" > "$pl"
+      while IFS=$'\t' read -r name ed files; do
+        # shellcheck disable=SC2086
+        (cd "$srcroot" && run_helper tree "$dest" "$ed" $files) 2>> "$dest.err" || true
+      done < "$pl"
+      rm -f "$pl" ;;
+  esac
+  case $kind in dumps*) find "$dest" -name '*.edn' -print0 | xargs -0 -r sed -i "s|:abs \"$srcroot/|:abs \"@SRC@/|" ;; esac
+  rm -f "$dest.err"
+}
+# record_corpus CORPUS: the selected crates' three kinds made live and packed (a pack a kind), the crates not selected kept from the pack in
+# place; by hand (a commit of its own naming :rustc's identity)
+record_corpus() {
+  local c=$1 kind pin stage man name d m k
+  for kind in $corpus_kinds; do
+    pin=$(corpus_pin "$c" "$kind"); man=$(oracle_manifest "$pin"); name=$(oracle_pin_name "$pin"); stage=$work/records/$kind
+    rm -rf "$stage"; mkdir -p "$stage/$name"; : > "$stage/ids"
+    if [ -f "$man" ] && [ -f "$pin" ] && d=$(oracle_unpack "$pin" 2>"$TMPDIR/repr-rust.err"); then
+      cp -a "$d/$name/." "$stage/$name/"; awk -F'\t' '!/^#/ && NF {print $1 "\t" $2}' "$man" > "$stage/ids"
+    fi
+    corpus_live_kind "$c" "$kind" "$stage/live"
+    corpus_member_plan "$c" "$kind" > "$stage/plan.tsv"
+    # the selected crates' members replaced by the live outputs
+    cut -f1 "$stage/plan.tsv" > "$stage/plan.ids"
+    awk -F'\t' 'FILENAME == ARGV[1] { drop[$1] = 1; next } !($1 in drop)' "$stage/plan.ids" "$stage/ids" > "$stage/ids.new"
+    mv "$stage/ids.new" "$stage/ids"
+    while IFS= read -r m; do rm -f "${stage:?}/$name/$m"; done < "$stage/plan.ids"
+    while IFS=$'\t' read -r m k; do
+      if [ -f "$stage/live/$m" ]; then mkdir -p "$stage/$name/$(dirname "$m")"; cp "$stage/live/$m" "$stage/$name/$m"; printf '%s\t%s\n' "$m" "$k" >> "$stage/ids"; fi
+    done < "$stage/plan.tsv"
+    rm -rf "${stage:?}/live"
+    oracle_make "$pin" "$stage" "$stage/ids" "bin/repr-rust record-corpus${REPR_RUST_ONLY_CRATES:+ (REPR_RUST_ONLY_CRATES=\"$REPR_RUST_ONLY_CRATES\")} $c" rustc || return 1
+    rm -rf "$stage"
+  done
+}
+# verify_corpus CORPUS [N]: the live outputs of the selected crates (N files of each kind, spread evenly, with N) against the packs' members
+# byte for byte, ORS6 (a)'s verdict, and the crossed pair
+verify_corpus() {
+  local c=$1 sample=${2:-} kind pin name u d=$work/verify m ndiff=0 total=0 first="" last="" n
+  rm -rf "$d"; mkdir -p "$d"
+  for kind in $corpus_kinds; do
+    pin=$(corpus_pin "$c" "$kind"); name=$(oracle_pin_name "$pin")
+    u=$(oracle_unpack "$pin") || return 1
+    corpus_live_kind "$c" "$kind" "$d/$kind"
+    (cd "$d/$kind" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) > "$d/$kind.files"
+    n=$(wc -l < "$d/$kind.files")
+    if [ -n "$sample" ] && [ "$sample" -lt "$n" ]; then
+      awk -v n="$n" -v s="$sample" 'BEGIN { for (i = 0; i < s; i++) want[int(i * n / s) + 1] = 1 } (NR in want)' "$d/$kind.files" > "$d/$kind.sel"
+    else cp "$d/$kind.files" "$d/$kind.sel"; fi
+    while IFS= read -r m; do
+      total=$((total + 1)); [ -n "$first" ] || first=$d/$kind/$m; last=$u/$name/$m
+      if [ ! -f "$u/$name/$m" ]; then echo "verify: $name/$m: UNRECORDED"; ndiff=$((ndiff + 1))
+      elif cmp -s "$d/$kind/$m" "$u/$name/$m"; then :
+      else echo "verify: $name/$m: DIFFERS"; ndiff=$((ndiff + 1)); fi
+    done < "$d/$kind.sel"
+  done
+  oracle_verdict rustc "$(oracle_manifest "$(corpus_pin "$c" dumps)")" "$ndiff" "$total" || return 1
+  if [ "$total" -ge 2 ] && cmp -s "$first" "$last"; then echo "verify: FAILED: the crossed pair is equal: control not judged"; return 1
+  elif [ "$total" -ge 2 ]; then echo "verify: the crossed pair differs (control passed)"; fi
 }
 
 # prune_dumps DUMPS LOG: the dumps of the files the conversion's log names no error or misread for
@@ -451,12 +589,13 @@ roundtrip_one() {
   # the trees: of the originals (in the corpus's tree) and of the printed files (in the
   # candidate's, under the same relative paths: the spans name the same files)
   rm -rf "$orig" "$orig.err"; mkdir -p "$orig" "$cand.trees"
+  [ -n "${REPR_RUST_LIVE:-}" ] || corpus_records_get "$c" trees "$orig" || return 1
   local name ed files f
   local pl; pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX")
   edition_plan "$c" > "$pl"
   while IFS=$'\t' read -r name ed files; do
     # shellcheck disable=SC2086
-    (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true
+    [ -n "${REPR_RUST_LIVE:-}" ] && { (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true; }
     # shellcheck disable=SC2086
     (cd "$cand" && run_helper tree "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
   done < "$pl"
@@ -720,11 +859,12 @@ pretty_level() {
     grep -v '^error' "$cand.print.log" | tail -3 >&2
   t1=$(date +%s)
   rm -rf "$orig" "$orig.err"; mkdir -p "$orig" "$cand.trees"
+  [ -n "${REPR_RUST_LIVE:-}" ] || corpus_records_get "$c" trees "$orig" || return 1
   local pl; pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX")
   edition_plan "$c" > "$pl"
   while IFS=$'\t' read -r name ed files; do
     # shellcheck disable=SC2086
-    (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true
+    [ -n "${REPR_RUST_LIVE:-}" ] && { (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true; }
     # shellcheck disable=SC2086
     (cd "$cand" && run_helper tree "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
   done < "$pl"
@@ -768,11 +908,12 @@ text_level() {
     --times "dump $((t1 - t0)) convert $((t2 - t1)) print $((t3 - t2))" || st=1
   echo "== repr-rust roundtrip $c: text level: the tree level of mode :full's printed files" >&2
   rm -rf "$orig" "$orig.err"; mkdir -p "$orig" "$cand.trees"
+  [ -n "${REPR_RUST_LIVE:-}" ] || corpus_records_get "$c" trees "$orig" || return 1
   local pl; pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX")
   edition_plan "$c" > "$pl"
   while IFS=$'\t' read -r name ed files; do
     # shellcheck disable=SC2086
-    (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true
+    [ -n "${REPR_RUST_LIVE:-}" ] && { (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true; }
     # shellcheck disable=SC2086
     (cd "$cand" && run_helper tree "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
   done < "$pl"
@@ -1009,8 +1150,8 @@ case $cmd in
     if [ "${1:-}" = --full ]; then full=(--full); shift; fi
     if [ "${1:-}" = --corpus ]; then
       c=${2:-rustc-1.99.1}; corpus_root "$c"
-      if [ ${#full[@]} -gt 0 ]; then dump_corpus "$c" "$work/dumps/$c-full" --full; cat "$work/dumps/$c-full.err" >&2
-      else dump_corpus "$c" "$work/dumps/$c"; cat "$work/dumps/$c.err" >&2; fi
+      if [ ${#full[@]} -gt 0 ]; then dump_corpus_live "$c" "$work/dumps/$c-full" --full; cat "$work/dumps/$c-full.err" >&2
+      else dump_corpus_live "$c" "$work/dumps/$c"; cat "$work/dumps/$c.err" >&2; fi
       exit 0
     fi
     out=$work/out; ed=2024; files=()
@@ -1027,7 +1168,7 @@ case $cmd in
     if [ "${1:-}" = --full ] && [ "${2:-}" = --corpus ]; then full=(--full); sfx=-full; shift; fi
     if [ "${1:-}" = --corpus ]; then
       shift; c=${1:-rustc-1.99.1}
-      build; corpus_root "$c"
+      prepare; corpus_root "$c"
       dump_corpus "$c" "$work/dumps/$c$sfx" "${full[@]}"
       out=$work/forms/$c$sfx
       rm -rf "$out"
@@ -1036,6 +1177,13 @@ case $cmd in
       read_files --jobs "$jobs" "$@"
     fi ;;
   print) arbace_tool -m arbace.repr.rust print --jobs "$jobs" "$@" ;;
+  record-corpus)
+    # ORS12: the corpus's originals dumped (both modes) and parsed to trees by the helper and packed (by hand, on a host with rustc)
+    rustc_check; build; c=${1:-rustc-1.99.1}; corpus_root "$c"; record_corpus "$c" ;;
+  verify-corpus)
+    rustc_check; build; sample=""
+    if [ "${1:-}" = --sample ]; then sample=$2; shift 2; fi
+    c=${1:-rustc-1.99.1}; corpus_root "$c"; verify_corpus "$c" "$sample" ;;
   roundtrip) rustc_check; roundtrip "$@" ;;
   test) exec "$root/bin/lib/repr-rust/test" "$@" ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;

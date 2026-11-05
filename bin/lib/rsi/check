@@ -22,6 +22,9 @@
 #   --essential  the nightly's essential programs alone (test/rust/essential.txt: --only that file, --corpus samples,synthetic)
 #   --record   the record and the times rewritten for the corpora run (not with --only or --sample)
 #   --judge    the last run judged again (nothing run)
+#   --record-ir  ORS12: the oracle's IR of each corpus (whole) made live and packed (rust-ir-CORPUS, test/rust/records/; by hand, a commit of its own
+#              naming :rustc's identity), nothing lowered or run; --verify-ir [--sample N]: the IR made live again and compared with the packs byte for
+#              byte (ORS6 (a)'s verdict, the crossed pair); --ir-only: the IR step alone (from the packs unless RSI_LIVE=1), nothing lowered or run. Otherwise the IR is the pack's (no rustc, no std sysroot); RSI_LIVE=1: rustc's
 #   RSI_JOBS (default 4): the IR's and the runs' jobs; RSI_THREADS (default 3): the builder's threads (its GOMEMLIMIT
 #   RSI_CI_MEMLIMIT, default 6GiB); RSI_CHECK_WORK (default .tmp/rsi-check, .tmp/rsi-aot with --aot); RSI_KEEP: the IR, the C and
 #   the node programs kept
@@ -29,8 +32,9 @@ set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
+. "$root/bin/lib/repr-rust/records.bash"
 cd "$root"
-corpora=samples,synthetic,ui set=all only= sample=1 offset=0 record= judge= aot=
+corpora=samples,synthetic,ui set=all only= sample=1 offset=0 record= judge= aot= recir= verir= ironly=
 while [ $# -gt 0 ]; do
   case $1 in
     --aot) aot=1; shift ;;
@@ -41,11 +45,17 @@ while [ $# -gt 0 ]; do
     --offset) offset=$2; shift 2 ;;
     --record) record=1; shift ;;
     --judge) judge=1; shift ;;
+    --record-ir) recir=1; shift ;;
+    --verify-ir) verir=1; shift ;;
+    --ir-only) ironly=1; shift ;;
     --essential) only=$root/test/rust/essential.txt; corpora=samples,synthetic; shift ;;
     *) sed -n '17,28p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 level=eval; [ -n "$aot" ] && level=aot
+if [ -n "$recir" ] && { [ -n "$only" ] || [ "$sample" != 1 ] || [ "$set" != all ]; }; then echo "bin/rsi check: --record-ir records whole corpora, not --only's, --sample's or --set's subset" >&2; exit 2; fi
+irlive=; { [ -n "${RSI_LIVE:-}" ] || [ -n "$recir" ] || [ -n "$verir" ]; } && irlive=1
+[ -n "$verir" ] && [ -n "$recir" ] && { echo "bin/rsi check: --record-ir or --verify-ir" >&2; exit 2; }
 if [ -n "$only" ] || [ "$sample" != 1 ] || [ "$set" != all ]; then
   [ -n "$record" ] && { echo "bin/rsi check: --record records whole corpora, not --only's, --sample's or --set's subset" >&2; exit 2; }
   export CI_SUBSET=1
@@ -66,12 +76,19 @@ budget() { # ID: the run's seconds (60, or test/rust/check-budget.edn's)
   local b; b=$(grep -F "\"$1\"" "$root/test/rust/check-budget.edn" 2>"$TMPDIR/rsi-budget.err" | sed -n 's/.*" *\([0-9][0-9]*\).*/\1/p' | head -1)
   echo "${b:-${RSI_BUDGET:-60}}"
 }
-ir1() { # N CORPUS: the plan's Nth program's IR (bin/lib/rsi/wrap-ir) in WORK/files/KEY, its status and seconds
+ir1() { # N CORPUS: the plan's Nth program's IR (bin/lib/rsi/wrap-ir) in WORK/files/KEY, its status and seconds: the pack's (RSI_IRPACK) unless live
   . "$root/bin/lib/rsi/plan.bash"
   plan_line "$work/$2/list.tsv" "$1"
-  local src=$srcroot k d t0
+  local src=$srcroot k d t0 f
   case $file in test/rust/eval/*|test/rust/synthetic/*) src=$root ;; esac
   k=$(plan_key "$id"); d=$work/files/$k
+  if [ -z "${RSI_IRLIVE:-}" ]; then
+    rm -rf "$d"; mkdir -p "$d"
+    for f in ir.status ir.log x.ll shim.ll x.refused; do [ -f "$RSI_IRPACK/$k/$f" ] && cp "$RSI_IRPACK/$k/$f" "$d/$f"; done
+    # the shim's ModuleID names the scratch directory (recorded as @WORK@)
+    [ -f "$d/shim.ll" ] && sed -i "1s|@WORK@|$work|" "$d/shim.ll"
+    return 0
+  fi
   rm -rf "$d"; mkdir -p "$d/b"; t0=$(date +%s.%N)
   RSI_LOW=$d RUN_PROGRAM_ID=$id plan_rustc "$src" "$sb/sysroot" "$d/b/t" "$root/bin/lib/rsi/wrap-ir" > "$d/ir.log" 2>&1; echo $? > "$d/ir.status"
   echo "$(date +%s.%N) $t0" | awk '{printf "%.1f\n", $1 - $2}' > "$d/ir.secs"
@@ -99,22 +116,90 @@ gobuild() { # the shard's executable (RSI_HEAVY: the host's heavy-slot wrapper, 
   (cd "$mod" && ${RSI_HEAVY:-} env CGO_ENABLED=0 GOFLAGS=-mod=mod GOCACHE=${RSI_GOCACHE:-$root/.tmp/gocache} GOMAXPROCS=4 GOMEMLIMIT=4GiB \
      "$go" build -p "$gop" -trimpath -o "$@")
 }
-export -f budget ir1 run1 gobuild; export work root srcroot sb
+
+# ---- the IR's records (ORS12): one pack rust-ir-CORPUS a corpus (test/rust/records/), the members KEY/FILE for each program (KEY: its id as a
+# directory name; FILE: ir.status, x.ll and shim.ll, x.refused, ir.log of a failure), a program's entries keyed by ir_key: the program's source
+# (its file, or the UI corpus's tarball pin), its plan line, the std IR's pin (test/rust/runtime/ir.sha256), the helpers' (cc) source pin and the
+# wrap and link scripts. The oracle's own identity is in the manifest's header (:rustc), not in the key (what a host without rustc cannot compute).
+ir_pin() { echo "$root/test/rust/records/rust-ir-$1.sha256"; }
+ir_key() { # ID FILE LINE
+  { case $2 in test/rust/eval/*|test/rust/synthetic/*) cat "$root/$2" ;; *) sed -n 's/.*:sha256 "\([0-9a-f]*\)".*/\1/p' "$root/test/rust/corpus-rustc-1.99.1-ui.edn" | head -1; printf '%s\n' "$2" ;; esac
+    printf '%s\n' "$3"; sha256sum < "$root/test/rust/runtime/ir.sha256"; cat "$root/bin/lib/rsi/wrap-ir" "$root/bin/lib/rsi/link-ir" "$root/bin/lib/rsi/plan.bash"; } | sha256sum | cut -c1-64
+}
+export -f ir_key
+ir_keys() { # CORPUS: ID<TAB>KEY for each program of WORK/CORPUS/list.tsv
+  local id file l
+  while IFS= read -r l; do
+    IFS=$'\x1f' read -r id file _ <<< "$l"
+    printf '%s\t%s\n' "$(printf '%s' "$id" | tr '/#' '%%')" "$(ir_key "$id" "$file" "$l")"
+  done < "$work/$1/list.tsv"
+}
+ir_records_get() { # CORPUS: the pack unpacked, every program's key against the manifest's (UNRECORDED, STALE: the step fails, ORS10 (a)); RSI_IRPACK
+  local pin name man u bad
+  pin=$(ir_pin "$1"); name=$(oracle_pin_name "$pin"); man=$(oracle_manifest "$pin")
+  [ -f "$pin" ] && [ -f "$man" ] || { echo "rsi check: UNRECORDED: no $pin (bin/rsi check --record-ir, by hand on a host with rustc; RSI_LIVE=1 runs rustc)" >&2; return 1; }
+  u=$(oracle_unpack "$pin") || return 1
+  ir_keys "$1" > "$work/$1/ir-keys.tsv"
+  bad=$(awk -F'\t' 'FILENAME == ARGV[1] { k[$1] = $2; next }
+                    !/^#/ && NF { split($1, a, "/"); m[a[1]] = $2 } END { for (i in k) { if (!(i in m)) { print "UNRECORDED " i; exit } if (m[i] != k[i]) { print "STALE " i; exit } } }' "$work/$1/ir-keys.tsv" "$man")
+  if [ -n "$bad" ]; then echo "rsi check: $bad ($name: the program, its plan line, the std IR's pin or the wrap scripts changed since the record, or it was not recorded; bin/rsi check --record-ir)" >&2; return 1; fi
+  export RSI_IRPACK=$u/$name
+}
+ir_files() { # CORPUS: the files of each program's directory to record: KEY/FILE, one a line
+  local d=$work/files k f
+  cut -f1 "$work/$1/ir-keys.tsv" | while IFS= read -r k; do
+    for f in ir.status ir.log x.ll shim.ll x.refused; do
+      [ -f "$d/$k/$f" ] || continue
+      [ "$f" = ir.log ] && [ "$(cat "$d/$k/ir.status")" = 0 ] && continue
+      printf '%s/%s\t%s\n' "$k" "$f" "$(awk -F'\t' -v k="$k" '$1 == k {print $2}' "$work/$1/ir-keys.tsv")"
+    done
+  done
+}
+ir_record() { # CORPUS: the live IR packed
+  local pin name stage
+  pin=$(ir_pin "$1"); name=$(oracle_pin_name "$pin"); stage=$work/irrec/$name
+  rm -rf "$stage"; mkdir -p "$stage/$name"
+  ir_files "$1" > "$stage/ids"
+  while IFS=$'\t' read -r m _; do mkdir -p "$stage/$name/$(dirname "$m")"; cp "$work/files/$m" "$stage/$name/$m"; done < "$stage/ids"
+  oracle_make "$pin" "$stage" "$stage/ids" "bin/rsi check --record-ir --corpus $1" rustc || return 1
+  rm -rf "$stage"
+}
+ir_verify() { # CORPUS [N]: the live IR against the pack's members, byte for byte
+  local pin name u man m n=0 nd=0 first="" last="" sel
+  pin=$(ir_pin "$1"); name=$(oracle_pin_name "$pin"); man=$(oracle_manifest "$pin")
+  u=$(oracle_unpack "$pin") || return 1
+  ir_files "$1" | cut -f1 > "$work/$1/ir-verify.files"
+  if [ -n "${2:-}" ] && [ "$2" -lt "$(wc -l < "$work/$1/ir-verify.files")" ]; then
+    awk -v n="$(wc -l < "$work/$1/ir-verify.files")" -v s="$2" 'BEGIN { for (i = 0; i < s; i++) w[int(i * n / s) + 1] = 1 } (NR in w)' "$work/$1/ir-verify.files" > "$work/$1/ir-verify.sel"
+  else cp "$work/$1/ir-verify.files" "$work/$1/ir-verify.sel"; fi
+  while IFS= read -r m; do
+    n=$((n + 1)); [ -n "$first" ] || first=$work/files/$m; last=$u/$name/$m
+    if [ ! -f "$u/$name/$m" ]; then echo "verify: $name/$m: UNRECORDED"; nd=$((nd + 1))
+    elif cmp -s "$work/files/$m" "$u/$name/$m"; then :
+    else echo "verify: $name/$m: DIFFERS"; nd=$((nd + 1)); fi
+  done < "$work/$1/ir-verify.sel"
+  oracle_verdict rustc "$man" "$nd" "$n" || return 1
+  if [ "$n" -ge 2 ] && cmp -s "$first" "$last"; then echo "verify: FAILED: the crossed pair is equal: control not judged"; return 1
+  elif [ "$n" -ge 2 ]; then echo "verify: the crossed pair differs (control passed)"; fi
+}
+export -f budget ir1 run1 gobuild; export work root srcroot sb; [ -n "$irlive" ] && export RSI_IRLIVE=1
 
 if [ -z "$judge" ]; then
-  rtlib=$("$root/bin/rsi" runtime-ci) || exit 1
-  cirun=${CIRUN:-$root/.tmp/ci/cirun}
-  { [ -n "${CIRUN:-}" ] && [ -x "$cirun" ]; } || "$root/bin/ci" cirun-build --ensure > "$work/cirun-build.log" 2>&1 || { cat "$work/cirun-build.log"; exit 1; }
-  "$root/bin/ci" musl ensure || exit 1
-  : > "$work/empty"
-  # compiletest's native helpers (tests/auxiliary/rust_test_helpers.c), read as a library of ci's (the original links gcc's)
-  xlib=$work/helpers
-  if [ ! -f "$xlib/index.edn" ] && [ -f "$srcroot/tests/auxiliary/rust_test_helpers.c" ]; then
-    rm -rf "$xlib"; mkdir -p "$xlib"
-    printf 'rust_test_helpers\t%s\n' "$srcroot/tests/auxiliary/rust_test_helpers.c" > "$xlib/list.tsv"
-    GOMEMLIMIT=${RSI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.rust.run read-lib "$xlib" "$xlib/list.tsv" 1 > "$xlib/read.log" 2>&1 || { tail -5 "$xlib/read.log"; exit 1; }
+  if [ -z "$recir$verir$ironly" ]; then
+    rtlib=$("$root/bin/rsi" runtime-ci) || exit 1
+    cirun=${CIRUN:-$root/.tmp/ci/cirun}
+    { [ -n "${CIRUN:-}" ] && [ -x "$cirun" ]; } || "$root/bin/ci" cirun-build --ensure > "$work/cirun-build.log" 2>&1 || { cat "$work/cirun-build.log"; exit 1; }
+    "$root/bin/ci" musl ensure || exit 1
+    : > "$work/empty"
+    # compiletest's native helpers (tests/auxiliary/rust_test_helpers.c), read as a library of ci's (the original links gcc's)
+    xlib=$work/helpers
+    if [ ! -f "$xlib/index.edn" ] && [ -f "$srcroot/tests/auxiliary/rust_test_helpers.c" ]; then
+      rm -rf "$xlib"; mkdir -p "$xlib"
+      printf 'rust_test_helpers\t%s\n' "$srcroot/tests/auxiliary/rust_test_helpers.c" > "$xlib/list.tsv"
+      GOMEMLIMIT=${RSI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.rust.run read-lib "$xlib" "$xlib/list.tsv" 1 > "$xlib/read.log" 2>&1 || { tail -5 "$xlib/read.log"; exit 1; }
+    fi
+    [ -f "$xlib/index.edn" ] && export RSI_EXTRA_LIBS=$xlib
   fi
-  [ -f "$xlib/index.edn" ] && export RSI_EXTRA_LIBS=$xlib
   # the original's native helpers, for programs that link them (rustc's link needs the archive even when nothing is linked)
   mkdir -p "$work/native"
   [ -f "$work/native/librust_test_helpers.a" ] || { cc -c -O2 -fPIC -o "$work/native/rust_test_helpers.o" "$srcroot/tests/auxiliary/rust_test_helpers.c" \
@@ -139,8 +224,17 @@ if [ -z "$judge" ]; then
     cut -d$'\x1f' -f1 "$d/list.tsv" > "$d/ids.txt"
     [ "$n" -gt 0 ] || continue
     echo "rsi check ($level): $id: $n programs" >&2
-    # the oracle's IR
+    # the oracle's IR: the pack's, or rustc's against std's sysroot (RSI_LIVE, --record-ir, --verify-ir)
+    if [ -z "$irlive" ]; then ir_records_get "$id" || exit 1
+    else
+      [ -n "$srcroot" ] && [ -f "$sb/ir.sha256" ] && [ -d "$sb/sysroot" ] || "$root/bin/rsi" std-build > "$work/std-build.log" 2>&1 || { tail -5 "$work/std-build.log" >&2; exit 1; }
+      ir_keys "$id" > "$d/ir-keys.tsv"
+    fi
     seq 1 "$n" | xargs -P "$jobs" -I{} nice bash -c 'ir1 "$1" "$2"' _ {} "$id"
+    if [ -n "$recir$verir" ]; then for f in "$work"/files/*/shim.ll; do [ -f "$f" ] && sed -i "1s|$work|@WORK@|" "$f"; done; fi
+    if [ -n "$recir" ]; then ir_record "$id" || exit 1; continue; fi
+    if [ -n "$verir" ]; then ir_verify "$id" "${VERIFY_SAMPLE:-}" || exit 1; continue; fi
+    if [ -n "$ironly" ]; then echo "rsi check: $id: $(grep -c . "$d/ids.txt") programs, IR in $work/files ($(cat "$work/files"/*/ir.status | sort | uniq -c | tr -s " " | tr "\n" ";"))"; continue; fi
     # the build list: ID DIR (DIR - when the IR is missing), and for AOT the package
     awk -v w="$work" '{ k = $0; gsub(/[\/#]/, "%", k); s = ""; f = w "/files/" k "/ir.status"
                         if ((getline s < f) <= 0) s = ""; close(f)
@@ -212,4 +306,5 @@ if [ -z "$judge" ]; then
       k=$(printf '%s' "$i" | tr '/#' '%%'); rm -f "$work/files/$k/x.ll" "$work/files/$k/shim.ll" "$work/files/$k/x.c" "$work/files/$k/x.nodes"; done
   done
 fi
+if [ -n "$recir$verir$ironly" ]; then exit 0; fi
 arbace_tool -m arbace.rust.check run-judge "$work" "$level" "${record:+--record}" "${ids[@]}"
