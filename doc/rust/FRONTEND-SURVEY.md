@@ -808,9 +808,9 @@ All as recommended: the codegen finished on rustc's data first, then layout, the
 The front half's first stages beside Tier B (RFS3 (a)), one afternoon on the branch `rust-rf4` (from `rust-rf13`; `rust-native`, the
 native reader, was already its ancestor: nothing to merge). Code in `arbace/rust/front/` (RFS13: evaluated from the checkout, out of
 `gate_key`), the helper's new modes in `tools/rsdump/front.rs`, the verbs `bin/rust-front front-oracles|expand-check|resolve-check`
-(`make rust-front-oracles`, `rust-front-expand-check`, `rust-front-resolve-check`), two samples `test/rust/front/expand1.rs` and
-`resolve1.rs`. Ports of rustc 1.99.1 (`58cf8f9c3`) under MIT (RFS12), recorded in `LICENSE.md` and `doc/ARBACE.md`; rust-analyzer and
-mrustc not read for this slice. Light: no gate step, no corpus beyond the 89 files of the synthetic corpus, `test/rust/sample`,
+(`make rust-front-oracles`, `rust-front-expand-check`, `rust-front-resolve-check`), three samples `test/rust/front/expand1.rs`,
+`expand2.rs` and `resolve1.rs`. Ports of rustc 1.99.1 (`58cf8f9c3`) under MIT (RFS12), recorded in `LICENSE.md` and `doc/ARBACE.md`; rust-analyzer and
+mrustc not read for this slice. Light: no gate step, no corpus beyond the 90 files of the synthetic corpus, `test/rust/sample`,
 `test/rust/eval` and `test/rust/front`; each check about 20 s and 0.5 GB.
 
 ### The oracles (`tools/rsdump/front.rs`)
@@ -841,27 +841,32 @@ placeholder identifier and is put back after the parse, as rustc's invisible del
 
 - `macro_rules!` (and macros 2.0 arms, `,`-separated), after `rustc_expand/src/mbe/`: matchers with nested repetitions, separators,
   `*`/`+`/`?`, every fragment kind (`tt`, `ident`, `lifetime`, `literal`, `vis`, `expr`, `ty`, `pat`, `pat_param`, `path`, `block`,
-  `stmt`, `item`), the first arm that matches all of the input, transcription with `$crate`, the definition's tokens `Alone` and `]`
-  closing `Alone` as `transcribe.rs` does; user macros by name (textual scoping simplified to the crate's definitions), std's from
-  `--std-names`;
+  `stmt`, `item`; `pat` without a top-level guard), the first arm that matches all of the input, transcription with `$crate`, the
+  definition's tokens `Alone` and `]` closing `Alone` as `transcribe.rs` does, a fragment left in a token stream (a macro a macro
+  defines) as rustc's invisible group; user macros by name, those a macro's expansion defines from there on (textual scoping otherwise
+  simplified to the crate's definitions, the last of a name), std's from `--std-names`;
 - the builtins the corpus uses: `format_args!`, `format_args_nl!`, `const_format_args!` (`rustc_parse_format`'s grammar and
   `make_format_args`: implicit, numbered, named and captured arguments, width, precision and `*`, fill, alignment, sign, `#`, `0`,
   `x?`/`X?`, the traits, literals merged, the spans inside the literal), `assert!` (with and without a message), `panic!` and
-  `unreachable!` by edition (`panic_2021`/`unreachable_2021`), `stringify!`, `concat!`, `line!`, `column!`, `file!`, `cfg!`,
-  `include!` (an expression file); the prelude's injection (`extern crate std`/`core`, `#[prelude_import] use ...::rust_20xx::*`,
+  `unreachable!` by edition (`panic_2021`/`unreachable_2021`), `stringify!` and `concat!` (escaped as `expr_str` writes them),
+  `line!` and `column!` (at the outermost call site, through the marks), `file!`, `cfg!`, `include!` (an expression file); std's
+  `dbg!`, `matches!`, `write!`, `vec!`, `assert_eq!` ... as macro_rules!; the prelude's injection (`extern crate std`/`core`, `#[prelude_import] use ...::rust_20xx::*`,
   edition 2015's `::std`);
 - the derives `Debug`, `Clone` (with `Copy`'s `TrivialClone` shortcut), `Copy`, `PartialEq` (`StructuralPartialEq`, discriminants),
-  `Eq`, `PartialOrd` (with `Ord`'s shortcut), `Ord`, `Hash`, `Default`, on structs (named, tuple, unit) and enums, generic types
-  bounded per parameter, written as Rust text read by the native parser with the fields' types as fragments, then the builder's
-  differences applied (expression statements in `Hash`, no colon spans, compiler-generated `unsafe`, the item's generics' spans);
-- `#[cfg]` and `#[cfg_attr]` on items, evaluated for the host's target and left as their `CfgTrace`/`CfgAttrTrace`;
+  `Eq`, `PartialOrd` (with `Ord`'s shortcut), `Ord`, `Hash`, `Default` (an enum's `#[default]`), on structs (named, tuple, unit) and
+  enums, `PartialEq`'s scalar fields first (`Ty::maybe_scalar`), generic types bounded per parameter after their own bounds, the
+  item's where predicates, written as Rust text read by the native parser with the fields' types as fragments, then the builder's
+  differences applied (expression statements in `Hash`, no colon spans, compiler-generated `unsafe`, the item's generics' and the
+  derive path's spans, the type parameters the item's own tokens);
+- `#[cfg]` and `#[cfg_attr]` on items, fields, variants, statements, arms and every attributed element of a vector (StripUnconfigured,
+  also over a macro's output and a derive's input), evaluated for the host's target and left as their `CfgTrace`/`CfgAttrTrace`;
 - a statement macro's semicolon as `expand.rs` and the parser apply it (an expression statement takes it; after a statement that already
   has one, the call's `;` stays as an empty statement).
 
-**Results** (`bin/rust-front expand-check`): **88 of 88 crates equal to rustc's expanded crate, 724 of 724 items**, at the tree level
+**Results** (`bin/rust-front expand-check`): **89 of 89 crates equal to rustc's expanded crate, 759 of 759 items**, at the tree level
 (spans and syntax contexts set aside, as `native-check` compares parse trees); the negative control (one crate's expansion against
-another's oracle) differs. The second view, `EXPAND_SPANS=1`, keeps the root file's spans at context 0: 86 of 88 crates, 693 of 724
-items (the two classes left: an empty generics span after a fragment identifier in a macro's output is the root's here and has the
+another's oracle) differs. The second view, `EXPAND_SPANS=1`, keeps the root file's spans at context 0: 86 of 89 crates, 722 of 759
+items (the classes left: an empty generics span after a fragment identifier in a macro's output is the root's here and has the
 expansion's context in rustc; a derived impl's `Id<T>` has the parameter's context in rustc's tree where ours keeps the root's, though
 rustc's HIR reports that path at the root's span, as ours does). The first run of the day's code: 65 of 87; then the derives, `cfg`,
 `include!`, fragments through nested macros (a fragment's placeholder carried through a nested call's token stream) and the statement
@@ -869,10 +874,11 @@ macros' semicolon.
 
 What is not taken yet: hygiene beyond marks (one mark per expansion, a local visible to identifiers of its own mark: `macro_rules!`'
 mixed-site behaviour for locals; no transparency levels, no `$crate` by context, no opaque `macro` def-site resolution), macro paths
-resolved by resolution (`#[macro_use]`, `$crate::m!` by its crate, shadowing), `cfg` on fields, statements and expressions, the
-derives' `#[default]` variants, packed structs, where clauses and bounded parameters, `PartialOrd` on enums without `Ord`, more than one
-variant in an enum's `Default`, proc macros (RFS8's class until RF11), `-Zunpretty=expanded`'s text (the survey's second view; it
-needs `rustc_ast_pretty`, RFP5).
+resolved by resolution (`#[macro_use]`, `$crate::m!` by its crate, a name's textual shadowing before its last definition), packed
+structs and unions in derives, const generics in derived impls, the rest of the builtins (`env!`, `option_env!`, `include_str!`,
+`include_bytes!`, `module_path!`, `compile_error!`, `concat_idents!`, `cfg_select!`, `global_asm!`/`asm!`), attribute macros and
+`#[test]`, proc macros (RFS8's class until RF11), `-Zunpretty=expanded`'s text (the survey's second view; it needs
+`rustc_ast_pretty`, RFP5).
 
 ### RF5: resolution (`arbace.rust.front.resolve`)
 
@@ -886,12 +892,13 @@ resolutions reported at their resolved prefix as HIR's type-relative paths are, 
 `resolve-crate` takes the crate and std's names (and the root file's text, which places definitions whose identifiers the dump writes
 without spans; identifiers of a macro's output carry their span, `(id NAME CTXT [l c l c])`).
 
-**Results** (`bin/rust-front resolve-check`): over the helper's expanded crates **4,912 of 4,912 paths of 86 programs equal**, nothing
-missing or extra; and **the pipeline** (`resolve-check --ours`: the native reader, our expansion, our resolution) **4,912 of 4,912 paths,
-86 of 86 programs**; the negative control differs. (`constructs`, `edition2015` and `lowered_table` have no resolution oracle: rustc stops
+**Results** (`bin/rust-front resolve-check`): over the helper's expanded crates **4,948 of 4,948 paths of 87 programs equal**, nothing
+missing or extra; and **the pipeline** (`resolve-check --ours`: the native reader, our expansion, our resolution) **4,948 of 4,948 paths,
+87 of 87 programs**; the negative control differs. (`constructs`, `edition2015` and `lowered_table` have no resolution oracle: rustc stops
 on them after expansion or they are no crate.) What rustc's HIR reports, found on the way: `&self`'s implicit `Self` at the `self` token;
 a parameter's bound as a path at its identifier; `impl Trait` arguments as synthetic type parameters; `e?`'s desugared local; the leaves of
-nested use trees, not their stem. Not taken yet: privacy, `pub(in path)`, out-of-line `mod m;` files, `<T as Trait>::f`'s trait part,
+nested use trees, not their stem; a derived enum `Default`'s `Self::Variant` reported at the variant's identifier, its `Self` the impl's
+(the derive path's) start. Not taken yet: privacy, `pub(in path)`, out-of-line `mod m;` files, `<T as Trait>::f`'s trait part,
 the crate root's items seen from nested modules without a path (an approximation the corpus does not exercise), traits in scope.
 
 ### Estimates, revisited
