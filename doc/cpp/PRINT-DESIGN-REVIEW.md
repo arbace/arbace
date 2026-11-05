@@ -119,3 +119,7 @@ needs `cpp-native2` merged first. The sample check above is the evidence; its sc
   with the next re-record.*
 - **CPR4: `-fcoroutines` to c++20 for clang in the list's modelled options** (18 files accepted, 11 more stay rejections of error tests): (a) with CPR1's
   re-record, (b) now with its own re-record. *Recommended: (a).*
+
+## Decided (2026-11-05, the user)
+
+CPR1-CPR4 as recommended: CPR1 (a), the print cell reads the oracle's rejected files natively with the new judge level, after cpp-native2's merge; CPR2 (a), oracle-rejects split after it; CPR3, gxx-objects-location by design now, split by cause at the next re-record; CPR4, -fcoroutines mapped to c++20 for clang with CPR1's re-record.
