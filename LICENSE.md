@@ -370,7 +370,16 @@ covers what.
   tarball CPython 3.14.10's `Misc/externals.spdx.json` pins), built by ci's builder with the part of musl 1.2.6 it reaches
   and `tools/pyi/clib/zstd/pyzstd.c` (Arbace's own): Copyright (c) Meta Platforms, Inc. and affiliates, under the BSD
   License of its `LICENSE` (zstd is dual licensed, BSD or GPLv2; taken under the BSD License, section "zstd: BSD
-  License" below), musl under the MIT License (section "musl: MIT License" below).
+  License" below), musl under the MIT License (section "musl: MIT License" below). `go/arbace/pyzstd.ae` and
+  `go/arbace/pyzstd/` (package `arbace/pyzstd`, queue 215), a port of the CPython 3.14.10 tarball's `Modules/_zstd/`
+  (under the PSF License Agreement, section "CPython: the PSF License Agreement for Python 3.14" below);
+  `tools/pyi/clib/refmod.bash`, Arbace's own, builds that tarball's `Modules/_zstd` unchanged for the reference (not kept).
+- `tools/pyi/clib/sqlite/` (queue 215: the C library of pyi's module `_sqlite3`; `lib.conf` and `pysqlite.c`, Arbace's
+  own): its node program, built by `bin/pyi-clib` from SQLite 3.50.4's amalgamation (`sqlite3.c`, `sqlite3.h` of
+  https://github.com/python/cpython-source-deps/archive/refs/tags/sqlite-3.50.4.0.tar.gz, SHA-256 `fb5ab81f...31e8d0`, the
+  tarball CPython 3.14.10's `Misc/externals.spdx.json` pins) with the part of musl 1.2.6 it reaches, is not committed
+  (208's DECISION 2 (a)); SQLite is in the public domain (section "SQLite: public domain" below), musl under the MIT
+  License (section "musl: MIT License" below).
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
   JN2), written for Arbace in place of jdk26u's files of the same names (from their
@@ -3030,6 +3039,19 @@ XZ Utils Licensing
 
     If you have questions, don't hesitate to ask the author(s) for more
     information.
+```
+
+## SQLite: public domain
+
+The notice every file of SQLite 3.50.4's amalgamation (the tarball above) carries, as `sqlite3.c` opens `sqliteInt.h`:
+
+```
+** The author disclaims copyright to this source code.  In place of
+** a legal notice, here is a blessing:
+**
+**    May you do good and not evil.
+**    May you find forgiveness for yourself and forgive others.
+**    May you share freely, never taking more than you give.
 ```
 
 ## zstd: BSD License
