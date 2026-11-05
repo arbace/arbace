@@ -125,7 +125,7 @@ applied on this branch: the existing `reap` step's `:inputs` gain `"test/python/
 
 **The negative controls before entry** (GTS218 (a)): each step's family must have one that fails. Present: `c2j-check`'s (queue 206: `test/python/c2j/pyi/c2j_control.ae`, which c2j must refuse, in the same run), `check --aot`'s
 judge (two passing programs against each other's references; the essential's 20 hold it), `lex-check`'s, PY7's
-`test/python/controls.edn` (`bin/pyi check`), `lib-test-all`'s. Missing: the round trips (both modes), `parse-check`,
+`test/python/controls.edn` (`bin/pyi check`), `lib-test-all`'s. (Queue 212: R1's controls built, `test/python/controls-read.edn`, judged by each check's own judge; the steps enter by GT9's fragments `python.edn` and `python-records.edn`.) Missing before queue 212: the round trips (both modes), `parse-check`,
 `scope-check` and `compile-check` (R3: present since PY7-check's dc8aa6d1, judged by their own judge). Until R1's exist,
 `python-roundtrip` and the `parse-check` half of `python-native` cannot enter under GTS218 (a), and
 `python-read-essential` enters only with them.

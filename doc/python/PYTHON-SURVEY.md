@@ -2174,3 +2174,24 @@ Not changed: Go's collector stays at GOGC 400 (GOGC 800 measured 3-7% faster for
 - **The sample**: `bin/pyi lib-test-all --fresh test_ast test_dict`, 339 methods: 316 equal, 23 classed, 0 failing
   (the base: 305, 34, 0). test_ast 207 of 217 (the 10: 7 `:cpython-only`, 2 `:ast-objects`, 1
   `:finalization-collect`); test_dict 109 of 122 (10 `:cpython-only`, 3 finalization).
+
+## As built: 212, Python's GT9 fragment checked and R1's controls (2026-11-05, the Mac VM, queue 212)
+
+- **R1's negative controls** (GTS81 (a), PY11-PREP's R1). `test/python/controls-read.edn` declares a crossed pair per
+  corpus (samples, stdlib, lib-test, site-packages, lex-errors, syntax-errors), two files that pass every judge. After its
+  run each check judges the subject's output against the reference's expected result by its own judge, which must fail:
+  the round trip by `judge-file` (the subject's printed dump against the reference's original; `--text`: `judge-text`,
+  the bytes and marshal), lex-check and parse-check (and `--full`) by `judge-dump` (the subject's native dump, named as the
+  reference, against the reference's helper dump). `arbace.repr.python.results/judge-controls`: "control passed:" or
+  "control not judged:" fails the check (also with `--record`, before anything is written); a pair a selection did not run
+  is left. They replace the inline controls, which compared on their own (a judge made to pass everything still passed
+  them), ran on the last corpus only, compared a non-`--full` dump against `--full` references, and printed success with
+  nothing judged. `REPR_PYTHON_CONTROLS` names another file.
+- **The rotations' subsets**: `test/python/corpora.edn`'s `:subset-roundtrip` and `:subset-native` for stdlib, lib-test and
+  site-packages, by hand (every known file, the controls' pair, every 24th file), for the gate's `python-roundtrip` and
+  `python-native` (`test/gate/crops/python-records.edn`, the main host's, spliced after batch P's night of records).
+- **The pinned files from the main checkout** (GTS212 (a)): `bin/gate` drops `REPR_PYTHON_SRC`, so `bin/repr-python`'s
+  fetch and `bin/pyi wheels fetch` take, when it is unset, the main checkout's copy at the same path before the network
+  (a linked worktree's and the clean clone's).
+- **The fragment** (`test/gate/crops/python.edn`, the main host's): checked in a scratch merge of `gt9-verbs` with this
+  branch; its corrections and the second fragment are queue 212's patch for batch P (report 212).
