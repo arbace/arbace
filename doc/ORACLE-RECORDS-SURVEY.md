@@ -705,3 +705,119 @@ the order they land:
 ## Decided (2026-11-05, the user: ORS15-ORS18)
 
 ORS15-ORS18 (a): the library into bin/lib/ excluded from gate_key, and the record judges folded into the embedded c23check and rtcheck, both in the GTS240 change; both packs kept in the store outside the clone; the dg record committed.
+
+## As built: Scheme (write-ahead, 2026-11-05)
+
+ORS12's second crop, on branch `oracle-records-scheme` (from `oracle-records-c`, with `scheme-sm9` merged in), light: the whole
+recording is small enough that it was made here (15 s of Chez); what is left to the night is the verification and the commits.
+Scheme's gate steps were read from GT9's fragment (`git show gt9-verbs:test/gate/crops/scheme.edn`) and `scheme-sm9`'s scripts.
+
+### What the steps asked of Chez and Chibi, and what each became
+
+| Step | Live call | Class | Now |
+|---|---|---|---|
+| scheme-read-essential, scheme-read (7 parts) | `chez --script tools/schemedump/dump.ss` over the corpora, the probes and the 7 scans | B | the pack `scheme-chez-dumps`; the essential subset's dumps committed; `:chez` off |
+| si-corpora | `bin/si chibi-tests`: chibi-scheme runs 3 libraries' own tests | A | committed records `test/scheme/records/chibi-tests/`; `:chibi` off |
+| si-check | `bin/si boot --check`: Chez expands psyntax, `cmp` with `scheme/psyntax/psyntax.pp.ae` | D | the oracle tier's `si-boot-oracle`; out of `si-check`; `:chez` off |
+| si-essential, si-aot-essential, si-aot, si-ecraven, si-mats, scheme-roundtrip | none (`ref-chez.edn`, `ref-r7rs-*.edn`, `ref-ecraven-*.edn` committed) | A | unchanged |
+
+No other call: `bin/si test`, `check-suite`, `fixpoint`, `vendor verify`, `r7rs`, `r7rs --chibi-test` and `srfi` read the committed
+references; `--chez`, `--chibi` and `--record-ref` are recording verbs no step runs.
+
+### Chez's dumps (class B)
+
+- **The pack `scheme-chez-dumps`** (`test/scheme/records/scheme-chez-dumps.{sha256,tsv}`): 23 units, a member each: `dump-ID.edn` for
+  the 15 corpora and `dump-probes.edn`, `scan-KIND.edn` for the 7 scans of every scalar value. 6.2 MB raw (whimsical's 4.7 MB the
+  most), **510,016 bytes xz** (`f61291c11fbc…`), made by `bin/repr-scheme check --record-dumps` in 15 s. The `:file` paths are
+  normalized (`@corpora/`, `@whimsical/`, `@probes/`, the roots the reading puts back), so the pack is the same wherever the corpora
+  are. The key of an entry: the digest of `tools/schemedump/dump.ss` and of each file the dump reads, in order (the probes' files
+  are generated from `test/scheme/probes.edn`, so a changed probe changes the key); the identity is the manifest's `host:` line
+  (`:chez 1abe097a713483b5`, the gate's `:host-ids` identity, `oracle_host_id chez`), as for C.
+- **The essential subset committed** (ORS2 (a)): `test/scheme/records/essential/`, the 15 dumps of the probes, racket-r6rs,
+  larceny-r6rs, chibi-r7rs and the srfi-* corpora, **1.4 MB** raw. The essential steps (`scheme-read-essential`) need no store.
+  A committed file that differs from the manifest's digest is refused, never replaced by the pack's.
+- **`bin/repr-scheme check`** reads the records by default: no Chez run. An entry whose inputs changed is `STALE`, an absent one
+  `UNRECORDED`, a differing committed file `REFUSED`; each fails the run (ORS10 (a)). `--live` runs Chez as before (day work and
+  the oracle tier), `--record-dumps [--corpus ID]...` records (the units not named are kept from the pack in place), `--verify-dumps
+  [--corpus ID]... [--sample N]` runs Chez over the units and compares each with its entry byte for byte (ORS6 (a)'s verdict), with
+  the crossed pair (the first unit's live dump against the last unit's entry, which must differ).
+- Kind `scheme chez-dumps` in `test/oracle-records/kinds.edn` (`bin/oracle-records verify scheme chez-dumps --corpus ID --sample N`).
+
+### Chibi's answers (class A)
+
+`test/scheme/records/chibi-tests/NAME.chibi.{out,err,rc}` for diff, optional and term-ansi (9 small files, 7 KB) with their manifest
+`chibi-tests.tsv`, committed (an outcome, not a pack). The key of a library: its driver text, the digest of its vendored test file
+and the escapes flag. `bin/si chibi-tests` replays them (the comparison with si's run is unchanged: `2 of 3 results pass`, the class
+`chibi-optional-fallback`); `--live`, `--record-chibi`, `--verify-chibi` as above. Chibi's `run-tests` prints its own elapsed time
+("passed in 0.0017 seconds"), the one nondeterministic part: the verify masks it on both sides, the record keeps the bytes as made.
+Kind `scheme chibi-tests`. Chibi's identity: `:chibi fa919cb939995a70` (`oracle_host_id chibi`, the same recipe as the gate's).
+
+### Class D: `si boot --check`
+
+Chez expanding psyntax on Arbace's own product has no record to keep. It is the oracle tier's step **`si-boot-oracle`** (`bin/si
+boot --check`, 38 s, `:hosts [:stage0 :chez]`, `:phase :oracle`), and kind `scheme boot` (verify only). The expander's fixpoint
+without Chez stays in `si-check` (`bin/si fixpoint`). The other oracle-tier Scheme step, **`scheme-records-verify`**
+(`bin/oracle-records verify scheme chez-dumps chibi-tests --sample 8`, `:hosts [:stage0 :chez :chibi]`), is the verify of both kinds.
+
+### The fragment and the plan
+
+`test/gate/crops/scheme.edn` is GT9's fragment with these changes (on merge take this file's side): `scheme-read-essential`,
+`scheme-read`, `si-check` and `si-corpora` lose `:chez` and `:chibi`; `scheme-read` pins the pack's `.sha256`; `si-check` loses
+`bin/si boot --check`; the two oracle steps and their controls (waived: the verifies' crossed pairs) are new; `:scheme` gains
+`bin/oracle-records` and `test/oracle-records/`. Not spliced into `test/gate/steps.edn`: GT9's splice tool (`gate.crops`) is on
+`gt9-verbs`, so the merge order is gt9-verbs, then this branch.
+
+Checked with the plan (`GATE_STEPS` a scratch table, `.tmp/overlay/`: this branch's `steps.edn` with each fragment spliced in by a
+script, `ARBACE_GATE_STORE` a scratch store, `bin/gate --full --plan`):
+
+| Step | hosts with GT9's fragment | with this one |
+|---|---|---|
+| scheme-read-essential, scheme-read (7 parts) | `chez stage0` | `stage0` |
+| si-check | `chez go stage0` | `go stage0` |
+| si-corpora | `chibi go stage0` | `go stage0` |
+| the other 14 Scheme steps and parts | as before, none on `:chez` or `:chibi` | |
+
+- No Scheme step outside the oracle tier names `:chez` or `:chibi` (the plan's `host` lines of every `si-*` and `scheme-*` input).
+- The keys do not depend on the toolchain any more: with `chez` and `chibi-scheme` off `PATH`, this fragment's keys are the same
+  (`scheme-read-essential` `30bed9c6c5c3` both ways); GT9's fragment's change (`eb6645ade959` with Chez, `0e32052605fa` without).
+- `bin/gate --oracle --plan`: with both tools `si-boot-oracle` and `scheme-records-verify` `run`; without them both `absent`
+  ("host :chez none here").
+
+### What was checked (light, in the worktree, main's stage 0)
+
+- `bin/repr-scheme check` with Chez off `PATH`: 1,364 files and probes equal to Chez, the 7 scans equal, 1 m 42 s. With an empty
+  store and the essential corpora alone (probes, racket-r6rs, larceny-r6rs, chibi-r7rs, srfi-*): 1,358 equal; whimsical alone:
+  `UNRECORDED` naming the missing pack; a changed manifest key: `STALE`; a committed dump with a byte appended: `REFUSED`.
+- `bin/repr-scheme check --verify-dumps --corpus srfi-39 --corpus probes --corpus scans --sample 4`: 4 units equal, the crossed pair
+  differs. `bin/si chibi-tests --verify-chibi`: 9 entries equal, the crossed pair differs. `bin/oracle-records list` and `check`
+  list and check the pack; `bin/si boot --check`: "the bootstrap gives the committed file".
+- `bin/si chibi-tests` with Chibi off `PATH`: the same three result lines as `--live`.
+- Not run: any gate, any build, the whole `bin/oracle-records verify scheme`.
+
+### The night's commands
+
+1. The pack is in the main store already (this branch's store is the main checkout's, `.tmp/oracle-packs/scheme-chez-dumps/`; the
+   command that made it: `bin/repr-scheme check --record-dumps`, deterministic: `oracle: packed scheme-chez-dumps: 23 members,
+   510016 bytes xz, f61291c11fbcd93b…`). `bin/oracle-records check` then shows it. The record is a commit of its own naming
+   `:chez 1abe097a713483b5` and `:chibi fa919cb939995a70` (ORS5 (a)): `test/scheme/records/`.
+2. `bin/oracle-records verify scheme` (every unit and both Chibi kinds, about 3 minutes), then `bin/si boot --check` (38 s).
+3. After the merge with gt9-verbs: `bin/gate --full --plan` shows no Scheme step on `:chez` or `:chibi`; `bin/gate --oracle` runs
+   the two Scheme steps.
+4. `bin/oracle-records mirror --push` once the user agrees (ORS3 (a)): `scheme-chez-dumps` is a pack to mirror.
+
+### Left
+
+- The merge with gt9-verbs (the fragment) and the planner's `:phase :oracle` (`d3737b220`, on `oracle-records-c`): both are the
+  merge's; until then `si-boot-oracle` and `scheme-records-verify` exist only in the fragment.
+- `bin/si ecraven --chez|--chibi` and `bin/si r7rs --chez|--chibi` (the references' own recording) have no verify verb: they are
+  `--record` commands run by hand with their toolchain and judged against the committed `ref-*.edn`; the verify of those records
+  is the kinds' next entries (`ref-r7rs-chez.edn`, `ref-ecraven-*.edn`: about 2,800 and 600 rows, minutes of Chez and Chibi).
+
+## Proposed (2026-11-05, Scheme): ORS19
+
+- **ORS19 The essential dumps' form.** The essential subset's 15 dumps are 1.4 MB raw in `test/scheme/records/essential/`, over the
+  survey's "under 1 MB" for Scheme.
+  - Options: (a) raw text, diffable, as ORS2 (a) says; (b) one committed xz of them (about 150 KB), which a helper change rewrites
+    whole and git cannot diff.
+  - Costs: (a) 1.4 MB in the tree, each helper or corpus change a visible diff; (b) smaller, opaque.
+  - *Recommended: (a)*: a helper change is rare (`dump.ss` has not changed since SM2) and a diff of the dumps is the review.
