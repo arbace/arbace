@@ -1645,3 +1645,7 @@ trees' `eval`, not a second machine.
   measured on nfib and nofib's `:speed` nine; (b) size first (a smaller expansion per node, e.g. the continuations' common
   tails shared) to make HES70's packages cheaper to compile. *Recommended: (a)*, HES70's per-module packages bounding the
   compile's memory anyway.
+
+## Decided (2026-11-05, the user: HES70-HES73)
+
+All (a): the 1,320 library modules compiled at night once per key under the heavy lock; then the metadata emitted for a standalone executable; the build through Go forms at HE8's end; speed before size (typed locals for unlifted binders, then direct calls between compiled closures).
