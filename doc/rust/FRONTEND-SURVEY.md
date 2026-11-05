@@ -839,7 +839,7 @@ of the mono items of 81 programs, the collector's traversal to all 81 item sets,
 resolution with specialization, v0 symbols (the crates' disambiguator hashes), vtable and drop glue and shim MIR from data
 (about 8 to 12 days). The estimate stands; the exactness of the judge is what the day showed. After the second day (RF3b) the codegen's
 refusals that need only rustc's data are done but for the transmutes, unsizings and subslices; the two big ones need the helper to
-dump more (the vector layouts, the vtable slots), RFP5 below; the 565 differing items need about 2 more days by the classes above.
+dump more (the vector layouts, the vtable slots), RFP13 below; the 565 differing items need about 2 more days by the classes above.
 
 ### Proposed (RF-trial)
 
@@ -860,7 +860,7 @@ dump more (the vector layouts, the vtable slots), RFP5 below; the 565 differing 
 
 ### Proposed (RF3b)
 
-- **RFP5 The helper's missing data.** Two refusal classes, 265 items (2.3 % of the corpus), wait on facts the helper does not dump:
+- **RFP13 The helper's missing data.** Two refusal classes, 265 items (2.3 % of the corpus), wait on facts the helper does not dump:
   the vector layouts (`(other)` with no element type or lane count: 234 items, hashbrown's SSE2 group and `simd_*`) and the vtable slot
   of a virtual callee (31 items, more in programs that call trait objects: the drop and `Drop` of `dyn` are another 48); the fields'
   types of ADTs would also give the named struct types rustc's bodies instead of fillers. Options: (a) **add them to `--mono-mir`
