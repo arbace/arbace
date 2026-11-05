@@ -318,3 +318,42 @@ smaller parts), each on a branch of its own, held for after the tag (the merge p
 - **Housekeeping:** the disk from 83% to 47% (merged and old worktrees removed, the user's OK for the older lines;
   night 3's raw coverage and the speed reruns' work directories; `bin/gate --prune`); a stray `/.tmp/tmp` (an empty root
   in a TMPDIR, 2026-11-03) removed. The account switched (`/login`): both hosts switch together next time.
+
+## 2026-11-05: the re-seed before `arbace-reaps-4-crops-v1` (night 5); GTS228; the audit's reducer race
+
+- **Night 4's coverage run (2026-11-04, `.tmp/night4/`):** the cover build ran Java's compiled level (20:28-22:57,
+  passed) and Clojure's AOT level (failed only on test.generative's "no result", the cover build's slowness; every other
+  namespace equal to the plain build's). Clojure's AOT run takes about 13 minutes, so it needs no subset.
+- **GTS228 (a), branch `java-compiled-subset` (2c939eec):** java-compiled-full's nightly slices now run the compiled
+  level's coverage subset, `test/java/corpora.edn`'s `:subset-compiled` per corpus (`:subset-key :subset-compiled` in
+  `test/gate/steps.edn`). It holds 1,905 of the 3,322 tests: every covered block, one test per class, the kept classes'
+  tests and the controls' subjects (`bin/cover subset`, GTS205 (a)'s rule). The sub parts: jdk-run 1,190, jdk-other 520,
+  langtools-run 89, hotspot-compiler 75, hotspot-runtime 22, jls 9. The clean run still runs every test.
+- **The reducer race, branch `audit-race` (344dcb07):** night 5's first gate of `next` failed at 23:35 on gate-tests
+  ("files the step reads outside its :inputs: 1, e.g. go/arbace/goi/ops.ae"), a step that had passed at 20:01 on the same
+  commit. Cause: strace can print a new child's first calls before its parent's clone result. A relative open by such a
+  child was resolved against the checkout's root, not the parent's directory, and generated-check-test's fabricated tree
+  opens `ops.ae` by its bare name. Fix, in both reducers (`test/gate/audit.awk`, `tools/gateaudit`): the path of a relative
+  call by a process not yet born is the result's own path when `-y` names it (`= N</abs/path>`). `audit-trace-test.bash`'s
+  new case `earlyrel` failed on the old awk and passes on the fix (19 of 19). The relaunched gate passed (23:57).
+  Alternatives: a retry of gate-tests (it hides the race); buffering an unborn child's lines until its birth (heavier in
+  both reducers, and the result path makes it unnecessary for opens).
+- **The re-seed (`.tmp/night5/reseed.sh`, 23:37-03:14 UTC), every step passed:**
+  - `next` gated and main fast-forwarded;
+  - the pre-seed C checks passed, with `bin/ci check` judged against the record (no `--record`);
+  - the build: 157 sources, 15,267 classes, 0 failed;
+  - `--fixpoint` held (G2 = G3);
+  - `bin/seed --make` packed G3 as seed `d5548e72…`, committed as 496d33485;
+  - `bin/seed --verify`: stage 0 = G1 = G2 = G3, `d503777b…`;
+  - stage 0 rebuilt from the new seed;
+  - the PATH_FIRST trio dropped from the nine C steps (d86cb874a);
+  - C's light checks and `bin/ci check --aot` passed without the trio;
+  - the essential gate passed on the re-seed (26 steps run, 31 min);
+  - main and `next` advanced to d86cb874a, main pushed.
+
+  Before the launch, Go's build cache was trimmed from 39 GB to 3 GB (`gocache_trim`, ARBACE_GOCACHE_KEEP_MIN=20) to meet
+  the precondition of 60 GiB free.
+- **The keyed `bin/gate --full --concurrent` (GTS230) started at 03:14 on main,** with a deadline of 16:00 (GTS231-234 (a):
+  overflow into the day allowed).
+- **Merged into `next` (2026-11-05 morning):** `java-compiled-subset` and `audit-race`, for tonight's gate before the
+  clean run.
