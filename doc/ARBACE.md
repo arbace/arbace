@@ -74,7 +74,18 @@ code. Three kinds of things live here:
   PY5a"; evaluated from the checkout, not embedded, PYS18 (a)): its scope analysis, `python/scope.ae`, ports CPython
   3.14.10's `Python/symtable.c` and `Python/future.c`'s future parse (the release tarball
   https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256 `de414a57...b72032`), by hand on
-  2026-11-03, the file carrying its notice (LICENSE.md: the PSF License Agreement); the rest is Arbace's own.
+  2026-11-03, the file carrying its notice (LICENSE.md: the PSF License Agreement); the rest is Arbace's own;
+  `repr/llvm.ae` and `repr/llvm/` (repr/llvm, LLVM IR to LLVM forms and back and its verifier, `arbace.repr.llvm` and
+  `arbace.repr.llvm.*`; doc/llvm/SPEC.md, doc/llvm/LLVM-CROP-SURVEY.md): the verifier `repr/llvm/verify.ae` and the
+  reader's LLParser errors in `repr/llvm/read.ae` reimplement checks of llvm-project at `llvmorg-23.1.4` (the release
+  tarball `llvm-project-23.1.4.src.tar.xz` pinned in `test/cpp/corpora.edn`): `llvm/lib/IR/Verifier.cpp`,
+  `llvm/lib/AsmParser/LLParser.cpp` and `LLLexer.cpp`, with the parts of `lib/IR/{AutoUpgrade,Type,Attributes,AsmWriter,DebugInfoMetadata}.cpp`
+  their rules call (the functions SPEC §6.2 names), by hand on 2026-11-04 and 2026-11-05 (LL4); `repr/llvm/intr.ae` ports
+  `llvm/lib/IR/Intrinsics.cpp`'s IIT decoding, `lookupIntrinsicID`, `matchIntrinsicType`, `isSignatureValid` and
+  `getMangledTypeStr` (2026-11-05); `repr/llvm/intr_table.ae` and `di_table.ae` are generated from the same release by
+  `bin/llvm-corpus intrinsics` (llvm-tblgen `--dump-json` over `llvm/include/llvm/IR/Intrinsics*.td`) and `bin/llvm-corpus
+  di-table` (`LLParser.cpp`'s `VISIT_MD_FIELDS`, `AsmWriter.cpp`'s field order, `BinaryFormat/Dwarf.def` and `Dwarf.h`,
+  `IR/DebugInfoFlags.def`); LICENSE.md: Apache 2.0 with LLVM Exceptions; the rest of repr/llvm is Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go
