@@ -1,0 +1,177 @@
+;; format_args!: rustc_builtin_macros/src/format.rs (parse_args, make_format_args) and rustc_parse_format/src/lib.rs
+;; (Parser::next, argument, format, count), rustc 1.99.1 at 58cf8f9c3 (MIT OR Apache-2.0, LICENSE.md); part of
+;; arbace.rust.front.expand.
+
+(in-ns 'arbace.rust.front.expand)
+
+(defn unesc
+  "A string literal's cooked text"
+  ^String [^String s]
+  (let [sb (StringBuilder.)]
+    (doseq [u (lx/unescape s :str)] (.appendCodePoint sb (int (if (vector? u) (second u) u))))
+    (str sb)))
+
+(defn- fmt-parse
+  "rustc_parse_format over a format string's raw text (escapes kept whole): pieces [:lit cooked] and
+  [:arg {:pos [:implicit i]|[:index n]|[:name s off] :off offset-of-position :fill :align :sign :alternate :zero-pad
+  :debug-hex :width :precision :ty}]"
+  [^String raw cook]
+  (let [n (count raw) cur (atom 0) pieces (java.util.ArrayList.) lit (StringBuilder.)
+        flush (fn [] (when (pos? (.length lit)) (.add pieces [:lit (cook (str lit))]) (.setLength lit 0)))
+        digits (fn [i] (loop [j i] (if (and (< j n) (Character/isDigit (.charAt raw j))) (recur (inc j)) j)))
+        word (fn [i] (if (and (< i n) (let [c (.charAt raw i)] (or (Character/isLetter c) (= c \_))))
+                       (loop [j (inc i)] (if (and (< j n) (let [c (.charAt raw j)] (or (Character/isLetterOrDigit c) (= c \_)))) (recur (inc j)) j))
+                       i))
+        count-at (fn [i]
+                   ;; [count next-i]: [:is n] [:param n] [:name s off] or nil
+                   (let [d (digits i)]
+                     (if (> d i)
+                       (if (and (< d n) (= \$ (.charAt raw d)))
+                         [[:param (Long/parseLong (subs raw i d))] (inc d)]
+                         [[:is (Long/parseLong (subs raw i d))] d])
+                       (let [w (word i)]
+                         (if (and (> w i) (< w n) (= \$ (.charAt raw w)))
+                           [[:name (subs raw i w) i] (inc w)]
+                           [nil i])))))]
+    (loop [i 0]
+      (if (>= i n)
+        (do (flush) (vec pieces))
+        (let [c (.charAt raw i)]
+          (cond
+            (= c \\) (let [j (if (and (< (inc i) n) (= \u (.charAt raw (inc i))))
+                               (inc (.indexOf raw "}" (int i)))
+                               (if (and (< (inc i) n) (= \x (.charAt raw (inc i)))) (+ i 4) (+ i 2)))]
+                       (.append lit (subs raw i (min j n))) (recur (min j n)))
+            (and (= c \{) (< (inc i) n) (= \{ (.charAt raw (inc i)))) (do (.append lit "{") (recur (+ i 2)))
+            (and (= c \}) (< (inc i) n) (= \} (.charAt raw (inc i)))) (do (.append lit "}") (recur (+ i 2)))
+            (= c \{)
+            (let [_ (flush)
+                  p0 (inc i)
+                  d (digits p0) w (word p0)
+                  [pos i] (cond (> d p0) [[:index (Long/parseLong (subs raw p0 d)) p0 d] d]
+                                (> w p0) [[:name (subs raw p0 w) p0 w] w]
+                                :else [nil p0])
+                  spec (atom {:align nil :fill nil :sign nil :alternate false :zero-pad false :debug-hex nil :width nil :precision nil :ty ""})
+                  i (if (and (< i n) (= \: (.charAt raw i)))
+                      (let [i (inc i)
+                            i (cond (and (< (inc i) n) (#{\< \^ \>} (.charAt raw (inc i)))) (do (swap! spec assoc :fill (.charAt raw i) :align (.charAt raw (inc i))) (+ i 2))
+                                    (and (< i n) (#{\< \^ \>} (.charAt raw i))) (do (swap! spec assoc :align (.charAt raw i)) (inc i))
+                                    :else i)
+                            i (if (and (< i n) (#{\+ \-} (.charAt raw i))) (do (swap! spec assoc :sign (.charAt raw i)) (inc i)) i)
+                            i (if (and (< i n) (= \# (.charAt raw i))) (do (swap! spec assoc :alternate true) (inc i)) i)
+                            [i havew] (if (and (< i n) (= \0 (.charAt raw i)))
+                                        (if (and (< (inc i) n) (= \$ (.charAt raw (inc i))))
+                                          (do (swap! spec assoc :width [:param 0]) [(+ i 2) true])
+                                          (do (swap! spec assoc :zero-pad true) [(inc i) false]))
+                                        [i false])
+                            i (if havew i (let [[cnt j] (count-at i)] (when cnt (swap! spec assoc :width cnt)) j))
+                            i (if (and (< i n) (= \. (.charAt raw i)))
+                                (let [i (inc i)]
+                                  (if (and (< i n) (= \* (.charAt raw i)))
+                                    (let [k @cur] (swap! cur inc) (swap! spec assoc :precision [:star k]) (inc i))
+                                    (let [[cnt j] (count-at i)] (swap! spec assoc :precision cnt) j)))
+                                i)
+                            i (cond (and (< (inc i) n) (= \x (.charAt raw i)) (= \? (.charAt raw (inc i)))) (do (swap! spec assoc :debug-hex :lower :ty "?") (+ i 2))
+                                    (and (< (inc i) n) (= \X (.charAt raw i)) (= \? (.charAt raw (inc i)))) (do (swap! spec assoc :debug-hex :upper :ty "?") (+ i 2))
+                                    (and (< i n) (= \? (.charAt raw i))) (do (swap! spec assoc :ty "?") (inc i))
+                                    :else (let [w (word i)] (swap! spec assoc :ty (subs raw i w)) w))]
+                        i)
+                      i)
+                  pos (or pos (let [k @cur] (swap! cur inc) [:implicit k]))]
+              (when-not (and (< i n) (= \} (.charAt raw i))) (throw (ex-info (str "expand: format string not taken: " raw) {:expand true})))
+              (.add pieces [:arg (assoc @spec :pos pos)])
+              (recur (inc i)))
+            :else (do (.append lit c) (recur (inc i)))))))))
+
+(def ^:private fmt-traits {"" 'Display "?" 'Debug "e" 'LowerExp "E" 'UpperExp "o" 'Octal "p" 'Pointer "b" 'Binary
+                           "x" 'LowerHex "X" 'UpperHex})
+
+(defn- parse-fmt-args
+  "parse_args over the call's items after the format string: [[name-or-nil Expr] ...]"
+  [items]
+  (if (empty? items)
+    []
+    (let [ctx (assemble items) ^objects toks (:toks ctx)]
+      (parse-with ctx
+                  (fn [^P p]
+                    (loop [out []]
+                      (if (= :Eof (cur-kind p))
+                        out
+                        (do (when-not (= :Comma (cur-kind p)) (throw (ex-info "expand: format_args! expects a comma" {:expand true})))
+                            (#'ps/bump p)
+                            (if (= :Eof (cur-kind p))
+                              out
+                              (let [ci (cur-index p) ^Tok t (aget toks ci) ^Tok t2 (aget toks (inc ci))]
+                                (if (and (= :Ident (.-kind t)) (= :Eq (.-kind t2)))
+                                  (do (#'ps/bump p) (#'ps/bump p)
+                                      (let [e (ps/parse-expr p)]
+                                        (recur (conj out [(cout ctx (#'ps/id (.-sym t) (ps/sp (.-lo t) (.-hi t)))) (cout ctx e)]))))
+                                  (recur (conj out [nil (cout ctx (ps/parse-expr p))])))))))))))))
+
+(defn format-args
+  "format_args! (format_args_nl! with nl): the FormatArgs expression"
+  [input nl m]
+  (let [[fmt-item rest-items] [(first input) (vec (rest input))]
+        [cooked raw style ^Tok ftok] (or (str-lit-of fmt-item)
+                                         (throw (ex-info "expand: format_args!'s format is not a literal" {:expand true})))
+        source? (>= (.-lo ftok) 0)
+        cook (if (= style 'Str) unesc identity)
+        pieces (cond-> (fmt-parse raw cook) nl (conj [:lit "\n"]))
+        args (parse-fmt-args rest-items)
+        explicit (vec args)
+        names0 (into {} (keep-indexed (fn [i [nm _]] (when nm [(second nm) i])) explicit))
+        arguments (atom (mapv (fn [[nm e]] (list 'FormatArgument :kind (if nm (list 'Named nm) 'Normal) :expr e)) explicit))
+        names (atom names0)
+        ;; the literal's text starts after its opening quote
+        q0 (when source? (+ (.-lo ftok) (if (= style 'Str) 1 (+ 2 (long (.-z ftok))))))
+        inner (fn [off len] (when source? (lx/span-vec (root-src) (+ q0 off) (+ q0 off len))))
+        ospan (fn [] (if source? (list 'Some (foreign-span m)) 'None))
+        lookup (fn [ref kind]
+                 (let [idx (case (first ref)
+                             (:implicit :index :param :star) (second ref)
+                             :name (let [nm (second ref)]
+                                     (or (get @names nm)
+                                         (let [i (count @arguments) sv (inner (nth ref 2) (count nm))]
+                                           (swap! arguments conj (list 'FormatArgument :kind (list 'Captured (list 'id nm 0))
+                                                                       :expr (list 'Expr :kind (list 'Path 'None (list 'Path :span sv :segments [(list 'PathSegment :ident (list 'id nm 0) :args 'None)]))
+                                                                                   :span sv :attrs [])))
+                                           (swap! names assoc nm i)
+                                           i))))]
+                   (list 'FormatArgPosition :index (list 'Ok idx) :kind kind :span (ospan))))
+        cnt (fn [c]
+              (case (first c)
+                nil 'None
+                :is (list 'Some (list 'Literal (second c)))
+                :param (list 'Some (list 'Argument (lookup c 'Number)))
+                :name (list 'Some (list 'Argument (lookup c 'Named)))
+                :star (list 'Some (list 'Argument (lookup c 'Implicit)))))
+        template (vec (for [[k v] (reduce (fn [acc [k v :as pc]]
+                                             (if (and (= k :lit) (= :lit (first (peek acc))))
+                                               (conj (pop acc) [:lit (str (second (peek acc)) v)])
+                                               (conj acc pc)))
+                                           [] pieces)]
+                        (if (= k :lit)
+                          (list 'Literal v)
+                          (let [pos (:pos v)
+                                ;; make_format_args' order of lookups: the argument, the precision, the width
+                                arg (lookup pos (case (first pos) :implicit 'Implicit :index 'Number :name 'Named))
+                                prec (cnt (:precision v))
+                                wid (cnt (:width v))]
+                            (list 'Placeholder
+                                  (list 'FormatPlaceholder :argument arg :span (ospan)
+                                        :format_trait (or (fmt-traits (:ty v)) 'Display)
+                                        :format_options (list 'FormatOptions :width wid :precision prec
+                                                              :alignment (case (:align v) \< '(Some Left) \> '(Some Right) \^ '(Some Center) 'None)
+                                                              :fill (if (:fill v) (list 'Some (list 'char (long (int (:fill v))))) 'None)
+                                                              :sign (case (:sign v) \+ '(Some Plus) \- '(Some Minus) 'None)
+                                                              :alternate (:alternate v) :zero_pad (:zero-pad v)
+                                                              :debug_hex (case (:debug-hex v) :lower '(Some Lower) :upper '(Some Upper) 'None))))))))]
+    (list 'Expr :kind (list 'FormatArgs
+                            (list 'FormatArgs :span (foreign-span m) :template template
+                                  :arguments (list 'FormatArguments :arguments @arguments
+                                                   :num_unnamed_args (count (filter #(nil? (first %)) explicit))
+                                                   :num_explicit_args (count explicit)
+                                                   :names (apply list 'map (mapcat identity @names)))
+                                  :uncooked_fmt_str (list 'tuple style raw)
+                                  :is_source_literal source?))
+          :span (foreign-span m) :attrs [])))

@@ -1,0 +1,74 @@
+(ns arbace.rust.front.expand-check
+  "RF4's judge (bin/rust-front expand-check): each file expanded by arbace.rust.front.expand against the helper's
+  --expanded crate (tools/rsdump/front.rs), both with spans and syntax contexts set aside (the tree level, as the native
+  reader's check compares parse trees); per item of the crate, so a file's equal items are counted when others differ;
+  a negative control (one file's expansion against another's oracle) must differ."
+  (:require [arbace.rust.front.expand :as ex]
+            [arbace.repr.rust.native :as nat]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- span-form? [x]
+  (or (nil? x)
+      (and (vector? x) (<= 4 (count x) 5) (every? integer? x))
+      (and (seq? x) (= 'span (first x)))))
+
+(defn normalize
+  "Spans to _, identifiers' contexts dropped, maps' entries sorted, token spacing kept"
+  [x]
+  (cond (span-form? x) '_
+        (and (seq? x) (= 'id (first x))) (list 'id (second x))
+        (and (seq? x) (= 'map (first x))) (apply list 'map (mapcat identity (sort-by (comp str first) (map vec (partition 2 (map normalize (rest x)))))))
+        (seq? x) (apply list (map normalize x))
+        (vector? x) (mapv normalize x)
+        :else x))
+
+(defn- fget [x k] (when (seq? x) (get (apply hash-map (rest x)) k)))
+
+(defn- read-oracle [f]
+  (with-open [r (java.io.PushbackReader. (java.io.FileReader. ^String f))]
+    (read r)))
+
+(defn- item-key [it] (pr-str (normalize it)))
+
+(defn check-one
+  "[status equal-items total-items first-difference]"
+  [file oracle std ed]
+  (let [want (normalize (read-oracle oracle))
+        got (try (normalize (ex/expand-file file ed std))
+                 (catch Throwable e
+                   (when (System/getenv "EXPAND_TRACE") (.printStackTrace e))
+                   (list 'error (str e (when-let [d (ex-data e)] (str " " (pr-str (dissoc d :expand))))))))]
+    (if (= 'error (first got))
+      [:error 0 (count (fget want :items)) (second got)]
+      (let [wi (fget want :items) gi (fget got :items)
+            gset (frequencies (map pr-str gi))
+            eq (count (filter #(pos? (get gset (pr-str %) 0)) wi))]
+        [(if (= want got) :pass :differ) eq (count wi)
+         (when-not (= want got)
+           (let [wrong (first (remove #(pos? (get gset (pr-str %) 0)) wi))
+                 near (when wrong (first (filter #(= (take 7 (pr-str %)) (take 7 (pr-str wrong))) gi)))
+                 d (if (and wrong near) (nat/first-diff near wrong) (nat/first-diff got want))]
+             (when d (let [[path a b] d] (str "at " path "\n    got  " (subs (pr-str a) 0 (min 400 (count (pr-str a))))
+                                             "\n    want " (subs (pr-str b) 0 (min 400 (count (pr-str b)))))))))]))))
+
+(defn -main [dir std-file & files]
+  (let [std (ex/load-std-macros std-file)
+        verbose (System/getenv "EXPAND_VERBOSE")
+        rs (doall (for [f files
+                        :let [n (str/replace (.getName (File. ^String f)) #"\.rs$" "")
+                              o (str dir "/" n ".exp.edn")]
+                        :when (.exists (File. o))]
+                    (let [ed (if (= n "edition2015") 2015 2024)
+                          [st eq tot why] (check-one f o std ed)]
+                      (println (format "%-28s %-7s %3d of %3d items%s" n (name st) eq tot (if (and why (or verbose (= st :error))) (str "\n  " why) "")))
+                      [n st eq tot])))
+        pass (count (filter #(= :pass (second %)) rs))
+        eq (reduce + (map #(nth % 2) rs)) tot (reduce + (map #(nth % 3) rs))]
+    (println (str "expand-check: " pass " of " (count rs) " crates equal to rustc's expansion; " eq " of " tot " items"))
+    (when (>= (count files) 2)
+      (let [[a b] (take 2 files)
+            nb (str/replace (.getName (File. ^String b)) #"\.rs$" "")
+            [st] (check-one a (str dir "/" nb ".exp.edn") std 2024)]
+        (println "control (" a "against" nb "):" (if (= st :pass) "PASSED (a bug)" "differs, as it must"))))
+    (System/exit 0)))
