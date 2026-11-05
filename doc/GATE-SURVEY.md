@@ -3745,10 +3745,10 @@ hunks but `reap`'s (its `:inputs` and `:summary` per row), which stay. `bin/gate
 
 | fragment | batch | essential (chain wall, warm) | nightly, worst case | share | clean | share | notes |
 |---|---|---|---|---|---|---|---|
-| `ocaml.edn` (o8) | 1 | 1.4 min measured (o8) | 48 *est.* (o8's --cmi on every corpus, judges with expect, oi check whole) | 32.4 | 55 *est.* | 130 | 35 once `--cmi-only`, `--no-expect` and `:subset-oi` exist (GT9.4); OVER until then |
+| `ocaml.edn` (o8) | 1 | 1.4 min measured (o8) | 27 *est.* (GT9's verbs: `--cmi-only`, `--no-expect`, `:subset-oi`, `--only-list`; was 48) | 32.4 | 45 *est.* | 130 | within the share with `gt9v-ocaml` |
 | `scheme.edn` (sm9) | 1 | 1.7 measured | 23 *est.* (SM9) | 32.4 | 30 *est.* | 130 | ecraven and mats rotated (checked: `.sub` and a slice planned) |
-| `cpp.edn` (cx8, cx9, cx10) | 1 | 1.5 measured + ci samples *est.* 1 = 2.5 | 33 *est.* | 24.3 | 55 *est.* | 97 | the lowering's libstdcxx 15th, the compiled runtime programs and dg's modules `:clean-only` until subsets; `cpp-runtime` a build step |
-| `llvm-rust.edn` (re4, llvm-read) | 2 | Rust 1.7 *est.* (test 58 s, three ci programs) | Rust 22 *est.*; LLVM 1-2 | 24.3; 16.2 | Rust 40 + rsi-aot 18 *est.*; LLVM 5 | 97; 65 | library, compiler and crates' round trips `:clean-only` until `--only-list`; LLVM's list is LL1's |
+| `cpp.edn` (cx8, cx9, cx10) | 1 | 1.5 measured + ci samples *est.* 1 = 2.5 | 28 *est.* (was 33: gxx-dg round trip rotated) | 24.3 | 55 *est.* | 97 | the lowering's libstdcxx 15th (rotated), the compiled runtime programs and dg's modules `:clean-only`; `cpp-runtime` a build step; over by about 4 (GTS246) |
+| `llvm-rust.edn` (re4, llvm-read) | 2 | Rust 1.3 *est.* (`test --samples` about 35 s, three ci programs) | Rust 22 *est.*; LLVM 1-2 | 24.3; 16.2 | Rust 40 + rsi-aot 18 *est.*; LLVM 5 | 97; 65 | library, compiler and crates' round trips `:clean-only` until `--only-list`; LLVM's list is LL1's |
 | `natives.edn` (ocaml-native, rust-native) | 3 | +10 s each *est.* | OCaml +3, Rust +1 | | | | joins the crops' chains and vectors |
 | `haskell.edn` (he4d, haskell-native) | 4 | 1.2 *est.* (37 + 21 + 4 + 10 s) | 12.5 *est.* (round trips 10, hsi 2.3 at 8 jobs, heavy, its own chain) | 32.4 | 50 *est.* | 130 | |
 | `cpp-native.edn` | 5 | +10 s *est.* | +2 (977 files in 101 s) | | | | |
@@ -3779,6 +3779,60 @@ against the default reading); Python's rotated steps (`pyi-check-aot-goi`, `pyi-
 writes (the planner refuses a missing universe), so they wait for that night; `rsi-aot` (6 GiB) left `rust-full` for a chain of its
 own; the splice appends a later batch's steps to a gated crop's vector. In every scratch no step on `:javac` changes key through a
 crop's files (before the keys commit, o8's overlay alone moved the javac key and every repr/java step).
+
+### GT9's verbs (branch `gt9-verbs`, 2026-11-05)
+
+The verbs the fragments left out or made `:clean-only`, each on a branch of its own from the crop's branch (`gt9v-CROP`; to merge with the crop's
+branch, before the fragment's splice). Each was checked on samples in the light tier (stage 0 by `ARBACE_HOST_EXE`, a few files, no corpus run).
+
+| branch (from) | verbs | checked |
+|---|---|---|
+| `gt9v-ocaml` (`ocaml-o8`) | `bin/repr-ocaml roundtrip --only-list FILE` (ids CORPUS/FILE as `read-results.edn` writes them; each corpus its own, one with none of them is not run; the judges leave out what was not run: compare and full judge the dumps present, the floors are not checked; refused with `--record`, `--record-results`; its failed files printed `FAILED CORPUS/FILE` for the rotation), `--cmi-only` (the helper's dump, mode :full's print and cmp, ocamlc on the originals and the prints: the tree level, the `:lines` print and its redump left out), `bin/oi judges-test --no-expect` (suite expect's whole run and judges_test's two whole-run cases, about 9 of the 9.5 minutes, left out; their `--only` cases stay), `test/ocaml/subsets.edn`'s `:subset-oi` and `:subset-roundtrip` | 6 files of stdlib with `--cmi` and `--cmi-only` (4.5 s and 2.6 s, 3 of 3 cmi equal); whiml whole: `--cmi` 100 s, `--cmi-only` 53 s; a planted known entry gives `GONE ...` and `FAILED samples/core.ml`, exit 1; `judges_test.bash` with the skip: 46 cases run, 0 FAIL, 3.2 min |
+| `gt9v-cpp` (`cpp-cx10`) | `bin/repr-cpp roundtrip-corpus KEY --only-list FILE` (the key's list cut to the CORPUS/NAME ids, `roundtrip --partial`: the recorded results and the oracle's record held for those files alone, no recording; failing ids `FAIL CORPUS/NAME`), `bin/cppi lower-corpus KEY --only-list FILE` (`--recorded none`: held to the record's `:files` by name, not to the whole list; `  failing: NAME` as always), `test/cpp/subsets.edn` (`:subset-roundtrip` of gxx-dg-every-10, 57 files; `:subset-lower` of libstdcxx-every-15th, 30 files) | 4 gxx-dg files 13 s, all four levels pass, `results-missing 0`; 2 samples and 4 libstdcxx programs lowered, 4 of 4 pass (49 s of which the util library 30 s); the runtime built (198 of 198, 3.6 min) for it |
+| `gt9v-scheme` (`scheme-sm9`) | `bin/repr-scheme pins check` (346 corpus files and licenses at their SHA-256 without a fetch, whimsical's tree, Chez's version and boot files, Chibi's version: `test/scheme/corpora.edn`'s `:reference` gains `:chibi` and `:boot`), `roundtrip --only-list FILE` (keys CORPUS/PATH and probe/ID as `roundtrip-results.edn`; a partial run; `FAILED KEY`) | pins 4.8 s, a wrong Chibi makes it fail (exit 1); two keys round-tripped, 1 s |
+| `gt9v-llvm` (`llvm-verify3`) | `bin/repr-llvm pins check` (llvm-as, opt, lli, FileCheck, clang at 23.1.4, the pinned packages installed, `test/llvm`'s 478 probes there and its known file's ids in the list) | 0.7 s; `REPR_LLVM_BIN` wrong fails |
+| `gt9v-rust` (`rust-re5`) | `bin/repr-rust test --samples` (cases 1-4 and 6-8: no rustdoc comparison, no program built and run), `roundtrip --only-list FILE` (the corpus files named, as one `--only` regex of those names alone), `pins check` (rustc, its driver library and rustdoc at `RUSTC_VERSION`; each pinned apk, crate and the UI tarball that is there at its SHA-256, the rest said, not a failure) | `test --samples` 34-42 s of 68 s, 0 FAIL; 404 pinned files at their SHA-256; two files of std round-tripped, 9 s |
+| `gt9v-haskell` (`haskell-he5`) | `bin/repr-haskell roundtrip --only-list FILE` (ids PKG/FILE as `corpus list` prints them) | two modules of ghc-internal, 2 of 2 equal, 52 s (the helper's build included) |
+
+The fragments use them (`test/gate/crops/`): OCaml's `ocaml-roundtrip` (the `:subset-roundtrip` rotation of testsuite, compiler-sources and compiler-backend on
+`read-results.edn`'s ids, `--text` there, `--cmi` on stdlib and samples whole, the `.cmi` level of the others the `:clean-only` part `cmi-rest`) and
+`ocaml-judges` (`tests`: `--no-expect`, nightly; `expect`: the whole, `:clean-only`); `oi-check`'s `:subset-oi` now exists (it ran whole before); C++'s
+`cpp-roundtrip-dg` (gxx-dg-every-10, its own step: its universe is that results file) and `cpp-lower`'s libstdcxx part (rotated, `:clean-only`);
+Rust's `rust-read-essential` on `test --samples`; the three `:crop-pins` commands exist. Planned in scratch merges (`.tmp/gt9v/scratch.sh`, the
+procedure above with the `gt9v-*` branches): `gate.crops check` 0 problems for ocaml, cpp, llvmrust, scheme; the nightly plan rotates (OCaml: testsuite
+243 + 211, compiler-sources and backend, oi-check.run 28 + 84; C++: gxx-dg 57 + 249); `crops-test` ok.
+
+**What the costs become** (estimates, as the table above: replaced by the first two `--nightly` runs, GTS222):
+
+| crop | nightly before | now | share | how |
+|---|---|---|---|---|
+| OCaml | 48 | about 27 | 32.4 | round trip 12.4 to about 5.5 (`.cmi` on stdlib and samples only, three corpora rotated), oi-check 10.1 to about 4.5 (the run corpus 28 + 84 of 556), judges 9.5 to about 4 (`--no-expect`), the AOT parts at `O2J_JOBS=4` about 6 and 3.8 |
+| C++ | 33 | about 28 | 24.3 | gxx-dg round trip 8 to about 2 (its 745 oracle rejections cost nothing); the libstdcxx lowering stays out of the night (rotated, clean run only: a night's rotation is 4-5 minutes) |
+| Scheme | 23 | 23 | 32.4 | unchanged, within the share |
+| Rust | 22 + 1 | 22 | 24.3 | `test --samples` takes 30 seconds off the essential chain (about 1.3 min against 1.7); the library, compiler and crates round trips stay `:clean-only` |
+| Haskell | 12.5 | 12.5 | 32.4 | unchanged; `--only-list` is there for a rotation |
+| LLVM IR | 1-2 | 1-2 | 16.2 | unchanged; `pins check` joins `--pins` |
+
+**Not built, and why.**
+- **Coverage subsets (GTS205 (a)) for C++ and OCaml.** The rule needs a cover build that reaches the code under check. OCaml's oi driver and o2j's runtime
+  are Go built with `-cover`, but repr/ocaml, o2j's front end and the converters are Arbace namespaces evaluated on stage 0, which Go's counters do not
+  see; C++'s lowering and repr/cpp likewise (the proposal GTS206 (a), compiled with `-coverpkg` and run one file a process, is C's method, not built for
+  them). No cover build was made (the day's rules: no builds, no corpus runs). The subsets above are by hand, labelled: every non-pass of the record, one
+  file of each class, a spread (every 8th, 10th or 20th).
+- **C++'s cx8 and cx9 levels** (`bin/cppi check`'s libstdcxx and dg-run parts, dg's modules): their verbs live on `cpp-cx8` and `cpp-cx9`, which are not
+  ancestors of `cpp-cx10`; `--only` is there on cx8's `check`, but the records are one row a line only there (CP181 (a)), and no universe exists to rotate by.
+- **Rust's library, compiler and crates round trips** and **Haskell's** rotate only with a universe of ids (one a line) and a subset: `--only-list` is built, the
+  universe is not (Rust's corpora record their files as vectors on one line). Rust is already near its share.
+- **`pins check` for Haskell, Python** (not asked); Rust's `pins --check` of the table's earlier spelling is `pins check`, `--check` accepted.
+
+**Proposed (none decided)**
+
+- **GTS246 C++'s nightly share.** About 28 minutes against 24.3 with the libstdcxx lowering in the clean run only. (a) accept until GTS222's two nights say;
+  (b) run the lowering's rotation nightly (remove `:clean-only`: +4-5 minutes, 33 in all) and raise C++'s share from 0.75 to 1.0 of the four (`:shares`);
+  (c) rotate cx9's dg-error (6 minutes) too, once cx9's lists are one row a line. *Recommended: (a), then (c).*
+- **GTS247 Rust's and Haskell's id universes.** (a) a generated file of ids one a line per corpus (`bin/repr-rust corpus list`, `bin/repr-haskell corpus list`
+  to `test/*/roundtrip-ids.edn`, regenerated by the vendoring tools) so the round trips rotate; (b) leave them whole or `:clean-only`. *Recommended: (b)
+  until a share is exceeded; (a) then.*
 
 ### The night commands
 

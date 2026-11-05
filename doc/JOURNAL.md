@@ -357,3 +357,13 @@ smaller parts), each on a branch of its own, held for after the tag (the merge p
   overflow into the day allowed).
 - **Merged into `next` (2026-11-05 morning):** `java-compiled-subset` and `audit-race`, for tonight's gate before the
   clean run.
+- **GT9's verbs (2026-11-05, branch `gt9-verbs`; light tier, no gate, no corpus run).** The verbs the fragments left out or made `:clean-only`, each on a
+  branch of its own from the crop's branch: `gt9v-ocaml` (from `ocaml-o8`: `roundtrip --only-list`, `--cmi-only`, `oi judges-test --no-expect`,
+  `test/ocaml/subsets.edn`'s `:subset-oi` and `:subset-roundtrip`), `gt9v-cpp` (from `cpp-cx10`: `roundtrip-corpus` and `cppi lower-corpus` `--only-list`, a
+  partial judge in rtcheck, `test/cpp/subsets.edn`), `gt9v-scheme` (from `scheme-sm9`: `pins check`, `roundtrip --only-list`), `gt9v-llvm` (from
+  `llvm-verify3`: `pins check`), `gt9v-rust` (from `rust-re5`: `test --samples`, `roundtrip --only-list`, `pins check`), `gt9v-haskell` (from `haskell-he5`:
+  `roundtrip --only-list`). Alternatives considered: for Rust's and Haskell's `--only-list`, a regex built from the list over their existing `--only` (done)
+  against a second selection path through the converters (more code, no gain); for C++'s round trip, a partial run judged against the corpus key's own
+  records with a `partial` marker (done) against the `-only` key's records (none exist). Not built: coverage subsets (no cover build reaches the
+  evaluated namespaces; the subsets are by hand), cx8's and cx9's levels' rotation, Rust's and Haskell's id universes. The fragments, the per-crop cost table
+  and GTS246-GTS247 (proposed) are in doc/GATE-SURVEY.md, "GT9's verbs".
