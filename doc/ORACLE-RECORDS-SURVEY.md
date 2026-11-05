@@ -825,3 +825,136 @@ script, `ARBACE_GATE_STORE` a scratch store, `bin/gate --full --plan`):
 ## Decided (2026-11-05, the user: ORS19)
 
 ORS19 (a): the essential subset's Chez dumps stay committed as raw text (1.4 MB), so a helper change shows as a diff.
+
+## As built: Haskell (write-ahead, 2026-11-05)
+
+ORS12's third crop, on branch `oracle-records-haskell` (from `oracle-records-scheme`, with `haskell-row2` merged: repr/haskell's tools
+and records, hsi with HE5 and HE8). The merge's conflicts, resolved as both sides: `Makefile`'s `.PHONY` line (main's list with
+`ci-runtime`, row2's `hsi-*` targets added), `doc/JOURNAL.md` (both sides' entries, this branch's first), `test/reap/cells.edn` and
+`matrix.edn` (the Scheme row and the Haskell row, `:languages [... :scheme :haskell]`). Light: the helper (`tools/hsdump`) was built here
+(1 min), the records were made on samples and on the libraries' dumps the `haskell-he8` worktree's scratch holds; the whole recording is
+the night's. Read from GT9's fragment (`git show gt9-verbs:test/gate/crops/haskell.edn`), `bin/repr-haskell`, `bin/lib/repr-haskell/test`,
+`bin/hsi` and `bin/lib/hsi/{check,aot}`.
+
+### What the steps asked of GHC, and what each became
+
+| Step | Live call | Class | Now |
+|---|---|---|---|
+| haskell-read-essential (`bin/repr-haskell test`) | the helper's `dump` and `tree` of the 9 cases' fixed inputs (Shape, Space, Layout, R5's, R6's, HR26's); `ghc -c` and `--show-iface` of the iface cases and the originals; `ghc --make` of R6's originals | B | 74 files committed, `test/haskell/records/test/` (1.06 MB) with the manifest `test.tsv`; no GHC; `:ghc` off |
+| the same, the print's half | the helper's `tree` of the printed modules, `ghc -c`/`--make` and `--show-iface` of the printed modules | D | `bin/repr-haskell test --oracle` (45 s), the oracle tier's `haskell-test-oracle`; 22 checks listed as `skipped` in the records mode |
+| haskell-roundtrip (4 parts) | the helper's dump (both modes) and tree (both modes) of the originals; the helper's tree and `ghc --make`/`--show-iface` of the print | B; D | the originals from four packs `haskell-{dumps,dumps-full,trees,trees-full}-ghc-9.14.1`; the whole step, GHC reading the print, is the oracle tier's `haskell-roundtrip-oracle` (until ORS20's native reader) |
+| hsi-essential, hsi-check | `hsdump stg -O0` per program (`bin/lib/hsi/check`); the libraries' STG (`bin/hsi dumps`, hadrian's flags, 41 packages) | C | the packs `haskell-stg-progs` (keyed per program: sources, flags, helper) and `haskell-stg-libs` (keyed per package); `:ghc` off. GHC's runs are `ref-ghc914.edn` (A, 908 ids) already |
+| haskell-native-essential (haskell-native's `native-check`, `tables --check`) | the helper's `dump` and `cpp` of the listed modules | B | not on this branch: the step stays on `:ghc` until that branch reads the packs (ORS20) |
+
+Not steps: `bin/hsi pins`/`spec-check` (the source tarball, no GHC), `libm-check` (the host's cc), `primops` (`ghc :browse`),
+`genprimopcode`'s build; `bin/hsi record-ref` (GHC's runs, the record already).
+
+### What the tooling is
+
+- **The identity** `:ghc` in `test/oracle-records/oracle.bash` (`oracle_ghc_id`): GT9's recipe for the `:ghc` host (the `--version` line, the SHA-256 of
+  `{libdir}/../bin/ghc-[0-9]*` and of `{libdir}/package.conf.d/ghc-[0-9]*.conf`): here `:ghc b9908216a3a8aa45` (GHC 9.14.1).
+- **`bin/lib/repr-haskell/records.bash`** (out of `gate_key`, as `bin/lib/repr-haskell/` is): committed records (`hsr_records_unpack`: `STALE` when
+  the key moved, `UNRECORDED`, `REFUSED` when a file's digest is not the manifest's; `hsr_records_make`, `hsr_records_verify` with the crossed pair).
+  `bin/lib/hsi/records.bash`: hsi's two packs.
+- **`bin/repr-haskell test [--oracle | --record | --verify-records]`**: the originals' GHC calls are one function (`live_origs`) whose outputs
+  are the records; the key is one digest of the helper's sources, every input of the cases and `live_origs`' text. `--record` 6 s, `--verify-records`
+  74 files equal, the crossed pair differs. With a `ghc` that exits 99 first on `PATH`: 18 checks `ok`, 22 skipped, rc 0, the same 39 `ok`
+  lines as the old run under `--oracle`.
+- **`bin/repr-haskell record-corpus`, `verify-corpus [--sample N]`**: four packs (a pack a kind: unpacking `trees-full` alone is the
+  big one), members `PKG/FILE`, keyed per package by the source tarball's SHA-256, the helper's identity, the kind, the package's plan line as
+  the corpus writes it (`$libdir` and `$repo` unexpanded) and `test/haskell/generated`'s files; `REPR_HASKELL_ONLY_PACKAGES="P Q"` selects. `read --corpus`
+  and the round trip's originals (`dump_corpus`, `tree_jobs`) read the packs unless `REPR_HASKELL_LIVE=1`; `dump --corpus` stays live (it records).
+- **`bin/hsi dumps --record [--packages P,...]`, `record-libs DIR`, `verify-libs --packages P,...|--sample N`**: `haskell-stg-libs`, members
+  `PKG/MODULE.stg.ae` (the layout of `.tmp/hsi/dumps/stg`, a `--lib` directory), keyed per package by the tarball, the helper, `HSI_BIGNUM`, the text of
+  `bin/hsi`'s dump functions and the plan's line. `bin/hsi run`, `check` and `aot` read it unless `HSI_LIBS` names others or `HSI_LIVE=1`
+  (`--live`).
+- **`bin/hsi check [--live] [--dump-only] [--record-progs] [--verify-progs [--sample N]]`**: `haskell-stg-progs`, members `ID/stg/FILE` or
+  `ID/dump-failed.txt` (the helper's first error: the class `:no-dump` is reproduced), keyed by `prog_key` (what `.tmp/hsi/progs/ID/KEY` already
+  was). A program with no entry is `:unrecorded` (`UNRECORDED`, or `STALE` when its key moved), in no class: the check fails (ORS10 (a)).
+- Kinds in `test/oracle-records/kinds.edn`: `haskell test-dumps`, `hsdump-corpus`, `stg-libs`, `stg-progs` (B, B, C, C) and `roundtrip` (D, verify only).
+  `bin/oracle-records verify haskell ... --sample N` runs each kind's verify (the corpus' with `REPR_HASKELL_ONLY_PACKAGES` while only two packages are recorded).
+
+### Sizes (ORS11)
+
+| Pack | Measured here | Whole corpus |
+|---|---|---|
+| `test/haskell/records/test/` (committed) | 74 files, 1,057 KB raw | the same |
+| `haskell-stg-libs` | 41 packages, 1,320 modules, 157 MB raw, **9,292,924 bytes xz** (17x; 2 min of one xz thread) | the same |
+| `haskell-stg-progs` | 63 programs (samples, synthetic), 11.3 MB raw, 335,512 bytes xz (34x) | 908 ids in `ref-ghc914.edn`: about 5 MB xz by the same ratio (testsuite-core and nofib not here) |
+| `haskell-dumps` (array, deepseq) | 1.56 MB raw, 122,184 bytes | the native worktree's 106 MB of lines dumps: 8,644,228 bytes xz measured by one tar and xz -9e over it (12x) |
+| `haskell-dumps-full` | 4.2 MB raw, 235,572 bytes (18x) | about 289 MB raw by the 68x of dumps, about 16 MB |
+| `haskell-trees`, `trees-full` | 5.8 MB, 81,704 bytes (71x); 12.1 MB, 241,648 bytes (50x) | about 396 and 825 MB raw, about 6 and 17 MB |
+
+The whole Haskell packs: about 9.3 + 5 + 46 = **60 MB xz**, inside ORS11's 100 MB a crop (the corpus' share is an extrapolation from two packages
+and the dumps' measure: confirm after the night's recording). The committed side: 1.06 MB of records and the manifests (the libraries' 0.23 MB,
+the programs' about 0.25 MB, the corpus' four about 1.5 MB at 187 bytes a member and about 8,100 members): about **3.1 MB, a little over ORS11's 3 MB** (ORS21).
+Unpacking checks every member (a sha256 of the pack's bytes): `haskell-stg-libs` 157 MB, `trees-full` the largest.
+
+### Checked (light, in the worktree, main's stage 0)
+
+- `bin/repr-haskell test` before: 39 `ok`, 43 s. After, with a `ghc` that exits 99 first on `PATH`: rc 0, 18 `ok`, 22 `skipped`, 32 s; `--oracle`: the same 39 `ok` lines;
+  `--record` then `--verify-records`: 74 entries equal (`:ghc b9908216a3a8aa45`), the crossed pair differs.
+- `REPR_HASKELL_ONLY_PACKAGES="array deepseq" bin/repr-haskell record-corpus`: 4 packs (100 members) in 49 s; `verify-corpus --sample 2`: 100 entries equal, crossed pair
+  differs; `read --corpus` and `read --full --corpus` with no GHC: 16 dumps converted, 925 forms; `roundtrip` (tree level) on the packs: the originals' side read, 16 modules equal.
+- `bin/hsi record-libs` of the `haskell-he8` worktree's 41 packages' dumps (helper `60fdf0c2f05c`, the same as this tree's), then `bin/hsi verify-libs --packages
+  array,deepseq,pretty,stm`: dumped afresh by the helper, 32 entries byte for byte equal, crossed pair differs (the recording's source is therefore credible; its manifest says so).
+- `bin/hsi check --live --dump-only --record-progs --corpus samples,synthetic`: 63 programs, 42 s; `--verify-progs --sample 6` and via `bin/oracle-records verify haskell test-dumps
+  hsdump-corpus stg-libs stg-progs --sample 2`: all equal, crossed pairs differ.
+- `bin/hsi check --only` four programs (samples, synthetic) with GHC replaced by a stub that exits 99: 4 pass (libraries from the pack, the 1,320 images made in 10 s,
+  programs from the pack); with one sample's source changed: `:unrecorded`, `STALE`, "in no class", the run fails; `bin/oracle-records pins`/`controls`: the Haskell packs found in the
+  store with their members, the tampered pack refused (the C packs are not in this store).
+- Not run: any gate, any build of the executable, `bin/hsi check --aot` (it reads the libraries through the same function; its programs build with TamaGo's go), the
+  testsuite-core and nofib corpora (no network), the whole `record-corpus`.
+
+### The plan (scratch overlay)
+
+`.tmp/overlay/` here: this branch's tree with `bin/lib/gate-run.bash` given the `:ghc` host (GT9's `:host-ids :ghc` is on `gt9-verbs`, not here; the recipe is `oracle_ghc_id`'s)
+and `steps.edn` with GT9's fragment and, apart, this branch's spliced in; `bin/gate --full --plan`:
+
+| Step | hosts with GT9's fragment | with this one |
+|---|---|---|
+| haskell-read-essential | `ghc stage0` | `stage0` |
+| hsi-essential, hsi-check | `ghc go stage0` | `go stage0` |
+| haskell-roundtrip (4 parts) | `ghc stage0` | gone from the gate: `haskell-roundtrip-oracle` (4 parts) in the oracle tier |
+| haskell-native-essential | (in haskell-read-essential) | `ghc stage0`: the one gate step on `:ghc` left (ORS20) |
+
+- With another `ghc` first on `PATH` (a stub printing 9.99.9) every key of GT9's fragment's seven steps and parts changes (`haskell-read-essential` `1df4724d021d` to `4ff9e34121dd`);
+  with this fragment `haskell-read-essential` (`dbbb8368f0f2`), `hsi-essential` (`e021f77afd60`) and `hsi-check` (`78da2ff99729`) do not, `haskell-native-essential` does.
+- `bin/gate --oracle --plan`: `haskell-test-oracle`, `haskell-roundtrip-oracle` (tree, layout, iface, text) and `haskell-records-verify` `run`.
+
+### The night's commands
+
+1. `bin/repr-haskell record-corpus` (the whole corpus into the four packs, the helper 32 at a time; the dump and the trees of 1,345 modules, both modes: estimate 20-30 min),
+   then `bin/oracle-records verify haskell hsdump-corpus --sample 8` (the pack must be in the store first).
+2. `bin/heavy-lock bin/hsi dumps --record` (the libraries compiled by the helper as hadrian does: heavy; it replaces the pack made here from the he8 worktree's dumps; the same bytes expected,
+   which `bin/hsi verify-libs --sample 8` then shows) and `bin/hsi pins --fetch` (the testsuite tarball and nofib: network).
+3. `bin/hsi check --live --dump-only --record-progs --corpus samples,synthetic,testsuite-core` (about 63 programs a 40 s: the 700 of testsuite-core about 10-15 min; add `nofib` to record it too).
+4. `bin/repr-haskell test --record` is done here (the records are in this branch); redo it only when the helper or a case changes.
+5. A commit of its own naming `:ghc b9908216a3a8aa45` for the records and pins (ORS5 (a)); `bin/oracle-records verify haskell`; `bin/oracle-records mirror --push` once the user agrees (five packs, about 60 MB).
+6. After the merge with gt9-verbs: `bin/gate --full --plan` shows hsi-essential and hsi-check without `:ghc`, `bin/gate --oracle` the three steps.
+
+### Left
+
+- **haskell-native's verbs** (`native-check`: the helper's `dump` and `cpp` of its list; `tables --check`: GHC's version pin only): not on this branch; until `native_check` reads the packs
+  its step keeps `:ghc` (ORS20, ORS21).
+- **The committed pins are samples**: the corpus packs hold array and deepseq, `haskell-stg-progs` the 63 programs of samples and synthetic; the night's commands replace them. An unrecorded package or
+  program fails (`UNRECORDED`), by design.
+- The class D steps no longer run per merge: GHC's reading of the print (trees, interfaces) is once a night at most and at tags (ORS1 (a)); the forms level of the round trip is still in `haskell-read-essential`
+  (the byte-for-byte prints of mode `:full`, the layout's expected files).
+- `test --record`'s key covers `live_origs`' text: a new case rekeys the records (STALE until `--record` is run again, by hand).
+
+## Proposed (2026-11-05, Haskell): ORS20-ORS21
+
+- **ORS20 The print's reading, and haskell-native's steps.** GHC reads Arbace's print at every level of the round trip (the helper's tree and `ghc --make`), class D; the native reader
+  (haskell-native, `arbace.repr.haskell.native`) is the survey's N substitute (§5) and is not merged.
+  - Options: (a) as built: the whole round trip and the print halves of `test` in the oracle tier, `native-check` on a gate step with `:ghc` until its verb reads the packs; (b) keep the round
+    trip's tree, layout and text parts on `--full` with `:ghc` until the native reader reads the print; (c) merge haskell-native first, then make `native_check` read `haskell-dumps` (and a pack of the
+    `cpp` outputs) and the round trip's print side read natively (N), so that the gate keeps the tree level with no `:ghc`.
+  - Costs: (a) the print's tree level is checked once a night, not per merge, and one gate step keeps `:ghc` for a while; (b) the gate keeps three Alpine-GHC-dependent parts (each GHC upgrade
+    reruns them); (c) the most work (about a day), after the merge of a branch the user has not scheduled.
+  - *Recommended: (a) now, then (c)*: (a) is the survey's ORS8 (a) for class D; (c) is the entry that gives the tree level back to the gate with no toolchain.
+- **ORS21 The committed size.** The records and manifests come to about 3.1 MB (estimated from 187 bytes a manifest line and 8,100 corpus members), a little over ORS11's 3 MB for a crop.
+  - Options: (a) accept 3.1 MB (the figure is confirmed after the night's recording); (b) one key a package in a separate small file and the manifests without the KEY column (about 1.3 MB less, a new
+    manifest format for this crop); (c) raise Haskell's cap to 3.5 MB.
+  - Costs: (a) none beyond the overrun; (b) a second format next to `oracle.bash`'s; (c) a precedent.
+  - *Recommended: (a)*: the overrun is 3%, and the manifests are what makes a tampered member visible.
