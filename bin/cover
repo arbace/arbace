@@ -13,7 +13,9 @@
 #                        CI_COVER_READ=1 also ci-read: each program read, checked and built by a process of its own on
 #                        it), bin/ci check --aot (ci-aot: the shards built with -cover of arbace/ci and arbace/crt),
 #                        bin/clojure-tests (clojure: the eval level on the cover build's arbace-tests; --aot,
-#                        clojure-aot: the compiled suite's program built with the cover flags), a namespace a test
+#                        clojure-aot: the compiled suite's program built with the cover flags), a namespace a test;
+#                        RUN/key the cover build's key, a run of another build into RUN refused and bin/cover blocks
+#                        refusing a RUN of another build than ARBACE_COVER_CACHE's (review 182 L5)
 #   bin/cover blocks RUN [--tool TOOL,...] [--crop CROP] [--pkgs ERE] [-o OUT]
 #                        each test's covered blocks of a crop's code under check (tools/covsubset blocks): for each
 #                        TOOL of RUN (default all) OUT/TOOL (default RUN/blocks/TOOL): tests.tsv (ID, its blocks,
@@ -27,7 +29,9 @@
 #   bin/cover classes DIVERGENCES RESULTS [--level L] [--controls FILE] -o OUT
 #                        each test's class (the subset's --classes and --keep): RESULTS a check's rows, ID [LEVEL]
 #                        RESULT REASON tab-separated (bin/goi check's results.tsv, bin/java-check's), a non-pass
-#                        classed by the first class of DIVERGENCES (test/goi/divergences.edn's format: :tests, or a
+#                        classed by the first class of DIVERGENCES (several files comma-separated, read in order as the
+#                        level's judge reads them: C's AOT levels test/c/divergences-aot.edn,test/c/divergences.edn;
+#                        a non-pass in no class warned on the standard error; review 195) (test/goi/divergences.edn's format: :tests, or a
 #                        :match finding "RESULT REASON"; :level when L is given) as the judges do: OUT.classes
 #                        (ID<TAB>CLASS), OUT.keep (the tests of a class whose :kind is one whose work remains,
 #                        test/cover/classes.ae's keep-kinds, and the controls' subjects and references: test/java/controls.edn's :subject and :reference, or
@@ -39,12 +43,14 @@
 #                        (test/clojure/divergences-read.edn and divergences.edn; --aot divergences-aot.edn); a
 #                        namespace of several classes classed by their set (A+B); OUT.classes, OUT.keep (the kept
 #                        kinds' namespaces and test/clojure/controls.edn's), OUT.cases
-#   bin/cover subset OUT [--keep FILE] [--classes FILE] [--times FILE] [--seeds N]
+#   bin/cover subset OUT [--keep FILE] [--classes FILE] [--times FILE] [--seeds N] [--corpus C]
 #                        the subset of a tool's tests by GTS205 (a) (tools/covsubset reduce, queue 160's and 161's
 #                        reducer): the tests of --keep (one id a line: the controls' subjects and references, the
 #                        deferred and gap classes' tests) first, then one test per class (--classes: ID<TAB>CLASS,
 #                        a test of a class not kept), then by greedy set cover every covered block; --times
-#                        (ID<TAB>SECONDS) breaks ties. Writes OUT/index.tsv, OUT/subset.txt, OUT/curve.tsv,
+#                        (ID<TAB>SECONDS) breaks ties; --corpus C: only the ids C/... of tests.tsv, --classes
+#                        and --keep (a corpus's subset from a whole record's classes, review 195's medium 2).
+#                        Writes OUT/index.tsv, OUT/subset.txt, OUT/curve.tsv,
 #                        OUT/reduce.tsv
 #
 # Environment: ARBACE_GOROOT (TamaGo's go, default /root/tamago-go; its `go tool covdata` reads the profiles),
@@ -89,8 +95,15 @@ blocks() {
   done
   [ -d "$run" ] || { echo "cover blocks: no run $run" >&2; return 1; }
   [ -n "$tools" ] || tools=$(cd "$run" && for t in *; do [ -d "$t" ] && [ "$t" != meta ] && [ "$t" != blocks ] && echo "$t"; done)
-  ex=$(tool) || return 1
   cache=$(cover_cache "$root") || return 1
+  # the run's build (RUN/key, cover_claim) is the one whose packages are read (review 182 L5)
+  if [ ! -f "$run/key" ]; then
+    echo "cover blocks: $run names no cover build (RUN/key, written since review 182 L5): read with $cache's packages, not compared" >&2
+  elif [ "$(cat "$run/key")" != "$(cat "$cache/key" 2>"$discard")" ]; then
+    echo "cover blocks: $run holds the data of cover build $(cut -c1-12 "$run/key"), not of $cache ($(cut -c1-12 "$cache/key" 2>"$discard")): ARBACE_COVER_CACHE naming the run's build" >&2
+    return 1
+  fi
+  ex=$(tool) || return 1
   for t in $tools; do
     c=${crop:-$(crop_of "$t")} || return 1
     pk=${out:-$run/blocks}/$t.pkgs
@@ -100,13 +113,16 @@ blocks() {
       || { echo "cover blocks: no package of crop $c in $cache/pkgs-*.txt" >&2; return 1; }
     echo "== $t ($c: $(wc -l < "$pk") packages)"
     find "$run/$t" -mindepth 1 -maxdepth 1 -type d | LC_ALL=C sort > "${out:-$run/blocks}/$t.dirs"
-    xargs -a "${out:-$run/blocks}/$t.dirs" -d '\n' "$ex" blocks -go "$goroot/bin/go" -pkgs "$pk" -exclude "$(cover_exclude "$c")" -o "${out:-$run/blocks}/$t" -j "${COVER_JOBS:-8}" \
+    # the directories as a list, one run of the tool (xargs split a corpus's 3,321 into two runs, the second's
+    # tests.tsv, 131 tests, overwriting the first's: night 3's java-interp)
+    [ -s "${out:-$run/blocks}/$t.dirs" ] || { echo "cover blocks: $run/$t holds no test's directory" >&2; continue; }
+    "$ex" blocks -go "$goroot/bin/go" -pkgs "$pk" -exclude "$(cover_exclude "$c")" -o "${out:-$run/blocks}/$t" -j "${COVER_JOBS:-8}" -dirs "${out:-$run/blocks}/$t.dirs" \
       || echo "cover blocks: $t: some profiles were not read (above)" >&2
   done
 }
 
 subset() {
-  local o=${1:?bin/cover subset OUT} keep="" classes="" times="" seeds=20 ex
+  local o=${1:?bin/cover subset OUT} keep="" classes="" times="" seeds=20 corpus="" ex
   shift
   while [ $# -gt 0 ]; do
     case $1 in
@@ -114,16 +130,20 @@ subset() {
       --classes) classes=$2; shift 2 ;;
       --times) times=$2; shift 2 ;;
       --seeds) seeds=$2; shift 2 ;;
+      --corpus) corpus=$2; shift 2 ;;
       *) echo "cover subset: unknown option $1" >&2; return 2 ;;
     esac
   done
   [ -f "$o/tests.tsv" ] || { echo "cover subset: no $o/tests.tsv (bin/cover blocks)" >&2; return 1; }
   ex=$(tool) || return 1
   # the index: ID PROFILE KEEP SECONDS CLASS (tools/cicover's, queue 160; removed with bin/ci cover, GT8.3)
-  awk -F'\t' -v keep="${keep:-/nonexistent}" -v cls="${classes:-/nonexistent}" -v tm="${times:-/nonexistent}" '
-    BEGIN { while ((getline l < keep) > 0) if (l != "") k[l] = 1
-            while ((getline l < cls) > 0) { split(l, a, "\t"); if (a[2] != "") c[a[1]] = a[2] }
+  # --corpus C: an id outside C/ is no id of this subset, in tests.tsv, --classes and --keep alike
+  awk -F'\t' -v keep="${keep:-/nonexistent}" -v cls="${classes:-/nonexistent}" -v tm="${times:-/nonexistent}" -v cp="${corpus:+$corpus/}" '
+    function mine(i) { return cp == "" || substr(i, 1, length(cp)) == cp }
+    BEGIN { while ((getline l < keep) > 0) if (l != "" && mine(l)) k[l] = 1
+            while ((getline l < cls) > 0) { split(l, a, "\t"); if (a[2] != "" && mine(a[1])) c[a[1]] = a[2] }
             while ((getline l < tm) > 0) { split(l, a, "\t"); t[a[1]] = a[2] } }
+    !mine($1) { next }
     { seen[$1] = 1; print $1 "\t" $2 "\t" (($1 in k) ? 1 : 0) "\t" (($1 in t) ? t[$1] : 0) "\t" (($1 in c) ? c[$1] : "-") }
     # a test of --classes or --keep that wrote no counters (not run: a program refused before its run, by design) is
     # still the subset'"'"'s, its profile - (tools/cicover'"'"'s index: every judged program, a kept one costs no run)

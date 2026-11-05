@@ -3279,6 +3279,125 @@ the nightly tier every step over its subset plus a rotating slice, seven nights;
 checking the rotation's record; the C subset rule for every crop; Go's coverage builds kept by key, run at night; synthetic
 corpora against the same references; Java's `speed` curation inside GT8; acceptance as GTS209.
 
+## Decided (2026-11-04, the user): fitting the clean run into one night (GTS227-GTS230)
+
+The analysis (`.tmp/night5/clean-fit.md`, not committed; its estimates): the four crops' clean run serially about
+14.5-18 h (C's four read checks whole, 223 min on the old stage 0; `gate-tests` and C's essential chain; a fresh clone's
+1.35x over the store's medians, Java's levels 1.7x); under 10 h (about 9-9.5 h) only with two memory lanes and Java's
+compiled level on a subset. The user's decisions, each (a):
+
+- **GTS227 Two memory lanes in the clean run.** Lane 1 the big-memory steps one at a time (Java's levels, peaks 48-50 GiB:
+  `java-interp`'s declaration, 2 GiB and not heavy, corrected), lane 2 the small-memory heavy steps beside it (C's seven
+  full checks, 2-9 GiB, CPU-bound); code in `bin/gate` and `bin/lib/gate-run.bash` before the clean run's night.
+- **GTS228 Java's compiled level on its coverage subset** (GTS205 (a)'s rule) in the nightly and clean tiers, from night
+  4's Java compiled coverage; the rest rotates.
+- **GTS229 C's read checks timed after the re-seed** (tokens, tree, annotations, round trip), proxy subsets decided then
+  if they still do not fit.
+- **GTS230 The rotation's record:** one keyed `--full` of the rotated parts on the re-seed's night (a whole run counts for
+  every slice), so the clean run finds the rotation complete.
+
+GTS231-GTS234, decided (a) by the user later the same day: the parked parts kept in the clean run if lane 1 fits; the
+clean clone's caches empty; nothing reused from v2's record; the second night for failures only. Also decided then: the
+re-seed's night runs GTS230's keyed `--full` with the lanes (`--full --concurrent`), and it may run on into the morning
+(keyed: nothing is lost); the clean run the night after.
+
+## As built: GTS227 (a), the memory lanes (write-ahead, branch `gate-lanes`, 2026-11-04)
+
+GTS227 (a) as code, not yet run as a gate (tonight's essential gate on `next` was not touched; no gate ran). Four parts.
+
+**The declarations made true** (`test/gate/steps.edn`'s `:mem-gib`, not in any key). Each step's and part's declaration is now
+at least the largest peak recorded for it: the larger of the largest process's RSS and the process tree's sampled peak, over
+the main store's passes (1,084) and the clean runs' logs (`.tmp/gate-clean/*.logs*/gate/*.mem`, eight runs), 2026-11-04.
+Raised: `java-interp` 2 → 53 (52.4 GiB at the clean run of `1f0cd7b`; now `:heavy true`), `java-compiled-full` 21 → 50 (49.7),
+`repr-java-nojavac` 11 → 34 (its jdk part 33.1), `jrt-convert` 28 → 34 (33.2), `diffcheck` 25 → 31 (30.9), `repr-go` 27 → 30
+(30.0), `suite-aot` 23 → 27 (26.4), `goi` 5 → 14 (13.3), `goi-aot-essential` 1 → 9 (8.8), `goi-check` 2 → 8 (7.9),
+`goi-check-full` 5 → 8 and `goi-aot` 2 → 8 (the whole check's 7.9), `oracle-go` 1 → 5 (4.4), `repr-java` 12 → 16 (15.4),
+`java-compiled` 19 → 22, `programs` 19 → 21, `j2g-edge` 5 → 7, `repr-java-attr` 41 → 43, `repr-java-front` 29 → 31,
+`repr-java-roundtrip` 29 → 30, `javac-tool` 26 → 27, `go-build`, `fixpoint`, `programs-full` 19 → 20, `suite-go` 13 → 14,
+`javac-verify` 8 → 9, `java-check` and `java-fixtures` 1 → 2. Lowered (far above every peak): `java-read` and `java-print` 12 → 4
+(3.5 and 3.0 GiB as whole steps), `c-aot-essential` 6 → 2 (1.8). Per part (a part's `:mem-gib` over its step's, so that a
+small corpus is not taken for its step's largest): repr/java's tree checks' samples 1, baseline 2-3, javac 6-9 (their jdk
+parts the step's), `repr-java-roundtrip.{baseline,samples}` 2 and 1, `repr-java-parse.tests` 3, `repr-go-native`'s parts
+2-24 (its `cmd-*` parts the step's 28). Unmeasured as parts, so from the whole step or C9.2's table: Java's levels' parts,
+C's seven full checks (2-9 GiB), `goi-check-full`. The planner now refuses a non-numeric `:mem-gib` and a step of 16 GiB or
+more without `:heavy` (java-interp's case: outside the lanes it would run beside another heavy step).
+
+**The check that keeps them true**: `bin/gate [--full] --mem-check` (`test/gate/lanes.ae`'s `mem-check`; reads only, keys
+nothing) holds every declaration against the store's passes and the committed clean records (`test/gate/clean-*.edn`): a
+peak over `:mem-gib` x 1.1 + 0.5 GiB fails, as does a step (but `:pre`) without one; a parted step's whole run (an older
+table's record) is held to its parts' largest; a declaration over twice its largest peak and 2 GiB is listed, not failed.
+`test/gate/lanes-test.bash` runs it on the table and the committed clean records (in the gate's `gate-tests`), so a clean
+record committed with a peak over its declaration fails the next gate. Today: 1,166 peaks, none over.
+
+**The scheduler** (`bin/gate-lane`, `bin/lib/gate-run.bash`'s `step`). With `bin/gate --full --concurrent` and the new `bin/gate
+--full --clean --concurrent` (`GATE_LANES=1`), every step of the plan (the builds, the essential and the full checks; the pre
+steps stay one after another) starts through `bin/gate-lane` with its declared `:mem-gib` and its index in the plan. The rule
+(`lane_decide`, a function of the state alone): the waiters in the plan's order; R the declared GiB of the running steps and
+of the waiters looked at so far; a waiter of G GiB is admitted when R + G fits the budget (or R is 0: a step over the budget
+runs alone) and it is not big while a big one is counted; every waiter counts, admitted or not (conservative backfill: a big
+step waiting is never passed by small ones that would delay it). Hence the two lanes: lane 1, the steps of 16 GiB or more
+(`GATE_LANE_BIG_GIB`), one at a time; lane 2, every other step beside it while the sum fits. The budget `GATE_MEM_BUDGET_GIB`
+defaults to MemTotal less `GATE_MEM_RESERVE_GIB` (4): 58 GiB on the 62.7 GiB host. Light steps are admitted too (by their
+declaration, so that the sum is the host's, not the heavy steps' alone). The admission is the lock: the run holds the host's
+big lock once for its whole length (`bin/heavy-lock`, its FIFO; `GATE_CONCURRENT_HELD=1` or `GATE_HEAVY_CMD=env` when the
+caller holds it) and every step runs with `ARBACE_HEAVY_HELD=1`, `:inner` ones too (their declared memory is held for the
+step). `.tmp/heavy`'s slot is the caller's, as before. The state is `.tmp/gate/lanes/` (`run/`, `wait/`, entries pruned by
+their process's start time; `events.tsv`, each wait and admission). The order is deterministic in the sense that the decision
+depends only on who waits and who runs, never on arrival or the poll's race; the actual order is recorded: the clean record
+gains `:lanes {:budget-gib :big-gib}` and, per step, `:mem-gib`, `:lane` and `:start-s` (seconds after the run's start),
+its wall, CPU, peaks and waits as before. In the clean run the essential chains and then the full chains run at once
+(`GATE_FULL_PARALLEL=1`), still audited, every part, the pins and stage 0 first. `GATE_LANES=0` keeps GTS37 (a)'s one heavy
+step at a time for the everyday `--concurrent` (refused with `--clean`); `--clean --concurrent --only` is refused (the
+second night's reruns stay serial).
+
+**The plan's view**: `bin/gate --full [--clean] --concurrent --plan` prints the plan, then each step's lane and a schedule
+simulated by the same rule (`test/gate/lanes.ae`'s `view`: the pre steps and builds one after another, then each phase's
+chains at once with their `:start-after`; durations the median of the main store's passes, else the newest clean record's
+wall, a part of a step the record ran whole getting its share; `GATE_LANES_RECORDS` adds records, a file of estimates among
+them, `GATE_LANES_PREFER=clean` takes the records first), the simulated wall, lane 1's sum and the largest declared sum.
+
+**Tests** (`test/gate/lanes-test.bash`, 21 checks, about 20 s): the rule in both implementations on seven states; five
+synthetic steps (sleeps) through `bin/gate-lane` admitted in the rule's order, never over the budget, one big at a time; a dead
+entry pruned; the runner's `step` admitting through it with `ARBACE_HEAVY_HELD=1` inside, and not without `GATE_LANES`; the
+declarations' check on a made-up table and on the real one; the planner's refusal; the view on a made-up plan (its schedule
+by hand); `bin/gate`'s refused options. Run with the gate's tests it touches (costs, rotation, declared-env, audited,
+gate-tests-test, plan-logic, claude-md, stale-comments, limit, pass-write): passed.
+
+**The estimate** (the view with v2's clean record and a record of estimates, `GATE_LANES_PREFER=clean`: audited, cold walls;
+`gate-tests` 30 min, C's essential chain about 43, C's run checks on their subsets about 20, `c-dg` 11, `goi-check-full` 15,
+`java-interp` on its subset 45, `java-compiled-full` on a subset (GTS228) 100; C's four read checks whole, low 89 min if repr/c
+compiled into the re-seeded stage 0 is 3x faster, high 4.5 h at C9.2's speed): **about 9.6 h** with C's reads low, **about
+12.1 h** with them high (C's chain then the critical path: its 6-9 GiB read steps cannot run beside java-interp's 53 GiB
+within 58), 13.9 h with Java's compiled level whole as well. Lane 1 carries about 6.9 h (8.7 h with compiled whole); the
+declared sum never passes 56 GiB. The C chain first in the plan's order (the table's) would save about 35 min of the high case.
+So GTS229's measurement decides the night: with C's reads under about 2 h the clean run fits 10 h.
+
+**The clean run with the lanes** (night 6, after GTS228's subset and the re-seed; from the main checkout at the candidate):
+
+    .tmp/heavy bin/heavy-lock env GATE_HEAVY_CMD=env bin/gate --full --clean --concurrent --tag arbace-reaps-4-crops-v1
+
+(`.tmp/night5/clean.sh`'s `clean_run` with `--concurrent` added; without the outer `bin/heavy-lock` the gate takes the big
+lock itself, once. The plan first: `bin/gate --full --clean --concurrent --plan`. A failure's second night stays
+`bin/gate --full --clean --tag ... --only failed`, serial.) Risks: an under-declared step is an OOM (the declarations are the
+largest seen, the unmeasured C parts C9.2's); CPU contention lengthens the limited programs' walls (their CPU-time limits
+have wall caps); the audit's strace under concurrency is untried at this scale.
+
+## Decided (2026-11-04, the user): the day and the night (GTS224-GTS226, amending GTS209)
+
+The night shift is nominally 12 hours, 19:00 to 07:00 UTC: gating, testing, working out details and fixing the bugs the
+checks find. The day is for development, design and grand concepts, with sample checks and occasional light gating.
+
+- **GTS224 The nightly tier.** 8 hours of planned runs in the 12-hour night (6 before), 4 hours of slack for the fixes and
+  `--only failed` reruns a night's failures need, so a broken run still ends by 07:00.
+- **GTS225 The clean run.** Within one night (about 10 hours planned: the clean run over GT8's compressed corpora; the
+  whole corpora rotate through the nights), two nights at most (`bin/gate --clean --only` resumes the record; `main`
+  frozen at the candidate between them). A tag's night runs the clean run instead of the nightly. GTS209's acceptance reads
+  so: the four crops' clean run within the night, the nightly within its 8 hours.
+- **GTS226 The staging branch.** By day, merges go to the branch `next` after their sample checks; the night's first step
+  runs the essential gate on `next` and fast-forwards `main` to it (then pushes), so `main` stays gated and the day free of
+  gate runs. The essential gate's 15 minutes stays a goal, off the day's critical path. (Before: the essential gate at each
+  merge into `main`, 2026-10-26.)
+
 ## As built: GT8.4, GT8.7 (write-ahead, branch `gt8-nightly`, 2026-11-03)
 
 GTS202 (a), GTS203 (a), GTS204 (a) in the planner's way: the rotation is data in `test/gate/steps.edn`, decided by
