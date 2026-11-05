@@ -1645,3 +1645,135 @@ The user's decision on 205's DECISION (a), 2026-11-05: the constructors now, as 
   `typing._generic_class_getitem`'s `typing._GenericAlias`, so its `__mro_entries__` keeps Generic where CPython's
   returns `()` before a later generic alias. This is not chased here (the brief). It is in no class yet: every
   `class X(Generic[T], SomeABC[T])` stops there.
+
+## As built: 209, PYS22 (a)'s `_ssl` over Go's crypto/tls (2026-11-05, the Mac VM, queue 209)
+
+The user's decision PYS22 (a) (2026-11-04) names `_ssl` over Go's TLS. Built: `go/arbace/py/builtins_ssl.ae` (the
+module, the context), `builtins_ssl_cert.ae` (certificates, OIDs) and `builtins_ssl_conn.ae` (SSL objects, MemoryBIO,
+SSLSession), about 3,000 lines of Go in pyi's runtime, written after CPython 3.14.10's `Modules/_ssl.c`, its clinic
+file and `Modules/_ssl/cert.c` (the survey's pinned tarball; PSF License, LICENSE.md's entry for the Python runtime's
+ports). Go's `crypto/tls`, `crypto/x509` and their dependencies are compiled packages of goi's table, so the TLS itself
+runs at native speed under goi; pyi's own Go around it is interpreted. `Lib/ssl.py` runs unchanged.
+
+### The design
+
+- **The context** (`_SSLContext`) keeps OpenSSL's settings as `_ssl.c` reads and writes them, with CPython's defaults
+  and errors. These are: the options; `verify_mode` and `check_hostname`, with their mutual rules; `verify_flags`;
+  `_host_flags`; the minimum and maximum versions (PY_SSL_MIN_PROTOCOL TLS 1.2 for the TLS protocols); the cipher
+  list; ALPN; one certificate chain a key type; the trust store; CRLs; the curves; `num_tickets`; the session
+  statistics; `keylog_filename`; `sni_callback`. Each connection gets a fresh `tls.Config` made from these settings:
+  - **Versions:** the protocol, the bounds and `OP_NO_TLSv1*` give `MinVersion`/`MaxVersion`. An empty range is
+    OpenSSL's NO_PROTOCOLS_AVAILABLE.
+  - **Ciphers:** `set_ciphers` evaluates OpenSSL's cipher-string language (`:`, `+`, `!`, `-`, `+X`, `@STRENGTH`,
+    `@SECLEVEL`) over the TLS 1.0-1.2 suites Go implements, under OpenSSL's names and attributes (`get_ciphers`'
+    dicts as `cipher_to_dict`'s). The result goes to `CipherSuites`. TLS 1.3's three suites are always on, as with
+    OpenSSL's separate list.
+  - **Tickets and resumption:** `OP_NO_TICKET` (and `num_tickets` 0 on a server) disables tickets. A server context's
+    ticket key is shared by its connections, so a session resumes against the same context.
+  - **ALPN, SNI, curves, key log:** ALPN goes to `NextProtos`. On a server without a protocol in common, the
+    connection gets none (CPython's callback answers NOACK; Go's server would refuse). `server_hostname` gives the SNI
+    `ServerName`. `set_ecdh_curve` sets `CurvePreferences`. `keylog_filename` is Go's `KeyLogWriter` on the file,
+    with OpenSSL's header line.
+- **Verification** is `_ssl`'s own: `InsecureSkipVerify` is set and `VerifyConnection` does the work, so CERT_OPTIONAL
+  and the codes keep OpenSSL's meaning:
+  - Go's `x509.Verify` runs with the context's store, plus the capath directories read at verification (OpenSSL's
+    lookup by hash; the anchor found there then joins the store, as `get_ca_certs` shows). The peer's other
+    certificates are the intermediates. The purpose is serverAuth or clientAuth.
+  - Then the distrusted SPKIs (`Modules/_ssl/distrusted_spki.h`, code 28), `VERIFY_X509_STRICT`'s missing AKI (85),
+    `VERIFY_CRL_CHECK_LEAF` (3, 8, 23) and the host check run. The host check is X509_check_host's rules:
+    NO_PARTIAL_WILDCARDS, the CN only without DNS names and without NEVER_CHECK_SUBJECT, IP addresses (62, 64).
+  - Go's errors map to OpenSSL's codes and texts: 18, 19, 20, 9, 10, 24, 25, 26, 47.
+  - A server's CERT_REQUIRED is `RequireAnyClientCert`, and the certificate is verified the same way.
+- **Certificates** are decoded from their DER by a walker of `_ssl`'s own, not by crypto/x509, which refuses some
+  certificates OpenSSL reads (test_ssl's NUL-byte and CVE-2019-5010 certificates):
+  - `_decode_certificate`'s dict: names with OpenSSL's long names, ASN1_STRING_to_UTF8's decodings,
+    i2a_ASN1_INTEGER's serial, ASN1_TIME_print's dates;
+  - `subjectAltName`'s GeneralNames as `_get_peer_alt_names` prints them;
+  - OCSP, caIssuers and crlDistributionPoints.
+  The OIDs are the part of OpenSSL 3.5's objects table that `_ssl` names, with its NIDs (`txt2obj`, `nid2obj`).
+  Keys are PKCS #1, SEC 1 or PKCS #8. Encrypted PEM is read both ways: OpenSSL's legacy encryption by Go's
+  `DecryptPEMBlock`, and PKCS #8's PBES2 with PBKDF2 and AES/3DES-CBC by the port (RFC 8018; PBKDF2 by hand, because
+  `crypto/pbkdf2.Key` is generic and goi's table calls no generic function). The password follows CPython's rules: a
+  str, bytes or a callable called only when needed, at most 1,024 bytes.
+- **The pipe adapter (SSL objects over sockets and MemoryBIOs).** Go's `tls.Conn` wants a `net.Conn` it may block on.
+  OpenSSL's callers want SSL_ERROR_WANT_READ and an operation that the next call resumes (ssl.py over a non-blocking
+  socket, asyncio's SSLProtocol over MemoryBIOs). The adapter works as follows:
+  - Each SSL object runs its `tls.Conn` in a goroutine of its own (the engine), over an in-memory transport. The
+    engine's Read takes the bytes the Python side fed it. When there are none, Read signals that it wants input and
+    waits. The engine's Write appends to the bytes to send.
+  - Control alternates strictly. The Python thread hands the engine an operation (handshake or read), or resumes the
+    one in flight, and waits for its event with the GIL released; the engine waits for the Python side. So the
+    engine never touches a Python object, and the buffers have one owner at a time.
+  - When the engine wants input, the Python side first sends the pending bytes (into the outgoing BIO, or to the
+    socket under its timeout). Then it feeds the next bytes of the current TLS record (its header, then its length,
+    never more), read from the incoming BIO or the socket:
+    - a blocking socket blocks with the GIL released;
+    - a socket with a timeout waits on select(2) to the operation's deadline, then raises CPython's TimeoutError
+      text;
+    - a non-blocking socket or an empty BIO raises SSLWantReadError, and the operation stays in flight for the
+      next call.
+    A byte past the record is never read, so after `unwrap()` the clear bytes behind close_notify stay in the
+    socket, as with OpenSSL (STARTTLS).
+  - Writes and close_notify never wait for input. After the handshake they are made on the Python thread directly
+    (tls.Conn's write side has its own lock); a write before the handshake drives it first. A non-blocking socket
+    that cannot take the records raises SSLWantWriteError. It keeps them, and the retried write returns the accepted
+    count (SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER's contract).
+  - A callback the engine needs (the SNI callback inside `GetConfigForClient`) is a third event. It runs on the
+    Python thread with the GIL; the SNI callback may switch `sslsocket.context`, and the configuration is made from
+    the context then in force.
+  - So the runtime needs no decision on blocking or the GIL. Python code runs only on Python threads, holding the GIL,
+    and every wait releases it.
+- **Errors** are `fill_and_set_sslerror`'s:
+  - The message is `[LIB: REASON] text (_ssl.c:LINE)`, with CPython 3.14.10's line numbers. The exception carries
+    `reason` and `library`, and `verify_code` and `verify_message` on SSLCertVerificationError, whose bases are SSLError
+    and ValueError.
+  - A peer's alert gives OpenSSL's reason by its number (`SSLV3_ALERT_*`, `TLSV1_ALERT_*`). Go's own handshake errors
+    give theirs by text (WRONG_VERSION_NUMBER, NO_SHARED_CIPHER, UNSUPPORTED_PROTOCOL,
+    PEER_DID_NOT_RETURN_A_CERTIFICATE, ...).
+  - The transport's EOF inside a record or a handshake is SSLEOFError UNEXPECTED_EOF_WHILE_READING
+    (OP_IGNORE_UNEXPECTED_EOF: a clean EOF). close_notify is the zero return: `read()` gives `b''`.
+- **What the module reports:** `OPENSSL_VERSION` is "OpenSSL 3.5.0 (compatible; Go crypto/tls)" with
+  `OPENSSL_VERSION_INFO` (3, 5, 0, 0, 0): the API level the port follows. ssl.py and the tests branch on it, and 3.5 is
+  the level CPython's references ran with. HAS_SNI, HAS_ECDH, HAS_ALPN, HAS_TLS_UNIQUE (Go's `TLSUnique` for TLS 1.2)
+  and HAS_TLSv1 through 1_3 are True; HAS_PHA, HAS_PSK, HAS_NPN and HAS_SSLv2/3 are False. `get_default_verify_paths`
+  is OpenSSL's Linux defaults (`/etc/ssl/cert.pem`, `/etc/ssl/certs`, `$SSL_CERT_FILE`, `$SSL_CERT_DIR`).
+  `set_default_verify_paths` loads the file now and looks in the directory at verification, as OpenSSL does.
+- **By design** (class `:ssl-go-tls`): what Go's TLS does not have:
+  - TLS 1.3 post-handshake authentication (`verify_client_post_handshake` raises NotImplementedError, as CPython
+    without PHA);
+  - TLS-PSK (`set_psk_*_callback` raise NotImplementedError);
+  - `_msg_callback` (kept, never called);
+  - the TLS 1.3 exporter secret in the key log (Go logs four secrets, OpenSSL five);
+  - the alert of a refusing SNI callback (Go sends internal_error);
+  - the alert of a failed verification (Go sends bad_certificate where OpenSSL sends unknown_ca: the peer's reason
+    differs);
+  - finite-field DHE (`load_dh_params` reads the file and keeps nothing);
+  - SSLv3 and compression;
+  - the cipher each side picks (Go's preference order, not OpenSSL's).
+- **Deferred** (class `:ssl-finalization`, PYS9's finalizer queue): an SSL object freed by `gc.collect()`.
+- **Not in this slice:** the x509roots/ bundle as the fallback store (DECISION in the report); an engine goroutine
+  is not ended when its SSL object dies (it waits on its channels for ever: one goroutine an abandoned connection);
+  tamago (pyi's runtime is read for linux; Go's TLS would run there, the sockets would not).
+
+### The first slice and its samples (run on the VM)
+
+- `test/python/pyi/d-ssl.py` with its own test CA and leaf (`test/python/pyi/ssl/`: EC P-256, localhost and
+  127.0.0.1, valid until 2525). It runs a client and a server in one process over MemoryBIOs and over a socket pair
+  with a thread, and covers:
+  - the certificate's decoding, the handshake, `version`, `cipher`'s protocol, `getpeercert` (dict and DER);
+  - the verified and unverified chains, reads and writes (20,000 bytes in pieces), `pending`, `unwrap` on both sides;
+  - the verification failures (20, 62, 64) with their texts;
+  - a handshake timeout, a non-blocking WANT_READ, then SSLEOFError, and ALPN with and without a protocol in common.
+  Its output is equal to `python3 -I -B`'s under `bin/pyi run` (goi) and `bin/pyi aot` (the runtime compiled by Go).
+- `bin/pyi lib-test-all --fresh test_ssl` (2 jobs, 49 s): 206 methods, from 0 equal (all in `:ssl`, "No ssl module")
+  to 176 equal, 30 classed (20 `:ssl-go-tls`, 4 `:ssl-finalization`, 5 cpython-only, 1 buffer-exports), 0 failing.
+- `bin/pyi lib-test-all --fresh test_poplib test_ftplib test_httplib test_imaplib test_urllib2_localnet` (their TLS
+  tests ran for the first time): 570 methods, 564 equal, 3 classed, 3 failing. The failures are imaplib's
+  `Time2Internaldate`, "date_time not of a known type": not `_ssl`'s, and in no class.
+- `bin/pyi lib-test --corpus lib-test-asyncio test_asyncio.test_ssl test_asyncio.test_sslproto` (asyncio's
+  SSLProtocol over MemoryBIOs, its starttls and shutdown paths): 64 methods, 56 equal, 8 classed (`:ssl-finalization`),
+  0 failing. On the first run, `test_remote_shutdown_receives_trailing_data` hung. The cause: a read after this side's
+  `unwrap()` had sent close_notify returned `b''` on the peer's close_notify, where OpenSSL raises
+  SSLZeroReturnError once both shutdowns are seen. Fixed.
+- `test_ssl`'s `test_session` failed once in three runs: a resumed session's id changed when the server renewed the
+  ticket. Fixed: a resumed session keeps its id and time, and the renewed ticket only replaces its state.
