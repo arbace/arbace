@@ -18,7 +18,15 @@
 #   bin/repr-haskell corpus list [CORPUS]
 #                                 the corpus's modules, one per line: modules|hsc|boot, package, file
 #                                 (the modules, R6's .hsc modules and boot files; every one converted)
-#   bin/repr-haskell dump --corpus [CORPUS]   dump the corpus into .tmp/repr-haskell/dumps/CORPUS/PKG/
+#   bin/repr-haskell dump --corpus [CORPUS]   dump the corpus into .tmp/repr-haskell/dumps/CORPUS/PKG/ (live: the helper, GHC)
+#   bin/repr-haskell record-corpus [CORPUS]    ORS12: the corpus's originals dumped (both modes) and parsed to trees (both modes) by the helper
+#                                 and packed into test/haskell/records/haskell-{dumps,dumps-full,trees,trees-full}-CORPUS (pins and manifests committed, the packs in
+#                                 the store, test/oracle-records/oracle.bash); by hand, a commit of its own naming :ghc's identity;
+#                                 REPR_HASKELL_ONLY_PACKAGES="P Q" the packages named alone (the others' members kept from the pack)
+#   bin/repr-haskell verify-corpus [--sample N] [CORPUS]
+#                                 the helper's live outputs of N packages (default all) against the pack's members byte for byte
+#                                 (ORS6 (a)'s verdict) and the crossed pair; exit 1 when entries differ under the identity the record names
+#   REPR_HASKELL_LIVE=1           read --corpus and roundtrip's originals' dumps and trees made by the helper, not read from the pack
 #   bin/repr-haskell dump [--full] --corpus [CORPUS]   the same with --full into dumps/CORPUS-full/
 #   bin/repr-haskell dump [--full] [-o DIR] FILE... [--ghc FLAG...]
 #                                 run the helper on modules (relative to the current directory) with
@@ -165,12 +173,17 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
 . "$root/bin/lib/tools.bash"
+. "$root/bin/lib/repr-haskell/records.bash"
 work=$root/.tmp/hsdump
 helper=${REPR_HASKELL_HELPER:-$work/hsdump}
 rh=$root/.tmp/repr-haskell
 jobs=${REPR_HASKELL_JOBS:-$(nproc)}
 [ "$jobs" -gt 32 ] && jobs=32
 pin=$(cat "$root/tools/hsdump/GHC_VERSION")
+libdir=${libdir:-}
+# ORS12 (doc/ORACLE-RECORDS-SURVEY.md, "As built: Haskell"): GHC's reading of the corpus's originals (the helper's dumps and trees) is
+# read from the packs haskell-KIND-CORPUS (test/haskell/records/) unless REPR_HASKELL_LIVE=1 (the helper runs, as before)
+live=${REPR_HASKELL_LIVE:-}
 
 ghc_check() {
   command -v ghc > "$TMPDIR/repr-haskell-which.txt" || { echo "repr-haskell: no ghc (Alpine's ghc package, doc/ALPINE.md)" >&2; return 1; }
@@ -228,6 +241,11 @@ corpus_file() {
 # all: the three, every module the corpus converts, R6), and for all a fifth field: the helper's
 # hsc2hs arguments (--hsc2hs-arg A for each of the package's :hsc-flags; $repo expanded)
 corpus_plan() {
+  corpus_plan_raw "$@" | sed -e "s|\\\$libdir|$libdir|g" -e "s|\\\$repo|$root|g"
+}
+# the plan as the corpus writes it ($libdir and $repo not expanded: the records' keys name no path of the host); the packages
+# named by REPR_HASKELL_ONLY_PACKAGES alone when it is set (the sample recordings and verifies)
+corpus_plan_raw() {
   local f
   f=$(corpus_file "$1")
   arbace_tool -e "(let [c (read-string (slurp \"$f\")) what (keyword \"$2\")
@@ -237,7 +255,7 @@ corpus_plan() {
         (j (concat [(str \"-X\" (:language p))] (map #(str \"-X\" %) (:extensions p)) [\"-haddock\"] (:ghc-flags p)))
         \"\t\" (j (map #(if (vector? %) (second %) %) (if (= what :all) (concat (:modules p) (:hsc p) (:boot p)) (get p what))))
         (if (= what :all) (str \"\t\" (j (mapcat (fn [a] [\"--hsc2hs-arg\" a]) (:hsc-flags p)))) \"\")))))" |
-    sed -e "s|\\\$libdir|$libdir|g" -e "s|\\\$repo|$root|g"
+    awk -F'\t' -v o="${REPR_HASKELL_ONLY_PACKAGES:-}" 'o == "" || index(" " o " ", " " $1 " ")'
 }
 
 corpus_fetch() {
@@ -298,11 +316,114 @@ corpus_configure() {
       (println (str (:name p) \"\t\" (:dir p) \"\t\" (apply str (interpose \" \" (:configure p)))))))"
 }
 
+# ---- the corpus's records (ORS12): four packs haskell-KIND-CORPUS (test/haskell/records/), KIND one of dumps (the helper's dump, mode
+# :lines), dumps-full (--full, with CPP's module views), trees and trees-full (the helper's tree of the original modules, FILE.tree and
+# FILE.lines), the members PKG/FILE; a package's entries keyed by pkg_key: the source tarball's SHA-256, the helper's identity, the
+# kind and the package's plan line as the corpus writes it, and the files of test/haskell/generated (cabal_macros.h, a CPP include)
+corpus_kinds="dumps dumps-full trees trees-full"
+corpus_pin() { echo "$root/test/haskell/records/haskell-$2-$1.sha256"; } # CORPUS KIND
+pkg_key() { # CORPUS KIND PKG-PLAN-LINE
+  { arbace_tool -e "(println (:sha256 (:tarball (read-string (slurp \"$(corpus_file "$1")\")))))"
+    hsr_helper_hash; echo "$2"; printf '%s\n' "$3"
+    (cd "$root/test/haskell/generated" && find . -type f | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -c1-64
+}
+# corpus_records_get CORPUS KIND OUT: the selected packages' members into OUT/PKG/, their keys checked
+corpus_records_get() {
+  local c=$1 kind=$2 out=$3 pin u man name pk line want n dir flags files hargs
+  pin=$(corpus_pin "$c" "$kind"); name=$(oracle_pin_name "$pin"); man=$(oracle_manifest "$pin")
+  [ -f "$pin" ] && [ -f "$man" ] || { echo "UNRECORDED: no $pin (bin/repr-haskell record-corpus, by hand on a host with GHC; REPR_HASKELL_LIVE=1 runs the helper)" >&2; return 1; }
+  u=$(oracle_unpack "$pin") || return 1
+  mkdir -p "$out"
+  corpus_plan_raw "$c" all > "$TMPDIR/repr-haskell-recplan.$$"
+  while IFS=$'\t' read -r pk dir flags files hargs; do
+    [ -n "$files" ] || continue
+    line=$(printf '%s\t%s\t%s\t%s\t%s' "$pk" "$dir" "$flags" "$files" "$hargs")
+    want=$(pkg_key "$c" "$kind" "$line")
+    n=$(awk -F'\t' -v p="$pk/" 'index($1, p) == 1 {n++} END {print n + 0}' "$man")
+    [ "$n" -gt 0 ] || { echo "UNRECORDED $name: $pk has no entry in $man (bin/repr-haskell record-corpus)" >&2; rm -f "$TMPDIR/repr-haskell-recplan.$$"; return 1; }
+    if [ -n "$(awk -F'\t' -v p="$pk/" -v k="$want" 'index($1, p) == 1 && $2 != k {print "x"; exit}' "$man")" ]; then
+      echo "STALE $name: $pk's sources' pin, the helper, the corpus's plan or test/haskell/generated changed since the record" >&2; rm -f "$TMPDIR/repr-haskell-recplan.$$"; return 1
+    fi
+    mkdir -p "$out/$pk"; cp -r "$u/$name/$pk/." "$out/$pk/"
+  done < "$TMPDIR/repr-haskell-recplan.$$"
+  rm -f "$TMPDIR/repr-haskell-recplan.$$"
+}
+# corpus_live_kind CORPUS KIND DEST: the helper's outputs of KIND for the selected packages into DEST/PKG (live)
+corpus_live_kind() {
+  local c=$1 kind=$2 dest=$3
+  case $kind in
+    dumps) dump_corpus_live "$c" "$dest" ;;
+    dumps-full) dump_corpus_live "$c" "$dest" --full ;;
+    trees) rm -rf "$dest"; mkdir -p "$dest"; tree_jobs_live "" "$dest" /nonexistent /nonexistent ;;
+    trees-full) rm -rf "$dest"; mkdir -p "$dest"; tree_jobs_live --full "$dest" /nonexistent /nonexistent ;;
+  esac
+  rm -f "$dest"/*.err
+}
+# record_corpus CORPUS: the selected packages' four kinds made live and packed (a pack a kind), the packages not selected kept from
+# the pack in place; by hand (a commit of its own naming :ghc's identity)
+record_corpus() {
+  local c=$1 kind pin stage man name d pk line dir flags files hargs m
+  for kind in $corpus_kinds; do
+    pin=$(corpus_pin "$c" "$kind"); man=$(oracle_manifest "$pin"); name=$(oracle_pin_name "$pin"); stage=$rh/records/$kind
+    rm -rf "$stage"; mkdir -p "$stage/$name"; : > "$stage/ids"
+    if [ -f "$man" ] && [ -f "$pin" ] && d=$(oracle_unpack "$pin" 2>"$TMPDIR/repr-haskell.err"); then
+      cp -a "$d/$name/." "$stage/$name/"; awk -F'\t' '!/^#/ && NF {print $1 "\t" $2}' "$man" > "$stage/ids"
+    fi
+    corpus_live_kind "$c" "$kind" "$stage/live"
+    corpus_plan_raw "$c" all > "$stage/plan.tsv"
+    while IFS=$'\t' read -r pk dir flags files hargs; do
+      [ -n "$files" ] || continue
+      line=$(printf '%s\t%s\t%s\t%s\t%s' "$pk" "$dir" "$flags" "$files" "$hargs")
+      # the package's members replaced by the live outputs
+      awk -F'\t' -v p="$pk/" 'index($1, p) != 1' "$stage/ids" > "$stage/ids.new"; mv "$stage/ids.new" "$stage/ids"
+      rm -rf "${stage:?}/$name/$pk"
+      [ -d "$stage/live/$pk" ] || continue
+      mkdir -p "$stage/$name/$pk"; cp -r "$stage/live/$pk/." "$stage/$name/$pk/"
+      (cd "$stage/$name" && find "$pk" -type f | LC_ALL=C sort) | while IFS= read -r m; do
+        printf '%s\t%s\n' "$m" "$(pkg_key "$c" "$kind" "$line")"; done >> "$stage/ids"
+    done < "$stage/plan.tsv"
+    rm -rf "${stage:?}/live"
+    oracle_make "$pin" "$stage" "$stage/ids" "bin/repr-haskell record-corpus${REPR_HASKELL_ONLY_PACKAGES:+ (REPR_HASKELL_ONLY_PACKAGES=$REPR_HASKELL_ONLY_PACKAGES)} $c" ghc || return 1
+    rm -rf "$stage"
+  done
+}
+# verify_corpus CORPUS [N]: the live outputs of N packages (default all, evenly spread) against the packs' members byte for byte,
+# ORS6 (a)'s verdict, and the crossed pair
+verify_corpus() {
+  local c=$1 sample=${2:-} pin man name u kind pk ndiff=0 total=0 d=$rh/verify first="" last="" pks=() i j m
+  mkdir -p "$rh"; corpus_plan_raw "$c" all | cut -f1 > "$rh/verify.pkgs"; mapfile -t pks < "$rh/verify.pkgs"
+  if [ -n "$sample" ] && [ "$sample" -lt "${#pks[@]}" ]; then
+    local picked=(); for ((i = 0; i < sample; i++)); do j=$(( i * ${#pks[@]} / sample )); picked+=("${pks[$j]}"); done; pks=("${picked[@]}")
+  fi
+  rm -rf "$d"; mkdir -p "$d"
+  for kind in $corpus_kinds; do
+    pin=$(corpus_pin "$c" "$kind"); man=$(oracle_manifest "$pin"); name=$(oracle_pin_name "$pin")
+    u=$(oracle_unpack "$pin") || return 1
+    REPR_HASKELL_ONLY_PACKAGES="${pks[*]}" corpus_live_kind "$c" "$kind" "$d/$kind"
+    for pk in "${pks[@]}"; do
+      [ -d "$d/$kind/$pk" ] || continue
+      while IFS= read -r m; do
+        total=$((total + 1)); [ -n "$first" ] || first=$d/$kind/$pk/$m; last=$u/$name/$pk/$m
+        if [ ! -f "$u/$name/$pk/$m" ]; then echo "verify: $name/$pk/$m: UNRECORDED"; ndiff=$((ndiff + 1))
+        elif cmp -s "$d/$kind/$pk/$m" "$u/$name/$pk/$m"; then :
+        else echo "verify: $name/$pk/$m: DIFFERS"; ndiff=$((ndiff + 1)); fi
+      done < <(cd "$d/$kind/$pk" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
+    done
+  done
+  oracle_verdict ghc "$(oracle_manifest "$(corpus_pin "$c" dumps)")" "$ndiff" "$total" || return 1
+  if [ "$total" -ge 2 ] && cmp -s "$first" "$last"; then echo "verify: FAILED: the crossed pair is equal: control not judged"; return 1
+  elif [ "$total" -ge 2 ]; then echo "verify: the crossed pair differs (control passed)"; fi
+}
+
 # dump_corpus CORPUS OUT: every module of the corpus dumped into OUT/PKG/FILE.edn (a module the
 # helper fails on is written as (hsdump/error ...), which the conversion reports); R6: the .hsc
 # modules through hsc2hs (by the helper, its output X.hs beside X.hsc in the extracted tree, as a
 # Cabal build's; the dump X.hs.edn), the boot files and the literate modules too
 dump_corpus() {
+  if [ -z "$live" ]; then rm -rf "$2"; corpus_records_get "$1" "dumps${3:+-full}" "$2"; return; fi
+  dump_corpus_live "$@"
+}
+dump_corpus_live() {
   local c=$1 out=$2 full=${3:-} name dir flags files hargs hh
   rm -rf "$out"
   mkdir -p "$out"
@@ -326,6 +447,12 @@ dump_corpus() {
 # 8 modules a job, JOBS at a time (R5: package by package, the corpus's 37 small packages left the
 # cores idle); the helper's messages in each output's .err
 tree_jobs() {
+  local mode=$1 o=$2 k=$3 kout=$4 reuse=${5:-}
+  # the originals' trees from the records (the printed modules' are class D: the helper runs on them)
+  if [ -z "$reuse" ] && [ -z "$live" ]; then corpus_records_get "$c" "trees${mode:+-full}" "$o" || return 1; reuse=records; fi
+  tree_jobs_live "$mode" "$o" "$k" "$kout" "$reuse"
+}
+tree_jobs_live() {
   local mode=$1 o=$2 k=$3 kout=$4 reuse=${5:-} name dir flags files hargs jl
   jl=$(mktemp "$rh/tree-jobs.XXXXXX")
   local pl; pl=$(mktemp "$TMPDIR/repr-haskell-plan.XXXXXX")
@@ -1101,8 +1228,13 @@ case $cmd in
             done ;;
       *) echo "usage: bin/repr-haskell corpus fetch|list [CORPUS]" >&2; exit 2 ;;
     esac ;;
+  record-corpus)
+    live=1; ghc_check; build; c=${1:-ghc-9.14.1}; corpus_fetch "$c"; record_corpus "$c" ;;
+  verify-corpus)
+    live=1; sample=""; [ "${1:-}" = --sample ] && { sample=$2; shift 2; }
+    ghc_check; build; c=${1:-ghc-9.14.1}; corpus_fetch "$c"; verify_corpus "$c" "$sample" ;;
   dump)
-    ghc_check; build
+    live=1; ghc_check; build
     if [ "${1:-}" = --full ] && [ "${2:-}" = --corpus ]; then
       c=${3:-ghc-9.14.1}; corpus_fetch "$c"; dump_corpus "$c" "$rh/dumps/$c-full" --full
       cat "$rh/dumps/$c-full"/*.err >&2; exit 0
@@ -1131,7 +1263,8 @@ case $cmd in
     if [ "${1:-}" = --full ] && [ "${2:-}" = --corpus ]; then full=--full; shift; fi
     if [ "${1:-}" = --corpus ]; then
       shift; c=${1:-ghc-9.14.1}
-      ghc_check; build; corpus_fetch "$c"
+      # the corpus's dumps are the records' unless REPR_HASKELL_LIVE=1 (the helper, GHC)
+      if [ -n "$live" ]; then ghc_check; build; corpus_fetch "$c"; fi
       dump_corpus "$c" "$rh/dumps/$c${full:+-full}" $full
       out=$rh/forms/$c${full:+-full}
       rm -rf "$out"
