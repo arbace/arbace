@@ -1461,3 +1461,134 @@ server alone, from the GHC API, with no evaluation). The scripted session compar
 ## Decided (2026-11-05, the user)
 
 HES60-HES64, each (a) as recommended: the helper dumps foreign exports' and wrappers' helpers and hsi makes real callbacks (decided at the next night by what the stgToCmm hook sees); descriptors waited on by poll with HE4f's scheduler work; coverage subsets by a counting mode and greedy cover at HE10; forkProcess a design class; a program's own C through ci beside hsi at HE6's second half.
+
+## As built: HE8 (write-ahead)
+
+Built 2026-11-05 on branch `haskell-he8` from `haskell-he5` (`a7fafe0b`), on the host's GHC 9.14.1, TamaGo's go and the main
+checkout's stage 0, light work by day (2 jobs, no gate, no lock; every Go build of a program under `GOMEMLIMIT=1536MiB`, `-p 2`).
+Write-ahead: HE8's design and its first slice, not the milestone (§11's exit criteria: below, "The rest of HE8"). Nothing of
+Haskell is in `gate_key` or a gate step (HES19 (a)). The AOT's files are its own (`go/arbace/hs/aot.ae`,
+`test/haskell/hsi/cmd/aot.ae`, `bin/lib/hsi/aot`); the machine's files carry four hooks only (below), so HE6's branch merges.
+
+### The design
+
+§7's shape, decided against the machine as HE4-HE5 built it: compiled code is a second implementation of hsi's node
+trees' `eval`, not a second machine.
+
+- **The code's shape.** One Go function per STG closure body, per case continuation whose scrutinee may push a frame, and per
+  join point, each `func(m *Machine, env []Value) (Expr, []Value)`: a function of the closure's frame of slots (hsi's
+  frames: free variables, arguments, every local binder, join points' arguments; `compile.go`'s numbering, liveness and
+  scopes) that returns the next code to run and its frame. The trampoline is hsi's own loop (`runSlice`): Go has no tail
+  calls and Haskell's stack is not Go's. Go's goroutine stacks for Haskell's stack (HES8 (b)) were rejected again: E7's
+  `<<loop>>`, `-K`'s StackOverflow, asynchronous exceptions' unwinding, `control0#`'s captured segments, the collector's
+  reachability walk and the thread switch at any bounce all need the stack as data, and with the explicit stack an AOT
+  closure and an interpreted one call each other freely (the libraries interpreted, the program compiled, or any mix).
+  Within one function the code is straight-line Go: atoms are `env[k]`, a global's value (`m.gv`, loaded on first use) or a
+  number literal as a Go constant; a case on a pure primop or a literal never pushes a frame, so its alternatives are inline
+  Go; a case on a variable takes the value at once when it is evaluated (a thunk's indirection followed once, as
+  `CaseE.eval`) and pushes the case's frame and enters the thunk otherwise; a case on a constructor is a chain of pointer
+  comparisons of its `DataCon`, on integer literals a Go `switch` (a duplicate literal's alternative dropped, the first
+  wins as in hsi); a `let` allocates inline (`allocClosure`, `newConN`; `rec` in two passes); a jump assigns the join's
+  slots and returns its function.
+- **Calls, known and unknown.** A call's atoms go into the machine's argument buffer and `aotApp` takes `App.eval`'s paths
+  on the values: an evaluated function of the call's arity is entered with its arguments placed in its frame (in a tail
+  position the caller's frame reused when large enough), a class method's selector applied to an evaluated dictionary takes
+  the method at once (the `-O0` programs' every `+`), anything else goes through the machine's `apply` (PAPs, over-saturated
+  calls through apply frames, thunks). A callee compiled or not is the same `Lambda`: its `Body` is a `goCode` or a tree.
+- **Laziness and updates.** Compiled code never evaluates a thunk itself: it pushes its continuation's frame and returns
+  `m.enter(t)`, so blackholing, update frames, their squeezing, `NonTermination` and the waits on another thread's blackhole
+  are the machine's, unchanged. Thunks and functions are allocated as hsi allocates them (one Go object up to four fields;
+  an updatable thunk with room for its frame, evaluated in place).
+- **Exceptions, asynchronous exceptions, masks, STM, continuations.** All are frames (`fCatch`, `fMask`, `fAtomically`,
+  `fPrompt`...), and a compiled function holds nothing on Go's stack across a return: `raise#`, `throwTo`, `killThread#`, the
+  masking states, `catchSTM#`/`catchRetry#` and `control0#`'s captured frames work on compiled code as on trees. A compiled
+  case's frame is the tree's `CaseE` with its continuation in Go (`CaseE.k`): a frame copied by `control0#` resumes in Go.
+- **Concurrency.** Green threads on hsi's scheduler (HES9 (a)): a thread is preempted at a bounce of the trampoline (a slice
+  of 20,000 bounces; a compiled function runs longer per bounce than a node, so the slices are longer in time: scheduling
+  points are a design class already). A compiled function never blocks; the primops that block return to the scheduler as
+  in hsi.
+- **The collector.** Go's for the heap. hsi's own reachability walk (deadlock detection, weak pointers: HE4e) reads the
+  trees: each `goCode` keeps the tree it was generated from (`orig`), and a compiled case keeps its `CaseE` and alternatives.
+- **Primops.** 48 pure scalar primops are inline Go over the atoms (`Int#`, `Word#`, `Char#` and `Double#` arithmetic and
+  comparisons, each `Double#` result an explicit `float64` conversion so Go cannot fuse it); the other pure ones call the
+  primop's function on the machine's buffer as `PrimE.simple`; effectful and control primops and the foreign calls run their
+  node, hsi's implementations (one primop implementation for both levels: the classes are shared).
+- **Installation by shape, and what the slice still loads.** The generated code does not rebuild the tree: at run time the
+  closure is compiled from its dump (or decoded from its image) as before, and the installer registered for "UNIT:MODULE
+  NAME" indexes that tree's nodes and atoms in a fixed preorder, checks a 64-bit digest of its structure (kinds, slots,
+  arities, liveness lists, atoms' kinds) against the one the generator saw, and puts the Go functions in its places (the
+  closure's `Body`, nested closures' bodies, join points' bodies, cases' `k`). Another dump or another compiler: refused,
+  the closure interpreted (counted, `HSI_AOT_TRACE`). So the slice still loads the program's dumps and the libraries'
+  images (declarations, constructors, globals, string literals' addresses): §7's program without dumps needs the metadata
+  emitted too (HES71). Two latent nondeterminisms found on the way: `live.go`'s kill lists were in a map's order (images'
+  bytes and shapes differed run to run: sorted now), and a string literal's or label's address is a number of the
+  generating process (never a constant now: read from the node).
+- **What is compiled.** Every closure of the program's modules, and the library closures a list names; `bin/hsi aot`'s list
+  is a profile, the closures a first run on hsi entered (`HSI_AOT_MODULES`), which decides only what is compiled, never what
+  a run computes (a closure not listed is interpreted). Whole library modules are §7's plan, held back by the Go compiler on
+  one package: 21 whole modules of `ghc-internal` (4,206 closures, 9.2 MB of Go) peaked at 5.2 GB of RSS and 24 s; Nfib's 69
+  closures (0.9 MB) 0.7 GB and 5 s; LibMisc's 981 (4.1 MB) 1.5 GB and 10 s under the memory limit. Hence HES70: a Go package
+  per module.
+- **Forms.** The generator writes Go text (files of package `arbace/hs`) that TamaGo's go builds with the runtime printed
+  from its forms; reading them into Go forms first (repr/go's native reader, then `arbace.build.go` as goi's `check --aot`
+  builds) adds a round trip for no new check at this slice's size, and is HES72's.
+- **Expected speed.** §7 expected 3 to 10 times hsi on call-heavy code. Measured on `nfib 32` (`-O0`: every `<`, `-`, `+` a
+  dictionary method call): XXSPEED. The rest of the time is the machine's: frames pushed and popped, thunks allocated and
+  updated, `Int#` boxed in interfaces, the bounces; HES73's typed locals and direct calls are the next factor.
+
+### What is in the tree
+
+- **`go/arbace/hs/aot.ae`**: the generator (`(*Machine).GenAOT`, `aotGen`), the runtime half (`goCode`, `aotRegister`,
+  `aotInstall`, `aotCollect`, `aotShape`, `aotApp`), the profile (`HSI_AOT_MODULES`, `EnteredModules`) and the bisection's
+  switches (`HSI_AOT_LIMIT=N`: the first N installs only; `HSI_AOT_NO=Kind,...`: node kinds left to their nodes). The hooks
+  elsewhere: `compileTop` calls `aotInstall` after compiling or decoding a closure (`load.ae`), `CaseE` has the field `k`
+  and `cont` calls it (`nodes.ae`), the collector's walk reads a `goCode`'s tree (`rts.ae`), the kill lists sorted
+  (`live.ae`).
+- **`test/haskell/hsi/cmd/aot.ae`**: `hsi aot [--lib DIR... --image DIR --modules FILE] [--prog DIR] --out DIR`; `hsi run`'s
+  `--stats` counts the installed and refused closures.
+- **`bin/hsi aot build --prog STGDIR [--closures FILE] --out DIR`** (`bin/lib/hsi/aot`): generated, then built with the runtime
+  module `bin/hsi build` printed, into `DIR/hsi-aot`, kept by the generated files' and the runtime's digests;
+  **`bin/hsi aot run FILE.hs [ARG...]`**: dumped, profiled on hsi with an empty stdin, built, run with the arguments and stdin.
+- **`bin/hsi check --aot`**: each program profiled on hsi in a copy of its directory with its stdin and arguments, built, and
+  run on its executable as `check` runs hsi, judged against the same references and classes (`:aot-build` its build's
+  seconds); results in `.tmp/hsi/check-aot/`, `--record` into `test/haskell/check-hsi-aot.edn`.
+
+### Results
+
+XXRESULTS
+
+### The rest of HE8 (re-estimated: 8 to 12 days)
+
+1. **The libraries compiled once per key** (HES70; 3-4 days): a Go package per module over an exported runtime API, generated
+   into `.tmp/hsi/aot/lib/KEY/` by the module's dump digest and the generator's, compiled once by Go's build cache; the 41
+   packages' 1,320 modules generated and built at night (their size measured first: the 21 modules above extrapolate to some
+   hundreds of MB of Go: HES73's code size matters before it).
+2. **The metadata emitted** (HES71; 2 days): data declarations, globals, string literals and labels as Go, so a compiled
+   program loads no dump or image; then hsi with compiled libraries (HES14 (b)) is the same packages linked into hsi.
+3. **Speed** (HES73; 2-3 days): `Int#`/`Word#`/`Double#` binders as typed Go locals (no interface boxing between primops),
+   a call to a known compiled closure of known arity as a direct Go call when its result returns to a pushed frame anyway,
+   a case on a known constructor's tag as a jump table.
+4. **The check whole** (1-2 days): `bin/hsi check --aot` over the testsuite's core and nofib at night (the programs' builds
+   are the cost: a minute or less each, 1.5 GB), hsi against compiled per program (diffcheck's kind), the AOT's own classes.
+
+### Proposed (HES70 onward; HES65-HES69 left to HE6's branch)
+
+- **HES70 The libraries' code.** (a) one Go package per Haskell module (`arbace/hs/aot/UNIT/MODULE`), over an exported
+  runtime API of the machine (the frame, the atoms' accessors, `aotApp`, `pushCase`, `enter`, the allocation helpers;
+  `hs` stays the one implementation), generated once per (dump digest, generator digest) and compiled by Go's build cache
+  once, every program linking the packages it needs: §7's "compiled once per pin", the compile's memory per module (the
+  largest, `Data.Text.Internal.Encoding`'s one closure of 2,700 cases, about 1 MB of Go); (b) one package per program with
+  its profiled closures (as built): no API, but every program recompiles its share; (c) the libraries interpreted, the
+  program compiled. *Recommended: (a)*; (b) stays the check's fallback until (a) lands.
+- **HES71 The metadata.** (a) the generator emits each module's data declarations, globals, string literals and labels, and
+  its trees' constants, so a compiled program needs no dump, no image and no loader at run time (a standalone executable, as
+  Go's AOT gives); (b) keep loading them (as built). *Recommended: (a)*, after HES70.
+- **HES72 Forms.** (a) the generator's Go read into Go forms by repr/go's native reader and built by `arbace.build.go` (goi's
+  `check --aot`'s route), the forms committed for nothing (generated); (b) the generator writes Go forms itself (as c2j writes
+  Java forms): the generator in Arbace over the dumps' forms; (c) Go text built directly (as built). *Recommended: (a)* at
+  HE8's end, for the row's AOT cell to be "STG → Go forms" literally; (b) only if the generator moves to Arbace for HE7's
+  REPL anyway.
+- **HES73 Speed before size.** (a) typed locals for unlifted binders and direct calls between compiled closures (above),
+  measured on nfib and nofib's `:speed` nine; (b) size first (a smaller expansion per node, e.g. the continuations' common
+  tails shared) to make HES70's packages cheaper to compile. *Recommended: (a)*, HES70's per-module packages bounding the
+  compile's memory anyway.
