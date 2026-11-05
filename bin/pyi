@@ -117,7 +117,10 @@
 #                                  on sys.path after the stdlib); run: a console script's launcher; check: install, verify,
 #                                  the layout against the host pip's --target, each pin's sample (test/python/wheels/) and
 #                                  console script by pyi and by python3 -I -S with the same site, two negative controls;
-#                                  pip-probe: the apks' pip on pyi (--version, an offline install), failures classed
+#                                  pip-probe: a check (queue 207): the apks' pip on pyi and on python3 -I -S, --version,
+#                                  list, an offline --target install of each pin and one --find-links install of all,
+#                                  list --path: each run and each installed tree equal to CPython's, but the classed
+#                                  differences (the no-ssl warning, a console script's #! line)
 #   bin/pyi c2j-check              queue 206 (AFTER-PY11.md §4.4, the re-seed window's light check, as bin/ci c2j-check): the
 #                                  namespaces of arbace/python and arbace/repr/python compiled by c2j alone on stage 0 (no j2g,
 #                                  no Go build), as the build's first pass compiles an embedded namespace; ends "N namespaces:
@@ -1361,37 +1364,92 @@ with zipfile.ZipFile(src) as a, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) 
   else echo "wheels check: FAILED (runs in $W/runs)"; return 1; fi
 }
 
-# pip on pyi, a probe (PYS24 (a): an eval target, no installer work): the apks' pip 26.2.1 alone on PYI_SITE,
-# pip --version and an offline install of a pinned wheel; each failure's last line and its class
+# pip on pyi, a check (PYS24 (a), queue 207): the apks' pip 26.2.1 alone on sys.path, run by pyi (PYI_SITE) and by
+# python3 -I -S -B with the same argv and directories: pip --version, pip list, pip install --no-index --no-deps
+# --no-compile --target DIR WHEEL for each pinned wheel, pip install --no-index --find-links CACHE --no-compile --target
+# DIR for the pins' names, pip list --path DIR; each run's status, stdout and stderr equal to CPython's, each installed
+# tree equal file for file (RECORD, dist-info, files), but the classed differences:
+# - stderr's "WARNING: Disabling truststore since ssl support is missing" (pyi has no _ssl, class :ssl, queue 209's
+#   module: pip's truststore, the system's trust store, is used by no offline verb);
+# - a console script's first line, #! and the run's sys.executable, and its RECORD row's digest and size, which follow it.
+# --no-compile on both sides: pyi compiles to __pycache__/NAME.arbace-314.pyc, its own code (class :pyc-magic), where
+# CPython writes NAME.cpython-314.pyc (the RECORD rows of both without digest, as pip writes them).
+pip_run() { # SIDE NAME ARGS...: SIDE pyi or cpython; NAME.out .err .rc in $W/SIDE
+  local side=$1 n=$2 rc=0; shift 2
+  case $side in
+    pyi) (cd "$W" && PYI_SITE="$W/path" "$root/bin/pyi" python -m pip "$@") > "$W/$side/$n.out" 2> "$W/$side/$n.err" || rc=$? ;;
+    cpython) (cd "$W" && python3 -I -S -B -c 'import runpy, sys
+sys.path.insert(0, sys.argv.pop(1)); sys.argv[0] = "pip"
+runpy.run_module("pip", run_name="__main__", alter_sys=True)' "$W/path" "$@") > "$W/$side/$n.out" 2> "$W/$side/$n.err" || rc=$? ;;
+  esac
+  echo $rc > "$W/$side/$n.rc"
+}
+
+# pip_tree DIR EXE: DIR's files, each a line "PATH SHA256", a console script's first line checked to be #!EXE and left
+# out, its RECORD row (csv's lines, \r\n) without digest and size
+pip_tree() {
+  local d=$1 exe=$2 f
+  [ -d "$d" ] || { echo "(no tree)"; return; }
+  (cd "$d" && find . -type f | LC_ALL=C sort | while read -r f; do
+    case $f in
+      ./bin/*) if [ "$(head -1 "$f")" = "#!$exe" ]; then echo "$f $(tail -n +2 "$f" | sha256sum | cut -c1-64) (#! the run's)"
+               else echo "$f its first line $(head -1 "$f"), not #!$exe"; fi ;;
+      */RECORD) echo "$f $(sed -E 's|^(\.\./\.\./bin/[^,]*),[^,]*,[0-9]*(\r?)$|\1,(the run'"'"'s),\2|' "$f" | sha256sum | cut -c1-64)" ;;
+      *) echo "$f $(sha256sum < "$f" | cut -c1-64)" ;;
+    esac
+  done)
+}
+
 wheels_pip_probe() {
-  local W="$WORK/wheels/pip-probe" sp="$root/.tmp/repr-python/site-packages/$(uname -m)/usr/lib/python3.14/site-packages" six
+  local W="$WORK/wheels/pip-probe" sp="$root/.tmp/repr-python/site-packages/$(uname -m)/usr/lib/python3.14/site-packages"
   [ -d "$sp/pip" ] || "$root/bin/repr-python" pins --fetch >/dev/null
-  rm -rf "$W"; mkdir -p "$W/path" "$W/target"; ln -s "$sp/pip" "$W/path/pip"
-  six=$(ls "$WHEELS_CACHE/wheels"/six-*.whl 2>/dev/null | head -1); [ -n "$six" ] || die "wheels pip-probe: run bin/pyi wheels fetch first"
-  local name rc
-  for name in version install; do
-    rc=0
-    case $name in
-      version) (cd "$W" && PYI_SITE="$W/path" "$root/bin/pyi" python -m pip --version > "$W/$name.out" 2> "$W/$name.err") || rc=$? ;;
-      install) (cd "$W" && PYI_SITE="$W/path" "$root/bin/pyi" python -m pip install --no-index --no-deps --no-compile \
-                  --disable-pip-version-check --root-user-action=ignore --target "$W/target" "$six" > "$W/$name.out" 2> "$W/$name.err") || rc=$? ;;
-    esac
-    # a run that writes nothing on stderr (pip --version since queue 205f): grep's status 1 not the probe's end
-    local last; last=$(grep -v '^[[:space:]]*$' "$W/$name.err" | tail -1 || true)
-    local cls=:ran
-    case $last in
-      *"cannot create 'function' instances"*) cls="the class \"types.FunctionType and types.CellType called\" (divergences.edn): annotationlib's FORWARDREF builds a function for typing.NamedTuple's class body (rich's ColorTriplet)" ;;
-      *"duplicate base class Generic"*) cls="Generic[...] a types.GenericAlias on pyi, not typing._generic_class_getitem's _GenericAlias: its __mro_entries__ keeps Generic beside a later generic alias (urllib3's RecentlyUsedContainer; queue 205f, fixed by 205g)" ;;
-      *"_idfunc() takes exactly one argument"*) cls="the class \"a built-in function as a class's special method\" (divergences.edn): typing.NewType's __call__ = _idfunc called with the instance (one of pip's six NewTypes called; queue 205g)" ;;
-      *"No module named '_csv'"*) cls=":c-module _csv (queue 204's port)" ;;
-      *"No module named '_ssl'"*) cls=":c-module _ssl" ;;
-      *"No module named"*) cls=":missing-module" ;;
-      *Error*) cls=":error" ;;
-    esac
-    [ $rc = 0 ] && cls=:ran
-    echo "  pip $name: status $rc, $cls; stdout: $(head -1 "$W/$name.out"); stderr: ${last:-none}"
+  rm -rf "$W"; mkdir -p "$W/path" "$W/pyi" "$W/cpython"; ln -s "$sp/pip" "$W/path/pip"
+  local whls=() names=() file url sha bytes rest
+  while IFS=$'\t' read -r file url sha bytes rest; do
+    [ -f "$WHEELS_CACHE/wheels/$file" ] || die "wheels pip-probe: run bin/pyi wheels fetch first ($file)"
+    whls+=("$WHEELS_CACHE/wheels/$file"); names+=("${file%%-*}")
+  done < <(wheels_arbace list --pins "$WHEELS_PINS")
+  local o=(--disable-pip-version-check) i=(--no-index --no-compile --disable-pip-version-check --root-user-action=ignore)
+  local runs=() side w n
+  for side in cpython pyi; do
+    pip_run $side version --version
+    pip_run $side list list "${o[@]}"
+    for w in "${whls[@]}"; do n=${w##*/}; n=${n%%-*}
+      pip_run $side "target-$n" install "${i[@]}" --no-deps --target "$W/$side/tree-$n" "$w"; done
+    pip_run $side find-links install "${i[@]}" --find-links "$WHEELS_CACHE/wheels" --target "$W/$side/tree-find-links" "${names[@]}"
+    pip_run $side list-path list "${o[@]}" --path "$W/$side/tree-find-links"
   done
-  echo "wheels pip-probe: a probe, not a check (runs in $W)"
+  local bad=0 trees=0 files=0 exe_p exe_c
+  exe_p="$root/tools/pyi/python3"; exe_c=$(python3 -I -S -c 'import sys; print(sys.executable)')
+  local why ssl=0
+  for n in version list $(printf 'target-%s ' "${names[@]}") find-links list-path; do
+    why=""
+    [ "$(cat "$W/pyi/$n.rc")" = "$(cat "$W/cpython/$n.rc")" ] || why="status $(cat "$W/pyi/$n.rc"), CPython's $(cat "$W/cpython/$n.rc")"
+    # the outputs name each side's own tree: the same text once the side's directory is the other's
+    sed "s|$W/pyi/|$W/cpython/|g" "$W/pyi/$n.out" | cmp -s - "$W/cpython/$n.out" || why="${why:+$why; }stdout differs"
+    grep -q '^WARNING: Disabling truststore since ssl support is missing$' "$W/pyi/$n.err" && ssl=$((ssl + 1))
+    sed '/^WARNING: Disabling truststore since ssl support is missing$/d' "$W/pyi/$n.err" | cmp -s - "$W/cpython/$n.err" \
+      || why="${why:+$why; }stderr differs: $(sed '/truststore/d; /^[[:space:]]*$/d' "$W/pyi/$n.err" | tail -1)"
+    case $n in
+      target-*|find-links)
+        local t=${n#target-}; t=tree-$t
+        pip_tree "$W/pyi/$t" "$exe_p" > "$W/pyi/$t.files"; pip_tree "$W/cpython/$t" "$exe_c" > "$W/cpython/$t.files"
+        if cmp -s "$W/pyi/$t.files" "$W/cpython/$t.files"; then
+          trees=$((trees + 1)); files=$((files + $(wc -l < "$W/pyi/$t.files")))
+          n="$n ($(wc -l < "$W/pyi/$t.files") files, $(cat "$W/pyi/$t"/*.dist-info/RECORD | wc -l) RECORD rows)"
+        else why="${why:+$why; }its tree differs: $(diff "$W/cpython/$t.files" "$W/pyi/$t.files" | sed -n '/^[<>]/{p;q}' || true)"; fi ;;
+    esac
+    if [ -z "$why" ]; then echo "  pass pip $n"; else echo "  FAIL pip $n: $why"; bad=1; fi
+  done
+  # the negative controls: the judge on CPython's own trees, one file changed, and a launcher of another executable
+  rm -rf "$W/control"; cp -r "$W/cpython/tree-six" "$W/control"; echo "# tampered" >> "$W/control/six.py"
+  if pip_tree "$W/control" "$exe_c" | cmp -s - "$W/cpython/tree-six.files"; then echo "  FAIL control: a changed six.py judged equal"; bad=1
+  else echo "  control refused: six.py changed in CPython's tree"; fi
+  if pip_tree "$W/cpython/tree-idna" "$exe_p" | cmp -s - "$W/cpython/tree-idna.files"; then echo "  FAIL control: CPython's launcher judged pyi's"; bad=1
+  else echo "  control refused: CPython's console script idna judged with pyi's executable"; fi
+  if [ $bad = 0 ]; then
+    echo "wheels pip-probe: pip 26.2.1 on pyi: $((${#names[@]} + 4)) runs equal to CPython's; $trees installed trees ($files files) equal; truststore's no-ssl warning on $ssl runs (classed); 2 controls refused"
+  else echo "wheels pip-probe: FAILED (runs in $W)"; return 1; fi
 }
 
 cmd_wheels() {
