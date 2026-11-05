@@ -43,7 +43,7 @@ END {
         }
         continue
       }
-      if (key == "ocamlopt_flags" || key == "reason" || key == "exit_status") continue
+      if (key == "ocamlopt_flags" || key == "reason" || key == "exit_status" || key == "binary_modules") continue
       if (key == "arguments") { args = val; continue }
       if (key == "ocamlrunparam") { print "class\theader: ocamlrunparam " val; exit }
       print "class\theader: " key " = " val; exit
@@ -55,6 +55,9 @@ END {
       if (lib == "unix") { incs = incs " unix"; continue }
       # the threads library (OT9's fifth fix): thread.ml and event.ml loaded with unix's units
       if (lib == "systhreads") { incs = incs " unix systhreads"; continue }
+      # compiler-libs (OT9's eighth fix): the units of utils/ bin/oi builds (COMPLIB_UNITS); a program that needs more (the parser, the typer)
+      # fails at its link, in a class
+      if (lib == "config" || lib == "ocamlcommon") { if (incs !~ / complib/) incs = incs " complib"; continue }
       print "class\theader: include " lib; exit
     }
     if (s ~ /^set [A-Za-z_0-9]+ *= *"/) { e = s; sub(/^set /, "", e); gsub(/ *= */, "=", e); gsub(/"/, "", e); env = env " " e; continue }
@@ -62,7 +65,7 @@ END {
     # a later alternative that skips (lib-threads' "{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }"): the run is the
     # first alternative's, read up to here (OT9's fifth fix); a test whose only branch skips stays a class
     if (s == "skip" && incs != "") break
-    if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "hasunix" || s == "hassysthreads") continue
+    if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "not_macos_amd64_tsan" || s == "hasunix" || s == "hassysthreads") continue
     print "class\theader: " s; exit
   }
   print "run\t" trim(flags) "\t" trim(incs) "\t" args "\t" trim(env)

@@ -37,6 +37,7 @@
 (go/var
   [^atomic/Uint64 sigPending]
   [^atomic/Uint64 sigWatched]
+  [^{:tag (array 64 atomic/Uint64)} sigArrived]
   [^sync/Mutex sigMu]
   [^{:tag (chan os/Signal)} sigCh]
   [sigWaiters (make (map (* Thread) bool))])
@@ -58,6 +59,8 @@
 (go/func sigDispatch "sigDispatch records each signal os/signal catches and wakes the threads blocked in a call.\n" [^{:tag (chan os/Signal)} ch]
   (range [s ch]
     (when [(values sg ok) (assert syscall/Signal s)] ok
+      (when (< (conv int sg) 64)
+        (.Add (aget sigArrived (conv int sg)) 1))
       (.Or sigPending (sigBit (conv int sg)))
       (.Lock sigMu)
       (range [t _ sigWaiters]
@@ -303,13 +306,16 @@
     (r "caml_unix_kill" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
       (let [pid (AsInt (aget a 0))
             n (convertSignal (AsInt (aget a 1)))
-            self (or (== pid 0) (== pid (os/Getpid)))]
+            self (or (== pid 0) (== pid (os/Getpid)))
+            seen (conv uint64 0)]
+        (when (and (> n 0) (< n 64))
+          (set! seen (.Load (aget sigArrived n))))
         (when [err (syscall/Kill pid (conv syscall/Signal n))] (!= err nil)
           (RaiseUnixError (errnoOf err) "kill" ""))
         ;; a signal sent to the process itself is delivered before kill returns, as the kernel does to the caller
         (when (and self (> n 0) (< n 64) (!= (bit-and (.Load sigWatched) (sigBit n)) 0))
           (let [until (.Add (time/Now) time/Second)]
-            (while (and (== (bit-and (.Load sigPending) (sigBit n)) 0) (.Before (time/Now) until))
+            (while (and (== (.Load (aget sigArrived n)) seen) (.Before (time/Now) until))
               (Blocking (fn [] (time/Sleep (* 100 time/Microsecond)))))))
         (.processSignals th)
         Unit)))

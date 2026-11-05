@@ -115,7 +115,7 @@ END {
     # a later alternative that skips (lib-threads' "{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }"): the run is the
     # first alternative's, read up to here (OT9's fifth fix); a test whose only branch skips stays a class
     if (s == "skip" && incs != "") break
-    if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "hasunix" || s == "hassysthreads") continue
+    if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "not_macos_amd64_tsan" || s == "hasunix" || s == "hassysthreads") continue
     print "class\theader: " s; exit
   }
   # explicit build steps that do not end in a run of the program (the compiler's own checks), and arguments naming ocamltest's directories
