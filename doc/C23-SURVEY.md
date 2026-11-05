@@ -4716,3 +4716,15 @@ test/c/essential-aot.txt` exit 0 (415 s), `dg --essential` 0 (85 s), `bin/repr-c
    `runtime.ae`, which the old build lacks, fails to load: no fragments made under a wrong key). Each source of the key is now
    tagged `compiled` (its embedded copy's digest) or `evaluated` (the checkout's under `ARBACE_PATH_FIRST` or a differing tool
    source under `arbace/repr/`, else the embedded copy).
+
+## As built: LLS21 (a), ci's atomics, fmodf/fmodl and function-pointer result width (2026-11-05)
+
+For the LLVM crop's row (doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS21 (a)"; the user decided it 2026-11-05): in `arbace/c/build.ae`,
+`__builtin_fmodf` and `__builtin_fmodl` are aliases of musl's functions; gcc's `__atomic_*` and `__sync_*` builtins are lowered to
+loads and stores (one thread: the memory orders are no-ops beyond sequential consistency; integer, pointer and `_Bool` objects, the
+rest refused); a call through a function pointer wraps its integer result (8 to 32 bits) in a conversion to the pointer's return type
+(gcc reads the same register whatever type the callee was defined with). In `arbace/c/check.ae`: `atomic-res` types the atomic
+builtins' results, and the parser's prelude `void __atomic_load ();` (and store, exchange) no longer makes the generic forms
+"too many arguments". Samples `test/c/run/builtin-atomic.c` and `fnptr-result-width.c` (the `ci-run` corpus, 13 files). Not changed:
+`__atomic_is_lock_free` and `__atomic_always_lock_free` (queue 126), cf2g and go/arbace/{ci,crt} (the nodes used exist), the
+`ci-run` AOT subset (the two files' AOT rows are the next record's).
