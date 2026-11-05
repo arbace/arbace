@@ -930,3 +930,96 @@ that corpus; the trial says the judges are exact and cheap.
 ## Decided (2026-11-05, the user: RFP5-RFP9)
 
 All as recommended: the -Zunpretty=expanded text compared later with RF6's pretty printers; std's macros from the helper's metadata; the UI run-pass programs through the checks in a night, then the compiler corpus; full hygiene when that corpus needs it; RF6 (AST to HIR) next.
+
+## As built: RF6 (2026-11-05)
+
+AST to HIR and rustc's HIR printer, one afternoon on the branch `rust-rf6` (from `rust-rf4`), front half only (`rust-rf3b` carries RF3's
+back half). Code in `arbace/rust/front/` (RFS13: evaluated from the checkout, out of `gate_key`): `pp.ae` (rustc_ast_pretty's `pp.rs`
+and `pp/ring.rs`: Oppen's printer as rustc keeps it, margin 78, and `pprust/state.rs`'s `gather_comments`), `lower.ae` (rustc_ast_lowering),
+`hir_pretty.ae` (rustc_hir_pretty with the PrintState it inherits), `hir_check.ae` (the judge); the verb `bin/rust-front hir-check
+[--ours]` (`make rust-front-hir-check`); the sample `test/rust/front/lower1.rs`. Ports of rustc 1.99.1 (`58cf8f9c3`) under MIT (RFS12),
+recorded in `LICENSE.md` and `doc/ARBACE.md`. Light: no gate step, the 91 files of the synthetic corpus, `test/rust/sample`,
+`test/rust/eval` and `test/rust/front`; the whole check about 5 s over the helper's crates, 30 s through the pipeline, under 1 GB.
+
+### The oracle
+
+`bin/rust-front front-oracles` also writes `NAME.hir.txt`: rustc's `-Zunpretty=hir` text, by the helper run as rustc (`rsdump rustc --
+... -Zunpretty=hir`), the same driver, flags and pin as the `expanded` and `resolve` modes (no new helper code, no rebuild). 89 files
+have one (`constructs` and `lowered_table` stop before HIR, as before). Paths in the text (`file!()`, the cfg traces' spans) are the
+absolute paths `front-oracles` passes; the judge gives the lowering the same path.
+
+### RF6: lowering (`arbace.rust.front.lower`)
+
+`(lower-crate CRATE RES opts)`: over an expanded crate in the dump format (the helper's or `arbace.rust.front.expand`'s) and the
+resolutions by span (the helper's `--resolve` or `arbace.rust.front.resolve`'s), the HIR as data: maps with `:node`, `:kind`, the AST's
+span and `:hir-id [OWNER LOCAL]` (each item and associated item an owner, its nodes numbered in lowering order; not judged: the text does
+not show them, `-Zunpretty=hir-tree` would), paths with their `:res`. After `lib.rs`, `item.rs`, `expr.rs`, `pat.rs`, `block.rs` and
+`format.rs`:
+
+- the desugarings: `while` and `while let` to `loop { if .. { .. } else { break; } }`, `for` to `match into_iter(e) { mut iter => loop
+  { match next(&mut iter) { None {} => break, Some { 0: pat } => body } } }` in `DropTemps`, `?` to `match branch(e) { Break { 0: residual }
+  => return from_residual(residual), Continue { 0: val } => val }` with its `#[allow(unreachable_code)]`, ranges to `Range { start, end }`,
+  `RangeFrom`, `RangeTo`, `RangeToInclusive`, `RangeFull {}` and `range_inclusive_new(a, b)`, an `if`'s condition in `DropTemps` unless it
+  holds a `let` (let chains stay), parentheses dropped (the printer puts back what precedence needs), a trailing expression statement as the
+  block's expression;
+- `format_args!` after `format.rs`: `flatten_format_args` (nested `format_args!` spliced), `inline_literals` (string and integer
+  literals within their type's range folded into the template), `expand_format_args`' bytecode (literal chunks, placeholders' flag words,
+  width and precision, explicit argument positions, the terminator), the `super let args` pair, `format_argument::new_*` per (argument,
+  trait), `from_str`/`from_str_nonconst` for a literal alone, the compiler-generated `unsafe` block;
+- items: `use` trees split into one item per leaf with a `ListStem` for each nested tree, functions with implicit `self`, generics whose
+  parameters' bounds move into the where clause, `impl Trait` arguments as synthetic type parameters named by their text, elided
+  lifetimes printed `'_` in signatures, statics and consts (references and the types std and the crate declare with a lifetime parameter:
+  std's by a name table, see RFP10), structs, enums, unions, impls, traits with associated types and consts, modules, `macro_rules!`;
+- patterns: an identifier that resolves to a unit struct or variant, a constant or a static is a path pattern (the resolutions decide);
+  expression paths whose resolution is partial (no resolution at the whole path) and that carry generic arguments before their last segment
+  are type-relative (`Pair<u8, 4>::len`);
+- attributes as rustc_attr_parsing leaves them: doc comments and unparsed attributes in order, the parsed ones after them (`Inline`,
+  `NoMangle`, `Lang(..)`, `NoStd`, `NoMain`, `Feature([..])`, `PreludeImport`, `AutomaticallyDerived`, `Doc(DocAttribute {..})`,
+  `Coverage(..)`, `Repr {..}`, `MacroExport {..}`, `MustUse`, `Cold`), then the cfg traces as one `CfgTrace([..])` and `CfgAttrTrace([..])`
+  with their entries' Debug text;
+- `$crate`: the crate of the macro whose tokens the path came from: the helper's crates by the tokens' file (`library/std/` ...), ours
+  by the expansion's mark (`arbace.rust.front.expand`'s new `*mark-crates*`: std's macros by their path's crate, a user's `crate`, a
+  builtin derive's `:derive`, whose spans then place no comment, as rustc's derive spans do not).
+
+### RF6: the printer (`arbace.rust.front.hir-pretty`, `arbace.rust.front.pp`)
+
+A port of `rustc_hir_pretty`'s `State` (items, generics, where clauses, types, expressions with `ExprPrecedence` and the
+parenthesization rules, patterns, arms, blocks, statements, `DropTemps` as `{ let _t = ..; _t }`), with what it inherits from
+`pprust/state.rs`: the comments copied forward by position (`maybe_print_comment`, trailing comments, blank lines with their `twice`
+rule, `break_offset_if_not_bol`'s tucked offset), `head`/`bopen`/`bclose`, `commasep_cmnt`, token streams for macro definitions
+(`print_tt`, `print_tts`, `space_between`, `print_mac_common`, `print_mac_def`), literals as `LitKind`'s Display (integers in decimal
+with their suffix, strings and chars by `escape_string_symbol`/`escape_default`, byte strings by `escape_ascii`), parsed attributes as
+`#[derive(PrintAttribute)]` prints them (words and `word_space`, no boxes: so they break at the enclosing box's indentation). A node
+whose span lies in another file (std's macros) passes every comment of the root file, as the source map's order makes rustc's do.
+
+**Results** (`bin/rust-front hir-check`): over the helper's expanded crates and resolutions **89 of 89 programs' HIR text equal to
+`-Zunpretty=hir` byte for byte**; **the pipeline** (`hir-check --ours`: the native reader, our expansion, our resolution, our lowering)
+**88 of 89 byte for byte**, the last (`expand1`) equal but for whitespace: four blank lines placed early, because our expansion gives a
+`macro_rules!`-made struct's fields the span of the macro's tokens where rustc's start at the call site's identifier (an RF4 span
+class). The negative control (one program's text against another's oracle) differs. `expand-check` (90 of 90) and `resolve-check`
+(5,138 of 5,138 paths, both inputs) unchanged. The first run of the day's code: 2 of 3, then 38 of 88 with `format_args!`, 68 with the
+comments of other files' spans, 78 with the parsed attributes.
+
+Not taken yet: `async` and coroutines (Tier S), `asm!`, `yield`, `become`, contracts, delegation, foreign items' printing, inline
+`const` blocks, `offset_of!`, unsafe binders, trait aliases, `impl` restrictions, closures' `for<>` binders, `box` patterns' lang items,
+the `hir-tree` view and the HIR ids' judge, the parsed attributes beyond the corpus's (each is a line of the table), std's types' lifetime
+parameters from data (RFP10).
+
+### Estimates, revisited
+
+RF6 was planned at 4 to 6 days; this slice took the corpus to byte equality in an afternoon: 305 lines of `.ae` for `pp.rs` and the
+comments, 831 for the lowering, 917 for the printer, 84 for the judge. As with RF4-RF5, what the corpus does not exercise is most of
+the rest; the judge (text for text, comments included) is stricter than planned, and was cheap.
+
+### Proposed (RF6)
+
+- **RFP10 Lifetime parameters of std's types.** Elided lifetimes in signatures print `'_` per lifetime parameter of the named type
+  (`Formatter<'_>`), which needs each type's generics. Options: (a) **the helper's `--std-names` extended with each public type's
+  generic parameters (kinds and names; pinned with the rest, RFS4), the name table replaced**, about half a day; (b) keep the table
+  of 20 names until RF7 reads std's interface (`iface`), which carries generics anyway. *Recommended: (a)*: a wrong name in the table
+  is a silent difference in RF7's input, and the data is a few lines of the helper.
+- **RFP11 RF6 on the next corpus.** Options: (a) **`hir-check` joins RFP7's night run of the UI suite's run-pass programs (the
+  oracle is one more helper run per file), differences recorded as classes**; (b) a corpus of its own. *Recommended: (a)*.
+- **RFP12 What next.** Options: (a) **RF7 (collection: generics, predicates, `type_of`, HIR type lowering) over this HIR, judged
+  against the helper's `iface`**; (b) the HIR ids' judge first (`-Zunpretty=hir-tree`, owners and local ids per node). *Recommended:
+  (a)*: no later stage reads the ids' numbering, only their identity; (b) when a stage needs it.

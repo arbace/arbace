@@ -525,6 +525,16 @@ covers what.
   licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the
   judges `expand_check.ae` and `resolve_check.ae`, the samples `test/rust/front/expand1.rs` and `resolve1.rs`) is Arbace's own, under
   the Eclipse Public License 1.0.
+- `arbace/rust/front/pp.ae`, `lower.ae` and `hir_pretty.ae` (RF6, doc/rust/FRONTEND-SURVEY.md, "As built: RF6"): Arbace forms written
+  after rustc 1.99.1, the same revision and sources, reading `compiler/rustc_ast_pretty/src/pp.rs`, `pp/ring.rs` and
+  `pprust/state.rs` (Oppen's printer as rustc keeps it, the comments copied forward, PrintState, token streams, macro definitions),
+  `compiler/rustc_ast_lowering/src/{lib,item,expr,pat,block,format}.rs` (AST to HIR: the desugarings of `for`, `while`, `while let`,
+  `?`, ranges and `format_args!`'s bytecode, use trees, generics, implicit self, elided lifetimes), `compiler/rustc_hir_pretty/src/lib.rs`
+  (the HIR printer), `compiler/rustc_hir/src/hir.rs` (expression precedence), `compiler/rustc_ast/src/util/literal.rs` (literals'
+  display) and `compiler/rustc_macros/src/print_attribute.rs` (parsed attributes' printing): copyright the Rust project's contributors,
+  dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc
+  1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `hir_check.ae`, the sample `test/rust/front/lower1.rs`) is
+  Arbace's own, under the Eclipse Public License 1.0.
 - The non-javac branches of `skip-parens`, `tree-name`, `full-name`, `diamond?` and `class-kind` in
   `arbace/repr/java/tree.ae` (repr/java's interface to the tree, doc/classes/JAVA-FRONTEND-SURVEY.md,
   "As built: JFS66 (b)"): Arbace forms reimplementing, for the native parser's trees,
