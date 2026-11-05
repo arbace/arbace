@@ -524,22 +524,37 @@
                          :memory
                          (do
                            (when (:mutable a) (unsupported "mutable allocation"))
-                           (when (some #(= \0 %) (:init a)) (unsupported "allocation with uninitialized bytes"))
                            (let [bs (:bytes a)
-                                 chars (fn [from to] (apply str (map (fn [i] (char (Integer/parseInt (subs bs (* 2 i) (+ 2 (* 2 i))) 16))) (range from to))))
+                                 init (:init a)
+                                 byte (fn [i] (Integer/parseInt (subs bs (* 2 i) (+ 2 (* 2 i))) 16))
                                  n (quot (count bs) 2)
-                                 relocs (sort-by first (:relocs a))]
-                             (if (empty? relocs)
-                               (intern-const! gl (list 'array n 'i8) (list 'c-string (chars 0 n)) (:align a))
+                                 relocs (sort-by first (:relocs a))
+                                 ;; a run of bytes [from to): undef when uninitialized, zeroinitializer when all zero, else the bytes
+                                 run (fn [from to]
+                                       (let [ty (list 'array (- to from) 'i8)]
+                                         (cond
+                                           (every? #(= \0 (nth init %)) (range from to)) [ty 'undef]
+                                           (every? #(zero? (byte %)) (range from to)) [ty 'zeroinitializer]
+                                           :else [ty (list 'c-string (apply str (map #(char (byte %)) (range from to))))])))
+                                 ;; split a span at the changes of initialization
+                                 runs (fn [from to]
+                                        (if (= from to)
+                                          []
+                                          (loop [i from start from out []]
+                                            (cond (= i to) (conj out (run start to))
+                                                  (and (> i start) (not= (nth init i) (nth init (dec i)))) (recur (inc i) i (conj out (run start i)))
+                                                  :else (recur (inc i) start out)))))]
+                             (if (and (empty? relocs) (= 1 (count (runs 0 n))))
+                               (let [[ty v] (first (runs 0 n))] (intern-const! gl ty v (:align a)))
                                (let [segs (loop [pos 0 rs relocs out []]
                                             (cond
                                               (and (empty? rs) (= pos n)) out
-                                              (empty? rs) (conj out [:bytes pos n])
+                                              (empty? rs) (into out (runs pos n))
                                               :else (let [[off tid] (first rs)]
                                                       (recur (+ off 8) (rest rs)
-                                                             (cond-> out (> off pos) (conj [:bytes pos off]) true (conj [:ptr tid]))))))
-                                     tys (mapv (fn [[k a b]] (if (= k :ptr) 'ptr (list 'array (- b a) 'i8))) segs)
-                                     vals (mapv (fn [[k a b]] (if (= k :ptr) ['ptr (alloc-sym! a)] [(list 'array (- b a) 'i8) (list 'c-string (chars a b))])) segs)]
+                                                             (-> out (into (runs pos off)) (conj [:ptr tid]))))))
+                                     tys (mapv (fn [x] (if (= :ptr (first x)) 'ptr (first x))) segs)
+                                     vals (mapv (fn [x] (if (= :ptr (first x)) ['ptr (alloc-sym! (second x))] [(first x) (second x)])) segs)]
                                  (intern-const! gl (apply list 'packed tys) (apply list 'packed vals) (:align a))))))
                          (unsupported "allocation of this kind"))))
         ;; a constant held in an allocation: scalars and pairs read from its bytes, aggregates by reference to its global
@@ -558,8 +573,13 @@
                                             :else {:ty (:imm sc) :v (as-num (sext-const (:bits sc) v))}))))]
                          (when-not (zero? off) (unsupported "indirect constant at an offset"))
                          (case (:kind l)
-                           :scalar (rd 0 (:scalar l))
-                           :pair (let [[sa sb boff] (:pair l)] {:pair [(rd 0 sa) (rd boff sb)]})
+                           (:scalar :pair)
+                           (if (some #(= \0 %) (:init a))
+                             ;; not fully initialized: read from the global at run time
+                             {:load-from {:ptr (alloc-sym! id) :align (:align a) :ly l}}
+                             (if (= :scalar (:kind l))
+                               (rd 0 (:scalar l))
+                               (let [[sa sb boff] (:pair l)] {:pair [(rd 0 sa) (rd boff sb)]})))
                            :memory {:ref {:ptr (alloc-sym! id) :align (:align a) :ly l}}
                            (unsupported "indirect constant of this layout"))))
         st (volatile! {:n 0 :skip #{} :bbs {} :bb-order [] :vals {} :allocas {} :start []})
@@ -705,7 +725,8 @@
                                           [(get-in @st [:vals l]) (nth lay l)] projs)]
                            (first ty))
                          :else (load-place! bb (place-of! bb p))))
-                     "const" (const-val lt o alloc-sym! alloc-const!)
+                     "const" (let [v (const-val lt o alloc-sym! alloc-const!)]
+                               (if (and (map? v) (:load-from v)) (load-place! bb (:load-from v)) v))
                      ;; the session's checks, decided at codegen: ub checks follow debug assertions (on at -O0), overflow
                      ;; checks the flag of the run, contract checks are off
                      "runtime-checks" {:ty "i1" :v (case (second o)
@@ -1029,7 +1050,7 @@
                                                    nm (symbol "g" "llvm.memcpy.p0.p0.i64")
                                                    bytes (if (number? (:v cv))
                                                            (* (:size el) (:v cv))
-                                                           (let [r (fresh!)] (emit! bb (list '= r (list 'mul 'i64 (:size el) (:v cv)))) r))]
+                                                           (let [r (fresh!)] (emit! bb (list '= r (list 'mul :nuw :nsw 'i64 (:v cv) (:size el)))) r))]
                                                (declare! gl nm 'void [['ptr] ['ptr] ['i64] ['i1]])
                                                (emit! bb (list 'call 'void nm [['ptr (list :align (:align el)) (:v dv)] ['ptr (list :align (:align el)) (:v sv)] ['i64 bytes] ['i1 'false]])))
                        "assign" (let [[_ p r] (stmt-of s)
@@ -1342,7 +1363,7 @@
                                      (let [d (operand! bb (first args)) v (operand! bb (second args)) c (operand! bb (nth args 2))
                                            el (layout lt (second (ty-struct (ty-of (first args)))))
                                            nm (symbol "g" "llvm.memset.p0.i64")
-                                           bytes (if (number? (:v c)) (* (:size el) (:v c)) (let [r (fresh!)] (emit! bb (list '= r (list 'mul 'i64 (:size el) (:v c)))) r))]
+                                           bytes (if (number? (:v c)) (* (:size el) (:v c)) (let [r (fresh!)] (emit! bb (list '= r (list 'mul :nuw :nsw 'i64 (:v c) (:size el)))) r))]
                                        (declare! gl nm 'void [['ptr] ['i8] ['i64] ['i1]])
                                        (emit! bb (list 'call 'void nm [['ptr (list :align (:align el)) (:v d)] ['i8 (:v v)] ['i64 bytes] ['i1 'false]]))
                                        (when target (br-or-merge bb t target)))
