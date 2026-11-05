@@ -10,7 +10,9 @@
 //   rsdump tree  [--expr] -o DIR --edition E FILE...             DIR/FILE.tree, DIR/FILE.lines
 //   rsdump lines [--expr] --edition E FILE                       the lines on standard output
 //   rsdump rustc [--hir FILE] [--mir FILE] -- RUSTC-ARGS...      rustc, the crate's HIR and MIR
-//                                                                written after analysis (RR6)
+//                                                                written after analysis (RR6); RF1's modes
+//                                                                (mirdata.rs), RF4-RF5's --expanded, --resolve,
+//                                                                --std-names (front.rs)
 //
 // With --expr each FILE is an expression file of include! (RR6, SPEC RSS6): parsed as one
 // expression, as include! in an expression's place parses it (nothing stripped), the dump's tree
@@ -46,6 +48,7 @@ extern crate rustc_hir;
 extern crate rustc_hir_pretty;
 extern crate rustc_interface;
 extern crate rustc_lexer;
+extern crate rustc_metadata;
 extern crate rustc_abi;
 extern crate rustc_middle;
 extern crate rustc_parse;
@@ -62,6 +65,7 @@ use rustc_interface::interface::Compiler;
 use rustc_session::parse::ParseSess;
 use std::fmt::Write;
 
+mod front;
 mod mirdata;
 
 const PIN: &str = include_str!("RUSTC_VERSION");
@@ -162,6 +166,8 @@ struct T<'a> {
     names: Vec<String>,
     key: String,
     depth: usize,
+    /// RF4: spans of any file (the expanded crate's, std's macros'): other files' as (span "FILE" l1 c1 l2 c2 ctxt)
+    any: bool,
 }
 
 fn is_ident_start(b: u8) -> bool {
@@ -170,7 +176,7 @@ fn is_ident_start(b: u8) -> bool {
 
 impl<'a> T<'a> {
     fn new(s: &'a str, file: &'a str, mode: Mode) -> T<'a> {
-        T { s: s.as_bytes(), i: 0, file: file.as_bytes(), mode, out: String::new(), names: Vec::new(), key: String::new(), depth: 0 }
+        T { s: s.as_bytes(), i: 0, file: file.as_bytes(), mode, out: String::new(), names: Vec::new(), key: String::new(), depth: 0, any: false }
     }
     fn fail(&self, what: &str) -> ! {
         let a = self.i.saturating_sub(80);
@@ -265,6 +271,19 @@ impl<'a> T<'a> {
             if self.starts(b"..") {
                 self.i += 2;
                 self.emit(" :..");
+                continue;
+            }
+            if self.any && self.peek() == b'"' {
+                // RF4: a map with string keys (FormatArgs' names)
+                let k = self.string(b'"');
+                if !self.eat(b':') {
+                    self.fail("a map entry without a colon");
+                }
+                self.emit(" ");
+                self.clj(&k);
+                self.emit(" ");
+                self.value();
+                self.eat(b',');
                 continue;
             }
             let k = self.word();
@@ -406,11 +425,78 @@ impl<'a> T<'a> {
             }
         }
     }
+    /// RF4: the length of a span's file name at i (`FILE:l:c: l:c`), any file
+    fn any_span(&self) -> Option<usize> {
+        let mut j = self.i;
+        while j < self.s.len() && !b" ,()[]{}\"\n".contains(&self.s[j]) && self.s[j] != b':' {
+            j += 1;
+        }
+        if j == self.i || j >= self.s.len() || self.s[j] != b':' {
+            return None;
+        }
+        let r = &self.s[j..];
+        let mut k = 1;
+        let digits = |k: &mut usize| -> bool {
+            let st = *k;
+            while *k < r.len() && r[*k].is_ascii_digit() {
+                *k += 1;
+            }
+            *k > st
+        };
+        if !digits(&mut k) || r.get(k) != Some(&b':') { return None; }
+        k += 1;
+        if !digits(&mut k) || r.get(k) != Some(&b':') || r.get(k + 1) != Some(&b' ') { return None; }
+        k += 2;
+        if !digits(&mut k) || r.get(k) != Some(&b':') { return None; }
+        k += 1;
+        if !digits(&mut k) { return None; }
+        Some(j - self.i)
+    }
     fn value(&mut self) {
         self.ws();
         let c = self.peek();
-        if self.starts(self.file) && self.s.get(self.i + self.file.len()) == Some(&b':') {
+        if self.starts(self.file) && !self.file.is_empty() && self.s.get(self.i + self.file.len()) == Some(&b':') {
             return self.span();
+        }
+        if self.any {
+            if let Some(n) = self.any_span() {
+                let f = String::from_utf8(self.s[self.i..self.i + n].to_vec()).unwrap();
+                self.i += n + 1;
+                let mut ns = Vec::new();
+                for k in 0..4 {
+                    ns.push(self.num());
+                    if k == 1 { self.i += 2; } else if k < 3 { self.i += 1; }
+                }
+                let save = self.i;
+                self.ws();
+                let c = if self.peek() == b'(' && self.at(1) == b'#' {
+                    self.i += 2;
+                    let n = self.num();
+                    self.eat(b')');
+                    n
+                } else {
+                    self.i = save;
+                    "0".into()
+                };
+                let fq = clj_str(&f);
+                self.emit(&format!("(span {} {} {} {} {} {})", fq, ns[0], ns[1], ns[2], ns[3], c));
+                return;
+            }
+            if c == b'$' && is_ident_start(self.at(1)) {
+                self.i += 1;
+                let w = format!("${}", self.word());
+                if self.peek() == b'#' {
+                    self.i += 1;
+                    let n = self.num();
+                    self.emit("(id ");
+                    self.clj(&w);
+                    self.emit(&format!(" {}", n));
+                    self.emit(")");
+                } else {
+                    self.emit(&w);
+                }
+                return;
+            }
         }
         if self.starts(b"no-location") {
             self.i += 11;
@@ -605,6 +691,18 @@ impl<'a> T<'a> {
             }
         }
     }
+}
+
+/// RF4: the dump's transcoding with spans of any file (tools/rsdump/front.rs)
+pub fn transcode_any(text: &str, file: &str) -> String {
+    let mut t = T::new(text, file, Mode::Dump);
+    t.any = true;
+    t.value();
+    t.ws();
+    if t.i != t.s.len() {
+        t.fail("trailing text");
+    }
+    t.out
 }
 
 fn transcode(text: &str, file: &str, mode: Mode) -> String {
@@ -941,6 +1039,9 @@ struct Compile {
     census: Option<String>,
     iface: Option<String>,
     mono: Option<String>,
+    expanded: Option<String>,
+    resolve: Option<String>,
+    std_names: Option<String>,
 }
 
 fn write_mir<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, w: &mut dyn std::io::Write) -> std::io::Result<()> {
@@ -993,6 +1094,15 @@ fn write_mir<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, w: &mut dyn std::io::Wri
 }
 
 impl Callbacks for Compile {
+    fn after_expansion<'tcx>(&mut self, _compiler: &Compiler, tcx: rustc_middle::ty::TyCtxt<'tcx>) -> Compilation {
+        if let Some(p) = &self.expanded {
+            write_file(p, &format!("{}\n", front::expanded(tcx)));
+        }
+        if let Some(p) = &self.std_names {
+            write_file(p, &front::std_names(tcx));
+        }
+        Compilation::Continue
+    }
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: rustc_middle::ty::TyCtxt<'tcx>) -> Compilation {
         if let Some(p) = &self.hir {
             let sm = tcx.sess.source_map();
@@ -1009,6 +1119,9 @@ impl Callbacks for Compile {
         }
         if let Some(p) = &self.mono {
             write_file(p, &mono_mir(tcx));
+        }
+        if let Some(p) = &self.resolve {
+            write_file(p, &front::resolve(tcx));
         }
         if let Some(p) = &self.iface {
             write_file(p, &mirdata::iface(tcx));
@@ -1194,7 +1307,7 @@ fn collect_ty<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, t: rustc_middle::ty::Ty
 }
 
 fn compile(args: &[String]) -> ! {
-    let mut c = Compile { hir: None, mir: None, mir_data: None, census: None, iface: None, mono: None };
+    let mut c = Compile { hir: None, mir: None, mir_data: None, census: None, iface: None, mono: None, expanded: None, resolve: None, std_names: None };
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -1218,6 +1331,18 @@ fn compile(args: &[String]) -> ! {
                 c.census = args.get(i + 1).cloned();
                 i += 2
             }
+            "--expanded" => {
+                c.expanded = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--resolve" => {
+                c.resolve = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--std-names" => {
+                c.std_names = args.get(i + 1).cloned();
+                i += 2
+            }
             "--mir-data" => {
                 c.mir_data = args.get(i + 1).cloned();
                 i += 2
@@ -1236,7 +1361,7 @@ fn compile(args: &[String]) -> ! {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: rsdump dump [--full] [--expr] -o DIR --edition E [--helper-hash H] FILE...\n       rsdump tree [--expr] -o DIR --edition E FILE...\n       rsdump lines [--expr] --edition E FILE\n       rsdump rustc [--hir FILE] [--mir FILE] -- RUSTC-ARGS...");
+    eprintln!("usage: rsdump dump [--full] [--expr] -o DIR --edition E [--helper-hash H] FILE...\n       rsdump tree [--expr] -o DIR --edition E FILE...\n       rsdump lines [--expr] --edition E FILE\n       rsdump rustc [--hir FILE] [--mir FILE] [--expanded FILE] [--resolve FILE] [--std-names FILE] ... -- RUSTC-ARGS...");
     std::process::exit(2)
 }
 
