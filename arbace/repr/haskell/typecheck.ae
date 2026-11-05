@@ -203,7 +203,9 @@
 (defn- read-forms [text] (read-string (str "[" text "]")))
 
 (defn- add-things! [things]
-  (doseq [t things :when (seq? t)]
+  ;; a thing without a type (the renamer's own interface of a module, written before its types are known) is skipped
+  (doseq [t things :when (and (seq? t) (case (first t) id (some? (nth t 3 nil)) datacon (some? (nth t 5 nil))
+                                         class (some? (nth t 4 nil)) true))]
     (case (first t)
       id (swap! *genv* assoc (strs (nth t 1)) (conv-type (nth t 3)))
       datacon (let [n (strs (nth t 1)) ty (conv-type (nth t 5))]
@@ -1120,8 +1122,64 @@
         {:module m
          :types (merge types cons-types)
          :syns @*syns*
+         :cons (into {} (filter (fn [[n _]] (= m (nmod n))) @*cons*))
+         :classes (into {} (for [[n info] @*classes* :when (= m (nmod n))] [n (dissoc info :binds)]))
+         :insts (vec (filter (fn [i] (= m (nmod (:dfun i)))) @*insts*))
          :core (mapv resolve-core (concat core dms ibs sels))
          :errors @*errors*}))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The module's interface (HF1-HF2's proposal 2): the iface verb's forms, so a module that imports it is checked
+;;; as against a library's
+
+(def ^:private many "(tycon-app (ext data \"GHC.Internal.Types\" \"Many\") [])")
+(def ^:private kind-type "(tycon-app (ext tc \"GHC.Internal.Types\" \"Type\") [])")
+
+(defn type-form
+  "A type as the helper's typeF text"
+  [t]
+  (let [t (zonk t)]
+    (case (first t)
+      :tv (str "(tv " (pr-str (second t)) ")")
+      :mv (str "(tv " (pr-str (str "m" (second t))) ")")
+      :tc (if (= fun-tc (second t))
+            (str "(fun t " many " " (type-form (first (nth t 2))) " " (type-form (second (nth t 2))) ")")
+            (str "(tycon-app " (name-str (second t)) " [" (str/join " " (map type-form (nth t 2))) "])"))
+      :app (str "(app " (type-form (nth t 1)) " " (type-form (nth t 2)) ")")
+      :forall (let [body (reduce (fn [acc [c ts]] (str "(fun c " many " (tycon-app " (name-str c) " [" (str/join " " (map type-form ts)) "]) " acc ")"))
+                                 (type-form (nth t 3)) (reverse (nth t 2)))]
+                (reduce (fn [acc v] (str "(forall " (pr-str v) " specified " kind-type " " acc ")")) body (reverse (nth t 1))))
+      (str "(lit " (pr-str (second t)) ")"))))
+
+(defn iface-text
+  "The elaborated module's interface: its things with their types and its instances (hsiface/things,
+  hsiface/instances); the exports and fixities are the renamer's (its own interface of the module)"
+  [r]
+  (let [m (:module r) cl (:classes r)]
+    (str "(hsiface/module " (pr-str m) " {:unit \"main\"})\n"
+         "(hsiface/things ["
+         (str/join "\n  "
+                   (sort (concat
+                          (for [[n t] (:types r) :when (contains? #{"var" "fld"} (nth n 1))
+                                :when (not (and (= "var" (nth n 1)) (contains? (:types r) (ext-name "data" m (occ n)))))]
+                            (str "(id " (name-str n) " \"\" " (type-form t) " {})"))
+                          (for [[n t] (:types r) :when (= "data" (nth n 1))]
+                            (let [info (get (:cons r) n)]
+                              (str "(datacon " (name-str n) " \"\" " (:arity info) " [" (str/join " " (map (comp pr-str occ) (:fields info))) "] "
+                                   (type-form t) " {})")))
+                          (for [[n info] cl]
+                            (str "(class " (name-str n) " [] ["
+                                 (str/join " " (for [mn (:methods info)] (str "(" (name-str mn) " \"\" " (type-form (get (:types r) mn)) ")")))
+                                 "] [" (str/join " " (for [[c ts] (:supers info)] (str "(tycon-app " (name-str c) " [" (str/join " " (map type-form ts)) "])")))
+                                 "] {:tvs " (pr-str (:tvs info)) " :defaults ["
+                                 (str/join " " (for [[mn d] (:defaults info)] (str "[" (name-str mn) " " (name-str d) "]"))) "]})"))
+                          (for [[n [tvs rhs]] (:syns r) :when (= m (nmod n))]
+                            (str "(tycon " (name-str n) " \"\" synonym [] " kind-type " {:synonym [" (pr-str tvs) " " (type-form rhs) "]})")))))
+         "])\n"
+         "(hsiface/instances ["
+         (str/join "\n  " (for [{:keys [dfun tvs ctx head]} (:insts r)]
+                            (str "(instance " (name-str dfun) " " (type-form [:forall tvs ctx [:tc (first head) (second head)]]) ")")))
+         "])\n")))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; The judge: types alpha-equivalent; evidence
@@ -1327,7 +1385,8 @@
   [& args]
   (let [[verb & more] args
         [opts pos] (parse-args more)]
-    (binding [*ifdirs* (vec (remove empty? (str/split (or (get opts "--ifaces") "") #",")))
+    (binding [*ifdirs* (vec (concat (remove empty? (str/split (or (get opts "--ifaces") "") #","))
+                                    (when (get opts "--local") [(get opts "--local")])))
               *control* (= "true" (get opts "--control"))]
       (case verb
         "check"
@@ -1335,6 +1394,9 @@
                          (let [tree (read-string (slurp f))
                                nm* (let [b (base-name f)] (subs b 0 (- (count b) (count ".rn-tree.edn"))))
                                r (typecheck-module tree)
+                               _ (when-let [l (get opts "--local")]
+                                   (.mkdirs (File. ^String l))
+                                   (spit (str l "/" (:module r) ".iface.edn") (iface-text r)))
                                _ (when-let [o (get opts "-o")]
                                    (.mkdirs (File. ^String o))
                                    (spit (str o "/" nm* ".core.edn")

@@ -1368,7 +1368,7 @@
 ;;; and the module (rn/module {:module :decls :binds :sigs :exports :imports}). The facts are its projection:
 ;;; rename-check also requires every located name of the tree among the facts (tree-names).
 
-(declare rtree)
+(declare rtree local-things)
 
 (defn- rname [ns]
   (if (= 1 (count ns)) (list 'rn/name (first ns)) (list 'rn/names (vec (distinct ns)))))
@@ -1528,6 +1528,7 @@
          :exports (sorted (map (fn [[n k]] (avail-text n k)) avails))
          :avails avails
          :fixities (into {} (for [[n f] @*fixities* :when (= (name-mod n) m)] [n f]))
+         :things (local-things m decls)
          :errors @*errors*}))))
 
 (defn- with-projection
@@ -1555,13 +1556,64 @@
        "(hsrn/group-order [" (str/join "\n  " (:group-order r)) "])\n"
        "(hsrn/exports [" (str/join "\n  " (:exports r)) "])\n"))
 
+(defn- bang-text
+  "A field's source bang as GHC prints an HsSrcBang: \"\" lazy by default, \"!\" strict, \"~\" lazy, {-# UNPACK #-} ahead"
+  [cdf]
+  (let [u (nth cdf 2 nil) st (nth cdf 3 nil)]
+    (str (case u SrcUnpack "{-# UNPACK #-} " SrcNoUnpack "{-# NOUNPACK #-} " "")
+         (case st SrcStrict "!" SrcLazy "~" ""))))
+
+(defn local-things
+  "What the renamer knows of the module's own things, in the helper's iface forms with the types left nil (the
+  elaborator writes them, arbace.repr.haskell.typecheck's iface-text): type constructors with their constructors,
+  constructors with their arity, fields and source bangs, classes with their methods, functional dependencies and
+  default methods (HF1-HF2's proposal 2)"
+  [m decls]
+  (let [occ-of (fn [nl] (rdr-occ (lval nl)))
+        n-str (fn [ns o] (name-str (ext-name ns m o)))]
+    (vec (for [d decls :let [v (lval d)] :when (= 'TyClD (con v))
+               :let [t (arg v 2)]
+               x (case (con t)
+                   DataDecl
+                   (let [tn (occ-of (arg t 2)) defn* (arg t 5) cs (arg defn* 5)
+                         kind (if (= 'NewTypeCon (con cs)) "newtype" "data")
+                         conlist (case (con cs) DataTypeCons (arg cs 2) NewTypeCon [(arg cs 1)] [])
+                         cdecls (for [c conlist :let [cv (lval c)] :when (= 'ConDeclH98 (con cv))]
+                                (let [det (arg cv 6)
+                                      cdfs (case (con det)
+                                             PrefixCon (vec (last (rest det)))
+                                             InfixCon [(arg det 1) (arg det 2)]
+                                             RecCon (vec (mapcat (fn [f] (let [fv (lval f)] (repeat (count (arg fv 2)) (arg fv 3)))) (lval (arg det 1))))
+                                             [])
+                                      fields (when (= 'RecCon (con det))
+                                               (vec (mapcat (fn [f] (map (fn [fo] (rdr-occ (lval (arg (lval fo) 2)))) (arg (lval f) 2))) (lval (arg det 1)))))]
+                                  [(occ-of (arg cv 2)) (count cdfs) fields (mapv bang-text cdfs)]))]
+                     (cons (str "(tycon " (n-str "tc" tn) " nil " kind " [" (str/join " " (map #(n-str "data" (first %)) cdecls)) "] nil {})")
+                           (for [[cn ar fs bangs] cdecls]
+                             (str "(datacon " (n-str "data" cn) " nil " ar " [" (str/join " " (map pr-str fs)) "] nil {:src-bangs ["
+                                  (str/join " " (map pr-str bangs)) "]})"))))
+                   SynDecl [(str "(tycon " (n-str "tc" (occ-of (arg t 2))) " nil synonym [] nil {})")]
+                   ClassDecl
+                   (let [cn (occ-of (arg t 3))
+                         methods (for [s (arg t 7) :let [sv (lval s)] :when (and (= 'ClassOpSig (con sv)) (not (true? (arg sv 2)))) nl (arg sv 3)] (occ-of nl))
+                         defaults (set (keep (fn [b] (let [bv (lval b)] (when (= 'FunBind (con bv)) (occ-of (arg bv 2))))) (arg t 8)))
+                         fds (for [fd (arg t 6) :let [fv (lval fd)] :when (= 'FunDep (con fv))]
+                               [(mapv occ-of (arg fv 2)) (mapv occ-of (arg fv 3))])]
+                     [(str "(class " (n-str "tc" cn) " [] [" (str/join " " (map #(str "(" (n-str "var" %) " nil nil)") methods)) "] nil {:fundeps "
+                           (pr-str (vec fds)) " :defaults [" (str/join " " (for [o methods] (str "[" (n-str "var" o) " " (if (contains? defaults o) (n-str "var" (str "$dm" o)) "nil") "]")))
+                           "]})")])
+                   [])]
+           x))))
+
 (defn iface-text
-  "The module's interface for the modules that import it (the helper's iface forms: exports, fixities)"
+  "The module's interface for the modules that import it (the helper's iface forms: exports, fixities, and the
+  things as far as the renamer knows them, local-things)"
   [r]
   (str "(hsiface/module " (esc (:module r)) " {:unit \"main\"})\n"
        "(hsiface/exports [" (str/join "\n  " (:exports r)) "])\n"
        "(hsiface/fixities [" (str/join "\n  " (for [[n [p d]] (sort-by (comp name-str key) (:fixities r))]
-                                                 (str "(fixity " (name-ns n) " " (esc (name-occ n)) " " p " " d ")"))) "])\n"))
+                                                 (str "(fixity " (name-ns n) " " (esc (name-occ n)) " " p " " d ")"))) "])\n"
+       "(hsiface/things [" (str/join "\n  " (sort (:things r))) "])\n"))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Command line
