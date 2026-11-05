@@ -12,6 +12,8 @@
 #                                  the program of STGDIR (its dumps, unit main) and FILE's library closures compiled
 #                                  and built into DIR/hsi-aot, its path printed; kept by the generated files' and the
 #                                  runtime's digests (DIR/key); the build's peak held near 1.5 GiB (GOMEMLIMIT, -p 2)
+#                                  (a library package over HSI_AOT_MAX_KB, default 4096, left interpreted: the compile's
+#                                  memory)
 #   bin/hsi aot run FILE.hs [ARG...]
 #                                  FILE dumped at -O0 as bin/hsi run dumps it, run once on hsi with an empty stdin to
 #                                  list the library closures it enters (the profile: which closures are compiled, never
@@ -58,15 +60,27 @@ aot_build() {
     done < <(cut -d' ' -f1 "$cl" | grep -v '^main:' | LC_ALL=C sort -u)
   fi
   if [ -s "$miss" ]; then
+    # one generation at a time: two programs of a check may miss the same module
+    exec 9> "$lib/.lock"; flock 9
     local st=$out/lib-staging k
     rm -rf "${st:?}"; mkdir -p "$st"
     cut -d' ' -f1 "$miss" > "$out/missing-mods.txt"
     "$hsi" aot "${la[@]}" --modules "$out/missing-mods.txt" --out "$st" > "$out/aot-lib.log" 2>&1 || { cat "$out/aot-lib.log" >&2; die "hsi aot (libraries) failed"; }
     while read -r m k id; do
+      [ -f "$lib/$k/$id/aot.go" ] && continue
       mkdir -p "$lib/$k"; rm -rf "${lib:?}/$k/$id"; mv "$st/$id" "$lib/$k/$id"
     done < "$miss"
     rm -rf "${st:?}"
+    flock -u 9; exec 9>&-
   fi
+  # a library package larger than HSI_AOT_MAX_KB (default 4096: Go's compiler takes about 2 GB on 5 MB, 3 GB on 9.5 MB)
+  # is left interpreted, listed in OUT/libs-skipped.txt (the night's builds raise the limit)
+  local max=${HSI_AOT_MAX_KB:-4096} sz
+  : > "$out/libs-skipped.txt"
+  while read -r id d; do
+    sz=$(( $(wc -c < "$d/aot.go") / 1024 ))
+    if [ "$sz" -gt "$max" ]; then echo "$id $sz" >> "$out/libs-skipped.txt"; else echo "$id $d"; fi
+  done < "$out/libs.txt" > "$out/libs.kept"; mv "$out/libs.kept" "$out/libs.txt"
   key=$( { cat "$WORK/bin/key"; (cd "$gen" && find . -name '*.go' | LC_ALL=C sort | xargs sha256sum); cat "$out/libs.txt"; } | sha256sum | cut -c1-64)
   if [ -x "$out/hsi-aot" ] && [ "$(cat "$out/key" 2> "$out/key.err")" = "$key" ]; then echo "$out/hsi-aot"; return; fi
   rm -rf "${mod:?}"; cp -r "$WORK/bin/mod" "$mod"
