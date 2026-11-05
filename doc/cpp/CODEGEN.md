@@ -567,11 +567,11 @@ The corpus's 141 others before the merge, by what stops them (each file's first 
 | wrong results: names clang folds away (`constexpr` objects and functions clang evaluates, a static local's constant initialization: 7), a user `operator new` or `C1` called natively (`new1`, `new11`, `virtual4`, `rv-life`: the native level), addresses printed (`t39`), `constexpr` odr-use (2), a function-try-block (`fntry1`, G2) | 16 | mostly G2's constant evaluation; none in the template machinery's names |
 | other (the reference failed, a declaration kind) | 2 | |
 
-After the merge the wrong results are 26, all but three on G2's branch alone too or newly reachable through G2's
-inheritance: `temp-extend1` (a temporary bound through a subobject, `B().i[0]`, destroyed early: G2's branch regressed
-G1 there), `constexpr-static4`, `mi1` (an empty base's offset among virtual bases: 16 where clang has 24), `virtual4`
-(an extern global declared before its definition, lowered twice); a construction vtable's name now shares its
-substitutions (`_ZTC12ECPrivateKeyI4EC2NE0_11ECPublicKeyIS0_E`, found by `mi1`).
+After the merge the wrong results were 26: 14 the same on G2's branch alone (its constant-evaluation and lifetime cases;
+`temp-extend1`, a temporary bound through a subobject, `B().i[0]`, destroyed early, is one G1 passed), 8 as before the
+merge (the table's last row), 4 reached through G2's features: `mi1` (an empty base's offset among virtual bases, 16
+where clang has 24), `vbase1` (fixed since: a construction vtable's name now shares its substitutions,
+`_ZTC12ECPrivateKeyI4EC2NE0_11ECPublicKeyIS0_E`), `anon-union1`, `constexpr-initlist`.
 
 ### G3.8 What is not done (refused with a class)
 
