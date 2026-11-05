@@ -156,20 +156,31 @@ cmd_check_native() {
   local out=$OI_DIR/check-native.tsv
   selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0 }' | xargs -0 -r -n 5 -P "$JOBS" bash -c 'oi_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
+  # the judgment's directory: oi_check.ae reads the known programs, the slow ones and the controls beside the results file, so the native
+  # path's are merged there with ocamlc's (oi-known-native.edn after oi-known.edn; divergences-native.edn's classes before divergences.edn's)
+  local j=$OI_DIR/native-judge; rm -rf "$j"; mkdir -p "$j"
+  local t=$root/test/ocaml
+  cp "$RESULTS" "$t/oi-slow.edn" "$t/controls.txt" "$j/"
+  [ -f "$t/check-oi-native.edn" ] && cp "$t/check-oi-native.edn" "$j/"
+  { sed '$d' "$t/oi-known.edn"; sed '1,/^\[/d' "$t/oi-known-native.edn"; } > "$j/oi-known.edn"
+  { sed '$d' "$t/divergences-native.edn"; sed '1,/^\[/d' "$CLASSES"; } > "$j/classes.edn"
+  # the native results' own controls: check-oi.edn's, the same pair
+  sed -n 's/^judge check-oi\.edn /judge check-oi-native.edn /p' "$t/controls.txt" >> "$j/controls.txt"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
-  [ -n "$ONLY" ] || [ -n "$ONLY_LIST" ] && mode=$mode-only
+  { [ -n "$ONLY" ] || [ -n "$ONLY_LIST" ]; } && mode=$mode-only
   local st=0
-  if [ "$RECORD" = 1 ]; then
-    "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "$mode" "$out" "$OI_DIR/corpus.tsv" "$REFS" "$root/test/ocaml/check-oi-native.edn" "$CLASSES" || st=$?
-  fi
-  # the native path against ocamlc's: every row that differs from check-oi.edn's (a CHANGED line), the counts of both over the rows run
-  echo "oi: check --native: the rows against ocamlc's path (test/ocaml/check-oi.edn):"
-  "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" judge-only "$out" "$OI_DIR/corpus.tsv" "$REFS" "$RESULTS" "$CLASSES" > "$OI_DIR/check-native.judge" 2>&1 || st=$?
-  cat "$OI_DIR/check-native.judge"
-  local n op
+  echo "oi: check --native: the native path judged (test/ocaml/check-oi-native.edn; classes divergences-native.edn, then divergences.edn):"
+  "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "$mode" "$out" "$OI_DIR/corpus.tsv" "$REFS" "$j/check-oi-native.edn" "$j/classes.edn" || st=$?
+  [ "$RECORD" = 1 ] && [ -f "$j/check-oi-native.edn" ] && cp "$j/check-oi-native.edn" "$t/check-oi-native.edn"
+  # against ocamlc's path: every row that differs from check-oi.edn's is a CHANGED line (expected: the native path's non-passes)
+  echo "oi: check --native: against ocamlc's path (test/ocaml/check-oi.edn):"
+  "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" judge-only "$out" "$OI_DIR/corpus.tsv" "$REFS" "$j/check-oi.edn" "$j/classes.edn" > "$OI_DIR/check-native.judge" 2>&1 || true
+  grep -a '^CHANGED\|results differ' "$OI_DIR/check-native.judge" || true
+  local n op np
   n=$(wc -l < "$out")
   op=$(awk -F'\t' 'NR == FNR { id[$1] = 1; next } { gsub(/^ *\[/, ""); split($0, a, "\" \""); x = a[1]; gsub(/"/, "", x); if ((x in id) && $0 ~ /"pass"/) n++ } END { print n + 0 }' "$out" "$RESULTS")
-  echo "oi: check --native: $n programs run; ocamlc's path passes $op of them (check-oi.edn); the native path's own counts above, CHANGED rows its differences"
+  np=$(grep -a -o '^oi: [0-9]* pass' "$OI_DIR/check-native.judge" | grep -o '[0-9]*' || echo 0)
+  echo "oi: check --native: $n programs run: the native path passes $np, ocamlc's path $op (check-oi.edn)"
   return $st
 }
 

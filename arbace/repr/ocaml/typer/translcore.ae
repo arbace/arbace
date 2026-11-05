@@ -369,6 +369,12 @@
 
 (defn- transl-case [c] [(:lhs c) (transl-guard (:guard c) (:rhs c))])
 
+(defn- reachable
+  "Translcore's filter of the refutation cases (`| p -> .`, Texp_unreachable): typed, counted in the match's
+  partiality, then left out of the translation"
+  [cases]
+  (remove #(= :Texp_unreachable ((:desc (:rhs %)) 0)) cases))
+
 (defn- exn-names [p]
   (let [d (:desc p)] (case (d 0) :Tpat_var [(d 1)] :Tpat_alias (cons (d 2) (exn-names (d 1))) [])))
 
@@ -489,7 +495,7 @@
       :Texp_try (let [cases (d 2)
                       id (m/name-pattern* "exn" (map :lhs cases))]
                   [:Ltrywith (transl-exp (d 1)) id
-                   (m/for-trywith (:loc e) [:Lvar id] (mapv transl-case-try cases))])
+                   (m/for-trywith (:loc e) [:Lvar id] (mapv transl-case-try (reachable cases)))])
       :Texp_tuple (let [[ll shape] (transl-list-with-shape (mapv second (d 1)))
                         cs (map extract-constant ll)]
                     (if (every? some? cs)
@@ -540,6 +546,7 @@
                      (if (and (= :Texp_construct (cd 0)) (= "false" (:name (cd 1))))
                        (failure-block ty/path-assert-failure (d 2))
                        [:Lifthenelse (transl-exp c) l/lambda-unit (failure-block ty/path-assert-failure (d 2))]))
+      :Texp_unreachable (throw (ex-info "Unreachable_reached: an unreachable expression was translated" {}))
       :Texp_struct_item (*transl-struct-item* (d 1) (fn [] (transl-exp (d 2))))
       :Texp_pack (*transl-module* nil nil (d 1))
       :Texp_lazy (let [a (d 1) ad (:desc a)]
@@ -601,7 +608,8 @@
                                  (if (= :Lfunction (b 0))
                                    [:Lfunction :curried (vec (cons [id-arg ""] (b 2))) (b 3) (b 4)]
                                    [:Lfunction :curried [[id-arg ""]] "" b]))]
-                      (reduce (fn [body [id lam]] [:Llet :strict "" id lam body]) body @defs))))))]
+                      ;; List.fold_right over !defs (the latest first): the latest protected outermost, evaluated first
+                      (reduce (fn [body [id lam]] [:Llet :strict "" id lam body]) body (reverse @defs)))))))]
       (build lam () (mapv (fn [[label a]] [(when a (transl-exp a)) (ty/is-optional label)]) sargs)))))
 
 (defn- vk-union [a b] (if (= a b) a ""))
@@ -622,7 +630,7 @@
           :body [nil (transl-exp (body 1))]
           :cases (let [[_ cases partial param loc] body
                        kind (reduce vk-union (map #(ty/value-kind (:type (:lhs %))) cases))]
-                   [[param kind] (m/for-function (or loc (:loc e)) [:Lvar param] (mapv transl-case cases) partial)]))
+                   [[param kind] (m/for-function (or loc (:loc e)) [:Lvar param] (mapv transl-case (reachable cases)) partial)]))
         [lbody lparams]
         (reduce (fn [[body ps] fp]
                   (let [param (:param fp) k (:kind fp)]
@@ -676,7 +684,7 @@
                               [(conj vc [pv [:Lstaticraise lbl (mapv (fn [v] [:Lvar v]) vids)]])
                                (conj ec [pe [:Lstaticraise lbl (mapv (fn [v] [:Lvar v]) ids)]])
                                (conj hs [lbl kinds rhs])]))))
-                [[] [] []] cases)
+                [[] [] []] (reachable cases))
         static-catch (fn [scrutinees val-ids handler]
                        (let [id (m/name-pattern* "exn" (map first exn-cases))
                              sid (l/next-raise-count)]
