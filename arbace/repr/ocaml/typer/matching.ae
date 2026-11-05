@@ -525,6 +525,25 @@
                  (fn [p rem] (if (= :Tpat_any (ptag p)) (vec (concat (pm/omegas n) rem)) (vec (concat (map second ((:desc p) 1)) rem))))
                  head ctx pmt)))
 
+(def ^:dynamic *inline-lazy-force* "Matching.inline_lazy_force, given by Translcore" nil)
+
+(defn- divide-array [kind ctx pmt]
+  (divide (fn [head {:keys [arg mut]} rem]
+            (vec (concat (mapv (fn [pos] {:arg [:Lprim (l/prim (str "array.unsafe_get[" kind "]")) [arg (l/lconst-int pos)]]
+                                          :kind :strictopt :mut true})
+                               (range ((:desc head) 1)))
+                         rem)))
+          =
+          (fn [p] (count ((:desc p) 1)))
+          (fn [p rem] (vec (concat ((:desc p) 1) rem)))
+          ctx pmt))
+
+(defn- divide-lazy [head ctx pmt]
+  (divide-line #(ctx-specialize head %)
+               (fn [_ {:keys [arg mut]} rem] (vec (cons {:arg (*inline-lazy-force* arg) :kind :strict :mut mut} rem)))
+               (fn [p rem] (if (= :Tpat_any (ptag p)) (vec (cons pm/omega rem)) (vec (cons ((:desc p) 1) rem))))
+               head ctx pmt))
+
 (defn- divide-record [all head ctx pmt]
   (let [head (expand-record-head head) n (count all)]
     (divide-line #(ctx-specialize head %)
@@ -685,6 +704,14 @@
                         [[] (jumps-empty :total)]
                         [(mk-fails (mapv first fps) (def-raise-final defs)) (jumps-empty :partial)]))))]
           (let [[fails jumps] (fj defs (vec in-ctx))] [nil fails jumps]))))))
+
+(defn- combine-array
+  "Matching.combine_array: a switch on the array's length"
+  [arg kind partial ctx d [cll total _]]
+  (let [[fail local-jumps] (mk-failaction-neg partial ctx d)
+        v (ty/ident-create "len")
+        sw (call-switcher fail [:Lvar v] 0 Long/MAX_VALUE (vec cll))]
+    [(l/bind :alias v [:Lprim (l/prim (str "array.length[" kind "]")) [arg]] sw) (jumps-union local-jumps total)]))
 
 (defn- combine-constant [arg cst partial ctx d [cll total _]]
   (let [[fail local-jumps] (mk-failaction-neg partial ctx d)
@@ -935,6 +962,9 @@
             :Record (compile-no-test #(divide-record (ty/label-all (first (d 1))) ph %1 %2) ctx-combine partial ctx pmt)
             :Constant (ctest divide-constant (fn [c dd cdiv] (combine-constant arg (d 1) arg-partial c dd cdiv)))
             :Construct (ctest divide-constructor (fn [c dd cdiv] (combine-constructor arg (d 1) arg-partial c dd cdiv)))
+            :Lazy (compile-no-test #(divide-lazy ph %1 %2) ctx-combine partial ctx pmt)
+            :Array (let [kind (ty/array-kind (:type ph))]
+                     (ctest #(divide-array kind %1 %2) (fn [c dd cdiv] (combine-array arg kind arg-partial c dd cdiv))))
             (throw (ex-info (str "Matching: " (d 0) " patterns are outside the slice") {:ocaml-type-error "matching"}))))
     :pmvar (let [[lam total] (do-compile-matching partial (ctx-lshift ctx) (pmh 1))] [lam (jumps-map ctx-rshift total)])
     :pmor (let [{:keys [body handlers]} (pmh 1)
