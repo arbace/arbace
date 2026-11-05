@@ -27,7 +27,7 @@ grep -q '^gate_rest_key() {' "$d/fns.bash" && grep -q '^arbace_embedded_sources(
   || { echo "FAIL: gate_key, gate_rest_key or arbace_embedded_sources not found"; exit 1; }
 
 excluded="bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip
-go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/arbace/expat.ae go/arbace/expat/xmlparse_doc.ae go/arbace/pyexpat.ae go/arbace/pyexpat/pyexpat.ae go/arbace/clib.ae go/arbace/clib/clib.ae go/arbace/pybz2.ae go/arbace/pybz2/pybz2.ae go/arbace/pylzma.ae go/arbace/pylzma/pylzma.ae go/arbace/pyzstd.ae go/arbace/pyzstd/pyzstd.ae go/arbace/pyssl.ae go/arbace/pyssl/pyssl.ae jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae
+go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/arbace/expat.ae go/arbace/expat/xmlparse_doc.ae go/arbace/pyexpat.ae go/arbace/pyexpat/pyexpat.ae go/arbace/clib.ae go/arbace/clib/clib.ae go/arbace/pybz2.ae go/arbace/pybz2/pybz2.ae go/arbace/pylzma.ae go/arbace/pylzma/pylzma.ae go/arbace/pyzstd.ae go/arbace/pyzstd/pyzstd.ae go/arbace/pyssl.ae go/arbace/pyssl/pyssl.ae jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae go/arbace/pysqlite3.ae go/arbace/pysqlite3/module.ae
 arbace/repr/cpp.ae arbace/repr/cpp/convert.ae arbace/repr/llvm.ae arbace/cpp/lower.ae
 arbace/repr/ocaml.ae arbace/repr/scheme.ae arbace/scheme/aot.ae"
 kept="go/arbace/ci.ae go/arbace/ci/expr.ae go/arbace/cinterp.ae go/arbace/cinterp/natives.ae go/arbace/crt.ae go/arbace/crt/mem.ae
@@ -73,7 +73,7 @@ gb=$(host_block gate); pb=$(host_block prog)
 for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!jdk/ocaml/' '!go/arbace/oi.ae' \
          '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm/' '!go/arbace/expat.ae' '!go/arbace/expat/' '!go/arbace/pyexpat.ae' '!go/arbace/pyexpat/' \
          '!go/arbace/clib.ae' '!go/arbace/clib/' '!go/arbace/pybz2.ae' '!go/arbace/pybz2/' \
-         '!go/arbace/pylzma.ae' '!go/arbace/pylzma/' '!go/arbace/pyzstd.ae' '!go/arbace/pyzstd/' '!go/arbace/pyssl.ae' '!go/arbace/pyssl/'; do
+         '!go/arbace/pylzma.ae' '!go/arbace/pylzma/' '!go/arbace/pyzstd.ae' '!go/arbace/pyzstd/' '!go/arbace/pyssl.ae' '!go/arbace/pyssl/' '!go/arbace/pysqlite3.ae' '!go/arbace/pysqlite3/'; do
   if echo "$gb" | grep -qF "\"$p\""; then ok "audit :gate names $p"; else bad "audit :gate does not name $p"; fi
 done
 for p in '!go/arbace/py.ae' '!go/arbace/py/' '!go/arbace/libm.ae' '!go/arbace/libm/' '!arbace/python/' '!arbace/repr/python/'; do
