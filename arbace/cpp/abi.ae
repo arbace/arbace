@@ -222,9 +222,26 @@
     :cls (source-name (:name (cls (second p))))
     :enum (source-name (:name (enm (second p))))))
 
+(declare mangle-type* template-args)
+
+(defn- part-targs
+  "A class part's template arguments when the class is a template's specialization (CODEGEN.md §G3), else nil."
+  [p]
+  (when (= :cls (first p)) (let [c (cls (second p))] (when (:tmpl c) c))))
+
+(defn- template-prefix
+  "<template-prefix> ::= <prefix> <template unqualified-name>: `out` (the prefix as written so far) and the template's
+  name, or the template's substitution when it was seen (it stands for the prefix too); a new candidate otherwise."
+  ^String [^String out tid ^String nm]
+  (let [i (.indexOf ^java.util.List @*subs* [:tmpl tid])]
+    (if (neg? i)
+      (let [s (str out (source-name nm))] (swap! *subs* conj [:tmpl tid]) s)
+      (seq-id i))))
+
 (defn- mangle-prefix
   "The prefix of the parts as written inside N ... E: the longest prefix already substituted as its S_, then each
-  further part, every prefix a new substitution candidate."
+  further part, every prefix a new substitution candidate (a template specialization's part: its template-prefix a
+  candidate, then its arguments)."
   ^String [parts]
   (let [parts (vec parts)
         n (count parts)
@@ -234,7 +251,10 @@
     (loop [i (inc start) out (if best (seq-id (idx best)) "")]
       (if (> i n)
         out
-        (let [s (str out (part-name (nth parts (dec i))))]
+        (let [p (nth parts (dec i))
+              s (if-let [c (part-targs p)]
+                  (str (template-prefix out (:tmpl c) (:name c)) (template-args (:targs c)))
+                  (str out (part-name p)))]
           (swap! *subs* conj [:prefix (subvec parts 0 i)])
           (recur (inc i) s))))))
 
@@ -253,10 +273,28 @@
         i (.indexOf ^java.util.List @*subs* k)]
     (cond
       (not (neg? i)) (seq-id i)
-      (= 1 (count parts)) (do (swap! *subs* conj k) (part-name (first parts)))
+      (= 1 (count parts)) (mangle-prefix parts)
       :else (str "N" (mangle-prefix parts) "E"))))
 
-(declare mangle-type*)
+(defn- template-param
+  "<template-param>: T_ for the first, T<n-2>_ after (a parameter of depth 0: CODEGEN.md §G3)."
+  ^String [^long i]
+  (if (zero? i) "T_" (str "T" (dec i) "_")))
+
+(defn- template-arg
+  "<template-arg>: a type, or an integral value as <expr-primary> L <type> <number> E (n for a minus, bool 0/1)."
+  ^String [a]
+  (cond
+    (contains? a :val) (let [v (:val a) t (unq (:ty a))]
+                         (str "L" (mangle-type* t)
+                              (cond (= :bool (bn t)) (if (and v (not= 0 v) (not (false? v))) "1" "0")
+                                    (neg? (long v)) (str "n" (- (long v)))
+                                    :else v)
+                              "E"))
+    (contains? a :k) (mangle-type* a)
+    :else (fail :mangle "template argument " (pr-str a))))
+
+(defn template-args ^String [args] (str "I" (apply str (map template-arg args)) "E"))
 
 (defn- cvq ^String [t] (str (when (:v t) "V") (when (:c t) "K")))
 
@@ -271,10 +309,16 @@
                   :ptr (sub-or [:t bare] #(str "P" (mangle-type* (:to bare))))
                   :ref (sub-or [:t bare] #(str "R" (mangle-type* (:to bare))))
                   :rref (sub-or [:t bare] #(str "O" (mangle-type* (:to bare))))
-                  :arr (sub-or [:t bare] #(str "A" (:n bare) "_" (mangle-type* (:of bare))))
+                  :arr (sub-or [:t bare] #(str "A" (let [n (:n bare)] (if (map? n) (template-param (:i n)) n)) "_" (mangle-type* (:of bare))))
                   :fn (sub-or [:t bare] #(str "F" (mangle-type* (:ret bare))
                                               (if (and (empty? (:ps bare)) (not (:va bare))) "v" (apply str (map mangle-type* (:ps bare))))
-                                              (when (:va bare) "z") "E"))))]
+                                              (when (:va bare) "z") "E"))
+                  ;; a template's own parameter and a dependent template-id, in a function template's signature (§G3)
+                  :tparam (sub-or [:t bare] #(template-param (:i bare)))
+                  :tspec (sub-or [:t bare] #(let [path (vec (:path bare))]
+                                              (if (empty? path)
+                                                (str (template-prefix "" (:tmpl bare) (:name bare)) (template-args (:args bare)))
+                                                (str "N" (template-prefix (mangle-prefix path) (:tmpl bare) (:name bare)) (template-args (:args bare)) "E"))))))]
     (if (= "" q)
       (inner)
       (let [k [:t t] i (.indexOf ^java.util.List @*subs* k)]
@@ -300,7 +344,9 @@
       (source-name (:name f)))))
 
 (defn mangle-fn
-  "A function's mangled name (variant: 1 or 2 for a constructor's C1/C2, 0/1/2 for a destructor's D0/D1/D2)."
+  "A function's mangled name (variant: 1 or 2 for a constructor's C1/C2, 0/1/2 for a destructor's D0/D1/D2). A
+  function template's specialization (:tinst) writes its template arguments after its name, then its template's
+  signature with the return type (§5.1.3: the parameters as the template declares them, T_ for its own)."
   (^String [f] (mangle-fn f nil))
   (^String [f variant]
    (cond
@@ -309,11 +355,25 @@
      :else
      (binding [*subs* (atom [])]
        (let [path (vec (:path f))
+             ti (:tinst f)
+             uname (fn [^String out]
+                     (if ti
+                       (str (if (#{:ctor :dtor :conv} (:kind f))
+                              (str out (unqualified-name f variant))
+                              (let [i (.indexOf ^java.util.List @*subs* [:tmpl (:tid ti)])]
+                                (if (neg? i)
+                                  (let [s (str out (unqualified-name f variant))] (swap! *subs* conj [:tmpl (:tid ti)]) s)
+                                  (seq-id i))))
+                            (template-args (:args ti)))
+                       (str out (unqualified-name f variant))))
              enc (if (empty? path)
-                   (str (when (:internal-l f) "L") (unqualified-name f variant))
+                   (str (when (:internal-l f) "L") (uname ""))
                    (let [pre (mangle-prefix path)]
-                     (str "N" (when (:cq f) "K") pre (unqualified-name f variant) "E")))]
-         (str "_Z" enc (bare-params (:ps (:ty f)) (:va (:ty f)))))))))
+                     (str "N" (when (:cq f) "K") (uname pre) "E")))
+             sig (if ti (:tsig ti) (:ty f))]
+         (str "_Z" enc
+              (when (and ti (not (#{:ctor :dtor :conv} (:kind f)))) (mangle-type* (:ret sig)))
+              (bare-params (:ps sig) (:va sig))))))))
 
 (defn mangle-var
   "A variable's mangled name at namespace or class scope (a global in the global namespace keeps its name; static: L)."

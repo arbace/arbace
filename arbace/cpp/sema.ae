@@ -20,6 +20,13 @@
 
 (def fail abi/fail)
 
+;; Templates (doc/cpp/CODEGEN.md §G3) live in arbace.cpp.template, which installs these hooks: :declare (a template's
+;; declaration node, nil when not one), :template-id (a type form (<> name args...)), :const-bound (an array bound
+;; that is not a literal), :call-candidates (the specializations a call's function templates deduce), :tiebreak
+;; ([over.match.best]/2.2-2.5: a non-template over a template, the more specialized template), :pending (the lazily
+;; instantiated definitions a round of analysis made used), :wrap (the analysis run inside the templates' state).
+(def hooks (atom {}))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; State
 
@@ -157,19 +164,30 @@
     (seq? f)
     (case (first f)
       * (abi/ptr (resolve-type-form scope (second f)))
-      & (abi/lref (resolve-type-form scope (second f)))
-      && (abi/rref (resolve-type-form scope (second f)))
+      ;; references to references collapse ([dcl.ref]/7: a substituted T& or T&&)
+      & (let [t (resolve-type-form scope (second f))] (abi/lref (if (abi/ref? t) (:to t) t)))
+      && (let [t (resolve-type-form scope (second f))] (if (abi/ref? t) t (abi/rref t)))
       const (assoc (resolve-type-form scope (second f)) :c true)
       volatile (assoc (resolve-type-form scope (second f)) :v true)
       restrict (resolve-type-form scope (second f))
       cpp/attributed (resolve-type-form scope (last f))
-      array (if (= 2 (count f)) (abi/arr nil (resolve-type-form scope (second f))) (abi/arr (when (number? (second f)) (second f)) (resolve-type-form scope (nth f 2))))
+      array (if (= 2 (count f))
+              (abi/arr nil (resolve-type-form scope (second f)))
+              (abi/arr (let [b (second f)] (cond (number? b) b (and b (:const-bound @hooks)) ((:const-bound @hooks) scope b) :else nil))
+                       (resolve-type-form scope (nth f 2))))
       fn (let [[_ ps r] f
                va (some #{'&} ps)
                ps (remove #{'&} ps)
                ps (if (= ['void] (vec ps)) [] ps)]
            {:k :fn :ret (resolve-type-form scope r) :ps (mapv #(resolve-type-form scope %) ps) :va (boolean va)})
       cpp/elaborated (resolve-type-form scope (nth f 2))
+      typename (resolve-type-form scope (second f))
+      <> (if-let [h (:template-id @hooks)] (h scope f) (fail :template "template-id " (pr-str f)))
+      cpp/scope (let [t (resolve-type-form scope (second f))
+                      _ (when-not (abi/class? t) (fail :type "a scope of a non-class " (pr-str f)))
+                      es (lookup-qualified (:scope (abi/cls-of t)) (mapv #(if (symbol? %) (name %) (fail :type "type form " (pr-str f))) (nnext f)) false)
+                      e (type-entity es)]
+                  (or (:ty e) (fail :type "unknown type " (pr-str f))))
       cpp/global (binding [] (resolve-type-form (loop [s scope] (if (:parent s) (recur (:parent s)) s)) (second f)))
       (fail :type "type form " (pr-str f)))
     :else (fail :type "type form " (pr-str f))))
@@ -213,10 +231,12 @@
   ([scope parts global?]
    (let [root (loop [s scope] (if (:parent s) (recur (:parent s)) s))]
      (loop [s (if global? root nil) [p & more] parts]
-       (let [es (if s (find-here s p) (lookup scope p))]
+       (let [es (when-not (str/includes? p "<") (if s (find-here s p) (lookup scope p)))]
          (if (empty? more)
            (or (seq es) (when (and (nil? s) (= :ns (:kind scope))) nil) (header-entities parts))
-           (let [e (first (filter #(#{:ns :type} (:e %)) es))
+           (let [e (if (str/includes? p "<")
+                     {:e :type :ty (resolve-type (or s scope) p)} ; a template-id (Box<int>::count)
+                     (first (filter #(#{:ns :type} (:e %)) es)))
                  s2 (cond (= :ns (:e e)) (:scope e)
                           (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e)))
                           (abi/enum? (:ty e)) (:scope (abi/enm (:id (:ty e))))
@@ -391,6 +411,8 @@
 (defn declare-node!
   "Enters a declaration node of namespace or class scope."
   [scope n]
+  (if-let [r (when-let [h (:declare @hooks)] (h scope n))]
+    r
   (case (:kind n)
     "NamespaceDecl" (let [s (ns-scope! scope (:name n) (nil? (:name n)))] (doseq [k (kids n)] (declare-node! s k)))
     "LinkageSpecDecl" (let [s (assoc scope :extern-c (= "C" (:language n)))] (doseq [k (kids n)] (declare-node! s k)))
@@ -415,7 +437,7 @@
                       es (lookup-qualified scope parts)]
                   (doseq [e es] (enter! scope (last parts) (assoc e :pos (long (or (:_b n) 0))))))
     ("EmptyDecl" "StaticAssertDecl" "AccessSpecDecl" "FriendDecl") nil
-    (fail :decl "declaration " (:kind n))))
+    (fail :decl "declaration " (:kind n)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Classes completed: special members, virtual functions
@@ -738,7 +760,9 @@
                                 {:rank 0 :sub 0})]
                      :when (and oc (every? some? convs))]
                  [cid (cons oc convs)])
-        better (fn [[_ a] [_ b]] (and (every? true? (map #(not (better-ics? %2 %1)) a b)) (some true? (map better-ics? a b))))
+        tiebreak (or (:tiebreak @hooks) (constantly false))
+        better (fn [[fa a] [fb b]] (and (every? true? (map #(not (better-ics? %2 %1)) a b))
+                                        (or (some true? (map better-ics? a b)) (tiebreak fa fb))))
         best (filter (fn [x] (every? #(or (identical? % x) (better x %)) viable)) viable)]
     (cond
       (= 1 (count best)) (ffirst best)
@@ -838,7 +862,7 @@
           :else (fail :init "a non-const reference to a temporary")))
       (vector? src)
       (cond
-        (abi/class? tu) (class-init tu src ctx :direct)
+        (abi/class? tu) (class-init tu src ctx (if (and (empty? src) (= style :value)) :value :direct))
         (empty? src) {:i :zero}
         (= 1 (count src)) (init-for t (first src) ctx :direct)
         :else (fail :init "several values for a scalar"))
@@ -946,7 +970,8 @@
       :var (var-node (:id e))
       :field (field-node (deref-node (this-expr ctx)) (:cls e) (:i e))
       :enumerator {:op :int :v (:val e) :ty (:ty e) :cat :pr}
-      :fn {:op :fnset :fns (mapv :id (filter #(= :fn (:e %)) es)) :ty {:k :overload} :cat :lv :implicit-this true}
+      (:fn :tmpl) {:op :fnset :fns (mapv :id (filter #(= :fn (:e %)) es)) :tmpls (mapv :id (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))) es))
+                   :name (get-in n [:referencedDecl :name]) :ty {:k :overload} :cat :lv :implicit-this true}
       (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e)))))
 
 (defn- name-expr [ctx n]
@@ -958,10 +983,10 @@
         ;; class members found through a class's scope keep their class
         es (if (and (seq q) (seq es)) es es)]
     (when (empty? es) (fail :name "unknown name " nm))
-    (let [es (if (= :class (:kind (:scope ctx))) es es)]
-      (if (and (seq q) (= :field (:e (first es))))
-        (entity-expr ctx es n)
-        (entity-expr ctx es n)))))
+    (let [e (entity-expr ctx es n)]
+      (if (and (seq (:tmpls e)) (str/includes? (or (node-text n) "") "<"))
+        (assoc e :targs-text (node-text n) :targs-scope (:scope ctx))
+        e))))
 
 (defn- arith-binop [o l r]
   (let [l (rv l) r (rv r) ct (arith-common (:ty l) (:ty r))]
@@ -1047,7 +1072,11 @@
         (nil? e) (fail :member "no member " nm)
         (= :field (:e e)) (field-node (if (= :pr (:cat obj)) (materialize obj) obj) (:cls e) (:i e))
         (= :var (:e e)) {:op :comma :l obj :r (var-node (:id e)) :ty (:ty (var* (:id e))) :cat :lv}
-        (= :fn (:e e)) {:op :fnset :fns fids :obj (if (= :pr (:cat obj)) (materialize obj) obj) :ty {:k :overload} :cat :lv :qualified (boolean qcid)}
+        (#{:fn :tmpl} (:e e))
+        (let [tm (vec (keep (fn [[_ x]] (when (= :tmpl (:e x)) (:id x))) (class-lookup (or qcid cid) nm)))
+              t (or (node-text n) "")]
+          (cond-> {:op :fnset :fns fids :tmpls tm :name nm :obj (if (= :pr (:cat obj)) (materialize obj) obj) :ty {:k :overload} :cat :lv :qualified (boolean qcid)}
+            (and (seq tm) (re-find #"<[^<>]*(?:<[^<>]*>[^<>]*)*>\s*$" t)) (assoc :targs-text (second (re-find #"(?:\.|->)\s*(?:template\s+)?(.*)$" t)) :targs-scope (:scope ctx))))
         (= :enumerator (:e e)) {:op :int :v (:val e) :ty (:ty e) :cat :pr}
         :else (fail :member "member " nm)))))
 
@@ -1076,11 +1105,13 @@
 
 (defn analyze-call [ctx callee args]
   (case (:op callee)
-    :fnset (let [ms (mapv fnd (:fns callee))
+    :fnset (let [;; the function templates' specializations their deduction from the arguments declares
+                 tcands (when-let [h (:call-candidates @hooks)] (h ctx callee args))
+                 ms (mapv fnd (concat (:fns callee) tcands))
                  obj (:obj callee)
                  any-method (some #(and (:cls %) (not (:static %))) ms)
                  obj (or obj (when (and (:implicit-this callee) any-method (:this-type ctx)) (deref-node (this-expr ctx))))
-                 cands (concat (:fns callee) (when (and (not (:obj callee)) (not any-method)) (adl-fns args (:name (first ms)))))
+                 cands (concat (:fns callee) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
                  fid (resolve-overload cands args obj)
                  f (fnd fid)]
              (if (and (:cls f) (not (:static f)))
@@ -1437,7 +1468,7 @@
         cls (:cls f)
         fs (new-scope :fn (or (:def-scope f) (:scope f)))
         ;; a member's body sees the class's members: its scope is the class's for lookups
-        fs (if cls (assoc fs :parent (:scope (abi/cls cls))) fs)
+        fs (if (and cls (not (:keep-def-scope f))) (assoc fs :parent (:scope (abi/cls cls))) fs)
         pids (vec (map-indexed (fn [i t]
                                  (let [id (next-id) nm (nth (:param-names f) i nil)]
                                    (swap! *vars* assoc id {:id id :name nm :ty t :storage :param :fn fid})
@@ -1513,13 +1544,24 @@
   (binding [*src* src *fns* (atom {}) *vars* (atom {}) *ids* (atom 0) *order* (atom [])
             abi/*classes* (atom {}) abi/*enums* (atom {}) *proot* proot *root* root *header-cache* (atom {})]
     (do
-      (doseq [n nodes] (declare-node! root n))
-      (doseq [[k id] @*order*]
-        (case k
-          :fn (let [f (fnd id)]
-                (cond
-                  (:body f) (analyze-fn! id)
-                  (or (:implicit f) (:defaulted f)) (analyze-implicit! id)
-                  :else nil))
-          :var (let [v (var* id)] (when (:defined v) (upd-var! id assoc :ginit (global-init id))))))
+      ((or (:wrap @hooks) (fn [f] (f)))
+       (fn []
+         (doseq [n nodes] (declare-node! root n))
+         ;; the declarations in order, then (templates) the lazy definitions each round made used, until none
+         (let [entry! (fn [[k id]]
+                        (case k
+                          :fn (let [f (fnd id)]
+                                (when-not (or (:lazy f) (:analyzed f))
+                                  (cond
+                                    (:body f) (do (upd-fn! id assoc :analyzed true) (analyze-fn! id))
+                                    (or (:implicit f) (:defaulted f)) (do (upd-fn! id assoc :analyzed true) (analyze-implicit! id))
+                                    :else nil)))
+                          :var (let [v (var* id)] (when (and (:defined v) (not (:ginit v))) (upd-var! id assoc :ginit (global-init id))))))]
+           (loop [i 0]
+             (let [order @*order*]
+               (if (< i (count order))
+                 (do (entry! (nth order i)) (recur (inc i)))
+                 (when-let [more (seq (when-let [h (:pending @hooks)] (h)))]
+                   (doseq [x more] (entry! x))
+                   (recur i))))))))
       {:fns @*fns* :vars @*vars* :order @*order* :classes @abi/*classes* :enums @abi/*enums* :root root}))))
