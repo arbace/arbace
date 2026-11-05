@@ -648,7 +648,8 @@ The trial the user asked for (RFS1-RFS13 decided as recommended): RF1's oracles 
 `arbace/rust/back/` (evaluated from the checkout, out of `gate_key`, RFS13), the helper's new modes in `tools/rsdump/mirdata.rs`,
 the command `bin/rust-front` (`make rust-front-*`), samples in `test/rust/front/`, the spec `doc/rust/MIR.md`. Ports of rustc 1.99.1
 (`58cf8f9c3`, the apks `tools/rsdump/apks.sha256` pins) are recorded in `LICENSE.md` and `doc/ARBACE.md`. No gate step, no corpus
-run beyond the 80 programs of the synthetic corpus and the samples, each process under 2 GiB.
+run beyond the 81 programs of the synthetic corpus, two samples, rsi's five and the seven of `test/rust/front/`, each process
+under 2 GiB.
 
 ### RF1: the oracles and the census
 
@@ -668,8 +669,8 @@ run beyond the 80 programs of the synthetic corpus and the samples, each process
   (the crate's collected items: kind, generics, signatures and types, ADTs' variants, impls' trait references; std's interface
   stays RR's rustdoc JSON).
 
-`bin/rust-front oracles|corpus` runs them: the synthetic corpus (67 programs), the samples (5 of `test/rust/sample/`, 3 of
-`test/rust/eval/`, `p.rs`-like programs not counted) are 80 files, **77 built** (the three left out: `constructs.rs` needs
+`bin/rust-front oracles|corpus` runs them over the synthetic corpus (67 programs), `test/rust/sample/` (8) and `test/rust/eval/`
+(5), 80 files, **77 built** (the three left out: `constructs.rs` needs
 `#![feature(stmt_expr_attributes)]`, `edition2015.rs` is not dyn-compatible at its edition, `lowered_table.rs` is not a crate).
 Census: no program of the 77 enables a feature; the crates' own bodies (not std's generics) call 15 lang items (the iterator's
 `next`/`into_iter`, `PanicFmt`, `CloneFn`, `TryTrait*`, `RangeInclusiveNew`, `FromFn`, `SliceLen`, `Panic`), 1 intrinsic and use
@@ -710,9 +711,11 @@ nop landing pads as `find_noop_landing_pads` finds them, drops through the glue'
 indirect calls), the Rust ABI of scalars, pairs, small memory aggregates (cast to an integer, through a scratch alloca when
 under-aligned) and large ones (by pointer, `sret` returns, `memcpy`), return and parameter attributes, constants interned by
 content (strings, byte slices, vtables, locations), the constant folding LLVM's builder does, and the intrinsics `abort`,
-`black_box`, `cold_path` and the inhabitedness assertions. **Not taken yet**: floats, SIMD, `i128` in pairs, `Offset` of
-non-scalars, unsized places, virtual calls, most intrinsics (`ctpop`, `ctlz`, `size_of_val`, the saturating ones...), coroutines,
-inline assembly.
+`black_box`, `cold_path`, the inhabitedness assertions, the bit intrinsics (`ctpop`, `ctlz`, `cttz`, `bswap`, rotates, funnel
+shifts, saturating arithmetic), `ptr_offset_from`, `write_bytes` and the float math ones; floats (constants in LLVM's text,
+arithmetic, comparisons, conversions with the saturating intrinsics). **Not taken yet**: SIMD and the vector ABI, `i128` in
+pairs, `Offset` of aggregates (LLVM's named struct types), arrays of aggregates, unsized places, virtual calls, `size_of_val`,
+the rest of the intrinsics, coroutines, inline assembly.
 
 `arbace.rust.back.collect` (the collector slice, about 100 lines): the mono items of a program from its roots (the entry's
 `main` and `lang_start`; for `no_std` programs the functions with plain symbols and the panic handler) by what the bodies use:
@@ -774,8 +777,8 @@ RF1 (6-9 days planned): the modes the table names for RF3's judging are in (`mir
 mono-items run, the census); `expanded`, `resolve`, `typeck` and `consts` (RF4-RF10's oracles) are not built. RF2 (3-5): done
 in under a day, the spec, reader, printer and check. RF3 (16-26 days): the first day took the code generation from nothing to 70.1 %
 of the mono items of 81 programs, the collector's traversal to all 81 item sets, and seven programs to running; what is left of the 16 to 26 is the remaining codegen
-(memory aggregates and `memcpy`, floats, the intrinsics' list, virtual calls, `indirect` constants, about 5 to 8 days by the
-refusal counts), then the pieces the helper still answers: layout (`rustc_abi`, about 2,500 lines), the collector and instance
+(LLVM's types of aggregates for `Offset` and arrays, vectors, virtual calls, `size_of_val`, the intrinsics' tail, the classes of the
+1,879 items that differ: about 3 to 5 days by the refusal counts), then the pieces the helper still answers: layout (`rustc_abi`, about 2,500 lines), the collector and instance
 resolution with specialization, v0 symbols (the crates' disambiguator hashes), vtable and drop glue and shim MIR from data
 (about 8 to 12 days). The estimate stands; the exactness of the judge is what the day showed.
 
@@ -784,7 +787,7 @@ resolution with specialization, v0 symbols (the crates' disambiguator hashes), v
 - **RFP1 What next in RF3.** Options: (a) **finish the codegen on rustc's data first (memory aggregates, floats, the intrinsics,
   virtual calls, constants in memory) to reach most of the corpus's mono items, then replace the oracle's answers one at a time (layout,
   then the collector with resolution, then symbols), each judged against the helper's**; (b) port layout and the collector first, with
-  the codegen at today's 43 %; (c) stop at the trial. *Recommended: (a)*: every step stays judged exactly and the program runs grow
+  the codegen at today's 70 %; (c) stop at the trial. *Recommended: (a)*: every step stays judged exactly and the program runs grow
   with it.
 - **RFP2 Running std.** Options: (a) **keep the native-std leg for RF3's runs (the unit replaced, std native) and the ci leg after the
   lowered std exists at the checkout's key (RE3/RE4, heavy)**; (b) build the lowered std in a worktree for the trial's runs. *Recommended:
