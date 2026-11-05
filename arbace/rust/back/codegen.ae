@@ -402,6 +402,11 @@
                   [(list :align (ref-align lt t))])
     nil))
 
+(defn indirect?
+  "A memory aggregate the Rust ABI passes and returns by pointer (larger than a pointer)."
+  [l]
+  (and (= :memory (:kind l)) (> (:size l) 8)))
+
 (defn cast-int
   "The integer type a small memory aggregate is passed and returned as (the Rust ABI: size up to a pointer's)."
   [l]
@@ -412,7 +417,7 @@
     :zst 'void
     :scalar (symbol (:imm (:scalar l)))
     :pair (list 'struct (symbol (:imm (first (:pair l)))) (symbol (:imm (second (:pair l)))))
-    :memory (cast-int l)
+    :memory (if (indirect? l) 'void (cast-int l))
     (unsupported "aggregate as a return")))
 
 (defn new-globals
@@ -545,7 +550,11 @@
                                     b (load-scalar! bb sb p2 (restrict-align align off))]
                                 {:pair [a b]})
                         (unsupported "load")))
-        store-val! (fn [bb {:keys [ptr align ly]} val]
+        memcpy! (fn [bb dst src size]
+                  (let [nm (symbol "g" "llvm.memcpy.p0.p0.i64")]
+                    (declare! gl nm 'void [['ptr] ['ptr] ['i64] ['i1]])
+                    (emit! bb (list 'call 'void nm [['ptr (list :align (:align dst)) (:ptr dst)] ['ptr (list :align (:align src)) (:ptr src)] ['i64 size] ['i1 'false]]))))
+        store-val! (fn [bb {:keys [ptr align ly] :as dstpl} val]
                      (case (:kind ly)
                        :zst nil
                        :scalar (store-scalar! bb (:scalar ly) val ptr align)
@@ -553,7 +562,10 @@
                                    _ (store-scalar! bb sa a ptr align)
                                    p2 (gep! bb ptr off)]
                                (store-scalar! bb sb b p2 (restrict-align align off)))
-                       (unsupported "store of a memory aggregate")))
+                       :memory (if (:ref val)
+                                 (memcpy! bb dstpl (:ref val) (:size ly))
+                                 (unsupported "store of a memory aggregate from a value"))
+                       (unsupported "store of an aggregate")))
         ;; the pair component a field of a pair/scalar layout lives in
         comp-index (fn [ly fi]
                      (let [offs (:offsets ly)
@@ -933,9 +945,11 @@
                                  (emit! bb (list '= r0 (list 'insertvalue [ty 'poison] [(symbol (:ty a)) (:v a)] 0)))
                                  (emit! bb (list '= r1 (list 'insertvalue [ty r0] [(symbol (:ty b)) (:v b)] 1)))
                                  (emit! bb (list 'ret ty r1)))
-                         :memory (let [pl (:ref v) ci (cast-int ly) r (fresh!)]
-                                   (emit! bb (list '= r (list 'load ci ['ptr (:ptr pl)] :align (:align pl))))
-                                   (emit! bb (list 'ret ci r)))
+                         :memory (if (indirect? ly)
+                                   (emit! bb '(ret void))
+                                   (let [pl (:ref v) ci (cast-int ly) r (fresh!)]
+                                     (emit! bb (list '= r (list 'load ci ['ptr (:ptr pl)] :align (:align pl))))
+                                     (emit! bb (list 'ret ci r))))
                          (unsupported "return of an aggregate"))))
         arg-forms (fn [bb o]
                     (let [v (operand! bb o) l (layout lt (ty-of o))]
@@ -951,9 +965,17 @@
                                                                             (when (and (= :ptr (:prim sc)) (pair-align lt (ty-of o) i)) [(list :align (pair-align lt (ty-of o) i))])
                                                                             [(:v c)])))
                                                 (map vector (:pair v) (take 2 (:pair l)))))
-                        :memory (let [pl (:ref v) ci (cast-int l) r (fresh!)]
-                                  (emit! bb (list '= r (list 'load ci ['ptr (:ptr pl)] :align (:align pl))))
-                                  [[ci r]])
+                        :memory (if (indirect? l)
+                                  ;; passed by pointer: a move hands the place over, a copy goes through a temporary of its own
+                                  (let [pl (:ref v)]
+                                    (if (= "copy" (name (first o)))
+                                      (let [tmp (scratch! (:size l) (:align l))]
+                                        (memcpy! bb {:ptr tmp :align (:align l)} pl (:size l))
+                                        [['ptr (list :align (:align l)) tmp]])
+                                      [['ptr (list :align (:align l)) (:ptr pl)]]))
+                                  (let [pl (:ref v) ci (cast-int l) r (fresh!)]
+                                    (emit! bb (list '= r (list 'load ci ['ptr (:ptr pl)] :align (:align pl))))
+                                    [[ci r]]))
                         (unsupported "aggregate as an argument"))))
         ;; --- unwinding: landing pads, the personality slot, the terminate and unreachable blocks
         slot! (fn [] (or (get @st :slot)
@@ -1145,7 +1167,10 @@
                                                 (let [v (operand! bb f)] (:v v))
                                                 (call-symbol f callee-info))
                                      can-unwind (if (and (seq? callee-info) (map? (second callee-info))) (:can-unwind (second callee-info)) true)
+                                     dl0 (let [d (nth lay (place-local dest))] (if (seq (place-projs dest)) (layout lt (place-type body dest)) d))
+                                     sret-pl (when (indirect? dl0) (place-of! bb dest))
                                      argfs (vec (mapcat #(arg-forms bb %) args))
+                                     argfs (if sret-pl (into [['ptr (list :sret (list 'array (:size dl0) 'i8)) (list :align (:align dl0)) (:ptr sret-pl)]] argfs) argfs)
                                      argfs (if (and (seq? callee-info) (map? (second callee-info)) (:track-caller (second callee-info)))
                                              (conj argfs ['ptr (list :align 8) (caller-location! fn-loc scope)])
                                              argfs)
@@ -1170,9 +1195,11 @@
                                                         (emit! rbb (list '= a (list 'extractvalue [ret r] 0)))
                                                         (emit! rbb (list '= c (list 'extractvalue [ret r] 1)))
                                                         (assign-in! rbb dest {:pair [{:ty (:imm sa) :v a} {:ty (:imm sb) :v c}]}))
-                                                :memory (let [r (fresh!) ci (cast-int dl) pl (place-of! bb dest)]
-                                                          (emit! bb (list '= r instr-form))
-                                                          (store-cast! rbb ci r pl (:size dl)))
+                                                :memory (if (indirect? dl)
+                                                          (emit! bb instr-form)
+                                                          (let [r (fresh!) ci (cast-int dl) pl (place-of! bb dest)]
+                                                            (emit! bb (list '= r instr-form))
+                                                            (store-cast! rbb ci r pl (:size dl))))
                                                 (unsupported "aggregate returned")))]
                                  (when (and ci (symbol? callee))
                                    (declare! gl callee ret (mapv #(vec (butlast %)) argfs)))
@@ -1184,7 +1211,11 @@
                         (unsupported (str "terminator " (first t)))))]
     (llbb! 0)
     (doseq [l (concat (range 1 (inc (:args body))) [0] (range (inc (:args body)) (count locs)))]
-      (when (contains? mem l) (alloca! l)))
+      (when (and (contains? mem l)
+                 ;; an argument passed by pointer and an sret return live in the caller's memory
+                 (not (and (indirect? (nth lay l)) (or (= l 0) (<= 1 l (:args body))) (not= l spread))))
+        (alloca! l)))
+    (when (indirect? (first lay)) (vswap! st assoc-in [:allocas 0] (symbol "%_0")))
     ;; arguments: parameters; memory ones stored into their alloca
     (let [params (vec (mapcat
                        (fn [a]
@@ -1221,10 +1252,14 @@
                                        (store-val! "start" {:ptr (get-in @st [:allocas a]) :align (:align ly) :ly ly} val)
                                        (vswap! st assoc-in [:vals a] val))
                                      (param-forms (assoc ly :pair-aligns [(pair-align lt (:ty (nth locs a)) 0) (pair-align lt (:ty (nth locs a)) 1)]) nil [n0 n1]))
-                             :memory (let [nm (symbol (str "%_" a)) ci (cast-int ly)]
+                             :memory (let [nm (symbol (str "%_" a))]
                                        (when-not (contains? mem a) (unsupported "SSA memory aggregate"))
-                                       (store-cast! "start" ci nm {:ptr (get-in @st [:allocas a]) :align (:align ly)} (:size ly))
-                                       [[ci nm]])
+                                       (if (indirect? ly)
+                                         (do (vswap! st assoc-in [:allocas a] nm)
+                                             [['ptr (list :align (:align ly)) nm]])
+                                         (let [ci (cast-int ly)]
+                                           (store-cast! "start" ci nm {:ptr (get-in @st [:allocas a]) :align (:align ly)} (:size ly))
+                                           [[ci nm]])))
                              (unsupported "aggregate parameter")))))
                        (range 1 (inc (:args body)))))]
       (doseq [b order]
@@ -1244,6 +1279,7 @@
             (llbb! b)
             (emit! nm '(unreachable)))))
       (let [params (if (:track-caller body) (conj params ['ptr (list :align 8) (symbol "%_loc")]) params)
+            params (if (indirect? (first lay)) (into [['ptr (list :sret (list 'array (:size (first lay)) 'i8)) (list :align (:align (first lay))) (symbol "%_0")]] params) params)
             s @st
             start-code (into (:start s) (get-in s [:bbs "start"]))
             bbs (for [nm (:bb-order s)] (list* 'block (symbol (str "%" nm)) (if (= nm "start") start-code (get-in s [:bbs nm]))))
