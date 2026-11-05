@@ -336,6 +336,7 @@
                          "rawptr" (visit-place (nth r 2) :rawborrow loc)
                          "aggregate" (doseq [o (nth r 2)] (visit-operand o loc))
                          "discriminant" (visit-place (second r) :copy loc)
+                         "repeat" (visit-operand (second r) loc)
                          (unsupported (str "rvalue " (first r)))))]
     (doseq [a (range 1 (inc (:args body)))] (define! a [:arg]))
     (doseq [b order]
@@ -1123,7 +1124,7 @@
                                        (and (= :pair (:kind fl)) (= :pair (:kind tl))) v
                                        (and (= :pair (:kind fl)) (= :scalar (:kind tl))) (first (:pair v))
                                        :else (unsupported "PtrToPtr between these layouts")))
-                               (= kind "Transmute")
+                               (#{"Transmute" "BoxDerefTransmute"} kind)
                                (let [fl (layout lt (ty-of o)) tl (layout lt t) v (operand! bb o)]
                                  (cond (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= (:imm (:scalar fl)) (:imm (:scalar tl)))) v
                                        (and (= :pair (:kind fl)) (= :pair (:kind tl))
@@ -1178,6 +1179,26 @@
                                       (if ssa-dest
                                         (when-let [v (aggregate-value bb dly ops variant)] (assign! bb p v))
                                         (when-not (zst? dly) (aggregate-into! bb (place-of! bb p) ops variant))))
+                                    ;; a transmute of a scalar or a pair into a memory place: stored with the place's alignment
+                                    (and (= "cast" (name (first r))) (#{"Transmute" "BoxDerefTransmute"} (second r)) (not ssa-dest) (= :memory (:kind dly))
+                                         (#{:scalar :pair} (:kind (layout lt (ty-of (nth r 2))))))
+                                    (let [fl (layout lt (ty-of (nth r 2)))
+                                          pl (place-of! bb p)
+                                          v (operand! bb (nth r 2))]
+                                      (store-val! bb {:ptr (:ptr pl) :align (:align pl) :ly fl} v))
+                                    ;; [x; N]: a memset for a zero or a byte element (the loop for the rest is not taken)
+                                    (= "repeat" (name (first r)))
+                                    (let [n (Long/parseLong (str (nth r 2)))]
+                                      (when-not (or (zst? dly) (zero? n))
+                                        (let [pl (place-of! bb p)
+                                              v (operand! bb (second r))
+                                              zero? (and v (or (= 0 (:v v)) (= 'false (:v v))))
+                                              nm (symbol "g" "llvm.memset.p0.i64")]
+                                          (when-not v (unsupported "repeat of a zero-sized element"))
+                                          (when-not (or zero? (= "i8" (:ty v)) (= "i1" (:ty v))) (unsupported "repeat loop"))
+                                          (declare! gl nm 'void [['ptr] ['i8] ['i64] ['i1]])
+                                          (let [fill (cond zero? 0 (= 'true (:v v)) 1 (= "i1" (:ty v)) (let [z (fresh!)] (emit! bb (list '= z (list 'zext 'i1 (:v v) 'i8))) z) :else (:v v))]
+                                            (emit! bb (list 'call 'void nm [['ptr (list :align (:align pl)) (:ptr pl)] ['i8 fill] ['i64 (:size dly)] ['i1 'false]]))))))
                                     ssa-dest (when-let [v (rvalue! bb r dly)] (assign! bb p v))
                                     ;; rustc codegens the destination place before the rvalue
                                     :else (let [pl (if (zst? dly) nil (place-of! bb p))
