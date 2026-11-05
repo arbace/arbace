@@ -51,7 +51,7 @@
   "Whether a type or argument names a template's parameter."
   [x]
   (cond
-    (map? x) (or (#{:tparam :tparam-v :tspec :tdep} (:k x)) (some dependent? (vals x)))
+    (map? x) (or (#{:tparam :tparam-v :tspec :tdep :texpr} (:k x)) (some dependent? (vals x)))
     (sequential? x) (some dependent? x)
     :else false))
 
@@ -110,9 +110,39 @@
              (if (and (:c (:ty v)) (:init v)) (sema/const-int (or (:def-scope v) scope) (:init v)) (fail :template "not a constant: " (str/join "::" parts))))
       (fail :template "not a constant: " (str/join "::" parts)))))
 
+(defn- member-constant
+  "The constant `nm` of the class type `t` (X<T>::value), or, when `t` is dependent, the expression standing for it
+  ({:k :texpr :o :sr}, mangled sr...)."
+  [t ^String nm]
+  (if (dependent? t)
+    {:k :texpr :o :sr :base t :name nm}
+    (do (when-not (abi/class? t) (fail :template "a member of a non-class: " nm))
+        (const-entity (:scope (abi/cls (:id t))) [nm]))))
+
+(def ^:private binary-fns
+  {"+" + "-" - "*" * "/" quot "%" rem "<<" bit-shift-left ">>" bit-shift-right "&" bit-and "|" bit-or "^" bit-xor
+   "<" #(if (< %1 %2) 1 0) ">" #(if (> %1 %2) 1 0) "<=" #(if (<= %1 %2) 1 0) ">=" #(if (>= %1 %2) 1 0)
+   "==" #(if (= %1 %2) 1 0) "!=" #(if (not= %1 %2) 1 0) "&&" #(if (and (not= %1 0) (not= %2 0)) 1 0)
+   "||" #(if (or (not= %1 0) (not= %2 0)) 1 0)})
+
+(defn- fold
+  "An operator applied to constants: its value, or (an operand dependent) the expression {:k :texpr :o o :args [...]}."
+  [o args]
+  (if (every? number? args)
+    (let [[a b c] (map long args)]
+      (case o
+        "neg" (- a) "!" (if (zero? a) 1 0) "~" (bit-not a) "?" (if (zero? a) c b)
+        (long ((binary-fns o) a b))))
+    {:k :texpr :o o :args (vec args)}))
+
+(defn- template-name? [scope ^String nm]
+  (let [es (sema/lookup scope nm)]
+    (some #(or (= :tmpl (:e %)) (and (= :type (:e %)) (abi/class? (:ty %)) (:tmpl (abi/cls (:id (:ty %)))))) es)))
+
 (defn eval-text
-  "The value of a constant expression's text in `scope` (integers, the operators, parentheses, names of constants and
-  of non-type parameters, sizeof(type), true and false): a number, or a non-type parameter of a signature."
+  "The value of a constant expression's text in `scope` (integers, the operators, parentheses, the conditional
+  operator, names of constants and of non-type parameters, members of classes (X<T>::value), sizeof(type), true and
+  false): a number, or in a template's signature the dependent expression standing for it."
   [scope ^String s]
   (let [ts (vec (ct/tokens s))
         pos (atom 0)
@@ -123,51 +153,69 @@
                                     (and (> (count t) 1) (str/starts-with? t "0")) (Long/parseLong (subs t 1) 8)
                                     :else (Long/parseLong t))))
         prec {"||" 1 "&&" 2 "|" 3 "^" 4 "&" 5 "==" 6 "!=" 6 "<" 7 ">" 7 "<=" 7 ">=" 7 "<<" 8 ">>" 8 "+" 9 "-" 9 "*" 10 "/" 10 "%" 10}
-        dep (fn [x] (when (map? x) (fail :template-dependent "a dependent expression in a signature: " s)) x)]
+        ;; the tokens of a bracketed run from the current position (its opening token consumed), joined
+        run (fn [^String open ^String close]
+              (let [start @pos]
+                (loop [d 1]
+                  (let [[_ x] (next!)]
+                    (cond (nil? x) (fail :template "constant expression " s)
+                          (= x open) (recur (inc d))
+                          (= x close) (if (= 1 d) (str/join " " (map second (subvec ts start (dec @pos)))) (recur (dec d)))
+                          :else (recur d))))))]
     (letfn [(primary []
               (let [[k t] (next!)]
                 (cond
                   (= t "(") (let [v (expr 0)] (next!) v)
-                  (= t "-") (- (long (dep (primary))))
+                  (= t "-") (fold "neg" [(primary)])
                   (= t "+") (primary)
-                  (= t "!") (if (zero? (long (dep (primary)))) 1 0)
-                  (= t "~") (bit-not (long (dep (primary))))
+                  (= t "!") (fold "!" [(primary)])
+                  (= t "~") (fold "~" [(primary)])
                   (= t "true") 1
                   (= t "false") 0
-                  (= t "sizeof") (let [_ (next!) start @pos
-                                       end (loop [d 1] (let [[_ x] (next!)] (cond (= x "(") (recur (inc d)) (= x ")") (if (= 1 d) (dec @pos) (recur (dec d))) :else (recur d))))
-                                       txt (str/join " " (map second (subvec ts start end)))]
-                                   (abi/size-of (abi/non-ref (sema/resolve-type scope txt))))
+                  (= t "sizeof") (let [_ (next!)
+                                       ty (abi/non-ref (sema/resolve-type scope (run "(" ")")))]
+                                   (if (dependent? ty) {:k :texpr :o "sizeof" :type ty} (abi/size-of ty)))
                   (= k :num) (num t)
                   (= k :chr) (long (int (.charAt ^String t 1)))
-                  (= k :id) (let [parts (loop [ps [t]] (if (= "::" (peek)) (do (next!) (recur (conj ps (second (next!))))) ps))]
-                              (const-entity scope parts))
+                  (= k :id)
+                  ;; a name, qualified, its parts maybe template-ids: Name<...>::member
+                  (let [parts (loop [ps [t]]
+                                (cond
+                                  (and (= "<" (peek)) (template-name? scope (last ps)))
+                                  (do (next!) (recur (conj (pop ps) (str (last ps) "<" (run "<" ">") ">"))))
+                                  (= "::" (peek)) (do (next!) (recur (conj ps (second (next!)))))
+                                  :else ps))]
+                    (if (some #(str/includes? % "<") parts)
+                      (member-constant (sema/resolve-type scope (str/join "::" (butlast parts))) (last parts))
+                      (let [es (when (> (count parts) 1) (sema/lookup scope (first parts)))
+                            e (first (filter #(= :type (:e %)) es))]
+                        (if (and e (dependent? (:ty e)))
+                          (member-constant (sema/resolve-type scope (str/join "::" (butlast parts))) (last parts))
+                          (const-entity scope parts)))))
                   :else (fail :template "constant expression " s))))
             (expr [^long minp]
               (loop [l (primary)]
                 (let [o (peek) p (get prec o)]
                   (cond
-                    (and (= o "?") (<= minp 0)) (do (next!) (let [a (expr 0) _ (next!) b (expr 0)] (if (zero? (long (dep l))) b a)))
-                    (and p (> (long p) minp))
-                    (do (next!)
-                        (let [r (expr p) a (long (dep l)) b (long (dep r))]
-                          (recur (case o "+" (+ a b) "-" (- a b) "*" (* a b) "/" (quot a b) "%" (rem a b) "<<" (bit-shift-left a b)
-                                       ">>" (bit-shift-right a b) "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)
-                                       "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
-                                       "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0) "&&" (if (and (not= a 0) (not= b 0)) 1 0)
-                                       "||" (if (or (not= a 0) (not= b 0)) 1 0)))))
+                    (and (= o "?") (<= minp 0)) (do (next!) (let [a (expr 0) _ (next!) b (expr 0)] (fold "?" [l a b])))
+                    (and p (> (long p) minp)) (do (next!) (recur (fold o [l (expr p)])))
                     :else l))))]
       (let [v (expr 0)]
         (when (< (long @pos) (count ts)) (fail :template "constant expression " s))
         v))))
 
 (defn- const-form
-  "A constant of a template argument's or array bound's form: a number, a name, (cpp/text s)."
+  "A constant of a template argument's or array bound's form: a number, a name, X<T>::member, (cpp/text s)."
   [scope f]
   (cond
     (number? f) (long f)
     (true? f) 1 (false? f) 0
-    (symbol? f) (const-entity scope (if (namespace f) (concat (str/split (namespace f) #"/") [(name f)]) [(name f)]))
+    (symbol? f) (let [parts (if (namespace f) (concat (str/split (namespace f) #"/") [(name f)]) [(name f)])
+                      e (when (> (count parts) 1) (first (filter #(= :type (:e %)) (sema/lookup scope (first parts)))))]
+                  (if (and e (dependent? (:ty e)))
+                    (member-constant (sema/resolve-type-form scope (symbol (str/join "/" (butlast parts)))) (last parts))
+                    (const-entity scope parts)))
+    (and (seq? f) (= 'cpp/scope (first f))) (member-constant (sema/resolve-type-form scope (second f)) (name (last f)))
     (and (seq? f) (= 'cpp/text (first f))) (eval-text scope (second f))
     :else (fail :template "constant " (pr-str f))))
 
@@ -211,50 +259,124 @@
 
 (defn- tparam-of? [x tid] (and (map? x) (= tid (:tid x)) (#{:tparam :tparam-v} (:k x))))
 
-(defn- deduce-type
-  "Matches P against A, binding the parameters of `tid` in the atom `b` ({i arg}); true on success
-  (DeduceTemplateArgumentsByTypeMatch's cases for the types the slice has)."
-  [b tid P A]
-  (cond
-    (and (= :tparam (:k P)) (= tid (:tid P)))
-    (let [qs (filter #(get P %) [:c :v])]
-      (when (every? #(get A %) qs)
-        (let [a (apply dissoc A qs) old (get @b (:i P))]
-          (if (some? old) (= old a) (do (swap! b assoc (:i P) a) true)))))
-    (not (dependent? P)) (= P A)
-    (= :tdep (:k P)) true ; a nested-name-specifier's member: a non-deduced context ([temp.deduct.type]/5.1)
-    (or (not= (boolean (:c P)) (boolean (:c A))) (not= (boolean (:v P)) (boolean (:v A)))) false
-    :else
-    (case (:k P)
-      :ptr (and (= :ptr (:k A)) (deduce-type b tid (:to P) (:to A)))
-      :ref (and (= :ref (:k A)) (deduce-type b tid (:to P) (:to A)))
-      :rref (and (= :rref (:k A)) (deduce-type b tid (:to P) (:to A)))
-      :arr (and (= :arr (:k A))
-                (let [n (:n P)]
-                  (cond (tparam-of? n tid) (let [old (get @b (:i n))]
-                                             (if old (= (:val old) (:n A)) (do (swap! b assoc (:i n) {:val (:n A) :bound true}) true)))
-                        :else (= n (:n A))))
-                (deduce-type b tid (:of P) (:of A)))
-      :fn (and (= :fn (:k A)) (= (count (:ps P)) (count (:ps A))) (= (boolean (:va P)) (boolean (:va A)))
-               (deduce-type b tid (:ret P) (:ret A)) (every? true? (map #(deduce-type b tid %1 %2) (:ps P) (:ps A))))
-      :tspec (and (abi/class? A)
-                  (let [c (abi/cls (:id A))]
-                    (and (= (:tmpl c) (:tmpl P)) (= (count (:args P)) (count (:targs c)))
-                         (every? true? (map (fn [p a]
-                                              (cond (tparam-of? p tid) (let [old (get @b (:i p))]
-                                                                          (if (some? old) (same-arg? old a) (do (swap! b assoc (:i p) a) true)))
-                                                    (contains? p :val) (= (:val p) (:val a))
-                                                    :else (deduce-type b tid p a)))
-                                            (:args P) (:targs c))))))
-      false)))
+;; Qualifiers: an array's are its elements' ([basic.type.qualifier]/3), as clang's getUnqualifiedArrayType sees them
+(defn- arr-cv [t] (if (abi/arr? t) (arr-cv (:of t)) t))
+(defn- quals [t] (let [t (arr-cv t)] (cond-> #{} (:c t) (conj :c) (:v t) (conj :v))))
+(defn- unq-array [t] (if (abi/arr? t) (assoc (abi/unq t) :of (unq-array (:of t))) (abi/unq t)))
+(defn- with-quals [t qs]
+  (if (abi/arr? t) (assoc t :of (with-quals (:of t) qs)) (cond-> (abi/unq t) (qs :c) (assoc :c true) (qs :v) (assoc :v true))))
+(defn- inconsistent-or-superset?
+  "hasInconsistentOrSupersetQualifiersOf: P has a qualifier A lacks."
+  [P A] (not (every? (quals A) (quals P))))
 
-(defn- deduce-class-or-base
-  "[temp.deduct.call]/4.3: a template-id P matched against the class A or, failing, one of its bases."
-  [b tid P A]
-  (let [snap @b]
-    (or (deduce-type b tid P A)
-        (and (= :tspec (:k (abi/unq P))) (abi/class? A)
-             (some (fn [bs] (reset! b snap) (deduce-class-or-base b tid P (cond-> {:k :class :id (:cls bs)} (:c A) (assoc :c true)))) (:bases (abi/cls (:id A))))))))
+(defn- canonical [t]
+  (cond (and (map? t) (#{:tparam :tparam-v} (:k t))) (select-keys t [:k :i :c :v])
+        (map? t) (into {} (map (fn [[k v]] [k (canonical v)]) t))
+        (vector? t) (mapv canonical t)
+        :else t))
+
+(declare deduce-by-type-match)
+
+(defn- bind-arg!
+  "checkDeducedTemplateArguments: the parameter i deduced as `a`, consistent with an earlier deduction."
+  [b i a]
+  (let [old (get @b i)]
+    (if (some? old) (same-arg? old a) (do (swap! b assoc i a) true))))
+
+(defn- deduce-template-spec
+  "DeduceTemplateSpecArguments: P a template-id of the template, A a class; the arguments matched pairwise
+  (TDF_None), and with :derived-class, failing that, A's bases searched (DeduceTemplateBases, [temp.deduct.call]/4.3:
+  the deduction must be unique)."
+  [b tid P A tdf]
+  (let [one (fn [A]
+              (let [c (abi/cls (:id A)) snap @b]
+                (if (and (= (:tmpl c) (:tmpl P)) (= (count (:args P)) (count (:targs c)))
+                         (every? true? (map (fn [p a]
+                                              (cond (and (map? p) (= :tparam-v (:k p)) (= tid (:tid p))) (bind-arg! b (:i p) a)
+                                                    (contains? p :val) (= (:val p) (:val a))
+                                                    :else (deduce-by-type-match b tid p a #{} :none)))
+                                            (:args P) (:targs c))))
+                  true
+                  (do (reset! b snap) false))))]
+    (and (abi/class? A)
+         (or (one A)
+             (and (tdf :derived-class)
+                  (let [snap @b
+                        found (loop [todo (map :cls (:bases (abi/cls (:id A)))) seen #{} hits []]
+                                (if-let [c (first todo)]
+                                  (if (seen c)
+                                    (recur (rest todo) seen hits)
+                                    (do (reset! b snap)
+                                        (if (one {:k :class :id c})
+                                          (recur (rest todo) (conj seen c) (conj hits [c @b]))
+                                          (recur (concat (rest todo) (map :cls (:bases (abi/cls c)))) (conj seen c) hits))))
+                                  hits))]
+                    (reset! b snap)
+                    (when (= 1 (count (distinct (map second found))))
+                      (reset! b (second (first found)))
+                      true)))))))
+
+(defn deduce-by-type-match
+  "DeduceTemplateArgumentsByTypeMatch (SemaTemplateDeduction.cpp at llvmorg-23.1.4), ported for the types of the
+  slice: P (a type with the parameters of the template `tid`) matched against A, the deductions bound in the atom `b`
+  ({index argument}); true on success. `tdf` the deduction flags (#{:skip-non-dependent :param-with-reference
+  :ignore-qualifiers :derived-class}), `pok` :call while partially ordering a call's parameters ([temp.deduct.partial]
+  /5-/9), else :none."
+  [b tid P A tdf pok]
+  (let [[P A ok tdf]
+        (if (= pok :call)
+          ;; [temp.deduct.partial]/5: references replaced by their referred types; /9: of two references to the same
+          ;; type, an lvalue reference's or a more cv-qualified one's argument is not as specialized
+          (let [pr (abi/ref? P) ar (abi/ref? A)
+                P (abi/non-ref P) A (abi/non-ref A)
+                ;; the same type as clang's canonical types compare: a parameter by its depth and index
+                bad (and pr ar (= (canonical (unq-array P)) (canonical (unq-array A)))
+                         (or (and (= :ref pr) (not= :ref ar))
+                             (and (every? (quals P) (quals A)) (not= (quals P) (quals A)))))]
+            ;; /7: the top-level cv-qualifiers removed
+            [(unq-array P) (unq-array A) (not bad) tdf])
+          [(if (tdf :param-with-reference) (with-quals (unq-array P) (set (filter (quals A) (quals P)))) P) A true tdf])]
+    (cond
+      (not ok) false
+      ;; T, cv-list T
+      (and (= :tparam (:k P)) (= tid (:tid P)))
+      (when (or (tdf :ignore-qualifiers) (not (inconsistent-or-superset? P A)))
+        (when-not (and (abi/fn? A) (seq (quals P)))
+          ;; the parameter's qualifiers removed from the deduced type
+          (bind-arg! b (:i P) (with-quals (unq-array A) (set (remove (quals P) (quals A)))))))
+      :else
+      (let [qual-ok (or (tdf :ignore-qualifiers)
+                        (if (tdf :param-with-reference)
+                          (not (inconsistent-or-superset? P A))
+                          (= (quals P) (quals A))))]
+        (cond
+          (not qual-ok) false
+          (not (dependent? P)) (or (boolean (tdf :skip-non-dependent))
+                                   (if (tdf :ignore-qualifiers) (= (unq-array P) (unq-array A)) (= P A)))
+          :else
+          (let [down (if (= pok :call) :none pok)]
+            (case (:k P)
+              :ptr (and (abi/ptr? A) (deduce-by-type-match b tid (:to P) (:to A) (set (filter #{:ignore-qualifiers :derived-class} tdf)) down))
+              :ref (and (= :ref (:k A)) (deduce-by-type-match b tid (:to P) (:to A) #{} down))
+              :rref (and (= :rref (:k A)) (deduce-by-type-match b tid (:to P) (:to A) #{} down))
+              :arr (and (abi/arr? A)
+                        (deduce-by-type-match b tid (:of P) (:of A) (set (filter #{:ignore-qualifiers} tdf)) down)
+                        (let [n (:n P)]
+                          ;; a dependent bound: the array's size deduces the non-type parameter (DeducedFromArrayBound)
+                          (if (and (map? n) (= :tparam-v (:k n)) (= tid (:tid n)))
+                            (bind-arg! b (:i n) {:val (:n A) :bound true})
+                            (= n (:n A)))))
+              :fn (and (abi/fn? A) (= (count (:ps P)) (count (:ps A))) (= (boolean (:va P)) (boolean (:va A)))
+                       (deduce-by-type-match b tid (:ret P) (:ret A) #{} down)
+                       (every? true? (map #(deduce-by-type-match b tid %1 %2 #{} pok) (:ps P) (:ps A))))
+              :tspec (deduce-template-spec b tid P A tdf)
+              ;; T::name: a non-deduced context ([temp.deduct.type]/5.1)
+              :tdep true
+              :texpr true ; an expression: non-deduced ([temp.deduct.type]/5.3)
+              :tparam true ; another template's parameter at another depth: skipped
+              false)))))))
+
+(defn- deduce-type "TDF_None outside partial ordering." [b tid P A] (deduce-by-type-match b tid P A #{} :none))
 
 (defn- sym-scope [t] (bind-scope (:scope t) (:params t) nil (:id t)))
 
@@ -293,18 +415,37 @@
       (when (> (count forms) (count (:params t))) (fail :template "too many template arguments"))
       (vec (map-indexed (fn [i x] (resolve-arg scope (nth (:params t) i) x)) forms)))))
 
-(defn- add-cv
-  "A with the cv-qualifiers of P (at the elements of an array) added."
-  [A P]
-  (if (and (abi/arr? P) (abi/arr? A))
-    (assoc A :of (add-cv (:of A) (:of P)))
-    (cond-> A (:c P) (assoc :c true) (:v P) (assoc :v true))))
+(defn- forwarding-reference?
+  "isForwardingReference: an rvalue reference to a cv-unqualified parameter of the template itself."
+  [P tid]
+  (and (= :rref (:k P)) (= :tparam (:k (:to P))) (= tid (:tid (:to P))) (empty? (quals (:to P)))))
+
+(defn- simple-template-id? [t] (= :tspec (:k (abi/unq t))))
+
+(defn- adjust-for-deduction
+  "AdjustFunctionParmAndArgTypesForDeduction ([temp.deduct.call]/2-/4), ported: [P A tdf] for the parameter type P
+  and the argument expression `e`, or nil."
+  [P e tid]
+  (let [A (:ty e)
+        P (abi/unq P)
+        pref (when (abi/ref? P) P)
+        P (if pref (:to P) P)]
+    (when-not (or (= :fnset (:op e)) (= :init-list (:op e)) (nil? A))
+      (let [A (if pref
+                (if (and (forwarding-reference? pref tid) (= :lv (:cat e))) (abi/lref A) A)
+                (cond (abi/arr? A) (abi/ptr (:of A))
+                      (abi/fn? A) (abi/ptr A)
+                      :else (unq-array A)))
+            tdf (cond-> #{:skip-non-dependent}
+                  pref (conj :param-with-reference)
+                  (abi/ptr? A) (conj :ignore-qualifiers)
+                  (or (simple-template-id? P) (and (abi/ptr? P) (simple-template-id? (:to P)))) (conj :derived-class))]
+        [P A tdf]))))
 
 (defn deduce-call
-  "[temp.deduct.call]: the template arguments of the function template `t` for the call's typed arguments, after the
-  explicit ones; nil when deduction fails. Each P/A pair adjusted as /2-/4 say (a reference's referred type; an
-  array's or function's decay and the top-level cv dropped for a non-reference; a forwarding reference and an lvalue:
-  A&; the qualification conversion of a pointer), then matched."
+  "DeduceTemplateArguments for a call ([temp.deduct.call]): the template arguments of the function template `t` for
+  the call's typed arguments after the explicit ones, each parameter's P and A adjusted (adjust-for-deduction) and
+  matched (deduce-by-type-match); nil when deduction fails."
   [t explicit args]
   (let [sig (sym-sig t)
         ps (:ps sig)
@@ -314,44 +455,26 @@
       (when (every? true?
                     (for [[P e] (map vector ps args)
                           :when (dependent? P)]
-                      (let [A (:ty e)]
-                        (if (or (= :fnset (:op e)) (= :init-list (:op e)) (nil? A))
-                          false
-                          (let [fwd (and (= :rref (:k P)) (tparam-of? (:to P) tid) (not (:c (:to P))) (= :lv (:cat e)))
-                                [P A] (cond
-                                        fwd [(:to P) (abi/lref A)]
-                                        ;; the referred type may be more cv-qualified than A (an array's elements carry it)
-                                        (abi/ref? P) [(:to P) (add-cv A (:to P))]
-                                        :else [(abi/unq P) (abi/unq (cond (abi/arr? A) (abi/ptr (:of A))
-                                                                          (abi/fn? A) (abi/ptr A)
-                                                                          :else A))])
-                                ;; a more cv-qualified P: its qualifiers dropped from both ([temp.deduct.call]/4.1)
-                                [P A] (if (and (or (:c P) (:v P)) (not fwd)) [(abi/unq P) (abi/unq A)] [P A])
-                                ;; a qualification conversion of a pointer (/4.2)
-                                A (if (and (abi/ptr? P) (abi/ptr? A) (:c (:to P)) (not (:c (:to A)))) (assoc A :to (assoc (:to A) :c true)) A)]
-                            (deduce-class-or-base b tid P A))))))
+                      (if-let [[P A tdf] (adjust-for-deduction P e tid)]
+                        (deduce-by-type-match b tid P A tdf :none)
+                        false)))
         (finish-deduction t @b)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Partial ordering ([temp.func.order], [temp.deduct.partial])
 
 (defn- at-least-as-specialized?
-  "Whether the parameters `p1` (of template tid1) deduce the template tid2's from its `p2`, each pair stripped of
-  references and top-level cv ([temp.deduct.partial]/5-7)."
+  "isAtLeastAsSpecializedAs for a call: the template tid2's parameters deduced from tid1's, pair by pair, with
+  TDF_None in the partial ordering of a call (the references' and qualifiers' rules inside the match)."
   [tid2 p2s p1s]
-  (let [b (atom {})
-        adj (fn [t] (abi/unq (abi/non-ref t)))]
-    (every? true? (map (fn [p2 p1] (deduce-type b tid2 (adj p2) (adj p1))) p2s p1s))))
+  (let [b (atom {})]
+    (every? true? (map (fn [p2 p1] (deduce-by-type-match b tid2 p2 p1 #{} :call)) p2s p1s))))
 
 (defn more-specialized-fn?
-  "Whether the function template tid1 is more specialized than tid2 for a call with `n` arguments."
+  "getMoreSpecialized for a call with `n` arguments: tid1 at least as specialized as tid2 and not the reverse."
   [tid1 tid2 n]
   (let [s1 (take n (:ps (sym-sig (tmpl tid1)))) s2 (take n (:ps (sym-sig (tmpl tid2))))]
-    (let [a (at-least-as-specialized? tid2 s2 s1) b (at-least-as-specialized? tid1 s1 s2)]
-      (or (and a (not b))
-          ;; [temp.deduct.partial]/9: of two references otherwise equal, the lvalue reference's is more specialized
-          (and a b (some true? (map #(and (= :ref (:k %1)) (= :rref (:k %2))) s1 s2))
-               (not (some true? (map #(and (= :rref (:k %1)) (= :ref (:k %2))) s1 s2))))))))
+    (and (at-least-as-specialized? tid2 s2 s1) (not (at-least-as-specialized? tid1 s1 s2)))))
 
 (defn tiebreak
   "[over.match.best]/2.4-2.5 for two candidates no argument ranks apart: a non-template function over a template's

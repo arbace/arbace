@@ -184,11 +184,14 @@
       cpp/elaborated (resolve-type-form scope (nth f 2))
       typename (resolve-type-form scope (second f))
       <> (if-let [h (:template-id @hooks)] (h scope f) (fail :template "template-id " (pr-str f)))
-      cpp/scope (let [t (resolve-type-form scope (second f))
-                      _ (when-not (abi/class? t) (fail :type "a scope of a non-class " (pr-str f)))
+      cpp/scope (let [t (resolve-type-form scope (second f))]
+                  (if (#{:tparam :tspec :tdep} (:k (abi/unq t)))
+                    ;; a member of a dependent type in a template's signature (CODEGEN.md G3)
+                    {:k :tdep :base t :names (mapv #(if (symbol? %) (name %) (fail :type "type form " (pr-str f))) (nnext f))}
+                  (let [_ (when-not (abi/class? t) (fail :type "a scope of a non-class " (pr-str f)))
                       es (lookup-qualified (:scope (abi/cls-of t)) (mapv #(if (symbol? %) (name %) (fail :type "type form " (pr-str f))) (nnext f)) false)
                       e (type-entity es)]
-                  (or (:ty e) (fail :type "unknown type " (pr-str f))))
+                  (or (:ty e) (fail :type "unknown type " (pr-str f))))))
       cpp/global (binding [] (resolve-type-form (loop [s scope] (if (:parent s) (recur (:parent s)) s)) (second f)))
       (fail :type "type form " (pr-str f)))
     :else (fail :type "type form " (pr-str f))))
@@ -217,13 +220,26 @@
             m (re-find #"((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)+)(~\s*)?$" t)]
         (when m (vec (map str/trim (remove str/blank? (str/split (second m) #"::")))))))))
 
+(defn- split-scope
+  "A qualified name's parts: the text split at the :: outside template argument lists and parentheses."
+  [^String t]
+  (loop [i 0 d 0 start 0 out []]
+    (if (>= i (count t))
+      (conj out (subs t start))
+      (let [c (.charAt t i)]
+        (cond
+          (#{\< \(} c) (recur (inc i) (inc d) start out)
+          (#{\> \)} c) (recur (inc i) (max 0 (dec d)) start out)
+          (and (zero? d) (= c \:) (< (inc i) (count t)) (= \: (.charAt t (inc i)))) (recur (+ i 2) d (+ i 2) (conj out (subs t start i)))
+          :else (recur (inc i) d start out))))))
+
 (defn- ref-qualifier
   "A DeclRefExpr's written qualifier's parts and whether it starts with ::."
   [n]
   (let [t (node-text n)]
     (when (and t (str/includes? t "::"))
       (let [g (str/starts-with? (str/trim t) "::")
-            parts (vec (map str/trim (remove str/blank? (str/split t #"::"))))]
+            parts (vec (map str/trim (remove str/blank? (split-scope t))))]
         [g (vec (butlast parts))]))))
 
 (defn lookup-qualified
