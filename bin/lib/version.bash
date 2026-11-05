@@ -90,7 +90,6 @@ arbace_embedded_sources() {
        ! -path 'arbace/repr/rust/*' \
        ! -path arbace/repr/ocaml.ae ! -path 'arbace/repr/ocaml/*' \
        ! -path arbace/repr/scheme.ae ! -path 'arbace/repr/scheme/*' ! -path 'arbace/scheme/*' \
-       ! -path arbace/repr/python.ae ! -path 'arbace/repr/python/*' ! -path arbace/python.ae ! -path 'arbace/python/*' \
        ! -path arbace/repr/cpp.ae ! -path 'arbace/repr/cpp/*' ! -path arbace/repr/llvm.ae ! -path 'arbace/repr/llvm/*' \
        ! -path 'arbace/cpp/*' | LC_ALL=C sort)
 }

@@ -8,6 +8,8 @@
 # arbace/tls, goi, jrt, repr/go's Go forms, jdk/forms, jdk/data, bin/lib/tls-checks.bash, ...). Then the audit's
 # identity of the hosts :gate and :prog (test/gate/audit.ae) names the same exclusions. No executable.
 # C9: ci's namespaces (arbace/c, arbace/repr/c) and arbace.lang.CInterp are embedded, so the key hashes them.
+# W2 (PYS28 (a), queue 214): repr/python, arbace/python and pyi's runtime go/arbace/{py,libm} too (j2g copies the runtime, goi's table
+# lists it); pyi's lazy modules (expat, pyexpat, clib, pybz2, pylzma, pyzstd, pyssl) not (W-P6 (a)).
 # By hand: test/gate/gate-key-crops-test.bash [ARBACE_GO [VERSION_BASH [AUDIT_AE]]]   (older copies to test)
 set -uo pipefail
 src=$(cd "$(dirname "$0")/../.." && pwd)
@@ -25,12 +27,13 @@ grep -q '^gate_rest_key() {' "$d/fns.bash" && grep -q '^arbace_embedded_sources(
   || { echo "FAIL: gate_key, gate_rest_key or arbace_embedded_sources not found"; exit 1; }
 
 excluded="bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip
-go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/arbace/libm.ae go/arbace/libm/libm.ae go/arbace/expat.ae go/arbace/expat/xmlparse_doc.ae go/arbace/pyexpat.ae go/arbace/pyexpat/pyexpat.ae go/arbace/clib.ae go/arbace/clib/clib.ae go/arbace/pybz2.ae go/arbace/pybz2/pybz2.ae go/arbace/pylzma.ae go/arbace/pylzma/pylzma.ae jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae
+go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/arbace/expat.ae go/arbace/expat/xmlparse_doc.ae go/arbace/pyexpat.ae go/arbace/pyexpat/pyexpat.ae go/arbace/clib.ae go/arbace/clib/clib.ae go/arbace/pybz2.ae go/arbace/pybz2/pybz2.ae go/arbace/pylzma.ae go/arbace/pylzma/pylzma.ae go/arbace/pyzstd.ae go/arbace/pyzstd/pyzstd.ae go/arbace/pyssl.ae go/arbace/pyssl/pyssl.ae jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae
 arbace/repr/cpp.ae arbace/repr/cpp/convert.ae arbace/repr/llvm.ae arbace/cpp/lower.ae
-arbace/repr/ocaml.ae arbace/repr/scheme.ae arbace/scheme/aot.ae arbace/repr/python.ae arbace/repr/python/print.ae
-arbace/python.ae arbace/python/scope.ae go/arbace/py.ae go/arbace/py/frame.ae"
+arbace/repr/ocaml.ae arbace/repr/scheme.ae arbace/scheme/aot.ae"
 kept="go/arbace/ci.ae go/arbace/ci/expr.ae go/arbace/cinterp.ae go/arbace/cinterp/natives.ae go/arbace/crt.ae go/arbace/crt/mem.ae
 arbace/c.ae arbace/c/build.ae arbace/c/cinterp.ae arbace/repr/c.ae arbace/repr/c/lex.ae arbace/lang/CInterp.ae
+arbace/repr/python.ae arbace/repr/python/print.ae arbace/python.ae arbace/python/scope.ae go/arbace/py.ae go/arbace/py/frame.ae
+go/arbace/libm.ae go/arbace/libm/libm.ae
 arbace/core.ae arbace/o2j.ae arbace/http.ae arbace/tls/x.ae arbace/go/check.ae arbace/repr/go.ae
 go/arbace.ae go/arbace/api.ae go/arbace/goi.ae go/arbace/goi/x.ae go/arbace/jrt/x.ae go/arbace/repr/go/godump.ae
 go/arbace/gotable.edn go/arbace/cmd/arbace/image.ae go/arbace/cimore/x.ae
@@ -68,11 +71,13 @@ host_block() { awk -v h="$1" '$0 ~ "^ *(\\{)?:" h " " {f=1} f && $0 ~ /^ *:[a-z-
 gb=$(host_block gate); pb=$(host_block prog)
 [ -n "$gb" ] && [ -n "$pb" ] || { echo "FAIL: no :gate or :prog in $aud"; exit 1; }
 for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!jdk/ocaml/' '!go/arbace/oi.ae' \
-         '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm/' '!go/arbace/py.ae' '!go/arbace/py/' \
-         '!go/arbace/libm.ae' '!go/arbace/libm/' '!go/arbace/expat.ae' '!go/arbace/expat/' '!go/arbace/pyexpat.ae' '!go/arbace/pyexpat/' \
+         '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm/' '!go/arbace/expat.ae' '!go/arbace/expat/' '!go/arbace/pyexpat.ae' '!go/arbace/pyexpat/' \
          '!go/arbace/clib.ae' '!go/arbace/clib/' '!go/arbace/pybz2.ae' '!go/arbace/pybz2/' \
-         '!go/arbace/pylzma.ae' '!go/arbace/pylzma/'; do
+         '!go/arbace/pylzma.ae' '!go/arbace/pylzma/' '!go/arbace/pyzstd.ae' '!go/arbace/pyzstd/' '!go/arbace/pyssl.ae' '!go/arbace/pyssl/'; do
   if echo "$gb" | grep -qF "\"$p\""; then ok "audit :gate names $p"; else bad "audit :gate does not name $p"; fi
+done
+for p in '!go/arbace/py.ae' '!go/arbace/py/' '!go/arbace/libm.ae' '!go/arbace/libm/' '!arbace/python/' '!arbace/repr/python/'; do
+  if echo "$gb" | grep -qF "\"$p\""; then bad "audit :gate names $p (embedded since W2)"; else ok "audit :gate does not name $p"; fi
 done
 for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/'; do
   if echo "$pb" | grep -qF "\"$p\""; then ok "audit :prog names $p"; else bad "audit :prog does not name $p"; fi
