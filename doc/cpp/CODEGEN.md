@@ -259,6 +259,7 @@ objects, const overloads with a nested class, default arguments, static locals. 
 | the libstdc++ testsuite's recorded list (234 files) | not run: 229 need C++ library headers and templates (§1) |
 | `bin/repr-cpp native-check samples` after the parser's change | 9 of 9 the same, 68 of 68 items (as on `cpp-sema`) |
 | G2 (`cpp-codegen2`, 2026-11-05, light, 4 jobs): `bin/cppi codegen-check` over `test/cpp/codegen` | 82 of 82 pass all three levels (`known.edn` empty); generate and lower 70-85 s, gcc, clang and runs 6 s |
+| G2: `bin/repr-cpp native-check samples` after the parser's change (variables' `:clink`) | 9 of 9 the same, 68 of 68 items, 43 s |
 | G2: the existing samples again (16 files, our route) | 2 of 16 run by our route, as clang's: `samples/bitfields.cpp`, `samples/vexing.cpp`; the other 14 below (3 min 53 s, the headers' skim dominating) |
 
 The existing samples' first refusals after G2: templates (`auto.cpp` a function template, `classes.cpp`, `layouts.cpp`
