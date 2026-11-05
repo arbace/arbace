@@ -137,6 +137,8 @@
                       :variance [] :immediate false})
     p))
 
+(def ^:dynamic *let-equations* "The GADT equations a let's patterns add, for its body (an atom), or nil" nil)
+
 (def ^:dynamic *equations* "The GADT equations of the case being typed: an atom of [path previous-declaration]" nil)
 
 (defn- add-equation [t1 t2]
@@ -368,6 +370,56 @@
   (let [t (ty/expand-head t) d (ty/desc t)]
     (if (and (= :Tconstr (d 0)) (= (d 1) ty/path-option)) (first (d 2)) (type-error "not an option type"))))
 
+(defn- inferred?
+  "Typecore.is_inferred"
+  [sexp]
+  (let [d (:pexp_desc sexp)]
+    (case (d 0)
+      (:Pexp_ident :Pexp_apply :Pexp_field :Pexp_constraint :Pexp_coerce) true
+      :Pexp_pack (some? (d 2))
+      :Pexp_sequence (inferred? (d 2))
+      :Pexp_ifthenelse (and (d 3) (inferred? (d 2)) (inferred? (d 3)))
+      :Pexp_struct_item (and (= :Pstr_open ((:pstr_desc (d 1)) 0)) (inferred? (d 2)))
+      false)))
+
+(defn type-argument
+  "Typecore.type_argument: an argument expected as a function without labels, its optional parameters eliminated
+  (applied to None, eta-expanded after a let)"
+  [env sarg texpected]
+  (let [no-labels (fn [t] (let [[ls tvar] (list-labels t)] (and (not tvar) (every? #(= :Nolabel (% 0)) ls))))
+        te (ty/expand-head texpected) td (ty/desc te)]
+    (if-not (and (inferred? sarg) (= :Tarrow (td 0)) (= :Nolabel ((td 1) 0)))
+      (type-expect env sarg texpected)
+      (let [safe-expect (no-labels (td 3))
+            texp (type-exp env sarg)
+            [args tyfun simple-res]
+            (loop [args [] tf (:type texp)]
+              (let [e (ty/expand-head tf) d (ty/desc e)]
+                (cond
+                  (and (= :Tarrow (d 0)) (ty/is-optional (d 1)))
+                  (recur (conj args [(d 1) (option-none (ty/instance (extract-option-type (d 2))) nil)]) (d 3))
+                  (and (= :Tarrow (d 0)) (or (= :Nolabel ((d 1) 0)) ty/*classic*)) [args tf (no-labels (d 3))]
+                  (= :Tvar (d 0)) [args tf false]
+                  :else [[] (:type texp) false])))
+            texp (assoc texp :type (ty/instance (:type texp)))]
+        (if-not (or simple-res safe-expect)
+          (do (unify! (:type texp) texpected "expression") texp)
+          (let [ty-fun (ty/instance tyfun)
+                [ty-arg ty-res] (let [d (ty/desc (ty/expand-head texpected))] [(d 2) (d 3)])]
+            (unify! ty-fun texpected "expression")
+            (if (empty? args)
+              texp
+              (let [var-pair (fn [n t] (let [id (ty/ident-create n)
+                                             vd {:type t :kind [:reg] :path (ty/pident id) :id id}]
+                                         [{:desc [:Tpat_var id n] :type t}
+                                          (mkexp [:Texp_ident (ty/pident id) vd] t nil)]))
+                    [eta-pat eta-var] (var-pair "eta" ty-arg)
+                    [let-pat let-var] (var-pair "arg" (:type texp))
+                    e (mkexp [:Texp_apply let-var (conj args [[:Nolabel] eta-var])] ty-res nil)
+                    cases [{:lhs eta-pat :guard nil :rhs e}]
+                    func (mkexp [:Texp_function [] [:cases cases :Total (name-pattern "param" [eta-pat]) nil]] ty-fun nil)]
+                (mkexp [:Texp_let :Nonrecursive [{:pat let-pat :expr texp :attrs nil}] func] ty-fun (:loc texp))))))))))
+
 (defn type-application
   "Typecore.type_application: the arguments in the order of the function's type, an omitted one nil (Omitted ()),
   an eliminated optional one None; returns [args result-type]"
@@ -418,7 +470,7 @@
                                      [l (if wrapped
                                           (let [t (extract-option-type targ)]
                                             (option-some (type-expect env sarg t) t))
-                                          (type-expect env sarg targ))])
+                                          (type-argument env sarg targ))])
                             :eliminated [l (option-none (ty/instance (extract-option-type (a 1))) nil)]
                             :omitted [l [:omitted (a 1)]]))
                         args)
@@ -453,8 +505,9 @@
                        ;; Typecore's "terrible hack for format strings": the literal typed as its format's constructors
                        (type-expect env (assoc (fmt/type-format ((:pconst_desc (d 1)) 1)) :pexp_loc loc) expected)
                        (let [[c tf] (constant (d 1))] (ret [:Texp_constant c] (tf))))
-      :Pexp_let (let [[vbs env'] (type-let env (d 1) (d 2))
-                      body (type-expect env' (d 3) expected)]
+      :Pexp_let (let [eqs (atom [])
+                      [vbs env'] (binding [*let-equations* eqs] (type-let env (d 1) (d 2)))
+                      body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
                   (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))
       :Pexp_function (let [sbody (if-let [c (d 2)]
                                    (if (and (= :Pfunction_body ((d 3) 0)) (= :Pconstraint (c 0)))
@@ -633,7 +686,8 @@
                           (let [td (ty/newvar)]
                             (unify! (ty/type-option td) targ "parameter")
                             [td (type-expect env default td)])
-                          [targ nil])
+                          (do (when (ty/is-optional l) (unify! (ty/type-option (ty/newvar)) targ "parameter"))
+                              [targ nil]))
             vars (atom []) eqs (atom [])
             p (binding [*equations* eqs] (type-pat env spat tint vars))
             env' (add-pattern-vars env @vars)
@@ -757,11 +811,38 @@
                                  (reverse (c 1)))))
       :else (type-error "this let's type constraint is outside the slice"))))
 
+(defn- gadt-pattern?
+  "A pattern with a GADT constructor (a let that refines types, typed as a match is)"
+  [env sp]
+  (letfn [(go [x]
+            (cond
+              (and (map? x) (:ppat_desc x) (= :Ppat_construct ((:ppat_desc x) 0)))
+              (or (some :res (try (env/lookup env :constrs (:txt ((:ppat_desc x) 1))) (catch Exception _ nil)))
+                  (go ((:ppat_desc x) 2)))
+              (map? x) (some go (vals x))
+              (sequential? x) (some go x)
+              :else false))]
+    (boolean (go sp))))
+
+(declare type-let*)
+
 (defn type-let
   "[value-bindings env'] for let [rec]: each {:pat :expr}"
   [env rec svbs]
-  (let [svbs (mapv vb-constraint svbs)
-        res (ty/with-local-level
+  (let [svbs (mapv vb-constraint svbs)]
+    (if (and (= rec :Nonrecursive) (= 1 (count svbs)) *let-equations* (gadt-pattern? env (:pvb_pat (first svbs))))
+      ;; let K = e in body with K a GADT constructor: the expression first, then its pattern with equations that
+      ;; hold over the body (as match e with K -> body)
+      (let [vb (first svbs)
+            e (type-exp env (:pvb_expr vb))
+            vars (atom [])
+            p (binding [*equations* *let-equations*] (type-pat env (:pvb_pat vb) (:type e) vars))]
+        [[{:pat p :expr e :attrs nil}] (add-pattern-vars env @vars)])
+    (type-let* env rec svbs))))
+
+(defn- type-let*
+  [env rec svbs]
+  (let [res (ty/with-local-level
               (let [pats (mapv (fn [vb] (let [vars (atom [])
                                               p (type-pat env (:pvb_pat vb) (ty/newvar) vars)]
                                           [p @vars]))

@@ -121,6 +121,10 @@
                          ["max_wosize" "max_wosize"] ["ostype_unix" "ostype_unix"] ["ostype_win32" "ostype_win32"]
                          ["ostype_cygwin" "ostype_cygwin"] ["backend_type" "backend_type"]]]
               [(str "%" k) {:t :p :name (str "sys.constant_" n) :arity 1}]))
+   (into {} (for [n [1 2 3] [op base] [["ref" 1] ["set" 2]] u ["" "unsafe_"]]
+              [(str "%caml_ba_" u op "_" n) {:t :bigarray :op (if (= op "ref") "get" "set") :unsafe (= u "unsafe_") :n n
+                                            :arity (+ n base)}]))
+   (into {} (for [n [1 2 3]] [(str "%caml_ba_dim_" n) {:t :p :name (str "Bigarray.dim_" n) :arity 1}]))
    (into {} (for [[op ar] [["load" 1] ["exchange" 2] ["cas" 3] ["fetch_add" 2]]
                   [k extra] [["" 0] ["_field" 1]]]
               [(str "%atomic_" op k) {:t :atomic :op op :field (= k "_field") :arity (+ ar extra)}]))
@@ -176,6 +180,26 @@
    :nativeint {:eq "Nativeint.==" :ne "Nativeint.!=" :le "Nativeint.<=" :lt "Nativeint.<" :ge "Nativeint.>="
                :gt "Nativeint.>" :compare "compare_bints nativeint"}})
 
+(def ^:private bigarray-kinds
+  {"float16_elt" "float16" "float32_elt" "float32" "float64_elt" "float64" "int8_signed_elt" "sint8"
+   "int8_unsigned_elt" "uint8" "int16_signed_elt" "sint16" "int16_unsigned_elt" "uint16" "int32_elt" "int32"
+   "int64_elt" "int64" "int_elt" "camlint" "nativeint_elt" "nativeint" "complex32_elt" "complex32"
+   "complex64_elt" "complex64"})
+
+(defn- bigarray-kind-layout
+  "Typeopt.bigarray_type_kind_and_layout: the element kind and layout a bigarray's type names"
+  [t]
+  (let [decode (fn [t tbl dfl]
+                 (let [d (ty/desc (ty/expand-head t))]
+                   (or (when (and (= :Tconstr (d 0)) (empty? (d 2)) (= :Pdot ((d 1) 0)) (= :Pident (((d 1) 1) 0))
+                                  (= "Stdlib__Bigarray" (:name (((d 1) 1) 1))))
+                         (get tbl ((d 1) 2)))
+                       dfl)))
+        d (ty/desc (ty/expand-head t))]
+    (if (and (= :Tconstr (d 0)) (= 3 (count (d 2))))
+      [(decode ((d 2) 1) bigarray-kinds "generic") (decode ((d 2) 2) {"c_layout" "C" "fortran_layout" "Fortran"} "unknown")]
+      ["generic" "unknown"])))
+
 (defn- specialize
   "Translprim.specialize_primitive: the primitive as the types make it"
   [ty has-constant-constructor prim]
@@ -187,6 +211,7 @@
       :setfield (assoc prim :ptr (if (= 2 (count ps)) (ty/maybe-pointer (second ps)) :pointer))
       :array (assoc prim :kind (let [k (if (seq ps) (ty/array-kind (first ps)) "gen")] k))
       :makeblock (assoc prim :shape (mapv ty/value-kind ps))
+      :bigarray (assoc prim :kl (if (seq ps) (bigarray-kind-layout (first ps)) ["generic" "unknown"]))
       :cmp (if (empty? ps)
              (assoc prim :kind :generic)
              (let [p1 (first ps)]
@@ -211,6 +236,7 @@
     :cmp (let [k (or (:kind prim) :generic) n (get-in cmp-names [k (:c prim)])]
            (if (#{:generic :strings :bytes} k) (l/pccall n) (l/prim n)))
     :p (l/prim (:name prim))
+    :bigarray (let [[k lay] (:kl prim)] (l/prim (str "Bigarray." (when (:unsafe prim) "unsafe_") (:op prim) "[" k "," lay "]")))
     :external (l/pccall (:name prim))))
 
 (defn- prim-arity [prim desc]
@@ -224,7 +250,7 @@
     :atomic (:arity prim)
     (:apply :revapply :cmp) 2
     :sys-argv 0
-    (:p :array) (:arity prim)
+    (:p :array :bigarray) (:arity prim)
     :external (:arity desc)))
 
 (declare inline-lazy-force)
