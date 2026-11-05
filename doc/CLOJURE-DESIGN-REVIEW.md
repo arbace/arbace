@@ -273,3 +273,7 @@ Read: `test/clojure/divergences*.edn`, `test/reap/matrix.edn`, `bin/reap --entri
 (`compilation.clj`, `genclass.clj`, `genclass/examples.clj`, `java_interop.clj`, `reflect.clj`, `java/javadoc.clj`, `clojure_xml.clj`),
 jdk26u's `java.desktop` and `java.sql` sources for sizes. Probes: stage 0 `-e` (primitive typing, above) and
 `target/arbace-go/amd64/arbace-javac -e` (SAX parse, above); no build was started.
+
+## Decided (2026-11-05, the user)
+
+CDR1: measure the 42 locale cases under JRT_LOCALES=common at night, then flip the shipped default to common (+8.9 MB) if they pass, reversing the decision of 2026-10-11 (effective at the next re-seed). CDR2-CDR9 as recommended: a typed primitive invoke; gen-class in two stages; the java.sql, Point and Color slice; SAX and StAX in the shipped world under 10 MB of growth; a 2-day serialization spike; a one-off long limit for seq-and-transducer; clj-1208 eval-by-design and AOT-deferred; the out-for-good class split by reason.
