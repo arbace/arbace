@@ -1809,3 +1809,48 @@ run at cirun's speed, about 130 times faster (DECISION 1).
     (ci's Prog has one stack today: a change for the main host), the GIL released only around the library's sleeps
     (a native for nanosleep), so C never runs in two goroutines at once. SQLite is built `SQLITE_THREADSAFE=1` with
     its mutexes uncontended, so `sqlite3.threadsafety` is CPython's 3.
+
+## Decided (2026-11-05, the user): 208's DECISIONs
+
+- **DECISION 1 (a), decided:** arbace/ci and arbace/crt are listed in goi's table at the re-seed after Python's tag.
+  This is the main host's REQUEST, given in 208's report. Until then the tests of megabytes stay `:clib-on-goi`.
+- **DECISION 2 (a), decided:** the node programs of bzip2, liblzma and zstd are committed as forms and checked by
+  `bin/pyi-clib verify`. SQLite is built on the main host into a keyed cache, and runs compiled only.
+
+## After the decisions: `_lzma`, and zstd's library (2026-11-05, the Mac VM, queue 208)
+
+- **liblzma committed** (`go/arbace/clib/xz`):
+  - The build: `tools/pyi/clib/xz/` holds lib.conf (the 69 files of `src/liblzma`'s `liblzma.la`), `config.h` (the
+    tarball's configure output, run once: no threads, every filter, the three checks) and `pylzma.c`.
+  - `pylzma.c` holds the layouts, the filter chains, and the option structures of the LZMA, delta and BCJ filters,
+    made and read field by field, so their layout stays liblzma's.
+  - The result: 1.93 MB of node program, 2.05 MB of forms, 3 min 30 s with the checkout's builder.
+  - `bin/pyi-clib` takes lib.conf's `includes`, with the glue's directory first on the include path (its config.h).
+- **`_lzma`** (`go/arbace/pylzma`, lazy, as `_bz2`): `Modules/_lzmamodule.c` ported statement for statement:
+  - `LZMACompressor`: the formats XZ, ALONE and RAW; a preset or a filter chain.
+  - `LZMADecompressor`: the formats AUTO, XZ, ALONE and RAW; memlimit; `check`, `eof`, `needs_input`, `unused_data`.
+  - `is_check_supported`, `_encode_filter_properties`, `_decode_filter_properties`, `LZMAError` and the constants.
+  - The unsigned converters' messages ("Cannot convert negative int", "Python int too large for C uint32_t" and
+    the like).
+  - Filter specifiers: a key outside the options, or a refused value, raises the "Invalid filter specifier"
+    ValueError.
+  - A dict given as the filter chain is "dict is not a sequence".
+
+  pyi's AOT links it with liblzma compiled by cf2g (`arbace/clib/xz/aot`).
+- **Samples (the VM).**
+  - `l1.py` against `python3 -I -B`: every format and check, a delta+LZMA2 chain, max_length, the properties
+    codecs, 21 error cases, pickling, the constants. It is equal on goi (22 s, the start included) and compiled.
+  - test_lzma, 121 methods:
+    - compiled: 121 equal (120 ok, plus the refleak skip CPython's reference also skips);
+    - on goi: 120 equal, 1 `:clib-on-goi` (test_decompress_limited's 2 MB of zeros), 0 failing; 13 minutes, 150 s
+      cap per test.
+- **zstd's library committed** (`go/arbace/clib/zstd`, decision 2 (a)):
+  - The build: the four library directories; `-U__x86_64__ -U__amd64__` (cpu.h's portable branch, its
+    `ZSTD_cpuid` asm avoided), with `ZSTD_NO_INTRINSICS`, `ZSTD_DISABLE_ASM` and `ZSTD_LEGACY_SUPPORT=0`, and no
+    threads.
+  - `pyzstd.c` holds the buffers' layouts and wrappers for the calls that pass a structure by value (`ZSTD_bounds`,
+    `ZDICT_params_t`).
+  - The result: 4.12 MB of node program, 4.36 MB of forms, 3 min 54 s.
+  - Checked: `ZSTD_compress` at levels 1, 3 and 19 on 4 inputs, through arbace/clib with ci's interpreter
+    compiled, gives the same bytes as gcc's build of the same files and decompresses back (12 of 12).
+  - `_zstd`'s glue (`Modules/_zstd/`, 2,567 lines plus the clinic's 1,176) is not written yet: the next step.
