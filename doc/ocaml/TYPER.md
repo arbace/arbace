@@ -159,3 +159,7 @@ Total beyond this slice: about 31 to 49 days, within the survey's 15-30 for a ch
   the samples are. *Recommended: (c)*, with (a) meanwhile; (b) costs 5.4 MB of history for a stopgap.
 - **TY6 The order after this slice.** (a) T7, T8, T11, then T9, T10, T12 (standalone first: the stdlib and the run
   corpus without ocamlc); (b) T7, T9, T10 first (the core complete before modules); (c) T8 first. *Recommended: (a)*.
+
+## Decided (2026-11-05, the user)
+
+TY1-TY6, each as recommended: the raw Lambda judged until T7, then both; the samples' oracle dumps committed and verified fresh when ocdump is present; bin/oi typer-check an essential step once they land; the typer in arbace/repr/ocaml/typer/, out of gate_key; T8 unit by unit, bin/oi stdlib meanwhile; the order T7, T8, T11, T9, T10, T12.
