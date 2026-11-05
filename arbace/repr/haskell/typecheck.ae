@@ -137,6 +137,15 @@
         t)
       t)))
 
+(defn deep-expand
+  "A type with every synonym expanded"
+  [t]
+  (let [t (expand (prune t))]
+    (case (first t)
+      :tc [:tc (second t) (mapv deep-expand (nth t 2))]
+      :app (mk-app (deep-expand (nth t 1)) (deep-expand (nth t 2)))
+      t)))
+
 (defn- adjust-levels! [t lvl]
   (doseq [i (metas-of t)]
     (swap! *metas* update i (fn [m] (assoc m :level (min (:level m) lvl))))))
@@ -266,7 +275,7 @@
     (swap! *wanteds* conj {:ev i :pred pred})
     (list 'ev i)))
 
-(defn- zonk-pred [[c ts]] [c (mapv (comp expand zonk) ts)])
+(defn- zonk-pred [[c ts]] [c (mapv (comp deep-expand zonk) ts)])
 
 (defn- match-ty
   "One-way match of a pattern type (its variables in vs) against t: the extended map or nil"
@@ -775,6 +784,8 @@
   (let [inner? (fn [i] (> (:level (get @*metas* i)) *level*))
         ty-metas (vec (filter inner? (distinct (mapcat metas-of tys))))
         ;; simplify: solve by instances what has a known head, keep the rest
+        ;; the constraints a local binding deferred come after the group's own (GHC solves them later)
+        wanteds (concat (remove :late wanteds) (filter :late wanteds))
         simplified (loop [ws wanteds out []]
                      (if (empty? ws)
                        out
@@ -794,12 +805,15 @@
         deferred (vec (concat outer (remove quant? cands)))
         ;; the metas of deferred wanteds are not generalised
         _ (doseq [w deferred t (second (:pred w))] (adjust-levels! t *level*))
-        _ (doseq [w deferred] (swap! *wanteds* conj w))
+        _ (doseq [w deferred] (swap! *wanteds* conj (assoc w :late true)))
         gen (vec (filter inner? (distinct (mapcat metas-of tys))))
         names (mapv (fn [i] (str "t" i)) gen)
         _ (doseq [[i n] (map vector gen names)] (swap! *metas* assoc-in [i :ref] [:tv n]))
         ;; the quantified constraints, each once; the duplicates' evidence is the first's parameter
         preds (reduce (fn [acc w] (if (some #(= (zonk-pred (:pred w)) (zonk-pred (:pred %))) acc) acc (conj acc w))) [] q)
+        ;; grouped by class, the classes in the order of their first constraint (GHC's inert dictionaries, a map by class)
+        corder (vec (distinct (map (comp first :pred) preds)))
+        preds (vec (sort-by #(.indexOf ^java.util.List corder (first (:pred %))) preds))
         ;; a constraint a superclass of another implies is not quantified (GHC's mkMinimalBySCs)
         implied? (fn [w] (some (fn [o] (and (not= o w)
                                             (some #(= (zonk-pred (:pred w)) (zonk-pred (first %)))
@@ -929,6 +943,9 @@
 (defn- qtvs-names [qtvs]
   (vec (keep (fn [t] (let [b (arg (lval t) 3)] (when (= 'HsBndrVar (con b)) (nm (arg b 2))))) (arg qtvs 2))))
 
+(def constructor-classes
+  #{"Functor" "Applicative" "Monad" "Foldable" "Traversable" "MonadFail" "Alternative" "MonadPlus" "MonadFix" "MonadZip"})
+
 (defn- data-decl! [m d]
   (let [tn (nm (arg d 2)) tvn (qtvs-names (arg d 3))
         names (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) tvn)
@@ -965,10 +982,15 @@
         (let [body (lval (arg (lval sg) 3))
               cls (when (= 'HsTyVar (con body)) (nm (arg body 3)))]
           (when cls
-            (swap! *insts* conj {:dfun (ext-name "var" m (str "$f" (occ cls) (occ tn)))
-                                 :tvs names
-                                 :ctx (vec (for [[n x] (map vector tvn names) :when (contains? used n)] [cls [[:tv x]]]))
-                                 :head [cls [res]]})))))))
+            (if (and (contains? constructor-classes (occ cls)) (seq names))
+              ;; a class of type constructors (Functor, Monad...): the head drops the last parameter
+              (swap! *insts* conj {:dfun (ext-name "var" m (str "$f" (occ cls) (occ tn)))
+                                   :tvs (vec (butlast names)) :ctx []
+                                   :head [cls [[:tc tn (mapv (fn [x] [:tv x]) (butlast names))]]]})
+              (swap! *insts* conj {:dfun (ext-name "var" m (str "$f" (occ cls) (occ tn)))
+                                   :tvs names
+                                   :ctx (vec (for [[n x] (map vector tvn names) :when (contains? used n)] [cls [[:tv x]]]))
+                                   :head [cls [res]]}))))))))
 
 (defn- syn-decl! [d]
   (let [tn (nm (arg d 2)) tvn (qtvs-names (arg d 3))
@@ -1017,7 +1039,7 @@
         [ctx head] (if (= :forall (first t)) [(nth t 2) (nth t 3)] [[] t])
         cls (second head) ts (nth head 2)
         dfun (ext-name "var" m (str "$f" (occ cls) (head-occs ts)))]
-    (swap! *insts* conj {:dfun dfun :tvs names :ctx ctx :head [cls ts]})
+    (swap! *insts* conj {:dfun dfun :tvs names :ctx ctx :head [cls (mapv deep-expand ts)]})
     {:dfun dfun :tvs names :ctx ctx :cls cls :ts ts :binds (arg d 3)}))
 
 (defn- method-type
@@ -1079,10 +1101,16 @@
                  (or (solve-pred [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)] (vec (remove #(= [cls ts] (first %)) givens)) 0)
                      (do (error! "no superclass dictionary " (occ sc)) (list 'lit "?"))))
         dcon (list 'v (ext-name "var" (nmod cls) (str "C:" (occ cls))))
-        fields (concat supers (map (fn [[cm _]] (if (empty? params) cm (list 'app cm params))) methods))
+        ;; an instance with a context: each superclass dictionary a binding of its own over the context's
+        ;; dictionaries ($cp1Cls), as GHC's tcSuperClasses makes it; without one the dictionary inline
+        sc-binds (when (seq params)
+                   (vec (map-indexed (fn [i term] [(fresh-lv (str "$cp" (inc i) (occ cls))) (list 'lam params term)]) supers)))
+        sc-fields (if (seq params) (map (fn [[x _]] (list 'app x params)) sc-binds) supers)
+        fields (concat sc-fields (map (fn [[cm _]] (if (empty? params) cm (list 'app cm params))) methods))
         dict (list 'app dcon (vec fields))]
     (into [(list 'bind dfun (if (empty? params) dict (list 'lam params dict)))]
-          (map (fn [[cm c]] (list 'bind cm c)) methods))))
+          (concat (map (fn [[x c]] (list 'bind x c)) sc-binds)
+                  (map (fn [[cm c]] (list 'bind cm c)) methods)))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Defaulting and the end of the module
@@ -1382,15 +1410,33 @@
   [binds]
   (vec (for [b (mapcat (fn [x] (if (= 'rec (first x)) (second x) [x])) binds)] [(second b) (nth b 2)])))
 
-(defn- core-binds
-  "Top-level bindings by key (the binder's name text, or the local occ): [[key core]...], rec groups flattened,
-  the Typeable bindings dropped"
+(defn- method-owners
+  "The instance methods' binders ($cop, local) mapped to their dictionary function's occurrence: two instances'
+  methods of the same name are told apart by it"
   [binds]
-  (vec (for [b (mapcat (fn [x] (if (= 'rec (first x)) (second x) [x])) binds)
-             :let [n (second b) o (if (= 'lv (first n)) (str (second n)) (nth (vec (map #(if (symbol? %) (name %) %) n)) 3))]
+  (into {} (for [b binds
+                 :let [n (second b) rhs (nth b 2)
+                       rhs (if (and (seq? rhs) (= 'lam (first rhs))) (nth rhs 2) rhs)]
+                 :when (and (not= 'lv (first n)) (str/starts-with? (nth (vec (map #(if (symbol? %) (name %) %) n)) 3) "$f")
+                            (seq? rhs) (= 'app (first rhs)))
+                 a (nth rhs 2)
+                 :let [x (if (and (seq? a) (= 'app (first a))) (second a) a)]
+                 :when (and (seq? x) (= 'lv (first x)))]
+             [x (nth (vec (map #(if (symbol? %) (name %) %) n)) 3)])))
+
+(defn- core-binds
+  "Top-level bindings by key (the binder's name text, or the local occ, an instance method's with its dictionary
+  function's): [[key core]...], rec groups flattened, the Typeable bindings dropped"
+  [binds]
+  (let [flat (mapcat (fn [x] (if (= 'rec (first x)) (second x) [x])) binds)
+        owners (method-owners flat)]
+  (vec (for [b flat
+             :let [n (second b) o (if (= 'lv (first n))
+                                    (str (second n) (when-let [d (get owners n)] (str "@" d)))
+                                    (nth (vec (map #(if (symbol? %) (name %) %) n)) 3))]
              :when (not-any? #(str/starts-with? o %) typeable-prefixes)
              :when (not (and (= 'lv (first n)) (str/starts-with? o "$d")))]
-         [(if (= 'lv (first n)) (str "local " o) o) (nth b 2)])))
+         [(if (= 'lv (first n)) (str "local " o) o) (nth b 2)]))))
 
 (defn compare-with-ghc
   "Our elaboration against the tc verb's dump: {:types {:equal n :diff [...]} :evidence {:equal n :diff [...]} :core-equal n}"
