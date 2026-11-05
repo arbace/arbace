@@ -624,10 +624,11 @@ No default cap is set: the measure of the day's shards is too small to choose on
   (`lib-unix/unix-socket/recvfrom_unix`). (a) a class by design for the AOT levels (`:unix-java`: Unix sockets, datagrams,
   `getaddrinfo` beyond numeric hosts); (b) the compiled level over Go's syscall (OT15 (b)'s world: the runtime's sockets as Go
   forms): 2 days for 1 program. *Recommended: (a)*.
-- **OT25 The compiled shards of socket and process programs.** Their package holds java.net's or ProcessBuilder's JDK classes on top
-  of the runtime's (6.1 GB for five such programs). (a) shards of at most 3 for the programs that include unix, by OT20 (b)'s bytes
-  once calibrated; (b) OT15 (b)/OT20 (c): the JDK's translated classes in a package built once, shared by the shards; (c) the AOT
-  levels' sockets and processes by design (classes), the runtime without them. *Recommended: (a)* tonight, (b) with the gate step.
+- **OT25 The compiled shards of the programs that include unix.** Their package holds the Unix library's units, translated into each
+  program's package as compiler-libs' are (OT26), and java.net's or ProcessBuilder's JDK classes for those that reach Sock or
+  ExtProc (6.1 GB for five such programs). (a) shards of at most 3 for the programs that include unix, by OT20 (b)'s bytes
+  once calibrated; (b) the library units in `ocaml.u` once (OT26 (a)'s change, unix and threads too) and OT15 (b)/OT20 (c)'s JDK package built once;
+  (c) the AOT levels' sockets and processes by design (classes), the runtime without them. *Recommended: (a)* tonight, then (b).
 - **OT26 compiler-libs' units at the compiled level.** (a) translate them once into `ocaml.u` as the stdlib's (o2j `clib` with the
   complib units, the programs that include config or ocamlcommon linking them from there): half a day, the shard's size back to its
   programs'; (b) shards of one for these programs (7 programs, 7 builds a night). *Recommended: (a)*.
