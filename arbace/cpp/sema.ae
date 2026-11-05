@@ -181,10 +181,12 @@
                ps (remove #{'&} ps)
                ps (if (= ['void] (vec ps)) [] ps)]
            {:k :fn :ret (resolve-type-form scope r)
-            :ps (vec (mapcat #(if (and (seq? %) (= 'pack-expand (first %)))
-                                (if-let [h (:pack-expand @hooks)] (h scope (second %)) (fail :pack "a pack expansion"))
-                                [(resolve-type-form scope %)])
-                             ps))
+            ;; a parameter of array or function type is a pointer ([dcl.fct]/5), a substituted one too
+            :ps (mapv (fn [t] (cond (abi/arr? t) (abi/ptr (:of t)) (abi/fn? t) (abi/ptr t) :else t))
+                      (mapcat #(if (and (seq? %) (= 'pack-expand (first %)))
+                                 (if-let [h (:pack-expand @hooks)] (h scope (second %)) (fail :pack "a pack expansion"))
+                                 [(resolve-type-form scope %)])
+                              ps))
             :va (boolean va)})
       cpp/elaborated (resolve-type-form scope (nth f 2))
       typename (resolve-type-form scope (second f))
@@ -1157,6 +1159,7 @@
                  any-method (some #(and (:cls %) (not (:static %))) ms)
                  obj (or obj (when (and (:implicit-this callee) any-method (:this-type ctx)) (deref-node (this-expr ctx))))
                  cands (concat (:fns callee) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
+                 _ (when (and (empty? cands) (empty? (:tmpls callee))) (fail :name "unknown name " (:name callee)))
                  fid (resolve-overload cands args obj)
                  f (fnd fid)]
              (if (and (:cls f) (not (:static f)))
@@ -1285,6 +1288,10 @@
         (or (operator-call ctx "()" (into [callee] args)) (fail :call "no operator()"))
         (analyze-call ctx (if (and (= :fnset (:op callee)) (str/includes? (or (node-text cn) "") "::")) (assoc callee :qualified true) callee) args)))
     "MemberExpr" (member-expr ctx n)
+    ;; a member named in a template's pattern whose lookup clang left to the instantiation (f<T>() in a member)
+    "UnresolvedMemberExpr" (if (seq (kids n))
+                             (member-expr ctx (assoc n :name (get-in n [:referencedDecl :name])))
+                             (name-expr ctx n))
     "ArraySubscriptExpr"
     (let [[an in] (kids n) a (analyze ctx an) i (analyze ctx in)]
       (or (when (class-operand? a) (operator-call ctx "[]" [a i]))
@@ -1332,7 +1339,9 @@
   (let [ty (resolve-type (:scope ctx) (get-in n [:type :qualType]))
         id (next-id)
         st (if (= "static" (:storageClass n)) :static-local storage)
-        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx)}]
+        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx)}
+        ;; a constant local's initializer, for constant expressions (an array bound, a template argument)
+        v (if (and (:c ty) (abi/integral? (abi/unq ty)) (first (kids n))) (assoc v :init (first (kids n)) :def-scope (:scope ctx)) v)]
     (swap! *vars* assoc id v)
     id))
 
