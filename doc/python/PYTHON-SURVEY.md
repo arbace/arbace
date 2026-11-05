@@ -2245,3 +2245,89 @@ samples on the VM; nothing recorded is committed (the main host's night records 
   without it.
 - **Sizes**, extrapolated from 24 files a corpus: the packs about 410 MB raw, 50 MB xz (stdlib 18, site-packages 11,
   lib-test 21; scopes besides), within ORS11's 100 MB; committed: the essential dumps 1.9 MB and the manifests about 4 MB.
+
+## As built: 217, `_ssl` round two (2026-11-05, the Mac VM, queue 217)
+
+209's `_ssl` passed test_ssl's sample (176 equal) and asyncio's TLS tests. 217 measured what was still short of
+CPython: test_ssl's classed methods, a wider sample of modules that use `ssl`, and probes over MemoryBIOs that compare
+pyi with `python3 -I -B` beyond test_ssl. It made OpenSSL's behaviour where Go's TLS allows it, and recorded the rest
+as by design.
+
+### What was built
+
+- **The SNI callback's alert.** `_servername_callback` answers a refusal with an alert: the integer the callback
+  returns, handshake_failure when it raises, internal_error for another type. Go's server always sends
+  internal_error when `GetConfigForClient` fails. The transport sees the records the engine writes, and that alert is
+  still in the clear (before the server's hello), so it puts the callback's description in Go's alert record. The
+  unraisable is CPython's (`PyErr_FormatUnraisable`'s text, object None).
+- **The message callback** (`_msg_callback`, kept and never called before). The transport carries the records, and
+  the Python thread feeds and flushes them with the GIL held, so the callback runs there. It reports each record's
+  header (SSL3_RT_HEADER, 256) and the messages still in the clear: the handshake up to the change of keys, change
+  cipher spec (SSL3_MT_CHANGE_CIPHER_SPEC, 257) and alerts. The versions are OpenSSL 3.5's: the context's highest
+  before the server hello, the negotiated one after (supported_versions read from the hello). A received change
+  cipher spec is reported under TLS 1.3 only, as OpenSSL 3.5 does. A callback's exception is raised by the operation
+  (PySSL_ChainExceptions).
+- **Verification failures send OpenSSL's alerts** (ssl_x509err2alert): unknown_ca for 18, 19 and 20,
+  certificate_expired for 10, bad_certificate for 62, 64 and 66-68, and so on. Go sends bad_certificate. Under
+  TLS 1.2 that record is in the clear, and the transport rewrites its description.
+- **The security level.** `set_ciphers`' `@SECLEVEL=N` now sets the level; before, it was read and dropped. The cipher
+  string is cut as OpenSSL's rule parser cuts it: a word ends at `@`, a `@KEYWORD` ends its item, and `DEFAULT` counts
+  only as the first word. `load_cert_chain` refuses a leaf key below the level (EE_KEY_TOO_SMALL) and a chain key
+  below it (CA_KEY_TOO_SMALL). It refuses no signature digest: OpenSSL 3.5 loads a SHA-1 leaf at level 2.
+  Verification adds X509_verify_cert's level checks: 66 for the leaf's key, 67 for an issuer's key, 68 for a
+  signature digest. Go refuses SHA-1 signatures itself; from level 1 on, that refusal is code 68.
+- **PEM.** A block OpenSSL's PEM reader cannot decode is "PEM lib" at the certificate step. Go's `pem.Decode`
+  silently skips such a block.
+- **The automatic chain** (ssl_add_cert_chain without SSL_MODE_NO_AUTO_CHAIN). A certificate loaded without its chain
+  is sent with the chain that the context's store builds for it, root included.
+- **Sessions.**
+  - Before its first ticket, a TLS 1.3 client's session has no id and a ticket_lifetime_hint of 0.
+  - A server's session is reported; it was None.
+  - OP_NO_TICKET stops TLS 1.2's tickets only: OpenSSL's TLS 1.3 server then sends stateful tickets, which the client
+    sees as tickets. Go's switch covers both versions, so the server's configuration follows the version the client
+    hello will get.
+- **memoryview** (`memoryview.go`, a fix outside `_ssl`). `memoryview(view)` keeps the view's start, stride and
+  format. Before, a non-contiguous view passed through `memoryview()` became contiguous, so `MemoryBIO.write` (and
+  every `y*` argument) accepted it instead of raising BufferError. This fixes test_ssl's
+  `MemoryBIOTests.test_buffer_types`, which `:buffer-exports`' pattern had matched though it was not that cause.
+
+### By design (what Go's crypto/tls does not give; `:ssl-go-tls` and the probes)
+
+- **Kept from 209:**
+  - TLS 1.3 post-handshake authentication (HAS_PHA False). `verify_client_post_handshake` raises CPython's
+    NotImplementedError; with OpenSSL it raises EXTENSION_NOT_RECEIVED.
+  - TLS-PSK.
+  - finite-field DHE.
+  - SSLv3.
+  - the cipher each side prefers.
+- **The TLS 1.3 exporter secret in the key log.** Go logs four secrets a connection, OpenSSL five
+  (test_keylog_filename).
+- **What the message callback cannot see.** Messages under the keys are not reported: TLS 1.2's Finished, TLS 1.3's
+  encrypted handshake, and the inner content types. Go's `tls.Conn` keeps its keys.
+- **TLS 1.3's verification alerts.** They go out under the handshake keys, so the peer sees Go's bad_certificate where
+  OpenSSL sends unknown_ca or certificate_expired.
+- **`get_channel_binding("tls-unique")` under TLS 1.3 is None.** Go gives no Finished for TLS 1.3, where RFC 9266
+  leaves tls-unique undefined; OpenSSL returns its Finished.
+- **SHA-1 signatures at security level 0.** OpenSSL accepts them; Go's x509 refuses them at any level and has no
+  switch to allow them since Go 1.24.
+- **TLS 1.2 with OP_NO_TICKET resumes nothing.** Go's server has no session-id cache; OpenSSL's has one.
+
+### Samples (run on the VM)
+
+| sample | result |
+|---|---|
+| `bin/pyi lib-test-all --fresh test_ssl` | 206 methods: 176 → **180 equal**, 30 → 26 classed (20 → 17 `:ssl-go-tls`, 4 `:ssl-finalization`, 5 cpython-only, `:buffer-exports` 1 → 0), 0 failing, on each of the three runtime commits |
+| `test/python/pyi/d-ssl-callbacks.py` (new) | equal to `python3 -I -B`: the SNI alerts, the clear records and messages under TLS 1.2 and 1.3, a callback's exception, a non-contiguous view |
+| `test/python/pyi/d-ssl-levels.py` (new, with `ssl/levels/`) | equal to `python3 -I -B`: set_ciphers' levels, load_cert_chain's checks, 8 verification failures with their TLS 1.2 alerts, a client certificate refused, the automatic chain, sessions under TLS 1.2 and 1.3 with and without OP_NO_TICKET. Before 217: the run stopped at `set_ciphers("DEFAULT@SECLEVEL=1")` |
+| `test/python/pyi/d-ssl.py` (209's) | still equal |
+| asyncio before the changes: `test_asyncio.test_events test_streams test_sendfile test_ssl test_sslproto` | 515 methods: 485 equal, 30 classed, 0 failing; the only TLS methods among the classed are `:ssl-finalization`'s 8 |
+| asyncio at the head: `test_asyncio.test_ssl test_sslproto test_streams test_selector_events test_base_events` | 386 methods: 371 equal, 15 classed (8 `:ssl-finalization`, the rest not TLS's), 0 failing |
+| `bin/pyi lib-test-all --fresh test_httpservers test_logging test_xmlrpc test_urllib` | their TLS tests all equal (test_httpservers' HTTPS server, test_logging's HTTPS handler, test_urllib's, test_xmlrpc's ssl presence); the 7 failures are not `_ssl`'s (logging's exception tracebacks and `__del__` at shutdown, two 300 s timeouts under the VM's load) |
+
+### Narrowed and left
+
+- **Narrowed.** `:ssl-go-tls` lost test_msg_callback_tls12, test_sni_callback_alert and test_sni_callback_raising.
+  test_buffer_types passes.
+- **`:ssl-finalization` stays PYS9's.** Its 4 test_ssl methods and 8 asyncio methods need an SSL object freed by
+  `gc.collect()`.
+- **The engine goroutine of an abandoned SSL object is not ended.** This is 209's Low; it needs the same finalizer.
