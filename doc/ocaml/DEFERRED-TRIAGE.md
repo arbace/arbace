@@ -482,3 +482,7 @@ files changed: 13 programs moved to the suite, 28 thread programs and 15 suite p
   one package). (a) `O2J_SHARD=8` for the whole night's run (about 45 shards, 4 to 5 h); (b) shards sized by the programs' translated size
   (o2j's output bytes), a cap of about 4 GB; (c) OT15 (b), the JDK's classes and the runtime in a package built once. *Recommended: (b)*
   tonight with a cap, (c) with the gate step.
+
+## Decided (2026-11-05, the user: OT16-OT20)
+
+OT16 (b): the programs calling alarm or Sys.signal classed by a source grep; OT17 (a): creation-order thread start; OT18 (a): signals in fix 7; OT19 (a): link-test's packs a class; OT20: (b) compiled shards sized by translated size with a 4 GB cap tonight, (c) the JDK classes built once later.
