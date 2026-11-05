@@ -622,6 +622,13 @@ covers what.
   "GHC: the Glasgow Haskell Compiler License" below); the rest of `compiler/GHC/Rename/` read as the
   specification of the scoping and of the dependency analyses. The helper's `rn` and `iface` verbs,
   `tools/hsdump/HsRn.hs`, are Arbace's own, written against GHC's API.
+- `arbace/repr/haskell/desugar.ae` and `arbace/repr/haskell/tostg.ae` (the front end's match compiler, HF5, and its
+  CorePrep, CoreToStg and Unarise, HF6; doc/haskell/FRONTEND-SURVEY.md, "As built: HF5-HF6"): written on 2026-11-05
+  after GHC 9.14.1's algorithms (the same tarball and pin: `compiler/GHC/HsToCore/Match.hs`, `Match/Constructor.hs`,
+  `Match/Literal.hs`, `GuardedRHSs.hs`, `ListComp.hs`, `compiler/GHC/Core/Utils.hs`'s `refineDefaultAlt`,
+  `compiler/GHC/CoreToStg/Prep.hs`, `CoreToStg.hs`, `compiler/GHC/Stg/Unarise.hs`, `Stg/FVs.hs`,
+  `compiler/GHC/Types/Id/Make.hs`'s dictionary selectors), the files carrying GHC's notice (the Glasgow Haskell
+  Compiler License, "GHC: the Glasgow Haskell Compiler License" below); `stgcmp.ae`, the STG judge, is Arbace's own.
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`

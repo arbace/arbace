@@ -776,3 +776,88 @@ GHC's choices exactly where they leave no trace in the types (the two classes ab
 ## Decided (2026-11-05, the user: HF3's proposals)
 
 HF3's five proposals as recommended: the judge types plus evidence, full Core from HF5; the default-method unfoldings kept; constraint order a known class until the solver keeps GHC's; a --full step haskell-front (rename-check and typecheck-check) after review; HF4 (deriving) next, then the extensions in the corpora's order, the nofib sweeps committed as a check list.
+
+## As built: HF5-HF6 (first slice) (2026-11-05, branch `haskell-hf56`, from `haskell-hf3`)
+
+HF5 and HF6's first slice: the elaborated program of HF3 becomes STG in hsi's format and runs on hsi. Light on the host
+(main's stage 0 as the tools' host, the helper at `-O0`, hsi's light driver built by `bin/hsi build` in the worktree, the
+libraries' STG dumps of `haskell-integrate`'s worktree through `HSI_LIBS`). `haskell-integrate` (7bda6b88b) is merged in
+for hsi; conflicts: the Makefile's `.PHONY` line and targets, `bin/repr-haskell`'s helper build line (`-threaded` and the
+quoted `-i`), `doc/JOURNAL.md` and `tools/hsdump/HsDump.hs`'s usage and verb dispatch, all resolved by keeping both sides.
+Deriving is left to HF4 (`haskell-hf4`): the programs here derive nothing.
+
+**HF5, the match compiler** (`arbace/repr/haskell/desugar.ae`, `arbace.repr.haskell.desugar`, about 300 lines): the
+elaborator's `(match ...)`/`(clause ...)`, `(guards ...)`, pattern guards, `(listcomp ...)` and patterns in lambdas become
+cases, after GHC 9.14.1's `HsToCore/Match.hs` and its parts: tidy1 (variables and as-patterns bound to the match variable,
+list patterns as conses, literals at Int, Word, Char, Double, Float as their boxing constructor around the primitive literal,
+string patterns as character lists, newtype constructors transparent), groupEquations by the first pattern's kind
+(variables, constructors, primitive literals, overloaded literals by `(==)`), one case per constructor group with the
+equations of a constructor gathered, the alternatives in tag order, DEFAULT first and only when a constructor is missing,
+and a DEFAULT standing for one constructor made that constructor's alternative (`refineDefaultAlt`, whose `ipv` binders
+GHC's `-O0` STG shows); guards as dsGuarded (`otherwise` and `True` drop out); list comprehensions as deListComp (the `-O0`
+translation, no foldr/build); lambdas collected (`mkLams`); the interfaces' inlined unfoldings normalised to the program's
+spelling. Failure is a let-bound thunk inlined when used once and dropped when unused (GHC: a join point over a void
+argument): a normaliser class. The elaborator gained the tables the passes need (`:all-cons` with tags and strict marks,
+`:tycons` with each type's flavour and constructors, `:all-classes`), and a fix: the record selectors' case scrutinised
+an unbound variable.
+
+**HF6, CorePrep, CoreToStg, Unarise** (`arbace/repr/haskell/tostg.ae`, `arbace.repr.haskell.tostg`, about 450 lines): A-normal
+form (every non-trivial argument let-bound, the last argument's binding outermost as cpeArgs makes them; a string literal's
+`Addr#` bound by a case, as the spec's worked example), constructors saturated (a saturated application `con`/`rcon`, an
+unsaturated one the worker, whose binding the module carries; a strict field's argument evaluated first, `$WCon`'s work),
+right-hand sides (lambda a `:r` closure, a saturated constructor of atoms `rcon`, else an updatable thunk), free variables
+(Stg/FVs; top-level binders excluded), representations from the constructors' `stg/data` (the libraries' dumps for theirs:
+`I#`'s field `:int`, `C#`'s `:word`, ...), literal alternatives with `(prim REP)`, the module's `stg/data` (data types,
+newtypes and the non-newtype classes' `C:Cls`), the classes' selectors (`mkDictSelId`), newtype classes (one method and no
+superclass, or one superclass and no method) and newtypes erased, the program's `:Main.main` (`runMainIO main`). Unarise
+leaves Haskell 2010's programs as they are (no unboxed tuples or sums at the source level). Names: the program's top-level
+binders `main:M/occ`, the libraries' by the unit of their module (read from the dumps' headers), locals `occ_N`.
+
+**The judges** (`bin/repr-haskell stg-check`, `make repr-haskell-stg-check`; about 2 minutes, at most 1 GB a process):
+
+- **Run, the final judge**: the programs of `test/haskell/stg/` (six Haskell 2010 programs with a `main`: list functions
+  and nested patterns, guards and character and numeric literal patterns, data types and classes with defaults, a user
+  `State` monad with `Functor`/`Applicative`/`Monad` instances and `Maybe`'s `do`, records (construction, update, field
+  patterns), strict fields, a `Num` instance, newtypes, `Integer`, `where` with local recursion, list comprehensions with
+  guards and `let`, imports of `Data.List` and `Data.Char`) compiled from source by Arbace's front end (native read, rename,
+  elaborate, desugar, STG) and run on hsi: **6 of 6 print GHC's `-O0` build's output byte for byte**. The negative control
+  (each program's run against the next program's reference) fails as it must.
+- **Core** (decision 1 of HF3: in full from HF5): the desugared Core against the helper's tc verb after the judge's
+  normalisation: **152 of 220 bindings of the 17 typecheck samples equal** (107 of 220 before the match compiler), 41 of 71
+  of the six programs.
+- **STG** (`arbace/repr/haskell/stgcmp.ae`): per top-level binding of an external name, against the helper's `stg` dump at
+  `-O0`, Typeable bindings dropped, internal names renamed by first occurrence: **28 of 67 bindings equal**, the data
+  declarations equal (as sets) in 6 of 6.
+
+The remaining differences, by class (none is a wrong result on the programs): (1) GHC's simple optimiser at `-O0`
+(`simpleOptPgm`): local functions used once inlined and beta-reduced, constant dictionaries and string literals floated to
+the top level as internal bindings (`$dShow_4`, `main_sat_6`): the STG judge compares `main` and the instances' methods
+against GHC's floated shape; (2) AbsBinds of a mutually recursive group without signatures (GHC's tuple and selectors,
+T04's `evens`/`odds`), which the elaborator writes as a letrec; (3) the failure join points' void argument; (4) GHC's
+top-level `(rec ...)` groups (the judge flattens them; hsi takes the separate bindings); (5) the order of the module's
+`stg/data` forms. Not covered yet: lazy patterns (the elaborator reads `~p` as `p`), `n+k`, view and bang patterns' strictness
+in matches, `seq`, overloaded literal patterns at non-built-in types beyond `(==)` chains, string literals with characters
+beyond ASCII (`unpackCStringUtf8#`), `fromRational` literals at other than `Double` and `Float`, foreign imports, the
+derived instances' bindings (HF4), unboxed tuples (no Unarise work yet), the Typeable bindings (`$trModule`, `$tc`), and
+GHC's top-level floating.
+
+**On HFS5 (port).** The two files follow GHC's algorithms and reproduce their output's shape where the judges show it,
+but they were written after the algorithms in this session's time, not translated line by line from the tarball's text;
+they carry GHC's notice and are recorded under its license (LICENSE.md) as derived work. Proposal 1 below.
+
+**Proposed** (the user decides).
+
+1. HFS5's port of the match compiler and CorePrep. Options: (a) translate `HsToCore/Match*.hs`, `GuardedRHSs.hs`,
+   `CoreToStg/Prep.hs`, `CoreToStg.hs` line by line now (about 3,000 `.ae` lines, 3 to 5 days, Sonnet), replacing these
+   files, so the Core and STG judges reach equality by construction; (b) keep these files and close the judges' classes
+   one by one, porting a GHC function where a diff needs it (HF3's proposal 1 (a) style). *Recommended: (b)*: 6 of 6
+   programs already run, the classes above are few and the simple optimiser (class 1) is a separate piece either way.
+2. The simple optimiser (class 1). Options: (a) port `GHC/Core/SimpleOpt.hs` (1,612 lines) into the pipeline so the Core
+   and STG judges compare GHC's `-O0` output exactly; (b) normalise both sides in the judges only. *Recommended: (a)*:
+   it is what GHC's `-O0` runs, and the STG judge cannot be exact without it.
+3. The run judge's corpus. Options: (a) grow `test/haskell/stg/` to hsi's samples and the synthetic corpus' Haskell 2010
+   programs as the elaborator covers them, recorded as a check list with classes (`test/haskell/stg-check.edn`); (b) only
+   the hand-written programs. *Recommended: (a)*, after HF4 (deriving: `Show` and `Eq` are in most programs).
+4. The gate. Options: (a) add `stg-check` to the `--full` step `haskell-front` of HF3's decision 4 (about 2 minutes, light;
+   it needs the libraries' STG dumps and hsi's driver: `bin/hsi dumps` and `bin/hsi build`); (b) wait for HF8.
+   *Recommended: (a)* once `haskell-integrate` is on main.
