@@ -7,7 +7,7 @@
 -- at the end of the simplifier's pipeline (a static plugin) that writes the module's simplified
 -- Core as Core forms. Arbace's own code, written anew; GHC.Stg.Syntax's pretty printer
 -- (pprGenStgTopBinding) and GHC.StgToJS are its models.
-module Stg (stgMain, Mode(..)) where
+module Stg (stgMain, Mode(..), stgModule, writeAtomically) where
 
 import GHC
 import GHC.Driver.Session
@@ -215,7 +215,11 @@ nameB ns n
 
 extName :: Name -> String
 extName n = let m = nameModule n in
-  unitString (moduleUnit m) ++ ":" ++ moduleNameString (moduleName m) ++ "/" ++ getOccString n
+  unitName m ++ ":" ++ moduleNameString (moduleName m) ++ "/" ++ getOccString n
+
+-- the unit of a module as the dumps name it: the REPL's interactive modules (HE7) are unit main's
+unitName :: Module -> String
+unitName m = let u = unitString (moduleUnit m) in if "interactive" `isPrefixOf` u then "main" else u
 
 idB :: Names -> Id -> IO BB.Builder
 idB ns = nameB ns . idName
@@ -340,7 +344,7 @@ argsB ns as = vec <$> mapM (argB ns) as
 headerB :: [(String, String)] -> String -> Module -> FilePath -> BB.Builder
 headerB header h m src =
   form h [BB.char7 '{' <> mconcat (intersperse sp
-    ([kw "unit" <> sp <> strB (unitString (moduleUnit m)), kw "module" <> sp <> strB (moduleNameString (moduleName m)),
+    ([kw "unit" <> sp <> strB (unitName m), kw "module" <> sp <> strB (moduleNameString (moduleName m)),
       kw "file" <> sp <> strB src] ++ [kw k <> sp <> v | (k, v) <- map (fmap BB.string7) header])) <> BB.char7 '}']
 
 stgModule :: [(String, String)] -> Module -> FilePath -> [TyCon] -> [CgStgTopBinding] -> IO BB.Builder

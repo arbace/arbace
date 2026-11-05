@@ -64,6 +64,12 @@
 #                                  (test/haskell/hsi/c/) into the node program OUT, which hsi run --c loads over the
 #                                  machine's memory (test/haskell/eval/cnodes.ae); the files relative to the working
 #                                  directory, -I, -D, -U and -std= passed to repr/c, gcc's other flags dropped
+#   bin/hsi repl [DIR]             the REPL (HE7): ghci's session on stdin and stdout (the banner, "ghci> " before each line), each
+#                                  line a request to the session server tools/hsrepl (a GHC API session, built by bin/hsi repl-build),
+#                                  its statements' STG written into DIR's modules and run on hsi, `let` and `it` kept across lines
+#   bin/hsi repl-session [--record] [FILE.in...]
+#                                  test/haskell/repl/'s sessions run through bin/hsi repl, stdout byte for byte against GHCi's
+#                                  recorded transcript (--record: from the host's GHC), the negative control
 #   bin/hsi primops                hsi's primops against GHC.Prim's non-SIMD names
 #   bin/hsi libm-check [N [SEED]]  the port of musl's libm (go/arbace/libm, HE4b) against the host's libm
 #                                  (musl 1.2.6) function by function: test/haskell/hsi/libm-ref.c built by the host's cc
@@ -593,6 +599,82 @@ libm_fma_check() {
   echo "hsi libm-check: no product of go/arbace/libm fused (tools/fmacheck; 0 FMA instructions in its functions)"
 }
 
+# repl_build: HE7's session server (tools/hsrepl/Repl.hs over tools/hsdump/Stg.hs's serializer) built by the host's ghc into
+# .tmp/hsi/hsrepl/hsrepl, kept by its sources' digest; its path printed
+repl_build() {
+  ghc_check
+  local d=$WORK/hsrepl key exe=$WORK/hsrepl/hsrepl
+  key=$(cat "$root/tools/hsrepl/Repl.hs" "$root/tools/hsdump/Stg.hs" "$root/tools/hsdump/GHC_VERSION" | sha256sum | cut -c1-64)
+  if [ -x "$exe" ] && [ -f "$d/key" ] && [ "$(cat "$d/key")" = "$key" ]; then echo "$exe"; return; fi
+  mkdir -p "$d"
+  ghc -O0 -package ghc -package ghci -i"$root/tools/hsdump" -outputdir "$d/obj" -o "$exe.new" "$root/tools/hsrepl/Repl.hs" > "$d/build.log" 2>&1 \
+    || { cat "$d/build.log" >&2; die "repl-build: ghc"; }
+  mv -f "$exe.new" "$exe"
+  echo "$key" > "$d/key"
+  echo "$exe"
+}
+
+# repl_hsi [DIR]: the REPL (HE7): ghci's session on stdin and stdout, run by hsi's repl over the session server; the statements'
+# STG modules written into DIR (default a fresh directory of .tmp/hsi/repl/, removed after)
+repl_hsi() {
+  ghc_check
+  local exe helper d
+  exe=$(build_hsi); helper=$(repl_build)
+  d=${1:-$(mktemp -d "$WORK/repl.XXXXXX")}; mkdir -p "$d"
+  local la=() l
+  IFS=: read -r -a dirs <<< "${HSI_LIBS:-$WORK/dumps/stg:$WORK/dumps-extra/stg:$WORK/dumps-more/stg}"
+  for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
+  local img=${HSI_IMAGE:-$WORK/image}
+  if [ "$img" != none ]; then "$exe" image --out "$img" "${la[@]}" 2> "$d/image.log" || { cat "$d/image.log" >&2; exit 1; }; la+=(--image "$img"); fi
+  local st=0
+  "$exe" repl "${la[@]}" --prog "$d" --helper "$helper" --libdir "$libdir" || st=$?
+  [ -n "${1:-}" ] || rm -rf "$d"
+  return $st
+}
+
+# repl_session [--record] [--control] [FILE.in...]: HE7's scripted sessions (test/haskell/repl/NAME.in, the input lines): each run through
+# bin/hsi repl, its stdout compared byte for byte with the recorded GHCi transcript NAME.out (`ghc --interactive
+# -ignore-dot-ghci` on the same input; --record writes NAME.out and NAME.err from the host's GHC), its stderr's messages
+# listed beside (NAME.err: GHCi's, compared line for line and reported, not judged); the negative control: each session's output against the next
+# session's transcript must differ
+repl_session() {
+  local record=0 files=() a
+  for a in "$@"; do case $a in --record) record=1 ;; *) files+=("$a") ;; esac; done
+  [ ${#files[@]} -gt 0 ] || files=("$root"/test/haskell/repl/*.in)
+  local out=$WORK/repl-session; mkdir -p "$out"
+  local f n bad=0 ok=0 serr=0
+  if [ $record = 1 ]; then
+    ghc_check
+    for f in "${files[@]}"; do
+      n=$(basename "$f" .in)
+      ghc --interactive -ignore-dot-ghci < "$f" > "${f%.in}.out" 2> "${f%.in}.err" || true
+      echo "repl-session: recorded $n ($(wc -l < "${f%.in}.out") lines)"
+    done
+    return 0
+  fi
+  for f in "${files[@]}"; do
+    n=$(basename "$f" .in)
+    repl_hsi < "$f" > "$out/$n.out" 2> "$out/$n.err" || true
+    if cmp -s "$out/$n.out" "${f%.in}.out"; then ok=$((ok+1)); echo "repl-session: $n: stdout equal to GHCi's ($(wc -c < "$out/$n.out") bytes)"
+    else bad=$((bad+1)); echo "repl-session: $n: stdout DIFFERS"; diff "${f%.in}.out" "$out/$n.out" | head -10; fi
+    if diff <(sed 's/^[0-9]*://' "${f%.in}.err") <(sed 's/^[0-9]*://' "$out/$n.err") > /dev/null 2>&1; then :; else serr=$((serr+1)); fi
+  done
+  # the control: a run judged against another session's transcript must fail
+  local i k ctl=0 cbad=0
+  if [ ${#files[@]} -gt 1 ]; then
+    for i in "${!files[@]}"; do
+      k=$(( (i + 1) % ${#files[@]} ))
+      n=$(basename "${files[$i]}" .in)
+      ctl=$((ctl+1))
+      if cmp -s "$out/$n.out" "${files[$k]%.in}.out"; then cbad=$((cbad+1)); echo "repl-session: the control passes: $n against $(basename "${files[$k]}" .in)'s transcript"; fi
+    done
+    [ $cbad = 0 ] || die "repl-session: the negative control passes: the judge does not discriminate"
+    echo "repl-session: the control: $ctl runs judged against another session's transcript, all fail, as they must"
+  fi
+  echo "repl-session: $ok of ${#files[@]} sessions byte for byte; stderr differing from GHCi's in $serr (not judged)"
+  [ $bad = 0 ] || exit 1
+}
+
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
@@ -606,6 +688,9 @@ case $cmd in
   stubs-build) stubs_build ;;
   runtime) runtime_cmd "$@" ;;
   run) run_hsi "$@" ;;
+  repl) repl_hsi "$@" ;;
+  repl-session) repl_session "$@" ;;
+  repl-build) repl_build ;;
   cnodes)
     # bin/hsi cnodes OUT [OPTION...] FILE...: a program's own C (HES64 (a)) built by ci into the node program OUT, the
     # files relative to the working directory (test/haskell/eval/cnodes.ae); musl's forms cache prepared first
