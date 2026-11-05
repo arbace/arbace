@@ -926,3 +926,7 @@ that corpus; the trial says the judges are exact and cheap.
 - **RFP9 What next.** Options: (a) **RF6 (AST to HIR) on these crates, RF4's and RF5's remaining pieces as RFP7's corpus asks**; (b)
   finish RF4 and RF5 against the compiler corpus first. *Recommended: (a)*: every stage stays judged exactly and the pipeline grows
   toward Tier U's MIR.
+
+## Decided (2026-11-05, the user: RFP5-RFP9)
+
+All as recommended: the -Zunpretty=expanded text compared later with RF6's pretty printers; std's macros from the helper's metadata; the UI run-pass programs through the checks in a night, then the compiler corpus; full hygiene when that corpus needs it; RF6 (AST to HIR) next.
