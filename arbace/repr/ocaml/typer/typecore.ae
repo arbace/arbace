@@ -119,11 +119,57 @@
     (or typed (choose (env/lookup env :labels lid) expected "field" lid))))
 
 (defn instance-constructor
-  "Ctype.instance_constructor: [args res] as fresh instances"
+  "Ctype.instance_constructor: [args res] as fresh instances (a GADT constructor's own result type)"
   [c]
-  (let [res (ty/newgenty [:Tconstr (:res-path c) (vec (:params c))])
+  (let [res (or (:res c) (ty/newgenty [:Tconstr (:res-path c) (vec (:params c))]))
         ts (ty/instance-list (cons res (:args c)))]
     [(vec (rest ts)) (first ts)]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Locally abstract types and GADT equations (Typecore.type_newtype, Ctype's pattern mode)
+
+(defn new-local-type
+  "Ctype.new_local_type: an abstract type of a fresh identifier, which a GADT pattern may equate"
+  [n]
+  (let [id (ty/ident-create n) p [:Pident id]]
+    (env/add-decl! p {:path p :params [] :kind [:abstract] :manifest nil :arity 0 :local-abstract true
+                      :variance [] :immediate false})
+    p))
+
+(def ^:dynamic *equations* "The GADT equations of the case being typed: an atom of [path previous-declaration]" nil)
+
+(defn- add-equation [t1 t2]
+  (let [local (fn [t] (let [d (ty/desc t)]
+                        (when (and (= :Tconstr (d 0)) (empty? (d 2)))
+                          (let [decl (env/find-decl (d 1))]
+                            (when (and (:local-abstract decl) (nil? (:manifest decl))) [(d 1) decl])))))]
+    (when *equations*
+      (when-let [[p decl t] (or (when-let [[p d] (local t1)] [p d t2]) (when-let [[p d] (local t2)] [p d t1]))]
+        (swap! *equations* conj [p decl])
+        (env/add-decl! p (assoc decl :manifest t))
+        true))))
+
+(defn- undo-equations! [eqs] (doseq [[p decl] (reverse eqs)] (env/add-decl! p decl)))
+(defn instance-constructor-pattern
+  "Ctype.instance_constructor with existentials made abstract: a GADT or existential constructor in a pattern, the
+  variables of its arguments that its result does not bind fresh locally abstract types"
+  [c]
+  (let [[args res] (instance-constructor c)]
+    (if-not (:res c)
+      [args res]
+      (let [in-res (atom #{})
+            _ (letfn [(go [t] (let [t (ty/repr t)] (if (ty/tvar? t) (swap! in-res conj t) (run! go (ty/children (ty/desc t))))))]
+                (go res))
+            seen (atom #{})]
+        (letfn [(ex [t] (let [t (ty/repr t)]
+                          (when-not (@seen t)
+                            (swap! seen conj t)
+                            (if (ty/tvar? t)
+                              (when-not (@in-res t)
+                                (ty/link! t (ty/tconstr (new-local-type (str "$" (:name c) "_'" (or ((ty/desc t) 1) "a"))) [])))
+                              (run! ex (ty/children (ty/desc t)))))))]
+          (run! ex args))
+        [args res]))))
 
 (defn instance-label
   "[res arg all-args] of a label: the record type, the field's type and every field's, sharing one instance"
@@ -203,8 +249,8 @@
                     (mk [:Tpat_tuple (mapv (fn [[l p] t] [l (type-pat env p t vars)]) ps ts)] expected))
       :Ppat_construct
       (let [c (lookup-constr env (:txt (d 1)) expected)
-            [targs tres] (instance-constructor c)
-            _ (unify! tres expected "pattern")
+            [targs tres] (instance-constructor-pattern c)
+            _ (binding [ty/*gadt-equation* add-equation] (unify! tres expected "pattern"))
             sarg (when-let [a (d 2)] (second a))
             sargs (cond
                     (nil? sarg) []
@@ -235,9 +281,17 @@
                      m (into {} (map (fn [[n id t]] [n [id t]]) @vars))
                      ren (into {} (map (fn [[n id t]] (let [[id1 t1] (get m n)] (when t1 (unify! t t1 "pattern")) [id id1])) @v2))]
                  (mk [:Tpat_or p1 (pm/alpha-pat ren p2)] expected))
-      :Ppat_constraint (let [t (ty/instance (env/make-generic! (env/transl-type env (atom {}) (d 2))))]
-                         (unify! t expected "pattern")
-                         (type-pat env (d 1) expected vars))
+      :Ppat_constraint (if (and (= :Ptyp_poly ((:ptyp_desc (d 2)) 0)) (= :Ppat_var ((:ppat_desc (d 1)) 0)))
+                         ;; an explicitly polymorphic variable: its type the scheme, each use an instance (polymorphic
+                         ;; recursion); its definition typed against an instance
+                         (let [scheme (env/make-generic! (env/transl-type env (atom {}) (d 2)))
+                               n (:txt ((:ppat_desc (d 1)) 1)) id (ty/ident-create n)]
+                           (unify! (ty/instance scheme) expected "pattern")
+                           (swap! vars conj [n id scheme])
+                           (mk [:Tpat_var id n] expected))
+                         (let [t (ty/instance (env/make-generic! (env/transl-type env (atom {}) (d 2))))]
+                           (unify! t expected "pattern")
+                           (type-pat env (d 1) expected vars)))
       :Ppat_exception (mk [:Tpat_exception (type-pat env (d 1) (ty/type-exn) vars)] expected)
       :Ppat_lazy (let [t (ty/newvar)]
                    (unify! (ty/tconstr ty/path-lazy-t [t]) expected "pattern")
@@ -375,6 +429,8 @@
 
 (defn- record-repres [l] (:repres l))
 
+(declare type-newtype)
+
 (defn type-expect
   "Typecore.type_expect for the slice"
   [env sexp expected]
@@ -494,6 +550,16 @@
                    (let [tm (*type-package* env (d 1) t)]
                      (unify! t expected "expression")
                      (mkexp [:Texp_pack tm] t loc)))
+      :Pexp_coerce (let [t2 (ty/instance (env/make-generic! (env/transl-type env (atom {}) (d 3))))
+                         e (if-let [t1s (d 2)]
+                             (type-expect env (d 1) (ty/instance (env/make-generic! (env/transl-type env (atom {}) t1s))))
+                             (type-exp env (d 1)))]
+                     ;; the subtyping check (Ctype.subtype) is not made: the program is one ocamlc accepts
+                     (unify! t2 expected "expression")
+                     (assoc e :type t2))
+      :Pexp_newtype (let [e (type-newtype env (:txt (d 1)) (fn [env'] (let [e (type-exp env' (d 2))] [e (:type e)])))]
+                      (unify! (:type e) expected "expression")
+                      e)
       :Pexp_lazy (let [t (ty/newvar)]
                    (unify! (ty/tconstr ty/path-lazy-t [t]) expected "expression")
                    (mkexp [:Texp_lazy (type-expect env (d 1) t)] expected loc))
@@ -505,15 +571,22 @@
 (defn type-cases
   "Typecore.type_cases: the patterns first, then guards and bodies; computation patterns (exceptions) when allowed"
   [env targ tres scases computation]
-  (let [typed (mapv (fn [c] (let [vars (atom [])
-                                  p (type-pat env (:pc_lhs c) targ vars)]
-                              [c p @vars]))
+  (let [typed (mapv (fn [c] (let [vars (atom []) eqs (atom [])
+                                  p (binding [*equations* eqs] (type-pat env (:pc_lhs c) targ vars))
+                                  done @eqs
+                                  ;; the equations' types, kept for the case's body, then taken back
+                                  now (mapv (fn [[path _]] [path (env/find-decl path)]) done)]
+                              (undo-equations! done)
+                              [c p @vars [done now]]))
                     scases)]
-    (mapv (fn [[c p vars]]
+    (mapv (fn [[c p vars [before now]]]
             (let [env' (add-pattern-vars env vars)]
-              {:lhs p
-               :guard (when-let [g (:pc_guard c)] (type-expect env' g (ty/type-bool)))
-               :rhs (type-expect env' (:pc_rhs c) tres)}))
+              (doseq [[path decl] now] (env/add-decl! path decl))
+              (try
+                {:lhs p
+                 :guard (when-let [g (:pc_guard c)] (type-expect env' g (ty/type-bool)))
+                 :rhs (type-expect env' (:pc_rhs c) tres)}
+                (finally (undo-equations! before)))))
           typed)))
 
 (defn- split-arrow
@@ -526,6 +599,8 @@
         (unify! (ty/newty [:Tarrow l a r]) expected "function")
         [a r]))))
 
+(declare type-newtype)
+
 (defn type-function
   "Typecore.type_function: [params body type], a parameter {:kind [:pat p] | [:opt p default] :label :param :partial},
   the body [:body e] or [:cases cases partial param]"
@@ -537,7 +612,10 @@
                              cases (type-cases env targ tres (sbody 1) false)]
                          [[] [:cases cases (partiality cases) (name-pattern "param" (map :lhs cases)) (get sbody 2)] expected]))
     (let [sp (first sparams) pd (:pparam_desc sp)]
-      (when-not (= :Pparam_val (pd 0)) (type-error "locally abstract types are outside the slice"))
+      (if (= :Pparam_newtype (pd 0))
+        (let [[params body t] (type-newtype env (:txt (pd 1)) (fn [env'] (let [r (type-function env' (rest sparams) sbody (ty/newvar))] [r (r 2)])))]
+          (unify! t expected "function")
+          [params body t])
       (let [[_ l default spat] pd
             [targ tret] (split-arrow expected l)
             [tint dflt] (if default
@@ -545,14 +623,39 @@
                             (unify! (ty/type-option td) targ "parameter")
                             [td (type-expect env default td)])
                           [targ nil])
-            vars (atom [])
-            p (type-pat env spat tint vars)
+            vars (atom []) eqs (atom [])
+            p (binding [*equations* eqs] (type-pat env spat tint vars))
             env' (add-pattern-vars env @vars)
-            [params body _] (type-function env' (rest sparams) sbody tret)
+            ;; a GADT parameter's equations hold over the rest of the function
+            [params body _] (try (type-function env' (rest sparams) sbody tret) (finally (undo-equations! @eqs)))
             param {:kind (if dflt [:opt p dflt] [:pat p]) :label l
                    :param (if dflt (ty/ident-create "*opt*") (name-pattern "param" [p]))
                    :partial (partiality [{:lhs p}])}]
-        [(vec (cons param params)) body expected]))))
+        [(vec (cons param params)) body expected])))))
+
+(defn type-newtype
+  "Typecore.type_newtype: body typed with name a locally abstract type; its result's type with that type a fresh
+  variable (on a copy). (type-body env') gives [result type]; returns the result with the copied type"
+  [env n type-body]
+  (let [p (new-local-type n)
+        [r t] (ty/with-local-level (type-body (assoc-in env [:types n] p)))
+        v (ty/newvar n)
+        memo (atom {})
+        rw (fn rw [t]
+             (let [t (ty/repr t)]
+               (or (get @memo t)
+                   (let [d (ty/desc t)]
+                     (cond
+                       (= :Tvar (d 0)) t
+                       (and (= :Tconstr (d 0)) (= (d 1) p)) v
+                       :else (let [x (ty/newty2 (ty/level t) [:Tvar nil])]
+                               (swap! memo assoc t x)
+                               (swap! x assoc :desc (ty/map-desc rw d))
+                               x))))))
+        t' (rw t)]
+    (if (vector? r)
+      (assoc r 2 t')
+      (assoc r :type t'))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; let (Typecore.type_let) with the relaxed value restriction
@@ -606,16 +709,42 @@
                        (= nil (second (first (d 2)))))
       false)))
 
+(defn- varify-constructors
+  "Ast_helper.Typ.varify_constructors: the names of the locally abstract types as type variables"
+  [names t]
+  (letfn [(go [x]
+            (cond
+              (and (map? x) (:ptyp_desc x)
+                   (= :Ptyp_constr ((:ptyp_desc x) 0)) (= :Lident ((:txt ((:ptyp_desc x) 1)) 0))
+                   (names ((:txt ((:ptyp_desc x) 1)) 1)) (empty? ((:ptyp_desc x) 2)))
+              (assoc x :ptyp_desc [:Ptyp_var ((:txt ((:ptyp_desc x) 1)) 1)])
+              (map? x) (into {} (map (fn [[k v]] [k (go v)]) x))
+              (vector? x) (mapv go x)
+              (seq? x) (map go x)
+              :else x))]
+    (go t)))
+
 (defn- vb-constraint
-  "Typecore's vb_pat_constraint and vb_exp_constraint: `let p : t = e` as `let (p : t) = (e : t)`"
+  "Typecore's vb_pat_constraint and vb_exp_constraint: `let p : t = e` as `let (p : t) = (e : t)`; `let p : type a. t
+  = e` as `let (p : 'a. t[a := 'a]) = fun (type a) -> (e : t)`"
   [vb]
-  (let [c (:pvb_constraint vb)]
-    (if (and c (= :Pvc_constraint (c 0)) (empty? (c 1)) (not= :Ptyp_poly ((:ptyp_desc (c 2)) 0)))
+  (let [c (:pvb_constraint vb)
+        ploc (:ppat_loc (:pvb_pat vb)) eloc (:pexp_loc (:pvb_expr vb))]
+    (cond
+      (nil? c) vb
+      (and (= :Pvc_constraint (c 0)) (empty? (c 1)) (not= :Ptyp_poly ((:ptyp_desc (c 2)) 0)))
       (assoc vb :pvb_constraint nil
-             :pvb_pat {:ppat_desc [:Ppat_constraint (:pvb_pat vb) (c 2)] :ppat_loc (:ppat_loc (:pvb_pat vb))}
-             :pvb_expr {:pexp_desc [:Pexp_constraint (:pvb_expr vb) (c 2)] :pexp_loc (:pexp_loc (:pvb_expr vb))})
-      (do (when c (type-error "this let's type constraint is outside the slice"))
-          vb))))
+             :pvb_pat {:ppat_desc [:Ppat_constraint (:pvb_pat vb) (c 2)] :ppat_loc ploc}
+             :pvb_expr {:pexp_desc [:Pexp_constraint (:pvb_expr vb) (c 2)] :pexp_loc eloc})
+      (and (= :Pvc_constraint (c 0)) (seq (c 1)))
+      (let [names (set (map :txt (c 1)))
+            poly {:ptyp_desc [:Ptyp_poly (vec (c 1)) (varify-constructors names (c 2))]}]
+        (assoc vb :pvb_constraint nil
+               :pvb_pat {:ppat_desc [:Ppat_constraint (:pvb_pat vb) poly] :ppat_loc ploc}
+               :pvb_expr (reduce (fn [e n] {:pexp_desc [:Pexp_newtype n e] :pexp_loc eloc})
+                                 {:pexp_desc [:Pexp_constraint (:pvb_expr vb) (c 2)] :pexp_loc eloc}
+                                 (reverse (c 1)))))
+      :else (type-error "this let's type constraint is outside the slice"))))
 
 (defn type-let
   "[value-bindings env'] for let [rec]: each {:pat :expr}"
