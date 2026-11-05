@@ -1095,3 +1095,7 @@ fixed, a stub `cpp-runtime`, and `steps.edn` with GT9's fragment (its LLVM step 
     (c) a combined host `:rustc` that adds `clang --version`.
   - Costs: (a) none, a moved clang is found by `std-build`'s check and by `std-verify`; (b) the oracle tier's verify needs both, `kinds.edn` a second `:host`; (c) a change of GT9's recipe, a rekey of every Rust step.
   - *Recommended: (a)*.
+
+## Decided (2026-11-05, the user: ORS22, ORS23)
+
+ORS22 (a): as built, the larger corpora live in the oracle tier, the UI suite's IR pack recorded at night, rust-native's native-check with its merge; ORS23 (a): the packs name rustc's identity only.
