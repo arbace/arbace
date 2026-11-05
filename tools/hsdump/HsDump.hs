@@ -34,6 +34,7 @@
 module Main (main) where
 
 import GHC
+import HsRn (rnVerb, ifaceVerb)
 import GHC.Driver.Session
 import GHC.Driver.Env (HscEnv(..), hscSetFlags)
 import GHC.Driver.Config.Parser (initParserOpts, supportedLanguagePragmas)
@@ -139,6 +140,11 @@ main = do
       hPutStrLn stderr ("hsdump: " ++ libdir ++ " holds no ghc-" ++ cProjectVersion ++ " unit: not the GHC this helper was built with")
       exitWith (ExitFailure 2)
     Just _ -> return ()
+  -- HF1: the front end's oracles (HsRn.hs), their own session
+  when (oVerb o `elem` ["rn", "iface"]) $ do
+    let out = fromMaybe ".tmp/hsdump/out" (oOut o)
+    ok <- if oVerb o == "rn" then rnVerb libdir (oGhc o) out (oFiles o) else ifaceVerb libdir (oGhc o) out True (oFiles o)
+    exitWith (if ok then ExitSuccess else ExitFailure 1)
   failures <- newIORef (0 :: Int)
   runGhc (Just libdir) $ do
     dflags0 <- getSessionDynFlags
