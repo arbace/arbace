@@ -13,10 +13,13 @@
   lists it with its class; mutants (files of the corpora with tokens deleted, duplicated, swapped, inserted, and
   characters inserted: the error paths) are a corpus of their own, drawn by a seeded shuffle.
 
-    check --corpus ID --base DIR --list FILE --ref DIR --out DIR --known FILE [--record] [--jobs N]
+    check --corpus ID --base DIR --list FILE --ref DIR --out DIR --known FILE [--record] [--jobs N] [--controls FILE]
     mutants --out DIR --seed N --files N --per N --edits N --pool FILE...   (each pool file: BASE then RELs)
-    control --base DIR --list FILE --ref DIR   the negative control: each file judged against another's dump, which
-                                               must differ"
+
+  --controls FILE (test/python/controls-read.edn; GTS81 (a), queue 212): the corpus's crossed pairs, the subject's
+  source read natively and judged by judge-dump, this check's own comparison, against the reference's dump (named as
+  the reference, so that only the content differs), which it must fail (arbace.repr.python.results/judge-controls); a
+  control that passes or is not judged fails the check, with --record too (before anything is written)"
   (:require [arbace.repr.python.lex :as lex]
             [arbace.repr.python.native :as nv]
             [arbace.repr.python.results :as results]
@@ -54,14 +57,15 @@
 
 (def ^:dynamic *full* false)
 
-(defn- one-file
-  "[rel status detail]: :equal, :differ [line ref mine], :crash message, :no-ref"
-  [^String base ^String ref-dir ^String out rel]
-  (let [rf (File. (str ref-dir "/" rel ".ae"))]
+(defn- judge-dump
+  "[rel status detail]: :equal, :differ [line ref mine], :crash message, :no-ref: the source SRC's native dump (named
+  REL) against the reference dump REF; the differing dumps kept under OUT/diff/REL"
+  [^String src ^String ref-path ^String out rel]
+  (let [rf (File. ref-path)]
     (if (not (.exists rf))
       [rel :no-ref nil]
       (let [ref (slurp rf)
-            mine (try (nv/read-dump (read-bytes (str base "/" rel)) rel *full*)
+            mine (try (nv/read-dump (read-bytes src) rel *full*)
                       (catch Throwable e
                         (if-let [c (:class (ex-data e))] {:refused c :message (.getMessage e)} (str "!Crash\t" (.getMessage e)))))]
         (cond
@@ -77,6 +81,9 @@
             (if (str/starts-with? mine "!Crash")
               [rel :crash (subs mine 7 (min (count mine) 300))]
               [rel :differ d])))))))
+
+(defn- one-file [^String base ^String ref-dir ^String out rel]
+  (judge-dump (str base "/" rel) (str ref-dir "/" rel ".ae") out rel))
 
 (defn- run-files [base ref-dir out rels jobs]
   (let [parts (partition-all (max 1 (long (Math/ceil (/ (count rels) (double jobs))))) rels)
@@ -131,12 +138,23 @@
         section (if *full* :full :lines)
         mine (get-in known [section corpus] {})
         bad (filter #(not= :equal (second %)) res)
-        freq (frequencies (map second res))]
-    (spit-mk (str out "/files.tsv")
-             (str/join (for [[r s d] res] (str r "\t" (name s) "\t" (str/replace (pr-str d) #"[\t\n]" " ") "\n"))))
-    (println (format "parse-check %s: %d files in %.1f s: equal %d, differ %d, refused %d, crash %d, no reference %d"
-                     (name corpus) (count res) secs (get freq :equal 0) (get freq :differ 0) (get freq :refused 0)
-                     (get freq :crash 0) (get freq :no-ref 0)))
+        freq (frequencies (map second res))
+        _ (spit-mk (str out "/files.tsv")
+               (str/join (for [[r s d] res] (str r "\t" (name s) "\t" (str/replace (pr-str d) #"[\t\n]" " ") "\n"))))
+        _ (println (format "parse-check %s: %d files in %.1f s: equal %d, differ %d, refused %d, crash %d, no reference %d"
+                       (name corpus) (count res) secs (get freq :equal 0) (get freq :differ 0) (get freq :refused 0)
+                       (get freq :crash 0) (get freq :no-ref 0)))
+        ctl-bad (long (results/judge-controls
+                   (str "parse-check" (when *full* " --full")) corpus (results/read-controls (get opts "--controls") corpus) (set rels)
+                   (set (keep (fn [[r st _]] (when (= st :equal) r)) res))
+                   (fn [subject reference]
+                     (let [[_ st d] (judge-dump (str base "/" subject) (str ref-dir "/" reference ".ae") (str out "/control") reference)]
+                       (case st
+                         :equal :pass
+                         :differ [:fail (str "the dumps differ at line " (first d))]
+                         [:not-judged (str (name st) (when d (str " " (pr-str d))))])))))]
+    (when (pos? ctl-bad) (println (str "parse-check " (name corpus) ": " ctl-bad " negative control(s) failed")))
+    (when (and (get opts "--record") (pos? ctl-bad)) (System/exit 1))
     (if (get opts "--record")
       (let [new (into {} (for [[r s d] bad
                                :let [c (if (= s :refused) d (:class (get mine r)))] :when c]
@@ -166,7 +184,7 @@
         (doseq [[_ p] (take 50 problems)] (println p))
         (doseq [[r p] problems] (results/print-fail corpus r p))
         (when (> (count problems) 50) (println "..." (- (count problems) 50) "more"))
-        (System/exit (if (empty? problems) 0 1))))))
+        (System/exit (if (and (empty? problems) (zero? ctl-bad)) 0 1))))))
 
 ;; ---- mutants ----
 
@@ -242,23 +260,6 @@
     (spit-mk (str out "/from.tsv") (str/join (for [[nm p] @made] (str nm "\t" p "\n"))))
     (println (str "mutants: " (count @made) " mutants of " (count picked) " files (seed " seed ", " per " mutants of " edits " edits each)"))))
 
-(defn- do-control [{:keys [opts]}]
-  (let [base (get opts "--base") ref-dir (get opts "--ref")
-        rels (vec (take 20 (remove str/blank? (str/split-lines (slurp (get opts "--list"))))))
-        pairs (map vector rels (concat (rest rels) [(first rels)]))
-        passed (for [[a b] pairs
-                     :when (and (not= a b) (.exists (File. (str ref-dir "/" b ".ae")))
-                                ;; two files of the same tokens (empty ones) are not a control
-                                (let [nofile #(str/replace (slurp (str ref-dir "/" % ".ae")) #":file \"[^\"]*\"" "")] (not= (nofile a) (nofile b)))
-                                ;; a refused file (the runtime's charsets) is no control
-                                (= (try (nv/read-dump (read-bytes (str base "/" a)) b)
-                                        (catch arbace.lang.ExceptionInfo e (if (:class (ex-data e)) ::refused (throw e))))
-                                   (slurp (str ref-dir "/" b ".ae"))))]
-                 [a b])]
-    (if (seq passed)
-      (do (println "parse-check control: FAILED, a file's dump equals another's:" (pr-str (first passed))) (System/exit 1))
-      (println (str "parse-check control: " (count pairs) " files each judged against another's dump, none equal")))))
-
 (defn- do-dump
   "dump --base DIR --list FILE --out DIR [--full]: each file's native dump as OUT/REL.ae (bin/repr-python read --reader
   native), and a TSV REL STATUS on stdout"
@@ -276,8 +277,7 @@
 (defn -main [& args]
   (let [[verb & more] args pa (fn [wv] (parse-args more wv))]
     (case verb
-      "check" (do-check (pa #{"--corpus" "--base" "--list" "--ref" "--out" "--known" "--jobs" "--results-file"}))
+      "check" (do-check (pa #{"--corpus" "--base" "--list" "--ref" "--out" "--known" "--jobs" "--results-file" "--controls"}))
       "mutants" (do-mutants (pa #{"--out" "--seed" "--files" "--per" "--edits"}))
-      "control" (do-control (pa #{"--base" "--list" "--ref"}))
       "dump" (do-dump (pa #{"--base" "--list" "--out"}))
-      (do (println "usage: -m arbace.repr.python.parsecheck check|mutants|control ...") (System/exit 2)))))
+      (do (println "usage: -m arbace.repr.python.parsecheck check|mutants ...") (System/exit 2)))))

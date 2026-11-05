@@ -14,7 +14,7 @@
         a charset the runtime lacks is the printer's refusal, [class charset] in the TSV
     print FORMS.ae OUT        one forms file printed to OUT
     compare --corpus NAME --orig DIR --cand DIR --orig-tsv FILE --cand-tsv FILE --convert-tsv FILE
-            --known FILE [--record] [--results FILE] [--text]
+            --known FILE [--record] [--results FILE] [--text] [--controls FILE]
         the round trip's levels (survey §5.2) per file: 1 forms (the original's dump converted against the print's,
         the module's map but :type-ignores' tags left out: their lines are positions), 2 ast (ast.dump's digest), 3
         code (the normalized code's digest); a file ast.parse rejects is judged on CPython's class and message against
@@ -23,9 +23,14 @@
         :rejected, a rejection, and :code-lines, a code difference with the ast equal, are classed by rule) is printed
         and not written: the run exits 3 (CS265 (a), CS266 (a)'s rule). With --text (PY3) the levels are 4, the :full
         print's bytes (their SHA-256 against the original's) and 5, marshal of the compiled code, positions included,
-        against test/python/full-known.edn; the writer's rules add :charset, the printer's refusal."
+        against test/python/full-known.edn; the writer's rules add :charset, the printer's refusal. --controls FILE
+        (test/python/controls-read.edn; GTS81 (a), queue 212): the corpus's crossed pairs, the subject's print judged
+        by judge-file (judge-text) against the reference's original, which must fail
+        (arbace.repr.python.results/judge-controls); a control that passes or is not judged fails the run, with
+        --record too (before anything is written)."
   (:require [arbace.repr.python.convert :as cv]
             [arbace.repr.python.print :as pr]
+            [arbace.repr.python.results :as results]
             [arbace.string :as str])
   (:import [java.io File]))
 
@@ -240,28 +245,30 @@
                (str "roundtrip --text " (name corpus) ": " n " files: read in mode :full, woven and printed " pass1
                     ", level 4 (text, byte for byte) " pass2 ", level 5 (marshal) " pass3 "; not passing " (pr-str (into (sorted-map) counts)))
                (str "roundtrip " (name corpus) ": " n " files: level 1 (forms) " pass1 ", level 2 (ast) " pass2
-                    ", level 3 (code) " pass3 "; not passing " (pr-str (into (sorted-map) counts))))]
-    (println line)
-    ;; the negative control (GTS81 (a)): a file's printed dump judged against another file's original must differ
-    (let [ok (vec (take 20 (filter #(and (= "ok" (nth (get oa %) 1 nil)) (nil? (get failing %))) files)))
-          pairs (map vector ok (concat (rest ok) [(first ok)]))
-          same (for [[a b] pairs
-                     :when (not= a b)
-                     :let [bf (File. (str cand "/" b ".ae"))]
-                     :when (.exists bf)
-                     :when (if text?
-                             (and (not= (nth (get oa a) 5) (nth (get oa b) 5)) (= (nth (get oa a) 5) (nth (get ob b) 5 nil)))
-                             (let [fa (level1-form (cv/convert (slurp (File. (str orig "/" a ".ae")))))]
-                               (and (not= fa (level1-form (cv/convert (slurp (File. (str orig "/" b ".ae"))))))
-                                    (= fa (level1-form (cv/convert (slurp bf)))))))]
-                 [a b])]
-      (if (seq same)
-        (do (println "roundtrip control: FAILED, a file's printed dump equals another's original:" (pr-str (first same)))
-            (System/exit 1))
-        (println (str "roundtrip control: " (count pairs) " files each judged against another's original, none equal"))))
+                    ", level 3 (code) " pass3 "; not passing " (pr-str (into (sorted-map) counts))))
+        _ (println line)
+        ;; the negative controls (GTS81 (a), queue 212: test/python/controls-read.edn): the subject's print (its dump; with
+        ;; --text its bytes and code) judged by judge-file (judge-text) against the reference's original, which must fail
+        ctl-bad
+        (long (results/judge-controls
+               (str "roundtrip" (when text? " --text")) corpus (results/read-controls (get opts "--controls") corpus)
+               (set files) (set (remove #(get failing %) files))
+               (fn [subject reference]
+                 (let [bf (File. (str cand "/" subject ".ae"))
+                       a-text (slurp (File. (str orig "/" reference ".ae")))
+                       v (if text?
+                           (judge-text reference a-text (get oa reference) (get ob subject) (get ct reference))
+                           (judge-file reference a-text (when (.exists bf) (slurp bf)) (get oa reference) (get ob subject) (get ct reference)))]
+                   (cond
+                     (nil? v) :pass
+                     (#{:forms :ast :code :text :marshal} (:level v))
+                     [:fail (str "level " (name (:level v)) (when (:at v) (str " at " (pr-str (:at v)))))]
+                     :else [:not-judged (str (name (:level v)) (when (:message v) (str ": " (:message v))))])))))]
+    (when (pos? ctl-bad) (println (str "roundtrip " (name corpus) ": " ctl-bad " negative control(s) failed")))
     (when-let [rf (get opts "--results")]
       (spit-mk rf (pr-str {:corpus corpus :files n :mode (if text? :full :lines) :passed [pass1 pass2 pass3]
                            :failing (into (sorted-map) (map (fn [[r v]] [r (:level v)]) failing))})))
+    (when (and record? (pos? ctl-bad)) (System/exit 1))
     (if record?
       (let [classed (into {} (for [[r v] failing] [r (classify v)]))
             unclassed (filter (comp nil? val) classed)
@@ -292,7 +299,7 @@
                         [r (str "NO SUCH CLASS " (:class k) " for " r)]))]
         (doseq [[_ p] problems] (println p))
         (doseq [[r p] problems] (println (str "FAIL " (name corpus) "/" r "\t" (str/replace p #"\s+" " "))))
-        (System/exit (if (empty? problems) 0 1))))))
+        (System/exit (if (and (empty? problems) (zero? ctl-bad)) 0 1))))))
 
 ;; ---- mode :full (PY3) ----
 
@@ -347,6 +354,6 @@
     (case verb
       "convert" (do-convert (pa #{"--dumps" "--forms" "--printed" "--tsv"}))
       "print" (do-print (pa #{}))
-      "compare" (do-compare (pa #{"--corpus" "--orig" "--cand" "--orig-tsv" "--cand-tsv" "--convert-tsv" "--known" "--results" "--results-file"}))
+      "compare" (do-compare (pa #{"--corpus" "--orig" "--cand" "--orig-tsv" "--cand-tsv" "--convert-tsv" "--known" "--results" "--results-file" "--controls"}))
       "convert-full" (do-convert-full (pa #{"--dumps" "--lines" "--forms" "--printed" "--tsv"}))
       (do (println "usage: -m arbace.repr.python convert|print|compare ...") (System/exit 2)))))
