@@ -132,14 +132,27 @@
                     (list 'when (list '!= '(.-PC f) (inc n)) '(goto :dispatch))]
           {:exec true}))))
 
+(defn- fused
+  "Instruction n, [op arg], fused with the next when it is to-bool or not and the next a conditional jump (queue
+  210: to-bool pushed a bool the jump popped): the operand's truth popped once, the jump taken or the next's
+  successor gone to; the next keeps its own statements for the jumps to it"
+  [ins n [op _]]
+  (let [[nop narg] (get ins (inc n))]
+    (when (and (#{:to-bool :not} op) (#{:jump-if-false :jump-if-true} nop) (< (+ n 2) (count ins)))
+      (let [on-true (not= (= nop :jump-if-true) (= op :not))]
+        [(list 'if '[(values b err) (py/AotTruthy f)] '(!= err nil)
+               '(return nil err)
+               (list 'when (if on-true 'b '(not b)) (list 'goto (lbl narg))))
+         (list 'goto (lbl (+ n 2)))]))))
+
 (def ^:private go-thread (with-meta 't {:tag '(* py/Thread)}))
 (def ^:private go-frame (with-meta 'f {:tag '(* py/Frame)}))
 
 (defn- code-func
   "Code object c as the Go function NAME: the entry switch on f.PC, then each instruction under its label"
   [nm c]
-  (let [ins (:code c)
-        bodies (vec (map-indexed instr ins))
+  (let [ins (vec (:code c))
+        bodies (vec (map-indexed (fn [n i] (or (fused ins n i) (instr n i))) ins))
         exec? (some #(:exec (meta %)) bodies)
         sw (list* 'switch '(.-PC f) (for [n (range (count ins))] (list 'case [n] (list 'goto (lbl n)))))]
     (list* 'go/func nm [go-thread go-frame] :results '[py/Object error]
