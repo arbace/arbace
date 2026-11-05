@@ -1,0 +1,103 @@
+(ns arbace.repr.llvm.full
+  "repr/llvm's mode :full (doc/cpp/LLVM.md §6.1; doc/llvm/LLVM-CROP-SURVEY.md, LLS18 (a)): the forms of an IR text and
+  the layer that prints the text back byte for byte. The forms are the plain mode's (arbace.repr.llvm.read); the layer
+  holds, item by item (a top-level form; a definition's header up to `{`, each label, instruction, debug record and
+  use-list order, and its `}`), what the canonical print (arbace.repr.llvm.print) does not write:
+
+  - the gap before the item (white space, comments: `; ModuleID`, `; preds = ...`, a hand-written note, blank lines),
+    when it is not the canonical layout's;
+  - the item's own text, when its spelling is not the canonical one: spacing inside it, a name quoted that need not be,
+    an escape, an optional word written (`external`, `default`, `to label`), metadata attachments or a global's
+    properties in another order, a typed pointer, an integer in hex (`u0x..`), a field's layout, ... The forms keep what
+    the text says (numbered and named values, hex and decimal floats, attribute groups and inline attributes are the
+    forms' own); the text keeps how. A text is kept with the hash of its canonical print: an item whose form was
+    changed since (written or edited by hand) prints canonically.
+
+  A layer is {:items [E ...] :end S}: an E per top-level form, nil when every item of it is canonical, else a vector of
+  an entry per item: nil (canonical), a string (the gap; the text canonical), or [GAP TEXT HASH] (GAP nil when
+  canonical). :end is the text after the last item, nil when canonical. The `.ae` text of a module read in :full is its
+  forms, as the plain mode writes them, then a last line `#_(llvm/layer {...})` that the reader skips."
+  (:require [arbace.repr.llvm.read :as rd]
+            [arbace.repr.llvm.print :as pr]
+            [arbace.repr.c.layout :as layout]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- entry [^String src prev-end g-canon t-canon [s e]]
+  (let [g (subs src (int prev-end) (int s))
+        t (subs src (int s) (int e))]
+    (cond
+      (and (= g g-canon) (= t t-canon)) nil
+      (= t t-canon) g
+      :else [(when-not (= g g-canon) g) t (.hashCode ^String t-canon)])))
+
+(defn read-full
+  "{:forms F :layer L} of an IR text."
+  [^String src]
+  (let [[forms spans] (rd/read-module-items src)]
+    (loop [i 0 prev nil prev-end 0 out []]
+      (if (= i (count forms))
+        (let [end (subs src (int prev-end))]
+          {:forms forms
+           :layer {:items out :end (when-not (= end (pr/module-end forms)) end)}})
+        (let [f (nth forms i)
+              items (pr/form-items f)
+              sp (nth spans i)
+              _ (when-not (= (count items) (count sp))
+                  (throw (ex-info (str "llvm full: " (count sp) " spans for " (count items) " items") {:form (first f)})))
+              es (loop [k 0 pe prev-end acc []]
+                   (if (= k (count items))
+                     acc
+                     (let [[g t] (nth items k)
+                           g (if (zero? k) (pr/module-gap prev) g)]
+                       (recur (inc k) (long (second (nth sp k))) (conj acc (entry src pe g t (nth sp k)))))))]
+          (recur (inc i) f (long (second (peek sp))) (conj out (when (some some? es) es))))))))
+
+(defn print-full
+  "The text of `forms` with their `layer`: the original byte for byte when the forms are those the layer was read
+  with; an item whose form changed (its canonical print's hash not the layer's), and every item of a form whose item
+  count changed, printed canonically."
+  ^String [forms layer]
+  (let [b (StringBuilder.)
+        ls (:items layer)]
+    (loop [i 0 prev nil]
+      (when (< i (count forms))
+        (let [f (nth forms i)
+              items (pr/form-items f)
+              es (nth ls i nil)
+              es (if (and es (not= (count es) (count items))) [(let [e (first es)] (if (vector? e) (first e) e))] es)]
+          (doseq [k (range (count items))]
+            (let [[g t] (nth items k)
+                  g (if (zero? k) (pr/module-gap prev) g)
+                  e (nth es k nil)]
+              (cond
+                (nil? e) (do (.append b ^String g) (.append b ^String t))
+                (string? e) (do (.append b ^String e) (.append b ^String t))
+                :else (let [[eg et h] e]
+                        (.append b ^String (or eg g))
+                        (.append b ^String (if (= h (.hashCode ^String t)) et t))))))
+          (recur (inc i) f))))
+    (.append b ^String (or (:end layer) (pr/module-end forms)))
+    (str b)))
+
+(defn layer-stats
+  "The counts of a layer: forms with an entry, gaps kept, texts kept."
+  [layer]
+  (let [es (mapcat identity (remove nil? (:items layer)))]
+    {:forms (count (remove nil? (:items layer)))
+     :gaps (count (filter #(or (string? %) (and (vector? %) (first %))) es))
+     :texts (count (filter vector? es))}))
+
+(defn layer-text
+  "The layer's last line of the `.ae` text."
+  ^String [layer]
+  (str "#_(llvm/layer " (layout/form-str layer) ")\n"))
+
+(defn layer-of-ae
+  "The layer of an `.ae` text written in :full (nil when it has none)."
+  [^String text]
+  (let [k (.lastIndexOf text "\n#_(llvm/layer ")
+        k (cond (pos? k) (inc k) (.startsWith text "#_(llvm/layer ") 0 :else -1)]
+    (when-not (neg? k)
+      (second (read-string (subs text (+ k 2)))))))

@@ -1,36 +1,143 @@
 #!/bin/bash
 # repr/llvm, LLVM IR's bridge (doc/cpp/LLVM.md; doc/cpp/CPP-SURVEY.md §5.2, "As built: CX6"): LLVM IR text as LLVM forms
-# and back, arbace.repr.llvm on the tools' host (evaluated from the checkout). The judge is clang as the assembler.
+# and back, arbace.repr.llvm on the tools' host (evaluated from the checkout). The judges are clang as the assembler and
+# LLVM 23's llvm-as.
 #
-#   bin/repr-llvm read FILE.ll [-o OUT.ae]     FILE's LLVM forms as .ae text
-#   bin/repr-llvm print FILE.ae [-o OUT.ll]    the forms printed as IR
+#   bin/repr-llvm read [--full] FILE.ll [-o OUT.ae]   FILE's LLVM forms as .ae text; --full: mode :full, the text's
+#                                              layer kept in the .ae's last line (comments, blank lines, spacing, spellings)
+#   bin/repr-llvm print [--full] FILE.ae [-o OUT.ll]  the forms printed as IR; --full: with the layer, the original text
+#                                              byte for byte
+#   bin/repr-llvm verify FILE.ll|FILE.ae...    LLVM 23's LLParser checks and Verifier rules over the forms
+#                                              (arbace.repr.llvm.verify): what `opt -passes=verify` prints to stderr for
+#                                              each file, line for line (LLParser's error with file:line:col, the source
+#                                              line and its caret; the Verifier's every message with the values it
+#                                              prints; the debug info's warnings), or nothing; exit 1 when one is invalid
+#   bin/repr-llvm verify-check LIST WORK       verify against opt -passes=verify (REPR_LLVM_OPT, default
+#                                              /usr/lib/llvm23/bin/opt) on each NAME<tab>PATH.ll of LIST: the same
+#                                              verdict and, for a rejection, the same first message (WORK/verify.tsv),
+#                                              and the whole of opt's stderr (WORK/full.tsv; opt's in WORK/opt/NAME.log,
+#                                              verify's in WORK/arb/NAME.err); REPR_LLVM_KNOWN names a file of the known
+#                                              differences, counted apart; exit 1 on a different verdict
+#   bin/repr-llvm mutants LIST OUT [N [FIRST [FAMILY]]] N mutants (default 300; the FIRST-th on, default 0) of LIST's
+#                                              modules, each one change meant to be invalid, into OUT/, OUT/mutants.list;
+#                                              FAMILY: base, attrs, cc, musttail, bundles, ... (arbace.repr.llvm.mutate/families)
 #   bin/repr-llvm roundtrip LIST WORK          each NAME<tab>PATH.ll of LIST: read, the .ae text read back equal, printed,
-#                                              read again equal (WORK/forms/NAME.ae, WORK/print/NAME.ll), and clang -c of the
-#                                              print equal byte for byte to clang -c of the original (WORK/rt.tsv, WORK/objects.tsv);
-#                                              exit 1 unless every file's forms are equal and its objects the same
+#                                              read again equal (WORK/forms/NAME.ae, WORK/print/NAME.ll); clang -c of the
+#                                              print against clang -c of the original, for the module's own target triple
+#                                              (COFF without its time stamp), byte for byte (WORK/objects.tsv), and llvm-as's
+#                                              bitcode of both, module summaries included (WORK/bitcode.tsv; REPR_LLVM_AS,
+#                                              default /usr/lib/llvm23/bin/llvm-as, the judge skipped when it is missing);
+#                                              WORK/rt.tsv. A judge is `same`, `differs` (the print's output differs or the
+#                                              print does not build where the original does) or `none` (the original does
+#                                              not build: a target the back end does not take). Exit 1 unless every file's
+#                                              forms are equal, no judge differs, and each file has one judge `same`
+#   bin/repr-llvm roundtrip --text LIST WORK   mode :full's round trip: each file read in :full, its .ae text read
+#                                              back (forms and layer equal, the forms the plain mode's), printed back
+#                                              byte for byte, and the plain print read in :full without a layer
+#                                              (WORK/full/NAME.ae, WORK/text.tsv); exit 1 unless every file is ok
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
 
+# judge NAME ORIG PRINT CMD...: CMD ORIG ORIG-OUT, CMD PRINT PRINT-OUT, the verdict on the two outputs
+judge() {
+  local o=$1 a=$2 b=$3; shift 3
+  if ! "$@" "$a" -o "$o.orig" 2> "$o.log"; then echo none
+  elif [ -f "$b" ] && "$@" "$b" -o "$o.print" 2>> "$o.log" && cmp -s "$o.orig" "$o.print"; then echo same
+  else echo differs; fi
+}
+
 case ${1:-} in
-  read|print) arbace_tool -m arbace.repr.llvm "$@" ;;
+  read|print|verify) arbace_tool -m arbace.repr.llvm "$@" ;;
   roundtrip)
+    if [ "${2:-}" = --text ]; then
+      list=$3 work=$4
+      mkdir -p "$work"; work=$(cd "$work" && pwd)
+      REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm rt-text "$list" "$work"
+      nf=$(wc -l < "$work/text.tsv"); nok=$(cut -f2 "$work/text.tsv" | grep -c '^ok$' || true)
+      echo "roundtrip --text: $nok of $nf printed back byte for byte"
+      [ "$nf" -gt 0 ] && [ "$nok" = "$nf" ] && [ "$nf" = "$(grep -c . "$list")" ]
+      exit
+    fi
     list=$2 work=$3
     mkdir -p "$work"; work=$(cd "$work" && pwd)
     REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm rt "$list" "$work"
+    llvm_as=${REPR_LLVM_AS:-/usr/lib/llvm23/bin/llvm-as}
+    [ -x "$llvm_as" ] || llvm_as=
+    : > "$work/objects.tsv"; : > "$work/bitcode.tsv"
     while IFS=$'\t' read -r n p; do
+      [ -n "$n" ] || continue
       mkdir -p "$work/obj/$(dirname "$n")"
-      if clang -c "$p" -o "$work/obj/$n.orig.o" 2> "$work/obj/$n.log" && [ -f "$work/print/$n.ll" ] \
-         && clang -c "$work/print/$n.ll" -o "$work/obj/$n.print.o" 2>> "$work/obj/$n.log"; then
-        if cmp -s "$work/obj/$n.orig.o" "$work/obj/$n.print.o"; then echo "$n	same"; else echo "$n	differs"; fi
-      else echo "$n	none"; fi
-    done < "$list" > "$work/objects.tsv"
+      tr=$(sed -n '/^target triple = /{s/^target triple = "\(.*\)"$/\1/p;q;}' "$p")
+      printf '%s\t%s\n' "$n" "$(judge "$work/obj/$n.o" "$p" "$work/print/$n.ll" \
+        clang -c -mno-incremental-linker-compatible ${tr:+-target "$tr"})" >> "$work/objects.tsv"
+      if [ -n "$llvm_as" ]; then
+        printf '%s\t%s\n' "$n" "$(judge "$work/obj/$n.bc" "$p" "$work/print/$n.ll" "$llvm_as")" >> "$work/bitcode.tsv"
+      fi
+    done < "$list"
     nf=$(wc -l < "$work/rt.tsv"); nok=$(cut -f2 "$work/rt.tsv" | grep -c '^ok$' || true)
     no=$(wc -l < "$work/objects.tsv"); nsame=$(grep -c '	same$' "$work/objects.tsv" || true)
-    echo "roundtrip: $nok of $nf forms equal, $nsame of $no objects equal"
-    # a check: every form equal and every object the same, else exit 1 (review 007's finding 11)
-    [ "$nf" -gt 0 ] && [ "$nok" = "$nf" ] && [ "$nsame" = "$no" ] && [ "$no" = "$(grep -c . "$list")" ] ;;
+    nb=$(wc -l < "$work/bitcode.tsv"); nbsame=$(grep -c '	same$' "$work/bitcode.tsv" || true)
+    echo "roundtrip: $nok of $nf forms equal, $nsame of $no objects equal${llvm_as:+, $nbsame of $nb bitcode equal}"
+    # a check: every form equal, no judge differing, and every file judged same by one of them (review 007's finding 11)
+    judged=$(cat "$work/objects.tsv" "$work/bitcode.tsv" | awk -F'\t' '$2 == "same" { print $1 }' | sort -u | wc -l)
+    [ "$nf" -gt 0 ] && [ "$nok" = "$nf" ] && awk -F'\t' '$2 == "differs" { d = 1 } END { exit d }' "$work/objects.tsv" "$work/bitcode.tsv" \
+      && [ "$no" = "$(grep -c . "$list")" ] && [ "$judged" = "$no" ] ;;
+  mutants)
+    list=$2 out=$3
+    mkdir -p "$out"; out=$(cd "$out" && pwd)
+    arbace_tool -m arbace.repr.llvm.mutate "$list" "$out" "${4:-300}" "${5:-0}" ${6:+"$6"} ;;
+  verify-check)
+    list=$2 work=$3
+    mkdir -p "$work/opt"; work=$(cd "$work" && pwd)
+    opt=${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}
+    rm -rf "$work/arb"; mkdir -p "$work/arb"
+    REPR_LLVM_OPT=$opt REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm verify-list "$list" "$work/arbace.tsv" "$work/arb"
+    # opt's verdict and first message: the first line that is not a warning, without its program and position
+    : > "$work/opt.tsv"
+    while IFS=$'\t' read -r n p; do
+      [ -n "$n" ] || continue
+      if ( "$opt" -passes=verify -disable-output "$p"; ) > "$work/opt/$n.log" 2>&1; then
+        # opt takes a module whose debug info is broken: it prints the message, then warns and strips the debug info (the
+        # verdict `debug`, the message its first line); a debug info version it does not know is stripped with a warning only
+        v=valid m=
+        first=$(head -1 "$work/opt/$n.log")
+        case $first in
+          "warning: ignoring debug info with an invalid version"*) v=debug; m=$(printf '%s' "$first" | sed -E 's/^warning: //; s/ in [^ ]*$//') ;;
+          "") ;;
+          "warning: "*) ;;
+          *) v=debug; m=$first ;;
+        esac
+      else
+        v=invalid
+        m=$(awk '/error: input module is broken/ { next } { sub(/^[^ ]*opt: /, "") } /^warning: / { next } { if (sub(/^[^ ]*:[0-9]+:[0-9]+: error: /, "") || sub(/^[^ ]*: error: /, "")) { print; exit } print; exit }' "$work/opt/$n.log")
+      fi
+      printf '%s\t%s\t%s\n' "$n" "$v" "$m" >> "$work/opt.tsv"
+    done < "$list"
+    # the verdicts side by side: NAME, opt's, Arbace's, same-verdict, same-message, opt's message, Arbace's
+    awk -F'\t' 'NR == FNR { v[$1] = $2; m[$1] = $3; next }
+      { sv = (v[$1] == $2) ? "same" : "differs"; sm = (v[$1] == "valid" && $2 == "valid") ? "-" : (m[$1] == $3 ? "same" : "differs")
+        print $1 "\t" v[$1] "\t" $2 "\t" sv "\t" sm "\t" m[$1] "\t" $3 }' "$work/opt.tsv" "$work/arbace.tsv" > "$work/verify.tsv"
+    # the whole of opt's stderr against what verify prints (WORK/full.tsv: NAME, same or differs)
+    : > "$work/full.tsv"
+    while IFS=$'\t' read -r n p; do
+      [ -n "$n" ] || continue
+      if cmp -s "$work/opt/$n.log" "$work/arb/$n.err"; then f=same; else f=differs; fi
+      printf '%s\t%s\n' "$n" "$f" >> "$work/full.tsv"
+    done < "$list"
+    n=$(wc -l < "$work/verify.tsv")
+    sv=$(awk -F'\t' '$4 == "same"' "$work/verify.tsv" | wc -l)
+    ninv=$(awk -F'\t' '$2 == "invalid" || $2 == "debug"' "$work/verify.tsv" | wc -l)
+    sm=$(awk -F'\t' '($2 == "invalid" || $2 == "debug") && $5 == "same"' "$work/verify.tsv" | wc -l)
+    nf=$(grep -c '	same$' "$work/full.tsv" || true)
+    # the names of a known file (REPR_LLVM_KNOWN: NAME<tab>CLASS<tab>reason) that differ are counted apart
+    nk=0
+    if [ -n "${REPR_LLVM_KNOWN:-}" ] && [ -f "$REPR_LLVM_KNOWN" ]; then
+      nk=$(awk -F'\t' 'NR == FNR { k[$1] = 1; next } $2 == "differs" && ($1 in k)' "$REPR_LLVM_KNOWN" "$work/full.tsv" | wc -l)
+    fi
+    echo "verify-check: $sv of $n verdicts as opt's; $sm of $ninv rejections with opt's first message; $nf of $n whole stderr equal${REPR_LLVM_KNOWN:+ ($nk more differ in the known classes)}"
+    [ "$n" -gt 0 ] && [ "$sv" = "$n" ] ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
 esac
