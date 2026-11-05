@@ -64,6 +64,7 @@
 
 (def ^:dynamic *types* {})
 (def ^:dynamic *renames* {})   ; implicit intrinsic declarations: the name written -> the mangled name LLParser gives
+(def ^:dynamic *distinct* #{})   ; the ids of the distinct nodes
 (def ^:dynamic *partial* false)
 (def ^:dynamic *dbg-format* nil)   ; LLParser's SeenOldDbgInfoFormat / SeenNewDbgInfoFormat (a volatile of #{:old :new})   ; the forms end at an LLParser error the reader met: no end-of-function/module checks
 (def ^:dynamic *alloca-as* 0)   ; the data layout's alloca address space (A), program address space (P)
@@ -1849,57 +1850,167 @@
           (= nm "VP") nil
           :else (verr :verifier/md-prof "expected either branch_weights or VP profile name" [:mdv x]))))))
 
+(defn- mem-op?
+  "Instruction::mayReadOrWriteMemory, as far as the forms tell: loads, stores, atomics, fences, va_arg, and calls but those
+  of intrinsics with IntrNoMem or with memory(none) / readnone."
+  [hd b]
+  (or ('#{load store atomicrmw cmpxchg fence va_arg} hd)
+      (and ('#{call invoke callbr} hd)
+           (let [c (callee-of b) e (when (global? c) (intr/lookup (global-key c)))
+                 [_ _ o] (split-inst b) fa (group-items (:attrs o))]
+             (not (or (:nomem e) (has-attr? fa "readnone")
+                      (some #(and (seq? %) (= (aname %) "memory") (= "none" (str/trim (str (second %))))) fa)))))))
+
 (defn- check-inst-metadata
-  "The attachments of an instruction `hd` (result type `rt`, body `b`): their placement and their operands."
+  "Verifier::visitInstruction's metadata attachments of an instruction `hd` (result type `rt`, body `b`), in its order: a
+  failed check of visitInstruction's own ends the visit, one of a visitXMetadata ends that function only."
   [md hd rt b]
-  (when-let [x (get md '!range)]
-    (when-not ('#{load call invoke} hd) (verr :verifier/md-range "Ranges are only for loads, calls and invokes!"))
-    (check-range-md x rt))
-  (when-let [x (get md '!noalias.addrspace)]
-    (when-let [ops (md-ops x)]
-      (when-not ('#{load store atomicrmw cmpxchg call invoke} hd) (verr :verifier/md-misc "noalias.addrspace are only for memory operations!"))
-      (doseq [op ops] (when-not (and (vector? op) (= 'i32 (norm-type (first op)))) (verr :verifier/md-misc "noalias.addrspace type must be i32!")))))
-  (when (get md '!invariant.group)
-    (when-not ('#{load store} hd) (verr :verifier/md-misc "invariant.group metadata is only for loads and stores")))
-  (when (get md '!invariant.load)
-    (when-not (= hd 'load) (verr :verifier/md-misc "invariant.load metadata is only for loads and readonly intrinsic calls")))
-  (when-let [x (get md '!fpmath)]
-    (when-not (fp-ish? rt) (verr :verifier/md-misc "fpmath requires a floating point result!"))
-    (when-let [ops (md-ops x)]
-      (when-not (= 1 (count ops)) (verr :verifier/md-misc "fpmath takes one operand!"))
-      (let [op (first ops)]
-        (when-not (and (vector? op) (= 'float (norm-type (first op)))) (verr :verifier/md-misc "fpmath accuracy must have float type"))
-        (let [v (md-fp-val op)]
-          (when-not (and v (> v 0.0)) (verr :verifier/md-misc "fpmath accuracy not a positive number!"))))))
-  (when-let [x (get md '!nonnull)]
-    (when-not (ptr-type? rt) (verr :verifier/md-nonnull "nonnull applies only to pointer types"))
-    (when-not (= hd 'load) (verr :verifier/md-nonnull "nonnull applies only to load instructions, use attributes for calls or invokes"))
-    (when-let [ops (md-ops x)] (when (seq ops) (verr :verifier/md-nonnull "nonnull metadata must be empty"))))
-  (when-let [x (get md '!noundef)]
-    (when-not (= hd 'load) (verr :verifier/md-misc "noundef applies only to load instructions"))
-    (when-let [ops (md-ops x)] (when (seq ops) (verr :verifier/md-misc "noundef metadata must be empty"))))
-  (when-let [x (get md '!align)]
-    (when-not (ptr-type? rt) (verr :verifier/md-align "align applies only to pointer types"))
-    (when-not (= hd 'load) (verr :verifier/md-align "align applies only to load instructions, use attributes for calls or invokes"))
-    (when-let [ops (md-ops x)]
-      (when-not (= 1 (count ops)) (verr :verifier/md-align "align takes one operand!"))
-      (let [op (first ops)]
-        (when-not (and (vector? op) (= 'i64 (norm-type (first op)))) (verr :verifier/md-align "align metadata value must be an i64!"))
-        (when-not (pow2? (.longValue ^java.math.BigInteger (md-int-val op))) (verr :verifier/md-align "align metadata value must be a power of 2!")))))
-  (doseq [k ['!dereferenceable '!dereferenceable_or_null] :let [x (get md k)] :when x]
-    (when-not (ptr-type? rt) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null apply only to pointer types"))
-    (when-not ('#{load inttoptr} hd) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null apply only to load and inttoptr instructions, use attributes for calls or invokes"))
-    (when-let [ops (md-ops x)]
-      (when-not (= 1 (count ops)) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null take one operand!"))
-      (when-not (and (vector? (first ops)) (= 'i64 (norm-type (first (first ops))))) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null metadata value must be an i64!"))))
-  (doseq [k ['!alias.scope '!noalias] :let [x (get md k)] :when x]
-    (when-let [ops (md-ops x)]
-      (doseq [s ops]
-        (let [sops (md-ops s)]
-          (when-not (or (md-ref? s) (and (seq? s) (= (first s) '!))) (verr :verifier/md-misc "scope list must consist of MDNodes" [:mdv x]))
-          (when (and sops (not (<= 2 (count sops) 3))) (verr :verifier/md-misc "scope must have two or three operands" [:mdv s]))))))
-  (when-let [x (get md '!tbaa)] (check-tbaa-tag x))
-  (when-let [x (get md '!prof)] (check-prof-md x hd b)))
+  (let [sub (fn [f] (visiting (f)))
+        ops-of (fn [x] (md-ops x))]
+    (when-let [x (get md '!fpmath)]
+      (when-not (fp-class-compatible? rt) (verr :verifier/md-misc "fpmath requires a floating point result!"))
+      (when-let [ops (md-ops x)]
+        (when-not (= 1 (count ops)) (verr :verifier/md-misc "fpmath takes one operand!"))
+        (let [op (first ops) v (md-fp-val op)]
+          (if v
+            (do (when-not (= 'float (norm-type (first op))) (verr :verifier/md-misc "fpmath accuracy must have float type"))
+                (when-not (> v 0.0) (verr :verifier/md-misc "fpmath accuracy not a positive number!")))
+            (verr :verifier/md-misc "invalid fpmath accuracy!")))))
+    (when-let [x (get md '!range)]
+      (when-not ('#{load call invoke} hd) (verr :verifier/md-range "Ranges are only for loads, calls and invokes!"))
+      (sub (fn [] (check-range-md x rt))))
+    (when-let [x (get md '!nofpclass)]
+      (when-not (= hd 'load) (verr :verifier/md-misc "nofpclass is only for loads"))
+      (sub (fn [] (let [ops (ops-of x)]
+              (when-not (fp-class-compatible? rt) (verr :verifier/md-misc "nofpclass only applies to floating-point typed loads" :inst))
+              (when-not (= 1 (count ops)) (verr :verifier/md-misc "nofpclass must have exactly one entry" [:mdv x]))
+              (when-not (and (md-int-op? (first ops)) (= 'i32 (norm-type (first (first ops))))) (verr :verifier/md-misc "nofpclass entry must be a constant i32" [:mdv x]))
+              (let [v (long (md-int-val (first ops)))]
+                (when (zero? v) (verr :verifier/md-misc "'nofpclass' must have at least one test bit set" [:mdv x] :inst))
+                (when-not (zero? (bit-and v (bit-not 1023))) (verr :verifier/md-misc "Invalid value for 'nofpclass' test mask" [:mdv x] :inst)))))))
+    (when-let [x (get md '!noalias.addrspace)]
+      (when-not ('#{load store atomicrmw cmpxchg call} hd) (verr :verifier/md-misc "noalias.addrspace are only for memory operations!"))
+      (sub (fn [] (when-let [ops (md-ops x)]
+              (doseq [op ops] (when-not (and (vector? op) (= 'i32 (norm-type (first op)))) (verr :verifier/md-misc "noalias.addrspace type must be i32!")))))))
+    (when (get md '!invariant.group)
+      (when-not ('#{load store} hd) (verr :verifier/md-misc "invariant.group metadata is only for loads and stores")))
+    (when (get md '!invariant.load)
+      (when-not (= hd 'load) (verr :verifier/md-misc "invariant.load metadata is only for loads and readonly intrinsic calls")))
+    (when-let [x (get md '!nonnull)]
+      (when-not (ptr-type? rt) (verr :verifier/md-nonnull "nonnull applies only to pointer types"))
+      (when-not (= hd 'load) (verr :verifier/md-nonnull "nonnull applies only to load instructions, use attributes for calls or invokes"))
+      (when-let [ops (md-ops x)] (when (seq ops) (verr :verifier/md-nonnull "nonnull metadata must be empty"))))
+    (when-let [x (get md '!noundef)]
+      (when-not (= hd 'load) (verr :verifier/md-misc "noundef applies only to load instructions"))
+      (when-let [ops (md-ops x)] (when (seq ops) (verr :verifier/md-misc "noundef metadata must be empty"))))
+    (doseq [k ['!dereferenceable '!dereferenceable_or_null] :let [x (get md k)] :when x]
+      (sub (fn [] (do
+              (when-not (ptr-type? rt) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null apply only to pointer types"))
+              (when-not ('#{load inttoptr} hd) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null apply only to load and inttoptr instructions, use attributes for calls or invokes"))
+              (when-let [ops (md-ops x)]
+                (when-not (= 1 (count ops)) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null take one operand!"))
+                (when-not (and (vector? (first ops)) (= 'i64 (norm-type (first (first ops))))) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null metadata value must be an i64!")))))))
+    (when-let [x (get md '!nofree)]
+      (sub (fn [] (do (when-not (ptr-type? rt) (verr :verifier/md-misc "nofree applies only to pointer types"))
+                (when-not (= hd 'inttoptr) (verr :verifier/md-misc "nofree applies only to inttoptr instruction"))
+                (when (seq (md-ops x)) (verr :verifier/md-misc "nofree metadata must be empty"))))))
+    (when-let [x (get md '!tbaa)] (sub (fn [] (check-tbaa-tag x))))
+    (doseq [k ['!noalias '!alias.scope] :let [x (get md k)] :when x]
+      (sub (fn [] (when-let [ops (md-ops x)]
+              (doseq [s ops]
+                (let [sops (md-ops s)]
+                  (when-not (or (md-ref? s) (and (seq? s) (= (first s) '!))) (verr :verifier/md-misc "scope list must consist of MDNodes" [:mdv x]))
+                  (when (and sops (not (<= 2 (count sops) 3))) (verr :verifier/md-misc "scope must have two or three operands" [:mdv s]))))))))
+    (when-let [x (get md '!llvm.access.group)]
+      (sub (fn [] (let [scope-ok? (fn [n] (and (md-ref? n) (empty? (md-ops n)) (contains? *distinct* n)))]
+              (when-not (scope-ok? x)
+                (doseq [op (md-ops x)]
+                  (when-not (md-ops op) (verr :verifier/md-misc "Access scope list must consist of MDNodes" [:mdv x]))
+                  (when-not (scope-ok? op) (verr :verifier/md-misc "Access scope list contains invalid access scope" [:mdv x]))))))))
+    (when-let [x (get md '!align)]
+      (when-not (ptr-type? rt) (verr :verifier/md-align "align applies only to pointer types"))
+      (when-not (= hd 'load) (verr :verifier/md-align "align applies only to load instructions, use attributes for calls or invokes"))
+      (when-let [ops (md-ops x)]
+        (when-not (= 1 (count ops)) (verr :verifier/md-align "align takes one operand!"))
+        (let [op (first ops)]
+          (when-not (and (vector? op) (= 'i64 (norm-type (first op)))) (verr :verifier/md-align "align metadata value must be an i64!"))
+          (when-not (pow2? (.longValue ^java.math.BigInteger (md-int-val op))) (verr :verifier/md-align "align metadata value must be a power of 2!"))
+          (when (> (.longValue ^java.math.BigInteger (md-int-val op)) 4294967296) (verr :verifier/md-align "alignment is larger that implementation defined limit")))))
+    (when-let [x (get md '!prof)] (sub (fn [] (check-prof-md x hd b))))
+    (when-let [x (get md '!callee_type)]
+      (sub (fn [] (do (when-not ('#{call invoke callbr} hd) (verr :verifier/md-misc "!callee_type metadata should only exist on calls"))
+                (doseq [op (md-ops x)]
+                  (let [ops (md-ops op)]
+                    (when-not ops (verr :verifier/md-misc "The callee_type metadata must be a list of callgraph metadata nodes" [:mdv op]))
+                    (when-not (= 1 (count ops)) (verr :verifier/md-misc "Well-formed generalized callgraph metadata must contain exactly one operand" [:mdv op]))
+                    (when-not (md-str (first ops)) (verr :verifier/md-misc "The operand of callgraph metadata for functions must be an MDString" [:mdv op]))
+                    (when-not (str/ends-with? (md-str (first ops)) ".generalized")
+                      (verr :verifier/md-misc "Only generalized callgraph metadata can be part of the callee_type metadata list" [:mdv op]))))))))
+    (when-let [x (get md '!mmra)]
+      (sub (fn [] (let [tag? (fn [n] (let [ops (md-ops n)] (and ops (= 2 (count ops)) (every? md-str ops))))]
+              (when-not (or (mem-op? hd b)) (verr :verifier/md-misc "!mmra metadata attached to unexpected instruction kind" :inst [:mdv x]))
+              (when-not (tag? x)
+                (when-not (md-ops x) (verr :verifier/md-misc "!mmra expected to be a metadata tuple" :inst [:mdv x]))
+                (doseq [op (md-ops x)] (when-not (tag? op) (verr :verifier/md-misc "!mmra metadata tuple operand is not an MMRA tag" :inst [:mdv op]))))))))
+    (when-let [x (get md '!annotation)]
+      (sub (fn [] (let [ops (md-ops x)]
+              (when-not ops (verr :verifier/md-misc "annotation must be a tuple" :none))
+              (when (empty? ops) (verr :verifier/md-misc "annotation must have at least one operand" :none))
+              (doseq [op ops]
+                (when-not (or (md-str op) (let [os (md-ops op)] (and os (every? md-str os))))
+                  (verr :verifier/md-misc "operands must be a string or a tuple of strings" :none)))))))
+    (when-let [x (get md '!captures)]
+      (sub (fn [] (let [[_ ps] (split-inst b)]
+              (when-not (= hd 'store) (verr :verifier/md-misc "!captures metadata can only be applied to store instructions"))
+              (when-not (ptr-type? (norm-type (first (first ps)))) (verr :verifier/md-misc "!captures metadata can only be applied to store with value operand of pointer type"))
+              (when (empty? (md-ops x)) (verr :verifier/md-misc "!captures metadata cannot be empty"))
+              (doseq [op (md-ops x)]
+                (when-not (md-str op) (verr :verifier/md-misc "!captures metadata must be a list of strings"))
+                (when-not (#{"address_is_null" "address" "read_provenance" "provenance"} (md-str op))
+                  (verr :verifier/md-misc "invalid entry in !captures metadata" :inst [:mdv op])))))))
+    (when-let [x (get md '!inline_history)]
+      (sub (fn [] (do (when-not ('#{call invoke callbr} hd) (verr :verifier/md-misc "!inline_history should only exist on calls"))
+                (doseq [op (md-ops x) :when (not= op 'null)]
+                  (when-not (and (vector? op) (global? (second op))
+                                 (let [d (.get *gdefs* (global-key (second op)))]
+                                   (or (= :function (:kind d))
+                                       (and (= :alias (:kind d)) (let [a (nth (:form d) 3)] (global? (if (vector? a) (second a) a)))))))
+                    (verr :verifier/md-misc "!inline_history operands must be functions or null" [:mdv x])))))))
+    (when-let [x (get md '!mem.cache_hint)]
+      (sub (fn [] (let [ops (vec (md-ops x)) [_ ps] (split-inst b)
+                  call? ('#{call invoke callbr} hd)]
+              (when-not (mem-op? hd b) (verr :verifier/md-misc "!mem.cache_hint is only valid on memory operations"))
+              (when-not (even? (count ops)) (verr :verifier/md-misc "!mem.cache_hint must have even number of operands (operand_no, hint_node pairs)" [:mdv x]))
+              (when (and call? (not (intr/recognized? (global-key (callee-of b)))))
+                (verr :verifier/md-misc "!mem.cache_hint is not supported on non-intrinsic calls"))
+              (let [opnds (if call? (mapv #(norm-type (first %)) (nth ps 2)) (mapv #(norm-type (second %)) (uses b)))]
+                (loop [j 0 seen #{} last nil]
+                  (when (< (inc j) (count ops))
+                    (let [o (nth ops j)]
+                      (when-not (md-int-op? o) (verr :verifier/md-misc "!mem.cache_hint must alternate between i32 operand numbers and metadata hint nodes" [:mdv x]))
+                      (let [n (long (md-int-val o))]
+                        (when (neg? n) (verr :verifier/md-misc "!mem.cache_hint operand number must be non-negative" [:mdv x]))
+                        (when-not (< n (count opnds)) (verr :verifier/md-misc "!mem.cache_hint operand number is out of range"))
+                        (when-not (ptr-ish? (nth opnds n)) (verr :verifier/md-misc "!mem.cache_hint operand number must refer to a pointer operand"))
+                        (when (seen n) (verr :verifier/md-misc "!mem.cache_hint contains duplicate operand number" [:mdv x]))
+                        (when (and last (<= n (long last))) (verr :verifier/md-misc "!mem.cache_hint operand numbers must be in increasing order" [:mdv x]))
+                        (let [nd (nth ops (inc j)) nops (vec (md-ops nd))]
+                          (when-not (md-ops nd) (verr :verifier/md-misc "!mem.cache_hint must alternate between i32 operand numbers and metadata hint nodes" [:mdv x]))
+                          (when-not (even? (count nops)) (verr :verifier/md-misc "!mem.cache_hint hint node must have even number of operands (key-value pairs)" [:mdv nd]))
+                          (loop [kk 0 keys #{}]
+                            (when (< (inc kk) (count nops))
+                              (let [key (md-str (nth nops kk))]
+                                (when-not key (verr :verifier/md-misc "!mem.cache_hint key must be a string" [:mdv nd]))
+                                (when (keys key) (verr :verifier/md-misc "!mem.cache_hint hint node contains duplicate key" [:mdv nd]))
+                                (let [v (nth nops (inc kk))]
+                                  (when-not (or (md-str v) (md-int-op? v)) (verr :verifier/md-misc "!mem.cache_hint value must be a string or integer" [:mdv nd])))
+                                (recur (+ kk 2) (conj keys key))))))
+                        (recur (+ j 2) (conj seen n) n))))))))))
+    (when-let [x (get md '!amdgpu.expected.active.lanes)]
+      (let [ops (md-ops x)]
+        (when-not (= 1 (count ops)) (verr :verifier/md-misc "!amdgpu.expected.active.lanes must have exactly one operand" :inst [:mdv x]))
+        (when-not (and (md-int-op? (first ops)) (= 'i32 (norm-type (first (first ops)))))
+          (verr :verifier/md-misc "!amdgpu.expected.active.lanes operand must be an i32 constant" :inst [:mdv x]))))))
 
 (defn- check-function-md
   "A function's metadata attachments (visitFunction): !prof."
@@ -1967,7 +2078,6 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Debug info (Verifier's DebugInfoCheck: opt takes a module whose debug info is broken, warns and strips it)
 
-(def ^:dynamic *distinct* #{})   ; the ids of the distinct nodes
 
 (def ^:private di-required
   "LLParser's required fields by DI node kind (derived from opt: each field dropped from a node that has it)."
@@ -2764,6 +2874,7 @@
   [forms]
   (binding [*types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))
             *alloca-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "A")
+            *distinct* (set (keep #(when (and (= (first %) 'llvm/meta) (:distinct (apply hash-map (drop 3 %)))) (second %)) forms))
             *prog-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "P")
             *dl-str* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
             *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
@@ -3038,7 +3149,13 @@
         (if al
           (let [nb (concat b [:align al])] (if (= (first x) '=) (list '= (second x) nb) nb))
           x))
-      x)))
+      (if (and (#{'atomicrmw 'cmpxchg} h) (nil? (:align (nth (split-inst b) 2))))
+        ;; the type's store size (LLParser's default for the atomics)
+        (let [[_ ps] (split-inst b) t (norm-type (first (if (= h 'atomicrmw) (nth ps 2) (nth ps 1))))
+              al (cond (int-type? t) (quot (+ (int-bits t) 7) 8) (fp-type? t) (quot (+ (long (fp-bits t)) 7) 8)
+                       (ptr-type? t) (quot (dl-ptr-bits (addrspace t)) 8) (vec-type? t) (some-> (bits t) (+ 7) (quot 8)))]
+          (if al (let [nb (concat b [:align al])] (if (= (first x) '=) (list '= (second x) nb) nb)) x))
+        x))))
 
 (defn- prog ^String [] (or (System/getenv "REPR_LLVM_OPT") "/usr/lib/llvm23/bin/opt"))
 
@@ -3117,6 +3234,14 @@
                  ps)]
     (apply list h nm rt ps more)))
 
+(defn- md-form-text
+  "A metadata definition as the AsmWriter prints it (canon-di, canonical floats, a node that refers to itself distinct)."
+  [f]
+  (let [f (canon-fps (canon-di f))
+        self? (letfn [(walk [y] (cond (= y (second f)) true (or (seq? y) (vector? y)) (some walk y) :else false))] (walk (nth f 2)))
+        f (if (and self? (not (:distinct (apply hash-map (drop 3 f))))) (concat (take 3 f) [:distinct true]) f)]
+    (pr/top-str f)))
+
 (defn- culprit-text
   "What the Verifier prints for one culprit, a line (its own newline kept by the caller)."
   [c ctx metaforms]
@@ -3130,10 +3255,10 @@
     (= c :bb) (label-text (:bb ctx))
     (= c :global) (global-operand (:global ctx))
     (and (vector? c) (= (first c) :global)) (global-operand (second c))
-    (and (vector? c) (= (first c) :md)) (if-let [f (get metaforms (second c))] (pr/top-str (canon-di f)) (str (second c)))
+    (and (vector? c) (= (first c) :md)) (if-let [f (get metaforms (second c))] (md-form-text f) (str (second c)))
     (and (vector? c) (= (first c) :mdv)) (let [v (second c)]
                                            (cond (nil? v) "null"
-                                                 (and (symbol? v) (get metaforms v)) (pr/top-str (canon-di (get metaforms v)))
+                                                 (and (symbol? v) (get metaforms v)) (md-form-text (get metaforms v))
                                                  (vector? v) (pr/typed-str (canon-fps v))
                                                  :else (pr/md-str v)))
     (and (vector? c) (= (first c) :inst)) (let [x (canon-fps (number-groups (canon-attr-order (with-default-align (canon-ptr0 (second c)))))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
@@ -3173,11 +3298,62 @@
       item (diag/offset-of src (first item) (second item) hint)
       :else 0)))
 
+(defn hoist-inline-md
+  "The forms with their inline metadata nodes (tuples and specialized nodes but DIExpression and DIArgList) numbered, as
+  LLParser makes them nodes and the slot tracker numbers them: a node of the same contents and not distinct is one node,
+  an inline one included."
+  [forms]
+  (let [ids (keep #(when (= (first %) 'llvm/meta) (second %)) forms)
+        nxt (volatile! (inc (reduce max -1 (map #(Long/parseLong (subs (name %) 1)) (filter md-ref? ids)))))
+        uniq (java.util.HashMap.) added (java.util.ArrayList.)]
+    (doseq [f forms :when (and (= (first f) 'llvm/meta) (md-ref? (second f)) (not (:distinct (apply hash-map (drop 3 f)))))]
+      (.putIfAbsent uniq (nth f 2) (second f)))
+    (letfn [(inline? [x] (and (seq? x) (symbol? (first x))
+                              (or (and (= (first x) '!) (vector? (second x)))
+                                  (and (di-kind x) (not (#{"DIExpression" "DIArgList"} (di-kind x)))))))
+            (hoist [x] (let [x (inner x)]
+                         (if (inline? x)
+                           (or (.get uniq x)
+                               (let [id (symbol (str "!" @nxt))]
+                                 (vswap! nxt inc) (.put uniq x id) (.add added (list 'llvm/meta id x)) id))
+                           x)))
+            (inner [x] (cond (and (seq? x) (= (first x) '!) (vector? (second x))) (list '! (mapv hoist (second x)))
+                             (and (seq? x) (di-kind x)) (apply list (first x) (map #(if (keyword? %) % (hoist %)) (rest x)))
+                             :else x))
+            (md-attach [md] (vec (mapcat (fn [[k v]] [k (hoist v)]) (partition 2 md))))
+            (inst [x] (let [b (body x)]
+                        (if (dbg-record? b) x
+                            (let [b2 (let [[h ps o] (split-inst b)
+                                           v (vec b) i (.indexOf ^java.util.List v :md)
+                                           v (if (neg? i) v (assoc v (inc i) (md-attach (nth v (inc i)))))
+                                           v (if ('#{call invoke callbr} h)
+                                               (assoc v 3 (mapv (fn [a] (if (and (vector? a) (= 'metadata (first a))) (assoc a (dec (count a)) (hoist (peek a))) a)) (nth v 3)))
+                                               v)]
+                                       (apply list v))]
+                              (if (= (first x) '=) (list '= (second x) b2) b2)))))
+            (top [f] (case (first f)
+                       llvm/meta (let [v (vec f)] (apply list (assoc v 2 (inner (nth f 2)))))
+                       (llvm/define llvm/declare)
+                       (let [v (vec f) mi (.indexOf ^java.util.List v :md) v (if (neg? mi) v (assoc v (inc mi) (md-attach (nth v (inc mi)))))
+                             bi (.indexOf ^java.util.List v :body)
+                             v (if (and (>= bi 0) (nth v (inc bi))) (assoc v (inc bi) (mapv (fn [blk] (apply list (concat (take 2 blk) (map inst (drop 2 blk))))) (nth v (inc bi)))) v)]
+                         (apply list v))
+                       llvm/global (let [v (vec f) mi (.indexOf ^java.util.List v :md)] (apply list (if (neg? mi) v (assoc v (inc mi) (md-attach (nth v (inc mi)))))))
+                       llvm/named-meta (list (first f) (second f) (mapv hoist (nth f 2)))
+                       f))]
+      (let [out (mapv top forms)]
+        (if (.isEmpty added) forms (into out added))))))
+
 (defn diagnose
   "[verdict message rule text] of forms: verdict valid, invalid or debug; the text what `opt -passes=verify` prints to
   stderr (empty when valid). `src`, `spans` (reader's items) and `file` give the parser errors their position."
   [forms ^String src spans ^String file]
   (let [[pe es renames es2] (run-phases forms)
+        ;; past the parser, the Verifier sees the inline nodes as numbered ones
+        hoisted (when-not pe (try (hoist-inline-md forms) (catch Throwable _ forms)))
+        [es renames es2 forms] (if (and hoisted (not (identical? hoisted forms)))
+                                 (let [[_ es* r* e2*] (run-phases hoisted)] [es* r* e2* hoisted])
+                                 [es renames es2 forms])
         metaforms (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) %]) forms))
         slots (when (or pe (seq es)) (try (diag/md-slots forms) (catch Throwable _ {})))
         rule-of #(:llvm/verify (ex-data %))
