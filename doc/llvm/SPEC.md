@@ -557,11 +557,14 @@ vector selects, use-list orders (indexes and uses), comdats (undefined, unnamed,
 and globals in another address space, recursive struct bodies (StructType::checkBody), `Metadata id is already used`, invalid
 `!dbg` and debug record locations, mixed debug formats, `dso_local dllimport`, the data layout's address spaces, empty
 `range`/`allockind`/`uwtable` values, `allocsize`'s same index, huge parameter alignments, musttail calls that forward their
-varargs (the reader's `:ellipsis`, printed back as `...`).
+varargs (the reader's `:ellipsis`, printed back as `...`), inline asm strings (InlineAsm::verify: the constraints' parse, order and
+counts against the call's type), LLParser's own messages at its parseToken sites seen in the tests (a function body's `{`, a global's
+`=`, `getelementptr`'s and `load`'s commas, extractvalue's index list), the attributes that require parentheses.
 
 Not ported (by class; the records name them): the AMDGPU and other target-specific intrinsic rules of visitIntrinsicCall (9
 tests of Verifier/AMDGPU), the vector-predication, vector insert/extract, matrix, statepoint relocation and convergence
 intrinsics' rules, `DILocation not allowed within this metadata node` (visitMDNode's AreDebugLocsAllowed), memprof and
 modular-format, `Missing funclet token on intrinsic call`, the logical-pointer and structured-gep modules, `dso_local_equivalent`,
-a few lexer cases (`*/` at the top, `u0x` integers, inline asm constraint syntax), and the order of opt's output where it
+a few lexer cases (`*/` at the top, `u0x` integers), AutoUpgrade's rewrites beyond the old forms named above (x86
+intrinsics' signatures are not judged, targets' unknown implicit intrinsics are taken), and the order of opt's output where it
 depends on the use lists (two users of one intrinsic).
