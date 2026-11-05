@@ -666,6 +666,77 @@
   [t]
   (first (build-subtype #{} true 4 t)))
 
+(defn- subtype-error [] (throw (ex-info "Subtype" {:subtype true})))
+
+(declare unify)
+
+(defn subtype
+  "Ctype.subtype without objects, functors and universal variables: the constraints making t1 a subtype of t2, as a
+  function that enforces them (unifications); throws {:subtype true} when t1 cannot be a subtype of t2"
+  [t1 t2]
+  (let [seen (atom #{})]
+    (letfn [(sub [t1 t2 cs]
+              (let [t1 (repr t1) t2 (repr t2)]
+                (if (or (identical? t1 t2) (@seen [t1 t2]))
+                  cs
+                  (do
+                    (swap! seen conj [t1 t2])
+                    (let [d1 (desc t1) d2 (desc t2)
+                          abbrev? (fn [d] (and (= :Tconstr (d 0)) (:manifest (*find-type* (d 1)))))
+                          same-path? (fn [] (or (= (d1 1) (d2 1)) (= (*normalize-type-path* (d1 1)) (*normalize-type-path* (d2 1)))))]
+                      (cond
+                        (or (= :Tvar (d1 0)) (= :Tvar (d2 0))) (conj cs [t1 t2])
+                        (and (= :Tarrow (d1 0) (d2 0))
+                             (or (= (d1 1) (d2 1)) (and *classic* (not (is-optional (d1 1))) (not (is-optional (d2 1))))))
+                        (sub (d1 3) (d2 3) (sub (d2 2) (d1 2) cs))
+                        (= :Ttuple (d1 0) (d2 0))
+                        (do (when-not (and (= (count (d1 1)) (count (d2 1))) (= (map first (d1 1)) (map first (d2 1))))
+                              (subtype-error))
+                            (reduce (fn [cs [[_ a] [_ b]]] (sub a b cs)) cs (map vector (d1 1) (d2 1))))
+                        (and (= :Tconstr (d1 0) (d2 0)) (empty? (d1 2)) (empty? (d2 2)) (same-path?)) cs
+                        (abbrev? d1) (sub (expand-abbrev-once t1) t2 cs)
+                        (abbrev? d2) (sub t1 (expand-abbrev-once t2) cs)
+                        (and (= :Tconstr (d1 0) (d2 0)) (same-path?))
+                        (if-let [decl (*find-type* (d1 1))]
+                          (reduce (fn [cs [v a b]]
+                                    (case v
+                                      :co (sub a b cs)
+                                      (conj cs [(newty2 (level a) [:Ttuple [[nil a]]]) (newty2 (level b) [:Ttuple [[nil b]]])])))
+                                  cs (map vector (or (:variance decl) (repeat :inv)) (d1 2) (d2 2)))
+                          (conj cs [t1 t2]))
+                        (= :Tvariant (d1 0) (d2 0))
+                        (or (sub-row (d1 1) (d2 1) cs) (conj cs [t1 t2]))
+                        :else (conj cs [t1 t2])))))))
+            (sub-row [row1 row2 cs]
+              ;; Ctype.subtype_row: nil for its Exit
+              (let [r1row (row-repr row1) r2row (row-repr row2)
+                    [r1 r2 pairs] (merge-row-fields (:fields r1row) (:fields r2row))
+                    r1 (if (:closed r2row) (filter-row-fields false r1) r1)
+                    m1 (desc (:more r1row)) m2 (desc (:more r2row))
+                    plain #{:Tvar :Tconstr :Tnil}]
+                (cond
+                  (and (= :Tconstr (m1 0) (m2 0)) (= (m1 1) (m2 1))) (sub (:more r1row) (:more r2row) cs)
+                  (and (plain (m1 0)) (plain (m2 0)) (:closed r1row) (empty? r1))
+                  (reduce (fn [cs [_ f1 f2]]
+                            (if (nil? cs)
+                              cs
+                              (let [v1 (field-view f1) v2 (field-view f2)]
+                                (cond
+                                  (and (or (and (= :Rpresent (v1 0)) (nil? (v1 1))) (and (= :Reither (v1 0)) (v1 1)))
+                                       (= :Rpresent (v2 0)) (nil? (v2 1))) cs
+                                  (and (= :Rpresent (v1 0) (v2 0)) (v1 1) (v2 1)) (sub (v1 1) (v2 1) cs)
+                                  (and (= :Reither (v1 0)) (not (v1 1)) (seq (v1 2)) (= :Rpresent (v2 0)) (v2 1))
+                                  (sub (first (v1 2)) (v2 1) cs)
+                                  (= :Rabsent (v1 0)) cs
+                                  (and (= :Rpresent (v1 0) (v2 0)) (not= (nil? (v1 1)) (nil? (v2 1)))) (subtype-error)
+                                  :else nil))))
+                          cs pairs)
+                  :else nil)))]
+      (let [cs (sub t1 t2 [])]
+        (fn [] (doseq [[a b] cs]
+                 (try (unify a b)
+                      (catch arbace.lang.ExceptionInfo e (if (:unify (ex-data e)) (subtype-error) (throw e))))))))))
+
 (defn free-vars?
   "Ctype.closed_type_expr's negation: some variable (a row's too) in t"
   [t]
@@ -898,7 +969,7 @@
                    1 (str (type-text names (first args) 2) " " n)
                    (str "(" (str/join ", " (map #(type-text names % 0) args)) ") " n)))
       :Tvariant (let [row (row-repr (d 1))
-                      fs (remove (fn [[_ f]] (and (:closed row) (absent? f))) (:fields row))
+                      fs (sort-row-fields (remove (fn [[_ f]] (absent? f)) (:fields row)))
                       present (filter (fn [[_ f]] (= :Rpresent ((field-view f) 0))) fs)]
                   (str "[" (if (:closed row) (if (= (count present) (count fs)) " " "< ") (if (= (count present) (count fs)) "> " "? "))
                        (str/join " | " (map (fn [[l f]] (let [v (field-view f)

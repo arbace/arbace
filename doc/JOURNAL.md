@@ -360,3 +360,12 @@ of 71 units equal natively (CamlinternalFormatBasics and Format new); the basic/
 Alternatives weighed: a row representation of our own (rejected: Matching and the printer need OCaml's rows as they
 are); porting Ctype.subtype and scopes now (deferred: TY12, TY13, no accepted program's output depends on them).
 Proposals TY11-TY13 (TYPER.md §12), none decided.
+
+## 2026-11-05: oi's native front end, T9's polymorphic variants continued (branch ocaml-polyvar)
+
+Later the same day, correcting the entry above: Ctype.subtype was ported after all (typing/ctype.ml's subtype_rec and
+subtype_row, without objects, functors and universal variables), since the brief named it: `(e : t1 :> t2)` is checked,
+a ground coercion that one unification cannot make is made by its constraints. So the proposals are TY11 (sharing in
+unification) and TY12 (scopes), TYPER.md §12; the entry above's TY12 (subtype) is withdrawn and its TY13 is TY12. Also
+`let p : 'a. t = e`, and two more samples (t59, t60): test/ocaml/typer/ 60 of 60 at every level; the stdlib still 66 of
+71, the basic/ probe 32 of 36.

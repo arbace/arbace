@@ -9,7 +9,7 @@ native reader gives the Parsetree as Arbace data. The route of OC4 (b) (doc/ocam
 host's `ocamlc` for a program. Light rules (the day's): no gate, no Arbace build, no re-seed; every run on main's stage 0
 (`ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace`), one process under 1.5 GB, samples only. Nothing here is
 TY1-TY6 (§8) were decided by the user (below §8); the proposals of T7-T8 are TY7-TY10 (§10), decided; those of T9's
-polymorphic variants TY11-TY13 (§12).
+polymorphic variants TY11-TY12 (§12).
 
 ## 1. What needs ocamlc today, and what the slice removes
 
@@ -284,9 +284,9 @@ namespaces (§2's table), each port following OCaml's functions:
 
 | namespace | OCaml 5.5.0 sources | what |
 |---|---|---|
-| `typer.types` | `types.ml` (row_desc, row_field with its `ext` cells, row_fields, row_repr, get_row_field, rf_either, link_row_field_ext), `btype.ml` (hash_variant, static_row, fixed_explanation, proxy), `ctype.ml` (merge_row_fields, filter_row_fields, unify_row, unify_row_field, copy_row and copy's sharing of a row by its more, occur_rec through rows and abbreviations, unify3's link of a row before its unification, memorized abbreviations, build_subtype and enlarge_type, immediacy of rows, lower_contravariant's visited table), `out_type.ml` (nameable_row, printer_iter_type_expr, mark_loops with alias_nongen_row) | a row `[:Tvariant {:fields :more :closed :fixed :name}]`, a field `[:RFpresent t]` `[:RFabsent]` `[:RFeither {:no-arg :arg-type :matched :ext}]`; Btype's snapshots and backtrack (`*trail*`, `try-unify`) for unifications that may fail |
+| `typer.types` | `types.ml` (row_desc, row_field with its `ext` cells, row_fields, row_repr, get_row_field, rf_either, link_row_field_ext), `btype.ml` (hash_variant, static_row, fixed_explanation, proxy), `ctype.ml` (merge_row_fields, filter_row_fields, unify_row, unify_row_field, copy_row and copy's sharing of a row by its more, occur_rec through rows and abbreviations, unify3's link of a row before its unification, memorized abbreviations, build_subtype and enlarge_type, subtype_rec and subtype_row (without objects, functors and universal variables), immediacy of rows, lower_contravariant's visited table), `out_type.ml` (nameable_row, printer_iter_type_expr, mark_loops with alias_nongen_row) | a row `[:Tvariant {:fields :more :closed :fixed :name}]`, a field `[:RFpresent t]` `[:RFabsent]` `[:RFeither {:no-arg :arg-type :matched :ext}]`; Btype's snapshots and backtrack (`*trail*`, `try-unify`) for unifications that may fail |
 | `typer.env` | `typetexp.ml`'s Ptyp_variant (tags by hash, inheritance of static rows, `[< ... > ...]`) and Ptyp_alias, `btype.ml`'s set_static_row_name, `typedecl.ml`'s constraints (`as 'a`, `constraint`), checked at a constrained type's uses | |
-| `typer.typecore` | `typecore.ml`'s Pexp_variant, solve_Ppat_variant, build_or_pat (`#t` patterns), finalize_variant, build_as_type of variants, the polymorphic variant processing of type_cases, type_function's parameters and type_let, type_coerce (a ground coercion tried as one unification with the enlarged type, else the argument unified with it), the application operators `|>` and `@@` typed as applications (Pexp_apply's `%revapply`/`%apply`), a function's cases with a type constraint, `let p : 'a. t = e` | |
+| `typer.typecore` | `typecore.ml`'s Pexp_variant, solve_Ppat_variant, build_or_pat (`#t` patterns), finalize_variant, build_as_type of variants, the polymorphic variant processing of type_cases, type_function's parameters and type_let, type_coerce (`(e : t1 :> t2)` checked by Ctype.subtype; a ground coercion tried as one unification with the enlarged type, else made by subtype's constraints; else the argument unified with the enlarged type), the application operators `|>` and `@@` typed as applications (Pexp_apply's `%revapply`/`%apply`), a function's cases with a type constraint, `let p : 'a. t = e` | |
 | `typer.parmatch` | `parmatch.ml`'s variant heads, full_match (closing or not), close_variant, pressure_variants; GADT constructors whose result type cannot be the matched one left out of a signature's completeness | |
 | `typer.matching`, `typer.lambda` | `matching.ml`'s divide_variant, combine_variant (test sequences, switches on the hashes, isint splits), `switch.ml`'s test_sequence | |
 | `typer.translcore` | `translcore.ml`'s Texp_variant (constant blocks), `translprim.ml`'s `%loc_LINE`, `%loc_FILE`, `%loc_LOC`, `%loc_POS`, the comparisons with a constant tag as `==` | |
@@ -314,12 +314,11 @@ functor's parameter: refused), pr6985_ok, pr4933_ok (private abbreviations' and 
 
 Faithfulness notes: unification links a row to the other before unifying their fields (Ctype.unify3) but links no
 other type (TY11); a row built by build_subtype or build_as_type carries no name, as OCaml's loses it when
-update_level lowers it below its type's scope (scopes are not ported: TY13); Ctype.subtype is not ported (a ground
-coercion whose single unification fails is accepted: the program is one ocamlc accepts, TY12).
+update_level lowers it below its type's scope (scopes are not ported: TY12).
 
 Size: about 8,100 lines of Arbace under `arbace/repr/ocaml/typer/` (and the driver, 177), about 940 more than T8 left (T9's variants and their fixes).
 
-## 12. Proposed (TY11-TY13; options with costs, a recommendation each, none decided)
+## 12. Proposed (TY11-TY12; options with costs, a recommendation each, none decided)
 
 - **TY11 Sharing in unification.** OCaml's unify3 links every non-variable type to the other before unifying their
   parts; the port does it for rows only, so a printed type can show the other node of an equal pair (mixin:
@@ -327,10 +326,7 @@ Size: about 8,100 lines of Arbace under `arbace/repr/ocaml/typer/` (and the driv
   type as unify3 does (about half a day: every sample and the stdlib re-judged, the expansions' memo checked); (b) when
   T11's corpus shows the difference in its classes; (c) not at all. *Recommended: (b)*, as (a) risks the 60 samples'
   printed types for a case the corpus may not have.
-- **TY12 Ctype.subtype.** The checking coercion (`(e : t1 :> t2)`, a ground coercion a single unification cannot make)
-  is not ported; only accepted programs are typed, so no output depends on it but an error's. (a) port it with T12's
-  errors (about a day: subtype's constraints and its trace); (b) now. *Recommended: (a)*.
-- **TY13 Scopes.** OCaml drops a row's name when update_level lowers it below its type's scope, and checks escapes by
+- **TY12 Scopes.** OCaml drops a row's name when update_level lowers it below its type's scope, and checks escapes by
   scopes; the port approximates the first (rows built by enlarge_type and build_as_type unnamed) and has no escape
   check. (a) port Ident's scopes and update_scope with T11 if its corpus shows printed names differing; (b) now (about
   a day, every type node gaining a scope). *Recommended: (a)*.
