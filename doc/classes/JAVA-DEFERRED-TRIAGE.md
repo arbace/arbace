@@ -475,9 +475,12 @@ JCS128-JCS135, each as recommended: :management split (:jmx by design, :mxbeans 
 Branch `java-jc9-jca` (from `java-deferred-triage`), JC9's first fix as F1 above designed it, prepared on the light
 side: the closure's lists, jrt's own Java, the variants, j2g's renames and the REPL's extendable classes, the
 generator of the generated fields; and JCS128-JCS130's classes. Nothing heavy ran: no `bin/jrt-convert update`, no
-build. **The branch is not mergeable before the night's conversion**: its variants name classes `jdk/forms` does
-not hold yet (a variant naming no class or member is j2g's error), so every j2g run fails until `bin/jrt-convert
-update` has written the new forms; the night's commands below make it whole, then it merges.
+build. **The branch is not mergeable before the night's conversion**: 16 of its variants name classes `jdk/forms`
+does not hold yet (j2g records each as "a variant for a class not in the inputs", an analysis failure, not an
+error), and the variants of classes it holds call what it does not (`SecretKeySpec`'s static initializer calls
+`CryptoAccess`, an operation-level stub until converted: the class would not initialize, HMAC with it), so a build
+before `bin/jrt-convert update` is wrong, though it completes (the night's steps 1-2 build javac's tool so, which
+uses none of it); the night's commands below make it whole, then it merges.
 
 **What came in, and how** (jdk26u at `baf63fb`):
 
