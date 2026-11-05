@@ -45,12 +45,31 @@
             (swap! required conj (:name (unit 1)))
             [:Lprim (l/pfield pos :pointer false) [[:Lprim (l/pgetglobal (unit 1)) []]]])))
 
-(defn transl-value-path [vd] (transl-address (:path vd) (:pos vd)))
+(defn transl-addr
+  "Lambda.transl_address: an environment's address ([:global id] [:var id] [:field addr pos]) as Lambda"
+  [a]
+  (case (a 0)
+    :global (do (swap! required conj (:name (a 1))) [:Lprim (l/pgetglobal (a 1)) []])
+    :var [:Lvar (a 1)]
+    :field [:Lprim (l/pfield (a 2) :pointer false) [(transl-addr (a 1))]]))
+
+(defn transl-value-path [vd]
+  (if-let [a (:addr vd)] (transl-addr a) (transl-address (:path vd) (:pos vd))))
+
+(defn transl-module-path [p] (transl-addr (or (:addr (env/find-module p)) (env/type-error (str "no address for " p)))))
 
 (defn transl-extension-path [path]
-  (case (path 0)
-    :Pident (transl-address path nil)
-    :Pdot (transl-address path (or (get @env/ext-positions path) (env/type-error (str "no position for " path))))))
+  (if-let [a (get @env/ext-addrs path)]
+    (transl-addr a)
+    (case (path 0)
+      :Pident (transl-address path nil)
+      :Pdot (transl-address path (or (get @env/ext-positions path) (env/type-error (str "no position for " path)))))))
+
+(def ^:dynamic *transl-struct-item*
+  "Translmod.transl_struct_item for an expression's structure item: (fn [titem next-fn] lambda)"
+  nil)
+(defn required-globals [] @required)
+(defn reset-required! [] (reset! required #{}) (reset! try-ids #{}))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Primitives (translprim.ml)
@@ -218,7 +237,7 @@
 (defn- pos-info [loc]
   (let [p (first loc)] [(lex/pos-fname p) (lex/pos-lnum p) (- (lex/pos-cnum p) (lex/pos-bol p))]))
 
-(defn- failure-block [path loc]
+(defn failure-block [path loc]
   (let [[f line ch] (pos-info loc)]
     [:Lprim (l/praise :regular)
      [[:Lprim (l/pmakeblock 0 false nil)
@@ -357,7 +376,8 @@
       :Texp_assert (let [c (d 1) cd (:desc c)]
                      (if (and (= :Texp_construct (cd 0)) (= "false" (:name (cd 1))))
                        (failure-block ty/path-assert-failure (d 2))
-                       [:Lifthenelse (transl-exp c) l/lambda-unit (failure-block ty/path-assert-failure (d 2))])))))
+                       [:Lifthenelse (transl-exp c) l/lambda-unit (failure-block ty/path-assert-failure (d 2))]))
+      :Texp_struct_item (*transl-struct-item* (d 1) (fn [] (transl-exp (d 2)))))))
 
 (defn transl-apply
   "Translcore.transl_apply: right-to-left evaluation, out-of-order partial applications as closures"
@@ -463,29 +483,3 @@
                     (static-catch [(transl-exp arg)] [[val-id k]]
                                   (m/for-function (:loc e) [:Lvar val-id] val-cases partial))))]
     (reduce (fn [body [sid ids handler]] [:Lstaticcatch body [sid ids] handler]) classic handlers)))
-
-;; ---------------------------------------------------------------------------------------------
-;; The structure (translmod.ml, bytecode)
-
-(defn transl-implementation
-  "[:program unit-name size required code]"
-  [uname items sig]
-  (reset! required #{})
-  (reset! try-ids #{})
-  (l/reset-exits!)
-  (binding [m/*transl-ext-path* transl-extension-path
-            m/*match-failure* (fn [loc] (failure-block ty/path-match-failure loc))]
-    (let [fields (vec (keep (fn [item] (case (item 0) :val (item 2) :exn (item 2) nil)) sig))
-          final [:Lprim (l/pmakeblock 0 false nil) (mapv (fn [id] [:Lvar id]) fields)]
-          body (reduce (fn [rest item]
-                         (case (item 0)
-                           :Tstr_value (transl-let (item 1) (item 2) rest true)
-                           :Tstr_eval [:Lsequence (transl-exp (item 1)) rest]
-                           :Tstr_type rest
-                           :Tstr_exception [:Llet :strict "" (item 1)
-                                            [:Lprim (l/pmakeblock 248 false nil)
-                                             [[:Lconst [:string (item 3)]] [:Lprim (l/pccall "caml_fresh_oo_id") [(l/lconst-int 0)]]]]
-                                            rest]))
-                       final (reverse items))
-          id (ty/ident-global uname)]
-      [:program uname (count fields) (vec (sort @required)) [:Lprim (l/psetglobal id) [body]]])))

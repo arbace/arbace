@@ -33,6 +33,11 @@
 
 (def type-error env/type-error)
 
+(def ^:dynamic *type-struct-item*
+  "Typemod's typing of a structure item for an expression's local open, module or exception (Pexp_struct_item):
+  (fn [env sitem] [titem env'])"
+  nil)
+
 (defn unify! [t1 t2 what]
   (try (ty/unify t1 t2)
        (catch arbace.lang.ExceptionInfo e
@@ -423,6 +428,9 @@
       :Pexp_assert (let [e (type-expect env (d 1) (ty/type-bool))
                          false? (let [ed (:desc e)] (and (= :Texp_construct (ed 0)) (= "false" (:name (ed 1)))))]
                      (ret [:Texp_assert e (:pexp_loc sexp)] (if false? (ty/newvar) (ty/type-unit))))
+      :Pexp_struct_item (let [[ti env'] (*type-struct-item* env (d 1))
+                              body (type-expect env' (d 2) expected)]
+                          (mkexp [:Texp_struct_item ti body] (:type body) loc))
       (type-error (str "expression " (d 0) " outside the slice")))))
 
 (defn type-cases
@@ -480,6 +488,26 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; let (Typecore.type_let) with the relaxed value restriction
 
+(declare nonexpansive?)
+
+(defn nonexpansive-mod?
+  "Typecore.is_nonexpansive_mod"
+  [m]
+  (let [d (:desc m)]
+    (case (d 0)
+      :Tmod_ident true
+      :Tmod_functor true
+      :Tmod_constraint (nonexpansive-mod? (d 1))
+      :Tmod_structure (every? (fn [it]
+                                (case (it 0)
+                                  :Tstr_value (every? #(nonexpansive? (:expr %)) (it 2))
+                                  :Tstr_module (nonexpansive-mod? (it 2))
+                                  :Tstr_include (nonexpansive-mod? (it 1))
+                                  (:Tstr_type :Tstr_modtype :Tstr_open :Tstr_primitive) true
+                                  false))
+                              (d 1))
+      false)))
+
 (defn nonexpansive?
   "Typecore.is_nonexpansive for the slice"
   [e]
@@ -492,6 +520,13 @@
       :Texp_record (and (every? (fn [[l df]] (and (not (:mut l)) (or (= :kept (df 0)) (nonexpansive? (df 1))))) (d 1))
                         (or (nil? (d 3)) (nonexpansive? (d 3))))
       :Texp_field (nonexpansive? (d 1))
+      :Texp_struct_item (and (let [ti (d 1)]
+                               (case (ti 0)
+                                 :Tstr_open true
+                                 :Tstr_module (nonexpansive-mod? (ti 2))
+                                 :Tstr_exception true
+                                 false))
+                             (nonexpansive? (d 2)))
       :Texp_array (empty? (d 1))
       :Texp_ifthenelse (and (nonexpansive? (d 2)) (or (nil? (d 3)) (nonexpansive? (d 3))))
       :Texp_sequence (nonexpansive? (d 2))
@@ -523,35 +558,3 @@
     (doseq [[p _] pats] (ty/generalize (:type p)))
     [(mapv (fn [[p _] e] {:pat p :expr e}) pats exprs)
      (reduce (fn [e [_ vs]] (add-pattern-vars e vs)) env pats)]))
-
-;; ---------------------------------------------------------------------------------------------
-;; Structures (Typemod.type_structure for the slice): items and the signature
-
-(defn type-structure
-  "[items sig env]: items [:Tstr_value rec vbs] [:Tstr_eval e] [:Tstr_exception id cstr] [:Tstr_type]; sig the
-  signature's items in order, [:val name id type] [:type [[name path decl]...]] [:exn name id cstr]"
-  [env sitems unit-name]
-  (loop [sitems sitems env env items [] sig []]
-    (if (empty? sitems)
-      [items sig env]
-      (let [d (:pstr_desc (first sitems))
-            drop-name (fn [sig kind name] (vec (remove #(and (= kind (first %)) (= name (second %))) sig)))]
-        (case (d 0)
-          :Pstr_value (let [[vbs env'] (type-let env (d 1) (d 2))
-                            vars (mapcat #(pm/bound-idents-full (:pat %)) vbs)
-                            sig (reduce (fn [s [id n t]] (conj (drop-name s :val n) [:val n id t])) sig vars)]
-                        (recur (rest sitems) env' (conj items [:Tstr_value (d 1) vbs]) sig))
-          :Pstr_eval (let [e (type-statement env (d 1))]
-                       (recur (rest sitems) env (conj items [:Tstr_eval e]) sig))
-          :Pstr_type (let [[env' out] (env/transl-type-decls env (d 2) #(ty/pident (ty/ident-create %)))]
-                       (recur (rest sitems) env' (conj items [:Tstr_type]) (conj sig [:type out])))
-          :Pstr_exception
-          (let [ec (:ptyexn_constructor (d 1)) name (:txt (:pext_name ec)) k (:pext_kind ec)
-                _ (when-not (= :Pext_decl (k 0)) (type-error "exception rebinding is outside the slice"))
-                id (ty/ident-create name)
-                c (env/exn-constructor env name ((k 2) 1) (ty/pident id))
-                env' (update-in env [:constrs name] #(cons c %))]
-            (recur (rest sitems) env' (conj items [:Tstr_exception id c (str unit-name "." name)])
-                   (conj (drop-name sig :exn name) [:exn name id c])))
-          (:Pstr_attribute) (recur (rest sitems) env items sig)
-          (type-error (str "structure item " (d 0) " outside the slice")))))))
