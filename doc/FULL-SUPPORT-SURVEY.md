@@ -3450,7 +3450,7 @@ The draft stood on main `6ad08d82` (2026-10-29). Since:
   `^timeout ` comes first, takes an interp timeout, so `audit-timeout` and `thread-order`'s `:unstable` are the
   judgment's (`java-judge`), not the matrix's: no case moves, and the matrix above and the numbers are as before.
 
-## REAP v3's divergences (2026-11-04, the tag `arbace-reaps-4-crops-v1`)
+## REAP v3's divergences (TODO(tag): the date; the tag `arbace-reaps-4-crops-v1`)
 
 The milestone's record at the tag: read, eval, AOT and print for Clojure, Java 26 (jdk26u `baf63fbe`), Go 1.27.1 and,
 since C8, C (C23 against gcc 15.2's testsuites and cc's ports, doc/C23-SURVEY.md §10, §11), on the host (linux/amd64),
@@ -3482,24 +3482,20 @@ is new since v2: every C class is "new".
 
 **Caveats.**
 
-- **Java's timeouts are by design by a catch-all** (as v2). Java's `speed` class (`test/java/divergences.edn`, kind
-  `:speed`, by design in `test/reap/cells.edn`'s kind maps) has one `:match`, `^timeout `, no `:level` and no `:tests`:
-  the 51 interpreted and 14 compiled timeouts count as by design in Java eval and Java AOT without being judged one by
-  one. Decided by the user (2026-10-31), and again for this tag (2026-11-02, VM audit 149 F2): the record keeps them so;
-  they are curated with GTS102's lowering of the per-test limits (doc/GATE-SURVEY.md, "Decided (2026-11-01): GTS102,
-  GTS103"), after the next clean run.
-- **No all-crops clean run for this tag** (the user, 2026-11-02, the test-budget decision). v2's tag stood on a clean
-  run (`bin/gate --full --clean`, a fresh clone, serial, every step audited, every part: 190,621 s over eight runs for
-  three crops); C's seven full checks add about 7 to 8 hours to `--full` serial (doc/C23-SURVEY.md, "As built: C's full
-  checks in the gate"), and the planned crops (C++, OCaml, Scheme, Haskell, Rust, Python) would multiply it again. The
-  clean run waits for compressed corpora, GT8, the next milestone's main thread (tiers: essential at most 15 minutes,
-  nightly at most 6 hours, clean at most 24 hours for all ten planned crops; by deduplication, coverage subsets,
-  rotation and synthetic corpora). In its place: `bin/seed --verify` at the seed's commit `1fe1063f` (stage 0 = G1 = G2 =
-  G3), the keyed `bin/gate --full` (since 2026-11-02 with C's seven full checks as heavy steps, judged against the
-  records, never `--record`) whose non-C steps ran overnight 2026-11-02/03 (TODO(tag): their outcome; `c-c2j` failed and was fixed) and whose C steps reran on the night of
-  2026-11-03 after the night's fixes (TODO(tag): the keyed `--full`'s result: commit, steps run and skipped, wall time,
-  failures), and `bin/gate --audit` of C's new steps (TODO(tag): the audit's result, or that it was not run). C9.2's row
-  12 (`--full --clean --tag arbace-reaps-4-crops-v1`, VM report 153 F2) is superseded by this decision.
+- **Java's timeouts, judged one by one since GTS208 (a)** (the user, 2026-11-03; v2 counted them by design by a catch-all,
+  `^timeout `): `speed` (by design, 20 at eval) keeps the timeouts the lowered limits judge slow, `speed-hang` (deferred,
+  28) those above 600 s of CPU, no slowness by design until shown otherwise, `speed-compiled` (by design, 2) the compiled
+  ones that pass at the test's own limit (1f0cd7b1).
+- **The record: a clean run of the four crops over GT8's compressed corpora** (the user, 2026-11-03, superseding the
+  decision of 2026-11-02 that the tag stand on a keyed `--full` alone). v2's tag stood on a clean run of every part (190,621 s
+  over eight runs for three crops); C's seven full checks add about 7 to 8 hours serial (doc/C23-SURVEY.md, "As built: C's
+  full checks in the gate"). GT8 (doc/GATE-SURVEY.md) compressed the corpora (deduplication, coverage subsets for C, goi and
+  Java's interpreted and compiled levels, the nightly rotation) and set the tiers (the user, 2026-11-04, GTS224-GTS226:
+  essential at most 15 minutes, nightly 8 hours planned, clean one night of about 10 hours, two at most). Before it: the
+  re-seed of 2026-11-05 (seed `d5548e72`, `bin/seed --verify`: stage 0 = G1 = G2 = G3, `d503777b`; the essential gate on
+  it) and a keyed `bin/gate --full --concurrent` from 03:14 (TODO(tag): its result). The clean run: `bin/gate --full --clean
+  --concurrent --tag arbace-reaps-4-crops-v1`, recorded in `test/gate/clean-arbace-reaps-4-crops-v1.edn` (TODO(tag): its
+  commit, wall time, steps, the rotation's state and the audit's result).
 - **C's `speed` class** (`test/c/divergences.edn`, by design, CS107 (a), GOI-SPEC §11.1's rule) takes every interpreted
   run beyond the check's 10 s (`^fail differ status timeout`): 9 programs of C eval, judged by the catch-all as Java's
   `speed` is, not one by one.
@@ -3510,9 +3506,9 @@ is new since v2: every C class is "new".
 - **C's gate keys are coarse.** Every C full step declares the whole of `test/c/`, `test/repr/c/`, `bin/lib/ci/` and C's
   tools: any change there reruns all seven (about 7 to 8 hours). Narrowed inputs (VM task 163, `mac/163-c-keys`) merge
   after the tag (the user, 2026-11-02), confirmed by `bin/gate --audit` on the listed steps.
-- **`:bad-specs-print` deferred for v1** (C print, 1 file, `gcc-bitint gcc.dg/bitint-1.c`): `long _BitInt (42) h;` is
-  printed `_BitInt(42) h;` and the reread loses `:c/bad-specs` (level 1). Decided (the user, 2026-11-03): deferred for this
-  tag; CS221 (a) with CS232 (a), conflicting specifiers printed as written, after the tag (VM task 168).
+- **`:bad-specs-print` retired** (C print, 1 file, `gcc-bitint gcc.dg/bitint-1.c`): first deferred for this tag (the user,
+  2026-11-03), then CS221 (a) with CS232 (a) built in the backlog (VM task 168: conflicting specifiers printed as written);
+  the file passes and the class is gone (6f6dbf17), as is C eval's `:wide` (queues 154, 164).
 - **CS268 (a) decided, built after the tag** (the user, 2026-11-03): the `--record` writers guess `:pp-errors` only when
   the differing errors are the preprocessor's, and never fall back to another check's classes. Not built for the tag:
   repr/c is embedded (in `gate_key`), so a change to it reruns the whole `--full` (VM task 167). The records at the tag
@@ -3522,18 +3518,18 @@ is new since v2: every C class is "new".
 **v2's section since its tag.** "REAP v2's divergences" above was regenerated after its tag by `doc/v2-record/refresh.sh`
 on later `bin/reap` outputs (be3096f8, 2439507a: C's row and the post-tag numbers) and gained two paragraphs (818ff165:
 `speed` decided again; `print-classes` narrowed); the comparison here reads v2's tables from the tag, not from this
-file. TODO(tag): the user's choice whether v2's generated block is restored to the tag's.
+file; its generated block was restored to the tag's (the user, 2026-11-03; `doc/v2-record/refresh.sh` frozen).
 
-<!-- v3-record:begin (generated by doc/v3-record/refresh.sh from bin/reap's output of 2026-11-03; do not edit between the markers) -->
+<!-- v3-record:begin (generated by doc/v3-record/refresh.sh from bin/reap's output of 2026-11-05; do not edit between the markers) -->
 
 Now (`bin/reap`; pass / by design / deferred), with v2's beside it:
 
 | | read | eval | AOT | print |
 |---|---|---|---|---|
 | Clojure | 908 / 2 / 0 | 21,053 / 81 / 1 | 809 / 30 / 0 | 1,031+ / 0 / 0 |
-| Java | 7,742 / 0 / 96 | 1,848 / 285 / 1,189 | 1,921 / 172 / 1,229 | 2,598 / 615 / 109 |
-| Go | 12,158 / 204 / 0 | 1,620 / 217 / 0 | 1,690 / 147 / 0 | 2,584+ / 141 / 0 |
-| C | 5,201 / 232 / 50 | 2,049 / 124 / 87 | 2,058 / 115 / 87 | 4,767 / 6 / 83 |
+| Java | 7,742 / 0 / 96 | 1,848 / 254 / 1,220 | 1,921 / 160 / 1,241 | 2,598 / 615 / 109 |
+| Go | 12,158 / 204 / 0 | 1,664 / 173 / 0 | 1,690 / 147 / 0 | 2,584+ / 141 / 0 |
+| C | 5,201 / 232 / 50 | 2,111 / 124 / 33 | 2,120 / 115 / 33 | 4,768 / 6 / 82 |
 
 | v2 (the tag) | read | eval | AOT | print |
 |---|---|---|---|---|
@@ -3610,8 +3606,8 @@ No class: nothing to record at this cell.
 | class | kind | cases | v2 | since v2 | decision |
 |---|---|---:|---:|---|---|
 | `serialization`: serialization (ObjectInputStream, ObjectOutputStream, Externalizable) | by design | 168 | 168 | unchanged | J2G-SPEC §12 (2026-10-10) |
-| `speed`: speed: beyond the check's limit (20 s an action, the definition included, or ... | by design | 51 | 51 | unchanged | survey §6.1, JCS10 (a); a catch-all kept by the user's decision of 2026-10-31, the timeouts curated after ... |
 | `xml`: XML (javax.xml, the XML signature API, Properties in XML) | by design | 22 | 22 | unchanged | J2G-SPEC §12 (2026-10-10) |
+| `speed`: speed: beyond the check's limit (20 s an action, the definition included, or ... | by design | 20 | 51 | shrunk by 31: GTS208 (a) (the user, 2026-11-03) removed the catch-all; the levels re-recorded with the fixed judge (1f0cd7b1): the interpreted timeouts above 600 s of CPU are speed-hang's (deferred), the rest stay by design | survey §6.1, JCS10 (a); GTS208 (a) (the user, 2026-11-03): the catch-all :match [#"^timeout "] removed, th... |
 | `classfile`: java.lang.classfile, java.lang.constant | by design | 14 | 14 | unchanged | JCS9 (b), JC6; JCS95 (a): by design |
 | `classloading`: class loading (ClassLoader's members, defineClass, ServiceLoader, modules, Cl... | by design | 13 | 13 | unchanged | J2G-SPEC §12, loading classes from jars for good (the user, 2026-10-10); JCS9 (b): J2G-SPEC §12 stands |
 | `foreign`: the foreign function and memory API (java.lang.foreign: Arena, MemorySegment;... | by design | 8 | 8 | unchanged | JCS95 (a): by design, FFM |
@@ -3629,6 +3625,7 @@ No class: nothing to record at this cell.
 | `invoke`: java.lang.invoke (MethodHandle, MethodHandles, CallSite, LambdaConversionExce... | deferred | 41 | 41 | unchanged | JCS9 (b), JC6; JCS94 (b): deferred |
 | `javac-api`: javac's API (com.sun.tools.javac.Main, javax.tools, com.sun.source): javac's ... | deferred | 39 | 39 | unchanged | JCS9 (b), JC6; JCS95: deferred (not run on arbace-javac before the milestone) |
 | `logging`: java.util.logging, System.Logger | deferred | 28 | 28 | unchanged | JCS9 (b), JC6; JCS95: deferred (not built before the milestone) |
+| `speed-hang`: interpreted timeouts above 600 s of CPU: no slowness by design until shown ot... | deferred | 28 | - | new | GTS208 (a) (the user, 2026-11-03): a test above 600 s of CPU or not finishing is not by design; deferred, e... |
 | `threads`: threads and concurrency's members jrt lacks (thread groups, platform threads,... | deferred | 26 | 26 | unchanged | JCS9 (b), JC6; JCS96 (b): deferred |
 | `charsets-locales`: charsets and locales (UTF-16LE's and UTF-32's coders, EUC-JP, US-ASCII's alia... | deferred | 20 | 20 | unchanged | JCS9 (b), JC6; JCS92 (b): deferred |
 | `interp-protected`: a protected member of a world class that is not an extendable class's instanc... | deferred | 19 | 19 | unchanged | survey §6.1, JC4; JCS98 (a) built in JC4b, JCS112 (a) in JC4c (the protected static methods in the member ... |
@@ -3642,6 +3639,7 @@ No class: nothing to record at this cell.
 | `system-properties`: the JVM's identifying system properties (java.version, java.vm.specification.... | deferred | 7 | 7 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
 | `random`: java.util.random (RandomGeneratorFactory and the algorithms by name) | deferred | 6 | 6 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
 | `jrt-strings`: jrt's StringBuffer: its capacity, its synchronized methods and an append's bo... | deferred | 4 | 4 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `memory-limit`: no heap limit: a test waiting for OutOfMemoryError (the JDK's -Xmx2g) allocat... | deferred | 4 | 1 | grew by 3: the re-recording of 1f0cd7b1 (t07728 and the tests waiting for OutOfMemoryError that the old catch-all hid as timeouts); deferred, JCS99 (a) | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
 | `sql`: JDBC beyond the Go build's java.sql (javax.sql.rowset, java.sql.Time) | deferred | 4 | 4 | unchanged | JCS97 (b): deferred |
 | `identity`: stdout prints identity hash codes or traces (Object.toString, a stack trace t... | deferred | 3 | 3 | unchanged | As built: JC1; JCS17 (b): stdout's digest with identity hashes masked |
 | `jvm-tools`: a JDK tool the test runs or its jtreg actions ran: the java launcher (java.ho... | deferred | 3 | 3 | unchanged | JCS103 (a): the JDK's own tools a test runs, a harness class |
@@ -3660,7 +3658,6 @@ No class: nothing to record at this cell.
 | `interp-volatile`: the interpreter's volatile fields: no sequential consistency between threads ... | deferred | 1 | 1 | unchanged | JCS127 (a): deferred, a class now, the fix after the tag arbace-reaps-3-crops-v2 |
 | `jrt-io`: jrt's FileInputStream.skip of a negative count | deferred | 1 | 1 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
 | `jrt-math`: jrt's Math.pow at large exponents | deferred | 1 | 1 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
-| `memory-limit`: no heap limit: a test waiting for OutOfMemoryError (the JDK's -Xmx2g) allocat... | deferred | 1 | 1 | unchanged | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
 | `read-failed`: not interpreted or compiled: the read level failed (the test's class at that ... | deferred | 1 | 1 | unchanged | As built: JC1 |
 
 
@@ -3670,14 +3667,15 @@ No class: nothing to record at this cell.
 |---|---|---:|---:|---|---|
 | `serialization`: serialization (ObjectInputStream, ObjectOutputStream, Externalizable) | by design | 117 | 117 | unchanged | J2G-SPEC §12 (2026-10-10) |
 | `classloading`: class loading (ClassLoader's members, defineClass, ServiceLoader, modules, Cl... | by design | 18 | 18 | unchanged | J2G-SPEC §12, loading classes from jars for good (the user, 2026-10-10); JCS9 (b): J2G-SPEC §12 stands |
-| `speed`: speed: beyond the check's limit (20 s an action, the definition included, or ... | by design | 14 | 14 | unchanged | survey §6.1, JCS10 (a); a catch-all kept by the user's decision of 2026-10-31, the timeouts curated after ... |
 | `jforms-corpus-own`: diffcheck's exclusions: the Java forms compiler's corpus's own classes that f... | by design (beside) | 12 | 12 | unchanged | RPS27 (a): the corpus's own classes failing in both halves by design |
 | `classfile`: java.lang.classfile, java.lang.constant | by design | 10 | 10 | unchanged | JCS9 (b), JC6; JCS95 (a): by design |
 | `foreign`: the foreign function and memory API (java.lang.foreign: Arena, MemorySegment;... | by design | 6 | 6 | unchanged | JCS95 (a): by design, FFM |
 | `xml`: XML (javax.xml, the XML signature API, Properties in XML) | by design | 4 | 4 | unchanged | J2G-SPEC §12 (2026-10-10) |
+| `speed-compiled`: speed, compiled: beyond the check's limit compiled, passing at the test's own... | by design | 2 | - | new | GTS208 (a)'s rule (the user, 2026-11-03) at the compiled level: a test that finishes and passes under its l... |
 | `desktop`: AWT, Swing (java.desktop) | by design | 1 | 1 | unchanged | J2G-SPEC §12, Swing/AWT for good (the user, 2026-10-10); JCS9 (b): J2G-SPEC §12 stands |
 | `j2g-reflection`: reflection's access checks (Method.invoke, Field.get: the caller's class from... | by design | 1 | 1 | unchanged | JCS98 (a), JCS117 (a) built in JC4c; JCS123 (b): the two j2g ones built, the access checks left out by design |
 | `zip`: the jrt: URL (the run-time image's file system; zip, jar and the jar: URL are... | by design | 1 | 1 | unchanged | JCS106 (a): by design, no run-time image |
+| `speed`: speed: beyond the check's limit (20 s an action, the definition included) | (by design in v2) | 0 | 14 | removed | (removed) |
 | `j2g-unresolved`: j2g: a class whose analysis stops at a type the world does not have (Cannot c... | deferred | 305 | 305 | unchanged | JCS69 (a), then (b): the world, until JCS44 (a)'s messages name the class, then the analysis failing at the... |
 | `security`: security (KeyStore, certificates, providers, permissions, key generators) | deferred | 242 | 242 | unchanged | JCS9 (b), JC6; JCS90 (b): deferred |
 | `net`: networking (datagrams, multicast, NIO channels and selectors, URL protocols, ... | deferred | 156 | 156 | unchanged | JCS9 (b), JC6; JCS91 (b): deferred |
@@ -3692,11 +3690,13 @@ No class: nothing to record at this cell.
 | `javac-api`: javac's API (com.sun.tools.javac.Main, javax.tools, com.sun.source): javac's ... | deferred | 17 | 17 | unchanged | JCS9 (b), JC6; JCS95: deferred (not run on arbace-javac before the milestone) |
 | `logging`: java.util.logging, System.Logger | deferred | 16 | 16 | unchanged | JCS9 (b), JC6; JCS95: deferred (not built before the milestone) |
 | `jrt-dates`: jrt's dates: Date, Calendar, GregorianCalendar, TimeZone and DateFormat behav... | deferred | 13 | 13 | unchanged | JCS96 (b): deferred |
+| `speed-hang-compiled`: compiled timeouts above 600 s of CPU or not finishing: deadlock, finalization... | deferred | 10 | - | new | GTS208 (a): not by design; deferred, each one's cause to be named and moved to its class (2026-11-04: t0371... |
 | `references`: references, finalization, collection (PhantomReference, Cleaner, runFinalizat... | deferred | 9 | 9 | unchanged | JCS9 (b), JC6; JCS96 (b): deferred |
 | `interp-protected`: a protected member of a world class that is not an extendable class's instanc... | deferred | 8 | 8 | unchanged | survey §6.1, JC4; JCS98 (a) built in JC4b, JCS112 (a) in JC4c (the protected static methods in the member ... |
 | `stack`: StackWalker, stack traces and their line numbers | deferred | 8 | 8 | unchanged | JCS9 (b), JC6; JCS94 (b): deferred |
 | `random`: java.util.random (RandomGeneratorFactory and the algorithms by name) | deferred | 6 | 6 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
 | `system-properties`: the JVM's identifying system properties (java.version, java.vm.specification.... | deferred | 6 | 6 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `memory-limit`: no heap limit: a test waiting for OutOfMemoryError (the JDK's -Xmx2g) allocat... | deferred | 4 | 2 | grew by 2: the compiled level re-recorded with the fixed judge (1f0cd7b1), as at eval: the timeouts that were memory-limit's under the old catch-all; deferred, JCS99 (a) | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
 | `util-classes`: java.util and java.lang members jrt lacks: Scanner, Calendar.Builder, Propert... | deferred | 4 | 4 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
 | `jforms-namespace-body`: diffcheck's exclusions: Clojure in a class body naming the namespace's vars o... | deferred (beside) | 4 | 4 | unchanged | RPS27 (a): F2.4's kin deferred to REAP3 |
 | `flaky`: flaky: the result depends on the threads' timing or a Random's draw; passed w... | deferred | 3 | 3 | unchanged | JCS71 (a) |
@@ -3707,7 +3707,6 @@ No class: nothing to record at this cell.
 | `j2g-go`: j2g: Go that does not compile (a local class's captured values missing from i... | deferred | 2 | 2 | unchanged | JCS42 (b): fixed in JC5 |
 | `j2g-pp-override`: j2g: a package-private method redeclared by a class of another package (Go wo... | deferred | 2 | 2 | unchanged | J2G-SPEC §4.4, As built: JC2; JCS118 (a): not built in JC4c, JCS122 |
 | `jrt-streams`: jrt's own streams otherwise than the JDK's: a closed DataInputStream over a F... | deferred | 2 | 2 | unchanged | JCS101: jrt flushing its streams at exit by design (a); the other behaviours deferred with JCS96 (b) |
-| `memory-limit`: no heap limit: a test waiting for OutOfMemoryError (the JDK's -Xmx2g) allocat... | deferred | 2 | 2 | unchanged | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
 | `tls`: TLS (javax.net.ssl, javax.net socket factories, HTTPS) | deferred | 2 | 2 | unchanged | JCS90 (b): deferred, providers into the closure first, then TLS over Go's crypto/tls |
 | `url-headers`: URLConnection's headers jrt answers otherwise: no MIME type (getFileNameMap h... | deferred | 2 | 2 | unchanged | JCS105 (b): deferred with JCS96 |
 | `clock`: stdout names the run's clock (a file's last-modified time made by the run) | deferred | 1 | 1 | unchanged | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
@@ -3748,21 +3747,21 @@ No class: nothing to record at this cell.
 
 | class | kind | cases | v2 | since v2 | decision |
 |---|---|---:|---:|---|---|
-| `gc-flags`: gc's optimizer diagnostics and flags | by design | 111 | 111 | unchanged | §1.1, GC46 |
-| `frames`: runtime.Caller, runtime.Callers, FuncForPC and traces naming goi's frames | by design | 21 | 21 | unchanged | §1.1, §10.6 |
+| `gc-flags`: gc's optimizer diagnostics and flags | by design | 98 | 111 | shrunk by 13: goi-classes (d038a39e): go build's flags in gc's reference, goi running the programs as written, the passing ones out of the class; Go eval re-recorded (d603d029) | §1.1, GC46 |
 | `memory`: finalizer timing, escape analysis, memory statistics, heap profiles | by design | 17 | 17 | unchanged | §1.1 |
-| `gc-phases`: errors of gc's phases after type checking | by design | 13 | 13 | unchanged | GC46, GPS41 (c) |
 | `foreign-code`: assembly, cgo, go:linkname | by design | 9 | 9 | unchanged | §1.1 |
 | `spellings`: message spellings, columns and lines the forms do not keep | by design | 9 | 9 | unchanged | GC49, SPEC.md §6.4, §10.1 |
+| `gc-phases`: errors of gc's phases after type checking | by design | 7 | 13 | shrunk by 6: goi-classes (cfef5629): gc's type-size checks after noder's declaration checks; re-recorded (d603d029) | GC46, GPS41 (c) |
 | `gc-std`: gc compiling std or the runtime | by design | 7 | 7 | unchanged | §1.1, GC46 |
-| `line-directives`: line directives | by design | 7 | 7 | unchanged | GC46 |
 | `speed`: speed: programs beyond the check's 10 s | by design | 6 | 6 | unchanged | §11.1, GR3's criterion |
 | `race`: -race | by design | 5 | 5 | unchanged | §1.1, GC46 |
-| `no-forms`: syntax errors gc's types2 reports on syntax's tree | by design | 4 | 4 | unchanged | GC47, G1, GPS9, GPS43 |
+| `frames`: runtime.Caller, runtime.Callers, FuncForPC and traces at positions within a line | by design | 3 | 21 | shrunk by 18: goi-frames (bce86dca): runtime.Caller and gc's traces from the interpreted stack, 21 of the class's 24 programs pass or move; re-recorded (d603d029) | §1.1, §10.6, SPEC.md §10.1 |
 | `gc-reference`: gc's own errors no longer pass the test | by design | 3 | 3 | unchanged | GR7b |
+| `no-forms`: syntax errors gc's types2 reports on syntax's tree | by design | 2 | 4 | shrunk by 2: goi-classes (c48a6d8b): types2's go and defer check on syntax's tree; re-recorded (d603d029) | GC47, G1, GPS9, GPS43 |
+| `std-out-of-scope`: standard packages out of goi's scope | by design | 2 | 1 | grew by 1: fixedbugs/issue68415.go imports unique, refused as weak is (GR8a), recorded once the run actions with go build's flags ran (d038a39e) | GR8a |
 | `unsafe-layout`: unsafe layout and memory order gc decides | by design | 2 | 2 | unchanged | §1.1, §5.4 |
 | `call-depth`: S23's call depth | by design | 1 | 1 | unchanged | S23 |
-| `std-out-of-scope`: standard packages out of goi's scope | by design | 1 | 1 | unchanged | GR8a |
+| `line-directives`: line directives | by design | 1 | 7 | shrunk by 6: goi-classes (f909fb7c): the errorcheck follows //line directives; re-recorded (d603d029) | GC46 |
 | `toolchain`: the toolchain's root | by design | 1 | 3 | shrunk by 2: issue21317 and linkobj pass, run in Go's test driver's environment (1ebd4ee6, c430b01e) | §1.1, GR4 |
 
 
@@ -3842,11 +3841,9 @@ No class: nothing to record at this cell.
 | `gcc-builtin`: gcc's own semantics of a builtin a program redefines | by design | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | SPEC §7.9, CS264 (a) |
 | `cc-c23-constants`: C23's nullptr, true and false | by design (beside) | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS263 (a); C8 |
 | `cc-redeclared`: cc writes a redeclared array's or function's composite type at the earlier de... | by design (beside) | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS263 (a); C8 |
-| `missing-builtin`: a builtin ci does not implement yet (deferred) | deferred | 23 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | the user, 2026-11-02 (queue 122, F2) |
-| `wide`: the overflow builtins on wide integers (deferred) | deferred | 23 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS35, this section |
-| `vla`: variably modified types beyond a block's arrays (deferred) | deferred | 18 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS106 |
-| `checker-gap`: a difference neither cc's known gaps nor the reference explain | deferred (beside) | 12 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS93 (a); C8 |
+| `checker-gap`: a difference neither cc's known gaps nor the reference explain | deferred (beside) | 10 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS93 (a); C8 |
 | `complex-int`: GNU's complex integer types (deferred) | deferred | 9 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS105 |
+| `vla`: variably modified types beyond a block's arrays (deferred) | deferred | 9 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS106 |
 | `read`: repr/c's reader's known gaps (deferred) | deferred | 7 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | C3b.2, CS104; self-include CS261 (a) |
 | `converter-gap`: the forms lose what the checker needs | deferred (beside) | 5 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS83 (a); C8 |
 | `layout-unjudged`: a layout cc and the checker part on that the judge could not ask gcc about | deferred (beside) | 5 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS263 (a): deferred until the judge asks gcc about it; C8 |
@@ -3854,6 +3851,7 @@ No class: nothing to record at this cell.
 | `signals`: a signal delivered to the program's handler (review 006) | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS191 (a); review 006 |
 | `threads`: threads (deferred) | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | §6.5, CS264 (a) |
 | `complit-static`: compound literals with storage class specifiers: the builder's places (C7 fol... | deferred | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | C7 follow-up, CS131 |
+| `missing-builtin`: a builtin ci does not implement yet (deferred) | deferred | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | the user, 2026-11-02 (queue 122, F2) |
 | `checker-layout`: the checker's layout differs from cc's and gcc's static assertions refuse the... | deferred (beside) | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS93 (a); C8 |
 
 
@@ -3867,15 +3865,14 @@ No class: nothing to record at this cell.
 | `fenv`: floating-point exception flags and signaling NaNs are not modelled (C7) | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | C7 (write-ahead), CS130 |
 | `ub`: undefined behaviour the reference's runs show (SPEC §13.2) | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS10 (a), SPEC §13.2 |
 | `gcc-builtin`: gcc's own semantics of a builtin a program redefines | by design | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | SPEC §7.9, CS264 (a) |
-| `missing-builtin`: a builtin ci does not implement yet (deferred) | deferred | 23 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | the user, 2026-11-02 (queue 122, F2) |
-| `wide`: the overflow builtins on wide integers (deferred) | deferred | 23 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS35, this section |
-| `vla`: variably modified types beyond a block's arrays (deferred) | deferred | 18 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS106 |
 | `complex-int`: GNU's complex integer types (deferred) | deferred | 9 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS105 |
+| `vla`: variably modified types beyond a block's arrays (deferred) | deferred | 9 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS106 |
 | `read`: repr/c's reader's known gaps (deferred) | deferred | 7 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | C3b.2, CS104; self-include CS261 (a) |
 | `checker`: the checker's own differences ci meets (deferred, CS93 (a)) | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS93 (a) |
 | `signals`: a signal delivered to the program's handler (review 006) | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS191 (a); review 006 |
 | `threads`: threads (deferred) | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | §6.5, CS264 (a) |
 | `complit-static`: compound literals with storage class specifiers: the builder's places (C7 fol... | deferred | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | C7 follow-up, CS131 |
+| `missing-builtin`: a builtin ci does not implement yet (deferred) | deferred | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | the user, 2026-11-02 (queue 122, F2) |
 
 
 **C print** (classes file `test/c/divergences-print.edn`)
@@ -3893,7 +3890,6 @@ No class: nothing to record at this cell.
 | `print-grammar`: the :lines print holds what cc's grammar (the reread) or gcc refuses though t... | deferred | 6 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS80 (a); C8 |
 | `self-include`: the main file includes itself (#include __FILE__-like tests) | deferred | 6 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS261 (a): deferred, the converter to read the re-entered main file as an include of its own (the user, 202... |
 | `split-declaration`: a declaration begins in one file and ends in another (SPEC §4.3's split-decl... | deferred | 5 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS104 (a): the converter keeps such a declaration whole (C6); deferred as at eval (the user, 2026-11-02, qu... |
-| `bad-specs-print`: a declaration whose conflicting specifiers (:c/bad-specs) are printed as one ... | deferred | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | deferred for v1 (the user, 2026-11-03), CS221 (a) with CS232 (a) after the tag: CS221 (b) and CS232 (b) (th... |
 
 <!-- v3-record:end -->
 
@@ -3908,22 +3904,25 @@ branches and audits, the crops C23, net/http, OCaml, Scheme and C++23, JN10), th
   a standard offset on 2026-11-01), one case more passing; `runtime-source` (by design, the user, 2026-11-02):
   `clojure/bad_def_test.clj`, written at run time by the suite, loads from source (5249c0ba, 8f3d43c6, 062de7d1). Read and
   print unchanged.
-- **Java** (read 7,742 / 3 / 93 to 7,742 / 0 / 96; print 2,598 / 687 / 37 to 2,598 / 615 / 109; eval and AOT
-  unchanged): at the diagnostics level, javac on Arbace reaching a member jrt lacks is `diag-closed-world`'s (deferred),
+- **Java** (read 7,742 / 3 / 93 to 7,742 / 0 / 96; print 2,598 / 687 / 37 to 2,598 / 615 / 109; eval 1,848 / 285 /
+  1,189 to 1,848 / 254 / 1,220, AOT 1,921 / 172 / 1,229 to 1,921 / 160 / 1,241, the passes unchanged): GTS208 (a) (the user,
+  2026-11-03) removed `speed`'s catch-all and the levels were re-recorded with the fixed judge (1f0cd7b1): the interpreted
+  timeouts above 600 s of CPU the new deferred `speed-hang`, the compiled ones passing at the test's own limit
+  `speed-compiled` (by design), `memory-limit` grown by what the catch-all hid; at the diagnostics level, javac on Arbace reaching a member jrt lacks is `diag-closed-world`'s (deferred),
   not `classloading`'s (bf844109, queue 012); `print-classes` (by design) takes only the differences `test/java/print.ae`
   names, the 72 others the new deferred `print-classes-unnamed`, to triage (818ff165; VM audit 149 F1, the user,
   2026-11-02). The dead classes `interp-private-call` and `interp-object-method` removed (b412c5f3, no case); every
   class's `:decided` cites its decision (724e8499).
-- **Go** (eval 1,618 / 219 / 0 to 1,620 / 217 / 0; AOT 1,688 / 149 / 0 to 1,690 / 147 / 0): issue21317 and linkobj pass
-  at both levels, run in Go's test driver's environment (1ebd4ee6, c430b01e), `toolchain` 3 to 1. Read and print unchanged.
-- **C** (new row; read 5,201 / 232 / 50, eval 2,049 / 124 / 87, AOT 2,058 / 115 / 87, print 4,767 / 6 / 83): C8 made the
+- **Go** (eval 1,618 / 219 / 0 to 1,664 / 173 / 0; AOT 1,688 / 149 / 0 to 1,690 / 147 / 0): issue21317 and linkobj pass
+  at both levels, run in Go's test driver's environment (1ebd4ee6, c430b01e), `toolchain` 3 to 1; at eval goi's classes reduced (goi-classes: go build's flags in gc's reference, gc's type-size checks, `//line` directives, types2's go/defer check) and the frames class (goi-frames), 1,620 to 1,664 (d603d029). Read and print unchanged.
+- **C** (new row; read 5,201 / 232 / 50, eval 2,111 / 124 / 33, AOT 2,120 / 115 / 33, print 4,768 / 6 / 82): C8 made the
   row (8c61bd89; doc/C23-SURVEY.md, "As built: C8, the fourth row"). Since: the classes audited and cited (queue 122,
   CS260-CS264, 121a873b, 6fd02a6e); `torture-execute-mirror` collapsed to its 101 files not in `torture-execute` (VM
   report 156, 1a385469: eval 3,457 / 195 / 109 to 2,049 / 124 / 87); the re-seed window's records (C9.2 steps 7 and 7a:
   the annotations, the token and tree checks, the round trip) written with their results files (CS240 (a)), so read and
   print count their passes (575+ and 0+ before), and classified (CS265, CS266, b7e8e8f6; the tree check's 276 files of
   C7's grammar, `gcc-syntax`, CS267 (a), 14873a86, d16ae499; 255c9d54); after the re-seed, the AOT record's stale pass of
-  `20101011-1.c` corrected and `c23-float-6.c` passing (04947f0e: AOT 2,058 / 115 / 87).
+  `20101011-1.c` corrected and `c23-float-6.c` passing (04947f0e: AOT 2,058 / 115 / 87); the backlog's ci work (queues 154, 164, 165: the overflow builtins, `_BitInt` wide values, variably modified types at run time; 10bb6a48, 3459abaf, d6882663) and `:wide` and `:bad-specs-print` retired (6f6dbf17): eval 2,111 / 124 / 33, AOT 2,120 / 115 / 33, print 4,768 / 6 / 82.
 - **Reclassified**: none at a v2 cell (Java's `classloading` to `diag-closed-world` at the read level is a move between
   classes, by design to deferred).
 - **Not a cell**: the merge window's gate work (GTS80-GTS103, GTS130-GTS143, GTS170-GTS173, GTS180; doc/GATE-SURVEY.md), Java 26

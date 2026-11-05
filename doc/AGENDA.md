@@ -55,12 +55,12 @@ The current state of the work. This file is rewritten as things change. For the 
 - **`arbace-reaps-3-crops-v1`** (2026-10-27) and **`-v2`** (2026-11-01, at `c4f85ace`): REAP for Clojure, Java 26 and
   Go 1.27.1, 12 of 12 cells; v2 with the gate made efficient and run clean in a fresh clone
   (`test/gate/clean-arbace-reaps-3-crops-v2.edn`).
-- **`arbace-reaps-4-crops-v1`** (not yet tagged: it waits for GT8 and the backlog, the user, 2026-11-03; TODO(tag): the date and the commit): C the fourth row
-  (C1-C9, [C23-SURVEY.md](C23-SURVEY.md)): read 5,201 / 232 / 50, eval 2,049 / 124 / 87, AOT 2,058 / 115 / 87, print
-  4,767 / 6 / 83 (pass / by design / deferred); 16 of 16 cells, none failing ("REAP v3's divergences"). The merge
-  window after v2 (the gate's branches and audits, the crops, JN10), C8, C9 and its re-seed window (C9.2: the seed
-  `1fe1063f` verified, the records written and classified, CS265-CS268), the keyed `bin/gate --full` with C's full
-  checks (TODO(tag): its result). Its record: an audited clean run of the four crops over GT8's compressed corpora, within budget (the user, 2026-11-03).
+- **`arbace-reaps-4-crops-v1`** (not yet tagged: it waits for its clean run, the user, 2026-11-03; TODO(tag): the date and
+  the commit): C the fourth row (C1-C9, [C23-SURVEY.md](C23-SURVEY.md)): read 5,201 / 232 / 50, eval 2,111 / 124 / 33,
+  AOT 2,120 / 115 / 33, print 4,768 / 6 / 82 (pass / by design / deferred); 16 of 16 cells, none failing ("REAP v3's
+  divergences"). The merge window after v2 (the gate's branches and audits, the crops, JN10), C8, C9 and its re-seed window
+  (C9.2, the seed `1fe1063f`), GT8 and the backlog, the re-seed of 2026-11-05 (seed `d5548e72`, verified). Its record: an
+  audited clean run of the four crops over GT8's compressed corpora, within budget (TODO(tag): its result).
 
 ## Now: the tag `arbace-reaps-4-crops-v1` (as of 2026-11-05, morning)
 
