@@ -346,3 +346,17 @@ four proposals of "As built: HF1-HF2" as recommended; recorded in doc/haskell/FR
   of 202; nofib/spectral's 21 programs by hand, 17 of 21; the four others in two recorded classes (GHC inlines `INLINE`
   library default methods; the order of two constraints of one class). Proposals 1-5 in the survey (the judge, the
   `INLINE` unfoldings, the constraint order, the gate step of decision 3, HF3's next steps).
+
+## 2026-11-05: HF3's start, later the same session: the judge widened (correcting the entry above)
+
+The evidence judge of the entry above recognised only dictionary *parameters*: after normalisation a global dictionary
+(`$fShowInt`) was text and escaped the recogniser, so the numbers above were too kind. Fixed, then what the wider judge
+found was matched: every default method has a compulsory unfolding GHC inlines into an instance's missing method even at
+`-O0` (GHC.Tc.TyCl.Instance, Note [INLINE and default methods]), now dumped by the helper's `iface` verb
+(`hsiface/unfoldings`) and inlined by the elaborator (the survey's proposal 2, done because no instance of a base class
+passes without it; the alternative, leaving it to HF5, kept as the proposal's option (b)); tidyNPat's literal patterns;
+superclass bindings `$cpNCls`; an instance's own dictionary as a given; pattern bindings bound once; `MonadFail` in `do`;
+dictionary functions' names; and in the judge, GHC's `simpleOptPgm` inlining of once-used unexported top-level bindings
+and `:Main.main`. Results now: 17 of 17 samples (types 194 of 194, evidence 220 of 220), nofib/spectral 17 of 21, 36 more
+nofib programs 27 of 36, every non-pass in the survey's three recorded classes ("As built: HF3 (start)"). `typecheck.ae`
+is 1,627 lines.

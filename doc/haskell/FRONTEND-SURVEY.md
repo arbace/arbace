@@ -653,7 +653,7 @@ interface (`typecheck.ae`'s `iface-text`, `--local`): ids, selectors, constructo
 superclasses, synonyms and instances, read back for the modules that import it (samples `T14Lib`, `T15Use`). Proposals 3
 and 4: `rename-check` is not in the gate yet (with this step, Proposed below), the groups' order stays unjudged.
 
-**3. The elaborator's first slice** (`arbace/repr/haskell/typecheck.ae`, 1,531 lines, namespace
+**3. The elaborator's first slice** (`arbace/repr/haskell/typecheck.ae`, 1,627 lines, namespace
 `arbace.repr.haskell.typecheck`; `bin/repr-haskell typecheck-check`, `make repr-haskell-typecheck-check`). Clean (HFS1
 (b)), no GHC code ported (GHC's `Tc/` and Jones's "Typing Haskell in Haskell" read as the specification):
 
@@ -690,29 +690,51 @@ and 4: `rename-check` is not in the gate yet (with this step, Proposed below), t
 The judge (`compare-with-ghc`, against the `tc` verb): (a) **types**: every binder, constructor, worker, selector and
 method of the module, canonical forms compared (synonyms expanded, foralls dropped, variables renamed by first
 occurrence, constraints sorted, multiplicities ignored), a binder GHC has and the elaborator lacks a failure; (b)
-**evidence**: per top-level binding (an instance method keyed by its dictionary function), the sorted applications of a
-name to dictionary terms, after a little of GHC's simple optimiser on both sides (a once-used let inlined, a dead one
-dropped, a lambda applied to trivial arguments beta-reduced: the `-O0` desugarer's output is after `simpleOptPgm`),
-GHC's floated top-level dictionaries (`$dNum = $fNumInt`) and let-bound ones inlined, local binders renamed by
-place; (c) **Core** equal after the same normalisation: reported, not judged (the match compiler is HF5's). The
-**negative control** (`--control true`: defaulting's order reversed, superclass-implied constraints kept) must differ
-from GHC on some module, else the check fails.
+**evidence**: per top-level binding (an instance method keyed by its dictionary function, `:Main.main` apart), the
+sorted applications of a name to dictionary terms (global `$f...`, superclass selections, dictionary parameters by
+place), after what GHC's `-O0` desugarer does after the desugaring proper (`simpleOptPgm`), applied to both sides: a
+once-used let inlined, a dead one dropped, a lambda applied to trivial arguments beta-reduced, a module's unexported
+top-level binding used once (not under a lambda) inlined at its use, GHC's floated top-level dictionaries
+(`$dNum = $fNumInt`) and let-bound ones inlined, local binders renamed by place; (c) **Core** equal after the same
+normalisation: reported, not judged (the match compiler is HF5's). The **negative control** (`--control true`:
+defaulting's order reversed, superclass-implied constraints kept) must differ from GHC on some module, else the check
+fails. (A first version of the judge compared only applications to dictionary *parameters*: the global dictionaries
+were text after normalisation and escaped the recogniser. Fixed; the wider judge found the default methods' unfoldings
+and the four choices below.)
 
-**Results** (2026-11-05): `bin/repr-haskell typecheck-check` over the 16 samples of `test/haskell/typecheck/` (Haskell
+What matching GHC's evidence required beyond the type system, each found by the judge: every default method has a
+compulsory unfolding (GHC.Tc.TyCl.Instance, Note [INLINE and default methods]) inlined into an instance's missing
+method even at `-O0`, so the helper's `iface` verb now dumps them (`(hsiface/unfoldings [(dm-unfolding NAME CORE)...])`,
+the Core erased as `tc`'s) and the elaborator inlines them; a numeric literal pattern at `Int`, `Word`, `Char`,
+`Double`, `Float` is matched without `(==)` (tidyNPat); an instance's superclass dictionary that is not a variable,
+or any of an instance with a context, is a binding of its own (`$cpNCls`); in an instance's method a constraint the
+instances solve to a variable is solved so, else by the instance's own dictionary's superclasses; constraints a
+reduction by an instance produces come after the others, and the quantified ones are grouped by class; a pattern
+binding's right-hand side is bound once; `MonadFail`'s `fail` for a failable `do` pattern, with its `HasCallStack` at
+the pattern ("a do statement"); a dictionary function is named by each argument's outer type constructor, synonyms
+expanded (`instance C (State Env)`: `$fCStateT`).
+
+**Results** (2026-11-05): `bin/repr-haskell typecheck-check` over the 17 samples of `test/haskell/typecheck/` (Haskell
 2010: basic polymorphism, classes with superclasses and defaults, defaulting and the monomorphism restriction, local
 polymorphism, monads, higher-kinded classes, a user `State` monad, constructor classes, local recursion and list
 comprehensions, imports of base, records, a `Num` instance and literals at it, a cross-module library and its user, the
-restriction's ambiguity case): **16 of 16 equal**, types 194 of 194, evidence 202 of 202 bindings, Core equal in 77 of
-202 (the rest is the match compiler's shape); the control differs on 7 of 16. In 26 s for the 16 (most of it reading
-the interfaces once per module), at most 600 MB. Wider, run by hand: the 21 nofib/spectral programs of rename-check,
-**17 of 21 equal** (types 668 of 668 binders), up to 1,124 lines (`simple`, 125 bindings, 6.6 s); the four others in two
-classes: GHC inlines a library default method with an `INLINE` pragma into the instance's method (`Num`'s `(-)`,
-`Floating`'s `(**)`, `RealFrac`'s `floor`...: atom, power, exact-reals; the elaborator applies `$dm-`, the evidence is
-the same dictionary, applied once instead of at each inlined use), and the order of two constraints of the same class
-(life's `elt`: `(Ord a, Num a1, Num a)` against ours `(Ord a, Num a, Num a1)`). Bugs the programs found that the
-samples did not: a lazy `filter` that read the metas' levels after their adjustment (the ambiguous constraints of a
-binding were quantified), NPat's equality before the literal, record patterns, derived instances, synonyms in
-instance heads (`State Env`), instance methods of the same name in two instances.
+restriction's ambiguity case, methods with their own constraints, `MonadFail`, deriving): **17 of 17 equal**, types 194
+of 194, evidence 220 of 220 bindings, Core equal in 107 of 220 (the rest is the match compiler's shape); the control
+differs on 10 of 17. In about 30 s for the 17 (most of it reading the interfaces once per module), at most 600 MB.
+Wider, run by hand (scratch scripts, not committed as checks): the 21 nofib/spectral programs of rename-check, **17 of 21
+equal**, types 626 of 626 binders, evidence 597 of 608 bindings, up to 1,124 lines (`simple`, 125 bindings, 6.6 s); and
+the 36 single-module programs of nofib's other directories that rename equal (gc, imaginary, real/maillist, shake,
+shootout, smp), **27 of 36 equal**, types 345 of 347, evidence 309 of 322. The non-passes fall in recorded classes:
+(1) the order of two constraints of one class or of classes GHC's solver orders otherwise (life's `elt`, simple's
+`table_search`: GHC's inert set's order; one binding each); (2) superclass bindings of some instances without a
+context whose superclass is a variable (exact-reals: GHC binds `$cp1Ord = $fEqCR`, T02 inlines `$fShapeSq`; the rule
+is not found yet) and the inner lets of inlined unfoldings (exact-reals, power); (3) extensions outside the slice:
+foreign imports (smp/callback), `printf`'s equality-constrained instances (smp/threads005), pragmas in expressions
+(`HsPragE`: binary-trees, k-nucleotide, reverse-complement), `IO ()`'s defaulting of `main` through `~`
+(spectral-norm), higher-rank arguments trusted (`runST`: kahan passes). Bugs the programs found that the samples did
+not: a lazy `filter` that read the metas' levels after their adjustment (the ambiguous constraints of a binding were
+quantified), NPat's equality before the literal, record patterns, derived instances (and their heads for constructor
+classes), synonyms in instance heads, instance methods of the same name in two instances, local recursive groups.
 
 **Not covered yet** (beyond this slice of Tier S): the deriving bindings (HF4: their instances are in the table), the
 match compiler, CorePrep, CoreToStg (HF5, HF6: so no program runs on hsi from Arbace's own STG yet, and this branch does
@@ -722,8 +744,8 @@ GADTs, existentials, type families, kinds, `Typeable`/`Coercible` evidence, impl
 cases beyond the standard rule, error messages.
 
 **On the estimates.** The survey gave HF3 20 to 30 working days for 14,000 to 20,000 lines (Tier S). The first slice,
-Haskell 2010 with classes, is 1,531 lines and took this session (about an hour of the agent's wall clock after the
-renamed tree): the checker's core is small; the remaining cost is in the extensions of the list above and in matching
+Haskell 2010 with classes, is about 1,630 lines and took this session (the renamed tree and the interfaces included,
+about two hours of the agent's wall clock): the checker's core is small; the remaining cost is in the extensions of the list above and in matching
 GHC's choices exactly where they leave no trace in the types (the two classes above).
 
 **Proposed** (the user decides).
@@ -731,17 +753,21 @@ GHC's choices exactly where they leave no trace in the types (the two classes ab
 1. The judge of HF3. Options: (a) types and evidence as built, full Core equality from HF5 (the match compiler) on;
    (b) port GHC's match compiler now (`HsToCore/Match*`, about 2,300 lines) so Core is judged from HF3. *Recommended:
    (a)*, HF5 is where the port belongs (HFS5 (a)).
-2. Default methods with `INLINE` (atom, power, exact-reals). Options: (a) the `iface` verb dumps the unfoldings of
-   `INLINE` default methods (the library's `$dm...` as erased Core, a few dozen in base) and the elaborator inlines them
-   as GHC does (half a day, needed for HF5's Core equality anyway); (b) record the class and leave it. *Recommended: (a)*.
-3. The order of constraints of the same class (life). Options: (a) a recorded class until the solver keeps GHC's order
-   (the inert set's insertion order: needs the solver's work-list order, not GHC's uniques); (b) compare dictionary
+2. The default methods' unfoldings: done in this branch (the helper dumps every default method's compulsory unfolding,
+   the elaborator inlines it), because the evidence judge cannot pass a single instance of a base class without it.
+   Options: (a) keep it (the unfoldings are data of the pinned libraries, like their interfaces; Tier L derives them
+   from the libraries' own source); (b) leave the inlining to HF5's desugarer and judge instances' missing methods as a
+   recorded class until then. *Recommended: (a)*.
+3. The order of constraints (class 1 above). Options: (a) a recorded class until the solver keeps GHC's order (its
+   inert set's insertion order: the work list's order, not GHC's uniques); (b) compare a binding's dictionary
    parameters as a multiset per class (hides real misplacements). *Recommended: (a)*.
 4. The gate step of decision 3: rename-check with the type checker's. Options: (a) one `--full` step `haskell-front`
    running `bin/repr-haskell rename-check` and `typecheck-check` (about 4 minutes, at most 600 MB, the host's GHC at
    its pin for the helper; the crop's other rows stay out until GT8's budget); (b) an essential step (samples only,
    about 1 minute); (c) wait for HF8. *Recommended: (a)*, after the user's night review of this branch.
 5. HF3's next steps, in order: classes beyond Haskell 2010 (multi-parameter, flexible and overlapping instances,
-   fundeps), higher-rank and scoped type variables, existentials and GADTs' local equalities, then the type-level tier
-   (HF9). Alternative: HF4 (deriving, a port) first, to make the nofib programs' derived instances judged too.
-   *Recommended:* HF4 next (a port, mechanical, Sonnet), then the extensions as the corpora's measured needs order them.
+   fundeps), higher-rank and scoped type variables (checked, not trusted), existentials and GADTs' local equalities,
+   equality constraints, pragmas, then the type-level tier (HF9). Alternative: HF4 (deriving, a port) first, to make the
+   derived instances' bindings judged too. *Recommended:* HF4 next (a port, mechanical, Sonnet), then the extensions as
+   the corpora's measured needs order them; the nofib sweeps above become a committed list (`test/haskell/typecheck-check.txt`,
+   as rename-check's) with HF4.
