@@ -51,6 +51,11 @@ lrr_list() { # hw|probes|runtime|all
       d=$(oracle_unpack "$pin") || return $?
       awk -F'\t' '!/^#/ && $1 ~ /\/x\.ll$/ {print $1}' "$(oracle_manifest "$pin")" | while read -r u; do printf 'rt/%s\t%s/%s/%s\n' "${u%/x.ll}" "$d" "$(oracle_pin_name "$pin")" "$u"; done ;;
     all) lrr_list hw; lrr_list probes; lrr_list runtime ;;
-    *) echo "list: hw, probes, runtime or all" >&2; return 2 ;;
+    valid) lrr_list hw; lrr_list runtime ;;  # the modules every judge takes: hand-written ones and clang's IR
+    *) echo "list: hw, probes, runtime, valid or all" >&2; return 2 ;;
   esac | sed "s|\t\(test/\)|\t$root/\1|"
+}
+lrr_listfile() { # LIST: a file, or hw|probes|runtime|all made into one
+  if [ -f "$1" ]; then echo "$1"; return; fi
+  lrr_list "$1" > "$TMPDIR/lrr-list.$1" && echo "$TMPDIR/lrr-list.$1"
 }

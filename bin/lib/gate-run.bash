@@ -119,6 +119,17 @@ gate_cxx_id() {  # the :cxx host's identity (CX10): g++'s and clang++'s --versio
     awk '{print $2}' "$root/test/cpp/host/headers.sha256" 2>"$TMPDIR/gate-cxx.err" | while read -r h; do
       if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64
 }
+gate_llvm_id() {  # the :llvm host's identity (ORS12; GT9's :host-ids :llvm): llvm-as's --version lines, the digests of llvm-as, opt, lli and FileCheck of
+  # ${REPR_LLVM_BIN:-/usr/lib/llvm23/bin} and of ../lib/libLLVM.so.*; none without llvm-as (the same text as test/oracle-records/oracle.bash's oracle_llvm_id)
+  local b=${REPR_LLVM_BIN:-/usr/lib/llvm23/bin} f p m
+  [ -x "$b/llvm-as" ] || { echo none; return; }
+  { "$b/llvm-as" --version 2>"$TMPDIR/gate-llvm.err"
+    for f in llvm-as opt lli FileCheck; do
+      if [ -f "$b/$f" ]; then sha256sum < "$(readlink -f "$b/$f")" | cut -c1-64; else echo "missing $b/$f"; fi; done
+    m=0
+    for p in "$b"/../lib/libLLVM.so.*; do [ -f "$p" ] && { sha256sum < "$(readlink -f "$p")" | cut -c1-64; m=1; }; done
+    [ $m = 1 ] || echo "missing $b/../lib/libLLVM.so.*"; } | sha256sum | cut -c1-64
+}
 plan_inputs() {  # plan_inputs DIR: DIR/files.sha256, DIR/hosts.edn and DIR/ancestors.txt
   local d=$1 jdk rel
   mkdir -p "$d"
@@ -181,7 +192,9 @@ javac none
     # compiler-libs) and oi's references (ocamlc's and ocamlopt's runs); the steps judge against the recorded runs, the helper live
     printf ' :ocaml "%s"\n' "$(gate_ocaml_id)"
     # :cxx (CX10; doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"): the host's g++ and clang++, C++'s references and oracle
-    printf ' :cxx "%s"}\n' "$(gate_cxx_id)"; } > "$d/hosts.edn"
+    printf ' :cxx "%s"\n' "$(gate_cxx_id)"
+    # :llvm (ORS12; GT9's :host-ids :llvm): llvm-as, opt, lli and libLLVM, the oracle tier's llvm-* steps and the records' identity
+    printf ' :llvm "%s"}\n' "$(gate_llvm_id)"; } > "$d/hosts.edn"
 }
 run_plan() {  # run_plan DIR [--rerun]: the plan into DIR (plan.tsv, plan/), printed; plan_rot (GT8.4): --night N or --rotation subset
   local d=$1; shift

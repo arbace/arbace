@@ -58,7 +58,7 @@ judge() {
 }
 
 record_orig() { # record-orig LIST: the record rewritten for LIST's modules (the others' rows kept)
-  local list=$1 n p key d tmp=$TMPDIR/lrr-orig.$$
+  local list; list=$(lrr_listfile "$1"); local n p key d tmp=$TMPDIR/lrr-orig.$$
   command -v clang > "$TMPDIR/lrr.err" && [ -x "${REPR_LLVM_AS:-/usr/lib/llvm23/bin/llvm-as}" ] || { echo "record-orig: needs clang and llvm-as" >&2; exit 2; }
   mkdir -p "$(dirname "$lrr_orig")"
   [ -f "$lrr_orig" ] && grep -v '^;;' "$lrr_orig" > "$tmp.old" || : > "$tmp.old"
@@ -75,7 +75,7 @@ record_orig() { # record-orig LIST: the record rewritten for LIST's modules (the
   echo "record-orig: $(grep -vc '^;;' "$lrr_orig") modules in $lrr_orig"
 }
 verify_orig() { # verify-orig LIST [--sample N]
-  local list=$1 n=0 bad=0 want got p name k=0 sample=${3:-}
+  local list; list=$(lrr_listfile "$1"); local n=0 bad=0 want got p name k=0 sample=${3:-}
   [ "${2:-}" = --sample ] || sample=
   while IFS=$'\t' read -r name p; do
     [ -n "$name" ] || continue
@@ -83,7 +83,16 @@ verify_orig() { # verify-orig LIST [--sample N]
     n=$((n+1)); want=$(lrr_orig_get "$name" "$p" 2>"$TMPDIR/lrr.err") || { bad=$((bad+1)); continue; }
     got=$(lrr_orig_digests "$p"); [ "$got" = "$want" ] || bad=$((bad+1))
   done < "$list"
-  oracle_verdict llvm "$lrr_orig" "$bad" "$n"
+  oracle_verdict llvm "$lrr_orig" "$bad" "$n" || return 1
+  # ORS7 (a), the crossed pair: one module's live digests against another's record, which must differ
+  local a b ra rb pa
+  a=$(awk -F'\t' '!/^;;/ && $3 != "none" {print $1; exit}' "$lrr_orig"); b=$(awk -F'\t' -v a="$a" '!/^;;/ && $3 != "none" && $1 != a {print $1; exit}' "$lrr_orig")
+  pa=$(awk -F'\t' -v n="$a" '$1 == n {print $2}' "$list")
+  if [ -n "$a" ] && [ -n "$b" ] && [ -f "$pa" ]; then
+    got=$(lrr_orig_digests "$pa"); want=$(awk -F'\t' -v n="$b" '$1 == n {print $3 "\t" $4}' "$lrr_orig")
+    if [ "$got" = "$want" ]; then echo "verify: FAILED: the crossed pair ($a live, $b recorded) is equal: the verify is blind"; return 1; fi
+    echo "verify: the crossed pair ($a live against $b's record) differs, as a control must"
+  fi
 }
 opt_live() { # NAME FILE DIR: opt -passes=verify -disable-output into DIR/log, DIR/rc
   local opt=${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}
@@ -92,7 +101,7 @@ opt_live() { # NAME FILE DIR: opt -passes=verify -disable-output into DIR/log, D
   echo "$rc" > "$3/rc"
 }
 record_opt() { # record-opt LIST
-  local list=$1 n p st=$root/.tmp/repr-llvm/record-opt d
+  local list; list=$(lrr_listfile "$1"); local n p st=$root/.tmp/repr-llvm/record-opt d
   [ -x "${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}" ] || { echo "record-opt: needs opt" >&2; exit 2; }
   rm -rf "$st"; mkdir -p "$st/llvm-opt-verify"; : > "$st/ids.tsv"
   while IFS=$'\t' read -r n p; do
@@ -105,7 +114,7 @@ record_opt() { # record-opt LIST
   oracle_make "$lrr_opt_pin" "$st" "$st/ids.tsv" "bin/repr-llvm record-opt LIST" llvm
 }
 verify_opt() { # verify-opt LIST [--sample N]
-  local list=$1 n=0 bad=0 name p k=0 d=$root/.tmp/repr-llvm/verify-opt sample=${3:-}
+  local list; list=$(lrr_listfile "$1"); local n=0 bad=0 name p k=0 d=$root/.tmp/repr-llvm/verify-opt sample=${3:-}
   [ "${2:-}" = --sample ] || sample=
   mkdir -p "$d"
   while IFS=$'\t' read -r name p; do
@@ -114,7 +123,17 @@ verify_opt() { # verify-opt LIST [--sample N]
     n=$((n+1)); opt_live "$name" "$p" "$d"; lrr_norm "$d/log"
     cmp -s "$d/log" "$(oracle_get "$lrr_opt_pin" "$name/log" 2>"$TMPDIR/lrr.err")" && cmp -s "$d/rc" "$(oracle_get "$lrr_opt_pin" "$name/rc" 2>"$TMPDIR/lrr.err")" || bad=$((bad+1))
   done < "$list"
-  oracle_verdict llvm "$(oracle_manifest "$lrr_opt_pin")" "$bad" "$n"
+  oracle_verdict llvm "$(oracle_manifest "$lrr_opt_pin")" "$bad" "$n" || return 1
+  # ORS7 (a), the crossed pair: the first module that opt rejects, its live answer against the record of the first valid one: must differ
+  local a b pa
+  a=$(awk -F'\t' '!/^#/ && $1 ~ /\/rc$/ && $3 != "'"$(printf '0\n' | sha256sum | cut -c1-64)"'" {sub(/\/rc$/, "", $1); print $1; exit}' "$(oracle_manifest "$lrr_opt_pin")")
+  b=$(awk -F'\t' '!/^#/ && $1 ~ /\/rc$/ && $3 == "'"$(printf '0\n' | sha256sum | cut -c1-64)"'" {sub(/\/rc$/, "", $1); print $1; exit}' "$(oracle_manifest "$lrr_opt_pin")")
+  pa=$(awk -F'\t' -v n="$a" '$1 == n {print $2}' "$list")
+  if [ -n "$a" ] && [ -n "$b" ] && [ -f "$pa" ]; then
+    opt_live "$a" "$pa" "$d"; lrr_norm "$d/log"
+    if cmp -s "$d/log" "$(oracle_get "$lrr_opt_pin" "$b/log")"; then echo "verify: FAILED: the crossed pair ($a live, $b recorded) is equal: the verify is blind"; return 1; fi
+    echo "verify: the crossed pair ($a live against $b's record) differs, as a control must"
+  fi
 }
 
 case ${1:-} in
@@ -126,7 +145,7 @@ case ${1:-} in
   read|print|verify) arbace_tool -m arbace.repr.llvm "$@" ;;
   roundtrip)
     if [ "${2:-}" = --text ]; then
-      list=$3 work=$4
+      list=$(lrr_listfile "$3") work=$4
       mkdir -p "$work"; work=$(cd "$work" && pwd)
       REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm rt-text "$list" "$work"
       nf=$(wc -l < "$work/text.tsv"); nok=$(cut -f2 "$work/text.tsv" | grep -c '^ok$' || true)
@@ -134,7 +153,7 @@ case ${1:-} in
       [ "$nf" -gt 0 ] && [ "$nok" = "$nf" ] && [ "$nf" = "$(grep -c . "$list")" ]
       exit
     fi
-    list=$2 work=$3
+    list=$(lrr_listfile "$2") work=$3
     mkdir -p "$work"; work=$(cd "$work" && pwd)
     REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm rt "$list" "$work"
     llvm_as=${REPR_LLVM_AS:-/usr/lib/llvm23/bin/llvm-as}
@@ -188,7 +207,7 @@ case ${1:-} in
     mkdir -p "$out"; out=$(cd "$out" && pwd)
     arbace_tool -m arbace.repr.llvm.mutate "$list" "$out" "${4:-300}" "${5:-0}" ${6:+"$6"} ;;
   verify-check)
-    list=$2 work=$3
+    list=$(lrr_listfile "$2") work=$3
     mkdir -p "$work/opt"; work=$(cd "$work" && pwd)
     opt=${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}
     ! lrr_live && { oracle_unpack "$lrr_opt_pin" > "$TMPDIR/lrr-unpack.out" || exit 1; }
