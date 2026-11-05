@@ -571,6 +571,9 @@
       (cond
         (and (= i 0) (= pk "slice")) (let [el (layout lt (second (ty-struct pt)))] (when (and (not (zst? el)) (> (:align el) 1)) (:align el)))
         (and (= i 1) (= pk "dyn")) 8
+        ;; a struct with an unsized tail behind a fat pointer: the struct's own alignment, when the table has its layout
+        (and (= i 0) (= pk "adt") (get lt (second pt)))
+        (let [pl (layout lt pt)] (when (and (not (zst? pl)) (> (:align pl) 1)) (:align pl)))
         :else nil)))))
 
 (defn ret-attrs-of
@@ -781,7 +784,8 @@
                          (let [a (fresh!)]
                            (emit! bb (list '= a (list 'load (symbol (:mem sc)) ['ptr ptr] :align align)))
                            {:ty (:imm sc) :v a})))
-        store-scalar! (fn [bb sc {:keys [ty v]} ptr align]
+        store-scalar! (fn [bb sc {:keys [ty v] :as val} ptr align]
+                        (when-not (string? ty) (unsupported (str "store of a scalar from " (pr-str val))))
                         (cond
                           (and (:bool sc) (boolean? v)) (emit! bb (list 'store ['i8 (if v 1 0)] ['ptr ptr] :align align))
                           (:bool sc) (let [z (fresh!)]
@@ -1227,9 +1231,14 @@
                     "ref" (let [p (nth r 2) projs (place-projs p)]
                             (if (and (= 1 (count projs)) (= "deref" (proj-kind (first projs))))
                               (operand! bb (list 'copy (list 'place (place-local p))))
-                              (let [pl (place-of! bb p)] {:ty "ptr" :v (:ptr pl)})))
+                              (if (#{"slice" "str"} (ty-kind (place-type body p)))
+                                ;; a reference to the unsized tail field of a struct behind a fat pointer: the field's address, the same metadata
+                                (let [meta (second (:pair (operand! bb (list 'copy (list 'place (place-local p))))))
+                                      pl (place-of! bb p)]
+                                  {:pair [{:ty "ptr" :v (:ptr pl)} meta]})
+                                (let [pl (place-of! bb p)] {:ty "ptr" :v (:ptr pl)}))))
                     (unsupported (str "rvalue " (first r)))))
-        statement! (fn [bb s]
+        statement-inner! (fn [bb s]
                      (case (name (first (stmt-of s)))
                        "set-discriminant" (let [[_ p v] (stmt-of s)] (set-discr! bb (place-of! bb p) v))
                        ;; copy_nonoverlapping: a memcpy of count * size_of::<T>() bytes
@@ -1280,6 +1289,9 @@
                                                 v (rvalue! bb r dly)]
                                             (when (and pl v) (store-val! bb pl v)))))
                        nil))
+        statement! (fn [bb s]
+                     (try (statement-inner! bb s)
+                          (catch Throwable e (throw (ex-info (str (.getMessage e) " in " (subs (pr-str (stmt-of s)) 0 (min 300 (count (pr-str (stmt-of s)))))) (ex-data e))))))
         ret-value! (fn [bb]
                      (let [ly (first lay)
                            v (if (indirect? ly) nil (if (contains? mem 0) (load-place! bb {:ptr (get-in @st [:allocas 0]) :align (:align ly) :ly ly}) (get-in @st [:vals 0])))]
