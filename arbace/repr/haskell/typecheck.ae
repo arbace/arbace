@@ -390,14 +390,14 @@
 (defn- callstack-term
   "HasCallStack's evidence at an occurrence of n at span sp, as GHC's solver builds it (an implicit parameter: the
   call site pushed onto the empty stack)"
-  [n sp]
+  [n sp & [label]]
   (let [cs (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" "unpackCString#")) [(list 'lit (str (pr-str x) "#"))]))
         i (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str x "#"))]))
         cip (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "C:IP")) [x]))
         [l1 c1 l2 c2] (take-last 4 sp)]
     (cip (list 'app (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "pushCallStack"))
                [(list 'app (list 'v (ext-name "var" "GHC.Internal.Tuple" "(,)"))
-                      [(cs (occ n))
+                      [(cs (or label (occ n)))
                        (list 'app (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "$WSrcLoc"))
                              [(cs "main") (cs *module*) (cs (str (str/replace *module* "." "/") ".hs")) (i l1) (i c1) (i l2) (i c2)])])
                 (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "ip"))
@@ -405,12 +405,12 @@
 
 (defn- want-at!
   "The evidence of a predicate of an occurrence: HasCallStack solved at once, the others wanted"
-  [pred n sp]
-  (if (and (= cls-callstack (first pred)) sp) (callstack-term n sp) (want! pred)))
+  [pred n sp & [label]]
+  (if (and (= cls-callstack (first pred)) sp) (callstack-term n sp label) (want! pred)))
 
 (defn- var-occ
   "An occurrence of a variable or constructor: [type core]"
-  [env n & [sp]]
+  [env n & [sp label]]
   (if-let [e (get env n)]
     (if (:mono e)
       [(:mono e) (or (:core e) (lv n))]
@@ -419,7 +419,7 @@
     (if-let [t (get @*genv* (if (= "data" (nth n 1)) n n))]
       (let [[t preds] (instantiate t)
             core (list 'v (if (= "data" (nth n 1)) (ext-name "var" (nmod n) (occ n)) n))]
-        [t (app* core (mapv #(want-at! % n sp) preds))])
+        [t (app* core (mapv #(want-at! % n sp label) preds))])
       (do (error! "no type for " (name-str n)) [(fresh-meta) (list 'v n)]))))
 
 (defn- implicit-name
@@ -476,7 +476,13 @@
                      [tb cb] (global-occ env ">>=" "GHC.Internal.Base")
                      r (fresh-meta)]
                  (unify tb (fn-ty te (fn-ty (fn-ty a tr) r)))
-                 [r (app* cb [ce (list 'lam [pc] cr)])])
+                 ;; a pattern that can fail (the renamer attached MonadFail's fail to the statement): fail in the monad
+                 (if-let [fl (implicit-name v "fail" nil)]
+                   (let [[tf cf] (var-occ env fl (lsp (arg v 2)) "a do statement") ds (fresh-lv "ds")]
+                     (unify tf (fn-ty (list-ty (con-ty tc-char)) tr))
+                     [r (app* cb [ce (list 'lam [ds] (list 'match [ds] [(list 'clause [pc] cr)
+                                                                        (list 'clause [(list 'pwild)] (app* cf [(list 'lit "\"pattern match failure\"")]))]))])])
+                   [r (app* cb [ce (list 'lam [pc] cr)])]))
       LetStmt (let [[env1 binds] (tc-local-binds env (arg v 2))
                     [tr cr] (infer-stmts env1 more)]
                 [tr (reduce (fn [body b] (list 'let [b] body)) cr (reverse binds))])
