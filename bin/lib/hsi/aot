@@ -19,7 +19,9 @@
 #                                  list the library closures it enters (the profile: which closures are compiled, never
 #                                  what a run computes), built, then run with the arguments and stdin; --stats's lines
 #                                  on stderr (HSI_STATS=1)
-# Environment: HSI_LIBS, HSI_IMAGE as bin/hsi run's; HSI_AOT_TRACE=1 (the installs on stderr), HSI_AOT_LIMIT=N (the first
+# Environment: HSI_LIBS, HSI_IMAGE as bin/hsi run's; HSI_EXE with HSI_RT_MOD (its module, printed Go) and HSI_RT_KEY (a
+# file of its key) for a runtime edited as Go before it is read back into forms; HSI_AOT_PARTS=0 (an oversized library
+# module left interpreted whole, as HE8's first slice); HSI_AOT_TRACE=1 (the installs on stderr), HSI_AOT_LIMIT=N (the first
 # N installed only), HSI_AOT_NO=Kind,... (node kinds the generator leaves to the interpreter): a divergence's bisection.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -43,7 +45,7 @@ libargs() {
 aot_build() {
   local prog=$1 cl=$2 out=$3 gen mod key rk lib=$WORK/aot/lib
   mkdir -p "$out" "$lib"; out=$(cd "$out" && pwd); gen=$out/gen mod=$out/mod
-  rk=$(cut -c1-16 "$WORK/bin/key")
+  rk=$(cut -c1-16 "$rtkey")
   rm -rf "${gen:?}"; mkdir -p "$gen"
   "$hsi" aot "${la[@]}" --prog "$prog" --out "$gen" > "$out/aot.log" 2>&1 || { cat "$out/aot.log" >&2; die "hsi aot failed"; }
   # the library modules: those of CLOSURES's lines, their packages generated when not cached
@@ -74,16 +76,34 @@ aot_build() {
     flock -u 9; exec 9>&-
   fi
   # a library package larger than HSI_AOT_MAX_KB (default 4096: Go's compiler takes about 2 GB on 5 MB, 3 GB on 9.5 MB)
-  # is left interpreted, listed in OUT/libs-skipped.txt (the night's builds raise the limit)
-  local max=${HSI_AOT_MAX_KB:-4096} sz
+  # is compiled in part (HES73): only the closures CLOSURES names of it, a package of their own kept by their list's digest
+  # ($lib/KEY/part/ID-DIGEST); a part still over the limit is left interpreted, listed in OUT/libs-skipped.txt (the
+  # night's builds raise the limit)
+  local max=${HSI_AOT_MAX_KB:-4096} sz pm ph pd
   : > "$out/libs-skipped.txt"
   while read -r id d; do
     sz=$(( $(wc -c < "$d/aot.go") / 1024 ))
-    if [ "$sz" -gt "$max" ]; then echo "$id $sz" >> "$out/libs-skipped.txt"; else echo "$id $d"; fi
+    if [ "$sz" -le "$max" ]; then echo "$id $d"; continue; fi
+    [ "${HSI_AOT_PARTS:-1}" = 1 ] || { echo "$id $sz" >> "$out/libs-skipped.txt"; continue; }
+    m=$(head -1 "$d/aot.go" | sed -n 's/^.* from the STG of \([^ ]*\)\. DO NOT EDIT\.$/\1/p')
+    pm=$out/part-$id.txt
+    : > "$pm"; [ -z "$cl" ] || awk -v m="$m" '$1 == m' "$cl" | LC_ALL=C sort -u > "$pm"
+    ph=$(sha256sum < "$pm" | cut -c1-16); pd=$(dirname "$d")/part/$id-$ph
+    if [ -s "$pm" ] && [ ! -f "$pd/aot.go" ]; then
+      exec 9> "$lib/.lock"; flock 9
+      if [ ! -f "$pd/aot.go" ]; then
+        rm -rf "${out:?}/part-staging"; mkdir -p "$out/part-staging" "$(dirname "$pd")"
+        "$hsi" aot "${la[@]}" --modules "$pm" --out "$out/part-staging" > "$out/aot-part.log" 2>&1 || { cat "$out/aot-part.log" >&2; die "hsi aot (part of $m) failed"; }
+        rm -rf "${pd:?}"; mv "$out/part-staging/$id" "$pd"; rm -rf "${out:?}/part-staging"
+      fi
+      flock -u 9; exec 9>&-
+    fi
+    if [ -f "$pd/aot.go" ] && [ $(( $(wc -c < "$pd/aot.go") / 1024 )) -le "$max" ]; then echo "$id $pd"
+    else echo "$id $sz" >> "$out/libs-skipped.txt"; fi
   done < "$out/libs.txt" > "$out/libs.kept"; mv "$out/libs.kept" "$out/libs.txt"
-  key=$( { cat "$WORK/bin/key"; (cd "$gen" && find . -name '*.go' | LC_ALL=C sort | xargs sha256sum); cat "$out/libs.txt"; } | sha256sum | cut -c1-64)
+  key=$( { cat "$rtkey"; (cd "$gen" && find . -name '*.go' | LC_ALL=C sort | xargs sha256sum); cat "$out/libs.txt"; } | sha256sum | cut -c1-64)
   if [ -x "$out/hsi-aot" ] && [ "$(cat "$out/key" 2> "$out/key.err")" = "$key" ]; then echo "$out/hsi-aot"; return; fi
-  rm -rf "${mod:?}"; cp -r "$WORK/bin/mod" "$mod"
+  rm -rf "${mod:?}"; cp -r "$rtmod" "$mod"
   mkdir -p "$mod/aot"; cp -r "$gen"/. "$mod/aot/"
   local d
   while read -r id d; do cp -r "$d" "$mod/aot/$id"; done < "$out/libs.txt"
@@ -98,6 +118,9 @@ aot_build() {
 
 sub=${1:-}; [ $# -gt 0 ] && shift
 hsi=$("$root/bin/hsi" build)
+# the runtime's module and key: bin/hsi build's, or HSI_RT_MOD's and HSI_RT_KEY's with HSI_EXE (a runtime being edited as
+# Go, its generator HSI_EXE: the library packages are kept by that key)
+rtmod=${HSI_RT_MOD:-$WORK/bin/mod} rtkey=${HSI_RT_KEY:-$WORK/bin/key}
 case $sub in
   build)
     prog="" cl="" out=""
