@@ -1327,17 +1327,35 @@
   (let [subs (subobjects m lid moff)
         construction? (not= m lid)
         lvb (:vbases (abi/layout lid))
-        pvbs (set (keep #(let [p (:primary (abi/layout (:cls %)))] (when (:virtual p) (:cls p))) subs))
+        ;; the virtual bases some subobject's vtable shares as its primary base (in a construction group, only where the
+        ;; layout class places it at that subobject)
+        pvbs (set (keep #(let [p (:primary (abi/layout (:cls %)))]
+                           (when (and (:virtual p) (or (not construction?) (= (long (get lvb (:cls p) -1)) (long (:off %))))) (:cls p)))
+                        subs))
         items (atom []) aps (atom {})]
     (letfn [(table! [x ^long xoff mv virt]
               (let [{:keys [comps]} (offset-comps subs lid {:cls x :off xoff} virt)
                     pre (concat (reverse (map (fn [c] [:off (:val c)]) comps)) [[:off (- moff xoff)] [:rtti m]])
                     ap (+ (count @items) (count pre))
+                    ;; the primary chain as this layout shares it: cut at a virtual primary base placed elsewhere
+                    chain (loop [c x out [x]]
+                            (let [p (:primary (abi/layout c))]
+                              (if (and p (or (not (:virtual p)) (= (long (get lvb (:cls p) -1)) xoff)))
+                                (recur (:cls p) (conj out (:cls p)))
+                                out)))
+                    cut-off (let [c (last chain) p (:primary (abi/layout c))] (when (:virtual p) (long (get lvb (:cls p)))))
+                    in-chain? (set chain)
                     slots (for [sl (:vtable (abi/cls x))]
                             (let [gid (:fn sl) g (sema/fnd gid)
-                                  [ofid ox] (final-overrider subs gid (find-sub subs (:cls g) xoff))
-                                  of (sema/fnd ofid)]
+                                  beyond (not (in-chain? (:cls g)))
+                                  [ofid ox] (final-overrider subs gid (find-sub subs (:cls g) (if beyond cut-off xoff)))
+                                  of (sema/fnd ofid)
+                                  overridden (fn [] (filter #(overrides-fn? (sema/fnd ofid) (sema/fnd %))
+                                                            (mapcat #(:virtuals (abi/cls %)) chain)))]
                               (cond
+                                ;; clang's IsOverriderUsed: a slot of a primary base this layout does not share holds
+                                ;; nothing unless its overrider is the chain's or overrides one of the chain's
+                                (and beyond (not= (:cls ox) x) (empty? (overridden))) [:unused]
                                 (:pure of) [:pure]
                                 (= (long (:off ox)) xoff) [:fn ofid (:v sl) nil]
                                 :else (let [[_ off vb] (abi/base-path (:cls ox) (:cls g))]
@@ -1557,11 +1575,16 @@
           (if (and (= :dtor (:kind f)) vbc (not vtt?))
             ;; the complete object's destructor of a class with virtual bases: the base-object one with the class's
             ;; VTT, then the virtual bases in reverse
+            (if (some #(= :pure (first %)) (:items (group-of cid cid 0)))
+              ;; an abstract class's complete object never exists: clang's trap
+              (do (declare! "llvm.trap" 'void [] :nounwind true)
+                  (emit! (list 'call 'void (gsym "llvm.trap") [] :attrs [:noreturn :nounwind]))
+                  (emit! '(unreachable)))
             (do (call-dtor! cid thisv (vtt-ref cid nil 0))
                 (let [lay (vtt-layout cid)]
-                  (doseq [vb (reverse (abi/vbases cid)) :when (nontrivial-dtor? vb)]
+                  (doseq [vb (reverse (abi/vbases-init cid)) :when (nontrivial-dtor? vb)]
                     (let [off (long (get (:vbases (abi/layout cid)) vb))]
-                      (call-dtor! vb (offset! thisv off) (when (vb-class? vb) (vtt-ref cid nil (get (:sub-vtts lay) [vb off]))))))))
+                      (call-dtor! vb (offset! thisv off) (when (vb-class? vb) (vtt-ref cid nil (get (:sub-vtts lay) [vb off])))))))))
             (when-let [b (:tbody f)] (emit-stmt b)))
           ;; falling off the end
           (when-not (:term @*f*)
@@ -1696,6 +1719,7 @@
                        :off ['ptr (if (zero? (long (second it))) 'null (list 'inttoptr 'i64 (second it) 'ptr))]
                        :rtti ['ptr ti]
                        :pure (do (declare! "__cxa_pure_virtual" 'void []) ['ptr (gsym "__cxa_pure_virtual")])
+                       :unused ['ptr 'null]
                        :fn (let [[_ fid v adj] it f (sema/fnd fid)]
                              (cond
                                adj ['ptr (thunk! fid v adj)]

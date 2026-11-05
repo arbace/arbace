@@ -81,14 +81,17 @@
 ;; Classes: members by name, through the bases
 
 (defn class-lookup
-  "[[class-id entity] ...]: the members named `nm` in class `id` or, if none, in its bases (the first base that has
-  them, depth first: single inheritance's answer)."
+  "[[class-id entity] ...]: the members named `nm` in class `id` or, if none, in its bases ([class.member.lookup]: the
+  bases' sets merged, a set found in a base of another found one's class dropped -- dominance through virtual bases;
+  of the rest the first)."
   [id ^String nm]
   (let [c (abi/cls id)
         own (seq (.get ^java.util.HashMap (:names (:scope c)) nm))]
     (if own
       (mapv (fn [e] [id e]) own)
-      (some #(seq (class-lookup (:cls %) nm)) (:bases c)))))
+      (let [found (keep #(seq (class-lookup (:cls %) nm)) (:bases c))
+            keep? (fn [r] (not-any? (fn [o] (abi/derived-from? (ffirst o) (ffirst r))) found))]
+        (first (filter keep? found))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Types from clang's qualType strings
@@ -1604,7 +1607,7 @@
         (and dc sc (or (= dc sc) (abi/derived-from? sc dc))) (cast-expr ctx t e false)
         (and (not ref) (abi/void? dt)) {:op :dyncast :e src :void true :ty t :cat :pr}
         :else {:op :dyncast :e src :ref ref :from sc :to dc :ty (if ref dt t) :cat (if ref (if (= :rref (:k t)) :xv :lv) :pr)
-               :hint (if-let [[_ off] (abi/base-path dc sc)] off -2)}))
+               :hint (if-let [[_ off vb] (abi/base-path dc sc)] (if vb -1 off) -2)}))
     "CXXThrowExpr" (if-let [k (first (kids n))]
                      (let [e (analyze ctx k)
                            r (if (abi/class? (abi/unq (:ty e))) e (rv e))
@@ -1829,7 +1832,7 @@
                            x (get given [:base (:cls b)])]
                        {:base (:cls b) :idx i :init (if (contains? given [:base (:cls b)]) (init-of t x) (init-for t nil ctx :default))})))
        ;; the virtual bases, which the complete object's constructor initializes ([class.base.init]/7)
-       :vbases (vec (for [v (abi/vbases cid)]
+       :vbases (vec (for [v (abi/vbases-init cid)]
                       (let [t {:k :class :id v}]
                         {:base v :init (if (contains? given [:base v]) (init-of t (get given [:base v])) (init-for t nil ctx :default))})))
        :fields (vec (for [fl (:fields c)]
@@ -1899,7 +1902,7 @@
             (upd-fn! fid assoc :tinits
                      {:bases (vec (for [[i b] (map-indexed vector (:bases c)) :when (not (:virtual b))]
                                     {:base (:cls b) :idx i :init (init-for {:k :class :id (:cls b)} [(to-base-lv src (:cls b))] ctx :direct)}))
-                      :vbases (vec (for [v (abi/vbases cls)] {:base v :init (init-for {:k :class :id v} [(to-base-lv src v)] ctx :direct)}))
+                      :vbases (vec (for [v (abi/vbases-init cls)] {:base v :init (init-for {:k :class :id v} [(to-base-lv src v)] ctx :direct)}))
                       :fields (vec (for [fl (:fields c)]
                                      {:field (:i fl) :init (let [t (:ty fl)]
                                                              (if (abi/arr? t) {:i :copy-bytes :e (field-node src cls (:i fl))}
