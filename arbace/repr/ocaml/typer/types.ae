@@ -31,7 +31,8 @@
 ;; Identifiers and paths (typing/ident.ml, typing/path.ml)
 
 (def stamp (atom 1000))
-(defn reset-stamps! [] (reset! stamp 1000))
+(declare abbrev-memo)
+(defn reset-stamps! [] (reset! stamp 1000) (reset! abbrev-memo {}))
 (def unit-stamp-base "The stamps of the identifiers of the stdlib's interfaces, apart from a program's" 100000000)
 (def unit-stamp (atom unit-stamp-base))
 (defmacro with-unit-stamps
@@ -404,6 +405,10 @@
 
 (def ^:dynamic *find-type* (fn [p] nil))
 
+(def abbrev-memo
+  "Ctype's memorized abbreviations: the expansion of a path applied to the same argument nodes, shared (so that the
+  unification of recursive types through abbreviations ends)" (atom {}))
+
 (defn expand-head-opt
   "Ctype.expand_head: the type with its head abbreviations expanded"
   [t]
@@ -411,7 +416,17 @@
     (if (= :Tconstr (d 0))
       (let [decl (*find-type* (d 1))]
         (if (and decl (:manifest decl))
-          (recur (subst (:params decl) (d 2) (:manifest decl)))
+          ;; Ctype's memorized abbreviations (a local equation's not)
+          (if (:local-abstract decl)
+            (recur (subst (:params decl) (d 2) (:manifest decl)))
+            (let [k [(d 1) (mapv repr (d 2))]
+                  [e0 d0] (get @abbrev-memo k)
+                  e (if (and e0 (identical? d0 decl))
+                      e0
+                      (let [e (subst (:params decl) (d 2) (:manifest decl))]
+                        (swap! abbrev-memo assoc k [e decl])
+                        e))]
+              (recur e)))
           t))
       t)))
 
@@ -491,7 +506,12 @@
           (unify-list (mapv second (d1 2)) (mapv second (d2 2)))
           (and (= :Ttuple (d1 0) (d2 0)) (= (map first (d1 1)) (map first (d2 1))))
           (unify-list (mapv second (d1 1)) (mapv second (d2 1)))
-          (= :Tvariant (d1 0) (d2 0)) (unify-row (d1 1) (d2 1))
+          ;; Ctype.unify3: the first type linked to the second before their rows are unified (so that a recursive
+          ;; type's unification ends), its description restored on failure
+          (= :Tvariant (d1 0) (d2 0)) (let [saved @t1]
+                                        (link! t1 t2)
+                                        (try (unify-row (d1 1) (d2 1))
+                                             (catch arbace.lang.ExceptionInfo e (reset! t1 saved) (throw e))))
           (= :Tnil (d1 0) (d2 0)) nil
           :else (unify-error t1 t2))))))
 
@@ -680,10 +700,13 @@
   that the relaxed value restriction generalizes only the covariant ones; a declaration's :variance gives its
   parameters' (:co or :inv; an abstract type's are invariant)"
   [t]
-  (let [lv @current-level]
+  (let [lv @current-level
+        visited (atom #{})]
     (letfn [(go [co t]
               (let [t (repr t) d (desc t)]
-                (when (> (level t) lv)
+                ;; each node once with each variance (Ctype's visited table)
+                (when (and (> (level t) lv) (not (@visited [t co])))
+                  (swap! visited conj [t co])
                   (if-not co
                     (update-level lv t)
                     (case (d 0)
