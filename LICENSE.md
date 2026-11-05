@@ -198,6 +198,14 @@ covers what.
   `Modules/clinic/_csv.c.h`, and of `Modules/mmapmodule.c`'s UNIX paths with `Modules/clinic/mmapmodule.c.h`, from the same release
   tarball, by hand on 2026-11-05: Copyright (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF
   License Agreement for Python 3.14 (text below).
+- `go/arbace/py/builtins_faulthandler.ae`, `builtins_lsprof.ae`, `builtins_termios.ae`, `builtins_tracemalloc.ae` and
+  `monitoring.ae` (queue 220, PYS22 (a): pyi's modules `faulthandler`, `_lsprof`, `termios`, `_tracemalloc` and
+  sys.monitoring's call-family events; doc/python/PYTHON-SURVEY.md, "As built: 220"): ports to Go of CPython 3.14.10's
+  `Modules/faulthandler.c` with `Python/traceback.c`'s dump functions, `Modules/_lsprof.c` with
+  `Modules/clinic/_lsprof.c.h`, `Modules/termios.c` with `Modules/clinic/termios.c.h`, `Modules/_tracemalloc.c` with
+  `Python/tracemalloc.c`'s API, and `Python/instrumentation.c`'s and `Python/legacy_tracing.c`'s call events, from the
+  same release tarball, by hand on 2026-11-05: Copyright (c) 2001 Python Software Foundation, All Rights Reserved,
+  under the PSF License Agreement for Python 3.14 (text below).
 - `go/arbace/py/builtins_ssl.ae`, `builtins_ssl_cert.ae` and `builtins_ssl_conn.ae` (queue 209, PYS22 (a): pyi's module
   `_ssl` over Go's crypto/tls; doc/python/PYTHON-SURVEY.md, "As built: 209"): written after CPython 3.14.10's
   `Modules/_ssl.c`, `Modules/clinic/_ssl.c.h`, `Modules/_ssl/cert.c` and `Modules/_ssl/distrusted_spki.h` (its digests
