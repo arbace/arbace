@@ -570,3 +570,28 @@ utils/ and ocamlcommon programs):
     bin/oi pins --attest
     bin/oi divergences && bin/oi suite divergences && bin/oi divergences --aot && bin/oi divergences --compiled && bin/oi pins
     bin/reap record
+
+### OT20 (b): shards by translated size
+
+`bin/oi check --aot --level compiled` can end a shard by its programs' translated bytes: `O2J_SHARD_BYTES` (each program's `out`
+directory and the library units it links, counted once a program; `c2_bytes`), with `O2J_SHARD` still the most programs a shard;
+every shard's bytes, j2g's and the build's wall seconds and peak memory are written to `.tmp/o6/compiled/shards.tsv` (`c2_measure`).
+No default cap is set: the measure of the day's shards is too small to choose one (OT22).
+
+### Proposed (OT21-OT24; none decided)
+
+- **OT21 compiler-libs' parser.** `formatting/errors_batch`, `parsetree/test` and `ast-invariants/test` need parsing/'s units.
+  (a) wait for T10 (§5: the typer compiles them natively); (b) now, by the oracle as utils/ is built: `boot/menhir/parser.ml` (the
+  tarball's generated parser), `lexer.mll` by the host's ocamllex, parsing/'s other modules and the utils/ ones they need (Warnings,
+  Clflags, Load_path, Terminfo...) dumped by ocdump into `.tmp/oi/complib/`, plus the harness's `readonly_files = source.ml` and
+  `${ocamlsrcdir}` (the tarball's root): about 1 day, 3 programs at eval (`ast-invariants` walks the whole tree: slow at the light
+  level). *Recommended: (b)*: no dependency on T10 (ocdump is the oracle already), and the units are reused when T10 lands.
+- **OT22 The shards' byte cap.** (a) set `O2J_SHARD_BYTES`'s default from tonight's `shards.tsv` (the bytes for which the build peaks
+  under 4 GB), then drop `O2J_SHARD=8` from the night's commands; (b) keep shards by count. *Recommended: (a)* after the night.
+- **OT23 Sockets at the AOT levels beyond TCP.** Java has no Unix sockets and the runtime's datagram sockets carry nothing
+  (`lib-unix/unix-socket/recvfrom_unix`). (a) a class by design for the AOT levels (`:unix-java`: Unix sockets, datagrams,
+  `getaddrinfo` beyond numeric hosts); (b) the compiled level over Go's syscall (OT15 (b)'s world: the runtime's sockets as Go
+  forms): 2 days for 1 program. *Recommended: (a)*.
+- **OT24 Signals between processes at the AOT levels.** Java receives no OS signal: `kill` of another pid raises `EPERM`, a signal
+  from outside is not seen. (a) by design at the AOT levels (no program of the lists needs it); (b) the compiled level over
+  os/signal (as oi). *Recommended: (a)*.
