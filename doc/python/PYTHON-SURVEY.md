@@ -2857,3 +2857,50 @@ tuple, list (CPython's over-allocation pattern), dict and int as `sys.getsizeof`
 internal allocations (frames, code, the interpreter's own buffers, free lists' reuse, the small-int cache), so a
 snapshot's totals and `get_tracemalloc_memory` differ, and a trace never comes from inside a built-in's work on its own
 buffers. Its port is last in the brief's order; how far it got is in "As built: 220".
+
+## As built: 220, faulthandler, _lsprof, termios and _tracemalloc's first stage (2026-11-05, the Mac VM, queue 220)
+
+Built as "Design: 220" above, in `go/arbace/py` (`builtins_faulthandler.ae`, `builtins_lsprof.ae`, `builtins_termios.ae`,
+`builtins_tracemalloc.ae`, `monitoring.ae`; the PSF License Agreement in LICENSE.md), with these hooks elsewhere:
+- **the loops** (`eval.ae`, `aot.ae`, their own commit): runFrames' start, return, pushed frame and unwinding, and the
+  call sites callStack, call-ex, `AotCallMethod`, `aotInvoke`, `AotCallV`, `AotCallMethodV`, each `if monEvents != 0`;
+  `AotCallV`/`AotCallMethodV` leave a call that goes the stack's way (`aotStacked`) to callStack's event, so a call
+  fires CALL once. Monitored, a call of anything but a Python function goes through `Call` (callInit's in-loop
+  `__init__` is not taken then: its frame runs nested, PY_START inside).
+- **signals** (`builtins_signal.ae`): `ownSignalHook` (os.kill of the own pid and signal.raise_signal: faulthandler's
+  handlers run in the sending thread, and a signal whose Python disposition is SIG_DFL and whose default ends the process
+  ends it, by SIG_DFL through rt_sigaction: Go's runtime ignored SIGUSR1 and printed its own traceback for SIGABRT), and
+  `signalTakenHook` (faulthandler.register without chain keeps the Python handler from running, as its sigaction
+  replaces it).
+- **threads** (`builtins_thread.ae`): `allThreads`, the started threads with their idents under a lock of their own
+  (faulthandler's dumps read it from goroutines that do not hold the GIL).
+- **the start** (`interp.ae`, `sys.ae`, bin/pyi): `atStartHooks` (faulthandler's enable for `-X faulthandler` and
+  `PYTHONFAULTHANDLER`, tracemalloc's start for `-X tracemalloc[=N]` and `PYTHONTRACEMALLOC`, as CPython's configuration
+  checks them); bin/pyi python passes `-X` options in `PYI_XOPTIONS` (`sys._xoptions`) and `-E`/`-I` as
+  `PYI_IGNORE_ENV`, both read once and removed from the environment; `-c`'s code runs as `"<string>"` (no prefix line:
+  the runtime sets `sys.path[0]` to `""`, no `__file__`), so `-c`'s tracebacks, line numbers and faulthandler's dumps are
+  CPython's.
+- **posix**: `os.openpty` (termios' file, through `posixAddons`) and `isatty` as musl's (TIOCGWINSZ: a pty's master is a
+  tty, the device numbers missed it).
+
+What each module gives (run: the programs below against `python3 -I -B` and the lib-test sample):
+- **faulthandler**: the four entry points, the fatal handler for SIGSEGV, SIGFPE, SIGABRT, SIGBUS and SIGILL (sent by
+  another process: os/signal; raised by pyi: in the raising thread), dump_traceback_later's watchdog (repeat, exit,
+  file, cancel), register/unregister with chain, the `_sigsegv`/`_read_null`/`_sigabrt`/`_sigfpe`/`_stack_overflow`/
+  `_fatal_error_c_thread` helpers, `Extension modules:` (the built-in modules not in `sys.stdlib_module_names`), the
+  message texts and argument errors. By design: a thread's ident stands for its pthread id and no thread name is
+  printed (the tests' regexes allow both); the C stack is musl's "<cannot get C stack on this system>" (CPython on
+  Alpine prints the same); a real fault in Go code is Go's panic (pyi's SystemError), not a signal; `  Garbage-collecting`
+  never prints and test_gc's `__del__` does not run at gc.collect() (`:finalization-collect`, 218's).
+- **_lsprof** and **sys.monitoring**: test_cprofile's and test_profile's profilee outputs (print_stats, print_callers,
+  print_callees) equal CPython's to the digit under both profilers (the external timer's simulated ticks make every
+  number exact), the calling conventions, the tool's registry, the second profiler's error, the external timer's
+  unraisables, throw's entry, sys.setprofile's event sequence. By design: CALL's offset is pyi's, DISABLE disables
+  nothing, no local events, the default timer is Go's monotonic clock.
+- **termios**: every function, the 216 constants, musl 1.2.6's speeds in CIBAUD (`cfsetispeed`/`cfgetispeed`), the
+  errors of clinic's converters. Not on tamago (no tty there).
+- **_tracemalloc** (first stage): start/stop/is_tracing/get_traceback_limit, the start from the environment and `-X`
+  with CPython's errors; Snapshot, Filter, Traceback and statistics work (TestSnapshot, TestFilters, TestTraceback,
+  TestCommandLine pass), no allocation is traced (`:tracemalloc-no-traces`, 10 methods of TestTracemallocEnabled).
+  The second stage, as designed above (the constructors' allocations with CPython's sizes, frees by the collector's
+  cleanups, get_traced_memory collecting first), is the report's DECISION.
