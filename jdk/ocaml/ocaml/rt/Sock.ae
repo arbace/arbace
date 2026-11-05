@@ -1,7 +1,7 @@
 ;; Sockets (doc/ocaml/DEFERRED-TRIAGE.md, §3 fix 6, "As built: OT9's fixes 6-8"), the AOT runtime's mirror of oi's ext_unix_sock.go
 ;; over java.net: a socket of Fd's table (Fd's sock) is TCP over IPv4 or IPv6 (PF_INET, PF_INET6 and SOCK_STREAM; Unix sockets
 ;; and the datagrams' traffic are oi's alone: EPROTONOSUPPORT, a datagram socket made but carrying nothing). Java's socket is made by its use: bind records the address, listen makes the
-;; ServerSocket, connect the Socket, accept the accepted one. The calls that may block (accept, connect, read, write) run outside
+;; ServerSocket (bind already, for a stream socket), connect the Socket, accept the accepted one. The calls that may block (accept, connect, read, write) run outside
 ;; the Gil; select tests a socket's readiness by the bytes available (a listening socket's by a pending connection it accepts
 ;; ahead), a pipe's by its count, a file's always.
 
@@ -62,16 +62,25 @@
   (method ^:public ^:static caml_unix_bind [fd sa]
     (let [s (Sock/ofFd (Rt/l fd) "bind")]
       (set! (.-bound s) (Sock/addrOf sa "bind"))
+      ;; a bound stream socket is a server's: its ServerSocket made now, so that getsockname before listen knows the port
+      (when (== (.-typ s) 0)
+        (try
+          (let [ss (ServerSocket.)]
+            (.setReuseAddress ss true)
+            (.bind ss (.-bound s) 50)
+            (set! (.-server s) ss))
+          (catch IOException e (throw (ExtUnix/error (Sock/errno e) "bind" "")))))
       Rt/UNIT))
 
   (method ^:public ^:static caml_unix_listen [fd n]
     (let [s (Sock/ofFd (Rt/l fd) "listen")]
-      (try
+      (when (nil? (.-server s))
+       (try
         (let [ss (ServerSocket.)]
           (.setReuseAddress ss true)
           (.bind ss (or (.-bound s) (InetSocketAddress. 0)) (Rt/ii n))
           (set! (.-server s) ss))
-        (catch IOException e (throw (ExtUnix/error (Sock/errno e) "listen" ""))))
+        (catch IOException e (throw (ExtUnix/error (Sock/errno e) "listen" "")))))
       Rt/UNIT))
 
   (method ^:static attach ^void [^Sock s ^Socket c]
@@ -86,7 +95,7 @@
                 (let [a (.-ahead s)] (set! (.-ahead s) nil) a)
                 (do (Gil/unlock)
                     (try (.accept (.-server s))
-                         (catch IOException e (Gil/lock) (throw (ExtUnix/error (Sock/errno e) "accept" "")))
+                         (catch IOException e (throw (ExtUnix/error (Sock/errno e) "accept" "")))
                          (finally (Gil/lock)))))
             n (Sock.)]
         (set! (.-domain n) (.-domain s))
@@ -99,7 +108,7 @@
           c (Socket.)]
       (Gil/unlock)
       (try (.connect c a)
-           (catch IOException e (Gil/lock) (throw (ExtUnix/error (Sock/errno e) "connect" "")))
+           (catch IOException e (throw (ExtUnix/error (Sock/errno e) "connect" "")))
            (finally (Gil/lock)))
       (Sock/attach s c)
       Rt/UNIT))

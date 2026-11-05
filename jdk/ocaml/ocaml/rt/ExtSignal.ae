@@ -2,16 +2,16 @@
 ;; oi's ext_signal.go Java allows: the signals a program sends itself. Java receives no signal of the OS, so a signal is the
 ;; runtime's own: Unix.kill of the process's own pid (or 0) and Unix.alarm's timer record it as pending (a bit a signal), and it is
 ;; delivered at a call's or a loop's tick (Rt/tick) and at the end of the externals that send or unblock one, unless the mask blocks
-;; it (one mask for the process: Thread.sigmask's per-thread masks are oi's alone). Unix.sigprocmask, sigpending, sigwait and
+;; it (one mask a thread, TState's, a new thread or domain starting with its creator's); a pipe's wait is interrupted by a signal its thread
+;; takes (Pipe: the handlers run, the read or write ends with EINTR, a channel's retries). Unix.sigprocmask, sigpending, sigwait and
 ;; sigsuspend over the pending set; a pending signal with the default action ends the process with status 128 + its number (the
-;; ones whose default is to be ignored are dropped). Signals sent to another process, and the interruption of a blocking call, stay
-;; oi's (:unix-unported at the AOT levels).
+;; ones whose default is to be ignored are dropped). Signals sent to another process, and the interruption of the other blocking calls
+;; (sockets, sleeps), stay oi's.
 
 (in-ns 'ocaml.rt)
 
 (defclass ^:public ^:final ExtSignal
   (field ^:public ^:static ^long pending 0)
-  (field ^:public ^:static ^long mask 0)
   (field ^:static ^boolean insig false)
   ;; the alarm: its generation (a new alarm cancels the last) and its time (System/currentTimeMillis), 0 when none is armed
   (field ^:static ^long alarmGen 0)
@@ -40,7 +40,14 @@
   ;; a signal recorded as pending (the Gil held)
   (method ^:public ^:static post ^void [^long n]
     (when (and (> n 0) (< n 64) (not (== (aget ExtSys/sigAct (unchecked-int n)) 1)))
-      (set! pending (bit-or pending (ExtSignal/bit n)))))
+      (set! pending (bit-or pending (ExtSignal/bit n)))
+      (Gil/broadcast)))
+
+  ;; a wait of a pipe interrupted: the pending signals the thread may take are handled, true when there were some (EINTR)
+  (method ^:public ^:static interrupted ^boolean []
+    (if (or insig (== (bit-and pending (bit-not (.-sigmask (Effects/st)))) 0))
+      false
+      (do (ExtSignal/process) true)))
 
   ;; the default action of a signal no handler takes
   (method ^:static dflt ^void [^long n]
@@ -51,7 +58,7 @@
   (method ^:public ^:static process ^void []
     (when (not insig)
       (loop []
-        (let [p (bit-and pending (bit-not mask))]
+        (let [p (bit-and pending (bit-not (.-sigmask (Effects/st))))]
           (when (not (== p 0))
             (let [n (long (Long/numberOfTrailingZeros p))
                   i (unchecked-int n)]
@@ -76,16 +83,17 @@
       Rt/UNIT))
 
   (method ^:public ^:static caml_unix_sigprocmask [how l]
-    (let [old mask
+    (let [st (Effects/st)
+          old (.-sigmask st)
           m (ExtSignal/maskOf l)
           h (Rt/l how)]
-      (set! mask (cond (== h 0) m
+      (set! (.-sigmask st) (cond (== h 0) m
                        (== h 1) (bit-or old m)
                        :else (bit-and old (bit-not m))))
       (ExtSignal/process)
       (ExtSignal/listOf old)))
 
-  (method ^:public ^:static caml_unix_sigpending [u] (ExtSignal/listOf (bit-and pending mask)))
+  (method ^:public ^:static caml_unix_sigpending [u] (ExtSignal/listOf (bit-and pending (.-sigmask (Effects/st)))))
 
   (method ^:public ^:static caml_unix_sigwait [l]
     (let [set (ExtSignal/maskOf l)]
@@ -100,12 +108,13 @@
                 (recur)))))))
 
   (method ^:public ^:static caml_unix_sigsuspend [l]
-    (let [old mask]
-      (set! mask (ExtSignal/maskOf l))
-      (while (== (bit-and pending (bit-not mask)) 0)
+    (let [st (Effects/st)
+          old (.-sigmask st)]
+      (set! (.-sigmask st) (ExtSignal/maskOf l))
+      (while (== (bit-and pending (bit-not (.-sigmask (Effects/st)))) 0)
         (Gil/unlock)
         (try (Thread/sleep 1) (catch InterruptedException e nil) (finally (Gil/lock))))
-      (try (ExtSignal/process) (finally (set! mask old)))
+      (try (ExtSignal/process) (finally (set! (.-sigmask st) old)))
       (throw (ExtUnix/error 4 "sigsuspend" ""))))
 
   ;; alarm n: SIGALRM in n seconds on a thread of its own, counted among the running domains while armed so that Rt/tick lets it in

@@ -486,3 +486,87 @@ files changed: 13 programs moved to the suite, 28 thread programs and 15 suite p
 ## Decided (2026-11-05, the user: OT16-OT20)
 
 OT16 (b): the programs calling alarm or Sys.signal classed by a source grep; OT17 (a): creation-order thread start; OT18 (a): signals in fix 7; OT19 (a): link-test's packs a class; OT20: (b) compiled shards sized by translated size with a 4 GB cap tonight, (c) the JDK classes built once later.
+
+## As built: OT9's fixes 6-8 (2026-11-05, branch `ocaml-libs3`)
+
+Built on the light tier of the day, as fixes 1-5 (no gate, no build of Arbace's executables, no corpus run, stage 0 of main as the
+tools' host), each check a list of programs (`--only-list`), the records merged.
+
+### Fix 6: sockets (§3 item 6)
+
+- oi: `go/arbace/oi/ext_unix_sock.ae` over Go's syscall: `socket`, `socketpair`, `accept`, `bind`, `connect`, `listen`, `shutdown`,
+  `getsockname`, `getpeername`, `recv`, `recvfrom`, `send`, `sendto`, `getsockopt`/`setsockopt` (the four option tables of sockopt.c and
+  `SO_ERROR`'s `error option`), `string_of_inet_addr`, `gethostname`, `gethostbyname`, `gethostbyaddr` (Go's net: /etc/hosts first),
+  `getprotobyname`/`number`, `getservbyname`/`port` (/etc/protocols, /etc/services), `getaddrinfo`, `getnameinfo`, and `select` over
+  ppoll(2) (the three lists ready in their order, `EBADF` for a closed descriptor). A sockaddr is `ADDR_UNIX` (tag 0) or `ADDR_INET`
+  (tag 1); Unix sockets and datagrams are real. The channels of a descriptor check channels.c's stream semantics (a datagram socket
+  or a closed descriptor raises, `lib-unix/common/channel_of`). Localhost only: nothing in the lists leaves the host.
+- AOT runtime: `jdk/ocaml/ocaml/rt/Sock.ae`, TCP over java.net (a socket is made by its use: bind records the address, listen makes
+  the ServerSocket, connect the Socket), Fd's entries carrying a socket (Fd's read, write and close dispatch to it), select by the bytes
+  available (a listening socket by a connection accepted ahead), `gethostbyaddr`; a datagram socket is made (for the channels' check)
+  but carries nothing; Unix sockets stay oi's.
+
+### Fix 7: processes and signals, no fork (§3 item 7; OT18 (a))
+
+- oi: `go/arbace/oi/ext_signal.ae`. A signal the program handles or blocks is caught by os/signal and recorded as pending (a bit a
+  signal); it is delivered at a safe point of a thread whose mask does not block it: the calls' and loops' ticks (apply.go: one atomic
+  load a tick), and the end of the externals that send or unblock one (`kill` of the process itself waits for its signal's arrival, by
+  a count, as the kernel delivers to the caller before kill returns). One mask a thread (`Thread.sigmask` is `Unix.sigprocmask`), a new
+  thread and a new domain inheriting their creator's. A thread blocked in a read, a write, a select, `accept`, `recv`, a sleep or
+  `sigsuspend` polls its descriptor and a wake pipe of its own, which the signal's arrival writes; woken with a signal it may take, it
+  runs the handlers and the call ends with `EINTR` (`Unix.read`: `Unix_error (EINTR, ...)` after the handlers, `lib-systhreads/eintr`;
+  a channel's read or write retries, as io.c does: `lib-channels/close_during_flush`, whose alarm handler empties the full pipe). The
+  wake pipe is polled only while a signal is caught (no cost otherwise). `kill`, `sigprocmask`, `sigpending`, `sigsuspend`, `sigwait`,
+  `alarm`, `setitimer`/`getitimer` (real kernel timers), `spawn` (create_process, open_process*, system: ForkExec with the three
+  redirections, `PATH` searched for `usepath`), `waitpid` (`WNOHANG`, `WUNTRACED`), `wait`, `execv`/`execve`/`execvp`/`execvpe`,
+  `setsid`, `nice`. A pending signal whose action is the default one, once unblocked, is raised again with that action. `exit` in a
+  domain now ends the process (it was an internal error: `parallel/mctest`, which also needed `select`).
+- AOT runtime: Java receives no signal of the OS, so `ExtSignal.ae` mirrors the signals a program sends itself (`kill` of its own pid,
+  `alarm`'s timer thread), delivered at `Rt/tick` and at the end of `kill` and `sigprocmask`; one mask for the process. `ExtProc.ae`:
+  `spawn` over ProcessBuilder (a redirection to the runtime's own pipe pumped by a thread holding the pipe's end), `waitpid`, `wait`.
+  The interruption of a blocking call, per-thread masks and signals between processes stay oi's.
+- `lib-unix/kill/unix_kill`'s platform filter `not_macos_amd64_tsan` is read (header.awk, actions.awk): one more run program.
+- OT16 (b) was not built: fix 7 makes it moot (`close_during_flush` passes; its known entry is dropped from `oi-known.edn`).
+
+### Fix 8: compiler-libs, as far as the list needs (§3 item 8)
+
+- `bin/oi stdlib` builds compiler-libs' units of `utils/` from the pinned tarball into `.tmp/oi/complib/` (`complib_build`,
+  `COMPLIB_UNITS`: Config from `config.fixed.ml` and `config.common.ml.in` with the host's magic numbers, Build_path_prefix_map,
+  Format_doc, Misc, Identifiable, Numbers, Strongly_connected_components, Stable_matching, Compression), compiled against the installed
+  stdlib as unix's units are; the headers' `include config` and `include ocamlcommon` load them (`inc_units`, `inc_I`; the reference
+  compilers link `-I +compiler-libs ocamlcommon.cma`/`.cmxa`); `binary_modules` is read. oi and the runtime gain
+  `caml_sys_get_stdlib_dirs` and `caml_zstd_initialize` (no zstd: Marshal's Compression flag ignored, as a runtime built without it).
+- `parsing/`'s units (Location, Lexer, Parser, ...) need ocamllex's and menhir's generated sources and, per §5, T10's typer:
+  `formatting/errors_batch` is in the new deferred class `:compiler-libs-parser` (divergences.edn, -aot, -aot-compiled);
+  `parsetree/test` (`readonly_files`) and `ast-invariants/test` (`${ocamlsrcdir}`) stay header classes.
+
+### The lists and the results
+
+Run corpus (`.tmp` lists of the day, named here): fix 6 `lib-threads/{pr4466,pr5325,sockets}`, `lib-unix/common/{channel_of,
+gethostbyaddr}`; fix 7 `lib-unix/common/{pipe_eof,process_pid}`, `parallel/{recommended_domain_count_unix,mctest}`, `lib-sys/signal`,
+`lib-systhreads/{eintr,threadsigmask}`, `lib-channels/close_during_flush`, `lib-unix/kill/unix_kill`; fix 8 `utils/{edit_distance,
+find_first_mono,overflow_detection,test_strongly_connected_components}`, `misc/stable_matching_test`, `lib-marshal/compressed`,
+`formatting/errors_batch`. Suite corpus: `lib-unix/common/{getaddrinfo,sigwait}`, `lib-unix/unix-socket/recvfrom_unix`,
+`parallel/catch_break`.
+
+| level | fix 6 | fix 7 | fix 8 |
+|---|---|---|---|
+| eval (oi) | run 5 of 5, suite 2 of 2 | run 9 of 9, suite 2 of 2 | 6 of 7 (`errors_batch` `:compiler-libs-parser`) |
+
+### The night's record commands (after this branch; in this order, the compiled level heavy)
+
+The lists' rows were merged into the records; the whole corpora were not rerun. oi changed (signals at the ticks, the wake pipes,
+the externals' thread note), the runtime changed (Rt/tick reads the pending signals; Fd's sockets), `bin/oi` changed (the stdlib's key:
+the next run rebuilds the library set with compiler-libs' units), and two programs became run programs (`lib-unix/kill/unix_kill`, the
+utils/ and ocamlcommon programs):
+
+    bin/oi record-ref && bin/oi suite record-ref    # every run program's references (today: the newly run ones, by list)
+    bin/oi check --record                           # oi, the run corpus (370 programs)
+    bin/oi suite check --record                     # oi, the suite corpus
+    bin/oi check --aot --record                     # the light level: the runtime changed
+    bin/oi suite check --aot --record
+    O2J_SHARD=8 bin/oi check --aot --level compiled --record         # OT20: shards of 8 (no shard sizing by bytes built yet, below)
+    O2J_SHARD=8 bin/oi suite check --aot --level compiled --record
+    bin/oi pins --attest
+    bin/oi divergences && bin/oi suite divergences && bin/oi divergences --aot && bin/oi divergences --compiled && bin/oi pins
+    bin/reap record
