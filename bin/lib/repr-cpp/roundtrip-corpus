@@ -4,7 +4,10 @@
 # bin/repr-cpp roundtrip over it, judged against test/repr/cpp/roundtrip-known.edn, roundtrip-oracle.edn and roundtrip-results/KEY.edn.
 # The gate's cpp-roundtrip parts and cpp-print-essential run it.
 #
-# Usage: bin/repr-cpp roundtrip-corpus KEY [WORK] [roundtrip's options: --jobs N, --no-objects, --record-oracle, --record-results ...]
+# Usage: bin/repr-cpp roundtrip-corpus KEY [WORK] [--only-list FILE] [roundtrip's options: --jobs N, --no-objects, --record-oracle, --record-results ...]
+#   --only-list FILE  (GT9, the gate's rotation) only the files FILE names, CORPUS/NAME a line (as test/repr/cpp/roundtrip-results/KEY.edn names
+#        them): the list of KEY cut to them, the run partial (roundtrip --partial: held to the recorded results of its own files, no recording);
+#        the files that fail are printed after as `FAIL CORPUS/NAME`, one a line, for the rotation
 #   KEY  CORPUS-every-N (every Nth file of CORPUS, gxx-dg-every-10, gxx-old-deja-every-10, c-c++-common-every-10,
 #        libstdcxx-testsuite-every-40), CORPUS-all (every file), CORPUS-essential (the files of test/cpp/essential-print.txt under
 #        CORPUS, a recorded list of its own), or samples (bin/cppi list samples: test/cpp/samples, no key, not held to a record)
@@ -15,6 +18,14 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 key=${1:?usage: bin/repr-cpp roundtrip-corpus KEY [WORK] [options]}; shift
 work=$root/.tmp/repr-cpp-roundtrip/$key
 case ${1:-} in ""|--*) ;; *) work=$1; shift ;; esac
+only_list=""; rest=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --only-list) only_list=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); [ -f "$only_list" ] || { echo "roundtrip-corpus: no list $2" >&2; exit 2; }; shift 2 ;;
+    *) rest+=("$1"); shift ;;
+  esac
+done
+set -- "${rest[@]+"${rest[@]}"}"
 mkdir -p "$work"; work=$(cd "$work" && pwd)
 rm -rf "${work:?}/lists"; mkdir -p "$work/lists"
 case $key in
@@ -35,4 +46,16 @@ case $key in
 esac
 [ "$key" = samples ] || [ "$(sed -n '1s/^#list //p' "$list")" = "$key" ] \
   || { echo "roundtrip-corpus: $list is headed $(head -1 "$list"), not #list $key" >&2; exit 1; }
-exec "$root/bin/lib/repr-cpp/roundtrip" "$list" "$work/run" "$@"
+if [ -z "$only_list" ]; then exec "$root/bin/lib/repr-cpp/roundtrip" "$list" "$work/run" "$@"; fi
+# the key's list cut to the files of --only-list: a name qualified as the results do (CORPUS, the key without its sampling, then NAME;
+# a name the list already writes under its corpus, `samples/x.cpp`, is kept)
+corpus=${key%-every-*}; corpus=${corpus%-all}; corpus=${corpus%-essential}
+awk -F'\t' -v c="$corpus" 'NR == FNR { want[$0] = 1; next }
+  /^#/ { print; next }
+  { q = index($1, c "/") == 1 ? $1 : c "/" $1; if (q in want) print }' "$only_list" "$list" > "$work/lists/only.list"
+grep -q -v '^#' "$work/lists/only.list" || { echo "roundtrip-corpus: $only_list names no file of $key" >&2; exit 2; }
+st=0
+"$root/bin/lib/repr-cpp/roundtrip" "$work/lists/only.list" "$work/run" --partial "$@" || st=$?
+# the failed files, one id a line (the rotation's :failed-re "^FAIL (.+)$")
+awk -F'\t' -v c="$corpus" '$2 == "fail" { print "FAIL " $1 }' "$work/run/results.tsv" 2>/dev/null || true
+exit $st
