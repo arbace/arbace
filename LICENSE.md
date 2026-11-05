@@ -758,6 +758,17 @@ covers what.
   first line names its source), under the GNU General Public License version 2 (the text below,
   "OpenJDK (jdk26u)"), without the Classpath Exception, which jdk26u's `test/` does not carry.
   They are inputs of the check, in no executable.
+- `arbace/cpp/template.ae` and the template parts of `arbace/cpp/abi.ae`'s mangling (C++'s code generator,
+  doc/cpp/CODEGEN.md §G3, by the user's decision P6 (b), 2026-11-05): ports of parts of clang, the LLVM Project,
+  https://github.com/llvm/llvm-project at `llvmorg-23.1.4` (commit `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`,
+  the tarball pinned in `test/cpp/corpora.edn`): `clang/lib/Sema/SemaTemplateDeduction.cpp`'s
+  `DeduceTemplateArgumentsByTypeMatch`, `AdjustFunctionParmAndArgTypesForDeduction`, `DeduceTemplateSpecArguments`,
+  `DeduceTemplateBases`, `checkDeducedTemplateArguments`, `isForwardingReference`,
+  `hasInconsistentOrSupersetQualifiersOf` and `isAtLeastAsSpecializedAs`, and `clang/lib/AST/ItaniumMangle.cpp`'s
+  `mangleTemplatePrefix`, `mangleTemplateArgs`, `mangleTemplateParameter`, `mangleIntegerLiteral`, the return-type
+  rule of `mangleFunctionEncodingBareType` and the `sr` form of `mangleUnresolvedPrefix`, under the Apache License
+  2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the files carrying clang's notice. The rest of
+  `arbace/cpp/` is Arbace's own, under the Eclipse Public License 1.0.
 - `scheme/psyntax/` (Scheme's expander, doc/scheme/SCHEME-SURVEY.md, "As built: SM4"; origins in
   `scheme/provenance.edn`): `expander.ae`, `library-manager.ae`, `builders.ae` and `config.ae` are
   psyntax, the R6RS library and syntax-case system of Abdulaziz Ghuloum and R. Kent Dybvig, as Ikarus
@@ -1236,6 +1247,34 @@ Copyright (C) 2011 The Guava Authors
 
    END OF TERMS AND CONDITIONS
 ```
+
+## LLVM (clang): Apache License 2.0 with LLVM Exceptions
+
+The LLVM Project's `LICENSE.TXT` (in `llvm-project-23.1.4.src/clang/LICENSE.TXT`, sha256
+`ebcd9bbf783a73d05c53ba4d586b8d5813dcdf3bbec50265860ccc885e606f47`) states: "The LLVM Project is under the Apache
+License v2.0 with LLVM Exceptions". The Apache License, Version 2.0, January 2004, is given in full in the section
+"Murmur3 (Guava): Apache License 2.0" above. The exceptions, verbatim:
+
+```
+---- LLVM Exceptions to the Apache 2.0 License ----
+
+As an exception, if, as a result of your compiling your source code, portions
+of this Software are embedded into an Object form of such source code, you
+may redistribute such embedded portions in such Object form without complying
+with the conditions of Sections 4(a), 4(b) and 4(d) of the License.
+
+In addition, if you combine or link compiled forms of this Software with
+software that is licensed under the GPLv2 ("Combined Software") and if a
+court of competent jurisdiction determines that the patent provision (Section
+3), the indemnity provision (Section 9) or other Section of the License
+conflicts with the conditions of the GPLv2, you may retroactively and
+prospectively choose to deem waived or otherwise exclude such Section(s) of
+the License, but only in their entirety and only with respect to the Combined
+Software.
+```
+
+The file's further sections (software from third parties, which the ported functions are not, and the legacy
+University of Illinois/NCSA license of code contributed before the relicensing) state no terms for the ported parts.
 
 ## purego: Apache License 2.0
 

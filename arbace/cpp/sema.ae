@@ -180,7 +180,12 @@
                va (some #{'&} ps)
                ps (remove #{'&} ps)
                ps (if (= ['void] (vec ps)) [] ps)]
-           {:k :fn :ret (resolve-type-form scope r) :ps (mapv #(resolve-type-form scope %) ps) :va (boolean va)})
+           {:k :fn :ret (resolve-type-form scope r)
+            :ps (vec (mapcat #(if (and (seq? %) (= 'pack-expand (first %)))
+                                (if-let [h (:pack-expand @hooks)] (h scope (second %)) (fail :pack "a pack expansion"))
+                                [(resolve-type-form scope %)])
+                             ps))
+            :va (boolean va)})
       cpp/elaborated (resolve-type-form scope (nth f 2))
       typename (resolve-type-form scope (second f))
       <> (if-let [h (:template-id @hooks)] (h scope f) (fail :template "template-id " (pr-str f)))
@@ -188,10 +193,15 @@
                   (if (#{:tparam :tspec :tdep} (:k (abi/unq t)))
                     ;; a member of a dependent type in a template's signature (CODEGEN.md G3)
                     {:k :tdep :base t :names (mapv #(if (symbol? %) (name %) (fail :type "type form " (pr-str f))) (nnext f))}
+                  (if (and (= 1 (count (nnext f))) (seq? (last f)) (= '<> (first (last f))))
+                    ;; a member template's specialization (Outer<int>::Inner<double>): its name found in the class, its
+                    ;; arguments resolved here
+                    (do (when-not (abi/class? t) (fail :type "a scope of a non-class " (pr-str f)))
+                        ((:template-id @hooks) scope (apply list '<> {:in (:scope (abi/cls-of t)) :name (second (last f))} (nnext (last f)))))
                   (let [_ (when-not (abi/class? t) (fail :type "a scope of a non-class " (pr-str f)))
                       es (lookup-qualified (:scope (abi/cls-of t)) (mapv #(if (symbol? %) (name %) (fail :type "type form " (pr-str f))) (nnext f)) false)
                       e (type-entity es)]
-                  (or (:ty e) (fail :type "unknown type " (pr-str f))))))
+                  (or (:ty e) (fail :type "unknown type " (pr-str f)))))))
       cpp/global (binding [] (resolve-type-form (loop [s scope] (if (:parent s) (recur (:parent s)) s)) (second f)))
       (fail :type "type form " (pr-str f)))
     :else (fail :type "type form " (pr-str f))))
@@ -591,6 +601,12 @@
                                "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0) "&&" (if (and (not= a 0) (not= b 0)) 1 0)
                                "||" (if (or (not= a 0) (not= b 0)) 1 0)))
                 :cond (if (zero? (long (ev (:c e)))) (ev (:else e)) (ev (:then e)))
+                :cmp (let [a (long (ev (:l e))) b (long (ev (:r e)))]
+                       (case (:o e) "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
+                             "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0)))
+                :not (if (zero? (long (ev (:e e)))) 1 0)
+                :land (if (and (not= 0 (long (ev (:l e)))) (not= 0 (long (ev (:r e))))) 1 0)
+                :lor (if (or (not= 0 (long (ev (:l e)))) (not= 0 (long (ev (:r e))))) 1 0)
                 :load (let [v (var* (:id (:e e)))] (if (and (:c (:ty v)) (:init v)) (const-int (:def-scope v) (:init v)) (fail :const "not a constant")))
                 (fail :const "constant " (:op e))))]
       (ev e))))
@@ -840,7 +856,7 @@
           (if (empty? (:items l)) (default-ctor-init id true) (class-init t (:items l) ctx :direct))))
       (and (empty? args)) (default-ctor-init id (= style :value))
       :else
-      (let [fid (resolve-overload (ctor-candidates id) args nil)
+      (let [fid (resolve-overload (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)] (h id args))) args nil)
             f (fnd fid)]
         (if (and (:trivial f) (= 1 (count args)))
           {:i :copy :e (first args) :cls id}
@@ -996,8 +1012,10 @@
       :var (var-node (:id e))
       :field (field-node (deref-node (this-expr ctx)) (:cls e) (:i e))
       :enumerator {:op :int :v (:val e) :ty (:ty e) :cat :pr}
-      (:fn :tmpl) {:op :fnset :fns (mapv :id (filter #(= :fn (:e %)) es)) :tmpls (mapv :id (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))) es))
-                   :name (get-in n [:referencedDecl :name]) :ty {:k :overload} :cat :lv :implicit-this true}
+      (:fn :tmpl) (if (and (= :tmpl (:e e)) (= :var (:tk e)))
+                    (if-let [h (:var-template @hooks)] (var-node (h ctx e n)) (fail :template "a variable template"))
+                    {:op :fnset :fns (mapv :id (filter #(= :fn (:e %)) es)) :tmpls (mapv :id (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))) es))
+                   :name (get-in n [:referencedDecl :name]) :ty {:k :overload} :cat :lv :implicit-this true})
       (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e)))))
 
 (defn- name-expr [ctx n]
@@ -1021,7 +1039,7 @@
 
 (defn- to-bool [e] (convert-scalar (rv e) abi/bool* false))
 
-(declare operator-call analyze-call)
+(declare operator-call analyze-call analyze-args)
 
 (defn- class-operand? [e] (or (abi/class? (abi/unq (:ty e))) (abi/enum? (abi/unq (:ty e)))))
 
@@ -1197,6 +1215,14 @@
 
 (defn- dtor-of [cid] (:dtor (abi/cls cid)))
 
+(defn- analyze-args
+  "The typed expressions of argument nodes, a pack expansion (args...) analyzed once for each of its packs' elements."
+  [ctx ns]
+  (vec (mapcat (fn [a] (if (= "PackExpansionExpr" (:kind a))
+                         (if-let [h (:expand-pack @hooks)] (h ctx a) (fail :pack "a pack expansion"))
+                         [(analyze ctx a)]))
+               ns)))
+
 (defn analyze
   "The typed expression of the tree node `n` in the context `ctx` ({:scope :fn :this-type ...})."
   [ctx n]
@@ -1254,7 +1280,7 @@
     "CallExpr"
     (let [[cn & an] (kids n)
           callee (analyze ctx cn)
-          args (mapv #(analyze ctx %) an)]
+          args (analyze-args ctx an)]
       (if (and (abi/class? (abi/unq (:ty callee))) (not= :fnset (:op callee)))
         (or (operator-call ctx "()" (into [callee] args)) (fail :call "no operator()"))
         (analyze-call ctx (if (and (= :fnset (:op callee)) (str/includes? (or (node-text cn) "") "::")) (assoc callee :qualified true) callee) args)))
@@ -1274,12 +1300,16 @@
         (cast-expr ctx t (analyze ctx k) true)))
     ("CXXTemporaryObjectExpr" "CXXUnresolvedConstructExpr" "CXXConstructExpr")
     (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
-          args (mapv #(analyze ctx %) (kids n))]
+          args (analyze-args ctx (kids n))]
       (if (abi/class? (abi/unq t))
         {:op :temp-obj :init (init-for t args ctx (if (empty? args) :value :direct)) :ty (abi/unq t) :cat :pr}
         (if (empty? args) {:op :zero-val :ty t :cat :pr} (cast-expr ctx t (first args) true))))
     "CXXScalarValueInitExpr" (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))] {:op :zero-val :ty t :cat :pr})
-    "InitListExpr" {:op :init-list :items (mapv #(analyze ctx %) (kids n)) :ty {:k :init-list}}
+    "InitListExpr" {:op :init-list :items (analyze-args ctx (kids n)) :ty {:k :init-list}}
+    ;; sizeof...(pack): the number of a pack's elements (CODEGEN.md G3)
+    "SizeOfPackExpr" (let [e (first (lookup (:scope ctx) (:name n)))]
+                       (when-not (#{:pack :varpack} (:e e)) (fail :pack "sizeof... of a non-pack " (:name n)))
+                       {:op :int :v (count (or (:elems e) (:ids e))) :ty abi/ulong* :cat :pr})
     "UnaryExprOrTypeTraitExpr"
     (let [t (if-let [at (get-in n [:argType :qualType])] (resolve-type (:scope ctx) at) (:ty (analyze ctx (first (kids n)))))
           t (abi/non-ref t)]
@@ -1320,7 +1350,7 @@
         _ (upd-var! id assoc :ty t)]
     (cond
       (nil? init) (init-for t nil ctx :default)
-      (= "call" (:init n)) (init-for t (if (= "ParenListExpr" (:kind init)) (mapv #(analyze ctx %) (kids init)) [(analyze ctx init)]) ctx :direct)
+      (= "call" (:init n)) (init-for t (if (= "ParenListExpr" (:kind init)) (analyze-args ctx (kids init)) [(analyze ctx init)]) ctx :direct)
       (= "list" (:init n)) (init-for t (analyze ctx init) ctx :list)
       :else (let [a (analyze ctx init)] (init-for t a ctx (if (= :init-list (:op a)) :list :copy))))))
 
@@ -1381,8 +1411,13 @@
                    cn (if (and cvar (nil? (get-in cn [:referencedDecl :name])))
                         (assoc cn :referencedDecl {:name (:name (first (kids cvar)))}) cn)]
                {:s :block :items (vec (concat (when init-s [init-s]) (when cvar-s [cvar-s])
-                                              [{:s :if :cond (cond-of c cn) :then (stmt (block-ctx c) (nth ks 1))
-                                                :else (when (:hasElse n) (stmt (block-ctx c) (nth ks 2)))}]))})
+                                              (if (:isConstexpr n)
+                                                ;; if constexpr ([stmt.if]/2): the condition a constant, the discarded branch not analyzed
+                                                [(if (not= 0 (long (const-int (:scope c) cn)))
+                                                   (stmt (block-ctx c) (nth ks 1))
+                                                   (if (:hasElse n) (stmt (block-ctx c) (nth ks 2)) {:s :null}))]
+                                                [{:s :if :cond (cond-of c cn) :then (stmt (block-ctx c) (nth ks 1))
+                                                  :else (when (:hasElse n) (stmt (block-ctx c) (nth ks 2)))}])))})
     "WhileStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
                       [cvar ks] (if (:hasVar n) [(first ks) (subvec ks 1)] [nil ks])]
                   (when cvar (fail :stmt "a while condition's declaration (destroyed each iteration)"))
@@ -1456,7 +1491,7 @@
         init-of (fn [t x]
                   (cond
                     (nil? x) nil
-                    (= "ParenListExpr" (:kind x)) (init-for t (mapv #(analyze ctx %) (kids x)) ctx (if (empty? (kids x)) :value :direct))
+                    (= "ParenListExpr" (:kind x)) (init-for t (analyze-args ctx (kids x)) ctx (if (empty? (kids x)) :value :direct))
                     (= "InitListExpr" (:kind x)) (init-for t (analyze ctx x) ctx :list)
                     (= "CXXParenListInitExpr" (:kind x)) (init-for t (mapv #(analyze ctx %) (kids x)) ctx :direct)
                     :else (init-for t [(analyze ctx x)] ctx :direct)))
@@ -1502,6 +1537,8 @@
                                    (when nm (enter! fs nm {:e :var :id id}))
                                    id))
                                (:ps (:ty f))))
+        ;; a function parameter pack's name stands for its parameters (CODEGEN.md G3)
+        _ (doseq [[nm idxs] (:param-packs f)] (enter! fs nm {:e :varpack :ids (mapv #(nth pids %) idxs)}))
         this-t (when (and cls (not (:static f))) (abi/ptr (cond-> {:k :class :id cls} (:cq f) (assoc :c true))))
         cut (if cls (let [outer (loop [id cls] (let [c (abi/cls id) s (:outer c)] (if (= :class (:kind s)) (recur (:cls s)) c)))] Long/MAX_VALUE) (:pos f))
         ctx {:scope fs :fn-id fid :this-type this-t :statics (atom [])}]

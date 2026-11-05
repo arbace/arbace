@@ -1,3 +1,15 @@
+;; Part of Arbace. Ports parts of the LLVM Project's clang (https://github.com/llvm/llvm-project at llvmorg-23.1.4,
+;; commit 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5): clang/lib/Sema/SemaTemplateDeduction.cpp's
+;; DeduceTemplateArgumentsByTypeMatch, AdjustFunctionParmAndArgTypesForDeduction, DeduceTemplateSpecArguments with
+;; DeduceTemplateBases, checkDeducedTemplateArguments, isForwardingReference, hasInconsistentOrSupersetQualifiersOf and
+;; isAtLeastAsSpecializedAs (a call's partial ordering), ported by hand on 2026-11-05 (doc/cpp/CODEGEN.md §G3). Their notice:
+;;
+;;   Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+;;   See https://llvm.org/LICENSE.txt for license information.
+;;   SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+;;
+;; The rest of this file is Arbace's own. LICENSE.md states which license covers what.
+
 (ns arbace.cpp.template
   "Templates for the code generator (doc/cpp/CODEGEN.md §G3): class and function templates declared, specialized and
   instantiated on use. The native parser's tree keeps a template's pattern as it was written (clang's dependent
@@ -51,7 +63,7 @@
   "Whether a type or argument names a template's parameter."
   [x]
   (cond
-    (map? x) (or (#{:tparam :tparam-v :tspec :tdep :texpr} (:k x)) (some dependent? (vals x)))
+    (map? x) (or (#{:tparam :tparam-v :tspec :tdep :texpr :pack-exp} (:k x)) (some dependent? (vals x)))
     (sequential? x) (some dependent? x)
     :else false))
 
@@ -63,12 +75,13 @@
   [n]
   (vec (for [k (kids n) :when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind k))]
          (do
-           (when (or (:isParameterPack k) (str/includes? (or (node-text k) "") "...")) (fail :template-pack "a template parameter pack"))
-           (case (:kind k)
-             "TemplateTypeParmDecl" {:name (:name k) :kind :type :default (some-> (first (kids k)) (get-in [:type :qualType]))}
-             "NonTypeTemplateParmDecl" {:name (:name k) :kind :value :qt (get-in k [:type :qualType])
-                                        :default (some-> (first (kids k)) kids first)}
-             (fail :template-template "a template template parameter"))))))
+           (cond->
+             (case (:kind k)
+               "TemplateTypeParmDecl" {:name (:name k) :kind :type :default (some-> (first (kids k)) (get-in [:type :qualType]))}
+               "NonTypeTemplateParmDecl" {:name (:name k) :kind :value :qt (str/replace (get-in k [:type :qualType]) #"\s*\.\.\.$" "")
+                                          :default (some-> (first (kids k)) kids first)}
+               (fail :template-template "a template template parameter"))
+             (or (:isParameterPack k) (re-find #"\.\.\." (or (node-text k) ""))) (assoc :pack true))))))
 
 (defn- strip-tparam-kids [n]
   (assoc n :inner (vec (remove #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl" "TemplateArgument"} (:kind %)) (:inner n)))))
@@ -77,6 +90,8 @@
 ;; Scopes binding the parameters
 
 (defn- param-type [scope p] (abi/unq (sema/resolve-type scope (:qt p))))
+
+(declare arg-entity)
 
 (defn- bind-scope
   "A scope of the parameters `params` bound to `args` (a type each, or {:val n}) over `parent`; with `sym-tid` (and no
@@ -87,13 +102,21 @@
       (enter! s (:name p)
               (if sym-tid
                 (if (= :type (:kind p))
-                  {:e :type :ty {:k :tparam :i i :tid sym-tid :name (:name p)} :pos -1}
-                  {:e :nttp :i i :tid sym-tid :ty (param-type s p) :pos -1})
-                (let [a (nth args i)]
-                  (if (= :type (:kind p))
-                    {:e :type :ty a :pos -1}
-                    {:e :enumerator :val (:val a) :ty (:ty a) :pos -1})))))
+                  {:e :type :ty (cond-> {:k :tparam :i i :tid sym-tid :name (:name p)} (:pack p) (assoc :pack true)) :pos -1}
+                  {:e :nttp :i i :tid sym-tid :ty (param-type s p) :pack (:pack p) :pos -1})
+                (arg-entity p (nth args i)))))
     s))
+
+(defn- arg-entity
+  "The entity a parameter's name stands for when bound to the argument `a`: a type, a value (an enumerator's
+  entity), a non-type parameter or a dependent expression of a signature, a pack of them ({:pack [...]})."
+  [p a]
+  (cond
+    (contains? a :pack) {:e :pack :kind (:kind p) :elems (:pack a) :pos -1}
+    (= :type (:kind p)) {:e :type :ty a :pos -1}
+    (contains? a :val) {:e :enumerator :val (:val a) :ty (:ty a) :pos -1}
+    (= :tparam-v (:k a)) {:e :nttp :i (:i a) :tid (:tid a) :pos -1}
+    :else {:e :texpr :x a :pos -1}))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Constant expressions written as text (a template argument the type parser leaves as (cpp/text s))
@@ -105,7 +128,8 @@
         e (first es)]
     (case (:e e)
       :enumerator (:val e)
-      :nttp {:k :tparam-v :i (:i e) :tid (:tid e)}
+      :nttp (cond-> {:k :tparam-v :i (:i e) :tid (:tid e)} (:pack e) (assoc :pack true))
+      :texpr (:x e)
       :var (let [v (sema/var* (:id e))]
              (if (and (:c (:ty v)) (:init v)) (sema/const-int (or (:def-scope v) scope) (:init v)) (fail :template "not a constant: " (str/join "::" parts))))
       (fail :template "not a constant: " (str/join "::" parts)))))
@@ -247,12 +271,84 @@
       args
       (let [p (nth (:params t) i)
             d (:default p)]
+        (if (:pack p)
+          (recur (inc i) (conj args {:pack []}))
         (when d
           (let [s (bind-scope (:scope t) (subvec (:params t) 0 i) args nil)
                 a (if (= :type (:kind p))
                     (sema/resolve-type s d)
                     (value-arg (binding [sema/*cutoff* Long/MAX_VALUE] (sema/const-int s d)) (:name p) (param-type s p)))]
-            (recur (inc i) (conj args a))))))))
+            (recur (inc i) (conj args a)))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Packs ([temp.variadic]): a pack's elements, its expansions in types, argument lists and expressions
+
+(defn- form-symbols [f]
+  (cond (symbol? f) [f] (sequential? f) (mapcat form-symbols f) :else []))
+
+(defn- packs-named
+  "The packs among the entities the names `nms` denote in `scope`: [[name entity] ...]."
+  [scope nms]
+  (distinct (for [nm nms
+                  :let [e (first (sema/lookup scope nm))]
+                  :when (#{:pack :varpack} (:e e))]
+              [nm e])))
+
+(defn- elementwise
+  "The scopes over `scope` binding each pack of `packs` to its i-th element, for each i."
+  [scope packs]
+  (let [ns (distinct (map (fn [[_ e]] (count (or (:elems e) (:ids e)))) packs))]
+    (when (> (count ns) 1) (fail :pack "packs of different lengths in one expansion"))
+    (for [i (range (or (first ns) 0))]
+      (let [s (new-scope :tparams scope :internal (:internal scope) :cls (:cls scope))]
+        (doseq [[nm e] packs]
+          (enter! s nm (if (= :varpack (:e e)) {:e :var :id (nth (:ids e) i) :pos -1} (arg-entity {:kind (:kind e)} (nth (:elems e) i)))))
+        s))))
+
+(defn expand-type-pack
+  "The :pack-expand hook: the types a pack expansion's pattern (Ts&... in a parameter list or argument list) stands
+  for, one per element of its packs; in a template's signature, the pattern as {:k :pack-exp}."
+  [scope X]
+  (let [names (distinct (map name (filter #(not (namespace %)) (form-symbols X))))
+        packs (packs-named scope names)]
+    (if (seq packs)
+      (mapv #(sema/resolve-type-form % X) (elementwise scope packs))
+      (let [t (sema/resolve-type-form scope X)]
+        (if (dependent? t) [{:k :pack-exp :of t}] (fail :pack "a pack expansion without a pack"))))))
+
+(defn expand-expr-pack
+  "The :expand-pack hook: a PackExpansionExpr's pattern analyzed once per element of the packs its text names."
+  [ctx n]
+  (let [pat (first (kids n))
+        names (distinct (re-seq #"[A-Za-z_][A-Za-z_0-9]*" (or (node-text pat) "")))
+        packs (packs-named (:scope ctx) names)]
+    (when (empty? packs) (fail :pack "a pack expansion without a pack"))
+    (mapv #(sema/analyze (assoc ctx :scope %) pat) (elementwise (:scope ctx) packs))))
+
+(defn- resolve-args
+  "Template argument forms for the template `t`: each resolved for its parameter, pack expansions spliced, the
+  arguments of a trailing parameter pack gathered into {:pack [...]} (always with `group-all`, else when given)."
+  [scope t forms group-all]
+  (let [ps (:params t)
+        np (count ps)
+        pack? (and (pos? np) (:pack (last ps)))
+        param (fn [i] (nth ps (min i (dec np)) nil))
+        args (loop [fs forms out []]
+               (if (seq fs)
+                 (let [f (first fs)
+                       p (or (param (count out)) (fail :template "too many template arguments for " (:name t)))
+                       xs (if (and (seq? f) (= 'pack-expand (first f)))
+                            (if (= :type (:kind p))
+                              (expand-type-pack scope (second f))
+                              (let [packs (packs-named scope [(name (second f))])]
+                                (if (seq packs) (vec (:elems (second (first packs)))) [(value-arg (const-form scope (second f)) nil (param-type scope p))])))
+                            [(resolve-arg scope p f)])]
+                   (recur (rest fs) (into out xs)))
+                 out))]
+    (when (and (not pack?) (> (count args) np)) (fail :template "too many template arguments for " (:name t)))
+    (if (and pack? (or group-all (>= (count args) np)))
+      (conj (vec (take (dec np) args)) {:pack (vec (drop (dec np) args))})
+      args)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Deduction ([temp.deduct.type]): P (a signature's type with the template's parameters) matched against A
@@ -373,6 +469,8 @@
               ;; T::name: a non-deduced context ([temp.deduct.type]/5.1)
               :tdep true
               :texpr true ; an expression: non-deduced ([temp.deduct.type]/5.3)
+              ;; a pack expansion's pattern against the type (partial ordering, [temp.deduct.partial]/8)
+              :pack-exp (deduce-by-type-match b tid (:of P) (if (= :pack-exp (:k A)) (:of A) A) tdf down)
               :tparam true ; another template's parameter at another depth: skipped
               false)))))))
 
@@ -395,6 +493,8 @@
   [t b]
   (let [ps (:params t)
         n (count ps)
+        ;; a trailing pack nothing deduced is empty ([temp.arg.explicit]/4)
+        b (reduce (fn [b i] (if (and (:pack (nth ps i)) (not (contains? b i))) (assoc b i {:pack []}) b)) b (range n))
         given (loop [i 0 out []]
                 (if (or (= i n) (not (contains? b i)))
                   out
@@ -412,8 +512,7 @@
     (let [f (ct/parse-name (str/trim text))
           f (if (and (seq? f) (= 'cpp/scope (first f))) (last f) f)
           forms (when (and (seq? f) (= '<> (first f))) (nnext f))]
-      (when (> (count forms) (count (:params t))) (fail :template "too many template arguments"))
-      (vec (map-indexed (fn [i x] (resolve-arg scope (nth (:params t) i) x)) forms)))))
+      (resolve-args scope t forms false))))
 
 (defn- forwarding-reference?
   "isForwardingReference: an rvalue reference to a cv-unqualified parameter of the template itself."
@@ -442,23 +541,43 @@
                   (or (simple-template-id? P) (and (abi/ptr? P) (simple-template-id? (:to P)))) (conj :derived-class))]
         [P A tdf]))))
 
+(defn- tparams-in [P tid]
+  (distinct (keep #(when (and (map? %) (#{:tparam :tparam-v} (:k %)) (= tid (:tid %))) (:i %)) (tree-seq coll? seq P))))
+
 (defn deduce-call
   "DeduceTemplateArguments for a call ([temp.deduct.call]): the template arguments of the function template `t` for
   the call's typed arguments after the explicit ones, each parameter's P and A adjusted (adjust-for-deduction) and
   matched (deduce-by-type-match); nil when deduction fails."
   [t explicit args]
   (let [sig (sym-sig t)
-        ps (:ps sig)
+        all (:ps sig)
+        pk (when (= :pack-exp (:k (last all))) (last all))
+        ps (if pk (vec (butlast all)) all)
         tid (:id t)
-        b (atom (into {} (map-indexed vector explicit)))]
-    (when (or (<= (count args) (count ps)) (:va sig))
+        explicit-b (into {} (map-indexed vector explicit))
+        b (atom explicit-b)]
+    (when (or (<= (count args) (count ps)) (:va sig) pk)
       (when (every? true?
                     (for [[P e] (map vector ps args)
-                          :when (dependent? P)]
+                          ;; a parameter whose template parameters were all given explicitly has them substituted
+                          ;; ([temp.deduct]/2-/3): nothing left to deduce, overload resolution checks the argument
+                          :when (and (dependent? P) (not (every? (set (keys explicit-b)) (tparams-in P tid))))]
                       (if-let [[P A tdf] (adjust-for-deduction P e tid)]
                         (deduce-by-type-match b tid P A tdf :none)
                         false)))
-        (finish-deduction t @b)))))
+        ;; a trailing function parameter pack: its pattern deduced from each remaining argument, each pack the
+        ;; elements so deduced ([temp.deduct.call]/1)
+        (when (or (nil? pk)
+                  (let [packs (distinct (keep #(when (and (map? %) (:pack %) (= tid (:tid %))) (:i %)) (tree-seq coll? seq (:of pk))))
+                        rest-args (drop (count ps) args)
+                        elems (for [e rest-args]
+                                (let [b2 (atom (apply dissoc @b packs))]
+                                  (when-let [[P A tdf] (adjust-for-deduction (:of pk) e tid)]
+                                    (when (deduce-by-type-match b2 tid P A tdf :none) @b2))))]
+                    (when (every? some? elems)
+                      (doseq [i packs :when (not (contains? @b i))] (swap! b assoc i {:pack (mapv #(get % i) elems)}))
+                      true)))
+          (finish-deduction t @b))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Partial ordering ([temp.func.order], [temp.deduct.partial])
@@ -474,7 +593,11 @@
   "getMoreSpecialized for a call with `n` arguments: tid1 at least as specialized as tid2 and not the reverse."
   [tid1 tid2 n]
   (let [s1 (take n (:ps (sym-sig (tmpl tid1)))) s2 (take n (:ps (sym-sig (tmpl tid2))))]
-    (and (at-least-as-specialized? tid2 s2 s1) (not (at-least-as-specialized? tid1 s1 s2)))))
+    (let [a (at-least-as-specialized? tid2 s2 s1) b (at-least-as-specialized? tid1 s1 s2)
+          variadic? (fn [tid] (some #(= :pack-exp (:k %)) (:ps (sym-sig (tmpl tid)))))]
+      (or (and a (not b))
+          ;; [temp.func.order]/5 (after [temp.deduct.partial]/11): of two otherwise equal, the one without a trailing pack
+          (and a b (variadic? tid2) (not (variadic? tid1)))))))
 
 (defn tiebreak
   "[over.match.best]/2.4-2.5 for two candidates no argument ranks apart: a non-template function over a template's
@@ -555,7 +678,7 @@
               :else (fail :template "ambiguous partial specializations of " (:name t))))))))
 
 (defn- tmpl-of-entity [es]
-  (or (some #(when (= :tmpl (:e %)) (:id %)) es)
+  (or (some #(when (and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) (:id %)) es)
       (some #(when (and (= :type (:e %)) (abi/class? (:ty %))) (:tmpl (abi/cls (:id (:ty %))))) es)))
 
 (defn template-id
@@ -563,17 +686,23 @@
   resolved arguments (instantiated), or a dependent {:k :tspec} in a template's signature."
   [scope f]
   (let [[_ nm & forms] f
+        [in nm] (if (map? nm) [(:in nm) (:name nm)] [nil nm])
         parts (if (namespace nm) (concat (str/split (namespace nm) #"/") [(name nm)]) [(name nm)])
-        es (if (= 1 (count parts)) (sema/lookup scope (first parts)) (sema/lookup-qualified scope (vec parts)))
+        es (cond in (map second (sema/class-lookup (:cls in) (name nm)))
+                 (= 1 (count parts)) (sema/lookup scope (first parts))
+                 :else (sema/lookup-qualified scope (vec parts)))
         tid (or (tmpl-of-entity es) (fail :template "not a template: " nm))
         t (tmpl tid)]
-    (when-not (= :class (:tk t)) (fail :template "not a class template: " nm))
-    (when (> (count forms) (count (:params t))) (fail :template "too many template arguments for " nm))
-    (let [args (vec (map-indexed (fn [i x] (resolve-arg scope (nth (:params t) i) x)) forms))]
+    (when-not (#{:class :alias} (:tk t)) (fail :template "not a class or alias template: " nm))
+    (let [args (resolve-args scope t forms true)]
+      (if (= :alias (:tk t))
+        ;; an alias template's specialization is its pattern's type with the arguments substituted ([temp.alias]/2)
+        (let [args (or (complete-args t args) (fail :template "missing template arguments for " nm))]
+          (sema/resolve-type (bind-scope (:scope t) (:params t) args nil) (get-in (:pattern t) [:type :qualType])))
       (if (dependent? args)
         (do (when (< (count args) (count (:params t))) (fail :template "a dependent template-id with default arguments"))
             {:k :tspec :tmpl tid :name (:name t) :path (:path t) :args args})
-        (instantiate-class tid (or (complete-args t args) (fail :template "missing template arguments for " nm)))))))
+        (instantiate-class tid (or (complete-args t args) (fail :template "missing template arguments for " nm))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Members defined outside their class template (template <class T> T Box<T>::get() {...})
@@ -646,6 +775,22 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Function templates: specializations
 
+(defn- name-pack-params!
+  "A specialization's parameters from a function parameter pack (Ts... ts): their names, the pack's name standing for
+  them (:param-packs), the default arguments realigned."
+  [fid pattern]
+  (let [f (sema/fnd fid)
+        pn (filter #(= "ParmVarDecl" (:kind %)) (kids pattern))
+        packed (mapv #(boolean (re-find #"\.\.\.\s*$" (or (get-in % [:type :qualType]) ""))) pn)]
+    (when (some true? packed)
+      (let [n (- (count (:ps (:ty f))) (dec (count pn)))
+            [names defaults packs] (reduce (fn [[ns ds pk] [p pack?]]
+                                             (if pack?
+                                               [(into ns (repeat n nil)) (into ds (repeat n nil)) (assoc pk (:name p) (vec (range (count ns) (+ (count ns) n))))]
+                                               [(conj ns (:name p)) (conj ds (first (kids p))) pk]))
+                                           [[] [] {}] (map vector pn packed))]
+        (upd-fn! fid assoc :param-names names :defaults defaults :param-packs (dissoc packs nil))))))
+
 (defn instantiate-fn
   "The specialization of the function template `tid` for the complete arguments `args`: its declaration (the pattern
   declared in a scope binding the parameters; its definition analyzed when used), memoized."
@@ -657,6 +802,7 @@
             ;; the specialization is found through its template, not by its name in the parameters' scope
             _ (.remove ^java.util.HashMap (:names ps) (:name (:pattern t)))]
         (upd-fn! fid assoc :lazy true :inline true :keep-def-scope true :tinst {:tid tid :args args :tsig (sym-sig t)})
+        (name-pack-params! fid (:pattern t))
         (upd-tmpl! tid assoc-in [:insts args] fid)
         fid)))
 
@@ -709,6 +855,24 @@
     :template))
 
 ;; ---------------------------------------------------------------------------------------------
+;; Variable templates ([temp.pre]/1: template <class T> constexpr bool v = ...;)
+
+(defn var-template
+  "The :var-template hook: the variable a variable template's name with its explicit arguments names (`v<int>`), its
+  specialization declared once; defined (linkonce_odr) only when odr-used."
+  [ctx e n]
+  (let [t (tmpl (:id e))
+        args (or (complete-args t (or (explicit-args t (node-text n) (:scope ctx)) [])) (fail :template "missing template arguments for " (:name t)))]
+    (or (get-in @*tmpls* [(:id t) :insts args])
+        (let [ps (bind-scope (:scope t) (:params t) args nil)
+              vid (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/declare-var! ps (:pattern t) :global))]
+          (.remove ^java.util.HashMap (:names ps) (:name (:pattern t)))
+          (upd-var! vid assoc :tinst {:tid (:id t) :args args :name (:name t)} :linkonce true :defined false :pending-def true
+                    :internal (boolean (:internal ps)) :internal-l false)
+          (upd-tmpl! (:id t) assoc-in [:insts args] vid)
+          vid))))
+
+;; ---------------------------------------------------------------------------------------------
 ;; Declarations
 
 (defn- template-text-args
@@ -741,7 +905,8 @@
       :template)
     "FunctionTemplateDecl"
     (let [pattern (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} (:kind %)) (kids n)))
-          _ (when (#{"CXXConstructorDecl" "CXXConversionDecl"} (:kind pattern)) (fail :template "a constructor or conversion template"))
+          _ (when (= "CXXConversionDecl" (:kind pattern)) (fail :template "a conversion function template"))
+          ctor? (= "CXXConstructorDecl" (:kind pattern))
           body? (some #(= "CompoundStmt" (:kind %)) (kids pattern))
           qt (get-in pattern [:type :qualType])
           ;; a redeclaration (a declaration, then the definition) is the same template
@@ -754,7 +919,18 @@
         (let [tid (next-id)]
           (swap! *tmpls* assoc tid {:id tid :tk :fn :name (:name n) :scope scope :path (:path scope) :params (tparams n) :pattern pattern
                                     :pos (:_b n) :insts {}})
-          (enter! scope (:name n) {:e :tmpl :tk :fn :id tid :pos (long (or (:_b n) 0))})))
+          ;; a constructor template is found through its class (class-init's candidates), not by name
+          (if ctor?
+            (abi/update-cls! (:cls scope) update :ctor-tmpls (fnil conj []) tid)
+            (enter! scope (:name n) {:e :tmpl :tk :fn :id tid :pos (long (or (:_b n) 0))}))))
+      :template)
+    ("TypeAliasTemplateDecl" "VarTemplateDecl")
+    (let [tk (if (= "VarTemplateDecl" (:kind n)) :var :alias)
+          pattern (first (filter #(#{"TypeAliasDecl" "VarDecl"} (:kind %)) (kids n)))
+          tid (next-id)]
+      (swap! *tmpls* assoc tid {:id tid :tk tk :name (:name n) :scope scope :path (:path scope) :params (tparams n) :pattern pattern
+                                :pos (:_b n) :insts {}})
+      (enter! scope (:name n) {:e :tmpl :tk tk :id tid :pos (long (or (:_b n) 0))})
       :template)
     "ClassTemplatePartialSpecializationDecl"
     (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope (:name n))) (fail :template "no primary template " (:name n)))
@@ -846,6 +1022,11 @@
       (doseq [id (:vars @acc) :let [v (sema/var* id)] :when (:pending-def v)]
         (when (and (:init v) (not (re-find #"^(c|list)$" (str (:init-style v))))) nil)
         (upd-var! id #(-> % (assoc :defined true) (dissoc :pending-def)))
+        ;; a constant integral variable's initializer folded, as clang emits it (a constant, no guard)
+        (let [t (:ty v)]
+          (when (and (:c t) (abi/integral? (abi/unq t)) (:init v))
+            (when-let [c (try (binding [sema/*cutoff* Long/MAX_VALUE] (sema/const-int (:def-scope v) (:init v))) (catch arbace.lang.ExceptionInfo _ nil))]
+              (upd-var! id assoc :ginit {:i :expr :e {:op :int :v c :ty (abi/unq t) :cat :pr}}))))
         (swap! out conj [:var id]))
       @out)))
 
@@ -858,6 +1039,15 @@
          :const-bound (fn [scope f] (let [v (const-form scope f)] (if (map? v) v (long v))))
          :call-candidates (fn [ctx callee args] (when (or (seq (:tmpls callee)) (and (not (:obj callee)) (:name callee))) (call-candidates ctx callee args)))
          :tiebreak tiebreak
+         :ctor-candidates (fn [cid args]
+                            (vec (for [tid (:ctor-tmpls (abi/cls cid))
+                                       :let [fid (try (when-let [a (deduce-call (tmpl tid) [] args)] (instantiate-fn tid a))
+                                                      (catch arbace.lang.ExceptionInfo _ nil))]
+                                       :when fid]
+                                   fid)))
+         :pack-expand expand-type-pack
+         :expand-pack expand-expr-pack
+         :var-template var-template
          :dependent-name (fn [scope parts]
                            (let [es (sema/lookup scope (first parts)) e (first (filter #(= :type (:e %)) es))]
                              (when (and e (#{:tparam :tdep :tspec} (:k (:ty e))))

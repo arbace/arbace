@@ -70,6 +70,13 @@ code. Three kinds of things live here:
   `go/check.ae` and `go/check/` (goi's checker, a type checker of Go forms written anew after
   go/types, `arbace.go.check` and `arbace.go.check.*`; doc/go/GOI-SPEC.md §3, GR2; evaluated
   from the checkout, not embedded, until the program carries goi).
+- `cpp/` (`arbace.cpp.*`, the C++ crop's eval: the lowering of LLVM forms to C forms, the code generator and its
+  semantic analysis; doc/cpp/LLVM.md, doc/cpp/CODEGEN.md) is Arbace's own but for `cpp/template.ae`
+  (`arbace.cpp.template`, templates, CODEGEN.md §G3), whose deduction ports parts of clang's
+  `clang/lib/Sema/SemaTemplateDeduction.cpp`, https://github.com/llvm/llvm-project at `llvmorg-23.1.4` (commit
+  `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`), and the template parts of `cpp/abi.ae`'s mangling, which
+  reimplement parts of `clang/lib/AST/ItaniumMangle.cpp` at the same commit, by hand on 2026-11-05 (LICENSE.md
+  names the functions; the files carry clang's notice).
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go
