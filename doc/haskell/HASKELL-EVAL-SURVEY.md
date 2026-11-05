@@ -1301,3 +1301,159 @@ host was shared with other agents throughout: the times below vary by about 10 %
   189 L5), at HE4g with the labels the libraries read listed; (b) zeroed storage (as now). *Recommended: (a)* at HE4g.
 - **HES58 libm-check on arm64.** (a) its reference musl's `src/math` from the pinned tarball built as x86_64 builds it
   (review 189 F1's third fix), at the Mac's next hsi task; (b) amd64 only. *Recommended: (a)*.
+
+## As built: HE5, HE6 (write-ahead)
+
+Built 2026-11-05 on branch `haskell-he5` from `haskell-he4d`, on the host's GHC 9.14.1, TamaGo's go and the main checkout's
+stage 0, light work by day (2 jobs, no lock, no gate, no corpus run of the whole row). Write-ahead: HE5's exit criterion
+(the testsuite's language-core run tests and nofib: none failing, every non-pass classed) is met for what the two
+corpora reach, with the classes below; the whole-row runs are the night commands at the end. Nothing of Haskell is in
+`gate_key` or a gate step (HES19 (a)). The tarballs `bin/hsi pins --fetch` pins (the testsuite's, nofib's commit) were
+fetched by that command, as every `bin/hsi record-ref` and `bin/hsi check --corpus testsuite-core` does; the source
+tarball is the one the other branches' `bin/repr-haskell corpus fetch` kept, copied.
+
+### HE5: the C by need
+
+- **Method.** `bin/hsi dumps` (this branch, 1,320 modules of the 41 packages, 0 errors, about 12 minutes at 3 jobs) counts
+  the foreign symbols the libraries' STG names: 434, 253 of them C functions hsi's table lacked once a `capi` wrapper's
+  `ghczuwrapperZC...ZC` name is decoded to the C function's (`cSymbol`). `bin/hsi cfunctions` lists the table (203 symbols at the
+  start of HE5, **395** now); what the table lacked went by need: the library
+  samples below were written, run on hsi against GHC's recorded runs, and each stop (an unimplemented C function, a data label
+  read as zeros, an internal error) fixed. 69 symbols remain, none reached by a sample, a synthetic program or a language-core
+  test but those in the classes below: createAdjustor, allocateExecPage, freezeExecPage, ffi_prep_cif and
+  `arenaAlloc` (wrappers, HE5's open piece), fork, forkProcess, forkOS_*, execv*, `__hsunix_execvpe` (a process image
+  cannot be forked: a design class), POSIX semaphores and shared memory (`sem_*`, `shm_*`), terminfo (`setupterm`, `tigetstr`,
+  ...), the loader (`loadObj`, `lookupSymbol`, ... : GHCi's linker, unreached), `haskeline_mk_wcwidth`, `__gmpn_popcount` (the
+  GMP backend, not the native one HES7 chose), `fchdir`, `findSystemLibrary`, `addLibrarySearchPath`.
+- **`go/arbace/hs/cbits.go`**: the cbits of two packages ported to Go by hand from their own sources (GHC 9.14.1's tarball,
+  `libraries/bytestring/cbits`: `itoa.c`, `fpstring.c`, `shortbytestring.c`, `is-valid-utf8.c`; `libraries/text/cbits`:
+  `is_ascii.c`, `measure_off.c`, `reverse.c`, `utils.c`; BSD licenses, LICENSE.md): the SIMD variants (`fps_count_avx2`,
+  `measure_off_avx`) compute what their portable fallbacks do, the same bytes; `bytestring_is_valid_utf8` is Go's `unicode/utf8`'s
+  (both are the Unicode standard's well-formedness: no surrogates, no overlong forms, nothing past U+10FFFF); `memchr`. The data
+  tables of `cbits/aligned-static-hs-data.c` (the hex and digit-pair tables, Ryu's float and double tables) are `cdata.go`,
+  generated from the tarball by `bin/lib/hsi/cdata-gen` (a data label's storage is the table's, not 4 KiB of zeros).
+- **Unlifted arguments** (`UnliftedFFITypes`, text's imports take `ByteArray#`): an unpinned byte array given to a foreign
+  call is copied into a scratch region of the C memory and back after the call (`ffiBack`, `scratchFor`); a pinned one is its
+  address. T9274 (the `:hsi-bug` class) passes by it.
+- **`go/arbace/hs/posix.go`**: what crt's kernel does not emulate, over Go's `os` and `syscall` on the host's files, paths
+  resolved against the working directory the program set by `chdir`: `chmod`, `chown`, `link`, `symlink`, `readlink`,
+  `realpath`, `utimes`/`utimensat`/`utime`, `truncate`, `mkfifo`, `mknod`, `mkdtemp`, `mkstemp(s)`, `getcwd`, `creat`,
+  `openat` and friends on crt's calls; directory streams (`opendir`, `readdir` through `__hscore_readdir`'s dirent,
+  `closedir`, `rewinddir`, `telldir`, `seekdir`) over crt's `getdents64`; the environment (`setenv`, `putenv`, `unsetenv`,
+  `clearenv`, `environ`: the host's, as `getenv`); users and groups from `/etc/passwd` and `/etc/group` (`getpwnam_r`, ...,
+  as musl's); time (`clock_gettime` with the CPU clocks, `gettimeofday`, `times`, `getrusage`, the time zone of Go's
+  `time.Local`, `TZ` as the host gives it); `sysconf`, `pathconf`, `getrlimit`, `setrlimit`, the wait macros; signal sets;
+  terminals as non-terminals (`tcgetattr` and the rest fail with ENOTTY: a handle on a terminal is a class if a program
+  needs one); `dlopen` failing with a message. The answers of an RTS built without the event manager, backtraces from DWARF,
+  the debugger and static pointers for the RTS functions no program reaches.
+- **Processes and pipes.** `pipe` and `pipe2` make `os.Pipe`'s two ends, and `runInteractiveProcess`, `waitForProcess`,
+  `getProcessExitCode`, `terminateProcess`, `waitpid` are the process package's C over `os/exec`: the standard handles -1 a
+  new pipe, -2 closed, 0 to 2 the program's own; the parent's ends are fds of the same layer (numbers from 4096, below them
+  crt's), `read`, `write`, `close`, `fstat`, `fcntl` going to the layer that owns the number. A read that would block while another thread can
+  run returns EAGAIN after 300 microseconds and the library retries (GHC's `throwErrnoIfMinus1RetryMayBlock`), so the
+  writer thread of `readProcess` runs; when no thread is runnable it blocks. `forkProcess` and `exec*` stay (a Go process
+  image has no fork): T24672's class `:process`, now `:design`.
+- **Signals** (rts/posix/Signals.c, the non-threaded RTS): `stg_sig_install` keeps what each signal does (default,
+  ignored, the Haskell handler), `raise` and `kill` of the program's own pid queue a signal with a handler, and the scheduler
+  starts one thread per queued signal running `GHC.Internal.Conc.Signal.runHandlersPtr` (the RTS's `startSignalHandlers`);
+  a signal from outside the program is not delivered (a class when a test needs it).
+- **A general `printf`** (`cformat.go`): the conversions d i u x X o c s p f F e E g G with flags, width, precision, `*` and
+  the length modifiers, for the RTS's messages and a program's own `printf` (T4012, the class `:c-stdio`, passes: the class is gone).
+- **Smaller fixes by the samples and the core**: `reallyUnsafePtrEquality#` on stable names and prompt tags (the `Eq`
+  instance of `StableName`); the range primops with a zero length at any offset (`CheckBoundsOK` passes: `copyByteArray#`,
+  `compareByteArrays#`, `cloneArray#` and kin, whose offset may be out of bounds when nothing is copied);
+  `getRTSStats` an empty answer (`getRTSStatsEnabled` is 0).
+- **Library samples** (`test/haskell/eval/samples/Lib*.hs`, references recorded by `bin/hsi record-ref --only`): `LibBytes`
+  (bytestring: packed strings, builders, readers), `LibText` (text: UTF-8 measure, reverse, encode and decode, builders),
+  `LibContainers` (containers, array, mtl, stm, deepseq), `LibSystem` (directory, filepath, process, time, `System.Posix.Files`,
+  timeout), `LibPosix` (links, times, the environment, users, directory streams, handle seeks, `Fd`s), `LibMisc` (zones, pipes,
+  signals, resource limits, stable names, weak pointers, `printf`), `LibIO` (encodings, binary, temporary files, buffering, end of
+  file, terminals). All equal to GHC's runs, byte for byte, stdout, stderr and status; the first three differed on the
+  HE4d branch's hsi at their first stop (`memchr`, the byte-array argument, `fstatat`).
+- **Results.** `bin/hsi check --corpus samples,synthetic,testsuite-core` (2 jobs): **661 of 763** pass (650 of 756 before:
+  samples 24 of 25 with `AsyncRerun` in `:async-revert`, synthetic 37 of 37, the core 600 of 701; 52 minutes at 2 jobs with the other runs of the day beside it), every other one in its class, the four
+  controls failing as they must; `test/haskell/check-hsi.edn` recorded. nofib (`bin/hsi check --corpus nofib`, new: the Makefile's flags,
+  arguments and stdin as `record-ref` plans them): 144 programs: **76 pass**, 9 `:speed` (killed at the 60 s CPU limit: imaginary/kahan, queens, x2n1, shootout/k-nucleotide, n-body, pidigits, spectral-norm, smp/threads001 and threads007: hsi is a few times slower than GHCi, HE8's AOT), 2 `:callback` (smp/callback001 and 002), 57 `:no-reference` (GHC 9.14.1 builds none of them either: their references are `:no-build`; every one of the 57 fails to dump for the same reason), none unclassed; about 35 minutes at 2 jobs. nofib's per-program results are in `test/haskell/check-hsi.edn` (907 programs recorded with the samples, synthetic and the core).
+- **Classes after HE5** (`bin/hsi divergences`): `:test-c` 46 and `:test-c-output` 11 (the tests' own C, Cmm and assembly: HES35 (a),
+  ci beside hsi), `:callback` 19 (below), `:rts` 14, `:speed` 3 (5 of its 8 pass), `:rts-options` 2, `:fd-wait` 1 (new: T21969,
+  `threadWaitRead` and `killThread` on a pipe: waitRead# is a no-op and fdReady always ready, so a wake-up by readiness does not
+  happen), `:process` 1 (`:design`: forkProcess), `:simd`, `:skipped`, `:no-reference`, `:async-revert`; `:hsi-bug` and
+  `:c-stdio` gone.
+- **What is left of HE5.** (1) `foreign import "wrapper"` and `foreign export`: the dump has the `createAdjustor` call
+  with a stable pointer to the Haskell function and the label of the C stub (`$main$Main$Main_mk`), but the exported Haskell
+  helper the stub applies and the typed marshalling (the function's argument and result types) are not in the dump
+  (STG-SPEC §11: foreign stubs do not reach the hook): HES60 below. (2) A program's own C (`:test-c`, 57 tests): ci
+  beside hsi (HES11 (b)), HE6 in the plan. (3) Waiting on a file descriptor: `waitRead#`/`waitWrite#` and `fdReady` by `poll`
+  with the scheduler sleeping until a descriptor is ready (HES61). (4) GHC's scheduling order of yields and the timer
+  (`:rts`: conc037, conc065-072, T3279) and allocation limits: HE4f's. (5) Signals from outside the program.
+
+### HE6: the verbs and the classes
+
+- **`bin/hsi divergences [--results FILE] [--programs]`** (`bin/lib/hsi/divergences`, `test/haskell/eval/divergences.ae` on
+  stage 0): `check`'s recorded results judged against `test/haskell/divergences.edn` with no run, as `bin/goi divergences`
+  and `bin/reap` judge theirs: each non-pass in a class of its `:ids`, the result's kind among the class's `:results`, for `:hsi`
+  the message holding the class's `:message`; a summary by class (kind, non-passes, members that pass, members absent from the
+  results; a class every member of which passes is noted, never a failure); exit 1 on a non-pass in no class. The classes file
+  is read by the Clojure reader (the verb exposed an escape in `:skipped`'s `:why` that the awk of `check` had hidden: fixed).
+- **`bin/hsi slice K [--results FILE] [--slices N]`**: the recorded programs of rotation slice K of N (default 7, GTS203 (a):
+  the first 8 hex digits of the id's SHA-256 mod N, a function of the name), one a line: the list for `bin/hsi check --only @FILE`,
+  which the planner's `:rotate` writes the same way. Over the 760 recorded programs the slices hold 101 to 113.
+- **`bin/hsi check --corpus nofib`**: the third run corpus (87 of its 144 programs built by GHC in the reference; the others are
+  `:no-build` in `ref-ghc914.edn`, the class of HE3's classes file when the row comes).
+- **Left of HE6.** (1) Reasons per run, HES43 (b): hsi writing why it stopped (a typed reason beside the message) so classes
+  match by reason, as goi's: not started. (2) The coverage subsets of GT8.3 (`test/haskell/hsi/essential.txt` is the HE4d list by
+  speed, not by coverage): the files that reach every primop and every C function of the table, every class and every control, need
+  hsi to count the primops and C functions a run reaches (`hsi run --stats` counts steps only): a counting mode and the greedy
+  cover over the recorded runs (HES62). (3) The testsuite's run tests whole: the 701 of the core are the language core; the
+  other directories' run tests (about 5,000 more) need their classes by the same method. (4) The planner's step, parts
+  and `:rotate` entries: HE10 (the row).
+
+### Night commands (listed, not run)
+
+1. `bin/hsi dumps` (the 41 packages, 12 minutes at 3 jobs; `--again` for the determinism check), then `bin/hsi check --corpus
+   samples,synthetic,testsuite-core,nofib --jobs 3 --record` under `bin/heavy-lock` (about 12 minutes for the first three at 3 jobs, nofib
+   about 30 minutes at 2 jobs: its programs run 5 to 60 s, the CPU limit's `:speed` class takes the rest), then `bin/hsi
+   divergences` (must exit 0) and `bin/hsi runtime check` (the committed forms printed and read again equal themselves).
+2. `bin/hsi record-ref --corpus samples,synthetic,testsuite-core,nofib` afresh only when GHC's pin changes; the samples' references
+   with `--only`.
+3. `bin/hsi libm-check` (unchanged by HE5), `bin/lib/hsi/cdata-gen .tmp/repr-haskell/corpus/ghc-9.14.1 | diff - <(print of
+   go/arbace/hs/cdata.ae)` (the generator reproduces the committed table: done by hand today).
+
+### Proposed (HES60 onward)
+
+- **HES60 Wrappers and foreign exports.** (a) the helper dumps the exported Haskell helper of a `wrapper` import and of each
+  `foreign export` (the desugarer's `fe_bind`, which GHC passes to the code generator in the module's bindings but the
+  stgToCmm hook's `binds` do not hold: to find out in `tools/hsdump/Stg.hs`) with the argument and result C types; hsi's
+  `createAdjustor` makes a function pointer in crt's text that applies the helper to a stable pointer and the marshalled
+  arguments and runs it in a thread of its own (19 tests of `:callback`, 3 of `:test-c`); (b) a class in v1 (as now);
+  (c) hsi boxes by the type string `createAdjustor` gets: measured on two wrappers, it holds the arguments only, one character
+  each by width (`"dWb"` for a `CDouble`, a `CInt` and a `Word8`; `"L"` for an `Int64`; `"W"` for a `CInt`), not the signedness (`Int32` or
+  `Word32`), not the result: unsound, so not proposed. *Recommended: (a)* at the next night: what the stgToCmm hook is given decides.
+- **HES61 Waiting on descriptors.** (a) `waitRead#`/`waitWrite#` and `fdReady` poll the host's descriptor and the scheduler
+  sleeps until one is ready or a delay expires (Go's `poll` through `syscall.Select` or `os.File`'s deadlines), so a thread
+  blocked in `threadWaitRead` does not busy-wait and a `killThread` interrupts it (T21969); (b) the EAGAIN retry of HE5 (as
+  built). *Recommended: (a)* with HE4f's scheduling work: one scheduler change.
+- **HES62 The coverage subsets.** (a) a counting mode in hsi (`hsi run --reach FILE`: the primops, C functions and data labels a
+  run reached) and `bin/hsi coverage` choosing greedily from the recorded runs the programs that reach every one, plus one per class
+  and every control, into `test/haskell/hsi/essential.txt` (GT8.3); (b) by hand, as built. *Recommended: (a)* at the row's
+  HE10: the essential share is 15 minutes for every crop.
+- **HES63 forkProcess.** (a) a design class (as built: Go has no fork); (b) `forkProcess` re-executes hsi on the same program
+  with the continuation's state serialized: not feasible without a heap image. *Recommended: (a)*.
+- **HES64 A program's own C.** (a) ci's C forms beside hsi (HES11 (b)): the test's `.c` files read and compiled by ci and run with
+  hsi's memory (`ci` over `crt`'s kernel, which hsi's `Mem` already is), the Haskell side's foreign calls resolved into them; the
+  57 `:test-c` and `:test-c-output` tests; (b) a class in v1. *Recommended: (a)* at HE6's second half, after the cbits (done):
+  ci already runs musl and `crt`'s kernel is the one hsi uses.
+
+### HE7: the REPL (design only)
+
+Not started. The plan's design, checked against GHC's API: the helper as a session server (`tools/hsdump`'s GHC API session,
+`ghc --interactive`'s statements: `GHC.Driver.Main.hscParsedStmt`) takes a line, returns the STG of the expression GHCi would
+compile (`hscCompileCoreExprHook`, a field of `GHC.Driver.Hooks.Hooks` in 9.14.1 as `:info` on the host's ghc package shows, is the hook GHC offers for the one step between Core and the interpreter's bytecode: the
+helper's hook would run `corePrep`, `coreToStg` and the serializer instead of `byteCodeGen`, and return a placeholder
+value), the interactive context's bindings named as external names of the session's modules, and hsi's REPL holds the loaded
+STG of each line, evaluates it and prints with the `Show` instance GHC chose (`it`, `let`, `:t` and `:k` answered by the
+server alone, from the GHC API, with no evaluation). The scripted session compared byte for byte against `ghc
+--interactive`'s output on stdin. Two things to establish first: what `hscCompileCoreExprHook` is given for a `let` binding
+(GHC compiles it as an expression returning the new bindings) and how the session's earlier names resolve in later STG
+(by name: `Ghci1.it` style external names). A spike of one `1 + 1` is the first step (about 1 to 2 days); HE7's estimate of
+3 to 5 days holds if the hook is enough.
