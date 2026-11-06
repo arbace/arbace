@@ -1140,8 +1140,10 @@ the earlier pipeline):
   `refineFromInScope`, `substIdBndr` with `uniqAway` and `zapFragileIdInfo`, `SimplFloats` with the float flags and
   `doFloatFromRhs`); `Simplify/Inline.hs` (`callSiteInline`, `tryUnfolding`, `computeDiscount`, the case-depth
   penalty); the built-in rules `-O0` keeps (rewrite rules are off, `matchRule` cannot switch built-in ones off): the
-  class-op rule of `GHC.Types.Id.Make.mkDictSelId` against the module's DFun unfoldings, ConstantFold's floating-point
-  primop rules (`constfold.ae`) and its `dataToTagRule` on a known constructor. The SimplMode is `-O0`'s
+  class-op rule of `GHC.Types.Id.Make.mkDictSelId` against the module's DFun unfoldings, ConstantFold's primop rules
+  (`constfold.ae`: the floating-point ones, and now the `Int#`, `Word#` and `Char#` ones `-O0` keeps: `binaryLit`, the
+  identities, `zeroElem`, `leftZero`, `equalArgs`, the comparisons of literals and of equal arguments, negation, the
+  conversions; the `NumConstantFolding` ones are off at `-O0`) and its `dataToTagRule` on a known constructor. The SimplMode is `-O0`'s
   (`initSimplMode`): inlining on, eta expansion and reduction on, case-of-case on, cast swizzling on, case merging and
   case folding off, let floating to the top level on, the phase final.
 - `arbace/repr/haskell/occanal.ae`: `OccurAnal.hs` as the Simplifier runs it before each iteration
@@ -1201,7 +1203,7 @@ the tag primops (ours on `I#` and `ltInt`) and makes the Ix instances top-level;
 lets past a join point (`grade_sat_80`).
 
 **Not ported** (no `-O0` program of the corpora needed it, or the Core lacks what it reads): the other built-in rules
-(the integral primops' folding, the string rules `unpackFoldrCString#`/`eqString`/`unpackAppendCString#`, `tagToEnum#`'s
+(the narrowings', shifts' and sized integers' folding, the string rules `unpackFoldrCString#`/`eqString`/`unpackAppendCString#`, `tagToEnum#`'s
 rule, which needs the erased type argument, `seq#`, `inline`), `runRW#`'s special case, `improveSeq`,
 `mkStrictFieldSeqs` in the join points, `combineIdenticalAlts`, `abstractFloats` (the types are erased), INLINE and
 NOINLINE pragmas and stable unfoldings of the user's, the demands (`-O0` has none but the types' and the dead ends'),

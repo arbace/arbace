@@ -110,9 +110,13 @@
 (defn- lits [kind args] (let [vs (map lit-val args)] (when (every? #(= kind (first %)) vs) (mapv #(conv kind (second %)) vs))))
 (defn- is-lit? [kind e r] (let [v (lit-val e)] (and (= kind (first v)) (= r (second v)))))
 
+(declare int-rule int-ops)
+
 (defn primop-rule
   "The rewritten application of primop o to args, or nil (mkPrimOpRule's rules in GHC's order)"
   [o args]
+  (if (contains? int-ops o)
+    (int-rule o args)
   (when-let [[kind op] (get ops o)]
     (let [ap (fn [op2 as] (list 'app (prim (op-name kind op2)) (vec as)))]
       (case op
@@ -157,9 +161,76 @@
         :from-int (let [v (lit-val (first args))] (when (= :int (first v)) (lit-of-kind kind (second v))))
         :to-float (let [v (lit-val (first args))] (when (= :double (first v)) (lit-of-kind :float (second v))))
         :to-double (let [v (lit-val (first args))] (when (= :float (first v)) (lit-of-kind :double (second v))))
+        nil)))))
+
+;;; The integral primops' rules (primOpRules' Int#, Word#, Char# entries at -O0: binaryLit, the identities, zeroElem,
+;;; leftZero, equalArgs, the comparisons of two literals and of equal arguments, negation, the conversions; the
+;;; NumConstantFolding rules are off at -O0)
+
+(defn- ilit [e]
+  (when (head? e 'lit)
+    (let [t (second e)]
+      (cond (re-matches #"-?[0-9]+##" t) [:word (bigint (read-string (subs t 0 (- (count t) 2))))]
+            (re-matches #"-?[0-9]+#" t) [:int (bigint (read-string (subs t 0 (dec (count t)))))]
+            (re-matches #"'\(char ([0-9]+)\)'#" t) [:char (bigint (read-string (second (re-find #"char ([0-9]+)" t))))]
+            (re-matches #"(?s)'.'#" t) [:char (bigint (int (.charAt ^String t 1)))]
+            :else nil))))
+
+(defn- wrapw [n] (mod (bigint n) 18446744073709551616N))
+(defn- mk-int [n] (list 'lit (str (wrap64 n) "#")))
+(defn- mk-word [n] (list 'lit (str (wrapw n) "##")))
+(defn- mk-kind [k n] (if (= k :word) (mk-word n) (mk-int n)))
+(def ^:private true-i (list 'lit "1#"))
+(def ^:private false-i (list 'lit "0#"))
+
+(def ^:private int-ops
+  {"+#" [:int :add] "-#" [:int :sub] "*#" [:int :mul] "quotInt#" [:int :quot] "remInt#" [:int :rem]
+   "andI#" [:int :and] "orI#" [:int :or] "xorI#" [:int :xor] "negateInt#" [:int :neg]
+   "plusWord#" [:word :add] "minusWord#" [:word :sub] "timesWord#" [:word :mul] "quotWord#" [:word :quot]
+   "remWord#" [:word :rem] "and#" [:word :and] "or#" [:word :or] "xor#" [:word :xor]
+   "==#" [:int :eq] "/=#" [:int :ne] ">#" [:int :gt] ">=#" [:int :ge] "<#" [:int :lt] "<=#" [:int :le]
+   "eqWord#" [:word :eq] "neWord#" [:word :ne] "gtWord#" [:word :gt] "geWord#" [:word :ge] "ltWord#" [:word :lt]
+   "leWord#" [:word :le]
+   "eqChar#" [:char :eq] "neChar#" [:char :ne] "gtChar#" [:char :gt] "geChar#" [:char :ge] "ltChar#" [:char :lt]
+   "leChar#" [:char :le]
+   "int2Word#" [:int :to-word] "word2Int#" [:word :to-int] "ord#" [:char :to-int] "chr#" [:int :to-char]})
+
+(defn- int-rule [o args]
+  (when-let [[k op] (get int-ops o)]
+    (let [vs (mapv ilit args)
+          lits (when (every? #(= k (first %)) vs) (mapv second vs))
+          is (fn [i n] (let [v (get vs i)] (and (= k (first v)) (= n (second v)))))
+          same (and (= 2 (count args)) (= (first args) (second args)) (seq? (first args)) (contains? #{'lv 'v} (first (first args))))
+          cmp (fn [f] (cond (and lits (= 2 (count lits))) (if (f (first lits) (second lits)) true-i false-i)))]
+      (case op
+        :add (or (when lits (mk-kind k (+ (first lits) (second lits)))) (cond (is 0 0) (second args) (is 1 0) (first args)))
+        :sub (or (when lits (mk-kind k (- (first lits) (second lits)))) (cond (is 1 0) (first args) same (mk-kind k 0)))
+        :mul (or (when lits (mk-kind k (* (first lits) (second lits))))
+                 (cond (is 0 0) (first args) (is 1 0) (second args) (is 0 1) (second args) (is 1 1) (first args)))
+        :quot (or (when (and lits (not (zero? (second lits)))) (mk-kind k (quot (first lits) (second lits))))
+                  (cond (is 0 0) (first args) (is 1 1) (first args) same (mk-kind k 1)))
+        :rem (or (when (and lits (not (zero? (second lits)))) (mk-kind k (rem (first lits) (second lits))))
+                 (cond (is 0 0) (first args) (is 1 1) (mk-kind k 0) same (mk-kind k 0)))
+        :and (or (when lits (mk-kind k (.and (biginteger (first lits)) (biginteger (second lits)))))
+                 (cond (is 0 0) (first args) (is 1 0) (second args) same (first args)))
+        :or (or (when lits (mk-kind k (.or (biginteger (first lits)) (biginteger (second lits)))))
+                (cond (is 0 0) (second args) (is 1 0) (first args) same (first args)))
+        :xor (or (when lits (mk-kind k (.xor (biginteger (first lits)) (biginteger (second lits)))))
+                 (cond (is 0 0) (second args) (is 1 0) (first args) same (mk-kind k 0)))
+        :neg (or (when (and lits (= 1 (count lits))) (mk-int (- (first lits))))
+                 (let [a (first args)] (when (and (head? a 'app) (= (prim-name (second a)) o) (= 1 (count (nth a 2)))) (first (nth a 2)))))
+        :eq (or (cmp =) (when same true-i))
+        :ne (or (cmp not=) (when same false-i))
+        :gt (or (cmp >) (when same false-i))
+        :ge (or (cmp >=) (when same true-i))
+        :lt (or (cmp <) (when same false-i))
+        :le (or (cmp <=) (when same true-i))
+        :to-word (when lits (mk-word (first lits)))
+        :to-int (when lits (mk-int (first lits)))
+        :to-char (when (and lits (<= 0 (first lits) 1114111)) (list 'lit (str "'(char " (first lits) ")'#")))
         nil))))
 
-(defn has-rules? [o] (contains? ops o))
+(defn has-rules? [o] (or (contains? ops o) (contains? int-ops o)))
 
 (defn fold
   "An expression with the floating-point primops' rules applied bottom-up, to a fixpoint at each application"
