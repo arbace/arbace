@@ -344,10 +344,11 @@ export TMPDIR=$PWD/.tmp/tmp
 bin/jrt-convert update && bin/jrt modules && bin/j2g-edge update         # CDR4's world: jdk/, sources.txt, the table, the edge
 bin/generated-check                                                     # module_table.ae current
 bin/arbace-go --build && bin/arbace-go --build-tests                    # the executable and the test build (CDR2, CDR3, CDR4)
+#   first unskip java-interop's test-dot and test-bean in test/arbace-go-results.edn (skipped tests are not compiled)
 CLOJURE_TESTS_GO=target/arbace-go/amd64/arbace-tests bin/clojure-tests --no-generative \
   clojure.test-clojure.java.javadoc clojure.test-clojure.java-interop clojure.test-clojure.compilation \
   clojure.test-clojure.genclass clojure.test-clojure.genclass.examples # expect javadoc 5/5, test-dot, test-bean, the primitive tests, genclass 6/8
-#   then unskip test-dot, test-bean in test/arbace-go-results.edn; record compilation's and javadoc's counts
+#   then record compilation's, javadoc's and java-interop's counts in the reference
 CLOJURE_TESTS_GO=target/arbace-go/amd64/arbace-tests bin/clojure-tests     # the whole suite, the reference re-recorded
 bin/clojure-tests --aot                                                 # AOT level: unskip genclass, genclass.examples, test-dot, test-bean in test/arbace-go-aot-results.edn
 bin/oracle check "target/arbace-go/amd64/arbace -" --expected test/oracle/known-go-amd64-frozen.edn
