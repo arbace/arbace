@@ -662,7 +662,8 @@
            ;; (a class's allocation and deallocation functions are static members, [class.free]/1)
            :static (and cid (or (= "static" (:storageClass n)) (contains? #{"operator new" "operator new[]" "operator delete" "operator delete[]"} nm)))
            :virtual (boolean (:virtual n)) :pure (boolean (:pure n))
-           :constexpr (boolean (:constexpr n))
+           :constexpr (boolean (or (:constexpr n) (:_consteval n)))
+           :consteval (boolean (:_consteval n))
            ;; GNU's always_inline (clang's AlwaysInlineAttr, `alwaysinline` in the IR: inlined at -O0 by LLVM's
            ;; AlwaysInliner, arbace.cpp.inline; P16 (a))
            :always-inline (always-inline-node? n)
@@ -698,7 +699,11 @@
           (when (= k :dtor) (abi/update-cls! cid assoc :dtor id))
           (when (and cid (:virtual f)) (abi/update-cls! cid update :virtuals (fnil conj []) id))
           (when cid (abi/update-cls! cid update :methods (fnil conj []) id))
-          (swap! *order* conj [:fn id])))
+          (swap! *order* conj [:fn id])
+          ;; a defaulted <=> declares a defaulted == alongside it ([class.compare.default]/5)
+          (when (and cid (:explicitlyDefaulted n) (= "operator<=>" nm)
+                     (not (some #(= :fn (:e %)) (.get ^java.util.HashMap (:names home) "operator=="))))
+            (declare-fn! scope (assoc n :name "operator==" :type {:qualType (str/replace (str qt) #"^\s*auto\b" "bool")})))))
     id)))
 
 (defn- declare-var!
@@ -1403,6 +1408,8 @@
         (and (class-id at) (= (class-id at) (:id pt))) {:rank 0}
         (and (class-id at) (abi/derived-from? (class-id at) (:id pt))) {:rank 2}
         *no-user* nil
+        ;; the source class's conversion function to the class ([over.ics.user]; G5: strong_ordering to partial_ordering)
+        (and (class-id at) (conv-for (class-id at) (abi/unq pt) false)) {:rank 3}
         :else (when (some (fn [cid] (let [f (fnd cid)]
                                       (and (not (:explicit f)) (>= (count (:ps (:ty f))) 1)
                                            (not (let [p0 (first (:ps (:ty f)))] (and (abi/ref? p0) (= (class-id (:to p0)) (:id pt)))))
@@ -1575,9 +1582,12 @@
                          (fail (:codegen/refused (ex-data e)) (.getMessage e) " (constructing " (:name (abi/cls id)) ")")
                          (throw e))))
             f (fnd fid)]
-        (if (and (:trivial f) (= 1 (count args)))
-          {:i :copy :e (first args) :cls id}
-          {:i :ctor :fn fid :args (call-args f args ctx)}))))
+        (cond
+          (and (:trivial f) (= 1 (count args))) {:i :copy :e (first args) :cls id}
+          ;; an immediate function's constructor of an empty class: evaluated, nothing at run time ([expr.const]/16;
+          ;; G5: <compare>'s __cmp_cat::__unspec)
+          (and (:consteval f) (abi/empty-class? id)) {:i :none}
+          :else {:i :ctor :fn fid :args (call-args f args ctx)}))))
 
 (defn default-ctor-init
   "Default- (or with `value?` value-) initialization of a class object."
@@ -1837,7 +1847,7 @@
     (convert-scalar (user-conv {:scope *root*} e abi/bool* true) abi/bool* false)
     (convert-scalar (rv e) abi/bool* false)))
 
-(declare operator-call analyze-call analyze-args)
+(declare operator-call analyze-call analyze-args rewritten-relational)
 
 (defn- class->scalar
   "A class operand of a built-in operator by its conversion function (the one non-explicit, [over.built]'s candidates
@@ -1853,9 +1863,29 @@
 
 (defn- class-operand? [e] (or (abi/class? (abi/unq (:ty e))) (abi/enum? (abi/unq (:ty e)))))
 
+(defn- ordering-type
+  "std::strong_ordering, weak_ordering or partial_ordering (<compare>'s classes), or a refusal."
+  [^String nm]
+  (or (:ty (type-entity (try (lookup-qualified *root* ["std" nm] true) (catch arbace.lang.ExceptionInfo _ nil))))
+      (fail :operator "<=> without <compare>")))
+
+(defn- three-way
+  "The built-in three-way comparison ([expr.spaceship]): the operands' common type, its category's class prvalue
+  ({:op :cmp3}, the code generator's -1, 0, 1 or partial_ordering's unordered 2)."
+  [l r]
+  (let [a (rv l) b (rv r) lt (:ty a) rt (:ty b)]
+    (cond
+      (and (abi/arith? lt) (abi/arith? rt))
+      (let [ct (arith-common lt rt)]
+        {:op :cmp3 :l (convert-scalar a ct false) :r (convert-scalar b ct false) :ct ct
+         :ty (ordering-type (if (abi/floating? ct) "partial_ordering" "strong_ordering")) :cat :pr})
+      (and (abi/ptr? lt) (abi/ptr? rt)) {:op :cmp3 :l a :r (convert-scalar b lt false) :ct lt :ty (ordering-type "strong_ordering") :cat :pr}
+      :else (fail :operator "<=> of " (pr-str lt) " and " (pr-str rt)))))
+
 (defn- builtin-binop [o l r]
   (let [lt (:ty (rv l)) rt (:ty (rv r))]
     (case o
+      "<=>" (three-way l r)
       ("+" "-")
       (cond
         (and (abi/ptr? lt) (abi/integral? rt)) {:op :ptradd :o o :p (rv l) :n (convert-scalar (rv r) abi/long* false) :ty lt :cat :pr}
@@ -1966,11 +1996,16 @@
 
 (declare analyze-fn! has-auto?)
 
+(declare defaulted-comparison!)
+
 (defn- deduced!
   "The function `fid` with its deduced return type deduced ([dcl.spec.auto.general]/11: a use needs its definition
   analyzed first; G4: <bits/ptr_traits.h>'s auto __to_address)."
   [fid]
   (let [f (fnd fid)]
+    ;; (a defaulted <=> with auto: its category deduced from the members')
+    (when (and (has-auto? (:ret (:ty f))) (:defaulted f) (= "<=>" (:op f)) (not (:tbody f)))
+      (defaulted-comparison! fid))
     (when (and (has-auto? (:ret (:ty f))) (:body f) (not (:tbody f)) (not (:analyzing f)))
       (upd-fn! fid assoc :analyzing true)
       (analyze-fn! fid)
@@ -2084,6 +2119,7 @@
         (= o "=") (fail :assign "no operator=")
         ;; C++20's rewritten candidate: a != b as !(a == b)
         (= o "!=") (when-let [c (operator-call ctx "==" args)] {:op :not :e (convert-scalar (rv c) abi/bool* false) :ty abi/bool* :cat :pr})
+        (#{"<" ">" "<=" ">="} o) (rewritten-relational ctx o args)
         :else nil)
       (let [;; one candidate set ([over.match.oper]/3): members as functions of the remaining operands with the object
             ;; as their first, non-members of all
@@ -2096,9 +2132,19 @@
                                                                (when (re-find #"ambiguous" (.getMessage x)) (throw x)))
                                                            (throw x))))]
         (cond
-          (nil? best) nil
+          (nil? best) (when (#{"<" ">" "<=" ">="} o) (rewritten-relational ctx o args))
           (contains? ms best) (method-call ctx best l more true)
           :else (fn-call ctx best args))))))
+
+(defn- rewritten-relational
+  "x @ y for a relational @ by a three-way comparison ([over.match.oper]/3.4, /8): (x <=> y) @ 0, else 0 @ (y <=> x)."
+  [ctx o args]
+  (let [zero {:op :int :v 0 :ty abi/int* :cat :pr}
+        [x y] args
+        three (fn [a b] (or (when (or (class-operand? a) (class-operand? b)) (try (operator-call ctx "<=>" [a b]) (catch arbace.lang.ExceptionInfo _ nil)))
+                            (try (three-way a b) (catch arbace.lang.ExceptionInfo _ nil))))]
+    (or (when-let [c (three x y)] (operator-call ctx o [c zero]))
+        (when-let [c (three y x)] (operator-call ctx o [zero c])))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Allocation and deallocation functions ([expr.new]/9-28, [expr.delete]/7-12; clang's Sema::FindAllocationFunctions,
@@ -3048,11 +3094,50 @@
             body (when (:body f) (trace #(stmt ctx (:body f))))]
         (upd-fn! fid assoc :params pids :tbody body :tinits inits :nrvo (when body (nrvo-var body)) :statics @(:statics ctx))))))
 
+(defn- defaulted-comparison!
+  "A defaulted == or <=> ([class.compare.default], [class.eq], [class.spaceship]): the bases' and members' comparisons
+  in order -- == their conjunction, <=> the first that is not equal (the common comparison category's, deduced for an
+  auto return type) or equal."
+  [fid]
+  (let [f (fnd fid)
+        ps (:ps (:ty f))
+        member? (and (:cls f) (not (:static f)) (= 1 (count ps)))
+        cls (if member? (:cls f) (class-id (abi/non-ref (first ps))))
+        pids (vec (map-indexed (fn [i t] (let [id (next-id)] (swap! *vars* assoc id {:id id :name (str "__p" i) :ty t :storage :param :fn fid}) id)) ps))
+        ctx {:scope (:scope (abi/cls cls)) :fn-id fid :this-type (when member? (abi/ptr (cond-> {:k :class :id cls} (:cq f) (assoc :c true)))) :statics (atom [])}
+        a (if member? (deref-node (this-expr ctx)) (var-node (first pids)))
+        b (var-node (last pids))
+        c (abi/cls cls)
+        subs (concat (for [bb (:bases c)] [(to-base-lv a (:cls bb)) (to-base-lv b (:cls bb))])
+                     (for [fl (:fields c)] [(field-node a cls (:i fl)) (field-node b cls (:i fl))]))
+        bin (fn [o x y] (or (when (or (class-operand? x) (class-operand? y)) (operator-call ctx o [x y])) (builtin-binop o (class->scalar ctx x) (class->scalar ctx y))))]
+    (binding [*cutoff* Long/MAX_VALUE]
+      (case (:op f)
+        "==" (let [e (reduce (fn [acc [x y]] (let [t (to-bool (bin "==" x y))] (if acc {:op :land :l acc :r t :ty abi/bool* :cat :pr} t))) nil subs)
+                   e (or e {:op :int :v 1 :ty abi/bool* :cat :pr})]
+               (upd-fn! fid assoc :params pids :tbody {:s :return :init {:i :expr :e e}}))
+        "<=>" (let [cs (vec (for [[x y] subs] (bin "<=>" x y)))
+                    nm (fn [t] (:name (abi/cls (class-id t))))
+                    declared (:ret (:ty f))
+                    rt (if (= :auto (:k declared))
+                         (ordering-type (cond (some #(= "partial_ordering" (nm (:ty %))) cs) "partial_ordering"
+                                              (some #(= "weak_ordering" (nm (:ty %))) cs) "weak_ordering"
+                                              :else "strong_ordering"))
+                         (abi/unq declared))
+                    zero {:op :int :v 0 :ty abi/int* :cat :pr}
+                    as-rt (fn [x] (if (= (class-id (:ty x)) (class-id rt)) x {:op :temp-obj :init (init-for rt [x] ctx :copy) :ty rt :cat :pr}))
+                    e (reduce (fn [acc x] {:op :cond :c (to-bool (bin "!=" x zero)) :then (as-rt x) :else acc :ty rt :cat :pr})
+                              {:op :ord :v 0 :ty rt :cat :pr} (reverse cs))]
+                (upd-fn! fid #(-> % (assoc-in [:ty :ret] rt) (assoc :params pids :tbody {:s :return :init {:i :expr :e e}}))))))
+    fid))
+
 (defn analyze-implicit!
   "An implicit (or defaulted) special member's definition: params and, for a default constructor, the members'
   initializers."
   [fid]
-  (let [f (fnd fid)
+  (if (#{"==" "<=>"} (:op (fnd fid)))
+    (defaulted-comparison! fid)
+  (do (let [f (fnd fid)
         cls (:cls f)
         fs (new-scope :fn (:scope (abi/cls cls)))
         pids (vec (map-indexed (fn [i t] (let [id (next-id)] (swap! *vars* assoc id {:id id :name (str "__p" i) :ty t :storage :param :fn fid}) id)) (:ps (:ty f))))
@@ -3087,7 +3172,7 @@
                                   (if (abi/arr? (:ty fl))
                                     {:s :copy-bytes :dst (field-node me cls (:i fl)) :src (field-node src cls (:i fl))}
                                     (full (assign-node ctx (field-node me cls (:i fl)) (field-node src cls (:i fl)))))))))))))
-  fid)
+  fid)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The program

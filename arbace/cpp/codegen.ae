@@ -1156,7 +1156,10 @@
     :icall (if (= :pr (:cat e)) (materialize! e) (icall! e nil))
     :temp-obj (materialize! e)
     :raw (fail :codegen "raw as an lvalue")
-    (fail :codegen "lvalue " (:op e))))
+    ;; (another class prvalue: materialized, [conv.rval])
+    (if (and (= :pr (:cat e)) (abi/class? (abi/unq (:ty e))))
+      (materialize! e)
+      (fail :codegen "lvalue " (:op e)))))
 
 (alter-var-root #'emit-rv (fn [f] (fn [e] (if (= :raw (:op e)) (:v e) (f e)))))
 
@@ -1170,6 +1173,19 @@
     :mcall (mcall! e addr)
     :cond (cond-branches! e #(emit-into % addr) nil)
     :comma (do (emit-rv (:l e)) (emit-into (:r e) addr))
+    ;; <compare>'s orderings: one signed char ([cmp.categories]: libstdc++'s _M_value), a built-in three-way
+    ;; comparison's -1, 0, 1 (partial_ordering's unordered 2) or a constant
+    :ord (emit! (list 'store ['i8 (:v e)] ['ptr addr] :align 1))
+    :cmp3 (let [t (:ct e) a (emit-rv (:l e)) b (emit-rv (:r e))
+                lt (cmp! "<" t a b) eq (cmp! "==" t a b)
+                v (if (abi/floating? t)
+                    (let [gt (cmp! ">" t a b)
+                          x (val! (list 'select ['i1 eq] ['i8 0] ['i8 2]))
+                          y (val! (list 'select ['i1 gt] ['i8 1] ['i8 x]))]
+                      (val! (list 'select ['i1 lt] ['i8 -1] ['i8 y])))
+                    (let [x (val! (list 'select ['i1 eq] ['i8 0] ['i8 1]))]
+                      (val! (list 'select ['i1 lt] ['i8 -1] ['i8 x]))))]
+            (emit! (list 'store ['i8 v] ['ptr addr] :align 1)))
     ;; std::initializer_list<E>'s prvalue: its backing array (a temporary, CXXStdInitializerListExpr), then
     ;; libstdc++'s object {const E* _M_array; size_t _M_len}
     :std-init-list
