@@ -5017,7 +5017,8 @@ and `run.ae` compile by c2j alone (as `bin/ci c2j-check` does for ci: 549 classe
    checked tree. (b) The standard library's tags made with its inliner: today a package's tags are made
    without it, for memory (the analyses of inlined packages nest, 3.5 GB for `fmt`'s closure); a warm-up
    building the cache package by package in its own process, dependencies first, would make them as gc
-   does: 0.5-1 day, 1 program (and the tags then exact). (c) `testing.B.Loop`'s keep-alives (gc's escape of
+   does: 0.5-1 day, 1 program (and the tags then exact). (`GOI_ESCAPE_STD_INLINE=1` makes them with the
+   inliner in the one process today: over 2.5 GB, beyond the day's limits.) (c) `testing.B.Loop`'s keep-alives (gc's escape of
    a `b.Loop()` loop's results and arguments, Go 1.24) with `-m=2`'s remaining explanations (the notes of
    every flow): 1 day, 1 program. Recommended: (b), then (c); (a) with the generics' next round.
 2. **The record.** The class's rows were written from a `--list` run. Recommended: the night's full
