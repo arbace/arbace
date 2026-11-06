@@ -1226,3 +1226,9 @@ is not seen).
    (`T20Derive3`'s `cmp`, `weekend`, the Ix instances top-level): HF4's generators. *Recommended* in HF4's next pass.
 3. The nofib record at the night caps (decision 4): once a night slot allows, `ARBACE_MEM_GIB=16 HSI_TIMEOUT=60
    bin/repr-haskell run-check --nofib --record` to empty the `hsi` class (integrate and queens pass at 4 GiB / 600 s).
+
+## Decided (2026-11-06, the user: the Simplifier's proposals 1-3)
+
+- **1 (a):** evidence bindings placed where GHC's solver places them (constant dictionaries shared once), in the next elaborator slice.
+- **2 (a):** HF4's derived code uses `dataToTag#` and the tag primops, as GHC's generators do.
+- **3 (a):** nofib re-recorded at the night caps (16 GiB, 60 s) to empty the `hsi` class.
