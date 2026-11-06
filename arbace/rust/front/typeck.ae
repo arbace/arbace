@@ -163,10 +163,30 @@
 
 (declare deep-normalize)
 
+(def ^:dynamic *obligations* nil)   ; atom: the clauses the instantiated items' predicates registered ([:trait [D ARGS]], [:proj AD ARGS TERM])
+
+(defn- fn-clauses
+  "A function's own clauses as data ([:trait [D ARGS]] and [:proj AD ARGS TERM]), uninstantiated"
+  [d]
+  (if (number? d)
+    (if (#{"Fn" "AssocFn"} (:kind (c/def-of d))) (c/explicit-clauses d) [])
+    (vec (keep (fn [c] (case (head c)
+                         trait [:trait [(nth c 1) (mapv c/sty->ty (nth c 2))]]
+                         proj [:proj (nth c 1) (mapv c/sty->ty (nth c 2)) (c/sty->ty (nth c 3))]
+                         nil))
+               (:predicates (get (:fns c/*si*) d))))))
+
+(defn- register-obligations! [d args]
+  (when *obligations*
+    (doseq [cl (fn-clauses d)]
+      (swap! *obligations* conj (erase (c/subst cl (vec args)))))))
+
 (defn- sig-of
-  "A function item's or a constructor's signature, instantiated with its arguments"
+  "A function item's or a constructor's signature, instantiated with its arguments (its clauses registered as
+  obligations, for the closures among its arguments)"
   [[_ d args]]
   (let [sig (erase (c/subst* (select-keys (c/fndef-sig d) [:inputs :output]) (vec args)))]
+    (register-obligations! d args)
     {:inputs (mapv deep-normalize (:inputs sig)) :output (deep-normalize (:output sig))}))
 
 (defn- adt-fields
@@ -597,7 +617,7 @@
   [e op lt rt]
   (let [tr (c/lang (get op-traits op))
         cmp? (#{"==" "!=" "<" "<=" ">" ">="} op)]
-    (if (and tr (not= [:unknown] (shallow lt)) (not= [:unknown] (shallow rt)) (impls-for (shallow lt) tr [rt]))
+    (if (and tr (not= [:unknown] (shallow lt)) (not= [:unknown] (shallow rt)) (not (tvar? (shallow lt))) (impls-for (shallow lt) tr [rt]))
       (do (when cmp?
             (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] false lt]]])
             (adjust! (:rhs e) [["Borrow" [:ref [:re-erased] false rt]]]))
@@ -605,20 +625,69 @@
                              (if out (shallow [:proj out [lt rt]]) [:unknown]))))
       [:unknown])))
 
+(declare param-fn-bound fn-traits)
+
 (defn- check-call [e expected]
   (let [callee (:func e)
         ft (shallow (check-expr callee nil))]
     (case (first ft)
-      :fndef (let [{:keys [inputs output]} (sig-of ft)]
-               (doseq [[a ty] (map vector (:args e) (concat inputs (repeat nil)))]
-                 (let [at (check-expr a ty)] (when ty (let [ok (coerce! a at ty)] (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "arg" (second ft) ok (deep at) (deep ty))))))))
+      :fndef (let [{:keys [inputs output]} (sig-of ft)
+                   ;; expected_inputs_for_expected_output: the expectation unified with the output in a snapshot gives the
+                   ;; arguments' expectations
+                   exp-ins (when expected
+                             (let [sn (snapshot)
+                                   r (when (unify output expected) (mapv deep inputs))]
+                               (rollback! sn)
+                               r))]
+               (doseq [[a ty xi] (map vector (:args e) (concat inputs (repeat nil)) (concat exp-ins (repeat nil)))]
+                 (let [at (check-expr a (or (when (and xi (not (tvar? (shallow xi)))) xi) ty))] (when ty (let [ok (coerce! a at ty)] (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "arg" (second ft) ok (deep at) (deep ty))))))))
                (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "call" (second ft) (deep output) (shallow output))))
                output)
+      ;; a closure's own signature (deferred call resolution)
+      :closure (let [{:keys [inputs output]} (nth ft 2)]
+                 (doseq [[a ty] (map vector (:args e) (concat inputs (repeat nil)))]
+                   (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
+                 output)
       :fnptr (let [{:keys [inputs output]} (second ft)]
                (doseq [[a ty] (map vector (:args e) (concat inputs (repeat nil)))]
                  (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
                (erase output))
-      (do (doseq [a (:args e)] (check-expr a nil)) [:unknown]))))
+      ;; try_overloaded_call_traits: a parameter with a Fn bound, a trait object of one, through its reference (the callee
+      ;; autoref'd for Fn and FnMut)
+      (let [steps (autoderef ft)
+            hit (some (fn [[i st]] (let [st (shallow st)]
+                                     (cond (= :dyn (first st)) (let [{:keys [principal projections]} (second st)]
+                                                                 (when (and principal (fn-traits (first principal)))
+                                                                   [i st (first principal) (shallow (first (second principal)))
+                                                                    (some (fn [[ad _ term]] (when (= "core::ops::function::FnOnce::Output" ad) term)) projections)]))
+                                           (= :param (first st)) (some (fn [[tr out]] [i st tr (second tr) out]) (param-fn-bound st))
+                                           :else nil)))
+                      (map-indexed vector steps))]
+        (if-let [[i st tr targs out] hit]
+          (let [ins (if (= :tuple (first (shallow targs))) (second (shallow targs)) [])
+                trn (if (vector? tr) (first tr) tr)]
+            (adjust! (:func e) (vec (concat (for [x (rest (take (inc i) steps))] ["Deref" x])
+                                            (case trn "core::ops::function::Fn" [["Borrow" [:ref [:re-erased] false st]]]
+                                                  "core::ops::function::FnMut" [["Borrow" [:ref [:re-erased] true st]]] []))))
+            (doseq [[a ty] (map vector (:args e) (concat ins (repeat nil)))]
+              (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
+            (or out [:unknown]))
+          (do (doseq [a (:args e)] (check-expr a nil)) [:unknown]))))))
+
+(defn- param-fn-bound
+  "A type parameter's Fn bounds in scope: [[[TRAIT ARGS] OUTPUT] ...]"
+  [p]
+  (vec (for [g c/*scope*
+             d [(c/def-of (:def g))]
+             :when (#{"Fn" "AssocFn" "Impl { of_trait: true }" "Impl { of_trait: false }" "Struct" "Trait"} (:kind d))
+             :let [cs (try (c/explicit-clauses (:id d)) (catch Throwable _ []))]
+             cl cs
+             :when (= :trait (first cl))
+             :let [[tr args] (second cl)]
+             :when (fn-traits tr)
+             :when (= p (first args))]
+         [[tr (vec (rest args))]
+          (some (fn [c] (when (and (= :proj (first c)) (= "core::ops::function::FnOnce::Output" (second c)) (= p (first (nth c 2)))) (nth c 3))) cs)])))
 
 (defn- std-struct-ty
   "A std struct's or variant's path in a struct expression or pattern: [adt-ty variant-key args]"
@@ -626,6 +695,80 @@
   (cond (get (:adts c/*si*) p) (let [args (fresh-args p)] [[:adt p args] p args])
         :else (let [adt (c/path-parent p) a (get (:adts c/*si*) adt)]
                 (when a (let [args (fresh-args adt)] [[:adt adt args] p args])))))
+
+(def ^:dynamic *file* nil)   ; the root file's path, as closures' types print it
+
+(defn- closure-decl-span
+  "A closure's fn_decl_span: from its start (`move`) to the end of its parameters' bars (and its return type)"
+  [e]
+  (let [sp (:span e) src c/*src*]
+    (when (and (vector? sp) src)
+      (let [{:keys [^ints cps lines n]} src
+            off (+ (long (nth lines (dec (long (sp 0))))) (dec (long (sp 1))))
+            n (long n)
+            at (fn [i] (when (< i n) (char (aget cps (int i)))))
+            skip-ws (fn [i] (loop [i i] (if (and (< i n) (Character/isWhitespace (char (at i)))) (recur (inc i)) i)))
+            i (loop [i off] (cond (= "move" (String. cps (int i) (int (min 4 (- n i))))) (recur (skip-ws (+ i 4)))
+                                  (= "async" (String. cps (int i) (int (min 5 (- n i))))) (recur (skip-ws (+ i 5)))
+                                  :else i))
+            end (if (= \| (at (inc i)))
+                  (+ i 2)
+                  (loop [j (inc i) depth 0]
+                    (let [ch (at j)]
+                      (cond (nil? ch) j
+                            (and (= ch \|) (zero? depth)) (inc j)
+                            (#{\( \[ \{ \<} ch) (recur (inc j) (inc depth))
+                            (#{\) \] \} \>} ch) (recur (inc j) (max 0 (dec depth)))
+                            :else (recur (inc j) depth)))))
+            ;; a return type: up to the body's block
+            end (let [k (skip-ws end)]
+                  (if (= "->" (String. cps (int k) (int (min 2 (- n k)))))
+                    (let [b (loop [j (+ k 2)] (if (or (>= j n) (= \{ (at j))) j (recur (inc j))))]
+                      (loop [j b] (if (and (> j k) (Character/isWhitespace (char (at (dec j))))) (recur (dec j)) j)))
+                    end))
+            lc (fn [o] (let [li (loop [a 0 b (dec (count lines))] (if (>= a b) a (let [m (quot (+ a b 1) 2)] (if (<= (long (nth lines m)) o) (recur m b) (recur a (dec m))))))]
+                         [(inc li) (inc (- o (long (nth lines li))))]))]
+        (let [[l1 c1] (lc off) [l2 c2] (lc end)] [l1 c1 l2 c2])))))
+
+(def ^:private fn-traits #{"core::ops::function::Fn" "core::ops::function::FnMut" "core::ops::function::FnOnce"})
+
+(defn- deduce-closure-sig
+  "deduce_closure_signature: from the expectation (a variable whose pending obligations name a Fn trait, a trait object of
+  one): [inputs output] or nil"
+  [expected]
+  (let [ex (some-> expected shallow)]
+    (cond
+      (nil? ex) nil
+      (tvar? ex)
+      (let [obs (when *obligations* @*obligations*)
+            tr (some (fn [o] (when (and (= :trait (first o)) (fn-traits (first (second o))) (= ex (shallow (first (second (second o)))))) (second o))) obs)
+            out (some (fn [o] (when (and (= :proj (first o)) (= "core::ops::function::FnOnce::Output" (second o)) (= ex (shallow (first (nth o 2))))) (nth o 3))) obs)]
+        (when tr (let [args (shallow (second (second tr)))] (when (= :tuple (first args)) [(second args) (or out (fresh :ty))]))))
+      ;; a return-position impl Trait: its bounds
+      (= :opaque (first ex))
+      (let [cs (second ex)
+            tr (some (fn [c] (when (and (= :trait (first c)) (fn-traits (first (second c)))) (second c))) cs)
+            out (some (fn [c] (when (and (= :proj (first c)) (= "core::ops::function::FnOnce::Output" (second c))) (nth c 3))) cs)]
+        (when tr (let [args (shallow (second (second tr)))] (when (= :tuple (first args)) [(second args) (or out (fresh :ty))]))))
+      (= :dyn (first ex))
+      (let [{:keys [principal projections]} (second ex)]
+        (when (and principal (fn-traits (first principal)))
+          (let [args (shallow (first (second principal)))]
+            (when (= :tuple (first args))
+              [(second args) (or (some (fn [[ad _ term]] (when (= "core::ops::function::FnOnce::Output" ad) term)) projections) (fresh :ty))]))))
+      :else nil)))
+
+(defn- check-closure [e expected]
+  (let [[ins out] (or (deduce-closure-sig expected) [nil nil])
+        ptys (vec (map-indexed (fn [i p] (if (and (:ty p) (not= :infer (:kind (:ty p)))) (body-ty (:ty p)) (or (nth ins i nil) (fresh :ty)))) (:params e)))
+        ret (if (:output e) (body-ty (:output e)) (or out (fresh :ty)))
+        env (atom {})]
+    (doseq [[p t] (map vector (:params e) ptys)] (check-pat (:pat p) t env :none))
+    (binding [*env* (conj *env* @env) *ret* ret *loops* nil]
+      (let [bt (check-expr (:body e) ret)] (coerce! (:body e) bt ret)))
+    (let [sp (closure-decl-span e)
+          text (if (and sp *file*) (str "{closure@" *file* ":" (sp 0) ":" (sp 1) ": " (sp 2) ":" (sp 3) "}") "{closure}")]
+      [:closure text {:inputs ptys :output ret}])))
 
 (defn- struct-ty [e]
   (let [rd (if (:lang (:path e)) (when-let [p (c/lang (:ident (first (:segs (:path e)))))] [:ext p "Struct"]) (c/res-def (:path e)))]
@@ -760,6 +903,7 @@
                       t)
                     (do (doseq [f (:fields e)] (check-expr (:expr f) nil)) [:unknown]))
           :drop-temps (check-expr (:expr e) expected)
+          :closure (check-closure e expected)
           (do (doseq [x (vals (select-keys e [:receiver :args :expr :body :exprs]))]
                 (cond (map? x) (when (:node x) (try (check-expr x nil) (catch Throwable _ nil)))
                       (vector? x) (doseq [y x] (when (map? y) (try (check-expr y nil) (catch Throwable _ nil))))))
@@ -870,7 +1014,7 @@
   (let [n (:node d) k (:kind d)
         owner (binding [c/*in-value* true] (c/print-def-path (:id d) []))
         facts (atom [])]
-    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *owner* owner *env* [{}] *loops* nil]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *owner* owner *env* [{}] *loops* nil]
       (c/in-def (:id d)
         (if (#{"Fn" "AssocFn"} k)
           (let [sig (erase (c/fn-sig (:id d)))
@@ -894,7 +1038,9 @@
   []
   (vec (mapcat (fn [d]
                  (try (check-body d)
-                      (catch Throwable ex [{:owner "?" :error (str ex)}])))
+                      (catch Throwable ex
+                        (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "body" (:id d) "failed:" ex) (.printStackTrace ex)))
+                        [{:owner "?" :error (str ex)}])))
                (filter (fn [d] (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
                                    (and (or (str/starts-with? (str (:kind d)) "Const") (str/starts-with? (str (:kind d)) "Static")
                                             (str/starts-with? (str (:kind d)) "AssocConst"))
