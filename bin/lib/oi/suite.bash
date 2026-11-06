@@ -101,7 +101,7 @@ cmd_suite_record_ref() {
   opts "$@"; cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_suite_corpus > "$S/corpus.log"
   export -f suite_ref_one suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT root
   local out=$S/ref.tsv
-  suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' | xargs -0 -n 7 -P "$JOBS" bash -c 'suite_ref_one "$@"' _ > "$out.new"
+  suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' | xargs -0 -r -n 7 -P "$JOBS" bash -c 'suite_ref_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
   # --only, --only-list: the rows run replace theirs, the others are kept (record-ref-only, as bin/oi record-ref's)
   "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "record-ref${ONLY:+-only}" "$out" "$S/corpus.tsv" "$SUITE_REFS"
@@ -159,7 +159,7 @@ cmd_suite_check() {
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"
   export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   local out=$S/check.tsv
-  suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' | xargs -0 -n 7 -P "$JOBS" bash -c 'suite_oi_one "$@"' _ > "$out.new"
+  suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' | xargs -0 -r -n 7 -P "$JOBS" bash -c 'suite_oi_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; oi_key "$S/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
   [ -n "$ONLY" ] && mode=$mode-only
@@ -176,11 +176,11 @@ cmd_suite_check() {
 cmd_suite_check_compiled() {
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; cmd_aot_clib
   export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_stage suite_names; export S OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
-  suite_selected > "$S/selected.tsv"
+  suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   C2=$S/compiled; rm -rf "$C2"; mkdir -p "$C2"
   C2_OVERLAY=$(cd "$root" && ARBACE_HOST_EXE=$(arbace_exe) bin/jrt overlay | tail -1) || die "bin/jrt overlay"
-  suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $7, 0, $8, 0 }' | xargs -0 -n 5 -P 4 bash -c 'suite_dump "$@"' _
+  suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $7, 0, $8, 0 }' | xargs -0 -r -n 5 -P 4 bash -c 'suite_dump "$@"' _
   : > "$C2/cprogs.list"; : > "$C2/progs.tsv"
   local id kind flags incs args env base units d n=0 out=$C2/check.tsv
   : > "$out.new"
@@ -208,11 +208,11 @@ cmd_suite_check_aot() {
   mkdir -p "$O2J/tmp"
   # oi's rows for the same programs, from this oi build (review 008's finding 1)
   export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
-  suite_selected > "$S/selected.tsv"
+  suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   local A=$S/aot; rm -rf "$A"; mkdir -p "$A"
   # dump (many at once), translate (one process), run (shards)
-  suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $7, 0, $8, 0 }' | xargs -0 -n 5 -P 4 bash -c 'suite_dump "$@"' _
+  suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $7, 0, $8, 0 }' | xargs -0 -r -n 5 -P 4 bash -c 'suite_dump "$@"' _
   local tl=$A/translate.list bl=$A/batch.list
   : > "$tl"; : > "$bl"
   suite_selected | awk -F'\t' '$2 == "run"' | tr '\t' '\037' | while IFS=$'\037' read -r id kind flags incs args env base units; do
