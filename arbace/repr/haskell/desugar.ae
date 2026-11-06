@@ -359,23 +359,38 @@
     (vector? x) (mapv norm-iface x)
     :else x))
 
+(def ^:dynamic *casts* false) ; the newtypes' casts kept (the -O0 Simplifier's input, arbace.repr.haskell.simplify)
+
+(defn newtype-co
+  "The coercion of a newtype's constructor CON, {:l REP :r NEWTYPE} (its type variables left uninstantiated)"
+  [r con]
+  (let [tc (:tycon (get (:all-cons r) con))
+        t (get (:genv r) con)
+        body (if (= :forall (first t)) (nth t 3) t)]
+    {:l (when (and (vector? body) (= :tc (first body))) (first (nth body 2))) :r [:tc tc nil]}))
+
+(defn program-exported
+  "isExportedId: the export list's, and the Ids GHC makes exported or keeps alive (dictionary functions, default
+  methods, the instances' methods and superclasses a DFunUnfolding mentions, Typeable's, record selectors, class
+  methods)"
+  [r prog]
+  (let [fields (set (mapcat :fields (vals (:all-cons r))))
+        methods (set (mapcat :methods (vals (:all-classes r))))]
+    (into (set (:exported r))
+          (for [[_ b] prog :when (and (vector? b) (or (str/starts-with? (nth b 3) "$") (contains? fields b) (contains? methods b)
+                                                      (not= (nth b 2) (:module r))))]
+            b))))
+
 (defn desugar-program
   "The elaborator's result (:core, :all-cons, :tycons): its bindings without matches"
   [r]
   (binding [*cons* (:all-cons r) *tycons* (:tycons r) *n* (atom 0)]
     (let [prog (mapv (fn [[_ b e]] (binding [*where* (if (vector? b) (nth b 3) (str (second b)))] (list 'bind b (simplify (simplify (ds (norm-iface e))))))) (:core r))
-          fields (set (mapcat :fields (vals (:all-cons r))))
-          methods (set (mapcat :methods (vals (:all-classes r))))
-          ;; isExportedId: the export list's, and the Ids GHC makes exported or keeps alive (dictionary functions,
-          ;; default methods, the instances' methods and superclasses a DFunUnfolding mentions, Typeable's,
-          ;; record selectors, class methods)
-          exported (into (set (:exported r))
-                         (for [[_ b] prog :when (and (vector? b) (or (str/starts-with? (nth b 3) "$") (contains? fields b) (contains? methods b)
-                                                                     (not= (nth b 2) (:module r))))]
-                           b))
+          exported (program-exported r prog)
           cons (into {} (for [[c i] (:all-cons r)] [c {:arity (:arity i) :flavour (:flavour (get (:tycons r) (:tycon i)))}]))
           ;; a class of one method and no superclass, or one superclass and no method, is a newtype (GHC's mkClass):
           ;; its dictionary constructor is a newtype constructor, the identity
           cons (into cons (for [[cls i] (:all-classes r) :when (= 1 (+ (count (:methods i)) (or (:nsupers i) (count (:supers i)))))]
                             [["ext" "data" (nth cls 2) (str "C:" (nth cls 3))] {:arity 1 :flavour 'newtype}]))]
-      (cf/fold-program (so/simple-opt-pgm prog exported cons)))))
+      (binding [so/*newtype-co* (when *casts* (fn [con] (when (contains? (:all-cons r) con) (newtype-co r con))))]
+        (cf/fold-program (so/simple-opt-pgm prog exported cons))))))

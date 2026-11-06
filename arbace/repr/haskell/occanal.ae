@@ -1,0 +1,459 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Core/Opt/OccurAnal.hs
+;; (occurAnalysePgm, occurAnalyseExpr, occAnalBind, occAnalRecBind with its loop-breaker choice, occAnal,
+;; occAnalApp, occAnalLamTail, the binder swap, join points, UsageDetails), on Arbace's Core
+;; (doc/haskell/FRONTEND-SURVEY.md, "As built: the -O0 Simplifier"); GHC's notice is in arbace/repr/haskell/core.ae
+;; (LICENSE.md, "GHC: the Glasgow Haskell Compiler License").
+
+(ns arbace.repr.haskell.occanal
+  "GHC's occurrence analyser, as the Simplifier runs it before each iteration: every binder tagged with its OccInfo
+  (metadata :occ: {:k :dead} | {:k :one :in-lam B :n N :int B :tail T} | {:k :many :tail T} | {:k :lb :strong B :tail T},
+  T a tail-call arity or nil) and :join (its join arity when it becomes a join point); dead bindings dropped; the
+  top-level's and every letrec's bindings split into strongly connected components, the loop breakers chosen by
+  GHC's scores; a case's scrutinee variable replaced by its binder in the alternatives (the binder swap)."
+  (:require [arbace.repr.haskell.core :as c]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; UsageDetails: {:env {key LocalOcc} :many #{key} :inlam #{key} :tail #{key}}; LocalOcc {:one true :n N :int B :tail T}
+;;; or {:tail T} (ManyOccL)
+
+(def empty-ud {:env {} :many #{} :inlam #{} :tail #{}})
+
+(defn- and-tail [a b] (when (and a b (= a b)) a))
+(defn- and-occ [a b] {:tail (and-tail (:tail a) (:tail b))})
+(defn- or-occ [a b]
+  (if (and (:one a) (:one b))
+    {:one true :n (+ (:n a) (:n b)) :int (or (:int a) (:int b)) :tail (and-tail (:tail a) (:tail b))}
+    (and-occ a b)))
+
+(defn- combine [f u1 u2]
+  (cond (empty? (:env u1)) u2
+        (empty? (:env u2)) u1
+        :else {:env (merge-with f (:env u1) (:env u2))
+               :many (into (:many u1) (:many u2)) :inlam (into (:inlam u1) (:inlam u2)) :tail (into (:tail u1) (:tail u2))}))
+
+(defn and-uds [a b] (combine and-occ a b))
+(defn or-uds [a b] (combine or-occ a b))
+
+(defn- mark-many [u] (assoc u :many (into (:many u) (keys (:env u)))))
+(defn- mark-inlam [u] (assoc u :inlam (into (:inlam u) (keys (:env u)))))
+(defn- mark-nontail [u] (assoc u :tail (into (:tail u) (keys (:env u)))))
+(defn- mark-many-nontail [u] (mark-many (mark-nontail u)))
+
+(defn- del-bndrs [u bs]
+  (let [ks (map c/vkey bs)]
+    {:env (apply dissoc (:env u) ks) :many (apply disj (:many u) ks) :inlam (apply disj (:inlam u) ks) :tail (apply disj (:tail u) ks)}))
+
+(defn- add-many-occs [u ks]
+  (assoc u :env (reduce (fn [m k] (assoc m k {:tail nil})) (:env u) ks)))
+
+(defn lookup-occ
+  "lookupOccInfoByUnique"
+  [u k]
+  (if-let [o (get (:env u) k)]
+    (let [tl (if (contains? (:tail u) k) nil (:tail o))]
+      (if (and (:one o) (not (contains? (:many u) k)))
+        {:k :one :in-lam (contains? (:inlam u) k) :n (:n o) :int (:int o) :tail tl}
+        {:k :many :tail tl}))
+    {:k :dead}))
+
+(defn- lookup-tail [u k]
+  (if (contains? (:tail u) k) nil (:tail (get (:env u) k))))
+
+(def ^:dynamic *exported* #{})
+(def ^:dynamic *tops* #{})
+
+(defn- exported? [b] (contains? *exported* (c/vkey b)))
+
+(defn- lookup-let-occ [u b] (if (exported? b) {:k :many :tail nil} (lookup-occ u (c/vkey b))))
+
+(defn- mark-nontail-occ [o] (if (= :dead (:k o)) o (assoc o :tail nil)))
+
+(defn- set-occ [b o] (c/update-info b assoc :occ o))
+
+;;; ------------------------------------------------------------------------------------------
+;;; OccEnv: {:encl :rhs|:scrut|:vanilla :one-shots [B...] :bs {key [case-bndr co]} :bs-rng #{key} :joins {key env}}
+
+(def init-env {:encl :vanilla :one-shots [] :bs {} :bs-rng #{} :joins {}})
+
+(defn- nontail-ctxt [encl env] (assoc env :encl encl :one-shots [] :joins {}))
+(defn- tail-ctxt [env] (assoc env :encl :vanilla))
+(defn- rhs-env? [env] (= :rhs (:encl env)))
+
+(defn- local? [x]
+  (or (c/lv? x) (and (c/gv? x) (contains? *tops* (second x))) (and (vector? x) (contains? *tops* x))))
+
+(defn- add-in-scope
+  "addInScope: the analysis of a scope binding bs (the binder swaps and join points they shadow dropped)"
+  [env bs f]
+  (let [ks (set (map c/vkey bs))
+        jps (:joins env)
+        bad (some (fn [[j jenv]] (or (contains? ks j) (some #(contains? ks %) (keys jenv)))) jps)
+        env1 (cond-> env
+               (and (seq (:bs env)) (some #(contains? (:bs-rng env) %) ks)) (assoc :bs {} :bs-rng #{})
+               (seq (:bs env)) (update :bs #(apply dissoc % ks))
+               bad (assoc :joins {}))
+        [u r] (f env1)
+        u2 (del-bndrs u bs)
+        u3 (if bad
+             (reduce (fn [u [j jenv]] (if (contains? (:env u) j) (assoc u :env (merge-with and-occ (:env u) jenv)) u)) u2 jps)
+             u2)]
+    [u3 r]))
+
+(defn- mk-one-occ [env x int-cxt n-args]
+  (let [k (c/vkey x)]
+    (if-not (local? x)
+      empty-ud
+      (let [o {:one true :n 1 :int int-cxt :tail n-args}]
+        (if-let [jenv (get (:joins env) k)]
+          (assoc empty-ud :env (assoc jenv k o))
+          (assoc empty-ud :env {k o}))))))
+
+(defn- zeroed-form [u]
+  (into {} (for [[k o] (:env u) :when (and (:one o) (not (contains? (:many u) k)))] [k (assoc o :n 0)])))
+
+(defn- add-join-point [env b rhs-uds]
+  (let [z (zeroed-form rhs-uds)] (if (empty? z) env (assoc-in env [:joins (c/vkey b)] z))))
+
+(defn- one-shot-fun? [e]
+  (cond (c/head? e 'lam) (and (every? #(:oneshot (c/info %)) (second e)) (one-shot-fun? (nth e 2)))
+        (c/head? e 'cast) (one-shot-fun? (second e))
+        :else true))
+
+(defn- adjust-tail-usage [mb-join [ja u rhs]]
+  (cond->> u
+    (not= mb-join ja) mark-nontail
+    (not (one-shot-fun? rhs)) mark-inlam))
+
+(defn- adjust-tail-arity [mb-join [ja u]] (if (not= mb-join ja) (mark-nontail u) u))
+
+(defn- tag-lam-binder [u b] (set-occ b (mark-nontail-occ (lookup-occ u (c/vkey b)))))
+
+(defn- ok-for-join? [top? b tail]
+  (or (c/join? b)
+      (and (not top?) (some? tail)
+           (let [u (c/id-unf b)] (not (= :dfun (:k u)))))))
+
+(defn- tag-nonrec-binder [top? occ b]
+  (let [tail (:tail occ)]
+    (if (and (ok-for-join? top? b tail) tail)
+      [(c/update-info (set-occ b occ) assoc :join tail) tail]
+      [(c/update-info (set-occ b (mark-nontail-occ occ)) dissoc :join) nil])))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The binder swap
+
+(defn- scrut-swap
+  "scrutOkForBinderSwap: [var co-or-nil] or nil"
+  [s]
+  (cond (c/vref? s) [s nil]
+        (and (c/head? s 'cast) (c/vref? (second s))) [(second s) (c/co-sym (nth s 2))]
+        :else nil))
+
+(defn- add-bndr-swap [s cb env]
+  (if-let [[v co] (scrut-swap s)]
+    (if (and (not= (c/vkey v) (c/vkey cb)) (local? v))
+      (let [cb2 (c/update-info cb dissoc :occ)]
+        (-> env (assoc-in [:bs (c/vkey v)] [cb2 co]) (update :bs-rng conj (c/vkey cb2))))
+      env)
+    env))
+
+(defn- lookup-bndr-swap [env x]
+  (if-let [[b co] (get (:bs env) (c/vkey x))]
+    (let [[f fid] (lookup-bndr-swap env b)] [(if co (c/mk-cast f co) f) fid])
+    [x x]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Expressions
+
+(declare occ-anal occ-bind occ-rec-bind occ-lam-tail-tagged)
+
+(defn- occ-list [env es]
+  (reduce (fn [[u out] e] (let [[u2 e2] (occ-anal env e)] [(and-uds u u2) (conj out e2)])) [empty-ud []] es))
+
+(defn- occ-lam-tail
+  "occAnalLamTail: [join-arity usage expr]"
+  [env e]
+  (let [[u e2] (occ-lam-tail-tagged env e)]
+    [(c/join-rhs-arity e) u e2]))
+
+(defn- occ-lam-tail-tagged [env e]
+  (cond
+    (c/head? e 'lam)
+    (let [[_ bs body] e
+          [os bs2] (loop [os (:one-shots env) bs bs out []]
+                     (if (empty? bs) [os out]
+                         (if (seq os)
+                           (recur (rest os) (rest bs) (conj out (if (first os) (c/update-info (first bs) assoc :oneshot true) (first bs))))
+                           (recur os (rest bs) (conj out (first bs))))))
+          env2 (assoc env :encl :vanilla :one-shots (vec os))
+          inner (atom nil)
+          [u body2] (add-in-scope env2 bs2 (fn [env3] (let [[u b] (occ-lam-tail-tagged env3 body)] (reset! inner u) [u b])))]
+      [u (list 'lam (mapv #(tag-lam-binder @inner %) bs2) body2)])
+    (c/head? e 'cast)
+    (let [[u e2] (occ-lam-tail-tagged env (second e))
+          u2 (if (and (c/vref? (second e)) (rhs-env? env)) (mark-many u) u)]
+      [(mark-nontail u2) (list 'cast e2 (nth e 2))])
+    :else (occ-anal env e)))
+
+(defn- occ-app [env f args]
+  (if (c/vref? f)
+    (let [[f2 fid] (lookup-bndr-swap env f)
+          n (count args)
+          env-args (nontail-ctxt (if (c/dead-end-id? f) :scrut :vanilla) env)
+          [au args2] (occ-list env-args args)
+          int-cxt (or (= :scrut (:encl env)) (pos? n))
+          fu (mk-one-occ env fid int-cxt n)
+          is-exp (c/expandable-app? fid n)
+          au2 (cond-> au (and (rhs-env? env) is-exp) mark-inlam true mark-nontail)]
+      [(and-uds fu au2) (c/mk-apps f2 args2)])
+    (let [n (count args)
+          env-f (if (pos? n) (assoc env :one-shots (into (vec (repeat n true)) (:one-shots env)) :encl :vanilla) env)
+          [fu f2] (occ-anal env-f f)
+          [au args2] (occ-list (nontail-ctxt :vanilla env) args)]
+      [(mark-nontail (and-uds fu au)) (c/mk-apps f2 args2)])))
+
+(defn occ-anal
+  "occAnal: [usage expr']"
+  [env e]
+  (case (first e)
+    lit [empty-ud e]
+    (lv v) (occ-app env e [])
+    app (let [[f args] (c/collect-args e)] (occ-app env f args))
+    cast (let [[u e2] (occ-anal env (second e))] [(mark-nontail u) (list 'cast e2 (nth e 2))])
+    lam (let [[ja u e2] (occ-lam-tail env e)] [(adjust-tail-usage nil [ja u e2]) e2])
+    case (let [[_ s b alts] e
+               interesting (case (count alts) 0 false 1 (not= :default (second (first alts))) true)
+               [su s2] (occ-anal (nontail-ctxt (if interesting :scrut :vanilla) env) s)
+               [au [b2 alts2]]
+               (add-in-scope env [b]
+                             (fn [env2]
+                               (let [alt-env (add-bndr-swap s2 b (tail-ctxt env2))
+                                     res (map (fn [[_ con bs r]]
+                                                (add-in-scope alt-env bs
+                                                              (fn [env3]
+                                                                (let [[ru r2] (occ-anal env3 r)]
+                                                                  [ru (list 'alt con (mapv #(tag-lam-binder ru %) bs) r2)]))))
+                                              alts)
+                                     u (reduce or-uds empty-ud (map first res))]
+                                 [u [(tag-lam-binder u b) (mapv second res)]])))]
+           [(and-uds (mark-nontail su) au) (list 'case s2 b2 alts2)])
+    let (let [[_ [[_ b r]] body] e]
+          (occ-bind env false [(list 'bind b r)] (fn [env2] (occ-anal env2 body))
+                    (fn [binds body2] (c/wrap-binds binds body2))))
+    letrec (occ-bind env false [(list 'rec (second e))] (fn [env2] (occ-anal env2 (nth e 2)))
+                     (fn [binds body2] (c/wrap-binds binds body2)))
+    [empty-ud e]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Bindings
+
+(defn- unf-usage
+  "occAnalUnfolding's usage: a stable unfolding's (marked many), a DFun's arguments'"
+  [env b]
+  (let [u (c/id-unf b)]
+    (case (:k u)
+      :core (if (c/stable-unf? u)
+              (let [[ja uu _] (occ-lam-tail env (:tmpl u))] [ja (mark-many uu)])
+              [0 empty-ud])
+      :dfun [0 (first (occ-list env (:args u)))]
+      [0 empty-ud])))
+
+(defn- rhs-env [env rec? encl mb-join rhs]
+  (if mb-join
+    (assoc env :encl :vanilla
+               :one-shots (loop [n mb-join e rhs out []]
+                            (cond (zero? n) (into out (:one-shots env))
+                                  (c/head? e 'lam) (let [k (min n (count (second e)))]
+                                                     (recur (- n k) (if (< k (count (second e))) (list 'lam (vec (drop k (second e))) (nth e 2)) (nth e 2))
+                                                            (into out (repeat k (not rec?)))))
+                                  :else []))
+               :joins (:joins env))
+    (assoc env :encl encl :one-shots [] :joins {})))
+
+(defn- nonrec-rhs-ctxt [top? b]
+  (let [o (c/id-occ b)]
+    (if (and (= :one (:k o)) (not (:in-lam o)) (= 1 (:n o))
+             (not (c/stable-unf? (c/id-unf b))) (not (and top? (c/dead-end-id? b))))
+      :vanilla :rhs)))
+
+(defn- occ-nonrec-rhs
+  "occAnalNonRecRhs: [usage binder rhs']"
+  [env top? mb-join b rhs]
+  (let [renv (rhs-env env false (if mb-join :vanilla (nonrec-rhs-ctxt top? b)) mb-join rhs)
+        [ja u rhs2] (occ-lam-tail renv rhs)
+        adj (adjust-tail-usage mb-join [ja u rhs2])
+        [uja uu] (unf-usage renv b)]
+    [(and-uds adj (adjust-tail-arity mb-join [uja uu])) b rhs2]))
+
+(declare loop-break-nodes)
+
+(defn- node-score
+  "nodeScore: [rank size was-loop-breaker]"
+  [b lb-deps rhs]
+  (let [u (c/id-unf b) o (c/id-occ b)
+        is-lb (and (= :lb (:k o)) (:strong o))
+        size (if (and (= :core (:k u)) (= :if-good (:k (:guide u)))) (:size (:guide u))
+                 (let [n (atom 0)]
+                   ((fn go [e] (when (< @n 20)
+                                 (case (first e)
+                                   (lv v lit) (swap! n inc)
+                                   cast (go (second e))
+                                   app (do (go (second e)) (doseq [a (nth e 2)] (go a)))
+                                   lam (do (swap! n inc) (go (nth e 2)))
+                                   (let letrec) (do (go (nth e 2)) (doseq [[_ _ r] (second e)] (go r)))
+                                   case (do (go (second e)) (doseq [[_ _ _ r] (nth e 3)] (go r)))
+                                   nil))) rhs)
+                   @n))
+        mk (fn [rank] [rank size is-lb])
+        con-app? (fn con-app? [e] (case (first e) (lv v) (c/conlike-id? e) app (con-app? (second e)) lam (con-app? (nth e 2)) (let letrec) (con-app? (nth e 2)) false))]
+    (cond (contains? lb-deps (c/vkey b)) [0 0 true]
+          (c/trivial? rhs) (mk 10)
+          (= :dfun (:k u)) [9 (count (:args u)) is-lb]
+          (and (= :core (:k u)) (= :when (:k (:guide u)))) (mk 6)
+          (con-app? rhs) (mk 5)
+          (and (c/stable-unf? u)) (mk 3)
+          (= :one (:k (c/id-occ b))) (mk 2)
+          (= :core (:k u)) (mk 1)
+          :else [0 0 is-lb])))
+
+(defn- better-lb? [[r1 s1 l1] [r2 s2 _]]
+  (cond (< r1 r2) true (> r1 r2) false (< s1 s2) false (> s1 s2) true l1 true :else false))
+
+(defn- sccs
+  "Strongly connected components, dependencies first: [[node...] cyclic?]...; nodes {:key k :deps #{k}}"
+  [nodes]
+  (let [by (into {} (map (juxt :key identity) nodes))
+        order (mapv :key nodes)
+        idx (atom 0) index (atom {}) low (atom {}) stack (atom []) on (atom #{}) out (atom [])]
+    (letfn [(strong [v]
+              (swap! index assoc v @idx) (swap! low assoc v @idx) (swap! idx inc)
+              (swap! stack conj v) (swap! on conj v)
+              (doseq [w (filter #(contains? by %) (sort-by #(.indexOf ^java.util.List order %) (:deps (get by v))))]
+                (cond (not (contains? @index w)) (do (strong w) (swap! low update v min (get @low w)))
+                      (contains? @on w) (swap! low update v min (get @index w))))
+              (when (= (get @low v) (get @index v))
+                (let [comp (loop [cc []]
+                             (let [w (peek @stack)]
+                               (swap! stack pop) (swap! on disj w)
+                               (if (= w v) (conj cc w) (recur (conj cc w)))))
+                      comp (vec (sort-by #(.indexOf ^java.util.List order %) comp))]
+                  (swap! out conj [(mapv by comp) (or (> (count comp) 1) (contains? (:deps (get by v)) v))]))))]
+      (doseq [v order] (when-not (contains? @index v) (strong v)))
+      @out)))
+
+(defn- mk-loop-breaker [b] (set-occ b {:k :lb :strong true :tail (:tail (c/id-occ b))}))
+
+(defn- reorder-nodes [depth nodes acc]
+  (if (= 1 (count nodes))
+    (into [[(mk-loop-breaker (:bndr (first nodes))) (:rhs (first nodes))]] acc)
+    (let [approx (>= depth 2)
+          [chosen unchosen]
+          (loop [best (:score (first nodes)) chosen [(first nodes)] others [] ns (rest nodes)]
+            (if (empty? ns) [chosen others]
+                (let [n (first ns) sc (:score n)]
+                  (cond (and approx (= (first sc) (first best))) (recur best (conj chosen n) others (rest ns))
+                        (better-lb? sc best) (recur sc [n] (into others chosen) (rest ns))
+                        :else (recur best chosen (conj others n) (rest ns))))))
+          ;; unchosen keep the order they came in
+          ks (set (map :key chosen))
+          unchosen (filterv #(not (contains? ks (:key %))) nodes)]
+      (loop-break-nodes (if approx 0 (inc depth)) unchosen
+                        (into (mapv (fn [n] [(mk-loop-breaker (:bndr n)) (:rhs n)]) chosen) acc)))))
+
+(defn- loop-break-nodes [depth nodes acc]
+  (let [ks (set (map :key nodes))
+        nodes (mapv (fn [n] (assoc n :deps (into #{} (filter ks) (:lb-deps n)))) nodes)]
+    (reduce (fn [acc [comp cyclic]]
+              (if cyclic
+                (reorder-nodes depth comp acc)
+                (into [[(:bndr (first comp)) (:rhs (first comp))]] acc)))
+            acc
+            (reverse (sccs nodes)))))
+
+(defn- occ-rec-bind
+  "occAnalRecBind: [usage binds], the bindings split into their components"
+  [env top? pairs body-uds]
+  (let [bset (set (map (fn [[_ b _]] (c/vkey b)) pairs))
+        nodes (vec (for [[_ b r] pairs]
+                     (let [renv (rhs-env env true :rhs (c/join-arity b) r)
+                           [ja u r2] (occ-lam-tail renv r)
+                           [uja uu] (unf-usage renv b)
+                           uu2 (adjust-tail-arity ja [uja uu])
+                           scope (and-uds u uu2)
+                           fvs (into #{} (filter bset) (keys (:env scope)))]
+                       {:key (c/vkey b) :bndr b :rhs r2 :ja ja :uds u :deps fvs :inl fvs})))
+        comps (sccs nodes)]
+    (reduce
+      (fn [[body-uds binds] [comp cyclic]]
+        (if-not cyclic
+          (let [{:keys [bndr rhs ja uds]} (first comp)
+                occ (lookup-let-occ body-uds bndr)]
+            (if (= :dead (:k occ))
+              [body-uds binds]
+              (let [[b2 mbj] (tag-nonrec-binder top? occ bndr)
+                    u2 (adjust-tail-usage mbj [ja uds rhs])]
+                [(and-uds body-uds u2) (into [(list 'bind b2 rhs)] binds)])))
+          (if-not (some (fn [n] (or (exported? (:bndr n)) (contains? (:env body-uds) (:key n)))) comp)
+            [body-uds binds]
+            ;; tagRecBinders: the join points decided for the group, then the binders' occurrences
+            (let [unadj (reduce (fn [u n] (and-uds u (adjust-tail-arity (c/join-rhs-arity (:rhs n)) [(:ja n) (:uds n)]))) body-uds comp)
+                  joins? (every? (fn [n] (ok-for-join? top? (:bndr n) (lookup-tail unadj (:key n)))) comp)
+                  mbj (fn [n] (when joins? (lookup-tail unadj (:key n))))
+                  adj (reduce (fn [u n] (and-uds u (adjust-tail-usage (mbj n) [(:ja n) (:uds n) (:rhs n)]))) body-uds comp)
+                  comp2 (mapv (fn [n]
+                                (let [b (set-occ (:bndr n) (lookup-let-occ adj (:bndr n)))
+                                      b (if-let [j (mbj n)] (c/update-info b assoc :join j) (c/update-info b dissoc :join))
+                                      ks (set (map :key comp))
+                                      lb-deps (into #{} (filter ks) (:inl n))]
+                                  (assoc n :bndr b :lb-deps lb-deps :score (node-score b lb-deps (:rhs n)))))
+                              comp)
+                  prs (reorder-nodes 0 comp2 [])]
+              [adj (into [(list 'rec (mapv (fn [[b r]] (list 'bind b r)) prs))] binds)]))))
+      [body-uds []]
+      (reverse comps))))
+
+(defn- occ-bind
+  "occAnalBind: one let's bindings around a scope analysed by thing; combine builds the result"
+  [env top? binds thing combine]
+  (let [bind (first binds)]
+    (if (c/head? bind 'rec)
+      (let [pairs (second bind)
+            [u r] (add-in-scope env (map second pairs)
+                                (fn [env2]
+                                  (let [[bu body] (thing env2)
+                                        [u2 binds2] (occ-rec-bind env2 top? pairs bu)]
+                                    [u2 (combine binds2 body)])))]
+        [u r])
+      (let [[_ b rhs] bind]
+        (if-let [ja (c/join-arity b)]
+          (let [[ru b2 rhs2] (occ-nonrec-rhs env top? ja b rhs)
+                [bu [occ body]] (add-in-scope env [b2] (fn [env2] (let [[u r] (thing (add-join-point env2 b2 ru))] [u [(lookup-let-occ u b2) r]])))]
+            (if (= :dead (:k occ))
+              [bu body]
+              [(or-uds ru bu) (combine [(list 'bind (first (tag-nonrec-binder top? occ b2)) rhs2)] body)]))
+          (let [[bu [occ body]] (add-in-scope env [b] (fn [env2] (let [[u r] (thing env2)] [u [(lookup-let-occ u b) r]])))]
+            (if (= :dead (:k occ))
+              [bu body]
+              (let [[tb mbj] (tag-nonrec-binder top? occ b)
+                    [ru fb rhs2] (occ-nonrec-rhs env top? mbj tb rhs)]
+                [(and-uds bu ru) (combine [(list 'bind fb rhs2)] body)]))))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Entry points
+
+(defn occur-analyse-expr
+  "occurAnalyseExpr"
+  [e]
+  (binding [*tops* #{}] (second (occ-anal init-env e))))
+
+(defn occur-analyse-pgm
+  "occurAnalysePgm: the program's top-level binds [(bind B E)|(rec [...])...] analysed, the module's exported names
+  never dead; the bindings glommed into one group and split into components (the first iteration's input is the
+  desugarer's, in no particular grouping)"
+  [binds exported]
+  (binding [*exported* exported
+            *tops* (set (for [bd binds [_ b _] (c/bind-pairs bd)] (c/vkey b)))]
+    (let [pairs (vec (for [bd binds p (c/bind-pairs bd)] p))
+          [_ out] (occ-rec-bind init-env true pairs empty-ud)]
+      out)))

@@ -1,0 +1,895 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Core/Utils.hs (exprIsTrivial,
+;; exprIsDupable, exprIsCheapX and its three instances, isWorkFreeApp, isCheapApp, isExpandableApp, exprOkForSpeculation,
+;; exprOkToDiscard, exprIsHNF, exprIsConLike, altsAreExhaustive, cheapEqExpr, mkCast, findAlt, filterAlts,
+;; refineDefaultAlt, combineIdenticalAlts, mkStrictFieldSeqs), compiler/GHC/Core/Opt/Arity.hs (typeArity, typeOneShots,
+;; ArityType and arityType, findRhsArity, exprEtaExpandArity, etaExpandAT, tryEtaReduce, exprArity, manifestArity,
+;; exprIsDeadEnd, cheapArityType, pushCoValArg), compiler/GHC/Core/Unfold.hs and Unfold/Make.hs (sizeExpr,
+;; calcUnfoldingGuidance, inlineBoringOk, uncondInline, uncondInlineJoin, mkUnfolding, smallEnoughToInline) and
+;; compiler/GHC/Core/SimpleOpt.hs (exprIsConApp_maybe), on Arbace's Core (doc/haskell/FRONTEND-SURVEY.md, "As built:
+;; the -O0 Simplifier"); GHC's notice follows (LICENSE.md, "GHC: the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.core
+  "Core as the -O0 Simplifier reads it (arbace.repr.haskell.simplify): the tc vocabulary of the desugarer's output,
+  (v NAME) (lv \"occ\" ID) (lit \"text\") (app F [ARG...]) (lam [B...] E) (let [(bind B E)] E) (letrec [(bind B E)...] E)
+  (case E B [(alt CON [B...] E)...]), and (cast E CO), a coercion CO a map {:l TYPE :r TYPE} (its two kinds, the
+  elaborator's types, nil where unknown). An Id's IdInfo is the metadata of its binder form (as GHC's Ids carry
+  theirs): :arity :unf (the unfolding) :occ (OccInfo) :join (join arity) :oneshot :type :bot (a dead-end arity) :inl
+  (an INLINE pragma); a global name's from *globals* (data constructor workers, class-op selectors, primops,
+  dictionary functions: GHC's IdDetails), the imported Ids having no unfolding and arity 0 at -O0
+  (-fignore-interface-pragmas: GHC.IfaceToCore.tcIdInfo)."
+  (:require [arbace.string :as str]
+            [arbace.repr.haskell.primops :as primops]))
+
+(defn head? [x h] (and (seq? x) (= h (first x))))
+(defn lv? [x] (head? x 'lv))
+(defn gv? [x] (head? x 'v))
+(defn vref? [x] (or (lv? x) (gv? x)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Ids: keys, info, fresh names
+
+(def ^:dynamic *globals* (constantly nil)) ; NAME -> {:details ... :arity n :type T :unf U}: imported and wired-in Ids
+(def ^:dynamic *ltypes* {})                ; the elaborator's local binders' types
+(def ^:dynamic *new-types* nil)            ; atom {binder type}: the clones' types, for tostg
+(def ^:dynamic *uniq* nil)                 ; atom: fresh uniques
+(def ^:dynamic *unlifted-type?* (fn [t] false))
+(def ^:dynamic *unlifted-expr?* (fn [e] false))
+(def ^:dynamic *tycons* {})
+(def ^:dynamic *genv* {})
+(def ^:dynamic *con-family* (constantly nil)) ; CON -> the number of its type's constructors
+
+(defn vkey
+  "The key of a variable occurrence or binder: a global's NAME, a local's form"
+  [x]
+  (if (gv? x) (second x) x))
+
+(defn occ-form
+  "A binder's occurrence form, its IdInfo with it"
+  [b]
+  (if (vector? b) (with-meta (list 'v b) (meta b)) b))
+
+(defn global? [x] (or (vector? x) (gv? x)))
+
+(defn info
+  "The IdInfo of an occurrence or binder"
+  [x]
+  (cond (lv? x) (or (meta x) {})
+        (gv? x) (merge (*globals* (second x)) (meta x))
+        (vector? x) (merge (*globals* x) (meta x))
+        :else {}))
+
+(defn set-info [x m] (with-meta x m))
+(defn update-info [x f & args] (with-meta x (apply f (or (meta x) {}) args)))
+
+(defn details [x] (:details (info x)))
+(defn id-arity [x] (or (:arity (info x)) 0))
+(defn id-unf [x] (:unf (info x)))
+(defn id-occ [x] (:occ (info x)))
+(defn join-arity [x] (:join (info x)))
+(defn join? [x] (some? (join-arity x)))
+(defn con-id? [x] (= :con (:k (details x))))
+(defn classop-id? [x] (= :classop (:k (details x))))
+(defn primop-of [x] (when (= :primop (:k (details x))) (:op (details x))))
+(defn dfun-id? [x] (= :dfun (:k (details x))))
+(defn recsel-id? [x] (= :recsel (:k (details x))))
+
+(defn id-type
+  "An Id's type (the elaborator's), or nil"
+  [x]
+  (let [i (info x) k (vkey x)]
+    (or (:type i) (get *ltypes* k) (when *new-types* (get @*new-types* k)) (when (vector? k) (get *genv* k)))))
+
+(defn fresh-uniq [] (str "s" (swap! *uniq* inc)))
+
+(defn fresh-local
+  "A new local binder named after occ, with IdInfo m"
+  [occ m]
+  (with-meta (list 'lv occ (fresh-uniq)) m))
+
+(defn clone
+  "A binder's copy with a new unique (uniqAway), its IdInfo and type kept"
+  [b]
+  (let [b2 (with-meta (list 'lv (second b) (fresh-uniq)) (meta b))]
+    (when-let [t (id-type b)] (when *new-types* (swap! *new-types* assoc b2 t)))
+    b2))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Types (the elaborator's: [:tc NAME [ARG...]] [:tv n] [:mv n] [:app F X] [:forall TVS PREDS BODY]) and coercions
+
+(def fun-tc ["ext" "tc" "GHC.Internal.Types" "FUN"])
+(def state-tc ["ext" "tc" "GHC.Internal.Prim" "State#"])
+
+(defn fun-ty [a r] [:tc fun-tc [a r]])
+(defn fun-ty? [t] (and (vector? t) (= :tc (first t)) (= fun-tc (second t))))
+(defn strip-forall [t] (if (and (vector? t) (= :forall (first t)) (empty? (nth t 2))) (recur (nth t 3)) t))
+
+(defn- tsubst [m t]
+  (cond (not (vector? t)) t
+        (= :tv (first t)) (get m (second t) t)
+        (= :tc (first t)) [:tc (second t) (when (nth t 2) (mapv #(tsubst m %) (nth t 2)))]
+        (= :app (first t)) [:app (tsubst m (nth t 1)) (tsubst m (nth t 2))]
+        (= :forall (first t)) (let [m2 (apply dissoc m (nth t 1))]
+                                [:forall (nth t 1) (mapv (fn [[c ts]] [c (mapv #(tsubst m2 %) ts)]) (nth t 2)) (tsubst m2 (nth t 3))])
+        :else t))
+
+(defn newtype-rep
+  "instNewTyCon_maybe: the representation type of a newtype application, or nil"
+  [t]
+  (when (and (vector? t) (= :tc (first t)))
+    (let [[_ n args] t i (get *tycons* n)]
+      (when (= 'newtype (:flavour i))
+        (let [c (first (:cons i)) ct (get *genv* c)]
+          (when ct
+            (let [[tvs body] (if (= :forall (first ct)) [(nth ct 1) (nth ct 3)] [[] ct])]
+              (when (fun-ty? body)
+                (tsubst (if args (zipmap tvs args) {}) (first (nth body 2)))))))))))
+
+(defn state-hack-type? [t] (and (vector? t) (= :tc (first t)) (= state-tc (second t))))
+
+(defn type-one-shots
+  "typeOneShots: one entry an arrow (dictionary arguments too), through newtypes; nil for an unknown type"
+  [t]
+  (when t
+    (loop [t t seen #{} out []]
+      (cond
+        (not (vector? t)) out
+        (= :forall (first t)) (recur (nth t 3) seen (into out (repeat (count (nth t 2)) false)))
+        (fun-ty? t) (recur (second (nth t 2)) seen (conj out (state-hack-type? (first (nth t 2)))))
+        (and (= :tc (first t)) (not (contains? seen (second t))) (newtype-rep t))
+        (recur (newtype-rep t) (conj seen (second t)) out)
+        :else out))))
+
+(defn type-arity [t] (when t (count (type-one-shots t))))
+
+(defn co-refl? [co] (or (:refl co) (and (some? (:l co)) (= (:l co) (:r co)))))
+(defn co-sym [co] {:l (:r co) :r (:l co)})
+(defn co-trans [c1 c2] {:l (:l c1) :r (:r c2)})
+
+(defn mk-cast
+  "mkCast: a reflexive coercion dropped, a cast of a cast one cast"
+  [e co]
+  (cond (co-refl? co) e
+        (head? e 'cast) (let [co2 (co-trans (nth e 2) co)] (if (co-refl? co2) (second e) (list 'cast (second e) co2)))
+        :else (list 'cast e co)))
+
+(defn mk-pi-cos
+  "mkPiCos: a coercion over the lambdas of the binders"
+  [bs co]
+  (reduce (fn [c b] (let [t (id-type b)] {:l (fun-ty t (:l c)) :r (fun-ty t (:r c))})) co (reverse bs)))
+
+(defn push-co-val-arg
+  "pushCoValArg: for co :: (a1 -> r1) ~ (a2 -> r2), [arg-co res-co] (nil for a reflexive part); nil when the coercion
+  is not between function types"
+  [co]
+  (cond (co-refl? co) [nil nil]
+        (and (fun-ty? (:l co)) (fun-ty? (:r co)))
+        (let [[a1 r1] (nth (:l co) 2) [a2 r2] (nth (:r co) 2)
+              c1 {:l a2 :r a1} c2 {:l r1 :r r2}]
+          [(when-not (co-refl? c1) c1) (when-not (co-refl? c2) c2)])
+        :else nil))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Expressions: building and taking apart
+
+(defn lit-string? [e] (and (head? e 'lit) (re-matches #"(?s)\".*\"#?" (second e))))
+
+(defn mk-apps [f args]
+  (cond (empty? args) f
+        (head? f 'app) (list 'app (second f) (into (vec (nth f 2)) args))
+        :else (list 'app f (vec args))))
+
+(defn collect-args
+  "[head args] of an application, looking through nested applications"
+  [e]
+  (if (head? e 'app)
+    (let [[f as] (collect-args (second e))] [f (into as (nth e 2))])
+    [e []]))
+
+(defn mk-lams [bs body]
+  (cond (empty? bs) body
+        (head? body 'lam) (list 'lam (into (vec bs) (second body)) (nth body 2))
+        :else (list 'lam (vec bs) body)))
+
+(defn collect-binders [e]
+  (if (head? e 'lam) (let [[bs b] (collect-binders (nth e 2))] [(into (vec (second e)) bs) b]) [[] e]))
+
+(defn collect-n-binders
+  "collectNBinders: n binders of a lambda (nested lambdas looked through); nil when it has fewer"
+  [n e]
+  (loop [n n e e out []]
+    (cond (zero? n) [out e]
+          (head? e 'lam) (let [bs (second e)]
+                           (if (<= (count bs) n)
+                             (recur (- n (count bs)) (nth e 2) (into out bs))
+                             [(into out (take n bs)) (list 'lam (vec (drop n bs)) (nth e 2))]))
+          :else nil)))
+
+(defn mk-let [b r body] (list 'let [(list 'bind b r)] body))
+(defn mk-letrec [prs body] (list 'letrec (mapv (fn [[b r]] (list 'bind b r)) prs) body))
+
+(defn bind-pairs [bind] (if (head? bind 'rec) (vec (second bind)) [bind]))
+
+(defn wrap-binds
+  "Core binds [(bind B E)|(rec [...])...] around a body"
+  [binds body]
+  (reduce (fn [e b] (if (head? b 'rec) (list 'letrec (second b) e) (list 'let [b] e))) body (reverse binds)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Free variables and substitution
+
+(defn free-locals
+  "The free local variables of an expression (their keys), and the module's top-level ones when tops is given"
+  ([e] (free-locals e nil))
+  ([e tops]
+   (let [acc (transient #{})]
+     (letfn [(w [e bound]
+               (when (seq? e)
+                 (case (first e)
+                   lv (when-not (contains? bound e) (conj! acc e))
+                   v (when (and tops (contains? tops (second e))) (conj! acc (second e)))
+                   lit nil
+                   app (do (w (second e) bound) (doseq [a (nth e 2)] (w a bound)))
+                   lam (w (nth e 2) (into bound (second e)))
+                   let (let [[_ [[_ b r]] body] e] (w r bound) (w body (conj bound b)))
+                   letrec (let [bound2 (into bound (map second (second e)))]
+                            (doseq [[_ _ r] (second e)] (w r bound2)) (w (nth e 2) bound2))
+                   case (let [[_ s b alts] e]
+                          (w s bound)
+                          (doseq [[_ _ bs r] alts] (w r (into (conj bound b) bs))))
+                   cast (w (second e) bound)
+                   nil)))]
+       (w e #{}))
+     (persistent! acc))))
+
+(defn subst-expr
+  "substExpr: the free variables of keys of m replaced by their expressions, every binder of e cloned (no capture)"
+  [m e]
+  (letfn [(sub [m e]
+            (if-not (seq? e)
+              e
+              (case (first e)
+                lv (if-let [r (get m e)] r e)
+                v (if-let [r (get m (second e))] r e)
+                lit e
+                app (list 'app (sub m (second e)) (mapv #(sub m %) (nth e 2)))
+                lam (let [bs (mapv clone (second e))
+                          m2 (into m (map (fn [b b2] [b b2]) (second e) bs))]
+                      (list 'lam bs (sub m2 (nth e 2))))
+                let (let [[_ [[_ b r]] body] e b2 (clone b)]
+                      (mk-let b2 (sub m r) (sub (assoc m b b2) body)))
+                letrec (let [bs (map second (second e)) bs2 (mapv clone bs)
+                             m2 (into m (map vector bs bs2))]
+                         (list 'letrec (mapv (fn [[_ _ r] b2] (list 'bind b2 (sub m2 r))) (second e) bs2) (sub m2 (nth e 2))))
+                case (let [[_ s b alts] e b2 (clone b) m2 (assoc m b b2)]
+                       (list 'case (sub m s) b2
+                             (mapv (fn [[_ c xs r]]
+                                     (let [xs2 (mapv clone xs)]
+                                       (list 'alt c xs2 (sub (into m2 (map vector xs xs2)) r))))
+                                   alts)))
+                cast (list 'cast (sub m (second e)) (nth e 2))
+                e)))]
+    (sub m e)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Literals and primops
+
+(defn lit-trivial? [e] (not (lit-string? e)))
+
+(defn primop-info [op] (get primops/table op))
+(defn primop-out-of-line? [op] (boolean (:out-of-line (primop-info op))))
+(defn primop-code-size [op] (let [c (:code-size (primop-info op))] (cond (nil? c) 1 (= :foreign c) 4 :else c)))
+(defn primop-ok-for-spec? [op] (let [i (primop-info op)] (and i (= :NoEffect (:effect i)) (not (:out-of-line i)))))
+(defn primop-ok-to-discard? [op] (let [i (primop-info op)] (and i (contains? #{:NoEffect :CanFail} (:effect i)))))
+(defn primop-work-free? [op] (let [i (primop-info op)] (if (some? (:work-free i)) (:work-free i) (zero? (primop-code-size op)))))
+(defn primop-cheap? [op] (let [i (primop-info op)] (if (some? (:cheap i)) (:cheap i) (primop-ok-for-spec? op))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; GHC.Core.Utils
+
+(defn trivial?
+  "exprIsTrivial"
+  [e]
+  (cond (vref? e) true
+        (head? e 'lit) (lit-trivial? e)
+        (head? e 'cast) (trivial? (second e))
+        (head? e 'app) false
+        :else false))
+
+(defn trivial-id
+  "getIdFromTrivialExpr_maybe"
+  [e]
+  (cond (vref? e) e (head? e 'cast) (trivial-id (second e)) :else nil))
+
+(defn dupable?
+  "exprIsDupable: at most 8 variables and dupable literals in an application"
+  [e]
+  (letfn [(go [n e]
+            (cond (vref? e) (when (pos? n) (dec n))
+                  (head? e 'cast) (go n (second e))
+                  (head? e 'lit) (when (and (lit-trivial? e) (pos? n)) (dec n))
+                  (head? e 'app) (let [n2 (reduce (fn [n a] (when n (go n a))) n (reverse (nth e 2)))]
+                                   (when n2 (go n2 (second e))))
+                  :else nil))]
+    (some? (go 8 e))))
+
+(defn dead-end-id?
+  "isDeadEndId: a bottoming signature (a dead-end arity)"
+  [x]
+  (some? (:bot (info x))))
+
+(defn work-free-app? [f n]
+  (or (zero? n) (< n (id-arity f)) (con-id? f)
+      (when-let [op (primop-of f)] (primop-work-free? op))))
+
+(defn cheap-app? [f n]
+  (or (work-free-app? f n) (dead-end-id? f)
+      (and (or (recsel-id? f) (classop-id? f)) (= n 1))
+      (when-let [op (primop-of f)] (primop-cheap? op))))
+
+(defn conlike-id? [x] (or (con-id? x) (:conlike (info x))))
+
+(defn expandable-app? [f n]
+  (or (work-free-app? f n)
+      (and (or (recsel-id? f) (classop-id? f)) (= n 1))
+      (cond (primop-of f) false
+            (dead-end-id? f) false
+            (conlike-id? f) true
+            :else (let [t (id-type f)]
+                    ;; all_args_are_preds: the arguments all dictionaries
+                    (boolean (and t (= :forall (first t)) (<= n (count (nth t 2)))))))))
+
+(defn cheap-x?
+  "exprIsCheapX"
+  [ok-app expandable e]
+  (letfn [(ok [e] (go 0 e))
+          (go [n e]
+            (case (first e)
+              (lv v) (ok-app e n)
+              lit true
+              cast (go n (second e))
+              case (and (not expandable) (ok (second e)) (every? (fn [[_ _ _ r]] (go n r)) (nth e 3)))
+              lam (let [k (count (second e))]
+                    (if (< n k) true (go (- n k) (nth e 2))))
+              app (and (go (+ n (count (nth e 2))) (second e)) (every? ok (nth e 2)))
+              let (and (not expandable) (go n (nth e 2)) (ok (nth (first (second e)) 2)))
+              letrec (and (not expandable) (go n (nth e 2)) (every? (fn [[_ _ r]] (ok r)) (second e)))
+              false))]
+    (ok e)))
+
+(defn work-free? [e] (cheap-x? work-free-app? false e))
+(defn cheap? [e] (cheap-x? cheap-app? false e))
+(defn expandable? [e] (cheap-x? expandable-app? true e))
+
+(defn alts-exhaustive?
+  "altsAreExhaustive"
+  [alts]
+  (or (empty? alts)
+      (let [c (second (first alts))]
+        (cond (= :default c) true
+              (head? c 'lit) false
+              :else (let [fam (*con-family* c)]
+                      (and fam (= (count alts) fam)))))))
+
+(defn- arg-lifted? [a] (not (*unlifted-expr?* a)))
+
+(defn expr-ok?
+  "expr_ok: exprOkForSpeculation (primop-ok primop-ok-for-spec?) or exprOkToDiscard"
+  [primop-ok e]
+  (letfn [(app-ok [f args]
+            (let [n (count args)]
+              (cond
+                (> (id-arity f) n) (every? (fn [a] (or (arg-lifted? a) (ok a))) args)
+                (dfun-id? f) true
+                (con-id? f) (let [strict (:strict (details f))]
+                              (every? true? (map (fn [a s] (or (and (not s) (arg-lifted? a)) (ok a))) args (concat strict (repeat false)))))
+                (classop-id? f) false
+                (primop-of f) (let [op (primop-of f)]
+                                (if (:div (primop-info op))
+                                  (let [d (last args)]
+                                    (and (head? d 'lit) (not (re-matches #"-?0+(\.0*)?#*" (second d)))
+                                         (every? ok (butlast args))))
+                                  (and (primop-ok op) (every? (fn [a] (or (arg-lifted? a) (ok a))) args))))
+                (zero? n) (*unlifted-type?* (id-type f))
+                :else false)))
+          (ok [e]
+            (case (first e)
+              lit true
+              (lv v) (app-ok e [])
+              cast (ok (second e))
+              lam true
+              (let letrec) false
+              case (let [[_ s b alts] e]
+                     (and (ok s) (*unlifted-expr?* s) (every? (fn [[_ _ _ r]] (ok r)) alts) (alts-exhaustive? alts)))
+              app (let [[f args] (collect-args e)]
+                    (if (vref? f) (app-ok f args) false))
+              false))]
+    (ok e)))
+
+(defn ok-for-speculation? [e] (expr-ok? primop-ok-for-spec? e))
+(defn ok-to-discard? [e] (expr-ok? primop-ok-to-discard? e))
+
+(defn evald-unf? [u] (or (= :other (:k u)) (and (= :core (:k u)) (:value u)) (= :dfun (:k u))))
+(defn conlike-unf? [u] (or (= :other (:k u)) (and (= :core (:k u)) (:conlike u)) (= :dfun (:k u))))
+
+(defn- hnf-like? [is-con is-con-unf e]
+  (letfn [(id-app-value [f args]
+            (let [ar (id-arity f) n (count args)]
+              (cond (and (= ar n) (is-con f))
+                    (let [strict (when (con-id? f) (:strict (details f)))]
+                      (every? true? (map (fn [a s] (if (or s (*unlifted-expr?* a)) (hnf a) true)) args (concat strict (repeat false)))))
+                    (> ar n) (every? (fn [a] (if (*unlifted-expr?* a) (hnf a) true)) args)
+                    :else false)))
+          (hnf [e]
+            (case (first e)
+              (lv v) (or (id-app-value e []) (is-con-unf (id-unf e)) (*unlifted-type?* (id-type e)))
+              lit true
+              lam true
+              cast (hnf (second e))
+              app (let [[f args] (collect-args e)]
+                    (cond (vref? f) (id-app-value f args)
+                          (head? f 'cast) (let [[f2 a2] (collect-args (second f))] (and (vref? f2) (id-app-value f2 (into a2 args))))
+                          :else false))
+              (let letrec) (hnf (nth e 2))
+              false))]
+    (hnf e)))
+
+(defn hnf? [e] (hnf-like? con-id? evald-unf? e))
+(defn conlike? [e] (hnf-like? conlike-id? conlike-unf? e))
+
+(defn cheap-eq?
+  "cheapEqExpr"
+  [a b]
+  (cond (and (vref? a) (vref? b)) (= (vkey a) (vkey b))
+        (and (head? a 'lit) (head? b 'lit)) (= a b)
+        (and (head? a 'cast) (head? b 'cast)) (and (cheap-eq? (second a) (second b)) (= (nth a 2) (nth b 2)))
+        (and (head? a 'app) (head? b 'app))
+        (let [[fa xa] (collect-args a) [fb xb] (collect-args b)]
+          (and (= (count xa) (count xb)) (cheap-eq? fa fb) (every? true? (map cheap-eq? xa xb))))
+        :else false))
+
+(defn find-alt
+  "findAlt: the alternative of a constructor or literal, else the default"
+  [con alts]
+  (or (some (fn [a] (when (= con (second a)) a)) alts)
+      (some (fn [a] (when (= :default (second a)) a)) alts)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; GHC.Core.Opt.Arity
+
+;; ArityType: {:lams [[cheap? one-shot?]...] :div :top|:bot|:exn}
+
+(def top-at {:lams [] :div :top})
+(def bot-at {:lams [] :div :bot})
+(defn dead-end-div? [d] (not= :top d))
+(defn at-arity [at] (count (:lams at)))
+
+(defn safe-at
+  "safeArityType: trimmed at the first expensive lambda that is not one-shot"
+  [at]
+  (loop [lams (:lams at) ar 0 ch true]
+    (if (empty? lams)
+      at
+      (let [[c os] (first lams) c2 (and ch c)]
+        (if (and (not c2) (not os)) {:lams (vec (take ar (:lams at))) :div :top}
+            (recur (rest lams) (inc ar) c2))))))
+
+(defn trim-at [n at]
+  (if (or (nil? n) (<= (count (:lams at)) n)) at {:lams (vec (take n (:lams at))) :div :top}))
+
+(defn id-arity-type
+  "idArityType"
+  [v]
+  (let [i (info v) shots (concat (or (type-one-shots (id-type v)) []) (repeat false))]
+    (if-let [b (:bot i)]
+      {:lams (vec (map (fn [os] [true os]) (take b shots))) :div :bot}
+      {:lams (vec (map (fn [os] [true os]) (take (id-arity v) shots))) :div :top})))
+
+(defn- at-lam [b at]
+  {:lams (vec (cons [true (if (dead-end-div? (:div at)) true (boolean (or (:oneshot (info b)) (state-hack-type? (id-type b)))))] (:lams at)))
+   :div (:div at)})
+
+(defn- float-in [ch at]
+  (let [lams (:lams at)]
+    (cond (empty? lams) at
+          (not (first (first lams))) at
+          :else (assoc at :lams (vec (cons [ch (second (first lams))] (rest lams)))))))
+
+(defn- add-work [at]
+  (if (empty? (:lams at)) at (assoc at :lams (vec (cons [false (second (first (:lams at)))] (rest (:lams at)))))))
+
+(defn- at-app [at ch]
+  (if (empty? (:lams at)) at
+      (float-in (and (first (first (:lams at))) ch) {:lams (vec (rest (:lams at))) :div (:div at)})))
+
+(defn- and-at [a b]
+  (let [la (:lams a) lb (:lams b)]
+    (cond (and (seq la) (seq lb))
+          (let [r (and-at {:lams (rest la) :div (:div a)} {:lams (rest lb) :div (:div b)})]
+            {:lams (vec (cons [(and (first (first la)) (first (first lb))) (or (second (first la)) (second (first lb)))] (:lams r)))
+             :div (:div r)})
+          (empty? la) (if (dead-end-div? (:div a)) b {:lams (mapv (fn [[_ os]] [false os]) lb) :div :top})
+          :else (if (dead-end-div? (:div b)) a {:lams (mapv (fn [[_ os]] [false os]) la) :div :top}))))
+
+(declare dead-end?)
+
+(defn- my-cheap? [sigs e]
+  (cheap-x? (fn [f n] (if-let [at (get sigs (vkey f))]
+                        (or (dead-end-div? (:div at)) (zero? n) (< n (count (:lams at))))
+                        (cheap-app? f n)))
+            false e))
+
+(defn arity-type
+  "arityType env e; env {:sigs {key ArityType}}"
+  [sigs e]
+  (case (first e)
+    (lv v) (or (get sigs (vkey e)) (id-arity-type e))
+    cast (arity-type sigs (second e))
+    lam (reduce (fn [at b] (at-lam b at)) (arity-type (apply dissoc sigs (second e)) (nth e 2)) (reverse (second e)))
+    app (reduce (fn [at a] (at-app at (my-cheap? sigs a))) (arity-type sigs (second e)) (nth e 2))
+    case (let [[_ s b alts] e]
+           (if (or (dead-end? s) (empty? alts))
+             bot-at
+             (let [sigs2 (dissoc sigs b)
+                   at (reduce and-at (map (fn [[_ _ bs r]] (arity-type (apply dissoc sigs2 bs) r)) alts))]
+               (cond (my-cheap? sigs s) at
+                     (ok-for-speculation? s) at
+                     :else (add-work at)))))
+    let (let [[_ [[_ b r]] body] e]
+          (float-in (my-cheap? sigs r) (arity-type (assoc sigs b (safe-at (arity-type sigs r))) body)))
+    letrec (let [sigs2 (into sigs (for [[_ b _] (second e)] [b (id-arity-type b)]))]
+             (float-in (every? (fn [[_ _ r]] (my-cheap? sigs2 r)) (second e)) (arity-type sigs2 (nth e 2))))
+    top-at))
+
+(defn cheap-arity-type
+  "cheapArityType"
+  [e]
+  (letfn [(go [e]
+            (case (first e)
+              (lv v) (id-arity-type e)
+              cast (go (second e))
+              lam (reduce (fn [at b] (at-lam b at)) (go (nth e 2)) (reverse (second e)))
+              app (reduce (fn [at a]
+                            (cond (empty? (:lams at)) at
+                                  (dead-end-div? (:div at)) {:lams (vec (rest (:lams at))) :div (:div at)}
+                                  (trivial? a) {:lams (vec (rest (:lams at))) :div :top}
+                                  :else top-at))
+                          (go (second e)) (nth e 2))
+              case (if (empty? (nth e 3)) bot-at top-at)
+              top-at))]
+    (go e)))
+
+(defn expr-arity
+  "exprArity"
+  [e]
+  (case (first e)
+    (lv v) (id-arity e)
+    lam (+ (count (second e)) (expr-arity (nth e 2)))
+    cast (expr-arity (second e))
+    app (let [[f args] (collect-args e)]
+          (if (every? trivial? args) (max 0 (- (expr-arity f) (count args)))
+              (loop [ar (expr-arity f) as args] (cond (empty? as) ar (trivial? (first as)) (recur (max 0 (dec ar)) (rest as)) :else 0))))
+    0))
+
+(defn manifest-arity [e]
+  (case (first e) lam (+ (count (second e)) (manifest-arity (nth e 2))) cast (manifest-arity (second e)) 0))
+
+(defn join-rhs-arity [e] (if (head? e 'lam) (+ (count (second e)) (join-rhs-arity (nth e 2))) 0))
+
+(defn dead-end?
+  "exprIsDeadEnd"
+  [e]
+  (loop [n 0 e e]
+    (case (first e)
+      app (recur (+ n (count (nth e 2))) (second e))
+      cast (recur n (second e))
+      (let letrec) (recur n (nth e 2))
+      case (empty? (nth e 3))
+      (lv v) (let [b (:bot (info e))] (boolean (and b (>= n b))))
+      false)))
+
+(defn find-rhs-arity
+  "findRhsArity: [arity-increased? ArityType]"
+  [rec? bndr rhs]
+  (let [old (expr-arity rhs)
+        ty-ar (type-arity (id-type bndr))
+        step (fn [sigs] (trim-at ty-ar (safe-at (arity-type sigs rhs))))]
+    (if (join? bndr)
+      [false (if rec? (loop [cur bot-at n 0]
+                        (let [nxt (step {bndr cur})] (if (or (= nxt cur) (> n 10)) cur (recur nxt (inc n)))))
+                 (trim-at ty-ar (cheap-arity-type rhs)))]
+      (let [at (if rec?
+                 (loop [cur bot-at n 0]
+                   (if (and (not (dead-end-div? (:div cur))) (<= (count (:lams cur)) old))
+                     cur
+                     (let [nxt (step {bndr cur})] (if (or (= nxt cur) (> n 10)) cur (recur nxt (inc n))))))
+                 (step {}))]
+        [(> (at-arity at) old) at]))))
+
+(defn eta-expand-arity
+  "exprEtaExpandArity: nil when no lambda"
+  [e]
+  (let [at (safe-at (arity-type {} e))] (when (seq (:lams at)) at)))
+
+(defn- peel-arg
+  "A type's first value argument's type and the rest: [arg res], or nil when it is not a function type"
+  [t]
+  (cond (and (vector? t) (= :forall (first t)) (seq (nth t 2)))
+        [(vec (first (nth t 2))) (if (next (nth t 2)) [:forall [] (vec (rest (nth t 2))) (nth t 3)] (nth t 3))]
+        (and (vector? t) (= :forall (first t))) (peel-arg (nth t 3))
+        (fun-ty? t) (vec (nth t 2))
+        :else nil))
+
+(defn- mk-eta-ww
+  "mkEtaWW: [eta-binders mco] for the one-shot infos over the type ty (nil: unknown); mco nil when reflexive, else
+  {:l ty :r ARROWS} through the newtypes on the way"
+  [shots ty]
+  (loop [shots shots t ty bs [] tys [] newtype? false seen #{}]
+    (if (empty? shots)
+      [bs (when (and newtype? t) {:l ty :r (reduce (fn [r a] (fun-ty a r)) t (reverse tys))})]
+      (let [mk (fn [at] (let [b (fresh-local "eta" (if (first shots) {:oneshot true} {}))]
+                          (when (and at *new-types*) (swap! *new-types* assoc b at))
+                          b))]
+        (if-let [[a r] (when t (peel-arg t))]
+          (recur (rest shots) r (conj bs (mk a)) (conj tys a) newtype? seen)
+          (if-let [rep (when (and t (= :tc (first t)) (not (contains? seen (second t)))) (newtype-rep t))]
+            (recur shots rep bs tys true (conj seen (second t)))
+            (recur (rest shots) nil (conj bs (mk nil)) (conj tys nil) false seen)))))))
+
+(defn- eta-info-app
+  "etaInfoApp: the eta binders and the coercion pushed into an expression"
+  [e args co]
+  (case (first e)
+    cast (let [c2 (if co (co-trans (nth e 2) co) (nth e 2))] (eta-info-app (second e) args (when-not (co-refl? c2) c2)))
+    case (list 'case (second e) (nth e 2) (mapv (fn [[_ c xs r]] (list 'alt c xs (eta-info-app r args co))) (nth e 3)))
+    let (if (join? (second (first (second e))))
+          (mk-apps (if co (mk-cast e co) e) args)
+          (list 'let (second e) (eta-info-app (nth e 2) args co)))
+    letrec (if (join? (second (first (second e))))
+             (mk-apps (if co (mk-cast e co) e) args)
+             (list 'letrec (second e) (eta-info-app (nth e 2) args co)))
+    lam (let [pushed (when (seq args) (if co (push-co-val-arg co) [nil nil]))]
+          (if pushed
+            (let [[c1 c2] pushed
+                  [v & vs] (second e)
+                  body (if (seq vs) (list 'lam (vec vs) (nth e 2)) (nth e 2))
+                  a (first args)]
+              (eta-info-app (subst-expr {v (if c1 (mk-cast a c1) a)} body) (rest args) c2))
+            (mk-apps (if co (mk-cast e co) e) args)))
+    (mk-apps (if co (mk-cast e co) e) args)))
+
+(defn eta-expand-at
+  "etaExpandAT: the expression eta-expanded to the ArityType's lambdas, the new binders one-shot as it says; ty, the
+  expression's type when known, gives the binders' types and the newtypes' coercions (eta_expand, mkEtaWW,
+  etaInfoApp, etaInfoAbs)"
+  ([at e] (eta-expand-at at e nil))
+  ([at e ty]
+   (let [shots (map second (:lams at))]
+     (if (head? e 'cast)
+       (mk-cast (eta-expand-at at (second e) (:l (nth e 2))) (nth e 2))
+       (let [[bs body] (collect-binders e)
+             more (drop (count bs) shots)
+             body-ty (reduce (fn [t _] (second (peel-arg t))) ty bs)]
+         (if (empty? more)
+           e
+           (let [[etas co] (mk-eta-ww more body-ty)
+                 lam (mk-lams (into bs etas) (eta-info-app body etas co))]
+             (if co (mk-cast lam (co-sym (mk-pi-cos bs co))) lam))))))))
+
+(defn- cant-eta-reduce-fun? [f] (or (join? f) (con-id? f) (some? (primop-of f))))
+
+(defn try-eta-reduce
+  "tryEtaReduce: \\xs -> f xs to f, when sound (criteria R, J, B, A, T of the Note)"
+  [rec-ids bs body]
+  (let [incoming (count bs)]
+    (loop [rbs (reverse bs) body body cast nil]
+      (cond
+        (head? body 'cast) (recur rbs (second body) (if cast (co-trans (nth body 2) cast) (nth body 2)))
+        (and (seq rbs) (head? body 'app) (= (vkey (last (nth body 2))) (vkey (first rbs))) (lv? (last (nth body 2))))
+        (recur (rest rbs) (let [as (nth body 2)] (if (= 1 (count as)) (second body) (list 'app (second body) (vec (butlast as))))) nil)
+        :else
+        (let [remaining rbs
+              reduced (set (drop (count remaining) bs))]
+          (when (and (< (count remaining) (count bs)) (empty? remaining) (vref? body) (nil? cast)
+                     (not (contains? rec-ids (vkey body)))
+                     (not (cant-eta-reduce-fun? body))
+                     (let [ar (id-arity body)
+                           far (if (pos? ar) ar (if (evald-unf? (id-unf body)) 1 0))]
+                       (>= far incoming))
+                     (not (contains? (free-locals body) reduced)))
+            body))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; GHC.Core.Unfold and GHC.Core.Unfold.Make
+
+(def uf-creation-threshold 750)
+(def uf-use-threshold 90)
+(def uf-fun-app-discount 60)
+(def uf-dict-discount 30)
+(def uf-case-threshold 2)
+(def uf-case-scaling 30)
+
+;; ExprSize: nil (TooBig) or [size discounts-map scrut-discount]; discounts {binder [disc...]}
+
+(defn- size-n [n] [n {} 0])
+(defn- merge-discs [a b] (merge-with into a b))
+(defn- mk-size [n xs d] (if (> (- n d) uf-creation-threshold) nil [n xs d]))
+(defn- add-size-n [s m] (when s (mk-size (+ (first s) m) (second s) (nth s 2))))
+(defn- add-alt-size [a b] (when (and a b) (mk-size (+ (first a) (first b)) (merge-discs (second a) (second b)) (+ (nth a 2) (nth b 2)))))
+(defn- add-size-nsd [a b] (when (and a b) (mk-size (+ (first a) (first b)) (merge-discs (second a) (second b)) (nth b 2))))
+(defn- max-size [a b] (when (and a b) (if (> (first a) (first b)) a b)))
+
+
+(defn- unary-class-con? [x] (:unary (details x)))
+
+(defn size-expr
+  "sizeExpr: the size of an expression for inlining, with the discounts of the top arguments"
+  [top-args e]
+  (let [tops (set top-args)]
+    (letfn [(call-size [n voids] (* 10 (+ 1 (- n voids))))
+            (fun-size [f n]
+              (let [size (cond (join? f) 0 (zero? n) 0 :else (call-size n 0))
+                    disc (if (and (pos? n) (contains? tops f)) {f [uf-fun-app-discount]} {})
+                    res (if (> (id-arity f) n) uf-fun-app-discount 0)]
+                [size disc res]))
+            (call [f args]
+              (let [n (count args) d (details f)]
+                (case (:k d)
+                  :con (cond (zero? n) [0 {} 10] (:unary d) [0 {} 0] :else [10 {} 10])
+                  :primop (let [op (:op d) c (primop-code-size op)] (size-n (if (primop-out-of-line? op) (+ c n) c)))
+                  :classop (if (:unary d) [0 {} 0]
+                               (if (empty? args) [0 {} 0]
+                                   [(+ 20 (* 10 (dec n))) (let [a (first args)] (if (and (vref? a) (contains? tops (vkey a))) {(vkey a) [uf-dict-discount]} {})) 0]))
+                  (fun-size (vkey f) n))))
+            (up [e]
+              (case (first e)
+                (lv v) (call e [])
+                lit (size-n (if (lit-string? e) (+ 10 (* 10 (quot (+ (count (str/replace (second e) #"^\"|\"#?$" "")) 3) 4))) 0))
+                cast (up (second e))
+                app (let [[f args] (collect-args e)]
+                      (reduce (fn [s a] (add-size-nsd (up a) s))
+                              (if (vref? f) (call f args) (add-size-n (up f) (call-size (count args) 0)))
+                              args))
+                lam (let [n (count (second e))] [(first (add-size-n (up (nth e 2)) (* 10 n))) (second (up (nth e 2))) uf-fun-app-discount])
+                let (let [[_ [[_ b r]] body] e]
+                      (add-size-n (add-size-nsd (up-rhs b r) (up body)) (alloc b)))
+                letrec (reduce (fn [s [_ b r]] (add-size-nsd (up-rhs b r) s))
+                               (add-size-n (up (nth e 2)) (reduce + (map (fn [[_ b _]] (alloc b)) (second e))))
+                               (second e))
+                case (let [[_ s _ alts] e]
+                       (if (empty? alts)
+                         (up s)
+                         (let [sv (let [x (if (head? s 'cast) (second s) s)] (when (and (vref? x) (contains? tops (vkey x))) (vkey x)))
+                               alt-sizes (map (fn [[_ _ _ r]] (add-size-n (up r) 10)) alts)]
+                           (if sv
+                             (let [tot (reduce add-alt-size alt-sizes) mx (reduce max-size alt-sizes)]
+                               (if (and tot mx)
+                                 [(first tot) (merge-discs {sv [(+ 20 (- (first tot) (first mx)))]} (second tot)) (nth tot 2)]
+                                 tot))
+                             (add-size-nsd (up s)
+                                           (reduce add-alt-size
+                                                   (if (and (inline-scrut? s) (<= (count alts) 1)) [-10 {} 0] [0 {} 0])
+                                                   alt-sizes))))))
+                [0 {} 0]))
+            (inline-scrut? [s]
+              (if (vref? s) (*unlifted-type?* (id-type s))
+                  (let [[f _] (collect-args s)] (boolean (when-let [op (and (vref? f) (primop-of f))] (not (primop-out-of-line? op)))))))
+            (up-rhs [b r]
+              (if-let [ja (join-arity b)]
+                (let [[_ body] (collect-n-binders ja r)] (up (or body r)))
+                (up r)))
+            (alloc [b] (if (or (join? b) (*unlifted-type?* (id-type b))) 0 10))]
+      (up e))))
+
+(defn- val-fun? [e] (head? e 'lam))
+
+(defn inline-boring-ok?
+  "inlineBoringOk"
+  [e]
+  (let [is-fun (val-fun? e)]
+    (loop [credit 0 e e]
+      (case (first e)
+        lam (recur (+ credit (count (second e))) (nth e 2))
+        app (let [as (nth e 2)]
+              (if (every? trivial? as) (recur (- credit (count as)) (second e)) false))
+        case (if (empty? (nth e 3)) (recur credit (second e)) false)
+        cast (recur credit (second e))
+        lit (lit-trivial? e)
+        (lv v) (cond (and (con-id? e) is-fun) true
+                     (unary-class-con? e) true
+                     (>= credit 0) true
+                     :else false)
+        false))))
+
+(defn uncond-inline-join?
+  "uncondInlineJoin"
+  [bs body]
+  (let [bset (set bs)]
+    (or (trivial? body)
+        (letfn [(go-arg [a] (cond (head? a 'cast) (go-arg (second a))
+                                  (head? a 'lit) (if (lit-trivial? a) false nil)
+                                  (vref? a) (not (contains? bset a))
+                                  :else nil))
+                (go [seen e]
+                  (cond (head? e 'app) (let [rs (map go-arg (nth e 2))]
+                                         (if (some nil? rs) false (go (or seen (some true? rs)) (second e))))
+                        (head? e 'cast) (go seen (second e))
+                        (vref? e) (cond (join? e) true
+                                       (con-id? e) (not seen)
+                                       (contains? bset e) (not seen)
+                                       :else false)
+                        :else false))]
+          (go false body)))))
+
+(defn calc-guidance
+  "calcUnfoldingGuidance: {:k :when :arity n :unsat-ok :boring-ok} | {:k :if-good :args [disc...] :size n :res n} | {:k :never}"
+  [top-bottoming? join? e]
+  (let [[bs body] (collect-binders e)
+        sz (size-expr bs body)
+        n (count bs)]
+    (if (nil? sz)
+      {:k :never}
+      (let [[size discs scrut] sz]
+        (cond
+          (if join? (uncond-inline-join? bs body) (if (pos? n) (<= size (* 10 (inc n))) (trivial? e)))
+          {:k :when :arity n :unsat-ok true :boring-ok true}
+          top-bottoming? {:k :never}
+          :else {:k :if-good :size size :res scrut
+                 :args (mapv (fn [b] (let [ds (get discs b [])]
+                                       (if (fun-ty? (strip-forall (or (id-type b) [:x]))) (reduce max 0 ds) (reduce + 0 ds))))
+                             bs)})))))
+
+(defn mk-unfolding
+  "mkUnfolding: a CoreUnfolding of the template with its cache and guidance"
+  [src top? bottoming? join? e]
+  {:k :core :src src :top top? :tmpl e
+   :value (hnf? e) :conlike (conlike? e) :work-free (work-free? e) :expandable (expandable? e)
+   :guide (calc-guidance (and top? bottoming?) join? e)})
+
+(defn mk-compulsory-unfolding [e]
+  {:k :core :src :compulsory :top true :tmpl e :value (hnf? e) :conlike (conlike? e) :work-free (work-free? e)
+   :expandable (expandable? e) :guide {:k :when :arity 0 :unsat-ok true :boring-ok true}})
+
+(defn stable-unf? [u] (and (= :core (:k u)) (contains? #{:stable :compulsory :inline} (:src u))))
+(defn compulsory-unf? [u] (and (= :core (:k u)) (= :compulsory (:src u))))
+(defn unf-template [u] (when (= :core (:k u)) (:tmpl u)))
+
+(defn small-enough-to-inline?
+  "smallEnoughToInline"
+  [u]
+  (and (= :core (:k u))
+       (case (:k (:guide u)) :if-good (<= (:size (:guide u)) uf-use-threshold) :when true false)))
+
+(defn cheap-unf? [u] (and (= :core (:k u)) (:work-free u)))

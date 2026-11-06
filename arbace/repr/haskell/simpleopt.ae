@@ -87,6 +87,7 @@
     (case (first e)
       (lv v) (occ! e d)
       lit nil
+      cast (occ-expr (second e) d)
       app (do (occ-expr (second e) d) (doseq [a (nth e 2)] (occ-expr a d)))
       lam (let [d2 (inc d)] (doseq [b (second e)] (bind! b d2)) (occ-expr (nth e 2) d2))
       let (doseq [[_ b r] (second e)] (bind! b d) (occ-expr r d))
@@ -152,13 +153,21 @@
 (def ^:dynamic *cons* nil)     ; {CON {:arity n :flavour data|newtype}}
 (defn- fresh [o] (list 'lv o (str "so" (swap! *fresh* inc))))
 
+(def ^:dynamic *newtype-co*
+  "nil, or (fn [CON]) -> the coercion {:l REP :r NEWTYPE} of a newtype's constructor (the -O0 Simplifier's casts)"
+  nil)
+
 (defn- compulsory
   "The compulsory unfolding of a global name, or nil"
   [g]
   (when (vector? g)
     (case (if (= 'newtype (:flavour (get *cons* (assoc g 1 "data")))) :newtype [(nth g 2) (nth g 3)])
-      ;; a newtype's constructor: the identity (Note [Compulsory newtype unfolding], its cast erased)
-      :newtype (let [x (fresh "nt")] (list 'lam [x] x))
+      ;; a newtype's constructor: the identity (Note [Compulsory newtype unfolding]), a cast of its argument when
+      ;; the Simplifier runs, else the cast erased
+      :newtype (let [x (fresh "nt")]
+                 (if-let [co (and *newtype-co* (*newtype-co* (assoc g 1 "data")))]
+                   (list 'lam [x] (list 'cast x co))
+                   (list 'lam [x] x)))
       ["GHC.Internal.Prim" "seq"] (let [a (fresh "a") b (fresh "b")] (list 'lam [a b] (list 'case a (fresh "wild") [(list 'alt :default [] b)])))
       ["GHC.Internal.Magic" "oneShot"] (let [f (fresh "f")] (list 'lam [f] f))
       ["GHC.Internal.Prim" "coerce"] (let [x (fresh "x")] (list 'lam [x] x))
@@ -176,9 +185,10 @@
 (defn- exported? [b] (and (vector? b) (contains? *exported* b)))
 
 (defn- trivial?
-  "exprIsTrivial: a variable, or a literal but a string"
+  "exprIsTrivial: a variable, or a literal but a string, or a cast of one"
   [e]
-  (or (lv? e) (head? e 'v) (and (head? e 'lit) (not (re-matches #"(?s)\".*\"#?" (second e))))))
+  (or (lv? e) (head? e 'v) (and (head? e 'lit) (not (re-matches #"(?s)\".*\"#?" (second e))))
+      (and (head? e 'cast) (trivial? (second e)))))
 
 (declare so-expr so-app)
 
@@ -234,6 +244,11 @@
                (if (= k :inl) (so-expr a b) a)
                (if-let [u (and (head? e 'v) (compulsory (second e)))] u e))
       lit e
+      cast (let [b (so-expr env (second e)) co (nth e 2)]
+             (cond (and (= (:l co) (:r co)) (some? (:l co))) b
+                   (head? b 'cast) (let [co2 {:l (:l (nth b 2)) :r (:r co)}]
+                                     (if (and (= (:l co2) (:r co2)) (some? (:l co2))) (second b) (list 'cast (second b) co2)))
+                   :else (list 'cast b co)))
       app (so-app env (second e) (mapv (fn [a] [env a]) (nth e 2)))
       lam (loop [bs (vec (second e)) body (nth e 2)]
             (if (head? body 'lam) (recur (into bs (second body)) (nth body 2))
@@ -247,8 +262,10 @@
                     (= 'newtype (:flavour (get *cons* (second (first (nth e 3)))))))
              ;; a newtype's constructor matched: no case in GHC's Core (the match is a cast, erased): the field and
              ;; the case binder are the scrutinee
-             (let [[_ s b [[_ _ [x] rhs]]] e]
-               (so-expr env (list 'let [(list 'bind b s)] (list 'let [(list 'bind x b)] rhs))))
+             (let [[_ s b [[_ c [x] rhs]]] e
+                   co (when *newtype-co* (*newtype-co* c))
+                   xr (if co (list 'cast b {:l (:r co) :r (:l co)}) b)]
+               (so-expr env (list 'let [(list 'bind b s)] (list 'let [(list 'bind x xr)] rhs))))
            (let [[_ s b alts] e
                  s2 (so-expr env s)
                  known (when (dead? b) (con-app s2 *cons*))

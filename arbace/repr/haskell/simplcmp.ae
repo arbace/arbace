@@ -1,0 +1,137 @@
+(ns arbace.repr.haskell.simplcmp
+  "The -O0 Simplifier's judge (doc/haskell/FRONTEND-SURVEY.md, \"As built: the -O0 Simplifier\"): Arbace's simplified
+  Core of a module (arbace.repr.haskell.simplify's output, MODULE.simpl.edn) against GHC's simplified Core at -O0 (the
+  helper's stg --core: MODULE.core.ae, the Core after the Simplifier's last pass), per top-level binding of an external
+  name, both read into one normal form: types, type arguments and binders, casts and ticks erased; nested
+  applications and lambdas flattened; local names (and the module's internal top-level names) renamed by first
+  occurrence within each binding; literals as the STG dump writes them."
+  (:require [arbace.string :as str]
+            [arbace.repr.haskell.tostg :as tostg]))
+
+(defn- read-file [f] (read-string (str "[" (slurp f) "]")))
+
+;;; GHC's side: the core.ae forms (STG-SPEC §9)
+
+(defn- ghc-ext? [n] (and (string? n) (re-find #"^[^/ ]*:[^/]*/" n)))
+
+(defn- ghc-name
+  "An external name as MODULE.occ; nil for a local or internal one"
+  [n]
+  (when (ghc-ext? n)
+    (let [[_ m o] (re-matches #"(?s)[^:]*:([^/]*)/(.*)" n)] (str m "." o))))
+
+(def ^:private kind-re #"(?s)(Type|Constraint|RuntimeRep|Levity|LiftedRep|UnliftedRep|TYPE .*|CONSTRAINT .*|.* -> (Type|Constraint)|.*~.*|Multiplicity)")
+
+(defn- type-binder? [[_ t]] (and (string? t) (re-matches kind-re t)))
+
+(defn- g-norm
+  "GHC's Core expression in the normal form"
+  [e]
+  (cond
+    (string? e) (if-let [x (ghc-name e)] (list 'v x) (list 'x e))
+    (not (seq? e)) e
+    :else
+    (case (first e)
+      app (let [[_ f as] e
+                as (vec (remove #(and (seq? %) (contains? #{'type 'coercion} (first %))) as))
+                f2 (g-norm f)]
+            (cond (empty? as) f2
+                  (and (seq? f2) (= 'app (first f2))) (list 'app (second f2) (into (nth f2 2) (map g-norm as)))
+                  :else (list 'app f2 (mapv g-norm as))))
+      lam (let [[_ bs body] e
+                bs2 (vec (for [b bs :when (not (type-binder? b))] (list 'x (first b))))
+                b2 (g-norm body)]
+            (cond (empty? bs2) b2
+                  (and (seq? b2) (= 'lam (first b2))) (list 'lam (into bs2 (second b2)) (nth b2 2))
+                  :else (list 'lam bs2 b2)))
+      let (let [[_ b body] e
+                pairs (if (= 'rec (first b)) (rest b) [b])
+                ps (vec (for [[_ [x t] r] pairs :when (not (type-binder? [x t]))] [(list 'x x) (g-norm r)]))]
+            (if (empty? ps) (g-norm body)
+                (list (if (= 'rec (first b)) 'letrec 'let) ps (g-norm body))))
+      case (let [[_ s [b _] _ alts] e]
+             (list 'case (g-norm s) (list 'x b)
+                   (vec (for [[_ c bs r] alts]
+                          (list 'alt (cond (string? c) (list 'c (or (ghc-name c) c)) (keyword? c) c :else c)
+                                (vec (for [x bs :when (not (type-binder? x))] (list 'x (first x))))
+                                (g-norm r))))))
+      cast (g-norm (second e))
+      tick (g-norm (nth e 2))
+      (type coercion) (list 'type)
+      e)))
+
+(defn- ghc-binds
+  "{NAME normal-form} of GHC's module's top-level bindings, external names only"
+  [forms]
+  (into {} (for [f forms
+                 :when (contains? #{'bind 'rec} (first f))
+                 [_ [b _] rhs] (if (= 'rec (first f)) (rest f) [f])
+                 :let [n (ghc-name b)] :when n]
+             [n (g-norm rhs)])))
+
+;;; Ours: the tc vocabulary, with cast
+
+(defn- o-name [g] (when (vector? g) (str (nth g 2) "." (nth g 3))))
+
+(defn- o-norm [e]
+  (if-not (seq? e)
+    e
+    (case (first e)
+      v (list 'v (o-name (second e)))
+      lv (list 'x (str (second e) "#" (nth e 2)))
+      lit (first (tostg/lit-form (second e)))
+      app (let [[_ f as] e f2 (o-norm f)]
+            (cond (empty? as) f2
+                  (and (seq? f2) (= 'app (first f2))) (list 'app (second f2) (into (nth f2 2) (map o-norm as)))
+                  :else (list 'app f2 (mapv o-norm as))))
+      lam (let [b2 (o-norm (nth e 2)) bs (mapv o-norm (second e))]
+            (if (and (seq? b2) (= 'lam (first b2))) (list 'lam (into bs (second b2)) (nth b2 2)) (list 'lam bs b2)))
+      (let letrec) (list (first e) (vec (for [[_ b r] (second e)] [(o-norm b) (o-norm r)])) (o-norm (nth e 2)))
+      case (let [[_ s b alts] e]
+             (list 'case (o-norm s) (o-norm b)
+                   (vec (for [[_ c bs r] alts]
+                          (list 'alt (cond (vector? c) (list 'c (o-name c)) (keyword? c) c :else (o-norm c))
+                                (mapv o-norm bs) (o-norm r))))))
+      cast (o-norm (second e))
+      e)))
+
+(defn- our-binds [forms]
+  (into {} (for [f forms
+                 [_ b rhs] (if (= 'rec (first f)) (second f) [f])
+                 :when (vector? b)]
+             [(o-name b) (o-norm rhs)])))
+
+;;; The comparison
+
+(defn- rename
+  "Names other than externals numbered by first occurrence (literals' and constructors' forms left alone)"
+  [x]
+  (let [m (atom {})]
+    (letfn [(w [y] (cond
+                     (and (seq? y) (= 'x (first y))) (or (get @m (second y)) (let [k (list 'x (count @m))] (swap! m assoc (second y) k) k))
+                     (and (seq? y) (contains? #{'v 'c 'str} (first y))) y
+                     (seq? y) (apply list (map w y))
+                     (vector? y) (mapv w y)
+                     :else y))]
+      (w x))))
+
+(defn- typeable? [n] (re-find #"\.\$(tr|tc|krep)" n))
+
+(defn compare-files [ghc ours]
+  (let [gb (ghc-binds (read-file ghc)) ob (our-binds (read-file ours))
+        ks (sort (filter #(and (contains? ob %) (not (typeable? %))) (keys gb)))
+        eq (filter #(= (rename (get gb %)) (rename (get ob %))) ks)]
+    {:compared (count ks) :equal (count eq)
+     :ghc-only (vec (sort (remove #(or (contains? ob %) (typeable? %)) (keys gb))))
+     :diff (vec (remove (set eq) ks))
+     :pairs (into {} (for [k ks] [k [(rename (get gb k)) (rename (get ob k))]]))}))
+
+(defn -main [ghc ours & more]
+  (let [c (compare-files ghc ours)]
+    (println (str "simpl " (:equal c) " of " (:compared c) " bindings equal"))
+    (println "ghc only:" (pr-str (:ghc-only c)))
+    (println "differ:" (pr-str (:diff c)))
+    (when (= "-v" (first more))
+      (doseq [k (:diff c)]
+        (let [[g o] (get (:pairs c) k)]
+          (println "==" k) (println "  ghc: " (pr-str g)) (println "  ours:" (pr-str o)))))))

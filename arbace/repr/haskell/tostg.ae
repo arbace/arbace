@@ -60,6 +60,7 @@
   MkId.mkDictSelId writes them. A newtype's constructor is the identity likewise."
   (:require [arbace.string :as str]
             [arbace.repr.haskell.desugar :as ds]
+            [arbace.repr.haskell.simplify :as simpl]
             [arbace.repr.haskell.typecheck :as tc])
   (:import [java.io File]))
 
@@ -691,11 +692,25 @@
                 (let [xs (mapv (fn [_] (fresh "eta")) (range (:arity ci)))]
                   (list 'bind [(gname c) :L] (list 'closure :r [] (mapv (fn [x r] [x r]) xs (concat (con-reps c) (repeat :L))) (strict-con c xs))))))}))
 
+(def last-prog (atom nil)) ; the last module's Core as module-stg translated it (the Simplifier's output when it runs)
+
 (defn module-stg
   "The desugared program as STG forms (a vector of top-level forms, the header first)"
   [r units file]
   (binding [*r* r *units* units *names* (atom {}) *n* (atom 0) *reps* (atom {}) *joins* (atom #{}) *lreps* (atom {}) *multi* (atom {}) *mcomps* (atom {})]
-    (let [prog (binding [arbace.repr.haskell.simpleopt/*unlifted?* (fn [e] (not= [:L] (expr-reps e)))] (ds/desugar-program r))
+    (let [simpl? (= "1" (System/getenv "REPR_HASKELL_SIMPL"))
+          prog0 (binding [arbace.repr.haskell.simpleopt/*unlifted?* (fn [e] (not= [:L] (expr-reps e)))
+                          ds/*casts* simpl?]
+                  (ds/desugar-program r))
+          [prog new-types raw] (if simpl?
+                             (simpl/simplify-module r prog0 (ds/program-exported r prog0)
+                                                    {:unlifted-type? (fn [t] (boolean (and t (not= [:L] (type-reps t)))))
+                                                     :unlifted-expr? (fn [e] (not= [:L] (expr-reps e)))
+                                                     :con-strict con-strict})
+                             [prog0 {} prog0])
+          _ (reset! last-prog raw)
+          _ (set! *r* (update r :ltypes merge new-types))
+          r *r*
           top-names (set (concat (for [[_ b _] prog] (if (lv? b) (local-name b) (gname b)))))
           has-main? (some (fn [[_ b _]] (= b ["ext" "var" (module) "main"])) prog)]
       (binding [*tops* (into top-names [(str "main::" (module) "/main")])]
@@ -762,6 +777,8 @@
                           dsd (ds/desugar-program r)
                           forms (module-stg r units nm)
                           _ (write-stg forms (str (get opts "-o") "/" base) (:module r))
+                          _ (spit (str (get opts "-o") "/" base "/" (:module r) ".simpl.edn")
+                                  (binding [*print-length* nil *print-level* nil *print-meta* false] (str/join "\n" (map pr-str @last-prog))))
                           _ (spit (str (get opts "-o") "/" base "/" (:module r) ".ds.edn")
                                   (binding [*print-length* nil *print-level* nil] (str/join "\n" (map pr-str dsd))))
                           c (when-let [g (get opts "--ghc")]
