@@ -5038,6 +5038,39 @@ now, on the branch `goi-escape`; 1 (a), generic functions' instances, with the n
 2: tonight's full `bin/goi check --record` confirms the 96 rows. 3: the 33 programs of gc's back-end flags
 stay in `gc-flags`, by design.
 
+## As built: Proposed 1 (b) and (c) (2026-11-06, branch `goi-escape`)
+
+**(b) The standard library's tags with its inliner.** A package's tags are now made as gc makes them, with
+the inliner on, by a warm-up of one process a package: `arbace.go.run --escape-order STD CACHE PKG...` lists
+the packages the given ones import, transitively, each after its imports, whose inliner-made tags are not
+kept yet (their imports read from the forms' headers); `--escape-warm-pkg STD CACHE PKG` makes one
+package's (`warm-package!`: its imports' tags read from the cache, the bodies of the functions it inlines
+loaded from their forms). The cache keeps them apart from the tags made without the inliner (another key):
+a run reads the inliner's when the warm-up made them, else makes and keeps the others, as before. `bin/goi
+check` runs the warm-up before its runs (the -m programs' imports; `GOMEMLIMIT` 1,200 MiB, `GOI_ESCAPE_WARM_MEM`);
+from an empty cache the 73 packages of `fmt`'s and `testing`'s closures take about 11 minutes, the largest,
+`runtime`, 6.5 minutes and 1.49 GB, the others at most 1.4 GB. Two faults the warm-up found were fixed: an
+inlined call kept its callee's return expression in the tree (for staticinit's verdict, now decided at
+once), which the closures' scan read as a variable of the caller; a statement list nested in a list. And a
+method call's receiver is adjusted (`&` or `*`) after its embedded fields by its method's receiver, as
+typecheck does (it was the checker's adjustment of the whole selection): `b.Fatal` of a `*testing.B`
+leaks `b`, not its content.
+
+**(c) `testing.B.Loop`'s keep-alives.** gc's `bloop` pass (`cmd/compile/internal/bloop/bloop.go`,
+`bloop.Walk`, before the inliner): in a `for b.Loop()` loop (and the statement lists nested in it) each
+assignment's destinations, each call's results (into temporaries) or arguments (an addressable variable's
+own, the others' temporaries, a variadic literal's elements) are kept alive by
+`runtime.KeepAlive(unsafe.Pointer(&v))` (a call whose argument flows nowhere, `IsCompilerVarLive`, its
+address taken), and `-m=2` reports them (`function result will be kept alive`, `function arg will be kept
+alive`, `p.v will be kept alive`, `dereference will be kept alive`). `-m=2`'s explanations of flows are
+the heap allocations' (`explainFlow` with its note); the other flows' notes are not recorded (no program of
+the check needs them: `bloop.go`'s are on a line whose `// ERROR ".*"` takes any).
+
+**Results.** `bin/goi check --list` of the class's 96 from an empty cache (the warm-up 22 minutes, then 4):
+58 pass (`bloop` and `escape_bloop` beside the 56), 0 fail, 3 known in `gc-m` (generic instances:
+`devirtualization`, `typeparam/issue54497`, `typeparam/pragma`), 35 unsupported as before. The record:
+1,722 of 1,837 pass; `bin/goi divergences` and `bin/reap` (re-recorded) as before.
+
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
 The user chose, 2026-10-24, goi's two items deferred from v1 (doc/AGENDA.md): GC157 (b), `byte`,
