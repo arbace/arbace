@@ -125,6 +125,23 @@
         (swap! *header-cache* assoc [:opaque nm] t)
         t)))
 
+(declare finish-class!)
+
+(defn- va-list-tag
+  "x86-64's struct __va_list_tag {unsigned gp_offset, fp_offset; void *overflow_arg_area, *reg_save_area;} (the SysV
+  psABI §3.5.7), a complete trivial class (a va_list local is default-initialized: nothing runs)."
+  []
+  (or (get @*header-cache* [:va-list])
+      (let [id (next-id) t {:k :class :id id}
+            u (abi/b :uint) vp (abi/ptr abi/void)]
+        (swap! abi/*classes* assoc id {:id id :name "__va_list_tag" :path [] :scope (new-scope :class *root* :cls id :path [[:cls id]])
+                                       :bases [] :outer *root* :complete true
+                                       :fields (vec (map-indexed (fn [i [nm ty]] {:name nm :ty ty :access :public :i i})
+                                                                 [["gp_offset" u] ["fp_offset" u] ["overflow_arg_area" vp] ["reg_save_area" vp]]))})
+        (finish-class! id)
+        (swap! *header-cache* assoc [:va-list] t)
+        t)))
+
 (defn- ptype->type
   "Our type of the native parser's type map (a builtin's words, a pointer, a named type through its entity)."
   [t]
@@ -252,7 +269,7 @@
       (abi/b n)
       (cond (= 'auto f) {:k :auto}
             ;; x86-64's va_list (the SysV ABI §3.5.7): struct __va_list_tag[1], the struct opaque here
-            (= '__builtin_va_list f) (abi/arr 1 (opaque-class "__va_list_tag"))
+            (= '__builtin_va_list f) (abi/arr 1 (va-list-tag))
             :else
       (let [parts (name-parts f)
             es (if (= 1 (count parts)) (lookup scope (first parts))
@@ -953,7 +970,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Constant integers (enumerators, array bounds, case labels)
 
-(declare analyze rv)
+(declare analyze rv init-list-elem)
 
 (declare ce-eval)
 
@@ -1310,7 +1327,10 @@
         at (:ty e)]
     (cond
       (= :init-list (:op e))
-      (cond (and (abi/class? pt) (or (aggregate? pt) (seq (ctor-candidates (:id pt))))) {:rank 3}
+      (cond (init-list-elem pt) (let [el (init-list-elem pt) rs (map #(ics % el) (:items e))]
+                                  ;; [over.ics.list]/5: the worst conversion of an element
+                                  (when (every? some? rs) {:rank (reduce max 0 (map #(long (:rank %)) rs))}))
+            (and (abi/class? pt) (or (aggregate? pt) (seq (ctor-candidates (:id pt))))) {:rank 3}
             (and (abi/scalar? pt) (<= (count (:items e)) 1)) {:rank (if (seq (:items e)) (or (std-rank (rv (first (:items e))) (:ty (rv (first (:items e)))) pt) 9) 0)}
             :else nil)
       (abi/ref? p)
@@ -1386,7 +1406,7 @@
 ;;  {:i :list :items [init ...] :fill init}  an array's or an aggregate's elements (bases first)
 ;;  {:i :bind :e glvalue}  a reference bound to an object   {:i :bind-temp :init init :ty T}  to a temporary
 
-(declare init-for args-for default-ctor-init method-call materialize)
+(declare init-for args-for default-ctor-init method-call materialize ctor-init)
 
 (defn user-conv
   "The class object `e` converted to the non-class type `t` by a conversion function: the call's value."
@@ -1416,6 +1436,34 @@
               (when-not d (fail :call "missing argument"))
               (init-for (nth ps i) (binding [*cutoff* Long/MAX_VALUE] (analyze (assoc ctx :scope (:scope f)) d)) ctx :copy)))))))
 
+(defn init-list-elem
+  "E when the type `t` (cv-qualified, or a reference to it) is std::initializer_list<E>, else nil."
+  [t]
+  (let [u (abi/unq (abi/non-ref t))]
+    (when (abi/class? u)
+      (let [c (abi/cls (:id u))]
+        (when (and (= "initializer_list" (:name c)) (= [[:ns "std"]] (:path c)) (seq (:targs c)))
+          (abi/unq (first (:targs c))))))))
+
+(defn- std-init-list
+  "The prvalue std::initializer_list<E> a braced list `l` initializes ([dcl.init.list]/5-6, clang's
+  CXXStdInitializerListExpr): a backing array const E[N] whose elements are copy-initialized from the list's, the
+  object its first element's address and N; nil when an element does not convert to E."
+  [t l ctx]
+  (let [e (init-list-elem t) items (:items l)]
+    (when (every? #(ics % e) items)
+      {:op :std-init-list :elem e :n (count items) :items (mapv #(init-for e % ctx :copy) items)
+       :ty (abi/unq (abi/non-ref t)) :cat :pr})))
+
+(defn- init-list-ctors
+  "The initializer-list constructors of class `id` ([dcl.init.list]/2): a first parameter std::initializer_list<E> or a
+  reference to one, every other with a default argument."
+  [id]
+  (filter #(let [f (fnd %) ps (:ps (:ty f))]
+             (and (seq ps) (init-list-elem (first ps))
+                  (<= (dec (count ps)) (count (filter some? (rest (:defaults f)))))))
+          (ctor-candidates id)))
+
 (defn- class-init
   "The initialization of an object of class type `t` by the arguments `args` (typed expressions or an init-list)."
   [t args ctx style]
@@ -1428,20 +1476,32 @@
       (let [l (first args)]
         (if (aggregate? (abi/unq t))
           (init-for t l ctx :list)
-          (if (empty? (:items l))
+          (cond
+            ;; T{} with a default constructor: value-initialization ([dcl.init.list]/3.5)
+            (and (empty? (:items l)) (seq (filter #(let [f (fnd %)] (<= (count (:ps (:ty f))) (count (filter some? (:defaults f))))) (ctor-candidates id))))
             (default-ctor-init id true)
-            (do
-              ;; ([over.match.list]/1: a class's initializer-list constructors first; std::initializer_list is not
-              ;; built yet, so refused rather than another constructor chosen: G4, std::vector<int> v{1, 2})
-              (when (some #(let [p0 (first (:ps (:ty (fnd %))))
-                                 c (abi/unq (abi/non-ref (or p0 abi/void)))]
-                             (and (abi/class? c) (= "initializer_list" (:name (abi/cls (:id c))))))
-                          (ctor-candidates id))
-                (fail :init "an initializer-list constructor (std::initializer_list)"))
-              (class-init t (:items l) ctx :direct)))))
+            ;; [over.match.list]/1.1: the initializer-list constructors with the list as one argument first
+            :else
+            (or (let [ils (init-list-ctors id)
+                      viable (keep (fn [fid] (when-let [a (std-init-list (first (:ps (:ty (fnd fid)))) l ctx)] [fid a])) ils)]
+                  (when (seq viable)
+                    (let [fid (if (= 1 (count viable)) (ffirst viable) (resolve-overload (map first viable) [(second (first viable))] nil))
+                          a (some #(when (= fid (first %)) (second %)) viable)]
+                      {:i :ctor :fn fid :args (call-args (fnd fid) [a] ctx)})))
+                ;; 1.2: all the constructors with the list's elements (each an argument, a list among them too)
+                (ctor-init id (:items l) ctx (and (= 1 (count (:items l))) (= :init-list (:op (first (:items l))))))))))
       (and (empty? args)) (default-ctor-init id (= style :value))
-      :else
-      (let [fid (try (resolve-overload (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)] (h id args))) args nil)
+      :else (ctor-init id args ctx))))
+
+(defn- ctor-init
+  "A constructor of class `id` chosen for the arguments `args` by overload resolution, its call's initializer. `nested`:
+  the second phase of [over.match.list] with one element itself a list, where a conversion to X by a user-defined
+  conversion is not considered for a constructor's first parameter of type X or reference to X ([over.best.ics]/4)."
+  ([id args ctx] (ctor-init id args ctx false))
+  ([id args ctx nested]
+  (let [cands (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)] (h id args)))
+        cands (if nested (remove #(= id (class-id (abi/non-ref (or (first (:ps (:ty (fnd %)))) abi/void)))) cands) cands)
+        fid (try (resolve-overload cands args nil)
                      (catch arbace.lang.ExceptionInfo e
                        (if (and (System/getenv "CPP_HDR_TRACE") (:codegen/refused (ex-data e)))
                          (fail (:codegen/refused (ex-data e)) (.getMessage e) " (constructing " (:name (abi/cls id)) ")")
@@ -1449,7 +1509,7 @@
             f (fnd fid)]
         (if (and (:trivial f) (= 1 (count args)))
           {:i :copy :e (first args) :cls id}
-          {:i :ctor :fn fid :args (call-args f args ctx)})))))
+          {:i :ctor :fn fid :args (call-args f args ctx)}))))
 
 (defn default-ctor-init
   "Default- (or with `value?` value-) initialization of a class object."
@@ -1475,6 +1535,9 @@
   [t src ctx style]
   (let [tu (abi/unq t)]
     (cond
+      (and (= :init-list (:op src)) (init-list-elem t))
+      (let [a (or (std-init-list t src ctx) (fail :init "a list's element does not convert to the initializer_list's"))]
+        (if (abi/ref? t) {:i :bind-temp :init {:i :expr :e a} :ty (:ty a)} {:i :expr :e a}))
       (abi/ref? t)
       (let [e (if (= :init-list (:op src)) (if (= 1 (count (:items src))) (first (:items src)) (fail :init "a list for a reference")) src)
             e (if (vector? e) (if (= 1 (count e)) (first e) (fail :init "a reference from arguments")) e)
@@ -1510,7 +1573,8 @@
               el (:of tu)]
           (if (and (= 1 (count items)) (= :str (:op (first items))) (#{:char :schar :uchar} (abi/bn (abi/unq el))))
             {:i :string :e (first items) :n (:n tu)}
-            {:i :list :items (mapv #(init-for el % ctx :copy) items) :fill (init-for el nil ctx :value) :n (:n tu)}))
+            ;; (the elements not written value-initialized: analyzed only when there are some, [dcl.init.aggr]/5)
+            {:i :list :items (mapv #(init-for el % ctx :copy) items) :fill (when (and (:n tu) (< (count items) (long (:n tu)))) (init-for el nil ctx :value)) :n (:n tu)}))
         (and (abi/class? tu) (aggregate? tu))
         (let [c (abi/cls (:id tu))
               items (:items src)
@@ -1992,6 +2056,9 @@
         size {:op :int :v 0 :ty abi/ulong* :cat :pr}
         [scope ids] (alloc-lookup cid nm global?)
         try-res (fn [args] (try (resolve-overload ids args nil) (catch arbace.lang.ExceptionInfo x (if (= :overload (:codegen/refused (ex-data x))) nil (throw x)))))
+        ;; (the implicit global declarations are always there, [basic.stc.dynamic]/2: a program's own global placement
+        ;; form does not hide them)
+        ids (if (and (= :global scope) (empty? place) (seq ids) (nil? (try-res [size]))) [] ids)
         [fid aligned] (cond
                         (empty? ids) [nil over]
                         (and over avt) (if-let [f (try-res (into [size {:op :int :v (abi/align-of et) :ty avt :cat :pr}] place))]
@@ -2020,7 +2087,7 @@
                                               {:fn id :place true})))
                                  dids)))
                   (let [target {:size (= :global dscope) :align over}]
-                    (if (seq dids) (resolve-dealloc dids target) (implicit-dealloc array? target))))]
+                    (or (when (seq dids) (resolve-dealloc dids target)) (when (= :global dscope) (implicit-dealloc array? target)))))]
     {:alloc alloc :dealloc dealloc :reserved reserved :scope scope}))
 
 (defn- delete-dealloc

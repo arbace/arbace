@@ -81,7 +81,9 @@
          (do
            (cond->
              (case (:kind k)
-               "TemplateTypeParmDecl" {:name (:name k) :kind :type :default (some-> (first (kids k)) (get-in [:type :qualType]))}
+               "TemplateTypeParmDecl" (cond-> {:name (:name k) :kind :type :default (some-> (first (kids (update k :inner (fn [is] (remove #(= "ConceptSpecializationExpr" (:kind %)) is))))) (get-in [:type :qualType]))}
+                                        ;; a type-constraint ([temp.param]/4): the concept's name as written
+                                        (:_tc k) (assoc :tc (:_tc k) :tc-args (:_tcargs k)))
                "NonTypeTemplateParmDecl" {:name (:name k) :kind :value :qt (str/replace (get-in k [:type :qualType]) #"\s*\.\.\.$" "")
                                           :default (some-> (first (kids k)) kids first)}
                "TemplateTemplateParmDecl" {:name (:name k) :kind :template})
@@ -1210,13 +1212,38 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Function templates: specializations
 
+(defn- concept-of
+  "The concept a type-constraint names (its template entry), looked up in the template's scope, or nil."
+  [t p]
+  (when-let [parts (:tc p)]
+    (let [es (try (if (= 1 (count parts)) (sema/lookup (:scope t) (first parts)) (sema/lookup-qualified (:scope t) parts))
+                  (catch arbace.lang.ExceptionInfo _ nil))
+          e (first (filter #(and (= :tmpl (:e %)) (= :concept (:tk %))) es))]
+      (when e (tmpl (:id e))))))
+
 (defn- tn-types
   "For a function template (overloadable, so its arguments name their parameters when not natural:
   ItaniumMangle.cpp's needToMangleTemplateParam): each non-type parameter's declared type when it is dependent
-  (template <class T, T v>: Tn T_), else nil."
+  (template <class T, T v>: Tn T_), a constrained type parameter's concept (Tk <name>, clang 17's mangling of a
+  type-constraint without arguments), else nil."
   [t]
   (let [ss (sym-scope t)]
-    (mapv (fn [p] (when (= :value (:kind p)) (let [ty (param-type ss p)] (when (dependent? ty) {:ty ty :pack (:pack p)})))) (:params t))))
+    (mapv (fn [p] (case (:kind p)
+                    :value (let [ty (param-type ss p)] (when (dependent? ty) {:ty ty :pack (:pack p)}))
+                    :type (when-let [c (and (:tc p) (not (:tc-args p)) (concept-of t p))]
+                            {:tk {:tid (:id c) :name (:name c) :path (:path c)} :pack (:pack p)})
+                    nil))
+          (:params t))))
+
+(defn- type-constraints-satisfied?
+  "Each constrained type parameter's concept satisfied by its argument ([temp.param]/4: the immediately-declared
+  constraint C<T>)."
+  [t args]
+  (every? (fn [[p a]]
+            (if-let [c (when (and (:tc p) (not (:tc-args p)) (not (:pack p))) (concept-of t p))]
+              (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) [a] nil) (:expr c))
+              true))
+          (map vector (:params t) args)))
 
 (defn- name-pack-params!
   "A specialization's parameters from a function parameter pack (Ts... ts): their names, the pack's name standing for
@@ -1254,6 +1281,7 @@
             ;; P14 (b)): not satisfied, no specialization ([temp.deduct]/5, [over.match.viable]/3)
             _ (when-let [rc (:constraint t)]
                 (when-not (sema/constraint-satisfied? ps rc) (fail :template "constraints not satisfied for " (:name t))))
+            _ (when-not (type-constraints-satisfied? t args) (fail :template "type-constraints not satisfied for " (:name t)))
             fid (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/declare-fn! ps (:pattern t)))
             _ (when-not fid (fail :template "constraints not satisfied for " (:name t)))
             ;; the specialization is found through its template, not by its name in the parameters' scope

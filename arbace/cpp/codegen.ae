@@ -282,7 +282,8 @@
 (def ^:dynamic *extend* nil) ; atom: a reference's temporary is lifetime-extended into these cleanups
 (def ^:dynamic *extend-now* false) ; the temporary being pushed is the one a declared reference binds
 
-(def ^:dynamic *extend-root* nil) ; the complete temporary a declared reference binds through subobjects ([class.temporary])
+(def ^:dynamic *extend-root* nil)
+(def ^:dynamic *decl-e* nil) ; the prvalue a declared variable is initialized from (a std::initializer_list's array extended) ; the complete temporary a declared reference binds through subobjects ([class.temporary])
 
 (defn- extend-root
   "The expression whose temporary a reference bound to the glvalue `e` extends: `e` itself, or the object whose
@@ -1122,6 +1123,19 @@
     :mcall (mcall! e addr)
     :cond (cond-branches! e #(emit-into % addr) nil)
     :comma (do (emit-rv (:l e)) (emit-into (:r e) addr))
+    ;; std::initializer_list<E>'s prvalue: its backing array (a temporary, CXXStdInitializerListExpr), then
+    ;; libstdc++'s object {const E* _M_array; size_t _M_len}
+    :std-init-list
+    (let [el (:elem e) n (long (:n e)) sz (abi/size-of el)
+          arr (slot! {:k :arr :n (max n 1) :of el})]
+      (doseq [[i it] (map-indexed vector (:items e))] (emit-init (offset! arr (* i sz)) el it))
+      (let [cid (when (abi/class? el) (:id el))]
+        (when (and (pos? n) (nontrivial-dtor? cid))
+          (let [c {:array arr :n n :cls cid}]
+            ;; a declared std::initializer_list's array lives as long as it ([dcl.init.list]/6)
+            (if (and *extend* (identical? e *decl-e*)) (swap! *extend* conj c) (swap! *temps* conj c)))))
+      (emit! (list 'store ['ptr arr] ['ptr addr] :align 8))
+      (emit! (list 'store ['i64 n] ['ptr (offset! addr 8)] :align 8)))
     (if (#{:lv :xv} (:cat e))
       (memcpy! addr (emit-lv e) (abi/size-of (:ty e)))
       (fail :codegen "class prvalue " (:op e)))))
@@ -1181,7 +1195,7 @@
         addr (if nrvo (:sret @*f*) (slot! (if (abi/ref? t) (abi/ptr abi/void) t)))]
     (swap! *f* assoc-in [:addr (:var s)] addr)
     (let [ext (atom [])]
-      (with-full (binding [*extend* ext] (emit-init addr t (:init s))))
+      (with-full (binding [*extend* ext *decl-e* (when (= :expr (:i (:init s))) (:e (:init s)))] (emit-init addr t (:init s))))
       (doseq [c @ext] (push-cleanup! c)))
     (when-not nrvo
       (let [bt (loop [t (abi/unq t)] (if (abi/arr? t) (recur (abi/unq (:of t))) t))]
