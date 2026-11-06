@@ -353,6 +353,16 @@
                    (mk [:Tpat_lazy (type-pat env (d 1) t vars)] expected))
       (type-error (str "pattern " (d 0) " outside the slice")))))
 
+(defn type-pat-generalized
+  "Typecore.map_half_typed_cases' typing of a case's pattern under with_local_level_generalize: what the pattern
+  creates and its expected type does not reach (a polymorphic field's instance, `{pf}` of pf : 'a. ...) generalized,
+  so that its variables are polymorphic"
+  [env sp expected vars]
+  (let [n0 (count @vars)
+        p (ty/with-local-level (type-pat env sp expected vars))]
+    (doseq [[_ _ t] (drop n0 @vars)] (ty/generalize t))
+    p))
+
 (defn add-pattern-vars
   "The environment with a pattern's variables, a (module M) pattern's a module of its package's type, its address the
   variable"
@@ -570,6 +580,17 @@
       :Pexp_struct_item (and (= :Pstr_open ((:pstr_desc (d 1)) 0)) (inferred? (d 2)))
       false)))
 
+(defn- apply-prim-type?
+  "Typecore.check_apply_prim_type: %apply's ('a -> 'b) -> 'a -> 'b or %revapply's 'a -> ('a -> 'b) -> 'b, as declared"
+  [prim t]
+  (let [arrow (fn [t] (let [t (ty/repr t) d (ty/desc t)] (when (and (= :Tarrow (d 0)) (= [:Nolabel] (d 1))) [(ty/repr (d 2)) (ty/repr (d 3))])))]
+    (boolean
+     (when-let [[a b] (arrow t)]
+       (when-let [[c d] (arrow b)]
+         (let [[f x res] (if (= prim :apply) [a c d] [c a d])]
+           (when-let [[fl fr] (arrow f)]
+             (and (every? ty/tvar? [fl fr x res]) (identical? fl x) (identical? fr res)))))))))
+
 (defn type-argument
   "Typecore.type_argument: an argument expected as a function without labels, its optional parameters eliminated
   (applied to None, eta-expanded after a let)"
@@ -749,9 +770,10 @@
                         nolabels (and (= 2 (count sargs)) (every? #(= :Nolabel ((first %) 0)) sargs))
                         ;; Typecore's application operators: x |> f and f @@ x typed as f x
                         [f sargs] (cond
-                                    (and nolabels (= pname "%revapply") (inferred? (second (second sargs))))
+                                    (and nolabels (= pname "%revapply") (inferred? (second (second sargs)))
+                                         (apply-prim-type? :revapply (:type ((:desc f) 2))))
                                     [(type-exp env (second (second sargs))) [(first sargs)]]
-                                    (and nolabels (= pname "%apply") (inferred? (second (first sargs))))
+                                    (and nolabels (= pname "%apply") (apply-prim-type? :apply (:type ((:desc f) 2))))
                                     [(type-exp env (second (first sargs))) [(second sargs)]]
                                     :else [f sargs])
                         [args t] (type-application env f sargs)]
@@ -1018,7 +1040,7 @@
   ([env targ tres scases computation] (type-cases env targ tres scases computation nil))
   ([env targ tres scases computation conts]
   (let [typed (mapv (fn [c] (let [vars (atom []) eqs (atom [])
-                                  p (binding [*equations* eqs] (type-pat env (:pc_lhs c) targ vars))
+                                  p (binding [*equations* eqs] (type-pat-generalized env (:pc_lhs c) targ vars))
                                   done @eqs
                                   ;; the equations' types, kept for the case's body, then taken back
                                   now (mapv (fn [[path _]] [path (env/find-decl path)]) done)]
@@ -1076,7 +1098,7 @@
                           (do (when (ty/is-optional l) (unify! (ty/type-option (ty/newvar)) targ "parameter"))
                               [targ nil]))
             vars (atom []) eqs (atom [])
-            p (binding [*equations* eqs] (type-pat env spat tint vars))
+            p (binding [*equations* eqs] (type-pat-generalized env spat tint vars))
             _ (pressure-variants! [p])
             env' (add-pattern-vars env @vars)
             ;; a GADT parameter's equations hold over the rest of the function
