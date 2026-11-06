@@ -188,6 +188,7 @@
   [t]
   (cond (= [:re-static] t) t
         (and (vector? t) (= :re-var (first t))) t
+        (and (vector? t) (= :re-bound (first t)) (= :inner (nth t 2 nil))) t
         (and (vector? t) (= :re-early (first t)) (not= "'_" (nth t 2))) t
         (and (vector? t) (= :re-bound (first t)) (string? (second t)) (not= "'_" (second t))) [:re-bound (second t)]
         (c/region? t) [:re-erased]
@@ -265,6 +266,7 @@
       (:int :uint :float) (str "prim:" (second t))
       :bool "prim:bool" :char "prim:char" :str "prim:str" :slice "prim:slice" :array "prim:array" :ptr "prim:ptr"
       :ref "prim:ref" :tuple "prim:tuple"
+      :dyn (str "dyn:" (first (:principal (second t))))
       nil)))
 
 (defn- std-impl-instance
@@ -415,12 +417,18 @@
   [ad args]
   (let [self (shallow (first args))]
     (case (first self)
-      :proj (let [[_ sad sargs] self]
-              (when (number? sad)
-                (some (fn [cl] (when (and (= :proj (first cl)) (= ad (second cl)))
-                                 (let [cl (erase (c/subst cl (vec sargs))) s (snapshot)]
-                                   (if (unify-all (vec (nth cl 2)) (vec args)) (nth cl 3) (do (rollback! s) nil)))))
-                      (try (c/item-bounds sad) (catch Throwable _ [])))))
+      :proj (let [[_ sad sargs] self
+                  bounds (if (number? sad)
+                           (try (c/item-bounds sad) (catch Throwable _ []))
+                           ;; std's: the trait's item's bounds from its interface
+                           (vec (for [[_ _ p bs] (:items (get (:traits c/*si*) (c/path-parent sad)))
+                                      :when (= p sad)
+                                      b bs :when (= 'proj (head b))]
+                                  [:proj (nth b 1) (mapv c/sty->ty (nth b 2)) (c/sty->ty (nth b 3))])))]
+              (some (fn [cl] (when (and (= :proj (first cl)) (= ad (second cl)))
+                               (let [cl (erase (c/subst cl (vec sargs))) s (snapshot)]
+                                 (if (unify-all (vec (nth cl 2)) (vec args)) (nth cl 3) (do (rollback! s) nil)))))
+                    bounds))
       :opaque (some (fn [cl] (when (and (= :proj (first cl)) (= ad (second cl))) (nth cl 3))) (second self))
       nil)))
 
@@ -876,6 +884,8 @@
                    (if (and p (= :const (:kind p)) (:hir p)) (erase (c/lower-ty (:ty (:hir p)))) [:unknown]))
           :ext (let [[_ p k] rd]
                  (cond (#{"Fn" "AssocFn"} k) [:fndef p (fresh-args p)]
+                       ;; RF9b: std's constants and statics by their types
+                       (get (:consts c/*si*) p) (erase (c/sty->ty (:ty (get (:consts c/*si*) p))))
                        (#{"Ctor(Variant, Fn)" "Ctor(Struct, Fn)"} k) [:fndef p (fresh-args (std-adt-of p))]
                        (#{"Ctor(Variant, Const)" "Ctor(Struct, Const)"} k) (let [a (std-adt-of p)] [:adt a (fresh-args a)])
                        :else [:unknown]))
@@ -1405,7 +1415,8 @@
       (case kind :int (bind! [:infer :int id] [:int "i32"]) :float (bind! [:infer :float id] [:float "f64"]) nil))))
 
 (defn- erase-all [t]
-  (cond (c/region? t) [:re-erased]
+  (cond (and (vector? t) (= :re-bound (first t)) (= :inner (nth t 2 nil))) t   ; bound within the type: kept
+        (c/region? t) [:re-erased]
         (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (erase-all %) (map? %) (into {} (for [[k v] %] [k (erase-all v)])) :else %) (rest t)))
         (vector? t) (mapv erase-all t)
         :else t))

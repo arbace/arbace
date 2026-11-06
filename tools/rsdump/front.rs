@@ -192,9 +192,14 @@ fn sty<'tcx>(tcx: TyCtxt<'tcx>, t: rustc_middle::ty::Ty<'tcx>) -> String {
         ty::Alias(_, ty::AliasTy { kind: ty::Opaque { def_id }, args: aa, .. }) => format!("(opaque {} [{}])", q(&def_path(tcx, def_id)), args(aa)),
         ty::FnPtr(sig_tys, hdr) => {
             let s = sig_tys.with(hdr).skip_binder();
-            format!("(fnptr [{}] {})", s.inputs().iter().map(|x| sty(tcx, *x)).collect::<Vec<_>>().join(" "), sty(tcx, s.output()))
+            BINDERS.with(|b| b.set(b.get() + 1));
+            let r = format!("(fnptr [{}] {})", s.inputs().iter().map(|x| sty(tcx, *x)).collect::<Vec<_>>().join(" "), sty(tcx, s.output()));
+            BINDERS.with(|b| b.set(b.get() - 1));
+            r
         }
         ty::Dynamic(preds, r) => {
+            // RF9b: the principal's and projections' binder (a region it binds is marked `'^^`)
+            BINDERS.with(|b| b.set(b.get() + 1));
             let pr = preds.principal().map(|p| {
                 let p = p.skip_binder();
                 format!("(trait {} [{}])", q(&def_path(tcx, p.def_id)), args(p.args))
@@ -203,6 +208,7 @@ fn sty<'tcx>(tcx: TyCtxt<'tcx>, t: rustc_middle::ty::Ty<'tcx>) -> String {
                 let p = p.skip_binder();
                 format!("(proj {} [{}] {})", q(&def_path(tcx, p.def_id)), args(p.args), p.term.as_type().map(|t| sty(tcx, t)).unwrap_or_else(|| "(text \"const\")".into()))
             }).collect();
+            BINDERS.with(|b| b.set(b.get() - 1));
             let autos: Vec<String> = preds.auto_traits().map(|d| q(&def_path(tcx, d))).collect();
             format!("(dyn {} [{}] [{}] {})", pr, projs.join(" "), autos.join(" "), q(&r.to_string()))
         }
@@ -210,11 +216,26 @@ fn sty<'tcx>(tcx: TyCtxt<'tcx>, t: rustc_middle::ty::Ty<'tcx>) -> String {
     }
 }
 
-/// A region's text, a bound (late-bound) one marked `'^` (then its name when it has one)
+thread_local! {
+    /// RF9b: the binders `sty` is inside (fn pointers', trait objects')
+    static BINDERS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A region's text, a bound (late-bound) one marked `'^` (then its name when it has one), one bound by a binder within
+/// the type (a trait object's, a fn pointer's) `'^^`
 fn region_text(r: rustc_middle::ty::Region<'_>) -> String {
-    if let rustc_middle::ty::ReBound(..) = r.kind() {
+    if let rustc_middle::ty::ReBound(db, br) = r.kind() {
         let t = r.to_string();
-        if t == "'_" || t.is_empty() { "'^".into() } else { format!("'^{t}") }
+        let inner = match db {
+            rustc_middle::ty::BoundVarIndexKind::Bound(d) => d.as_u32() < BINDERS.with(|b| b.get()),
+            _ => false,
+        };
+        let m = if inner { "'^^" } else { "'^" };
+        if t == "'_" || t.is_empty() {
+            if inner { format!("'^^#{}", br.var.as_u32()) } else { m.into() }
+        } else {
+            format!("{m}{t}")
+        }
     } else {
         r.to_string()
     }
@@ -511,6 +532,8 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
             match k {
                 DefKind::Mod => todo.push(d),
                 DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::Trait | DefKind::Fn => items.push((k, d)),
+                // RF9b: constants and statics, by their types
+                DefKind::Const { .. } | DefKind::Static { .. } => items.push((k, d)),
                 _ => {}
             }
         }
@@ -547,9 +570,20 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
                         if matches!(i.kind, ty::AssocKind::Fn { .. }) {
                             fns.push(i.def_id);
                         }
-                        format!("[{} {} {}]", q(i.name().as_str()), kind(tcx.def_kind(i.def_id)), q(&def_path(tcx, i.def_id)))
+                        // RF9b: an associated type's item bounds (explicit_item_bounds, Self its alias)
+                        let bounds = if matches!(i.kind, ty::AssocKind::Type { .. }) {
+                            format!(
+                                " [{}]",
+                                tcx.explicit_item_bounds(i.def_id).skip_binder().iter().map(|(c, _)| clause(*c)).collect::<Vec<_>>().join(" ")
+                            )
+                        } else {
+                            String::new()
+                        };
+                        format!("[{} {} {}{}]", q(i.name().as_str()), kind(tcx.def_kind(i.def_id)), q(&def_path(tcx, i.def_id)), bounds)
                     })
                     .collect();
+                // RF9b: the inherent impls of the trait's objects (`impl dyn Any + Send`)
+                impls.extend(tcx.inherent_impls(*d).iter().copied().filter(|i| std_crate(*i)));
                 let ti = tcx.trait_impls_of(*d);
                 impls.extend(ti.blanket_impls().iter().copied().filter(|i| std_crate(*i)));
                 for v in ti.non_blanket_impls().values() {
@@ -558,6 +592,9 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
                 let _ = writeln!(out, "(si/trait {} {{{} {} :items [{}]}})", q(&p), generics(*d), preds(*d), its.join(" "));
             }
             DefKind::Fn => fns.push(*d),
+            DefKind::Const { .. } | DefKind::Static { .. } => {
+                let _ = writeln!(out, "(si/const {} {{:kind {} :ty {}}})", q(&p), kind(*k), sty(tcx, tcx.type_of(*d).skip_binder()));
+            }
             _ => {}
         }
     }
