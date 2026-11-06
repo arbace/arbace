@@ -861,8 +861,8 @@ run_check() {
       local p=${id#nofib/} mk main="" fo pa sin="" s n
       n=$(basename "$p"); mk=$nf/$p/Makefile
       main=$(grep -F "$p/" "$root/test/haskell/run-check-nofib.txt" | head -1); main=$nf/$main
-      fo=$( [ -f "$mk" ] && sed -n 's/^FAST_OPTS *= *//p' "$mk" | head -1 | sed 's/#.*//')
-      pa=$( [ -f "$mk" ] && sed -n 's/^PROG_ARGS *+\{0,1\}= *//p' "$mk" | tr '\n' ' ' | perl -pe 's/\+RTS.*?-RTS//g')
+      fo=$( [ ! -f "$mk" ] || sed -n 's/^FAST_OPTS *= *//p' "$mk" | head -1 | sed 's/#.*//')
+      pa=$( [ ! -f "$mk" ] || sed -n 's/^PROG_ARGS *+\{0,1\}= *//p' "$mk" | tr '\n' ' ' | perl -pe 's/\+RTS.*?-RTS//g')
       for s in "$n.faststdin" "$n.stdin"; do [ -f "$nf/$p/$s" ] && { sin=$s; break; }; done
       echo "$id|$main|$nf/$p|$(echo "$pa $fo" | xargs)|$sin|$n|$(echo "$p" | tr '/' '_')" >> "$plan"
     done
@@ -873,15 +873,20 @@ run_check() {
     while IFS='|' read -r id f d a sin nm ob; do
       local r=$w/ref/$ob s=0
       rm -rf "$r"; mkdir -p "$r"; cp -r "$d"/. "$r"/; : > "$r/.empty"
-      (cd "$r" && ghc -O0 -outputdir obj -o ghcprog "$(basename "$f")" > build.log 2>&1) || { echo "{:id \"$id\" :no-build true}" >> "$w/ref.edn"; continue; }
+      # the executable named as nofib names it (its messages start with the program's name)
+      (cd "$r" && ghc -O0 -outputdir obj -o "$nm.ghcbin" "$(basename "$f")" > build.log 2>&1) || { echo "{:id \"$id\" :no-build true}" >> "$w/ref.edn"; continue; }
+      mkdir -p "$r/bin"; mv "$r/$nm.ghcbin" "$r/bin/$nm"
       (cd "$r" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$r" timeout -s KILL 360 \
-         sh -c "ulimit -v $((4 * 1048576)); ulimit -t 120; exec ./ghcprog $a" < "$r/${sin:-.empty}" > "$r/out" 2> "$r/err") || s=$?
+         sh -c "ulimit -v $((4 * 1048576)); ulimit -t 120; exec ./bin/$nm $a" < "$r/${sin:-.empty}" > "$r/out" 2> "$r/err") || s=$?
       echo "{:id \"$id\" :status $s :stdout \"$(sha256sum < "$r/out" | cut -c1-64)\" :stderr \"$(sha256sum < "$r/err" | cut -c1-64)\" :bytes $(wc -c < "$r/out")}" >> "$w/ref.edn"
     done < "$plan"
     { echo ";; GHC 9.14.1's -O0 runs of the nofib programs of test/haskell/run-check-nofib.txt (bin/repr-haskell run-check --nofib"
       echo ";; --record-ref): each built by the host's ghc -O0 in a copy of its directory and run as nofib's fast mode runs it (FAST_OPTS,"
       echo ";; PROG_ARGS less +RTS options, NAME.faststdin or NAME.stdin) under env -i, LANG=C.UTF-8, TZ=UTC; :stdout and :stderr SHA-256."
-      sort "$w/ref.edn"; } > "$ref"
+      # a run of some programs keeps the others' lines
+      sed -n 's/^\({:id "[^"]*" \).*/\1/p' "$w/ref.edn" > "$w/ref.ids"
+      { [ ! -f "$ref" ] || grep '^{' "$ref" | grep -v -F -f "$w/ref.ids" || true; cat "$w/ref.edn"; } | sort; } > "$ref.new"
+    mv "$ref.new" "$ref"
     echo "run-check: recorded $(grep -c '^{' "$ref") references into $ref"
   fi
   local files=() srcs=(); while IFS='|' read -r id f d a sin nm ob; do files+=("$f@$ob"); srcs+=("$f"); done < "$plan"

@@ -965,3 +965,134 @@ choice of strategy). Nothing else of GHC was needed beyond the pinned tarball's 
 ## Decided (2026-11-05, the user: HF4's proposals)
 
 HF4's four as recommended: $tag2con/$maxtag inlined until HF5; a haskell-front step, the samples essential and the nofib list in --full; DerivingVia and the strategy keywords next, Generic/Data/Lift at HF9; Tier S's exit does not cover Generic/Data/Lift.
+
+## As built: HF5-HF6's second slice, HF7 (first light), HF3's second slice (2026-11-06, branch `haskell-hf7`)
+
+From `haskell-hf56` (589e0cde7) with `haskell-hf4` (08a4354e7) merged in (HF5-HF6's decision 3 asks for the run corpus
+after HF4; conflicts in `typecheck.ae`'s `data-decl!` and the elaborator's bindings, both sides' tables kept, and in the
+docs). The decisions of HF5-HF6 as the user took them: (1) (b) the match compiler and CorePrep kept, GHC's functions ported
+where a judge needs them; (2) (a) GHC's simple optimiser ported; (3) (a) the run corpus a recorded check list; (4) the gate
+step waits for `haskell-integrate` on main. Light on the host: main's stage 0, the helper at `-O0`, hsi's light driver,
+the libraries' STG of the oracle pack `haskell-stg-libs` (`.tmp/oracle-packs/unpacked/c2c81126.../`, the same dumps
+`haskell-integrate`'s worktree held), at most 2 GiB a process.
+
+**1. GHC's simple optimiser** (decision 2 (a); `arbace/repr/haskell/simpleopt.ae`, a port of
+`compiler/GHC/Core/SimpleOpt.hs`): the occurrence information it reads (OccurAnal's: dead, once outside a lambda, many;
+a recursive group's binders loop breakers; the top level's one recursive group split into its binding groups in dependency
+order, Tarjan's), then `simple_opt_expr` rule for rule on the untyped Core: `preInlineUnconditionally` (a binder dead or
+used once outside a lambda inlined unoptimised with its binding's environment, `soe_inl`), `postInlineUnconditionally` (a
+trivial optimised right-hand side substituted), `simple_app` (beta with each argument bound as `simple_bind_pair` binds a
+let, a let in head position floated over the arguments, compulsory unfoldings), case of known constructor
+(`exprIsConApp_maybe`'s constructor case with `simple_out_bind`), `go_lam`'s collected lambdas, exported Ids never inlined
+nor dropped (the export list's, and the Ids GHC keeps: `$f`, `$dm`, `$tc`, selectors, methods; a dictionary function's
+methods count twice, as its DFunUnfolding mentions them). The compulsory unfoldings of `GHC.Types.Id.Make`: `seq`
+(`\a b -> case a of _ -> b`: the run corpus's `t` helper), `oneShot`, `coerce`, the sections, `nullAddr#`, every newtype's
+constructor (Note [Compulsory newtype unfolding]: the identity, `IO` among them) and a newtype class's dictionary
+constructor. Not ported: eta reduction (`tryEtaReduce` needs every Id's arity), rules (none at `-O0` in a program).
+A newtype constructor's case is no case (GHC's match is a cast): the field and the case binder are the scrutinee.
+
+**2. What `-O0` runs after the desugarer** (a correction of §2.3): `GHC.Core.Opt.Pipeline.getCoreToDo` keeps
+`simplify "final"` at every level, so `-O0` runs the Simplifier once (inlining, case of case, eta expansion, the built-in
+rules), not only `simpleOptPgm`. Its effects on the output: shapes (the STG judge's classes below) and, where the
+built-in rules compute differently from the machine, results: GHC folds the floating-point primops on the literals'
+Rationals (`0.0## *## -2.5##` is `0.0`, a Rational has no negative zero) and drops identities (`0.0## +## x` is `x`, so
+`0.0## +## (negateDouble# 0.0##)` prints `-0.0`). Those rules are ported (`arbace/repr/haskell/constfold.ae`, a port of
+`compiler/GHC/Core/Opt/ConstantFold.hs`'s `Float#`/`Double#` rules: `binaryLit` with `floatOp2`/`doubleOp2` and the division
+guards, `identity`, `rightIdentity`, `strengthReduction`, `negOp`, `semiInversePrimOp`, the fused multiply-adds' `fmaLit`,
+`fmaZero_z`, `fmaOne`, `convFloating`, and `Literal.hs`'s conversions, `double2Int#` wrapping), applied after the simple
+optimiser; a literal is a Rational (`-0.0##` is `0.0`). The integral primops' rules compute what the machine computes and
+are left to hsi.
+
+**3. CorePrep, CoreToStg and Unarise, GHC's functions where the corpus needed them** (decision 1 (b);
+`arbace/repr/haskell/tostg.ae`): representations (`typePrimRep`) from the elaborator's types: every local binder's
+zonked type (`:ltypes`), a global's result type after its arguments, a primop's from `GHC.Internal.Prim`'s interface;
+`Int#`...`Word64#`, `Char#`, `Double#`, `Float#`, `Addr#`, the unlifted boxed `:U`, `State#` void. Primops saturated as
+`(primop "OP" ...)` (`maybeSaturate`'s eta expansion when not), a void argument `void#`; an unlifted argument case-bound
+(`cpeArg`'s case float), an unlifted let a case (Core's let-can-float invariant, the desugarer's `bindNonRec`); Unarise's
+unboxed tuples: void components dropped, the constructor of the non-void ones' count (`MkSolo#`, `(#,#)`...), `(multi N)`
+alternatives, a binder of an unboxed tuple unarised into its components (a case on it renames the alternative's binders).
+The module's own constructors' fields their types' representations; the boxed `(~)`'s evidence `Eq#`; `word64`
+literals (Typeable's fingerprints), infinite floating literals.
+
+**4. HF3's second slice: the elaborator's extensions the run corpus asked for, in its order** (the next stage of the route,
+HF3's decision 5: "the extensions as the corpora's measured needs order them"; `typecheck.ae`): `MagicHash`'s literals
+(`3#`, `3##`, `'c'#`, `"s"#`, `1.5##`, `1.5#`, exact) and the primops' types; `UnboxedTuples` (`(# a, b #)` in patterns
+and expressions, the unboxed tuples' constructors wired in, their representation arguments dropped from the interfaces'
+types); Typeable: the solver's evidence for a type without variables (`mkTrCon $tcT []`, `mkTrApp`), the module's
+`$trModule` and `$tcT` bindings with GHC's fingerprints (`GHC.Internal.Fingerprint`: MD5 of each string's characters as four
+big-endian bytes, then of the three fingerprints: `$tcBoom` equal to GHC's, `17929780780547902510 8657790650026734023`);
+existential constructors (`data T = forall s. C s => T s`: the context's dictionaries the worker's first fields, skolems
+and givens in the pattern); functional dependencies' improvement before defaulting (`MonadState s m | m -> s`); a class with
+a quantified superclass counted as a field (`MonadTrans`); a newtype class's dictionary the identity; HasCallStack's
+`SrcLoc` file the source's path; `default` declarations (§4.3.4); fractional literals at other types `fromRational` of a
+reduced `n :% d`; non-ASCII string literals `unpackCStringUtf8#` (modified UTF-8); generated code's `Int` literals boxed;
+deriving's tags as GHC's `dataToTag#` (`dataToTagLarge#`, boxed) and tags' constructors a case on the literals (HF4's
+`DerivTag` had typed them without a run: the derived `==` of a type with a field compared the values, not their tags).
+
+**5. Interfaces** (Tier S's data, HFS3 (a)): the helper's `iface` closure now also follows the modules of the type
+constructors its things' types mention and the orphan modules below each interface (`dep_orphs`: `Num CSize`,
+`FormatTime UTCTime`), and a reexported module (`GHC.Prim` is `ghc-internal`'s `GHC.Internal.Prim`) is read through
+`reexports.edn` (ghc-pkg's `exposed-modules` reexports), in the renamer.
+
+**6. The driver and the run check** (HF7's first light; decision 3 (a)): `arbace/repr/haskell/front.ae`, the front end as
+one process for many programs (native read, rename, elaborate, desugar, the simple optimiser, the constant folder, STG; the
+interfaces read once), and `bin/repr-haskell run-check` (`make repr-haskell-run-check`): the samples and synthetic programs
+of `test/haskell/eval/` through it in four shards and on hsi, each against GHC 9.14.1's `-O0` run recorded in
+`test/haskell/ref-ghc914.edn` (status, stdout, stderr), against the record `test/haskell/run-check.edn` (`--record`;
+`test/haskell/run_record.ae` judges, every non-pass in a class), the negative control (each run against the next program's
+reference) failing. No GHC at build time but the interfaces' dump. About 2 minutes, at most 1.6 GB.
+
+**Results** (the brief's measure: the run corpus's programs that run from Arbace's own STG):
+
+| corpus | before (HF5-HF6's head, `haskell-hf4` merged) | after |
+|---|---:|---:|
+| `test/haskell/stg/` (stg-check) | 9 of 9 | 9 of 9 |
+| `test/haskell/eval/samples` | 12 of 26 | 23 of 26 |
+| `test/haskell/eval/synthetic` | 4 of 37 | 37 of 37 |
+| run-check (samples and synthetic) | 16 of 63 | **60 of 63** |
+
+The three others fail on GHC's own STG under the same cap (`hsi-memory`: `Loop`, `runtime-deep`, which
+`test/haskell/check-hsi.edn` passes at 16 GiB; `hsi`: `AsyncRerun`, a failure of check-hsi too): every program hsi runs
+from GHC's STG now runs from Arbace's. The judges of HF5-HF6 (`bin/repr-haskell stg-check`): desugared Core equal to the
+tc dump in 171 of 227 bindings of the typecheck samples (158 before) and 53 of 85 of the programs (48); STG equal to GHC's
+`-O0` dumps in 65 of 83 bindings (62; S01, S02, S07, S08 entirely); `bin/repr-haskell typecheck-check` 22 of 22, its control
+differing. The STG judge's remaining classes are the Simplifier's shapes (2 above): a newtype-wrapped function's binding
+split by its cast and eta-expanded (`get = \eta -> get1 eta`), local functions inlined, floats' order.
+
+**7. Beyond the run corpus: nofib** (the next stage's first slice measured on programs no one wrote for it):
+`bin/repr-haskell run-check --nofib` runs the 53 single-module nofib programs of HF3-HF4's check list
+(`test/haskell/run-check-nofib.txt`; shake's three-module program and the two `callback` programs with C of their own left
+out) from the pinned GHC tarball's `nofib/` in nofib's fast mode (each Makefile's `FAST_OPTS` and `PROG_ARGS` less `+RTS`
+options, `NAME.faststdin` or `NAME.stdin`), against GHC's `-O0` runs recorded once with the host's GHC
+(`test/haskell/ref-nofib.edn`, `--record-ref`: the tarball's nofib is not hsi's pinned nofib commit, whose runs
+`ref-ghc914.edn` holds), record `test/haskell/run-check-nofib.edn`. NOFIB_RESULTS The nofib programs found five
+front-end bugs the run corpus had not: the derived `==` of a type with a field compared the values where GHC compares
+the tags (HF4's `DerivTag` typed without a run), `default (Integer, Rational, Double)` ignored, a top-level pattern
+binding's selectors returning themselves (`((kmin, kmax), ...) = grid_size`: `<<loop>>`), `MonadTrans`'s quantified
+superclass not counted as a dictionary field, `MonadFail`'s message a bare literal; each fixed with GHC's rule.
+
+**Not covered yet**: multi-module programs in the driver (the renamer and the elaborator read a module's own interface,
+`--local`, but `front.ae` compiles one module a program), the `-O0` Simplifier's other effects (2 above), eta reduction,
+`n+k` patterns, view patterns, `foreign import` calls' STG (`ffi`), `Typeable` of types with kind variables, GADTs and type
+families (HF9), Template Haskell; the libraries stay GHC's STG (Tier S).
+
+**Proposed** (the user decides).
+
+1. The gate (HF5-HF6's decision 4, HF4's decision 2): `run-check` beside `typecheck-check` in the step `haskell-front`.
+   Options: (a) the run corpus (63 programs, about 2 minutes, at most 1.6 GB a process, the libraries' STG of the oracle
+   pack pinned by its digest) in the essential gate and `--nofib` (53 programs, about 25 minutes) in `--full`; (b) both
+   in `--full`; (c) wait for HF8. *Recommended: (a)*, once `haskell-integrate` is on main (decision 4's condition).
+2. GHC's `-O0` Simplifier run (the finding of 2). Options: (a) a recorded class for the STG judge's shapes and the
+   `space` class, only the rules that change results ported (done); (b) port the Simplifier in `-O0`'s mode
+   (`GHC/Core/Opt/Simplify/*`, `OccurAnal`, `Arity`, `Unfold`: about 16,000 lines, most of its decisions typed: it would
+   need GHC's typed Core, HFS4 (b)); (c) port the parts the judges and the space class ask for, one at a time: the inlining
+   of a once-used recursive top-level group into its use, eta expansion through a newtype's cast (`get = \eta -> get1
+   eta`), the local functions' inlining. *Recommended: (a) now, (c) as the nofib corpus or the STG judge asks*.
+3. The nofib references. Options: (a) keep the tarball's nofib with its own recorded GHC runs (`ref-nofib.edn`); (b)
+   move to hsi's pinned nofib commit and `ref-ghc914.edn` when its checkout is fetched (a network fetch; its programs
+   differ from the tarball's in places); (c) both. *Recommended: (a)*: the tarball is repr/haskell's pin already.
+4. The light runs' caps (`hsi`, `hsi-memory` classes: hsi on GHC's own STG fails the same way at 2 GiB and 120 s).
+   Options: (a) run-check takes `ARBACE_MEM_GIB` and `HSI_TIMEOUT` as `bin/hsi check` does, the gate's night run at 16 GiB
+   and 60 s (the classes then empty or smaller); (b) keep the light caps everywhere. *Recommended: (a)*.
+5. Next: the multi-module driver (nofib's 100 other programs, the testsuite's), then the elaborator's next extensions as
+   those corpora order them (GADTs and type families wait for HF9). *Recommended* as the order of HF3's decision 5.

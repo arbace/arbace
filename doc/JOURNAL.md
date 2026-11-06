@@ -566,3 +566,36 @@ Alternatives considered: judging `-ddump-deriv`'s text (needs a printer of GHC's
 for less than the Core comparison gives); generating source text and renaming it (the derived code names `GHC.Classes`'
 functions whatever the module imports, so it would need the renamer's wired-in scope). Proposals 1-4 in the survey.
 
+
+## 2026-11-06: HF5-HF6's second slice, HF7's first light, HF3's second slice (branch `haskell-hf7`, from `haskell-hf56`)
+
+- What: the user's decisions on HF5-HF6 (2026-11-05: (1) (b) the match compiler and CorePrep kept, GHC's functions ported
+  where a judge needs them, amending HFS5; (2) (a) GHC's simple optimiser ported; (3) (a) the run corpus a recorded check
+  list after HF4; (4) the gate step once `haskell-integrate` is on main) carried out, and the front end's next stage, HF3's
+  extensions in the order the run corpus asked for them. `haskell-hf4` (08a4354e7) merged first (decision 3's "after
+  HF4"; conflicts in `typecheck.ae` and the docs, both sides kept). New: `arbace/repr/haskell/simpleopt.ae` (a port of
+  GHC's `Core/SimpleOpt.hs` with OccurAnal's information and `Types/Id/Make.hs`'s compulsory unfoldings),
+  `constfold.ae` (a port of `Core/Opt/ConstantFold.hs`'s `Float#`/`Double#` rules), `front.ae` (the front end as one
+  driver), `bin/repr-haskell run-check` with `test/haskell/run-check.edn` and `test/haskell/run_record.ae`
+  (`make repr-haskell-run-check`). Changed: `tostg.ae` (representations from types, primops, unlifted case floats,
+  Unarise's unboxed tuples), `typecheck.ae` (MagicHash, UnboxedTuples, Typeable with GHC's fingerprints, existentials,
+  fundeps' improvement, `default` declarations, deriving's tags as `dataToTag#`, ...), `desugar.ae`, `rename.ae`
+  (reexported modules), `tools/hsdump/HsRn.hs` (the iface closure follows types' modules and orphans). Details in
+  doc/haskell/FRONTEND-SURVEY.md, "As built: HF5-HF6's second slice, HF7 (first light), HF3's second slice".
+- Sources: GHC 9.14.1's `compiler/GHC/Core/SimpleOpt.hs`, `Core/Opt/OccurAnal.hs`, `Core/Opt/ConstantFold.hs`,
+  `Types/Literal.hs`, `Types/Id/Make.hs`, `Core/Opt/Pipeline.hs` (`getCoreToDo`), `CoreToStg/Prep.hs`, `Stg/Unarise.hs`,
+  `Tc/Instance/Typeable.hs` with `GHC.Internal.Fingerprint` (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz,
+  SHA-256 `2a83779c...101e77`, BSD-3), read in the extracted tree of the frontend survey's worktree
+  (`.tmp/keep/wt/haskell-frontend-survey/src/ghc-9.14.1`); simpleopt.ae and constfold.ae carry GHC's notice, LICENSE.md and
+  doc/ARBACE.md record them. References: `test/haskell/ref-ghc914.edn` (GHC's recorded `-O0` runs),
+  `test/haskell/check-hsi.edn` (hsi on GHC's STG), the oracle pack's GHC STG of the programs
+  (`.tmp/oracle-packs/unpacked/576184f2.../haskell-stg-progs`) for the shapes.
+- Finding: `-O0` is not "the desugarer's `simpleOptPgm` and nothing else" (the survey's §2.3): `getCoreToDo` keeps
+  `simplify "final"`, one Simplifier run with the built-in rules; the floating-point rules change results (GHC computes
+  on Rationals), so they are ported; the rest of that run changes shapes only (the STG judge's classes).
+- Results: run-check 60 of 63 (16 before: 12 samples, 4 synthetic), the 3 others in hsi's classes (they fail on GHC's
+  own STG under the light cap); stg-check 9 of 9 runs, Core 171 of 227 bindings (158), STG 65 of 83 (62);
+  typecheck-check 22 of 22. Light: about 2 minutes, at most 1.6 GB a process.
+- Alternatives: a line-by-line port of CorePrep and CoreToStg (decision 1 (a), declined by the user); porting the whole
+  `-O0` Simplifier for the STG judge's equality (a proposal, below the survey's section); running the run corpus with
+  GHC's interfaces regenerated per program (the iface closure's fix keeps one dump for the corpus).
