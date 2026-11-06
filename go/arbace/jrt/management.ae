@@ -1,0 +1,113 @@
+;; jrt: what java.lang.management asks of the runtime (doc/classes/JAVA-DEFERRED-TRIAGE.md, F13, "As built: F13
+;; (write-ahead)"; JCS161 (a)): the registry of live threads (ThreadMXBean's ids, counts, peak, total started,
+;; daemons, as HotSpot's ThreadService counts them) and the natives of jdk.internal.jrt.HostManagement
+;; (overlay/jdk/java.base/jdk/internal/jrt/HostManagement.java), under the variants of
+;; sun.management.VMManagementImpl and ThreadImpl: the threads, their counts, the runtime's start and uptime,
+;; the process id. A thread is live from its start (thread.ae's threadEntry) to its end (terminate); the main
+;; thread from RunMain; a goroutine jrt adopts is not counted (no Java thread of the JVM's either: the JVM's
+;; are the threads it starts and attaches).
+(in-ns 'go.arbace.jrt)
+
+(go/file "management.go"
+  :imports [[os "os"] [sync "sync"] [time "time"]])
+
+(go/var ^{:doc "vmStart is when the program's runtime started (package initialization), RuntimeMXBean's
+start time.\n"
+          :tag time/Time} vmStart (time/Now))
+
+(go/var ^{:tag sync/Mutex} liveMu)
+(go/var ^{:doc "liveSet holds the live threads (liveMu).\n" :tag (map (* Thread) int64)} liveSet
+  (make (map (* Thread) int64)))
+(go/var ^{:doc "liveOrder numbers the threads in start order (liveMu): liveSet's values.\n" :tag int64} liveOrder)
+(go/var ^{:doc "liveStarted counts the threads ever started (liveMu).\n" :tag int64} liveStarted)
+(go/var ^{:doc "livePeak is the most live threads since the start or the last reset (liveMu).\n" :tag int32} livePeak)
+
+(go/func liveAdd
+  "liveAdd makes t live: counted once, however often it is added.\n"
+  [^{:tag (* Thread)} t]
+  (.Lock liveMu)
+  (defer (.Unlock liveMu))
+  (let [(values _ ok) (aget liveSet t)]
+    (when ok (return)))
+  (inc! liveOrder)
+  (aset liveSet t liveOrder)
+  (inc! liveStarted)
+  (when (> (conv int32 (len liveSet)) livePeak)
+    (set! livePeak (conv int32 (len liveSet)))))
+
+(go/func liveRemove "liveRemove ends t's life.\n" [^{:tag (* Thread)} t]
+  (.Lock liveMu)
+  (delete liveSet t)
+  (.Unlock liveMu))
+
+(go/func liveThreads
+  "liveThreads is the live threads in start order.\n"
+  ^{:tag (slice (* Thread))} []
+  (.Lock liveMu)
+  (let [ts (make (slice (* Thread)) 0 (len liveSet))]
+    (range [t _ liveSet] (set! ts (append ts t)))
+    (let [order liveSet]
+      (for [i 1] (< i (len ts)) (inc! i)
+        (for [j i] (and (> j 0) (> (aget order (aget ts (- j 1))) (aget order (aget ts j)))) (dec! j)
+          (let [x (aget ts j)]
+            (aset ts j (aget ts (- j 1)))
+            (aset ts (- j 1) x)))))
+    (.Unlock liveMu)
+    ts))
+
+(go/func HostManagement_Threads0__Thread1_native
+  "HostManagement_Threads0__Thread1_native is the live threads, in start order (ThreadImpl's getThreads).\n"
+  ^{:tag (* RefArray)} []
+  (let [ts (liveThreads)
+        a (NewRefArray Thread_class (conv int32 (len ts)))]
+    (range [i t ts] (aset (.-A a) i (.-self t)))
+    a))
+
+(go/func HostManagement_LiveCount0__I_native "HostManagement_LiveCount0__I_native is the live threads' count.\n"
+  ^int32 []
+  (.Lock liveMu)
+  (defer (.Unlock liveMu))
+  (conv int32 (len liveSet)))
+
+(go/func HostManagement_DaemonCount0__I_native "HostManagement_DaemonCount0__I_native is the live daemon threads' count.\n"
+  ^int32 []
+  (.Lock liveMu)
+  (defer (.Unlock liveMu))
+  (let [^int32 n 0]
+    (range [t _ liveSet]
+      (when (.Load (.-daemon t)) (inc! n)))
+    n))
+
+(go/func HostManagement_PeakCount0__I_native "HostManagement_PeakCount0__I_native is the peak live count.\n"
+  ^int32 []
+  (.Lock liveMu)
+  (defer (.Unlock liveMu))
+  livePeak)
+
+(go/func HostManagement_ResetPeakCount0__V_native
+  "HostManagement_ResetPeakCount0__V_native makes the peak the current live count.\n"
+  []
+  (.Lock liveMu)
+  (set! livePeak (conv int32 (len liveSet)))
+  (.Unlock liveMu))
+
+(go/func HostManagement_TotalStarted0__J_native
+  "HostManagement_TotalStarted0__J_native is the count of threads ever started.\n"
+  ^int64 []
+  (.Lock liveMu)
+  (defer (.Unlock liveMu))
+  liveStarted)
+
+(go/func HostManagement_StartTime0__J_native
+  "HostManagement_StartTime0__J_native is the runtime's start, in milliseconds since the epoch.\n"
+  ^int64 []
+  (.UnixMilli vmStart))
+
+(go/func HostManagement_Uptime0__J_native
+  "HostManagement_Uptime0__J_native is the milliseconds since the runtime's start (the monotonic clock).\n"
+  ^int64 []
+  (.Milliseconds (time/Since vmStart)))
+
+(go/func HostManagement_Pid0__I_native "HostManagement_Pid0__I_native is the process id.\n"
+  ^int32 []
+  (conv int32 (os/Getpid)))
