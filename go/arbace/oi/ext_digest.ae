@@ -69,8 +69,11 @@
   (switch kind
     (case [baFloat32]
       (return (conv float64 (conv float32 (AsFloat v)))))
-    (case [baFloat64 baFloat16]
+    (case [baFloat64]
       (return (AsFloat v)))
+    ;; a float16 element holds a half float (ext_bigarray.go's f16Round)
+    (case [baFloat16]
+      (return (f16Round (AsFloat v))))
     (case [baSint8]
       (return (conv int (conv int8 (AsInt v)))))
     (case [baUint8 baChar]
@@ -468,35 +471,56 @@
         (regIfAbsent "caml_ba_sub" ^{:go/end 477} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
             (let [b (baOf (aget a 0))
                 (values ofs n) (values (AsInt (aget a 1)) (AsInt (aget a 2)))]
-              (when (or (== (len (.-dims b)) 0) (< ofs 0) (< n 0) (> (+ ofs n) (aget (.-dims b) 0)))
+              (when (== (len (.-dims b)) 0)
                 (InvalidArg "Bigarray.sub: bad sub-array"))
-
-              (let [stride (product (subslice (.-dims b) 1))
-                  ^{:line 475} dims (append (lit (slice int) n) (spread (subslice (.-dims b) 1)))]
-                (.wrap b (subslice (.-data b) (* ofs stride) (* (+ ofs n) stride)) dims)))))
+              ;; caml_ba_sub: the C layout reduces the first dimension, the Fortran one the last (its offset from 1), over
+              ;; the elements' blocks of the other dimensions
+              (when (== (.-layout b) 0)
+                (when (or (< ofs 0) (< n 0) (> (+ ofs n) (aget (.-dims b) 0)))
+                  (InvalidArg "Bigarray.sub: bad sub-array"))
+                (let [stride (product (subslice (.-dims b) 1))
+                      dims (append (lit (slice int) n) (spread (subslice (.-dims b) 1)))]
+                  (return (.wrap b (subslice (.-data b) (* ofs stride) (* (+ ofs n) stride)) dims))))
+              (let [last (- (len (.-dims b)) 1)
+                      o (- ofs 1)]
+                  (when (or (< o 0) (< n 0) (> (+ o n) (aget (.-dims b) last)))
+                    (InvalidArg "Bigarray.sub: bad sub-array"))
+                  (let [stride (product (subslice (.-dims b) 0 last))
+                        dims (append (append (lit (slice int)) (spread (subslice (.-dims b) 0 last))) n)]
+                    (.wrap b (subslice (.-data b) (* o stride) (* (+ o n) stride)) dims))))))
 
         (regIfAbsent "caml_ba_slice" ^{:go/end 495} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
             (let [b (baOf (aget a 0))
                 ^{:line 480} idx (.-F (assert (* Block) (aget a 1)))]
-              (when (>= (len idx) (len (.-dims b)))
+              ;; caml_ba_slice: the C layout fixes the first indices, the Fortran one the last (the others at their first
+              ;; position, 0 or 1), the offset caml_ba_offset's ("index out of bounds")
+              (when (> (len idx) (len (.-dims b)))
                 (InvalidArg "Bigarray.slice: too many indices"))
-
-              (let [off 0]
-                (range [i x idx]
-                  (let [j (AsInt x)]
-                    (when (or (< j 0) (>= j (aget (.-dims b) i)))
-                      (InvalidArg "Bigarray.slice: index out of bounds"))
-
-                    (set! off (+ (* off (aget (.-dims b) i)) j))))
-
-                (let [rest (subslice (.-dims b) (len idx))
-                    ^{:line 493} n (product rest)]
-                  (.wrap b (subslice (.-data b) (* off n) (* (+ off 1) n)) (append (conv (slice int) nil) (spread rest))))))))
+              (let [nd (len (.-dims b))
+                    k (len idx)
+                    full (make (slice Value) nd)]
+                (if (== (.-layout b) 0)
+                  (range [i full]
+                    (if (< i k) (aset full i (aget idx i)) (aset full i 0)))
+                  (range [i full]
+                    (if (>= i (- nd k)) (aset full i (aget idx (- i (- nd k)))) (aset full i 1))))
+                (let [off (.offset b full)]
+                  (if (== (.-layout b) 0)
+                    (let [rest (subslice (.-dims b) k)]
+                      (return (.wrap b (subslice (.-data b) off (+ off (product rest))) (append (conv (slice int) nil) (spread rest)))))
+                    (let [rest (subslice (.-dims b) 0 (- nd k))]
+                      (return (.wrap b (subslice (.-data b) off (+ off (product rest))) (append (conv (slice int) nil) (spread rest)))))))))))
 
         (regIfAbsent "caml_ba_reshape" ^{:go/end 503} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
             (let [b (baOf (aget a 0))
                 ^{:line 498} dims (intsOf (aget a 1))]
-              (when (!= (product dims) (len (.-data b)))
+              ;; caml_ba_reshape's checks: the number of dimensions, negative ones, an overflow of the product (a mismatch)
+              (when (> (len dims) 16)
+                (InvalidArg "Bigarray.reshape: bad number of dimensions"))
+              (range [_ d dims]
+                (when (< d 0)
+                  (InvalidArg "Bigarray.reshape: negative dimension")))
+              (when [(values n ok) (baElements dims)] (or (not ok) (!= n (len (.-data b))))
                 (InvalidArg "Bigarray.reshape: size mismatch"))
 
               (.wrap b (.-data b) dims))))

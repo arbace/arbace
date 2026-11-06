@@ -91,7 +91,7 @@ suite_ref_one() {
     extra=$(inc_ref $c "$incs" "$r")
     (cd "$r" && $c -w -a $flags $extra $names -o "prog.$ext") > "$d/$c.log" 2>&1 || cst=$?
     if [ $cst != 0 ]; then line="$line	compile-error	-	0"; continue; fi
-    (cd "$r" && env $env timeout "$TIMEOUT" "./prog.$ext" $args > "$d/$ext.out" 2>&1) || st=$?
+    (cd "$r" && run_redirected "$env" "$d/$ext.out" timeout "$TIMEOUT" "./prog.$ext" $args) || st=$?
     line="$line	$st	$(sha256sum < "$d/$ext.out" | cut -d' ' -f1)	$(wc -c < "$d/$ext.out")"
   done
   local same=false last; last=$(echo "$units" | awk '{print $NF}')
@@ -142,7 +142,7 @@ suite_oi_one() {
   local tl; tl=$(inc_units "$incs" $(cat "$d/units.list") | tr '\n' ' ')
   local st=0 t0 t1 note=""
   t0=$(date +%s.%N); times > "$d/cpu0"
-  (cd "$d" && limited_cpu "$TIMEOUT" "$(oi_wall)" env $env "$EXE" run "$LIB" $tl $(cat "$d/units.list") -- $args > "$d/oi.out" 2>&1) || st=$?
+  (cd "$d" && run_redirected "$env" "$d/oi.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$LIB" $tl $(cat "$d/units.list") -- $args) || st=$?
   t1=$(date +%s.%N); times > "$d/cpu1"
   note=$(grep -a -m1 -o 'oi: .*' "$d/oi.out" | head -c 300 | tr '\t' ' ' || true)
   st=$(oi_status "$st" "$(oi_cpu_secs "$d/cpu0" "$d/cpu1")")

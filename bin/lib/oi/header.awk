@@ -25,6 +25,8 @@ END {
   sub(/^ *TEST/, "", body)
   # ocamltest's ${ocamlsrcdir}, the compiler's source tree (OT21 (b)): the pinned tarball's, bin/oi corpus puts its path for @OCAMLSRCDIR@
   gsub(/\$\{ocamlsrcdir\}/, "@OCAMLSRCDIR@", body)
+  gsub(/\$\{test_source_directory\}/, "@TSD@", body)
+  gsub(/\$\{[a-z_]*\}/, "$VAR", body)
   gsub(/[{}]/, ";", body)
   m = split(body, st, ";")
   flags = ""; incs = ""; args = ""; env = ""
@@ -47,6 +49,17 @@ END {
         }
         continue
       }
+      # ocamltest's precondition scripts that only check the platform, decided as ocamltest's run here decides them: the runtime does
+      # not clean up at exit (no OCAMLRUNPARAM c=1) and the host is Linux, so both pass; has-execvpe skips where the C library has
+      # execvpe (musl, glibc)
+      if (key == "script" && val ~ /^sh @TSD@\/(test-runtime-cleanup|is-linux)\.sh$/) { prescript = 1; continue }
+      if (key == "script" && val ~ /^sh @TSD@\/has-execvpe\.sh$/) { print "class\theader: skip (has-execvpe.sh: the C library has execvpe)"; exit }
+      # the program's output into a file then compared, ocamltest's default made explicit (lib-threads/sieve)
+      if (key == "output" && val == "$VAR/program-output") continue
+      if (key == "stdout" && val == "$VAR") continue
+      # the standard input empty and the standard error discarded (bin/oi's @stdin=null, @stderr=null in the run's environment field)
+      if (key == "stdin" && val == "/dev/null") { env = env " @stdin=null"; continue }
+      if (key == "stderr" && val == "/dev/null") { env = env " @stderr=null"; continue }
       if (key == "ocamlopt_flags" || key == "reason" || key == "exit_status" || key == "binary_modules") continue
       if (key == "arguments") { args = val; continue }
       if (key == "ocamlrunparam") { print "class\theader: ocamlrunparam " val; exit }
@@ -61,16 +74,20 @@ END {
       if (lib == "systhreads") { incs = incs " unix systhreads"; continue }
       # compiler-libs (OT9's eighth fix): the units of utils/ bin/oi builds (COMPLIB_UNITS); a program that needs more (the parser, the typer)
       # fails at its link, in a class
+      # the Str library (DEFERRED-TRIAGE §3 item 10): str.ml loaded with the program, its matcher oi's ext_str_re
+      if (lib == "str") { incs = incs " str"; continue }
       if (lib == "config" || lib == "ocamlcommon") { if (incs !~ / complib/) incs = incs " complib"; continue }
       print "class\theader: include " lib; exit
     }
     if (s ~ /^set [A-Za-z_0-9]+ *= *"/) { e = s; sub(/^set /, "", e); gsub(/ *= */, "=", e); gsub(/"/, "", e); env = env " " e; continue }
     if (s ~ /^unset /) continue
+    if (s == "script" && prescript) continue
     # a later alternative that skips (lib-threads' "{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }"): the run is the
     # first alternative's, read up to here (OT9's fifth fix); a test whose only branch skips stays a class
     if (s == "skip" && incs != "") break
-    if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "not_macos_amd64_tsan" || s == "hasunix" || s == "hassysthreads") continue
+    if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "not_macos_amd64_tsan" || s == "hasunix" || s == "hassysthreads" || s == "hasstr") continue
     print "class\theader: " s; exit
   }
+  if (args ~ /\$VAR/) { print "class\theader: arguments = " args; exit }
   print "run\t" trim(flags) "\t" trim(incs) "\t" args "\t" trim(env)
 }

@@ -1,0 +1,214 @@
+(in-ns 'go.arbace.oi) (go/file "ext_bigarray.go" :imports [
+    [binary "encoding/binary"]
+    [math "math"]
+    [bits "math/bits"]])
+
+;; The Bigarray library beyond the minimal one of ext_digest.go (DEFERRED-TRIAGE §3 item 11): runtime/bigarray.c of OCaml 5.5.0
+;; (LGPL-2.1 with the OCaml linking exception) ported rule for rule for the custom operations compare (caml_ba_compare),
+;; serialize and deserialize (caml_ba_serialize, caml_ba_deserialize: the "_bigarr02" custom block of the marshal format),
+;; the float16 kind's conversions (round to nearest even, as the F16C instructions and float_to_half_fast3_rtne) and the
+;; dimension checks of reshape (caml_umul_overflow).
+
+(go/func f16Bits "f16Bits is caml_float_to_float16: f as a half float, rounded to nearest even.\n" ^uint16 [^float32 f]
+  (let [x (math/Float32bits f)
+        sign (conv uint16 (bit-and (>> x 16) 0x8000))
+        e (conv int (bit-and (>> x 23) 0xff))
+        m (bit-and x 0x7fffff)]
+    (when (== e 255)
+      (when (!= m 0)
+        (return (bit-or sign 0x7e00)))
+      (return (bit-or sign 0x7c00)))
+    (let [h (+ (- e 127) 15)]
+      (when (>= h 31)
+        (return (bit-or sign 0x7c00)))
+      (when (<= h 0)
+        (when (< h -10)
+          (return sign))
+        (let [mm (bit-or m 0x800000)
+              shift (conv uint (- 14 h))
+              half (>> mm shift)
+              rem (bit-and mm (- (<< (conv uint32 1) shift) 1))
+              mid (<< (conv uint32 1) (- shift 1))]
+          (when (or (> rem mid) (and (== rem mid) (== (bit-and half 1) 1)))
+            (inc! half))
+          (return (bit-or sign (conv uint16 half)))))
+      (let [half (bit-or (<< (conv uint32 h) 10) (>> m 13))
+            rem (bit-and m 0x1fff)]
+        (when (or (> rem 0x1000) (and (== rem 0x1000) (== (bit-and half 1) 1)))
+          (inc! half))
+        (bit-or sign (conv uint16 half))))))
+
+(go/func f16Value "f16Value is caml_float16_to_float: the half float d as a float.\n" ^float64 [^uint16 d]
+  (let [sign 1.0
+        e (conv int (bit-and (>> d 10) 0x1f))
+        m (conv float64 (bit-and d 0x3ff))]
+    (when (!= (bit-and d 0x8000) 0)
+      (set! sign -1.0))
+    (when (== e 31)
+      (when (!= m 0)
+        (return (math/NaN)))
+      (return (math/Inf (conv int sign))))
+    (when (== e 0)
+      (return (* sign (math/Ldexp m -24))))
+    (* sign (math/Ldexp (+ 1024 m) (- e 25)))))
+
+(go/func f16Round "f16Round is f stored as a float16 element and read back (caml_ba_set's and caml_ba_get's conversions).\n"
+  ^float64 [^float64 f]
+  (f16Value (f16Bits (conv float32 f))))
+
+(go/func baFlags "baFlags is the array's flags as bigarray.c compares and serializes them: kind | layout.\n" ^int [^{:tag (* bigarray)} b]
+  (bit-or (.-kind b) (<< (.-layout b) 8)))
+
+(go/func baCmpFloat "baCmpFloat is DO_GENERIC_UNORDERED_COMPARISON's step: a NaN above every number.\n" ^int [^float64 a ^float64 b]
+  (when (< a b) (return -1))
+  (when (> a b) (return 1))
+  (when (!= a b)
+    (when (== a a) (return 1))
+    (when (== b b) (return -1)))
+  0)
+
+(go/func baCompare "baCompare is caml_ba_compare.\n" ^int [^{:tag (* bigarray)} x ^{:tag (* bigarray)} y]
+  (let [f1 (baFlags x) f2 (baFlags y)]
+    (when (!= f1 f2)
+      (return (- f2 f1)))
+    (when (!= (len (.-dims x)) (len (.-dims y)))
+      (return (- (len (.-dims y)) (len (.-dims x)))))
+    (range [i d (.-dims x)]
+      (let [e (aget (.-dims y) i)]
+        (when (< d e) (return -1))
+        (when (> d e) (return 1))))
+    (range [i v (.-data x)]
+      (let [w (aget (.-data y) i)]
+        (type-switch [a v]
+          (case [float64]
+            (when [c (baCmpFloat a (AsFloat w))] (!= c 0)
+              (return c)))
+          (case [(* FloatArray)]
+            (let [b (.-F (assert (* FloatArray) w))]
+              (range [k z (.-F a)]
+                (when [c (baCmpFloat z (aget b k))] (!= c 0)
+                  (return c)))))
+          (default
+            (let [p (bigInt v) q (bigInt w)]
+              (when (< p q) (return -1))
+              (when (> p q) (return 1)))))))
+    0))
+
+(go/func baElements "baElements is the number of elements of dims, false on an overflow (caml_umul_overflow).\n"
+  [^{:tag (slice int)} dims] :results [int bool]
+  (let [n (conv uint64 1)]
+    (range [_ d dims]
+      (let [(values hi lo) (bits/Mul64 n (conv uint64 d))]
+        (when (!= hi 0)
+          (return 0 false))
+        (set! n lo)))
+    (when (> n (conv uint64 math/MaxInt64))
+      (return 0 false))
+    (return (conv int n) true)))
+
+(go/func baLongs "baLongs is caml_ba_serialize_longarray: 32-bit words when every element is in [lo, hi], else 64-bit ones.\n"
+  ^{:tag (slice byte)} [^{:tag (slice byte)} buf ^{:tag (slice Value)} data ^int64 lo ^int64 hi]
+  (let [wide false]
+    (range [_ v data]
+      (let [x (conv int64 (bigInt v))]
+        (when (or (< x lo) (> x hi))
+          (set! wide true)
+          (break))))
+    (if wide
+      (do (set! buf (append buf 1))
+          (range [_ v data]
+            (set! buf (.AppendUint64 binary/BigEndian buf (conv uint64 (bigInt v))))))
+      (do (set! buf (append buf 0))
+          (range [_ v data]
+            (set! buf (.AppendUint32 binary/BigEndian buf (conv uint32 (conv int32 (bigInt v))))))))
+    buf))
+
+(go/func baSerialize "baSerialize is caml_ba_serialize: the block's data appended to buf, and its sizes in the 32-bit and 64-bit heaps.\n"
+  [^{:tag (slice byte)} buf ^{:tag (* bigarray)} b] :results [(slice byte) uint64 uint64]
+  (set! buf (.AppendUint32 binary/BigEndian buf (conv uint32 (len (.-dims b)))))
+  (set! buf (.AppendUint32 binary/BigEndian buf (conv uint32 (baFlags b))))
+  (range [_ d (.-dims b)]
+    (if (< d 0xffff)
+      (set! buf (.AppendUint16 binary/BigEndian buf (conv uint16 d)))
+      (do (set! buf (.AppendUint16 binary/BigEndian buf 0xffff))
+          (set! buf (.AppendUint64 binary/BigEndian buf (conv uint64 d))))))
+  (switch (.-kind b)
+    (case [baChar baSint8 baUint8]
+      (range [_ v (.-data b)] (set! buf (append buf (conv byte (bigInt v))))))
+    (case [baSint16 baUint16]
+      (range [_ v (.-data b)] (set! buf (.AppendUint16 binary/BigEndian buf (conv uint16 (bigInt v))))))
+    (case [baFloat16]
+      (range [_ v (.-data b)] (set! buf (.AppendUint16 binary/BigEndian buf (f16Bits (conv float32 (AsFloat v)))))))
+    (case [baFloat32]
+      (range [_ v (.-data b)] (set! buf (.AppendUint32 binary/BigEndian buf (math/Float32bits (conv float32 (AsFloat v)))))))
+    (case [baInt32]
+      (range [_ v (.-data b)] (set! buf (.AppendUint32 binary/BigEndian buf (conv uint32 (bigInt v))))))
+    (case [baComplex32]
+      (range [_ v (.-data b)]
+        (range [_ z (.-F (assert (* FloatArray) v))]
+          (set! buf (.AppendUint32 binary/BigEndian buf (math/Float32bits (conv float32 z)))))))
+    (case [baFloat64]
+      (range [_ v (.-data b)] (set! buf (.AppendUint64 binary/BigEndian buf (math/Float64bits (AsFloat v))))))
+    (case [baInt64]
+      (range [_ v (.-data b)] (set! buf (.AppendUint64 binary/BigEndian buf (conv uint64 (bigInt v))))))
+    (case [baComplex64]
+      (range [_ v (.-data b)]
+        (range [_ z (.-F (assert (* FloatArray) v))]
+          (set! buf (.AppendUint64 binary/BigEndian buf (math/Float64bits z))))))
+    (case [baCamlInt]
+      (set! buf (baLongs buf (.-data b) (/ math/MinInt32 2) (/ math/MaxInt32 2))))
+    (case [baNativeInt]
+      (set! buf (baLongs buf (.-data b) math/MinInt32 math/MaxInt32))))
+  (let [n (conv uint64 (len (.-dims b)))]
+    (return buf (* (+ 4 n) 4) (* (+ 4 n) 8))))
+
+(go/func baDeserialize "baDeserialize is caml_ba_deserialize over the reader's input.\n" ^Value [^{:tag (* internState)} s]
+  (let [nd (conv int (.u32 s))]
+    (when (or (< nd 0) (> nd 16))
+      (.failf s "input_value: wrong number of bigarray dimensions"))
+    (let [flags (conv int (.u32 s))
+          kind (bit-and flags 0xff)
+          layout (bit-and (>> flags 8) 1)
+          dims (make (slice int) nd)]
+      (range [i dims]
+        (let [l (.u16 s)]
+          (if (== l 0xffff)
+            (aset dims i (conv int (.u64 s)))
+            (aset dims i l))))
+      (let [(values n ok) (baElements dims)]
+        (when (not ok)
+          (.failf s "input_value: size overflow for bigarray"))
+        (when (> kind baFloat16)
+          (.failf s "input_value: bad bigarray kind"))
+        (let [data (make (slice Value) n)]
+          (switch kind
+            (case [baChar baUint8] (range [i data] (aset data i (.u8 s))))
+            (case [baSint8] (range [i data] (aset data i (.s8 s))))
+            (case [baUint16] (range [i data] (aset data i (.u16 s))))
+            (case [baSint16] (range [i data] (aset data i (conv int (conv int16 (.u16 s))))))
+            (case [baFloat16] (range [i data] (aset data i (f16Value (conv uint16 (.u16 s))))))
+            (case [baFloat32] (range [i data] (aset data i (conv float64 (math/Float32frombits (.u32 s))))))
+            (case [baInt32] (range [i data] (aset data i (conv int32 (.u32 s)))))
+            (case [baComplex32]
+              (range [i data]
+                (let [re (conv float64 (math/Float32frombits (.u32 s)))
+                      im (conv float64 (math/Float32frombits (.u32 s)))]
+                  (aset data i (addr (lit FloatArray :F (lit (slice float64) re im)))))))
+            (case [baFloat64] (range [i data] (aset data i (math/Float64frombits (.u64 s)))))
+            (case [baInt64] (range [i data] (aset data i (conv int64 (.u64 s)))))
+            (case [baComplex64]
+              (range [i data]
+                (let [re (math/Float64frombits (.u64 s))
+                      im (math/Float64frombits (.u64 s))]
+                  (aset data i (addr (lit FloatArray :F (lit (slice float64) re im)))))))
+            (case [baCamlInt baNativeInt]
+              (let [wide (.u8 s)]
+                (range [i data]
+                  (let [x 0]
+                    (if (!= wide 0)
+                      (set! x (conv int (conv int64 (.u64 s))))
+                      (set! x (conv int (conv int32 (.u32 s)))))
+                    (if (== kind baNativeInt)
+                      (aset data i (conv Nativeint x))
+                      (aset data i x)))))))
+          (addr (lit Custom :Name "_bigarr02" :V (addr (lit bigarray :kind kind :layout layout :dims dims :data data)))))))))

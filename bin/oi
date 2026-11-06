@@ -93,6 +93,9 @@ TESTLIB=$OI_DIR/testlib
 UNIXLIB=$OI_DIR/unixlib
 # the threads library's units (OT9's fifth fix): otherlibs/systhreads' thread.ml and event.ml, loaded by the programs that include systhreads
 THREADLIB=$OI_DIR/threadlib
+# the Str library's unit (DEFERRED-TRIAGE §3 item 10): otherlibs/str's str.ml, loaded by the programs that include str; its matcher is
+# oi's ext_str_re (strstubs.c's re_match) and the runtime's ExtStrRe
+STRLIB=$OI_DIR/strlib
 # compiler-libs' units (OT9's eighth fix, as far as the triage's list needs): the tarball's utils/ modules the programs of `include config`
 # and `include ocamlcommon` name (Config from config.fixed.ml and config.common.ml.in, the magic numbers the host's), in link order
 COMPLIB=$OI_DIR/complib
@@ -102,7 +105,7 @@ COMPLIB=$OI_DIR/complib
 COMPLIB_UNITS="config build_path_prefix_map format_doc misc identifiable numbers arg_helper local_store load_path clflags profile terminfo ccomp warnings consistbl linkdeps strongly_connected_components targetint int_replace_polymorphic_compare binutils lazy_backtrack diffing diffing_with_keys stable_matching compression location unit_info asttypes longident docstrings syntaxerr ast_helper ast_iterator builtin_attributes camlinternalMenhirLib parser lexer pprintast parse printast ast_mapper attr_helper ast_invariants depend"
 # the interfaces without an implementation (cmi only)
 COMPLIB_MLI_ONLY="parsetree"
-export UNIXLIB THREADLIB COMPLIB COMPLIB_UNITS
+export UNIXLIB THREADLIB STRLIB COMPLIB COMPLIB_UNITS
 EXE=$OI_DIR/bin/oi
 TESTS=$TOP/testsuite/tests
 REFS=$root/test/ocaml/ref-ocaml55.edn
@@ -121,17 +124,21 @@ die() { echo "oi: $*" >&2; exit 2; }
 # the library units it is run with, in link order (Unix, then Thread and Event, then the testsuite's Testing), one a line; inc_ref C INCS DIR,
 # the reference compiler C's (ocamlc or ocamlopt) libraries for a program compiled in DIR (OT9's third fix: one place for both corpora)
 inc_I() { case " $1 " in *" unix "*) printf -- '-I %s ' "$UNIXLIB" ;; esac; case " $1 " in *" systhreads "*) printf -- '-I %s ' "$THREADLIB" ;; esac
+  case " $1 " in *" str "*) printf -- '-I %s ' "$STRLIB" ;; esac
   case " $1 " in *" complib "*) printf -- '-I %s ' "$COMPLIB" ;; esac
   case " $1 " in *" testing "*) printf -- '-I %s ' "$TESTLIB" ;; esac; }
-inc_units() { case " $1 " in *" unix "*) echo "$UNIXLIB/Unix.ae"; echo "$UNIXLIB/UnixLabels.ae" ;; esac
-  case " $1 " in *" systhreads "*) echo "$THREADLIB/Thread.ae"; echo "$THREADLIB/Event.ae" ;; esac
-  case " $1 " in *" complib "*) local m; if [ $# -gt 1 ]; then shift; complib_need "$@"
+inc_units() { local incs=$1 m; shift
+  case " $incs " in *" unix "*) echo "$UNIXLIB/Unix.ae"; echo "$UNIXLIB/UnixLabels.ae" ;; esac
+  case " $incs " in *" systhreads "*) echo "$THREADLIB/Thread.ae"; echo "$THREADLIB/Event.ae" ;; esac
+  case " $incs " in *" str "*) echo "$STRLIB/Str.ae" ;; esac
+  case " $incs " in *" complib "*) if [ $# -gt 0 ]; then complib_need "$@"
     else for m in $COMPLIB_UNITS; do echo "$COMPLIB/$(echo "${m:0:1}" | tr a-z A-Z)${m:1}.ae"; done; fi ;; esac
-  case " $1 " in *" testing "*) echo "$TESTLIB/Testing.ae" ;; esac; }
+  case " $incs " in *" testing "*) echo "$TESTLIB/Testing.ae" ;; esac; }
 inc_ref() {
   local c=$1 incs=$2 d=$3 x=""
   case " $incs " in *" unix "*) if [ "$c" = ocamlc ]; then x="-I +unix unix.cma"; else x="-I +unix unix.cmxa"; fi ;; esac
   case " $incs " in *" systhreads "*) if [ "$c" = ocamlc ]; then x="$x -I +threads threads.cma"; else x="$x -I +threads threads.cmxa"; fi ;; esac
+  case " $incs " in *" str "*) if [ "$c" = ocamlc ]; then x="$x -I +str str.cma"; else x="$x -I +str str.cmxa"; fi ;; esac
   case " $incs " in *" complib "*) if [ "$c" = ocamlc ]; then x="$x -I +compiler-libs ocamlcommon.cma"; else x="$x -I +compiler-libs ocamlcommon.cmxa"; fi ;; esac
   case " $incs " in *" testing "*)
     if [ "$c" = ocamlc ]; then x="$x -I $TESTLIB $TESTLIB/testing.cmo"
@@ -139,6 +146,24 @@ inc_ref() {
   esac
   echo "$x"
 }
+# run_redirected ENV OUT CMD...: CMD with ENV's variables (NAME=VALUE words), its standard output and error into OUT, but for ENV's
+# @stdin=null (the standard input an empty file, OUT.stdin) and @stderr=null (the standard error discarded into OUT.stderr): the header's
+# stdin = "/dev/null" and stderr = "/dev/null" (header.awk), for every runner of a program (oi, the references, the AOT levels)
+run_redirected() {
+  local e=$1 out=$2 kv i=0 n=0; shift 2
+  local v=()
+  for kv in $e; do case $kv in @stdin=null) i=1 ;; @stderr=null) n=1 ;; *) v+=("$kv") ;; esac; done
+  [ $i = 1 ] && : > "$out.stdin"
+  # (a subshell exports the variables: CMD may be a shell function)
+  case $i$n in
+    00) ( for kv in "${v[@]}"; do export "$kv"; done; "$@" ) > "$out" 2>&1 ;;
+    01) ( for kv in "${v[@]}"; do export "$kv"; done; "$@" ) > "$out" 2> "$out.stderr" ;;
+    10) ( for kv in "${v[@]}"; do export "$kv"; done; "$@" ) < "$out.stdin" > "$out" 2>&1 ;;
+    11) ( for kv in "${v[@]}"; do export "$kv"; done; "$@" ) < "$out.stdin" > "$out" 2> "$out.stderr" ;;
+  esac
+}
+# env_vars ENV: ENV less its @ redirections
+env_vars() { local kv; for kv in $1; do case $kv in @*) ;; *) printf '%s ' "$kv" ;; esac; done; }
 # dump_required DUMP: the units a Lambda dump requires (its lambda-program's list, ocamlc's required globals), one a line
 dump_required() { awk '/^ *\[/ { on = 1 } on { s = $0; while (match(s, /"[^"]*"/)) { print substr(s, RSTART + 1, RLENGTH - 2); s = substr(s, RSTART + RLENGTH) }; if ($0 ~ /\]$/) exit }' "$1"; }
 # complib_need DUMP...: compiler-libs' units the dumps require and those they require, in COMPLIB_UNITS' order (OT21 (b): ocamlc links a
@@ -156,7 +181,7 @@ complib_need() {
   for m in $COMPLIB_UNITS; do M="$(echo "${m:0:1}" | tr a-z A-Z)${m:1}"; [ -n "${seen[$M]:-}" ] && echo "$COMPLIB/$M.ae"; done
   return 0
 }
-export -f inc_I inc_units inc_ref dump_required complib_need
+export -f inc_I inc_units inc_ref dump_required complib_need run_redirected env_vars
 
 # oi's own level runs a program under limited_cpu: TIMEOUT seconds of CPU and a wall cap of four times that, as o2j_cpu (re-review 042's finding 1:
 # twice was a load band: a program needing more than half the cap in CPU timed out on a host slowed twofold)
@@ -214,7 +239,7 @@ stdlib_flags() {
 stdlib_key() {
   local k s
   k=$(cat "$OCDUMP_KEY") || { echo "oi: key: cannot read ocdump's key $OCDUMP_KEY" >&2; return 1; }
-  s=$(sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli" "$TOP/otherlibs/unix/unix.mli" "$TOP/otherlibs/unix/unix_unix.ml" "$TOP/otherlibs/unix/unixLabels.mli" "$TOP/otherlibs/unix/unixLabels.ml" "$TOP/otherlibs/systhreads/thread.ml" "$TOP/otherlibs/systhreads/thread.mli" "$TOP/otherlibs/systhreads/event.ml" "$TOP/otherlibs/systhreads/event.mli" "$TOP"/utils/*.ml* "$TOP"/parsing/*.ml*) || { echo "oi: key: the stdlib's sources cannot be read" >&2; return 1; }
+  s=$(sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli" "$TOP/otherlibs/unix/unix.mli" "$TOP/otherlibs/unix/unix_unix.ml" "$TOP/otherlibs/unix/unixLabels.mli" "$TOP/otherlibs/unix/unixLabels.ml" "$TOP/otherlibs/systhreads/thread.ml" "$TOP/otherlibs/systhreads/thread.mli" "$TOP/otherlibs/systhreads/event.ml" "$TOP/otherlibs/systhreads/event.mli" "$TOP/otherlibs/str/str.ml" "$TOP/otherlibs/str/str.mli" "$TOP"/utils/*.ml* "$TOP"/parsing/*.ml*) || { echo "oi: key: the stdlib's sources cannot be read" >&2; return 1; }
   { echo "$k"; echo "$s"; cat "$0"; } | sha256sum | cut -d' ' -f1
 }
 
@@ -287,6 +312,11 @@ cmd_stdlib() {
      && "$OCD" --mode lambda --simplify -I "$UNIXLIB" -I . --prefix thread --file thread.ml thread.ml > Thread.ae \
      && "$OCD" --mode lambda --simplify -I "$UNIXLIB" -I . --prefix event --file event.ml event.ml > Event.ae) \
     || die "stdlib: otherlibs/systhreads' thread.ml"
+  # the Str library's unit, as unix's
+  rm -rf "$STRLIB"; mkdir -p "$STRLIB"
+  cp "$TOP/otherlibs/str/str.ml" "$TOP/otherlibs/str/str.mli" "$STRLIB/"
+  (cd "$STRLIB" && ocamlc -w -a -c str.mli str.ml && "$OCD" --mode lambda --simplify -I . --prefix str --file str.ml str.ml > Str.ae) \
+    || die "stdlib: otherlibs/str's str.ml"
   complib_build
   echo "$key" > "$LIB/key"
   echo "oi: stdlib: $(wc -l < "$LIB/order.txt") units, $(du -sh "$LIB" | cut -f1) of Lambda, in $LIB"
@@ -464,7 +494,7 @@ ref_one() {
     extra=$(inc_ref $c "$incs" "$r")
     (cd "$r" && $c -w -a $flags $extra "$base.ml" -o "$base.$ext") > "$d/$c.log" 2>&1 || cst=$?
     if [ $cst != 0 ]; then line="$line	compile-error	-	0"; continue; fi
-    (cd "$r" && env $env timeout "$TIMEOUT" "./$base.$ext" $args > "$d/$ext.out" 2>&1) || st=$?
+    (cd "$r" && run_redirected "$env" "$d/$ext.out" timeout "$TIMEOUT" "./$base.$ext" $args) || st=$?
     line="$line	$st	$(sha256sum < "$d/$ext.out" | cut -d' ' -f1)	$(wc -c < "$d/$ext.out")"
   done
   local same=false
@@ -498,7 +528,7 @@ oi_one() {
   units=$(inc_units "$incs" "$d/$u.ae" | tr '\n' ' ')
   local st=0 t0 t1
   t0=$(date +%s.%N); times > "$d/cpu0"
-  (cd "$d" && limited_cpu "$TIMEOUT" "$(oi_wall)" env $env "$EXE" run "$LIB" $units "$u.ae" -- $args > "$d/oi.out" 2>&1) || st=$?
+  (cd "$d" && run_redirected "$env" "$d/oi.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$LIB" $units "$u.ae" -- $args) || st=$?
   t1=$(date +%s.%N); times > "$d/cpu1"
   local note=""
   note=$(grep -a -m1 -o 'oi: .*' "$d/oi.out" | head -c 300 | tr '\t' ' ' || true)
@@ -617,7 +647,7 @@ o2j_cpu() { local c=$((TIMEOUT + ${O2J_LOAD_ALLOWANCE:-20})); echo "$c $((c * 4)
 o2j_alone() {
   local id=$1 out=$2 files=$3 argv0=$4 st=0 t0 t1; shift 4
   t0=$(date +%s.%N)
-  (cd "$(dirname "$out")" && O2J_ARGV0=$argv0 o2j_run_cpu $(o2j_cpu) $(cat "$files") -- "$@") > "$out" 2>&1 || st=$?
+  (cd "$(dirname "$out")" && O2J_ARGV0=$argv0 run_redirected "${OI_REDIR:-}" "$out" o2j_run_cpu $(o2j_cpu) $(cat "$files") -- "$@") || st=$?
   t1=$(date +%s.%N)
   case $st in 124|137|152) st=timeout ;; esac
   printf '%s\t%s\t%s\n' "$id" "$st" "$(echo "$t1 - $t0" | bc)"
@@ -630,7 +660,7 @@ o2j_env_runs() {
   local bl=$1 res=$2
   awk -F'\t' '$NF != "" { a = ""; for (i = 5; i < NF; i++) a = a (a == "" ? "" : " ") $i; print $1 "\037" $2 "\037" $3 "\037" $4 "\037" a "\037" $NF }' "$bl" |
   while IFS=$'\037' read -r id out files argv0 args env; do
-    ( for kv in $env; do export "$kv"; done; o2j_alone "$id" "$out" "$files" "$argv0" $args ) >> "$res"
+    ( for kv in $(env_vars "$env"); do export "$kv"; done; OI_REDIR=$env; o2j_alone "$id" "$out" "$files" "$argv0" $args ) >> "$res"
   done
 }
 
@@ -778,7 +808,7 @@ cmd_aot_clib() {
   rm -rf "$C2_LIB"; mkdir -p "$C2_LIB"
   # the libraries outside the stdlib translated once into ocaml.u after it (OT26 (a), OT25 (b)): unix, threads, compiler-libs' units
   # and lib/testing; a program links those its header includes (cprogs' @UNIT entries) and those they need
-  o2j clib "$LIB" "$C2_LIB" $(inc_units "unix systhreads complib testing") > "$O2J/clib-missing.txt"
+  o2j clib "$LIB" "$C2_LIB" $(inc_units "unix systhreads str complib testing") > "$O2J/clib-missing.txt"
   echo "$key" > "$C2_LIB/key"
 }
 
@@ -873,8 +903,8 @@ c2_programs() {
     if [ -n "$r" ]; then printf '%s\t-\t-\t0\t0\trefused: %s\n' "$id" "$r" >> "$outnew"; continue; fi
     prog=$(awk -F'\t' -v p="$p" '{ n = split($2, a, " "); for (i = 1; i <= n; i++) if (a[i] == p) print $1 }' "$C2/built.tsv" | head -1)
     st=0; t0=$(date +%s.%N); times > "$d/cpu0"
-    (cd "$d" && for kv in $env; do export "$kv"; done
-     O2J_PROG=$p O2J_ARGV0=$a0 GOMAXPROCS=1 GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} limited_cpu "$TIMEOUT" "$(oi_wall)" "$prog" $args > "$d/o2j.out" 2>&1) || st=$?
+    (cd "$d" && O2J_PROG=$p O2J_ARGV0=$a0 GOMAXPROCS=1 GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} \
+       run_redirected "$env" "$d/o2j.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$prog" $args) || st=$?
     t1=$(date +%s.%N); times > "$d/cpu1"
     st=$(oi_status "$st" "$(oi_cpu_secs "$d/cpu0" "$d/cpu1")")
     note=$(grep -a -m1 -o 'o2j: .*' "$d/o2j.out" | head -c 300 | tr '\t' ' ' || true)
