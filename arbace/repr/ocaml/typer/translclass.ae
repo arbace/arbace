@@ -178,12 +178,14 @@
       :Tcl_let (let [[_ rec vbs vals cl'] d
                      [inh oi] (build-object-init cl-table obj (into (vec vals) params) inh-init obj-init cl')]
                  [inh (tr/transl-let rec vbs oi false)])
-      :Tcl_constraint (build-object-init cl-table obj params inh-init obj-init (d 1)))))
+      ;; a class's local open is of a path: no code
+      (:Tcl_constraint :Tcl_open) (build-object-init cl-table obj params inh-init obj-init (if (= :Tcl_open (d 0)) (d 2) (d 1))))))
 
 (defn- build-object-init-0 [cl-table params cl copy-env subst-env top ids]
   (let [d (:desc cl)]
-    (if (= :Tcl_let (d 0))
-      (build-object-init-0 cl-table (into (vec (d 3)) params) (d 4) copy-env subst-env top ids)
+    (case (d 0)
+      :Tcl_let (build-object-init-0 cl-table (into (vec (d 3)) params) (d 4) copy-env subst-env top ids)
+      :Tcl_open (build-object-init-0 cl-table params (d 2) copy-env subst-env top ids)
       (let [self (ty/ident-create "self")
             env (ty/ident-create "env")
             obj (if (empty? ids) l/lambda-unit [:Lvar self])
@@ -240,7 +242,7 @@
                         :Tcf_val (let [[_ name _ id _ over] f] [inh ci methods (if over values (cons [name id] values))])
                         :Tcf_method (let [[_ name _ kind] f]
                                       (if (= :concrete (kind 0))
-                                        (let [code (msubst true (tr/transl-exp (kind 1)))]
+                                        (let [code (msubst true (tr/transl-scoped-exp (tr/enter-method-definition tr/*scopes* name) (kind 1)))]
                                           [inh ci (vec (concat [[:Lvar (get (:meths cs) name)]] code methods)) values])
                                         [inh ci methods values]))
                         :Tcf_initializer [inh [:Lsequence (mkappl (oo-prim "add_initializer") (cons [:Lvar cla] (msubst false (tr/transl-exp (f 1))))) ci]
@@ -253,6 +255,7 @@
       :Tcl_fun (let [[inh ci] (build-class-init cla cstr super inh-init cl-init msubst top (d 3))]
                  [inh (transl-vals cla true :strictopt (mapv (fn [[id _]] ["" id]) (d 2)) ci)])
       :Tcl_apply (build-class-init cla cstr super inh-init cl-init msubst top (d 1))
+      :Tcl_open (build-class-init cla cstr super inh-init cl-init msubst top (d 2))
       :Tcl_let (let [[inh ci] (build-class-init cla cstr super inh-init cl-init msubst top (d 4))]
                  [inh (transl-vals cla true :strictopt (mapv (fn [[id _]] ["" id]) (d 3)) ci)])
       :Tcl_constraint
@@ -280,9 +283,10 @@
 
 (defn- build-class-lets [cl]
   (let [d (:desc cl)]
-    (if (= :Tcl_let (d 0))
-      (let [[env wrap] (build-class-lets (d 4))]
-        [env (fn [lam] (tr/transl-let (d 1) (d 2) (wrap lam) false))])
+    (case (d 0)
+      :Tcl_let (let [[env wrap] (build-class-lets (d 4))]
+                 [env (fn [lam] (tr/transl-let (d 1) (d 2) (wrap lam) false))])
+      :Tcl_open (build-class-lets (d 2))
       [(:env cl) identity])))
 
 (defn- get-class-meths [cl]
@@ -292,7 +296,8 @@
       :Tcl_ident #{}
       :Tcl_fun (get-class-meths (d 3))
       :Tcl_let (get-class-meths (d 4))
-      (:Tcl_apply :Tcl_constraint) (get-class-meths (d 1)))))
+      (:Tcl_apply :Tcl_constraint) (get-class-meths (d 1))
+      :Tcl_open (get-class-meths (d 2)))))
 
 (defn- env-diff
   "Env.diff: the local value identifiers of env2 not in env1"
@@ -371,6 +376,7 @@
       :Tcl_apply (let [[path pl oi] (transl-class-rebind* obj-init (d 1) vf)] [path pl (tr/transl-apply oi (d 2))])
       :Tcl_let (let [[path pl oi] (transl-class-rebind* obj-init (d 4) vf)] [path pl (tr/transl-let (d 1) (d 2) oi false)])
       :Tcl_structure (rebind-exit)
+      :Tcl_open (transl-class-rebind* obj-init (d 2) vf)
       :Tcl_constraint (let [[path pl oi] (transl-class-rebind* obj-init (d 1) vf)]
                         (loop [c (:type cl)]
                           (case (c 0)
@@ -410,6 +416,7 @@
   [ids cl-id pub-meths cl vflag]
   (if-let [rebind (transl-class-rebind cl vflag)]
     [rebind :dynamic]
+  (binding [tr/*scopes* (tr/enter-class-definition tr/*scopes* cl-id)]
   (let [tables (ty/ident-create (str (:name cl-id) "_tables"))
         [top-env req] (oo-add-class tables)
         top (not req)
@@ -505,7 +512,7 @@
                                                 (if concrete [(mkappl (lfield cached 0) [lenvs]) (lfield cached 1) lenvs]
                                                     [l/lambda-unit (lfield cached 0) lenvs])]
                                                :static])))]
-            [(llets lam) rk])))))))
+            [(llets lam) rk]))))))))
 
 (defn transl-class
   "Translclass.transl_class's wrapper: under oo_wrap"

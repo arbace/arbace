@@ -524,7 +524,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
 
-(declare type-expect type-function type-let type-cases split-effect-cases type-effect-cases)
+(declare type-expect type-function type-let type-cases split-effect-cases type-effect-cases type-binding-op type-andops)
 
 (defn type-exp [env sexp] (type-expect env sexp (ty/newvar)))
 
@@ -934,9 +934,49 @@
       :Pexp_struct_item (let [[ti env'] (*type-struct-item* env (d 1))
                               body (type-expect env' (d 2) expected)]
                           (mkexp [:Texp_struct_item ti body] (:type body) loc))
+      ;; Typecore's Pexp_letop: `let* p = e and* p' = e' in body` as (let* ) (( and* ) e e') (fun (p, p') -> body)
+      :Pexp_letop
+      (let [{let_ :let_ sands :ands sbody :body} (d 1)
+            lop (type-binding-op env let_)
+            [spat tparams] (reduce (fn [[sp tacc] a]
+                                     [{:ppat_desc [:Ppat_tuple [[nil sp] [nil (:pbop_pat a)]] :Closed] :ppat_loc (:loc (:pbop_op let_))}
+                                      (ty/newty [:Ttuple [[nil tacc] [nil (ty/newvar)]]])])
+                                   [(:pbop_pat let_) (ty/newvar)] sands)
+            tfres (ty/newvar) tres (ty/newvar) tands (ty/newvar)
+            tfunc (ty/newty [:Tarrow [:Nolabel] tparams tfres])
+            _ (unify! (:type lop) (ty/newty [:Tarrow [:Nolabel] tands (ty/newty [:Tarrow [:Nolabel] tfunc tres])]) "operator")
+            [lexp ands] (type-andops env (:pbop_exp let_) sands tands)
+            cases (type-cases env tparams tfres [{:pc_lhs spat :pc_rhs sbody}] true)
+            partial (partiality cases tparams)
+            param (name-pattern "param" (map :lhs cases))]
+        (ret [:Texp_letop lop lexp ands param (first cases) partial] tres))
       ;; Typecore's Pexp_unreachable: a refutation case's body (its pattern's refutation is not checked here: TY17)
       :Pexp_unreachable (mkexp [:Texp_unreachable] expected loc)
       (type-error (str "expression " (d 0) " outside the slice")))))
+
+(defn type-binding-op
+  "Typecore.type_binding_op_ident: a binding operator (let*, and+...) as the identifier it names, its type an instance"
+  [env op]
+  (type-exp env {:pexp_desc [:Pexp_ident {:txt [:Lident (:txt (:pbop_op op))] :loc (:loc (:pbop_op op))}]
+                 :pexp_loc (:loc (:pbop_op op))}))
+
+(defn type-andops
+  "Typecore.type_andops: the and-operators from the last, each typed ( and* ) : rest -> arg -> result, the let's
+  expression the innermost rest; [let-exp [[op exp]...]] in the source's order"
+  [env slet sands expected]
+  (letfn [(lp [rev expected]
+            (if (empty? rev)
+              [(type-expect env slet expected) []]
+              (let [a (first rev)
+                    op (type-binding-op env a)
+                    targ (ty/newvar) trest (ty/newvar) tr (ty/newvar)
+                    _ (unify! (:type op) (ty/newty [:Tarrow [:Nolabel] trest (ty/newty [:Tarrow [:Nolabel] targ tr])]) "operator")
+                    [larg more] (lp (rest rev) trest)
+                    e (type-expect env (:pbop_exp a) targ)]
+                (unify! tr expected "binding")
+                [larg (into [[op e]] more)])))]
+    (let [[larg rev-ands] (lp (reverse sands) expected)]
+      [larg (vec (reverse rev-ands))])))
 
 (defn split-effect-cases
   "Typecore's split_cases: [other-cases effect-cases continuation-patterns], an effect case `effect p1, p2` as the
@@ -1041,7 +1081,7 @@
             env' (add-pattern-vars env @vars)
             ;; a GADT parameter's equations hold over the rest of the function
             [params body _] (try (type-function env' (rest sparams) sbody tret) (finally (undo-equations! @eqs)))
-            param {:kind (if dflt [:opt p dflt] [:pat p]) :label l
+            param {:kind (if dflt [:opt p dflt] [:pat p]) :label l :loc (:pparam_loc sp)
                    :param (if dflt (ty/ident-create "*opt*") (name-pattern "param" [p]))
                    :partial (partiality [{:lhs p}] (:type p))}]
         [(vec (cons param params)) body expected])))))

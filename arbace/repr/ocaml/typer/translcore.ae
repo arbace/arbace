@@ -79,6 +79,7 @@
 (def ^:private primitives
   (merge
    {"%loc_LINE" {:t :loc :k :line} "%loc_FILE" {:t :loc :k :file} "%loc_LOC" {:t :loc :k :loc} "%loc_POS" {:t :loc :k :pos} "%loc_MODULE" {:t :loc :k :module}
+    "%loc_FUNCTION" {:t :loc :k :function}
     "%identity" {:t :identity} "%ignore" {:t :p :name "ignore" :arity 1} "%revapply" {:t :revapply} "%apply" {:t :apply}
     "%field0" {:t :field :pos 0} "%field1" {:t :field :pos 1}
     "%send" {:t :send :k :public} "%sendself" {:t :send :k :self} "%sendcache" {:t :send :k :cache}
@@ -266,6 +267,32 @@
 (def ^:dynamic *unit-name* "Env.get_current_unit_name: the unit being translated" nil)
 (declare pos-info)
 
+;; ---------------------------------------------------------------------------------------------
+;; Scoped locations (lambda/debuginfo.ml's Scoped_location): the names a %loc_FUNCTION reports
+
+(def ^:dynamic *scopes* "Debuginfo.Scoped_location.scopes: nil (Empty) or {:item :str :str-fun}" nil)
+(def ^:private new-scope "Translcore's ~in_new_scope for the next transl-exp (transl_scoped_exp sets it)" (atom false))
+
+(defn- add-parens-if-symbolic [^String s]
+  (cond (= "" s) ""
+        (let [c (.charAt s 0)] (or (Character/isLetterOrDigit c) (= c \_))) s
+        :else (str "(" s ")")))
+
+(defn- scope-dot [scopes s & [sep]]
+  (let [s (add-parens-if-symbolic s)] (if scopes (str (:str scopes) (or sep ".") s) s)))
+
+(defn- scope-cons [item s] {:item item :str s :str-fun (str s ".(fun)")})
+
+(defn enter-anonymous-function [scopes]
+  (let [s (if scopes (:str-fun scopes) "(fun)")] {:item :anonymous-function :str s :str-fun s}))
+(defn enter-value-definition [scopes id] (scope-cons :value-definition (scope-dot scopes (:name id))))
+(defn enter-module-definition [scopes id] (scope-cons :module-definition (scope-dot scopes (:name id))))
+(defn enter-class-definition [scopes id] (scope-cons :class-definition (scope-dot scopes (:name id))))
+(defn enter-method-definition [scopes name]
+  (scope-cons :method-definition (if (= :class-definition (:item scopes)) (scope-dot scopes name "#") (scope-dot scopes name))))
+
+(defn- string-of-scopes [scopes] (if scopes (:str scopes) "<unknown>"))
+
 (defn- lambda-of-loc
   "Translprim.lambda_of_loc"
   [k]
@@ -277,6 +304,7 @@
       :file [:Lconst [:string file]]
       :module [:Lconst [:string (or *unit-name* (str "//" (last (str/split file #"/")) "//"))]]
       :loc [:Lconst [:string (format "File \"%s\", line %d, characters %d-%d" file lnum cnum enum)]]
+      :function [:Lconst [:string (string-of-scopes *scopes*)]]
       :line (l/lconst-int lnum))))
 
 (defn- lambda-of-prim [prim args]
@@ -440,11 +468,28 @@
 (declare transl-exp0)
 
 (defn transl-exp
-  "Translcore.transl_exp1: a function, for or while evaluated more than once, its immediate objects' classes cached"
+  "Translcore.transl_exp1: a function, for or while evaluated more than once, its immediate objects' classes cached;
+  a function not just given a scope of its own (transl_scoped_exp) enters an anonymous function's"
   [e]
-  (if (#{:Texp_function :Texp_for :Texp_while} ((:desc e) 0))
-    (*oo-wrap* (:env e) true #(transl-exp0 e))
-    (transl-exp0 e)))
+  (let [in-new-scope (when @new-scope (reset! new-scope false) true)]
+    (if (#{:Texp_function :Texp_for :Texp_while} ((:desc e) 0))
+      (if (and (= :Texp_function ((:desc e) 0)) (not in-new-scope))
+        (binding [*scopes* (enter-anonymous-function *scopes*)] (*oo-wrap* (:env e) true #(transl-exp0 e)))
+        (*oo-wrap* (:env e) true #(transl-exp0 e)))
+      (transl-exp0 e))))
+
+(defn transl-scoped-exp
+  "Translcore.transl_scoped_exp: e translated in scopes, which it was just given"
+  [scopes e]
+  (binding [*scopes* scopes] (reset! new-scope true) (transl-exp e)))
+
+(defn- transl-bound-exp
+  "Translcore.transl_bound_exp: a binding of a function, or any in a structure, in the scope of its first variable"
+  [in-structure pat expr]
+  (let [ids (pm/bound-idents pat)]
+    (if (and (seq ids) (or (= :Texp_function ((:desc expr) 0)) in-structure))
+      (transl-scoped-exp (enter-value-definition *scopes* (first ids)) expr)
+      (transl-exp expr))))
 
 (defn- transl-setinstvar [self var expr]
   [:Lprim (l/prim (str "setfield_" (if (= :immediate (ty/maybe-pointer (:type expr))) "imm" "ptr") "_computed"))
@@ -491,6 +536,20 @@
                 lam (binding [*prim-loc* (:loc e)] (lambda-of-prim prim largs))]
             (if (empty? extra) lam (transl-apply lam extra)))
           (transl-apply (transl-exp f) args)))
+      ;; Translcore.transl_letop: each and-operator applied to the bindings so far and its expression, the
+      ;; let-operator to their result and the body's function (no arity fusion)
+      :Texp_letop (let [[_ lop lexp ands param case partial] d
+                        exp ((fn lp [prev ands]
+                               (if (empty? ands)
+                                 prev
+                                 (let [[op e] (first ands)
+                                       left (ty/ident-create "left") right (ty/ident-create "right")
+                                       lam (l/bind :strict right (transl-exp e) [:Lapply (transl-exp op) [[:Lvar left] [:Lvar right]]])]
+                                   (l/bind :strict left prev (lp lam (rest ands))))))
+                             (transl-exp lexp) ands)
+                        func (transl-function {:loc (:loc (:rhs case))} []
+                                              [:cases [case] partial param (:loc (:rhs case))])]
+                    [:Lapply (transl-exp lop) [exp func]])
       :Texp_match (if (seq (get d 4))
                     ;; Translcore's Texp_match with effect cases: the values' and the exceptions' cases split, transl_handler
                     (let [[vc ec] (reduce (fn [[vc ec] c]
@@ -644,9 +703,10 @@
         (reduce (fn [[body ps] fp]
                   (let [param (:param fp) k (:kind fp)]
                     (case (k 0)
-                      :pat [(m/for-function (:loc e) [:Lvar param] [[(k 1) body]] (:partial fp))
+                      ;; each parameter's matching at its own location (fp_loc)
+                      :pat [(m/for-function (or (:loc fp) (:loc e)) [:Lvar param] [[(k 1) body]] (:partial fp))
                             (cons [param (ty/value-kind (:type (k 1)))] ps)]
-                      :opt [(m/for-optional-arg-default (:loc e) (k 1) (transl-exp (k 2)) param body)
+                      :opt [(m/for-optional-arg-default (or (:loc fp) (:loc e)) (k 1) (transl-exp (k 2)) param body)
                             (cons [param ""] ps)])))
                 [lbody (if cases-param [cases-param] [])]
                 (reverse params))]
@@ -666,10 +726,10 @@
   (if (= rec :Recursive)
     ;; Value_rec_compiler.compile_letrec over (id, rkind, def)
     (let [defs (mapv (fn [vb] [((:desc (:pat vb)) 1) (or (:rec-kind vb) (vr/rec-kind (:expr vb)))
-                               (with-vb-attrs vb (transl-exp (:expr vb)))])
+                               (with-vb-attrs vb (transl-bound-exp in-structure (:pat vb) (:expr vb)))])
                      vbs)]
       (vr/compile-letrec defs (if (fn? body) (body) body)))
-    (let [lams (mapv (fn [vb] (transl-exp (:expr vb))) vbs)
+    (let [lams (mapv (fn [vb] (transl-bound-exp in-structure (:pat vb) (:expr vb))) vbs)
           body (if (fn? body) (body) body)]
       (reduce (fn [body [vb lam]] (m/for-let (:loc (:pat vb)) lam (:pat vb) body))
               body (reverse (map vector vbs lams))))))
