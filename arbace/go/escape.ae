@@ -668,17 +668,20 @@
 
 (defn discard [e n] (expr e (discard-hole e) n))
 
+(defn- max-stack ^long [] (if (:smallframes *debug*) (* 64 1024) (* 128 1024)))
+(defn- max-implicit ^long [] (if (:smallframes *debug*) (* 16 1024) (* 64 1024)))
+
 (defn- heap-alloc-reason
   "escape.HeapAllocReason: why node n must be on the heap, or nil."
   [n]
   (let [ty (node-type n)]
     (when (and ty (not= :invalid ty))
       (cond
-        (> (size ty) (* 128 1024)) "too large for stack"
+        (> (size ty) (max-stack)) "too large for stack"
         (> (align ty) 8) "too aligned for stack"
         (and (or (and (= :call (:op n)) (= "new" (:builtin n))) (and (= :addr (:op n)) (= :lit (:op (:x n)))))
-             (> (size (elem ty)) (* 64 1024))) "too large for stack"
-        (and (= :method (:op n)) (> (+ 8 (size (node-type (method-recv n)))) (* 64 1024))) "too large for stack"
+             (> (size (elem ty)) (max-implicit))) "too large for stack"
+        (and (= :method (:op n)) (> (+ 8 (size (node-type (method-recv n)))) (max-implicit))) "too large for stack"
         (and (= :call (:op n)) (= "make" (:builtin n)) (= :slice (kind ty)))
         (let [[l c] (rest (:args n))
               r (or c l)
@@ -686,7 +689,7 @@
           (cond
             (zero? es) "zero-sized element"
             (not (and r (= :constant (:mode r)) (integer? (:val r)) (<= 0 (long (:val r))))) nil
-            (> (long (:val r)) (quot (* 64 1024) es)) "too large for stack"
+            (> (long (:val r)) (quot (max-implicit) es)) "too large for stack"
             :else nil))
         :else nil))))
 
@@ -1645,7 +1648,7 @@
           (when (heap-alloc-reason n)
             (flow (with-fn b (lget l :curfn)) (k-addr (heap-hole (with-fn b (lget l :curfn)))) l)))
         (when (and n (name-loc? l) (not (#{:param :result} (e/o n :esc-class))))
-          (when (or (> (size (e/o n :type)) (* 128 1024)) (> (align (e/o n :type)) 8))
+          (when (or (> (size (e/o n :type)) (max-stack)) (> (align (e/o n :type)) 8))
             (flow (with-fn b (lget l :curfn)) (k-addr (heap-hole (with-fn b (lget l :curfn)))) l)))))
     (walk-all! b)
     (finish! b fns)))
@@ -2172,8 +2175,11 @@
                           (when (= path (System/getenv "GOI_ESCAPE_TRACE")) (.printStackTrace ex))))
                       {}))]
             (when cf
+              ;; through a temporary name: parallel checks share the cache
               (.mkdirs (.getParentFile cf))
-              (spit cf (pr-str r)))
+              (let [tmp (java.io.File. (str cf ".tmp" (System/nanoTime)))]
+                (spit tmp (pr-str r))
+                (.renameTo tmp cf)))
             r))))))
 
 (defn- foreign-fn
