@@ -328,3 +328,19 @@ unions, aliases and traits (rustc 1.99.1 `58cf8f9c3`, `generics_of(..).own_param
 `arbace/rust/front/lower.ae` counts a type's lifetime parameters from it by the resolved definition (a derive's unresolved
 `$crate` path by its text) and the 20-name table is dropped. hir-check 89/89, `--ours` 88/89 (+1 whitespace), expand-check 90/90,
 resolve-check 88/88 unchanged. Alternative (b), keeping the table until RF7's `iface`, rejected by the user (RFP10 decided (a)).
+
+## 2026-11-06: RF7, collection (branch rust-rf14)
+
+The front end's next stage after RF6 (the survey's order, RFP12 decided (a)): `arbace/rust/front/collect.ae`, a port of rustc 1.99.1's
+(`58cf8f9c3`) def collector (`rustc_resolve/src/def_collector.rs`), `generics_of`, `is_late_bound_map`, `type_of`, `fn_sig`,
+`gather_explicit_clauses_of`, `setup_constraining_clauses`, `associated_type_bounds`, `opaque_type_bounds`, HIR type lowering
+(`hir_ty_lowering/{mod,bounds,dyn_trait}.rs`), `visible_parent_map` and the type printer (`rustc_middle/src/ty/print/{mod,pretty}.rs`),
+judged item by item against the helper's `--iface` (extended with defaults, item bounds and opaque types) by
+`arbace/rust/front/collect_check.ae` (`bin/rust-front collect-check`). std's interface for it from `--std-names`, extended with
+parameters' defaults, aliases, supertraits, lang items and doc(hidden) data, re-pinned. A corpus of ordinary crates added
+(`bin/rust-front crates`): the host's Cargo registry sources without dependencies, read in place. Results: samples 1,189 of 1,191 items
+(89 of 90 programs) from the helper's crates and from the pipeline; crates 8,157 of 8,157 (55 of 55). Gaps of RF4-RF6 the new samples
+showed were fixed on the way (derives over lifetime and const parameters, const initializers' resolution, `for<>` and Fn sugar in the
+HIR printer, nested impl Trait arguments). Alternatives considered: a clean collector reading rustc's printed types back (rejected:
+the printer is the judge's view, the types are what RF8-RF10 read); the resolutions of out-of-line modules from the helper (deferred,
+RFP15). Proposed RFP14-RFP16 in doc/rust/FRONTEND-SURVEY.md, "As built: RF7".

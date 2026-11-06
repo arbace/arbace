@@ -1047,3 +1047,95 @@ std's types' generic parameters come from the helper's data; the 20-name table o
 - Checked (helper rebuilt, std-names regenerated, light runs): `bin/rust-front hir-check` 89 of 89 byte for byte, `--ours` 88 of 89 and 1
   more equal but for whitespace (as before); `expand-check` 90 of 90 crates, 786 of 786 items; `resolve-check` and `--ours` 5,138 of
   5,138 paths, 88 of 88 programs.
+
+## As built: RF7 (2026-11-06)
+
+Collection, one day on the branch `rust-rf14` (from `rust-rfp10`), front half only. Code: `arbace/rust/front/collect.ae` (1,543 lines,
+`arbace.rust.front.collect`) and its judge `collect_check.ae`; the verbs `bin/rust-front collect-check [--crates] [--ours]` and `bin/rust-front
+crates DIR...` (`make rust-front-collect-check`); the samples `test/rust/front/collect1.rs` and `collect2.rs`. Ports of rustc 1.99.1
+(`58cf8f9c3`) under MIT (RFS12), recorded in `LICENSE.md` and `doc/ARBACE.md`; evaluated from the checkout, out of `gate_key` (RFS13).
+Light: no gate step, each check one process under 1 GB.
+
+### The oracle
+
+The helper's `--iface` (RF1's mode, `tools/rsdump/mirdata.rs`) writes one `(iface/item {...})` per local definition rustc collects: its
+def path (`def_path_str` with no trimmed paths), `DefKind`, own generic parameters, their defaults, `fn_sig` (identity, binder skipped),
+`type_of`, ADT variants and fields, impls' trait refs and self types, `explicit_clauses_of`, and since RF7 the associated and opaque
+types' `explicit_item_bounds` and the opaque types themselves. `front-oracles` writes `NAME.iface.edn` beside the expansion and
+resolution oracles; `bin/rust-front crates` writes them for ordinary crates (a Cargo registry's sources, each `src/lib.rs` at its
+`Cargo.toml` edition, no features) into `.tmp/rust-front/crates/`. std's interface comes from `--std-names` (RFS4), which RF7 extends:
+each type and trait parameter's default as a structural type, std's type aliases' types (`names/alias`), traits' supertraits, Fn sugar and
+auto flags (`names/trait`), the lang items (`names/lang`) and the `#[doc(hidden)]` modules and re-exports visible_parent_map
+deprioritizes (`names/hidden`, `names/hidden-reexport`); `test/rust/front/std-names.sha256` re-pinned (the old readers skip the new
+forms).
+
+### RF7: collection (`arbace.rust.front.collect`)
+
+`(collect-crate HIR RES STD {:source TEXT :edition E})` over `arbace.rust.front.lower`'s HIR and the resolutions it was lowered with:
+
+- the definitions as the def collector makes them (`def_collector.rs`): items, fields, variants and constructors, associated items, impls,
+  closures (in the body's own fragment first, then those of each macro expansion as it is collected: a node of another file's span or a
+  lowered `format_args!`), nested items, opaque types of return-position `impl Trait`; the disambiguators per parent and data;
+- `generics_of`: Self, early-bound lifetimes (`is_late_bound_map`: named by a where clause, or by the output and constrained by no
+  input), types and consts, synthetic `impl Trait` parameters named by the AST's text (nested ones first), an impl header's elided
+  lifetimes as fresh `'_` parameters, closures' three, opaque types' captured lifetimes (edition 2024: all in scope);
+- HIR type lowering: paths by their resolutions (std's ADTs with defaults filled, std's and the crate's free aliases expanded, a bare trait
+  object in 2015/2018), type-relative paths (`Self::Item`, `T::Item`, through the bounds that define the name, the
+  `SelfTraitThatDefines` filter), qualified paths, GATs' own arguments, references with the object lifetime default, `dyn` with its
+  principal, projections and auto traits, `impl Trait` as opaque types, fn pointers and Fn sugar with their binders' anonymous regions,
+  array lengths (a literal's value, a const parameter, else the anonymous constant's source text, any file's);
+- the clauses (`gather_explicit_clauses_of`): a trait's MetaSized and supertraits, each type parameter's implicit Sized (MetaSized for
+  `?Sized`), const parameters' types, the inline bounds, the where clause, then `impl Trait` arguments' bounds, Sized first within its
+  predicate, Fn sugar's `Output` projection on the supertrait that defines it, `for<...>` binders; impls' order after
+  `setup_constraining_clauses`; a trait's clauses on its own associated types moved to their `explicit_item_bounds`; opaque types'
+  bounds and bidirectional outlives;
+- rustc's type printer (`FmtPrinter`, no trimmed paths): visible paths through `visible_parent_map` computed from std's module children
+  (a BFS from the crates an extern crate item names: std, or core for `no_std`), impl paths (`<T as Trait>`, `Type`, `module::<impl ..>`
+  by `characteristic_def_id_of_type`), the value namespace's `::<..>`, `own_args_no_defaults`, regions (`should_print_optional_region`),
+  binders named as `name_all_regions` names them, `dyn` and opaque types, clauses with `TraitRefPrintSugared`.
+
+The names the oracle's resolutions do not cover (an expansion's paths: derives, local `macro_rules!`, other files of the crate) are looked
+up in their module: its items, its imports and glob imports, the function scopes' items, then the edition's prelude; a span several
+expansions share (a macro's `$t`) is resolved by the name it carries.
+
+**Results** (`bin/rust-front collect-check`): the synthetic corpus, samples, eval programs and `test/rust/front` (90 programs with an
+oracle), **1,189 of 1,191 items equal to rustc's, 89 of 90 programs whole**, from the helper's crates and from the pipeline (`--ours`:
+the native reader, our expansion, resolution and lowering) alike; the two left are `vectors`' `simd_swizzle!` impl (a def-site name,
+`Swizzle`, which needs hygiene, RFP8, and an anonymous constant rustc prints by its def path). **The registry's crates without
+dependencies** (`bin/rust-front crates`: 75 crates under 6,000 lines with no `[dependencies]` and no build script; 62 build alone,
+the others need target dependencies, `rustc_private` or a build script's output; 55 of them define items):
+**8,157 of 8,157 items, 55 of 55 crates whole** (termcolor, glob, pkg-config, time-core, unicode-segmentation, fallible-iterator, ...).
+The day's first runs: samples 991 of 1,017, crates 5,240 of 8,147 (out-of-line modules and macro-made items), then 7,930, 8,090, 8,147.
+Along the way, gaps of the earlier stages the new samples showed, fixed: RF4's derives over lifetime and const parameters
+(`cx.const_ident`), RF5's const initializers, RF6's `for<..>` and Fn sugar's fresh lifetimes, fn pointers' ABI, impl Trait arguments
+(nested; their predicates after the where clause), an impl with only elided header lifetimes; `expand-check` 92 of 92, `resolve-check`
+5,594 of 5,594, `hir-check` 91 of 91 (`--ours` 90 and one equal but for whitespace).
+
+Not taken yet: hygiene for def-site names (RFP8), the resolutions of out-of-line modules' own paths (looked up by name, RFP15), lazy
+type aliases, inherent associated types, trait aliases, `impl Trait` in let bindings and type aliases (TAIT), return-type notation,
+const generics beyond literals and parameters (`generic_const_exprs`), the specialization graph and the impls indexes (RF8 builds them
+on these facts), the variances and inferred outlives (regions are erased, RFS5).
+
+### Estimates, revisited
+
+RF7 was planned at 6 to 9 days; this slice took the corpora to equality in a day: 1,543 lines for collection and the printer, 108 for
+the judge, 60 of helper. As before the judge's corpus is the limit: the registry crates were a better test than planned (real code's
+macros, modules and generics), and the UI suite (RFP7) is the next.
+
+### Proposed (RF7)
+
+- **RFP14 The next corpus for collection.** Options: (a) **the UI suite's run-pass programs in RFP7's night run (one helper run per file
+  more), then the registry crates with dependencies through the helper with `--extern`s built from the registry (no network: the
+  sources are on the host)**; (b) the compiler corpus's crates (a Cargo build of rustc's own crates, heavy); (c) stay on the samples and
+  the 55 crates. *Recommended: (a)*: both are light per file and exercise what real code writes.
+- **RFP15 Paths outside the root file.** The helper's `--resolve` reports the root file's paths only; collection looks the others up by
+  name (the module's items, imports, globs, prelude): a small resolver of its own. Options: (a) extend `--resolve` to every local file
+  (spans with their file) and key lowering and collection by file; (b) **teach RF4-RF5 to load out-of-line modules (`mod m;`,
+  `#[path]`) so the pipeline (`--ours`) runs on the crates, its resolutions judged by an extended `--resolve` as (a), and the name
+  lookup kept only for the helper's input**; (c) keep the lookup. *Recommended: (b)*: the pipeline is the goal (no rustc) and RF4 must
+  load module files anyway; (a)'s oracle extension is its judge.
+- **RFP16 What next.** Options: (a) **RF9's first slice with RF8's part it needs: the helper's `typeck` mode (each body's node types,
+  method resolutions, adjustments, by span), then type checking of bodies without method calls on generic receivers (literals and
+  their fallback, locals, paths, calls of fn items, operators on scalars, struct and tuple expressions, fields, blocks, `if`, `match`
+  on simple patterns), judged fact by fact**; (b) RF10 first, MIR built from the helper's typeck data (judged against MIR text); (c) RF3's
+  layouts from RF7's ADT data (the back half's next piece). *Recommended: (a)*: the survey's order, and every later stage reads its facts.
