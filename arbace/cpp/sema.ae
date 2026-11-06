@@ -536,7 +536,8 @@
   (let [qt (or qt "")
         m (re-matcher #"\bnoexcept\b" qt)]
     (if-not (.find m)
-      false
+      ;; throw(): noexcept(true) since C++17 ([except.spec]/1, clang's EST_DynamicNone)
+      (boolean (re-find #"\bthrow\s*\(\s*\)" qt))
       (let [i (.end m)
             j (loop [j i] (if (and (< j (count qt)) (Character/isWhitespace (.charAt qt j))) (recur (inc j)) j))]
         (if (or (>= j (count qt)) (not= \( (.charAt qt j)))
@@ -720,6 +721,13 @@
                                                                                                          (if (= "class" (:tagUsed n)) "private" "public")))}
                                          ;; a base dependent in a template's pattern (CODEGEN.md G3: [temp.dep]/4)
                                          (contains? (:dep-bases (abi/cls id)) bi) (assoc :dependent true))))))
+      ;; alignas on the class ([dcl.align]): its alignment at least the strictest one written (a type's or a constant's)
+      (when-let [as (seq (keep :_arg (filter #(= "AlignedAttr" (:kind %)) (:inner n))))]
+        (abi/update-cls! id assoc :align-attr
+                         (apply max (for [a as]
+                                      (long (or (parse-long (str/trim a))
+                                                (try (abi/align-of (resolve-type scope a)) (catch arbace.lang.ExceptionInfo _ nil))
+                                                ((:const-bound @hooks) scope a)))))))
       (let [access (atom (if (= "class" (:tagUsed n)) :private :public))]
         (doseq [k (kids n)]
           (case (:kind k)
@@ -1998,7 +2006,7 @@
                 (do (when (seq place) (fail :new "a placement new without a declared operator new"))
                     {:sym (str (if array? "_Zna" "_Znw") "m" (when aligned "St11align_val_t")) :align (when aligned (abi/align-of et)) :places []}))
         f (when fid (fnd fid))
-        reserved (boolean (and f (not (:cls f)) (= 2 (count (:ps (:ty f)))) (void-ptr? (second (:ps (:ty f)))) (:header f) (not array?)
+        reserved (boolean (and f (not (:cls f)) (= 2 (count (:ps (:ty f)))) (void-ptr? (second (:ps (:ty f))))
                                (= 1 (count place))))
         dnm (if array? "operator delete[]" "operator delete")
         [dscope dids] (alloc-lookup cid dnm global?)
@@ -2018,7 +2026,7 @@
 (defn- delete-dealloc
   "The deallocation function of `delete p` / `delete[] p` (ActOnCXXDelete), with the array's cookie need."
   [et array? global?]
-  (let [cid (class-id (abi/unq et))
+  (let [cid (class-id (loop [t (abi/unq et)] (if (abi/arr? t) (recur (abi/unq (:of t))) t)))
         nm (if array? "operator delete[]" "operator delete")
         over (overaligned? et)
         cls (when (and cid (not global?)) (let [[k ids] (alloc-lookup cid nm false)] (when (= :class k) (resolve-dealloc ids {:size false :align over}))))
@@ -2049,7 +2057,7 @@
         init (if (and (= :ctor (:i init)) (empty? (:args init)) (nil? initn)) init init)]
     (when (and nexpr initn (not= "InitListExpr" (:kind initn))) nil)
     {:op :new :placement placement :alloc (when-not placement (:alloc fa)) :dealloc (when-not placement (:dealloc fa))
-     :cookie (boolean (and nexpr (let [bt (loop [x (abi/unq et)] (if (abi/arr? x) (recur (abi/unq (:of x))) x)) c (class-id bt)]
+     :cookie (boolean (and nexpr (not placement) (let [bt (loop [x (abi/unq et)] (if (abi/arr? x) (recur (abi/unq (:of x))) x)) c (class-id bt)]
                                    (or (and c (not (trivial-dtor? c)))
                                        (:size (delete-dealloc et true (boolean (:isGlobal n))))))))
      :ty t :et et :n (when nexpr (convert-scalar (rv (analyze ctx nexpr)) abi/ulong* false))
@@ -2429,7 +2437,7 @@
                           et (:to (abi/unq (:ty e)))
                           arr (boolean (:isArrayAsWritten n))
                           d (delete-dealloc et arr (boolean (:isGlobal n)))
-                          bt (abi/unq et) c (class-id bt)]
+                          bt (loop [t (abi/unq et)] (if (abi/arr? t) (recur (abi/unq (:of t))) t)) c (class-id bt)]
                       {:op :delete :e e :array arr :dealloc d :global (boolean (:isGlobal n))
                        ;; the array's cookie: a non-trivial destructor, or a usual operator delete[] taking the size
                        :cookie (boolean (and arr (or (and c (not (trivial-dtor? c))) (:size d))))

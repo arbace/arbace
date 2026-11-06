@@ -893,7 +893,7 @@
                sz (abi/size-of et)]
            (cond
              ;; new (p) T: the object constructed at p ([new.delete.placement]; clang calls no operator new; G4)
-             (:placement e) (let [p (emit-rv (:placement e))] (emit-init p et (:init e)) p)
+             (and (:placement e) (not (:n e))) (let [p (emit-rv (:placement e))] (emit-init p et (:init e)) p)
              (:n e)
              (let [n (emit-rv (:n e))
                    cookie (if (contains? e :cookie) (:cookie e) (nontrivial-dtor? cid))
@@ -901,7 +901,15 @@
                    csz (max 8 (long (abi/align-of et)))
                    bytes (val! (list 'mul 'i64 n sz))
                    bytes (if cookie (val! (list 'add 'i64 bytes csz)) bytes)
-                   [raw _] (alloc-call! (or (:alloc e) {:sym "_Znam" :places []}) bytes)
+                   ;; (new (p) T[n]: at p, no cookie, Itanium §2.7)
+                   [raw _] (if (:placement e) [(emit-rv (:placement e)) nil] (alloc-call! (or (:alloc e) {:sym "_Znam" :places []}) bytes))
+                   nullable (when-let [fid (:fn (:alloc e))] (and (not (:placement e)) (:noexcept (sema/fnd fid))))
+                   [lend from] (when nullable
+                                 (let [lnn (new-label "new.notnull") lend (new-label "new.cont")
+                                       z (val! (list 'icmp :eq 'ptr raw 'null))
+                                       from (:label @*f*)]
+                                   (condbr! z lend lnn) (close-block!) (start! lnn)
+                                   [lend from]))
                    p (if cookie (do (emit! (list 'store ['i64 n] ['ptr (offset! raw (- csz 8))] :align 8)) (offset! raw csz)) raw)
                    init (:init e)]
                ;; the elements: the list's, then the rest default-initialized (a loop)
@@ -920,10 +928,20 @@
                        (emit! (list 'store ['i64 (val! (list 'add 'i64 i 1))] ['ptr ix] :align 8))
                        (br! lc)
                        (begin! le)))))
-               p)
+               (if nullable
+                 (let [l (:label @*f*)] (begin! lend) (val! (list 'phi 'ptr ['null from] [p l])))
+                 p))
              :else
              (let [[p places] (alloc-call! (or (:alloc e) {:sym "_Znwm" :places []}) sz)
-                   d (count (:cleanups @*f*))]
+                   d (count (:cleanups @*f*))
+                   ;; a non-throwing allocation function's null result: no initialization ([expr.new]/17)
+                   nullable (when-let [fid (:fn (:alloc e))] (:noexcept (sema/fnd fid)))
+                   [lnn lend from] (when nullable
+                                     (let [lnn (new-label "new.notnull") lend (new-label "new.cont")
+                                           z (val! (list 'icmp :eq 'ptr p 'null))
+                                           from (:label @*f*)]
+                                       (condbr! z lend lnn) (close-block!) (start! lnn)
+                                       [lnn lend from]))]
                ;; the storage freed when the initialization throws, by the matching deallocation function ([expr.new]/26)
                (do
                    (when (and (#{:ctor :expr :list} (:i (:init e))) (or (:dealloc e) (nil? (:alloc e))))
@@ -932,7 +950,9 @@
                                                         {:delete p :size sz})))
                    (emit-init p et (:init e))
                    (swap! *f* update :cleanups #(subvec % 0 d))
-                   p))))
+                   (if nullable
+                     (let [l (:label @*f*)] (begin! lend) (val! (list 'phi 'ptr ['null from] [p l])))
+                     p)))))
     :throw (if-let [t (:ety e)]
              (let [_ (declare! "__cxa_allocate_exception" 'ptr '[i64] :nounwind true)
                    _ (declare! "__cxa_throw" 'void '[ptr ptr ptr])
