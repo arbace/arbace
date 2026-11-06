@@ -3528,3 +3528,98 @@ moments a test can observe, and keeps reference counting's order (218's queue):
 - *Rebinding and a frame's return* (`o = None`, a function's locals at its return, an iterator dropped) would need the
   same check on every `STORE_FAST` and every return: a load and a branch on the compiled loop's hottest paths. Measured
   with 210's method; past 3% it is the user's DECISION, not built.
+## As built: 222, cycles through finalizers and the moment at del (2026-11-06, the Mac VM, queue 222)
+
+What "Design: 222" proposed, built in `go/arbace/py/finalize.go` (with `dict.go`'s `escaped`, `builtins_gc.go`, and the two
+DELETE_FAST sites, `eval.go` and `aot.go`'s `AotDeleteFast`); light samples only.
+
+- **The cycle detector** (`cyCollect`, run by `gc.collect()` after 218's rounds): the graph from the tracked objects
+  over instances (the dictionary folded in while `escaped` is false, `__slots__`), lists, tuples and dictionaries (lists
+  and dictionaries not once tracemalloc traced: its finalizers), Tarjan's components with a cycle and a tracked node and
+  what they reach (at most 2^18 nodes), the probe (`cyProbe`: edges between probed nodes hidden, a probe's Go finalizer on
+  each, 218's own taken off and put back, `runtime.GC()` under the GIL, a wait until all ran or Go's finalizers are still
+  for 3 ms), the reachable propagated from the unfired; then CPython 3.14.10's order: weak references to the trash
+  cleared, their callbacks called; `__del__` (and 218's other work) once; when Python code ran, the probe again over the
+  trash alone (resurrection); weak references made meanwhile cleared; DEBUG_SAVEALL's `gc.garbage`, else the records
+  dropped and no Go finalizer set again (Go frees the cycle); 218's rounds again for what the trash held.
+  `gc.collect()` returns the trash's node count; `gc.get_debug`/`set_debug` keep the flags.
+- **Escapes** (the soundness assumption, `Dict.escaped`): an instance's dictionary handed out as an object (`__dict__`'s
+  getter and setter, `object.__getstate__`, `_thread._local`'s dictionaries) is no longer folded into its instance:
+  a cycle through it is not found (by design: the instance's typed field would keep it marked).
+- **The moment at del** (`finDeleted`, `finVerify`): `DELETE_FAST` of a tracked object with work or weak references due
+  collects at once (rounds while its record moves: `__del__`, then the weak references), the queue drained before the
+  next instruction; the collections' time bounded to 50 ms plus a tenth of the elapsed wall time.
+- **goi's registers** (found by the goi sample): the first build passed the deleted value to the check, and goi's frames
+  (the eval loop's case-local, the callee's parameters: queue 218's REQUEST c9047d52, unbuilt) kept it past the next
+  `gc_collect()`: test_weakref's test_equality and both test_hashing failed on goi. `finDeletedAt(f, i)` now reads and
+  clears the slot itself, takes the type by reflection inline and drops the value before anything runs (7700bbf8).
+  Under goi the cycle detector finds nothing yet (the walk's values stay in goi's registers, as 218's collections lag):
+  the methods it serves are `:finalization-goi`'s, decided (a) by the user for 218.
+
+**The classes, before and after** (methods named): `:finalization-cycle` 33 to 17 (test_finalization's 11 cycle tests,
+test_gc's test_bug1055820b, test_resurrection_is_transitive and test_resurrection_only_happens_once_per_object,
+test_weakref's test_weak_keyed_len_cycles and test_weak_valued_len_cycles found; left: classes, functions, a weak
+reference in the trash, the count of untracked cyclic garbage, `gc.get_stats`' shape); `:finalization` 47 to 45
+(test_weakref's two union_operators tests, served at `del`); `:finalization-goi` 41 to 59 (the 18, passing compiled).
+
+**The samples** (the VM):
+- `bin/pyi lib-test --aot test_finalization test_gc test_weakref`: 214 methods, 148 equal, 66 classed, 0 failing
+  (218's head: 130 equal, 84 classed).
+- `bin/pyi lib-test-all --fresh test_finalization test_gc test_weakref` (goi): 214 methods, 122 equal, 92 classed,
+  0 failing (218's: 121, 93, 0); test_weakref took 1,134 s on the loaded VM (218's time was not recorded).
+- check222.sh (`.tmp/q222/t/cyc.py` compiled against CPython: self-cycle, resurrection once, a chain through a list and a
+  tuple with callbacks, a live cycle kept, DEBUG_SAVEALL, the moment at del, an escaped `__dict__`): equal but t7b (the
+  escaped dictionary's cycle, by design); it fails at 160750c2 (t1 to t6 differ).
+- `bin/pyi runtime check`: the packages printed and read again the same, tables and runtime-ops equal, the REPL equal,
+  136 of 138 programs equal: e-executable.py (status 124, the 120 s cap under the VM's load, as at 218) and f-signal.py
+  (run from a background job, whose SIGINT bash sets to SIG_IGN before CPython's reference ran: rerun in the foreground,
+  CPython and compiled pyi equal). `make python-essential`: check --aot 21 programs, 20 pass, 1 classed, 0 failing, the
+  control refused. 219t's check219t.sh, 219's check219.sh, 216d's check216d.sh and 210's check210.sh: PASS.
+
+**The cost** (210's method: wall milliseconds, least of 3 rounds, each round base 160750c2 and the branch back to back, CPython's the least of all its runs; `bin/pyi bench` over ten benchmarks of 216d's table, every output equal to CPython's). The model as built adds nothing to the compiled loop (the check sits only in DELETE_FAST):
+
+| benchmark | CPython | base | branch | branch / base |
+|---|---:|---:|---:|---:|
+| coroutines | 353 | 694 | 697 | 1.004 |
+| generators | 152 | 657 | 653 | 0.994 |
+| chaos | 77 | 199 | 198 | 0.995 |
+| deltablue | 123 | 376 | 375 | 0.997 |
+| float | 212 | 438 | 437 | 0.998 |
+| nqueens | 250 | 596 | 594 | 0.997 |
+| raytrace | 201 | 542 | 549 | 1.013 |
+| richards | 309 | 493 | 488 | 0.990 |
+| spectral_norm | 324 | 627 | 591 | 0.943 |
+| unpack_sequence | 223 | 594 | 598 | 1.007 |
+| sum | 2224 | 5216 | 5180 | 0.993 |
+
+The wider model, measured as an experiment and not committed (`.tmp/q222/exp_patch.py`: an instance flagged at its tracking, checked on every `STORE_FAST`, `AotStoreFast`, `AotStoreFastV`, and over the fast locals at every frame's release, each found one collected as at `del`), against base again in 3 rounds:
+
+| benchmark | CPython | base | exp | exp / base |
+|---|---:|---:|---:|---:|
+| coroutines | 353 | 688 | 892 | 1.297 |
+| generators | 152 | 655 | 881 | 1.345 |
+| chaos | 77 | 201 | 283 | 1.408 |
+| deltablue | 123 | 377 | 485 | 1.286 |
+| float | 212 | 439 | 528 | 1.203 |
+| nqueens | 250 | 599 | 702 | 1.172 |
+| raytrace | 201 | 543 | 652 | 1.201 |
+| richards | 310 | 490 | 599 | 1.222 |
+| spectral_norm | 324 | 630 | 711 | 1.129 |
+| unpack_sequence | 223 | 597 | 495 | 0.829 |
+| sum | 2225 | 5219 | 6228 | 1.193 |
+
++19.3% on the sum, past the brief's 3%: not built; DECISION 1 below. Its cost is the check itself (no benchmark has a
+tracked instance to collect at a store), a type assertion on every store and a scan with a deferred call at every
+frame's release; a variant gated by one global (no tracked instance alive: no check) is not measured.
+
+**DECISION 1** (queue 222, the user's): the moment at rebinding and at a frame's return.
+- (a) keep the moment at `del` alone, as built (recommended): 0% on the compiled loop; `:finalization` keeps the 45
+  methods that rebind, return, delete an item or drop an iterator.
+- (b) a follow-up task measures the gated variant (one global load per store and per frame's release while no tracked
+  instance lives; the check when one does): adopt it if it stays under 3% on the sample, else (a).
+- (c) adopt the wider model as measured: +19.3% on the bench sample, some of `:finalization`'s 45 methods.
+
+**Not served, by design** (with their class): a cycle through a class, a function, a cell, a frame or a generator (typed
+Go fields, never hidden), or through an instance whose `__dict__` was handed out; a weak reference inside the trash
+(callbacks always called); the count of untracked cyclic garbage; `gc.get_stats`, `get_objects`, `is_tracked` and the
+other collector observables (`:gc-collector`).
