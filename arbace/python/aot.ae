@@ -52,6 +52,11 @@
 
 (defn- set-pc [n] (list 'set! '(.-PC f) (inc n)))
 
+(defn- to-loop
+  "While tracing (queue 219t): the frame handed to the loop at instruction n, its whole stack in the frame (a block start)"
+  [n]
+  (list 'when '(py/AotTracing) (list 'set! '(.-PC f) n) '(return nil py/AotToLoop)))
+
 (defn- lookup [table k what]
   (or (get table k) (throw (ex-info (str "aot: no " what " " (pr-str k)) {}))))
 
@@ -196,7 +201,7 @@
            (concat
              [(if exec? (list 'label :dispatch sw) sw)
               '(return (py/AotBadPC f))]
-             (mapcat (fn [n body] (cons (list 'label (lbl n) (list 'set! '(.-Lasti f) n)) body))
+             (mapcat (fn [n body] (list* (list 'label (lbl n) (list 'set! '(.-Lasti f) n)) (to-loop n) body))
                      (range) bodies)
              ['(return (py/AotBadPC f))]))))
 
@@ -337,6 +342,9 @@
                         (emit! (list* 'when '(!= err nil) (err-path n false '(return nil err))))
                         (emit! (list 'set! (sv lo) 'tmp))
                         (vreset! d (inc lo))
+                        ;; while tracing (queue 219t): written back, the frame to the loop at the call's next instruction
+                        (emit! (list* 'when '(py/AotTracing)
+                                      (concat (spill-stmts @m @d) [(list 'set! '(.-PC f) nxt) '(return nil py/AotToLoop)])))
                         (when (contains? reentries nxt)
                           (let [after (keyword (str "A" nxt))]
                             (emit! (list 'goto after))
@@ -369,6 +377,7 @@
                   (do (when check-depths
                         (emit! (list 'when (list '!= '(len (.-Stack f)) dn)
                                      (list 'panic (str "aot regs: " (:qualname c) " at " n " depth " dn)))))
+                      (emit! (to-loop n))
                       (vreset! m dn) (vreset! d dn) (vreset! live true))))
               (if (or (not @live) (nil? dn))
                 (recur (inc n))
