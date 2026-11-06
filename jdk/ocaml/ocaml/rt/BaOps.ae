@@ -196,4 +196,104 @@
                                      r)
                       :else (let [x (if (== wide 0) (long (unchecked-int (.u32 m))) (.u64 m))]
                               (if (== kind 9) (NInt. x) (Long/valueOf x))))) (recur (unchecked-inc-int k))))
-            (BigArray/custom (BigArray. kind layout dims data 0))))))))
+            (BigArray/custom (BigArray. kind layout dims data 0)))))))
+
+  ;; ---- Unix.map_file (otherlibs/unix/mmap_unix.c), without mmap: the region read through the descriptor's file, a shared
+  ;; array's stores written through a RandomAccessFile of its own (a private one's kept in the array)
+
+  (field ^:public ^:static ^:final ^int/1 ELT (new int/1 [4 8 1 1 2 2 4 8 8 8 8 16 1 2]))
+
+  (method ^:static putBytes ^void [^byte/1 b ^long x ^int at ^int w]
+    (loop [^int i 0] (when (< i w) (aset b (unchecked-add-int at i) (unchecked-byte (bit-shift-right x (unchecked-multiply-int 8 i)))) (recur (unchecked-inc-int i)))))
+  (method ^:static getBytes ^long [^byte/1 b ^int at ^int w]
+    (let [^:mutable ^long x 0]
+      (loop [^int i (unchecked-dec-int w)]
+        (when (>= i 0)
+          (set! x (bit-or (bit-shift-left x 8) (bit-and (long (aget b (unchecked-add-int at i))) 255)))
+          (recur (unchecked-dec-int i))))
+      x))
+
+  ;; the element's little-endian bytes (amd64's C array)
+  (method ^:static le ^byte/1 [^int kind v]
+    (let [n (aget BaOps/ELT kind) b (new byte/1 n)]
+      (cond (== kind 0) (BaOps/putBytes b (long (Float/floatToRawIntBits (unchecked-float (Rt/d v)))) 0 4)
+            (== kind 1) (BaOps/putBytes b (Double/doubleToRawLongBits (Rt/d v)) 0 8)
+            (== kind 13) (BaOps/putBytes b (long (BaOps/f16Bits (unchecked-float (Rt/d v)))) 0 2)
+            (== kind 10) (let [z (cast double/1 v)]
+                           (BaOps/putBytes b (long (Float/floatToRawIntBits (unchecked-float (aget z 0)))) 0 4)
+                           (BaOps/putBytes b (long (Float/floatToRawIntBits (unchecked-float (aget z 1)))) 4 4))
+            (== kind 11) (let [z (cast double/1 v)]
+                           (BaOps/putBytes b (Double/doubleToRawLongBits (aget z 0)) 0 8)
+                           (BaOps/putBytes b (Double/doubleToRawLongBits (aget z 1)) 8 8))
+            :else (BaOps/putBytes b (BaOps/num v) 0 n))
+      b))
+
+  (method ^:static fromLE [^int kind ^byte/1 b ^int at]
+    (do
+      (cond (== kind 0) (Double/valueOf (double (Float/intBitsToFloat (unchecked-int (BaOps/getBytes b (unchecked-add-int at 0) 4)))))
+            (== kind 1) (Double/valueOf (Double/longBitsToDouble (BaOps/getBytes b (unchecked-add-int at 0) 8)))
+            (== kind 13) (Double/valueOf (BaOps/f16Value (unchecked-int (BaOps/getBytes b (unchecked-add-int at 0) 2))))
+            (== kind 2) (Long/valueOf (long (unchecked-byte (BaOps/getBytes b (unchecked-add-int at 0) 1))))
+            (or (== kind 3) (== kind 12)) (Long/valueOf (BaOps/getBytes b (unchecked-add-int at 0) 1))
+            (== kind 4) (Long/valueOf (long (unchecked-short (BaOps/getBytes b (unchecked-add-int at 0) 2))))
+            (== kind 5) (Long/valueOf (BaOps/getBytes b (unchecked-add-int at 0) 2))
+            (== kind 6) (Integer/valueOf (unchecked-int (BaOps/getBytes b (unchecked-add-int at 0) 4)))
+            (== kind 7) (I64. (BaOps/getBytes b (unchecked-add-int at 0) 8))
+            (== kind 9) (NInt. (BaOps/getBytes b (unchecked-add-int at 0) 8))
+            (== kind 10) (let [r (new double/1 2)]
+                           (aset r 0 (double (Float/intBitsToFloat (unchecked-int (BaOps/getBytes b (unchecked-add-int at 0) 4)))))
+                           (aset r 1 (double (Float/intBitsToFloat (unchecked-int (BaOps/getBytes b (unchecked-add-int at 4) 4)))))
+                           r)
+            (== kind 11) (let [r (new double/1 2)]
+                           (aset r 0 (Double/longBitsToDouble (BaOps/getBytes b (unchecked-add-int at 0) 8)))
+                           (aset r 1 (Double/longBitsToDouble (BaOps/getBytes b (unchecked-add-int at 8) 8)))
+                           r)
+            :else (Long/valueOf (BaOps/getBytes b (unchecked-add-int at 0) 8)))))
+
+  ;; a store of a shared mapping's element i written through to its file
+  (method ^:public ^:static putLE ^void [^BigArray a ^int i v]
+    (let [raf (.-mraf a)]
+      (.seek raf (unchecked-add (.-mpos a) (unchecked-multiply (long i) (long (aget BaOps/ELT (.-kind a))))))
+      (.write raf (BaOps/le (.-kind a) v))))
+
+  (method ^:public ^:static mapFile [fd kindv layoutv sharedv dimv startv]
+    (let [kind (Rt/ii kindv) layout (Rt/ii layoutv) shared (not (== (Rt/l sharedv) 0))
+          dim (ExtBigarray/dimsOf dimv) nd (alength dim)
+          start (Rt/bv startv)
+          major (if (== layout 1) (unchecked-dec-int nd) 0)]
+      (when (or (< nd 1) (> nd 16)) (throw (Rt/invalidArg "Unix.map_file: bad number of dimensions")))
+      (loop [^int i 0]
+        (when (< i nd)
+          (when (and (< (aget dim i) 0) (not (and (== (aget dim i) -1) (== i major))))
+            (throw (Rt/invalidArg "Unix.map_file: negative dimension")))
+          (recur (unchecked-inc-int i))))
+      (let [d (Fd/get (Rt/l fd))]
+        (when (or (nil? d) (nil? (.-raf d))) (throw (ExtUnix/error 9 "map_file" "")))
+        ;; mmap's PROT_WRITE of a MAP_SHARED mapping needs a descriptor open for writing
+        (when (and shared (not (.-writable d))) (throw (ExtUnix/error 13 "map_file" "")))
+        (let [size (.length (.-raf d))
+              ^:mutable ^long asize (long (aget BaOps/ELT kind))]
+          (loop [^int i 0] (when (< i nd) (when (not (== (aget dim i) -1)) (set! asize (unchecked-multiply asize (long (aget dim i))))) (recur (unchecked-inc-int i))))
+          (if (== (aget dim major) -1)
+            (do (when (< size start) (throw (Rt/failwith "Unix.map_file: file position exceeds file size")))
+                (let [ds (unchecked-subtract size start)]
+                  (aset dim major (unchecked-int (quot ds asize)))
+                  (set! asize (unchecked-multiply (long (aget dim major)) asize))
+                  (when (not (== asize ds)) (throw (Rt/failwith "Unix.map_file: file size doesn't match array dimensions")))))
+            (when (< size (unchecked-add start asize)) (.setLength (.-raf d) (unchecked-add start asize))))
+          (let [bytes (new byte/1 (unchecked-int asize))
+                n (unchecked-int (quot asize (long (aget BaOps/ELT kind))))
+                data (new Object/1 n)
+                path (.-path d)]
+            (let [r (java.io.RandomAccessFile. path "r")]
+              (.seek r start) (.readFully r bytes) (.close r))
+            (loop [^int i 0]
+              (when (< i n) (aset data i (BaOps/fromLE kind bytes (unchecked-multiply-int i (aget BaOps/ELT kind)))) (recur (unchecked-inc-int i))))
+            (let [b (BigArray. kind layout dim data 0)]
+              (when shared
+                (set! (.-mraf b) (java.io.RandomAccessFile. path "rw"))
+                (set! (.-mpos b) start))
+              (BigArray/custom b)))))))
+
+  (method ^:public ^:static caml_unix_map_file [fd k l s d p] (BaOps/mapFile fd k l s d p))
+  (method ^:public ^:static caml_unix_map_file_bytecode [fd k l s d p] (BaOps/mapFile fd k l s d p)))

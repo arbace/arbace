@@ -639,3 +639,93 @@ No default cap is set: the measure of the day's shards is too small to choose on
 ## Decided (2026-11-05, the user: OT21-OT26)
 
 OT21 (b): compiler-libs' parser now through ocdump; OT22 (a): the shard byte cap from tonight's shards.tsv; OT23 (a), OT24 (a): Unix sockets and datagrams, and signals between processes, by design at AOT; OT25: at most 3 unix programs a shard tonight, then the library units built once; OT26 (a): compiler-libs' units translated once into ocaml.u.
+
+## As built: OT21-OT26 and the decided classes, fixes 9-11 in part (2026-11-06, branch `ocaml-libs4`)
+
+Built on the light tier of the day, as fixes 1-8 (no gate, no build of Arbace's executables, no corpus run, stage 0 of main as the
+tools' host), each check a list of programs (`--only-list`), the records merged.
+
+### The decided classes (OT1-OT7, OT23, OT24)
+
+OT1-OT7 were decided on 2026-11-05 but only OT1's `:unix-fork` was in the classes files. Now, in the six run-level classes files
+(`divergences{,-aot,-aot-compiled,-suite,-suite-aot,-suite-aot-compiled}.edn`), before `:multi-file`:
+
+- by design: `:compiler-output` (OT2 (a), 19 programs: `shape-index/*`, `uid-deps`, `uids`, `no-alias-deps`, `syntactic-arity/*`,
+  `tool-dumpobj`), `:ocamltest-tools` (OT3 (a): 13 tools' tests, the 4 subprocess tests and the 2 `reference = $` backtrace tests),
+  `:runtime-events` (OT4 (a), every `include runtime_events`: 7), `:dynlink` (OT5 (a), every `include dynlink`: 6),
+  `:c-runtime-internals` (OT6 (a), the 21 of §6), `:marshal-closures` now `:design` (OT7 (a)), and at the AOT levels `:unix-java`
+  (OT23 (a), OT24 (a): `lib-unix/unix-socket/recvfrom_unix` and `recvfrom_linux`, the known reason `unix-java: ...`);
+- deferred: `:c-api` (OT6 (c)), the C stubs on the stable API (every other `modules`/`readonly_files` naming a `.c` or `.f` file:
+  25 programs), DEFERRED-TRIAGE's item 9.
+
+A class may list `:programs` (goi's format, `test/reap/main.ae`'s classify): the judges `test/ocaml/oi_check.ae`, `o2j_check.ae` and
+`testsuite_check.ae` read it. OT3's two "script" tools of the triage are not among them: their scripts only check the platform
+(below). Two harness bugs were found on the way: a `--only-list` record kept the class rows' reasons of the last whole run (the class
+rows of a selection are now recorded from the header reading, `OI_SELECTED`), and an empty selection ran one empty program (`xargs -r`).
+
+### OT21 (b): compiler-libs' parser
+
+- `bin/oi stdlib`'s compiler-libs are ocamlcommon's `utils/` (all but `domainstate`, which the C preprocessor generates and only the
+  back ends use) and `parsing/` in the Makefile's link order (`utils_SOURCES`, `parsing_SOURCES`): `boot/menhir/parser.ml` with
+  `MenhirLib` renamed `CamlinternalMenhirLib` as the Makefile does (taken from the pinned tarball when the tree lacks it), `lexer.ml`
+  by the host's ocamllex, `parsetree.mli` alone; 44 units, Parser's Lambda 16.7 MB.
+- A program links the units its dump requires and theirs (`complib_need`: the closure over the dumps' `lambda-program` required lists,
+  in link order), as ocamlc links from `ocamlcommon.cma`; before, every utils/ unit was linked.
+- The headers' `${ocamlsrcdir}` is the pinned tree (`@OCAMLSRCDIR@` in the corpus files, the path in the rows the runs read), and
+  `-I ${ocamlsrcdir}/parsing` (`/toplevel`) flags are dropped: compiler-libs' interfaces are on the path. The suite's reading takes
+  `include ocamlcommon` and copies the `.ml` files a header names as `readonly_files` (data: `parsetree/test`'s `source.ml`).
+- A bug fixed on the way: `inc_units` shifted its arguments in the compiler-libs branch, so a program that included both compiler-libs
+  and lib/testing ran without Testing.
+
+| program | eval | AOT, light |
+|---|---|---|
+| `formatting/errors_batch` | pass | pass (105 s) |
+| `parsing/change_start_loc` | pass | pass (240 s of the batch) |
+| `parsetree/test` (suite) | pass (13 s) | `:light-speed` (`aot-slow.edn`) |
+| `ast-invariants/test` (parses the whole tree) | `:speed` (211 s, `oi-slow.edn`) | `:light-speed` |
+
+### OT22, OT25, OT26: the compiled level's shards
+
+- OT26 (a) and OT25 (b): `o2j clib LAMBDA-DIR OUT-DIR DUMP...` translates the stdlib's units and, after them, the libraries outside it
+  (unix, threads, Str, compiler-libs, lib/testing) once into `ocaml.u` (`bin/oi aot-clib`); a program's row of `cprogs.list` names the
+  library units of its includes as `@UNIT` (linked from `ocaml.u` with the units they need, o2j's `link` with forced roots), no
+  longer translated into its own package. Proof by translation (the build needs more than the day's 2 GiB): `utils/edit_distance`'s
+  package 23 KB (about 750 KB before).
+- OT25 (a): a shard holds at most `O2J_SHARD_UNIX` (default 3) programs that include unix.
+- `O2J_PLAN_ONLY=1`: the shards planned and their bytes written (`.tmp/o6/compiled/plan.tsv`, `shards.tsv`), nothing built.
+- OT22 (a) waits for tonight's `shards.tsv`.
+
+### The harness: redirections and the platform's scripts
+
+- `stdin = "/dev/null"` and `stderr = "/dev/null"` are the run's `@stdin=null` and `@stderr=null` (header.awk, actions.awk), which every
+  runner (oi, the references, both AOT levels) applies through `run_redirected` (an empty file as the input, the error output into a file
+  apart): `lib-unix/common/dup2`, `lib-unix/isatty/isatty_std`.
+- ocamltest's precondition scripts that only check the platform are decided as ocamltest's run decides them here:
+  `test-runtime-cleanup.sh` and `is-linux.sh` pass (no `OCAMLRUNPARAM` c=1; Linux), `has-execvpe.sh` skips (the C library has execvpe:
+  `lib-unix/unix-execvpe/exec` is `header: skip`, by design); `output = "${test_build_directory}/program-output"` with
+  `stdout = "${output}"` is ocamltest's default: `lib-threads/sieve`, `lib-unix/unix-socket/recvfrom_linux` (suite) run.
+- oi's Unix sockets take Linux's abstract names (a leading NUL, Go's leading `@`): `recvfrom_linux` passes at eval; at the AOT levels
+  it is `:unix-java`.
+
+### Fix 10: Str
+
+- oi: `go/arbace/oi/ext_str_re.ae`, otherlibs/str's `strstubs.c` ported rule for rule: `re_match`'s backtracking interpreter (the 19
+  opcodes, the stack of program points and undo records, the progress registers, the groups, partial matches), the searches with the
+  start characters' table, `re_replacement_text`; `str.ml` built by `bin/oi stdlib` into `.tmp/oi/strlib/`, loaded for `include str`
+  (`hasstr` read). The AOT runtime: `ExtStrRe.ae`, the same; o2j now calls an external the runtime defines under a library's own C
+  name (`re_*`), not only `caml_*`.
+- `lib-str/t01` (the regex suite, 2,270 bytes of output) and `lib-str/parallel`: pass at eval and at the light level.
+
+### Fix 11: Bigarray
+
+- oi: `go/arbace/oi/ext_bigarray.ae`, bigarray.c's `caml_ba_compare`, `caml_ba_serialize`/`caml_ba_deserialize` (the `_bigarr02` custom
+  block: CODE_CUSTOM_LEN, the sizes, the dimensions, the elements by kind, the 32/64-bit choice of int and nativeint elements), the
+  float16 kind (stores rounded to nearest even, `caml_float_to_float16`), `caml_ba_reshape`'s checks (overflow: a mismatch), and in
+  ext_digest.go the Fortran layout's `sub` (the last dimension, from 1) and `slice` (the last indices, the offset `caml_ba_offset`'s);
+  `Unix.map_file` (mmap_unix.c) by mmap(2) itself, the elements read from the mapping and the stores written through it.
+- The AOT runtime: `BaOps.ae` (compare, serialization, float16, reshape), `ExtBigarray`'s sub and slice, and `Unix.map_file` without
+  mmap (the region read through the descriptor's file, a shared array's stores written through a RandomAccessFile of its own).
+- `lib-bigarray/bigarrays`, `reshape_overflow`, `lib-marshal/marshal_bigarray`: pass at eval and at the light level;
+  `lib-bigarray-file/mapfile`: passes at eval and at the light level.
+- Not ported: stores through a sub-array or a slice of a mapped array, and `fill`/`blit` into one, do not reach the file; NaN's
+  unordered flag of compare (`compare_unordered`) is not kept.

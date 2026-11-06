@@ -1,7 +1,8 @@
 (in-ns 'go.arbace.oi) (go/file "ext_bigarray.go" :imports [
     [binary "encoding/binary"]
     [math "math"]
-    [bits "math/bits"]])
+    [bits "math/bits"]
+    [syscall "syscall"]])
 
 ;; The Bigarray library beyond the minimal one of ext_digest.go (DEFERRED-TRIAGE §3 item 11): runtime/bigarray.c of OCaml 5.5.0
 ;; (LGPL-2.1 with the OCaml linking exception) ported rule for rule for the custom operations compare (caml_ba_compare),
@@ -212,3 +213,104 @@
                       (aset data i (conv Nativeint x))
                       (aset data i x)))))))
           (addr (lit Custom :Name "_bigarr02" :V (addr (lit bigarray :kind kind :layout layout :dims dims :data data)))))))))
+
+(go/var ^{:doc "baEltSize is caml_ba_element_size: the bytes of an element of each kind.\n"}
+  baEltSize (lit (slice int) 4 8 1 1 2 2 4 8 8 8 8 16 1 2))
+
+(go/func baPutLE "baPutLE stores element i of the kind, v, into mem as the C array holds it (little-endian, amd64's).\n"
+  [^{:tag (slice byte)} mem ^int kind ^int i ^Value v]
+  (let [p (subslice mem (* i (aget baEltSize kind)))
+        le binary/LittleEndian]
+    (switch kind
+      (case [baFloat32] (.PutUint32 le p (math/Float32bits (conv float32 (AsFloat v)))))
+      (case [baFloat64] (.PutUint64 le p (math/Float64bits (AsFloat v))))
+      (case [baFloat16] (.PutUint16 le p (f16Bits (conv float32 (AsFloat v)))))
+      (case [baSint8 baUint8 baChar] (aset p 0 (conv byte (bigInt v))))
+      (case [baSint16 baUint16] (.PutUint16 le p (conv uint16 (bigInt v))))
+      (case [baInt32] (.PutUint32 le p (conv uint32 (bigInt v))))
+      (case [baInt64 baCamlInt baNativeInt] (.PutUint64 le p (conv uint64 (bigInt v))))
+      (case [baComplex32]
+        (let [z (.-F (assert (* FloatArray) v))]
+          (.PutUint32 le p (math/Float32bits (conv float32 (aget z 0))))
+          (.PutUint32 le (subslice p 4) (math/Float32bits (conv float32 (aget z 1))))))
+      (case [baComplex64]
+        (let [z (.-F (assert (* FloatArray) v))]
+          (.PutUint64 le p (math/Float64bits (aget z 0)))
+          (.PutUint64 le (subslice p 8) (math/Float64bits (aget z 1))))))))
+
+(go/func baGetLE "baGetLE is element i of the kind in mem, as baPutLE stores it.\n" ^Value [^{:tag (slice byte)} mem ^int kind ^int i]
+  (let [p (subslice mem (* i (aget baEltSize kind)))
+        le binary/LittleEndian]
+    (switch kind
+      (case [baFloat32] (return (conv float64 (math/Float32frombits (.Uint32 le p)))))
+      (case [baFloat64] (return (math/Float64frombits (.Uint64 le p))))
+      (case [baFloat16] (return (f16Value (.Uint16 le p))))
+      (case [baSint8] (return (conv int (conv int8 (aget p 0)))))
+      (case [baUint8 baChar] (return (conv int (aget p 0))))
+      (case [baSint16] (return (conv int (conv int16 (.Uint16 le p)))))
+      (case [baUint16] (return (conv int (.Uint16 le p))))
+      (case [baInt32] (return (conv int32 (.Uint32 le p))))
+      (case [baInt64] (return (conv int64 (.Uint64 le p))))
+      (case [baCamlInt] (return (conv int (conv int64 (.Uint64 le p)))))
+      (case [baNativeInt] (return (conv Nativeint (conv int64 (.Uint64 le p)))))
+      (case [baComplex32]
+        (return (addr (lit FloatArray :F (lit (slice float64) (conv float64 (math/Float32frombits (.Uint32 le p)))
+                                               (conv float64 (math/Float32frombits (.Uint32 le (subslice p 4)))))))))
+      (case [baComplex64]
+        (return (addr (lit FloatArray :F (lit (slice float64) (math/Float64frombits (.Uint64 le p))
+                                               (math/Float64frombits (.Uint64 le (subslice p 8)))))))))
+    0))
+
+(go/func baMapFile "baMapFile is otherlibs/unix/mmap_unix.c's caml_unix_map_file: the file's bytes mapped by mmap(2) (MAP_SHARED or
+MAP_PRIVATE, so that a shared array's stores reach the file and a mapping's errors are the kernel's), the elements read from them and
+the array's stores written through them.\n" ^Value [^int fd ^int kind ^int layout ^bool shared ^{:tag (slice int)} dim ^int64 start]
+  (let [nd (len dim)]
+    (when (or (< nd 1) (> nd 16))
+      (InvalidArg "Unix.map_file: bad number of dimensions"))
+    (let [major 0]
+      (when (== layout 1) (set! major (- nd 1)))
+      (range [i d dim]
+        (when (not (and (== d -1) (== i major)))
+          (when (< d 0)
+            (InvalidArg "Unix.map_file: negative dimension"))))
+      (let [^syscall/Stat_t st (zero syscall/Stat_t)]
+        (when [err (syscall/Fstat fd (addr st))] (!= err nil)
+          (unixFail err "map_file" ""))
+        (let [size (.-Size st)
+              asize (conv int64 (aget baEltSize kind))]
+          (range [_ d dim]
+            (when (!= d -1) (set! asize (* asize (conv int64 d)))))
+          (if (== (aget dim major) -1)
+            (do
+              (when (< size start)
+                (Failwith "Unix.map_file: file position exceeds file size"))
+              (let [ds (- size start)]
+                (aset dim major (conv int (/ ds asize)))
+                (set! asize (* (conv int64 (aget dim major)) asize))
+                (when (!= asize ds)
+                  (Failwith "Unix.map_file: file size doesn't match array dimensions"))))
+            (when (< size (+ start asize))
+              (when [err (syscall/Ftruncate fd (+ start asize))] (!= err nil)
+                (unixFail err "map_file" ""))))
+          (let [page (conv int64 (syscall/Getpagesize))
+                delta (% start page)
+                flags syscall/MAP_PRIVATE
+                ^{:tag (slice byte)} mem nil]
+            (when shared (set! flags syscall/MAP_SHARED))
+            (when (> asize 0)
+              (let [(values m err) (syscall/Mmap fd (- start delta) (conv int (+ asize delta)) (bit-or syscall/PROT_READ syscall/PROT_WRITE) flags)]
+                (when (!= err nil)
+                  (unixFail err "map_file" ""))
+                (set! mem (subslice m (conv int delta)))))
+            (let [n (conv int (/ asize (conv int64 (aget baEltSize kind))))
+                  data (make (slice Value) n)]
+              (range [i data]
+                (aset data i (baGetLE mem kind i)))
+              (addr (lit Custom :Name "_bigarr02" :V (addr (lit bigarray :kind kind :layout layout :dims dim :data data :mem mem)))))))))))
+
+(go/func init []
+  (let [mapFile (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                  (baMapFile (AsInt (aget a 0)) (AsInt (aget a 1)) (AsInt (aget a 2)) (!= (AsInt (aget a 3)) 0)
+                             (intsOf (aget a 4)) (assert int64 (aget a 5))))]
+    (RegisterExt "caml_unix_map_file" mapFile)
+    (RegisterExt "caml_unix_map_file_bytecode" mapFile)))
