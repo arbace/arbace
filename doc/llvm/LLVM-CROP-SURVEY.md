@@ -996,3 +996,12 @@ for C++'s lowering for gcc.
    only `c.tar.xz` committed and make `tx` locally by `bin/llvmi ir-make tx` (clang again at the check for the torture corpora);
    (c) a corpus of permissive programs in its place (CompCert's tests are not permissive either; tcc's tests2 are LGPL). Recommend (a)
    with gcc 15.2.0's `COPYING3` from the pinned tarball (no network): done so in LICENSE.md, for the user to ratify or undo.
+
+## Decided (2026-11-06, the user: LLS23-LLS26)
+
+- **LLS23 (a):** the 304-module torture sample stays in the default check; all 3,040 modules run at night (`LLVMI_TX_ALL=1`).
+- **LLS24 (a):** a printer writing exactly `llvm-dis`'s text, so the round trip needs no LLVM tool, after LL9.
+- **LLS25 (a):** the AMDGPU verifier rules stay classed; the Assembler errors' order is fixed when LL9 puts the row in the gate.
+- **LLS26 (a), ratified:** `test/llvm/ir/tx.tar.xz` stays committed as GPL-3.0-or-later test data (clang's IR of gcc's torture
+  tests), with GPL version 3's text in `LICENSE.md` from the pinned gcc 15.2.0 tarball's `COPYING3`; the rule against porting GPL
+  sources is about code, not test data.
