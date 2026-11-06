@@ -3686,7 +3686,7 @@ prints C's line for a non-exception value. The main module's SyntaxError is no l
 `bin/pyi run` hands the compiler's answer to `RunModule`, which raises it as `compile()` does (the parser's `_metadata`,
 a file's source None, a decoding error naming the file as the tokenizer does) and gives it to `sys.excepthook`, so the
 keyword typos ("Did you mean 'and'?") come from traceback as in CPython. `-c`'s source is registered with
-`linecache._register_code` (run_mod). A SyntaxError's file line is decoded by its coding cookie, the BOM skipped
+`linecache._register_code` (run_mod), and so are the REPL's statements (the Go display read them from RegisterSource). A SyntaxError's file line is decoded by its coding cookie, the BOM skipped
 (err_programtext).
 
 **PEP 657's positions**, as designed: the unit's `:loc` beside `:line`, `flow!` carrying it, the IR's `:positions`
