@@ -113,7 +113,9 @@ code. Three kinds of things live here:
   `arbace/rust/front/typeck.ae` (type checking's first slice after `rustc_hir_typeck/src/` and `method/`, with the trait solver's
   selection, normalization and pending obligations after `rustc_trait_selection/src/traits/`, over std's interface from the helper's
   `--std-iface`) ports rustc 1.99.1, the same revision and sources, by hand on 2026-11-06 (RF9a, doc/rust/FRONTEND-SURVEY.md, "As built:
-  RF9a"; LICENSE.md names the files; MIT OR Apache-2.0); evaluated from the checkout, out of `gate_key` (RFS13).
+  RF9a"; RF9b's second slice, the same day: ambiguity and where-clause candidates, normalization through the parameter environment and
+  item bounds, CoerceMany, closure kinds, writeback's fix-ups, "As built: RF9b"; LICENSE.md names the files; MIT OR Apache-2.0);
+  evaluated from the checkout, out of `gate_key` (RFS13).
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

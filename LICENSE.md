@@ -553,7 +553,10 @@ covers what.
   `method/{probe,confirm}.rs` (expressions with expectations, coercions, calls, operators, indexing, patterns and default binding
   modes, closures' signature deduction, the method probe), `compiler/rustc_infer/src/infer/` (type, integer and float variables),
   `compiler/rustc_trait_selection/src/traits/{select,project,fulfill}.rs` (selection of impls, normalization of projections, pending
-  obligations) and `compiler/rustc_middle/src/ty/{typeck_results,adjustment}.rs` (the facts' shapes): copyright the Rust project's
+  obligations) and `compiler/rustc_middle/src/ty/{typeck_results,adjustment}.rs` (the facts' shapes), and since RF9b ("As built: RF9b")
+  `rustc_hir_typeck/src/{upvar,expr_use_visitor,cast,fn_ctxt/checks,gather_locals}.rs` (closure kinds, argument checking, casts, locals'
+  initializers), `rustc_infer/src/infer/relate/{generalize,lattice}.rs` and `region_constraints/mod.rs` (generalization, LUB and GLB of
+  regions) and `rustc_infer/src/traits/util.rs` with `rustc_type_ir/src/elaborate.rs` (the parameter environment's elaboration): copyright the Rust project's
   contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License
   ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `typeck_check.ae`) is Arbace's own, under the
   Eclipse Public License 1.0.

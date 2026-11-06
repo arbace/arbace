@@ -521,9 +521,13 @@
   []
   (let [k (System/identityHashCode c/*scope*)]
     (or (when *param-env-cache* (get @*param-env-cache* k))
-        (let [own (vec (for [g c/*scope* :let [d (:def g)] :when (number? d)
-                             cl (try (c/explicit-clauses d) (catch Throwable _ []))]
-                         (erase cl)))
+        (let [own (vec (concat
+                        ;; a trait's own `Self: Trait<..>` (predicates_of a trait and its items)
+                        (for [g c/*scope* :let [d (:def g)] :when (and (number? d) (= "Trait" (:kind (c/def-of d))))]
+                          [:trait [d (erase (c/identity-args (c/generics-of d)))]])
+                        (for [g c/*scope* :let [d (:def g)] :when (number? d)
+                              cl (try (c/explicit-clauses d) (catch Throwable _ []))]
+                          (erase cl))))
               r (loop [acc own todo (filter #(= :trait (first %)) own) n 0]
                   (if (or (empty? todo) (> n 64))
                     (vec (distinct acc))
@@ -790,7 +794,8 @@
                        self (some-> (first targs) shallow)]
                    (if (and r self (or (not (tvar? self)) (#{:int :float} (second self)))
                             (or ;; a parameter: its where clause's arguments (a WhereClausePick)
-                                (when (= :param (first self)) (impls-for self tr (vec (rest targs))) true)
+                                ;; (only a trait its where clauses, or an impl, give it)
+                                (when (= :param (first self)) (impls-for self tr (vec (rest targs))))
                                 ;; the object candidate: a trait object of the trait (or of a trait it extends)
                                 (dyn-implements? self tr)
                                 ;; an alias's item bounds (a projection's, an opaque type's)
@@ -1470,7 +1475,15 @@
   (let [kinds (into {}
                     (for [{:keys [text node env kind]} (when *closures* @*closures*)]
                       [text (or kind
-                                (let [upvars (set (mapcat keys env))
+                                (let [;; the closure's own bindings (its parameters', its lets') shadow the captured names
+                                      own (let [acc (java.util.HashSet.)]
+                                            (letfn [(w [y] (cond (map? y) (do (when (and (= :binding (:kind y)) (:name y)) (.add acc (:name y)))
+                                                                              (doseq [v (vals y)] (w v)))
+                                                                 (sequential? y) (doseq [v y] (w v))
+                                                                 :else nil))]
+                                              (w (:params node)) (w (:body node)))
+                                            (set acc))
+                                      upvars (set (remove own (mapcat keys env)))
                                       uses (closure-uses (:body node) upvars)
                                       ty-of (fn [nm] (some #(get % nm) (rseq env)))]
                                   (cond (some (fn [[nm m]] (and (= m :consume) (not (copy-ty? (deep (ty-of nm)))))) uses) :fn-once
