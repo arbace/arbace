@@ -1276,6 +1276,28 @@
     (vector? e) (mapv let-to-case e)
     :else e))
 
+(defn- uniquify
+  "Every local binder of an expression cloned (a binding site a unique of its own)"
+  [e]
+  (letfn [(cl [m b] (let [b2 (c/clone b)] [(assoc m b b2) b2]))
+          (cls [m bs] (reduce (fn [[m out] b] (let [[m2 b2] (cl m b)] [m2 (conj out b2)])) [m []] bs))
+          (w [m e]
+            (if-not (seq? e)
+              e
+              (case (first e)
+                lv (get m e e)
+                (v lit) e
+                app (list 'app (w m (second e)) (mapv #(w m %) (nth e 2)))
+                lam (let [[m2 bs] (cls m (second e))] (list 'lam bs (w m2 (nth e 2))))
+                let (let [[_ [[_ b r]] body] e [m2 b2] (cl m b)] (list 'let [(list 'bind b2 (w m r))] (w m2 body)))
+                letrec (let [[m2 bs] (cls m (map second (second e)))]
+                         (list 'letrec (mapv (fn [[_ _ r] b2] (list 'bind b2 (w m2 r))) (second e) bs) (w m2 (nth e 2))))
+                case (let [[_ s b alts] e [m2 b2] (cl m b)]
+                       (list 'case (w m s) b2 (mapv (fn [[_ c xs r]] (let [[m3 xs2] (cls m2 xs)] (list 'alt c xs2 (w m3 r)))) alts)))
+                cast (list 'cast (w m (second e)) (nth e 2))
+                e)))]
+    (w {} e)))
+
 (defn strip
   "The simplified program for CorePrep and CoreToStg (arbace.repr.haskell.tostg): casts erased, a binding whose
   arity exceeds its right-hand side's lambdas eta-expanded (CorePrep's cpeEtaExpand), rec groups flattened"
@@ -1294,7 +1316,8 @@
               (if (and (not (c/join? b)) (> ar (c/manifest-arity r)))
                 (c/eta-expand-at {:lams (vec (repeat ar [true false])) :div :top} r)
                 r)))]
-    (vec (for [bd binds [_ b r] (c/bind-pairs bd)] (list 'bind b (eta b (st r)))))))
+    ;; CorePrep clones every local binder (cpCloneBndr): each binding site a name of its own
+    (vec (for [bd binds [_ b r] (c/bind-pairs bd)] (list 'bind b (uniquify (eta b (st r))))))))
 
 (defn simplify-module
   "The desugared program of the elaborator's result r ([(bind B E)...], after the simple optimiser) through the -O0
