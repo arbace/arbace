@@ -753,6 +753,18 @@ The eval cell's 25 deferred are all `:c-api` (OT27). The AOT cell's 64: the same
 passing compiled). With the night's whole runs the cells move by what the lists did not cover (the stdlib's key changed, so every row
 is rerun); expected: eval about 441 / 205 / 25, AOT at the compiled level about 440 / 205 / 30.
 
+### Checks run (all by list, 2026-11-06)
+
+`bin/oi check --record --only-list` and `--aot --record --only-list` over each fix's programs and the class rows (164), `bin/oi suite
+check [--aot] --record --only-list` (parsetree/test, recvfrom_linux, the opam rows, the four unrun suite programs), `bin/oi record-ref` and
+`suite record-ref --only-list` for the newly run programs, `bin/oi check --only-list test/ocaml/essential-check.txt` (58 of 58) and its
+light level (57 pass, 1 `:light-speed`, no row changed), `bin/oi test` (go vet, go test: ok), `bin/oi judges-test` (the judges' tests,
+the dumps' determinism, the expect check: pass; the pins' tests count the attested rows instead of a fixed 39), `bin/oi suite rollup
+--record` (0 files without a result or a class; `divergences-testsuite.edn` reads `exit_status`, `arguments`, `ocamlc_flags` and
+`windows-`), `bin/oi divergences` (all five judgments, 0 failing), `bin/oi pins` (40 pins attested), `bin/oi aot-clib` (430 MB, 22 s),
+`O2J_PLAN_ONLY=1 bin/oi check --aot --level compiled --only-list` (six programs), `bin/reap`, `make check-makefile`. **Not run**: the gate,
+any whole corpus, a compiled shard's build (over the day's 2 GiB), `bin/arbace-go`.
+
 ### Proposed (OT27-OT29; none decided)
 
 - **OT27 The C API shim's route** (item 9, the 25 programs of `:c-api`: callbacks 12, `[@unboxed]`/many-argument externals 3,
