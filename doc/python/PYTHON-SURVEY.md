@@ -3286,3 +3286,183 @@ inlined but grow, so a few of their callers no longer inline (`go build -gcflags
   - Run alone in the foreground, both programs equal CPython's. With `PYI_SMOKE_ONLY='^(e-executable|f-signal)'`,
     f-signal passes and e-executable equals but for the cap.
 
+## Design: 219t, tracing: `sys.settrace`, `f_trace`'s events, `f_lineno` jumps (2026-11-06, the Mac VM, queue 219t; the user's (a) on 219's DECISION)
+
+Read from CPython 3.14.10's Python/legacy_tracing.c (`sys_trace_*`, `call_trace_func`, `trace_line`,
+`sys_trace_jump_func`), Python/instrumentation.c (`initialize_lines`, `_Py_call_instrumentation_line`),
+Python/sysmodule.c's `trace_trampoline` and Objects/frameobject.c (`mark_stacks`, `marklines`,
+`frame_lineno_set_impl`), against go/arbace/py at 50c6882d with 220's `sys.monitoring` (075e56ae) merged in.
+
+**One mechanism with 220's profiler.** Since 3.12 CPython's `sys.settrace` is a `sys.monitoring` tool of its own
+(PY_MONITORING_SYS_TRACE_ID, 7), as `sys.setprofile` is tool 6. 220 built the registry, the call-family events at
+runFrames' entry, return, pushed frame and unwinding, and the profiler as tool 6's native callback. 219t makes
+`sys.settrace` tool 7 the same way (a native callback, `traceEvent`, in a new file `trace.go`): PY_START, PY_RESUME and
+PY_THROW are `call`, PY_RETURN and PY_YIELD `return` with the value, PY_UNWIND `return` with None, RAISE `exception`
+with `(type, value, traceback)`; and adds what neither had: the RAISE event (fired where runFrames adds a frame's
+traceback entry, i.e. at the raise and in each frame the exception passes through, not at a re-raise: CPython's
+`monitor_raise` at its `error:` label), and the local events LINE (and the legacy JUMP and INSTRUCTION, `opcode`) from
+the dispatch loop. The trampoline is sysmodule.c's: `call` goes to the thread's trace function, the others to the
+frame's `f_trace`; a result other than None becomes `f_trace`; an error removes the trace function and the frame's
+`f_trace` and is raised where the event is. Callbacks run with 220's `monTracing` count up, so no event fires inside
+one. A tool registered with `sys.monitoring.set_events(..., LINE)` gets LINE from the same loop hook (global events
+only, as 220's registry; local events stay 220's not-built).
+
+**Line events by CPython's rule over pyi's IR.** pyi's IR is CPython's codegen's shape (the same operations, jumps and
+handlers, one instruction per operation, 216's per-expression lines). An instruction is *instrumented* when (a) its line
+differs from the previous instruction's in code order and is known, (b) it is a jump's target (jump, jump-if-*,
+for-iter's exit) with a line, or (c) a handler's target (not end-async-for) with a line; `initialize_lines`, computed
+once per code object. Before an instrumented instruction runs, `line` fires unless the previous instruction this frame
+ran (f.Lasti) has the same line, a previous RESUME forcing it: the frame's start, and the resumption after a
+yield-value. A backward `jump` to an instruction of its own line fires `line` too (`sys_trace_jump_func`). f_trace_lines
+false: no line events; f_trace_opcodes: `opcode` before each instruction.
+
+**RESUME.** CPython's code objects start with RESUME at `co_firstlineno` (the `call` event's `f_lineno`, which
+test_sys_settrace's `lineno_matches_lasti` checks against `co_lines` at `f_lasti`). pyi's had none: a function's first
+instruction is its body's. So `arbace.python.compile` starts every code object but a module's with a `nop` at
+`co_firstlineno` (its line only; the next instruction's line as before), never instrumented, the "previous RESUME" of
+the first line event. The loop runs one more instruction per call; the compiled code none (a nop emits nothing). Every
+function's IR changes (one instruction, the offsets one later: `f_lasti`, `tb_lasti` move as CPython's do, which have
+RESUME too); the IR cache is keyed by the compiler's digest.
+
+**Traced frames run on the loop.** The compiled code cannot report lines. While a trace function is set on any thread
+or a tool has LINE events (`monEvents & monTraceMask`, one load of 220's word):
+- runFrames' guardedStep (and step) enters a code object's `Native` only when tracing is off: a frame started or
+  resumed while tracing runs on the loop;
+- the loop checks the word once per instruction (`if monEvents&monTraceMask != 0 { traceInstr }`, taken only when on);
+- a compiled frame already running hands itself to the loop at its next block start (216's rule 2: every slot is in
+  `f.Stack` there): the register generator emits `if py.AotTracing() { f.PC = n; return nil, py.AotToLoop }` after each
+  block start's label, and after a direct call's value (216d: the slots then in Go locals written back first, f.PC the
+  call's next instruction), so `pdb.set_trace()` returning into compiled code reports the next line; guardedStep runs
+  the frame on the loop from there. The stack generator (the fallback) checks at each instruction's label. Once on the
+  loop a frame stays there until it returns; a later call of the code is compiled again. Every PC the loop leaves a
+  frame at (a call's next instruction, a handler's target, a yield's resumption) is an entry of the compiled function
+  (216's and 216d's re-entries), so a frame resumed compiled after tracing ends is entered correctly.
+- Cost when off: one load and branch per block start and per direct call in compiled code, per instruction on the
+  loop; measured with 210's method (CPython, base, branch back to back, 3 rounds, the least).
+
+**`f_lineno` jumps** (frame_lineno_set_impl): allowed only during a trace function's event, by the event (line, PY_YIELD,
+PY_RESUME and JUMP allow it; `call`'s "can't jump from the 'call' trace event of a new frame"; return, unwind, throw,
+exception, opcode "can only jump from a 'line' trace event"; none "f_lineno can only be set in a trace function"); the
+line's first instruction not before it (`marklines`, "line N comes before/after the current code block"); `mark_stacks`
+over pyi's IR, each stack slot's kind (Iterator after get-iter and get-aiter, Except after push-exc-info and at a
+handler's entry, Lasti for a handler that pushes it, Object otherwise), every operation's stack effect as
+arbace.python.ir's table; the target the compatible one with the deepest stack, else CPython's messages ("can't jump
+into the body of a for loop", "can't jump into an 'except' block as there's no exception", ...); unbound locals bound
+to None after the RuntimeWarning "assigning None to N unbound local(s)"; the slots above popped, an Except slot
+restoring the handled exception; f.PC set to the target, which then runs without a line event of its own.
+
+**What cannot match by construction:** pyi's offsets are its instructions' (one code unit each), so `f_lasti` values and
+jumps' "offsets" in opcode events differ from CPython's numbers; where pyi's compiler places a line differently from
+CPython's flowgraph (NOPs kept for a line, the lines of a loop's exit and of handlers' preambles), the events differ,
+each a compiler line fix found by test_sys_settrace's expected sequences. Opcode events are pyi's instructions, not
+CPython's.
+
+**The proof asked:** test_sys_settrace (the event sequences, the jump tests, raising trace functions), test_bdb, a
+sample of test_pdb, test_trace, and probes of coverage-style tracing (line sets of a program's functions) against
+CPython, on the loop and with the program compiled (the handoff); no regression on `bin/pyi runtime check`,
+`make python-essential` and the check scripts of 210, 216, 216d and 219; the bench sample's table.
+
+## As built: 219t, tracing: `sys.settrace`, `f_trace`'s events, `f_lineno` jumps (2026-11-06, the Mac VM, queue 219t)
+
+Built as "Design: 219t" above, on 50c6882d with 220's `sys.monitoring` (075e56ae: its registry, call-family events and
+loop hooks) merged in (bf8d0a0b), so that the tracer and the profiler are one mechanism:
+
+- **`trace.go`** (go/arbace/py): `sys.settrace` is sys.monitoring's tool 7 with a native callback, as tool 6 is
+  220's profiler: PY_START/PY_RESUME/PY_THROW `call`, PY_RETURN/PY_YIELD `return` with the value, PY_UNWIND `return`
+  None, RAISE and STOP_ITERATION `exception` with `(type, value, traceback)`; sysmodule.c's trampoline (`call` to the
+  thread's function, the rest to `f_trace`, a result not None the new `f_trace`, an error removing both); the thread's
+  event while its trace function runs (`what_event`) for `f_lineno`'s setter; `sys.gettrace`, `threading.settrace`,
+  `settrace_all_threads`. RAISE fires where runFrames adds a frame's traceback entry (each frame the exception passes
+  through, not a re-raise); STOP_ITERATION where a yield-from's delegate ends, RAISE for the StopIteration a for-iter's
+  Python `__next__` raises and for a generator that a for-iter runs to a value other than None (bytecodes.c's FOR_ITER,
+  SEND, INSTRUMENTED_END_SEND, gen_iternext).
+- **Line events from the loop** (`traceInstr`, before each instruction while `monEvents & monTraceMask`): CPython's
+  `initialize_lines` over pyi's IR (a line start in code order, a jump's target, a handler's target; never RESUME or
+  end-async-for), an instrumented instruction reporting `line` unless the frame's previous instruction had its line
+  (RESUME's exception: the frame's start, a resumption after yield-value), a backward jump to its own line `line` too
+  (`sys_trace_jump_func`), `opcode` per instruction with `f_trace_opcodes`; a tool's global LINE, INSTRUCTION and JUMP
+  events from the same hook (coverage's sysmon core in its simplest form).
+- **`f_lineno` jumps** (`frameSetLineno`): frame_lineno_set_impl's event rules and messages, `marklines`, `mark_stacks`
+  over pyi's IR (`irEffect`: arbace.python.ir's stack effects in Go; the kinds Iterator, Except, Lasti, Object),
+  `compatible_stack`, the deepest compatible target, the unbound locals' RuntimeWarning and None, the popped slots (an
+  Except one restoring the handled exception).
+- **Traced frames on the loop**: guardedStep and step enter `Code.Native` only while tracing is off; a compiled body
+  returns `py.AotToLoop` at a block start (and after a direct call's value, its slots written back) when
+  `py.AotTracing()`, guardedStep continuing the frame on the loop (arbace.python.aot: `to-loop` at each block start's label
+  in the register generator, at each instruction in the stack generator).
+- **One code object per code** (`Code.Object`): `frame.f_code is func.__code__` (pyi made a new wrapper per access; bdb
+  and the tracers compare code objects by identity); 220's `monCode` the same (a REQUEST commit for 220).
+- **The compiler's locations** (arbace.python.compile): a RESUME nop at `co_firstlineno` starting every code object but a
+  module's; codegen.c's NO_LOCATION instructions and line-holding NOPs (pass, try, break, continue, return, a for
+  target, a constant statement), and `flow!`, a port of flowgraph.c's line passes over a unit's instructions in basic
+  blocks: small and line-less exit blocks inlined, unreachable code removed, line-less exits duplicated per jump and
+  lines propagated (resolve_line_numbers, twice), constant tests folded, tuples of constants folded, jumps to jumps
+  threaded, const-pop pairs and redundant NOPs and jumps removed, a backward conditional jump made a forward one over a
+  backward jump (normalize_jumps_in_block); push_cold_blocks_to_end is not done (pyi's handlers stay inline). With it a
+  target's store at the target's line, a decorated definition's name at its statement's line, a class body's
+  `co_firstlineno` its first decorator's, docstrings at their line and a function's no statement of its body, the
+  except clause's instructions at its line and a named clause's name stored as codegen_try_except stores it (the
+  exception popped: the handler's stack is CPython's, which mark_stacks' jumps need), match cases at their pattern's
+  line, async for's end at its iterator's line. Every function's IR changes (the IR cache is keyed by the compiler's
+  digest: the night re-records).
+
+**The proofs (run, the VM; CPython 3.14.10 `python3 -I -B` the reference; the test modules by `t/ut.py`, unittest's
+loader, one line per test, run by a compiled runner on the loop, `t/pr.sh`):**
+- test_sys_settrace: 441 of 448 equal (base: `sys.settrace` a no-op; with the tracer but the compiler's old lines, 254).
+  The 7 left: `test_13_genexp` in its four classes, `test_jump_from_yield` and `test_reentrancy` need a generator's
+  finalization or `__del__` (the trace events of a generator closed when collected: 218's finalizer queue), and
+  `test_trace_lots_of_globals` (a display of more than 16 items: pyi builds it in one instruction, CPython item by item;
+  the narrowed `:tracing` class).
+- test_bdb: 36 of 37 (`test_skip`: pyi's `io` is `_pyio`, so the import's frames include `_pyio`'s, which the test's skip
+  list does not name). test_trace: 18 of 27, the 9 left outside tracing (7 run `sys.executable`, empty under the runner;
+  2 need `gc.get_referrers`, which pyi's collector does not answer). test_pdb's 72 doctests, each run alone as its
+  load_tests runs them (`t/pdb3.py`): 54 equal (CPython 71); the rest pdb's other machinery on pyi: `dis` of pyi's code
+  (`break FUNC`, find_first_executable_line), pdb's closures through `co_consts[0]`, a string statement in mode single
+  taken for a docstring, the interact command. test_patma's TestTracing and test_threading's `gettrace_all_threads` and
+  `getprofile_all_threads` equal (out of `:tracing`).
+- `t/check219t.sh` (tr1: call, line, return and exception events through calls, loops, handlers and a generator; tr2:
+  tracing switched on inside running frames as pdb's set_trace does, the compiled frames' handoff; cov1: line coverage
+  by settrace of a module of branches, handlers, with, a class, a comprehension, a generator, a match, a lambda and
+  multi-line displays, and by a sys.monitoring LINE tool; ts1: except* with else and finally; ci: `f_code is __code__`;
+  th1: threading.settrace and settrace_all_threads): every output equal to CPython's, compiled and on the loop; on the
+  base every one fails.
+- 219's check219.sh and check219tb.sh, 216d's check216d.sh, 210's check210.sh: PASS. `make python-essential`: 20 pass, 1
+  classed, 0 failing. `bin/pyi check --aot --no-pyi` on 210's 73-program sample: 73 pass. `bin/pyi runtime vet`: ok. `bin/pyi runtime check`: the same forms for all packages, runtime-ops equal, 137 of 138 programs equal, the REPL equal; the one FAIL, e-executable.py, is status 124, the 120 s cap that 216 and 219 also hit (its output is cut at the cap).
+
+**The bench (run, the VM):** `bin/pyi bench`'s 20-benchmark sample, 210's method: each round CPython, base (bf8d0a0b:
+219's head with 220's monitoring hooks merged, its own worktree) and branch back to back, 3 rounds, the least wall
+seconds; load 1.5-3; every output equal to CPython's.
+
+| benchmark | CPython | base | after | base / CPython | after / CPython |
+|---|---:|---:|---:|---:|---:|
+| raytrace | 0.20 | 0.55 | 0.55 | 2.8x | 2.8x |
+| deltablue | 0.12 | 0.37 | 0.38 | 3.1x | 3.2x |
+| fannkuch | 0.28 | 0.58 | 0.57 | 2.1x | 2.0x |
+| generators | 0.15 | 0.65 | 0.65 | 4.3x | 4.3x |
+| nqueens | 0.25 | 0.60 | 0.60 | 2.4x | 2.4x |
+| go | 0.09 | 0.22 | 0.21 | 2.4x | 2.3x |
+| richards | 0.30 | 0.48 | 0.48 | 1.6x | 1.6x |
+| chaos | 0.07 | 0.19 | 0.19 | 2.7x | 2.7x |
+| json_dumps | 0.03 | 0.19 | 0.19 | 6.3x | 6.3x |
+| spectral_norm | 0.32 | 0.57 | 0.58 | 1.8x | 1.8x |
+| unpack_sequence | 0.22 | 0.58 | 0.58 | 2.6x | 2.6x |
+| coroutines | 0.35 | 0.59 | 0.59 | 1.7x | 1.7x |
+| float | 0.21 | 0.43 | 0.43 | 2.0x | 2.0x |
+| nbody | 0.29 | 0.33 | 0.33 | 1.1x | 1.1x |
+| hexiom | 0.03 | 0.08 | 0.08 | 2.7x | 2.7x |
+| base64 | 1.49 | 3.39 | 2.66 | 2.3x | 1.8x |
+| bpe_tokeniser | 3.06 | 5.48 | 5.49 | 1.8x | 1.8x |
+| async_tree | 0.22 | 0.96 | 0.96 | 4.4x | 4.4x |
+| mdp | 0.75 | 2.54 | 2.51 | 3.4x | 3.3x |
+| pprint | 1.35 | 4.16 | 4.26 | 3.1x | 3.2x |
+
+Sum: CPython 9.78 s, base 22.94 s (2.35x), after 22.29 s (2.28x). Every difference is within 5% and goes both ways but
+base64's, 19% faster (5 rounds again: base 3.30, after 2.67; its cause not established: the flow passes change its
+loops' code, constant tuples folded, jumps threaded, NOPs gone); deltablue and pprint 2-5% slower in their least of 3
+(5 rounds: deltablue 0.36 and 0.38, pprint 4.13 and 4.11). The handoff's check, one load and branch per block start and
+per direct call, costs nothing measurable at this resolution.
+
+**What stays by design:** pyi's offsets are its instructions' (`f_lasti`, an opcode event's instruction); the layout's
+one difference left, handlers inline where CPython moves them to the end (push_cold_blocks_to_end), shows in no test
+of the sample; sys.monitoring's local events (`set_local_events`) and DISABLE stay 220's not-built; the tests that need a
+generator's finalization or `__del__` wait for 218.
