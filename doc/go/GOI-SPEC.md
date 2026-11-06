@@ -4978,9 +4978,13 @@ the test's calls inline are loaded from its forms in the run.
 **In the check.** `arbace.go.run --errorcheck` takes `--escape N` (gc's `-m` level), `--inline` (no `-l`),
 `--escape-debug EDN` (`-d=escapemutationscalls`, `-d=zerocopy`, `-smallframes`), `--escape-std DIR` and
 `--escape-cache DIR`: when the package has no errors, its escape and inlining diagnostics are its output
-(status 0). `bin/goi check_err` passes them for `-m`, `-m=N`, `-l`, `-N`, `-smallframes` and those two `-d`
-flags (gc's reference compiles with the action's flags as before) and gives such a program 180 s (a first
-run analyzes the imports); `-l=N`, `-live`, `-wb` and the other `-d` flags stay unsupported.
+(status 0). `bin/goi check_err` passes them for `-m`, `-m=N`, `-l`, `-N`, `-smallframes` and the `-d` flags
+`escapemutationscalls`, `zerocopy` and `inlfuncswithclosures` (gc's reference compiles with the action's flags
+as before) and gives such a program 180 s; `-l=N`, `-live`, `-wb` and the other `-d` flags stay unsupported.
+Before its parallel runs, `bin/goi check` makes the tags of the standard packages the listed `-m` programs
+import in one process (`arbace.go.run --escape-warm`, a program for each import not yet covered, under
+`GOMEMLIMIT` 1,400 MiB, `GOI_ESCAPE_WARM_MEM`: 1.5 GB at most, under two minutes from an empty cache), so that
+each program's run reads them (0.6 GB, seconds) instead of making them.
 
 **Since then (the same day).** gc's `-m=2` text: `can inline f with cost N as: SIG { BODY }` (the body
 in `ir/fmt.go`'s statement format, a loop as `for loop`), `cannot inline f: REASON` for every function,
@@ -5002,8 +5006,8 @@ tag made without the inliner in 1), 2 stay in `std-out-of-scope` (`unique`, `int
 and 33 stay in `gc-flags` (design: `-live` 8, `-d=ssa/...` 14, `-d=wb` 4, `-d=nil` 3, `-d=typeassert`,
 `-d=tailcall`, `-d=append,slice`, `-d=checkptr`, `-d=escapedebug`: gc's back end), with the two run programs
 (`known gc flags`). The record: 1,720 of 1,837 pass (1,664 before); `bin/goi divergences` places every
-program; `bin/reap` re-recorded. Memory: a warm run of a program 0.6 GB; a first run, which analyzes the
-imports' packages from their forms, up to 2 GB (`fmt`'s closure), its tags then kept. `arbace/go/escape.ae`
+program; `bin/reap` re-recorded. Memory: a run of a program with the tags made 0.6 GB; the check's warm-up 1.5 GB; a
+program run by hand on an empty cache, which makes its imports' tags itself, up to 2 GB (`fmt`'s closure). `arbace/go/escape.ae`
 and `run.ae` compile by c2j alone (as `bin/ci c2j-check` does for ci: 549 classes, none failing).
 
 ### Proposed
