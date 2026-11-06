@@ -393,3 +393,14 @@ for the others. Expected: genclass's `protected-final-access` passes (`findSyste
 call throws IllegalArgumentException; `superFindSystemClass`, the `:exposes-methods`, answers `String`), genclass 7 of 8
 at both levels. Night, after the build: run `clojure.test-clojure.genclass` as above, then record genclass
 `{:test 7, :pass 53}` in `test/arbace-go-results.edn` and drop `:gen-class`'s class (eval) once it passes.
+
+### As built: CDR10, begun (2026-11-06)
+
+The port is staged in `test/jrt/serialization/` and recorded in doc/go/JRT-NOTES.md, "Serialization": jrt's `ClassCache`
+(a map in place of `ClassValue`), `jdk.internal.jrt.SerialAlloc` (ReflectionFactory's allocation, its natives over
+`ClassInfo.SerialNew`), `variants.py` making jrt's `ObjectStreamClass` (fields by reflection in place of Unsafe's offsets,
+records by their canonical constructor in place of method handles, no JFR event), `ObjectInputStream` and
+`ObjectOutputStream` (no `SharedSecrets`) from jdk26u's text, and the natives' Go forms. Checked light: javac on Arbace
+compiles them patched into java.base, repr/java reads them. Left for the builds: j2g's `SerialNew` per Serializable class,
+jrt's `ClassInfo` field, the sources into the world (`bin/jrt-convert update`), the member tables' private hooks, then
+Clojure's suite's `serialization` and Java's class. CDR5's measurement comes first, as decided.

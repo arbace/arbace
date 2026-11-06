@@ -4119,3 +4119,44 @@ inflaters (Go's collector, JCS96 (b)); signed jars (JCS90 (b)); the `jrt:` URL (
 a multi-release jar opened at the runtime's version; MIME types of `URLConnection.getFileNameMap`
 ("Files"); `FileInputStream.skip` of a negative count (`:jrt-io`, JCS96 (b)).
 
+
+# Serialization (CDR10, branch `clojure-cdr`, begun 2026-11-06)
+
+The user's decision of 2026-11-06 (doc/CLOJURE-DESIGN-REVIEW.md, CDR10 (a)): Java serialization in the shipped world,
+after CDR5's measurement. Serialization's core is jdk26u's java.io (`ObjectOutputStream`, `ObjectInputStream`,
+`ObjectStreamClass`, `ObjectStreamField`, their interfaces and exceptions: 21 files, 12,052 lines); what it needs outside
+the world, and jrt's answer to each:
+
+| jdk26u's | used for | jrt's |
+|---|---|---|
+| `ReflectionFactory.newConstructorForSerialization` | an object made by the first non-serializable superclass's no-argument constructor | `jdk.internal.jrt.SerialAlloc` over `ClassInfo.SerialNew`, which j2g writes per class (below) |
+| `Unsafe`'s field offsets | `ObjectStreamClass.FieldReflector`'s reads and writes of fields | `java.lang.reflect.Field`'s `get`/`set` (`setAccessible(true)`) |
+| `MethodHandles` | records' deserialization constructors (`RecordSupport`) | the canonical `Constructor`, each component's value taken from the stream by an extractor (`RecordSupport.Ctr`) |
+| `ClassValue` and soft references | `ClassCache`, the descriptors' and reflectors' caches | a `ConcurrentHashMap` (the closed world unloads no class) |
+| `SharedSecrets`, `JavaLangAccess` | ASCII counts of modified UTF-8; ObjectInputStream's accessors | the loops of `StringCoding`'s; the accessors not set |
+| JFR's `DeserializationEvent`, `SerializationMisdeclarationEvent` | events | not raised |
+| `Unsafe.storeFence` | `freeze` | none: the graph is handed to another goroutine by a synchronization, which publishes it |
+
+**Staged, checked light (2026-11-06).** `test/jrt/serialization/`: jrt's own Java (`java/io/ClassCache.java`,
+`jdk/internal/jrt/SerialAlloc.java`), the variants' maker `variants.py` (jdk26u's `ObjectStreamClass`, `ObjectInputStream` and
+`ObjectOutputStream` edited as the table says: `python3 test/jrt/serialization/variants.py /root/jdk26u OUT`, replayable on
+jdk26u's next revision) and the natives' Go forms `serial.ae`. javac on Arbace compiles the five files patched into
+java.base against the platform (40 classes) and repr/java reads them (7 forms files). They are not in the world yet: the
+overlay takes every file of `overlay/jdk/java.base`, and the world would take them before j2g writes `SerialNew`.
+
+**Left (the night's build proves each).** (1) j2g (`arbace.j2g.decls`): for each concrete class C of the world that is
+Serializable (`m/all-supertypes` has `java/io/Serializable`) and not an enum or a record (they are written by name and
+by their canonical constructor), its first superclass S that is not Serializable; when S has a no-argument constructor
+accessible to C (public or protected, or package-private in C's package; ReflectionFactory's rule), a function
+`C_SerialNew` (`(let [t (addr (lit C))] (.Ctor <S's embedded struct of t> t) t)`: S's constructor body, `this` the
+object, as `ctor-forms` calls a super constructor; `Object`'s none), set in `C`'s init as `(.-SerialNew (.Info C_class))`,
+written only when `java/io/ObjectStreamClass` is in the world. (2) jrt: `ClassInfo`'s field `SerialNew (func [] [any])`
+(`class.ae`), `serial.ae` moved to `go/arbace/jrt`, `ClassInfo.Init` checked as `hasStaticInitializer`'s answer.
+(3) The sources: `test/jrt/serialization`'s Java into `overlay/jdk/java.base`, the variants made into it by `variants.py`,
+`java/io`'s core among `jrt_sources.ae`'s added sources, then `bin/jrt-convert update`, `bin/j2g-edge update`.
+(4) Clojure's types: `arbace.lang`'s Serializable classes (`PersistentVector`, `Keyword`'s `readResolve`, `Var`'s
+`writeReplace` and the rest) are Java forms translated as the runtime: their hooks are reached by reflection
+(`getDeclaredMethod`), so the member tables must list their private `readObject`/`writeObject`/`readResolve`; a Dyn class
+(deftype, defrecord, proxy) has no `SerialNew` (its fields are slots): a defrecord's serialization is the case to build
+next (`Compiler$Dyn`'s allocation without constructor). Then Clojure's suite's `serialization` (9 tests) and
+`test-proxy-non-serializable`, and Java's `serialization` class.
