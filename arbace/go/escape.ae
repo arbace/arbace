@@ -702,7 +702,9 @@
   [e c]
   (let [^java.util.IdentityHashMap tm (:temps *ctx*)]
     (or (.get tm c)
-        (let [rtys (let [ty (node-type (:callee c))] (nth (under (or ty [:func [] [] false])) 2 nil))
+        (let [rtys (if (= :inlcall (:op c))
+                     (mapv #(e/o % :type) (:retvars c))
+                     (let [ty (node-type (:callee c))] (nth (under (or ty [:func [] [] false])) 2 nil)))
               rtys (or rtys (rest (node-type c)))
               tmps (vec (for [i (range (count rtys))]
                           (let [o (e/obj {:kind :var :name (str ".autotmp_" i) :line (or (:line c) (:line @e))
@@ -1924,7 +1926,7 @@
 (def ^:private inline-param-call-cost 17)
 (def ^:private inline-closure-called-once-cost 800)
 
-(declare inl-callee can-inline! try-inline field-offset max-cost all-fns)
+(declare inl-callee can-inline! try-inline field-offset max-cost all-fns scan-fn! closure-vars! foreign-body)
 
 (defn- conv-nop?
   "typecheck's convertOp: whether a conversion is OCONVNOP (costs nothing in the budget)."
@@ -1947,6 +1949,27 @@
   "An ONAME of class PPARAM (or a closure variable of the enclosing function's: PAUTOHEAP)."
   [n]
   (and (= :local (:op n)) (#{:param} (e/o (:obj n) :esc-class))))
+
+(def ^:private intrinsics
+  "ssagen's intrinsics for amd64 (ssagen/intrinsics.go's initIntrinsics, go1.27.1: its add, addF and
+  alias entries that apply to amd64): calls the back end replaces by instructions, which the
+  inliner's budget counts as one node (ir.IsIntrinsicCall)."
+  {"crypto/internal/constanttime" #{"Select" "boolToUint8"}
+   "internal/runtime/atomic" #{"And" "And32" "And64" "And8" "Cas" "Cas64" "CasRel" "Casint32" "Casint64" "Casp1" "Casuintptr" "Load" "Load64" "Load8" "LoadAcq" "LoadAcq64" "LoadAcquintptr" "Loadint32" "Loadint64" "Loadp" "Loaduint" "Loaduintptr" "Or" "Or32" "Or64" "Or8" "Store" "Store64" "Store8" "StoreRel" "StoreRel64" "StoreReluintptr" "Storeint32" "Storeint64" "StorepNoWB" "Storeuintptr" "Xadd" "Xadd64" "Xaddint32" "Xaddint64" "Xadduintptr" "Xchg" "Xchg64" "Xchg8" "Xchgint32" "Xchgint64" "Xchguintptr"}
+   "internal/runtime/maps" #{"bitsetFirst" "bitsetLowestSet" "bitsetRemoveBelow" "bitsetShiftOutLowest" "ctrlGroupMatchEmpty" "ctrlGroupMatchEmptyOrDeleted" "ctrlGroupMatchFull" "ctrlGroupMatchH2"}
+   "internal/runtime/math" #{"Add64" "MulUintptr"}
+   "internal/runtime/sys" #{"Bswap32" "Bswap64" "GetCallerPC" "GetCallerSP" "GetClosurePtr" "Len64" "Len8" "OnesCount64" "Prefetch" "PrefetchStreamed" "TrailingZeros32" "TrailingZeros64" "TrailingZeros8"}
+   "math" #{"Ceil" "FMA" "Floor" "RoundToEven" "Trunc" "sqrt"}
+   "math/big" #{"mulWW"}
+   "math/bits" #{"Add" "Add64" "Div" "Div64" "Len" "Len16" "Len32" "Len64" "Len8" "Mul" "Mul64" "OnesCount" "OnesCount16" "OnesCount32" "OnesCount64" "ReverseBytes32" "ReverseBytes64" "RotateLeft" "RotateLeft16" "RotateLeft32" "RotateLeft64" "RotateLeft8" "Sub" "Sub64" "TrailingZeros16" "TrailingZeros32" "TrailingZeros64" "TrailingZeros8"}
+   "runtime" #{"KeepAlive" "slicebytetostringtmp"}
+   "sync/atomic" #{"AddInt32" "AddInt64" "AddUint32" "AddUint64" "AddUintptr" "AndInt32" "AndInt64" "AndUint32" "AndUint64" "AndUintptr" "CompareAndSwapInt32" "CompareAndSwapInt64" "CompareAndSwapUint32" "CompareAndSwapUint64" "CompareAndSwapUintptr" "LoadInt32" "LoadInt64" "LoadPointer" "LoadUint32" "LoadUint64" "LoadUintptr" "OrInt32" "OrInt64" "OrUint32" "OrUint64" "OrUintptr" "StoreInt32" "StoreInt64" "StoreUint32" "StoreUint64" "StoreUintptr" "SwapInt32" "SwapInt64" "SwapUint32" "SwapUint64" "SwapUintptr"}})
+
+(defn- intrinsic? [f]
+  (boolean (if (or (fn-get f :foreign) (fn-get f :foreign-body))
+             (contains? (get intrinsics (fn-get f :pkg-path)) (fn-get f :local-name))
+             (and (fn-get f :obj) (not (fn-get f :parent))
+                  (contains? (get intrinsics (:local-pkg *ctx*)) (fn-get f :name))))))
 
 (defn- hairy-cost
   "hairyVisitor over function f's body: [cost reason], gc's IR nodes counted as the unified IR
@@ -2062,6 +2085,7 @@
                       sig (if (= :method (:kind c)) (e/o (:method (:callee c)) :type) sig)
                       args (if (and (vector? (under sig)) (nth (under sig) 3 false)) (variadic-args c sig) (:args c))
                       extra (cond
+                              (and callee (intrinsic? callee)) 0
                               (and inl (<= (long (:cost inl)) (long (max-cost callee false)))) (:cost inl)
                               (and (= :closure (:kind c)) (param-local? (:callee c))) inline-param-call-cost
                               :else inline-extra-call-cost)]
@@ -2125,14 +2149,14 @@
   method expression of the receiver's own type, a literal of the caller's)."
   [caller c]
   (case (:kind c)
-    (:static :compiled) (let [g (fn-of-obj (:obj (:callee c)))] (when (and g (not (fn-get g :foreign))) g))
+    (:static :compiled) (fn-of-obj (:obj (:callee c)))
     :method (let [m (:callee c)]
               (when (= 1 (count (:path m)))
-                (let [g (fn-of-obj (:method m))] (when (and g (not (fn-get g :foreign))) g))))
+                (fn-of-obj (:method m))))
     :closure (let [v (static-value (:callee c))]
                (case (:op v)
-                 :func (let [g (fn-of-obj (:obj v))] (when (and g (not (fn-get g :foreign))) g))
-                 :method-expr (let [g (fn-of-obj (:method v))] (when (and g (not (fn-get g :foreign))) g))
+                 :func (fn-of-obj (:obj v))
+                 :method-expr (fn-of-obj (:method v))
                  :fn (let [g (fn-of-node v)]
                        (when (and g (let [cvs (fn-get g :closure-vars)]
                                       (or (empty? cvs)
@@ -2169,12 +2193,33 @@
                              x)
                     x2 (if (contains? x :line) (assoc x2 :line line) x2)]
                 (if (= :fn (:op x))
-                  (assoc x2 :lit-name (get lit-names x))
+                  (assoc x2 :lit-name (get lit-names x) ::copy true ::orig-line (:line x))
                   x2))
               (vector? x) (mapv cp x)
               (seq? x) (doall (map cp x))
               :else x))]
     (cp body)))
+
+(defn- register-copies!
+  "Records for the literals of an inlined body (copies of the callee's), scanned, so that their
+  calls in the copy can be inlined in turn."
+  [caller body]
+  (letfn [(walk [x]
+            (cond
+              (map? x) (if (and (= :fn (:op x)) (::copy x))
+                         (let [c (volatile! {:node x :parent caller :closure? true :file (fn-get caller :file) :name (:lit-name x)
+                                             :params (vec (:params x)) :param-types (vec (nth (under (:sig x)) 1))
+                                             :results (vec (map-indexed (fn [i r] (or (:obj r) (when (e/obj? r) r)
+                                                                                      (e/obj {:kind :var :name (str "~r" i) :line (:line x) :type (:type r)})))
+                                                                        (:results x)))
+                                             :sig (:sig x) :recv nil :esc :unknown :line (or (::orig-line x) (:line x)) :body (:body x)})]
+                           (.put ^java.util.IdentityHashMap (:fn-of-node *ctx*) x c)
+                           (scan-fn! c)
+                           (closure-vars! c))
+                         (doseq [[_ v] x] (walk v)))
+              (sequential? x) (doseq [v x] (walk v))
+              :else nil))]
+    (walk body)))
 
 (defn- returns->assigns
   "The inlined body's return statements as assignments to the result variables rv (their goto to
@@ -2185,11 +2230,14 @@
               (map? x) (case (:op x)
                          :fn x
                          :return (let [vs (:values x)]
-                                   (if (empty? vs)
-                                     {:op :block :stmts [] :line (:line x)}
-                                     {:op :assign :line (:line x) :inl-return true
-                                      :lhs (mapv (fn [o] {:op :place-local :obj o :type (e/o o :type) :mode :variable}) rv)
-                                      :rhs vs}))
+                                   ;; ~R0 = v; goto .i0 (the goto keeps what follows dead, as gc's)
+                                   {:op :block :line (:line x)
+                                    :stmts (conj (if (empty? vs)
+                                                   []
+                                                   [{:op :assign :line (:line x) :inl-return true
+                                                     :lhs (mapv (fn [o] {:op :place-local :obj o :type (e/o o :type) :mode :variable}) rv)
+                                                     :rhs vs}])
+                                                 {:op :goto :label ".inlret" :line (:line x)})})
                          (into {} (map (fn [[k v]] [k (rw v)])) x))
               (vector? x) (mapv rw x)
               :else x))]
@@ -2208,11 +2256,17 @@
               (and (map? x) (.containsKey memo x)) (.get memo x)
               (map? x)
               (let [r (il1 x)] (.put memo x r) r)
-              (vector? x) (mapv #(il % false) x)
+              (vector? x) (mapv #(il % false) (if (and (seq x) (every? map? x) (some :op x)) (live-stmts x) x))
               (seq? x) (doall (map #(il % false) x))
               :else x))
           (il1 [x]
               (case (:op x)
+                ;; noder's dead code: the live branch of a constant condition
+                :if (let [c (static-bool (:cond x))]
+                      (cond
+                        (pos? c) {:op :block :line (:line x) :stmts (il (vec (concat (when (:init x) [(:init x)]) (let [t (:then x)] (if (map? t) [t] t)))) false)}
+                        (neg? c) {:op :block :line (:line x) :stmts (il (vec (concat (when (:init x) [(:init x)]) (let [t (:else x)] (cond (nil? t) [] (map? t) [t] :else t)))) false)}
+                        :else (into {} (map (fn [[k v]] [k (il v false)])) x)))
                 :fn (let [g (fn-of-node x)]
                       (when g (vswap! (:kept-lits *ctx*) conj g))
                       (if-let [nb (when g (fn-get g :inlined-body))]
@@ -2233,12 +2287,15 @@
 
 (defn- try-inline [caller c chain]
   (let [callee (inl-callee caller c)
-        inl (when callee (can-inline! callee))]
-    (when (and inl (not (some #(identical? % callee) chain)) (not (identical? callee caller))
+        inl (when callee (can-inline! callee))
+        inl (when-not (and callee (intrinsic? callee)) inl)
+        callee (if (and inl (fn-get callee :foreign)) (foreign-body callee) callee)
+        inl (when callee inl)]
+    (when (and inl (not (some #(identical? % callee) chain))
                (<= (long (:cost inl)) (long (max-cost callee false))))
       (let [line (call-line c (fn-get caller :line))
             _ (warn! line (str "inlining call to " (fn-get callee :name)))
-            _ (when (= :fn (:op (static-value (:callee c)))) (vswap! (:kept-lits *ctx*) disj callee))
+            _ (when (= :fn (:op (:callee c))) (vswap! (:kept-lits *ctx*) disj callee))
             om (java.util.HashMap.)
             fresh (fn [o nm] (let [c (e/obj (assoc (if o @o {:kind :var :name nm}) :line line :esc-class :auto :local? true))]
                                (when o (.put om o c))
@@ -2256,9 +2313,17 @@
                           (= :method (:kind c)) [(method-recv (:callee c)) args]
                           method-expr? [(first args) (vec (rest args))]
                           :else [nil args])
-            lit-names (into {} (for [k (fn-get callee :kids)] [(fn-get k :node) (fn-get k :name)]))
+            ;; the copies of the callee's literals named after it (r.func2's r.func2.1 inlined: r.func2.func1)
+            cname (fn-get callee :name)
+            lit-names (into {} (for [k (rest (all-fns callee))
+                                     :let [n (fn-get k :name)]]
+                                 [(fn-get k :node)
+                                  (if (and (str/starts-with? n (str cname ".")) (not (str/starts-with? n (str cname ".func"))))
+                                    (str cname ".func" (subs n (inc (count cname))))
+                                    n)]))
             body (copy-body (fn-get callee :body) om line lit-names (mapcat #(fn-get % :dcl) (all-fns callee)))
             body (returns->assigns body rv)
+            _ (register-copies! caller body)
             pdecl {:op :decl :short true :objs (vec (concat (when recv [recv]) params))
                    :init (vec (concat (when recv [rarg]) args)) :line line :inl-params true}
             rdecl {:op :decl :objs rv :init [] :line line}
@@ -2270,7 +2335,7 @@
 
 ;;; The package: its functions, their declarations, closures and captured variables
 
-(defn- scan-fn!
+(defn scan-fn!
   "Walks function f's body (not the bodies of its literals, which are scanned as functions of
   their own): its declared variables (its Dcl), its function literals, the variables it refers
   to (for the closure variables), the single definitions (the ReassignOracle's)."
@@ -2354,7 +2419,7 @@
     (fn-set! f :kids @kids)
     (doseq [c @kids] (scan-fn! c))))
 
-(defn- closure-vars!
+(defn closure-vars!
   "A function literal's closure variables: the variables it (or a literal nested in it) refers to
   that an enclosing function declares, in order of first reference."
   [f]
@@ -2463,6 +2528,40 @@
                                 (if (= :struct (:kind n)) (:fields n) (:elems n)))))
             nil)))
 
+(defn- const-eq? [a b]
+  (let [x (:val a) y (:val b)]
+    (cond
+      (and (number? x) (number? y)) (== x y)
+      :else (= x y))))
+
+(defn- prune-switches
+  "noder's writer: a switch whose tag (or true, without one) and cases are constants keeps only
+  the clause that matches (none when none does; not one that falls through)."
+  [tree]
+  (let [memo (java.util.IdentityHashMap.)]
+    (letfn [(pr [x]
+              (cond
+                (and (map? x) (.containsKey memo x)) (.get memo x)
+                (map? x)
+                (let [x0 x
+                      x (into {} (map (fn [[k v]] [k (if (#{:type :to :sig :field :method :recv-type :iface} k) v (pr v))])) x)
+                      r (if (and (= :switch (:op x)) (or (nil? (:tag x)) (const? (:tag x))))
+                          (let [tag (or (:tag x) {:op :const :val true :mode :constant :type :bool})
+                                cls (:clauses x)]
+                            (if (every? const? (mapcat :values cls))
+                              (let [target (or (first (filter (fn [cl] (some #(const-eq? tag %) (:values cl))) cls))
+                                               (first (filter :default cls)))]
+                                (if (and target (some #(and (map? %) (= :fallthrough (:op %))) (tree-seq coll? seq (:body target))))
+                                  x
+                                  (assoc x :tag nil :clauses (if target [(assoc target :values [] :default true)] []))))
+                              x))
+                          x)]
+                  (.put memo x0 r)
+                  r)
+                (vector? x) (mapv pr x)
+                :else x))]
+      (pr tree))))
+
 (defn- fn-name
   "ir.FuncName: a function's name, a method's (T).m or (*T).m."
   [d o]
@@ -2492,7 +2591,7 @@
 
 (def ^:private tag-version
   "The version of the tags' analysis, in the cache's keys: changed with the analysis."
-  "escape-1")
+  "escape-6")
 
 (def ^:private pkg-tags
   "The other packages' tags analyzed in this process: path -> {function name -> its record}."
@@ -2511,11 +2610,45 @@
         package-source (requiring-resolve 'arbace.go.check.load/package-source)
         config (let [c @(requiring-resolve 'arbace.go.repl/config)] (if (delay? c) @c c))
         root *import-root*
-        s (or @std-sess
-              (reset! std-sess (assoc (session (fn [p _] (package-source {:dir root} p config)))
-                                      :keep-trees (constantly true))))
+        listed? (requiring-resolve 'arbace.go.repl/listed?)
+        digest (let [d @(resolve 'arbace.go.repl/digest-session)] (if (delay? d) @d d))
+        ;; the package from its forms, with its trees; its imports the table lists from the
+        ;; digest (their declarations), the others from their forms
+        s (assoc (session (fn [p _] (package-source {:dir root} p config)))
+                 :delegate digest
+                 :local (fn [p] (or (= p path) (not (listed? p))))
+                 :keep-trees (fn [p] (= p path)))
         pkg (ensure s path nil [])]
     (if pkg (e/o pkg :result) {:errors [{:msg "no package"}]})))
+
+(def ^:dynamic *phase-a*
+  "When true, analyze-package returns the functions' records once scanned (their bodies for
+  inlining), before inlining and the analysis."
+  false)
+
+(def ^:dynamic *pkg-bodies*
+  "Other packages' functions' records with their bodies (for inlining their calls): an atom, path
+  -> {name f}; one for the analysis of each package (dropped when its tags are made, for memory)."
+  (atom {}))
+
+(defn foreign-body
+  "Another package's function f (a foreign record) with its body, or nil."
+  [f]
+  (let [path (fn-get f :pkg-path)
+        m (or (get @*pkg-bodies* path)
+              (let [m (try
+                        (let [r (binding [*ctx* nil] (std-result path))]
+                          (if (seq (:errors r))
+                            {}
+                            (binding [*msgs* (volatile! []) *m* 0 *phase-a* true]
+                              (into {} (for [g (analyze-package r) :when (fn-get g :obj)] [(fn-get g :name) g])))))
+                        (catch Throwable ex {}))]
+                (swap! *pkg-bodies* assoc path m)
+                m))]
+    (when-let [g (get m (fn-get f :local-name))]
+      (vswap! g assoc :name (fn-get f :name) :inl (fn-get f :inl) :inl-state :done :foreign-body true
+               :pkg-path (fn-get f :pkg-path) :local-name (fn-get f :local-name))
+      g)))
 
 (defn- forms-digest [^java.io.File dir ^java.io.File pf]
   (let [md (java.security.MessageDigest/getInstance "SHA-256")
@@ -2546,13 +2679,21 @@
                         (do (when (System/getenv "GOI_ESCAPE_TRACE")
                               (binding [*out* *err*] (println "escape: package" path "not analyzed:" (first (:errors r)))))
                             {})
-                        (binding [*msgs* (volatile! []) *m* 0]
+                        ;; the functions' inlining costs (CanInline over their bodies), then their tags by
+                        ;; the analysis without the inliner (gc compiles the standard library with it:
+                        ;; the inlined bodies' effects on the tags are left out, for memory: the
+                        ;; packages' analyses would nest the inlined packages' checks)
+                        (binding [*msgs* (volatile! []) *m* 0 *inline* false]
+                          (let [costs (binding [*phase-a* :costs]
+                                        (into {} (for [f (analyze-package r) :when (fn-get f :obj)]
+                                                   [(fn-get f :name) (fn-get f :inl)])))]
                           (into {} (for [f (analyze-package r)
                                          :when (not (fn-get f :closure?))
                                          :when (fn-get f :obj)]
                                      [(fn-get f :name) {:tags (fn-get f :tags) :nparams (count (fn-get f :param-types))
+                                                        :inl (get costs (fn-get f :name))
                                                         :recv-type (boolean (fn-get f :recv-type)) :name (fn-get f :name)
-                                                        :pragmas (vec (fn-get f :uintptr-pragmas))}])))))
+                                                        :pragmas (vec (fn-get f :uintptr-pragmas))}]))))))
                     (catch Throwable ex
                       (when (System/getenv "GOI_ESCAPE_TRACE")
                         (binding [*out* *err*] (println "escape: package" path "not analyzed:" (.getMessage ex))
@@ -2581,6 +2722,9 @@
                (e/o o :name))]
       (when-let [m (get tags nm)]
         (volatile! (assoc m :esc :tagged :foreign true :params [] :sig nil
+                          :pkg-path path :local-name nm
+                          :name (str (last (str/split (str path) #"/")) "." nm)
+                          :inl-state :done
                           :param-types (vec (repeat (:nparams m) nil)) :uintptr-pragmas (set (:pragmas m))))))))
 
 (defn analyze
@@ -2637,6 +2781,7 @@
                    :kept-lits (volatile! #{})}]
 
     (let [decls (filter #(and (= :func (:kind %)) (:obj %)) (:decl-infos r))
+          decls (mapv (fn [d] (if (:tree d) (update d :tree prune-switches) d)) decls)
           fns (vec (for [d decls
                          :let [tree (:tree d)
                                o (:obj d)
@@ -2690,16 +2835,20 @@
                                        :lhs (mapv #(if (or (nil? %) (= "_" (e/o % :name))) :blank {:op :place-global :obj %}) (:lhs tr))
                                        :rhs (vec (:rhs tr))}])]
                             st))
-                f (volatile! {:node {:op :func} :obj nil :name "init" :parent nil :closure? false :file (file-of (first (first inits)))
+                f (volatile! {:node {:op :func} :obj nil :name "init" :parent nil :closure? false :noinline true :file (file-of (first (first inits)))
                               :recv nil :recv-type nil :params [] :param-types [] :results [] :sig [:func [] [] false]
                               :esc :unknown :line nil :extern false :uintptr-pragmas #{} :body body})]
             (vswap! (:extra-fns *ctx*) conj f))))
       (let [fns (into fns @(:extra-fns *ctx*))]
-      (when-not *inline*
+      (when-not (or *inline* *phase-a*)
         (doseq [f fns :when (not (fn-get f :extern))]
           (binding [*wfile* (fn-get f :file)] (fn-set! f :body (devirtualize (fn-get f :body))))))
       (doseq [f fns :when (not (fn-get f :extern))] (scan-fn! f))
       (doseq [f fns :when (not (fn-get f :extern))] (closure-vars! f))
+      (if *phase-a*
+        (do (when (= :costs *phase-a*)
+              (doseq [f fns :when (not (fn-get f :extern))] (can-inline! f)))
+            fns)
       (let [fns (if *inline* (inline-package! fns) fns)]
       (doseq [f fns :when (fn-get f :extern)]
         ;; an external function's tags (paramTag's len(fn.Body) == 0): no batch
@@ -2719,4 +2868,4 @@
         (doseq [f (mapcat all-fns fns) :when (not (fn-get f :extern))]
           (binding [*wfile* (fn-get f :file)]
             (bce-walk! (fn-get f :body)))))
-      (vec (mapcat all-fns fns)))))))
+      (vec (mapcat all-fns fns))))))))
