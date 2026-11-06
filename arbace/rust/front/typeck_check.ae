@@ -42,14 +42,20 @@
                      :else [:differ w g])))]
     (frequencies (map first rs))))
 
-(defn -main [dir & names]
+(defn -main [dir & args]
   (alter-var-root #'*dir* (constantly dir))
-  (let [verbose (System/getenv "TYPECK_VERBOSE")
+  (let [ours? (= "--ours" (first args))
+        names (if ours? (rest args) args)
+        verbose (System/getenv "TYPECK_VERBOSE")
         std-file (str dir "/std-names.edn")
         std (collect/load-std std-file)
         std-generics (lower/load-std-generics std-file)
         si-file (str dir "/std-iface.edn")
         si (when (.exists (File. si-file)) (collect/load-std-iface si-file))
+        pipeline (when ours?
+                   (require 'arbace.rust.front.expand 'arbace.rust.front.resolve)
+                   {:macros ((resolve 'arbace.rust.front.expand/load-std-macros) std-file)
+                    :names ((resolve 'arbace.rust.front.resolve/load-std-names) std-file)})
         got-all (atom {})
         results
         (vec (for [n names
@@ -58,10 +64,18 @@
                (let [want (oracle-facts oracle)
                      src (slurp (source-file n))
                      got (try
-                           (let [crate (first (read-all (str dir "/" n ".exp.edn")))
-                                 res (let [f (File. (str dir "/" n ".res.edn"))] (when (.exists f) (read-all f)))
+                           (let [[crate res mark-crates]
+                                 (if ours?
+                                   (let [mc (atom {})
+                                         c (with-bindings {(resolve 'arbace.rust.front.expand/*mark-crates*) mc}
+                                             ((resolve 'arbace.rust.front.expand/expand-file) (source-file n) (if (= n "edition2015") 2015 2024) (:macros pipeline)))
+                                         r ((resolve 'arbace.rust.front.resolve/resolve-crate) c (:names pipeline) {:source src})]
+                                     [c r @mc])
+                                   [(first (read-all (str dir "/" n ".exp.edn")))
+                                    (let [f (File. (str dir "/" n ".res.edn"))] (when (.exists f) (read-all f)))
+                                    nil])
                                  res-map (into {} (for [[_ s rs] res] [s rs]))
-                                 hir (lower/lower-crate crate res-map {:file (.getCanonicalPath (File. ^String (source-file n))) :std-generics std-generics})
+                                 hir (lower/lower-crate crate res-map {:file (.getCanonicalPath (File. ^String (source-file n))) :mark-crates mark-crates :std-generics std-generics})
                                  ed (let [f (File. (str dir "/" n ".edition"))] (if (.exists f) (Long/parseLong (str/trim (slurp f))) (if (= n "edition2015") 2015 2024)))]
                              (our-facts (binding [tc/*root-file* (.getCanonicalPath (File. ^String (source-file n)))]
                                            (collect/with-crate hir res-map std {:source src :edition ed :si si} tc/check-crate))))
@@ -76,8 +90,9 @@
         sum (fn [k] (reduce + (map k results)))]
     (doseq [r results]
       (println (format "%-28s %5d of %5d facts equal, %4d more with the type alone, %4d differ, %4d missing" (:name r) (:equal r) (:total r) (:ty-only r) (:differ r) (:missing r))))
-    (println (format "typeck-check: %d of %d facts equal to rustc's (the helper's --typeck), %d more with the type equal, %d programs whole of %d"
-                     (sum :equal) (sum :total) (sum :ty-only) (count (filter #(= (:equal %) (:total %)) results)) (count results)))
+    (println (format "typeck-check: %d of %d facts equal to rustc's (the helper's --typeck), %d more with the type equal, %d programs whole of %d%s"
+                     (sum :equal) (sum :total) (sum :ty-only) (count (filter #(= (:equal %) (:total %)) results)) (count results)
+                     (if ours? " (input: the pipeline)" " (input: the helper's expanded crates and resolutions)")))
     (when (>= (count results) 2)
       (let [[a b] (map :name results)
             j (judge (oracle-facts (File. (str dir "/" b ".tc.edn"))) (get @got-all a))]
