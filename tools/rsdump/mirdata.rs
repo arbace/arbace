@@ -734,7 +734,7 @@ pub fn iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
     for local in tcx.iter_local_def_id() {
         let d = local.to_def_id();
         let k = tcx.def_kind(d);
-        if !matches!(k, DefKind::Fn | DefKind::AssocFn | DefKind::Ctor(..) | DefKind::Const { .. } | DefKind::AssocConst { .. } | DefKind::Static { .. } | DefKind::TyAlias | DefKind::AssocTy | DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::Trait | DefKind::Impl { .. } | DefKind::Variant | DefKind::Field | DefKind::Closure) {
+        if !matches!(k, DefKind::Fn | DefKind::AssocFn | DefKind::Ctor(..) | DefKind::Const { .. } | DefKind::AssocConst { .. } | DefKind::Static { .. } | DefKind::TyAlias | DefKind::AssocTy | DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::Trait | DefKind::Impl { .. } | DefKind::Variant | DefKind::Field | DefKind::Closure | DefKind::OpaqueTy) {
             continue;
         }
         let kn = format!("{k:?}");
@@ -742,6 +742,22 @@ pub fn iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
         let g = tcx.generics_of(d);
         if !g.own_params.is_empty() || g.parent.is_some() {
             let _ = write!(f, " :generics [{}]", join(g.own_params.iter(), |p| q(p.name.as_str())));
+        }
+        // RF7: the own parameters' defaults (the generic arguments HIR type lowering fills and the printer omits)
+        let dflts: Vec<String> = g
+            .own_params
+            .iter()
+            .filter_map(|p| p.default_value(tcx).map(|dv| format!("[{} {}]", q(p.name.as_str()), q(&ty::print::with_no_trimmed_paths!(dv.skip_binder().to_string())))))
+            .collect();
+        if !dflts.is_empty() {
+            let _ = write!(f, " :defaults [{}]", dflts.join(" "));
+        }
+        // RF7: an associated type's and an opaque type's bounds (explicit_item_bounds)
+        if k == DefKind::OpaqueTy || (k == DefKind::AssocTy && tcx.def_kind(tcx.parent(d)) == DefKind::Trait) {
+            let bs = tcx.explicit_item_bounds(d).skip_binder();
+            if !bs.is_empty() {
+                let _ = write!(f, " :item-bounds [{}]", join(bs.iter(), |(c, _)| q(&ty::print::with_no_trimmed_paths!(c.to_string()))));
+            }
         }
         match k {
             DefKind::Fn | DefKind::AssocFn | DefKind::Ctor(..) => {
@@ -769,7 +785,7 @@ pub fn iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
             }
             _ => {}
         }
-        if matches!(k, DefKind::Fn | DefKind::AssocFn | DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::Trait | DefKind::Impl { .. }) {
+        if matches!(k, DefKind::Fn | DefKind::AssocFn | DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::Trait | DefKind::Impl { .. } | DefKind::AssocTy | DefKind::TyAlias | DefKind::OpaqueTy) {
             let ps = tcx.explicit_clauses_of(d).clauses;
             if !ps.is_empty() {
                 let _ = write!(f, " :predicates [{}]", join(ps.iter(), |(c, _)| q(&c.to_string())));

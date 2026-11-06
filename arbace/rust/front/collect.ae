@@ -187,13 +187,26 @@
   (doseq [[i f] (map-indexed vector (:fields data))]
     (add-def! {:parent parent :data [:value (or (:ident f) (str i))] :kind "Field" :node f})))
 
+(defn- collect-opaques!
+  "The def collector's OpaqueTy definitions of a function's return-position impl Trait types (outer before inner)"
+  [parent f]
+  (letfn [(walk [x]
+            (cond (and (map? x) (= :ty (:node x)) (= :impl (:kind x)))
+                  (do (add-def! {:parent parent :data [:opaque] :kind "OpaqueTy" :node x})
+                      (doseq [v (vals x)] (walk v)))
+                  (and (map? x) (= :fnptr (:kind x))) nil
+                  (map? x) (doseq [v (vals x)] (walk v))
+                  (sequential? x) (doseq [v x] (walk v))
+                  :else nil))]
+    (walk (:output f))))
+
 (defn- collect-assoc! [parent it in-trait]
   (let [nm (:ident it)
         id (add-def! {:parent parent :node it :ident-span (ident-span (:span it) nm)
                       :data (if (= :type (:kind it)) [:type nm] [:value nm])
                       :kind (case (:kind it) :fn "AssocFn" :const "AssocConst { is_type_const: false }" :type "AssocTy" "AssocErr")})]
     (case (:kind it)
-      :fn (walk-body! (:body it) id)
+      :fn (do (collect-opaques! id it) (walk-body! (:body it) id))
       :const (walk-body! (:expr it) id)
       nil)
     id))
@@ -204,6 +217,7 @@
   (let [nm (:ident it) sp (:span it) isp (ident-span sp nm)]
     (case (:kind it)
       :fn (let [id (add-def! {:parent parent :data [:value nm] :kind "Fn" :node it :ident-span isp})]
+            (collect-opaques! id it)
             (walk-body! (:body it) id))
       (:struct :union)
       (let [id (add-def! {:parent parent :data [:type nm] :kind (if (= :struct (:kind it)) "Struct" "Union") :node it :ident-span isp})]
@@ -346,7 +360,7 @@
 (defn- param-name [p] (if (:synthetic p) (synthetic-name (:synthetic p)) (:name p)))
 
 (def ^:private has-parent-kinds
-  #{"AssocFn" "AssocTy" "AssocConst { is_type_const: false }" "Variant" "Field" "Closure"})
+  #{"AssocFn" "AssocTy" "AssocConst { is_type_const: false }" "Variant" "Field" "Closure" "OpaqueTy"})
 
 (defn- parent-generics-def
   "The definition whose generics are a definition's parent generics (generics_of's parent)"
@@ -357,9 +371,40 @@
           (str/starts-with? (str k) "Ctor") (:parent d)
           (= "Field" k) (:parent d)
           (= "Closure" k) (:parent d)
+          (= "OpaqueTy" k) (:parent d)
           :else nil)))
 
 (declare generics-of)
+
+(defn- elided-input-lifetimes
+  "A signature's elided lifetimes (a reference without one, a lifetime argument written `'_` or left out), outside the
+  binders of fn pointers and Fn sugar"
+  [x]
+  (let [n (atom 0)]
+    (letfn [(walk [x]
+              (cond (and (map? x) (= :fnptr (:kind x))) nil
+                    (and (map? x) (:paren x)) nil
+                    (map? x) (do (when (or (and (= :ref (:kind x)) (or (:unwritten x) (= "'_" (:lifetime x))))
+                                           (and (string? (:lifetime x)) (not= :ref (:kind x)) (= "'_" (:lifetime x)) (nil? (:kind x))))
+                                   (swap! n inc))
+                                 (doseq [v (vals x)] (walk v)))
+                    (sequential? x) (doseq [v x] (walk v))
+                    :else nil))]
+      (walk x))
+    @n))
+
+(defn- opaque-captures [id]
+  (let [d (def-of id)
+        fd (def-of (:parent d))
+        f (:node fd)
+        pd (some-> (:parent fd) def-of)
+        impl-lts (when (and pd (str/starts-with? (str (:kind pd)) "Impl"))
+                   (for [p (:params (:generics (:node pd))) :when (= :lifetime (:kind p))] (:name p)))]
+    (if (>= (long *edition*) 2024)
+      (vec (concat impl-lts
+                   (for [p (:params (:generics f)) :when (= :lifetime (:kind p))] (:name p))
+                   (repeat (elided-input-lifetimes (mapv :ty (:params f))) "'_")))
+      (vec (distinct (remove #{"'static"} (lifetimes-in (:bounds (:node d)))))))))
 
 (defn- path-lifetime-params
   "The number of lifetime parameters of the type a HIR path names (its resolution)"
@@ -402,6 +447,9 @@
         late (if (#{"Fn" "AssocFn"} (:kind d)) (late-bound (:node d)) #{})
         own (cond
               (= "Closure" (:kind d)) [{:name "" :kind :type} {:name "" :kind :type} {:name "" :kind :type}]
+              ;; an opaque type duplicates the lifetimes it captures: in edition 2024 every one in scope (the impl's, the
+              ;; function's named ones, then one '_ per elided lifetime of its inputs), before, those its bounds name
+              (= "OpaqueTy" (:kind d)) (vec (for [n (opaque-captures id)] {:name n :kind :lifetime}))
               :else
               (vec (concat (when (= "Trait" (:kind d)) [{:name "Self" :kind :type :self true}])
                            (for [p (:params g) :when (= :lifetime (:kind p)) :when (not (contains? late (:name p)))]
@@ -992,6 +1040,7 @@
       (:type :value) n
       :impl (str "{impl#" (:disamb d) "}")
       :closure (str "{closure#" (:disamb d) "}")
+      :opaque (str "{opaque#" (:disamb d) "}")
       :ctor ""
       "")))
 
@@ -1321,7 +1370,15 @@
                     (range i (count cs)))]
         (recur cs i inputs changed)))))
 
-(defn- explicit-clauses
+(declare assoc-clause-of? assoc-item-ty)
+
+(defn- subst-param [x from to]
+  (cond (= x from) to
+        (vector? x) (mapv #(subst-param % from to) x)
+        (map? x) (into {} (for [[k v] x] [k (subst-param v from to)]))
+        :else x))
+
+(defn- raw-explicit-clauses
   "gather_explicit_clauses_of"
   [id]
   (let [d (def-of id)
@@ -1357,11 +1414,58 @@
               (setup-constraining-clauses clauses tr (clause-params (if tr [:tuple (second tr)] self-ty) false)))
             clauses))))))
 
+(defn- explicit-clauses
+  "explicit_clauses_of: a trait's clauses on its own associated types are its items' bounds instead"
+  [id]
+  (let [d (def-of id) cs (raw-explicit-clauses id)]
+    (cond
+      ;; compute_bidirectional_outlives_clauses: an opaque type's duplicate of an early-bound lifetime outlives it and
+      ;; is outlived by it
+      (= "OpaqueTy" (:kind d))
+      (let [fg (generics-of (:parent d))
+            early (set (for [p (all-params fg) :when (= :lifetime (:kind p))] (:name p)))]
+        (into cs (mapcat (fn [p] (when (contains? early (:name p))
+                                   (let [r [:re-early (:index p) (:name p)]]
+                                     [[:region-outlives r r] [:region-outlives r r]])))
+                         (:params (generics-of id)))))
+      (= "Trait" (:kind d))
+      (let [assoc-tys (set (for [x @*defs* :when (= id (:parent x)) :when (= "AssocTy" (:kind x))] (assoc-item-ty (:id x))))]
+        (vec (remove (fn [c] (some #(assoc-clause-of? c %) assoc-tys)) cs)))
+      :else cs)))
+
+(defn- assoc-clause-of?
+  "A trait's clause whose self type is the associated type ITEM-TY (it moves to the item's bounds)"
+  [c item-ty]
+  (case (first c)
+    :trait (= item-ty (first (second (second c))))
+    :proj (= item-ty (first (nth c 2)))
+    :type-outlives (= item-ty (second c))
+    false))
+
+(defn- assoc-item-ty [id] [:proj id (identity-args (generics-of id))])
+
+(defn item-bounds
+  "explicit_item_bounds: an associated type's bounds (associated_type_bounds: the written ones, the implicit Sized, then
+  the trait's where clauses on it) or an opaque type's (opaque_type_bounds), with the item itself as the self type"
+  [id]
+  (let [d (def-of id) n (:node d)]
+    (in-def id
+      (binding [*elided* :erased]
+        (if (= "OpaqueTy" (:kind d))
+          (let [self [:param -2 "impl"]
+                cs (into (implicit-sizedness self (:bounds n) false) (lower-bounds self (:bounds n)))
+                opaque [:opaque cs]]
+            (mapv #(subst-param % self opaque) cs))
+          (let [item-ty (assoc-item-ty id)
+                own (into (implicit-sizedness item-ty (:bounds n) false) (lower-bounds item-ty (:bounds n)))
+                trait-cs (raw-explicit-clauses (:parent d))]
+            (into own (filter #(assoc-clause-of? % item-ty) trait-cs))))))))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; The crate
 
 (def ^:private iface-kinds
-  #{"Fn" "AssocFn" "Const { is_type_const: false }" "AssocConst { is_type_const: false }" "TyAlias" "AssocTy" "Struct" "Enum"
+  #{"OpaqueTy" "Fn" "AssocFn" "Const { is_type_const: false }" "AssocConst { is_type_const: false }" "TyAlias" "AssocTy" "Struct" "Enum"
     "Union" "Trait" "Variant" "Field" "Closure" "Impl { of_trait: true }" "Impl { of_trait: false }"})
 
 (defn- emit? [d]
@@ -1393,7 +1497,14 @@
                         (and (nil? tr) (:of-trait (:node d))) (assoc :trait-ref (let [p (:path (:of-trait (:node d)))] (str "{no trait " (pr-str (mapv :ident (:segs p))) " " (pr-str (:res p)) " " (:file p) " " (:krate p) "}")))
                         true (assoc :self (print-ty self-ty)))))]
                  (if (string? r) (assoc m :self r) (merge m r)))))
-      (or (#{"Fn" "AssocFn" "Struct" "Enum" "Union" "Trait"} k) (str/starts-with? (str k) "Impl"))
+      (seq (filter :default (:params g)))
+      (assoc :defaults (safe #(in-def id (vec (for [p (:params g) :when (:default p)]
+                                               [(:name p) (print-arg (if (= :const (:kind p)) (lower-const-arg (:default p)) (lower-ty (:default p))))])))))
+      (or (= "OpaqueTy" k) (and (= "AssocTy" k) (= "Trait" (:kind (def-of (:parent d))))))
+      (#(let [bs (safe (fn [] (mapv print-clause (item-bounds id))))]
+          (cond (string? bs) (assoc % :item-bounds [bs]) (seq bs) (assoc % :item-bounds bs) :else %)))
+      (or (#{"Fn" "AssocFn" "Struct" "Enum" "Union" "Trait" "TyAlias" "OpaqueTy"} k) (str/starts-with? (str k) "Impl")
+          (and (= "AssocTy" k) (:ty (:node d))))
       (#(let [cs (safe (fn [] (mapv print-clause (explicit-clauses id))))]
           (cond (string? cs) (assoc % :predicates [cs]) (seq cs) (assoc % :predicates cs) :else %))))))
 
@@ -1421,6 +1532,8 @@
         vs (fn [xs] (str "[" (str/join " " (map q xs)) "]"))]
     (str "(iface/item {:def " (q (:def m)) " :kind " (q (:kind m))
          (when (contains? m :generics) (str " :generics " (vs (:generics m))))
+         (when (:defaults m) (str " :defaults [" (str/join " " (map vs (:defaults m))) "]"))
+         (when (:item-bounds m) (str " :item-bounds " (vs (:item-bounds m))))
          (when (:sig m) (str " :sig " (q (:sig m))))
          (when (:ty m) (str " :ty " (q (:ty m))))
          (when (:variants m) (str " :variants [" (str/join " " (map (fn [v] (str "{:name " (q (:name v)) " :fields " (vs (:fields v)) "}")) (:variants m))) "]"))
