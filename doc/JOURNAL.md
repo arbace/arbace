@@ -595,7 +595,12 @@ functions whatever the module imports, so it would need the renamer's wired-in s
   on Rationals), so they are ported; the rest of that run changes shapes only (the STG judge's classes).
 - Results: run-check 60 of 63 (16 before: 12 samples, 4 synthetic), the 3 others in hsi's classes (they fail on GHC's
   own STG under the light cap); stg-check 9 of 9 runs, Core 171 of 227 bindings (158), STG 65 of 83 (62);
-  typecheck-check 22 of 22. Light: about 2 minutes, at most 1.6 GB a process.
+  typecheck-check 22 of 22. Light: about 2 minutes, at most 1.6 GB a process. Beyond it, `run-check --nofib`: the 53
+  single-module nofib programs of the check list (the pinned tarball's nofib/, references recorded once with the host's
+  GHC at -O0 in `test/haskell/ref-nofib.edn`), 40 of 53 with GHC's output, 12 in the class `hsi` (hsi fails on GHC's own
+  STG of them under the light caps), 1 `space` (the -O0 Simplifier's inlining of once-used recursive CAFs); the nofib
+  programs found five front-end bugs the run corpus had not (derived `==` on tags, `default` declarations, top-level
+  pattern bindings' selectors, a quantified superclass, MonadFail's message), each fixed.
 - Alternatives: a line-by-line port of CorePrep and CoreToStg (decision 1 (a), declined by the user); porting the whole
   `-O0` Simplifier for the STG judge's equality (a proposal, below the survey's section); running the run corpus with
   GHC's interfaces regenerated per program (the iface closure's fix keeps one dump for the corpus).

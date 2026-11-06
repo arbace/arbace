@@ -1065,7 +1065,12 @@ split by its cast and eta-expanded (`get = \eta -> get1 eta`), local functions i
 out) from the pinned GHC tarball's `nofib/` in nofib's fast mode (each Makefile's `FAST_OPTS` and `PROG_ARGS` less `+RTS`
 options, `NAME.faststdin` or `NAME.stdin`), against GHC's `-O0` runs recorded once with the host's GHC
 (`test/haskell/ref-nofib.edn`, `--record-ref`: the tarball's nofib is not hsi's pinned nofib commit, whose runs
-`ref-ghc914.edn` holds), record `test/haskell/run-check-nofib.edn`. NOFIB_RESULTS The nofib programs found five
+`ref-ghc914.edn` holds), record `test/haskell/run-check-nofib.edn`. **40 of 53 run with GHC's output**; the 13 others in two classes: `hsi` (12: hsi
+fails on GHC's own `-O0` STG of the program the same way under the light caps, 2 GiB and 120 s of CPU: `cryptarithm1`,
+`last-piece`, `kahan`, `x2n1`, `maillist`, `fannkuch-redux`, `k-nucleotide`, `spectral-norm`, `stm001`, `stm002`,
+`threads003`, `threads005`), `space` (1, `imaginary/integrate`: GHC's `-O0` Simplifier inlines the once-used recursive
+CAFs `rtotals` and `itotals` into `es`, the front end keeps them top-level, so more is retained; GHC's STG of it passes).
+About 25 minutes (the references once, about 10 more), at most 1.6 GB a process. The nofib programs found five
 front-end bugs the run corpus had not: the derived `==` of a type with a field compared the values where GHC compares
 the tags (HF4's `DerivTag` typed without a run), `default (Integer, Rational, Double)` ignored, a top-level pattern
 binding's selectors returning themselves (`((kmin, kmax), ...) = grid_size`: `<<loop>>`), `MonadTrans`'s quantified
