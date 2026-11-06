@@ -67,6 +67,15 @@
         (vector? t) (mapv generalize t)
         :else t))
 
+(defn- fudge
+  "fudge_inference_if_ok's result: the region variables in it fresh ones ('static and named regions kept)"
+  [t]
+  (cond (and (vector? t) (#{:re-erased :re-var} (first t))) [:re-var (swap! *next-var* inc)]
+        (and (vector? t) (= :infer (first t))) t
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (fudge %) (map? %) (into {} (for [[k v] %] [k (fudge v)])) :else %) (rest t)))
+        (vector? t) (mapv fudge t)
+        :else t))
+
 (defn- bind! [v t] (swap! *vars* assoc-in [(nth v 2) :val] t) true)
 
 (declare unify)
@@ -303,11 +312,25 @@
     (doseq [cl (fn-clauses d)]
       (swap! *obligations* conj (erase (c/subst cl (vec args)))))))
 
+(defn- instantiate-late
+  "instantiate_binder_with_fresh_vars: a signature's late-bound regions (anonymous or named, not those a trait object's
+  or fn pointer's binder inside binds) each a fresh region variable, the same region the same variable"
+  [sig]
+  (let [m (atom {})
+        late? (fn [r] (and (vector? r) (= :re-bound (first r)) (not= :inner (nth r 2 nil))))
+        f (fn f [x] (cond (late? x) (or (get @m x) (let [v [:re-var (swap! *next-var* inc)]] (swap! m assoc x v) v))
+                          (and (vector? x) (#{:fnptr :dyn} (first x))) x
+                          (and (vector? x) (keyword? (first x))) (into [(first x)] (map #(cond (vector? %) (f %) (map? %) (into {} (for [[k v] %] [k (f v)])) :else %) (rest x)))
+                          (vector? x) (mapv f x)
+                          (map? x) (into {} (for [[k v] x] [k (f v)]))
+                          :else x))]
+    (f sig)))
+
 (defn- sig-of
   "A function item's or a constructor's signature, instantiated with its arguments (its clauses registered as
   obligations, for the closures among its arguments)"
   [[_ d args]]
-  (let [sig (erase (c/subst* (select-keys (c/fndef-sig d) [:inputs :output]) (vec args)))]
+  (let [sig (erase (instantiate-late (c/subst* (select-keys (c/fndef-sig d) [:inputs :output]) (vec args))))]
     (register-obligations! d args)
     {:inputs (mapv deep-normalize (:inputs sig)) :output (deep-normalize (:output sig))}))
 
@@ -1228,6 +1251,7 @@
       ;; the formal input type is then a supertype of
       (let [xi (when (and xi (not (tvar? (shallow xi)))) xi)
             at (check-expr a (or xi ty))]
+        (when (System/getenv "TYPECK_ARGS") (binding [*out* *err*] (println "arg" (:kind a) (:span a) (deep at) (deep ty) (some-> xi deep))))
         (when ty
           (if xi
             (let [sn (snapshot)]
@@ -1243,7 +1267,8 @@
                    ;; arguments' expectations
                    exp-ins (when expected
                              (let [sn (snapshot)
-                                   r (when (unify output expected) (mapv deep inputs))]
+                                   ;; (fudge_inference_if_ok: what the probe made, regions among them, fresh)
+                                   r (when (unify output expected) (mapv (comp fudge deep) inputs))]
                                (rollback! sn)
                                r))]
                (check-args! (map vector (:args e) (concat inputs (repeat nil)) (concat exp-ins (repeat nil))))
