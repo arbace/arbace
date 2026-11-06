@@ -475,7 +475,11 @@
                                   (= "::" (peek)) (do (next!) (recur (conj ps (second (next!)))))
                                   :else ps))]
                     (if (some #(str/includes? % "<") parts)
-                      (member-constant (sema/resolve-type scope (str/join "::" (butlast parts))) (last parts))
+                      (let [r (member-constant (sema/resolve-type scope (str/join "::" (butlast parts))) (last parts))
+                            tp (last (butlast parts))
+                            i (str/index-of tp "<")]
+                        ;; (an unresolved name's spelling for its mangling: its arguments as written, its namespaces)
+                        r)
                       (let [es (when (> (count parts) 1) (sema/lookup scope (first parts)))
                             e (first (filter #(= :type (:e %)) es))]
                         (if (and e (dependent? (:ty e)))
@@ -702,8 +706,15 @@
 
 (defn- canonical [t]
   (cond (and (map? t) (#{:tparam :tparam-v} (:k t))) (select-keys t [:k :i :c :v])
-        (map? t) (into {} (map (fn [[k v]] [k (canonical v)]) t))
+                (map? t) (into {} (map (fn [[k v]] [k (canonical v)]) t))
         (vector? t) (mapv canonical t)
+        :else t))
+
+(defn- unspelled
+  "A type without its template-ids' spellings (:written, :qual): functionally equivalent signatures compare equal."
+  [t]
+  (cond (map? t) (into {} (map (fn [[k v]] [k (unspelled v)]) (dissoc t :written :qual)))
+        (vector? t) (mapv unspelled t)
         :else t))
 
 (declare deduce-by-type-match)
@@ -1146,6 +1157,7 @@
                          (fail :template "a dependent template-id with default arguments"))
                      args)]
           ;; (as written, for an unresolved name's mangling: its arguments' count, the namespaces of its qualifier)
+          ;; (:written and :qual no part of the type's identity: canonical drops them)
           (cond-> {:k :tspec :tmpl tid :name (:name t) :path (:path t) :args args :written written}
             (and (> (count parts) 1) (not in)) (assoc :qual (vec (butlast parts)))))
         (instantiate-class tid (or (complete-args t args) (fail :template "missing template arguments for " nm))))))))))
@@ -1609,8 +1621,9 @@
                                             (= (map (juxt :kind :pack) ps) (map (juxt :kind :pack) (:params (tmpl (:id %))))))
                                       (.get ^java.util.HashMap (:names scope) (:name n)))]
                     (when (seq cands)
-                      (when-let [sig (try (dissoc (sema/resolve-type (bind-scope scope ps nil -1) qt) :cq) (catch arbace.lang.ExceptionInfo _ nil))]
-                        (some #(when (= (canonical sig) (canonical (try (sym-sig (tmpl (:id %))) (catch arbace.lang.ExceptionInfo _ nil)))) (:id %)) cands)))))]
+                      (when-let [sig (try (dissoc (sema/resolve-type (bind-scope scope ps nil -1) qt) :cq) (catch arbace.lang.ExceptionInfo x (when (System/getenv "CPP_EQ_TRACE") (binding [*out* *err*] (println "equiv" (:name n) (.getMessage x)))) nil))]
+                        (when (System/getenv "CPP_EQ_TRACE") (binding [*out* *err*] (println "equiv" (:name n) (pr-str (canonical sig)) (pr-str (map #(canonical (try (sym-sig (tmpl (:id %))) (catch arbace.lang.ExceptionInfo _ nil))) cands)))))
+                        (some #(when (= (unspelled (canonical sig)) (unspelled (canonical (try (sym-sig (tmpl (:id %))) (catch arbace.lang.ExceptionInfo _ nil))))) (:id %)) cands)))))]
       (if old
         ;; the definition replaces the declaration; the declarations' default arguments are kept ([dcl.fct.default]/4)
         (when body? (upd-tmpl! old #(assoc % :pattern pattern :params (tparams n) :sig nil :decls (conj (vec (:decls %)) (:pattern %)))))
@@ -1861,6 +1874,7 @@
                            (if (sema/constraint-satisfied? (bind-scope (:scope t) (:params t) args nil) (:expr t)) 1 0))))
          :pending pending
          :fnaddr-specs fnaddr-specs
+         :instantiate-class (fn [tid args] (instantiate-class tid args))
          ;; (a transform trait's name, not a function type returning a type named __x: __c_locale ())
          :is-trait (fn [nm] (contains? type-traits nm))
          :wrap (fn [f] (binding [*tmpls* (atom {}) *scanned* (atom #{})] (f)))})
