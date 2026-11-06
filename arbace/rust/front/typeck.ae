@@ -430,12 +430,29 @@
                    :else nil)]
       (if (and nx (< n 8)) (recur nx (conj acc nx) (inc n)) acc))))
 
+(def ^:dynamic *scope-traits* nil)   ; std's traits in scope: the edition's prelude's and those the crate imports
+
+(defn- std-traits-in-scope
+  "The resolver's traits_in_scope for std's traits (crate-wide): the prelude's traits and every trait a use item names
+  (a glob of a module, its traits)"
+  []
+  (let [pre (str c/*root-crate* "::prelude::rust_" (if (= 2015 c/*edition*) 2015 c/*edition*))
+        kids (fn [m] (for [ch (:children (get (:mods c/*std*) m)) :when (= "Trait" (:kind ch))] (:path ch)))
+        uses (for [d (c/defs) u (:uses d)
+                   :let [r (try (c/resolve-written (mapv :ident (:path u)) (:id d)) (catch Throwable _ nil))]
+                   :when (= :ext (first r))
+                   p (if (= :glob (:use u)) (kids (second r)) [(second r)])
+                   :when (get (:traits c/*si*) p)]
+               p)]
+    (set (concat (kids pre) uses))))
+
 (defn- traits-in-scope
-  "The traits a method call may name: the prelude's, the crate's own and std's every trait with the name (an
-  approximation of the resolver's traits_in_scope)"
+  "The traits a method call may name: the crate's own, then std's in scope (*scope-traits*)"
   [nm]
   (concat (for [d (c/defs) :when (= "Trait" (:kind d)) :when (trait-item (:id d) nm)] (:id d))
-          (for [[p m] (:traits c/*si*) :when (some #(= nm (first %)) (:items m))] p)))
+          (for [p (or *scope-traits* (keys (:traits c/*si*)))
+                :let [m (get (:traits c/*si*) p)]
+                :when (some #(= nm (first %)) (:items m))] p)))
 
 (defn- method-candidate
   "At one step type T with receiver adjustment AUTOREF (nil, :not, :mut): the method named NM of an inherent impl, then of a
@@ -647,7 +664,16 @@
             base-res (or (get c/*res* psp) (:res path))
             bty (try (body-ty {:kind :path :path {:segs [(first segs)] :res base-res :span psp}}) (catch Throwable _ nil))]
         (when (and bty (not (#{:err :unknown} (first bty))))
-          (probe-assoc-fn bty (:ident (peek segs))))))))
+          (or (probe-assoc-fn bty (:ident (peek segs)))
+              ;; a parameter's (a trait's Self): the trait's associated constant or function
+              (when (= :param (first (shallow bty)))
+                (some (fn [g] (let [d (c/def-of (:def g))]
+                                (when (= "Trait" (:kind d))
+                                  (when-let [[item k] (trait-item (:id d) (:ident (peek segs)))]
+                                    (cond (str/starts-with? (str k) "AssocConst") (erase (c/type-of item))
+                                          (= "AssocFn" (str k)) [:fndef item (fresh-args item)]
+                                          :else nil)))))
+                      c/*scope*))))))))
 
 (defn- std-value-ty
   "A std value path's type: a function item, a constructor (a tuple variant's as a function item, a unit one as its ADT)"
@@ -1119,7 +1145,7 @@
       :binding (let [by-ref (or (:by-ref p) (case dbm :ref :not :ref-mut :mut nil))
                      t (case by-ref :not [:ref [:re-erased] false ex] :mut [:ref [:re-erased] true ex] ex)]
                  (swap! env assoc (:name p) t)
-                 (when (vector? (:span p))
+                 (when (and (vector? (:span p)) (not (:synthesized p)))
                    (swap! *facts* conj {:owner *owner* :span (:span p) :ty t :pat true :mode (bm-text by-ref (:mutbl p))}))
                  (when (:sub p) (check-pat (:sub p) ex env dbm)))
       :tuple (let [ts (if (= :tuple (first ex)) (second ex) (vec (repeatedly (count (:pats p)) #(fresh :ty))))]
@@ -1155,6 +1181,16 @@
               :struct (let [m (into {} fs)] (doseq [f (:fields p)] (check-pat (:pat f) (get m (:ident f) [:unknown]) env dbm)))
               nil))))
       :or (doseq [sp (:pats p)] (check-pat sp ex env dbm))
+      ;; a slice pattern: each element the array's or slice's element type, a rest binding (`r @ ..`) the subslice
+      :slice (let [[ex dbm] (if (= :ref (first ex))
+                               (loop [t ex m dbm] (if (= :ref (first t)) (recur (shallow (nth t 3)) (if (or (= m :ref) (not (nth t 2))) :ref :ref-mut)) [t m]))
+                               [ex dbm])
+                   elt (if (#{:array :slice} (first ex)) (second ex) (fresh :ty))]
+               (doseq [sp (:pats p)]
+                 (cond (= :rest (:kind sp)) nil
+                       (and (= :binding (:kind sp)) (= :rest (:kind (:sub sp))))
+                       (check-pat (dissoc sp :sub) (if (= :slice (first ex)) ex [:slice elt]) env dbm)
+                       :else (check-pat sp elt env dbm))))
       nil)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1241,7 +1277,8 @@
                 (record! be t)
                 (coerce! be t (:output sig))
                 t)))
-          (let [t (erase (c/type-of (:id d)))]
+          (let [_ (doseq [l (array-lens (:ty n))] (anon-const! l false))
+                t (erase (c/type-of (:id d)))]
             (binding [*ret* t] (let [x (check-expr (:expr n) t)] (coerce! (:expr n) x t))))))
       (solve-obligations!)
       (fallback!)
@@ -1272,6 +1309,7 @@
 (defn check-crate
   "RF9: every typeck root's facts (within collect/with-crate)"
   []
+  (binding [*scope-traits* (std-traits-in-scope)]
   (vec (mapcat (fn [d]
                  (try (if (= "Variant" (:kind d)) (check-discriminant d) (check-body d))
                       (catch Throwable ex
@@ -1282,4 +1320,4 @@
                                    (and (or (str/starts-with? (str (:kind d)) "Const") (str/starts-with? (str (:kind d)) "Static")
                                             (str/starts-with? (str (:kind d)) "AssocConst"))
                                         (:expr (:node d)))))
-                       (c/defs)))))
+                       (c/defs))))))
