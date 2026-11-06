@@ -69,7 +69,12 @@ code. Three kinds of things live here:
   `compiler/GHC/Core/SimpleOpt.hs` with the occurrence information of `Core/Opt/OccurAnal.hs` and the compulsory
   unfoldings of `Types/Id/Make.hs`, `constfold.ae` (2026-11-06) the `Float#`/`Double#` rules of
   `compiler/GHC/Core/Opt/ConstantFold.hs` with `Types/Literal.hs`'s conversions, both from the same tarball and carrying
-  GHC's notice; `front.ae`, the front end's driver, is Arbace's own),
+  GHC's notice; `front.ae`, the front end's driver, is Arbace's own; `simplify.ae`, `occanal.ae` and `core.ae`
+  (2026-11-06, the -O0 Simplifier) port `compiler/GHC/Core/Opt/Simplify.hs` with `Simplify/Iteration.hs`, `Utils.hs`,
+  `Env.hs`, `Inline.hs`, `compiler/GHC/Core/Opt/OccurAnal.hs`, `Opt/Arity.hs`, `compiler/GHC/Core/Unfold.hs` with
+  `Unfold/Make.hs`, `compiler/GHC/Core/Utils.hs` and `SimpleOpt.hs`'s `exprIsConApp_maybe` from the same tarball, carrying
+  GHC's notice; `primops.ae` is generated from `compiler/GHC/Builtin/primops.txt.pp` by `tools/hsprimops/primops.awk`;
+  `simplcmp.ae`, the simplified Core's judge, is Arbace's own),
   `deriv.ae` (HF4, 2026-11-05) ports the generators of `compiler/GHC/Tc/Deriv/Generate.hs` (Eq, Ord, Enum, Bounded, Ix, Read,
   Show) and `Deriv/Functor.hs` (Functor, Foldable, Traversable) from the same tarball, the file carrying GHC's notice;
   `Deriv/Infer.hs` and `Deriv.hs` read as the specification of the contexts and strategies),

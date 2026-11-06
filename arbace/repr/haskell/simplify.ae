@@ -6,8 +6,40 @@
 ;; Simplify/Inline.hs (callSiteInline, tryUnfolding, computeDiscount), the built-in class-op rule of
 ;; compiler/GHC/Types/Id/Make.hs (mkDictSelId's classOpRule) and GHC.Core.Opt.Pipeline's -O0 SimplMode (initSimplMode
 ;; at -O0: getCoreToDo's `simplify "final"`), on Arbace's Core (doc/haskell/FRONTEND-SURVEY.md, "As built: the -O0
-;; Simplifier"); GHC's notice is in arbace/repr/haskell/core.ae (LICENSE.md, "GHC: the Glasgow Haskell Compiler
-;; License").
+;; Simplifier"); GHC's notice follows (LICENSE.md, "GHC: the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
 
 (ns arbace.repr.haskell.simplify
   "GHC's Simplifier at -O0 (the one pass `simplify \"final\"` of GHC.Core.Opt.Pipeline.getCoreToDo, up to 4 iterations,
@@ -248,7 +280,7 @@
   [env f rules k]
   (let [n (loop [k k n 0] (case (:k k) :apply (recur (:cont k) (inc n)) :cast (recur (:cont k) n) n))
         unf (c/id-unf f)
-        discs (concat (when (and (= :core (:k unf)) (= :if-good (:k (:guide unf)))) (:args (:guide unf))) (repeat 0))]
+        discs (concat (when (and (= :core (:k unf)) (= :if-good (:k (c/guide unf)))) (:args (c/guide unf))) (repeat 0))]
     (if (< n (c/id-arity f))
       {:fun f :args [] :rules rules :encl false :dmds (repeat :top) :discs (repeat 0)}
       (let [bot (:bot (c/info f))
@@ -343,7 +375,7 @@
     (+ 10 (* 10 (count actual)) (reduce + 0 actual) res)))
 
 (defn- try-unfolding [env v lone arg-infos cont-info u]
-  (let [g (:guide u) n (count arg-infos)
+  (let [g (c/guide u) n (count arg-infos)
         some-benefit (fn [uf-arity is-inline]
                        (let [sat (>= n uf-arity) over (> n uf-arity)
                              interesting-args (some #(not= :triv %) arg-infos)]
@@ -361,7 +393,7 @@
       :never nil
       :when (when (and (or (>= n (:arity g)) (and (:unsat-ok g) (pos? n)))
                        (or (:boring-ok g) (some-benefit (:arity g) true)))
-              (:tmpl u))
+              (c/tmpl u))
       :if-good (let [size (:size g) depth (:case-depth env)
                      penalty (if (<= depth c/uf-case-threshold) 0 (quot (* size (- depth c/uf-case-threshold)) c/uf-case-scaling))
                      disc (compute-discount (:args g) (:res g) arg-infos cont-info)
@@ -370,9 +402,9 @@
                        (when (or (some true? (map (fn [d a] (and (= a :value) (pos? d))) (:args g) arg-infos))
                                  (some (fn [x] (let [b (get (:in-scope env) (c/vkey x))]
                                                  (and b (c/evald-unf? (c/id-unf b)) (not (c/evald-unf? (c/id-unf x))))))
-                                       (c/free-locals (:tmpl u))))
-                         (:tmpl u))
-                       (and (:work-free u) (some-benefit (count (:args g)) false) small) (:tmpl u)
+                                       (c/free-locals (c/tmpl u))))
+                         (c/tmpl u))
+                       (and (:work-free u) (some-benefit (count (:args g)) false) small) (c/tmpl u)
                        :else nil))
       nil)))
 
@@ -455,7 +487,7 @@
                          (= :dfun (:k (unf-of v2)))
                          (when-let [as (dfun-args (unf-of v2) args)] [floats (:con (unf-of v2)) as])
                          (and (zero? (c/id-arity v2)) (= :core (:k (unf-of v2))) (:expandable (unf-of v2)))
-                         (go floats (:tmpl (unf-of v2)) args)
+                         (go floats (c/tmpl (unf-of v2)) args)
                          :else nil))
               nil))]
     (go [] e [])))
@@ -490,18 +522,20 @@
       [at rhs])))
 
 (defn- mk-let-unfolding [env top? b join? rhs]
-  (c/mk-unfolding :vanilla top? (c/dead-end-id? b) join? (oa/occur-analyse-expr rhs)))
+  (c/mk-unfolding :vanilla top? (c/dead-end-id? b) join? rhs oa/occur-analyse-expr))
 
 (defn- simpl-stable-unfolding [env ctx b u]
   (case (:k u)
-    :dfun (let [[env2 bs] (simpl-binders env (:bndrs u))]
-            (assoc u :bndrs bs :args (mapv #(simpl-expr env2 %) (:args u))))
+    :dfun (let [[env2 bs] (simpl-binders env (:bndrs u))
+                u2 (assoc u :bndrs bs :args (mapv #(simpl-expr env2 %) (:args u)))]
+            (when *trace* (binding [*out* *err*] (println "dfun" (pr-str (c/vkey b)) (pr-str (map #(count (pr-str %)) (:args u))) "->" (pr-str (map #(count (pr-str %)) (:args u2))))))
+            u2)
     :core (if (c/stable-unf? u)
             (let [e2 (if (= :join (:k ctx))
-                       (simpl-join-rhs env b (:tmpl u) (:cont ctx))
-                       (simpl-expr-c env (:tmpl u) (rhs-stop (= :rec (:rec ctx)))))]
-              (if (= :when (:k (:guide u)))
-                (assoc (c/mk-unfolding (:src u) (bc-level ctx) false false (oa/occur-analyse-expr e2)) :guide (:guide u) :src (:src u))
+                       (simpl-join-rhs env b (c/tmpl u) (:cont ctx))
+                       (simpl-expr-c env (c/tmpl u) (rhs-stop (= :rec (:rec ctx)))))]
+              (if (= :when (:k (c/guide u)))
+                (assoc (c/mk-unfolding (:src u) (bc-level ctx) false false e2 oa/occur-analyse-expr) :guide (c/guide u) :src (:src u))
                 (assoc (mk-let-unfolding env (bc-level ctx) b false e2) :src (:src u))))
             nil)
     u))
@@ -756,9 +790,9 @@
   (let [rules (rules-for f)
         m (when (seq rules) (try-rules env rules f (cont-out-args env k)))]
     (if m
-      (do (tick!) (simpl-expr-f env (second m) (drop-cont-args (first m) k)))
+      (do (tick!) (when *trace* (binding [*out* *err*] (println "rule" (pr-str (c/vkey f)) (pr-str (second m))))) (simpl-expr-f env (second m) (drop-cont-args (first m) k)))
       (if-let [e (try-inlining env f k)]
-        (do (tick!) (when *trace* (binding [*out* *err*] (println "inline" (pr-str (c/vkey f)))))
+        (do (tick!) (when *trace* (binding [*out* *err*] (println "inline" (pr-str (c/vkey f)) (pr-str (second (cont-args interesting-arg k))) (pr-str (:k (c/guide (c/id-unf f)))))))
             (simpl-expr-f env e k))
         (rebuild-call env (mk-arg-info env f rules k) k)))))
 
@@ -1114,10 +1148,11 @@
       (if (empty? bs)
         (:lets fl)
         (let [bd (first bs)
-              _ (when *trace* (binding [*out* *err*] (println "top" (pr-str (map second (c/bind-pairs bd))))))
+              t0 (System/currentTimeMillis)
               [f2 env2] (if (c/head? bd 'rec)
                           (simpl-rec-bind env {:k :let :level :top :rec :rec} (second bd))
                           (let [[_ b r] bd] (simpl-rec-or-top-pair env {:k :let :level :top :rec :nonrec} b (lookup-rec-bndr env b) r)))]
+          (when *trace* (binding [*out* *err*] (println "top" (- (System/currentTimeMillis) t0) "ms" (pr-str (map second (c/bind-pairs bd))))))
           (recur env2 (rest bs) (add-floats fl f2)))))))
 
 (defn- short-out-indirections
