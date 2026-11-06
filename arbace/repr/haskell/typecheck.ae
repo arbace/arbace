@@ -241,6 +241,8 @@
                   supers (vec (keep (fn [f] (let [p (conv-type f)] (when (= :tc (first p)) [(second p) (nth p 2)]))) (nth t 4)))]
               (doseq [[mn _ mty] (nth t 3)] (swap! *genv* assoc (strs mn) (conv-type mty)))
               (swap! *classes* assoc n {:tvs tvs :supers supers :methods (mapv (comp strs first) (nth t 3))
+                                        ;; every superclass, a quantified one too (MonadTrans's): the dictionary's fields
+                                        :nsupers (count (nth t 4))
                                         ;; functional dependencies by parameter position (the iface writes occ names)
                                         :fundeps (let [occs (mapv #(first (str/split (str %) #"#")) tvs)
                                                        pos (fn [o] (.indexOf ^java.util.List occs (str o)))]
@@ -560,6 +562,15 @@
 (defn- global-occ [env o m]
   (var-occ env (ext-name "var" m o)))
 
+(defn- fail-msg
+  "The desugarer's message of a failed pattern (GHC.HsToCore.Utils' mk_fail_msg): the context and the pattern's span as
+  GHC prints a SrcSpan, a String"
+  [ctx [l1 c1 l2 c2]]
+  (let [loc (if (= l1 l2) (str l1 ":" c1 "-" (dec c2)) (str "(" l1 "," c1 ")-(" l2 "," (dec c2) ")"))
+        msg (str "Pattern match failure in " ctx " at " (or *srcfile* (str *module* ".hs")) ":" loc)]
+    (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) msg) "unpackCString#" "unpackCStringUtf8#")))
+          [(list 'lit (str (pr-str msg) "#"))])))
+
 (defn- infer-stmts
   "A do block's statements in a monad: [type core]"
   [env stmts]
@@ -585,7 +596,7 @@
                    (let [[tf cf] (var-occ env fl (lsp (arg v 2)) "a do statement") ds (fresh-lv "ds")]
                      (unify tf (fn-ty (list-ty (con-ty tc-char)) tr))
                      [r (app* cb [ce (list 'lam [ds] (list 'match [ds] [(list 'clause [pc] cr)
-                                                                        (list 'clause [(list 'pwild)] (app* cf [(list 'lit "\"pattern match failure\"")]))]))])])
+                                                                        (list 'clause [(list 'pwild)] (app* cf [(fail-msg "'do' block" (lsp (arg v 2)))]))]))])])
                    [r (app* cb [ce (list 'lam [pc] cr)])]))
       LetStmt (let [[env1 binds] (tc-local-binds env (arg v 2))
                     [tr cr] (infer-stmts env1 more)]
@@ -702,12 +713,21 @@
                                                              (mapv (fn [f x] (get m f x)) (:fields info) xs)))))
                                   cons*))])
       ;; deriving's nodes (arbace.repr.haskell.deriv): a constructor's tag as an Int, the constructor of a tag, a primop on Ints
+      ;; the tag: GHC's dataToTag# (the primop dataToTagLarge#, which evaluates its argument), boxed as the Int the
+      ;; generated code compares; the constructor of a tag: a case on the tag's literals (GHC's tagToEnum#)
       DerivTag (let [[_ c] (infer env (arg v 1))]
-                 [(con-ty tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Magic" "dataToTag#")) [c])])
+                 [(con-ty tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#"))
+                                        [(list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" "dataToTagLarge#")) [c])])])
       DerivTag2Con (let [[t c] (infer env (arg v 2))
-                         [_ res] (con-arg-types (first (arg v 1)))]
+                         cs (arg v 1)
+                         [_ res] (con-arg-types (first cs))
+                         i (fresh-lv "tag") w (fresh-lv "wild")]
                      (unify t (con-ty tc-int))
-                     [res (list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" "tagToEnum#")) [c])])
+                     [res (list 'case c (fresh-lv "wild")
+                                [(list 'alt (ext-name "data" "GHC.Internal.Types" "I#") [i]
+                                       (list 'case i w (vec (concat [(list 'alt :default [] (list 'v (ext-name "var" (nmod (last cs)) (occ (last cs)))))]
+                                                                    (map-indexed (fn [k cn] (list 'alt (list 'lit (str k "#")) [] (list 'v (ext-name "var" (nmod cn) (occ cn)))))
+                                                                                 (butlast cs))))))])])
       DerivPrim (let [rs (mapv #(infer env %) (arg v 2))]
                   (doseq [[t _] rs] (unify t (con-ty tc-int)))
                   [(con-ty tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" (arg v 1))) (mapv second rs))])
@@ -1029,7 +1049,12 @@
                                         (doseq [[n m] es] (unify m (:mono (get env2 n))))
                                         ;; the right-hand side bound once, each variable selected from it
                                         (let [pn ["loc" "var" "pat" (str "u" (fresh-id))]]
-                                          (into [[pn c]] (mapv (fn [[n _]] [n (list 'match [(lv pn)] [(list 'clause [pc] (lv n))])]) es))))))
+                                          ;; each selector's pattern variables locals of its own (the top level's
+                                          ;; rename-mono turns the binders' names into the globals)
+                                          (into [[pn c]] (mapv (fn [[n _]]
+                                                                 (let [sm (into {} (map (fn [[x _]] [(lv x) (list 'lv (occ x) (str "sel" (fresh-id)))]) es))]
+                                                                   [n (list 'match [(lv pn)] [(list 'clause [(substitute sm pc)] (get sm (lv n)))])]))
+                                                               es))))))
                                   unsigned entries)))
                 results (vec (apply concat results))
                 [tvs preds params] (generalize (mapv second all) @ws (restricted? unsigned))
@@ -1448,6 +1473,8 @@
     "RealFloat" "Functor" "Monad" "MonadFail" "Foldable" "Traversable" "Semigroup" "Monoid" "Applicative"})
 (def numeric-classes #{"Num" "Real" "Integral" "Fractional" "Floating" "RealFrac" "RealFloat"})
 
+(def ^:dynamic *defaults* nil) ; the module's default declaration's types (Haskell 2010 §4.3.4), nil: (Integer, Double)
+
 (defn- improve!
   "Functional dependencies' improvement (GHC.Tc.Solver.Dict's improvement from instances): a wanted whose class has a
   fundep a -> b and an instance whose head matches it at a's positions gets b's positions unified with the instance's;
@@ -1482,7 +1509,7 @@
       (let [classes (map (comp occ first :pred) group)]
         (when (and (every? standard-classes classes) (some numeric-classes classes))
           (when-let [t (first (filter (fn [t] (every? (fn [w] (solve-pred [(first (:pred w)) [t]] [] 0)) group))
-                                      (cond-> [(con-ty tc-integer) (con-ty tc-double)] *control* reverse)))]
+                                      (cond-> (or *defaults* [(con-ty tc-integer) (con-ty tc-double)]) *control* reverse)))]
             (unify [:mv i] t)))))
     (doseq [w ws]
       (if-let [term (solve-pred (:pred w) [] 0)]
@@ -1585,7 +1612,11 @@
               *genv* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
               *derivs* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
-              *ltypes* (atom {}) *skolem-givens* (atom [])]
+              *ltypes* (atom {}) *skolem-givens* (atom [])
+              *defaults* (some (fn [d] (let [v (lval d)]
+                                         (when (and (= 'DefD (con v)) (= 'DefaultDecl (con (arg v 2))))
+                                           (mapv #(hs-type {} %) (last (arg v 2))))))
+                               decls)]
       (load-ifaces!)
       (doseq [s sigs :let [sv (lval s)] :when (= 'FixSig (con sv))
               :let [fs (arg sv 2) fx (arg fs 3)] n (arg fs 2)]

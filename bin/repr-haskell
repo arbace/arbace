@@ -132,14 +132,17 @@
 #                                 HF5-HF6: the match compiler, CorePrep, CoreToStg over DIR's S*.hs (default test/haskell/stg):
 #                                 Core against the tc dump, STG against GHC's -O0 STG, each program run on hsi from our STG
 #                                 against GHC's output (HSI_LIBS: the libraries' STG dumps)
-#   bin/repr-haskell run-check [--record] [ID...]
+#   bin/repr-haskell run-check [--nofib] [--record] [--record-ref] [ID...]
 #                                 HF5-HF6's decision 3 (a): the run corpus (hsi's samples and synthetic programs,
 #                                 test/haskell/eval/) compiled by Arbace's front end alone (arbace.repr.haskell.front: native
 #                                 read, rename, elaborate, desugar with the simple optimiser, STG; no GHC but the pinned
 #                                 interfaces) and run on hsi, each judged against GHC's -O0 run (test/haskell/ref-ghc914.edn:
 #                                 status, stdout and stderr) and the record test/haskell/run-check.edn (a change either way
 #                                 fails; --record rewrites it, the classes kept); the negative control (each run against the
-#                                 next program's reference) must fail. HSI_LIBS: the libraries' STG dumps
+#                                 next program's reference) must fail. HSI_LIBS: the libraries' STG dumps. --nofib: the
+#                                 single-module nofib programs of test/haskell/run-check-nofib.txt (the pinned GHC tarball's
+#                                 nofib/, REPR_HASKELL_NOFIB an extracted copy) against test/haskell/ref-nofib.edn (GHC's -O0
+#                                 runs in fast mode, --record-ref with the host's GHC), record test/haskell/run-check-nofib.edn
 #   bin/repr-haskell typecheck-check [DIR|LIST.txt]
 #                                 HF3: the elaborator (arbace.repr.haskell.typecheck) against the tc dump over DIR's T*.hs
 #                                 (default test/haskell/typecheck): types and evidence equal, the negative control differs;
@@ -813,25 +816,77 @@ stg_check() {
   return $st
 }
 
-# run_check [--record] [ID...]: HF5-HF6's decision 3 (a) (doc/haskell/FRONTEND-SURVEY.md, "As built: HF7 (first light)"):
-# the samples and synthetic programs of test/haskell/eval/ through Arbace's front end (arbace.repr.haskell.front, one process
-# a shard) and hsi, judged against GHC's recorded -O0 runs and against test/haskell/run-check.edn. The interfaces are the
-# helper's iface dump of the corpus's imports (Tier S's pinned data, HFS3 (a)) with the packages' reexports (ghc-pkg). Light:
-# each front shard about 1 GiB, hsi's runs capped at 2 GiB. Work in .tmp/repr-haskell/run-check/
+# run_check [--nofib] [--record] [--record-ref] [ID...]: HF5-HF6's decision 3 (a) (doc/haskell/FRONTEND-SURVEY.md, "As built:
+# HF5-HF6's second slice, HF7 (first light), HF3's second slice"): programs through Arbace's front end
+# (arbace.repr.haskell.front, one process a shard) and hsi, judged against GHC's recorded -O0 runs and a record of
+# their results. The corpora: by default the samples and synthetic programs of test/haskell/eval/ (references
+# test/haskell/ref-ghc914.edn, record test/haskell/run-check.edn); --nofib the single-module nofib programs of
+# test/haskell/run-check-nofib.txt, read from the pinned GHC source tarball's nofib/ (REPR_HASKELL_NOFIB: an extracted
+# copy of it; references test/haskell/ref-nofib.edn, which --record-ref makes with the host's GHC at -O0 in fast mode,
+# FAST_OPTS and PROG_ARGS of each Makefile, its NAME.faststdin or NAME.stdin; record test/haskell/run-check-nofib.edn).
+# The interfaces are the helper's iface dump of the corpus's imports (Tier S's pinned data, HFS3 (a)) with the packages'
+# reexports (ghc-pkg). Light: each front shard about 1.6 GiB, hsi's runs capped at 2 GiB and 120 s of CPU.
+# Work in .tmp/repr-haskell/run-check/ (--nofib: run-check-nofib/)
 run_check() {
-  local record="" ids=() w=$rh/run-check st=0
-  while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; *) ids+=("$1"); shift ;; esac; done
-  local rec=$root/test/haskell/run-check.edn ref=$root/test/haskell/ref-ghc914.edn
+  local record="" recref="" nofib="" ids=() st=0
+  while [ $# -gt 0 ]; do
+    case $1 in --record) record=1; shift ;; --record-ref) recref=1; shift ;; --nofib) nofib=1; shift ;; *) ids+=("$1"); shift ;; esac
+  done
+  local w=$rh/run-check rec=$root/test/haskell/run-check.edn ref=$root/test/haskell/ref-ghc914.edn
+  [ -n "$nofib" ] && { w=$rh/run-check-nofib; rec=$root/test/haskell/run-check-nofib.edn; ref=$root/test/haskell/ref-nofib.edn; }
   local libs=${HSI_LIBS:-$root/.tmp/hsi/dumps/stg}
-  rm -rf "${w:?}"; mkdir -p "$w/if" "$w/out" "$w/run"
-  local files=() f id
-  if [ ${#ids[@]} = 0 ]; then
-    for f in "$root"/test/haskell/eval/samples/*.hs "$root"/test/haskell/eval/synthetic/*.hs; do files+=("$f"); done
+  rm -rf "${w:?}"; mkdir -p "$w/if" "$w/out" "$w/run" "$w/src"
+  # the plan: ID|SOURCE|RUNDIR|ARGS|STDIN|NAME|OUT (the program's name in the front's output)
+  local plan=$w/plan.txt f id d nm
+  : > "$plan"
+  if [ -z "$nofib" ]; then
+    if [ ${#ids[@]} = 0 ]; then
+      for f in "$root"/test/haskell/eval/samples/*.hs "$root"/test/haskell/eval/synthetic/*.hs; do ids+=("$(basename "$(dirname "$f")")/$(basename "$f" .hs)"); done
+    fi
+    for id in "${ids[@]}"; do
+      f=$root/test/haskell/eval/$id.hs; d=$(dirname "$f"); nm=$(basename "$f" .hs)
+      echo "$id|$f|$d|$([ -f "$d/$nm.args" ] && cat "$d/$nm.args")|$([ -f "$d/$nm.stdin" ] && echo "$nm.stdin")|$nm|$nm" >> "$plan"
+    done
   else
-    for id in "${ids[@]}"; do files+=("$root/test/haskell/eval/$id.hs"); done
+    local nf=${REPR_HASKELL_NOFIB:-$rh/corpus/ghc-9.14.1/nofib}
+    if [ ! -d "$nf" ]; then
+      local tb=$rh/corpus/ghc-9.14.1-src.tar.xz
+      [ -f "$tb" ] || { echo "run-check: no nofib (REPR_HASKELL_NOFIB, or $tb: bin/repr-haskell corpus fetch)" >&2; return 1; }
+      mkdir -p "$rh/corpus"; tar -xJf "$tb" -C "$rh/corpus" ghc-9.14.1/nofib
+    fi
+    if [ ${#ids[@]} = 0 ]; then
+      while read -r f; do case $f in ''|\#*) continue ;; esac; ids+=("nofib/$(dirname "$f")"); done < "$root/test/haskell/run-check-nofib.txt"
+    fi
+    for id in "${ids[@]}"; do
+      local p=${id#nofib/} mk main="" fo pa sin="" s n
+      n=$(basename "$p"); mk=$nf/$p/Makefile
+      main=$(grep -F "$p/" "$root/test/haskell/run-check-nofib.txt" | head -1); main=$nf/$main
+      fo=$( [ -f "$mk" ] && sed -n 's/^FAST_OPTS *= *//p' "$mk" | head -1 | sed 's/#.*//')
+      pa=$( [ -f "$mk" ] && sed -n 's/^PROG_ARGS *+\{0,1\}= *//p' "$mk" | tr '\n' ' ' | perl -pe 's/\+RTS.*?-RTS//g')
+      for s in "$n.faststdin" "$n.stdin"; do [ -f "$nf/$p/$s" ] && { sin=$s; break; }; done
+      echo "$id|$main|$nf/$p|$(echo "$pa $fo" | xargs)|$sin|$n|$(echo "$p" | tr '/' '_')" >> "$plan"
+    done
   fi
+  # --record-ref: GHC's -O0 runs of the programs as the references (the host's GHC, at the pin)
+  if [ -n "$recref" ]; then
+    : > "$w/ref.edn"
+    while IFS='|' read -r id f d a sin nm ob; do
+      local r=$w/ref/$ob s=0
+      rm -rf "$r"; mkdir -p "$r"; cp -r "$d"/. "$r"/; : > "$r/.empty"
+      (cd "$r" && ghc -O0 -outputdir obj -o ghcprog "$(basename "$f")" > build.log 2>&1) || { echo "{:id \"$id\" :no-build true}" >> "$w/ref.edn"; continue; }
+      (cd "$r" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$r" timeout -s KILL 360 \
+         sh -c "ulimit -v $((4 * 1048576)); ulimit -t 120; exec ./ghcprog $a" < "$r/${sin:-.empty}" > "$r/out" 2> "$r/err") || s=$?
+      echo "{:id \"$id\" :status $s :stdout \"$(sha256sum < "$r/out" | cut -c1-64)\" :stderr \"$(sha256sum < "$r/err" | cut -c1-64)\" :bytes $(wc -c < "$r/out")}" >> "$w/ref.edn"
+    done < "$plan"
+    { echo ";; GHC 9.14.1's -O0 runs of the nofib programs of test/haskell/run-check-nofib.txt (bin/repr-haskell run-check --nofib"
+      echo ";; --record-ref): each built by the host's ghc -O0 in a copy of its directory and run as nofib's fast mode runs it (FAST_OPTS,"
+      echo ";; PROG_ARGS less +RTS options, NAME.faststdin or NAME.stdin) under env -i, LANG=C.UTF-8, TZ=UTC; :stdout and :stderr SHA-256."
+      sort "$w/ref.edn"; } > "$ref"
+    echo "run-check: recorded $(grep -c '^{' "$ref") references into $ref"
+  fi
+  local files=() srcs=(); while IFS='|' read -r id f d a sin nm ob; do files+=("$f@$ob"); srcs+=("$f"); done < "$plan"
   # the interfaces: every module the programs import, the helper's closure below them
-  local mods; mods=$(cat "${files[@]}" | sed -n 's/^import *\(qualified \)\?\([A-Z][A-Za-z0-9.]*\).*/\2/p' | sort -u | tr '\n' ' ')
+  local mods; mods=$(cat "${srcs[@]}" | sed -n 's/^import *\(qualified \)\?\([A-Z][A-Za-z0-9.]*\).*/\2/p' | sort -u | tr '\n' ' ')
   # shellcheck disable=SC2086
   "$helper" iface --libdir "$libdir" -o "$w/if" --ghc -XHaskell2010 --files Prelude $mods > "$w/if.log" 2>&1 || true
   ghc-pkg field '*' exposed-modules 2> "$w/pkg.err" | tr ',' '\n' \
@@ -856,43 +911,40 @@ run_check() {
   "$exe" image --out "$img" "${la[@]}" 2> "$w/image.log" || { cat "$w/image.log" >&2; return 1; }
   : > "$w/results.edn"
   local pass=0 total=0
-  for f in "${files[@]}"; do
-    local d nm sin a so se rl rs rso rse dif res=""
-    d=$(dirname "$f"); nm=$(basename "$f" .hs); id=$(basename "$d")/$nm; total=$((total + 1))
-    if [ ! -f "$w/out/stg/$nm/Main.stg.ae" ]; then
-      res="{:id \"$id\" :result :no-stg :stage \"$(grep "^$nm " "$w/front.txt" | cut -d' ' -f2 | head -1)\"}"
+  while IFS='|' read -r id f d a sin nm b <&3; do
+    local so se rl rs rso rse dif res="" s=0 r
+    total=$((total + 1))
+    if [ ! -f "$w/out/stg/$b/Main.stg.ae" ]; then
+      res="{:id \"$id\" :result :no-stg :stage \"$(grep "^$b " "$w/front.txt" | cut -d' ' -f2 | head -1)\"}"
     else
-      local r=$w/run/$nm s=0
+      r=$w/run/$b
       rm -rf "$r"; mkdir -p "$r"; cp -r "$d"/. "$r"/; : > "$r/.empty"
-      sin=.empty; [ -f "$d/$nm.stdin" ] && sin=$nm.stdin
-      a=""; [ -f "$d/$nm.args" ] && a=$(cat "$d/$nm.args")
-      (cd "$r" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$r" timeout -s KILL 90 \
-         sh -c "ulimit -v $((2 * 1048576)); export GOMEMLIMIT=1536MiB; ulimit -t 30; exec $(printf '%q ' "$exe" run "${la[@]}" --image "$img" --prog "$w/out/stg/$nm" --name "$nm" --) $a" \
-         < "$r/$sin" > "$w/$nm.stdout" 2> "$w/$nm.stderr") || s=$?
+      (cd "$r" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$r" timeout -s KILL 360 \
+         sh -c "ulimit -v $((2 * 1048576)); export GOMEMLIMIT=1536MiB; ulimit -t 120; exec $(printf '%q ' "$exe" run "${la[@]}" --image "$img" --prog "$w/out/stg/$b" --name "$nm" --) $a" \
+         < "$r/${sin:-.empty}" > "$w/$b.stdout" 2> "$w/$b.stderr") || s=$?
       rm -rf "$r"
-      echo "$s" > "$w/$nm.status"
-      so=$(sha256sum < "$w/$nm.stdout" | cut -c1-64); se=$(sha256sum < "$w/$nm.stderr" | cut -c1-64)
+      echo "$s" > "$w/$b.status"
+      so=$(sha256sum < "$w/$b.stdout" | cut -c1-64); se=$(sha256sum < "$w/$b.stderr" | cut -c1-64)
       rl=$(grep -F "{:id \"$id\" " "$ref" || true)
       rs=$(echo "$rl" | sed -n 's/.*:status \([0-9]*\).*/\1/p'); rso=$(echo "$rl" | sed -n 's/.*:stdout "\([0-9a-f]*\)".*/\1/p'); rse=$(echo "$rl" | sed -n 's/.*:stderr "\([0-9a-f]*\)".*/\1/p')
       dif=""; [ "$s" = "$rs" ] || dif="$dif :status"; [ "$so" = "$rso" ] || dif="$dif :stdout"; [ "$se" = "$rse" ] || dif="$dif :stderr"
-      if [ -z "$rl" ]; then res="{:id \"$id\" :result :no-ref}"
+      if [ -z "$rs" ]; then res="{:id \"$id\" :result :no-ref}"
       elif [ -z "$dif" ]; then res="{:id \"$id\" :result :pass}"; pass=$((pass + 1))
       else res="{:id \"$id\" :result :fail :differs [${dif# }]}"; fi
     fi
     echo "$res" >> "$w/results.edn"
-  done
+  done 3< "$plan"
   echo "run-check: $pass of $total programs run on hsi from Arbace's own STG with GHC's -O0 output"
   # the negative control: each program's run against the next program's reference
-  local prev="" ctl=0 nm2
-  for f in "${files[@]}"; do
-    nm2=$(basename "$f" .hs); id=$(basename "$(dirname "$f")")/$nm2
+  local prev="" ctl=0
+  while IFS='|' read -r id f d a sin nm b <&3; do
     if [ -n "$prev" ] && [ -f "$w/$prev.stdout" ]; then
       rl=$(grep -F "{:id \"$id\" " "$ref" || true)
       if [ "$(sha256sum < "$w/$prev.stdout" | cut -c1-64)" = "$(echo "$rl" | sed -n 's/.*:stdout "\([0-9a-f]*\)".*/\1/p')" ] &&
          [ "$(cat "$w/$prev.status")" = "$(echo "$rl" | sed -n 's/.*:status \([0-9]*\).*/\1/p')" ]; then ctl=1; fi
     fi
-    prev=$nm2
-  done
+    prev=$b
+  done 3< "$plan"
   if [ "$ctl" = 1 ] || [ "$total" -lt 2 ]; then echo "run-check: the negative control passed: the judge does not tell programs apart" >&2; st=1
   else echo "run-check: the negative control fails as it must (each run against the next program's reference)"; fi
   # the record: each result against its line (the class a line carries is kept by --record)
