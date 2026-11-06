@@ -1114,3 +1114,97 @@ families (HF9), Template Haskell; the libraries stay GHC's STG (Tier S).
 3. (a): the tarball's nofib with its own recorded GHC runs (`test/haskell/ref-nofib.edn`).
 4. (a): run-check takes hsi's memory and time caps (`ARBACE_MEM_GIB`, `HSI_TIMEOUT`), 16 GiB at night.
 5. The multi-module driver (HF9's first part) comes after the Simplifier, by another agent.
+
+## As built: the -O0 Simplifier (2026-11-06, branch `haskell-simpl`, from `haskell-hf7`)
+
+The user's decision 2 above: GHC 9.14.1's Simplifier as `-O0` runs it (`getCoreToDo`'s `simplify "final"`: one
+`CoreDoSimplify` of up to 4 iterations, `maxSimplIterations`), ported rule for rule from the pinned tarball's
+`compiler/GHC/Core/Opt/` (read in the frontend survey's extraction) into three namespaces, behind
+`REPR_HASKELL_SIMPL=1` (`tostg/module-stg` runs it after the desugarer's simple optimiser; `REPR_HASKELL_SIMPL=0`
+the earlier pipeline):
+
+- `arbace/repr/haskell/simplify.ae`: `Simplify.hs` (`simplifyPgm`'s iterations to a fixed point, `shortOutIndirections`),
+  `Simplify/Iteration.hs` (`simplTopBinds`, `simplRecBind`, `simplLazyBind`, `simplJoinBind`, `completeBind`,
+  `prepareBinding`, `prepareRhs`, `makeTrivial`, `tryCastWorkerWrapper`, `simplExprF` and the continuations
+  `ApplyToVal`/`CastIt`/`Select`/`StrictBind`/`StrictArg`, `simplLam` and the beta reductions, `simplNonRecE`,
+  `completeBindX`, `simplAuxBind`, `simplInId`/`simplOutId`, `rebuildCall` with the demands of a dead-end Id,
+  `simplCast` with `addCoerce` and `pushCoValArg`, `rebuild`, `rebuildCase` with case of known constructor
+  (`knownCon`), case-to-let and the plain seq, `reallyRebuildCase`, `simplAlts`, `simplAlt` with the alternatives'
+  and the binder swap's unfoldings, `mkDupableCaseCont`/`mkDupableCont` with Plan A and B of the strict argument and
+  the join points `$j` of `mkDupableAlt`/`mkDupableStrictBind`, `simplLetUnfolding`, `simplStableUnfolding` (DFun
+  unfoldings simplified), `wrapJoinCont`, `trimJoinCont`); `Simplify/Utils.hs` (`SimplCont`, `ArgInfo`,
+  `mkArgInfo` with the type's strictness, `interestingCallContext`, `interestingArg`, `contArgs`,
+  `preInlineUnconditionally`, `postInlineUnconditionally`, `rebuildLam` with eta reduction, eta expansion and the cast
+  swizzle, `tryEtaExpandRhs`, `wantEtaExpansion`, `prepareAlts` with `filterAlts` and `refineDefaultAlt`, `mkCase`'s
+  identity case); `Simplify/Env.hs` (the substitution `DoneId`/`DoneEx`/`ContEx`, the in-scope set with
+  `refineFromInScope`, `substIdBndr` with `uniqAway` and `zapFragileIdInfo`, `SimplFloats` with the float flags and
+  `doFloatFromRhs`); `Simplify/Inline.hs` (`callSiteInline`, `tryUnfolding`, `computeDiscount`, the case-depth
+  penalty); the built-in rules `-O0` keeps (rewrite rules are off, `matchRule` cannot switch built-in ones off): the
+  class-op rule of `GHC.Types.Id.Make.mkDictSelId` against the module's DFun unfoldings, ConstantFold's floating-point
+  primop rules (`constfold.ae`) and its `dataToTagRule` on a known constructor. The SimplMode is `-O0`'s
+  (`initSimplMode`): inlining on, eta expansion and reduction on, case-of-case on, cast swizzling on, case merging and
+  case folding off, let floating to the top level on, the phase final.
+- `arbace/repr/haskell/occanal.ae`: `OccurAnal.hs` as the Simplifier runs it before each iteration
+  (`occurAnalysePgm` glomming the top level, `occAnalBind`, `occAnalRecBind` with `makeNode`, `tagRecBinders`,
+  `loopBreakNodes`/`reOrderNodes`/`chooseLoopBreaker` and `nodeScore`, `occAnal`, `occAnalApp` with the binder swap,
+  `occAnalLamTail`, `occAnalUnfolding` (a DFun's arguments and a stable unfolding counted), join points by tail calls
+  (`tagNonRecBinder`, `decideRecJoinPointHood`, the join points' zeroed usage at their jumps), UsageDetails with the
+  many/in-lambda/non-tail zappings, dead code dropped) and `occurAnalyseExpr` for the unfolding templates.
+- `arbace/repr/haskell/core.ae`: `Core/Utils.hs` (`exprIsTrivial`, `exprIsDupable`, `exprIsCheapX` with
+  `isWorkFreeApp`/`isCheapApp`/`isExpandableApp`, `exprOkForSpeculation`/`exprOkToDiscard`, `exprIsHNF`/`exprIsConLike`,
+  `cheapEqExpr`, `mkCast`), `Opt/Arity.hs` (`typeArity` through newtypes, `ArityType`, `arityType`, `findRhsArity`'s
+  fixpoint for recursive bindings, `exprEtaExpandArity`, `etaExpandAT` with `mkEtaWW`, `etaInfoApp` and `etaInfoAbs`
+  (the newtypes' coercions pushed through the expansion), `tryEtaReduce`, `exprArity`, `exprIsDeadEnd`,
+  `cheapArityType`, `pushCoValArg`), `Unfold.hs` and `Unfold/Make.hs` (`sizeExpr` with GHC's sizes and discounts,
+  `calcUnfoldingGuidance`, `uncondInline`, `uncondInlineJoin`, `inlineBoringOk`, `mkUnfolding` with its cache, the
+  template and the guidance computed when first asked as GHC's lazy fields), `SimpleOpt.hs`'s `exprIsConApp_maybe`
+  (through casts, lambdas, lets, DFun and expandable unfoldings); the primops' attributes from
+  `compiler/GHC/Builtin/primops.txt.pp` (`primops.ae`, generated by `tools/hsprimops/primops.awk`).
+
+**The Core it reads** (the elaborator's output extended where the Simplifier needs it, as decision 2 allows): the
+newtypes' casts kept (`(cast E {:l T1 :r T2})`, a coercion by its two kinds: a newtype constructor's compulsory
+unfolding `\x -> x |> sym co`, its match `x |> co`; `desugar/*casts*`), GHC's failure handlers `\void -> e` applied to
+`(##)` (`mkFailurePair`), `dsAbsBinds`' letrec for one self-recursive binder without a signature, the simple
+optimiser's dead code (a dead top-level group's occurrences not counted: the once-used letrecs inlined as GHC's
+desugarer inlines them), the module's DFun unfoldings, record selectors one a field with `recSelError`'s DEFAULT,
+Core's let-can-float invariant (an unlifted let not ok for speculation a case); the binders' IdInfo is their forms'
+metadata (`:occ :join :arity :unf :oneshot :type :bot`), the imported Ids' from GHC's implicit Ids (constructor
+workers, class-op and superclass selectors, primops, DFuns, the wired-in error Ids with their dead-end arity) and none
+else (`-fignore-interface-pragmas`). After it, CorePrep's eta expansion to the binders' arity (`simplify/strip`),
+the casts erased, top-level string literals (`StgTopStringLit`), the join points let-no-escape, a strict
+constructor's non-atomic arguments case-bound with their fields' types (`tostg.ae`).
+
+**The judges.** New: the simplified Core against GHC's (`arbace/repr/haskell/simplcmp.ae`: the helper's `stg --core`
+Core after GHC's Simplifier, both sides in one normal form, types, casts and ticks erased, names alpha-normalised by
+binding site; `bin/repr-haskell stg-check` prints it per program and in total). The measures (before = this branch's
+start, the simplifier off; after = on):
+
+| judge | before | after |
+|---|---:|---:|
+| simplified Core = GHC's -O0 Core, test/haskell/stg's programs | 37 of 61 | NNSTG |
+| simplified Core = GHC's -O0 Core, test/haskell/typecheck's 22 samples | 261 of 321 | NNTC |
+| STG = GHC's -O0 STG (stg-check) | 65 of 83 | NNSTGSTG |
+| stg-check runs | 9 of 9 | 9 of 9 |
+| run-check (the run corpus) | 60 of 63 | NNRC |
+| run-check --nofib (light caps) | 40 of 53 | NNNF |
+
+`imaginary/integrate` (the `space` class): the Simplifier's input now inlines `rtotals` and `itotals` into `es` as GHC's
+desugarer does; its run's peak memory is GHC's own STG's (804 MB against GHC's 792 MB, from 993 MB), so it fails
+under the light 2 GiB cap exactly as GHC's STG does (the class `hsi-memory`) and passes with GHC's output at 4 GiB:
+with decision 4's night caps it passes.
+
+**The differences left** are the elaborator's and the desugarer's, not the Simplifier's: GHC's desugarer floats a
+module's constant dictionaries to the top level (`$dShow = $fShowList $fShowInt`, shared), binds a section's operator
+and operand outside its lambda, generalises local bindings over their constraints (`parity`'s
+`\$dEq $dNum -> letrec ...`), matches string literal patterns with `eqString`, derives Ix and Enum on `dataToTag#` and
+the tag primops (ours on `I#` and `ltInt`) and makes the Ix instances top-level; CorePrep floats a scrutinee's argument
+lets past a join point (`grade_sat_80`).
+
+**Not ported** (no `-O0` program of the corpora needed it, or the Core lacks what it reads): the other built-in rules
+(the integral primops' folding, the string rules `unpackFoldrCString#`/`eqString`/`unpackAppendCString#`, `tagToEnum#`'s
+rule, which needs the erased type argument, `seq#`, `inline`), `runRW#`'s special case, `improveSeq`,
+`mkStrictFieldSeqs` in the join points, `combineIdenticalAlts`, `abstractFloats` (the types are erased), INLINE and
+NOINLINE pragmas and stable unfoldings of the user's, the demands (`-O0` has none but the types' and the dead ends'),
+the coercions' optimiser (`optCoercion`: a coercion is its two kinds; reflexive when they are equal), the newtypes'
+coercions with their type arguments (left uninstantiated: an arity through a type variable instantiated to a function
+is not seen).
