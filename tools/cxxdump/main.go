@@ -575,9 +575,12 @@ func runOpts(in io.Reader, out io.Writer, o options) (kept, dropped int64, err e
 	} else {
 		fmt.Fprintf(bw, "{\"cxxdump\":1,\"main\":%q}\n", main)
 	}
+	ids := map[string]string{}
 	emit := func(c *obj) {
 		if o.norm {
 			normalize(c)
+		} else {
+			renumber(c, ids)
 		}
 		if edn {
 			writeEdn(bw, c)
@@ -590,6 +593,33 @@ func runOpts(in io.Reader, out io.Writer, o options) (kept, dropped int64, err e
 		return f.kept, f.dropped, err
 	}
 	return f.kept, f.dropped, bw.Flush()
+}
+
+// renumber replaces clang's per-run ids (the nodes' addresses, which ASLR moves from run to run) by their order of first
+// appearance in the dump, 0x1, 0x2, ...: every string value of the form 0x[0-9a-f]+ (the same values normalize drops), under any
+// key and in arrays, so that a reference and the node it names keep one number and the same input gives the same output byte
+// for byte (the records of ORS12 (a): a dump pack verified entry by entry). ids is the dump's map, shared by its top-level forms.
+func renumber(v any, ids map[string]string) any {
+	switch x := v.(type) {
+	case *obj:
+		for i := range x.vals {
+			x.vals[i] = renumber(x.vals[i], ids)
+		}
+	case []any:
+		for i := range x {
+			x[i] = renumber(x[i], ids)
+		}
+	case string:
+		if reID.MatchString(x) {
+			n, ok := ids[x]
+			if !ok {
+				n = fmt.Sprintf("0x%x", len(ids)+1)
+				ids[x] = n
+			}
+			return n
+		}
+	}
+	return v
 }
 
 func main() {

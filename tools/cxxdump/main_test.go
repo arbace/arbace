@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
@@ -40,7 +41,7 @@ func TestEdn(t *testing.T) {
 	if _, _, err := run(strings.NewReader(dump), &out, "m.cpp", false, true); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(out.String(), "{:cxxdump 1 :main \"m.cpp\"}\n{:id \"0x5\" :kind \"NamespaceDecl\"") {
+	if !strings.HasPrefix(out.String(), "{:cxxdump 1 :main \"m.cpp\"}\n{:id \"0x1\" :kind \"NamespaceDecl\"") { // clang's 0x5, renumbered
 		t.Fatalf("edn: %s", out.String())
 	}
 	if got := ednString("a\"b\\c\n\x01"); got != `"a\"b\\c\n\u0001"` {
@@ -106,5 +107,46 @@ func TestRepeatedKey(t *testing.T) {
 	want := `{:kind "UsingType" :type "a" :decl "b" :type-2 "c"}`
 	if b.String() != want {
 		t.Fatalf("got %s want %s", b.String(), want)
+	}
+}
+
+// The ids are renumbered by first appearance across the dump's forms: a reference keeps its node's number, and two runs whose
+// addresses differ write the same text.
+func TestRenumber(t *testing.T) {
+	ids := map[string]string{}
+	a := &obj{keys: []string{"id", "kind", "inner"}, vals: []any{"0x7f10", "FunctionDecl", []any{&obj{keys: []string{"id", "referencedDecl"},
+		vals: []any{"0x7f30", &obj{keys: []string{"id", "name"}, vals: []any{"0x7f10", "0x10"}}}}}}}
+	b := &obj{keys: []string{"id", "previousDecl", "value"}, vals: []any{"0x7f20", "0x7f30", "10"}}
+	renumber(a, ids)
+	renumber(b, ids)
+	var w strings.Builder
+	writeEdn(&w, a)
+	writeEdn(&w, b)
+	want := `{:id "0x1" :kind "FunctionDecl" :inner [{:id "0x2" :referencedDecl {:id "0x1" :name "0x3"}}]}{:id "0x4" :previousDecl "0x2" :value "10"}`
+	if w.String() != want {
+		t.Fatalf("got %s want %s", w.String(), want)
+	}
+}
+
+// Under CXXDUMP_ROOT a path in the arguments is keyed as @ROOT@/...: the same unit has one key in every checkout.
+func TestRootKey(t *testing.T) {
+	dir := t.TempDir()
+	src := dir + "/a.cpp"
+	os.WriteFile(src, []byte("int main() {}\n"), 0o644)
+	key := func(root string) string {
+		t.Setenv("CXXDUMP_ROOT", root)
+		k, err := job{clang: "clang++-none", args: []string{"-iquote", root + "/x", src}}.key()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	clangID = "clang version test"
+	defer func() { clangID = "" }()
+	if a, b := key("/r1"), key("/r2"); a != b {
+		t.Fatalf("keys differ by root: %s %s", a, b)
+	}
+	if rootAbs("@ROOT@/x/h.h") != "/r2/x/h.h" || rootRel("/r2/x/h.h") != "@ROOT@/x/h.h" {
+		t.Fatalf("rootRel/rootAbs: %s %s", rootAbs("@ROOT@/x/h.h"), rootRel("/r2/x/h.h"))
 	}
 }
