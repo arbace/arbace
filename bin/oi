@@ -38,6 +38,8 @@
 #   bin/oi aot-lib                 AOT (O6, OC7 (a)): the stdlib's Lambda (bin/oi stdlib's) translated by
 #                                  arbace.o2j into Java forms over the runtime jdk/ocaml/, into .tmp/o6/lib/
 #                                  (kept by the translator's, the runtime's and the stdlib's key)
+#   bin/oi aot-clib                the compiled level's library (o2j clib): the stdlib's units and, after them, the libraries outside it
+#                                  (unix, threads, compiler-libs, lib/testing: OT26 (a)) translated once into ocaml.u, .tmp/o6/clib/
 #   bin/oi aot-run FILE.ml [ARG...]
 #                                  FILE's Lambda translated with the stdlib's and run at the light level: the
 #                                  Java forms defined by the Java forms' interpreter on stage 0 (test/ocaml/o2j/run.ae)
@@ -734,7 +736,9 @@ cmd_aot_clib() {
   local key; key=$(o2j_key)
   if [ -f "$C2_LIB/key" ] && [ "$(cat "$C2_LIB/key")" = "$key" ]; then return 0; fi
   rm -rf "$C2_LIB"; mkdir -p "$C2_LIB"
-  o2j clib "$LIB" "$C2_LIB" > "$O2J/clib-missing.txt"
+  # the libraries outside the stdlib translated once into ocaml.u after it (OT26 (a), OT25 (b)): unix, threads, compiler-libs' units
+  # and lib/testing; a program links those its header includes (cprogs' @UNIT entries) and those they need
+  o2j clib "$LIB" "$C2_LIB" $(inc_units "unix systhreads complib testing") > "$O2J/clib-missing.txt"
   echo "$key" > "$C2_LIB/key"
 }
 
@@ -771,6 +775,8 @@ c2_build() {
 c2_shard() {
   local s=$1; shift
   echo "oi: compiled: shard $(basename "$s"), $# programs" >&2
+  # O2J_PLAN_ONLY=1: the shards planned, not built (their programs and bytes in C2/plan.tsv)
+  if [ "${O2J_PLAN_ONLY:-}" = 1 ]; then printf '%s\t%s\n' "$(basename "$s")" "$*" >> "$C2/plan.tsv"; return 0; fi
   if c2_build "$s" "$@"; then printf '%s\t%s\n' "$s/prog" "$*" >> "$C2/built.tsv"; return 0; fi
   if [ $# = 1 ]; then printf '%s\t%s\n' "$1" "$(cat "$s/why")" >> "$C2/refused.tsv"; return 0; fi
   local h=$(($# / 2))
@@ -783,7 +789,7 @@ c2_bytes() {
   local n u t=0
   n=$(du -sb "$2/out" 2>/dev/null | cut -f1); t=${n:-0}
   for u in $(awk -F'\t' -v p="$1" '$1 == p { for (i = 3; i < NF; i++) print $i }' "$C2/cprogs.list"); do
-    n=$(du -sb "$C2_LIB/$(basename "$u" .ae)" 2>/dev/null | cut -f1); t=$((t + ${n:-0}))
+    n=$(du -sb "$C2_LIB/${u#@}.ae" 2>/dev/null | cut -f1); t=$((t + ${n:-0}))
   done
   echo "$t"
 }
@@ -804,21 +810,24 @@ c2_programs() {
   # OT20 (b): a shard ends at O2J_SHARD programs or, when O2J_SHARD_BYTES is set, before its programs' translated forms (their
   # out directories, the library units they link counted once a program) pass that many bytes; each shard's bytes and its j2g's and
   # build's peaks are written to C2/shards.tsv, the measure a cap is chosen by
-  local size=${O2J_SHARD:-8} cap=${O2J_SHARD_BYTES:-0} k=0 pkgs=() bytes=0 b
+  # OT25 (a): a shard holds at most O2J_SHARD_UNIX programs that include unix (default 3: their Sock and ExtProc reach java.net's and
+  # ProcessBuilder's JDK classes, 6.1 GB for five such programs)
+  local size=${O2J_SHARD:-8} cap=${O2J_SHARD_BYTES:-0} ucap=${O2J_SHARD_UNIX:-3} k=0 pkgs=() bytes=0 b nu=0 hasu
   : > "$C2/shards.tsv"
-  while IFS=$'\037' read -r id p d args env a0; do
+  while IFS=$'\037' read -r id p d args env a0 hasu; do
     grep -q -F "refused	$d/out	" "$C2/translate.log" && continue
     b=$(c2_bytes "$p" "$d")
-    if [ "$cap" -gt 0 ] && [ ${#pkgs[@]} -gt 0 ] && [ $((bytes + b)) -gt "$cap" ]; then
-      k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; pkgs=(); bytes=0
+    if [ ${#pkgs[@]} -gt 0 ] && { { [ "$cap" -gt 0 ] && [ $((bytes + b)) -gt "$cap" ]; } || { [ "$hasu" = 1 ] && [ "$nu" -ge "$ucap" ]; }; }; then
+      k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; pkgs=(); bytes=0; nu=0
     fi
-    pkgs+=("$p"); bytes=$((bytes + b))
-    if [ ${#pkgs[@]} = "$size" ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; pkgs=(); bytes=0; fi
+    pkgs+=("$p"); bytes=$((bytes + b)); [ "$hasu" = 1 ] && nu=$((nu + 1))
+    if [ ${#pkgs[@]} = "$size" ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; pkgs=(); bytes=0; nu=0; fi
   done < "$C2/progs.tsv"
   if [ ${#pkgs[@]} -gt 0 ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; fi
+  if [ "${O2J_PLAN_ONLY:-}" = 1 ]; then echo "oi: compiled: $k shards planned (O2J_PLAN_ONLY): $C2/plan.tsv, $C2/shards.tsv" >&2; return 0; fi
   # the runs: each program alone, in its directory (C2/run/ID), argv.(0) its dump as the light level's
   local prog st t0 t1 note r kv
-  while IFS=$'\037' read -r id p d args env a0; do
+  while IFS=$'\037' read -r id p d args env a0 hasu; do
     r=$(grep -m1 -F "refused	$d/out	" "$C2/translate.log" | cut -f3 || true)
     [ -n "$r" ] || r=$(awk -F'\t' -v p="$p" '$1 == p {print $2}' "$C2/refused.tsv" | head -1)
     if [ -n "$r" ]; then printf '%s\t-\t-\t0\t0\trefused: %s\n' "$id" "$r" >> "$outnew"; continue; fi
@@ -851,12 +860,15 @@ cmd_check_compiled() {
     rm -f "$d/$base.cmi" "$d/$base.cmo"
     grep -q '^(ocaml/error' "$d/$u.ae" && continue
     n=$((n + 1))
-    printf 'ocaml.p%s\t%s\t%s%s\n' "$n" "$d/out" "$(inc_units "$incs" | sed 's/$/\t/' | tr -d '\n')" "$d/$u.ae" >> "$C2/cprogs.list"
-    printf '%s\037p%s\037%s\037%s\037%s\037%s\n' "$id" "$n" "$d" "$args" "$env" "$d/$u.ae" >> "$C2/progs.tsv"
+    # the library units of its includes from ocaml.u (@UNIT: clib translated them once, OT26 (a)), not translated into its package
+    printf 'ocaml.p%s\t%s\t%s%s\n' "$n" "$d/out" "$(inc_units "$incs" | sed -e 's|.*/|@|' -e 's/\.ae$/\t/' | tr -d '\n')" "$d/$u.ae" >> "$C2/cprogs.list"
+    # the seventh field: 1 for a program that includes unix (OT25 (a): at most O2J_SHARD_UNIX of them a shard)
+    printf '%s\037p%s\037%s\037%s\037%s\037%s\037%s\n' "$id" "$n" "$d" "$args" "$env" "$d/$u.ae" "$(case " $incs " in *" unix "*) echo 1 ;; *) echo 0 ;; esac)" >> "$C2/progs.tsv"
   done < <(awk -F'\t' '$2 == "run"' "$C2/selected.tsv" | tr '\t' '\037')
   local out=$C2/check.tsv
   : > "$out.new"
   c2_programs "$out.new"
+  [ "${O2J_PLAN_ONLY:-}" = 1 ] && return 0
   # the dumps the oracle refused
   awk -F'\t' '$2 == "run" {print $1}' "$C2/selected.tsv" | while read -r id; do
     base=$(basename "$id"); u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}; d=$C2/run/$id
@@ -996,6 +1008,7 @@ case $cmd in
   oi-status) oi_status "$@" ;;
   oi-cpu) oi_cpu_secs "$@" ;;
   aot-lib) cmd_aot_lib ;;
+  aot-clib) cmd_aot_clib; echo "oi: aot-clib: $(wc -l < "$O2J/clib-missing.txt") missing externals lines, in $C2_LIB" ;;
   aot-run) cmd_aot_run "$@" ;;
   suite) cmd_suite "$@" ;;
   judges-test) cmd_judges_test ;;

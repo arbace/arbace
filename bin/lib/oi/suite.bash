@@ -188,10 +188,12 @@ cmd_suite_check_compiled() {
     d=$S/run/$id
     if [ -f "$d/error" ]; then printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(cat "$d/error")" >> "$out.new"; continue; fi
     n=$((n + 1))
-    printf 'ocaml.p%s\t%s\t%s%s\n' "$n" "$d/out" "$(inc_units "$incs" | sed 's/$/\t/' | tr -d '\n')" "$(paste -sd'\t' "$d/units.list")" >> "$C2/cprogs.list"
-    printf '%s\037p%s\037%s\037%s\037%s\037%s\n' "$id" "$n" "$d" "$args" "$env" "$(tail -1 "$d/units.list")" >> "$C2/progs.tsv"
+    # the library units from ocaml.u (OT26 (a), bin/oi's cmd_check_compiled), the seventh field the unix mark (OT25 (a))
+    printf 'ocaml.p%s\t%s\t%s%s\n' "$n" "$d/out" "$(inc_units "$incs" | sed -e 's|.*/|@|' -e 's/\.ae$/\t/' | tr -d '\n')" "$(paste -sd'\t' "$d/units.list")" >> "$C2/cprogs.list"
+    printf '%s\037p%s\037%s\037%s\037%s\037%s\037%s\n' "$id" "$n" "$d" "$args" "$env" "$(tail -1 "$d/units.list")" "$(case " $incs " in *" unix "*) echo 1 ;; *) echo 0 ;; esac)" >> "$C2/progs.tsv"
   done < <(suite_selected | awk -F'\t' '$2 == "run"' | tr '\t' '\037')
   c2_programs "$out.new"
+  [ "${O2J_PLAN_ONLY:-}" = 1 ] && return 0
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
   [ "${O2J_KEEP:-}" = 1 ] || rm -f "$C2"/s*/prog
   local mode=judge; [ "$RECORD" = 1 ] && mode=record

@@ -695,8 +695,10 @@
     (vec (sort (disj (into @acc (:required u)) (:name u))))))
 
 (defn link
-  "The library units programs' units need, in lib-order; deps: unit -> the units it needs."
-  [lib-order deps prog-units]
+  "The library units programs' units need, in lib-order; deps: unit -> the units it needs. FORCED: library units the program
+  links whatever it names (the compiled level's libraries outside the stdlib, OT26 (a): a program that includes unix links
+  Unix and UnixLabels as oi and the light level do), with the units they need."
+  [lib-order deps prog-units & [forced]]
   (let [progs (set (map :name prog-units))
         need (volatile! #{})]
     (letfn [(visit [n]
@@ -704,6 +706,7 @@
                 (when-not (contains? deps n) (throw (ex-info (str "no unit " n " in the library") {:unit n})))
                 (vswap! need conj n)
                 (run! visit (deps n))))]
+      (run! visit forced)
       (doseq [u prog-units] (run! visit (unit-refs u))))
     (filterv @need lib-order)))
 
@@ -727,8 +730,10 @@
   package of its units and main class, else ocaml.u."
   [lo od dumps & [pkg]]
   (let [{:keys [order deps]} (read-string (slurp (io/file lo "deps.edn")))
-        us (mapv #(read-dump (io/file %)) dumps)
-        libs (link order deps us)]
+        ;; an entry @UNIT names a library unit the program links (OT26 (a)), the others its own units' dumps
+        forced (for [d dumps :when (str/starts-with? d "@")] (subs d 1))
+        us (mapv #(read-dump (io/file %)) (remove #(str/starts-with? % "@") dumps))
+        libs (link order deps us forced)]
     (binding [*pkg* (or pkg "ocaml.u") *own* (if pkg (set (map :name us)) #{})]
       (translate-units lo od us libs))))
 
@@ -744,16 +749,21 @@
                (write-forms (io/file o) forms (str "Translated by arbace.o2j from the Lambda of " (:name u) ". Regenerate rather than edit."))
                (doseq [[n c] (sort missing)] (println (str "missing\t" (:name u) "\t" n "\t" c)))))
     ;; lib LAMBDA-DIR OUT-DIR: every unit of LAMBDA-DIR/order.txt translated, OUT-DIR/deps.edn
-    "lib" (let [[ld od] args
-                order (str/split-lines (slurp (io/file ld "order.txt")))
-                deps (into {} (for [n order]
-                                (let [u (read-dump (io/file ld (str n ".ae")))
-                                      [forms missing] (translate-unit u)]
-                                  (write-forms (io/file od (str n ".ae")) forms
-                                               (str "Translated by arbace.o2j from the Lambda of " n ". Regenerate rather than edit."))
-                                  (doseq [[m c] (sort missing)] (println (str "missing\t" n "\t" m "\t" c)))
-                                  [n (unit-refs u)])))]
-            (spit (io/file od "deps.edn") (pr-str {:order order :deps deps})))
+    ;; (lib LAMBDA-DIR OUT-DIR DUMP...: the DUMPs' units after the stdlib's, in their order: the compiled level's libraries outside
+    ;; the stdlib, unix, threads, compiler-libs, lib/testing, translated once into ocaml.u, OT26 (a))
+    "lib" (let [[ld od & extra] args
+                files (concat (for [n (str/split-lines (slurp (io/file ld "order.txt")))] (io/file ld (str n ".ae")))
+                              (map io/file extra))
+                ;; one unit read at a time (the library's Lambda is not held at once)
+                pairs (vec (for [f files]
+                             (let [u (read-dump f)
+                                   n (:name u)
+                                   [forms missing] (translate-unit u)]
+                               (write-forms (io/file od (str n ".ae")) forms
+                                            (str "Translated by arbace.o2j from the Lambda of " n ". Regenerate rather than edit."))
+                               (doseq [[m c] (sort missing)] (println (str "missing\t" n "\t" m "\t" c)))
+                               [n (unit-refs u)])))]
+            (spit (io/file od "deps.edn") (pr-str {:order (mapv first pairs) :deps (into {} pairs)})))
     ;; prog LIB-OUT OUT-DIR DUMP...: the program's units translated into OUT-DIR, its main class,
     ;; OUT-DIR/files.txt the files to define in order
     "prog" (let [[lo od & dumps] args] (translate-program lo od dumps))
@@ -769,7 +779,7 @@
     ;; cprogs LIB-OUT LIST: LIST's lines PKG OUT-DIR DUMP... (tabs), each a program as prog's in package PKG (ocaml.p<N>), in
     ;; the tree style, a refusal as progs'; shard OUT-DIR PKG...: OUT-DIR/ocaml/u/Shard.ae, the dispatcher, and the packages'
     ;; namespace files OUT-DIR/ocaml/u.ae, OUT-DIR/ocaml/p<N>.ae
-    "clib" (binding [*in-ns* true] (-main "lib" (first args) (second args)))
+    "clib" (binding [*in-ns* true] (apply -main "lib" args))
     "cprogs" (let [[lo lst] args]
                (binding [*in-ns* true]
                  (doseq [line (str/split-lines (slurp lst)) :when (seq line)
