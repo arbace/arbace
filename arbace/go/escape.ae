@@ -1796,8 +1796,12 @@
         result-type (fn [c i] (let [ty (node-type (:callee c))]
                                 (when (and (vector? (under ty)) (= :func (nth (under ty) 0)))
                                   (nth (nth (under ty) 2) i nil))))
+        inl-val (fn [r i] (let [rv (nth (:retvars r) i nil)]
+                            (when rv {:op :local :obj rv :type (e/o rv :type) :mode :variable})))
         assign-pairs (fn [objs rhs]
                        (cond
+                         (and (= 1 (count rhs)) (= :inlcall (:op (first rhs))))
+                         (doseq [[i o] (map-indexed vector objs)] (add! o (inl-val (first rhs) i)))
                          (and (= 1 (count rhs)) (> (count objs) 1))
                          (let [r (first rhs)]
                            (cond
@@ -1812,11 +1816,16 @@
                            (add! (second objs) nil))
                          :else
                          (doseq [[o r] (map vector objs rhs)]
+                           (cond
+                             (= :inlcall (:op r)) (add! o (inl-val r 0))
+                             (and (= :result (:op r)) (= :inlcall (:op (:call r)))) (add! o (inl-val (:call r) (:index r)))
+                             (and (= :convert-iface (:op r)) (= :inlcall (:op (:x r)))) (add! o (assoc r :x (inl-val (:x r) 0)))
+                             :else
                            (if (and (= :call (:op r)) (not= :builtin (:kind r)) (not (:comma-ok r)))
                              (add! o [::type (result-type r 0)])
                              (if (and (= :result (:op r)))
                                (add! o [::type (node-type r)])
-                               (add! o r))))))]
+                               (add! o r)))))))]
     (letfn [(walk [x]
               (cond
                 (map? x)
@@ -2366,7 +2375,7 @@
   [body ^java.util.HashMap om line lit-names decls qual]
   (doseq [o decls]
     (when-not (.containsKey om o)
-      (.put om o (e/obj (cond-> (assoc @o :line line :esc-class :auto :local? true) qual (assoc :inl-pkg qual))))))
+      (.put om o (e/obj (cond-> (dissoc (assoc @o :line line :esc-class :auto :local? true) :param? :result?) qual (assoc :inl-pkg qual))))))
   (letfn [(fresh [o]
             (or (.get om o)
                 (let [c (e/obj (assoc @o :line line :esc-class :auto :local? true))]
@@ -2474,8 +2483,8 @@
                                                 c)))
                 (let [x (into {} (map (fn [[k v]] [k (il v false)])) x)
                       x (if (and (= :call (:op x)) (= :iface (:kind x))) (devirt-call asg x) x)]
-                  (if (and (= :call (:op x)) (not= :builtin (:kind x)) (not= :iface (:kind x)))
-                    (or (try-inline caller x chain) x)
+                  (if (and (= :call (:op x)) (not= :builtin (:kind x)) (not= :iface (:kind x)) (not (::tried x)))
+                    (or (try-inline caller x chain) (assoc x ::tried true))
                     x))))]
     (il x false))))
 
@@ -2493,7 +2502,7 @@
             om (java.util.HashMap.)
             ;; another package's variables inlined print qualified by its name (bytes.b)
             qual (when (fn-get callee :foreign-body) (last (str/split (str (fn-get callee :pkg-path)) #"/")))
-            fresh (fn [o nm] (let [c (e/obj (cond-> (assoc (if o @o {:kind :var :name nm}) :line line :esc-class :auto :local? true)
+            fresh (fn [o nm] (let [c (e/obj (cond-> (dissoc (assoc (if o @o {:kind :var :name nm}) :line line :esc-class :auto :local? true) :param? :result?)
                                               qual (assoc :inl-pkg qual)))]
                                (when o (.put om o c))
                                c))
@@ -2992,7 +3001,14 @@
           (when (and big (> (long *m*) 1))
             (warn! (fn-get f :line) (str "function " (fn-get f :name) " considered 'big'; reducing max cost of inlinees")))
           (binding [*big-caller* big]
-            (fn-set! f :inlined-body (inline-calls f (fn-get f :body) []))))))
+            ;; the interleaved loop: the calls inlined, then the interface calls whose receivers'
+            ;; concrete types the inlined bodies show devirtualized and inlined in turn
+            (loop [b (fn-get f :body) i 0]
+              (let [n0 (count @*msgs*)
+                    b2 (inline-calls f b [])]
+                (if (and (< i 8) (> (count @*msgs*) n0))
+                  (recur b2 (inc i))
+                  (fn-set! f :inlined-body b2))))))))
     (let [lits (filter #(fn-get % :parent) all)
           kept @(:kept-lits *ctx*)
           lone (vec (for [g lits
