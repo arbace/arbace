@@ -219,6 +219,7 @@
       :adt (when (string? (second t)) (second t))
       (:int :uint :float) (str "prim:" (second t))
       :bool "prim:bool" :char "prim:char" :str "prim:str" :slice "prim:slice" :array "prim:array" :ptr "prim:ptr"
+      :ref "prim:ref" :tuple "prim:tuple"
       nil)))
 
 (defn- std-impl-instance
@@ -266,7 +267,13 @@
   [t trait & [targs]]
   (let [cands (if trait
                 (concat (for [x (local-impls true) :when (= trait (first (nth x 3)))] x)
-                        (for [ip (get (:trait-impls c/*si*) trait)] (std-impl-instance ip)))
+                        ;; std's: those of the self type's key and the blanket ones (all when the type has no key)
+                        (let [k (self-key t) by (get (:trait-impls-by c/*si*) trait)]
+                          (for [ip (let [st (shallow t)]
+                                     (cond (and (= :adt (first st)) (number? (second st))) (get by :blanket)   ; the crate's own type
+                                           k (concat (get by k) (get by :blanket))
+                                           :else (get (:trait-impls c/*si*) trait)))]
+                            (std-impl-instance ip))))
                 (concat (local-impls false)
                         (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))]
     (some (fn [[ip args self tr]]
@@ -376,14 +383,18 @@
                  (concat (local-impls false)
                          (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
            (do (rollback! s) nil)))
-     ;; traits in scope: the trait's method with Self the step type, when an impl of the trait for it unifies, or a bound
+     ;; traits in scope (assemble_extension_candidates_for_trait): Self a fresh variable, the method's self type unified
+     ;; with the adjusted receiver, then `Self: Trait` proven (an impl, or a parameter's bound)
      (some (fn [tr]
              (let [s (snapshot)]
                (if-let [[def k] (trait-item tr nm)]
-                 (let [targs (vec (cons t (drop 1 (fresh-args tr))))]
-                   (or (when (or (let [r (impls-for t tr)] (when (and r (System/getenv "TYPECK_TRACE")) (binding [*out* *err*] (println "trait cand" nm tr (deep t) (first r)))) r) (= :param (first (shallow t))))
-                         (try-def def targs))
-                       (do (rollback! s) nil)))
+                 (let [targs (fresh-args tr)
+                       r (when (= "AssocFn" (str k)) (try-def def targs))
+                       self (some-> (first targs) shallow)]
+                   (if (and r self (not (tvar? self))
+                            (or (= :param (first self)) (impls-for self tr (vec (rest targs)))))
+                     r
+                     (do (rollback! s) nil)))
                  nil)))
            (traits-in-scope nm)))))
 
@@ -635,7 +646,7 @@
                              (if out (shallow [:proj out [lt rt]]) [:unknown]))))
       [:unknown])))
 
-(declare param-fn-bound fn-traits)
+(declare param-fn-bound fn-traits solve-obligations!)
 
 (defn- check-call [e expected]
   (let [callee (:func e)
@@ -798,7 +809,8 @@
           :lit (lit-ty (:lit e) expected)
           :path (path-ty e)
           :call (check-call e expected)
-          :method (let [rt (check-expr (:receiver e) nil)]
+          :method (let [rt (check-expr (:receiver e) nil)
+                        _ (when (tvar? (shallow rt)) (solve-obligations!))]
                     (if-let [[def args sig adj] (probe-method rt (:ident (:seg e)))]
                       (do (adjust! (:receiver e) adj)
                           ;; a turbofish: the method's own arguments
@@ -948,7 +960,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Patterns (pat.rs, with the default binding modes)
 
-(defn- bm-text [by-ref mutbl] (str "BindingMode(" (case by-ref :not "Yes(Not)" :mut "Yes(Mut)" "No") ", " (if mutbl "Mut" "Not") ")"))
+(defn- bm-text [by-ref mutbl] (str "BindingMode(" (case by-ref :not "Yes(Not, Not)" :mut "Yes(Not, Mut)" "No") ", " (if mutbl "Mut" "Not") ")"))
 
 (defn check-pat
   "check_pat: P against EXPECTED; bindings into the atom ENV; DBM the default binding mode (:none, :ref, :ref-mut)"
@@ -999,6 +1011,34 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Bodies, fallback and writeback
 
+(defn- has-var? [t]
+  (let [t (shallow t)]
+    (cond (tvar? t) true
+          (and (vector? t) (keyword? (first t))) (boolean (some #(cond (vector? %) (has-var? %) (map? %) (some has-var? (vals %)) :else false) (rest t)))
+          (vector? t) (boolean (some has-var? t))
+          :else false)))
+
+(defn solve-obligations!
+  "select_obligations_where_possible: each pending trait obligation whose self type is known selects its impl (binding
+  the other arguments' variables, a FromIterator's element), each projection obligation's term unified with the
+  normalized projection; again while something changes"
+  []
+  (loop [n 0]
+    (let [before @*vars*]
+      (doseq [o (when *obligations* @*obligations*)]
+        (case (first o)
+          :trait (let [[tr args] (second o) self (shallow (first args))]
+                   (when (and (not (tvar? self)) (not= :param (first self)) (not= [:unknown] self)
+                              (not (#{(c/lang "sized") (c/lang "meta_sized")} tr))
+                              (some has-var? args))
+                     (let [sn (snapshot)] (when-not (impls-for self tr (vec (rest args))) (rollback! sn)))))
+          :proj (let [[_ ad args term] o self (shallow (first args))]
+                  (when (and (not (tvar? self)) (not= :param (first self)))
+                    (let [nv (normalize [:proj ad args])]
+                      (when (not= :proj (first nv)) (let [sn (snapshot)] (when-not (unify nv term) (rollback! sn)))))))
+          nil))
+      (when (and (not= before @*vars*) (< n 8)) (recur (inc n))))))
+
 (defn- fallback!
   "fallback.rs: unresolved integer variables are i32, float variables f64"
   []
@@ -1039,7 +1079,9 @@
                 t)))
           (let [t (erase (c/type-of (:id d)))]
             (binding [*ret* t] (let [x (check-expr (:expr n) t)] (coerce! (:expr n) x t))))))
+      (solve-obligations!)
       (fallback!)
+      (solve-obligations!)
       (mapv (fn [f] (-> f (update :ty print-fact-ty) (update :adj (fn [as] (mapv (fn [[k t]] [k (print-fact-ty t)]) (or as []))))))
             @facts))))
 

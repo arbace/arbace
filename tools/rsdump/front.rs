@@ -183,7 +183,10 @@ fn sty<'tcx>(tcx: TyCtxt<'tcx>, t: rustc_middle::ty::Ty<'tcx>) -> String {
         ty::Ref(r, e, m) => format!("(ref {} {} {})", q(&region_text(r)), m.is_mut(), sty(tcx, e)),
         ty::RawPtr(e, m) => format!("(ptr {} {})", m.is_mut(), sty(tcx, e)),
         ty::Slice(e) => format!("(slice {})", sty(tcx, e)),
-        ty::Array(e, n) => format!("(array {} {})", sty(tcx, e), q(&n.to_string())),
+        ty::Array(e, n) => match n.kind() {
+            ty::ConstKind::Param(p) => format!("(array {} (cparam {} {}))", sty(tcx, e), p.index, q(p.name.as_str())),
+            _ => format!("(array {} {})", sty(tcx, e), q(&n.to_string())),
+        },
         ty::Alias(_, ty::AliasTy { kind: ty::Projection { def_id }, args: aa, .. }) => format!("(projection {} [{}])", q(&def_path(tcx, def_id)), args(aa)),
         // RF9's: opaque types, fn pointers, trait objects
         ty::Alias(_, ty::AliasTy { kind: ty::Opaque { def_id }, args: aa, .. }) => format!("(opaque {} [{}])", q(&def_path(tcx, def_id)), args(aa)),
