@@ -252,13 +252,30 @@
     (some (fn [[n k p]] (when (= n nm) [p k])) (:items (get (:traits c/*si*) tr)))))
 
 (defn- impl-clauses
-  "An impl's own clauses instantiated: [[TRAIT ARGS] ...] (the trait clauses alone)"
+  "An impl's own clauses instantiated: [TRAIT ARGS] for a trait clause, [:proj AD ARGS TERM] for a projection"
   [ip args]
   (if (number? ip)
-    (vec (keep (fn [c] (when (= :trait (first c)) (let [[d as] (second c)] [d (erase (c/subst as args))]))) (c/explicit-clauses ip)))
-    (vec (keep (fn [c] (when (= 'trait (head c)) [(nth c 1) (erase (c/subst (mapv c/sty->ty (nth c 2)) args))])) (:predicates (get (:impls c/*si*) ip))))))
+    (vec (keep (fn [c] (case (first c)
+                         :trait (let [[d as] (second c)] [d (erase (c/subst as args))])
+                         :proj (erase (c/subst c args))
+                         nil))
+               (c/explicit-clauses ip)))
+    (vec (keep (fn [c] (case (head c)
+                         trait [(nth c 1) (erase (c/subst (mapv c/sty->ty (nth c 2)) args))]
+                         proj [:proj (nth c 1) (erase (c/subst (mapv c/sty->ty (nth c 2)) args)) (erase (c/subst (c/sty->ty (nth c 3)) args))]
+                         nil))
+               (:predicates (get (:impls c/*si*) ip))))))
 
-(defn impl-predicates-hold? [ip args] (every? holds? (impl-clauses ip args)))
+(defn impl-predicates-hold?
+  "An impl's clauses: its trait clauses proven, its projection clauses' terms unified with the normalized projections
+  (which binds the impl's parameters that only they determine: Map's B by its closure's output)"
+  [ip args]
+  (every? (fn [c]
+            (if (= :proj (first c))
+              (let [[_ ad as term] c n (normalize [:proj ad as])]
+                (if (= :proj (first n)) true (unify n term)))
+              (holds? c)))
+          (impl-clauses ip args)))
 
 (defn- impls-for
   "The impls (inherent, or of TRAIT) whose self type unifies with T (and the trait's other arguments with TARGS when
@@ -285,14 +302,27 @@
                 (do (rollback! s) nil))))
           cands)))
 
+(defn- callable-output
+  "A closure's, function item's or function pointer's return type (FnOnce::Output's builtin impl)"
+  [self]
+  (case (first self)
+    :closure (:output (nth self 2))
+    :fndef (:output (sig-of self))
+    :fnptr (erase (:output (second self)))
+    nil))
+
 (defn normalize
   "A projection <T as Trait<..>>::Name normalized through the impl that selection finds (its associated type's value),
-  a rigid projection (a parameter's) left as it is"
+  a rigid projection (a parameter's) left as it is; FnOnce::Output of a callable by its signature"
   [t]
   (let [[_ ad args] t
         self (shallow (first args))]
-    (if (or (tvar? self) (= :param (first self)) (nil? self))
+    (cond
+      (or (tvar? self) (= :param (first self)) (nil? self))
       t
+      (and (= "core::ops::function::FnOnce::Output" ad) (#{:closure :fndef :fnptr} (first self)))
+      (or (callable-output self) t)
+      :else
       (let [tr (c/def-parent ad)
             nm (if (number? ad) (second (:data (c/def-of ad))) (c/path-name ad))
             s (snapshot)]
@@ -302,6 +332,7 @@
                     (some (fn [[n k _ v]] (when (= n nm) (erase (c/subst (c/sty->ty v) iargs)))) (:items (get (:impls c/*si*) ip))))]
             (if v (deep v) (do (rollback! s) t)))
           (do (rollback! s) t))))))
+
 
 (defn- deep-normalize [t]
   (let [t (if (vector? t) (deep t) t)]
@@ -325,6 +356,10 @@
     (cond
       (= tr (c/lang "sized")) (not (unsized? self))
       (#{(c/lang "meta_sized") (c/lang "pointee_sized")} tr) true
+      ;; the builtin impls: closures, function items and pointers implement the Fn traits; closures Clone and Copy
+      (and (#{:closure :fndef :fnptr} (first self))
+           (#{"core::ops::function::Fn" "core::ops::function::FnMut" "core::ops::function::FnOnce"
+              "core::clone::Clone" "core::marker::Copy"} tr)) true
       (or (tvar? self) (= :param (first self)) (= [:unknown] self)) true
       ;; a cycle or a chain too deep: not proven (the old solver's overflow is an error, never a success)
       (> (long *depth*) 4) false
