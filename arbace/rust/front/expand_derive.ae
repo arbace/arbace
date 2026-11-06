@@ -48,13 +48,22 @@
 
 (defn- derive-text
   "One derive's impls as text, the fields' types as fragments (frags: an atom of N -> {:frag :ty :ast})"
-  [trait {:keys [kind name tparams ptoks shape variants copy? ord? default-variant]} frags]
+  [trait {:keys [kind name tparams ptoks gparams shape variants copy? ord? default-variant]} frags]
   (let [fr (fn [ty] (let [n (count @frags)] (swap! frags assoc n {:frag :ty :ast ty}) (str "__rf_frag_" n)))
         ;; the type parameters' names are the item's own tokens (generic/mod.rs copies the parameters with their spans)
         tparams (map (fn [nm t] (if t (let [n (count @frags)] (swap! frags assoc n (titem t 0)) (str "__rf_frag_" n)) nm))
                      tparams (concat ptoks (repeat nil)))
-        self-ty (if (seq tparams) (str name "<" (str/join ", " tparams) ">") name)
-        gens (fn [bound] (if (seq tparams) (str "<" (str/join ", " (map #(str % ": " bound) tparams)) ">") ""))
+        tname (zipmap (map :name (filter #(= :type (:k %)) gparams)) tparams)
+        ;; generic/mod.rs's create_derived_impl: lifetimes as written, types bounded by the trait, consts without defaults;
+        ;; the self type's arguments every parameter in order
+        self-ty (if (seq gparams) (str name "<" (str/join ", " (map #(if (= :type (:k %)) (tname (:name %)) (:name %)) gparams)) ">") name)
+        gens (fn [bound] (if (seq gparams)
+                           (str "<" (str/join ", " (map #(case (:k %)
+                                                            :type (str (tname (:name %)) ": " bound)
+                                                            :const (str "const " (:name %) ": " (fr (:ty %)))
+                                                            (:name %))
+                                                        gparams)) ">")
+                           ""))
         head (fn [attrs unsafe? path bound body]
                (str "#[automatically_derived] " attrs (if unsafe? "unsafe " "") "impl" (gens bound) " " path " for " self-ty " {" body "}\n"))
         asserts (fn [path fields-tys]
@@ -225,6 +234,21 @@
               (str "#[inline] fn cmp(&self, other: &" self-ty ") -> $crate::cmp::Ordering { " body " }")))
       (throw (ex-info (str "expand: the derive " trait " is not taken") {:expand true})))))
 
+(defn- const-args
+  "cx.const_ident: a const parameter's name in the self type's arguments is a const argument (an AnonConst of its path),
+  where the text parses a type"
+  [names x]
+  (cond (and (seq? x) (= 'Arg (first x)) (seq? (second x)) (= 'Type (first (second x))))
+        (let [ty (second (second x)) k (fget ty :kind)]
+          (if (and (seq? k) (= 'Path (first k)) (= 'None (second k))
+                   (let [segs (fget (nth k 2) :segments)]
+                     (and (= 1 (count segs)) (= 'None (fget (first segs) :args)) (contains? names (second (fget (first segs) :ident))))))
+            (list 'Arg (list 'Const (list 'AnonConst :value (list 'Expr :kind k :span (fget ty :span) :attrs []))))
+            x))
+        (seq? x) (apply list (map #(const-args names %) x))
+        (vector? x) (mapv #(const-args names %) x)
+        :else x))
+
 (defn- no-colon-spans
   "The builder's generic parameters have no colon span"
   [x]
@@ -314,7 +338,11 @@
                                                               (or (< l (nth gsp 2)) (and (= l (nth gsp 2)) (< c (nth gsp 3)))))))
                                           (take (dec (alength toks)) toks))]
                       (for [nm tparams] (first (filter #(= nm (.-sym ^Tok %)) in-gens)))))
-            info {:kind (if (= 'Struct kw) :struct :enum) :name (second idf) :tparams tparams :ptoks ptoks
+            gparams (vec (for [p (fget gens :params) :let [pk (fget p :kind)]]
+                           (cond (and (seq? pk) (= 'Type (first pk))) {:k :type :name (second (fget p :ident))}
+                                 (and (seq? pk) (= 'Const (first pk))) {:k :const :name (second (fget p :ident)) :ty (fget pk :ty)}
+                                 :else {:k :lifetime :name (second (fget p :ident))})))
+            info {:kind (if (= 'Struct kw) :struct :enum) :name (second idf) :tparams tparams :ptoks ptoks :gparams gparams
                   :shape (when (= 'Struct kw) (variant-shape data))
                   :variants (when (= 'Enum kw) (mapv (fn [v] [(second (fget v :ident)) (variant-shape (fget v :data))]) (fget data :variants)))
                   :default-variant (when (= 'Enum kw)
@@ -329,6 +357,7 @@
                                          text (derive-text trait info frags)
                                          tsp (get spans trait)]
                                      (map (comp (fn [d] (impl-bounds d gens))
+                                                (fn [d] (let [cs (set (map :name (filter #(= :const (:k %)) gparams)))] (if (seq cs) (const-args cs d) d)))
                                                 ;; the impl's span is the derive's path's, at the expansion's context
                                                 (fn [d] (if (vector? tsp) (fset d :span (conj (vec (take 4 tsp)) m)) d))
                                                 (fn [d] (if (= trait "Default") (default-path-span d info it) d))

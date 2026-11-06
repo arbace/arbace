@@ -156,6 +156,7 @@
 (def ^:dynamic *res* {})
 
 (defn- def-of [id] (nth @*defs* id))
+(defn- def-parent [d] (if (number? d) (:parent (def-of d)) (path-parent d)))
 
 (defn- add-def! [m]
   (let [id (count @*defs*)
@@ -324,7 +325,8 @@
                :when (not (contains? in-where (:name p)))]
            (:name p)))))
 
-(defn- param-name [p] (if (:synthetic p) (hp/synthetic-name (:synthetic p)) (:name p)))
+(defn- synthetic-name [bounds] (hp/synthetic-name bounds))
+(defn- param-name [p] (if (:synthetic p) (synthetic-name (:synthetic p)) (:name p)))
 
 (def ^:private has-parent-kinds
   #{"AssocFn" "AssocTy" "AssocConst { is_type_const: false }" "Variant" "Field" "Closure"})
@@ -400,13 +402,24 @@
 (defn- scope-lifetime [nm]
   (some (fn [g] (some #(when (and (= nm (:name %)) (= :lifetime (:kind %))) %) (all-params g))) *scope*))
 
+(def ^:dynamic *for-names* #{})      ; the lifetimes a `for<...>` binder in scope declares
+(def ^:dynamic *binder-counter* nil) ; atom: the anonymous bound variables of the binder being lowered (Fn sugar's elided lifetimes)
+
+(defn- elided-region []
+  (case *elided*
+    :anon [:re-bound nil]
+    :static [:re-static]
+    :binder [:re-bound nil (swap! *binder-counter* inc)]
+    [:re-erased]))
+
 (defn- lower-region [nm]
   (cond (= "'static" nm) [:re-static]
-        (or (nil? nm) (= "'_" nm)) (case *elided* :anon [:re-bound nil] :static [:re-static] [:re-erased])
+        (or (nil? nm) (= "'_" nm)) (elided-region)
+        (contains? *for-names* nm) [:re-bound nm :for]
         (contains? *late* nm) [:re-bound nm]
         :else (if-let [p (scope-lifetime nm)] [:re-early (:index p) nm] [:re-bound nm])))
 
-(declare lower-ty lower-trait-ref assoc-in-trait implicit-sizedness lower-bounds)
+(declare lower-ty lower-trait-ref assoc-in-trait implicit-sizedness lower-bounds ast-param-names)
 
 (defn- local-def-at [sp kind-pred]
   (or (get @*by-span* sp)
@@ -464,7 +477,7 @@
               :else nil))
       [:unresolved (str r)])))
 
-(defn- elided-default [] (case *elided* :anon [:re-bound nil] :static [:re-static] [:re-erased]))
+(defn- elided-default [] (elided-region))
 
 (defn- lower-const-arg [x]
   ;; a const argument: a literal's value, a const parameter, else its text
@@ -541,15 +554,18 @@
         nm (:ident (peek segs))
         base (res-def {:res base-res :segs [(first segs)]})]
     (when (= 2 (count segs))
-      (case (first base)
-        :self-param (some-> (assoc-in-trait [(:def (first (filter :has-self *scope*))) [[:param 0 "Self"]]] nm) (#(vector :proj (first %) (second %))))
+      (some-> (case (first base)
+        :self-param (let [tg (first (filter :has-self *scope*))]
+                      (some-> (assoc-in-trait [(:def tg) (identity-args tg)] nm) (#(vector :proj (first %) (second %)))))
         :param (some-> (trait-bounds-defining (second base) nm) (#(vector :proj (first %) (second %))))
         :self-alias (let [impl-g (first (filter #(str/starts-with? (str (:kind (def-of (:def %)))) "Impl") *scope*))
                           impl (some-> impl-g :def def-of :node)]
                       (when-let [ot (:of-trait impl)]
                         (let [tr (lower-trait-ref (:path ot) *self-ty*)]
                           (some-> (assoc-in-trait tr nm) (#(vector :proj (first %) (second %)))))))
-        nil))))
+        nil)
+        ;; a generic associated type's own arguments after the trait's
+        (#(let [[_ ad args] %] [:proj ad (lower-generic-args ad (:args (peek segs)) nil args)]))))))
 
 (defn- lower-path-ty [t]
   (let [path (:path t)
@@ -586,7 +602,10 @@
 (defn- lower-dyn [t]
   (let [traits (filter :trait (:bounds t))
         self-dummy [:param -1 "Self"]
-        lowered (for [b traits] {:path (:trait b) :tr (lower-trait-ref (:trait b) self-dummy :with-constraints)})
+        lowered (vec (for [b traits]
+                       {:path (:trait b)
+                        :tr (binding [*for-names* (into *for-names* (ast-param-names (:bound-params b))) *binder-counter* (atom 0)]
+                              (lower-trait-ref (:trait b) self-dummy))}))
         auto? (fn [{:keys [tr]}] (let [d (first tr)] (if (number? d) (:auto (:node (def-of d))) (:auto (get (:traits *std*) d)))))
         principal (first (remove auto? lowered))
         autos (filter auto? lowered)]
@@ -601,9 +620,28 @@
     :qpath (let [segs (:segs (:path t)) pos (or (:position t) 0)
                  qself (lower-ty (:qself t))]
              (if (and (pos? pos) (= (inc pos) (count segs)))
-               (let [tr (lower-trait-ref {:segs (subvec segs 0 pos) :res (:res (:path t)) :span (:span (:path t))} qself)
+               (let [r (first (:res (:path t)))
+                     assoc-def (case (head r)
+                                 def (when (= "AssocTy" (second r)) (nth r 2))
+                                 local-def (when (= "AssocTy" (second r)) (get @*by-span* (nth r 2)))
+                                 nil)]
+                 (if assoc-def
+                   ;; resolved to the associated type: its trait's arguments from the trait's segment
+                   (let [trait-def (def-parent assoc-def)
+                         targs (lower-generic-args trait-def (:args (nth segs (dec pos))) qself)]
+                     [:proj assoc-def (lower-generic-args assoc-def (:args (peek segs)) nil targs)])
+               (let [sp (:span (:path t))
+                     ;; the trait part's resolution: the trait path's own span lies inside the qualified path's
+                     tres (or (:res (:path t))
+                              (when (vector? sp)
+                                (some (fn [[k rs]] (when (and (vector? k) (= 4 (count k)) (>= (compare [(k 0) (k 1)] [(sp 0) (sp 1)]) 0)
+                                                             (<= (compare [(k 2) (k 3)] [(sp 2) (sp 3)]) 0)
+                                                             (some #(and (#{'def 'local-def} (head %)) (= "Trait" (second %))) rs))
+                                                    rs))
+                                      (sort-by key *res*))))
+                     tr (lower-trait-ref {:segs (subvec segs 0 pos) :res tres :span sp} qself)
                      found (when tr (assoc-in-trait tr (:ident (peek segs))))]
-                 (if found [:proj (first found) (second found)] [:err "qpath"]))
+                 (if found [:proj (first found) (second found)] [:err "qpath"]))))
                [:err "qpath"]))
     :ref (let [r (lower-region (:lifetime t))]
            [:ref r (:mutbl (:mt t)) (binding [*object-default* r] (lower-ty (:ty (:mt t))))])
@@ -616,11 +654,13 @@
     :dyn (lower-dyn t)
     :impl (let [self [:param -2 "impl"]]
             [:opaque (into (implicit-sizedness self (:bounds t) false) (lower-bounds self (:bounds t)))])
-    :impl-param (let [nm (hp/synthetic-name (:bounds t)) p (scope-param nm)] (if p [:param (:index p) nm] [:err nm]))
+    :impl-param (let [nm (synthetic-name (:bounds t)) p (scope-param nm)] (if p [:param (:index p) nm] [:err nm]))
     :fnptr [:fnptr {:inputs (binding [*elided* :anon *late* #{}] (mapv lower-ty (:inputs t)))
                     :output (binding [*elided* :anon] (if (:output t) (lower-ty (:output t)) unit))
                     :safety (when (and (seq? (:safety t)) (= 'Unsafe (first (:safety t)))) :unsafe)
-                    :abi (let [x (:ext t)] (cond (= 'Implicit (head x)) "C" (= 'Explicit (head x)) (str (second x)) (= 'Implicit x) "C" :else nil))}]
+                    :abi (let [x (:ext t)] (cond (= 'Implicit (head x)) "C"
+                                                 (= 'Explicit (head x)) (let [l (second x)] (str (second (drop-while #(not= :symbol_unescaped %) l))))
+                                                 (= 'Implicit x) "C" :else nil))}]
     [:err (str "ty " (:kind t))]))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -643,9 +683,10 @@
     (let [seg (peek (:segs path))
           ga (:args seg)]
       (if (:paren ga)
-        (let [args [self-ty [:tuple (binding [*object-default* nil] (mapv lower-ty (:inputs ga)))]]
+        (let [args [self-ty [:tuple (binding [*object-default* nil *elided* :binder *binder-counter* (or *binder-counter* (atom 0))]
+                                      (mapv lower-ty (:inputs ga)))]]
               tr [d args]
-              out (if (:output ga) (lower-ty (:output ga)) unit)
+              out (if (:output ga) (binding [*elided* :erased] (lower-ty (:output ga))) unit)
               found (assoc-in-trait tr "Output")]
           (with-meta tr {:constraints (if found [[(first found) (second found) out]] [])}))
         (let [args (lower-generic-args d ga self-ty)
@@ -689,7 +730,7 @@
 
 (def ^:dynamic *in-value* false)
 
-(declare print-ty print-def-path print-arg)
+(declare print-ty print-def-path print-arg name-binder)
 
 (defn- print-region [r]
   (case (first r)
@@ -763,7 +804,6 @@
     :tuple (some characteristic-def (second t))
     nil))
 
-(defn- def-parent [d] (if (number? d) (:parent (def-of d)) (path-parent d)))
 
 (declare impl-header)
 
@@ -836,13 +876,14 @@
 
 (defn- fn-trait? [d] (contains? #{(lang "fn") (lang "fn_mut") (lang "fn_once")} d))
 
-(defn- print-dyn [{:keys [principal projections autos]} r]
-  (let [print-r (print-optional-region? r)
+(defn- print-dyn [data r]
+  (let [[pre {:keys [principal projections autos]}] (name-binder (select-keys data [:principal :projections :autos]))
+        print-r (print-optional-region? r)
         body (str/join " + "
                        (concat
                         (when principal
                           (let [[d args] principal
-                                pre (print-def-path d [])]
+                                pre (str pre (print-def-path d []))]
                             [(if (and (fn-trait? d) (= :tuple (first (first args))) (= 1 (count projections)))
                                (str pre (print-fn-sig-tail (second (first args)) (nth (first projections) 2)))
                                (let [g (generics-any d)
@@ -920,7 +961,47 @@
     (str (path-name d) "(" (str/join ", " (map print-ty (second (nth args 1)))) ")")
     (print-def-path d args)))
 
-(defn- print-clause [c]
+(defn- binder-regions
+  "The regions an inner binder binds ([:re-bound NAME TAG]), in order of first appearance"
+  [x]
+  (let [acc (java.util.LinkedHashSet.)]
+    (letfn [(walk [x] (cond (and (vector? x) (= :re-bound (first x)) (= 3 (count x))) (.add acc x)
+                            (vector? x) (doseq [y x] (walk y))
+                            (map? x) (doseq [y (vals x)] (walk y))
+                            :else nil))]
+      (walk x))
+    (vec acc)))
+
+(defn- region-names [x]
+  (let [acc (java.util.HashSet.)]
+    (letfn [(walk [x] (cond (and (vector? x) (#{:re-bound :re-early} (first x))) (when-let [n (if (= :re-early (first x)) (nth x 2) (second x))] (.add acc n))
+                            (vector? x) (doseq [y x] (walk y))
+                            (map? x) (doseq [y (vals x)] (walk y))
+                            :else nil))]
+      (walk x))
+    (set acc)))
+
+(defn- name-binder
+  "pretty_print_in_binder's naming (name_all_regions): the binder's anonymous regions named 'a, 'b, ... past the names
+  in use; the value renamed and its `for<...> ` prefix"
+  [x]
+  (let [vars (binder-regions x)]
+    (if (empty? vars)
+      ["" x]
+      (let [used (atom (region-names x))
+            fresh (fn [] (let [n (first (remove @used (map #(str "'" (char (+ 97 %))) (range 26))))] (swap! used conj n) n))
+            names (into {} (for [v vars] [v (or (second v) (fresh))]))
+            ren (fn ren [y] (cond (and (vector? y) (contains? names y)) [:re-bound (names y)]
+                                  (and (vector? y) (keyword? (first y))) (into [(first y)] (map ren (rest y)))
+                                  (vector? y) (mapv ren y)
+                                  (map? y) (into {} (for [[k v] y] [k (ren v)]))
+                                  :else y))]
+        [(str "for<" (str/join ", " (map names vars)) "> ") (ren x)]))))
+
+(declare print-clause*)
+(defn- print-clause [c] (let [[pre c] (name-binder c)] (str pre (print-clause* c))))
+
+(defn- print-clause* [c]
   (case (first c)
     :trait (str (print-ty (first (second (second c)))) ": " (print-trait-sugared (second c)))
     :proj (let [[_ ad args term] c] (str (print-def-path ad args) " == " (print-arg term)))
@@ -975,14 +1056,7 @@
     (in-def id
       (binding [*late* (:late (generics-of id)) *elided* :anon]
         (let [self-ty (or *self-ty* [:param 0 "Self"])
-              inputs (vec (for [[i p] (map-indexed vector (:params f))]
-                            (if (and (zero? i) (:self f))
-                              (case (:self f)
-                                (:imm :mut) (if (= :path (:kind (:ty p))) (lower-ty (:ty p)) self-ty)
-                                :ref-imm [:ref [:re-bound nil] false self-ty]
-                                :ref-mut [:ref [:re-bound nil] true self-ty]
-                                (lower-ty (:ty p)))
-                              (lower-ty (:ty p)))))]
+              inputs (vec (for [p (:params f)] (lower-ty (:ty p))))]
           {:inputs inputs
            :output (if (:output f) (lower-ty (:output f)) unit)
            :safety (:safety (:header f))
@@ -1024,15 +1098,19 @@
           trait? [[:trait [(lang "meta_sized") [self-ty]]]]
           :else [[:trait [(lang "sized") [self-ty]]]])))
 
+(defn- ast-param-names [ps]
+  (set (keep (fn [p] (when (seq? p) (let [i (second (drop-while #(not= :ident %) p))] (when (seq? i) (second i))))) ps)))
+
 (defn- lower-bounds
   "lower_bounds: each written bound of SELF-TY as clauses (a trait bound, then its constraints' projections; ?Trait and
-  PointeeSized bounds none; an outlives bound)"
+  PointeeSized bounds none; an outlives bound); a bound's `for<...>` lifetimes and Fn sugar's elided ones bound by it"
   [self-ty bounds]
   (vec (mapcat (fn [b]
                  (cond
                    (:lifetime b) [[:type-outlives self-ty (lower-region (:lifetime b))]]
                    (:trait b)
-                   (let [tr (lower-trait-ref (:trait b) self-ty)]
+                   (let [tr (binding [*for-names* (into *for-names* (ast-param-names (:bound-params b))) *binder-counter* (atom 0)]
+                              (lower-trait-ref (:trait b) self-ty))]
                      (cond (nil? tr) [[:err (str "bound " (pr-str (mapv :ident (:segs (:trait b)))))]]
                            (= 'Maybe (head (:polarity b))) []
                            (= (first tr) (lang "pointee_sized")) []
@@ -1102,7 +1180,8 @@
                              (cond
                                (:param-ty pr) (let [p (some #(when (= (:param-ty pr) (:hir %)) %) (:params own))]
                                                 (lower-bounds [:param (:index p) (:name p)] (:bounds pr)))
-                               (:ty pr) (lower-bounds (lower-ty (:ty pr)) (:bounds pr))
+                               (:ty pr) (binding [*for-names* (ast-param-names (:bound-params pr))]
+                                          (lower-bounds (lower-ty (:ty pr)) (:bounds pr)))
                                (:lifetime pr) (for [b (:bounds pr) :when (:lifetime b)] [:region-outlives (lower-region (:lifetime pr)) (lower-region (:lifetime b))])
                                :else []))
               clauses (vec (concat trait-clauses (apply concat param-clauses) (apply concat pred-clauses)))]

@@ -250,12 +250,22 @@
           (when-let [t (:eq (:kind c))] (ws "=") (print-type t)))
         (when-not @empty (w ">"))))))
 
+(defn- print-poly-prefix
+  "print_formal_generic_params: `for<...>` before a poly trait ref with bound parameters (the elided ones, Fn sugar's
+  fresh lifetimes, not listed)"
+  [b]
+  (when (or (seq (:bound-names b)) (:fresh-params b))
+    (w "for")
+    (when (seq (:bound-names b)) (w "<") (w (str/join ", " (:bound-names b))) (w ">"))
+    (nbsp)))
+
 (defn- print-bounds [prefix bounds]
   (doseq [[i b] (map-indexed vector bounds)]
     (when (zero? i) (w prefix))
     (when-not (and (zero? i) (empty? prefix)) (nbsp))
     (when (pos? i) (ws "+"))
     (cond (:trait b) (do (when (= 'Maybe (head-of (:polarity b))) (w "?"))
+                         (print-poly-prefix b)
                          (print-path (:trait b) false))
           (:lifetime b) (w (:lifetime b)))))
 
@@ -267,10 +277,21 @@
 
 (declare print-fn)
 
+(defn- strip-unwritten
+  "A HIR type as the source wrote it: the lifetimes lowering made for elided ones taken out"
+  [x]
+  (cond (map? x) (let [x (if (and (= :ref (:kind x)) (:unwritten x)) (assoc x :lifetime nil) x)
+                       x (if (and (:args x) (vector? (:args x))) (update x :args (fn [as] (vec (remove :unwritten as)))) x)
+                       x (dissoc x :fresh-params :bound-names)]
+                   (into {} (for [[k v] x] [k (strip-unwritten v)])))
+        (vector? x) (mapv strip-unwritten x)
+        :else x))
+
 (defn synthetic-name
-  "An impl Trait argument's synthetic parameter: its name is the type's text, one word"
+  "An impl Trait argument's synthetic parameter: its name is the AST type's text (no lifetimes for elided ones), one word"
   [bounds]
-  (let [p (pp/printer)]
+  (let [bounds (strip-unwritten bounds)
+        p (pp/printer)]
     (binding [*p* p *comments* (atom nil)]
       (print-bounds "impl" bounds)
       (pp/eof p))))
@@ -294,13 +315,13 @@
     :dyn (do (when-not (= 'None (:syntax t)) (wn "dyn"))
              (doseq [[i b] (map-indexed vector (:bounds t))]
                (when (pos? i) (nbsp) (ws "+"))
-               (if (:trait b) (print-path (:trait b) false) (w (:lifetime b)))))
+               (if (:trait b) (do (print-poly-prefix b) (print-path (:trait b) false)) (w (:lifetime b)))))
     :impl (w "/*impl Trait*/")
     :impl-param (w (synthetic-name (:bounds t)))
     :array (do (w "[") (print-type (:ty t)) (w "; ") (print-expr (:len t)) (w "]"))
     :infer (w "_")
     :fnptr (do (ibox indent-unit)
-               (print-fn {:header {:safety (when (and (seq? (:safety t)) (= 'Unsafe (first (:safety t)))) :unsafe)}
+               (print-fn {:header {:safety (when (and (seq? (:safety t)) (= 'Unsafe (first (:safety t)))) :unsafe) :abi (:abi t)}
                           :params (mapv (fn [ty n] {:ty ty :name n}) (:inputs t) (:arg-names t))
                           :output (:output t) :generics {:params [] :where []}} nil :ty)
                (end))

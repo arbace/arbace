@@ -227,7 +227,7 @@
           n (cond dp (get *std-lts* dp 0)
                   (contains? *lt-types* seg-name) 1
                   :else 0)]
-      (vec (repeat n {:lifetime "'_" :fresh true})))))
+      (vec (repeat n {:lifetime "'_" :fresh true :unwritten true})))))
 
 (defn- lower-generic-args [ga seg-name]
   (cond
@@ -253,7 +253,7 @@
       {:args args :constraints cons})
     (= 'Parenthesized (head ga))
     (let [a (second ga)]
-      {:paren true :inputs (mapv #(lower-ty (if (= 'Param (head %)) (fv % :ty) %)) (fv a :inputs))
+      {:paren true :inputs (binding [*sig* true] (mapv #(lower-ty (if (= 'Param (head %)) (fv % :ty) %)) (fv a :inputs)))
        :output (let [o (fv a :output)] (if (= 'Ty (head o)) (lower-ty (second o)) {:node :ty :kind :tup :elts []}))})
     :else nil))
 
@@ -262,9 +262,15 @@
 (defn- lower-bound [b]
   (case (head b)
     Trait (let [p (second b)]
-            {:trait (lower-path (fv (fv p :trait_ref) :path))
-             :polarity (fv (fv p :modifiers) :polarity)
-             :bound-params (vec (fv p :bound_generic_params))})
+            (let [path (lower-path (fv (fv p :trait_ref) :path))
+                  ga (:args (peek (:segs path)))]
+              {:trait path
+               :polarity (fv (fv p :modifiers) :polarity)
+               :bound-params (vec (fv p :bound_generic_params))
+               :bound-names (vec (keep #(id-name (fv % :ident)) (fv p :bound_generic_params)))
+               ;; Fn sugar's elided input lifetimes are the poly trait ref's fresh late-bound parameters
+               :fresh-params (boolean (and (:paren ga) (some #(or (:unwritten %) (:fresh %))
+                                                             (tree-seq coll? (fn [x] (if (map? x) (vals x) x)) (:inputs ga)))))}))
     Outlives {:lifetime (second (second b))}
     {:other true}))
 
@@ -287,7 +293,7 @@
           Ref (let [[_ lt mt] k
                     l (some-val lt)
                     lname (when l (if (= 'lifetime (head l)) (second l) (second (fv l :ident))))]
-                {:kind :ref :lifetime (cond lname lname *sig* "'_" :else nil) :mt (lower-mt mt)})
+                {:kind :ref :lifetime (cond lname lname *sig* "'_" :else nil) :unwritten (nil? lname) :mt (lower-mt mt)})
           PinnedRef {:kind :err}
           Ptr {:kind :ptr :mt (lower-mt (second k))}
           Slice {:kind :slice :ty (lower-ty (second k))}
@@ -298,6 +304,11 @@
           ImplTrait {:kind :impl :bounds (mapv lower-bound (second k))}
           FnPtr (let [f (second k) d (fv f :decl)]
                   {:kind :fnptr :safety (fv f :safety) :ext (fv f :ext)
+                   :abi (let [x (fv f :ext)]
+                          (cond (= 'Implicit (head x)) "C"
+                                (= 'Explicit (head x)) (fv (second x) :symbol_unescaped)
+                                (= 'Implicit x) "C"
+                                :else nil))
                    :inputs (mapv #(lower-ty (fv % :ty)) (fv d :inputs))
                    :arg-names (mapv #(let [p (fv % :pat)] (when (= 'Ident (head (fv p :kind))) (id-name (nth (fv p :kind) 2)))) (fv d :inputs))
                    :output (let [o (fv d :output)] (when (= 'Ty (head o)) (lower-ty (second o))))})
