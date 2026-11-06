@@ -5,15 +5,19 @@
  * here as jrt's PkiAccess and ZipAccess keep theirs (jrt has no SharedSecrets). InetAddress's
  * variant (overlay/jdk/variants/InetAddressAccess.ae) sets it in its static initializer;
  * SSLSocketImpl's variant reads it (useImplicitHost: the host name an unconnected socket was
- * connected to, for the server name indication and the endpoint identification).
+ * connected to, for the server name indication and the endpoint identification). Since F12
+ * ("As built: F12 (write-ahead)") also java.net.HttpCookie's (JavaNetHttpCookieAccess: a header's
+ * cookies parsed, a cookie's header string), which HttpCookie's variant (HttpCookieAccess.ae) sets in
+ * its static initializer and the http: handler's connection's (HttpURLConnectionCookies.ae) reads.
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
 
 import java.net.InetAddress;
+import jdk.internal.access.JavaNetHttpCookieAccess;
 import jdk.internal.access.JavaNetInetAddressAccess;
 
-/** InetAddress's access object. */
+/** InetAddress's and HttpCookie's access objects. */
 public final class NetAccess {
     private static JavaNetInetAddressAccess javaNetInetAddressAccess;
 
@@ -32,6 +36,27 @@ public final class NetAccess {
             // InetAddress's static initializer sets it
             InetAddress.getLoopbackAddress();
             access = javaNetInetAddressAccess;
+        }
+        return access;
+    }
+
+    private static JavaNetHttpCookieAccess javaNetHttpCookieAccess;
+
+    /** Set by HttpCookie's static initializer (F12). */
+    public static void setJavaNetHttpCookieAccess(JavaNetHttpCookieAccess access) {
+        javaNetHttpCookieAccess = access;
+    }
+
+    /** HttpCookie's access object, HttpCookie initialized first, as SharedSecrets ensures it. */
+    public static JavaNetHttpCookieAccess getJavaNetHttpCookieAccess() {
+        JavaNetHttpCookieAccess access = javaNetHttpCookieAccess;
+        if (access == null) {
+            try {
+                Class.forName("java.net.HttpCookie");
+            } catch (ClassNotFoundException e) {
+                throw new InternalError(e);
+            }
+            access = javaNetHttpCookieAccess;
         }
         return access;
     }
