@@ -12,6 +12,7 @@
   (:require [arbace.cpp.abi :as abi]
             [arbace.cpp.sema :as sema]
             [arbace.cpp.template]
+            [arbace.cpp.inline :as inl]
             [arbace.repr.cpp.native :as native]
             [arbace.repr.cpp.parse :as ps]
             [arbace.repr.llvm :as llvm]
@@ -295,7 +296,7 @@
       :decay (recur (:e e))
       e)))
 
-(declare emit-rv emit-lv emit-into emit-init call-dtor! eh-typeinfo!)
+(declare emit-rv emit-lv emit-into emit-init call-dtor! eh-typeinfo! dealloc-call!)
 
 (defn- nontrivial-dtor? [cid] (and cid (not (sema/trivial-dtor? cid))))
 
@@ -373,8 +374,10 @@
 (defn- run-cleanup-eh! [c]
   (cond
     (:eh-only c) (call-dtor! (:cls c) (:addr c) (:vtt c))
-    (:delete c) (do (declare! "_ZdlPvm" 'void '[ptr i64] :nounwind true)
-                    (emit! (list 'call 'void (gsym "_ZdlPvm") [['ptr (:delete c)] ['i64 (:size c)]] :attrs [:nounwind])))
+    (:delete c) (if (:dealloc c)
+                  (dealloc-call! (:dealloc c) (:delete c) (:size c) (:align c) (:places c))
+                  (do (declare! "_ZdlPvm" 'void '[ptr i64] :nounwind true)
+                      (emit! (list 'call 'void (gsym "_ZdlPvm") [['ptr (:delete c)] ['i64 (:size c)]] :attrs [:nounwind]))))
     :else (run-cleanup! c)))
 
 (defn- clang-call-terminate! []
@@ -731,7 +734,17 @@
     (binding [*extend-now* (or *extend-now* (identical? e *extend-root*))] (push-temp-cleanup! (:id (abi/unq (:ty e))) t))
     t))
 
+(declare folds-to short-circuit-branches! cond-branches2!)
+
 (defn- short-circuit! [e]
+  ;; a left operand that folds (ScalarExprEmitter::VisitBinLAnd, VisitBinLOr): the right one alone, or a constant
+  (let [k (folds-to (:l e)) land (= :land (:op e))]
+    (cond
+      (nil? k) (short-circuit-branches! e)
+      (= k land) (emit-rv (:r e))
+      :else (not land))))
+
+(defn- short-circuit-branches! [e]
   (let [land (= :land (:op e))
         rhs (new-label (if land "land.rhs" "lor.rhs")) end (new-label (if land "land.end" "lor.end"))
         a (emit-rv (:l e))
@@ -743,8 +756,14 @@
       (val! (list 'phi 'i1 [(not land) from] [b from2])))))
 
 (defn- cond-branches!
-  "A conditional operator: the operands' values from each branch (by `f`), joined by a phi of type `t` (nil: no value)."
+  "A conditional operator: the operands' values from each branch (by `f`), joined by a phi of type `t` (nil: no value);
+  a condition that folds: the live operand alone (ScalarExprEmitter::VisitAbstractConditionalOperator)."
   [e f t]
+  (if-some [k (folds-to (:c e))]
+    (f (if k (:then e) (:else e)))
+    (cond-branches2! e f t)))
+
+(defn- cond-branches2! [e f t]
   (let [lt (new-label "cond.true") lf (new-label "cond.false") le (new-label "cond.end")
         c (emit-rv (:c e))]
     (condbr! c lt lf)
@@ -764,6 +783,40 @@
              :else (arith! (if (= "++" (:o e)) "+" "-") (abi/underlying t) old 1))]
     (store! t nv a)
     (if (:post e) old a)))
+
+(declare emit-rv)
+
+(defn- place-values
+  "The placement arguments' operands for the parameters `ps` (scalars, pointers and references: an allocation
+  function's placement parameters)."
+  [ps inits]
+  (doseq [p ps] (when (abi/class? (abi/unq p)) (fail :new "a class placement argument by value")))
+  (arg-values ps inits))
+
+(defn- alloc-call!
+  "The call of the allocation function `a` (arbace.cpp.sema's choice) for `size` bytes: its result's operand and the
+  placement arguments' operands (for the matching deallocation function)."
+  [a size]
+  (if-let [fid (:fn a)]
+    (let [f (sema/fnd fid) ps (vec (:ps (:ty f))) k (if (:align a) 2 1)
+          places (place-values (subvec ps k) (:places a))
+          args (vec (concat [['i64 size]] (when (:align a) [['i64 (:align a)]]) places))
+          r (call-insn! 'ptr (if (:va (:ty f)) (list 'fn 'ptr (conj (vec (repeat (count ps) 'ptr)) '&)) 'ptr) (want-fn! fid) args (nothrow-fn? f))]
+      [r places])
+    (let [nm (:sym a) ps (if (:align a) '[i64 i64] '[i64])]
+      (declare! nm 'ptr ps)
+      [(call-insn! 'ptr 'ptr (gsym nm) (vec (concat [['i64 size]] (when (:align a) [['i64 (:align a)]]))) false) []])))
+
+(defn- dealloc-call!
+  "The call of the deallocation function `d` on `p` (`size` and `align` operands when it takes them, the placement
+  arguments' operands for a placement one)."
+  [d p size align places]
+  (let [args (vec (concat [['ptr p]] (when (:size d) [['i64 size]]) (when (:align d) [['i64 align]]) (when (:place d) places)))]
+    (if-let [fid (:fn d)]
+      (call-insn! 'void 'void (want-fn! fid) args (nothrow-fn? (sema/fnd fid)))
+      (let [nm (:sym d)]
+        (declare! nm 'void (mapv first args) :nounwind true)
+        (emit! (list 'call 'void (gsym nm) args :attrs [:nounwind]))))))
 
 (defn emit-rv
   "The operand of the scalar prvalue `e`."
@@ -843,12 +896,13 @@
              (:placement e) (let [p (emit-rv (:placement e))] (emit-init p et (:init e)) p)
              (:n e)
              (let [n (emit-rv (:n e))
-                   cookie (nontrivial-dtor? cid)
+                   cookie (if (contains? e :cookie) (:cookie e) (nontrivial-dtor? cid))
+                   ;; the cookie's size (Itanium §2.7: max(sizeof(size_t), alignof(T)))
+                   csz (max 8 (long (abi/align-of et)))
                    bytes (val! (list 'mul 'i64 n sz))
-                   bytes (if cookie (val! (list 'add 'i64 bytes 8)) bytes)
-                   _ (declare! "_Znam" 'ptr '[i64])
-                   raw (call-insn! 'ptr 'ptr (gsym "_Znam") [['i64 bytes]] false)
-                   p (if cookie (do (emit! (list 'store ['i64 n] ['ptr raw] :align 8)) (offset! raw 8)) raw)
+                   bytes (if cookie (val! (list 'add 'i64 bytes csz)) bytes)
+                   [raw _] (alloc-call! (or (:alloc e) {:sym "_Znam" :places []}) bytes)
+                   p (if cookie (do (emit! (list 'store ['i64 n] ['ptr (offset! raw (- csz 8))] :align 8)) (offset! raw csz)) raw)
                    init (:init e)]
                ;; the elements: the list's, then the rest default-initialized (a loop)
                (let [items (when (= :list (:i init)) (:items init))
@@ -868,10 +922,14 @@
                        (begin! le)))))
                p)
              :else
-             (do (declare! "_Znwm" 'ptr '[i64])
-                 (let [p (call-insn! 'ptr 'ptr (gsym "_Znwm") [['i64 sz]] false)
-                       d (count (:cleanups @*f*))]
-                   (when (#{:ctor :expr} (:i (:init e))) (swap! *f* update :cleanups conj {:delete p :size sz}))
+             (let [[p places] (alloc-call! (or (:alloc e) {:sym "_Znwm" :places []}) sz)
+                   d (count (:cleanups @*f*))]
+               ;; the storage freed when the initialization throws, by the matching deallocation function ([expr.new]/26)
+               (do
+                   (when (and (#{:ctor :expr :list} (:i (:init e))) (or (:dealloc e) (nil? (:alloc e))))
+                     (swap! *f* update :cleanups conj (if (:dealloc e)
+                                                        {:delete p :size sz :dealloc (:dealloc e) :align (abi/align-of et) :places places}
+                                                        {:delete p :size sz})))
                    (emit-init p et (:init e))
                    (swap! *f* update :cleanups #(subvec % 0 d))
                    p))))
@@ -907,6 +965,31 @@
               (condbr! isnull lend lnn)
               (begin! lnn)
               (cond
+                (and (:array e) (:dealloc e))
+                ;; a cookie when the destructor is not trivial or operator delete[] takes the size (Itanium §2.7)
+                (if (:cookie e)
+                  (let [csz (max 8 (long (abi/align-of et)))
+                        raw (offset! p (- csz))
+                        n (val! (list 'load 'i64 ['ptr (offset! p -8)] :align 8))
+                        sz (abi/size-of et)]
+                    (when (nontrivial-dtor? cid)
+                      (let [lc (new-label "delete.loop") lb (new-label "delete.body") ld (new-label "delete.free")
+                            ix (alloca! 'i64 8)]
+                        (emit! (list 'store ['i64 n] ['ptr ix] :align 8))
+                        (begin! lc)
+                        (let [i (val! (list 'load 'i64 ['ptr ix] :align 8)) c (val! (list 'icmp :eq 'i64 i 0))]
+                          (condbr! c ld lb)
+                          (begin! lb)
+                          (let [j (val! (list 'sub 'i64 i 1))]
+                            (emit! (list 'store ['i64 j] ['ptr ix] :align 8))
+                            (call-dtor! cid (val! (list 'getelementptr :inbounds (elem-type et) ['ptr p] ['i64 j])))
+                            (br! lc)))
+                        (begin! ld)))
+                    (dealloc-call! (:dealloc e) raw (val! (list 'add 'i64 (val! (list 'mul 'i64 sz n)) csz)) (abi/align-of et) []))
+                  (dealloc-call! (:dealloc e) p (abi/size-of et) (abi/align-of et) []))
+                (and (:dealloc e) (not (and cid (:dtor (abi/cls cid)) (:virtual (sema/fnd (:dtor (abi/cls cid))))  (not (:global e)))))
+                (do (call-dtor! cid p)
+                    (dealloc-call! (:dealloc e) p (abi/size-of et) (abi/align-of et) []))
                 (:array e)
                 (if (nontrivial-dtor? cid)
                   (let [raw (offset! p -8)
@@ -1069,7 +1152,7 @@
   (doseq [c (reverse (subvec (:cleanups @*f*) depth))] (run-cleanup! c)))
 (defn- pop-to! [^long depth] (unwind-to! depth) (swap! *f* update :cleanups #(subvec % 0 depth)))
 
-(declare emit-stmt emit-d0! emit-try!)
+(declare emit-stmt emit-d0! emit-try! emit-if-branches!)
 
 (defn- local-decl! [s]
   (let [v (sema/var* (:var s))
@@ -1241,7 +1324,33 @@
     (close-block!) (start! cont)))
 
 ;; the if statement
+(defn- contains-label?
+  "Whether a statement holds a label, or a case or default outside a switch of its own (clang's ContainsLabel)."
+  ([s] (contains-label? s false))
+  ([s in-switch]
+   (cond
+     (map? s) (case (:s s)
+                :label true
+                (:case :default) (or (not in-switch) (some #(contains-label? % in-switch) (vals s)))
+                :switch (boolean (some #(contains-label? % true) (vals s)))
+                (boolean (some #(contains-label? % in-switch) (vals s))))
+     (sequential? s) (boolean (some #(contains-label? % in-switch) s))
+     :else false)))
+
+(defn- folds-to
+  "The condition's folded value (arbace.cpp.sema/fold-mark's :folds): true, false or nil."
+  [c]
+  (:folds c))
+
 (defn- emit-if! [s]
+  ;; a condition that folds: the dead branch not written when it holds no label (CodeGenFunction::EmitIfStmt)
+  (let [k (folds-to (:cond s))
+        [live dead] (if k [(:then s) (:else s)] [(:else s) (:then s)])]
+    (if (and (some? k) (not (contains-label? dead)))
+      (when live (let [d (cleanup-depth)] (emit-stmt live) (when-not (:term @*f*) (unwind-to! d)) (swap! *f* update :cleanups #(subvec % 0 d))))
+      (emit-if-branches! s))))
+
+(defn- emit-if-branches! [s]
   (let [lt (new-label "if.then") le (new-label "if.else") lend (new-label "if.end")
         c (with-full (emit-rv (:cond s)))]
     (condbr! c lt (if (:else s) le lend))
@@ -1686,7 +1795,8 @@
         (when (:personality s) (declare! "__gxx_personality_v0" 'i32 [] :va true))
         (add-top! (apply list 'llvm/define (gsym nm) ret (cond-> params va (conj '&))
                          (concat (linkage-of f)
-                                 (when (nothrow-fn? f) [:attrs [:nounwind]])
+                                 (when (or (nothrow-fn? f) (:always-inline f))
+                                   [:attrs (vec (concat (when (:always-inline f) [:alwaysinline]) (when (nothrow-fn? f) [:nounwind])))])
                                  (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
                                  [:body body])))
         ;; the complete object's constructor and destructor: aliases of the base ones for a strong definition
@@ -1698,13 +1808,18 @@
 (defn emit-d0!
   "The deleting destructor: D2, then operator delete with the object's size."
   [f]
-  (let [nm (abi/mangle-fn f 0)]
-    (declare! "_ZdlPvm" 'void '[ptr i64])
+  (let [nm (abi/mangle-fn f 0)
+        t {:k :class :id (:cls f)}
+        ;; the class's operator delete, else the global sized one (FindDeallocationFunctionForDestructor)
+        d (sema/dtor-dealloc (:cls f))
+        state (atom {:blocks [] :label '%entry :insts [] :n 0 :allocas [] :addr {} :cleanups [] :fn f})]
+    (binding [*f* state]
+      (emit! (list 'call 'void (want-fn! (:id f) 1) [['ptr '%a0]]))
+      (binding [*no-eh* true] (dealloc-call! d '%a0 (abi/size-of t) (abi/align-of t) []))
+      (emit! '(ret void))
+      (close-block!))
     (add-top! (list 'llvm/define (gsym nm) 'void [['ptr '%a0]] :linkage (if (:internal f) :internal :linkonce_odr)
-                    :body [(list 'block nil
-                                 (list 'call 'void (want-fn! (:id f) 1) [['ptr '%a0]])
-                                 (list 'call 'void (gsym "_ZdlPvm") [['ptr '%a0] ['i64 (abi/size-of {:k :class :id (:cls f)})]])
-                                 '(ret void))]))))
+                    :body (vec (:blocks @state))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Vtables and type_info (Itanium §2.5, §2.9.5)
@@ -2067,6 +2182,8 @@
           (recur))))
     (doseq [[nm a] (sort-by key (:aliases @*top*))] (when (contains? (:c1 @*top*) nm) (add-top! a)))
     (when (:dso @*top*) (add-top! (list 'llvm/global (gsym "__dso_handle") 'i8 :linkage :external :visibility :hidden)))
+    ;; clang's -O0 pipeline: the always-inline functions inlined and erased (LLVM's AlwaysInliner, P16 (a))
+    (swap! *top* update :forms inl/always-inline)
     (vec (concat [(list 'llvm/source-filename file)
                   (list 'llvm/datalayout "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128")
                   (list 'llvm/triple "x86_64-alpine-linux-musl")]

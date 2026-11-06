@@ -560,6 +560,11 @@
          (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "constraint not satisfied:" (.getMessage e))))
          false)))
 
+(defn- always-inline-node?
+  "Whether a function declaration's attributes hold GNU's always_inline ([[gnu::always_inline]], __attribute__((always_inline)))."
+  [n]
+  (boolean (some #(and (= "NativeAttr" (:kind %)) (#{"always_inline" "__always_inline__"} (:_gnu %))) (:inner n))))
+
 (defn- declare-fn!
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
   their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
@@ -600,9 +605,13 @@
         body (first (filter #(= "CompoundStmt" (:kind %)) (kids n)))
         pn (param-nodes n)
         f {:name nm :kind k :cls cid :ty ty :cq (method-const? qt) :op (when (and nm (not= k :conv)) (fn-op nm))
-           :static (and cid (= "static" (:storageClass n)))
+           ;; (a class's allocation and deallocation functions are static members, [class.free]/1)
+           :static (and cid (or (= "static" (:storageClass n)) (contains? #{"operator new" "operator new[]" "operator delete" "operator delete[]"} nm)))
            :virtual (boolean (:virtual n)) :pure (boolean (:pure n))
            :constexpr (boolean (:constexpr n))
+           ;; GNU's always_inline (clang's AlwaysInlineAttr, `alwaysinline` in the IR: inlined at -O0 by LLVM's
+           ;; AlwaysInliner, arbace.cpp.inline; P16 (a))
+           :always-inline (always-inline-node? n)
            :noexcept (noexcept-of home qt)
            :noexcept-false (boolean (re-find #"\bnoexcept\s*\(\s*false" (or qt "")))
            :linkage (if (linkage-c? home) :c :cpp)
@@ -622,6 +631,7 @@
     (if old
       (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names] [])))
                             (some some? (:defaults pinfo)) (assoc :defaults (:defaults pinfo))
+                            (:always-inline f) (assoc :always-inline true)
                             body (assoc :body body :node n :def-scope scope :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))
                                         :inline (or (:inline g) (boolean (:inline n))))
                             ;; a header's definition: analyzed when used (G4), as clang emits an inline function
@@ -1108,6 +1118,15 @@
   (try (let [v (ce-eval e) t (abi/unq (:ty e))]
          (if (abi/floating? t) {:op :float :v (double v) :ty t :cat :pr} {:op :int :v (long v) :ty t :cat :pr}))
        (catch arbace.lang.ExceptionInfo x (when-not (:codegen/not-constant (ex-data x)) (when-not (:codegen/refused (ex-data x)) (throw x))) nil)))
+
+(defn fold-mark
+  "The condition `c` with :folds true or false when it constant-folds to an integer as clang's CodeGen asks
+  (ConstantFoldsToSimpleInteger: EvaluateAsInt, not a constant-evaluated context; the code generator then writes only the
+  live branch of an if, a conditional operator, && and ||)."
+  [c]
+  (if-let [v (ce-try c)]
+    (if (= :int (:op v)) (assoc c :folds (not (zero? (long (:v v))))) c)
+    c))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions: typed nodes {:op ... :ty T :cat :lv|:xv|:pr}
@@ -1668,8 +1687,8 @@
             {:op :cmp :o o :l (convert-scalar l pt false) :r (convert-scalar r pt false) :ct pt :ty abi/bool* :cat :pr})
           :else (let [ct (arith-common lt rt)]
                   {:op :cmp :o o :l (convert-scalar l ct false) :r (convert-scalar r ct false) :ct ct :ty abi/bool* :cat :pr})))
-      "&&" {:op :land :l (to-bool l) :r (to-bool r) :ty abi/bool* :cat :pr}
-      "||" {:op :lor :l (to-bool l) :r (to-bool r) :ty abi/bool* :cat :pr}
+      "&&" {:op :land :l (fold-mark (to-bool l)) :r (to-bool r) :ty abi/bool* :cat :pr}
+      "||" {:op :lor :l (fold-mark (to-bool l)) :r (to-bool r) :ty abi/bool* :cat :pr}
       "," {:op :comma :l l :r r :ty (:ty r) :cat (:cat r)}
       (".*" "->*")
       (let [obj (if (= o "->*") (deref-node l) l)
@@ -1880,6 +1899,134 @@
           fviable (fn-call ctx (first fviable) args)
           :else nil)))))
 
+;; ---------------------------------------------------------------------------------------------
+;; Allocation and deallocation functions ([expr.new]/9-28, [expr.delete]/7-12; clang's Sema::FindAllocationFunctions,
+;; resolveAllocationOverload, resolveDeallocationOverload with UsualDeallocFnInfo::Compare, FindDeallocationFunction,
+;; FindUsualDeallocationFunction, FindDeallocationFunctionForDestructor, doesUsualArrayDeleteWantSize; Itanium's array
+;; cookie). A choice is {:fn id} (a declared function) or {:sym name} (an implicitly declared global one, [basic.stc.dynamic]/2,
+;; when no header declares it), with :size and :align (the deallocation's implicit arguments) and an allocation's
+;; :align (the alignment passed) and :places (the placement arguments' initializers).
+
+(def ^:private new-align 16) ; __STDCPP_DEFAULT_NEW_ALIGNMENT__ on x86-64
+
+(defn overaligned? [t] (> (long (abi/align-of t)) (long new-align)))
+
+(defn- align-val-t [] (some-> (try (lookup-qualified *root* ["std" "align_val_t"] true) (catch arbace.lang.ExceptionInfo _ nil)) type-entity :ty))
+
+(defn- size-t? [t] (= (abi/unq t) abi/ulong*))
+(defn- align-t? [t] (let [t (abi/unq t)] (and (abi/enum? t) (= "align_val_t" (:name (abi/enm (:id t)))))))
+(defn- void-ptr? [t] (let [t (abi/unq t)] (and (abi/ptr? t) (abi/void? (abi/unq (:to t))))))
+
+(defn- fn-ids [es] (vec (distinct (keep #(when (= :fn (:e %)) (:id %)) es))))
+
+(defn- alloc-lookup
+  "[:class ids] when the class `cid` (not ::-qualified) declares or inherits `nm`, else [:global ids] (ids empty when no
+  header declares it: the implicit declarations)."
+  [cid ^String nm global?]
+  (let [cl (when (and cid (not global?)) (fn-ids (map second (class-lookup cid nm))))]
+    (if (seq cl) [:class cl] [:global (fn-ids (lookup *root* nm))])))
+
+(defn- usual-dealloc-info
+  "UsualDeallocFnInfo of a deallocation function: {:size :align} when it is a usual (non-placement) one, else nil."
+  [fid]
+  (let [f (fnd fid) ps (vec (:ps (:ty f)))]
+    (when (and (not (:va (:ty f))) (seq ps) (void-ptr? (first ps)) (not (:deleted f)))
+      (let [i (if (and (< 1 (count ps)) (size-t? (nth ps 1))) 2 1)
+            j (if (and (< i (count ps)) (align-t? (nth ps i))) (inc i) i)]
+        (when (= j (count ps)) {:size (= i 2) :align (> j i)})))))
+
+(defn- resolve-dealloc
+  "The usual deallocation function of `ids` preferred for the target {:size :align} (Compare: the alignment parameter as
+  the target asks, then the size parameter), or nil."
+  [ids target]
+  (let [infos (keep (fn [id] (when-let [u (usual-dealloc-info id)] (assoc u :fn id))) ids)
+        score (fn [u] [(if (= (:align u) (:align target)) 1 0) (if (= (:size u) (:size target)) 1 0)])]
+    (when (seq infos)
+      (let [best (reduce (fn [a b] (if (pos? (compare (score b) (score a))) b a)) infos)]
+        (select-keys best [:fn :size :align])))))
+
+(defn- implicit-dealloc
+  "The implicitly declared global deallocation function for {:size :align} ([basic.stc.dynamic]/2)."
+  [array? {:keys [size align]}]
+  {:sym (str (if array? "_ZdaPv" "_ZdlPv") (when size "m") (when align "St11align_val_t")) :size (boolean size) :align (boolean align)})
+
+(defn global-dealloc
+  "FindUsualDeallocationFunction: the global usual deallocation function for {:size :align}."
+  [array? target]
+  (let [nm (if array? "operator delete[]" "operator delete")
+        ids (second (alloc-lookup nil nm true))]
+    (or (resolve-dealloc ids target) (implicit-dealloc array? target))))
+
+(defn dtor-dealloc
+  "FindDeallocationFunctionForDestructor: the deallocation function a deleting destructor of class `cid` calls."
+  [cid]
+  (let [[k ids] (alloc-lookup cid "operator delete" false)
+        t {:k :class :id cid}]
+    (or (when (= :class k) (resolve-dealloc ids {:size false :align (overaligned? t)}))
+        (global-dealloc false {:size true :align (overaligned? t)}))))
+
+(defn- array-delete-wants-size?
+  "doesUsualArrayDeleteWantSize: the class's own usual operator delete[] takes a size."
+  [et]
+  (let [cid (class-id (loop [t (abi/unq et)] (if (abi/arr? t) (recur (abi/unq (:of t))) t)))]
+    (boolean (when cid (let [[k ids] (alloc-lookup cid "operator delete[]" false)]
+                         (when (= :class k) (:size (resolve-dealloc ids {:size false :align (overaligned? et)}))))))))
+
+(defn- find-allocation
+  "FindAllocationFunctions for `new T` (`array?`, `global?` for ::new, `place` the placement arguments): {:alloc choice
+  :dealloc choice-or-nil :reserved bool} (:reserved: the reserved placement form operator new(size_t, void*), which clang
+  calls not; G4)."
+  [ctx et array? global? place]
+  (let [cid (class-id (loop [t (abi/unq et)] (if (abi/arr? t) (recur (abi/unq (:of t))) t)))
+        nm (if array? "operator new[]" "operator new")
+        over (overaligned? et)
+        avt (align-val-t)
+        size {:op :int :v 0 :ty abi/ulong* :cat :pr}
+        [scope ids] (alloc-lookup cid nm global?)
+        try-res (fn [args] (try (resolve-overload ids args nil) (catch arbace.lang.ExceptionInfo x (if (= :overload (:codegen/refused (ex-data x))) nil (throw x)))))
+        [fid aligned] (cond
+                        (empty? ids) [nil over]
+                        (and over avt) (if-let [f (try-res (into [size {:op :int :v (abi/align-of et) :ty avt :cat :pr}] place))]
+                                         [f true]
+                                         [(try-res (into [size] place)) false])
+                        :else [(try-res (into [size] place)) false])
+        _ (when (and (seq ids) (nil? fid)) (fail :new "no viable " nm " for " (count place) " placement arguments"))
+        alloc (if fid
+                (let [f (fnd fid) ps (vec (:ps (:ty f))) k (if aligned 2 1)]
+                  {:fn fid :align (when aligned (abi/align-of et))
+                   :places (call-args (assoc f :ty (assoc (:ty f) :ps (subvec ps k)) :defaults (vec (drop k (:defaults f)))) place ctx)})
+                (do (when (seq place) (fail :new "a placement new without a declared operator new"))
+                    {:sym (str (if array? "_Zna" "_Znw") "m" (when aligned "St11align_val_t")) :align (when aligned (abi/align-of et)) :places []}))
+        f (when fid (fnd fid))
+        reserved (boolean (and f (not (:cls f)) (= 2 (count (:ps (:ty f)))) (void-ptr? (second (:ps (:ty f)))) (:header f) (not array?)
+                               (= 1 (count place))))
+        dnm (if array? "operator delete[]" "operator delete")
+        [dscope dids] (alloc-lookup cid dnm global?)
+        placement? (or (seq place) (and f (or (:va (:ty f)) (not= (count (:ps (:ty f))) (if aligned 2 1)))))
+        dealloc (if placement?
+                  ;; the placement deallocation function whose parameters after the first are the allocation function's
+                  ;; after the size ([expr.new]/28)
+                  (let [want (into [:void-ptr] (map abi/unq (drop 1 (:ps (:ty f)))))]
+                    (first (keep (fn [id] (let [g (fnd id) ps (:ps (:ty g))]
+                                            (when (and (= (count ps) (count want)) (void-ptr? (first ps)) (= (map abi/unq (rest ps)) (rest want)) (= (boolean (:va (:ty g))) (boolean (:va (:ty f)))))
+                                              {:fn id :place true})))
+                                 dids)))
+                  (let [target {:size (= :global dscope) :align over}]
+                    (if (seq dids) (resolve-dealloc dids target) (implicit-dealloc array? target))))]
+    {:alloc alloc :dealloc dealloc :reserved reserved :scope scope}))
+
+(defn- delete-dealloc
+  "The deallocation function of `delete p` / `delete[] p` (ActOnCXXDelete), with the array's cookie need."
+  [et array? global?]
+  (let [cid (class-id (abi/unq et))
+        nm (if array? "operator delete[]" "operator delete")
+        over (overaligned? et)
+        cls (when (and cid (not global?)) (let [[k ids] (alloc-lookup cid nm false)] (when (= :class k) (resolve-dealloc ids {:size false :align over}))))
+        wants (if array? (if cls (boolean (:size cls)) (array-delete-wants-size? et)) false)
+        destructed (boolean (and cid (not (trivial-dtor? cid))))]
+    (or cls
+        (global-dealloc array? {:size (boolean (and (let [u (abi/unq et)] (or (not (abi/class? u)) (:complete (abi/cls (:id u))))) (or (not array?) wants destructed))) :align over}))))
+
 (defn- new-expr [ctx n]
   (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
         et (:to t)
@@ -1888,12 +2035,10 @@
         ;; the initializer when written, then the placement arguments (the native parser's order; G4)
         initn (when (or (:initStyle n) (not (:isPlacement n))) (first ks))
         place (vec (if initn (rest ks) ks))
-        placement (when (:isPlacement n)
-                    (let [as (analyze-args ctx place)]
-                      ;; only the reserved placement form new (void*) T: clang's CodeGen uses its argument, calls nothing
-                      (when-not (and (= 1 (count as)) (abi/ptr? (abi/unq (:ty (rv (first as))))))
-                        (fail :new "a placement new other than new (void*) T"))
-                      (convert-scalar (rv (first as)) (abi/ptr abi/void) false)))
+        pargs (when (:isPlacement n) (vec (analyze-args ctx place)))
+        fa (find-allocation ctx (if nexpr et et) (boolean nexpr) (boolean (:isGlobal n)) (vec pargs))
+        ;; the reserved placement form new (p) T: clang's CodeGen uses its argument, calls nothing
+        placement (when (:reserved fa) (convert-scalar (rv (first pargs)) (abi/ptr abi/void) false))
         init (cond
                (or (nil? initn) nexpr) (init-for et nil ctx :default)
                ;; (its pack expansions spliced: new T(std::forward<Args>(args)...), G4)
@@ -1903,7 +2048,11 @@
                :else (init-for et [(analyze ctx initn)] ctx :direct))
         init (if (and (= :ctor (:i init)) (empty? (:args init)) (nil? initn)) init init)]
     (when (and nexpr initn (not= "InitListExpr" (:kind initn))) nil)
-    {:op :new :placement placement :ty t :et et :n (when nexpr (convert-scalar (rv (analyze ctx nexpr)) abi/ulong* false))
+    {:op :new :placement placement :alloc (when-not placement (:alloc fa)) :dealloc (when-not placement (:dealloc fa))
+     :cookie (boolean (and nexpr (let [bt (loop [x (abi/unq et)] (if (abi/arr? x) (recur (abi/unq (:of x))) x)) c (class-id bt)]
+                                   (or (and c (not (trivial-dtor? c)))
+                                       (:size (delete-dealloc et true (boolean (:isGlobal n))))))))
+     :ty t :et et :n (when nexpr (convert-scalar (rv (analyze ctx nexpr)) abi/ulong* false))
      :init (if nexpr
              (cond (nil? initn) (init-for et nil ctx :default)
                    (#{"ImplicitValueInitExpr" "ParenListExpr"} (:kind initn)) {:i :list :items [] :fill (init-for et nil ctx :value)}
@@ -2186,7 +2335,7 @@
       (or (when (or (class-operand? l) (class-operand? r)) (operator-call ctx o [l r]))
           (compound-node (subs o 0 (dec (count o))) l (class->scalar ctx r))))
     "ConditionalOperator"
-    (let [[c a b] (kids n) c (to-bool (analyze ctx c)) a (analyze ctx a) b (analyze ctx b)]
+    (let [[c a b] (kids n) c (fold-mark (to-bool (analyze ctx c))) a (analyze ctx a) b (analyze ctx b)]
       (cond
         (and (lv? a) (lv? b) (= (:ty a) (:ty b))) {:op :cond :c c :then a :else b :ty (:ty a) :cat :lv}
         (and (abi/class? (abi/unq (:ty a))) (= (abi/unq (:ty a)) (abi/unq (:ty b))))
@@ -2276,8 +2425,15 @@
         "alignof" {:op :int :v (abi/align-of t) :ty abi/ulong* :cat :pr}
         (fail :trait (:name n))))
     "CXXNewExpr" (new-expr ctx n)
-    "CXXDeleteExpr" (let [e (rv (analyze ctx (first (kids n))))]
-                      {:op :delete :e e :array (boolean (:isArrayAsWritten n)) :ty abi/void :cat :pr})
+    "CXXDeleteExpr" (let [e (rv (analyze ctx (first (kids n))))
+                          et (:to (abi/unq (:ty e)))
+                          arr (boolean (:isArrayAsWritten n))
+                          d (delete-dealloc et arr (boolean (:isGlobal n)))
+                          bt (abi/unq et) c (class-id bt)]
+                      {:op :delete :e e :array arr :dealloc d :global (boolean (:isGlobal n))
+                       ;; the array's cookie: a non-trivial destructor, or a usual operator delete[] taking the size
+                       :cookie (boolean (and arr (or (and c (not (trivial-dtor? c))) (:size d))))
+                       :ty abi/void :cat :pr})
     "ExprWithCleanups" (analyze ctx (first (kids n)))
     "LambdaExpr" (lambda-expr ctx n)
     "CXXTypeidExpr"
@@ -2479,7 +2635,7 @@
                                                 [(if (not= 0 (long (const-int (:scope c) cn)))
                                                    (stmt (block-ctx c) (nth ks 1))
                                                    (if (:hasElse n) (stmt (block-ctx c) (nth ks 2)) {:s :null}))]
-                                                [{:s :if :cond (cond-of c cn) :then (stmt (block-ctx c) (nth ks 1))
+                                                [{:s :if :cond (fold-mark (cond-of c cn)) :then (stmt (block-ctx c) (nth ks 1))
                                                   :else (when (:hasElse n) (stmt (block-ctx c) (nth ks 2)))}])))}))
     "WhileStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
                       [cvar ks] (if (:hasVar n) [(first ks) (subvec ks 1)] [nil ks])]

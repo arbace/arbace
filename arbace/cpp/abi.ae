@@ -632,6 +632,8 @@
               (fail :mangle "a constraint's " (:kind n))))]
     (ex n)))
 
+(declare encoding*)
+
 (defn mangle-fn
   "A function's mangled name (variant: 1 or 2 for a constructor's C1/C2, 0/1/2 for a destructor's D0/D1/D2). A
   function template's specialization (:tinst) writes its template arguments after its name, then its template's
@@ -641,10 +643,16 @@
    (cond
      (= :c (:linkage f)) (:name f)
      (and (= "main" (:name f)) (empty? (:path f)) (not (:cls f))) "main"
+     :else (binding [*subs* (atom [])] (str "_Z" (encoding* f variant))))))
+
+(defn- encoding*
+  "A function's <encoding> (its mangled name without _Z) in the current substitution table: a local entity's
+  Z <encoding> E <entity> shares it with the enclosing function's encoding (ItaniumMangle.cpp's mangleLocalName)."
+  ^String [f variant]
+  (cond
      ;; a member of a local class (a closure's operator()): Z encoding E, then the name as if at namespace scope
-     (= :local (ffirst (:path f))) (str "_ZZ" (local-enc (second (first (:path f)))) "E" (subs (mangle-fn (assoc f :path (vec (rest (:path f)))) variant) 2))
+     (= :local (ffirst (:path f))) (str "Z" (local-enc (second (first (:path f)))) "E" (encoding* (assoc f :path (vec (rest (:path f)))) variant))
      :else
-     (binding [*subs* (atom [])]
        (let [path (vec (:path f))
              ti (:tinst f)
              uname (fn [^String out]
@@ -671,9 +679,9 @@
                    :else (let [pre (mangle-prefix path)]
                            (str "N" (when (:cq f) "K") (uname pre) "E")))
              sig (if ti (:tsig ti) (:ty f))]
-         (str "_Z" enc
+         (str enc
               (when (and ti (not (#{:ctor :dtor :conv} (:kind f)))) (mangle-type* (:ret sig)))
-              (bare-params (:ps sig) (:va sig))))))))
+              (bare-params (:ps sig) (:va sig))))))
 
 (defn mangle-var
   "A variable's mangled name at namespace or class scope (a global in the global namespace keeps its name; static: L)."
@@ -694,15 +702,20 @@
                 (str "_ZN" (mangle-prefix path) (source-name (:name v)) "E"))))))
 
 (defn local-encoding
-  "A function's encoding as a local name's prefix: its mangled name without _Z (main's: 4main)."
+  "A function's encoding as a local name's prefix: its mangled name without _Z (main's: 4main), in the current
+  substitution table when one is bound."
   ^String [f]
-  (let [fm (mangle-fn f (when (#{:ctor :dtor} (:kind f)) 1))] ; a constructor's or destructor's locals: its C1's or D1's names
-    (cond (str/starts-with? fm "_Z") (subs fm 2) (= "main" fm) "4main" :else (source-name fm))))
+  (cond
+    (and (= "main" (:name f)) (empty? (:path f)) (not (:cls f))) "4main"
+    (= :c (:linkage f)) (source-name (:name f))
+    ;; a constructor's or destructor's locals: its C1's or D1's names
+    :else (let [v (when (#{:ctor :dtor} (:kind f)) 1)]
+            (if *subs* (encoding* f v) (binding [*subs* (atom [])] (encoding* f v))))))
 
 (defn mangle-local-static
   "A static local's name in the function f (Itanium §5.1.6: Z encoding E name, the discriminator _N from the second)."
   ^String [f ^String nm ^long disc]
-  (let [enc (local-encoding f)]
+  (let [enc (binding [*subs* (atom [])] (local-encoding f))]
     (str "_ZZ" enc "E" (source-name nm) (cond (zero? disc) "" (< disc 11) (str "_" (dec disc)) :else (str "__" (dec disc) "_")))))
 
 (defn mangle-type-name
