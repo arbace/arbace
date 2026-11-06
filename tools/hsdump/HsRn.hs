@@ -46,7 +46,8 @@ import GHC.Types.Var (VarBndr(..), isInvisibleFunArg)
 import GHC.Driver.Env (hscEPS)
 import GHC.Unit.External (ExternalPackageState(..))
 import Data.Char (ord)
-import GHC.Core.Type (Type, PredType)
+import GHC.Core.Type (Type, PredType, tyConsOfType)
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Unit.Module.ModIface
 import GHC.Core.Coercion.Axiom (CoAxiom(..), CoAxBranch(..), fromBranches, Role(..))
 import GHC.Core.FamInstEnv (FamInst(..), famInstEnvElts)
@@ -354,7 +355,16 @@ ifaceOf outDir m = do
                                                                       | i <- insts, nameModule_maybe (getName (is_dfun i)) == Just m ]) ++ "])")
           hPutStrLn h ("(hsiface/unfoldings [" ++ intercalate "\n  " (sort unfoldings) ++ "])")
           hPutStrLn h ("(hsiface/fam-instances [" ++ intercalate "\n  " (sort [ famInstF fi | fi <- famInstEnvElts (eps_fam_inst_env eps), nameModule_maybe (getName (fi_axiom fi)) == Just m ]) ++ "])")
-      return (True, nubMods [nameModule n | a <- mi_exports iface, n <- availNames a, not (isInternalName n), not (isSystemName n), isExternalName n])
+      -- the closure also follows the modules of the type constructors the things' types mention (their instances
+      -- live with them: Num CSize in GHC.Internal.Foreign.C.Types, which no import list names)
+      let tyOf t = case t of
+            AnId i -> [varType i]
+            AConLike (RealDataCon dc) -> [dataConWrapperType dc]
+            ATyCon tc | Just cls <- tyConClass_maybe tc -> map varType (classMethods cls)
+            _ -> []
+          tcMods = [ nameModule n | t <- defined, ty <- tyOf t, tc <- nonDetEltsUniqSet (tyConsOfType ty)
+                                  , let n = getName tc, isExternalName n ]
+      return (True, nubMods ([nameModule n | a <- mi_exports iface, n <- availNames a, not (isInternalName n), not (isSystemName n), isExternalName n] ++ tcMods))
   where unitString' = pprS . moduleUnit
 
 nubNames :: [Name] -> [Name]

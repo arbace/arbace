@@ -175,13 +175,17 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Literals
 
-(defn- utf8-bytes [^String s]
-  (apply str (map (fn [b] (char (bit-and (int b) 255))) (.getBytes s "UTF-8"))))
+(defn- utf8-bytes
+  "A string's modified UTF-8 (NUL as C0 80, GHC's utf8EncodeByteString of a string literal), one char a byte"
+  [^String s]
+  (apply str (mapcat (fn [b] (let [b (bit-and (int b) 255)] (if (zero? b) [(char 0xC0) (char 0x80)] [(char b)])))
+                     (.getBytes s "UTF-8"))))
 
 (defn lit-form
   "A Core literal's text as an STG literal and its PrimRep"
   [t]
   (cond
+    (re-matches #"-?[0-9]+#w64" t) [(list 'word64 (bigint (read-string (subs t 0 (- (count t) 4))))) :word64]
     (re-matches #"-?[0-9]+##" t) [(list 'word (read-string (subs t 0 (- (count t) 2)))) :word]
     (re-matches #"-?[0-9]+#" t) [(list 'int (read-string (subs t 0 (dec (count t))))) :int]
     (re-matches #"'\(char [0-9]+\)'#" t) [(list 'char (read-string (second (re-find #"char ([0-9]+)" t)))) :word]
@@ -195,7 +199,9 @@
 (defn- hexify
   "The float literals' bits as 0x numbers (the reader takes 0x integers)"
   [s]
-  (str/replace s #"\((double|float) \"(0x[0-9a-f]+)\"\)" "($1 $2)"))
+  (-> s
+      (str/replace #"\((double|float) \"(0x[0-9a-f]+)\"\)" "($1 $2)")
+      (str/replace #"\((word64|int64) ([0-9-]+)N\)" "($1 $2)")))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Representations (GHC.Types.RepType's typePrimRep, Unarise's view: void components dropped)
@@ -589,13 +595,18 @@
       (let [c (as-data (second f))]
         (if (and (not (newtype-con? c)) (not (class-of-dcon (second f))) (= (:arity (con-info c)) (count args))
                  (not (some true? (con-strict c))))
-          (let [rs (mapv atom-of args)] (float! rs) (list 'rcon (gname c) (rename rs)))
+          (let [rs (mapv atom-of args)]
+            (if (some (fn [[_ bs]] (some #(= :case (first %)) bs)) rs)
+              (rhs e)
+              (do (float! rs) (list 'rcon (gname c) (rename rs)))))
           (rhs e)))
       (and (head? f 'v) (newtype-selector? (second f))) (rhs e)
       (or (lv? f) (head? f 'v))
       (let [rs (mapv atom-of args)]
-        (float! rs)
-        (list 'closure :u :fvs [] (list 'app (if (lv? f) (local-name f) (gname (second f))) (rename rs))))
+        (if (some (fn [[_ bs]] (some #(= :case (first %)) bs)) rs)
+          (rhs e)
+          (do (float! rs)
+              (list 'closure :u :fvs [] (list 'app (if (lv? f) (local-name f) (gname (second f))) (rename rs))))))
       :else (rhs e))))
 
 ;;; ------------------------------------------------------------------------------------------

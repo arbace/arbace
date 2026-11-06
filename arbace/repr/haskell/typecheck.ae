@@ -354,6 +354,21 @@
                               (:supers info))]
         (recur (concat (rest todo) (remove (fn [[p _]] (some #(= p (first %)) out)) subs)) (conj out g))))))
 
+(def cls-typeable (ext-name "tc" "GHC.Internal.Data.Typeable.Internal" "Typeable"))
+
+(defn- typeable-term
+  "Typeable's evidence for a type without variables (GHC.Tc.Instance.Class's Typeable solver: a type constructor
+  mkTrCon of its $tc binding, an application mkTrApp of its parts); nil for another type"
+  [t]
+  (let [t (deep-expand (zonk t))]
+    (when (= :tc (first t))
+      (let [[_ n args] t
+            con (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrCon"))
+                      [(list 'v (ext-name "var" (nmod n) (str "$tc" (occ n)))) (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))])
+            subs (mapv typeable-term args)]
+        (when (every? some? subs)
+          (reduce (fn [f x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x])) con subs))))))
+
 (defn solve-pred
   "A dictionary term for pred from the givens or the instances, nil when none applies yet"
   [pred givens depth]
@@ -361,6 +376,7 @@
     (if (eq-pred? [c ts])
       (do (unify (last (butlast ts)) (last ts)) (list 'co))
     (or (some (fn [[[gc gts] term]] (when (and (= gc c) (= (mapv zonk gts) ts)) term)) givens)
+        (when (and (= c cls-typeable) (seq ts)) (typeable-term (last ts)))
         (when (and (< depth 30) (seq ts) (not= :mv (first (first ts))) (not= :tv (first (first ts))))
           (some (fn [{:keys [dfun tvs ctx head]}]
                   (when (= (first head) c)
@@ -514,9 +530,13 @@
 (defn- hslit [v]
   (let [l (arg v 2)]
     (case (con l)
-      HsString [(list-ty (con-ty tc-char)) (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" "unpackCString#")) [(list 'lit (str (pr-str (arg l 2)) "#"))])]
+      ;; GHC.Core.Make.mkStringExprFS: ASCII without NUL unpackCString#, else the modified UTF-8 of unpackCStringUtf8#
+      HsString [(list-ty (con-ty tc-char))
+                (list 'app (list 'v (ext-name "var" "GHC.Internal.CString"
+                                              (if (every? #(< 0 (int %) 128) (arg l 2)) "unpackCString#" "unpackCStringUtf8#")))
+                      [(list 'lit (str (pr-str (arg l 2)) "#"))])]
       HsChar [(con-ty tc-char) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "C#")) [(list 'lit (str "'" (arg l 2) "'#"))])]
-      HsInt [(con-ty tc-int) (list 'lit (str (arg l 2)))]
+      HsInt [(con-ty tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str (arg l 2) "#"))])]
       ;; MagicHash's primitive literals: their types of GHC.Internal.Prim, the literal's text as tostg reads it
       HsIntPrim [(prim-ty "Int#") (list 'lit (str (arg l 2) "#"))]
       HsWordPrim [(prim-ty "Word#") (list 'lit (str (arg l 2) "##"))]
@@ -1085,7 +1105,7 @@
         conlist (case (con cs) DataTypeCons (arg cs 2) NewTypeCon [(arg cs 1)] [])
         descs (atom [])]
     (when *tycons*
-      (swap! *tycons* assoc tn {:flavour (if (= 'NewTypeCon (con cs)) 'newtype 'data)
+      (swap! *tycons* assoc tn {:flavour (if (= 'NewTypeCon (con cs)) 'newtype 'data) :tvs names
                                 :cons (mapv (fn [c] (nm (arg (lval c) 2))) conlist)}))
     (doseq [c conlist]
       (let [cv (lval c) cn (nm (arg cv 2)) det (arg cv 6)
@@ -1459,6 +1479,38 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; The module
 
+;;; ------------------------------------------------------------------------------------------
+;;; Typeable's bindings (GHC.Tc.Instance.Typeable: mkTypeableBinds): the module's $trModule and a $tc binding
+;;; per type constructor, with GHC's fingerprints (GHC.Internal.Fingerprint: MD5 over each string's characters
+;;; as four big-endian bytes, then over the three fingerprints' sixteen big-endian bytes)
+
+(defn- md5 [^bytes bs] (.digest (java.security.MessageDigest/getInstance "MD5") bs))
+(defn- fp-words [^bytes d]
+  [(reduce (fn [acc i] (+' (*' acc 256) (bit-and (aget d i) 255))) 0 (range 0 8))
+   (reduce (fn [acc i] (+' (*' acc 256) (bit-and (aget d i) 255))) 0 (range 8 16))])
+(defn- fp-string ^bytes [s]
+  (md5 (byte-array (mapcat (fn [c] (let [w (int c)] [(unchecked-byte (bit-shift-right w 24)) (unchecked-byte (bit-shift-right w 16))
+                                                      (unchecked-byte (bit-shift-right w 8)) (unchecked-byte w)])) s))))
+(defn tycon-fingerprint
+  "GHC's fingerprint of a type constructor: [high low]"
+  [unit m occ]
+  (fp-words (md5 (byte-array (mapcat seq [(fp-string unit) (fp-string m) (fp-string occ)])))))
+
+(defn- typeable-binds [m]
+  (let [v (fn [mm o] (list 'v (ext-name "var" mm o)))
+        trname (fn [s] (list 'app (v "GHC.Internal.Types" "TrNameS") [(list 'lit (str (pr-str s) "#"))]))
+        modv (ext-name "var" m "$trModule")]
+    (when (seq @*tycons*)
+      (cons (list 'bind modv (list 'app (v "GHC.Internal.Types" "Module") [(trname "main") (trname m)]))
+            (for [[tn info] @*tycons* :when (= m (nmod tn))]
+              (let [[hi lo] (tycon-fingerprint "main" m (occ tn))
+                    arity (count (:tvs info []))
+                    star (v "GHC.Internal.Types" "krep$*")
+                    krep (reduce (fn [acc _] (list 'app (v "GHC.Internal.Types" "KindRepFun") [star acc])) star (range arity))]
+                (list 'bind (ext-name "var" m (str "$tc" (occ tn)))
+                      (list 'app (v "GHC.Internal.Types" "TyCon")
+                            [(list 'lit (str hi "#w64")) (list 'lit (str lo "#w64")) (list 'v modv) (trname (occ tn)) (list 'lit "0#") krep]))))))))
+
 (defn typecheck-module
   "A renamed module (rn/module {...}) elaborated: {:types {NAME type} :core [(bind ...)...] :errors [...]}"
   [tree]
@@ -1508,7 +1560,7 @@
          :cons (into {} (filter (fn [[n _]] (= m (nmod n))) @*cons*))
          :classes (into {} (for [[n info] @*classes* :when (= m (nmod n))] [n (dissoc info :binds)]))
          :insts (vec (filter (fn [i] (= m (nmod (:dfun i)))) @*insts*))
-         :core (mapv resolve-core (concat fimports core dms ibs sels))
+         :core (mapv resolve-core (concat fimports core dms ibs sels (typeable-binds m)))
          ;; the tables HF5-HF6 need (the match compiler's constructor families, STG's data and dictionaries)
          :all-cons @*cons* :tycons @*tycons*
          :all-classes (into {} (for [[n info] @*classes*] [n (dissoc info :binds)]))
