@@ -69,7 +69,15 @@ code. Three kinds of things live here:
   `arbace.aot.*` until 2026-10-17; doc/STANDALONE-NOTES.md, "S6: Arbace compiled to Go"),
   `go/check.ae` and `go/check/` (goi's checker, a type checker of Go forms written anew after
   go/types, `arbace.go.check` and `arbace.go.check.*`; doc/go/GOI-SPEC.md §3, GR2; evaluated
-  from the checkout, not embedded, until the program carries goi), `python.ae` and `python/` (pyi, the evaluator of
+  from the checkout, not embedded, until the program carries goi), `go/escape.ae` (`arbace.go.escape`: gc's
+  escape analysis and inliner over goi's checked trees, for the errorcheck programs' `-m`; doc/go/GOI-SPEC.md,
+  "Since v1: gc's escape analysis and inliner"): a port to Arbace, by hand on 2026-11-06, of TamaGo's go1.27.1
+  (`VERSION` "go1.27.1", the tree pinned by `seed/goroot.sha256`) `src/cmd/compile/internal/escape/*.go`,
+  `inline/inl.go`'s `CanInline`, `hairyVisitor` and `mkinlcall`, `inline/interleaved/interleaved.go`,
+  `devirtualize/devirtualize.go`'s `StaticCall`, `ir/scc.go`, `ir/reassignment.go`, `loopvar/loopvar.go`'s
+  `ForCapture`, `typecheck/stmt.go`'s `normalizeGoDeferCall`, `walk/expr.go`'s `walkIndex` and `bounded`,
+  `noder/writer.go`'s dead code and constant switches, `ir/fmt.go`'s `exprFmt` and `types/fmt.go`'s `tconv`,
+  and the amd64 entries of `ssagen/intrinsics.go`'s table (LICENSE.md: Go's BSD 3-Clause License), `python.ae` and `python/` (pyi, the evaluator of
   Python forms, `arbace.python` and `arbace.python.*`; doc/python/PYI-SPEC.md, doc/python/PYTHON-SURVEY.md "As built:
   PY5a"; evaluated from the checkout, not embedded, PYS18 (a)): its scope analysis, `python/scope.ae`, ports CPython
   3.14.10's `Python/symtable.c` and `Python/future.c`'s future parse (the release tarball

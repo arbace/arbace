@@ -1,3 +1,9 @@
+;; A port of gc's escape analysis and inliner (Go 1.27.1, src/cmd/compile/internal/escape, inline,
+;; devirtualize and the parts of ir, typecheck, loopvar, walk, noder and ssagen named below).
+;; Copyright The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file (LICENSE.md: Go's BSD 3-Clause License).
+
 (ns arbace.go.escape
   "gc's escape analysis over goi's checked trees (doc/go/GOI-SPEC.md, \"Since v1: gc's escape
   analysis\"): a port, rule for rule, of Go 1.27.1's cmd/compile/internal/escape (escape.go,
@@ -20,7 +26,11 @@
   Calls of functions of other packages use their parameter tags as gc does; goi has no export
   data, so a package's functions are analyzed from their forms when the package's forms are at
   hand (arbace.go.escape/*import-tags*), else such a call's arguments leak to the heap (gc's
-  unknown callee)."
+  unknown callee).
+
+  Without -l gc's inliner runs first (inline/inl.go's CanInline and hairyVisitor, the interleaved
+  inliner, devirtualize.StaticCall interleaved): can inline f, inlining call to f; the analysis then
+  sees the inlined bodies."
   (:require [arbace.string :as str]
             [arbace.go.check.env :as e]
             [arbace.go.check.types :as t]))
@@ -470,8 +480,12 @@
         :slice (let [[lo hi mx] (:indexes n)]
                  (str (fmt-node (:x n) np) "[" (when lo (fmt-node lo 0)) ":" (when hi (fmt-node hi 0))
                       (when (= 3 (count (:indexes n))) (str ":" (when mx (fmt-node mx 0)))) "]"))
-        :conv (let [ty (node-type n)]
-                (str (if (or (keyword? ty) (t/named? ty)) (type-str ty) (str "(" (type-str ty) ")"))
+        :conv (let [ty (node-type n)
+                    tf (let [f (:form n)] (when (and (seq? f) (= 'conv (first f))) (second f)))]
+                (str (cond
+                       (and (= 'any tf) (iface? ty)) "any"
+                       (or (keyword? ty) (t/named? ty)) (type-str ty)
+                       :else (str "(" (type-str ty) ")"))
                      "(" (fmt-node (:x n) 0) ")"))
         :call (case (:kind n)
                 :builtin (builtin-str n)
@@ -1099,20 +1113,25 @@
   (str (str/join ", " (map #(fmt-node (norm-place %) 0) dsts)) " = " (str/join ", " (map #(fmt-node % 0) srcs))))
 
 (defn- comma-ok-temps
-  "typecheck's assignments of a comma-ok value (v, ok = x.(T), m[k], <-c) to a destination of
-  another type: through an autotmp of the value's type (tmp, ok = x.(T); v = tmp), the
-  conversion of the temporary in the value's place. [rhs pre]: pre the temporary's assignment."
+  "typecheck's assignments of a comma-ok pair (v, ok = x.(T), m[k], <-c) to destinations of other
+  types: through an autotmp each (tmp, tmp2 = x.(T); v = tmp; ok = tmp2), the conversion of the
+  temporary in the value's place. The pair's values with the temporaries' assignments made."
   [e rhs]
-  (let [r (first rhs)]
-    (if (and (= 2 (count rhs)) (#{:convert-iface :conv} (:op r)) (:comma-ok (:x r)))
-      (let [x (:x r)
-            o (e/obj {:kind :var :name (str ".autotmp_" (count @(:all-locs (eb e)))) :line (or (:line x) (:line @e))
-                      :type (node-type x) :esc-class :auto})
-            l (new-loc e o true)]
-        (dcl! e l)
-        (expr e (hole l) x)
-        (assoc (vec rhs) 0 (assoc r :x {:op :local :obj o :type (node-type x) :mode :variable :line (:line x)})))
-      rhs)))
+  (if (and (= 2 (count rhs))
+           (let [[a b] rhs
+                 inner (fn [r] (if (#{:convert-iface :conv} (:op r)) (:x r) r))]
+             (and (:comma-ok (inner a)) (= :ok (:op (inner b))))))
+    (vec (for [r rhs]
+           (if (#{:convert-iface :conv} (:op r))
+             (let [x (:x r)
+                   o (e/obj {:kind :var :name (str ".autotmp_" (count @(:all-locs (eb e)))) :line (or (:line x) (:line @e))
+                             :type (node-type x) :esc-class :auto})
+                   l (new-loc e o true)]
+               (dcl! e l)
+               (expr e (hole l) x)
+               (assoc r :x {:op :local :obj o :type (node-type x) :mode :variable :line (:line x)}))
+             r)))
+    rhs))
 
 (defn assign-list
   "escape.assignList: dsts (places, objects' holes given by addr-of) from srcs; where: the
@@ -1777,6 +1796,8 @@
                                 (= ::none t) (recur (rest vs) typ)
                                 (nil? t) nil
                                 (and typ (not (t/same? typ t))) nil
+                                ;; gc's types of two struct literals are two types (*types.Type identity)
+                                (and typ (= :struct (kind t)) (not (t/named? t))) nil
                                 :else (recur (rest vs) t)))))))))))]
     (let [r (ct n (volatile! #{}))]
       (when-not (= ::none r) r))))
