@@ -686,6 +686,23 @@
                 (verr :verifier/attr-value "'alloc-variant-zeroed' must name a function with the same signature" :none))
               (when (and me (not= (:cconv vo) (:cconv (apply hash-map (drop 4 me)))))
                 (verr :verifier/attr-value "'alloc-variant-zeroed' must name a function with the same calling convention" :none)))))))
+    ;; LL6: "modular-format"="TYPE,FORMAT-INDEX,FIRST-ARG-INDEX,MODULAR-FN,IMPL-NAME[,ASPECT...]" (Verifier::verifyFunctionAttrs): indices
+    ;; base 10, the first argument's at most the parameters (and one more when variadic), 0 for none; the format string's 1 to the parameters
+    (when-let [a (and (not call?) (str-attr attrs "modular-format"))]
+      (let [args (str/split (str (second a)) #"," -1)
+            n (count ptypes) var? (boolean (some #{'&} (nth (:fn *ctx*) 3 nil)))
+            idx (fn [x] (when (re-matches #"[0-9]+" x) (bigint x)))
+            m #(verr :verifier/attr-value (str "modular-format attribute " %) :fn)]
+        (when (< (count args) 5) (m "requires at least 5 arguments"))
+        (let [fa (idx (nth args 2))]
+          (when-not fa (m "first arg index is not an integer"))
+          (when (> fa (+ n (if var? 1 0))) (m "first arg index is out of bounds")))
+        (let [fi (idx (nth args 1))]
+          (when-not fi (m "format string index is not an integer"))
+          (when (zero? fi) (m "format string index must be greater than 0"))
+          (when (> fi n) (m "format string index is out of bounds")))
+        (when (= "" (nth args 3)) (m "modular implementation function name cannot be empty"))
+        (when (= "" (nth args 4)) (m "implementation name cannot be empty"))))
     (when (and (has "jumptable") (not call?)) (verr :verifier/attr-value "Attribute 'jumptable' requires 'unnamed_addr'"))))
 
 (defn- check-function-attrs
@@ -1687,6 +1704,11 @@
             (when-not et (verr :verifier/intrinsic-call "gc.statepoint callee argument must have elementtype attribute" :inst))
             (let [ft (norm-type (second et))]
               (when-not (and (seq? ft) (= 'fn (first ft))) (verr :verifier/intrinsic-call "gc.statepoint callee elementtype must be function type" :inst)))))
+      ;; LL6: the result an integer of the alloca address space's pointer width
+      "llvm.get.dynamic.area.offset"
+      (let [t (result-type b)]
+        (when-not (and (int-type? t) (= (bits t) (dl-ptr-bits *alloca-as*)))
+          (verr :verifier/intrinsic-call "get_dynamic_area_offset result type must be scalar integer matching alloca address space width" :inst)))
       "llvm.va_start" (when-not (some #{'&} (nth f 3)) (verr :verifier/intrinsic-call "va_start called in a non-varargs function" :none))
       "llvm.threadlocal.address"
       (let [v (arg 0) d (when (global? v) (.get *gdefs* (global-key v)))]
@@ -2211,6 +2233,35 @@
           (when-not (pow2? (.longValue ^java.math.BigInteger (md-int-val op))) (verr :verifier/md-align "align metadata value must be a power of 2!"))
           (when (> (.longValue ^java.math.BigInteger (md-int-val op)) 4294967296) (verr :verifier/md-align "alignment is larger that implementation defined limit")))))
     (when-let [x (get md '!prof)] (sub (fn [] (check-prof-md x hd b))))
+    ;; LL6: Verifier::visitMemProfMetadata and visitCallsiteMetadata (MemProf's MemInfoBlocks and call stacks); a call stack's own
+    ;; failure ends visitCallStackMetadata only, its MemInfoBlock goes on
+    (let [call? ('#{call invoke callbr} hd)
+          stack (fn [n] (sub (fn [] (let [ops (md-ops n)]
+                                      (when-not (seq ops) (verr :verifier/md-misc "call stack metadata should have at least 1 operand" [:mdv n]))
+                                      (doseq [op ops]
+                                        (when-not (md-int-op? op) (verr :verifier/md-misc "call stack metadata operand should be constant integer" [:mdv op])))))))]
+      (when-let [x (get md '!memprof)]
+        (sub (fn [] (when-not call? (verr :verifier/md-misc "!memprof metadata should only exist on calls" :inst))
+               (when-not (get md '!callsite) (verr :verifier/md-misc "!memprof metadata requires !callsite metadata" :inst [:mdv x]))
+               (when-not (seq (md-ops x)) (verr :verifier/md-misc "!memprof annotations should have at least 1 metadata operand (MemInfoBlock)" [:mdv x]))
+               (doseq [mib (md-ops x)]
+                 (let [ops (vec (md-ops mib))]
+                   (when-not (>= (count ops) 2) (verr :verifier/md-misc "Each !memprof MemInfoBlock should have at least 2 operands" [:mdv mib]))
+                   (when (= 'null (first ops)) (verr :verifier/md-misc "!memprof MemInfoBlock first operand should not be null" [:mdv mib]))
+                   (when-not (md-ops (first ops)) (verr :verifier/md-misc "!memprof MemInfoBlock first operand should be an MDNode" [:mdv mib]))
+                   (stack (first ops))
+                   ;; the allocation type, then the context size pairs (llvm/test's memprof-metadata-bad: an MDString third is refused)
+                   (when-not (md-str (nth ops 1)) (verr :verifier/md-misc "!memprof MemInfoBlock second operand should be an MDString" [:mdv mib]))
+                   (do
+                     (doseq [op (subvec ops 2)]
+                       (let [os (md-ops op)]
+                         (when-not os (verr :verifier/md-misc "Not all !memprof MemInfoBlock operands 2 to N are MDNode" [:mdv mib]))
+                         (when-not (= 2 (count os)) (verr :verifier/md-misc "Not all !memprof MemInfoBlock operands 2 to N are MDNode with 2 operands" [:mdv mib]))
+                         (when-not (every? md-int-op? os)
+                           (verr :verifier/md-misc "Not all !memprof MemInfoBlock operands 2 to N are MDNode with ConstantInt operands" [:mdv mib]))))))))))
+      (when-let [x (get md '!callsite)]
+        (sub (fn [] (when-not call? (verr :verifier/md-misc "!callsite metadata should only exist on calls" :inst))
+               (stack x)))))
     (when-let [x (get md '!callee_type)]
       (sub (fn [] (do (when-not ('#{call invoke callbr} hd) (verr :verifier/md-misc "!callee_type metadata should only exist on calls"))
                 (doseq [op (md-ops x)]
@@ -2912,6 +2963,18 @@
   [t]
   [:raw (str " " (if (named-type? t) (str (pr/type-str t) " = type " (let [b (get *types* t)] (if (= b 'opaque) "opaque" (tstr b)))) (tstr t)))])
 
+(defn- check-gep
+  "Verifier::visitGetElementPtrInst's rule beyond LLParser's (LL6): an index into a vector steps by its element's size, so the
+  element's size must be its store size (DataLayout::typeSizeEqualsStoreSize: an integer of a whole number of bytes)."
+  [b]
+  (let [[_ ps] (split-inst b) [st _ & idxs] (strip-flags ps) st (norm-type st)]
+    (doseq [j (range 1 (count idxs))]
+      (let [t (some-> (gep-indexed-type st (take j idxs)) resolve-type)]
+        (when (vec-type? t)
+          (let [e (resolve-type (norm-type (nth t 2)))]
+            (when (and (int-type? e) (pos? (mod (long (bits e)) 8)))
+              (verr :verifier/gep "GEP into vector with non-byte-addressable element type" :inst))))))))
+
 (defn- check-load-store
   "Verifier::visitLoadInst and visitStoreInst: alignment, sizedness, an atomic access's ordering, type and size, a
   non-atomic one's synchronization scope."
@@ -3037,6 +3100,7 @@
                           (when-not (= x (first (remove #(= 'phi (first (body %))) insts)))
                             (verr :verifier/landingpad "LandingPadInst not the first non-PHI instruction in the block."))))
                       (check-funclet hd b x bi blocks items insts g defs (some? (:personality o)))
+                      (when (= hd 'getelementptr) (check-gep b))
                       (when ('#{load store} hd) (check-load-store hd b))
                       ;; visitCallBase
                       (when-let [c (callee-of b)]
