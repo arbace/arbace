@@ -153,9 +153,14 @@
                               :else (recur out))))))]
         (swap! lib-data assoc m res) res)))
 
+(declare global-type arg-types type-reps reps->rep)
+
 (defn- con-reps [c]
   (if (= (nth c 2) (module))
-    (vec (repeat (or (:arity (con-info c)) 0) :L))
+    ;; the module's own constructor: its fields' representations from its type
+    (let [ar (or (:arity (con-info c)) 0)
+          ts (when-let [t (global-type c)] (arg-types t))]
+      (if (= ar (count ts)) (mapv (comp reps->rep type-reps) ts) (vec (repeat ar :L))))
     (or (:reps (get (lib-cons (nth c 2)) (ext-str (nth c 2) (nth c 3))))
         (vec (repeat (or (:arity (con-info c)) 0) :L)))))
 
@@ -193,6 +198,115 @@
   (str/replace s #"\((double|float) \"(0x[0-9a-f]+)\"\)" "($1 $2)"))
 
 ;;; ------------------------------------------------------------------------------------------
+;;; Representations (GHC.Types.RepType's typePrimRep, Unarise's view: void components dropped)
+
+(def ^:private prim-tycon-reps
+  {"Int#" [:int] "Int8#" [:int8] "Int16#" [:int16] "Int32#" [:int32] "Int64#" [:int64]
+   "Word#" [:word] "Word8#" [:word8] "Word16#" [:word16] "Word32#" [:word32] "Word64#" [:word64]
+   "Char#" [:word] "Double#" [:double] "Float#" [:float] "Addr#" [:addr] "StablePtr#" [:addr]
+   "State#" [] "Proxy#" [] "RealWorld" [:L]})
+
+(defn- strip-forall [t] (if (= :forall (first t)) (recur (nth t 3)) t))
+(defn- fun-ty? [t] (and (= :tc (first t)) (= tc/fun-tc (second t))))
+
+(defn type-reps
+  "A type's PrimReps after unarisation: a vector, empty for a void type"
+  [t]
+  (let [t (strip-forall t)]
+    (if (= :tc (first t))
+      (let [[_ n args] t]
+        (cond
+          (and (= "GHC.Internal.Types" (nth n 2)) (re-matches #"Tuple[0-9]+#" (nth n 3))) (vec (mapcat type-reps args))
+          (and (= "GHC.Internal.Prim" (nth n 2)) (contains? prim-tycon-reps (nth n 3))) (get prim-tycon-reps (nth n 3))
+          (and (= "GHC.Internal.Prim" (nth n 2)) (str/ends-with? (nth n 3) "#")) [:U]
+          :else [:L]))
+      [:L])))
+
+(defn- result-type
+  "A type after n arguments (dictionary arguments first), or nil"
+  [t n]
+  (let [t0 (if (= :forall (first t)) t [:forall [] [] t])
+        preds (count (nth t0 2)) body (nth t0 3)]
+    (if (< n preds) nil
+        (loop [t body k (- n preds)]
+          (cond (zero? k) t
+                (= :forall (first t)) (recur (nth t 3) k)
+                (fun-ty? t) (recur (second (nth t 2)) (dec k))
+                :else nil)))))
+
+(defn- arg-types
+  "A function type's argument types (after its dictionaries)"
+  [t]
+  (loop [t (strip-forall t) out []]
+    (cond (fun-ty? t) (recur (strip-forall (second (nth t 2))) (conj out (first (nth t 2))))
+          :else out)))
+
+(def ^:dynamic *lreps* nil)   ; atom {(lv ...) reps}: the desugarer's binders' representations, from their right-hand sides
+
+(defn- global-type [g] (get (:genv *r*) g))
+
+(defn local-reps [x]
+  (or (get @*lreps* x)
+      (when-let [t (get (:ltypes *r*) x)] (type-reps t))
+      [:L]))
+
+(declare unboxed-con?)
+
+(defn expr-reps
+  "A Core expression's representations"
+  [e]
+  (case (first e)
+    lit (if (re-matches #"(?s)\".*\"" (second e)) [:L] [(second (lit-form (second e)))])
+    lv (local-reps e)
+    v (if-let [t (global-type (second e))] (if (seq (nth (if (= :forall (first t)) t [:forall [] [] t]) 2)) [:L] (type-reps t)) [:L])
+    app (let [[_ f args] e]
+          (cond (and (head? f 'v) (unboxed-con? (second f))) (vec (mapcat expr-reps args))
+                (head? f 'v) (if-let [t (some-> (global-type (second f)) (result-type (count args)))] (type-reps t) [:L])
+                (lv? f) (if-let [t (some-> (get (:ltypes *r*) f) (result-type (count args)))] (type-reps t) [:L])
+                :else [:L]))
+    case (let [alts (nth e 3)] (if (seq alts) (expr-reps (nth (first alts) 3)) [:L]))
+    (let letrec) (expr-reps (nth e 2))
+    [:L]))
+
+(def ^:dynamic *multi* nil)   ; atom {(lv ...) [[name rep]...]}: an unboxed tuple's binder unarised into its components
+(def ^:dynamic *mcomps* nil)  ; atom {(lv ...) [reps...]}: its components' representations, the void ones too
+
+(defn- tuple-ty? [t] (let [t (strip-forall t)] (and (= :tc (first t)) (= "GHC.Internal.Types" (nth (second t) 2)) (re-matches #"Tuple[0-9]+#" (nth (second t) 3)))))
+
+(defn expr-comps
+  "An expression of an unboxed tuple type: each component's representations; nil for another type"
+  [e]
+  (case (first e)
+    lv (get @*mcomps* e)
+    app (let [[_ f args] e
+              t (cond (and (head? f 'v) (unboxed-con? (second f))) :con
+                      (head? f 'v) (some-> (global-type (second f)) (result-type (count args)))
+                      (lv? f) (some-> (get (:ltypes *r*) f) (result-type (count args))))]
+          (cond (= :con t) (mapv expr-reps args)
+                (and t (tuple-ty? t)) (mapv type-reps (nth (strip-forall t) 2))))
+    case (let [alts (nth e 3)] (when (seq alts) (expr-comps (nth (first alts) 3))))
+    (let letrec) (expr-comps (nth e 2))
+    nil))
+
+(defn- reps->rep [rs] (case (count rs) 0 :v 1 (first rs) (vec rs)))
+
+(defn unboxed-con? [g] (and (vector? g) (= "GHC.Internal.Types" (nth g 2)) (re-matches #"\(#,*#\)|MkSolo#" (nth g 3))))
+
+(defn- unboxed-name
+  "The unboxed tuple constructor of k non-void components (Unarise's renaming)"
+  [k]
+  (ext-str "GHC.Internal.Types" (if (= 1 k) "MkSolo#" (str "(#" (apply str (repeat (dec k) ",")) "#)"))))
+
+(defn- primop?
+  "A primop of GHC.Internal.Prim (not one of the Ids with a compulsory unfolding or the void tokens)"
+  [g]
+  (and (vector? g) (= "GHC.Internal.Prim" (nth g 2))
+       (not (contains? #{"seq" "coerce" "realWorld#" "void#" "nullAddr#" "proxy#"} (nth g 3)))
+       (some? (global-type g))))
+
+(defn- void-global? [g] (and (vector? g) (= "GHC.Internal.Prim" (nth g 2)) (contains? #{"realWorld#" "void#"} (nth g 3))))
+
+;;; ------------------------------------------------------------------------------------------
 ;;; A-normal form and STG (CorePrep and CoreToStg together)
 
 (declare expr rhs)
@@ -208,7 +322,7 @@
 
 (def ^:dynamic *joins* nil)   ; atom #{name}: the failure join points (their calls pass the void (##))
 
-(defn- void-atom [] (ext-str "GHC.Internal.Types" "(##)"))
+(defn- void-atom [] (ext-str "GHC.Internal.Prim" "void#"))
 
 (declare floatable-con)
 
@@ -218,16 +332,28 @@
   [a]
   (cond
     (and (lv? a) (contains? @*joins* (local-name a))) (let [n (fresh "sat")] [n [[n (list 'closure :u :fvs [] (list 'app (local-name a) [(void-atom)]))]]])
+    (and (lv? a) (empty? (local-reps a))) [(void-atom) []]
     (lv? a) [(local-name a) []]
+    (and (head? a 'v) (void-global? (second a))) [(void-atom) []]
     (and (head? a 'v) (con-name? (second a)) (newtype-con? (as-data (second a)))) (let [n (fresh "sat")] [n [[n (rhs a)]]])
     (head? a 'v) [(gname (second a)) []]
     (and (head? a 'lit) (not (string-lit? a))) [(first (lit-form (second a))) []]
     (floatable-con a) (let [[c args] (floatable-con a) rs (mapv atom-of args) n (fresh "sat")]
                         [n (conj (vec (mapcat second (reverse rs))) [n (list 'rcon (gname c) (mapv first rs))])])
+    ;; an argument of an unlifted type: evaluated first, case-bound (CorePrep's cpeArg: a case float)
+    (not= [:L] (expr-reps a))
+    (let [rs (expr-reps a) r (reps->rep rs) n (fresh "sat")]
+      (swap! *reps* assoc n r)
+      [n [[:case n r (expr a)]]])
     :else (let [n (fresh "sat")] [n [[n (rhs a)]]])))
 
 (defn- wrap-binds [bnds body]
-  (reduce (fn [b [n r]] (list 'let (list 'bind [n :L] r) b)) body (reverse bnds)))
+  (reduce (fn [b [n r :as bd]]
+            (if (= :case n)
+              (let [[_ x rep ex] bd]
+                (list 'case ex [x rep] (if (vector? rep) (list 'multi (count rep)) (list 'prim rep)) [(list 'alt :default [] b)]))
+              (list 'let (list 'bind [n :L] r) b)))
+          body (reverse bnds)))
 
 (defn- with-atoms
   "Atoms for the arguments, their bindings let around k's expression, the last argument's outermost"
@@ -263,6 +389,23 @@
     (let [s (fresh "sat")]
       (list 'case (first (lit-form (second (first args)))) [s :addr] '(prim :addr)
             [(list 'alt :default [] (list 'app (gname (second f)) [s]))]))
+    (and (head? f 'v) (unboxed-con? (second f)))
+    ;; an unboxed tuple: its non-void components (Unarise)
+    (let [keep (filterv #(seq (expr-reps %)) args)]
+      (with-atoms keep (fn [as] (list 'con (unboxed-name (count as)) as))))
+    (and (head? f 'v) (primop? (second f)))
+    (let [g (second f) ar (count (arg-types (global-type g)))]
+      (if (>= (count args) ar)
+        (with-atoms (take ar args)
+          (fn [as] (let [call (list 'primop (nth g 3) as)]
+                     (if (= ar (count args)) call
+                         (let [n (fresh "sat")]
+                           (list 'case call [n :L] '(poly) [(list 'alt :default [] (with-atoms (drop ar args) (fn [bs] (list 'app n bs))))]))))))
+        ;; unsaturated: eta-expanded (CorePrep's maybeSaturate)
+        (let [xs (mapv (fn [i] (list 'lv "eta" (str "pe" (swap! *n* inc)))) (range (- ar (count args))))
+              tys (drop (count args) (arg-types (global-type g)))]
+          (doseq [[x t] (map vector xs tys)] (swap! *lreps* assoc x (type-reps t)))
+          (expr (list 'lam xs (list 'app f (into (vec args) xs)))))))
     (and (head? f 'v) (con-name? (second f)))
     (let [c (as-data (second f)) ar (or (:arity (con-info c)) (count args))]
       (cond
@@ -284,7 +427,7 @@
           (seq ls) (list 'prim (second (lit-form (second (first ls)))))
           :else '(poly))))
 
-(defn- binders [bs] (mapv (fn [b] [(local-name b) :L]) bs))
+(defn- binders [bs] (mapv (fn [b] (let [n (local-name b) r (reps->rep (local-reps b))] (swap! *reps* assoc n r) [n r])) bs))
 
 (defn- bind-pair [[_ b e]]
   (let [n (if (lv? b) (local-name b) (gname b))] [[n :L] (rhs e)]))
@@ -327,22 +470,63 @@
                   body (expr (nth e 2))
                   join? (not (under-closure? fname body))]
               (list (if join? 'letne 'let) (list 'bind [fname :L] (list 'closure (if join? :j :r) :fvs [[v :v]] (expr fe))) body))
-          (reduce (fn [b [_ x e2 :as bd]]
+          (do
+           (doseq [[_ x e2] (second e)]
+             (when (and (lv? x) (not (get (:ltypes *r*) x))) (swap! *lreps* assoc x (expr-reps e2)))
+             ;; a binder of an unboxed tuple: its components (Unarise)
+             (when-let [cs (and (lv? x) (expr-comps e2))]
+               (swap! *mcomps* assoc x cs)
+               (swap! *multi* assoc x (vec (for [rs cs :when (seq rs)] (let [n (fresh "ubx") r (reps->rep rs)] (swap! *reps* assoc n r) [n r]))))))
+           (reduce (fn [b [_ x e2 :as bd]]
+                    (cond
+                    ;; a binder of an unlifted type is bound by a case (Core's let-can-float invariant; the desugarer's
+                    ;; bindNonRec, mkDefaultCase)
+                    (and (lv? x) (get @*multi* x))
+                    (let [cs (get @*multi* x) n (local-name x)]
+                      (list 'case (expr e2) [n (reps->rep (mapv second cs))] (list 'multi (count cs))
+                            [(list 'alt (unboxed-name (count cs)) cs b)]))
+                    (and (lv? x) (not= [:L] (local-reps x)))
+                    (let [rs (local-reps x) r (reps->rep rs) n (local-name x)]
+                      (swap! *reps* assoc n r)
+                      (list 'case (expr e2) [n r] (if (> (count rs) 1) (list 'multi (count rs)) (list 'prim r)) [(list 'alt :default [] b)]))
+                    :else
                     (if-let [[c args] (floatable-con e2)]
                       (let [rs (mapv atom-of args)]
                         (wrap-binds (vec (mapcat second (reverse rs)))
                                     (list 'let (list 'bind [(local-name x) :L] (list 'rcon (gname c) (mapv first rs))) b)))
-                      (let [[bn r] (bind-pair bd)] (list 'let (list 'bind bn r) b))))
-                  (expr (nth e 2)) (reverse (second e))))
+                      (let [[bn r] (bind-pair bd)] (list 'let (list 'bind bn r) b)))))
+                  (expr (nth e 2)) (reverse (second e)))))
       letrec (list 'let (apply list 'rec (map (fn [bd] (let [[bn r] (bind-pair bd)] (list 'bind bn r))) (second e)))
                    (expr (nth e 2)))
       case (if (and (= 1 (count (nth e 3))) (vector? (second (first (nth e 3)))) (newtype-con? (second (first (nth e 3)))))
              ;; a newtype's constructor matched: its field is the scrutinee
              (let [[_ s b [[_ _ [x] body]]] e]
                (expr (list 'let [(list 'bind b s)] (list 'let [(list 'bind x b)] body))))
+           (if (and (lv? (second e)) (get @*multi* (second e)))
+             ;; a case on an unarised unboxed tuple: its alternative's binders are the components
+             (let [[_ s b alts] e
+                   cs (get @*multi* s)
+                   alt (or (some (fn [a] (when (and (vector? (second a)) (unboxed-con? (second a))) a)) alts) (first alts))
+                   [_ c xs body] alt]
+               (swap! *multi* assoc b cs)
+               (swap! *mcomps* assoc b (get @*mcomps* s))
+               (when (vector? c)
+                 (let [comps (expr-comps s)
+                       pairs (map vector xs (concat (or comps []) (repeat [:L])))
+                       _ (doseq [[x rs] pairs] (swap! *lreps* assoc x rs))
+                       nonvoid (keep (fn [[x rs]] (when (seq rs) x)) pairs)]
+                   (doseq [[x [n _]] (map vector nonvoid cs)]
+                     (swap! *names* assoc x n))))
+               (expr body))
            (let [[_ s b alts] e
                  at (alt-type alts)
-                 brep (if (= 'prim (first at)) (second at) :L)
+                 srs (expr-reps s)
+                 ubx (some (fn [[_ c]] (and (vector? c) (unboxed-con? c))) alts)
+                 [at brep] (cond ubx [(list 'multi (count srs)) (reps->rep srs)]
+                                 (= 'prim (first at)) [at (second at)]
+                                 (and (= '(poly) at) (not= [:L] srs)) [(if (> (count srs) 1) (list 'multi (count srs)) (list 'prim (reps->rep srs))) (reps->rep srs)]
+                                 :else [at :L])
+                 _ (when (lv? b) (swap! *lreps* assoc b srs))
                  bn (local-name b)
                  _ (swap! *reps* assoc bn brep)
                  salts (vec (for [[_ c xs body] (sort-by (fn [[_ c]] (if (= :default c) 0 1)) alts)]
@@ -351,6 +535,12 @@
                                 (head? c 'lit) (list 'alt (first (lit-form (second c))) [] (expr body))
                                 (not (vector? c)) (do (binding [*out* *err*] (println "tostg: alternative not handled:" (pr-str c)))
                                                       (list 'alt :default [] (expr body)))
+                                (unboxed-con? c)
+                                (let [comps (or (expr-comps s) (mapv local-reps xs))
+                                      bs (vec (keep (fn [[x rs]] (let [_ (swap! *lreps* assoc x rs)]
+                                                              (when (seq rs) (let [n (local-name x) r (reps->rep rs)] (swap! *reps* assoc n r) [n r]))))
+                                                    (map vector xs (concat comps (repeat [:L])))))]
+                                  (list 'alt (unboxed-name (count bs)) bs (expr body)))
                                 :else (let [reps (con-reps c)
                                             bs (mapv (fn [x r] (let [n (local-name x)] (swap! *reps* assoc n r) [n r]))
                                                      xs (concat reps (repeat :L)))]
@@ -359,7 +549,7 @@
              (loop [se (expr s) wraps []]
                (if (head? se 'let)
                  (recur (nth se 2) (conj wraps (second se)))
-                 (reduce (fn [b bd] (list 'let bd b)) (list 'case se [bn brep] at salts) (reverse wraps))))))
+                 (reduce (fn [b bd] (list 'let bd b)) (list 'case se [bn brep] at salts) (reverse wraps)))))))
       (do (binding [*out* *err*] (println "tostg: expression not handled:" (pr-str (first e)))) (list 'int 0)))))
 
 (defn- atomic-args? [args]
@@ -394,7 +584,7 @@
         float! (fn [rs] (doseq [b (mapcat second (reverse rs))] (swap! *floats* conj [b (first b)])))
         rename (fn [rs] (mapv first rs))]
     (cond
-      (or (nil? f) (head? e 'lam) (string-lit? (first args))) (rhs e)
+      (or (nil? f) (head? e 'lam) (string-lit? (first args)) (some #(not= [:L] (expr-reps %)) args)) (rhs e)
       (and (head? f 'v) (con-name? (second f)))
       (let [c (as-data (second f))]
         (if (and (not (newtype-con? c)) (not (class-of-dcon (second f))) (= (:arity (con-info c)) (count args))
@@ -433,6 +623,7 @@
   (if-not (seq? e) [e []]
     (case (first e)
       app [e (vec (distinct (fv-atoms (cons (second e) (nth e 2)))))]
+      primop [e (vec (distinct (fv-atoms (nth e 2))))]
       con [e (vec (distinct (fv-atoms (nth e 2))))]
       case (let [[_ s b at alts] e
                  [s2 fs] (fv-expr s)
@@ -477,18 +668,18 @@
   (for [[t info] (:tycons *r*) :when (= (module) (nth t 2))]
     {:data (list 'stg/data (ext-str (module) (nth t 3))
                  (vec (for [c (:cons info) :let [ci (con-info c)]]
-                        (list 'dc (gname c) (:tag ci) (vec (repeat (:arity ci) :L)) (mapv #(if % :strict :lazy) (or (:strict ci) (repeat (:arity ci) false)))))))
+                        (list 'dc (gname c) (:tag ci) (con-reps c) (mapv #(if % :strict :lazy) (or (:strict ci) (repeat (:arity ci) false)))))))
      :binds (for [c (:cons info) :let [ci (con-info c)] :when (= 'data (:flavour info))]
               (if (zero? (:arity ci))
                 (list 'bind [(gname c) :L] (list 'rcon (gname c) []))
                 (let [xs (mapv (fn [_] (fresh "eta")) (range (:arity ci)))]
-                  (list 'bind [(gname c) :L] (list 'closure :r [] (mapv (fn [x] [x :L]) xs) (strict-con c xs))))))}))
+                  (list 'bind [(gname c) :L] (list 'closure :r [] (mapv (fn [x r] [x r]) xs (concat (con-reps c) (repeat :L))) (strict-con c xs))))))}))
 
 (defn module-stg
   "The desugared program as STG forms (a vector of top-level forms, the header first)"
   [r units file]
-  (binding [*r* r *units* units *names* (atom {}) *n* (atom 0) *reps* (atom {}) *joins* (atom #{})]
-    (let [prog (ds/desugar-program r)
+  (binding [*r* r *units* units *names* (atom {}) *n* (atom 0) *reps* (atom {}) *joins* (atom #{}) *lreps* (atom {}) *multi* (atom {}) *mcomps* (atom {})]
+    (let [prog (binding [arbace.repr.haskell.simpleopt/*unlifted?* (fn [e] (not= [:L] (expr-reps e)))] (ds/desugar-program r))
           top-names (set (concat (for [[_ b _] prog] (if (lv? b) (local-name b) (gname b)))))
           has-main? (some (fn [[_ b _]] (= b ["ext" "var" (module) "main"])) prog)]
       (binding [*tops* (into top-names [(str "main::" (module) "/main")])]

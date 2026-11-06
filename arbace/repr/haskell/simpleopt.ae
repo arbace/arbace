@@ -149,13 +149,16 @@
 ;;; Compulsory unfoldings (GHC.Types.Id.Make): a fresh copy at each use
 
 (def ^:dynamic *fresh* nil)
+(def ^:dynamic *cons* nil)     ; {CON {:arity n :flavour data|newtype}}
 (defn- fresh [o] (list 'lv o (str "so" (swap! *fresh* inc))))
 
 (defn- compulsory
   "The compulsory unfolding of a global name, or nil"
   [g]
   (when (vector? g)
-    (case [(nth g 2) (nth g 3)]
+    (case (if (= 'newtype (:flavour (get *cons* (assoc g 1 "data")))) :newtype [(nth g 2) (nth g 3)])
+      ;; a newtype's constructor: the identity (Note [Compulsory newtype unfolding], its cast erased)
+      :newtype (let [x (fresh "nt")] (list 'lam [x] x))
       ["GHC.Internal.Prim" "seq"] (let [a (fresh "a") b (fresh "b")] (list 'lam [a b] (list 'case a (fresh "wild") [(list 'alt :default [] b)])))
       ["GHC.Internal.Magic" "oneShot"] (let [f (fresh "f")] (list 'lam [f] f))
       ["GHC.Internal.Prim" "coerce"] (let [x (fresh "x")] (list 'lam [x] x))
@@ -192,10 +195,14 @@
     [(assoc-in env [:subst (key-of b)] out-rhs) nil]
     [env [b out-rhs]]))
 
+(def ^:dynamic *unlifted?* (constantly false)) ; an expression of an unlifted type (tostg's representations)
+
 (defn- so-bind-pair
-  "simple_bind_pair: a binder and its (unoptimised) closure: inlined unconditionally, substituted, or bound"
+  "simple_bind_pair: a binder and its (unoptimised) closure: inlined unconditionally, substituted, or bound; a binder
+  of an unlifted type is case-bound in GHC's Core (needsCaseBinding, the desugarer's bindNonRec), so never inlined
+  unoptimised (tostg makes its let a case)"
   [env b [cenv ce]]
-  (if (and (not (exported? b)) (safe-to-inline? b))
+  (if (and (not (exported? b)) (safe-to-inline? b) (not (*unlifted?* ce)))
     [(assoc-in env [:inl (key-of b)] [cenv ce]) nil]
     (so-out-bind env b (so-expr cenv ce))))
 
@@ -209,7 +216,6 @@
       (let [g (second f) c (when (vector? g) (assoc g 1 "data")) i (get cons c)]
         (when (and i (not= 'newtype (:flavour i)) (= (:arity i) (count args))) [c args])))))
 
-(def ^:dynamic *cons* nil)     ; {CON {:arity n :flavour data|newtype}}
 
 (defn- so-binds
   "A let's bindings, in order: [env [bind...]]"

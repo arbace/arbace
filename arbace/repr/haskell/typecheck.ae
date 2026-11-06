@@ -54,6 +54,7 @@
 (def fun-tc (ext-name "tc" "GHC.Internal.Types" "FUN"))
 (def list-tc (ext-name "tc" "GHC.Internal.Types" "List"))
 (defn tuple-tc [n] (if (zero? n) (ext-name "tc" "GHC.Internal.Tuple" "Unit") (ext-name "tc" "GHC.Internal.Tuple" (str "Tuple" n))))
+(defn unboxed-con [n] (ext-name "data" "GHC.Internal.Types" (str "(#" (apply str (repeat (dec n) ",")) "#)")))
 (defn tuple-con [n] (ext-name "var" "GHC.Internal.Tuple" (if (zero? n) "()" (str "(" (apply str (repeat (dec n) ",")) ")"))))
 (def tc-int (ext-name "tc" "GHC.Internal.Types" "Int"))
 (def tc-integer (ext-name "tc" "GHC.Internal.Bignum.Integer" "Integer"))
@@ -191,7 +192,12 @@
   [f]
   (case (first f)
     tv [:tv (second f)]
-    tycon-app [:tc (vec (map #(if (symbol? %) (name %) %) (second f))) (mapv conv-type (nth f 2))]
+    tycon-app (let [n (vec (map #(if (symbol? %) (name %) %) (second f))) as (mapv conv-type (nth f 2))
+                    ;; an unboxed tuple's or sum's representation arguments dropped: the elaborator works with
+                    ;; its N component types alone (representations are tostg's, from the components)
+                    k (when (and (= "GHC.Internal.Types" (nth n 2)) (re-matches #"(Tuple|Sum)[0-9]+#" (nth n 3)))
+                        (quot (count as) 2))]
+                [:tc n (if k (subvec as k) as)])
     app (mk-app (conv-type (nth f 1)) (conv-type (nth f 2)))
     fun (if (= 'c (nth f 1))
           (let [p (conv-type (nth f 3)) body (conv-type (nth f 4))
@@ -273,7 +279,12 @@
     (doseq [n (range 2 8)]
       (let [vs (mapv #(str "t" %) (range n)) ts (mapv (fn [v] [:tv v]) vs)]
         (swap! *genv* assoc (ext-name "data" "GHC.Internal.Tuple" (occ (tuple-con n)))
-               [:forall vs [] (reduce (fn [acc t] (fn-ty t acc)) [:tc (tuple-tc n) ts] (reverse ts))])))))
+               [:forall vs [] (reduce (fn [acc t] (fn-ty t acc)) [:tc (tuple-tc n) ts] (reverse ts))])))
+    ;; the unboxed tuples' constructors (wired in: no interface carries them), their representation arguments left out
+    (doseq [n (range 2 8)]
+      (let [vs (mapv #(str "t" %) (range n)) ts (mapv (fn [v] [:tv v]) vs)]
+        (swap! *genv* assoc (unboxed-con n)
+               [:forall vs [] (reduce (fn [acc t] (fn-ty t acc)) [:tc (ext-name "tc" "GHC.Internal.Types" (str "Tuple" n "#")) ts] (reverse ts))])))))
 
 (def iface-forms (atom {}))  ; {[path mtime] forms}: an interface read once per process (front's build of many programs)
 
@@ -406,6 +417,8 @@
 ;;; Core
 
 (defn- lv [n] (list 'lv (occ n) (str/join ":" (map str (drop 3 n)))))
+(def ^:dynamic *ltypes* nil)   ; atom {(lv ...) type}: the local binders' types, zonked into :ltypes (tostg's PrimReps)
+(defn- note-type! [x t] (when *ltypes* (swap! *ltypes* assoc x t)))
 (def ^:dynamic *uniq* nil)
 (defn- fresh-lv [o] (list 'lv o (str "u" (fresh-id))))
 
@@ -454,7 +467,8 @@
   [env n & [sp label]]
   (if-let [e (get env n)]
     (if (:mono e)
-      [(:mono e) (or (:core e) (lv n))]
+      (do (when-not (:core e) (note-type! (lv n) (:mono e)))
+          [(:mono e) (or (:core e) (lv n))])
       (let [[t preds] (instantiate (:poly e))]
         [t (app* (:core e) (mapv want! preds))]))
     (if-let [t (get @*genv* (if (= "data" (nth n 1)) n n))]
@@ -486,12 +500,32 @@
                      [a (list 'olit :frac fl a ev fr)])
       [(fresh-meta) (list 'lit "?")])))
 
+(defn- prim-ty [o] [:tc (ext-name "tc" "GHC.Internal.Prim" o) []])
+
+(defn- fl-text
+  "A FractionalLit (FL (src S) NEG (:% N D) EXP BASE) as decimal text, exactly: N/D * 10^EXP"
+  [fl]
+  (let [[_ _ neg [_ n d] e] fl
+        x (with-precision 40 (/ (.scaleByPowerOfTen ^java.math.BigDecimal (bigdec n) (int e)) (bigdec d)))
+        t (.toPlainString ^java.math.BigDecimal x)
+        t (if (str/includes? t ".") t (str t ".0"))]
+    (if (and (zero? x) (true? neg)) "-0.0" t)))
+
 (defn- hslit [v]
   (let [l (arg v 2)]
     (case (con l)
       HsString [(list-ty (con-ty tc-char)) (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" "unpackCString#")) [(list 'lit (str (pr-str (arg l 2)) "#"))])]
       HsChar [(con-ty tc-char) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "C#")) [(list 'lit (str "'" (arg l 2) "'#"))])]
       HsInt [(con-ty tc-int) (list 'lit (str (arg l 2)))]
+      ;; MagicHash's primitive literals: their types of GHC.Internal.Prim, the literal's text as tostg reads it
+      HsIntPrim [(prim-ty "Int#") (list 'lit (str (arg l 2) "#"))]
+      HsWordPrim [(prim-ty "Word#") (list 'lit (str (arg l 2) "##"))]
+      HsInt64Prim [(prim-ty "Int64#") (list 'lit (str (arg l 2) "#"))]
+      HsWord64Prim [(prim-ty "Word64#") (list 'lit (str (arg l 2) "##"))]
+      HsCharPrim [(prim-ty "Char#") (list 'lit (str "'" (arg l 2) "'#"))]
+      HsStringPrim [(prim-ty "Addr#") (list 'lit (str (pr-str (arg l 2)) "#"))]
+      HsDoublePrim [(prim-ty "Double#") (list 'lit (str (fl-text (arg l 2)) "##"))]
+      HsFloatPrim [(prim-ty "Float#") (list 'lit (str (fl-text (arg l 2)) "#"))]
       [(fresh-meta) (list 'lit "?")])))
 
 (defn- global-occ [env o m]
@@ -595,7 +629,10 @@
                      [(list-ty a) (reduce (fn [tl x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" ":")) [x tl]))
                                           (list 'v (ext-name "var" "GHC.Internal.Types" "[]")) (reverse cs))])
       ExplicitTuple (let [rs (mapv (fn [p] (infer env (arg (lval p) 2))) (arg v 2))]
-                      [[:tc (tuple-tc (count rs)) (mapv first rs)] (app* (list 'v (tuple-con (count rs))) (mapv second rs))])
+                      (if (= 'Unboxed (arg v 3))
+                        [[:tc (ext-name "tc" "GHC.Internal.Types" (str "Tuple" (count rs) "#")) (mapv first rs)]
+                         (app* (list 'v (unboxed-con (count rs))) (mapv second rs))]
+                        [[:tc (tuple-tc (count rs)) (mapv first rs)] (app* (list 'v (tuple-con (count rs))) (mapv second rs))]))
       ArithSeq (let [info (arg v 3)
                      [fname xs] (case (con info)
                                   From ["enumFrom" [(arg info 1)]]
@@ -715,19 +752,28 @@
 (defn tc-pat [env p t]
   (let [v (lval p)]
     (case (con v)
-      VarPat (let [n (nm (arg v 2))] [(assoc env n {:mono t}) (lv n)])
+      VarPat (let [n (nm (arg v 2))] (note-type! (lv n) t) [(assoc env n {:mono t}) (lv n)])
       WildPat [env (list 'pwild)]
       (ParPat BangPat) (tc-pat env (arg v 2) t)
       ;; a lazy pattern: kept for the match compiler (HF5), its variables bound by selectors
       LazyPat (let [[env1 pc] (tc-pat env (arg v 2) t)] [env1 (list 'plazy pc)])
-      AsPat (let [n (nm (arg v 2)) [env1 pc] (tc-pat (assoc env n {:mono t}) (arg v 3) t)] [env1 (list 'pas (lv n) pc)])
+      AsPat (let [n (nm (arg v 2)) _ (note-type! (lv n) t) [env1 pc] (tc-pat (assoc env n {:mono t}) (arg v 3) t)] [env1 (list 'pas (lv n) pc)])
       ConPat (if (= 'RecCon (con (arg v 3)))
                (tc-rec-pat env v t)
                (tc-con-pat env v t))
-      TuplePat (let [ps (arg v 2) ts (mapv (fn [_] (fresh-meta)) ps)
+      TuplePat (if (= 'Unboxed (arg v 3))
+                 ;; an unboxed tuple: its constructor (#,...,#) of GHC.Internal.Types
+                 (let [ps (arg v 2) cn (unboxed-con (count ps))
+                       [ct _] (instantiate (get @*genv* cn))
+                       [ats rt] (loop [ty ct ats []] (if (and (= :tc (first ty)) (= fun-tc (second ty)))
+                                                         (recur (second (nth ty 2)) (conj ats (first (nth ty 2)))) [ats ty]))
+                       [env' pcs] (reduce (fn [[env pcs] [p1 t1]] (let [[e c] (tc-pat env p1 t1)] [e (conj pcs c)])) [env []] (map vector ps ats))]
+                   (unify t rt)
+                   [env' (list 'pcon cn pcs)])
+               (let [ps (arg v 2) ts (mapv (fn [_] (fresh-meta)) ps)
                      [env' pcs] (reduce (fn [[env pcs] [p1 t1]] (let [[e c] (tc-pat env p1 t1)] [e (conj pcs c)])) [env []] (map vector ps ts))]
                  (unify t [:tc (tuple-tc (count ps)) ts])
-                 [env' (list 'pcon (ext-name "data" "GHC.Internal.Tuple" (occ (tuple-con (count ps)))) pcs)])
+                 [env' (list 'pcon (ext-name "data" "GHC.Internal.Tuple" (occ (tuple-con (count ps)))) pcs)]))
       ListPat (let [a (fresh-meta)
                     [env' pcs] (reduce (fn [[env pcs] p1] (let [[e c] (tc-pat env p1 a)] [e (conj pcs c)])) [env []] (arg v 2))]
                 (unify t (list-ty a))
@@ -1421,7 +1467,8 @@
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
               *genv* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
-              *derivs* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))]
+              *derivs* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
+              *ltypes* (atom {})]
       (load-ifaces!)
       (doseq [s sigs :let [sv (lval s)] :when (= 'FixSig (con sv))
               :let [fs (arg sv 2) fx (arg fs 3)] n (arg fs 2)]
@@ -1465,6 +1512,8 @@
          ;; the tables HF5-HF6 need (the match compiler's constructor families, STG's data and dictionaries)
          :all-cons @*cons* :tycons @*tycons*
          :all-classes (into {} (for [[n info] @*classes*] [n (dissoc info :binds)]))
+         :ltypes (into {} (for [[x t] @*ltypes*] [x (deep-expand (zonk t))]))
+         :genv @*genv*
          :errors @*errors*}))))
 
 ;;; ------------------------------------------------------------------------------------------
