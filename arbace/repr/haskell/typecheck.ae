@@ -443,6 +443,7 @@
 ;;; Core
 
 (defn- lv [n] (list 'lv (occ n) (str/join ":" (map str (drop 3 n)))))
+(def ^:dynamic *abs-binds* (= "1" (System/getenv "REPR_HASKELL_SIMPL"))) ; dsAbsBinds' letrec for one unsigned binder
 (def ^:dynamic *ltypes* nil)   ; atom {(lv ...) type}: the local binders' types, zonked into :ltypes (tostg's PrimReps)
 (defn- note-type! [x t] (when *ltypes* (swap! *ltypes* assoc x t)))
 (def ^:dynamic *uniq* nil)
@@ -1060,10 +1061,20 @@
                 [tvs preds params] (generalize (mapv second all) @ws (restricted? unsigned))
                 env' (reduce (fn [e [n t]] (assoc e n {:poly [:forall tvs preds (zonk t)] :core (if top? (list 'v n) (lv n))}))
                              env all)
-                out (if (empty? params)
+                self-rec? (fn [[n c]] (let [me (lv n)] ((fn occ? [x] (cond (= x me) true (coll? x) (boolean (some occ? x)) :else false)) c)))
+                out (cond
+                      ;; GHC's dsAbsBinds for one exported binder without a signature: the global bound to a letrec
+                      ;; of the monomorphic binding (a self-recursive one keeps it; the -O0 Simplifier's input)
+                      (and (empty? params) *abs-binds* (= 1 (count all)) (= 1 (count results)) (self-rec? (first results)))
+                      (let [[n c] (first results)
+                            mono (list 'lv (occ n) (str "mono" (fresh-id)))]
+                        (swap! *ltypes* assoc mono (second (first all)))
+                        [(list 'bind (bind-core top? n) (list 'letrec [(list 'bind mono (substitute {(lv n) mono} c))] mono))])
+                      (empty? params)
                       ;; no dictionaries: the monomorphic references are the binders themselves
                       (mapv (fn [[n c]] (list 'bind (bind-core top? n) (if top? (reduce (fn [c [m _]] (rename-mono c m)) c all) c)))
                             results)
+                      :else
                       ;; GHC's AbsBinds: each binder abstracted over the dictionaries, the group's monomorphic
                       ;; bindings inside (a letrec when recursive)
                       (let [monos (into {} (map (fn [[n _]] [(lv n) (list 'lv (occ n) (str "mono" (fresh-id)))]) all))

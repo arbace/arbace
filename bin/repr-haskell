@@ -789,14 +789,17 @@ stg_check() {
   for f in "${files[@]}"; do
     n=${f%.hs}; total=$((total + 1))
     mkdir -p "$w/ref/$n"
-    (cd "$d" && "$helper" stg -o "$w/ref/$n" --libdir "$libdir" --ghc -O0 -outputdir "$w/ref/$n/obj" -o "$w/ref/$n/prog" --files "$f") > "$w/ref/$n.log" 2>&1 || true
+    (cd "$d" && "$helper" stg --core -o "$w/ref/$n" --libdir "$libdir" --ghc -O0 -outputdir "$w/ref/$n/obj" -o "$w/ref/$n/prog" --files "$f") > "$w/ref/$n.log" 2>&1 || true
+    arbace_tool -m arbace.repr.haskell.simplcmp "$w/ref/$n/Main.core.ae" "$w/stg/$n/Main.simpl.edn" > "$w/$n.simplcmp" 2>&1 || true
     (cd "$d" && ghc -O0 -outputdir "$w/ref/$n/gobj" -o "$w/ref/$n/ghc-prog" "$f") > "$w/ref/$n.ghc.log" 2>&1 && "$w/ref/$n/ghc-prog" > "$w/ref/$n.out" 2> "$w/ref/$n.err" || true
     arbace_tool -m arbace.repr.haskell.stgcmp "$w/ref/$n/Main.stg.ae" "$w/stg/$n/Main.stg.ae" > "$w/$n.stgcmp" 2>&1 || true
     (ulimit -v $((${ARBACE_MEM_GIB:-3} * 1048576)); timeout 60 "$exe" run "${la[@]}" --image "$img" --prog "$w/stg/$n" --name "$n" > "$w/$n.out" 2> "$w/$n.err") || true
-    if cmp -s "$w/$n.out" "$w/ref/$n.out"; then pass=$((pass + 1)); echo "run ok $n ($(head -1 "$w/$n.stgcmp"))"
-    else echo "run FAIL $n ($(head -1 "$w/$n.stgcmp")): $(head -c 300 "$w/$n.err" | tr '\n' ' ')"; st=1; fi
+    if cmp -s "$w/$n.out" "$w/ref/$n.out"; then pass=$((pass + 1)); echo "run ok $n ($(head -1 "$w/$n.stgcmp"); $(head -1 "$w/$n.simplcmp"))"
+    else echo "run FAIL $n ($(head -1 "$w/$n.stgcmp"); $(head -1 "$w/$n.simplcmp")): $(head -c 300 "$w/$n.err" | tr '\n' ' ')"; st=1; fi
   done
   echo "stg-check: $pass of $total programs run on hsi from Arbace's STG with GHC's output"
+  awk '/^simpl /{e+=$2; c+=$4} END{print "stg-check: simplified Core equal to GHC'"'"'s -O0 Core (after its Simplifier) in " e " of " c " bindings of the programs"}' "$w"/*.simplcmp
+  awk '/^stg /{e+=$2; c+=$4} END{print "stg-check: STG equal to GHC'"'"'s -O0 STG in " e " of " c " bindings of the programs"}' "$w"/*.stgcmp
   # the negative control: each program's run judged against the next program's reference must fail
   local prev="" ctl=0
   for f in "${files[@]}"; do n=${f%.hs}; if [ -n "$prev" ] && cmp -s "$w/$prev.out" "$w/ref/$n.out"; then ctl=1; fi; prev=$n; done
@@ -912,6 +915,10 @@ run_check() {
   cat "$w"/front.*.log | grep -E '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash) ' | sort > "$w/front.txt" || true
   local exe; exe=$("$root/bin/hsi" build)
   local img=${HSI_IMAGE:-$root/.tmp/hsi/image} la=() l
+  # hsi's caps (the user's decision 4, 2026-11-06): ARBACE_MEM_GIB (address space, GiB; Go's heap limit three quarters
+  # of it) and HSI_TIMEOUT (CPU seconds), as bin/hsi check takes them; the light defaults 2 GiB and 120 s, the gate's
+  # night run 16 GiB
+  local gib=${ARBACE_MEM_GIB:-2} cpu=${HSI_TIMEOUT:-120}
   IFS=: read -r -a dirs <<< "$libs"; for l in "${dirs[@]}"; do la+=(--lib "$l"); done
   "$exe" image --out "$img" "${la[@]}" 2> "$w/image.log" || { cat "$w/image.log" >&2; return 1; }
   : > "$w/results.edn"
@@ -924,8 +931,8 @@ run_check() {
     else
       r=$w/run/$b
       rm -rf "$r"; mkdir -p "$r"; cp -r "$d"/. "$r"/; : > "$r/.empty"
-      (cd "$r" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$r" timeout -s KILL 360 \
-         sh -c "ulimit -v $((2 * 1048576)); export GOMEMLIMIT=1536MiB; ulimit -t 120; exec $(printf '%q ' "$exe" run "${la[@]}" --image "$img" --prog "$w/out/stg/$b" --name "$nm" --) $a" \
+      (cd "$r" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$r" timeout -s KILL $((cpu * 3)) \
+         sh -c "ulimit -v $((gib * 1048576)); export GOMEMLIMIT=$((gib * 768))MiB; ulimit -t $cpu; exec $(printf '%q ' "$exe" run "${la[@]}" --image "$img" --prog "$w/out/stg/$b" --name "$nm" --) $a" \
          < "$r/${sin:-.empty}" > "$w/$b.stdout" 2> "$w/$b.stderr") || s=$?
       rm -rf "$r"
       echo "$s" > "$w/$b.status"

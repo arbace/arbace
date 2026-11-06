@@ -586,7 +586,11 @@
     (c/head? e 'cast) (let [[fl e2] (make-trivial env top? dmd occ (second e))] [fl (list 'cast e2 (nth e 2))])
     :else
     (let [[fl e1] (prepare-rhs env top? occ e)
-          v (c/fresh-local occ {})
+          v (if (c/lit-string? e1)
+              (let [t [:tc ["ext" "tc" "GHC.Internal.Prim" "Addr#"] []] v (c/fresh-local occ {:type t})]
+                (when c/*new-types* (swap! c/*new-types* assoc v t))
+                v)
+              (c/fresh-local occ {}))
           [at e2] (try-eta-expand-rhs env {:k :let :level (if top? :top :nested) :rec :nonrec} v e1)
           unf (mk-let-unfolding env top? v false e2)
           v2 (add-let-bndr-info v at unf)]
@@ -768,21 +772,23 @@
         :done-ex (simpl-expr-f (zap-subst env) (second r) (trim-join-cont (nth r 2) k))))))
 
 (defn- rebuild-call [env ai k]
-  (cond
-    (and (not (seq (:dmds ai))) (not (cont-is-trivial? k)))
-    [(empty-floats env) (arg-info-expr (:fun ai) (:args ai))]
-    (= :apply (:k k))
-    (let [{:keys [arg dup cont]} k]
-      (cond (simplified? dup) (rebuild-call env (add-val-arg ai arg) cont)
-            (and (strict-arg-info? ai) (:case-case (:mode env)))
-            (simpl-expr-f (in-scope-from-e (:env k) env) arg {:k :strict-arg :fun ai :dup :simpl :cont cont})
-            :else (let [[_ _ a2] (simpl-lazy-arg env dup (:env k) arg ai)] (rebuild-call env (add-val-arg ai a2) cont))))
-    (empty? (:rules ai)) (rebuild env (arg-info-expr (:fun ai) (:args ai)) k)
-    :else (let [args (:args ai)
-                m (try-rules env (:rules ai) (:fun ai) (map :arg args))]
-            (if m
-              (do (tick!) (simpl-expr-f env (second m) (push-simplified-args env (drop (first m) args) k)))
-              (rebuild env (arg-info-expr (:fun ai) (:args ai)) k)))))
+  ;; a loop over the arguments (the interpreter's call depth is bounded: a long do block nests deeply)
+  (loop [ai ai k k]
+    (cond
+      (and (not (seq (:dmds ai))) (not (cont-is-trivial? k)))
+      [(empty-floats env) (arg-info-expr (:fun ai) (:args ai))]
+      (= :apply (:k k))
+      (let [{:keys [arg dup cont]} k]
+        (cond (simplified? dup) (recur (add-val-arg ai arg) cont)
+              (and (strict-arg-info? ai) (:case-case (:mode env)))
+              (simpl-expr-f (in-scope-from-e (:env k) env) arg {:k :strict-arg :fun ai :dup :simpl :cont cont})
+              :else (let [[_ _ a2] (simpl-lazy-arg env dup (:env k) arg ai)] (recur (add-val-arg ai a2) cont))))
+      (empty? (:rules ai)) (rebuild env (arg-info-expr (:fun ai) (:args ai)) k)
+      :else (let [args (:args ai)
+                  m (try-rules env (:rules ai) (:fun ai) (map :arg args))]
+              (if m
+                (do (tick!) (simpl-expr-f env (second m) (push-simplified-args env (drop (first m) args) k)))
+                (rebuild env (arg-info-expr (:fun ai) (:args ai)) k))))))
 
 (defn- add-coerce [env co k]
   (cond (c/co-refl? co) k
@@ -850,9 +856,8 @@
   (case (first e)
     (lv v) (simpl-in-id env e k)
     lit (rebuild env e k)
-    cast (simpl-cast env (second e) (nth e 2) k)
-    app (simpl-expr-f env (second e)
-                      (reduce (fn [k a] {:k :apply :arg a :env env :dup :nodup :cont k}) k (reverse (nth e 2))))
+    cast (let [co (nth e 2)] (recur env (second e) (if (c/co-refl? co) k (add-coerce env co k))))
+    app (recur env (second e) (reduce (fn [k a] {:k :apply :arg a :env env :dup :nodup :cont k}) k (reverse (nth e 2))))
     lam (simpl-lam env (zap-lambda-bndrs e (count-args k)) k)
     case (let [[_ s b alts] e] (simpl-expr-f env s {:k :select :dup :nodup :bndr b :alts alts :env env :cont k}))
     letrec (let [pairs (second e)]

@@ -1101,3 +1101,16 @@ families (HF9), Template Haskell; the libraries stay GHC's STG (Tier S).
    and 60 s (the classes then empty or smaller); (b) keep the light caps everywhere. *Recommended: (a)*.
 5. Next: the multi-module driver (nofib's 100 other programs, the testsuite's), then the elaborator's next extensions as
    those corpora order them (GADTs and type families wait for HF9). *Recommended* as the order of HF3's decision 5.
+
+## Decided (2026-11-06, the user: HF5-HF6's second slice and HF7's proposals)
+
+1. (a): `run-check` (the run corpus, 63 programs) in the essential gate and `run-check --nofib` (53 programs) in `--full`,
+   once `haskell-integrate` is on main; the steps are prepared on the branch, not added to main's gate.
+2. **The full port of GHC 9.14.1's `-O0` Simplifier now** (`GHC/Core/Opt/Simplify/*`, with OccurAnal, Arity's eta expansion
+   and arity analysis, Unfold's inlining decisions and sizes, the rules `-O0` has, the casts and coercions as far as the
+   elaborator's typed Core carries them), not piece by piece: behind a flag first, the default when the judges agree;
+   measured by stg-check (Core and STG equal to GHC's) and run-check / `--nofib` (runs equal; `imaginary/integrate` to pass).
+   The elaborator's output is extended where the Simplifier needs types (part of the port).
+3. (a): the tarball's nofib with its own recorded GHC runs (`test/haskell/ref-nofib.edn`).
+4. (a): run-check takes hsi's memory and time caps (`ARBACE_MEM_GIB`, `HSI_TIMEOUT`), 16 GiB at night.
+5. The multi-module driver (HF9's first part) comes after the Simplifier, by another agent.
