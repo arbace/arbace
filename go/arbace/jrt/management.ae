@@ -325,3 +325,79 @@ HotSpot's ThreadService::find_deadlocks_at_safepoint finds them, in a search per
 synchronizers, or null.\n"
   ^{:tag (* RefArray)} []
   (deadlockArray (deadlocked true)))
+
+;; ---------------------------------------------------------------------------------------
+;; slice 3b: the monitors and synchronizers a thread holds (ThreadInfo's locked monitors and synchronizers)
+
+(go/var ^{:doc "trackLocks is on once ThreadMXBean is made (HostManagement.trackLocks0): from then each thread's
+monitor entries and exits, and its jrt ReentrantLocks' acquisitions and releases, are recorded (one atomic
+load on the paths before). What was locked before is not known: a monitor entered before stays unlisted, and
+its exit finds no entry.\n" :tag atomic/Bool} trackLocks)
+
+(go/type heldMonitor "heldMonitor is a monitor a thread entered: its header and its Java object (nil: unknown).\n"
+  (struct ^{:tag (* Object)} o ^any x))
+
+(go/func heldPush [^{:tag (* Thread)} t ^{:tag (* Object)} o ^any x]
+  (.Lock (.-heldMu t))
+  (set! (.-held t) (append (.-held t) (lit heldMonitor :o o :x x)))
+  (.Unlock (.-heldMu t)))
+
+(go/func heldPop "heldPop removes t's latest entry of o's monitor, if any.\n" [^{:tag (* Thread)} t ^{:tag (* Object)} o]
+  (.Lock (.-heldMu t))
+  (for [i (- (len (.-held t)) 1)] (>= i 0) (dec! i)
+    (when (== (.-o (aget (.-held t) i)) o)
+      (set! (.-held t) (append (subslice (.-held t) _ i) (spread (subslice (.-held t) (+ i 1)))))
+      (break)))
+  (.Unlock (.-heldMu t)))
+
+(go/func syncHeld
+  "syncHeld records that t now holds (on) or no longer holds the synchronizer s, once tracked.\n"
+  [^{:tag (* Thread)} t ^any s ^bool on]
+  (when (not (.Load trackLocks)) (return))
+  (.Lock (.-heldMu t))
+  (if on
+    (set! (.-syncs t) (append (.-syncs t) s))
+    (range [i x (.-syncs t)]
+      (when (== x s)
+        (set! (.-syncs t) (append (subslice (.-syncs t) _ i) (spread (subslice (.-syncs t) (+ i 1)))))
+        (break))))
+  (.Unlock (.-heldMu t)))
+
+(go/func HostManagement_TrackLocks0__V_native
+  "HostManagement_TrackLocks0__V_native starts recording the threads' held monitors and synchronizers.\n"
+  []
+  (.Store trackLocks true))
+
+(go/func HostManagement_LockedMonitors0_Thread__O1_native
+  "HostManagement_LockedMonitors0_Thread__O1_native is the monitors t holds, the latest entered first, each once
+(its latest entry), not the one it waits on (Object.wait releases it): their Java objects (the header when
+unknown).\n"
+  ^{:tag (* RefArray)} [^Thread_I th]
+  (let [t (.Self_Thread th)
+        waiting (or (== (.Load (.-wstate t)) wsWaiting) (== (.Load (.-wstate t)) wsTimed))
+        on (.Load (.-waitOn t))
+        seen (make (map (* Object) bool))
+        ^{:tag (slice any)} out nil]
+    (.Lock (.-heldMu t))
+    (for [i (- (len (.-held t)) 1)] (>= i 0) (dec! i)
+      (let [h (aget (.-held t) i)
+            ^any x (.-x h)]
+        (when (== x nil) (set! x (.-o h)))
+        (when (and (not (aget seen (.-o h))) (not (and waiting (== x on))))
+          (aset seen (.-o h) true)
+          (set! out (append out x)))))
+    (.Unlock (.-heldMu t))
+    (let [a (NewRefArray Object_class (conv int32 (len out)))]
+      (range [i x out] (aset (.-A a) i x))
+      a)))
+
+(go/func HostManagement_LockedSynchronizers0_Thread__O1_native
+  "HostManagement_LockedSynchronizers0_Thread__O1_native is the ownable synchronizers t holds (jrt's
+ReentrantLocks; the JDK lists the locks' AQS sync objects, which jrt's lock has not).\n"
+  ^{:tag (* RefArray)} [^Thread_I th]
+  (let [t (.Self_Thread th)]
+    (.Lock (.-heldMu t))
+    (defer (.Unlock (.-heldMu t)))
+    (let [a (NewRefArray Object_class (conv int32 (len (.-syncs t))))]
+      (range [i x (.-syncs t)] (aset (.-A a) i x))
+      a)))

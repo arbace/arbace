@@ -55,6 +55,7 @@ public class ManagementFactoryHelper {
 
     public static synchronized ThreadMXBean getThreadMXBean() {
         if (threadMBean == null) {
+            jdk.internal.jrt.HostManagement.trackLocks0();
             threadMBean = new ThreadImpl(jvm);
         }
         return threadMBean;

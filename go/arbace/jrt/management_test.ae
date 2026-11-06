@@ -140,45 +140,89 @@ ReentrantLock WAITING on the lock, its holder the owner; the blocked and waited 
       (.Error t "the locker did not end"))))
 
 (go/func TestDeadlocks
-  "Two threads each holding the monitor the other enters are found by both searches; two threads each
-holding the ReentrantLock the other waits for only by the synchronizers' search; none before.\n"
+  "Two threads each holding the monitor the other is BLOCKED to enter are found by both searches; two each
+holding the ReentrantLock the other waits for only by the synchronizers' search; none before or after. The
+waits are recorded as the contended paths record them (waitBegin) while the threads sit on a channel, so that
+the cycles end with the test (TestThreadStatesAndLocks proves the recording itself).\n"
   [^{:tag (* testing/T)} t]
   (when (!= (HostManagement_FindDeadlocked0__Thread1_native) nil)
     (.Fatal t "a deadlock before any"))
   (let [a (Object_New)
         b (Object_New)
-        both (make (chan (struct)))
+        l1 (ReentrantLock_New)
+        l2 (ReentrantLock_New)
         ^sync/WaitGroup held (zero sync/WaitGroup)
-        t1 (Thread_New_Runnable_String (RunnableOf (fn [] (MonitorEnter a) (.Done held) (<! both) (MonitorEnter b))) (Str "dl-1"))
-        t2 (Thread_New_Runnable_String (RunnableOf (fn [] (MonitorEnter b) (.Done held) (<! both) (MonitorEnter a))) (Str "dl-2"))]
-    (.Add held 2)
+        release (make (chan (struct)))
+        cycle (fn ^Runnable [^any mine ^any theirs ^int32 ws ^bool monitor]
+                (RunnableOf (fn []
+                              (let [me (CurrentThread)
+                                    (values rl _) (assert (* ReentrantLock) mine)]
+                                (if monitor (MonitorEnter mine) (.Lock__V rl))
+                                (waitBegin me ws theirs)
+                                (.Done held)
+                                (<! release)
+                                (waitEnd me)
+                                (if monitor (MonitorExit mine) (.Unlock__V rl))))))
+        t1 (Thread_New_Runnable_String (cycle a b wsBlocked true) (Str "dl-1"))
+        t2 (Thread_New_Runnable_String (cycle b a wsBlocked true) (Str "dl-2"))
+        t3 (Thread_New_Runnable_String (cycle l1 l2 wsWaiting false) (Str "dl-3"))
+        t4 (Thread_New_Runnable_String (cycle l2 l1 wsWaiting false) (Str "dl-4"))]
+    (.Add held 4)
     (.Start__V t1)
     (.Start__V t2)
-    (.Wait held)
-    (close both)
-    (when (or (not (waitState t1 Thread_State_BLOCKED)) (not (waitState t2 Thread_State_BLOCKED)))
-      (.Fatal t "the monitor deadlock did not form"))
-    (let [m (HostManagement_FindMonitorDeadlocked0__Thread1_native)
-          d (HostManagement_FindDeadlocked0__Thread1_native)]
-      (when (or (== m nil) (!= (len (.-A m)) 2) (== d nil) (!= (len (.-A d)) 2))
-        (.Fatalf t "monitor deadlock: %v %v" m d))))
-  (let [l1 (ReentrantLock_New)
-        l2 (ReentrantLock_New)
-        both (make (chan (struct)))
-        ^sync/WaitGroup held (zero sync/WaitGroup)
-        t3 (Thread_New_Runnable_String (RunnableOf (fn [] (.Lock__V l1) (.Done held) (<! both) (.Lock__V l2))) (Str "dl-3"))
-        t4 (Thread_New_Runnable_String (RunnableOf (fn [] (.Lock__V l2) (.Done held) (<! both) (.Lock__V l1))) (Str "dl-4"))]
-    (.Add held 2)
     (.Start__V t3)
     (.Start__V t4)
     (.Wait held)
-    (close both)
-    (when (or (not (waitState t3 Thread_State_WAITING)) (not (waitState t4 Thread_State_WAITING)))
-      (.Fatal t "the lock deadlock did not form"))
     (let [m (HostManagement_FindMonitorDeadlocked0__Thread1_native)
           d (HostManagement_FindDeadlocked0__Thread1_native)]
-      ;; the monitor search sees the first pair only, the synchronizers' both
       (when (or (== m nil) (!= (len (.-A m)) 2))
-        (.Errorf t "monitor search with a lock deadlock: %v" m))
+        (.Errorf t "monitor search: %v" m))
       (when (or (== d nil) (!= (len (.-A d)) 4))
-        (.Errorf t "synchronizers search: %v" d)))))
+        (.Errorf t "synchronizers search: %v" d)))
+    (close release)
+    (.Join__V t1)
+    (.Join__V t2)
+    (.Join__V t3)
+    (.Join__V t4)
+    (when (!= (HostManagement_FindDeadlocked0__Thread1_native) nil)
+      (.Error t "a deadlock after the cycles ended"))))
+
+(go/func TestLockedMonitorsAndSynchronizers
+  "Once tracked, the monitors a thread holds are listed latest first and once each, its jrt ReentrantLocks as
+its synchronizers; released, they are gone; a monitor it waits on is not listed while it waits.\n"
+  [^{:tag (* testing/T)} t]
+  (HostManagement_TrackLocks0__V_native)
+  (let [me (.-self (CurrentThread))
+        a (Object_New)
+        b (Object_New)
+        l (ReentrantLock_New)]
+    (MonitorEnter a)
+    (MonitorEnter b)
+    (MonitorEnter b)
+    (.Lock__V l)
+    (let [ms (HostManagement_LockedMonitors0_Thread__O1_native me)
+          ss (HostManagement_LockedSynchronizers0_Thread__O1_native me)]
+      (when (or (!= (len (.-A ms)) 2) (!= (aget (.-A ms) 0) b) (!= (aget (.-A ms) 1) a))
+        (.Errorf t "locked monitors %v" (.-A ms)))
+      (when (or (!= (len (.-A ss)) 1) (!= (aget (.-A ss) 0) l))
+        (.Errorf t "locked synchronizers %v" (.-A ss))))
+    (.Unlock__V l)
+    (MonitorExit b)
+    (MonitorExit b)
+    (MonitorExit a)
+    (when (or (!= (len (.-A (HostManagement_LockedMonitors0_Thread__O1_native me))) 0)
+              (!= (len (.-A (HostManagement_LockedSynchronizers0_Thread__O1_native me))) 0))
+      (.Error t "still held after the exits")))
+  (let [o (Object_New)
+        p (Object_New)
+        w (Thread_New_Runnable_String (RunnableOf (fn [] (MonitorEnter p) (MonitorEnter o) (Wait o) (MonitorExit o) (MonitorExit p))) (Str "waiter-held"))]
+    (.Start__V w)
+    (when (not (waitState w Thread_State_WAITING))
+      (.Fatal t "the waiter does not wait"))
+    (let [ms (HostManagement_LockedMonitors0_Thread__O1_native w)]
+      (when (or (!= (len (.-A ms)) 1) (!= (aget (.-A ms) 0) p))
+        (.Errorf t "a waiter's locked monitors %v" (.-A ms))))
+    (MonitorEnter o)
+    (NotifyAll o)
+    (MonitorExit o)
+    (.Join__V w)))

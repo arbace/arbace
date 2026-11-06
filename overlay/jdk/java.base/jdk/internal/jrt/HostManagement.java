@@ -73,6 +73,18 @@ public final class HostManagement {
     /** The threads deadlocked on monitors or ownable synchronizers, or null (slice 3). */
     public static native Thread[] findDeadlocked0();
 
+    /**
+     * Starts recording the threads' held monitors and synchronizers (slice 3b), when ThreadMXBean is made: what
+     * a thread locked before is not known.
+     */
+    public static native void trackLocks0();
+
+    /** The monitors t holds, the latest entered first, each once, not the one it waits on (slice 3b). */
+    public static native Object[] lockedMonitors0(Thread t);
+
+    /** The ownable synchronizers t holds (jrt's ReentrantLocks; slice 3b). */
+    public static native Object[] lockedSynchronizers0(Thread t);
+
     /** The times t blocked to enter a monitor or a lock. */
     public static native long blockedCount0(Thread t);
 

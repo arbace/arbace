@@ -30,7 +30,8 @@
  * interface in the JDK, written over jrt's (jdk.internal.jrt.HostManagement: the threads' counts, the start,
  * the uptime, the process id) and constants where jrt has nothing to measure yet (classes loaded, compilation,
  * safepoints, GC CPU time: 0, -1 for unsupported; no VM arguments; no performance data, as -XX:-UsePerfData);
- * the optional supports false until their slice but thread contention monitoring (slice 2). Copyright (c) Oracle and/or its affiliates, under the GNU
+ * the optional supports false until their slice but thread contention monitoring (slice 2), the object
+ * monitors' and the synchronizers' usage (slice 3b). Copyright (c) Oracle and/or its affiliates, under the GNU
  * General Public License version 2 with the Classpath Exception, as the notice above says (LICENSE.md).
  */
 
@@ -81,8 +82,8 @@ class VMManagementImpl implements VMManagement {
         threadContentionMonitoringSupport = true;
         currentThreadCpuTimeSupport = false;
         otherThreadCpuTimeSupport = false;
-        objectMonitorUsageSupport = false;
-        synchronizerUsageSupport = false;
+        objectMonitorUsageSupport = true;
+        synchronizerUsageSupport = true;
         threadAllocatedMemorySupport = false;
         remoteDiagnosticCommandsSupport = false;
     }

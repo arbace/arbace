@@ -151,6 +151,8 @@ public class ManagementFactory {
 
     private static synchronized PlatformManagedObject threadBean() {
         if (threadImpl == null) {
+            // jrt: the threads' held monitors and synchronizers recorded from here (F13 slice 3b)
+            jdk.internal.jrt.HostManagement.trackLocks0();
             threadImpl = new com.sun.management.internal.HotSpotThreadImpl(
                     sun.management.ManagementFactoryHelper.getVMManagement());
         }

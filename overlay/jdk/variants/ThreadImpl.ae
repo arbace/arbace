@@ -3,12 +3,11 @@
 ;; jdk.internal.jrt.HostManagement: the live threads (getThreads), their ThreadInfo as the JVM makes it (through
 ;; ThreadInfo's private constructors, HostManagement's factory: the thread's state as jmm reports it, its stack
 ;; trace to maxDepth frames, the object it is blocked or waits on with its owner, the blocked and waited counts
-;; and times (slice 2), no locked monitors or synchronizers until slice 3), the settings kept by
-;; HostManagement, the peak's reset. The CPU times and the
+;; and times (slice 2), the locked monitors and synchronizers when asked (slice 3b: the monitors' frames are
+;; not known, their stack depth -1), the settings kept by HostManagement, the peak's reset. The CPU times and the
 ;; allocated memory are unsupported (VMManagementImpl says so, and jdk26u's code throws before reaching these):
 ;; they answer -1; the deadlock searches are jrt's (slice 3: cycles of waits, the monitors' and the locks'
-;; owners; findDeadlockedThreads stays unsupported until the locked synchronizers, VMManagementImpl's
-;; synchronizerUsageSupport). The rest is jdk26u's. Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; owners). The rest is jdk26u's. Copyright (c) the Arbace authors; Eclipse Public License 1.0.
 (in-ns 'sun.management)
 
 (j2g/variant ThreadImpl
@@ -23,6 +22,10 @@
 
   (j2g/add
     (method ^:private ^:static jrtInfo ^ThreadInfo [^Thread t ^int maxDepth]
+      (ThreadImpl/jrtInfo t maxDepth false false)))
+
+  (j2g/add
+    (method ^:private ^:static jrtInfo ^ThreadInfo [^Thread t ^int maxDepth ^boolean monitors ^boolean syncs]
       (let [^:mutable ^StackTraceElement/1 st (new StackTraceElement/1 0)]
         (when (not (== maxDepth 0))
           (let [all (.getStackTrace t)]
@@ -37,7 +40,14 @@
                           (jdk.internal.jrt.HostManagement/blockedTime0 t)
                           (jdk.internal.jrt.HostManagement/waitedCount0 t)
                           (jdk.internal.jrt.HostManagement/waitedTime0 t)
-                          st (new Object/1 0) (new int/1 0) (new Object/1 0))))))
+                          st
+                          (if monitors (jdk.internal.jrt.HostManagement/lockedMonitors0 t) (new Object/1 0))
+                          (if monitors
+                              (let [d (new int/1 (alength (jdk.internal.jrt.HostManagement/lockedMonitors0 t)))]
+                                (java.util.Arrays/fill d -1)
+                                d)
+                              (new int/1 0))
+                          (if syncs (jdk.internal.jrt.HostManagement/lockedSynchronizers0 t) (new Object/1 0)))))))
 
   (method ^:private ^:static getThreadInfo1 ^void [^long/1 ids ^int maxDepth ^ThreadInfo/1 result]
     (loop [^int i 0]
@@ -53,11 +63,17 @@
               res (new ThreadInfo/1 (alength ts))]
           (loop [^int i 0]
             (when (< i (alength ts))
-              (aset res i (ThreadImpl/jrtInfo (aget ts i) maxDepth))
+              (aset res i (ThreadImpl/jrtInfo (aget ts i) maxDepth lockedMonitors lockedSynchronizers))
               (recur (unchecked-inc-int i))))
           res)
         (let [res (new ThreadInfo/1 (alength ids))]
-          (ThreadImpl/getThreadInfo1 ids maxDepth res)
+          (loop [^int i 0]
+            (when (< i (alength ids))
+              (let [t (ThreadImpl/jrtThread (aget ids i))]
+                (aset res i (if (or (nil? t) (not (.isAlive t)))
+                                nil
+                                (ThreadImpl/jrtInfo t maxDepth lockedMonitors lockedSynchronizers))))
+              (recur (unchecked-inc-int i))))
           res)))
 
   (method ^:private ^:static getThreadTotalCpuTime0 ^long [^long id] -1)
