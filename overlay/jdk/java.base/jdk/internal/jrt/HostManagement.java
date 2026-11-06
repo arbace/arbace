@@ -67,6 +67,12 @@ public final class HostManagement {
     /** The thread holding x's monitor or lock, or null. */
     public static native Thread lockOwner0(Object x);
 
+    /** The threads deadlocked on object monitors (cycles of BLOCKED threads), or null (slice 3). */
+    public static native Thread[] findMonitorDeadlocked0();
+
+    /** The threads deadlocked on monitors or ownable synchronizers, or null (slice 3). */
+    public static native Thread[] findDeadlocked0();
+
     /** The times t blocked to enter a monitor or a lock. */
     public static native long blockedCount0(Thread t);
 

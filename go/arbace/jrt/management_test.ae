@@ -2,7 +2,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "management_test.go"
-  :imports [[testing "testing"] [time "time"]])
+  :imports [[sync "sync"] [testing "testing"] [time "time"]])
 
 (go/func TestLiveThreads
   "A started thread is live, counted among the started and in the peak, and gone at its end; a daemon is
@@ -138,3 +138,47 @@ ReentrantLock WAITING on the lock, its holder the owner; the blocked and waited 
     (.Join__V lw)
     (when (!= (.GetState__Thread_State lw) Thread_State_TERMINATED)
       (.Error t "the locker did not end"))))
+
+(go/func TestDeadlocks
+  "Two threads each holding the monitor the other enters are found by both searches; two threads each
+holding the ReentrantLock the other waits for only by the synchronizers' search; none before.\n"
+  [^{:tag (* testing/T)} t]
+  (when (!= (HostManagement_FindDeadlocked0__Thread1_native) nil)
+    (.Fatal t "a deadlock before any"))
+  (let [a (Object_New)
+        b (Object_New)
+        both (make (chan (struct)))
+        ^sync/WaitGroup held (zero sync/WaitGroup)
+        t1 (Thread_New_Runnable_String (RunnableOf (fn [] (MonitorEnter a) (.Done held) (<! both) (MonitorEnter b))) (Str "dl-1"))
+        t2 (Thread_New_Runnable_String (RunnableOf (fn [] (MonitorEnter b) (.Done held) (<! both) (MonitorEnter a))) (Str "dl-2"))]
+    (.Add held 2)
+    (.Start__V t1)
+    (.Start__V t2)
+    (.Wait held)
+    (close both)
+    (when (or (not (waitState t1 Thread_State_BLOCKED)) (not (waitState t2 Thread_State_BLOCKED)))
+      (.Fatal t "the monitor deadlock did not form"))
+    (let [m (HostManagement_FindMonitorDeadlocked0__Thread1_native)
+          d (HostManagement_FindDeadlocked0__Thread1_native)]
+      (when (or (== m nil) (!= (len (.-A m)) 2) (== d nil) (!= (len (.-A d)) 2))
+        (.Fatalf t "monitor deadlock: %v %v" m d))))
+  (let [l1 (ReentrantLock_New)
+        l2 (ReentrantLock_New)
+        both (make (chan (struct)))
+        ^sync/WaitGroup held (zero sync/WaitGroup)
+        t3 (Thread_New_Runnable_String (RunnableOf (fn [] (.Lock__V l1) (.Done held) (<! both) (.Lock__V l2))) (Str "dl-3"))
+        t4 (Thread_New_Runnable_String (RunnableOf (fn [] (.Lock__V l2) (.Done held) (<! both) (.Lock__V l1))) (Str "dl-4"))]
+    (.Add held 2)
+    (.Start__V t3)
+    (.Start__V t4)
+    (.Wait held)
+    (close both)
+    (when (or (not (waitState t3 Thread_State_WAITING)) (not (waitState t4 Thread_State_WAITING)))
+      (.Fatal t "the lock deadlock did not form"))
+    (let [m (HostManagement_FindMonitorDeadlocked0__Thread1_native)
+          d (HostManagement_FindDeadlocked0__Thread1_native)]
+      ;; the monitor search sees the first pair only, the synchronizers' both
+      (when (or (== m nil) (!= (len (.-A m)) 2))
+        (.Errorf t "monitor search with a lock deadlock: %v" m))
+      (when (or (== d nil) (!= (len (.-A d)) 4))
+        (.Errorf t "synchronizers search: %v" d)))))

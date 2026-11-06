@@ -250,3 +250,78 @@ times start again from 0 (as HotSpot resets them).\n"
       (.Store (.-waitedNanos t) 0))
     (.Unlock liveMu))
   (.Store contentionMonitoring on))
+
+;; ---------------------------------------------------------------------------------------
+;; slice 3: deadlocks (ThreadMXBean's findMonitorDeadlockedThreads, findDeadlockedThreads)
+
+(go/type ownableSynchronizer
+  "ownableSynchronizer is java.util.concurrent.locks.AbstractOwnableSynchronizer as jrt sees a translated one
+(LockSupport's blocker of a parked thread): its exclusive owner.\n"
+  (interface
+    (GetExclusiveOwnerThread__Thread ^Thread_I [])))
+
+(go/func waitOwner
+  "waitOwner is the thread t waits for in a deadlock search: the owner of the monitor t is BLOCKED to enter
+and, when synchronizers counts, of the lock or ownable synchronizer it waits on (WAITING or TIMED_WAITING:
+jrt's ReentrantLock, a translated AbstractOwnableSynchronizer park's blocker); nil if none.\n"
+  ^{:tag (* Thread)} [^{:tag (* Thread)} t ^bool synchronizers]
+  (let [ws (.Load (.-wstate t))
+        on (.Load (.-waitOn t))]
+    (when (or (== on nil) (== ws wsNone)) (return nil))
+    (when (== ws wsBlocked)
+      (return (lockOwnerOf on)))
+    (when (not synchronizers) (return nil))
+    (let [(values rl ok) (assert (* ReentrantLock) on)]
+      (when ok
+        (.Lock (.-mu rl))
+        (defer (.Unlock (.-mu rl)))
+        (return (.-owner rl))))
+    (let [(values os ok) (assert ownableSynchronizer on)]
+      (when ok
+        (let [o (.GetExclusiveOwnerThread__Thread os)]
+          (when (== o nil) (return nil))
+          (return (.Self_Thread o)))))
+    nil))
+
+(go/func deadlocked
+  "deadlocked is the live threads in a cycle of waits (each waiting for one the next owns, waitOwner), as
+HotSpot's ThreadService::find_deadlocks_at_safepoint finds them, in a search per thread; nil when none.\n"
+  ^{:tag (slice (* Thread))} [^bool synchronizers]
+  (let [ts (liveThreads)
+        in (make (map (* Thread) bool))
+        ^{:tag (slice (* Thread))} out nil]
+    (range [_ t ts]
+      (when (not (aget in t))
+        (let [pos (make (map (* Thread) int))
+              ^{:tag (slice (* Thread))} path nil
+              cur t]
+          (while (and (!= cur nil) (not (aget in cur)))
+            (let [(values i seen) (aget pos cur)]
+              (when seen
+                ;; a cycle: path[i:]
+                (range [_ c (subslice path i)]
+                  (when (not (aget in c))
+                    (aset in c true)
+                    (set! out (append out c))))
+                (break))
+              (aset pos cur (len path))
+              (set! path (append path cur))
+              (set! cur (waitOwner cur synchronizers)))))))
+    out))
+
+(go/func deadlockArray ^{:tag (* RefArray)} [^{:tag (slice (* Thread))} ts]
+  (when (== (len ts) 0) (return nil))
+  (let [a (NewRefArray Thread_class (conv int32 (len ts)))]
+    (range [i t ts] (aset (.-A a) i (.-self t)))
+    a))
+
+(go/func HostManagement_FindMonitorDeadlocked0__Thread1_native
+  "HostManagement_FindMonitorDeadlocked0__Thread1_native is the threads deadlocked on object monitors, or null.\n"
+  ^{:tag (* RefArray)} []
+  (deadlockArray (deadlocked false)))
+
+(go/func HostManagement_FindDeadlocked0__Thread1_native
+  "HostManagement_FindDeadlocked0__Thread1_native is the threads deadlocked on monitors or ownable
+synchronizers, or null.\n"
+  ^{:tag (* RefArray)} []
+  (deadlockArray (deadlocked true)))
