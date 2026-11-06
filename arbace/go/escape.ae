@@ -1514,6 +1514,10 @@
       (let [l (old-loc e cv)
             byval (and (not (lget l :addrtaken)) (not (lget l :reassigned)) (<= (size (e/o cv :type)) 128))
             k (if byval k (k-addr k))]
+        (when (> (long *m*) 1)
+          (binding [*wfile* (fn-get (lget l :curfn) :file)]
+            (warn! (e/o cv :line) (str (fn-get (lget l :curfn) :name) " capturing by " (if byval "value" "ref") ": " (e/o cv :name)
+                                       " (addr=" (lget l :addrtaken) " assign=" (lget l :reassigned) " width=" (size (e/o cv :type)) ")"))))
         (flow e k l)))))
 
 (defn- init-func! [b f]
@@ -1752,7 +1756,14 @@
     (doseq [l @(:all-locs b)]
       (let [n (lget l :n)]
         (when (and n (not (name-loc? l)))
-          (when (heap-alloc-reason n)
+          (when-let [why (heap-alloc-reason n)]
+            (when (and (> (long *m*) 1) (not (has-attr? l attr-escapes)))
+              ;; flow's explanation of a flow into the heap (explainFlow, its one note)
+              (binding [*wfile* (fn-get (lget l :curfn) :file)]
+                (let [line (lget l :line) s (fmt-node n 0)]
+                  (warn! line (str s " escapes to heap in " (fn-get (lget l :curfn) :name) ":"))
+                  (warn! line (str "  flow: {heap} ← &{storage for " s "}:"))
+                  (warn! line (str "    from " s " (" why ") at " *wfile* ":" line)))))
             (flow (with-fn b (lget l :curfn)) (k-addr (heap-hole (with-fn b (lget l :curfn)))) l)))
         (when (and n (name-loc? l) (not (#{:param :result} (e/o n :esc-class))))
           (when (or (> (size (e/o n :type)) (max-stack)) (> (align (e/o n :type)) 8))
@@ -2221,12 +2232,75 @@
         (if i (long (nth (t/offsetsof st) i 0)) -1))
       -1)))
 
+(def ^:dynamic *big-caller*
+  "Whether the function whose calls are being inlined is big (IsBigFunc): its inlinees' maximum
+  cost is 20."
+  false)
+
 (defn- max-cost
   "inlineCostOK's maximum cost of a callee (a closure's doubled)."
   [callee called-once]
-  (let [m inline-max-budget
+  (let [m (if *big-caller* 20 inline-max-budget)
         m (if (fn-get callee :parent) (* 2 m) m)]
     (if (and (fn-get callee :parent) called-once) (max m inline-closure-called-once-cost) m)))
+
+(defn- call-str2
+  "A call as gc prints it after typecheck (-m=2's bodies): a method call as its method expression's
+  call, the receiver first."
+  [c]
+  (case (:kind c)
+    :method (let [m (:callee c)
+                  rt (or (:recv-type m) (node-type (method-recv m)))
+                  ptr (e/o (:method m) :ptr-recv)
+                  tt (if (and ptr (not (t/pointer? rt))) [:pointer rt] rt)
+                  ts (type-str tt)
+                  ts (if (t/pointer? tt) (str "(" ts ")") ts)]
+              (str ts "." (e/o (:method m) :name) "(" (args-str (cons (method-recv m) (:args c))) ")"))
+    (fmt-node c 0)))
+
+(declare stmt-str)
+
+(defn- stmts-str [ss]
+  (str/join "; " (remove str/blank? (map stmt-str (live-stmts (cond (nil? ss) [] (map? ss) [ss] :else ss))))))
+
+(defn- stmt-str
+  "ir/fmt.go's stmtFmt (its short forms: for loop, switch statement)."
+  [n]
+  (letfn [(ex [x] (if (and (= :call (:op x)) (not= :builtin (:kind x))) (call-str2 x) (fmt-node x 0)))
+          (pl [x] (if (= :blank x) "_" (fmt-node (norm-place x) 0)))]
+    (case (:op n)
+      :block (stmts-str (concat (:decls n) (:stmts n)))
+      :decl (if (empty? (:init n))
+              (str/join "; " (for [o (:objs n)] (str "var " (e/o o :name) " " (type-str (e/o o :type)))))
+              (str (str/join ", " (map #(if % (e/o % :name) "_") (:objs n))) " := " (str/join ", " (map ex (:init n)))))
+      :assign (str (str/join ", " (map pl (:lhs n))) " = " (str/join ", " (map ex (:rhs n))))
+      :op-assign (str (pl (:place n)) " " (get go-ops (str (:go/op n)) (str (:go/op n))) "= " (ex (:value n)))
+      :incdec (str (pl (:place n)) (if (:inc n) "++" "--"))
+      :return (str "return " (str/join ", " (map ex (:values n))))
+      :expr (ex (:x n))
+      :if (str "if " (ex (:cond n)) " { " (stmts-str (:then n)) " }"
+               (when (seq (let [e (:else n)] (if (map? e) [e] e))) (str " else { " (stmts-str (:else n)) " }")))
+      (:for :range) "for loop"
+      (:switch :type-switch) "switch statement"
+      :select "select statement"
+      (:go :defer) (str (name (:op n)) " " (ex (:call n)))
+      (:break :continue :goto) (str (name (:op n)) (when (:label n) (str " " (:label n))))
+      :label (str (:label n) ": ")
+      :send (str (fmt-node (:ch n) 0) " <- " (ex (:value n)))
+      "")))
+
+(defn- big-func?
+  "IsBigFunc: whether function f has more than 5,000 IR nodes (counted as the budget counts them,
+  every node one)."
+  [f]
+  (let [n (volatile! 0)]
+    (letfn [(walk [x]
+              (cond
+                (map? x) (do (when (:op x) (vswap! n inc)) (when-not (= :fn (:op x)) (doseq [[k v] x] (when-not (#{:type :to :sig :field :method :recv-type :iface :form} k) (walk v)))))
+                (sequential? x) (doseq [v x] (walk v))
+                :else nil))]
+      (walk (fn-get f :body)))
+    (> (long @n) 5000)))
 
 (defn- can-inline!
   "CanInline: function f's inlining record {:cost n}, or nil (with its reason); its message."
@@ -2252,9 +2326,16 @@
           (when (System/getenv "GOI_INLINE_COSTS")
             (binding [*out* *err*] (println "inl-cost" (fn-get f :line) (fn-get f :name) cost (or r ""))))
           (fn-set! f :inl-state :done)
-          (when (and inl (pos? (long *m*)))
-            (binding [*wfile* (fn-get f :file)]
-              (warn! (fn-get f :line) (str "can inline " (fn-get f :name)))))
+          (binding [*wfile* (fn-get f :file)]
+            (cond
+              (and inl (> (long *m*) 1))
+              (warn! (fn-get f :line) (str "can inline " (fn-get f :name) " with cost " cost " as: "
+                                           (type-str (fn-get f :sig)) " { " (stmts-str (fn-get f :body)) " }"))
+              (and inl (pos? (long *m*)))
+              (warn! (fn-get f :line) (str "can inline " (fn-get f :name)))
+              (and r (> (long *m*) 1) (not (fn-get f :foreign)))
+              (warn! (fn-get f :line) (str "cannot inline " (fn-get f :name) ": " r))
+              :else nil))
           inl)))))
 
 (defn- inl-callee
@@ -2902,10 +2983,16 @@
               :when (and (fn-get f :obj) (fn-get f :recv-type) (not (t/pointer? (fn-get f :recv-type)))
                          (fn-get f :inl) (<= (long (:cost (fn-get f :inl))) inline-max-budget))]
         (warn! 1 (str "inlining call to " (fn-get f :name)))))
+    (when (> (long *m*) 1)
+      (doseq [f fns :when (fn-get f :extern)] (can-inline! f)))
     ;; literals first (all-fns lists a function before its literals)
     (doseq [f (reverse all)]
       (binding [*wfile* (fn-get f :file)]
-        (fn-set! f :inlined-body (inline-calls f (fn-get f :body) []))))
+        (let [big (big-func? f)]
+          (when (and big (> (long *m*) 1))
+            (warn! (fn-get f :line) (str "function " (fn-get f :name) " considered 'big'; reducing max cost of inlinees")))
+          (binding [*big-caller* big]
+            (fn-set! f :inlined-body (inline-calls f (fn-get f :body) []))))))
     (let [lits (filter #(fn-get % :parent) all)
           kept @(:kept-lits *ctx*)
           lone (vec (for [g lits
