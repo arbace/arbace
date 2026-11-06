@@ -372,3 +372,24 @@ settles the allocator (1 day of the 4-6).
 `arbace.j2g.model/class-supers` with its protected constructors and final methods reachable (`findSystemClass`):
 `protected-final-access` passes (1 case at each level), and gen-class or `defclass` code may extend `ClassLoader`;
 0.5-1 day and a build; (b) keep the stand-in (the class throws when made). Recommended (a).
+
+## Decided (2026-11-06, the user: CDR10, CDR11)
+
+CDR10 (a): Java serialization is built, after CDR5's size measurement: jrt's allocation for serialization
+(ReflectionFactory's `newConstructorForSerialization`), `ObjectStreamClass`'s field access without Unsafe's offsets,
+records' constructors without method handles, the caches without `ClassValue`. CDR11 (a): gen-class and the Java
+forms may extend `java.lang.ClassLoader` (a class-super of the world, with its protected constructors and final methods).
+
+### As built: CDR11 (2026-11-06; the night proves it)
+
+`java/lang/ClassLoader` is among `arbace.j2g.model/class-supers`, so j2g gives jrt's hand-written ClassLoader a
+`DynSub_ClassLoader` (its methods promoted: jrt's struct defines them without `Impl_` variants, `arbace.j2g.model/impl-of`'s
+`:promoted`) and records its protected members in the world's signatures (`arbace.j2g.dyncf/protected-members`:
+`ClassLoader()`, `ClassLoader(ClassLoader)`, `loadClass(String, boolean)`, `findSystemClass`), which the Java forms'
+analysis reads (`arbace.classes.go/protected-members`). jrt's ClassLoader gains `findSystemClass` (protected final: the
+registry's class, as its `loadClass`), regenerated into `go/arbace/jrt/manifest.edn` and `manifest_test.ae` by
+`bin/jrt manifest` (on the frozen JVM, 2.6 GB, 2.5 minutes). gen-class's stand-in for an unextendable superclass stays
+for the others. Expected: genclass's `protected-final-access` passes (`findSystemClass` is protected, so the reflective
+call throws IllegalArgumentException; `superFindSystemClass`, the `:exposes-methods`, answers `String`), genclass 7 of 8
+at both levels. Night, after the build: run `clojure.test-clojure.genclass` as above, then record genclass
+`{:test 7, :pass 53}` in `test/arbace-go-results.edn` and drop `:gen-class`'s class (eval) once it passes.
