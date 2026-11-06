@@ -329,3 +329,78 @@ pub fn std_names<'tcx>(tcx: TyCtxt<'tcx>) -> String {
     }
     o
 }
+
+/// RF9's oracle, `--typeck FILE`: each typeck root's TypeckResults over the root file's HIR (not an expansion's):
+/// `(tc/expr OWNER [l1 c1 l2 c2] KIND "TYPE" {:adj [...] :method "PATH" :args "ARGS"})` per expression (its node type
+/// before adjustments, the adjustments' kinds and targets, a type-dependent definition with its arguments) and
+/// `(tc/pat OWNER [span] "TYPE" MODE)` per binding (its type and binding mode)
+pub fn typeck<'tcx>(tcx: TyCtxt<'tcx>) -> String {
+    use rustc_middle::ty::print::with_no_trimmed_paths;
+    struct Tc<'a, 'tcx> {
+        tcx: TyCtxt<'tcx>,
+        root: String,
+        owner: String,
+        res: &'a rustc_middle::ty::TypeckResults<'tcx>,
+        out: String,
+    }
+    impl<'a, 'tcx> Visitor<'tcx> for Tc<'a, 'tcx> {
+        type NestedFilter = rustc_middle::hir::nested_filter::OnlyBodies;
+        fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+            self.tcx
+        }
+        fn visit_expr(&mut self, e: &'tcx rustc_hir::Expr<'tcx>) {
+            if !e.span.from_expansion() {
+                if let Some(sv) = span_vec(self.tcx, &self.root, e.span) {
+                    let kd = format!("{:?}", e.kind);
+                    let kind: String = kd.chars().take_while(|c| c.is_alphanumeric()).collect();
+                    let ty = self.res.node_type_opt(e.hir_id).map(|t| with_no_trimmed_paths!(t.to_string())).unwrap_or_else(|| "?".into());
+                    let adj = self
+                        .res
+                        .expr_adjustments(e)
+                        .iter()
+                        .map(|a| {
+                            let k = format!("{:?}", a.kind);
+                            let k: String = k.chars().take_while(|c| c.is_alphanumeric()).collect();
+                            format!("[{} {}]", q(&k), q(&with_no_trimmed_paths!(a.target.to_string())))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let mut extra = format!("{{:adj [{adj}]");
+                    if let Some(Ok((_, d))) = self.res.type_dependent_defs().get(e.hir_id) {
+                        let args = self.res.node_args(e.hir_id);
+                        let _ = write!(extra, " :method {} :args {}", q(&with_no_trimmed_paths!(self.tcx.def_path_str(*d))), q(&with_no_trimmed_paths!(format!("{:?}", args))));
+                    }
+                    extra.push('}');
+                    let _ = writeln!(self.out, "(tc/expr {} {} {} {} {})", q(&self.owner), sv, q(&kind), q(&ty), extra);
+                }
+            }
+            intravisit::walk_expr(self, e)
+        }
+        fn visit_pat(&mut self, p: &'tcx rustc_hir::Pat<'tcx>) {
+            if let rustc_hir::PatKind::Binding(..) = p.kind {
+                if !p.span.from_expansion() {
+                    if let Some(sv) = span_vec(self.tcx, &self.root, p.span) {
+                        let ty = self.res.node_type_opt(p.hir_id).map(|t| with_no_trimmed_paths!(t.to_string())).unwrap_or_else(|| "?".into());
+                        let mode = self.res.pat_binding_modes().get(p.hir_id).map(|m| format!("{m:?}")).unwrap_or_default();
+                        let _ = writeln!(self.out, "(tc/pat {} {} {} {})", q(&self.owner), sv, q(&ty), q(&mode));
+                    }
+                }
+            }
+            intravisit::walk_pat(self, p)
+        }
+    }
+    let root = root_name_at(tcx, tcx.hir_span(rustc_hir::CRATE_HIR_ID));
+    let mut out = String::new();
+    for def in tcx.hir_body_owners() {
+        if tcx.is_typeck_child(def.to_def_id()) {
+            continue;
+        }
+        let res = tcx.typeck(def);
+        let body = tcx.hir_body_owned_by(def);
+        let owner = with_no_trimmed_paths!(tcx.def_path_str(def.to_def_id()));
+        let mut v = Tc { tcx, root: root.clone(), owner, res, out: String::new() };
+        v.visit_body(body);
+        out.push_str(&v.out);
+    }
+    out
+}

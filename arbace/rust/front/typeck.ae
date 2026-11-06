@@ -1,0 +1,481 @@
+;; Ported from rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's
+;; rust-src-1.99.1-r0, pinned by tools/rsdump/apks.sha256): the first slice of compiler/rustc_hir_typeck/src/
+;; {expr.rs (check_expr_with_expectation and its kinds: literals, paths, calls, operators, blocks, if, loops, match,
+;; struct expressions, fields, casts, references), expectation.rs, coercion.rs (coerce: identity, never to any, reborrows,
+;; the arrays' unsizing behind references; CoerceMany's LUB for if, match and blocks), callee.rs (calls of fn items and fn
+;; pointers), op.rs (is_builtin_binop: scalars), place_op.rs (builtin indexing of arrays and slices), pat.rs (bindings,
+;; tuples, structs, literals, default binding modes), fallback.rs (integer and float fallback), writeback.rs}, and
+;; compiler/rustc_infer/src/infer/ (type, integer and float variables, unification without regions);
+;; rustc is dual-licensed MIT OR Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.typeck
+  "RF9's first slice (doc/rust/FRONTEND-SURVEY.md, \"As built: RF9a\"): type checking of bodies over RF7's collection
+  (arbace.rust.front.collect, in its with-crate context): each body's expressions' types (node types, before
+  adjustments), their adjustments, the bindings' types and modes, as the helper's --typeck writes rustc's TypeckResults,
+  so RF9's judge compares fact by fact. Regions are erased (RFS5). What the slice does not check yet (method calls through
+  traits, closures, operators through traits, std's functions) is the type {unknown}, a fact that cannot be equal.
+
+    (check-crate)    within collect/with-crate: [{:owner :span :kind :ty :adj} ...] and [{:owner :span :ty :mode :pat true} ...]"
+  (:require [arbace.rust.front.collect :as c] [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- head [x] (when (seq? x) (first x)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Inference variables (rustc_infer: ty, int and float variables; unification with regions erased)
+
+(def ^:dynamic *vars* nil)   ; atom: id -> {:kind :ty|:int|:float :val TY}
+
+(defn- fresh [k] (let [id (count @*vars*)] (swap! *vars* assoc id {:kind k}) [:infer k id]))
+(defn- tvar? [t] (and (vector? t) (= :infer (first t))))
+
+(defn- shallow [t]
+  (if (tvar? t)
+    (if-let [v (:val (get @*vars* (nth t 2)))] (shallow v) t)
+    t))
+
+(defn- deep [t]
+  (let [t (shallow t)]
+    (cond (tvar? t) t
+          (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (deep %) (map? %) (into {} (for [[k v] %] [k (deep v)])) :else %) (rest t)))
+          (vector? t) (mapv deep t)
+          :else t)))
+
+(def ^:private int-tys #{:int :uint})
+(def ^:private unit [:tuple []])
+
+(defn- bind! [v t] (swap! *vars* assoc-in [(nth v 2) :val] t) true)
+
+(declare unify)
+
+(defn- unify-all [as bs] (and (= (count as) (count bs)) (every? true? (map unify as bs))))
+
+(defn unify
+  "Equate two types (regions ignored): true when they unify, binding variables"
+  [a b]
+  (let [a (shallow a) b (shallow b)]
+    (cond
+      (= a b) true
+      (or (= [:unknown] a) (= [:unknown] b)) true
+      (c/region? a) true
+      (and (tvar? a) (= :ty (second a))) (bind! a b)
+      (and (tvar? b) (= :ty (second b))) (bind! b a)
+      (and (tvar? a) (tvar? b)) (if (= (second a) (second b)) (bind! a b) false)
+      (and (tvar? a) (= :int (second a))) (if (int-tys (first b)) (bind! a b) false)
+      (and (tvar? b) (= :int (second b))) (if (int-tys (first a)) (bind! b a) false)
+      (and (tvar? a) (= :float (second a))) (if (= :float (first b)) (bind! a b) false)
+      (and (tvar? b) (= :float (second b))) (if (= :float (first a)) (bind! b a) false)
+      (not= (first a) (first b)) false
+      :else
+      (case (first a)
+        :adt (and (= (second a) (second b)) (unify-all (nth a 2) (nth b 2)))
+        :ref (and (= (nth a 2) (nth b 2)) (unify (nth a 3) (nth b 3)))
+        :ptr (and (= (nth a 1) (nth b 1)) (unify (nth a 2) (nth b 2)))
+        (:slice) (unify (second a) (second b))
+        :array (and (unify (second a) (second b)) (or (= (nth a 2) (nth b 2)) true))
+        :tuple (unify-all (second a) (second b))
+        :fndef (and (= (second a) (second b)) (unify-all (nth a 2) (nth b 2)))
+        :proj (and (= (second a) (second b)) (unify-all (nth a 2) (nth b 2)))
+        (= a b)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The facts
+
+(def ^:dynamic *owner* nil)
+(def ^:dynamic *facts* nil)  ; atom [fact]
+(def ^:dynamic *env* nil)    ; the bindings in scope: [{name type}] innermost last
+(def ^:dynamic *ret* nil)    ; the body's return type
+(def ^:dynamic *loops* nil)  ; atom: the enclosing loops' break types, innermost first
+
+(def ^:private kind-names
+  {:lit "Lit" :path "Path" :call "Call" :method "MethodCall" :binary "Binary" :unary "Unary" :addr-of "AddrOf"
+   :cast "Cast" :field "Field" :index "Index" :tup "Tup" :array "Array" :repeat "Repeat" :assign "Assign"
+   :assign-op "AssignOp" :block "Block" :if "If" :loop "Loop" :match "Match" :ret "Ret" :break "Break"
+   :continue "Continue" :struct "Struct" :closure "Closure" :let "Let" :drop-temps "DropTemps" :type-relative "Path"
+   :qpath "Path" :type "Type"})
+
+(defn- record! [e ty & [adj]]
+  (when (and (vector? (:span e)) (not (:synthesized e)))
+    (swap! *facts* conj {:owner *owner* :span (:span e) :kind (get kind-names (:kind e) (str (:kind e))) :ty ty :adj (or adj [])}))
+  ty)
+
+(defn- adjust!
+  "Adjustments recorded on an expression after the fact (coercions, autoderef of a field's base)"
+  [e adj]
+  (when (seq adj)
+    (swap! *facts* (fn [fs] (let [i (last (keep-indexed (fn [i f] (when (and (= (:span f) (:span e)) (= (:kind f) (get kind-names (:kind e)))) i)) fs))]
+                              (if i (update-in fs [i :adj] into adj) fs))))))
+
+(defn- lookup-local [nm] (some #(get % nm) (rseq *env*)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types of definitions, instantiated with fresh variables
+
+(defn- fresh-args [def]
+  (vec (for [p (c/all-params (c/generics-of def))]
+         (case (:kind p) :lifetime [:re-erased] :const [:cexpr "_"] (fresh :ty)))))
+
+(defn- erase [t]
+  (cond (c/region? t) [:re-erased]
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (erase %) (map? %) (into {} (for [[k v] %] [k (erase v)])) :else %) (rest t)))
+        (vector? t) (mapv erase t)
+        :else t))
+
+(defn- fn-item-ty [def] [:fndef def (fresh-args def)])
+
+(defn- sig-of
+  "A function item's or a constructor's signature, instantiated with its arguments"
+  [[_ d args]]
+  (let [k (str (:kind (c/def-of d)))
+        sig (if (str/starts-with? k "Ctor") (c/ctor-sig d) (c/fn-sig d))]
+    (erase (c/subst* (select-keys sig [:inputs :output]) (vec args)))))
+
+(defn- adt-fields
+  "A struct's or a variant's fields: [[name type] ...] with the ADT's arguments substituted"
+  [vid args]
+  (let [fs (filter #(and (= vid (:parent %)) (= "Field" (:kind %))) (c/defs))]
+    (vec (for [f fs] [(second (:data f)) (erase (c/subst (c/type-of (:id f)) (vec args)))]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Coercion (coercion.rs: identity, never to any, reborrows, unsizing behind references)
+
+(defn- coerce!
+  "coerce: E (of type FROM) to TO, the adjustments recorded on E; false when neither coerces nor unifies. Never to any
+  (NeverToAny, even to `!`), a reference from &mut reborrowed (Deref, Borrow: coerce_borrowed_pointer; & to & is the
+  identity), &[T; N] to &[T] (Deref, Borrow, Pointer(Unsize))"
+  [e from to]
+  (let [f (shallow from) t (shallow to)]
+    (cond
+      (= [:never] f) (do (adjust! e [["NeverToAny" to]]) true)
+      (and (= :ref (first f)) (= :ref (first t)) (= :array (first (shallow (nth f 3)))) (= :slice (first (shallow (nth t 3)))))
+      (do (adjust! e [["Deref" (nth f 3)] ["Borrow" [:ref [:re-erased] (nth t 2) (nth f 3)]] ["Pointer" to]])
+          (unify (second (shallow (nth f 3))) (second (shallow (nth t 3)))))
+      (and (= :ref (first f)) (= :ref (first t)) (nth f 2))
+      (do (adjust! e [["Deref" (nth f 3)] ["Borrow" [:ref [:re-erased] (nth t 2) (nth f 3)]]]) (unify (nth f 3) (nth t 3)))
+      :else (unify from to))))
+
+(defn- lub!
+  "CoerceMany: the arms' common type (the expectation's when there is one)"
+  [arms expected]
+  (let [tys (remove #(= [:never] (shallow (second %))) arms)
+        target (or expected (when (seq tys) (second (first tys))) [:never])]
+    (doseq [[e ty] arms] (coerce! e ty target))
+    (if (and (empty? tys) (nil? expected)) [:never] target)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions (check_expr_with_expectation)
+
+(declare check-expr check-block check-pat)
+
+(defn- lit-ty [l expected]
+  (let [k (str (:lit-kind l)) suf (some-> (:suffix l) str)
+        ex (some-> expected shallow)]
+    (case k
+      "Integer" (cond (and suf (not= "None" suf)) (get c/prim-tys (str/replace suf #"^\(?Some \"?|\"?\)?$" "") [:unknown])
+                      (and ex (or (int-tys (first ex)) (and (tvar? ex) (= :int (second ex))))) ex
+                      (and ex (= :char (first ex))) (fresh :int)
+                      :else (fresh :int))
+      "Float" (cond (and suf (not= "None" suf)) (get c/prim-tys (str/replace suf #"^\(?Some \"?|\"?\)?$" "") [:unknown])
+                    (and ex (= :float (first ex))) ex
+                    :else (fresh :float))
+      "Bool" [:bool]
+      "Char" [:char]
+      "Str" [:ref [:re-erased] false [:str]]
+      "ByteStr" [:ref [:re-erased] false [:array [:uint "u8"] [:cval (str (count (str (:symbol l))))]]]
+      "Byte" [:uint "u8"]
+      [:unknown])))
+
+(defn- path-ty
+  "A value path's type: a local, a function item (fresh arguments), a constant or static, a unit or tuple
+  constructor"
+  [e]
+  (let [path (:path e) segs (:segs path) r (first (:res path))]
+    (if (= 'local (head r))
+      (or (lookup-local (:ident (peek segs))) [:unknown])
+      (let [rd (c/res-def path)]
+        (case (first rd)
+          :local (let [[_ id k] rd]
+                   (cond (#{"Fn" "AssocFn"} k) (fn-item-ty id)
+                         (= "Ctor(Struct, Fn)" k) (let [id (:ctor (c/def-of id) id)] (fn-item-ty id))
+                         (= "Ctor(Variant, Fn)" k) (let [v (c/def-of id) cid (or (:ctor v) id)] (fn-item-ty cid))
+                         (#{"Ctor(Struct, Const)" "Ctor(Variant, Const)" "Struct"} k)
+                         (let [d (c/def-of id) adt (or (:adt d) id)] [:adt adt (fresh-args adt)])
+                         (= "Variant" k) (let [d (c/def-of id)] [:adt (:adt d (:parent d)) (fresh-args (:parent d))])
+                         (or (str/starts-with? (str k) "Const") (str/starts-with? (str k) "Static")) (erase (c/type-of id))
+                         :else [:unknown]))
+          [:unknown])))))
+
+(defn- builtin-binop?
+  "op.rs's is_builtin_binop over the operands' types (variables of the right kind count)"
+  [op l r]
+  (let [l (shallow l) r (shallow r)
+        num? (fn [t] (or (int-tys (first t)) (= :float (first t)) (and (tvar? t) (#{:int :float} (second t)))))
+        int? (fn [t] (or (int-tys (first t)) (and (tvar? t) (= :int (second t)))))]
+    (case op
+      ("+" "-" "*" "/" "%") (and (num? l) (num? r))
+      ("&" "|" "^") (or (and (int? l) (int? r)) (and (= [:bool] l) (= [:bool] r)))
+      ("<<" ">>") (and (int? l) (int? r))
+      ("==" "!=" "<" "<=" ">" ">=") (or (and (num? l) (num? r)) (and (= l r) (#{:bool :char} (first l))))
+      ("&&" "||") true
+      false)))
+
+(defn- autoderef-steps [t]
+  (loop [t (shallow t) acc [t]]
+    (if (= :ref (first t)) (let [n (shallow (nth t 3))] (recur n (conj acc n))) acc)))
+
+(defn- field-of
+  "check_field: the base's autoderef steps until one has the field (a struct's named or positional field, a tuple's)"
+  [e base-ty nm]
+  (loop [steps (autoderef-steps base-ty) i 0]
+    (if-let [t (first steps)]
+      (let [found (case (first t)
+                    :adt (let [d (c/def-of (second t))]
+                           (when (#{"Struct" "Union"} (:kind d))
+                             (some (fn [[fname fty]] (when (= fname nm) fty)) (adt-fields (second t) (nth t 2)))))
+                    :tuple (when (re-matches #"\d+" nm) (nth (second t) (Long/parseLong nm) nil))
+                    nil)]
+        (if found
+          (do (when (pos? i) (adjust! (:expr e) (vec (for [s (rest (take (inc i) (autoderef-steps base-ty)))] ["Deref" s])))) found)
+          (recur (rest steps) (inc i))))
+      [:unknown])))
+
+(defn- check-call [e expected]
+  (let [callee (:func e)
+        ft (shallow (check-expr callee nil))]
+    (case (first ft)
+      :fndef (let [{:keys [inputs output]} (sig-of ft)]
+               (doseq [[a ty] (map vector (:args e) (concat inputs (repeat nil)))]
+                 (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
+               output)
+      :fnptr (let [{:keys [inputs output]} (second ft)]
+               (doseq [[a ty] (map vector (:args e) (concat inputs (repeat nil)))]
+                 (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
+               (erase output))
+      (do (doseq [a (:args e)] (check-expr a nil)) [:unknown]))))
+
+(defn- struct-ty [e]
+  (let [rd (c/res-def (:path e))]
+    (case (first rd)
+      :local (let [[_ id k] rd d (c/def-of id)]
+               (cond (= "Struct" k) (let [args (fresh-args id)] [[:adt id args] id args])
+                     (= "Variant" k) (let [args (fresh-args (:parent d))] [[:adt (:parent d) args] id args])
+                     :else nil))
+      nil)))
+
+(defn check-expr
+  "check_expr_with_expectation: E's type (recorded), EXPECTED a type or nil"
+  [e expected]
+  (let [ty
+        (case (:kind e)
+          :lit (lit-ty (:lit e) expected)
+          :path (path-ty e)
+          :call (check-call e expected)
+          :binary (let [op (:op e)
+                        lt (check-expr (:lhs e) nil)
+                        rt (check-expr (:rhs e) (when (#{"+" "-" "*" "/" "%" "&" "|" "^" "==" "!=" "<" "<=" ">" ">="} op) lt))]
+                    (cond
+                      (#{"&&" "||"} op) (do (unify lt [:bool]) (unify rt [:bool]) [:bool])
+                      (builtin-binop? op lt rt)
+                      (do (when-not (#{"<<" ">>"} op) (unify lt rt))
+                          (if (#{"==" "!=" "<" "<=" ">" ">="} op) [:bool] lt))
+                      :else [:unknown]))
+          :unary (let [t (check-expr (:expr e) (when (#{"-" "!"} (:op e)) expected))
+                       s (shallow t)]
+                   (case (:op e)
+                     "*" (if (#{:ref :ptr} (first s)) (if (= :ref (first s)) (nth s 3) (nth s 2)) [:unknown])
+                     ("-" "!") (if (or (int-tys (first s)) (= :float (first s)) (= :bool (first s)) (tvar? s)) t [:unknown])
+                     [:unknown]))
+          :addr-of (let [ex (some-> expected shallow)
+                         inner-ex (when (and ex (= :ref (first ex))) (nth ex 3))
+                         t (check-expr (:expr e) inner-ex)]
+                     (if (:raw e) [:ptr (:mutbl e) t] [:ref [:re-erased] (:mutbl e) t]))
+          :cast (let [t (erase (c/lower-ty (:ty e)))]
+                  (check-expr (:expr e) nil)
+                  t)
+          :type (let [t (erase (c/lower-ty (:ty e)))] (let [x (check-expr (:expr e) t)] (coerce! (:expr e) x t)) t)
+          :field (let [bt (check-expr (:expr e) nil)] (field-of e bt (:ident e)))
+          :index (let [bt (check-expr (:expr e) nil)
+                       it (check-expr (:index e) nil)
+                       steps (autoderef-steps bt)
+                       hit (first (keep-indexed (fn [i t] (when (#{:array :slice} (first t)) [i t])) steps))]
+                   (if (and hit (let [s (shallow it)] (or (= [:uint "usize"] s) (and (tvar? s) (= :int (second s))))))
+                     (do (unify it [:uint "usize"])
+                         (let [[i t] hit]
+                           (when (pos? i) (adjust! (:expr e) (vec (for [s (rest (take (inc i) steps))] ["Deref" s]))))
+                           (second t)))
+                     [:unknown]))
+          :tup (let [ex (some-> expected shallow)
+                     exs (when (= :tuple (first ex)) (second ex))]
+                 [:tuple (vec (map-indexed (fn [i x] (check-expr x (nth exs i nil))) (:exprs e)))])
+          :array (let [ex (some-> expected shallow)
+                       elt (if (#{:array :slice} (first ex)) (second ex) (fresh :ty))]
+                   (doseq [x (:exprs e)] (let [t (check-expr x elt)] (coerce! x t elt)))
+                   [:array elt [:cval (str (count (:exprs e)))]])
+          :repeat (let [ex (some-> expected shallow)
+                        elt (if (#{:array :slice} (first ex)) (second ex) (fresh :ty))]
+                    (let [t (check-expr (:expr e) elt)] (coerce! (:expr e) t elt))
+                    [:array elt (c/lower-const-arg (:count e))])
+          :assign (let [lt (check-expr (:lhs e) nil)] (let [rt (check-expr (:rhs e) lt)] (coerce! (:rhs e) rt lt)) unit)
+          :assign-op (let [lt (check-expr (:lhs e) nil) rt (check-expr (:rhs e) lt)]
+                       (when (builtin-binop? (str/replace (str (:op e)) "=" "") lt rt) (when-not (#{"<<=" ">>="} (:op e)) (unify lt rt)))
+                       unit)
+          :block (check-block (:block e) expected)
+          :if (let [ct (check-expr (:cond e) [:bool])
+                    tt (check-expr (:then e) (when (:else e) expected))]
+                (if (:else e)
+                  (let [et (check-expr (:else e) expected)]
+                    (lub! [[(:then e) tt] [(:else e) et]] (when (and expected (not (tvar? (shallow expected)))) expected)))
+                  (do (coerce! (:then e) tt unit) unit)))
+          :loop (let [brk (atom nil)]
+                  (binding [*loops* (cons brk *loops*)]
+                    (check-block (:block e) unit))
+                  (or @brk (if (= :while (:source e)) unit [:never])))
+          :break (do (when-let [x (:expr e)]
+                       (let [t (check-expr x nil)] (when-let [b (first *loops*)] (if @b (unify @b t) (reset! b t)))))
+                     (when-let [b (first *loops*)] (when-not @b (reset! b unit)))
+                     [:never])
+          :continue [:never]
+          :ret (do (when-let [x (:expr e)] (let [t (check-expr x *ret*)] (coerce! x t *ret*))) [:never])
+          :match (let [st (check-expr (:expr e) nil)
+                       arms (vec (for [a (:arms e)]
+                                   (binding [*env* (conj *env* {})]
+                                     (let [env (atom {})]
+                                       (check-pat (:pat a) st env :none)
+                                       (binding [*env* (conj *env* @env)]
+                                         (when (:guard a) (check-expr (:guard a) [:bool]))
+                                         [(:body a) (check-expr (:body a) expected)])))))]
+                   (lub! arms (when (and expected (not (tvar? (shallow expected)))) expected)))
+          :let (let [t (check-expr (:init e) nil) env (atom {})]
+                 (check-pat (:pat e) t env :none)
+                 (set! *env* (conj *env* @env))
+                 [:bool])
+          :struct (if-let [[t vid args] (struct-ty e)]
+                    (let [fs (into {} (adt-fields vid args))]
+                      (doseq [f (:fields e)]
+                        (let [fty (get fs (:ident f))
+                              x (check-expr (:expr f) fty)]
+                          (when fty (coerce! (:expr f) x fty))))
+                      (when (:base e) (check-expr (:base e) t))
+                      t)
+                    (do (doseq [f (:fields e)] (check-expr (:expr f) nil)) [:unknown]))
+          :drop-temps (check-expr (:expr e) expected)
+          (do (doseq [x (vals (select-keys e [:receiver :args :expr :body :exprs]))]
+                (cond (map? x) (when (:node x) (try (check-expr x nil) (catch Throwable _ nil)))
+                      (vector? x) (doseq [y x] (when (map? y) (try (check-expr y nil) (catch Throwable _ nil))))))
+              [:unknown]))]
+    (record! e ty)))
+
+(defn- check-stmt [s]
+  (case (:kind s)
+    :let (let [decl (when (:ty s) (erase (c/lower-ty (:ty s))))
+               t (if-let [init (:init s)]
+                   (let [x (check-expr init decl)] (when decl (coerce! init x decl)) (or decl x))
+                   (or decl (fresh :ty)))
+               env (atom {})]
+           (check-pat (:pat s) t env :none)
+           (when (:els s) (check-block (:els s) nil))
+           (set! *env* (conj *env* @env)))
+    (:semi :expr) (check-expr (:expr s) (when (= :expr (:kind s)) unit))
+    nil))
+
+(defn check-block [b expected]
+  (binding [*env* (conj *env* {})]
+    (let [diverges (atom false)]
+      (doseq [s (:stmts b)]
+        (check-stmt s)
+        (when (and (#{:semi :expr} (:kind s)) (= [:never] (some-> (last (filter #(= (:span %) (:span (:expr s))) @*facts*)) :ty shallow))) (reset! diverges true)))
+      (if-let [x (:expr b)]
+        (let [t (check-expr x expected)]
+          (when (and expected (not (tvar? (shallow expected)))) (coerce! x t expected))
+          t)
+        (if @diverges [:never] unit)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Patterns (pat.rs, with the default binding modes)
+
+(defn- bm-text [by-ref mutbl] (str "BindingMode(" (case by-ref :not "Yes(Not)" :mut "Yes(Mut)" "No") ", " (if mutbl "Mut" "Not") ")"))
+
+(defn check-pat
+  "check_pat: P against EXPECTED; bindings into the atom ENV; DBM the default binding mode (:none, :ref, :ref-mut)"
+  [p expected env dbm]
+  (let [ex (shallow expected)
+        ;; peel references for non-reference patterns (match ergonomics)
+        [ex dbm] (if (and (#{:tuple :struct :tuple-struct :lit} (:kind p)) (= :ref (first ex)))
+                   (loop [t ex m dbm] (if (= :ref (first t)) (recur (shallow (nth t 3)) (if (or (= m :ref) (not (nth t 2))) :ref :ref-mut)) [t m]))
+                   [ex dbm])]
+    (case (:kind p)
+      :binding (let [by-ref (or (:by-ref p) (case dbm :ref :not :ref-mut :mut nil))
+                     t (case by-ref :not [:ref [:re-erased] false ex] :mut [:ref [:re-erased] true ex] ex)]
+                 (swap! env assoc (:name p) t)
+                 (when (vector? (:span p))
+                   (swap! *facts* conj {:owner *owner* :span (:span p) :ty t :pat true :mode (bm-text by-ref (:mutbl p))}))
+                 (when (:sub p) (check-pat (:sub p) ex env dbm)))
+      :tuple (let [ts (if (= :tuple (first ex)) (second ex) (vec (repeatedly (count (:pats p)) #(fresh :ty))))]
+               (when-not (= :tuple (first ex)) (unify ex [:tuple ts]))
+               (doseq [[sp t] (map vector (:pats p) ts)] (check-pat sp t env dbm)))
+      :ref (let [inner (if (= :ref (first ex)) (nth ex 3) (fresh :ty))] (check-pat (:pat p) inner env :none))
+      :lit (let [t (check-expr (:expr p) ex)] (unify t ex))
+      (:tuple-struct :struct :path)
+      (let [rd (c/res-def (:path p))]
+        (when (= :local (first rd))
+          (let [[_ id k] rd d (c/def-of id)
+                vid (cond (= "Variant" k) id (str/starts-with? (str k) "Ctor") (if (:variant d) (:variant d) (:adt d)) :else id)
+                adt (or (:adt (c/def-of vid)) vid)
+                args (if (and (= :adt (first ex)) (= adt (second ex))) (nth ex 2) (let [a (fresh-args adt)] (unify ex [:adt adt a]) a))
+                fs (adt-fields vid args)]
+            (case (:kind p)
+              :tuple-struct (doseq [[sp [_ t]] (map vector (:pats p) fs)] (check-pat sp t env dbm))
+              :struct (let [m (into {} fs)] (doseq [f (:fields p)] (check-pat (:pat f) (get m (:ident f) [:unknown]) env dbm)))
+              nil))))
+      :or (doseq [sp (:pats p)] (check-pat sp ex env dbm))
+      nil)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Bodies, fallback and writeback
+
+(defn- fallback!
+  "fallback.rs: unresolved integer variables are i32, float variables f64"
+  []
+  (doseq [[id {:keys [kind val]}] @*vars*]
+    (when (nil? val)
+      (case kind :int (bind! [:infer :int id] [:int "i32"]) :float (bind! [:infer :float id] [:float "f64"]) nil))))
+
+(defn- print-fact-ty [t]
+  (let [t (deep t)]
+    (binding [c/*in-value* false] (c/print-ty t))))
+
+(defn- check-body
+  "One typeck root's body: a function's parameters and block, a constant's or static's initializer"
+  [d]
+  (let [n (:node d) k (:kind d)
+        owner (binding [c/*in-value* true] (c/print-def-path (:id d) []))
+        facts (atom [])]
+    (binding [*vars* (atom {}) *facts* facts *owner* owner *env* [{}] *loops* nil]
+      (c/in-def (:id d)
+        (if (#{"Fn" "AssocFn"} k)
+          (let [sig (erase (c/fn-sig (:id d)))
+                env (atom {})]
+            (doseq [[p t] (map vector (:params n) (:inputs sig))] (check-pat (:pat p) t env :none))
+            (binding [*env* [@env] *ret* (:output sig)]
+              (let [t (check-block (:body n) (:output sig))]
+                (coerce! {:span nil} t (:output sig))
+                ;; the body's block expression is a fact of its own
+                (record! {:kind :block :span (:span (:body n))} t))))
+          (let [t (erase (c/type-of (:id d)))]
+            (binding [*ret* t] (let [x (check-expr (:expr n) t)] (coerce! (:expr n) x t))))))
+      (fallback!)
+      (mapv (fn [f] (-> f (update :ty print-fact-ty) (update :adj (fn [as] (mapv (fn [[k t]] [k (print-fact-ty t)]) (or as []))))))
+            @facts))))
+
+(defn check-crate
+  "RF9: every typeck root's facts (within collect/with-crate)"
+  []
+  (vec (mapcat (fn [d]
+                 (try (check-body d)
+                      (catch Throwable ex [{:owner "?" :error (str ex)}])))
+               (filter (fn [d] (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
+                                   (and (or (str/starts-with? (str (:kind d)) "Const") (str/starts-with? (str (:kind d)) "Static")
+                                            (str/starts-with? (str (:kind d)) "AssocConst"))
+                                        (:expr (:node d)))))
+                       (c/defs)))))
