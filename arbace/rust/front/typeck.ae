@@ -126,6 +126,28 @@
     (swap! *facts* (fn [fs] (let [i (last (keep-indexed (fn [i f] (when (and (= (:span f) (:span e)) (= (:kind f) (get kind-names (:kind e)))) i)) fs))]
                               (if i (update-in fs [i :adj] into adj) fs))))))
 
+(def ^:dynamic *anon-consts* nil)   ; atom: the body owner's next anonymous constant's disambiguator
+
+(defn- array-lens
+  "A HIR type's array lengths in the def collector's order (an element type's before its array's)"
+  [t]
+  (cond (and (map? t) (= :array (:kind t))) (concat (array-lens (:ty t)) [(:len t)])
+        (map? t) (mapcat array-lens (vals (dissoc t :len)))
+        (sequential? t) (mapcat array-lens t)
+        :else nil))
+
+(defn- anon-const!
+  "An anonymous constant (an array length, a repeat count): its own typeck root `OWNER::{constant#K}` types its literal or
+  path usize; written in the body, the body's results have it untyped (`?`)"
+  [x in-body?]
+  (when *anon-consts*
+    (let [k (dec (long (swap! *anon-consts* inc)))
+          x (if (and (= :block (:kind x)) (empty? (:stmts (:block x)))) (:expr (:block x)) x)
+          kind (get kind-names (:kind x))]
+      (when (and (vector? (:span x)) (#{"Lit" "Path"} kind))
+        (swap! *facts* conj {:owner (str *owner* "::{constant#" k "}") :span (:span x) :kind kind :ty [:uint "usize"] :adj []})
+        (when in-body? (swap! *facts* conj {:owner *owner* :span (:span x) :kind kind :ty "?" :adj []}))))))
+
 (defn- lookup-local [nm] (some #(get % nm) (rseq *env*)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -360,6 +382,20 @@
       (and (#{:closure :fndef :fnptr} (first self))
            (#{"core::ops::function::Fn" "core::ops::function::FnMut" "core::ops::function::FnOnce"
               "core::clone::Clone" "core::marker::Copy"} tr)) true
+      ;; an integer or float variable: the one impl among the integral (floating) ones that unifies, selected (the index
+      ;; `v[0]`'s `{integer}: SliceIndex<[T]>` makes it usize)
+      (and (tvar? self) (#{:int :float} (second self)) (<= (long *depth*) 4))
+      (let [by (get (:trait-impls-by c/*si*) tr)
+            keys (for [k (keys by) :when (string? k) :when (str/starts-with? k (if (= :int (second self)) "prim:" "prim:f"))] k)
+            cands (for [k keys ip (get by k)] ip)
+            hits (vec (filter (fn [ip] (let [sn (snapshot)
+                                             [_ _ st itr] (std-impl-instance ip)
+                                             ok (and (unify st self) (unify-all (vec (rest (second itr))) (vec (rest args))))]
+                                         (rollback! sn) ok))
+                              cands))]
+        (when (= 1 (count (distinct hits)))
+          (binding [*depth* (inc (long *depth*))] (impls-for self tr (vec (rest args)))))
+        true)
       (or (tvar? self) (= :param (first self)) (= [:unknown] self)) true
       ;; a cycle or a chain too deep: not proven (the old solver's overflow is an error, never a success)
       (> (long *depth*) 4) false
@@ -909,6 +945,7 @@
           :repeat (let [ex (some-> expected shallow)
                         elt (if (#{:array :slice} (first ex)) (second ex) (fresh :ty))]
                     (let [t (check-expr (:expr e) elt)] (coerce! (:expr e) t elt))
+                    (anon-const! (:count e) true)
                     [:array elt (c/lower-const-arg (:count e))])
           :assign (let [lt (binding [*mutable-place* true] (check-expr (:lhs e) nil))] (let [rt (check-expr (:rhs e) lt)] (coerce! (:rhs e) rt lt)) unit)
           :assign-op (let [lt (check-expr (:lhs e) nil) rt (check-expr (:rhs e) lt)
@@ -969,7 +1006,8 @@
 
 (defn- check-stmt [s]
   (case (:kind s)
-    :let (let [decl (when (:ty s) (body-ty (:ty s)))
+    :let (let [_ (doseq [l (array-lens (:ty s))] (anon-const! l true))
+               decl (when (:ty s) (body-ty (:ty s)))
                t (if-let [init (:init s)]
                    (let [x (check-expr init decl)] (when decl (coerce! init x decl)) (or decl x))
                    (or decl (fresh :ty)))
@@ -1099,11 +1137,12 @@
   (let [n (:node d) k (:kind d)
         owner (binding [c/*in-value* true] (c/print-def-path (:id d) []))
         facts (atom [])]
-    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *owner* owner *env* [{}] *loops* nil]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *owner* owner *env* [{}] *loops* nil]
       (c/in-def (:id d)
         (if (#{"Fn" "AssocFn"} k)
           (let [sig (erase (c/fn-sig (:id d)))
-                env (atom {})]
+                env (atom {})
+                _ (doseq [l (array-lens (concat (map :ty (:params n)) [(:output n)]))] (anon-const! l false))]
             (doseq [[p t] (map vector (:params n) (:inputs sig))] (check-pat (:pat p) t env :none))
             (binding [*env* [@env] *ret* (:output sig)]
               (let [t (check-block (:body n) (:output sig))
@@ -1117,7 +1156,7 @@
       (solve-obligations!)
       (fallback!)
       (solve-obligations!)
-      (mapv (fn [f] (-> f (update :ty print-fact-ty) (update :adj (fn [as] (mapv (fn [[k t]] [k (print-fact-ty t)]) (or as []))))))
+      (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %))) (update :adj (fn [as] (mapv (fn [[k t]] [k (print-fact-ty t)]) (or as []))))))
             @facts))))
 
 (defn check-crate
