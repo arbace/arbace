@@ -2948,6 +2948,9 @@ run's): about 16 va_arg programs of gxx-dg-run and the long double layouts' chec
 
 ### Left
 
+- **`bin/reap` has 2 problems on this branch until the night's records**: `runtime/deferred.cpp` is in g++'s reference and not yet in
+  `test/cpp/check-linux-amd64.edn` (nor the AOT record), and `test/reap/matrix.edn` holds the lowering's 250 against 251 now. The night's
+  steps 1 (`check --record`, `check --aot --record`, then `bin/reap --record`) clear both; the records are not written by hand.
 - The run records and the cells' numbers are tonight's (above); by day only single programs ran, and three of them were over the
   2 GiB rule (the slips in the table).
 - An argument of alignment 16 read by va_arg, an `x86_fp80` atomic, a computation in long double: their classes stay.
