@@ -3466,3 +3466,65 @@ per direct call, costs nothing measurable at this resolution.
 one difference left, handlers inline where CPython moves them to the end (push_cold_blocks_to_end), shows in no test
 of the sample; sys.monitoring's local events (`set_local_events`) and DISABLE stay 220's not-built; the tests that need a
 generator's finalization or `__del__` wait for 218.
+## Design: 222, finalization at reference counting's moment, and cycles through finalizers (PEP 442) (2026-11-06, the Mac VM, queue 222)
+
+Read from CPython 3.14.10's Python/gc.c (`gc_collect_main`: `deduce_unreachable`, `handle_weakrefs`, `finalize_garbage`,
+`handle_resurrected_objects`, `delete_garbage`), Objects/typeobject.c (`subtype_dealloc`, `slot_tp_finalize`) and
+Lib/test's test_finalization, test_gc, test_weakref and support's `check_free_after_iterating`, against
+go/arbace/py at 160750c2 (218's finalizer queue, `finalize.go`, with 219, 219t and 220 merged).
+
+**What the tests observe.** Two families, apart:
+- *Cycles* (`:finalization-cycle`, 33): `del` the last outside reference to a cycle that holds an object with a `__del__`
+  or a weak reference, `gc.collect()`, then look: `__del__` called once (PEP 442), the weak references cleared (also a
+  survivor's: test_finalization's "XXX is this desirable?"), a resurrected object kept and never finalized again,
+  `gc.garbage` empty (or every unreachable object in it under DEBUG_SAVEALL), and some tests `gc.collect()`'s count.
+  Go never frees a cycle that reaches a finalized object from itself, so today such a cycle lives for good.
+- *The moment* (`:finalization`, 47): the test looks right after the last reference went, with no collection between
+  (`del o; self.assertIsNone(r())`, a key deleted in `__eq__`, an iterator rebound to None, a frame's return).
+
+**The cycles: CPython's algorithm with Go's collector as the oracle of outside references.** CPython's
+`deduce_unreachable` subtracts the references inside the generation from every object's count: what keeps a positive
+count is held from outside. pyi has no counts, and the references from outside are Go's (stacks, registers of the
+compiled loop, goi's frames, the runtime's own variables): only Go's collector sees them all. So `gc.collect()` asks it:
+1. *The graph.* From the tracked objects (218's records) of the node types (an instance, its dictionary and `__slots__`
+   folded into it while the dictionary has not been handed out as an object; a list; a tuple; a dictionary), the
+   nodes reachable through their slots of interface type, and the edges between nodes. Only the strongly connected
+   components that hold a tracked node and have a cycle matter (an acyclic dead object is Go's to find, 218), with
+   what they reach.
+2. *The probe.* Every edge between two probed nodes is hidden (its slot set to nil, its target kept as an address), the
+   node's Go finalizer (218's) replaced by a probe's, `runtime.GC()` with the GIL held (no Python code may see a hidden
+   slot), and a wait until every probe fired or Go's finalizers have been still for a moment. A node whose probe did
+   not fire is held from outside the probed set (by any Go reference, or through an object the graph does not
+   traverse); the slots are put back, and everything reachable from such a node through the edges is reachable:
+   the rest is cyclic trash, CPython's `unreachable`. Sound by construction: a slot is hidden only between two
+   probed nodes, so a node that fires has no reference from outside but the hidden ones, and the propagation puts
+   those back; a type the graph does not traverse only keeps more alive (a class, a function, a cell, a frame:
+   their references are typed fields, never hidden, so a cycle through them is not found: it stays classed).
+3. *PEP 442's order* (gc_collect_main): the weak references to the trash cleared, and their callbacks called (a weak
+   reference is not a node: its callback is always called, CPython's "outside the trash" case); `__del__` (218's work:
+   a generator's close, a socket's warning too) on each object not finalized before, once (the record's work cleared);
+   then, when any Python code ran, the probe again over the trash alone (`handle_resurrected_objects`): what a
+   finalizer stored somewhere is held from outside now and survives, never finalized again; the weak references made
+   meanwhile cleared without callbacks; DEBUG_SAVEALL puts the final trash in `gc.garbage`, else the records are dropped
+   and the Go finalizers not set again, so Go frees the cycle (CPython's `tp_clear` breaks cycles for reference
+   counting, which Go does not need: unobservable). `gc.collect()` returns the number of trash nodes (CPython counts
+   its trash's objects; an instance's dictionary, folded, is not one, as 3.14's inline values).
+4. *Cost.* Nothing when no tracked node is in a cycle; else the graph's walk over what the tracked objects reach, and one
+   Go collection with the probes (two when a finalizer ran). Untracked cycles (no `__del__`, no weak reference) stay
+   Go's: their count is not CPython's (test_gc's test_list and the like keep a class).
+- *Go's limits respected*: one finalizer per object (an object that may carry another file's: _tracemalloc's lists and
+  dicts once it traced, another package's types, is not a node); Go's heap does not move (the hidden addresses).
+
+**The moment.** Exact reference counting would need a count on every holder of every tracked object: every store
+into a list, a dict, an attribute, a cell, a register of the compiled loop, a goi register, and every Go variable of
+the runtime that holds an object; one missed increment frees a live object (a weak reference cleared under a live
+referent, `__del__` on a live object), which no test could excuse. The cheapest exact model instead asks Go at the
+moments a test can observe, and keeps reference counting's order (218's queue):
+- *`del NAME` of a tracked object* (`DELETE_FAST`, on the loop and compiled: `AotDeleteFast`): the deletion's site checks
+  whether the value was tracked with work or weak references due; if so, one Go collection there and the queue drained
+  before the next instruction (the statement leaves nothing on the value stack): exact when that was the last reference,
+  a wasted collection when not. No cost on any other path; the collections are bounded (a budget of a tenth of the
+  elapsed wall time; past it the site leaves the death to the next collection, 218's moment).
+- *Rebinding and a frame's return* (`o = None`, a function's locals at its return, an iterator dropped) would need the
+  same check on every `STORE_FAST` and every return: a load and a branch on the compiled loop's hottest paths. Measured
+  with 210's method; past 3% it is the user's DECISION, not built.
