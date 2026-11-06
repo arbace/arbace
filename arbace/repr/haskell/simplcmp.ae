@@ -104,16 +104,30 @@
 ;;; The comparison
 
 (defn- rename
-  "Names other than externals numbered by first occurrence (literals' and constructors' forms left alone)"
+  "Binders numbered by binding site (alpha-normalised: GHC's dump reuses a unique in disjoint scopes), the free names
+  other than externals by first occurrence"
   [x]
-  (let [m (atom {})]
-    (letfn [(w [y] (cond
-                     (and (seq? y) (= 'x (first y))) (or (get @m (second y)) (let [k (list 'x (count @m))] (swap! m assoc (second y) k) k))
-                     (and (seq? y) (contains? #{'v 'c 'str} (first y))) y
-                     (seq? y) (apply list (map w y))
-                     (vector? y) (mapv w y)
-                     :else y))]
-      (w x))))
+  (let [n (atom 0) free (atom {})]
+    (letfn [(fresh [] (list 'x (swap! n inc)))
+            (bind [env bs] (reduce (fn [[env out] b] (let [k (fresh)] [(assoc env (second b) k) (conj out k)])) [env []] bs))
+            (w [env y]
+              (cond
+                (and (seq? y) (= 'x (first y))) (or (get env (second y))
+                                                    (or (get @free (second y)) (let [k (list 'f (count @free))] (swap! free assoc (second y) k) k)))
+                (and (seq? y) (contains? #{'v 'c 'str} (first y))) y
+                (and (seq? y) (= 'lam (first y))) (let [[env2 bs] (bind env (second y))] (list 'lam bs (w env2 (nth y 2))))
+                (and (seq? y) (= 'let (first y))) (let [[[b r]] (second y) [env2 [b2]] (bind env [b])]
+                                                    (list 'let [[b2 (w env r)]] (w env2 (nth y 2))))
+                (and (seq? y) (= 'letrec (first y))) (let [[env2 bs] (bind env (map first (second y)))]
+                                                       (list 'letrec (mapv (fn [b2 [_ r]] [b2 (w env2 r)]) bs (second y)) (w env2 (nth y 2))))
+                (and (seq? y) (= 'case (first y))) (let [s (w env (second y)) [env2 [b2]] (bind env [(nth y 2)])]
+                                                     (list 'case s b2
+                                                           (mapv (fn [[_ c bs r]] (let [[env3 bs2] (bind env2 bs)] (list 'alt c bs2 (w env3 r))))
+                                                                 (nth y 3))))
+                (seq? y) (apply list (map #(w env %) y))
+                (vector? y) (mapv #(w env %) y)
+                :else y))]
+      (w {} x))))
 
 (defn- typeable? [n] (re-find #"\.\$(tr|tc|krep)" n))
 
