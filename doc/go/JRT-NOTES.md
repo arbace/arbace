@@ -1958,8 +1958,8 @@ as grown".
 | class | what |
 |---|---|
 | `SocketImpl` | `createPlatformSocketImpl` makes a `HostSocketImpl` |
-| `Socket` | the state bits and the streams' installation through `Unsafe` (a compare-and-set loop for `getAndBitwiseOr`, `compareAndSetReference`) instead of `VarHandle`s; a client's impl is the platform's itself, not wrapped in a `SocksSocketImpl` (no proxies); the streams record no JFR events |
-| `ServerSocket` | `implAccept(Socket)` without the `DelegatingSocketImpl` step (no SOCKS or HTTP-tunnel impls; j2g has no cast for a pattern-matching `instanceof` of a cut class) |
+| `Socket` | the state bits and the streams' installation through `Unsafe` (a compare-and-set loop for `getAndBitwiseOr`, `compareAndSetReference`) instead of `VarHandle`s; the streams record no JFR events; until F12 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F12 (write-ahead)") a client's impl was the platform's itself, since F12 jdk26u's `SocksSocketImpl` over it again, which asks the proxy selector |
+| `ServerSocket` | (until F12) `implAccept(Socket)` without the `DelegatingSocketImpl` step; since F12 jdk26u's, the SOCKS and HTTP-tunnel impls in the world |
 | `InetAddress` | the static initializers without the native library, `SharedSecrets` and the native `init`; IPv4 and IPv6 availability from the host; the built-in resolver only (no `ServiceLoader`); the cache a map of `CachedLookup`s expiring as the JVM's default policy without a security manager (30 s, failures 10 s), checked when used (the JVM's `ConcurrentSkipListSet` of expiries is outside the world), without the one-lookup-per-host lock; `PlatformResolver` without `Blocker` |
 | `Inet4Address`, `Inet6Address` | no native `init`; `Inet6Address(String, byte[])` without `NetworkInterface` (outside the world: null in the JDK there); `Inet6AddressHolder.getHostAddress` without the scope's interface (a dropped field) |
 | `Inet4AddressImpl`, `Inet6AddressImpl` | the natives over `HostNet`; `isReachable` throws `UnsupportedOperationException`; the loopback address without asking `NetworkInterface` whether it is bound |

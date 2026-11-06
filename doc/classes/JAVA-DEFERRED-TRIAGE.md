@@ -690,6 +690,166 @@ around compiled code, `:speed`'s measure if they time out.
 the data step (F2's, decided, not built), which the default `SSLContext`'s trust managers read; JCS155-JCS157
 (Proposed).
 
+## As built: F6 (javac's API on javac's tool, JCS95 (c))
+
+Branch `java-jc9c` (from `java-jc9-tls`), 2026-11-06, by day under the light rules. F6 is the check's change JCS95 (c)
+proposed and the user deferred on 2026-10-26: the tests that name javac's API run on javac's tool executable,
+which holds javac's world, instead of the shipped program, which has none. It needs no JC9 branch.
+
+**The check** (`bin/java-check`, its header): a test whose source files name `com.sun.tools.javac`, `com.sun.source`,
+`javax.tools`, `javax.lang.model`, `javax.annotation.processing` or `java.util.spi.ToolProvider` on a line that is no
+comment line is interpreted on javac's tool (`REPR_JAVA_EXE`, bin/repr-java's default), with
+`-Djdk.internal.jrt.javac.platform=` the platform `bin/repr-java platform-dir` gives (new verb: the platform
+javac on Arbace's command line attributes against, made as `bin/repr-java javac` makes it), which
+`jdk.internal.jrt.javac.SystemCompiler`, javax.tools' system compiler on the tool, reads (as bin/javac-vendor's
+generate step sets it). Without a tool the tests run on the executable as before (a warning). The rule selects
+exactly the 56 tests the triage's scan files under javac's API (of the 3,322 the interp level runs; the one
+more a plain grep would take, t06039, names javac in a comment). The gate's `java-interp` hosts `:javac-prog`
+(it had `REPR_JAVA_EXE` already) and declares `bin/repr-java`, `bin/javac-vendor`, `bin/lib/host.bash`.
+
+**javac's tool world** (built at the night, `bin/javac-vendor tool`):
+- `com.sun.tools.javac.Main`'s `compile(String[])` and `compile(String[], PrintWriter)`: javac on Arbace's
+  command line (variant `overlay/jdk/javac/variants/JavacMain.ae`, over the added
+  `jdk.internal.jrt.javac.Main.runOnPlatform`: the platform property's directories as `--platform`): jdk26u's
+  launcher runs over JavacFileManager and java.nio.file, which the tool has not (`BasicFileAttributes is not in
+  the closed world`);
+- the API's standard file manager (`StandardFileManager`) handles the file manager's options javac hands it
+  (`handleOption`, `isSupportedOption`): `-d`, the class and source paths, `-encoding UTF-8`, `--system none`,
+  as the command line serves them;
+- a class file without `-d` goes where JavacFileManager puts it: beside its source file, else in the current
+  directory by its simple name (`FileManager.besideSibling`); before, an `IOException` ("no output location");
+- j2g's `class-supers` + `javax/tools/SimpleJavaFileObject`, `com/sun/source/util/TreeScanner`, `TreePathScanner`
+  (what the tests extend; absent from the shipped world, which they leave alone);
+- `jdk/javac/forms` of the three changed overlay classes, converted as `bin/javac-vendor convert` reads
+  jdk.compiler (`read-jdk --check --no-javac`, `REPR_JAVA_PATCH_ALL=1`): the unchanged `SystemCompiler` came
+  out byte for byte its committed form; the night's `bin/javac-vendor verify` compares the whole tree.
+
+**Checked by day** (main's stage 0, the gate's tool `.tmp/gate-exe/javac-fee544298f4305f99543`, stale for the
+checkout's key: `REPR_JAVA_STALE_OK=1`):
+- the 56 at read and interp: before F6 every one load-failed on the shipped executable; with the check's
+  change, on today's tool, **6 pass** (t05890, t06381-t06384, t06385), every other one in a class;
+- the javac-world changes, before their build: renamed copies of the four overlay classes (package `f6x`,
+  `FileManager.Obj` implementing `JavaFileObject` itself, since an interpreted class cannot extend
+  `SimpleJavaFileObject` until the build), read and interpreted on today's tool with the tests' javac entries
+  pointed at them (`.tmp/jc9c/f6x/proof.sh`): t06044, t06045, t06369, t06378, t06379, t06380 **pass** against the
+  JDK's recorded runs (status, stdout); t06346 stops at `--release 11` (no ct.sym, `:diag-release`);
+- the classes: `:javac-tool` (new, kind `:javac`, the eval cell maps it to deferred) for what javac on Arbace's own
+  Java does not serve (javac's ToolProvider, JCS159; until the night the API's `-d`, the class output and
+  `Main.compile`), the jar tool's two (`ToolProvider.findFirst("jar")`) to `:jvm-tools` (JCS103's JDK tools),
+  ToolProviderTest's META-INF/services provider and the file manager's `getServiceLoader` to `:classloading`,
+  `--release` at the interp level to `:diag-release`.
+
+**Expected, interp** (the 56): after the night about **16 pass** (6 measured, 6 proven, the 4 that extend
+`SimpleJavaFileObject` and `TreeScanner` not provable before the build); 4 leave deferred for by-design classes;
+the rest: the class-file API 22 (by design, JCS129), the launcher's tests 11 (`tools/launcher`, they need `java`),
+`--release` 1, javac's ToolProvider 2. The compiled level is unchanged (JCS158). **Deferred at eval: -18**
+(16 passing, 2 by design), AOT unchanged.
+
+**The night's commands** (after the merge; javac's tool is the only build):
+
+```sh
+cd /root/arbace/.tmp/worktrees/java-jc9c
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 bin/javac-vendor verify
+bin/heavy-lock bin/javac-vendor edge         # javac's world's edge (the new members name nothing new: expect no change)
+bin/heavy-lock bin/javac-vendor tool .tmp/f6-night/tool   # the tool at the checkout's arbace_javac_key
+# the 56: expect about 16 pass at interp, every other in a class; record their lines
+REPR_JAVA_EXE=$PWD/.tmp/f6-night/tool/arbace-javac JAVA_CHECK_EXE=<the night's gate executable> \
+  bin/java-check --levels interp,compiled --only "$(paste -sd'|' .tmp/jc9c/javacapi.ids)" --record
+```
+
+## As built: F12 (write-ahead)
+
+Branch `java-jc9c`, 2026-11-06, F12 prepared by day under the light rules as JC9's and JC9b's areas were: the
+closure's list, jrt's own Java, the variants, j2g's tables, the data step, light checks. Nothing converted,
+translated or built. **F12 needs F5** (`PlatformLogger`'s bridge is java.util.logging, F5's `LoggingProviderImpl`
+access), **F3** (https: is SunJSSE's), **F4** (the permissions `URLPermission`, `NetPermission` the classes check) and
+**F8** (`URLEncoder.encode(String, Charset)`'s `CharsetEncoder`, JC9b's): its closure was computed against the world
+plus every JC9 and JC9b list (a scratch merge of `java-jc9-tls`, `java-jc9-jca`, `java-jc9-logging` and
+`java-jc9b-natives` with the union for their shared lines, `.tmp/jc9c/mclone`, 1,993 lines of print-sources), by
+reference: `http-sources` names none of their files. Not mergeable before its night, as JC9's branches (its
+variants name classes `jdk/forms` does not hold yet: "a variant for a class not in the inputs").
+
+**What comes in** (jdk26u at `baf63fb`; `test/jrt/jrt_sources.ae`'s `http-sources`, one line in `sources`): 82 files,
+25,542 lines, all `share`:
+
+| part | how |
+|---|---|
+| java.net (23) | `Proxy`, `ProxySelector`, `SocksSocketImpl`, `SocksConsts`, `HttpConnectSocketImpl`, `DelegatingSocketImpl`; `URLEncoder` (with `jdk.internal.util.ImmutableBitSetPredicate`); `HttpCookie`, `CookieHandler`, `CookieManager`, `CookiePolicy`, `CookieStore`, `InMemoryCookieStore`; `Authenticator`, `PasswordAuthentication`; `ResponseCache`, `CacheRequest`, `CacheResponse`, `SecureCacheResponse`; `HttpURLConnection`, `HttpRetryException`, `ProtocolException`, `ContentHandlerFactory` |
+| the http: and https: connections (33) | `sun.net.www.protocol.http` (13: `HttpURLConnection`, the authentication schemes Basic and Digest, the NTLM and Negotiate proxies, which find no implementation by name and answer none, as on a JDK without them), `sun.net.www.http` (12: `HttpClient`, the keep-alive cache and streams, the chunked streams, `PosterOutputStream`, the capture), `sun.net.www.protocol.https` (4: `HttpsURLConnectionImpl` over SunJSSE), `javax.net.ssl.HttpsURLConnection` (F3 left it out), `sun.net.www` `HeaderParser`, `MeteredStream`, `sun.net.util.ProxyUtil` |
+| the ftp: and mailto: handlers (17) | `sun.net.www.protocol.ftp` and `mailto` (2 each), `sun.net.ftp` (7) with `impl` (2), `sun.net.smtp` (2), `sun.net` `NetworkClient`, `TransferProtocolClient`, the telnet streams (3) |
+| the proxies' configuration (6) | `sun.net.spi.DefaultProxySelector`, `sun.net.NetProperties`, `ApplicationProxy`, `SocksProxy`; `jdk.internal.access.JavaNetHttpCookieAccess` |
+| jrt's own (overlay, 2 new, 1 extended) | `sun.util.logging.PlatformLogger`: jdk26u's transcribed without System.Logger (JCS155 (b); its lazy loggers have nothing to bridge to), its bridge the one the JDK ends with when java.logging is present, jdk26u's JULWrapper's PlatformLogger half (`JulBridge`), the java.util.logging logger demanded through F5's `LoggingProviderImpl` access when first used; `jdk.internal.misc.InnocuousThread`, the factories of jdk26u's on jrt's `Thread` (no thread groups, context class loaders or Unsafe on Thread's fields in jrt); `jdk.internal.jrt.NetAccess` holds HttpCookie's access (as InetAddress's since F3) |
+| the variants (9) | `ProxySelector.ae` (the default constructed directly, no `Class.forName`), `DefaultProxySelector.ae` (no libnet: `init` answers false, the JDK's answer on a host without the desktop's proxy settings), `NetProperties.ae` (the resource `conf/net.properties`), `HttpCookieAccess.ae` and `HttpURLConnectionImpl.ae` (the cookie access through NetAccess; `jrtTunnelSocket`), `HttpClient.ae` (`System.getProperty`, jrt has no `getProperties` for translated code; `jrtServerSocket`), `HttpConnectSocketImpl.ae` (the tunnel without reflection on protected members); `URL.ae`'s factory + `ftp`, `mailto`; `Socket.ae` without its `createImpl` (jdk26u's: the platform impl in a `SocksSocketImpl`, which asks the proxy selector, JCS160) and `ServerSocket.ae` removed (jdk26u's `implAccept` unwraps the delegating impls) |
+| the data | `conf/net.properties` into `jdk/data` by `bin/jrt-convert`'s data step, as `make/modules/java.base/Copy.gmk` makes it (share's then unix's: equal to the image's) |
+| j2g | renames `java/net/Authenticator` → `Net_Authenticator` (SunJSSE's, F3's), `sun/net/www/protocol/ftp/Handler` → `Ftp_Handler`, `mailto/Handler` → `Mailto_Handler` (java.util.logging's `Handler`, F5's), `sun/net/ftp/impl/FtpClient` → `FtpImpl_FtpClient`, `sun/net/www/protocol/http/HttpURLConnection` → `Http_HttpURLConnection` (J2G-SPEC §4.4); `class-supers` + `Authenticator`, `ProxySelector`, `Socket`, `ServerSocket`, `URLConnection`, `SecureCacheResponse`, `BufferedReader` (what the area's tests extend: 3, 2, 2, 2, 1, 1, 1) |
+
+What the classes reach outside the world: serialization (`KeepAliveCache`'s `writeObject`, J2G-SPEC §12's stubs), the
+NTLM, Negotiate and SPNEGO implementations by name (none: they answer as a JDK without them), `ServiceLoader` (no
+FTP provider: the default, as jdk26u's own comment has it).
+
+**Light checks done** (main's stage 0, today's tool, `REPR_JAVA_STALE_OK=1`, each under 1 GB; scratch
+`.tmp/jc9c/`): the closure (`closure.py`, F3's with the merged world, scope `java.net`, `sun.net.**`'s packages,
+`jdk.internal.util`; seeded with the world's own java.net and sun.net files, whose stubbed references become real,
+which added `HttpConnectSocketImpl` and `ContentHandlerFactory`): nothing outside the world and the list but the
+overlays' classes and the variants' members; print-sources: the branch's 1,424 lines + exactly these 84 (82 share,
+2 overlay), no line twice; `read-jdk --check` of the 82, the overlays and F5's java.util.logging as a patch of
+java.base: 104 converted, 0 failed, 0 javac errors; `--no-javac`: 104 native, 0 fallbacks, the forms identical;
+the variants applied and parsed on the converted forms (ProxySelector 1/0/0, DefaultProxySelector 3/0/0,
+NetProperties 1/0/0, HttpCookie 1/0/0, sun's HttpURLConnection 1/0/1, HttpClient 1/0/1, HttpConnectSocketImpl
+1/8/0) and on the world's (URL with its factory, Socket 3/4/4); the whole closure by the JDK's javac against jrt's
+overlays (F3's `run.sh` on JC9, JC9b, F3 and F12 merged): 2,077 files, **0 errors**, 4,706 classes (18 s, 0.9 GB);
+jrt's hand-written members the new files call (System, Thread, Class...): `System.getProperties` was the one
+missing (`HttpClient.ae`). `git merge-tree` with `java-jc9-jca`: conflicts in this file, `test/java/divergences.edn`
+(`:jvm-tools`, whose kind JCS130's branch makes `:harness-design`: take it, with F6's two ids) and
+`test/reap/cells.edn` (the eval kind-map: the union, `:harness-design :design` and `:javac :deferred`); with
+`java-jc9-logging` and `java-jc9b-natives`: this file alone.
+
+**JCS135's measure**: +25,542 Java lines of jdk26u's and about 500 of jrt's (+5.3% on the closure's 483,461; JC9,
+JC9b, F3 and F12 together about +85%); about +4 MB on the executable by JC6b's measure.
+
+**Expected yield** (the triage's scan, the deferred tests whose causes JC9, JC9b and F12 together cover and JC9 and
+JC9b alone do not): **40 interpreted / 37 compiled** at most (the HttpsURLConnection tests F3 left among them),
+about **28 / 26** (0.7). F12b (java.net.http's client, com.sun.net.httpserver) gains with it. At risk: every client
+socket now goes through `SocksSocketImpl` and the proxy selector (JCS160: should the sockets' passing tests regress,
+the fallback is `Socket.ae`'s former `createImpl`, BadProxySelector and `socksProxyHost` left out); the HTTP tests'
+loopback servers under the CPU limits; the keep-alive threads (`InnocuousThread`).
+
+**The night's commands**, after `next` holds JC9 and JC9b (merge `next` into `java-jc9c` first), heavy ones under
+`bin/heavy-lock`, about 3 hours with the check:
+
+```sh
+cd /root/arbace/.tmp/worktrees/java-jc9c
+git merge next
+# 1. jdk/ converted afresh: expect the night before's count + 84 files (82 share, 2 overlay), 0 failed, 0 javac
+#    errors, no javac: 0 fallbacks; jdk/data + conf/net.properties (:same as the image's)
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. j2g's edge afresh; 3. javac's world's edge less it
+bin/heavy-lock bin/j2g-edge update
+bin/heavy-lock bin/javac-vendor edge
+# 4. the executable (its size, the j2g and Go times); j2g's report: the variants above, none "for a class not in
+#    the inputs"
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 5. a smoke: a loopback HTTP server thread and HttpURLConnection, a cookie, a proxy selector's answer
+target/arbace-go/amd64/arbace -e '(import (quote (java.net ServerSocket URL HttpCookie ProxySelector URI URLEncoder)))
+  (let [ss (ServerSocket. 0)
+        srv (future (with-open [s (.accept ss)] (let [in (.getInputStream s)] (while (pos? (.available in)) (.read in))
+              (.write (.getOutputStream s) (.getBytes "HTTP/1.1 200 OK\r\nSet-Cookie: a=b\r\nContent-Length: 2\r\n\r\nok")))))
+        c (.openConnection (URL. (str "http://127.0.0.1:" (.getLocalPort ss) "/")))]
+    (println (.getResponseCode c) (slurp (.getInputStream c)) (HttpCookie/parse "Set-Cookie: a=b"))
+    (println (.select (ProxySelector/getDefault) (URI. "http://example.com/")) (URLEncoder/encode "a b&c" "UTF-8"))))'
+# expect "200 ok [a=b]" then "[DIRECT] a+b%26c"
+# 6. Java's levels interp and compiled on F12's areas and the sockets' (then the whole corpus with JC9's): saved,
+#    not recorded; expect about 28 / 26 of the 40 / 37 to pass, no passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/(java/net/(Authenticator|CookieHandler|HttpCookie|HttpURLConnection|IDN|ProxySelector|Socks|Socket|ServerSocket|URL|URLConnection|URLDecoder|URLEncoder)|sun/net/www|javax/net/ssl/HttpsURLConnection|java/io/OutputStreamWriter/Encode)' \
+  --save .tmp/f12-night/check
+```
+
+Then, the day after: the results judged, the tail classified, the records with the whole corpus, `bin/reap --record`,
+JRT-SOURCES.md's closure list, JRT-NOTES.md's "Sockets" (the proxies, the http: connection), the commit of `jdk/`.
+
 ## 6. Findings on the way
 
 - `:j2g-unresolved` (305 compiled, kind `:world`) is the compiled level's catch-all for "a type the world does
@@ -723,6 +883,15 @@ the data step (F2's, decided, not built), which the default `SSLContext`'s trust
   `System` has no `Logger`, `Logger.Level` or `LoggerFinder`). F3's new files were then checked by hand against
   jrt's manifest for `System`'s, `Thread`'s and `Runtime`'s members (only `getLogger` missing). The scan should
   read `go/arbace/jrt/manifest.edn`'s nested types and members; the next widening's day can add it.
+- (F12's day) jrt's hand-written `System` has no `getProperties` for translated code (SeedGenerator's overlay says
+  so since F1): a JDK class reading its properties as a `Properties` (`sun.net.www.http.HttpClient`'s static
+  initializer) needs a variant reading them one by one. The closure scan's member check (F3's finding: the scan
+  should read `go/arbace/jrt/manifest.edn`) found it on F12's day: a check of each `System.`, `Thread.`, `Class.`
+  static member the new files call against the manifest, `.tmp/jc9c/statics.txt`.
+- (F6's day) The interpreter on javac's tool runs Java forms against javac's world as on the shipped program
+  (`test/java/run.ae` unchanged): the overlay classes of javac's world can be tried by day, renamed, before a tool
+  build (`.tmp/jc9c/f6x/proof.sh`), except where they extend a class not in `class-supers` (then a copy implementing
+  the interface itself).
 - (F3's day) `arbace.j2g.vh` compiles `findVarHandle` on an instance field, with the class or field type a
   literal or a final local bound to one, but not `findStaticVarHandle` (a static field) nor a handle stored
   through a local (`QuicTLSContext`'s `vh = lookup.findVarHandle(...); CONTEXT_SPI = vh;`). jdk26u's java.base
@@ -733,9 +902,54 @@ the data step (F2's, decided, not built), which the default `SSLContext`'s trust
 
 ## Proposed
 
+JCS158-JCS159 are F6's ("As built: F6"), JCS160 F12's ("As built: F12 (write-ahead)"), branch `java-jc9c`;
 JCS155-JCS157 are F3's ("As built: F3 (write-ahead)", branch `java-jc9-tls`); JCS143-JCS154 are JC9b's
 (`java-jc9b`). JCS140-JCS142 are F4's and F2's ("As built: F4 (write-ahead)", "As built: F2 (write-ahead)", branch
 `java-jc9-pki`); JCS136-JCS137 are F1's (`java-jc9-jca`), JCS138-JCS139 F5's (`java-jc9-logging`).
+
+### JCS158 javac's API tests at the compiled level (F6)
+
+F6 runs the 56 tests that name javac's API interpreted on javac's tool; the compiled level still translates them with
+the shipped program (`bin/j2g --program` over the shipped build's compiled namespaces), which has none of javac's
+world, so j2g refuses each (`:j2g-unresolved` filed `:javac-api`): 21 tests the triage counts as F6's compiled.
+- (a) As built: the compiled level of these tests stays deferred under `:javac-api` until (b) is worth its night.
+- (b) A shard of its own over javac's tool's program: the tests' Java forms translated with javac's world's forms
+  and the tool's compiled namespaces (its `aot-reader` base, `bin/javac-vendor tool`'s), built and run as the other
+  shards. Cost: a day of `bin/java-check`'s compiled level (a second program base, its key) and, each night, a j2g
+  run of javac's world (about the tool build's: heavy, `:mem-gib` near the tool's); +about 16 compiled.
+- (c) By design at the compiled level: javac's API is the tool's, not a user program's. Cost: none; the 21 leave
+  the AOT cell's deferred count for good.
+- *Recommended: (a)*, (b) after the GT8 budget is known (one more whole-world j2g run a night): the interp level
+  already proves the API on javac on Arbace, and (c) would call by design what Arbace can do.
+
+### JCS159 javac's ToolProvider on javac's tool (F6)
+
+javac's tool world has jrt's ServiceLoader, which finds no provider (JN2), so `ToolProvider.findFirst("javac")` and
+`ServiceLoader.load(ToolProvider.class)` find none: Help.java (javac's `-help` and `-X` text) and
+ToolProviderDescriptionTest (any tool observable) fail, `:javac-tool`. jdk26u's `JavacToolProvider` runs javac's own
+launcher over JavacFileManager, which the tool has not.
+- (a) A javac ToolProvider of jrt's own (overlay/jdk/javac/jdk.compiler, beside SystemCompiler), `run` over javac on
+  Arbace's command line (`Main.runOnPlatform`), found by `ToolProvider.findFirst` and the ServiceLoader's stream for
+  `java.util.spi.ToolProvider` (the two variants of the tool world); `-help`, `-X` and `--version` printed by
+  javac's own `com.sun.tools.javac.main.Option` help over Arbace's file manager, as `Main` does not today. Cost: a
+  day by day, a night's tool build; +2 tests (Help, ToolProviderDescriptionTest), and the tools' tests that ask for
+  javac by name later.
+- (b) Deferred until a tool test of another corpus asks for it.
+- *Recommended: (a)* with F6's follow-ups: javac's command line help is javac's own text, and the provider is the
+  API a program uses to run javac in process.
+
+### JCS160 Every client socket in a SocksSocketImpl again (F12)
+
+Until F12 jrt's `Socket.ae` gave a client socket the platform's impl itself, "no proxies in the Go build". jdk26u wraps
+it in a `SocksSocketImpl` that asks the proxy selector (and `socksProxyHost`) at each connect; F12 brings the
+proxies, and BadProxySelector (t05015) needs the wrapper (its selector is asked for `socket://` URIs).
+- (a) As built: jdk26u's `createImpl`; each connect first asks `ProxySelector.getDefault()` (DefaultProxySelector,
+  the Java properties, `conf/net.properties`), as on the JDK. Cost: a selector call a connect; a risk on every socket
+  test until the night's corpus run shows none lost (the fallback is (b)).
+- (b) The platform impl unwrapped as before, `Socket(Proxy)` the only way to a proxy. Cost: BadProxySelector and
+  `socksProxyHost`, `socksProxyPort` and `java.net.useSystemProxies` for plain sockets left out, a divergence from
+  the JDK to record.
+- *Recommended: (a)*: it is the JDK's algorithm, and its cost is one map lookup of properties a connect.
 
 ### JCS155 System.Logger: jrt's own now, or SSLLogger without it (F3; JCS138 (b))
 

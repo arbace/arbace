@@ -464,6 +464,20 @@ covers what.
   Their jdk26u sources join `jdk/forms/` (the converted closure, under the same license as above): 205 of
   tls-sources (`src/java.base/share/classes`); the resource data `sun/net/idn/uidna.spp` joins `jdk/data/`
   (the resource data's item below).
+- URL and HTTP's classes (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F12 (write-ahead)"; recorded by the
+  rule of B7): the variants `overlay/jdk/variants/DefaultProxySelector.ae`, `HttpClient.ae`,
+  `HttpConnectSocketImpl.ae`, `HttpCookieAccess.ae` and `HttpURLConnectionImpl.ae` keep the jdk26u members
+  they replace (https://github.com/openjdk/jdk26u at `baf63fb`, the classes' files of
+  `src/java.base/share/classes`) as repr/java converts them, with the changes they name, and
+  `overlay/jdk/java.base/sun/util/logging/PlatformLogger.java` is jdk26u's `PlatformLogger.java` transcribed
+  with the changes its header names, its `JulBridge` from jdk26u's
+  `src/java.logging/share/classes/sun/util/logging/internal/LoggingProviderImpl.java`: Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
+  below), as its notice says; the rest of the variants (`ProxySelector.ae`, `NetProperties.ae` too),
+  `overlay/jdk/java.base/jdk/internal/misc/InnocuousThread.java` (written after jdk26u's documented
+  factories) and NetAccess's cookie access are Arbace's own. Their jdk26u sources join `jdk/forms/` (the
+  converted closure, under the same license as above): 82 of http-sources (`src/java.base/share/classes`);
+  `conf/net.properties` joins `jdk/data/` (the resource data's item below).
 - `go/arbace/jrt/fdlibm.ae` and the `FdLibm` part of `go/arbace/jrt/math.ae` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1
@@ -646,6 +660,10 @@ covers what.
     jdk26u's `src/java.base/share/classes/sun/net/idn/`: ICU4J's StringPrep profile for IDNA (RFC 3491),
     under the ICU4J License, the Unicode License V3 (text below), as jdk26u's
     `src/java.base/share/legal/icu.md` records ICU's data;
+  - `conf/net.properties` (doc/classes/JAVA-DEFERRED-TRIAGE.md, F12: sun.net.NetProperties' defaults), as
+    `make/modules/java.base/Copy.gmk` makes it: jdk26u's `src/java.base/share/conf/net.properties` followed
+    by `src/java.base/unix/conf/net.properties`, Copyright (c) Oracle and/or its affiliates, under the GNU
+    General Public License version 2 with the Classpath Exception (text below), as their notices say;
   - `java/lang/uniName.dat`, generated as the JDK build generates it
     (`make/modules/java.base/Gendata.gmk`: jdk26u's build tool
     `make/jdk/src/classes/build/tools/generatecharacter/CharacterName.java` run on
