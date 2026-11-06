@@ -4749,7 +4749,7 @@ c23-imaginary-constants-5 and -7 are by design now. Three programs of Arbace's o
 
 | cell | deferred before | after (from the classes; the records re-recorded at night) |
 |---|---|---|
-| eval | 33 | 13: read 7, checker 2, threads 2, missing-builtin 1, complit-static 1 until c23-complit-2's stale record goes (then 12); signals, vla and complex-int 0 |
+| eval | 33 | 13: read 7, checker 2, threads 2, missing-builtin 1, complit-static 1 until c23-complit-2's stale record goes (then 12); signals, vla and complex-int 0; 7 after CDF.5 (read 1) |
 | AOT | 33 | 13, the same programs (the AOT record's c23-complit-2 to be confirmed by `check --aot`) |
 | read | 51 | 51 |
 | print | 78 | 78 |
@@ -4766,7 +4766,7 @@ variable size is no constant now: cc gives -1, class `cc-invalid` as before), `b
   object; CS274.
 - `self-include` (6 + 6 + 6): all six files include themselves inside a function body at least once (vprintf-1's four inside a
   `switch`, 20040629-1 inside `main`, 95_bitfields inside its tests), so the read needs both a distinct file for the re-entered
-  main file and a body's include (today `:split-declaration` unless `*include-inside*`); CS275.
+  main file and a body's include; CS275 (b) built for ci's read (CDF.5), the print's 6 (and its `split-declaration` 5) left.
 - `threads` (binary-trees-5, c23-complit-4): CS276. `missing-builtin` (`__builtin_va_arg_pack`, va-arg-pack-1): CS277.
 
 ### CDF.4 Proposed (CS274-CS277)
@@ -4777,7 +4777,7 @@ variable size is no constant now: cc gives -1, class `cc-invalid` as before), `b
   runs) the judge; (c) print such a body through a one-line macro of the print's own (`#define __arbace_body(...) __VA_ARGS__`),
   every token then at one location as in the original. Cost: (a) a converter and printer change and the roundtrip's four levels over
   the 26 files, about a day; (c) half that, but the print gains a macro the original lacks. *Recommended: (a)*; CS81's (b) withdrawn.
-- **CS275 A main file that includes itself.** Options: (a) the preprocessor gives the re-entered main file a CFile of its own (same
+- **CS275 A main file that includes itself** ((b) built the same day, CDF.5). Options: (a) the preprocessor gives the re-entered main file a CFile of its own (same
   name, not identical), so its tokens are a header's to the converter, and a body's `#include` is read as a statement form
   `(c/include "x.c" :unit U)` whose unit holds statements (the eval read binds `*include-inside*` until then: the eval level for the
   six, the print still refused); (b) the eval read alone with `*include-inside*` and a fresh CFile (12 of the 18 cases, the print's 6
@@ -4797,3 +4797,20 @@ variable size is no constant now: cc gives -1, class `cc-invalid` as before), `b
   entry, both back ends); (b) inline always_inline variadic functions that use it, in the builder; (c) by design. Cost: (a) a day
   (the frame keeps its Args; cf2g's Enter likewise); (b) two. *Recommended: (a)*: one program, va-arg-pack-1, whose long double
   arguments then meet CS35.
+
+### CDF.5 CS275 (b) built: ci's read of a self-including file (2026-11-06)
+
+`arbace.c.run`'s `read-unit` (the eval and AOT levels' read) binds `arbace.repr.c.convert/*include-inside*` (queue 178's rule for
+the libc: a file included inside a declaration is the main file's) and a new `arbace.repr.c.pp/*reentry*`: the main file entered
+again is read as a file of its own named `MAIN#again` (a CFile not the main's, so that the converter's main tokens and the
+directives' placement, which takes the main file's directive records by name, no longer mix the re-entered copy's taken and
+untaken conditionals with the main's; its top-level items become the unit of the `#include` that entered it), its `__FILE__`
+still the main file's name. Under `*include-inside*` a function body keeps the items an `#include` inside it brought in (before,
+they were left to the directive, so a body's included statements were lost at eval: 18_include's "included", vprintf-1's cases;
+the libc's read binds it too, its forms cache rereads). The converter's self-include refusal stands unless `*include-inside*`.
+The text levels (`bin/repr-c check`, `parse-check`, `roundtrip`) bind neither and are unchanged (`bin/repr-c check --c23`: 59
+pass, 3 expected, 0 failing). Proved as CDF.2: `bin/ci check --only` on 133 programs (the 7 read-refused programs among them),
+exit 0, 25 recorded failures now pass: CDF.2's 19 and 20040629-1, vprintf-1, vfprintf-1, vprintf-chk-1, vfprintf-chk-1,
+18_include. Left: 95_bitfields, whose packed attribute comes from a macro the re-entered copy defines (`P`) and is lost, so its
+packed tests lay out unpacked (`test/c/check-known.edn`, class `read`, matched by `fail known read:` now). Eval and AOT deferred:
+13 to 7 each (read 1, checker 2, threads 2, missing-builtin 1, complit-static 1 until its stale record goes).

@@ -427,3 +427,8 @@ Each branch's doc records it.
 - **Proposed** CS274-CS277 (a multi-item invocation printed as itself; self-include; threads over goroutines; va_arg_pack).
 - **Left for the night (main host):** `bin/ci record-ref --corpus ci-run --only`, `bin/ci check --record`, `check --aot --record`,
   `bin/ci annotations --only` over the touched files, `bin/ci judge-test`, `bin/reap`.
+- **Later the same day: CS275 (b)** (doc/C23-SURVEY.md, CDF.5): ci's read binds the converter's `*include-inside*` and the
+  preprocessor's new `*reentry*` (the re-entered main file a CFile of its own, `MAIN#again`); a body keeps the items an
+  `#include` inside it brought in under `*include-inside*`. Five self-including programs and 18_include pass (25 recorded
+  failures pass on the 133-program sample, exit 0); 95_bitfields left in `read` (a packed attribute from a macro the copy
+  defines is lost). Eval and AOT deferred 33 to 7 each. Alternatives: CS275 (a), the print's statement-level include, two days.

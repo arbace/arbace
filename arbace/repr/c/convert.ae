@@ -49,6 +49,13 @@
 (def ^:dynamic *cx* nil)
 (defn- cx [k] (get *cx* k))
 
+(def ^:dynamic *include-inside*
+  "Queue 178: when true, a declaration whose other files' tokens all come from headers its own extent includes is the main
+  file's (included-inside?), not refused as :split-declaration. ci's libc read binds it (arbace.c.musl/read-one: five of
+  musl 1.2.6's sources include a table inside a declaration); the corpora's reads keep the refusal, since such a form
+  prints the table inline and the text levels need its #include."
+  false)
+
 (defn- main-tok? [t] (and (instance? PTok t) (some? (.-pf ^PTok t)) (identical? (.-pf ^PTok t) (cx :main-file))))
 
 ;; Each node's extent: [minSeq maxSeq minMainPo maxMainEnd main? other?] over its tokens (a token from a
@@ -1240,8 +1247,9 @@
         out (ArrayList.)]
     (doseq [[i bi] (map-indexed vector bis)]
       (doseq [df (dirs-at owner i)] (.add out [:stmt df]))
-      ;; an item an #include inside the body brought in is the directive's
-      (when (or (nil? own) (some #(identical? (.-pf ^PTok %) own) (take 64 (node-tokens bi))))
+      ;; an item an #include inside the body brought in is the directive's; under *include-inside* (ci's read, CS275 (b)) the
+      ;; body's own item, as the libc's tables are the declaration's
+      (when (or *include-inside* (nil? own) (some #(identical? (.-pf ^PTok %) own) (take 64 (node-tokens bi))))
         (case (cs bi)
           :BlockItemDecl (let [d (g bi :Declaration)
                                t (group-of d)
@@ -1753,12 +1761,6 @@
     :ExternalDeclarationEmpty []
     (refuse :declaration (str "external declaration " (cs ed)) ed)))
 
-(def ^:dynamic *include-inside*
-  "Queue 178: when true, a declaration whose other files' tokens all come from headers its own extent includes is the main
-  file's (included-inside?), not refused as :split-declaration. ci's libc read binds it (arbace.c.musl/read-one: five of
-  musl 1.2.6's sources include a table inside a declaration); the corpora's reads keep the refusal, since such a form
-  prints the table inline and the text levels need its #include."
-  false)
 
 (defn- included-inside?
   "Queue 178: whether every token of the declaration `n` from another file than the main one comes from a file the main
@@ -1775,7 +1777,9 @@
                    (if (= s2 s) s (recur s2))))]
     (and (seq inside)
          (every? (fn [t] (let [^CFile f (.-pf ^PTok t)]
-                           (or (nil? f) (identical? f (cx :main-file)) (contains? inside (.-name f)))))
+                           (or (nil? f) (identical? f (cx :main-file)) (contains? inside (.-name f))
+                               ;; the main file entered again (pp's *reentry*: MAIN#again), included inside the declaration
+                               (and (= (.-name f) (str main-name "#again")) (contains? inside main-name)))))
                  (filter #(instance? PTok %) (node-tokens n))))))
 
 (defn convert
@@ -1792,7 +1796,9 @@
                                          (node-tokens ed)))
                           eds)
           unit-of-off (HashMap.)]
-      (when (some #(and (= (:directive %) "enter") (= (:path %) main-name)) (:layer r))
+      ;; CS275 (b): ci's read (*include-inside*) takes the re-entered main file as a file of its own (the preprocessor gives it
+      ;; a CFile of its own); the text levels keep the refusal
+      (when (and (not *include-inside*) (some #(and (= (:directive %) "enter") (= (:path %) main-name)) (:layer r)))
         (refuse :self-include "the main file includes itself: its tokens are the main file's twice"))
       (binding [*cx* {:ranges ranges :main-file main-file :main-name main-name :main-bytes main-bytes :std std
                       :pieces parse/strlit-pieces :typedefs (atom {}) :claimed (HashSet.)
@@ -1823,6 +1829,8 @@
               units (java.util.LinkedHashMap.)]
           (doseq [ed eds :when (not (has-main? ed))]
             (let [file (item-file ed)
+                  ;; the main file entered again (pp's *reentry*) is entered by the path it was included by
+                  file (if (and file (= file (str main-name "#again"))) main-name file)
                   e (when-let [sq (item-seq ed)] (entry-at entries sq))
                   e (if (and e (= (:path (nth layer e)) file)) e (get first-entry file))]
               (when-let [off (when e (entry-root layer e))]
