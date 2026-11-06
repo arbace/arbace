@@ -189,7 +189,7 @@
                           (sort-by (fn [[n expn]] [(if expn 1 0) (if expn (long (second expn)) 0) (let [h (:hir-id n)] (if h (long (second h)) -1))])
                                    (vec acc))))))
 
-(declare check-expr coerce! solve-obligations! fallback! print-fact-ty mut-borrow! unadjust! deduced-kind)
+(declare check-expr coerce! solve-obligations! fallback! print-fact-ty mut-borrow! unadjust! deduced-kind scalar?)
 (def ^:dynamic *obligations* nil)   ; atom: the clauses the instantiated items' predicates registered ([:trait [D ARGS]], [:proj AD ARGS TERM])
 (def ^:dynamic *select-cache* nil)
 (def ^:dynamic *norm-cache* nil)
@@ -1578,7 +1578,14 @@
                           (doseq [a (:args e)] (check-expr a nil)) [:unknown])))
           :binary (let [op (:op e)
                         lt (check-expr (:lhs e) nil)
-                        rt (check-expr (:rhs e) (when (#{"+" "-" "*" "/" "%" "&" "|" "^" "==" "!=" "<" "<=" ">" ">="} op) lt))]
+                        ;; check_overloaded_binop: the right operand's expectation a fresh `?R` that `L: Op<?R>`'s selection
+                        ;; binds when one impl matches (before the operand is checked); a scalar's left operand's type
+                        ;; otherwise (enforce_builtin_binop_types gives the same)
+                        tr (c/lang (get op-traits op))
+                        rv (when (and tr (not (#{"&&" "||"} op)) (not (tvar? (shallow lt))) (not (scalar? lt)))
+                             (let [v (fresh :ty) sn (snapshot) r (impls-for (shallow lt) tr [v])]
+                               (if (and (vector? r) (not (tvar? (shallow v)))) v (do (rollback! sn) nil))))
+                        rt (check-expr (:rhs e) (or rv (when (and (#{"+" "-" "*" "/" "%" "&" "|" "^" "==" "!=" "<" "<=" ">" ">="} op) (or (scalar? lt) (tvar? (shallow lt)))) lt)))]
                     (cond
                       (#{"&&" "||"} op) (do (unify lt [:bool]) (unify rt [:bool]) [:bool])
                       (builtin-binop? op lt rt)
