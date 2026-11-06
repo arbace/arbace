@@ -39,6 +39,9 @@ bin/lib/tmpdir.bash
 bin/lib/renamed-env.bash
 bin/lib/tools.bash
 bin/lib/host.bash"
+# the canary is declared for the audit (the fake-strace cases of gate-tests-test read it under bin/gate --audit's trace),
+# never here: it must stay undeclared for this check
+inputs=$(echo "$inputs" | grep -vx "LICENSE.md")
 undeclared=$(awk -F'\t' '$1 == "R" || $1 == "X" || $1 == "H" { print $2 }' "$trace.paths" | grep "^$src/" | sed "s|^$src/||" \
   | grep -v '^\.tmp/\|^\.git\|^target/' | LC_ALL=C sort -u | while read -r f; do
     ok=
