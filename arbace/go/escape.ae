@@ -936,6 +936,8 @@
       ("StringData" "SliceData") (argument e k0 (first args))
       ("Add" "Slice" "String") (do (argument e k0 (first args)) (discard e (second args)))
       ("Sizeof" "Alignof" "Offsetof") nil
+      ;; bloop's runtime.KeepAlive (IsCompilerVarLive: its argument flows nowhere)
+      "keepalive" (doseq [a args] (argument e (discard-hole e) a))
       ("new" "make") (expr e (or k0 (discard-hole e)) n)
       (unsupported! (str "the built-in " (:builtin n))))))
 
@@ -1436,7 +1438,9 @@
       (assign-list e dsts vals where))))
 
 (defn stmt [e n]
-  (when n
+  (if (sequential? n)
+    (stmts e n)
+  (when (map? n)
     (with-line* e n
       (fn []
         (case (:op n)
@@ -1480,7 +1484,7 @@
                     :recv (discard e (:x x))
                     (discard e x)))
           (:go :defer) (go-defer e n)
-          (unsupported! (str "the statement " (:op n))))))))
+          (unsupported! (str "the statement " (:op n) " at " (:line @e)))))))))
 
 ;;; Functions: their records, closures, labels
 
@@ -2038,7 +2042,7 @@
 (def ^:private inline-param-call-cost 17)
 (def ^:private inline-closure-called-once-cost 800)
 
-(declare inl-callee can-inline! try-inline field-offset max-cost all-fns scan-fn! closure-vars! foreign-body)
+(declare static-inlined-call? inl-callee can-inline! try-inline field-offset max-cost all-fns scan-fn! closure-vars! foreign-body)
 
 (defn- conv-nop?
   "typecheck's convertOp: whether a conversion is OCONVNOP (costs nothing in the budget)."
@@ -2213,6 +2217,7 @@
                                      (when (= :convert-iface (:op a)) (cost! -1))
                                      (visit a))
                            ("new") (cost! 1)
+                           "keepalive" (do (cost! 2) (doseq [a (:args c)] (visit a)))
                            (do (cost! 1) (doseq [a (:args c)] (when-not (= :type (:op a)) (visit a)))))
                 :iface (do (cost! (+ 1 inline-extra-call-cost)) (visit (:callee c)) (doseq [a (:args c)] (visit a)))
                 (let [callee (inl-callee f c)
@@ -2547,15 +2552,146 @@
             body (inline-calls caller body (conj chain callee))]
         {:op :inlcall :callee-name (fn-get callee :name) :body body :retvars rv :line line
          ;; staticinit's staticAssignInlinedCall: a callee whose body is one return
-         :inl-static (let [ss (live-stmts (let [b (fn-get callee :body)] (if (map? b) (:stmts b) b)))
+         :inl-static (static-inlined-call? (let [ss (live-stmts (let [b (fn-get callee :body)] (if (map? b) (:stmts b) b)))
                            ss (if (and (= 1 (count ss)) (= :block (:op (first ss))) (empty? (:decls (first ss))))
                                 (live-stmts (:stmts (first ss))) ss)]
                        (when (and (= 1 (count ss)) (= :return (:op (first ss))) (= 1 (count (:values (first ss)))))
                          {:value (first (:values (first ss)))
                           :params (set (remove nil? (concat [(fn-get callee :recv)] (fn-get callee :params))))
-                          :args (vec (concat (when rarg [rarg]) args))}))
+                          :args (vec (concat (when rarg [rarg]) args))})))
          :type (node-type c) :mode :value
          :callee-is-lit (= :fn (:op (static-value (:callee c))))}))))
+
+;;; testing.B.Loop's loops (bloop/bloop.go, Go 1.24): in a package that imports testing, the
+;;; statements of a b.Loop() loop keep their results and operands alive (runtime.KeepAlive of
+;;; each), reported at -m=2; before the inliner
+
+(def ^:private bloop-tmps (atom 0))
+
+(defn- bloop-tmp [ty line]
+  (e/obj {:kind :var :name (str ".autotmp_" (swap! bloop-tmps inc)) :line line :type ty :local? true :esc-class :auto}))
+
+(defn- bloop-name
+  "getNameFromNode: the variable at the root of n's selections, slices, conversions, indexes."
+  [n]
+  (loop [n n]
+    (when (map? n)
+      (case (:op n)
+        (:local :place-local :global :place-global) (:obj n)
+        (:slice :conv :convert-iface :addr :index :place-index :map-index :place-map :sel) (recur (:x n))
+        (:field :place-field) (recur (:x n))
+        nil))))
+
+(defn- addressable-name
+  "getAddressableNameFromNode: that variable when it is addressable (a local or global variable)."
+  [n]
+  (let [o (bloop-name n)]
+    (when (and o (= :var (e/o o :kind)) (not= "_" (e/o o :name))) o)))
+
+(defn- bloop-kept [line o]
+  (when (> (long *m*) 1)
+    (warn! line (str (if (e/o o :local?) "p." (str (e/o o :pkg) ".")) (e/o o :name) " will be kept alive"))))
+
+(defn- keep-alive-calls
+  "keepAliveAt: runtime.KeepAlive(unsafe.Pointer(&v)) for each variable (the call IsCompilerVarLive)."
+  [objs line]
+  (vec (for [o objs :when (and o (not= "_" (e/o o :name)))]
+         {:op :expr :line line
+          :x {:op :call :kind :builtin :builtin "keepalive" :line line :mode :novalue :type :invalid
+              :args [{:op :addr :x {:op (if (e/o o :local?) :local :global) :obj o :type (e/o o :type) :mode :variable :line line}
+                      :type [:pointer (e/o o :type)] :mode :value :line line}]}})))
+
+(defn- keep-alive-nodes
+  "getKeepAliveNodes of an assignment's destination."
+  [line n]
+  (let [o (when (map? n) (addressable-name n))]
+    (cond
+      o (do (bloop-kept line o) [o])
+      (and (map? n) (#{:deref :place-deref} (:op n))) (do (when (> (long *m*) 1) (warn! line "dereference will be kept alive")) [])
+      :else (do (when (> (long *m*) 1) (warn! line "expr is unknown to bloop pass")) []))))
+
+(defn- preserve-stmt [st]
+  (let [line (:line st)
+        blk (fn [s objs] (let [ka (keep-alive-calls objs line)] (if (seq ka) {:op :block :line line :stmts (into [s] ka)} s)))]
+    (case (:op st)
+      :assign
+      (let [lhs (:lhs st) rhs (:rhs st)
+            rtys (if (and (= 1 (count rhs)) (> (count lhs) 1))
+                   (let [t (node-type (first rhs))] (if (and (vector? t) (= :tuple (first t))) (vec (rest t)) []))
+                   (mapv node-type rhs))
+            tmps (volatile! [])
+            lhs2 (vec (map-indexed (fn [i p] (if (= :blank p)
+                                                (let [o (bloop-tmp (nth rtys i nil) line)] (vswap! tmps conj o) {:op :place-local :obj o})
+                                                p))
+                                   lhs))
+            objs (vec (mapcat #(keep-alive-nodes line %) lhs2))
+            st2 (assoc st :lhs lhs2)]
+        (blk (if (seq @tmps) {:op :block :line line :stmts [{:op :decl :objs @tmps :init [] :line line} st2]} st2) objs))
+      :decl (if (:const st) st (blk st (vec (mapcat #(keep-alive-nodes line {:op :local :obj %}) (remove nil? (:objs st))))))
+      (:op-assign :incdec) (blk st (keep-alive-nodes line (:place st)))
+      :expr
+      (let [c (:x st)]
+        (if (and (= :call (:op c)) (not= :builtin (:kind c)))
+          (let [sig (if (= :method (:kind c)) (e/o (:method (:callee c)) :type) (node-type (:callee c)))
+                rs (when (vector? (under sig)) (nth (under sig) 2 nil))]
+            (if (seq rs)
+              (let [tmps (mapv #(bloop-tmp % line) rs)]
+                (when (> (long *m*) 1) (warn! line (str "function result" (when (> (count rs) 1) "s") " will be kept alive")))
+                (blk {:op :decl :short true :line line :objs tmps :init [c]} tmps))
+              ;; preserveCallArgs
+              (let [args (if (nth (under sig) 3 false) (variadic-args c sig) (vec (:args c)))
+                    pre (volatile! []) names (volatile! [])
+                    tmp-of (fn [a] (let [o (bloop-tmp (node-type a) line)]
+                                     (vswap! pre conj {:op :decl :short true :line line :objs [o] :init [a]})
+                                     (vswap! names conj o)
+                                     (when (> (long *m*) 1) (warn! line "function arg will be kept alive"))
+                                     {:op :local :obj o :type (node-type a) :mode :variable :line line}))
+                    args2 (mapv (fn [a]
+                                  (if-let [o (addressable-name a)]
+                                    (do (bloop-kept line o) (vswap! names conj o) a)
+                                    (if (and (= :lit (:op a)) (:implicit a))
+                                      (assoc a :elems (mapv (fn [x] (if-let [o (addressable-name x)]
+                                                                      (do (bloop-kept line o) (vswap! names conj o) x)
+                                                                      (tmp-of x)))
+                                                            (:elems a)))
+                                      (tmp-of a))))
+                                args)
+                    c2 (assoc c :args args2 :spread true :packed true)]
+                (blk {:op :block :line line :stmts (conj @pre {:op :expr :x c2 :line line})} @names))))
+          st))
+      st)))
+
+(defn- preserve-stmts [ss] (if (map? ss) (preserve-stmt ss) (mapv preserve-stmt ss)))
+
+(defn- b-loop? [n]
+  (and (= :for (:op n))
+       (let [c (:cond n)]
+         (and (= :call (:op c)) (= :method (:kind c))
+              (let [m (:method (:callee c))]
+                (and (= "Loop" (e/o m :name)) (= "testing" (e/o m :pkg))))))))
+
+(defn bloop-walk
+  "bloop.Walk over a function's tree."
+  [tree]
+  (letfn [(ed [x in]
+            (cond
+              (map? x)
+              (let [in (or in (b-loop? x))
+                    x (into {} (map (fn [[k v]] [k (if (#{:type :to :sig :field :method :recv-type :iface :form} k) v (ed v in))])) x)]
+                (if in
+                  (case (:op x)
+                    :for (update x :body preserve-stmts)
+                    :if (-> x (update :then #(if (vector? %) (preserve-stmts %) %))
+                            (update :else #(if (vector? %) (preserve-stmts %) %)))
+                    :block (-> x (update :stmts preserve-stmts) (update :decls #(when % (preserve-stmts %))))
+                    :case (update x :body preserve-stmts)
+                    :comm (update x :body preserve-stmts)
+                    :range (update x :body preserve-stmts)
+                    x)
+                  x))
+              (vector? x) (mapv #(ed % in) x)
+              :else x))]
+    (ed tree false)))
 
 ;;; The package: its functions, their declarations, closures and captured variables
 
@@ -2881,13 +3017,19 @@
                :pkg-path (fn-get f :pkg-path) :local-name (fn-get f :local-name))
       g)))
 
-(defn- forms-digest [^java.io.File dir ^java.io.File pf]
+(def ^:dynamic *std-inline*
+  "Whether another package's tags are made with gc's inliner on (as gc compiles the standard
+  library): the per-package warm-up's (one package a process: its imports' tags already kept),
+  else without it (a run that finds no tags made by the warm-up)."
+  false)
+
+(defn- forms-digest [^java.io.File dir ^java.io.File pf version]
   (let [md (java.security.MessageDigest/getInstance "SHA-256")
         files (sort-by #(.getPath ^java.io.File %)
                        (cons pf (when (.isDirectory dir)
                                   (filter #(.isFile ^java.io.File %) (.listFiles dir)))))]
     (doseq [^java.io.File f files] (.update md (java.nio.file.Files/readAllBytes (.toPath f))))
-    (.update md (.getBytes ^String tag-version "UTF-8"))
+    (.update md (.getBytes ^String version "UTF-8"))
     (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (take 16 (.digest md))))))
 
 (defn- load-package-tags
@@ -2900,10 +3042,15 @@
         dir (java.io.File. (str root "/" rel))]
     (if-not (.isFile pf)
       {}
-      (let [key (when *tag-cache* (forms-digest dir pf))
-            cf (when key (java.io.File. (str *tag-cache* "/" (str/replace path "/" "%") "-" key ".edn")))]
-        (if (and cf (.isFile cf))
-          (read-string (slurp cf))
+      (let [cfile (fn [v] (when *tag-cache*
+                            (java.io.File. (str *tag-cache* "/" (str/replace path "/" "%") "-" (forms-digest dir pf v) ".edn"))))
+            inl-cf (cfile (str tag-version "-inline"))
+            plain-cf (cfile tag-version)
+            ;; the inliner's tags when the warm-up made them, else the ones without it
+            found (first (filter #(and % (.isFile ^java.io.File %)) (if *std-inline* [inl-cf] [inl-cf plain-cf])))
+            cf (if *std-inline* inl-cf plain-cf)]
+        (if found
+          (read-string (slurp found))
           (let [r (try
                     (let [r (std-result path)]
                       (if (seq (:errors r))
@@ -2914,7 +3061,7 @@
                         ;; the analysis without the inliner (gc compiles the standard library with it:
                         ;; the inlined bodies' effects on the tags are left out, for memory: the
                         ;; packages' analyses would nest the inlined packages' checks)
-                        (binding [*msgs* (volatile! []) *m* 0 *inline* (= "1" (System/getenv "GOI_ESCAPE_STD_INLINE")) *phase-a* false
+                        (binding [*msgs* (volatile! []) *m* 0 *inline* (or *std-inline* (= "1" (System/getenv "GOI_ESCAPE_STD_INLINE"))) *phase-a* false
                                   *pkg-bodies* (atom {})]
                           (let [costs (binding [*phase-a* :costs]
                                         (into {} (for [f (analyze-package r) :when (fn-get f :obj)]
@@ -2938,6 +3085,45 @@
                 (spit tmp (pr-str r))
                 (.renameTo tmp cf)))
             r))))))
+
+(defn std-imports
+  "The import paths of standard package path's forms (its files for the configuration)."
+  [path]
+  (let [package-source (requiring-resolve 'arbace.go.check.load/package-source)
+        config (let [c @(requiring-resolve 'arbace.go.repl/config)] (if (delay? c) @c c))
+        src (try (package-source {:dir *import-root*} path config) (catch Throwable _ nil))]
+    (vec (distinct (for [fi (:files src)
+                         spec (get-in fi [:opts :imports])
+                         :let [p (if (vector? spec) (second spec) spec)]
+                         :when (and (string? p) (not (#{"unsafe" "C"} p)))]
+                     p)))))
+
+(defn warm-order
+  "The packages paths import, transitively, theirs first (each after its imports), whose tags
+  made with the inliner are not kept yet."
+  [paths]
+  (let [seen (volatile! #{})
+        out (volatile! [])]
+    (letfn [(visit [p]
+              (when-not (contains? @seen p)
+                (vswap! seen conj p)
+                (doseq [q (std-imports p)] (visit q))
+                (vswap! out conj p)))]
+      (doseq [p paths] (visit p)))
+    (vec (remove (fn [p]
+                   (let [rel (str "go/" p)
+                         pf (java.io.File. (str *import-root* "/" rel ".ae"))
+                         dir (java.io.File. (str *import-root* "/" rel))]
+                     (or (not (.isFile pf))
+                         (.isFile (java.io.File. (str *tag-cache* "/" (str/replace p "/" "%") "-"
+                                                      (forms-digest dir pf (str tag-version "-inline")) ".edn"))))))
+                 @out))))
+
+(defn warm-package!
+  "The tags of package path made with the inliner and kept (the warm-up's one package)."
+  [path]
+  (binding [*std-inline* true *ctx* nil]
+    (load-package-tags path)))
 
 (defn- foreign-fn
   "The record of another package's function or method o (its tags), or nil."
@@ -2968,11 +3154,14 @@
     (analyze-package r)
     (vec (sort-by (juxt first second) (distinct @*msgs*)))))
 
-(defn- static-inlined?
+(defn- static-inlined? [x] (boolean (:inl-static x)))
+
+(defn- static-inlined-call?
   "staticinit over an inlined call in an initializer: its callee returns one expression static but
-  for its parameters, its arguments static."
-  [x]
-  (let [st (:inl-static x)]
+  for its parameters, its arguments static (decided when it is inlined: the callee's nodes are not
+  kept in the tree)."
+  [st]
+  (let []
     (boolean
       (and st (every? static-init? (:args st))
            (letfn [(ok [n] (cond
@@ -3058,7 +3247,7 @@
                    :kept-lits (volatile! #{})}]
 
     (let [decls (filter #(and (= :func (:kind %)) (:obj %)) (:decl-infos r))
-          decls (mapv (fn [d] (if (:tree d) (update d :tree (comp normalize-go-defer prune-switches)) d)) decls)
+          decls (mapv (fn [d] (if (:tree d) (binding [*wfile* (file-of d)] (update d :tree (comp bloop-walk normalize-go-defer prune-switches))) d)) decls)
           fns (vec (for [d decls
                          :let [tree (:tree d)
                                o (:obj d)
