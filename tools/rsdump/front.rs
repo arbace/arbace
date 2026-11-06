@@ -163,6 +163,41 @@ fn ns_name(k: DefKind) -> &'static str {
     }
 }
 
+/// RF7: a type as data, for std's defaults, aliases and supertraits: `(param I "N")`, `(prim "u8")`, `(adt "PATH" [ARGS])`,
+/// `(tuple [..])`, `(ref "'a" MUT T)`, `(ptr MUT T)`, `(slice T)`, `(array T "LEN")`, `(projection "PATH" [ARGS])`, `(never)`,
+/// else `(text "...")`; arguments as types, `(lt "'a")` or `(const "TEXT")`
+fn sty<'tcx>(tcx: TyCtxt<'tcx>, t: rustc_middle::ty::Ty<'tcx>) -> String {
+    use rustc_middle::ty;
+    let args = |a: ty::GenericArgsRef<'tcx>| a.iter().map(|x| sarg(tcx, x)).collect::<Vec<_>>().join(" ");
+    match *t.kind() {
+        ty::Bool => "(prim \"bool\")".into(),
+        ty::Char => "(prim \"char\")".into(),
+        ty::Str => "(prim \"str\")".into(),
+        ty::Int(i) => format!("(prim {})", q(i.name_str())),
+        ty::Uint(i) => format!("(prim {})", q(i.name_str())),
+        ty::Float(i) => format!("(prim {})", q(i.name_str())),
+        ty::Never => "(never)".into(),
+        ty::Param(p) => format!("(param {} {})", p.index, q(p.name.as_str())),
+        ty::Adt(d, a) => format!("(adt {} [{}])", q(&def_path(tcx, d.did())), args(a)),
+        ty::Tuple(ts) => format!("(tuple [{}])", ts.iter().map(|x| sty(tcx, x)).collect::<Vec<_>>().join(" ")),
+        ty::Ref(r, e, m) => format!("(ref {} {} {})", q(&r.to_string()), m.is_mut(), sty(tcx, e)),
+        ty::RawPtr(e, m) => format!("(ptr {} {})", m.is_mut(), sty(tcx, e)),
+        ty::Slice(e) => format!("(slice {})", sty(tcx, e)),
+        ty::Array(e, n) => format!("(array {} {})", sty(tcx, e), q(&n.to_string())),
+        ty::Alias(_, ty::AliasTy { kind: ty::Projection { def_id }, args: aa, .. }) => format!("(projection {} [{}])", q(&def_path(tcx, def_id)), args(aa)),
+        _ => format!("(text {})", q(&t.to_string())),
+    }
+}
+
+fn sarg<'tcx>(tcx: TyCtxt<'tcx>, a: rustc_middle::ty::GenericArg<'tcx>) -> String {
+    use rustc_middle::ty::GenericArgKind;
+    match a.kind() {
+        GenericArgKind::Type(t) => sty(tcx, t),
+        GenericArgKind::Lifetime(r) => format!("(lt {})", q(&r.to_string())),
+        GenericArgKind::Const(c) => format!("(const {})", q(&c.to_string())),
+    }
+}
+
 /// `--std-names FILE`
 pub fn std_names<'tcx>(tcx: TyCtxt<'tcx>) -> String {
     let mut o = String::new();
@@ -170,6 +205,7 @@ pub fn std_names<'tcx>(tcx: TyCtxt<'tcx>) -> String {
     let mut macros: Vec<DefId> = Vec::new();
     let mut gen_seen = std::collections::HashSet::new();
     let mut gens: Vec<String> = Vec::new();
+    let mut extra: Vec<String> = Vec::new();
     let mut todo: Vec<DefId> = Vec::new();
     for &cnum in tcx.crates(()) {
         let n = tcx.crate_name(cnum);
@@ -193,6 +229,10 @@ pub fn std_names<'tcx>(tcx: TyCtxt<'tcx>) -> String {
                 continue;
             };
             kids.push(format!("({} {} {} {})", ns_name(k), q(c.ident.name.as_str()), kind(k), q(&def_path(tcx, d))));
+            // RF7: a re-export that is itself #[doc(hidden)] (visible_parent_map's fallback)
+            if c.reexport_chain.first().and_then(|r| r.id()).is_some_and(|id| tcx.is_doc_hidden(id)) {
+                extra.push(format!("(names/hidden-reexport {} {})", q(&def_path(tcx, m)), q(c.ident.name.as_str())));
+            }
             // RFP10: each type's generic parameters (kind and name), for elided lifetimes in signatures (`Formatter<'_>`)
             if matches!(k, DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::TyAlias | DefKind::Trait) && gen_seen.insert(d) {
                 let ps: Vec<String> = tcx
@@ -205,10 +245,33 @@ pub fn std_names<'tcx>(tcx: TyCtxt<'tcx>) -> String {
                             rustc_middle::ty::GenericParamDefKind::Type { .. } => "type",
                             rustc_middle::ty::GenericParamDefKind::Const { .. } => "const",
                         };
-                        format!("({} {})", pk, q(p.name.as_str()))
+                        // RF7: a parameter's default, as a structural type (own_args_no_defaults, the defaults HIR type lowering fills)
+                        match p.default_value(tcx) {
+                            Some(dv) => format!("({} {} {})", pk, q(p.name.as_str()), sarg(tcx, dv.skip_binder())),
+                            None => format!("({} {})", pk, q(p.name.as_str())),
+                        }
                     })
                     .collect();
                 gens.push(format!("(names/generics {} [{}])", q(&def_path(tcx, d)), ps.join(" ")));
+                // RF7: a type alias's type (free aliases are expanded by HIR type lowering), a trait's supertraits and flags
+                if k == DefKind::TyAlias {
+                    gens.push(format!("(names/alias {} {})", q(&def_path(tcx, d)), sty(tcx, tcx.type_of(d).skip_binder())));
+                }
+                if k == DefKind::Trait {
+                    let sups: Vec<String> = tcx
+                        .explicit_super_clauses_of(d)
+                        .skip_binder()
+                        .iter()
+                        .filter_map(|(c, _)| c.as_trait_clause())
+                        .map(|t| t.skip_binder())
+                        .filter(|t| t.polarity == rustc_middle::ty::PredicatePolarity::Positive)
+                        .map(|t| format!("(trait {} [{}])", q(&def_path(tcx, t.trait_ref.def_id)), t.trait_ref.args.iter().map(|a| sarg(tcx, a)).collect::<Vec<_>>().join(" ")))
+                        .collect();
+                    gens.push(format!(
+                        "(names/trait {} {{:supertraits [{}] :paren-sugar {} :auto {}}})",
+                        q(&def_path(tcx, d)), sups.join(" "), tcx.trait_def(d).paren_sugar, tcx.trait_is_auto(d)
+                    ));
+                }
             }
             match k {
                 DefKind::Mod | DefKind::Enum | DefKind::Trait => next.push(d),
@@ -219,10 +282,18 @@ pub fn std_names<'tcx>(tcx: TyCtxt<'tcx>) -> String {
             }
         }
         let _ = writeln!(o, "(names/mod {} {} [{}])", q(&def_path(tcx, m)), kind(tcx.def_kind(m)), kids.join(" "));
+        if tcx.is_doc_hidden(m) {
+            extra.push(format!("(names/hidden {})", q(&def_path(tcx, m))));
+        }
         next.reverse();
         todo.extend(next);
     }
     gens.sort();
+    // RF7: the lang items (the sizedness traits HIR type lowering adds, the Fn family, ...)
+    for (l, d) in tcx.lang_items().iter() {
+        gens.push(format!("(names/lang {} {})", q(l.name().as_str()), q(&def_path(tcx, d))));
+    }
+    gens.extend(extra);
     for g in gens {
         let _ = writeln!(o, "{g}");
     }

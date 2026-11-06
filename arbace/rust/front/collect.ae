@@ -1,0 +1,1181 @@
+;; Ported from rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's
+;; rust-src-1.99.1-r0, pinned by tools/rsdump/apks.sha256): the essentials of
+;; compiler/rustc_resolve/src/def_collector.rs (the definitions and their def path data), compiler/rustc_hir_analysis/src/
+;; {collect/generics_of.rs (own parameters: Self, early-bound lifetimes, types and consts), collect/resolve_bound_vars.rs
+;; (is_late_bound_map: a lifetime constrained by the inputs and absent from the where clauses is late-bound), collect/
+;; type_of.rs, collect/clauses_of.rs (gather_explicit_clauses_of), constrained_generic_params.rs (setup_constraining_clauses),
+;; hir_ty_lowering/{mod.rs (lower_ty, lower_generic_args_of_path, lower_poly_trait_ref, type-relative paths), bounds.rs
+;; (lower_bounds, add_implicit_sizedness_bounds, lower_assoc_item_constraint), dyn_trait.rs (object lifetime defaults)}},
+;; compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs (visible_parent_map) and compiler/rustc_middle/src/ty/print/
+;; {mod.rs (default_print_def_path, default_print_impl_path, characteristic_def_id_of_type), pretty.rs (FmtPrinter:
+;; try_print_visible_def_path, pretty_print_type, pretty_print_region, should_print_optional_region,
+;; pretty_print_dyn_existential, the clauses' Print impls, TraitRefPrintSugared)}, compiler/rustc_middle/src/ty/generics.rs
+;; (own_args_no_defaults); rustc is dual-licensed MIT OR Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.collect
+  "RF7's first slice (doc/rust/FRONTEND-SURVEY.md, \"As built: RF7\"): collection over the HIR of arbace.rust.front.lower
+  (with the resolutions it was lowered with) and std's interface from the helper's --std-names data (RFS4, RFP6): the
+  crate's definitions (def collector), each one's generics (generics_of), its type (type_of, HIR type lowering with
+  regions as rustc's printer sees them: early-bound, late-bound named or anonymous, 'static), its signature (fn_sig),
+  its explicit clauses (explicit_clauses_of: implicit sizedness bounds, the written bounds and where clauses, associated
+  item constraints, Fn sugar, impls' constraining order), ADT variants and impls' trait refs; printed as rustc's type
+  printer prints them with no trimmed paths (visible paths through std's re-exports). The output is the helper's --iface
+  format (tools/rsdump/mirdata.rs), so RF7's judge compares item by item.
+
+    (load-std FILE)                                 std's interface from --std-names
+    (collect-crate HIR RES STD {:source TEXT})      [{:def :kind :generics :sig :ty :variants :trait-ref :self :predicates}]
+    (item-form ITEM)                                one (iface/item {...}) line, as the helper writes it"
+  (:require [arbace.string :as str]
+            [arbace.rust.front.resolve :as resolve]
+            [arbace.rust.front.hir-pretty :as hp]))
+
+(set! *warn-on-reflection* true)
+
+(defn- head [x] (when (seq? x) (first x)))
+
+;; ---------------------------------------------------------------------------------------------
+;; std's interface (the helper's --std-names: names/mod, names/generics, names/alias, names/trait, names/lang,
+;; names/hidden, names/hidden-reexport)
+
+(defn- visible-parent-map
+  "visible_parent_map: a breadth-first search over the crates an extern crate item names (std, or core in a no_std
+  crate), each public child's def mapped to the first module it is reached from; re-exports named `_`, children of
+  #[doc(hidden)] modules and #[doc(hidden)] re-exports only as a fallback"
+  [mods hidden hidden-re roots]
+  (loop [queue (vec roots) qi 0 vpm {} fallback {}]
+    (if-let [m (nth queue qi nil)]
+      (let [[q vpm fallback]
+            (reduce (fn [[q vpm fallback] c]
+                      (let [d (:path c)
+                            fb (or (= "_" (:name c)) (contains? hidden m) (contains? hidden-re [m (:name c)]))]
+                        (if (contains? vpm d)
+                          [q vpm fallback]
+                          (let [vpm (if fb vpm (assoc vpm d m))]
+                            (if (contains? fallback d)
+                              [q vpm fallback]
+                              [(if (#{"Mod" "Enum" "Trait"} (:kind c)) (conj q d) q)
+                               vpm
+                               (if fb (assoc fallback d m) fallback)])))))
+                    [queue vpm fallback]
+                    (:children (get mods m)))]
+        (recur q (inc qi) vpm fallback))
+      (merge fallback vpm))))
+
+(defn load-std
+  "std's, core's and alloc's interface from the helper's --std-names file"
+  [file]
+  (let [rdr (java.io.PushbackReader. (java.io.StringReader. (slurp file)))
+        acc (loop [acc {:mods {} :generics {} :aliases {} :traits {} :lang {} :hidden #{} :hidden-re #{}}]
+              (let [x (read rdr false ::eof)]
+                (if (= x ::eof)
+                  acc
+                  (recur
+                   (case (head x)
+                     names/mod (let [[_ p k kids] x]
+                                 (assoc-in acc [:mods p] {:kind k :children (mapv (fn [[ns nm kind path]] {:ns (keyword (name ns)) :name nm :kind kind :path path}) kids)}))
+                     names/generics (assoc-in acc [:generics (second x)] (vec (nth x 2)))
+                     names/alias (assoc-in acc [:aliases (second x)] (nth x 2))
+                     names/trait (assoc-in acc [:traits (second x)] (nth x 2))
+                     names/lang (assoc-in acc [:lang (second x)] (nth x 2))
+                     names/hidden (update acc :hidden conj (second x))
+                     names/hidden-reexport (update acc :hidden-re conj [(second x) (nth x 2)])
+                     acc)))))
+        kinds (into {} (for [[p m] (:mods acc)] [p (:kind m)]))
+        kinds (reduce (fn [k c] (if (contains? k (:path c)) k (assoc k (:path c) (:kind c))))
+                      kinds (mapcat :children (vals (:mods acc))))]
+    (assoc acc :kinds kinds
+           :vpm {"std" (visible-parent-map (:mods acc) (:hidden acc) (:hidden-re acc) ["std"])
+                 "core" (visible-parent-map (:mods acc) (:hidden acc) (:hidden-re acc) ["core"])})))
+
+(def ^:dynamic *std* {})
+(def ^:dynamic *root-crate* "std")   ; the crate an injected extern crate item names (core in a no_std crate)
+
+(defn- path-segs [^String p] (str/split p #"::"))
+(defn- path-parent [^String p] (let [i (.lastIndexOf p "::")] (when (pos? i) (subs p 0 i))))
+(defn- path-name [^String p] (let [i (.lastIndexOf p "::")] (if (neg? i) p (subs p (+ i 2)))))
+(defn- ext-kind [p] (get (:kinds *std*) p))
+(defn- lang [nm] (get (:lang *std*) nm))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types (rustc_middle::ty as data)
+;;
+;;   [:bool] [:char] [:str] [:never] [:int "i32"] [:uint "u8"] [:float "f64"] [:param I NAME] [:adt DEF ARGS]
+;;   [:ref REGION MUT TY] [:ptr MUT TY] [:slice TY] [:array TY CONST] [:tuple TYS] [:proj ASSOC-DEF ARGS]
+;;   [:fnptr SIG] [:dyn {:principal [DEF ARGS] :projections [[ASSOC-DEF ARGS TERM]] :autos [DEF]} REGION] [:err TEXT]
+;;   regions [:re-early I NAME] [:re-bound NAME-or-nil] [:re-static] [:re-erased]; consts [:cval N] [:cparam I NAME]
+;;   [:cexpr TEXT]; a DEF is a local def's id (a number) or another crate's def path (a string)
+;;   SIG {:inputs [TY] :output TY :safety :unsafe|nil :abi "C"|nil}
+
+(def ^:private prim-tys
+  (merge {"bool" [:bool] "char" [:char] "str" [:str]}
+         (into {} (for [i ["i8" "i16" "i32" "i64" "i128" "isize"]] [i [:int i]]))
+         (into {} (for [u ["u8" "u16" "u32" "u64" "u128" "usize"]] [u [:uint u]]))
+         (into {} (for [f ["f16" "f32" "f64" "f128"]] [f [:float f]]))))
+
+(defn- region? [x] (and (vector? x) (#{:re-early :re-bound :re-static :re-erased} (first x))))
+(defn- const? [x] (and (vector? x) (#{:cval :cparam :cexpr} (first x))))
+(def ^:private unit [:tuple []])
+
+(defn- subst
+  "A type (or argument) with its parameters replaced by ARGS (EarlyBinder::instantiate)"
+  [x args]
+  (cond
+    (not (vector? x)) x
+    (and (#{:param :re-early :cparam} (first x)) (< (long (second x)) (count args))) (nth args (second x))
+    (keyword? (first x)) (into [(first x)] (map #(subst % args) (rest x)))
+    :else (mapv #(subst % args) x)))
+
+(defn- subst* [x args] (cond (map? x) (into {} (for [[k v] x] [k (subst* v args)])) (vector? x) (subst x args) :else x))
+
+(defn- sty->ty
+  "The helper's structural types (std's defaults, aliases and supertraits) as types"
+  [s]
+  (case (head s)
+    param [:param (nth s 1) (nth s 2)]
+    prim (get prim-tys (second s) [:err (second s)])
+    never [:never]
+    adt [:adt (nth s 1) (mapv sty->ty (nth s 2))]
+    tuple [:tuple (mapv sty->ty (second s))]
+    ref [:ref (sty->ty (list 'lt (nth s 1))) (nth s 2) (sty->ty (nth s 3))]
+    ptr [:ptr (nth s 1) (sty->ty (nth s 2))]
+    slice [:slice (sty->ty (second s))]
+    array [:array (sty->ty (nth s 1)) [:cexpr (nth s 2)]]
+    projection [:proj (nth s 1) (mapv sty->ty (nth s 2))]
+    lt (let [n (second s)] (case n "'static" [:re-static] "'_" [:re-erased] [:re-bound n]))
+    const [:cexpr (second s)]
+    [:err (str s)]))
+
+;; ---------------------------------------------------------------------------------------------
+;; The definitions (def_collector.rs): {:id :parent :data [:type N]|[:value N]|[:impl]|[:ctor]|[:closure]|[:crate]
+;; :disamb K :kind "DefKind" :node HIR ...}
+
+(def ^:dynamic *defs* nil)       ; atom: [def ...] by id
+(def ^:dynamic *disamb* nil)     ; atom: {[parent data] next}
+(def ^:dynamic *src* nil)        ; resolve/source-index of the root file
+(def ^:dynamic *by-span* nil)    ; atom: ident span -> def id
+(def ^:dynamic *res* {})
+
+(defn- def-of [id] (nth @*defs* id))
+
+(defn- add-def! [m]
+  (let [id (count @*defs*)
+        dkey [(:parent m) (first (:data m)) (second (:data m))]
+        k (get @*disamb* dkey 0)]
+    (swap! *disamb* assoc dkey (inc k))
+    (swap! *defs* conj (assoc m :id id :disamb k))
+    (when-let [sp (:ident-span m)] (swap! *by-span* assoc sp id))
+    id))
+
+(defn- update-def! [id f & args] (apply swap! *defs* update id f args))
+
+(defn- span-lo [sp] (when (vector? sp) [(nth sp 0) (nth sp 1)]))
+(defn- ident-span [item-span nm] (when (and *src* (vector? item-span) nm) (resolve/ident-span *src* item-span nm)))
+
+(declare collect-item! walk-body!)
+
+(defn- ctor-kind [data] (case (:kind data) :tuple "Fn" :unit "Const" nil))
+
+(defn- collect-fields! [parent data sp]
+  (doseq [[i f] (map-indexed vector (:fields data))]
+    (add-def! {:parent parent :data [:value (or (:ident f) (str i))] :kind "Field" :node f})))
+
+(defn- collect-assoc! [parent it in-trait]
+  (let [nm (:ident it)
+        id (add-def! {:parent parent :node it :ident-span (ident-span (:span it) nm)
+                      :data (if (= :type (:kind it)) [:type nm] [:value nm])
+                      :kind (case (:kind it) :fn "AssocFn" :const "AssocConst { is_type_const: false }" :type "AssocTy" "AssocErr")})]
+    (case (:kind it)
+      :fn (walk-body! (:body it) id)
+      :const (walk-body! (:expr it) id)
+      nil)
+    id))
+
+(defn- collect-item!
+  "One item's definitions (and its children's) under PARENT"
+  [parent it]
+  (let [nm (:ident it) sp (:span it) isp (ident-span sp nm)]
+    (case (:kind it)
+      :fn (let [id (add-def! {:parent parent :data [:value nm] :kind "Fn" :node it :ident-span isp})]
+            (walk-body! (:body it) id))
+      (:struct :union)
+      (let [id (add-def! {:parent parent :data [:type nm] :kind (if (= :struct (:kind it)) "Struct" "Union") :node it :ident-span isp})]
+        (when-let [ck (and (= :struct (:kind it)) (ctor-kind (:data it)))]
+          (update-def! id assoc :ctor (add-def! {:parent id :data [:ctor] :kind (str "Ctor(Struct, " ck ")") :node it :adt id})))
+        (collect-fields! id (:data it) sp))
+      :enum
+      (let [id (add-def! {:parent parent :data [:type nm] :kind "Enum" :node it :ident-span isp})]
+        (doseq [v (:variants it)]
+          (let [vid (add-def! {:parent id :data [:type (:ident v)] :kind "Variant" :node v :adt id
+                               :ident-span (ident-span (:span v) (:ident v))})]
+            (when-let [ck (ctor-kind (:data v))]
+              (update-def! vid assoc :ctor (add-def! {:parent vid :data [:ctor] :kind (str "Ctor(Variant, " ck ")") :node v :adt id :variant vid})))
+            (collect-fields! vid (:data v) (:span v))
+            (when (:disr v) (walk-body! (:disr v) vid)))))
+      :trait
+      (let [id (add-def! {:parent parent :data [:type nm] :kind "Trait" :node it :ident-span isp})]
+        (doseq [a (:items it)] (collect-assoc! id a true)))
+      :impl
+      (let [id (add-def! {:parent parent :data [:impl] :kind (str "Impl { of_trait: " (some? (:of-trait it)) " }") :node it})]
+        (doseq [a (:items it)] (collect-assoc! id a false)))
+      :const (let [id (add-def! {:parent parent :data [:value nm] :kind "Const { is_type_const: false }" :node it :ident-span isp})]
+               (walk-body! (:expr it) id))
+      :static (let [id (add-def! {:parent parent :data [:value nm] :node it :ident-span isp
+                                  :kind (str "Static { safety: Safe, mutability: " (if (:mutbl it) "Mut" "Not") ", nested: false }")})]
+                (walk-body! (:expr it) id))
+      :ty-alias (add-def! {:parent parent :data [:type nm] :kind "TyAlias" :node it :ident-span isp})
+      :mod (let [id (add-def! {:parent parent :data [:type nm] :kind "Mod" :node it :ident-span isp :module true})]
+             (doseq [x (:items it)] (collect-item! id x)))
+      nil)))
+
+(defn- body-children
+  "The closures and nested items of a body, outside nested closures, in the def collector's order: those the body's
+  own fragment holds first, then those of the macro expansions in it (collected as each expansion is, depth first in
+  source order: a node of another file's span, a macro's tokens, or a lowered format_args!), each in lowering order"
+  [x]
+  (let [acc (java.util.ArrayList.)]
+    (letfn [(walk [x expn]
+              (cond
+                (map? x) (let [expn (or expn (when (or (= :foreign (:span x)) (:expansion x)) (or (:hir-id x) [0 0])))]
+                           (cond (and (= :expr (:node x)) (= :closure (:kind x))) (.add acc [:closure x expn])
+                                 (and (= :stmt (:node x)) (= :item (:kind x))) (.add acc [:item (:item x) expn])
+                                 (= :item (:node x)) (.add acc [:item x expn])
+                                 :else (doseq [v (vals x)] (walk v expn))))
+                (sequential? x) (doseq [v x] (walk v expn))
+                :else nil))]
+      (walk x nil))
+    (map (fn [[k n _]] [k n])
+         (sort-by (fn [[k n expn]] [(if expn 1 0) (if expn (long (second expn)) 0) (let [h (:hir-id n)] (if h (long (second h)) -1))]) (vec acc)))))
+
+(defn- walk-body! [x parent]
+  (doseq [[k n] (body-children x)]
+    (case k
+      :closure (let [id (add-def! {:parent parent :data [:closure] :kind "Closure" :node n})]
+                 (walk-body! (:params n) id)
+                 (walk-body! (:body n) id))
+      :item (collect-item! parent n))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Generics (generics_of.rs, resolve_bound_vars.rs's is_late_bound_map)
+
+(defn- def-generics-hir [d]
+  (let [n (:node d)]
+    (case (:kind d)
+      ("Struct" "Union" "Enum" "Trait" "TyAlias" "Fn" "AssocFn" "AssocTy" "Const { is_type_const: false }" "AssocConst { is_type_const: false }")
+      (:generics n)
+      (if (str/starts-with? (str (:kind d)) "Impl") (:generics n) nil))))
+
+(defn- lifetimes-in
+  "The lifetime names a HIR type or bound mentions"
+  [x]
+  (let [acc (java.util.ArrayList.)]
+    (letfn [(walk [x]
+              (cond (map? x) (do (when (and (string? (:lifetime x)) (not= :lifetime (:kind x))) (.add acc (:lifetime x)))
+                                 (doseq [v (vals x)] (walk v)))
+                    (sequential? x) (doseq [v x] (walk v))
+                    :else nil))]
+      (walk x))
+    (set acc)))
+
+(defn- constrained-lifetimes
+  "is_late_bound_map's ConstrainedCollector over the inputs: the lifetimes a type constrains (not inside a projection
+  or a type-relative path)"
+  [t]
+  (let [acc (java.util.ArrayList.)]
+    (letfn [(walk [t]
+              (when (map? t)
+                (case (:kind t)
+                  :qpath nil
+                  :path (let [segs (:segs (:path t))]
+                          (if (and (nil? (:res (:path t))) (> (count segs) 1))
+                            nil
+                            (doseq [s segs a (:args (:args s))]
+                              (cond (:lifetime a) (.add acc (:lifetime a))
+                                    (:ty a) (walk (:ty a))))))
+                  :ref (do (when (:lifetime t) (.add acc (:lifetime t))) (walk (:ty (:mt t))))
+                  (:ptr) (walk (:ty (:mt t)))
+                  (:slice :array) (walk (:ty t))
+                  :tup (doseq [e (:elts t)] (walk e))
+                  :dyn (doseq [b (:bounds t)] (if (:lifetime b) (.add acc (:lifetime b))
+                                                   (doseq [s (:segs (:trait b)) a (:args (:args s))]
+                                                     (cond (:lifetime a) (.add acc (:lifetime a)) (:ty a) (walk (:ty a))))))
+                  :fnptr (do (doseq [i (:inputs t)] (walk i)) (some-> (:output t) walk))
+                  nil)))]
+      (walk t))
+    (set acc)))
+
+(defn- where-preds
+  "HIR's predicates: the parameters' inline bounds first, in order, then the written where clause (rustc_ast_lowering)"
+  [g]
+  (concat (for [p (:params g) :when (seq (:bounds p))]
+            (if (= :lifetime (:kind p))
+              {:lifetime (:name p) :bounds (:bounds p) :param p}
+              {:param-ty p :bounds (:bounds p) :param p}))
+          (:where g)))
+
+(defn- late-bound
+  "The late-bound lifetimes of a function: constrained by an input and named in no where clause"
+  [f]
+  (let [g (:generics f)
+        in-where (into #{} (mapcat (fn [pr] (concat (when (:lifetime pr) [(:lifetime pr)]) (lifetimes-in (:bounds pr)) (lifetimes-in (:ty pr)))) (where-preds g)))
+        constrained (into #{} (mapcat #(constrained-lifetimes (:ty %)) (:params f)))]
+    (set (for [p (:params g)
+               :when (= :lifetime (:kind p))
+               :when (contains? constrained (:name p))
+               :when (not (contains? in-where (:name p)))]
+           (:name p)))))
+
+(defn- param-name [p] (if (:synthetic p) (hp/synthetic-name (:synthetic p)) (:name p)))
+
+(def ^:private has-parent-kinds
+  #{"AssocFn" "AssocTy" "AssocConst { is_type_const: false }" "Variant" "Field" "Closure"})
+
+(defn- parent-generics-def
+  "The definition whose generics are a definition's parent generics (generics_of's parent)"
+  [d]
+  (let [k (:kind d)]
+    (cond (contains? #{"AssocFn" "AssocTy" "AssocConst { is_type_const: false }"} k) (:parent d)
+          (= "Variant" k) (:parent d)
+          (str/starts-with? (str k) "Ctor") (:parent d)
+          (= "Field" k) (:parent d)
+          (= "Closure" k) (:parent d)
+          :else nil)))
+
+(declare generics-of)
+
+(defn- generics-of*
+  [id]
+  (let [d (def-of id)
+        pid (parent-generics-def d)
+        parent (when pid (generics-of pid))
+        pc (if parent (+ (long (:parent-count parent)) (count (:params parent))) 0)
+        g (def-generics-hir d)
+        late (if (#{"Fn" "AssocFn"} (:kind d)) (late-bound (:node d)) #{})
+        own (cond
+              (= "Closure" (:kind d)) [{:name "" :kind :type} {:name "" :kind :type} {:name "" :kind :type}]
+              :else
+              (vec (concat (when (= "Trait" (:kind d)) [{:name "Self" :kind :type :self true}])
+                           (for [p (:params g) :when (= :lifetime (:kind p)) :when (not (contains? late (:name p)))]
+                             {:name (:name p) :kind :lifetime :hir p})
+                           (for [p (:params g) :when (not= :lifetime (:kind p))]
+                             {:name (param-name p) :kind (:kind p) :hir p :default (:default p)}))))]
+    {:def id :parent pid :parent-count pc :has-self (= "Trait" (:kind d))
+     :params (vec (map-indexed (fn [i p] (assoc p :index (+ pc i))) own))
+     :late late
+     :has-parent (or (contains? has-parent-kinds (:kind d)) (str/starts-with? (str (:kind d)) "Ctor"))}))
+
+(def ^:dynamic *generics-cache* nil)
+(defn generics-of [id] (or (get @*generics-cache* id) (let [g (generics-of* id)] (swap! *generics-cache* assoc id g) g)))
+
+(defn- all-params [g] (concat (when-let [p (:parent g)] (all-params (generics-of p))) (:params g)))
+
+(defn- ext-generics
+  "Another crate's definition's generics (std's data): {:parent-count 0 :params [{:name :kind :index :default}]}; a
+  trait's associated item's parent generics are the trait's"
+  [p]
+  (if (and (#{"AssocTy" "AssocFn" "AssocConst { is_type_const: false }"} (ext-kind p)) (= "Trait" (ext-kind (path-parent p))))
+    {:parent-count (count (get (:generics *std*) (path-parent p))) :params [] :has-parent true}
+  (let [ps (get (:generics *std*) p)]
+    {:parent-count 0 :has-self (= "Trait" (ext-kind p))
+     :params (vec (map-indexed (fn [i [k nm dflt]] (cond-> {:name nm :kind (keyword (name k)) :index i :ext-default dflt}
+                                                       (and (zero? i) (= "Self" nm) (= "Trait" (ext-kind p))) (assoc :self true)))
+                               ps))})))
+
+(defn- generics-any [def] (if (number? def) (generics-of def) (ext-generics def)))
+
+(defn- identity-args [g]
+  (vec (for [p (all-params g)]
+         (case (:kind p) :lifetime [:re-early (:index p) (:name p)] :const [:cparam (:index p) (:name p)] [:param (:index p) (:name p)]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; HIR type lowering (hir_ty_lowering)
+
+(def ^:dynamic *scope* nil)      ; the generics in scope, innermost first: [generics ...]
+(def ^:dynamic *self-ty* nil)    ; the type Self stands for (an impl's self type; a trait's Self parameter)
+(def ^:dynamic *late* #{})       ; the late-bound lifetimes of the signature being lowered
+(def ^:dynamic *elided* :erased) ; what an elided lifetime is: :anon (a signature), :static (a const's type), :erased
+(def ^:dynamic *module* 0)       ; the module whose items an unresolved name is looked up in
+
+(defn- scope-param [nm]
+  (some (fn [g] (some #(when (and (= nm (:name %)) (not= :lifetime (:kind %))) %) (all-params g))) *scope*))
+(defn- scope-lifetime [nm]
+  (some (fn [g] (some #(when (and (= nm (:name %)) (= :lifetime (:kind %))) %) (all-params g))) *scope*))
+
+(defn- lower-region [nm]
+  (cond (= "'static" nm) [:re-static]
+        (or (nil? nm) (= "'_" nm)) (case *elided* :anon [:re-bound nil] :static [:re-static] [:re-erased])
+        (contains? *late* nm) [:re-bound nm]
+        :else (if-let [p (scope-lifetime nm)] [:re-early (:index p) nm] [:re-bound nm])))
+
+(declare lower-ty lower-trait-ref assoc-in-trait implicit-sizedness lower-bounds)
+
+(defn- local-def-at [sp kind-pred]
+  (or (get @*by-span* sp)
+      nil))
+
+(defn- local-by-name
+  "An unresolved name (an expansion's) among the module's definitions in the type namespace"
+  [nm]
+  (some (fn [d] (when (and (= *module* (:parent d)) (= [:type nm] (:data d)) (not (str/starts-with? (str (:kind d)) "Ctor"))) (:id d))) @*defs*))
+
+(defn- std-path-def
+  "A written std path (a derive's `$crate::fmt::Debug`): its definition through std's modules' children"
+  [names]
+  (loop [m (first names) rest-names (rest names)]
+    (if (empty? rest-names)
+      m
+      (let [nm (first rest-names)
+            c (or (some #(when (and (= nm (:name %)) (= :type (:ns %))) %) (:children (get (:mods *std*) m)))
+                  (some #(when (= nm (:name %)) %) (:children (get (:mods *std*) m))))]
+        (when c (recur (:path c) (rest rest-names)))))))
+
+(defn- res-def
+  "A path's resolution as [:local ID KIND] [:ext PATH KIND] [:prim N] [:param P] [:self-alias] [:self-param] or nil"
+  [path]
+  (let [rs (when-not (= "$crate" (:ident (first (:segs path)))) (:res path))   ; a derive's $crate path: its written text (its span is the derive's)
+        r (or (first (filter #(not= 'err (head %)) rs)) (first rs))]
+    (case (head r)
+      def (let [k (second r) p (nth r 2)
+                p (if k p (or (std-path-def (path-segs p)) p))]
+            [:ext p (or k (ext-kind p))])
+      local-def (let [k (second r) sp (nth r 2)]
+                  (case k
+                    ("TyParam" "ConstParam") [:param (scope-param (:ident (peek (:segs path))))]
+                    (if-let [id (get @*by-span* sp)]
+                      [:local id k]
+                      [:unresolved (:ident (peek (:segs path)))])))
+      prim [:prim (second r)]
+      self-ty-alias [:self-alias]
+      self-ty-param [:self-param]
+      nil (let [segs (:segs path)
+                names (mapv :ident segs)
+                names (if (= "{{root}}" (first names)) (subvec names 1) names)
+                file-crate (when-let [f (:file path)] (some #(when (str/includes? f (str "library/" % "/")) %) ["core" "alloc" "std"]))
+                names (if (= "$crate" (first names)) (assoc names 0 (or (:krate path) file-crate "core")) names)]
+            (cond
+              (and (> (count names) 1) (#{"std" "core" "alloc"} (first names)) (std-path-def names))
+              (let [p (std-path-def names)] [:ext p (ext-kind p)])
+              (and (= 1 (count segs)) (not (:lang path)))
+              (let [nm (:ident (first segs))]
+                (cond (scope-param nm) [:param (scope-param nm)]
+                      (= "Self" nm) (if *self-ty* [:self-alias] [:self-param])
+                      (local-by-name nm) (let [id (local-by-name nm)] [:local id (:kind (def-of id))])
+                      (get prim-tys nm) [:prim nm]
+                      :else [:unresolved nm]))
+              :else nil))
+      [:unresolved (str r)])))
+
+(defn- elided-default [] (case *elided* :anon [:re-bound nil] :static [:re-static] [:re-erased]))
+
+(defn- lower-const-arg [x]
+  ;; a const argument: a literal's value, a const parameter, else its text
+  (cond
+    (and (map? x) (= :lit (:kind x))) (let [l (:lit x)] [:cval (str (or (:symbol l) (:text l) l))])
+    (and (map? x) (= :path (:kind x))) (let [nm (:ident (peek (:segs (:path x))))]
+                                         (if-let [p (scope-param nm)] [:cparam (:index p) nm] [:cexpr nm]))
+    (and (map? x) (= :block (:kind x)) (nil? (seq (:stmts (:block x))))) (lower-const-arg (:expr (:block x)))
+    :else [:cexpr (str x)]))
+
+(defn- lower-generic-args
+  "lower_generic_args_of_path: the arguments of DEF's own parameters (with SELF-TY for a trait's Self), elided
+  lifetimes by context, missing types and consts by their defaults"
+  [def ga self-ty & [parent-args]]
+  (let [g (generics-any def)
+        provided (:args ga)
+        lts (filter :lifetime provided)
+        others (remove :lifetime provided)
+        params (:params g)]
+    (loop [ps params lts lts others others args (vec (or parent-args []))]
+      (if-let [p (first ps)]
+        (cond
+          (:self p) (recur (rest ps) lts others (conj args self-ty))
+          (= :lifetime (:kind p))
+          (if-let [l (first lts)]
+            (recur (rest ps) (rest lts) others (conj args (lower-region (:lifetime l))))
+            (recur (rest ps) lts others (conj args (elided-default))))
+          :else
+          (if-let [a (first others)]
+            (recur (rest ps) lts (rest others)
+                   (conj args (cond (= :const (:kind p)) (if (:const a) (lower-const-arg (:const a))
+                                                             (let [t (:ty a)] (if (= :path (:kind t)) (lower-const-arg {:kind :path :path (:path t)}) [:cexpr "?"])))
+                                    (:ty a) (lower-ty (:ty a))
+                                    (:const a) (lower-const-arg (:const a))
+                                    :else [:err "arg"])))
+            (recur (rest ps) lts others
+                   (conj args (cond (:ext-default p) (subst (sty->ty (:ext-default p)) args)
+                                    (:default p) (subst (binding [*scope* [(generics-of def)]] (lower-ty (:default p))) args)
+                                    :else [:err (str "missing " (:name p))])))))
+        args))))
+
+(defn- adt-args [def ga] (lower-generic-args def ga nil))
+
+(defn- local-alias-ty [id args]
+  (let [d (def-of id)]
+    (subst (binding [*scope* [(generics-of id)] *module* (:parent d)] (lower-ty (:ty (:node d)))) args)))
+
+(defn- trait-bounds-defining
+  "probe_single_ty_param_bound_for_assoc_item: the trait refs among a parameter's bounds (and the where clauses on it)
+  that define the associated type NAME, through their supertraits"
+  [param nm]
+  (first
+   (for [g *scope*
+         :let [gh (def-generics-hir (def-of (:def g)))]
+         pr (where-preds gh)
+         :when (or (= param (:param-ty pr))
+                   (and (:ty pr) (= :path (:kind (:ty pr))) (= 1 (count (:segs (:path (:ty pr)))))
+                        (= (:name param) (:ident (first (:segs (:path (:ty pr))))))))
+         b (:bounds pr)
+         :when (:trait b)
+         :let [tr (lower-trait-ref (:trait b) [:param (:index param) (:name param)])]
+         :when tr
+         :let [found (assoc-in-trait tr nm)]
+         :when found]
+     found)))
+
+(defn- type-relative
+  "A path whose prefix resolves to a type and whose last segment names an associated type (lower_type_relative_path)"
+  [path]
+  (let [segs (:segs path) sp (:span path)
+        base-name (:ident (first segs))
+        psp (when (vector? sp) [(nth sp 0) (nth sp 1) (nth sp 0) (+ (long (nth sp 1)) (count base-name))])
+        base-res (get *res* psp)
+        nm (:ident (peek segs))
+        base (res-def {:res base-res :segs [(first segs)]})]
+    (when (= 2 (count segs))
+      (case (first base)
+        :self-param (some-> (assoc-in-trait [(:def (first (filter :has-self *scope*))) [[:param 0 "Self"]]] nm) (#(vector :proj (first %) (second %))))
+        :param (some-> (trait-bounds-defining (second base) nm) (#(vector :proj (first %) (second %))))
+        :self-alias (let [impl-g (first (filter #(str/starts-with? (str (:kind (def-of (:def %)))) "Impl") *scope*))
+                          impl (some-> impl-g :def def-of :node)]
+                      (when-let [ot (:of-trait impl)]
+                        (let [tr (lower-trait-ref (:path ot) *self-ty*)]
+                          (some-> (assoc-in-trait tr nm) (#(vector :proj (first %) (second %)))))))
+        nil))))
+
+(defn- lower-path-ty [t]
+  (let [path (:path t)
+        r (res-def path)
+        last-seg (peek (:segs path))]
+    (case (first r)
+      :prim (get prim-tys (second r))
+      :param (let [p (second r)] (if p (case (:kind p) :const [:cparam (:index p) (:name p)] [:param (:index p) (:name p)]) [:err "param"]))
+      :self-alias (or *self-ty* [:param 0 "Self"])
+      :self-param [:param 0 "Self"]
+      :ext (let [[_ p k] r]
+             (case k
+               ("Struct" "Enum" "Union") [:adt p (adt-args p (:args last-seg))]
+               "TyAlias" (if-let [a (get (:aliases *std*) p)] (subst (sty->ty a) (adt-args p (:args last-seg))) [:err (str "alias " p)])
+               "ForeignTy" [:adt p []]
+               [:err (str "ext " k " " p)]))
+      :local (let [[_ id k] r]
+               (case k
+                 ("Struct" "Enum" "Union") [:adt id (adt-args id (:args last-seg))]
+                 "TyAlias" (local-alias-ty id (adt-args id (:args last-seg)))
+                 [:err (str "local " k)]))
+      (or (type-relative path) [:err (str "unresolved " (pr-str (mapv :ident (:segs path))) " " (pr-str (:res path)))]))))
+
+(defn- object-region
+  "An object type's region: its written `+ 'a`, else the object lifetime default (resolve_bound_vars: a reference's
+  region, else 'static for a type parameter without lifetime bounds)"
+  [t default]
+  (if-let [b (first (filter :lifetime (:bounds t)))]
+    (lower-region (:lifetime b))
+    (or default [:re-static])))
+
+(def ^:dynamic *object-default* nil)
+
+(defn- lower-dyn [t]
+  (let [traits (filter :trait (:bounds t))
+        self-dummy [:param -1 "Self"]
+        lowered (for [b traits] {:path (:trait b) :tr (lower-trait-ref (:trait b) self-dummy :with-constraints)})
+        auto? (fn [{:keys [tr]}] (let [d (first tr)] (if (number? d) (:auto (:node (def-of d))) (:auto (get (:traits *std*) d)))))
+        principal (first (remove auto? lowered))
+        autos (filter auto? lowered)]
+    [:dyn {:principal (when principal [(first (:tr principal)) (vec (rest (second (:tr principal))))])
+           :projections (vec (for [[ad args term] (:constraints (meta (:tr principal)))] [ad (vec (rest args)) term]))
+           :autos (vec (map (comp first :tr) autos))}
+     (object-region t *object-default*)]))
+
+(defn lower-ty [t]
+  (case (:kind t)
+    :path (binding [*object-default* nil] (lower-path-ty t))
+    :qpath (let [segs (:segs (:path t)) pos (or (:position t) 0)
+                 qself (lower-ty (:qself t))]
+             (if (and (pos? pos) (= (inc pos) (count segs)))
+               (let [tr (lower-trait-ref {:segs (subvec segs 0 pos) :res (:res (:path t)) :span (:span (:path t))} qself)
+                     found (when tr (assoc-in-trait tr (:ident (peek segs))))]
+                 (if found [:proj (first found) (second found)] [:err "qpath"]))
+               [:err "qpath"]))
+    :ref (let [r (lower-region (:lifetime t))]
+           [:ref r (:mutbl (:mt t)) (binding [*object-default* r] (lower-ty (:ty (:mt t))))])
+    :ptr [:ptr (:mutbl (:mt t)) (lower-ty (:ty (:mt t)))]
+    :slice [:slice (lower-ty (:ty t))]
+    :array [:array (lower-ty (:ty t)) (lower-const-arg (:len t))]
+    :tup [:tuple (mapv lower-ty (:elts t))]
+    :never [:never]
+    :infer [:err "_"]
+    :dyn (lower-dyn t)
+    :impl (let [self [:param -2 "impl"]]
+            [:opaque (into (implicit-sizedness self (:bounds t) false) (lower-bounds self (:bounds t)))])
+    :impl-param (let [nm (hp/synthetic-name (:bounds t)) p (scope-param nm)] (if p [:param (:index p) nm] [:err nm]))
+    :fnptr [:fnptr {:inputs (binding [*elided* :anon *late* #{}] (mapv lower-ty (:inputs t)))
+                    :output (binding [*elided* :anon] (if (:output t) (lower-ty (:output t)) unit))
+                    :safety (when (and (seq? (:safety t)) (= 'Unsafe (first (:safety t)))) :unsafe)
+                    :abi (let [x (:ext t)] (cond (= 'Implicit (head x)) "C" (= 'Explicit (head x)) (str (second x)) (= 'Implicit x) "C" :else nil))}]
+    [:err (str "ty " (:kind t))]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Traits: their references, associated items and supertraits
+
+(defn- trait-def-of
+  "A bound's trait path as a definition"
+  [path]
+  (let [r (res-def path)]
+    (case (first r)
+      :ext (when (= "Trait" (nth r 2)) (second r))
+      :local (when (= "Trait" (nth r 2)) (second r))
+      nil)))
+
+(defn lower-trait-ref
+  "lower_poly_trait_ref's trait ref [DEF ARGS] for a bound's path with SELF-TY; with Fn sugar the tuple of the inputs,
+  the associated item constraints as the trait ref's metadata :constraints [[ASSOC-DEF ARGS TERM] ...]"
+  [path self-ty & [_]]
+  (when-let [d (trait-def-of path)]
+    (let [seg (peek (:segs path))
+          ga (:args seg)]
+      (if (:paren ga)
+        (let [args [self-ty [:tuple (binding [*object-default* nil] (mapv lower-ty (:inputs ga)))]]
+              tr [d args]
+              out (if (:output ga) (lower-ty (:output ga)) unit)
+              found (assoc-in-trait tr "Output")]
+          (with-meta tr {:constraints (if found [[(first found) (second found) out]] [])}))
+        (let [args (lower-generic-args d ga self-ty)
+              tr [d args]]
+          (with-meta tr {:constraints (vec (for [c (:constraints ga) :when (:eq (:kind c))
+                                                 :let [found (assoc-in-trait tr (:ident c))]
+                                                 :when found]
+                                             [(first found) (second found) (lower-ty (:eq (:kind c)))]))}))))))
+
+(defn- trait-assoc-ty
+  "A trait's associated type named NM: its definition, or nil"
+  [d nm]
+  (if (number? d)
+    (some (fn [x] (when (and (= d (:parent x)) (= [:type nm] (:data x)) (= "AssocTy" (:kind x))) (:id x))) @*defs*)
+    (some #(when (and (= nm (:name %)) (= "AssocTy" (:kind %))) (:path %)) (:children (get (:mods *std*) d)))))
+
+(defn- supertraits
+  "A trait ref's direct supertraits [[DEF ARGS] ...] (explicit_super_clauses_of: positive trait bounds on Self)"
+  [[d args]]
+  (if (number? d)
+    (let [t (:node (def-of d))]
+      (binding [*scope* [(generics-of d)] *self-ty* nil]
+        (vec (for [b (:bounds t) :when (:trait b) :when (not= 'Maybe (head (:polarity b)))
+                   :let [tr (lower-trait-ref (:trait b) [:param 0 "Self"])] :when tr]
+               [(first tr) (subst (second tr) args)]))))
+    (vec (for [s (:supertraits (get (:traits *std*) d))]
+           [(nth s 1) (subst (mapv sty->ty (nth s 2)) args)]))))
+
+(defn assoc-in-trait
+  "The associated type NM of a trait ref or of its supertraits (probe_trait_that_defines_assoc_item, then
+  traits::supertraits breadth first): [ASSOC-DEF TRAIT-ARGS] or nil"
+  [tr nm]
+  (loop [queue [tr] seen #{}]
+    (when-let [[d args :as t] (first queue)]
+      (if-let [a (trait-assoc-ty d nm)]
+        [a args]
+        (recur (into (vec (rest queue)) (remove #(contains? seen (first %)) (supertraits t))) (conj seen d))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Printing (FmtPrinter, with no trimmed paths)
+
+(def ^:dynamic *in-value* false)
+
+(declare print-ty print-def-path print-arg)
+
+(defn- print-region [r]
+  (case (first r)
+    :re-early (nth r 2)
+    :re-bound (or (second r) "'_")
+    :re-static "'static"
+    "'_"))
+
+(defn- print-optional-region? [r]
+  (case (first r)
+    :re-early (not= "'_" (nth r 2))
+    :re-bound (and (some? (second r)) (not= "'_" (second r)))
+    :re-static true
+    false))
+
+(defn- print-const [c] (case (first c) :cval (second c) :cparam (nth c 2) (str (second c))))
+
+(defn- print-arg [a] (cond (region? a) (print-region a) (const? a) (print-const a) :else (print-ty a)))
+
+(defn- generic-delimiters [f] (str "<" (binding [*in-value* false] (f)) ">"))
+
+(defn- default-of [p] (or (some-> (:ext-default p) sty->ty) (when (:default p) (binding [*scope* [(generics-of (:def-id p))]] (lower-ty (:default p))))))
+
+(defn- own-args-no-defaults
+  "generics.own_args_no_defaults: the own arguments, Self skipped, the trailing ones equal to their defaults dropped"
+  [def g args]
+  (let [pc (long (:parent-count g))
+        start (if (:has-self g) (max 1 pc) pc)
+        params (:params g)
+        n (+ pc (count params))
+        trailing (count (take-while (fn [p]
+                                      (let [dv (cond (:ext-default p) (sty->ty (:ext-default p))
+                                                     (:default p) (binding [*scope* [(generics-of def)]] (lower-ty (:default p))))]
+                                        (and dv (< (long (:index p)) (count args)) (= (subst dv args) (nth args (:index p))))))
+                                    (reverse params)))]
+    (subvec args (min start (count args)) (max (min start (count args)) (min (count args) (- n trailing))))))
+
+(defn- ext-def-data
+  "Another crate's definition's last def path data: [:type N] or [:value N] (the namespace of its kind)"
+  [p]
+  (let [k (ext-kind p) nm (path-name p)]
+    (if (contains? #{"Fn" "AssocFn" "Const { is_type_const: false }" "AssocConst { is_type_const: false }" "Static { safety: Safe, mutability: Not, nested: false }" "Field"} k)
+      [:value nm]
+      [:type nm])))
+
+(defn- visible-path
+  "try_print_visible_def_path for another crate's definition, or nil"
+  [p]
+  (let [vpm (get (:vpm *std*) *root-crate*)]
+    (loop [p p callers #{} suffix ()]
+      (cond
+        (= p *root-crate*) (str/join "::" (cons p suffix))
+        (contains? #{"std" "core" "alloc"} p) (str/join "::" (cons p suffix))
+        :else
+        (let [vp (get vpm p)
+              actual (path-parent p)
+              [ns nm] (ext-def-data p)]
+          (when (and vp (not (contains? callers vp)))
+            (let [nm (if (and (= :type ns) (not= vp actual))
+                       (some #(when (and (= p (:path %)) (not= "_" (:name %))) (:name %)) (:children (get (:mods *std*) vp)))
+                       nm)]
+              (when nm (recur vp (conj callers vp) (cons nm suffix))))))))))
+
+(defn- characteristic-def [t]
+  (case (first t)
+    :adt (second t)
+    :dyn (first (:principal (second t)))
+    (:array :slice) (characteristic-def (second t))
+    :ptr (characteristic-def (nth t 2))
+    :ref (characteristic-def (nth t 3))
+    :tuple (some characteristic-def (second t))
+    nil))
+
+(defn- def-parent [d] (if (number? d) (:parent (def-of d)) (path-parent d)))
+
+(declare impl-header)
+
+(defn- print-path-with-qualified [self-ty trait-ref]
+  (if (and (nil? trait-ref) (#{:adt :bool :char :str :int :uint :float} (first self-ty)))
+    (print-ty self-ty)
+    (generic-delimiters (fn [] (str (print-ty self-ty) (when trait-ref (str " as " (print-def-path (first trait-ref) (second trait-ref)))))))))
+
+(defn- print-impl-path [id]
+  (let [d (def-of id)
+        [self-ty tr] (impl-header id)
+        parent (:parent d)
+        in-self (when-let [c (characteristic-def self-ty)] (= (def-parent c) parent))
+        in-trait (when tr (= (def-parent (first tr)) parent))]
+    (if (or in-self in-trait)
+      (print-path-with-qualified self-ty tr)
+      (let [pre (print-def-path parent [])]
+        (str pre (when (seq pre) "::")
+             (generic-delimiters (fn [] (str "impl " (when tr (str (print-def-path (first tr) (second tr)) " for ")) (print-ty self-ty)))))))))
+
+(defn- data-sym [d]
+  (let [[k n] (:data d)]
+    (case k
+      (:type :value) n
+      :impl (str "{impl#" (:disamb d) "}")
+      :closure (str "{closure#" (:disamb d) "}")
+      :ctor ""
+      "")))
+
+(defn- assoc-of-trait? [def]
+  (if (number? def)
+    (let [d (def-of def)] (and (:parent d) (= "Trait" (:kind (def-of (:parent d)))) (#{"AssocTy" "AssocFn" "AssocConst { is_type_const: false }"} (:kind d))))
+    (and (#{"AssocTy" "AssocFn" "AssocConst { is_type_const: false }"} (ext-kind def)) (= "Trait" (ext-kind (path-parent def))))))
+
+(defn print-def-path
+  "print_def_path DEF ARGS"
+  [def args]
+  (let [args (vec args)]
+    (cond
+      ;; another crate's definition: its visible path when printed without arguments
+      (and (string? def) (empty? args)) (or (visible-path def) def)
+      (and (number? def) (= :crate (first (:data (def-of def))))) ""
+      (and (number? def) (= :impl (first (:data (def-of def))))) (print-impl-path def)
+      :else
+      (let [g (generics-any def)
+            pc (long (:parent-count g))
+            parent (if (number? def) (:parent (def-of def)) (path-parent def))
+            parent-args (subvec args 0 (min pc (count args)))
+            closure? (and (number? def) (= :closure (first (:data (def-of def)))))
+            ctor? (and (number? def) (= :ctor (first (:data (def-of def)))))]
+        (cond
+          (and (seq args) (not closure?) (seq (:params g)) (>= (count args) (+ pc (count (:params g)))))
+          (let [own (own-args-no-defaults def g args)
+                pre (print-def-path def parent-args)]
+            (if (seq own)
+              (str pre (when *in-value* "::") (generic-delimiters (fn [] (str/join ", " (map print-arg own)))))
+              pre))
+          (and (seq args) (assoc-of-trait? def) (= (count parent-args) pc))
+          (str (print-path-with-qualified (first parent-args) [parent parent-args]) "::" (if (number? def) (data-sym (def-of def)) (path-name def)))
+          ctor? (print-def-path parent parent-args)
+          (string? def) (let [pre (print-def-path parent [])] (str pre "::" (path-name def)))
+          :else (let [pre (print-def-path parent parent-args) s (data-sym (def-of def))]
+                  (str pre (when (seq pre) "::") s)))))))
+
+(defn- print-fn-sig-tail [inputs output]
+  (str "(" (str/join ", " (map print-ty inputs)) ")" (when-not (= output unit) (str " -> " (print-ty output)))))
+
+(defn- print-sig [{:keys [inputs output safety abi]}]
+  (str (when (= :unsafe safety) "unsafe ") (when (and abi (not= "Rust" abi)) (str "extern \"" abi "\" ")) "fn" (print-fn-sig-tail inputs output)))
+
+(defn- fn-trait? [d] (contains? #{(lang "fn") (lang "fn_mut") (lang "fn_once")} d))
+
+(defn- print-dyn [{:keys [principal projections autos]} r]
+  (let [print-r (print-optional-region? r)
+        body (str/join " + "
+                       (concat
+                        (when principal
+                          (let [[d args] principal
+                                pre (print-def-path d [])]
+                            [(if (and (fn-trait? d) (= :tuple (first (first args))) (= 1 (count projections)))
+                               (str pre (print-fn-sig-tail (second (first args)) (nth (first projections) 2)))
+                               (let [g (generics-any d)
+                                     own (own-args-no-defaults d g (into [[:param -1 "Self"]] args))
+                                     projs (sort-by #(path-name (if (number? (first %)) (data-sym (def-of (first %))) (first %))) projections)
+                                     ps (map (fn [[ad _ term]] (str (if (number? ad) (data-sym (def-of ad)) (path-name ad)) " = " (print-ty term))) projs)]
+                                 (str pre (when (or (seq own) (seq ps)) (generic-delimiters (fn [] (str/join ", " (concat (map print-arg own) ps))))))))]))
+                        (map #(print-def-path % []) (sort-by #(print-def-path % []) autos))))]
+    (if print-r (str "(dyn " body " + " (print-region r) ")") (str "dyn " body))))
+
+(defn- fn-trait-kind [d] (cond (= d (lang "fn")) 0 (= d (lang "fn_mut")) 1 (= d (lang "fn_once")) 2 :else nil))
+
+(defn- print-opaque
+  "pretty_print_opaque_impl_type: the item bounds, Fn traits resugared with their Output, the others by name with
+  their own arguments and associated item constraints, Sized when nothing else is printed"
+  [clauses]
+  (let [sized (lang "sized") meta (lang "meta_sized")
+        fn-names {0 "Fn" 1 "FnMut" 2 "FnOnce"}
+        step (fn [[fns trs has-sized has-meta lts] c]
+               (case (first c)
+                 :trait (let [[d args] (second c)]
+                          (cond (= d sized) [fns trs true has-meta lts]
+                                (= d meta) [fns trs has-sized true lts]
+                                (and (fn-trait-kind d) (= :tuple (first (nth args 1 nil))))
+                                (let [k [(second (nth args 1)) (first args)]
+                                      e (get fns k {:kind 2 :order (count fns)})]
+                                  [(assoc fns k (assoc e :kind (min (long (:kind e)) (long (fn-trait-kind d))))) trs has-sized has-meta lts])
+                                :else [fns (if (some #(= [d args] (first %)) trs) trs (conj trs [[d args] []])) has-sized has-meta lts]))
+                 :proj (let [[_ ad args term] c tr [(def-parent ad) args]]
+                         (if (and (fn-trait-kind (first tr)) (= :tuple (first (nth args 1 nil))))
+                           (let [k [(second (nth args 1)) (first args)]
+                                 e (get fns k {:kind 2 :order (count fns)})]
+                             [(assoc fns k (cond-> e (= "Output" (path-name (if (number? ad) (data-sym (def-of ad)) ad))) (assoc :ret term))) trs has-sized has-meta lts])
+                           [fns (let [i (first (keep-indexed (fn [i x] (when (= tr (first x)) i)) trs))]
+                                  (if i (update-in trs [i 1] conj [ad term]) (conj trs [tr [[ad term]]])))
+                            has-sized has-meta lts]))
+                 :type-outlives [fns trs has-sized has-meta (conj lts (nth c 2))]
+                 [fns trs has-sized has-meta lts]))
+        [fns trs has-sized _ lts] (reduce step [{} [] false false []] clauses)
+        fns (sort-by (comp :order val) fns)
+        paren (or (> (count fns) 1) (seq trs) (not has-sized))
+        fparts (for [[[ins _] e] fns]
+                 (if (contains? e :ret)
+                   (str (when paren "(") (get fn-names (:kind e)) "(" (str/join ", " (map print-ty ins)) ")"
+                        (when-not (= unit (:ret e)) (str " -> " (print-ty (:ret e)))) (when paren ")"))
+                   nil))
+        tparts (for [[[d args] items] trs]
+                 (let [own (own-args-no-defaults d (generics-any d) args)
+                       xs (concat (map print-arg own) (for [[ad term] items] (str (if (number? ad) (data-sym (def-of ad)) (path-name ad)) " = " (print-arg term))))]
+                   (str (print-def-path d []) (when (seq xs) (str "<" (str/join ", " xs) ">")))))
+        parts (concat (remove nil? fparts) tparts)
+        parts (if (and has-sized (empty? parts)) ["Sized"] parts)]
+    (str "impl " (str/join " + " parts) (apply str (for [r lts] (str " + " (print-region r)))))))
+
+(defn print-ty [t]
+  (case (first t)
+    :bool "bool" :char "char" :str "str" :never "!"
+    (:int :uint :float) (second t)
+    :param (nth t 2)
+    :adt (print-def-path (second t) (nth t 2))
+    :ref (let [[_ r m e] t] (str "&" (when (print-optional-region? r) (str (print-region r) " ")) (when m "mut ") (print-ty e)))
+    :ptr (str "*" (if (second t) "mut" "const") " " (print-ty (nth t 2)))
+    :slice (str "[" (print-ty (second t)) "]")
+    :array (str "[" (print-ty (second t)) "; " (print-const (nth t 2)) "]")
+    :tuple (let [ts (second t)] (str "(" (str/join ", " (map print-ty ts)) (when (= 1 (count ts)) ",") ")"))
+    :proj (print-def-path (second t) (nth t 2))
+    :fnptr (print-sig (second t))
+    :dyn (print-dyn (second t) (nth t 2))
+    :opaque (print-opaque (second t))
+    :err (str "{" (second t) "}")
+    (str "{?" t "}")))
+
+(defn- print-trait-sugared [[d args]]
+  (if (and (if (number? d) false (:paren-sugar (get (:traits *std*) d))) (= :tuple (first (nth args 1 nil))))
+    (str (path-name d) "(" (str/join ", " (map print-ty (second (nth args 1)))) ")")
+    (print-def-path d args)))
+
+(defn- print-clause [c]
+  (case (first c)
+    :trait (str (print-ty (first (second (second c)))) ": " (print-trait-sugared (second c)))
+    :proj (let [[_ ad args term] c] (str (print-def-path ad args) " == " (print-arg term)))
+    :type-outlives (str (print-ty (second c)) ": " (print-region (nth c 2)))
+    :region-outlives (str (print-region (second c)) ": " (print-region (nth c 2)))
+    :const-has-type (str "the constant `" (print-const (second c)) "` has type `" (print-ty (nth c 2)) "`")
+    (str c)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The items' facts: type_of, fn_sig, impl headers, explicit clauses
+
+(defn- scope-of
+  "The generics in scope at a definition, innermost first"
+  [id]
+  (loop [id id acc []]
+    (if (nil? id)
+      acc
+      (let [d (def-of id)]
+        (cond (:module d) acc
+              (= :crate (first (:data d))) acc
+              :else (recur (parent-generics-def d) (conj acc (generics-of id))))))))
+
+(defn- module-of [id] (loop [id (:parent (def-of id))] (let [d (def-of id)] (if (or (:module d) (= :crate (first (:data d))) (#{"Fn" "AssocFn"} (:kind d))) id (recur (:parent d))))))
+
+(defn- self-of
+  "The type Self stands for in a definition's scope"
+  [id]
+  (loop [id id]
+    (when id
+      (let [d (def-of id)]
+        (cond (str/starts-with? (str (:kind d)) "Impl") (binding [*scope* (scope-of id) *self-ty* nil *module* (module-of id)] (lower-ty (:self-ty (:node d))))
+              (= "Trait" (:kind d)) [:param 0 "Self"]
+              (or (:module d) (= :crate (first (:data d)))) nil
+              :else (recur (:parent d)))))))
+
+(defmacro ^:private in-def [id & body]
+  `(let [id# ~id]
+     (binding [*scope* (scope-of id#) *self-ty* (self-of id#) *module* (module-of id#)]
+       ~@body)))
+
+(defn- impl-header* [id]
+  (let [n (:node (def-of id))]
+    (in-def id
+      (let [self-ty (binding [*self-ty* nil] (lower-ty (:self-ty n)))]
+        [self-ty (when-let [ot (:of-trait n)] (binding [*self-ty* self-ty *elided* :erased] (lower-trait-ref (:path ot) self-ty)))]))))
+
+(def ^:dynamic *impl-cache* nil)
+(defn impl-header [id] (or (get @*impl-cache* id) (let [h (impl-header* id)] (swap! *impl-cache* assoc id h) h)))
+
+(defn- fn-sig [id]
+  (let [d (def-of id) f (:node d)]
+    (in-def id
+      (binding [*late* (:late (generics-of id)) *elided* :anon]
+        (let [self-ty (or *self-ty* [:param 0 "Self"])
+              inputs (vec (for [[i p] (map-indexed vector (:params f))]
+                            (if (and (zero? i) (:self f))
+                              (case (:self f)
+                                (:imm :mut) (if (= :path (:kind (:ty p))) (lower-ty (:ty p)) self-ty)
+                                :ref-imm [:ref [:re-bound nil] false self-ty]
+                                :ref-mut [:ref [:re-bound nil] true self-ty]
+                                (lower-ty (:ty p)))
+                              (lower-ty (:ty p)))))]
+          {:inputs inputs
+           :output (if (:output f) (lower-ty (:output f)) unit)
+           :safety (:safety (:header f))
+           :abi (:abi (:header f))})))))
+
+(defn- ctor-sig [id]
+  (let [d (def-of id)
+        adt (:adt d)
+        data (:data (:node d))]
+    (in-def adt
+      {:inputs (vec (for [f (:fields data)] (binding [*elided* :erased] (lower-ty (:ty f)))))
+       :output [:adt adt (identity-args (generics-of adt))]})))
+
+(defn- type-of [id]
+  (let [d (def-of id) n (:node d)]
+    (in-def id
+      (case (:kind d)
+        "Field" (binding [*elided* :erased] (lower-ty (:ty n)))
+        ("Const { is_type_const: false }" "AssocConst { is_type_const: false }") (binding [*elided* :static] (lower-ty (:ty n)))
+        ("TyAlias" "AssocTy") (when (:ty n) (lower-ty (:ty n)))
+        (if (str/starts-with? (str (:kind d)) "Static") (binding [*elided* :static] (lower-ty (:ty n))) nil)))))
+
+(defn- sized-bounds-of
+  "collect_sizedness_bounds over a parameter's inline bounds and the where clauses on it: :sized, :maybe-sized,
+  :meta-sized or :pointee-sized when one is written"
+  [bounds]
+  (let [sized (lang "sized") meta (lang "meta_sized") pointee (lang "pointee_sized")
+        tr (fn [b] (when (:trait b) (trait-def-of (:trait b))))]
+    {:sized-pos (some #(and (= sized (tr %)) (not (#{'Maybe 'Negative} (head (:polarity %))))) bounds)
+     :sized-maybe (some #(and (= sized (tr %)) (#{'Maybe 'Negative} (head (:polarity %)))) bounds)
+     :other (some #(#{meta pointee} (tr %)) bounds)}))
+
+(defn- implicit-sizedness
+  "add_implicit_sizedness_bounds: a trait's MetaSized supertrait, a parameter's Sized, ?Sized as MetaSized"
+  [self-ty bounds trait?]
+  (let [{:keys [sized-pos sized-maybe other]} (sized-bounds-of bounds)]
+    (cond (and sized-maybe (not sized-pos) (not other)) [[:trait [(lang "meta_sized") [self-ty]]]]
+          (or sized-pos sized-maybe other) []
+          trait? [[:trait [(lang "meta_sized") [self-ty]]]]
+          :else [[:trait [(lang "sized") [self-ty]]]])))
+
+(defn- lower-bounds
+  "lower_bounds: each written bound of SELF-TY as clauses (a trait bound, then its constraints' projections; ?Trait and
+  PointeeSized bounds none; an outlives bound)"
+  [self-ty bounds]
+  (vec (mapcat (fn [b]
+                 (cond
+                   (:lifetime b) [[:type-outlives self-ty (lower-region (:lifetime b))]]
+                   (:trait b)
+                   (let [tr (lower-trait-ref (:trait b) self-ty)]
+                     (cond (nil? tr) [[:err (str "bound " (pr-str (mapv :ident (:segs (:trait b)))))]]
+                           (= 'Maybe (head (:polarity b))) []
+                           (= (first tr) (lang "pointee_sized")) []
+                           :else (into (if (= (first tr) (lang "sized")) [[:trait tr]] [[:trait tr]])
+                                       (for [[ad args term] (:constraints (meta tr))] [:proj ad args term]))))
+                   :else []))
+               bounds)))
+
+(defn- clause-params
+  "parameters_for: the parameters a value mentions (with INCLUDE-NONCONSTRAINING, those inside projections too)"
+  [x include]
+  (let [acc (java.util.ArrayList.)]
+    (letfn [(walk [x]
+              (when (vector? x)
+                (case (first x)
+                  :param (.add acc (second x))
+                  :re-early (.add acc (second x))
+                  :cparam (.add acc (second x))
+                  :proj (when include (doseq [a (nth x 2)] (walk a)))
+                  (doseq [y (rest x)] (cond (vector? y) (if (keyword? (first y)) (walk y) (doseq [z y] (walk z)))
+                                            (map? y) (doseq [v (vals y)] (walk v)))))))]
+      (walk x))
+    (set acc)))
+
+(defn- setup-constraining-clauses
+  "constrained_generic_params::setup_constraining_clauses: projections whose trait ref's parameters are all constrained
+  move to the front, in turn, constraining their terms' parameters"
+  [clauses trait-ref inputs]
+  (loop [cs (vec clauses) i 0 inputs inputs changed true]
+    (if-not changed
+      cs
+      (let [[cs i inputs changed]
+            (reduce (fn [[cs i inputs changed] j]
+                      (let [c (nth cs j)]
+                        (if (and (= :proj (first c))
+                                 (not (and trait-ref (= trait-ref [(def-parent (second c)) (nth c 2)])))
+                                 (every? inputs (clause-params [:proj (second c) (nth c 2)] true)))
+                          [(assoc cs i c j (nth cs i)) (inc i) (into inputs (clause-params (nth c 3) false)) true]
+                          [cs i inputs changed])))
+                    [cs i inputs false]
+                    (range i (count cs)))]
+        (recur cs i inputs changed)))))
+
+(defn- explicit-clauses
+  "gather_explicit_clauses_of"
+  [id]
+  (let [d (def-of id)
+        g (def-generics-hir d)
+        own (generics-of id)]
+    (in-def id
+      (binding [*late* (:late own) *elided* :erased]
+        (let [trait-clauses (when (= "Trait" (:kind d))
+                              (let [bs (:bounds (:node d)) self [:param 0 "Self"]]
+                                (into (implicit-sizedness self bs true) (lower-bounds self bs))))
+              preds (where-preds g)
+              param-clauses (for [p (:params own) :when (:hir p) :when (not= :lifetime (:kind p))]
+                              (let [h (:hir p)]
+                                (if (= :const (:kind p))
+                                  [[:const-has-type [:cparam (:index p) (:name p)] (lower-ty (:ty h))]]
+                                  (let [on-param (concat (:bounds h)
+                                                         (mapcat :bounds (filter #(and (:ty %) (= :path (:kind (:ty %)))
+                                                                                       (= 1 (count (:segs (:path (:ty %)))))
+                                                                                       (= (:name p) (:ident (first (:segs (:path (:ty %)))))))
+                                                                                 (:where g))))]
+                                    (implicit-sizedness [:param (:index p) (:name p)] on-param false)))))
+              pred-clauses (for [pr preds]
+                             (cond
+                               (:param-ty pr) (let [p (some #(when (= (:param-ty pr) (:hir %)) %) (:params own))]
+                                                (lower-bounds [:param (:index p) (:name p)] (:bounds pr)))
+                               (:ty pr) (lower-bounds (lower-ty (:ty pr)) (:bounds pr))
+                               (:lifetime pr) (for [b (:bounds pr) :when (:lifetime b)] [:region-outlives (lower-region (:lifetime pr)) (lower-region (:lifetime b))])
+                               :else []))
+              clauses (vec (concat trait-clauses (apply concat param-clauses) (apply concat pred-clauses)))]
+          (if (str/starts-with? (str (:kind d)) "Impl")
+            (let [[self-ty tr] (impl-header id)]
+              (setup-constraining-clauses clauses tr (clause-params (if tr [:tuple (second tr)] self-ty) false)))
+            clauses))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The crate
+
+(def ^:private iface-kinds
+  #{"Fn" "AssocFn" "Const { is_type_const: false }" "AssocConst { is_type_const: false }" "TyAlias" "AssocTy" "Struct" "Enum"
+    "Union" "Trait" "Variant" "Field" "Closure" "Impl { of_trait: true }" "Impl { of_trait: false }"})
+
+(defn- emit? [d]
+  (or (contains? iface-kinds (:kind d)) (str/starts-with? (str (:kind d)) "Ctor") (str/starts-with? (str (:kind d)) "Static")))
+
+(defn- value-ns? [d] (contains? #{:value :closure :ctor} (first (:data d))))
+
+(defn- safe [f] (try (f) (catch Throwable e (str "{ERROR " (.getMessage e) "}"))))
+
+(defn- item-facts [d]
+  (let [id (:id d) k (:kind d)
+        g (generics-of id)
+        path (safe #(binding [*in-value* (value-ns? d)] (print-def-path id [])))]
+    (cond-> {:def path :kind k}
+      (or (seq (:params g)) (:has-parent g)) (assoc :generics (mapv :name (:params g)))
+      (#{"Fn" "AssocFn"} k) (assoc :sig (safe #(print-sig (fn-sig id))))
+      (str/starts-with? (str k) "Ctor") (assoc :sig (safe #(print-sig (ctor-sig id))))
+      (or (#{"Field" "Const { is_type_const: false }" "AssocConst { is_type_const: false }" "TyAlias"} k) (str/starts-with? (str k) "Static")
+          (and (= "AssocTy" k) (:ty (:node d))))
+      (assoc :ty (safe #(print-ty (type-of id))))
+      (#{"Struct" "Enum" "Union"} k)
+      (assoc :variants (if (= "Enum" k)
+                         (vec (for [v (:variants (:node d))] {:name (:ident v) :fields (vec (map-indexed (fn [i f] (or (:ident f) (str i))) (:fields (:data v))))}))
+                         [{:name (:ident (:node d)) :fields (vec (map-indexed (fn [i f] (or (:ident f) (str i))) (:fields (:data (:node d)))))}]))
+      (str/starts-with? (str k) "Impl")
+      (merge (safe #(let [[self-ty tr] (impl-header id)]
+                      (cond-> {}
+                        tr (assoc :trait-ref (str "<" (print-ty self-ty) " as " (print-def-path (first tr) (second tr)) ">"))
+                        (and (nil? tr) (:of-trait (:node d))) (assoc :trait-ref (let [p (:path (:of-trait (:node d)))] (str "{no trait " (pr-str (mapv :ident (:segs p))) " " (pr-str (:res p)) " " (:file p) " " (:krate p) "}")))
+                        true (assoc :self (print-ty self-ty))))))
+      (or (#{"Fn" "AssocFn" "Struct" "Enum" "Union" "Trait"} k) (str/starts-with? (str k) "Impl"))
+      (#(let [cs (safe (fn [] (mapv print-clause (explicit-clauses id))))]
+          (cond (string? cs) (assoc % :predicates [cs]) (seq cs) (assoc % :predicates cs) :else %))))))
+
+(defn collect-crate
+  "RF7: the crate's collected items, in the def collector's order"
+  [hir res std & [{:keys [source]}]]
+  (binding [*std* std
+            *root-crate* (if (some #(= "NoStd" (:parsed %)) (:attrs hir)) "core" "std")
+            *defs* (atom [{:id 0 :data [:crate] :kind "Mod" :module true}])
+            *disamb* (atom {})
+            *by-span* (atom {})
+            *generics-cache* (atom {})
+            *impl-cache* (atom {})
+            *res* res
+            *src* (when source (resolve/source-index source))]
+    (doseq [it (:items hir)] (collect-item! 0 it))
+    (vec (for [d @*defs* :when (emit? d)] (item-facts d)))))
+
+(defn item-form
+  "An item as the helper's --iface line"
+  [m]
+  (let [q pr-str
+        vs (fn [xs] (str "[" (str/join " " (map q xs)) "]"))]
+    (str "(iface/item {:def " (q (:def m)) " :kind " (q (:kind m))
+         (when (contains? m :generics) (str " :generics " (vs (:generics m))))
+         (when (:sig m) (str " :sig " (q (:sig m))))
+         (when (:ty m) (str " :ty " (q (:ty m))))
+         (when (:variants m) (str " :variants [" (str/join " " (map (fn [v] (str "{:name " (q (:name v)) " :fields " (vs (:fields v)) "}")) (:variants m))) "]"))
+         (when (:trait-ref m) (str " :trait-ref " (q (:trait-ref m))))
+         (when (:self m) (str " :self " (q (:self m))))
+         (when (:predicates m) (str " :predicates " (vs (:predicates m))))
+         "})")))
