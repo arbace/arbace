@@ -324,6 +324,11 @@
 
 (declare has-var?)
 
+(def ^:dynamic *depth* 0)
+(def ^:dynamic *select-cache* nil)   ; atom: a body's goals with variables that were ambiguous or failed, by their resolved form
+(def ^:dynamic *profile* nil)   ; TYPECK_PROFILE: atom, the impl candidates tried per [trait self-kind vars? evaluating]
+(def ^:dynamic *evaluating* false)   ; within holds?'s evaluation, whose bindings are rolled back: the first impl suffices
+
 (defn- impls-for
   "The impls (inherent, or of TRAIT) whose self type unifies with T (and the trait's other arguments with TARGS when
   given) and whose clauses hold: [impl args trait-ref], the first kept bound (an accepted program's impl is the one rustc
@@ -350,15 +355,20 @@
     ;; ambiguous (no impl selected, nothing bound; the obligation stays pending), else the one impl that matches
     (let [vars? (or (has-var? t) (some has-var? targs))
           try! (fn [[ip args self tr]]
+                 (when *profile* (swap! *profile* update [trait (first (shallow t)) vars? *evaluating*] (fnil inc 0)))
                  (and (or (nil? *budget*) (pos? (long (swap! *budget* dec))))
                       (unify self t)
                       (or (nil? targs) (unify-all (vec (rest (second tr))) (vec (take (dec (count (second tr))) targs))))
                       (impl-predicates-hold? ip args)))]
+      (let [key (when (and vars? *select-cache* (not *evaluating*) (zero? (long *depth*))) [trait (deep t) (deep targs)])]
+       (if (and key (contains? @*select-cache* key))
+        (get @*select-cache* key)
+        (let [r
       (loop [cs cands]
         (when-let [[ip args _ tr :as c] (first cs)]
           (let [s (snapshot)]
             (if (try! c)
-              (if-not vars?
+              (if (or (not vars?) *evaluating*)
                 [ip args tr]
                 (let [after (snapshot)
                       other (some (fn [c2] (when (not= ip (first c2))
@@ -368,7 +378,11 @@
                   (if other
                     (do (rollback! s) (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "ambiguous" trait (deep t) (deep targs) ip (first other)))) :ambiguous)
                     (do (reset! *vars* after) [ip args tr]))))
-              (do (rollback! s) (recur (rest cs))))))))))
+              (do (rollback! s) (recur (rest cs)))))))]
+          ;; an ambiguous or failed goal's answer is the same while its variables are as they are (the evaluation
+          ;; cache's role)
+          (when (and key (not (vector? r))) (swap! *select-cache* assoc key r))
+          r))))))
 
 (defn- callable-output
   "A closure's, function item's or function pointer's return type (FnOnce::Output's builtin impl)"
@@ -447,8 +461,6 @@
 
 (declare impl-predicates-hold? impls-for)
 
-(def ^:dynamic *depth* 0)
-
 (defn- unsized? [t] (#{:slice :str :dyn} (first (shallow t))))
 
 (declare supertraits-of)
@@ -505,8 +517,9 @@
       (or (tvar? self) (= :param (first self)) (= [:unknown] self)) true
       ;; a cycle or a chain too deep: not proven (the old solver's overflow is an error, never a success)
       (> (long *depth*) 4) false
+      ;; evaluation (the bindings rolled back): whether some impl may apply, no winnowing needed
       :else (let [s (snapshot)
-                  r (binding [*depth* (inc (long *depth*))] (impls-for self tr (vec (rest args))))]
+                  r (binding [*depth* (inc (long *depth*)) *evaluating* true] (impls-for self tr (vec (rest args))))]
               (rollback! s)
               (boolean r)))))
 
@@ -1409,7 +1422,7 @@
   (let [n (:node d) k (:kind d)
         owner (binding [c/*in-value* true] (c/print-def-path (:id d) []))
         facts (atom [])]
-    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *owner* owner *env* [{}] *loops* nil]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *owner* owner *env* [{}] *loops* nil]
       (c/in-def (:id d)
         (if (#{"Fn" "AssocFn"} k)
           (let [sig (erase (c/fn-sig (:id d)))
@@ -1429,6 +1442,11 @@
       (solve-obligations!)
       (fallback!)
       (solve-obligations!)
+      (when *profile*
+        (binding [*out* *err*]
+          (println "profile" owner "budget left" @*budget*)
+          (doseq [[k n] (take 12 (sort-by (comp - val) @*profile*))] (println "  " n k)))
+        (reset! *profile* {}))
       (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %))) (update :adj (fn [as] (mapv (fn [[k t]] [k (print-fact-ty t)]) (or as []))))))
             @facts))))
 
@@ -1455,7 +1473,7 @@
 (defn check-crate
   "RF9: every typeck root's facts (within collect/with-crate)"
   []
-  (binding [*scope-traits* (std-traits-in-scope)]
+  (binding [*scope-traits* (std-traits-in-scope) *profile* (when (System/getenv "TYPECK_PROFILE") (atom {}))]
   (vec (mapcat (fn [d]
                  (try (if (= "Variant" (:kind d)) (check-discriminant d) (check-body d))
                       (catch Throwable ex
