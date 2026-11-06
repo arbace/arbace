@@ -61,7 +61,10 @@ suite_stage() {
   local id=$1 base=$2 units=$3 d=$4 u
   mkdir -p "$d"
   # a testsuite program's directory beside it: the data files (ocamltest copies the test, its modules and its readonly files only)
-  case $id in opam/*) ;; *) find "$base/$(dirname "$id")" -maxdepth 1 -type f ! -name '*.ml' ! -name '*.mli' ! -name '*.reference' ! -name '*.c' -exec cp {} "$d/" \; ;; esac
+  case $id in opam/*) ;; *) find "$base/$(dirname "$id")" -maxdepth 1 -type f ! -name '*.ml' ! -name '*.mli' ! -name '*.reference' ! -name '*.c' -exec cp {} "$d/" \;
+    # and the .ml files its header names as readonly_files, data (parsetree/test's source.ml: OT21 (b))
+    local ro f; ro=$(sed -n 's/.*readonly_files *= *"\([^"]*\)".*/\1/p' "$base/$id.ml" | head -1)
+    for f in $ro; do case $f in *.ml) [ -f "$base/$(dirname "$id")/$f" ] && cp "$base/$(dirname "$id")/$f" "$d/" ;; esac; done ;; esac
   for u in $units; do
     case $u in =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;; *) cp "$base/$u" "$d/" ;; esac
   done
@@ -136,7 +139,7 @@ suite_oi_one() {
   suite_dump "$id" "$flags" "$incs" "$base" "$units"
   local d=$S/run/$id
   if [ -f "$d/error" ]; then printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(cat "$d/error")"; return; fi
-  local tl; tl=$(inc_units "$incs" | tr '\n' ' ')
+  local tl; tl=$(inc_units "$incs" $(cat "$d/units.list") | tr '\n' ' ')
   local st=0 t0 t1 note=""
   t0=$(date +%s.%N); times > "$d/cpu0"
   (cd "$d" && limited_cpu "$TIMEOUT" "$(oi_wall)" env $env "$EXE" run "$LIB" $tl $(cat "$d/units.list") -- $args > "$d/oi.out" 2>&1) || st=$?
@@ -189,7 +192,7 @@ cmd_suite_check_compiled() {
     if [ -f "$d/error" ]; then printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(cat "$d/error")" >> "$out.new"; continue; fi
     n=$((n + 1))
     # the library units from ocaml.u (OT26 (a), bin/oi's cmd_check_compiled), the seventh field the unix mark (OT25 (a))
-    printf 'ocaml.p%s\t%s\t%s%s\n' "$n" "$d/out" "$(inc_units "$incs" | sed -e 's|.*/|@|' -e 's/\.ae$/\t/' | tr -d '\n')" "$(paste -sd'\t' "$d/units.list")" >> "$C2/cprogs.list"
+    printf 'ocaml.p%s\t%s\t%s%s\n' "$n" "$d/out" "$(inc_units "$incs" $(cat "$d/units.list") | sed -e 's|.*/|@|' -e 's/\.ae$/\t/' | tr -d '\n')" "$(paste -sd'\t' "$d/units.list")" >> "$C2/cprogs.list"
     printf '%s\037p%s\037%s\037%s\037%s\037%s\037%s\n' "$id" "$n" "$d" "$args" "$env" "$(tail -1 "$d/units.list")" "$(case " $incs " in *" unix "*) echo 1 ;; *) echo 0 ;; esac)" >> "$C2/progs.tsv"
   done < <(suite_selected | awk -F'\t' '$2 == "run"' | tr '\t' '\037')
   c2_programs "$out.new"
@@ -221,7 +224,7 @@ cmd_suite_check_aot() {
     local d=$S/run/$id last b
     [ -f "$d/error" ] && continue
     last=$(echo "$units" | awk '{print $NF}'); b=$(basename "${last%.*}")
-    printf '%s\t%s%s\n' "$A/out/$id" "$(inc_units "$incs" | sed 's/$/\t/' | tr -d '\n')" "$(paste -sd'\t' "$d/units.list")" >> "$tl"
+    printf '%s\t%s%s\n' "$A/out/$id" "$(inc_units "$incs" $(cat "$d/units.list") | sed 's/$/\t/' | tr -d '\n')" "$(paste -sd'\t' "$d/units.list")" >> "$tl"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$d/o2j.out" "$A/out/$id/files.txt" "$d/$(echo "${b:0:1}" | tr a-z A-Z)${b:1}.ae" "$(echo "$args" | tr ' ' '\t')" "$env" >> "$bl"
   done
   o2j progs "$O2J_LIB" "$tl" > "$A/translate.log" 2>&1 || { tail -5 "$A/translate.log"; die "translate"; }

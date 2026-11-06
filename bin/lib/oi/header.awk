@@ -23,6 +23,8 @@ END {
     if (depth == 1) body = body substr(text, k, 1)
   }
   sub(/^ *TEST/, "", body)
+  # ocamltest's ${ocamlsrcdir}, the compiler's source tree (OT21 (b)): the pinned tarball's, bin/oi corpus puts its path for @OCAMLSRCDIR@
+  gsub(/\$\{ocamlsrcdir\}/, "@OCAMLSRCDIR@", body)
   gsub(/[{}]/, ";", body)
   m = split(body, st, ";")
   flags = ""; incs = ""; args = ""; env = ""
@@ -38,6 +40,8 @@ END {
           if (f == "-w" || f == "-warn-error") { q++; continue }
           if (f ~ /^-w[+-]/ || f == "-g" || f == "-bin-annot" || f == "-bin-annot-occurrences" || f == "-S" || f == "-function-sections") continue
           if (f == "-inline") { q++; continue }
+          # -I of the compiler's source directories (parsing/, toplevel/: their .cmi files): compiler-libs' units are on the path (OT21 (b))
+          if (f == "-I" && fl[q + 1] ~ /^@OCAMLSRCDIR@\//) { q++; continue }
           if (f == "-unsafe" || f == "-rectypes" || f == "-no-strict-formats" || f == "-strict-formats" || f == "-principal" || f == "-strict-sequence" || f == "-nolabels" || f == "-nopervasives" || f == "-no-alias-deps" || f == "-safer-matching") { flags = flags " " f; continue }
           print "class\theader: flags " val; exit
         }
