@@ -106,6 +106,15 @@
 
 (defn- untyped? [ty] (t/untyped? ty))
 
+(def ^:private go-ops
+  {"bit-and" "&" "bit-or" "|" "bit-xor" "^" "bit-and-not" "&^" "and" "&&" "or" "||" "not" "!" "bit-not" "^"
+   "=" "==" "not=" "!=" "==" "==" "!=" "!="})
+
+(defn- gop
+  "A unary or binary node's Go operator (the forms spell some: bit-and, not=, ...)."
+  [n]
+  (let [o (str (:go/op n))] (get go-ops o o)))
+
 (defn- spread-call? [n] (boolean (or (:spread n) (:spread (peek (vec (:args n)))))))
 
 ;;; types/fmt.go's tconv in fmtGo mode, for the messages
@@ -379,7 +388,7 @@
 
 (defn- node-prec [n]
   (case (:op n)
-    :binary (get bin-prec (str (:go/op n)) 5)
+    :binary (get bin-prec (gop n) 5)
     :addr (if (= :lit (:op (:x n))) 0 7)
     (get prec (:op n) 8)))
 
@@ -388,7 +397,6 @@
         v (:val n)
         ty (node-type n)]
     (cond
-      (and (symbol? f) (not (#{"true" "false" "nil"} (name f)))) (name f)
       (= :untyped-nil ty) "nil"
       (or (= ty :rune) (= ty :untyped-rune))
       (if (and (integer? v) (<= 0 (long v) 0x10FFFF)) (pr-str (char (long v))) (str v))
@@ -424,9 +432,9 @@
               (recur (:x n))
               n))
         np (node-prec n)]
-    (if (> (long p) (long np))
+    (if (and (> (long p) (long np)) (not (const? n)))
       (str "(" (fmt-node n 0) ")")
-      (case (:op n)
+      (case (if (const? n) :const (:op n))
         (:local :global :place-local :place-global) (let [nm (e/o (:obj n) :name)] (if (str/starts-with? nm "~b") "_" nm))
         :func (e/o (:obj n) :name)
         (:const :nil) (const-str n)
@@ -460,9 +468,9 @@
                       args (:args n)]
                   (str (fmt-node c np) "(" (args-str args) (when (spread-call? n) "...") ")")))
         :result (fmt-node (:call n) p)
-        :unary (str (:go/op n) (when (= (:op (:x n)) :unary) " ") (fmt-node (:x n) (inc (long np))))
+        :unary (str (gop n) (when (= (:op (:x n)) :unary) " ") (fmt-node (:x n) (inc (long np))))
         :recv (str "<-" (fmt-node (:x n) (inc (long np))))
-        :binary (str (fmt-node (:x n) np) " " (:go/op n) " " (fmt-node (:y n) (inc (long np))))
+        :binary (str (fmt-node (:x n) np) " " (gop n) " " (fmt-node (:y n) (inc (long np))))
         :addstr (str/join " + " (map #(fmt-node % np) (:list n)))
         :type (type-str (node-type n))
         (str (:form n))))))
@@ -504,22 +512,33 @@
       (and (= :unsafe-pointer tk) (= :uintptr fk)) :unsafe-from-uintptr
       :else :nop)))
 
+(defn- reflect-header-data?
+  "ir.IsReflectHeaderDataField: n (a one-step selection) is the Data field of a
+  *reflect.SliceHeader or *reflect.StringHeader."
+  [n]
+  (and (= :sel (:op n)) (:deref n) (= "Data" (:field-name n))
+       (let [et (elem (node-type (:x n)))]
+         (and (t/named? et) (= "reflect" (:pkg (t/info et)))
+              (#{"SliceHeader" "StringHeader"} (:name (t/info et)))))))
+
 (defn- unsafe-value
   "escape.unsafeValue: k flows from a uintptr expression n converted to unsafe.Pointer."
   [e k n]
   (cond
+    (= :field (:op n)) (unsafe-value e k (expand-field n))
+    (= :sel (:op n)) (if (reflect-header-data? n) (expr e (k-deref k) (:x n)) (discard e (:x n)))
     (= :conv (:op n)) (if (t/unsafe-pointer? (node-type (:x n))) (expr e k (:x n)) (discard e (:x n)))
-    (and (= :unary (:op n)) (#{"+" "-" "^"} (str (:go/op n)))) (unsafe-value e k (:x n))
-    (and (= :binary (:op n)) (#{"+" "-" "|" "^" "*" "/" "%" "&" "&^"} (str (:go/op n))))
+    (and (= :unary (:op n)) (#{"+" "-" "^"} (gop n))) (unsafe-value e k (:x n))
+    (and (= :binary (:op n)) (#{"+" "-" "|" "^" "*" "/" "%" "&" "&^"} (gop n)))
     (do (unsafe-value e k (:x n)) (unsafe-value e k (:y n)))
-    (and (= :binary (:op n)) (#{"<<" ">>"} (str (:go/op n))))
+    (and (= :binary (:op n)) (#{"<<" ">>"} (gop n)))
     (do (unsafe-value e k (:x n)) (discard e (:y n)))
     :else (expr e (discard-hole e) n)))
 
 (defn- add-string-list
   "OADDSTR's operands: a string + chain flattened (typecheck's tcArith of strings)."
   [n]
-  (if (and (= :binary (:op n)) (= "+" (str (:go/op n))) (not (const? n)) (t/string-type? (node-type n)))
+  (if (and (= :binary (:op n)) (= "+" (gop n)) (not (const? n)) (t/string-type? (node-type n)))
     (concat (add-string-list (:x n)) [(:y n)])
     [n]))
 
@@ -562,7 +581,7 @@
         (:global :place-global :func :type :method-expr :ok) nil
         (:local :place-local) (flow e k (old-loc e (:obj n)))
         :unary (discard e (:x n))
-        :binary (if (and (= "+" (str (:go/op n))) (t/string-type? ty))
+        :binary (if (and (= "+" (gop n)) (t/string-type? ty))
                   (let [k2 (spill e k (assoc n :op :addstr :list (vec (add-string-list n))))]
                     (discards e (add-string-list n)))
                   (do (discard e (:x n)) (discard e (:y n))))
@@ -1019,6 +1038,7 @@
                nil)]
     (and dstx (= :local (:op dstx))
          (= :slice (:op src))
+         (not (= :array (kind (node-type (:x src)))))
          (let [sx (:x src)
                basex (case (:op sx)
                        (:deref) (:x sx)
@@ -1066,13 +1086,16 @@
     (doseq [[i k] (map-indexed vector ks)]
       (let [src (nth srcs i nil)
             dst (nth dsts i)
-            k (if (and src (map? dst) (:op dst) (self-assign? dst src))
+            hdr (and (map? dst) (#{:place-field :field} (:op dst)) (reflect-header-data? (expand-field dst)))
+            k (if (and src (map? dst) (:op dst) (not hdr) (self-assign? dst src))
                 (do (when (pos? (long *m*))
                       (warn! (:line where) (str (fn-get (curfn e) :name) " ignoring self-assignment in "
                                                 (fmt-stmt-assign dsts srcs))))
                     (discard-hole e))
                 k)]
-        (expr e k src)))
+        (if hdr
+          (unsafe-value e (heap-hole e) src)
+          (expr e k src))))
     (reassigned! e ks where)))
 
 (defn reassigned!
@@ -1099,11 +1122,46 @@
     (stmts e ss)
     (vswap! e assoc :loop-depth old)))
 
+(defn- static-bool
+  "noder's staticBool: +1, -1 for a constant condition, else 0."
+  [c]
+  (if (and c (const? c) (instance? Boolean (:val c)))
+    (if (:val c) 1 -1)
+    0))
+
+(defn- terminates?
+  "noder's terminates: a statement that ends normal control flow (return, goto, panic, an if
+  both of whose live branches do, a block whose last statement does)."
+  [n]
+  (case (:op n)
+    :goto true
+    :return true
+    :expr (let [x (:x n)] (boolean (and (= :call (:op x)) (= :builtin (:kind x)) (= "panic" (:builtin x)))))
+    :if (let [c (static-bool (:cond n))]
+          (and (or (neg? c) (terminates? (:then n))) (or (pos? c) (terminates? (:else n)))))
+    :block (let [ss (:stmts n)] (boolean (and (seq ss) (terminates? (peek (vec ss))))))
+    nil (if (sequential? n) (boolean (and (seq n) (terminates? (peek (vec n))))) false)
+    false))
+
+(defn- live-stmts
+  "noder's stmts: the statements after a terminating one (and after the list's last label) are
+  not written."
+  [ss]
+  (let [ss (vec ss)
+        last-label (reduce (fn [acc [i s]] (if (= :label (:op s)) i acc)) -1 (map-indexed vector ss))]
+    (loop [i 0 dead false acc []]
+      (if (= i (count ss))
+        acc
+        (let [s (nth ss i)]
+          (if (and dead (> i last-label) (not= :label (:op s)))
+            (recur (inc i) dead acc)
+            (recur (inc i) (terminates? s) (conj acc s))))))))
+
 (defn stmts [e ss]
   (cond
     (nil? ss) nil
     (map? ss) (stmt e ss)
-    :else (doseq [s ss] (stmt e s))))
+    :else (doseq [s (live-stmts ss)] (stmt e s))))
 
 (defn- decl-stmt
   "A :decl (x := v, var x T = v, var x T): gc's ODCLs, then its OAS or OAS2 (each object's Defn)."
@@ -1266,10 +1324,11 @@
           :label (do (when-let [st (get (:labels @e) (:label n))]
                        (when (= st :looping) (vswap! e update :loop-depth inc)))
                      (stmt e (:stmt n)))
-          :if (do (stmts e (:init n))
-                  (discard e (:cond n))
-                  (block e (:then n))
-                  (block e (:else n)))
+          :if (let [c (static-bool (:cond n))]
+                (stmts e (:init n))
+                (discard e (:cond n))
+                (when (>= c 0) (block e (:then n)))
+                (when (<= c 0) (block e (:else n))))
           :for (for-stmt e n)
           :range (range-stmt e n)
           :switch (do (stmts e (:init n))
@@ -1504,6 +1563,8 @@
       (when n
        (binding [*wfile* (fn-get (lget l :curfn) :file)]
         (let [wrapper (and (map? n) (= :fn (:op n)) (:wrapper n))]
+          (when (and (pos? (long *m*)) (map? n) (= :conv (:op n)) (= :str2bytes (conv-kind n)) (not (has-attr? l attr-mutates)))
+            (warn! (lget l :line) "zero-copy string->[]byte conversion"))
           (if (has-attr? l attr-escapes)
             (if (name-loc? l)
               (when (and (pos? (long *m*)) (not (str/starts-with? (e/o n :name) ".")))
@@ -1886,6 +1947,25 @@
           (e/obj? b) (e/o b :name)
           :else (str b))))
 
+(defn- static-init?
+  "staticinit's StaticAssign, approximately: an initializer gc makes static data (no code in the
+  package's init function)."
+  [n]
+  (cond
+    (nil? n) true
+    (const? n) true
+    :else (case (:op n)
+            (:global :func :nil :method-expr) true
+            :fn true
+            :addr (let [x (:x n)] (or (= :global (:op x)) (and (= :lit (:op x)) (static-init? x))))
+            :lit (case (:kind n)
+                   (:struct) (every? #(static-init? (elt-value %)) (:fields n))
+                   (:array :slice) (every? #(static-init? (elt-value %)) (:elems n))
+                   false)
+            :convert-iface (static-init? (:x n))
+            :conv (and (= :nop (conv-kind n)) (static-init? (:x n)))
+            false)))
+
 (defn- fn-name
   "ir.FuncName: a function's name, a method's (T).m or (*T).m."
   [d o]
@@ -2023,7 +2103,8 @@
                    :owner (java.util.HashMap.)
                    :single-def (java.util.HashMap.)
                    :func-assigns (java.util.HashMap.)
-                   :temps (java.util.IdentityHashMap.)}]
+                   :temps (java.util.IdentityHashMap.)
+                   :extra-fns (volatile! [])}]
 
     (let [decls (filter #(and (= :func (:kind %)) (:obj %)) (:decl-infos r))
           decls (mapv (fn [d] (if (:tree d) (binding [*wfile* (file-of d)] (update d :tree devirtualize)) d)) decls)
@@ -2058,6 +2139,24 @@
                        (doseq [p (fn-get f :results)] (e/oset! p :esc-class :result))
                        (.put ^java.util.HashMap (:fn-of-obj *ctx*) o f)
                        f)))]
+      (let [inits (vec (for [d (:decl-infos r)
+                             :let [tr (:tree d)]
+                             :when (and (= :var (:kind d)) (= :var-init (:op tr)))
+                             :let [rhs (vec (:rhs tr))]
+                             :when (not (every? static-init? rhs))]
+                         [d tr]))]
+        (when (seq inits)
+          ;; the package's init function (gc's staticinit leaves it the initializers it cannot
+          ;; make static data)
+          (let [body (vec (for [[_ tr] inits]
+                            {:op :assign :line (:line tr)
+                             :lhs (mapv #(if (or (nil? %) (= "_" (e/o % :name))) :blank {:op :place-global :obj %}) (:lhs tr))
+                             :rhs (vec (:rhs tr))}))
+                f (volatile! {:node {:op :func} :obj nil :name "init" :parent nil :closure? false :file (file-of (first (first inits)))
+                              :recv nil :recv-type nil :params [] :param-types [] :results [] :sig [:func [] [] false]
+                              :esc :unknown :line nil :extern false :uintptr-pragmas #{} :body body})]
+            (vswap! (:extra-fns *ctx*) conj f))))
+      (let [fns (into fns @(:extra-fns *ctx*))]
       (doseq [f fns :when (not (fn-get f :extern))] (scan-fn! f))
       (doseq [f fns :when (not (fn-get f :extern))] (closure-vars! f))
       (doseq [f fns :when (fn-get f :extern)]
@@ -2065,13 +2164,13 @@
         (fn-set! f :esc :tagged)
         (binding [*wfile* (fn-get f :file)]
         (let [sig (under (fn-get f :sig))
-              params (let [form (:form (some #(when (identical? (:obj %) (fn-get f :obj)) %) decls))]
+              params (let [form (:spec (some #(when (identical? (:obj %) (fn-get f :obj)) %) decls))]
                        (vec (for [[i p] (map-indexed vector (when (seq? form) (some #(when (vector? %) %) form)))]
                               (let [s (if (vector? p) (first p) p)
                                     nm (when (and (symbol? s) (not (seq? s))) (name s))]
                                 (when (and nm (instance? arbace.lang.IMeta s) (:tag (meta s)))
-                                  (e/obj {:kind :var :name nm :line (or (:line (meta s)) (fn-get f :line))}))))))]
+                                  (e/obj {:kind :var :name nm :line (or (:line (meta s)) (fn-get f :line) (e/o (fn-get f :obj) :line))}))))))]
           (fn-set! f :tags (into {} (map-indexed (fn [i ty] [i (param-tag nil f (nth params i nil) ty)]) (nth sig 1)))))))
       (doseq [blk (bottom-up (vec (remove #(fn-get % :extern) fns)))]
         (batch! blk))
-      (vec (mapcat all-fns fns)))))
+      (vec (mapcat all-fns fns))))))
