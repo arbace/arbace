@@ -105,6 +105,8 @@ END {
       # not clean up at exit (no OCAMLRUNPARAM c=1) and the host is Linux, so both pass; has-execvpe skips where the C library has
       # execvpe (musl, glibc)
       if (key == "script" && val ~ /^sh @TSD@\/(test-runtime-cleanup|is-linux)\.sh$/) { prescript = 1; continue }
+      # has-afunix.sh: Windows's AF_UNIX (lib-unix/win-socketpair, target-windows below it)
+      if (key == "script" && val ~ /^sh @TSD@\/has-afunix\.sh$/) { print "class\theader: target-windows (has-afunix.sh)"; exit }
       if (key == "script" && val ~ /^sh @TSD@\/has-execvpe\.sh$/) { print "class\theader: skip (has-execvpe.sh: the C library has execvpe)"; exit }
       # the program's output into a file then compared, ocamltest's default made explicit (lib-threads/sieve)
       if (key == "output" && val == "$VAR/program-output") continue

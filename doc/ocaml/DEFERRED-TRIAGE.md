@@ -730,6 +730,29 @@ rows of a selection are now recorded from the header reading, `OI_SELECTED`), an
 - Not ported: stores through a sub-array or a slice of a mapped array, and `fill`/`blit` into one, do not reach the file; NaN's
   unordered flag of compare (`compare_unordered`) is not kept.
 
+### Also on the way
+
+- `lib-unix/win-socketpair/test` (`has-afunix.sh`) is `target-windows`; `link-test/test` is the class `:packs` (OT19 (a), by design).
+- Records brought up to date by list: the light level's rows of `backtrace/callstack`, `parallel/fib_threads`,
+  `statmemprof/moved_while_blocking` (stale since fix 5: now `:backtraces`, `:light-speed`, `:gc-and-memory` as oi's) and
+  `lib-unix/common/fork_cleanup` (`:unix-fork`); the four suite programs the light level had not run
+  (`multicore_fork_domain_alone{,2}`, `statmemprof/{blocking_in_callback,thread_exit_in_callback}`: the matrix's one problem of the
+  day); `recvfrom_linux` and `parsetree/test` dropped from the run corpus's records (they are the suite's); the opam set's not-run
+  reasons that said "needs unix".
+- oi's essential subset: 58 of 58; the light level's: 57 pass and one `:light-speed`, as before (no change of a row).
+
+### The numbers (from the records, `bin/reap`; every judgment 0 failing)
+
+| cell | 2026-11-05 (`ocaml-libs3`) | now |
+|---|---|---|
+| eval | 428 pass / 125 by design / 118 deferred | **441 / 205 / 25** |
+| AOT (the light level until OT8's compiled record) | 394 / 114 / 159 | **405 / 202 / 64** |
+
+The eval cell's 25 deferred are all `:c-api` (OT27). The AOT cell's 64: the same 25, and 39 of the light level (`:light-speed` 34,
+`:light-depth` 4, the suite's 1) that the compiled level judges (OT8 (a), the night's record; fix 1 measured 26 of 29 such programs
+passing compiled). With the night's whole runs the cells move by what the lists did not cover (the stdlib's key changed, so every row
+is rerun); expected: eval about 441 / 205 / 25, AOT at the compiled level about 440 / 205 / 30.
+
 ### Proposed (OT27-OT29; none decided)
 
 - **OT27 The C API shim's route** (item 9, the 25 programs of `:c-api`: callbacks 12, `[@unboxed]`/many-argument externals 3,
