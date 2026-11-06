@@ -722,6 +722,7 @@
         :else t))
 
 (declare deduce-by-type-match)
+(def ^:dynamic *satisfaction* nil)
 
 (defn- bind-arg!
   "checkDeducedTemplateArguments: the parameter i deduced as `a`, consistent with an earlier deduction."
@@ -1089,7 +1090,11 @@
         (let [ded (mapv #(get @b %) (range (count (:params pt))))]
           ;; its associated constraints satisfied ([temp.spec.partial.match]/2; G4)
           (when (and (or (nil? (:constraint pt))
-                         (sema/constraint-satisfied? (bind-scope (:scope pt) (:params pt) ded nil) (:constraint pt)))
+                         (let [k [:partial (:id pt) (canonical ded)] m *satisfaction* v (if m (get @m k ::none) ::none)]
+                           (if (= ::none v)
+                             (let [r (sema/constraint-satisfied? (bind-scope (:scope pt) (:params pt) ded nil) (:constraint pt))]
+                               (when m (swap! m assoc k r)) r)
+                             v)))
                      ;; the partial specialization's arguments substituted ([temp.spec.partial.match]/2: a failure is no
                      ;; match, SFINAE: __void_t<typename _Alloc::value_type, decltype(...)>; G4) equal to the arguments
                      (or (nil? (:forms pt))
@@ -1299,13 +1304,25 @@
                     nil))
           (:params t))))
 
+
+(defn- concept-satisfied?
+  "The satisfaction of the concept `c` (its template entry) for the arguments `args`, memoized."
+  [c args]
+  (let [k [(:id c) (canonical args)]]
+    (if-let [m *satisfaction*]
+      (let [v (get @m k ::none)]
+        (if (= ::none v)
+          (let [r (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c))] (swap! m assoc k r) r)
+          v))
+      (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c)))))
+
 (defn- type-constraints-satisfied?
   "Each constrained type parameter's concept satisfied by its argument ([temp.param]/4: the immediately-declared
   constraint C<T>)."
   [t args]
   (every? (fn [[p a]]
             (if-let [c (when (and (:tc p) (not (:tc-args p)) (not (:pack p))) (concept-of t p))]
-              (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) [a] nil) (:expr c))
+              (concept-satisfied? c [a])
               true))
           (map vector (:params t) args)))
 
@@ -1887,10 +1904,10 @@
                                       (fail :template "missing template arguments for " (:name t)))]
                          (if (dependent? args)
                            (fail :template "a dependent concept-id")
-                           (if (sema/constraint-satisfied? (bind-scope (:scope t) (:params t) args nil) (:expr t)) 1 0))))
+                           (if (concept-satisfied? t args) 1 0))))
          :pending pending
          :fnaddr-specs fnaddr-specs
          :instantiate-class (fn [tid args] (instantiate-class tid args))
          ;; (a transform trait's name, not a function type returning a type named __x: __c_locale ())
          :is-trait (fn [nm] (contains? type-traits nm))
-         :wrap (fn [f] (binding [*tmpls* (atom {}) *scanned* (atom #{})] (f)))})
+         :wrap (fn [f] (binding [*tmpls* (atom {}) *scanned* (atom #{}) *satisfaction* (atom {})] (f)))})
