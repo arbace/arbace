@@ -356,3 +356,11 @@ writeback) and of the trait solver's selection, normalization and pending obliga
 RFS4. Results on the 90 programs: 10,216 of 11,173 facts (51 programs whole), 10,199 through the pipeline. Alternatives considered: the
 next solver's structure (`rustc_next_trait_solver`, RFS6) for selection; the old solver's accepting paths were ported for this slice
 because type checking at 1.99.1 uses them and the judge sees their choices; the decision of RFS6 stays open for RF8 proper.
+
+## 2026-11-06: RF9a continued (branch rust-rf14)
+
+Correction to the entry above (its numbers were the midday's): RF9a went on through the classes of the non-equal facts (std's
+associated constants, pending obligations, the Fn builtins and object candidates, traits in scope, slice patterns, overloaded derefs,
+named regions, tuples' and fn pointers' coercions). Final: samples 10,768 of 11,173 facts (54 of 90 programs whole), the pipeline
+10,760; registry crates 21,922 of 23,722 facts (6 of 49 crates whole). `test/rust/front/std-names.sha256` and `std-iface.sha256` re-pinned (the helper's structural
+types now carry const parameters). RFP17-RFP19 proposed (doc/rust/FRONTEND-SURVEY.md, "As built: RF9a").

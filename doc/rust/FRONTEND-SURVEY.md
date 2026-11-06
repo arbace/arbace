@@ -1191,14 +1191,49 @@ evaluated from the checkout, out of `gate_key` (RFS13). Light: one process under
   type (FnOnce::Output of a callable by its signature), as their self types resolve; pending obligations (each instantiated item's
   clauses) selected where possible (`select_obligations_where_possible`) before fallback and before a method call on a variable.
 
-**Results** (`bin/rust-front typeck-check`, the 90 programs with an oracle; facts: each expression's node type and adjustments, each
-binding's type and mode): **10,216 of 11,173 facts equal to rustc's (91.4 %), 146 more with the type equal and the adjustments not,
-51 programs whole**; from the pipeline (`--ours`: native reader, our expansion, resolution, lowering, collection, std's interface the
-only rustc data) 10,199. The day's run: 4,217, then 5,890 with std's interface and the probe, 7,544 with operators, 8,142 with closures,
-9,843 with associated constants, 10,084 with the Fn builtins. The negative control differs.
+Also: the object candidate (a trait object implements its principal, the principal's supertraits and its auto traits), traits in
+scope (the edition's prelude's and those the crate's use items name, not all of std's), slice patterns, overloaded derefs (Deref,
+DerefMut on assigned places), arrays' unsized method step (`arr.iter()`: Borrow, then Pointer(Unsize)), operators over integer
+variables left pending until fallback, Fn obligations on callables unifying their signatures, the `?` desugaring's `residual` binding
+(a desugaring's, no fact), named regions kept through the body for coercion's no-op case, each anonymous late-bound region of a
+signature its own (`for<'a, 'b>`).
 
-Not taken yet (the classes of the non-equal facts): closures' kinds (FnMut/FnOnce by their captures: a call's autoref) and
-captures, methods through trait objects' supertraits and generic parameters' bounds beyond Fn, `?` and `Try` (the desugaring's
-`branch`/`from_residual` resolve but their impls' residual types are not selected yet), auto-deref of `Box` patterns, slice patterns,
-two-phase borrows, the never type's fallback edge cases, `impl Trait` in let and argument positions' coercions, specialization,
-async, SIMD's intrinsics-heavy programs (`vectors`), formatting macros' internal facts (none: rustc's are expansions).
+**Results** (`bin/rust-front typeck-check`, the 90 programs with an oracle; facts: each expression's node type and adjustments, each
+binding's type and mode): **10,768 of 11,173 facts equal to rustc's (96.4 %), 92 more with the type equal and the adjustments not,
+54 programs whole**; from the pipeline (`--ours`: native reader, our expansion, resolution, lowering, collection, std's interface the
+only rustc data) **10,760**. The day's run: 4,217, then 5,890 with std's interface and the probe, 7,544 with operators, 8,142 with
+closures, 9,843 with associated constants, 10,084 with the Fn builtins, 10,566 with pending integer obligations, 10,768. The registry
+crates (`typeck-check --crates`, 49 of the 55 with bodies, every function of a library): **21,922 of 23,722 facts (92.4 %), 266 more with the type equal, 6 crates whole** (the midday code: 20,731). The negative control
+differs. Light: about a minute for the samples (under 1.2 GB); the crates about twenty minutes (a per-body selection budget bounds a
+runaway search).
+
+Not taken yet (the classes of the non-equal facts): closures' kinds (FnMut/FnOnce by their captures: a call's autoref) and captures;
+normalization through the parameter environment (`<I as IntoIterator>::Item` by a where clause's projection, `I::IntoIter`'s item
+bound); a literal's reborrow when a `vec!`'s or a `for` loop's array elements are coerced (rustc's CoerceMany order); `Box<dyn Fn>`
+returns' Pointer at the arm or the block; specialization; async; SIMD's intrinsics-heavy programs (`vectors`); formatting macros'
+internal facts (none: rustc's are expansions); the facts of anonymous constants inside closures and of const generic arguments.
+
+### Estimates, revisited
+
+RF8 (10-15 days) and RF9 (14-22) were planned as the long poles; this first slice of both, judged on every expression of 90 programs
+and 49 crates, took one day: 1,215 lines of `.ae` for type checking with the solver's slice (1,697 for collection with the printer),
+100 for the judge, about 330 of helper. As with RF4-RF7, what the corpora do not exercise is most of the rest (and the solver here is
+the old solver's accepting paths for the common cases, not RFS6's next solver); the judge (every node's type, every adjustment) is
+stricter than the plan's and was cheap; the estimates for the remainder stand.
+
+### Proposed (RF9a)
+
+- **RFP17 The solver's shape.** RF9a's selection is the old solver's accepting paths for the cases the corpora reach (unification of
+  impl headers, recursive clauses, projection clauses, a depth bound, the builtin Fn and object candidates). Options: (a) **keep it and
+  grow it as RF9's classes ask, with RF8 proper (the next solver after rust-analyzer's shape, RFS6) when ambiguity, coinduction (auto
+  traits) or specialization first need it**; (b) port `rustc_next_trait_solver` now and move RF9a onto it; (c) port the old solver's
+  `select.rs` and `project.rs` whole. *Recommended: (a)*: every fact is judged, so a divergence shows where the slice is too simple.
+- **RFP18 std's interface as pinned data.** `--std-iface` (13.8 MB) is regenerated by the helper and pinned by its digest, like
+  `--std-names` (RFS4, RFP6). Options: (a) **as built: the helper writes it at the pin, the digest is committed**; (b) commit the file
+  (compressed) so no rustc is needed even for the data; (c) derive it from the std sources by RF4-RF7 themselves (Tier S, RF12).
+  *Recommended: (a) now, (c) at RF12*: (b) adds 2-3 MB of compressed data to the repository for a dependency that the pin already makes
+  reproducible.
+- **RFP19 What next.** Options: (a) **RF9's next slice on its classes (closure kinds and captures, the parameter environment's
+  normalization, the CoerceMany order), then RF10 (THIR and MIR building) over RF9's facts, judged against the MIR text**; (b) RF10 now
+  on the helper's typeck data, RF9 later; (c) the UI suite's run-pass programs through every judge first (RFP7, RFP14). *Recommended:
+  (a)*, with (c) in the night run when the suite's tarball is on the host.
