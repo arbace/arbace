@@ -277,3 +277,94 @@ jdk26u's `java.desktop` and `java.sql` sources for sizes. Probes: stage 0 `-e` (
 ## Decided (2026-11-05, the user)
 
 CDR1: measure the 42 locale cases under JRT_LOCALES=common at night, then flip the shipped default to common (+8.9 MB) if they pass, reversing the decision of 2026-10-11 (effective at the next re-seed). CDR2-CDR9 as recommended: a typed primitive invoke; gen-class in two stages; the java.sql, Point and Color slice; SAX and StAX in the shipped world under 10 MB of growth; a 2-day serialization spike; a one-off long limit for seq-and-transducer; clj-1208 eval-by-design and AOT-deferred; the out-for-good class split by reason.
+
+## As built (2026-11-06, branch `clojure-cdr`)
+
+Each decision in the review's order; "proved" means on Clojure's suite run on main's test build
+(`target/arbace-go/amd64/arbace-tests` of 2026-11-04) with the checkout's changed namespaces loaded over its own
+(`.tmp/cdr-exe`: the executable with `-i` loading the checkout's `arbace/genclass.ae`), a few namespaces at a time;
+the changes to the Java runtime, jrt or the world wait for the night's conversion and build (commands below).
+
+- **CDR9** (built): `:out-for-good` split at both levels into `:gen-class`, `:xml`, `:serialization` (with the
+  oracle's one case), `:desktop`, `:tools-deps`; each class's `:decided` names its CDR.
+- **CDR8** (built): `:clj-1208` its own class at the AOT level, deferred; by design at the eval level (`:class-files`).
+- **CDR7** (built, proved): `clojure.test-clojure.transducers` run whole once with a 1,800 s limit: 19 of 19 tests,
+  108 assertions, 282 s wall alone (363 s CPU, 1.7 GB resident). The runner's 900 s suffice (EC7's 1,700 s predates the
+  evaluator's speed-ups): seq-and-transducer is no longer skipped in `test/arbace-go-results.edn`, its class gone.
+- **CDR4 (b)** (built; the night proves it): java.sql's interfaces that `Connection` reaches, `javax.xml.transform`'s
+  `Source` and `Result`, java.desktop's `Point`, `Point2D`, `Transparency`, `java.beans.Transient` among
+  `test/jrt/jrt_sources.ae`'s added module sources; jrt's variants of `DriverManager`, `Driver`, `SQLException` and an
+  sRGB `Color` in `overlay/jdk/java.base`; `bin/jrt modules` maps them to their modules (doc/go/JRT-NOTES.md,
+  "Modules", CDR4). Checked light: javac on Arbace compiles the 42 files patched into java.base, repr/java reads them
+  (`Date`, `Timestamp` byte for byte the committed forms). Not provable interpreted: `Point` and `Color` are cut classes
+  of the world (arbace.inspector's), which the interpreter cannot define again.
+- **CDR2 (a)** (built; the night proves it): no new node kind was needed. `InvokeExpr.parse` analyzes a call of a
+  `^long`/`^double` arglist as `(RT/longCast (f args))` (`doubleCast`), the inner call marked to stay a plain invoke,
+  and the method expressions check their primitive parameters' arguments as `emitTypedArgs` does
+  (doc/VENDOR-NOTES.md, hand change 32): the recur warning and "Cannot coerce long to int" come from the same code as
+  Clojure's (`RecurExpr`'s check, `Compiler.retType` through `maybePrimitiveType`). The mechanism probed on stage 0
+  with the casts written by hand (the warning printed); the change is in `Compiler`, compiled into the executables.
+  The oracle's three native.ae cases (`.invokePrim`, `instance? IFn$LL`) stay by design, `:q1-boxed-prims` narrowed to them;
+  the suite's two are `:q1-typing`, deferred until the night's run.
+- **CDR3, first stage** (built, proved): `gen-class` defines its class at run time as a Java form (doc/VENDOR-NOTES.md,
+  hand change 31): Clojure's `generate-class` ported rule for rule. `genclass.examples` loads; `genclass` 6 of 8:
+  `arg-support`, `name-munging` (the static `Var` fields), `genclass-option-validation`, `interface-array-type-hints`,
+  `array-descriptors->class`, `interface-methods` (a default method run through Dyn's super marker). Left:
+  `protected-final-access` (`:extends java.lang.ClassLoader`, not a class the Java forms may extend: the second stage,
+  a j2g `class-supers` entry with ClassLoader's protected constructors, a build) and `gen-interface-source-file`
+  (ASM's `ClassReader`: by design, `:class-files`). `:init`, `:state`, `:post-init`, `:constructors`, `:factory`,
+  static `:methods`, `:exposes-methods` and `:main` checked by a sample (`ns` with `:gen-class` extending `Exception`).
+- **CDR5** (measured on paper, not built): the SAX closure of javac's tool world is 221 java.xml files, 1.77 MB of
+  forms (`overlay/jdk/javac/closure.txt`); at the shipped build's ratio of executable to forms that is about 9 to 16 MB,
+  around the 10 MB bound, so the decision needs the build's measurement. What the shipped world needs beyond the list:
+  the `:xml` category of `doc/go/java-surface.edn` no longer cut, the tool world's variants (`JdkXmlConfig`'s catalog read
+  from an embedded resource, not `ARBACE_PATH`; `SecuritySupport`) in `overlay/jdk/variants`, the XXE test's entity left
+  unresolved, then StAX (`XMLInputFactoryImpl`, `XMLStreamReaderImpl` and their scanners, not in the tool world either).
+- **CDR6** (the spike's analysis half; the run needs a build of the tool's world): serialization's core, 21 files of
+  jdk26u's java.io, 12,052 lines (`ObjectOutputStream`, `ObjectInputStream`, `ObjectStreamClass`, `ObjectStreamField`,
+  their interfaces and exceptions; `.tmp/sercl.py`). Their references outside the world: `jdk.internal.reflect.ReflectionFactory`
+  (`newConstructorForSerialization`: an object of C made by the first non-serializable superclass's no-argument
+  constructor, a jrt native per translated class: j2g would emit an allocator in each Serializable class's `ClassInfo`),
+  `jdk.internal.misc.Unsafe` (`FieldReflector`'s field offsets: a variant over jrt's `Field.get`/`set`),
+  `java.lang.invoke.MethodHandles` (records' canonical constructors: a variant over `Constructor.newInstance`), `ClassValue`
+  (the caches: a map), `RecordComponent`, `SharedSecrets`/`JavaLangAccess`, the JFR events (stubs). Estimate: 4 to 6 days,
+  the allocator the risk (Dyn classes: proxies are not serializable upstream either). Proposed below (CDR10).
+- **CDR1** (night): the measurement and the flip need the conversion and a build (below).
+
+The cells (bin/reap, test/reap/matrix.edn): Clojure eval 21,053 / 81 / 1 before, 21,060 / 24 / 50 now (the decided
+classes made deferred: locales 42, desktop 2, java.sql 1, q1-typing 2, xml 2, gen-class 1); Clojure AOT 809 / 30 / 0
+before, 809 / 13 / 17 now. Expected after the night if each lands: eval about 21,110 / 18 / 1-2 (locales 42, java.sql 1,
+desktop 2, q1-typing 2 pass; xml's 2 if CDR5 is under its bound), AOT about 825 / 13 / 2 (genclass's 7 and its fixture,
+java.sql, desktop 2, q1 2 at the AOT level).
+
+### The night's commands (in the worktree, one at a time, after the clean rerun's `end`)
+
+```
+export TMPDIR=$PWD/.tmp/tmp
+bin/jrt-convert update && bin/jrt modules && bin/j2g-edge update         # CDR4's world: jdk/, sources.txt, the table, the edge
+bin/generated-check                                                     # module_table.ae current
+bin/arbace-go --gate-build                                              # the executable and the test build (CDR2, CDR3, CDR4)
+CLOJURE_TESTS_GO=$(bin/lib/gate-cache.bash path)/amd64/arbace-tests \
+  bin/clojure-tests java.javadoc java-interop compilation genclass genclass.examples   # expect javadoc 5/5, test-dot, test-bean, primitive tests, genclass 6/8
+#   then unskip test-dot, test-bean in test/arbace-go-results.edn; record compilation's and javadoc's counts
+bin/clojure-tests                                                       # the whole suite, the reference re-recorded
+bin/clojure-tests --aot                                                 # AOT level: unskip genclass, genclass.examples, test-dot, test-bean in test/arbace-go-aot-results.edn
+bin/oracle && bin/diffcheck                                             # no regression from CDR2's typing
+# CDR1: the locales
+JRT_LOCALES=common bin/jrt-convert update && bin/arbace-go --gate-build && bin/oracle   # count the 42; if they pass: commit jdk/ and make common the default (bin/jrt-convert line 484, jrt_sources print-sources)
+# CDR5: the measurement (a scratch commit with the java.xml closure in added sources, not kept unless under 10 MB)
+ls -l target/arbace-go/amd64/arbace                                     # before and after
+```
+
+## Proposed (2026-11-06)
+
+**CDR10. Java serialization after the spike's analysis.** (a) Build it: jrt's allocator for serialization (j2g emits
+one per Serializable class), variants of `ObjectStreamClass` (field access by reflection, records by constructor, no
+`ClassValue`), the JFR events stubbed; 4-6 days; Clojure's 20 cases and Java's `serialization` class (168 + 117);
+(b) keep it out for good (J2G-SPEC §12). Recommended (a) after CDR5, when a tool-world run of a vector's round trip
+settles the allocator (1 day of the 4-6).
+
+**CDR11. CDR3's second stage, `ClassLoader` among the Java forms' superclasses.** (a) `java/lang/ClassLoader` in
+`arbace.j2g.model/class-supers` with its protected constructors and final methods reachable (`findSystemClass`):
+`protected-final-access` passes (1 case at each level), and gen-class or `defclass` code may extend `ClassLoader`;
+0.5-1 day and a build; (b) keep the stand-in (the class throws when made). Recommended (a).

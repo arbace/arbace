@@ -1083,6 +1083,17 @@ step 4 (2026-10-07); the others came with later work, as each says:
     descriptor without loading it. Clojure's suite's `genclass` and `genclass.examples` run: 6 of 8
     tests pass, `protected-final-access` errs (a `ClassLoader` subclass), `gen-interface-source-file`
     is skipped (ASM).
+32. **CDR2: the evaluator's primitive typing** (2026-11-06; doc/CLOJURE-DESIGN-REVIEW.md, CDR2 (a), the user's
+    decision of 2026-11-05; Q1 (a) kept: no fn has a primitive interface). `arbace/lang/Compiler.ae`:
+    `InvokeExpr.parse` types a call of a var whose arglist of the call's arity returns `^long` or `^double`
+    (`FnMethod.primReturnCast`) as Clojure's `.invokePrim` of `IFn$...L` or `...D` types it, by analyzing it as
+    `(arbace.lang.RT/longCast (f args))` (`doubleCast`), the inner call marked (`PRIM_CAST_KEY`) so that it stays
+    a plain `invoke`, the form's and the var's metadata on the cast as Clojure puts them on `.invokePrim`; and
+    `MethodExpr.checkTypedArgs`, called by `InstanceMethodExpr`'s and `StaticMethodExpr`'s constructors, types each
+    argument of a primitive parameter as `MethodExpr.emitTypedArgs` does (`maybePrimitiveType`, so a tag that
+    does not fit, `^int` on a long, throws Clojure's "Cannot coerce long to int, use a cast instead" when the
+    call is analyzed: the evaluator emits nothing). So a `recur` of another type to a loop local bound to such
+    a call warns, and compilation's `primitive-return-decl` and `incorrect-primitive-type-hint-throws` pass.
 
 ## Dialect divergences
 

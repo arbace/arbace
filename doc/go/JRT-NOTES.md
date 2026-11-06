@@ -3987,6 +3987,23 @@ class), then falls back to the prefix rule as before: javac's tool world now ans
 unnamed module as before. The shipped world has none of these packages, so its answers are unchanged.
 `classPlace` (the ClassCastException messages) is unchanged. `TestClassLoaders` checks one class of each module.
 
+**CDR4 (b): java.sql and a slice of java.desktop in the shipped world (branch `clojure-cdr`, 2026-11-06;
+doc/CLOJURE-DESIGN-REVIEW.md, the user's decision of 2026-11-05).** `test/jrt/jrt_sources.ae`'s
+`added-module-sources` (compiled into java.base's tree, KIND `share:MODULE`) gains the java.sql interfaces
+`java.sql.Connection` reaches (31 more files with `Date`, `Timestamp`), `javax.xml.transform`'s `Source` and
+`Result` (`SQLXML`'s; java.xml), and java.desktop's `java.awt.Point`, `java.awt.geom.Point2D`,
+`java.awt.Transparency`, `java.beans.Transient`; jrt's own variants in `overlay/jdk/java.base`: `java.sql.DriverManager`
+(no `ServiceLoader`, no caller: `jdk.internal.reflect.Reflection` is not in the world; the `jdbc.drivers` property's
+and `registerDriver`'s drivers only), `java.sql.Driver` (no `getParentLogger`: `java.util.logging` is not in the
+world), `java.sql.SQLException` (no `AtomicReferenceFieldUpdater`: `setNextException`'s compare-and-set under a
+lock), `java.awt.Color` (sRGB only: no `ColorSpace`, no `Paint` but its `Transparency`, no `@ConstructorProperties`).
+`bin/jrt modules` now maps a `share:MODULE` file to MODULE (jdk.localedata's excepted), so `Class.getModule`
+answers java.sql (platform loader), java.xml and java.desktop (bootstrap) for them as the JDK does: java.sql's
+`Date` and `Timestamp` move from java.base to java.sql. Checked light (the conversion is a night's): javac on Arbace
+compiles the 42 files patched into java.base against the platform, and repr/java reads them (`Date` and
+`Timestamp` byte for byte the committed forms). For Clojure's suite: java.javadoc's `javadoc-url-test`
+(`java.sql.Connection`'s module) and java-interop's `test-dot` (`Point`) and `test-bean` (`Color`).
+
 # java.io, zip and jar (JC6b, branch `java-check-jc6b`)
 
 The user's decisions JCS92 (c) and JCS93 (c) (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided
