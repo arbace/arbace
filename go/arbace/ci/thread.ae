@@ -1,0 +1,106 @@
+;; ci: threads (doc/c/SPEC.md §6.5; crt's sched.go): musl's __clone, the assembly that starts a thread, as a native that
+;; starts a goroutine with its own Thread (its C stack the one musl mapped), and the thread-local objects swapped as the
+;; baton passes: every thread sees a thread-local object at the same address, its own bytes there while it runs (the
+;; builder marks them, static ... 2); a thread's copy starts as the objects were after the static initializers.
+(in-ns 'go.arbace.ci) (go/file "thread.go" :doc "ci: threads (doc/c/SPEC.md §6.5; crt's sched.go): musl's __clone as a native starting a goroutine with its own\nThread, and the thread-local objects swapped as the baton passes (each thread its own bytes at the objects'\naddresses while it runs; a new thread's as after the static initializers).\n" :imports [
+    [fmt "fmt"]
+
+    [crt "arbace/crt"]])
+
+(go/const "PreemptCalls is the calls a thread makes before it lets the other runnable threads run (a spin loop that\nwaits for another thread without a system call still ends).\n"
+  [^{:tag int :val 20000} PreemptCalls 20000])
+
+(go/func preempt "preempt counts a call of t and lets the others run when its budget is spent.\n" [^{:tag (* Thread)} t]
+  (dec! (.-budget t))
+  (when (<= (.-budget t) 0)
+    (set! (.-budget t) PreemptCalls)
+    (.Yield (.-Sys (.-P t)))))
+
+(go/method tlsSnapshot "tlsSnapshot records the thread-local objects' bytes (Run, after the static initializers).\n" [^{:tag (* Prog)} p]
+  (set! (.-tlsInit p) nil)
+  (for [i 0] (< i (len (.-tls p))) (set! i + 2)
+    (set! (.-tlsInit p) (append (.-tlsInit p) (spread (.R (.-M p) (aget (.-tls p) i) (aget (.-tls p) (+ i 1))))))))
+
+(go/method tlsSwitch "tlsSwitch is the scheduler's OnSwitch: the running thread's thread-local bytes saved into from, next's put\nin place (a new thread's from tlsInit).\n" [^{:tag (* Prog)} p ^{:tag (* crt/Task)} from ^{:tag (* crt/Task)} next]
+  (when (== (len (.-tls p)) 0)
+    (return))
+  (let [m (.-M p)
+        ^{:tag (slice byte)} saved (subslice (.-TLS from) _ 0)]
+    (for [i 0] (< i (len (.-tls p))) (set! i + 2)
+      (set! saved (append saved (spread (.R m (aget (.-tls p) i) (aget (.-tls p) (+ i 1)))))))
+    (set! (.-TLS from) saved)
+    (let [src (.-TLS next)
+          off 0]
+      (when (== src nil)
+        (set! src (.-tlsInit p)))
+      (for [i 0] (< i (len (.-tls p))) (set! i + 2)
+        (let [n (aget (.-tls p) (+ i 1))]
+          (copy (.W m (aget (.-tls p) i) n) (subslice src off (+ off (conv int n))))
+          (set! off + (conv int n)))))))
+
+(go/func clone "clone is musl's __clone(fn, stack, flags, arg, ptid, tls, ctid) for a thread (CLONE_VM | CLONE_THREAD): a new\nThread on the stack given, runnable after the running ones, fn(arg) its body; a new process (fork, posix_spawn's\nvfork) is refused, ci runs one.\n" ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a]
+  (let [p (.-P t)
+        s (.-Sys p)
+        m (.-M p)
+        fnp (conv uint64 (.-I (aget a 0)))
+        stack (conv uint64 (.-I (aget a 1)))
+        flags (conv uint64 (.-I (aget a 2)))
+        arg (.-I (aget a 3))
+        ptid (conv uint64 (.-I (aget a 4)))
+        tls (conv uint64 (.-I (aget a 5)))
+        ctid (conv uint64 (.-I (aget a 6)))]
+    (when (or (== (bit-and flags crt/CloneVM) 0) (== (bit-and flags crt/CloneThread) 0))
+      (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Msg (fmt/Sprintf "clone(%#x) of a process: ci runs one process" flags)))))
+    (let [q (.Threads s)]
+      (when (== (.-OnSwitch q) nil)
+        (set! (.-OnSwitch q) (.-tlsSwitch p))))
+    (let [task (.NewTask s)
+          ^uint64 lo 0]
+      (set! (.-FS task) (.-FS s))
+      (when (!= (bit-and flags crt/CloneSettls) 0)
+        (set! (.-FS task) tls))
+      (when (!= (bit-and flags crt/CloneParentSettid) 0)
+        (.Store32 m ptid (conv uint32 (.-Tid task))))
+      (when (!= (bit-and flags crt/CloneChildSettid) 0)
+        (.Store32 m ctid (conv uint32 (.-Tid task))))
+      (when (!= (bit-and flags crt/CloneChildCleartid) 0)
+        (set! (.-ClearTid task) ctid))
+      (when [sl (.Slab m (- stack 1))] (!= sl nil)
+        (set! lo (.-Base sl)))
+      (let [nt (addr (lit Thread :P p :M m :SP (bit-and-not stack 15) :Lo lo :Task task :budget PreemptCalls))]
+        (go (.runThread p nt fnp arg))
+        (.Ready s task)
+        (return (ai (conv int64 (.-Tid task))))))))
+
+(go/method runThread "runThread is a thread's goroutine: its turn awaited, fn(arg) run, then the thread's exit; an exit_group or a\nfault in it ends the program (the main thread raises it).\n" [^{:tag (* Prog)} p ^{:tag (* Thread)} nt ^uint64 fnp ^int64 arg]
+  (let [s (.-Sys p)]
+    (defer ((fn []
+          (when [r (recover)] (!= r nil)
+            (type-switch [x r]
+              (case [(* crt/ThreadExit)]
+                (.ExitTask s 0))
+              (case [(* crt/Fault)]
+                (.EndProgram s (addr (lit crt/Fault :Sig (.-Sig x) :Addr (.-Addr x) :Msg (fmt/Sprintf "%s (thread %d: %s)" (.-Msg x) (.-Tid (.-Task nt)) (traceOf nt))))))
+              (default
+                (.EndProgram s r)))))))
+    (.Start s (.-Task nt))
+    (let [r (.CallAddr p nt fnp (lit (slice Arg) (lit Arg :K \i :I arg)))]
+      (.ExitTask s (conv int (.-I r))))))
+
+(go/func traceOf "traceOf is t's interpreted frames, innermost first.\n" ^string [^{:tag (* Thread)} t]
+  (let [s ""
+        n 0]
+    (for [fr (.-Top t)] (and (!= fr nil) (< n 12)) (set! fr (.-Caller fr))
+      (when (!= s "")
+        (set! s + " < "))
+      (set! s + (.-Name (.-Fn fr)))
+      (inc! n))
+    (return s)))
+
+(go/func unmapself "unmapself is musl's __unmapself(base, size): a detached thread's stack unmapped, then its exit.\n" ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a]
+  (.Unmap (.-M (.-P t)) (conv uint64 (.-I (aget a 0))) (conv uint64 (.-I (aget a 1))))
+  (panic (addr (lit crt/ThreadExit))))
+
+(go/func init []
+  (aset Natives "__clone" clone)
+  (aset Natives "__unmapself" unmapself))

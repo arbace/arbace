@@ -16,6 +16,8 @@
     [crt "arbace/crt"]])
 
 (go/func Enter "Enter is a compiled function's prologue: its frame (Base, VA) below the thread's stack pointer,\nits memory parameters stored and its varargs written as Call does; it gives the frame and the\nstack pointer Leave restores.\n" [^{:tag (* Thread)} t ^{:tag (* Func)} f ^{:tag (* Code)} c ^{:tag (slice Arg)} args] :results [(* Frame) uint64]
+  (when (!= (.-Sched (.-Sys (.-P t))) nil)
+    (preempt t))
   (inc! (.-Depth t))
   (when (> (.-Depth t) (.-MaxDepth (.-P t)))
     (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Msg "stack overflow"))))
@@ -34,7 +36,7 @@
       (range [_ a (subslice args (min np (len args)))]
         (set! va + (argSize a))))
     (let [nsp (bit-and-not (- sp (.-FrameSize c) va 16) 15)]
-      (when (or (< nsp (- crt/StackTop crt/StackSize)) (> nsp sp))
+      (when (or (< nsp (.-Lo t)) (> nsp sp))
         (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Addr nsp :Msg "stack overflow"))))
       (set! (.-Base fr) nsp)
       (set! (.-VA fr) (+ nsp (bit-and-not (+ (.-FrameSize c) 15) 15)))
@@ -137,7 +139,7 @@
 (go/func AllocaT "AllocaT is Alloca's node: n bytes on the thread's C stack, 16-aligned.\n" ^int64 [^{:tag (* Thread)} t ^int64 n]
   (let [sz (bit-and-not (+ (conv uint64 n) 15) 15)
         nsp (- (.-SP t) sz)]
-    (when (< nsp (- crt/StackTop crt/StackSize))
+    (when (< nsp (.-Lo t))
       (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Msg "stack overflow (alloca)"))))
     (set! (.-SP t) nsp)
     (conv int64 nsp)))
@@ -218,7 +220,7 @@
       (aset g i (conv int64 a)))
     g))
 
-(go/func AotMain "AotMain runs a compiled program as tools/cirun runs a node program: setup loads its data and\nsets its compiled functions, then the program runs with argv (argv[0] \"a.out\", then args) on the\nstandard streams; the process exits with its status, a fault reported as \"ciaot: fault: ...\".\n" [^{:tag (slice string)} args ^{:tag (func [(* Prog) (* Loader)])} setup]
+(go/func AotMain "AotMain runs a compiled program as tools/cirun runs a node program: setup loads its data and\nsets its compiled functions, then the program runs with argv (argv[0] \"a.out\", then args) on the\nstandard streams (--env first: the runner's environment as the program's); the process exits with its status, a fault reported as \"ciaot: fault: ...\".\n" [^{:tag (slice string)} args ^{:tag (func [(* Prog) (* Loader)])} setup]
   (let [out (bufio/NewWriterSize os/Stdout (<< 1 16))
         m (crt/NewMem)
         sys (crt/NewSys m os/Stdin out os/Stderr)
@@ -239,6 +241,10 @@
     (when (== (.-Entry l) nil)
       (fmt/Fprintln os/Stderr "ciaot: internal: no entry")
       (os/Exit 70))
+    ;; --env first: the program's environment is the runner's (RES29 (a)), else empty
+    (when (and (> (len args) 0) (== (aget args 0) "--env"))
+      (set! (.-Env p) (os/Environ))
+      (set! args (subslice args 1)))
     (let [argv (append (lit (slice string) "a.out") (spread args))
           (values status fault) (.RunMain p (.-Start l) (.-Entry l) argv)]
       (.Flush out)

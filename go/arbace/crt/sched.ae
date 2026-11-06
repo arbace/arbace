@@ -1,0 +1,326 @@
+;; crt: the program's threads (doc/c/SPEC.md §6.5, the survey's CS11 (a): threads as goroutines over musl's own primitives,
+;; the futex natives; doc/rust/EVAL.md §10). Each C thread is a goroutine, and one runs at a time: the baton passes at the
+;; points where a thread waits (futex WAIT, sleeps, sched_yield, its exit) and at the interpreter's preemption points (a
+;; budget of calls, ci's Call and Enter), in a fixed round-robin order, so a program's run is deterministic and musl's
+;; atomics, which ci runs as plain loads and stores on one thread, stay atomic. Nothing changes for a program that starts no
+;; thread: the scheduler exists from the first clone on.
+(in-ns 'go.arbace.crt) (go/file "sched.go" :doc "crt: the program's threads (doc/c/SPEC.md §6.5, CS11 (a): threads as goroutines over musl's own\nprimitives, the futex natives). Each C thread is a goroutine and one runs at a time: the baton passes\nwhere a thread waits (futex WAIT, a sleep, sched_yield, its exit) and at ci's preemption points, in a\nfixed round-robin order, so a run is deterministic and musl's atomics stay atomic. The scheduler exists\nfrom the first clone on: a program that starts no thread runs as before.\n" :imports [
+    [time "time"]])
+
+(go/const "clone(2)'s flags (linux/sched.h).\n"
+  [^{:tag uint64 :val 256} CloneVM 0x100]
+  [^{:tag uint64 :val 65536} CloneThread 0x10000]
+  [^{:tag uint64 :val 524288} CloneSettls 0x80000]
+  [^{:tag uint64 :val 1048576} CloneParentSettid 0x100000]
+  [^{:tag uint64 :val 2097152} CloneChildCleartid 0x200000]
+  [^{:tag uint64 :val 16777216} CloneChildSettid 0x1000000])
+
+(go/const
+  [^{:val 110} eTIMEDOUT 110]
+  [^{:val 4} eINTR 4])
+
+(go/type Task
+  "Task is one thread for the scheduler: its id, its thread pointer while it does not run, the address\nthe kernel clears and wakes at its exit (CLONE_CHILD_CLEARTID), its baton, what it waits for, and its\nthread-local storage while it does not run (ci's OnSwitch).\n"
+  (struct
+    ^{:tag int} Tid
+    ^{:tag uint64} FS
+    ^{:tag uint64} ClearTid
+    ^{:tag (slice byte)} TLS
+    ^{:tag (chan bool)} baton
+    ^{:tag bool} futex
+    ^{:tag uint64} addr
+    ^{:tag uint32} mask
+    ^{:tag bool} timed
+    ^{:tag time/Time} deadline
+    ^{:tag bool} woken
+    ^{:tag bool} exited
+    ^{:tag int} code))
+
+(go/type ThreadExit
+  "ThreadExit is the panic that ends a thread other than the main one (exit(2), musl's __unmapself):\nci's thread start recovers it and calls Sys.ExitTask.\n"
+  (struct))
+
+(go/type Sched
+  "Sched is the program's threads: the one running (Cur), the runnable ones in order, the waiting ones in\nthe order they began to wait, the main thread, and Over, the panic that ended the program in another\nthread than the main one (exit_group, a fault), which the main thread raises when woken.\n"
+  (struct
+    ^{:tag (* Task)} Cur
+    ^{:tag (* Task)} Main
+    ^{:tag (slice (* Task))} run
+    ^{:tag (slice (* Task))} blocked
+    ^{:tag int} live
+    ^{:tag int} nextTid
+    ^{:tag any} Over
+    ^{:tag (func [(* Task) (* Task)]) :doc "OnSwitch is called as the baton passes from one thread to the next (ci: the thread-local storage swapped).\n"} OnSwitch))
+
+(go/method Threads "Threads is the scheduler, made with the main thread as its first task at the first clone.\n" ^{:tag (* Sched)} [^{:tag (* Sys)} s]
+  (when (== (.-Sched s) nil)
+    (let [m (addr (lit Task :Tid sysPid :ClearTid (.-tidAddr s) :baton (make (chan bool) 1)))]
+      (set! (.-Sched s) (addr (lit Sched :Cur m :Main m :live 1 :nextTid (+ sysPid 1))))))
+  (.-Sched s))
+
+(go/method NewTask "NewTask is a new thread's task (its id the next), not yet runnable.\n" ^{:tag (* Task)} [^{:tag (* Sys)} s]
+  (let [q (.Threads s)
+        t (addr (lit Task :Tid (.-nextTid q) :baton (make (chan bool) 1)))]
+    (inc! (.-nextTid q))
+    (inc! (.-live q))
+    (return t)))
+
+(go/method Ready "Ready makes t runnable, last in the order.\n" [^{:tag (* Sys)} s ^{:tag (* Task)} t]
+  (let [q (.Threads s)]
+    (set! (.-run q) (append (.-run q) t))))
+
+(go/method Start "Start is a new thread's first wait for its turn (on its goroutine, before it runs).\n" [^{:tag (* Sys)} s ^{:tag (* Task)} t]
+  (.wait s t))
+
+(go/method wait "wait blocks t's goroutine until the baton is passed to it; the main thread raises the program's\nend when another thread ended it.\n" [^{:tag (* Sys)} s ^{:tag (* Task)} t]
+  (<! (.-baton t))
+  (let [q (.-Sched s)]
+    (when (and (== t (.-Main q)) (!= (.-Over q) nil))
+      (panic (.-Over q)))))
+
+(go/method pass "pass gives the baton to next (from the running thread): its thread pointer and, through OnSwitch,\nits thread-local storage in place.\n" [^{:tag (* Sys)} s ^{:tag (* Task)} next]
+  (let [q (.-Sched s)
+        from (.-Cur q)]
+    (when (!= from next)
+      (set! (.-FS from) (.-FS s))
+      (when (!= (.-OnSwitch q) nil)
+        ((.-OnSwitch q) from next))
+      (set! (.-FS s) (.-FS next))
+      (set! (.-Cur q) next))
+    (>! (.-baton next) true)))
+
+(go/method due "due makes runnable the waiting threads whose deadline has passed (a timeout).\n" [^{:tag (* Sys)} s]
+  (let [q (.-Sched s)]
+    (when (> (len (.-blocked q)) 0)
+      (let [now (time/Now)
+            ^{:tag (slice (* Task))} keep (zero (slice (* Task)))]
+        (range [_ t (.-blocked q)]
+          (if (and (.-timed t) (not (.Before now (.-deadline t))))
+            (do
+              (set! (.-woken t) false)
+              (set! (.-run q) (append (.-run q) t)))
+            (set! keep (append keep t))))
+        (set! (.-blocked q) keep)))))
+
+(go/method pick "pick is the next thread to run: the first runnable one, else the waiting one whose deadline\ncomes first, slept for (its wait timed out); nil when every thread waits with no deadline.\n" ^{:tag (* Task)} [^{:tag (* Sys)} s]
+  (let [q (.-Sched s)]
+    (.due s)
+    (when (> (len (.-run q)) 0)
+      (let [t (aget (.-run q) 0)]
+        (set! (.-run q) (subslice (.-run q) 1))
+        (return t)))
+    (let [best -1]
+      (range [i t (.-blocked q)]
+        (when (and (.-timed t) (or (< best 0) (.Before (.-deadline t) (.-deadline (aget (.-blocked q) best)))))
+          (set! best i)))
+      (when (< best 0)
+        (return nil))
+      (let [t (aget (.-blocked q) best)]
+        (time/Sleep (time/Until (.-deadline t)))
+        (set! (.-blocked q) (append (subslice (.-blocked q) _ best) (spread (subslice (.-blocked q) (+ best 1)))))
+        (set! (.-woken t) false)
+        (return t)))))
+
+(go/method Yield "Yield lets the other runnable threads run first (sched_yield, ci's preemption): the running one\ngoes last in the order.\n" [^{:tag (* Sys)} s]
+  (let [q (.-Sched s)]
+    (when (== q nil)
+      (return))
+    (.due s)
+    (when (== (len (.-run q)) 0)
+      (return))
+    (let [cur (.-Cur q)]
+      (set! (.-run q) (append (.-run q) cur))
+      (let [next (.pick s)]
+        (when (!= next cur)
+          (.pass s next)
+          (.wait s cur))))))
+
+(go/method block "block makes the running thread wait (it is in blocked) until a wake or its deadline.\n" [^{:tag (* Sys)} s]
+  (let [q (.-Sched s)
+        cur (.-Cur q)]
+    (set! (.-blocked q) (append (.-blocked q) cur))
+    (let [next (.pick s)]
+      (when (== next nil)
+        (panic (addr (lit Fault :Sig SIGABRT :Msg "deadlock: every thread waits"))))
+      (when (!= next cur)
+        (.pass s next)
+        (.wait s cur)))))
+
+(go/method futexWait "futexWait is FUTEX_WAIT and FUTEX_WAIT_BITSET with several threads: -EAGAIN when the word is not\nval, else the thread waits until a wake matching mask (0) or the deadline (-ETIMEDOUT).\n" ^int64 [^{:tag (* Sys)} s ^uint64 addr ^uint32 val ^bool timed ^time/Time deadline ^uint32 mask]
+  (when (!= (.Load32 (.-M s) addr) val)
+    (return (- eAGAIN)))
+  (let [q (.-Sched s)
+        cur (.-Cur q)]
+    (set! (.-futex cur) true)
+    (set! (.-addr cur) addr)
+    (set! (.-mask cur) mask)
+    (set! (.-timed cur) timed)
+    (set! (.-deadline cur) deadline)
+    (set! (.-woken cur) false)
+    (.block s)
+    (set! (.-futex cur) false)
+    (set! (.-timed cur) false)
+    (when (.-woken cur)
+      (return 0))
+    (return (- eTIMEDOUT))))
+
+(go/method futexWake "futexWake wakes at most n threads waiting on addr whose mask meets mask, in the order they began to\nwait; to (when not 0) takes at most requeue more of them, moved to wait on to. It gives the number woken\nand the number moved.\n" [^{:tag (* Sys)} s ^uint64 addr ^int64 n ^uint32 mask ^uint64 to ^int64 requeue] :results [int64 int64]
+  (let [q (.-Sched s)
+        ^int64 woken 0
+        ^int64 moved 0
+        ^{:tag (slice (* Task))} keep (zero (slice (* Task)))]
+    (when (== q nil)
+      (return 0 0))
+    (range [_ t (.-blocked q)]
+      (cond
+        (or (not (.-futex t)) (!= (.-addr t) addr) (== (bit-and (.-mask t) mask) 0))
+        (set! keep (append keep t))
+        (< woken n)
+        (do
+          (inc! woken)
+          (set! (.-woken t) true)
+          (set! (.-run q) (append (.-run q) t)))
+        (and (!= to 0) (< moved requeue))
+        (do
+          (inc! moved)
+          (set! (.-addr t) to)
+          (set! keep (append keep t)))
+        :else
+        (set! keep (append keep t))))
+    (set! (.-blocked q) keep)
+    (return woken moved)))
+
+(go/method futex "futex is futex(2) (op without FUTEX_PRIVATE_FLAG and FUTEX_CLOCK_REALTIME): with one thread a WAIT\nreturns at once (0, or -EAGAIN) or sleeps out its timeout, as before the first clone; with several the\nthreads wait and wake (futexWait, futexWake).\n" ^int64 [^{:tag (* Sys)} s ^uint64 a1 ^uint64 a2 ^uint64 a3 ^uint64 a4 ^uint64 a5 ^uint64 a6]
+  (let [m (.-M s)
+        op (bit-and a2 127)
+        q (.-Sched s)]
+    (switch op
+      (case [0 9] ; WAIT (a relative timeout), WAIT_BITSET (an absolute one, CLOCK_REALTIME when flag 256)
+        (let [timed (!= a4 0)
+              ^time/Time deadline (zero time/Time)
+              ^uint32 mask 0xffffffff]
+          (when (== op 9)
+            (set! mask (conv uint32 a6)))
+          (when (== mask 0)
+            (return (- eINVAL)))
+          (when timed
+            (let [(values d e) (readTimespec m a4)]
+              (when (!= e 0)
+                (return e))
+              (if (== op 0)
+                (set! deadline (.Add (time/Now) d))
+                (let [clk 1]
+                  (when (!= (bit-and a2 256) 0)
+                    (set! clk 0))
+                  (let [(values sec nsec _) (.clockNow s clk)
+                        now (+ (* (conv time/Duration sec) time/Second) (conv time/Duration nsec))]
+                    (set! deadline (.Add (time/Now) (- d now))))))))
+          (when (or (== q nil) (== (.-live q) 1))
+            ;; one thread: no other can wake it (a timed wait sleeps it out)
+            (when (!= (.Load32 m a1) (conv uint32 a3))
+              (return (- eAGAIN)))
+            (when timed
+              (time/Sleep (time/Until deadline))
+              (return (- eTIMEDOUT)))
+            (return 0))
+          (return (.futexWait s a1 (conv uint32 a3) timed deadline mask))))
+      (case [1 10] ; WAKE, WAKE_BITSET
+        (let [^uint32 mask 0xffffffff]
+          (when (== op 10)
+            (set! mask (conv uint32 a6)))
+          (let [(values w _) (.futexWake s a1 (conv int64 (conv int32 a3)) mask 0 0)]
+            (return w))))
+      (case [3 4] ; REQUEUE, CMP_REQUEUE (a4 the number to requeue, a5 the second word, a6 CMP's value)
+        (when (and (== op 4) (!= (.Load32 m a1) (conv uint32 a6)))
+          (return (- eAGAIN)))
+        (let [(values w r) (.futexWake s a1 (conv int64 (conv int32 a3)) 0xffffffff a5 (conv int64 (conv int32 a4)))]
+          (if (== op 4) (return (+ w r)) (return w))))
+      (case [5] ; WAKE_OP: the operation on the second word, its old value compared (the kernel's futex_atomic_op_inuser)
+        (let [enc (conv uint32 a6)
+              fop (bit-and (>> enc 28) 7)
+              cmp (bit-and (>> enc 24) 15)
+              oparg (>> (<< (conv int32 enc) 8) 20)
+              cmparg (>> (<< (conv int32 enc) 20) 20)
+              old (conv int32 (.Load32 m a5))
+              ^int32 nv 0]
+          (when (!= (bit-and (>> enc 28) 8) 0)
+            (set! oparg (<< 1 (bit-and (conv uint32 oparg) 31))))
+          (switch fop
+            (case [0] (set! nv oparg))
+            (case [1] (set! nv (+ old oparg)))
+            (case [2] (set! nv (bit-or old oparg)))
+            (case [3] (set! nv (bit-and old (bit-not oparg))))
+            (case [4] (set! nv (bit-xor old oparg)))
+            (default (return (- eNOSYS))))
+          (.Store32 m a5 (conv uint32 nv))
+          (let [(values w _) (.futexWake s a1 (conv int64 (conv int32 a3)) 0xffffffff 0 0)
+                ok false]
+            (switch cmp
+              (case [0] (set! ok (== old cmparg)))
+              (case [1] (set! ok (!= old cmparg)))
+              (case [2] (set! ok (< old cmparg)))
+              (case [3] (set! ok (<= old cmparg)))
+              (case [4] (set! ok (> old cmparg)))
+              (case [5] (set! ok (>= old cmparg))))
+            (if ok
+              (let [(values w2 _) (.futexWake s a5 (conv int64 (conv int32 a4)) 0xffffffff 0 0)]
+                (return (+ w w2)))
+              (return w))))))
+    (return (- eNOSYS))))
+
+(go/method sleep "sleep is nanosleep's wait: with several threads the others run meanwhile.\n" [^{:tag (* Sys)} s ^time/Duration d]
+  (let [q (.-Sched s)]
+    (when (or (== q nil) (== (.-live q) 1))
+      (time/Sleep d)
+      (return))
+    (let [cur (.-Cur q)]
+      (set! (.-timed cur) true)
+      (set! (.-deadline cur) (.Add (time/Now) d))
+      (.block s)
+      (set! (.-timed cur) false))))
+
+(go/method ExitTask "ExitTask ends the running thread (not the main one): its CLONE_CHILD_CLEARTID word cleared and woken,\nthe baton passed on; its goroutine then returns. When it was the last thread but a main thread that\ncalled exit(2), the program ends with code.\n" [^{:tag (* Sys)} s ^int code]
+  (let [q (.-Sched s)
+        cur (.-Cur q)]
+    (set! (.-exited cur) true)
+    (dec! (.-live q))
+    (when (!= (.-ClearTid cur) 0)
+      (.Store32 (.-M s) (.-ClearTid cur) 0)
+      (.futexWake s (.-ClearTid cur) 0x7fffffff 0xffffffff 0 0))
+    (when (and (== (.-live q) 1) (.-exited (.-Main q)))
+      (set! (.-Over q) (addr (lit Exit :Code (bit-and code 0xff))))
+      (.pass s (.-Main q))
+      (return))
+    (let [next (.pick s)]
+      (when (== next nil)
+        (set! (.-Over q) (addr (lit Fault :Sig SIGABRT :Msg "deadlock: every thread waits")))
+        (set! next (.-Main q)))
+      (.pass s next))))
+
+(go/method EndProgram "EndProgram ends the program from a thread other than the main one (exit_group, a fault: v the\npanic): the main thread raises v when woken.\n" [^{:tag (* Sys)} s ^any v]
+  (let [q (.-Sched s)]
+    (set! (.-Over q) v)
+    (.pass s (.-Main q))))
+
+(go/method exitThread "exitThread is exit(2): with several threads it ends the calling one alone (the main one waits for the\nothers' end), else the program.\n" [^{:tag (* Sys)} s ^int code]
+  (let [q (.-Sched s)]
+    (when (or (== q nil) (== (.-live q) 1))
+      (panic (addr (lit Exit :Code (bit-and code 0xff)))))
+    (when (!= (.-Cur q) (.-Main q))
+      (panic (addr (lit ThreadExit))))
+    ;; the main thread: it waits, a zombie, until the last other thread ends
+    (let [m (.-Main q)]
+      (set! (.-exited m) true)
+      (set! (.-code m) code)
+      (dec! (.-live q))
+      (let [next (.pick s)]
+        (when (== next nil)
+          (panic (addr (lit Fault :Sig SIGABRT :Msg "deadlock: every thread waits"))))
+        (.pass s next)
+        (.wait s m)
+        (panic (addr (lit Exit :Code (bit-and code 0xff))))))))
+
+(go/method Tid "Tid is the running thread's id (gettid).\n" ^int64 [^{:tag (* Sys)} s]
+  (when (== (.-Sched s) nil)
+    (return sysPid))
+  (return (conv int64 (.-Tid (.-Cur (.-Sched s))))))

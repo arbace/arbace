@@ -4,6 +4,8 @@
 // is reported on the standard error as "cirun: fault: ...". cirun's own failures (no node program, a parse
 // error, no entry, a panic of the interpreter's) are "cirun: internal: ..." with status 70, which bin/ci check's
 // judge tells from a program's own status (doc/C23-SURVEY.md, "As built: review 006's fixes", finding 4).
+// cirun --env PROGRAM.nodes [ARG...] gives the program cirun's own environment (RES29 (a), doc/rust/EVAL.md §10);
+// without it the program starts with an empty one, as before.
 package main
 
 import (
@@ -26,10 +28,15 @@ func internal(out *bufio.Writer, format string, a ...any) {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		internal(nil, "usage: cirun PROGRAM.nodes [ARG...]")
+	args := os.Args[1:]
+	env := false
+	if len(args) > 0 && args[0] == "--env" {
+		env, args = true, args[1:]
 	}
-	text, err := os.ReadFile(os.Args[1])
+	if len(args) < 1 {
+		internal(nil, "usage: cirun [--env] PROGRAM.nodes [ARG...]")
+	}
+	text, err := os.ReadFile(args[0])
 	if err != nil {
 		internal(nil, "%v", err)
 	}
@@ -46,6 +53,9 @@ func main() {
 	m := crt.NewMem()
 	sys := crt.NewSys(m, os.Stdin, out, os.Stderr)
 	p := ci.NewProg(sys)
+	if env {
+		p.Env = os.Environ()
+	}
 	l := ci.NewLoader(p)
 	for _, t := range tops {
 		l.Top(t)
@@ -53,7 +63,7 @@ func main() {
 	if l.Entry == nil {
 		internal(out, "no entry")
 	}
-	argv := append([]string{"a.out"}, os.Args[2:]...)
+	argv := append([]string{"a.out"}, args[1:]...)
 	status, fault := p.RunMain(l.Start, l.Entry, argv)
 	out.Flush()
 	if fault != nil {

@@ -26,7 +26,39 @@ double __builtin_fmod(double x, double y) { return fmod(x, y); }
 float __builtin_fmodf(float x, float y) { return fmodf(x, y); }
 
 /* __cxa_thread_atexit_impl: std's thread-local destructors' registration (sys/thread_local/destructors/linux_like.rs), a weak
-   reference natively, null on musl (which has none), so std falls back on a pthread key whose destructors the main thread
-   never runs at exit. ci calls a weak undefined function rather than reading it null (a ci gap): this port registers nothing
-   and returns success, so the main thread's destructors do not run either, as natively. */
-int __cxa_thread_atexit_impl(void (*dtor)(void *), void *obj, void *dso) { (void)dtor; (void)obj; (void)dso; return 0; }
+   reference natively, null on musl (which has none), so std falls back on its own list run by a pthread key's destructor:
+   musl's pthread_exit runs it as a thread other than the main one exits, and the main thread never runs it at exit. ci calls
+   a weak undefined function rather than reading it null (a ci gap, RES31): this port keeps natively's behaviour with the same
+   mechanism, a list per thread (last registered first run, a destructor registering more run too) held by a pthread key whose
+   destructor runs it (since RE6: ci runs threads). */
+typedef unsigned pthread_key_t;
+typedef int pthread_once_t;
+int pthread_key_create(pthread_key_t *, void (*)(void *));
+int pthread_once(pthread_once_t *, void (*)(void));
+void *pthread_getspecific(pthread_key_t);
+int pthread_setspecific(pthread_key_t, const void *);
+void *malloc(unsigned long);
+void free(void *);
+struct rsi_tls_dtor { void (*dtor)(void *); void *obj; struct rsi_tls_dtor *next; };
+static pthread_key_t rsi_tls_key;
+static pthread_once_t rsi_tls_once;
+static void rsi_tls_run(void *head) {
+  struct rsi_tls_dtor *d = head;
+  while (d) {
+    pthread_setspecific(rsi_tls_key, d->next);
+    d->dtor(d->obj);
+    free(d);
+    d = pthread_getspecific(rsi_tls_key);
+  }
+}
+static void rsi_tls_init(void) { pthread_key_create(&rsi_tls_key, rsi_tls_run); }
+int __cxa_thread_atexit_impl(void (*dtor)(void *), void *obj, void *dso) {
+  struct rsi_tls_dtor *d;
+  (void)dso;
+  pthread_once(&rsi_tls_once, rsi_tls_init);
+  d = malloc(sizeof *d);
+  if (!d) return -1;
+  d->dtor = dtor; d->obj = obj; d->next = pthread_getspecific(rsi_tls_key);
+  pthread_setspecific(rsi_tls_key, d);
+  return 0;
+}
