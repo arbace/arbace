@@ -189,6 +189,13 @@
                           (sort-by (fn [[n expn]] [(if expn 1 0) (if expn (long (second expn)) 0) (let [h (:hir-id n)] (if h (long (second h)) -1))])
                                    (vec acc))))))
 
+(declare check-expr coerce! solve-obligations! fallback! print-fact-ty)
+(def ^:dynamic *obligations* nil)   ; atom: the clauses the instantiated items' predicates registered ([:trait [D ARGS]], [:proj AD ARGS TERM])
+(def ^:dynamic *select-cache* nil)
+(def ^:dynamic *norm-cache* nil)
+(def ^:dynamic *casts* nil)
+(def ^:dynamic *scalar-fixes* nil)
+
 (defn- anon-const!
   "An anonymous constant (an array length, a repeat count, a const argument): its own typeck root `OWNER::{constant#K}`
   types its literal or path usize; written in the body, the body's results have it untyped (`?`)"
@@ -197,9 +204,34 @@
     (let [k (if (and in-body? *anon-order*) (get *anon-order* (:hir-id x) -1) (dec (long (swap! *anon-consts* inc))))
           x (if (and (= :block (:kind x)) (empty? (:stmts (:block x)))) (:expr (:block x)) x)
           kind (get kind-names (:kind x))]
-      (when (and (vector? (:span x)) (#{"Lit" "Path"} kind) (>= (long k) 0))
-        (swap! *facts* conj {:owner (str *owner* "::{constant#" k "}") :span (:span x) :kind kind :ty [:uint "usize"] :adj []})
-        (when in-body? (swap! *facts* conj {:owner *owner* :span (:span x) :kind kind :ty "?" :adj []}))))))
+      (cond
+        (and (vector? (:span x)) (#{"Lit" "Path"} kind) (>= (long k) 0))
+        (do (swap! *facts* conj {:owner (str *owner* "::{constant#" k "}") :span (:span x) :kind kind :ty [:uint "usize"] :adj []})
+            (when in-body? (swap! *facts* conj {:owner *owner* :span (:span x) :kind kind :ty "?" :adj []})))
+        ;; RF9b: an expression (`[u8; (B / 7 + 1) as usize]`): its own typeck root, checked against usize with inference
+        ;; variables of its own, its facts resolved there; written in the body, each of its expressions untyped there
+        (and (map? x) (:node x) (>= (long k) 0))
+        (let [own (str *owner* "::{constant#" k "}")
+              nested (atom [])]
+          (binding [*vars* (atom {}) *facts* nested *owner* own *env* [{}] *loops* nil *obligations* (atom [])
+                    *anon-order* nil *select-cache* (atom {}) *norm-cache* (atom {}) *casts* (atom []) *scalar-fixes* (atom [])]
+            (try (let [t (check-expr x [:uint "usize"])] (coerce! x t [:uint "usize"])) (catch Throwable _ nil))
+            (solve-obligations!) (fallback!) (solve-obligations!)
+            (reset! nested (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %)))
+                                             (update :adj (fn [as] (mapv (fn [[k t]] [k (if (string? t) t (print-fact-ty t))]) (or as []))))))
+                                 @nested)))
+          (swap! *facts* into @nested)
+          (when in-body?
+            (let [acc (java.util.ArrayList.)]
+              (letfn [(walk [y] (cond (map? y) (do (when (and (= :expr (:node y)) (vector? (:span y)) (get kind-names (:kind y))
+                                                              (not (:synthesized y)))
+                                                     (.add acc {:owner *owner* :span (:span y) :kind (get kind-names (:kind y)) :ty "?" :adj []}))
+                                                   (when-not (= :closure (:kind y)) (doseq [v (vals y)] (walk v))))
+                                      (sequential? y) (doseq [v y] (walk v))
+                                      :else nil))]
+                (walk x))
+              (swap! *facts* into acc))))
+        :else nil))))
 
 (defn- lookup-local [nm] (some #(get % nm) (rseq *env*)))
 
@@ -245,7 +277,6 @@
 
 (declare deep-normalize)
 
-(def ^:dynamic *obligations* nil)   ; atom: the clauses the instantiated items' predicates registered ([:trait [D ARGS]], [:proj AD ARGS TERM])
 
 (defn- fn-clauses
   "A function's own clauses as data ([:trait [D ARGS]] and [:proj AD ARGS TERM]), uninstantiated"
@@ -384,7 +415,6 @@
         :else t))
 
 (def ^:dynamic *depth* 0)
-(def ^:dynamic *select-cache* nil)   ; atom: a body's goals with variables that were ambiguous or failed, by their resolved form
 (def ^:dynamic *profile* nil)   ; TYPECK_PROFILE: atom, the impl candidates tried per [trait self-kind vars? evaluating]
 (def ^:dynamic *evaluating* false)   ; within holds?'s evaluation, whose bindings are rolled back: the first impl suffices
 
@@ -544,7 +574,6 @@
         (vector? t) (boolean (some #(cond (vector? %) (raw-var? %) (map? %) (some raw-var? (vals %)) :else false) t))
         :else false))
 
-(def ^:dynamic *norm-cache* nil)   ; atom: a body's projections without variables, normalized
 
 (declare normalize*)
 
@@ -1022,10 +1051,12 @@
   "A value path's explicit generic arguments (`size_of::<T>`): its own parameters' variables unified with them"
   [e t]
   (let [ga (:args (peek (:segs (:path e))))
-        tys (seq (filter :ty (:args ga)))]
+        tys (seq (filter #(or (:ty %) (map? (:const %))) (:args ga)))]
     (when (and tys (= :fndef (first t)))
-      (let [own (vec (take-last (count tys) (remove #(or (c/region? %) (and (tvar? %) (= :const (second %)))) (nth t 2))))]
-        (doseq [[v a] (map vector own tys)] (unify v (body-ty (:ty a))))))
+      ;; the explicit type and const arguments, in order, for the item's own non-lifetime parameters
+      (let [own (vec (take-last (count tys) (remove c/region? (nth t 2))))]
+        (doseq [[v a] (map vector own tys)]
+          (if (:ty a) (unify v (body-ty (:ty a))) (unify v (c/lower-const-arg (:const a)))))))
     t))
 
 (defn- path-ty
@@ -1111,8 +1142,6 @@
 
 (declare has-num-var?)
 
-(def ^:dynamic *casts* nil)   ; atom: the body's casts [operand from to], checked after fallback
-(def ^:dynamic *scalar-fixes* nil)   ; atom: the overloaded operators whose autorefs writeback drops if both sides end scalars
 
 (defn- overloaded-binop
   "check_overloaded_binop: the operator's trait for the operands' types (lookup_op_method); a comparison by reference
@@ -1813,7 +1842,7 @@
           (println "profile" owner "budget left" @*budget*)
           (doseq [[k n] (take 12 (sort-by (comp - val) @*profile*))] (println "  " n k)))
         (reset! *profile* {}))
-      (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %))) (update :adj (fn [as] (mapv (fn [[k t]] [k (print-fact-ty t)]) (or as []))))))
+      (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %))) (update :adj (fn [as] (mapv (fn [[k t]] [k (if (string? t) t (print-fact-ty t))]) (or as []))))))
             @facts))))
 
 (defn- repr-int
@@ -1833,7 +1862,7 @@
       (c/in-def (:parent d)
         (let [x (check-expr (:disr v) t)] (coerce! (:disr v) x t)))
       (fallback!)
-      (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %))) (update :adj (fn [as] (mapv (fn [[k t]] [k (print-fact-ty t)]) (or as []))))))
+      (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %))) (update :adj (fn [as] (mapv (fn [[k t]] [k (if (string? t) t (print-fact-ty t))]) (or as []))))))
             @facts))))
 
 (defn check-crate
