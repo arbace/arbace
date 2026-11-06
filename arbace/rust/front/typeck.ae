@@ -1104,6 +1104,7 @@
 
 (declare has-num-var?)
 
+(def ^:dynamic *casts* nil)   ; atom: the body's casts [operand from to], checked after fallback
 (def ^:dynamic *scalar-fixes* nil)   ; atom: the overloaded operators whose autorefs writeback drops if both sides end scalars
 
 (defn- overloaded-binop
@@ -1338,6 +1339,24 @@
   [x]
   (case (:kind x) :lit true :unary (and (#{"-" "!"} (:op x)) (castable-lit? (:expr x))) false))
 
+(defn- mut-borrow!
+  "E's fact's last Borrow adjustment made mutable (`&` to `&mut`)"
+  [e]
+  (swap! *facts* (fn [fs] (let [i (last (keep-indexed (fn [i f] (when (and (= (:span f) (:span e)) (= (:kind f) (get kind-names (:kind e)))) i)) fs))]
+                            (if-let [j (and i (last (keep-indexed (fn [j [k t]] (when (and (= "Borrow" k) (= :ref (first t))) j)) (:adj (nth fs i)))))]
+                              (update-in fs [i :adj j 1] (fn [t] (assoc t 2 true)))
+                              fs)))))
+
+(defn- place-mutable!
+  "convert_place_derefs_to_mutable: a place used mutably (a `&mut` autoref of it): its Index operators IndexMut and
+  its overloaded derefs DerefMut, their bases' autorefs mutable, down the place's projections"
+  [e]
+  (case (:kind e)
+    :index (do (mut-borrow! (:expr e)) (place-mutable! (:expr e)))
+    :field (place-mutable! (:expr e))
+    :unary (when (= "*" (:op e)) (mut-borrow! (:expr e)) (place-mutable! (:expr e)))
+    nil))
+
 (defn check-expr
   "check_expr_with_expectation: E's type (recorded), EXPECTED a type or nil"
   [e expected]
@@ -1369,6 +1388,9 @@
                         _ (when (tvar? (shallow rt)) (solve-obligations!))]
                     (if-let [[def args sig adj] (probe-method rt (:ident (:seg e)))]
                       (do (adjust! (:receiver e) adj)
+                          ;; a mutable autoref of the receiver: its place's index and deref operators made mutable
+                          (when (some (fn [[k t]] (and (= "Borrow" k) (= :ref (first t)) (nth t 2))) adj)
+                            (place-mutable! (:receiver e)))
                           ;; a turbofish: the method's own arguments
                           (when-let [ga (seq (filter :ty (:args (:args (:seg e)))))]
                             (let [own (vec (take-last (count ga) (remove c/region? args)))]
@@ -1407,8 +1429,10 @@
           ;; check_expr_cast: the operand checked with ExpectCastableToType (a literal takes the type, a block does not
                   ;; coerce to it)
           :cast (let [t (body-ty (:ty e))
-                      _ (doseq [l (ty-consts (:ty e))] (anon-const! l true))]
-                  (check-expr (:expr e) (when (castable-lit? (:expr e)) t))
+                      _ (doseq [l (ty-consts (:ty e))] (anon-const! l true))
+                      x (check-expr (:expr e) (when (castable-lit? (:expr e)) t))]
+                  ;; checked after fallback (check_casts): a cast that is a coercion takes its adjustments
+                  (when *casts* (swap! *casts* conj [(:expr e) x t]))
                   t)
           :type (let [t (body-ty (:ty e))] (let [x (check-expr (:expr e) t)] (coerce! (:expr e) x t)) t)
           :field (let [bt (check-expr (:expr e) nil)] (field-of e bt (:ident e)))
@@ -1716,6 +1740,17 @@
   (swap! *facts* (fn [fs] (let [i (last (keep-indexed (fn [i f] (when (and (= (:span f) (:span e)) (= (:kind f) (get kind-names (:kind e)))) i)) fs))]
                             (if (and i (seq (:adj (nth fs i)))) (update-in fs [i :adj] pop) fs)))))
 
+(defn- check-casts!
+  "check_casts' try_coercion_cast: a reference cast to a raw pointer, a function item or non-capturing closure to a fn
+  pointer, `&mut` to `&`: the coercion's adjustments on the operand"
+  []
+  (doseq [[x from to] (when *casts* @*casts*)]
+    (let [f (shallow from) t (shallow to)]
+      (when (or (and (= :ref (first f)) (= :ptr (first t)))
+                (and (#{:fndef :closure} (first f)) (= :fnptr (first t)))
+                (and (= :ref (first f)) (= :ref (first t)) (nth f 2) (not (nth t 2))))
+        (let [sn (snapshot)] (when-not (coerce! x from to) (rollback! sn)))))))
+
 (defn- fix-scalar-builtins!
   "writeback's fix_scalar_builtin_expr: an operator both of whose operands ended scalar is builtin, its by-reference
   operands' autorefs dropped"
@@ -1737,7 +1772,7 @@
   (let [n (:node d) k (:kind d)
         owner (binding [c/*in-value* true] (c/print-def-path (:id d) []))
         facts (atom [])]
-    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *norm-cache* (atom {}) *param-env-cache* (atom {}) *scalar-fixes* (atom []) *owner* owner *env* [{}] *loops* nil]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *norm-cache* (atom {}) *param-env-cache* (atom {}) *scalar-fixes* (atom []) *casts* (atom []) *owner* owner *env* [{}] *loops* nil]
       (c/in-def (:id d)
         (if (#{"Fn" "AssocFn"} k)
           (let [sig (erase (c/fn-sig (:id d)))
@@ -1756,6 +1791,7 @@
             (binding [*ret* t] (let [x (check-expr (:expr n) t)] (coerce! (:expr n) x t))))))
       (solve-obligations!)
       (fallback!)
+      (check-casts!)
       (solve-obligations!)
       (fix-scalar-builtins!)
       (when *profile*

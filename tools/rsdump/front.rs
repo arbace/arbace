@@ -185,7 +185,14 @@ fn sty<'tcx>(tcx: TyCtxt<'tcx>, t: rustc_middle::ty::Ty<'tcx>) -> String {
         ty::Slice(e) => format!("(slice {})", sty(tcx, e)),
         ty::Array(e, n) => match n.kind() {
             ty::ConstKind::Param(p) => format!("(array {} (cparam {} {}))", sty(tcx, e), p.index, q(p.name.as_str())),
-            _ => format!("(array {} {})", sty(tcx, e), q(&n.to_string())),
+            // RF9b: an evaluable length by its value (`[u8; size_of::<Self>()]` in a concrete impl)
+            _ => {
+                let v = tcx
+                    .try_normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), ty::Unnormalized::new_wip(n))
+                    .ok()
+                    .and_then(|c| c.try_to_target_usize(tcx));
+                format!("(array {} {})", sty(tcx, e), q(&v.map(|v| v.to_string()).unwrap_or_else(|| n.to_string())))
+            }
         },
         ty::Alias(_, ty::AliasTy { kind: ty::Projection { def_id }, args: aa, .. }) => format!("(projection {} [{}])", q(&def_path(tcx, def_id)), args(aa)),
         // RF9's: opaque types, fn pointers, trait objects
