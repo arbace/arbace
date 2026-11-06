@@ -506,10 +506,13 @@
               ;; an unresolved name as written (clang's mangleUnresolvedPrefix): the template's simple name, its
               ;; arguments as written (a pack's elements one by one, no J ... E), the qualifier not written in the
               ;; headers' unqualified uses (G4: sr6__and_I...E5valueE)
-              :tspec (str "sr" (when-not (= [[:ns "std"]] (vec (:path b))) (apply str (map part-name (:path b))))
-                          (source-name (:name b))
-                          (template-args (vec (mapcat #(if (and (map? %) (contains? % :pack) (nil? (:k %))) (:pack %) [%]) (:args b))))
-                          "E" (source-name (:name x)))
+              :tspec (let [args (if (:written b) (vec (take (:written b) (:args b))) (:args b))
+                           targs (template-args (vec (mapcat #(if (and (map? %) (contains? % :pack) (nil? (:k %))) (:pack %) [%]) args)))]
+                       (if-let [q (seq (:qual b))]
+                         ;; a qualifier written (std::X<T>::value): sr <its levels, the namespaces' names> E <name>
+                         (str "sr" (apply str (map source-name q)) (source-name (:name b)) targs "E" (source-name (:name x)))
+                         (str "sr" (when-not (= [[:ns "std"]] (vec (:path b))) (apply str (map part-name (:path b))))
+                              (source-name (:name b)) targs "E" (source-name (:name x)))))
               (fail :mangle "a member of " (pr-str b))))
       "sizeof" (str "st" (mangle-type* (:type x)))
       (str (or (expr-op-codes (:o x)) (fail :mangle "operator " (:o x))) (apply str (map mangle-expr (:args x)))))
@@ -545,9 +548,19 @@
 
 (defn- cvq ^String [t] (str (when (:v t) "V") (when (:c t) "K")))
 
+(defn- skey
+  "A type as a substitution key: a template parameter by its index alone (the signature's T_ and a constraint's are
+  one candidate)."
+  [t]
+  (cond
+    (and (map? t) (= :tparam (:k t))) (cond-> {:k :tparam :i (:i t)} (:c t) (assoc :c true) (:v t) (assoc :v true))
+    (map? t) (into {} (map (fn [[k v]] [k (skey v)]) t))
+    (vector? t) (mapv skey t)
+    :else t))
+
 (defn- mangle-type* ^String [t]
   (let [q (cvq t)
-        bare (unq t)
+        bare (skey (unq t))
         inner (fn []
                 (case (:k bare)
                   :b (builtin-codes (:n bare))
@@ -565,7 +578,7 @@
                                               (if (and (empty? (:ps bare)) (not (:va bare))) "v" (apply str (map mangle-type* (:ps bare))))
                                               (when (:va bare) "z") "E"))
                   ;; a template's own parameter and a dependent template-id, in a function template's signature (§G3)
-                  :tparam (sub-or [:t bare] #(template-param (:i bare)))
+                  :tparam (sub-or [:qparam 0 (:i bare)] #(template-param (:i bare)))
                   :pack-exp (sub-or [:t bare] #(str "Dp" (mangle-type* (:of bare))))
                   ;; T::name, a dependent member type: N <prefix> <name> E
                   :tdep (sub-or [:t bare] #(let [base (unq (:base bare))]
@@ -613,23 +626,64 @@
   written (an unresolved simple name with its explicit arguments), the template's own parameters by depth and index;
   `pidx` {name index} of the template's parameters (G4)."
   ^String [n pidx ^long depth]
-  (letfn [(arg [^String a]
+  (letfn [(ty [^String a]
+            ;; a type as written in a constraint: the template's parameters, builtins, pointers, references, cv
             (let [a (str/trim a)]
-              (if-let [i (get pidx a)] (q-param depth i) (fail :mangle "a constraint's argument " a))))
+              (cond
+                (get pidx a) (if (zero? depth) (mangle-type* {:k :tparam :i (get pidx a)}) (q-param depth (get pidx a)))
+                (str/ends-with? a "&&") (mangle-type* {:k :rref :to (tt (subs a 0 (- (count a) 2)))})
+                (str/ends-with? a "&") (mangle-type* {:k :ref :to (tt (subs a 0 (dec (count a))))})
+                :else (mangle-type* (tt a)))))
+          (tt [^String a]
+            (let [a (str/trim a)]
+              (cond
+                (str/ends-with? a "*") {:k :ptr :to (tt (subs a 0 (dec (count a))))}
+                (str/starts-with? a "const ") (assoc (tt (subs a 6)) :c true)
+                (str/ends-with? a " const") (assoc (tt (subs a 0 (- (count a) 6))) :c true)
+                (get pidx a) (if (zero? depth) {:k :tparam :i (get pidx a)} (fail :mangle "a member template's parameter type"))
+                (get {"void" :void "bool" :bool "char" :char "int" :int "unsigned int" :uint "long" :long "unsigned long" :ulong "double" :double "float" :float} a)
+                {:k :b :n (get {"void" :void "bool" :bool "char" :char "int" :int "unsigned int" :uint "long" :long "unsigned long" :ulong "double" :double "float" :float} a)}
+                :else (fail :mangle "a constraint's type " a))))
+          (arg [^String a]
+            (let [a (str/trim a)]
+              (if-let [i (get pidx a)] (q-param depth i) (ty a))))
+          (req [r]
+            (case (:kind r)
+              ;; (clang's mangleRequirement: X <expression>, no end marker)
+              "SimpleRequirement" (str "X" (ex (first (:inner r))))
+              "NestedRequirement" (str "Q" (ex (first (:inner r))))
+              "TypeRequirement" (str "T" (ty (get-in r [:type :qualType])))
+              (fail :mangle "a requirement " (:kind r))))
           (ex [n]
             (case (:kind n)
               "ParenExpr" (ex (first (:inner n)))
+              ;; requires { ... } (rq <requirement>+ E; with parameters rQ, not written yet)
+              "RequiresExpr" (if (seq (:params n)) (fail :mangle "a requires-expression's parameters") (str "rq" (apply str (map req (:inner n))) "E"))
+              ;; [gs] nw <placement>* _ <type> (pi <expression>* E | E)
+              "CXXNewExpr" (let [ks (:inner n)
+                                 [init place] (if (:initStyle n) [(first ks) (rest ks)] [nil ks])
+                                 t (str/trim (get-in n [:type :qualType]))
+                                 et (if (str/ends-with? t "*") (subs t 0 (dec (count t))) t)]
+                             (when (:isArray n) (fail :mangle "an array new in a constraint"))
+                             (str (when (:isGlobal n) "gs") "nw" (apply str (map ex place)) "_" (ty et)
+                                  (if init (str "pi" (apply str (map ex (if (= "ParenListExpr" (:kind init)) (:inner init) [init]))) "E") "E")))
+              "CStyleCastExpr" (str "cv" (ty (get-in n [:type :qualType])) (ex (first (:inner n))))
+              "PackExpansionExpr" (str "sp" (ex (first (:inner n))))
               "BinaryOperator" (str (or (expr-op-codes (:opcode n)) (fail :mangle "operator " (:opcode n))) (ex (first (:inner n))) (ex (second (:inner n))))
               "UnaryOperator" (str (case (:opcode n) "!" "nt" "-" "ng" "~" "co" (fail :mangle "operator " (:opcode n))) (ex (first (:inner n))))
               "CallExpr" (str "cl" (apply str (map ex (:inner n))) "E")
               "CXXBoolLiteralExpr" (if (:value n) "Lb1E" "Lb0E")
               "IntegerLiteral" (str "Li" (:value n) "E")
               ("DeclRefExpr" "UnresolvedLookupExpr")
-              (let [nm (get-in n [:referencedDecl :name])]
-                (when (or (seq (:qualifier n)) (:globalQualifier n)) (fail :mangle "a qualified name in a constraint"))
-                (if-let [i (get pidx nm)]
-                  (q-param depth i)
-                  (str (source-name nm) (when-let [as (:explicitTemplateArgs n)] (str "I" (apply str (map arg as)) "E")))))
+              (let [nm (get-in n [:referencedDecl :name])
+                    targs (when-let [as (:explicitTemplateArgs n)] (str "I" (apply str (map arg as)) "E"))]
+                (when (:globalQualifier n) (fail :mangle "a ::-qualified name in a constraint"))
+                (cond
+                  ;; ns::f<...>: sr <the namespaces' names> E <name> (clang's mangleUnresolvedName, unresolved-qualifier-levels)
+                  (seq (:qualifier n)) (do (when (some #(re-find #"<" (str %)) (:qualifier n)) (fail :mangle "a template in a constraint's qualifier"))
+                                           (str "sr" (apply str (map #(source-name (str %)) (:qualifier n))) "E" (source-name nm) targs))
+                  (get pidx nm) (q-param depth (get pidx nm))
+                  :else (str (source-name nm) targs)))
               (fail :mangle "a constraint's " (:kind n))))]
     (ex n)))
 

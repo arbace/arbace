@@ -2262,7 +2262,14 @@
       (is? p "noexcept")
       (do (adv! p)
           (if (is? p "(")
-            (let [ob (ix p)] (skip-balanced! p) (recur (str q " noexcept(" (tok-text-this p (inc ob) (- (ix p) 2)) ")") (assoc m :noexcept true)))
+            (let [ob (ix p)
+                  ;; G5: the operand parsed for the code generator (noexcept(e) evaluated per specialization), keyed by its text
+                  x (when (and *full-headers* (not (skim? p)))
+                      (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x)))))]
+              (skip-balanced! p)
+              (let [txt (tok-text-this p (inc ob) (- (ix p) 2))]
+                (when (map? x) (.put ^HashMap (stv p DECLTYPES) (str "noexcept:" (str/replace txt #"\s+" "")) x))
+                (recur (str q " noexcept(" txt ")") (assoc m :noexcept true))))
             (recur (str q " noexcept") (assoc m :noexcept true))))
       (and (is? p "throw") (is-at? p 1 "("))
       (do (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (str q " throw(" (tok-text p (inc ob) (- (ix p) 2)) ")") (assoc m :throw true))))
@@ -3767,6 +3774,42 @@
                      (binding [*out* *err*] (println "repr/cpp: the header-skim cache not written:" (ex-message e)))
                      nil)))))))))
 
+(defn- full-headers!
+  "In full-header mode (*full-headers*, the code generator's): the leading run of header tokens parsed in full, its
+  nodes and the parser's state taken from the cache when it holds them (P15 (b), doc/cpp/CODEGEN.md G5: the skim
+  cache's table and key, the run's tokens and `parts`, a key of its own kind), else parsed and written into it:
+  [:hit|:stored|nil nodes]."
+  [^P p parts]
+  (let [n (.-cnt p)
+        k (long (loop [i 0] (if (or (>= i (dec n)) (main-tok? p i)) i (recur (inc i)))))
+        run (fn [] (loop [out []]
+                     (if (and (not (eof? p)) (not (main-tok? p (ix p))))
+                       (recur (if (is? p "}") (do (adv! p) out) (into out (decl-or-decline p :top))))
+                       out)))
+        ;; (opt-in, CPP_FULL_CACHE=1: on the tools' host reading the table back costs about what parsing does, G5.2)
+        dir (when (and parts (= "1" (System/getenv "CPP_FULL_CACHE")) (>= k (long skim-cache-min))) (skim/cache-dir))]
+    (if-not dir
+      [nil (run)]
+      (let [t0 (System/nanoTime)
+            path (str dir "/" (skim/digest (concat ["full"] parts [(.-year p) (.-gnu p) (.-main p) (tokens-text p k)])) ".full")
+            t1 (System/nanoTime)
+            st (try (skim/read-state path) (catch Exception _ nil))
+            _ (when (System/getenv "REPR_CPP_TIME")
+                (binding [*out* *err*] (println (format "repr/cpp native: the full-header key %.2f s, cache read %.2f s" (/ (- t1 t0) 1e9) (/ (- (System/nanoTime) t1) 1e9)))))]
+        (if st
+          (let [[root mt i nodes ^HashMap dts unnamed] st]
+            (st! p SCOPE root) (st! p ROOT root) (st! p MTMPL mt) (seek! p (long i))
+            (.putAll ^HashMap (stv p DECLTYPES) dts) (st! p UNNAMED unnamed)
+            [:hit nodes])
+          (let [root (stv p ROOT)
+                nodes (run)]
+            [(when (and (identical? root (stv p SCOPE)) (nil? (stv p CLS)) (nil? (stv p THDR)))
+               (try (skim/write-state path [root (stv p MTMPL) (ix p) nodes (stv p DECLTYPES) (stv p UNNAMED)]) :stored
+                    (catch Exception e
+                      (binding [*out* *err*] (println "repr/cpp: the full-header cache not written:" (ex-message e)))
+                      nil)))
+             nodes]))))))
+
 (defn parse-unit
   "The main file's top-level declarations as clang's AST nodes, from the parser's tokens `toks` (tokens'):
   {:nodes [...] :declines n :reasons {why n} :skim-cache :hit|:stored|nil}. `main` the main file's name in locations,
@@ -3779,8 +3822,8 @@
     (st! p SCOPE root) (st! p ROOT root) (st! p SKIM false) (st! p MTMPL (HashSet.)) (st! p DECLINES 0) (st! p GTOP true)
     (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.)) (st! p DECLTYPES (HashMap.))
     (doseq [nm builtin-types] (sc/declare! root {:k :type :name nm}))
-    (let [cached (when-not *full-headers* (skim-headers! p cache-parts))
-          nodes (loop [out []]
+    (let [[cached pre] (if *full-headers* (full-headers! p cache-parts) [(skim-headers! p cache-parts) []])
+          nodes (loop [out (vec pre)]
                   (let [out (into out (decl-seq p :top))]
                     (if (eof? p) out (do (adv! p) (recur out)))))]
       {:nodes (let [^ArrayList us (stv p USES)
