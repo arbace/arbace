@@ -959,6 +959,7 @@ for C++'s lowering for gcc.
 |---|---|---|
 | REAP LLVM read (pass / design / deferred) | 2,695 / 1 / 58 | 3,750 / 1 / 113 (llvm/test's 1,110 rows added) |
 | REAP LLVM eval | 229 / 7 / 22 (258 modules) | 519 / 22 / 21 (562 modules: the 258 and the torture sample; `bin/llvmi check` exits 0, 2.5 min, 1.5 GB) |
+| REAP LLVM AOT | 229 / 8 / 21 (LL5's hand-set rows among them) | 519 / 22 / 21 (`bin/llvmi check --aot --record`, a recorded run, 33 min, 1.5 GB; every row's result the eval's; the two heavy modules' rows kept) |
 | REAP LLVM print | 282 / 0 / 0 | 586 / 0 / 0 |
 | llvmi on the torture sample (304) | 271 | 290 (AOT before the stackrestore fix, `--aot --corpus tx-O0,tx-O2`: 288, the same rows as eval's then, 7.9 min, 1.4 GB) |
 | verify on llvm/test's 446 opt rejections: verdicts / first message / whole stderr | 428 / 399 / 381 | 433 / 406 / 388 |
@@ -973,7 +974,7 @@ for C++'s lowering for gcc.
 |---|---|---|
 | lli's runs of the whole torture corpora | `LLVMI_TX_ALL=1 bin/llvmi record-ref --corpus tx-O0,tx-O2` | `3040 runs recorded`; the sample's 304 entries unchanged (`git diff` adds lines only) |
 | eval, whole | `LLVMI_TX_ALL=1 bin/llvmi check` (about 16 min, 1.5 GB) | about 95 % pass by the sample; new non-passes classed in `divergences-eval.edn` (`:long-double` by its static assertions, `:lli-reference`), then `--record` without `LLVMI_TX_ALL` for the committed rows |
-| AOT, recorded | `LLVMI_AOT_HEAVY=1 bin/llvmi check --aot --record` (about 40 min: 562 modules, 15 shards) | the eval rows' results (the sample's AOT run had no AOT-only failure); replaces LL5's hand-set rows |
+| AOT, the heavy two | `LLVMI_AOT_HEAVY=1 bin/llvmi check --aot --record` (about 35 min, one `go build` at 2.9 GB: above the day's limit) | the day's recorded run (519 of 562, the eval's rows) unchanged; the two heavy modules' rows from their own run |
 | the matrix | `bin/reap --record` after the records | 20 of 20, 0 problems |
 
 ### Proposed
