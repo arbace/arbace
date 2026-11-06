@@ -1,0 +1,199 @@
+;; The Bigarray library beyond the minimal one (DEFERRED-TRIAGE §3 item 11), ported from oi's ext_bigarray.go, itself a port of
+;; runtime/bigarray.c of OCaml 5.5.0 (LGPL-2.1 with the OCaml linking exception): caml_ba_compare, caml_ba_serialize and
+;; caml_ba_deserialize (the "_bigarr02" custom block of the marshal format), the float16 kind's conversions (round to nearest
+;; even) and the element count with caml_umul_overflow's check. Elements as BigArray holds them: Double (floats), double/1
+;; (complex), Integer (int32), I64 (int64), NInt (nativeint), Long (the others).
+
+(in-ns 'ocaml.rt)
+
+(defclass ^:public ^:final BaOps
+
+  ;; an integer element's value
+  (method ^:public ^:static num ^long [v]
+    (cond (instance? Long v) (.longValue (cast Long v))
+          (instance? Integer v) (long (.intValue (cast Integer v)))
+          (instance? I64 v) (.-v (cast I64 v))
+          (instance? NInt v) (.-v (cast NInt v))
+          :else (throw (Rt/internal "not an integer bigarray element"))))
+
+  ;; caml_float_to_float16: f as a half float, rounded to nearest even
+  (method ^:public ^:static f16Bits ^int [^float f]
+    (let [x (Float/floatToRawIntBits f)
+          sign (bit-and (unsigned-bit-shift-right x 16) 32768)
+          e (bit-and (unsigned-bit-shift-right x 23) 255)
+          m (bit-and x 8388607)]
+      (cond
+        (== e 255) (unchecked-int (bit-or sign (if (== m 0) 31744 32256)))
+        :else
+        (let [h (unchecked-add-int (unchecked-subtract-int (unchecked-int e) 127) 15)]
+          (cond
+            (>= h 31) (unchecked-int (bit-or sign 31744))
+            (<= h 0)
+            (if (< h -10)
+              (unchecked-int sign)
+              (let [mm (bit-or m 8388608)
+                    shift (unchecked-subtract-int 14 h)
+                    ^:mutable ^long half (unsigned-bit-shift-right mm shift)
+                    rem (bit-and mm (unchecked-dec (bit-shift-left 1 shift)))
+                    mid (bit-shift-left 1 (unchecked-dec-int shift))]
+                (when (or (> rem mid) (and (== rem mid) (== (bit-and half 1) 1)))
+                  (set! half (unchecked-inc half)))
+                (unchecked-int (bit-or sign half))))
+            :else
+            (let [^:mutable ^long half (bit-or (bit-shift-left (long h) 10) (unsigned-bit-shift-right m 13))
+                  rem (bit-and m 8191)]
+              (when (or (> rem 4096) (and (== rem 4096) (== (bit-and half 1) 1)))
+                (set! half (unchecked-inc half)))
+              (unchecked-int (bit-or sign half))))))))
+
+  ;; caml_float16_to_float
+  (method ^:public ^:static f16Value ^double [^int d]
+    (let [sign (if (== (bit-and d 32768) 0) 1.0 -1.0)
+          e (bit-and (bit-shift-right d 10) 31)
+          m (double (bit-and d 1023))]
+      (cond (== e 31) (if (== m 0.0) (* sign Double/POSITIVE_INFINITY) Double/NaN)
+            (== e 0) (* sign (Math/scalb m -24))
+            :else (* sign (Math/scalb (+ 1024.0 m) (unchecked-subtract-int (unchecked-int e) 25))))))
+
+  (method ^:public ^:static f16Round ^double [^double f] (BaOps/f16Value (BaOps/f16Bits (unchecked-float f))))
+
+  ;; the number of elements, -1 on an overflow (caml_umul_overflow)
+  (method ^:public ^:static elements ^long [^int/1 dims]
+    (let [^:mutable ^long n 1 ^:mutable ^boolean over false]
+      (loop [^int i 0]
+        (when (< i (alength dims))
+          (let [d (long (aget dims i))]
+            (if (and (> d 0) (> n (Long/divideUnsigned Long/MAX_VALUE d)))
+              (set! over true)
+              (set! n (unchecked-multiply n d))))
+          (recur (unchecked-inc-int i))))
+      (if over -1 n)))
+
+  (method ^:public ^:static flags ^long [^BigArray b] (bit-or (long (.-kind b)) (bit-shift-left (long (.-layout b)) 8)))
+
+  ;; DO_GENERIC_UNORDERED_COMPARISON's step: a NaN above every number
+  (method ^:static cmpD ^long [^double a ^double b]
+    (cond (< a b) -1
+          (> a b) 1
+          (== a b) 0
+          (== a a) 1
+          (== b b) -1
+          :else 0))
+
+  ;; caml_ba_compare
+  (method ^:public ^:static compare ^long [^BigArray x ^BigArray y]
+    (let [f1 (BaOps/flags x) f2 (BaOps/flags y)
+          d1 (.-dims x) d2 (.-dims y)]
+      (cond
+        (not (== f1 f2)) (unchecked-subtract f2 f1)
+        (not (== (alength d1) (alength d2))) (long (unchecked-subtract-int (alength d2) (alength d1)))
+        :else
+        (let [^:mutable ^long r 0 ^:mutable ^int i 0]
+          (while (and (== r 0) (< i (alength d1)))
+            (let [a (aget d1 i) b (aget d2 i)]
+              (cond (< a b) (set! r -1) (> a b) (set! r 1)))
+            (set! i (unchecked-inc-int i)))
+          (let [n (.size x) ^:mutable ^int k 0]
+            (while (and (== r 0) (< k n))
+              (let [v (aget (.-data x) (unchecked-add-int (.-off x) k))
+                    w (aget (.-data y) (unchecked-add-int (.-off y) k))]
+                (cond (instance? Double v) (set! r (BaOps/cmpD (.doubleValue (cast Double v)) (.doubleValue (cast Double w))))
+                      (instance? double/1 v)
+                      (let [p (cast double/1 v) q (cast double/1 w)]
+                        (set! r (BaOps/cmpD (aget p 0) (aget q 0)))
+                        (when (== r 0) (set! r (BaOps/cmpD (aget p 1) (aget q 1)))))
+                      :else (let [a (BaOps/num v) b (BaOps/num w)]
+                              (cond (< a b) (set! r -1) (> a b) (set! r 1)))))
+              (set! k (unchecked-inc-int k))))
+          r))))
+
+  ;; caml_ba_serialize_longarray
+  (method ^:static longs ^void [^Marshal m ^BigArray b ^long lo ^long hi]
+    (let [n (.size b) ^:mutable ^boolean wide false]
+      (loop [^int k 0] (when (< k n) (let [x (BaOps/num (aget (.-data b) (unchecked-add-int (.-off b) k)))]
+          (when (or (< x lo) (> x hi)) (set! wide true))) (recur (unchecked-inc-int k))))
+      (.b1 m (if wide 1 0))
+      (loop [^int k 0] (when (< k n) (let [x (BaOps/num (aget (.-data b) (unchecked-add-int (.-off b) k)))]
+          (if wide (.be64 m x) (.be32 m x))) (recur (unchecked-inc-int k))))))
+
+  ;; extern_custom of a bigarray: CODE_CUSTOM_LEN, the identifier, the sizes in the 32-bit and 64-bit heaps, caml_ba_serialize's data
+  (method ^:public ^:static serialize ^void [^Marshal m ^BigArray b]
+    (let [nd (alength (.-dims b))
+          sz32 (unchecked-multiply (long (unchecked-add-int 4 nd)) 4)
+          sz64 (unchecked-multiply (long (unchecked-add-int 4 nd)) 8)
+          n (.size b)
+          kind (.-kind b)]
+      (.b1 m 24)
+      (.b1 m 95) (.b1 m 98) (.b1 m 105) (.b1 m 103) (.b1 m 97) (.b1 m 114) (.b1 m 114) (.b1 m 48) (.b1 m 50)
+      (.b1 m 0)
+      (.be32 m sz32)
+      (.be64 m sz64)
+      (.be32 m (long nd))
+      (.be32 m (BaOps/flags b))
+      (loop [^int i 0] (when (< i nd) (let [d (long (aget (.-dims b) i))]
+          (if (< d 65535) (.be16 m d) (do (.be16 m 65535) (.be64 m d)))) (recur (unchecked-inc-int i))))
+      (cond
+        (or (== kind 12) (== kind 2) (== kind 3))
+        (loop [^int k 0] (when (< k n) (.b1 m (BaOps/num (aget (.-data b) (unchecked-add-int (.-off b) k)))) (recur (unchecked-inc-int k))))
+        (or (== kind 4) (== kind 5))
+        (loop [^int k 0] (when (< k n) (.be16 m (BaOps/num (aget (.-data b) (unchecked-add-int (.-off b) k)))) (recur (unchecked-inc-int k))))
+        (== kind 13)
+        (loop [^int k 0] (when (< k n) (.be16 m (long (BaOps/f16Bits (unchecked-float (Rt/d (aget (.-data b) (unchecked-add-int (.-off b) k))))))) (recur (unchecked-inc-int k))))
+        (== kind 0)
+        (loop [^int k 0] (when (< k n) (.be32 m (long (Float/floatToRawIntBits (unchecked-float (Rt/d (aget (.-data b) (unchecked-add-int (.-off b) k))))))) (recur (unchecked-inc-int k))))
+        (== kind 6)
+        (loop [^int k 0] (when (< k n) (.be32 m (BaOps/num (aget (.-data b) (unchecked-add-int (.-off b) k)))) (recur (unchecked-inc-int k))))
+        (== kind 10)
+        (loop [^int k 0] (when (< k n) (let [z (cast double/1 (aget (.-data b) (unchecked-add-int (.-off b) k)))]
+            (.be32 m (long (Float/floatToRawIntBits (unchecked-float (aget z 0)))))
+            (.be32 m (long (Float/floatToRawIntBits (unchecked-float (aget z 1)))))) (recur (unchecked-inc-int k))))
+        (== kind 1)
+        (loop [^int k 0] (when (< k n) (.be64 m (Double/doubleToRawLongBits (Rt/d (aget (.-data b) (unchecked-add-int (.-off b) k))))) (recur (unchecked-inc-int k))))
+        (== kind 7)
+        (loop [^int k 0] (when (< k n) (.be64 m (BaOps/num (aget (.-data b) (unchecked-add-int (.-off b) k)))) (recur (unchecked-inc-int k))))
+        (== kind 11)
+        (loop [^int k 0] (when (< k n) (let [z (cast double/1 (aget (.-data b) (unchecked-add-int (.-off b) k)))]
+            (.be64 m (Double/doubleToRawLongBits (aget z 0)))
+            (.be64 m (Double/doubleToRawLongBits (aget z 1)))) (recur (unchecked-inc-int k))))
+        (== kind 8) (BaOps/longs m b -1073741824 1073741823)
+        :else (BaOps/longs m b -2147483648 2147483647))
+      (set! (.-size32 m) (unchecked-add (.-size32 m) (unchecked-add 2 (unchecked-divide (unchecked-add sz32 3) 4))))
+      (set! (.-size64 m) (unchecked-add (.-size64 m) (unchecked-add 2 (unchecked-divide (unchecked-add sz64 7) 8))))))
+
+  ;; caml_ba_deserialize, after the identifier and the 12 bytes of sizes
+  (method ^:public ^:static deserialize [^Marshal m]
+    (let [nd (.u32 m)]
+      (when (or (< nd 0) (> nd 16)) (.failf m "input_value: wrong number of bigarray dimensions"))
+      (let [flags (.u32 m)
+            kind (unchecked-int (bit-and flags 255))
+            layout (unchecked-int (bit-and (bit-shift-right flags 8) 1))
+            dims (new int/1 (unchecked-int nd))]
+        (loop [^int i 0] (when (< i (alength dims)) (let [l (.u16 m)]
+            (aset dims i (unchecked-int (if (== l 65535) (.u64 m) l)))) (recur (unchecked-inc-int i))))
+        (let [n (BaOps/elements dims)]
+          (when (< n 0) (.failf m "input_value: size overflow for bigarray"))
+          (when (> kind 13) (.failf m "input_value: bad bigarray kind"))
+          (let [data (new Object/1 (unchecked-int n))
+                wide (if (or (== kind 8) (== kind 9)) (.u8 m) 0)]
+            (loop [^int k 0] (when (< k (alength data)) (aset data k
+                    (cond
+                      (or (== kind 12) (== kind 3)) (Long/valueOf (.u8 m))
+                      (== kind 2) (Long/valueOf (.s8 m))
+                      (== kind 5) (Long/valueOf (.u16 m))
+                      (== kind 4) (Long/valueOf (.s16 m))
+                      (== kind 13) (Double/valueOf (BaOps/f16Value (unchecked-int (.u16 m))))
+                      (== kind 0) (Double/valueOf (double (Float/intBitsToFloat (unchecked-int (.u32 m)))))
+                      (== kind 6) (Integer/valueOf (unchecked-int (.u32 m)))
+                      (== kind 10) (let [r (new double/1 2)]
+                                     (aset r 0 (double (Float/intBitsToFloat (unchecked-int (.u32 m)))))
+                                     (aset r 1 (double (Float/intBitsToFloat (unchecked-int (.u32 m)))))
+                                     r)
+                      (== kind 1) (Double/valueOf (Double/longBitsToDouble (.u64 m)))
+                      (== kind 7) (I64. (.u64 m))
+                      (== kind 11) (let [r (new double/1 2)]
+                                     (aset r 0 (Double/longBitsToDouble (.u64 m)))
+                                     (aset r 1 (Double/longBitsToDouble (.u64 m)))
+                                     r)
+                      :else (let [x (if (== wide 0) (long (unchecked-int (.u32 m))) (.u64 m))]
+                              (if (== kind 9) (NInt. x) (Long/valueOf x))))) (recur (unchecked-inc-int k))))
+            (BigArray/custom (BigArray. kind layout dims data 0))))))))
