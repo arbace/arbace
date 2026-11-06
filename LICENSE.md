@@ -478,6 +478,13 @@ covers what.
   factories) and NetAccess's cookie access are Arbace's own. Their jdk26u sources join `jdk/forms/` (the
   converted closure, under the same license as above): 82 of http-sources (`src/java.base/share/classes`);
   `conf/net.properties` joins `jdk/data/` (the resource data's item below).
+- javax.script's API and JNDI's names (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F19 (write-ahead)"; recorded by
+  the rule of B7): the variants `overlay/jdk/variants/ScriptEngineManager.ae`, `VersionHelper.ae` and
+  `NamingManager.ae` keep the jdk26u members they replace (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.scripting/share/classes`, `src/java.naming/share/classes`) as repr/java converts them, with the changes
+  they name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
+  Classpath Exception (text below); the rest of the variants is Arbace's own. Their jdk26u sources join `jdk/forms/`
+  (the converted closure, under the same license): 63 of naming-script-sources.
 - `go/arbace/jrt/fdlibm.ae` and the `FdLibm` part of `go/arbace/jrt/math.ae` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1

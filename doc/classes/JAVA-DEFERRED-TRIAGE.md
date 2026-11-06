@@ -874,6 +874,59 @@ Branch `java-jc9c`, 2026-11-06, after the user's JCS159 (a). Two variants of jav
 pass: F6's 56 at about **18**, eval's deferred -20. No command beyond F6's: the same tool build (`bin/javac-vendor
 tool`), then F6's `bin/java-check --levels interp,compiled --only ... --record` covers both tests.
 
+## As built: F19 (write-ahead): javax.script's API, JNDI's names
+
+Branch `java-jc9c`, 2026-11-06, after F12, by the triage's next rate (F13, 10.3 tests a day, waits for JCS161; F19,
+8.4, comes next). Prepared as F12 was; nothing converted, translated or built. F19 needs nothing of JC9 or JC9b
+but F4's permissions (javax.naming's and javax.script's `checkPermission` paths are gone with the Security Manager);
+its closure was computed against the world with JC9, JC9b and F12.
+
+**What comes in** (`test/jrt/jrt_sources.ae`'s `naming-script-sources`, 63 files, 17,814 lines, other modules'
+files translated as java.base's, F5's way): javax.script (12: the API; `ScriptEngineManager`, `AbstractScriptEngine`,
+`SimpleBindings`, `SimpleScriptContext`...), javax.naming (21: `Name`, `CompositeName`, `CompoundName`'s base
+`NameImpl`, `Reference`, `RefAddr` and its two kinds, `InitialContext`, `Context`, the exceptions...),
+javax.naming.directory (9: `Attribute(s)`, `BasicAttribute(s)`, `DirContext`...), javax.naming.ldap (7: `LdapName`,
+`Rdn`, `Rfc2253Parser`, `LdapContext`, controls), javax.naming.spi (9: `NamingManager` and the factories'
+interfaces), com.sun.naming.internal (6: `ResourceManager`, `VersionHelper`, `FactoryEnumeration`,
+`NamingManagerHelper`, `ObjectFactoriesFilter`, `NamedWeakReference`). No provider: JNDI's LDAP, DNS and RMI
+contexts stay out (JCS133's Kerberos neighbourhood; `LdapLoginModule`'s test with them).
+
+| what | how |
+|---|---|
+| variants (3) | `ScriptEngineManager.ae`: no ServiceLoader, so no engine (JDK 26's image holds none: the scripting tests pass vacuously on the JDK too), the no-argument constructor on the system class loader (jrt's threads have no context class loader); `VersionHelper.ae`: the system class loader, no class-path resource files (`jndi.properties`: jrt's ClassLoader has no `getResources`), the JNDI properties one by one (no `System.getProperties`); `NamingManager.ae`: the initial context factories cached by class name (jdk26u's per-loader `ClassLoaderValue` is outside the world; one registry of classes, J2G-SPEC §10.3), the factory the named class's, as jdk26u does when no ServiceLoader provider has the name |
+| outside the world | serialization (`readObject`, `writeObject`: J2G-SPEC §12's stubs), `ObjectFactoriesFilter`'s `ObjectInputFilter` (serialization's filters, by design): `NamingManager.getObjectInstance` reaches it, no test of the area does |
+| j2g | renames `javax/naming/directory/Attributes` → `Naming_Attributes` (java.util.jar's), `javax/naming/Reference` → `Naming_Reference` (jrt's java.lang.ref); `class-supers` + `javax/naming/InitialContext` (EnvClone extends it) |
+
+**Light checks**: print-sources + 63 lines (51 `share:java.naming`, 12 `share:java.scripting`), no line twice;
+`read-jdk --check`: 63 converted, 0 failed, 0 javac errors; `--no-javac`: 63 native, 0 fallbacks, the forms
+identical; the variants applied and parsed (ScriptEngineManager 2/1/0, VersionHelper 3/0/0, NamingManager
+2/1/1); the whole closure with F12's and F19's by the JDK's javac against jrt's overlays: 2,140 files, **0
+errors**. **The algorithms run on Arbace by day**: jdk26u's javax.script and javax.naming classes, renamed into
+one package each (`aajs`, `aaxjn`: run.ae orders packages by imports, and JNDI's import each other in a cycle), the
+variants' changes made in their Java, serialization's members left out, read and interpreted on the gate's
+executable with the tests renamed to them (`.tmp/jc9c/f19p/proof.sh`, `jsproof.sh`, `--load do`): **18 of the 21
+pass** against the JDK's recorded runs (the 12 javax.script tests; t07958, t07960, t07962 with identity hash codes
+masked, t07963, t07967, t07968); t07961 iterates `Locale.getAvailableLocales()`, which jrt's locale selection
+shortens (the locales' class, not F19's); t07964's interpreted `NamingException.toString` reaches
+`super.toString()` of Exception, which the interpreter cannot call on a compiled superclass (the copy's limit:
+compiled, NamingException is jdk26u's); t07869 needs the LDAP provider.
+
+**JCS135's measure**: +17,814 lines (+3.7%). **Expected**: 21 / 21 at most, about **19 / 19** (18 proven, t07964
+compiled). **Night**: F12's (the same conversion, edge, build); then `bin/java-check --levels interp,compiled --only
+'jdk/javax/(script|naming)|jdk/com/sun/security/auth/module/LdapLoginModule' --save .tmp/f19-night/check`.
+
+## F13 (java.lang.management's MXBeans): not built, JCS161
+
+The next area by rate, 31 / 31 tests (ManagementFactory's ThreadMXBean 17, RuntimeMXBean 6, OperatingSystemMXBean 4,
+GarbageCollector and MemoryPool 3, the rest 1). Read on F19's day: java.lang.management is not separable from JMX as
+jdk26u writes it. `ManagementFactory` imports 15 javax.management classes (MBeanServer, ObjectName, StandardMBean,
+JMX's proxies), every `PlatformManagedObject` answers `getObjectName()` (a javax.management.ObjectName), the platform
+beans are found through `sun.management.spi.PlatformMBeanProvider`s by ServiceLoader, and the beans' data come from
+49 natives of `sun.management.VMManagementImpl` and `ThreadImpl` (HotSpot's jmm interface: thread contention
+counts, monitors and synchronizers owned, deadlocks, CPU times, GC and pool statistics). JCS95 (a) and JCS128 (a)
+put JMX by design; F13 needs a line between them (JCS161) and jrt's own runtime facts (its monitors and locks
+record no owner chains, its threads no CPU time): days of Go beside the Java, which a light day cannot prove.
+
 ## 6. Findings on the way
 
 - `:j2g-unresolved` (305 compiled, kind `:world`) is the compiled level's catch-all for "a type the world does
@@ -907,6 +960,14 @@ tool`), then F6's `bin/java-check --levels interp,compiled --only ... --record` 
   `System` has no `Logger`, `Logger.Level` or `LoggerFinder`). F3's new files were then checked by hand against
   jrt's manifest for `System`'s, `Thread`'s and `Runtime`'s members (only `getLogger` missing). The scan should
   read `go/arbace/jrt/manifest.edn`'s nested types and members; the next widening's day can add it.
+- (F19's day) The interpreter's view of `Class` and `Module` lacks `getResourceAsStream` ("No accessible method
+  getResourceAsStream in java.lang.Class"), which the compiled program has (j2g's `out.ae` adds it to every
+  class): a Java form calling it works compiled and fails interpreted. Its member tables
+  (`test/jrt/tables.ae`) could list it as the compiled side has it; a JC4-style finding for the interpreter.
+- (F19's day) `test/java/run.ae` orders a test's packages by their imports and takes the first by name when they
+  import each other in a cycle; JDK-style package cycles (javax.naming and its spi, internal) then load in an
+  order that fails ("Class ... is not defined yet"). No jtreg test of the corpus has such a cycle (the day's proof
+  did); `--load do` with the packages' classes entered together across packages would take it.
 - (F12's day) jrt's hand-written `System` has no `getProperties` for translated code (SeedGenerator's overlay says
   so since F1): a JDK class reading its properties as a `Properties` (`sun.net.www.http.HttpClient`'s static
   initializer) needs a variant reading them one by one. The closure scan's member check (F3's finding: the scan
@@ -926,10 +987,31 @@ tool`), then F6's `bin/java-check --levels interp,compiled --only ... --record` 
 
 ## Proposed
 
-JCS158-JCS159 are F6's ("As built: F6"), JCS160 F12's ("As built: F12 (write-ahead)"), branch `java-jc9c`;
+JCS161 is F13's ("F13 (java.lang.management's MXBeans): not built, JCS161"); JCS158-JCS159 are F6's ("As built:
+F6"), JCS160 F12's ("As built: F12 (write-ahead)"), branch `java-jc9c`;
 JCS155-JCS157 are F3's ("As built: F3 (write-ahead)", branch `java-jc9-tls`); JCS143-JCS154 are JC9b's
 (`java-jc9b`). JCS140-JCS142 are F4's and F2's ("As built: F4 (write-ahead)", "As built: F2 (write-ahead)", branch
 `java-jc9-pki`); JCS136-JCS137 are F1's (`java-jc9-jca`), JCS138-JCS139 F5's (`java-jc9-logging`).
+
+### JCS161 java.lang.management without JMX, or with JMX's core (F13)
+
+JCS95 (a) put JMX (javax.management) by design and JCS128 (a) deferred java.lang.management's MXBeans (31 / 31 tests);
+jdk26u's java.lang.management names JMX throughout (ManagementFactory's MBean server and proxies, every bean's
+`getObjectName`, the platform beans' composite data for `ThreadInfo` and `MemoryUsage`).
+- (a) java.lang.management alone, JMX cut by variants: `ManagementFactory`'s `getXxxMXBean`s and
+  `getPlatformMXBean(s)` over jrt's own implementations of the interfaces (jdk26u's `sun.management` impls where
+  their Java stands, `ThreadImpl`, `RuntimeImpl`, `MemoryImpl`, with jrt's natives in Go: thread ids and states,
+  stack traces, uptime and input arguments, the process id, Go's `runtime/metrics` for memory and GC, and for the
+  contention, monitor and deadlock facts what jrt's monitors and locks can record), `getObjectName` and
+  `getPlatformMBeanServer` throwing `UnsupportedOperationException`. Cost: about 5 days (2 of Go: owners and waiters
+  recorded by jrt's monitors, which also slows every monitor a little); about 22 of the 31 (GetObjectName and the
+  MBean-server tests stay by design).
+- (b) With JMX's core (ObjectName, the MBean server, StandardMBean, the open types and MXBean mapping: about 250
+  files, 70k lines): every java.lang.management test and part of javax.management's own (`:jmx`'s 34 / 37 then
+  deferred, not by design). Cost: about 10 days, reversing JCS95 (a) in part, +15% on the closure.
+- (c) Deferred: java.lang.management stays out until JMX is decided again.
+- *Recommended: (a)*: the MXBeans are what a program asks of its runtime (threads, memory, uptime), and they need
+  no MBean server; JMX's remote management is a JVM's, as JCS95 (a) found.
 
 ### JCS158 javac's API tests at the compiled level (F6)
 
