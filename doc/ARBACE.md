@@ -65,7 +65,11 @@ code. Three kinds of things live here:
   `desugar.ae` (HF5, the match compiler) and `tostg.ae` (HF6, CorePrep, CoreToStg, Unarise) follow GHC 9.14.1's
   `compiler/GHC/HsToCore/Match*.hs`, `GuardedRHSs.hs`, `ListComp.hs`, `compiler/GHC/CoreToStg/Prep.hs`,
   `CoreToStg.hs`, `compiler/GHC/Stg/Unarise.hs`, `Stg/FVs.hs` from the same tarball (2026-11-05, written after their
-  algorithms, carrying GHC's notice), `stgcmp.ae` is Arbace's own),
+  algorithms, carrying GHC's notice), `stgcmp.ae` is Arbace's own; `simpleopt.ae` (2026-11-06) ports
+  `compiler/GHC/Core/SimpleOpt.hs` with the occurrence information of `Core/Opt/OccurAnal.hs` and the compulsory
+  unfoldings of `Types/Id/Make.hs`, `constfold.ae` (2026-11-06) the `Float#`/`Double#` rules of
+  `compiler/GHC/Core/Opt/ConstantFold.hs` with `Types/Literal.hs`'s conversions, both from the same tarball and carrying
+  GHC's notice; `front.ae`, the front end's driver, is Arbace's own),
   `deriv.ae` (HF4, 2026-11-05) ports the generators of `compiler/GHC/Tc/Deriv/Generate.hs` (Eq, Ord, Enum, Bounded, Ix, Read,
   Show) and `Deriv/Functor.hs` (Functor, Foldable, Traversable) from the same tarball, the file carrying GHC's notice;
   `Deriv/Infer.hs` and `Deriv.hs` read as the specification of the contexts and strategies),

@@ -629,6 +629,15 @@ covers what.
   `compiler/GHC/CoreToStg/Prep.hs`, `CoreToStg.hs`, `compiler/GHC/Stg/Unarise.hs`, `Stg/FVs.hs`,
   `compiler/GHC/Types/Id/Make.hs`'s dictionary selectors), the files carrying GHC's notice (the Glasgow Haskell
   Compiler License, "GHC: the Glasgow Haskell Compiler License" below); `stgcmp.ae`, the STG judge, is Arbace's own.
+- `arbace/repr/haskell/simpleopt.ae` and `arbace/repr/haskell/constfold.ae` (the front end's simple optimiser and the
+  floating-point primops' built-in rules, HF5-HF6's decision 2 (a); doc/haskell/FRONTEND-SURVEY.md, "As built: HF7 (first
+  light)"): ports of GHC 9.14.1 (the same tarball and pin) by hand on 2026-11-06: `compiler/GHC/Core/SimpleOpt.hs`
+  (`simpleOptPgm`, `simple_opt_expr`, `simple_app`, `simple_opt_bind`, `simple_bind_pair`, `simple_out_bind_pair`,
+  `safe_to_inline`, `exprIsConApp_maybe`'s constructor case), the occurrence information of
+  `compiler/GHC/Core/Opt/OccurAnal.hs`, the compulsory unfoldings of `compiler/GHC/Types/Id/Make.hs`, and
+  `compiler/GHC/Core/Opt/ConstantFold.hs`'s `Float#`/`Double#` rules with `compiler/GHC/Types/Literal.hs`'s
+  conversions, the files carrying GHC's notice (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell
+  Compiler License" below). `front.ae` (the driver) and `test/haskell/run_record.ae` are Arbace's own.
 - `arbace/repr/haskell/deriv.ae` (repr/haskell's deriving, HF4, doc/haskell/FRONTEND-SURVEY.md, "As built: HF4", HFS5 (a)):
   ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
   `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): the generators of
