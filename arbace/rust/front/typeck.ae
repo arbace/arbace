@@ -657,6 +657,12 @@
   "A value path `Type::name` (its prefix a type): the associated function an inherent impl or a trait gives the type"
   [e]
   (let [path (:path e) segs (:segs path)]
+    (or
+     ;; a longer path an expansion wrote (`$crate::vec::Vec::new`): its prefix a std or local type by the written names
+     (when (> (count segs) 2)
+       (let [r (c/res-def (assoc path :segs (vec (butlast segs)) :res nil :span nil))]
+         (when (and (#{:ext :local} (first r)) (#{"Struct" "Enum" "Union"} (nth r 2)))
+           (probe-assoc-fn [:adt (second r) (fresh-args (second r))] (:ident (peek segs))))))
     (when (= 2 (count segs))
       (let [sp (:span path)
             base-name (:ident (first segs))
@@ -673,7 +679,7 @@
                                     (cond (str/starts-with? (str k) "AssocConst") (erase (c/type-of item))
                                           (= "AssocFn" (str k)) [:fndef item (fresh-args item)]
                                           :else nil)))))
-                      c/*scope*))))))))
+                      c/*scope*)))))))))
 
 (defn- std-value-ty
   "A std value path's type: a function item, a constructor (a tuple variant's as a function item, a unit one as its ADT)"
@@ -928,6 +934,8 @@
             tr (some (fn [o] (when (and (= :trait (first o)) (fn-traits (first (second o))) (= ex (shallow (first (second (second o)))))) (second o))) obs)
             out (some (fn [o] (when (and (= :proj (first o)) (= "core::ops::function::FnOnce::Output" (second o)) (= ex (shallow (first (nth o 2))))) (nth o 3))) obs)]
         (when tr (let [args (shallow (second (second tr)))] (when (= :tuple (first args)) [(second args) (or out (fresh :ty))]))))
+      ;; a fn pointer: its signature
+      (= :fnptr (first ex)) [(:inputs (second ex)) (:output (second ex))]
       ;; a return-position impl Trait: its bounds
       (= :opaque (first ex))
       (let [cs (second ex)
@@ -1033,9 +1041,12 @@
                                                              [["Borrow" [:ref [:re-erased] (boolean *mutable-place*) st]]])))
                              (shallow [:proj (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr))) [st it]]))
                          [:unknown]))))
+          ;; check_expr_tuple: an element with an expected type is coerced to it (and has its type)
           :tup (let [ex (some-> expected shallow)
                      exs (when (= :tuple (first ex)) (second ex))]
-                 [:tuple (vec (map-indexed (fn [i x] (check-expr x (nth exs i nil))) (:exprs e)))])
+                 [:tuple (vec (map-indexed (fn [i x] (let [ety (nth exs i nil) t (check-expr x ety)]
+                                                       (if (and ety (not (tvar? (shallow ety))) (coerce! x t ety)) ety t)))
+                                           (:exprs e)))])
           :array (let [ex (some-> expected shallow)
                        elt (if (#{:array :slice} (first ex)) (second ex) (fresh :ty))]
                    (doseq [x (:exprs e)] (let [t (check-expr x elt)] (coerce! x t elt)))
