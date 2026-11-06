@@ -25,6 +25,24 @@
 (def ^:dynamic *attr-groups* nil)
 (def ^:dynamic *typeids* nil)   ; atom: {typeinfo-name-or-null id}
 (def ^:dynamic *fn* nil)        ; the function being lowered: atom of its state
+;; how a va_list is held (LL6): :native, the lowered C's own __builtin_va_list in the IR's va_list memory (gcc's SysV va_list is
+;; the IR's { i32, i32, ptr, ptr }, so clang's inline va_arg code reads it); :sysv-ci, the IR's SysV va_list kept by the lowering
+;; for ci, whose va_list is a pointer to the next 8-byte slot (doc/C23-SURVEY.md §7): gp_offset 48 and fp_offset 176 (every
+;; register used), overflow_arg_area that pointer, so clang's inline code reads every argument from ci's varargs area, and a
+;; va_list passed to libc's v* functions passed as its overflow_arg_area (va-list-args); llvmi binds it (arbace.llvm.run)
+(def ^:dynamic *va-model* :native)
+;; blockaddress and indirectbr (LL6): a block's address is a token, a small integer as a pointer distinct for each (function, block) of the
+;; module, and indirectbr a switch over its destinations' tokens: LangRef lets a blockaddress be only compared, stored and jumped to by
+;; its function's indirectbr, so no C extension is needed (gcc's &&label is not a file-scope constant, and clang hoists the tables)
+(def ^:dynamic *blockaddrs* nil) ; atom: [function-name label] -> token
+(defn- block-token [f l]
+  (or (get @*blockaddrs* [f l]) (let [n (inc (count @*blockaddrs*))] (swap! *blockaddrs* assoc [f l] n) n)))
+(def va-list-args
+  "libc's functions that take a va_list, by name: the index of that argument (C11 7.21.6, 7.29.2, POSIX, BSD's err.h)."
+  {"vprintf" 1 "vfprintf" 2 "vsprintf" 2 "vsnprintf" 3 "vasprintf" 2 "vdprintf" 2 "vscanf" 1 "vfscanf" 2 "vsscanf" 2
+   "vwprintf" 1 "vfwprintf" 2 "vswprintf" 3 "vwscanf" 1 "vfwscanf" 2 "vswscanf" 2 "vsyslog" 2 "verr" 2 "verrx" 2 "vwarn" 1 "vwarnx" 1})
+(defn- va-overflow "The overflow_arg_area of the SysV va_list at p (its second pointer-sized field), an lvalue." [p]
+  (list 'aget (list 'conv '(* (* void)) p) 1))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Names
@@ -469,7 +487,7 @@
       (let [[_ [t1 a b]] (split-flags (rest v))] (binop h t1 (value a t1) (value b t1)))
       (= h 'dso_local_equivalent) (value (second v) t)
       (= h 'no_cfi) (value (second v) t)
-      (= h 'blockaddress) (refuse :blockaddress "blockaddress")
+      (= h 'blockaddress) (let [[_ f l] v] (list 'conv '(* void) (list 'conv 'unsigned-long (block-token (gname-str f) l))))
       (= h 'asm) (refuse :inline-asm "inline assembly")
       (#{'! '!DI} h) (refuse :metadata "a metadata value")
       :else (refuse :const "the constant " (pr-str v)))))
@@ -584,9 +602,22 @@
       (re-matches #"llvm\.is\.constant\..*" nm) (set-res (int-lit 0 1))
       (re-matches #"llvm\.objectsize\..*" nm) (set-res (int-lit (if (true? (peek (nth args 1))) 0 -1) (int-bits rt)))
       (#{"llvm.trap" "llvm.ubsantrap" "llvm.debugtrap"} nm) ['(__builtin_trap)]
+      (and (= *va-model* :sysv-ci) (re-matches #"llvm\.va_(start|end|copy).*" nm))
+      (case (nth parts 1)
+        "va_start" [(list 'let [(list 'c/var (with-meta 'cx$va {:tag '__builtin_va_list}))]
+                          (list '__builtin_va_start 'cx$va (or (:last-param @*fn*) (refuse :va "va_start without a named parameter")))
+                          (list 'set! (list 'aget (list 'conv '(* unsigned) (a 0)) 0) (int-lit 48 32))
+                          (list 'set! (list 'aget (list 'conv '(* unsigned) (a 0)) 1) (int-lit 176 32))
+                          (list 'set! (va-overflow (a 0)) (list 'conv '(* void) 'cx$va))
+                          (list 'set! (list 'aget (list 'conv '(* (* void)) (a 0)) 2) '(conv (* void) 0)))]
+        "va_end" []
+        "va_copy" [(list '__builtin_memcpy (a 0) (a 1) 24)])
       (re-matches #"llvm\.va_start.*" nm) [(list '__builtin_va_start (list 'deref (list 'conv '(* __builtin_va_list) (a 0))) (or (:last-param @*fn*) (refuse :va "va_start without a named parameter")))]
       (re-matches #"llvm\.va_end.*" nm) [(list '__builtin_va_end (list 'deref (list 'conv '(* __builtin_va_list) (a 0))))]
       (re-matches #"llvm\.va_copy.*" nm) [(list '__builtin_va_copy (list 'deref (list 'conv '(* __builtin_va_list) (a 0))) (list 'deref (list 'conv '(* __builtin_va_list) (a 1))))]
+      ;; LL6: C's builtins, with a constant level as LangRef requires (ci answers 0 for the return address)
+      (re-matches #"llvm\.returnaddress.*" nm) (set-res (list '__builtin_return_address (a 0)))
+      (re-matches #"llvm\.frameaddress.*" nm) (set-res (list '__builtin_frame_address (a 0)))
       (re-matches #"llvm\.stacksave.*" nm) (set-res '(conv (* void) 0))
       (re-matches #"llvm\.stackrestore.*" nm) []
       (re-matches #"llvm\.([su])(add|sub|mul)\.with\.overflow\.i[0-9]+" nm)
@@ -596,6 +627,19 @@
             outp (if sgn (list 'conv (list '* (stype (container-bits wd))) (list 'addr (list '.-f0 res))) (list 'addr (list '.-f0 res)))]
         (when-not (#{8 16 32 64 128} wd) (refuse :intrinsic nm))
         [(list 'set! (list '.-f1 res) (list (symbol (str "__builtin_" op "_overflow")) (v 0) (v 1) outp))])
+      ;; LL6: the saturating add and sub (LangRef "Saturation Arithmetic Intrinsics"): the overflow builtins' result, or the bound the
+      ;; exact result passed (unsigned: the maximum for add, 0 for sub; signed: by the first operand's sign, the only one possible)
+      (re-matches #"llvm\.([su])(add|sub)\.sat\.i[0-9]+" nm)
+      (let [[_ sg op] (re-matches #"llvm\.([su])(add|sub)\..*" nm)
+            wd (w 0) sgn (= sg "s") ut (utype wd) st (stype wd)
+            _ (when-not (#{8 16 32 64 128} wd) (refuse :intrinsic nm))
+            umax (list 'conv ut -1)
+            smax (list 'conv st (list '>> umax 1))
+            bound (cond (not sgn) (if (= op "add") umax (list 'conv ut 0))
+                        :else (list '? (list '< (sval (a 0) wd) 0) (list 'conv ut (list '- (list '- smax) 1)) (list 'conv ut smax)))
+            v #(if sgn (sval (a %) wd) (uval (a %) wd))]
+        (set-res (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx {:tag (if sgn st ut)}))]
+                                        (list '? (list (symbol (str "__builtin_" op "_overflow")) (v 0) (v 1) '(addr cx)) bound (list 'conv ut 'cx))))))
       (re-matches #"llvm\.(smax|smin|umax|umin)\..*" nm)
       (let [op (subs (second (re-matches #"llvm\.([a-z]+)\..*" nm)) 1) sgn (str/starts-with? (subs nm 5) "s") wd (w 0)
             v #(if sgn (sval (a %) wd) (uval (a %) wd))]
@@ -838,6 +882,9 @@
                              (let [bt (param-attr a :byval) v (typed-value [(first a) (peek a)])]
                                (if bt (list 'deref (list 'conv (list '* (ctype bt)) v)) v))))
             call-sig [rt (vec (map first args)) (boolean variadic) (vec (map #(param-attr % :byval) args))]
+            arg-exprs (if-let [i (and (= *va-model* :sysv-ci) gname (= (quote llvm/declare) (first (:form info))) (va-list-args gname))]
+                        (if (< i (count arg-exprs)) (update arg-exprs i va-overflow) arg-exprs)
+                        arg-exprs)
             direct (and info (= (:kind info) :fn)
                         (let [[drt dps dvar dbv] (:sig info)]
                           (and (= drt rt) (= dvar (boolean variadic))
@@ -1028,8 +1075,18 @@
                                (cons '(default) (edge d))))])
       unreachable ['(__builtin_trap)]
       resume [(list 'cx$resume (list '.-f0 (value (nth x 2) (second x)))) (dummy-return)]
-      indirectbr (refuse :indirectbr "indirectbr")
-      va_arg (refuse :va "the va_arg instruction")
+      indirectbr (let [[_ t p ls] x]
+                   [(apply list 'switch (list 'conv 'unsigned-long (value p t))
+                           (concat (mapcat (fn [l] (cons (list 'case (block-token (:name @*fn*) l)) (edge l))) (distinct ls))
+                                   ['(default) '(__builtin_trap)]))])
+      ;; va_arg (LL6): from the overflow area, the next slot of size rounded to 8 (ci's layout, no 16-byte alignment); natively gcc's
+      va_arg (let [[_ [pt p] t] x]
+               (if (= *va-model* :sysv-ci)
+                 (let [ap (value p pt) [s _] (size-align t)]
+                   (set (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$vp {:tag '(* void)}) (va-overflow ap))]
+                                               (list 'set! (va-overflow ap) (list 'conv '(* void) (list '+ '(conv (* char) cx$vp) (* 8 (quot (+ (long s) 7) 8)))))
+                                               (list 'deref (list 'conv (list '* (ctype t)) 'cx$vp))))))
+                 (set (list 'va-arg (list 'deref (list 'conv '(* __builtin_va_list) (value p pt))) (ctype t)))))
       (extractelement-dynamic shufflevector) (refuse :vector (str h))
       (refuse :instruction "the instruction " h))))
 
@@ -1062,7 +1119,7 @@
                         (if bt
                           {:c (with-meta (symbol (str sym "$v")) {:tag (ctype bt)}) :local sym :byval true}
                           {:c (with-meta sym {:tag (ctype t)})}))))
-        state (atom {:void (= rt 'void) :allocas [] :phis {} :block nil :entry-block true
+        state (atom {:void (= rt 'void) :name (gname-str (second f)) :allocas [] :phis {} :block nil :entry-block true
                      :last-param (some-> (last (remove :byval params)) :c (vary-meta (constantly nil)))})
         _ (doseq [b blocks]
             (let [[_ l & is] b]
@@ -1129,7 +1186,7 @@
                                  :sig (when (#{'llvm/declare 'llvm/define} (first f)) (fn-sig f))}])))]
 
     (when (some #(= (first %) 'llvm/module-asm) forms) (refuse :inline-asm "module asm"))
-    (binding [*types* types *attr-groups* groups *structs* (atom {:tags {} :defs [] :n 0})
+    (binding [*types* types *attr-groups* groups *blockaddrs* (atom {}) *structs* (atom {:tags {} :defs [] :n 0})
               *globals* (into globals (for [[s info] globals :when (= (first (:form info)) 'llvm/alias)]
                                         (let [[_ _ t [_ target]] (:form info)
                                               tg (when (or (symbol? target) (and (seq? target) (= (first target) 'g))) (get globals (gname-str target)))]

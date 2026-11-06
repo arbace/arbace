@@ -34,7 +34,9 @@
          (cond (= op '=) false
                (str/starts-with? n "dbg_") false
                (void-ops op) false
-               ('#{call invoke callbr} op) (not= 'void (first (remove keyword? (rest inst))))
+               ('#{call invoke callbr} op) (let [t (first (remove keyword? (rest inst)))]
+                                          ;; a variadic callee's type is written (fn RT ...): its return type decides
+                                          (not= 'void (if (and (seq? t) (= 'fn (first t))) (second t) t)))
                :else true))))
 
 (defn- number-define
@@ -47,12 +49,14 @@
         needs? (some (fn [b] (or (and (not= b (first body)) (nil? (second b))) (some #(and (value-inst? %) true) (drop 2 b)))) body)]
     (if-not needs?
       f
+      ;; LLParser's numbering: an explicitly numbered value or block (%N, as a mixed text writes) takes N and the next unnamed one N+1
       (let [n (atom -1) nx (fn [] (symbol (str "%" (swap! n inc))))
-            ps (mapv (fn [p] (if (and (vector? p) (not (and (> (count p) 1) (named? (peek p))))) (conj p (nx)) p)) (nth f 3))
+            seen (fn [s] (when-let [[_ d] (and (symbol? s) (re-matches #"%([0-9]+)" (name s)))] (reset! n (Long/parseLong d))) s)
+            ps (mapv (fn [p] (if (and (vector? p) (not (and (> (count p) 1) (named? (peek p))))) (conj p (nx)) (do (when (vector? p) (seen (peek p))) p))) (nth f 3))
             body' (vec (map-indexed
                         (fn [i b]
-                          (let [lbl (if (nil? (second b)) (let [l (nx)] (when (pos? i) l)) (second b))]
-                            (apply list 'block lbl (map #(if (value-inst? %) (list '= (nx) %) %) (drop 2 b)))))
+                          (let [lbl (if (nil? (second b)) (let [l (nx)] (when (pos? i) l)) (seen (second b)))]
+                            (apply list 'block lbl (doall (map #(cond (value-inst? %) (list '= (nx) %) (and (seq? %) (= '= (first %))) (do (seen (second %)) %) :else %) (drop 2 b))))))
                         body))
             idx (.indexOf ^java.util.List (vec f) :body)]
         (apply list (assoc (vec f) 3 ps (inc idx) body'))))))
@@ -105,10 +109,12 @@
   "The module's C text by the shared lowering (arbace.cpp.lower's lower-file, with run-inits between the forms and the print)."
   [forms ^String c-name]
   (try
-    (let [[ff cs] (lower/lower-module forms c-name)
-          ns (str "c.llvmi." (str/replace (str/replace c-name #"\.c$" "") #"[^A-Za-z0-9_]" "_"))
-          [ff2 cs2] (rc/read-unit-text (lower/c-forms-text ns ff cs))]
-      {:c (rc/print-c ff2 (run-inits cs2))})
+    ;; ci holds a va_list as a pointer to its next slot: the IR's SysV va_list kept (arbace.cpp.lower/*va-model*, LL6)
+    (binding [lower/*va-model* :sysv-ci]
+      (let [[ff cs] (lower/lower-module forms c-name)
+            ns (str "c.llvmi." (str/replace (str/replace c-name #"\.c$" "") #"[^A-Za-z0-9_]" "_"))
+            [ff2 cs2] (rc/read-unit-text (lower/c-forms-text ns ff cs))]
+        {:c (rc/print-c ff2 (run-inits cs2))}))
     (catch Throwable e
       (if-let [c (or (:lower/refused (ex-data e)) (:llvm/refused (ex-data e)))]
         {:refused c :message (.getMessage e)}

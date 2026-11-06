@@ -41,6 +41,9 @@ src=${LLVM_SRC:-$main/.tmp/llvm/src}/llvm-project-23.1.4.src
 jobs=${LLVMI_JOBS:-3} threads=${LLVMI_THREADS:-2}
 all_corpora=ee,c-O0,c-O2,cpp
 ref=$root/test/llvm/ref-lli23.edn
+# the torture corpus (tx-O0, tx-O2): ccorpus2 in Go's module cache, as bin/ci's corpora (test/c/corpora.edn's :torture-execute)
+tx=${LLVMI_TORTURE:-${GOMODCACHE:-/root/go/pkg/mod}/modernc.org/ccorpus2@v1.6.0/assets/gcc-9.1.0/gcc/testsuite/gcc.c-torture/execute}
+tx_flags="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=return-mismatch -Wno-error=incompatible-function-pointer-types"
 quiet() { grep -v '^Reflection warning\|recur arg for primitive\|^Auto-boxing' || true; }
 tool() { # an Arbace tool on the tools' host, its compiler's warnings filtered out of stderr
   local e st; e=$(mktemp "$TMPDIR/llvmi-err.XXXXXX")
@@ -52,6 +55,7 @@ tool() { # an Arbace tool on the tools' host, its compiler's warnings filtered o
 modules() {
   local work=$1 corpora=$2 c f n
   mkdir -p "$work/ir"
+  work=$(cd "$work" && pwd)
   : > "$work/modules.tsv"
   IFS=, read -r -a cs <<< "$corpora"
   for c in "${cs[@]}"; do
@@ -71,6 +75,19 @@ modules() {
           n=$c.$(basename "$(dirname "$f")").$(basename "$f" .c)
           (cd "$root" && clang -${c#c-} -S -emit-llvm -std=gnu23 -w -I test/c/synth -ffile-prefix-map="$root/"= \
              -o "$work/ir/$n.ll" "${f#$root/}") 2> "$work/ir/$n.clang.log" || { rm -f "$work/ir/$n.ll"; continue; }
+          printf '%s\t%s\n' "$n" "$work/ir/$n.ll"
+        done >> "$work/modules.tsv" ;;
+      tx-O0|tx-O2)
+        # gcc 9.1.0's gcc.c-torture/execute (test/c/corpora.edn's :torture-execute, ccorpus2 at its pin) with ieee/, not builtins/ (its
+        # tests link builtins/lib/): through clang 23 in gnu17 with gcc's leniencies as warnings (implicit declarations, implicit int,
+        # int conversions: the 1990s tests rely on them); a program clang refuses is not a module
+        [ -d "$tx" ] || { echo "llvmi: no $tx (Go's module cache: modernc.org/ccorpus2@v1.6.0)" >&2; exit 1; }
+        (cd "$tx" && ls *.c ieee/*.c | LC_ALL=C sort) | while read -r f; do
+          n=$c.$(echo "${f%.c}" | tr / .)
+          [ -z "${only_ids:-}" ] || grep -qxF "$n" "$only_ids" || continue  # --only: compile only the ids asked
+          (cd "$tx" && clang -${c#tx-} -S -emit-llvm -std=gnu17 -w -fno-strict-aliasing $tx_flags \
+             -ffile-prefix-map="$tx/"= -o "$work/ir/$n.ll" "$f") 2> "$work/ir/$n.clang.log" || { rm -f "$work/ir/$n.ll"; continue; }
+          grep -q '^define .*@main(' "$work/ir/$n.ll" || { rm -f "$work/ir/$n.ll"; continue; }
           printf '%s\t%s\n' "$n" "$work/ir/$n.ll"
         done >> "$work/modules.tsv" ;;
       cpp)
@@ -132,7 +149,7 @@ case $cmd in
       case $1 in --corpus) corpora=$2; shift 2 ;; --only) only=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;; *) echo "llvmi record-ref: $1?" >&2; exit 2 ;; esac
     done
     work=$root/.tmp/llvmi/ref
-    rm -rf "$work"; modules "$work" "$corpora"; only_filter "$work" "$only"
+    rm -rf "$work"; only_ids=$only modules "$work" "$corpora"; only_filter "$work" "$only"
     cut -f1,2 "$work/modules.tsv" | tr '\t' '\n' | xargs -d '\n' -n 2 -P "$jobs" bash -c 'run1 "$1" '"$lli"' "$2"' _ > "$work/lli.tsv"
     "$lli" --version | grep -m1 -i 'version' > "$work/lli.version"
     # the second opinion (LLS8 (a)'s reference): the same module built by clang 23 -O0 and run; recorded as whether it agrees with lli
@@ -156,7 +173,7 @@ case $cmd in
     work=${LLVMI_WORK:-$root/.tmp/llvmi/$level}
     if [ -z "$judge" ]; then
       rm -rf "$work"; mkdir -p "$work"
-      modules "$work" "$corpora"; only_filter "$work" "$only"
+      only_ids=$only modules "$work" "$corpora"; only_filter "$work" "$only"
       if [ -n "$only" ] || [ "$corpora" != "$all_corpora" ]; then echo "${only:-all} $corpora" > "$work/subset"; fi
       "$root/bin/ci" musl prepare > "$work/musl.log" 2>&1 || { cat "$work/musl.log" >&2; exit 1; }
       t0=$(date +%s)
