@@ -944,8 +944,9 @@ the general form the standard (or clang, where named) gives:
 | check (2026-11-06, light) | result |
 |---|---|
 | `bin/cppi codegen-check` over `test/cpp/codegen` (130 of G1-G4 and nine new: `hdr-iostream`, `va-args`, `tmpl-member-class`, `initlist`, `newdelete-class`, `udl`, `brace-elision`, `spaceship`, `init-priority`) | **138 of 139 pass all three levels** (`hdr-string` now among them); `hdr-vector` passes run and native, known (`trailing-requires`, G5.6); generate and lower 308 s, gcc, clang and runs 12 s |
+| `bin/repr-cpp native-check samples` and `native` after the parser's changes (its new fields underscored, a qualified class definition's lookup scope) | 9 of 9 the same, 68 of 68 items; 1 of 1, 30 of 30 |
 | the corpus's every fifth (42 files, 2 jobs) at the branch's start (G4's head) | **7 of 42** pass all three levels |
-| the same at the branch's head | **32 of 42** (76 %); generate and lower 661 s for the 42 (two jobs for the runs), gcc, clang and runs 6 s; 18 and 25 at intermediate measures of the branch |
+| the same at the branch's head | **32 of 42** (76 %); generate and lower 661 s for the 42 (two jobs for the runs), gcc, clang and runs 6 s; 25, 29 and 30 at intermediate measures of the branch |
 | the samples that were on clang's route (`test/cpp/samples`, `test/cpp/runtime/samples`: 16 files) | **7 of 16** (G4: 5): `auto`, `bitfields`, `classes`, `p1-first`, `vexing`, `uncaught`, and `ctor-throw` (init_priority, constructor attributes); `decls` and `layouts` have no `main`; `hello` an overload set's conversion among `<string>`'s and `<map>`'s `operator<<` candidates, `io` `iterator_traits` of a class iterator in `std::sort`'s internals, `atomics` `__atomic_fetch_sub`, `threads` and `thread-throw` `std::thread`'s invocation, `coroutine` `co_yield`, `library` a parser decline |
 
 The corpus sample's files that do not pass at the branch's head, by their first refusal: coroutines (`func-params-08`,
