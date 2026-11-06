@@ -440,7 +440,10 @@
     (if (and (> (long p) (long np)) (not (const? n)))
       (str "(" (fmt-node n 0) ")")
       (case (if (const? n) :const (:op n))
-        (:local :global :place-local :place-global) (let [nm (e/o (:obj n) :name)] (if (str/starts-with? nm "~b") "_" nm))
+        (:local :global :place-local :place-global) (let [o (:obj n) nm (e/o o :name)]
+                                                      (cond (str/starts-with? nm "~b") "_"
+                                                            (e/o o :inl-pkg) (str (e/o o :inl-pkg) "." nm)
+                                                            :else nm))
         :func (let [o (:obj n) pk (e/o o :pkg)]
                 (if (and pk (not= pk (:local-pkg *ctx*)))
                   (str (last (str/split (str pk) #"/")) "." (e/o o :name))
@@ -1610,7 +1613,7 @@
           (if (has-attr? l attr-escapes)
             (if (name-loc? l)
               (when (and (pos? (long *m*)) (not (str/starts-with? (e/o n :name) ".")))
-                (warn! (lget l :line) (str "moved to heap: " (e/o n :name))))
+                (warn! (lget l :line) (str "moved to heap: " (if (e/o n :inl-pkg) (str (e/o n :inl-pkg) "." (e/o n :name)) (e/o n :name)))))
               (when (and (pos? (long *m*)) (not wrapper))
                 (warn! (lget l :line) (if (:append n) "append escapes to heap" (str (fmt-node n 0) " escapes to heap")))))
             (when (and (pos? (long *m*)) (not (name-loc? l)) (not wrapper))
@@ -1965,6 +1968,28 @@
    "runtime" #{"KeepAlive" "slicebytetostringtmp"}
    "sync/atomic" #{"AddInt32" "AddInt64" "AddUint32" "AddUint64" "AddUintptr" "AndInt32" "AndInt64" "AndUint32" "AndUint64" "AndUintptr" "CompareAndSwapInt32" "CompareAndSwapInt64" "CompareAndSwapUint32" "CompareAndSwapUint64" "CompareAndSwapUintptr" "LoadInt32" "LoadInt64" "LoadPointer" "LoadUint32" "LoadUint64" "LoadUintptr" "OrInt32" "OrInt64" "OrUint32" "OrUint64" "OrUintptr" "StoreInt32" "StoreInt64" "StoreUint32" "StoreUint64" "StoreUintptr" "SwapInt32" "SwapInt64" "SwapUint32" "SwapUint64" "SwapUintptr"}})
 
+(def ^:private cheap-calls
+  "hairyVisitor's cheap calls (amd64: CanMergeLoads): counted as one node."
+  {"encoding/binary" (set (for [e ["littleEndian" "bigEndian"] f ["Uint64" "Uint32" "Uint16" "PutUint64" "PutUint32" "PutUint16"
+                                                                  "AppendUint64" "AppendUint32" "AppendUint16"]]
+                            (str e "." f)))
+   "internal/byteorder" (set (for [e ["LE" "BE"] f ["Uint64" "Uint32" "Uint16" "PutUint64" "PutUint32" "PutUint16"
+                                                    "AppendUint64" "AppendUint32" "AppendUint16"]]
+                              (str e f)))
+   "internal/abi" #{"NoEscape"}})
+
+(defn- fn-pkg-name
+  "A function record's package path and its name in it."
+  [f]
+  (if (or (fn-get f :foreign) (fn-get f :foreign-body))
+    [(fn-get f :pkg-path) (fn-get f :local-name)]
+    [(:local-pkg *ctx*) (fn-get f :name)]))
+
+(defn- cheap-call? [f]
+  (let [[p n] (fn-pkg-name f)]
+    (boolean (or (contains? (get cheap-calls p) n)
+                 (and (= p "internal/abi") (str/starts-with? (str n) "EscapeNonString["))))))
+
 (defn- intrinsic? [f]
   (boolean (if (or (fn-get f :foreign) (fn-get f :foreign-body))
              (contains? (get intrinsics (fn-get f :pkg-path)) (fn-get f :local-name))
@@ -2085,7 +2110,7 @@
                       sig (if (= :method (:kind c)) (e/o (:method (:callee c)) :type) sig)
                       args (if (and (vector? (under sig)) (nth (under sig) 3 false)) (variadic-args c sig) (:args c))
                       extra (cond
-                              (and callee (intrinsic? callee)) 0
+                              (and callee (or (intrinsic? callee) (cheap-call? callee))) 0
                               (and inl (<= (long (:cost inl)) (long (max-cost callee false)))) (:cost inl)
                               (and (= :closure (:kind c)) (param-local? (:callee c))) inline-param-call-cost
                               :else inline-extra-call-cost)]
@@ -2169,10 +2194,10 @@
   "The callee's body copied for an inlined call at line: its variables (in om, extended with a
   fresh copy of each the body declares) renamed, every node at the call's line (gc reports the
   inlined code at its outermost position), its literals fresh nodes (named as the callee's)."
-  [body ^java.util.HashMap om line lit-names decls]
+  [body ^java.util.HashMap om line lit-names decls qual]
   (doseq [o decls]
     (when-not (.containsKey om o)
-      (.put om o (e/obj (assoc @o :line line :esc-class :auto :local? true)))))
+      (.put om o (e/obj (cond-> (assoc @o :line line :esc-class :auto :local? true) qual (assoc :inl-pkg qual))))))
   (letfn [(fresh [o]
             (or (.get om o)
                 (let [c (e/obj (assoc @o :line line :esc-class :auto :local? true))]
@@ -2297,7 +2322,10 @@
             _ (warn! line (str "inlining call to " (fn-get callee :name)))
             _ (when (= :fn (:op (:callee c))) (vswap! (:kept-lits *ctx*) disj callee))
             om (java.util.HashMap.)
-            fresh (fn [o nm] (let [c (e/obj (assoc (if o @o {:kind :var :name nm}) :line line :esc-class :auto :local? true))]
+            ;; another package's variables inlined print qualified by its name (bytes.b)
+            qual (when (fn-get callee :foreign-body) (last (str/split (str (fn-get callee :pkg-path)) #"/")))
+            fresh (fn [o nm] (let [c (e/obj (cond-> (assoc (if o @o {:kind :var :name nm}) :line line :esc-class :auto :local? true)
+                                              qual (assoc :inl-pkg qual)))]
                                (when o (.put om o c))
                                c))
             sig (under (fn-get callee :sig))
@@ -2321,7 +2349,7 @@
                                   (if (and (str/starts-with? n (str cname ".")) (not (str/starts-with? n (str cname ".func"))))
                                     (str cname ".func" (subs n (inc (count cname))))
                                     n)]))
-            body (copy-body (fn-get callee :body) om line lit-names (mapcat #(fn-get % :dcl) (all-fns callee)))
+            body (copy-body (fn-get callee :body) om line lit-names (mapcat #(fn-get % :dcl) (all-fns callee)) qual)
             body (returns->assigns body rv)
             _ (register-copies! caller body)
             pdecl {:op :decl :short true :objs (vec (concat (when recv [recv]) params))
@@ -2591,7 +2619,7 @@
 
 (def ^:private tag-version
   "The version of the tags' analysis, in the cache's keys: changed with the analysis."
-  "escape-6")
+  "escape-8")
 
 (def ^:private pkg-tags
   "The other packages' tags analyzed in this process: path -> {function name -> its record}."
@@ -2614,12 +2642,17 @@
         digest (let [d @(resolve 'arbace.go.repl/digest-session)] (if (delay? d) @d d))
         ;; the package from its forms, with its trees; its imports the table lists from the
         ;; digest (their declarations), the others from their forms
-        s (assoc (session (fn [p _] (package-source {:dir root} p config)))
-                 :delegate digest
-                 :local (fn [p] (or (= p path) (not (listed? p))))
-                 :keep-trees (fn [p] (= p path)))
-        pkg (ensure s path nil [])]
-    (if pkg (e/o pkg :result) {:errors [{:msg "no package"}]})))
+        mk (fn [local] (assoc (session (fn [p _] (package-source {:dir root} p config)))
+                              :delegate digest
+                              :local local
+                              :keep-trees (fn [p] (= p path))))
+        res (fn [s] (let [pkg (ensure s path nil [])] (if pkg (e/o pkg :result) {:errors [{:msg "no package"}]})))
+        r (res (mk (fn [p] (or (= p path) (not (listed? p))))))]
+    ;; the digest's declarations and the forms' types of one package can disagree (an alias's
+    ;; instance named from two sources): then every import from its forms
+    (if (seq (:errors r))
+      (res (mk (constantly true)))
+      r)))
 
 (def ^:dynamic *phase-a*
   "When true, analyze-package returns the functions' records once scanned (their bodies for
@@ -2683,7 +2716,7 @@
                         ;; the analysis without the inliner (gc compiles the standard library with it:
                         ;; the inlined bodies' effects on the tags are left out, for memory: the
                         ;; packages' analyses would nest the inlined packages' checks)
-                        (binding [*msgs* (volatile! []) *m* 0 *inline* false]
+                        (binding [*msgs* (volatile! []) *m* 0 *inline* false *phase-a* false]
                           (let [costs (binding [*phase-a* :costs]
                                         (into {} (for [f (analyze-package r) :when (fn-get f :obj)]
                                                    [(fn-get f :name) (fn-get f :inl)])))]
