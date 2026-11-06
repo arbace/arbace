@@ -344,3 +344,15 @@ showed were fixed on the way (derives over lifetime and const parameters, const 
 HIR printer, nested impl Trait arguments). Alternatives considered: a clean collector reading rustc's printed types back (rejected:
 the printer is the judge's view, the types are what RF8-RF10 read); the resolutions of out-of-line modules from the helper (deferred,
 RFP15). Proposed RFP14-RFP16 in doc/rust/FRONTEND-SURVEY.md, "As built: RF7".
+
+## 2026-11-06: RF9a, type checking's first slice with RF8's part (branch rust-rf14)
+
+After RF7, the survey's next stages (RF8 the solver, RF9 type checking; RFP16 proposed and recommended them) begun the same day:
+`arbace/rust/front/typeck.ae`, a port of rustc 1.99.1's (`58cf8f9c3`) `rustc_hir_typeck` accepting paths (expressions with expectations,
+coercions, calls, operators, indexing, patterns and default binding modes, closures' signature deduction, the method probe, fallback,
+writeback) and of the trait solver's selection, normalization and pending obligations, judged fact by fact against the helper's new
+`--typeck` (TypeckResults per expression and binding) by `arbace/rust/front/typeck_check.ae`. std's interface for it from the helper's new
+`--std-iface` (ADTs, traits, impls, functions as structural types; pinned by `test/rust/front/std-iface.sha256`), the Tier U data of
+RFS4. Results on the 90 programs: 10,216 of 11,173 facts (51 programs whole), 10,199 through the pipeline. Alternatives considered: the
+next solver's structure (`rustc_next_trait_solver`, RFS6) for selection; the old solver's accepting paths were ported for this slice
+because type checking at 1.99.1 uses them and the judge sees their choices; the decision of RFS6 stays open for RF8 proper.

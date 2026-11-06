@@ -1139,3 +1139,66 @@ macros, modules and generics), and the UI suite (RFP7) is the next.
   their fallback, locals, paths, calls of fn items, operators on scalars, struct and tuple expressions, fields, blocks, `if`, `match`
   on simple patterns), judged fact by fact**; (b) RF10 first, MIR built from the helper's typeck data (judged against MIR text); (c) RF3's
   layouts from RF7's ADT data (the back half's next piece). *Recommended: (a)*: the survey's order, and every later stage reads its facts.
+
+## As built: RF9a, type checking's first slice with RF8's part (2026-11-06)
+
+RFP16 proposed RF9's first slice next (the survey's order, §7: RF8 and RF9 after RF7); taken the same day on `rust-rf14` while the
+proposal waits, since every later stage reads its facts. Code: `arbace/rust/front/typeck.ae` (`arbace.rust.front.typeck`, over RF7's
+collection in its `with-crate` context) and its judge `typeck_check.ae`; the verb `bin/rust-front typeck-check [--crates] [--ours]`
+(`make rust-front-typeck-check`). Ports of rustc 1.99.1 (`58cf8f9c3`) under MIT (RFS12), recorded in `LICENSE.md` and `doc/ARBACE.md`;
+evaluated from the checkout, out of `gate_key` (RFS13). Light: one process under 1.2 GB, the samples' check about a minute.
+
+### The oracles
+
+- **`--typeck`** (`tools/rsdump/front.rs`): for each typeck root (`hir_body_owners`, closures inside their roots), over the root
+  file's HIR (no expansion's spans): `(tc/expr OWNER [span] KIND "TYPE" {:adj [[KIND "TARGET"]...] :method "PATH" :args "..."})` per
+  expression (`node_type`, the adjustments, the type-dependent definition) and `(tc/pat OWNER [span] "TYPE" "MODE")` per binding (its
+  type and `BindingMode`), types printed with no trimmed paths after writeback (regions erased). `front-oracles` writes `NAME.tc.edn`.
+- **`--std-iface`**: std's interface as data (RFS4, Tier U's data, pinned by `test/rust/front/std-iface.sha256`, 13.8 MB, one second to
+  write): every reachable ADT with its variants and fields `(si/adt ..)`, trait with its items and clauses `(si/trait ..)`, impl (the
+  ADTs' and the primitives' inherent impls, the traits' impls in std, core and alloc, with polarity) with its self type, trait ref,
+  generics, clauses and items, associated types' values and constants' types `(si/impl ..)`, and function or method with its
+  generics, clauses and signature `(si/fn ..)`, all as structural types (parameters by index, late-bound regions marked, projections,
+  opaque types, trait objects, fn pointers, const parameters in array lengths); `core::arch` alone left out.
+
+### RF9a: type checking (`arbace.rust.front.typeck`), with RF8's part
+
+- inference variables (types, integers, floats, consts; ids never reused across snapshots), unification without regions,
+  snapshots and rollback; `'static` kept through the body for coercion's no-op case, every region erased at writeback;
+- `check_expr_with_expectation` for literals (suffixes, expectations, fallback i32/f64), paths (locals, fn items with fresh arguments,
+  constructors, consts and statics, const parameters, std's values, a desugaring's lang item paths and bindings), calls (fn items and
+  pointers, closures, Fn-bounded parameters, trait objects and opaque types with the callee's autoref,
+  `expected_inputs_for_expected_output`), method calls (the probe below, turbofish), builtin and overloaded operators (by their traits;
+  comparisons by reference; compound assignments), unary operators, references, casts, fields (autoderef), indexing (builtin, then
+  `Index` impls with the base's autoref, `IndexMut` on assigned places), tuples, arrays, repeats, blocks, `if`, `loop` and `while`,
+  `match` with guards, `let` chains, `return`, `break` with values, struct expressions (the crate's and std's, lang items' ranges),
+  closures (signature deduction from pending Fn obligations, trait objects and return-position `impl Trait`; their types printed
+  `{closure@FILE:L:C: L:C}` by their `fn_decl_span`), anonymous constants (array lengths, repeat counts, discriminants by the enum's
+  repr) as typeck roots of their own;
+- coercions (`coercion.rs`): never to any, reborrows (`coerce_borrowed_pointer` with its autoderef through Deref impls), references to
+  raw pointers, unsizing (arrays to slices, to `dyn`, `Box`/`Rc`/`Arc` of them), fn items and non-capturing closures to fn pointers,
+  CoerceMany's LUB for `if`, `match` and blocks;
+- patterns (`pat.rs`): bindings with explicit and default binding modes (match ergonomics), tuples, references, literals, the crate's
+  and std's tuple-struct, struct and path patterns, or-patterns;
+- the method probe (`method/probe.rs`): the receiver's autoderef steps (references, then `Deref` impls), by value (a reference
+  reborrowed), then `&`, then `&mut`; at each, inherent candidates (the crate's impls, std's by the self type's key) before trait
+  candidates (Self a fresh variable, the method's self type unified with the adjusted receiver, then `Self: Trait` proven; the trait's
+  other arguments left to inference); type-relative paths (`Vec::new`, `u32::try_from`, `i32::MAX`) the same way;
+- **RF8's part, the solver's slice** (`rustc_trait_selection`'s accepting paths): selection of an impl whose header unifies and whose
+  clauses hold (trait clauses recursively, projection clauses binding the impl's parameters), negative impls excluded, Sized by the type,
+  the builtin impls of the Fn traits for closures, fn items and pointers, integer variables selecting their one integral impl, a
+  cycle or a chain over four deep unproven, a per-body budget; normalization of projections through the selected impl's associated
+  type (FnOnce::Output of a callable by its signature), as their self types resolve; pending obligations (each instantiated item's
+  clauses) selected where possible (`select_obligations_where_possible`) before fallback and before a method call on a variable.
+
+**Results** (`bin/rust-front typeck-check`, the 90 programs with an oracle; facts: each expression's node type and adjustments, each
+binding's type and mode): **10,216 of 11,173 facts equal to rustc's (91.4 %), 146 more with the type equal and the adjustments not,
+51 programs whole**; from the pipeline (`--ours`: native reader, our expansion, resolution, lowering, collection, std's interface the
+only rustc data) 10,199. The day's run: 4,217, then 5,890 with std's interface and the probe, 7,544 with operators, 8,142 with closures,
+9,843 with associated constants, 10,084 with the Fn builtins. The negative control differs.
+
+Not taken yet (the classes of the non-equal facts): closures' kinds (FnMut/FnOnce by their captures: a call's autoref) and
+captures, methods through trait objects' supertraits and generic parameters' bounds beyond Fn, `?` and `Try` (the desugaring's
+`branch`/`from_residual` resolve but their impls' residual types are not selected yet), auto-deref of `Box` patterns, slice patterns,
+two-phase borrows, the never type's fallback edge cases, `impl Trait` in let and argument positions' coercions, specialization,
+async, SIMD's intrinsics-heavy programs (`vectors`), formatting macros' internal facts (none: rustc's are expansions).

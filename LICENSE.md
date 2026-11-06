@@ -547,6 +547,16 @@ covers what.
   project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the
   MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `collect_check.ae`, the samples
   `test/rust/front/collect1.rs` and `collect2.rs`) is Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/typeck.ae` (RF9's first slice with RF8's part, doc/rust/FRONTEND-SURVEY.md, "As built: RF9a") and the helper's
+  `--typeck` and `--std-iface` modes in `tools/rsdump/front.rs`: Arbace forms and Rust written after rustc 1.99.1, the same revision and
+  sources, reading `compiler/rustc_hir_typeck/src/{expr,expectation,coercion,callee,op,place_op,pat,fallback,writeback,closure}.rs` and
+  `method/{probe,confirm}.rs` (expressions with expectations, coercions, calls, operators, indexing, patterns and default binding
+  modes, closures' signature deduction, the method probe), `compiler/rustc_infer/src/infer/` (type, integer and float variables),
+  `compiler/rustc_trait_selection/src/traits/{select,project,fulfill}.rs` (selection of impls, normalization of projections, pending
+  obligations) and `compiler/rustc_middle/src/ty/{typeck_results,adjustment}.rs` (the facts' shapes): copyright the Rust project's
+  contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License
+  ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `typeck_check.ae`) is Arbace's own, under the
+  Eclipse Public License 1.0.
 - The non-javac branches of `skip-parens`, `tree-name`, `full-name`, `diamond?` and `class-kind` in
   `arbace/repr/java/tree.ae` (repr/java's interface to the tree, doc/classes/JAVA-FRONTEND-SURVEY.md,
   "As built: JFS66 (b)"): Arbace forms reimplementing, for the native parser's trees,
