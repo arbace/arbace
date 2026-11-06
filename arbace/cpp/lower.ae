@@ -161,9 +161,10 @@
     (when-not (get-in @*structs* [:unions tag])
       (swap! *structs* assoc-in [:unions tag] true)
       (swap! *structs* update :defs conj
-             (with-meta (list 'c/union tag [(with-meta 'v {:tag (if ld? 'long-double '(complex long-double))})
-                                            (with-meta 'b {:tag (list 'array n 'unsigned-char)})])
-               {:c/attrs [(list '__attribute__ ['aligned 16])]})
+             ;; the alignment on the member (ci's checker raises a member's alignment by its aligned attribute; the union's own
+             ;; attribute left its alignment 8 in a struct)
+             (list 'c/union tag [(with-meta 'v {:tag (if ld? 'long-double '(complex long-double)) :c/attrs [(list '__attribute__ ['aligned 16])]})
+                                 (with-meta 'b {:tag (list 'array n 'unsigned-char)})])
              (list 'c/static-assert (list '== (list 'sizeof-type (list 'union tag)) n))))
     (list 'union tag)))
 
@@ -779,12 +780,13 @@
   ci's are not given) each is the field's address. ci's va_list is one pointer to the next 8-byte slot of the variadic
   arguments (doc/c/SPEC.md §7.9), what x86-64's overflow_arg_area is: in ci (arbace.cpp.run/opts) gp_offset and fp_offset read
   48 and 176 (the registers used up: clang's code takes the overflow path, which reads the argument at overflow_arg_area and
-  advances it by the size rounded to 8, as ci's va_arg), overflow_arg_area is the va_list's pointer itself and reg_save_area a
+  advances it by the size rounded to 8, as ci's va_arg), overflow_arg_area is the place of the va_list's pointer (pl: the va_list's
+  storage, or for a va_list parameter, which ci passes as the pointer itself, the place it was loaded from) and reg_save_area a
   pointer no path reads: the runtime layer's cx$va_full and cx$va_rs (arbace/cpp/rt/eh.c.ae)."
-  {:gcc [["cx$va_f0(ap)" "((void *)(ap))"] ["cx$va_f1(ap)" "((void *)((char *)(ap) + 4))"]
-         ["cx$va_f2(ap)" "((void *)((char *)(ap) + 8))"] ["cx$va_f3(ap)" "((void *)((char *)(ap) + 16))"]]
-   :ci [["cx$va_f0(ap)" "((void *)&cx$va_full[0])"] ["cx$va_f1(ap)" "((void *)&cx$va_full[1])"]
-        ["cx$va_f2(ap)" "((void *)(ap))"] ["cx$va_f3(ap)" "((void *)&cx$va_rs)"]]})
+  {:gcc [["cx$va_f0(ap,pl)" "((void *)(ap))"] ["cx$va_f1(ap,pl)" "((void *)((char *)(ap) + 4))"]
+         ["cx$va_f2(ap,pl)" "((void *)((char *)(ap) + 8))"] ["cx$va_f3(ap,pl)" "((void *)((char *)(ap) + 16))"]]
+   :ci [["cx$va_f0(ap,pl)" "((void *)&cx$va_full[0])"] ["cx$va_f1(ap,pl)" "((void *)&cx$va_full[1])"]
+        ["cx$va_f2(ap,pl)" "((void *)(pl))"] ["cx$va_f3(ap,pl)" "((void *)&cx$va_rs)"]]})
 
 (defn- atomic-int
   "The integer type of a float's or a double's bits (i32, i64), whose _n builtins the lowering writes for an atomic of that type
@@ -845,6 +847,8 @@
       ;; i48, i56: bit-field access units clang does not widen over the next field) loaded and stored by those bytes only
       load (let [[t pv] [(second x) (nth x 2)] ct0 (ctype t) ct (if (:volatile o) (list 'volatile ct0) ct0) w (int-bits t)
                  ss (when w (store-bytes w))]
+             ;; a pointer's load remembers its place: a va_list parameter's fields are read through it (va-field-macros)
+             (when (and res (ptr-type? t)) (swap! *fn* assoc-in [:ptr-loads res] (typed-value pv)))
              (cond
                (:atomic o) (cond
                              (atomic-n? t) (set (list '__atomic_load_n (atomic-place pv ct0 o) (atomic-order (:atomic o))))
@@ -879,8 +883,15 @@
                       (if-let [k (va-field st is)]
                         ;; a field of x86-64's va_list (clang's inline va_arg at -O0): by the macro cx$va_fK, the field's address
                         ;; under gcc, ci's own va_list in ci (cppi-deferred; LLVM.md §11)
-                        (do (swap! *structs* assoc :va-fields true)
-                            (set (list (symbol (str "cx$va_f" k)) (typed-value base))))
+                        (let [b (typed-value base)
+                              ;; where ci's va_list (one pointer) is: the va_list's own storage when the base is the va_list the
+                              ;; function allocated, else the place the base was loaded from (a va_list parameter is ci's pointer
+                              ;; itself, kept in the parameter's alloca by clang's -O0 code)
+                              place (cond (contains? (:va-lists @*fn*) b) b
+                                          (get-in @*fn* [:ptr-loads b]) (get-in @*fn* [:ptr-loads b])
+                                          :else b)]
+                          (swap! *structs* assoc :va-fields true)
+                          (set (list (symbol (str "cx$va_f" k)) b place)))
                         (set (gep-expr st (typed-value base) is))))
       phi []
       select (let [[c a b] args]

@@ -1,12 +1,12 @@
 // cppi-deferred: three of cppi's deferred classes closed in the lowering (doc/cpp/LLVM.md §7, §11). A struct that holds a long
-// double (std::format's argument, a std::pair, an array) in its slot union, so ci's check takes it; atomics of float and double
+// double (a struct, an array, a std::pair, a std::complex<long double>, std::hash<long double>'s frexp result) in its slot union, so ci's check takes it; atomics of float and double
 // (load, store, exchange, fetch_add's compare-exchange loop) by the _n builtins on their bits; a variadic function that reads its
 // va_list inline (ints, doubles, a small and a large struct, a pointer), a va_list parameter, va_copy, and a va_list read and then
 // passed on to vsnprintf. Long double values are ones a double holds exactly (ci computes long double as double, CS35).
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
-#include <format>
+#include <complex>
 #include <functional>
 #include <utility>
 struct P { int a, b; };
@@ -37,7 +37,8 @@ int main() {
   LD ld[2] = {{'a', 1.5L, 7}, {'b', -0.25L, 9}};
   std::pair<long double, int> pr{ld[1].v * 4, ld[0].tail};
   std::printf("%d %d %.2f %d %c%c\n", int(sizeof(LD)), int(alignof(LD)), double(ld[0].v + pr.first), pr.second, ld[0].c, ld[1].c);
-  std::printf("%s\n", std::format("{} {} {:.3f}", 2.5, 'q', double(0.125L)).c_str());
+  std::complex<long double> z(1.5L, -2.0L); z *= 2.0L;
+  std::printf("%.2f %.2f\n", double(z.real()), double(z.imag()));
   std::printf("%d\n", std::hash<long double>{}(0.0L) == std::hash<long double>{}(-0.0L));
   return 0;
 }
