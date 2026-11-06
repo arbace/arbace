@@ -3689,8 +3689,10 @@ keyword typos ("Did you mean 'and'?") come from traceback as in CPython. `-c`'s 
 `linecache._register_code` (run_mod), and so are the REPL's statements (the Go display read them from RegisterSource). A SyntaxError's file line is decoded by its coding cookie, the BOM skipped
 (err_programtext).
 
-**PEP 657's positions**, as designed: the unit's `:loc` beside `:line`, `flow!` carrying it, the IR's `:positions`
-(`[END-LINE COL END-COL]` or nil), `Code.Positions`, `co_positions()`, `-X no_debug_ranges`. The locations codegen moves
+**PEP 657's positions**: the unit's `:loc` beside `:line`, `flow!` carrying it, `co_positions()`, `-X no_debug_ranges`,
+as designed; but the IR's `:positions` is one string (`COL,END-COL[,END-LINE-LESS-LINE]` per instruction, empty for
+none, `;` between), kept as text by load.go and decoded on the first `Code.Position` (a traceback, `co_positions`): the
+vector of numbers per instruction first built lengthened every program's IR parse (the bench sample's process times). The locations codegen moves
 are ported: attribute load, store and delete and a method call's CALL (`update_start_location_to_match_attr`,
 `maybe_optimize_method_call` with `is_import_originated`), augmented assignment at its target, assert's raise at its
 test, RESUME at `(line, line, 0, 0)` (a traceback at `tb_lasti` 0 prints its empty caret line), an except handler's
