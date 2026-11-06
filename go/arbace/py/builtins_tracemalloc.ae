@@ -1,0 +1,369 @@
+(in-ns 'go.arbace.py) ^{:go/comments [[12 1 "// The module _tracemalloc (queue 220; Modules/_tracemalloc.c, Modules/clinic/_tracemalloc.c.h and Python/tracemalloc.c"] [13 1 "// of CPython 3.14.10, PSF License Agreement), its second stage (the user's (a) on 220's DECISION, 2026-11-06). pyi"] [14 1 "// allocates through Go: there is no allocator to hook. An allocation is decided as the creation of a Python object at"] [15 1 "// the runtime's constructors (tmAlloc's callers: NewBytes, NewList, NewDict, a frame's cells; not NewStr and NewTuple,"] [16 1 "// whose hook puts them past Go's inlining budget, a measured cost with tracing off: str and tuple are not traced), its"] [17 1 "// size CPython's for that object as sys.getsizeof gives it (cpythonSizeof; a dict 64, a cell 40), its traceback the running thread's frames, most recent first, the first nframe of them (a frame not"] [18 1 "// yet entered is not on the chain: a callee's cells are its caller's, CPython's \"no incomplete frames\"). A free is the"] [19 1 "// object's collection, seen by a finalizer (runtime.SetFinalizer) the collector runs; get_traced_memory, _get_traces and"] [20 1 "// take_snapshot collect first and wait for the cleanups, so a dropped object's size is gone when they look, as"] [21 1 "// CPython's refcount frees it at once. Interned tracebacks: one tuple per distinct traceback (the traces share it)."] [22 1 "//"] [23 1 "// What cannot match: CPython's internal allocations (frames, code, the interpreter's buffers, its free lists, the"] [24 1 "// small-int cache, a list's or dict's growth by realloc) are not Python objects made here, so totals and the count of"] [25 1 "// traces differ; a built-in's own Go buffers are none of tracemalloc's; str and tuple are not traced. Off, a constructor pays one load"] [26 1 "// of tmOn and stays inlined."] [28 36 "// MAX_NFRAME: UINT16_MAX"] [35 1 "// tmOn is the constructors' check (tracemalloc.tracing, kept apart so the hot paths load one byte)"] [38 1 "// the traces: by the object's address (no reference: the object stays collectable), their totals and the"] [39 1 "// interned tracebacks; mu also orders the cleanups, which run on the collector's goroutine"] [47 18 "// a trace being made (its own allocations are none)"] [57 18 "// (filename, lineno), most recent first"] [59 16 "// the interned frames' tuple, made at the first _get_traces"] [62 1 "// tracemallocStart is _PyTraceMalloc_Start."] [79 1 "// tmClear is _PyTraceMalloc_ClearTraces: the traces and the totals dropped (a pending cleanup of an old trace finds no"] [80 1 "// trace of its generation)."] [89 1 "// tmSize is a traced object's size: sys.getsizeof's (cpythonSizeof), a dict's 64, a cell's 40."] [100 1 "// tmAlloc records o's creation: its size and the running thread's traceback. A finalizer frees the trace. One argument:"] [101 1 "// the constructors' call stays cheap enough for Go's inliner (NewBytes, NewList, NewDict inlined as before)."] [158 1 "// tmFree is a traced object's collection: its trace dropped, when it is still the one of that generation."] [168 1 "// tmCleanup has tmFree run at o's collection: a finalizer (runtime.SetFinalizer: goi runs Go's own, where"] [169 1 "// runtime.AddCleanup's generic body is not interpretable); one per type, so a type another file finalizes is not"] [170 1 "// traced (an instance: 218's finalizer queue owns instances' finalization). A second finalizer on an object would be"] [171 1 "// Go's fatal error: o is always fresh here."] [185 1 "// tmCollect runs the collector and waits for the finalizers it queued (a sentinel's, queued last, run after theirs on"] [186 1 "// the one finalizer goroutine), so a dropped object's trace is gone; with the GIL released, at most a second a round."] [203 1 "// tmTracesList is _PyTraceMalloc_GetTraces: (domain, size, frames, total_nframe) per trace, frames interned."] [206 17 "// the list and tuples made here are no allocations of the program's (and tm.mu is held)"] [272 4 "// the tables' sizes as Go holds them: a trace's entry and a traceback's frames"] [347 1 "// tracemallocAtStart is the configuration's tracemalloc (config_init_tracemalloc): PYTHONTRACEMALLOC=N (0 none) or"] [348 1 "// -X tracemalloc[=N] (the option wins) start it with N frames; a value that is no number is the configuration's error."]] :go/pos {:name [1 9] :package [1 1]} :go/semis [[118 18] [118 28] [138 32] [143 26] [161 25] [189 17] [189 28] [333 34] [336 32] [351 44] [354 38] [359 46]]} (go/file "builtins_tracemalloc.go" :imports [
+
+
+    ^{:go/apos {1 [4 2]} :go/pos {:lparen [3 8] :rparen [10 1] :tok-pos [3 1]}} [reflect "reflect"]
+    ^{:go/apos {1 [5 2]}} [runtime "runtime"]
+    ^{:go/apos {1 [6 2]}} [strconv "strconv"]
+    ^{:go/apos {1 [7 2]}} [strings "strings"]
+    ^{:go/apos {1 [8 2]}} [sync "sync"]
+    ^{:go/apos {1 [9 2]}} [time "time"]])
+
+
+;; The module _tracemalloc (queue 220; Modules/_tracemalloc.c, Modules/clinic/_tracemalloc.c.h and Python/tracemalloc.c
+;; of CPython 3.14.10, PSF License Agreement), its second stage (the user's (a) on 220's DECISION, 2026-11-06). pyi
+;; allocates through Go: there is no allocator to hook. An allocation is decided as the creation of a Python object at
+;; the runtime's constructors (tmAlloc's callers: NewBytes, NewList, NewDict, a frame's cells; not NewStr and NewTuple,
+;; whose hook puts them past Go's inlining budget, a measured cost with tracing off: str and tuple are not traced), its
+;; size CPython's for that object as sys.getsizeof gives it (cpythonSizeof; a dict 64, a cell 40), its traceback the running thread's frames, most recent first, the first nframe of them (a frame not
+;; yet entered is not on the chain: a callee's cells are its caller's, CPython's "no incomplete frames"). A free is the
+;; object's collection, seen by a finalizer (runtime.SetFinalizer) the collector runs; get_traced_memory, _get_traces and
+;; take_snapshot collect first and wait for the cleanups, so a dropped object's size is gone when they look, as
+;; CPython's refcount frees it at once. Interned tracebacks: one tuple per distinct traceback (the traces share it).
+;;
+;; What cannot match: CPython's internal allocations (frames, code, the interpreter's buffers, its free lists, the
+;; small-int cache, a list's or dict's growth by realloc) are not Python objects made here, so totals and the count of
+;; traces differ; a built-in's own Go buffers are none of tracemalloc's; str and tuple are not traced. Off, a constructor pays one load
+;; of tmOn and stays inlined.
+
+^{:go/apos {2 [28 30]} :go/pos {:tok-pos [28 1]}} (go/const ^{:val 65535 :go/pos {:name-pos [28 7]}} tracemallocMaxNFrame 65535) ; MAX_NFRAME: UINT16_MAX
+
+^{:go/pos {:tok-pos [30 1]}} (go/var ^{:tag ^{:go/pos {:lbrace [30 24] :rbrace [33 1] :struct [30 17]}} (struct ^{:tag ^{:go/pos {:name-pos [31 10]}} bool :go/pos {:name-pos [31 2]}} tracing ^{:tag ^{:go/pos {:name-pos [32 10]}} int :go/pos {:name-pos [32 2]}} nframe) :go/pos {:name-pos [30 5]}} tracemalloc)
+
+
+
+
+
+^{:go/pos {:doc [35 1] :tok-pos [36 1]}} (go/var ^{:tag ^{:go/pos {:name-pos [36 10]}} bool :doc "tmOn is the constructors' check (tracemalloc.tracing, kept apart so the hot paths load one byte)\n" :go/pos {:name-pos [36 5]}} tmOn)
+
+
+
+^{:go/pos {:doc [38 1] :tok-pos [40 1]}} (go/var ^{:tag ^{:go/pos {:lbrace [40 15] :rbrace [48 1] :struct [40 8]}} (struct ^{:tag ^{:go/pos {:dot [41 17] :name-pos [41 18] :x-pos [41 13]}} sync/Mutex :go/pos {:name-pos [41 2]}} mu ^{:tag ^{:go/pos {:map [42 13]}} (map ^{:go/pos {:name-pos [42 17]}} uintptr ^{:go/pos {:star [42 25]}} (* ^{:go/pos {:name-pos [42 26]}} tmTrace)) :go/pos {:name-pos [42 2]}} traces ^{:tag ^{:go/pos {:lbrack [43 13]}} (slice ^{:go/pos {:name-pos [43 15]}} uintptr) :go/pos {:name-pos [43 2]}} order ^{:tag ^{:go/pos {:name-pos [44 13]}} int64 :go/pos {:name-pos [44 2]}} size ^{:tag ^{:go/pos {:name-pos [44 13]}} int64 :go/pos {:name-pos [44 8]}} peak ^{:tag ^{:go/pos {:map [45 13]}} (map ^{:go/pos {:name-pos [45 17]}} string ^{:go/pos {:star [45 24]}} (* ^{:go/pos {:name-pos [45 25]}} tmTraceback)) :go/pos {:name-pos [45 2]}} tbs ^{:tag ^{:go/pos {:name-pos [46 13]}} int :go/pos {:name-pos [46 2]}} gen ^{:tag ^{:go/pos {:name-pos [47 13]}} bool :go/pos {:name-pos [47 2]}} busy) :doc "the traces: by the object's address (no reference: the object stays collectable), their totals and the\ninterned tracebacks; mu also orders the cleanups, which run on the collector's goroutine\n" :go/pos {:name-pos [40 5]}} tm)
+
+
+
+
+
+
+;; a trace being made (its own allocations are none)
+
+
+^{:go/pos {:tok-pos [50 1]}} (go/type ^{:go/pos {:name-pos [50 6]}} tmTrace ^{:go/pos {:lbrace [50 21] :rbrace [54 1] :struct [50 14]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [51 7]}} int64 :go/pos {:name-pos [51 2]}} size
+    ^{:tag ^{:go/pos {:star [52 7]}} (* ^{:go/pos {:name-pos [52 8]}} tmTraceback) :go/pos {:name-pos [52 2]}} tb
+    ^{:tag ^{:go/pos {:name-pos [53 7]}} int :go/pos {:name-pos [53 2]}} gen))
+
+
+^{:go/pos {:tok-pos [56 1]}} (go/type ^{:go/pos {:name-pos [56 6]}} tmTraceback ^{:go/pos {:lbrace [56 25] :rbrace [60 1] :struct [56 18]}} (struct
+    ^{:tag ^{:go/pos {:lbrack [57 9]}} (slice ^{:go/apos {1 [57 12]} :go/pos {:lbrack [57 11]}} (array 2 ^{:go/pos {:name-pos [57 14]}} any)) :go/pos {:name-pos [57 2]}} frames ; (filename, lineno), most recent first
+    ^{:tag ^{:go/pos {:name-pos [58 9]}} int :go/pos {:name-pos [58 2]}} total
+    ^{:tag ^{:go/pos {:name-pos [59 9]}} Object :go/pos {:name-pos [59 2]}} tuple)) ; the interned frames' tuple, made at the first _get_traces
+
+
+
+^{:go/apos {8 [76 9]} :go/pos {:doc [62 1] :func [63 1] :lbrace [63 36] :rbrace [77 1] :return [76 2]}} (go/func ^{:go/pos {:name-pos [63 6]}} tracemallocStart "tracemallocStart is _PyTraceMalloc_Start.\n" ^{:tag ^{:go/pos {:name-pos [63 30]}} error :go/pos {:closing [63 28] :opening [63 22]}} [^{:tag ^{:go/pos {:name-pos [63 25]}} int :go/pos {:name-pos [63 23]}} n]
+  ^{:go/pos {:if [64 2] :lbrace [64 39] :rbrace [66 2]}} (when ^{:go/pos {:op-pos [64 11]}} (or ^{:go/apos {2 [64 9]} :go/pos {:op-pos [64 7]}} (< ^{:go/pos {:name-pos [64 5]}} n 1) ^{:go/pos {:op-pos [64 16]}} (> ^{:go/pos {:name-pos [64 14]}} n ^{:go/pos {:name-pos [64 18]}} tracemallocMaxNFrame))
+    ^{:go/pos {:return [65 3]}} (return ^{:go/apos {2 [65 33]} :go/pos {:lparen [65 16] :rparen [65 102]}} (^{:go/pos {:name-pos [65 10]}} Raisef ^{:go/pos {:name-pos [65 17]}} ValueErrorType "the number of frames must be in range [1; %d]" ^{:go/pos {:name-pos [65 82]}} tracemallocMaxNFrame)))
+
+  ^{:go/pos {:tok-pos [67 21]}} (set! ^{:go/pos {:dot [67 13] :name-pos [67 14]}} (.-nframe ^{:go/pos {:name-pos [67 2]}} tracemalloc) ^{:go/pos {:name-pos [67 23]}} n)
+  ^{:go/pos {:if [68 2] :lbrace [68 26] :rbrace [74 2]}} (when ^{:go/pos {:op-pos [68 5]}} (not ^{:go/pos {:dot [68 17] :name-pos [68 18]}} (.-tracing ^{:go/pos {:name-pos [68 6]}} tracemalloc))
+    ^{:go/pos {:dot [69 8] :lparen [69 13] :name-pos [69 9] :rparen [69 14]}} (.Lock ^{:go/pos {:dot [69 5] :name-pos [69 6]}} (.-mu ^{:go/pos {:name-pos [69 3]}} tm))
+    ^{:go/pos {:if [70 3] :lbrace [70 23] :rbrace [72 3]}} (when ^{:go/apos {2 [70 19]} :go/pos {:op-pos [70 16]}} (== ^{:go/pos {:dot [70 8] :name-pos [70 9]}} (.-traces ^{:go/pos {:name-pos [70 6]}} tm) nil)
+      ^{:go/pos {:tok-pos [71 22]}} (set! (values ^{:go/pos {:dot [71 6] :name-pos [71 7]}} (.-traces ^{:go/pos {:name-pos [71 4]}} tm) ^{:go/pos {:dot [71 17] :name-pos [71 18]}} (.-tbs ^{:go/pos {:name-pos [71 15]}} tm)) (values ^{:go/pos {:lbrace [71 44] :rbrace [71 45]}} (lit ^{:go/pos {:map [71 24]}} (map ^{:go/pos {:name-pos [71 28]}} uintptr ^{:go/pos {:star [71 36]}} (* ^{:go/pos {:name-pos [71 37]}} tmTrace))) ^{:go/pos {:lbrace [71 71] :rbrace [71 72]}} (lit ^{:go/pos {:map [71 48]}} (map ^{:go/pos {:name-pos [71 52]}} string ^{:go/pos {:star [71 59]}} (* ^{:go/pos {:name-pos [71 60]}} tmTraceback))))))
+
+    ^{:go/pos {:dot [73 8] :lparen [73 15] :name-pos [73 9] :rparen [73 16]}} (.Unlock ^{:go/pos {:dot [73 5] :name-pos [73 6]}} (.-mu ^{:go/pos {:name-pos [73 3]}} tm)))
+
+  ^{:go/pos {:tok-pos [75 28]}} (set! (values ^{:go/pos {:dot [75 13] :name-pos [75 14]}} (.-tracing ^{:go/pos {:name-pos [75 2]}} tracemalloc) ^{:go/pos {:name-pos [75 23]}} tmOn) ^{:go/apos {1 [75 30] 2 [75 36]}} (values true true))
+  nil)
+
+
+
+
+^{:go/pos {:doc [79 1] :func [81 1] :lbrace [81 16] :rbrace [87 1]}} (go/func ^{:go/pos {:name-pos [81 6]}} tmClear "tmClear is _PyTraceMalloc_ClearTraces: the traces and the totals dropped (a pending cleanup of an old trace finds no\ntrace of its generation).\n" ^{:go/pos {:closing [81 14] :opening [81 13]}} []
+  ^{:go/pos {:dot [82 7] :lparen [82 12] :name-pos [82 8] :rparen [82 13]}} (.Lock ^{:go/pos {:dot [82 4] :name-pos [82 5]}} (.-mu ^{:go/pos {:name-pos [82 2]}} tm))
+  ^{:go/pos {:tok-pos [83 30]}} (set! (values ^{:go/pos {:dot [83 4] :name-pos [83 5]}} (.-traces ^{:go/pos {:name-pos [83 2]}} tm) ^{:go/pos {:dot [83 15] :name-pos [83 16]}} (.-tbs ^{:go/pos {:name-pos [83 13]}} tm) ^{:go/pos {:dot [83 23] :name-pos [83 24]}} (.-order ^{:go/pos {:name-pos [83 21]}} tm)) ^{:go/apos {3 [83 83]}} (values ^{:go/pos {:lbrace [83 52] :rbrace [83 53]}} (lit ^{:go/pos {:map [83 32]}} (map ^{:go/pos {:name-pos [83 36]}} uintptr ^{:go/pos {:star [83 44]}} (* ^{:go/pos {:name-pos [83 45]}} tmTrace))) ^{:go/pos {:lbrace [83 79] :rbrace [83 80]}} (lit ^{:go/pos {:map [83 56]}} (map ^{:go/pos {:name-pos [83 60]}} string ^{:go/pos {:star [83 67]}} (* ^{:go/pos {:name-pos [83 68]}} tmTraceback))) nil))
+  ^{:go/pos {:tok-pos [84 19]}} (set! (values ^{:go/pos {:dot [84 4] :name-pos [84 5]}} (.-size ^{:go/pos {:name-pos [84 2]}} tm) ^{:go/pos {:dot [84 13] :name-pos [84 14]}} (.-peak ^{:go/pos {:name-pos [84 11]}} tm)) ^{:go/apos {1 [84 21] 2 [84 24]}} (values 0 0))
+  ^{:go/pos {:tok-pos [85 8]}} (inc! ^{:go/pos {:dot [85 4] :name-pos [85 5]}} (.-gen ^{:go/pos {:name-pos [85 2]}} tm))
+  ^{:go/pos {:dot [86 7] :lparen [86 14] :name-pos [86 8] :rparen [86 15]}} (.Unlock ^{:go/pos {:dot [86 4] :name-pos [86 5]}} (.-mu ^{:go/pos {:name-pos [86 2]}} tm)))
+
+
+
+^{:go/pos {:doc [89 1] :func [90 1] :lbrace [90 29] :rbrace [98 1] :return [97 2]}} (go/func ^{:go/pos {:name-pos [90 6]}} tmSize "tmSize is a traced object's size: sys.getsizeof's (cpythonSizeof), a dict's 64, a cell's 40.\n" ^{:tag ^{:go/pos {:name-pos [90 23]}} int64 :go/pos {:closing [90 21] :opening [90 12]}} [^{:tag ^{:go/pos {:name-pos [90 15]}} Object :go/pos {:name-pos [90 13]}} o]
+  ^{:go/pos {:guard-dot [91 10] :guard-lparen [91 11] :guard-rparen [91 16] :lbrace [91 18] :rbrace [96 2] :switch [91 2]}} (type-switch ^{:go/pos {:name-pos [91 9]}} o
+    ^{:go/pos {:case [92 2] :colon [92 12]}} (case [^{:go/pos {:star [92 7]}} (* ^{:go/pos {:name-pos [92 8]}} Dict)]
+      ^{:go/apos {1 [93 10]} :go/pos {:return [93 3]}} (return 64))
+    ^{:go/pos {:case [94 2] :colon [94 12]}} (case [^{:go/pos {:star [94 7]}} (* ^{:go/pos {:name-pos [94 8]}} Cell)]
+      ^{:go/apos {1 [95 10]} :go/pos {:return [95 3]}} (return 40)))
+
+  ^{:go/pos {:lparen [97 22] :rparen [97 24]}} (^{:go/pos {:name-pos [97 9]}} cpythonSizeof ^{:go/pos {:name-pos [97 23]}} o))
+
+
+
+
+^{:go/pos {:doc [100 1] :func [102 1] :lbrace [102 24] :rbrace [156 1]}} (go/func ^{:go/pos {:name-pos [102 6]}} tmAlloc "tmAlloc records o's creation: its size and the running thread's traceback. A finalizer frees the trace. One argument:\nthe constructors' call stays cheap enough for Go's inliner (NewBytes, NewList, NewDict inlined as before).\n" ^{:go/pos {:closing [102 22] :opening [102 13]}} [^{:tag ^{:go/pos {:name-pos [102 16]}} Object :go/pos {:name-pos [102 14]}} o]
+  ^{:go/pos {:if [103 2] :lbrace [103 37] :rbrace [105 2]}} (when ^{:go/pos {:op-pos [103 26]}} (or ^{:go/pos {:op-pos [103 5]}} (not ^{:go/pos {:dot [103 17] :name-pos [103 18]}} (.-tracing ^{:go/pos {:name-pos [103 6]}} tracemalloc)) ^{:go/pos {:dot [103 31] :name-pos [103 32]}} (.-busy ^{:go/pos {:name-pos [103 29]}} tm))
+    ^{:go/pos {:return [104 3]}} (return))
+
+  (let [^{:go/pos {:name-pos [106 2] :tok-pos [106 7]}} size ^{:go/pos {:lparen [106 16] :rparen [106 18]}} (^{:go/pos {:name-pos [106 10]}} tmSize ^{:go/pos {:name-pos [106 17]}} o)]
+    ^{:go/pos {:if [107 2] :lbrace [107 15] :rbrace [109 2]}} (when ^{:go/apos {2 [107 13]} :go/pos {:op-pos [107 10]}} (<= ^{:go/pos {:name-pos [107 5]}} size 0)
+      ^{:go/pos {:return [108 3]}} (return))
+
+    (let [^{:go/pos {:name-pos [110 2] :tok-pos [110 4]}} t ^{:go/pos {:name-pos [110 7]}} current]
+      ^{:go/pos {:if [111 2] :lbrace [111 14] :rbrace [113 2]}} (when ^{:go/apos {2 [111 10]} :go/pos {:op-pos [111 7]}} (== ^{:go/pos {:name-pos [111 5]}} t nil)
+        ^{:go/pos {:return [112 3]}} (return))
+
+      ^{:go/apos {2 [114 12]} :go/pos {:tok-pos [114 10]}} (set! ^{:go/pos {:dot [114 4] :name-pos [114 5]}} (.-busy ^{:go/pos {:name-pos [114 2]}} tm) true)
+      ^{:go/pos {:defer [115 2]}} (defer ^{:go/pos {:lparen [115 34] :rparen [115 35]}} (^{:go/pos {:func [115 8] :lbrace [115 15] :rbrace [115 33]}} (fn ^{:go/pos {:closing [115 13] :opening [115 12]}} [] ^{:go/apos {2 [115 27]} :go/pos {:tok-pos [115 25]}} (set! ^{:go/pos {:dot [115 19] :name-pos [115 20]}} (.-busy ^{:go/pos {:name-pos [115 17]}} tm) false))))
+      (let [^{:tag ^{:go/pos {:dot [116 17] :name-pos [116 18] :x-pos [116 10]}} strings/Builder :go/pos {:name-pos [116 6] :tok-pos [116 2]}} key (zero ^{:go/pos {:dot [116 17] :name-pos [116 18] :x-pos [116 10]}} strings/Builder)
+          ^{:go/pos {:name-pos [117 2] :tok-pos [117 5]}} tb ^{:go/pos {:op-pos [117 8]}} (addr ^{:go/pos {:lbrace [117 20] :rbrace [117 21]}} (lit ^{:go/pos {:name-pos [117 9]}} tmTraceback))]
+        ^{:go/pos {:for [118 2] :lbrace [118 41] :rbrace [130 2]}} (for [^{:go/pos {:name-pos [118 6] :tok-pos [118 8]}} f ^{:go/pos {:dot [118 12] :name-pos [118 13]}} (.-Frame ^{:go/pos {:name-pos [118 11]}} t)] ^{:go/apos {2 [118 25]} :go/pos {:op-pos [118 22]}} (!= ^{:go/pos {:name-pos [118 20]}} f nil) ^{:go/pos {:tok-pos [118 32]}} (set! ^{:go/pos {:name-pos [118 30]}} f ^{:go/pos {:dot [118 35] :name-pos [118 36]}} (.-Back ^{:go/pos {:name-pos [118 34]}} f))
+          ^{:go/pos {:if [119 3] :lbrace [119 36] :rbrace [126 3]}} (when ^{:go/pos {:op-pos [119 15]}} (< ^{:go/pos {:dot [119 8] :name-pos [119 9]}} (.-total ^{:go/pos {:name-pos [119 6]}} tb) ^{:go/pos {:dot [119 28] :name-pos [119 29]}} (.-nframe ^{:go/pos {:name-pos [119 17]}} tracemalloc))
+            (let [^{:go/pos {:name-pos [120 4] :tok-pos [120 7]}} ln ^{:go/pos {:dot [120 11] :lparen [120 16] :name-pos [120 12] :rparen [120 17]}} (.Line ^{:go/pos {:name-pos [120 10]}} f)]
+              ^{:go/pos {:tok-pos [121 14]}} (set! ^{:go/pos {:dot [121 6] :name-pos [121 7]}} (.-frames ^{:go/pos {:name-pos [121 4]}} tb) ^{:go/pos {:lparen [121 22] :rparen [121 61]}} (^{:go/pos {:name-pos [121 16]}} append ^{:go/pos {:dot [121 25] :name-pos [121 26]}} (.-frames ^{:go/pos {:name-pos [121 23]}} tb) ^{:go/pos {:lbrace [121 40] :rbrace [121 60]}} (lit ^{:go/apos {1 [121 35]} :go/pos {:lbrack [121 34]}} (array 2 ^{:go/pos {:name-pos [121 37]}} any) ^{:go/pos {:dot [121 47] :name-pos [121 48]}} (.-Filename ^{:go/pos {:dot [121 42] :name-pos [121 43]}} (.-Code ^{:go/pos {:name-pos [121 41]}} f)) ^{:go/pos {:name-pos [121 58]}} ln)))
+              ^{:go/pos {:dot [122 7] :lparen [122 19] :name-pos [122 8] :rparen [122 35]}} (.WriteString ^{:go/pos {:name-pos [122 4]}} key ^{:go/pos {:dot [122 26] :name-pos [122 27]}} (.-Filename ^{:go/pos {:dot [122 21] :name-pos [122 22]}} (.-Code ^{:go/pos {:name-pos [122 20]}} f)))
+              ^{:go/apos {2 [123 18]} :go/pos {:dot [123 7] :lparen [123 17] :name-pos [123 8] :rparen [123 19]}} (.WriteByte ^{:go/pos {:name-pos [123 4]}} key 0)
+              ^{:go/pos {:dot [124 7] :lparen [124 19] :name-pos [124 8] :rparen [124 36]}} (.WriteString ^{:go/pos {:name-pos [124 4]}} key ^{:go/pos {:lparen [124 32] :rparen [124 35]}} (^{:go/pos {:dot [124 27] :name-pos [124 28] :x-pos [124 20]}} strconv/Itoa ^{:go/pos {:name-pos [124 33]}} ln))
+              ^{:go/apos {2 [125 18]} :go/pos {:dot [125 7] :lparen [125 17] :name-pos [125 8] :rparen [125 19]}} (.WriteByte ^{:go/pos {:name-pos [125 4]}} key 0)))
+
+          ^{:go/pos {:if [127 3] :lbrace [127 38] :rbrace [129 3]}} (when ^{:go/pos {:op-pos [127 15]}} (< ^{:go/pos {:dot [127 8] :name-pos [127 9]}} (.-total ^{:go/pos {:name-pos [127 6]}} tb) ^{:go/pos {:name-pos [127 17]}} tracemallocMaxNFrame)
+            ^{:go/pos {:tok-pos [128 12]}} (inc! ^{:go/pos {:dot [128 6] :name-pos [128 7]}} (.-total ^{:go/pos {:name-pos [128 4]}} tb))))
+
+
+        ^{:go/pos {:if [131 2] :lbrace [131 25] :rbrace [134 2]}} (when ^{:go/apos {2 [131 23]} :go/pos {:op-pos [131 20]}} (== ^{:go/pos {:lparen [131 8] :rparen [131 18]}} (^{:go/pos {:name-pos [131 5]}} len ^{:go/pos {:dot [131 11] :name-pos [131 12]}} (.-frames ^{:go/pos {:name-pos [131 9]}} tb)) 0)
+          ^{:go/pos {:tok-pos [132 13]}} (set! ^{:go/pos {:dot [132 5] :name-pos [132 6]}} (.-frames ^{:go/pos {:name-pos [132 3]}} tb) ^{:go/pos {:lbrace [132 23] :rbrace [132 40]}} (lit ^{:go/pos {:lbrack [132 15]}} (slice ^{:go/apos {1 [132 18]} :go/pos {:lbrack [132 17]}} (array 2 ^{:go/pos {:name-pos [132 20]}} any)) ^{:go/apos {2 [132 25] 3 [132 38]} :go/pos {:lbrace [132 24] :rbrace [132 39]}} (lit _ "<unknown>" 0)))
+          ^{:go/apos {2 [133 19]} :go/pos {:dot [133 6] :lparen [133 18] :name-pos [133 7] :rparen [133 39]}} (.WriteString ^{:go/pos {:name-pos [133 3]}} key "<unknown>\u00000\u0000"))
+
+        ^{:go/pos {:dot [135 5] :lparen [135 17] :name-pos [135 6] :rparen [135 40]}} (.WriteString ^{:go/pos {:name-pos [135 2]}} key ^{:go/pos {:lparen [135 30] :rparen [135 39]}} (^{:go/pos {:dot [135 25] :name-pos [135 26] :x-pos [135 18]}} strconv/Itoa ^{:go/pos {:dot [135 33] :name-pos [135 34]}} (.-total ^{:go/pos {:name-pos [135 31]}} tb)))
+        (let [^{:go/pos {:name-pos [136 2] :tok-pos [136 6]}} ptr ^{:go/pos {:dot [136 27] :lparen [136 35] :name-pos [136 28] :rparen [136 36]}} (.Pointer ^{:go/pos {:lparen [136 24] :rparen [136 26]}} (^{:go/pos {:dot [136 16] :name-pos [136 17] :x-pos [136 9]}} reflect/ValueOf ^{:go/pos {:name-pos [136 25]}} o))]
+          ^{:go/pos {:dot [137 7] :lparen [137 12] :name-pos [137 8] :rparen [137 13]}} (.Lock ^{:go/pos {:dot [137 4] :name-pos [137 5]}} (.-mu ^{:go/pos {:name-pos [137 2]}} tm))
+          ^{:go/pos {:else-lbrace [140 9] :else-rbrace [142 2] :if [138 2] :lbrace [138 45] :rbrace [140 2]}} (if [^{:go/pos {:name-pos [138 5] :tok-pos [138 9]}} old ^{:go/pos {:lbrack [138 18] :rbrack [138 31]}} (aget ^{:go/pos {:dot [138 14] :name-pos [138 15]}} (.-tbs ^{:go/pos {:name-pos [138 12]}} tm) ^{:go/pos {:dot [138 22] :lparen [138 29] :name-pos [138 23] :rparen [138 30]}} (.String ^{:go/pos {:name-pos [138 19]}} key))] ^{:go/apos {2 [138 41]} :go/pos {:op-pos [138 38]}} (!= ^{:go/pos {:name-pos [138 34]}} old nil)
+            ^{:go/pos {:tok-pos [139 6]}} (set! ^{:go/pos {:name-pos [139 3]}} tb ^{:go/pos {:name-pos [139 8]}} old)
+
+            ^{:go/pos {:lbrack [141 9] :rbrack [141 22] :tok-pos [141 24]}} (aset ^{:go/pos {:dot [141 5] :name-pos [141 6]}} (.-tbs ^{:go/pos {:name-pos [141 3]}} tm) ^{:go/pos {:dot [141 13] :lparen [141 20] :name-pos [141 14] :rparen [141 21]}} (.String ^{:go/pos {:name-pos [141 10]}} key) ^{:go/pos {:name-pos [141 26]}} tb))
+
+          ^{:go/pos {:else-lbrace [145 9] :else-rbrace [147 2] :if [143 2] :lbrace [143 39] :rbrace [145 2]}} (if [^{:go/pos {:name-pos [143 5] :tok-pos [143 9]}} old ^{:go/pos {:lbrack [143 21] :rbrack [143 25]}} (aget ^{:go/pos {:dot [143 14] :name-pos [143 15]}} (.-traces ^{:go/pos {:name-pos [143 12]}} tm) ^{:go/pos {:name-pos [143 22]}} ptr)] ^{:go/apos {2 [143 35]} :go/pos {:op-pos [143 32]}} (!= ^{:go/pos {:name-pos [143 28]}} old nil)
+            ^{:go/pos {:tok-pos [144 11]}} (set! ^{:go/pos {:dot [144 5] :name-pos [144 6]}} (.-size ^{:go/pos {:name-pos [144 3]}} tm) - ^{:go/pos {:dot [144 17] :name-pos [144 18]}} (.-size ^{:go/pos {:name-pos [144 14]}} old))
+
+            ^{:go/pos {:tok-pos [146 12]}} (set! ^{:go/pos {:dot [146 5] :name-pos [146 6]}} (.-order ^{:go/pos {:name-pos [146 3]}} tm) ^{:go/pos {:lparen [146 20] :rparen [146 34]}} (^{:go/pos {:name-pos [146 14]}} append ^{:go/pos {:dot [146 23] :name-pos [146 24]}} (.-order ^{:go/pos {:name-pos [146 21]}} tm) ^{:go/pos {:name-pos [146 31]}} ptr)))
+
+          ^{:go/pos {:lbrack [148 11] :rbrack [148 15] :tok-pos [148 17]}} (aset ^{:go/pos {:dot [148 4] :name-pos [148 5]}} (.-traces ^{:go/pos {:name-pos [148 2]}} tm) ^{:go/pos {:name-pos [148 12]}} ptr ^{:go/pos {:op-pos [148 19]}} (addr ^{:go/acolon {2 [148 32] 4 [148 42] 6 [148 51]} :go/apos {2 [148 28] 4 [148 40] 6 [148 48]} :go/pos {:lbrace [148 27] :rbrace [148 59]}} (lit ^{:go/pos {:name-pos [148 20]}} tmTrace :size ^{:go/pos {:name-pos [148 34]}} size :tb ^{:go/pos {:name-pos [148 44]}} tb :gen ^{:go/pos {:dot [148 55] :name-pos [148 56]}} (.-gen ^{:go/pos {:name-pos [148 53]}} tm))))
+          ^{:go/pos {:tok-pos [149 10]}} (set! ^{:go/pos {:dot [149 4] :name-pos [149 5]}} (.-size ^{:go/pos {:name-pos [149 2]}} tm) + ^{:go/pos {:name-pos [149 13]}} size)
+          ^{:go/pos {:if [150 2] :lbrace [150 23] :rbrace [152 2]}} (when ^{:go/pos {:op-pos [150 13]}} (> ^{:go/pos {:dot [150 7] :name-pos [150 8]}} (.-size ^{:go/pos {:name-pos [150 5]}} tm) ^{:go/pos {:dot [150 17] :name-pos [150 18]}} (.-peak ^{:go/pos {:name-pos [150 15]}} tm))
+            ^{:go/pos {:tok-pos [151 11]}} (set! ^{:go/pos {:dot [151 5] :name-pos [151 6]}} (.-peak ^{:go/pos {:name-pos [151 3]}} tm) ^{:go/pos {:dot [151 15] :name-pos [151 16]}} (.-size ^{:go/pos {:name-pos [151 13]}} tm)))
+
+          (let [^{:go/pos {:name-pos [153 2] :tok-pos [153 6]}} gen ^{:go/pos {:dot [153 11] :name-pos [153 12]}} (.-gen ^{:go/pos {:name-pos [153 9]}} tm)]
+            ^{:go/pos {:dot [154 7] :lparen [154 14] :name-pos [154 8] :rparen [154 15]}} (.Unlock ^{:go/pos {:dot [154 4] :name-pos [154 5]}} (.-mu ^{:go/pos {:name-pos [154 2]}} tm))
+            ^{:go/pos {:lparen [155 11] :rparen [155 23]}} (^{:go/pos {:name-pos [155 2]}} tmCleanup ^{:go/pos {:name-pos [155 12]}} o ^{:go/pos {:name-pos [155 15]}} ptr ^{:go/pos {:name-pos [155 20]}} gen)))))))
+
+
+
+^{:go/pos {:doc [158 1] :func [159 1] :lbrace [159 35] :rbrace [166 1]}} (go/func ^{:go/pos {:name-pos [159 6]}} tmFree "tmFree is a traced object's collection: its trace dropped, when it is still the one of that generation.\n" ^{:go/pos {:closing [159 33] :opening [159 12]}} [^{:tag ^{:go/pos {:name-pos [159 17]}} uintptr :go/pos {:name-pos [159 13]}} ptr ^{:tag ^{:go/pos {:name-pos [159 30]}} int :go/pos {:name-pos [159 26]}} gen]
+  ^{:go/pos {:dot [160 7] :lparen [160 12] :name-pos [160 8] :rparen [160 13]}} (.Lock ^{:go/pos {:dot [160 4] :name-pos [160 5]}} (.-mu ^{:go/pos {:name-pos [160 2]}} tm))
+  ^{:go/pos {:if [161 2] :lbrace [161 54] :rbrace [164 2]}} (when [^{:go/pos {:name-pos [161 5] :tok-pos [161 8]}} tr ^{:go/pos {:lbrack [161 20] :rbrack [161 24]}} (aget ^{:go/pos {:dot [161 13] :name-pos [161 14]}} (.-traces ^{:go/pos {:name-pos [161 11]}} tm) ^{:go/pos {:name-pos [161 21]}} ptr)] ^{:go/pos {:op-pos [161 37]}} (and ^{:go/apos {2 [161 33]} :go/pos {:op-pos [161 30]}} (!= ^{:go/pos {:name-pos [161 27]}} tr nil) ^{:go/pos {:op-pos [161 47]}} (== ^{:go/pos {:dot [161 42] :name-pos [161 43]}} (.-gen ^{:go/pos {:name-pos [161 40]}} tr) ^{:go/pos {:name-pos [161 50]}} gen))
+    ^{:go/pos {:lparen [162 9] :rparen [162 24]}} (^{:go/pos {:name-pos [162 3]}} delete ^{:go/pos {:dot [162 12] :name-pos [162 13]}} (.-traces ^{:go/pos {:name-pos [162 10]}} tm) ^{:go/pos {:name-pos [162 21]}} ptr)
+    ^{:go/pos {:tok-pos [163 11]}} (set! ^{:go/pos {:dot [163 5] :name-pos [163 6]}} (.-size ^{:go/pos {:name-pos [163 3]}} tm) - ^{:go/pos {:dot [163 16] :name-pos [163 17]}} (.-size ^{:go/pos {:name-pos [163 14]}} tr)))
+
+  ^{:go/pos {:dot [165 7] :lparen [165 14] :name-pos [165 8] :rparen [165 15]}} (.Unlock ^{:go/pos {:dot [165 4] :name-pos [165 5]}} (.-mu ^{:go/pos {:name-pos [165 2]}} tm)))
+
+
+
+
+
+
+^{:go/pos {:doc [168 1] :func [172 1] :lbrace [172 48] :rbrace [183 1]}} (go/func ^{:go/pos {:name-pos [172 6]}} tmCleanup "tmCleanup has tmFree run at o's collection: a finalizer (runtime.SetFinalizer: goi runs Go's own, where\nruntime.AddCleanup's generic body is not interpretable); one per type, so a type another file finalizes is not\ntraced (an instance: 218's finalizer queue owns instances' finalization). A second finalizer on an object would be\nGo's fatal error: o is always fresh here.\n" ^{:go/pos {:closing [172 46] :opening [172 15]}} [^{:tag ^{:go/pos {:name-pos [172 18]}} Object :go/pos {:name-pos [172 16]}} o ^{:tag ^{:go/pos {:name-pos [172 30]}} uintptr :go/pos {:name-pos [172 26]}} ptr ^{:tag ^{:go/pos {:name-pos [172 43]}} int :go/pos {:name-pos [172 39]}} gen]
+  ^{:go/pos {:guard-dot [173 15] :guard-lparen [173 16] :guard-rparen [173 21] :guard-tok [173 11] :lbrace [173 23] :rbrace [182 2] :switch [173 2]}} (type-switch [^{:go/pos {:name-pos [173 9]}} x ^{:go/pos {:name-pos [173 14]}} o]
+    ^{:go/pos {:case [174 2] :colon [174 13]}} (case [^{:go/pos {:star [174 7]}} (* ^{:go/pos {:name-pos [174 8]}} Bytes)]
+      ^{:go/pos {:lparen [175 23] :rparen [175 60]}} (^{:go/pos {:dot [175 10] :name-pos [175 11] :x-pos [175 3]}} runtime/SetFinalizer ^{:go/pos {:name-pos [175 24]}} x ^{:go/pos {:func [175 27] :lbrace [175 40] :rbrace [175 59]}} (fn ^{:go/pos {:closing [175 38] :opening [175 31]}} [^{:go/pos {:star [175 32]}} (* ^{:go/pos {:name-pos [175 33]}} Bytes)] ^{:go/pos {:lparen [175 48] :rparen [175 57]}} (^{:go/pos {:name-pos [175 42]}} tmFree ^{:go/pos {:name-pos [175 49]}} ptr ^{:go/pos {:name-pos [175 54]}} gen))))
+    ^{:go/pos {:case [176 2] :colon [176 12]}} (case [^{:go/pos {:star [176 7]}} (* ^{:go/pos {:name-pos [176 8]}} List)]
+      ^{:go/pos {:lparen [177 23] :rparen [177 59]}} (^{:go/pos {:dot [177 10] :name-pos [177 11] :x-pos [177 3]}} runtime/SetFinalizer ^{:go/pos {:name-pos [177 24]}} x ^{:go/pos {:func [177 27] :lbrace [177 39] :rbrace [177 58]}} (fn ^{:go/pos {:closing [177 37] :opening [177 31]}} [^{:go/pos {:star [177 32]}} (* ^{:go/pos {:name-pos [177 33]}} List)] ^{:go/pos {:lparen [177 47] :rparen [177 56]}} (^{:go/pos {:name-pos [177 41]}} tmFree ^{:go/pos {:name-pos [177 48]}} ptr ^{:go/pos {:name-pos [177 53]}} gen))))
+    ^{:go/pos {:case [178 2] :colon [178 12]}} (case [^{:go/pos {:star [178 7]}} (* ^{:go/pos {:name-pos [178 8]}} Dict)]
+      ^{:go/pos {:lparen [179 23] :rparen [179 59]}} (^{:go/pos {:dot [179 10] :name-pos [179 11] :x-pos [179 3]}} runtime/SetFinalizer ^{:go/pos {:name-pos [179 24]}} x ^{:go/pos {:func [179 27] :lbrace [179 39] :rbrace [179 58]}} (fn ^{:go/pos {:closing [179 37] :opening [179 31]}} [^{:go/pos {:star [179 32]}} (* ^{:go/pos {:name-pos [179 33]}} Dict)] ^{:go/pos {:lparen [179 47] :rparen [179 56]}} (^{:go/pos {:name-pos [179 41]}} tmFree ^{:go/pos {:name-pos [179 48]}} ptr ^{:go/pos {:name-pos [179 53]}} gen))))
+    ^{:go/pos {:case [180 2] :colon [180 12]}} (case [^{:go/pos {:star [180 7]}} (* ^{:go/pos {:name-pos [180 8]}} Cell)]
+      ^{:go/pos {:lparen [181 23] :rparen [181 59]}} (^{:go/pos {:dot [181 10] :name-pos [181 11] :x-pos [181 3]}} runtime/SetFinalizer ^{:go/pos {:name-pos [181 24]}} x ^{:go/pos {:func [181 27] :lbrace [181 39] :rbrace [181 58]}} (fn ^{:go/pos {:closing [181 37] :opening [181 31]}} [^{:go/pos {:star [181 32]}} (* ^{:go/pos {:name-pos [181 33]}} Cell)] ^{:go/pos {:lparen [181 47] :rparen [181 56]}} (^{:go/pos {:name-pos [181 41]}} tmFree ^{:go/pos {:name-pos [181 48]}} ptr ^{:go/pos {:name-pos [181 53]}} gen))))))
+
+
+
+
+
+^{:go/pos {:doc [185 1] :func [187 1] :lbrace [187 18] :rbrace [201 1]}} (go/func ^{:go/pos {:name-pos [187 6]}} tmCollect "tmCollect runs the collector and waits for the finalizers it queued (a sentinel's, queued last, run after theirs on\nthe one finalizer goroutine), so a dropped object's trace is gone; with the GIL released, at most a second a round.\n" ^{:go/pos {:closing [187 16] :opening [187 15]}} []
+  ^{:go/pos {:lparen [188 14] :rparen [200 3]}} (^{:go/pos {:name-pos [188 2]}} allowThreads ^{:go/pos {:func [188 15] :lbrace [188 22] :rbrace [200 2]}} (fn ^{:go/pos {:closing [188 20] :opening [188 19]}} []
+      ^{:go/pos {:for [189 3] :lbrace [189 38] :rbrace [199 3]}} (for ^{:go/apos {1 [189 16]}} [^{:go/pos {:name-pos [189 7] :tok-pos [189 13]}} round 0] ^{:go/apos {2 [189 27]} :go/pos {:op-pos [189 25]}} (< ^{:go/pos {:name-pos [189 19]}} round 2) ^{:go/pos {:tok-pos [189 35]}} (inc! ^{:go/pos {:name-pos [189 30]}} round)
+        (let [^{:go/pos {:name-pos [190 4] :tok-pos [190 9]}} done ^{:go/pos {:lparen [190 16] :rparen [190 30]}} (^{:go/pos {:name-pos [190 12]}} make ^{:go/pos {:begin [190 17]}} (chan ^{:go/pos {:lbrace [190 28] :rbrace [190 29] :struct [190 22]}} (struct)))
+            ^{:go/pos {:name-pos [191 4] :tok-pos [191 6]}} s ^{:go/pos {:lparen [191 12] :rparen [191 21]}} (^{:go/pos {:name-pos [191 9]}} new ^{:go/apos {1 [191 14]} :go/pos {:lbrack [191 13]}} (array 16 ^{:go/pos {:name-pos [191 17]}} byte))]
+          ^{:go/pos {:lparen [192 24] :rparen [192 59]}} (^{:go/pos {:dot [192 11] :name-pos [192 12] :x-pos [192 4]}} runtime/SetFinalizer ^{:go/pos {:name-pos [192 25]}} s ^{:go/pos {:func [192 28] :lbrace [192 44] :rbrace [192 58]}} (fn ^{:go/pos {:closing [192 42] :opening [192 32]}} [^{:go/pos {:star [192 33]}} (* ^{:go/apos {1 [192 35]} :go/pos {:lbrack [192 34]}} (array 16 ^{:go/pos {:name-pos [192 38]}} byte))] ^{:go/pos {:lparen [192 51] :rparen [192 56]}} (^{:go/pos {:name-pos [192 46]}} close ^{:go/pos {:name-pos [192 52]}} done)))
+          ^{:go/apos {2 [193 8]} :go/pos {:tok-pos [193 6]}} (set! ^{:go/pos {:name-pos [193 4]}} s nil)
+          ^{:go/pos {:lparen [194 14] :rparen [194 15]}} (^{:go/pos {:dot [194 11] :name-pos [194 12] :x-pos [194 4]}} runtime/GC)
+          ^{:go/pos {:lbrace [195 11] :rbrace [198 4] :select [195 4]}} (select
+            ^{:go/pos {:case [196 4] :colon [196 15]}} (case ^{:go/pos {:op-pos [196 9]}} (<! ^{:go/pos {:name-pos [196 11]}} done))
+            ^{:go/pos {:case [197 4] :colon [197 34]}} (case ^{:go/pos {:op-pos [197 9]}} (<! ^{:go/pos {:lparen [197 21] :rparen [197 33]}} (^{:go/pos {:dot [197 15] :name-pos [197 16] :x-pos [197 11]}} time/After ^{:go/pos {:dot [197 26] :name-pos [197 27] :x-pos [197 22]}} time/Second)))))))))
+
+
+
+
+
+
+^{:go/pos {:doc [203 1] :func [204 1] :lbrace [204 28] :rbrace [222 1] :return [221 2]}} (go/func ^{:go/pos {:name-pos [204 6]}} tmTracesList "tmTracesList is _PyTraceMalloc_GetTraces: (domain, size, frames, total_nframe) per trace, frames interned.\n" ^{:tag ^{:go/pos {:name-pos [204 21]}} Object :go/pos {:closing [204 19] :opening [204 18]}} []
+  (let [^{:go/pos {:name-pos [205 2] :tok-pos [205 7]}} busy ^{:go/pos {:dot [205 12] :name-pos [205 13]}} (.-busy ^{:go/pos {:name-pos [205 10]}} tm)]
+    ^{:go/apos {2 [206 12]} :go/pos {:tok-pos [206 10]}} (set! ^{:go/pos {:dot [206 4] :name-pos [206 5]}} (.-busy ^{:go/pos {:name-pos [206 2]}} tm) true) ; the list and tuples made here are no allocations of the program's (and tm.mu is held)
+    ^{:go/pos {:defer [207 2]}} (defer ^{:go/pos {:lparen [207 33] :rparen [207 34]}} (^{:go/pos {:func [207 8] :lbrace [207 15] :rbrace [207 32]}} (fn ^{:go/pos {:closing [207 13] :opening [207 12]}} [] ^{:go/pos {:tok-pos [207 25]}} (set! ^{:go/pos {:dot [207 19] :name-pos [207 20]}} (.-busy ^{:go/pos {:name-pos [207 17]}} tm) ^{:go/pos {:name-pos [207 27]}} busy))))
+    ^{:go/pos {:dot [208 7] :lparen [208 12] :name-pos [208 8] :rparen [208 13]}} (.Lock ^{:go/pos {:dot [208 4] :name-pos [208 5]}} (.-mu ^{:go/pos {:name-pos [208 2]}} tm))
+    ^{:go/pos {:defer [209 2]}} (defer ^{:go/pos {:dot [209 13] :lparen [209 20] :name-pos [209 14] :rparen [209 21]}} (.Unlock ^{:go/pos {:dot [209 10] :name-pos [209 11]}} (.-mu ^{:go/pos {:name-pos [209 8]}} tm)))
+    (let [^{:go/pos {:name-pos [210 2] :tok-pos [210 6]}} out ^{:go/pos {:lparen [210 16] :rparen [210 17]}} (^{:go/pos {:name-pos [210 9]}} NewList)
+        ^{:go/pos {:name-pos [211 2] :tok-pos [211 7]}} live ^{:go/apos {3 [211 20]} :go/pos {:lbrack [211 18] :rbrack [211 21]}} (subslice ^{:go/pos {:dot [211 12] :name-pos [211 13]}} (.-order ^{:go/pos {:name-pos [211 10]}} tm) _ 0)]
+      ^{:go/pos {:for [212 2] :lbrace [212 31] :range [212 16] :rbrace [219 2] :tok-pos [212 13]}} (range [^{:go/pos {:name-pos [212 6]}} _ ^{:go/pos {:name-pos [212 9]}} ptr ^{:go/pos {:dot [212 24] :name-pos [212 25]}} (.-order ^{:go/pos {:name-pos [212 22]}} tm)]
+        (let [^{:go/pos {:name-pos [213 3] :tok-pos [213 6]}} tr ^{:go/pos {:lbrack [213 18] :rbrack [213 22]}} (aget ^{:go/pos {:dot [213 11] :name-pos [213 12]}} (.-traces ^{:go/pos {:name-pos [213 9]}} tm) ^{:go/pos {:name-pos [213 19]}} ptr)]
+          ^{:go/pos {:if [214 3] :lbrace [214 16] :rbrace [216 3]}} (when ^{:go/apos {2 [214 12]} :go/pos {:op-pos [214 9]}} (== ^{:go/pos {:name-pos [214 6]}} tr nil)
+            ^{:go/pos {:tok-pos [215 4]}} (continue))
+
+          ^{:go/pos {:tok-pos [217 8]}} (set! ^{:go/pos {:name-pos [217 3]}} live ^{:go/pos {:lparen [217 16] :rparen [217 26]}} (^{:go/pos {:name-pos [217 10]}} append ^{:go/pos {:name-pos [217 17]}} live ^{:go/pos {:name-pos [217 23]}} ptr))
+          ^{:go/pos {:tok-pos [218 13]}} (set! ^{:go/pos {:dot [218 6] :name-pos [218 7]}} (.-Items ^{:go/pos {:name-pos [218 3]}} out) ^{:go/pos {:lparen [218 21] :rparen [218 119]}} (^{:go/pos {:name-pos [218 15]}} append ^{:go/pos {:dot [218 25] :name-pos [218 26]}} (.-Items ^{:go/pos {:name-pos [218 22]}} out) ^{:go/pos {:lparen [218 41] :rparen [218 118]}} (^{:go/pos {:name-pos [218 33]}} NewTuple ^{:go/apos {1 [218 49]} :go/pos {:lparen [218 48] :rparen [218 50]}} (^{:go/pos {:name-pos [218 42]}} NewInt 0) ^{:go/pos {:lparen [218 59] :rparen [218 67]}} (^{:go/pos {:name-pos [218 53]}} NewInt ^{:go/pos {:dot [218 62] :name-pos [218 63]}} (.-size ^{:go/pos {:name-pos [218 60]}} tr)) ^{:go/pos {:lparen [218 83] :rparen [218 89]}} (^{:go/pos {:name-pos [218 70]}} tmFramesTuple ^{:go/pos {:dot [218 86] :name-pos [218 87]}} (.-tb ^{:go/pos {:name-pos [218 84]}} tr)) ^{:go/pos {:lparen [218 98] :rparen [218 117]}} (^{:go/pos {:name-pos [218 92]}} NewInt ^{:go/pos {:lparen [218 104] :rparen [218 116]}} (conv ^{:go/pos {:name-pos [218 99]}} int64 ^{:go/pos {:dot [218 110] :name-pos [218 111]}} (.-total ^{:go/pos {:dot [218 107] :name-pos [218 108]}} (.-tb ^{:go/pos {:name-pos [218 105]}} tr)))))))))
+
+      ^{:go/pos {:tok-pos [220 11]}} (set! ^{:go/pos {:dot [220 4] :name-pos [220 5]}} (.-order ^{:go/pos {:name-pos [220 2]}} tm) ^{:go/pos {:name-pos [220 13]}} live)
+      ^{:go/pos {:name-pos [221 9]}} out)))
+
+
+^{:go/pos {:func [224 1] :lbrace [224 44] :rbrace [233 1] :return [232 2]}} (go/func ^{:go/pos {:name-pos [224 6]}} tmFramesTuple ^{:tag ^{:go/pos {:name-pos [224 37]}} Object :go/pos {:closing [224 35] :opening [224 19]}} [^{:tag ^{:go/pos {:star [224 23]}} (* ^{:go/pos {:name-pos [224 24]}} tmTraceback) :go/pos {:name-pos [224 20]}} tb]
+  ^{:go/pos {:if [225 2] :lbrace [225 21] :rbrace [231 2]}} (when ^{:go/apos {2 [225 17]} :go/pos {:op-pos [225 14]}} (== ^{:go/pos {:dot [225 7] :name-pos [225 8]}} (.-tuple ^{:go/pos {:name-pos [225 5]}} tb) nil)
+    (let [^{:go/pos {:name-pos [226 3] :tok-pos [226 9]}} items ^{:go/pos {:lparen [226 16] :rparen [226 41]}} (^{:go/pos {:name-pos [226 12]}} make ^{:go/pos {:lbrack [226 17]}} (slice ^{:go/pos {:name-pos [226 19]}} Object) ^{:go/pos {:lparen [226 30] :rparen [226 40]}} (^{:go/pos {:name-pos [226 27]}} len ^{:go/pos {:dot [226 33] :name-pos [226 34]}} (.-frames ^{:go/pos {:name-pos [226 31]}} tb)))]
+      ^{:go/pos {:for [227 3] :lbrace [227 32] :range [227 16] :rbrace [229 3] :tok-pos [227 13]}} (range [^{:go/pos {:name-pos [227 7]}} i ^{:go/pos {:name-pos [227 10]}} fr ^{:go/pos {:dot [227 24] :name-pos [227 25]}} (.-frames ^{:go/pos {:name-pos [227 22]}} tb)]
+        ^{:go/pos {:lbrack [228 9] :rbrack [228 11] :tok-pos [228 13]}} (aset ^{:go/pos {:name-pos [228 4]}} items ^{:go/pos {:name-pos [228 10]}} i ^{:go/pos {:lparen [228 23] :rparen [228 74]}} (^{:go/pos {:name-pos [228 15]}} NewTuple ^{:go/pos {:lparen [228 30] :rparen [228 45]}} (^{:go/pos {:name-pos [228 24]}} NewStr ^{:go/pos {:dot [228 36] :lparen [228 37] :rparen [228 44]}} (assert ^{:go/pos {:name-pos [228 38]}} string ^{:go/apos {2 [228 34]} :go/pos {:lbrack [228 33] :rbrack [228 35]}} (aget ^{:go/pos {:name-pos [228 31]}} fr 0))) ^{:go/pos {:lparen [228 54] :rparen [228 73]}} (^{:go/pos {:name-pos [228 48]}} NewInt ^{:go/pos {:lparen [228 60] :rparen [228 72]}} (conv ^{:go/pos {:name-pos [228 55]}} int64 ^{:go/pos {:dot [228 66] :lparen [228 67] :rparen [228 71]}} (assert ^{:go/pos {:name-pos [228 68]}} int ^{:go/apos {2 [228 64]} :go/pos {:lbrack [228 63] :rbrack [228 65]}} (aget ^{:go/pos {:name-pos [228 61]}} fr 1)))))))
+
+      ^{:go/pos {:tok-pos [230 12]}} (set! ^{:go/pos {:dot [230 5] :name-pos [230 6]}} (.-tuple ^{:go/pos {:name-pos [230 3]}} tb) ^{:go/pos {:ellipsis [230 28] :lparen [230 22] :rparen [230 31]}} (^{:go/pos {:name-pos [230 14]}} NewTuple (spread ^{:go/pos {:name-pos [230 23]}} items)))))
+
+  ^{:go/pos {:dot [232 11] :name-pos [232 12]}} (.-tuple ^{:go/pos {:name-pos [232 9]}} tb))
+
+
+^{:go/pos {:func [235 1] :lbrace [235 13] :rbrace [345 1]}} (go/func ^{:go/pos {:name-pos [235 6]}} init ^{:go/pos {:closing [235 11] :opening [235 10]}} []
+  ^{:go/apos {2 [236 23]} :go/pos {:tok-pos [236 21]}} (set! ^{:go/pos {:dot [236 13] :name-pos [236 14]}} (.-nframe ^{:go/pos {:name-pos [236 2]}} tracemalloc) 1)
+  ^{:go/apos {2 [237 20]} :go/pos {:lbrack [237 19] :rbrack [237 34] :tok-pos [237 36]}} (aset ^{:go/pos {:name-pos [237 2]}} builtinModulesErr "_tracemalloc" ^{:go/pos {:func [237 38] :lbrace [237 72] :rbrace [343 2]}} (fn ^{:go/pos {:closing [237 53] :opening [237 42]}} [^{:tag ^{:go/pos {:star [237 46]}} (* ^{:go/pos {:name-pos [237 47]}} Interp) :go/pos {:name-pos [237 43]}} in] :results ^{:go/pos {:closing [237 70] :opening [237 55]}} [^{:go/pos {:star [237 56]}} (* ^{:go/pos {:name-pos [237 57]}} Module) ^{:go/pos {:name-pos [237 65]}} error]
+      (let [^{:go/pos {:name-pos [238 3] :tok-pos [238 5]}} d ^{:go/apos {1 [238 14]} :go/pos {:lparen [238 13] :rparen [238 28]}} (^{:go/pos {:name-pos [238 8]}} modNS "_tracemalloc")]
+        ^{:go/apos {2 [239 12]} :go/pos {:dot [239 4] :lparen [239 11] :name-pos [239 5] :rparen [239 89]}} (.SetStr ^{:go/pos {:name-pos [239 3]}} d "__doc__" ^{:go/apos {1 [239 30]} :go/pos {:lparen [239 29] :rparen [239 88]}} (^{:go/pos {:name-pos [239 23]}} NewStr "Debug module to trace memory blocks allocated by Python."))
+        (let [^{:go/pos {:name-pos [240 3] :tok-pos [240 10]}} noArgs ^{:go/pos {:func [240 13] :lbrace [240 57] :rbrace [250 3]}} (fn ^{:go/pos {:closing [240 55] :opening [240 17]}} [^{:tag ^{:go/pos {:name-pos [240 23]}} string :go/pos {:name-pos [240 18]}} name ^{:tag ^{:go/pos {:func [240 33]}} (func ^{:go/pos {:closing [240 38] :opening [240 37]}} [] ^{:go/pos {:closing [240 54] :opening [240 40]}} [^{:go/pos {:name-pos [240 41]}} Object ^{:go/pos {:name-pos [240 49]}} error]) :go/pos {:name-pos [240 31]}} f]
+              ^{:go/pos {:dot [241 5] :lparen [241 12] :name-pos [241 6] :rparen [249 6]}} (.SetStr ^{:go/pos {:name-pos [241 4]}} d ^{:go/pos {:name-pos [241 13]}} name ^{:go/pos {:op-pos [241 19]}} (addr ^{:go/acolon {2 [241 32] 4 [241 42]} :go/apos {2 [241 28] 4 [241 40]} :go/pos {:lbrace [241 27] :rbrace [249 5]}} (lit ^{:go/pos {:name-pos [241 20]}} Builtin :Name ^{:go/pos {:name-pos [241 34]}} name :Fn ^{:go/pos {:func [241 44] :lbrace [241 91] :rbrace [249 4] :return [248 5]}} (fn ^{:go/pos {:closing [241 73] :opening [241 48]}} [^{:tag ^{:go/pos {:lbrack [241 54]}} (slice ^{:go/pos {:name-pos [241 56]}} Object) :go/pos {:name-pos [241 49]}} args ^{:tag ^{:go/pos {:lbrack [241 67]}} (slice ^{:go/pos {:star [241 69]}} (* ^{:go/pos {:name-pos [241 70]}} Str)) :go/pos {:name-pos [241 64]}} kw] :results ^{:go/pos {:closing [241 89] :opening [241 75]}} [^{:go/pos {:name-pos [241 76]}} Object ^{:go/pos {:name-pos [241 84]}} error]
+                      ^{:go/pos {:if [242 5] :lbrace [242 20] :rbrace [244 5]}} (when ^{:go/apos {2 [242 18]} :go/pos {:op-pos [242 16]}} (> ^{:go/pos {:lparen [242 11] :rparen [242 14]}} (^{:go/pos {:name-pos [242 8]}} len ^{:go/pos {:name-pos [242 12]}} kw) 0)
+                        ^{:go/apos {1 [243 13]} :go/pos {:return [243 6]}} (return nil ^{:go/apos {2 [243 40]} :go/pos {:lparen [243 24] :rparen [243 92]}} (^{:go/pos {:name-pos [243 18]}} Raisef ^{:go/pos {:name-pos [243 25]}} TypeErrorType "_tracemalloc.%s() takes no keyword arguments" ^{:go/pos {:name-pos [243 88]}} name)))
+
+                      ^{:go/pos {:if [245 5] :lbrace [245 22] :rbrace [247 5]}} (when ^{:go/apos {2 [245 20]} :go/pos {:op-pos [245 18]}} (> ^{:go/pos {:lparen [245 11] :rparen [245 16]}} (^{:go/pos {:name-pos [245 8]}} len ^{:go/pos {:name-pos [245 12]}} args) 0)
+                        ^{:go/apos {1 [246 13]} :go/pos {:return [246 6]}} (return nil ^{:go/apos {2 [246 40]} :go/pos {:lparen [246 24] :rparen [246 106]}} (^{:go/pos {:name-pos [246 18]}} Raisef ^{:go/pos {:name-pos [246 25]}} TypeErrorType "_tracemalloc.%s() takes no arguments (%d given)" ^{:go/pos {:name-pos [246 91]}} name ^{:go/pos {:lparen [246 100] :rparen [246 105]}} (^{:go/pos {:name-pos [246 97]}} len ^{:go/pos {:name-pos [246 101]}} args))))
+
+                      ^{:go/pos {:lparen [248 13] :rparen [248 14]}} (^{:go/pos {:name-pos [248 12]}} f))))))]
+
+
+          ^{:go/apos {1 [251 10]} :go/pos {:lparen [251 9] :rparen [251 91]}} (^{:go/pos {:name-pos [251 3]}} noArgs "is_tracing" ^{:go/pos {:func [251 24] :lbrace [251 47] :rbrace [251 90]}} (fn ^{:go/pos {:closing [251 29] :opening [251 28]}} [] :results ^{:go/pos {:closing [251 45] :opening [251 31]}} [^{:go/pos {:name-pos [251 32]}} Object ^{:go/pos {:name-pos [251 40]}} error] ^{:go/apos {2 [251 86]} :go/pos {:return [251 49]}} (return ^{:go/pos {:lparen [251 63] :rparen [251 83]}} (^{:go/pos {:name-pos [251 56]}} NewBool ^{:go/pos {:dot [251 75] :name-pos [251 76]}} (.-tracing ^{:go/pos {:name-pos [251 64]}} tracemalloc)) nil)))
+          ^{:go/apos {1 [252 10]} :go/pos {:lparen [252 9] :rparen [257 4]}} (^{:go/pos {:name-pos [252 3]}} noArgs "clear_traces" ^{:go/pos {:func [252 26] :lbrace [252 49] :rbrace [257 3]}} (fn ^{:go/pos {:closing [252 31] :opening [252 30]}} [] :results ^{:go/pos {:closing [252 47] :opening [252 33]}} [^{:go/pos {:name-pos [252 34]}} Object ^{:go/pos {:name-pos [252 42]}} error]
+              ^{:go/pos {:if [253 4] :lbrace [253 27] :rbrace [255 4]}} (when ^{:go/pos {:dot [253 18] :name-pos [253 19]}} (.-tracing ^{:go/pos {:name-pos [253 7]}} tracemalloc)
+                ^{:go/pos {:lparen [254 12] :rparen [254 13]}} (^{:go/pos {:name-pos [254 5]}} tmClear))
+
+              ^{:go/apos {2 [256 17]} :go/pos {:return [256 4]}} (return ^{:go/pos {:name-pos [256 11]}} None nil)))
+
+          ^{:go/apos {1 [258 10]} :go/pos {:lparen [258 9] :rparen [264 4]}} (^{:go/pos {:name-pos [258 3]}} noArgs "_get_traces" ^{:go/pos {:func [258 25] :lbrace [258 48] :rbrace [264 3]}} (fn ^{:go/pos {:closing [258 30] :opening [258 29]}} [] :results ^{:go/pos {:closing [258 46] :opening [258 32]}} [^{:go/pos {:name-pos [258 33]}} Object ^{:go/pos {:name-pos [258 41]}} error]
+              ^{:go/pos {:if [259 4] :lbrace [259 28] :rbrace [261 4]}} (when ^{:go/pos {:op-pos [259 7]}} (not ^{:go/pos {:dot [259 19] :name-pos [259 20]}} (.-tracing ^{:go/pos {:name-pos [259 8]}} tracemalloc))
+                ^{:go/apos {2 [260 23]} :go/pos {:return [260 5]}} (return ^{:go/pos {:lparen [260 19] :rparen [260 20]}} (^{:go/pos {:name-pos [260 12]}} NewList) nil))
+
+              ^{:go/pos {:lparen [262 13] :rparen [262 14]}} (^{:go/pos {:name-pos [262 4]}} tmCollect)
+              ^{:go/apos {2 [263 27]} :go/pos {:return [263 4]}} (return ^{:go/pos {:lparen [263 23] :rparen [263 24]}} (^{:go/pos {:name-pos [263 11]}} tmTracesList) nil)))
+
+          ^{:go/apos {1 [265 10]} :go/pos {:lparen [265 9] :rparen [269 4]}} (^{:go/pos {:name-pos [265 3]}} noArgs "stop" ^{:go/pos {:func [265 18] :lbrace [265 41] :rbrace [269 3]}} (fn ^{:go/pos {:closing [265 23] :opening [265 22]}} [] :results ^{:go/pos {:closing [265 39] :opening [265 25]}} [^{:go/pos {:name-pos [265 26]}} Object ^{:go/pos {:name-pos [265 34]}} error]
+              ^{:go/pos {:tok-pos [266 30]}} (set! (values ^{:go/pos {:dot [266 15] :name-pos [266 16]}} (.-tracing ^{:go/pos {:name-pos [266 4]}} tracemalloc) ^{:go/pos {:name-pos [266 25]}} tmOn) ^{:go/apos {1 [266 32] 2 [266 39]}} (values false false))
+              ^{:go/pos {:lparen [267 11] :rparen [267 12]}} (^{:go/pos {:name-pos [267 4]}} tmClear)
+              ^{:go/apos {2 [268 17]} :go/pos {:return [268 4]}} (return ^{:go/pos {:name-pos [268 11]}} None nil)))
+
+          ^{:go/apos {1 [270 10]} :go/pos {:lparen [270 9] :rparen [270 105]}} (^{:go/pos {:name-pos [270 3]}} noArgs "get_traceback_limit" ^{:go/pos {:func [270 33] :lbrace [270 56] :rbrace [270 104]}} (fn ^{:go/pos {:closing [270 38] :opening [270 37]}} [] :results ^{:go/pos {:closing [270 54] :opening [270 40]}} [^{:go/pos {:name-pos [270 41]}} Object ^{:go/pos {:name-pos [270 49]}} error] ^{:go/apos {2 [270 100]} :go/pos {:return [270 58]}} (return ^{:go/pos {:lparen [270 71] :rparen [270 97]}} (^{:go/pos {:name-pos [270 65]}} NewInt ^{:go/pos {:lparen [270 77] :rparen [270 96]}} (conv ^{:go/pos {:name-pos [270 72]}} int64 ^{:go/pos {:dot [270 89] :name-pos [270 90]}} (.-nframe ^{:go/pos {:name-pos [270 78]}} tracemalloc))) nil)))
+          ^{:go/apos {1 [271 10]} :go/pos {:lparen [271 9] :rparen [280 4]}} (^{:go/pos {:name-pos [271 3]}} noArgs "get_tracemalloc_memory" ^{:go/pos {:func [271 36] :lbrace [271 59] :rbrace [280 3]}} (fn ^{:go/pos {:closing [271 41] :opening [271 40]}} [] :results ^{:go/pos {:closing [271 57] :opening [271 43]}} [^{:go/pos {:name-pos [271 44]}} Object ^{:go/pos {:name-pos [271 52]}} error]
+              ;; the tables' sizes as Go holds them: a trace's entry and a traceback's frames
+              ^{:go/pos {:dot [273 9] :lparen [273 14] :name-pos [273 10] :rparen [273 15]}} (.Lock ^{:go/pos {:dot [273 6] :name-pos [273 7]}} (.-mu ^{:go/pos {:name-pos [273 4]}} tm))
+              ^{:go/pos {:defer [274 4]}} (defer ^{:go/pos {:dot [274 15] :lparen [274 22] :name-pos [274 16] :rparen [274 23]}} (.Unlock ^{:go/pos {:dot [274 12] :name-pos [274 13]}} (.-mu ^{:go/pos {:name-pos [274 10]}} tm)))
+              (let [^{:go/pos {:name-pos [275 4] :tok-pos [275 6]}} n ^{:go/pos {:op-pos [275 34]}} (+ ^{:go/apos {2 [275 31]} :go/pos {:op-pos [275 30]}} (* ^{:go/pos {:lparen [275 14] :rparen [275 29]}} (conv ^{:go/pos {:name-pos [275 9]}} int64 ^{:go/pos {:lparen [275 18] :rparen [275 28]}} (^{:go/pos {:name-pos [275 15]}} len ^{:go/pos {:dot [275 21] :name-pos [275 22]}} (.-traces ^{:go/pos {:name-pos [275 19]}} tm))) 48) ^{:go/apos {2 [275 57]} :go/pos {:op-pos [275 56]}} (* ^{:go/pos {:lparen [275 41] :rparen [275 55]}} (conv ^{:go/pos {:name-pos [275 36]}} int64 ^{:go/pos {:lparen [275 45] :rparen [275 54]}} (^{:go/pos {:name-pos [275 42]}} len ^{:go/pos {:dot [275 48] :name-pos [275 49]}} (.-order ^{:go/pos {:name-pos [275 46]}} tm))) 8))]
+                ^{:go/pos {:for [276 4] :lbrace [276 30] :range [276 17] :rbrace [278 4] :tok-pos [276 14]}} (range [^{:go/pos {:name-pos [276 8]}} _ ^{:go/pos {:name-pos [276 11]}} tb ^{:go/pos {:dot [276 25] :name-pos [276 26]}} (.-tbs ^{:go/pos {:name-pos [276 23]}} tm)]
+                  ^{:go/pos {:tok-pos [277 7]}} (set! ^{:go/pos {:name-pos [277 5]}} n + ^{:go/apos {1 [277 10]} :go/pos {:op-pos [277 13]}} (+ 64 ^{:go/apos {2 [277 37]} :go/pos {:op-pos [277 36]}} (* ^{:go/pos {:lparen [277 20] :rparen [277 35]}} (conv ^{:go/pos {:name-pos [277 15]}} int64 ^{:go/pos {:lparen [277 24] :rparen [277 34]}} (^{:go/pos {:name-pos [277 21]}} len ^{:go/pos {:dot [277 27] :name-pos [277 28]}} (.-frames ^{:go/pos {:name-pos [277 25]}} tb))) 32))))
+
+                ^{:go/apos {2 [279 22]} :go/pos {:return [279 4]}} (return ^{:go/pos {:lparen [279 17] :rparen [279 19]}} (^{:go/pos {:name-pos [279 11]}} NewInt ^{:go/pos {:name-pos [279 18]}} n) nil))))
+
+          ^{:go/apos {1 [281 10]} :go/pos {:lparen [281 9] :rparen [290 4]}} (^{:go/pos {:name-pos [281 3]}} noArgs "get_traced_memory" ^{:go/pos {:func [281 31] :lbrace [281 54] :rbrace [290 3]}} (fn ^{:go/pos {:closing [281 36] :opening [281 35]}} [] :results ^{:go/pos {:closing [281 52] :opening [281 38]}} [^{:go/pos {:name-pos [281 39]}} Object ^{:go/pos {:name-pos [281 47]}} error]
+              ^{:go/pos {:if [282 4] :lbrace [282 28] :rbrace [284 4]}} (when ^{:go/pos {:op-pos [282 7]}} (not ^{:go/pos {:dot [282 19] :name-pos [282 20]}} (.-tracing ^{:go/pos {:name-pos [282 8]}} tracemalloc))
+                ^{:go/apos {2 [283 44]} :go/pos {:return [283 5]}} (return ^{:go/pos {:lparen [283 20] :rparen [283 41]}} (^{:go/pos {:name-pos [283 12]}} NewTuple ^{:go/apos {1 [283 28]} :go/pos {:lparen [283 27] :rparen [283 29]}} (^{:go/pos {:name-pos [283 21]}} NewInt 0) ^{:go/apos {1 [283 39]} :go/pos {:lparen [283 38] :rparen [283 40]}} (^{:go/pos {:name-pos [283 32]}} NewInt 0)) nil))
+
+              ^{:go/pos {:lparen [285 13] :rparen [285 14]}} (^{:go/pos {:name-pos [285 4]}} tmCollect)
+              ^{:go/pos {:dot [286 9] :lparen [286 14] :name-pos [286 10] :rparen [286 15]}} (.Lock ^{:go/pos {:dot [286 6] :name-pos [286 7]}} (.-mu ^{:go/pos {:name-pos [286 4]}} tm))
+              (let [^{:go/pos {:tok-pos [287 15]}} (values ^{:go/pos {:name-pos [287 4]}} size ^{:go/pos {:name-pos [287 10]}} peak) (values ^{:go/pos {:dot [287 20] :name-pos [287 21]}} (.-size ^{:go/pos {:name-pos [287 18]}} tm) ^{:go/pos {:dot [287 29] :name-pos [287 30]}} (.-peak ^{:go/pos {:name-pos [287 27]}} tm))]
+                ^{:go/pos {:dot [288 9] :lparen [288 16] :name-pos [288 10] :rparen [288 17]}} (.Unlock ^{:go/pos {:dot [288 6] :name-pos [288 7]}} (.-mu ^{:go/pos {:name-pos [288 4]}} tm))
+                ^{:go/apos {2 [289 49]} :go/pos {:return [289 4]}} (return ^{:go/pos {:lparen [289 19] :rparen [289 46]}} (^{:go/pos {:name-pos [289 11]}} NewTuple ^{:go/pos {:lparen [289 26] :rparen [289 31]}} (^{:go/pos {:name-pos [289 20]}} NewInt ^{:go/pos {:name-pos [289 27]}} size) ^{:go/pos {:lparen [289 40] :rparen [289 45]}} (^{:go/pos {:name-pos [289 34]}} NewInt ^{:go/pos {:name-pos [289 41]}} peak)) nil))))
+
+          ^{:go/apos {1 [291 10]} :go/pos {:lparen [291 9] :rparen [299 4]}} (^{:go/pos {:name-pos [291 3]}} noArgs "reset_peak" ^{:go/pos {:func [291 24] :lbrace [291 47] :rbrace [299 3]}} (fn ^{:go/pos {:closing [291 29] :opening [291 28]}} [] :results ^{:go/pos {:closing [291 45] :opening [291 31]}} [^{:go/pos {:name-pos [291 32]}} Object ^{:go/pos {:name-pos [291 40]}} error]
+              ^{:go/pos {:if [292 4] :lbrace [292 27] :rbrace [297 4]}} (when ^{:go/pos {:dot [292 18] :name-pos [292 19]}} (.-tracing ^{:go/pos {:name-pos [292 7]}} tracemalloc)
+                ^{:go/pos {:lparen [293 14] :rparen [293 15]}} (^{:go/pos {:name-pos [293 5]}} tmCollect)
+                ^{:go/pos {:dot [294 10] :lparen [294 15] :name-pos [294 11] :rparen [294 16]}} (.Lock ^{:go/pos {:dot [294 7] :name-pos [294 8]}} (.-mu ^{:go/pos {:name-pos [294 5]}} tm))
+                ^{:go/pos {:tok-pos [295 13]}} (set! ^{:go/pos {:dot [295 7] :name-pos [295 8]}} (.-peak ^{:go/pos {:name-pos [295 5]}} tm) ^{:go/pos {:dot [295 17] :name-pos [295 18]}} (.-size ^{:go/pos {:name-pos [295 15]}} tm))
+                ^{:go/pos {:dot [296 10] :lparen [296 17] :name-pos [296 11] :rparen [296 18]}} (.Unlock ^{:go/pos {:dot [296 7] :name-pos [296 8]}} (.-mu ^{:go/pos {:name-pos [296 5]}} tm)))
+
+              ^{:go/apos {2 [298 17]} :go/pos {:return [298 4]}} (return ^{:go/pos {:name-pos [298 11]}} None nil)))
+
+          ^{:go/apos {2 [300 12]} :go/pos {:dot [300 4] :lparen [300 11] :name-pos [300 5] :rparen [322 5]}} (.SetStr ^{:go/pos {:name-pos [300 3]}} d "_get_object_traceback" ^{:go/pos {:op-pos [300 37]}} (addr ^{:go/acolon {2 [300 50] 4 [300 79]} :go/apos {2 [300 46] 3 [300 52] 4 [300 77]} :go/pos {:lbrace [300 45] :rbrace [322 4]}} (lit ^{:go/pos {:name-pos [300 38]}} Builtin :Name "_get_object_traceback" :Fn ^{:go/pos {:func [300 81] :lbrace [300 128] :rbrace [322 3]}} (fn ^{:go/pos {:closing [300 110] :opening [300 85]}} [^{:tag ^{:go/pos {:lbrack [300 91]}} (slice ^{:go/pos {:name-pos [300 93]}} Object) :go/pos {:name-pos [300 86]}} args ^{:tag ^{:go/pos {:lbrack [300 104]}} (slice ^{:go/pos {:star [300 106]}} (* ^{:go/pos {:name-pos [300 107]}} Str)) :go/pos {:name-pos [300 101]}} kw] :results ^{:go/pos {:closing [300 126] :opening [300 112]}} [^{:go/pos {:name-pos [300 113]}} Object ^{:go/pos {:name-pos [300 121]}} error]
+                  ^{:go/pos {:if [301 4] :lbrace [301 19] :rbrace [303 4]}} (when ^{:go/apos {2 [301 17]} :go/pos {:op-pos [301 15]}} (> ^{:go/pos {:lparen [301 10] :rparen [301 13]}} (^{:go/pos {:name-pos [301 7]}} len ^{:go/pos {:name-pos [301 11]}} kw) 0)
+                    ^{:go/apos {1 [302 12]} :go/pos {:return [302 5]}} (return nil ^{:go/apos {2 [302 38]} :go/pos {:lparen [302 22] :rparen [302 103]}} (^{:go/pos {:name-pos [302 17]}} Raise ^{:go/pos {:name-pos [302 23]}} TypeErrorType "_tracemalloc._get_object_traceback() takes no keyword arguments")))
+
+                  ^{:go/pos {:if [304 4] :lbrace [304 22] :rbrace [306 4]}} (when ^{:go/apos {2 [304 20]} :go/pos {:op-pos [304 17]}} (!= ^{:go/pos {:lparen [304 10] :rparen [304 15]}} (^{:go/pos {:name-pos [304 7]}} len ^{:go/pos {:name-pos [304 11]}} args) 1)
+                    ^{:go/apos {1 [305 12]} :go/pos {:return [305 5]}} (return nil ^{:go/apos {2 [305 39]} :go/pos {:lparen [305 23] :rparen [305 126]}} (^{:go/pos {:name-pos [305 17]}} Raisef ^{:go/pos {:name-pos [305 24]}} TypeErrorType "_tracemalloc._get_object_traceback() takes exactly one argument (%d given)" ^{:go/pos {:lparen [305 120] :rparen [305 125]}} (^{:go/pos {:name-pos [305 117]}} len ^{:go/pos {:name-pos [305 121]}} args))))
+
+                  ^{:go/pos {:if [307 4] :lbrace [307 28] :rbrace [309 4]}} (when ^{:go/pos {:op-pos [307 7]}} (not ^{:go/pos {:dot [307 19] :name-pos [307 20]}} (.-tracing ^{:go/pos {:name-pos [307 8]}} tracemalloc))
+                    ^{:go/apos {2 [308 18]} :go/pos {:return [308 5]}} (return ^{:go/pos {:name-pos [308 12]}} None nil))
+
+                  (let [^{:go/pos {:name-pos [310 4] :tok-pos [310 6]}} o ^{:go/apos {2 [310 14]} :go/pos {:lbrack [310 13] :rbrack [310 15]}} (aget ^{:go/pos {:name-pos [310 9]}} args 0)]
+                    ^{:go/pos {:if [311 4] :lbrace [311 85] :rbrace [313 4]}} (when ^{:go/pos {:op-pos [311 37]}} (or ^{:go/pos {:op-pos [311 7]}} (not ^{:go/pos {:dot [311 26] :lparen [311 34] :name-pos [311 27] :rparen [311 35]}} (.IsValid ^{:go/pos {:lparen [311 23] :rparen [311 25]}} (^{:go/pos {:dot [311 15] :name-pos [311 16] :x-pos [311 8]}} reflect/ValueOf ^{:go/pos {:name-pos [311 24]}} o))) ^{:go/pos {:op-pos [311 66]}} (!= ^{:go/pos {:dot [311 58] :lparen [311 63] :name-pos [311 59] :rparen [311 64]}} (.Kind ^{:go/pos {:lparen [311 55] :rparen [311 57]}} (^{:go/pos {:dot [311 47] :name-pos [311 48] :x-pos [311 40]}} reflect/ValueOf ^{:go/pos {:name-pos [311 56]}} o)) ^{:go/pos {:dot [311 76] :name-pos [311 77] :x-pos [311 69]}} reflect/Pointer))
+                      ^{:go/apos {2 [312 18]} :go/pos {:return [312 5]}} (return ^{:go/pos {:name-pos [312 12]}} None nil))
+
+                    (let [^{:go/pos {:name-pos [314 4] :tok-pos [314 8]}} ptr ^{:go/pos {:dot [314 29] :lparen [314 37] :name-pos [314 30] :rparen [314 38]}} (.Pointer ^{:go/pos {:lparen [314 26] :rparen [314 28]}} (^{:go/pos {:dot [314 18] :name-pos [314 19] :x-pos [314 11]}} reflect/ValueOf ^{:go/pos {:name-pos [314 27]}} o))]
+                      ^{:go/pos {:dot [315 9] :lparen [315 14] :name-pos [315 10] :rparen [315 15]}} (.Lock ^{:go/pos {:dot [315 6] :name-pos [315 7]}} (.-mu ^{:go/pos {:name-pos [315 4]}} tm))
+                      (let [^{:go/pos {:name-pos [316 4] :tok-pos [316 7]}} tr ^{:go/pos {:lbrack [316 19] :rbrack [316 23]}} (aget ^{:go/pos {:dot [316 12] :name-pos [316 13]}} (.-traces ^{:go/pos {:name-pos [316 10]}} tm) ^{:go/pos {:name-pos [316 20]}} ptr)]
+                        ^{:go/pos {:dot [317 9] :lparen [317 16] :name-pos [317 10] :rparen [317 17]}} (.Unlock ^{:go/pos {:dot [317 6] :name-pos [317 7]}} (.-mu ^{:go/pos {:name-pos [317 4]}} tm))
+                        ^{:go/pos {:if [318 4] :lbrace [318 17] :rbrace [320 4]}} (when ^{:go/apos {2 [318 13]} :go/pos {:op-pos [318 10]}} (== ^{:go/pos {:name-pos [318 7]}} tr nil)
+                          ^{:go/apos {2 [319 18]} :go/pos {:return [319 5]}} (return ^{:go/pos {:name-pos [319 12]}} None nil))
+
+                        ^{:go/apos {2 [321 33]} :go/pos {:return [321 4]}} (return ^{:go/pos {:lparen [321 24] :rparen [321 30]}} (^{:go/pos {:name-pos [321 11]}} tmFramesTuple ^{:go/pos {:dot [321 27] :name-pos [321 28]}} (.-tb ^{:go/pos {:name-pos [321 25]}} tr)) nil))))))))
+
+          ^{:go/apos {2 [323 12]} :go/pos {:dot [323 4] :lparen [323 11] :name-pos [323 5] :rparen [341 5]}} (.SetStr ^{:go/pos {:name-pos [323 3]}} d "start" ^{:go/pos {:op-pos [323 21]}} (addr ^{:go/acolon {2 [323 34] 4 [323 47]} :go/apos {2 [323 30] 3 [323 36] 4 [323 45]} :go/pos {:lbrace [323 29] :rbrace [341 4]}} (lit ^{:go/pos {:name-pos [323 22]}} Builtin :Name "start" :Fn ^{:go/pos {:func [323 49] :lbrace [323 96] :rbrace [341 3]}} (fn ^{:go/pos {:closing [323 78] :opening [323 53]}} [^{:tag ^{:go/pos {:lbrack [323 59]}} (slice ^{:go/pos {:name-pos [323 61]}} Object) :go/pos {:name-pos [323 54]}} args ^{:tag ^{:go/pos {:lbrack [323 72]}} (slice ^{:go/pos {:star [323 74]}} (* ^{:go/pos {:name-pos [323 75]}} Str)) :go/pos {:name-pos [323 69]}} kw] :results ^{:go/pos {:closing [323 94] :opening [323 80]}} [^{:go/pos {:name-pos [323 81]}} Object ^{:go/pos {:name-pos [323 89]}} error]
+                  ^{:go/pos {:if [324 4] :lbrace [324 19] :rbrace [326 4]}} (when ^{:go/apos {2 [324 17]} :go/pos {:op-pos [324 15]}} (> ^{:go/pos {:lparen [324 10] :rparen [324 13]}} (^{:go/pos {:name-pos [324 7]}} len ^{:go/pos {:name-pos [324 11]}} kw) 0)
+                    ^{:go/apos {1 [325 12]} :go/pos {:return [325 5]}} (return nil ^{:go/apos {2 [325 38]} :go/pos {:lparen [325 22] :rparen [325 74]}} (^{:go/pos {:name-pos [325 17]}} Raise ^{:go/pos {:name-pos [325 23]}} TypeErrorType "start() takes no keyword arguments")))
+
+                  ^{:go/pos {:if [327 4] :lbrace [327 21] :rbrace [329 4]}} (when ^{:go/apos {2 [327 19]} :go/pos {:op-pos [327 17]}} (> ^{:go/pos {:lparen [327 10] :rparen [327 15]}} (^{:go/pos {:name-pos [327 7]}} len ^{:go/pos {:name-pos [327 11]}} args) 1)
+                    ^{:go/apos {1 [328 12]} :go/pos {:return [328 5]}} (return nil ^{:go/apos {2 [328 39]} :go/pos {:lparen [328 23] :rparen [328 93]}} (^{:go/pos {:name-pos [328 17]}} Raisef ^{:go/pos {:name-pos [328 24]}} TypeErrorType "start expected at most 1 argument, got %d" ^{:go/pos {:lparen [328 87] :rparen [328 92]}} (^{:go/pos {:name-pos [328 84]}} len ^{:go/pos {:name-pos [328 88]}} args))))
+
+                  (let ^{:go/apos {1 [330 9]}} [^{:go/pos {:name-pos [330 4] :tok-pos [330 6]}} n 1]
+                    ^{:go/pos {:if [331 4] :lbrace [331 22] :rbrace [339 4]}} (when ^{:go/apos {2 [331 20]} :go/pos {:op-pos [331 17]}} (== ^{:go/pos {:lparen [331 10] :rparen [331 15]}} (^{:go/pos {:name-pos [331 7]}} len ^{:go/pos {:name-pos [331 11]}} args) 1)
+                      (let [^{:tag ^{:go/pos {:name-pos [332 13]}} error :go/pos {:name-pos [332 9] :tok-pos [332 5]}} err (zero ^{:go/pos {:name-pos [332 13]}} error)]
+                        ^{:go/pos {:if [333 5] :lbrace [333 40] :rbrace [335 5]}} (when [^{:go/pos {:tok-pos [333 15]}} (values ^{:go/pos {:name-pos [333 8]}} _ ^{:go/pos {:name-pos [333 11]}} isF) ^{:go/pos {:dot [333 25] :lparen [333 26] :rparen [333 33]}} (assert ^{:go/pos {:star [333 27]}} (* ^{:go/pos {:name-pos [333 28]}} Float) ^{:go/apos {2 [333 23]} :go/pos {:lbrack [333 22] :rbrack [333 24]}} (aget ^{:go/pos {:name-pos [333 18]}} args 0))] ^{:go/pos {:name-pos [333 36]}} isF
+                          ^{:go/apos {1 [334 13]} :go/pos {:return [334 6]}} (return nil ^{:go/apos {2 [334 39]} :go/pos {:lparen [334 23] :rparen [334 91]}} (^{:go/pos {:name-pos [334 18]}} Raise ^{:go/pos {:name-pos [334 24]}} TypeErrorType "'float' object cannot be interpreted as an integer")))
+
+                        ^{:go/pos {:if [336 5] :lbrace [336 45] :rbrace [338 5]}} (when [^{:go/pos {:tok-pos [336 15]}} (set! (values ^{:go/pos {:name-pos [336 8]}} n ^{:go/pos {:name-pos [336 11]}} err) ^{:go/pos {:lparen [336 23] :rparen [336 31]}} (^{:go/pos {:name-pos [336 17]}} intArg ^{:go/apos {2 [336 29]} :go/pos {:lbrack [336 28] :rbrack [336 30]}} (aget ^{:go/pos {:name-pos [336 24]}} args 0)))] ^{:go/apos {2 [336 41]} :go/pos {:op-pos [336 38]}} (!= ^{:go/pos {:name-pos [336 34]}} err nil)
+                          ^{:go/apos {1 [337 13]} :go/pos {:return [337 6]}} (return nil ^{:go/pos {:name-pos [337 18]}} err))))
+
+
+                    ^{:go/pos {:return [340 4]}} (return ^{:go/pos {:name-pos [340 11]}} None ^{:go/pos {:lparen [340 33] :rparen [340 35]}} (^{:go/pos {:name-pos [340 17]}} tracemallocStart ^{:go/pos {:name-pos [340 34]}} n)))))))
+
+          ^{:go/apos {2 [342 50]} :go/pos {:return [342 3]}} (return ^{:go/pos {:op-pos [342 10]}} (addr ^{:go/acolon {2 [342 22] 4 [342 44]} :go/apos {2 [342 18] 3 [342 24] 4 [342 40]} :go/pos {:lbrace [342 17] :rbrace [342 47]}} (lit ^{:go/pos {:name-pos [342 11]}} Module :Name "_tracemalloc" :Dict ^{:go/pos {:name-pos [342 46]}} d)) nil)))))
+
+  ^{:go/pos {:tok-pos [344 15]}} (set! ^{:go/pos {:name-pos [344 2]}} atStartHooks ^{:go/pos {:lparen [344 23] :rparen [344 56]}} (^{:go/pos {:name-pos [344 17]}} append ^{:go/pos {:name-pos [344 24]}} atStartHooks ^{:go/pos {:name-pos [344 38]}} tracemallocAtStart)))
+
+
+
+
+^{:go/pos {:doc [347 1] :func [349 1] :lbrace [349 43] :rbrace [370 1] :return [369 2]}} (go/func ^{:go/pos {:name-pos [349 6]}} tracemallocAtStart "tracemallocAtStart is the configuration's tracemalloc (config_init_tracemalloc): PYTHONTRACEMALLOC=N (0 none) or\n-X tracemalloc[=N] (the option wins) start it with N frames; a value that is no number is the configuration's error.\n" ^{:tag ^{:go/pos {:name-pos [349 37]}} error :go/pos {:closing [349 35] :opening [349 24]}} [^{:tag ^{:go/pos {:star [349 28]}} (* ^{:go/pos {:name-pos [349 29]}} Interp) :go/pos {:name-pos [349 25]}} in]
+  (let ^{:go/apos {1 [350 7]}} [^{:go/pos {:name-pos [350 2] :tok-pos [350 4]}} n -1]
+    ^{:go/pos {:if [351 2] :lbrace [351 49] :rbrace [359 2]}} (if [^{:go/pos {:tok-pos [351 11]}} (values ^{:go/pos {:name-pos [351 5]}} v ^{:go/pos {:name-pos [351 8]}} ok) ^{:go/apos {2 [351 30]} :go/pos {:lbrack [351 29] :rbrack [351 43]}} (aget ^{:go/pos {:lparen [351 27] :rparen [351 28]}} (^{:go/pos {:name-pos [351 14]}} startXOptions) "tracemalloc")] ^{:go/pos {:name-pos [351 46]}} ok
+      ^{:go/pos {:if [352 3] :lbrace [352 14] :rbrace [354 3]}} (if ^{:go/apos {2 [352 11]} :go/pos {:op-pos [352 8]}} (== ^{:go/pos {:name-pos [352 6]}} v "")
+        ^{:go/apos {2 [353 8]} :go/pos {:tok-pos [353 6]}} (set! ^{:go/pos {:name-pos [353 4]}} n 1)
+        ^{:go/pos {:else-lbrace [356 10] :else-rbrace [358 3] :if [354 10] :lbrace [354 61] :rbrace [356 3]}} (if [^{:go/pos {:tok-pos [354 20]}} (values ^{:go/pos {:name-pos [354 13]}} x ^{:go/pos {:name-pos [354 16]}} err) ^{:go/pos {:lparen [354 35] :rparen [354 37]}} (^{:go/pos {:dot [354 30] :name-pos [354 31] :x-pos [354 23]}} strconv/Atoi ^{:go/pos {:name-pos [354 36]}} v)] ^{:go/pos {:op-pos [354 51]}} (and ^{:go/apos {2 [354 47]} :go/pos {:op-pos [354 44]}} (== ^{:go/pos {:name-pos [354 40]}} err nil) ^{:go/apos {2 [354 59]} :go/pos {:op-pos [354 56]}} (>= ^{:go/pos {:name-pos [354 54]}} x 0))
+          ^{:go/pos {:tok-pos [355 6]}} (set! ^{:go/pos {:name-pos [355 4]}} n ^{:go/pos {:name-pos [355 8]}} x)
+
+          ^{:go/pos {:return [357 4]}} (return ^{:go/apos {2 [357 33]} :go/pos {:lparen [357 16] :rparen [357 82]}} (^{:go/pos {:name-pos [357 11]}} Raise ^{:go/pos {:name-pos [357 17]}} ValueErrorType "-X tracemalloc=NFRAME: invalid number of frames"))))
+
+      ^{:go/pos {:if [359 9] :lbrace [359 56] :rbrace [365 2]}} (when [^{:go/pos {:name-pos [359 12] :tok-pos [359 14]}} v ^{:go/apos {1 [359 26]} :go/pos {:lparen [359 25] :rparen [359 45]}} (^{:go/pos {:name-pos [359 17]}} startEnv "PYTHONTRACEMALLOC")] ^{:go/apos {2 [359 53]} :go/pos {:op-pos [359 50]}} (!= ^{:go/pos {:name-pos [359 48]}} v "")
+        (let [^{:go/pos {:tok-pos [360 10]}} (values ^{:go/pos {:name-pos [360 3]}} x ^{:go/pos {:name-pos [360 6]}} err) ^{:go/pos {:lparen [360 25] :rparen [360 27]}} (^{:go/pos {:dot [360 20] :name-pos [360 21] :x-pos [360 13]}} strconv/Atoi ^{:go/pos {:name-pos [360 26]}} v)]
+          ^{:go/pos {:if [361 3] :lbrace [361 26] :rbrace [363 3]}} (when ^{:go/pos {:op-pos [361 17]}} (or ^{:go/apos {2 [361 13]} :go/pos {:op-pos [361 10]}} (!= ^{:go/pos {:name-pos [361 6]}} err nil) ^{:go/apos {2 [361 24]} :go/pos {:op-pos [361 22]}} (< ^{:go/pos {:name-pos [361 20]}} x 0))
+            ^{:go/pos {:return [362 4]}} (return ^{:go/apos {2 [362 33]} :go/pos {:lparen [362 16] :rparen [362 78]}} (^{:go/pos {:name-pos [362 11]}} Raise ^{:go/pos {:name-pos [362 17]}} ValueErrorType "PYTHONTRACEMALLOC: invalid number of frames")))
+
+          ^{:go/pos {:tok-pos [364 5]}} (set! ^{:go/pos {:name-pos [364 3]}} n ^{:go/pos {:name-pos [364 7]}} x))))
+
+    ^{:go/pos {:if [366 2] :lbrace [366 12] :rbrace [368 2]}} (when ^{:go/apos {2 [366 10]} :go/pos {:op-pos [366 7]}} (<= ^{:go/pos {:name-pos [366 5]}} n 0)
+      ^{:go/apos {1 [367 10]} :go/pos {:return [367 3]}} (return nil))
+
+    ^{:go/pos {:lparen [369 25] :rparen [369 27]}} (^{:go/pos {:name-pos [369 9]}} tracemallocStart ^{:go/pos {:name-pos [369 26]}} n)))

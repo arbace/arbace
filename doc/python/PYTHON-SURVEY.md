@@ -3086,3 +3086,203 @@ test_finalization had no class before: their 96 failing methods are in these. `:
 test_subprocess test_thread test_threading test_threading_local test_xml_etree test_ssl` to place `:finalization-collect`'s
 and `:ssl-finalization`'s rest; `bin/pyi runtime check`; `make python-essential`. After W2: `bin/pyi check --record`, then
 `:finalization-goi` dropped.
+## Design: 220, the diagnostic C modules (2026-11-05, the Mac VM, queue 220; PYS22 (a))
+
+Four of `:c-modules-deferred`'s modules, ported to Go as 204 ported `_csv` and `mmap`: runtime files of `go/arbace/py`,
+function for function from the pinned tarball's C (`Modules/faulthandler.c`, `Python/traceback.c`'s dump functions,
+`Modules/_lsprof.c`, `Modules/termios.c`, `Modules/_tracemalloc.c` and `Python/tracemalloc.c`, with their clinic files),
+the Python halves (`Lib/cProfile.py`, `profile.py`, `pstats.py`, `tracemalloc.py`, `tty.py`) unchanged. In order of
+value, as the brief takes them.
+
+**faulthandler** (1,491 lines of C). Observable: what it writes to a descriptor and the process's exit by the signal.
+- `dump_traceback(file, all_threads)`: `Current thread 0x...`/`Thread 0x...` headers (the thread's name in brackets),
+  `  File "f", line N in name` per frame, most recent first, `_Py_DumpASCII`'s escapes and 500-character truncation,
+  `MAX_FRAME_DEPTH` 100 (`  ...`), `MAX_NTHREADS` 100, `Stack (most recent call first):` for one thread. pyi needs every
+  thread's frame chain: `Thread.Frame` per `*Thread` (threadInfos, the main thread first as CPython's list is newest
+  first). The dump reads another goroutine's chain without its lock, as CPython reads another thread's frames: a frame
+  pointer and an instruction index read whole.
+- `enable(file, all_threads, c_stack)`, `disable`, `is_enabled`; the fatal signals SIGSEGV, SIGFPE, SIGABRT, SIGBUS,
+  SIGILL: `Fatal Python error: Segmentation fault`, a blank line, the dump, `Current thread's C stack trace (most recent
+  call first):` with musl's `  <cannot get C stack on this system>` (no backtrace on musl: CPython on Alpine prints the
+  same), then the previous action restored and the signal raised again: the process dies by it (status -11). On pyi a
+  fatal signal another process sends is caught through os/signal on a channel of faulthandler's own; one pyi raises
+  itself (`_sigsegv`, `_read_null`, `_sigabrt`, `_sigfpe`, `_stack_overflow`) runs the handler in the raising thread
+  first, as the kernel runs a synchronous signal's handler, then dies by the signal with its action set to SIG_DFL by
+  rt_sigaction (Go's own handler would print a Go traceback instead: probed). A real fault in Go code stays Go's panic,
+  pyi's SystemError (guardedStep): there is no C to fault.
+- `dump_traceback_later(timeout, repeat, file, exit)` and `cancel_dump_traceback_later`: a watchdog goroutine, the
+  `Timeout (0:00:00.500000)!` header, `_exit(1)` with exit. `register(signum, file, all_threads, chain)` and
+  `unregister`: a user signal dumps the traceback; chain calls the previous handler (the Python handler of `signal`
+  when one is set). `dump_c_stack`. `-X faulthandler` and `PYTHONFAULTHANDLER` enable it at start (bin/pyi python passes
+  `-X` options to the runtime, `sys._xoptions`).
+- What cannot match: thread ids are pyi's (goroutines have no pthread id; the dump prints the thread's ident as CPython
+  prints `pthread_self`), `Extension modules:` never prints (pyi has no extension modules but its built-in ones, which
+  CPython does not list), `_fatal_error_c_thread` and the `_testcapi` cases (`test_fatal_error`, `test_sigbus`,
+  `test_sigill`) are `_testcapi`'s, and the GIL-disabled cases do not apply.
+
+**_lsprof** (1,158 lines). Since 3.12 it is a `sys.monitoring` tool (PROFILER_ID 2, the name "cProfile"): enable
+registers its callbacks for PY_START, PY_RESUME, PY_THROW, PY_RETURN, PY_YIELD, PY_UNWIND, CALL, C_RETURN and C_RAISE;
+the tests read `sys.monitoring.get_tool(2)` and expect the second profiler's "tool 2 is already in use". So pyi gets
+`sys.monitoring`'s call-family events for real, global events only (`set_events`, `register_callback`, `use_tool_id`,
+`free_tool_id`, `clear_tool_id`, `get_events`; the callbacks run with the thread's tracing flag set, so they raise no
+events themselves); `sys.setprofile` (and `threading.setprofile_all_threads`) is the same events' legacy tool
+(`PY_MONITORING_SYS_PROFILE_ID` 6, as CPython's legacy_tracing.c), `call`/`return`/`c_call`/`c_return`/`c_exception`
+with the frame. The local events, LINE, INSTRUCTION, JUMP, BRANCH and settrace are not this task's (219 owns
+settrace's frame hooks). The hooks:
+- a frame's start and end: runFrames' entry and its pushed frame (PY_START, or PY_RESUME for a resumed generator,
+  PY_THROW for a throw into it), its return (PY_RETURN, PY_YIELD when suspended) and its unwinding (PY_UNWIND). Every
+  Python frame passes there: the loop's, a compiled function's (216's register loop runs its callees by
+  `runDirect` -> `runFrames`), a generator's resumption, exec's and a class body's.
+- a call's CALL and, for a callable that is not a Python function, C_RETURN or C_RAISE after it: callStack, call-ex,
+  `AotCallMethod`, `aotInvoke`, `AotCallV` and `AotCallMethodV`, the call sites of the loop and of compiled code.
+- no cost when off: one load of a global word (the events of all tools, 0 when none) and a branch at each site; the
+  monitored path is a separate function. Measured by `bin/pyi bench`'s sample against the base (210's method).
+- What cannot match: CALL's `instruction_offset` is pyi's (2 x the IR's instruction, as `f_lasti`), timings are Go's
+  monotonic clock, `DISABLE` returned by a callback disables nothing (CPython disables the event at that location: a
+  local event, not built), and a C function is a `*Builtin` (builtin_function_or_method; a method descriptor called
+  unbound is bound to its first argument as `_lsprof`'s `get_cfunc_from_callable`): pyi's built-in implementations of
+  what CPython writes in Python would show as built-ins, and the reverse (none known in the profiled samples).
+
+**termios** (1,399 lines). tcgetattr, tcsetattr, tcsendbreak, tcdrain, tcflush, tcflow, tcgetwinsize, tcsetwinsize
+over the tty ioctls as musl's functions make them (TCGETS, TCSETS+when, TCSBRK, TCFLSH, TCXONC, TIOCGWINSZ/TIOCSWINSZ),
+the struct's bytes by their address as mmap's msync passes one (reflect's Pointer: no unsafe; the `:pointer-syscall`
+class's premise, "Go forms take no pointer", has this way round it); the 216 constants of musl's headers on Linux
+(asm-generic's: amd64 and arm64 alike). test_termios and test_tty need `os.openpty` (absent: `:pointer-syscall`), so it
+comes with termios (/dev/ptmx, TIOCSPTLCK, TIOCGPTN, as musl's openpty). Not on tamago (no tty).
+
+**_tracemalloc** (1,717 lines with Python/tracemalloc.c). CPython hooks its three allocator domains: every
+PyMem/PyObject malloc, realloc and free records (size, traceback of the Python frames) per pointer, and
+`get_object_traceback` finds an object's trace by its address. pyi allocates through Go: no allocator to hook, no
+frees (the collector reclaims without telling). An "allocation" on pyi is decided here as the creation of a Python object
+that CPython's allocator would see, at the runtime's constructors, with CPython's sizes (`sys.getsizeof`'s, the object's
+header and its variable part as 64-bit CPython lays them out); a free is the object's collection, seen by a cleanup
+(`runtime.AddCleanup`) when the collector runs, and `get_traced_memory` runs the collector first so a dropped object's
+size is gone as CPython's refcount frees it. Which numbers can match: the traces' tracebacks (the frames' filenames and
+lines), the count of traces per line for objects made by Python code, `get_object_traceback`; the sizes of bytes, str,
+tuple, list (CPython's over-allocation pattern), dict and int as `sys.getsizeof` gives them. What cannot: CPython's
+internal allocations (frames, code, the interpreter's own buffers, free lists' reuse, the small-int cache), so a
+snapshot's totals and `get_tracemalloc_memory` differ, and a trace never comes from inside a built-in's work on its own
+buffers. Its port is last in the brief's order; how far it got is in "As built: 220".
+
+## As built: 220, faulthandler, _lsprof, termios and _tracemalloc (2026-11-05/06, the Mac VM, queue 220)
+
+Decided (2026-11-06, the user): 220's DECISION (a), _tracemalloc's second stage (allocations traced at the runtime's
+constructors with CPython's sizes, frees seen by the collector, CPython's internal allocations out by design).
+
+Built as "Design: 220" above, in `go/arbace/py` (`builtins_faulthandler.ae`, `builtins_lsprof.ae`, `builtins_termios.ae`,
+`builtins_tracemalloc.ae`, `monitoring.ae`; the PSF License Agreement in LICENSE.md), with these hooks elsewhere:
+- **the loops** (`eval.ae`, `aot.ae`, `thread_gil.ae`, their own commits): runFrames' start and pushed frame inside
+  the eval breaker's check (`breakMonitor` set while a tool has events: no new load), its return and unwinding, and
+  the call sites callStack, call-ex, `AotCallMethod`, `aotInvoke`, `AotCallV`, `AotCallMethodV`, each
+  `if monEvents != 0`;
+  `AotCallV`/`AotCallMethodV` leave a call that goes the stack's way (`aotStacked`) to callStack's event, so a call
+  fires CALL once. Monitored, a call of anything but a Python function goes through `Call` (callInit's in-loop
+  `__init__` is not taken then: its frame runs nested, PY_START inside).
+- **signals** (`builtins_signal.ae`): `ownSignalHook` (os.kill of the own pid and signal.raise_signal: faulthandler's
+  handlers run in the sending thread, and a signal whose Python disposition is SIG_DFL and whose default ends the process
+  ends it, by SIG_DFL through rt_sigaction: Go's runtime ignored SIGUSR1 and printed its own traceback for SIGABRT), and
+  `signalTakenHook` (faulthandler.register without chain keeps the Python handler from running, as its sigaction
+  replaces it).
+- **threads** (`builtins_thread.ae`): `allThreads`, the started threads with their idents under a lock of their own
+  (faulthandler's dumps read it from goroutines that do not hold the GIL).
+- **the start** (`interp.ae`, `sys.ae`, bin/pyi): `atStartHooks` (faulthandler's enable for `-X faulthandler` and
+  `PYTHONFAULTHANDLER`, tracemalloc's start for `-X tracemalloc[=N]` and `PYTHONTRACEMALLOC`, as CPython's configuration
+  checks them); bin/pyi python passes `-X` options in `PYI_XOPTIONS` (`sys._xoptions`) and `-E`/`-I` as
+  `PYI_IGNORE_ENV`, both read once and removed from the environment; `-c`'s code runs as `"<string>"` (no prefix line:
+  the runtime sets `sys.path[0]` to `""`, no `__file__`), so `-c`'s tracebacks, line numbers and faulthandler's dumps are
+  CPython's.
+- **the constructors** (`bytes.ae`, `containers.ae`, `dict.ae`, `frame.ae`): `if tmOn { tmAlloc(o) }` in NewBytes,
+  NewList, NewDict and newFrame's cells (_tracemalloc's second stage).
+- **posix**: `os.openpty` (termios' file, through `posixAddons`) and `isatty` as musl's (TIOCGWINSZ: a pty's master is a
+  tty, the device numbers missed it).
+
+What each module gives (run: the programs below against `python3 -I -B` and the lib-test sample):
+- **faulthandler**: the four entry points, the fatal handler for SIGSEGV, SIGFPE, SIGABRT, SIGBUS and SIGILL (sent by
+  another process: os/signal; raised by pyi: in the raising thread), dump_traceback_later's watchdog (repeat, exit,
+  file, cancel), register/unregister with chain, the `_sigsegv`/`_read_null`/`_sigabrt`/`_sigfpe`/`_stack_overflow`/
+  `_fatal_error_c_thread` helpers, `Extension modules:` (the built-in modules not in `sys.stdlib_module_names`), the
+  message texts and argument errors. By design: a thread's ident stands for its pthread id and no thread name is
+  printed (the tests' regexes allow both); the C stack is musl's "<cannot get C stack on this system>" (CPython on
+  Alpine prints the same); a real fault in Go code is Go's panic (pyi's SystemError), not a signal; `  Garbage-collecting`
+  never prints and test_gc's `__del__` does not run at gc.collect() (`:finalization-collect`, 218's).
+- **_lsprof** and **sys.monitoring**: test_cprofile's and test_profile's profilee outputs (print_stats, print_callers,
+  print_callees) equal CPython's to the digit under both profilers (the external timer's simulated ticks make every
+  number exact), the calling conventions, the tool's registry, the second profiler's error, the external timer's
+  unraisables, throw's entry, sys.setprofile's event sequence. By design: CALL's offset is pyi's, DISABLE disables
+  nothing, no local events, the default timer is Go's monotonic clock.
+- **termios**: every function, the 216 constants, musl 1.2.6's speeds in CIBAUD (`cfsetispeed`/`cfgetispeed`), the
+  errors of clinic's converters. Not on tamago (no tty there).
+- **_tracemalloc** (both stages; the second the user's (a) on this task's DECISION, 2026-11-06): start, stop,
+  is_tracing, get_traceback_limit, clear_traces, reset_peak, get_traced_memory, get_tracemalloc_memory, `_get_traces`,
+  `_get_object_traceback`, the start from `PYTHONTRACEMALLOC` and `-X tracemalloc[=N]` with CPython's errors. An
+  allocation is the creation of a Python object at the runtime's constructors (`NewBytes`, `NewStr`, `NewTuple`,
+  `NewList`, `NewDict`, a frame's cells: each `if tmOn { tmAlloc(o) }`), its size `sys.getsizeof`'s (a dict 64, a
+  cell 40), its traceback the running thread's frames (a callee's cells are its caller's: the callee is not on the
+  chain yet, CPython's "no incomplete frames"); tracebacks interned; a free is the object's collection, seen by a
+  finalizer (`runtime.SetFinalizer`, which goi runs as Go's own; `runtime.AddCleanup`'s generic body goi does not
+  interpret), and get_traced_memory, `_get_traces` and reset_peak run the collector and wait for the finalizers first
+  (a sentinel's, queued last). By design: CPython's internal allocations (frames, code, the interpreter's buffers, free
+  lists, the small-int cache, a list's or dict's growth by realloc) and a built-in's own Go buffers are none of pyi's
+  traces, so totals and counts differ; str and tuple are not traced (the hook put `NewStr` and `NewTuple` past Go's
+  inlining budget, measured by `-gcflags=-m`: their cost with tracing off decided it); an empty list made right after one was dropped has a trace (CPython's comes
+  from its free list); instances are not traced (218's finalizer queue owns their finalization: one finalizer per Go
+  object). TestTracemallocEnabled: 8 of the 10 methods `:tracemalloc-no-traces` held now pass; the other 2
+  (test_set_traceback_limit, test_snapshot) fail under the lib-test driver in CPython itself (`bin/pyi lib-test-all
+  --oracle test_tracemalloc`: 8 != 10, 6 not greater than 10, as pyi), `:tracemalloc-driver-depth`.
+
+Samples (run, the VM):
+
+| module | before (base) | after |
+|---|---|---|
+| test_termios | 2 equal, 18 classed (`:pointer-syscall`), 1 failing | 21 equal |
+| test_tty | 4 classed | 4 equal |
+| test_profile | 7 classed (`:c-modules-deferred`) | 7 equal |
+| test_cprofile | 27 classed | 25 equal, 2 classed (`:multiprocessing`: spawn and forkserver children need `_multiprocessing`) |
+| test_faulthandler | 48 classed | 43 equal, 5 classed (testcapi 4, `:finalization-collect` 1) |
+| test_tracemalloc | 51 classed | 38 equal, 12 classed (testcapi 9, fork 1, `:tracemalloc-driver-depth` 2) |
+
+The programs of `/root/arbace-mac/.tmp/q220/t` against `python3 -I -B`: `prof/prof1.py` (110 lines: the profilee's
+three pstats tables under cProfile and profile, the calling conventions, the tool's registry, throw, the external
+timer's unraisables, the documented cumulative example, sys.setprofile's events) equal under `bin/pyi run` and compiled
+(`bin/pyi aot`); `fh.sh` (15 faulthandler cases through `bin/pyi python`) equal; `termios1.py` equal; `tm1.py` equal;
+`tm2.py` (the traced-memory cases and the documented top-lines example) equal compiled, but for the empty list's trace;
+under `bin/pyi run` its module-level drop of the 1 MiB bytes is not seen as freed (something of goi's interpretation
+still holds it: test_get_traced_memory, the same drop inside a test method, passes under goi).
+
+**Speed with profiling and tracing off** (run, the VM, load 4.4-4.8 with two other agents): `bin/pyi bench` of seven
+benchmarks, 3 rounds, base (40ab1e13, `/root/arbace-mac/.tmp/worktrees/q220-base`) and branch back to back, the least
+of 3 (milliseconds; `/root/arbace-mac/.tmp/q220/bench/all.tsv`, every output equal to CPython's):
+
+| benchmark | CPython | base compiled | after compiled | base loop | after loop |
+|---|---:|---:|---:|---:|---:|
+| bm_coroutines | 360 | 642 | 617 (-3.9%) | 769 | 767 (-0.3%) |
+| bm_deltablue | 130 | 386 | 389 (+0.8%) | 589 | 609 (+3.4%) |
+| bm_float | 219 | 447 | 469 (+4.9%) | 639 | 647 (+1.3%) |
+| bm_generators | 159 | 677 | 678 (+0.1%) | 681 | 681 (+0.0%) |
+| bm_nbody | 303 | 353 | 356 (+0.8%) | 589 | 581 (-1.4%) |
+| bm_richards | 321 | 504 | 507 (+0.6%) | 1108 | 1138 (+2.7%) |
+| bm_spectral_norm | 335 | 614 | 662 (+7.8%) | 821 | 851 (+3.7%) |
+| sum | | 3623 | 3678 (+1.5%) | 5196 | 5274 (+1.5%) |
+
+The two outliers were taken apart on the compiled benchmarks themselves: the same program's binaries, built from the
+base's runtime and from the branch's (and from variants), run interleaved 8-10 times each
+(`/root/arbace-mac/.tmp/q220/var/run.sh`). The least times: bm_float base 438-440, after 441-444, after without
+tracemalloc's hooks 445; bm_spectral_norm base 592-596, after 600-601, after with the frame start on the eval breaker
+596, that without the call sites' hooks 592. The spread of one binary is 3-8%, wider than any difference between them:
+the table's +4.9% and +7.8% were the load. Two changes came from these runs. First, a frame's PY_START check moved
+under the eval breaker (`breakMonitor` is set while any tool has events), so the frame start costs nothing more than
+the base's. Second, `NewStr` and `NewTuple` are not hooked, so both stay inlined. `NewList`, `NewDict` and `NewBytes` stay
+inlined but grow, so a few of their callers no longer inline (`go build -gcflags=-m`: `AotBuildList`, `instanceDict`,
+`currentContext`, `(*Exception).dict` and six more); their cost is within the noise above.
+
+**The closing checks (run, the VM):**
+- `make python-essential`: check --aot 21 programs, 20 pass, 1 classed, 0 failing; the controls fail as they must.
+- `bin/pyi runtime check`: the packages print and read back to the same forms; the tables and runtime-ops are equal;
+  the REPL session is equal; 136 of the 138 programs are equal.
+  - e-executable.py: found `-c`'s `sys.path[0]` not `""` (fixed by 78c9ebd8). It also ran past the check's 120 s cap:
+    on the loaded VM it takes 133 s, its six children starting in 14 s each, and the base's start is the same 14 s.
+  - f-signal.py: the check ran as a background job, which inherits SIGINT ignored. CPython then reports
+    `getsignal(SIGINT)` 1, pyi does not read the inherited disposition (as on the base).
+  - Run alone in the foreground, both programs equal CPython's. With `PYI_SMOKE_ONLY='^(e-executable|f-signal)'`,
+    f-signal passes and e-executable equals but for the cap.
+
