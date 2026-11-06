@@ -861,7 +861,8 @@
                       code (function-code! u2 block :function nm args
                                            (fn [cu]
                                              (when-let [d (docstring body)] (swap! cu assoc :docstring d))
-                                             (stmts! cu body)
+                                             ;; the docstring is no statement of the body (codegen_function_body)
+                                             (stmts! cu (if (docstring body) (rest body) body))
                                              (no-loc! cu #(do (load-const! cu nil) (emit! cu :return nil))))
                                            {:firstlineno (decorated-first-line x o)})]
                   (make-function! u2 code (cond-> parts ann (conj :annotate)))))]
@@ -1253,7 +1254,8 @@
           (let [breaks (end-loop! u fb)]
             (target! u h)
             (set-depth! u (inc d))
-            (emit! u :end-async-for nil)
+            ;; at the iterator's line: the loop's end succeeds the for, not the body (codegen_async_for)
+            (at-line! u (or (line-of it) (line-of x)) #(emit! u :end-async-for nil))
             (stmts! u (:else o))
             (let [end (here u)] (doseq [b breaks] (patch! u b end)))))
         (let [exit (at-line! u (line-of it) #(jump! u :for-iter))
@@ -1834,7 +1836,10 @@
     (expr! u subject)
     (doseq [[i c] (map-indexed vector cases)]
       (let [[_ [pt body] co _] (node c)
-            d (depth u)]
+            d (depth u)
+            pl (or (line-of pt) (line-of c))]
+        ;; a case's instructions at its pattern's line (codegen_match_inner's LOC(m->pattern))
+        (when pl (swap! u assoc :line pl))
         (emit! u :copy 1)
         (let [fails (atom [])]
           (binding [*allow-irrefutable* (or (some? (:guard co)) (= i (dec (count cases))))]
@@ -1843,9 +1848,11 @@
           (when-let [g (:guard co)]
             (expr! u g) (emit! u :to-bool nil)
             (let [j (jump! u :jump-if-false)] (swap! fails conj [j (depth u)])))
-          (emit! u :pop nil)
+          ;; the subject popped on success: NEXT_LOCATION in CPython (here artificial: the pattern's line propagated)
+          (emit-nl! u :pop nil)
           (stmts! u body)
-          (swap! ends conj (jump! u :jump))
+          (swap! ends conj (emit-nl! u :jump nil))
+          (when pl (swap! u assoc :line pl))
           (if (seq @fails) (fail-ladder! u @fails d) (set-depth! u d)))))
     (emit! u :pop nil)
     (let [end (here u)] (doseq [e @ends] (patch! u e end)))))
@@ -1999,6 +2006,36 @@
                   b)))))
         bs))
 
+(defn- fl-const? [k] (or (nil? k) (boolean? k) (number? k) (string? k) (and (map? k) (contains? k :tuple) (= 1 (count k)))))
+
+(defn- fl-tuples
+  "A tuple of constants built (const ... build-tuple N, NOPs between): one constant, the loads NOPs without a line
+  (fold_tuple_of_constants); the unit's constants extended"
+  [bs consts-atom]
+  (let [const-ix (fn [v] (let [cs @consts-atom i (.indexOf ^java.util.List cs v)]
+                           (if (>= i 0) i (do (swap! consts-atom conj v) (count cs)))))]
+    (mapv (fn [b]
+            (assoc b :ins
+                   (loop [v (:ins b) i 0]
+                     (if (>= i (count v))
+                       v
+                       (let [ins (nth v i) n (:arg ins)]
+                         (if (and (= :build-tuple (:op ins)) (integer? n) (< 0 n 31))
+                           (let [ks (loop [j (dec i) acc ()]
+                                      (cond (= n (count acc)) acc
+                                            (neg? j) nil
+                                            (= :nop (:op (nth v j))) (if (keyword? (:arg (nth v j))) (recur (dec j) acc) nil)
+                                            (= :const (:op (nth v j))) (recur (dec j) (cons j acc))
+                                            :else nil))
+                                 vals (when ks (map #(get @consts-atom (:arg (nth v %)) ::none) ks))]
+                             (if (and ks (every? fl-const? vals) (not-any? #(= :resume (:arg (nth v %))) (range (first ks) i)))
+                               (recur (assoc (reduce (fn [v j] (assoc v j (fl-nop nil (:h (nth v j))))) v ks)
+                                             i (assoc ins :op :const :arg (const-ix {:tuple (vec vals)})))
+                                      (inc i))
+                               (recur v (inc i))))
+                           (recur v (inc i))))))))
+          bs)))
+
 (defn- fl-pairs
   "const or copy 1, then pop: both NOPs (remove_redundant_nops_and_pairs), within a block"
   [bs]
@@ -2053,6 +2090,24 @@
                   [bs k])))
             [bs 0] (range (count bs)))))
 
+(def ^:private fl-reversed {:jump-if-false :jump-if-true :jump-if-true :jump-if-false
+                             :jump-if-none :jump-if-not-none :jump-if-not-none :jump-if-none})
+
+(defn- fl-normalize
+  "A backward conditional jump reversed over a backward jump of its own (normalize_jumps_in_block): CPython's conditional
+  jumps go forward, its backward edges are JUMP_BACKWARD (a line event for the backward jump to the same line)"
+  [bs fresh]
+  (loop [bs bs p 0]
+    (if (>= p (count bs))
+      bs
+      (let [pos (fl-pos bs) b (nth bs p) l (fl-last b)]
+        (if (and l (fl-reversed (:op l)) (<= (pos (:arg l)) p) (< (inc p) (count bs)))
+          (let [id (swap! fresh inc)
+                nb {:id id :ins [{:op :jump :arg (:arg l) :line (:line l) :h (:h l)}]}
+                b (assoc b :ins (conj (pop (:ins b)) (assoc l :op (fl-reversed (:op l)) :arg (:id (nth bs (inc p))))))]
+            (recur (vec (concat (subvec bs 0 p) [b nb] (subvec bs (inc p)))) (+ p 2)))
+          (recur bs (inc p)))))))
+
 (defn- flow!
   "The unit's :code, :lines and :hs-of through CPython's line passes; its handlers' :target renumbered"
   [m]
@@ -2070,12 +2125,13 @@
         bs (if (some #(= n (:id %)) bs) bs (conj bs {:id n :ins []}))
         htarget (fn [h] (htarget-ix h))
         fresh (atom (+ n 1))
-        bs (-> bs fl-inline (fl-unreachable htarget) (fl-resolve htarget fresh) (fl-fold (:consts m)) fl-thread fl-pairs
-               (fl-unreachable htarget))
+        consts (atom (vec (:consts m)))
+        bs (-> bs fl-inline (fl-unreachable htarget) (fl-resolve htarget fresh) (fl-tuples consts) (fl-fold @consts) fl-thread
+               fl-pairs (fl-unreachable htarget))
         bs (loop [bs bs k 0]
              (let [[bs a] (fl-nops bs) [bs b] (fl-jumps-redundant bs)]
                (if (and (pos? (+ a b)) (< k 16)) (recur bs (inc k)) bs)))
-        bs (fl-resolve bs htarget fresh)
+        bs (-> bs (fl-resolve htarget fresh) (fl-normalize fresh))
         starts (loop [p 0 at 0 acc {}] (if (>= p (count bs)) acc (recur (inc p) (+ at (count (:ins (nth bs p)))) (assoc acc p at))))
         total (reduce + (map (comp count :ins) bs))
         pos (fl-pos bs)
@@ -2083,6 +2139,7 @@
         out (vec (mapcat :ins bs))]
     (doseq [h hs :let [t (htarget-ix h)] :when t] (swap! h assoc :target (index t)))
     (assoc m
+           :consts @consts
            :code (mapv (fn [{:keys [op arg]}] [op (cond (fl-jumps op) (index arg) (and (= :nop op) (keyword? arg)) nil :else arg)]) out)
            :lines (mapv :line out)
            :hs-of (mapv :h out))))
