@@ -4814,3 +4814,15 @@ exit 0, 25 recorded failures now pass: CDF.2's 19 and 20040629-1, vprintf-1, vfp
 18_include. Left: 95_bitfields, whose packed attribute comes from a macro the re-entered copy defines (`P`) and is lost, so its
 packed tests lay out unpacked (`test/c/check-known.edn`, class `read`, matched by `fail known read:` now). Eval and AOT deferred:
 13 to 7 each (read 1, checker 2, threads 2, missing-builtin 1, complit-static 1 until its stale record goes).
+
+## Decided (2026-11-06, the user: CS274-CS277)
+
+- **CS274 (a)**: the print writes an invocation that made several top-level items as the invocation itself, in place of its
+  items; CS81 (b) withdrawn.
+- **CS275 (a)**: the print's statement-level include (a body's `#include`, the re-entered main file, as forms the print writes
+  back), beyond CDF.5's (b) for ci's read.
+- **CS276 (b) first**: a deterministic scheduler (one goroutine per C thread, one running at a time, a fixed order), shared with
+  Rust's crop: rust-re6's draft (`go/arbace/crt/sched.ae`, `go/arbace/ci/thread.ae`) is the one scheduler; C's threads programs
+  (binary-trees-5, c23-complit-4) adopt it at its merge, no second one here.
+- **CS277 (a)**: `__builtin_va_arg_pack` built, a call node appending the current frame's variadic arguments.
+- Order of the work: CS277, CS274, CS275 (a).
