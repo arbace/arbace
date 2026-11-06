@@ -524,7 +524,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
 
-(declare type-expect type-function type-let type-cases)
+(declare type-expect type-function type-let type-cases split-effect-cases type-effect-cases)
 
 (defn type-exp [env sexp] (type-expect env sexp (ty/newvar)))
 
@@ -756,12 +756,20 @@
                                     :else [f sargs])
                         [args t] (type-application env f sargs)]
                     (ret [:Texp_apply f args] t))
+      ;; Typecore's Pexp_match and Pexp_try: the effect cases (`effect P, k`) split off and typed by type_effect_cases;
+      ;; a match with effect cases is [:Texp_match arg cases partial eff-cases], a try [:Texp_try body cases eff-cases]
       :Pexp_match (let [arg (type-exp env (d 1))
-                        cases (type-cases env (:type arg) expected (d 2) true)]
-                    (mkexp [:Texp_match arg cases (partiality cases (:type arg))] expected loc))
+                        [val-cases eff-cases conts] (split-effect-cases (d 2))
+                        _ (when (and (empty? val-cases) (seq eff-cases))
+                            (type-error "None of the patterns in this 'match' expression match values."))
+                        cases (type-cases env (:type arg) expected val-cases true)
+                        effs (when (seq eff-cases) (type-effect-cases env expected eff-cases conts))]
+                    (mkexp (cond-> [:Texp_match arg cases (partiality cases (:type arg))] effs (conj effs)) expected loc))
       :Pexp_try (let [body (type-expect env (d 1) expected)
-                      cases (type-cases env (ty/type-exn) expected (d 2) false)]
-                  (mkexp [:Texp_try body cases] expected loc))
+                      [exn-cases eff-cases conts] (split-effect-cases (d 2))
+                      cases (type-cases env (ty/type-exn) expected exn-cases false)
+                      effs (when (seq eff-cases) (type-effect-cases env expected eff-cases conts))]
+                  (mkexp (cond-> [:Texp_try body cases] effs (conj effs)) expected loc))
       :Pexp_tuple (let [ts (mapv (fn [_] (ty/newvar)) (d 1))]
                     (unify! (ty/newty [:Ttuple (mapv (fn [[l _] t] [l t]) (d 1) ts)]) expected "expression")
                     (mkexp [:Texp_tuple (mapv (fn [[l e] t] [l (type-expect env e t)]) (d 1) ts)] expected loc))
@@ -930,9 +938,45 @@
       :Pexp_unreachable (mkexp [:Texp_unreachable] expected loc)
       (type-error (str "expression " (d 0) " outside the slice")))))
 
+(defn split-effect-cases
+  "Typecore's split_cases: [other-cases effect-cases continuation-patterns], an effect case `effect p1, p2` as the
+  case of p1 with the continuation's pattern p2"
+  [scases]
+  (reduce (fn [[vc ec ks] c]
+            (let [d (:ppat_desc (:pc_lhs c))]
+              (if (= :Ppat_effect (d 0))
+                [vc (conj ec (assoc c :pc_lhs (d 1))) (conj ks (d 2))]
+                [(conj vc c) ec ks])))
+          [[] [] []] scases))
+
+(defn- type-continuation-pat
+  "Typecore.type_continuation_pat: `_` none, a variable [name id type]"
+  [ty-cont sp]
+  (let [d (:ppat_desc sp)]
+    (case (d 0)
+      :Ppat_any nil
+      :Ppat_var [(:txt (d 1)) (ty/ident-create (:txt (d 1))) ty-cont]
+      (type-error "Invalid continuation pattern: only variables and _ are allowed ."))))
+
+(declare type-cases)
+
+(defn type-effect-cases
+  "Typecore.type_effect_cases: the effect's type a fresh locally abstract type %eff, the patterns typed against
+  %eff eff (an effect constructor's GADT equation refines it), the continuation (%eff, result) continuation"
+  [env tres scases sconts]
+  (ty/with-local-level
+    (let [p (new-local-type "%eff")
+          ty-eff (ty/newgenty [:Tconstr p []])
+          ty-arg (ty/tconstr (ty/predef-path "eff") [ty-eff])
+          ty-cont (ty/tconstr (ty/predef-path "continuation") [ty-eff tres])
+          conts (mapv #(type-continuation-pat ty-cont %) sconts)]
+      (type-cases env ty-arg tres scases false conts))))
+
 (defn type-cases
-  "Typecore.type_cases: the patterns first, then guards and bodies; computation patterns (exceptions) when allowed"
-  [env targ tres scases computation]
+  "Typecore.type_cases: the patterns first, then guards and bodies; computation patterns (exceptions) when allowed;
+  conts, an effect case's continuation variable each ([name id type] or nil): bound in the body, not in the guard"
+  ([env targ tres scases computation] (type-cases env targ tres scases computation nil))
+  ([env targ tres scases computation conts]
   (let [typed (mapv (fn [c] (let [vars (atom []) eqs (atom [])
                                   p (binding [*equations* eqs] (type-pat env (:pc_lhs c) targ vars))
                                   done @eqs
@@ -942,15 +986,17 @@
                               [c p @vars [done now]]))
                     scases)
         _ (pressure-variants! (mapv second typed))]
-    (mapv (fn [[c p vars [before now]]]
-            (let [env' (add-pattern-vars env vars)]
+    (mapv (fn [[c p vars [before now]] cont]
+            (let [env' (add-pattern-vars env vars)
+                  ext-env (if cont (add-pattern-vars env' [cont]) env')]
               (doseq [[path decl] now] (env/add-decl! path decl))
               (try
-                {:lhs p
-                 :guard (when-let [g (:pc_guard c)] (type-expect env' g (ty/type-bool)))
-                 :rhs (type-expect env' (:pc_rhs c) tres)}
+                (cond-> {:lhs p
+                         :guard (when-let [g (:pc_guard c)] (type-expect env' g (ty/type-bool)))
+                         :rhs (type-expect ext-env (:pc_rhs c) tres)}
+                  cont (assoc :cont (cont 1)))
                 (finally (undo-equations! before)))))
-          typed)))
+          typed (or conts (repeat nil))))))
 
 (defn- split-arrow
   "The argument and result types of an arrow with label l the expected type is, or is unified with"
@@ -1126,6 +1172,11 @@
                :pvb_expr (reduce (fn [e n] {:pexp_desc [:Pexp_newtype n e] :pexp_loc eloc})
                                  {:pexp_desc [:Pexp_constraint (:pvb_expr vb) (c 2)] :pexp_loc eloc}
                                  (reverse (c 1)))))
+      ;; let p : t1 :> t2 = e: the pattern constrained by t2, the expression coerced (Pexp_coerce)
+      (= :Pvc_coercion (c 0))
+      (assoc vb :pvb_constraint nil
+             :pvb_pat {:ppat_desc [:Ppat_constraint (:pvb_pat vb) (c 2)] :ppat_loc ploc}
+             :pvb_expr {:pexp_desc [:Pexp_coerce (:pvb_expr vb) (c 1) (c 2)] :pexp_loc eloc})
       :else (type-error "this let's type constraint is outside the slice"))))
 
 (defn- gadt-pattern?

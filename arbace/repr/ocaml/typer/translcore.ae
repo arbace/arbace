@@ -350,7 +350,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
 
-(declare transl-exp transl-function transl-let transl-apply transl-match)
+(declare transl-exp transl-function transl-let transl-apply transl-match transl-handler)
 
 (defn- split-pattern
   "Typedtree.split_pattern: [value-part exception-part] of a computation pattern"
@@ -491,11 +491,20 @@
                 lam (binding [*prim-loc* (:loc e)] (lambda-of-prim prim largs))]
             (if (empty? extra) lam (transl-apply lam extra)))
           (transl-apply (transl-exp f) args)))
-      :Texp_match (transl-match e (d 1) (d 2) (d 3))
-      :Texp_try (let [cases (d 2)
+      :Texp_match (if (seq (get d 4))
+                    ;; Translcore's Texp_match with effect cases: the values' and the exceptions' cases split, transl_handler
+                    (let [[vc ec] (reduce (fn [[vc ec] c]
+                                            (let [[pv pe] (split-pattern (:lhs c))]
+                                              [(cond-> vc pv (conj (assoc c :lhs pv))) (cond-> ec pe (conj (assoc c :lhs pe)))]))
+                                          [[] []] (reachable (d 2)))]
+                      (transl-handler e (d 1) [vc (d 3)] ec (d 4)))
+                    (transl-match e (d 1) (d 2) (d 3)))
+      :Texp_try (if (seq (get d 3))
+                  (transl-handler e (d 1) nil (d 2) (d 3))
+                  (let [cases (d 2)
                       id (m/name-pattern* "exn" (map :lhs cases))]
                   [:Ltrywith (transl-exp (d 1)) id
-                   (m/for-trywith (:loc e) [:Lvar id] (mapv transl-case-try (reachable cases)))])
+                   (m/for-trywith (:loc e) [:Lvar id] (mapv transl-case-try (reachable cases)))]))
       :Texp_tuple (let [[ll shape] (transl-list-with-shape (mapv second (d 1)))
                         cs (map extract-constant ll)]
                     (if (every? some? cs)
@@ -664,6 +673,42 @@
           body (if (fn? body) (body) body)]
       (reduce (fn [body [vb lam]] (m/for-let (:loc (:pat vb)) lam (:pat vb) body))
               body (reverse (map vector vbs lams))))))
+
+(defn- transl-cases-cont
+  "Translcore.transl_cases ~cont: an effect case's continuation variable an alias of the handler's k"
+  [cont cases]
+  (mapv (fn [c] (let [[p body] (transl-case c)]
+                  [p (if-let [id (:cont c)] [:Llet :alias "" id [:Lvar cont] body] body)]))
+        (reachable cases)))
+
+(defn- evaluated? [lam] (contains? #{:Lconst :Lvar :Lfunction} (lam 0)))
+
+(defn transl-handler
+  "Translcore.transl_handler: the handler's three functions (values, exceptions, effects) on a stack
+  caml_alloc_stack makes, the body a function of one argument run on it by runstack"
+  [e body val-caselist exn-caselist eff-caselist]
+  (let [lfun (fn [params lbody] [:Lfunction :curried (mapv (fn [p] [p ""]) params) "" lbody])
+        val-fun (if-let [[vcs partial] val-caselist]
+                  (let [cases (mapv transl-case (reachable vcs))
+                        param (m/name-pattern* "param" (map :lhs vcs))]
+                    (lfun [param] (m/for-function (:loc e) [:Lvar param] cases partial)))
+                  (let [param (ty/ident-create "param")] (lfun [param] [:Lvar param])))
+        exn-fun (let [cases (mapv transl-case (reachable exn-caselist))
+                      param (m/name-pattern* "exn" (map :lhs exn-caselist))]
+                  (lfun [param] (m/for-trywith (:loc e) [:Lvar param] cases)))
+        eff-fun (let [param (m/name-pattern* "eff" (map :lhs eff-caselist))
+                      cont (ty/ident-create "k")
+                      cont-tail (ty/ident-create "ktail")
+                      cases (transl-cases-cont cont eff-caselist)]
+                  (lfun [param cont cont-tail]
+                        (m/for-handler (:loc e) [:Lvar param] [:Lvar cont] [:Lvar cont-tail] cases)))
+        lbody (transl-exp body)
+        [body-fun arg] (if (and (= :Lapply (lbody 0)) (= 1 (count (lbody 2)))
+                                (evaluated? (lbody 1)) (evaluated? (first (lbody 2))))
+                         [(lbody 1) (first (lbody 2))]
+                         [(lfun [(ty/ident-create "param")] lbody) [:Lconst [:int 0]]])]
+    [:Lprim (l/prim "runstack")
+     [[:Lprim (l/pccall "caml_alloc_stack") [val-fun exn-fun eff-fun]] body-fun arg]]))
 
 (defn transl-match [e arg cases partial]
   (let [[val-cases exn-cases handlers]
