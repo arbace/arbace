@@ -2208,12 +2208,20 @@
               :else
               (do (add-top! (apply list 'llvm/global (gsym nm) (if (abi/ref? t) 'ptr (list 'array s 'i8)) (if (abi/ref? t) 'null 'zeroinitializer) (concat link [:align a])))
                   (swap! dyn conj [:init id])))))))
-    (when (seq @dyn)
+    ;; the dynamic initializations by priority (init_priority(N): a function _GLOBAL__I_00000N of its own, clang's), then
+    ;; the functions __attribute__((constructor(N))) names, all in llvm.global_ctors
+    (let [groups (group-by (fn [[_ id]] (long (or (:init-priority (sema/var* id)) 65535))) @dyn)
+          entries (atom [])
+          ;; (the constructor functions first, then the initializations' functions: clang's order, ties at a
+          ;; priority run in it)
+          _ (doseq [[fid f] (sort-by key (:fns prog)) :when (:ctor-attr f) :when (:tbody (sema/fnd fid))]
+              (swap! entries conj [(:ctor-attr f) (let [g (want-fn! fid)] (if (symbol? g) (name g) (second g)))]))]
+     (doseq [[prio items] (sort-by key groups)]
       (let [state (atom {:blocks [] :label '%entry :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores []
                          :fn {:name "init" :ty {:k :fn :ret abi/void :ps []}} :ret-label '%return})
-            nm (str "_GLOBAL__sub_I_" file)]
+            nm (if (= 65535 prio) (str "_GLOBAL__sub_I_" file) (format "_GLOBAL__I_%06d" prio))]
         (binding [*f* state]
-          (doseq [[k id] @dyn]
+          (doseq [[k id] items]
             (let [v (sema/var* id) t (:ty v) addr (gsym (abi/mangle-var v))
                   ;; a template's static member (linkonce_odr, defined in each unit that uses it): initialized once,
                   ;; behind its guard variable _ZGV..., as clang writes it (CODEGEN.md G3)
@@ -2244,9 +2252,11 @@
           (add-top! (apply list 'llvm/define (gsym nm) 'void [] :linkage :internal
                            (concat (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
                                    [:body (vec (concat [entry] (rest blocks) (:pad-blocks s)))])))
-          (add-top! (list 'llvm/global (gsym "llvm.global_ctors") '(array 1 (struct i32 ptr ptr))
-                          (list 'array ['(struct i32 ptr ptr) (list 'struct ['i32 65535] ['ptr (gsym nm)] ['ptr 'null])])
-                          :linkage :appending)))))))
+          (swap! entries conj [prio nm]))))
+     (when (seq @entries)
+       (add-top! (list 'llvm/global (gsym "llvm.global_ctors") (list 'array (count @entries) '(struct i32 ptr ptr))
+                       (apply list 'array (for [[prio nm] @entries] ['(struct i32 ptr ptr) (list 'struct ['i32 prio] ['ptr (gsym nm)] ['ptr 'null])]))
+                       :linkage :appending))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The module

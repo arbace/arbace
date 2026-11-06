@@ -359,7 +359,10 @@
                     (and (seq? p) (= '<> (first p)))
                     (recur ((:template-id @hooks) scope (apply list '<> {:in (:scope (abi/cls-of t)) :name (second p)} (nnext p))) more)
                     (symbol? p)
-                    (let [e (type-entity (lookup-qualified (:scope (abi/cls-of t)) [(name p)] false))]
+                    ;; (a qualified name: the class's members and its bases', dependent ones in the pattern too,
+                    ;; [class.member.lookup]; G5: move_iterator<It>::iterator_category from __move_iter_cat)
+                    (let [e (type-entity (or (seq (map second (class-lookup (:id (abi/unq t)) (name p) false)))
+                                             (lookup-qualified (:scope (abi/cls-of t)) [(name p)] false)))]
                       (recur (or (:ty e) (fail :type "unknown type " (pr-str f))) more))
                     :else (fail :type "type form " (pr-str f))))
       member-ptr (let [c (resolve-type-form scope (second f))
@@ -544,6 +547,20 @@
 
 (defn- kids [n] (filter #(and (map? %) (:kind %)) (:inner n)))
 
+(defn- gnu-attr-arg
+  "The argument of a GNU attribute `nm` among a declaration's attribute nodes (init_priority(200)): a number, or true
+  when written without one; nil when absent."
+  [n nm]
+  (some #(when (and (= "NativeAttr" (:kind %)) (#{nm (str "__" nm "__")} (:_gnu %)))
+           (or (some-> (:_arg %) str/trim parse-long) true))
+        (:inner n)))
+
+(defn- init-kid
+  "A variable declaration's initializer node: its first child that is not an attribute (__attribute__((init_priority(N)))
+  comes first in the tree; G5)."
+  [n]
+  (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids n))))
+
 (defn- linkage-c? [scope] (:extern-c scope))
 
 (defn- ns-scope! [parent nm anon]
@@ -605,11 +622,17 @@
                                      (catch arbace.lang.ExceptionInfo _ nil))]
                           (and (number? v) (not= 0 (long v)))))))))))
 
+(def ^:dynamic *constraint-depth* 0)
+
 (defn constraint-satisfied?
   "A constraint expression's satisfaction in `scope` ([temp.constr.constr]: the atomic constraints constant expressions
   of type bool; a substitution failure or an expression not constant is not satisfied)."
   [scope rc]
-  (try (not= 0 (long (const-int scope rc)))
+  ;; (a satisfaction that needs itself, through the constraints of the templates it instantiates, is not satisfied:
+  ;; clang's "satisfaction of constraint depends on itself", [temp.constr.atomic]/3; the depth bounds it, G5)
+  (try (when (> (long *constraint-depth*) 48) (fail :template "a constraint's satisfaction depends on itself"))
+       (binding [*constraint-depth* (inc (long *constraint-depth*))]
+         (not= 0 (long (const-int scope rc))))
        (catch arbace.lang.ExceptionInfo e
          (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "constraint not satisfied:" (.getMessage e))))
          false)))
@@ -667,6 +690,8 @@
            ;; GNU's always_inline (clang's AlwaysInlineAttr, `alwaysinline` in the IR: inlined at -O0 by LLVM's
            ;; AlwaysInliner, arbace.cpp.inline; P16 (a))
            :always-inline (always-inline-node? n)
+           ;; __attribute__((constructor(N))): run before main, in llvm.global_ctors at its priority (65535 unwritten)
+           :ctor-attr (when-let [x (gnu-attr-arg n "constructor")] (if (number? x) x 65535))
            :noexcept (noexcept-of tscope qt)
            :noexcept-false (boolean (re-find #"\bnoexcept\s*\(\s*false" (or qt "")))
            :linkage (if (linkage-c? home) :c :cpp)
@@ -716,7 +741,7 @@
                scope)
         ^java.util.HashMap m (:names home)
         old (some #(when (= :var (:e %)) (:id %)) (.get m (:name n)))
-        init (first (kids n))
+        init (init-kid n)
         st (if (:cls home) :member-static storage)]
     (if (and old (seq q))
       (do (upd-var! old assoc :init init :init-style (:init n) :defined true :def-scope scope)
@@ -730,6 +755,7 @@
                :internal-l (boolean (and (= st :global) (not (:cls home)) (or (= "static" (:storageClass n)) (and (:c ty) (not (:extern n)) (not= "extern" (:storageClass n)))) (not (:internal home))))
                :internal (boolean (or (:internal home) (= "static" (:storageClass n)) (and (= st :global) (:c ty) (not= "extern" (:storageClass n)))))
                :def-scope scope
+               :init-priority (let [x (gnu-attr-arg n "init_priority")] (when (number? x) x))
                :pos (long (or (:_b n) 0))}]
         ;; a header's definition: defined when odr-used (G4: clang emits an unused inline variable not at all)
         (swap! *vars* assoc id (if (and (header-node? n) (:defined v) (= st :global))
@@ -2756,9 +2782,9 @@
   (let [ty (resolve-type (:scope ctx) (get-in n [:type :qualType]))
         id (next-id)
         st (if (= "static" (:storageClass n)) :static-local storage)
-        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (first (kids n)) :constexpr (boolean (:constexpr n))}
+        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (init-kid n) :constexpr (boolean (:constexpr n))}
         ;; a constant local's initializer, for constant expressions (an array bound, a template argument)
-        v (if (and (:c ty) (abi/integral? (abi/unq ty)) (first (kids n))) (assoc v :init (first (kids n)) :def-scope (:scope ctx)) v)]
+        v (if (and (:c ty) (abi/integral? (abi/unq ty)) (init-kid n)) (assoc v :init (init-kid n) :def-scope (:scope ctx)) v)]
     (swap! *vars* assoc id v)
     id))
 
@@ -2779,7 +2805,7 @@
   "A local declaration's initializer from its node (`:init` c, call or list)."
   [ctx id n]
   (let [t (:ty (var* id))
-        init (first (kids n))
+        init (init-kid n)
         t (if (and (abi/arr? t) (nil? (:n t)) init)
             (let [a (analyze ctx init)]
               (cond (= :init-list (:op a)) (if (and (= 1 (count (:items a))) (= :str (:op (first (:items a))))) (assoc t :n (inc (count (:s (first (:items a)))))) (assoc t :n (count (:items a))))
