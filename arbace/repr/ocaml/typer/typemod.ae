@@ -86,6 +86,57 @@
 
 (declare transl-signature transl-modtype type-module include-mty)
 
+(declare transl-modtype)
+
+(defn- approx-sig-ast
+  "Typemod.approx_sig, on the Parsetree: the types abstract (Typedecl.approx_type_decl), the modules and module types
+  approximated, opens and includes kept, the rest left out"
+  [items]
+  (letfn [(approx-mty [smty]
+            (let [d (:pmty_desc smty)]
+              (case (d 0)
+                :Pmty_signature (assoc smty :pmty_desc [:Pmty_signature (approx-sig-ast (d 1))])
+                :Pmty_functor (assoc smty :pmty_desc [:Pmty_functor (if (= :Unit (d 1)) :Unit (update (d 1) 2 approx-mty))
+                                                      (approx-mty (d 2))])
+                :Pmty_with (assoc smty :pmty_desc (assoc d 1 (approx-mty (d 1))))
+                smty)))]
+    (vec (keep (fn [item]
+                 (let [d (:psig_desc item)
+                       re (fn [d'] (assoc item :psig_desc d'))]
+                   (case (d 0)
+                     :Psig_type (re (assoc d 2 (mapv #(assoc % :ptype_kind :Ptype_abstract :ptype_manifest nil :ptype_constraints []
+                                                             :ptype_private :Public)
+                                                     (d 2))))
+                     :Psig_module (when (:txt (:pmd_name (d 1))) (re [:Psig_module (update (d 1) :pmd_type approx-mty)]))
+                     :Psig_recmodule (re [:Psig_recmodule (mapv #(update % :pmd_type approx-mty) (d 1))])
+                     :Psig_modtype (re [:Psig_modtype (update (d 1) :pmtd_type #(some-> % approx-mty))])
+                     :Psig_open item
+                     :Psig_include (re [:Psig_include (update (d 1) :pincl_mod approx-mty)])
+                     nil)))
+               items))))
+
+(defn- approx-modtype-ast [smty]
+  (let [d (:pmty_desc smty)]
+    (case (d 0)
+      :Pmty_signature (assoc smty :pmty_desc [:Pmty_signature (approx-sig-ast (d 1))])
+      :Pmty_functor (assoc smty :pmty_desc [:Pmty_functor (if (= :Unit (d 1)) :Unit (update (d 1) 2 approx-modtype-ast))
+                                            (approx-modtype-ast (d 2))])
+      :Pmty_with (assoc smty :pmty_desc (assoc d 1 (approx-modtype-ast (d 1))))
+      smty)))
+
+(defn transl-recmodule-modtypes
+  "Typemod.transl_recmodule_modtypes: decls [[name smty]...]; the modules bound to their approximations
+  (approx_modtype), their types translated in that environment, then again in the environment of the first
+  translations; [env ids mtys]"
+  [env decls]
+  (let [ids (mapv (fn [[n _]] (ty/ident-create (or n "_"))) decls)
+        make-env (fn [mtys] (reduce (fn [e [[n _] id mty]] (if n (add-item e [:module n id mty]) e))
+                                    env (map vector decls ids mtys)))
+        env0 (make-env (mapv (fn [[_ smty]] (transl-modtype env (approx-modtype-ast smty))) decls))
+        env1 (make-env (mapv (fn [[_ smty]] (transl-modtype env0 smty)) decls))
+        dcl2 (mapv (fn [[_ smty]] (transl-modtype env1 smty)) decls)]
+    [(make-env dcl2) ids dcl2]))
+
 (defn- functor-param
   "[id-or-nil mty env'] of a functor's parameter, nil for ()"
   [env sparam]
@@ -256,12 +307,11 @@
           ;; in order, each seeing the earlier ones
           :Psig_recmodule (let [[env' its]
                                 (try
-                                  (reduce (fn [[e acc] [i md]]
-                                            (let [n (:txt (:pmd_name md))
-                                                  item [:module n (ty/ident-create (or n "_")) (transl-modtype e (:pmd_type md)) nil
-                                                        (if (zero? i) :rec-first :rec-next)]]
-                                              [(if n (add-item e item) e) (if n (conj acc item) acc)]))
-                                          [env []] (map-indexed vector (d 1)))
+                                  (let [decls (mapv (fn [md] [(:txt (:pmd_name md)) (:pmd_type md)]) (d 1))
+                                        [env' ids mtys] (transl-recmodule-modtypes env decls)]
+                                    [env' (vec (keep-indexed (fn [i [[n _] id mty]]
+                                                               (when n [:module n id mty nil (if (zero? i) :rec-first :rec-next)]))
+                                                             (map vector decls ids mtys)))])
                                   (catch arbace.lang.ExceptionInfo e
                                     (if (and env/*lenient* (:ocaml-type-error (ex-data e))) nil (throw e))))]
                             (if env'
@@ -500,7 +550,10 @@
                         fpath (when (= :Tmod_ident ((:desc f) 0)) ((:desc f) 1))
                         res (cond (nil? pid) (fm 2)
                                   apath (env/subst-mty {pid apath} (fm 2))
-                                  :else (nondep pid (:mty a) (fm 2)))]
+                                  :else (nondep pid (:mty a) (fm 2)))
+                        ;; Subst.modtype (Rescope scope): the result's bound identifiers fresh, their declarations (the
+                        ;; argument substituted) registered under them, not over the functor's own
+                        res (if (and pid (= :Mty_signature (res 0))) [:Mty_signature (env/rename-items (res 1))] res)]
                     {:desc [:Tmod_apply f a cc] :mty res})
       :Pmod_apply_unit (let [f (type-module env (d 1) false nil)
                              fm (env/scrape (:mty f))]
@@ -563,14 +616,11 @@
       ;; Typemod's recursive modules: each with its signature, the signatures translated in order (each seeing the
       ;; earlier ones), the bodies typed with all the modules bound, each coerced to its signature
       (let [bs (vec (d 1))
-            [env1 decls]
-            (reduce (fn [[e acc] mb]
-                      (let [n (:txt (:pmb_name mb)) me (:pmod_desc (:pmb_expr mb))]
-                        (when-not (= :Pmod_constraint (me 0)) (type-error "a recursive module needs a signature"))
-                        (let [mty (transl-modtype e (me 2)) id (ty/ident-create (or n "_"))
-                              item [:module n id mty]]
-                          [(if n (add-item e item) e) (conj acc [n id mty (me 1) (:pmod_loc (me 1))])])))
-                    [env []] bs)
+            _ (doseq [mb bs] (when-not (= :Pmod_constraint ((:pmod_desc (:pmb_expr mb)) 0)) (type-error "a recursive module needs a signature")))
+            [env1 ids mtys] (transl-recmodule-modtypes env (mapv (fn [mb] [(:txt (:pmb_name mb)) ((:pmod_desc (:pmb_expr mb)) 2)]) bs))
+            decls (mapv (fn [mb id mty] (let [me (:pmod_desc (:pmb_expr mb))]
+                                          [(:txt (:pmb_name mb)) id mty (me 1) (:pmod_loc (me 1))]))
+                        bs ids mtys)
             tbs (mapv (fn [[n id mty sme loc]]
                         (let [tm (type-module env1 sme false (when n (sub-root rootpath n)))]
                           [id {:desc [:Tmod_constraint tm mty (include-mty env1 (:mty tm) mty)] :mty mty} loc]))

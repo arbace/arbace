@@ -32,7 +32,10 @@
 
 (def stamp (atom 1000))
 (declare abbrev-memo)
-(defn reset-stamps! [] (reset! stamp 1000) (reset! abbrev-memo {}))
+(def scope-windows
+  "Identifiers' scopes (Ident.create_scoped): [first-stamp last-stamp-or-nil scope] of each local structure item of an
+  expression (`let module`, a local open), the identifiers stamped in it scoped there" (atom []))
+(defn reset-stamps! [] (reset! stamp 1000) (reset! abbrev-memo {}) (reset! scope-windows []))
 (def unit-stamp-base "The stamps of the identifiers of the stdlib's interfaces, apart from a program's" 100000000)
 (def unit-stamp (atom unit-stamp-base))
 (defmacro with-unit-stamps
@@ -58,7 +61,7 @@
 (defn pident [id] [:Pident id])
 (defn pdot [p s] [:Pdot p s])
 (defn path-last [p] (case (p 0) :Pident (:name (p 1)) :Pdot (p 2)))
-(defn path-head [p] (case (p 0) :Pident (p 1) :Pdot (recur (p 1))))
+(defn path-head [p] (case (p 0) :Pident (p 1) (:Pdot :Papply) (recur (p 1))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Type nodes and levels (types.ml, btype.ml)
@@ -521,13 +524,39 @@
                       (run! go (children d)))))))]
       (go t))))
 
+(defn ident-scope
+  "Ident.scope of a local identifier stamped in a scope window, the innermost; nil for the others (the outermost)"
+  [id]
+  (when-let [st (:stamp id)]
+    (when (and (not (:global id)) (not (:predef id)) (< st unit-stamp-base))
+      (some (fn [[s0 s1 sc]] (when (and (< s0 st) (or (nil? s1) (<= st s1))) sc)) (rseq @scope-windows)))))
+
+(defmacro with-scope
+  "body with the identifiers it creates scoped at the current level (Ctype.create_scope)"
+  [& body]
+  `(let [i# (count @scope-windows)]
+     (swap! scope-windows conj [@stamp nil @current-level])
+     (try (do ~@body) (finally (swap! scope-windows assoc-in [i# 1] @stamp)))))
+
+(declare expand-head)
+
 (defn update-level
-  "Ctype.update_level: the levels of t's nodes lowered to lv"
+  "Ctype.update_level: the levels of t's nodes lowered to lv; an abbreviation whose path is scoped deeper than lv
+  replaced by its expansion (linked to it), as a local module's type leaving its scope is"
   [lv t]
   (let [t (repr t)]
     (when (> (level t) lv)
-      (set-level! t lv)
-      (run! #(update-level lv %) (children (desc t))))))
+      (let [d (desc t)
+            sc (when (= :Tconstr (d 0)) (ident-scope (path-head (d 1))))
+            e (when (and sc (< lv sc)) (let [e (repr (expand-head t))] (when-not (identical? e t) e)))]
+        (if e
+          (do (link! t e) (update-level lv e))
+          (do (set-level! t lv)
+              (run! #(update-level lv %) (children d))))))))
+
+(def ^:dynamic *normalize-modtype-path*
+  "Env.normalize_modtype_path: a module type path through module type abbreviations is its definition's (set by the
+  environment)" identity)
 
 (def ^:dynamic *normalize-type-path*
   "Env.normalize_type_path: a type path through an alias is its target's (set by the environment)" identity)
@@ -598,7 +627,9 @@
                (or (= (d1 1) (d2 1))
                    (and *classic* (not (is-optional (d1 1))) (not (is-optional (d2 1))))))
           (do (unify (d1 2) (d2 2)) (unify (d1 3) (d2 3)))
-          (and (= :Tpackage (d1 0) (d2 0)) (= (d1 1) (d2 1)) (= (map first (d1 2)) (map first (d2 2))))
+          ;; Ctype.compare_package's eq_package_path: the paths equal, or equal once normalized
+          (and (= :Tpackage (d1 0) (d2 0)) (= (map first (d1 2)) (map first (d2 2)))
+               (or (= (d1 1) (d2 1)) (= (*normalize-modtype-path* (d1 1)) (*normalize-modtype-path* (d2 1)))))
           (unify-list (mapv second (d1 2)) (mapv second (d2 2)))
           (and (= :Ttuple (d1 0) (d2 0)) (= (map first (d1 1)) (map first (d2 1))))
           (unify-list (mapv second (d1 1)) (mapv second (d2 1)))
