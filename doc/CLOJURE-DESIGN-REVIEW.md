@@ -343,15 +343,18 @@ java.sql, desktop 2, q1 2 at the AOT level).
 export TMPDIR=$PWD/.tmp/tmp
 bin/jrt-convert update && bin/jrt modules && bin/j2g-edge update         # CDR4's world: jdk/, sources.txt, the table, the edge
 bin/generated-check                                                     # module_table.ae current
-bin/arbace-go --gate-build                                              # the executable and the test build (CDR2, CDR3, CDR4)
-CLOJURE_TESTS_GO=$(bin/lib/gate-cache.bash path)/amd64/arbace-tests \
-  bin/clojure-tests java.javadoc java-interop compilation genclass genclass.examples   # expect javadoc 5/5, test-dot, test-bean, primitive tests, genclass 6/8
+bin/arbace-go --build && bin/arbace-go --build-tests                    # the executable and the test build (CDR2, CDR3, CDR4)
+CLOJURE_TESTS_GO=target/arbace-go/amd64/arbace-tests bin/clojure-tests --no-generative \
+  clojure.test-clojure.java.javadoc clojure.test-clojure.java-interop clojure.test-clojure.compilation \
+  clojure.test-clojure.genclass clojure.test-clojure.genclass.examples # expect javadoc 5/5, test-dot, test-bean, the primitive tests, genclass 6/8
 #   then unskip test-dot, test-bean in test/arbace-go-results.edn; record compilation's and javadoc's counts
-bin/clojure-tests                                                       # the whole suite, the reference re-recorded
+CLOJURE_TESTS_GO=target/arbace-go/amd64/arbace-tests bin/clojure-tests     # the whole suite, the reference re-recorded
 bin/clojure-tests --aot                                                 # AOT level: unskip genclass, genclass.examples, test-dot, test-bean in test/arbace-go-aot-results.edn
-bin/oracle && bin/diffcheck                                             # no regression from CDR2's typing
+bin/oracle check "target/arbace-go/amd64/arbace -" --expected test/oracle/known-go-amd64-frozen.edn
+bin/diffcheck                                                           # no regression from CDR2's typing
 # CDR1: the locales
-JRT_LOCALES=common bin/jrt-convert update && bin/arbace-go --gate-build && bin/oracle   # count the 42; if they pass: commit jdk/ and make common the default (bin/jrt-convert line 484, jrt_sources print-sources)
+JRT_LOCALES=common bin/jrt-convert update && bin/arbace-go --build && bin/oracle check "target/arbace-go/amd64/arbace -" --expected test/oracle/known-go-amd64-frozen.edn
+#   count the 42 locale mismatches gone; if they pass: commit jdk/ and make common the default (bin/jrt-convert line 484, jrt_sources print-sources)
 # CDR5: the measurement (a scratch commit with the java.xml closure in added sources, not kept unless under 10 MB)
 ls -l target/arbace-go/amd64/arbace                                     # before and after
 ```
