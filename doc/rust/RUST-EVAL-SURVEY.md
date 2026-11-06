@@ -1051,12 +1051,12 @@ env, ci-param-width, c-variadic, lto). Over the whole suite the causes size so (
   run, **69 pass** (two after fixes: `float-f32.rs` met `__builtin_logf` undefined, the math ports; `trap.rs`'s status was
   rustc's, its stderr ci's fault line, now out of the compared stderr; both rerun and passing); not measured, over the day's
   memory line in one process: `threads.rs` (2.4 GB), `collections.rs`, `drops.rs`, `errors.rs` (a batch of three past 2.3 GB).
-- **UI sample (RE4's every 40th, 93 programs)**: 60 run so far, **58 pass**, `c-variadic/valid.rs` refused (class c-variadic) and
-  `macros/stringify.rs` (a `--test` harness) ended in `deadlock: every thread waits`: fixed after (thread-local objects at a
-  thread's own addresses, EVAL.md §10), its 13 tests now pass as rustc's;
-  33 not run (`.tmp/re6/left-ui40.ids`). RE4 had 87 of 93 with this std (one threads, one process, one env, one c-variadic, one lto,
-  one ci-param-width failure); in the 60 run here the process (`segfault-no-out-of-stack.rs`: its spawn now runs; the child needed
-  `ioctl` FIONBIO and a signal's end, both built, not rerun) and env programs had not come yet.
+- **UI sample (RE4's every 40th, 93 programs)**: 92 run (one a process, under 1.5 GiB from 16:55), **90 pass**: `c-variadic/valid.rs`
+  refused (class c-variadic), `abi/abi-sysv64-arg-passing.rs` (ci-param-width, C's gap, RES31); not run by day: `threads-sendsync/
+  task-comm-16.rs` (over 1.5 GiB in one process: the night). RE4 had 87 of 93: its threads (`macros/stringify.rs`, a `--test`
+  harness: fixed after a first deadlock by thread-local objects at each thread's own addresses, EVAL.md §10), process
+  (`abi/segfault-no-out-of-stack.rs`: its child runs now, `ioctl` FIONBIO, `--signals`, `--quiet-faults`), env and lto failures
+  pass. **Before RE6 87 of 93 (93.5%), after 90 of 92 run (97.8%; 90 of 93 at worst).**
 - **The gcc leg** (`bin/rsi lower-check`, std lowered, over the 345 UI programs of the check list, 85 minutes at 2 jobs): 305 pass,
   13 nondet, 25 in classes (backtrace 7, speed 8: fat LTO's merged module, lto 6, optimized-ir 2, c-variadic 1, inline-asm 1), 2
   unclassed (`abi/stack-probes.rs#x64`: a stack overflow on purpose; `backtrace/backtrace.rs`). All the threads set's programs pass
