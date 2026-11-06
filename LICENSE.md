@@ -767,8 +767,13 @@ covers what.
   `hasInconsistentOrSupersetQualifiersOf` and `isAtLeastAsSpecializedAs`, and `clang/lib/AST/ItaniumMangle.cpp`'s
   `mangleTemplatePrefix`, `mangleTemplateArgs`, `mangleTemplateParameter`, `mangleIntegerLiteral`, the return-type
   rule of `mangleFunctionEncodingBareType` and the `sr` form of `mangleUnresolvedPrefix`, under the Apache License
-  2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the files carrying clang's notice. The rest of
-  `arbace/cpp/` is Arbace's own, under the Eclipse Public License 1.0.
+  2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the files carrying clang's notice; and
+  `arbace/cpp/inline.ae` (doc/cpp/CODEGEN.md G5, the user's decision P16 (a), 2026-11-05): a port of LLVM's
+  AlwaysInliner at the same commit, `llvm/lib/Transforms/IPO/AlwaysInliner.cpp`'s `AlwaysInlineImpl`,
+  `llvm/lib/Transforms/Utils/InlineFunction.cpp`'s `InlineFunctionImpl` (the parts -O0 IR uses),
+  `HandleInlinedLandingPad`, `HandleCallsInBlockInlinedThroughInvoke`, `LandingPadInliningInfo::forwardResume` and
+  `getInnerResumeDest`, and `llvm/lib/Analysis/InlineCost.cpp`'s `isInlineViable`, under the same license, the file
+  carrying LLVM's notice. The rest of `arbace/cpp/` is Arbace's own, under the Eclipse Public License 1.0.
 - `scheme/psyntax/` (Scheme's expander, doc/scheme/SCHEME-SURVEY.md, "As built: SM4"; origins in
   `scheme/provenance.edn`): `expander.ae`, `library-manager.ae`, `builders.ae` and `config.ae` are
   psyntax, the R6RS library and syntax-case system of Abdulaziz Ghuloum and R. Kent Dybvig, as Ikarus

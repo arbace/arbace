@@ -1514,6 +1514,17 @@
             (let [x (with-gt p true (parse-expr p))] (expect! p ")") (node p "CXXTypeidExpr" b (last-ix p) {:inner [x]}))))
       (t= t "requires") (parse-requires-expr p)
       (or (t= t "__func__") (t= t "__FUNCTION__") (t= t "__PRETTY_FUNCTION__")) (do (adv! p) (text-node p "PredefinedExpr" b))
+      ;; G5: __builtin_va_arg(ap, T) for the code generator: its operand and type (clang's VAArgExpr), the node the
+      ;; converter's text all the same
+      (and (= s "__builtin_va_arg") *full-headers* (not (skim? p)) (is-at? p 1 "("))
+      (or (try (adv! p) (adv! p)
+               (let [x (with-gt p true (parse-assign-expr p))]
+                 (when (accept! p ",")
+                   (let [ty (parse-type-id p :paren)]
+                     (when (is? p ")") (adv! p)
+                       (assoc (node p "BuiltinExpr" b (last-ix p) {}) :_vaarg x :_vatype (qt ty))))))
+               (catch arbace.lang.ExceptionInfo _ nil))
+          (do (seek! p b) (adv! p) (skip-balanced! p) (text-node p "BuiltinExpr" b)))
       (and (identical? k :kw) (#{"__builtin_va_arg" "__builtin_offsetof" "__builtin_bit_cast" "__builtin_types_compatible_p" "__builtin_convertvector" "__builtin_choose_expr"} s))
       (do (adv! p) (when (is? p "(") (skip-balanced! p)) (text-node p "BuiltinExpr" b))
       (and (identical? k :id) (is-at? p 1 "(") (trait-name? s) (not (sc/lookup (scope p) s)))
@@ -3204,18 +3215,26 @@
     (if-not (is? p "<")
       ;; an explicit instantiation: the converter reads it from its text
       (let [b0 (ix p)
-            names (try (skimming p true
-                         (let [ds (parse-decl-specs p :top) d (parse-declarator p :named) fs (fn-suffix-of d)]
-                           (when fs (:names fs))))
-                       (catch arbace.lang.ExceptionInfo _ nil))
+            fi (try (skimming p true
+                      (let [ds (parse-decl-specs p :top) d (parse-declarator p :named) fs (fn-suffix-of d)
+                            qn (:name (last (name-chain d)))]
+                        {:names (when fs (:names fs))
+                         ;; (G5: a function's name and type, for the code generator)
+                         :fname (when (and fs qn) (fn-name p (peek (:parts qn)) false false))
+                         :ftype (when (and fs (ds-type ds)) (try (qt (build-type (ds-type ds) d)) (catch Exception _ nil)))}))
+                    (catch arbace.lang.ExceptionInfo _ nil))
+            names (:names fi)
             _ (seek! p b0)
             _ (skip-until! p #{";"})
             e (last-ix p)]
         (expect! p ";")
-        [(node p "ExplicitInstantiationDecl" hb e
-               (if (some some? names)
-                 {:inner [{:kind "FunctionProtoTypeLoc" :inner (mapv (fn [nm] (cond-> {:kind "ParmVarDecl"} nm (assoc :name nm))) names)}]}
-                 {}))])
+        [(cond-> (node p "ExplicitInstantiationDecl" hb e
+                       (if (some some? names)
+                         {:inner [{:kind "FunctionProtoTypeLoc" :inner (mapv (fn [nm] (cond-> {:kind "ParmVarDecl"} nm (assoc :name nm))) names)}]}
+                         {}))
+           ;; (G5: the code generator's: extern, and the declaration's tokens' text after `template`)
+           *full-headers* (assoc :_extern (boolean ext) :_text (tok-text p b0 e))
+           (and *full-headers* (:fname fi) (:ftype fi)) (assoc :_fname (:fname fi) :_ftype (:ftype fi)))])
       (with-scope p :tparams nil
         (adv! p)
         (let [[ps names] (parse-template-params p)

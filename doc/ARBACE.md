@@ -76,7 +76,10 @@ code. Three kinds of things live here:
   `clang/lib/Sema/SemaTemplateDeduction.cpp`, https://github.com/llvm/llvm-project at `llvmorg-23.1.4` (commit
   `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`), and the template parts of `cpp/abi.ae`'s mangling, which
   reimplement parts of `clang/lib/AST/ItaniumMangle.cpp` at the same commit, by hand on 2026-11-05 (LICENSE.md
-  names the functions; the files carry clang's notice).
+  names the functions; the files carry clang's notice), and `cpp/inline.ae` (`arbace.cpp.inline`, CODEGEN.md G5),
+  which ports LLVM's AlwaysInliner (`llvm/lib/Transforms/IPO/AlwaysInliner.cpp`, the parts of
+  `llvm/lib/Transforms/Utils/InlineFunction.cpp` and `llvm/lib/Analysis/InlineCost.cpp` it uses) at the same commit,
+  by hand on 2026-11-06.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

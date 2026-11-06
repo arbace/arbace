@@ -262,6 +262,17 @@
 
 (declare nothrow-fn?)
 
+(defn- extern-inst?
+  "Whether the function is a member of a class (or of a class nested in one) an explicit instantiation declaration
+  names (extern template class basic_ostream<char>): the library defines it."
+  [f]
+  (if (:extern-inst f) true
+  (loop [cid (:cls f)]
+    (when cid
+      (let [c (abi/cls cid)]
+        (or (:extern-inst c)
+            (recur (loop [s (:outer c)] (cond (nil? s) nil (:cls s) (:cls s) :else (recur (:parent s)))))))))))
+
 (defn- want-fn!
   "The function's symbol (a constructor's or destructor's variant `v`), its definition queued (or its declaration
   written)."
@@ -271,7 +282,8 @@
     (when c1 (swap! *top* update :c1 (fnil conj #{}) c1))
     (when-not (contains? (:wanted @*top*) [fid v])
       (swap! *top* update :wanted conj [fid v])
-      (if (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
+      (if (and (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
+               (not (and (:tbody f) (not (:implicit f)) (not (:defaulted f)) (extern-inst? f) (not (:always-inline f)))))
         (swap! *top* update :queue conj [fid v])
         (let [[r ps va plan] (fn-sig f v)] (declare! nm r ps :va va :nounwind (nothrow-fn? f) :pattrs (:pattrs plan)))))
     (gsym nm)))
@@ -920,7 +932,7 @@
                (let [items (when (= :list (:i init)) (:items init))
                      fill (if (= :list (:i init)) (:fill init) init)]
                  (doseq [[i it] (map-indexed vector items)] (emit-init (offset! p (* i sz)) et it))
-                 (when-not (#{:none} (:i fill))
+                 (when-not (or (nil? fill) (#{:none} (:i fill)))
                    (let [lc (new-label "new.loop") lb (new-label "new.body") le (new-label "new.end")
                          ix (alloca! 'i64 8)]
                      (emit! (list 'store ['i64 (count items)] ['ptr ix] :align 8))
@@ -974,6 +986,30 @@
                  nil))
     :exn-ptr (:exn-adj @*f*)
     :alloca (val! (list 'alloca 'i8 :count ['i64 (emit-rv (:e e))] :align 16))
+    ;; va_arg as clang's X86_64ABIInfo::EmitVAArg writes it for one INTEGER or SSE eightbyte: from the register save
+    ;; area while gp_offset <= 40 (fp_offset <= 160), else from the overflow area
+    :va-arg (let [t (:ty e)
+                  sse (abi/floating? t)
+                  _ (when (or (abi/class? t) (= :ldouble (abi/bn t)) (> (long (abi/size-of t)) 8)) (fail :va "va_arg of " (pr-str t)))
+                  ap (emit-rv (:e e))
+                  op (if sse (offset! ap 4) ap)
+                  o (val! (list 'load 'i32 ['ptr op] :align 4))
+                  fits (val! (list 'icmp :ule 'i32 o (if sse 160 40)))
+                  lr (new-label "vaarg.in_reg") lm (new-label "vaarg.in_mem") le (new-label "vaarg.end")]
+              (condbr! fits lr lm)
+              (begin! lr)
+              (let [rsa (val! (list 'load 'ptr ['ptr (offset! ap 16)] :align 8))
+                    ar (val! (list 'getelementptr 'i8 ['ptr rsa] ['i32 o]))
+                    _ (emit! (list 'store ['i32 (val! (list 'add 'i32 o (if sse 16 8)))] ['ptr op] :align 4))
+                    fr (:label @*f*)]
+                (br! le) (close-block!) (start! lm)
+                (let [oa (offset! ap 8)
+                      ov (val! (list 'load 'ptr ['ptr oa] :align 8))
+                      _ (emit! (list 'store ['ptr (val! (list 'getelementptr 'i8 ['ptr ov] ['i32 8]))] ['ptr oa] :align 8))
+                      fm (:label @*f*)]
+                  (begin! le)
+                  (let [a (val! (list 'phi 'ptr [ar fr] [ov fm]))]
+                    (load! t a)))))
     :va (let [nm (case (:which e) :va-start "llvm.va_start.p0" :va-end "llvm.va_end.p0" :va-copy "llvm.va_copy.p0")
               as (mapv (fn [a] ['ptr (emit-rv a)]) (:args e))]
           (declare! nm 'void (mapv first as) :nounwind true)

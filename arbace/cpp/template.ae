@@ -1244,7 +1244,7 @@
              (when-not vid (fail :template "no static member " (:name n) " of " (:name t) " to define"))
              ;; a definition without an initializer keeps the one the class gave (static const int x = 3; ... X<T>::x;)
              (upd-var! vid #(cond-> % (first (kids n)) (assoc :init (first (kids n)) :init-style (:init n) :def-scope s)))
-             (upd-var! vid assoc :pending-def true :linkonce true :internal (boolean (:internal (:outer c))) :internal-l false)))))
+             (upd-var! vid assoc :pending-def true :linkonce true :internal (boolean (:internal (:outer c))) :internal-l false :of-cls icid)))))
 
 (declare attach-member-template!)
 
@@ -1495,9 +1495,13 @@
         c (abi/cls (:id cls))]
     (if (= "VarDecl" (:kind n))
       (let [vid (or (some #(when (= (:name (sema/var* %)) (:name n)) %) (:statics c)) (fail :template "no static member " (:name n)))]
-        (upd-var! vid #(-> % (assoc :init (first (kids n)) :init-style (:init n) :def-scope scope :defined true :linkonce false
-                                    :internal false :internal-l false)
-                           (dissoc :pending-def))))
+        (if (first (kids n))
+          (upd-var! vid #(-> % (assoc :init (first (kids n)) :init-style (:init n) :def-scope scope :defined true :linkonce false
+                                      :internal false :internal-l false)
+                             (dissoc :pending-def)))
+          ;; without an initializer a declaration, not a definition ([temp.expl.spec]/14): defined elsewhere (G5:
+          ;; <locale_facets_nonio.h>'s template<> const char* __timepunct_cache<char>::_S_timezones[14];)
+          (upd-var! vid #(-> % (assoc :extern true :defined false :linkonce false :internal false :internal-l false) (dissoc :pending-def)))))
       (let [k (case (:kind n) "CXXConstructorDecl" :ctor "CXXDestructorDecl" :dtor :method)
             q (get-in n [:type :qualType])
             ty (sema/resolve-type (:scope c) q)
@@ -1629,7 +1633,27 @@
     "FriendDecl" (friend! scope n)
     ;; an explicit instantiation (template struct A<int>; extern template ...): the definitions clang emits weak_odr are
     ;; emitted here only when used (the names check takes ours among clang's)
-    "ExplicitInstantiationDecl" :template
+    ;; (G5: an explicit instantiation declaration of a class template's specialization, extern template class X<A>:
+    ;; its members are the library's, clang emitting none of them at -O0 but the always-inline ones,
+    ;; CodeGenModule::shouldEmitFunction with TSK_ExplicitInstantiationDeclaration)
+    "ExplicitInstantiationDecl"
+    (do (when-let [[_ t] (and (:_extern n) (re-matches #"(?s)\s*(?:class|struct)\s+(.*?)\s*" (str (:_text n))))]
+          (when-let [ty (sema/resolve-type scope t)]
+            (when (abi/class? ty) (abi/update-cls! (:id ty) assoc :extern-inst true))))
+        ;; extern template R f(params): the function template's specialization of that type (deduced from it,
+        ;; [temp.explicit]/7) the library's
+        (when (and (:_extern n) (:_fname n) (:_ftype n))
+          ;; (a type not declared yet refuses it: the headers' retry declares it again after them)
+          (when-let [ft (abi/unq (sema/resolve-type scope (:_ftype n)))]
+            (when (abi/fn? ft)
+              (let [es (try (sema/lookup scope (:_fname n)) (catch arbace.lang.ExceptionInfo _ nil))
+                    tids (keep #(when (and (= :tmpl (:e %)) (= :fn (:tk %))) (:id %)) es)]
+                (when (System/getenv "CPP_EXTERN_TRACE") (binding [*out* *err*] (println "extern template" (:_fname n) (:_ftype n) (count tids) (count (fnaddr-specs {:tmpls tids} ft)))))
+                (doseq [fid (fnaddr-specs {:tmpls tids} ft)]
+                  (let [f (sema/fnd fid)]
+                    (when (and (= (mapv abi/unq (:ps (:ty f))) (mapv abi/unq (:ps ft))) (= (abi/unq (:ret (:ty f))) (abi/unq (:ret ft))))
+                      (upd-fn! fid assoc :extern-inst true))))))))
+        :template)
     ("TypeAliasTemplateDecl" "VarTemplateDecl")
     (let [tk (if (= "VarTemplateDecl" (:kind n)) :var :alias)
           pattern (first (filter #(#{"TypeAliasDecl" "VarDecl"} (:kind %)) (kids n)))
@@ -1743,6 +1767,15 @@
                  (conj seen c))))
       seen)))
 
+(defn- extern-class?
+  "Whether the class (or a class enclosing it) is named by an explicit instantiation declaration."
+  [cid]
+  (loop [cid cid]
+    (when cid
+      (let [c (abi/cls cid)]
+        (or (:extern-inst c)
+            (recur (loop [s (:outer c)] (cond (nil? s) nil (:cls s) (:cls s) :else (recur (:parent s))))))))))
+
 (defn pending
   "The :pending hook: the lazy definitions the analyzed bodies reference, made eager ([[:fn id] [:var id] ...])."
   []
@@ -1774,7 +1807,9 @@
               (upd-fn! id assoc :body body :node pat :def-scope (bind-scope (:scope t) (:params t) (:args ti) nil)
                        :param-names (mapv :name (filter #(= "ParmVarDecl" (:kind %)) (kids pat)))))))
         (swap! out conj [:fn id]))
-      (doseq [id (:vars @acc) :let [v (sema/var* id)] :when (:pending-def v)]
+      (doseq [id (:vars @acc) :let [v (sema/var* id)] :when (:pending-def v)
+              ;; (a static member of a class an explicit instantiation declaration names: the library's, G5)
+              :when (if (extern-class? (:of-cls v)) (do (upd-var! id #(-> % (assoc :extern true :defined false) (dissoc :pending-def))) false) true)]
         (upd-var! id #(-> % (assoc :defined true) (dissoc :pending-def)))
         ;; a constant integral variable's initializer folded, as clang emits it (a constant, no guard)
         (let [t (:ty v)]

@@ -1366,6 +1366,8 @@
   (let [pt (abi/non-ref p)
         at (:ty e)]
     (cond
+      ;; an overload set converts to a pointer to function only ([over.over]; G5: std::endl among operator<<'s candidates)
+      (and (= :fnset (:op e)) (not (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt)))))) nil
       (= :init-list (:op e))
       (cond (init-list-elem pt) (let [el (init-list-elem pt) rs (map #(ics % el) (:items e))]
                                   ;; [over.ics.list]/5: the worst conversion of an element
@@ -2176,7 +2178,8 @@
         ;; the reserved placement form new (p) T: clang's CodeGen uses its argument, calls nothing
         placement (when (:reserved fa) (convert-scalar (rv (first pargs)) (abi/ptr abi/void) false))
         init (cond
-               (or (nil? initn) nexpr) (init-for et nil ctx :default)
+               nexpr nil
+               (nil? initn) (init-for et nil ctx :default)
                ;; (its pack expansions spliced: new T(std::forward<Args>(args)...), G4)
                (= "ParenListExpr" (:kind initn)) (init-for et (vec (analyze-args ctx (kids initn))) ctx (if (empty? (kids initn)) :value :direct))
                (= "InitListExpr" (:kind initn)) (init-for et (analyze ctx initn) ctx :list)
@@ -2192,7 +2195,9 @@
      :init (if nexpr
              (cond (nil? initn) (init-for et nil ctx :default)
                    (#{"ImplicitValueInitExpr" "ParenListExpr"} (:kind initn)) {:i :list :items [] :fill (init-for et nil ctx :value)}
-                   :else (init-for (abi/arr nil et) (analyze ctx initn) ctx :list))
+                   ;; (the elements past the list's from {} when the count is not the list's, [expr.new]/24)
+                   :else (assoc (init-for (abi/arr nil et) (analyze ctx initn) ctx :list)
+                                :fill (try (init-for et {:op :init-list :items []} ctx :list) (catch arbace.lang.ExceptionInfo _ nil))))
              init)
      :cat :pr}))
 
@@ -2379,6 +2384,11 @@
     "IntegerLiteral" (let [t (int-type-of (get-in n [:type :qualType]))] {:op :int :v (let [v (bigint (:value n))] (if (> v Long/MAX_VALUE) (long (- v 18446744073709551616N)) (long v))) :ty t :cat :pr})
     "CharacterLiteral" {:op :int :v (long (:value n)) :ty (int-type-of (get-in n [:type :qualType] "char")) :cat :pr}
     ;; a type trait's value (G4: the headers' __is_constructible(T, Args...)), its text evaluated by the templates' hook
+    ;; __builtin_va_arg(ap, T) (clang's VAArgExpr; G5): the next argument of a va_list
+    "BuiltinExpr" (if-let [x (:_vaarg n)]
+                    (let [t (resolve-type (:scope ctx) (:_vatype n))]
+                      {:op :va-arg :e (rv (analyze ctx x)) :ty (abi/unq t) :cat :pr})
+                    (fail :expr "a builtin expression " (node-text n)))
     "TypeTraitExpr" (let [t (or (:_text n) (node-text n))
                           v (if-let [h (:trait-text @hooks)] (h (:scope ctx) t) (fail :expr "a type trait"))]
                       (when (map? v) (fail :expr "a dependent type trait " t))
