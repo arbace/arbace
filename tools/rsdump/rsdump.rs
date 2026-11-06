@@ -1043,6 +1043,7 @@ struct Compile {
     resolve: Option<String>,
     std_names: Option<String>,
     typeck: Option<String>,
+    std_iface: Option<String>,
 }
 
 fn write_mir<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, w: &mut dyn std::io::Write) -> std::io::Result<()> {
@@ -1101,6 +1102,9 @@ impl Callbacks for Compile {
         }
         if let Some(p) = &self.std_names {
             write_file(p, &front::std_names(tcx));
+        }
+        if let Some(p) = &self.std_iface {
+            write_file(p, &front::std_iface(tcx));
         }
         Compilation::Continue
     }
@@ -1311,7 +1315,7 @@ fn collect_ty<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, t: rustc_middle::ty::Ty
 }
 
 fn compile(args: &[String]) -> ! {
-    let mut c = Compile { hir: None, mir: None, mir_data: None, census: None, iface: None, mono: None, expanded: None, resolve: None, std_names: None, typeck: None };
+    let mut c = Compile { hir: None, mir: None, mir_data: None, census: None, iface: None, mono: None, expanded: None, resolve: None, std_names: None, typeck: None, std_iface: None };
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -1345,6 +1349,10 @@ fn compile(args: &[String]) -> ! {
             }
             "--std-names" => {
                 c.std_names = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--std-iface" => {
+                c.std_iface = args.get(i + 1).cloned();
                 i += 2
             }
             "--typeck" => {

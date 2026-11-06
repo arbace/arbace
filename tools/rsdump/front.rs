@@ -180,12 +180,40 @@ fn sty<'tcx>(tcx: TyCtxt<'tcx>, t: rustc_middle::ty::Ty<'tcx>) -> String {
         ty::Param(p) => format!("(param {} {})", p.index, q(p.name.as_str())),
         ty::Adt(d, a) => format!("(adt {} [{}])", q(&def_path(tcx, d.did())), args(a)),
         ty::Tuple(ts) => format!("(tuple [{}])", ts.iter().map(|x| sty(tcx, x)).collect::<Vec<_>>().join(" ")),
-        ty::Ref(r, e, m) => format!("(ref {} {} {})", q(&r.to_string()), m.is_mut(), sty(tcx, e)),
+        ty::Ref(r, e, m) => format!("(ref {} {} {})", q(&region_text(r)), m.is_mut(), sty(tcx, e)),
         ty::RawPtr(e, m) => format!("(ptr {} {})", m.is_mut(), sty(tcx, e)),
         ty::Slice(e) => format!("(slice {})", sty(tcx, e)),
         ty::Array(e, n) => format!("(array {} {})", sty(tcx, e), q(&n.to_string())),
         ty::Alias(_, ty::AliasTy { kind: ty::Projection { def_id }, args: aa, .. }) => format!("(projection {} [{}])", q(&def_path(tcx, def_id)), args(aa)),
+        // RF9's: opaque types, fn pointers, trait objects
+        ty::Alias(_, ty::AliasTy { kind: ty::Opaque { def_id }, args: aa, .. }) => format!("(opaque {} [{}])", q(&def_path(tcx, def_id)), args(aa)),
+        ty::FnPtr(sig_tys, hdr) => {
+            let s = sig_tys.with(hdr).skip_binder();
+            format!("(fnptr [{}] {})", s.inputs().iter().map(|x| sty(tcx, *x)).collect::<Vec<_>>().join(" "), sty(tcx, s.output()))
+        }
+        ty::Dynamic(preds, r) => {
+            let pr = preds.principal().map(|p| {
+                let p = p.skip_binder();
+                format!("(trait {} [{}])", q(&def_path(tcx, p.def_id)), args(p.args))
+            }).unwrap_or_else(|| "nil".into());
+            let projs: Vec<String> = preds.projection_bounds().map(|p| {
+                let p = p.skip_binder();
+                format!("(proj {} [{}] {})", q(&def_path(tcx, p.def_id)), args(p.args), p.term.as_type().map(|t| sty(tcx, t)).unwrap_or_else(|| "(text \"const\")".into()))
+            }).collect();
+            let autos: Vec<String> = preds.auto_traits().map(|d| q(&def_path(tcx, d))).collect();
+            format!("(dyn {} [{}] [{}] {})", pr, projs.join(" "), autos.join(" "), q(&r.to_string()))
+        }
         _ => format!("(text {})", q(&t.to_string())),
+    }
+}
+
+/// A region's text, a bound (late-bound) one marked `'^` (then its name when it has one)
+fn region_text(r: rustc_middle::ty::Region<'_>) -> String {
+    if let rustc_middle::ty::ReBound(..) = r.kind() {
+        let t = r.to_string();
+        if t == "'_" || t.is_empty() { "'^".into() } else { format!("'^{t}") }
+    } else {
+        r.to_string()
     }
 }
 
@@ -193,7 +221,7 @@ fn sarg<'tcx>(tcx: TyCtxt<'tcx>, a: rustc_middle::ty::GenericArg<'tcx>) -> Strin
     use rustc_middle::ty::GenericArgKind;
     match a.kind() {
         GenericArgKind::Type(t) => sty(tcx, t),
-        GenericArgKind::Lifetime(r) => format!("(lt {})", q(&r.to_string())),
+        GenericArgKind::Lifetime(r) => format!("(lt {})", q(&region_text(r))),
         GenericArgKind::Const(c) => format!("(const {})", q(&c.to_string())),
     }
 }
@@ -401,6 +429,208 @@ pub fn typeck<'tcx>(tcx: TyCtxt<'tcx>) -> String {
         let mut v = Tc { tcx, root: root.clone(), owner, res, out: String::new() };
         v.visit_body(body);
         out.push_str(&v.out);
+    }
+    out
+}
+
+/// RF9's std interface (RFS4, Tier U's data), `--std-iface FILE`: what type checking asks of std, core and alloc, as
+/// structural types (`sty`): each reachable ADT's variants and fields `(si/adt PATH {..})`, trait `(si/trait PATH {..})`
+/// with its items, impl (inherent ones of the ADTs and the primitives, the traits' impls in these crates)
+/// `(si/impl PATH {:trait TR :self TY :generics [..] :predicates [..] :items [..]})` and function or method
+/// `(si/fn PATH {:generics [..] :parent-count N :inputs [..] :output TY :predicates [..]})`; core::arch and the SIMD
+/// modules are left out
+pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
+    use rustc_middle::ty::{self, fast_reject::SimplifiedType};
+    let std_crate = |d: DefId| matches!(tcx.crate_name(d.krate).as_str(), "std" | "core" | "alloc");
+    let skip = |p: &str| p.contains("::arch") || p.contains("simd") || p.contains("core_arch");
+    let clause = |c: ty::Clause<'tcx>| -> String {
+        match c.kind().skip_binder() {
+            ty::ClauseKind::Trait(t) => format!("(trait {} [{}])", q(&def_path(tcx, t.def_id())), t.trait_ref.args.iter().map(|a| sarg(tcx, a)).collect::<Vec<_>>().join(" ")),
+            ty::ClauseKind::Projection(p) => format!(
+                "(proj {} [{}] {})",
+                q(&def_path(tcx, p.def_id())),
+                p.projection_term.args.iter().map(|a| sarg(tcx, a)).collect::<Vec<_>>().join(" "),
+                p.term.as_type().map(|t| sty(tcx, t)).unwrap_or_else(|| "(text \"const\")".into())
+            ),
+            ty::ClauseKind::TypeOutlives(o) => format!("(type-outlives {} {})", sty(tcx, o.0), q(&o.1.to_string())),
+            _ => format!("(other {})", q(&c.to_string())),
+        }
+    };
+    let generics = |d: DefId| -> String {
+        let g = tcx.generics_of(d);
+        let ps: Vec<String> = g
+            .own_params
+            .iter()
+            .map(|p| {
+                let pk = match p.kind {
+                    ty::GenericParamDefKind::Lifetime => "lifetime",
+                    ty::GenericParamDefKind::Type { .. } => "type",
+                    ty::GenericParamDefKind::Const { .. } => "const",
+                };
+                match p.default_value(tcx) {
+                    Some(dv) => format!("({} {} {})", pk, q(p.name.as_str()), sarg(tcx, dv.skip_binder())),
+                    None => format!("({} {})", pk, q(p.name.as_str())),
+                }
+            })
+            .collect();
+        format!(":generics [{}] :parent-count {} :has-self {}", ps.join(" "), g.parent_count, g.has_self)
+    };
+    let preds = |d: DefId| -> String {
+        let cs = tcx.explicit_clauses_of(d).clauses;
+        format!(":predicates [{}]", cs.iter().map(|(c, _)| clause(*c)).collect::<Vec<_>>().join(" "))
+    };
+    let mut out = String::new();
+    let mut fns: Vec<DefId> = Vec::new();
+    let mut impls: Vec<DefId> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut todo: Vec<DefId> = Vec::new();
+    for &cnum in tcx.crates(()) {
+        if matches!(tcx.crate_name(cnum).as_str(), "std" | "core" | "alloc") {
+            todo.push(cnum.as_def_id());
+        }
+    }
+    let mut items: Vec<(DefKind, DefId)> = Vec::new();
+    while let Some(m) = todo.pop() {
+        if !seen.insert(m) {
+            continue;
+        }
+        for c in tcx.module_children(m) {
+            if !c.vis.is_public() {
+                continue;
+            }
+            let Res::Def(k, d) = c.res else { continue };
+            if !std_crate(d) || skip(&def_path(tcx, d)) {
+                continue;
+            }
+            match k {
+                DefKind::Mod => todo.push(d),
+                DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::Trait | DefKind::Fn => items.push((k, d)),
+                _ => {}
+            }
+        }
+    }
+    items.sort_by_key(|(_, d)| def_path(tcx, *d));
+    items.dedup_by_key(|(_, d)| *d);
+    for (k, d) in &items {
+        let p = def_path(tcx, *d);
+        match k {
+            DefKind::Struct | DefKind::Enum | DefKind::Union => {
+                let a = tcx.adt_def(*d);
+                let vs: Vec<String> = a
+                    .variants()
+                    .iter()
+                    .map(|v| {
+                        let ctor = match v.ctor_kind() {
+                            Some(rustc_hir::def::CtorKind::Fn) => "\"Fn\"",
+                            Some(rustc_hir::def::CtorKind::Const) => "\"Const\"",
+                            None => "nil",
+                        };
+                        let fs: Vec<String> = v.fields.iter().map(|f| format!("[{} {}]", q(f.name.as_str()), sty(tcx, tcx.type_of(f.did).skip_binder()))).collect();
+                        format!("{{:name {} :path {} :ctor {} :fields [{}]}}", q(v.name.as_str()), q(&def_path(tcx, v.def_id)), ctor, fs.join(" "))
+                    })
+                    .collect();
+                let _ = writeln!(out, "(si/adt {} {{:kind {} {} :variants [{}]}})", q(&p), kind(*k), generics(*d), vs.join(" "));
+                impls.extend(tcx.inherent_impls(*d).iter().copied().filter(|i| std_crate(*i)));
+            }
+            DefKind::Trait => {
+                let its: Vec<String> = tcx
+                    .associated_items(*d)
+                    .in_definition_order()
+                    .filter(|i| i.opt_name().is_some())
+                    .map(|i| {
+                        if matches!(i.kind, ty::AssocKind::Fn { .. }) {
+                            fns.push(i.def_id);
+                        }
+                        format!("[{} {} {}]", q(i.name().as_str()), kind(tcx.def_kind(i.def_id)), q(&def_path(tcx, i.def_id)))
+                    })
+                    .collect();
+                let ti = tcx.trait_impls_of(*d);
+                impls.extend(ti.blanket_impls().iter().copied().filter(|i| std_crate(*i)));
+                for v in ti.non_blanket_impls().values() {
+                    impls.extend(v.iter().copied().filter(|i| std_crate(*i)));
+                }
+                let _ = writeln!(out, "(si/trait {} {{{} {} :items [{}]}})", q(&p), generics(*d), preds(*d), its.join(" "));
+            }
+            DefKind::Fn => fns.push(*d),
+            _ => {}
+        }
+    }
+    use rustc_ast::{FloatTy, IntTy, UintTy};
+    let mut prims = vec![SimplifiedType::Bool, SimplifiedType::Char, SimplifiedType::Str, SimplifiedType::Slice, SimplifiedType::Array, SimplifiedType::Never];
+    for i in [IntTy::Isize, IntTy::I8, IntTy::I16, IntTy::I32, IntTy::I64, IntTy::I128] {
+        prims.push(SimplifiedType::Int(i));
+    }
+    for u in [UintTy::Usize, UintTy::U8, UintTy::U16, UintTy::U32, UintTy::U64, UintTy::U128] {
+        prims.push(SimplifiedType::Uint(u));
+    }
+    for f in [FloatTy::F32, FloatTy::F64] {
+        prims.push(SimplifiedType::Float(f));
+    }
+    prims.push(SimplifiedType::Ptr(rustc_ast::Mutability::Not));
+    prims.push(SimplifiedType::Ptr(rustc_ast::Mutability::Mut));
+    for s in prims {
+        impls.extend(tcx.incoherent_impls(s).iter().copied().filter(|i| std_crate(*i)));
+    }
+    impls.sort_by_key(|d| def_path(tcx, *d));
+    impls.dedup();
+    for i in impls {
+        let p = def_path(tcx, i);
+        if skip(&p) {
+            continue;
+        }
+        let tr = tcx
+            .impl_opt_trait_ref(i)
+            .map(|t| {
+                let t = t.skip_binder();
+                format!("(trait {} [{}])", q(&def_path(tcx, t.def_id)), t.args.iter().map(|a| sarg(tcx, a)).collect::<Vec<_>>().join(" "))
+            })
+            .unwrap_or_else(|| "nil".into());
+        let its: Vec<String> = tcx
+            .associated_items(i)
+            .in_definition_order()
+            .filter(|it| it.opt_name().is_some())
+            .map(|it| {
+                let k = tcx.def_kind(it.def_id);
+                if matches!(it.kind, ty::AssocKind::Fn { .. }) {
+                    fns.push(it.def_id);
+                }
+                let val = if k == DefKind::AssocTy { sty(tcx, tcx.type_of(it.def_id).skip_binder()) } else { "nil".into() };
+                format!("[{} {} {} {}]", q(it.name().as_str()), kind(k), q(&def_path(tcx, it.def_id)), val)
+            })
+            .collect();
+        let _ = writeln!(
+            out,
+            "(si/impl {} {{:trait {} :negative {} :self {} {} {} :items [{}]}})",
+            q(&p),
+            tr,
+            tcx.impl_is_of_trait(i) && matches!(tcx.impl_polarity(i), ty::ImplPolarity::Negative),
+            sty(tcx, tcx.type_of(i).skip_binder()),
+            generics(i),
+            preds(i),
+            its.join(" ")
+        );
+    }
+    fns.sort_by_key(|d| def_path(tcx, *d));
+    fns.dedup();
+    for f in fns {
+        let p = def_path(tcx, f);
+        if skip(&p) {
+            continue;
+        }
+        let sig = tcx.fn_sig(f).skip_binder().skip_binder();
+        let ins: Vec<String> = sig.inputs().iter().map(|t| sty(tcx, *t)).collect();
+        let _ = writeln!(
+            out,
+            "(si/fn {} {{{} {} :inputs [{}] :output {} :variadic {} :safety {} :abi {}}})",
+            q(&p),
+            generics(f),
+            preds(f),
+            ins.join(" "),
+            sty(tcx, sig.output()),
+            sig.c_variadic(),
+            q(&format!("{:?}", sig.safety())),
+            q(&format!("{}", sig.abi()))
+        );
     }
     out
 }

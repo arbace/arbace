@@ -87,14 +87,40 @@
            :vpm {"std" (visible-parent-map (:mods acc) (:hidden acc) (:hidden-re acc) ["std"])
                  "core" (visible-parent-map (:mods acc) (:hidden acc) (:hidden-re acc) ["core"])})))
 
+(defn load-std-iface
+  "std's interface for type checking from the helper's --std-iface (RF9): {:adts {PATH m} :traits {PATH m} :impls {PATH m}
+  :fns {PATH m} :inherent {ADT-or-prim-key [impl ...]} :trait-impls {TRAIT [impl ...]}}"
+  [file]
+  (with-open [r (java.io.PushbackReader. (java.io.FileReader. ^String file))]
+    (loop [acc {:adts {} :traits {} :impls {} :fns {} :inherent {} :trait-impls {}}]
+      (let [x (read {:eof ::eof} r)]
+        (if (= x ::eof)
+          acc
+          (recur
+           (case (head x)
+             si/adt (assoc-in acc [:adts (second x)] (nth x 2))
+             si/trait (assoc-in acc [:traits (second x)] (nth x 2))
+             si/fn (assoc-in acc [:fns (second x)] (nth x 2))
+             si/impl (let [[_ p m] x
+                           self (:self m)
+                           k (case (head self) adt (nth self 1) prim (str "prim:" (second self)) slice "prim:slice" array "prim:array"
+                                   ref "prim:ref" ptr "prim:ptr" param "param" tuple "prim:tuple" (str "other:" (head self)))
+                           acc (assoc-in acc [:impls p] m)]
+                       ;; a negative impl (`impl !Iterator for [T]`) is no candidate
+                       (cond (:negative m) acc
+                             (:trait m) (update-in acc [:trait-impls (nth (:trait m) 1)] (fnil conj []) p)
+                             :else (update-in acc [:inherent k] (fnil conj []) p)))
+             acc)))))))
+
 (def ^:dynamic *std* {})
+(def ^:dynamic *si* {})   ; std's interface for type checking (load-std-iface), when loaded
 (def ^:dynamic *root-crate* "std")   ; the crate an injected extern crate item names (core in a no_std crate)
 
 (defn- path-segs [^String p] (str/split p #"::"))
-(defn- path-parent [^String p] (let [i (.lastIndexOf p "::")] (when (pos? i) (subs p 0 i))))
-(defn- path-name [^String p] (let [i (.lastIndexOf p "::")] (if (neg? i) p (subs p (+ i 2)))))
+(defn path-parent [^String p] (let [i (.lastIndexOf p "::")] (when (pos? i) (subs p 0 i))))
+(defn path-name [^String p] (let [i (.lastIndexOf p "::")] (if (neg? i) p (subs p (+ i 2)))))
 (defn- ext-kind [p] (get (:kinds *std*) p))
-(defn- lang [nm] (get (:lang *std*) nm))
+(defn lang [nm] (get (:lang *std*) nm))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Types (rustc_middle::ty as data)
@@ -127,7 +153,7 @@
 
 (defn subst* [x args] (cond (map? x) (into {} (for [[k v] x] [k (subst* v args)])) (vector? x) (subst x args) :else x))
 
-(defn- sty->ty
+(defn sty->ty
   "The helper's structural types (std's defaults, aliases and supertraits) as types"
   [s]
   (case (head s)
@@ -141,7 +167,19 @@
     slice [:slice (sty->ty (second s))]
     array [:array (sty->ty (nth s 1)) [:cexpr (nth s 2)]]
     projection [:proj (nth s 1) (mapv sty->ty (nth s 2))]
-    lt (let [n (second s)] (case n "'static" [:re-static] "'_" [:re-erased] [:re-bound n]))
+    lt (let [n (second s)]
+         (cond (= n "'static") [:re-static]
+               (= n "'_") [:re-erased]
+               (= n "'^") [:re-bound nil :late]
+               (str/starts-with? n "'^") [:re-bound (subs n 2) :late]
+               :else [:re-bound n]))
+    fnptr [:fnptr {:inputs (mapv sty->ty (nth s 1)) :output (sty->ty (nth s 2))}]
+    dyn (let [[_ pr projs autos r] s]
+          [:dyn {:principal (when (seq? pr) [(nth pr 1) (mapv sty->ty (nth pr 2))])
+                 :projections (vec (for [p projs] [(nth p 1) (mapv sty->ty (nth p 2)) (sty->ty (nth p 3))]))
+                 :autos (vec autos)}
+           (sty->ty (list 'lt r))])
+    opaque [:ext-opaque (nth s 1) (mapv sty->ty (nth s 2))]
     const [:cexpr (second s)]
     [:err (str s)]))
 
@@ -473,15 +511,28 @@
   "Another crate's definition's generics (std's data): {:parent-count 0 :params [{:name :kind :index :default}]}; a
   trait's associated item's parent generics are the trait's"
   [p]
+  (cond
+    ;; a std variant's or constructor's: its ADT's parameters as the parent's (generics_of: a variant's parent is its enum)
+    (re-find #"\{constructor#\d+\}$" p) {:parent-count (:parent-count (ext-generics (path-parent p)) 0) :params [] :has-parent true
+                                           :ctor-of (path-parent p)}
+    (and (get (:adts *si*) (path-parent p)) (some #(= p (:path %)) (:variants (get (:adts *si*) (path-parent p)))))
+    {:parent-count (count (:generics (get (:adts *si*) (path-parent p)))) :params [] :has-parent true}
+    :else
+  (if-let [m (or (get (:fns *si*) p) (get (:impls *si*) p))]
+    ;; std's interface (RF9): a function's or an impl's generics
+    {:parent-count (or (:parent-count m) 0) :has-self (:has-self m) :has-parent (pos? (long (or (:parent-count m) 0)))
+     :params (vec (map-indexed (fn [i [k nm dflt]] (cond-> {:name nm :kind (keyword (name k)) :index (+ (long (or (:parent-count m) 0)) i) :ext-default dflt}
+                                                     (and (zero? i) (:has-self m) (= "Self" nm)) (assoc :self true)))
+                               (:generics m)))}
   (if (and (#{"AssocTy" "AssocFn" "AssocConst { is_type_const: false }"} (ext-kind p)) (= "Trait" (ext-kind (path-parent p))))
     {:parent-count (count (get (:generics *std*) (path-parent p))) :params [] :has-parent true}
   (let [ps (get (:generics *std*) p)]
     {:parent-count 0 :has-self (= "Trait" (ext-kind p))
      :params (vec (map-indexed (fn [i [k nm dflt]] (cond-> {:name nm :kind (keyword (name k)) :index i :ext-default dflt}
                                                        (and (zero? i) (= "Self" nm) (= "Trait" (ext-kind p))) (assoc :self true)))
-                               ps))})))
+                               ps))})))))
 
-(defn- generics-any [def] (if (number? def) (generics-of def) (ext-generics def)))
+(defn generics-any [def] (if (number? def) (generics-of def) (ext-generics def)))
 
 (defn identity-args [g]
   (vec (for [p (all-params g)]
@@ -941,7 +992,7 @@
 
 (def ^:dynamic *in-value* false)
 
-(declare print-ty print-def-path print-arg name-binder fn-sig ctor-sig)
+(declare print-ty print-def-path print-arg name-binder fn-sig ctor-sig fndef-sig)
 
 (defn print-region [r]
   (case (first r)
@@ -1034,6 +1085,33 @@
         (str pre (when (seq pre) "::")
              (generic-delimiters (fn [] (str "impl " (when tr (str (print-def-path (first tr) (second tr)) " for ")) (print-ty self-ty)))))))))
 
+(defn- ext-default-path
+  "default_print_def_path for another crate's definition with no visible path: its parent's path, then its name (a
+  constructor's skipped)"
+  [p]
+  (if-let [parent (path-parent p)]
+    (let [pre (print-def-path parent [])]
+      (if (re-find #"\{constructor#\d+\}$" p) pre (str pre "::" (path-name p))))
+    p))
+
+(declare sty->ty)
+
+(defn- print-ext-impl-path
+  "default_print_impl_path for std's impls: `<Self as Trait>` or the self type when colocated with either, else
+  `module::<impl Trait for Self>`"
+  [p args]
+  (let [m (get (:impls *si*) p)
+        self-ty (subst (sty->ty (:self m)) (vec args))
+        tr (when-let [t (:trait m)] [(nth t 1) (subst (mapv sty->ty (nth t 2)) (vec args))])
+        parent (path-parent p)
+        in-self (when-let [c (characteristic-def self-ty)] (= (if (number? c) nil (path-parent c)) parent))
+        in-trait (when tr (= (path-parent (first tr)) parent))]
+    (if (or in-self in-trait)
+      (print-path-with-qualified self-ty tr)
+      (let [pre (print-def-path parent [])]
+        (str pre (when (seq pre) "::")
+             (generic-delimiters (fn [] (str "impl " (when tr (str (print-def-path (first tr) (second tr)) " for ")) (print-ty self-ty)))))))))
+
 (defn- data-sym [d]
   (let [[k n] (:data d)]
     (case k
@@ -1054,8 +1132,10 @@
   [def args]
   (let [args (vec args)]
     (cond
-      ;; another crate's definition: its visible path when printed without arguments
-      (and (string? def) (empty? args)) (or (visible-path def) def)
+      ;; another crate's definition: its visible path when printed without arguments, else its def path's data (an impl
+      ;; by its header, from std's interface)
+      (and (string? def) (empty? args)) (or (visible-path def) (if (re-find #"\{impl#\d+\}$" def) (print-ext-impl-path def []) (ext-default-path def)))
+      (and (string? def) (re-find #"\{impl#\d+\}$" def)) (print-ext-impl-path def args)
       (and (number? def) (= :crate (first (:data (def-of def))))) ""
       (and (number? def) (= :impl (first (:data (def-of def))))) (print-impl-path def)
       :else
@@ -1075,7 +1155,8 @@
           (and (seq args) (assoc-of-trait? def) (= (count parent-args) pc))
           (str (print-path-with-qualified (first parent-args) [parent parent-args]) "::" (if (number? def) (data-sym (def-of def)) (path-name def)))
           ctor? (print-def-path parent parent-args)
-          (string? def) (let [pre (print-def-path parent [])] (str pre "::" (path-name def)))
+          (string? def) (let [pre (print-def-path parent parent-args)]
+                          (if (re-find #"\{constructor#\d+\}$" def) pre (str pre "::" (path-name def))))
           :else (let [pre (print-def-path parent parent-args) s (data-sym (def-of def))]
                   (str pre (when (seq pre) "::") s)))))))
 
@@ -1166,8 +1247,15 @@
     :opaque (print-opaque (second t))
     ;; RF9's: a function item's type (its signature, then its value path), an inference variable
     :fndef (let [[_ d args] t
-                 sig (if (str/starts-with? (str (:kind (def-of d))) "Ctor") (ctor-sig d) (fn-sig d))]
-             (str (print-sig (subst* sig (vec args))) " {" (binding [*in-value* true] (print-def-path d args)) "}"))
+                 sig (fndef-sig d)
+                 ;; the signature's binder: its late-bound regions (named or anonymous) printed for<...>
+                 late (fn late [x] (cond (and (vector? x) (= :re-bound (first x)) (= 2 (count x))) [:re-bound (second x) :late]
+                                         (and (vector? x) (= :fnptr (first x))) x
+                                         (vector? x) (if (keyword? (first x)) (into [(first x)] (map late (rest x))) (mapv late x))
+                                         (map? x) (into {} (for [[k v] x] [k (late v)]))
+                                         :else x))
+                 [pre sig] (name-binder (late (subst* sig (vec args))))]
+             (str pre (print-sig sig) " {" (binding [*in-value* true] (print-def-path d args)) "}"))
     :infer (case (second t) :int "{integer}" :float "{float}" "_")
     :unknown "{unknown}"
     :err (str "{" (second t) "}")
@@ -1281,6 +1369,28 @@
            :output (if (:output f) (lower-ty (:output f)) unit)
            :safety (:safety (:header f))
            :abi (:abi (:header f))})))))
+
+(defn ext-ctor-sig
+  "A std constructor's signature: its variant's fields to its ADT at the ADT's identity arguments"
+  [p]
+  (let [vpath (path-parent p)
+        [adt v] (or (when-let [a (get (:adts *si*) vpath)] [vpath (first (:variants a))])
+                    (let [ep (path-parent vpath) a (get (:adts *si*) ep)]
+                      [ep (some #(when (= vpath (:path %)) %) (:variants a))]))
+        a (get (:adts *si*) adt)]
+    {:inputs (mapv #(sty->ty (second %)) (:fields v))
+     :output [:adt adt (vec (map-indexed (fn [i [k nm]] (case (keyword (name k)) :lifetime [:re-early i nm] :const [:cparam i nm] [:param i nm])) (:generics a)))]}))
+
+(defn fndef-sig
+  "A function item's signature (a local definition's, or std's from its interface)"
+  [d]
+  (cond (number? d) (if (str/starts-with? (str (:kind (def-of d))) "Ctor") (ctor-sig d) (fn-sig d))
+        (re-find #"\{constructor#\d+\}$" d) (ext-ctor-sig d)
+        :else (let [m (get (:fns *si*) d)]
+                (if m
+                  {:inputs (mapv sty->ty (:inputs m)) :output (sty->ty (:output m))
+                   :safety (when (= "Unsafe" (:safety m)) :unsafe) :abi (when-not (= "Rust" (:abi m)) (str/replace (str (:abi m)) "\"" ""))}
+                  {:inputs [] :output [:err (str "no sig " d)]}))))
 
 (defn ctor-sig [id]
   (let [d (def-of id)
@@ -1420,7 +1530,7 @@
               (setup-constraining-clauses clauses tr (clause-params (if tr [:tuple (second tr)] self-ty) false)))
             clauses))))))
 
-(defn- explicit-clauses
+(defn explicit-clauses
   "explicit_clauses_of: a trait's clauses on its own associated types are its items' bounds instead"
   [id]
   (let [d (def-of id) cs (raw-explicit-clauses id)]
@@ -1516,8 +1626,9 @@
 
 (defn with-crate
   "Collection's context for a crate (its definitions collected), F called within it (RF9's type checking runs there)"
-  [hir res std {:keys [source edition]} f]
+  [hir res std {:keys [source edition si]} f]
   (binding [*std* std
+            *si* (or si {})
             *root-crate* (if (some #(= "NoStd" (:parsed %)) (:attrs hir)) "core" "std")
             *defs* (atom [{:id 0 :data [:crate] :kind "Mod" :module true}])
             *disamb* (atom {})

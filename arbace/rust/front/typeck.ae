@@ -27,13 +27,22 @@
 
 (def ^:dynamic *vars* nil)   ; atom: id -> {:kind :ty|:int|:float :val TY}
 
-(defn- fresh [k] (let [id (count @*vars*)] (swap! *vars* assoc id {:kind k}) [:infer k id]))
+(def ^:dynamic *next-var* nil)   ; atom: the next variable's id (never reused: a rolled-back variable may still be named)
+
+(defn- fresh [k] (let [id (swap! *next-var* inc)] (swap! *vars* assoc id {:kind k}) [:infer k id]))
 (defn- tvar? [t] (and (vector? t) (= :infer (first t))))
 
-(defn- shallow [t]
-  (if (tvar? t)
-    (if-let [v (:val (get @*vars* (nth t 2)))] (shallow v) t)
-    t))
+(declare normalize)
+
+(defn- shallow
+  "A type with its variables resolved at the top; a projection whose self type is known normalized (the obligation
+  rustc registers, solved when it can be)"
+  [t]
+  (cond (tvar? t) (if-let [v (:val (get @*vars* (nth t 2)))] (shallow v) t)
+        (and (vector? t) (= :proj (first t)))
+        (let [self (let [x (first (nth t 2))] (if (tvar? x) (if-let [v (:val (get @*vars* (nth x 2)))] v x) x))]
+          (if (tvar? self) t (let [n (normalize t)] (if (= n t) t (shallow n)))))
+        :else t))
 
 (defn- deep [t]
   (let [t (shallow t)]
@@ -51,10 +60,14 @@
 
 (defn- unify-all [as bs] (and (= (count as) (count bs)) (every? true? (map unify as bs))))
 
+(declare normalize)
+
 (defn unify
-  "Equate two types (regions ignored): true when they unify, binding variables"
+  "Equate two types (regions ignored): true when they unify, binding variables; a projection normalized first"
   [a b]
-  (let [a (shallow a) b (shallow b)]
+  (let [a (shallow a) b (shallow b)
+        a (if (= :proj (first a)) (normalize a) a)
+        b (if (= :proj (first b)) (normalize b) b)]
     (cond
       (= a b) true
       (or (= [:unknown] a) (= [:unknown] b)) true
@@ -64,6 +77,8 @@
       (and (tvar? a) (tvar? b)) (if (= (second a) (second b)) (bind! a b) false)
       (and (tvar? a) (= :int (second a))) (if (int-tys (first b)) (bind! a b) false)
       (and (tvar? b) (= :int (second b))) (if (int-tys (first a)) (bind! b a) false)
+      (and (tvar? a) (= :const (second a))) (bind! a b)
+      (and (tvar? b) (= :const (second b))) (bind! b a)
       (and (tvar? a) (= :float (second a))) (if (= :float (first b)) (bind! a b) false)
       (and (tvar? b) (= :float (second b))) (if (= :float (first a)) (bind! b a) false)
       (not= (first a) (first b)) false
@@ -73,11 +88,13 @@
         :ref (and (= (nth a 2) (nth b 2)) (unify (nth a 3) (nth b 3)))
         :ptr (and (= (nth a 1) (nth b 1)) (unify (nth a 2) (nth b 2)))
         (:slice) (unify (second a) (second b))
-        :array (and (unify (second a) (second b)) (or (= (nth a 2) (nth b 2)) true))
+        :array (and (unify (second a) (second b)) (do (unify (nth a 2) (nth b 2)) true))
         :tuple (unify-all (second a) (second b))
         :fndef (and (= (second a) (second b)) (unify-all (nth a 2) (nth b 2)))
         :proj (and (= (second a) (second b)) (unify-all (nth a 2) (nth b 2)))
         (= a b)))))
+
+(declare holds? impls-for normalize)
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The facts
@@ -112,9 +129,17 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Types of definitions, instantiated with fresh variables
 
+(defn- params-of
+  "A definition's generic parameters, its parents' first (std's: an impl's before its items')"
+  [def]
+  (if (number? def)
+    (c/all-params (c/generics-of def))
+    (let [g (c/generics-any def)]
+      (concat (when (pos? (long (:parent-count g))) (when-let [p (c/path-parent def)] (params-of p))) (:params g)))))
+
 (defn- fresh-args [def]
-  (vec (for [p (c/all-params (c/generics-of def))]
-         (case (:kind p) :lifetime [:re-erased] :const [:cexpr "_"] (fresh :ty)))))
+  (vec (for [p (params-of def)]
+         (case (:kind p) :lifetime [:re-erased] :const (fresh :const) (fresh :ty)))))
 
 (defn- erase [t]
   (cond (c/region? t) [:re-erased]
@@ -124,18 +149,242 @@
 
 (defn- fn-item-ty [def] [:fndef def (fresh-args def)])
 
+(declare deep-normalize)
+
 (defn- sig-of
   "A function item's or a constructor's signature, instantiated with its arguments"
   [[_ d args]]
-  (let [k (str (:kind (c/def-of d)))
-        sig (if (str/starts-with? k "Ctor") (c/ctor-sig d) (c/fn-sig d))]
-    (erase (c/subst* (select-keys sig [:inputs :output]) (vec args)))))
+  (let [sig (erase (c/subst* (select-keys (c/fndef-sig d) [:inputs :output]) (vec args)))]
+    {:inputs (mapv deep-normalize (:inputs sig)) :output (deep-normalize (:output sig))}))
 
 (defn- adt-fields
-  "A struct's or a variant's fields: [[name type] ...] with the ADT's arguments substituted"
+  "A struct's or a variant's fields: [[name type] ...] with the ADT's arguments substituted (std's from its interface: VID
+  the struct's or the variant's path)"
   [vid args]
+  (if (string? vid)
+    (let [a (get (:adts c/*si*) vid)
+          v (if a (first (:variants a)) (some #(when (= vid (:path %)) %) (:variants (get (:adts c/*si*) (c/path-parent vid)))))]
+      (vec (for [[n t] (:fields v)] [n (erase (c/subst (c/sty->ty t) (vec args)))])))
   (let [fs (filter #(and (= vid (:parent %)) (= "Field" (:kind %))) (c/defs))]
-    (vec (for [f fs] [(second (:data f)) (erase (c/subst (c/type-of (:id f)) (vec args)))]))))
+    (vec (for [f fs] [(second (:data f)) (erase (c/subst (c/type-of (:id f)) (vec args)))])))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Impls and method probing (method/probe.rs: the autoderef steps, by value then autoref, inherent before trait
+;; candidates; method/confirm.rs: the receiver's adjustments, the method's arguments)
+
+(defn- snapshot [] @*vars*)
+(defn- rollback! [s] (reset! *vars* s))
+
+(defn- try-unify
+  "unify in a snapshot: the bindings kept only on success"
+  [a b]
+  (let [s (snapshot)] (or (unify a b) (do (rollback! s) false))))
+
+(defn- self-key [t]
+  (let [t (shallow t)]
+    (case (first t)
+      :adt (when (string? (second t)) (second t))
+      (:int :uint :float) (str "prim:" (second t))
+      :bool "prim:bool" :char "prim:char" :str "prim:str" :slice "prim:slice" :array "prim:array" :ptr "prim:ptr"
+      nil)))
+
+(defn- std-impl-instance
+  "A std impl instantiated: [impl-path args self-ty trait-ref]"
+  [ip]
+  (let [m (get (:impls c/*si*) ip)
+        args (fresh-args ip)]
+    [ip args (erase (c/subst (c/sty->ty (:self m)) args))
+     (when-let [t (:trait m)] [(nth t 1) (erase (c/subst (mapv c/sty->ty (nth t 2)) args))])]))
+
+(defn- local-impls
+  "The crate's impls: [id self-ty trait-ref] instantiated with fresh arguments"
+  [trait?]
+  (for [d (c/defs) :when (str/starts-with? (str (:kind d)) "Impl")
+        :let [[self-ty tr] (c/impl-header (:id d))]
+        :when (if trait? tr (nil? tr))]
+    (let [args (fresh-args (:id d))]
+      [(:id d) args (erase (c/subst self-ty args)) (when tr [(first tr) (erase (c/subst (second tr) args))])])))
+
+(defn- impl-item
+  "An impl's item named NM: [def kind] (std's or the crate's)"
+  [impl nm]
+  (if (number? impl)
+    (some (fn [d] (when (and (= impl (:parent d)) (= nm (second (:data d)))) [(:id d) (:kind d)])) (c/defs))
+    (some (fn [[n k p]] (when (= n nm) [p k])) (:items (get (:impls c/*si*) impl)))))
+
+(defn- trait-item [tr nm]
+  (if (number? tr)
+    (some (fn [d] (when (and (= tr (:parent d)) (= nm (second (:data d)))) [(:id d) (:kind d)])) (c/defs))
+    (some (fn [[n k p]] (when (= n nm) [p k])) (:items (get (:traits c/*si*) tr)))))
+
+(defn- impl-clauses
+  "An impl's own clauses instantiated: [[TRAIT ARGS] ...] (the trait clauses alone)"
+  [ip args]
+  (if (number? ip)
+    (vec (keep (fn [c] (when (= :trait (first c)) (let [[d as] (second c)] [d (erase (c/subst as args))]))) (c/explicit-clauses ip)))
+    (vec (keep (fn [c] (when (= 'trait (head c)) [(nth c 1) (erase (c/subst (mapv c/sty->ty (nth c 2)) args))])) (:predicates (get (:impls c/*si*) ip))))))
+
+(defn impl-predicates-hold? [ip args] (every? holds? (impl-clauses ip args)))
+
+(defn- impls-for
+  "The impls (inherent, or of TRAIT) whose self type unifies with T (and the trait's other arguments with TARGS when
+  given) and whose clauses hold: [impl args trait-ref], the first kept bound (an accepted program's impl is the one rustc
+  selected)"
+  [t trait & [targs]]
+  (let [cands (if trait
+                (concat (for [x (local-impls true) :when (= trait (first (nth x 3)))] x)
+                        (for [ip (get (:trait-impls c/*si*) trait)] (std-impl-instance ip)))
+                (concat (local-impls false)
+                        (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))]
+    (some (fn [[ip args self tr]]
+            (let [s (snapshot)]
+              (if (and (unify self t)
+                       (or (nil? targs) (unify-all (vec (rest (second tr))) (vec (take (dec (count (second tr))) targs))))
+                       (impl-predicates-hold? ip args))
+                [ip args tr]
+                (do (rollback! s) nil))))
+          cands)))
+
+(defn normalize
+  "A projection <T as Trait<..>>::Name normalized through the impl that selection finds (its associated type's value),
+  a rigid projection (a parameter's) left as it is"
+  [t]
+  (let [[_ ad args] t
+        self (shallow (first args))]
+    (if (or (tvar? self) (= :param (first self)) (nil? self))
+      t
+      (let [tr (c/def-parent ad)
+            nm (if (number? ad) (second (:data (c/def-of ad))) (c/path-name ad))
+            s (snapshot)]
+        (if-let [[ip iargs _] (impls-for self tr (vec (rest args)))]
+          (let [v (if (number? ip)
+                    (some (fn [d] (when (and (= ip (:parent d)) (= [:type nm] (:data d))) (erase (c/subst (c/type-of (:id d)) iargs)))) (c/defs))
+                    (some (fn [[n k _ v]] (when (= n nm) (erase (c/subst (c/sty->ty v) iargs)))) (:items (get (:impls c/*si*) ip))))]
+            (if v (deep v) (do (rollback! s) t)))
+          (do (rollback! s) t))))))
+
+(defn- deep-normalize [t]
+  (let [t (deep t)]
+    (cond (= :proj (first t)) (let [n (normalize t)] (if (= n t) t (deep-normalize n)))
+          (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (deep-normalize %) (map? %) (into {} (for [[k v] %] [k (deep-normalize v)])) :else %) (rest t)))
+          (vector? t) (mapv deep-normalize t)
+          :else t)))
+
+(declare impl-predicates-hold? impls-for)
+
+(def ^:dynamic *depth* 0)
+
+(defn- unsized? [t] (#{:slice :str :dyn} (first (shallow t))))
+
+(defn holds?
+  "Selection of a trait clause [TRAIT ARGS] (the solver's slice, RF8): Sized by the self type, a variable or a parameter
+  assumed (an accepted program's obligation), else an impl whose header unifies and whose own clauses hold"
+  [[tr args]]
+  (let [self (shallow (first args))]
+    (cond
+      (= tr (c/lang "sized")) (not (unsized? self))
+      (#{(c/lang "meta_sized") (c/lang "pointee_sized")} tr) true
+      (or (tvar? self) (= :param (first self)) (= [:unknown] self)) true
+      ;; a cycle or a chain too deep: not proven (the old solver's overflow is an error, never a success)
+      (> (long *depth*) 4) false
+      :else (let [s (snapshot)
+                  r (binding [*depth* (inc (long *depth*))] (impls-for self tr (vec (rest args))))]
+              (rollback! s)
+              (boolean r)))))
+
+(defn- deref-target
+  "One overloaded autoderef step: `<T as Deref>::Target` from the impl of Deref for T"
+  [t]
+  (let [s (snapshot)]
+    (if-let [[ip args _] (impls-for t "core::ops::deref::Deref")]
+      (let [tgt (if (number? ip)
+                  (some (fn [d] (when (and (= ip (:parent d)) (= [:type "Target"] (:data d))) (erase (c/subst (c/type-of (:id d)) args)))) (c/defs))
+                  (some (fn [[n k _ v]] (when (= n "Target") (erase (c/subst (c/sty->ty v) args)))) (:items (get (:impls c/*si*) ip))))]
+        (let [tgt (some-> tgt deep)] (rollback! s) tgt))
+      (do (rollback! s) nil))))
+
+(defn- autoderef
+  "Autoderef's steps of T: references, then Deref impls (at most 8)"
+  [t]
+  (loop [t (shallow t) acc [t] n 0]
+    (let [nx (cond (= :ref (first t)) (shallow (nth t 3))
+                   (and (= :adt (first t)) (< n 8)) (some-> (deref-target t) shallow)
+                   :else nil)]
+      (if (and nx (< n 8)) (recur nx (conj acc nx) (inc n)) acc))))
+
+(defn- traits-in-scope
+  "The traits a method call may name: the prelude's, the crate's own and std's every trait with the name (an
+  approximation of the resolver's traits_in_scope)"
+  [nm]
+  (concat (for [d (c/defs) :when (= "Trait" (:kind d)) :when (trait-item (:id d) nm)] (:id d))
+          (for [[p m] (:traits c/*si*) :when (some #(= nm (first %)) (:items m))] p)))
+
+(defn- method-candidate
+  "At one step type T with receiver adjustment AUTOREF (nil, :not, :mut): the method named NM of an inherent impl, then of a
+  trait in scope, whose self parameter's type is the adjusted receiver: [def args sig]"
+  [t nm autoref]
+  (let [recv (case autoref nil t :not [:ref [:re-erased] false t] :mut [:ref [:re-erased] true t])
+        try-def (fn [def parent-args]
+                  (let [own (vec (drop (count parent-args) (fresh-args def)))
+                        args (into (vec parent-args) own)
+                        sig (sig-of [:fndef def args])]
+                    (when (and (seq (:inputs sig)) (try-unify (first (:inputs sig)) recv)) [def args sig])))]
+    (or
+     ;; inherent impls
+     (let [s (snapshot)]
+       (or (some (fn [[ip args self _]]
+                   (let [s2 (snapshot)]
+                     (if (try-unify self t)
+                       (if-let [[def k] (impl-item ip nm)]
+                         (or (when (#{"AssocFn"} k) (try-def def args)) (do (rollback! s2) nil))
+                         (do (rollback! s2) nil))
+                       nil)))
+                 (concat (local-impls false)
+                         (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
+           (do (rollback! s) nil)))
+     ;; traits in scope: the trait's method with Self the step type, when an impl of the trait for it unifies, or a bound
+     (some (fn [tr]
+             (let [s (snapshot)]
+               (if-let [[def k] (trait-item tr nm)]
+                 (let [targs (vec (cons t (drop 1 (fresh-args tr))))]
+                   (or (when (or (let [r (impls-for t tr)] (when (and r (System/getenv "TYPECK_TRACE")) (binding [*out* *err*] (println "trait cand" nm tr (deep t) (first r)))) r) (= :param (first (shallow t))))
+                         (try-def def targs))
+                       (do (rollback! s) nil)))
+                 nil)))
+           (traits-in-scope nm)))))
+
+(defn- probe-method
+  "probe_op: the receiver's autoderef steps, each by value, then &, then &mut: [def args sig adjustments]"
+  [recv-ty nm]
+  (let [steps (autoderef recv-ty)]
+    (some (fn [[i t]]
+            (some (fn [ar]
+                    (when-let [[def args sig] (method-candidate t nm ar)]
+                      [def args sig (vec (concat (for [s (rest (take (inc i) steps))] ["Deref" s])
+                                                 (case ar nil [] :not [["Borrow" [:ref [:re-erased] false t]]] :mut [["Borrow" [:ref [:re-erased] true t]]])))]))
+                  [nil :not :mut]))
+          (map-indexed vector steps))))
+
+(defn probe-assoc-fn
+  "A type-relative function path's definition (`Vec::new`, `String::from`): an inherent impl's, else a trait's for the type"
+  [t nm]
+  (or (some (fn [[ip args self _]]
+              (let [s (snapshot)]
+                (if (try-unify self t)
+                  (if-let [[def k] (impl-item ip nm)]
+                    (if (= "AssocFn" k) (let [own (drop (count args) (fresh-args def))] [:fndef def (into (vec args) own)]) (do (rollback! s) nil))
+                    (do (rollback! s) nil))
+                  nil)))
+            (concat (local-impls false)
+                    (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
+      (some (fn [tr]
+              (when-let [[def k] (trait-item tr nm)]
+                (when (= "AssocFn" (str k))
+                  (let [s (snapshot) targs (vec (cons t (drop 1 (fresh-args tr))))]
+                    (if (impls-for t tr)
+                      [:fndef def (into targs (drop (count targs) (fresh-args def)))]
+                      (do (rollback! s) nil))))))
+            (traits-in-scope nm))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Coercion (coercion.rs: identity, never to any, reborrows, unsizing behind references)
@@ -186,11 +435,53 @@
       "Byte" [:uint "u8"]
       [:unknown])))
 
+(defn- std-adt-of
+  "The ADT a std constructor's path belongs to (its variant's enum, or its struct)"
+  [p]
+  (let [v (c/path-parent p)]
+    (if (get (:adts c/*si*) v) v (c/path-parent v))))
+
+(declare probe-assoc-fn)
+
+(defn- type-relative-value
+  "A value path `Type::name` (its prefix a type): the associated function an inherent impl or a trait gives the type"
+  [e]
+  (let [path (:path e) segs (:segs path)]
+    (when (= 2 (count segs))
+      (let [sp (:span path)
+            base-name (:ident (first segs))
+            psp (when (vector? sp) [(nth sp 0) (nth sp 1) (nth sp 0) (+ (long (nth sp 1)) (count base-name))])
+            base-res (or (get c/*res* psp) (:res path))
+            bty (try (erase (c/lower-ty {:kind :path :path {:segs [(first segs)] :res base-res :span psp}})) (catch Throwable _ nil))]
+        (when (and bty (not (#{:err :unknown} (first bty))))
+          (probe-assoc-fn bty (:ident (peek segs))))))))
+
+(defn- std-value-ty
+  "A std value path's type: a function item, a constructor (a tuple variant's as a function item, a unit one as its ADT)"
+  [p]
+  (cond (get (:fns c/*si*) p) [:fndef p (fresh-args p)]
+        (let [a (get (:adts c/*si*) (c/path-parent p))] (some #(when (= p (:path %)) %) (:variants a)))
+        (let [adt (c/path-parent p) a (get (:adts c/*si*) adt) v (some #(when (= p (:path %)) %) (:variants a))]
+          (if (= "Fn" (:ctor v)) [:fndef (str p "::{constructor#0}") (fresh-args adt)] [:adt adt (fresh-args adt)]))
+        :else [:unknown]))
+
+(defn- lang-value-ty [names]
+  (let [p (c/lang (first names))]
+    (cond (nil? p) [:unknown]
+          (= 1 (count names)) (std-value-ty p)
+          :else [:unknown])))
+
 (defn- path-ty
   "A value path's type: a local, a function item (fresh arguments), a constant or static, a unit or tuple
   constructor"
   [e]
   (let [path (:path e) segs (:segs path) r (first (:res path))]
+    (cond
+      ;; a desugaring's lang item path (into_iter, next, Some, None, branch, ...)
+      (:lang path) (lang-value-ty (mapv :ident segs))
+      ;; a desugaring's own binding (`iter`, `residual`, `val`): no resolution, a local by its name
+      (and (nil? r) (= 1 (count segs)) (lookup-local (:ident (first segs)))) (lookup-local (:ident (first segs)))
+      :else
     (if (= 'local (head r))
       (or (lookup-local (:ident (peek segs))) [:unknown])
       (let [rd (c/res-def path)]
@@ -204,7 +495,15 @@
                          (= "Variant" k) (let [d (c/def-of id)] [:adt (:adt d (:parent d)) (fresh-args (:parent d))])
                          (or (str/starts-with? (str k) "Const") (str/starts-with? (str k) "Static")) (erase (c/type-of id))
                          :else [:unknown]))
-          [:unknown])))))
+          ;; a const parameter's value: its declared type
+          :param (let [p (second rd)]
+                   (if (and p (= :const (:kind p)) (:hir p)) (erase (c/lower-ty (:ty (:hir p)))) [:unknown]))
+          :ext (let [[_ p k] rd]
+                 (cond (#{"Fn" "AssocFn"} k) [:fndef p (fresh-args p)]
+                       (#{"Ctor(Variant, Fn)" "Ctor(Struct, Fn)"} k) [:fndef p (fresh-args (std-adt-of p))]
+                       (#{"Ctor(Variant, Const)" "Ctor(Struct, Const)"} k) (let [a (std-adt-of p)] [:adt a (fresh-args a)])
+                       :else [:unknown]))
+          (or (type-relative-value e) [:unknown])))))))
 
 (defn- builtin-binop?
   "op.rs's is_builtin_binop over the operands' types (variables of the right kind count)"
@@ -246,7 +545,8 @@
     (case (first ft)
       :fndef (let [{:keys [inputs output]} (sig-of ft)]
                (doseq [[a ty] (map vector (:args e) (concat inputs (repeat nil)))]
-                 (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
+                 (let [at (check-expr a ty)] (when ty (let [ok (coerce! a at ty)] (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "arg" (second ft) ok (deep at) (deep ty))))))))
+               (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "call" (second ft) (deep output) (shallow output))))
                output)
       :fnptr (let [{:keys [inputs output]} (second ft)]
                (doseq [[a ty] (map vector (:args e) (concat inputs (repeat nil)))]
@@ -254,9 +554,17 @@
                (erase output))
       (do (doseq [a (:args e)] (check-expr a nil)) [:unknown]))))
 
+(defn- std-struct-ty
+  "A std struct's or variant's path in a struct expression or pattern: [adt-ty variant-key args]"
+  [p]
+  (cond (get (:adts c/*si*) p) (let [args (fresh-args p)] [[:adt p args] p args])
+        :else (let [adt (c/path-parent p) a (get (:adts c/*si*) adt)]
+                (when a (let [args (fresh-args adt)] [[:adt adt args] p args])))))
+
 (defn- struct-ty [e]
-  (let [rd (c/res-def (:path e))]
+  (let [rd (if (:lang (:path e)) (when-let [p (c/lang (:ident (first (:segs (:path e)))))] [:ext p "Struct"]) (c/res-def (:path e)))]
     (case (first rd)
+      :ext (std-struct-ty (let [p (second rd)] (if (re-find #"\{constructor#\d+\}$" p) (c/path-parent p) p)))
       :local (let [[_ id k] rd d (c/def-of id)]
                (cond (= "Struct" k) (let [args (fresh-args id)] [[:adt id args] id args])
                      (= "Variant" k) (let [args (fresh-args (:parent d))] [[:adt (:parent d) args] id args])
@@ -271,6 +579,13 @@
           :lit (lit-ty (:lit e) expected)
           :path (path-ty e)
           :call (check-call e expected)
+          :method (let [rt (check-expr (:receiver e) nil)]
+                    (if-let [[def args sig adj] (probe-method rt (:ident (:seg e)))]
+                      (do (adjust! (:receiver e) adj)
+                          (doseq [[a ty] (map vector (:args e) (concat (rest (:inputs sig)) (repeat nil)))]
+                            (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
+                          (:output sig))
+                      (do (doseq [a (:args e)] (check-expr a nil)) [:unknown])))
           :binary (let [op (:op e)
                         lt (check-expr (:lhs e) nil)
                         rt (check-expr (:rhs e) (when (#{"+" "-" "*" "/" "%" "&" "|" "^" "==" "!=" "<" "<=" ">" ">="} op) lt))]
@@ -417,7 +732,18 @@
       :ref (let [inner (if (= :ref (first ex)) (nth ex 3) (fresh :ty))] (check-pat (:pat p) inner env :none))
       :lit (let [t (check-expr (:expr p) ex)] (unify t ex))
       (:tuple-struct :struct :path)
-      (let [rd (c/res-def (:path p))]
+      (let [rd (if (:lang (:path p)) (when-let [lp (c/lang (:ident (first (:segs (:path p)))))] [:ext lp "Variant"]) (c/res-def (:path p)))]
+        (when (= :ext (first rd))
+          (let [vp (let [x (second rd)] (if (re-find #"\{constructor#\d+\}$" x) (c/path-parent x) x))]
+            (when-let [[t vk args] (std-struct-ty vp)]
+              (unify ex t)
+              (let [fs (adt-fields vk args)]
+                (case (:kind p)
+                  :tuple-struct (doseq [[sp [_ ft]] (map vector (:pats p) fs)] (check-pat sp ft env dbm))
+                  :struct (let [m (into {} fs)]
+                            (doseq [[i f] (map-indexed vector (:fields p))]
+                              (check-pat (:pat f) (or (get m (:ident f)) (second (nth fs i nil)) [:unknown]) env dbm)))
+                  nil)))))
         (when (= :local (first rd))
           (let [[_ id k] rd d (c/def-of id)
                 vid (cond (= "Variant" k) id (str/starts-with? (str k) "Ctor") (if (:variant d) (:variant d) (:adt d)) :else id)
@@ -442,7 +768,7 @@
       (case kind :int (bind! [:infer :int id] [:int "i32"]) :float (bind! [:infer :float id] [:float "f64"]) nil))))
 
 (defn- print-fact-ty [t]
-  (let [t (deep t)]
+  (let [t (deep-normalize t)]
     (binding [c/*in-value* false] (c/print-ty t))))
 
 (defn- check-body
@@ -451,7 +777,7 @@
   (let [n (:node d) k (:kind d)
         owner (binding [c/*in-value* true] (c/print-def-path (:id d) []))
         facts (atom [])]
-    (binding [*vars* (atom {}) *facts* facts *owner* owner *env* [{}] *loops* nil]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *owner* owner *env* [{}] *loops* nil]
       (c/in-def (:id d)
         (if (#{"Fn" "AssocFn"} k)
           (let [sig (erase (c/fn-sig (:id d)))
