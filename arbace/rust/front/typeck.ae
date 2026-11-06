@@ -166,8 +166,12 @@
   (vec (for [p (params-of def)]
          (case (:kind p) :lifetime [:re-erased] :const (fresh :const) (fresh :ty)))))
 
-(defn- erase [t]
+(defn- erase
+  "A type's anonymous regions erased; 'static and the named ones kept (coercion's no-op case compares them)"
+  [t]
   (cond (= [:re-static] t) t
+        (and (vector? t) (= :re-early (first t)) (not= "'_" (nth t 2))) t
+        (and (vector? t) (= :re-bound (first t)) (string? (second t)) (not= "'_" (second t))) [:re-bound (second t)]
         (c/region? t) [:re-erased]
         (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (erase %) (map? %) (into {} (for [[k v] %] [k (erase v)])) :else %) (rest t)))
         (vector? t) (mapv erase t)
@@ -477,7 +481,13 @@
 (defn- probe-method
   "probe_op: the receiver's autoderef steps, each by value, then &, then &mut: [def args sig adjustments]"
   [recv-ty nm]
-  (let [steps (autoderef recv-ty)]
+  (let [steps (autoderef recv-ty)
+        last-step (shallow (peek steps))
+        ;; an array's last step is its slice, reached by autoref and unsizing (method_autoderef_steps' reached_raw_pointer
+        ;; aside: `arr.iter()`)
+        unsized (when (= :array (first last-step)) [:slice (second last-step)])]
+    (when-not (= [:unknown] (shallow recv-ty))
+     (or
     (some (fn [[i t]]
             (some (fn [ar]
                     (when-let [[def args sig] (method-candidate t nm ar)]
@@ -491,7 +501,14 @@
                                                    :not [["Borrow" [:ref [:re-erased] false t]]]
                                                    :mut [["Borrow" [:ref [:re-erased] true t]]])))]))
                   [nil :not :mut]))
-          (map-indexed vector steps))))
+          (map-indexed vector steps))
+    (when unsized
+      (some (fn [ar]
+              (when-let [[def args sig] (method-candidate unsized nm ar)]
+                [def args sig (vec (concat (for [s (rest steps)] ["Deref" s])
+                                           [["Borrow" [:ref [:re-erased] (= ar :mut) last-step]]
+                                            ["Pointer" [:ref [:re-erased] (= ar :mut) unsized]]]))]))
+            [:not :mut]))))))
 
 (defn probe-assoc-fn
   "A type-relative value path's definition (`Vec::new`, `String::from`, `i32::MAX`): an inherent impl's function or
@@ -554,7 +571,8 @@
       ;; coerce_borrowed_pointer: a reference to a reference type is reborrowed (`&*x`: the target's region is a new
       ;; one, so the no-op case `ty == a` does not arise), &mut to & included
       ;; the same 'static on both sides: `&'a *x` would be the type itself (the no-op case)
-      (and (= :ref (first f)) (= :ref (first t)) (= [:re-static] (second f)) (= [:re-static] (second t)) (= (nth f 2) (nth t 2)))
+      (and (= :ref (first f)) (= :ref (first t)) (= (nth f 2) (nth t 2)) (not (nth f 2))
+           (= (second f) (second t)) (not= [:re-erased] (second f)))
       (unify from to)
       ;; &T (&mut T) to *const T (*mut T): Deref, Borrow(RawPtr)
       (and (= :ref (first f)) (= :ptr (first t)) (or (nth f 2) (not (second t))))
@@ -646,6 +664,16 @@
           (= 1 (count names)) (std-value-ty p)
           :else [:unknown])))
 
+(defn- apply-turbofish
+  "A value path's explicit generic arguments (`size_of::<T>`): its own parameters' variables unified with them"
+  [e t]
+  (let [ga (:args (peek (:segs (:path e))))
+        tys (seq (filter :ty (:args ga)))]
+    (when (and tys (= :fndef (first t)))
+      (let [own (vec (take-last (count tys) (remove #(or (c/region? %) (and (tvar? %) (= :const (second %)))) (nth t 2))))]
+        (doseq [[v a] (map vector own tys)] (unify v (body-ty (:ty a))))))
+    t))
+
 (defn- path-ty
   "A value path's type: a local, a function item (fresh arguments), a constant or static, a unit or tuple
   constructor"
@@ -724,7 +752,13 @@
   [e op lt rt]
   (let [tr (c/lang (get op-traits op))
         cmp? (#{"==" "!=" "<" "<=" ">" ">="} op)]
-    (if (and tr (not= [:unknown] (shallow lt)) (not= [:unknown] (shallow rt)) (not (tvar? (shallow lt))) (impls-for (shallow lt) tr [rt]))
+    (if (and tr (not= [:unknown] (shallow lt)) (not= [:unknown] (shallow rt)) (not (tvar? (shallow lt)))
+             (or (impls-for (shallow lt) tr [rt])
+                 ;; the rhs coerced to the impl's Rhs (`String + &String`: &str by deref coercion)
+                 (let [rv (fresh :ty) sn (snapshot)]
+                   (if (and (impls-for (shallow lt) tr [rv]) (not (tvar? (shallow rv))) (coerce! (:rhs e) rt rv))
+                     true
+                     (do (rollback! sn) false)))))
       (do (when cmp?
             (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] false lt]]])
             (adjust! (:rhs e) [["Borrow" [:ref [:re-erased] false rt]]]))
@@ -900,7 +934,7 @@
   (let [ty
         (case (:kind e)
           :lit (lit-ty (:lit e) expected)
-          :path (path-ty e)
+          :path (apply-turbofish e (path-ty e))
           :call (check-call e expected)
           :method (let [rt (check-expr (:receiver e) nil)
                         _ (when (tvar? (shallow rt)) (solve-obligations!))]
