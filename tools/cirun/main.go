@@ -7,7 +7,7 @@
 // cirun --env PROGRAM.nodes [ARG...] gives the program cirun's own environment (RES29 (a), doc/rust/EVAL.md §10);
 // without it the program starts with an empty one, as before. --signals: a run a signal ended (a fault, an abort) ends
 // cirun by that signal (crt.DieBy), as the kernel ends the C program, so a parent sees WIFSIGNALED (RE6); without it
-// cirun exits with 128 + the signal, as before.
+// cirun exits with 128 + the signal, as before. --quiet-faults (the children's, crt's spawn.go): no fault line.
 package main
 
 import (
@@ -32,12 +32,15 @@ func internal(out *bufio.Writer, format string, a ...any) {
 
 func main() {
 	args := os.Args[1:]
-	env, sigs := false, false
-	for len(args) > 0 && (args[0] == "--env" || args[0] == "--signals") {
-		if args[0] == "--env" {
+	env, sigs, quiet := false, false, false
+	for len(args) > 0 && (args[0] == "--env" || args[0] == "--signals" || args[0] == "--quiet-faults") {
+		switch args[0] {
+		case "--env":
 			env = true
-		} else {
+		case "--signals":
 			sigs = true
+		default:
+			quiet = true
 		}
 		args = args[1:]
 	}
@@ -76,7 +79,9 @@ func main() {
 			sys.Self = append(sys.Self, "--env")
 		}
 		if sigs {
-			sys.Self = append(sys.Self, "--signals")
+			// a child (the program run again) dies by its signal as the original's child does, and prints no fault line
+			// of ci's: its parent reads its standard error as the original's parent reads its child's
+			sys.Self = append(sys.Self, "--signals", "--quiet-faults")
 		}
 		sys.Self = append(sys.Self, nodes)
 	}
@@ -91,7 +96,7 @@ func main() {
 	argv := append([]string{"a.out"}, args[1:]...)
 	status, fault := p.RunMain(l.Start, l.Entry, argv)
 	out.Flush()
-	if fault != nil {
+	if fault != nil && !quiet {
 		fmt.Fprintln(os.Stderr, "cirun: fault:", fault)
 	}
 	if sigs && p.Signal != 0 {
