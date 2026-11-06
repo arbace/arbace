@@ -701,7 +701,7 @@
 (defn- field-of
   "check_field: the base's autoderef steps until one has the field (a struct's named or positional field, a tuple's)"
   [e base-ty nm]
-  (loop [steps (autoderef-steps base-ty) i 0]
+  (loop [steps (autoderef base-ty) i 0]
     (if-let [t (first steps)]
       (let [found (case (first t)
                     :adt (let [d (if (number? (second t)) (c/def-of (second t)) {:kind (:kind (get (:adts c/*si*) (second t)))})]
@@ -710,7 +710,7 @@
                     :tuple (when (re-matches #"\d+" nm) (nth (second t) (Long/parseLong nm) nil))
                     nil)]
         (if found
-          (do (when (pos? i) (adjust! (:expr e) (vec (for [s (rest (take (inc i) (autoderef-steps base-ty)))] ["Deref" s])))) found)
+          (do (when (pos? i) (adjust! (:expr e) (vec (for [s (rest (take (inc i) (autoderef base-ty)))] ["Deref" s])))) found)
           (recur (rest steps) (inc i))))
       [:unknown])))
 
@@ -926,7 +926,13 @@
           :unary (let [t (check-expr (:expr e) (when (#{"-" "!"} (:op e)) expected))
                        s (shallow t)]
                    (case (:op e)
-                     "*" (if (#{:ref :ptr} (first s)) (if (= :ref (first s)) (nth s 3) (nth s 2)) [:unknown])
+                     ;; a builtin deref of a reference or pointer, else an overloaded one (Deref, DerefMut on an assigned
+                     ;; place), the operand autoref'd
+                     "*" (cond (#{:ref :ptr} (first s)) (if (= :ref (first s)) (nth s 3) (nth s 2))
+                               (= :adt (first s)) (if-let [tgt (deref-target s)]
+                                                    (do (adjust! (:expr e) [["Borrow" [:ref [:re-erased] (boolean *mutable-place*) s]]]) tgt)
+                                                    [:unknown])
+                               :else [:unknown])
                      ("-" "!") (if (or (int-tys (first s)) (= :float (first s)) (= :bool (first s)) (tvar? s)) t [:unknown])
                      [:unknown]))
           :addr-of (let [ex (some-> expected shallow)
@@ -1092,7 +1098,11 @@
                   nil)))))
         (when (= :local (first rd))
           (let [[_ id k] rd d (c/def-of id)
-                vid (cond (= "Variant" k) id (str/starts-with? (str k) "Ctor") (if (:variant d) (:variant d) (:adt d)) :else id)
+                ;; a constructor's resolution finds its variant (the same identifier) or struct
+                vid (cond (= "Variant" k) id
+                          (= "Variant" (:kind d)) id
+                          (str/starts-with? (str k) "Ctor") (if (:variant d) (:variant d) (or (:adt d) id))
+                          :else id)
                 adt (or (:adt (c/def-of vid)) vid)
                 args (if (and (= :adt (first ex)) (= adt (second ex))) (nth ex 2) (let [a (fresh-args adt)] (unify ex [:adt adt a]) a))
                 fs (adt-fields vid args)]
