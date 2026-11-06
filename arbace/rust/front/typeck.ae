@@ -366,7 +366,22 @@
               (holds? c)))
           (impl-clauses ip args)))
 
-(declare has-var? param-env alias-implements?)
+(declare has-var? param-env alias-implements? deep-normalize)
+
+(defn- mentions-param?
+  "A type with a type parameter (or an alias, an opaque type) in it: where clauses may apply to it"
+  [t]
+  (let [t (shallow t)]
+    (cond (and (vector? t) (#{:param :proj :opaque} (first t))) true
+          (tvar? t) false
+          (vector? t) (boolean (some #(cond (vector? %) (mentions-param? %) (map? %) (some mentions-param? (vals %)) :else false) t))
+          :else false)))
+
+(defn- erase-regions [t]
+  (cond (c/region? t) [:re-erased]
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (erase-regions %) (map? %) (into {} (for [[k v] %] [k (erase-regions v)])) :else %) (rest t)))
+        (vector? t) (mapv erase-regions t)
+        :else t))
 
 (def ^:dynamic *depth* 0)
 (def ^:dynamic *select-cache* nil)   ; atom: a body's goals with variables that were ambiguous or failed, by their resolved form
@@ -401,8 +416,9 @@
           ;; where-clause candidates (assemble_candidates_from_caller_bounds) win over impls: the parameter environment's
           ;; clauses of the trait whose self type is this one
           st (shallow t)
-          envs (when (and trait (#{:param :proj :opaque} (first st)))
-                 (vec (filter (fn [cl] (and (= :trait (first cl)) (= trait (first (second cl))) (= st (shallow (first (second (second cl)))))
+          dst (when (and trait (mentions-param? st)) (erase-regions (deep st)))
+          envs (when dst
+                 (vec (filter (fn [cl] (and (= :trait (first cl)) (= trait (first (second cl))) (= dst (erase-regions (deep (first (second (second cl))))))
                                             (let [s (snapshot) ok (or (nil? targs) (unify-all (vec (rest (second (second cl)))) (vec (take (dec (count (second (second cl)))) targs))))]
                                               (rollback! s) ok)))
                               (param-env))))
@@ -552,8 +568,12 @@
       t
       ;; a rigid self type (a parameter, an alias): the parameter environment's projection clauses, then the alias's item
       ;; bounds (project.rs: assemble_candidates_from_param_env, assemble_candidates_from_object_ty/trait_def)
-      (#{:param :proj :opaque} (first self))
-      (or (env-projection ad args) (alias-bound-projection ad args) t)
+      (and (#{:param :proj :opaque} (first self)) (or (env-projection ad args) (alias-bound-projection ad args)))
+      (or (env-projection ad args) (alias-bound-projection ad args))
+      ;; another self type with a parameter in it (`&'b Iter1`): a where clause's projection first, then the impls (a
+      ;; blanket impl's for a rigid type too: `impl<I: Iterator> IntoIterator for I`)
+      (and (mentions-param? self) (env-projection ad args))
+      (env-projection ad args)
       (and (= "core::ops::function::FnOnce::Output" ad) (#{:closure :fndef :fnptr} (first self)))
       (or (callable-output self) t)
       :else
@@ -1297,8 +1317,14 @@
       [:closure text {:inputs ptys :output ret}])))
 
 (defn- struct-ty [e]
-  (let [rd (if (:lang (:path e)) (when-let [p (c/lang (:ident (first (:segs (:path e)))))] [:ext p "Struct"]) (c/res-def (:path e)))]
+  (let [rd (if (:lang (:path e)) (when-let [p (c/lang (:ident (first (:segs (:path e)))))] [:ext p "Struct"]) (c/res-def (:path e)))
+        ;; `Self { .. }` in an impl: the impl's self type's struct, at its arguments
+        rd (if (= :self-alias (first rd))
+             (let [st (erase c/*self-ty*)]
+               (when (= :adt (first st)) [:self-adt st]))
+             rd)]
     (case (first rd)
+      :self-adt (let [[_ [_ id args]] rd] [[:adt id args] id args])
       :ext (std-struct-ty (let [p (second rd)] (if (re-find #"\{constructor#\d+\}$" p) (c/path-parent p) p)))
       :local (let [[_ id k] rd d (c/def-of id)]
                (cond (#{"Struct" "Union"} k) (let [args (fresh-args id)] [[:adt id args] id args])
