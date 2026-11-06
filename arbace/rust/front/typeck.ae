@@ -304,6 +304,8 @@
               (holds? c)))
           (impl-clauses ip args)))
 
+(declare has-var?)
+
 (defn- impls-for
   "The impls (inherent, or of TRAIT) whose self type unifies with T (and the trait's other arguments with TARGS when
   given) and whose clauses hold: [impl args trait-ref], the first kept bound (an accepted program's impl is the one rustc
@@ -315,20 +317,40 @@
                         (let [k (self-key t) by (get (:trait-impls-by c/*si*) trait)]
                           (for [ip (let [st (shallow t)]
                                      (cond (and (= :adt (first st)) (number? (second st))) (get by :blanket)   ; the crate's own type
+                                           ;; an integer (float) variable: the integral (floating) types' impls
+                                           (and (tvar? st) (#{:int :float} (second st)))
+                                           (concat (for [k (keys by) :when (string? k)
+                                                         :when (if (= :int (second st)) (re-matches #"prim:[iu](8|16|32|64|128|size)" k) (re-matches #"prim:f(16|32|64|128)" k))
+                                                         ip (get by k)] ip)
+                                                   (get by :blanket))
                                            k (concat (get by k) (get by :blanket))
                                            :else (get (:trait-impls c/*si*) trait)))]
                             (std-impl-instance ip))))
                 (concat (local-impls false)
                         (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))]
-    (some (fn [[ip args self tr]]
-            (let [s (snapshot)]
-              (if (and (or (nil? *budget*) (pos? (long (swap! *budget* dec))))
-                       (unify self t)
-                       (or (nil? targs) (unify-all (vec (rest (second tr))) (vec (take (dec (count (second tr))) targs))))
-                       (impl-predicates-hold? ip args))
+    ;; candidate assembly and winnowing (select.rs): a goal with inference variables in it that two impls match is
+    ;; ambiguous (no impl selected, nothing bound; the obligation stays pending), else the one impl that matches
+    (let [vars? (or (has-var? t) (some has-var? targs))
+          try! (fn [[ip args self tr]]
+                 (and (or (nil? *budget*) (pos? (long (swap! *budget* dec))))
+                      (unify self t)
+                      (or (nil? targs) (unify-all (vec (rest (second tr))) (vec (take (dec (count (second tr))) targs))))
+                      (impl-predicates-hold? ip args)))]
+      (loop [cs cands]
+        (when-let [[ip args _ tr :as c] (first cs)]
+          (let [s (snapshot)]
+            (if (try! c)
+              (if-not vars?
                 [ip args tr]
-                (do (rollback! s) nil))))
-          cands)))
+                (let [after (snapshot)
+                      other (some (fn [c2] (when (not= ip (first c2))
+                                             (rollback! s)
+                                             (let [ok (try! c2)] (rollback! s) (when ok c2))))
+                                  (rest cs))]
+                  (if other
+                    (do (rollback! s) (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "ambiguous" trait (deep t) (deep targs) ip (first other)))) :ambiguous)
+                    (do (reset! *vars* after) [ip args tr]))))
+              (do (rollback! s) (recur (rest cs))))))))))
 
 (defn- callable-output
   "A closure's, function item's or function pointer's return type (FnOnce::Output's builtin impl)"
@@ -339,6 +361,37 @@
     :fnptr (erase (:output (second self)))
     nil))
 
+(defn- param-env
+  "The parameter environment: the clauses of the definitions whose generics are in scope (a function's, its impl's or
+  trait's), regions erased"
+  []
+  (vec (for [g c/*scope* :let [d (:def g)] :when (number? d)
+             cl (try (c/explicit-clauses d) (catch Throwable _ []))]
+         (erase cl))))
+
+(defn- env-projection
+  "A projection clause of the parameter environment for <ARGS0 as Trait<..>>::AD: its term (the arguments unified)"
+  [ad args]
+  (some (fn [cl] (when (and (= :proj (first cl)) (= ad (second cl)) (= (count args) (count (nth cl 2))))
+                   (let [s (snapshot)]
+                     (if (unify-all (vec (nth cl 2)) (vec args)) (nth cl 3) (do (rollback! s) nil)))))
+        (param-env)))
+
+(defn- alias-bound-projection
+  "An alias self type's item bounds (the crate's associated types' explicit_item_bounds; an opaque type's bounds): a
+  projection clause on the alias for AD, its term"
+  [ad args]
+  (let [self (shallow (first args))]
+    (case (first self)
+      :proj (let [[_ sad sargs] self]
+              (when (number? sad)
+                (some (fn [cl] (when (and (= :proj (first cl)) (= ad (second cl)))
+                                 (let [cl (erase (c/subst cl (vec sargs))) s (snapshot)]
+                                   (if (unify-all (vec (nth cl 2)) (vec args)) (nth cl 3) (do (rollback! s) nil)))))
+                      (try (c/item-bounds sad) (catch Throwable _ [])))))
+      :opaque (some (fn [cl] (when (and (= :proj (first cl)) (= ad (second cl))) (nth cl 3))) (second self))
+      nil)))
+
 (defn normalize
   "A projection <T as Trait<..>>::Name normalized through the impl that selection finds (its associated type's value),
   a rigid projection (a parameter's) left as it is; FnOnce::Output of a callable by its signature"
@@ -346,15 +399,19 @@
   (let [[_ ad args] t
         self (shallow (first args))]
     (cond
-      (or (tvar? self) (= :param (first self)) (nil? self))
+      (or (tvar? self) (nil? self))
       t
+      ;; a rigid self type (a parameter, an alias): the parameter environment's projection clauses, then the alias's item
+      ;; bounds (project.rs: assemble_candidates_from_param_env, assemble_candidates_from_object_ty/trait_def)
+      (#{:param :proj :opaque} (first self))
+      (or (env-projection ad args) (alias-bound-projection ad args) t)
       (and (= "core::ops::function::FnOnce::Output" ad) (#{:closure :fndef :fnptr} (first self)))
       (or (callable-output self) t)
       :else
       (let [tr (c/def-parent ad)
             nm (if (number? ad) (second (:data (c/def-of ad))) (c/path-name ad))
             s (snapshot)]
-        (if-let [[ip iargs _] (impls-for self tr (vec (rest args)))]
+        (if-let [[ip iargs _] (let [r (impls-for self tr (vec (rest args)))] (when (vector? r) r))]
           (let [v (if (number? ip)
                     (some (fn [d] (when (and (= ip (:parent d)) (= [:type nm] (:data d))) (erase (c/subst (c/type-of (:id d)) iargs)))) (c/defs))
                     (some (fn [[n k _ v]] (when (= n nm) (erase (c/subst (c/sty->ty v) iargs)))) (:items (get (:impls c/*si*) ip))))]
@@ -439,7 +496,7 @@
   "One overloaded autoderef step: `<T as Deref>::Target` from the impl of Deref for T"
   [t]
   (let [s (snapshot)]
-    (if-let [[ip args _] (impls-for t "core::ops::deref::Deref")]
+    (if-let [[ip args _] (let [r (impls-for t "core::ops::deref::Deref")] (when (vector? r) r))]
       (let [tgt (if (number? ip)
                   (some (fn [d] (when (and (= ip (:parent d)) (= [:type "Target"] (:data d))) (erase (c/subst (c/type-of (:id d)) args)))) (c/defs))
                   (some (fn [[n k _ v]] (when (= n "Target") (erase (c/subst (c/sty->ty v) args)))) (:items (get (:impls c/*si*) ip))))]
@@ -1265,7 +1322,7 @@
                      (let [sig (case (first self) :closure (nth self 2) :fndef (sig-of self) :fnptr (erase (second self)))
                            tys (second (shallow (second args)))]
                        (when (= (count tys) (count (:inputs sig))) (let [sn (snapshot)] (when-not (unify-all (vec (:inputs sig)) (vec tys)) (rollback! sn))))))
-                   (when (and (not (tvar? self)) (not= :param (first self)) (not= [:unknown] self)
+                   (when (and (or (not (tvar? self)) (#{:int :float} (second self))) (not= :param (first self)) (not= [:unknown] self)
                               (not (#{(c/lang "sized") (c/lang "meta_sized")} tr))
                               (some has-var? args))
                      (let [sn (snapshot)] (when-not (impls-for self tr (vec (rest args))) (rollback! sn)))))
