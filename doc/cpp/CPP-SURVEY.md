@@ -2967,3 +2967,9 @@ run's): about 16 va_arg programs of gxx-dg-run and the long double layouts' chec
 - Over the day's 2 GiB: the whole runtime-ci read (6.4 GB, CPPI_JOBS=2) and two ci runs (3.8 and 2.9 GB, the ones with `<format>`).
 - Scratch in the worktree's `.tmp/`: `ld/` (the probes, the lowered C before and after, `incr.sh`, the incremental read made by hand
   before `runtime_ci` did it), `cppi/runtime/` (the lowered runtime and its ci library), `lower-samples/`, `lower-ls15/`, `run-*.{out,err}`.
+
+## Decided (2026-11-06, the user: CP230, CP231)
+
+- **CP230 (a):** C++'s threads come with C's shared deterministic scheduler (one goroutine per C thread, one running at a time,
+  drafted on `rust-re6` in `go/arbace/crt/sched.ae`, adopted by C under CS276); the `threads` class stays deferred until then.
+- **CP231 (a):** `__PRETTY_FUNCTION__`'s spelling stays the class `oracle-text`; clang's strings are not rewritten to g++'s.
