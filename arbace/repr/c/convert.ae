@@ -326,6 +326,9 @@
 (defn float-literal
   "A floating constant's form (§8.3)."
   [^String text]
+  ;; an integer imaginary constant (GNU's 2i: _Complex int), which cc's parser takes as a floating one: the integer's form
+  (if (re-matches #"(0[xXbB][0-9a-fA-F']+|[0-9']+)[uUlL]*[ijIJ][uUlL]*" text)
+    (int-literal text)
   (let [s (digits-clean text)
         hex (or (.startsWith s "0x") (.startsWith s "0X"))
         [_ body suffix] (if hex
@@ -351,7 +354,7 @@
                       (and (not hex) (zero? (.compareTo (java.math.BigDecimal. (Double/toString d)) (java.math.BigDecimal. ^String body)))) (shortest-double d)
                       :else exact)))
         form (if t (list 'lit t v) v)]
-    (if imag (list 'imaginary form) form)))
+    (if imag (list 'imaginary form) form))))
 
 ;; Character constants and string literals: their code units
 
@@ -1244,9 +1247,37 @@
   (let [lbrace (g owner :Token)
         bis (vec (remove #(func-injected? % lbrace) (map #(g % :BlockItem) (chain bil :BlockItemList))))
         own (when lbrace (.-pf ^PTok lbrace))
-        out (ArrayList.)]
+        out (ArrayList.)
+        ;; CS274 (a): consecutive statements one invocation made whole (no directive between them): the first printed as the
+        ;; invocation, the others not (C3b.1's one statement extended)
+        ^HashMap groups (cx :groups)
+        multi (HashMap.)
+        _ (when groups
+            (loop [i 0]
+              (when (< i (count bis))
+                (let [bi (bis i)
+                      r (rng bi)
+                      gr (when (and (= (cs bi) :BlockItemStmt) (has-main? bi) (not (has-other? bi))) (.get groups (aget r 0)))
+                      j (when (and gr (< (aget r 1) (long (:max gr))) (not (.contains ^HashSet (cx :claimed) (aget r 0))))
+                          (loop [j (inc i)]
+                            (when (< j (count bis))
+                              (let [b2 (bis j) r2 (rng b2)]
+                                (cond
+                                  (or (not= (cs b2) :BlockItemStmt) (not (has-main? b2)) (has-other? b2) (seq (dirs-at owner j))) nil
+                                  (= (aget r2 1) (long (:max gr))) j
+                                  (< (aget r2 1) (long (:max gr))) (recur (inc j))
+                                  :else nil)))))]
+                  (if j
+                    (do (.put multi i [(:text gr) j]) (.add ^HashSet (cx :claimed) (aget r 0)) (recur (inc j)))
+                    (recur (inc i)))))))
+        mark! (fn [from t]
+                (doseq [k (range from (.size out))]
+                  (let [[kind f] (.get out k)]
+                    (.set out k [kind (addm f (if (= k from) {:c/macro-stmt t} {:c/macro-part true}))]))))
+        pending (atom nil)]
     (doseq [[i bi] (map-indexed vector bis)]
       (doseq [df (dirs-at owner i)] (.add out [:stmt df]))
+      (when-let [[t j] (.get multi i)] (reset! pending [(.size out) t j]))
       ;; an item an #include inside the body brought in is the directive's; under *include-inside* (ci's read, CS275 (b)) the
       ;; body's own item, as the libc's tables are the declaration's
       (when (or *include-inside* (nil? own) (some #(identical? (.-pf ^PTok %) own) (take 64 (node-tokens bi))))
@@ -1258,7 +1289,9 @@
                              (.add out [:decl (at d f)])))
           :BlockItemStmt (doseq [s (stmt-items (g bi :Statement))] (.add out [(if (and (seq? s) (= (first s) 'c/attr-decl)) :stmt :stmt) s]))
           :BlockItemLabel (.add out [:decl (Lv (cons 'c/local-labels (map #(keyword (tsrc (g % :Token2))) (chain (g (g bi :LabelDeclaration) :IdentifierList) :IdentifierList))))])
-          :BlockItemFuncDef (.add out [:decl (function-definition (g bi :DeclarationSpecifiers) (g bi :Declarator) nil (g bi :CompoundStatement) nil bi)]))))
+          :BlockItemFuncDef (.add out [:decl (function-definition (g bi :DeclarationSpecifiers) (g bi :Declarator) nil (g bi :CompoundStatement) nil bi)])))
+      (when-let [[from t j] @pending]
+        (when (= i j) (mark! from t) (reset! pending nil))))
     (doseq [df (dirs-at owner (count bis))] (.add out [:stmt df]))
     (vec out)))
 
@@ -1806,9 +1839,17 @@
         (compute-ranges! ranges tree)
         (let [groups (when main-file (compute-groups! (tu-tokens tree)))
               eds (vec (remove #(contains? #{"<builtin>" "<predefined>"} (item-file %)) eds))
+              ;; CS275 (a): a declaration whose other files' tokens all come from files it includes inside it is the main file's
+              ;; when each such #include stands between the items of a statement list (the print writes it there, the
+              ;; included items left to it: block-items); judged once the directives are placed (split-later)
+              split-later (ArrayList.)
               _ (doseq [ed eds]
-                  (when (and (has-other? ed) (has-main? ed) (not (and *include-inside* (included-inside? (:layer r) main-name ed))))
-                    (refuse :split-declaration "a declaration that begins in one file and ends in another" ed)))
+                  (when (and (has-other? ed) (has-main? ed))
+                    (cond
+                      (not (included-inside? (:layer r) main-name ed))
+                      (refuse :split-declaration "a declaration that begins in one file and ends in another" ed)
+                      *include-inside* nil
+                      :else (.add split-later ed))))
               main-eds (vec (filter has-main? eds))
               ;; header units first (their typedefs are the main file's too): each main-file include's
               ;; items, by the include that brought their file in
@@ -1854,13 +1895,50 @@
               (.put unit-of-off (:off e) ns)
               (.put units ns {:header (:raw e) :path (:path e) :system (boolean (:system e)) :forms fs :form-sys fsys})))
           (binding [*cx* (assoc *cx* :groups groups)]
-            (let [placed (place-directives! main-eds (:layer r))]
+            (let [placed (place-directives! main-eds (:layer r))
+                  placed-offs (set (for [^HashMap m (vals placed) [_ ds] m [off _] ds] off))
+                  _ (doseq [ed split-later
+                            :let [lo (min-po ed) hi (max-end ed)]
+                            e (:layer r)
+                            :when (and (= "enter" (:directive e)) (= main-name (:from e)) (<= lo (long (:off e)) hi))]
+                      (when-not (contains? placed-offs (:off e))
+                        (refuse :split-declaration "a declaration that begins in one file and ends in another" ed)))]
               (binding [*cx* (assoc *cx* :placed placed)]
                 (let [out (ArrayList.)
-                      items (ArrayList.)]
+                      items (ArrayList.)
+                      ;; CS274 (a): consecutive items one invocation made whole (their tokens exactly the invocation's, no
+                      ;; directive between them): the first form printed as the invocation (:c/macro-stmt), the others not
+                      ;; printed (:c/macro-part); one item alone is external's (C3b.1)
+                      multi (HashMap.) ; index of the first item -> [text index of the last]
+                      _ (when groups
+                          (loop [i 0]
+                            (when (< i (count main-eds))
+                              (let [ed (nth main-eds i)
+                                    r (rng ed)
+                                    gr (when (and (has-main? ed) (not (has-other? ed))) (.get ^HashMap groups (aget r 0)))
+                                    j (when (and gr (< (aget r 1) (long (:max gr))))
+                                        (loop [j (inc i)]
+                                          (when (< j (count main-eds))
+                                            (let [e2 (nth main-eds j) r2 (rng e2)]
+                                              (cond
+                                                (or (not (has-main? e2)) (has-other? e2) (seq (placed-at :top j))) nil
+                                                (= (aget r2 1) (long (:max gr))) j
+                                                (< (aget r2 1) (long (:max gr))) (recur (inc j))
+                                                :else nil)))))]
+                                (if j
+                                  (do (.put multi i [(:text gr) j]) (.add ^HashSet (cx :claimed) (aget r 0)) (recur (inc j)))
+                                  (recur (inc i)))))))
+                      part-until (atom -1)]
                   (doseq [[i ed] (map-indexed vector main-eds)]
                     (doseq [[off df] (placed-at :top i)] (.add out df) (.add items [off df]))
-                    (let [fs (external ed)]
+                    (let [fs (external ed)
+                          fs (cond
+                               (.containsKey multi i)
+                               (let [[t j] (.get multi i)]
+                                 (reset! part-until j)
+                                 (vec (cons (addm (first fs) {:c/macro-stmt t}) (map #(addm % {:c/macro-part true}) (rest fs)))))
+                               (<= i (long @part-until)) (mapv #(addm % {:c/macro-part true}) fs)
+                               :else fs)]
                       (doseq [f fs] (.add out f))
                       (when (seq fs) (.add items [(min-po ed) (first fs)]))))
                   (doseq [[off df] (placed-at :top (count main-eds))] (.add out df) (.add items [off df]))

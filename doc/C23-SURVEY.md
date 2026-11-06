@@ -4837,3 +4837,28 @@ it; ci, which never inlines, forwards the calling frame's, which is the same for
 outside an always_inline variadic function's call arguments). Proved: va-arg-pack-1 passes (`bin/ci check --only`, 134 programs,
 exit 0, 26 recorded failures pass), `test/c/run/va-arg-pack.c` (ci-run `:count` 15) equal to gcc -O0 here; cf2g translates it
 (`ci.Pack`), not compiled. The class `missing-builtin` is a guard class. Eval and AOT deferred: 7 to 6 each.
+
+### CDF.7 CS274 (a) built, and CS275 (a)'s statement-level include (2026-11-06)
+
+- **A multi-item invocation printed as itself** (`arbace.repr.c.convert`, `arbace.repr.c.print`). Consecutive top-level items,
+  or consecutive statements of one list, whose tokens are exactly one invocation's (the converter's groups, §9.4) with no
+  directive between them: the first form takes the invocation's text (`:c/macro-stmt`, C3b.1's mark for one whole item), the
+  others `:c/macro-part`, which the print skips. The original's tokens of one expansion share one location; printing the
+  invocation keeps it so for gcc -O0, whose nops follow locations (CDF.3's probe). Metadata only: the checker, ci and the reread
+  see the same forms.
+- **Integer imaginary constants** (GNU's `2i`, `_Complex int`): cc's parser takes them as floating constants; the converter
+  now writes `(imaginary 2)`, the print `2i` (was `2.0i`, a `_Complex double`: 20041201-1's object), and the checker types an
+  imaginary constant by its part (`int`, `long`, a `lit`'s type, else `double`).
+- **The print's statement-level include** (CS275 (a), its first half): a declaration whose other files' tokens all come from
+  files it includes is no longer refused when each such `#include` was placed between the items of a statement list (the print
+  writes the `#include` there and the included items stay the directive's, block-items); the check runs once the directives
+  are placed. Left refused: an `#include` inside an initializer or an enumeration (quickjs's libregexp.c, unicode_gen.c), and
+  the self-including files at the print (their re-entered copy takes conditional groups the main pass leaves inactive, which
+  the `:lines` print drops: the second half of CS275 (a), the print writing a family's inactive groups as text).
+- **Proved** (`bin/repr-c roundtrip --only`, the four levels, gcc 15.2 as the objects' and runs' reference): the 26
+  `objects-macro-body` files: 24 pass (the 12 bitint-28..39, 20001226-1, pr34093, 20040709-1 and -2, 20041201-1, 20050121-1,
+  builtin-bitops-1, complex-6 and its mirror, copysign1 and 2, pr53645 and -2); left pr27528 (its asm operands' constants) and
+  zlib's inflate.c (moved from `split-declaration`: statement macros inside larger statements); `split-declaration` 18_include
+  and infback pass. A sample of 131 files (all of tcc-tests2, every 40th of torture-execute and these) passes but the known.
+  Print deferred: 78 to 51. `test/repr/c/roundtrip-known.edn` and `test/c/divergences-print.edn` updated; the results file
+  (`roundtrip-results.edn`) is the night's `--record`.

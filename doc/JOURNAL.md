@@ -436,3 +436,8 @@ Each branch's doc records it.
   `__builtin_va_arg_pack` as a call's argument node `(apack)` forwarding the calling frame's variadic arguments (`Frame.VArgs`,
   both back ends, cf2g's `ci.Pack`), `__builtin_va_arg_pack_len` as `(vplen)`; va-arg-pack-1 passes. Alternative: inlining
   always_inline functions in the builder (CS277 (b)), two days.
+- **CS274 (a) built, and CS275 (a)'s first half** (doc/C23-SURVEY.md, CDF.7): the print writes an invocation that made several
+  top-level items or statements as itself (`:c/macro-stmt` on the first form, `:c/macro-part` on the rest); integer imaginary
+  constants read as integers (`2i`); a declaration holding `#include`s between its statements is no longer refused at the print.
+  `bin/repr-c roundtrip --only`: 24 of the 26 `objects-macro-body` files and 18_include and infback pass; a 131-file sample passes
+  but its known; print deferred 78 to 51. Left: CS275 (a)'s self-including files at the print (a family's inactive groups as text).
