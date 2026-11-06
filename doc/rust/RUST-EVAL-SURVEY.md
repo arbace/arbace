@@ -1057,6 +1057,13 @@ env, ci-param-width, c-variadic, lto). Over the whole suite the causes size so (
   harness: fixed after a first deadlock by thread-local objects at each thread's own addresses, EVAL.md §10), process
   (`abi/segfault-no-out-of-stack.rs`: its child runs now, `ioctl` FIONBIO, `--signals`, `--quiet-faults`), env and lto failures
   pass. **Before RE6 87 of 93 (93.5%), after 90 of 92 run (97.8%; 90 of 93 at worst).**
+- **The `--test` harnesses and the LTO programs** (the first 68 of `.tmp/re6/focus.ids`, one program a process, 18:00-19:45 UTC):
+  69 run, **66 of 68 judged pass**: all 48 harness programs (libtest's thread per test) and 18 of 20 LTO ones, one over 1.5 GiB
+  (`threads-sendsync/mpsc_stress.rs`: the night); not passing: `lto/thin-lto-inlines.rs` (`-Z thinlto -C codegen-units=8 -O`: a
+  SIGSEGV at a function's address in main, to look at: what its pre-LTO unit calls that thin LTO would have imported) and
+  `test-attrs/test-should-panic-failed-show-span.rs` (stdout differs; compiletest normalizes its `TypeId(0x...)`, which
+  run-program does not: the TypeId hash of rsi's build is not the judge's, a candidate for RES39's normalization). Before
+  RE6 every harness program and every LTO one failed on ci.
 - **The gcc leg** (`bin/rsi lower-check`, std lowered, over the 345 UI programs of the check list, 85 minutes at 2 jobs): 305 pass,
   13 nondet, 25 in classes (backtrace 7, speed 8: fat LTO's merged module, lto 6, optimized-ir 2, c-variadic 1, inline-asm 1), 2
   unclassed (`abi/stack-probes.rs#x64`: a stack overflow on purpose; `backtrace/backtrace.rs`). All the threads set's programs pass
