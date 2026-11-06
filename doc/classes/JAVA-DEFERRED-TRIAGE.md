@@ -850,6 +850,30 @@ JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-
 Then, the day after: the results judged, the tail classified, the records with the whole corpus, `bin/reap --record`,
 JRT-SOURCES.md's closure list, JRT-NOTES.md's "Sockets" (the proxies, the http: connection), the commit of `jdk/`.
 
+## As built: JCS159 (write-ahead): javac's ToolProvider on javac's tool
+
+Branch `java-jc9c`, 2026-11-06, after the user's JCS159 (a). Two variants of javac's tool world
+(`overlay/jdk/javac/variants/`), built with F6's at the tool's night:
+- `JavacToolProvider.ae`: jdk26u's `com.sun.tools.javac.main.JavacToolProvider` with `run` keeping javac's own
+  launcher (`com.sun.tools.javac.main.Main`) when an argument is one of javac's information options (Option's INFO
+  group that prints and compiles nothing: `--help`/`-help`/`-?`, `--help-extra`/`-X`, `--help-lint`,
+  `--version`/`-version`, `--full-version`/`-fullversion`): javac's own text, which needs no file manager (tried on
+  today's tool: `-help`'s 4,212 characters, exit 0); any other command line is javac on Arbace's
+  (`Main.runOnPlatform`, as F6's `JavacMain.ae`), diagnostics to `err`. `name` and `description` are jdk26u's
+  (`description` read through JavacMessages on today's tool: "read Java class and interface definitions and compile
+  them into bytecode and class files").
+- `ServiceLoader.ae`: over jrt's ServiceLoader of the tool world (JN2, no provider), `java.util.spi.ToolProvider` has
+  javac's provider, as on a JDK image (`iterator`, `findFirst`; `stream` stays empty: nothing in the world or the
+  tests streams it); jdk26u's `java.util.spi.ToolProvider.findFirst`, unchanged, iterates the loader. Every other
+  service still finds none, so javac itself runs as before.
+
+**Checked by day**: both variants applied and parsed on `jdk/javac/forms` (JavacToolProvider 1/0/0, ServiceLoader
+2/0/1); Help.java (t05926) with its `ToolProvider.findFirst("javac")` replaced by jdk26u's `JavacToolProvider`
+(the variant's `-help` and `-X` path is that one) interpreted on today's tool: **passes** against the JDK's run
+(status 0, stdout empty, every option checked). Expected after the night: t05926 and t05786 (ToolProviderDescriptionTest)
+pass: F6's 56 at about **18**, eval's deferred -20. No command beyond F6's: the same tool build (`bin/javac-vendor
+tool`), then F6's `bin/java-check --levels interp,compiled --only ... --record` covers both tests.
+
 ## 6. Findings on the way
 
 - `:j2g-unresolved` (305 compiled, kind `:world`) is the compiled level's catch-all for "a type the world does
@@ -1135,3 +1159,9 @@ JCS140 (a): jdk26u's cacerts as data from the build tree; JCS141 (b): jar verifi
 ## Decided (2026-11-05, the user: JCS155-JCS157)
 
 JCS155: (b) SSLLogger as built for F3's night, then (a) System.Logger in jrt as its own fix; JCS156 (a): QUIC's TLS engine in, amending JCS131; JCS157 (a): java.net.IDN in.
+
+## Decided (2026-11-06, the user: JCS158-JCS160)
+
+JCS158 (a): the javac-API tests stay deferred at the compiled level (`:javac-api`); JCS159 (a): javac's ToolProvider on
+javac's tool, built on `java-jc9c` ("As built: JCS159 (write-ahead)"); JCS160 (a): as built, every client socket in a
+SocksSocketImpl, as jdk26u.
