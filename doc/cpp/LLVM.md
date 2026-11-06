@@ -139,7 +139,10 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
   next field) loaded and stored by its store size's bytes, `__builtin_memcpy`, as LLVM reads and writes it; a `load volatile` or `store volatile` of such a width is a plain `__builtin_memcpy`: the qualifier is dropped on that path, harmless for the gcc -O0 builds the check makes, a known divergence of review 018's R8), `ptr` is `(* void)`, `float`, `double`,
   `x86_fp80` as `long-double` (CS35: ci computes it as `double`, the class `long-double`; gcc as x87), aggregates as C
   structs whose members are `f0`, `f1` ... (arrays and vectors as a struct of one member `e`, packed structs
-  `__attribute__((packed))`, vectors aligned as LLVM aligns them), each followed by `(c/static-assert (== (sizeof-type
+  `__attribute__((packed))`, vectors aligned as LLVM aligns them; a member or element of type `x86_fp80` or `{ x86_fp80, x86_fp80 }`
+  in a slot union, `union cx$f80 { long double v; unsigned char b[16]; }` or `cx$c80` (`_Complex long double`, 32 bytes), aligned
+  16 and read as its `v`: the IR's layout under gcc, where it is the type's own, and in ci, whose `long double` is 8 bytes, CS35;
+  cppi-deferred), each followed by `(c/static-assert (== (sizeof-type
   (struct T)) N))` with N the data layout's size: C's layout and the IR's agree or gcc refuses the unit.
 - **Names.** A global keeps its name when C takes it, else `g$` and its escape (`.` as `$_`, other bytes `$XX`) with an
   `__asm__` label holding the linker's name; locals are `l$` and their escape, labels `:b$NAME`. `main` is `cx$main`,
@@ -162,10 +165,11 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
   `std::thread` runs on musl's pthreads: until then plain operations, CP1) as gcc's `__atomic_*` builtins with the IR's
   orderings (`unordered` and `monotonic` `__ATOMIC_RELAXED` 0, `acquire` 2, `release` 3, `acq_rel` 4, `seq_cst` 5, written as
   numbers): `load atomic`/`store atomic` `__atomic_load_n`/`__atomic_store_n` on an integer of 1 to 16 bytes or a pointer
-  (`volatile` kept in the pointer's type), the generic `__atomic_load`/`__atomic_store` through memory on a float (`volatile` kept there too, and on the generic exchange and the compare-exchange loop, F4);
-  `atomicrmw` `__atomic_exchange_n` (`xchg`; the generic `__atomic_exchange` on a float) and `__atomic_fetch_add`, `_sub`,
+  (`volatile` kept in the pointer's type), on a `float` or a `double` the `_n` builtins on the integer of its size, the value
+bitcast (cppi-deferred: the same lock-free operation gcc's generic builtins do on 4 and 8 bytes, and the form ci takes), the generic `__atomic_load`/`__atomic_store` through memory on an `x86_fp80` (`volatile` kept there too, and on the generic exchange and the compare-exchange loop, F4);
+  `atomicrmw` `__atomic_exchange_n` (`xchg`; on a float or double the integer's, the generic `__atomic_exchange` on an `x86_fp80`) and `__atomic_fetch_add`, `_sub`,
   `_and`, `_or`, `_xor`, `_nand`, the others (`max`, `min`, `umax`, `umin`, `fadd`, `fsub`) a loop of the generic
-  `__atomic_compare_exchange` on the old value (refreshed by a failed exchange), the rest refused (`:atomic`); `cmpxchg`
+  `__atomic_compare_exchange` on the old value (refreshed by a failed exchange; the first load an `_n` load where one takes the type), the rest refused (`:atomic`); `cmpxchg`
   `__atomic_compare_exchange_n` into the result's two fields (`weak` kept; the failure ordering as written, the success ordering the join of the two, because LLVM allows a failure ordering stronger than the success one and gcc's documentation does not, report 043's F3); the libatomic entry points clang calls for an atomic of another size (`__atomic_load`, `__atomic_store`, ..., `__sync_*`) keep their linker names as `g$` identifiers with an asm label, because gcc reads the plain names as its builtins (F1); `fence`
   `__atomic_thread_fence`, `syncscope("singlethread")` `__atomic_signal_fence` (an operation of that scope stays a
   thread-wide atomic: stronger, the same result); `unreachable` as `__builtin_trap()`.
@@ -293,20 +297,30 @@ lowering alone (`bin/cppi lower-check`, §9). `arbace.cpp.run` (`arbace/cpp/run.
   linked defines, the first library defining it gives its unit, a strong definition before a weak one. The linked units are
   checked by ci's checker (once a process, shared by the programs a process builds) and built with the program into one node
   program (arbace.c.build, `__libc_start_main`'s start). A program with `<iostream>` links about 140 units (2 MB of nodes).
-- **Atomics.** The lowering writes gcc's `__atomic_*` builtins (CP121 (c)); ci's back end has none. ci's read of the lowered C
+- **Atomics.** The lowering writes gcc's `__atomic_*` builtins (CP121 (c)), on a float or double the `_n` ones on its bits (§7); ci's back end has none. ci's read of the lowered C
   (the program's and the runtime's) defines them as macros of plain operations (`arbace.cpp.run/ci-atomics`: each operand
   evaluated once, the orders not at all), right for ci's one thread (ci runs no threads, doc/c/SPEC.md §6.5). The generic
-  `__atomic_load`, `__atomic_store` and `__atomic_exchange` (which the lowering writes for a float) are left: repr/c's
-  `<builtin>` source declares them as functions, and a program reaching one faults on the undefined function.
+  `__atomic_load`, `__atomic_store` and `__atomic_exchange` are left (repr/c's `<builtin>` source declares them without
+  parameters, so a macro of three would break that declaration): since cppi-deferred the lowering writes them only for an
+  `x86_fp80`, whose program ci refuses ("too many arguments", the class atomic-generic).
 - **eval**: the node program run by `tools/cirun` (`bin/cppi run`, `bin/cppi check`); **AOT**: the node program translated by
   cf2g (`arbace.c.cf2g/translate`, about 4 MB of Go a program, the runtime's part included) and built by TamaGo's go in shards
   (`bin/cppi check --aot`).
 - **va_arg.** A va_list passed on (to `vsnprintf`, `va_copy`, a lowered forwarder) works: the lowering passes the va_list itself
   (§7). A lowered function that reads its va_list does it as clang writes va_arg for x86-64 at `-O0`, inline, by the
-  `__va_list_tag`'s fields, which ci's own va_list does not have: it faults on ci. The build's flags name such functions (their IR
-  GEPs into `%struct.__va_list_tag`) and the judge classes a fault in one (`va-arg`, a gap, the user's decision of queue 191: ci's
-  x86-64 va_list with C++'s next round). libstdc++'s one such function, `__snprintf_lite`, has a C override for ci
-  (`test/cpp/runtime/ci/`, a library linked before the runtime).
+  `__va_list_tag`'s fields: `gp_offset` and `fp_offset` say whether the next argument is in the register save area, else it is
+  read at `overflow_arg_area`, which is advanced by its size rounded to 8. ci's own va_list is one pointer to the next 8-byte slot
+  of the variadic arguments (`go/arbace/ci/call.ae`'s VaArg), what `overflow_arg_area` is. Since cppi-deferred the lowering writes
+  the address of each field (a GEP into `%struct.__va_list_tag` by indices 0, K) as the macro `cx$va_fK(ap)`: the lowered C defines
+  them as the fields' addresses when they are not defined (gcc), and ci's read defines them (`arbace.cpp.lower/va-field-macros`) as
+  `gp_offset` 48 and `fp_offset` 176 (the registers used up: the runtime layer's `cx$va_full`), `overflow_arg_area` the va_list's
+  pointer itself and `reg_save_area` a pointer no path reads (`cx$va_rs`): clang's code takes the overflow path, which is ci's
+  va_arg. One va_list serves both readers, so a va_list read inline and passed on, a `va_list` parameter and `va_copy` all work.
+  Not covered: an argument of alignment 16 (`long double`, `__int128`), which clang aligns in the overflow area and ci does not
+  slot so. The build's flags still name such functions and the judge classes a fault in one (`va-arg`); queue 191's DECISION (a)
+  put ci's x86-64 va_list in C++'s next round: this is it, without a change to ci. libstdc++'s `__snprintf_lite` keeps its C
+  override for ci (`test/cpp/runtime/ci/`, a library linked before the runtime).
 - `long double` (`x86_fp80`) is 8 bytes in ci (CS35) while the lowering's structs carry the IR's 16-byte layout in their static
-  assertions: a program whose types hold one fails ci's check (the class `long-double`, only those static assertions and C's
-  two differ shapes of a long double computation).
+  assertions: until cppi-deferred a program whose types held one failed ci's check. Since then an `x86_fp80` member or element is
+  held in its slot union (§7), whose layout is the IR's in ci too: the static assertions hold, and what is left of the class
+  `long-double` is C's two differ shapes of a computation in long double (ci computes it as double).

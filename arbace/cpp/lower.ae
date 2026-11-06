@@ -143,6 +143,45 @@
   (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes s "UTF-8"))]
     (apply str (map #(format "%02x" (bit-and (long %) 0xff)) d))))
 
+(declare complex-ld?)
+
+(defn- slot-type?
+  "An LLVM type whose C type's layout in ci is not the IR's (CS35: ci's long double is 8 bytes, the IR's x86_fp80 16, and
+  _Complex long double 16 against 32): as a member or an element of an aggregate it is held in a slot union (cppi-deferred)."
+  [t]
+  (or (and (symbol? t) (= (name t) "x86_fp80")) (complex-ld? t)))
+
+(defn- slot-union
+  "The slot union of an x86_fp80 (cx$f80) or of a _Complex long double (cx$c80): the value as member v, padded to the IR's
+  size and aligned to its alignment by a byte array, so a struct holding one has the IR's layout under gcc (where the union is
+  the type's own layout) and in ci (CS35) alike; defined once a unit, with its static assertion."
+  [t]
+  (let [ld? (and (symbol? t) (= (name t) "x86_fp80"))
+        tag (if ld? 'cx$f80 'cx$c80) n (if ld? 16 32)]
+    (when-not (get-in @*structs* [:unions tag])
+      (swap! *structs* assoc-in [:unions tag] true)
+      (swap! *structs* update :defs conj
+             (with-meta (list 'c/union tag [(with-meta 'v {:tag (if ld? 'long-double '(complex long-double))})
+                                            (with-meta 'b {:tag (list 'array n 'unsigned-char)})])
+               {:c/attrs [(list '__attribute__ ['aligned 16])]})
+             (list 'c/static-assert (list '== (list 'sizeof-type (list 'union tag)) n))))
+    (list 'union tag)))
+
+(defn- mtype
+  "The C type of an aggregate's member or element of LLVM type t: its slot union for a slot type, else its C type."
+  [t]
+  (if (slot-type? t) (slot-union t) (ctype t)))
+
+(defn- slot-get
+  "A member's or element's place e of LLVM type t as its value's place (the slot union's v)."
+  [e t]
+  (if (slot-type? t) (list '.-v e) e))
+
+(defn- slot-init
+  "An initializer of a member or element of LLVM type t (braced for a slot union)."
+  [x t]
+  (if (slot-type? t) (list 'init x) x))
+
 (defn- struct-tag
   "The C struct tag that stands for an aggregate LLVM type, its definition added (members first) on first use."
   [t]
@@ -159,8 +198,8 @@
           (swap! *structs* update :defs conj (list 'c/struct tag))
           (let [[s a] (size-align d)
                 members (case (first d)
-                          (struct packed) (vec (map-indexed (fn [i ft] (with-meta (symbol (str "f" i)) {:tag (ctype ft)})) (rest d)))
-                          (array vector) [(with-meta 'e {:tag (list 'array (nth d 1) (ctype (nth d 2)))})]
+                          (struct packed) (vec (map-indexed (fn [i ft] (with-meta (symbol (str "f" i)) {:tag (mtype ft)})) (rest d)))
+                          (array vector) [(with-meta 'e {:tag (list 'array (nth d 1) (mtype (nth d 2)))})]
                           (refuse :type "aggregate " (pr-str d)))
                 attrs (case (first d)
                         packed [(list '__attribute__ 'packed)]
@@ -346,7 +385,7 @@
     (and (seq? v) ('#{struct packed array vector c-string} (first v)))
     (let [elems (if (= (first v) 'c-string)
                   (map #(int-lit (int %) 8) (second v))
-                  (map (fn [[et ev]] (value ev et)) (rest v)))]
+                  (map (fn [[et ev]] (if (complex-ld? t) (value ev et) (slot-init (value ev et) et))) (rest v)))]
       (cond
         (complex-ld? t) (apply list '__builtin_complex elems)
         ('#{array vector c-string} (first v))
@@ -472,9 +511,9 @@
     (and (symbol? v) (#{"zeroinitializer" "undef" "poison"} (name v)) (nil? (namespace v)))
     (if (and (aggregate? t) (not (complex-ld? t))) '(init) (value v t))
     (and (seq? v) (= (first v) 'c-string)) (list 'init (apply list 'init (map #(int-lit (int %) 8) (second v))))
-    (and (seq? v) ('#{array vector} (first v))) (list 'init (apply list 'init (map (fn [[et ev]] (cinit ev et)) (rest v))))
+    (and (seq? v) ('#{array vector} (first v))) (list 'init (apply list 'init (map (fn [[et ev]] (slot-init (cinit ev et) et)) (rest v))))
     (complex-ld? t) (value v t)
-    (and (seq? v) ('#{struct packed} (first v))) (apply list 'init (map (fn [[et ev]] (cinit ev et)) (rest v)))
+    (and (seq? v) ('#{struct packed} (first v))) (apply list 'init (map (fn [[et ev]] (slot-init (cinit ev et) et)) (rest v)))
     :else (value v t)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -598,7 +637,7 @@
         (set-res (list 'conv 'unsigned-__int128 e)))
       (re-matches #"llvm\.frexp\.(f32|f64|f80)\.i32" nm)
       (let [sfx ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2))]
-        [(list 'set! (list '.-f0 res) (list (symbol (str "__builtin_frexp" sfx)) (a 0) (list 'conv '(* int) (list 'addr (list '.-f1 res)))))])
+        [(list 'set! (if (= sfx "l") (list '.-v (list '.-f0 res)) (list '.-f0 res)) (list (symbol (str "__builtin_frexp" sfx)) (a 0) (list 'conv '(* int) (list 'addr (list '.-f1 res)))))])
       (re-matches #"llvm\.ctpop\..*" nm) (let [wd (w 0)] (when (> wd 64) (refuse :intrinsic nm)) (set-res (list '__builtin_popcountll (list 'conv 'unsigned-long-long (a 0)))))
       (re-matches #"llvm\.ctlz\..*" nm) (let [wd (w 0)] (when (> wd 64) (refuse :intrinsic nm))
                                           (set-res (list '? (list '== (a 0) 0) wd (list '- (list '__builtin_clzll (list 'conv 'unsigned-long-long (a 0))) (- 64 wd)))))
@@ -727,6 +766,34 @@
   [t]
   (or (ptr-type? t) (#{8 16 32 64 128} (int-bits t))))
 
+(defn- va-field
+  "K when a GEP of source type st and indices is takes field K of x86-64's %struct.__va_list_tag (gp_offset, fp_offset,
+  overflow_arg_area, reg_save_area: indices 0 K), else nil."
+  [st is]
+  (when (and (named? st) (= "struct.__va_list_tag" (lname-str st)) (= 2 (count is))
+             (= 0 (second (first is))) (integer? (second (second is))) (<= 0 (long (second (second is))) 3))
+    (long (second (second is)))))
+
+(def va-field-macros
+  "x86-64's va_list fields as clang's inline va_arg reads them (cppi-deferred). Under gcc (the lowered C's own definitions, when
+  ci's are not given) each is the field's address. ci's va_list is one pointer to the next 8-byte slot of the variadic
+  arguments (doc/c/SPEC.md §7.9), what x86-64's overflow_arg_area is: in ci (arbace.cpp.run/opts) gp_offset and fp_offset read
+  48 and 176 (the registers used up: clang's code takes the overflow path, which reads the argument at overflow_arg_area and
+  advances it by the size rounded to 8, as ci's va_arg), overflow_arg_area is the va_list's pointer itself and reg_save_area a
+  pointer no path reads: the runtime layer's cx$va_full and cx$va_rs (arbace/cpp/rt/eh.c.ae)."
+  {:gcc [["cx$va_f0(ap)" "((void *)(ap))"] ["cx$va_f1(ap)" "((void *)((char *)(ap) + 4))"]
+         ["cx$va_f2(ap)" "((void *)((char *)(ap) + 8))"] ["cx$va_f3(ap)" "((void *)((char *)(ap) + 16))"]]
+   :ci [["cx$va_f0(ap)" "((void *)&cx$va_full[0])"] ["cx$va_f1(ap)" "((void *)&cx$va_full[1])"]
+        ["cx$va_f2(ap)" "((void *)(ap))"] ["cx$va_f3(ap)" "((void *)&cx$va_rs)"]]})
+
+(defn- atomic-int
+  "The integer type of a float's or a double's bits (i32, i64), whose _n builtins the lowering writes for an atomic of that type
+  (cppi-deferred): the same lock-free operation gcc's generic builtins do on 4 and 8 bytes, and the one form ci's read takes
+  (arbace.cpp.run/ci-atomics: repr/c's <builtin> declares the generic __atomic_load, __atomic_store and __atomic_exchange
+  without parameters, so ci refused the calls, the class atomic-generic). Else nil (x86_fp80: the generic builtins)."
+  [t]
+  (when (symbol? t) ({"float" 'i32 "double" 'i64} (name t))))
+
 (defn- atomic-place
   "The pointer operand cast to the C type's pointer, volatile when the instruction is."
   [pv ct o]
@@ -781,6 +848,8 @@
              (cond
                (:atomic o) (cond
                              (atomic-n? t) (set (list '__atomic_load_n (atomic-place pv ct0 o) (atomic-order (:atomic o))))
+                             (atomic-int t) (let [it (atomic-int t)]
+                                              (set (cast-expr 'bitcast it (list '__atomic_load_n (atomic-place pv (ctype it) o) (atomic-order (:atomic o))) t)))
                              (float-type? t) [(list '__atomic_load (atomic-place pv ct0 o) (list 'addr res) (atomic-order (:atomic o)))]
                              :else (refuse :atomic "an atomic load of " (pr-str t)))
                ss (set (mask (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$u {:tag ct0}) (int-lit 0 w))]
@@ -794,6 +863,9 @@
               (cond
                 (:atomic o) (cond
                               (atomic-n? (first v)) [(list '__atomic_store_n (atomic-place pv ct0 o) (typed-value v) (atomic-order (:atomic o)))]
+                              (atomic-int (first v)) (let [it (atomic-int (first v))]
+                                                       [(list '__atomic_store_n (atomic-place pv (ctype it) o) (cast-expr 'bitcast (first v) (typed-value v) it)
+                                                              (atomic-order (:atomic o)))])
                               (float-type? (first v)) [(list '__atomic_store (atomic-place pv ct0 o) (list 'addr (list 'compound-lit ct0 (typed-value v))) (atomic-order (:atomic o)))]
                               :else (refuse :atomic "an atomic store of " (pr-str (first v))))
                 ss
@@ -804,7 +876,12 @@
                           is (take-while vector? idxs)]
                       (when (and (contains? (:va-lists @*fn*) (typed-value base)) (every? #(= 0 (second %)) is))
                         (swap! *fn* update :va-lists conj res))
-                      (set (gep-expr st (typed-value base) is)))
+                      (if-let [k (va-field st is)]
+                        ;; a field of x86-64's va_list (clang's inline va_arg at -O0): by the macro cx$va_fK, the field's address
+                        ;; under gcc, ci's own va_list in ci (cppi-deferred; LLVM.md §11)
+                        (do (swap! *structs* assoc :va-fields true)
+                            (set (list (symbol (str "cx$va_f" k)) (typed-value base))))
+                        (set (gep-expr st (typed-value base) is))))
       phi []
       select (let [[c a b] args]
                (when (and (seq? (first c)) (= (first (first c)) 'vector)) (refuse :vector "select on a vector"))
@@ -821,16 +898,16 @@
                                   (if (complex-ld? rt)
                                     (recur (list (if (zero? i) 'real 'imag) e) 'x86_fp80 (rest is))
                                   (if ('#{struct packed} (first rt))
-                                    (recur (list (symbol (str ".-f" i)) e) (nth (rest rt) i) (rest is))
-                                    (recur (list 'aget (list '.-e e) i) (nth rt 2) (rest is)))))))))
+                                    (let [ft (nth (rest rt) i)] (recur (slot-get (list (symbol (str ".-f" i)) e) ft) ft (rest is)))
+                                    (recur (slot-get (list 'aget (list '.-e e) i) (nth rt 2)) (nth rt 2) (rest is)))))))))
       insertvalue (let [[[t a] [vt v] & is] (rest x)
                         place (loop [e res t t is is]
                                 (if (empty? is) e
                                     (let [rt (resolve-type t) i (first is)]
                                       (cond
                                         (complex-ld? rt) (recur (list (if (zero? i) 'real 'imag) e) 'x86_fp80 (rest is))
-                                        ('#{struct packed} (first rt)) (recur (list (symbol (str ".-f" i)) e) (nth (rest rt) i) (rest is))
-                                        :else (recur (list 'aget (list '.-e e) i) (nth rt 2) (rest is))))))]
+                                        ('#{struct packed} (first rt)) (let [ft (nth (rest rt) i)] (recur (slot-get (list (symbol (str ".-f" i)) e) ft) ft (rest is)))
+                                        :else (recur (slot-get (list 'aget (list '.-e e) i) (nth rt 2)) (nth rt 2) (rest is))))))]
                     [(list 'set! res (value a t)) (list 'set! place (value v vt))])
       extractelement (let [[[t v] i] (rest x)] (set (list 'aget (list '.-e (value v t)) (typed-value i))))
       insertelement (let [[[t v] e i] (rest x)] [(list 'set! res (value v t)) (list 'set! (list 'aget (list '.-e res) (typed-value i)) (typed-value e))])
@@ -843,6 +920,8 @@
                               :xor '__atomic_fetch_xor :nand '__atomic_fetch_nand} op)]
                   (cond
                     (and (= op :xchg) (atomic-n? vt)) (set (list '__atomic_exchange_n place val ord))
+                    (and (= op :xchg) (atomic-int vt)) (let [it (atomic-int vt)]
+                                                         (set (cast-expr 'bitcast it (list '__atomic_exchange_n (atomic-place pv (ctype it) o) (cast-expr 'bitcast vt val it) ord) vt)))
                     (= op :xchg) [(list '__atomic_exchange (atomic-place pv ct o) (list 'addr (list 'compound-lit ct val)) (list 'addr res) ord)]
                     (and fetch w (atomic-n? vt)) (set (list fetch place val ord))
                     :else
@@ -853,7 +932,12 @@
                                (:fadd :fsub) (list (if (= op :fadd) '+ '-) res val)
                                (refuse :atomic "atomicrmw " op))
                           gplace (atomic-place pv ct o)]
-                      [(list '__atomic_load gplace (list 'addr res) 0)
+                      [(cond
+                         ;; the old value by the _n load where one takes the type (cppi-deferred: ci has no generic __atomic_load)
+                         (atomic-n? vt) (list 'set! res (list '__atomic_load_n gplace 0))
+                         (atomic-int vt) (let [it (atomic-int vt)]
+                                           (list 'set! res (cast-expr 'bitcast it (list '__atomic_load_n (atomic-place pv (ctype it) o) 0) vt)))
+                         :else (list '__atomic_load gplace (list 'addr res) 0))
                        (list 'do-while (list 'not (list '__atomic_compare_exchange gplace (list 'addr res) (list 'addr (list 'compound-lit ct nv)) 0 ord 0)))])))
       cmpxchg (let [[pv [ct c] [_ n]] (rest x) cty (ctype ct)]
                 (when-not (atomic-n? ct) (refuse :atomic "cmpxchg of " (pr-str ct)))
@@ -1038,7 +1122,14 @@
                   (list 'c/declare 'cx$resume (with-meta [(with-meta 'o {:tag '(* void)})] {:tag 'void}))
                   (list 'c/declare 'cx$uncaught (with-meta ['void] {:tag 'void}))]]
         [(list 'c/file c-name :std :gnu23)
-         (vec (concat (:defs @*structs*) head protos aliases (keep first gvars) (keep second gvars) defs ctor-defs (when wrapper [wrapper])))]))))
+         (vec (concat (:defs @*structs*) head
+                      (when (:va-fields @*structs*)
+                        (concat [(list 'c/var (with-meta 'cx$va_full {:extern true :tag '(array 2 unsigned)}))
+                                 (list 'c/var (with-meta 'cx$va_rs {:extern true :tag '(* void)}))
+                                 (list 'c/directive "#ifndef cx$va_f0")]
+                                (for [[n d] (:gcc va-field-macros)] (list 'c/directive (str "#define " n " " d)))
+                                [(list 'c/directive "#endif")]))
+                      protos aliases (keep first gvars) (keep second gvars) defs ctor-defs (when wrapper [wrapper])))]))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; bin/cppi lower
