@@ -12,7 +12,7 @@
 ;;;; run, DETAIL the first failing clause "N: why".
 (library (si mats)
   (export run-mat set-evaluator! set-clause-ms! watchdog == fl~= ~= nan pi +pi +pi/2 +pi/4 -pi -pi/2 -pi/4 +e -e
-          *fuzz* cfl~= equivalent-expansion? windows? embedded? pb? mkfile $record->vector patch-exec-path $cat_flush find-source)
+          *fuzz* cfl~= equivalent-expansion? windows? embedded? pb? mkfile $record->vector patch-exec-path $cat_flush find-source retry-for-spurious)
   (import (except (rnrs) with-output-to-file) (rnrs mutable-pairs) (only (psyntax system $all) watchdog r7rs-write)
           (only (chezscheme) cfl-real-part cfl-imag-part gensym? box? unbox pretty-print with-output-to-file machine-type
                 csv7:record-type-field-names csv7:record-field-accessor source-directories))
@@ -20,7 +20,7 @@
   (define == eqv?)
   (define fl~=
     (case-lambda
-      ((x y) (fl~= x y 1e-14))
+      ((x y) (fl~= x y (fuzz)))
       ((x y fuzz)
        (cond ((and (fl>=? (flabs x) 2.0) (fl>=? (flabs y) 2.0)) (fl~= (fl/ x 2.0) (fl/ y 2.0) fuzz))
              ((and (fl<? 0.0 (flabs x) 1.0) (fl<? 0.0 (flabs y) 1.0)) (fl~= (fl* x 2.0) (fl* y 2.0) fuzz))
@@ -33,7 +33,19 @@
   ;; parts fl~=), equivalent-expansion? (two expansions equal up to a consistent renaming of gensyms, a procedure in either one the
   ;; predicate for the other's datum; on a mismatch it prints both, as mat.ss does), the machine predicates (si is a6le: none), mkfile
   ;; (each expression pretty-printed into a file, replacing it), $record->vector (a record as #(NAME FIELD ...)), $cat_flush
-  (define *fuzz* 1e-14)
+  ;; *fuzz* is mat.ss's top-level variable: the mats change it (fluid-let), so the export is a variable transformer over a cell
+  (define fuzz-cell (vector 1e-14))
+  (define (fuzz) (vector-ref fuzz-cell 0))
+  (define (set-fuzz! v) (vector-set! fuzz-cell 0 v))
+  (define-syntax *fuzz*
+    (make-variable-transformer
+      (lambda (x)
+        (syntax-case x (set!)
+          ((set! _ v) (syntax (set-fuzz! v)))
+          ((_ e ...) (syntax ((fuzz) e ...)))
+          (_ (identifier? x) (syntax (fuzz)))))))
+  ;; si runs on x86_64 (a6le): no retry loop, as mat.ss's for a6
+  (define-syntax retry-for-spurious (syntax-rules () ((_ e) e)))
   (define (cfl~= x y)
     (and (fl~= (cfl-real-part x) (cfl-real-part y))
          (fl~= (cfl-imag-part x) (cfl-imag-part y))))

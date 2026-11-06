@@ -19,7 +19,8 @@
 ;;;;   FILE N-datums M-mats       at the end
 (import (rnrs) (rnrs eval) (rnrs mutable-pairs) (si mats) (only (srfi :98) get-environment-variable)
         (only (chezscheme) interaction-environment)
-        (only (psyntax system $all) r7rs-write new-interaction-environment library-path))
+        (only (psyntax system $all) r7rs-write new-interaction-environment library-path)
+        (only (psyntax arbace) library-expander))
 
 (define argv (cdr (command-line)))
 ;; SC170 (b): Chez finds a library in the current directory first (its library-directories default is "."): a mat that writes a
@@ -151,11 +152,19 @@
          (let loop ((j k)) (if (or (= j (string-length m)) (char=? (string-ref m j) #\space)) (string->symbol (substring m k j)) (loop (+ j 1)))))))
 (define (note-stub! x)
   (newline) (display "STUB ") (write stub-mat) (display " ") (write x) (newline) (line))
+;; SMR7: Chez's REPL takes a library form at the top level (8.ms defines its libraries in clauses): it is expanded and installed,
+;; also inside a top-level begin; anything else is eval's
+(define (library-form? x) (and (pair? x) (eq? (car x) 'library)))
+(define (top-eval expr env2)
+  (cond ((library-form? expr) (library-expander expr) (if #f #f))
+        ((and (pair? expr) (eq? (car expr) 'begin) (list? expr) (exists library-form? (cdr expr)))
+         (let loop ((xs (cdr expr)) (v (if #f #f))) (if (null? xs) v (loop (cdr xs) (top-eval (car xs) env2)))))
+        (else (eval expr env2))))
 (define (stub-eval expr env2)
   (if (not stubbing)
-      (eval expr env2)
+      (top-eval expr env2)
       (let loop ((n 0) (done '()))
-        (let ((r (guard (e ((watchdog-error? e) (raise e)) (#t (cons 'bad e))) (cons 'ok (eval expr env2)))))
+        (let ((r (guard (e ((watchdog-error? e) (raise e)) (#t (cons 'bad e))) (cons 'ok (top-eval expr env2)))))
           (if (eq? (car r) 'ok)
               (cdr r)
               (let ((x (and (< n 40) (unbound-name (cdr r)))))
@@ -265,6 +274,26 @@
           ((and (char=? (string-ref s j) #\() (char=? (string-ref s (- j 1)) #\newline)) j)
           (else (loop (+ j 1))))))
 
+;; a top-level datum of the file: a mat, a definition, or (SMR7) Chez's meta-cond, whose first clause with a true test (evaluated in
+;; the harness' environment, else last) has its forms taken as top-level data (foreign.ms holds its mats in one)
+(define (process-datum d)
+  (cond
+    ((and (pair? d) (eq? (car d) 'mat) (pair? (cdr d)))
+     (run-one (cadr d) (cddr d)))
+    ((and (pair? d) (memq (car d) '(mat/cf)))
+     (set! mats (+ mats 1))
+     (newline) (display "MAT ") (write (if (pair? (cdr d)) (cdr d) d)) (display " SKIP mat/cf") (newline) (line))
+    ((def-form? d) (add-def! d))
+    ((and (pair? d) (eq? (car d) 'meta-cond) (list? d))
+     (let loop ((cs (cdr d)))
+       (when (pair? cs)
+         (let ((c (car cs)))
+           (if (and (pair? c) (or (eq? (car c) 'else)
+                                  (guard (e (#t #f)) (eval (car c) (make-mat-env)))))
+               (for-each process-datum (cdr c))
+               (loop (cdr cs)))))))
+    (else #f)))
+
 (let ((n (string-length text)))
   (let loop ((i 0))
     (let ((i (skip-ws text i n)))
@@ -278,15 +307,7 @@
              (newline) (display "READ ") (display i) (display " ") (display (message-of (cdr r))) (newline) (line)
              (loop (resync text i n)))
             (else
-             (let ((d (cdr r)))
-               (cond
-                 ((and (pair? d) (eq? (car d) 'mat) (pair? (cdr d)))
-                  (run-one (cadr d) (cddr d)))
-                 ((and (pair? d) (memq (car d) '(mat/cf)))
-                  (set! mats (+ mats 1))
-                  (newline) (display "MAT ") (write (if (pair? (cdr d)) (cdr d) d)) (display " SKIP mat/cf") (newline) (line))
-                 ((def-form? d) (add-def! d))
-                 (else #f)))
+             (process-datum (cdr r))
              (loop e))))))))
 
 (newline) (display "FILE ") (display data) (display " ") (display mats) (newline)

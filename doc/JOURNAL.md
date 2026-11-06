@@ -259,3 +259,23 @@ On branch `night-fix` (from `b2a4911f`), not merged while `--full` ran on main:
 - Result, whole mats run before and after: 340 / 62 / 669 mats pass / fail / not run to 436 / 99 / 536, `mats-chez-identifier` items 665 to 524; four new classes
   (`mats-chez-runtime-params`, `mats-chez-compiler-loader`, `mats-chez-immutable-typed` design, `mats-after-smr6` deferred), 0 items in no class.
   Regression: `bin/si r7rs`, `srfi`, `test --si`, `unit`, `check`, `check --aot` essential: no regression.
+
+## 2026-11-06, Scheme: SMR7 the mats' completeness, psyntax booted on si, Chez's format floats (branch `scheme-smr7`)
+
+- The task (the main session): the 536 mats not run by group, the 99 failing by cause, R7RS's and the SRFIs' gaps. The user decided the review's SMR7
+  proposals the same day (MATURITY-REVIEW.md, "Decided (2026-11-06)"): the cp0 mats stay a design class (a), psyntax boots on si (b), Chez's format float
+  directives are ported (c).
+- Built (MATURITY-REVIEW.md section 9): Chez's records (`scheme/lib/si/chez-records.sls`: `define-record`, typed fields, `make-record-type`, `csv7:`), the
+  cflonum operations, the compiler's no-effect parameters, one-argument comparisons, destructive list operations, the stub tail's simple names, mat.ss's
+  helpers in `(si mats)`, `(scheme)` as `(chezscheme)`, the harness's `meta-cond` and top-level `library` forms, Chez's lexical syntax under ChezLex
+  (gensyms, character names, length-prefixed vectors, radix numbers), `expt` of a flonum to a large integer by the correctly rounded power. Written from
+  Chez's User's Guide, CLHS 22.3.3 and the mats as the oracle; no new Chez run.
+- SMR7b: `tools/psyntax/boot-si.sps`, boot.ss's program on si's running psyntax (export lists from `environment-symbols`, the running system's labels
+  reused, gensyms renamed `NAME$N` in order): its output equals the Chez-booted `psyntax.pp.ae` up to gensym names, is committed, and boots itself byte
+  for byte; `bin/si boot` needs no Chez, the gate's `si-check` drops the host `:chez`. Alternative considered: SC41 (b)'s recorded library table with
+  boot.ss on Arbace's host (the fixpoint's) — si itself is the shorter path and makes new primitives a light boot.
+- SMR7c: `~f ~e ~g` in `(si format)` rewritten: shortest digits strictly inside the rounding interval and `#` below a tenth of the ulp for ~F, the
+  printer's digits for ~E, SBCL-style optional zeros; all 540 float clauses of format.ms pass, with `~r` in any radix and CLHS's `~<`.
+- Result, the 37 files on one key, record written from the run: 436 / 99 / 536 / 6 of 1,077 mats to 560 / 89 / 470 / 6 of 1,125; 0 items in no class
+  (new class `mats-after-smr7`). Regressions: `bin/si unit`, `r7rs`, `srfi`, `test --si`, `test`, `check`, `check --aot` essential, `fixpoint`,
+  `boot --check`: none. R7RS-small: nothing left but the decided `e+308` printing and SMR8; the corpora import no other SRFI.

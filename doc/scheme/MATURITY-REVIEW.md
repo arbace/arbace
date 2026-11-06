@@ -323,6 +323,73 @@ one, 1 refused (`racket/syntax-case`, a constant that does not read back: as bef
 **The night's command** (as SMR3's and SMR4's): `bin/heavy-lock bin/si mats --record` (the whole record again; this branch's is from a light run on the day), `bin/si r7rs --record`, `bin/si check --record` and `bin/si check --aot --record`
 (unchanged programs), and the stub experiment again for what is left: `SI_MAT_STUB=1 bin/si mats FILE.ms...` (a partial run; its `.tmp/si/mats/FILE.out` then holds the `STUB MAT X` and `STUBHIT X` lines; judge nothing from it and do not `--record` it), read by counting those lines per mat.
 
+## 9. As built: SMR7 (2026-11-06; completeness of the mats, psyntax booted on si, Chez's format floats)
+
+**The 536 not run, by first obstacle** (the SMR6 record, then the stub experiment run again on this branch, `.tmp/a/stub-rank-base.txt` of the work):
+the cp0 compiler mats (`test-cp0-expansion` 71 mats, `expand/optimize` 26, `enable-cp0`, `equivalent-expansion?` of expansions; a design class as decided,
+SMR7a); Chez's own record system (`define-record`, typed fields, `csv7:`: record.ms entirely, and uses in 6.ms, 8.ms, misc.ms); mat.ss's helpers the
+harness did not give (`cfl~=` and `*fuzz*` alone held 21 mats of 5_3.ms); Chez's lexical syntax still unread (`#{name uid}` gensyms, `#\rubout`, `#\377`,
+`#5(`, `#36r`, Chez's number syntax after `#`); the files' structure (foreign.ms's mats inside a `meta-cond`; 8.ms's libraries defined in clauses); and the
+one-mat tail of Chez identifiers.
+
+**What was built.**
+- `scheme/lib/si/chez-records.sls` (new, re-exported by `(chezscheme)`): `define-record` (parent, default fields seeing the fields before them, the options
+  `prefix`, `constructor`, `predicate`, `nongenerative`, `sealed`, `opaque`; duplicate field names refused), typed fields (integer-N and unsigned-N take
+  -2^(N-1) to 2^N-1 and keep the low N bits, double-float and single-float a flonum, single-float rounded, fixnum, boolean, char, wchar),
+  `make-record-type` with Chez's field specifications (a gensym name is the uid), `record-constructor` converting typed fields, the `csv7:` accessors,
+  mutators, field lists and declarations, `type-descriptor`, `record?` with an rtd, `make-record-type-descriptor` with Chez 10's `(N . mask)` fields.
+  The model: an R6RS record type with the fields' mutability, the types and the constructor's arity in a table beside it.
+- `(chezscheme)`: the cflonum operations; the compiler's parameters with no effect (`enable-cp0`, `run-cp0`, `$suppress-primitive-inlining`, ...); the
+  comparisons of one argument (`=` `<` `char=?` `string=?` and the rest: `mats-arity-one`); destructive `reverse!`, `subst!`, `remq!`, `remv!`,
+  `remove!` and a sharing `subst` (`mats-chezscheme-subset`); `random-seed` (the generator's state is now Chez's 32-bit seed), the cas operations, Chez's
+  five-argument `vector-copy!`, `expt-mod`, `flsingle`, `flbit-field`, `datum`, `syntax->list`, `syntax->vector`, the index checks, and parameters.
+- `(si mats)`: mat.ss's helpers (`*fuzz*` settable as mat.ss's variable, `cfl~=`, `equivalent-expansion?`, `mkfile`, `$record->vector`, `find-source`,
+  `retry-for-spurious`, the machine predicates); `(scheme)`, Chez's name of its system library (`scheme/lib/scheme.sls`, generated from
+  `(chezscheme)`'s export list).
+- The harness (`test/scheme/mats/run.sps`): a `meta-cond` at the top level takes its chosen clause's forms as top-level data; a `library` form in a clause
+  (or in a top-level `begin`) is expanded and installed, as Chez's REPL does.
+- The reader with ChezLex (`go/arbace/scm/read.ae`, `aot.ae`): `#{name uid}` and `#{name}`, the character names `rubout` `bel` `nel` `ls` and `#\NNN`
+  octal, `#N(`, `#Nvu8(`, `#Nvfx(`, `#Nvfl(`, `#Nr`, and Chez's number syntax after `#` (`#x10000000000000.0`, `#b1.1e1001100`).
+- `expt` of a flonum to an integer beyond 64 in magnitude is the correctly rounded power (`pnPow`), not repeated squaring (thousands of ulps away at 2^56).
+
+**SMR7b, psyntax booted on si itself** (as decided). `tools/psyntax/boot-si.sps` is boot.ss's program run by si's own psyntax (the committed
+`psyntax.pp` running on the light driver) instead of the vendored psyntax loaded into Chez: the libraries' export lists are the running system's
+(`environment-symbols`: Chez's `library-exports` at the first boot), the bootstrap libraries reuse the running system's labels (psyntax's bless'd
+identifiers are cached with them: fresh labels made `...` an ordinary identifier, "with-syntax: duplicate binding"), and every gensym is renamed
+`NAME$N` in the order met. `bin/si boot` runs it (16 s, no Chez); its first output equals the Chez-booted `psyntax.pp.ae` up to the gensyms' names
+(5,056 gensyms, the forms otherwise identical), and it is committed: booted again from itself it gives the same file byte for byte (`bin/si boot
+--check`: "the bootstrap gives the committed file"). `bin/si fixpoint` (Arbace expanding the sources) still gives the same six libraries. The gate's
+`si-check` no longer needs the host `:chez`. New primitives are possible now: add the name to boot-si.sps's `si-primitives` and boot.
+
+**SMR7c, Chez's format floats** (as decided; `scheme/lib/si/format.sls`, written for Arbace from CLHS 22.3.3 and the format.ms mats): `~w,d,k,ovf,padF`,
+`~w,d,e,k,ovf,pad,expE`, `~w,d,e,k,ovf,pad,expG` over a number as its digits and a significance threshold: ~F takes the shortest digits strictly inside
+the flonum's rounding interval (so 1e23 is 9999999999999999 and seven #), a position whose place is at most a tenth of the ulp prints as `#`, the
+leading and trailing zeros of the field are optional as room allows (SBCL's lpoint and tpoint), a width without d rounds to the digits that fit; ~E
+takes the printer's shortest digits, k digits before the point (or -k zeros after it), the exponent padded to e digits, the field overflowing on an
+exponent too long or a d too small for k, a width rounding once (a carry is not refitted); ~G chooses ~F with ww = w - ee when 0 <= d - n <= d (n from
+the value rounded to d digits) and pads ee spaces only with a width. All 540 float clauses of format.ms pass (format-fixed1..8, exp1..4, general, dollar,
+slib24..27, errors), and with them `~r` in every radix (and of a list: "(A B C)"), the radix ten when only other parameters are given, and `~<` as
+CLHS has it (the `~n,m:;` prefix written only when the field passes the line, the segments a `~^` ends left out).
+
+**Moved** (a light run on the day, the 37 files five at a time on one key, the record written from its outputs, `bin/si corpora mats .tmp/si/mats --key K --record`; 0 items in no class, the new ones in `mats-after-smr7`, `mats-format` now has none):
+
+| | SMR6 record | this branch |
+|---|---|---|
+| mats | 1,077 | 1,125 (more mats read: the reader, the meta-cond) |
+| pass / fail / not run / skipped | 436 / 99 / 536 / 6 | 560 / 89 / 470 / 6 |
+
+Per file (pass / fail / not run, record then now): `3.ms` 10/0/7 to 11/0/8, `5_2.ms` 31/15/10 to 45/5/6, `5_3.ms` 79/5/36 to 99/5/16, `5_4.ms` 21/6/5 to 28/2/4, `5_5.ms` 18/8/1 to 24/3/0, `5_6.ms` 14/14/13 to 19/26/5, `5_7.ms` 1/2/4 to 2/3/3, `6.ms` 7/3/24 to 10/4/22, `7.ms` 5/3/40 to 6/3/39, `8.ms` 8/3/60 to 10/4/60, `bytevector.ms` 55/1/13 to 65/3/12, `cfl.ms` 2/0/11 to 9/0/4, `cp0.ms` 0/0/14 to 1/0/13, `cptypes.ms` 0/0/24 to 1/0/23, `fl.ms` 41/0/10 to 43/0/8, `foreign.ms` 0/0/20 to 0/0/21, `format.ms` 43/14/0 to 61/1/0, `ieee.ms` 35/1/0 to 35/1/2, `misc.ms` 6/3/44 to 10/3/42, `oop.ms` 0/0/0 to 0/0/1, `primvars.ms` 4/12/13 to 10/16/3, `record.ms` 0/0/30 to 15/1/21.
+
+Checks run (light, `ARBACE_HOST_EXE` main's stage 0): `bin/si unit` ok; `bin/si r7rs` 1,230 of 1,232 (the 2 `e+308`), no regression; `bin/si srfi` 11
+programs, 1,231 checks, no regression; `bin/si test --si` 61 of 64, 3 known; `bin/si test` (the bootstrap host) ok; `bin/si check` 49 of 50 (the one
+known), no regression; `bin/si check --aot --only test/scheme/essential-aot.txt` as before (1 refused, the known); `bin/si fixpoint` 6 of 6; `bin/si boot
+--check` the committed file.
+
+**Left.** The cp0 mats (design); `record-reader` and `#[...]` with Chez's record printing, real fxvector, flvector and box types, the file system
+(`mkdir`, `directory-list`), engines, guardians, `oblist`, time objects: Go primitives, now possible without Chez (SMR7b); Chez's `module` export forms
+(`(($a $b) ...)`, implicit exports) in psyntax; `$hashtable-veclen` (Chez's resizing policy); the compile and load interfaces (7.ms). The night's
+command, to confirm the day's record on one invocation: `bin/heavy-lock bin/si mats --record` (expect 560 / 89 / 470 / 6), then `bin/si r7rs`, `check`, `check --aot`.
+
 ## Proposed (SMR1 onward; none decided)
 
 - **SMR1 include.** (a) keep the built `include`/`include-ci`, add it to `base.chezscheme.sls` and the include sample to `programs.edn` with a Chez run, at the next
@@ -338,3 +405,18 @@ one, 1 refused (`racket/syntax-case`, a constant that does not read back: as bef
 ## Decided (2026-11-05, the user)
 
 SMR1-SMR8 as recommended: include in the Chez variant with a program and its Chez run at the next night; the list-argument checks; the mats' reader resynchronised, then Chez's four syntaxes; string->number's extended syntax and the precision argument first; denormals printed without Chez's |N suffix in R7RS mode, Chez's digits kept; the identifier stub experiment, then the simple identifiers; si's speed after the tag; the mutable interaction environment left until a corpus needs it.
+
+## Proposed (SMR7)
+
+- **SMR7a the cp0 compiler mats** (`test-cp0-expansion` 71 mats, `expand/optimize` 26, `equivalent-expansion?` of expansions): (a) a design class, si has
+  no cp0; (b) a port of Chez's cp0 and of its expander's output format. *Recommended: (a)*.
+- **SMR7b psyntax booted on si**: new primitives (`record-reader` and `#[...]`, real fxvector, flvector and box types) need psyntax's boot list
+  changed, and `bin/si boot` runs psyntax on Chez. (a) boot psyntax on si itself, `bin/si fixpoint`'s expansion as the boot, Chez out of the
+  build; (b) keep Chez's boot. *Recommended: (a)*.
+- **SMR7c Chez's format float directives** (`mats-format`, 14 failing mats): (a) port Chez's algorithm for `~f ~e ~g` (digits past the flonum's
+  precision as `#`, the width rules), 2 to 3 days; (b) leave the class. *Recommended: (a)*.
+
+## Decided (2026-11-06, the user: SMR7a (a), SMR7b (a), SMR7c (a))
+
+The cp0 compiler mats stay a design class; psyntax is booted on si itself (`bin/si fixpoint` as the boot), removing Chez from the build; Chez's
+format float directives `~f ~e ~g` are ported, Chez's algorithm.

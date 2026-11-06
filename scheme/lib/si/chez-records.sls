@@ -15,8 +15,8 @@
   (export define-record type-descriptor make-record-type record-constructor
           csv7:record-field-accessor csv7:record-field-mutator csv7:record-field-mutable? csv7:record-type-field-names
           csv7:record-type-field-decls csv7:record-field-accessible? csv7:record-type-descriptor csv7:record-type-name csv7:record-type-symbol $record-type-descriptor
-          $record-type-field-names record-field-converter register-chez-record-type! chez-record-parent-arity)
-  (import (rename (rnrs) (record-constructor r6-record-constructor)))
+          $record-type-field-names record? make-record-type-descriptor record-field-converter register-chez-record-type! chez-record-parent-arity)
+  (import (rename (rnrs) (record-constructor r6-record-constructor) (record? r6-record?) (make-record-type-descriptor r6-make-rtd)))
 
   ;; rtd -> #(fields arity ctor): fields the list of (class type name) of every field, the parents' first; arity the
   ;; constructor's argument count; ctor the constructor define-record made, or #f
@@ -110,13 +110,23 @@
        (let* ((specs (map (lambda (f) (parse-field 'make-record-type f)) fields))
               (sym (if (string? name) (string->symbol name) (string->symbol (symbol->string name))))
               (uid (and (symbol? name) (gensym-uid name)))
-              (rtd (make-record-type-descriptor sym parent uid #f #f
+              (rtd (r6-make-rtd sym parent uid #f #f
                      (list->vector (map (lambda (s) (list (car s) (caddr s))) specs)))))
          (unless (hashtable-ref info rtd #f)
            (register-chez-record-type! rtd specs (+ (length specs) (if parent (length (all-fields parent)) 0)) #f))
          rtd))))
   ;; a symbol given as a record name is its uid: its own string (si has no gensym's unique name to take apart)
   (define (gensym-uid s) s)
+
+  ;; Chez 10's make-record-type-descriptor takes, beside R6RS's vector of field specifications, a pair (N . MASK): N anonymous fields
+  ;; named field, field i mutable when bit i of MASK is set
+  (define (make-record-type-descriptor name parent uid sealed? opaque? fields)
+    (r6-make-rtd name parent uid sealed? opaque?
+      (if (and (pair? fields) (fixnum? (car fields)) (>= (car fields) 0) (integer? (cdr fields)) (exact? (cdr fields)))
+          (let loop ((i (- (car fields) 1)) (acc '()))
+            (if (< i 0) (list->vector acc)
+                (loop (- i 1) (cons (list (if (bitwise-bit-set? (cdr fields) i) 'mutable 'immutable) 'field) acc))))
+          fields)))
 
   (define (converters rtd)
     (map (lambda (f) (and (not (memq (cadr f) '(scheme-object ptr))) (record-field-converter (cadr f)))) (all-fields rtd)))
@@ -179,6 +189,14 @@
   (define ($record-type-descriptor x) (record-rtd x))
   (define (csv7:record-type-name rtd) (symbol->string (record-type-name rtd)))
   (define (csv7:record-type-symbol rtd) (record-type-name rtd))
+
+  ;; Chez's record?: with an rtd, whether x is an instance of it or of a type below it (an opaque record too)
+  (define record?
+    (case-lambda
+      ((x) (r6-record? x))
+      ((x rtd)
+       (unless (record-type-descriptor? rtd) (assertion-violation 'record? "not a record type descriptor" rtd))
+       ((record-predicate rtd) x))))
 
   (define-syntax type-descriptor
     (syntax-rules () ((_ name) (record-type-descriptor name))))
