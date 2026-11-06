@@ -121,6 +121,13 @@ Prior art:
   CS240 (a)) do not exist until the full runs write them: C's read and print cells count their non-passes only until then; a cell whose check
   is not recorded yet prints "no check yet".
   `bin/clojure-tests --divergences [RESULTS]` judges a suite run per test against the Clojure classes.
+- `bin/crops-score` (and `make crops-score`; doc/CROPS-SCORE.md): each of the eleven crops' completeness (the REAP cells'
+  pass / (pass + by design + deferred + pending) from a tree's `test/reap/matrix.edn`), maturity (a checklist measured on the
+  tree: cells recorded, none unclassed, negative controls, gate steps, a REAP row, records without a host path) and
+  independence (per stage, read, eval, AOT, print and judge, the reviewed facts of `test/crops/independence.edn`
+  cross-checked with the tree's gate steps' toolchain hosts), from the records alone: the checkout, `--ref REF` (git show)
+  or `--newest` (each crop's newest held branch on the remote mac); `crops.score` (`test/crops/score.ae`), its crops
+  `test/crops/crops.edn`; no gate step yet (doc/CROPS-SCORE.md, CSP1).
 - `LICENSE.md` holds all licenses: their full texts and which files each covers. Licenses are
   stated nowhere else, apart from the notices source files came with, which stay. Extend it when
   vendoring from a new source.

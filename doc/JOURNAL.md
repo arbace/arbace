@@ -406,3 +406,32 @@ Each branch's doc records it.
   converter then overflowed Go's 1 GB stack, a fatal error that ended the corpus's run. A nesting bound in the parser
   (4,000) now fails such a file the old way. Until the next re-seed, stage 0 evaluates the changed parser from the
   checkout: torture-compile's parse check took 178 s, against 132 s compiled.
+
+## 2026-11-06: the crops' scores (bin/crops-score), held for after the tag
+
+The user asked for each crop's completeness, maturity and independence as percentages, measured and not estimated, with
+the goal of every crop above 90% on all three. `bin/crops-score` (branch `crops-score` from main 8d0bb009d) computes them
+from the recorded results alone, as `bin/reap` does. The logic is `crops.score` (`test/crops/score.ae`); the data are
+`test/crops/crops.edn` (steps, held branches, control rules) and `test/crops/independence.edn` (reviewed facts per stage).
+
+- Completeness reads a tree's `test/reap/matrix.edn`, bin/reap's judged record. A held ref is read by `git show`.
+  Re-judging a ref would need its own readers, since several branches add `reap.main` readers. `--judge` re-judges the
+  checkout with `reap.main` itself: 16 of 16 cells equal their record.
+- Maturity's items are fractions where the data allow: cells, controls, gate steps, records.
+- Independence scores the pipeline stages and the judge apart. The reason: every round trip would otherwise make the
+  print 0, although every printer is Arbace's.
+- Each claim is cross-checked with the scored tree's gate steps' `:hosts`. That found that `mac/oracle-records-cpp2`'s
+  `steps.edn` still plans OCaml on `:ocaml`, since only its fragment drops it.
+- Four claims of 1 were run with the toolchains stubbed (exit 99): LLVM read and print, Scheme read and print, si's check
+  on two programs, and repr/clojure's round trip of one file. No stub was called.
+- The facts came from doc/ORACLE-RECORDS-SURVEY.md (on `mac/oracle-records-cpp2`) and three read-only agents' reading of
+  the scripts at main and each crop's newest held branch, with REF:file:line evidence in the data file.
+
+The alternatives considered:
+- A fresh judging of every ref in a scratch extraction: rejected, because the ref's own `reap.main` would be needed.
+- Binary maturity items: rejected, because one record with a path weighs a sixth.
+- Counting TamaGo's go as a host toolchain: proposed as CSP2, recommendation not.
+
+The baseline is in doc/CROPS-SCORE.md, with the proposals CSP1-CSP5: CSP1 a gate step, CSP3 Python's numbers from the
+Mac (queue task 221, `--input`).
+
