@@ -26,7 +26,7 @@
 (defmacro ^:private with-types [& body]
   `(binding [chk/*cx* (merge {:ldouble-size 8} *cfg*)] ~@body))
 
-(declare cparts cmake complex? seq-node temp-i frame-temp new-slot!)
+(declare cparts cmake complex? seq-node temp-i frame-temp new-slot! var-size? vmem-of dyn-member dyn-copy ex-neg)
 
 (defn- refuse [cls & msg]
   (throw (ex-info (apply str msg) {:ci/refused cls})))
@@ -60,8 +60,15 @@
       :void :v
       (:float :double :ldouble :float32 :float64 :float32x :float64x) :f
       (:struct :union :array) :m
-      :complex (if (#{:float :double :ldouble :float32 :float64 :float32x} (:k (under (:of t)))) :m
-                 (refuse :complex "GNU's complex integer types (deferred)"))
+      ;; complex types: their parts floating, or integers of at most 64 bits (GNU's complex integer types, CS105); a part
+      ;; of a type out of eval (_Float16, _Float128, the decimal types: SPEC §14) refused by design as the part is
+      :complex (let [pt (under (:of t))]
+                 (cond
+                   (#{:float :double :ldouble :float32 :float64 :float32x :float64x} (:k pt)) :m
+                   (#{:float16 :float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x} (:k pt))
+                   (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
+                   (and (chk/int-type? pt) (not (wide? pt))) :m
+                   :else (refuse :complex "the complex type " (chk/tstr t) " (deferred)")))
       (:float16 :float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x) (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
       :vector (refuse :by-design "GNU vector types (SPEC §14)")
       :fn :i
@@ -295,7 +302,7 @@
   [{:keys [k n t]}]
   (case (cond (and (= k :m) (= :array (:k (unq t)))) :i (complex? t) :c :else k)
     :c (let [[pre re im] (cparts {:k k :n n :t t})]
-         (list 'seq pre (list 'or (list 'ftest (:n re)) (list 'ftest (:n im)))))
+         (list 'seq pre (list 'or (truth re) (truth im))))
     :i n
     :f (list 'ftest n)
     :w (list 'wtest (wty t) n)
@@ -316,7 +323,7 @@
       (and (complex? ft) (not= tk :v))
       (let [[pre re im] (cparts x)]
         (if (= :bool (:k (under t)))
-          {:k :i :t t :n (list 'seq pre (list 'or (list 'ftest (:n re)) (list 'ftest (:n im))))}
+          {:k :i :t t :n (list 'seq pre (list 'or (truth re) (truth im)))}
           (conv (seq-node pre re) t)))
       (= tk :v) {:k :v :n (case k :i (list 'ei n) :f (list 'ef n) :w (list 'ew n) :m (list 'ei n) :v n) :t t}
       (= :bool (:k (under t))) {:k :i :n (if (and (= k :i) (= "b" (ity ft))) n (list 'cv "b" (truth x))) :t t}
@@ -353,6 +360,23 @@
 
 (declare temp-i frame-temp seq-node)
 
+(defn- part-load
+  "A complex part of type ft at the address a."
+  [ft a]
+  (if (= :f (kind ft)) {:k :f :t ft :n (list 'fld (fty ft) a)} {:k :i :t ft :n (list 'ld (ity ft) a)}))
+
+(defn- part-store
+  "The store of the part node x (of type ft) at the address a, an effect."
+  [ft a x]
+  (if (= :f (kind ft)) (list 'ef (list 'fst (fty ft) a (:n x))) (list 'ei (list 'st (ity ft) a (:n x)))))
+
+(defn- part-neg [x] (if (= :f (:k x)) {:k :f :t (:t x) :n (list 'fneg (:n x))} (ex-neg x)))
+
+(defn- part-eq
+  "Whether two parts of one type are equal: an I node."
+  [x y]
+  (if (= :f (:k x)) (list 'fcmp "eq" (:n x) (:n y)) (list 'cmp "eq" (ity (:t x)) (:n x) (:n y))))
+
 (defn- cparts
   "A complex node's parts: [effects re im], its address evaluated once."
   [x]
@@ -360,8 +384,8 @@
         s (temp-i)
         a (list 'il s)]
     [[(list 'ei (list 'is s (:n x)))]
-     {:k :f :t ft :n (list 'fld (fty ft) a)}
-     {:k :f :t ft :n (list 'fld (fty ft) (list 'adds a '(i 1) (size-of ft)))}]))
+     (part-load ft a)
+     (part-load ft (list 'adds a '(i 1) (size-of ft)))]))
 
 (defn- cmake
   "A complex value of type t from its parts (effects pre first): a temporary's address."
@@ -371,14 +395,43 @@
         es (size-of ft)
         r (conv re ft) i (conv im ft)]
     {:k :m :t t
-     :n (list 'seq (vec (concat pre [(list 'ef (list 'fst (fty ft) tmp (:n r)))
-                                     (list 'ef (list 'fst (fty ft) (list 'adds tmp '(i 1) es) (:n i)))]))
+     :n (list 'seq (vec (concat pre [(part-store ft tmp r)
+                                     (part-store ft (list 'adds tmp '(i 1) es) i)]))
               tmp)}))
+
+(defn- icarith
+  "A complex integer operator at the complex type ot (GNU's, CS105): gcc's tree-complex.cc lowering, the parts'
+  arithmetic in the part type (+ and - by parts; * as (ac - bd) + (ad + bc)i; / as ((ac + bd) + (bc - ad)i) / (cc + dd),
+  each intermediate wrapped to the part type: computed in 64 bits and converted back, which gives the part type's low bits
+  for +, - and *, and dividing the wrapped values in the part type's signedness)."
+  [op a b ot]
+  (let [ft (under (:of (under ot)))
+        [pa ar ai] (cparts (conv a ot))
+        [pb br bi] (cparts (conv b ot))
+        s (fn [] (temp-i))
+        [s1 s2 s3 s4] [(s) (s) (s) (s)]
+        it (ity ft)
+        sets [(list 'ei (list 'is s1 (:n ar))) (list 'ei (list 'is s2 (:n ai))) (list 'ei (list 'is s3 (:n br))) (list 'ei (list 'is s4 (:n bi)))]
+        A (list 'il s1) B (list 'il s2) C (list 'il s3) D (list 'il s4)
+        w (fn [x] (list 'cv it x)) ; wrapped to the part type (its loads extend to 64 bits)
+        ib (fn [o x y] (w (list 'bin o "i64" x y)))
+        [re im] (case op
+                  + [(ib "add" A C) (ib "add" B D)]
+                  - [(ib "sub" A C) (ib "sub" B D)]
+                  * [(ib "sub" (ib "mul" A C) (ib "mul" B D)) (ib "add" (ib "mul" A D) (ib "mul" B C))]
+                  / (let [den (ib "add" (ib "mul" C C) (ib "mul" D D))
+                          dv (if (unsigned-ty? it) "u64" "i64")]
+                      [(w (list 'bin "div" dv (ib "add" (ib "mul" A C) (ib "mul" B D)) den))
+                       (w (list 'bin "div" dv (ib "sub" (ib "mul" B C) (ib "mul" A D)) den))])
+                  (refuse :complex "the operator " op " on complex operands"))]
+    (cmake ot {:k :i :t ft :n re} {:k :i :t ft :n im} (vec (concat pa pb sets)))))
 
 (defn- carith
   "A complex operator at the complex type ot (gcc -O0's formulas; its __muldc3 and __divdc3 handle
   infinities and NaNs more carefully: SPEC §13's class complex-edge when a program shows it)."
   [op a b ot]
+  (if (= :i (kind (under (:of (under ot)))))
+    (icarith op a b ot)
   (let [ft (under (:of (under ot)))
         f32 (if (f32? ft) 1 0)
         [pa ar ai] (cparts (conv a ot))
@@ -397,7 +450,7 @@
                       [(fb "div" (fb "add" (fb "mul" A C) (fb "mul" B D)) den)
                        (fb "div" (fb "sub" (fb "mul" B C) (fb "mul" A D)) den)])
                   (refuse :complex "the operator " op " on complex operands"))]
-    (cmake ot {:k :f :t ft :n re} {:k :f :t ft :n im} (vec (concat pa pb sets)))))
+    (cmake ot {:k :f :t ft :n re} {:k :f :t ft :n im} (vec (concat pa pb sets))))))
 
 (defn- effect
   "A node as an effect."
@@ -461,7 +514,7 @@
   (let [loc (cond
               (:static (:m e)) {:loc :static :idx (static-idx [:local (:id e)] (size-of t) (obj-align e t)
                                                                 (contains? (chk/quals t) :const))}
-              (and (= :array (:k (unq t))) (:vla (unq t))) {:loc :vla :slot (new-slot! :i) :size (new-slot! :i)}
+              (or (and (= :array (:k (unq t))) (:vla (unq t))) (var-size? t)) {:loc :vla :slot (new-slot! :i) :size (new-slot! :i)}
               (addressed? (:name e) t) (let [al (obj-align e t)]
                                          ;; the frame's base is 16-aligned (go/arbace/ci's Enter and Call): an object aligned
                                          ;; more takes al - 16 bytes more and its address is rounded up at run time (queue 173)
@@ -532,7 +585,7 @@
 
 (defn- place-store
   "A store of the node v (of the place's type) into the place: the node, its value the value stored."
-  [{:keys [mode k a t bits bitoff unit]} v]
+  [{:keys [mode k a t bits bitoff unit vsize]} v]
   (case mode
     :slot-i {:k :i :t t :n (list 'is k (:n v))}
     :slot-f {:k :f :t t :n (list 'fs k (:n v))}
@@ -544,7 +597,8 @@
              :i {:k :i :t t :n (list 'st (ity t) a (:n v))}
              :f {:k :f :t t :n (list 'fst (fty t) a (:n v))}
              :w {:k :w :t t :n (list 'wst (wty t) a (:n v))}
-             :m {:k :m :t t :n (list 'copy a (:n v) (size-of t))}))))
+             ;; a structure of variable size: its run-time size's bytes (CS106)
+             :m {:k :m :t t :n (if vsize (dyn-copy a (:n v) vsize) (list 'copy a (:n v) (size-of t)))}))))
 
 (defn- ptr-target-size
   "The size of what a pointer type points to (1 for void and functions, GNU's)."
@@ -561,13 +615,84 @@
 (def ^:dynamic *vm-typedefs* nil) ; the block's variably modified typedefs: an atom of name -> rtt
 
 (defn- vm?
-  "Whether a type is variably modified through arrays and pointers (structs holding VLAs: out of scope)."
+  "Whether a type is variably modified through arrays and pointers, or a structure or union with a variably modified
+  member (GNU's; the checker's vm-type?, CS106)."
   [t]
   (let [t (unq t)]
     (case (:k t)
       :array (boolean (or (:vla t) (vm? (:of t))))
       :ptr (vm? (:to t))
+      (:struct :union) (boolean (#'chk/vm-type? t))
       false)))
+
+(defn- var-size? "Whether a type's size is the run time's (a VLA, a structure holding one)." [t] (chk/var-size? t))
+
+;; GNU's variably modified structures and unions (CS106): the definition laid out where it stands, as gcc's
+;; stor-layout does with variable sizes (each member at its offset rounded up to its alignment, the size rounded up to
+;; the record's), its offsets and size kept in slots; the record's rtt, {:vsize (when of variable size) :vmem {NAME {:off
+;; LONG-OR-NODE :rt RTT}}}, kept per function by the checker's record
+
+(defn- struct-def
+  "The definition of a variably modified structure or union a type form holds at its head (through qualifiers):
+  [kind record body], the checker's record found by its body."
+  [tf]
+  (when (seq? tf)
+    (let [h (first tf)]
+      (cond
+        ('#{const volatile restrict atomic} h) (struct-def (second tf))
+        ('#{struct union c/struct c/union} h)
+        (when-let [body (first (filter vector? (rest tf)))]
+          (let [r (ex-res body)] (when (:rec r) [(:kind r) (:rec r) body])))
+        :else nil))))
+
+(defn- rec-rtt "A variably modified record's rtt, once its definition ran in the function." [t]
+  (when-let [^IdentityHashMap m (and *f* (:vmrecs @*f*))] (.get m (:rec (unq t)))))
+
+(defn- member-tfs
+  "A definition's members' type forms, in the checker's member order (arbace.c.check's member-forms): a group's c/base
+  replaced by the group's base form."
+  [body]
+  (vec (mapcat (fn mt [m]
+                 (cond
+                   (and (seq? m) (= 'c/static-assert (first m))) []
+                   (and (seq? m) (= 'c/bits (first m))) [(second m)]
+                   (and (seq? m) (= 'c/group (first m)))
+                   (let [base (second m)]
+                     (map (fn sub [tf] (cond (= tf 'c/base) base
+                                             (seq? tf) (with-meta (apply list (map sub tf)) (meta tf))
+                                             :else tf))
+                          (mapcat mt (drop 2 m))))
+                   (and (seq? m) ('#{struct union} (first m))) [m]
+                   :else [(:tag (meta m))]))
+               body)))
+
+(defn- vmem-of
+  "The rtt member entry {:off :rt} of the member named n of a record's rtt."
+  [rt ^String n]
+  (get (:vmem rt) n))
+
+(defn- dyn-member
+  "The checker's member mm of the record whose rtt is rt, its offset the run time's when it follows a member of variable
+  size."
+  [mm rt]
+  (if (:voff mm)
+    (assoc mm :off (or (:off (vmem-of rt (:name mm))) (refuse :vla "the offset of a member after one of variable size")))
+    mm))
+
+(defn- dyn-copy
+  "A copy of n bytes (a node) from the address src to dst: a node whose value is dst (a structure of variable size)."
+  [dst src n]
+  (let [d (new-slot! :i) s (new-slot! :i) i (new-slot! :i) c (new-slot! :i)]
+    (list 'sx (list 'do [(list 'x (list 'ei (list 'is d dst)))
+                         (list 'x (list 'ei (list 'is s src)))
+                         (list 'x (list 'ei (list 'is c n)))
+                         (list 'x (list 'ei (list 'is i '(i 0))))
+                         (list 'loop (list 'cmp "lt" "u64" (list 'il i) (list 'il c))
+                               (list 'ei (list 'is i (list 'bin "add" "u64" (list 'il i) '(i 1))))
+                               (list 'do [(list 'x (list 'ei (list 'st "u8" (list 'adds (list 'il d) (list 'il i) 1)
+                                                                   (list 'ld "u8" (list 'adds (list 'il s) (list 'il i) 1)))))])
+                               0)])
+          (list 'il d))))
 
 (defn- rt-elem "A pointer's or array's rtt's element rtt." [rt]
   (case (:k (unq rt)) :ptr (:to rt) :array (:of rt) nil))
@@ -604,7 +729,14 @@
             (set! inc! dec! pre-inc! pre-dec!) (as-ptr (rtt-of (first args)))
             (+ -) (when (ptr? t) (some-> (ptr-arg args) rtt-of as-ptr))
             ? (as-ptr (if (= 3 (count args)) (or (rtt-of (second args)) (rtt-of (nth args 2))) (or (rtt-of (first args)) (rtt-of (second args)))))
-            nil))
+            ;; a member of a variably modified structure (CS106): p->a->b through the pointers' targets
+            -> (loop [rt (rtt-of (first args)) ms (next args)]
+                 (if (and rt ms)
+                   (recur (:rt (vmem-of (:to rt) (name (first ms)))) (next ms))
+                   rt))
+            stmt-expr nil
+            (when (and (symbol? h) (str/starts-with? (name h) ".-"))
+              (some-> (rtt-of (first args)) (vmem-of (subs (name h) 2)) :rt))))
         :else nil))))
 
 (defn- with-rtt "The node x of the form f with f's rtt, when it has one." [f x]
@@ -618,9 +750,54 @@
   (let [out (java.util.ArrayList.)
         stmt! (fn [n] (.add out (list 'x n)))
         tname (fn [tf] (cond (symbol? tf) (name tf) (and (seq? tf) (= 'c/id (first tf))) (second tf)))
+        slot! (fn [n] (let [s (new-slot! :i)] (.add out (list 'x (list 'ei (list 'is s n)))) (list 'il s)))
+        nd (fn [x] (if (number? x) (list 'i (long x)) x))
+        up (fn [x ^long a] (if (<= a 1) x (list 'bin "and" "u64" (list 'bin "add" "u64" (nd x) (list 'i (dec a))) (list 'i (- a)))))
+        rec! (fn rec! [go kind ^HashMap r body t]
+               ;; the definition run: each member's type elaborated (its sizes evaluated in order), its offset and the
+               ;; record's size computed where they are the run time's
+               (let [ms (.get r :members)
+                     tfs (member-tfs body)
+                     _ (when-not (= (count ms) (count tfs)) (refuse :vla "a variably modified structure's members"))
+                     packed (.get r :packed) max-align (.get r :max-align)
+                     [vmem end vsz]
+                     (reduce
+                       (fn [[vmem end vsz] [m tf]]
+                         (let [mt (:t m)
+                               mrt (go tf mt false)
+                               sz (if (var-size? mt)
+                                    (or (:vsize mrt) (refuse :vla "the size of a member of variable size"))
+                                    (or (with-types (chk/size-of (unq mt))) 0))]
+                           (if (= kind :union)
+                             [(cond-> vmem (:name m) (assoc (:name m) {:off 0 :rt mrt}))
+                              nil
+                              (if (or (not (number? sz)) (not (number? vsz)))
+                                (slot! (list 'if (list 'cmp "lt" "u64" (nd vsz) (nd sz)) (nd sz) (nd vsz)))
+                                (max (long vsz) (long sz)))]
+                             (let [_ (when (and (:bits m) (:voff m)) (refuse :vla "a bit-field after a member of variable size"))
+                                   off (if (:voff m)
+                                         (slot! (up end (long (with-types (#'chk/member-align m packed max-align)))))
+                                         (:off m))
+                                   end (if (or (:voff m) (var-size? mt)) (slot! (list 'bin "add" "u64" (nd off) (nd sz))) end)]
+                               [(cond-> vmem (:name m) (assoc (:name m) {:off off :rt mrt})) end nil]))))
+                       [{} nil 0]
+                       (map vector ms tfs))
+                     al (long (.get r :align))
+                     vsize (when (.get r :var-size)
+                             (if (= kind :union)
+                               (if (number? vsz) nil (slot! (up vsz al)))
+                               (slot! (up end al))))
+                     rt (cond-> (assoc (unq t) :vmem vmem) vsize (assoc :vsize vsize))]
+                 (when-let [^IdentityHashMap vm (and *f* (:vmrecs @*f*))] (.put vm r rt))
+                 rt))
         go (fn go [tf t param]
              (cond
                (and (not param) (not (vm? t))) t
+               ;; a variably modified structure or union: its definition run here, else the rtt of its latest run
+               (#{:struct :union} (:k (unq t)))
+               (if-let [[kind r body] (struct-def tf)]
+                 (rec! go kind r body t)
+                 (or (rec-rtt t) t))
                (tname tf) (or (and (vm? t) *vm-typedefs* (get @*vm-typedefs* (tname tf))) t)
                (seq? tf)
                (let [[h a b] tf]
@@ -663,10 +840,12 @@
   (let [ra (res-of a) ta (chk/decay (unq (:t ra)))
         [base idx] (if (ptr? ta) [a i] [i a])
         bn (ex base)
-        in (conv (ex idx) chk/t-long)]
-    {:mode :mem :t t :a (if-let [d (when (vm? t) (rt-dscale (rtt-of base)))]
-                          (adds-dyn (:n bn) (:n in) d)
-                          (list 'adds (:n bn) (:n in) (size-of t)))}))
+        in (conv (ex idx) chk/t-long)
+        d (when (vm? t) (rt-dscale (rtt-of base)))]
+    (cond-> {:mode :mem :t t :a (if d
+                                  (adds-dyn (:n bn) (:n in) d)
+                                  (list 'adds (:n bn) (:n in) (size-of t)))}
+      (and d (var-size? t)) (assoc :vsize d))))
 
 (defn- place
   "A form's place (an lvalue)."
@@ -705,7 +884,8 @@
           (str/starts-with? (name h) ".-")
           (let [base (first args)
                 bp (place base)
-                mm (:member r)]
+                mm (:member r)
+                mm (if (:voff mm) (dyn-member mm (rtt-of base)) mm)]
             (member-place bp mm t))
           (= h 'compound-lit) (compound-lit-place f)
           (#{'real 'imag} h) (refuse :by-design "__real__ and __imag__ (SPEC §14)")
@@ -722,7 +902,9 @@
 (defn- member-place
   "The member mm of the aggregate at place bp."
   [bp mm t]
-  (let [a (list 'adds (:a bp) '(i 1) (long (:off mm)))]
+  (let [a (if (number? (:off mm))
+            (list 'adds (:a bp) '(i 1) (long (:off mm)))
+            (list 'adds (:a bp) (:off mm) 1))] ; after a member of variable size (CS106)
     (if (:bits mm)
       (let [ft (unq (:t mm))
             usize (max 1 (size-of ft))
@@ -741,17 +923,20 @@
   [f]
   (let [[_ p & ms] f
         r (res-of f)]
-    (loop [pt (chk/decay (unq (:t (res-of p)))) addr (:n (ex-as p :i)) ms (seq ms)]
+    (loop [pt (chk/decay (unq (:t (res-of p)))) addr (:n (ex-as p :i)) ms (seq ms) prt (delay (rtt-of p))]
       (let [rt (unq (:to pt))
             m (name (first ms))
             mm (when (:rec rt) (with-types (#'chk/member rt m)))
             _ (when-not mm (refuse :checker "no member " m " in " (chk/tstr rt) " of " (pr-str f)))
+            ;; the pointer's rtt's target: a variably modified structure's run-time offsets (CS106)
+            srt (delay (:to @prt))
+            mm (if (:voff mm) (dyn-member mm @srt) mm)
             q (chk/quals (:to pt))
             mt (if (seq q) (reduce chk/qual (:t mm) q) (:t mm))
             np (member-place {:mode :mem :a addr} mm mt)]
         (if (next ms)
           (let [x (place-load np)]
-            (recur (chk/decay (unq mt)) (:n x) (next ms)))
+            (recur (chk/decay (unq mt)) (:n x) (next ms) (delay (:rt (vmem-of @srt m)))))
           (assoc np :t (if (:bits np) (:t np) (:t r))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -806,7 +991,7 @@
       (let [ot (with-types (chk/usual (promoted ra) (promoted rb)))]
        (if (complex? ot)
         (let [[pa ar ai] (cparts (conv a ot)) [pb br bi] (cparts (conv b ot))
-              eq (list 'and (list 'fcmp "eq" (:n ar) (:n br)) (list 'fcmp "eq" (:n ai) (:n bi)))]
+              eq (list 'and (part-eq ar br) (part-eq ai bi))]
           {:k :i :t chk/t-int :n (list 'seq (vec (concat pa pb)) (if (= o "eq") eq (list 'lnot eq)))})
        (let [a (conv a ot) b (conv b ot)]
         {:k :i :t chk/t-int
@@ -874,8 +1059,11 @@
         pl (if (and (seq? pl-f) (= '-> (first pl-f))) (arrow-place pl-f) (place pl-f))
         pt (:t pl)]
     (if (nil? b)
-      ;; (set! place e)
-      (let [v (conv (ex a) pt)]
+      ;; (set! place e); a structure of variable size copied by its run-time size (CS106)
+      (let [v (conv (ex a) pt)
+            pl (if (and (= :m (kind pt)) (var-size? pt) (not (:vsize pl)))
+                 (assoc pl :vsize (or (:vsize (rtt-of pl-f)) (refuse :vla "the size of a structure of variable size")))
+                 pl)]
         (place-store pl v))
       ;; (set! place op e)
       (let [op a e b
@@ -1048,7 +1236,7 @@
                   + (conv x pt)
                   - (let [x (conv x pt)]
                       (if (complex? pt)
-                        (let [[p re im] (cparts x)] (cmake pt {:k :f :t (:t re) :n (list 'fneg (:n re))} {:k :f :t (:t im) :n (list 'fneg (:n im))} p))
+                        (let [[p re im] (cparts x)] (cmake pt (part-neg re) (part-neg im) p))
                         (case (:k x) :f {:k :f :t pt :n (list 'fneg (:n x))} (ex-neg x))))
                   (refuse :forms "unary " h)))
               (loop [acc (with-rtt (first args) (ex (first args))) racc (res-of (first args)) xs (next args)]
@@ -1065,7 +1253,7 @@
             not {:k :i :t chk/t-int :n (list 'lnot (truth (ex (first args))))}
             bit-not (let [x (conv (ex (first args)) t)]
                       (case (if (complex? t) :c (:k x))
-                        :c (let [[p re im] (cparts x)] (cmake t re {:k :f :t (:t im) :n (list 'fneg (:n im))} p))
+                        :c (let [[p re im] (cparts x)] (cmake t re (part-neg im) p))
                         :i {:k :i :t t :n (list 'bnot (ity t) (:n x))}
                         :w {:k :w :t t :n (list 'wnot (wty t) (:n x))}))
             addr (let [a (first args)
@@ -1134,6 +1322,25 @@
                                 (if-let [v (:vsize rt)]
                                   (seq-node (mapv second es) {:k :i :t t :n v})
                                   (refuse :vla "sizeof of a variably modified type")))
+                  ;; offsetof through members or elements of variable size (CS106): the type's rtt walked, each
+                  ;; offset and element size the run time's where it is
+                  offsetof (let [[tf & path] args
+                                 [es rt] (if (and *f* (:tt r)) (elab tf (:tt r) false) (refuse :vla "offsetof of a variably modified type"))
+                                 nd (fn [x] (if (number? x) (list 'i (long x)) x))
+                                 [off pre] (loop [rt rt off '(i 0) pre [] ps (seq path)]
+                                             (if-not ps
+                                               [off pre]
+                                               (let [p (first ps) ut (unq rt)]
+                                                 (if (keyword? p)
+                                                   (let [mm (or (with-types (#'chk/member ut (name p))) (refuse :checker "no member " (name p)))
+                                                         vm (vmem-of rt (name p))
+                                                         o (if (:voff mm) (or (:off vm) (refuse :vla "the offset of a member after one of variable size")) (:off mm))]
+                                                     (recur (or (:rt vm) (:t mm)) (list 'bin "add" "u64" (nd off) (nd o)) pre (next ps)))
+                                                   (let [el (:of ut)
+                                                         esz (if (var-size? el) (or (:vsize el) (refuse :vla "an element of variable size")) (size-of el))
+                                                         ix (:n (conv (ex p) chk/t-long))]
+                                                     (recur el (list 'bin "add" "u64" (nd off) (list 'bin "mul" "i64" ix (nd esz))) pre (next ps)))))))]
+                              (seq-node (mapv second es) {:k :i :t t :n (nd off)}))
                   (refuse :vla "sizeof of a variably modified type")))
             generic (let [chosen (or (some #(when (= :chosen (ex-res %)) %) (drop 2 f))
                                      (refuse :checker "_Generic without a chosen association"))]
@@ -1152,8 +1359,10 @@
             va-arg (let [[ap tf] args
                          apl (place ap)
                          aa (if (= :mem (:mode apl)) (:a apl) (refuse :builder "va_arg of a register place"))
-                         slot {:k :i :t t :n (list 'vaarg aa (if (= :m (kind t)) (size-of t) (max 8 (size-of t))))}]
-                     (place-load {:mode :mem :a (:n slot) :t t}))
+                         vs (var-size? t)
+                         slot {:k :i :t t :n (list 'vaarg aa (cond vs 8 (= :m (kind t)) (size-of t) :else (max 8 (size-of t))))}]
+                     ;; a type of variable size arrives by reference (arg-node, CS106)
+                     (place-load {:mode :mem :a (if vs (list 'ld "u64" (:n slot)) (:n slot)) :t t}))
             label-addr {:k :i :t t :n (list 'labaddr (label-code! (first args)))}
             c/call (call-node f (first args) (rest args) r)
             c/expr (ex (first args))
@@ -1175,7 +1384,9 @@
               (let [base (first args)
                     rb (res-of base)
                     bx (ex-as base :i)
-                    pl (member-place {:mode :mem :a (:n bx)} (:member r) t)
+                    mm (:member r)
+                    mm (if (:voff mm) (dyn-member mm (rtt-of base)) mm)
+                    pl (member-place {:mode :mem :a (:n bx)} mm t)
                     x (place-load pl)]
                 (if (= :array (:k (unq t))) (assoc x :k :i :t (chk/decay (unq t))) x))
               (call-node f h args r))))))
@@ -1237,7 +1448,11 @@
                          (= :i (kind t)) (if (ptr? t) t (with-types (chk/promote t (:bits ra))))
                          :else t)))
         x (conv x t)]
-    (case (:k x)
+    (case (if (and (= :m (:k x)) (var-size? (:t x))) :vm (:k x))
+      ;; a structure of variable size: passed by reference to a copy, as gcc passes every type of variable size
+      ;; (calls.cc's pass_by_reference; va_arg reads the pointer, CS106)
+      :vm (let [vs (or (:vsize (rtt-of a)) (refuse :vla "an argument of variable size"))]
+            (list 'ai (dyn-copy (list 'alloca vs) (:n x) vs)))
       :i (list 'ai (:n x))
       :f (list 'af (:n x))
       :w (list 'aw (:n x))
@@ -1784,7 +1999,11 @@
                     (swap! *vm-typedefs* assoc n rt)
                     es)
                   []))
-    c/group (vec (mapcat local-decl (drop 2 d)))
+    ;; a variably modified structure's or union's definition: laid out where it stands (CS106)
+    (c/struct c/union) (if-let [[kind r] (struct-def d)] (first (elab d {:k kind :rec r} false)) [])
+    c/group (let [base (second d)
+                  pre (if-let [[kind r] (struct-def base)] (first (elab base {:k kind :rec r} false)) [])]
+              (into pre (mapcat local-decl (drop 2 d))))
     c/defn (refuse :by-design "GNU nested functions (SPEC §14)")
     []))
 
@@ -1996,7 +2215,7 @@
         (refuse :by-design (:name e) ": inline assembly (SPEC §14)"))
     (try
     (binding [*f* (atom {:ni 0 :nf 0 :frame 0 :labels {} :locals {} :fn-ret rt :fn-name (:name e)
-                         :addressed (addressed-names body) :rtts (IdentityHashMap.)})
+                         :addressed (addressed-names body) :rtts (IdentityHashMap.) :vmrecs (IdentityHashMap.)})
               *vm-typedefs* (atom {})]
       (let [sret (when (= :m (kind rt)) (new-slot! :i))
             ;; an unnamed parameter (C23) still takes its argument: a place of its own, its type the checker's function
