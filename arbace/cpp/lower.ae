@@ -25,12 +25,16 @@
 (def ^:dynamic *attr-groups* nil)
 (def ^:dynamic *typeids* nil)   ; atom: {typeinfo-name-or-null id}
 (def ^:dynamic *fn* nil)        ; the function being lowered: atom of its state
-;; how a va_list is held (LL6): :native, the lowered C's own __builtin_va_list in the IR's va_list memory (gcc's SysV va_list is
-;; the IR's { i32, i32, ptr, ptr }, so clang's inline va_arg code reads it); :sysv-ci, the IR's SysV va_list kept by the lowering
-;; for ci, whose va_list is a pointer to the next 8-byte slot (doc/C23-SURVEY.md §7): gp_offset 48 and fp_offset 176 (every
-;; register used), overflow_arg_area that pointer, so clang's inline code reads every argument from ci's varargs area, and a
-;; va_list passed to libc's v* functions passed as its overflow_arg_area (va-list-args); llvmi binds it (arbace.llvm.run)
-(def ^:dynamic *va-model* :native)
+;; LL6: the lowering for ci (llvmi binds *ci* true, arbace.llvm.run; C++'s lowering for gcc leaves it false), where the C differs:
+;; - a va_list: natively the lowered C's own __builtin_va_list in the IR's va_list memory (gcc's SysV va_list is the IR's
+;;   { i32, i32, ptr, ptr }, so clang's inline va_arg code reads it); for ci, whose va_list is a pointer to the next 8-byte slot
+;;   (doc/C23-SURVEY.md §7), the IR's SysV va_list kept by the lowering: gp_offset 48 and fp_offset 176 (every register used),
+;;   overflow_arg_area that pointer, so clang's inline code reads every argument from ci's varargs area, and a va_list passed to
+;;   libc's v* functions passed as its overflow_arg_area (va-list-args);
+;; - llvm.stacksave and llvm.stackrestore: natively nothing (gcc's alloca); for ci, in a function that restores, its dynamic
+;;   allocas taken from the heap on a chain (cx$dyn_alloc), stackrestore freeing back to the saved head and every return to none
+;;   (cx$dyn_restore, llvmi's layer arbace/llvm/rt/none.c.ae), so a loop's VLAs do not exhaust ci's C stack
+(def ^:dynamic *ci* false)
 ;; blockaddress and indirectbr (LL6): a block's address is a token, a small integer as a pointer distinct for each (function, block) of the
 ;; module, and indirectbr a switch over its destinations' tokens: LangRef lets a blockaddress be only compared, stored and jumped to by
 ;; its function's indirectbr, so no C extension is needed (gcc's &&label is not a file-scope constant, and clang hoists the tables)
@@ -602,7 +606,7 @@
       (re-matches #"llvm\.is\.constant\..*" nm) (set-res (int-lit 0 1))
       (re-matches #"llvm\.objectsize\..*" nm) (set-res (int-lit (if (true? (peek (nth args 1))) 0 -1) (int-bits rt)))
       (#{"llvm.trap" "llvm.ubsantrap" "llvm.debugtrap"} nm) ['(__builtin_trap)]
-      (and (= *va-model* :sysv-ci) (re-matches #"llvm\.va_(start|end|copy).*" nm))
+      (and *ci* (re-matches #"llvm\.va_(start|end|copy).*" nm))
       (case (nth parts 1)
         "va_start" [(list 'let [(list 'c/var (with-meta 'cx$va {:tag '__builtin_va_list}))]
                           (list '__builtin_va_start 'cx$va (or (:last-param @*fn*) (refuse :va "va_start without a named parameter")))
@@ -618,6 +622,8 @@
       ;; LL6: C's builtins, with a constant level as LangRef requires (ci answers 0 for the return address)
       (re-matches #"llvm\.returnaddress.*" nm) (set-res (list '__builtin_return_address (a 0)))
       (re-matches #"llvm\.frameaddress.*" nm) (set-res (list '__builtin_frame_address (a 0)))
+      (and *ci* (:dyn @*fn*) (re-matches #"llvm\.stacksave.*" nm)) (set-res 'cx$dyn)
+      (and *ci* (:dyn @*fn*) (re-matches #"llvm\.stackrestore.*" nm)) [(list 'cx$dyn_restore '(addr cx$dyn) (a 0))]
       (re-matches #"llvm\.stacksave.*" nm) (set-res '(conv (* void) 0))
       (re-matches #"llvm\.stackrestore.*" nm) []
       (re-matches #"llvm\.([su])(add|sub|mul)\.with\.overflow\.i[0-9]+" nm)
@@ -882,7 +888,7 @@
                              (let [bt (param-attr a :byval) v (typed-value [(first a) (peek a)])]
                                (if bt (list 'deref (list 'conv (list '* (ctype bt)) v)) v))))
             call-sig [rt (vec (map first args)) (boolean variadic) (vec (map #(param-attr % :byval) args))]
-            arg-exprs (if-let [i (and (= *va-model* :sysv-ci) gname (= (quote llvm/declare) (first (:form info))) (va-list-args gname))]
+            arg-exprs (if-let [i (and *ci* gname (= (quote llvm/declare) (first (:form info))) (va-list-args gname))]
                         (if (< i (count arg-exprs)) (update arg-exprs i va-overflow) arg-exprs)
                         arg-exprs)
             direct (and info (= (:kind info) :fn)
@@ -982,7 +988,10 @@
                  (let [n (* (long s) (long (if cnt (second cnt) 1))) m (symbol (str res "$m"))]
                    (swap! *fn* update :allocas conj (with-meta m {:tag (list 'array (max n 1) 'unsigned-char) :c/alignas al}))
                    (set (list 'conv '(* void) m)))
-                 (set (list '__builtin_alloca_with_align (if cnt (list '* (uval (typed-value cnt) (int-bits (first cnt))) s) s) (* 8 al)))))
+                 (let [n (if cnt (list '* (uval (typed-value cnt) (int-bits (first cnt))) s) s)]
+                   (if (and *ci* (:dyn @*fn*))
+                     (set (list 'cx$dyn_alloc n al '(addr cx$dyn)))
+                     (set (list '__builtin_alloca_with_align n (* 8 al)))))))
       ;; an integer of an odd width: loaded masked to it, and when its store size is smaller than its container's (i24, i40,
       ;; i48, i56: bit-field access units clang does not widen over the next field) loaded and stored by those bytes only
       load (let [[t pv] [(second x) (nth x 2)] ct0 (ctype t) ct (if (:volatile o) (list 'volatile ct0) ct0) w (int-bits t)
@@ -1064,7 +1073,8 @@
                                                     (if (:weak o) 1 0)
                                                     (order-join (atomic-order (nth x 4)) (atomic-order (nth x 5))) (atomic-order (nth x 5))))])
       fence [(list (if (= (:syncscope o) "singlethread") '__atomic_signal_fence '__atomic_thread_fence) (atomic-order (second x)))]
-      ret (if (= (second x) 'void) ['(return)] [(list 'return (value (nth x 2) (second x)))])
+      ret (into (if (and *ci* (:dyn @*fn*)) ['(cx$dyn_restore (addr cx$dyn) (conv (* void) 0))] [])
+                (if (= (second x) 'void) ['(return)] [(list 'return (value (nth x 2) (second x)))]))
       br (if (= 2 (count x))
            (edge (second x))
            (let [[_ _ c a b] x] [(list 'if (value c 'i1) (apply list 'do (edge a)) (apply list 'do (edge b)))]))
@@ -1081,7 +1091,7 @@
                                    ['(default) '(__builtin_trap)]))])
       ;; va_arg (LL6): from the overflow area, the next slot of size rounded to 8 (ci's layout, no 16-byte alignment); natively gcc's
       va_arg (let [[_ [pt p] t] x]
-               (if (= *va-model* :sysv-ci)
+               (if *ci*
                  (let [ap (value p pt) [s _] (size-align t)]
                    (set (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$vp {:tag '(* void)}) (va-overflow ap))]
                                                (list 'set! (va-overflow ap) (list 'conv '(* void) (list '+ '(conv (* char) cx$vp) (* 8 (quot (+ (long s) 7) 8)))))
@@ -1119,7 +1129,8 @@
                         (if bt
                           {:c (with-meta (symbol (str sym "$v")) {:tag (ctype bt)}) :local sym :byval true}
                           {:c (with-meta sym {:tag (ctype t)})}))))
-        state (atom {:void (= rt 'void) :name (gname-str (second f)) :allocas [] :phis {} :block nil :entry-block true
+        dyn (and *ci* (boolean (some (fn [b] (some #(re-find #"llvm\.stackrestore" (pr-str %)) (drop 2 b))) blocks)))
+        state (atom {:void (= rt 'void) :name (gname-str (second f)) :dyn dyn :allocas [] :phis {} :block nil :entry-block true
                      :last-param (some-> (last (remove :byval params)) :c (vary-meta (constantly nil)))})
         _ (doseq [b blocks]
             (let [[_ l & is] b]
@@ -1142,7 +1153,8 @@
                (for [m (:allocas @state)] (list 'c/var m))
                (for [[s t] (sort-by (comp str key) @locals) :when (not= t 'void)] (list 'c/var (with-meta s {:tag (ctype t)})))
                (for [[_ ps] (:phis @state) [r t _] ps] (list 'c/var (with-meta (symbol (str r "$p")) {:tag (ctype t)})))
-               (when-not (= rt 'void) [(list 'c/var (with-meta 'cx$z {:tag (ctype rt)}) '(init))]))
+               (when-not (= rt 'void) [(list 'c/var (with-meta 'cx$z {:tag (ctype rt)}) '(init))])
+               (when dyn [(list 'c/var (with-meta 'cx$dyn {:tag '(* void)}) '(conv (* void) 0))]))
         pvec (let [cs (mapv :c params)] (cond-> (if (empty? cs) (if (some #{'&} ps) [] ['void]) cs) (some #{'&} ps) (conj '&)))]
     (list 'c/defn (:c-decl info) (with-meta pvec {:tag (ctype rt)})
           (apply list 'let (vec decls) body))))
@@ -1265,7 +1277,10 @@
                   (list 'c/declare 'cx$exception (with-meta ['void] {:tag '(* void)}))
                   (list 'c/declare 'cx$catches (with-meta [(with-meta 'ti {:tag '(* void)})] {:tag 'int}))
                   (list 'c/declare 'cx$resume (with-meta [(with-meta 'o {:tag '(* void)})] {:tag 'void}))
-                  (list 'c/declare 'cx$uncaught (with-meta ['void] {:tag 'void}))]]
+                  (list 'c/declare 'cx$uncaught (with-meta ['void] {:tag 'void}))]
+            head (cond-> head
+                   *ci* (conj (list 'c/declare 'cx$dyn_alloc (with-meta [(with-meta 'n {:tag 'unsigned-long}) (with-meta 'al {:tag 'unsigned-long}) (with-meta 'h {:tag '(* (* void))})] {:tag '(* void)}))
+                              (list 'c/declare 'cx$dyn_restore (with-meta [(with-meta 'h {:tag '(* (* void))}) (with-meta 'to {:tag '(* void)})] {:tag 'void}))))]
         [(list 'c/file c-name :std :gnu23)
          (vec (concat (:defs @*structs*) head protos aliases (keep first gvars) (keep second gvars) defs ctor-defs dtor-defs (when wrapper [wrapper])))]))))
 

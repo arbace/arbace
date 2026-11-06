@@ -59,7 +59,8 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
   x86-64 code), `frexp` (`__builtin_frexp*` into the result's two fields), `x86.sse2.pause` (nothing),
   `eh.typeid.for` (a number per type_info), since llvmi `scmp`/`ucmp` (C23's three-way comparisons at `-O2`), `fshl`/`fshr` on
   8 to 64 bits, `lround`/`llround`/`lrint`/`llrint` (`__builtin_l*`), the math functions (`fabs`, `sqrt`, `floor`, ... as `__builtin_*`). Others
-  are refused (`:intrinsic`), `llvm.coro.*` among them (`:coroutine`; clang's `-O0` pipeline runs CoroSplit, so the
+  are refused (`:intrinsic`); since LL6 also `uadd.sat`/`usub.sat`/`sadd.sat`/`ssub.sat` (the overflow builtins' result or the
+  bound), `returnaddress`/`frameaddress` (`__builtin_return_address`, `__builtin_frame_address`), `llvm.coro.*` among the refused (`:coroutine`; clang's `-O0` pipeline runs CoroSplit, so the
   IR it writes holds none: the coroutine sample lowers and runs).
 - **Constants**: integers as `(lit unsigned N)`/`(lit unsigned-long N)` (an `i128` by shifts), doubles as their
   shortest decimal, floats `(lit float x)`, NaNs by their payload (`__builtin_nan("0x...")`, `__builtin_nans` for a
@@ -160,3 +161,28 @@ pending flag and the in-flight exception are per thread (CP103 (b)), a thread's 
 §8), and the atomics of the lowered library and programs are gcc's `__atomic_*` builtins (CP121 (c), §7): the refcounts of
 `std::shared_ptr` and `std::exception_ptr`, the guards of function-local statics (`__cxa_guard_acquire`, libsupc++'s,
 lowered) and `std::atomic` are shared state that works across threads (the runtime sample `atomics.cpp`).
+
+
+## LL6: the lowering for ci (`*ci*`), the va_arg instruction, blockaddress
+
+Since LL6 (doc/llvm/LLVM-CROP-SURVEY.md, "As built: LL6") `arbace.cpp.lower/*ci*` (false by default, C++'s lowering for gcc unchanged;
+llvmi binds it true, `arbace.llvm.run`) writes the two places where the C for ci differs from the C for gcc:
+
+- **va_list.** gcc's `__builtin_va_list` is SysV's `{ i32 gp_offset, i32 fp_offset, ptr overflow_arg_area, ptr reg_save_area }`,
+  the IR's own, so clang's inline `va_arg` code reads it. ci's is a pointer to the next 8-byte slot of the caller's varargs area
+  (doc/C23-SURVEY.md §7). For ci, `llvm.va_start` writes the SysV form with every register used (gp_offset 48, fp_offset 176),
+  `overflow_arg_area` ci's slot pointer and `reg_save_area` null, so the inline code reads every argument from ci's area, slot after
+  slot; `va_end` is nothing, `va_copy` a 24-byte copy; a call to libc's functions that take a `va_list` (`vprintf` ... `vwarnx`,
+  `va-list-args`, a declared callee only) passes the `overflow_arg_area` as musl's `va_list`. A 16-byte-aligned argument (long double,
+  `__int128`) is the one case where clang's code (aligning the area to 16) and ci's slots (8) disagree.
+- **The va_arg instruction** (hand-written IR; clang lowers va_arg itself on x86-64): for ci the next slot of the
+  `overflow_arg_area`, its size rounded to 8; for gcc C's `va_arg` on the IR's `va_list`.
+- **stacksave and stackrestore.** For gcc nothing (gcc's alloca). For ci, a function that calls `llvm.stackrestore` takes its dynamic
+  allocas from the heap on a chain of its own (`cx$dyn_alloc`), `stacksave` returns the chain's head, `stackrestore` frees back to it
+  and every `ret` frees the rest (`cx$dyn_restore`, in llvmi's layer `arbace/llvm/rt/none.c.ae`), so a loop's VLAs do not exhaust
+  ci's C stack (gcc's `vla-dealloc-1`).
+
+For both: **blockaddress** is a token, `(void *)(unsigned long)N` with N distinct for each (function, block) of the module, and
+**indirectbr** a `switch` over its destinations' tokens (`default` traps): LangRef lets a block's address only be compared, stored
+and jumped to by its own function's `indirectbr`, and gcc's `&&label` is no file-scope constant, while clang hoists a computed goto's
+table into a global.

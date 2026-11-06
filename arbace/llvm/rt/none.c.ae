@@ -24,3 +24,36 @@
 (c/defn cx$cxa_atexit ^int [^{:tag (* (fn [(* void)] void))} f ^{:tag (* void)} a ^{:tag (* void)} dso] (return (__cxa_atexit f a dso)))
 (c/defn cx$pthread_create ^int [^{:tag (* void)} th ^{:tag (* void)} attr ^{:tag (* (fn [(* void)] (* void)))} f ^{:tag (* void)} a]
   (return (pthread_create th attr f a)))
+
+;; LL6: the dynamic allocas of a function that restores the stack (llvm.stackrestore; arbace.cpp.lower's *ci*): each a heap
+;; block on the function's chain (its words: the previous head, its size, its alignment); a restore takes the blocks back to the
+;; saved head, a return to none, onto a list of spare blocks the next allocas reuse (an interpreted malloc and free a loop's
+;; iteration, gcc's vla-dealloc-1's million, is a minute on ci; a spare of the size is a few steps)
+(c/declare aligned_alloc ^{:tag (* void)} [^unsigned-long al ^unsigned-long n])
+(c/var ^:static ^{:tag (* (* void))} cx$dyn_spare 0)
+(c/defn cx$dyn_alloc ^{:tag (* void)} [^unsigned-long n ^unsigned-long al ^{:tag (* (* void))} h]
+  (let [^unsigned-long a (? (< al 32) 32 al)
+        ^unsigned-long sz (* (/ (+ (+ n a) (- a 1)) a) a)
+        ^{:tag (* (* (* void)))} pp (addr cx$dyn_spare)
+        ^{:tag (* (* void))} b 0]
+    (while (!= (deref pp) 0)
+      (let [^{:tag (* (* void))} c (deref pp)]
+        (when (and (>= (conv unsigned-long (aget c 1)) sz) (== (conv unsigned-long (aget c 2)) a))
+          (set! (deref pp) (conv (* (* void)) (aget c 0)))
+          (set! b c)
+          (break))
+        (set! pp (conv (* (* (* void))) c))))
+    (when (== b 0)
+      (set! b (conv (* (* void)) (aligned_alloc a sz)))
+      (when (== b 0) (abort))
+      (set! (aget b 1) (conv (* void) sz))
+      (set! (aget b 2) (conv (* void) a)))
+    (set! (aget b 0) (deref h))
+    (set! (deref h) (conv (* void) b))
+    (return (conv (* void) (+ (conv (* char) b) a)))))
+(c/defn cx$dyn_restore ^void [^{:tag (* (* void))} h ^{:tag (* void)} to]
+  (while (and (!= (deref h) to) (!= (deref h) 0))
+    (let [^{:tag (* (* void))} b (conv (* (* void)) (deref h))]
+      (set! (deref h) (aget b 0))
+      (set! (aget b 0) (conv (* void) cx$dyn_spare))
+      (set! cx$dyn_spare b))))
