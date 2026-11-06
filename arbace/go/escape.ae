@@ -31,6 +31,11 @@
   "gc's -m level (base.Flag.LowerM)."
   1)
 
+(def ^:dynamic *debug*
+  "gc's -d flags the analysis reads: {:escapemutationscalls n :zerocopy n} (base.Debug; zerocopy
+  is on by default)."
+  {:zerocopy 1})
+
 (def ^:dynamic *msgs*
   "A volatile vector of the messages: [line text]."
   nil)
@@ -266,7 +271,7 @@
 
 (defn- old-loc [e o]
   (or (.get ^java.util.HashMap (:loc-of *ctx*) o)
-      (unsupported! (str "a variable without a location (" (e/o o :name) ")"))))
+      (unsupported! (str "a variable without a location (" (e/o o :name) " of line " (e/o o :line) " in " (fn-get (curfn e) :name) ")"))))
 
 (defn- flow
   "batch.flow."
@@ -375,7 +380,7 @@
 
 ;;; ir/fmt.go's exprFmt, for the messages
 
-(declare fmt-node)
+(declare fmt-node variadic-args)
 
 (def ^:private prec
   {:call 8 :lit 8 :local 8 :global 8 :func 8 :const 8 :nil 8 :conv 8 :convert-iface 8 :index 8 :map-index 8
@@ -436,7 +441,10 @@
       (str "(" (fmt-node n 0) ")")
       (case (if (const? n) :const (:op n))
         (:local :global :place-local :place-global) (let [nm (e/o (:obj n) :name)] (if (str/starts-with? nm "~b") "_" nm))
-        :func (e/o (:obj n) :name)
+        :func (let [o (:obj n) pk (e/o o :pkg)]
+                (if (and pk (not= pk (:local-pkg *ctx*)))
+                  (str (last (str/split (str pk) #"/")) "." (e/o o :name))
+                  (e/o o :name)))
         (:const :nil) (const-str n)
         :fn "func literal"
         :addr (if (= :lit (:op (:x n)))
@@ -465,8 +473,11 @@
         :call (case (:kind n)
                 :builtin (builtin-str n)
                 (let [c (:callee n)
-                      args (:args n)]
-                  (str (fmt-node c np) "(" (args-str args) (when (spread-call? n) "...") ")")))
+                      sig (node-type c)
+                      variadic (and (vector? (under sig)) (= :func (nth (under sig) 0)) (nth (under sig) 3 false))
+                      args (if variadic (variadic-args n sig) (:args n))
+                      ddd (or (spread-call? n) variadic)]
+                  (str (fmt-node c np) "(" (args-str args) (when ddd "...") ")")))
         :result (fmt-node (:call n) p)
         :unary (str (gop n) (when (= (:op (:x n)) :unary) " ") (fmt-node (:x n) (inc (long np))))
         :recv (str "<-" (fmt-node (:x n) (inc (long np))))
@@ -1515,8 +1526,16 @@
         (when (>= x 0)
           (warn! line (str "leaking param: " nm " to result " (nth res-names i) " level=" x))
           (vreset! warned true))))
-    (when-not @warned
-      (warn! line (str nm " does not escape")))))
+    (if (<= (long (get *debug* :escapemutationscalls 0)) 0)
+      (when-not @warned
+        (warn! line (str nm " does not escape")))
+      (do
+        (let [x (leak-get esc 1)]
+          (when (>= x 0) (warn! line (str "mutates param: " nm " derefs=" x)) (vreset! warned true)))
+        (let [x (leak-get esc 2)]
+          (when (>= x 0) (warn! line (str "calls param: " nm " derefs=" x)) (vreset! warned true)))
+        (when-not @warned
+          (warn! line (str nm " does not escape, mutate, or call")))))))
 
 (defn- param-tag
   "batch.paramTag: the tag of f's parameter o (its type ty), reporting its leaks."
@@ -1563,7 +1582,7 @@
       (when n
        (binding [*wfile* (fn-get (lget l :curfn) :file)]
         (let [wrapper (and (map? n) (= :fn (:op n)) (:wrapper n))]
-          (when (and (pos? (long *m*)) (map? n) (= :conv (:op n)) (= :str2bytes (conv-kind n)) (not (has-attr? l attr-mutates)))
+          (when (and (pos? (long *m*)) (pos? (long (get *debug* :zerocopy 0))) (map? n) (= :conv (:op n)) (= :str2bytes (conv-kind n)) (not (has-attr? l attr-mutates)))
             (warn! (lget l :line) "zero-copy string->[]byte conversion"))
           (if (has-attr? l attr-escapes)
             (if (name-loc? l)
@@ -1790,6 +1809,81 @@
                         c)))))]
         (dv tree false)))))
 
+;;; Bounds check elision (walk/expr.go's walkIndex and bounded): with -m, an index into an
+;;; array whose range the index's type and operation cannot exceed, reported
+
+(defn- small-int-const [n]
+  (when (and n (const? n) (integer? (:val n)) (t/integer-type? (node-type n)))
+    (long (:val n))))
+
+(defn- bounded?
+  "walk.bounded: whether integer expression n is in [0, max)."
+  [n ^long mx]
+  (let [ty (node-type n)]
+    (if-not (and ty (t/integer-type? ty))
+      false
+      (let [sign (not (t/unsigned? ty))
+            bits (* 8 (size ty))]
+        (if-let [v (small-int-const n)]
+          (and (<= 0 v) (< v mx))
+          (let [op (when (= :binary (:op n)) (gop n))
+                [res bits]
+                (case op
+                  ("&" "&^") (let [v (cond (small-int-const (:x n)) (small-int-const (:x n))
+                                           (small-int-const (:y n)) (let [v (small-int-const (:y n))]
+                                                                      (if (= op "&^")
+                                                                        (let [v (bit-not v)]
+                                                                          (if (not sign) (bit-and v (dec (bit-shift-left 1 bits))) v))
+                                                                        v))
+                                           :else -1)]
+                               [(and (<= 0 v) (< v mx)) bits])
+                  "%" [(boolean (and (not sign) (small-int-const (:y n))
+                                     (let [v (small-int-const (:y n))] (and (<= 0 v) (<= v mx)))))
+                       bits]
+                  "/" [false (if (and (not sign) (small-int-const (:y n)))
+                               (loop [bits bits v (small-int-const (:y n))]
+                                 (if (and (> bits 0) (>= v 2)) (recur (dec bits) (bit-shift-right v 1)) bits))
+                               bits)]
+                  ">>" (if (and (not sign) (small-int-const (:y n)))
+                         (let [v (small-int-const (:y n))]
+                           (if (> v bits) [::max bits] [false (- bits v)]))
+                         [false bits])
+                  [false bits])]
+            (cond
+              (= ::max res) (> mx 0)
+              res true
+              (and (not sign) (<= bits 62) (<= (bit-shift-left 1 bits) mx)) true
+              :else false)))))))
+
+(defn- bce-walk!
+  "The index expressions of a function's live code, each elided bounds check reported."
+  [body]
+  (letfn [(walk [x]
+            (cond
+              (map? x)
+              (do (when (and (#{:index :place-index} (:op x)) (:index x))
+                    (let [xt (node-type (:x x))
+                          at (if (t/pointer? xt) (elem xt) xt)
+                          idx (:index x)]
+                      (cond
+                        (= :array (kind at))
+                        (when (and (bounded? idx (long (nth (under at) 1))) (not (small-int-const idx)))
+                          (warn! (:line x) "index bounds check elided"))
+                        (and (const? (:x x)) (string? (:val (:x x))))
+                        (when (and (bounded? idx (count (.getBytes ^String (:val (:x x)) "UTF-8"))) (not (small-int-const idx)))
+                          (warn! (:line x) "index bounds check elided"))
+                        :else nil)))
+                  (case (:op x)
+                    :fn nil
+                    :if (let [c (static-bool (:cond x))]
+                          (walk (:init x)) (walk (:cond x))
+                          (when (>= c 0) (walk (:then x)))
+                          (when (<= c 0) (walk (:else x))))
+                    (doseq [[_ v] x] (walk v))))
+              (sequential? x) (doseq [v (if (every? map? x) (live-stmts x) x)] (walk v))
+              :else nil))]
+    (walk body)))
+
 ;;; The package: its functions, their declarations, closures and captured variables
 
 (defn- scan-fn!
@@ -1820,7 +1914,8 @@
               (cond
                 (map? x)
                 (case (:op x)
-                  :fn (let [c (volatile! {:node x :parent f :closure? true :file (fn-get f :file) :name (str (fn-get f :name) ".func" (inc (count @kids)))
+                  :fn (when-not (.containsKey ^java.util.IdentityHashMap (:fn-of-node *ctx*) x)
+                       (let [c (volatile! {:node x :parent f :closure? true :file (fn-get f :file) :name (str (fn-get f :name) ".func" (inc (count @kids)))
                                           :params (vec (:params x)) :param-types (vec (nth (under (:sig x)) 1))
                                           :results (vec (map-indexed (fn [i r] (or (:obj r) (when (e/obj? r) r)
                                                                                    (e/obj {:kind :var :name (str "~r" i) :line (:line x) :type (:type r)})))
@@ -1830,7 +1925,7 @@
                         (doseq [o (:params x)] (when o (e/oset! o :esc-class :param)))
                         (doseq [o (fn-get c :results)] (e/oset! o :esc-class :result))
                         (.put ^java.util.IdentityHashMap (:fn-of-node *ctx*) x c)
-                        (vswap! kids conj c))
+                        (vswap! kids conj c)))
                   :decl (do (doseq [o (:objs x)] (declare! o))
                             (doseq [o (:objs x)]
                               (when (and o (e/o o :local?) (not (e/o o :addressed?)))
@@ -1966,6 +2061,21 @@
             :conv (and (= :nop (conv-kind n)) (static-init? (:x n)))
             false)))
 
+(defn- dynamic-parts
+  "staticinit.StaticAssign of an initializer: nil when the whole of it is code; else the parts
+  that are (a static composite literal's entries that are not static data), each assigned into
+  the static data by the init function."
+  [n]
+  (cond
+    (static-init? n) []
+    :else (case (:op n)
+            :addr (when (= :lit (:op (:x n))) (dynamic-parts (:x n)))
+            :lit (when (#{:struct :array :slice} (:kind n))
+                   (vec (mapcat (fn [x] (let [v (elt-value x)]
+                                          (or (dynamic-parts v) [v])))
+                                (if (= :struct (:kind n)) (:fields n) (:elems n)))))
+            nil)))
+
 (defn- fn-name
   "ir.FuncName: a function's name, a method's (T).m or (*T).m."
   [d o]
@@ -2049,7 +2159,7 @@
                         (do (when (System/getenv "GOI_ESCAPE_TRACE")
                               (binding [*out* *err*] (println "escape: package" path "not analyzed:" (first (:errors r)))))
                             {})
-                        (binding [*msgs* (volatile! [])]
+                        (binding [*msgs* (volatile! []) *m* 0]
                           (into {} (for [f (analyze-package r)
                                          :when (not (fn-get f :closure?))
                                          :when (fn-get f :obj)]
@@ -2144,14 +2254,22 @@
                              :when (and (= :var (:kind d)) (= :var-init (:op tr)))
                              :let [rhs (vec (:rhs tr))]
                              :when (not (every? static-init? rhs))]
-                         [d tr]))]
+                         (let [parts (when (= 1 (count rhs) (count (:lhs tr))) (dynamic-parts (first rhs)))]
+                           (if parts
+                             ;; the static data's dynamic entries, each stored into it
+                             [d (assoc tr :parts parts)]
+                             [d tr]))))]
         (when (seq inits)
           ;; the package's init function (gc's staticinit leaves it the initializers it cannot
           ;; make static data)
-          (let [body (vec (for [[_ tr] inits]
-                            {:op :assign :line (:line tr)
-                             :lhs (mapv #(if (or (nil? %) (= "_" (e/o % :name))) :blank {:op :place-global :obj %}) (:lhs tr))
-                             :rhs (vec (:rhs tr))}))
+          (let [body (vec (for [[_ tr] inits
+                                st (if (:parts tr)
+                                     (for [x (:parts tr)]
+                                       {:op :assign :line (:line tr) :lhs [{:op :place-global :obj (first (:lhs tr))}] :rhs [x]})
+                                     [{:op :assign :line (:line tr)
+                                       :lhs (mapv #(if (or (nil? %) (= "_" (e/o % :name))) :blank {:op :place-global :obj %}) (:lhs tr))
+                                       :rhs (vec (:rhs tr))}])]
+                            st))
                 f (volatile! {:node {:op :func} :obj nil :name "init" :parent nil :closure? false :file (file-of (first (first inits)))
                               :recv nil :recv-type nil :params [] :param-types [] :results [] :sig [:func [] [] false]
                               :esc :unknown :line nil :extern false :uintptr-pragmas #{} :body body})]
@@ -2173,4 +2291,8 @@
           (fn-set! f :tags (into {} (map-indexed (fn [i ty] [i (param-tag nil f (nth params i nil) ty)]) (nth sig 1)))))))
       (doseq [blk (bottom-up (vec (remove #(fn-get % :extern) fns)))]
         (batch! blk))
+      (when (pos? (long *m*))
+        (doseq [f (mapcat all-fns fns) :when (not (fn-get f :extern))]
+          (binding [*wfile* (fn-get f :file)]
+            (bce-walk! (fn-get f :body)))))
       (vec (mapcat all-fns fns))))))
