@@ -344,6 +344,37 @@
 
 (declare generics-of)
 
+(defn- path-lifetime-params
+  "The number of lifetime parameters of the type a HIR path names (its resolution)"
+  [path]
+  (let [r (first (:res path))]
+    (case (head r)
+      def (count (filter #(= 'lifetime (first %)) (get (:generics *std*) (nth r 2))))
+      local-def (if-let [id (get @*by-span* (nth r 2))]
+                  (count (filter #(= :lifetime (:kind %)) (:params (:generics (:node (def-of id))))))
+                  0)
+      0)))
+
+(defn- impl-fresh-count
+  "An impl header's elided lifetimes (references without one, `'_`, a lifetime-generic path without arguments)"
+  [impl]
+  (let [n (atom 0)]
+    (letfn [(walk [x]
+              (cond
+                (map? x) (do (when (and (= :ref (:kind x)) (or (nil? (:lifetime x)) (= "'_" (:lifetime x)))) (swap! n inc))
+                             (when (:segs x)
+                               (let [ga (:args (peek (:segs x)))
+                                     lts (filter :lifetime (:args ga))]
+                                 (if (and (empty? lts) (not (:paren ga)))
+                                   (swap! n + (path-lifetime-params x))
+                                   (swap! n + (count (filter #(= "'_" (:lifetime %)) lts))))))
+                             (doseq [v (vals x)] (walk v)))
+                (sequential? x) (doseq [v x] (walk v))
+                :else nil))]
+      (walk (:self-ty impl))
+      (walk (:path (:of-trait impl))))
+    @n))
+
 (defn- generics-of*
   [id]
   (let [d (def-of id)
@@ -358,6 +389,9 @@
               (vec (concat (when (= "Trait" (:kind d)) [{:name "Self" :kind :type :self true}])
                            (for [p (:params g) :when (= :lifetime (:kind p)) :when (not (contains? late (:name p)))]
                              {:name (:name p) :kind :lifetime :hir p})
+                           ;; an impl header's elided lifetimes: fresh early-bound parameters named '_
+                           (when (str/starts-with? (str (:kind d)) "Impl")
+                             (repeat (impl-fresh-count (:node d)) {:name "'_" :kind :lifetime :fresh true}))
                            (for [p (:params g) :when (not= :lifetime (:kind p))]
                              {:name (param-name p) :kind (:kind p) :hir p :default (:default p)}))))]
     {:def id :parent pid :parent-count pc :has-self (= "Trait" (:kind d))
@@ -410,6 +444,7 @@
     :anon [:re-bound nil]
     :static [:re-static]
     :binder [:re-bound nil (swap! *binder-counter* inc)]
+    :impl-fresh (let [i (swap! *binder-counter* inc)] [:re-early (dec (long i)) "'_"])
     [:re-erased]))
 
 (defn- lower-region [nm]
@@ -533,7 +568,7 @@
    (for [g *scope*
          :let [gh (def-generics-hir (def-of (:def g)))]
          pr (where-preds gh)
-         :when (or (= param (:param-ty pr))
+         :when (or (= (:hir param) (:param-ty pr))
                    (and (:ty pr) (= :path (:kind (:ty pr))) (= 1 (count (:segs (:path (:ty pr)))))
                         (= (:name param) (:ident (first (:segs (:path (:ty pr))))))))
          b (:bounds pr)
@@ -1032,7 +1067,7 @@
   (loop [id id]
     (when id
       (let [d (def-of id)]
-        (cond (str/starts-with? (str (:kind d)) "Impl") (binding [*scope* (scope-of id) *self-ty* nil *module* (module-of id)] (lower-ty (:self-ty (:node d))))
+        (cond (str/starts-with? (str (:kind d)) "Impl") (first (impl-header id))
               (= "Trait" (:kind d)) [:param 0 "Self"]
               (or (:module d) (= :crate (first (:data d)))) nil
               :else (recur (:parent d)))))))
@@ -1044,9 +1079,12 @@
 
 (defn- impl-header* [id]
   (let [n (:node (def-of id))]
-    (in-def id
-      (let [self-ty (binding [*self-ty* nil] (lower-ty (:self-ty n)))]
-        [self-ty (when-let [ot (:of-trait n)] (binding [*self-ty* self-ty *elided* :erased] (lower-trait-ref (:path ot) self-ty)))]))))
+    (binding [*scope* (scope-of id) *self-ty* nil *module* (module-of id)]
+      (let [first-fresh (some #(when (:fresh %) (:index %)) (:params (generics-of id)))
+            ctr (atom (or first-fresh 0))]
+        (binding [*elided* :impl-fresh *binder-counter* ctr]
+          (let [self-ty (binding [*self-ty* nil] (lower-ty (:self-ty n)))]
+            [self-ty (when-let [ot (:of-trait n)] (binding [*self-ty* self-ty] (lower-trait-ref (:path ot) self-ty)))]))))))
 
 (def ^:dynamic *impl-cache* nil)
 (defn impl-header [id] (or (get @*impl-cache* id) (let [h (impl-header* id)] (swap! *impl-cache* assoc id h) h)))
@@ -1220,11 +1258,12 @@
                          (vec (for [v (:variants (:node d))] {:name (:ident v) :fields (vec (map-indexed (fn [i f] (or (:ident f) (str i))) (:fields (:data v))))}))
                          [{:name (:ident (:node d)) :fields (vec (map-indexed (fn [i f] (or (:ident f) (str i))) (:fields (:data (:node d)))))}]))
       (str/starts-with? (str k) "Impl")
-      (merge (safe #(let [[self-ty tr] (impl-header id)]
+      ((fn [m] (let [r (safe #(let [[self-ty tr] (impl-header id)]
                       (cond-> {}
                         tr (assoc :trait-ref (str "<" (print-ty self-ty) " as " (print-def-path (first tr) (second tr)) ">"))
                         (and (nil? tr) (:of-trait (:node d))) (assoc :trait-ref (let [p (:path (:of-trait (:node d)))] (str "{no trait " (pr-str (mapv :ident (:segs p))) " " (pr-str (:res p)) " " (:file p) " " (:krate p) "}")))
-                        true (assoc :self (print-ty self-ty))))))
+                        true (assoc :self (print-ty self-ty)))))]
+                 (if (string? r) (assoc m :self r) (merge m r)))))
       (or (#{"Fn" "AssocFn" "Struct" "Enum" "Union" "Trait"} k) (str/starts-with? (str k) "Impl"))
       (#(let [cs (safe (fn [] (mapv print-clause (explicit-clauses id))))]
           (cond (string? cs) (assoc % :predicates [cs]) (seq cs) (assoc % :predicates cs) :else %))))))
