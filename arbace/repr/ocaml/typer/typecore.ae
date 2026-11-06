@@ -542,7 +542,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
 
-(declare type-expect type-function type-let type-cases split-effect-cases type-effect-cases type-binding-op type-andops)
+(declare type-expect type-function type-let type-cases split-effect-cases type-effect-cases type-binding-op type-andops type-moddep-fun)
 
 (defn type-exp [env sexp] (type-expect env sexp (ty/newvar)))
 
@@ -553,6 +553,7 @@
     (let [d (ty/desc t)]
       (case (d 0)
         :Tarrow (recur (ty/expand-head (d 3)) (conj ls (d 1)))
+        :Tfunctor (recur (ty/expand-head (d 5)) (conj ls (d 1)))
         :Tvar [ls true]
         [ls false]))))
 
@@ -637,6 +638,43 @@
                     func (mkexp [:Texp_function [] [:cases cases :Total (name-pattern "param" [eta-pat]) nil]] ty-fun nil)]
                 (mkexp [:Texp_let :Nonrecursive [{:pat let-pat :expr texp :attrs nil}] func] ty-fun (:loc texp))))))))))
 
+(defn- module-path
+  "Typedtree.path_of_module: the path of a module expression that is one (applicative functors)"
+  [m]
+  (let [d (:desc m)]
+    (case (d 0)
+      :Tmod_ident (d 1)
+      :Tmod_constraint (module-path (d 1))
+      :Tmod_apply (let [f (module-path (d 1)) a (module-path (d 2))] (when (and f a) [:Papply f a]))
+      nil)))
+
+(defn- functor-result
+  "Typecore.collect_functor_module_arg's result: a dependent arrow's result with its parameter replaced by the module
+  argument's path (instance_funct), or, for a module that is no path, its types through the parameter expanded in
+  the argument's module type (instance_funct_nondep: one that cannot be is an error)"
+  [d tm]
+  (if-let [p (module-path tm)]
+    (ty/subst-module-ident (d 2) p (d 5))
+    (let [id' (ty/ident-rename (d 2))
+          t (ty/subst-module-ident (d 2) [:Pident id'] (d 5))
+          seen (atom #{})]
+      ;; Typedtree.remove_module_constraint: the module's own type, not the package's
+      (env/add-module! id' {:path [:Pident id'] :addr nil
+                            :mty (:mty (if (= :Tmod_constraint ((:desc tm) 0)) ((:desc tm) 1) tm))})
+      (letfn [(go [t]
+                (let [t (ty/repr t)]
+                  (when-not (@seen t)
+                    (swap! seen conj t)
+                    (let [d (ty/desc t)]
+                      (if (and (= :Tconstr (d 0)) (ty/path-mentions? id' (d 1)))
+                        (let [e (ty/expand-head t)]
+                          (when (identical? (ty/repr e) t)
+                            (type-error "This dependent function's result names its module parameter, which escapes"))
+                          (ty/link! t e) (go e))
+                        (run! go (ty/children d)))))))]
+        (go t))
+      t)))
+
 (defn type-application
   "Typecore.type_application: the arguments in the order of the function's type, an omitted one nil (Omitted ()),
   an eliminated optional one None; returns [args result-type]"
@@ -656,7 +694,20 @@
               (if (empty? sargs)
                 [tyf (vec (reverse rev))]
                 (let [tyf' (ty/expand-head tyf) d (ty/desc tyf')]
-                  (if-not (= :Tarrow (d 0))
+                  (cond
+                    ;; a dependent arrow (Typecore's `Functor): its module argument typed now, as a package of its
+                    ;; signature, the result depending on the module's path
+                    (= :Tfunctor (d 0))
+                    (let [l (d 1) name (ty/label-name l)
+                          found (if ignore-labels
+                                  (let [[l' sarg] (first sargs)] [l' sarg nil (vec (rest sargs))])
+                                  (extract-label name sargs))
+                          sarg (second found)]
+                      (when-not (and found (= :Pexp_pack ((:pexp_desc sarg) 0)))
+                        (type-error "a dependent function applied to an argument that is not a packed module is outside the slice"))
+                      (let [texp (type-expect env sarg (ty/newty [:Tpackage (d 3) (d 4)]))]
+                        (recur (functor-result d ((:desc texp) 1)) (nth found 3) (cons [l [:typed texp]] rev))))
+                    (not= :Tarrow (d 0))
                     ;; collect_unknown_apply_args
                     (let [[l sarg] (first sargs)]
                       (if (= :Tvar (d 0))
@@ -664,6 +715,7 @@
                           (unify! tyf' (ty/newty [:Tarrow l targ tres]) "function")
                           (recur tres (rest sargs) (cons [l [:unknown sarg targ]] rev)))
                         (type-error "This function is applied to too many arguments")))
+                    :else
                     (let [l (d 1) name (ty/label-name l) optional (ty/is-optional l)
                           found (if ignore-labels
                                   (let [[l' sarg] (first sargs)]
@@ -683,6 +735,7 @@
             targs (mapv (fn [[l a]]
                           (case (a 0)
                             :unknown [l (type-expect env (a 1) (a 2))]
+                            :typed [l (a 1)]
                             :known (let [[_ sarg targ wrapped] a]
                                      [l (if wrapped
                                           (let [t (extract-option-type targ)]
@@ -1105,6 +1158,10 @@
         (let [[params body t] (type-newtype env (:txt (pd 1)) (fn [env'] (let [r (type-function env' (rest sparams) sbody (ty/newvar))] [r (r 2)])))]
           (unify! t expected "function")
           [params body t])
+      (if (let [[_ l default spat] pd sd (:ppat_desc spat)]
+            (and (nil? default) (= :Ppat_unpack (sd 0)) (:txt (sd 1)) (not (ty/is-optional l))
+                 (#{:Tvar :Tfunctor} ((ty/desc (ty/expand-head expected)) 0))))
+        (type-moddep-fun env sp (rest sparams) sbody expected)
       (let [[_ l default spat] pd
             [targ tret] (split-arrow expected l)
             [tint dflt] (if default
@@ -1122,7 +1179,46 @@
             param {:kind (if dflt [:opt p dflt] [:pat p]) :label l :loc (:pparam_loc sp)
                    :param (if dflt (ty/ident-create "*opt*") (name-pattern "param" [p]))
                    :partial (partiality [{:lhs p}] (:type p))}]
-        [(vec (cons param params)) body expected])))))
+        [(vec (cons param params)) body expected]))))))
+
+(defn type-moddep-fun
+  "Typecore.type_moddep_fun: a `(module M : S)` parameter whose function may be dependent (modular explicits): M
+  bound as a module of the package's signature, the rest typed against the expected result (the expected dependent
+  arrow's parameter replaced by M); the function's type a dependent arrow when its result names M, else an arrow
+  from the package"
+  [env sp rest sbody expected]
+  (let [[_ l _ spat] (:pparam_desc sp)
+        [_ sname spack] (:ppat_desc spat)
+        name (:txt sname)
+        e (ty/expand-head expected) ed (ty/desc e)
+        expected-f (when (= :Tfunctor (ed 0))
+                     (when-not (= (ed 1) l) (type-error "This function's parameter label is not the expected one"))
+                     ed)
+        pack (cond
+               spack (let [t (env/transl-type env (atom {}) {:ptyp_desc [:Ptyp_package spack]})
+                           td (ty/desc t)]
+                       (when expected-f
+                         (unify! (ty/newty [:Tpackage (td 1) (td 2)]) (ty/newty [:Tpackage (expected-f 3) (expected-f 4)]) "package"))
+                       [(td 1) (td 2)])
+               expected-f [(expected-f 3) (expected-f 4)]
+               :else (type-error "Cannot infer the signature of this module parameter"))
+        tpack (ty/newty [:Tpackage (pack 0) (pack 1)])
+        mty (env/modtype-of-package tpack)
+        s-id (ty/ident-create name)
+        [[params body res-ty]]
+        (ty/with-local-level
+          (let [entry (env/add-module! s-id {:path [:Pident s-id] :mty mty :addr [:var s-id]})
+                env' (assoc-in env [:modules name] entry)
+                expected-res (if expected-f (ty/subst-module-ident (expected-f 2) [:Pident s-id] (expected-f 5)) (ty/newvar))]
+            [(type-function env' rest sbody expected-res)]))
+        ident (env/tfunctor-ident name (pack 0))
+        exp-type (if (ty/type-mentions? s-id res-ty)
+                   (ty/newty [:Tfunctor l ident (pack 0) (pack 1) (ty/subst-module-ident s-id [:Pident ident] res-ty)])
+                   (ty/newty [:Tarrow l tpack res-ty]))
+        _ (unify! expected exp-type "function")
+        p {:desc [:Tpat_var s-id name] :type tpack :loc (:ppat_loc spat)}
+        param {:kind [:pat p] :label l :loc (:pparam_loc sp) :param s-id :partial :total}]
+    [(vec (cons param params)) body expected]))
 
 (defn type-newtype
   "Typecore.type_newtype: body typed with name a locally abstract type; its result's type with that type a fresh
