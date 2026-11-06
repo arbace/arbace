@@ -241,6 +241,10 @@
                   supers (vec (keep (fn [f] (let [p (conv-type f)] (when (= :tc (first p)) [(second p) (nth p 2)]))) (nth t 4)))]
               (doseq [[mn _ mty] (nth t 3)] (swap! *genv* assoc (strs mn) (conv-type mty)))
               (swap! *classes* assoc n {:tvs tvs :supers supers :methods (mapv (comp strs first) (nth t 3))
+                                        ;; functional dependencies by parameter position (the iface writes occ names)
+                                        :fundeps (let [occs (mapv #(first (str/split (str %) #"#")) tvs)
+                                                       pos (fn [o] (.indexOf ^java.util.List occs (str o)))]
+                                                   (vec (for [[l r] (:fundeps info)] [(mapv pos l) (mapv pos r)])))
                                         :defaults (into {} (keep (fn [[m d]] (when d [(strs m) (strs d)])) (:defaults info)))}))
       tycon (let [info (nth t 6 {}) tn (strs (nth t 1))]
               (when (and *tycons* (contains? '#{data newtype} (nth t 3)))
@@ -354,6 +358,9 @@
                               (:supers info))]
         (recur (concat (rest todo) (remove (fn [[p _]] (some #(= p (first %)) out)) subs)) (conj out g))))))
 
+(def ^:dynamic *srcfile* nil)  ; the source file's path as the compiler was given it (HasCallStack's SrcLoc)
+(def ^:dynamic *skolem-givens* nil) ; atom [[pred term]...]: the dictionaries existential patterns bind
+
 (def cls-typeable (ext-name "tc" "GHC.Internal.Data.Typeable.Internal" "Typeable"))
 
 (defn- typeable-term
@@ -376,6 +383,7 @@
     (if (eq-pred? [c ts])
       (do (unify (last (butlast ts)) (last ts)) (list 'co))
     (or (some (fn [[[gc gts] term]] (when (and (= gc c) (= (mapv zonk gts) ts)) term)) givens)
+        (some (fn [[[gc gts] term]] (when (and (= gc c) (= (mapv zonk gts) ts)) term)) (some-> *skolem-givens* deref))
         (when (and (= c cls-typeable) (seq ts)) (typeable-term (last ts)))
         (when (and (< depth 30) (seq ts) (not= :mv (first (first ts))) (not= :tv (first (first ts))))
           (some (fn [{:keys [dfun tvs ctx head]}]
@@ -469,7 +477,7 @@
                [(list 'app (list 'v (ext-name "var" "GHC.Internal.Tuple" "(,)"))
                       [(cs (or label (occ n)))
                        (list 'app (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "$WSrcLoc"))
-                             [(cs "main") (cs *module*) (cs (str (str/replace *module* "." "/") ".hs")) (i l1) (i c1) (i l2) (i c2)])])
+                             [(cs "main") (cs *module*) (cs (or *srcfile* (str (str/replace *module* "." "/") ".hs"))) (i l1) (i c1) (i l2) (i c2)])])
                 (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "ip"))
                       [(cip (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "emptyCallStack")))])]))))
 
@@ -755,7 +763,17 @@
 (defn- tc-con-pat [env v t]
   (let [cn (nm (arg v 2))
                    ct (get @*genv* cn)
-                   [ity _] (instantiate (or ct (fresh-meta)))
+                   nex (or (:ex (get @*cons* cn)) 0)
+                   ;; an existential constructor's own variables are skolems in its pattern, its context's
+                   ;; dictionaries bound by the pattern and given to its alternative
+                   [ity dpreds] (if (and ct (= :forall (first ct)) (or (pos? nex) (seq (nth ct 2))))
+                                  (let [vs (nth ct 1) k (- (count vs) nex)
+                                        m (into {} (concat (map (fn [x] [x (fresh-meta)]) (take k vs))
+                                                           (map (fn [x] [x [:tv (str x "_sk" (fresh-id))]]) (drop k vs))))]
+                                    [(subst m (nth ct 3)) (mapv (fn [[c ts]] [c (mapv #(subst m %) ts)]) (nth ct 2))])
+                                  [(first (instantiate (or ct (fresh-meta)))) []])
+                   dvars (mapv (fn [[c _]] (fresh-lv (str "$d" (occ c)))) dpreds)
+                   _ (when *skolem-givens* (swap! *skolem-givens* into (super-closure (mapv vector dpreds dvars))))
                    args (pat-args (arg v 3))
                    [env' pcs res] (reduce (fn [[env pcs ty] a]
                                             (let [ty (expand (prune ty))]
@@ -767,7 +785,7 @@
                                           [env [] ity] args)]
                (when-not ct (error! "no constructor type for " (pr-str cn)))
                (unify res t)
-               [env' (list 'pcon cn pcs)]))
+               [env' (list 'pcon cn (into dvars pcs))]))
 
 (defn tc-pat [env p t]
   (let [v (lval p)]
@@ -1109,6 +1127,14 @@
                                 :cons (mapv (fn [c] (nm (arg (lval c) 2))) conlist)}))
     (doseq [c conlist]
       (let [cv (lval c) cn (nm (arg cv 2)) det (arg cv 6)
+            ;; an existential constructor (ExistentialQuantification): its own type variables and context; the
+            ;; context's dictionaries are the worker's first fields (GHC.Core.DataCon's dcOtherTheta)
+            exn (when (= 'ConDeclH98 (con cv))
+                  (vec (keep (fn [b] (let [bv (lval b) bb (arg bv 3)] (when (= 'HsBndrVar (con bb)) (nm (arg bb 2))))) (arg cv 4))))
+            exnames (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) exn)
+            tvs (merge tvs (zipmap exn (map (fn [x] [:tv x]) exnames)))
+            ctx (when (and (= 'ConDeclH98 (con cv)) (seq? (arg cv 5)) (= 'Just (first (arg cv 5))))
+                  (vec (keep (fn [ct] (let [p (hs-type tvs ct)] (when (= :tc (first p)) [(second p) (nth p 2)]))) (lval (second (arg cv 5))))))
             cdf-type (fn [f] (hs-type tvs (last (butlast f))))
             fields (when (= 'RecCon (con det))
                      (vec (mapcat (fn [f] (let [fv (lval f) t (cdf-type (arg fv 3))]
@@ -1120,13 +1146,14 @@
                      RecCon (mapv second fields)
                      [])
             ty (reduce (fn [acc a] (fn-ty a acc)) res (reverse argtys))]
-        (swap! *genv* assoc cn [:forall names [] ty])
+        (swap! *genv* assoc cn [:forall (into names exnames) (vec ctx) ty])
         ;; a field's selector: forall tvs. T tvs -> field type
         (doseq [[f t] fields] (swap! *genv* assoc f [:forall names [] (fn-ty res t)]))
         (swap! descs conj {:name cn :arity (count argtys) :labels (mapv first fields) :infix? (= 'InfixCon (con det)) :tys argtys})
-        (swap! *cons* assoc cn {:arity (count argtys) :tycon tn :fields (mapv first fields)
+        (swap! *cons* assoc cn {:arity (+ (count ctx) (count argtys)) :tycon tn :fields (mapv first fields)
+                                :ex (count exnames) :dicts (count ctx)
                                 :tag (inc (.indexOf ^java.util.List (mapv (fn [c] (nm (arg (lval c) 2))) conlist) cn))
-                                :strict (vec (for [x (case (con det)
+                                :strict (into (vec (repeat (count ctx) false)) (for [x (case (con det)
                                                        PrefixCon (last (rest det))
                                                        InfixCon [(arg det 1) (arg det 2)]
                                                        RecCon (mapcat (fn [f] (let [fv (lval f)] (repeat (count (arg fv 2)) (arg fv 3)))) (lval (arg det 1)))
@@ -1420,10 +1447,34 @@
     "RealFloat" "Functor" "Monad" "MonadFail" "Foldable" "Traversable" "Semigroup" "Monoid" "Applicative"})
 (def numeric-classes #{"Num" "Real" "Integral" "Fractional" "Floating" "RealFrac" "RealFloat"})
 
+(defn- improve!
+  "Functional dependencies' improvement (GHC.Tc.Solver.Dict's improvement from instances): a wanted whose class has a
+  fundep a -> b and an instance whose head matches it at a's positions gets b's positions unified with the instance's;
+  true when something was unified"
+  [wanteds]
+  (let [changed (atom false)]
+    (doseq [w wanteds
+            :let [[c ts] (zonk-pred (:pred w)) fds (:fundeps (get @*classes* c))]
+            :when (seq fds)
+            [ls rs] fds :when (and (every? #(< -1 % (count ts)) ls) (every? #(< -1 % (count ts)) rs))
+            :let [inst (some (fn [{:keys [tvs head] :as i}]
+                               (when (= (first head) c)
+                                 (when-let [m (reduce (fn [m p] (match-ty (set tvs) m (nth (second head) p) (nth ts p))) {} ls)]
+                                   [i m])))
+                             @*insts*)]
+            :when inst]
+      (let [[{:keys [tvs head]} m] inst
+            m (into (into {} (map (fn [v] [v (fresh-meta)]) tvs)) m)]
+        (doseq [p rs]
+          (let [want (zonk (nth ts p)) got (subst m (nth (second head) p))]
+            (when (not= want (zonk got)) (unify (nth ts p) got) (reset! changed true))))))
+    @changed))
+
 (defn default!
   "Haskell 2010 §4.3.4: each ambiguous meta of the wanteds whose classes are standard, one numeric, defaulted to the
   first of (Integer, Double) that satisfies them all; then every wanted solved"
   [wanteds]
+  (loop [k 0] (when (and (< k 4) (improve! wanteds)) (recur (inc k))))
   (let [ws (mapv #(assoc % :pred (zonk-pred (:pred %))) wanteds)
         by-meta (group-by (fn [w] (let [ts (second (:pred w))] (when (and (= 1 (count ts)) (= :mv (first (first ts)))) (second (first ts))))) ws)]
     (doseq [[i group] by-meta :when i]
@@ -1436,6 +1487,18 @@
       (if-let [term (solve-pred (:pred w) [] 0)]
         (swap! *evidence* assoc (:ev w) term)
         (error! "unsolved: " (pr-str (zonk-pred (:pred w))))))))
+
+(defn- fl-ratio
+  "A FractionalLit (FL (src S) NEG (:% N D) EXP BASE) as the Core of its Rational: (:%) of two Integers, reduced"
+  [fl]
+  (let [[_ _ _ [_ n d] e] fl
+        n (bigint n) d (bigint d) e (long e)
+        p (.pow (java.math.BigInteger/TEN) (int (Math/abs e)))
+        [n d] (if (neg? e) [n (* d (bigint p))] [(* n (bigint p)) d])
+        g (.gcd (biginteger n) (biginteger d))
+        n (/ n (bigint g)) d (/ d (bigint g))
+        int-core (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Bignum.Integer" "IS")) [(list 'lit (str x "#"))]))]
+    (list 'app (list 'v (ext-name "var" "GHC.Internal.Real" ":%")) [(int-core n) (int-core d)])))
 
 (defn- lit-core
   "An overloaded literal at its final type: GHC's desugarer's folded forms at Int, Integer, Double, else the
@@ -1452,7 +1515,8 @@
               (case (when tn (occ tn))
                 "Double" (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "D#")) [(list 'lit (str txt "##"))])
                 "Float" (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "F#")) [(list 'lit (str txt "#"))])
-                (list 'app (list 'v f) [ev (list 'lit (str "rational " txt))]))))))
+                ;; another type: fromRational of the literal as a Rational, n :% d reduced (dsFractionalLitToRational)
+                (list 'app (list 'v f) [ev (fl-ratio val)]))))))
 
 (defn resolve-core
   "The core with every evidence placeholder replaced by its term and the literals resolved"
@@ -1520,7 +1584,7 @@
               *genv* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
               *derivs* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
-              *ltypes* (atom {})]
+              *ltypes* (atom {}) *skolem-givens* (atom [])]
       (load-ifaces!)
       (doseq [s sigs :let [sv (lval s)] :when (= 'FixSig (con sv))
               :let [fs (arg sv 2) fx (arg fs 3)] n (arg fs 2)]

@@ -48,6 +48,7 @@ import GHC.Unit.External (ExternalPackageState(..))
 import Data.Char (ord)
 import GHC.Core.Type (Type, PredType, tyConsOfType)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
+import GHC.Unit.Module.Deps (dep_orphs)
 import GHC.Unit.Module.ModIface
 import GHC.Core.Coercion.Axiom (CoAxiom(..), CoAxBranch(..), fromBranches, Role(..))
 import GHC.Core.FamInstEnv (FamInst(..), famInstEnvElts)
@@ -364,7 +365,8 @@ ifaceOf outDir m = do
             _ -> []
           tcMods = [ nameModule n | t <- defined, ty <- tyOf t, tc <- nonDetEltsUniqSet (tyConsOfType ty)
                                   , let n = getName tc, isExternalName n ]
-      return (True, nubMods ([nameModule n | a <- mi_exports iface, n <- availNames a, not (isInternalName n), not (isSystemName n), isExternalName n] ++ tcMods))
+      -- and the orphan modules below it (their instances are visible wherever it is imported: FormatTime UTCTime)
+      return (True, nubMods ([nameModule n | a <- mi_exports iface, n <- availNames a, not (isInternalName n), not (isSystemName n), isExternalName n] ++ tcMods ++ dep_orphs (mi_deps iface)))
   where unitString' = pprS . moduleUnit
 
 nubNames :: [Name] -> [Name]
