@@ -3,19 +3,38 @@
 # original's link: the program's codegen unit's IR (kept by -C save-temps beside NAME-cgu.0.rcgu.o) copied to RSI_LOW/x.ll, the
 # allocator shim's bitcode (the other .rcgu.o's) made IR text by clang into RSI_LOW/shim.ll, the line kept as RSI_LOW/link.args;
 # the output (-o) an empty file. One codegen unit only: more is RSI_LOW/x.refused (cgu).
+# Under LTO (RE6, EVAL.md §11) the program's own unit as codegen made it before the link-time optimization: thin LTO's
+# NAME-cgu.N.rcgu.thin-lto-input.bc (the upstream crates' copies, NAME.CRATE-...rcgu.o.rcgu.o, left out) with the shim's
+# thin-lto-input.bc; fat LTO's NAME-cgu.0.rcgu.no-opt.bc (its .ll is the merged module, std's code in it), the shim then
+# made by wrap-ir's second build (RSI_SHIM_ONLY: this linker keeps the shim alone).
 set -u
 low=${RSI_LOW:?} prog=() shim="" out="" prev=""
 for a in "$@"; do
   case $a in
+    *.rcgu.o.rcgu.o) ;;
     *.rcgu.o) case $(basename "$a") in *-cgu.*) prog+=("$a") ;; *) shim=$a ;; esac ;;
   esac
   [ "$prev" = -o ] && out=$a
   prev=$a
 done
+shim_ir() { # BC: the shim's bitcode as IR text
+  clang -S -emit-llvm "$1" -o "$low/shim.ll" 2> "$low/shim.log" || { echo "shim-ir	clang -S -emit-llvm of the shim" > "$low/x.refused"; exit 1; }
+}
+if [ -n "${RSI_SHIM_ONLY:-}" ]; then
+  [ -n "$shim" ] || { echo "shim-ir	no allocator shim in the build without LTO" > "$low/x.refused"; exit 1; }
+  shim_ir "${shim%.o}.bc"; [ -z "$out" ] || : > "$out"; exit 0
+fi
 printf '%s\n' "$@" > "$low/link.args"
 if [ "${#prog[@]}" != 1 ]; then echo "cgu	${#prog[@]} codegen units" > "$low/x.refused"; echo "rsi: ${#prog[@]} codegen units" >&2; exit 1; fi
-cp "${prog[0]%.o}.ll" "$low/x.ll" || { echo "ir	no IR beside ${prog[0]}" > "$low/x.refused"; exit 1; }
-if [ -n "$shim" ]; then
-  clang -S -emit-llvm "${shim%.o}.bc" -o "$low/shim.ll" 2> "$low/shim.log" || { echo "shim-ir	clang -S -emit-llvm of the shim" > "$low/x.refused"; exit 1; }
+p=${prog[0]%.o}
+if [ -f "$p.thin-lto-input.bc" ]; then
+  clang -S -emit-llvm "$p.thin-lto-input.bc" -o "$low/x.ll" 2> "$low/x.ll.log" || { echo "ir	clang -S -emit-llvm of the thin LTO input" > "$low/x.refused"; exit 1; }
+  [ -z "$shim" ] || shim_ir "${shim%.o}.thin-lto-input.bc"
+elif [ -f "$p.lto.input.bc" ] && [ -f "$p.no-opt.bc" ]; then
+  clang -S -emit-llvm "$p.no-opt.bc" -o "$low/x.ll" 2> "$low/x.ll.log" || { echo "ir	clang -S -emit-llvm of the unit before fat LTO" > "$low/x.refused"; exit 1; }
+  : > "$low/fat-lto"
+else
+  cp "$p.ll" "$low/x.ll" || { echo "ir	no IR beside ${prog[0]}" > "$low/x.refused"; exit 1; }
+  [ -z "$shim" ] || shim_ir "${shim%.o}.bc"
 fi
 [ -z "$out" ] || : > "$out"

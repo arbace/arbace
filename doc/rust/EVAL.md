@@ -281,3 +281,56 @@ gcc compiles to `ud2` (132) and ci raises as `Fault{SIGILL}` (`go/arbace/ci/nati
 mapping is the identity, no judge rule is needed (checked: `bin/ci run` of a C program gives 132 for `__builtin_trap`, 134 for `abort`,
 as gcc's; the synthetic programs `trap.rs` and `abort.rs` are the Rust cases, rustc's 132 and 134). `std::process::abort` and
 std's own aborts (a panic in a drop while unwinding, a panic that cannot unwind) are `abort()`, 134 (rustc's run: checked natively; on ci not yet run).
+
+## 10. Threads and the environment on ci (RE6)
+
+ci ran one thread until RE6: musl's `pthread_create` reached `__clone`, which musl writes in assembly, and the program faulted
+(`undefined function __clone`, the class `threads`); libtest starts a thread per test even with `--test-threads=1`, so every
+`--test` program of the UI suite (49) was in it with the threads set's (175). RE6 builds what C's design named for ci from the
+start (doc/C23-SURVEY.md §6.5, CS11 (a): "threads as goroutines over musl's own primitives, the futex natives"):
+
+- **The scheduler** (`go/arbace/crt/sched.ae`, the `Sched` of a `Sys`, made at the first clone): each C thread is a goroutine and
+  **one runs at a time**, holding a baton (each task's channel). The baton passes where a thread waits (futex `WAIT` and
+  `WAIT_BITSET`, `nanosleep`, `clock_nanosleep`), at `sched_yield`, at a thread's exit, and at ci's preemption points (every
+  20,000 calls, `PreemptCalls`, in `Call` and the compiled code's `Enter`, so a spin loop on an atomic ends), always to the first
+  runnable thread (round robin): a run is deterministic, and the atomics ci runs as plain loads and stores (musl's
+  `atomic_arch.h`, gcc's `__atomic_*` as C++'s and Rust's lowering emits them) stay atomic, a switch never falling inside one.
+  The futex is the kernel's (`kernel/futex`): `WAIT` with a relative timeout, `WAIT_BITSET` with an absolute one (monotonic, or
+  realtime with `FUTEX_CLOCK_REALTIME`) and a mask, `WAKE`, `WAKE_BITSET`, `REQUEUE`, `CMP_REQUEUE` (woken plus requeued), `WAKE_OP`
+  (the operation and comparison decoded as `futex_atomic_op_inuser`); waiters are woken in the order they began to wait. A wait
+  with a deadline is a timed waiter: when no thread is runnable the scheduler sleeps until the earliest deadline (real time, as
+  the clocks the program reads are real). When every thread waits with no deadline, the run ends with `deadlock: every thread
+  waits` (natively it would hang until the judge's timeout). Nothing changes for a program that never clones: the single
+  thread's futex returns at once as before (a timed wait now sleeps out its timeout and gives `ETIMEDOUT`, as the kernel does).
+- **The thread** (`go/arbace/ci/thread.ae`): `__clone(fn, stack, flags, arg, ptid, tls, ctid)` is a native for a thread
+  (`CLONE_VM | CLONE_THREAD`): a new `Thread` whose C stack is the one musl mapped (its lowest address `Lo`, the stack check's,
+  from the mapping's slab), `CLONE_SETTLS`'s thread pointer, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`,
+  `CLONE_CHILD_CLEARTID` (cleared and woken at the thread's exit: musl's `pthread_join` and its thread-list lock wait on it);
+  it is runnable after the running ones and the caller goes on. `exit(2)` ends the calling thread (`exit_group` the program;
+  the main thread's `exit` waits for the others), `__unmapself` (musl's detached exit, assembly) unmaps and exits. A clone of a
+  process (`posix_spawn`'s `CLONE_VM | CLONE_VFORK`, `fork`) faults with `clone(...) of a process: ci runs one process` (the class
+  `process`). An exit_group or a fault in another thread ends the program: the main thread, woken, raises it, the fault's message
+  naming the thread and its frames.
+- **Thread-local storage**: the builder marks a thread-local object (C's `_Thread_local`, the lowering's `thread_local`
+  globals: Rust's `thread_local!`, the pending-exception flag `cx$pending`) as `(static IDX SIZE ALIGN 2 NAME)`; the loader lists
+  them, `Run` records their bytes after the static initializers, and as the baton passes the running thread's bytes are saved
+  into its task and the next one's put in place (a new thread's from the recorded image). So each thread sees its own objects
+  at the same addresses while it runs; a thread-local object's address handed to another thread reads that thread's own copy
+  (a divergence; Rust's thread-locals are `!Send`, C rarely does it).
+- **std's thread-local destructors**: `__cxa_thread_atexit_impl`'s port (`test/rust/runtime/ci/builtins.c`) keeps a list per
+  thread on a pthread key, run as musl's `pthread_exit` runs the key's destructor: a thread's `thread_local!` values drop as it
+  exits, the main thread's never (natively on musl: no `__cxa_thread_atexit_impl`, std's own list on a key, the same behaviour).
+- **The environment** (RES29 (a)): `RunMain` gives the program `Prog.Env` (empty unless set); `tools/cirun --env` and a compiled
+  program's `--env` set it to the runner's. rsi's check and `bin/rsi run` pass `--env`, so a program sees run-program's
+  environment (`env -i PATH HOME` and the test's exec-env, as the judge's run); C's runs do not, as before.
+
+## 11. LTO on the ci leg (RE6)
+
+A test built with `-C lto` (fat or thin) or `-Z thinlto` keeps its flags (RES2 (c): the judge is built with them), but what
+rsi lowers is the program's own codegen unit as rustc's code generation made it **before** the link-time optimization, which
+rsi does not reproduce (its IR is `-O0`'s and std is linked as lowered units): `bin/lib/rsi/link-ir` takes thin LTO's
+`NAME-cgu.N.rcgu.thin-lto-input.bc` and the allocator shim's (the upstream crates' copies that thin LTO hands the link,
+`NAME.CRATE-....rcgu.o.rcgu.o`, are left out), and fat LTO's `NAME-cgu.0.rcgu.no-opt.bc` (its `.ll` is the merged module, std's
+code in it); fat LTO merges the shim, so `bin/lib/rsi/wrap-ir` builds the program again with `-C lto=off` after its own flags,
+that build's linker keeping the shim alone. The gcc leg's `wrap` and `link` (RE2, RE3) are unchanged: there the class `lto`
+stays.
