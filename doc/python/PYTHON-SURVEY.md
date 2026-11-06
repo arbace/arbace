@@ -2953,3 +2953,136 @@ failing; `bin/pyi runtime check` the same forms, the tables and runtime-ops equa
 past the 120 s cap at load 5-8: 138 s run alone, its output equal to the base's), the REPL equal. test_inspect does not
 import on pyi (`_pickle`, pre-existing). **Decided (the user, 2026-11-06): 219's DECISION (a)**, tracing a task of its own
 after 219.
+## Design: 218, the finalizer queue (2026-11-05, the Mac VM, queue 218; PYS9 (a), decided 2026-11-04)
+
+pyi has no reference counts: `weakref.ref` holds its referent, `gc.collect()` returns 0, no `__del__` runs, and
+`identityHash`'s map keeps every object ever hashed by identity (`id()`, the default `__hash__`) alive for good. This
+section is what CPython guarantees, what Go's collector can give of it, and what stays by design.
+
+**What CPython guarantees** (3.14's Objects/typeobject.c, weakrefobject.c, genobject.c, Python/gc.c):
+- *Refcount death* (subtype_dealloc): `__del__` (tp_finalize, slot_tp_finalize) first; when it did not resurrect the object,
+  its weak references are cleared and their callbacks called (PyObject_ClearWeakRefs). The list's order: the basic ref
+  (no callback, reused by `ref(o)`), the basic proxy, then the refs with callbacks, the newest first (insert_after); the
+  callbacks are called in that order with the weak reference, an exception going to `sys.unraisablehook` as "Exception
+  ignored while calling weakref callback %R". A weak reference that died first is out of the list: no callback.
+- *PEP 442*: `__del__` runs at most once per object; an object it resurrects is not finalized again. Cyclic trash: weak
+  references to it are cleared (callbacks only for refs outside the trash), the finalizers called, the cycle broken.
+  `gc.garbage` holds what cannot be freed (DEBUG_SAVEALL); `gc.callbacks` are called with ("start", info) and ("stop",
+  info), info's `generation`, `collected`, `uncollectable`; an exception "Exception ignored while calling GC callback %R".
+- *`__del__`'s exception*: "Exception ignored while calling deallocator %R" (the bound `__del__`).
+- *Generators* (_PyGen_Finalize): a generator suspended at its death is closed (GeneratorExit thrown in; an exception
+  "Exception ignored while closing generator %R"); a coroutine never started warns "coroutine '...' was never awaited"
+  (RuntimeWarning through `warnings._warn_unawaited_coroutine`); an async generator with sys's finalizer hook (asyncio's
+  `_asyncgen_finalizer_hook`) is handed to the hook instead ("Exception ignored while finalizing generator %R").
+- *Sockets* (sock_finalize): an open socket warns ResourceWarning "unclosed %R" (source the socket) and is closed.
+- *`weakref.finalize` at exit*: Lib/weakref.py's own atexit hook, over weak references with callbacks.
+
+**How Go's collector serves it.**
+- *Weak references.* Go's `weak` package is out of goi's scope (gotable.edn's `:out`), and pyi's runtime runs interpreted
+  by goi until W2 lists it compiled (and whenever the checkout's runtime differs from the embedded one). So the weak
+  reference keeps its referent's address hidden from the collector (a `uintptr` and the pointer's element type) and
+  rebuilds the object through `reflect.NewAt`; the referent gets a Go finalizer at its first weak reference (probed,
+  compiled and under goi: `.tmp/q218/probe/refl`). Go's heap does not move, and an object with a finalizer is kept
+  until its finalizer ran: the finalizer clears the address under a mutex before anything can free it, so no weak
+  reference ever yields freed memory. `runtime.AddCleanup` would not resurrect the object (no `__del__`), and is generic:
+  goi cannot call it.
+- *A tracked object's record* (finTrack) lives in a table keyed by its address, never holding it: its weak references in
+  CPython's order, whether a `__del__`, a generator's close or a socket's warning is due, and its identity once hashed.
+  `identityHash` moves an object's number there (an instance keeps it in its own field), so hashing no longer pins it.
+- *The queue.* Go's finalizer goroutine only moves the dead object (resurrected by Go for the call) into pyi's queue and
+  sets an eval-breaker bit; the thread holding the GIL drains it at the eval breaker (a frame's start, a backward jump)
+  and in `gc.collect()`. Python code never runs on Go's finalizer goroutine.
+- *The order, refcount's*: an object with a `__del__` due is finalized first and its Go finalizer set again without it
+  (PEP 442's once-only); found unreachable again, its weak references are cleared and their callbacks called, newest
+  first, the basic `ref(o)` reused as CPython does. A resurrecting `__del__` simply keeps the object reachable.
+- *`gc.collect()`*: the callbacks' "start"; rounds of `runtime.GC()`, a wait until Go's finalizer goroutine has been quiet
+  for a moment (there is no public barrier: `blockUntilEmptyFinalizerQueue` is the runtime's tests' own) and a drain,
+  until a round drains nothing (at most 8); "stop" with the count; that count returned.
+- *Generators and coroutines*: a generator gets the finalizer when it first suspends inside a try region (its code has
+  handlers: only then can `close()` be observed); a coroutine at its creation (the unawaited warning), an async
+  generator when sys's finalizer hook is set at its first iteration. *Sockets*: at creation, the warning and close.
+- *`sys.unraisablehook`*: `writeUnraisable` with CPython's messages, the queue's exceptions never escaping into the code
+  the drain interrupted.
+
+**What cannot be served** (stays by design, with its class):
+- *The moment* (`:finalization`, PYS9 (a)): nothing happens when the last reference goes, only at a collection.
+- *Cycles through a finalized object*: Go never frees a cycle that reaches an object with a finalizer from itself
+  (SetFinalizer's documented rule), so such an object's `__del__` never runs and its weak references are never cleared:
+  CPython 2's uncollectable cycles, without `gc.garbage`. That includes every class (its MRO holds it) and module-level
+  functions (their globals). A new class `:finalization-cycle` (`:kind :design`) takes the methods that need it.
+- *goi's registers* (the runtime interpreted): an interpreted frame still running may keep the last value it handled in
+  a slot, so an object can survive one more collection than compiled; the compiled runtime (AOT, W2's table) is exact.
+- *The weak references themselves* are held by their referent's record: a dropped weak reference's callback still runs.
+- `gc.garbage`, `get_referrers`, `get_objects`, `is_tracked`, thresholds and counts keep their shapes, not CPython's values.
+## As built: 218, the finalizer queue (2026-11-06, the Mac VM, queue 218; PYS9 (a); the user's decisions 2026-11-06)
+
+What "Design: 218" proposed, built in `go/arbace/py/finalize.go` and its call sites; light samples only (the main host's
+whole runs below).
+
+- **Weak references** (`builtins_weakref.go` rewritten): the referent's address hidden in a `uintptr`, rebuilt through
+  `reflect.NewAt`, cleared by its Go finalizer under `finMu` before Go can free it; CPython's list order (the basic ref,
+  the basic proxy, then the refs with callbacks, newest first), the basic ref and proxy reused, the callbacks called with
+  the reference (a subclass's instance: `wrapInstance`), "Exception ignored while calling weakref callback %R";
+  `__callback__` None once cleared; `hash` cached, "weak object has gone away"; equality of dead refs by identity;
+  CPython's repr (`__name__` looked up on the type, gh-99184); `_remove_dead_weakref`; proxies forward every number
+  operator (and pow with a modulus), item assignment and deletion, `__index__`, `__next__`, `__reversed__`, `__bytes__`,
+  ReferenceError once dead. A referent of another package's type (it may carry its own Go finalizer: _bz2's, _sqlite3's,
+  _zstd's) is held, as before.
+- **The queue**: Go's finalizer only queues the object and sets the eval breaker's bit 8; the GIL's holder drains it at a
+  frame's start and a backward jump and in `gc.collect()` (the user's decision 2026-11-06 (a): at safe points as built).
+  Refcount death's order: the work (`__del__`, once, PEP 442; a generator's close; a socket's warning), the Go finalizer
+  set again without it; found unreachable again, the weak references cleared and their callbacks called.
+  `PYI_NO_FINALIZERS=1` turns tracking off (the weak references hold, as before 218).
+- **`gc.collect()`**: `gc.callbacks` ("start", "stop", info's generation, collected, uncollectable), rounds of
+  `runtime.GC()` with a wait until Go's finalizers are quiet (3 ms, at most 500), until a round drains nothing (at most 8),
+  nothing at all when nothing is tracked; the classes' stale attribute caches dropped first. It returns 0, as CPython does
+  for garbage outside cycles (its count is of cyclic garbage; returning the dead objects handled broke f-struct.py's
+  smoke line, `bin/pyi runtime check`).
+- **`__del__`**: an instance of a class whose MRO defines it is tracked at creation (`classInfo.hasDel`, set by
+  `fixupSlots`), "Exception ignored while calling deallocator %R". **Generators and coroutines**: a coroutine made, a
+  generator suspended in a try region, go to a pending list; those still unfinished when it is flushed (every 256, and in
+  `gc.collect()`) are tracked (measured, `bin/pyi aot`: a coroutine 0.13 us untracked against 0.6 us tracked at its
+  creation; a generator with a try 0.66 us against 1.0-1.2 us tracked at its first suspension); at death a coroutine
+  never started warns through `warnings._warn_unawaited_coroutine`, a suspended one is closed, an async generator with
+  sys's finalizer hook (kept at its first iteration) is handed to it. **Sockets**: `socket.socket`'s instance warns
+  "unclosed %R" (ResourceWarning, its source the socket) and closes its descriptor.
+- **Identity**: `identityHash` keeps an instance's number in its `ident` field and a tracked object's in its record (the
+  same sequence as before): hashing or `id()` no longer keeps an object alive.
+- **Retention found and fixed**: a frame's value stack grown from the array it shares with the fast locals kept its
+  stale values (`growStack`, frame.go's push, `AotPush`, `AotSpill`); deque's pop, popleft and trims kept their items;
+  goi's `Thread.restore` keeps a returned call's R slots set (a REQUEST commit for goi's owner, `go/arbace/goi/frame.ae`,
+  unbuilt on the VM).
+- **Not served (classes)**: `:finalization` (the moment, 47), `:finalization-cycle` (Go never frees a cycle through an
+  object with a finalizer: 33), `:gc-collector` (the collector's own observables, modules cleared at exit: 20),
+  `:weakref-list` (a weak reference lives as long as its referent's record: 3); `:finalization-goi` (41, the user's
+  decision 2026-11-06 (a)): they pass compiled, and lag under goi; dropped once W2's stage 0 makes the record.
+  `:finalization-collect` keeps the 26 methods of modules not sampled and WeakMethod's two (an attribute site's inline
+  cache keeps a deleted method).
+
+**The classes, before and after** (methods named): `:finalization-collect` 61 to 28; `:finalization` 41 to 47 (5 of
+test_weakref's mapping tests and test_fatal_coro_warning, whose failure is an earlier test's coroutine finalized late);
+new `:finalization-goi` 41, `:finalization-cycle` 33, `:gc-collector` 20, `:weakref-list` 3. test_weakref, test_gc and
+test_finalization had no class before: their 96 failing methods are in these. `:ssl-finalization` (12) is unchanged: test_ssl and asyncio's TLS modules were not sampled (the main host's run below places them; sockets now warn and close at a collection).
+
+**The samples** (the VM):
+- `bin/pyi lib-test --aot test_weakref test_queue test_gc test_finalization test_dict test_ast test_coroutines`: 817
+  methods, 702 equal, 115 classed, 0 failing (test_weakref 115 equal, test_gc 13, test_finalization 2, test_queue all 164).
+- The same 12-module sample before the last fixes (test_array, test_list, test_tuple, test_dict, test_scope, test_struct,
+  test_queue, test_mmap, test_socket, test_exceptions, test_ast, test_weakref): 2,266 equal; test_socket's 5 failing are
+  not finalization's (`sys.getrefcount`'s constant 2, an abstract socket name another agent's run held, a signal's timing).
+- `bin/pyi lib-test-all --fresh test_weakref test_gc test_finalization` (goi): 214 methods, 121 equal, 93 classed,
+  0 failing (the base 40ab1e13: 94 equal, 24 classed, 96 failing).
+- `bin/pyi table-check --configs tamago/arm64`: ok (py 141 files); `go vet` of the printed runtime for linux and tamago.
+- `bin/pyi runtime check`: the packages printed and read again the same forms, the tables and runtime-ops equal, 136 of 138
+  programs equal before the count fix: f-struct.py (gc.collect's count, fixed, rerun alone: pass; test_gc, test_weakref
+  and test_finalization --aot again after it: 130 equal, 84 classed, 0 failing) and e-executable.py
+  (status 124: its 2 min 15 s under the VM's load past the smoke limit, the same with `PYI_NO_FINALIZERS=1`: not 218's);
+  the REPL equal. `make python-essential`: check --aot 21 programs, 20 pass, 1 classed, 0 failing, the control refused.
+- **Decided (the user, 2026-11-06)**: 218's DECISION 1 (a), the compiled-only methods kept in `:finalization-goi` until
+  W2's record; DECISION 2 (a), the queue drained at safe points as built.
+
+**The main host's runs**: `bin/pyi lib-test-all --fresh test_weakref test_gc test_finalization` (expected: 0 failing, about
+121 equal); `bin/pyi check --corpus lib-test-asyncio` and `bin/pyi lib-test-all --fresh test_sqlite3 test_importlib test_os
+test_subprocess test_thread test_threading test_threading_local test_xml_etree test_ssl` to place `:finalization-collect`'s
+and `:ssl-finalization`'s rest; `bin/pyi runtime check`; `make python-essential`. After W2: `bin/pyi check --record`, then
+`:finalization-goi` dropped.
