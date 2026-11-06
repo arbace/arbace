@@ -406,3 +406,24 @@ Each branch's doc records it.
   converter then overflowed Go's 1 GB stack, a fatal error that ended the corpus's run. A nesting bound in the parser
   (4,000) now fails such a file the old way. Until the next re-seed, stage 0 evaluates the changed parser from the
   checkout: torture-compile's parse check took 178 s, against 132 s compiled.
+
+## 2026-11-06: C's deferred classes: variably modified structures, complex integers, synchronous signals (branch `c-deferred`)
+
+- **What.** C's deferred cases ranked by cases per fix across the four cells (doc/C23-SURVEY.md, "As built: C's deferred
+  classes closed"): `vla` (9 programs at eval and at AOT, all GNU's structures with VLA members) and `complex-int` (9, of
+  which 3 were `_Float16`/`_Float128`/`_Float64x` complexes misclassed) first, then `signals` (20101011-1 twice). Built in
+  `arbace/c/check.ae` and `arbace/c/build.ae` (a record's run-time layout where its definition stands, sizeof, offsetof,
+  members, copies, varargs by reference; complex integer parts and gcc's wide division) and in `go/arbace/crt` and
+  `go/arbace/ci` (crt's `Raise`/`SyncHook`, `Sys.SyncSignal`: a fault delivered to the installed handler where it is raised).
+- **Why this way.** Only existing node kinds, so cf2g needs nothing; the signal at the fault's point (not after unwinding)
+  so a handler's `siglongjmp` reaches its `sigsetjmp` frame. Alternatives: a run-time layout node in the back end (more Go,
+  both back ends); delivering after the panic unwound (breaks siglongjmp). Clean-room: gcc's behaviour observed, none of its
+  code ported. CS81 (b) was found not to hold (a one-line hand-written body keeps gcc -O0's nop; only one expansion's
+  location drops it).
+- **Proof.** The checkout's checker and builder `load-file`d over main's stage 0 (its `arbace.c.*` compiled; RT's
+  `toolSource` does not reload `arbace/c/`), cirun by `bin/ci cirun-build`: `bin/ci check --only` on 124 programs, no failure,
+  19 recorded failures pass; three new ci-run programs (`vla-struct.c`, `complex-int.c`, `signal-sync.c`) equal to gcc -O0 here.
+  Deferred at eval and AOT 33 to 13 each; read 51 and print 78 unchanged.
+- **Proposed** CS274-CS277 (a multi-item invocation printed as itself; self-include; threads over goroutines; va_arg_pack).
+- **Left for the night (main host):** `bin/ci record-ref --corpus ci-run --only`, `bin/ci check --record`, `check --aot --record`,
+  `bin/ci annotations --only` over the touched files, `bin/ci judge-test`, `bin/reap`.

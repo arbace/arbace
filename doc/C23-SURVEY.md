@@ -4716,3 +4716,84 @@ test/c/essential-aot.txt` exit 0 (415 s), `dg --essential` 0 (85 s), `bin/repr-c
    `runtime.ae`, which the old build lacks, fails to load: no fragments made under a wrong key). Each source of the key is now
    tagged `compiled` (its embedded copy's digest) or `evaluated` (the checkout's under `ARBACE_PATH_FIRST` or a differing tool
    source under `arbace/repr/`, else the embedded copy).
+
+## As built: C's deferred classes closed (2026-11-06, branch `c-deferred`)
+
+The deferred cases across C's four cells ranked by cases per fix (each run program counts at eval and AOT): `vla` 9 + 9
+(GNU's variably modified structures), `complex-int` 9 + 9 (GNU's complex integers, 3 of them `_Float16`/`_Float128`
+complexes misclassed), print's `objects-macro-body` 26, `self-include` 6 + 6 + 6, `signals` 2 + 2, `threads` 2 + 2,
+`missing-builtin` 1 + 1. Built: the first two and signals; the rest are proposals below (CS274-CS277).
+
+### CDF.1 What was built
+
+| what | where | how |
+|---|---|---|
+| structures and unions with variably modified members (CS106's rest) | `arbace/c/check.ae`, `arbace/c/build.ae` | the checker marks a record with a member of variable size `:var-size` (`var-size?`: a VLA, an array of such elements, such a record) and each member after one `:voff`, keeps its packing (`:packed`, `:max-align`), and records a variably modified definition's body with its record (`:results`, keyed by the body vector); `sizeof` of such a type and `offsetof` through such a member or element are not constants (`:tt` for the builder). The builder runs the definition where it stands (a `c/struct` item, a group's base, a declaration's, typedef's or type name's type): its members' sizes evaluated in order, each member after one of variable size at its offset rounded up to its `member-align` and the size rounded up to the record's alignment (gcc's stor-layout with variable sizes; a union the largest member), into slots, the record's rtt `{:vsize :vmem}` kept per function. Objects of variable size go on the C stack as VLAs (with their empty initializer's zeroing); members after one of variable size are at their run-time offsets (`.`, `->`, `offsetof`); assignments and array stores copy the run-time size (a byte loop of existing nodes); an argument of variable size is passed by reference to a copy and `va_arg` reads the pointer (gcc's `pass_by_reference` for variable-size types) |
+| the composite of two compatible records (C23 6.2.7), as far as needed | `arbace/c/check.ae` | a conditional of pointers to two compatible records of which only one is variably modified gives the variably modified one (gcc's `composite_type_internal` takes each member's composite: `char (*)[]` and `char (*)[n]` give `char (*)[n]`) |
+| complex integer types (CS105) | `arbace/c/build.ae` | parts of at most 64 bits loaded and stored by their integer type; `+`, `-`, `*` by tree-complex.cc's formulas in 64 bits wrapped to the part type; `/` by gcc's default wide method (`expand_complex_div_wide`: the ratio of the smaller to the larger divisor part in magnitude) with integer division in the part's signedness; equality, truth, negation and conjugation by part. A complex of `_Float16`, `_Float128` or a decimal type is refused by design (SPEC §14, class `by-design`), `_Complex _Float64x` built as the long double it is; a complex of wide parts stays `complex-int` |
+| synchronous signals (review 006's `signals`) | `go/arbace/crt/mem.ae`, `crt/syscall.ae`, `go/arbace/ci/expr.ae`, `ci/prog.ae` | crt's `Raise` calls `SyncHook` (set by ci's `NewProg`) before it panics with the fault: `Sys.SyncSignal` delivers a SIGSEGV or SIGFPE to the handler `sigaction` or `signal` installed, where the fault is raised, on the faulting thread (not for SIG_DFL, SIG_IGN, a blocked signal or one whose handler runs; the signal blocked while it runs): a handler that exits or `siglongjmp`s ends there; one that returns ends the run with the fault (the machine would raise it again forever). The interpreter, the compiled programs (`AotMain`) and cinterp all make their program by `NewProg` |
+
+Clean-room: gcc is GPL, nothing of its source was ported; the layout rules, the division method and pass-by-reference are gcc's documented and observed behaviour (its runs of the corpora and of `.tmp`'s probes compared with ci's), named after the gcc functions that implement them only as references. Only existing node kinds are emitted: cf2g is unchanged and translates the samples' node programs (`bin/ci aot`).
+
+### CDF.2 How it was proved
+
+Stage 0 compiles `arbace.c.*` and RT's `toolSource` does not take `arbace/c/` from the checkout, so the checkout's checker and
+builder ran `load-file`d over main's stage 0 (a wrapper as `ARBACE_HOST_EXE`; PB.6's `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1
+ARBACE_NO_IMAGE=1` is the other way), the back end by `bin/ci cirun-build` from this tree. `bin/ci check --only` on 124 programs
+(the essential subset, every VLA, struct, complex and signal program of the classes and their passing neighbours): no failure, 19
+recorded failures now pass: `vla`'s 9 (20020412-1, 20040423-1, 20041218-2, 20070919-1, pr41935, pr82210, gnu23-empty-init-1,
+gnu23-tag-composite-3 and -4), `complex-int`'s 6 (20041124-1, 20041201-1, pr38151, pr56837, complex-6 and its mirror),
+c23-imaginary-constants-9, both 20101011-1, and c23-complit-2, which main's own builder passes too (a stale record);
+c23-imaginary-constants-5 and -7 are by design now. Three programs of Arbace's own in `test/c/run/` (ci-run, `:count` 14):
+`vla-struct.c`, `complex-int.c`, `signal-sync.c`, their status and stdout equal to the host gcc -O0's here.
+
+| cell | deferred before | after (from the classes; the records re-recorded at night) |
+|---|---|---|
+| eval | 33 | 13: read 7, checker 2, threads 2, missing-builtin 1, complit-static 1 until c23-complit-2's stale record goes (then 12); signals, vla and complex-int 0 |
+| AOT | 33 | 13, the same programs (the AOT record's c23-complit-2 to be confirmed by `check --aot`) |
+| read | 51 | 51 |
+| print | 78 | 78 |
+
+Night (main host; the records are its): `bin/ci record-ref --corpus ci-run --only` (the three new programs), `bin/ci check
+--record`, `bin/ci check --aot --record`, `bin/ci annotations --only` over the touched files (the checker's `sizeof` of a record of
+variable size is no constant now: cc gives -1, class `cc-invalid` as before), `bin/ci judge-test`, `bin/reap`.
+
+### CDF.3 Left, and why
+
+- `objects-macro-body` (26, print): CS81 (b) does not hold. With gcc 15.2 -O0 a hand-written one-line body (`void f(int*p){*p=1;}`)
+  still gets the nop before its epilogue, as the same body over three lines does; only a body whose tokens share one location (one
+  macro expansion: `#define F(n) void n(int*p){*p=1;}` then `F(f)`) loses it. No layout of the expanded text gives the original's
+  object; CS274.
+- `self-include` (6 + 6 + 6): all six files include themselves inside a function body at least once (vprintf-1's four inside a
+  `switch`, 20040629-1 inside `main`, 95_bitfields inside its tests), so the read needs both a distinct file for the re-entered
+  main file and a body's include (today `:split-declaration` unless `*include-inside*`); CS275.
+- `threads` (binary-trees-5, c23-complit-4): CS276. `missing-builtin` (`__builtin_va_arg_pack`, va-arg-pack-1): CS277.
+
+### CDF.4 Proposed (CS274-CS277)
+
+- **CS274 A body one invocation made.** Options: (a) the print writes the invocation that made several top-level items once, in
+  place of its items (C3b.1's rule for one whole definition, extended: the group's items printed as `(c/macro-items TEXT N)`, the
+  macro defined at that point by the kept directives; CS82's macro context checked as for one item); (b) keep the class, level 4 (the
+  runs) the judge; (c) print such a body through a one-line macro of the print's own (`#define __arbace_body(...) __VA_ARGS__`),
+  every token then at one location as in the original. Cost: (a) a converter and printer change and the roundtrip's four levels over
+  the 26 files, about a day; (c) half that, but the print gains a macro the original lacks. *Recommended: (a)*; CS81's (b) withdrawn.
+- **CS275 A main file that includes itself.** Options: (a) the preprocessor gives the re-entered main file a CFile of its own (same
+  name, not identical), so its tokens are a header's to the converter, and a body's `#include` is read as a statement form
+  `(c/include "x.c" :unit U)` whose unit holds statements (the eval read binds `*include-inside*` until then: the eval level for the
+  six, the print still refused); (b) the eval read alone with `*include-inside*` and a fresh CFile (12 of the 18 cases, the print's 6
+  stay); (c) by design. Cost: (a) pp, convert and print, checked token for token against cc and by the round trip, two days; (b)
+  half a day. *Recommended: (b) now, (a) with CS274*.
+- **CS276 Threads (C11 `threads.h`, POSIX threads) over goroutines.** musl's `pthread_create` calls `__clone` (assembly): a native
+  that runs the start function on a goroutine with a Thread of its own (its C stack carved from the stack region, its TLS from
+  `CLONE_SETTLS`, `CLONE_CHILD_CLEARTID`'s futex wake at its end), crt's futex made real for several waiters (a map of address to
+  waiters on Go channels), crt's memory and Sys made safe for concurrent threads (a lock per Sys call; loads and stores as the
+  memory model allows: plain, the C program's races its own; atomics by `sync/atomic`), the per-thread errno through musl's TLS,
+  and SyncHook per thread. Options: (a) as described, both back ends; (b) a single-threaded scheduler (each thread run to a
+  blocking point: deterministic, no data races in ci itself, but a spinning thread starves the rest); (c) by design. Cost: (a)
+  three to four days with a thread-heavy run corpus; (b) two. *Recommended: (b)* first (deterministic runs, the corpora's two
+  programs and C11's `thrd_*`), (a) when a program needs parallelism.
+- **CS277 `__builtin_va_arg_pack`.** It forwards an always_inline variadic function's extra arguments into a call; ci never
+  inlines. Options: (a) a call node `vapack` that appends the current frame's variadic arguments (their kinds and sizes kept at
+  entry, both back ends); (b) inline always_inline variadic functions that use it, in the builder; (c) by design. Cost: (a) a day
+  (the frame keeps its Args; cf2g's Enter likewise); (b) two. *Recommended: (a)*: one program, va-arg-pack-1, whose long double
+  arguments then meet CS35.
