@@ -986,8 +986,9 @@
                 (some (fn [g] (let [d (c/def-of (:def g))]
                                 (when (= "Trait" (:kind d))
                                   (when-let [[item k] (trait-item (:id d) (:ident (peek segs)))]
-                                    (cond (str/starts-with? (str k) "AssocConst") (erase (c/type-of item))
-                                          (= "AssocFn" (str k)) [:fndef item (fresh-args item)]
+                                    ;; (Self the parameter itself: `Self::read_uint(..)` in a provided method)
+                                    (cond (str/starts-with? (str k) "AssocConst") (erase (c/subst (c/type-of item) (vec (cons (shallow bty) (rest (fresh-args (:id d)))))))
+                                          (= "AssocFn" (str k)) [:fndef item (vec (cons (shallow bty) (rest (fresh-args item))))]
                                           :else nil)))))
                       c/*scope*))
               ;; a parameter's bounds in the parameter environment (`T::default()` under `T: Default`): the bound
@@ -1522,8 +1523,10 @@
   (case (:kind s)
     :let (let [_ (doseq [l (ty-consts (:ty s))] (anon-const! l true))
                decl (when (:ty s) (body-ty (:ty s)))
+               ;; check_decl_initializer: the initializer coerced to the local's type (a fresh variable without a type
+               ;; annotation, which a block initializer takes as its coercion target)
                t (if-let [init (:init s)]
-                   (let [x (check-expr init decl)] (when decl (coerce! init x decl)) (or decl x))
+                   (let [lt (or decl (fresh :ty)) x (check-expr init lt)] (coerce! init x lt) lt)
                    (or decl (fresh :ty)))
                env (atom {})]
            (check-pat (:pat s) t env :none)
@@ -1549,8 +1552,11 @@
         ;; check_block_with_expected: the tail's CoerceMany to the expected type (else a fresh variable), which is then
         ;; the block's type; a diverging tail's target falls back as diverging variables do
         (let [has? (and expected (not (tvar? (shallow expected))))
+              var? (and expected (tvar? (shallow expected)) (= :ty (second (shallow expected))))
               t (check-expr x expected)]
           (cond has? (if (coerce! x t expected) expected t)
+                ;; an expected type variable (a local's, ExpectHasType(?T)): the tail coerced into it, the block's type
+                var? (do (coerce! x t expected) expected)
                 (= [:never] (shallow t)) (let [v (fresh-diverging)] (coerce! x t v) v)
                 :else t))
         ;; no tail: `!` when the block diverges (nothing pushed), else the forced unit
