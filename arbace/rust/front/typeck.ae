@@ -55,6 +55,16 @@
 (def ^:private int-tys #{:int :uint})
 (def ^:private unit [:tuple []])
 
+(defn- generalize
+  "A type variable's value as generalization makes it (generalize.rs): each free region a fresh region variable, so two
+  values of one written type are not the same type (the reborrows CoerceMany's LUB adds); bound regions kept"
+  [t]
+  (cond (and (vector? t) (#{:re-static :re-early :re-erased :re-var} (first t))) [:re-var (swap! *next-var* inc)]
+        (and (vector? t) (= :infer (first t))) t
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (generalize %) (map? %) (into {} (for [[k v] %] [k (generalize v)])) :else %) (rest t)))
+        (vector? t) (mapv generalize t)
+        :else t))
+
 (defn- bind! [v t] (swap! *vars* assoc-in [(nth v 2) :val] t) true)
 
 (declare unify)
@@ -93,6 +103,13 @@
         :tuple (unify-all (second a) (second b))
         :fndef (and (= (second a) (second b)) (unify-all (nth a 2) (nth b 2)))
         :proj (and (= (second a) (second b)) (unify-all (nth a 2) (nth b 2)))
+        ;; a trait object: its principal's and projections' arguments, its auto traits; its region ignored
+        :dyn (let [x (second a) y (second b)]
+               (and (= (first (:principal x)) (first (:principal y)))
+                    (= (set (:autos x)) (set (:autos y)))
+                    (= (map first (:projections x)) (map first (:projections y)))
+                    (unify-all (vec (second (:principal x))) (vec (second (:principal y))))
+                    (every? true? (map (fn [[_ as t] [_ bs u]] (and (unify-all (vec as) (vec bs)) (unify t u))) (:projections x) (:projections y)))))
         (= a b)))))
 
 (declare holds? impls-for normalize)
@@ -164,12 +181,13 @@
 
 (defn- fresh-args [def]
   (vec (for [p (params-of def)]
-         (case (:kind p) :lifetime [:re-erased] :const (fresh :const) (fresh :ty)))))
+         (case (:kind p) :lifetime [:re-var (swap! *next-var* inc)] :const (fresh :const) (fresh :ty)))))
 
 (defn- erase
   "A type's anonymous regions erased; 'static and the named ones kept (coercion's no-op case compares them)"
   [t]
   (cond (= [:re-static] t) t
+        (and (vector? t) (= :re-var (first t))) t
         (and (vector? t) (= :re-early (first t)) (not= "'_" (nth t 2))) t
         (and (vector? t) (= :re-bound (first t)) (string? (second t)) (not= "'_" (second t))) [:re-bound (second t)]
         (c/region? t) [:re-erased]
@@ -567,7 +585,7 @@
                  (let [targs (fresh-args tr)
                        r (when (= "AssocFn" (str k)) (try-def def targs))
                        self (some-> (first targs) shallow)]
-                   (if (and r self (not (tvar? self))
+                   (if (and r self (or (not (tvar? self)) (#{:int :float} (second self)))
                             (or (= :param (first self))
                                 ;; the object candidate: a trait object of the trait (or of a trait it extends)
                                 (dyn-implements? self tr)
@@ -649,6 +667,16 @@
 
 (declare autoderef)
 
+(def ^:dynamic *use-lub* false)   ; coercing within CoerceMany's LUB (a later arm to the previous arms' type)
+
+(defn- dyn-upcast?
+  "Unsize between trait objects (the builtin upcast candidate): the same principal (or none in the target), the target's
+  auto traits among the source's"
+  [a b]
+  (let [pa (first (:principal (second a))) pb (first (:principal (second b)))]
+    (and (or (nil? pb) (= pa pb))
+         (every? (set (:autos (second a))) (:autos (second b))))))
+
 (defn- coerce!
   "coerce: E (of type FROM) to TO, the adjustments recorded on E; false when neither coerces nor unifies. Never to any
   (NeverToAny, even to `!`), a reference from &mut reborrowed (Deref, Borrow: coerce_borrowed_pointer; & to & is the
@@ -667,13 +695,18 @@
       (do (adjust! e [["Deref" (nth f 3)] ["Borrow" [:ref [:re-erased] (nth t 2) (nth f 3)]] ["Pointer" to]])
           (unify (second (shallow (nth f 3))) (second (shallow (nth t 3)))))
       ;; &T to &dyn Trait (Unsize): a reborrow, then Pointer(Unsize)
-      (and (= :ref (first f)) (= :ref (first t)) (= :dyn (first (shallow (nth t 3)))) (not= :dyn (first (shallow (nth f 3)))))
+      ;; (a trait object to one of its principal or none: the builtin upcast, a region change at least)
+      (and (= :ref (first f)) (= :ref (first t)) (= :dyn (first (shallow (nth t 3))))
+           (or (not= :dyn (first (shallow (nth f 3)))) (dyn-upcast? (shallow (nth f 3)) (shallow (nth t 3)))))
       (do (adjust! e [["Deref" (nth f 3)] ["Borrow" [:ref [:re-erased] (nth t 2) (nth f 3)]] ["Pointer" to]]) true)
       ;; coerce_borrowed_pointer: a reference to a reference type is reborrowed (`&*x`: the target's region is a new
       ;; one, so the no-op case `ty == a` does not arise), &mut to & included
       ;; the same 'static on both sides: `&'a *x` would be the type itself (the no-op case)
+      ;; in CoerceMany's LUB (use_lub) the autoref'd type's region is the GLB of the previous type's and the new one's: a
+      ;; no-op when the previous type's is 'static or the new one's own
       (and (= :ref (first f)) (= :ref (first t)) (= (nth f 2) (nth t 2)) (not (nth f 2))
-           (= (second f) (second t)) (not= [:re-erased] (second f)))
+           (or (and (= (second f) (second t)) (not= [:re-erased] (second f)))
+               (and *use-lub* (= [:re-static] (second t)))))
       (unify from to)
       ;; &T (&mut T) to *const T (*mut T): Deref, Borrow(RawPtr)
       (and (= :ref (first f)) (= :ptr (first t)) (or (nth f 2) (not (second t))))
@@ -691,20 +724,31 @@
       (and (= :adt (first f)) (= :adt (first t)) (= (second f) (second t))
            (#{"alloc::boxed::Box" "alloc::rc::Rc" "alloc::sync::Arc"} (second f))
            (let [a (shallow (first (nth f 2))) b (shallow (first (nth t 2)))]
-             (or (and (= :dyn (first b)) (not= :dyn (first a)) (not (tvar? a)))
+             (or (and (= :dyn (first b)) (not (tvar? a)) (or (not= :dyn (first a)) (dyn-upcast? a b)))
                  (and (= :slice (first b)) (= :array (first a))))))
       (let [a (shallow (first (nth f 2))) b (shallow (first (nth t 2)))]
         (when (= :slice (first b)) (unify (second a) (second b)))
         (adjust! e [["Pointer" to]]) true)
+      ;; coercing into a type variable: sup(?T, FROM), the value generalized (its free regions fresh variables)
+      (and (tvar? t) (= :ty (second t)) (not (tvar? f))) (bind! t (generalize f))
       :else (unify from to))))
 
 (defn- lub!
-  "CoerceMany: the arms' common type (the expectation's when there is one)"
+  "CoerceMany: the arms' common type, the expectation's when there is one, else a fresh variable's; the first arm coerced
+  to it, each later one (whose type is not the previous arms' already) coerced to the previous arms' type in LUB mode
+  (try_find_coercion_lub)"
   [arms expected]
-  (let [tys (remove #(= [:never] (shallow (second %))) arms)
-        target (or expected (when (seq tys) (second (first tys))) [:never])]
-    (doseq [[e ty] arms] (coerce! e ty target))
-    (if (and (empty? tys) (nil? expected)) [:never] target)))
+  (let [tys (remove #(= [:never] (shallow (second %))) arms)]
+    (if (and (empty? tys) (nil? expected))
+      (do (doseq [[e ty] arms] (coerce! e ty [:never])) [:never])
+      (let [target (or expected (fresh :ty))]
+        (doseq [[i [e ty]] (map-indexed vector arms)]
+          (if (zero? i)
+            (coerce! e ty target)
+            (let [prev (deep target)]
+              (when-not (= prev (deep ty))
+                (binding [*use-lub* true] (coerce! e ty prev))))))
+        target))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions (check_expr_with_expectation)
@@ -1131,9 +1175,14 @@
                  [:tuple (vec (map-indexed (fn [i x] (let [ety (nth exs i nil) t (check-expr x ety)]
                                                        (if (and ety (not (tvar? (shallow ety))) (coerce! x t ety)) ety t)))
                                            (:exprs e)))])
+          ;; check_expr_array: the elements' CoerceMany to the expectation's element type (else a fresh variable)
           :array (let [ex (some-> expected shallow)
                        elt (if (#{:array :slice} (first ex)) (second ex) (fresh :ty))]
-                   (doseq [x (:exprs e)] (let [t (check-expr x elt)] (coerce! x t elt)))
+                   (doseq [[i x] (map-indexed vector (:exprs e))]
+                     (let [t (check-expr x elt)]
+                       (if (zero? i)
+                         (coerce! x t elt)
+                         (let [prev (deep elt)] (when-not (= prev (deep t)) (binding [*use-lub* true] (coerce! x t prev)))))))
                    [:array elt [:cval (str (count (:exprs e)))]])
           :repeat (let [ex (some-> expected shallow)
                         elt (if (#{:array :slice} (first ex)) (second ex) (fresh :ty))]
@@ -1218,9 +1267,11 @@
         (check-stmt s)
         (when (and (#{:semi :expr} (:kind s)) (= [:never] (some-> (last (filter #(= (:span %) (:span (:expr s))) @*facts*)) :ty shallow))) (reset! diverges true)))
       (if-let [x (:expr b)]
+        ;; check_block_with_expected: the tail's CoerceMany to the expected type, which is then the block's type
         (let [t (check-expr x expected)]
-          (when (and expected (not (tvar? (shallow expected)))) (coerce! x t expected))
-          t)
+          (if (and expected (not (tvar? (shallow expected))) (coerce! x t expected) (not= [:never] (shallow t)))
+            expected
+            t))
         (if @diverges [:never] unit)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1358,7 +1409,7 @@
   (let [n (:node d) k (:kind d)
         owner (binding [c/*in-value* true] (c/print-def-path (:id d) []))
         facts (atom [])]
-    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom 200000) *owner* owner *env* [{}] *loops* nil]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *owner* owner *env* [{}] *loops* nil]
       (c/in-def (:id d)
         (if (#{"Fn" "AssocFn"} k)
           (let [sig (erase (c/fn-sig (:id d)))
