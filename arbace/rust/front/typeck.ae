@@ -1288,7 +1288,13 @@
       ;; autoref'd for Fn and FnMut)
       (let [steps (autoderef ft)
             hit (some (fn [[i st]] (let [st (shallow st)]
-                                     (cond (= :dyn (first st)) (let [{:keys [principal projections]} (second st)]
+                                     (cond ;; a Box of a Fn trait object: the Box's own Fn impl (`impl<F: Fn<A> + ?Sized> Fn<A> for Box<F>`)
+                                           (and (= :adt (first st)) (= "alloc::boxed::Box" (second st)) (= :dyn (first (shallow (first (nth st 2))))))
+                                           (let [d (shallow (first (nth st 2))) {:keys [principal projections]} (second d)]
+                                             (when (and principal (fn-traits (first principal)))
+                                               [i st (first principal) (shallow (first (second principal)))
+                                                (some (fn [[ad _ term]] (when (= "core::ops::function::FnOnce::Output" ad) term)) projections)]))
+                                           (= :dyn (first st)) (let [{:keys [principal projections]} (second st)]
                                                                  (when (and principal (fn-traits (first principal)))
                                                                    [i st (first principal) (shallow (first (second principal)))
                                                                     (some (fn [[ad _ term]] (when (= "core::ops::function::FnOnce::Output" ad) term)) projections)]))
@@ -1653,7 +1659,14 @@
                                                     (do (adjust! (:expr e) [["Borrow" [:ref [:re-erased] (boolean *mutable-place*) s]]]) tgt)
                                                     [:unknown])
                                :else [:unknown])
-                     ("-" "!") (if (or (int-tys (first s)) (= :float (first s)) (= :bool (first s)) (tvar? s)) t [:unknown])
+                     ("-" "!") (if (or (int-tys (first s)) (= :float (first s)) (= :bool (first s)) (tvar? s))
+                                 t
+                                 ;; an overloaded unary operator (check_user_unop): `<T as Neg>::Output`, `<T as Not>::Output`
+                                 (let [tr (c/lang (if (= "-" (:op e)) "neg" "not"))
+                                       out (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr)))]
+                                   (if (and tr out (not= [:unknown] s) (impls-for s tr []))
+                                     (shallow [:proj out [s]])
+                                     [:unknown])))
                      [:unknown]))
           :addr-of (let [ex (some-> expected shallow)
                          inner-ex (when (and ex (= :ref (first ex))) (nth ex 3))
@@ -1990,6 +2003,9 @@
   (doseq [[x from to] (when *casts* @*casts*)]
     (let [f (shallow from) t (shallow to)]
       (when (or (and (= :ref (first f)) (= :ptr (first t)))
+                ;; (an unsizing cast: `Box::new(c) as Box<dyn Fn()>`)
+                (and (= :adt (first f)) (= :adt (first t)) (= (second f) (second t)) (#{"alloc::boxed::Box" "alloc::rc::Rc" "alloc::sync::Arc"} (second f))
+                     (= :dyn (first (shallow (first (nth t 2))))))
                 (and (#{:fndef :closure} (first f)) (= :fnptr (first t)))
                 (and (= :ref (first f)) (= :ref (first t)) (nth f 2) (not (nth t 2))))
         (let [sn (snapshot)] (when-not (coerce! x from to) (rollback! sn)))))))
