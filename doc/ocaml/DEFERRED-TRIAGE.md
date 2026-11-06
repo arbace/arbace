@@ -804,3 +804,10 @@ the run corpus has 377 run programs (541 with a `.reference`), the suite 120:
     bin/oi pins --attest
     bin/oi divergences && bin/oi suite divergences && bin/oi divergences --aot && bin/oi suite divergences --aot && bin/oi divergences --compiled
     bin/reap record
+
+## Decided (2026-11-06, the user: OT27-OT29)
+
+- **OT27 (a):** the C API shim through ci: the 25 `:c-api` tests' stubs interpreted by ci against a clean-room `caml/*.h`, after
+  oi is embedded in the shipped program (about 10 days at eval and 4 at AOT, after the embedding); the 25 stay deferred until then.
+- **OT28 (a):** writes through a `sub`/`slice` view of a mapped bigarray stay as built (no checked program does it).
+- **OT29 (a):** `ast-invariants` and `parsetree` stay in the speed classes; the compiled level is their AOT judgment.
