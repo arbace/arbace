@@ -376,6 +376,30 @@
 
 (defn- unsized? [t] (#{:slice :str :dyn} (first (shallow t))))
 
+(declare supertraits-of)
+
+(defn dyn-implements?
+  "A trait object implements its principal, the principal's supertraits and its auto traits (the object candidate)"
+  [t tr]
+  (let [t (shallow t)]
+    (when (= :dyn (first t))
+      (let [{:keys [principal autos]} (second t)]
+        (or (some #(= tr %) autos)
+            (when principal
+              (loop [queue [(first principal)] seen #{}]
+                (when-let [d (first queue)]
+                  (if (= d tr) true
+                      (recur (into (vec (rest queue)) (remove seen (supertraits-of d))) (conj seen d)))))))))))
+
+(defn- supertraits-of
+  "A trait's direct supertraits' definitions (the crate's or std's)"
+  [d]
+  (if (number? d)
+    (vec (keep (fn [b] (when (:trait b) (let [r (c/res-def (:trait b))] (when (#{:local :ext} (first r)) (second r)))))
+               (:bounds (:node (c/def-of d)))))
+    (vec (keep (fn [c] (when (= 'trait (head c)) (let [p (nth c 1)] (when-not (#{(c/lang "meta_sized") (c/lang "sized")} p) p))))
+               (:predicates (get (:traits c/*si*) d))))))
+
 (defn holds?
   "Selection of a trait clause [TRAIT ARGS] (the solver's slice, RF8): Sized by the self type, a variable or a parameter
   assumed (an accepted program's obligation), else an impl whose header unifies and whose own clauses hold"
@@ -384,6 +408,7 @@
     (cond
       (= tr (c/lang "sized")) (not (unsized? self))
       (#{(c/lang "meta_sized") (c/lang "pointee_sized")} tr) true
+      (dyn-implements? self tr) true
       ;; the builtin impls: closures, function items and pointers implement the Fn traits; closures Clone and Copy
       (and (#{:closure :fndef :fnptr} (first self))
            (#{"core::ops::function::Fn" "core::ops::function::FnMut" "core::ops::function::FnOnce"
@@ -487,6 +512,8 @@
                        self (some-> (first targs) shallow)]
                    (if (and r self (not (tvar? self))
                             (or (= :param (first self))
+                                ;; the object candidate: a trait object of the trait (or of a trait it extends)
+                                (dyn-implements? self tr)
                                 (let [sn (snapshot) ok (impls-for self tr (vec (rest targs)))]
                                   (when (> (count targs) 1) (rollback! sn))
                                   ok)))
