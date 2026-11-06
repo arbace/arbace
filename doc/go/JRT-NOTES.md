@@ -4144,7 +4144,7 @@ jdk26u's next revision) and the natives' Go forms `serial.ae`. javac on Arbace c
 java.base against the platform (40 classes) and repr/java reads them (7 forms files). They are not in the world yet: the
 overlay takes every file of `overlay/jdk/java.base`, and the world would take them before j2g writes `SerialNew`.
 
-**Left (the night's build proves each).** (1) j2g (`arbace.j2g.decls`): for each concrete class C of the world that is
+**Left (the night's build proves each).** (1) j2g, written (2026-11-06) and inert until `java/io/ObjectStreamClass` is translated (`arbace.j2g.model/serial-super`, `arbace.j2g.decls/serial-new-forms`, the class's init in `arbace.j2g.out`; the namespaces load on stage 0): for each concrete class C of the world that is
 Serializable (`m/all-supertypes` has `java/io/Serializable`) and not an enum or a record (they are written by name and
 by their canonical constructor), its first superclass S that is not Serializable; when S has a no-argument constructor
 accessible to C (public or protected, or package-private in C's package; ReflectionFactory's rule), a function
