@@ -746,12 +746,22 @@
   {"+" "add" "-" "sub" "*" "mul" "/" "div" "%" "rem" "&" "bitand" "|" "bitor" "^" "bitxor" "<<" "shl" ">>" "shr"
    "==" "eq" "!=" "eq" "<" "partial_ord" "<=" "partial_ord" ">" "partial_ord" ">=" "partial_ord"})
 
+(declare has-num-var?)
+
 (defn- overloaded-binop
   "check_overloaded_binop: the operator's trait for the operands' types (lookup_op_method); a comparison by reference
-  (both operands autoref'd), its type bool, else `<L as Op<R>>::Output`"
+  (both operands autoref'd), its type bool, else `<L as Op<R>>::Output`; with integer or float variables in an operand
+  (`&{integer} % {integer}`) the obligation stays pending and the output is the projection, normalized after fallback"
   [e op lt rt]
   (let [tr (c/lang (get op-traits op))
         cmp? (#{"==" "!=" "<" "<=" ">" ">="} op)]
+    (if (and tr (or (has-num-var? lt) (has-num-var? rt)) (not (tvar? (shallow lt))))
+      (do (when *obligations* (swap! *obligations* conj [:trait [tr [lt rt]]]))
+          (when cmp?
+            (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] false lt]]])
+            (adjust! (:rhs e) [["Borrow" [:ref [:re-erased] false rt]]]))
+          (if cmp? [:bool] (let [out (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr)))]
+                             (if out [:proj out [lt rt]] [:unknown]))))
     (if (and tr (not= [:unknown] (shallow lt)) (not= [:unknown] (shallow rt)) (not (tvar? (shallow lt)))
              (or (impls-for (shallow lt) tr [rt])
                  ;; the rhs coerced to the impl's Rhs (`String + &String`: &str by deref coercion)
@@ -764,7 +774,7 @@
             (adjust! (:rhs e) [["Borrow" [:ref [:re-erased] false rt]]]))
           (if cmp? [:bool] (let [out (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr)))]
                              (if out (shallow [:proj out [lt rt]]) [:unknown]))))
-      [:unknown])))
+      [:unknown]))))
 
 (declare param-fn-bound fn-traits solve-obligations!)
 
@@ -1150,6 +1160,15 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Bodies, fallback and writeback
 
+(defn has-num-var?
+  "An integer or float variable inside a type"
+  [t]
+  (let [t (shallow t)]
+    (cond (tvar? t) (boolean (#{:int :float} (second t)))
+          (and (vector? t) (keyword? (first t))) (boolean (some #(cond (vector? %) (has-num-var? %) :else false) (rest t)))
+          (vector? t) (boolean (some has-num-var? t))
+          :else false)))
+
 (defn- has-var? [t]
   (let [t (shallow t)]
     (cond (tvar? t) true
@@ -1167,6 +1186,11 @@
       (doseq [o (when *obligations* @*obligations*)]
         (case (first o)
           :trait (let [[tr args] (second o) self (shallow (first args))]
+                   ;; the builtin Fn impls of a callable: its signature's inputs are the obligation's tuple
+                   (when (and (fn-traits tr) (#{:fndef :closure :fnptr} (first self)) (= :tuple (first (shallow (second args)))))
+                     (let [sig (case (first self) :closure (nth self 2) :fndef (sig-of self) :fnptr (erase (second self)))
+                           tys (second (shallow (second args)))]
+                       (when (= (count tys) (count (:inputs sig))) (let [sn (snapshot)] (when-not (unify-all (vec (:inputs sig)) (vec tys)) (rollback! sn))))))
                    (when (and (not (tvar? self)) (not= :param (first self)) (not= [:unknown] self)
                               (not (#{(c/lang "sized") (c/lang "meta_sized")} tr))
                               (some has-var? args))

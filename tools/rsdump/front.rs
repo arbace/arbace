@@ -225,7 +225,10 @@ fn sarg<'tcx>(tcx: TyCtxt<'tcx>, a: rustc_middle::ty::GenericArg<'tcx>) -> Strin
     match a.kind() {
         GenericArgKind::Type(t) => sty(tcx, t),
         GenericArgKind::Lifetime(r) => format!("(lt {})", q(&region_text(r))),
-        GenericArgKind::Const(c) => format!("(const {})", q(&c.to_string())),
+        GenericArgKind::Const(c) => match c.kind() {
+            rustc_middle::ty::ConstKind::Param(p) => format!("(cparam {} {})", p.index, q(p.name.as_str())),
+            _ => format!("(const {})", q(&c.to_string())),
+        },
     }
 }
 
