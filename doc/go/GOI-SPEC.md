@@ -5030,6 +5030,14 @@ and `run.ae` compile by c2j alone (as `bin/ci c2j-check` does for ci: 549 classe
 4. **The build.** `arbace/go/escape.ae` is a new embedded namespace of goi (in `gate_key`): the next gate
    build compiles it into the executable (c2j checked here; j2g and Go's build not run, the day's rules).
 
+## Decided (2026-11-06, the user: gc's escape analysis and inliner's proposals)
+
+On "Since v1: gc's escape analysis and inliner"'s Proposed: 1 (b), the standard library's tags made with
+its inliner by a per-package warm-up, and 1 (c), `testing.B.Loop`'s keep-alives with `-m=2`'s explanations,
+now, on the branch `goi-escape`; 1 (a), generic functions' instances, with the next round of goi's generics.
+2: tonight's full `bin/goi check --record` confirms the 96 rows. 3: the 33 programs of gc's back-end flags
+stay in `gc-flags`, by design.
+
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
 The user chose, 2026-10-24, goi's two items deferred from v1 (doc/AGENDA.md): GC157 (b), `byte`,
