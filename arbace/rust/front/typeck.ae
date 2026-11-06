@@ -1179,15 +1179,36 @@
       (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %))) (update :adj (fn [as] (mapv (fn [[k t]] [k (print-fact-ty t)]) (or as []))))))
             @facts))))
 
+(defn- repr-int
+  "An enum's discriminant type: its #[repr(int)], else isize"
+  [enum-node]
+  (or (some (fn [a] (some #(when (and (string? %) (re-matches #"[iu](8|16|32|64|128|size)" %)) %) (:toks a))) (:attrs enum-node))
+      "isize"))
+
+(defn- check-discriminant
+  "An explicit discriminant (`A = 1`): the anonymous constant `Variant::{constant#0}`, typed by the enum's repr"
+  [d]
+  (let [v (:node d)
+        owner (str (binding [c/*in-value* true] (c/print-def-path (:id d) [])) "::{constant#0}")
+        t (get c/prim-tys (repr-int (:node (c/def-of (:parent d)))))
+        facts (atom [])]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *owner* owner *env* [{}] *loops* nil *obligations* (atom [])]
+      (c/in-def (:parent d)
+        (let [x (check-expr (:disr v) t)] (coerce! (:disr v) x t)))
+      (fallback!)
+      (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %))) (update :adj (fn [as] (mapv (fn [[k t]] [k (print-fact-ty t)]) (or as []))))))
+            @facts))))
+
 (defn check-crate
   "RF9: every typeck root's facts (within collect/with-crate)"
   []
   (vec (mapcat (fn [d]
-                 (try (check-body d)
+                 (try (if (= "Variant" (:kind d)) (check-discriminant d) (check-body d))
                       (catch Throwable ex
                         (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "body" (:id d) "failed:" ex) (.printStackTrace ex)))
                         [{:owner "?" :error (str ex)}])))
-               (filter (fn [d] (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
+               (filter (fn [d] (or (and (= "Variant" (:kind d)) (:disr (:node d)))
+                                   (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
                                    (and (or (str/starts-with? (str (:kind d)) "Const") (str/starts-with? (str (:kind d)) "Static")
                                             (str/starts-with? (str (:kind d)) "AssocConst"))
                                         (:expr (:node d)))))
