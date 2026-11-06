@@ -1004,6 +1004,71 @@
         (closure-expr e k clo)
         (when-not (seq tmps) (walk-func! (eb e) wf))))))
 
+;;; typecheck's normalizeGoDeferCall over the tree: a go or defer of a call with arguments or
+;;; results becomes the call of a wrapper literal (gc's f.gowrapN, f.deferwrapN) without either,
+;;; its arguments evaluated first into temporaries the wrapper captures
+
+(defn- normal-go-defer?
+  [c]
+  (let [sig (when (#{:static :closure :compiled} (:kind c)) (node-type (:callee c)))]
+    (and sig (let [[_ ps rs] (under sig)] (and (empty? ps) (empty? rs))))))
+
+(defn- wrap-go-defer
+  "Statement n (a go or defer) normalized: [temporaries' declaration or nil, the statement]."
+  [n]
+  (let [c (:call n)]
+    (if (or (not= :call (:op c)) (normal-go-defer? c))
+      [nil n]
+      (let [line (:line n)
+            c (if (= :builtin (:kind c)) c (assoc c :args (variadic-args c (or (when (= :method (:kind c)) (e/o (:method (:callee c)) :type))
+                                                                                (node-type (:callee c))))
+                                                  :spread true))
+            mrecv (when (= :method (:kind c)) (method-recv (:callee c)))
+            visits (case (:kind c)
+                     :builtin (vec (mapcat (fn [i a] (wrapper-visit a [:args i])) (range) (:args c)))
+                     :iface (vec (concat [[[:callee :recv] (:recv (:callee c))]]
+                                         (mapcat (fn [i a] (wrapper-visit a [:args i])) (range) (:args c))))
+                     :method (vec (concat (wrapper-visit mrecv [:callee ::recv])
+                                          (mapcat (fn [i a] (wrapper-visit a [:args i])) (range) (:args c))))
+                     (vec (concat (wrapper-visit (:callee c) [:callee])
+                                  (mapcat (fn [i a] (wrapper-visit a [:args i])) (range) (:args c)))))
+            tmps (vec (for [[_ a] visits]
+                        (e/obj {:kind :var :name ".autotmp" :line (or (:line a) line) :type (node-type a)
+                                :local? true :esc-class :auto})))
+            ln (fn [o a] {:op :local :obj o :type (node-type a) :mode :variable :line (:line a)})
+            c (if mrecv (assoc-in c [:callee :recv] mrecv) c)
+            c (if mrecv (update c :callee assoc :recv-adjust nil :path [(peek (vec (:path (:callee c))))]) c)
+            c2 (reduce (fn [c [o [path a]]]
+                         (if (= ::recv (peek path))
+                           (assoc-in c [:callee :recv] (ln o a))
+                           (assoc-in c path (ln o a))))
+                       c (map vector tmps visits))
+            wsig [:func [] [] false]
+            w {:op :fn :wrapper true :wrapkind (if (= :go (:op n)) "gowrap" "deferwrap") :params [] :results [] :recv nil
+               :sig wsig :type wsig :mode :value :line line
+               :body {:op :block :stmts [{:op :expr :x c2 :line line}]}}]
+        [(when (seq tmps) {:op :decl :short true :objs tmps :init (mapv second visits) :line line})
+         (assoc n :call {:op :call :kind :closure :callee w :args [] :mode :novalue :type :invalid :line line})]))))
+
+(defn- normalize-go-defer
+  "The go and defer statements of a tree normalized (wrap-go-defer)."
+  [tree]
+  (let [memo (java.util.IdentityHashMap.)]
+    (letfn [(nm [x]
+              (cond
+                (and (map? x) (.containsKey memo x)) (.get memo x)
+                (map? x) (let [x0 x
+                               x (into {} (map (fn [[k v]] [k (if (#{:type :to :sig :field :method :recv-type :iface} k) v (nm v))])) x)
+                               r (if (#{:go :defer} (:op x))
+                                   (let [[d st] (wrap-go-defer x)]
+                                     (if d {:op :block :line (:line x) :stmts [d st]} st))
+                                   x)]
+                           (.put memo x0 r)
+                           r)
+                (vector? x) (mapv nm x)
+                :else x))]
+      (nm tree))))
+
 ;;; Assignments (assign.go)
 
 (defn- addr-of
@@ -2185,7 +2250,7 @@
           (when (System/getenv "GOI_INLINE_COSTS")
             (binding [*out* *err*] (println "inl-cost" (fn-get f :line) (fn-get f :name) cost (or r ""))))
           (fn-set! f :inl-state :done)
-          (when (and inl (pos? (long *m*)) (not (fn-get f :wrapper)))
+          (when (and inl (pos? (long *m*)))
             (binding [*wfile* (fn-get f :file)]
               (warn! (fn-get f :line) (str "can inline " (fn-get f :name)))))
           inl)))))
@@ -2379,6 +2444,14 @@
             body [pdecl rdecl {:op :block :stmts (if (vector? body) body [body]) :line line}]
             body (inline-calls caller body (conj chain callee))]
         {:op :inlcall :callee-name (fn-get callee :name) :body body :retvars rv :line line
+         ;; staticinit's staticAssignInlinedCall: a callee whose body is one return
+         :inl-static (let [ss (live-stmts (let [b (fn-get callee :body)] (if (map? b) (:stmts b) b)))
+                           ss (if (and (= 1 (count ss)) (= :block (:op (first ss))) (empty? (:decls (first ss))))
+                                (live-stmts (:stmts (first ss))) ss)]
+                       (when (and (= 1 (count ss)) (= :return (:op (first ss))) (= 1 (count (:values (first ss)))))
+                         {:value (first (:values (first ss)))
+                          :params (set (remove nil? (concat [(fn-get callee :recv)] (fn-get callee :params))))
+                          :args (vec (concat (when rarg [rarg]) args))}))
          :type (node-type c) :mode :value
          :callee-is-lit (= :fn (:op (static-value (:callee c))))}))))
 
@@ -2414,6 +2487,7 @@
                 (case (:op x)
                   :fn (when-not (.containsKey ^java.util.IdentityHashMap (:fn-of-node *ctx*) x)
                        (let [c (volatile! {:node x :parent f :closure? true :file (fn-get f :file) :name (or (:lit-name x)
+                                                                                                                (when (:wrapkind x) (str (fn-get f :name) "." (:wrapkind x) (inc (count @kids))))
                                                                                                                 (if (fn-get f :parent)
                                                                                                                   (str (fn-get f :name) "." (inc (count @kids)))
                                                                                                                   (str (fn-get f :name) ".func" (inc (count @kids)))))
@@ -2422,6 +2496,7 @@
                                                                                    (e/obj {:kind :var :name (str "~r" i) :line (:line x) :type (:type r)})))
                                                                      (:results x)))
                                           :sig (:sig x) :recv nil :esc :unknown :line (:line x)
+                                          :wrapper (boolean (:wrapper x))
                                           :body (:body x)})]
                         (doseq [o (:params x)] (when o (e/oset! o :esc-class :param)))
                         (doseq [o (fn-get c :results)] (e/oset! o :esc-class :result))
@@ -2790,6 +2865,26 @@
     (analyze-package r)
     (vec (sort-by (juxt first second) (distinct @*msgs*)))))
 
+(defn- static-inlined?
+  "staticinit over an inlined call in an initializer: its callee returns one expression static but
+  for its parameters, its arguments static."
+  [x]
+  (let [st (:inl-static x)]
+    (boolean
+      (and st (every? static-init? (:args st))
+           (letfn [(ok [n] (cond
+                             (and (= :local (:op n)) (contains? (:params st) (:obj n))) true
+                             (static-init? n) true
+                             :else (case (:op n)
+                                     :addr (and (= :lit (:op (:x n))) (ok (:x n)))
+                                     :lit (case (:kind n)
+                                            :struct (every? #(ok (elt-value %)) (:fields n))
+                                            (:array :slice) (every? #(ok (elt-value %)) (:elems n))
+                                            false)
+                                     :convert-iface (ok (:x n))
+                                     false)))]
+             (ok (:value st)))))))
+
 (defn- inline-package!
   "CanInline over the package's functions and literals, then their bodies with the calls gc
   inlines inlined; the package scanned again over the new bodies (the literals inlined away
@@ -2798,6 +2893,13 @@
   (let [live (vec (remove #(fn-get % :extern) fns))
         all (vec (mapcat all-fns live))]
     (doseq [f all] (can-inline! f))
+    ;; reflectdata's pointer wrappers of value methods ((*T).M calling T.M), generated code that
+    ;; inlines an inlinable value method: reported at <autogenerated>:1
+    (binding [*wfile* "<autogenerated>"]
+      (doseq [f live
+              :when (and (fn-get f :obj) (fn-get f :recv-type) (not (t/pointer? (fn-get f :recv-type)))
+                         (fn-get f :inl) (<= (long (:cost (fn-get f :inl))) inline-max-budget))]
+        (warn! 1 (str "inlining call to " (fn-get f :name)))))
     ;; literals first (all-fns lists a function before its literals)
     (doseq [f (reverse all)]
       (binding [*wfile* (fn-get f :file)]
@@ -2809,7 +2911,12 @@
                       g))]
       (doseq [k [:owner :single-def :func-assigns]] (.clear ^java.util.HashMap (get *ctx* k)))
       (.clear ^java.util.IdentityHashMap (:fn-of-node *ctx*))
-      (doseq [f live] (fn-set! f :body (fn-get f :inlined-body)))
+      (doseq [f live]
+        (fn-set! f :body (if (= "init" (fn-get f :name))
+                           (vec (remove #(and (= :assign (:op %)) (= 1 (count (:rhs %))) (= :inlcall (:op (first (:rhs %))))
+                                              (static-inlined? (first (:rhs %))))
+                                        (fn-get f :inlined-body)))
+                           (fn-get f :inlined-body))))
       (let [lone-fns (vec (for [g lone]
                             (volatile! (assoc (select-keys @g [:node :name :file :params :param-types :results :sig :line :inl :inl-state])
                                               :parent nil :closure? false :recv nil :esc :unknown
@@ -2835,7 +2942,7 @@
                    :kept-lits (volatile! #{})}]
 
     (let [decls (filter #(and (= :func (:kind %)) (:obj %)) (:decl-infos r))
-          decls (mapv (fn [d] (if (:tree d) (update d :tree prune-switches) d)) decls)
+          decls (mapv (fn [d] (if (:tree d) (update d :tree (comp normalize-go-defer prune-switches)) d)) decls)
           fns (vec (for [d decls
                          :let [tree (:tree d)
                                o (:obj d)
