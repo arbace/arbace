@@ -240,7 +240,7 @@ repr-haskell-rename-check: ## the front end's renamer (HF2) against GHC's: the r
 	bin/repr-haskell rename-check
 repr-haskell-typecheck-check: ## the front end's elaborator (HF3) against GHC's types and desugared Core's evidence over test/haskell/typecheck's samples, with its negative control (bin/repr-haskell typecheck-check)
 	bin/repr-haskell typecheck-check
-repr-haskell-stg-check: ## HF5-HF6: the match compiler, CorePrep and CoreToStg; Core and STG against GHC's -O0, test/haskell/stg's programs run on hsi from Arbace's STG against GHC's output (bin/repr-haskell stg-check)
+repr-haskell-stg-check: ## HF5-HF6: the match compiler, the -O0 Simplifier, CorePrep and CoreToStg; desugared and simplified Core and STG against GHC's -O0, test/haskell/stg's programs run on hsi from Arbace's STG against GHC's output (bin/repr-haskell stg-check)
 	bin/repr-haskell stg-check
 repr-haskell-run-check: ## HF7's first light: the run corpus (test/haskell/eval's samples and synthetic programs) compiled by Arbace's front end alone and run on hsi, against GHC's recorded runs and test/haskell/run-check.edn (bin/repr-haskell run-check)
 	bin/repr-haskell run-check
