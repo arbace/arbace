@@ -1632,7 +1632,9 @@
                         rv (when (and tr (not (#{"&&" "||"} op)) (not (tvar? (shallow lt))) (not (scalar? lt)))
                              (let [v (fresh :ty) sn (snapshot) r (impls-for (shallow lt) tr [v])]
                                (if (and (vector? r) (not (tvar? (shallow v)))) v (do (rollback! sn) nil))))
-                        rt (check-expr (:rhs e) (or rv (when (and (#{"+" "-" "*" "/" "%" "&" "|" "^" "==" "!=" "<" "<=" ">" ">="} op) (or (scalar? lt) (tvar? (shallow lt)))) lt)))]
+                        rt (check-expr (:rhs e) (or rv (when (and (#{"+" "-" "*" "/" "%" "&" "|" "^" "==" "!=" "<" "<=" ">" ">="} op) (or (scalar? lt) (tvar? (shallow lt)))) lt)))
+                        ;; (check_expr_coercible_to_type: the right operand coerced to ?R)
+                        rt (if (and rv (coerce! (:rhs e) rt rv)) rv rt)]
                     (cond
                       (#{"&&" "||"} op) (do (unify lt [:bool]) (unify rt [:bool]) [:bool])
                       (builtin-binop? op lt rt)
@@ -1707,14 +1709,24 @@
                     (anon-const! (:count e) true)
                     [:array elt (c/lower-const-arg (:count e))])
           :assign (let [lt (binding [*mutable-place* true] (check-expr (:lhs e) nil))] (let [rt (check-expr (:rhs e) lt)] (coerce! (:rhs e) rt lt)) unit)
-          :assign-op (let [lt (check-expr (:lhs e) nil) rt (check-expr (:rhs e) lt)
-                           op (str/replace (str (:op e)) "=" "")]
+          ;; check_overloaded_binop with IsAssign: the left side a mutated place (its derefs DerefMut), the right
+          ;; operand's expectation the `?R` that `L: OpAssign<?R>`'s selection binds (a scalar's: its own type), the
+          ;; right operand coerced to it (`String += &&str`)
+          :assign-op (let [op (str/replace (str (:op e)) "=" "")
+                           lt (binding [*mutable-place* true] (check-expr (:lhs e) nil))
+                           tr (c/lang (str (get op-traits op) "_assign"))
+                           rv (when (and tr (not (tvar? (shallow lt))) (not (scalar? lt)))
+                                (let [v (fresh :ty) sn (snapshot) r (impls-for (shallow lt) tr [v])]
+                                  (if (and (vector? r) (not (tvar? (shallow v)))) v (do (rollback! sn) nil))))
+                           rt (check-expr (:rhs e) (or rv (when-not (#{"<<" ">>"} op) lt)))]
                        (if (builtin-binop? op lt rt)
                          (when-not (#{"<<=" ">>="} (:op e)) (unify lt rt))
                          ;; an overloaded compound assignment: OpAssign<R> for the left side, which is autoref'd mutably
-                         (when-let [tr (c/lang (str (get op-traits op) "_assign"))]
-                           (when (impls-for (shallow lt) tr [rt])
-                             (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] true lt]]]))))
+                         (when tr
+                           (if rv
+                             (do (coerce! (:rhs e) rt rv) (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] true lt]]]))
+                             (when (impls-for (shallow lt) tr [rt])
+                               (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] true lt]]])))))
                        unit)
           :block (if (:label e)
                    ;; a labeled block: its tail and its breaks' values coerced to one type
