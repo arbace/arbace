@@ -85,6 +85,18 @@ public final class HostManagement {
     /** The ownable synchronizers t holds (jrt's ReentrantLocks; slice 3b). */
     public static native Object[] lockedSynchronizers0(Thread t);
 
+    /**
+     * t's stack as ThreadInfo reports it (slice 4): the current thread's own; a waiting thread's as it began to
+     * wait (recorded once trackLocks0 ran); a running thread's none (its goroutine's stack cannot be read).
+     */
+    public static native StackTraceElement[] stackTrace0(Thread t);
+
+    /**
+     * For each of t's locked monitors (lockedMonitors0's order), the depth in a stack of n frames of the frame
+     * that locked it, -1 when not known (slice 4).
+     */
+    public static native int[] lockedMonitorDepths0(Thread t, int n);
+
     /** The times t blocked to enter a monitor or a lock. */
     public static native long blockedCount0(Thread t);
 

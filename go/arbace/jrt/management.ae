@@ -137,7 +137,10 @@ wsTimed) on on (nil: sleep): its state and its count.\n"
     (.Add (.-blockedCount t) 1)
     (.Add (.-waitedCount t) 1))
   (when (.Load contentionMonitoring)
-    (.Store (.-waitSince t) (conv int64 (time/Since vmStart)))))
+    (.Store (.-waitSince t) (conv int64 (time/Since vmStart))))
+  ;; slice 4: once tracked, the waiting thread's Java frames, for another thread's ThreadInfo
+  (when (and (.Load trackLocks) (== t (CurrentThread)))
+    (.Store (.-waitStack t) (javaFrames (callers 2) (evalTrace) (goiTrace)))))
 
 (go/func waitEnd
   "waitEnd records that t no longer waits, its time added while contention monitoring is on.\n"
@@ -145,6 +148,7 @@ wsTimed) on on (nil: sleep): its state and its count.\n"
   (let [ws (.Swap (.-wstate t) wsNone)
         since (.Swap (.-waitSince t) 0)]
     (.Store (.-waitOn t) nil)
+    (.Store (.-waitStack t) nil)
     (when (and (!= since 0) (.Load contentionMonitoring))
       (let [d (- (conv int64 (time/Since vmStart)) since)]
         (if (== ws wsBlocked)
@@ -334,13 +338,15 @@ monitor entries and exits, and its jrt ReentrantLocks' acquisitions and releases
 load on the paths before). What was locked before is not known: a monitor entered before stays unlisted, and
 its exit finds no entry.\n" :tag atomic/Bool} trackLocks)
 
-(go/type heldMonitor "heldMonitor is a monitor a thread entered: its header and its Java object (nil: unknown).\n"
-  (struct ^{:tag (* Object)} o ^any x))
+(go/type heldMonitor "heldMonitor is a monitor a thread entered: its header, its Java object (nil: unknown) and
+how many Java frames the thread had when it entered (slice 4: the frame that locked it).\n"
+  (struct ^{:tag (* Object)} o ^any x ^int frames))
 
 (go/func heldPush [^{:tag (* Thread)} t ^{:tag (* Object)} o ^any x]
-  (.Lock (.-heldMu t))
-  (set! (.-held t) (append (.-held t) (lit heldMonitor :o o :x x)))
-  (.Unlock (.-heldMu t)))
+  (let [n (len (.-A (javaFrames (callers 3) (evalTrace) (goiTrace))))]
+    (.Lock (.-heldMu t))
+    (set! (.-held t) (append (.-held t) (lit heldMonitor :o o :x x :frames n)))
+    (.Unlock (.-heldMu t))))
 
 (go/func heldPop "heldPop removes t's latest entry of o's monitor, if any.\n" [^{:tag (* Thread)} t ^{:tag (* Object)} o]
   (.Lock (.-heldMu t))
@@ -400,4 +406,47 @@ ReentrantLocks; the JDK lists the locks' AQS sync objects, which jrt's lock has 
     (defer (.Unlock (.-heldMu t)))
     (let [a (NewRefArray Object_class (conv int32 (len (.-syncs t))))]
       (range [i x (.-syncs t)] (aset (.-A a) i x))
+      a)))
+
+;; ---------------------------------------------------------------------------------------
+;; slice 4: other threads' stacks
+
+(go/func stackOf
+  "stackOf is t's Java frames as ThreadInfo reports them: the current thread's now; a waiting thread's as it
+began to wait (once tracked); else none (a running thread's goroutine stack cannot be read from another).\n"
+  ^{:tag (* RefArray)} [^{:tag (* Thread)} t]
+  (when (== t (CurrentThread))
+    (return (javaFrames (callers 3) (evalTrace) (goiTrace))))
+  (when (!= (.Load (.-wstate t)) wsNone)
+    (let [(values a ok) (assert (* RefArray) (.Load (.-waitStack t)))]
+      (when (and ok (!= a nil)) (return a))))
+  (NewRefArray StackTraceElement_class 0))
+
+(go/func HostManagement_StackTrace0_Thread__StackTraceElement1_native
+  "HostManagement_StackTrace0_Thread__StackTraceElement1_native is t's stack as ThreadInfo reports it (stackOf).\n"
+  ^{:tag (* RefArray)} [^Thread_I th]
+  (stackOf (.Self_Thread th)))
+
+(go/func HostManagement_LockedMonitorDepths0_Thread_I__I1_native
+  "HostManagement_LockedMonitorDepths0_Thread_I__I1_native is, for each of t's locked monitors (lockedMonitors0's
+order), the depth in a stack of n frames (stackOf's) of the frame that locked it, -1 when not known.\n"
+  ^{:tag (* IntArray)} [^Thread_I th ^int32 n]
+  (let [t (.Self_Thread th)
+        waiting (or (== (.Load (.-wstate t)) wsWaiting) (== (.Load (.-wstate t)) wsTimed))
+        on (.Load (.-waitOn t))
+        seen (make (map (* Object) bool))
+        ^{:tag (slice int32)} out nil]
+    (.Lock (.-heldMu t))
+    (for [i (- (len (.-held t)) 1)] (>= i 0) (dec! i)
+      (let [h (aget (.-held t) i)
+            ^any x (.-x h)]
+        (when (== x nil) (set! x (.-o h)))
+        (when (and (not (aget seen (.-o h))) (not (and waiting (== x on))))
+          (aset seen (.-o h) true)
+          (let [d (- (conv int32 n) (conv int32 (.-frames h)))]
+            (when (or (< d 0) (>= d n) (== n 0)) (set! d -1))
+            (set! out (append out d))))))
+    (.Unlock (.-heldMu t))
+    (let [a (NewIntArray (conv int32 (len out)))]
+      (range [i d out] (aset (.-A a) i d))
       a)))
