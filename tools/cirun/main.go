@@ -5,7 +5,9 @@
 // error, no entry, a panic of the interpreter's) are "cirun: internal: ..." with status 70, which bin/ci check's
 // judge tells from a program's own status (doc/C23-SURVEY.md, "As built: review 006's fixes", finding 4).
 // cirun --env PROGRAM.nodes [ARG...] gives the program cirun's own environment (RES29 (a), doc/rust/EVAL.md §10);
-// without it the program starts with an empty one, as before.
+// without it the program starts with an empty one, as before. --signals: a run a signal ended (a fault, an abort) ends
+// cirun by that signal (crt.DieBy), as the kernel ends the C program, so a parent sees WIFSIGNALED (RE6); without it
+// cirun exits with 128 + the signal, as before.
 package main
 
 import (
@@ -30,9 +32,14 @@ func internal(out *bufio.Writer, format string, a ...any) {
 
 func main() {
 	args := os.Args[1:]
-	env := false
-	if len(args) > 0 && args[0] == "--env" {
-		env, args = true, args[1:]
+	env, sigs := false, false
+	for len(args) > 0 && (args[0] == "--env" || args[0] == "--signals") {
+		if args[0] == "--env" {
+			env = true
+		} else {
+			sigs = true
+		}
+		args = args[1:]
 	}
 	if len(args) < 1 {
 		internal(nil, "usage: cirun [--env] PROGRAM.nodes [ARG...]")
@@ -68,6 +75,9 @@ func main() {
 		if env {
 			sys.Self = append(sys.Self, "--env")
 		}
+		if sigs {
+			sys.Self = append(sys.Self, "--signals")
+		}
 		sys.Self = append(sys.Self, nodes)
 	}
 	sys.StdFiles = [3]*os.File{os.Stdin, os.Stdout, os.Stderr}
@@ -83,6 +93,10 @@ func main() {
 	out.Flush()
 	if fault != nil {
 		fmt.Fprintln(os.Stderr, "cirun: fault:", fault)
+	}
+	if sigs && p.Signal != 0 {
+		os.Stderr.Sync()
+		crt.DieBy(p.Signal)
 	}
 	os.Exit(status)
 }

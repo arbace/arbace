@@ -62,3 +62,63 @@ int __cxa_thread_atexit_impl(void (*dtor)(void *), void *obj, void *dso) {
   pthread_setspecific(rsi_tls_key, d);
   return 0;
 }
+
+/* The math builtins the lowering writes for LLVM's math intrinsics (arbace.cpp.lower's math-fns: llvm.log.f32 is
+   __builtin_logf) as functions of their name over musl's (RE6: float-f32.rs met __builtin_logf undefined); a builtin ci
+   resolves itself never pulls its port from this library; those arbace.rust.run's ci-math makes macros are not here. */
+double sqrt(double);
+double __builtin_sqrt(double x) { return sqrt(x); }
+float sqrtf(float);
+float __builtin_sqrtf(float x) { return sqrtf(x); }
+double floor(double);
+double __builtin_floor(double x) { return floor(x); }
+float floorf(float);
+float __builtin_floorf(float x) { return floorf(x); }
+double ceil(double);
+double __builtin_ceil(double x) { return ceil(x); }
+float ceilf(float);
+float __builtin_ceilf(float x) { return ceilf(x); }
+double exp(double);
+double __builtin_exp(double x) { return exp(x); }
+float expf(float);
+float __builtin_expf(float x) { return expf(x); }
+double log(double);
+double __builtin_log(double x) { return log(x); }
+float logf(float);
+float __builtin_logf(float x) { return logf(x); }
+double log10(double);
+double __builtin_log10(double x) { return log10(x); }
+float log10f(float);
+float __builtin_log10f(float x) { return log10f(x); }
+double sin(double);
+double __builtin_sin(double x) { return sin(x); }
+float sinf(float);
+float __builtin_sinf(float x) { return sinf(x); }
+double cos(double);
+double __builtin_cos(double x) { return cos(x); }
+float cosf(float);
+float __builtin_cosf(float x) { return cosf(x); }
+double tan(double);
+double __builtin_tan(double x) { return tan(x); }
+float tanf(float);
+float __builtin_tanf(float x) { return tanf(x); }
+double roundeven(double);
+double __builtin_roundeven(double x) { return roundeven(x); }
+float roundevenf(float);
+float __builtin_roundevenf(float x) { return roundevenf(x); }
+double fabs(double);
+double __builtin_fabs(double x) { return fabs(x); }
+float fabsf(float);
+float __builtin_fabsf(float x) { return fabsf(x); }
+double pow(double, double);
+double __builtin_pow(double x, double y) { return pow(x, y); }
+float powf(float, float);
+float __builtin_powf(float x, float y) { return powf(x, y); }
+double copysign(double, double);
+double __builtin_copysign(double x, double y) { return copysign(x, y); }
+float copysignf(float, float);
+float __builtin_copysignf(float x, float y) { return copysignf(x, y); }
+double ldexp(double, int);
+double __builtin_ldexp(double x, int e) { return ldexp(x, e); }
+float ldexpf(float, int);
+float __builtin_ldexpf(float x, int e) { return ldexpf(x, e); }
