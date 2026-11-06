@@ -113,7 +113,7 @@
          (into {} (for [f ["f16" "f32" "f64" "f128"]] [f [:float f]]))))
 
 (defn- region? [x] (and (vector? x) (#{:re-early :re-bound :re-static :re-erased} (first x))))
-(defn- const? [x] (and (vector? x) (#{:cval :cparam :cexpr} (first x))))
+(defn- const? [x] (and (vector? x) (#{:cval :cparam :cexpr :cpath} (first x))))
 (def ^:private unit [:tuple []])
 
 (defn- subst
@@ -156,6 +156,13 @@
 (def ^:dynamic *res* {})
 
 (defn- def-of [id] (nth @*defs* id))
+
+(defn- span-def
+  "The definition at an identifier's span; a span several definitions share (a macro's) by the name used"
+  [sp nm]
+  (let [ids (get @*by-span* sp)]
+    (when (seq ids)
+      (or (some #(when (= nm (second (:data (def-of %)))) %) ids) (peek ids)))))
 (defn- def-parent [d] (if (number? d) (:parent (def-of d)) (path-parent d)))
 
 (defn- add-def! [m]
@@ -164,7 +171,7 @@
         k (get @*disamb* dkey 0)]
     (swap! *disamb* assoc dkey (inc k))
     (swap! *defs* conj (assoc m :id id :disamb k))
-    (when-let [sp (:ident-span m)] (swap! *by-span* assoc sp id))
+    (when-let [sp (:ident-span m)] (swap! *by-span* update sp (fnil conj []) id))
     id))
 
 (defn- update-def! [id f & args] (apply swap! *defs* update id f args))
@@ -307,13 +314,15 @@
     (set acc)))
 
 (defn- where-preds
-  "HIR's predicates: the parameters' inline bounds first, in order, then the written where clause (rustc_ast_lowering)"
+  "HIR's predicates: the parameters' inline bounds first, in order, then the written where clause, then impl Trait
+  arguments' bounds (rustc_ast_lowering: the synthetic parameters' predicates come last)"
   [g]
-  (concat (for [p (:params g) :when (seq (:bounds p))]
-            (if (= :lifetime (:kind p))
-              {:lifetime (:name p) :bounds (:bounds p) :param p}
-              {:param-ty p :bounds (:bounds p) :param p}))
-          (:where g)))
+  (let [pred (fn [p] (if (= :lifetime (:kind p))
+                       {:lifetime (:name p) :bounds (:bounds p) :param p}
+                       {:param-ty p :bounds (:bounds p) :param p}))]
+    (concat (for [p (:params g) :when (seq (:bounds p)) :when (not (:synthetic p))] (pred p))
+            (:where g)
+            (for [p (:params g) :when (seq (:bounds p)) :when (:synthetic p)] (pred p)))))
 
 (def ^:dynamic *edition* 2024)
 
@@ -358,7 +367,7 @@
   (let [r (first (:res path))]
     (case (head r)
       def (count (filter #(= 'lifetime (first %)) (get (:generics *std*) (nth r 2))))
-      local-def (if-let [id (get @*by-span* (nth r 2))]
+      local-def (if-let [id (span-def (nth r 2) (:ident (peek (:segs path))))]
                   (count (filter #(= :lifetime (:kind %)) (:params (:generics (:node (def-of id))))))
                   0)
       0)))
@@ -462,11 +471,7 @@
         (contains? *late* nm) [:re-bound nm]
         :else (if-let [p (scope-lifetime nm)] [:re-early (:index p) nm] [:re-bound nm])))
 
-(declare lower-ty lower-trait-ref assoc-in-trait implicit-sizedness lower-bounds ast-param-names)
-
-(defn- local-def-at [sp kind-pred]
-  (or (get @*by-span* sp)
-      nil))
+(declare lower-ty lower-trait-ref assoc-in-trait implicit-sizedness lower-bounds ast-param-names trait-def-of)
 
 (defn- local-by-name
   "An unresolved name (an expansion's) among the module's definitions in the type namespace"
@@ -529,6 +534,8 @@
                             nil))))
               (:uses d))
         (when (#{"std" "core" "alloc"} nm) [:ext nm])
+        ;; a function body's items, then its module's names
+        (when-not (or (:module d) (= :crate (first (:data d)))) (when-let [m (module-parent module)] (lookup-name nm m false)))
         (when use-prelude
           (when-let [p (std-child (str *root-crate* "::prelude::rust_" (if (= 2015 *edition*) 2015 *edition*)) nm :type)] [:ext p])))))))
 
@@ -559,7 +566,7 @@
       local-def (let [k (second r) sp (nth r 2)]
                   (case k
                     ("TyParam" "ConstParam") [:param (scope-param (:ident (peek (:segs path))))]
-                    (if-let [id (get @*by-span* sp)]
+                    (if-let [id (span-def sp (:ident (peek (:segs path))))]
                       [:local id k]
                       ;; a definition in an out-of-line module's file (no root-file span): by its written path
                       (if-let [r (resolve-written (mapv :ident (:segs path)) *module*)]
@@ -576,6 +583,10 @@
             (cond
               (and (> (count names) 1) (#{"std" "core" "alloc"} (first names)) (std-path-def names))
               (let [p (std-path-def names)] [:ext p (ext-kind p)])
+              ;; the crate's own macro's $crate
+              (and (= "$crate" (:ident (first segs))) (nil? (:krate path)) (nil? file-crate) (resolve-written (assoc names 0 "crate") *module*))
+              (let [r (resolve-written (assoc names 0 "crate") *module*)]
+                (if (= :local (first r)) [:local (second r) (:kind (def-of (second r)))] [:ext (second r) (ext-kind (second r))]))
               (and (= 1 (count segs)) (not (:lang path)))
               (let [nm (:ident (first segs))]
                 (cond (= "Self" nm) (if (and *self-ty* (not= *self-ty* [:param 0 "Self"])) [:self-alias] [:self-param])
@@ -592,15 +603,24 @@
 
 (defn- elided-default [] (elided-region))
 
+(def ^:dynamic *files* nil)   ; atom: another file's path -> its source index
+
 (defn- snippet
-  "The root file's text of a span (the source map's span_to_snippet)"
+  "The text of a span (the source map's span_to_snippet): the root file's [l1 c1 l2 c2], another file's
+  (span FILE l1 c1 l2 c2 CTXT)"
   [sp]
-  (when (and *src* (vector? sp) (= 4 (count sp)))
-    (let [{:keys [^ints cps lines n]} *src*
-          off (fn [l c] (+ (long (nth lines (dec (long l)) 0)) (dec (long c))))
-          a (off (sp 0) (sp 1)) b (off (sp 2) (sp 3))]
-      (when (<= 0 a b (long n))
-        (String. cps (int a) (int (- b a)))))))
+  (let [[src sp] (cond (and (vector? sp) (>= (count sp) 4)) [*src* (subvec sp 0 4)]
+                       (and (seq? sp) (= 'span (first sp)) (string? (second sp)) (.exists (java.io.File. ^String (second sp))))
+                       [(or (get @*files* (second sp))
+                            (let [ix (resolve/source-index (slurp (second sp)))] (swap! *files* assoc (second sp) ix) ix))
+                        (vec (take 4 (drop 2 sp)))]
+                       :else [nil nil])]
+    (when (and src sp)
+      (let [{:keys [^ints cps lines n]} src
+            off (fn [l c] (+ (long (nth lines (dec (long l)) 0)) (dec (long c))))
+            a (off (sp 0) (sp 1)) b (off (sp 2) (sp 3))]
+        (when (<= 0 a b (long n))
+          (String. cps (int a) (int (- b a))))))))
 
 (defn- lower-const-arg [x]
   ;; a const argument: a literal's value, a const parameter, else an unevaluated anonymous constant, printed by its
@@ -608,7 +628,9 @@
   (cond
     (and (map? x) (= :lit (:kind x))) (let [l (:lit x)] [:cval (str (or (:symbol l) (:text l) l))])
     (and (map? x) (= :path (:kind x))) (let [nm (:ident (peek (:segs (:path x))))]
-                                         (if-let [p (scope-param nm)] [:cparam (:index p) nm] [:cexpr nm]))
+                                         (if-let [p (and (= 1 (count (:segs (:path x)))) (scope-param nm))]
+                                           [:cparam (:index p) nm]
+                                           [:cexpr (or (snippet (:span x)) (str/join "::" (map :ident (:segs (:path x)))))]))
     (and (map? x) (= :block (:kind x)) (nil? (seq (:stmts (:block x))))) (lower-const-arg (:expr (:block x)))
     :else [:cexpr (or (snippet (:span x)) (str "{const " (:kind x) "}"))]))
 
@@ -639,7 +661,7 @@
                                     :else [:err "arg"])))
             (recur (rest ps) lts others
                    (conj args (cond (:ext-default p) (subst (sty->ty (:ext-default p)) args)
-                                    (:default p) (subst (binding [*scope* [(generics-of def)]] (lower-ty (:default p))) args)
+                                    (:default p) (subst (binding [*scope* [(generics-of def)]] (if (= :const (:kind p)) (lower-const-arg (:default p)) (lower-ty (:default p)))) args)
                                     :else [:err (str "missing " (:name p))])))))
         args))))
 
@@ -662,6 +684,10 @@
                         (= (:name param) (:ident (first (:segs (:path (:ty pr))))))))
          b (:bounds pr)
          :when (:trait b)
+         ;; PredicateFilter::SelfTraitThatDefines: only a bound whose trait may define the name is lowered (its arguments
+         ;; may name the same associated type)
+         :let [d (trait-def-of (:trait b))]
+         :when (and d (assoc-in-trait [d []] nm))
          :let [tr (lower-trait-ref (:trait b) [:param (:index param) (:name param)])]
          :when tr
          :let [found (assoc-in-trait tr nm)]
@@ -680,7 +706,9 @@
     (when (= 2 (count segs))
       (some-> (case (first base)
         :self-param (let [tg (first (filter :has-self *scope*))]
-                      (some-> (assoc-in-trait [(:def tg) (identity-args tg)] nm) (#(vector :proj (first %) (second %)))))
+                      (some-> (or (when tg (assoc-in-trait [(:def tg) (identity-args tg)] nm))
+                                  (when tg (trait-bounds-defining (first (:params tg)) nm)))
+                              (#(vector :proj (first %) (second %)))))
         :param (some-> (trait-bounds-defining (second base) nm) (#(vector :proj (first %) (second %))))
         :self-alias (let [impl-g (first (filter #(str/starts-with? (str (:kind (def-of (:def %)))) "Impl") *scope*))
                           impl (some-> impl-g :def def-of :node)]
@@ -753,7 +781,7 @@
                (let [r (first (:res (:path t)))
                      assoc-def (case (head r)
                                  def (when (= "AssocTy" (second r)) (nth r 2))
-                                 local-def (when (= "AssocTy" (second r)) (get @*by-span* (nth r 2)))
+                                 local-def (when (= "AssocTy" (second r)) (span-def (nth r 2) (:ident (peek segs))))
                                  nil)]
                  (if assoc-def
                    ;; resolved to the associated type: its trait's arguments from the trait's segment
@@ -777,7 +805,11 @@
            [:ref r (:mutbl (:mt t)) (binding [*object-default* r] (lower-ty (:ty (:mt t))))])
     :ptr [:ptr (:mutbl (:mt t)) (lower-ty (:ty (:mt t)))]
     :slice [:slice (lower-ty (:ty t))]
-    :array [:array (lower-ty (:ty t)) (lower-const-arg (:len t))]
+    :array [:array (lower-ty (:ty t)) (let [c (lower-const-arg (:len t))]
+                                        ;; an unevaluated length in another file: its text there
+                                        (if (and (= :cexpr (first c)) (str/starts-with? (str (second c)) "{const") (:len-span t))
+                                          [:cexpr (or (snippet (:len-span t)) (second c))]
+                                          c))]
     :tup [:tuple (mapv lower-ty (:elts t))]
     :never [:never]
     :infer [:err "_"]
@@ -785,8 +817,9 @@
     :impl (let [self [:param -2 "impl"]]
             [:opaque (into (implicit-sizedness self (:bounds t) false) (lower-bounds self (:bounds t)))])
     :impl-param (let [nm (synthetic-name (:bounds t)) p (scope-param nm)] (if p [:param (:index p) nm] [:err nm]))
-    :fnptr [:fnptr {:inputs (binding [*elided* :anon *late* #{}] (mapv lower-ty (:inputs t)))
-                    :output (binding [*elided* :anon] (if (:output t) (lower-ty (:output t)) unit))
+    ;; a fn pointer's elided lifetimes are its own binder's variables
+    :fnptr [:fnptr {:inputs (binding [*elided* :binder *binder-counter* (atom 0)] (mapv lower-ty (:inputs t)))
+                    :output (binding [*elided* :erased] (if (:output t) (lower-ty (:output t)) unit))
                     :safety (when (and (seq? (:safety t)) (= 'Unsafe (first (:safety t)))) :unsafe)
                     :abi (let [x (:ext t)] (cond (= 'Implicit (head x)) "C"
                                                  (= 'Explicit (head x)) (let [l (second x)] (str (second (drop-while #(not= :symbol_unescaped %) l))))
@@ -876,13 +909,12 @@
     :re-static true
     false))
 
-(defn- print-const [c] (case (first c) :cval (second c) :cparam (nth c 2) (str (second c))))
+(defn- print-const [c] (case (first c) :cval (second c) :cparam (nth c 2) :cpath (print-def-path (second c) []) (str (second c))))
 
 (defn- print-arg [a] (cond (region? a) (print-region a) (const? a) (print-const a) :else (print-ty a)))
 
 (defn- generic-delimiters [f] (str "<" (binding [*in-value* false] (f)) ">"))
 
-(defn- default-of [p] (or (some-> (:ext-default p) sty->ty) (when (:default p) (binding [*scope* [(generics-of (:def-id p))]] (lower-ty (:default p))))))
 
 (defn- own-args-no-defaults
   "generics.own_args_no_defaults: the own arguments, Self skipped, the trailing ones equal to their defaults dropped"
@@ -893,7 +925,7 @@
         n (+ pc (count params))
         trailing (count (take-while (fn [p]
                                       (let [dv (cond (:ext-default p) (sty->ty (:ext-default p))
-                                                     (:default p) (binding [*scope* [(generics-of def)]] (lower-ty (:default p))))]
+                                                     (:default p) (binding [*scope* [(generics-of def)]] (if (= :const (:kind p)) (lower-const-arg (:default p)) (lower-ty (:default p)))))]
                                         (and dv (< (long (:index p)) (count args)) (= (subst dv args) (nth args (:index p))))))
                                     (reverse params)))]
     (subvec args (min start (count args)) (max (min start (count args)) (min (count args) (- n trailing))))))
@@ -1080,7 +1112,7 @@
     :array (str "[" (print-ty (second t)) "; " (print-const (nth t 2)) "]")
     :tuple (let [ts (second t)] (str "(" (str/join ", " (map print-ty ts)) (when (= 1 (count ts)) ",") ")"))
     :proj (print-def-path (second t) (nth t 2))
-    :fnptr (print-sig (second t))
+    :fnptr (let [[pre sig] (name-binder (second t))] (str pre (print-sig sig)))
     :dyn (print-dyn (second t) (nth t 2))
     :opaque (print-opaque (second t))
     :err (str "{" (second t) "}")
@@ -1373,6 +1405,7 @@
             *defs* (atom [{:id 0 :data [:crate] :kind "Mod" :module true}])
             *disamb* (atom {})
             *by-span* (atom {})
+            *files* (atom {})
             *generics-cache* (atom {})
             *impl-cache* (atom {})
             *res* res

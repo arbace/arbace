@@ -535,6 +535,18 @@ covers what.
   dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc
   1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `hir_check.ae`, the sample `test/rust/front/lower1.rs`) is
   Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/collect.ae` (RF7, doc/rust/FRONTEND-SURVEY.md, "As built: RF7") and the helper's RF7 additions to
+  `tools/rsdump/front.rs`'s `--std-names` (defaults, aliases, supertraits, lang items, doc(hidden)): Arbace forms and Rust written after
+  rustc 1.99.1, the same revision and sources, reading `compiler/rustc_resolve/src/def_collector.rs` (definitions and their def path
+  data), `compiler/rustc_hir_analysis/src/collect/{generics_of,resolve_bound_vars,type_of,clauses_of}.rs` (own parameters,
+  is_late_bound_map, gather_explicit_clauses_of), `constrained_generic_params.rs` (setup_constraining_clauses), `hir_ty_lowering/{mod,
+  bounds,dyn_trait}.rs` (type lowering, generic arguments with their defaults, poly trait refs, implicit sizedness bounds, associated
+  item constraints), `compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs` (visible_parent_map),
+  `compiler/rustc_middle/src/ty/print/{mod,pretty}.rs` (the type printer: def paths, visible paths, impl paths, regions, binders' names,
+  trait objects, opaque types, clauses) and `compiler/rustc_middle/src/ty/generics.rs` (own_args_no_defaults): copyright the Rust
+  project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the
+  MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `collect_check.ae`, the samples
+  `test/rust/front/collect1.rs` and `collect2.rs`) is Arbace's own, under the Eclipse Public License 1.0.
 - The non-javac branches of `skip-parens`, `tree-name`, `full-name`, `diamond?` and `class-kind` in
   `arbace/repr/java/tree.ae` (repr/java's interface to the tree, doc/classes/JAVA-FRONTEND-SURVEY.md,
   "As built: JFS66 (b)"): Arbace forms reimplementing, for the native parser's trees,

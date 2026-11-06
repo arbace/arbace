@@ -104,6 +104,12 @@ code. Three kinds of things live here:
   `rustc_ast/src/util/literal.rs`'s literal display) port rustc 1.99.1, the same revision and sources, by hand on 2026-11-05 (RF6,
   doc/rust/FRONTEND-SURVEY.md, "As built: RF6"; LICENSE.md names the files; MIT OR Apache-2.0); evaluated from the checkout, not
   embedded, out of `gate_key` (RFS13).
+  `arbace/rust/front/collect.ae` (collection: the def collector after `rustc_resolve/src/def_collector.rs`, generics, types,
+  signatures and clauses after `rustc_hir_analysis/src/{collect/{generics_of,resolve_bound_vars,type_of,clauses_of},
+  constrained_generic_params,hir_ty_lowering/{mod,bounds,dyn_trait}}.rs`, visible paths after `rustc_metadata`'s visible_parent_map,
+  the type printer after `rustc_middle/src/ty/print/{mod,pretty}.rs`) ports rustc 1.99.1, the same revision and sources, by hand on
+  2026-11-06 (RF7, doc/rust/FRONTEND-SURVEY.md, "As built: RF7"; LICENSE.md names the files; MIT OR Apache-2.0); evaluated from the
+  checkout, not embedded, out of `gate_key` (RFS13).
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go
