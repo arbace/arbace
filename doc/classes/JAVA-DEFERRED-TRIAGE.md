@@ -927,6 +927,58 @@ counts, monitors and synchronizers owned, deadlocks, CPU times, GC and pool stat
 put JMX by design; F13 needs a line between them (JCS161) and jrt's own runtime facts (its monitors and locks
 record no owner chains, its threads no CPU time): days of Go beside the Java, which a light day cannot prove.
 
+## As built: F13 (write-ahead, in progress)
+
+Branch `java-jc9c`, 2026-11-06, after JCS161 (a). java.lang.management without JMX, jrt's natives in Go.
+
+**The line JMX draws, found on the day.** A variant is j2g's alone: `bin/jrt-convert`'s convert step compiles every
+file of the closure with javac (a patch of java.base), so a jdk26u file naming a javax.management class does not
+convert unless that class is in the closure (java.management's packages are not java.base's: "package
+javax.management is not visible"). jdk26u's java.lang.management names JMX in its public API
+(`PlatformManagedObject.getObjectName(): ObjectName`; `ThreadInfo`, `LockInfo`, `MonitorInfo`, `MemoryUsage`,
+`MemoryNotificationInfo`'s `from(CompositeData)`), and its implementations through `sun.management.Util`'s
+`newObjectName`, the `*CompositeData` helpers, `NotificationEmitterSupport` and `ManagementFactoryHelper`'s MBean
+registration. The smallest JMX that closes over `ObjectName` and `CompositeData` is 54 files, 15,395 lines (the
+MBean server's interfaces and the open types: `.tmp/jc9c/outjmx.json`), which JCS161 (a) declines. So F13 is:
+- **jrt's own type skeletons** (overlay/jdk/java.base) for the two JMX types the API's signatures name:
+  `javax.management.ObjectName` (its constructors and `getInstance` throw `UnsupportedOperationException`, "JMX is not
+  in the Go build", JCS95 (a), JCS161 (a)) and `javax.management.openmbean.CompositeData` (the interface without
+  `getCompositeType`, whose open types are JMX's);
+- **overlays transcribing jdk26u's files** where they reach more of JMX: `ManagementFactory` (the beans by
+  interface directly, no MBean server and no PlatformMBeanProvider's ServiceLoader: `getPlatformMBeanServer` and
+  `newPlatformMXBeanProxy` absent), `ManagementFactoryHelper` (the bean getters alone), `ThreadInfo`, `LockInfo`,
+  `MonitorInfo`, `MemoryUsage` (their `from(CompositeData)` throwing for a non-null argument), `sun.management.Util`
+  (`newObjectName` throwing), `VMManagementImpl` (its natives over `jdk.internal.jrt.HostManagement`);
+- **jdk26u's files as they are** where they name nothing else of JMX: the MXBean interfaces, `ThreadImpl`,
+  `RuntimeImpl` (with variants for `ThreadImpl`'s natives), `ManagementPermission`, `MemoryType`, jdk.management's
+  `com.sun.management.ThreadMXBean` and `HotSpotThreadImpl`.
+
+**jrt's natives** (`go/arbace/jrt/management.ae`, `jdk.internal.jrt.HostManagement`), in slices:
+1. *(built, `bin/jrt test` passing)* the registry of live threads (started to ended, and main), their counts as
+   HotSpot's ThreadService keeps them (live, daemon, peak and its reset, ever started), the runtime's start and
+   uptime, the process id: ThreadMXBean's ids and counts, RuntimeMXBean's pid, name, start, uptime;
+2. a thread's state as the JVM reports it (BLOCKED while it waits to enter a monitor, WAITING and TIMED_WAITING in
+   `wait`, `join`, `sleep`, `park`: jrt reports RUNNABLE today, JC8) with the object it blocks on, recorded at the
+   monitor's contended path and the waits only (the thin lock's path untouched); then ThreadInfo's lock, lock owner
+   and blocked and waited counts and times (contention monitoring);
+3. the monitor owners' chains for `findMonitorDeadlockedThreads` and, with AbstractOwnableSynchronizer's owner and
+   LockSupport's blocker (jrt's park), `findDeadlockedThreads`; the monitors and synchronizers a thread holds
+   (ThreadInfo's locked monitors: the inflated monitors' owners and their entry depth);
+4. stack traces of other threads: a goroutine's stack is not readable from another (Go has no such API but the
+   whole-program `runtime.Stack` text): each jrt thread publishes its Java frames when asked, at its next
+   safepoint-like poll (the evaluator's ticks, a monitor's wait), or ThreadInfo of another thread has an empty
+   stack (`getThreadInfo(id, 0)`'s shape) — to be decided on its slice;
+5. com.sun.management's: allocated bytes (Go's `runtime/metrics` per process, not per goroutine: unsupported per
+   thread), OperatingSystemMXBean's memory sizes from `/proc/meminfo` (jdk.management's `OperatingSystemImpl`
+   reads them through its natives the same way).
+
+**Expected**: of the 31, the counts and ids (AllThreadIds, ThreadCounts, ThreadDaemonTest, ThreadLists,
+InvalidThreadID), RuntimeMXBean's (ProcessIdTest, UpTime, GetSystemProperties) with slices 1-2, about 9; the
+deadlock and locks tests (FindDeadlocks, FindMonitorDeadlock, LockedMonitors, LockedSynchronizers,
+SharedSynchronizer, SynchronizationStatistics, ThreadBlockedCount, MaxDepthForThreadInfoTest) with slices 2-4,
+about 8 more; OperatingSystemMXBean's 4 with slice 5; GetObjectName, ThreadStartTest (javax.management) and the
+VM-option tests (InputArgument's `-XX`) by design or the harness's.
+
 ## 6. Findings on the way
 
 - `:j2g-unresolved` (305 compiled, kind `:world`) is the compiled level's catch-all for "a type the world does
