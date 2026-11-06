@@ -209,6 +209,24 @@
    "__builtin_strlen" ["strlen" "unsigned long (const char *)"]
    "__builtin_strcmp" ["strcmp" "int (const char *, const char *)"]
    "__builtin_abs" ["abs" "int (int)"]
+   "__builtin_labs" ["labs" "long (long)"]
+   "__builtin_strcpy" ["strcpy" "char *(char *, const char *)"]
+   "__builtin_strncpy" ["strncpy" "char *(char *, const char *, unsigned long)"]
+   "__builtin_strcat" ["strcat" "char *(char *, const char *)"]
+   "__builtin_strncmp" ["strncmp" "int (const char *, const char *, unsigned long)"]
+   "__builtin_strchr" ["strchr" "char *(const char *, int)"]
+   "__builtin_strrchr" ["strrchr" "char *(const char *, int)"]
+   "__builtin_memchr" ["memchr" "void *(const void *, int, unsigned long)"]
+   "__builtin_printf" ["printf" "int (const char *, ...)"]
+   "__builtin_puts" ["puts" "int (const char *)"]
+   "__builtin_putchar" ["putchar" "int (int)"]
+   "__builtin_exit" ["exit" "void (int)"]
+   "__builtin_malloc" ["malloc" "void *(unsigned long)"]
+   "__builtin_free" ["free" "void (void *)"]
+   "__builtin_vsnprintf" ["vsnprintf" "int (char *, unsigned long, const char *, __builtin_va_list)"]
+   "__builtin_vsprintf" ["vsprintf" "int (char *, const char *, __builtin_va_list)"]
+   "__builtin_snprintf" ["snprintf" "int (char *, unsigned long, const char *, ...)"]
+   "__builtin_sprintf" ["sprintf" "int (char *, const char *, ...)"]
    "__builtin_abort" ["abort" "void ()"]
    ;; never reached (clang writes LLVM's unreachable): abort stands for it (G4: the headers' __builtin_unreachable)
    "__builtin_unreachable" ["abort" "void ()"]})
@@ -290,7 +308,8 @@
               (abi/arr nil (resolve-type-form scope (second f)))
               (abi/arr (let [b (second f)] (cond (number? b) b (and b (:const-bound @hooks)) ((:const-bound @hooks) scope b) :else nil))
                        (resolve-type-form scope (nth f 2))))
-      fn (if-let [tt (when (and (symbol? (nth f 2 nil)) (str/starts-with? (str (nth f 2)) "__")) (:trait-type @hooks))]
+      fn (if-let [tt (when (and (symbol? (nth f 2 nil)) (str/starts-with? (str (nth f 2)) "__") (:is-trait @hooks) ((:is-trait @hooks) (str (nth f 2))))
+                       (:trait-type @hooks))]
            ;; a transform trait's type (G4: __remove_cv(T)), spelled as a function type returning the trait's name
            (tt scope (str (nth f 2)) (second f))
          (let [[_ ps r] f
@@ -726,8 +745,15 @@
           (recur more (inc (long v))))))
     t))
 
-(defn- declare-class! [scope n]
+(defn- declare-class! [scope0 n]
   (let [nm (:name n)
+        ;; a nested class defined outside its class (class L::F { ... }, [class.nest]/3): in the enclosing class's
+        ;; scope (G5: <locale_classes.h>'s class locale::facet)
+        q (when (:completeDefinition n) (qualifier-before n))
+        scope (or (when (seq q)
+                    (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope0 q)))]
+                      (cond (= :ns (:e e)) (:scope e) (and e (abi/class? (:ty e))) (:scope (abi/cls-of (:ty e))) :else nil)))
+                  scope0)
         ^java.util.HashMap m (:names scope)
         old (when nm (some #(when (and (= :type (:e %)) (abi/class? (:ty %))) (:id (:ty %))) (.get m nm)))
         id (or old (next-id))
@@ -792,7 +818,9 @@
                  ;; a declaration that named a class template's specialization before its specialization was defined
                  ;; (<stringfwd.h>'s typedef basic_string<char> string, char_traits<char> defined later): tried again
                  ;; after the headers (clang instantiates only when the type must be complete)
-                 (when (and *retry* (re-find #"an incomplete class template" (str (.getMessage e))))
+                 ;; (G5: and one that named a type such a declaration declares: <ostream>'s typedef, then <iostream>'s
+                 ;; extern ostream cout)
+                 (when (and *retry* (re-find #"an incomplete class template|unknown type" (str (.getMessage e))))
                    (swap! *retry* conj [scope n]))
                  (when (System/getenv "CPP_HDR_TRACE")
                    (binding [*out* *err*] (println "header drop:" (:kind n) (:name n) (get-in n [:range :begin :offset]) (.getMessage e) (:file (loc-of (get-in n [:range :begin]))))))
@@ -961,6 +989,8 @@
             new-fs (remove (fn [f] (some #(= (:id f) (:fn %)) vt)) mine)
             vt (into vt (mapcat (fn [f] (if (= :dtor (:kind f)) [{:fn (:id f) :v 1} {:fn (:id f) :v 0}] [{:fn (:id f)}])) new-fs))]
         (abi/update-cls! id assoc :vtable vt)))
+    ;; (the layout of the finished class, any earlier one computed while its members were entered dropped)
+    (abi/update-cls! id #(-> % (assoc :finished true) (dissoc :layout)))
     (abi/layout id)
     id))
 
@@ -1172,11 +1202,13 @@
   "The function of the overload set `e` whose type is the function type `ft` (the address of an overloaded function,
   [over.over]), or its only one when `ft` is nil."
   [e ft]
-  (let [fs (:fns e)]
+  (let [fs (:fns e)
+        same? #(let [g (fnd %)] (and (not (and (:cls g) (not (:static g))))
+                                     (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps ft))) (= (abi/unq (:ret (:ty g))) (abi/unq (:ret ft)))))]
     (if ft
-      (first (filter #(let [g (fnd %)] (and (not (and (:cls g) (not (:static g))))
-                                             (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps ft))) (= (abi/unq (:ret (:ty g))) (abi/unq (:ret ft)))))
-                     fs))
+      (or (first (filter same? fs))
+          ;; the templates' specializations deduced from the target type ([over.over]/2: a non-template preferred)
+          (when-let [h (and (seq (:tmpls e)) (:fnaddr-specs @hooks))] (first (filter same? (h e ft)))))
       (when (= 1 (count fs)) (first fs)))))
 
 (defn mptr-fn-node [fid]
@@ -1378,11 +1410,20 @@
   (or (< (long (:rank a)) (long (:rank b)))
       (and (= (:rank a) (:rank b)) (< (long (or (:sub a) 0)) (long (or (:sub b) 0))))))
 
+(declare resolve-overload*)
+
 (defn resolve-overload
   "The best viable function of `cands` (fn ids) for the arguments `args` (typed expressions; `obj` the implicit object
   argument of a method call, or nil), or a refusal."
   [cands args obj]
-  (let [viable (for [cid (distinct cands)
+  (resolve-overload* (map (fn [c] [c args obj true]) (distinct cands)) (count args)))
+
+(defn resolve-overload*
+  "The best viable of the candidates `cs` ([fn-id args obj] each: a member operator's with its object, a non-member's
+  with every operand, [over.match.oper]/3), `n` the operands' count, or a refusal."
+  [cs ^long n0]
+  (let [cands (map first cs)
+        viable (for [[cid args obj prefix] cs
                      :let [f (fnd cid)
                            ps (:ps (:ty f))
                            nreq (- (count ps) (count (filter some? (take-last (count ps) (concat (repeat (count ps) nil) (:defaults f))))))
@@ -1396,14 +1437,16 @@
                                       :else {:rank 0 :sub 0})
                                 {:rank 0 :sub 0})]
                      :when (and oc (every? some? convs))]
-                 [cid (cons oc convs)])
+                 ;; (a member operator's object is the first operand, a non-member's first operand its first argument:
+                 ;; `prefix` false)
+                 [cid (if prefix (cons oc convs) convs)])
         tiebreak (or (:tiebreak @hooks) (constantly false))
         better (fn [[fa a] [fb b]] (and (every? true? (map #(not (better-ics? %2 %1)) a b))
-                                        (or (some true? (map better-ics? a b)) (tiebreak fa fb (count args)))))
+                                        (or (some true? (map better-ics? a b)) (tiebreak fa fb n0))))
         best (filter (fn [x] (every? #(or (identical? % x) (better x %)) viable)) viable)]
     (cond
       (= 1 (count best)) (ffirst best)
-      (empty? viable) (fail :overload "no viable function among " (count (distinct cands)) " for " (count args) " arguments: " (pr-str (map :ty args)))
+      (empty? viable) (fail :overload "no viable function among " (count (distinct cands)) " for " n0 " arguments: " (pr-str (map :ty (second (first cs)))))
       :else (fail :overload "ambiguous call (" (count viable) " viable)" (when (System/getenv "CPP_HDR_TRACE") (str ": " (pr-str (map (fn [[f]] [(:name (fnd f)) (:ps (:ty (fnd f))) (loc-of (get-in (:node (fnd f)) [:range :begin]))]) viable))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1836,7 +1879,10 @@
               (when m (vec (map str/trim (remove str/blank? (split-scope (second m))))))))
         qcid (when (seq q) (let [e (first (filter #(= :type (:e %)) (lookup-qualified (:scope ctx) q)))] (class-id (:ty e))))]
     (when-not cid (fail :member "member of a non-class"))
-    (let [[fcid fids e] (method-set-of (or qcid cid) nm)
+    (let [[fcid fids e] (if (str/starts-with? (str nm) "~")
+                          ;; an explicit destructor call (p->~T(), [class.dtor]/14): the class's destructor
+                          (let [k (or qcid cid) d (:dtor (abi/cls k))] (when d [k [d] {:e :fn :id d}]))
+                          (method-set-of (or qcid cid) nm))
           fids (if qcid fids fids)]
       (cond
         (nil? e) (fail :member "no member " nm (when (System/getenv "CPP_HDR_TRACE") (str " (" (node-text n) ") of " (:name (abi/cls (or qcid cid))))))
@@ -1895,6 +1941,8 @@
   {"__builtin_expect" :expect "__builtin_expect_with_probability" :expect "__builtin_constant_p" :constant-p
    "__builtin_is_constant_evaluated" :is-constant-evaluated
    "__builtin_addressof" :addressof
+   "__builtin_alloca" :alloca
+   "__builtin_va_start" :va-start "__builtin_c23_va_start" :va-start "__builtin_va_end" :va-end "__builtin_va_copy" :va-copy
    "__builtin_add_overflow" :add-overflow "__builtin_sub_overflow" :sub-overflow "__builtin_mul_overflow" :mul-overflow})
 
 (def ^:private std-builtins
@@ -1970,14 +2018,19 @@
         ;; C++20's rewritten candidate: a != b as !(a == b)
         (= o "!=") (when-let [c (operator-call ctx "==" args)] {:op :not :e (convert-scalar (rv c) abi/bool* false) :ty abi/bool* :cat :pr})
         :else nil)
-      (let [;; members as functions of the remaining operands with the object, non-members of all
-            mviable (when (seq members) (try [(resolve-overload members more l) :m] (catch arbace.lang.ExceptionInfo _ nil)))
-            fviable (when (seq frees) (try [(resolve-overload (distinct frees) args nil) :f] (catch arbace.lang.ExceptionInfo _ nil)))]
+      (let [;; one candidate set ([over.match.oper]/3): members as functions of the remaining operands with the object
+            ;; as their first, non-members of all
+            ms (set members)
+            best (try (resolve-overload* (concat (map (fn [m] [m more l true]) (distinct members))
+                                                 (map (fn [f] [f args nil false]) (remove ms (distinct frees))))
+                                         (count args))
+                      (catch arbace.lang.ExceptionInfo x (if (= :overload (:codegen/refused (ex-data x)))
+                                                           (when (re-find #"ambiguous" (.getMessage x)) (throw x))
+                                                           (throw x))))]
         (cond
-          (and mviable fviable) (fail :overload "operator " o ": a member and a non-member both viable (not ranked yet)")
-          mviable (method-call ctx (first mviable) l more true)
-          fviable (fn-call ctx (first fviable) args)
-          :else nil)))))
+          (nil? best) nil
+          (contains? ms best) (method-call ctx best l more true)
+          :else (fn-call ctx best args))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Allocation and deallocation functions ([expr.new]/9-28, [expr.delete]/7-12; clang's Sema::FindAllocationFunctions,
@@ -2326,7 +2379,7 @@
     "IntegerLiteral" (let [t (int-type-of (get-in n [:type :qualType]))] {:op :int :v (let [v (bigint (:value n))] (if (> v Long/MAX_VALUE) (long (- v 18446744073709551616N)) (long v))) :ty t :cat :pr})
     "CharacterLiteral" {:op :int :v (long (:value n)) :ty (int-type-of (get-in n [:type :qualType] "char")) :cat :pr}
     ;; a type trait's value (G4: the headers' __is_constructible(T, Args...)), its text evaluated by the templates' hook
-    "TypeTraitExpr" (let [t (node-text n)
+    "TypeTraitExpr" (let [t (or (:_text n) (node-text n))
                           v (if-let [h (:trait-text @hooks)] (h (:scope ctx) t) (fail :expr "a type trait"))]
                       (when (map? v) (fail :expr "a dependent type trait " t))
                       {:op :int :v (long v) :ty (if (re-find #"^\s*__(is|has|reference)_" t) abi/bool* abi/ulong*) :cat :pr})
@@ -2446,6 +2499,12 @@
         :is-constant-evaluated {:op :int :v 0 :ty abi/bool* :cat :pr}
         ;; __builtin_addressof(x): x's address, no operator& ([specialized.addressof])
         :addressof (let [e (analyze ctx (second (kids n)))] {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr})
+        ;; __builtin_alloca(n): n bytes of the frame (clang's alloca i8, i64 n, align 16)
+        ;; va_start, va_end, va_copy: LLVM's intrinsics on the va_list's address (x86-64: __va_list_tag[1], decayed)
+        (:va-start :va-end :va-copy)
+        (let [as (mapv #(rv (analyze ctx %)) (rest (kids n)))]
+          {:op :va :which b :args (if (= b :va-copy) (subvec as 0 2) (subvec as 0 1)) :ty abi/void :cat :pr})
+        :alloca {:op :alloca :e (convert-scalar (rv (analyze ctx (second (kids n)))) abi/ulong* false) :ty (abi/ptr abi/void) :cat :pr}
         ;; __builtin_{add,sub,mul}_overflow(a, b, &r): r = a op b in r's type; the overflow flag false (a divergence
         ;; when it overflows: no wider arithmetic yet; G4: <bits/stl_vector.h>'s size computations)
         (:add-overflow :sub-overflow :mul-overflow)
@@ -2998,7 +3057,11 @@ protected:
            (let [retry! (fn [] (let [r @*retry*] (reset! *retry* []) (doseq [[sc n] r] (declare-node! sc n))))
                  [hs ms] (split-with header-node? nodes)]
              (doseq [n hs] (declare-node! root n))
-             (retry!) (retry!)
+             ;; rounds until one declares nothing more
+             (loop [k 0]
+               (let [before (count @*retry*)]
+                 (retry!)
+                 (when (and (< k 6) (pos? before) (< (count @*retry*) before)) (recur (inc k)))))
              (doseq [n ms] (declare-node! root n))))
          ;; the declarations in order, then (templates) the lazy definitions each round made used, until none
          (let [entry! (fn [[k id]]

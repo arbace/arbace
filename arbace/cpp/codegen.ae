@@ -136,7 +136,9 @@
 (defn field-place
   "The place of field `i` of class `cid` in the object at `base`: its address, or a bit-field's marker."
   [base cid i]
-  (let [f (nth (:fields (abi/cls cid)) i) l (abi/layout cid) uoff (long (nth (:fields l) i))]
+  (let [f (or (get (:fields (abi/cls cid)) i) (fail :codegen "no field " i " of " (:name (abi/cls cid))))
+        l (abi/layout cid)
+        uoff (long (or (get (:fields l) i) (fail :codegen "no laid-out field " i " of " (:name (abi/cls cid)) " (" (count (:fields l)) " laid out)")))]
     (if (:bits f)
       {:bf (offset! base uoff) :shift (- (long (nth (:bitoffs l) i)) (* 8 uoff)) :w (:bits f) :ty (:ty f)}
       (offset! base uoff))))
@@ -537,7 +539,8 @@
       (and (:trivial f) (= :ctor (:kind f)) (empty? (:ps (:ty f)))) nil
       :else
       (let [plan (nth (fn-sig f v) 3)
-            callee (if virtual (vcall-target (:cls f) fid nil obj) (want-fn! fid (if ab 2 v)))]
+            ;; (a virtual destructor called explicitly: its complete-object slot, D1)
+            callee (if virtual (vcall-target (:cls f) fid (when (= :dtor (:kind f)) 1) obj) (want-fn! fid (if ab 2 v)))]
         (binding [*as-base* nil]
           (emit-call! plan callee va (:ty f) inits (when (and (:cls f) (not (:static f))) obj) dest (nothrow-fn? f)
                       (when (takes-vtt? f v) (:vtt ab))))))))
@@ -970,6 +973,12 @@
                  (emit! '(unreachable))
                  nil))
     :exn-ptr (:exn-adj @*f*)
+    :alloca (val! (list 'alloca 'i8 :count ['i64 (emit-rv (:e e))] :align 16))
+    :va (let [nm (case (:which e) :va-start "llvm.va_start.p0" :va-end "llvm.va_end.p0" :va-copy "llvm.va_copy.p0")
+              as (mapv (fn [a] ['ptr (emit-rv a)]) (:args e))]
+          (declare! nm 'void (mapv first as) :nounwind true)
+          (emit! (list 'call 'void (gsym nm) as :attrs [:nounwind]))
+          nil)
     :dyncast (if (:void e)
                ;; dynamic_cast<void*>: the most derived object, by the vtable's offset to top
                (let [p (emit-rv (:e e))]
