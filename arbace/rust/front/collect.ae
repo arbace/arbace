@@ -1249,7 +1249,7 @@
     :fndef (let [[_ d args] t
                  sig (fndef-sig d)
                  ;; the signature's binder: its late-bound regions (named or anonymous) printed for<...>
-                 late (fn late [x] (cond (and (vector? x) (= :re-bound (first x)) (= 2 (count x))) [:re-bound (second x) :late]
+                 late (fn late [x] (cond (and (number? d) (vector? x) (= :re-bound (first x)) (= 2 (count x))) [:re-bound (second x) :late]
                                          (and (vector? x) (= :fnptr (first x))) x
                                          (vector? x) (if (keyword? (first x)) (into [(first x)] (map late (rest x))) (mapv late x))
                                          (map? x) (into {} (for [[k v] x] [k (late v)]))
@@ -1382,15 +1382,36 @@
     {:inputs (mapv #(sty->ty (second %)) (:fields v))
      :output [:adt adt (vec (map-indexed (fn [i [k nm]] (case (keyword (name k)) :lifetime [:re-early i nm] :const [:cparam i nm] [:param i nm])) (:generics a)))]}))
 
+(defn- ext-param-names
+  "A std item's generic parameters' names with their indices (its parents' first)"
+  [p]
+  (let [g (ext-generics p)
+        parent (when (pos? (long (:parent-count g))) (path-parent p))]
+    (into (if parent (ext-param-names parent) {}) (for [q (:params g)] [(:name q) (:index q)]))))
+
+(defn- early-regions
+  "A std signature's named regions (the item's or its parents' lifetime parameters) as early-bound parameters, so
+  instantiation substitutes them; its '^ ones stay late-bound"
+  [sig p]
+  (let [ix (ext-param-names p)
+        f (fn f [x] (cond (and (vector? x) (= :re-bound (first x)) (= 2 (count x)) (contains? ix (second x))) [:re-early (ix (second x)) (second x)]
+                          (and (vector? x) (keyword? (first x))) (into [(first x)] (map f (rest x)))
+                          (vector? x) (mapv f x)
+                          (map? x) (into {} (for [[k v] x] [k (f v)]))
+                          :else x))]
+    (f sig)))
+
 (defn fndef-sig
   "A function item's signature (a local definition's, or std's from its interface)"
   [d]
   (cond (number? d) (if (str/starts-with? (str (:kind (def-of d))) "Ctor") (ctor-sig d) (fn-sig d))
-        (re-find #"\{constructor#\d+\}$" d) (ext-ctor-sig d)
+        (re-find #"\{constructor#\d+\}$" d) (early-regions (ext-ctor-sig d) (path-parent (path-parent d)))
         :else (let [m (get (:fns *si*) d)]
                 (if m
+                  (early-regions
                   {:inputs (mapv sty->ty (:inputs m)) :output (sty->ty (:output m))
                    :safety (when (= "Unsafe" (:safety m)) :unsafe) :abi (when-not (= "Rust" (:abi m)) (str/replace (str (:abi m)) "\"" ""))}
+                  d)
                   {:inputs [] :output [:err (str "no sig " d)]}))))
 
 (defn ctor-sig [id]

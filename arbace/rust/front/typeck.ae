@@ -114,7 +114,8 @@
    :qpath "Path" :type "Type"})
 
 (defn- record! [e ty & [adj]]
-  (when (and (vector? (:span e)) (not (:synthesized e)))
+  ;; a desugaring's lang item path is no fact of rustc's (its span is the desugared expression's)
+  (when (and (vector? (:span e)) (not (:synthesized e)) (not (and (= :path (:kind e)) (:lang (:path e)))))
     (swap! *facts* conj {:owner *owner* :span (:span e) :kind (get kind-names (:kind e) (str (:kind e))) :ty ty :adj (or adj [])}))
   ty)
 
@@ -406,13 +407,21 @@
           (map-indexed vector steps))))
 
 (defn probe-assoc-fn
-  "A type-relative function path's definition (`Vec::new`, `String::from`): an inherent impl's, else a trait's for the type"
+  "A type-relative value path's definition (`Vec::new`, `String::from`, `i32::MAX`): an inherent impl's function or
+  constant (its type), else a trait's for the type"
   [t nm]
   (or (some (fn [[ip args self _]]
               (let [s (snapshot)]
                 (if (try-unify self t)
                   (if-let [[def k] (impl-item ip nm)]
-                    (if (= "AssocFn" k) (let [own (drop (count args) (fresh-args def))] [:fndef def (into (vec args) own)]) (do (rollback! s) nil))
+                    (cond (= "AssocFn" k) (let [own (drop (count args) (fresh-args def))] [:fndef def (into (vec args) own)])
+                          (str/starts-with? (str k) "AssocConst")
+                          (if (number? def)
+                            (erase (c/subst (c/type-of def) (vec args)))
+                            (if-let [v (some (fn [[n kk _ v]] (when (= n nm) v)) (:items (get (:impls c/*si*) ip)))]
+                              (erase (c/subst (c/sty->ty v) (vec args)))
+                              (do (rollback! s) nil)))
+                          :else (do (rollback! s) nil))
                     (do (rollback! s) nil))
                   nil)))
             (concat (local-impls false)
@@ -697,7 +706,7 @@
         :else (let [adt (c/path-parent p) a (get (:adts c/*si*) adt)]
                 (when a (let [args (fresh-args adt)] [[:adt adt args] p args])))))
 
-(def ^:dynamic *file* nil)   ; the root file's path, as closures' types print it
+(def ^:dynamic *root-file* nil)   ; the root file's path, as closures' types print it
 
 (defn- closure-decl-span
   "A closure's fn_decl_span: from its start (`move`) to the end of its parameters' bars (and its return type)"
@@ -768,7 +777,7 @@
     (binding [*env* (conj *env* @env) *ret* ret *loops* nil]
       (let [bt (check-expr (:body e) ret)] (coerce! (:body e) bt ret)))
     (let [sp (closure-decl-span e)
-          text (if (and sp *file*) (str "{closure@" *file* ":" (sp 0) ":" (sp 1) ": " (sp 2) ":" (sp 3) "}") "{closure}")]
+          text (if (and sp *root-file*) (str "{closure@" *root-file* ":" (sp 0) ":" (sp 1) ": " (sp 2) ":" (sp 3) "}") "{closure}")]
       [:closure text {:inputs ptys :output ret}])))
 
 (defn- struct-ty [e]

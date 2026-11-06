@@ -594,7 +594,8 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
                 if matches!(it.kind, ty::AssocKind::Fn { .. }) {
                     fns.push(it.def_id);
                 }
-                let val = if k == DefKind::AssocTy { sty(tcx, tcx.type_of(it.def_id).skip_binder()) } else { "nil".into() };
+                // an associated type's value, an associated constant's type
+                let val = if matches!(k, DefKind::AssocTy | DefKind::AssocConst { .. }) { sty(tcx, tcx.type_of(it.def_id).skip_binder()) } else { "nil".into() };
                 format!("[{} {} {} {}]", q(it.name().as_str()), kind(k), q(&def_path(tcx, it.def_id)), val)
             })
             .collect();
