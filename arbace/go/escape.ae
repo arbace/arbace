@@ -638,6 +638,7 @@
                                       (discards e (rest (:args n)))))
                            (call e [k] n))
                 (call e [k] n))
+        :inlcall (call e [k] n)
         :result (let [tmps (call-temps e (:call n))]
                   (flow e k (nth tmps (:index n))))
         :lit (case (:kind n)
@@ -793,6 +794,14 @@
               (recur (rest vs) (conj acc c)))
             nil))))))
 
+(defn- call-line
+  "A call's line as gc's (its Lparen's): after a function literal callee, the literal's closing
+  brace's line."
+  [c dflt]
+  (let [cl (:callee c)
+        end (when (= :fn (:op cl)) (some-> (:form cl) meta :go/end))]
+    (or end (:line c) dflt)))
+
 (defn- variadic-args
   "typecheck.FixVariadicCall: a call's arguments with its variadic ones in an implicit slice
   literal (\"... argument\"), nil when there are none."
@@ -806,17 +815,26 @@
         (conj (subvec args 0 (min vi (count args)))
               (if (empty? extra)
                 {:op :nil :type st :mode :value :line (:line n)}
-                {:op :lit :kind :slice :implicit true :elems extra :type st :mode :value :line (:line n)})))
+                {:op :lit :kind :slice :implicit true :elems extra :type st :mode :value :line (call-line n nil)})))
       args)))
 
 (defn- argument [e k arg] (expr e k arg))
+
+(defn- inl-call
+  "OINLCALL: the inlined body's statements, then its result variables into the holes ks."
+  [e ks n]
+  (stmts e (:body n))
+  (doseq [[i o] (map-indexed vector (:retvars n))]
+    (expr e (if ks (nth ks i (discard-hole e)) (discard-hole e))
+          {:op :local :obj o :type (e/o o :type) :mode :variable :line (:line n)})))
 
 (defn- call
   "escape.call: ks the holes of the call's results (nil: a statement)."
   [e ks n]
   (with-line* e n
     (fn []
-      (case (:kind n)
+      (case (if (= :inlcall (:op n)) :inlcall (:kind n))
+        :inlcall (inl-call e ks n)
         :builtin (builtin-call e ks n)
         (:static :method :closure :iface :compiled)
         (let [c (:callee n)
@@ -1366,7 +1384,7 @@
           :return (return-stmt e n)
           :expr (let [x (:x n)]
                   (case (:op x)
-                    :call (call e nil x)
+                    (:call :inlcall) (call e nil x)
                     :recv (discard e (:x x))
                     (discard e x)))
           (:go :defer) (go-defer e n)
@@ -1758,59 +1776,66 @@
     (let [r (ct n (volatile! #{}))]
       (when-not (= ::none r) r))))
 
+(defn- devirt-call
+  "StaticCall of interface call c (its operands already devirtualized), asg the function's
+  interface assignments: c as a method call of its receiver's concrete type, reported, or c."
+  [asg c]
+  (binding [t/*method-obj* method-obj-data]
+    (let [sel (:callee c)
+          x (:recv sel)
+          typ (concrete-type asg x)
+          mname (:name (:method sel))
+          mpkg (:pkg (:method sel))]
+      (if (and typ (nil? (t/missing-method typ (node-type x) false)))
+        (let [r (t/lookup typ false mname mpkg)
+              line (call-line c nil)
+              dt {:op :assert :x x :to typ :type typ :mode :value :line line :devirt true}
+              selstr (str (fmt-node x 8) "." mname)]
+          (case (:kind r)
+            :method
+            (let [m (:obj r)
+                  ptr (boolean (e/o m :ptr-recv))
+                  [_ isptr] (t/deref-type typ)
+                  adj (cond (and ptr (not (:indirect r))) :addr
+                            (and (not ptr) (:indirect r) (= 1 (count (:index r))) isptr) :deref
+                            :else nil)]
+              (warn! line (str "devirtualizing " selstr " to " (type-str typ)))
+              (assoc c :kind :method
+                     :callee {:op :method :method m :recv dt :recv-adjust adj :path (:index r) :via (:via r)
+                              :recv-type typ :type (e/o m :type) :mode :value :line (:line sel)}))
+            :iface-method
+            (do (warn! line (str "partially devirtualizing " selstr " to " (type-str typ)))
+                (assoc c :callee (assoc sel :recv (select-node dt (field-steps typ (pop (vec (:index r))) nil) line))))
+            c))
+        c))))
+
 (defn- devirtualize
   "A function's tree with its devirtualizable interface calls made method calls (StaticCall),
   each reported: devirtualizing x.M to T (partially, when T's method is an embedded interface's)."
   [tree]
   (let [asg (iface-assignments tree)
         memo (java.util.IdentityHashMap.)]
-    (binding [t/*method-obj* method-obj-data]
-      (letfn [(dv [x godefer]
-                (cond
-                  (and (map? x) (.containsKey memo x)) (.get memo x)
-                  (map? x)
-                  (let [x0 x
-                        x (if (contains? #{:go :defer} (:op x))
-                            (assoc x :call (dv-call (:call x) true))
-                            (into (empty x) (map (fn [[k v]] [k (dv v false)])) x))]
-                    (let [r (if (and (= :call (:op x)) (= :iface (:kind x)) (not godefer))
-                              (dv-call x false)
-                              x)]
-                      (.put memo x0 r)
-                      r))
-                  (vector? x) (if (and (seq x) (map? (first x))) (mapv #(dv % false) x) x)
-                  :else x))
-              (dv-call [c godefer]
-                (let [c (if (map? c) (into (empty c) (map (fn [[k v]] [k (dv v false)])) c) c)]
-                  (if (or godefer (not= :iface (:kind c)))
-                    c
-                    (let [sel (:callee c)
-                          x (:recv sel)
-                          typ (concrete-type asg x)
-                          mname (:name (:method sel))
-                          mpkg (:pkg (:method sel))]
-                      (if (and typ (nil? (t/missing-method typ (node-type x) false)))
-                        (let [r (t/lookup typ false mname mpkg)
-                              dt {:op :assert :x x :to typ :type typ :mode :value :line (:line c) :devirt true}
-                              selstr (str (fmt-node x 8) "." mname)]
-                          (case (:kind r)
-                            :method
-                            (let [m (:obj r)
-                                  ptr (boolean (e/o m :ptr-recv))
-                                  [_ isptr] (t/deref-type typ)
-                                  adj (cond (and ptr (not (:indirect r))) :addr
-                                            (and (not ptr) (:indirect r) (= 1 (count (:index r))) isptr) :deref
-                                            :else nil)]
-                              (warn! (:line c) (str "devirtualizing " selstr " to " (type-str typ)))
-                              (assoc c :kind :method
-                                     :callee {:op :method :method m :recv dt :recv-adjust adj :path (:index r) :via (:via r)
-                                              :recv-type typ :type (e/o m :type) :mode :value :line (:line sel)}))
-                            :iface-method
-                            (do (warn! (:line c) (str "partially devirtualizing " selstr " to " (type-str typ)))
-                                (assoc c :callee (assoc sel :recv (select-node dt (field-steps typ (pop (vec (:index r))) nil) (:line c)))))
-                            c))
-                        c)))))]
-        (dv tree false)))))
+    (letfn [(dv [x godefer]
+              (cond
+                (and (map? x) (.containsKey memo x)) (.get memo x)
+                (map? x)
+                (let [x0 x
+                      x (if (contains? #{:go :defer} (:op x))
+                          (assoc x :call (dv-call (:call x) true))
+                          (into (empty x) (map (fn [[k v]] [k (dv v false)])) x))]
+                  (let [r (if (and (= :call (:op x)) (= :iface (:kind x)) (not godefer))
+                            (dv-call x false)
+                            x)]
+                    (.put memo x0 r)
+                    r))
+                (vector? x) (if (and (seq x) (map? (first x))) (mapv #(dv % false) x) x)
+                :else x))
+            (dv-call [c godefer]
+              (let [c (if (map? c) (into (empty c) (map (fn [[k v]] [k (dv v false)])) c) c)]
+                (if (or godefer (not= :iface (:kind c)))
+                  c
+                  (devirt-call asg c))))]
+      (dv tree false))))
 
 ;;; Bounds check elision (walk/expr.go's walkIndex and bounded): with -m, an index into an
 ;;; array whose range the index's type and operation cannot exceed, reported
@@ -1887,6 +1912,362 @@
               :else nil))]
     (walk body)))
 
+;;; Inlining (inline/inl.go: CanInline's hairyVisitor and its budget, the interleaved inliner's
+;;; mkinlcall), as gc does it before escape analysis when inlining is on (no -l)
+
+(def ^:dynamic *inline*
+  "Whether gc's inliner runs (gc without -l)."
+  false)
+
+(def ^:private inline-max-budget 80)
+(def ^:private inline-extra-call-cost 57)
+(def ^:private inline-param-call-cost 17)
+(def ^:private inline-closure-called-once-cost 800)
+
+(declare inl-callee can-inline! try-inline field-offset max-cost all-fns)
+
+(defn- conv-nop?
+  "typecheck's convertOp: whether a conversion is OCONVNOP (costs nothing in the budget)."
+  [n]
+  (let [src (node-type (:x n))
+        dst (node-type n)]
+    (cond
+      (t/same? src dst) true
+      (or (iface? src) (iface? dst)) false
+      (t/identical-ignore-tags? (under src) (under dst)) true
+      (and (t/pointer? src) (t/pointer? dst) (not (t/named? src)) (not (t/named? dst))
+           (t/identical-ignore-tags? (under (elem src)) (under (elem dst)))) true
+      (and (or (t/integer-type? src) (t/float-type? src)) (or (t/integer-type? dst) (t/float-type? dst)))
+      (= (kind src) (kind dst))
+      (and (or (t/pointer? src) (t/uintptr? src)) (t/unsafe-pointer? dst)) true
+      (and (t/unsafe-pointer? src) (or (t/pointer? dst) (t/uintptr? dst))) true
+      :else false)))
+
+(defn- param-local?
+  "An ONAME of class PPARAM (or a closure variable of the enclosing function's: PAUTOHEAP)."
+  [n]
+  (and (= :local (:op n)) (#{:param} (e/o (:obj n) :esc-class))))
+
+(defn- hairy-cost
+  "hairyVisitor over function f's body: [cost reason], gc's IR nodes counted as the unified IR
+  reader and typecheck build them from the checked tree's forms."
+  [f]
+  (let [budget (volatile! 0)
+        reason (volatile! nil)
+        cost! (fn [n] (vswap! budget + (long n)))]
+    (letfn [(visit [x]
+              (cond
+                (nil? x) nil
+                @reason nil
+                (sequential? x) (doseq [v (live-stmts x)] (visit v))
+                (not (map? x)) nil
+                (const? x) (cost! 1)
+                :else
+                (case (:op x)
+                  :block (do (doseq [d (:decls x)] (visit d)) (visit (:stmts x)))
+                  :decl (let [objs (:objs x) init (:init x)]
+                          (when-not (:const x)
+                            (if (empty? init)
+                              (cost! (* 4 (count objs)))
+                              (do (cost! (* 2 (count objs)))
+                                  (cost! 1) (cost! (count objs))
+                                  (doseq [v init] (visit v))))))
+                  :assign (do (cost! 1) (doseq [p (:lhs x)] (if (map? p) (visit-place p) (cost! 1))) (doseq [v (:rhs x)] (visit v)))
+                  :op-assign (do (cost! 1) (visit-place (:place x)) (visit (:value x)))
+                  :incdec (do (cost! 2) (visit-place (:place x)))
+                  :return (do (cost! 1) (doseq [v (:values x)] (visit v)))
+                  :expr (visit (:x x))
+                  :if (let [c (static-bool (:cond x))]
+                        (if (zero? c)
+                          (do (cost! 1) (visit (:init x)) (visit (:cond x)) (visit (:then x)) (visit (:else x)))
+                          (do (visit (:init x)) (if (pos? c) (visit (:then x)) (visit (:else x))))))
+                  :for (do (cost! 1) (visit (:init x)) (visit (:cond x)) (visit (:post x)) (visit (:body x)))
+                  :range (do (cost! 1) (cost! (* 2 (count (remove nil? (:objs x)))))
+                             (visit (:x x))
+                             (cost! (count (remove nil? (:objs x))))
+                             (doseq [p (:places x)] (when (map? p) (visit-place p)))
+                             (visit (:body x)))
+                  :switch (do (cost! 1) (visit (:init x)) (visit (:tag x))
+                              (doseq [cl (:clauses x)] (cost! 1) (doseq [v (:values cl)] (visit v)) (visit (:body cl))))
+                  :type-switch (do (cost! 2) (visit (:init x)) (visit (:x x))
+                                   (doseq [cl (:clauses x)] (cost! 1) (when (:var cl) (cost! 1)) (visit (:body cl))))
+                  :select (do (cost! 1) (doseq [cl (:clauses x)] (cost! 1) (visit (:comm cl)) (visit (:body cl))))
+                  :send (do (cost! 1) (visit (:ch x)) (visit (:value x)))
+                  :label (do (cost! 1) (visit (:stmt x)))
+                  (:goto :break :continue) (cost! 1)
+                  (:fallthrough :local-type :directive :var-decl) nil
+                  :go (vreset! reason "unhandled op GO")
+                  :defer (vreset! reason "unhandled op DEFER")
+                  ;; expressions
+                  (:local :global :func :nil :place-local :place-global) (cost! 1)
+                  (:type :method-expr) nil
+                  (:field :place-field) (visit (expand-field x))
+                  :sel (do (cost! 1) (visit (:x x)))
+                  (:index :place-index :map-index :place-map) (do (cost! 1) (visit (:x x)) (visit (or (:index x) (:key x))))
+                  :slice (let [[lo hi mx] (:indexes x)]
+                           (cost! 1)
+                           (when (= :array (kind (node-type (:x x)))) (cost! 1))
+                           (when (and lo (const? lo) (= 0 (:val lo))) (cost! -1))
+                           (when (and hi (= :call (:op hi)) (= "len" (:builtin hi)) (= (:form (first (:args hi))) (:form (:x x)))) (cost! -2))
+                           (visit (:x x)) (doseq [i (remove nil? (:indexes x))] (visit i)))
+                  :addr (if (= :lit (:op (:x x)))
+                          (do (cost! 1) (visit (:x x)))
+                          (let [sx (let [y (:x x)] (if (#{:field :place-field} (:op y)) (expand-field y) y))]
+                            (cost! 1)
+                            (when (and (= :sel (:op sx)) (#{:local :global :place-local} (:op (:x sx)))
+                                       (zero? (field-offset (node-type (:x sx)) (:deref sx) (:field-name sx))))
+                              (cost! -2))
+                            (visit sx)))
+                  (:deref :place-deref) (do (cost! 1)
+                                            (when (= :addr (:op (loop [p (:x x)] (if (and (= :conv (:op p)) (conv-nop? p)) (recur (:x p)) p))))
+                                              (cost! -1))
+                                            (visit (:x x)))
+                  :conv (do (when-not (conv-nop? x) (cost! 1)) (visit (:x x)))
+                  :convert-iface (do (cost! 1) (visit (:x x)))
+                  (:assert :recv :unary) (do (cost! 1) (visit (:x x)))
+                  :binary (if (and (= "+" (gop x)) (t/string-type? (node-type x)))
+                            (do (cost! 1) (doseq [v (add-string-list x)] (visit v)))
+                            (do (cost! 1) (visit (:x x)) (visit (:y x))))
+                  :lit (case (:kind x)
+                         :struct (do (cost! 1) (doseq [fx (:fields x)] (cost! 1) (visit (elt-value fx))))
+                         (:array :slice) (do (cost! (if (and (= :slice (:kind x)) (not (:implicit-ptr x))) 2 1))
+                                             (doseq [ex (:elems x)]
+                                               (when (and (map? ex) (not (:op ex)) (:key ex)) (cost! 2))
+                                               (visit (elt-value ex))))
+                         :map (do (cost! 1) (doseq [en (:entries x)] (cost! 1) (visit (:key en)) (visit (:value en))))
+                         (cost! 1))
+                  :fn (cost! 16)
+                  :method (do (cost! 2) (visit (method-recv x)))
+                  :iface-method (do (cost! 1) (visit (:recv x)))
+                  :result (cost! 1)
+                  :ok nil
+                  :call (visit-call x)
+                  (cost! 1))))
+            (visit-place [p]
+              (visit (norm-place p)))
+            (visit-call [c]
+              (case (:kind c)
+                :builtin (case (:builtin c)
+                           "recover" (vreset! reason "call to recover")
+                           "panic" (let [a (first (:args c))]
+                                     (cost! 2)
+                                     (when (= :convert-iface (:op a)) (cost! -1))
+                                     (visit a))
+                           ("new") (cost! 1)
+                           (do (cost! 1) (doseq [a (:args c)] (when-not (= :type (:op a)) (visit a)))))
+                :iface (do (cost! (+ 1 inline-extra-call-cost)) (visit (:callee c)) (doseq [a (:args c)] (visit a)))
+                (let [callee (inl-callee f c)
+                      inl (when callee (can-inline! callee))
+                      sig (node-type (:callee c))
+                      sig (if (= :method (:kind c)) (e/o (:method (:callee c)) :type) sig)
+                      args (if (and (vector? (under sig)) (nth (under sig) 3 false)) (variadic-args c sig) (:args c))
+                      extra (cond
+                              (and inl (<= (long (:cost inl)) (long (max-cost callee false)))) (:cost inl)
+                              (and (= :closure (:kind c)) (param-local? (:callee c))) inline-param-call-cost
+                              :else inline-extra-call-cost)]
+                  (cost! (+ 1 (long extra)))
+                  (case (:kind c)
+                    :method (visit (method-recv (:callee c)))
+                    (visit (:callee c)))
+                  (doseq [a args] (visit a)))))]
+      (visit (fn-get f :body)))
+    [(long @budget) @reason]))
+
+(defn- field-offset
+  "The offset of field nm of struct type ty (through a pointer when deref)."
+  [ty deref nm]
+  (let [st (if deref (elem ty) ty)
+        u (under st)]
+    (if (and (vector? u) (= :struct (nth u 0)))
+      (let [fs (nth u 1)
+            i (first (keep-indexed (fn [i f] (when (= nm (:name f)) i)) fs))]
+        (if i (long (nth (t/offsetsof st) i 0)) -1))
+      -1)))
+
+(defn- max-cost
+  "inlineCostOK's maximum cost of a callee (a closure's doubled)."
+  [callee called-once]
+  (let [m inline-max-budget
+        m (if (fn-get callee :parent) (* 2 m) m)]
+    (if (and (fn-get callee :parent) called-once) (max m inline-closure-called-once-cost) m)))
+
+(defn- can-inline!
+  "CanInline: function f's inlining record {:cost n}, or nil (with its reason); its message."
+  [f]
+  (let [st (fn-get f :inl-state)]
+    (case st
+      :done (fn-get f :inl)
+      :visiting nil
+      (do
+        (fn-set! f :inl-state :visiting)
+        (let [reason (cond
+                       (fn-get f :foreign) "no function body"
+                       (fn-get f :extern) "no function body"
+                       (fn-get f :noinline) "marked go:noinline"
+                       (seq (fn-get f :uintptr-pragmas)) "marked as having an escaping uintptr argument"
+                       :else nil)
+              [cost r] (if reason [0 reason] (hairy-cost f))
+              budget (if (fn-get f :parent) (max inline-max-budget inline-closure-called-once-cost) inline-max-budget)
+              r (or r (when (> (long cost) (long budget)) (str "function too complex: cost " cost " exceeds budget " budget)))
+              inl (when-not r {:cost cost})]
+          (fn-set! f :inl inl)
+          (fn-set! f :inl-reason r)
+          (when (System/getenv "GOI_INLINE_COSTS")
+            (binding [*out* *err*] (println "inl-cost" (fn-get f :line) (fn-get f :name) cost (or r ""))))
+          (fn-set! f :inl-state :done)
+          (when (and inl (pos? (long *m*)) (not (fn-get f :wrapper)))
+            (binding [*wfile* (fn-get f :file)]
+              (warn! (fn-get f :line) (str "can inline " (fn-get f :name)))))
+          inl)))))
+
+(defn- inl-callee
+  "inlCallee: the function call c of caller calls, when gc can inline it (a package function, a
+  method expression of the receiver's own type, a literal of the caller's)."
+  [caller c]
+  (case (:kind c)
+    (:static :compiled) (let [g (fn-of-obj (:obj (:callee c)))] (when (and g (not (fn-get g :foreign))) g))
+    :method (let [m (:callee c)]
+              (when (= 1 (count (:path m)))
+                (let [g (fn-of-obj (:method m))] (when (and g (not (fn-get g :foreign))) g))))
+    :closure (let [v (static-value (:callee c))]
+               (case (:op v)
+                 :func (let [g (fn-of-obj (:obj v))] (when (and g (not (fn-get g :foreign))) g))
+                 :method-expr (let [g (fn-of-obj (:method v))] (when (and g (not (fn-get g :foreign))) g))
+                 :fn (let [g (fn-of-node v)]
+                       (when (and g (let [cvs (fn-get g :closure-vars)]
+                                      (or (empty? cvs)
+                                          (identical? (.get ^java.util.HashMap (:owner *ctx*) (first cvs)) caller))))
+                         g))
+                 nil))
+    nil))
+
+(defn- copy-body
+  "The callee's body copied for an inlined call at line: its variables (in om, extended with a
+  fresh copy of each the body declares) renamed, every node at the call's line (gc reports the
+  inlined code at its outermost position), its literals fresh nodes (named as the callee's)."
+  [body ^java.util.HashMap om line lit-names decls]
+  (doseq [o decls]
+    (when-not (.containsKey om o)
+      (.put om o (e/obj (assoc @o :line line :esc-class :auto :local? true)))))
+  (letfn [(fresh [o]
+            (or (.get om o)
+                (let [c (e/obj (assoc @o :line line :esc-class :auto :local? true))]
+                  (.put om o c)
+                  c)))
+          (cp [x]
+            (cond
+              (e/obj? x) (if (.containsKey om x) (.get om x) x)
+              (map? x)
+              (let [x2 (into {} (map (fn [[k v]]
+                                       [k (cond
+                                            (#{:type :to :sig :field :method :recv-type :iface} k) v
+                                            (= k :objs) (mapv #(when % (fresh %)) v)
+                                            (= k :var) (when v (fresh v))
+                                            (= k :params) (if (= :fn (:op x)) (mapv #(when % (fresh %)) v) v)
+                                            (and (= k :results) (= :fn (:op x))) (mapv (fn [r] (if (:obj r) (assoc r :obj (fresh (:obj r))) r)) v)
+                                            :else (cp v))]))
+                             x)
+                    x2 (if (contains? x :line) (assoc x2 :line line) x2)]
+                (if (= :fn (:op x))
+                  (assoc x2 :lit-name (get lit-names x))
+                  x2))
+              (vector? x) (mapv cp x)
+              (seq? x) (doall (map cp x))
+              :else x))]
+    (cp body)))
+
+(defn- returns->assigns
+  "The inlined body's return statements as assignments to the result variables rv (their goto to
+  the end left out: the analysis is not flow sensitive)."
+  [x rv]
+  (letfn [(rw [x]
+            (cond
+              (map? x) (case (:op x)
+                         :fn x
+                         :return (let [vs (:values x)]
+                                   (if (empty? vs)
+                                     {:op :block :stmts [] :line (:line x)}
+                                     {:op :assign :line (:line x) :inl-return true
+                                      :lhs (mapv (fn [o] {:op :place-local :obj o :type (e/o o :type) :mode :variable}) rv)
+                                      :rhs vs}))
+                         (into {} (map (fn [[k v]] [k (rw v)])) x))
+              (vector? x) (mapv rw x)
+              :else x))]
+    (rw x)))
+
+(defn- inline-calls
+  "The interleaved inliner over a tree of function caller: each call gc inlines replaced by its
+  inlined body ({:op :inlcall}), reported (inlining call to f), the inlined bodies' own calls
+  inlined in turn (chain: the functions being inlined, gc's inlining tree: no function inlined
+  into its own copy)."
+  [caller x chain]
+  (let [memo (java.util.IdentityHashMap.)
+        asg (iface-assignments x)]
+  (letfn [(il [x godefer]
+            (cond
+              (and (map? x) (.containsKey memo x)) (.get memo x)
+              (map? x)
+              (let [r (il1 x)] (.put memo x r) r)
+              (vector? x) (mapv #(il % false) x)
+              (seq? x) (doall (map #(il % false) x))
+              :else x))
+          (il1 [x]
+              (case (:op x)
+                :fn (let [g (fn-of-node x)]
+                      (when g (vswap! (:kept-lits *ctx*) conj g))
+                      (if-let [nb (when g (fn-get g :inlined-body))]
+                        (let [x2 (assoc x :body nb :lit-name (fn-get g :name))]
+                          (.put ^java.util.IdentityHashMap (:fn-of-node *ctx*) x2 g)
+                          x2)
+                        x))
+                (:go :defer) (let [c (:call x)]
+                               (assoc x :call (if (= :call (:op c))
+                                                (assoc (into {} (map (fn [[k v]] [k (if (#{:callee :args} k) (il v false) v)])) c) :godefer true)
+                                                c)))
+                (let [x (into {} (map (fn [[k v]] [k (il v false)])) x)
+                      x (if (and (= :call (:op x)) (= :iface (:kind x))) (devirt-call asg x) x)]
+                  (if (and (= :call (:op x)) (not= :builtin (:kind x)) (not= :iface (:kind x)))
+                    (or (try-inline caller x chain) x)
+                    x))))]
+    (il x false))))
+
+(defn- try-inline [caller c chain]
+  (let [callee (inl-callee caller c)
+        inl (when callee (can-inline! callee))]
+    (when (and inl (not (some #(identical? % callee) chain)) (not (identical? callee caller))
+               (<= (long (:cost inl)) (long (max-cost callee false))))
+      (let [line (call-line c (fn-get caller :line))
+            _ (warn! line (str "inlining call to " (fn-get callee :name)))
+            _ (when (= :fn (:op (static-value (:callee c)))) (vswap! (:kept-lits *ctx*) disj callee))
+            om (java.util.HashMap.)
+            fresh (fn [o nm] (let [c (e/obj (assoc (if o @o {:kind :var :name nm}) :line line :esc-class :auto :local? true))]
+                               (when o (.put om o c))
+                               c))
+            sig (under (fn-get callee :sig))
+            recv (when (fn-get callee :recv-type) (fresh (fn-get callee :recv) "~p"))
+            params (vec (map-indexed (fn [i o] (fresh o (str "~p" i))) (map (fn [i] (nth (fn-get callee :params) i nil)) (range (count (nth sig 1))))))
+            rv (vec (map-indexed (fn [i o] (fresh o (str "~R" i))) (fn-get callee :results)))
+            _ (doseq [[o ty] (map vector params (nth sig 1))] (e/oset! o :type ty))
+            sigc (node-type (:callee c))
+            sigc (if (= :method (:kind c)) (e/o (:method (:callee c)) :type) sigc)
+            args (if (and (vector? (under sigc)) (nth (under sigc) 3 false)) (variadic-args c sigc) (vec (:args c)))
+            method-expr? (and (= :closure (:kind c)) (fn-get callee :recv-type) (= :method-expr (:op (static-value (:callee c)))))
+            [rarg args] (cond
+                          (= :method (:kind c)) [(method-recv (:callee c)) args]
+                          method-expr? [(first args) (vec (rest args))]
+                          :else [nil args])
+            lit-names (into {} (for [k (fn-get callee :kids)] [(fn-get k :node) (fn-get k :name)]))
+            body (copy-body (fn-get callee :body) om line lit-names (mapcat #(fn-get % :dcl) (all-fns callee)))
+            body (returns->assigns body rv)
+            pdecl {:op :decl :short true :objs (vec (concat (when recv [recv]) params))
+                   :init (vec (concat (when recv [rarg]) args)) :line line :inl-params true}
+            rdecl {:op :decl :objs rv :init [] :line line}
+            body [pdecl rdecl {:op :block :stmts (if (vector? body) body [body]) :line line}]
+            body (inline-calls caller body (conj chain callee))]
+        {:op :inlcall :callee-name (fn-get callee :name) :body body :retvars rv :line line
+         :type (node-type c) :mode :value
+         :callee-is-lit (= :fn (:op (static-value (:callee c))))}))))
+
 ;;; The package: its functions, their declarations, closures and captured variables
 
 (defn- scan-fn!
@@ -1918,7 +2299,10 @@
                 (map? x)
                 (case (:op x)
                   :fn (when-not (.containsKey ^java.util.IdentityHashMap (:fn-of-node *ctx*) x)
-                       (let [c (volatile! {:node x :parent f :closure? true :file (fn-get f :file) :name (str (fn-get f :name) ".func" (inc (count @kids)))
+                       (let [c (volatile! {:node x :parent f :closure? true :file (fn-get f :file) :name (or (:lit-name x)
+                                                                                                                (if (fn-get f :parent)
+                                                                                                                  (str (fn-get f :name) "." (inc (count @kids)))
+                                                                                                                  (str (fn-get f :name) ".func" (inc (count @kids)))))
                                           :params (vec (:params x)) :param-types (vec (nth (under (:sig x)) 1))
                                           :results (vec (map-indexed (fn [i r] (or (:obj r) (when (e/obj? r) r)
                                                                                    (e/obj {:kind :var :name (str "~r" i) :line (:line x) :type (:type r)})))
@@ -1988,7 +2372,7 @@
       (fn-set! f :closure-vars cvs)
       (fn-set! f :closure? (boolean (seq cvs))))))
 
-(defn- all-fns [f] (cons f (mapcat all-fns (fn-get f :kids))))
+(defn all-fns [f] (cons f (mapcat all-fns (fn-get f :kids))))
 
 (defn- bottom-up
   "ir.VisitFuncsBottomUp: the package functions in batches, each a strongly connected component
@@ -2208,6 +2592,35 @@
     (analyze-package r)
     (vec (sort-by (juxt first second) (distinct @*msgs*)))))
 
+(defn- inline-package!
+  "CanInline over the package's functions and literals, then their bodies with the calls gc
+  inlines inlined; the package scanned again over the new bodies (the literals inlined away
+  that capture nothing stay functions of their own): the top-level functions."
+  [fns]
+  (let [live (vec (remove #(fn-get % :extern) fns))
+        all (vec (mapcat all-fns live))]
+    (doseq [f all] (can-inline! f))
+    ;; literals first (all-fns lists a function before its literals)
+    (doseq [f (reverse all)]
+      (binding [*wfile* (fn-get f :file)]
+        (fn-set! f :inlined-body (inline-calls f (fn-get f :body) []))))
+    (let [lits (filter #(fn-get % :parent) all)
+          kept @(:kept-lits *ctx*)
+          lone (vec (for [g lits
+                          :when (and (not (contains? kept g)) (not (fn-get g :closure?)))]
+                      g))]
+      (doseq [k [:owner :single-def :func-assigns]] (.clear ^java.util.HashMap (get *ctx* k)))
+      (.clear ^java.util.IdentityHashMap (:fn-of-node *ctx*))
+      (doseq [f live] (fn-set! f :body (fn-get f :inlined-body)))
+      (let [lone-fns (vec (for [g lone]
+                            (volatile! (assoc (select-keys @g [:node :name :file :params :param-types :results :sig :line :inl :inl-state])
+                                              :parent nil :closure? false :recv nil :esc :unknown
+                                              :body (fn-get g :inlined-body)))))
+            fns (into (vec fns) lone-fns)]
+        (doseq [f fns :when (not (fn-get f :extern))] (fn-set! f :kids []) (scan-fn! f))
+        (doseq [f fns :when (not (fn-get f :extern))] (closure-vars! f))
+        fns))))
+
 (defn analyze-package
   "The escape analysis of checked package r: its functions' records, their tags; the messages
   in *msgs*."
@@ -2220,10 +2633,10 @@
                    :single-def (java.util.HashMap.)
                    :func-assigns (java.util.HashMap.)
                    :temps (java.util.IdentityHashMap.)
-                   :extra-fns (volatile! [])}]
+                   :extra-fns (volatile! [])
+                   :kept-lits (volatile! #{})}]
 
     (let [decls (filter #(and (= :func (:kind %)) (:obj %)) (:decl-infos r))
-          decls (mapv (fn [d] (if (:tree d) (binding [*wfile* (file-of d)] (update d :tree devirtualize)) d)) decls)
           fns (vec (for [d decls
                          :let [tree (:tree d)
                                o (:obj d)
@@ -2244,9 +2657,10 @@
                                          :results (vec (map-indexed (fn [i r] (or (:obj r) (when (e/obj? r) r)
                                                                                   (e/obj {:kind :var :name (str "~r" i) :line (:line tree) :type (nth rtys i nil)})))
                                                                     (:results tree)))
-                                         :sig sig :esc :unknown :line (:line tree)
+                                         :sig sig :esc :unknown :line (or (:line tree) (e/o o :line))
                                          :extern (or (nil? tree) (boolean (:extern mt)))
                                          :noescape (boolean (:go/noescape mt))
+                                         :noinline (boolean (:go/noinline mt))
                                          :uintptrescapes (boolean (:go/uintptrescapes mt))
                                          :uintptr-pragmas (cond-> #{} (:go/uintptrescapes mt) (conj :escapes) (:go/uintptrkeepalive mt) (conj :keepalive))
                                          :body (:body tree)})]
@@ -2281,8 +2695,12 @@
                               :esc :unknown :line nil :extern false :uintptr-pragmas #{} :body body})]
             (vswap! (:extra-fns *ctx*) conj f))))
       (let [fns (into fns @(:extra-fns *ctx*))]
+      (when-not *inline*
+        (doseq [f fns :when (not (fn-get f :extern))]
+          (binding [*wfile* (fn-get f :file)] (fn-set! f :body (devirtualize (fn-get f :body))))))
       (doseq [f fns :when (not (fn-get f :extern))] (scan-fn! f))
       (doseq [f fns :when (not (fn-get f :extern))] (closure-vars! f))
+      (let [fns (if *inline* (inline-package! fns) fns)]
       (doseq [f fns :when (fn-get f :extern)]
         ;; an external function's tags (paramTag's len(fn.Body) == 0): no batch
         (fn-set! f :esc :tagged)
@@ -2301,4 +2719,4 @@
         (doseq [f (mapcat all-fns fns) :when (not (fn-get f :extern))]
           (binding [*wfile* (fn-get f :file)]
             (bce-walk! (fn-get f :body)))))
-      (vec (mapcat all-fns fns))))))
+      (vec (mapcat all-fns fns)))))))
