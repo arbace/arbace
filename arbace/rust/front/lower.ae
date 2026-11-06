@@ -254,7 +254,7 @@
     (= 'Parenthesized (head ga))
     (let [a (second ga)]
       {:paren true :inputs (binding [*sig* true] (mapv #(lower-ty (if (= 'Param (head %)) (fv % :ty) %)) (fv a :inputs)))
-       :output (let [o (fv a :output)] (if (= 'Ty (head o)) (lower-ty (second o)) {:node :ty :kind :tup :elts []}))})
+       :output (let [o (fv a :output)] (if (= 'Ty (head o)) (lower-ty (second o)) {:node :ty :kind :tup :elts [] :unwritten true}))})
     :else nil))
 
 (defn- lower-mt [mt] {:mutbl (= 'Mut (fv mt :mutbl)) :ty (lower-ty (fv mt :ty))})
@@ -752,11 +752,20 @@
 (defn- lower-fn [f]
   (let [sig (fv f :sig) d (fv sig :decl) h (fv sig :header)
         params (binding [*sig* true] (lower-fn-decl-params d))
-        ;; impl Trait in argument position: a synthetic type parameter, named by the type's text, the argument its path
-        synth (vec (for [p params :when (= :impl (:kind (:ty p)))] (:bounds (:ty p))))
-        params (mapv (fn [p] (if (= :impl (:kind (:ty p)))
-                               (assoc p :ty (assoc (:ty p) :kind :impl-param))
-                               p)) params)
+        ;; impl Trait in argument position (at any depth, an associated item constraint's too): a synthetic type parameter
+        ;; each, named by the type's text, the inner ones first (lowered before the bounds that hold them), the type its path
+        acc (atom [])
+        apit (fn apit [x]
+               (cond (and (map? x) (= :ty (:node x)) (= :impl (:kind x)))
+                     (let [x (into {} (for [[k v] x] [k (apit v)]))]
+                       (swap! acc conj (:bounds x))
+                       (assoc x :kind :impl-param))
+                     (and (map? x) (= :fnptr (:kind x))) x
+                     (map? x) (into {} (for [[k v] x] [k (apit v)]))
+                     (vector? x) (mapv apit x)
+                     :else x))
+        params (mapv (fn [p] (assoc p :ty (apit (:ty p)))) params)
+        synth @acc
         g (lower-generics (fv f :generics))
         g (update g :params into (for [b synth] {:synthetic b :kind :type :bounds b}))]
     {:ident (id-name (fv f :ident))

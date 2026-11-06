@@ -226,6 +226,8 @@
       :ty-alias (add-def! {:parent parent :data [:type nm] :kind "TyAlias" :node it :ident-span isp})
       :mod (let [id (add-def! {:parent parent :data [:type nm] :kind "Mod" :node it :ident-span isp :module true})]
              (doseq [x (:items it)] (collect-item! id x)))
+      ;; a module's imports, for the names an expansion's paths use (their resolutions are not in the oracle's data)
+      :use (update-def! parent update :uses (fnil conj []) it)
       nil)))
 
 (defn- body-children
@@ -313,16 +315,22 @@
               {:param-ty p :bounds (:bounds p) :param p}))
           (:where g)))
 
+(def ^:dynamic *edition* 2024)
+
 (defn- late-bound
-  "The late-bound lifetimes of a function: constrained by an input and named in no where clause"
+  "is_late_bound_map: a function's lifetime is late-bound unless a where clause names it, or the output names it and
+  no input constrains it (an edition 2024 return-position impl Trait captures every lifetime)"
   [f]
   (let [g (:generics f)
         in-where (into #{} (mapcat (fn [pr] (concat (when (:lifetime pr) [(:lifetime pr)]) (lifetimes-in (:bounds pr)) (lifetimes-in (:ty pr)))) (where-preds g)))
-        constrained (into #{} (mapcat #(constrained-lifetimes (:ty %)) (:params f)))]
+        constrained (into #{} (mapcat #(constrained-lifetimes (:ty %)) (:params f)))
+        out (:output f)
+        fully-capturing (and (>= (long *edition*) 2024) (some #(and (map? %) (= :impl (:kind %))) (tree-seq coll? (fn [x] (if (map? x) (vals x) x)) out)))
+        in-output (if fully-capturing (set (map :name (:params g))) (lifetimes-in out))]
     (set (for [p (:params g)
                :when (= :lifetime (:kind p))
-               :when (contains? constrained (:name p))
-               :when (not (contains? in-where (:name p)))]
+               :when (not (contains? in-where (:name p)))
+               :when (not (and (not (contains? constrained (:name p))) (contains? in-output (:name p))))]
            (:name p)))))
 
 (defn- synthetic-name [bounds] (hp/synthetic-name bounds))
@@ -465,6 +473,65 @@
   [nm]
   (some (fn [d] (when (and (= *module* (:parent d)) (= [:type nm] (:data d)) (not (str/starts-with? (str (:kind d)) "Ctor"))) (:id d))) @*defs*))
 
+(declare std-path-def)
+
+(defn- module-parent [id] (loop [p (:parent (def-of id))] (when p (let [d (def-of p)] (if (or (:module d) (= :crate (first (:data d)))) p (recur (:parent d)))))))
+
+(defn- std-child [m nm ns]
+  (some #(when (and (= nm (:name %)) (or (nil? ns) (= ns (:ns %)))) (:path %)) (:children (get (:mods *std*) m))))
+
+(declare lookup-name)
+(def ^:dynamic *looking* #{})   ; the names being looked up (glob imports may cycle)
+
+(defn- walk-written
+  "A written path's segments from a starting resolution: [:local ID] (a module or an item) or [:ext PATH]"
+  [start names]
+  (reduce (fn [r nm]
+            (when r
+              (case (first r)
+                :local (let [id (second r)]
+                         (or (some (fn [d] (when (and (= id (:parent d)) (#{[:type nm] [:value nm]} (:data d)) (not (str/starts-with? (str (:kind d)) "Ctor")))
+                                             [:local (:id d)]))
+                                   @*defs*)
+                             (when (:module (def-of id)) (lookup-name nm id false))))
+                :ext (when-let [p (std-child (second r) nm nil)] [:ext p])
+                nil)))
+          start names))
+
+(defn- resolve-written
+  "A use item's or an expansion's written path (crate::, self::, super::, std's crates, else the module's own names)"
+  [names module]
+  (let [[f & more] names]
+    (case f
+      "crate" (walk-written [:local 0] more)
+      "self" (walk-written [:local module] more)
+      "super" (walk-written [:local (or (module-parent module) 0)] more)
+      ("std" "core" "alloc") (when-let [p (std-path-def names)] [:ext p])
+      (walk-written (lookup-name f module true) more))))
+
+(defn lookup-name
+  "An unresolved name in a module (an expansion's path, whose resolution the oracle's data omits): the module's items,
+  its imports and glob imports, then (USE-PRELUDE) the edition's prelude"
+  [nm module use-prelude]
+  (let [d (def-of module)
+        k [nm module]]
+    (when-not (contains? *looking* k)
+     (binding [*looking* (conj *looking* k)]
+    (or (some (fn [x] (when (and (= module (:parent x)) (#{[:type nm] [:value nm]} (:data x)) (not (str/starts-with? (str (:kind x)) "Ctor"))) [:local (:id x)])) @*defs*)
+        (some (fn [u] (when (and (= :single (:use u)) (= nm (:ident u)))
+                        (resolve-written (mapv :ident (:path u)) module)))
+              (:uses d))
+        (some (fn [u] (when (= :glob (:use u))
+                        (let [m (resolve-written (mapv :ident (:path u)) module)]
+                          (case (first m)
+                            :ext (when-let [p (std-child (second m) nm nil)] [:ext p])
+                            :local (walk-written m [nm])
+                            nil))))
+              (:uses d))
+        (when (#{"std" "core" "alloc"} nm) [:ext nm])
+        (when use-prelude
+          (when-let [p (std-child (str *root-crate* "::prelude::rust_" (if (= 2015 *edition*) 2015 *edition*)) nm :type)] [:ext p])))))))
+
 (defn- std-path-def
   "A written std path (a derive's `$crate::fmt::Debug`): its definition through std's modules' children"
   [names]
@@ -480,6 +547,10 @@
   "A path's resolution as [:local ID KIND] [:ext PATH KIND] [:prim N] [:param P] [:self-alias] [:self-param] or nil"
   [path]
   (let [rs (when-not (= "$crate" (:ident (first (:segs path)))) (:res path))   ; a derive's $crate path: its written text (its span is the derive's)
+        ;; a span several expansions share (a macro's `$t:tt`) carries each one's resolution: the one this path's name names
+        nm (:ident (peek (:segs path)))
+        named? (fn [r] (case (head r) prim (= nm (second r)) def (= nm (path-name (str (nth r 2)))) true))
+        rs (if (> (count rs) 1) (or (seq (filter named? rs)) rs) rs)
         r (or (first (filter #(not= 'err (head %)) rs)) (first rs))]
     (case (head r)
       def (let [k (second r) p (nth r 2)
@@ -490,7 +561,10 @@
                     ("TyParam" "ConstParam") [:param (scope-param (:ident (peek (:segs path))))]
                     (if-let [id (get @*by-span* sp)]
                       [:local id k]
-                      [:unresolved (:ident (peek (:segs path)))])))
+                      ;; a definition in an out-of-line module's file (no root-file span): by its written path
+                      (if-let [r (resolve-written (mapv :ident (:segs path)) *module*)]
+                        (if (= :local (first r)) [:local (second r) (:kind (def-of (second r)))] [:ext (second r) (ext-kind (second r))])
+                        [:unresolved (:ident (peek (:segs path)))]))))
       prim [:prim (second r)]
       self-ty-alias [:self-alias]
       self-ty-param [:self-param]
@@ -504,24 +578,39 @@
               (let [p (std-path-def names)] [:ext p (ext-kind p)])
               (and (= 1 (count segs)) (not (:lang path)))
               (let [nm (:ident (first segs))]
-                (cond (scope-param nm) [:param (scope-param nm)]
-                      (= "Self" nm) (if *self-ty* [:self-alias] [:self-param])
-                      (local-by-name nm) (let [id (local-by-name nm)] [:local id (:kind (def-of id))])
+                (cond (= "Self" nm) (if (and *self-ty* (not= *self-ty* [:param 0 "Self"])) [:self-alias] [:self-param])
+                      (scope-param nm) [:param (scope-param nm)]
+                      (lookup-name nm *module* true) (let [r (lookup-name nm *module* true)]
+                                                       (if (= :local (first r)) [:local (second r) (:kind (def-of (second r)))] [:ext (second r) (ext-kind (second r))]))
                       (get prim-tys nm) [:prim nm]
                       :else [:unresolved nm]))
+              (and (> (count segs) 1) (not (:lang path)) (nil? (get *res* (let [sp (:span path)] (when (vector? sp) [(nth sp 0) (nth sp 1) (nth sp 0) (+ (long (nth sp 1)) (count (:ident (first segs))))])))))
+              (when-let [r (resolve-written names *module*)]
+                (if (= :local (first r)) [:local (second r) (:kind (def-of (second r)))] [:ext (second r) (ext-kind (second r))]))
               :else nil))
       [:unresolved (str r)])))
 
 (defn- elided-default [] (elided-region))
 
+(defn- snippet
+  "The root file's text of a span (the source map's span_to_snippet)"
+  [sp]
+  (when (and *src* (vector? sp) (= 4 (count sp)))
+    (let [{:keys [^ints cps lines n]} *src*
+          off (fn [l c] (+ (long (nth lines (dec (long l)) 0)) (dec (long c))))
+          a (off (sp 0) (sp 1)) b (off (sp 2) (sp 3))]
+      (when (<= 0 a b (long n))
+        (String. cps (int a) (int (- b a)))))))
+
 (defn- lower-const-arg [x]
-  ;; a const argument: a literal's value, a const parameter, else its text
+  ;; a const argument: a literal's value, a const parameter, else an unevaluated anonymous constant, printed by its
+  ;; expression's source text (pretty_print_const's span_to_snippet)
   (cond
     (and (map? x) (= :lit (:kind x))) (let [l (:lit x)] [:cval (str (or (:symbol l) (:text l) l))])
     (and (map? x) (= :path (:kind x))) (let [nm (:ident (peek (:segs (:path x))))]
                                          (if-let [p (scope-param nm)] [:cparam (:index p) nm] [:cexpr nm]))
     (and (map? x) (= :block (:kind x)) (nil? (seq (:stmts (:block x))))) (lower-const-arg (:expr (:block x)))
-    :else [:cexpr (str x)]))
+    :else [:cexpr (or (snippet (:span x)) (str "{const " (:kind x) "}"))]))
 
 (defn- lower-generic-args
   "lower_generic_args_of_path: the arguments of DEF's own parameters (with SELF-TY for a trait's Self), elided
@@ -616,6 +705,8 @@
                ("Struct" "Enum" "Union") [:adt p (adt-args p (:args last-seg))]
                "TyAlias" (if-let [a (get (:aliases *std*) p)] (subst (sty->ty a) (adt-args p (:args last-seg))) [:err (str "alias " p)])
                "ForeignTy" [:adt p []]
+               ;; a module named as a primitive type (`use std::str;`): the primitive in type position
+               "Mod" (or (get prim-tys (path-name p)) [:err (str "ext Mod " p)])
                [:err (str "ext " k " " p)]))
       :local (let [[_ id k] r]
                (case k
@@ -651,7 +742,11 @@
 
 (defn lower-ty [t]
   (case (:kind t)
-    :path (binding [*object-default* nil] (lower-path-ty t))
+    :path (let [r (res-def (:path t))]
+            (if (and (#{:ext :local} (first r)) (= "Trait" (nth r 2)))
+              ;; a bare trait object (editions 2015 and 2018)
+              (lower-dyn {:bounds [{:trait (:path t)}]})
+              (binding [*object-default* nil] (lower-path-ty t))))
     :qpath (let [segs (:segs (:path t)) pos (or (:position t) 0)
                  qself (lower-ty (:qself t))]
              (if (and (pos? pos) (= (inc pos) (count segs)))
@@ -1152,10 +1247,12 @@
                      (cond (nil? tr) [[:err (str "bound " (pr-str (mapv :ident (:segs (:trait b)))))]]
                            (= 'Maybe (head (:polarity b))) []
                            (= (first tr) (lang "pointee_sized")) []
-                           :else (into (if (= (first tr) (lang "sized")) [[:trait tr]] [[:trait tr]])
-                                       (for [[ad args term] (:constraints (meta tr))] [:proj ad args term]))))
+                           :else (into [[:trait tr]] (for [[ad args term] (:constraints (meta tr))] [:proj ad args term]))))
                    :else []))
-               bounds)))
+               ;; lower_poly_trait_ref: a Sized bound goes to the front of its predicate's bounds
+               (let [sized (lang "sized")
+                     s? (fn [b] (and (:trait b) (not= 'Maybe (head (:polarity b))) (= sized (trait-def-of (:trait b)))))]
+                 (reduce (fn [acc b] (if (s? b) (into [b] acc) (conj acc b))) [] bounds)))))
 
 (defn- clause-params
   "parameters_for: the parameters a value mentions (with INCLUDE-NONCONSTRAINING, those inside projections too)"
@@ -1270,7 +1367,7 @@
 
 (defn collect-crate
   "RF7: the crate's collected items, in the def collector's order"
-  [hir res std & [{:keys [source]}]]
+  [hir res std & [{:keys [source edition]}]]
   (binding [*std* std
             *root-crate* (if (some #(= "NoStd" (:parsed %)) (:attrs hir)) "core" "std")
             *defs* (atom [{:id 0 :data [:crate] :kind "Mod" :module true}])
@@ -1279,6 +1376,7 @@
             *generics-cache* (atom {})
             *impl-cache* (atom {})
             *res* res
+            *edition* (or edition 2024)
             *src* (when source (resolve/source-index source))]
     (doseq [it (:items hir)] (collect-item! 0 it))
     (vec (for [d @*defs* :when (emit? d)] (item-facts d)))))

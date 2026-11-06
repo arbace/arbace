@@ -4,10 +4,14 @@
 # to LLVM forms, the collector's traversal) and its judges. Light: one process per program, each under 2 GiB. Needs the helper
 # (bin/repr-rust helper) and rustc 1.99.1; evaluated from the checkout on the tools' host (ARBACE_HOST_EXE), RUSTC_BOOTSTRAP=1 set here.
 #
-#   bin/rust-front collect-check [--ours] [NAME...]
+#   bin/rust-front collect-check [--crates] [--ours] [NAME...]
 #                          RF7: arbace.rust.front.collect (generics, types, signatures, clauses, ADTs, impls) over the HIR of
 #                          arbace.rust.front.lower against the helper's --iface (front-oracles' NAME.iface.edn), item by item
-#                          (COLLECT_VERBOSE=1: each program's differing items; COLLECT_DUMP=DIR: our items); --ours: the pipeline
+#                          (COLLECT_VERBOSE=1: each program's differing items; COLLECT_DUMP=DIR: our items); --ours: the pipeline;
+#                          --crates: over the crates' oracles of `crates`
+#   bin/rust-front crates CRATE-DIR...
+#                          RF7 on ordinary crates (a Cargo registry's sources): src/lib.rs at its edition through the helper's
+#                          front oracles into .tmp/rust-front/crates/, then collect-check over the helper's crates
 #   bin/rust-front oracles [-o DIR] [--next-solver] FILE.rs...
 #                          rsdump rustc's --mir (rustc's -Zunpretty=mir text), --mir-data (the forms), --census,
 #                          --iface per file into DIR/NAME.{mir.txt,mir.edn,census.edn,iface.edn} (default
@@ -136,13 +140,37 @@ case ${1:-} in
   collect-check)
     # RF7: arbace.rust.front.collect over arbace.rust.front.lower's HIR against the helper's --iface (front-oracles first)
     shift
+    dir=$work/front
+    [ "${1:-}" = --crates ] && { dir=$work/crates; shift; }
     ours=()
     [ "${1:-}" = --ours ] && { ours=(--ours); shift; }
     names=("$@")
     if [ ${#names[@]} -eq 0 ]; then
-      names=($(cd "$work/front" && ls *.iface.edn | sed 's/\.iface\.edn$//'))
+      names=($(cd "$dir" && ls *.iface.edn | sed 's/\.iface\.edn$//'))
     fi
-    cd "$root" && arbace_tool -m arbace.rust.front.collect-check "$work/front" "${ours[@]}" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+    cd "$root" && arbace_tool -m arbace.rust.front.collect-check "$dir" "${ours[@]}" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  crates)
+    # RF7 on ordinary crates: each crate directory's src/lib.rs (its Cargo.toml's edition, no features) through the helper's
+    # --expanded, --resolve and --iface into .tmp/rust-front/crates/NAME.*, NAME.src naming the root file; then collect-check
+    # over the helper's crates (out-of-line modules are the helper's: the pipeline is not run)
+    shift
+    out=$work/crates; mkdir -p "$out"
+    [ -s "$work/front/std-names.edn" ] || front_oracles "$root/test/rust/front/a1.rs"
+    ln -sf "$work/front/std-names.edn" "$out/std-names.edn"
+    names=()
+    for d in "$@"; do
+      d=$(realpath "$d"); n=$(basename "$d"); f=$d/src/lib.rs
+      [ -f "$f" ] || { echo "crates: $d: no src/lib.rs" >&2; continue; }
+      ed=$(grep -m1 '^edition' "$d/Cargo.toml" | grep -o '20[0-9][0-9]'); ed=${ed:-2015}
+      cn=$(echo "$n" | sed -E 's/-[0-9][0-9.]*.*$//; s/-/_/g')
+      (ulimit -v 4000000; cd "$out" && "$helper" rustc --expanded "$n.exp.edn" --resolve "$n.res.edn" --iface "$n.iface.edn" \
+         -- --edition "$ed" --crate-type lib --crate-name "$cn" -A warnings --emit=metadata -o "$n.rmeta" "$f" > "$n.log" 2>&1) ||
+        { echo "crates: $n: the helper failed (see $out/$n.log)" >&2; rm -f "$out/$n.iface.edn"; continue; }
+      rm -f "$out/$n.rmeta"
+      echo "$f" > "$out/$n.src"; echo "$ed" > "$out/$n.edition"
+      names+=("$n")
+    done
+    cd "$root" && arbace_tool -m arbace.rust.front.collect-check "$out" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
   oracles) shift; oracles "$@" ;;
   front-oracles) shift; front_oracles $(front_files "$@") ;;
   expand-check)
