@@ -5,7 +5,8 @@
  * which the variants of those two classes call (overlay/jdk/variants/VMManagementImpl.ae, ThreadImpl.ae). The
  * threads are jrt's live threads (started and not ended, and the main thread); the counts are the JVM's
  * ThreadService's: live, daemon, peak (reset to the live count), ever started. The settings the beans enable
- * (contention monitoring, CPU time, allocated memory) are kept here.
+ * (contention monitoring, CPU time, allocated memory) are kept here. Since slice 2 what a thread waits for: the
+ * object, its owner, the blocked and waited counts and times (go/arbace/jrt/management.ae's waitBegin).
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
@@ -43,18 +44,40 @@ public final class HostManagement {
     /** The process id. */
     public static native int pid0();
 
-    private static volatile boolean contentionMonitoring;
     private static volatile boolean cpuTime;
     private static volatile boolean allocatedMemory;
 
-    /** Thread contention monitoring as ThreadMXBean set it. */
+    private static volatile boolean contentionMonitoring;
+
+    /** Thread contention monitoring as ThreadMXBean set it (jrt measures the times while it is on). */
     public static boolean contentionMonitoring() {
         return contentionMonitoring;
     }
 
     public static void setContentionMonitoring(boolean on) {
         contentionMonitoring = on;
+        setContentionMonitoring0(on);
     }
+
+    private static native void setContentionMonitoring0(boolean on);
+
+    /** The object t is blocked to enter, or waits on (a monitor's or a lock's, park's blocker), or null. */
+    public static native Object waitOn0(Thread t);
+
+    /** The thread holding x's monitor or lock, or null. */
+    public static native Thread lockOwner0(Object x);
+
+    /** The times t blocked to enter a monitor or a lock. */
+    public static native long blockedCount0(Thread t);
+
+    /** The times t waited. */
+    public static native long waitedCount0(Thread t);
+
+    /** t's milliseconds blocked while contention monitoring was on; -1 when it is off. */
+    public static native long blockedTime0(Thread t);
+
+    /** t's milliseconds waited while contention monitoring was on; -1 when it is off. */
+    public static native long waitedTime0(Thread t);
 
     /** Thread CPU time measurement as ThreadMXBean set it. */
     public static boolean cpuTime() {

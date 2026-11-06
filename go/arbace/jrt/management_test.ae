@@ -57,3 +57,84 @@ counted as one (the test's goroutine is an adopted daemon, so a is made a user t
       (.Error t "start time in the future"))
     (when (<= (HostManagement_Pid0__I_native) 0)
       (.Error t "pid"))))
+
+(go/func waitState
+  "waitState waits up to a second for th to be in state st.\n"
+  ^bool [^{:tag (* Thread)} th ^{:tag (* Thread_State)} st]
+  (let [deadline (.Add (time/Now) time/Second)]
+    (while (.Before (time/Now) deadline)
+      (when (== (.GetState__Thread_State th) st) (return true))
+      (time/Sleep time/Millisecond))
+    false))
+
+(go/func TestThreadStatesAndLocks
+  "A thread entering a held monitor is BLOCKED on its object, the holder its owner; in Object.wait it is
+WAITING on it, in a timed wait TIMED_WAITING; in sleep TIMED_WAITING on nothing; waiting for a held
+ReentrantLock WAITING on the lock, its holder the owner; the blocked and waited counts grow.\n"
+  [^{:tag (* testing/T)} t]
+  (HostManagement_SetContentionMonitoring0_Z__V_native true)
+  (defer (HostManagement_SetContentionMonitoring0_Z__V_native false))
+  (let [o (Object_New)
+        holder (CurrentThread)
+        go1 (make (chan (struct)))
+        b (Thread_New_Runnable_String (RunnableOf (fn [] (MonitorEnter o) (MonitorExit o) (close go1))) (Str "blocker"))]
+    (MonitorEnter o)
+    (.Start__V b)
+    (when (not (waitState b Thread_State_BLOCKED))
+      (.Fatalf t "the contending thread is %s" (.String (.Name__String (.GetState__Thread_State b)))))
+    (when (!= (HostManagement_WaitOn0_Thread__O_native b) o)
+      (.Error t "blocked on another object"))
+    (when (!= (HostManagement_LockOwner0_O__Thread_native o) (.-self holder))
+      (.Error t "the monitor's owner"))
+    (time/Sleep (* 3 time/Millisecond))
+    (MonitorExit o)
+    (<! go1)
+    (.Join__V b)
+    (when (< (HostManagement_BlockedCount0_Thread__J_native b) 1)
+      (.Error t "blocked count"))
+    (when (< (HostManagement_BlockedTime0_Thread__J_native b) 0)
+      (.Error t "blocked time with monitoring on")))
+  ;; Object.wait, timed and not, then notify
+  (let [o (Object_New)
+        w (Thread_New_Runnable_String (RunnableOf (fn [] (MonitorEnter o) (Wait o) (MonitorExit o))) (Str "waiter"))
+        tw (Thread_New_Runnable_String (RunnableOf (fn [] (MonitorEnter o) (WaitTimeout o 10000 0) (MonitorExit o))) (Str "timed"))]
+    (.Start__V w)
+    (.Start__V tw)
+    (when (not (waitState w Thread_State_WAITING))
+      (.Errorf t "waiter %s" (.String (.Name__String (.GetState__Thread_State w)))))
+    (when (not (waitState tw Thread_State_TIMED_WAITING))
+      (.Errorf t "timed waiter %s" (.String (.Name__String (.GetState__Thread_State tw)))))
+    (when (!= (HostManagement_WaitOn0_Thread__O_native w) o)
+      (.Error t "waiting on another object"))
+    (MonitorEnter o)
+    (NotifyAll o)
+    (MonitorExit o)
+    (.Join__V w)
+    (.Join__V tw)
+    (when (< (HostManagement_WaitedCount0_Thread__J_native w) 1)
+      (.Error t "waited count")))
+  ;; sleep
+  (let [s (Thread_New_Runnable_String (RunnableOf (fn [] (Thread_Sleep_J__V 200))) (Str "sleeper"))]
+    (.Start__V s)
+    (when (not (waitState s Thread_State_TIMED_WAITING))
+      (.Errorf t "sleeper %s" (.String (.Name__String (.GetState__Thread_State s)))))
+    (when (!= (HostManagement_WaitOn0_Thread__O_native s) nil)
+      (.Error t "a sleeper waits on an object"))
+    (.Interrupt__V s)
+    (.Join__V s))
+  ;; a held ReentrantLock
+  (let [l (ReentrantLock_New)
+        holder (CurrentThread)
+        lw (Thread_New_Runnable_String (RunnableOf (fn [] (.Lock__V l) (.Unlock__V l))) (Str "locker"))]
+    (.Lock__V l)
+    (.Start__V lw)
+    (when (not (waitState lw Thread_State_WAITING))
+      (.Errorf t "locker %s" (.String (.Name__String (.GetState__Thread_State lw)))))
+    (when (!= (HostManagement_WaitOn0_Thread__O_native lw) l)
+      (.Error t "the locker waits on another object"))
+    (when (!= (HostManagement_LockOwner0_O__Thread_native l) (.-self holder))
+      (.Error t "the lock's owner"))
+    (.Unlock__V l)
+    (.Join__V lw)
+    (when (!= (.GetState__Thread_State lw) Thread_State_TERMINATED)
+      (.Error t "the locker did not end"))))

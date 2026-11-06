@@ -30,7 +30,7 @@
  * interface in the JDK, written over jrt's (jdk.internal.jrt.HostManagement: the threads' counts, the start,
  * the uptime, the process id) and constants where jrt has nothing to measure yet (classes loaded, compilation,
  * safepoints, GC CPU time: 0, -1 for unsupported; no VM arguments; no performance data, as -XX:-UsePerfData);
- * the optional supports false until their slice. Copyright (c) Oracle and/or its affiliates, under the GNU
+ * the optional supports false until their slice but thread contention monitoring (slice 2). Copyright (c) Oracle and/or its affiliates, under the GNU
  * General Public License version 2 with the Classpath Exception, as the notice above says (LICENSE.md).
  */
 
@@ -78,7 +78,7 @@ class VMManagementImpl implements VMManagement {
     private static void initOptionalSupportFields() {
         // jrt (F13, JCS161 (a)): what jrt measures; the rest unsupported until its slice
         compTimeMonitoringSupport = false;
-        threadContentionMonitoringSupport = false;
+        threadContentionMonitoringSupport = true;
         currentThreadCpuTimeSupport = false;
         otherThreadCpuTimeSupport = false;
         objectMonitorUsageSupport = false;

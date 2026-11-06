@@ -157,9 +157,16 @@ interruptible and interrupted (the status consumed).\n"
         (return true)))
     (let [ch (.wait (addr (.-g l)))]
       (.Unlock (.-mu l))
-      (switch (block ch me interruptible deadline)
+      ;; a thread waiting for a lock parks in the JDK: WAITING (TIMED_WAITING with a deadline) on the lock
+      ;; (management.ae; the JDK's blocker is the lock's AQS sync object, which jrt's lock has not)
+      (let [^int32 ws wsTimed]
+        (when (.IsZero deadline) (set! ws wsWaiting))
+        (waitBegin me ws l))
+      (let [r (block ch me interruptible deadline)]
+        (waitEnd me)
+        (switch r
         (case [wokenInterrupted] (panic (InterruptedException_New)))
-        (case [wokenTimeout] (return false)))
+        (case [wokenTimeout] (return false))))
       (.Lock (.-mu l)))))
 
 (go/method Lock__V "Lock__V is lock().\n" [^{:tag (* ReentrantLock)} l]
@@ -595,6 +602,11 @@ spuriously, as Java's park.\n"
       (let [tm (time/NewTimer d)]
         (defer (.Stop tm))
         (set! tc (.-C tm))))
+    ;; WAITING or TIMED_WAITING on the blocker (management.ae)
+    (if (== tc nil)
+      (waitBegin me wsWaiting (.Load (.-parkBlocker me)))
+      (waitBegin me wsTimed (.Load (.-parkBlocker me))))
+    (defer (waitEnd me))
     (select
       (case (<! (.-park me)))
       (case (<! (.-intr me)) (.Impl_Interrupt__V me me))
