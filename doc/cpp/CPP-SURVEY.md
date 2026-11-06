@@ -2848,3 +2848,119 @@ Each under the heavy lock (`bin/heavy-lock CMD`; `CPPI_THREADS=3`, a process up 
 ## Decided (2026-11-05, the user: CP220-CP222)
 
 CP220 (a), prebuilt runtime nodes for ci then the whole corpora (with RES34's per-unit path), and (b) until it lands: samples nightly, the whole corpora at the clean run; CP221 (a): the essential C++ run steps stay in the essential gate; CP222 (a): sample records as built.
+
+## As built: cppi-deferred (2026-11-06)
+
+On the branch `cppi-deferred` from `cppi-check`'s head (5c31582f), the day's light tier (stage 0 by `ARBACE_HOST_EXE`, main's; no gate run,
+no executable built). Goal: the run cells' non-passes triaged by root cause, ranked by programs per fix, the top ones fixed in cppi (the
+lowering and its library support for ci). Nothing of Sema or the code generator (cpp-g5's) changed. Spec: doc/cpp/LLVM.md §7, §11.
+
+### The triage
+
+The cells' recorded non-passes (11: samples and runtime 4, gxx-dg-run every 25th 7), by root cause:
+
+| cause | recorded | whole corpora (the files that use it: gxx-dg-run's 1,806 `dg-do run` files, libstdcxx's run list of 3,501) | whose | fix |
+|---|---|---|---|---|
+| oracle-rejected (clang refuses the program) | 6 | about 1 in 10 of gxx-dg-run (CX8) | the oracle | none (CP11) |
+| a long double in a struct (`std::format`'s argument union, `std::hash<long double>`'s frexp result, the program's own types): ci's 8-byte `long double` against the IR's 16 in the structs' static assertions | 1 (`runtime/library.cpp`) | 12 + 67 files name `long double`; every program using `std::format`, `<complex>` of long double or such a struct | the lowering | **done**: the slot union |
+| threads (ci runs none, CP1) | 3 | 9 + 0 (the list leaves 30_threads and pthread tests out) | ci's back end (C's §6.5) | CP230 |
+| oracle-text (`__PRETTY_FUNCTION__`'s spelling is clang's) | 1 | 16 + 0 use the names | the oracle | CP231 |
+| va_arg read inline (the class `va-arg`, queue 191's gap) | 0 | 16 + 0 | the lowering over ci's va_list | **done**: `cx$va_fK` |
+| an atomic float or double (the class `atomic-generic`) | 0 | 0 + 4 | the lowering | **done**: the `_n` builtins |
+
+So the fixes per program: the long double layout first (the most programs, the recorded one among them), then va_arg, then the float
+atomics; threads and the oracle's text are not cppi's alone (the proposals below).
+
+### What was built
+
+- **The slot union** (`arbace.cpp.lower`'s `mtype`, `slot-union`, `slot-get`, `slot-init`): a member or element of an aggregate of type
+  `x86_fp80` is `union cx$f80 { long double v __attribute__((aligned(16))); unsigned char b[16]; }`, a `{ x86_fp80, x86_fp80 }` member
+  (`_Complex long double`) `union cx$c80` of 32 bytes; extractvalue, insertvalue, frexp's result and the aggregate constants and static
+  initializers read and write its `v` (an initializer braced). Under gcc the union is the type's own layout (the lower check's judge
+  unchanged); in ci, whose `long double` is 8 bytes (CS35), it keeps the IR's 16, so the structs' static assertions hold. The alignment is
+  on the member: ci's checker left the union's own `aligned` attribute out of a struct's layout (the first try's `deferred.cpp` failed
+  its static assertion on ci). A computation in long double still differs (ci's double): the class `long-double` keeps its differ shapes.
+- **Float atomics** (`atomic-int`): a `float` or `double` atomic load, store, exchange and the compare-exchange loop's first load by the
+  `_n` builtins on `unsigned`/`unsigned long`, the value bitcast; gcc's generic builtins do the same lock-free operation on 4 and 8 bytes,
+  and ci's read has the `_n` ones as macros (`arbace.cpp.run/ci-atomics`) while repr/c's `<builtin>` declares the generic ones without
+  parameters. An integer `atomicrmw max/min` loop's first load is `_n` too. Left: an `x86_fp80` atomic (the class atomic-generic).
+- **va_arg over ci's va_list** (`va-field`, `va-field-macros`): each GEP into `%struct.__va_list_tag` by indices 0, K is the macro
+  `cx$va_fK(ap, place)`; the lowered C defines them under `#ifndef` as the fields' addresses (gcc), ci's read defines them
+  (`arbace.cpp.run/opts`) as gp_offset 48 and fp_offset 176 (the runtime layer's `cx$va_full`, `arbace/cpp/rt/eh.c.ae`), overflow_arg_area
+  the place of ci's va_list pointer and reg_save_area `cx$va_rs`: clang's inline code takes the overflow path, which reads the argument and
+  advances by its size rounded to 8, as ci's va_arg does over its 8-byte slots. The place is the va_list's storage when the function
+  allocated it, else where the base pointer was loaded from (a `va_list` parameter: ci passes the pointer itself, which clang's -O0 code
+  keeps in the parameter's alloca; the first try faulted at 0x1 in `vsum(int, va_list)`). No change to ci; queue 191's DECISION (a)
+  ("ci's x86-64 va_list with C++'s next round") is met this way. Left: an argument of alignment 16 (long double, `__int128`).
+- **runtime-ci reads only what changed** (`bin/cppi`'s `runtime_ci`): beside its key the library keeps the reader's key
+  (`ci/reader-key`: run.ae's keyed part, repr/c, musl's forms, the host data, the overrides) and each unit's lowered C digest
+  (`ci/units.sha256`); when the runtime changed but the reader did not, only the units whose lowered C changed are read again (read-lib
+  keeps the rest, the index is made again from all): 36 s and 0.8 GB after this branch's lowering changes (1 to 3 units changed), against
+  19 min and 6.4 GB for the whole read. A step towards CP220 (a).
+- **CSP5** (the user, 2026-11-06, doc/CROPS-SCORE.md): `bin/cppi record-ref` writes the checkout as `${root}` (the main checkout's too) and
+  the Alpine builder's tree as `${aports}` in its `:error`s; `test/cpp/ref-gxx15.edn`'s three such lines rewritten (messages, never judged).
+- **The sample** `test/cpp/runtime/samples/deferred.cpp` (long double in a struct, an array, a pair, `std::complex<long double>`,
+  `std::hash<long double>`; float and double atomics; va_arg of ints, doubles, a small and a large struct and a pointer, a va_list
+  parameter, va_copy, a va_list read and then passed to `vsnprintf`), its g++ run in `test/cpp/ref-gxx15.edn`, in the essential subset
+  (`test/cpp/essential-check.txt`), in the lowering's recorded `samples` (17).
+
+### Numbers (this branch, this host)
+
+| run | result | wall | peak RSS |
+|---|---|---|---|
+| `bin/cppi runtime-build` (each lowering change) | 198 of 198 units pass; lowered C changed in `hash_tr1.cc`, `hash_c++0x.cc` (the slot union), `snprintf_lite.cc` (va fields) | 5.5 min | 1.5 GB |
+| `bin/cppi runtime-ci`, whole read (once; CPPI_JOBS=2) | 199 units | 19 min | **6.4 GB** (a slip: over the day's 2 GiB) |
+| `bin/cppi runtime-ci`, incremental (after the next changes) | 1 to 3 units read again | 36 s | 0.8 GB |
+| `bin/cppi run runtime/library.cpp` (ci) | **passes** (status 0, stdout = g++'s digest); was `check-error ... uses-long-double` | 7.5 min | **3.8 GB** (a slip) |
+| `bin/cppi run runtime/deferred.cpp` (ci; the first version, with `<format>`) | fault at 0x1 in `vsum` (the va_list parameter; fixed) | 5.5 min | **2.9 GB** (a slip) |
+| `bin/cppi run runtime/deferred.cpp` (ci; final) | **passes**, stdout = g++'s | 33 s | 1.4 GB |
+| `bin/cppi run` of va.cpp, afloat.cpp, ld.cpp (scratch probes: va_arg, float atomics, long double structs) | each = g++'s output | 26-29 s | 1.4 GB |
+| `bin/cppi lower-corpus samples` | 17 of 17 pass (record updated: 17 files) | 1 min | 0.8 GB |
+| `bin/cppi lower-corpus libstdcxx-every-15th` (gcc judges the lowered C) | 234 of 234 pass, the recorded summary exactly (no regression) | 18 min | 1.6 GB |
+
+The cells (`bin/reap`, from the records; the run records are tonight's, below): eval **70 / 8 / 3 → 72 / 7 / 3 expected** (pass / design /
+deferred: samples and runtime 10 / 1 / 3 → 12 / 0 / 3, `runtime/library.cpp` passing and `runtime/deferred.cpp` new; the gxx-dg-run
+sampling 60 / 7 / 0 unchanged, none of its seven non-passes is the lowering's); AOT the same. In the whole corpora (tonight's and the clean
+run's): about 16 va_arg programs of gxx-dg-run and the long double layouts' check-errors move to pass or to `long-double`'s differ shapes.
+
+### The night (each under the heavy lock; one check process at a time after 19:00, at most 1.5 GiB: so these wait for the night's end)
+
+1. `CPPI_THREADS=2 bin/cppi check --record` (samples, runtime: 15 programs; peaks about 4 GB) and `bin/cppi check --aot --record`:
+   expected 12 pass and threads 3 at each level (`runtime/library.cpp` from long-double to pass, `runtime/deferred.cpp` a new pass).
+   Then `bin/reap --record` (eval and AOT 72 / 7 / 3).
+2. `bin/cppi check --only test/cpp/essential-check.txt` and `--aot`: 6 pass, threads 1 (the essential gate's steps, `deferred.cpp` added).
+3. cppi-check's night list stands (libstdcxx `--sample 25 --record`, gxx-dg-run whole); the va_arg and long double programs among them
+   are where this branch's fixes show at scale.
+
+### Proposed (CP230-CP231; none decided)
+
+- **CP230 Threads.** ci runs no threads (C's §6.5); C++'s threads class (3 recorded, about 9 of gxx-dg-run; libstdcxx's lists leave them
+  out) waits on it, as C's own threads class does. Options: (a) threads in ci's back end (goroutines for `pthread_create`, ci's memory and
+  the atomics macros made real), a C crop item that serves both rows; (b) a cooperative ci thread (the routine run at `pthread_join`): wrong
+  for any program whose threads wait on each other, a class of its own; (c) deferred as now. Costs: (a) days in ci (its nodes, crt's
+  memory, the atomics), with C; (b) a day, and a divergence that hides deadlocks; (c) none. *Recommended: (a), with C's next round; (c)
+  until then.*
+- **CP231 The oracle's text.** `__PRETTY_FUNCTION__` and `__FUNCTION__`'s decorations are clang's in the IR (16 gxx-dg-run files use them,
+  1 recorded non-pass). Options: (a) the class `oracle-text` as now (design, CP2, CP11); (b) the lowering rewrites the strings to g++'s
+  spelling from repr/cpp's read of the program (the template's own parameters, which clang's string has substituted): the read's AST
+  joined to the IR by the function's mangled name. Costs: (a) none; (b) days, and g++'s rules for the spelling to port, for a handful of
+  tests. *Recommended: (a).*
+
+### Left
+
+- The run records and the cells' numbers are tonight's (above); by day only single programs ran, and three of them were over the
+  2 GiB rule (the slips in the table).
+- An argument of alignment 16 read by va_arg, an `x86_fp80` atomic, a computation in long double: their classes stay.
+- llvm-ll6 (the LLVM crop) lowers through the same `arbace.cpp.lower`: its long double structs, float atomics and va_arg modules gain the same,
+  at its next merge (its `:va-arg` class names the instruction, which clang's -O0 code does not write; not this).
+
+### Slips, scratch
+
+- A first `lower-corpus libstdcxx-every-15th` ran on a testsuite tree copied from cppi-check's kept scratch, which lacked
+  `20_util/to_chars/double.cc` (4.6 MB): the list shifted (200 recorded names missing) and two programs outside the recorded list
+  failed, `27_io/basic_istream/get/char/lwg3464.cc` (both builds crash, 139) and `28_regex/algorithms/regex_match/ecma/wchar_t/63199.cc`
+  (the lowered run 134, the original 0). The file extracted from the tarball, the rerun is the record's list (234 of 234). 63199.cc is
+  left unexplained here (this branch's change or not): a name for the night's libstdcxx runs.
+- Over the day's 2 GiB: the whole runtime-ci read (6.4 GB, CPPI_JOBS=2) and two ci runs (3.8 and 2.9 GB, the ones with `<format>`).
+- Scratch in the worktree's `.tmp/`: `ld/` (the probes, the lowered C before and after, `incr.sh`, the incremental read made by hand
+  before `runtime_ci` did it), `cppi/runtime/` (the lowered runtime and its ci library), `lower-samples/`, `lower-ls15/`, `run-*.{out,err}`.
