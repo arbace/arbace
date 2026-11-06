@@ -1424,7 +1424,7 @@ The user's decision: `:gcc` stays on `cpp-lower*` now, the gcc half goes to the 
   (a refusal outside the classes, a C level that did not run) that must fail.
 - The runtime: `runtime_key`'s gcc line only in gcc's mode; a build writes `key.records` (and, with gcc, `key`); records mode checks
   `key.records` and needs no archive, so a runtime the oracle tier built serves the gate; `runtime-ci` keys ci's library on `key.records`.
-- The gate's `cpp-lower-essential` and `cpp-lower` run `env CPPI_GCC=1 bin/cppi ...` and keep `:gcc` (the user's "now"; the brief of this branch named the decision "(b)", the decision's text conditions (b) on the coverage below, which wins).
+- (Superseded by ORS28 (b), below.) The gate's `cpp-lower-essential` and `cpp-lower` ran `env CPPI_GCC=1 bin/cppi ...` and kept `:gcc` (the user's "now"; the brief of this branch named the decision "(b)", the decision's text conditions (b) on the coverage below, which wins).
 - The condition is not met: `cpp-check-essential` runs `samples/bitfields.cpp`, `samples/coroutine.cpp`, `samples/vexing.cpp`,
   `runtime/uncaught.cpp`, `runtime/ctor-throw.cpp`, `runtime/thread-throw.cpp`; `essential-lower.txt` adds `samples/io.cpp`,
   `runtime/hello.cpp` and `runtime/library.cpp`, whose ci builds took 204, 304 and 242 s in the last recorded run
@@ -1469,3 +1469,17 @@ Measured with `clang`, `clang++`, `g++`, `gcc`, `cc`, `c++`, `opt`, `llvm-as`, `
   - Costs: (a) the essential gate about 4 to 5 more minutes of ci builds (2 jobs), against GT8's 900 s; (b) 2 to 3 minutes, `hello.cpp`'s and
     `library.cpp`'s lowered runs only nightly (`cpp-check`) and in the oracle tier; (c) `:gcc` in the gate, nothing else.
   - *Recommended: (b)*: `io.cpp` is the essential gate's <iostream> run, `hello.cpp` and `library.cpp` the nightly's.
+
+## Decided (2026-11-06, the user: ORS28)
+
+ORS28 (b): `samples/io.cpp` joins `test/cpp/essential-check.txt` (so `cpp-check-essential` and `cpp-aot-essential` run it on ci and compiled);
+`runtime/hello.cpp` and `runtime/library.cpp` are checked nightly (`cpp-check`'s samples-runtime part) and in the oracle tier (`cpp-lower-oracle`,
+gcc's lowered run); gcc leaves the gate's `cpp-lower-essential` and `cpp-lower` (no `CPPI_GCC=1`, no `:gcc`): from the records they stop at the
+lowered C, read by repr/c and checked by ci's checker. `CPPI_GCC=1` stays for a run by hand; the oracle tier's `CPPI_LIVE=1` implies it.
+
+Checked (2026-11-06): `bin/gate --full --plan` in the scratch overlay, then again with `gcc`, `g++`, `clang`, `clang++`, `opt`, `llvm-as` and
+`lli` printing a fake 9.99.9 first on `PATH`: all 15 C++ and LLVM steps and parts keep their keys (none names `:cxx`, `:gcc` or `:llvm`).
+A light run of `bin/cppi check --only` io.cpp (1 job, 1 thread, `GOMEMLIMIT=1500MiB`) passed 2 GiB in its ci build and was stopped,
+as the day's rule asks: **the night's**, `env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=4GiB bin/cppi check --only test/cpp/essential-check.txt` and
+`--aot` (the gate's `cpp-check-essential` and `cpp-aot-essential`), to measure io.cpp's cost in the essential gate (its last recorded ci build
+204 s) and confirm its pass.
