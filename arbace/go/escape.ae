@@ -35,8 +35,16 @@
   "A volatile vector of the messages: [line text]."
   nil)
 
+(def ^:dynamic *wfile*
+  "The file of the function a message is of."
+  nil)
+
 (defn- warn! [line msg]
-  (vswap! *msgs* conj [(or line 0) msg]))
+  (vswap! *msgs* conj [*wfile* (or line 0) msg]))
+
+(defn- file-of [d]
+  (let [f (:file d)]
+    (cond (string? f) f (map? f) (:name f) :else nil)))
 
 (defn- unsupported! [what]
   (throw (ex-info (str "not supported by goi yet: escape analysis of " what) {:goi/unsupported (str "escape analysis of " what)})))
@@ -285,7 +293,15 @@
 
 ;;; Functions
 
-(defn- fn-of-obj [o] (when o (.get ^java.util.HashMap (:fn-of-obj *ctx*) o)))
+(declare foreign-fn)
+
+(defn- fn-of-obj [o]
+  (when o
+    (or (.get ^java.util.HashMap (:fn-of-obj *ctx*) o)
+        (when (and (e/obj? o) (= :func (e/o o :kind)) (e/o o :pkg) (not= (e/o o :pkg) (:local-pkg *ctx*)))
+          (let [f (foreign-fn o)]
+            (.put ^java.util.HashMap (:fn-of-obj *ctx*) o f)
+            f)))))
 (defn- fn-of-node [n] (.get ^java.util.IdentityHashMap (:fn-of-node *ctx*) n))
 
 (defn- contains-closure?
@@ -909,7 +925,7 @@
                              (assoc-in c [:callee ::recv-node] ln)
                              (assoc-in c path ln))))
                        c (map vector tmps visits))
-            wf (volatile! {:node ::wrapper :parent f :closure? (boolean (seq tmps)) :wrapper true :params [] :results [] :recv nil
+            wf (volatile! {:node ::wrapper :parent f :file (fn-get f :file) :closure? (boolean (seq tmps)) :wrapper true :params [] :results [] :recv nil
                            :param-types [] :sig [:func [] [] false] :esc :planned :closure-vars tmps
                            :line (:line n) :body [{:op :expr :x c2 :line (:line n)}]})
             clo {:op :fn :wrapper true :line (:line n) :type [:func [] [] false]}]
@@ -1302,10 +1318,11 @@
     @st))
 
 (defn walk-func! [b f]
+  (binding [*wfile* (fn-get f :file)]
   (let [e (with-fn b f)]
     (fn-set! f :esc :started)
     (vswap! e assoc :labels (label-states (fn-get f :body)))
-    (stmts e (fn-get f :body))))
+    (stmts e (fn-get f :body)))))
 
 (defn- flow-closure
   "batch.flowClosure: closure clo's captured variables flow into its record, by value (<= 128
@@ -1450,17 +1467,17 @@
     (cond
       (fn-get f :extern)
       (cond
-        (t/uintptr? ty) (do (when diagnose (warn! (e/o o :line) (str "assuming " nm " is unsafe uintptr"))) nil)
+        (t/uintptr? ty) (do (when diagnose (warn! (some-> o (e/o :line)) (str "assuming " nm " is unsafe uintptr"))) nil)
         (not (has-pointers? ty)) nil
-        (fn-get f :noescape) (do (when (and diagnose nm) (warn! (e/o o :line) (str nm " does not escape")))
+        (fn-get f :noescape) (do (when (and diagnose nm) (warn! (some-> o (e/o :line)) (str nm " does not escape")))
                                  (-> no-leaks (leak-add 1 0) (leak-add 2 0)))
-        :else (do (when (and diagnose nm) (warn! (e/o o :line) (str "leaking param: " nm)))
+        :else (do (when (and diagnose nm) (warn! (some-> o (e/o :line)) (str "leaking param: " nm)))
                   (assoc no-leaks 0 1)))
       (and (fn-get f :uintptrescapes) (t/uintptr? ty))
-      (do (when diagnose (warn! (e/o o :line) (str "marking " nm " as escaping uintptr"))) nil)
+      (do (when diagnose (warn! (some-> o (e/o :line)) (str "marking " nm " as escaping uintptr"))) nil)
       (and (fn-get f :uintptrescapes) (= o (last (fn-get f :params))) (nth (under (fn-get f :sig)) 3 false)
            (t/uintptr? (elem ty)))
-      (do (when diagnose (warn! (e/o o :line) (str "marking " nm " as escaping ...uintptr"))) nil)
+      (do (when diagnose (warn! (some-> o (e/o :line)) (str "marking " nm " as escaping ...uintptr"))) nil)
       (not (has-pointers? ty)) nil
       (or (nil? o) (= "_" nm)) no-leaks
       :else
@@ -1472,6 +1489,7 @@
 
 (defn- finish! [b fns]
   (doseq [f fns]
+   (binding [*wfile* (fn-get f :file)]
     (fn-set! f :esc :tagged)
     (let [sig (under (fn-get f :sig))
           tags (cond-> {}
@@ -1480,10 +1498,11 @@
                        tags (map vector (range) (concat (fn-get f :params) (repeat nil)) (nth sig 1)))]
       (fn-set! f :tags tags)
       (when (System/getenv "GOI_ESCAPE_TRACE")
-        (binding [*out* *err*] (println "escape: tags" (fn-get f :name) tags)))))
+        (binding [*out* *err*] (println "escape: tags" (fn-get f :name) tags))))))
   (doseq [l @(:all-locs b)]
     (let [n (lget l :n)]
       (when n
+       (binding [*wfile* (fn-get (lget l :curfn) :file)]
         (let [wrapper (and (map? n) (= :fn (:op n)) (:wrapper n))]
           (if (has-attr? l attr-escapes)
             (if (name-loc? l)
@@ -1492,7 +1511,7 @@
               (when (and (pos? (long *m*)) (not wrapper))
                 (warn! (lget l :line) (if (:append n) "append escapes to heap" (str (fmt-node n 0) " escapes to heap")))))
             (when (and (pos? (long *m*)) (not (name-loc? l)) (not wrapper))
-              (warn! (lget l :line) (if (:append n) "append does not escape" (str (fmt-node n 0) " does not escape")))))))))
+              (warn! (lget l :line) (if (:append n) "append does not escape" (str (fmt-node n 0) " does not escape"))))))))))
   nil)
 
 (defn- literal-of
@@ -1660,17 +1679,22 @@
   "A function's tree with its devirtualizable interface calls made method calls (StaticCall),
   each reported: devirtualizing x.M to T (partially, when T's method is an embedded interface's)."
   [tree]
-  (let [asg (iface-assignments tree)]
+  (let [asg (iface-assignments tree)
+        memo (java.util.IdentityHashMap.)]
     (binding [t/*method-obj* method-obj-data]
       (letfn [(dv [x godefer]
                 (cond
+                  (and (map? x) (.containsKey memo x)) (.get memo x)
                   (map? x)
-                  (let [x (if (contains? #{:go :defer} (:op x))
+                  (let [x0 x
+                        x (if (contains? #{:go :defer} (:op x))
                             (assoc x :call (dv-call (:call x) true))
                             (into (empty x) (map (fn [[k v]] [k (dv v false)])) x))]
-                    (if (and (= :call (:op x)) (= :iface (:kind x)) (not godefer))
-                      (dv-call x false)
-                      x))
+                    (let [r (if (and (= :call (:op x)) (= :iface (:kind x)) (not godefer))
+                              (dv-call x false)
+                              x)]
+                      (.put memo x0 r)
+                      r))
                   (vector? x) (if (and (seq x) (map? (first x))) (mapv #(dv % false) x) x)
                   :else x))
               (dv-call [c godefer]
@@ -1735,7 +1759,7 @@
               (cond
                 (map? x)
                 (case (:op x)
-                  :fn (let [c (volatile! {:node x :parent f :closure? true :name (str (fn-get f :name) ".func" (inc (count @kids)))
+                  :fn (let [c (volatile! {:node x :parent f :closure? true :file (fn-get f :file) :name (str (fn-get f :name) ".func" (inc (count @kids)))
                                           :params (vec (:params x)) :param-types (vec (nth (under (:sig x)) 1))
                                           :results (vec (map-indexed (fn [i r] (or (:obj r) (when (e/obj? r) r)
                                                                                    (e/obj {:kind :var :name (str "~r" i) :line (:line x) :type (:type r)})))
@@ -1829,7 +1853,7 @@
                                 (sequential? x) (doseq [v x] (walk v))
                                 :else nil))]
                       (walk (fn-get f :body)))
-                    @acc))]
+                    (remove #(fn-get % :foreign) @acc)))]
     (letfn [(visit [f]
               (if-let [id (.get ids f)]
                 (long id)
@@ -1852,13 +1876,147 @@
       (doseq [f fns :when (not (fn-get f :closure?))] (visit f)))
     @out))
 
+(defn- method-base
+  "A method object's receiver base type name."
+  [o]
+  (let [d (e/o o :decl)
+        b (when (instance? arbace.lang.Volatile d) (:base @d))]
+    (cond (string? b) b
+          (symbol? b) (name b)
+          (e/obj? b) (e/o b :name)
+          :else (str b))))
+
+(defn- fn-name
+  "ir.FuncName: a function's name, a method's (T).m or (*T).m."
+  [d o]
+  (if (:method d)
+    (let [tn (method-base o)]
+      (if (e/o o :ptr-recv) (str "(*" tn ")." (e/o o :name)) (str tn "." (e/o o :name))))
+    (e/o o :name)))
+
+(defn- base-type
+  "The type named n in checked package r's scope."
+  [r n]
+  (let [sc (:scope r)
+        x (when sc (e/scope-get sc (str n)))]
+    (when x (e/o x :type))))
+
+(def ^:dynamic *import-root*
+  "The forms root other packages' forms are read from for their parameter tags (gc reads them
+  from their export data, written when it compiled them): repr/go's forms of the standard
+  library for the configuration (bin/goi: the corpus linux-amd64), or nil: a call of another
+  package's function is a call of an unknown function."
+  nil)
+
+(def ^:dynamic *tag-cache*
+  "A directory the packages' tags are kept in between runs ({name tags} per package, keyed by
+  the package's forms and this namespace's source), or nil."
+  nil)
+
+(def ^:private tag-version
+  "The version of the tags' analysis, in the cache's keys: changed with the analysis."
+  "escape-1")
+
+(def ^:private pkg-tags
+  "The other packages' tags analyzed in this process: path -> {function name -> its record}."
+  (atom {}))
+
+(declare analyze-package)
+
+(def ^:private std-sess (atom nil))
+
+(defn std-result
+  "The checked result of standard package path, with its trees, from *import-root*'s forms (a
+  session of the process: each package checked once)."
+  [path]
+  (let [session (requiring-resolve 'arbace.go.check/session)
+        ensure (requiring-resolve 'arbace.go.check/ensure-package)
+        package-source (requiring-resolve 'arbace.go.check.load/package-source)
+        config (let [c @(requiring-resolve 'arbace.go.repl/config)] (if (delay? c) @c c))
+        root *import-root*
+        s (or @std-sess
+              (reset! std-sess (assoc (session (fn [p _] (package-source {:dir root} p config)))
+                                      :keep-trees (constantly true))))
+        pkg (ensure s path nil [])]
+    (if pkg (e/o pkg :result) {:errors [{:msg "no package"}]})))
+
+(defn- forms-digest [^java.io.File dir ^java.io.File pf]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")
+        files (sort-by #(.getPath ^java.io.File %)
+                       (cons pf (when (.isDirectory dir)
+                                  (filter #(.isFile ^java.io.File %) (.listFiles dir)))))]
+    (doseq [^java.io.File f files] (.update md (java.nio.file.Files/readAllBytes (.toPath f))))
+    (.update md (.getBytes ^String tag-version "UTF-8"))
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (take 16 (.digest md))))))
+
+(defn- load-package-tags
+  "Package path's functions' tags, from its forms under *import-root*: {name {:tags :sig ...}},
+  or {} when its forms are missing or goi's checker does not check them."
+  [path]
+  (let [root *import-root*
+        rel (str "go/" path)
+        pf (java.io.File. (str root "/" rel ".ae"))
+        dir (java.io.File. (str root "/" rel))]
+    (if-not (.isFile pf)
+      {}
+      (let [key (when *tag-cache* (forms-digest dir pf))
+            cf (when key (java.io.File. (str *tag-cache* "/" (str/replace path "/" "%") "-" key ".edn")))]
+        (if (and cf (.isFile cf))
+          (read-string (slurp cf))
+          (let [r (try
+                    (let [r (std-result path)]
+                      (if (seq (:errors r))
+                        (do (when (System/getenv "GOI_ESCAPE_TRACE")
+                              (binding [*out* *err*] (println "escape: package" path "not analyzed:" (first (:errors r)))))
+                            {})
+                        (binding [*msgs* (volatile! [])]
+                          (into {} (for [f (analyze-package r)
+                                         :when (not (fn-get f :closure?))
+                                         :when (fn-get f :obj)]
+                                     [(fn-get f :name) {:tags (fn-get f :tags) :nparams (count (fn-get f :param-types))
+                                                        :recv-type (boolean (fn-get f :recv-type)) :name (fn-get f :name)
+                                                        :pragmas (vec (fn-get f :uintptr-pragmas))}])))))
+                    (catch Throwable ex
+                      (when (System/getenv "GOI_ESCAPE_TRACE")
+                        (binding [*out* *err*] (println "escape: package" path "not analyzed:" (.getMessage ex))
+                          (when (= path (System/getenv "GOI_ESCAPE_TRACE")) (.printStackTrace ex))))
+                      {}))]
+            (when cf
+              (.mkdirs (.getParentFile cf))
+              (spit cf (pr-str r)))
+            r))))))
+
+(defn- foreign-fn
+  "The record of another package's function or method o (its tags), or nil."
+  [o]
+  (when *import-root*
+    (let [path (e/o o :pkg)
+          tags (or (get @pkg-tags path)
+                   (let [t (binding [*ctx* nil] (load-package-tags path))]
+                     (swap! pkg-tags assoc path t)
+                     t))
+          nm (if (e/o o :method)
+               (let [tn (method-base o)]
+                 (if (e/o o :ptr-recv) (str "(*" tn ")." (e/o o :name)) (str tn "." (e/o o :name))))
+               (e/o o :name))]
+      (when-let [m (get tags nm)]
+        (volatile! (assoc m :esc :tagged :foreign true :params [] :sig nil
+                          :param-types (vec (repeat (:nparams m) nil)) :uintptr-pragmas (set (:pragmas m))))))))
+
 (defn analyze
   "gc's escape analysis of a checked package (check-package's result r, with its trees): the
-  -m lines, [line message] sorted by line. m: gc's -m level."
+  -m lines, [file line message] sorted. m: gc's -m level."
   [r m]
   (binding [*m* m
-            *msgs* (volatile! [])
-            *ctx* {:local-pkg (:path r)
+            *msgs* (volatile! [])]
+    (analyze-package r)
+    (vec (sort-by (juxt first second) (distinct @*msgs*)))))
+
+(defn analyze-package
+  "The escape analysis of checked package r: its functions' records, their tags; the messages
+  in *msgs*."
+  [r]
+  (binding [*ctx* {:local-pkg (:path r)
                    :fn-of-obj (java.util.HashMap.)
                    :fn-of-node (java.util.IdentityHashMap.)
                    :loc-of (java.util.HashMap.)
@@ -1866,8 +2024,9 @@
                    :single-def (java.util.HashMap.)
                    :func-assigns (java.util.HashMap.)
                    :temps (java.util.IdentityHashMap.)}]
+
     (let [decls (filter #(and (= :func (:kind %)) (:obj %)) (:decl-infos r))
-          decls (mapv (fn [d] (if (:tree d) (update d :tree devirtualize) d)) decls)
+          decls (mapv (fn [d] (if (:tree d) (binding [*wfile* (file-of d)] (update d :tree devirtualize)) d)) decls)
           fns (vec (for [d decls
                          :let [tree (:tree d)
                                o (:obj d)
@@ -1879,10 +2038,10 @@
                          :when (and sig (not (:generic d)))]
                      (let [recv (:recv tree)
                            rtys (nth (under sig) 2)
-                           f (volatile! {:node tree :obj o :name (e/o o :name) :parent nil :closure? false
+                           f (volatile! {:node tree :obj o :name (fn-name d o) :parent nil :closure? false :file (file-of d)
                                          :recv recv :recv-type (or (when recv (e/o recv :type))
                                                          (when (:method d)
-                                                           (let [rn (e/o o :recv-named)]
+                                                           (let [rn (base-type r (:base d))]
                                                              (if (e/o o :ptr-recv) [:pointer rn] rn))))
                                          :params (vec (:params tree)) :param-types (vec (nth (under sig) 1))
                                          :results (vec (map-indexed (fn [i r] (or (:obj r) (when (e/obj? r) r)
@@ -1904,6 +2063,7 @@
       (doseq [f fns :when (fn-get f :extern)]
         ;; an external function's tags (paramTag's len(fn.Body) == 0): no batch
         (fn-set! f :esc :tagged)
+        (binding [*wfile* (fn-get f :file)]
         (let [sig (under (fn-get f :sig))
               params (let [form (:form (some #(when (identical? (:obj %) (fn-get f :obj)) %) decls))]
                        (vec (for [[i p] (map-indexed vector (when (seq? form) (some #(when (vector? %) %) form)))]
@@ -1911,7 +2071,7 @@
                                     nm (when (and (symbol? s) (not (seq? s))) (name s))]
                                 (when (and nm (instance? arbace.lang.IMeta s) (:tag (meta s)))
                                   (e/obj {:kind :var :name nm :line (or (:line (meta s)) (fn-get f :line))}))))))]
-          (fn-set! f :tags (into {} (map-indexed (fn [i ty] [i (param-tag nil f (nth params i nil) ty)]) (nth sig 1))))))
+          (fn-set! f :tags (into {} (map-indexed (fn [i ty] [i (param-tag nil f (nth params i nil) ty)]) (nth sig 1)))))))
       (doseq [blk (bottom-up (vec (remove #(fn-get % :extern) fns)))]
-        (batch! blk)))
-    (vec (sort-by first (distinct @*msgs*)))))
+        (batch! blk))
+      (vec (mapcat all-fns fns)))))
