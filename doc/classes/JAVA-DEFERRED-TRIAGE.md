@@ -927,7 +927,7 @@ counts, monitors and synchronizers owned, deadlocks, CPU times, GC and pool stat
 put JMX by design; F13 needs a line between them (JCS161) and jrt's own runtime facts (its monitors and locks
 record no owner chains, its threads no CPU time): days of Go beside the Java, which a light day cannot prove.
 
-## As built: F13 (write-ahead, in progress)
+## As built: F13 (write-ahead)
 
 Branch `java-jc9c`, 2026-11-06, after JCS161 (a). java.lang.management without JMX, jrt's natives in Go.
 
@@ -963,17 +963,29 @@ MBean server's interfaces and the open types: `.tmp/jc9c/outjmx.json`), which JC
    and blocked and waited counts and times (contention monitoring);
 3. *(built: `a52ff720b`, TestDeadlocks)* the cycles of waits for `findMonitorDeadlockedThreads` and, with jrt's
    ReentrantLock's and a translated AbstractOwnableSynchronizer's owner (LockSupport's blocker, through its
-   `getExclusiveOwnerThread`), `findDeadlockedThreads`; *(next, 3b)* the monitors and synchronizers a thread
-   holds (ThreadInfo's locked monitors and synchronizers; then `isObjectMonitorUsageSupported` and
-   `isSynchronizerUsageSupported` true, and `findDeadlockedThreads` reachable: jdk26u's ThreadImpl throws
-   before it while the support is false);
-4. stack traces of other threads: a goroutine's stack is not readable from another (Go has no such API but the
-   whole-program `runtime.Stack` text): each jrt thread publishes its Java frames when asked, at its next
-   safepoint-like poll (the evaluator's ticks, a monitor's wait), or ThreadInfo of another thread has an empty
-   stack (`getThreadInfo(id, 0)`'s shape) — to be decided on its slice;
-5. com.sun.management's: allocated bytes (Go's `runtime/metrics` per process, not per goroutine: unsupported per
-   thread), OperatingSystemMXBean's memory sizes from `/proc/meminfo` (jdk.management's `OperatingSystemImpl`
-   reads them through its natives the same way).
+   `getExclusiveOwnerThread`), `findDeadlockedThreads`; 3b *(built: `8d859bf1c`, TestLockedMonitorsAndSynchronizers)*
+   the monitors and synchronizers a thread holds: once a ThreadMXBean is made (`HostManagement.trackLocks0`), every
+   monitor entry and exit and every jrt ReentrantLock's acquisition and release is recorded per thread (one atomic
+   load on those paths before); ThreadInfo's locked monitors (latest first, each once, not the one waited on) and
+   synchronizers (jrt's ReentrantLocks; the JDK lists their AQS sync objects, which jrt's lock has not); object
+   monitor and synchronizer usage supported, so `findDeadlockedThreads` is reached; a monitor locked before the
+   bean existed stays unlisted;
+4. *(built: `d7ef6b827`, TestOtherThreadsStacks)* other threads' stacks: once tracked, a thread records its Java
+   frames when it begins to wait, and the frame count at each monitor entry; ThreadInfo's stack is the current
+   thread's own, a waiting thread's as it began to wait (Thread.sleep, Object.wait, the lock's wait on top, as
+   jrt's frames name them), none for a running thread (a goroutine's stack cannot be read from another: such a
+   ThreadInfo has an empty stack, `getThreadInfo(id, 0)`'s shape); the locked monitors' frames from the counts.
+   While a ThreadMXBean exists each wait and monitor entry costs a stack walk; nothing before;
+5. *(built: `9642751d4`, TestOperatingSystemFacts)* the operating system's bean: jdk.management's unix
+   `OperatingSystemImpl` (overlay: its natives over jrt's `management_linux.ae`, which reads what
+   libmanagement_ext reads on Linux: sysinfo, /proc/self/stat, the process's CPU time, /proc/self/fd and
+   RLIMIT_NOFILE, sysfs's CPUs, /proc/stat's ticks for the loads, /proc/loadavg; no cgroup metrics,
+   `jdk.internal.platform` being outside: the host's facts, as the JDK's without container limits; the box
+   answers -1), made for ManagementFactory's table by `JrtPlatformBeans`; `BaseOperatingSystemImpl`'s load average.
+
+Left for later slices: the memory, class-loading, compilation, collector and pool beans (Go's `runtime/metrics`
+for the heap and the collector), the other threads' CPU time (per goroutine: none in Go), the allocated bytes
+(per process only), `-XX` VM arguments (none), logging's and buffer pools' beans.
 
 **The Java side** (`22919f139`): `management-sources`, 26 files of java.management and jdk.management (the MXBean
 interfaces, `ThreadImpl`, `RuntimeImpl`, `VMManagement`, `Util`, the counters' interface, JMX's three exceptions
@@ -993,9 +1005,11 @@ InvalidThreadID), RuntimeMXBean's (ProcessIdTest, UpTime, GetSystemProperties) w
 deadlock and locks tests (FindDeadlocks, FindMonitorDeadlock, LockedMonitors, LockedSynchronizers,
 SharedSynchronizer, SynchronizationStatistics, ThreadBlockedCount, MaxDepthForThreadInfoTest) with slices 2-4,
 about 8 more; OperatingSystemMXBean's 4 with slice 5; GetObjectName, ThreadStartTest (javax.management) and the
-VM-option tests (InputArgument's `-XX`) by design or the harness's. With slices 1-3 as built: about 12 (the counts,
-RuntimeMXBean's, InvalidThreadID, FindMonitorDeadlock; ThreadBlockedCount and SynchronizationStatistics if their
-stack-trace checks are of the current thread). The change of `Thread.getState` (BLOCKED, WAITING, TIMED_WAITING
+VM-option tests (InputArgument's `-XX`) by design or the harness's. With slices 1-5 as built: about 18 of the 31 (the
+counts and ids, RuntimeMXBean's, InvalidThreadID, the deadlock tests, the locked monitors and synchronizers where
+their frames are of waiting threads, ThreadBlockedCount and SynchronizationStatistics, three of the four
+OperatingSystemMXBean tests; MemoryStatusOverflow, ThreadAllocatedMemoryArray, LastGCInfo, ThresholdTest,
+GetObjectName, ThreadStartTest and the CPU-time ones stay). The change of `Thread.getState` (BLOCKED, WAITING, TIMED_WAITING
 where jrt said RUNNABLE) reaches the whole corpus: the night's run shows what it gains and whether it costs.
 
 **The night's commands** (F13's part, after F12's conversion and build of the same night: one `bin/jrt-convert
