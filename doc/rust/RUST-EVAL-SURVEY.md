@@ -1048,8 +1048,8 @@ env, ci-param-width, c-variadic, lto). Over the whole suite the causes size so (
   C's essential check (`bin/ci check --only test/c/essential-check.txt`): no regression, and two recorded failures now pass
   (`benchmarksgame/binary-trees-5.c`, C's one `threads` program; `gcc.dg/c23-complit-2.c`): to re-record by C's crop.
 - **Rust on ci**: a `thread::spawn` and `join` program runs as rustc's (55 s, 1.2 GB). **Samples and synthetic corpus**: 69 of 73
-  run, **67 pass**; the 2 that did not (`float-f32.rs`: `__builtin_logf` undefined; `trap.rs`: status rustc's, stderr ci's fault
-  line) are fixed since (the math ports; the fault line out of the compared stderr), not run again; not measured, over the day's
+  run, **69 pass** (two after fixes: `float-f32.rs` met `__builtin_logf` undefined, the math ports; `trap.rs`'s status was
+  rustc's, its stderr ci's fault line, now out of the compared stderr; both rerun and passing); not measured, over the day's
   memory line in one process: `threads.rs` (2.4 GB), `collections.rs`, `drops.rs`, `errors.rs` (a batch of three past 2.3 GB).
 - **UI sample (RE4's every 40th, 93 programs)**: 60 run so far, **58 pass**, `c-variadic/valid.rs` refused (class c-variadic) and
   `macros/stringify.rs` (a `--test` harness) ended in `deadlock: every thread waits`: fixed after (thread-local objects at a
