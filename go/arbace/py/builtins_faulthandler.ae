@@ -1,0 +1,748 @@
+
+
+(in-ns 'go.arbace.py) ^{:go/comments [[1 1 "//go:build linux"] [17 1 "// The module faulthandler (queue 220; Modules/faulthandler.c and Python/traceback.c's dump functions of CPython 3.14.10,"] [18 1 "// PSF License Agreement): the Python traceback of every thread written to a descriptor, on a fatal signal (enable), after"] [19 1 "// a timeout (dump_traceback_later), on a user signal (register) or when asked (dump_traceback)."] [20 1 "//"] [21 1 "// The threads are pyi's (allThreads, builtins_thread.go): the main thread and each started one, newest first as"] [22 1 "// CPython's interpreter lists its thread states; a thread's frames its Frame chain, read without its lock (a pointer and"] [23 1 "// an instruction index read whole) as CPython reads another thread's frames from a signal handler. A fatal signal another"] [24 1 "// process sends arrives through os/signal on fatalCh; one pyi raises itself (_sigsegv, _sigabrt, os.kill of its own pid,"] [25 1 "// signal.raise_signal: ownSignalHook) runs the handler in the raising thread first, as the kernel runs a synchronous"] [26 1 "// signal's handler. Then the process dies by the signal, its action set to SIG_DFL by rt_sigaction (fhDie: Go's own"] [27 1 "// handler would print a Go traceback). A thread's ident stands for its pthread id; musl has no backtrace(), so the C"] [28 1 "// stack is \"<cannot get C stack on this system>\" as CPython's on Alpine; no \"Extension modules:\" line (pyi has none)."] [36 1 "// fhFatalSignals are faulthandler_handlers: the fatal signals and their names, in CPython's order."] [42 1 "// fhFatal is fatal_error: enable()'s state."] [46 20 "// kept alive while enabled"] [51 1 "// fhUser is user_signals: register()'s state per signal."] [61 24 "// the state read by the signal goroutines"] [67 24 "// faulthandler_dump_traceback's reentrant guard: one dump at a time"] [70 1 "// fhLater is dump_traceback_later's watchdog: cancel closed to stop it, done closed when it has stopped."] [87 1 "// fhWrite is _Py_write_noraise: all of s written to fd, EINTR retried, errors ignored."] [102 1 "// fhHex is _Py_DumpHexadecimal: width lowercase hexadecimal digits."] [111 1 "// fhASCII is _Py_DumpASCII: printable ASCII as is, the rest as \\xHH, \\uHHHH or \\UHHHHHHHH, past 500 characters \"...\"."] [133 1 "// fhFrame is dump_frame: `  File \"f\", line N in name`."] [149 1 "// fhTraceback is dump_traceback: t's frames, most recent first, at most MAX_FRAME_DEPTH."] [163 18 "// read first, as CPython reads frame->previous early"] [175 1 "// fhThreads is _Py_DumpTracebackThreads: each thread's header (cur's \"Current thread\") and frames, newest first."] [196 1 "// fhDumpTo is faulthandler_dump_traceback: all threads, or cur's alone with the \"Stack\" header."] [213 1 "// fhFatalError is faulthandler_fatal_error: the header, the traceback, the C stack; the caller dies by the signal."] [238 1 "// sigactionT is the kernel's struct sigaction (handler, flags, restorer, mask) as rt_sigaction takes it."] [243 1 "// fhDie ends the process by sig: its action SIG_DFL (rt_sigaction), sig unblocked in the emulated mask, raised; if"] [244 1 "// it does not kill (a stopping or ignored signal), the exit status 128+sig after a moment."] [247 27 "// stdout's buffer is lost, as CPython's block-buffered stdout is"] [257 1 "// fhTerminates are the signals whose default action ends the process (signal(7)), SIGKILL and SIGSTOP apart."] [266 1 "// fhOwnSignal is ownSignalHook: a signal pyi sends itself (os.kill of its own pid, signal.raise_signal), handled in the"] [267 1 "// sending thread before the call returns as the kernel runs the handler of a signal a thread raises: faulthandler's"] [268 1 "// fatal handler (then death by it), its user handler (then, chained, the Python handler or the default action), or the"] [269 1 "// default action that ends the process when the signal's Python disposition is SIG_DFL (Go's runtime would ignore"] [270 1 "// SIGUSR1 and print its own traceback for SIGABRT)."] [300 1 "// fhStart starts the goroutines of the fatal and user signals once."] [330 1 "// fhGetFileno is faulthandler_get_fileno: None or absent sys.stderr, an int a descriptor, else file.fileno() (the file"] [331 1 "// flushed); the file kept while it is used (nil for a descriptor)."] [376 28 "// a flush error ignored"] [380 1 "// fhIntArg is the 'i' format: PyLong_AsInt."] [388 1 "// fhBoolArg is the 'p' format: PyObject_IsTrue; absent the default."] [396 1 "// fhTimeoutHeader is format_timeout."] [421 1 "// fhTimeoutUs is _PyTime_FromSecondsObject then _PyTime_AsMicroseconds, both _PyTime_ROUND_TIMEOUT (up)."] [452 1 "// fhCancelLater is cancel_dump_traceback_later: the watchdog stopped and waited for."] [599 29 "// the watchdog has no Python thread: no \"Current thread\""] [651 53 "// sigaction refuses SIGKILL and SIGSTOP"] [681 45 "// the Python handler's notification, which Reset removed"] [705 78 "// the overflow's SIGSEGV on the alternate stack"] [707 3 "// Py_FatalError in a thread without a Python thread state: the message, the threads (none current), the C"] [708 3 "// stack, then abort() with faulthandler finalized (no second traceback)"] [732 1 "// faulthandlerAtStart is _PyFaulthandler_Init(enable): -X faulthandler or PYTHONFAULTHANDLER set and not empty"] [733 1 "// import faulthandler and call its enable()."]] :go/pos {:name [3 9] :package [3 1]} :go/semis [[139 19] [159 16] [159 18] [169 14] [246 25] [294 35] [307 35] [335 72] [344 32] [345 31] [346 84] [368 22] [369 26] [382 25] [423 22] [432 28] [561 35] [566 33]]} (go/file "builtins_faulthandler.go" :build ["//go:build linux"] :imports [
+
+
+    ^{:go/apos {1 [6 2]} :go/pos {:lparen [5 8] :rparen [15 1] :tok-pos [5 1]}} [math "math"]
+    ^{:go/apos {1 [7 2]}} [os "os"]
+    ^{:go/apos {1 [8 2]}} [signal "os/signal"]
+    ^{:go/apos {1 [9 2]}} [reflect "reflect"]
+    ^{:go/apos {1 [10 2]}} [strconv "strconv"]
+    ^{:go/apos {1 [11 2]}} [strings "strings"]
+    ^{:go/apos {1 [12 2]}} [sync "sync"]
+    ^{:go/apos {1 [13 2]}} [syscall "syscall"]
+    ^{:go/apos {1 [14 2]}} [time "time"]])
+
+
+;; The module faulthandler (queue 220; Modules/faulthandler.c and Python/traceback.c's dump functions of CPython 3.14.10,
+;; PSF License Agreement): the Python traceback of every thread written to a descriptor, on a fatal signal (enable), after
+;; a timeout (dump_traceback_later), on a user signal (register) or when asked (dump_traceback).
+;;
+;; The threads are pyi's (allThreads, builtins_thread.go): the main thread and each started one, newest first as
+;; CPython's interpreter lists its thread states; a thread's frames its Frame chain, read without its lock (a pointer and
+;; an instruction index read whole) as CPython reads another thread's frames from a signal handler. A fatal signal another
+;; process sends arrives through os/signal on fatalCh; one pyi raises itself (_sigsegv, _sigabrt, os.kill of its own pid,
+;; signal.raise_signal: ownSignalHook) runs the handler in the raising thread first, as the kernel runs a synchronous
+;; signal's handler. Then the process dies by the signal, its action set to SIG_DFL by rt_sigaction (fhDie: Go's own
+;; handler would print a Go traceback). A thread's ident stands for its pthread id; musl has no backtrace(), so the C
+;; stack is "<cannot get C stack on this system>" as CPython's on Alpine; no "Extension modules:" line (pyi has none).
+
+^{:go/pos {:lparen [30 7] :rparen [34 1] :tok-pos [30 1]}} (go/const
+  ^{:go/apos {1 [31 22]}} [^{:val 500 :go/pos {:name-pos [31 2]}} fhMaxStringLength 500]
+  ^{:go/apos {1 [32 22]}} [^{:val 100 :go/pos {:name-pos [32 2]}} fhMaxFrameDepth 100]
+  ^{:go/apos {1 [33 22]}} [^{:val 100 :go/pos {:name-pos [33 2]}} fhMaxNThreads 100])
+
+
+
+^{:go/pos {:doc [36 1] :tok-pos [37 1]}} (go/var ^{:doc "fhFatalSignals are faulthandler_handlers: the fatal signals and their names, in CPython's order.\n" :go/pos {:name-pos [37 5]}} fhFatalSignals ^{:go/pos {:lbrace [40 2] :rbrace [40 124]}} (lit ^{:go/pos {:lbrack [37 22]}} (slice ^{:go/pos {:lbrace [37 31] :rbrace [40 1] :struct [37 24]}} (struct
+        ^{:tag ^{:go/pos {:name-pos [38 7]}} int :go/pos {:name-pos [38 2]}} sig
+        ^{:tag ^{:go/pos {:name-pos [39 7]}} string :go/pos {:name-pos [39 2]}} name))
+    ^{:go/apos {2 [40 4] 3 [40 7]} :go/pos {:lbrace [40 3] :rbrace [40 18]}} (lit _ 7 "Bus error") ^{:go/apos {2 [40 22] 3 [40 25]} :go/pos {:lbrace [40 21] :rbrace [40 46]}} (lit _ 4 "Illegal instruction") ^{:go/apos {2 [40 50] 3 [40 53]} :go/pos {:lbrace [40 49] :rbrace [40 79]}} (lit _ 8 "Floating-point exception") ^{:go/apos {2 [40 83] 3 [40 86]} :go/pos {:lbrace [40 82] :rbrace [40 95]}} (lit _ 6 "Aborted") ^{:go/apos {2 [40 99] 3 [40 103]} :go/pos {:lbrace [40 98] :rbrace [40 123]}} (lit _ 11 "Segmentation fault")))
+
+
+^{:go/pos {:doc [42 1] :tok-pos [43 1]}} (go/var ^{:tag ^{:go/pos {:lbrace [43 20] :rbrace [49 1] :struct [43 13]}} (struct ^{:tag ^{:go/pos {:name-pos [44 13]}} bool :go/pos {:name-pos [44 2]}} enabled ^{:tag ^{:go/pos {:name-pos [45 13]}} int :go/pos {:name-pos [45 2]}} fd ^{:tag ^{:go/pos {:name-pos [46 13]}} Object :go/pos {:name-pos [46 2]}} file ^{:tag ^{:go/pos {:name-pos [47 13]}} bool :go/pos {:name-pos [47 2]}} allThreads ^{:tag ^{:go/pos {:name-pos [48 13]}} bool :go/pos {:name-pos [48 2]}} cStack) :doc "fhFatal is fatal_error: enable()'s state.\n" :go/pos {:name-pos [43 5]}} fhFatal)
+
+
+;; kept alive while enabled
+
+
+
+
+
+^{:go/pos {:doc [51 1] :tok-pos [52 1]}} (go/type ^{:go/pos {:name-pos [52 6]}} fhUserSignal "fhUser is user_signals: register()'s state per signal.\n" ^{:go/pos {:lbrace [52 26] :rbrace [58 1] :struct [52 19]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [53 13]}} bool :go/pos {:name-pos [53 2]}} enabled
+    ^{:tag ^{:go/pos {:name-pos [54 13]}} int :go/pos {:name-pos [54 2]}} fd
+    ^{:tag ^{:go/pos {:name-pos [55 13]}} Object :go/pos {:name-pos [55 2]}} file
+    ^{:tag ^{:go/pos {:name-pos [56 13]}} bool :go/pos {:name-pos [56 2]}} allThreads
+    ^{:tag ^{:go/pos {:name-pos [57 13]}} bool :go/pos {:name-pos [57 2]}} chain))
+
+
+^{:go/pos {:lparen [60 5] :rparen [68 1] :tok-pos [60 1]}} (go/var
+  [^{:tag ^{:go/pos {:dot [61 17] :name-pos [61 18] :x-pos [61 13]}} sync/Mutex :go/pos {:name-pos [61 2]}} fhMu] ; the state read by the signal goroutines
+  [^{:tag ^{:go/pos {:lbrack [62 13]}} (array ^{:go/pos {:name-pos [62 14]}} nsig ^{:go/pos {:name-pos [62 19]}} fhUserSignal) :go/pos {:name-pos [62 2]}} fhUsers]
+  [^{:tag ^{:go/pos {:begin [63 13]}} (chan ^{:go/pos {:dot [63 20] :name-pos [63 21] :x-pos [63 18]}} os/Signal) :go/pos {:name-pos [63 2]}} fatalCh]
+  [^{:tag ^{:go/pos {:begin [64 13]}} (chan ^{:go/pos {:dot [64 20] :name-pos [64 21] :x-pos [64 18]}} os/Signal) :go/pos {:name-pos [64 2]}} userCh]
+  [^{:tag ^{:go/pos {:dot [65 17] :name-pos [65 18] :x-pos [65 13]}} sync/Once :go/pos {:name-pos [65 2]}} fhOnce]
+  [^{:tag ^{:go/pos {:star [66 13]}} (* ^{:go/pos {:name-pos [66 14]}} fhLater) :go/pos {:name-pos [66 2]}} fhWatchdog]
+  [^{:tag ^{:go/pos {:dot [67 17] :name-pos [67 18] :x-pos [67 13]}} sync/Mutex :go/pos {:name-pos [67 2]}} fhDumping]) ; faulthandler_dump_traceback's reentrant guard: one dump at a time
+
+
+
+^{:go/pos {:doc [70 1] :tok-pos [71 1]}} (go/type ^{:go/pos {:name-pos [71 6]}} fhLater "fhLater is dump_traceback_later's watchdog: cancel closed to stop it, done closed when it has stopped.\n" ^{:go/pos {:lbrace [71 21] :rbrace [74 1] :struct [71 14]}} (struct
+    ^{:tag ^{:go/pos {:begin [72 15]}} (chan ^{:go/pos {:lbrace [72 26] :rbrace [72 27] :struct [72 20]}} (struct)) :go/pos {:name-pos [72 2]}} cancel ^{:tag ^{:go/pos {:begin [72 15]}} (chan ^{:go/pos {:lbrace [72 26] :rbrace [72 27] :struct [72 20]}} (struct)) :go/pos {:name-pos [72 10]}} done
+    ^{:tag ^{:go/pos {:name-pos [73 15]}} Object :go/pos {:name-pos [73 2]}} file))
+
+
+^{:go/pos {:func [76 1] :lbrace [76 13] :rbrace [85 1]}} (go/func ^{:go/pos {:name-pos [76 6]}} init ^{:go/pos {:closing [76 11] :opening [76 10]}} []
+  ^{:go/apos {2 [77 20]} :go/pos {:lbrack [77 19] :rbrack [77 34] :tok-pos [77 36]}} (aset ^{:go/pos {:name-pos [77 2]}} builtinModulesErr "faulthandler" ^{:go/pos {:name-pos [77 38]}} makeFaulthandlerModule)
+  ^{:go/pos {:tok-pos [78 16]}} (set! ^{:go/pos {:name-pos [78 2]}} ownSignalHook ^{:go/pos {:name-pos [78 18]}} fhOwnSignal)
+  ^{:go/pos {:tok-pos [79 15]}} (set! ^{:go/pos {:name-pos [79 2]}} atStartHooks ^{:go/pos {:lparen [79 23] :rparen [79 57]}} (^{:go/pos {:name-pos [79 17]}} append ^{:go/pos {:name-pos [79 24]}} atStartHooks ^{:go/pos {:name-pos [79 38]}} faulthandlerAtStart))
+  ^{:go/pos {:tok-pos [80 18]}} (set! ^{:go/pos {:name-pos [80 2]}} signalTakenHook ^{:go/pos {:func [80 20] :lbrace [80 37] :rbrace [84 2] :return [83 3]}} (fn ^{:tag ^{:go/pos {:name-pos [80 32]}} bool :go/pos {:closing [80 30] :opening [80 24]}} [^{:tag ^{:go/pos {:name-pos [80 27]}} int :go/pos {:name-pos [80 25]}} n]
+      ^{:go/pos {:dot [81 7] :lparen [81 12] :name-pos [81 8] :rparen [81 13]}} (.Lock ^{:go/pos {:name-pos [81 3]}} fhMu)
+      ^{:go/pos {:defer [82 3]}} (defer ^{:go/pos {:dot [82 13] :lparen [82 20] :name-pos [82 14] :rparen [82 21]}} (.Unlock ^{:go/pos {:name-pos [82 9]}} fhMu))
+      ^{:go/pos {:op-pos [83 29]}} (and ^{:go/pos {:dot [83 20] :name-pos [83 21]}} (.-enabled ^{:go/pos {:lbrack [83 17] :rbrack [83 19]}} (aget ^{:go/pos {:name-pos [83 10]}} fhUsers ^{:go/pos {:name-pos [83 18]}} n)) ^{:go/pos {:op-pos [83 32]}} (not ^{:go/pos {:dot [83 43] :name-pos [83 44]}} (.-chain ^{:go/pos {:lbrack [83 40] :rbrack [83 42]}} (aget ^{:go/pos {:name-pos [83 33]}} fhUsers ^{:go/pos {:name-pos [83 41]}} n)))))))
+
+
+
+
+^{:go/pos {:doc [87 1] :func [88 1] :lbrace [88 32] :rbrace [100 1]}} (go/func ^{:go/pos {:name-pos [88 6]}} fhWrite "fhWrite is _Py_write_noraise: all of s written to fd, EINTR retried, errors ignored.\n" ^{:go/pos {:closing [88 30] :opening [88 13]}} [^{:tag ^{:go/pos {:name-pos [88 17]}} int :go/pos {:name-pos [88 14]}} fd ^{:tag ^{:go/pos {:name-pos [88 24]}} string :go/pos {:name-pos [88 22]}} s]
+  (let [^{:go/pos {:name-pos [89 2] :tok-pos [89 4]}} b ^{:go/pos {:lparen [89 13] :rparen [89 15]}} (conv ^{:go/pos {:lbrack [89 7]}} (slice ^{:go/pos {:name-pos [89 9]}} byte) ^{:go/pos {:name-pos [89 14]}} s)]
+    ^{:go/pos {:for [90 2] :lbrace [90 17] :rbrace [99 2]}} (while ^{:go/apos {2 [90 15]} :go/pos {:op-pos [90 13]}} (> ^{:go/pos {:lparen [90 9] :rparen [90 11]}} (^{:go/pos {:name-pos [90 6]}} len ^{:go/pos {:name-pos [90 10]}} b) 0)
+      (let [^{:go/pos {:tok-pos [91 10]}} (values ^{:go/pos {:name-pos [91 3]}} n ^{:go/pos {:name-pos [91 6]}} err) ^{:go/pos {:lparen [91 26] :rparen [91 32]}} (^{:go/pos {:dot [91 20] :name-pos [91 21] :x-pos [91 13]}} syscall/Write ^{:go/pos {:name-pos [91 27]}} fd ^{:go/pos {:name-pos [91 31]}} b)]
+        ^{:go/pos {:if [92 3] :lbrace [92 27] :rbrace [94 3]}} (when ^{:go/pos {:op-pos [92 10]}} (== ^{:go/pos {:name-pos [92 6]}} err ^{:go/pos {:dot [92 20] :name-pos [92 21] :x-pos [92 13]}} syscall/EINTR)
+          ^{:go/pos {:tok-pos [93 4]}} (continue))
+
+        ^{:go/pos {:if [95 3] :lbrace [95 27] :rbrace [97 3]}} (when ^{:go/pos {:op-pos [95 17]}} (or ^{:go/apos {2 [95 13]} :go/pos {:op-pos [95 10]}} (!= ^{:go/pos {:name-pos [95 6]}} err nil) ^{:go/apos {2 [95 25]} :go/pos {:op-pos [95 22]}} (<= ^{:go/pos {:name-pos [95 20]}} n 0))
+          ^{:go/pos {:return [96 4]}} (return))
+
+        ^{:go/pos {:tok-pos [98 5]}} (set! ^{:go/pos {:name-pos [98 3]}} b ^{:go/pos {:lbrack [98 8] :rbrack [98 11]}} (subslice ^{:go/pos {:name-pos [98 7]}} b ^{:go/pos {:name-pos [98 9]}} n))))))
+
+
+
+
+^{:go/pos {:doc [102 1] :func [103 1] :lbrace [103 40] :rbrace [109 1] :return [108 2]}} (go/func ^{:go/pos {:name-pos [103 6]}} fhHex "fhHex is _Py_DumpHexadecimal: width lowercase hexadecimal digits.\n" ^{:tag ^{:go/pos {:name-pos [103 33]}} string :go/pos {:closing [103 31] :opening [103 11]}} [^{:tag ^{:go/pos {:name-pos [103 14]}} uint64 :go/pos {:name-pos [103 12]}} v ^{:tag ^{:go/pos {:name-pos [103 28]}} int :go/pos {:name-pos [103 22]}} width]
+  (let [^{:go/pos {:name-pos [104 2] :tok-pos [104 4]}} s ^{:go/apos {2 [104 29]} :go/pos {:lparen [104 25] :rparen [104 31]}} (^{:go/pos {:dot [104 14] :name-pos [104 15] :x-pos [104 7]}} strconv/FormatUint ^{:go/pos {:name-pos [104 26]}} v 16)]
+    ^{:go/pos {:for [105 2] :lbrace [105 21] :rbrace [107 2]}} (while ^{:go/pos {:op-pos [105 13]}} (< ^{:go/pos {:lparen [105 9] :rparen [105 11]}} (^{:go/pos {:name-pos [105 6]}} len ^{:go/pos {:name-pos [105 10]}} s) ^{:go/pos {:name-pos [105 15]}} width)
+      ^{:go/pos {:tok-pos [106 5]}} (set! ^{:go/pos {:name-pos [106 3]}} s ^{:go/apos {1 [106 7]} :go/pos {:op-pos [106 11]}} (+ "0" ^{:go/pos {:name-pos [106 13]}} s)))
+
+    ^{:go/pos {:name-pos [108 9]}} s))
+
+
+
+^{:go/pos {:doc [111 1] :func [112 1] :lbrace [112 44] :rbrace [131 1]}} (go/func ^{:go/pos {:name-pos [112 6]}} fhASCII "fhASCII is _Py_DumpASCII: printable ASCII as is, the rest as \\xHH, \\uHHHH or \\UHHHHHHHH, past 500 characters \"...\".\n" ^{:go/pos {:closing [112 42] :opening [112 13]}} [^{:tag ^{:go/pos {:star [112 16]}} (* ^{:go/pos {:dot [112 24] :name-pos [112 25] :x-pos [112 17]}} strings/Builder) :go/pos {:name-pos [112 14]}} b ^{:tag ^{:go/pos {:name-pos [112 36]}} string :go/pos {:name-pos [112 34]}} s]
+  (let ^{:go/apos {1 [113 7]}} [^{:go/pos {:name-pos [113 2] :tok-pos [113 4]}} n 0]
+    ^{:go/pos {:for [114 2] :lbrace [114 23] :range [114 15] :rbrace [130 2] :tok-pos [114 12]}} (range [^{:go/pos {:name-pos [114 6]}} _ ^{:go/pos {:name-pos [114 9]}} ch ^{:go/pos {:name-pos [114 21]}} s]
+      ^{:go/pos {:if [115 3] :lbrace [115 29] :rbrace [118 3]}} (when ^{:go/pos {:op-pos [115 8]}} (== ^{:go/pos {:name-pos [115 6]}} n ^{:go/pos {:name-pos [115 11]}} fhMaxStringLength)
+        ^{:go/apos {2 [116 18]} :go/pos {:dot [116 5] :lparen [116 17] :name-pos [116 6] :rparen [116 23]}} (.WriteString ^{:go/pos {:name-pos [116 4]}} b "...")
+        ^{:go/pos {:return [117 4]}} (return))
+
+      ^{:go/pos {:tok-pos [119 4]}} (inc! ^{:go/pos {:name-pos [119 3]}} n)
+      ^{:go/pos {:lbrace [120 10] :rbrace [129 3] :switch [120 3]}} (switch
+        ^{:go/pos {:case [121 3] :colon [121 30]}} (case [^{:go/pos {:op-pos [121 18]}} (and ^{:go/apos {1 [121 8]} :go/pos {:op-pos [121 12]}} (<= \space ^{:go/pos {:name-pos [121 15]}} ch) ^{:go/apos {2 [121 27]} :go/pos {:op-pos [121 24]}} (<= ^{:go/pos {:name-pos [121 21]}} ch 126))]
+          ^{:go/pos {:dot [122 5] :lparen [122 15] :name-pos [122 6] :rparen [122 18]}} (.WriteRune ^{:go/pos {:name-pos [122 4]}} b ^{:go/pos {:name-pos [122 16]}} ch))
+        ^{:go/pos {:case [123 3] :colon [123 18]}} (case [^{:go/apos {2 [123 14]} :go/atext {2 "0xff"} :go/pos {:op-pos [123 11]}} (<= ^{:go/pos {:name-pos [123 8]}} ch 0xff)]
+          ^{:go/pos {:dot [124 5] :lparen [124 17] :name-pos [124 6] :rparen [124 46]}} (.WriteString ^{:go/pos {:name-pos [124 4]}} b ^{:go/apos {1 [124 18]} :go/pos {:op-pos [124 24]}} (+ "\\x" ^{:go/apos {2 [124 44]} :go/pos {:lparen [124 31] :rparen [124 45]}} (^{:go/pos {:name-pos [124 26]}} fhHex ^{:go/pos {:lparen [124 38] :rparen [124 41]}} (conv ^{:go/pos {:name-pos [124 32]}} uint64 ^{:go/pos {:name-pos [124 39]}} ch) 2))))
+        ^{:go/pos {:case [125 3] :colon [125 20]}} (case [^{:go/apos {2 [125 14]} :go/atext {2 "0xffff"} :go/pos {:op-pos [125 11]}} (<= ^{:go/pos {:name-pos [125 8]}} ch 0xffff)]
+          ^{:go/pos {:dot [126 5] :lparen [126 17] :name-pos [126 6] :rparen [126 46]}} (.WriteString ^{:go/pos {:name-pos [126 4]}} b ^{:go/apos {1 [126 18]} :go/pos {:op-pos [126 24]}} (+ "\\u" ^{:go/apos {2 [126 44]} :go/pos {:lparen [126 31] :rparen [126 45]}} (^{:go/pos {:name-pos [126 26]}} fhHex ^{:go/pos {:lparen [126 38] :rparen [126 41]}} (conv ^{:go/pos {:name-pos [126 32]}} uint64 ^{:go/pos {:name-pos [126 39]}} ch) 4))))
+        ^{:go/pos {:case [127 3] :colon [127 10]}} (default
+          ^{:go/pos {:dot [128 5] :lparen [128 17] :name-pos [128 6] :rparen [128 46]}} (.WriteString ^{:go/pos {:name-pos [128 4]}} b ^{:go/apos {1 [128 18]} :go/pos {:op-pos [128 24]}} (+ "\\U" ^{:go/apos {2 [128 44]} :go/pos {:lparen [128 31] :rparen [128 45]}} (^{:go/pos {:name-pos [128 26]}} fhHex ^{:go/pos {:lparen [128 38] :rparen [128 41]}} (conv ^{:go/pos {:name-pos [128 32]}} uint64 ^{:go/pos {:name-pos [128 39]}} ch) 8))))))))
+
+
+
+
+
+^{:go/pos {:doc [133 1] :func [134 1] :lbrace [134 44] :rbrace [147 1]}} (go/func ^{:go/pos {:name-pos [134 6]}} fhFrame "fhFrame is dump_frame: `  File \"f\", line N in name`.\n" ^{:go/pos {:closing [134 42] :opening [134 13]}} [^{:tag ^{:go/pos {:star [134 16]}} (* ^{:go/pos {:dot [134 24] :name-pos [134 25] :x-pos [134 17]}} strings/Builder) :go/pos {:name-pos [134 14]}} b ^{:tag ^{:go/pos {:star [134 36]}} (* ^{:go/pos {:name-pos [134 37]}} Frame) :go/pos {:name-pos [134 34]}} f]
+  (let [^{:go/pos {:name-pos [135 2] :tok-pos [135 4]}} c ^{:go/pos {:dot [135 8] :name-pos [135 9]}} (.-Code ^{:go/pos {:name-pos [135 7]}} f)]
+    ^{:go/apos {2 [136 16]} :go/pos {:dot [136 3] :lparen [136 15] :name-pos [136 4] :rparen [136 27]}} (.WriteString ^{:go/pos {:name-pos [136 2]}} b "  File \"")
+    ^{:go/pos {:lparen [137 9] :rparen [137 23]}} (^{:go/pos {:name-pos [137 2]}} fhASCII ^{:go/pos {:name-pos [137 10]}} b ^{:go/pos {:dot [137 14] :name-pos [137 15]}} (.-Filename ^{:go/pos {:name-pos [137 13]}} c))
+    ^{:go/apos {2 [138 16]} :go/pos {:dot [138 3] :lparen [138 15] :name-pos [138 4] :rparen [138 27]}} (.WriteString ^{:go/pos {:name-pos [138 2]}} b "\", line ")
+    ^{:go/pos {:else-lbrace [141 9] :else-rbrace [143 2] :if [139 2] :lbrace [139 29] :rbrace [141 2]}} (if [^{:go/pos {:name-pos [139 5] :tok-pos [139 8]}} ln ^{:go/pos {:dot [139 12] :lparen [139 17] :name-pos [139 13] :rparen [139 18]}} (.Line ^{:go/pos {:name-pos [139 11]}} f)] ^{:go/apos {2 [139 27]} :go/pos {:op-pos [139 24]}} (>= ^{:go/pos {:name-pos [139 21]}} ln 0)
+      ^{:go/pos {:dot [140 4] :lparen [140 16] :name-pos [140 5] :rparen [140 33]}} (.WriteString ^{:go/pos {:name-pos [140 3]}} b ^{:go/pos {:lparen [140 29] :rparen [140 32]}} (^{:go/pos {:dot [140 24] :name-pos [140 25] :x-pos [140 17]}} strconv/Itoa ^{:go/pos {:name-pos [140 30]}} ln))
+
+      ^{:go/apos {2 [142 17]} :go/pos {:dot [142 4] :lparen [142 16] :name-pos [142 5] :rparen [142 22]}} (.WriteString ^{:go/pos {:name-pos [142 3]}} b "???"))
+
+    ^{:go/apos {2 [144 16]} :go/pos {:dot [144 3] :lparen [144 15] :name-pos [144 4] :rparen [144 22]}} (.WriteString ^{:go/pos {:name-pos [144 2]}} b " in ")
+    ^{:go/pos {:lparen [145 9] :rparen [145 19]}} (^{:go/pos {:name-pos [145 2]}} fhASCII ^{:go/pos {:name-pos [145 10]}} b ^{:go/pos {:dot [145 14] :name-pos [145 15]}} (.-Name ^{:go/pos {:name-pos [145 13]}} c))
+    ^{:go/apos {2 [146 16]} :go/pos {:dot [146 3] :lparen [146 15] :name-pos [146 4] :rparen [146 20]}} (.WriteString ^{:go/pos {:name-pos [146 2]}} b "\n")))
+
+
+
+^{:go/pos {:doc [149 1] :func [150 1] :lbrace [150 62] :rbrace [173 1]}} (go/func ^{:go/pos {:name-pos [150 6]}} fhTraceback "fhTraceback is dump_traceback: t's frames, most recent first, at most MAX_FRAME_DEPTH.\n" ^{:go/pos {:closing [150 60] :opening [150 17]}} [^{:tag ^{:go/pos {:star [150 20]}} (* ^{:go/pos {:dot [150 28] :name-pos [150 29] :x-pos [150 21]}} strings/Builder) :go/pos {:name-pos [150 18]}} b ^{:tag ^{:go/pos {:star [150 40]}} (* ^{:go/pos {:name-pos [150 41]}} Thread) :go/pos {:name-pos [150 38]}} t ^{:tag ^{:go/pos {:name-pos [150 56]}} bool :go/pos {:name-pos [150 49]}} header]
+  ^{:go/pos {:if [151 2] :lbrace [151 12] :rbrace [153 2]}} (when ^{:go/pos {:name-pos [151 5]}} header
+    ^{:go/apos {2 [152 17]} :go/pos {:dot [152 4] :lparen [152 16] :name-pos [152 5] :rparen [152 52]}} (.WriteString ^{:go/pos {:name-pos [152 3]}} b "Stack (most recent call first):\n"))
+
+  (let [^{:go/pos {:name-pos [154 2] :tok-pos [154 4]}} f ^{:go/pos {:dot [154 8] :name-pos [154 9]}} (.-Frame ^{:go/pos {:name-pos [154 7]}} t)]
+    ^{:go/pos {:if [155 2] :lbrace [155 14] :rbrace [158 2]}} (when ^{:go/apos {2 [155 10]} :go/pos {:op-pos [155 7]}} (== ^{:go/pos {:name-pos [155 5]}} f nil)
+      ^{:go/apos {2 [156 17]} :go/pos {:dot [156 4] :lparen [156 16] :name-pos [156 5] :rparen [156 40]}} (.WriteString ^{:go/pos {:name-pos [156 3]}} b "  <no Python frame>\n")
+      ^{:go/pos {:return [157 3]}} (return))
+
+    ^{:go/pos {:for [159 2] :lbrace [159 28] :rbrace [172 2]}} (for ^{:go/apos {1 [159 15]}} [^{:go/pos {:name-pos [159 6] :tok-pos [159 12]}} depth 0] _ ^{:go/pos {:tok-pos [159 25]}} (inc! ^{:go/pos {:name-pos [159 20]}} depth)
+      ^{:go/pos {:if [160 3] :lbrace [160 31] :rbrace [162 3]}} (when ^{:go/pos {:op-pos [160 12]}} (>= ^{:go/pos {:name-pos [160 6]}} depth ^{:go/pos {:name-pos [160 15]}} fhMaxFrameDepth)
+        ^{:go/pos {:tok-pos [161 4]}} (break))
+
+      (let [^{:go/pos {:name-pos [163 3] :tok-pos [163 8]}} back ^{:go/pos {:dot [163 12] :name-pos [163 13]}} (.-Back ^{:go/pos {:name-pos [163 11]}} f)] ; read first, as CPython reads frame->previous early
+        ^{:go/pos {:if [164 3] :lbrace [164 20] :rbrace [167 3]}} (when ^{:go/apos {2 [164 16]} :go/pos {:op-pos [164 13]}} (== ^{:go/pos {:dot [164 7] :name-pos [164 8]}} (.-Code ^{:go/pos {:name-pos [164 6]}} f) nil)
+          ^{:go/apos {2 [165 18]} :go/pos {:dot [165 5] :lparen [165 17] :name-pos [165 6] :rparen [165 39]}} (.WriteString ^{:go/pos {:name-pos [165 4]}} b "  <invalid frame>\n")
+          ^{:go/pos {:tok-pos [166 4]}} (break))
+
+        ^{:go/pos {:lparen [168 10] :rparen [168 15]}} (^{:go/pos {:name-pos [168 3]}} fhFrame ^{:go/pos {:name-pos [168 11]}} b ^{:go/pos {:name-pos [168 14]}} f)
+        ^{:go/pos {:if [169 3] :lbrace [169 25] :rbrace [171 3]}} (when [^{:go/pos {:tok-pos [169 8]}} (set! ^{:go/pos {:name-pos [169 6]}} f ^{:go/pos {:name-pos [169 10]}} back)] ^{:go/apos {2 [169 21]} :go/pos {:op-pos [169 18]}} (== ^{:go/pos {:name-pos [169 16]}} f nil)
+          ^{:go/pos {:tok-pos [170 4]}} (break))))))
+
+
+
+
+
+^{:go/pos {:doc [175 1] :func [176 1] :lbrace [176 49] :rbrace [194 1]}} (go/func ^{:go/pos {:name-pos [176 6]}} fhThreads "fhThreads is _Py_DumpTracebackThreads: each thread's header (cur's \"Current thread\") and frames, newest first.\n" ^{:go/pos {:closing [176 47] :opening [176 15]}} [^{:tag ^{:go/pos {:star [176 18]}} (* ^{:go/pos {:dot [176 26] :name-pos [176 27] :x-pos [176 19]}} strings/Builder) :go/pos {:name-pos [176 16]}} b ^{:tag ^{:go/pos {:star [176 40]}} (* ^{:go/pos {:name-pos [176 41]}} Thread) :go/pos {:name-pos [176 36]}} cur]
+  ^{:go/pos {:for [177 2] :lbrace [177 41] :range [177 14] :rbrace [193 2] :tok-pos [177 11]}} (range [^{:go/pos {:name-pos [177 6]}} i ^{:go/pos {:name-pos [177 9]}} t ^{:go/pos {:lparen [177 38] :rparen [177 39]}} (^{:go/pos {:name-pos [177 20]}} threadsNewestFirst)]
+    ^{:go/pos {:if [178 3] :lbrace [178 13] :rbrace [180 3]}} (when ^{:go/apos {2 [178 11]} :go/pos {:op-pos [178 8]}} (!= ^{:go/pos {:name-pos [178 6]}} i 0)
+      ^{:go/apos {2 [179 18]} :go/pos {:dot [179 5] :lparen [179 17] :name-pos [179 6] :rparen [179 22]}} (.WriteString ^{:go/pos {:name-pos [179 4]}} b "\n"))
+
+    ^{:go/pos {:if [181 3] :lbrace [181 25] :rbrace [184 3]}} (when ^{:go/pos {:op-pos [181 8]}} (>= ^{:go/pos {:name-pos [181 6]}} i ^{:go/pos {:name-pos [181 11]}} fhMaxNThreads)
+      ^{:go/apos {2 [182 18]} :go/pos {:dot [182 5] :lparen [182 17] :name-pos [182 6] :rparen [182 25]}} (.WriteString ^{:go/pos {:name-pos [182 4]}} b "...\n")
+      ^{:go/pos {:tok-pos [183 4]}} (break))
+
+    ^{:go/pos {:else-lbrace [187 10] :else-rbrace [189 3] :if [185 3] :lbrace [185 15] :rbrace [187 3]}} (if ^{:go/pos {:op-pos [185 8]}} (== ^{:go/pos {:name-pos [185 6]}} t ^{:go/pos {:name-pos [185 11]}} cur)
+      ^{:go/apos {2 [186 18]} :go/pos {:dot [186 5] :lparen [186 17] :name-pos [186 6] :rparen [186 37]}} (.WriteString ^{:go/pos {:name-pos [186 4]}} b "Current thread 0x")
+
+      ^{:go/apos {2 [188 18]} :go/pos {:dot [188 5] :lparen [188 17] :name-pos [188 6] :rparen [188 29]}} (.WriteString ^{:go/pos {:name-pos [188 4]}} b "Thread 0x"))
+
+    ^{:go/pos {:dot [190 4] :lparen [190 16] :name-pos [190 5] :rparen [190 52]}} (.WriteString ^{:go/pos {:name-pos [190 3]}} b ^{:go/apos {2 [190 49]} :go/pos {:lparen [190 22] :rparen [190 51]}} (^{:go/pos {:name-pos [190 17]}} fhHex ^{:go/pos {:lparen [190 29] :rparen [190 46]}} (conv ^{:go/pos {:name-pos [190 23]}} uint64 ^{:go/pos {:lparen [190 43] :rparen [190 45]}} (^{:go/pos {:name-pos [190 30]}} threadIdentOf ^{:go/pos {:name-pos [190 44]}} t)) 16))
+    ^{:go/apos {2 [191 17]} :go/pos {:dot [191 4] :lparen [191 16] :name-pos [191 5] :rparen [191 47]}} (.WriteString ^{:go/pos {:name-pos [191 3]}} b " (most recent call first):\n")
+    ^{:go/apos {3 [192 21]} :go/pos {:lparen [192 14] :rparen [192 26]}} (^{:go/pos {:name-pos [192 3]}} fhTraceback ^{:go/pos {:name-pos [192 15]}} b ^{:go/pos {:name-pos [192 18]}} t false)))
+
+
+
+
+^{:go/pos {:doc [196 1] :func [197 1] :lbrace [197 53] :rbrace [209 1]}} (go/func ^{:go/pos {:name-pos [197 6]}} fhDumpTo "fhDumpTo is faulthandler_dump_traceback: all threads, or cur's alone with the \"Stack\" header.\n" ^{:go/pos {:closing [197 51] :opening [197 14]}} [^{:tag ^{:go/pos {:name-pos [197 18]}} int :go/pos {:name-pos [197 15]}} fd ^{:tag ^{:go/pos {:name-pos [197 34]}} bool :go/pos {:name-pos [197 23]}} allThreads ^{:tag ^{:go/pos {:star [197 44]}} (* ^{:go/pos {:name-pos [197 45]}} Thread) :go/pos {:name-pos [197 40]}} cur]
+  ^{:go/pos {:if [198 2] :lbrace [198 26] :rbrace [200 2]}} (when ^{:go/pos {:op-pos [198 5]}} (not ^{:go/pos {:dot [198 15] :lparen [198 23] :name-pos [198 16] :rparen [198 24]}} (.TryLock ^{:go/pos {:name-pos [198 6]}} fhDumping))
+    ^{:go/pos {:return [199 3]}} (return))
+
+  ^{:go/pos {:defer [201 2]}} (defer ^{:go/pos {:dot [201 17] :lparen [201 24] :name-pos [201 18] :rparen [201 25]}} (.Unlock ^{:go/pos {:name-pos [201 8]}} fhDumping))
+  (let [^{:tag ^{:go/pos {:dot [202 15] :name-pos [202 16] :x-pos [202 8]}} strings/Builder :go/pos {:name-pos [202 6] :tok-pos [202 2]}} b (zero ^{:go/pos {:dot [202 15] :name-pos [202 16] :x-pos [202 8]}} strings/Builder)]
+    ^{:go/cond [[[203 2] [203 16] [205 2]] [[205 9] [205 23] [207 2]]] :go/pos {:if [203 2]}} (cond ^{:go/pos {:name-pos [203 5]}} allThreads
+      ^{:go/pos {:lparen [204 12] :rparen [204 20]}} (^{:go/pos {:name-pos [204 3]}} fhThreads ^{:go/pos {:op-pos [204 13]}} (addr ^{:go/pos {:name-pos [204 14]}} b) ^{:go/pos {:name-pos [204 17]}} cur)
+      ^{:go/apos {2 [205 19]} :go/pos {:op-pos [205 16]}} (!= ^{:go/pos {:name-pos [205 12]}} cur nil)
+      ^{:go/apos {3 [206 24]} :go/pos {:lparen [206 14] :rparen [206 28]}} (^{:go/pos {:name-pos [206 3]}} fhTraceback ^{:go/pos {:op-pos [206 15]}} (addr ^{:go/pos {:name-pos [206 16]}} b) ^{:go/pos {:name-pos [206 19]}} cur true))
+
+    ^{:go/pos {:lparen [208 9] :rparen [208 24]}} (^{:go/pos {:name-pos [208 2]}} fhWrite ^{:go/pos {:name-pos [208 10]}} fd ^{:go/pos {:dot [208 15] :lparen [208 22] :name-pos [208 16] :rparen [208 23]}} (.String ^{:go/pos {:name-pos [208 14]}} b))))
+
+
+^{:go/apos {2 [211 18]} :go/pos {:tok-pos [211 1]}} (go/const ^{:val "Current thread's C stack trace (most recent call first):\n  <cannot get C stack on this system>\n" :go/pos {:name-pos [211 7]}} fhCStack "Current thread's C stack trace (most recent call first):\n  <cannot get C stack on this system>\n")
+
+
+^{:go/pos {:doc [213 1] :func [214 1] :lbrace [214 41] :rbrace [236 1]}} (go/func ^{:go/pos {:name-pos [214 6]}} fhFatalError "fhFatalError is faulthandler_fatal_error: the header, the traceback, the C stack; the caller dies by the signal.\n" ^{:go/pos {:closing [214 39] :opening [214 18]}} [^{:tag ^{:go/pos {:name-pos [214 23]}} int :go/pos {:name-pos [214 19]}} sig ^{:tag ^{:go/pos {:star [214 32]}} (* ^{:go/pos {:name-pos [214 33]}} Thread) :go/pos {:name-pos [214 28]}} cur]
+  ^{:go/pos {:dot [215 6] :lparen [215 11] :name-pos [215 7] :rparen [215 12]}} (.Lock ^{:go/pos {:name-pos [215 2]}} fhMu)
+  (let [^{:go/pos {:name-pos [216 2] :tok-pos [216 5]}} st ^{:go/pos {:name-pos [216 8]}} fhFatal]
+    ^{:go/pos {:dot [217 6] :lparen [217 13] :name-pos [217 7] :rparen [217 14]}} (.Unlock ^{:go/pos {:name-pos [217 2]}} fhMu)
+    ^{:go/pos {:if [218 2] :lbrace [218 17] :rbrace [220 2]}} (when ^{:go/pos {:op-pos [218 5]}} (not ^{:go/pos {:dot [218 8] :name-pos [218 9]}} (.-enabled ^{:go/pos {:name-pos [218 6]}} st))
+      ^{:go/pos {:return [219 3]}} (return))
+
+    (let ^{:go/apos {1 [221 10]}} [^{:go/pos {:name-pos [221 2] :tok-pos [221 7]}} name ""]
+      ^{:go/pos {:for [222 2] :lbrace [222 35] :range [222 14] :rbrace [226 2] :tok-pos [222 11]}} (range [^{:go/pos {:name-pos [222 6]}} _ ^{:go/pos {:name-pos [222 9]}} h ^{:go/pos {:name-pos [222 20]}} fhFatalSignals]
+        ^{:go/pos {:if [223 3] :lbrace [223 19] :rbrace [225 3]}} (when ^{:go/pos {:op-pos [223 12]}} (== ^{:go/pos {:dot [223 7] :name-pos [223 8]}} (.-sig ^{:go/pos {:name-pos [223 6]}} h) ^{:go/pos {:name-pos [223 15]}} sig)
+          ^{:go/pos {:tok-pos [224 9]}} (set! ^{:go/pos {:name-pos [224 4]}} name ^{:go/pos {:dot [224 12] :name-pos [224 13]}} (.-name ^{:go/pos {:name-pos [224 11]}} h))))
+
+
+      ^{:go/pos {:else-lbrace [229 9] :else-rbrace [231 2] :if [227 2] :lbrace [227 16] :rbrace [229 2]}} (if ^{:go/apos {2 [227 13]} :go/pos {:op-pos [227 10]}} (!= ^{:go/pos {:name-pos [227 5]}} name "")
+        ^{:go/pos {:lparen [228 10] :rparen [228 52]}} (^{:go/pos {:name-pos [228 3]}} fhWrite ^{:go/pos {:dot [228 13] :name-pos [228 14]}} (.-fd ^{:go/pos {:name-pos [228 11]}} st) ^{:go/apos {1 [228 18] 3 [228 46]} :go/ops [[228 40] [228 45]] :go/pos {:op-pos [228 45]}} (+ "Fatal Python error: " ^{:go/pos {:name-pos [228 41]}} name "\n\n"))
+
+        ^{:go/pos {:lparen [230 10] :rparen [230 88]}} (^{:go/pos {:name-pos [230 3]}} fhWrite ^{:go/pos {:dot [230 13] :name-pos [230 14]}} (.-fd ^{:go/pos {:name-pos [230 11]}} st) ^{:go/apos {1 [230 18] 3 [230 82]} :go/ops [[230 63] [230 81]] :go/pos {:op-pos [230 81]}} (+ "Fatal Python error from unexpected signum: " ^{:go/pos {:lparen [230 76] :rparen [230 80]}} (^{:go/pos {:dot [230 71] :name-pos [230 72] :x-pos [230 64]}} strconv/Itoa ^{:go/pos {:name-pos [230 77]}} sig) "\n\n")))
+
+      ^{:go/pos {:lparen [232 10] :rparen [232 36]}} (^{:go/pos {:name-pos [232 2]}} fhDumpTo ^{:go/pos {:dot [232 13] :name-pos [232 14]}} (.-fd ^{:go/pos {:name-pos [232 11]}} st) ^{:go/pos {:dot [232 20] :name-pos [232 21]}} (.-allThreads ^{:go/pos {:name-pos [232 18]}} st) ^{:go/pos {:name-pos [232 33]}} cur)
+      ^{:go/pos {:if [233 2] :lbrace [233 15] :rbrace [235 2]}} (when ^{:go/pos {:dot [233 7] :name-pos [233 8]}} (.-cStack ^{:go/pos {:name-pos [233 5]}} st)
+        ^{:go/pos {:lparen [234 10] :rparen [234 31]}} (^{:go/pos {:name-pos [234 3]}} fhWrite ^{:go/pos {:dot [234 13] :name-pos [234 14]}} (.-fd ^{:go/pos {:name-pos [234 11]}} st) ^{:go/apos {1 [234 18]} :go/pos {:op-pos [234 22]}} (+ "\n" ^{:go/pos {:name-pos [234 23]}} fhCStack))))))
+
+
+
+
+^{:go/pos {:doc [238 1] :tok-pos [239 1]}} (go/type ^{:go/pos {:name-pos [239 6]}} sigactionT "sigactionT is the kernel's struct sigaction (handler, flags, restorer, mask) as rt_sigaction takes it.\n" ^{:go/pos {:lbrace [239 24] :rbrace [241 1] :struct [239 17]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [240 33]}} uint64 :go/pos {:name-pos [240 2]}} handler ^{:tag ^{:go/pos {:name-pos [240 33]}} uint64 :go/pos {:name-pos [240 11]}} flags ^{:tag ^{:go/pos {:name-pos [240 33]}} uint64 :go/pos {:name-pos [240 18]}} restorer ^{:tag ^{:go/pos {:name-pos [240 33]}} uint64 :go/pos {:name-pos [240 28]}} mask))
+
+
+
+
+^{:go/pos {:doc [243 1] :func [245 1] :lbrace [245 21] :rbrace [255 1]}} (go/func ^{:go/pos {:name-pos [245 6]}} fhDie "fhDie ends the process by sig: its action SIG_DFL (rt_sigaction), sig unblocked in the emulated mask, raised; if\nit does not kill (a stopping or ignored signal), the exit status 128+sig after a moment.\n" ^{:go/pos {:closing [245 19] :opening [245 11]}} [^{:tag ^{:go/pos {:name-pos [245 16]}} int :go/pos {:name-pos [245 12]}} sig]
+  ^{:go/pos {:if [246 2] :lbrace [246 55] :rbrace [248 2]}} (when [^{:go/pos {:name-pos [246 5] :tok-pos [246 7]}} t ^{:go/pos {:lparen [246 23] :rparen [246 24]}} (^{:go/pos {:name-pos [246 10]}} currentThread)] ^{:go/pos {:op-pos [246 36]}} (and ^{:go/apos {2 [246 32]} :go/pos {:op-pos [246 29]}} (!= ^{:go/pos {:name-pos [246 27]}} t nil) ^{:go/apos {2 [246 51]} :go/pos {:op-pos [246 48]}} (!= ^{:go/pos {:dot [246 40] :name-pos [246 41]}} (.-Interp ^{:go/pos {:name-pos [246 39]}} t) nil))
+    ^{:go/pos {:dot [247 18] :lparen [247 24] :name-pos [247 19] :rparen [247 25]}} (.Flush ^{:go/pos {:dot [247 11] :name-pos [247 12]}} (.-Stderr ^{:go/pos {:dot [247 4] :name-pos [247 5]}} (.-Interp ^{:go/pos {:name-pos [247 3]}} t)))) ; stdout's buffer is lost, as CPython's block-buffered stdout is
+
+  ^{:go/pos {:lparen [249 14] :rparen [249 34]}} (^{:go/pos {:dot [249 8] :name-pos [249 9] :x-pos [249 2]}} signal/Reset ^{:go/pos {:lparen [249 29] :rparen [249 33]}} (conv ^{:go/pos {:dot [249 22] :name-pos [249 23] :x-pos [249 15]}} syscall/Signal ^{:go/pos {:name-pos [249 30]}} sig))
+  (let [^{:go/pos {:name-pos [250 2] :tok-pos [250 5]}} sa ^{:go/pos {:op-pos [250 8]}} (addr ^{:go/pos {:lbrace [250 19] :rbrace [250 20]}} (lit ^{:go/pos {:name-pos [250 9]}} sigactionT))]
+    ^{:go/apos {4 [251 90] 5 [251 93] 6 [251 96] 7 [251 99]} :go/pos {:lparen [251 18] :rparen [251 100]}} (^{:go/pos {:dot [251 9] :name-pos [251 10] :x-pos [251 2]}} syscall/Syscall6 ^{:go/pos {:dot [251 26] :name-pos [251 27] :x-pos [251 19]}} syscall/SYS_RT_SIGACTION ^{:go/pos {:lparen [251 52] :rparen [251 56]}} (conv ^{:go/pos {:name-pos [251 45]}} uintptr ^{:go/pos {:name-pos [251 53]}} sig) ^{:go/pos {:dot [251 78] :lparen [251 86] :name-pos [251 79] :rparen [251 87]}} (.Pointer ^{:go/pos {:lparen [251 74] :rparen [251 77]}} (^{:go/pos {:dot [251 66] :name-pos [251 67] :x-pos [251 59]}} reflect/ValueOf ^{:go/pos {:name-pos [251 75]}} sa)) 0 8 0 0)
+    ^{:go/pos {:lparen [252 14] :rparen [252 52]}} (^{:go/pos {:dot [252 9] :name-pos [252 10] :x-pos [252 2]}} syscall/Kill ^{:go/pos {:lparen [252 29] :rparen [252 30]}} (^{:go/pos {:dot [252 22] :name-pos [252 23] :x-pos [252 15]}} syscall/Getpid) ^{:go/pos {:lparen [252 47] :rparen [252 51]}} (conv ^{:go/pos {:dot [252 40] :name-pos [252 41] :x-pos [252 33]}} syscall/Signal ^{:go/pos {:name-pos [252 48]}} sig))
+    ^{:go/pos {:lparen [253 12] :rparen [253 24]}} (^{:go/pos {:dot [253 6] :name-pos [253 7] :x-pos [253 2]}} time/Sleep ^{:go/pos {:dot [253 17] :name-pos [253 18] :x-pos [253 13]}} time/Second)
+    ^{:go/pos {:lparen [254 14] :rparen [254 24]}} (^{:go/pos {:dot [254 9] :name-pos [254 10] :x-pos [254 2]}} syscall/Exit ^{:go/apos {1 [254 15]} :go/pos {:op-pos [254 19]}} (+ 128 ^{:go/pos {:name-pos [254 21]}} sig))))
+
+
+
+^{:go/pos {:doc [257 1] :func [258 1] :lbrace [258 31] :rbrace [264 1] :return [263 2]}} (go/func ^{:go/pos {:name-pos [258 6]}} fhTerminates "fhTerminates are the signals whose default action ends the process (signal(7)), SIGKILL and SIGSTOP apart.\n" ^{:tag ^{:go/pos {:name-pos [258 26]}} bool :go/pos {:closing [258 24] :opening [258 18]}} [^{:tag ^{:go/pos {:name-pos [258 21]}} int :go/pos {:name-pos [258 19]}} n]
+  ^{:go/pos {:lbrace [259 11] :rbrace [262 2] :switch [259 2]}} (switch ^{:go/pos {:name-pos [259 9]}} n
+    ^{:go/pos {:case [260 2] :colon [260 40]}} (case ^{:go/apos {0 [260 7] 1 [260 10] 2 [260 14] 3 [260 18] 4 [260 22] 5 [260 26] 6 [260 30] 7 [260 34] 8 [260 38]}} [9 17 18 19 20 21 22 23 28]
+      ^{:go/apos {1 [261 10]} :go/pos {:return [261 3]}} (return false)))
+
+  ^{:go/pos {:op-pos [263 15]}} (and ^{:go/apos {2 [263 13]} :go/pos {:op-pos [263 11]}} (> ^{:go/pos {:name-pos [263 9]}} n 0) ^{:go/pos {:op-pos [263 20]}} (< ^{:go/pos {:name-pos [263 18]}} n ^{:go/pos {:name-pos [263 22]}} nsig)))
+
+
+
+
+
+
+
+^{:go/pos {:doc [266 1] :func [271 1] :lbrace [271 39] :rbrace [298 1]}} (go/func ^{:go/pos {:name-pos [271 6]}} fhOwnSignal "fhOwnSignal is ownSignalHook: a signal pyi sends itself (os.kill of its own pid, signal.raise_signal), handled in the\nsending thread before the call returns as the kernel runs the handler of a signal a thread raises: faulthandler's\nfatal handler (then death by it), its user handler (then, chained, the Python handler or the default action), or the\ndefault action that ends the process when the signal's Python disposition is SIG_DFL (Go's runtime would ignore\nSIGUSR1 and print its own traceback for SIGABRT).\n" ^{:go/pos {:closing [271 23] :opening [271 17]}} [^{:tag ^{:go/pos {:name-pos [271 20]}} int :go/pos {:name-pos [271 18]}} n] :results ^{:go/pos {:closing [271 37] :opening [271 25]}} [^{:go/pos {:name-pos [271 26]}} bool ^{:go/pos {:name-pos [271 32]}} error]
+  ^{:go/pos {:if [272 2] :lbrace [272 25] :rbrace [274 2]}} (when ^{:go/pos {:op-pos [272 12]}} (or ^{:go/apos {2 [272 10]} :go/pos {:op-pos [272 7]}} (<= ^{:go/pos {:name-pos [272 5]}} n 0) ^{:go/pos {:op-pos [272 17]}} (>= ^{:go/pos {:name-pos [272 15]}} n ^{:go/pos {:name-pos [272 20]}} nsig))
+    ^{:go/apos {1 [273 10] 2 [273 17]} :go/pos {:return [273 3]}} (return false nil))
+
+  ^{:go/pos {:dot [275 6] :lparen [275 11] :name-pos [275 7] :rparen [275 12]}} (.Lock ^{:go/pos {:name-pos [275 2]}} fhMu)
+  (let [^{:go/pos {:name-pos [276 2] :tok-pos [276 8]}} fatal ^{:go/pos {:dot [276 18] :name-pos [276 19]}} (.-enabled ^{:go/pos {:name-pos [276 11]}} fhFatal)
+      ^{:go/pos {:name-pos [277 2] :tok-pos [277 4]}} u ^{:go/pos {:lbrack [277 14] :rbrack [277 16]}} (aget ^{:go/pos {:name-pos [277 7]}} fhUsers ^{:go/pos {:name-pos [277 15]}} n)]
+    ^{:go/pos {:dot [278 6] :lparen [278 13] :name-pos [278 7] :rparen [278 14]}} (.Unlock ^{:go/pos {:name-pos [278 2]}} fhMu)
+    ^{:go/pos {:for [279 2] :lbrace [279 35] :range [279 14] :rbrace [284 2] :tok-pos [279 11]}} (range [^{:go/pos {:name-pos [279 6]}} _ ^{:go/pos {:name-pos [279 9]}} h ^{:go/pos {:name-pos [279 20]}} fhFatalSignals]
+      ^{:go/pos {:if [280 3] :lbrace [280 26] :rbrace [283 3]}} (when ^{:go/pos {:op-pos [280 12]}} (and ^{:go/pos {:name-pos [280 6]}} fatal ^{:go/pos {:op-pos [280 21]}} (== ^{:go/pos {:dot [280 16] :name-pos [280 17]}} (.-sig ^{:go/pos {:name-pos [280 15]}} h) ^{:go/pos {:name-pos [280 24]}} n))
+        ^{:go/pos {:lparen [281 16] :rparen [281 27]}} (^{:go/pos {:name-pos [281 4]}} fhFatalError ^{:go/pos {:name-pos [281 17]}} n ^{:go/pos {:name-pos [281 20]}} current)
+        ^{:go/pos {:lparen [282 9] :rparen [282 11]}} (^{:go/pos {:name-pos [282 4]}} fhDie ^{:go/pos {:name-pos [282 10]}} n)))
+
+
+    ^{:go/pos {:if [285 2] :lbrace [285 15] :rbrace [290 2]}} (when ^{:go/pos {:dot [285 6] :name-pos [285 7]}} (.-enabled ^{:go/pos {:name-pos [285 5]}} u)
+      ^{:go/pos {:lparen [286 11] :rparen [286 39]}} (^{:go/pos {:name-pos [286 3]}} fhDumpTo ^{:go/pos {:dot [286 13] :name-pos [286 14]}} (.-fd ^{:go/pos {:name-pos [286 12]}} u) ^{:go/pos {:dot [286 19] :name-pos [286 20]}} (.-allThreads ^{:go/pos {:name-pos [286 18]}} u) ^{:go/pos {:name-pos [286 32]}} current)
+      ^{:go/pos {:if [287 3] :lbrace [287 15] :rbrace [289 3]}} (when ^{:go/pos {:op-pos [287 6]}} (not ^{:go/pos {:dot [287 8] :name-pos [287 9]}} (.-chain ^{:go/pos {:name-pos [287 7]}} u))
+        ^{:go/apos {1 [288 11] 2 [288 17]} :go/pos {:return [288 4]}} (return true nil)))
+
+
+    ^{:go/pos {:if [291 2] :lbrace [291 64] :rbrace [293 2]}} (when ^{:go/ops [[291 20] [291 44]] :go/pos {:op-pos [291 44]}} (or ^{:go/pos {:lbrack [291 16] :rbrack [291 18]}} (aget ^{:go/pos {:name-pos [291 5]}} sigNotified ^{:go/pos {:name-pos [291 17]}} n) ^{:go/pos {:dot [291 36] :lparen [291 41] :name-pos [291 37] :rparen [291 42]}} (.Load ^{:go/pos {:lbrack [291 33] :rbrack [291 35]}} (aget ^{:go/pos {:name-pos [291 23]}} sigBlocked ^{:go/pos {:name-pos [291 34]}} n)) ^{:go/pos {:op-pos [291 47]}} (not ^{:go/pos {:lparen [291 60] :rparen [291 62]}} (^{:go/pos {:name-pos [291 48]}} fhTerminates ^{:go/pos {:name-pos [291 61]}} n)))
+      ^{:go/apos {1 [292 10] 2 [292 17]} :go/pos {:return [292 3]}} (return false nil))
+
+    ^{:go/pos {:if [294 2] :lbrace [294 77] :rbrace [296 2]}} (when [^{:go/pos {:tok-pos [294 11]}} (values ^{:go/pos {:name-pos [294 5]}} h ^{:go/pos {:name-pos [294 8]}} ok) ^{:go/pos {:lparen [294 19] :rparen [294 34]}} (^{:go/pos {:name-pos [294 14]}} asInt ^{:go/pos {:lbrack [294 31] :rbrack [294 33]}} (aget ^{:go/pos {:name-pos [294 20]}} sigHandlers ^{:go/pos {:name-pos [294 32]}} n))] ^{:go/pos {:op-pos [294 52]}} (or ^{:go/pos {:op-pos [294 40]}} (and ^{:go/pos {:name-pos [294 37]}} ok ^{:go/apos {2 [294 50]} :go/pos {:op-pos [294 47]}} (== ^{:go/pos {:dot [294 44] :name-pos [294 45]}} (.-v ^{:go/pos {:name-pos [294 43]}} h) 0)) ^{:go/apos {2 [294 73]} :go/pos {:op-pos [294 70]}} (== ^{:go/pos {:lbrack [294 66] :rbrack [294 68]}} (aget ^{:go/pos {:name-pos [294 55]}} sigHandlers ^{:go/pos {:name-pos [294 67]}} n) nil))
+      ^{:go/pos {:lparen [295 8] :rparen [295 10]}} (^{:go/pos {:name-pos [295 3]}} fhDie ^{:go/pos {:name-pos [295 9]}} n))
+
+    ^{:go/apos {1 [297 9] 2 [297 16]} :go/pos {:return [297 2]}} (return false nil)))
+
+
+
+^{:go/pos {:doc [300 1] :func [301 1] :lbrace [301 16] :rbrace [328 1]}} (go/func ^{:go/pos {:name-pos [301 6]}} fhStart "fhStart starts the goroutines of the fatal and user signals once.\n" ^{:go/pos {:closing [301 14] :opening [301 13]}} []
+  ^{:go/pos {:dot [302 8] :lparen [302 11] :name-pos [302 9] :rparen [327 3]}} (.Do ^{:go/pos {:name-pos [302 2]}} fhOnce ^{:go/pos {:func [302 12] :lbrace [302 19] :rbrace [327 2]}} (fn ^{:go/pos {:closing [302 17] :opening [302 16]}} []
+      ^{:go/pos {:tok-pos [303 11]}} (set! ^{:go/pos {:name-pos [303 3]}} fatalCh ^{:go/apos {2 [303 34]} :go/pos {:lparen [303 17] :rparen [303 35]}} (^{:go/pos {:name-pos [303 13]}} make ^{:go/pos {:begin [303 18]}} (chan ^{:go/pos {:dot [303 25] :name-pos [303 26] :x-pos [303 23]}} os/Signal) 8))
+      ^{:go/pos {:tok-pos [304 10]}} (set! ^{:go/pos {:name-pos [304 3]}} userCh ^{:go/apos {2 [304 33]} :go/pos {:lparen [304 16] :rparen [304 35]}} (^{:go/pos {:name-pos [304 12]}} make ^{:go/pos {:begin [304 17]}} (chan ^{:go/pos {:dot [304 24] :name-pos [304 25] :x-pos [304 22]}} os/Signal) 64))
+      ^{:go/pos {:go [305 3]}} (go ^{:go/pos {:lparen [312 4] :rparen [312 5]}} (^{:go/pos {:func [305 6] :lbrace [305 13] :rbrace [312 3]}} (fn ^{:go/pos {:closing [305 11] :opening [305 10]}} []
+            ^{:go/pos {:for [306 4] :lbrace [306 27] :range [306 13] :rbrace [311 4] :tok-pos [306 10]}} (range [^{:go/pos {:name-pos [306 8]}} s ^{:go/pos {:name-pos [306 19]}} fatalCh]
+              ^{:go/pos {:if [307 5] :lbrace [307 40] :rbrace [310 5]}} (when [^{:go/pos {:tok-pos [307 14]}} (values ^{:go/pos {:name-pos [307 8]}} n ^{:go/pos {:name-pos [307 11]}} ok) ^{:go/pos {:dot [307 18] :lparen [307 19] :rparen [307 34]}} (assert ^{:go/pos {:dot [307 27] :name-pos [307 28] :x-pos [307 20]}} syscall/Signal ^{:go/pos {:name-pos [307 17]}} s)] ^{:go/pos {:name-pos [307 37]}} ok
+                ^{:go/pos {:lparen [308 18] :rparen [308 34]}} (^{:go/pos {:name-pos [308 6]}} fhFatalError ^{:go/pos {:lparen [308 22] :rparen [308 24]}} (conv ^{:go/pos {:name-pos [308 19]}} int ^{:go/pos {:name-pos [308 23]}} n) ^{:go/pos {:name-pos [308 27]}} current)
+                ^{:go/pos {:lparen [309 11] :rparen [309 18]}} (^{:go/pos {:name-pos [309 6]}} fhDie ^{:go/pos {:lparen [309 15] :rparen [309 17]}} (conv ^{:go/pos {:name-pos [309 12]}} int ^{:go/pos {:name-pos [309 16]}} n)))))))
+
+
+
+      ^{:go/pos {:go [313 3]}} (go ^{:go/pos {:lparen [326 4] :rparen [326 5]}} (^{:go/pos {:func [313 6] :lbrace [313 13] :rbrace [326 3]}} (fn ^{:go/pos {:closing [313 11] :opening [313 10]}} []
+            ^{:go/pos {:for [314 4] :lbrace [314 26] :range [314 13] :rbrace [325 4] :tok-pos [314 10]}} (range [^{:go/pos {:name-pos [314 8]}} s ^{:go/pos {:name-pos [314 19]}} userCh]
+              (let [^{:go/pos {:tok-pos [315 11]}} (values ^{:go/pos {:name-pos [315 5]}} n ^{:go/pos {:name-pos [315 8]}} ok) ^{:go/pos {:dot [315 15] :lparen [315 16] :rparen [315 31]}} (assert ^{:go/pos {:dot [315 24] :name-pos [315 25] :x-pos [315 17]}} syscall/Signal ^{:go/pos {:name-pos [315 14]}} s)]
+                ^{:go/pos {:if [316 5] :lbrace [316 45] :rbrace [318 5]}} (when ^{:go/ops [[316 12] [316 27]] :go/pos {:op-pos [316 27]}} (or ^{:go/pos {:op-pos [316 8]}} (not ^{:go/pos {:name-pos [316 9]}} ok) ^{:go/apos {2 [316 25]} :go/pos {:op-pos [316 22]}} (<= ^{:go/pos {:lparen [316 18] :rparen [316 20]}} (conv ^{:go/pos {:name-pos [316 15]}} int ^{:go/pos {:name-pos [316 19]}} n) 0) ^{:go/pos {:op-pos [316 37]}} (>= ^{:go/pos {:lparen [316 33] :rparen [316 35]}} (conv ^{:go/pos {:name-pos [316 30]}} int ^{:go/pos {:name-pos [316 34]}} n) ^{:go/pos {:name-pos [316 40]}} nsig))
+                  ^{:go/pos {:tok-pos [317 6]}} (continue))
+
+                ^{:go/pos {:dot [319 9] :lparen [319 14] :name-pos [319 10] :rparen [319 15]}} (.Lock ^{:go/pos {:name-pos [319 5]}} fhMu)
+                (let [^{:go/pos {:name-pos [320 5] :tok-pos [320 7]}} u ^{:go/pos {:lbrack [320 17] :rbrack [320 19]}} (aget ^{:go/pos {:name-pos [320 10]}} fhUsers ^{:go/pos {:name-pos [320 18]}} n)]
+                  ^{:go/pos {:dot [321 9] :lparen [321 16] :name-pos [321 10] :rparen [321 17]}} (.Unlock ^{:go/pos {:name-pos [321 5]}} fhMu)
+                  ^{:go/pos {:if [322 5] :lbrace [322 18] :rbrace [324 5]}} (when ^{:go/pos {:dot [322 9] :name-pos [322 10]}} (.-enabled ^{:go/pos {:name-pos [322 8]}} u)
+                    ^{:go/pos {:lparen [323 14] :rparen [323 42]}} (^{:go/pos {:name-pos [323 6]}} fhDumpTo ^{:go/pos {:dot [323 16] :name-pos [323 17]}} (.-fd ^{:go/pos {:name-pos [323 15]}} u) ^{:go/pos {:dot [323 22] :name-pos [323 23]}} (.-allThreads ^{:go/pos {:name-pos [323 21]}} u) ^{:go/pos {:name-pos [323 35]}} current)))))))))))
+
+
+
+
+
+
+
+
+^{:go/pos {:doc [330 1] :func [332 1] :lbrace [332 52] :rbrace [378 1]}} (go/func ^{:go/pos {:name-pos [332 6]}} fhGetFileno "fhGetFileno is faulthandler_get_fileno: None or absent sys.stderr, an int a descriptor, else file.fileno() (the file\nflushed); the file kept while it is used (nil for a descriptor).\n" ^{:go/pos {:closing [332 29] :opening [332 17]}} [^{:tag ^{:go/pos {:name-pos [332 23]}} Object :go/pos {:name-pos [332 18]}} file] :results ^{:go/pos {:closing [332 50] :opening [332 31]}} [^{:go/pos {:name-pos [332 32]}} int ^{:go/pos {:name-pos [332 37]}} Object ^{:go/pos {:name-pos [332 45]}} error]
+  ^{:go/pos {:if [333 2] :lbrace [333 33] :rbrace [344 2]}} (if ^{:go/pos {:op-pos [333 17]}} (or ^{:go/apos {2 [333 13]} :go/pos {:op-pos [333 10]}} (== ^{:go/pos {:name-pos [333 5]}} file nil) ^{:go/pos {:op-pos [333 25]}} (== ^{:go/pos {:name-pos [333 20]}} file ^{:go/pos {:name-pos [333 28]}} None)) ^{:go/pos {:lbrace [333 33] :rbrace [344 2]}} (do
+      ^{:go/apos {2 [334 10]} :go/pos {:tok-pos [334 8]}} (set! ^{:go/pos {:name-pos [334 3]}} file nil)
+      ^{:go/pos {:if [335 3] :lbrace [335 77] :rbrace [337 3]}} (when [^{:go/pos {:tok-pos [335 15]}} (values ^{:go/pos {:name-pos [335 6]}} sysm ^{:go/pos {:name-pos [335 12]}} ok) ^{:go/pos {:dot [335 62] :lparen [335 63] :rparen [335 71]}} (assert ^{:go/pos {:star [335 64]}} (* ^{:go/pos {:name-pos [335 65]}} Module) ^{:go/apos {2 [335 56]} :go/pos {:dot [335 48] :lparen [335 55] :name-pos [335 49] :rparen [335 61]}} (.GetStr ^{:go/pos {:dot [335 40] :name-pos [335 41]}} (.-Modules ^{:go/pos {:dot [335 33] :name-pos [335 34]}} (.-Interp ^{:go/pos {:lparen [335 31] :rparen [335 32]}} (^{:go/pos {:name-pos [335 18]}} currentThread))) "sys"))] ^{:go/pos {:name-pos [335 74]}} ok
+        ^{:go/pos {:tok-pos [336 9]}} (set! ^{:go/pos {:name-pos [336 4]}} file ^{:go/apos {2 [336 28]} :go/pos {:dot [336 20] :lparen [336 27] :name-pos [336 21] :rparen [336 36]}} (.GetStr ^{:go/pos {:dot [336 15] :name-pos [336 16]}} (.-Dict ^{:go/pos {:name-pos [336 11]}} sysm) "stderr")))
+
+      ^{:go/pos {:if [338 3] :lbrace [338 18] :rbrace [340 3]}} (when ^{:go/apos {2 [338 14]} :go/pos {:op-pos [338 11]}} (== ^{:go/pos {:name-pos [338 6]}} file nil)
+        ^{:go/apos {1 [339 11] 2 [339 14]} :go/pos {:return [339 4]}} (return 0 nil ^{:go/apos {2 [339 43]} :go/pos {:lparen [339 24] :rparen [339 60]}} (^{:go/pos {:name-pos [339 19]}} Raise ^{:go/pos {:name-pos [339 25]}} RuntimeErrorType "lost sys.stderr")))
+
+      ^{:go/pos {:if [341 3] :lbrace [341 19] :rbrace [343 3]}} (when ^{:go/pos {:op-pos [341 11]}} (== ^{:go/pos {:name-pos [341 6]}} file ^{:go/pos {:name-pos [341 14]}} None)
+        ^{:go/apos {1 [342 11] 2 [342 14]} :go/pos {:return [342 4]}} (return 0 nil ^{:go/apos {2 [342 43]} :go/pos {:lparen [342 24] :rparen [342 63]}} (^{:go/pos {:name-pos [342 19]}} Raise ^{:go/pos {:name-pos [342 25]}} RuntimeErrorType "sys.stderr is None"))))
+
+    ^{:go/pos {:if [344 9] :lbrace [344 37] :rbrace [358 2]}} (when [^{:go/pos {:tok-pos [344 18]}} (values ^{:go/pos {:name-pos [344 12]}} i ^{:go/pos {:name-pos [344 15]}} ok) ^{:go/pos {:lparen [344 26] :rparen [344 31]}} (^{:go/pos {:name-pos [344 21]}} asInt ^{:go/pos {:name-pos [344 27]}} file)] ^{:go/pos {:name-pos [344 34]}} ok
+      ^{:go/pos {:if [345 3] :lbrace [345 64] :rbrace [349 3]}} (when [^{:go/pos {:tok-pos [345 16]}} (values ^{:go/pos {:name-pos [345 6]}} _ ^{:go/pos {:name-pos [345 9]}} isBool) ^{:go/pos {:dot [345 23] :lparen [345 24] :rparen [345 30]}} (assert ^{:go/pos {:star [345 25]}} (* ^{:go/pos {:name-pos [345 26]}} Bool) ^{:go/pos {:name-pos [345 19]}} file)] ^{:go/pos {:op-pos [345 40]}} (and ^{:go/pos {:name-pos [345 33]}} isBool ^{:go/apos {2 [345 60]} :go/pos {:op-pos [345 57]}} (!= ^{:go/pos {:name-pos [345 43]}} posixWarnHook nil))
+        ^{:go/pos {:if [346 4] :lbrace [346 97] :rbrace [348 4]}} (when [^{:go/pos {:name-pos [346 7] :tok-pos [346 11]}} err ^{:go/apos {2 [346 48]} :go/pos {:lparen [346 27] :rparen [346 83]}} (^{:go/pos {:name-pos [346 14]}} posixWarnHook ^{:go/pos {:name-pos [346 28]}} RuntimeWarningType "bool is used as a file descriptor")] ^{:go/apos {2 [346 93]} :go/pos {:op-pos [346 90]}} (!= ^{:go/pos {:name-pos [346 86]}} err nil)
+          ^{:go/apos {1 [347 12] 2 [347 15]} :go/pos {:return [347 5]}} (return 0 nil ^{:go/pos {:name-pos [347 20]}} err)))
+
+
+      (let [^{:go/pos {:tok-pos [350 11]}} (values ^{:go/pos {:name-pos [350 3]}} v ^{:go/pos {:name-pos [350 6]}} fits) ^{:go/pos {:dot [350 15] :lparen [350 21] :name-pos [350 16] :rparen [350 22]}} (.Int64 ^{:go/pos {:name-pos [350 14]}} i)]
+        ^{:go/pos {:if [351 3] :lbrace [351 54] :rbrace [353 3]}} (when ^{:go/ops [[351 12] [351 33]] :go/pos {:op-pos [351 33]}} (or ^{:go/pos {:op-pos [351 6]}} (not ^{:go/pos {:name-pos [351 7]}} fits) ^{:go/pos {:op-pos [351 17]}} (> ^{:go/pos {:name-pos [351 15]}} v ^{:go/pos {:dot [351 23] :name-pos [351 24] :x-pos [351 19]}} math/MaxInt32) ^{:go/pos {:op-pos [351 38]}} (< ^{:go/pos {:name-pos [351 36]}} v ^{:go/pos {:dot [351 44] :name-pos [351 45] :x-pos [351 40]}} math/MinInt32))
+          ^{:go/apos {1 [352 11] 2 [352 14]} :go/pos {:return [352 4]}} (return 0 nil ^{:go/apos {2 [352 44]} :go/pos {:lparen [352 24] :rparen [352 86]}} (^{:go/pos {:name-pos [352 19]}} Raise ^{:go/pos {:name-pos [352 25]}} OverflowErrorType "Python int too large to convert to C int")))
+
+        ^{:go/pos {:if [354 3] :lbrace [354 12] :rbrace [356 3]}} (when ^{:go/apos {2 [354 10]} :go/pos {:op-pos [354 8]}} (< ^{:go/pos {:name-pos [354 6]}} v 0)
+          ^{:go/apos {1 [355 11] 2 [355 14]} :go/pos {:return [355 4]}} (return 0 nil ^{:go/apos {2 [355 41]} :go/pos {:lparen [355 24] :rparen [355 78]}} (^{:go/pos {:name-pos [355 19]}} Raise ^{:go/pos {:name-pos [355 25]}} ValueErrorType "file is not a valid file descriptor")))
+
+        ^{:go/apos {2 [357 18] 3 [357 23]} :go/pos {:return [357 3]}} (return ^{:go/pos {:lparen [357 13] :rparen [357 15]}} (conv ^{:go/pos {:name-pos [357 10]}} int ^{:go/pos {:name-pos [357 14]}} v) nil nil))))
+
+  (let [^{:go/pos {:tok-pos [359 12]}} (values ^{:go/pos {:name-pos [359 2]}} r ^{:go/pos {:name-pos [359 5]}} _ ^{:go/pos {:name-pos [359 8]}} err) ^{:go/apos {2 [359 32]} :go/pos {:lparen [359 25] :rparen [359 40]}} (^{:go/pos {:name-pos [359 15]}} callMethod ^{:go/pos {:name-pos [359 26]}} file "fileno")]
+    ^{:go/pos {:if [360 2] :lbrace [360 16] :rbrace [362 2]}} (when ^{:go/apos {2 [360 12]} :go/pos {:op-pos [360 9]}} (!= ^{:go/pos {:name-pos [360 5]}} err nil)
+      ^{:go/apos {1 [361 10] 2 [361 13]} :go/pos {:return [361 3]}} (return 0 nil ^{:go/pos {:name-pos [361 18]}} err))
+
+    ^{:go/pos {:if [363 2] :lbrace [363 14] :rbrace [366 2]}} (when ^{:go/apos {2 [363 10]} :go/pos {:op-pos [363 7]}} (== ^{:go/pos {:name-pos [363 5]}} r nil)
+      (let [^{:go/pos {:tok-pos [364 10]}} (values ^{:go/pos {:name-pos [364 3]}} _ ^{:go/pos {:name-pos [364 6]}} err) ^{:go/pos {:lparen [364 20] :rparen [364 43]}} (^{:go/pos {:name-pos [364 13]}} GetAttr ^{:go/pos {:name-pos [364 21]}} file ^{:go/apos {1 [364 34]} :go/pos {:lparen [364 33] :rparen [364 42]}} (^{:go/pos {:name-pos [364 27]}} NewStr "fileno"))]
+        ^{:go/apos {1 [365 10] 2 [365 13]} :go/pos {:return [365 3]}} (return 0 nil ^{:go/pos {:name-pos [365 18]}} err)))
+
+    (let ^{:go/apos {1 [367 8]}} [^{:go/pos {:name-pos [367 2] :tok-pos [367 5]}} fd -1]
+      ^{:go/pos {:if [368 2] :lbrace [368 27] :rbrace [372 2]}} (when [^{:go/pos {:tok-pos [368 11]}} (values ^{:go/pos {:name-pos [368 5]}} i ^{:go/pos {:name-pos [368 8]}} ok) ^{:go/pos {:lparen [368 19] :rparen [368 21]}} (^{:go/pos {:name-pos [368 14]}} asInt ^{:go/pos {:name-pos [368 20]}} r)] ^{:go/pos {:name-pos [368 24]}} ok
+        ^{:go/pos {:if [369 3] :lbrace [369 64] :rbrace [371 3]}} (when [^{:go/pos {:tok-pos [369 14]}} (values ^{:go/pos {:name-pos [369 6]}} v ^{:go/pos {:name-pos [369 9]}} fits) ^{:go/pos {:dot [369 18] :lparen [369 24] :name-pos [369 19] :rparen [369 25]}} (.Int64 ^{:go/pos {:name-pos [369 17]}} i)] ^{:go/ops [[369 33] [369 43]] :go/pos {:op-pos [369 43]}} (and ^{:go/pos {:name-pos [369 28]}} fits ^{:go/apos {2 [369 41]} :go/pos {:op-pos [369 38]}} (>= ^{:go/pos {:name-pos [369 36]}} v 0) ^{:go/pos {:op-pos [369 48]}} (< ^{:go/pos {:name-pos [369 46]}} v ^{:go/pos {:dot [369 54] :name-pos [369 55] :x-pos [369 50]}} math/MaxInt32))
+          ^{:go/pos {:tok-pos [370 7]}} (set! ^{:go/pos {:name-pos [370 4]}} fd ^{:go/pos {:lparen [370 12] :rparen [370 14]}} (conv ^{:go/pos {:name-pos [370 9]}} int ^{:go/pos {:name-pos [370 13]}} v))))
+
+
+      ^{:go/pos {:if [373 2] :lbrace [373 14] :rbrace [375 2]}} (when ^{:go/apos {2 [373 11]} :go/pos {:op-pos [373 8]}} (== ^{:go/pos {:name-pos [373 5]}} fd -1)
+        ^{:go/apos {1 [374 10] 2 [374 13]} :go/pos {:return [374 3]}} (return 0 nil ^{:go/apos {2 [374 42]} :go/pos {:lparen [374 23] :rparen [374 88]}} (^{:go/pos {:name-pos [374 18]}} Raise ^{:go/pos {:name-pos [374 24]}} RuntimeErrorType "file.fileno() is not a valid file descriptor")))
+
+      ^{:go/apos {2 [376 19]} :go/pos {:lparen [376 12] :rparen [376 26]}} (^{:go/pos {:name-pos [376 2]}} callMethod ^{:go/pos {:name-pos [376 13]}} file "flush") ; a flush error ignored
+      ^{:go/apos {3 [377 19]} :go/pos {:return [377 2]}} (return ^{:go/pos {:name-pos [377 9]}} fd ^{:go/pos {:name-pos [377 13]}} file nil))))
+
+
+
+^{:go/pos {:doc [380 1] :func [381 1] :lbrace [381 38] :rbrace [386 1] :return [385 2]}} (go/func ^{:go/pos {:name-pos [381 6]}} fhIntArg "fhIntArg is the 'i' format: PyLong_AsInt.\n" ^{:go/pos {:closing [381 23] :opening [381 14]}} [^{:tag ^{:go/pos {:name-pos [381 17]}} Object :go/pos {:name-pos [381 15]}} o] :results ^{:go/pos {:closing [381 36] :opening [381 25]}} [^{:go/pos {:name-pos [381 26]}} int ^{:go/pos {:name-pos [381 31]}} error]
+  ^{:go/pos {:if [382 2] :lbrace [382 31] :rbrace [384 2]}} (when [^{:go/pos {:tok-pos [382 12]}} (values ^{:go/pos {:name-pos [382 5]}} _ ^{:go/pos {:name-pos [382 8]}} isF) ^{:go/pos {:dot [382 16] :lparen [382 17] :rparen [382 24]}} (assert ^{:go/pos {:star [382 18]}} (* ^{:go/pos {:name-pos [382 19]}} Float) ^{:go/pos {:name-pos [382 15]}} o)] ^{:go/pos {:name-pos [382 27]}} isF
+    ^{:go/apos {1 [383 10]} :go/pos {:return [383 3]}} (return 0 ^{:go/apos {2 [383 34]} :go/pos {:lparen [383 18] :rparen [383 86]}} (^{:go/pos {:name-pos [383 13]}} Raise ^{:go/pos {:name-pos [383 19]}} TypeErrorType "'float' object cannot be interpreted as an integer")))
+
+  ^{:go/pos {:lparen [385 15] :rparen [385 17]}} (^{:go/pos {:name-pos [385 9]}} intArg ^{:go/pos {:name-pos [385 16]}} o))
+
+
+
+^{:go/pos {:doc [388 1] :func [389 1] :lbrace [389 51] :rbrace [394 1] :return [393 2]}} (go/func ^{:go/pos {:name-pos [389 6]}} fhBoolArg "fhBoolArg is the 'p' format: PyObject_IsTrue; absent the default.\n" ^{:go/pos {:closing [389 35] :opening [389 15]}} [^{:tag ^{:go/pos {:name-pos [389 18]}} Object :go/pos {:name-pos [389 16]}} o ^{:tag ^{:go/pos {:name-pos [389 31]}} bool :go/pos {:name-pos [389 26]}} dflt] :results ^{:go/pos {:closing [389 49] :opening [389 37]}} [^{:go/pos {:name-pos [389 38]}} bool ^{:go/pos {:name-pos [389 44]}} error]
+  ^{:go/pos {:if [390 2] :lbrace [390 14] :rbrace [392 2]}} (when ^{:go/apos {2 [390 10]} :go/pos {:op-pos [390 7]}} (== ^{:go/pos {:name-pos [390 5]}} o nil)
+    ^{:go/apos {2 [391 16]} :go/pos {:return [391 3]}} (return ^{:go/pos {:name-pos [391 10]}} dflt nil))
+
+  ^{:go/pos {:lparen [393 15] :rparen [393 17]}} (^{:go/pos {:name-pos [393 9]}} Truthy ^{:go/pos {:name-pos [393 16]}} o))
+
+
+
+^{:go/pos {:doc [396 1] :func [397 1] :lbrace [397 39] :rbrace [419 1] :return [418 2]}} (go/func ^{:go/pos {:name-pos [397 6]}} fhTimeoutHeader "fhTimeoutHeader is format_timeout.\n" ^{:tag ^{:go/pos {:name-pos [397 32]}} string :go/pos {:closing [397 30] :opening [397 21]}} [^{:tag ^{:go/pos {:name-pos [397 25]}} int64 :go/pos {:name-pos [397 22]}} us]
+  (let [^{:go/pos {:name-pos [398 2] :tok-pos [398 6]}} sec ^{:go/apos {2 [398 14]} :go/atext {2 "1e6"} :go/pos {:op-pos [398 12]}} (/ ^{:go/pos {:name-pos [398 9]}} us 1000000.0)]
+    ^{:go/apos {3 [399 8]} :go/atext {3 "1e6"} :go/pos {:tok-pos [399 5]}} (set! ^{:go/pos {:name-pos [399 2]}} us % 1000000.0)
+    (let [^{:go/pos {:name-pos [400 2] :tok-pos [400 6]}} min ^{:go/apos {2 [400 15]} :go/pos {:op-pos [400 13]}} (/ ^{:go/pos {:name-pos [400 9]}} sec 60)]
+      ^{:go/apos {3 [401 9]} :go/pos {:tok-pos [401 6]}} (set! ^{:go/pos {:name-pos [401 2]}} sec % 60)
+      (let [^{:go/pos {:name-pos [402 2] :tok-pos [402 7]}} hour ^{:go/apos {2 [402 16]} :go/pos {:op-pos [402 14]}} (/ ^{:go/pos {:name-pos [402 10]}} min 60)]
+        ^{:go/apos {3 [403 9]} :go/pos {:tok-pos [403 6]}} (set! ^{:go/pos {:name-pos [403 2]}} min % 60)
+        (let [^{:go/pos {:name-pos [404 2] :tok-pos [404 6]}} two ^{:go/pos {:func [404 9] :lbrace [404 30] :rbrace [409 2] :return [408 3]}} (fn ^{:tag ^{:go/pos {:name-pos [404 23]}} string :go/pos {:closing [404 21] :opening [404 13]}} [^{:tag ^{:go/pos {:name-pos [404 16]}} int64 :go/pos {:name-pos [404 14]}} v]
+              ^{:go/pos {:if [405 3] :lbrace [405 13] :rbrace [407 3]}} (when ^{:go/apos {2 [405 10]} :go/pos {:op-pos [405 8]}} (< ^{:go/pos {:name-pos [405 6]}} v 10)
+                ^{:go/pos {:return [406 4]}} (return ^{:go/apos {1 [406 11]} :go/pos {:op-pos [406 15]}} (+ "0" ^{:go/apos {2 [406 38]} :go/pos {:lparen [406 34] :rparen [406 40]}} (^{:go/pos {:dot [406 24] :name-pos [406 25] :x-pos [406 17]}} strconv/FormatInt ^{:go/pos {:name-pos [406 35]}} v 10))))
+
+              ^{:go/apos {2 [408 31]} :go/pos {:lparen [408 27] :rparen [408 33]}} (^{:go/pos {:dot [408 17] :name-pos [408 18] :x-pos [408 10]}} strconv/FormatInt ^{:go/pos {:name-pos [408 28]}} v 10))
+
+            ^{:go/pos {:name-pos [410 2] :tok-pos [410 4]}} h ^{:go/apos {1 [410 7] 3 [410 51] 5 [410 68]} :go/ops [[410 19] [410 49] [410 55] [410 66] [410 72]] :go/pos {:op-pos [410 72]}} (+ "Timeout (" ^{:go/apos {2 [410 45]} :go/pos {:lparen [410 38] :rparen [410 47]}} (^{:go/pos {:dot [410 28] :name-pos [410 29] :x-pos [410 21]}} strconv/FormatInt ^{:go/pos {:name-pos [410 39]}} hour 10) ":" ^{:go/pos {:lparen [410 60] :rparen [410 64]}} (^{:go/pos {:name-pos [410 57]}} two ^{:go/pos {:name-pos [410 61]}} min) ":" ^{:go/pos {:lparen [410 77] :rparen [410 81]}} (^{:go/pos {:name-pos [410 74]}} two ^{:go/pos {:name-pos [410 78]}} sec))]
+          ^{:go/pos {:if [411 2] :lbrace [411 13] :rbrace [417 2]}} (when ^{:go/apos {2 [411 11]} :go/pos {:op-pos [411 8]}} (!= ^{:go/pos {:name-pos [411 5]}} us 0)
+            (let [^{:go/pos {:name-pos [412 3] :tok-pos [412 5]}} u ^{:go/apos {2 [412 30]} :go/pos {:lparen [412 25] :rparen [412 32]}} (^{:go/pos {:dot [412 15] :name-pos [412 16] :x-pos [412 8]}} strconv/FormatInt ^{:go/pos {:name-pos [412 26]}} us 10)]
+              ^{:go/pos {:for [413 3] :lbrace [413 18] :rbrace [415 3]}} (while ^{:go/apos {2 [413 16]} :go/pos {:op-pos [413 14]}} (< ^{:go/pos {:lparen [413 10] :rparen [413 12]}} (^{:go/pos {:name-pos [413 7]}} len ^{:go/pos {:name-pos [413 11]}} u) 6)
+                ^{:go/pos {:tok-pos [414 6]}} (set! ^{:go/pos {:name-pos [414 4]}} u ^{:go/apos {1 [414 8]} :go/pos {:op-pos [414 12]}} (+ "0" ^{:go/pos {:name-pos [414 14]}} u)))
+
+              ^{:go/pos {:tok-pos [416 5]}} (set! ^{:go/pos {:name-pos [416 3]}} h + ^{:go/apos {1 [416 8]} :go/pos {:op-pos [416 12]}} (+ "." ^{:go/pos {:name-pos [416 14]}} u))))
+
+          ^{:go/apos {2 [418 13]} :go/pos {:op-pos [418 11]}} (+ ^{:go/pos {:name-pos [418 9]}} h ")!\n"))))))
+
+
+
+^{:go/pos {:doc [421 1] :func [422 1] :lbrace [422 43] :rbrace [450 1]}} (go/func ^{:go/pos {:name-pos [422 6]}} fhTimeoutUs "fhTimeoutUs is _PyTime_FromSecondsObject then _PyTime_AsMicroseconds, both _PyTime_ROUND_TIMEOUT (up).\n" ^{:go/pos {:closing [422 26] :opening [422 17]}} [^{:tag ^{:go/pos {:name-pos [422 20]}} Object :go/pos {:name-pos [422 18]}} o] :results ^{:go/pos {:closing [422 41] :opening [422 28]}} [^{:go/pos {:name-pos [422 29]}} int64 ^{:go/pos {:name-pos [422 36]}} error]
+  ^{:go/pos {:if [423 2] :lbrace [423 27] :rbrace [429 2]}} (when [^{:go/pos {:tok-pos [423 11]}} (values ^{:go/pos {:name-pos [423 5]}} i ^{:go/pos {:name-pos [423 8]}} ok) ^{:go/pos {:lparen [423 19] :rparen [423 21]}} (^{:go/pos {:name-pos [423 14]}} asInt ^{:go/pos {:name-pos [423 20]}} o)] ^{:go/pos {:name-pos [423 24]}} ok
+    (let [^{:go/pos {:tok-pos [424 11]}} (values ^{:go/pos {:name-pos [424 3]}} v ^{:go/pos {:name-pos [424 6]}} fits) ^{:go/pos {:dot [424 15] :lparen [424 21] :name-pos [424 16] :rparen [424 22]}} (.Int64 ^{:go/pos {:name-pos [424 14]}} i)]
+      ^{:go/pos {:if [425 3] :lbrace [425 76] :rbrace [427 3]}} (when ^{:go/ops [[425 12] [425 44]] :go/pos {:op-pos [425 44]}} (or ^{:go/pos {:op-pos [425 6]}} (not ^{:go/pos {:name-pos [425 7]}} fits) ^{:go/pos {:op-pos [425 17]}} (> ^{:go/pos {:name-pos [425 15]}} v ^{:go/apos {2 [425 33]} :go/pos {:op-pos [425 32]}} (/ ^{:go/pos {:dot [425 23] :name-pos [425 24] :x-pos [425 19]}} math/MaxInt64 1000000000)) ^{:go/pos {:op-pos [425 49]}} (< ^{:go/pos {:name-pos [425 47]}} v ^{:go/apos {2 [425 65]} :go/pos {:op-pos [425 64]}} (/ ^{:go/pos {:dot [425 55] :name-pos [425 56] :x-pos [425 51]}} math/MinInt64 1000000000)))
+        ^{:go/apos {1 [426 11]} :go/pos {:return [426 4]}} (return 0 ^{:go/apos {2 [426 39]} :go/pos {:lparen [426 19] :rparen [426 85]}} (^{:go/pos {:name-pos [426 14]}} Raise ^{:go/pos {:name-pos [426 20]}} OverflowErrorType "timestamp too large to convert to C PyTime_t")))
+
+      ^{:go/apos {2 [428 19]} :go/pos {:return [428 3]}} (return ^{:go/apos {2 [428 14]} :go/atext {2 "1e6"} :go/pos {:op-pos [428 12]}} (* ^{:go/pos {:name-pos [428 10]}} v 1000000.0) nil)))
+
+  (let [^{:go/pos {:tok-pos [430 9]}} (values ^{:go/pos {:name-pos [430 2]}} f ^{:go/pos {:name-pos [430 5]}} err) ^{:go/pos {:lparen [430 19] :rparen [430 21]}} (^{:go/pos {:name-pos [430 12]}} ToFloat ^{:go/pos {:name-pos [430 20]}} o)]
+    ^{:go/pos {:if [431 2] :lbrace [431 16] :rbrace [436 2]}} (when ^{:go/apos {2 [431 12]} :go/pos {:op-pos [431 9]}} (!= ^{:go/pos {:name-pos [431 5]}} err nil)
+      ^{:go/pos {:if [432 3] :lbrace [432 64] :rbrace [434 3]}} (when [^{:go/pos {:tok-pos [432 12]}} (values ^{:go/pos {:name-pos [432 6]}} _ ^{:go/pos {:name-pos [432 9]}} ok) ^{:go/pos {:dot [432 18] :lparen [432 19] :rparen [432 27]}} (assert ^{:go/pos {:star [432 20]}} (* ^{:go/pos {:name-pos [432 21]}} Raised) ^{:go/pos {:name-pos [432 15]}} err)] ^{:go/pos {:op-pos [432 33]}} (and ^{:go/pos {:name-pos [432 30]}} ok ^{:go/apos {2 [432 60]} :go/pos {:op-pos [432 57]}} (== ^{:go/pos {:dot [432 50] :name-pos [432 51]}} (.-Float ^{:go/pos {:dot [432 44] :name-pos [432 45]}} (.-Slots ^{:go/pos {:dot [432 37] :lparen [432 42] :name-pos [432 38] :rparen [432 43]}} (.Type ^{:go/pos {:name-pos [432 36]}} o))) nil))
+        ^{:go/apos {1 [433 11]} :go/pos {:return [433 4]}} (return 0 ^{:go/apos {2 [433 36]} :go/pos {:lparen [433 20] :rparen [433 109]}} (^{:go/pos {:name-pos [433 14]}} Raisef ^{:go/pos {:name-pos [433 21]}} TypeErrorType "'%s' object cannot be interpreted as an integer or float" ^{:go/pos {:dot [433 104] :name-pos [433 105]}} (.-Name ^{:go/pos {:dot [433 97] :lparen [433 102] :name-pos [433 98] :rparen [433 103]}} (.Type ^{:go/pos {:name-pos [433 96]}} o)))))
+
+      ^{:go/apos {1 [435 10]} :go/pos {:return [435 3]}} (return 0 ^{:go/pos {:name-pos [435 13]}} err))
+
+    ^{:go/pos {:if [437 2] :lbrace [437 19] :rbrace [439 2]}} (when ^{:go/pos {:lparen [437 15] :rparen [437 17]}} (^{:go/pos {:dot [437 9] :name-pos [437 10] :x-pos [437 5]}} math/IsNaN ^{:go/pos {:name-pos [437 16]}} f)
+      ^{:go/apos {1 [438 10]} :go/pos {:return [438 3]}} (return 0 ^{:go/apos {2 [438 35]} :go/pos {:lparen [438 18] :rparen [438 69]}} (^{:go/pos {:name-pos [438 13]}} Raise ^{:go/pos {:name-pos [438 19]}} ValueErrorType "Invalid value NaN (not a number)")))
+
+    (let [^{:go/pos {:name-pos [440 2] :tok-pos [440 5]}} ns ^{:go/pos {:lparen [440 17] :rparen [440 25]}} (^{:go/pos {:dot [440 12] :name-pos [440 13] :x-pos [440 8]}} math/Ceil ^{:go/apos {2 [440 22]} :go/atext {2 "1e9"} :go/pos {:op-pos [440 20]}} (* ^{:go/pos {:name-pos [440 18]}} f 1.0E9))]
+      ^{:go/pos {:if [441 2] :lbrace [441 68] :rbrace [443 2]}} (when ^{:go/pos {:op-pos [441 35]}} (or ^{:go/apos {2 [441 11]} :go/atext {2 "9.223372036854775807e18"} :go/pos {:op-pos [441 8]}} (>= ^{:go/pos {:name-pos [441 5]}} ns 9223372036854775807.0M) ^{:go/apos {2 [441 43]} :go/atext {2 "9.223372036854775808e18"} :go/pos {:op-pos [441 41]}} (< ^{:go/pos {:name-pos [441 38]}} ns -9223372036854775808.0M))
+        ^{:go/apos {1 [442 10]} :go/pos {:return [442 3]}} (return 0 ^{:go/apos {2 [442 38]} :go/pos {:lparen [442 18] :rparen [442 84]}} (^{:go/pos {:name-pos [442 13]}} Raise ^{:go/pos {:name-pos [442 19]}} OverflowErrorType "timestamp too large to convert to C PyTime_t")))
+
+      (let [^{:go/pos {:name-pos [444 2] :tok-pos [444 4]}} n ^{:go/pos {:lparen [444 12] :rparen [444 15]}} (conv ^{:go/pos {:name-pos [444 7]}} int64 ^{:go/pos {:name-pos [444 13]}} ns)
+          ^{:go/pos {:name-pos [445 2] :tok-pos [445 5]}} us ^{:go/apos {2 [445 12]} :go/pos {:op-pos [445 10]}} (/ ^{:go/pos {:name-pos [445 8]}} n 1000)]
+        ^{:go/pos {:if [446 2] :lbrace [446 16] :rbrace [448 2]}} (when ^{:go/apos {2 [446 14]} :go/pos {:op-pos [446 12]}} (> ^{:go/apos {2 [446 7]} :go/pos {:op-pos [446 6]}} (% ^{:go/pos {:name-pos [446 5]}} n 1000) 0)
+          ^{:go/pos {:tok-pos [447 5]}} (inc! ^{:go/pos {:name-pos [447 3]}} us))
+
+        ^{:go/apos {2 [449 13]} :go/pos {:return [449 2]}} (return ^{:go/pos {:name-pos [449 9]}} us nil)))))
+
+
+
+^{:go/pos {:doc [452 1] :func [453 1] :lbrace [453 22] :rbrace [461 1]}} (go/func ^{:go/pos {:name-pos [453 6]}} fhCancelLater "fhCancelLater is cancel_dump_traceback_later: the watchdog stopped and waited for.\n" ^{:go/pos {:closing [453 20] :opening [453 19]}} []
+  (let [^{:go/pos {:name-pos [454 2] :tok-pos [454 4]}} w ^{:go/pos {:name-pos [454 7]}} fhWatchdog]
+    ^{:go/pos {:if [455 2] :lbrace [455 14] :rbrace [457 2]}} (when ^{:go/apos {2 [455 10]} :go/pos {:op-pos [455 7]}} (== ^{:go/pos {:name-pos [455 5]}} w nil)
+      ^{:go/pos {:return [456 3]}} (return))
+
+    ^{:go/apos {2 [458 15]} :go/pos {:tok-pos [458 13]}} (set! ^{:go/pos {:name-pos [458 2]}} fhWatchdog nil)
+    ^{:go/pos {:lparen [459 7] :rparen [459 16]}} (^{:go/pos {:name-pos [459 2]}} close ^{:go/pos {:dot [459 9] :name-pos [459 10]}} (.-cancel ^{:go/pos {:name-pos [459 8]}} w))
+    ^{:go/pos {:lparen [460 14] :rparen [460 34]}} (^{:go/pos {:name-pos [460 2]}} allowThreads ^{:go/pos {:func [460 15] :lbrace [460 22] :rbrace [460 33]}} (fn ^{:go/pos {:closing [460 20] :opening [460 19]}} [] ^{:go/pos {:op-pos [460 24]}} (<! ^{:go/pos {:dot [460 27] :name-pos [460 28]}} (.-done ^{:go/pos {:name-pos [460 26]}} w))))))
+
+
+^{:go/pos {:func [463 1] :lbrace [463 58] :rbrace [730 1]}} (go/func ^{:go/pos {:name-pos [463 6]}} makeFaulthandlerModule ^{:go/pos {:closing [463 39] :opening [463 28]}} [^{:tag ^{:go/pos {:star [463 32]}} (* ^{:go/pos {:name-pos [463 33]}} Interp) :go/pos {:name-pos [463 29]}} in] :results ^{:go/pos {:closing [463 56] :opening [463 41]}} [^{:go/pos {:star [463 42]}} (* ^{:go/pos {:name-pos [463 43]}} Module) ^{:go/pos {:name-pos [463 51]}} error]
+  (let [^{:go/pos {:name-pos [464 2] :tok-pos [464 4]}} d ^{:go/apos {1 [464 13]} :go/pos {:lparen [464 12] :rparen [464 27]}} (^{:go/pos {:name-pos [464 7]}} modNS "faulthandler")]
+    ^{:go/apos {2 [465 11]} :go/pos {:dot [465 3] :lparen [465 10] :name-pos [465 4] :rparen [465 52]}} (.SetStr ^{:go/pos {:name-pos [465 2]}} d "__doc__" ^{:go/apos {1 [465 29]} :go/pos {:lparen [465 28] :rparen [465 51]}} (^{:go/pos {:name-pos [465 22]}} NewStr "faulthandler module."))
+    (let [^{:go/pos {:name-pos [466 2] :tok-pos [466 5]}} fn ^{:go/pos {:func [466 8] :lbrace [466 76] :rbrace [468 2]}} (fn ^{:go/pos {:closing [466 74] :opening [466 12]}} [^{:tag ^{:go/pos {:name-pos [466 18]}} string :go/pos {:name-pos [466 13]}} name ^{:tag ^{:go/pos {:func [466 28]}} (func ^{:go/pos {:closing [466 57] :opening [466 32]}} [^{:tag ^{:go/pos {:lbrack [466 38]}} (slice ^{:go/pos {:name-pos [466 40]}} Object) :go/pos {:name-pos [466 33]}} args ^{:tag ^{:go/pos {:lbrack [466 51]}} (slice ^{:go/pos {:star [466 53]}} (* ^{:go/pos {:name-pos [466 54]}} Str)) :go/pos {:name-pos [466 48]}} kw] ^{:go/pos {:closing [466 73] :opening [466 59]}} [^{:go/pos {:name-pos [466 60]}} Object ^{:go/pos {:name-pos [466 68]}} error]) :go/pos {:name-pos [466 26]}} f]
+          ^{:go/pos {:dot [467 4] :lparen [467 11] :name-pos [467 5] :rparen [467 45]}} (.SetStr ^{:go/pos {:name-pos [467 3]}} d ^{:go/pos {:name-pos [467 12]}} name ^{:go/pos {:op-pos [467 18]}} (addr ^{:go/acolon {2 [467 31] 4 [467 41]} :go/apos {2 [467 27] 4 [467 39]} :go/pos {:lbrace [467 26] :rbrace [467 44]}} (lit ^{:go/pos {:name-pos [467 19]}} Builtin :Name ^{:go/pos {:name-pos [467 33]}} name :Fn ^{:go/pos {:name-pos [467 43]}} f))))
+
+        ^{:go/pos {:name-pos [469 2] :tok-pos [469 9]}} noArgs ^{:go/pos {:func [469 12] :lbrace [469 56] :rbrace [479 2]}} (fn ^{:go/pos {:closing [469 54] :opening [469 16]}} [^{:tag ^{:go/pos {:name-pos [469 22]}} string :go/pos {:name-pos [469 17]}} name ^{:tag ^{:go/pos {:func [469 32]}} (func ^{:go/pos {:closing [469 37] :opening [469 36]}} [] ^{:go/pos {:closing [469 53] :opening [469 39]}} [^{:go/pos {:name-pos [469 40]}} Object ^{:go/pos {:name-pos [469 48]}} error]) :go/pos {:name-pos [469 30]}} f]
+          ^{:go/pos {:lparen [470 5] :rparen [478 4]}} (go/call ^{:go/pos {:name-pos [470 3]}} fn ^{:go/pos {:name-pos [470 6]}} name ^{:go/pos {:func [470 12] :lbrace [470 59] :rbrace [478 3] :return [477 4]}} (fn ^{:go/pos {:closing [470 41] :opening [470 16]}} [^{:tag ^{:go/pos {:lbrack [470 22]}} (slice ^{:go/pos {:name-pos [470 24]}} Object) :go/pos {:name-pos [470 17]}} args ^{:tag ^{:go/pos {:lbrack [470 35]}} (slice ^{:go/pos {:star [470 37]}} (* ^{:go/pos {:name-pos [470 38]}} Str)) :go/pos {:name-pos [470 32]}} kw] :results ^{:go/pos {:closing [470 57] :opening [470 43]}} [^{:go/pos {:name-pos [470 44]}} Object ^{:go/pos {:name-pos [470 52]}} error]
+              ^{:go/pos {:if [471 4] :lbrace [471 19] :rbrace [473 4]}} (when ^{:go/apos {2 [471 17]} :go/pos {:op-pos [471 15]}} (> ^{:go/pos {:lparen [471 10] :rparen [471 13]}} (^{:go/pos {:name-pos [471 7]}} len ^{:go/pos {:name-pos [471 11]}} kw) 0)
+                ^{:go/apos {1 [472 12]} :go/pos {:return [472 5]}} (return nil ^{:go/apos {2 [472 39]} :go/pos {:lparen [472 23] :rparen [472 91]}} (^{:go/pos {:name-pos [472 17]}} Raisef ^{:go/pos {:name-pos [472 24]}} TypeErrorType "faulthandler.%s() takes no keyword arguments" ^{:go/pos {:name-pos [472 87]}} name)))
+
+              ^{:go/pos {:if [474 4] :lbrace [474 21] :rbrace [476 4]}} (when ^{:go/apos {2 [474 19]} :go/pos {:op-pos [474 17]}} (> ^{:go/pos {:lparen [474 10] :rparen [474 15]}} (^{:go/pos {:name-pos [474 7]}} len ^{:go/pos {:name-pos [474 11]}} args) 0)
+                ^{:go/apos {1 [475 12]} :go/pos {:return [475 5]}} (return nil ^{:go/apos {2 [475 39]} :go/pos {:lparen [475 23] :rparen [475 105]}} (^{:go/pos {:name-pos [475 17]}} Raisef ^{:go/pos {:name-pos [475 24]}} TypeErrorType "faulthandler.%s() takes no arguments (%d given)" ^{:go/pos {:name-pos [475 90]}} name ^{:go/pos {:lparen [475 99] :rparen [475 104]}} (^{:go/pos {:name-pos [475 96]}} len ^{:go/pos {:name-pos [475 100]}} args))))
+
+              ^{:go/pos {:lparen [477 12] :rparen [477 13]}} (^{:go/pos {:name-pos [477 11]}} f))))]
+
+
+      ^{:go/apos {2 [480 5]} :go/pos {:lparen [480 4] :rparen [509 3]}} (go/call ^{:go/pos {:name-pos [480 2]}} fn "enable" ^{:go/pos {:func [480 15] :lbrace [480 62] :rbrace [509 2]}} (fn ^{:go/pos {:closing [480 44] :opening [480 19]}} [^{:tag ^{:go/pos {:lbrack [480 25]}} (slice ^{:go/pos {:name-pos [480 27]}} Object) :go/pos {:name-pos [480 20]}} args ^{:tag ^{:go/pos {:lbrack [480 38]}} (slice ^{:go/pos {:star [480 40]}} (* ^{:go/pos {:name-pos [480 41]}} Str)) :go/pos {:name-pos [480 35]}} kw] :results ^{:go/pos {:closing [480 60] :opening [480 46]}} [^{:go/pos {:name-pos [480 47]}} Object ^{:go/pos {:name-pos [480 55]}} error]
+          (let [^{:go/pos {:tok-pos [481 10]}} (values ^{:go/pos {:name-pos [481 3]}} a ^{:go/pos {:name-pos [481 6]}} err) ^{:go/apos {1 [481 23] 5 [481 87]} :go/pos {:lparen [481 22] :rparen [481 88]}} (^{:go/pos {:name-pos [481 13]}} parseArgs "enable" ^{:go/pos {:name-pos [481 33]}} args ^{:go/pos {:name-pos [481 39]}} kw ^{:go/apos {2 [481 52] 3 [481 60] 4 [481 75]} :go/pos {:lbrace [481 51] :rbrace [481 84]}} (lit ^{:go/pos {:lbrack [481 43]}} (slice ^{:go/pos {:name-pos [481 45]}} string) "file" "all_threads" "c_stack") 0)]
+            ^{:go/pos {:if [482 3] :lbrace [482 17] :rbrace [484 3]}} (when ^{:go/apos {2 [482 13]} :go/pos {:op-pos [482 10]}} (!= ^{:go/pos {:name-pos [482 6]}} err nil)
+              ^{:go/apos {1 [483 11]} :go/pos {:return [483 4]}} (return nil ^{:go/pos {:name-pos [483 16]}} err))
+
+            (let [^{:go/pos {:tok-pos [485 12]}} (values ^{:go/pos {:name-pos [485 3]}} all ^:assign ^{:go/pos {:name-pos [485 8]}} err) ^{:go/apos {2 [485 31]} :go/pos {:lparen [485 24] :rparen [485 35]}} (^{:go/pos {:name-pos [485 15]}} fhBoolArg ^{:go/apos {2 [485 27]} :go/pos {:lbrack [485 26] :rbrack [485 28]}} (aget ^{:go/pos {:name-pos [485 25]}} a 1) true)]
+              ^{:go/pos {:if [486 3] :lbrace [486 17] :rbrace [488 3]}} (when ^{:go/apos {2 [486 13]} :go/pos {:op-pos [486 10]}} (!= ^{:go/pos {:name-pos [486 6]}} err nil)
+                ^{:go/apos {1 [487 11]} :go/pos {:return [487 4]}} (return nil ^{:go/pos {:name-pos [487 16]}} err))
+
+              (let [^{:go/pos {:tok-pos [489 11]}} (values ^{:go/pos {:name-pos [489 3]}} cs ^:assign ^{:go/pos {:name-pos [489 7]}} err) ^{:go/apos {2 [489 30]} :go/pos {:lparen [489 23] :rparen [489 34]}} (^{:go/pos {:name-pos [489 14]}} fhBoolArg ^{:go/apos {2 [489 26]} :go/pos {:lbrack [489 25] :rbrack [489 27]}} (aget ^{:go/pos {:name-pos [489 24]}} a 2) true)]
+                ^{:go/pos {:if [490 3] :lbrace [490 17] :rbrace [492 3]}} (when ^{:go/apos {2 [490 13]} :go/pos {:op-pos [490 10]}} (!= ^{:go/pos {:name-pos [490 6]}} err nil)
+                  ^{:go/apos {1 [491 11]} :go/pos {:return [491 4]}} (return nil ^{:go/pos {:name-pos [491 16]}} err))
+
+                (let [^{:go/pos {:tok-pos [493 17]}} (values ^{:go/pos {:name-pos [493 3]}} fd ^{:go/pos {:name-pos [493 7]}} file ^:assign ^{:go/pos {:name-pos [493 13]}} err) ^{:go/pos {:lparen [493 31] :rparen [493 36]}} (^{:go/pos {:name-pos [493 20]}} fhGetFileno ^{:go/apos {2 [493 34]} :go/pos {:lbrack [493 33] :rbrack [493 35]}} (aget ^{:go/pos {:name-pos [493 32]}} a 0))]
+                  ^{:go/pos {:if [494 3] :lbrace [494 17] :rbrace [496 3]}} (when ^{:go/apos {2 [494 13]} :go/pos {:op-pos [494 10]}} (!= ^{:go/pos {:name-pos [494 6]}} err nil)
+                    ^{:go/apos {1 [495 11]} :go/pos {:return [495 4]}} (return nil ^{:go/pos {:name-pos [495 16]}} err))
+
+                  ^{:go/pos {:lparen [497 10] :rparen [497 11]}} (^{:go/pos {:name-pos [497 3]}} fhStart)
+                  ^{:go/pos {:dot [498 7] :lparen [498 12] :name-pos [498 8] :rparen [498 13]}} (.Lock ^{:go/pos {:name-pos [498 3]}} fhMu)
+                  ^{:go/pos {:tok-pos [499 64]}} (set! (values ^{:go/pos {:dot [499 10] :name-pos [499 11]}} (.-file ^{:go/pos {:name-pos [499 3]}} fhFatal) ^{:go/pos {:dot [499 24] :name-pos [499 25]}} (.-fd ^{:go/pos {:name-pos [499 17]}} fhFatal) ^{:go/pos {:dot [499 36] :name-pos [499 37]}} (.-allThreads ^{:go/pos {:name-pos [499 29]}} fhFatal) ^{:go/pos {:dot [499 56] :name-pos [499 57]}} (.-cStack ^{:go/pos {:name-pos [499 49]}} fhFatal)) (values ^{:go/pos {:name-pos [499 66]}} file ^{:go/pos {:name-pos [499 72]}} fd ^{:go/pos {:name-pos [499 76]}} all ^{:go/pos {:name-pos [499 81]}} cs))
+                  (let [^{:go/pos {:name-pos [500 3] :tok-pos [500 7]}} was ^{:go/pos {:dot [500 17] :name-pos [500 18]}} (.-enabled ^{:go/pos {:name-pos [500 10]}} fhFatal)]
+                    ^{:go/apos {2 [501 21]} :go/pos {:tok-pos [501 19]}} (set! ^{:go/pos {:dot [501 10] :name-pos [501 11]}} (.-enabled ^{:go/pos {:name-pos [501 3]}} fhFatal) true)
+                    ^{:go/pos {:dot [502 7] :lparen [502 14] :name-pos [502 8] :rparen [502 15]}} (.Unlock ^{:go/pos {:name-pos [502 3]}} fhMu)
+                    ^{:go/pos {:if [503 3] :lbrace [503 11] :rbrace [507 3]}} (when ^{:go/pos {:op-pos [503 6]}} (not ^{:go/pos {:name-pos [503 7]}} was)
+                      ^{:go/pos {:for [504 4] :lbrace [504 37] :range [504 16] :rbrace [506 4] :tok-pos [504 13]}} (range [^{:go/pos {:name-pos [504 8]}} _ ^{:go/pos {:name-pos [504 11]}} h ^{:go/pos {:name-pos [504 22]}} fhFatalSignals]
+                        ^{:go/pos {:lparen [505 18] :rparen [505 49]}} (^{:go/pos {:dot [505 11] :name-pos [505 12] :x-pos [505 5]}} signal/Notify ^{:go/pos {:name-pos [505 19]}} fatalCh ^{:go/pos {:lparen [505 42] :rparen [505 48]}} (conv ^{:go/pos {:dot [505 35] :name-pos [505 36] :x-pos [505 28]}} syscall/Signal ^{:go/pos {:dot [505 44] :name-pos [505 45]}} (.-sig ^{:go/pos {:name-pos [505 43]}} h)))))
+
+
+                    ^{:go/apos {2 [508 16]} :go/pos {:return [508 3]}} (return ^{:go/pos {:name-pos [508 10]}} None nil))))))))
+
+      ^{:go/apos {1 [510 9]} :go/pos {:lparen [510 8] :rparen [520 3]}} (^{:go/pos {:name-pos [510 2]}} noArgs "disable" ^{:go/pos {:func [510 20] :lbrace [510 43] :rbrace [520 2]}} (fn ^{:go/pos {:closing [510 25] :opening [510 24]}} [] :results ^{:go/pos {:closing [510 41] :opening [510 27]}} [^{:go/pos {:name-pos [510 28]}} Object ^{:go/pos {:name-pos [510 36]}} error]
+          ^{:go/pos {:dot [511 7] :lparen [511 12] :name-pos [511 8] :rparen [511 13]}} (.Lock ^{:go/pos {:name-pos [511 3]}} fhMu)
+          (let [^{:go/pos {:name-pos [512 3] :tok-pos [512 7]}} was ^{:go/pos {:dot [512 17] :name-pos [512 18]}} (.-enabled ^{:go/pos {:name-pos [512 10]}} fhFatal)]
+            ^{:go/pos {:tok-pos [513 33]}} (set! (values ^{:go/pos {:dot [513 10] :name-pos [513 11]}} (.-enabled ^{:go/pos {:name-pos [513 3]}} fhFatal) ^{:go/pos {:dot [513 27] :name-pos [513 28]}} (.-file ^{:go/pos {:name-pos [513 20]}} fhFatal)) ^{:go/apos {1 [513 35] 2 [513 42]}} (values false nil))
+            ^{:go/pos {:dot [514 7] :lparen [514 14] :name-pos [514 8] :rparen [514 15]}} (.Unlock ^{:go/pos {:name-pos [514 3]}} fhMu)
+            ^{:go/pos {:if [515 3] :lbrace [515 11] :rbrace [517 3]}} (when ^{:go/pos {:op-pos [515 6]}} (not ^{:go/pos {:name-pos [515 7]}} was)
+              ^{:go/apos {2 [516 18]} :go/pos {:return [516 4]}} (return ^{:go/pos {:name-pos [516 11]}} False nil))
+
+            ^{:go/pos {:lparen [518 14] :rparen [518 22]}} (^{:go/pos {:dot [518 9] :name-pos [518 10] :x-pos [518 3]}} signal/Stop ^{:go/pos {:name-pos [518 15]}} fatalCh)
+            ^{:go/apos {2 [519 16]} :go/pos {:return [519 3]}} (return ^{:go/pos {:name-pos [519 10]}} True nil))))
+
+      ^{:go/apos {1 [521 9]} :go/pos {:lparen [521 8] :rparen [525 3]}} (^{:go/pos {:name-pos [521 2]}} noArgs "is_enabled" ^{:go/pos {:func [521 23] :lbrace [521 46] :rbrace [525 2]}} (fn ^{:go/pos {:closing [521 28] :opening [521 27]}} [] :results ^{:go/pos {:closing [521 44] :opening [521 30]}} [^{:go/pos {:name-pos [521 31]}} Object ^{:go/pos {:name-pos [521 39]}} error]
+          ^{:go/pos {:dot [522 7] :lparen [522 12] :name-pos [522 8] :rparen [522 13]}} (.Lock ^{:go/pos {:name-pos [522 3]}} fhMu)
+          ^{:go/pos {:defer [523 3]}} (defer ^{:go/pos {:dot [523 13] :lparen [523 20] :name-pos [523 14] :rparen [523 21]}} (.Unlock ^{:go/pos {:name-pos [523 9]}} fhMu))
+          ^{:go/apos {2 [524 36]} :go/pos {:return [524 3]}} (return ^{:go/pos {:lparen [524 17] :rparen [524 33]}} (^{:go/pos {:name-pos [524 10]}} NewBool ^{:go/pos {:dot [524 25] :name-pos [524 26]}} (.-enabled ^{:go/pos {:name-pos [524 18]}} fhFatal)) nil)))
+
+      ^{:go/apos {2 [526 5]} :go/pos {:lparen [526 4] :rparen [541 3]}} (go/call ^{:go/pos {:name-pos [526 2]}} fn "dump_traceback" ^{:go/pos {:func [526 23] :lbrace [526 70] :rbrace [541 2]}} (fn ^{:go/pos {:closing [526 52] :opening [526 27]}} [^{:tag ^{:go/pos {:lbrack [526 33]}} (slice ^{:go/pos {:name-pos [526 35]}} Object) :go/pos {:name-pos [526 28]}} args ^{:tag ^{:go/pos {:lbrack [526 46]}} (slice ^{:go/pos {:star [526 48]}} (* ^{:go/pos {:name-pos [526 49]}} Str)) :go/pos {:name-pos [526 43]}} kw] :results ^{:go/pos {:closing [526 68] :opening [526 54]}} [^{:go/pos {:name-pos [526 55]}} Object ^{:go/pos {:name-pos [526 63]}} error]
+          (let [^{:go/pos {:tok-pos [527 10]}} (values ^{:go/pos {:name-pos [527 3]}} a ^{:go/pos {:name-pos [527 6]}} err) ^{:go/apos {1 [527 23] 5 [527 84]} :go/pos {:lparen [527 22] :rparen [527 85]}} (^{:go/pos {:name-pos [527 13]}} parseArgs "dump_traceback" ^{:go/pos {:name-pos [527 41]}} args ^{:go/pos {:name-pos [527 47]}} kw ^{:go/apos {2 [527 60] 3 [527 68]} :go/pos {:lbrace [527 59] :rbrace [527 81]}} (lit ^{:go/pos {:lbrack [527 51]}} (slice ^{:go/pos {:name-pos [527 53]}} string) "file" "all_threads") 0)]
+            ^{:go/pos {:if [528 3] :lbrace [528 17] :rbrace [530 3]}} (when ^{:go/apos {2 [528 13]} :go/pos {:op-pos [528 10]}} (!= ^{:go/pos {:name-pos [528 6]}} err nil)
+              ^{:go/apos {1 [529 11]} :go/pos {:return [529 4]}} (return nil ^{:go/pos {:name-pos [529 16]}} err))
+
+            (let [^{:go/pos {:tok-pos [531 12]}} (values ^{:go/pos {:name-pos [531 3]}} all ^:assign ^{:go/pos {:name-pos [531 8]}} err) ^{:go/apos {2 [531 31]} :go/pos {:lparen [531 24] :rparen [531 35]}} (^{:go/pos {:name-pos [531 15]}} fhBoolArg ^{:go/apos {2 [531 27]} :go/pos {:lbrack [531 26] :rbrack [531 28]}} (aget ^{:go/pos {:name-pos [531 25]}} a 1) true)]
+              ^{:go/pos {:if [532 3] :lbrace [532 17] :rbrace [534 3]}} (when ^{:go/apos {2 [532 13]} :go/pos {:op-pos [532 10]}} (!= ^{:go/pos {:name-pos [532 6]}} err nil)
+                ^{:go/apos {1 [533 11]} :go/pos {:return [533 4]}} (return nil ^{:go/pos {:name-pos [533 16]}} err))
+
+              (let [^{:go/pos {:tok-pos [535 14]}} (values ^{:go/pos {:name-pos [535 3]}} fd ^{:go/pos {:name-pos [535 7]}} _ ^:assign ^{:go/pos {:name-pos [535 10]}} err) ^{:go/pos {:lparen [535 28] :rparen [535 33]}} (^{:go/pos {:name-pos [535 17]}} fhGetFileno ^{:go/apos {2 [535 31]} :go/pos {:lbrack [535 30] :rbrack [535 32]}} (aget ^{:go/pos {:name-pos [535 29]}} a 0))]
+                ^{:go/pos {:if [536 3] :lbrace [536 17] :rbrace [538 3]}} (when ^{:go/apos {2 [536 13]} :go/pos {:op-pos [536 10]}} (!= ^{:go/pos {:name-pos [536 6]}} err nil)
+                  ^{:go/apos {1 [537 11]} :go/pos {:return [537 4]}} (return nil ^{:go/pos {:name-pos [537 16]}} err))
+
+                ^{:go/pos {:lparen [539 11] :rparen [539 28]}} (^{:go/pos {:name-pos [539 3]}} fhDumpTo ^{:go/pos {:name-pos [539 12]}} fd ^{:go/pos {:name-pos [539 16]}} all ^{:go/pos {:name-pos [539 21]}} current)
+                ^{:go/pos {:return [540 3]}} (return ^{:go/pos {:name-pos [540 10]}} None ^{:go/pos {:lparen [540 33] :rparen [540 41]}} (^{:go/pos {:name-pos [540 16]}} runPendingSignals ^{:go/pos {:name-pos [540 34]}} current)))))))
+
+      ^{:go/apos {2 [542 5]} :go/pos {:lparen [542 4] :rparen [553 3]}} (go/call ^{:go/pos {:name-pos [542 2]}} fn "dump_c_stack" ^{:go/pos {:func [542 21] :lbrace [542 68] :rbrace [553 2]}} (fn ^{:go/pos {:closing [542 50] :opening [542 25]}} [^{:tag ^{:go/pos {:lbrack [542 31]}} (slice ^{:go/pos {:name-pos [542 33]}} Object) :go/pos {:name-pos [542 26]}} args ^{:tag ^{:go/pos {:lbrack [542 44]}} (slice ^{:go/pos {:star [542 46]}} (* ^{:go/pos {:name-pos [542 47]}} Str)) :go/pos {:name-pos [542 41]}} kw] :results ^{:go/pos {:closing [542 66] :opening [542 52]}} [^{:go/pos {:name-pos [542 53]}} Object ^{:go/pos {:name-pos [542 61]}} error]
+          (let [^{:go/pos {:tok-pos [543 10]}} (values ^{:go/pos {:name-pos [543 3]}} a ^{:go/pos {:name-pos [543 6]}} err) ^{:go/apos {1 [543 23] 5 [543 67]} :go/pos {:lparen [543 22] :rparen [543 68]}} (^{:go/pos {:name-pos [543 13]}} parseArgs "dump_c_stack" ^{:go/pos {:name-pos [543 39]}} args ^{:go/pos {:name-pos [543 45]}} kw ^{:go/apos {2 [543 58]} :go/pos {:lbrace [543 57] :rbrace [543 64]}} (lit ^{:go/pos {:lbrack [543 49]}} (slice ^{:go/pos {:name-pos [543 51]}} string) "file") 0)]
+            ^{:go/pos {:if [544 3] :lbrace [544 17] :rbrace [546 3]}} (when ^{:go/apos {2 [544 13]} :go/pos {:op-pos [544 10]}} (!= ^{:go/pos {:name-pos [544 6]}} err nil)
+              ^{:go/apos {1 [545 11]} :go/pos {:return [545 4]}} (return nil ^{:go/pos {:name-pos [545 16]}} err))
+
+            (let [^{:go/pos {:tok-pos [547 14]}} (values ^{:go/pos {:name-pos [547 3]}} fd ^{:go/pos {:name-pos [547 7]}} _ ^:assign ^{:go/pos {:name-pos [547 10]}} err) ^{:go/pos {:lparen [547 28] :rparen [547 33]}} (^{:go/pos {:name-pos [547 17]}} fhGetFileno ^{:go/apos {2 [547 31]} :go/pos {:lbrack [547 30] :rbrack [547 32]}} (aget ^{:go/pos {:name-pos [547 29]}} a 0))]
+              ^{:go/pos {:if [548 3] :lbrace [548 17] :rbrace [550 3]}} (when ^{:go/apos {2 [548 13]} :go/pos {:op-pos [548 10]}} (!= ^{:go/pos {:name-pos [548 6]}} err nil)
+                ^{:go/apos {1 [549 11]} :go/pos {:return [549 4]}} (return nil ^{:go/pos {:name-pos [549 16]}} err))
+
+              ^{:go/pos {:lparen [551 10] :rparen [551 23]}} (^{:go/pos {:name-pos [551 3]}} fhWrite ^{:go/pos {:name-pos [551 11]}} fd ^{:go/pos {:name-pos [551 15]}} fhCStack)
+              ^{:go/pos {:return [552 3]}} (return ^{:go/pos {:name-pos [552 10]}} None ^{:go/pos {:lparen [552 33] :rparen [552 41]}} (^{:go/pos {:name-pos [552 16]}} runPendingSignals ^{:go/pos {:name-pos [552 34]}} current))))))
+
+      ^{:go/apos {2 [554 5]} :go/pos {:lparen [554 4] :rparen [609 3]}} (go/call ^{:go/pos {:name-pos [554 2]}} fn "dump_traceback_later" ^{:go/pos {:func [554 29] :lbrace [554 76] :rbrace [609 2]}} (fn ^{:go/pos {:closing [554 58] :opening [554 33]}} [^{:tag ^{:go/pos {:lbrack [554 39]}} (slice ^{:go/pos {:name-pos [554 41]}} Object) :go/pos {:name-pos [554 34]}} args ^{:tag ^{:go/pos {:lbrack [554 52]}} (slice ^{:go/pos {:star [554 54]}} (* ^{:go/pos {:name-pos [554 55]}} Str)) :go/pos {:name-pos [554 49]}} kw] :results ^{:go/pos {:closing [554 74] :opening [554 60]}} [^{:go/pos {:name-pos [554 61]}} Object ^{:go/pos {:name-pos [554 69]}} error]
+          (let [^{:go/pos {:tok-pos [555 10]}} (values ^{:go/pos {:name-pos [555 3]}} a ^{:go/pos {:name-pos [555 6]}} err) ^{:go/apos {1 [555 23] 5 [555 104]} :go/pos {:lparen [555 22] :rparen [555 105]}} (^{:go/pos {:name-pos [555 13]}} parseArgs "dump_traceback_later" ^{:go/pos {:name-pos [555 47]}} args ^{:go/pos {:name-pos [555 53]}} kw ^{:go/apos {2 [555 66] 3 [555 77] 4 [555 87] 5 [555 95]} :go/pos {:lbrace [555 65] :rbrace [555 101]}} (lit ^{:go/pos {:lbrack [555 57]}} (slice ^{:go/pos {:name-pos [555 59]}} string) "timeout" "repeat" "file" "exit") 1)]
+            ^{:go/pos {:if [556 3] :lbrace [556 17] :rbrace [558 3]}} (when ^{:go/apos {2 [556 13]} :go/pos {:op-pos [556 10]}} (!= ^{:go/pos {:name-pos [556 6]}} err nil)
+              ^{:go/apos {1 [557 11]} :go/pos {:return [557 4]}} (return nil ^{:go/pos {:name-pos [557 16]}} err))
+
+            (let [^{:go/pos {:tok-pos [559 16]}} (values ^{:go/pos {:name-pos [559 3]}} repeat ^{:go/pos {:name-pos [559 11]}} exit) ^{:go/apos {1 [559 19] 2 [559 22]}} (values 0 0)]
+              ^{:go/pos {:if [560 3] :lbrace [560 18] :rbrace [564 3]}} (when ^{:go/apos {2 [560 14]} :go/pos {:op-pos [560 11]}} (!= ^{:go/apos {2 [560 8]} :go/pos {:lbrack [560 7] :rbrack [560 9]}} (aget ^{:go/pos {:name-pos [560 6]}} a 1) nil)
+                ^{:go/pos {:if [561 4] :lbrace [561 48] :rbrace [563 4]}} (when [^{:go/pos {:tok-pos [561 19]}} (set! (values ^{:go/pos {:name-pos [561 7]}} repeat ^{:go/pos {:name-pos [561 15]}} err) ^{:go/pos {:lparen [561 29] :rparen [561 34]}} (^{:go/pos {:name-pos [561 21]}} fhIntArg ^{:go/apos {2 [561 32]} :go/pos {:lbrack [561 31] :rbrack [561 33]}} (aget ^{:go/pos {:name-pos [561 30]}} a 1)))] ^{:go/apos {2 [561 44]} :go/pos {:op-pos [561 41]}} (!= ^{:go/pos {:name-pos [561 37]}} err nil)
+                  ^{:go/apos {1 [562 12]} :go/pos {:return [562 5]}} (return nil ^{:go/pos {:name-pos [562 17]}} err)))
+
+
+              ^{:go/pos {:if [565 3] :lbrace [565 18] :rbrace [569 3]}} (when ^{:go/apos {2 [565 14]} :go/pos {:op-pos [565 11]}} (!= ^{:go/apos {2 [565 8]} :go/pos {:lbrack [565 7] :rbrack [565 9]}} (aget ^{:go/pos {:name-pos [565 6]}} a 3) nil)
+                ^{:go/pos {:if [566 4] :lbrace [566 46] :rbrace [568 4]}} (when [^{:go/pos {:tok-pos [566 17]}} (set! (values ^{:go/pos {:name-pos [566 7]}} exit ^{:go/pos {:name-pos [566 13]}} err) ^{:go/pos {:lparen [566 27] :rparen [566 32]}} (^{:go/pos {:name-pos [566 19]}} fhIntArg ^{:go/apos {2 [566 30]} :go/pos {:lbrack [566 29] :rbrack [566 31]}} (aget ^{:go/pos {:name-pos [566 28]}} a 3)))] ^{:go/apos {2 [566 42]} :go/pos {:op-pos [566 39]}} (!= ^{:go/pos {:name-pos [566 35]}} err nil)
+                  ^{:go/apos {1 [567 12]} :go/pos {:return [567 5]}} (return nil ^{:go/pos {:name-pos [567 17]}} err)))
+
+
+              (let [^{:go/pos {:tok-pos [570 11]}} (values ^{:go/pos {:name-pos [570 3]}} us ^:assign ^{:go/pos {:name-pos [570 7]}} err) ^{:go/pos {:lparen [570 25] :rparen [570 30]}} (^{:go/pos {:name-pos [570 14]}} fhTimeoutUs ^{:go/apos {2 [570 28]} :go/pos {:lbrack [570 27] :rbrack [570 29]}} (aget ^{:go/pos {:name-pos [570 26]}} a 0))]
+                ^{:go/pos {:if [571 3] :lbrace [571 17] :rbrace [573 3]}} (when ^{:go/apos {2 [571 13]} :go/pos {:op-pos [571 10]}} (!= ^{:go/pos {:name-pos [571 6]}} err nil)
+                  ^{:go/apos {1 [572 11]} :go/pos {:return [572 4]}} (return nil ^{:go/pos {:name-pos [572 16]}} err))
+
+                ^{:go/pos {:if [574 3] :lbrace [574 14] :rbrace [576 3]}} (when ^{:go/apos {2 [574 12]} :go/pos {:op-pos [574 9]}} (<= ^{:go/pos {:name-pos [574 6]}} us 0)
+                  ^{:go/apos {1 [575 11]} :go/pos {:return [575 4]}} (return nil ^{:go/apos {2 [575 38]} :go/pos {:lparen [575 21] :rparen [575 70]}} (^{:go/pos {:name-pos [575 16]}} Raise ^{:go/pos {:name-pos [575 22]}} ValueErrorType "timeout must be greater than 0")))
+
+                ^{:go/pos {:if [577 3] :lbrace [577 30] :rbrace [579 3]}} (when ^{:go/pos {:op-pos [577 9]}} (> ^{:go/pos {:name-pos [577 6]}} us ^{:go/apos {2 [577 25]} :go/pos {:op-pos [577 24]}} (/ ^{:go/pos {:dot [577 15] :name-pos [577 16] :x-pos [577 11]}} math/MaxInt64 1000))
+                  ^{:go/apos {1 [578 11]} :go/pos {:return [578 4]}} (return nil ^{:go/apos {2 [578 41]} :go/pos {:lparen [578 21] :rparen [578 69]}} (^{:go/pos {:name-pos [578 16]}} Raise ^{:go/pos {:name-pos [578 22]}} OverflowErrorType "timeout value is too large")))
+
+                (let [^{:go/pos {:tok-pos [580 17]}} (values ^{:go/pos {:name-pos [580 3]}} fd ^{:go/pos {:name-pos [580 7]}} file ^:assign ^{:go/pos {:name-pos [580 13]}} err) ^{:go/pos {:lparen [580 31] :rparen [580 36]}} (^{:go/pos {:name-pos [580 20]}} fhGetFileno ^{:go/apos {2 [580 34]} :go/pos {:lbrack [580 33] :rbrack [580 35]}} (aget ^{:go/pos {:name-pos [580 32]}} a 2))]
+                  ^{:go/pos {:if [581 3] :lbrace [581 17] :rbrace [583 3]}} (when ^{:go/apos {2 [581 13]} :go/pos {:op-pos [581 10]}} (!= ^{:go/pos {:name-pos [581 6]}} err nil)
+                    ^{:go/apos {1 [582 11]} :go/pos {:return [582 4]}} (return nil ^{:go/pos {:name-pos [582 16]}} err))
+
+                  (let [^{:go/pos {:name-pos [584 3] :tok-pos [584 10]}} header ^{:go/pos {:lparen [584 28] :rparen [584 31]}} (^{:go/pos {:name-pos [584 13]}} fhTimeoutHeader ^{:go/pos {:name-pos [584 29]}} us)]
+                    ^{:go/pos {:lparen [585 16] :rparen [585 17]}} (^{:go/pos {:name-pos [585 3]}} fhCancelLater)
+                    (let [^{:go/pos {:name-pos [586 3] :tok-pos [586 5]}} w ^{:go/pos {:op-pos [586 8]}} (addr ^{:go/acolon {2 [586 23] 4 [586 50] 6 [586 77]} :go/apos {2 [586 17] 4 [586 46] 6 [586 73]} :go/pos {:lbrace [586 16] :rbrace [586 83]}} (lit ^{:go/pos {:name-pos [586 9]}} fhLater :cancel ^{:go/pos {:lparen [586 29] :rparen [586 43]}} (^{:go/pos {:name-pos [586 25]}} make ^{:go/pos {:begin [586 30]}} (chan ^{:go/pos {:lbrace [586 41] :rbrace [586 42] :struct [586 35]}} (struct))) :done ^{:go/pos {:lparen [586 56] :rparen [586 70]}} (^{:go/pos {:name-pos [586 52]}} make ^{:go/pos {:begin [586 57]}} (chan ^{:go/pos {:lbrace [586 68] :rbrace [586 69] :struct [586 62]}} (struct))) :file ^{:go/pos {:name-pos [586 79]}} file))]
+                      ^{:go/pos {:tok-pos [587 14]}} (set! ^{:go/pos {:name-pos [587 3]}} fhWatchdog ^{:go/pos {:name-pos [587 16]}} w)
+                      ^{:go/pos {:go [588 3]}} (go ^{:go/pos {:lparen [607 4] :rparen [607 5]}} (^{:go/pos {:func [588 6] :lbrace [588 13] :rbrace [607 3]}} (fn ^{:go/pos {:closing [588 11] :opening [588 10]}} []
+                            ^{:go/pos {:defer [589 4]}} (defer ^{:go/pos {:lparen [589 15] :rparen [589 22]}} (^{:go/pos {:name-pos [589 10]}} close ^{:go/pos {:dot [589 17] :name-pos [589 18]}} (.-done ^{:go/pos {:name-pos [589 16]}} w)))
+                            ^{:go/pos {:for [590 4] :lbrace [590 8] :rbrace [606 4]}} (while true
+                              (let [^{:go/pos {:name-pos [591 5] :tok-pos [591 7]}} t ^{:go/pos {:lparen [591 23] :rparen [591 60]}} (^{:go/pos {:dot [591 14] :name-pos [591 15] :x-pos [591 10]}} time/NewTimer ^{:go/pos {:op-pos [591 42]}} (* ^{:go/pos {:lparen [591 37] :rparen [591 40]}} (conv ^{:go/pos {:dot [591 28] :name-pos [591 29] :x-pos [591 24]}} time/Duration ^{:go/pos {:name-pos [591 38]}} us) ^{:go/pos {:dot [591 48] :name-pos [591 49] :x-pos [591 44]}} time/Microsecond))]
+                                ^{:go/pos {:lbrace [592 12] :rbrace [597 5] :select [592 5]}} (select
+                                  ^{:go/pos {:case [593 5] :colon [593 20]}} (case ^{:go/pos {:op-pos [593 10]}} (<! ^{:go/pos {:dot [593 13] :name-pos [593 14]}} (.-cancel ^{:go/pos {:name-pos [593 12]}} w))
+                                    ^{:go/pos {:dot [594 7] :lparen [594 12] :name-pos [594 8] :rparen [594 13]}} (.Stop ^{:go/pos {:name-pos [594 6]}} t)
+                                    ^{:go/pos {:return [595 6]}} (return))
+                                  ^{:go/pos {:case [596 5] :colon [596 15]}} (case ^{:go/pos {:op-pos [596 10]}} (<! ^{:go/pos {:dot [596 13] :name-pos [596 14]}} (.-C ^{:go/pos {:name-pos [596 12]}} t))))
+
+                                ^{:go/pos {:lparen [598 12] :rparen [598 23]}} (^{:go/pos {:name-pos [598 5]}} fhWrite ^{:go/pos {:name-pos [598 13]}} fd ^{:go/pos {:name-pos [598 17]}} header)
+                                ^{:go/apos {2 [599 18] 3 [599 24]} :go/pos {:lparen [599 13] :rparen [599 27]}} (^{:go/pos {:name-pos [599 5]}} fhDumpTo ^{:go/pos {:name-pos [599 14]}} fd true nil) ; the watchdog has no Python thread: no "Current thread"
+                                ^{:go/pos {:if [600 5] :lbrace [600 18] :rbrace [602 5]}} (when ^{:go/apos {2 [600 16]} :go/pos {:op-pos [600 13]}} (!= ^{:go/pos {:name-pos [600 8]}} exit 0)
+                                  ^{:go/apos {1 [601 19]} :go/pos {:lparen [601 18] :rparen [601 20]}} (^{:go/pos {:dot [601 13] :name-pos [601 14] :x-pos [601 6]}} syscall/Exit 1))
+
+                                ^{:go/pos {:if [603 5] :lbrace [603 20] :rbrace [605 5]}} (when ^{:go/apos {2 [603 18]} :go/pos {:op-pos [603 15]}} (== ^{:go/pos {:name-pos [603 8]}} repeat 0)
+                                  ^{:go/pos {:return [604 6]}} (return)))))))
+
+
+
+                      ^{:go/apos {2 [608 16]} :go/pos {:return [608 3]}} (return ^{:go/pos {:name-pos [608 10]}} None nil)))))))))
+
+      ^{:go/apos {1 [610 9]} :go/pos {:lparen [610 8] :rparen [613 3]}} (^{:go/pos {:name-pos [610 2]}} noArgs "cancel_dump_traceback_later" ^{:go/pos {:func [610 40] :lbrace [610 63] :rbrace [613 2]}} (fn ^{:go/pos {:closing [610 45] :opening [610 44]}} [] :results ^{:go/pos {:closing [610 61] :opening [610 47]}} [^{:go/pos {:name-pos [610 48]}} Object ^{:go/pos {:name-pos [610 56]}} error]
+          ^{:go/pos {:lparen [611 16] :rparen [611 17]}} (^{:go/pos {:name-pos [611 3]}} fhCancelLater)
+          ^{:go/apos {2 [612 16]} :go/pos {:return [612 3]}} (return ^{:go/pos {:name-pos [612 10]}} None nil)))
+
+      (let [^{:go/pos {:name-pos [614 2] :tok-pos [614 14]}} checkSignum ^{:go/pos {:func [614 17] :lbrace [614 45] :rbrace [628 2]}} (fn ^{:go/pos {:closing [614 30] :opening [614 21]}} [^{:tag ^{:go/pos {:name-pos [614 24]}} Object :go/pos {:name-pos [614 22]}} o] :results ^{:go/pos {:closing [614 43] :opening [614 32]}} [^{:go/pos {:name-pos [614 33]}} int ^{:go/pos {:name-pos [614 38]}} error]
+            (let [^{:go/pos {:tok-pos [615 10]}} (values ^{:go/pos {:name-pos [615 3]}} n ^{:go/pos {:name-pos [615 6]}} err) ^{:go/pos {:lparen [615 21] :rparen [615 23]}} (^{:go/pos {:name-pos [615 13]}} fhIntArg ^{:go/pos {:name-pos [615 22]}} o)]
+              ^{:go/pos {:if [616 3] :lbrace [616 17] :rbrace [618 3]}} (when ^{:go/apos {2 [616 13]} :go/pos {:op-pos [616 10]}} (!= ^{:go/pos {:name-pos [616 6]}} err nil)
+                ^{:go/apos {1 [617 11]} :go/pos {:return [617 4]}} (return 0 ^{:go/pos {:name-pos [617 14]}} err))
+
+              ^{:go/pos {:for [619 3] :lbrace [619 36] :range [619 15] :rbrace [623 3] :tok-pos [619 12]}} (range [^{:go/pos {:name-pos [619 7]}} _ ^{:go/pos {:name-pos [619 10]}} h ^{:go/pos {:name-pos [619 21]}} fhFatalSignals]
+                ^{:go/pos {:if [620 4] :lbrace [620 18] :rbrace [622 4]}} (when ^{:go/pos {:op-pos [620 13]}} (== ^{:go/pos {:dot [620 8] :name-pos [620 9]}} (.-sig ^{:go/pos {:name-pos [620 7]}} h) ^{:go/pos {:name-pos [620 16]}} n)
+                  ^{:go/apos {1 [621 12]} :go/pos {:return [621 5]}} (return 0 ^{:go/apos {2 [621 40]} :go/pos {:lparen [621 21] :rparen [621 97]}} (^{:go/pos {:name-pos [621 15]}} Raisef ^{:go/pos {:name-pos [621 22]}} RuntimeErrorType "signal %d cannot be registered, use enable() instead" ^{:go/pos {:name-pos [621 96]}} n))))
+
+
+              ^{:go/pos {:if [624 3] :lbrace [624 25] :rbrace [626 3]}} (when ^{:go/pos {:op-pos [624 12]}} (or ^{:go/apos {2 [624 10]} :go/pos {:op-pos [624 8]}} (< ^{:go/pos {:name-pos [624 6]}} n 1) ^{:go/pos {:op-pos [624 17]}} (>= ^{:go/pos {:name-pos [624 15]}} n ^{:go/pos {:name-pos [624 20]}} nsig))
+                ^{:go/apos {1 [625 11]} :go/pos {:return [625 4]}} (return 0 ^{:go/apos {2 [625 36]} :go/pos {:lparen [625 19] :rparen [625 64]}} (^{:go/pos {:name-pos [625 14]}} Raise ^{:go/pos {:name-pos [625 20]}} ValueErrorType "signal number out of range")))
+
+              ^{:go/apos {2 [627 13]} :go/pos {:return [627 3]}} (return ^{:go/pos {:name-pos [627 10]}} n nil)))]
+
+        ^{:go/apos {2 [629 5]} :go/pos {:lparen [629 4] :rparen [662 3]}} (go/call ^{:go/pos {:name-pos [629 2]}} fn "register" ^{:go/pos {:func [629 17] :lbrace [629 64] :rbrace [662 2]}} (fn ^{:go/pos {:closing [629 46] :opening [629 21]}} [^{:tag ^{:go/pos {:lbrack [629 27]}} (slice ^{:go/pos {:name-pos [629 29]}} Object) :go/pos {:name-pos [629 22]}} args ^{:tag ^{:go/pos {:lbrack [629 40]}} (slice ^{:go/pos {:star [629 42]}} (* ^{:go/pos {:name-pos [629 43]}} Str)) :go/pos {:name-pos [629 37]}} kw] :results ^{:go/pos {:closing [629 62] :opening [629 48]}} [^{:go/pos {:name-pos [629 49]}} Object ^{:go/pos {:name-pos [629 57]}} error]
+            (let [^{:go/pos {:tok-pos [630 10]}} (values ^{:go/pos {:name-pos [630 3]}} a ^{:go/pos {:name-pos [630 6]}} err) ^{:go/apos {1 [630 23] 5 [630 97]} :go/pos {:lparen [630 22] :rparen [630 98]}} (^{:go/pos {:name-pos [630 13]}} parseArgs "register" ^{:go/pos {:name-pos [630 35]}} args ^{:go/pos {:name-pos [630 41]}} kw ^{:go/apos {2 [630 54] 3 [630 64] 4 [630 72] 5 [630 87]} :go/pos {:lbrace [630 53] :rbrace [630 94]}} (lit ^{:go/pos {:lbrack [630 45]}} (slice ^{:go/pos {:name-pos [630 47]}} string) "signum" "file" "all_threads" "chain") 1)]
+              ^{:go/pos {:if [631 3] :lbrace [631 17] :rbrace [633 3]}} (when ^{:go/apos {2 [631 13]} :go/pos {:op-pos [631 10]}} (!= ^{:go/pos {:name-pos [631 6]}} err nil)
+                ^{:go/apos {1 [632 11]} :go/pos {:return [632 4]}} (return nil ^{:go/pos {:name-pos [632 16]}} err))
+
+              (let [^{:go/pos {:tok-pos [634 10]}} (values ^{:go/pos {:name-pos [634 3]}} n ^:assign ^{:go/pos {:name-pos [634 6]}} err) ^{:go/pos {:lparen [634 24] :rparen [634 29]}} (^{:go/pos {:name-pos [634 13]}} checkSignum ^{:go/apos {2 [634 27]} :go/pos {:lbrack [634 26] :rbrack [634 28]}} (aget ^{:go/pos {:name-pos [634 25]}} a 0))]
+                ^{:go/pos {:if [635 3] :lbrace [635 17] :rbrace [637 3]}} (when ^{:go/apos {2 [635 13]} :go/pos {:op-pos [635 10]}} (!= ^{:go/pos {:name-pos [635 6]}} err nil)
+                  ^{:go/apos {1 [636 11]} :go/pos {:return [636 4]}} (return nil ^{:go/pos {:name-pos [636 16]}} err))
+
+                (let [^{:go/pos {:tok-pos [638 12]}} (values ^{:go/pos {:name-pos [638 3]}} all ^:assign ^{:go/pos {:name-pos [638 8]}} err) ^{:go/apos {2 [638 31]} :go/pos {:lparen [638 24] :rparen [638 35]}} (^{:go/pos {:name-pos [638 15]}} fhBoolArg ^{:go/apos {2 [638 27]} :go/pos {:lbrack [638 26] :rbrack [638 28]}} (aget ^{:go/pos {:name-pos [638 25]}} a 2) true)]
+                  ^{:go/pos {:if [639 3] :lbrace [639 17] :rbrace [641 3]}} (when ^{:go/apos {2 [639 13]} :go/pos {:op-pos [639 10]}} (!= ^{:go/pos {:name-pos [639 6]}} err nil)
+                    ^{:go/apos {1 [640 11]} :go/pos {:return [640 4]}} (return nil ^{:go/pos {:name-pos [640 16]}} err))
+
+                  (let [^{:go/pos {:tok-pos [642 14]}} (values ^{:go/pos {:name-pos [642 3]}} chain ^:assign ^{:go/pos {:name-pos [642 10]}} err) ^{:go/apos {2 [642 33]} :go/pos {:lparen [642 26] :rparen [642 38]}} (^{:go/pos {:name-pos [642 17]}} fhBoolArg ^{:go/apos {2 [642 29]} :go/pos {:lbrack [642 28] :rbrack [642 30]}} (aget ^{:go/pos {:name-pos [642 27]}} a 3) false)]
+                    ^{:go/pos {:if [643 3] :lbrace [643 17] :rbrace [645 3]}} (when ^{:go/apos {2 [643 13]} :go/pos {:op-pos [643 10]}} (!= ^{:go/pos {:name-pos [643 6]}} err nil)
+                      ^{:go/apos {1 [644 11]} :go/pos {:return [644 4]}} (return nil ^{:go/pos {:name-pos [644 16]}} err))
+
+                    (let [^{:go/pos {:tok-pos [646 17]}} (values ^{:go/pos {:name-pos [646 3]}} fd ^{:go/pos {:name-pos [646 7]}} file ^:assign ^{:go/pos {:name-pos [646 13]}} err) ^{:go/pos {:lparen [646 31] :rparen [646 36]}} (^{:go/pos {:name-pos [646 20]}} fhGetFileno ^{:go/apos {2 [646 34]} :go/pos {:lbrack [646 33] :rbrack [646 35]}} (aget ^{:go/pos {:name-pos [646 32]}} a 1))]
+                      ^{:go/pos {:if [647 3] :lbrace [647 17] :rbrace [649 3]}} (when ^{:go/apos {2 [647 13]} :go/pos {:op-pos [647 10]}} (!= ^{:go/pos {:name-pos [647 6]}} err nil)
+                        ^{:go/apos {1 [648 11]} :go/pos {:return [648 4]}} (return nil ^{:go/pos {:name-pos [648 16]}} err))
+
+                      ^{:go/pos {:if [650 3] :lbrace [650 24] :rbrace [652 3]}} (when ^{:go/pos {:op-pos [650 13]}} (or ^{:go/apos {2 [650 11]} :go/pos {:op-pos [650 8]}} (== ^{:go/pos {:name-pos [650 6]}} n 9) ^{:go/apos {2 [650 21]} :go/pos {:op-pos [650 18]}} (== ^{:go/pos {:name-pos [650 16]}} n 19))
+                        ^{:go/apos {1 [651 11]} :go/pos {:return [651 4]}} (return nil ^{:go/apos {2 [651 48]} :go/pos {:lparen [651 26] :rparen [651 51]}} (^{:go/pos {:name-pos [651 16]}} errnoError ^{:go/pos {:lparen [651 30] :rparen [651 45]}} (conv ^{:go/pos {:name-pos [651 27]}} int ^{:go/pos {:dot [651 38] :name-pos [651 39] :x-pos [651 31]}} syscall/EINVAL) nil))) ; sigaction refuses SIGKILL and SIGSTOP
+
+                      ^{:go/pos {:lparen [653 10] :rparen [653 11]}} (^{:go/pos {:name-pos [653 3]}} fhStart)
+                      ^{:go/pos {:dot [654 7] :lparen [654 12] :name-pos [654 8] :rparen [654 13]}} (.Lock ^{:go/pos {:name-pos [654 3]}} fhMu)
+                      (let [^{:go/pos {:name-pos [655 3] :tok-pos [655 7]}} was ^{:go/pos {:dot [655 20] :name-pos [655 21]}} (.-enabled ^{:go/pos {:lbrack [655 17] :rbrack [655 19]}} (aget ^{:go/pos {:name-pos [655 10]}} fhUsers ^{:go/pos {:name-pos [655 18]}} n))]
+                        ^{:go/pos {:lbrack [656 10] :rbrack [656 12] :tok-pos [656 14]}} (aset ^{:go/pos {:name-pos [656 3]}} fhUsers ^{:go/pos {:name-pos [656 11]}} n ^{:go/acolon {2 [656 36] 4 [656 46] 6 [656 56] 8 [656 74] 10 [656 86]} :go/apos {2 [656 29] 3 [656 38] 4 [656 44] 6 [656 52] 8 [656 64] 10 [656 81]} :go/pos {:lbrace [656 28] :rbrace [656 93]}} (lit ^{:go/pos {:name-pos [656 16]}} fhUserSignal :enabled true :fd ^{:go/pos {:name-pos [656 48]}} fd :file ^{:go/pos {:name-pos [656 58]}} file :allThreads ^{:go/pos {:name-pos [656 76]}} all :chain ^{:go/pos {:name-pos [656 88]}} chain))
+                        ^{:go/pos {:dot [657 7] :lparen [657 14] :name-pos [657 8] :rparen [657 15]}} (.Unlock ^{:go/pos {:name-pos [657 3]}} fhMu)
+                        ^{:go/pos {:if [658 3] :lbrace [658 11] :rbrace [660 3]}} (when ^{:go/pos {:op-pos [658 6]}} (not ^{:go/pos {:name-pos [658 7]}} was)
+                          ^{:go/pos {:lparen [659 17] :rparen [659 43]}} (^{:go/pos {:dot [659 10] :name-pos [659 11] :x-pos [659 4]}} signal/Notify ^{:go/pos {:name-pos [659 18]}} userCh ^{:go/pos {:lparen [659 40] :rparen [659 42]}} (conv ^{:go/pos {:dot [659 33] :name-pos [659 34] :x-pos [659 26]}} syscall/Signal ^{:go/pos {:name-pos [659 41]}} n)))
+
+                        ^{:go/apos {2 [661 16]} :go/pos {:return [661 3]}} (return ^{:go/pos {:name-pos [661 10]}} None nil)))))))))
+
+        ^{:go/apos {2 [663 5]} :go/pos {:lparen [663 4] :rparen [685 3]}} (go/call ^{:go/pos {:name-pos [663 2]}} fn "unregister" ^{:go/pos {:func [663 19] :lbrace [663 66] :rbrace [685 2]}} (fn ^{:go/pos {:closing [663 48] :opening [663 23]}} [^{:tag ^{:go/pos {:lbrack [663 29]}} (slice ^{:go/pos {:name-pos [663 31]}} Object) :go/pos {:name-pos [663 24]}} args ^{:tag ^{:go/pos {:lbrack [663 42]}} (slice ^{:go/pos {:star [663 44]}} (* ^{:go/pos {:name-pos [663 45]}} Str)) :go/pos {:name-pos [663 39]}} kw] :results ^{:go/pos {:closing [663 64] :opening [663 50]}} [^{:go/pos {:name-pos [663 51]}} Object ^{:go/pos {:name-pos [663 59]}} error]
+            ^{:go/pos {:if [664 3] :lbrace [664 18] :rbrace [666 3]}} (when ^{:go/apos {2 [664 16]} :go/pos {:op-pos [664 14]}} (> ^{:go/pos {:lparen [664 9] :rparen [664 12]}} (^{:go/pos {:name-pos [664 6]}} len ^{:go/pos {:name-pos [664 10]}} kw) 0)
+              ^{:go/apos {1 [665 11]} :go/pos {:return [665 4]}} (return nil ^{:go/apos {2 [665 37]} :go/pos {:lparen [665 21] :rparen [665 91]}} (^{:go/pos {:name-pos [665 16]}} Raise ^{:go/pos {:name-pos [665 22]}} TypeErrorType "faulthandler.unregister() takes no keyword arguments")))
+
+            ^{:go/pos {:if [667 3] :lbrace [667 21] :rbrace [669 3]}} (when ^{:go/apos {2 [667 19]} :go/pos {:op-pos [667 16]}} (!= ^{:go/pos {:lparen [667 9] :rparen [667 14]}} (^{:go/pos {:name-pos [667 6]}} len ^{:go/pos {:name-pos [667 10]}} args) 1)
+              ^{:go/apos {1 [668 11]} :go/pos {:return [668 4]}} (return nil ^{:go/apos {2 [668 38]} :go/pos {:lparen [668 22] :rparen [668 99]}} (^{:go/pos {:name-pos [668 16]}} Raisef ^{:go/pos {:name-pos [668 23]}} TypeErrorType "unregister() takes exactly 1 argument (%d given)" ^{:go/pos {:lparen [668 93] :rparen [668 98]}} (^{:go/pos {:name-pos [668 90]}} len ^{:go/pos {:name-pos [668 94]}} args))))
+
+            (let [^{:go/pos {:tok-pos [670 10]}} (values ^{:go/pos {:name-pos [670 3]}} n ^{:go/pos {:name-pos [670 6]}} err) ^{:go/pos {:lparen [670 24] :rparen [670 32]}} (^{:go/pos {:name-pos [670 13]}} checkSignum ^{:go/apos {2 [670 30]} :go/pos {:lbrack [670 29] :rbrack [670 31]}} (aget ^{:go/pos {:name-pos [670 25]}} args 0))]
+              ^{:go/pos {:if [671 3] :lbrace [671 17] :rbrace [673 3]}} (when ^{:go/apos {2 [671 13]} :go/pos {:op-pos [671 10]}} (!= ^{:go/pos {:name-pos [671 6]}} err nil)
+                ^{:go/apos {1 [672 11]} :go/pos {:return [672 4]}} (return nil ^{:go/pos {:name-pos [672 16]}} err))
+
+              ^{:go/pos {:dot [674 7] :lparen [674 12] :name-pos [674 8] :rparen [674 13]}} (.Lock ^{:go/pos {:name-pos [674 3]}} fhMu)
+              (let [^{:go/pos {:name-pos [675 3] :tok-pos [675 7]}} was ^{:go/pos {:dot [675 20] :name-pos [675 21]}} (.-enabled ^{:go/pos {:lbrack [675 17] :rbrack [675 19]}} (aget ^{:go/pos {:name-pos [675 10]}} fhUsers ^{:go/pos {:name-pos [675 18]}} n))]
+                ^{:go/pos {:lbrack [676 10] :rbrack [676 12] :tok-pos [676 14]}} (aset ^{:go/pos {:name-pos [676 3]}} fhUsers ^{:go/pos {:name-pos [676 11]}} n ^{:go/acolon {2 [676 31]} :go/apos {2 [676 29] 3 [676 33]} :go/pos {:lbrace [676 28] :rbrace [676 35]}} (lit ^{:go/pos {:name-pos [676 16]}} fhUserSignal :fd -1))
+                ^{:go/pos {:dot [677 7] :lparen [677 14] :name-pos [677 8] :rparen [677 15]}} (.Unlock ^{:go/pos {:name-pos [677 3]}} fhMu)
+                ^{:go/pos {:if [678 3] :lbrace [678 10] :rbrace [683 3]}} (when ^{:go/pos {:name-pos [678 6]}} was
+                  ^{:go/pos {:lparen [679 16] :rparen [679 34]}} (^{:go/pos {:dot [679 10] :name-pos [679 11] :x-pos [679 4]}} signal/Reset ^{:go/pos {:lparen [679 31] :rparen [679 33]}} (conv ^{:go/pos {:dot [679 24] :name-pos [679 25] :x-pos [679 17]}} syscall/Signal ^{:go/pos {:name-pos [679 32]}} n))
+                  ^{:go/pos {:if [680 4] :lbrace [680 22] :rbrace [682 4]}} (when ^{:go/pos {:lbrack [680 18] :rbrack [680 20]}} (aget ^{:go/pos {:name-pos [680 7]}} sigNotified ^{:go/pos {:name-pos [680 19]}} n)
+                    ^{:go/pos {:lparen [681 18] :rparen [681 43]}} (^{:go/pos {:dot [681 11] :name-pos [681 12] :x-pos [681 5]}} signal/Notify ^{:go/pos {:name-pos [681 19]}} sigCh ^{:go/pos {:lparen [681 40] :rparen [681 42]}} (conv ^{:go/pos {:dot [681 33] :name-pos [681 34] :x-pos [681 26]}} syscall/Signal ^{:go/pos {:name-pos [681 41]}} n)))) ; the Python handler's notification, which Reset removed
+
+
+                ^{:go/apos {2 [684 24]} :go/pos {:return [684 3]}} (return ^{:go/pos {:lparen [684 17] :rparen [684 21]}} (^{:go/pos {:name-pos [684 10]}} NewBool ^{:go/pos {:name-pos [684 18]}} was) nil)))))
+
+        (let [^{:go/pos {:name-pos [686 2] :tok-pos [686 13]}} raiseFatal ^{:go/pos {:func [686 16] :lbrace [686 44] :rbrace [695 2]}} (fn ^{:go/pos {:closing [686 26] :opening [686 20]}} [^{:tag ^{:go/pos {:name-pos [686 23]}} int :go/pos {:name-pos [686 21]}} n] :results ^{:go/pos {:closing [686 42] :opening [686 28]}} [^{:go/pos {:name-pos [686 29]}} Object ^{:go/pos {:name-pos [686 37]}} error]
+              ^{:go/pos {:dot [687 7] :lparen [687 12] :name-pos [687 8] :rparen [687 13]}} (.Lock ^{:go/pos {:name-pos [687 3]}} fhMu)
+              (let [^{:go/pos {:name-pos [688 3] :tok-pos [688 9]}} fatal ^{:go/pos {:dot [688 19] :name-pos [688 20]}} (.-enabled ^{:go/pos {:name-pos [688 12]}} fhFatal)]
+                ^{:go/pos {:dot [689 7] :lparen [689 14] :name-pos [689 8] :rparen [689 15]}} (.Unlock ^{:go/pos {:name-pos [689 3]}} fhMu)
+                ^{:go/pos {:if [690 3] :lbrace [690 12] :rbrace [692 3]}} (when ^{:go/pos {:name-pos [690 6]}} fatal
+                  ^{:go/pos {:lparen [691 16] :rparen [691 27]}} (^{:go/pos {:name-pos [691 4]}} fhFatalError ^{:go/pos {:name-pos [691 17]}} n ^{:go/pos {:name-pos [691 20]}} current))
+
+                ^{:go/pos {:lparen [693 8] :rparen [693 10]}} (^{:go/pos {:name-pos [693 3]}} fhDie ^{:go/pos {:name-pos [693 9]}} n)
+                ^{:go/apos {2 [694 16]} :go/pos {:return [694 3]}} (return ^{:go/pos {:name-pos [694 10]}} None nil)))]
+
+          ^{:go/apos {1 [696 9]} :go/pos {:lparen [696 8] :rparen [696 71]}} (^{:go/pos {:name-pos [696 2]}} noArgs "_read_null" ^{:go/pos {:func [696 23] :lbrace [696 46] :rbrace [696 70] :return [696 48]}} (fn ^{:go/pos {:closing [696 28] :opening [696 27]}} [] :results ^{:go/pos {:closing [696 44] :opening [696 30]}} [^{:go/pos {:name-pos [696 31]}} Object ^{:go/pos {:name-pos [696 39]}} error] ^{:go/apos {1 [696 66]} :go/pos {:lparen [696 65] :rparen [696 68]}} (^{:go/pos {:name-pos [696 55]}} raiseFatal 11)))
+          ^{:go/apos {2 [697 5]} :go/pos {:lparen [697 4] :rparen [702 3]}} (go/call ^{:go/pos {:name-pos [697 2]}} fn "_sigsegv" ^{:go/pos {:func [697 17] :lbrace [697 64] :rbrace [702 2] :return [701 3]}} (fn ^{:go/pos {:closing [697 46] :opening [697 21]}} [^{:tag ^{:go/pos {:lbrack [697 27]}} (slice ^{:go/pos {:name-pos [697 29]}} Object) :go/pos {:name-pos [697 22]}} args ^{:tag ^{:go/pos {:lbrack [697 40]}} (slice ^{:go/pos {:star [697 42]}} (* ^{:go/pos {:name-pos [697 43]}} Str)) :go/pos {:name-pos [697 37]}} kw] :results ^{:go/pos {:closing [697 62] :opening [697 48]}} [^{:go/pos {:name-pos [697 49]}} Object ^{:go/pos {:name-pos [697 57]}} error]
+              ^{:go/pos {:if [698 3] :lbrace [698 20] :rbrace [700 3]}} (when ^{:go/apos {2 [698 18]} :go/pos {:op-pos [698 16]}} (> ^{:go/pos {:lparen [698 9] :rparen [698 14]}} (^{:go/pos {:name-pos [698 6]}} len ^{:go/pos {:name-pos [698 10]}} args) 1)
+                ^{:go/apos {1 [699 11]} :go/pos {:return [699 4]}} (return nil ^{:go/apos {2 [699 38]} :go/pos {:lparen [699 22] :rparen [699 95]}} (^{:go/pos {:name-pos [699 16]}} Raisef ^{:go/pos {:name-pos [699 23]}} TypeErrorType "_sigsegv expected at most 1 argument, got %d" ^{:go/pos {:lparen [699 89] :rparen [699 94]}} (^{:go/pos {:name-pos [699 86]}} len ^{:go/pos {:name-pos [699 90]}} args))))
+
+              ^{:go/apos {1 [701 21]} :go/pos {:lparen [701 20] :rparen [701 23]}} (^{:go/pos {:name-pos [701 10]}} raiseFatal 11)))
+
+          ^{:go/apos {1 [703 9]} :go/pos {:lparen [703 8] :rparen [703 68]}} (^{:go/pos {:name-pos [703 2]}} noArgs "_sigabrt" ^{:go/pos {:func [703 21] :lbrace [703 44] :rbrace [703 67] :return [703 46]}} (fn ^{:go/pos {:closing [703 26] :opening [703 25]}} [] :results ^{:go/pos {:closing [703 42] :opening [703 28]}} [^{:go/pos {:name-pos [703 29]}} Object ^{:go/pos {:name-pos [703 37]}} error] ^{:go/apos {1 [703 64]} :go/pos {:lparen [703 63] :rparen [703 65]}} (^{:go/pos {:name-pos [703 53]}} raiseFatal 6)))
+          ^{:go/apos {1 [704 9]} :go/pos {:lparen [704 8] :rparen [704 67]}} (^{:go/pos {:name-pos [704 2]}} noArgs "_sigfpe" ^{:go/pos {:func [704 20] :lbrace [704 43] :rbrace [704 66] :return [704 45]}} (fn ^{:go/pos {:closing [704 25] :opening [704 24]}} [] :results ^{:go/pos {:closing [704 41] :opening [704 27]}} [^{:go/pos {:name-pos [704 28]}} Object ^{:go/pos {:name-pos [704 36]}} error] ^{:go/apos {1 [704 63]} :go/pos {:lparen [704 62] :rparen [704 64]}} (^{:go/pos {:name-pos [704 52]}} raiseFatal 8)))
+          ^{:go/apos {1 [705 9]} :go/pos {:lparen [705 8] :rparen [705 76]}} (^{:go/pos {:name-pos [705 2]}} noArgs "_stack_overflow" ^{:go/pos {:func [705 28] :lbrace [705 51] :rbrace [705 75] :return [705 53]}} (fn ^{:go/pos {:closing [705 33] :opening [705 32]}} [] :results ^{:go/pos {:closing [705 49] :opening [705 35]}} [^{:go/pos {:name-pos [705 36]}} Object ^{:go/pos {:name-pos [705 44]}} error] ^{:go/apos {1 [705 71]} :go/pos {:lparen [705 70] :rparen [705 73]}} (^{:go/pos {:name-pos [705 60]}} raiseFatal 11))) ; the overflow's SIGSEGV on the alternate stack
+          ^{:go/apos {1 [706 9]} :go/pos {:lparen [706 8] :rparen [728 3]}} (^{:go/pos {:name-pos [706 2]}} noArgs "_fatal_error_c_thread" ^{:go/pos {:func [706 34] :lbrace [706 57] :rbrace [728 2]}} (fn ^{:go/pos {:closing [706 39] :opening [706 38]}} [] :results ^{:go/pos {:closing [706 55] :opening [706 41]}} [^{:go/pos {:name-pos [706 42]}} Object ^{:go/pos {:name-pos [706 50]}} error]
+              ;; Py_FatalError in a thread without a Python thread state: the message, the threads (none current), the C
+              ;; stack, then abort() with faulthandler finalized (no second traceback)
+              ^{:go/pos {:dot [709 7] :lparen [709 12] :name-pos [709 8] :rparen [709 13]}} (.Lock ^{:go/pos {:name-pos [709 3]}} fhMu)
+              (let [^{:go/pos {:name-pos [710 3] :tok-pos [710 6]}} fd ^{:go/pos {:dot [710 16] :name-pos [710 17]}} (.-fd ^{:go/pos {:name-pos [710 9]}} fhFatal)]
+                ^{:go/pos {:if [711 3] :lbrace [711 23] :rbrace [713 3]}} (when ^{:go/pos {:op-pos [711 6]}} (not ^{:go/pos {:dot [711 14] :name-pos [711 15]}} (.-enabled ^{:go/pos {:name-pos [711 7]}} fhFatal))
+                  ^{:go/apos {2 [712 9]} :go/pos {:tok-pos [712 7]}} (set! ^{:go/pos {:name-pos [712 4]}} fd 2))
+
+                ^{:go/apos {2 [714 21]} :go/pos {:tok-pos [714 19]}} (set! ^{:go/pos {:dot [714 10] :name-pos [714 11]}} (.-enabled ^{:go/pos {:name-pos [714 3]}} fhFatal) false)
+                ^{:go/pos {:dot [715 7] :lparen [715 14] :name-pos [715 8] :rparen [715 15]}} (.Unlock ^{:go/pos {:name-pos [715 3]}} fhMu)
+                (let [^{:go/pos {:name-pos [716 3] :tok-pos [716 8]}} done ^{:go/pos {:lparen [716 15] :rparen [716 29]}} (^{:go/pos {:name-pos [716 11]}} make ^{:go/pos {:begin [716 16]}} (chan ^{:go/pos {:lbrace [716 27] :rbrace [716 28] :struct [716 21]}} (struct)))]
+                  ^{:go/pos {:go [717 3]}} (go ^{:go/pos {:lparen [725 4] :rparen [725 5]}} (^{:go/pos {:func [717 6] :lbrace [717 13] :rbrace [725 3]}} (fn ^{:go/pos {:closing [717 11] :opening [717 10]}} []
+                        (let [^{:tag ^{:go/pos {:dot [718 17] :name-pos [718 18] :x-pos [718 10]}} strings/Builder :go/pos {:name-pos [718 8] :tok-pos [718 4]}} b (zero ^{:go/pos {:dot [718 17] :name-pos [718 18] :x-pos [718 10]}} strings/Builder)]
+                          ^{:go/apos {2 [719 18]} :go/pos {:dot [719 5] :lparen [719 17] :name-pos [719 6] :rparen [719 125]}} (.WriteString ^{:go/pos {:name-pos [719 4]}} b "Fatal Python error: faulthandler_fatal_error_thread: in new thread\nPython runtime state: initialized\n\n")
+                          ^{:go/apos {2 [720 18]} :go/pos {:lparen [720 13] :rparen [720 21]}} (^{:go/pos {:name-pos [720 4]}} fhThreads ^{:go/pos {:op-pos [720 14]}} (addr ^{:go/pos {:name-pos [720 15]}} b) nil)
+                          ^{:go/pos {:dot [721 5] :lparen [721 17] :name-pos [721 6] :rparen [721 33]}} (.WriteString ^{:go/pos {:name-pos [721 4]}} b ^{:go/apos {1 [721 18]} :go/pos {:op-pos [721 23]}} (+ "\n" ^{:go/pos {:name-pos [721 25]}} fhCStack))
+                          ^{:go/pos {:lparen [722 11] :rparen [722 26]}} (^{:go/pos {:name-pos [722 4]}} fhWrite ^{:go/pos {:name-pos [722 12]}} fd ^{:go/pos {:dot [722 17] :lparen [722 24] :name-pos [722 18] :rparen [722 25]}} (.String ^{:go/pos {:name-pos [722 16]}} b))
+                          ^{:go/apos {1 [723 10]} :go/pos {:lparen [723 9] :rparen [723 11]}} (^{:go/pos {:name-pos [723 4]}} fhDie 6)
+                          ^{:go/pos {:lparen [724 9] :rparen [724 14]}} (^{:go/pos {:name-pos [724 4]}} close ^{:go/pos {:name-pos [724 10]}} done)))))
+
+                  ^{:go/pos {:lparen [726 15] :rparen [726 33]}} (^{:go/pos {:name-pos [726 3]}} allowThreads ^{:go/pos {:func [726 16] :lbrace [726 23] :rbrace [726 32]}} (fn ^{:go/pos {:closing [726 21] :opening [726 20]}} [] ^{:go/pos {:op-pos [726 25]}} (<! ^{:go/pos {:name-pos [726 27]}} done)))
+                  ^{:go/apos {2 [727 16]} :go/pos {:return [727 3]}} (return ^{:go/pos {:name-pos [727 10]}} None nil)))))
+
+          ^{:go/apos {2 [729 49]} :go/pos {:return [729 2]}} (return ^{:go/pos {:op-pos [729 9]}} (addr ^{:go/acolon {2 [729 21] 4 [729 43]} :go/apos {2 [729 17] 3 [729 23] 4 [729 39]} :go/pos {:lbrace [729 16] :rbrace [729 46]}} (lit ^{:go/pos {:name-pos [729 10]}} Module :Name "faulthandler" :Dict ^{:go/pos {:name-pos [729 45]}} d)) nil))))))
+
+
+
+
+^{:go/pos {:doc [732 1] :func [734 1] :lbrace [734 44] :rbrace [749 1] :return [748 2]}} (go/func ^{:go/pos {:name-pos [734 6]}} faulthandlerAtStart "faulthandlerAtStart is _PyFaulthandler_Init(enable): -X faulthandler or PYTHONFAULTHANDLER set and not empty\nimport faulthandler and call its enable().\n" ^{:tag ^{:go/pos {:name-pos [734 38]}} error :go/pos {:closing [734 36] :opening [734 25]}} [^{:tag ^{:go/pos {:star [734 29]}} (* ^{:go/pos {:name-pos [734 30]}} Interp) :go/pos {:name-pos [734 26]}} in]
+  (let [^{:go/pos {:tok-pos [735 7]}} (values ^{:go/pos {:name-pos [735 2]}} _ ^{:go/pos {:name-pos [735 5]}} x) ^{:go/apos {2 [735 26]} :go/pos {:lbrack [735 25] :rbrack [735 40]}} (aget ^{:go/pos {:lparen [735 23] :rparen [735 24]}} (^{:go/pos {:name-pos [735 10]}} startXOptions) "faulthandler")]
+    ^{:go/pos {:if [736 2] :lbrace [736 49] :rbrace [738 2]}} (when ^{:go/pos {:op-pos [736 8]}} (and ^{:go/pos {:op-pos [736 5]}} (not ^{:go/pos {:name-pos [736 6]}} x) ^{:go/apos {2 [736 46]} :go/pos {:op-pos [736 43]}} (== ^{:go/apos {1 [736 21]} :go/pos {:lparen [736 20] :rparen [736 41]}} (^{:go/pos {:dot [736 13] :name-pos [736 14] :x-pos [736 11]}} os/Getenv "PYTHONFAULTHANDLER") ""))
+      ^{:go/apos {1 [737 10]} :go/pos {:return [737 3]}} (return nil))
+
+    (let [^{:go/pos {:tok-pos [739 9]}} (values ^{:go/pos {:name-pos [739 2]}} m ^{:go/pos {:name-pos [739 5]}} err) ^{:go/apos {1 [739 25]} :go/pos {:lparen [739 24] :rparen [739 39]}} (^{:go/pos {:name-pos [739 12]}} importModule "faulthandler")]
+      ^{:go/pos {:if [740 2] :lbrace [740 16] :rbrace [742 2]}} (when ^{:go/apos {2 [740 12]} :go/pos {:op-pos [740 9]}} (!= ^{:go/pos {:name-pos [740 5]}} err nil)
+        ^{:go/pos {:return [741 3]}} (return ^{:go/pos {:name-pos [741 10]}} err))
+
+      (let [^{:go/pos {:tok-pos [743 14]}} (values ^{:go/pos {:name-pos [743 2]}} enable ^:assign ^{:go/pos {:name-pos [743 10]}} err) ^{:go/pos {:lparen [743 24] :rparen [743 44]}} (^{:go/pos {:name-pos [743 17]}} GetAttr ^{:go/pos {:name-pos [743 25]}} m ^{:go/apos {1 [743 35]} :go/pos {:lparen [743 34] :rparen [743 43]}} (^{:go/pos {:name-pos [743 28]}} NewStr "enable"))]
+        ^{:go/pos {:if [744 2] :lbrace [744 16] :rbrace [746 2]}} (when ^{:go/apos {2 [744 12]} :go/pos {:op-pos [744 9]}} (!= ^{:go/pos {:name-pos [744 5]}} err nil)
+          ^{:go/pos {:return [745 3]}} (return ^{:go/pos {:name-pos [745 10]}} err))
+
+        ^{:go/pos {:tok-pos [747 9]}} (set! (values ^{:go/pos {:name-pos [747 2]}} _ ^{:go/pos {:name-pos [747 5]}} err) ^{:go/apos {2 [747 24] 3 [747 29]} :go/pos {:lparen [747 15] :rparen [747 32]}} (^{:go/pos {:name-pos [747 11]}} Call ^{:go/pos {:name-pos [747 16]}} enable nil nil))
+        ^{:go/pos {:name-pos [748 9]}} err))))
