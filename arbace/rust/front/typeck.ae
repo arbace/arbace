@@ -857,7 +857,7 @@
                     :else (fresh :float))
       "Bool" [:bool]
       "Char" [:char]
-      "Str" [:ref [:re-static] false [:str]]
+      ("Str" "StrRaw") [:ref [:re-static] false [:str]]
       "ByteStr" [:ref [:re-erased] false [:array [:uint "u8"] [:cval (str (count (str (:symbol l))))]]]
       "Byte" [:uint "u8"]
       [:unknown])))
@@ -999,6 +999,8 @@
 
 (declare has-num-var?)
 
+(def ^:dynamic *scalar-fixes* nil)   ; atom: the overloaded operators whose autorefs writeback drops if both sides end scalars
+
 (defn- overloaded-binop
   "check_overloaded_binop: the operator's trait for the operands' types (lookup_op_method); a comparison by reference
   (both operands autoref'd), its type bool, else `<L as Op<R>>::Output`; with integer or float variables in an operand
@@ -1006,13 +1008,21 @@
   [e op lt rt]
   (let [tr (c/lang (get op-traits op))
         cmp? (#{"==" "!=" "<" "<=" ">" ">="} op)]
-    (if (and tr (or (has-num-var? lt) (has-num-var? rt)) (not (tvar? (shallow lt))))
+    ;; (a left operand that is a variable (`|x: _, y: u8| x + y`, `3.14 * r`): the obligation `L: Op<R>` registered, the
+    ;; output `<L as Op<R>>::Output` a fresh variable with its projection obligation, as normalizing an unresolved
+    ;; projection makes it)
+    (if (and tr (or (has-num-var? lt) (has-num-var? rt) (tvar? (shallow lt))))
       (do (when *obligations* (swap! *obligations* conj [:trait [tr [lt rt]]]))
           (when cmp?
             (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] false lt]]])
-            (adjust! (:rhs e) [["Borrow" [:ref [:re-erased] false rt]]]))
+            (adjust! (:rhs e) [["Borrow" [:ref [:re-erased] false rt]]])
+            (when *scalar-fixes* (swap! *scalar-fixes* conj [(:lhs e) (:rhs e) lt rt])))
           (if cmp? [:bool] (let [out (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr)))]
-                             (if out [:proj out [lt rt]] [:unknown]))))
+                             (if out
+                               (let [v (fresh :ty)]
+                                 (when *obligations* (swap! *obligations* conj [:proj out [lt rt] v]))
+                                 v)
+                               [:unknown]))))
     (if (and tr (not= [:unknown] (shallow lt)) (not= [:unknown] (shallow rt)) (not (tvar? (shallow lt)))
              (or (impls-for (shallow lt) tr [rt])
                  ;; the rhs coerced to the impl's Rhs (`String + &String`: &str by deref coercion)
@@ -1022,7 +1032,8 @@
                      (do (rollback! sn) false)))))
       (do (when cmp?
             (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] false lt]]])
-            (adjust! (:rhs e) [["Borrow" [:ref [:re-erased] false rt]]]))
+            (adjust! (:rhs e) [["Borrow" [:ref [:re-erased] false rt]]])
+            (when *scalar-fixes* (swap! *scalar-fixes* conj [(:lhs e) (:rhs e) lt rt])))
           (if cmp? [:bool] (let [out (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr)))]
                              (if out (shallow [:proj out [lt rt]]) [:unknown]))))
       [:unknown]))))
@@ -1333,21 +1344,31 @@
                            (when (impls-for (shallow lt) tr [rt])
                              (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] true lt]]]))))
                        unit)
-          :block (check-block (:block e) expected)
+          :block (if (:label e)
+                   ;; a labeled block: its tail and its breaks' values coerced to one type
+                   (let [brk (atom nil)
+                         t (binding [*loops* (cons {:label (:label e) :brk brk :block? true} *loops*)] (check-block (:block e) expected))]
+                     (cond (nil? @brk) t
+                           (= [:never] (shallow t)) @brk
+                           :else (do (unify t @brk) t)))
+                   (check-block (:block e) expected))
           :if (let [ct (check-expr (:cond e) [:bool])
                     tt (check-expr (:then e) (when (:else e) expected))]
                 (if (:else e)
                   (let [et (check-expr (:else e) expected)]
                     (lub! [[(:then e) tt] [(:else e) et]] (when (and expected (not (tvar? (shallow expected)))) expected)))
                   (do (coerce! (:then e) tt unit) unit)))
+          ;; the enclosing breakable scopes (loops, labeled blocks) by label: a `break` without one leaves the innermost loop
           :loop (let [brk (atom nil)]
-                  (binding [*loops* (cons brk *loops*)]
+                  (binding [*loops* (cons {:label (:label e) :brk brk} *loops*)]
                     (check-block (:block e) unit))
                   (or @brk (if (= :while (:source e)) unit [:never])))
-          :break (do (when-let [x (:expr e)]
-                       (let [t (check-expr x nil)] (when-let [b (first *loops*)] (if @b (unify @b t) (reset! b t)))))
-                     (when-let [b (first *loops*)] (when-not @b (reset! b unit)))
-                     [:never])
+          :break (let [target (if-let [l (:label e)] (some #(when (= l (:label %)) %) *loops*) (some #(when-not (:block? %) %) *loops*))
+                       b (:brk target)]
+                   (when-let [x (:expr e)]
+                     (let [t (check-expr x (some-> b deref))] (when b (if @b (coerce! x t @b) (reset! b t)))))
+                   (when (and b (not @b)) (reset! b unit))
+                   [:never])
           :continue [:never]
           :ret (do (when-let [x (:expr e)] (let [t (check-expr x *ret*)] (coerce! x t *ret*))) [:never])
           :match (let [st (check-expr (:expr e) nil)
@@ -1562,6 +1583,25 @@
         (vector? t) (mapv erase-all t)
         :else t))
 
+(defn- scalar? [t]
+  (let [t (shallow t)]
+    (or (#{:bool :char :int :uint :float :fnptr :ptr} (first t)) (and (tvar? t) (#{:int :float} (second t))))))
+
+(defn- unadjust!
+  "Drop the last adjustment of E's fact"
+  [e]
+  (swap! *facts* (fn [fs] (let [i (last (keep-indexed (fn [i f] (when (and (= (:span f) (:span e)) (= (:kind f) (get kind-names (:kind e)))) i)) fs))]
+                            (if (and i (seq (:adj (nth fs i)))) (update-in fs [i :adj] pop) fs)))))
+
+(defn- fix-scalar-builtins!
+  "writeback's fix_scalar_builtin_expr: an operator both of whose operands ended scalar is builtin, its by-reference
+  operands' autorefs dropped"
+  []
+  (doseq [[l r lt rt] (when *scalar-fixes* @*scalar-fixes*)]
+    (when (and (scalar? (deep-normalize lt)) (scalar? (deep-normalize rt)))
+      (unadjust! l)
+      (when r (unadjust! r)))))
+
 (defn- print-fact-ty
   "writeback: a fact's type resolved, normalized, its regions erased"
   [t]
@@ -1574,7 +1614,7 @@
   (let [n (:node d) k (:kind d)
         owner (binding [c/*in-value* true] (c/print-def-path (:id d) []))
         facts (atom [])]
-    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *norm-cache* (atom {}) *owner* owner *env* [{}] *loops* nil]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *norm-cache* (atom {}) *scalar-fixes* (atom []) *owner* owner *env* [{}] *loops* nil]
       (c/in-def (:id d)
         (if (#{"Fn" "AssocFn"} k)
           (let [sig (erase (c/fn-sig (:id d)))
@@ -1594,6 +1634,7 @@
       (solve-obligations!)
       (fallback!)
       (solve-obligations!)
+      (fix-scalar-builtins!)
       (when *profile*
         (binding [*out* *err*]
           (println "profile" owner "budget left" @*budget*)
