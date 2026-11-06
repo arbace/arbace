@@ -103,7 +103,8 @@
 (def ^:dynamic *facts* nil)  ; atom [fact]
 (def ^:dynamic *env* nil)    ; the bindings in scope: [{name type}] innermost last
 (def ^:dynamic *ret* nil)    ; the body's return type
-(def ^:dynamic *loops* nil)  ; atom: the enclosing loops' break types, innermost first
+(def ^:dynamic *loops* nil)
+(def ^:dynamic *mutable-place* false)   ; checking an assignment's left side (IndexMut, &mut autoref)  ; atom: the enclosing loops' break types, innermost first
 
 (def ^:private kind-names
   {:lit "Lit" :path "Path" :call "Call" :method "MethodCall" :binary "Binary" :unary "Unary" :addr-of "AddrOf"
@@ -142,7 +143,8 @@
          (case (:kind p) :lifetime [:re-erased] :const (fresh :const) (fresh :ty)))))
 
 (defn- erase [t]
-  (cond (c/region? t) [:re-erased]
+  (cond (= [:re-static] t) t
+        (c/region? t) [:re-erased]
         (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (erase %) (map? %) (into {} (for [[k v] %] [k (erase v)])) :else %) (rest t)))
         (vector? t) (mapv erase t)
         :else t))
@@ -371,7 +373,14 @@
             (some (fn [ar]
                     (when-let [[def args sig] (method-candidate t nm ar)]
                       [def args sig (vec (concat (for [s (rest (take (inc i) steps))] ["Deref" s])
-                                                 (case ar nil [] :not [["Borrow" [:ref [:re-erased] false t]]] :mut [["Borrow" [:ref [:re-erased] true t]]])))]))
+                                                 (case ar
+                                                   ;; pick_by_value_method: a reference receiver is reborrowed (`&*x`)
+                                                   nil (let [st (shallow t)]
+                                                         (if (= :ref (first st))
+                                                           [["Deref" (nth st 3)] ["Borrow" [:ref [:re-erased] (nth st 2) (nth st 3)]]]
+                                                           []))
+                                                   :not [["Borrow" [:ref [:re-erased] false t]]]
+                                                   :mut [["Borrow" [:ref [:re-erased] true t]]])))]))
                   [nil :not :mut]))
           (map-indexed vector steps))))
 
@@ -399,6 +408,8 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Coercion (coercion.rs: identity, never to any, reborrows, unsizing behind references)
 
+(declare autoderef)
+
 (defn- coerce!
   "coerce: E (of type FROM) to TO, the adjustments recorded on E; false when neither coerces nor unifies. Never to any
   (NeverToAny, even to `!`), a reference from &mut reborrowed (Deref, Borrow: coerce_borrowed_pointer; & to & is the
@@ -413,8 +424,23 @@
       ;; &T to &dyn Trait (Unsize): a reborrow, then Pointer(Unsize)
       (and (= :ref (first f)) (= :ref (first t)) (= :dyn (first (shallow (nth t 3)))) (not= :dyn (first (shallow (nth f 3)))))
       (do (adjust! e [["Deref" (nth f 3)] ["Borrow" [:ref [:re-erased] (nth t 2) (nth f 3)]] ["Pointer" to]]) true)
-      (and (= :ref (first f)) (= :ref (first t)) (nth f 2))
-      (do (adjust! e [["Deref" (nth f 3)] ["Borrow" [:ref [:re-erased] (nth t 2) (nth f 3)]]]) (unify (nth f 3) (nth t 3)))
+      ;; coerce_borrowed_pointer: a reference to a reference type is reborrowed (`&*x`: the target's region is a new
+      ;; one, so the no-op case `ty == a` does not arise), &mut to & included
+      ;; the same 'static on both sides: `&'a *x` would be the type itself (the no-op case)
+      (and (= :ref (first f)) (= :ref (first t)) (= [:re-static] (second f)) (= [:re-static] (second t)) (= (nth f 2) (nth t 2)))
+      (unify from to)
+      ;; &T (&mut T) to *const T (*mut T): Deref, Borrow(RawPtr)
+      (and (= :ref (first f)) (= :ptr (first t)) (or (nth f 2) (not (second t))))
+      (let [ok (unify (nth f 3) (nth t 2))]
+        (when ok (adjust! e [["Deref" (nth f 3)] ["Borrow" to]]))
+        ok)
+      (and (= :ref (first f)) (= :ref (first t)) (or (nth f 2) (not (nth t 2))))
+      ;; coerce_borrowed_pointer's autoderef: the first step of the referent (then its Deref impls) that unifies
+      (let [steps (autoderef (nth f 3))
+            hit (some (fn [[i st]] (let [sn (snapshot)] (if (unify st (nth t 3)) [i st] (do (rollback! sn) nil)))) (map-indexed vector steps))]
+        (if-let [[i st] hit]
+          (do (adjust! e (vec (concat (for [x (take (inc i) steps)] ["Deref" x]) [["Borrow" [:ref [:re-erased] (nth t 2) st]]]))) true)
+          (unify (nth f 3) (nth t 3))))
       ;; Box<T> (Rc<T>, Arc<T>) to Box<dyn Trait> or Box<[T]> (CoerceUnsized): Pointer(Unsize)
       (and (= :adt (first f)) (= :adt (first t)) (= (second f) (second t))
            (#{"alloc::boxed::Box" "alloc::rc::Rc" "alloc::sync::Arc"} (second f))
@@ -452,7 +478,7 @@
                     :else (fresh :float))
       "Bool" [:bool]
       "Char" [:char]
-      "Str" [:ref [:re-erased] false [:str]]
+      "Str" [:ref [:re-static] false [:str]]
       "ByteStr" [:ref [:re-erased] false [:array [:uint "u8"] [:cval (str (count (str (:symbol l))))]]]
       "Byte" [:uint "u8"]
       [:unknown])))
@@ -571,7 +597,7 @@
   [e op lt rt]
   (let [tr (c/lang (get op-traits op))
         cmp? (#{"==" "!=" "<" "<=" ">" ">="} op)]
-    (if (and tr (impls-for (shallow lt) tr [rt]))
+    (if (and tr (not= [:unknown] (shallow lt)) (not= [:unknown] (shallow rt)) (impls-for (shallow lt) tr [rt]))
       (do (when cmp?
             (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] false lt]]])
             (adjust! (:rhs e) [["Borrow" [:ref [:re-erased] false rt]]]))
@@ -663,7 +689,16 @@
                          (let [[i t] hit]
                            (when (pos? i) (adjust! (:expr e) (vec (for [s (rest (take (inc i) steps))] ["Deref" s]))))
                            (second t)))
-                     [:unknown]))
+                     ;; lookup_indexing: the base's autoderef steps, an Index impl for the step, the base autoref'd (mutably
+                     ;; when the place is assigned to)
+                     (let [steps (autoderef bt)
+                           tr (c/lang "index")
+                           hit (some (fn [[i st]] (when-let [r (impls-for st tr [it])] [i st r])) (map-indexed vector steps))]
+                       (if-let [[i st _] hit]
+                         (do (adjust! (:expr e) (vec (concat (for [x (rest (take (inc i) steps))] ["Deref" x])
+                                                             [["Borrow" [:ref [:re-erased] (boolean *mutable-place*) st]]])))
+                             (shallow [:proj (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr))) [st it]]))
+                         [:unknown]))))
           :tup (let [ex (some-> expected shallow)
                      exs (when (= :tuple (first ex)) (second ex))]
                  [:tuple (vec (map-indexed (fn [i x] (check-expr x (nth exs i nil))) (:exprs e)))])
@@ -675,7 +710,7 @@
                         elt (if (#{:array :slice} (first ex)) (second ex) (fresh :ty))]
                     (let [t (check-expr (:expr e) elt)] (coerce! (:expr e) t elt))
                     [:array elt (c/lower-const-arg (:count e))])
-          :assign (let [lt (check-expr (:lhs e) nil)] (let [rt (check-expr (:rhs e) lt)] (coerce! (:rhs e) rt lt)) unit)
+          :assign (let [lt (binding [*mutable-place* true] (check-expr (:lhs e) nil))] (let [rt (check-expr (:rhs e) lt)] (coerce! (:rhs e) rt lt)) unit)
           :assign-op (let [lt (check-expr (:lhs e) nil) rt (check-expr (:rhs e) lt)
                            op (str/replace (str (:op e)) "=" "")]
                        (if (builtin-binop? op lt rt)
@@ -739,7 +774,7 @@
                    (or decl (fresh :ty)))
                env (atom {})]
            (check-pat (:pat s) t env :none)
-           (when (:els s) (check-block (:els s) nil))
+           (when (:els s) (let [bt (check-block (:els s) [:never])] bt))
            (set! *env* (conj *env* @env)))
     (:semi :expr) (check-expr (:expr s) (when (= :expr (:kind s)) unit))
     nil))
@@ -817,8 +852,16 @@
     (when (nil? val)
       (case kind :int (bind! [:infer :int id] [:int "i32"]) :float (bind! [:infer :float id] [:float "f64"]) nil))))
 
-(defn- print-fact-ty [t]
-  (let [t (deep-normalize t)]
+(defn- erase-all [t]
+  (cond (c/region? t) [:re-erased]
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (erase-all %) (map? %) (into {} (for [[k v] %] [k (erase-all v)])) :else %) (rest t)))
+        (vector? t) (mapv erase-all t)
+        :else t))
+
+(defn- print-fact-ty
+  "writeback: a fact's type resolved, normalized, its regions erased"
+  [t]
+  (let [t (erase-all (deep-normalize t))]
     (binding [c/*in-value* false] (c/print-ty t))))
 
 (defn- check-body
@@ -834,10 +877,12 @@
                 env (atom {})]
             (doseq [[p t] (map vector (:params n) (:inputs sig))] (check-pat (:pat p) t env :none))
             (binding [*env* [@env] *ret* (:output sig)]
-              (let [t (check-block (:body n) (:output sig))]
-                (coerce! {:span nil} t (:output sig))
-                ;; the body's block expression is a fact of its own
-                (record! {:kind :block :span (:span (:body n))} t))))
+              (let [t (check-block (:body n) (:output sig))
+                    be {:kind :block :span (:span (:body n))}]
+                ;; the body's block expression is a fact of its own, coerced to the return type
+                (record! be t)
+                (coerce! be t (:output sig))
+                t)))
           (let [t (erase (c/type-of (:id d)))]
             (binding [*ret* t] (let [x (check-expr (:expr n) t)] (coerce! (:expr n) x t))))))
       (fallback!)
