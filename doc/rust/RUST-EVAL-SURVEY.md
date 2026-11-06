@@ -999,3 +999,30 @@ night's commands written (RE5.4).
 ## Decided (2026-11-05, the user)
 
 RES35-RES39, each as recommended: the synthetic corpus as a table and templates with the generated files committed; arbace/rust/ out of embed.ae and the keys (built on gt9-build's keys commit); a judge recorded against a non-pin std allowed, re-recorded at night; the coverage subset by greedy cover after the first whole run; programs printing backtrace addresses left out.
+
+## As built: RE6 (write-ahead, 2026-11-06)
+
+Branch `rust-re6` from `rust-re5` (`e573fd86`), by an agent on the main host during the day before the night's clean rerun (light tier:
+no gate, no build of Arbace, no heavy lock, every process under about 2 GiB, from 19:00 UTC 1.5 GiB and one check at a time; stage 0
+`/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated with `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`).
+The brief: RE6, the next eval stages, the UI suite's run-pass programs as the measure, the failing ones triaged by root cause and the
+largest causes fixed. The plan's RE6 (AOT) rests on RES34 (`rust-res34`, designed); this RE6 took the eval's completeness first, as
+the brief asked. The UI suite's source was fetched at the user's go-ahead (`bin/repr-rust corpus fetch rustc-1.99.1-ui`, the
+pinned `rustc-1.99.1-src.tar.xz` by its SHA-256, 26 s); std was built at the pin (`bin/rsi std-build`, 110 units, from the pinned
+`rust-src` apk) and lowered (`runtime-build`, 94 units, 33 stubbed) and read for ci (`runtime-ci`: one thread under the memory line,
+about four hours with restarts, read-lib resuming after each; RES52).
+
+### RE6.1 The triage
+
+Before RE6 the classes of RE4's sample (every 40th of the 3,718, 93 programs: 87 pass) were one program each (process, threads,
+env, ci-param-width, c-variadic, lto). Over the whole suite the causes size so (the corpus's flags and the sets, EVAL.md §6):
+
+| cause | programs (of 3,718) | why they fail on ci | RE6 |
+|---|---:|---|---|
+| threads | 175 in the threads set (157 files), and every one of the 49 `--test` harness programs (libtest spawns a thread per test even with `--test-threads=1`) | `__clone` is assembly: no threads on ci | **built**: threads on ci (EVAL.md §10) |
+| process | 63 in the process set; 51 of their files spawn themselves (`current_exe`, `args[0]`) | ci ran one process | **built**: posix_spawn's child and its exec (EVAL.md §12) |
+| env | 42 with an exec-env | ci's empty environment | **built**: RES29 (a), `--env` (EVAL.md §10) |
+| lto | 24 revisions with `-C lto`/`-Z thinlto` (19 not `lto=no`) | the link gets several units | **built**: the unit before LTO (EVAL.md §11) |
+| c-variadic | about 15 (RE2's ratio) | rustc's x86-64 `va_arg` against ci's `va_list` | RES51 |
+| f16/f128, not-lowered | about 10 to 15 | ci refuses `_Float16`/`_Float128` by design (C's SPEC §14) | RES51 |
+| ci-param-width | the abi tests' `i8`/`i16` helpers | ci does not narrow a parameter (C's gap, RES31) | C's crop |

@@ -334,3 +334,22 @@ rsi does not reproduce (its IR is `-O0`'s and std is linked as lowered units): `
 code in it); fat LTO merges the shim, so `bin/lib/rsi/wrap-ir` builds the program again with `-C lto=off` after its own flags,
 that build's linker keeping the shim alone. The gcc leg's `wrap` and `link` (RE2, RE3) are unchanged: there the class `lto`
 stays.
+
+## 12. Child processes on ci (RE6)
+
+Most of the UI suite's `process` programs run themselves again (`Command::new(env::current_exe())` or `args[0]`, with an
+argument) and judge the child's status and output. std spawns with musl's `posix_spawn`, which clones a child sharing the
+parent's memory (`CLONE_VM | CLONE_VFORK`) that applies the file actions and execs. ci's `__clone` takes that clone as well
+(`go/arbace/ci/thread.ae`'s `vforkChild`, `go/arbace/crt/spawn.ae`): the child function runs on the parent's goroutine, on the
+stack musl gave it, with a copy of the descriptor table (each description's reference counted, so a close in the child closes
+nothing of the parent's), of the signal actions, of the mask and of the working directory, all put back when the child ends.
+The child's `execve` starts a host process (`os.StartProcess`) with the child's descriptors that are not close-on-exec, as the
+host's files (ci's files and pipes are the host's; the standard streams the runner's, its buffers flushed first), the
+environment and directory given: when the path is the runner's own executable (`/proc/self/exe`, what `current_exe` reads) or
+names the program's `argv[0]` (`a.out`), the program itself runs again by `Sys.Self`, the command that ran it (`cirun [--env]
+PROGRAM.nodes`, a compiled program's shard executable and package), with the child's `argv[1:]`; else the program named (a
+missing or non-executable one gives its errno, which musl's child reports through its pipe). A child that exits before its
+exec (musl's `_exit(127)`) leaves a pid that `wait4` answers with that status. `wait4` waits for a host child (`WNOHANG` too),
+`kill` signals one. Not taken: `fork(2)` (a second address space: `ENOSYS`), a clone of a process without `CLONE_VFORK`.
+`test/rust/ci/spawn.c` (spawn of itself, `posix_spawnp` of `echo` through a pipe, a missing program) and `threads.c` give gcc's
+runs on ci.
