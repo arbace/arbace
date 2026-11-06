@@ -4982,38 +4982,48 @@ the test's calls inline are loaded from its forms in the run.
 flags (gc's reference compiles with the action's flags as before) and gives such a program 180 s (a first
 run analyzes the imports); `-l=N`, `-live`, `-wb` and the other `-d` flags stay unsupported.
 
+**Since then (the same day).** gc's `-m=2` text: `can inline f with cost N as: SIG { BODY }` (the body
+in `ir/fmt.go`'s statement format, a loop as `for loop`), `cannot inline f: REASON` for every function,
+`function f considered 'big'; reducing max cost of inlinees` (`IsBigFunc`'s 5,000 nodes; such a function's
+inlinees at most 20), `capturing by value|ref`, and the explanation of a heap allocation's flow
+(`explainFlow` with its one note, `too large for stack`); the interleaved loop to its fixed point
+(`State.InlinedCall`: an interface value assigned from an inlined call followed through the inlined body's
+result variables, a variable's assignments over its enclosing function with its literals).
+
 **Results.** `bin/goi check --list` of the class's 96 errorcheck programs (2026-11-06; its rows of
 `test/goi/check-linux-amd64.edn` taken from that run, `--record` refusing a list): before, 0 passed (all
-unsupported); now 50 pass (`-m -l`: 37 of the 42, among them `escape2` and `escape2n` with their 401 lines,
-`escape_closure` 151, `escape_reflect` 134, `bounds` 40; without `-l`: 13 of the 24, among them `inline`
-147 lines, `inline_sync`, `inline_endian`, `escape4`, `escape_make_non_const`, `fixedbugs/issue7921`), 11 are
-known in the new class `gc-m` (deferred: -m=2's text in 6, generic instances in 2, the devirtualization of
-values through inlined calls in 2, a standard tag made without the inliner in 1), 2 stay in
-`std-out-of-scope` (`unique`, `internal/runtime/atomic`), and 33 stay in `gc-flags` (design: `-live` 8,
-`-d=ssa/...` 14, `-d=wb` 4, `-d=nil` 3, `-d=typeassert`, `-d=tailcall`, `-d=append,slice`, `-d=checkptr`,
-`-d=escapedebug`... the back end's), with the two run programs (`known gc flags`). The record: 1,714 of 1,837
-pass (1,664 before); `bin/goi divergences` places every program; `bin/reap` re-recorded (Go eval: pass 1,714,
-design 112, deferred 11). Memory: a warm run of a program 0.6 GB; a first run, which analyzes the imports'
-packages from their forms, up to 2 GB (`fmt`'s closure), its tags then kept.
+unsupported); now 56 pass: with `-l` 38 of the 42 (`escape2` and `escape2n` with their 401 lines,
+`escape_closure` 151, `escape_reflect` 134, `bounds` 40, ...; the other 4 `-live` or an import goi refuses),
+without `-l` 18 of the 24 (`inline` 147 lines, `devirtualization_with_type_assertions_interleaved` 89,
+`inline_sync`, `inline_endian`, `inline_big`, `escape4`, `escape_make_non_const`, `fixedbugs/issue7921`, the
+`-m=2` programs `issue24651b`, `issue41635`, `issue54159`, `issue75278`, ...). 5 are known in the new class
+`gc-m` (deferred: generic instances in 3, `testing.B.Loop`'s keep-alives with `-m=2` in 1, a standard
+tag made without the inliner in 1), 2 stay in `std-out-of-scope` (`unique`, `internal/runtime/atomic`),
+and 33 stay in `gc-flags` (design: `-live` 8, `-d=ssa/...` 14, `-d=wb` 4, `-d=nil` 3, `-d=typeassert`,
+`-d=tailcall`, `-d=append,slice`, `-d=checkptr`, `-d=escapedebug`: gc's back end), with the two run programs
+(`known gc flags`). The record: 1,720 of 1,837 pass (1,664 before); `bin/goi divergences` places every
+program; `bin/reap` re-recorded. Memory: a warm run of a program 0.6 GB; a first run, which analyzes the
+imports' packages from their forms, up to 2 GB (`fmt`'s closure), its tags then kept. `arbace/go/escape.ae`
+and `run.ae` compile by c2j alone (as `bin/ci c2j-check` does for ci: 549 classes, none failing).
 
 ### Proposed
 
-1. **The class `gc-m`'s 11.** (a) Port -m=2's own text: escape analysis's explanations (`explainFlow`'s
-   notes, recorded only at -m=2), the inlinable bodies printed (`ir/fmt.go`'s statement format), `cannot
-   inline f: reason`, the big function's reduced budget: about 1-2 days, the 6 -m=2 programs. (b) Generic
-   functions' instances (gc's shape types and dictionaries in the inliner's and analysis's view): 2-3 days,
-   2 programs, with goi's generics in the checked tree. (c) Devirtualization through inlined calls (the
-   inliner's `State.InlinedCall`, interface values assigned from inlined results): 0.5-1 day, 2 programs.
-   (d) The standard library's tags made with its inliner: today a package's tags are made without it, for
-   memory (the analyses of inlined packages nest); a warm-up building the cache package by package in its
-   own process, dependencies first, would make them as gc does: 0.5 day, 1 program. Recommended: (c) and
-   (d) first (cheap), then (a); (b) with the generics' next round.
+1. **The class `gc-m`'s 5.** (a) Generic functions' instances (gc's shape types, `f[go.shape.uint]`, and
+   dictionaries in the inliner's and the analysis' view): 2-3 days, 3 programs, with goi's generics in the
+   checked tree. (b) The standard library's tags made with its inliner: today a package's tags are made
+   without it, for memory (the analyses of inlined packages nest, 3.5 GB for `fmt`'s closure); a warm-up
+   building the cache package by package in its own process, dependencies first, would make them as gc
+   does: 0.5-1 day, 1 program (and the tags then exact). (c) `testing.B.Loop`'s keep-alives (gc's escape of
+   a `b.Loop()` loop's results and arguments, Go 1.24) with `-m=2`'s remaining explanations (the notes of
+   every flow): 1 day, 1 program. Recommended: (b), then (c); (a) with the generics' next round.
 2. **The record.** The class's rows were written from a `--list` run. Recommended: the night's full
-   `bin/goi check --record` confirms them (it runs the 96 among the 1,837; their first run fills
-   `.tmp/goi-check/escape-tags`, a few minutes).
+   `bin/goi check --record` confirms them (the 96 among the 1,837; their first run fills
+   `.tmp/goi-check/escape-tags`, a few minutes, up to 2 GB a program).
 3. **`gc-flags`' remaining 33** stay by design: liveness, write barriers and the SSA passes are gc's back
    end, which an interpreter does not have (or "gc in the executable", GOI-DESIGN-REVIEW Proposed 1, if
    ever decided).
+4. **The build.** `arbace/go/escape.ae` is a new embedded namespace of goi (in `gate_key`): the next gate
+   build compiles it into the executable (c2j checked here; j2g and Go's build not run, the day's rules).
 
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
