@@ -1,0 +1,79 @@
+(ns arbace.repr.haskell.front
+  "Arbace's Haskell front end as one driver (doc/haskell/FRONTEND-SURVEY.md, HF7's first light): each program's
+  source read natively (arbace.repr.haskell.native), renamed (arbace.repr.haskell.rename), elaborated
+  (arbace.repr.haskell.typecheck), desugared (arbace.repr.haskell.desugar) and made STG (arbace.repr.haskell.tostg)
+  in one process, the interfaces read once: OUT/stg/NAME/MODULE.stg.ae, hsi's input, with no GHC. A program that
+  does not get through is reported with the stage that stopped it."
+  (:require [arbace.string :as str]
+            [arbace.repr.haskell.native :as native]
+            [arbace.repr.haskell.rename :as rn]
+            [arbace.repr.haskell.typecheck :as tc]
+            [arbace.repr.haskell.tostg :as tostg])
+  (:import [java.io File]))
+
+(defn- parse-args [args]
+  (loop [as args opts {} pos []]
+    (if (empty? as)
+      [opts pos]
+      (let [[x & more] as]
+        (if (and (or (= x "-o") (str/starts-with? x "--")) (seq more))
+          (recur (rest more) (assoc opts x (first more)) pos)
+          (recur more opts (conj pos x)))))))
+
+(defn- msg [^Throwable e] (str/replace (str (.getName (class e)) ": " (ex-message e)) #"\s+" " "))
+
+(defn build-one
+  "FILE (a path) through the front end into OUT; [stage message] when a stage stops it, else [:ok n-errors]"
+  [file out ifaces units flags]
+  (let [f (File. ^String file)
+        nm (.getName f)
+        base (str/replace nm #"\.l?hs$" "")
+        w (str out "/" base)
+        nd (str w "/nd")]
+    (.mkdirs (File. ^String nd))
+    (let [read-ok (try (let [text (slurp f)
+                             r (native/read-text text nm flags)
+                             cfg (native/config flags (.getBytes ^String text "UTF-8"))]
+                         (spit (str nd "/" nm ".edn") (str (str/join "\n" (map pr-str (native/dump-forms r cfg))) "\n"))
+                         nil)
+                       (catch Throwable e [:read (msg e)]))]
+      (or read-ok
+          (let [local (str w "/ifl")
+                rr (try (binding [rn/*ifdirs* (vec (cons local ifaces))]
+                          (rn/rename-file (str nd "/" nm ".edn") (str w "/tree") local))
+                        (catch Throwable e [:rename (msg e)]))]
+            (if (vector? rr)
+              rr
+              (let [tree (read-string (slurp (str w "/tree/" nm ".rn-tree.edn")))
+                    r (try (binding [tc/*ifdirs* (vec (concat ifaces [local]))] (tc/typecheck-module tree))
+                           (catch Throwable e [:typecheck (msg e)]))]
+                (if (vector? r)
+                  r
+                  (try
+                    (let [forms (tostg/module-stg r units nm)]
+                      (tostg/write-stg forms (str out "/stg/" base) (:module r))
+                      (if (seq (:errors r))
+                        [:typecheck-errors (str (count (:errors r)) ": " (str/join " | " (map #(str/replace (pr-str %) #"\s+" " ") (take 3 (:errors r)))))]
+                        [:ok (count (:errors rr))]))
+                    (catch Throwable e [:stg (msg e)]))))))))))
+
+(defn -main
+  "build --ifaces DIR,... --libs DIR,... -o OUT [--flags \"-XHaskell2010 ...\"] FILE.hs...: each program through the
+  front end, one line a program: NAME ok|STAGE MESSAGE"
+  [& args]
+  (let [[verb & more] args
+        [opts pos] (parse-args more)
+        ifaces (vec (remove empty? (str/split (or (get opts "--ifaces") "") #",")))
+        units (tostg/units-of (remove empty? (str/split (or (get opts "--libs") "") #",")))
+        flags (vec (remove empty? (str/split (or (get opts "--flags") "-XHaskell2010") #"\s+")))
+        out (get opts "-o" ".tmp/repr-haskell/front")]
+    (case verb
+      "build" (do (doseq [f pos]
+                    (let [t0 (System/currentTimeMillis)
+                          [st m] (try (build-one f out ifaces units flags) (catch Throwable e [:crash (msg e)]))
+                          nm (str/replace (.getName (File. ^String f)) #"\.l?hs$" "")]
+                      (println nm (name st) (if (= st :ok) "" m) (str "(" (quot (- (System/currentTimeMillis) t0) 100) "ds)"))
+                      (flush)))
+                  (System/exit 0))
+      (do (println "usage: -m arbace.repr.haskell.front build --ifaces DIR,... --libs DIR,... -o OUT FILE.hs...")
+          (System/exit 2)))))
