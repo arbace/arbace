@@ -2858,12 +2858,17 @@ internal allocations (frames, code, the interpreter's own buffers, free lists' r
 snapshot's totals and `get_tracemalloc_memory` differ, and a trace never comes from inside a built-in's work on its own
 buffers. Its port is last in the brief's order; how far it got is in "As built: 220".
 
-## As built: 220, faulthandler, _lsprof, termios and _tracemalloc's first stage (2026-11-05, the Mac VM, queue 220)
+## As built: 220, faulthandler, _lsprof, termios and _tracemalloc (2026-11-05/06, the Mac VM, queue 220)
+
+Decided (2026-11-06, the user): 220's DECISION (a), _tracemalloc's second stage (allocations traced at the runtime's
+constructors with CPython's sizes, frees seen by the collector, CPython's internal allocations out by design).
 
 Built as "Design: 220" above, in `go/arbace/py` (`builtins_faulthandler.ae`, `builtins_lsprof.ae`, `builtins_termios.ae`,
 `builtins_tracemalloc.ae`, `monitoring.ae`; the PSF License Agreement in LICENSE.md), with these hooks elsewhere:
-- **the loops** (`eval.ae`, `aot.ae`, their own commit): runFrames' start, return, pushed frame and unwinding, and the
-  call sites callStack, call-ex, `AotCallMethod`, `aotInvoke`, `AotCallV`, `AotCallMethodV`, each `if monEvents != 0`;
+- **the loops** (`eval.ae`, `aot.ae`, `thread_gil.ae`, their own commits): runFrames' start and pushed frame inside
+  the eval breaker's check (`breakMonitor` set while a tool has events: no new load), its return and unwinding, and
+  the call sites callStack, call-ex, `AotCallMethod`, `aotInvoke`, `AotCallV`, `AotCallMethodV`, each
+  `if monEvents != 0`;
   `AotCallV`/`AotCallMethodV` leave a call that goes the stack's way (`aotStacked`) to callStack's event, so a call
   fires CALL once. Monitored, a call of anything but a Python function goes through `Call` (callInit's in-loop
   `__init__` is not taken then: its frame runs nested, PY_START inside).
@@ -2880,6 +2885,8 @@ Built as "Design: 220" above, in `go/arbace/py` (`builtins_faulthandler.ae`, `bu
   `PYI_IGNORE_ENV`, both read once and removed from the environment; `-c`'s code runs as `"<string>"` (no prefix line:
   the runtime sets `sys.path[0]` to `""`, no `__file__`), so `-c`'s tracebacks, line numbers and faulthandler's dumps are
   CPython's.
+- **the constructors** (`bytes.ae`, `containers.ae`, `dict.ae`, `frame.ae`): `if tmOn { tmAlloc(o) }` in NewBytes,
+  NewList, NewDict and newFrame's cells (_tracemalloc's second stage).
 - **posix**: `os.openpty` (termios' file, through `posixAddons`) and `isatty` as musl's (TIOCGWINSZ: a pty's master is a
   tty, the device numbers missed it).
 
@@ -2899,8 +2906,77 @@ What each module gives (run: the programs below against `python3 -I -B` and the 
   nothing, no local events, the default timer is Go's monotonic clock.
 - **termios**: every function, the 216 constants, musl 1.2.6's speeds in CIBAUD (`cfsetispeed`/`cfgetispeed`), the
   errors of clinic's converters. Not on tamago (no tty there).
-- **_tracemalloc** (first stage): start/stop/is_tracing/get_traceback_limit, the start from the environment and `-X`
-  with CPython's errors; Snapshot, Filter, Traceback and statistics work (TestSnapshot, TestFilters, TestTraceback,
-  TestCommandLine pass), no allocation is traced (`:tracemalloc-no-traces`, 10 methods of TestTracemallocEnabled).
-  The second stage, as designed above (the constructors' allocations with CPython's sizes, frees by the collector's
-  cleanups, get_traced_memory collecting first), is the report's DECISION.
+- **_tracemalloc** (both stages; the second the user's (a) on this task's DECISION, 2026-11-06): start, stop,
+  is_tracing, get_traceback_limit, clear_traces, reset_peak, get_traced_memory, get_tracemalloc_memory, `_get_traces`,
+  `_get_object_traceback`, the start from `PYTHONTRACEMALLOC` and `-X tracemalloc[=N]` with CPython's errors. An
+  allocation is the creation of a Python object at the runtime's constructors (`NewBytes`, `NewStr`, `NewTuple`,
+  `NewList`, `NewDict`, a frame's cells: each `if tmOn { tmAlloc(o) }`), its size `sys.getsizeof`'s (a dict 64, a
+  cell 40), its traceback the running thread's frames (a callee's cells are its caller's: the callee is not on the
+  chain yet, CPython's "no incomplete frames"); tracebacks interned; a free is the object's collection, seen by a
+  finalizer (`runtime.SetFinalizer`, which goi runs as Go's own; `runtime.AddCleanup`'s generic body goi does not
+  interpret), and get_traced_memory, `_get_traces` and reset_peak run the collector and wait for the finalizers first
+  (a sentinel's, queued last). By design: CPython's internal allocations (frames, code, the interpreter's buffers, free
+  lists, the small-int cache, a list's or dict's growth by realloc) and a built-in's own Go buffers are none of pyi's
+  traces, so totals and counts differ; str and tuple are not traced (the hook put `NewStr` and `NewTuple` past Go's
+  inlining budget, measured by `-gcflags=-m`: their cost with tracing off decided it); an empty list made right after one was dropped has a trace (CPython's comes
+  from its free list); instances are not traced (218's finalizer queue owns their finalization: one finalizer per Go
+  object). TestTracemallocEnabled: 8 of the 10 methods `:tracemalloc-no-traces` held now pass; the other 2
+  (test_set_traceback_limit, test_snapshot) fail under the lib-test driver in CPython itself (`bin/pyi lib-test-all
+  --oracle test_tracemalloc`: 8 != 10, 6 not greater than 10, as pyi), `:tracemalloc-driver-depth`.
+
+Samples (run, the VM):
+
+| module | before (base) | after |
+|---|---|---|
+| test_termios | 2 equal, 18 classed (`:pointer-syscall`), 1 failing | 21 equal |
+| test_tty | 4 classed | 4 equal |
+| test_profile | 7 classed (`:c-modules-deferred`) | 7 equal |
+| test_cprofile | 27 classed | 25 equal, 2 classed (`:multiprocessing`: spawn and forkserver children need `_multiprocessing`) |
+| test_faulthandler | 48 classed | 43 equal, 5 classed (testcapi 4, `:finalization-collect` 1) |
+| test_tracemalloc | 51 classed | 38 equal, 12 classed (testcapi 9, fork 1, `:tracemalloc-driver-depth` 2) |
+
+The programs of `/root/arbace-mac/.tmp/q220/t` against `python3 -I -B`: `prof/prof1.py` (110 lines: the profilee's
+three pstats tables under cProfile and profile, the calling conventions, the tool's registry, throw, the external
+timer's unraisables, the documented cumulative example, sys.setprofile's events) equal under `bin/pyi run` and compiled
+(`bin/pyi aot`); `fh.sh` (15 faulthandler cases through `bin/pyi python`) equal; `termios1.py` equal; `tm1.py` equal;
+`tm2.py` (the traced-memory cases and the documented top-lines example) equal compiled, but for the empty list's trace;
+under `bin/pyi run` its module-level drop of the 1 MiB bytes is not seen as freed (something of goi's interpretation
+still holds it: test_get_traced_memory, the same drop inside a test method, passes under goi).
+
+**Speed with profiling and tracing off** (run, the VM, load 4.4-4.8 with two other agents): `bin/pyi bench` of seven
+benchmarks, 3 rounds, base (40ab1e13, `/root/arbace-mac/.tmp/worktrees/q220-base`) and branch back to back, the least
+of 3 (milliseconds; `/root/arbace-mac/.tmp/q220/bench/all.tsv`, every output equal to CPython's):
+
+| benchmark | CPython | base compiled | after compiled | base loop | after loop |
+|---|---:|---:|---:|---:|---:|
+| bm_coroutines | 360 | 642 | 617 (-3.9%) | 769 | 767 (-0.3%) |
+| bm_deltablue | 130 | 386 | 389 (+0.8%) | 589 | 609 (+3.4%) |
+| bm_float | 219 | 447 | 469 (+4.9%) | 639 | 647 (+1.3%) |
+| bm_generators | 159 | 677 | 678 (+0.1%) | 681 | 681 (+0.0%) |
+| bm_nbody | 303 | 353 | 356 (+0.8%) | 589 | 581 (-1.4%) |
+| bm_richards | 321 | 504 | 507 (+0.6%) | 1108 | 1138 (+2.7%) |
+| bm_spectral_norm | 335 | 614 | 662 (+7.8%) | 821 | 851 (+3.7%) |
+| sum | | 3623 | 3678 (+1.5%) | 5196 | 5274 (+1.5%) |
+
+The two outliers were taken apart on the compiled benchmarks themselves: the same program's binaries, built from the
+base's runtime and from the branch's (and from variants), run interleaved 8-10 times each
+(`/root/arbace-mac/.tmp/q220/var/run.sh`). The least times: bm_float base 438-440, after 441-444, after without
+tracemalloc's hooks 445; bm_spectral_norm base 592-596, after 600-601, after with the frame start on the eval breaker
+596, that without the call sites' hooks 592. The spread of one binary is 3-8%, wider than any difference between them:
+the table's +4.9% and +7.8% were the load. Two changes came from these runs. First, a frame's PY_START check moved
+under the eval breaker (`breakMonitor` is set while any tool has events), so the frame start costs nothing more than
+the base's. Second, `NewStr` and `NewTuple` are not hooked, so both stay inlined. `NewList`, `NewDict` and `NewBytes` stay
+inlined but grow, so a few of their callers no longer inline (`go build -gcflags=-m`: `AotBuildList`, `instanceDict`,
+`currentContext`, `(*Exception).dict` and six more); their cost is within the noise above.
+
+**The closing checks (run, the VM):**
+- `make python-essential`: check --aot 21 programs, 20 pass, 1 classed, 0 failing; the controls fail as they must.
+- `bin/pyi runtime check`: the packages print and read back to the same forms; the tables and runtime-ops are equal;
+  the REPL session is equal; 136 of the 138 programs are equal.
+  - e-executable.py: found `-c`'s `sys.path[0]` not `""` (fixed by 78c9ebd8). It also ran past the check's 120 s cap:
+    on the loaded VM it takes 133 s, its six children starting in 14 s each, and the base's start is the same 14 s.
+  - f-signal.py: the check ran as a background job, which inherits SIGINT ignored. CPython then reports
+    `getsignal(SIGINT)` 1, pyi does not read the inherited disposition (as on the base).
+  - Run alone in the foreground, both programs equal CPython's. With `PYI_SMOKE_ONLY='^(e-executable|f-signal)'`,
+    f-signal passes and e-executable equals but for the cap.
+
