@@ -680,3 +680,8 @@ anonymous structure apart from its `let module`'s (one scope a local structure i
   row of `check-oi-native.edn` is worse than `check-oi.edn`'s: the native path the default, `--ocdump` the oracle's, `check-oi.edn`
   kept as the oracle's record (the classes of the native path folded into `divergences.edn`); (b) keep both as now until T12.
   *Recommended: (a)*: TY19 (b)'s condition then holds.
+
+## Decided (2026-11-06, the user: TY23, TY24)
+
+TY23 (a): modular explicits ported now, as T10's last part, on `ocaml-t12`; TY24 (a): the native path becomes `bin/oi check`'s
+default after TY23 and the night's whole-corpus record, `--ocdump` the oracle's path.
