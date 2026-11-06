@@ -3623,3 +3623,53 @@ frame's release; a variant gated by one global (no tracked instance alive: no ch
 Go fields, never hidden), or through an instance whose `__dict__` was handed out; a weak reference inside the trash
 (callbacks always called); the count of untracked cyclic garbage; `gc.get_stats`, `get_objects`, `is_tracked` and the
 other collector observables (`:gc-collector`).
+
+## Design: 223, the exception state, traceback objects and the error display (2026-11-06, the Mac VM, queue 223)
+
+Read from CPython 3.14.10's Python/codegen.c (the locations each instruction is emitted at: `LOC(e)`,
+`update_start_location_to_match_attr`, `maybe_optimize_method_call`, `codegen_augassign`), Python/flowgraph.c
+(`propagate_line_numbers`, `duplicate_exits_without_lineno`: a location copied whole), Python/pythonrun.c (`_PyErr_PrintEx`,
+`_PyErr_Display`), Python/traceback.c (`tb_new`, `tb_next`'s setter, `tb_lineno_get`, `tb_dir`), Python/ceval.c
+(`do_raise`), Objects/exceptions.c (`AttributeError_getstate`, `AttributeError_reduce`) and Lib/traceback.py
+(`_get_code_position`, `_should_show_carets`, `_print_exception_bltin`), against go/arbace/py at cd5fd6cf (222's head).
+
+**The error display is traceback.py's.** CPython's `PyErr_Display` first calls `traceback._print_exception_bltin(exc)`
+and only falls back to its C printer when that import or call fails. pyi's display (interp.go's `printChain`) is a Go
+stand-in that prints no caret lines, no exception groups' boxes and no colour. So, as CPython: `PrintException` calls
+`traceback._print_exception_bltin` first (not while it is already displaying: a second error takes the Go display),
+and the Go display stays as the fallback. And `PyErr_Print`'s part, which pyi skipped: the uncaught exception of the
+main module and of the REPL stored as `sys.last_exc` (`last_type`, `last_value`, `last_traceback`) and given to
+`sys.excepthook`, a hook that raises reported as "Error in sys.excepthook:" then "Original exception was:".
+
+**PEP 657's positions.** traceback.py draws the carets from `co_positions()` at `tb_lasti // 2`. pyi's compiler keeps
+only a line per instruction. The unit gets, beside its `:line`, the `:loc` of the node being compiled (`[LINE COL
+END-LINE END-COL]`, the forms' `:pos`, UTF-8 byte offsets as the ast's): `expr!` and `stmt!` set both and restore both;
+an instruction emitted at a line without a node (`set-line!`, the many sites that set only a line) has no columns, as
+`[l l None None]`. The places CPython moves a location are ported: an attribute's load, store and delete, and a method
+call's CALL (maybe_optimize_method_call's conditions, `is_import_originated` from the module's symbol table), at the
+attribute name's line and column (`update_start_location_to_match_attr`, which also changes the instruction's line),
+and an augmented assignment's instructions at its target's location. `flow!` (219t's line passes) carries the location
+with the line wherever it copies a line from one instruction to another (propagation, the duplicated exits, NOPs
+replacing an instruction, threaded jumps). The IR gets `:positions`, `[END-LINE COL END-COL]` or nil per instruction
+(absent in mode :lines); load.go reads it into `Code.Positions`; `co_positions()` gives `(line, end_line, col,
+end_col)`, and `(line, line, None, None)` under `-X no_debug_ranges` or `PYTHONNODEBUGRANGES` (config.code_debug_ranges).
+pyi has no CACHE entries, so its `co_positions()` lists one item per instruction, the same location as CPython's
+instruction at the same position in the source.
+
+**Traceback objects** (`:traceback-objects`): `types.TracebackType(tb_next, tb_frame, tb_lasti, tb_lineno)` (tb_new's
+checks and messages), `tb_next` writable (None or a traceback, "traceback loop detected"), `tb_lasti` and `tb_lineno` as
+given (tb_lineno -1: the frame's line at tb_lasti), `__dir__`.
+
+**raise** (`do_raise`): the cause a class called (its result must be an instance: "calling X should have returned an
+instance of BaseException, not Y"), an instance, or None, else "exception causes must derive from BaseException";
+the exception class's call checked the same way.
+
+**`:exc-pickle`**: AttributeError's `__reduce__` (`AttributeError_getstate`): its state a copy of the instance dict
+with `name` (when set) and `args`.
+
+**`:exc-state`**: the context and the generator's saved exception are measured on the sample first; each failing
+method's cause is fixed in ceval's terms where it is a runtime path (the context chained in `_PyErr_SetObject`'s
+places), else left classed with its cause.
+
+**The cost.** The compiled loop is not touched: positions are data the loop never reads; the display imports traceback
+only when an exception is displayed. The bench sample is still run (210's method) because the IR's code objects grow.
