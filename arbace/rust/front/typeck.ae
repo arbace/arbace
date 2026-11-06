@@ -154,15 +154,48 @@
         (sequential? t) (mapcat array-lens t)
         :else nil))
 
+(defn- ty-consts
+  "A HIR type's anonymous constants: its array lengths (an element type's before its array's) and its paths' const
+  arguments"
+  [t]
+  (cond (and (map? t) (= :array (:kind t))) (concat (ty-consts (:ty t)) [(:len t)])
+        (and (map? t) (map? (:const t)) (not (:node t))) [(:const t)]
+        (map? t) (mapcat ty-consts (vals (dissoc t :len)))
+        (sequential? t) (mapcat ty-consts t)
+        :else nil))
+
+(def ^:dynamic *anon-order* nil)   ; {hir-id disambiguator}: the body's anonymous constants in the def collector's order
+
+(defn- body-const-order
+  "The anonymous constants of a body (repeat counts, array lengths, const arguments; a closure's are its own) numbered in
+  the def collector's order from BASE: the body's own fragment first, then each macro expansion's (as body-children
+  orders closures), each in lowering order"
+  [body base]
+  (let [acc (java.util.ArrayList.)]
+    (letfn [(walk [x expn]
+              (cond
+                (map? x) (let [expn (or expn (when (or (= :foreign (:span x)) (:expansion x)) (or (:hir-id x) [0 0])))]
+                           (cond (and (= :expr (:node x)) (= :closure (:kind x))) nil
+                                 (and (= :expr (:node x)) (= :repeat (:kind x))) (do (walk (:expr x) expn) (.add acc [(:count x) expn]))
+                                 (and (= :array (:kind x)) (contains? x :len)) (do (walk (:ty x) expn) (.add acc [(:len x) expn]))
+                                 (and (map? (:const x)) (not (:node x))) (.add acc [(:const x) expn])
+                                 :else (doseq [v (vals x)] (walk v expn))))
+                (sequential? x) (doseq [v x] (walk v expn))
+                :else nil))]
+      (walk body nil))
+    (into {} (map-indexed (fn [i [n _]] [(:hir-id n) (+ (long base) i)])
+                          (sort-by (fn [[n expn]] [(if expn 1 0) (if expn (long (second expn)) 0) (let [h (:hir-id n)] (if h (long (second h)) -1))])
+                                   (vec acc))))))
+
 (defn- anon-const!
-  "An anonymous constant (an array length, a repeat count): its own typeck root `OWNER::{constant#K}` types its literal or
-  path usize; written in the body, the body's results have it untyped (`?`)"
+  "An anonymous constant (an array length, a repeat count, a const argument): its own typeck root `OWNER::{constant#K}`
+  types its literal or path usize; written in the body, the body's results have it untyped (`?`)"
   [x in-body?]
   (when *anon-consts*
-    (let [k (dec (long (swap! *anon-consts* inc)))
+    (let [k (if (and in-body? *anon-order*) (get *anon-order* (:hir-id x) -1) (dec (long (swap! *anon-consts* inc))))
           x (if (and (= :block (:kind x)) (empty? (:stmts (:block x)))) (:expr (:block x)) x)
           kind (get kind-names (:kind x))]
-      (when (and (vector? (:span x)) (#{"Lit" "Path"} kind))
+      (when (and (vector? (:span x)) (#{"Lit" "Path"} kind) (>= (long k) 0))
         (swap! *facts* conj {:owner (str *owner* "::{constant#" k "}") :span (:span x) :kind kind :ty [:uint "usize"] :adj []})
         (when in-body? (swap! *facts* conj {:owner *owner* :span (:span x) :kind kind :ty "?" :adj []}))))))
 
@@ -700,6 +733,11 @@
                     (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
       (some (fn [tr]
               (when-let [[def k] (trait-item tr nm)]
+                (if (and (str/starts-with? (str k) "AssocConst") (number? def))
+                  ;; a trait's associated constant for the type: its declared type with Self the type
+                  (let [targs (vec (cons t (drop 1 (fresh-args tr)))) s (snapshot) ok (impls-for t tr (vec (rest targs)))]
+                    (rollback! s)
+                    (when ok (erase (c/subst (c/type-of def) targs))))
                 (when (= "AssocFn" (str k))
                   (let [targs (vec (cons t (drop 1 (fresh-args tr))))
                         s (snapshot)
@@ -708,7 +746,7 @@
                     (rollback! s)
                     (when ok
                       (when *obligations* (swap! *obligations* conj [:trait [tr targs]]))
-                      [:fndef def (into targs (drop (count targs) (fresh-args def)))])))))
+                      [:fndef def (into targs (drop (count targs) (fresh-args def)))]))))))
             (traits-in-scope nm))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1177,7 +1215,26 @@
   (let [ty
         (case (:kind e)
           :lit (lit-ty (:lit e) expected)
-          :path (apply-turbofish e (path-ty e))
+          ;; a type-relative value path whose type has generic arguments (`Pair::<u8, 4>::len`): resolve_fully_qualified_call
+          ;; on the lowered self type
+          :type-relative (let [_ (doseq [l (ty-consts (:qself e))] (anon-const! l true))
+                               bt (body-ty (:qself e))]
+                           (or (when-not (#{:err :unknown} (first bt)) (probe-assoc-fn bt (:ident (:seg e)))) [:unknown]))
+          ;; a qualified path `<T as Trait>::item`: the trait's item with Self the type (its other arguments fresh)
+          :qpath (let [bt (body-ty (:qself e))
+                       path (:path e) segs (:segs path)
+                       nm (:ident (peek segs))
+                       r (when (> (count segs) 1) (try (c/res-def (assoc path :segs (vec (butlast segs)) :res nil :span nil)) (catch Throwable _ nil)))
+                       tr (when (#{:local :ext} (first r)) (second r))]
+                   (or (when-let [[def k] (and tr (trait-item tr nm))]
+                         (let [targs (vec (cons bt (drop 1 (fresh-args tr))))]
+                           (when *obligations* (swap! *obligations* conj [:trait [tr targs]]))
+                           (cond (= "AssocFn" (str k)) [:fndef def (into targs (drop (count targs) (fresh-args def)))]
+                                 (and (str/starts-with? (str k) "AssocConst") (number? def)) (erase (c/subst (c/type-of def) targs))
+                                 :else nil)))
+                       [:unknown]))
+          :path (do (doseq [seg (:segs (:path e)) a (:args (:args seg)) :when (and (map? (:const a)) (not (:node a)))] (anon-const! (:const a) true))
+                    (apply-turbofish e (path-ty e)))
           :call (check-call e expected)
           :method (let [rt (check-expr (:receiver e) nil)
                         _ (when (tvar? (shallow rt)) (solve-obligations!))]
@@ -1219,7 +1276,8 @@
                      (if (:raw e) [:ptr (:mutbl e) t] [:ref [:re-erased] (:mutbl e) t]))
           ;; check_expr_cast: the operand checked with ExpectCastableToType (a literal takes the type, a block does not
                   ;; coerce to it)
-          :cast (let [t (body-ty (:ty e))]
+          :cast (let [t (body-ty (:ty e))
+                      _ (doseq [l (ty-consts (:ty e))] (anon-const! l true))]
                   (check-expr (:expr e) (when (castable-lit? (:expr e)) t))
                   t)
           :type (let [t (body-ty (:ty e))] (let [x (check-expr (:expr e) t)] (coerce! (:expr e) x t)) t)
@@ -1322,7 +1380,7 @@
 
 (defn- check-stmt [s]
   (case (:kind s)
-    :let (let [_ (doseq [l (array-lens (:ty s))] (anon-const! l true))
+    :let (let [_ (doseq [l (ty-consts (:ty s))] (anon-const! l true))
                decl (when (:ty s) (body-ty (:ty s)))
                t (if-let [init (:init s)]
                    (let [x (check-expr init decl)] (when decl (coerce! init x decl)) (or decl x))
@@ -1504,16 +1562,16 @@
         (if (#{"Fn" "AssocFn"} k)
           (let [sig (erase (c/fn-sig (:id d)))
                 env (atom {})
-                _ (doseq [l (array-lens (concat (map :ty (:params n)) [(:output n)]))] (anon-const! l false))]
+                _ (doseq [l (ty-consts (concat (map :ty (:params n)) [(:output n)]))] (anon-const! l false))]
             (doseq [[p t] (map vector (:params n) (:inputs sig))] (check-pat (:pat p) t env :none))
-            (binding [*env* [@env] *ret* (:output sig)]
+            (binding [*env* [@env] *ret* (:output sig) *anon-order* (body-const-order (:body n) @*anon-consts*)]
               (let [t (check-block (:body n) (:output sig))
                     be {:kind :block :span (:span (:body n))}]
                 ;; the body's block expression is a fact of its own, coerced to the return type
                 (record! be t)
                 (coerce! be t (:output sig))
                 t)))
-          (let [_ (doseq [l (array-lens (:ty n))] (anon-const! l false))
+          (let [_ (doseq [l (ty-consts (:ty n))] (anon-const! l false))
                 t (erase (c/type-of (:id d)))]
             (binding [*ret* t] (let [x (check-expr (:expr n) t)] (coerce! (:expr n) x t))))))
       (solve-obligations!)
