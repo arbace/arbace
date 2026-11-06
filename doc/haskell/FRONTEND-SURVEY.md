@@ -1183,14 +1183,17 @@ start, the simplifier off; after = on):
 
 | judge | before | after |
 |---|---:|---:|
-| simplified Core = GHC's -O0 Core, test/haskell/stg's programs | 37 of 61 | NNSTG |
-| simplified Core = GHC's -O0 Core, test/haskell/typecheck's 22 samples | 261 of 321 | NNTC |
-| STG = GHC's -O0 STG (stg-check) | 65 of 83 | NNSTGSTG |
+| simplified Core = GHC's -O0 Core, test/haskell/stg's programs | 37 of 61 | 53 of 61 |
+| simplified Core = GHC's -O0 Core, test/haskell/typecheck's 22 samples | 261 of 321 | 300 of 321 |
+| STG = GHC's -O0 STG (stg-check) | 65 of 83 | 80 of 83 |
 | stg-check runs | 9 of 9 | 9 of 9 |
-| run-check (the run corpus) | 60 of 63 | NNRC |
-| run-check --nofib (light caps) | 40 of 53 | NNNF |
+| run-check (the run corpus) | 60 of 63 | 60 of 63 (63 of 63 as recorded) |
+| run-check --nofib (light caps) | 40 of 53 | 39 of 53 (53 of 53 as recorded) |
 
-`imaginary/integrate` (the `space` class): the Simplifier's input now inlines `rtotals` and `itotals` into `es` as GHC's
+The desugared Core judge (stg-check's typecheck samples) went from 171 to 173 of 227 (dsAbsBinds' letrec, sections,
+selectors); typecheck-check stays 22 of 22. The one nofib change is `imaginary/queens`, now in the class `hsi`: it runs
+in 109 s of CPU from our STG against 119 s from the earlier pipeline's on the loaded host, both against the 120 s cap
+(the same output given 600 s). `imaginary/integrate`, the `space` class (now `hsi`, the class retired): the Simplifier's input now inlines `rtotals` and `itotals` into `es` as GHC's
 desugarer does; its run's peak memory is GHC's own STG's (804 MB against GHC's 792 MB, from 993 MB), so it fails
 under the light 2 GiB cap exactly as GHC's STG does (the class `hsi-memory`) and passes with GHC's output at 4 GiB:
 with decision 4's night caps it passes.
@@ -1210,3 +1213,16 @@ NOINLINE pragmas and stable unfoldings of the user's, the demands (`-O0` has non
 the coercions' optimiser (`optCoercion`: a coercion is its two kinds; reflexive when they are equal), the newtypes'
 coercions with their type arguments (left uninstantiated: an arity through a type variable instantiated to a function
 is not seen).
+
+**Proposed** (the user decides).
+
+1. The evidence bindings' placement (the remaining Core and STG differences of the judges): GHC's typechecker binds a
+   module's constant dictionaries at the top level (shared, the simple optimiser inlining the once-used) and a signed
+   binding's at its body's top (`collatz`'s `$dReal = $p1Integral $fIntegralInt`), where the elaborator writes each
+   dictionary term at its use. Options: (a) the elaborator's evidence bindings placed as GHC's solver places them
+   (top-level implication, signature implications), a slice of HF3; (b) a desugarer post-pass hoisting closed
+   dictionary terms (approximate); (c) leave them (the runs are equal). *Recommended: (a)*, with the next elaborator slice.
+2. The derived Ix/Enum/Ord code on `dataToTag#` and the tag primops as GHC's `Deriv/Generate.hs` writes them
+   (`T20Derive3`'s `cmp`, `weekend`, the Ix instances top-level): HF4's generators. *Recommended* in HF4's next pass.
+3. The nofib record at the night caps (decision 4): once a night slot allows, `ARBACE_MEM_GIB=16 HSI_TIMEOUT=60
+   bin/repr-haskell run-check --nofib --record` to empty the `hsi` class (integrate and queens pass at 4 GiB / 600 s).
