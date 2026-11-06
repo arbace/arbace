@@ -1388,22 +1388,32 @@
                env (atom {})]
            (check-pat (:pat s) t env :none)
            (when (:els s) (let [bt (check-block (:els s) [:never])] bt))
-           (set! *env* (conj *env* @env)))
+           (set! *env* (conj *env* @env))
+           (when (:init s) t))
     (:semi :expr) (check-expr (:expr s) (when (= :expr (:kind s)) unit))
     nil))
+
+(defn- fresh-diverging
+  "A type variable a diverging expression was coerced to (its fallback is the never type's: `()`, `!` since 2024)"
+  []
+  (let [v (fresh :ty)] (swap! *vars* assoc-in [(nth v 2) :diverging] true) v))
 
 (defn check-block [b expected]
   (binding [*env* (conj *env* {})]
     (let [diverges (atom false)]
+      ;; a statement of the never type makes the block diverge (FnCtxt::diverges)
       (doseq [s (:stmts b)]
-        (check-stmt s)
-        (when (and (#{:semi :expr} (:kind s)) (= [:never] (some-> (last (filter #(= (:span %) (:span (:expr s))) @*facts*)) :ty shallow))) (reset! diverges true)))
+        (let [t (check-stmt s)]
+          (when (and (vector? t) (= [:never] (shallow t))) (reset! diverges true))))
       (if-let [x (:expr b)]
-        ;; check_block_with_expected: the tail's CoerceMany to the expected type, which is then the block's type
-        (let [t (check-expr x expected)]
-          (if (and expected (not (tvar? (shallow expected))) (coerce! x t expected) (not= [:never] (shallow t)))
-            expected
-            t))
+        ;; check_block_with_expected: the tail's CoerceMany to the expected type (else a fresh variable), which is then
+        ;; the block's type; a diverging tail's target falls back as diverging variables do
+        (let [has? (and expected (not (tvar? (shallow expected))))
+              t (check-expr x expected)]
+          (cond has? (if (coerce! x t expected) expected t)
+                (= [:never] (shallow t)) (let [v (fresh-diverging)] (coerce! x t v) v)
+                :else t))
+        ;; no tail: `!` when the block diverges (nothing pushed), else the forced unit
         (if @diverges [:never] unit)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1534,9 +1544,14 @@
 (defn- fallback!
   "fallback.rs: unresolved integer variables are i32, float variables f64"
   []
-  (doseq [[id {:keys [kind val]}] @*vars*]
+  (doseq [[id {:keys [kind val diverging]}] @*vars*]
     (when (nil? val)
-      (case kind :int (bind! [:infer :int id] [:int "i32"]) :float (bind! [:infer :float id] [:float "f64"]) nil))))
+      (case kind
+        :int (bind! [:infer :int id] [:int "i32"])
+        :float (bind! [:infer :float id] [:float "f64"])
+        ;; diverging variables: `()`, the never type since edition 2024 (never_type_fallback)
+        :ty (when diverging (bind! [:infer :ty id] (if (>= (long c/*edition*) 2024) [:never] unit)))
+        nil))))
 
 (defn- erase-all [t]
   (cond (and (vector? t) (= :re-bound (first t)) (= :inner (nth t 2 nil))) t   ; bound within the type: kept
