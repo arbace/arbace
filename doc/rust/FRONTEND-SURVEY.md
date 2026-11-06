@@ -1272,7 +1272,8 @@ about 30 s under 1.2 GB (it was 85 s before the evaluation cache), the crates' a
 - **The fulfillment context** drops what it processed (selected, normalized, holding by assumption, failed); integer and float variables'
   obligations select their one integral impl (`{integer}: Add<u8>`); the builtin Fn impls unify a callable's inputs with the arguments'
   tuple, so an impl's `F: FnMut(char) -> bool` gives a closure its parameters (`str::split(|c| ..)`); a trait method's `Self: Trait`
-  predicate is registered with the method (`Into::into` as a value); aliases implement their item bounds' traits.
+  predicate is registered with the method (`Into::into` as a value); aliases implement their item bounds' traits; a selected impl's
+  nested obligations with variables stay pending (confirmation: the blanket Into impl's `U: From<T>` then binds `T`).
 
 ### Type checking
 
@@ -1283,21 +1284,31 @@ about 30 s under 1.2 GB (it was 85 s before the evaluation cache), the crates' a
   coerced to the same type is a no-op only when the regions are the same; a block's type is its coercion target; trait objects unify by
   principal, projections and auto traits, and upcast to their own principal (`Box<dyn Fn>` to `Box<dyn Fn>` is a Pointer(Unsize)).
 - **Arguments** (`check_argument_types`): closures checked last after `select_obligations_where_possible`, each argument coerced to its
-  expected input type (the formal one then its supertype: `Some(&e)` expecting `Option<&dyn Error>`).
+  expected input type (the formal one then its supertype: `Some(&e)` expecting `Option<&dyn Error>`), the expected inputs fudged
+  (`fudge_inference_if_ok`: their region variables fresh); a signature's late-bound regions instantiated as fresh region variables
+  (`instantiate_binder_with_fresh_vars`), so `parse(bb(s))` reborrows both `s` and `bb(s)`.
+- **Operators** (`op.rs`'s `check_overloaded_binop`): the right operand's expectation the `?R` that `L: Op<?R>`'s selection binds
+  before it is checked, the operand coerced to it (`"abc" < "abd"` reborrows the right literal; `String += &&str` derefs it); a
+  compound assignment's left side a mutated place; overloaded unary operators (`Neg`, `Not`); calls of a Box of a Fn trait object
+  through the Box's own Fn impl.
+- **Return-position `impl Trait`** inside its defining body: a hidden type variable with its bounds' obligations
+  (`replace_opaque_types_with_inference_vars`): `-> impl Iterator<Item = u8> { once(1) }` types the literal `u8`.
 - **Locals** (`check_decl_initializer`): the initializer coerced to the local's type, a fresh variable without an annotation, which a
   block initializer takes as its target (a `&mut` block value is reborrowed).
 - **Divergence**: a block whose statements have the never type is `!` without a tail; a diverging tail is coerced to a diverging
   variable, whose fallback is `()` before edition 2024 and `!` since (`fallback.rs`); a variable a `!` is coerced to diverges.
 - **Writeback**: `fix_scalar_builtin_expr` (an overloaded comparison whose operands end scalar is builtin: its autorefs dropped);
-  `check_casts` after fallback (a cast that is a coercion takes its adjustments: `&x as *const T`, a fn item to a fn pointer).
+  `check_casts` after fallback (a cast that is a coercion takes its adjustments: `&x as *const T`, a fn item to a fn pointer, an
+  unsizing `Box::new(c) as Box<dyn Fn()>`).
 - **Closure kinds** (`upvar.rs`'s `closure_analyze` over `expr_use_visitor.rs`'s uses): a closure whose expectation names a Fn trait has
   its kind; else a move of a captured non-Copy place makes it FnOnce, a mutation or mutable borrow FnMut, else Fn; a call of a closure
   value is autoref'd by its kind (`&`, `&mut`, none). The captures themselves (by-ref places, by-value moves) are not recorded yet.
 - Also: `convert_place_derefs_to_mutable` (a receiver's `&mut` autoref makes its place's Index IndexMut); operators on a variable or a
   parameter left operand; type-relative paths with generic arguments and on parameters (`T::default()`, `Self::read_uint`), qualified
   paths (`<T as Trait>::item`), traits' associated constants; anonymous constants numbered in the def collector's order, const arguments
-  among them, expression constants checked as typeck roots of their own; labeled breaks and blocks; unions and `Self { .. }`; raw string
-  literals; ExpectCastableToType for literal operands; a Box's builtin deref; lifetime elision of signatures' outputs.
+  among them, expression constants checked as typeck roots of their own; labeled breaks and blocks; unions, `Self { .. }`, `Self(..)`
+  (Res::SelfCtor) and `Self::Variant`; raw string literals; ExpectCastableToType for literal operands; a Box's builtin deref; lifetime
+  elision of signatures' outputs.
 
 ### The helper and std's interface (RFP18 (a): regenerated, the digest committed)
 
@@ -1308,12 +1319,29 @@ binders print their own `for<..>`). `test/rust/front/std-iface.sha256` re-pinned
 
 ### Results
 
-`bin/rust-front typeck-check` (the 90 programs): **11,112 of 11,173 facts (99.5 %), 71 programs whole** (RF9a: 10,768, 54 whole); the
-pipeline (`--ours`) 11,110. The registry crates (`--crates`, 49 crates): **CRATES** (RF9a: 21,922, 6 whole). The other judges unchanged:
-`collect-check` 1,189 of 1,191, `hir-check` 91 of 91; the negative controls differ.
+`bin/rust-front typeck-check` (the 90 programs): **11,139 of 11,173 facts (99.7 %), 81 programs whole** (RF9a: 10,768, 54 whole); the
+pipeline (`--ours`) 11,137. The registry crates (`--crates`, 49 crates): **CRATES** (RF9a: 21,922, 6 whole). The other judges unchanged:
+`expand-check` 92 of 92, `resolve-check` 5,594 of 5,594, `hir-check` 91 of 91, `collect-check` 1,189 of 1,191; the negative controls differ.
 
 Not taken yet (the classes of the facts left): closures' captures (the places and modes, which RF10 needs) and the full
-ExprUseVisitor (match patterns' moves, by-ref bindings); a binary operator's right operand expectation (rustc's fresh `?R` with the
-lookup before the operand, where the slice passes the left operand's type); traits in scope beyond the prelude and the crate's `use`
+ExprUseVisitor (match patterns' moves, by-ref bindings); `#[derive(Default)]`'s `#[default]` variant path; traits in scope beyond the prelude and the crate's `use`
 items (`self.0.fmt(f)` inside `impl Display`); `simd_swizzle!`'s def-site names (RFP8); `format_args!`'s width and precision arguments'
 `usize`; specialization; async.
+
+### Estimates, revisited
+
+The slice took a day as RF9a did (about 800 lines more of `typeck.ae`, 60 of helper); the solver's growth (ambiguity, where clauses,
+nested obligations, the evaluation cache) was the larger half, and made the checks faster, not slower. What the samples and crates still
+miss is now small and scattered; the judge's corpus (RFP14's UI suite and the crates with dependencies) is again the limit.
+
+### Proposed (RF9b)
+
+- **RFP20 Closures' captures in the judge.** RF10 (MIR building) needs each closure's captured places and capture modes
+  (`closure_min_captures`) and kind; the slice infers kinds, and the helper's `--typeck` dumps neither. Options: (a) **extend `--typeck`
+  with each closure's kind and captures (place, mode, by-value or by-ref) and port `upvar.rs`'s capture analysis whole, judged fact by
+  fact before RF10 reads it**; (b) leave captures to RF10, judged through the MIR text only. *Recommended: (a)*: a wrong capture shows
+  as a fact rather than as a MIR diff far from its cause.
+- **RFP21 The order of RFP15 and RF10.** Options: (a) **RFP15 (b) first (expansion and resolution load `mod m;` files, the helper's
+  `--resolve` extended to every local file), so the pipeline (`--ours`) runs on the registry crates and every RF4-RF9 judge sees real
+  multi-file crates, then RF10**; (b) RF10 first on the samples, RFP15 after. *Recommended: (a)*: a few days at most, and RF10's MIR
+  judge is better fed by crates than by the 90 samples alone.

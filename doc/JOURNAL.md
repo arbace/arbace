@@ -364,3 +364,22 @@ associated constants, pending obligations, the Fn builtins and object candidates
 named regions, tuples' and fn pointers' coercions). Final: samples 10,768 of 11,173 facts (54 of 90 programs whole), the pipeline
 10,760; registry crates 21,922 of 23,722 facts (6 of 49 crates whole). `test/rust/front/std-names.sha256` and `std-iface.sha256` re-pinned (the helper's structural
 types now carry const parameters). RFP17-RFP19 proposed (doc/rust/FRONTEND-SURVEY.md, "As built: RF9a").
+
+## 2026-11-06: RF9b, type checking's second slice (branch rust-rf9b)
+
+RFP19 (a) decided by the user: RF9's next slice on its classes. Taken on `rust-rf9b` from `rust-rf14`'s `fccc3d812` (its HANDOFF.md
+removed). Ported from rustc 1.99.1 (`58cf8f9c3`, the rust-src apk's sources pinned by `tools/rsdump/apks.sha256`) rule for rule, each
+piece proved on the 90 samples and the 49 registry crates against the helper's `--typeck` facts: the old solver's ambiguity
+(`rustc_trait_selection/src/traits/select/`), where-clause candidates and the parameter environment's elaboration
+(`rustc_type_ir/src/elaborate.rs`), normalization through the parameter environment and item bounds (`project.rs`), confirmation's
+nested obligations; CoerceMany and LUB coercion with generalization and region variables (`rustc_hir_typeck/src/coercion.rs`,
+`rustc_infer/src/infer/relate/{generalize,lattice}.rs`), argument checking with fudged expectations (`fn_ctxt/checks.rs`), locals'
+initializers, divergence and diverging fallback (`fallback.rs`), writeback's `fix_scalar_builtin_expr`, `check_casts` after fallback
+(`cast.rs`), closure kinds (`upvar.rs`, `expr_use_visitor.rs`), `convert_place_derefs_to_mutable` (`place_op.rs`), overloaded operators'
+right operand (`op.rs`), return-position impl Trait's hidden variable, anonymous constants as typeck roots, lifetime elision. The
+helper's `--std-iface` grew (trait objects' inherent impls, associated types' item bounds, constants, evaluated array lengths, bound
+regions by index and by binder); `test/rust/front/std-iface.sha256` re-pinned (RFP18 (a)). Results: samples 10,768 → 11,139 of 11,173
+facts (54 → 81 programs whole), the pipeline 11,137; crates 21,922 → CRATES of 23,722; the earlier judges unchanged (expand 92/92,
+resolve 5,594/5,594, HIR 91/91, collect 1,189/1,191). The checks got faster (samples 85 s → 30 s, crates 20 → 5 minutes) through the
+per-body caches. Alternatives considered: porting `select.rs` whole (RFP17 (c)) or the next solver (RFS6); kept to RFP17 (a), growing
+the accepting paths as the facts asked. Proposed: RFP20 (closures' captures judged before RF10), RFP21 (RFP15 before RF10).
