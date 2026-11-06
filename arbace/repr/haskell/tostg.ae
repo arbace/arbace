@@ -333,7 +333,7 @@
 
 (defn- void-atom [] (ext-str "GHC.Internal.Prim" "void#"))
 
-(declare floatable-con)
+(declare floatable-con atomic-args?)
 
 (defn- atom-of
   "An argument as an atom: [atom [[name stg-rhs]...]], the bindings outermost first; a saturated constructor
@@ -361,8 +361,8 @@
 (defn- wrap-binds [bnds body]
   (reduce (fn [b [n r :as bd]]
             (if (= :case n)
-              (let [[_ x rep ex] bd]
-                (list 'case ex [x rep] (if (vector? rep) (list 'multi (count rep)) (list 'prim rep)) [(list 'alt :default [] b)]))
+              (let [[_ x rep ex at] bd]
+                (list 'case ex [x rep] (or at (if (vector? rep) (list 'multi (count rep)) (list 'prim rep))) [(list 'alt :default [] b)]))
               (list 'let (list 'bind [n :L] r) b)))
           body (reverse bnds)))
 
@@ -374,14 +374,28 @@
 
 (defn- rep-of [n] (get @*reps* n :L))
 
+(declare global-type arg-types)
+
+(defn- field-alt-types
+  "The alternative types of a constructor's fields' cases: (alg TYCON) for a data type, else (poly)"
+  [c]
+  (let [ts (some-> (global-type c) arg-types)]
+    (mapv (fn [t] (let [t (strip-forall t)]
+                    (if (and (vector? t) (= :tc (first t)) (not= "GHC.Internal.Prim" (nth (second t) 2)) (not (fun-ty? t)))
+                      (list 'alg (ext-str (nth (second t) 2) (nth (second t) 3)))
+                      '(poly))))
+          (or ts []))))
+
 (defn- strict-con
   "A saturated constructor application, its strict fields' arguments evaluated first ($WCon's work)"
-  [c atoms]
+  ([c atoms] (strict-con c atoms #{}))
+  ([c atoms done]
   (let [st (con-strict c)
-        evald (mapv (fn [a s] (if (and s (string? a)) [a (fresh "sat")] [a nil])) atoms (concat st (repeat false)))
+        ats (concat (field-alt-types c) (repeat '(poly)))
+        evald (mapv (fn [a s] (if (and s (string? a) (not (contains? done a))) [a (fresh "sat")] [a nil])) atoms (concat st (repeat false)))
         body (list 'con (gname c) (mapv (fn [[a a2]] (or a2 a)) evald))]
-    (reduce (fn [b [a a2]] (if a2 (list 'case (list 'app a []) [a2 :L] '(poly) [(list 'alt :default [] b)]) b))
-            body (reverse evald))))
+    (reduce (fn [b [[a a2] at]] (if a2 (list 'case (list 'app a []) [a2 :L] at [(list 'alt :default [] b)]) b))
+            body (reverse (map vector evald ats))))))
 
 (defn- floatable-con
   "A saturated application of a constructor without strict fields: [CON ARGS]"
@@ -422,6 +436,17 @@
       (cond
         (or (newtype-con? c) (and (class-of-dcon (second f)) (newtype-class? (class-of-dcon (second f)))))
         (if (= 1 (count args)) (expr (first args)) (expr (list 'app (first args) (vec (rest args)))))
+        (and (= ar (count args)) (some true? (con-strict c)))
+        ;; a strict field's argument that is not an atom: case-bound (CorePrep's strict argument), the last
+        ;; argument's binding outermost
+        (let [st (concat (con-strict c) (repeat false))
+              ats (concat (field-alt-types c) (repeat '(poly)))
+              rs (mapv (fn [a s at] (if (and s (not (atomic-args? [a])))
+                                      (let [n (fresh "sat")] (swap! *reps* assoc n :L) [n [[:case n :L (expr a) at]]])
+                                      (atom-of a)))
+                       args st ats)]
+          (wrap-binds (vec (mapcat second (reverse rs)))
+                      (strict-con c (mapv first rs) (set (for [[n bs] rs :when (some #(= :case (first %)) bs)] n)))))
         (= ar (count args)) (with-atoms args (fn [as] (strict-con c as)))
         :else (with-atoms args (fn [as] (list 'app (gname (second f)) as)))))
     (and (head? f 'v) (newtype-selector? (second f)))
@@ -474,7 +499,12 @@
       co (list 'con (ext-str "GHC.Internal.Types" "Eq#") [])
       app (app-expr (second e) (nth e 2))
       lam (let [n (fresh "sat")] (list 'let (list 'bind [n :L] (rhs e)) (list 'app n [])))
-      let (if (and (= 1 (count (second e))) (fail-var? (second (first (second e)))))
+      let (if (and (= 1 (count (second e))) (:join (meta (second (first (second e))))) (not (fail-var? (second (first (second e))))))
+            ;; a join point of the Simplifier (its case-of-case's $j): let-no-escape, its lambda's binders the arguments
+            (let [[_ f fe] (first (second e)) fname (local-name f)
+                  [bs body] (if (head? fe 'lam) [(second fe) (nth fe 2)] [[] fe])]
+              (list 'letne (list 'bind [fname :L] (list 'closure :j :fvs (binders bs) (expr body))) (expr (nth e 2))))
+          (if (and (= 1 (count (second e))) (fail-var? (second (first (second e)))))
             ;; a failure handler shared by several alternatives: a join point over the void argument (GHC's
             ;; mkFailurePair, CoreToStg's let-no-escape), an ordinary closure when a call is under a closure
             (let [[_ f fe] (first (second e)) fname (local-name f)
@@ -510,7 +540,7 @@
                         (wrap-binds (vec (mapcat second (reverse rs)))
                                     (list 'let (list 'bind [(local-name x) :L] (list 'rcon (gname c) (mapv first rs))) b)))
                       (let [[bn r] (bind-pair bd)] (list 'let (list 'bind bn r) b)))))
-                  (expr (nth e 2)) (reverse (second e)))))
+                  (expr (nth e 2)) (reverse (second e))))))
       letrec (list 'let (apply list 'rec (map (fn [bd] (let [[bn r] (bind-pair bd)] (list 'bind bn r))) (second e)))
                    (expr (nth e 2)))
       case (if (and (= 1 (count (nth e 3))) (vector? (second (first (nth e 3)))) (newtype-con? (second (first (nth e 3)))))
