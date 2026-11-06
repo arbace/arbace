@@ -353,3 +353,12 @@ exec (musl's `_exit(127)`) leaves a pid that `wait4` answers with that status. `
 `kill` signals one. Not taken: `fork(2)` (a second address space: `ENOSYS`), a clone of a process without `CLONE_VFORK`.
 `test/rust/ci/spawn.c` (spawn of itself, `posix_spawnp` of `echo` through a pipe, a missing program) and `threads.c` give gcc's
 runs on ci.
+
+Two more pieces a parent of such a child needs: `ioctl`'s `FIONBIO` (std's `read2` sets its pipes non-blocking so; ci's `poll`
+answers ready and a read waits for data, which is what `read2` needs of two pipes the child fills) and `FIOCLEX`/`FIONCLEX`;
+and the child's end by a signal. A run a signal ends (a fault: SIGSEGV, SIGILL, SIGFPE; an abort) gave the runner's exit status
+128 + the signal, which a shell reads as the kernel's, but a parent's `waitpid` sees `WIFEXITED` where natively it sees
+`WIFSIGNALED`: with `--signals` (rsi's runs pass it, as `--env`) `tools/cirun` and a compiled program end themselves by the
+signal (`crt.DieBy`: its action back to `SIG_DFL`, no core file, `kill` of itself). The check leaves ci's diagnostic line
+(`cirun: fault: ...`) out of the standard error it compares, keeping it as the row's reason: a process the kernel signals prints
+nothing (`synthetic/trap.rs`'s status was rustc's, its standard error not).
