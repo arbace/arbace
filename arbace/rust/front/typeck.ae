@@ -147,6 +147,16 @@
         (vector? t) (mapv erase t)
         :else t))
 
+(defn- infer-holes
+  "A type written in a body: `_` and the arguments a value path leaves out are inference variables"
+  [t]
+  (cond (and (vector? t) (= :err (first t)) (or (= "_" (second t)) (str/starts-with? (str (second t)) "missing"))) (fresh :ty)
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (infer-holes %) (map? %) (into {} (for [[k v] %] [k (infer-holes v)])) :else %) (rest t)))
+        (vector? t) (mapv infer-holes t)
+        :else t))
+
+(defn- body-ty [t] (infer-holes (erase (c/lower-ty t))))
+
 (defn- fn-item-ty [def] [:fndef def (fresh-args def)])
 
 (declare deep-normalize)
@@ -400,8 +410,20 @@
       (and (= :ref (first f)) (= :ref (first t)) (= :array (first (shallow (nth f 3)))) (= :slice (first (shallow (nth t 3)))))
       (do (adjust! e [["Deref" (nth f 3)] ["Borrow" [:ref [:re-erased] (nth t 2) (nth f 3)]] ["Pointer" to]])
           (unify (second (shallow (nth f 3))) (second (shallow (nth t 3)))))
+      ;; &T to &dyn Trait (Unsize): a reborrow, then Pointer(Unsize)
+      (and (= :ref (first f)) (= :ref (first t)) (= :dyn (first (shallow (nth t 3)))) (not= :dyn (first (shallow (nth f 3)))))
+      (do (adjust! e [["Deref" (nth f 3)] ["Borrow" [:ref [:re-erased] (nth t 2) (nth f 3)]] ["Pointer" to]]) true)
       (and (= :ref (first f)) (= :ref (first t)) (nth f 2))
       (do (adjust! e [["Deref" (nth f 3)] ["Borrow" [:ref [:re-erased] (nth t 2) (nth f 3)]]]) (unify (nth f 3) (nth t 3)))
+      ;; Box<T> (Rc<T>, Arc<T>) to Box<dyn Trait> or Box<[T]> (CoerceUnsized): Pointer(Unsize)
+      (and (= :adt (first f)) (= :adt (first t)) (= (second f) (second t))
+           (#{"alloc::boxed::Box" "alloc::rc::Rc" "alloc::sync::Arc"} (second f))
+           (let [a (shallow (first (nth f 2))) b (shallow (first (nth t 2)))]
+             (or (and (= :dyn (first b)) (not= :dyn (first a)) (not (tvar? a)))
+                 (and (= :slice (first b)) (= :array (first a))))))
+      (let [a (shallow (first (nth f 2))) b (shallow (first (nth t 2)))]
+        (when (= :slice (first b)) (unify (second a) (second b)))
+        (adjust! e [["Pointer" to]]) true)
       :else (unify from to))))
 
 (defn- lub!
@@ -452,7 +474,7 @@
             base-name (:ident (first segs))
             psp (when (vector? sp) [(nth sp 0) (nth sp 1) (nth sp 0) (+ (long (nth sp 1)) (count base-name))])
             base-res (or (get c/*res* psp) (:res path))
-            bty (try (erase (c/lower-ty {:kind :path :path {:segs [(first segs)] :res base-res :span psp}})) (catch Throwable _ nil))]
+            bty (try (body-ty {:kind :path :path {:segs [(first segs)] :res base-res :span psp}}) (catch Throwable _ nil))]
         (when (and bty (not (#{:err :unknown} (first bty))))
           (probe-assoc-fn bty (:ident (peek segs))))))))
 
@@ -539,6 +561,24 @@
           (recur (rest steps) (inc i))))
       [:unknown])))
 
+(def ^:private op-traits
+  {"+" "add" "-" "sub" "*" "mul" "/" "div" "%" "rem" "&" "bitand" "|" "bitor" "^" "bitxor" "<<" "shl" ">>" "shr"
+   "==" "eq" "!=" "eq" "<" "partial_ord" "<=" "partial_ord" ">" "partial_ord" ">=" "partial_ord"})
+
+(defn- overloaded-binop
+  "check_overloaded_binop: the operator's trait for the operands' types (lookup_op_method); a comparison by reference
+  (both operands autoref'd), its type bool, else `<L as Op<R>>::Output`"
+  [e op lt rt]
+  (let [tr (c/lang (get op-traits op))
+        cmp? (#{"==" "!=" "<" "<=" ">" ">="} op)]
+    (if (and tr (impls-for (shallow lt) tr [rt]))
+      (do (when cmp?
+            (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] false lt]]])
+            (adjust! (:rhs e) [["Borrow" [:ref [:re-erased] false rt]]]))
+          (if cmp? [:bool] (let [out (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr)))]
+                             (if out (shallow [:proj out [lt rt]]) [:unknown]))))
+      [:unknown])))
+
 (defn- check-call [e expected]
   (let [callee (:func e)
         ft (shallow (check-expr callee nil))]
@@ -582,6 +622,10 @@
           :method (let [rt (check-expr (:receiver e) nil)]
                     (if-let [[def args sig adj] (probe-method rt (:ident (:seg e)))]
                       (do (adjust! (:receiver e) adj)
+                          ;; a turbofish: the method's own arguments
+                          (when-let [ga (seq (filter :ty (:args (:args (:seg e)))))]
+                            (let [own (vec (take-last (count ga) (remove c/region? args)))]
+                              (doseq [[v a] (map vector own ga)] (unify v (body-ty (:ty a))))))
                           (doseq [[a ty] (map vector (:args e) (concat (rest (:inputs sig)) (repeat nil)))]
                             (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
                           (:output sig))
@@ -594,7 +638,7 @@
                       (builtin-binop? op lt rt)
                       (do (when-not (#{"<<" ">>"} op) (unify lt rt))
                           (if (#{"==" "!=" "<" "<=" ">" ">="} op) [:bool] lt))
-                      :else [:unknown]))
+                      :else (overloaded-binop e op lt rt)))
           :unary (let [t (check-expr (:expr e) (when (#{"-" "!"} (:op e)) expected))
                        s (shallow t)]
                    (case (:op e)
@@ -605,10 +649,10 @@
                          inner-ex (when (and ex (= :ref (first ex))) (nth ex 3))
                          t (check-expr (:expr e) inner-ex)]
                      (if (:raw e) [:ptr (:mutbl e) t] [:ref [:re-erased] (:mutbl e) t]))
-          :cast (let [t (erase (c/lower-ty (:ty e)))]
+          :cast (let [t (body-ty (:ty e))]
                   (check-expr (:expr e) nil)
                   t)
-          :type (let [t (erase (c/lower-ty (:ty e)))] (let [x (check-expr (:expr e) t)] (coerce! (:expr e) x t)) t)
+          :type (let [t (body-ty (:ty e))] (let [x (check-expr (:expr e) t)] (coerce! (:expr e) x t)) t)
           :field (let [bt (check-expr (:expr e) nil)] (field-of e bt (:ident e)))
           :index (let [bt (check-expr (:expr e) nil)
                        it (check-expr (:index e) nil)
@@ -632,8 +676,14 @@
                     (let [t (check-expr (:expr e) elt)] (coerce! (:expr e) t elt))
                     [:array elt (c/lower-const-arg (:count e))])
           :assign (let [lt (check-expr (:lhs e) nil)] (let [rt (check-expr (:rhs e) lt)] (coerce! (:rhs e) rt lt)) unit)
-          :assign-op (let [lt (check-expr (:lhs e) nil) rt (check-expr (:rhs e) lt)]
-                       (when (builtin-binop? (str/replace (str (:op e)) "=" "") lt rt) (when-not (#{"<<=" ">>="} (:op e)) (unify lt rt)))
+          :assign-op (let [lt (check-expr (:lhs e) nil) rt (check-expr (:rhs e) lt)
+                           op (str/replace (str (:op e)) "=" "")]
+                       (if (builtin-binop? op lt rt)
+                         (when-not (#{"<<=" ">>="} (:op e)) (unify lt rt))
+                         ;; an overloaded compound assignment: OpAssign<R> for the left side, which is autoref'd mutably
+                         (when-let [tr (c/lang (str (get op-traits op) "_assign"))]
+                           (when (impls-for (shallow lt) tr [rt])
+                             (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] true lt]]]))))
                        unit)
           :block (check-block (:block e) expected)
           :if (let [ct (check-expr (:cond e) [:bool])
@@ -683,7 +733,7 @@
 
 (defn- check-stmt [s]
   (case (:kind s)
-    :let (let [decl (when (:ty s) (erase (c/lower-ty (:ty s))))
+    :let (let [decl (when (:ty s) (body-ty (:ty s)))
                t (if-let [init (:init s)]
                    (let [x (check-expr init decl)] (when decl (coerce! init x decl)) (or decl x))
                    (or decl (fresh :ty)))
