@@ -189,12 +189,14 @@
                           (sort-by (fn [[n expn]] [(if expn 1 0) (if expn (long (second expn)) 0) (let [h (:hir-id n)] (if h (long (second h)) -1))])
                                    (vec acc))))))
 
-(declare check-expr coerce! solve-obligations! fallback! print-fact-ty)
+(declare check-expr coerce! solve-obligations! fallback! print-fact-ty mut-borrow! unadjust! deduced-kind)
 (def ^:dynamic *obligations* nil)   ; atom: the clauses the instantiated items' predicates registered ([:trait [D ARGS]], [:proj AD ARGS TERM])
 (def ^:dynamic *select-cache* nil)
 (def ^:dynamic *norm-cache* nil)
 (def ^:dynamic *casts* nil)
 (def ^:dynamic *scalar-fixes* nil)
+(def ^:dynamic *closures* nil)        ; atom: the body's closures {:text :node :env :kind}
+(def ^:dynamic *closure-calls* nil)   ; atom: the calls of closure values [callee closure-text]
 
 (defn- anon-const!
   "An anonymous constant (an array length, a repeat count, a const argument): its own typeck root `OWNER::{constant#K}`
@@ -1221,8 +1223,10 @@
                (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "call" (second ft) (deep output) (shallow output))))
                output)
       ;; a closure's own signature (deferred call resolution), the callee autoref'd (its kind taken as Fn)
+      ;; (its kind decided after the body, by closure_analyze: the autoref fixed up then)
       :closure (let [{:keys [inputs output]} (nth ft 2)]
                  (adjust! (:func e) [["Borrow" [:ref [:re-erased] false ft]]])
+                 (when *closure-calls* (swap! *closure-calls* conj [(:func e) (second ft)]))
                  (check-args! (map vector (:args e) (concat inputs (repeat nil))))
                  output)
       :fnptr (let [{:keys [inputs output]} (second ft)]
@@ -1359,7 +1363,124 @@
       (let [bt (check-expr (:body e) ret)] (coerce! (:body e) bt ret)))
     (let [sp (closure-decl-span e)
           text (if (and sp *root-file*) (str "{closure@" *root-file* ":" (sp 0) ":" (sp 1) ": " (sp 2) ":" (sp 3) "}") "{closure}")]
+      (when *closures* (swap! *closures* conj {:text text :node e :env *env* :kind (deduced-kind expected)}))
       [:closure text {:inputs ptys :output ret}])))
+
+;; ---------------------------------------------------------------------------------------------
+;; Closure kinds (upvar.rs's closure_analyze over expr_use_visitor.rs's uses): a closure whose expectation names a Fn
+;; trait has that kind; else the uses of its captured variables decide it: a move out of one (a consume of a place
+;; whose type is not Copy) makes it FnOnce, a mutation or a mutable borrow FnMut, else it is Fn
+
+(defn- deduced-kind
+  "The kind an expectation gives a closure (deduce_closure_signature's expected_kind)"
+  [expected]
+  (let [ex (some-> expected shallow)
+        kind-of {"core::ops::function::Fn" :fn "core::ops::function::FnMut" :fn-mut "core::ops::function::FnOnce" :fn-once}
+        trs (cond (nil? ex) nil
+                  (tvar? ex) (for [o (when *obligations* @*obligations*)
+                                   :when (and (= :trait (first o)) (fn-traits (first (second o))) (= ex (shallow (first (second (second o))))))]
+                               (first (second o)))
+                  (= :dyn (first ex)) [(first (:principal (second ex)))]
+                  (= :opaque (first ex)) (for [c (second ex) :when (and (= :trait (first c)) (fn-traits (first (second c))))] (first (second c)))
+                  :else nil)]
+    ;; the most permissive kind the bounds allow (Fn over FnMut over FnOnce among the bounds named)
+    (let [ks (set (keep kind-of trs))]
+      (cond (ks :fn) :fn (ks :fn-mut) :fn-mut (ks :fn-once) :fn-once :else nil))))
+
+(defn- copy-ty?
+  "Whether a (resolved) type is Copy: scalars, shared references, raw and fn pointers, fn items, tuples and arrays of
+  Copy types, a parameter with a Copy where clause, an ADT with a Copy impl"
+  [t]
+  (let [t (shallow t)]
+    (case (first t)
+      (:bool :char :int :uint :float :ptr :fnptr :fndef :never) true
+      :ref (not (nth t 2))
+      :tuple (every? copy-ty? (second t))
+      :array (copy-ty? (second t))
+      :infer (#{:int :float} (second t))
+      :param (boolean (some (fn [cl] (and (= :trait (first cl)) (= (c/lang "copy") (first (second cl))) (= t (shallow (first (second (second cl))))))) (param-env)))
+      :adt (let [s (snapshot) r (impls-for t (c/lang "copy") [])] (rollback! s) (vector? r))
+      false)))
+
+(defn- fact-of
+  "The recorded fact of an expression (the last for its span and kind)"
+  [e]
+  (last (filter #(and (= (:span %) (:span e)) (= (:kind %) (get kind-names (:kind e))) (= *owner* (:owner %))) @*facts*)))
+
+(defn- closure-uses
+  "The uses of a closure body's captured variables: [[name mode] ...], mode :consume, :borrow or :mut
+  (ExprUseVisitor: consume, borrow, mutate), the consume of a Copy place a borrow"
+  [body upvars]
+  (let [acc (java.util.ArrayList.)
+        place? (fn [e] (#{:path :field :index :unary} (:kind e)))]
+    (letfn [(use! [e mode]
+              (case (:kind e)
+                :path (let [segs (:segs (:path e)) nm (:ident (first segs))]
+                        (when (and (= 1 (count segs)) (contains? upvars nm)) (.add acc [nm mode])))
+                :field (walk (:expr e) (if (= mode :consume) :consume mode))
+                :index (do (walk (:expr e) (if (= mode :mut) :mut :borrow)) (walk (:index e) :consume))
+                :unary (if (= "*" (:op e)) (walk (:expr e) (if (= mode :mut) :mut :borrow)) (walk (:expr e) :consume))
+                nil))
+            (walk [e mode]
+              (when (map? e)
+                (case (:kind e)
+                  (:path :field :index)
+                  (use! e (if (and (= mode :consume) (some-> (fact-of e) :ty deep copy-ty?)) :borrow mode))
+                  :unary (if (= "*" (:op e))
+                           (use! e (if (and (= mode :consume) (some-> (fact-of e) :ty deep copy-ty?)) :borrow mode))
+                           (walk (:expr e) :consume))
+                  :addr-of (walk (:expr e) (if (:mutbl e) :mut :borrow))
+                  (:assign :assign-op) (do (walk (:lhs e) :mut) (walk (:rhs e) :consume))
+                  :method (let [adj (:adj (fact-of (:receiver e)))
+                                m (cond (some (fn [[k t]] (and (= "Borrow" k) (vector? t) (= :ref (first t)) (nth t 2))) adj) :mut
+                                        (some (fn [[k _]] (= "Borrow" k)) adj) :borrow
+                                        :else :consume)]
+                            (walk (:receiver e) m)
+                            (doseq [a (:args e)] (walk a :consume)))
+                  :call (let [adj (:adj (fact-of (:func e)))
+                              m (cond (some (fn [[k t]] (and (= "Borrow" k) (vector? t) (= :ref (first t)) (nth t 2))) adj) :mut
+                                      (some (fn [[k _]] (= "Borrow" k)) adj) :borrow
+                                      (place? (:func e)) :consume
+                                      :else :borrow)]
+                          (walk (:func e) m)
+                          (doseq [a (:args e)] (walk a :consume)))
+                  :binary (let [m (if (#{"==" "!=" "<" "<=" ">" ">="} (:op e)) :borrow :consume)]
+                            (walk (:lhs e) m) (walk (:rhs e) m))
+                  :match (do (walk (:expr e) :borrow) (doseq [a (:arms e)] (walk (:guard a) :borrow) (walk (:body a) mode)))
+                  :let (walk (:init e) :borrow)
+                  :block (do (doseq [st (:stmts (:block e))]
+                               (case (:kind st)
+                                 :let (walk (:init st) (if (:by-ref (:pat st)) :borrow :consume))
+                                 (:semi :expr) (walk (:expr st) :consume)
+                                 nil))
+                             (walk (:expr (:block e)) mode))
+                  :closure (walk (:body e) :consume)
+                  (doseq [v (vals (select-keys e [:expr :exprs :args :fields :base :cond :then :else :block :body :receiver :count]))]
+                    (cond (map? v) (if (:node v) (walk v :consume) (doseq [x (vals v)] (when (map? x) (walk x :consume))))
+                          (sequential? v) (doseq [x v] (cond (and (map? x) (:node x)) (walk x :consume)
+                                                             (map? x) (walk (:expr x) :consume)))
+                          :else nil)))))]
+      (walk body :consume))
+    (vec acc)))
+
+(defn- closure-kinds!
+  "closure_analyze: each closure's kind (the expectation's, else its captured variables' uses), then each call of a
+  closure value's autoref as the kind needs: `&` for Fn, `&mut` for FnMut, none for FnOnce"
+  []
+  (let [kinds (into {}
+                    (for [{:keys [text node env kind]} (when *closures* @*closures*)]
+                      [text (or kind
+                                (let [upvars (set (mapcat keys env))
+                                      uses (closure-uses (:body node) upvars)
+                                      ty-of (fn [nm] (some #(get % nm) (rseq env)))]
+                                  (cond (some (fn [[nm m]] (and (= m :consume) (not (copy-ty? (deep (ty-of nm)))))) uses) :fn-once
+                                        (some (fn [[_ m]] (= m :mut)) uses) :fn-mut
+                                        :else :fn)))]))]
+    (doseq [[f text] (when *closure-calls* @*closure-calls*)]
+      (case (get kinds text :fn)
+        :fn-mut (mut-borrow! f)
+        :fn-once (unadjust! f)
+        nil))))
 
 (defn- struct-ty [e]
   (let [rd (if (:lang (:path e)) (when-let [p (c/lang (:ident (first (:segs (:path e)))))] [:ext p "Struct"]) (c/res-def (:path e)))
@@ -1815,7 +1936,7 @@
   (let [n (:node d) k (:kind d)
         owner (binding [c/*in-value* true] (c/print-def-path (:id d) []))
         facts (atom [])]
-    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *norm-cache* (atom {}) *param-env-cache* (atom {}) *scalar-fixes* (atom []) *casts* (atom []) *owner* owner *env* [{}] *loops* nil]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *norm-cache* (atom {}) *param-env-cache* (atom {}) *scalar-fixes* (atom []) *casts* (atom []) *closures* (atom []) *closure-calls* (atom []) *owner* owner *env* [{}] *loops* nil]
       (c/in-def (:id d)
         (if (#{"Fn" "AssocFn"} k)
           (let [sig (erase (c/fn-sig (:id d)))
@@ -1835,6 +1956,7 @@
       (solve-obligations!)
       (fallback!)
       (check-casts!)
+      (closure-kinds!)
       (solve-obligations!)
       (fix-scalar-builtins!)
       (when *profile*
