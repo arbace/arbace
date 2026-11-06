@@ -2864,3 +2864,92 @@ loop; test_frame's and test_scope's methods that need it (`bin/pyi lib-test-all 
 test_sys_settrace's and test_pdb's that need f_locals rather than tracing; `bin/pyi runtime check`, `make
 python-essential`, check216/check216d/check210 PASS; `bin/pyi bench`'s sample, CPython, base and branch back to back
 (210's method), to show 216's speed kept.
+
+## As built: 219, `frame.f_locals` as PEP 667's proxy, and the frame's other views (2026-11-05, the Mac VM, queue 219)
+
+Built as "Design: 219" above, on 40ab1e13: no change to `arbace.python.aot` or to the compiled code's helpers (aot.go,
+eval.go untouched); the runtime's frame views (tbobj.go, frame.go, code.go, funcattrs.go, match.go, one line in gen.go:
+a generator's frame knows its generator, `f_generator`), locals()/exec (builtins.go, builtins_exec.go, import.go), and
+one compiler change found on the way:
+
+- **`FrameLocalsProxy`** (tbobj.go) as the design's table: the slots in `co_localsplusnames`' order computed once per
+  code object (`Code.slots`), CPython's key lookup (exact str by text, else hash and `==`), the extra locals, every
+  mapping method of frameobject.c with its message, the constructor, unhashable and unpicklable, a `match` mapping.
+  A module's or class's frame answers its namespace (its mapping when `__prepare__`'s or exec's is no dict) unless an
+  inlined comprehension of the body has its own names bound (PEP 709's hidden locals: then a proxy over them, CPython's
+  `_PyFrame_HasHiddenLocals`). A name twice among the slots (an inlined comprehension's own name in a fast slot beside
+  the function's cell of that name: GH-128396's case) reads its first bound slot, as CPython's one slot holding the plain
+  value.
+- **The frame's rare views in one word** (`Frame.views`, a `*frameViews`: the extra locals, `f_trace`, `f_trace_lines`,
+  `f_trace_opcodes`), nil until set, so a call's frame grows by two words (`views`, `gen`), not six.
+- **`frame.clear()`**: executing (the current thread's chain, a running generator) and suspended refused with CPython's
+  messages; a generator's frame not started closes the generator; else the locals, cells, value stack, extra locals and
+  `f_trace` dropped, the code, globals, builtins and `f_back` kept (`f_locals` then `{}`).
+- **`f_trace`** stored, **`f_trace_lines`/`f_trace_opcodes`** booleans with the member's and getset's messages,
+  **`f_lineno = N`** "f_lineno can only be set in a trace function" (or "lineno must be an integer"), the read-only
+  attributes "is not writable"; the frame's attributes also getset descriptors of the type (`type(frame).f_locals`).
+- **`locals()`, `vars()`, `dir()`**: a function's the proxy's snapshot (extra locals included), a namespace's itself;
+  **`exec`/`eval`** take any mapping as the locals (`PyMapping_Check`), its name operations through it (`LocalsMap`), so
+  `exec(code, f.f_globals, f.f_locals)` writes the frame's locals (pdb's `default`, `code.interact`); `import *` into a
+  mapping namespace through its `__setitem__`; exec's "locals must be a mapping or None, not T".
+- **`co_cellvars`** in `co_localsplusnames`' order (a parameter's cell at the parameter, then the others: CPython's
+  from the kinds), pyi's `Code.Cells` order (the closure's index, sorted) unchanged.
+- **The compiler's local order** (arbace.python.compile, 79acc2dd): a function's locals were the parameters then the
+  symbol table's locals *sorted*; CPython's `co_varnames` are the parameters then each name as the compiler first emits a
+  name operation on it (`u_varnames`). Now the same (the unit starts with the parameters, `add-local!` at each name
+  operation, which it already called), so `f_locals`', `locals()`' and `co_varnames`' order are CPython's (fl.py's
+  `varorder`: a `def`, a `for` target, a `with` target, an `except` name, an inlined comprehension's name). Every
+  function's IR changes (its slot numbers only): the IR cache is keyed by the compiler's digest, so the night re-records.
+
+**What stays by design:** tracing (`sys.settrace`, `sys.setprofile`, `threading.settrace`, `f_trace`'s events,
+`f_lineno` jumps) is not built: pyi calls no trace function and `:tracing` stays deferred (DECISION in queue 219's report,
+the design's sketch above); `f_lineno` writes therefore always get the answer CPython gives outside a trace function.
+PEP 709's hidden names are not marked in pyi's IR (a write to one while its comprehension runs goes to the slot, CPython's
+to the extra locals). `frame.clear()` does not find a frame executing on another thread. A weakref's referent dropped by
+`frame.clear()` is not collected (test_frame's `test_clear_locals`, `test_clear_locals_after_f_locals_access`, and
+`test_entry_frames_are_invisible_during_teardown`'s weakref callback): pyi's weak references hold their referent until
+218's finalizer queue (`:finalization-collect`, 218's).
+
+
+**The bench (run, the VM, 2026-11-06):** `bin/pyi bench`'s 20-benchmark sample, 210's method: each round CPython, base (40ab1e13, built in a
+worktree of it) and branch back to back, 3 rounds, the least wall seconds; load 5-6 (218 and 220 alongside); every output
+equal to CPython's (table1.err empty).
+
+| benchmark | CPython | base | after | base / CPython | after / CPython |
+|---|---:|---:|---:|---:|---:|
+| raytrace | 0.20 | 0.58 | 0.62 | 2.9x | 3.1x |
+| deltablue | 0.13 | 0.39 | 0.40 | 3.0x | 3.1x |
+| fannkuch | 0.29 | 0.62 | 0.62 | 2.1x | 2.1x |
+| generators | 0.15 | 0.67 | 0.67 | 4.5x | 4.5x |
+| nqueens | 0.26 | 0.64 | 0.63 | 2.5x | 2.4x |
+| go | 0.10 | 0.23 | 0.23 | 2.3x | 2.3x |
+| richards | 0.32 | 0.50 | 0.51 | 1.6x | 1.6x |
+| chaos | 0.08 | 0.20 | 0.20 | 2.5x | 2.5x |
+| json_dumps | 0.03 | 0.20 | 0.19 | 6.7x | 6.3x |
+| spectral_norm | 0.33 | 0.60 | 0.61 | 1.8x | 1.8x |
+| unpack_sequence | 0.23 | 0.63 | 0.61 | 2.7x | 2.7x |
+| coroutines | 0.36 | 0.61 | 0.60 | 1.7x | 1.7x |
+| float | 0.22 | 0.45 | 0.45 | 2.0x | 2.0x |
+| nbody | 0.30 | 0.34 | 0.34 | 1.1x | 1.1x |
+| hexiom | 0.03 | 0.09 | 0.09 | 3.0x | 3.0x |
+| base64 | 1.56 | 2.80 | 2.81 | 1.8x | 1.8x |
+| bpe_tokeniser | 3.17 | 5.70 | 5.74 | 1.8x | 1.8x |
+| async_tree | 0.23 | 0.99 | 1.00 | 4.3x | 4.3x |
+| mdp | 0.80 | 2.98 | 2.85 | 3.7x | 3.6x |
+| pprint | 1.44 | 4.38 | 4.37 | 3.0x | 3.0x |
+
+Sum: CPython 10.23 s, base 23.60 s (2.31x), after 23.54 s (2.30x); median 2.5x both. Every difference is within 5% and
+both ways (mdp 4% faster, raytrace 7% slower in its least of three, 0.04 s; raytrace and deltablue again, 5 rounds: base 0.59 and 0.39, after 0.58 and 0.39): noise at this load. 216's and 216d's speed is kept, as
+the design expected (no instruction added to the compiled code; a frame two words larger).
+
+**The proofs (run, the VM):** fl.py (`t/check219.sh`, 66 lines: proxy reads and writes through locals, cells and
+free variables, the mapping methods and their errors, class and module scope, the locals() snapshot, exec/eval into
+f_locals and into a user mapping, clear, f_trace, f_lineno, f_generator, the constructor, str-like keys, hidden locals,
+co_varnames' order) equal to CPython's compiled and on the loop; 216's tb.py with no known line left (its f_locals line
+`(1, None, 2, 2)` as CPython's); check216d.sh and check210.sh PASS; `make python-essential` 20 pass, 1 classed, 0
+failing; the 73-program `check --aot` sample 73 pass; `bin/pyi lib-test-all test_frame test_scope` 23 failing -> 3
+(the 3 the finalizer queue's, 218's), test_scope 0 failing; `bin/pyi lib-test test_generators` 43 -> 45 equal, 0
+failing; `bin/pyi runtime check` the same forms, the tables and runtime-ops equal, 137 of 138 programs equal (e-executable.py
+past the 120 s cap at load 5-8: 138 s run alone, its output equal to the base's), the REPL equal. test_inspect does not
+import on pyi (`_pickle`, pre-existing). **Decided (the user, 2026-11-06): 219's DECISION (a)**, tracing a task of its own
+after 219.
