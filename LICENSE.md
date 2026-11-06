@@ -485,6 +485,15 @@ covers what.
   they name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
   Classpath Exception (text below); the rest of the variants is Arbace's own. Their jdk26u sources join `jdk/forms/`
   (the converted closure, under the same license): 63 of naming-script-sources.
+- java.lang.management without JMX (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F13 (write-ahead, in progress)";
+  recorded by the rule of B7): `overlay/jdk/java.base/java/lang/management/{ManagementFactory,ThreadInfo,LockInfo,MonitorInfo,MemoryUsage}.java`
+  and `overlay/jdk/java.base/sun/management/{ManagementFactoryHelper,VMManagementImpl}.java` are jdk26u's files
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.management/share/classes`) transcribed with the changes
+  their headers name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with
+  the Classpath Exception (text below), as their notices say; the variant `overlay/jdk/variants/ThreadImpl.ae`, the
+  skeletons `overlay/jdk/java.base/javax/management/ObjectName.java` and `openmbean/CompositeData.java` (written for
+  JMX's documented signatures), `jdk/internal/jrt/HostManagement.java` and `go/arbace/jrt/management.ae` are Arbace's
+  own. Their jdk26u sources join `jdk/forms/` (the converted closure, under the same license): 26 of management-sources.
 - `go/arbace/jrt/fdlibm.ae` and the `FdLibm` part of `go/arbace/jrt/math.ae` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1

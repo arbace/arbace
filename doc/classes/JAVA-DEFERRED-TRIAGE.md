@@ -954,16 +954,19 @@ MBean server's interfaces and the open types: `.tmp/jc9c/outjmx.json`), which JC
   `com.sun.management.ThreadMXBean` and `HotSpotThreadImpl`.
 
 **jrt's natives** (`go/arbace/jrt/management.ae`, `jdk.internal.jrt.HostManagement`), in slices:
-1. *(built, `bin/jrt test` passing)* the registry of live threads (started to ended, and main), their counts as
+1. *(built: `b47333dd5`, `bin/jrt test` passing)* the registry of live threads (started to ended, and main), their counts as
    HotSpot's ThreadService keeps them (live, daemon, peak and its reset, ever started), the runtime's start and
    uptime, the process id: ThreadMXBean's ids and counts, RuntimeMXBean's pid, name, start, uptime;
-2. a thread's state as the JVM reports it (BLOCKED while it waits to enter a monitor, WAITING and TIMED_WAITING in
+2. *(built: `0ad3408fd`, `bin/jrt test` passing, TestThreadStatesAndLocks)* a thread's state as the JVM reports it (BLOCKED while it waits to enter a monitor, WAITING and TIMED_WAITING in
    `wait`, `join`, `sleep`, `park`: jrt reports RUNNABLE today, JC8) with the object it blocks on, recorded at the
    monitor's contended path and the waits only (the thin lock's path untouched); then ThreadInfo's lock, lock owner
    and blocked and waited counts and times (contention monitoring);
-3. the monitor owners' chains for `findMonitorDeadlockedThreads` and, with AbstractOwnableSynchronizer's owner and
-   LockSupport's blocker (jrt's park), `findDeadlockedThreads`; the monitors and synchronizers a thread holds
-   (ThreadInfo's locked monitors: the inflated monitors' owners and their entry depth);
+3. *(built: `a52ff720b`, TestDeadlocks)* the cycles of waits for `findMonitorDeadlockedThreads` and, with jrt's
+   ReentrantLock's and a translated AbstractOwnableSynchronizer's owner (LockSupport's blocker, through its
+   `getExclusiveOwnerThread`), `findDeadlockedThreads`; *(next, 3b)* the monitors and synchronizers a thread
+   holds (ThreadInfo's locked monitors and synchronizers; then `isObjectMonitorUsageSupported` and
+   `isSynchronizerUsageSupported` true, and `findDeadlockedThreads` reachable: jdk26u's ThreadImpl throws
+   before it while the support is false);
 4. stack traces of other threads: a goroutine's stack is not readable from another (Go has no such API but the
    whole-program `runtime.Stack` text): each jrt thread publishes its Java frames when asked, at its next
    safepoint-like poll (the evaluator's ticks, a monitor's wait), or ThreadInfo of another thread has an empty
@@ -972,12 +975,45 @@ MBean server's interfaces and the open types: `.tmp/jc9c/outjmx.json`), which JC
    thread), OperatingSystemMXBean's memory sizes from `/proc/meminfo` (jdk.management's `OperatingSystemImpl`
    reads them through its natives the same way).
 
+**The Java side** (`22919f139`): `management-sources`, 26 files of java.management and jdk.management (the MXBean
+interfaces, `ThreadImpl`, `RuntimeImpl`, `VMManagement`, `Util`, the counters' interface, JMX's three exceptions
+`MalformedObjectNameException` stands on, `com.sun.management.ThreadMXBean`, `HotSpotThreadImpl`); 10 overlays (the
+two skeletons; `ManagementFactory`, its beans by interface from a table, the threads' (`HotSpotThreadImpl`, also the
+`com.sun.management.ThreadMXBean`) and the runtime's, every other platform interface `UnsupportedOperationException`
+naming the later slices; `ManagementFactoryHelper` with jmm's state mapping, jdk26u's `VM.toThreadState`'s;
+`VMManagementImpl` over HostManagement; `ThreadInfo` (and its factory over the private constructors, handed to
+HostManagement as the JVM reaches them by JNI), `LockInfo`, `MonitorInfo`, `MemoryUsage`; `HostManagement`); the
+variant `ThreadImpl.ae` (17 natives); j2g's rename `Sun_ThreadMXBean`. Light checks: print-sources + 36;
+read-jdk 36/0/0, `--no-javac` identical; the variant applied and parsed; the whole closure with F12, F19 and F13
+by the JDK's javac: 2,176 files, 0 errors; `bin/jrt test` (amd64: all of arbace/jrt) and `bin/jrt build --arch
+all` (jrt builds and vets clean on amd64 and arm64; vet's findings are scm's and goi's, as before) with slices 1-3.
+
 **Expected**: of the 31, the counts and ids (AllThreadIds, ThreadCounts, ThreadDaemonTest, ThreadLists,
 InvalidThreadID), RuntimeMXBean's (ProcessIdTest, UpTime, GetSystemProperties) with slices 1-2, about 9; the
 deadlock and locks tests (FindDeadlocks, FindMonitorDeadlock, LockedMonitors, LockedSynchronizers,
 SharedSynchronizer, SynchronizationStatistics, ThreadBlockedCount, MaxDepthForThreadInfoTest) with slices 2-4,
 about 8 more; OperatingSystemMXBean's 4 with slice 5; GetObjectName, ThreadStartTest (javax.management) and the
-VM-option tests (InputArgument's `-XX`) by design or the harness's.
+VM-option tests (InputArgument's `-XX`) by design or the harness's. With slices 1-3 as built: about 12 (the counts,
+RuntimeMXBean's, InvalidThreadID, FindMonitorDeadlock; ThreadBlockedCount and SynchronizationStatistics if their
+stack-trace checks are of the current thread). The change of `Thread.getState` (BLOCKED, WAITING, TIMED_WAITING
+where jrt said RUNNABLE) reaches the whole corpus: the night's run shows what it gains and whether it costs.
+
+**The night's commands** (F13's part, after F12's conversion and build of the same night: one `bin/jrt-convert
+update` and one `bin/arbace-go --build` take every area of the branch):
+
+```sh
+# the same jdk/ conversion (expect + 36 files, 0 failed, 0 javac errors), edge and build as F12's
+# then a smoke of the beans
+target/arbace-go/amd64/arbace -e '(let [t (java.lang.management.ManagementFactory/getThreadMXBean)
+                                     r (java.lang.management.ManagementFactory/getRuntimeMXBean)]
+  (println (pos? (.getThreadCount t)) (pos? (alength (.getAllThreadIds t))) (.getState (.getThreadInfo t (.threadId (Thread/currentThread))))
+           (pos? (.getPid r)) (>= (.getUptime r) 0) (.findMonitorDeadlockedThreads t)))'
+# expect "true true RUNNABLE true true nil"
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/(java/lang/management|com/sun/management|javax/management/mxbean)|jdk/java/lang/Thread' \
+  --save .tmp/f13-night/check
+```
 
 ## 6. Findings on the way
 
