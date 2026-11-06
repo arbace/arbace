@@ -112,7 +112,8 @@ code. Three kinds of things live here:
   disambiguation, translcore.ml's transl_handler and transl_letop, matching.ml's for_handler, lambda/debuginfo.ml's
   Scoped_location (`typer/translcore.ae`: %loc_FUNCTION's scopes), typemod.ml's open of a module expression,
   approx_modtype and transl_recmodule_modtypes, translmod.ml's Tstr_open and init_shape's classes, env.ml's
-  lookup_apply and normalize_modtype_path, ctype.ml's update_level scope expansion and eq_package_path, by hand, the
+  lookup_apply and normalize_modtype_path, ctype.ml's update_level scope expansion and eq_package_path, and (TY23,
+  TYPER.md §22) the modular explicits' Tfunctor of types.mli, ctype.ml, typetexp.ml, typecore.ml, typedtree.ml and oprint.ml, by hand, the
   files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver

@@ -7,7 +7,7 @@ typed natively unit by unit, with GADTs, formats and type extensions pulled forw
 built: T9's objects and classes"), then T10's two stdlib blockers (TY15 (a)), GADT-aware exhaustiveness and recursive
 values, on `ocaml-t10` (§15, "As built: T10's stdlib blockers"): the stdlib 71 of 71 natively; then TY18 (a), oi's library made
 natively, on `ocaml-native-lib` (§17, "As built: TY18"); then T11, the run corpus and the toplevel natively, on `ocaml-t11` (§18),
-and T10's rest as the run corpus needs it, on `ocaml-t12` (§20: 272 of the 309 run programs natively, ocamlc's path 273). From `ocaml-native`, whose
+and T10's rest as the run corpus needs it, on `ocaml-t12` (§20), with TY23's modular explicits (§22): 273 of the 309 run programs natively, as many as ocamlc's path. From `ocaml-native`, whose
 native reader gives the Parsetree as Arbace data. The route of OC4 (b) (doc/ocaml/OCAML-SURVEY.md §6.4): port OCaml 5.5.0's `typing/` and
 `lambda/`'s Translcore with Matching, so that the native Parsetree becomes Lambda in Arbace and oi stops needing the
 host's `ocamlc` for a program. Light rules (the day's): no gate, no Arbace build, no re-seed; every run on main's stage 0
@@ -137,7 +137,7 @@ of these, in `test/ocaml/divergences.edn`'s format:
 | T7 Simplif | `lambda/simplif.ml`: `simplify_exits`, `simplify_lets` (`mutlet`), `simplify_local_functions`; the judge against `-dlambda` too | the samples equal to `ocdump --simplify` | done (§9) |
 | T8 the module system | Typemod (structures, signatures, inclusion and coercions, strengthening, applicative paths), functors (`Map.Make`, `Set.Make`, `Hashtbl.Make`), `open`/`include`/local opens, recursive modules; Translmod complete; then the stdlib's own `.ml` typed and translated natively | `bin/oi stdlib --native`: every unit's Lambda equal to the oracle's (canonical), oi's check on it unchanged | the module system done, the stdlib 64 of 71 (§9); the rest wait on T9's objects and variants and T10 |
 | T9 formats, variants, objects | `format6` typing of literals (Typecore's `type_format`, CamlinternalFormatBasics), polymorphic variants (rows, `Tvariant`, Matching's `divide_variant`), objects and classes (Typeclass, Translobj, Translclass) | the testsuite's `basic/` and `typing-objects/` run programs through the native path | formats done (§9), polymorphic variants done (§11); objects and classes done (§13) |
-| T10 the rest of the core | GADTs and locally abstract types, existentials, first-class modules, effect handlers (`transl_handler`), lazy and array patterns, inline records, labelled tuples, `let` operators, optional-argument elimination | the probe's refusals gone | the run corpus's part done (§20): effect handlers, let operators, opens of module expressions, functor applications in paths, recursive modules' approximation, `%loc_FUNCTION`'s scopes, constructor disambiguation; modular explicits (5.5's `Tfunctor`) left, TY23 |
+| T10 the rest of the core | GADTs and locally abstract types, existentials, first-class modules, effect handlers (`transl_handler`), lazy and array patterns, inline records, labelled tuples, `let` operators, optional-argument elimination | the probe's refusals gone | the run corpus's part done (§20): effect handlers, let operators, opens of module expressions, functor applications in paths, recursive modules' approximation, `%loc_FUNCTION`'s scopes, constructor disambiguation; modular explicits (5.5's `Tfunctor`, TY23, §22) |
 | T11 the corpus and the toplevel | `bin/oi check --native` over the run corpus with the classes of §5; `bin/oi repl --native` (phrases typed here, Genprintval's value printing from types) | none failing, every non-pass classed; repl-check without ocamlc | done (§18): 244 of 309 natively, ocamlc's path 273, the 29 others classed; the session 24 of 24 |
 | T12 errors | typing errors as ocamlc reports them (Location's report, Printtyp's explanations), the testsuite's expect tests' type errors | the error tests' messages equal | 5-8 |
 
@@ -685,3 +685,32 @@ anonymous structure apart from its `let module`'s (one scope a local structure i
 
 TY23 (a): modular explicits ported now, as T10's last part, on `ocaml-t12`; TY24 (a): the native path becomes `bin/oi check`'s
 default after TY23 and the night's whole-corpus record, `--ocdump` the oracle's path.
+
+## 22. As built: TY23, modular explicits (2026-11-06, branch `ocaml-t12`)
+
+TY23 (a), ported from the same tarball: OCaml 5.5's dependent arrows, `(module M : S) -> t` where t names M.
+
+| part | OCaml 5.5.0 sources | here |
+|---|---|---|
+| the type | types.mli's `Tfunctor (label, Ident.Unscoped.t, package, type_expr)` | `[:Tfunctor label id package-path constraints result]` in `typer.types` (children, copies, levels through `children`/`map-desc`); its identifier registered as a module of the package's module type (Out_type's approximation of the printing environment), so a path through it is abstract |
+| unification | ctype.ml's unify3 Tfunctor pairs (labels, packages by eq_package_path, the second's result with its parameter renamed to the first's) and Tfunctor against Tarrow (when the result names no parameter); instance_funct | `types/unify`, `subst-module-ident` (copies the nodes whose paths name the identifier) |
+| annotations | typetexp.ml's Ptyp_functor | `env/transl-type` |
+| functions | typecore.ml's type_moddep_fun (a named `(module M : S)` parameter, no default, not optional, the expected type a variable or a dependent arrow; S from the pattern or from the expected arrow; the result a Tfunctor when it names M, else an arrow from the package) | `typecore/type-moddep-fun` |
+| applications | typecore.ml's collect_functor_module_arg (a `(module ME)` argument typed against the package, the result's parameter replaced by ME's path, Typedtree.path_of_module with applicative functors) and instance_funct_nondep (ME no path: the result's types through the parameter expanded in ME's own type, remove_module_constraint; one that cannot be is an error) | `typecore/type-application`, `functor-result`; `typemod/path-of-module` also applicative now |
+| printing | out_type.ml's Tfunctor, oprint.ml's Otyp_functor and print_package | `printtyp` |
+
+**Results (2026-11-06, the same rules)**: typing-modular-explicits/compiling types, translates (signature, raw and simplified Lambda
+equal to the oracle's) and runs equal; a second regression sample after the port (the 29 of §18, 36 passing rows not rerun before,
+every third of basic/ and effects/: 83 programs) 83 pass; the record `check-oi-native.edn` **273 of 309 run programs natively, as many
+as ocamlc's path** (167 of the 273 passing rows rerun on this branch, the others T11's until the night's record), no row that ocamlc's
+path passes left out; `bin/oi typer-check` 79 of 79 (t79: inferred, annotated and labelled dependent functions applied to paths, a
+functor application and a structure), `bin/oi stdlib-check` 71 of 71, `bin/oi repl-check --native` 24 of 24.
+
+Not ported: a dependent function applied to an argument that is not a packed module (filter_arrow's conversion of the
+Tfunctor to an arrow), or with the argument omitted (refused as outside the slice); moregeneral's and subtyping's
+Tfunctor cases (inclusion of a signature whose value has a dependent type, coercions); the typing-modular-explicits expect
+tests (T12: their errors).
+
+TY24 (a) prepared: `bin/oi check --ocdump` names the oracle's path, and `OI_CHECK_DEFAULT=native|ocdump` the path `bin/oi check`
+takes with neither flag; its default stays `ocdump` until the night's whole-corpus native record (`bin/oi check --native --record`),
+then becomes `native` (one line of bin/oi, with its header and the Makefile's `oi-check` line).

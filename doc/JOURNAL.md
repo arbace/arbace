@@ -462,3 +462,17 @@ programs natively (ocamlc's path 273; 130 of the passing rows rerun with this ty
 weighed: a post-pass expanding a `let module`'s types in the body's type (dropped for OCaml's scopes in update_level, which also
 reach a parameter unified inside the item); recursive signatures translated in order without approximation (as T8 had: a signature
 naming its own module failed); the record-field polytype's printing now (left to T12, TY22). Proposals TY23-TY24 (TYPER.md §21).
+
+## 2026-11-06: oi's native front end, TY23: modular explicits (branch ocaml-t12)
+
+The user decided TY23 (a) and TY24 (a) (TYPER.md, "Decided (2026-11-06...)"). Ported by hand from the same OCaml 5.5.0 tarball
+(SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba): types.mli's Tfunctor, ctype.ml's unify3 cases for it
+(Tfunctor pairs, Tfunctor against Tarrow) and instance_funct, typetexp.ml's Ptyp_functor, typecore.ml's type_moddep_fun,
+collect_functor_module_arg and instance_funct_nondep, typedtree.ml's applicative path_of_module, oprint.ml's Otyp_functor. Results
+(TYPER.md §22): typing-modular-explicits/compiling passes natively, so `test/ocaml/check-oi-native.edn` holds 273 of the 309 run
+programs, as many as ocamlc's path; a second regression sample of 83 programs all pass; typer-check 79 of 79 (t79 new),
+stdlib-check 71 of 71, repl-check --native 24 of 24. TY24 prepared, not switched: `bin/oi check --ocdump` and `OI_CHECK_DEFAULT`
+(default `ocdump` until the night's whole-corpus native record). Alternatives weighed: refusing dependent functions with a clear
+class (the T11 state); a dependent arrow as a plain arrow from the package with the result's paths left free (types escape, the
+program's inclusion check fails as T11 showed); not ported: filter_arrow's Tfunctor-to-arrow conversion for a non-packed argument,
+moregeneral's and subtyping's Tfunctor cases (no corpus program needs them).

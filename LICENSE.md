@@ -227,7 +227,7 @@ covers what.
   simplif.ml), and `valuerec.ae` (typing/value_rec_check.ml's classify_expression, lambda/value_rec_compiler.ml, T10)
   with parmatch.ml's exhaust and typecore.ml's counter-example check in `parmatch.ae` and `typecore.ae`, and (T10's
   rest, 2026-11-06) lambda/debuginfo.ml's Scoped_location in `translcore.ae` with the effect, let-operator, open,
-  recursive-module and scope parts of the files above, are ports of
+  recursive-module, scope and modular-explicit (Tfunctor) parts of the files above, are ports of
   the same OCaml 5.5.0 tarball (SHA-256
   `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`, Copyright INRIA), by hand on 2026-11-05 and 2026-11-06, the
   files carrying the notices: under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking
