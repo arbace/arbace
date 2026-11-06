@@ -943,12 +943,17 @@ the general form the standard (or clang, where named) gives:
 
 | check (2026-11-06, light) | result |
 |---|---|
-| `bin/cppi codegen-check` over `test/cpp/codegen` (130 of G1-G4, the five new: `hdr-iostream`, `va-args`, `tmpl-member-class`, `initlist`, `newdelete-class`) | **134 of 135 pass all three levels** (`hdr-string` now among them); `hdr-vector` passes run and native, known (`trailing-requires`, G5.6); generate and lower 321 s, gcc, clang and runs 12 s |
+| `bin/cppi codegen-check` over `test/cpp/codegen` (130 of G1-G4 and nine new: `hdr-iostream`, `va-args`, `tmpl-member-class`, `initlist`, `newdelete-class`, `udl`, `brace-elision`, `spaceship`, `init-priority`) | **138 of 139 pass all three levels** (`hdr-string` now among them); `hdr-vector` passes run and native, known (`trailing-requires`, G5.6); generate and lower 308 s, gcc, clang and runs 12 s |
 | the corpus's every fifth (42 files, 2 jobs) at the branch's start (G4's head) | **7 of 42** pass all three levels |
-| the same at the branch's head | SAMPLE_AFTER |
-| the samples that were on clang's route (`test/cpp/samples`, `test/cpp/runtime/samples`: 16 files) | SAMPLES16 |
+| the same at the branch's head | **32 of 42** (76 %); generate and lower 661 s for the 42 (two jobs for the runs), gcc, clang and runs 6 s; 18 and 25 at intermediate measures of the branch |
+| the samples that were on clang's route (`test/cpp/samples`, `test/cpp/runtime/samples`: 16 files) | **7 of 16** (G4: 5): `auto`, `bitfields`, `classes`, `p1-first`, `vexing`, `uncaught`, and `ctor-throw` (init_priority, constructor attributes); `decls` and `layouts` have no `main`; `hello` an overload set's conversion among `<string>`'s and `<map>`'s `operator<<` candidates, `io` `iterator_traits` of a class iterator in `std::sort`'s internals, `atomics` `__atomic_fetch_sub`, `threads` and `thread-throw` `std::thread`'s invocation, `coroutine` `co_yield`, `library` a parser decline |
 
-The corpus sample's files that do not pass at the branch's head, by their first refusal: REMAINING
+The corpus sample's files that do not pass at the branch's head, by their first refusal: coroutines (`func-params-08`,
+`exceptions-test-01-n4849-a`, `co-yield-04-complex-local-state`); `_Destroy`'s local typedef of `iterator_traits<It>::value_type`
+for a class iterator (`asan/pr90570`, `jason/template31`: `std::vector` of a class, G5.6); a class through `...`
+(`pr45843`); C++23's multi-argument `operator[]` (`subscript6`, a parser decline); GNU's `__complex__` (`unchanging1`'s
+`std::complex<double>`); `embed-11` defines a constant global clang folds away (names); `jason/thunk3`'s reference run
+fails (clang's route).
 
 The traces added for the work on headers: `CPP_OP_TRACE=1` (an operator's candidates when none is viable),
 `CPP_LOOKUP_TRACE=NAME` (each scope an unqualified lookup of NAME tries, a variable NAME's declaration, the
@@ -993,8 +998,8 @@ functional-equivalence check of function template redeclarations).
   function template (`_Destroy`'s `_Value_type`: the partial specialization `iterator_traits<_Tp*>` not chosen there,
   not understood yet), `istreambuf_iterator` named without arguments in its own class.
 - The cost: G5 made the analysis slower (codegen-check's 135 samples: generate and lower 321 s at G4's head with the
-  new samples, 423 s after the layouts are no longer kept for unfinished classes); a layout kept per class once all its
-  parts are finished would win it back.
+  new samples, 441 s after the layouts were no longer kept for unfinished classes, 308 s once concept satisfactions
+  were memoized).
 
 ### G5.7 Proposed
 
