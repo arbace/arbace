@@ -1247,3 +1247,9 @@ JCS155: (b) SSLLogger as built for F3's night, then (a) System.Logger in jrt as 
 JCS158 (a): the javac-API tests stay deferred at the compiled level (`:javac-api`); JCS159 (a): javac's ToolProvider on
 javac's tool, built on `java-jc9c` ("As built: JCS159 (write-ahead)"); JCS160 (a): as built, every client socket in a
 SocksSocketImpl, as jdk26u.
+
+## Decided (2026-11-06, the user: JCS161)
+
+JCS161 (a): java.lang.management alone, JMX cut by variants (`getObjectName` and the platform MBean server
+unsupported), jdk26u's `sun.management` implementations where their Java stands, jrt's natives in Go (monitor
+owners recorded for the deadlock tests): F13, on `java-jc9c` ("As built: F13 (write-ahead)").
