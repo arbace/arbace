@@ -138,7 +138,20 @@
     directory-separator directory-separator? timer-interrupt-handler keyboard-interrupt-handler collect collect-request-handler collect-maximum-generation collect-trip-bytes
     collect-generation-radix collect-notify bytes-allocated disable-interrupts enable-interrupts optimize-level debug-level enable-unsafe-application
     enable-unsafe-variable-reference enable-type-recovery print-radix print-gensym print-length print-level print-brackets
-    print-vector-length make-record-type)
+    print-vector-length make-record-type
+    ;; SMR7: Chez's records (si chez-records), the cflonum operations, the compiler's parameters
+    define-record type-descriptor csv7:record-field-accessor csv7:record-field-mutator csv7:record-field-mutable?
+    csv7:record-type-field-names csv7:record-type-field-decls csv7:record-field-accessible? csv7:record-type-descriptor csv7:record-type-name csv7:record-type-symbol $record-type-descriptor $record-type-field-names
+    cflonum? cfl+ cfl- cfl* cfl/ cfl= cfl-real-part cfl-imag-part cfl-conjugate cfl-magnitude-squared fl-make-rectangular gensym?
+    enable-cp0 run-cp0 $suppress-primitive-inlining internal-defines-as-letrec* generate-inspector-information generate-procedure-source-information
+    generate-interrupt-trap $enable-check-prelex-flags cp0-effort-limit cp0-score-limit cp0-outer-unroll-limit undefined-variable-warnings
+    commonization-level enable-arithmetic-left-associative enable-error-source-expression compile-interpret-simple
+    car-cas! cdr-cas! vector-cas! list-assuming-immutable? vector-copy! fxvector-copy! flvector-copy! $quotient-remainder subset-mode expt-mod
+    with-interrupts-disabled critical-section $fxu< flsingle flbit-field random-seed current-eval case-sensitive gensym-count gensym-prefix
+    pretty-line-length pretty-one-line-limit pretty-initial-indent pretty-standard-indent pretty-maximum-lines eval-syntax-expanders-when
+    collect-maximum-generation-threshold-factor file-position file-length clear-input-port clear-output-port
+    datum syntax->list syntax->vector $string-ref-check? $vector-ref-check? $fxvector-ref-check? $flvector-ref-check? $bytevector-ref-check?
+    current-directory source-directories library-directories command-line-arguments reset-handler abort-handler import-notify)
   ;; SC170 (b): Chez's wider forms of eval (the environment optional), dynamic-wind (a leading critical flag), fx+ fx* fx-
   ;; (any number of arguments) and the file procedures' options ('replace, 'truncate) replace (rnrs)'s
   (import (except (rnrs) file-options fx+ fx* fx- for-each dynamic-wind open-output-file call-with-output-file with-output-to-file
@@ -154,7 +167,7 @@
           (only (psyntax system $all) gensym module import real-time cpu-time make-file-options
                 unget-u8 unget-char port-has-port-length? port-has-set-port-length!? port-has-port-nonblocking??
                 port-has-set-port-nonblocking!? fresh-line port-length set-port-length! port-nonblocking? set-port-nonblocking!)
-          (si format))
+          (si format) (si chez-records) (only (srfi :98) get-environment-variable))
 
 ;; SC170 (b): Chez's file-options names more than R6RS's three (replace, append, compressed, exclusive, ...): the universe is si's
   (define-syntax file-options
@@ -166,9 +179,6 @@
   (define string->number (case-lambda ((s) (r6-string->number s 10 #t)) ((s r) (r6-string->number s r #t))))
   (define number->string
     (case-lambda ((x) (r6-number->string x 10 #f #t)) ((x r) (r6-number->string x r #f #t)) ((x r p) (r6-number->string x r p #t))))
-  ;; SMR6: Chez's record-constructor takes a record-type descriptor as well (make-record-type's), the default constructor
-  (define (record-constructor x)
-    (r6-record-constructor (if (record-type-descriptor? x) (make-record-constructor-descriptor x #f #f) x)))
   (define (transcoder? x) (guard (e (#t #f)) (transcoder-codec x) #t))
   (define ienv #f)
   (define interaction-environment
@@ -294,15 +304,28 @@
   (define logor bitwise-ior)
   (define logxor bitwise-xor)
   (define lognot bitwise-not)
-  (define random-state 88172645463325252)
+  ;; SMR7: the generator's state is Chez's 32-bit seed (random-seed reads and sets it, 1 to 2^32-1); each draw is the splitmix64 of the
+  ;; seed, the seed then stepped by a 32-bit linear congruence (not Chez's sequence: the mats check ranges and that a seed repeats a draw)
+  (define random-state 1)
+  (define (random-draw)
+    (let* ((z (bitwise-and (+ (* random-state #x9E3779B97F4A7C15) #x632BE59BD9B4E019) #xFFFFFFFFFFFFFFFF))
+           (z (bitwise-and (* (bitwise-xor z (bitwise-arithmetic-shift-right z 30)) #xBF58476D1CE4E5B9) #xFFFFFFFFFFFFFFFF))
+           (z (bitwise-and (* (bitwise-xor z (bitwise-arithmetic-shift-right z 27)) #x94D049BB133111EB) #xFFFFFFFFFFFFFFFF))
+           (z (bitwise-xor z (bitwise-arithmetic-shift-right z 31))))
+      (set! random-state (let ((s (mod (+ (* random-state 1664525) 1013904223) #x100000000))) (if (= s 0) 1 s)))
+      z))
   (define (random n)
-    ;; xorshift64*, enough for the mats' sampling (not Chez's sequence)
-    (set! random-state (bitwise-and (bitwise-xor random-state (bitwise-arithmetic-shift random-state 13)) #xFFFFFFFFFFFFFFFF))
-    (set! random-state (bitwise-xor random-state (bitwise-arithmetic-shift random-state -7)))
-    (set! random-state (bitwise-and (bitwise-xor random-state (bitwise-arithmetic-shift random-state 17)) #xFFFFFFFFFFFFFFFF))
-    (cond ((and (integer? n) (exact? n) (> n 0)) (mod random-state n))
-          ((and (real? n) (inexact? n) (> n 0)) (* n (/ (inexact random-state) 18446744073709551616.0)))
+    (cond ((and (integer? n) (exact? n) (> n 0))
+           ;; enough 64-bit draws to cover n, then reduced
+           (let loop ((acc 0) (range 1))
+             (if (>= range (* n #x10000)) (mod acc n) (loop (+ (* acc #x10000000000000000) (random-draw)) (* range #x10000000000000000)))))
+          ((and (real? n) (inexact? n) (> n 0)) (* n (/ (inexact (random-draw)) 18446744073709551616.0)))
           (else (assertion-violation 'random "invalid range" n))))
+  (define random-seed
+    (case-lambda
+      (() random-state)
+      ((s) (unless (and (integer? s) (exact? s) (<= 1 s #xFFFFFFFF)) (assertion-violation 'random-seed "invalid seed" s))
+           (set! random-state s))))
   (define (nonnegative? x) (>= x 0))
   (define (nonpositive? x) (<= x 0))
   (define-syntax rec
@@ -722,14 +745,146 @@
   (define print-level (make-parameter #f))
   (define print-brackets (make-parameter #t))
   (define print-vector-length (make-parameter #t))
-  ;; Chez's make-record-type: a name string, field names (all mutable), an optional parent rtd first
-  (define make-record-type
+;; SMR7: Chez's cflonum operations (the User's Guide, 8.5): a cflonum is a flonum or an inexact complex number whose parts are
+  ;; flonums; each operation takes cflonums only
+  (define (cflonum? x) (or (flonum? x) (and (number? x) (not (real? x)) (inexact? x))))
+  (define (cfl-check who xs) (for-each (lambda (x) (unless (cflonum? x) (assertion-violation who "not a cflonum" x))) xs))
+  (define (cfl+ . xs) (cfl-check 'cfl+ xs) (apply + 0.0 xs))
+  (define (cfl* . xs) (cfl-check 'cfl* xs) (apply * 1.0 xs))
+  (define (cfl- x . xs) (cfl-check 'cfl- (cons x xs)) (apply - x xs))
+  (define (cfl/ x . xs) (cfl-check 'cfl/ (cons x xs)) (apply / x xs))
+  (define (cfl= x . xs) (cfl-check 'cfl= (cons x xs)) (apply = x xs))
+  (define (cfl-real-part x) (cfl-check 'cfl-real-part (list x)) (inexact (real-part x)))
+  (define (cfl-imag-part x) (cfl-check 'cfl-imag-part (list x)) (inexact (imag-part x)))
+  (define (cfl-conjugate x) (cfl-check 'cfl-conjugate (list x)) (if (flonum? x) x (make-rectangular (real-part x) (- (imag-part x)))))
+  (define (cfl-magnitude-squared x)
+    (cfl-check 'cfl-magnitude-squared (list x))
+    (let ((a (inexact (real-part x))) (b (inexact (imag-part x)))) (+ (* a a) (* b b))))
+  (define (fl-make-rectangular x y)
+    (unless (and (flonum? x) (flonum? y)) (assertion-violation 'fl-make-rectangular "not a flonum" x y))
+    (make-rectangular x y))
+  ;; a gensym is a symbol that string->symbol of its name does not give back
+  (define (gensym? x) (and (symbol? x) (not (eq? x (string->symbol (symbol->string x))))))
+  ;; SMR7: the compiler's parameters with Chez's defaults and no effect (si has no cp0 and no code generator), as optimize-level (SMR6)
+  (define enable-cp0 (make-parameter #t (lambda (x) (and x #t))))
+  (define run-cp0 (make-parameter (lambda (cp0 x) (cp0 (cp0 x)))
+                                  (lambda (p) (unless (procedure? p) (assertion-violation 'run-cp0 "not a procedure" p)) p)))
+  (define $suppress-primitive-inlining (make-parameter #t (lambda (x) (and x #t))))
+  (define internal-defines-as-letrec* (make-parameter #t (lambda (x) (and x #t))))
+  (define generate-inspector-information (make-parameter #f (lambda (x) (and x #t))))
+  (define generate-procedure-source-information (make-parameter #f (lambda (x) (and x #t))))
+  (define generate-interrupt-trap (make-parameter #t (lambda (x) (and x #t))))
+  (define $enable-check-prelex-flags (make-parameter #f (lambda (x) (and x #t))))
+  (define (nonnegative-fixnum-param who v)
+    (make-parameter v (lambda (x) (unless (and (fixnum? x) (fx>=? x 0)) (assertion-violation who "invalid argument" x)) x)))
+  (define cp0-effort-limit (nonnegative-fixnum-param 'cp0-effort-limit 200))
+  (define cp0-score-limit (nonnegative-fixnum-param 'cp0-score-limit 20))
+  (define cp0-outer-unroll-limit (nonnegative-fixnum-param 'cp0-outer-unroll-limit 0))
+  (define undefined-variable-warnings (make-parameter #f (lambda (x) (and x #t))))
+  (define commonization-level
+    (make-parameter 0 (lambda (x) (unless (and (fixnum? x) (fx<=? 0 x 9)) (assertion-violation 'commonization-level "invalid level" x)) x)))
+  (define enable-arithmetic-left-associative (make-parameter #f (lambda (x) (and x #t))))
+  (define enable-error-source-expression (make-parameter #t (lambda (x) (and x #t))))
+  (define compile-interpret-simple (make-parameter #t (lambda (x) (and x #t))))
+;; SMR7: the stub experiment's simple names (doc/scheme/MATURITY-REVIEW.md, "As built: SMR7"), each written from its mat
+  ;; car-cas!, cdr-cas! and vector-cas!: the compare (eq?) and set of one place; si has no threads, so the swap is never spurious
+  (define (car-cas! p old new)
+    (unless (pair? p) (assertion-violation 'car-cas! "not a pair" p))
+    (and (eq? (car p) old) (begin (set-car! p new) #t)))
+  (define (cdr-cas! p old new)
+    (unless (pair? p) (assertion-violation 'cdr-cas! "not a pair" p))
+    (and (eq? (cdr p) old) (begin (set-cdr! p new) #t)))
+  (define (vector-cas! v i old new)
+    (unless (and (vector? v) (mutable-vector? v)) (assertion-violation 'vector-cas! "not a mutable vector" v))
+    (unless (and (fixnum? i) (fx<=? 0 i) (fx<? i (vector-length v))) (assertion-violation 'vector-cas! "invalid index" i))
+    (and (eq? (vector-ref v i) old) (begin (vector-set! v i new) #t)))
+  (define (list-assuming-immutable? x) (list? x))
+  ;; Chez's vector-copy!: (vector-copy! src src-start dest dest-start n), the ranges checked first, overlapping copies as if through a copy
+  (define (copy!-checker who ok?)
+    (lambda (src ss dst ds n)
+      (unless (ok? src) (assertion-violation who "invalid source" src))
+      (unless (ok? dst) (assertion-violation who "invalid destination" dst))
+      (for-each (lambda (k) (unless (and (fixnum? k) (fx>=? k 0)) (assertion-violation who "invalid index or count" k))) (list ss ds n))
+      (unless (<= (+ ss n) (vector-length src)) (assertion-violation who "source range out of bounds" ss n))
+      (unless (<= (+ ds n) (vector-length dst)) (assertion-violation who "destination range out of bounds" ds n))
+      (if (and (eq? src dst) (< ss ds))
+          (let loop ((k (- n 1))) (when (>= k 0) (vector-set! dst (+ ds k) (vector-ref src (+ ss k))) (loop (- k 1))))
+          (let loop ((k 0)) (when (< k n) (vector-set! dst (+ ds k) (vector-ref src (+ ss k))) (loop (+ k 1)))))))
+  (define vector-copy! (copy!-checker 'vector-copy! vector?))
+  (define fxvector-copy! (copy!-checker 'fxvector-copy! vector?))
+  (define flvector-copy! (copy!-checker 'flvector-copy! vector?))
+  (define subset-mode (make-parameter #f (lambda (x) (unless (memq x '(#f system)) (assertion-violation 'subset-mode "invalid mode" x)) x)))
+  (define ($quotient-remainder x y) (cons (quotient x y) (remainder x y)))
+  ;; (expt-mod x y z): x^y mod z by squaring, y a nonnegative exact integer, z a nonzero exact integer
+  (define (expt-mod x y z)
+    (unless (and (integer? x) (exact? x)) (assertion-violation 'expt-mod "not an exact integer" x))
+    (unless (and (integer? y) (exact? y) (>= y 0)) (assertion-violation 'expt-mod "not a nonnegative exact integer" y))
+    (unless (and (integer? z) (exact? z) (not (= z 0))) (assertion-violation 'expt-mod "not a nonzero exact integer" z))
+    (let loop ((b (modulo x z)) (e y) (r (modulo 1 z)))
+      (cond ((= e 0) r)
+            ((odd? e) (loop (modulo (* b b) z) (quotient e 2) (modulo (* r b) z)))
+            (else (loop (modulo (* b b) z) (quotient e 2) r)))))
+  ;; si has no interrupts and no threads: the body is evaluated as it is
+  (define-syntax with-interrupts-disabled (syntax-rules () ((_ e1 e2 ...) (let () e1 e2 ...))))
+  (define-syntax critical-section (syntax-rules () ((_ e1 e2 ...) (let () e1 e2 ...))))
+  ;; the unsigned comparison of two fixnums (their 61-bit two's complement)
+  (define ($fxu< x y)
+    (unless (and (fixnum? x) (fixnum? y)) (assertion-violation '$fxu< "not a fixnum" x y))
+    (let ((u (lambda (v) (if (fx<? v 0) (+ v (expt 2 (fixnum-width))) v)))) (< (u x) (u y))))
+  (define (flsingle x)
+    (unless (flonum? x) (assertion-violation 'flsingle "not a flonum" x))
+    (let ((b (make-bytevector 4))) (bytevector-ieee-single-native-set! b 0 x) (bytevector-ieee-single-native-ref b 0)))
+  ;; the bits START to END of a flonum's IEEE double representation, as an unsigned integer
+  (define (flbit-field x start end)
+    (unless (flonum? x) (assertion-violation 'flbit-field "not a flonum" x))
+    (unless (and (fixnum? start) (fixnum? end) (fx<=? 0 start end 64)) (assertion-violation 'flbit-field "invalid range" start end))
+    (let ((b (make-bytevector 8))) (bytevector-ieee-double-set! b 0 x (endianness little))
+      (bitwise-bit-field (bytevector-u64-ref b 0 (endianness little)) start end)))
+  (define current-eval (make-parameter (lambda (x . e) (apply eval x e))
+                                       (lambda (p) (unless (procedure? p) (assertion-violation 'current-eval "not a procedure" p)) p)))
+  (define case-sensitive (make-parameter #t (lambda (x) (and x #t))))
+  (define gensym-count (make-parameter 0 (lambda (x) (unless (and (integer? x) (exact? x) (>= x 0)) (assertion-violation 'gensym-count "invalid count" x)) x)))
+  (define gensym-prefix (make-parameter "g"))
+  (define pretty-line-length (nonnegative-fixnum-param 'pretty-line-length 75))
+  (define pretty-one-line-limit (nonnegative-fixnum-param 'pretty-one-line-limit 60))
+  (define pretty-initial-indent (nonnegative-fixnum-param 'pretty-initial-indent 0))
+  (define pretty-standard-indent (nonnegative-fixnum-param 'pretty-standard-indent 1))
+  (define pretty-maximum-lines (make-parameter #f))
+  (define eval-syntax-expanders-when (make-parameter '(compile load eval)))
+  (define collect-maximum-generation-threshold-factor (make-parameter 2))
+  (define file-position (case-lambda ((p) (port-position p)) ((p pos) (set-port-position! p pos))))
+  (define (file-length p) (port-length p))
+  (define (clear-input-port . p) (void))
+  (define (clear-output-port . p) (void))
+;; SMR7: Chez's datum, (datum x) = (syntax->datum #'x), which the mats' own macros use
+  (define-syntax datum (syntax-rules () ((_ t) (syntax->datum (syntax t)))))
+  ;; a syntax object's list or vector of syntax objects (Chez's syntax->list and syntax->vector)
+  (define (syntax->list x)
+    (syntax-case x () ((e ...) (syntax (e ...))) (_ (assertion-violation 'syntax->list "invalid argument" x))))
+  (define (syntax->vector x)
+    (syntax-case x () (#(e ...) (list->vector (syntax (e ...)))) (_ (assertion-violation 'syntax->vector "invalid argument" x))))
+  ;; Chez's index checks: whether (OP x i) would be valid
+  (define (ref-check ok? len)
+    (lambda (x i) (and (ok? x) (fixnum? i) (fx>=? i 0) (fx<? i (len x)))))
+  (define $string-ref-check? (ref-check string? string-length))
+  (define $vector-ref-check? (ref-check vector? vector-length))
+  (define $fxvector-ref-check? (ref-check vector? vector-length))
+  (define $flvector-ref-check? (ref-check vector? vector-length))
+  (define $bytevector-ref-check?
     (case-lambda
-      ((name fields) (make-record-type #f name fields))
-      ((parent name fields)
-       (unless (string? name) (assertion-violation 'make-record-type "invalid record name" name))
-       (make-record-type-descriptor (string->symbol name) parent #f #f #f
-                                    (list->vector (map (lambda (f) (list 'mutable (if (pair? f) (cadr f) f))) fields))))))
+      ((bits x i) (and (bytevector? x) (fixnum? i) (fx>=? i 0) (fx<=? (fx+ i (fxquotient bits 8)) (bytevector-length x))))
+      ((x i) ($bytevector-ref-check? 8 x i))))
+  ;; the process's directory as the shell gave it (si has no chdir); the directories Chez searches for sources and libraries
+  (define current-directory
+    (case-lambda
+      (() (or (get-environment-variable "PWD") "."))
+      ((d) (assertion-violation 'current-directory "si cannot change the current directory" d))))
+  (define source-directories (make-parameter '(".") (lambda (x) (unless (and (list? x) (for-all string? x)) (assertion-violation 'source-directories "invalid list" x)) x)))
+  (define library-directories (make-parameter '(("." . "."))))
+  (define command-line-arguments (make-parameter '() (lambda (x) (unless (and (list? x) (for-all string? x)) (assertion-violation 'command-line-arguments "invalid list" x)) x)))
+  (define reset-handler (make-parameter (lambda () (exit 1)) (lambda (p) (unless (procedure? p) (assertion-violation 'reset-handler "not a procedure" p)) p)))
+  (define abort-handler (make-parameter (lambda args (exit 1)) (lambda (p) (unless (procedure? p) (assertion-violation 'abort-handler "not a procedure" p)) p)))
+  (define import-notify (make-parameter #f (lambda (x) (and x #t))))
   (define call/1cc call/cc)
   (define-syntax exclusive-cond (syntax-rules () ((_ c ...) (cond c ...))))
   (define-syntax define-values

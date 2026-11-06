@@ -348,6 +348,19 @@
         (let [(values v found) (charNameValue key (.-r7rs r))]
           (when found
             (return (conv Char v))))
+        ;; SMR7: Chez's own character names (rubout, bel, nel, ls) and #\NNN, three octal digits, with ChezLex
+        (when ChezLex
+          (switch key
+            (case ["rubout"] (return (conv Char (conv rune 127))))
+            (case ["bel"] (return (conv Char (conv rune 7))))
+            (case ["nel"] (return (conv Char (conv rune 0x85))))
+            (case ["ls"] (return (conv Char (conv rune 0x2028)))))
+          (when (and (== (len name) 3) (isOctal (aget (conv (slice rune) name) 0)) (isOctal (aget (conv (slice rune) name) 1))
+                     (isOctal (aget (conv (slice rune) name) 2)))
+            (let [rs (conv (slice rune) name)
+                  v (+ (* 64 (- (aget rs 0) \0)) (* 8 (- (aget rs 1) \0)) (- (aget rs 2) \0))]
+              (when (< v 256)
+                (return (conv Char v))))))
         (when (== cp \x)
           (let [all true]
             (for [i 0] (< i (len tail)) (inc! i)
@@ -358,6 +371,8 @@
                 (when good
                   (return (conv Char (conv rune v))))))))
         (.readFail r "invalid character name #\\~a" (Str name))))))
+
+(go/func isOctal ^bool [^rune c] (and (>= c \0) (<= c \7)))
 
 (go/func isPeculiar "isPeculiar is whether the identifier token starting with + - . or a digit is one R6RS admits.\n" ^bool [^string t]
   (or (== t "+") (== t "-") (== t "...") (strings/HasPrefix t "->")))
@@ -547,10 +562,51 @@
                   (set! (.-v l) v)
                   (set! (.-set l) true)
                   (return (patchLabels v (make (map any bool)))))))
+            ;; SMR7: Chez's #N( and #Nvu8( #Nvfx( #Nvfl( (a vector of length N, its last element repeated, none: 0) and #Nr (radix N), with ChezLex
+            (case [\( \v]
+              (when (not ChezLex)
+                (return (.readFail r "invalid syntax #~a~c" n (conv Char e))))
+              (let [kind "vector"]
+                (when (== e \v)
+                  (let [t (conv string (.token r false))]
+                    (set! kind t)
+                    (when (not (or (== t "u8") (== t "fx") (== t "fl")))
+                      (return (.readFail r "invalid syntax #~av~a" n (Str t))))
+                    (let [(values p ok3) (.next r)]
+                      (when (not (and ok3 (== p \()))
+                        (return (.readFail r "invalid syntax #~av~a" n (Str t)))))))
+                (let [(values items _) (.seq r true "vector")]
+                  (when (> (conv int64 (len items)) n)
+                    (return (.readFail r "too many vector elements supplied" )))
+                  (let [^any fill (conv any (conv int64 0))]
+                    (when (== kind "fl")
+                      (set! fill (conv any (conv float64 0))))
+                    (when (> (len items) 0)
+                      (set! fill (aget items (- (len items) 1))))
+                    (while (< (conv int64 (len items)) n)
+                      (set! items (append items fill))))
+                  (if (== kind "u8")
+                    (let [bs (make (slice byte) 0 (len items))]
+                      (range [_ x items]
+                        (let [(values b isInt) (assert int64 x)]
+                          (when (or (not isInt) (< b 0) (> b 255))
+                            (return (.readFail r "invalid value ~:[~s~;~a~] found in bytevector" false x)))
+                          (set! bs (append bs (conv byte b)))))
+                      (return (addr (lit Bytevector :B bs))))
+                    (return (NewVector items))))))
+            (case [\r \R]
+              (when (not ChezLex)
+                (return (.readFail r "invalid syntax #~a~c" n (conv Char e))))
+              (let [tok (+ "#" (strconv/FormatInt n 10) "r" (conv string (.token r true)))
+                    v (StringToNumberX tok 10 true)]
+                (when (== v false)
+                  (return (.readFail r "invalid number syntax ~a" (Str tok))))
+                (return v)))
             (default (return (.readFail r "invalid syntax #~a~c" n (conv Char e))))))))
     (switch d
       (case [\{]
-        (when (.-gensyms r)
+        ;; SMR7: Chez's #{NAME UID} gensyms with ChezLex too
+        (when (or (.-gensyms r) ChezLex)
           (return (.readGensym r))))
       (case [\(]
         (.next r)
@@ -592,7 +648,7 @@
           (for [i 0] (< i (len rest)) (inc! i)
             (set! prefix (append prefix (aget rest i))))
           (let [tok (conv string prefix)
-                v (StringToNumber tok 10)]
+                v (StringToNumberX tok 10 ChezLex)]
             (when (== v false)
               (return (.readFail r "invalid number syntax ~a" (Str tok))))
             (return v)))))
