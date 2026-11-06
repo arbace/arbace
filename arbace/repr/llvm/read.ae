@@ -335,6 +335,48 @@
                        (do (adv!) (recur (dec depth))))
         :else (do (adv!) (recur depth))))))
 
+(defn- check-captures!
+  "LLParser::parseCapturesAttr's errors over the tokens after `captures` (LL6), the cursor left where it was: `(`, components
+  none, address, address_is_null, provenance, read_provenance, a `ret:` location at most once, none alone in its location."
+  []
+  (let [p0 (p)]
+    (when-not (punct? "(") (llerr "expected '('"))
+    (adv!)
+    (loop [ret? false seen false nothing false]
+      (let [[ret? seen nothing]
+            (cond
+              (and (= (kind) :label) (= (text) "ret")) (do (when ret? (adv!) (llerr "duplicate 'ret' location")) (adv!) [true false false])
+              (and (= (kind) :word) (= (text) "ret")) (do (adv!) (when-not (punct? ":") (llerr "expected ':'")) (adv!)
+                                                          (when ret? (llerr "duplicate 'ret' location")) [true false false])
+              :else [ret? seen nothing])
+            nothing (cond
+                      (and (= (kind) :word) (= (text) "none")) (do (adv!) (when seen (llerr "cannot use 'none' with other component")) true)
+                      (and seen nothing) (llerr "cannot use 'none' with other component")
+                      (and (= (kind) :word) (#{"address" "address_is_null" "provenance" "read_provenance"} (text))) (do (adv!) false)
+                      :else (llerr "expected one of 'none', 'address', 'address_is_null', 'provenance' or 'read_provenance'"))]
+        (cond
+          (punct? ")") nil
+          (punct? ",") (do (adv!) (recur ret? true nothing))
+          :else (llerr "expected ',' or ')'"))))
+    (aset ^ints (.pos *t*) 0 (int p0))))
+
+(defn- check-initializes!
+  "LLParser::parseInitializesAttr's errors over the tokens after `initializes` (LL6), the cursor left where it was: `(`, then
+  `(LOWER, UPPER)` pairs of integers, LOWER not UPPER, separated by commas, then `)`."
+  []
+  (let [p0 (p)
+        int! (fn [] (when-not (= (kind) :int) (llerr "expected integer")) (let [v (bigint (text))] (adv!) v))
+        tok! (fn [t msg] (when-not (punct? t) (llerr msg)) (adv!))]
+    (tok! "(" "expected '('")
+    (loop []
+      (tok! "(" "expected '('")
+      (let [lo (int!) _ (tok! "," "expected ','") hi (int!)]
+        (when (= lo hi) (llerr "the range should not represent the full or empty set!"))
+        (tok! ")" "expected ')'"))
+      (when (punct? ",") (adv!) (recur)))
+    (tok! ")" "expected ')'")
+    (aset ^ints (.pos *t*) 0 (int p0))))
+
 (defn- parse-attr
   "One attribute: :word, (:word ARG) for word(ARG) (a type for byval and the like, else the raw text), (:align N) for
   align N, (:word= N) for word=N, [\"k\" \"v\"] or [\"k\"] for a string attribute."
@@ -352,6 +394,8 @@
               (do (adv!) (adv!) (llerr "expected ')'"))
               (and (#{"align" "alignstack"} w) (punct? "(") (not= (kind 1) :int))
               (do (adv!) (llerr "expected integer"))
+              (= w "captures") (do (check-captures!) (list kw (raw-parens)))
+              (= w "initializes") (do (check-initializes!) (list kw (raw-parens)))
               (punct? "(") (if (type-attrs w)
                              (do (adv!) (when-not (type-start?) (llerr "expected type")) (let [t (parse-type)] (expect! ")") (list kw t)))
                              (list kw (raw-parens)))
@@ -682,6 +726,8 @@
         spec (get @di-fields-table (text))
         by-name (into {} (map (fn [[f r t a]] [f [r t a]]) spec))]
     (adv!) (expect! "(")
+    ;; LLParser::parseDIAssignID: no operands (LL6)
+    (when (and (= (name head) "!DIAssignID") (not (punct? ")"))) (llerr "expected ')' here"))
     (let [node
           (cond
             (and (punct? ")") (or (nil? spec) (not (some second spec)))) (do (adv!) (list head))

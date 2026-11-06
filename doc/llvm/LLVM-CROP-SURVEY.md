@@ -936,22 +936,34 @@ for C++'s lowering for gcc.
   control is judged by its forms then.
 - **The verifier**: `GEP into vector with non-byte-addressable element type`, `get_dynamic_area_offset`'s width, the `modular-format`
   attribute's rules, MemProf's `!memprof` and `!callsite` (each message and culprit as opt's, checked on the test and on the 120
-  llvm/test files that use them), and the reader's "expected type" for a word that is no type (llvm/test's RUN-line templates,
-  `iXLen`: refused as llvm-as refuses them, 8 of a fresh 999-file sample, the others of that sample read: forms 991 of 991, bitcode 988).
+  llvm/test files that use them), and in the reader LLParser's own errors for a word that is no type (llvm/test's RUN-line templates,
+  `iXLen`: refused as llvm-as refuses them, 8 of a fresh 999-file sample, the others of that sample read: forms 991 of 991, bitcode
+  988), for `captures(...)` (parseCapturesAttr: `ret:` once, `none` alone) and `initializes(...)` (parseInitializesAttr), and for
+  `!DIAssignID` with an operand (19 of 19 split-file sections of `Assembler/captures-errors` and `initializes-attribute-invalid`, opt's
+  whole stderr; 150 of 150 llvm/test files that use the two attributes). False errors on valid modules, from the 150 and a fresh
+  999-file valid sample, fixed at their root: a `bitcast`/`addrspacecast` in `@llvm.used` walked as a GEP (a crash), byte counts above
+  2^63 parsed as longs (a crash), a self-reference in an unreachable block (allowed: `!DT.isReachableFromEntry`), a named type that
+  aliases a non-struct type (`%T = type ptr` is `ptr` itself: `alias-type` in `norm-type`), and `common` globals' null values (+0.0, and
+  aggregates of nulls: `null-value?`). That sample's other false errors are AutoUpgrade's old intrinsic forms (x86's
+  `*-upgrade` tests, `llvm.experimental.vector.extract`, old argument counts: 7) and two debug-info warnings; they are not in a record
+  (the sample's verdicts were checked against opt, not recorded). Four probes known since LL4 now pass (`attrs-p17`, `cc-c10`,
+  `musttail-q38`, `metadata-w51`), out of `test/llvm/probes-known.tsv`; the probes' record is rewritten (475 of 478 verdicts).
 - **The REAP row**: read gains llvm/test's 806 verified modules and 304 round-tripped (judged from the records), print the same 304
-  printed back byte for byte; the non-passes of the 806 are in `:llvmtest-rules` (15: rules not ported, mostly AMDGPU's, VP and
-  gc.relocate intrinsics, two parser rules) and `:llvmtest-messages` (47: the verdict opt's, another first message or culprit, mostly
-  LLParser's error order). `test/reap/matrix.edn` re-recorded.
+  printed back byte for byte; the non-passes of the 806 are in `:llvmtest-rules` (14: rules not ported, mostly AMDGPU's, VP and
+  gc.relocate intrinsics, inline asm constraints) and `:llvmtest-messages` (45: the verdict opt's, another first message or culprit,
+  mostly LLParser's error order: an earlier error the lexer or the parser reports first). `test/reap/matrix.edn` re-recorded.
 
 **Numbers** (before: `llvm-ll5`'s records; after: this branch's):
 
 | what | before | after |
 |---|---|---|
-| REAP LLVM read (pass / design / deferred) | 2,695 / 1 / 58 | 3,743 / 1 / 120 (llvm/test's 1,110 rows added) |
+| REAP LLVM read (pass / design / deferred) | 2,695 / 1 / 58 | 3,750 / 1 / 113 (llvm/test's 1,110 rows added) |
 | REAP LLVM eval | 229 / 7 / 22 (258 modules) | 519 / 22 / 21 (562 modules: the 258 and the torture sample; `bin/llvmi check` exits 0, 2.5 min, 1.5 GB) |
 | REAP LLVM print | 282 / 0 / 0 | 586 / 0 / 0 |
 | llvmi on the torture sample (304) | 271 | 290 (AOT before the stackrestore fix, `--aot --corpus tx-O0,tx-O2`: 288, the same rows as eval's then, 7.9 min, 1.4 GB) |
-| verify on llvm/test's 446 opt rejections: verdicts / first message / whole stderr | 428 / 399 / 381 | 432 / 403 / 385 |
+| verify on llvm/test's 446 opt rejections: verdicts / first message / whole stderr | 428 / 399 / 381 | 433 / 406 / 388 |
+| verify on llvm/test's 806 (the samples and the rejections) | 791 verdicts, 744 whole stderr (this branch's first record) | 792, 747 |
+| verify on a fresh 999-file valid sample of llvm/test (not recorded) | 984 verdicts | 988 (AutoUpgrade's old intrinsic forms 7, debug-info warnings 2, a SPIR-V target warning, a template opt also rejects but with its own first message) |
 | verify on llvm/test's 300 valid, 200 rejection, 60 split samples | 300, 195, 59 verdicts | the same |
 | host LLVM tools a check needs | eval: clang (c, cpp); verify-check: opt; roundtrip: clang, llvm-as | none (records; the tools only to record) |
 

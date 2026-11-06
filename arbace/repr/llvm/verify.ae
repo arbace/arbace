@@ -91,6 +91,13 @@
 
 (def ^:private fp-bits '{half 16 bfloat 16 float 32 double 64 x86_fp80 80 fp128 128 ppc_fp128 128})
 
+(defn- alias-type
+  "A named type: LLParser's `%T = type X` with X no struct (`type ptr`, `type i32`) makes %T the type X itself (LL6:
+  llvm/test's pr33641_remove_arg_dbgvalue), so the alias is resolved; a struct's or an opaque type's name is kept."
+  [t]
+  (let [d (get *types* t)]
+    (if (and d (not= d 'opaque) (not (and (seq? d) ('#{struct packed} (first d))))) d t)))
+
 (defn norm-type
   "A type with LLParser's upgrades: a typed pointer (* T) is ptr, (* T N) and (ptr N) are (ptr N), (ptr 0) is ptr."
   [t]
@@ -101,7 +108,9 @@
                fn (list 'fn (norm-type (nth t 1)) (mapv #(if (= % '&) % (norm-type %)) (nth t 2)))
                (array vector vscale) (list (first t) (nth t 1) (norm-type (nth t 2)))
                (struct packed) (apply list (first t) (map norm-type (rest t)))
+               % (alias-type t)
                t)
+    (and (symbol? t) (nil? (namespace t)) (str/starts-with? (name t) "%")) (alias-type t)
     :else t))
 
 (defn- tstr ^String [t] (pr/type-str t))
@@ -403,9 +412,9 @@
     (let [n (aname a) v (second a)]
       (case n
         ("dereferenceable" "dereferenceable_or_null")
-        (when (and (string? v) (re-matches #"[0-9]+" v) (zero? (Long/parseLong v))) (verr :parser/attr-value "byte count specified must be non-zero" {:at [:attr-val n]}))
+        (when (and (string? v) (re-matches #"[0-9]+" v) (zero? (bigint v))) (verr :parser/attr-value "byte count specified must be non-zero" {:at [:attr-val n]}))
         "alignstack"
-        (when-let [k (and (string? v) (re-matches #"[0-9]+" v) (Long/parseLong v))]
+        (when-let [k (and (string? v) (re-matches #"[0-9]{1,18}" v) (Long/parseLong v))]
           (when-not (and (pos? k) (zero? (bit-and k (dec k)))) (verr :parser/attr-value "stack alignment is not a power of two" {:at [:attr-val n]})))
         "align"
         (do (when (and (integer? v) (pos? v) (not (zero? (bit-and (long v) (dec (long v)))))) (verr :parser/align "alignment is not a power of two" {:at [:attr-val-of n (str v)]}))
@@ -416,7 +425,7 @@
             (verr :parser/attr-value "'allocsize' indices can't refer to the same parameter"
                   {:at [:str (fn [toks] (let [i (first (keep-indexed (fn [i t] (when (= (:t t) "allocsize") i)) toks))] (when i (+ i 4))))]})))
         "initializes"
-        (let [nums (when (string? v) (mapv #(Long/parseLong %) (re-seq #"-?[0-9]+" v)))
+        (let [nums (when (string? v) (mapv bigint (re-seq #"-?[0-9]+" v)))
               prs (when nums (partition 2 nums))]
           (when (and prs (not (and (every? (fn [[lo hi]] (< lo hi)) prs)
                                    (every? (fn [[[_ a] [b _]]] (< a b)) (partition 2 1 prs)))))
@@ -771,7 +780,7 @@
     (walk x)))
 
 (defn- use-global [^Fn st x t]
-  (when-not (ptr-type? t) (verr :parser/global-type "global variable reference must have pointer type" {:at [:val {:text (pr/value-str x)}]}))
+  (when-not (or (ptr-type? t) (ptr-type? (resolve-type t))) (verr :parser/global-type "global variable reference must have pointer type" {:at [:val {:text (pr/value-str x)}]}))
   (let [k (global-key x)]
     (when-not (or (.containsKey *gdefs* k) (.containsKey *gfwd* k)) (.put *gfwd* k t))))
 
@@ -3151,7 +3160,8 @@
                       (let [r (result x) us (uses b)]
                         (doseq [[v t blk] us]
                           (when (and (local? v) (not= t 'label))
-                            (when (and r (= (local-key v) (local-key r)) (not= hd 'phi))
+                            ;; ... || !DT.isReachableFromEntry(BB): an unreachable block's instruction may use itself (LL6)
+                            (when (and r (= (local-key v) (local-key r)) (not= hd 'phi) ((:reach g) bi))
                               (verr :verifier/self-reference "Only PHI nodes may reference their own value!"))))
                         (doseq [[v t blk] us]
                           (when (and (local? v) (not= t 'label))
@@ -3282,6 +3292,20 @@
     (when (= (:dll o) :dllimport)
       (when-not (contains? #{nil :default} (:visibility o)) (verr :verifier/global "dllimport GlobalValue must have default visibility" me)))))
 
+(defn- null-value?
+  "Constant::isNullValue over a constant's form: zeroinitializer, null, 0, false, a floating-point +0.0 (decimal, or hex with
+  any kind prefix), and a vector, array or struct of null values (LLParser's ConstantAggregateZero)."
+  [v]
+  (cond
+    (#{'zeroinitializer 'null 0 false} v) true
+    (and (seq? v) (= 'fp (first v)) (string? (second v)))
+    (let [x ^String (second v)]
+      (or (boolean (re-matches #"0x[KLMHR]?0+" x))
+          (and (not (str/starts-with? x "-")) (boolean (re-matches #"[+]?[0-9.]+([eE][-+]?[0-9]+)?" x)) (zero? (Double/parseDouble x)))))
+    (and (seq? v) ('#{vector array struct packed} (first v)) (every? vector? (rest v)))
+    (every? #(null-value? (peek %)) (rest v))
+    :else false))
+
 (defn- check-global-variable
   "Verifier::visitGlobalVariable, then visitGlobalValue."
   [forms f]
@@ -3298,7 +3322,9 @@
                               (or (seq? y) (vector? y)) (doseq [z y] (walk z))))]
         (walk init))
       (when (= (:linkage o) :common)
-        (when-not (#{'zeroinitializer 'null 0 false} init) (verr :verifier/global "'common' global must have a zero initializer!" :global))
+        ;; Constant::isNullValue (LL6): +0.0 too, and an aggregate of null values (LLParser makes it a ConstantAggregateZero)
+        (when-not (null-value? init)
+          (verr :verifier/global "'common' global must have a zero initializer!" :global))
         (when (:constant o) (verr :verifier/global "'common' global may not be marked constant!" :global))
         (when (:comdat o) (verr :verifier/global "'common' global may not be in a Comdat!" :global))))
     (when (#{"llvm.global_ctors" "llvm.global_dtors"} k)
@@ -3320,7 +3346,7 @@
           (when-not (and (seq? init) (= 'array (first init)))
             (verr :verifier/global "wrong initializer for intrinsic global variable" (pr/typed-str [t init])))
           (doseq [[et v] (rest init)]
-            (let [v (loop [v v] (if (and (seq? v) ('#{bitcast addrspacecast getelementptr} (first v))) (recur (second (second (strip-flags (rest v))))) v))]
+            (let [v (loop [v v] (if (and (seq? v) ('#{bitcast addrspacecast getelementptr} (first v))) (recur (if (= 'getelementptr (first v)) (second (second (strip-flags (rest v)))) (second (strip-flags (rest v))))) v))]
               (when-not (and (global? v) (#{:global :function :alias} (:kind (.get *gdefs* (global-key v)))))
                 (verr :verifier/global (str "invalid " k " member") (pr/typed-str [(norm-type et) v]))))))))
     (when (scalable? t) (verr :verifier/global "Globals cannot contain scalable types" :global))
@@ -3988,7 +4014,7 @@
       :else
       (let [[forms src spans] r]
         (try (diagnose forms src spans path)
-             (catch Throwable e ["invalid" (str (.getMessage e)) ":crash" ""]))))))
+             (catch Throwable e (when (System/getenv "REPR_LLVM_TRACE") (.printStackTrace e)) ["invalid" (str (.getMessage e)) ":crash" ""]))))))
 
 (defn verify-main
   "bin/repr-llvm verify FILE...: what opt -passes=verify prints for each invalid file; 1 when one is invalid."
