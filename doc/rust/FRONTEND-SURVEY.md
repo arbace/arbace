@@ -1252,7 +1252,7 @@ RFP19 (a) taken on `rust-rf9b` (from `rust-rf14`'s `fccc3d812`): RF9's classes o
 ported rule for rule from rustc 1.99.1 (`58cf8f9c3`) and proved on the samples and the registry crates against the helper's facts. Code:
 `arbace/rust/front/typeck.ae` (now 2,004 lines), small changes to `collect.ae` (std's structural types, the printer's binders, lifetime
 elision) and `lower.ae` (the `?` desugaring's residual path marked), and the helper (`tools/rsdump/front.rs`). Light: the samples' check
-about 30 s under 1.2 GB (it was 85 s before the evaluation cache), the crates' about 4 minutes under 1.7 GB (20 minutes before).
+about 30 s under 1.2 GB (it was 85 s before the evaluation cache), the crates' about 5 minutes under 1.9 GB (20 minutes before; above the night's 1.5 GiB cap).
 
 ### The solver (RFP17 (a): the old solver's paths, grown)
 
@@ -1320,7 +1320,7 @@ binders print their own `for<..>`). `test/rust/front/std-iface.sha256` re-pinned
 ### Results
 
 `bin/rust-front typeck-check` (the 90 programs): **11,139 of 11,173 facts (99.7 %), 81 programs whole** (RF9a: 10,768, 54 whole); the
-pipeline (`--ours`) 11,137. The registry crates (`--crates`, 49 crates): **CRATES** (RF9a: 21,922, 6 whole). The other judges unchanged:
+pipeline (`--ours`) 11,137. The registry crates (`--crates`, 49 crates): **23,636 of 23,722 facts (99.6 %), 27 crates whole** (RF9a: 21,922, 6 whole). The other judges unchanged:
 `expand-check` 92 of 92, `resolve-check` 5,594 of 5,594, `hir-check` 91 of 91, `collect-check` 1,189 of 1,191; the negative controls differ.
 
 Not taken yet (the classes of the facts left): closures' captures (the places and modes, which RF10 needs) and the full

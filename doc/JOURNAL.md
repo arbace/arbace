@@ -379,7 +379,7 @@ initializers, divergence and diverging fallback (`fallback.rs`), writeback's `fi
 right operand (`op.rs`), return-position impl Trait's hidden variable, anonymous constants as typeck roots, lifetime elision. The
 helper's `--std-iface` grew (trait objects' inherent impls, associated types' item bounds, constants, evaluated array lengths, bound
 regions by index and by binder); `test/rust/front/std-iface.sha256` re-pinned (RFP18 (a)). Results: samples 10,768 → 11,139 of 11,173
-facts (54 → 81 programs whole), the pipeline 11,137; crates 21,922 → CRATES of 23,722; the earlier judges unchanged (expand 92/92,
+facts (54 → 81 programs whole), the pipeline 11,137; crates 21,922 → 23,636 of 23,722 (6 → 27 crates whole); the earlier judges unchanged (expand 92/92,
 resolve 5,594/5,594, HIR 91/91, collect 1,189/1,191). The checks got faster (samples 85 s → 30 s, crates 20 → 5 minutes) through the
 per-body caches. Alternatives considered: porting `select.rs` whole (RFP17 (c)) or the next solver (RFS6); kept to RFP17 (a), growing
 the accepting paths as the facts asked. Proposed: RFP20 (closures' captures judged before RF10), RFP21 (RFP15 before RF10).
