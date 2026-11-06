@@ -98,6 +98,8 @@
 
 (defn- untyped? [ty] (t/untyped? ty))
 
+(defn- spread-call? [n] (boolean (or (:spread n) (:spread (peek (vec (:args n)))))))
+
 ;;; types/fmt.go's tconv in fmtGo mode, for the messages
 
 (declare type-str)
@@ -362,7 +364,7 @@
 (defn- node-prec [n]
   (case (:op n)
     :binary (get bin-prec (str (:go/op n)) 5)
-    :addr (if (= :lit (:op (:x n))) 8 7)
+    :addr (if (= :lit (:op (:x n))) 0 7)
     (get prec (:op n) 8)))
 
 (defn- const-str [n]
@@ -396,7 +398,7 @@
                  (and l (or (= :slice (kind ty)) (not (untyped? (node-type l)))))
                  (str "make(" (type-str ty) ", " (fmt-node l 0) ")")
                  :else (str "make(" (type-str ty) ")")))
-      (str b "(" (args-str args) (when (:spread n) "...") ")"))))
+      (str b "(" (args-str args) (when (spread-call? n) "...") ")"))))
 
 (defn fmt-node
   "exprFmt: node n as gc's %v of its IR prints it, at precedence p."
@@ -440,7 +442,7 @@
                 :builtin (builtin-str n)
                 (let [c (:callee n)
                       args (:args n)]
-                  (str (fmt-node c np) "(" (args-str args) (when (:spread n) "...") ")")))
+                  (str (fmt-node c np) "(" (args-str args) (when (spread-call? n) "...") ")")))
         :result (fmt-node (:call n) p)
         :unary (str (:go/op n) (when (= (:op (:x n)) :unary) " ") (fmt-node (:x n) (inc (long np))))
         :recv (str "<-" (fmt-node (:x n) (inc (long np))))
@@ -505,17 +507,22 @@
     (concat (add-string-list (:x n)) [(:y n)])
     [n]))
 
-(defn- closure-expr [e k n]
+(defn- closure-expr
+  "OCLOSURE: the literal's record spilled; a closure (a literal that captures a variable,
+  Func.IsClosure) walked here, in its enclosing function's batch, its captured variables marked;
+  a literal that captures none is a function of its own, analyzed in an earlier batch."
+  [e k n]
   (let [f (fn-of-node n)
         k (spill e k n)]
     (vswap! (:closures (eb e)) conj [k n])
-    (doseq [cv (fn-get f :closure-vars)]
-      (let [l (old-loc e cv)]
-        (when-not (lget l :captured)
-          (lset! l :captured true)
-          (when (= (long (lget l :loop-depth)) (depth e))
-            (lset! l :reassigned false)))))
-    (walk-func! (eb e) f)))
+    (when (fn-get f :closure?)
+      (doseq [cv (fn-get f :closure-vars)]
+        (let [l (old-loc e cv)]
+          (when-not (lget l :captured)
+            (lset! l :captured true)
+            (when (= (long (lget l :loop-depth)) (depth e))
+              (lset! l :reassigned false)))))
+      (walk-func! (eb e) f))))
 
 (defn- method-value [e k n]
   (let [closure-k (spill e k n)
@@ -625,6 +632,7 @@
         (> (align ty) 8) "too aligned for stack"
         (and (or (and (= :call (:op n)) (= "new" (:builtin n))) (and (= :addr (:op n)) (= :lit (:op (:x n)))))
              (> (size (elem ty)) (* 64 1024))) "too large for stack"
+        (and (= :method (:op n)) (> (+ 8 (size (node-type (method-recv n)))) (* 64 1024))) "too large for stack"
         (and (= :call (:op n)) (= "make" (:builtin n)) (= :slice (kind ty)))
         (let [[l c] (rest (:args n))
               r (or c l)
@@ -727,7 +735,8 @@
     (if (empty? vs)
       acc
       (let [v (first vs)]
-        (if (= :nil (:op v))
+        (if (let [v (loop [v v] (if (= :conv (:op v)) (recur (:x v)) v))]
+              (or (= :nil (:op v)) (= :untyped-nil (node-type v))))
           (recur (rest vs) acc)
           (if-let [c (static-callee v)]
             (if (seq (fn-get c :uintptr-pragmas))
@@ -741,7 +750,7 @@
   [n sig]
   (let [[_ ps _ variadic] (under sig)
         args (vec (:args n))]
-    (if (and variadic (not (:spread n)))
+    (if (and variadic (not (spread-call? n)))
       (let [vi (dec (count ps))
             extra (subvec args (min vi (count args)))
             st (nth ps vi)]
@@ -812,7 +821,7 @@
                          (tee-hole e [appendee-k (k-deref (heap-hole e))])
                          appendee-k)]
         (argument e appendee-k s)
-        (if (:spread n)
+        (if (spread-call? n)
           (let [a (nth args 1)
                 ak (if (and (= :slice (kind (node-type a))) (has-pointers? (elem (node-type a))))
                      (k-deref (heap-hole e))
@@ -887,6 +896,7 @@
                         (e/obj {:kind :var :name ".autotmp" :line (or (:line a) (:line n)) :type (node-type a)
                                 :esc-class :auto})))
             _ (doseq [o tmps] (dcl! e (new-loc e o true)))
+            _ (doseq [[o [_ a]] (map vector tmps visits)] (.put ^java.util.HashMap (:single-def *ctx*) o a))
             ;; the assignment tmps = args (OAS2, each tmp's Defn)
             _ (doseq [[o [_ a]] (map vector tmps visits)]
                 (expr e (hole (old-loc e o)) a))
@@ -897,13 +907,14 @@
                              (assoc-in c [:callee ::recv-node] ln)
                              (assoc-in c path ln))))
                        c (map vector tmps visits))
-            wf (volatile! {:node ::wrapper :parent f :closure? true :wrapper true :params [] :results [] :recv nil
+            wf (volatile! {:node ::wrapper :parent f :closure? (boolean (seq tmps)) :wrapper true :params [] :results [] :recv nil
                            :param-types [] :sig [:func [] [] false] :esc :planned :closure-vars tmps
                            :line (:line n) :body [{:op :expr :x c2 :line (:line n)}]})
             clo {:op :fn :wrapper true :line (:line n) :type [:func [] [] false]}]
         (.put ^java.util.IdentityHashMap (:fn-of-node *ctx*) clo wf)
         (doseq [o tmps] (.put ^java.util.HashMap (:owner *ctx*) o f))
-        (closure-expr e k clo)))))
+        (closure-expr e k clo)
+        (when-not (seq tmps) (walk-func! (eb e) wf))))))
 
 ;;; Assignments (assign.go)
 
@@ -943,18 +954,6 @@
     (:place-index :index) (when (= :array (kind (node-type (:x n)))) (outer-name (:x n)))
     nil))
 
-(defn- same-safe-expr?
-  "ir.SameSafeExpr."
-  [l r]
-  (and (= (:op l) (:op r))
-       (case (:op l)
-         (:local :place-local :global :place-global) (identical? (:obj l) (:obj r))
-         (:sel) (and (= (:field-name l) (:field-name r)) (= (:deref l) (:deref r)) (same-safe-expr? (:x l) (:x r)))
-         (:deref :place-deref) (same-safe-expr? (:x l) (:x r))
-         (:index :place-index) (and (same-safe-expr? (:x l) (:x r)) (same-safe-expr? (:index l) (:index r)))
-         (:const) (= (:val l) (:val r))
-         false)))
-
 (defn- norm-place [n]
   (case (:op n)
     :place-local (assoc n :op :local)
@@ -964,6 +963,19 @@
     :place-deref (assoc n :op :deref)
     :place-map (assoc n :op :map-index)
     n))
+
+(defn- same-safe-expr?
+  "ir.SameSafeExpr."
+  [l r]
+  (let [l (norm-place l) r (norm-place r)]
+  (and (= (:op l) (:op r))
+       (case (:op l)
+         (:local :place-local :global :place-global) (identical? (:obj l) (:obj r))
+         (:sel) (and (= (:field-name l) (:field-name r)) (= (:deref l) (:deref r)) (same-safe-expr? (:x l) (:x r)))
+         (:deref :place-deref) (same-safe-expr? (:x l) (:x r))
+         (:index :place-index) (and (same-safe-expr? (:x l) (:x r)) (same-safe-expr? (:index l) (:index r)))
+         (:const) (= (:val l) (:val r))
+         false))))
 
 (defn- may-affect-memory? [n]
   (cond
@@ -1011,11 +1023,28 @@
 (defn- fmt-stmt-assign [dsts srcs]
   (str (str/join ", " (map #(fmt-node (norm-place %) 0) dsts)) " = " (str/join ", " (map #(fmt-node % 0) srcs))))
 
+(defn- comma-ok-temps
+  "typecheck's assignments of a comma-ok value (v, ok = x.(T), m[k], <-c) to a destination of
+  another type: through an autotmp of the value's type (tmp, ok = x.(T); v = tmp), the
+  conversion of the temporary in the value's place. [rhs pre]: pre the temporary's assignment."
+  [e rhs]
+  (let [r (first rhs)]
+    (if (and (= 2 (count rhs)) (#{:convert-iface :conv} (:op r)) (:comma-ok (:x r)))
+      (let [x (:x r)
+            o (e/obj {:kind :var :name (str ".autotmp_" (count @(:all-locs (eb e)))) :line (or (:line x) (:line @e))
+                      :type (node-type x) :esc-class :auto})
+            l (new-loc e o true)]
+        (dcl! e l)
+        (expr e (hole l) x)
+        (assoc (vec rhs) 0 (assoc r :x {:op :local :obj o :type (node-type x) :mode :variable :line (:line x)})))
+      rhs)))
+
 (defn assign-list
   "escape.assignList: dsts (places, objects' holes given by addr-of) from srcs; where: the
   statement, {:defn #{objs defined by it} :range bool}."
   [e dsts srcs where]
-  (let [ks (mapv #(if (instance? arbace.lang.IPersistentMap %) (if (:dst %) % (addr-of e %)) (addr-of e %)) dsts)]
+  (let [srcs (comma-ok-temps e srcs)
+        ks (mapv #(if (instance? arbace.lang.IPersistentMap %) (if (:dst %) % (addr-of e %)) (addr-of e %)) dsts)]
     (doseq [[i k] (map-indexed vector ks)]
       (let [src (nth srcs i nil)
             dst (nth dsts i)
@@ -1462,6 +1491,41 @@
               (warn! (lget l :line) (if (:append n) "append does not escape" (str (fmt-node n 0) " does not escape")))))))))
   nil)
 
+(defn- literal-of
+  "A node's static value when it is a constant: the constant node, else nil."
+  [n]
+  (let [v (static-value n)]
+    (when (and (const? v) (not= :nil (:op v)) (not= :untyped-nil (node-type v))) v)))
+
+(defn- rewrite-with-literals!
+  "batch.rewriteWithLiterals: a make's non-constant size whose static value is a constant (or
+  the len of a slice literal), an interface conversion's operand whose static value is one,
+  replaced by the literal (in the location's node, which the messages print)."
+  [l]
+  (let [n (lget l :n)]
+    (when (and (map? n) (not (name-loc? l)))
+      (cond
+        (and (= :call (:op n)) (= "make" (:builtin n)) (= :slice (kind (node-type n))))
+        (let [args (vec (:args n))
+              ri (if (> (count args) 2) 2 1)
+              r (nth args ri nil)]
+          (when (and r (not (const? r)))
+            (let [s (static-value r)]
+              (cond
+                (and (const? s) (integer? (:val s)) (>= (long (:val s)) 0))
+                (lset! l :n (assoc-in n [:args ri] {:op :const :mode :constant :type (node-type r) :val (:val s) :line (:line r)}))
+                (and (= :call (:op s)) (= "len" (:builtin s)))
+                (let [x (static-value (first (:args s)))]
+                  (when (and (= :lit (:op x)) (= :slice (:kind x)))
+                    (lset! l :n (assoc-in n [:args ri] {:op :const :mode :constant :type :int :val (count (:elems x)) :line (:line r)}))))
+                :else nil))))
+        (or (= :convert-iface (:op n)) (and (= :conv (:op n)) (= :iface (conv-kind n))))
+        (let [x (:x n)]
+          (when (and (not (const? x)) (not (iface? (node-type x))))
+            (when-let [v (literal-of x)]
+              (lset! l :n (assoc n :x (assoc v :type (node-type x) :form nil))))))
+        :else nil))))
+
 (defn- batch! [fns]
   (let [b (new-batch)]
     (doseq [f fns] (init-func! b f))
@@ -1470,6 +1534,8 @@
     (doseq [[k clo] @(:closures b)]
       (flow-closure b k clo))
     (vreset! (:closures b) [])
+    (doseq [l @(:all-locs b)]
+      (rewrite-with-literals! l))
     (doseq [l @(:all-locs b)]
       (let [n (lget l :n)]
         (when (and n (not (name-loc? l)))
@@ -1480,6 +1546,160 @@
             (flow (with-fn b (lget l :curfn)) (k-addr (heap-hole (with-fn b (lget l :curfn)))) l)))))
     (walk-all! b)
     (finish! b fns)))
+
+;;; Devirtualization (devirtualize/devirtualize.go's StaticCall, with go1.26's improved
+;;; concrete type analysis): an interface method call whose receiver's concrete type is known
+;;; statically becomes a call of the concrete type's method, before escape analysis
+
+(defn- method-obj-data [m]
+  (if (map? m) m
+      {:name (e/o m :name) :pkg (when-not (t/exported? (e/o m :name)) (e/o m :pkg))
+       :type (or (e/o m :type) [:func [] [] false]) :ptr-recv (e/o m :ptr-recv) :obj m}))
+
+(defn- iface-assignments
+  "devirtualize.State.analyze over a function's tree: for each local variable of interface type,
+  its assignments: a node (its value), a type (a concrete value of that type), or nil (unknown)."
+  [tree]
+  (let [acc (java.util.HashMap.)
+        add! (fn [o v]
+               (when (and o (e/o o :local?) (not= "_" (e/o o :name)) (iface? (e/o o :type)))
+                 (let [v (cond
+                           (and (vector? v) (= ::type (first v))) (if (iface? (second v)) nil v)
+                           :else v)]
+                   (when-not (and (map? v) (or (= :nil (:op v)) (= :untyped-nil (node-type v))))
+                     (.put acc o (conj (or (.get acc o) []) v))))))
+        place-obj (fn [p] (when (and (map? p) (#{:place-local :local} (:op p))) (:obj p)))
+        result-type (fn [c i] (let [ty (node-type (:callee c))]
+                                (when (and (vector? (under ty)) (= :func (nth (under ty) 0)))
+                                  (nth (nth (under ty) 2) i nil))))
+        assign-pairs (fn [objs rhs]
+                       (cond
+                         (and (= 1 (count rhs)) (> (count objs) 1))
+                         (let [r (first rhs)]
+                           (cond
+                             (= :call (:op r)) (doseq [[i o] (map-indexed vector objs)] (add! o [::type (result-type r i)]))
+                             (= :assert (:op r)) (do (add! (first objs) r) (add! (second objs) nil))
+                             :else (do (add! (first objs) [::type (node-type r)]) (add! (second objs) nil))))
+                         (and (= 2 (count rhs)) (:comma-ok (first rhs)))
+                         (let [r (first rhs)]
+                           (if (= :assert (:op r))
+                             (add! (first objs) r)
+                             (add! (first objs) [::type (node-type r)]))
+                           (add! (second objs) nil))
+                         :else
+                         (doseq [[o r] (map vector objs rhs)]
+                           (if (and (= :call (:op r)) (not= :builtin (:kind r)) (not (:comma-ok r)))
+                             (add! o [::type (result-type r 0)])
+                             (if (and (= :result (:op r)))
+                               (add! o [::type (node-type r)])
+                               (add! o r))))))]
+    (letfn [(walk [x]
+              (cond
+                (map? x)
+                (do (case (:op x)
+                      :decl (when (seq (:init x)) (assign-pairs (:objs x) (:init x)))
+                      :assign (assign-pairs (mapv place-obj (:lhs x)) (:rhs x))
+                      :range (let [xt (node-type (:x x))
+                                   xt (if (and (t/pointer? xt) (= :array (kind (elem xt)))) (elem xt) xt)
+                                   [ko vo] (or (:objs x) (mapv place-obj (:places x)))]
+                               (case (kind xt)
+                                 (:array :slice) (do (add! ko nil) (add! vo [::type (elem xt)]))
+                                 :chan (add! ko [::type (elem xt)])
+                                 :map (do (add! ko [::type (nth (under xt) 1)]) (add! vo [::type (elem xt)]))
+                                 (do (add! ko nil) (add! vo nil))))
+                      :type-switch (doseq [cl (:clauses x)] (when (:var cl) (add! (:var cl) (:x x))))
+                      nil)
+                    (doseq [[_ v] x] (walk v)))
+                (sequential? x) (doseq [v x] (walk v))
+                :else nil))]
+      (walk tree))
+    acc))
+
+(defn- concrete-type
+  "devirtualize.concreteType: the one concrete type n's value can have, or nil."
+  [^java.util.HashMap asg n]
+  (letfn [(ct [n seen]
+            (let [n (loop [n n]
+                      (cond
+                        (not (iface? (node-type n))) n
+                        (= :convert-iface (:op n)) (recur (:x n))
+                        (and (= :conv (:op n)) (#{:iface :nop} (conv-kind n))) (recur (:x n))
+                        (= :assert (:op n)) (recur (:x n))
+                        :else n))]
+              (cond
+                (not (iface? (node-type n))) (node-type n)
+                (not= :local (:op n)) nil
+                :else
+                (let [o (:obj n)]
+                  (cond
+                    (or (not (e/o o :local?)) (#{:param :result} (e/o o :esc-class)) (e/o o :param?) (e/o o :result?)
+                        (e/o o :addressed?)) nil
+                    (contains? @seen o) ::none
+                    :else
+                    (do (vswap! seen conj o)
+                        (loop [vs (seq (.get asg o)) typ nil]
+                          (if (empty? vs)
+                            (or typ ::none)
+                            (let [v (first vs)
+                                  t (cond (nil? v) nil
+                                          (vector? v) (second v)
+                                          :else (ct v seen))]
+                              (cond
+                                (= ::none t) (recur (rest vs) typ)
+                                (nil? t) nil
+                                (and typ (not (t/same? typ t))) nil
+                                :else (recur (rest vs) t)))))))))))]
+    (let [r (ct n (volatile! #{}))]
+      (when-not (= ::none r) r))))
+
+(defn- devirtualize
+  "A function's tree with its devirtualizable interface calls made method calls (StaticCall),
+  each reported: devirtualizing x.M to T (partially, when T's method is an embedded interface's)."
+  [tree]
+  (let [asg (iface-assignments tree)]
+    (binding [t/*method-obj* method-obj-data]
+      (letfn [(dv [x godefer]
+                (cond
+                  (map? x)
+                  (let [x (if (contains? #{:go :defer} (:op x))
+                            (assoc x :call (dv-call (:call x) true))
+                            (into (empty x) (map (fn [[k v]] [k (dv v false)])) x))]
+                    (if (and (= :call (:op x)) (= :iface (:kind x)) (not godefer))
+                      (dv-call x false)
+                      x))
+                  (vector? x) (if (and (seq x) (map? (first x))) (mapv #(dv % false) x) x)
+                  :else x))
+              (dv-call [c godefer]
+                (let [c (if (map? c) (into (empty c) (map (fn [[k v]] [k (dv v false)])) c) c)]
+                  (if (or godefer (not= :iface (:kind c)))
+                    c
+                    (let [sel (:callee c)
+                          x (:recv sel)
+                          typ (concrete-type asg x)
+                          mname (:name (:method sel))
+                          mpkg (:pkg (:method sel))]
+                      (if (and typ (nil? (t/missing-method typ (node-type x) false)))
+                        (let [r (t/lookup typ false mname mpkg)
+                              dt {:op :assert :x x :to typ :type typ :mode :value :line (:line c) :devirt true}
+                              selstr (str (fmt-node x 8) "." mname)]
+                          (case (:kind r)
+                            :method
+                            (let [m (:obj r)
+                                  ptr (boolean (e/o m :ptr-recv))
+                                  [_ isptr] (t/deref-type typ)
+                                  adj (cond (and ptr (not (:indirect r))) :addr
+                                            (and (not ptr) (:indirect r) (= 1 (count (:index r))) isptr) :deref
+                                            :else nil)]
+                              (warn! (:line c) (str "devirtualizing " selstr " to " (type-str typ)))
+                              (assoc c :kind :method
+                                     :callee {:op :method :method m :recv dt :recv-adjust adj :path (:index r) :via (:via r)
+                                              :recv-type typ :type (e/o m :type) :mode :value :line (:line sel)}))
+                            :iface-method
+                            (do (warn! (:line c) (str "partially devirtualizing " selstr " to " (type-str typ)))
+                                (assoc c :callee (assoc sel :recv (select-node dt (field-steps typ (pop (vec (:index r))) nil) (:line c)))))
+                            c))
+                        c)))))]
+        (dv tree false)))))
 
 ;;; The package: its functions, their declarations, closures and captured variables
 
@@ -1503,11 +1723,10 @@
                  (when-let [o (outer-name place)]
                    (when (.containsKey sd o)
                      (when-not defn? (.put sd o ::none)))
-                   (when (and (not defn?) (func-typed? o) (.containsKey fa o))
-                     (let [v (.get fa o)]
-                       (when (not= ::none v)
-                         (.put fa o (conj v ::assign)))))))]
+                   (when (and (not defn?) (func-typed? o) (.containsKey fa o) (not= :place-local (:op place)))
+                     (.put fa o ::none))))]
     (doseq [o (fn-get f :params)] (when o (.put sd o ::none)))
+    (doseq [o @dcl] (.put owner o f))
     (letfn [(walk [x]
               (cond
                 (map? x)
@@ -1535,14 +1754,25 @@
                                     :else nil))))
                             (walk (:init x)))
                   :range (do (doseq [o (:objs x)] (declare! o))
-                             (doseq [p (:places x)] (prune! p false))
+                             (doseq [p (:places x)] (prune! p false)
+                               (when-let [o (outer-name p)] (when (.containsKey fa o) (.put fa o ::none))))
                              (doseq [[_ v] x] (walk v)))
                   :type-switch (do (doseq [cl (:clauses x)] (declare! (:var cl)))
                                    (doseq [[_ v] x] (walk v)))
                   (:local :place-local) (vswap! refs conj (:obj x))
-                  :assign (do (doseq [p (:lhs x)] (when (map? p) (prune! p false)))
-                              (doseq [[_ v] x] (walk v)))
-                  (:op-assign :incdec) (do (prune! (:place x) false) (doseq [[_ v] x] (walk v)))
+                  :assign (let [lhs (:lhs x) rhs (:rhs x)]
+                            (doseq [[i p] (map-indexed vector lhs)]
+                              (when (map? p)
+                                (prune! p false)
+                                (when-let [o (when (= :place-local (:op p)) (:obj p))]
+                                  (when (and (func-typed? o) (.containsKey fa o) (not= ::none (.get fa o)))
+                                    (.put fa o (if (and (= 1 (count lhs)) (= 1 (count rhs)))
+                                                 (conj (.get fa o) (first rhs))
+                                                 ::none))))))
+                            (doseq [[_ v] x] (walk v)))
+                  (:op-assign :incdec) (do (prune! (:place x) false)
+                                           (when-let [o (outer-name (:place x))] (when (.containsKey fa o) (.put fa o ::none)))
+                                           (doseq [[_ v] x] (walk v)))
                   (doseq [[_ v] x] (walk v)))
                 (sequential? x) (doseq [v x] (walk v))
                 :else nil))]
@@ -1568,7 +1798,8 @@
                             (conj acc o)
                             acc)))
                       [] all)]
-      (fn-set! f :closure-vars cvs))))
+      (fn-set! f :closure-vars cvs)
+      (fn-set! f :closure? (boolean (seq cvs))))))
 
 (defn- all-fns [f] (cons f (mapcat all-fns (fn-get f :kids))))
 
@@ -1632,6 +1863,7 @@
                    :func-assigns (java.util.HashMap.)
                    :temps (java.util.IdentityHashMap.)}]
     (let [decls (filter #(and (= :func (:kind %)) (:obj %)) (:decl-infos r))
+          decls (mapv (fn [d] (if (:tree d) (update d :tree devirtualize) d)) decls)
           fns (vec (for [d decls
                          :let [tree (:tree d)
                                o (:obj d)
@@ -1644,7 +1876,10 @@
                      (let [recv (:recv tree)
                            rtys (nth (under sig) 2)
                            f (volatile! {:node tree :obj o :name (e/o o :name) :parent nil :closure? false
-                                         :recv recv :recv-type (when recv (e/o recv :type))
+                                         :recv recv :recv-type (or (when recv (e/o recv :type))
+                                                         (when (:method d)
+                                                           (let [rn (e/o o :recv-named)]
+                                                             (if (e/o o :ptr-recv) [:pointer rn] rn))))
                                          :params (vec (:params tree)) :param-types (vec (nth (under sig) 1))
                                          :results (vec (map-indexed (fn [i r] (or (:obj r) (when (e/obj? r) r)
                                                                                   (e/obj {:kind :var :name (str "~r" i) :line (:line tree) :type (nth rtys i nil)})))
@@ -1674,5 +1909,5 @@
                                   (e/obj {:kind :var :name nm :line (or (:line (meta s)) (fn-get f :line))}))))))]
           (fn-set! f :tags (into {} (map-indexed (fn [i ty] [i (param-tag nil f (nth params i nil) ty)]) (nth sig 1))))))
       (doseq [blk (bottom-up (vec (remove #(fn-get % :extern) fns)))]
-        (batch! (vec (mapcat all-fns blk)))))
+        (batch! blk)))
     (vec (sort-by first (distinct @*msgs*)))))
