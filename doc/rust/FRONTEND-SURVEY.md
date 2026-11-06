@@ -1345,3 +1345,9 @@ miss is now small and scattered; the judge's corpus (RFP14's UI suite and the cr
   `--resolve` extended to every local file), so the pipeline (`--ours`) runs on the registry crates and every RF4-RF9 judge sees real
   multi-file crates, then RF10**; (b) RF10 first on the samples, RFP15 after. *Recommended: (a)*: a few days at most, and RF10's MIR
   judge is better fed by crates than by the 90 samples alone.
+
+## Decided (2026-11-06, the user: RFP20, RFP21)
+
+- **RFP20 (a):** the helper's `--typeck` gains each closure's kind and captures, and rustc's capture analysis is ported in full, judged
+  fact by fact before RF10 reads it.
+- **RFP21 (a):** RFP15 (loading `mod m;` files through expansion, resolution, lowering and collection) comes before RF10.
