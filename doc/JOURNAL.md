@@ -441,3 +441,7 @@ Each branch's doc records it.
   constants read as integers (`2i`); a declaration holding `#include`s between its statements is no longer refused at the print.
   `bin/repr-c roundtrip --only`: 24 of the 26 `objects-macro-body` files and 18_include and infback pass; a 131-file sample passes
   but its known; print deferred 78 to 51. Left: CS275 (a)'s self-including files at the print (a family's inactive groups as text).
+- **CS275 (a)'s second half** (doc/C23-SURVEY.md, CDF.8): every `read-c` binds the preprocessor's `*reentry*`, the converter no
+  longer refuses a self-including file, and an executed conditional family's groups the main pass skipped are kept as their text
+  (`c/directive`), so the print's own second pass takes them. The six self-including files pass the round trip's four levels;
+  print deferred 51 to 45. 95_bitfields at eval left (its copy's `#pragma pack` is no form): CS278 proposed.

@@ -4862,3 +4862,24 @@ exit 0, 26 recorded failures pass), `test/c/run/va-arg-pack.c` (ci-run `:count` 
   and infback pass. A sample of 131 files (all of tcc-tests2, every 40th of torture-execute and these) passes but the known.
   Print deferred: 78 to 51. `test/repr/c/roundtrip-known.edn` and `test/c/divergences-print.edn` updated; the results file
   (`roundtrip-results.edn`) is the night's `--record`.
+
+### CDF.8 CS275 (a)'s second half: a self-including file at the print (2026-11-06)
+
+`arbace.repr.c/read-c` binds the preprocessor's `*reentry*` for every read (the token and tree checks call the preprocessor and
+the parser directly and keep cc's single file), so the converter no longer refuses a file that includes itself: the re-entered
+copy is a file of its own (`MAIN#again`), its top-level items the unit of the `#include` that entered it, a body's `#include` of
+itself placed among the statements (CDF.7). The print keeps what the copy's pass needs: `place-directives!` gives each group of
+an executed conditional family that the main pass skipped as a `c/directive` holding the group's lines (the text between the
+family's two lines), placed with its family; the print writes it back verbatim, so the print's own re-entered pass takes it as
+the original's did, and the reread places the same text (level 1 equal). `bin/repr-c roundtrip --only`: the six self-including
+files (vprintf-1, vfprintf-1, vprintf-chk-1, vfprintf-chk-1, 20040629-1, 95_bitfields) pass the four levels; the class
+`self-include` is a guard class. Print deferred: 51 to 45.
+
+Left: 95_bitfields at eval: its packed tests take `#pragma pack(push,1)` inside the re-entered copy, inside `main`'s body; a
+directive of the copy is no form (the main file's directives alone are placed), so the checker lays them out unpacked. The fix
+is the copy's own `#pragma pack` records placed among the body's items it brought in (under `*include-inside*`), by token
+sequence rather than by the main file's offsets: CS278 below.
+
+- **CS278 A re-entered copy's directives at eval.** Options: (a) the preprocessor records the copy's `pragma` directives by
+  token sequence, and block-items puts a `c/pragma` form before the first kept item after it (ci's read only); (b) the class
+  `read` for 95_bitfields. Cost: (a) half a day; (b) none. *Recommended: (a)*, after the tag.
