@@ -432,7 +432,35 @@
       :opaque (some (fn [cl] (when (and (= :proj (first cl)) (= ad (second cl))) (nth cl 3))) (second self))
       nil)))
 
+(defn- resolve-vars
+  "A type with its bound variables replaced by their values, nothing normalized"
+  [t]
+  (cond (tvar? t) (if-let [v (:val (get @*vars* (nth t 2)))] (resolve-vars v) t)
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (resolve-vars %) (map? %) (into {} (for [[k v] %] [k (resolve-vars v)])) :else %) (rest t)))
+        (vector? t) (mapv resolve-vars t)
+        :else t))
+
+(defn- raw-var?
+  "An unbound variable in a resolved type"
+  [t]
+  (cond (tvar? t) true
+        (vector? t) (boolean (some #(cond (vector? %) (raw-var? %) (map? %) (some raw-var? (vals %)) :else false) t))
+        :else false))
+
+(def ^:dynamic *norm-cache* nil)   ; atom: a body's projections without variables, normalized
+
+(declare normalize*)
+
 (defn normalize
+  "normalize* with a body's cache of the projections that have no variables (their normal form is fixed)"
+  [t]
+  (let [t (resolve-vars t)]
+    (if (and *norm-cache* (not (raw-var? t)))
+      (or (get @*norm-cache* t)
+          (let [r (normalize* t)] (when-not (raw-var? (resolve-vars r)) (swap! *norm-cache* assoc t r)) r))
+      (normalize* t))))
+
+(defn normalize*
   "A projection <T as Trait<..>>::Name normalized through the impl that selection finds (its associated type's value),
   a rigid projection (a parameter's) left as it is; FnOnce::Output of a callable by its signature"
   [t]
@@ -961,6 +989,17 @@
 
 (declare param-fn-bound fn-traits solve-obligations!)
 
+(defn- check-args!
+  "check_argument_types: each argument checked with its formal input type (the expectation's when it has one) and
+  coerced to it, the closures last, after select_obligations_where_possible (their signatures deduced from what the other
+  arguments decided)"
+  [args]
+  (doseq [closures? [false true]]
+    (when closures? (solve-obligations!))
+    (doseq [[a ty xi] args :when (= closures? (= :closure (:kind a)))]
+      (let [at (check-expr a (or (when (and xi (not (tvar? (shallow xi)))) xi) ty))]
+        (when ty (coerce! a at ty))))))
+
 (defn- check-call [e expected]
   (let [callee (:func e)
         ft (shallow (check-expr callee nil))]
@@ -973,19 +1012,16 @@
                                    r (when (unify output expected) (mapv deep inputs))]
                                (rollback! sn)
                                r))]
-               (doseq [[a ty xi] (map vector (:args e) (concat inputs (repeat nil)) (concat exp-ins (repeat nil)))]
-                 (let [at (check-expr a (or (when (and xi (not (tvar? (shallow xi)))) xi) ty))] (when ty (let [ok (coerce! a at ty)] (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "arg" (second ft) ok (deep at) (deep ty))))))))
+               (check-args! (map vector (:args e) (concat inputs (repeat nil)) (concat exp-ins (repeat nil))))
                (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "call" (second ft) (deep output) (shallow output))))
                output)
       ;; a closure's own signature (deferred call resolution), the callee autoref'd (its kind taken as Fn)
       :closure (let [{:keys [inputs output]} (nth ft 2)]
                  (adjust! (:func e) [["Borrow" [:ref [:re-erased] false ft]]])
-                 (doseq [[a ty] (map vector (:args e) (concat inputs (repeat nil)))]
-                   (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
+                 (check-args! (map vector (:args e) (concat inputs (repeat nil))))
                  output)
       :fnptr (let [{:keys [inputs output]} (second ft)]
-               (doseq [[a ty] (map vector (:args e) (concat inputs (repeat nil)))]
-                 (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
+               (check-args! (map vector (:args e) (concat inputs (repeat nil))))
                (erase output))
       ;; try_overloaded_call_traits: a parameter with a Fn bound, a trait object of one, through its reference (the callee
       ;; autoref'd for Fn and FnMut)
@@ -1010,8 +1046,7 @@
             (adjust! (:func e) (vec (concat (for [x (rest (take (inc i) steps))] ["Deref" x])
                                             (case trn "core::ops::function::Fn" [["Borrow" [:ref [:re-erased] false st]]]
                                                   "core::ops::function::FnMut" [["Borrow" [:ref [:re-erased] true st]]] []))))
-            (doseq [[a ty] (map vector (:args e) (concat ins (repeat nil)))]
-              (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
+            (check-args! (map vector (:args e) (concat ins (repeat nil))))
             (or out [:unknown]))
           (do (doseq [a (:args e)] (check-expr a nil)) [:unknown]))))))
 
@@ -1050,6 +1085,14 @@
             at (fn [i] (when (< i n) (char (aget cps (int i)))))
             skip-ws (fn [i] (loop [i i] (if (and (< i n) (Character/isWhitespace (char (at i)))) (recur (inc i)) i)))
             i (loop [i off] (cond (= "move" (String. cps (int i) (int (min 4 (- n i))))) (recur (skip-ws (+ i 4)))
+                                  ;; an outer attribute (`#[allow(unused)] || ..`): not the closure's declaration
+                                  (and (= \# (at i)) (= \[ (at (inc i))))
+                                  (recur (skip-ws (loop [j (+ i 2) depth 1]
+                                                    (let [ch (at j)]
+                                                      (cond (nil? ch) j
+                                                            (= ch \[) (recur (inc j) (inc depth))
+                                                            (= ch \]) (if (= 1 depth) (inc j) (recur (inc j) (dec depth)))
+                                                            :else (recur (inc j) depth))))))
                                   (= "async" (String. cps (int i) (int (min 5 (- n i))))) (recur (skip-ws (+ i 5)))
                                   :else i))
             end (if (= \| (at (inc i)))
@@ -1123,6 +1166,11 @@
                      :else nil))
       nil)))
 
+(defn- castable-lit?
+  "An operand ExpectCastableToType reaches as a literal's expectation: a literal, under unary minus or not"
+  [x]
+  (case (:kind x) :lit true :unary (and (#{"-" "!"} (:op x)) (castable-lit? (:expr x))) false))
+
 (defn check-expr
   "check_expr_with_expectation: E's type (recorded), EXPECTED a type or nil"
   [e expected]
@@ -1139,8 +1187,7 @@
                           (when-let [ga (seq (filter :ty (:args (:args (:seg e)))))]
                             (let [own (vec (take-last (count ga) (remove c/region? args)))]
                               (doseq [[v a] (map vector own ga)] (unify v (body-ty (:ty a))))))
-                          (doseq [[a ty] (map vector (:args e) (concat (rest (:inputs sig)) (repeat nil)))]
-                            (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
+                          (check-args! (map vector (:args e) (concat (rest (:inputs sig)) (repeat nil))))
                           (:output sig))
                       (do (doseq [a (:args e)] (check-expr a nil)) [:unknown])))
           :binary (let [op (:op e)
@@ -1158,6 +1205,8 @@
                      ;; a builtin deref of a reference or pointer, else an overloaded one (Deref, DerefMut on an assigned
                      ;; place), the operand autoref'd
                      "*" (cond (#{:ref :ptr} (first s)) (if (= :ref (first s)) (nth s 3) (nth s 2))
+                               ;; a Box's deref is builtin (no Deref call, no autoref)
+                               (and (= :adt (first s)) (= "alloc::boxed::Box" (second s))) (first (nth s 2))
                                (= :adt (first s)) (if-let [tgt (deref-target s)]
                                                     (do (adjust! (:expr e) [["Borrow" [:ref [:re-erased] (boolean *mutable-place*) s]]]) tgt)
                                                     [:unknown])
@@ -1168,8 +1217,10 @@
                          inner-ex (when (and ex (= :ref (first ex))) (nth ex 3))
                          t (check-expr (:expr e) inner-ex)]
                      (if (:raw e) [:ptr (:mutbl e) t] [:ref [:re-erased] (:mutbl e) t]))
+          ;; check_expr_cast: the operand checked with ExpectCastableToType (a literal takes the type, a block does not
+                  ;; coerce to it)
           :cast (let [t (body-ty (:ty e))]
-                  (check-expr (:expr e) nil)
+                  (check-expr (:expr e) (when (castable-lit? (:expr e)) t))
                   t)
           :type (let [t (body-ty (:ty e))] (let [x (check-expr (:expr e) t)] (coerce! (:expr e) x t)) t)
           :field (let [bt (check-expr (:expr e) nil)] (field-of e bt (:ident e)))
@@ -1387,24 +1438,39 @@
   normalized projection; again while something changes"
   []
   (loop [n 0]
-    (let [before @*vars*]
-      (doseq [o (when *obligations* @*obligations*)]
-        (case (first o)
-          :trait (let [[tr args] (second o) self (shallow (first args))]
-                   ;; the builtin Fn impls of a callable: its signature's inputs are the obligation's tuple
-                   (when (and (fn-traits tr) (#{:fndef :closure :fnptr} (first self)) (= :tuple (first (shallow (second args)))))
-                     (let [sig (case (first self) :closure (nth self 2) :fndef (sig-of self) :fnptr (erase (second self)))
-                           tys (second (shallow (second args)))]
-                       (when (= (count tys) (count (:inputs sig))) (let [sn (snapshot)] (when-not (unify-all (vec (:inputs sig)) (vec tys)) (rollback! sn))))))
-                   (when (and (or (not (tvar? self)) (#{:int :float} (second self))) (not= :param (first self)) (not= [:unknown] self)
-                              (not (#{(c/lang "sized") (c/lang "meta_sized")} tr))
-                              (some has-var? args))
-                     (let [sn (snapshot)] (when-not (impls-for self tr (vec (rest args))) (rollback! sn)))))
-          :proj (let [[_ ad args term] o self (shallow (first args))]
-                  (when (and (not (tvar? self)) (not= :param (first self)))
-                    (let [nv (normalize [:proj ad args])]
-                      (when (not= :proj (first nv)) (let [sn (snapshot)] (when-not (unify nv term) (rollback! sn)))))))
-          nil))
+    (let [before @*vars*
+          ;; each obligation processed: :keep while it may still make progress, else dropped (selected, normalized, holding
+          ;; by assumption, or failed), as the fulfillment context removes what it has processed
+          step (fn [o]
+                 (case (first o)
+                   :trait (let [[tr args] (second o) self (shallow (first args))]
+                            ;; the builtin Fn impls of a callable: its signature's inputs are the obligation's tuple
+                            (if (and (fn-traits tr) (#{:fndef :closure :fnptr} (first self)) (= :tuple (first (shallow (second args)))))
+                              (let [sig (case (first self) :closure (nth self 2) :fndef (sig-of self) :fnptr (erase (second self)))
+                                    tys (second (shallow (second args)))]
+                                (when (= (count tys) (count (:inputs sig))) (let [sn (snapshot)] (when-not (unify-all (vec (:inputs sig)) (vec tys)) (rollback! sn))))
+                                nil)
+                              (cond (or (= :param (first self)) (= [:unknown] self)
+                                        (#{(c/lang "sized") (c/lang "meta_sized")} tr)
+                                        (not (some has-var? args))) nil
+                                    (and (tvar? self) (not (#{:int :float} (second self)))) :keep
+                                    :else (let [sn (snapshot) r (impls-for self tr (vec (rest args)))]
+                                            (cond (vector? r) nil
+                                                  (= :ambiguous r) :keep
+                                                  :else (do (rollback! sn) nil))))))
+                   :proj (let [[_ ad args term] o self (shallow (first args))]
+                           (if (tvar? self)
+                             :keep
+                             (let [nv (normalize [:proj ad args])]
+                               (if (not= :proj (first nv))
+                                 (let [sn (snapshot)] (when-not (unify nv term) (rollback! sn)) nil)
+                                 (when (some has-var? args) :keep)))))
+                   nil))]
+      (when *obligations*
+        (let [os @*obligations*
+              kept (vec (filter #(= :keep (step %)) os))]
+          ;; obligations registered while these were processed are kept as well
+          (swap! *obligations* (fn [now] (into kept (drop (count os) now))))))
       (when (and (not= before @*vars*) (< n 8)) (recur (inc n))))))
 
 (defn- fallback!
@@ -1433,7 +1499,7 @@
   (let [n (:node d) k (:kind d)
         owner (binding [c/*in-value* true] (c/print-def-path (:id d) []))
         facts (atom [])]
-    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *owner* owner *env* [{}] *loops* nil]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *norm-cache* (atom {}) *owner* owner *env* [{}] *loops* nil]
       (c/in-def (:id d)
         (if (#{"Fn" "AssocFn"} k)
           (let [sig (erase (c/fn-sig (:id d)))

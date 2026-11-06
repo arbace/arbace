@@ -183,6 +183,7 @@
                ;; RF9b: bound by a binder inside the type (a trait object's, a fn pointer's)
                (str/starts-with? n "'^^#") [:re-bound nil :inner (Long/parseLong (subs n 4))]
                (str/starts-with? n "'^^") [:re-bound (subs n 3) :inner]
+               (str/starts-with? n "'^#") [:re-bound nil :late (- -1 (Long/parseLong (subs n 3)))]
                (= n "'^") [:re-bound nil :late (swap! anon-ids inc)]
                (str/starts-with? n "'^") [:re-bound (subs n 2) :late]
                :else [:re-bound n]))
@@ -571,7 +572,9 @@
 
 
 (defn- elided-region []
-  (case *elided*
+  (case (if (vector? *elided*) :fixed *elided*)
+    ;; RF9b: an elided output lifetime resolved by the elision rules (the receiver's, else the one input lifetime)
+    :fixed *elided*
     :anon [:re-bound nil :anon (swap! anon-ids inc)]
     :static [:re-static]
     :binder [:re-bound nil (swap! *binder-counter* inc)]
@@ -1380,14 +1383,34 @@
 (def ^:dynamic *impl-cache* nil)
 (defn impl-header [id] (or (get @*impl-cache* id) (let [h (impl-header* id)] (swap! *impl-cache* assoc id h) h)))
 
+(defn- input-regions
+  "The lifetime positions of a signature's inputs, in order (a fn pointer's and a trait object's own binders, and an
+  object lifetime default, are not among them)"
+  [x]
+  (let [acc (java.util.ArrayList.)]
+    (letfn [(walk [x] (cond (region? x) (.add acc x)
+                            (and (vector? x) (= :fnptr (first x))) nil
+                            (and (vector? x) (= :dyn (first x))) nil
+                            (vector? x) (doseq [y x] (walk y))
+                            (map? x) (doseq [y (vals x)] (walk y))
+                            :else nil))]
+      (walk x))
+    (vec acc)))
+
 (defn fn-sig [id]
   (let [d (def-of id) f (:node d)]
     (in-def id
       (binding [*late* (:late (generics-of id)) *elided* :anon]
         (let [self-ty (or *self-ty* [:param 0 "Self"])
-              inputs (vec (for [p (:params f)] (lower-ty (:ty p))))]
+              inputs (vec (for [p (:params f)] (lower-ty (:ty p))))
+              ;; RF9b: lifetime elision (resolve_fn_signature): the output's elided lifetimes are the reference
+              ;; receiver's, else the inputs' one lifetime position's
+              rs (input-regions inputs)
+              fixed (cond (and (#{:ref-imm :ref-mut} (:self f)) (= :ref (first (first inputs)))) (second (first inputs))
+                          (= 1 (count rs)) (first rs)
+                          :else nil)]
           {:inputs inputs
-           :output (if (:output f) (lower-ty (:output f)) unit)
+           :output (if (:output f) (binding [*elided* (or fixed :anon)] (lower-ty (:output f))) unit)
            :safety (:safety (:header f))
            :abi (:abi (:header f))})))))
 

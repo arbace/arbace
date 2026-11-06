@@ -232,7 +232,8 @@ fn region_text(r: rustc_middle::ty::Region<'_>) -> String {
         };
         let m = if inner { "'^^" } else { "'^" };
         if t == "'_" || t.is_empty() {
-            if inner { format!("'^^#{}", br.var.as_u32()) } else { m.into() }
+            // RF9b: an anonymous one by its index in its binder (`'^#N`, `'^^#N`): a signature's elided output is its input's
+            format!("{m}#{}", br.var.as_u32())
         } else {
             format!("{m}{t}")
         }
