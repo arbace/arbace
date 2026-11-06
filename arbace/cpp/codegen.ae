@@ -158,6 +158,8 @@
 
 (defn- zero-of [t] (let [l (abi/llvm-type t true)] (cond (abi/mfn-ptr? (abi/unq t)) 'zeroinitializer (abi/mptr? (abi/unq t)) -1 (= l 'ptr) 'null (#{'float 'double 'x86_fp80} l) (list 'fp "0.000000e+00") (= l 'i1) false :else 0)))
 
+(defn- zero-mem "A scalar's zero as memory holds it (bool an i8 0)." [t] (let [z (zero-of t)] (if (false? z) 0 z)))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; Functions referenced
 
@@ -1256,10 +1258,10 @@
         t (:ty v)
         [s a] (abi/size-align t)
         init (:sinit v)
-        cinit (when (#{:none :zero} (:i init)) (if (abi/scalar? (abi/unq t)) (zero-of t) 'zeroinitializer))
+        cinit (when (#{:none :zero} (:i init)) (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer))
         cexpr (when (and (= :expr (:i init)) (abi/scalar? (abi/unq t))) (let [e (:e init)] (when (#{:int :float :null} (:op e)) (emit-rv e))))
         ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8))]
-    (add-top! (list 'llvm/global (gsym nm) ltype (or cinit cexpr (if (abi/scalar? (abi/unq t)) (zero-of t) 'zeroinitializer)) :linkage :internal :align a))
+    (add-top! (list 'llvm/global (gsym nm) ltype (or cinit cexpr (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer)) :linkage :internal :align a))
     (when-not (or cinit cexpr)
       ;; the guard ([stmt.dcl]/3, Itanium §3.3.2)
       (let [g (str "_ZGV" (subs nm 2))
@@ -2047,7 +2049,8 @@
   "The type_info object of the type `t` (a thrown or caught type): a class's own; a fundamental type's and a pointer
   to one's in the runtime (external); a pointer to a class's or an enumeration's written here (Itanium §2.9.5)."
   [t]
-  (let [t (abi/unq t)
+  (let [;; (an array's cv-qualifiers are its elements', dropped as the top level's, [expr.typeid]/4)
+        t ((fn strip [t] (let [t (abi/unq t)] (if (abi/arr? t) (assoc t :of (strip (:of t))) t))) t)
         fundamental? (fn [x] (= :b (:k (abi/unq x))))]
     (cond
       (abi/class? t) (typeinfo! (:id t))
@@ -2073,6 +2076,11 @@
                               :linkage :linkonce_odr :constant true :align 8)))
             (abi/enum? t)
             (add-top! (list 'llvm/global (gsym nm) '(struct ptr ptr) (list 'struct (abi-class-global! "_ZTVN10__cxxabiv116__enum_type_infoE") ['ptr (gsym ts)])
+                            :linkage :linkonce_odr :constant true :align 8))
+            ;; arrays and functions: __array_type_info, __function_type_info, a name alone (Itanium §2.9.5)
+            (or (abi/arr? t) (abi/fn? t))
+            (add-top! (list 'llvm/global (gsym nm) '(struct ptr ptr)
+                            (list 'struct (abi-class-global! (if (abi/arr? t) "_ZTVN10__cxxabiv117__array_type_infoE" "_ZTVN10__cxxabiv120__function_type_infoE")) ['ptr (gsym ts)])
                             :linkage :linkonce_odr :constant true :align 8))
             :else (fail :rtti "type_info of " (pr-str t))))
         (gsym nm)))))
@@ -2173,7 +2181,7 @@
             (cond
               (and leaves (abi/scalar? (abi/unq t)) (<= (count leaves) 1))
               ((if (:internal v) #(swap! *top* assoc-in [:lazy nm] %) add-top!)
-               (apply list 'llvm/global (gsym nm) (abi/llvm-type t) (if (seq leaves) (nth (first leaves) 2) (zero-of t)) (concat link [:align a])))
+               (apply list 'llvm/global (gsym nm) (abi/llvm-type t) (if (seq leaves) (nth (first leaves) 2) (zero-mem t)) (concat link [:align a])))
               leaves
               (let [[ct cv] (leaves-constant leaves s)
                     bt (abi/unq t)]
@@ -2237,6 +2245,9 @@
     (reset! vt-cache {})
     ;; static locals know their function
     (doseq [[fid f] (:fns prog)] (doseq [vid (:statics f)] (swap! sema/*vars* assoc-in [vid :fn-of] fid)))
+    (when-let [nm (System/getenv "CPP_LAYOUT_TRACE")]
+      (doseq [[id c] (:classes prog) :when (some #{(:name c)} (str/split nm #","))]
+        (binding [*out* *err*] (println "layout" nm id (pr-str (:targs c)) (pr-str (dissoc (abi/layout id) :primary)) (pr-str (map (fn [f] [(:name f) (abi/size-of (:ty f))]) (:fields c))) (pr-str (:bases c))))))
     (emit-globals! prog file)
     ;; the definitions: every non-inline function with a body, then what they use
     (doseq [[k id] (:order prog) :when (= k :fn)]

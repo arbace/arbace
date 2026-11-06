@@ -81,6 +81,10 @@
   "Unqualified lookup: the entities of the first scope outward that declares `nm` (the headers' last, through the
   native parser's scopes)."
   [scope ^String nm]
+  (when (= nm (System/getenv "CPP_LOOKUP_TRACE"))
+    (binding [*out* *err*]
+      (loop [s scope] (when s (println "lookup" nm (:kind s) (count (:usings s)) (pr-str (map #(select-keys % [:e :pos]) (.get ^java.util.HashMap (:names s) nm)))
+                                       (pr-str (map (fn [u] (map #(select-keys % [:e :pos]) (.get ^java.util.HashMap (:names u) nm))) (:usings s))) *cutoff*) (recur (:parent s))))))
   (or (loop [s scope] (when s (or (find-here s nm true) (recur (:parent s)))))
       (header-entities [nm])
       (builtin-entities nm)))
@@ -392,6 +396,11 @@
 
 (defn- method-const? [^String qt] (boolean (re-find #"\)\s*const(\s|$|&)" qt)))
 
+(defn- method-refq
+  "A member function's ref-qualifier from its type's spelling: \"&\", \"&&\" or nil ([dcl.fct]/4)."
+  [^String qt]
+  (second (re-find #"\)\s*(?:const\s*)?(?:volatile\s*)?(&&|&)(?:\s|$)" (or qt ""))))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; The main file's text: qualifiers the tree does not keep
 
@@ -557,7 +566,7 @@
 (defn- param-nodes [n] (filter #(= "ParmVarDecl" (:kind %)) (kids n)))
 
 (defn- same-sig? [f g]
-  (and (= (:name f) (:name g)) (= (:kind f) (:kind g)) (= (boolean (:cq f)) (boolean (:cq g)))
+  (and (= (:name f) (:name g)) (= (:kind f) (:kind g)) (= (boolean (:cq f)) (boolean (:cq g))) (= (:refq f) (:refq g))
        (= (mapv abi/unq (:ps (:ty f))) (mapv abi/unq (:ps (:ty g))))))
 
 (defn- find-redecl [scope f]
@@ -649,7 +658,7 @@
         nm (:name n)
         body (first (filter #(= "CompoundStmt" (:kind %)) (kids n)))
         pn (param-nodes n)
-        f {:name nm :kind k :cls cid :ty ty :cq (method-const? qt) :op (when (and nm (not= k :conv)) (fn-op nm))
+        f {:name nm :kind k :cls cid :ty ty :cq (method-const? qt) :refq (when cid (method-refq qt)) :op (when (and nm (not= k :conv)) (fn-op nm))
            ;; (a class's allocation and deallocation functions are static members, [class.free]/1)
            :static (and cid (or (= "static" (:storageClass n)) (contains? #{"operator new" "operator new[]" "operator delete" "operator delete[]"} nm)))
            :virtual (boolean (:virtual n)) :pure (boolean (:pure n))
@@ -721,6 +730,7 @@
         (swap! *vars* assoc id (if (and (header-node? n) (:defined v) (= st :global))
                                  (cond-> (assoc v :defined false :pending-def true) (not (:internal v)) (assoc :linkonce true))
                                  v))
+        (when (= (:name n) (System/getenv "CPP_LOOKUP_TRACE")) (binding [*out* *err*] (println "declare" (:name n) (:path home) (System/identityHashCode (:names home)) (:pos v))))
         (enter! home (:name n) {:e :var :id id :pos (:pos v)})
         (when (:cls home) (abi/update-cls! (:cls home) update :statics (fnil conj []) id))
         (swap! *order* conj [:var id])
@@ -820,7 +830,7 @@
                  ;; after the headers (clang instantiates only when the type must be complete)
                  ;; (G5: and one that named a type such a declaration declares: <ostream>'s typedef, then <iostream>'s
                  ;; extern ostream cout)
-                 (when (and *retry* (re-find #"an incomplete class template|unknown type" (str (.getMessage e))))
+                 (when (and *retry* (re-find #"an incomplete class template|unknown type|header type" (str (.getMessage e))))
                    (swap! *retry* conj [scope n]))
                  (when (System/getenv "CPP_HDR_TRACE")
                    (binding [*out* *err*] (println "header drop:" (:kind n) (:name n) (get-in n [:range :begin :offset]) (.getMessage e) (:file (loc-of (get-in n [:range :begin]))))))
@@ -854,6 +864,7 @@
                                [_ target] (re-find #"namespace\s+([^;]+);?\s*$" (or t ""))
                                parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
                                e (first (filter #(= :ns (:e %)) (lookup-qualified scope parts)))]
+                           (when (System/getenv "CPP_LOOKUP_TRACE") (binding [*out* *err*] (println "using" (pr-str t) parts (:path (:scope e)) (count (:names (:scope e))) (System/identityHashCode (:names (:scope e))))))
                            (.add ^java.util.ArrayList (:usings scope) (:scope e)))
     ;; (a using-declaration naming a dependent base's member, resolved in the specialization: G4)
     ("UsingDecl" "UnresolvedUsingValueDecl" "UnresolvedUsingTypenameDecl")
@@ -1435,6 +1446,10 @@
                            ;; the implicit object parameter: a const method takes a const object, a non-const prefers a non-const one
                            oc (if (and obj (:cls f) (not (:static f)) (not= :ctor (:kind f)))
                                 (cond (and (:c (:ty obj)) (not (:cq f))) nil
+                                      ;; a ref-qualified one ([over.match.funcs]/5): && takes an rvalue object, & (not const) an lvalue
+                                      (and (= "&&" (:refq f)) (= :lv (:cat obj))) nil
+                                      (and (= "&" (:refq f)) (not (:cq f)) (not= :lv (:cat obj))) nil
+                                      (and (= "&&" (:refq f))) {:rank 0 :sub -1}
                                       (and (:cq f) (not (:c (:ty obj)))) {:rank 0 :sub 1}
                                       :else {:rank 0 :sub 0})
                                 {:rank 0 :sub 0})]
@@ -2014,6 +2029,7 @@
                       (catch arbace.lang.ExceptionInfo _ nil)))
         frees (concat (filter #(not (:cls (fnd %))) (map :id (filter #(= :fn (:e %)) found))) (adl-fns args nm) tspecs)
         cands (concat (map (fn [m] [:m m]) members) (map (fn [f] [:f f]) (distinct frees)))]
+    (when (and (empty? cands) (System/getenv "CPP_OP_TRACE")) (binding [*out* *err*] (println "operator" o "no candidates for" (pr-str (map :ty args)))))
     (if (empty? cands)
       (cond
         (= o "=") (fail :assign "no operator=")
@@ -2027,7 +2043,8 @@
                                                  (map (fn [f] [f args nil false]) (remove ms (distinct frees))))
                                          (count args))
                       (catch arbace.lang.ExceptionInfo x (if (= :overload (:codegen/refused (ex-data x)))
-                                                           (when (re-find #"ambiguous" (.getMessage x)) (throw x))
+                                                           (do (when (System/getenv "CPP_OP_TRACE") (binding [*out* *err*] (println "operator" o (.getMessage x) (count members) (count frees))))
+                                                               (when (re-find #"ambiguous" (.getMessage x)) (throw x)))
                                                            (throw x))))]
         (cond
           (nil? best) nil
@@ -2575,6 +2592,8 @@
       (case (:name n)
         "sizeof" {:op :int :v (abi/size-of t) :ty abi/ulong* :cat :pr}
         "alignof" {:op :int :v (abi/align-of t) :ty abi/ulong* :cat :pr}
+        ;; GNU's __alignof__: the preferred alignment, x86-64's the ABI's for every type the slice lays out
+        "__alignof" {:op :int :v (abi/align-of t) :ty abi/ulong* :cat :pr}
         (fail :trait (:name n))))
     "CXXNewExpr" (new-expr ctx n)
     "CXXDeleteExpr" (let [e (rv (analyze ctx (first (kids n))))
