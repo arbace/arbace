@@ -6,14 +6,15 @@ typed natively unit by unit, with GADTs, formats and type extensions pulled forw
 §11, "As built: T9's polymorphic variants"), then the rest of T9, objects and classes, on `ocaml-objects` (§13, "As
 built: T9's objects and classes"), then T10's two stdlib blockers (TY15 (a)), GADT-aware exhaustiveness and recursive
 values, on `ocaml-t10` (§15, "As built: T10's stdlib blockers"): the stdlib 71 of 71 natively; then TY18 (a), oi's library made
-natively, on `ocaml-native-lib` (§17, "As built: TY18"). From `ocaml-native`, whose
+natively, on `ocaml-native-lib` (§17, "As built: TY18"); then T11, the run corpus and the toplevel natively, on `ocaml-t11` (§18),
+and T10's rest as the run corpus needs it, on `ocaml-t12` (§20: 272 of the 309 run programs natively, ocamlc's path 273). From `ocaml-native`, whose
 native reader gives the Parsetree as Arbace data. The route of OC4 (b) (doc/ocaml/OCAML-SURVEY.md §6.4): port OCaml 5.5.0's `typing/` and
 `lambda/`'s Translcore with Matching, so that the native Parsetree becomes Lambda in Arbace and oi stops needing the
 host's `ocamlc` for a program. Light rules (the day's): no gate, no Arbace build, no re-seed; every run on main's stage 0
 (`ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace`), one process under 1.5 GB, samples only. Nothing here is
 TY1-TY6 (§8) were decided by the user (below §8); the proposals of T7-T8 are TY7-TY10 (§10), decided; those of T9's
 polymorphic variants TY11-TY12 (§12), decided; those of T9's objects and classes TY13-TY15 (§14), decided; those of
-T10's stdlib blockers TY16-TY18 (§16).
+T10's stdlib blockers TY16-TY18 (§16), decided; those of T11 TY19-TY22 (§19), decided; those of T10's rest TY23-TY24 (§21).
 
 ## 1. What needs ocamlc today, and what the slice removes
 
@@ -136,7 +137,7 @@ of these, in `test/ocaml/divergences.edn`'s format:
 | T7 Simplif | `lambda/simplif.ml`: `simplify_exits`, `simplify_lets` (`mutlet`), `simplify_local_functions`; the judge against `-dlambda` too | the samples equal to `ocdump --simplify` | done (§9) |
 | T8 the module system | Typemod (structures, signatures, inclusion and coercions, strengthening, applicative paths), functors (`Map.Make`, `Set.Make`, `Hashtbl.Make`), `open`/`include`/local opens, recursive modules; Translmod complete; then the stdlib's own `.ml` typed and translated natively | `bin/oi stdlib --native`: every unit's Lambda equal to the oracle's (canonical), oi's check on it unchanged | the module system done, the stdlib 64 of 71 (§9); the rest wait on T9's objects and variants and T10 |
 | T9 formats, variants, objects | `format6` typing of literals (Typecore's `type_format`, CamlinternalFormatBasics), polymorphic variants (rows, `Tvariant`, Matching's `divide_variant`), objects and classes (Typeclass, Translobj, Translclass) | the testsuite's `basic/` and `typing-objects/` run programs through the native path | formats done (§9), polymorphic variants done (§11); objects and classes done (§13) |
-| T10 the rest of the core | GADTs and locally abstract types, existentials, first-class modules, effect handlers (`transl_handler`), lazy and array patterns, inline records, labelled tuples, `let` operators, optional-argument elimination | the probe's refusals gone | 6-10 |
+| T10 the rest of the core | GADTs and locally abstract types, existentials, first-class modules, effect handlers (`transl_handler`), lazy and array patterns, inline records, labelled tuples, `let` operators, optional-argument elimination | the probe's refusals gone | the run corpus's part done (§20): effect handlers, let operators, opens of module expressions, functor applications in paths, recursive modules' approximation, `%loc_FUNCTION`'s scopes, constructor disambiguation; modular explicits (5.5's `Tfunctor`) left, TY23 |
 | T11 the corpus and the toplevel | `bin/oi check --native` over the run corpus with the classes of §5; `bin/oi repl --native` (phrases typed here, Genprintval's value printing from types) | none failing, every non-pass classed; repl-check without ocamlc | done (§18): 244 of 309 natively, ocamlc's path 273, the 29 others classed; the session 24 of 24 |
 | T12 errors | typing errors as ocamlc reports them (Location's report, Printtyp's explanations), the testsuite's expect tests' type errors | the error tests' messages equal | 5-8 |
 
@@ -623,3 +624,59 @@ which the typer's load is most (stage 0 evaluates the typer's namespaces each ti
 ## Decided (2026-11-05, the user: TY19-TY22)
 
 TY19 (b): ocamlc's and the native records side by side until the native non-passes are decided milestones' classes; TY20-TY22 (a) with T12 (one typer process per REPL session, Printtyp's short paths, unify3 sharing and record-field polytypes).
+
+TY19 (b) as built: nothing changes in the records' roles; `bin/oi check --native` keeps judging the native path on its own record
+(`check-oi-native.edn`) and printing every row that differs from ocamlc's (`check-oi.edn`), the CHANGED lines being the switch's
+condition. TY20-TY22 wait for T12.
+
+## 20. As built: T10's rest, the run corpus's (2026-11-06, branch `ocaml-t12`, from `ocaml-t11`)
+
+The next stage after T11 by §6's plan is T10 (T12 after it, with TY20-TY22). Its parts were taken in the order the run corpus's
+native non-passes that pass on ocamlc's path asked for them (§18's 29), each ported rule for rule from the same tarball (SHA-256
+fcc6ae66...f015ba), checked on the corpus's programs against the oracle's three dumps (`bin/oi typer-probe --only-list`), then
+run on oi:
+
+| part | OCaml 5.5.0 sources | the corpus's programs |
+|---|---|---|
+| effect handlers in the effect syntax | typecore.ml's split of `effect P, k` cases, type_effect_cases (a fresh locally abstract `%eff`, the cases against `%eff eff`, the continuation `(%eff, res) continuation`, bound in the body not the guard), translcore.ml's Texp_match/Texp_try with effect cases and transl_handler (caml_alloc_stack of the value, exception and effect functions, runstack), matching.ml's for_handler (Reperform_noloc) | effect-syntax/'s 12 |
+| let operators | typecore.ml's Pexp_letop, type_binding_op_ident and type_andops; translcore.ml's transl_letop | lib-result/test |
+| open of a module expression | typemod.ml's type_open_decl_aux (the signature entered with fresh identifiers, hidden from the structure's), translmod.ml's Tstr_open (the block let-bound, its values rebound; expressions' local opens through it as 5.5's Texp_struct_item) | generalized-open/accepted_batch, lib-pqueue/test, effect-syntax/shallow2deep |
+| functor applications in paths | env.ml's lookup_apply (`F(M).t`, `open F(M)` in a signature) | exotic-syntax/exotic (with `method f : type t. int`: typetexp.ml's unused univars dropped; `let p : t1 :> t2`: vb_exp_constraint's Pvc_coercion) |
+| `%loc_FUNCTION` | lambda/debuginfo.ml's Scoped_location (enter_anonymous_function, enter_value_definition, enter_module_definition, enter_class_definition, enter_method_definition), translcore.ml's transl_scoped_exp and transl_bound_exp, translmod.ml's and translclass.ml's scope entries, translprim.ml's Loc_FUNCTION; a parameter's matching at its fp_loc | translprim/locs, syntactic-arity/syntactic_arity |
+| recursive modules | typemod.ml's Psig_recmodule and transl_recmodule_modtypes with approx_modtype/approx_sig (the modules bound to their approximations, the types translated twice), translmod.ml's init_shape for classes, typeclass.ml's class_num (class declarations only) | ppx-attributes/warning, typing-fstclassmod/fstclassmod, basic-modules/recursive_module_init (no longer known) |
+| first-class modules | ctype.ml's eq_package_path (env.ml's normalize_modtype_path), subst.ml's package paths, update_level's expansion of an abbreviation scoped deeper than the level it is lowered to (5.5's Pexp_struct_item under with_local_level_generalize, its identifiers scoped there), the functor application's result rescoped (Subst's Rescope: fresh identifiers, the substituted declarations registered under them) | typing-fstclassmod/fstclassmod |
+| the rest | typecore.ml's check_apply_prim_type (`@@` typed as an application without is_inferred), NameChoice's lookup_from_type for constructors (an unqualified constructor of the expected variant type, in scope or not), map_half_typed_cases' with_local_level_generalize over a case's pattern (a polymorphic field's `{pf}` polymorphic), value_rec_compiler.ml's Pmakelazyblock for forward blocks, oprint.ml's value_ident and print_out_signature's break after a gathered extension, env.ml's required globals only from expand_module_path (Stdlib no longer required by an `open`) | prim-revapply/apply, lib-printf/tlprintf, lib-format/tlprintf, lib-format/domains, lazy/lazy9, letrec-compilation/lazy_ |
+
+**Results (2026-11-06, stage 0 of main, the native library; two programs at once, each process under 1.5 GB)**:
+
+| check | before (T11) | after |
+|---|---:|---:|
+| the run corpus on the native path (`check-oi-native.edn`; ocamlc's path 273 of 309) | 244 of 309 | 272 of 309 |
+| §18's 29 native non-passes that pass on ocamlc's path, rerun | 0 | 28 (the 29th: modular explicits, TY23) |
+| a regression sample of the native passes (basic/ and effects/ whole, every fourth other: 112 programs) | 111 (+1 known) | 111, the one non-pass modular explicits |
+| `bin/oi typer-check` (test/ocaml/typer/; t74-t78 new: effect handlers, let operators, opens, scopes and packages, recursive modules) | 73 of 73 | 78 of 78 at every level, their runs equal |
+| `bin/oi stdlib-check` | 71 of 71 | 71 of 71, lib/testing equal, the samples on the library |
+| `bin/oi repl-check --native` | 24 of 24 | 24 of 24 |
+
+The rows of the 28 and of the regression sample were run with `--only-list` (the 28 recorded with `--record`): 130 of the 272
+passing rows rerun with this typer, the other 142 T11's, not rerun on this branch (light day): the night's `bin/oi check --native --record` (about 22 minutes
+at three jobs) re-records every row with this typer. The one native non-pass that passes on ocamlc's path, its class `typer-type-error`:
+typing-modular-explicits/compiling, OCaml 5.5's modular explicits (`(module P : S) -> P.t -> unit`, a `Tfunctor` type), not ported.
+With it the only one left, TY19's condition (the native non-passes in decided milestones' classes) is one port away (TY23, TY24).
+
+Not ported, by choice: the record-field polytype's printing (`{ pf : 'a. ... }` printed with `'_`: TY22, with T12; lib-format/domains
+runs equal), approx_class_declarations in a recursive signature's approximation (classes left out of it), the scope of an
+anonymous structure apart from its `let module`'s (one scope a local structure item).
+
+## 21. Proposed (TY23-TY24; options with costs, a recommendation each, none decided)
+
+- **TY23 Modular explicits.** OCaml 5.5's dependent function types (`Tfunctor (label, id, package, ret)`: typetexp.ml's
+  `(module M : S) -> t`, typecore.ml's module parameters and type_application's instance_funct substituting the argument's path,
+  about 48 sites of ctype.ml: copy, unify with Tfunctor and Tarrow, moregeneral, subtyping, printing). (a) port it now as T10's last
+  part (about a day; one corpus program, typing-modular-explicits/compiling, and the typing-modular-explicits expect tests with T12);
+  (b) with T12; (c) not at all (the program stays a classed non-pass). *Recommended: (a)*: it is the last native non-pass that
+  ocamlc's path passes.
+- **TY24 The native path as `bin/oi check`'s default (TY19's switch).** (a) after TY23 and the night's whole-corpus record, when no
+  row of `check-oi-native.edn` is worse than `check-oi.edn`'s: the native path the default, `--ocdump` the oracle's, `check-oi.edn`
+  kept as the oracle's record (the classes of the native path folded into `divergences.edn`); (b) keep both as now until T12.
+  *Recommended: (a)*: TY19 (b)'s condition then holds.

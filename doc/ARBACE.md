@@ -107,8 +107,13 @@ code. Three kinds of things live here:
   and simplif.ml's Lifused, then (T10's stdlib blockers, TYPER.md §15) typing/value_rec_check.ml's classify_expression
   and lambda/value_rec_compiler.ml (`typer/valuerec.ae`: recursive values' kinds, sizes, function lifting and
   compile_letrec), parmatch.ml's exhaust and build_other (`typer/parmatch.ae`) and typecore.ml's
-  check_counter_example_pat and partial_pred (`typer/typecore.ae`: GADT-aware exhaustiveness), by hand, the files
-  carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own.
+  check_counter_example_pat and partial_pred (`typer/typecore.ae`: GADT-aware exhaustiveness), then (T10's rest,
+  TYPER.md §20, 2026-11-06) typecore.ml's effect cases, let operators, check_apply_prim_type and constructor
+  disambiguation, translcore.ml's transl_handler and transl_letop, matching.ml's for_handler, lambda/debuginfo.ml's
+  Scoped_location (`typer/translcore.ae`: %loc_FUNCTION's scopes), typemod.ml's open of a module expression,
+  approx_modtype and transl_recmodule_modtypes, translmod.ml's Tstr_open and init_shape's classes, env.ml's
+  lookup_apply and normalize_modtype_path, ctype.ml's update_level scope expansion and eq_package_path, by hand, the
+  files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

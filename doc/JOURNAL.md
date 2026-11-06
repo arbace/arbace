@@ -440,3 +440,25 @@ in the typer's classes (effect syntax 12, outside the slice 8, type errors 5, re
 shapes 1), none failing; the repl session 24 of 24. Alternatives weighed: one typer process for many programs (faster, but one hang or
 crash takes the batch; a process a program kept, TY20 for the toplevel); making the native path `bin/oi check`'s default now (TY19,
 proposed, not done: the oracle's record stays the reference). Proposals TY19-TY22 (TYPER.md §19), none decided.
+
+## 2026-11-06: oi's native front end, T10's rest as the run corpus needs it (branch ocaml-t12)
+
+From `ocaml-t11` (TY19-TY22 decided as recommended: the two records side by side, TY20-TY22 with T12). By TYPER.md §6's order the
+next stage is T10; its parts were taken in the order §18's 29 native non-passes that pass on ocamlc's path asked for them, ported by
+hand from OCaml 5.5.0's release tarball (SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+typing/typecore.ml's effect cases (type_effect_cases), Pexp_letop and type_andops, check_apply_prim_type, NameChoice's
+lookup_from_type for constructors, map_half_typed_cases' generalization of a case's pattern and Pexp_struct_item's local level;
+lambda/translcore.ml's transl_handler and transl_letop, matching.ml's for_handler, lambda/debuginfo.ml's Scoped_location for
+`%loc_FUNCTION` (the enter_* calls of translcore.ml, translmod.ml, translclass.ml), each parameter's matching at its fp_loc;
+typing/typemod.ml's open of a module expression, Psig_recmodule, transl_recmodule_modtypes with approx_modtype, a constraint's
+module typed with the outer alias flag; lambda/translmod.ml's Tstr_open and init_shape's classes; typing/env.ml's lookup_apply and
+normalize_modtype_path, ctype.ml's eq_package_path and update_level's expansion of abbreviations scoped deeper (identifiers'
+scopes for local structure items), subst.ml's package paths and the functor application's rescoped result; value_rec_compiler.ml's
+forward blocks; oprint.ml's value_ident and the gathered extension's trailing break; Env's required globals only through
+expand_module_path (the lookup of a module required its alias's unit). Results (TYPER.md §20): the 29 rerun, 28 pass (the 29th,
+typing-modular-explicits/compiling, needs 5.5's Tfunctor: TY23); the record `test/ocaml/check-oi-native.edn` 272 of 309 run
+programs natively (ocamlc's path 273; 130 of the passing rows rerun with this typer, a regression sample of 112 programs equal),
+`test/ocaml/oi-known-native.edn` empty; `bin/oi typer-check` 78 of 78 (t74-t78 new), `bin/oi stdlib-check` 71 of 71. Alternatives
+weighed: a post-pass expanding a `let module`'s types in the body's type (dropped for OCaml's scopes in update_level, which also
+reach a parameter unified inside the item); recursive signatures translated in order without approximation (as T8 had: a signature
+naming its own module failed); the record-field polytype's printing now (left to T12, TY22). Proposals TY23-TY24 (TYPER.md §21).
