@@ -435,3 +435,20 @@ The alternatives considered:
 The baseline is in doc/CROPS-SCORE.md, with the proposals CSP1-CSP5: CSP1 a gate step, CSP3 Python's numbers from the
 Mac (queue task 221, `--input`).
 
+## 2026-11-06: the crops' scores, the user's decisions CSP1-CSP5 built (held for after the tag)
+
+The user decided CSP1 (b), CSP2, CSP3, CSP4 and CSP5 as recommended (doc/CROPS-SCORE.md, "Decided"). Built on `crops-score`:
+- The essential step `crops-score` (`bin/crops-score --judge --strict`, after `reap`).
+- The scores' record `test/crops/scores.edn` (`--record`; any difference fails).
+- Completeness without by design, beside the strict number.
+- When scoring the checkout, files are asked one by one rather than listed through git, so that the gate's audit sees
+  only what the scores read.
+- The host paths of the records normalized at write time (`${root}`, `${JDK}`, `${aports}`) for the four writers that are
+  off gate_key: `test/java/check.ae` with `bin/java-check --record-ref`, `bin/lib/ci/record-ref`, and
+  `bin/lib/repr-c/annotations` and `roundtrip`, after the embedded `arbace.repr.c.results`. The four records were
+  rewritten by the same rules. bin/reap is unchanged: 16 of 16, 0 problems.
+- goi's writer is in gate_key (`bin/goi`), so its fix is prepared as `test/crops/after-tag/csp5-goi-goroot.patch`.
+- C++'s `ref-gxx15.edn` writer lives on `mac/cppi-deferred`.
+- The `:ocaml` hosts of `mac/oracle-records-cpp2`'s `steps.edn` are reported in the doc. The alternative of normalizing at
+  read time, in crops.score, was rejected: the records themselves would still differ between clones.
+

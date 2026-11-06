@@ -19,7 +19,14 @@ bin/crops-score --input FILE          REAP cell records over the tree's (test/re
 bin/crops-score --judge               the checkout's matrix judged afresh by reap.main's own readers and judging; a
                                       difference from test/reap/matrix.edn is a problem (exit 1)
 bin/crops-score --strict              a fact of independence.edn the tree's gate steps refute is a problem (exit 1)
+bin/crops-score --record              the checkout's scores of every crop written into test/crops/scores.edn (CSP1 (b));
+                                      without it, scoring the checkout (no --ref, --newest, --input) compares each crop
+                                      with its line there, and any difference is a problem (exit 1)
 ```
+
+Each cell and crop also prints its completeness without the by-design cases, pass / (pass + deferred + pending),
+beside the strict number (CSP4). The gate's essential step `crops-score` runs `bin/crops-score --judge --strict` on stage
+0 after `reap` (CSP1 (b)).
 
 It takes about 1 second for the checkout, 5 with `--judge` or `--newest` (eleven refs read by `git show`), under 0.5 GB.
 
@@ -40,8 +47,9 @@ counts are printed beside each percentage.
 - *Refinement.* A cell whose sources all record only their non-passes (`:pass nil`) scores pass / cases with pass 0 and is
   flagged "passes not recorded". Python's cells on `mac/mac/201-python-py7-py11` are such: its records live on the Mac VM
   (queue task 221 reports them; `--input` takes them).
-- *Refinement.* By design counts in the denominator, as the brief says. A class of kind `:na` (goi-not-applicable's: Go's
-  AOT invalid programs) is outside the matrix's counts already, so it is outside this denominator too.
+- *Refinement (CSP4, decided).* By design counts in the strict denominator, as the brief says. The number "without by
+  design", pass / (pass + deferred + pending), is printed beside it, in the table, the details, the TSV and the record. A class of kind `:na` (goi-not-applicable's: Go's
+  AOT invalid programs) is outside the matrix's counts already, and so outside both denominators.
 
 ### Maturity
 
@@ -60,7 +68,8 @@ Six items, each an equal share (a sixth). Each is measured on the tree scored:
 5. **A REAP row**: the crop in the tree's `test/reap/cells.edn` `:languages` (1 or 0).
 6. **Records reproducible**: the share of the crop's record files (the cells' sources' `:file`, `:results`, `:known`,
    `:ref-runs`, `:ref`, `:same-cases`, `:upstream`) that hold no absolute path of the host (`/root/`, `/home/`, `/tmp/`,
-   `/Users/` not inside a word).
+   `/Users/` not inside a word). The literals of the tests themselves are taken out first (`crops.edn`'s `:abs-path-allow`:
+   jtreg's TestUnlimited's argument `"/tmp/unlimited"`).
 
 - *Refinement.* Items 1, 3, 4 and 6 are fractions, not 0 or 1. With binary items, one record holding a path would take a
   sixth off Java, Go and C alike, whatever their share of clean records.
@@ -146,22 +155,25 @@ each ref.
 
 ## Baseline (2026-11-06)
 
-Measured by `bin/crops-score`, `--newest` and `--ref mac/oracle-records-cpp2` on branch `crops-score` (main 8d0bb009d).
-C/M/I: completeness / maturity / independence, in percent.
+Measured by `bin/crops-score`, `--newest` and `--ref mac/oracle-records-cpp2` on branch `crops-score` (main 8d0bb009d), after
+CSP1-CSP5. Each entry reads completeness (without by design) / maturity / independence, in percent. The record of main's line
+is `test/crops/scores.edn`. CSP5 changed two numbers from the first baseline. Main's Java maturity went from 98.3 to 100
+(`ref-jdk26.edn` normalized), and C's from 95.8 to 100 (`ref-gcc15.edn`, `annot-results.edn` and `roundtrip-results.edn`
+normalized). The held branches keep their own records, unnormalized until they merge.
 
-| crop | main C/M/I | newest held branch | C/M/I | mac/oracle-records-cpp2 C/M/I |
+| crop | main | newest held branch | that branch | mac/oracle-records-cpp2 |
 |---|---|---|---|---|
-| Clojure | 99.0 / 96.3 / 100.0 | `mac/clojure-cdr` | 99.0 / 96.3 / 100.0 | 99.0 / 96.3 / 100.0 |
-| Java | 72.6 / 98.3 / 90.0 | `mac/java-jc9c` | 72.6 / 98.3 / 90.0 | 72.6 / 98.3 / 90.0 |
-| Go | 93.9 / 86.0 / 100.0 | `mac/goi-escape` | 93.9 / 86.0 / 100.0 | 93.9 / 86.0 / 100.0 |
-| C | 94.9 / 95.8 / 20.0 | `mac/c-deferred` | 94.9 / 95.8 / 20.0 | 94.9 / 95.8 / 60.0 |
-| C++ | 0.0 / 0.0 / 20.0 | `mac/cppi-deferred` | 75.4 / 90.2 / 20.0 | 75.4 / 90.2 / 60.0 |
-| OCaml | 0.0 / 0.0 / 20.0 | `mac/ocaml-libs4` | 75.6 / 94.4 / 20.0 | 75.6 / 94.4 / 20.0 |
-| Scheme | 0.0 / 0.0 / 80.0 | `mac/scheme-smr7` | 98.3 / 87.5 / 80.0 | 98.3 / 79.2 / 90.0 |
-| Haskell | 0.0 / 0.0 / 20.0 | `mac/haskell-hf7` | 96.3 / 73.3 / 20.0 | 94.9 / 81.7 / 50.0 |
-| Rust | 0.0 / 0.0 / 20.0 | `mac/rust-row` | 75.0 / 66.7 / 20.0 | 75.0 / 75.0 / 40.0 |
-| LLVM IR | 0.0 / 0.0 / 40.0 | `mac/llvm-ll6` | 91.7 / 71.4 / 40.0 | 49.5 / 66.7 / 50.0 |
-| Python | 0.0 / 0.0 / 20.0 | `mac/mac/201-python-py7-py11` | 0.0 / 75.0 / 80.0 | 0.0 / 0.0 / 20.0 |
+| Clojure | 99.0 (100.0) / 96.3 / 100.0 | `mac/clojure-cdr` | 99.0 (100.0) / 96.3 / 100.0 | 99.0 (100.0) / 96.3 / 100.0 |
+| Java | 72.6 (78.9) / 100.0 / 90.0 | `mac/java-jc9c` | 72.6 (78.9) / 98.3 / 90.0 | 72.6 (78.9) / 98.3 / 90.0 |
+| Go | 93.9 (100.0) / 86.0 / 100.0 | `mac/goi-escape` | 93.9 (100.0) / 86.0 / 100.0 | 93.9 (100.0) / 86.0 / 100.0 |
+| C | 94.9 (98.6) / 100.0 / 20.0 | `mac/c-deferred` | 94.9 (98.6) / 95.8 / 20.0 | 94.9 (98.6) / 95.8 / 60.0 |
+| C++ | 0.0 (0.0) / 0.0 / 20.0 | `mac/cppi-deferred` | 75.4 (96.5) / 90.2 / 20.0 | 75.4 (96.5) / 90.2 / 60.0 |
+| OCaml | 0.0 (0.0) / 0.0 / 20.0 | `mac/ocaml-libs4` | 75.6 (81.5) / 94.4 / 20.0 | 75.6 (81.5) / 94.4 / 20.0 |
+| Scheme | 0.0 (0.0) / 0.0 / 80.0 | `mac/scheme-smr7` | 98.3 (98.8) / 87.5 / 80.0 | 98.3 (98.8) / 79.2 / 90.0 |
+| Haskell | 0.0 (0.0) / 0.0 / 20.0 | `mac/haskell-hf7` | 96.3 (98.7) / 73.3 / 20.0 | 94.9 (96.8) / 81.7 / 50.0 |
+| Rust | 0.0 (0.0) / 0.0 / 20.0 | `mac/rust-row` | 75.0 (75.0) / 66.7 / 20.0 | 75.0 (75.0) / 75.0 / 40.0 |
+| LLVM IR | 0.0 (0.0) / 0.0 / 40.0 | `mac/llvm-ll6` | 91.7 (92.9) / 71.4 / 40.0 | 49.5 (49.5) / 66.7 / 50.0 |
+| Python | 0.0 (0.0) / 0.0 / 20.0 | `mac/mac/201-python-py7-py11` | 0.0 (0.0) / 75.0 / 80.0 | 0.0 (0.0) / 0.0 / 20.0 |
 
 On main the seven crops outside the matrix have no REAP row: completeness and maturity 0, each cell flagged.
 
@@ -204,7 +216,7 @@ What keeps each crop under 90%:
   - `mac/oracle-records-cpp2` raises C and C++ to 60, Scheme to 90, Haskell to 50 and Rust to 40. Above 0.5 per stage,
     only the native front ends help: `ocaml-typer`, `cpp-codegen`, HF's Core/STG, RF's MIR, llvmi on hand-written IR.
 
-## Proposed
+## Proposed (decided 2026-11-06: see Decided)
 
 - **CSP1: a gate step.** `crops-score` as an essential step, `bin/crops-score --judge --strict` on `[:stage0]`. Its inputs
   are `test/crops/`, `test/reap/` and every record `cells.edn` names (the `reap` step's inputs plus `test/crops/` and
@@ -239,6 +251,47 @@ What keeps each crop under 90%:
   - (b) Exempt the `:reason` and `:error` fields from the item.
 
   Recommendation: (a). A path in a reason still differs between a clone and the main checkout.
+
+## Decided (2026-11-06, the user: CSP1-CSP5)
+
+- **CSP1 (b).** The gate step and the scores' record.
+  - The essential step `crops-score` (`test/gate/steps.edn`, beside `reap`, after it) runs `bin/crops-score --judge
+    --strict` on `[:stage0]`. Its inputs are `reap`'s, plus `bin/crops-score`, `test/crops/` and `test/gate/steps.edn`;
+    GT9's fragments `test/gate/crops/*.edn` join them when they arrive on main. It is in `:crops`' `:shared`.
+  - The scores of the checkout are recorded in `test/crops/scores.edn`, one map a crop: the three scores, CSP4's
+    completeness, each cell's counts, each maturity item, each stage. Any difference fails until `bin/crops-score
+    --record`, which writes only when `--judge` finds no difference.
+  - Checked: `bin/gate --plan` plans it ("run crops-score, key 0d4fdbd1f463, 731 files; never passed"); `test/gate/
+    costs-test.bash` passes; one line of the record edited by hand fails with both lines printed, exit 1. Not run under
+    `bin/gate --audit` today (no gate runs): its first audited run is the night's.
+- **CSP2.** TamaGo's pinned go is not a host toolchain. Go's judge and every AOT stage through it score as before.
+- **CSP3.** Python's numbers come through `--input FILE` (`test/reap/matrix.edn`'s records) until the Mac's branch commits
+  its result files. Checked with a hand-made one-cell input.
+- **CSP4.** Completeness without by design is printed beside the strict number, and recorded.
+- **CSP5.** Host paths are normalized when records are written. The checkout is `${root}` (the main checkout's too, when a
+  worktree reads its corpora), the JDK's home `${JDK}`, Alpine's package-builder tree `${aports}`, the toolchain's GOROOT
+  `${GOROOT}`. The six records:
+
+  | record | host path | writer | state |
+  |---|---|---|---|
+  | `test/java/ref-jdk26.edn` | `/root/jdk26u/.../images/jdk` (one `:why`, one `:err`) | `test/java/check.ae`'s `clean`, the home from `bin/java-check --record-ref` (`JAVA_CHECK_JDK`) | fixed, off gate_key; the record's line rewritten (the fields are messages, never judged) |
+  | `test/c/ref-gcc15.edn` | `/home/buildozer/aports/...` (195 `:error`s: the linker names musl's crt1.c) | `bin/lib/ci/record-ref`'s `run1` | fixed, off gate_key (`bin/lib/ci/` is out); the 195 lines rewritten |
+  | `test/repr/c/annot-results.edn` | `/root/arbace/.tmp/repr-c/gcc-15.2.0/...` (47 reasons) | `bin/lib/repr-c/annotations`, after `arbace.repr.c.results` | fixed in the script, off gate_key (`arbace.repr.c.results` is embedded, so it is left alone); rewritten |
+  | `test/repr/c/roundtrip-results.edn` | the same (50 reasons) | `bin/lib/repr-c/roundtrip`, after `arbace.repr.c.results` | as above |
+  | `test/goi/check-aot-linux-amd64.edn` | `/root/tamago-go/test/...` (one reason) | `bin/goi check --record` | **after the tag**: `bin/goi` is in gate_key. Prepared as `test/crops/after-tag/csp5-goi-goroot.patch` (the writer through `sed` with `$goroot`, and the record's line); `git apply --check` passes |
+  | `test/cpp/ref-gxx15.edn` | `/home/buildozer/...` (2 `:error`s) | `bin/lib/cppi/record-ref` | **on the C++ branch** (`mac/cppi-deferred`): the writer is not on main; its run1 takes the same `${aports}` rule as C's |
+
+  After the rewrite, `bin/reap` still finds 16 of 16 cells and no problem, and `--judge` matches all 16. Of the records
+  scored on main, only goi's AOT record still holds a host path (Go's maturity is 86.0 until the patch). The held
+  branches' copies of the C and Java records change at their merge with main: take main's side, since the rules are
+  the same.
+- **The `:ocaml` finding (reported here, as asked).** On `mac/oracle-records-cpp2`, `test/gate/steps.edn` plans every
+  OCaml step on `:ocaml`: `oi-essential`, `oi-check`, `oi-aot`, `oi-suite-aot`, `ocaml-read-essential`, `ocaml-roundtrip`
+  and `ocaml-judges`. The branch's survey ("As built: OCaml") and its fragment `test/gate/crops/ocaml.edn` say these
+  steps lose `:ocaml` and read the packs. But the fragment is a merge's draft ("On merge, take this file's side"), and
+  the planner reads `steps.edn`. As planned on that branch, OCaml still needs ocamlc and ocdump at check time, so
+  `independence.edn` scores OCaml 0 there (20% for the crop, not 60%). The fix is the merge of the fragment's hosts into
+  `steps.edn`, on that branch's line.
 
 ## Left
 
