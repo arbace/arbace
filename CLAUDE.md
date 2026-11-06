@@ -266,7 +266,12 @@ Prior art:
     `cpp-runtime-ir` (`bin/cppi record-ir`, read unless `CPPI_LIVE=1`), the originals' dumps the packs `cxxdump-KEY` (`bin/repr-cpp record-dumps`, `cxxdump -records`,
     read unless `REPR_CPP_LIVE=1`), LLVM's originals' `clang -c` and llvm-as digests and opt's answers `test/llvm/records/` (`bin/repr-llvm record-orig`, `record-opt`; the steps
     `llvm-roundtrip`, `llvm-verify`); the print's levels, the lowering's print object and the parts whose records are the night's are the oracle tier's (`cpp-*-oracle`,
-    `llvm-*-oracle`, `cpp-records-verify`, `llvm-records-verify`; the hosts `:cxx` and `:llvm`).
+    `llvm-*-oracle`, `cpp-records-verify`, `llvm-records-verify`; the hosts `:cxx` and `:llvm`). Since ORS26 (b) and ORS27 (the user, 2026-11-05; "As built:
+    ORS26 (b), ORS27, the packs again") the lowering's gcc half (gcc compiling the lowered C, its run, the runtime's archives) runs only under `CPPI_LIVE=1` or
+    `CPPI_GCC=1`, else the lowered C is read by repr/c and checked by ci's checker (`arbace.cpp.run check-c`; a refusal in a class of `test/cpp/divergences.edn`
+    known): the gate's `cpp-lower*` keep `CPPI_GCC=1` and `:gcc` until `cpp-check-essential` covers `test/cpp/essential-lower.txt` (ORS28); `bin/cppi record-ir
+    --every N,M` records the run lists' samplings (libstdcxx's with its util library's IR), the night's; tools/cxxdump renumbers clang's ids and keys the checkout
+    as `@ROOT@` (`CXXDUMP_ROOT`), so a dump pack is the same in every checkout and verifies entry by entry.
     OCaml: since O8 repr/ocaml against the host's OCaml 5.5.0 (the host `:ocaml`: ocamlc, ocamlopt, compiler-libs, the oracle `tools/ocdump` built live) and oi's light driver (`go/arbace/oi`) against ocamlc's and ocamlopt's recorded runs, the corpora fetched by pin into the checkout's `.tmp/repr-ocaml`; `--corpus ID` (`bin/repr-ocaml roundtrip`; `opam`, `all`) and `--only-list FILE` (`bin/oi check [--aot]`, `suite check [--aot]`) select parts.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the

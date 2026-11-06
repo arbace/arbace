@@ -1354,3 +1354,118 @@ the essential list's 33 files are 58 KB xz, 1.8 KB a file) about 8 to 12 MB the 
 ## Decided (2026-11-05, the user: ORS24-ORS27)
 
 ORS24 (a), ORS25 (a) for OCaml; ORS26 (b): C++'s night records gxx-dg-run, the samplings and the essential and sampled dump lists (~25 MB), the rest live in the oracle tier; ORS27: :gcc kept on cpp-lower* now, its gcc half to the oracle tier once cpp-check-essential covers essential-lower.txt.
+
+## As built: ORS26 (b), ORS27, the packs again (2026-11-06)
+
+On branch `oracle-records-cpp2` (from `oracle-records-cpp` at `0c025a3f7`).
+
+### The five packs, recorded again
+
+The store's C++ and LLVM packs were lost in a worktree cleanup on 2026-11-05 (the pins and manifests were committed; the packs live in
+`.tmp/oracle-packs/`, outside the clone, ORS3 (a)). Recorded again here, one at a time, in this worktree (main's stage 0):
+
+| Pack | Command | Wall, peak RSS | Against the lost record |
+|---|---|---|---|
+| `cpp-ir-samples` | `bin/cppi record-ir` | 21 s, 0.2 GB | 223 of 244 members equal; 19 (`x.ll`, `ir.log`) equal once this worktree's name is renamed to the old one's (the IR names its source by path); the two link logs of `layouts.cpp` (no `main`) named the drivers' random temporary objects (g++'s `ccXXXXXX.o`, clang's `x-XXXXXX.o`): kept as such now by `record-ir` and its verify, which then gives 16 of 16 entries equal twice |
+| `cpp-runtime-ir` | `bin/cppi record-ir --runtime` | 68 s, 1.5 GB | byte for byte: the same pin (`ea55ad3c…`) |
+| `llvm-opt-verify` | `bin/repr-llvm record-opt all` | 55 s, 0.1 GB | byte for byte: the same pin (`bd076fae…`) |
+| `cxxdump-samples` | `bin/repr-cpp record-dumps samples` | 22 s, 0.4 GB | see below: 18 entries |
+| `cxxdump-gxx-dg-essential` | `bin/repr-cpp record-dumps gxx-dg-essential` | 18 s, 1.5 GB | see below: 64 entries |
+
+**The dump packs were not deterministic**, so "recorded again" first needed two fixes of `tools/cxxdump`:
+
+- clang's JSON names each node by its address (`"id":"0x7fa44449b108"`, and the references to it: `previousDecl`, `referencedMemberDecl`,
+  `typeAliasDeclId`, `TemplateInstantiationPattern`, ...), which ASLR moves from run to run: two runs of `samples` differed in 9 of 18 dumps,
+  by the ids alone. `renumber` (main.go) now writes the ids by first appearance in the dump, `0x1`, `0x2`, ... (every string of the form
+  `0x[0-9a-f]+`, the values `normalize` already drops as ids), one map for the dump's forms, so that a reference keeps its node's number. The
+  converter reads no id but the keys' presence (`arbace.repr.cpp.convert`); the cache version is `cxxdump-9`. Tests: `TestRenumber`, `TestEdn`.
+- the cache's key hashed the arguments as given, and the round trip gives clang the absolute `-iquote DIR` of the source (and the run lists
+  their absolute paths): a pack recorded in one worktree had keys no other checkout computes (the survey's "read anywhere" held for the IR
+  packs, whose `cpr_key` writes the checkout as `@ROOT@`, not for the dumps). Under `CXXDUMP_ROOT` (set by `bin/lib/repr-cpp/roundtrip`, `dg`
+  and `cxxdump-check`) the key and the dependencies' paths name the checkout as `@ROOT@` (`rootRel`, `rootAbs`; `TestRootKey`).
+- `record-dumps` packed the `.stats` (seconds and memory) its comment said it left out: left out now (72 and 254 members, was 90 and 318).
+
+Against the lost record (its manifests): the statuses, clang's errors and the dependencies' digests equal entry for entry (18 of 18,
+64 of 64), the `-norm` dumps (no ids) equal, the dumps differ by their ids. `bin/repr-cpp verify-dumps KEY` (now with ORS7 (a)'s crossed
+pair, as `bin/cppi record-ir --verify`'s; KEY a comma list for `bin/oracle-records verify cpp cxxdump --corpus K1,K2`): 18 and 64 entries
+all equal, the crossed pairs differ. `cpp-records-verify` (the oracle tier) verifies the dump packs too.
+
+### ORS26 (b): the samplings' records, the night's
+
+- `bin/cppi record-ir --every N,M`: of each corpus's list (`run_list`) the programs a sampling every Nth or Mth holds, the selection of
+  `bin/cppi check --sample N` and of `bin/cppi list libstdcxx --sample N`. For libstdcxx the util library's IR is recorded too
+  (`libstdcxx/util/NAME.cc`, the key `bin/lib/cppi/check` already asked for: ORS26's second half), and each corpus's programs are linked
+  natively with the corpus's libraries (`cppi_native_libs`: libstdcxx's util library by g++; `record-ir` linked every corpus as the samples
+  before, so a libstdcxx program's original and g++ links would have failed).
+- One key a program: the lowering's `list_libstdcxx` gave clang a subset of the options the run lists give (`-fno-elide-constructors` and
+  six other switches were left out), so the same `libstdcxx/NAME` would have had two keys, one of them STALE; it takes `cppi_opts` now.
+- `lower_check` reads the util library's IR from the records unless `CPPI_LIVE=1` (g++'s objects of it only live).
+- Proved on a scratch store (`ARBACE_ORACLE_PACKS=.tmp/scratch-packs`, the pins put back after): `record-ir --corpus libstdcxx --every 400`
+  (9 programs and the 4 util units, 156 members, 1 min 43 s, 1.5 GB): every original and g++ link 0, every run 0; then
+  `bin/cppi lower-check` of `bin/cppi list libstdcxx --sample 400` from that pack with the stubs: the 9 programs and the 4 util units
+  lowered, the 9 programs pass (the C level ci's), 1 min 24 s, 2.1 GB.
+- Not recorded here (the user's "night records"): `bin/cppi testsuite`, `bin/cppi record-ir --corpus libstdcxx --every 15,25` (234 and 155
+  programs, about 340), `record-ir --corpus gxx-dg-run --every 25` (67), then `bin/repr-cpp record-dumps K` for `gxx-dg-every-10`,
+  `gxx-old-deja-every-10`, `c-c++-common-every-10`, `libstdcxx-testsuite-every-40` (and `verify-dumps K --sample 100`). Once recorded, the parts
+  go back into `--full`: `cpp-lower.libstdcxx-every-15th`, `cpp-check` and `cpp-aot` `.gxx-dg-run-every-25`, `cpp-roundtrip`'s four sampled lists
+  (they stay the oracle tier's parts too, live). The whole of libstdcxx and gxx-dg-run and the modules lists stay live in the oracle tier.
+
+### ORS27: the lowering's gcc half
+
+The user's decision: `:gcc` stays on `cpp-lower*` now, the gcc half goes to the oracle tier once `cpp-check-essential` covers
+`test/cpp/essential-lower.txt`. Built so that the move is one line of `steps.edn`:
+
+- `bin/cppi`'s `cpr_gcc`: gcc compiling the lowered C, the lowered run, the util library's lowered objects and the runtime's archives run
+  when `CPPI_LIVE=1` (the oracle tier) or `CPPI_GCC=1`; else the lowering stops at the lowered C, which repr/c reads and ci's checker checks
+  (`arbace.cpp.run check-c`, FILES/NAME/`ci-check.status`), the level gcc's compile was. `gcc.status` and the run are then `skipped`.
+- The judge (`arbace.cpp.check/judge`): a C level ci refuses is the outcome `c-check`, known when its `STATUS MESSAGE` falls in a class of
+  `test/cpp/divergences.edn` (the run check's classes: CS35's long double), failing otherwise; the control's line says the lowered run is the
+  oracle tier's. `runtime-judge` takes `skipped`. Selftest `lower-records` (no toolchain): a pass, a known refusal, and two negative cases
+  (a refusal outside the classes, a C level that did not run) that must fail.
+- The runtime: `runtime_key`'s gcc line only in gcc's mode; a build writes `key.records` (and, with gcc, `key`); records mode checks
+  `key.records` and needs no archive, so a runtime the oracle tier built serves the gate; `runtime-ci` keys ci's library on `key.records`.
+- The gate's `cpp-lower-essential` and `cpp-lower` run `env CPPI_GCC=1 bin/cppi ...` and keep `:gcc` (the user's "now"; the brief of this branch named the decision "(b)", the decision's text conditions (b) on the coverage below, which wins).
+- The condition is not met: `cpp-check-essential` runs `samples/bitfields.cpp`, `samples/coroutine.cpp`, `samples/vexing.cpp`,
+  `runtime/uncaught.cpp`, `runtime/ctor-throw.cpp`, `runtime/thread-throw.cpp`; `essential-lower.txt` adds `samples/io.cpp`,
+  `runtime/hello.cpp` and `runtime/library.cpp`, whose ci builds took 204, 304 and 242 s in the last recorded run
+  (`test/cpp/check-times-linux-amd64.edn`), and `runtime/library.cpp` is a known non-pass on ci (`long-double`): its run can never be ci's
+  (ORS28).
+
+Measured with `clang`, `clang++`, `g++`, `gcc`, `cc`, `c++`, `opt`, `llvm-as`, `lli` and `clang-23` first on `PATH` as stubs exiting 99
+(none was called), main's stage 0:
+
+| Check | Result | Wall, peak RSS |
+|---|---|---|
+| `bin/repr-cpp pp-check --essential` | ok: the three corpora's lines agree or are known | 10 s, 0.6 GB |
+| `bin/repr-cpp roundtrip-corpus samples` | 9 pass | 3 s, 0.4 GB |
+| `bin/repr-cpp roundtrip-corpus gxx-dg-essential` | 31 pass, 2 oracle-rejects as recorded, 0 regressions | 6 s, 0.4 GB |
+| `bin/cppi lower-essential` (records mode, gcc stubbed too) | 5 pass, `runtime/library.cpp` known `long-double` at the C level; the control says the run is the oracle tier's; the runtime built with no gcc (198 units pass) on the first run, 4 min 27 s | 63 s warm, 2.0 GB |
+| `env CPPI_GCC=1 bin/cppi lower-essential` (the gate's form; real gcc, clang and g++ stubbed) | 6 pass, the control differs as it must; the runtime rebuilt with gcc (`key` and `key.records`) | 3 min 15 s, 1.6 GB |
+| the same in records mode after it | 5 pass, 1 known: the gcc build's `key.records` served, no rebuild | 63 s, 2.0 GB |
+| `bin/cppi lower-check` of libstdcxx every 400th (scratch pack) | 9 pass, the util library's IR from the records | 84 s, 2.1 GB |
+| `bin/cppi check --only test/cpp/essential-check.txt` (1 job, 1 thread) | samples 3 pass, runtime 2 pass and `threads` in its class, the run control `bitfields-vs-io` differs as it must, rc 0 | 30 min 29 s, **5.6 GB** (cold: the runtime's ci library and musl's forms read afresh; the gate's warm run is 60 s and 2.7 GB) |
+| `bin/cppi selftest --no-toolchain` | 4 pass (`lower-records`, `oracle-key`, `results-hold`, `results-nonpass`); `ctor-throw` and `odd-width` run gcc's lowered run and moved to `toolchain.txt` (`CPPI_GCC=1` in them) | 19 s, 0.4 GB |
+| `bin/oracle-records verify cpp ir runtime-ir --sample 8`, `verify cpp cxxdump --corpus samples,gxx-dg-essential --sample 6` (live, the oracle tier's) | 2, 25, 3 and 11 entries equal; the four crossed pairs differ | |
+| `bin/oracle-records check cpp` | the five packs in the store as their manifests say; the tampered-pack control refused (C's `c-headers-gcc15` and `c-roundtrip-orig-benchmarksgame` are missing from the store: another crop's) | |
+| `bin/gate --full --plan` in a scratch overlay (`test/ocaml/subsets.edn` emptied, as on 2026-11-05), then again with `gcc`, `g++`, `clang`, `clang++`, `opt`, `llvm-as`, `lli` printing a fake 9.99.9 first on `PATH` | of the 15 C++ and LLVM steps and parts 13 keys equal; `cpp-lower-essential` and `cpp-lower.samples` change (`:gcc`, ORS28) | |
+
+### What still needs a host tool
+
+- **clang++ and g++ (`:cxx`)**: nothing in the essential gate or `--full`. The records' makers (`record-ir`, `record-dumps`, `host record`,
+  `record-ref`, `pp-check --record`, `dg --record-ref`) and the oracle tier (`cpp-*-oracle`, `cpp-records-verify`): the print's levels 1, 3, 4
+  of the round trip, the lowering's print object, the parts whose records are the night's (above), the whole run corpora.
+- **gcc (`:gcc`)**: `cpp-lower-essential` and `cpp-lower` until ORS28; `cpp-lower-oracle`, `cpp-selftest-oracle`.
+- **LLVM (`:llvm`)**: `llvm-*-oracle` and `llvm-records-verify` only.
+- **The host's headers** (class E): `/usr/include/c++/15.2.0` read by `pp-check` and the native reads, checked by `bin/repr-cpp host check
+  --headers` (`bin/gate --pins`): ORS9's packed headers are not made for C++ yet.
+
+## Proposed (2026-11-06, C++): ORS28
+
+- **ORS28 The lowering's gcc half: meeting ORS27's condition.** `cpp-check-essential` does not cover `essential-lower.txt`'s `io.cpp`,
+  `hello.cpp` and `library.cpp`, and cannot cover `library.cpp`'s run (ci refuses its x86_fp80 layout, CS35).
+  - Options: (a) add `io.cpp` and `hello.cpp` to `essential-check.txt`, `library.cpp`'s lowered run left to `cpp-lower-oracle` and the C
+    level (its refusal known), then drop `CPPI_GCC=1` and `:gcc`; (b) as (a) without `hello.cpp` (its ci build is 5 minutes), whose run
+    `cpp-check`'s samples-runtime part covers nightly; (c) keep `CPPI_GCC=1` on the gate's lowering until ci builds these in a minute.
+  - Costs: (a) the essential gate about 4 to 5 more minutes of ci builds (2 jobs), against GT8's 900 s; (b) 2 to 3 minutes, `hello.cpp`'s and
+    `library.cpp`'s lowered runs only nightly (`cpp-check`) and in the oracle tier; (c) `:gcc` in the gate, nothing else.
+  - *Recommended: (b)*: `io.cpp` is the essential gate's <iostream> run, `hello.cpp` and `library.cpp` the nightly's.
