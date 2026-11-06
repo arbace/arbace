@@ -260,6 +260,13 @@
 
 (defn- register-obligations! [d args]
   (when *obligations*
+    ;; a trait's method: its trait's `Self: Trait<..>` predicate first (predicates_of a trait item)
+    (let [tr (c/def-parent d)
+          n (cond (and (string? d) (get (:traits c/*si*) tr)) (count (:generics (get (:traits c/*si*) tr)))
+                  (and (number? d) (number? tr) (= "Trait" (:kind (c/def-of tr)))) (count (c/all-params (c/generics-of tr)))
+                  :else nil)]
+      (when (and n (>= (count args) n))
+        (swap! *obligations* conj [:trait [tr (vec (take n args))]])))
     (doseq [cl (fn-clauses d)]
       (swap! *obligations* conj (erase (c/subst cl (vec args)))))))
 
@@ -359,7 +366,7 @@
               (holds? c)))
           (impl-clauses ip args)))
 
-(declare has-var?)
+(declare has-var? param-env alias-implements?)
 
 (def ^:dynamic *depth* 0)
 (def ^:dynamic *select-cache* nil)   ; atom: a body's goals with variables that were ambiguous or failed, by their resolved form
@@ -391,6 +398,14 @@
     ;; candidate assembly and winnowing (select.rs): a goal with inference variables in it that two impls match is
     ;; ambiguous (no impl selected, nothing bound; the obligation stays pending), else the one impl that matches
     (let [vars? (or (has-var? t) (some has-var? targs))
+          ;; where-clause candidates (assemble_candidates_from_caller_bounds) win over impls: the parameter environment's
+          ;; clauses of the trait whose self type is this one
+          st (shallow t)
+          envs (when (and trait (#{:param :proj :opaque} (first st)))
+                 (vec (filter (fn [cl] (and (= :trait (first cl)) (= trait (first (second cl))) (= st (shallow (first (second (second cl)))))
+                                            (let [s (snapshot) ok (or (nil? targs) (unify-all (vec (rest (second (second cl)))) (vec (take (dec (count (second (second cl)))) targs))))]
+                                              (rollback! s) ok)))
+                              (param-env))))
           try! (fn [[ip args self tr]]
                  (when *profile* (swap! *profile* update [trait (first (shallow t)) vars? *evaluating*] (fnil inc 0)))
                  (and (or (nil? *budget*) (pos? (long (swap! *budget* dec))))
@@ -398,6 +413,11 @@
                       (or (nil? targs) (unify-all (vec (rest (second tr))) (vec (take (dec (count (second tr))) targs))))
                       (impl-predicates-hold? ip args)))]
       (let [key (when (and vars? *select-cache* (not *evaluating*) (zero? (long *depth*))) [trait (deep t) (deep targs)])]
+       (cond
+        (= 1 (count (distinct envs)))
+        (let [cl (first envs)] (when targs (unify-all (vec (rest (second (second cl)))) (vec (take (dec (count (second (second cl)))) targs)))) [:env [] (second cl)])
+        (seq envs) :ambiguous
+        :else
        (if (and key (contains? @*select-cache* key))
         (get @*select-cache* key)
         (let [r
@@ -419,7 +439,7 @@
           ;; an ambiguous or failed goal's answer is the same while its variables are as they are (the evaluation
           ;; cache's role)
           (when (and key (not (vector? r))) (swap! *select-cache* assoc key r))
-          r))))))
+          r)))))))
 
 (defn- callable-output
   "A closure's, function item's or function pointer's return type (FnOnce::Output's builtin impl)"
@@ -430,13 +450,39 @@
     :fnptr (erase (:output (second self)))
     nil))
 
+(defn- trait-supers
+  "A trait clause's supertrait clauses (elaborate.rs: the trait's own `Self: Super<..>` clauses with its arguments)"
+  [[tr args]]
+  (let [cs (if (number? tr)
+             (try (c/explicit-clauses tr) (catch Throwable _ []))
+             (vec (keep (fn [c] (case (head c)
+                                  trait [:trait [(nth c 1) (mapv c/sty->ty (nth c 2))]]
+                                  proj [:proj (nth c 1) (mapv c/sty->ty (nth c 2)) (c/sty->ty (nth c 3))]
+                                  nil))
+                        (:predicates (get (:traits c/*si*) tr)))))]
+    (for [c cs
+          :when (case (first c) :trait (= [:param 0 "Self"] (first (second (second c)))) :proj (= [:param 0 "Self"] (first (nth c 2))) false)
+          :when (not (and (= :trait (first c)) (#{(c/lang "meta_sized") (c/lang "sized") (c/lang "pointee_sized")} (first (second c)))))]
+      (erase (c/subst c (vec args))))))
+
+(def ^:dynamic *param-env-cache* nil)   ; atom: {scope's identity: clauses}
+
 (defn- param-env
   "The parameter environment: the clauses of the definitions whose generics are in scope (a function's, its impl's or
-  trait's), regions erased"
+  trait's), elaborated with their traits' supertraits, regions erased"
   []
-  (vec (for [g c/*scope* :let [d (:def g)] :when (number? d)
-             cl (try (c/explicit-clauses d) (catch Throwable _ []))]
-         (erase cl))))
+  (let [k (System/identityHashCode c/*scope*)]
+    (or (when *param-env-cache* (get @*param-env-cache* k))
+        (let [own (vec (for [g c/*scope* :let [d (:def g)] :when (number? d)
+                             cl (try (c/explicit-clauses d) (catch Throwable _ []))]
+                         (erase cl)))
+              r (loop [acc own todo (filter #(= :trait (first %)) own) n 0]
+                  (if (or (empty? todo) (> n 64))
+                    (vec (distinct acc))
+                    (let [more (remove (set acc) (mapcat (fn [c] (trait-supers (second c))) todo))]
+                      (recur (into acc more) (filter #(= :trait (first %)) more) (inc n)))))]
+          (when *param-env-cache* (swap! *param-env-cache* assoc k r))
+          r))))
 
 (defn- env-projection
   "A projection clause of the parameter environment for <ARGS0 as Trait<..>>::AD: its term (the arguments unified)"
@@ -514,7 +560,7 @@
       (let [tr (c/def-parent ad)
             nm (if (number? ad) (second (:data (c/def-of ad))) (c/path-name ad))
             s (snapshot)]
-        (if-let [[ip iargs _] (let [r (impls-for self tr (vec (rest args)))] (when (vector? r) r))]
+        (if-let [[ip iargs _] (let [r (impls-for self tr (vec (rest args)))] (when (and (vector? r) (not= :env (first r))) r))]
           (let [v (if (number? ip)
                     (some (fn [d] (when (and (= ip (:parent d)) (= [:type nm] (:data d))) (erase (c/subst (c/type-of (:id d)) iargs)))) (c/defs))
                     (some (fn [[n k _ v]] (when (= n nm) (erase (c/subst (c/sty->ty v) iargs)))) (:items (get (:impls c/*si*) ip))))]
@@ -567,6 +613,8 @@
       (= tr (c/lang "sized")) (not (unsized? self))
       (#{(c/lang "meta_sized") (c/lang "pointee_sized")} tr) true
       (dyn-implements? self tr) true
+      ;; an alias's item bounds (assemble_candidates_from_projected_tys)
+      (alias-implements? self tr) true
       ;; the builtin impls: closures, function items and pointers implement the Fn traits (their signature's inputs the
       ;; arguments' tuple, unified: a closure's parameters from an impl's `F: FnMut(char) -> bool`); closures Clone and Copy
       (and (#{:closure :fndef :fnptr} (first self)) (fn-traits tr))
@@ -603,7 +651,7 @@
   "One overloaded autoderef step: `<T as Deref>::Target` from the impl of Deref for T"
   [t]
   (let [s (snapshot)]
-    (if-let [[ip args _] (let [r (impls-for t "core::ops::deref::Deref")] (when (vector? r) r))]
+    (if-let [[ip args _] (let [r (impls-for t "core::ops::deref::Deref")] (when (and (vector? r) (not= :env (first r))) r))]
       (let [tgt (if (number? ip)
                   (some (fn [d] (when (and (= ip (:parent d)) (= [:type "Target"] (:data d))) (erase (c/subst (c/type-of (:id d)) args)))) (c/defs))
                   (some (fn [[n k _ v]] (when (= n "Target") (erase (c/subst (c/sty->ty v) args)))) (:items (get (:impls c/*si*) ip))))]
@@ -643,6 +691,21 @@
                 :let [m (get (:traits c/*si*) p)]
                 :when (some #(= nm (first %)) (:items m))] p)))
 
+(defn- alias-implements?
+  "An alias self type's item bounds name the trait: a projection's (the crate's associated type's bounds, std's from
+  its interface), an opaque type's"
+  [self tr]
+  (case (first self)
+    :proj (let [[_ sad sargs] self
+                bounds (if (number? sad)
+                         (try (c/item-bounds sad) (catch Throwable _ []))
+                         (vec (for [[_ _ p bs] (:items (get (:traits c/*si*) (c/path-parent sad))) :when (= p sad)
+                                    b bs :when (= 'trait (head b))]
+                                [:trait [(nth b 1) (mapv c/sty->ty (nth b 2))]])))]
+            (boolean (some (fn [cl] (and (= :trait (first cl)) (or (= tr (first (second cl))) (some #(= tr (first (second %))) (trait-supers (second cl)))))) bounds)))
+    :opaque (boolean (some (fn [cl] (and (= :trait (first cl)) (= tr (first (second cl))))) (second self)))
+    false))
+
 (defn- method-candidate
   "At one step type T with receiver adjustment AUTOREF (nil, :not, :mut): the method named NM of an inherent impl, then of a
   trait in scope, whose self parameter's type is the adjusted receiver: [def args sig]"
@@ -675,9 +738,12 @@
                        r (when (= "AssocFn" (str k)) (try-def def targs))
                        self (some-> (first targs) shallow)]
                    (if (and r self (or (not (tvar? self)) (#{:int :float} (second self)))
-                            (or (= :param (first self))
+                            (or ;; a parameter: its where clause's arguments (a WhereClausePick)
+                                (when (= :param (first self)) (impls-for self tr (vec (rest targs))) true)
                                 ;; the object candidate: a trait object of the trait (or of a trait it extends)
                                 (dyn-implements? self tr)
+                                ;; an alias's item bounds (a projection's, an opaque type's)
+                                (alias-implements? self tr)
                                 (let [sn (snapshot) ok (impls-for self tr (vec (rest targs)))]
                                   (when (> (count targs) 1) (rollback! sn))
                                   ok)))
@@ -1105,7 +1171,7 @@
                                                                  (when (and principal (fn-traits (first principal)))
                                                                    [i st (first principal) (shallow (first (second principal)))
                                                                     (some (fn [[ad _ term]] (when (= "core::ops::function::FnOnce::Output" ad) term)) projections)]))
-                                           (= :param (first st)) (some (fn [[tr out]] [i st tr (second tr) out]) (param-fn-bound st))
+                                           (= :param (first st)) (some (fn [[tr out]] [i st tr (first (second tr)) out]) (param-fn-bound st))
                                            ;; an opaque type's Fn bound
                                            (= :opaque (first st))
                                            (let [cs (second st)
@@ -1282,7 +1348,8 @@
                               (doseq [[v a] (map vector own ga)] (unify v (body-ty (:ty a))))))
                           (check-args! (map vector (:args e) (concat (rest (:inputs sig)) (repeat nil))))
                           (:output sig))
-                      (do (doseq [a (:args e)] (check-expr a nil)) [:unknown])))
+                      (do (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "no method" (:ident (:seg e)) (deep rt))))
+                          (doseq [a (:args e)] (check-expr a nil)) [:unknown])))
           :binary (let [op (:op e)
                         lt (check-expr (:lhs e) nil)
                         rt (check-expr (:rhs e) (when (#{"+" "-" "*" "/" "%" "&" "|" "^" "==" "!=" "<" "<=" ">" ">="} op) lt))]
@@ -1565,7 +1632,7 @@
                                     tys (second (shallow (second args)))]
                                 (when (= (count tys) (count (:inputs sig))) (let [sn (snapshot)] (when-not (unify-all (vec (:inputs sig)) (vec tys)) (rollback! sn))))
                                 nil)
-                              (cond (or (= :param (first self)) (= [:unknown] self)
+                              (cond (or (= [:unknown] self)
                                         (#{(c/lang "sized") (c/lang "meta_sized")} tr)
                                         (not (some has-var? args))) nil
                                     (and (tvar? self) (not (#{:int :float} (second self)))) :keep
@@ -1638,7 +1705,7 @@
   (let [n (:node d) k (:kind d)
         owner (binding [c/*in-value* true] (c/print-def-path (:id d) []))
         facts (atom [])]
-    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *norm-cache* (atom {}) *scalar-fixes* (atom []) *owner* owner *env* [{}] *loops* nil]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *norm-cache* (atom {}) *param-env-cache* (atom {}) *scalar-fixes* (atom []) *owner* owner *env* [{}] *loops* nil]
       (c/in-def (:id d)
         (if (#{"Fn" "AssocFn"} k)
           (let [sig (erase (c/fn-sig (:id d)))
