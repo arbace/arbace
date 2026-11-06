@@ -729,3 +729,43 @@ rows of a selection are now recorded from the header reading, `OI_SELECTED`), an
   `lib-bigarray-file/mapfile`: passes at eval and at the light level.
 - Not ported: stores through a sub-array or a slice of a mapped array, and `fill`/`blit` into one, do not reach the file; NaN's
   unordered flag of compare (`compare_unordered`) is not kept.
+
+### Proposed (OT27-OT29; none decided)
+
+- **OT27 The C API shim's route** (item 9, the 25 programs of `:c-api`: callbacks 12, `[@unboxed]`/many-argument externals 3,
+  exceptions from C, Marshal's helpers 2, bigarrays from C 3, BLAKE2's self test, `cloexec`'s fd status helper, `delayintr`'s SIGINT
+  sender, `recommended_domain_count`). Each test's C is a few dozen lines over `caml/mlvalues.h`, `alloc.h`, `memory.h`,
+  `callback.h`, `fail.h`, `bigarray.h`. (a) ci (Arbace's C, `arbace/c`) interprets the stubs against a clean-room `caml/*.h` whose
+  macros and functions call back into oi's values (a `value` a handle of a table, tagged ints as OCaml's): it needs oi and ci in one
+  executable, which only the shipped program gives (oi embedded at the re-seed, the heavy list); 10 days eval + 4 AOT as §3 estimated,
+  after the embedding; (b) the same over a subprocess protocol between the oi driver and the tools' host running ci (a callback a round
+  trip): no embedding, about 12 days, slow (the callback tests make 10^5 crossings); (c) each test's stubs ported by hand to Go forms as
+  externals of a test library loaded with the program: about 3 days, but no C runs and no C API is checked (the tests then check oi's
+  callbacks, not the stubs); (d) by design. *Recommended: (a)*, built after oi is embedded; the 25 stay `:c-api` (deferred) until then.
+- **OT28 A mapped array's views.** oi writes a mapped array's stores through its mapping and the runtime through a file of its own,
+  but a `sub`, `slice`, `reshape` or `change_layout` of it, and `fill` and `blit` into it, change only the elements (no checked program
+  does it). (a) as built; (b) the views share the mapping (their offset into it) and fill and blit write through: half a day each
+  level. *Recommended: (a)*, (b) with the first test that needs it.
+- **OT29 ast-invariants and parsetree at the light level.** `ast-invariants/test` parses the compiler's whole tree (211 s on oi, the
+  limit 120) and `parsetree/test` takes the light level over its limit: by design as speed (`:speed`, `:light-speed`). (a) as built;
+  (b) a limit of their own (OC67's limits per program): 2 programs, a night slot. *Recommended: (a)*; the compiled level (OT8) is their
+  AOT judgment.
+
+### The night's record commands (after this branch; the compiled level heavy, after the night's clean run)
+
+The lists' rows were merged into the records; the whole corpora were not rerun. oi changed (Str, Bigarray, map_file, abstract socket
+names), the runtime changed (ExtStrRe, BaOps, ExtBigarray, Compare, Marshal), o2j changed (`clib`'s libraries, `@UNIT`, the externals of a
+library's own name), `bin/oi` and the header readings changed (the stdlib's key: the library set is rebuilt with Str and the parser), and
+the run corpus has 377 run programs (541 with a `.reference`), the suite 120:
+
+    bin/oi record-ref && bin/oi suite record-ref     # every run program's references (today: the newly run ones, by list)
+    bin/oi check --record                            # oi, the run corpus
+    bin/oi suite check --record                      # oi, the suite corpus
+    bin/oi check --aot --record                      # the light level
+    bin/oi suite check --aot --record
+    O2J_PLAN_ONLY=1 bin/oi check --aot --level compiled          # the shards' plan and bytes, nothing built (seconds)
+    O2J_SHARD=4 bin/oi check --aot --level compiled --record     # OT25 (a): at most 3 unix programs a shard; OT26 (a): the
+    O2J_SHARD=4 bin/oi suite check --aot --level compiled --record  # libraries in ocaml.u once; shards.tsv is OT22's measure
+    bin/oi pins --attest
+    bin/oi divergences && bin/oi suite divergences && bin/oi divergences --aot && bin/oi suite divergences --aot && bin/oi divergences --compiled
+    bin/reap record
