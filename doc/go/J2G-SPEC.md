@@ -782,8 +782,9 @@ doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC6b": the `jar:` URL's conne
 is `Handler`), `sun/net/ftp/impl/FtpClient` → `FtpImpl_FtpClient` (its abstract class `sun.net.ftp.FtpClient`
 is `FtpClient`), `sun/net/www/protocol/http/HttpURLConnection` → `Http_HttpURLConnection`
 (`java.net.HttpURLConnection` is `HttpURLConnection`). Since F19: `javax/naming/directory/Attributes` → `Naming_Attributes` (java.util.jar's), `javax/naming/Reference`
-→ `Naming_Reference` (jrt's `java.lang.ref.Reference`). Since F13: `com/sun/management/ThreadMXBean` → `Sun_ThreadMXBean`
-(java.lang.management's is `ThreadMXBean`).
+→ `Naming_Reference` (jrt's `java.lang.ref.Reference`). Since F13: `com/sun/management/ThreadMXBean` → `Sun_ThreadMXBean`,
+`com/sun/management/OperatingSystemMXBean` → `Sun_OperatingSystemMXBean` (java.lang.management's are
+`ThreadMXBean`, `OperatingSystemMXBean`).
 The check runs after translation (`arbace.j2g.checks`) over every Go package's package-level
 names and every type's method names, across j2g's generated files **and jrt's hand-written
 ones** (the stand-in files excepted, since replaced stand-ins are removed, §4.3); a collision is

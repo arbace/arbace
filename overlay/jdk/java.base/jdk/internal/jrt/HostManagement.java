@@ -97,6 +97,22 @@ public final class HostManagement {
      */
     public static native int[] lockedMonitorDepths0(Thread t, int n);
 
+    /**
+     * The operating system's fact of kind k (slice 5): 0 the committed virtual memory, 1 the free and 2 the total
+     * memory, 3 the free and 4 the total swap, 5 the process's CPU time (ns), 6 the open and 7 the most file
+     * descriptors, 8 the configured and 9 the online CPUs, 10 the CPUs' total ticks (ns); -1 when unknown.
+     */
+    public static native long os0(int k);
+
+    /** The recent CPU load of cpu (-1: the system) since the previous call, in [0, 1]; -1 when unknown. */
+    public static native double cpuLoad0(int cpu);
+
+    /** The process's recent share of the CPUs, in [0, 1]; -1 when unknown. */
+    public static native double processCpuLoad0();
+
+    /** The one-minute load average; -1 when unknown. */
+    public static native double loadAverage0();
+
     /** The times t blocked to enter a monitor or a lock. */
     public static native long blockedCount0(Thread t);
 

@@ -31,9 +31,10 @@
  * (newPlatformMXBeanProxy and the getPlatformMXBean(s) taking one), no PlatformMBeanProvider found by
  * ServiceLoader. The platform components are a table of jrt's own, in jdk26u's precedence (jdk.management's
  * provider before java.management's): the threads' bean (jdk.management's HotSpotThreadImpl, which is also a
- * com.sun.management.ThreadMXBean) and the runtime's (sun.management.RuntimeImpl); the other interfaces of the
- * platform (memory, class loading, compilation, the collectors, the pools and managers, the operating system,
- * logging, buffer pools) are F13's later slices: asking for one throws UnsupportedOperationException, naming the
+ * com.sun.management.ThreadMXBean), the runtime's (sun.management.RuntimeImpl) and the operating system's
+ * (jdk.management's OperatingSystemImpl, also the com.sun.management and Unix interfaces); the other interfaces
+ * of the platform (memory, class loading, compilation, the collectors, the pools and managers, logging, buffer
+ * pools) are F13's later slices: asking for one throws UnsupportedOperationException, naming the
  * slice. The constants and the getters' contracts are jdk26u's. Copyright (c) Oracle and/or its affiliates, under
  * the GNU General Public License version 2 with the Classpath Exception, as the notice above says (LICENSE.md).
  */
@@ -144,6 +145,11 @@ public class ManagementFactory {
         if (n.equals("java.lang.management.RuntimeMXBean")) {
             return sun.management.ManagementFactoryHelper.getRuntimeMXBean();
         }
+        if (n.equals("java.lang.management.OperatingSystemMXBean")
+                || n.equals("com.sun.management.OperatingSystemMXBean")
+                || n.equals("com.sun.management.UnixOperatingSystemMXBean")) {
+            return osBean();
+        }
         return null;
     }
 
@@ -157,6 +163,16 @@ public class ManagementFactory {
                     sun.management.ManagementFactoryHelper.getVMManagement());
         }
         return threadImpl;
+    }
+
+    private static PlatformManagedObject osImpl;
+
+    private static synchronized PlatformManagedObject osBean() {
+        if (osImpl == null) {
+            osImpl = com.sun.management.internal.JrtPlatformBeans.operatingSystem(
+                    sun.management.ManagementFactoryHelper.getVMManagement());
+        }
+        return osImpl;
     }
 
     private static UnsupportedOperationException notYet(Class<?> intf) {
@@ -199,6 +215,9 @@ public class ManagementFactory {
         s.add(ThreadMXBean.class);
         s.add(com.sun.management.ThreadMXBean.class);
         s.add(RuntimeMXBean.class);
+        s.add(OperatingSystemMXBean.class);
+        s.add(com.sun.management.OperatingSystemMXBean.class);
+        s.add(com.sun.management.UnixOperatingSystemMXBean.class);
         return Collections.unmodifiableSet(s);
     }
 }
