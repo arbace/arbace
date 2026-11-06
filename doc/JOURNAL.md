@@ -545,3 +545,24 @@ smaller parts), each on a branch of its own, held for after the tag (the merge p
   judge comparing free variables as sets. Final numbers: 9 of 9 programs run on hsi with GHC's stdout, the control failing;
   Core 152 of 220 bindings of the typecheck samples; STG 62 of 83 bindings of the programs equal to GHC's `-O0` dumps;
   `bin/repr-haskell typecheck-check` still 17 of 17 with the elaborator's changes, its control differing.
+
+## 2026-11-05: HF4, deriving (branch `haskell-hf4`, from `haskell-hf3`)
+
+`arbace/repr/haskell/deriv.ae` (about 500 lines) ports the generators of GHC 9.14.1's `compiler/GHC/Tc/Deriv/Generate.hs`
+(Eq, Ord, Show, Read, Enum, Bounded, Ix) and `Deriv/Functor.hs` (Functor, Foldable, Traversable, with tuples and nested
+type constructors) from `ghc-9.14.1-src.tar.xz` (the corpus's pin, SHA-256 `2a83779c...101e77`), by hand, as renamed-tree
+bindings the elaborator types like any instance's methods; `Deriv/Infer.hs`, `Deriv/Utils.hs`, `Deriv.hs` read as the
+specification of the contexts (a fixpoint over the module's derived instances, the last occurrence of a duplicate kept as
+GHC's solver leaves it) and of the strategies (newtype for a newtype's Eq, Ord, Ix, Bounded as GHC chooses without
+extensions, every class but Show and Read with `GeneralizedNewtypeDeriving`, `DeriveAnyClass`, standalone deriving).
+`LICENSE.md` and `doc/ARBACE.md` record the origin (BSD-3, the Glasgow license). Primops (`dataToTag#`, `tagToEnum#`,
+`Int#` comparisons) became three nodes of the elaborator and `GHC.Classes`' `eqInt`/`ltInt`... since the elaborator has
+no unboxed types; the auxiliary `$tag2con_T`/`$maxtag_T` are inlined (alternative: generate them, proposal 1).
+The rename tree carries the module's extensions now (`:exts`); `bin/repr-haskell typecheck-check` takes a list
+(`test/haskell/typecheck-check.txt`, HF3's decision 5: the nofib sweeps as a check list with their recorded non-passes).
+Judge: HF3's evidence judge over the derived bindings (the tc dump's Core of each `$c` binding; `-ddump-deriv` read, not
+compared). Results: 22 of 22 samples equal (T18-T22 are new), the list 48 of 57 with 9 known non-passes in HF3's classes.
+Alternatives considered: judging `-ddump-deriv`'s text (needs a printer of GHC's pretty layout for the generated trees,
+for less than the Core comparison gives); generating source text and renaming it (the derived code names `GHC.Classes`'
+functions whatever the module imports, so it would need the renamer's wired-in scope). Proposals 1-4 in the survey.
+

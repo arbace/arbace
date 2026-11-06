@@ -132,9 +132,11 @@
 #                                 HF5-HF6: the match compiler, CorePrep, CoreToStg over DIR's S*.hs (default test/haskell/stg):
 #                                 Core against the tc dump, STG against GHC's -O0 STG, each program run on hsi from our STG
 #                                 against GHC's output (HSI_LIBS: the libraries' STG dumps)
-#   bin/repr-haskell typecheck-check [DIR]
+#   bin/repr-haskell typecheck-check [DIR|LIST.txt]
 #                                 HF3: the elaborator (arbace.repr.haskell.typecheck) against the tc dump over DIR's T*.hs
-#                                 (default test/haskell/typecheck): types and evidence equal, the negative control differs
+#                                 (default test/haskell/typecheck): types and evidence equal, the negative control differs;
+#                                 HF4: a LIST.txt (test/haskell/typecheck-check.txt) the nofib programs it names instead,
+#                                 each a session of its own, the known non-passes in their recorded classes
 #   bin/repr-haskell rename-check [LIST]
 #                                 HF2: the renamer (arbace.repr.haskell.rename) against the rn dump over the lists'
 #                                 modules (default test/haskell/rename-check.txt: 47 samples, 33 modules of
@@ -810,12 +812,13 @@ stg_check() {
 # elaborator with defaulting's order reversed and superclass-implied constraints kept) must differ from GHC on some module.
 # Light: a few seconds a module. Work in .tmp/repr-haskell/typecheck-check/
 typecheck_check() {
+  case ${1:-} in *.txt) typecheck_list "$1"; return ;; esac
   local d=${1:-$root/test/haskell/typecheck} w=$rh/typecheck-check files trees=() f st=0
   rm -rf "${w:?}"; mkdir -p "$w"
   files=($(cd "$d" && ls T*.hs))
   (cd "$d" && "$helper" tc --libdir "$libdir" -o "$w/ghc" --ghc -XHaskell2010 -i. --files "${files[@]}") > "$w/ghc.log" 2>&1 || { tail -5 "$w/ghc.log" >&2; return 1; }
   (cd "$d" && "$helper" rn --libdir "$libdir" -o "$w/rn" --ghc -XHaskell2010 -i. --files "${files[@]}") > "$w/rn.log" 2>&1 || { tail -5 "$w/rn.log" >&2; return 1; }
-  "$helper" iface --libdir "$libdir" -o "$w/if" --ghc -XHaskell2010 --files Prelude Data.List Data.Maybe Data.Char Control.Monad > "$w/if.log" 2>&1 || true
+  "$helper" iface --libdir "$libdir" -o "$w/if" --ghc -XHaskell2010 --files Prelude Data.List Data.Maybe Data.Char Control.Monad Data.Ix Data.Foldable Data.Traversable Data.Functor > "$w/if.log" 2>&1 || true
   (cd "$d" && arbace_tool -m arbace.repr.haskell.native read -o "$w/nd" --flags "-XHaskell2010" "${files[@]}" > "$w/read.log") || { tail -5 "$w/read.log" >&2; return 1; }
   local dumps=(); for f in "${files[@]}"; do dumps+=("$w/nd/$f.edn"); trees+=("$w/tree/$f.rn-tree.edn"); done
   arbace_tool -m arbace.repr.haskell.rename check --ifaces "$w/if" --local "$w/ifl" --ghc "$w/rn" -o "$w/tree" "${dumps[@]}" > "$w/rename.txt" 2>&1 || st=1
@@ -828,6 +831,45 @@ typecheck_check() {
   else
     echo "typecheck-check: the negative control differs from GHC ($(grep '^typecheck-check:' "$w/control.txt"))"
   fi
+  return $st
+}
+
+# typecheck_list LIST: the elaborator over programs of nofib (HF4, doc/haskell/FRONTEND-SURVEY.md, "As built: HF4"), each
+# a session of its own (Haskell 2010): GHC's rn and tc dumps, the interfaces of its imports, the native read, the
+# renamer, then the elaborator judged as typecheck_check does. LIST's lines: `nofib PATH...` (paths under the pinned
+# GHC tarball's nofib/, Main.hs or the program's own file), `known PATH CLASS...` (a program whose recorded non-pass
+# is allowed, the class in words). Fails on a program neither ok nor known, or a known one whose rename differs.
+# Work in .tmp/repr-haskell/typecheck-list/NAME/
+typecheck_list() {
+  local list=$1 w=$rh/typecheck-list kind a rest st=0 ok=0 n=0 nk=0 f pw need line
+  local tb=$rh/corpus/ghc-9.14.1-src.tar.xz
+  [ -f "$tb" ] || { echo "typecheck-check: $tb is missing (bin/repr-haskell corpus fetch)" >&2; return 1; }
+  local -A known=()
+  while read -r kind a rest; do if [ "$kind" = known ]; then known[$a]=1; fi; done < "$list"
+  mkdir -p "$w"
+  while read -r kind a rest <&3; do
+    case $kind in nofib) ;; *) continue ;; esac
+    for f in $a $rest; do
+      n=$((n + 1)); pw=$w/$(echo "$f" | tr / _); rm -rf "${pw:?}"; mkdir -p "$pw/src"
+      tar -xJf "$tb" -O "ghc-9.14.1/nofib/$f" > "$pw/src/Main.hs" 2> "$pw/tar.log" || { echo "nofib $f: not in the tarball" >&2; st=1; continue; }
+      (cd "$pw/src" && "$helper" rn --libdir "$libdir" -o "$pw/ghc-rn" --ghc -XHaskell2010 --files Main.hs) > "$pw/ghc.log" 2>&1 \
+        && (cd "$pw/src" && "$helper" tc --libdir "$libdir" -o "$pw/ghc" --ghc -XHaskell2010 --files Main.hs) >> "$pw/ghc.log" 2>&1 \
+        || { echo "nofib $f: GHC rejects it" >&2; st=1; continue; }
+      need="Prelude $(grep -h '^import' "$pw/src/Main.hs" | sed 's/qualified//; s/safe//' | awk '{print $2}' | sed 's/(.*//' | sort -u | tr '\n' ' ')"
+      # shellcheck disable=SC2086
+      "$helper" iface --libdir "$libdir" -o "$pw/if" --ghc -XHaskell2010 --files $need > "$pw/if.log" 2>&1 || true
+      (cd "$pw/src" && arbace_tool -m arbace.repr.haskell.native read -o "$pw/nd" --flags "-XHaskell2010" Main.hs) > "$pw/read.log" 2>&1 || { echo "nofib $f: the native reader rejects it" >&2; st=1; continue; }
+      arbace_tool -m arbace.repr.haskell.rename check --ifaces "$pw/if" --local "$pw/ifl" --ghc "$pw/ghc-rn" -o "$pw/out" "$pw/nd/Main.hs.edn" > "$pw/rn.txt" 2>&1 || true
+      grep -q '1 of 1 modules equal' "$pw/rn.txt" || { echo "nofib $f: the renamer differs ($pw/rn.txt)" >&2; st=1; continue; }
+      arbace_tool -m arbace.repr.haskell.typecheck check --ifaces "$pw/if" --local "$pw/tifl" --ghc "$pw/ghc" -o "$pw/core" "$pw/out/Main.hs.rn-tree.edn" > "$pw/tc.txt" 2>&1 || true
+      line=$(head -1 "$pw/tc.txt")
+      case $line in
+        ok*) ok=$((ok + 1)); [ -z "${known[$f]:-}" ] || echo "nofib $f: known, and ok now" ;;
+        *) if [ -n "${known[$f]:-}" ]; then nk=$((nk + 1)); else echo "nofib $f: $line ($pw/tc.txt)" >&2; st=1; fi ;;
+      esac
+    done
+  done 3< "$list"
+  echo "typecheck-check list: $ok of $n programs equal, $nk known non-passes"
   return $st
 }
 

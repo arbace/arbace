@@ -66,6 +66,9 @@ code. Three kinds of things live here:
   `compiler/GHC/HsToCore/Match*.hs`, `GuardedRHSs.hs`, `ListComp.hs`, `compiler/GHC/CoreToStg/Prep.hs`,
   `CoreToStg.hs`, `compiler/GHC/Stg/Unarise.hs`, `Stg/FVs.hs` from the same tarball (2026-11-05, written after their
   algorithms, carrying GHC's notice), `stgcmp.ae` is Arbace's own),
+  `deriv.ae` (HF4, 2026-11-05) ports the generators of `compiler/GHC/Tc/Deriv/Generate.hs` (Eq, Ord, Enum, Bounded, Ix, Read,
+  Show) and `Deriv/Functor.hs` (Functor, Foldable, Traversable) from the same tarball, the file carrying GHC's notice;
+  `Deriv/Infer.hs` and `Deriv.hs` read as the specification of the contexts and strategies),
   `repr/c/` (repr/c, C's bridge,
   `arbace.repr.c.*`; doc/C23-SURVEY.md, doc/c/SPEC.md: its lexer and preprocessor, `repr/c/lex.ae` and
   `pp.ae`, are ports of modernc.org/cc/v4 v4.29.7 as go-whim carries it, https://github.com/arbace/go-whim
