@@ -200,25 +200,26 @@
     (slurp dump)
     (let [f (File. ^String (get opts "--file"))]
       ((requiring-resolve 'arbace.repr.python.native/read-dump)
-       (java.nio.file.Files/readAllBytes (.toPath f)) (.getName f) true))))
+       (java.nio.file.Files/readAllBytes (.toPath f)) (.getName f) true true))))
 
 (defn- do-run [opts]
-  (let [d (cv/convert (run-dump opts))]
-    (when (cv/error-form? d)
-      (binding [*out* *err*] (println (pr-str d)))
-      (System/exit 1))
-    (let [code (try (pc/compile-module d)
+  (let [d (cv/convert (run-dump opts))
+        ;; the main module's SyntaxError as the compiler's answer (queue 223): the runtime raises it and gives it to
+        ;; sys.excepthook (traceback's display: the location, the caret, a keyword's typo), as CPython reports it
+        _ (require 'arbace.python.run)
+        answer (resolve 'arbace.python.run/error-answer)
+        file (let [f (get opts "--file")] (if (= "__pyi_c.py" (.getName (File. ^String f))) "<string>" f))
+        text (if (cv/error-form? d)
+               (answer d nil file)
+               (try (ir-text (pc/compile-module d))
                     (catch Throwable e
-                      (if (= 'SyntaxError (:class (ex-data e)))
-                        (do (binding [*out* *err*] (println (str "SyntaxError: " (:msg (ex-data e))))) (System/exit 1))
-                        (throw e))))]
-      ;; PY5e: the runtime's compiler (imports, exec, eval) and sys.argv, sys.path (arbace.python.run)
-      (require 'arbace.python.run)
-      ((resolve 'arbace.python.run/install!) (cons (get opts "--argv0" (get opts "--file")) (get opts :argv))
-       (concat (remove nil? [(.getParent (File. ^String (get opts "--file"))) (get opts "--lib")]) (site-dirs opts)))
-      ;; os._exit in the program is goi's os.Exit, a GoExit: the process exits with its status (PY6f's Low)
-      (System/exit (try ((runtime-fn 'RunModule) (ir-text code) (get opts "--file"))
-                        (catch arbace.lang.GoExit e (.status e)))))))
+                      (if (= 'SyntaxError (:class (ex-data e))) (answer nil e file) (throw e)))))]
+    ;; PY5e: the runtime's compiler (imports, exec, eval) and sys.argv, sys.path (arbace.python.run)
+    ((resolve 'arbace.python.run/install!) (cons (get opts "--argv0" (get opts "--file")) (get opts :argv))
+     (concat (remove nil? [(.getParent (File. ^String (get opts "--file"))) (get opts "--lib")]) (site-dirs opts)))
+    ;; os._exit in the program is goi's os.Exit, a GoExit: the process exits with its status (PY6f's Low)
+    (System/exit (try ((runtime-fn 'RunModule) text (get opts "--file"))
+                      (catch arbace.lang.GoExit e (.status e))))))
 
 (defn- do-runtime-ops [opts]
   (let [theirs (vec ((runtime-fn 'OpNames)))
