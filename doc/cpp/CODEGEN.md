@@ -1033,3 +1033,10 @@ template corners; `hdr-vector` needs it for its last name.
 | **G5a** (this branch) | P15 (b), P16 (a), G5.3 | `<iostream>`, `<sstream>`, `<initializer_list>`, `<compare>` programs at three levels; the corpus sample of G5.4 | done |
 | **G5b** | P17, P18, P19; coroutines (frames, `co_await`/`co_yield`, the lowering's `llvm.coro.*` or our own frame lowering); `__complex__`; classes through `...`; the remaining refusals | the headers' corpus at 80 %; the existing 16 samples | 3-4 |
 | **G5c** | the runtime's units by our route (libsupc++ and libstdc++-v3/src compiled without clang, §6's G5) | `bin/cppi runtime-build --route ours` | 3-5 |
+
+## Decided (2026-11-06, the user: P17-P19)
+
+- **P17 (b), then (c):** a preprocessor token cache keyed by the include closure now; compiling the C++ crop's namespaces into the
+  executable later.
+- **P18 (b):** the 206-test headers corpus list committed with recorded results, as a night check beside P11's template corpus.
+- **P19 (b):** a class template's pattern analyzed as a dependent class (the current instantiation), in G6.
