@@ -463,8 +463,11 @@
                        r (when (= "AssocFn" (str k)) (try-def def targs))
                        self (some-> (first targs) shallow)]
                    (if (and r self (not (tvar? self))
-                            (or (= :param (first self)) (impls-for self tr (vec (rest targs)))))
-                     r
+                            (or (= :param (first self))
+                                (let [sn (snapshot) ok (impls-for self tr (vec (rest targs)))]
+                                  (when (> (count targs) 1) (rollback! sn))
+                                  ok)))
+                     (do (when (and *obligations* (> (count targs) 1)) (swap! *obligations* conj [:trait [tr targs]])) r)
                      (do (rollback! s) nil)))
                  nil)))
            (traits-in-scope nm)))))
@@ -511,10 +514,14 @@
       (some (fn [tr]
               (when-let [[def k] (trait-item tr nm)]
                 (when (= "AssocFn" (str k))
-                  (let [s (snapshot) targs (vec (cons t (drop 1 (fresh-args tr))))]
-                    (if (impls-for t tr)
-                      [:fndef def (into targs (drop (count targs) (fresh-args def)))]
-                      (do (rollback! s) nil))))))
+                  (let [targs (vec (cons t (drop 1 (fresh-args tr))))
+                        s (snapshot)
+                        ok (impls-for t tr (vec (rest targs)))]
+                    ;; an impl exists; which one the other arguments decide later (the registered obligation)
+                    (rollback! s)
+                    (when ok
+                      (when *obligations* (swap! *obligations* conj [:trait [tr targs]]))
+                      [:fndef def (into targs (drop (count targs) (fresh-args def)))])))))
             (traits-in-scope nm))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -530,6 +537,12 @@
   (let [f (shallow from) t (shallow to)]
     (cond
       (= [:never] f) (do (adjust! e [["NeverToAny" to]]) true)
+      ;; a function item (a non-capturing closure) to a function pointer: ReifyFnPointer (ClosureFnPointer)
+      (and (#{:fndef :closure} (first f)) (= :fnptr (first t)))
+      (let [sig (if (= :fndef (first f)) (sig-of f) (nth f 2))
+            ok (and (unify-all (:inputs sig) (:inputs (second t))) (unify (:output sig) (:output (second t))))]
+        (when ok (adjust! e [["Pointer" to]]))
+        ok)
       (and (= :ref (first f)) (= :ref (first t)) (= :array (first (shallow (nth f 3)))) (= :slice (first (shallow (nth t 3)))))
       (do (adjust! e [["Deref" (nth f 3)] ["Borrow" [:ref [:re-erased] (nth t 2) (nth f 3)]] ["Pointer" to]])
           (unify (second (shallow (nth f 3))) (second (shallow (nth t 3)))))
@@ -735,8 +748,9 @@
                  (let [at (check-expr a (or (when (and xi (not (tvar? (shallow xi)))) xi) ty))] (when ty (let [ok (coerce! a at ty)] (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "arg" (second ft) ok (deep at) (deep ty))))))))
                (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "call" (second ft) (deep output) (shallow output))))
                output)
-      ;; a closure's own signature (deferred call resolution)
+      ;; a closure's own signature (deferred call resolution), the callee autoref'd (its kind taken as Fn)
       :closure (let [{:keys [inputs output]} (nth ft 2)]
+                 (adjust! (:func e) [["Borrow" [:ref [:re-erased] false ft]]])
                  (doseq [[a ty] (map vector (:args e) (concat inputs (repeat nil)))]
                    (let [at (check-expr a ty)] (when ty (coerce! a at ty))))
                  output)
@@ -753,6 +767,12 @@
                                                                    [i st (first principal) (shallow (first (second principal)))
                                                                     (some (fn [[ad _ term]] (when (= "core::ops::function::FnOnce::Output" ad) term)) projections)]))
                                            (= :param (first st)) (some (fn [[tr out]] [i st tr (second tr) out]) (param-fn-bound st))
+                                           ;; an opaque type's Fn bound
+                                           (= :opaque (first st))
+                                           (let [cs (second st)
+                                                 tr (some (fn [c] (when (and (= :trait (first c)) (fn-traits (first (second c)))) (second c))) cs)
+                                                 out (some (fn [c] (when (and (= :proj (first c)) (= "core::ops::function::FnOnce::Output" (second c))) (nth c 3))) cs)]
+                                             (when tr [i st (first tr) (second (second tr)) out]))
                                            :else nil)))
                       (map-indexed vector steps))]
         (if-let [[i st tr targs out] hit]

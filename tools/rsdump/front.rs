@@ -445,7 +445,7 @@ pub fn typeck<'tcx>(tcx: TyCtxt<'tcx>) -> String {
 pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
     use rustc_middle::ty::{self, fast_reject::SimplifiedType};
     let std_crate = |d: DefId| matches!(tcx.crate_name(d.krate).as_str(), "std" | "core" | "alloc");
-    let skip = |p: &str| p.contains("::arch") || p.contains("simd") || p.contains("core_arch");
+    let skip = |p: &str| p.contains("::arch") || p.contains("core_arch");
     let clause = |c: ty::Clause<'tcx>| -> String {
         match c.kind().skip_binder() {
             ty::ClauseKind::Trait(t) => format!("(trait {} [{}])", q(&def_path(tcx, t.def_id())), t.trait_ref.args.iter().map(|a| sarg(tcx, a)).collect::<Vec<_>>().join(" ")),
