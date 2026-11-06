@@ -22,6 +22,8 @@
 
 (defn- head [x] (when (seq? x) (first x)))
 
+(declare fn-traits)
+
 ;; ---------------------------------------------------------------------------------------------
 ;; Inference variables (rustc_infer: ty, int and float variables; unification with regions erased)
 
@@ -565,10 +567,15 @@
       (= tr (c/lang "sized")) (not (unsized? self))
       (#{(c/lang "meta_sized") (c/lang "pointee_sized")} tr) true
       (dyn-implements? self tr) true
-      ;; the builtin impls: closures, function items and pointers implement the Fn traits; closures Clone and Copy
-      (and (#{:closure :fndef :fnptr} (first self))
-           (#{"core::ops::function::Fn" "core::ops::function::FnMut" "core::ops::function::FnOnce"
-              "core::clone::Clone" "core::marker::Copy"} tr)) true
+      ;; the builtin impls: closures, function items and pointers implement the Fn traits (their signature's inputs the
+      ;; arguments' tuple, unified: a closure's parameters from an impl's `F: FnMut(char) -> bool`); closures Clone and Copy
+      (and (#{:closure :fndef :fnptr} (first self)) (fn-traits tr))
+      (let [sig (case (first self) :closure (nth self 2) :fndef (sig-of self) :fnptr (erase (second self)))
+            tup (some-> (second args) shallow)]
+        (if (and (= :tuple (first tup)) (= (count (second tup)) (count (:inputs sig))))
+          (unify-all (vec (:inputs sig)) (vec (second tup)))
+          true))
+      (and (#{:closure :fndef :fnptr} (first self)) (#{"core::clone::Clone" "core::marker::Copy"} tr)) true
       ;; an integer or float variable: the one impl among the integral (floating) ones that unifies, selected (the index
       ;; `v[0]`'s `{integer}: SliceIndex<[T]>` makes it usize)
       (and (tvar? self) (#{:int :float} (second self)) (<= (long *depth*) 4))
@@ -1212,7 +1219,7 @@
     (case (first rd)
       :ext (std-struct-ty (let [p (second rd)] (if (re-find #"\{constructor#\d+\}$" p) (c/path-parent p) p)))
       :local (let [[_ id k] rd d (c/def-of id)]
-               (cond (= "Struct" k) (let [args (fresh-args id)] [[:adt id args] id args])
+               (cond (#{"Struct" "Union"} k) (let [args (fresh-args id)] [[:adt id args] id args])
                      (= "Variant" k) (let [args (fresh-args (:parent d))] [[:adt (:parent d) args] id args])
                      :else nil))
       nil)))
@@ -1390,7 +1397,8 @@
                         (let [fty (get fs (:ident f))
                               x (check-expr (:expr f) fty)]
                           (when fty (coerce! (:expr f) x fty))))
-                      (when (:base e) (check-expr (:base e) t))
+                      ;; the functional update's base has the struct's type (coerced to it)
+                      (when (:base e) (let [bt (check-expr (:base e) t)] (coerce! (:base e) bt t)))
                       t)
                     (do (doseq [f (:fields e)] (check-expr (:expr f) nil)) [:unknown]))
           :drop-temps (check-expr (:expr e) expected)
