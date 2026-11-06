@@ -1052,7 +1052,8 @@ env, ci-param-width, c-variadic, lto). Over the whole suite the causes size so (
   line) are fixed since (the math ports; the fault line out of the compared stderr), not run again; not measured, over the day's
   memory line in one process: `threads.rs` (2.4 GB), `collections.rs`, `drops.rs`, `errors.rs` (a batch of three past 2.3 GB).
 - **UI sample (RE4's every 40th, 93 programs)**: 60 run so far, **58 pass**, `c-variadic/valid.rs` refused (class c-variadic) and
-  `macros/stringify.rs` (a `--test` harness) ends in `deadlock: every thread waits` (libtest's main waiting; to debug first on resume);
+  `macros/stringify.rs` (a `--test` harness) ended in `deadlock: every thread waits`: fixed after (thread-local objects at a
+  thread's own addresses, EVAL.md §10), its 13 tests now pass as rustc's;
   33 not run (`.tmp/re6/left-ui40.ids`). RE4 had 87 of 93 with this std (one threads, one process, one env, one c-variadic, one lto,
   one ci-param-width failure); in the 60 run here the process (`segfault-no-out-of-stack.rs`: its spawn now runs; the child needed
   `ioctl` FIONBIO and a signal's end, both built, not rerun) and env programs had not come yet.
@@ -1084,11 +1085,9 @@ env, ci-param-width, c-variadic, lto). Over the whole suite the causes size so (
   `Mem`'s bytes, `Mem`'s slabs and the `Sys` tables locked, a run no longer deterministic (the judge's `:det` classes
   more programs nondet), weeks; (c) keep threads on Rust's branch only (a fork of ci). *Recommended: (a)*; (b) only if a
   program needs real parallelism (none of the corpora's do: they are judged on their output).
-- **RES47 Thread-local storage by swapping.** As built each thread's thread-local bytes are swapped in at the objects'
-  addresses as the baton passes (cheap: std's are a few hundred bytes; no node format change but the RO field's 2). Options:
-  (a) **as built**, the divergence (another thread's object read through a pointer gives the reader's copy) recorded;
-  (b) addresses relative to the thread pointer (a `tls` node in the builder, the loader and cf2g), exact, a format change in
-  three places. *Recommended: (a)* until a program shows the divergence.
+- **RES47 Thread-local storage in the compiled programs.** Since the stringify.rs fix the interpreter gives each thread its own
+  block (EVAL.md §10); cf2g's code reads statics from its table. Options: (a) **cf2g emits a thread-local object's address as the
+  interpreter's node does (the thread's block, else the static), with RE6's AOT**; (b) threads refused in AOT. *Recommended: (a)*.
 - **RES48 LTO on the ci leg.** As built (EVAL.md §11) the program's unit before LTO is lowered, the flags kept for the judge
   (RES2 (c)); a fat-LTO program's shim from a second build without LTO. Options: (a) **as built**; (b) the class `lto` for
   good. *Recommended: (a)*: LTO changes no behaviour a run-pass test observes (the known-bug tests aside, their own class).

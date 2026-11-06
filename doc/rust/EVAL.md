@@ -312,11 +312,14 @@ start (doc/C23-SURVEY.md §6.5, CS11 (a): "threads as goroutines over musl's own
   `process`). An exit_group or a fault in another thread ends the program: the main thread, woken, raises it, the fault's message
   naming the thread and its frames.
 - **Thread-local storage**: the builder marks a thread-local object (C's `_Thread_local`, the lowering's `thread_local`
-  globals: Rust's `thread_local!`, the pending-exception flag `cx$pending`) as `(static IDX SIZE ALIGN 2 NAME)`; the loader lists
-  them, `Run` records their bytes after the static initializers, and as the baton passes the running thread's bytes are saved
-  into its task and the next one's put in place (a new thread's from the recorded image). So each thread sees its own objects
-  at the same addresses while it runs; a thread-local object's address handed to another thread reads that thread's own copy
-  (a divergence; Rust's thread-locals are `!Send`, C rarely does it).
+  globals: Rust's `thread_local!`, the pending-exception flag `cx$pending`) as `(static IDX SIZE ALIGN 2 NAME)`; the loader gives
+  each an offset in a thread's block, `Run` records the objects' bytes after the static initializers as the block's image, and a
+  new thread gets a block of its own made from it. A `(g IDX)` node of a thread-local object gives the running thread's: the main
+  thread's at the static's address, another's in its block. So threads see distinct addresses, as natively: std's mpmc channels
+  name a thread by a thread-local's address (`current_thread_id`), and RE6's first design (the bytes swapped at one address as
+  the baton passed) made every thread the same, a sender skipping the receiver's wake (`macros/stringify.rs`: libtest's main
+  never woken, "deadlock: every thread waits"). Not taken yet: the compiled programs (cf2g's code reads a static's address from
+  its table, the main thread's: threads in AOT share the main thread's objects, RE6's AOT to do).
 - **std's thread-local destructors**: `__cxa_thread_atexit_impl`'s port (`test/rust/runtime/ci/builtins.c`) keeps a list per
   thread on a pthread key, run as musl's `pthread_exit` runs the key's destructor: a thread's `thread_local!` values drop as it
   exits, the main thread's never (natively on musl: no `__cxa_thread_atexit_impl`, std's own list on a key, the same behaviour).
