@@ -4826,3 +4826,14 @@ packed tests lay out unpacked (`test/c/check-known.edn`, class `read`, matched b
   (binary-trees-5, c23-complit-4) adopt it at its merge, no second one here.
 - **CS277 (a)**: `__builtin_va_arg_pack` built, a call node appending the current frame's variadic arguments.
 - Order of the work: CS277, CS274, CS275 (a).
+
+### CDF.6 CS277 built: `__builtin_va_arg_pack` (2026-11-06)
+
+A call whose last argument is `__builtin_va_arg_pack ()` is built with the argument node `(apack)`: the calling frame's variadic
+arguments appended after the others, at both back ends (the interpreter's `evalArgs`, cf2g's `ci.Pack(fr, args)`); a variadic
+frame keeps its variadic `Arg`s (`Frame.VArgs`, set by `Prog.Call` and the compiled functions' `Enter`).
+`__builtin_va_arg_pack_len ()` is `(vplen)`, their number. gcc forwards an always_inline function's extra arguments when it inlines
+it; ci, which never inlines, forwards the calling frame's, which is the same for a function gcc accepts (gcc refuses the builtin
+outside an always_inline variadic function's call arguments). Proved: va-arg-pack-1 passes (`bin/ci check --only`, 134 programs,
+exit 0, 26 recorded failures pass), `test/c/run/va-arg-pack.c` (ci-run `:count` 15) equal to gcc -O0 here; cf2g translates it
+(`ci.Pack`), not compiled. The class `missing-builtin` is a guard class. Eval and AOT deferred: 7 to 6 each.

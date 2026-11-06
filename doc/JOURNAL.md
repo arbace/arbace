@@ -432,3 +432,7 @@ Each branch's doc records it.
   `#include` inside it brought in under `*include-inside*`. Five self-including programs and 18_include pass (25 recorded
   failures pass on the 133-program sample, exit 0); 95_bitfields left in `read` (a packed attribute from a macro the copy
   defines is lost). Eval and AOT deferred 33 to 7 each. Alternatives: CS275 (a), the print's statement-level include, two days.
+- **The user's decisions of the day (CS274 (a), CS275 (a), CS276 (b) by rust-re6's scheduler, CS277 (a)) recorded; CS277 built**:
+  `__builtin_va_arg_pack` as a call's argument node `(apack)` forwarding the calling frame's variadic arguments (`Frame.VArgs`,
+  both back ends, cf2g's `ci.Pack`), `__builtin_va_arg_pack_len` as `(vplen)`; va-arg-pack-1 passes. Alternative: inlining
+  always_inline functions in the builder (CS277 (b)), two days.
