@@ -1596,6 +1596,55 @@
   [e]
   {:op :temp :init {:i :expr :e e} :ty (:ty e) :cat :xv})
 
+(declare aggregate?)
+
+(defn- aggr-subs
+  "The types an aggregate's elements have, in order (an array of unknown bound: as many as `n`)."
+  [u n]
+  (cond
+    (abi/arr? u) (repeat (or (:n u) n) (:of u))
+    :else (let [c (abi/cls (:id u))
+                subs (concat (map (fn [b] {:k :class :id (:cls b)}) (:bases c))
+                             (map :ty (remove #(and (:bits %) (nil? (:name %))) (:fields c))))]
+            (if (:union c) (take 1 subs) subs))))
+
+(declare elide-agg)
+
+(defn- elide-sub
+  "One element of type `st` initialized from the flat items `items` ([dcl.init.aggr]/16, brace elision): a braced
+  item, an item that initializes it whole, or as many items as a subaggregate takes. [item rest]."
+  [st items]
+  (let [it (first items) u (abi/unq st)]
+    (cond
+      (= :init-list (:op it)) [it (rest items)]
+      (and (or (abi/arr? u) (and (abi/class? u) (aggregate? u)))
+           (not (and (abi/class? u) (let [k (class-id (:ty it))] (or (= k (:id u)) (and k (abi/derived-from? k (:id u)))))))
+           (not (and (abi/arr? u) (= :str (:op it)))))
+      (let [[sub r] (elide-agg u items)] [{:op :init-list :items sub} r])
+      :else [it (rest items)])))
+
+(defn- elide-agg [u items]
+  (loop [ts (aggr-subs u (count items)) items items out []]
+    (if (or (empty? ts) (empty? items))
+      [out items]
+      (let [[x r] (elide-sub (first ts) items)] (recur (rest ts) r (conj out x))))))
+
+(defn- brace-elide
+  "The braced list `src` for the aggregate `u` with its elided braces restored (fully braced), when some are elided."
+  [u src]
+  (let [items (:items src)
+        one (when (= 1 (count items)) (first items))
+        ;; (the native parser's semantic form braces a lone item of the class's own type as if it were elided:
+        ;; {{o.a}} for a{o.a}, unwrapped: [dcl.init.list]/3.2 copies it)
+        items (if (and one (= :init-list (:op one)) (= 1 (count (:items one))) (abi/class? u)
+                       (= (class-id (:ty (first (:items one)))) (:id u)))
+                (:items one) items)
+        src (assoc src :items items)]
+    (if (and (= 1 (count items)) (abi/class? u) (= (class-id (:ty (first items))) (:id u)))
+      src
+      (let [[out r] (elide-agg u items)]
+        (if (seq r) src (assoc src :items out))))))
+
 (defn init-for
   "The initializer of an object of type `t` from `src`: nil (none), a typed expression, an init-list node
   {:op :init-list :items [...]}, or a vector of constructor arguments (direct-initialization); `style` :copy :direct
@@ -1637,7 +1686,7 @@
       (= :init-list (:op src))
       (cond
         (abi/arr? tu)
-        (let [items (:items src)
+        (let [items (:items (brace-elide tu src))
               el (:of tu)]
           (if (and (= 1 (count items)) (= :str (:op (first items))) (#{:char :schar :uchar} (abi/bn (abi/unq el))))
             {:i :string :e (first items) :n (:n tu)}
@@ -1645,7 +1694,7 @@
             {:i :list :items (mapv #(init-for el % ctx :copy) items) :fill (when (and (:n tu) (< (count items) (long (:n tu)))) (init-for el nil ctx :value)) :n (:n tu)}))
         (and (abi/class? tu) (aggregate? tu))
         (let [c (abi/cls (:id tu))
-              items (:items src)
+              items (:items (brace-elide tu src))
               ;; a single item of the class's own type copies it ([dcl.init.list]/3.2)
               _ (when (seq (:bases c)) nil)
               subs (concat (map (fn [b] {:base true :ty {:k :class :id (:cls b)}}) (:bases c))
@@ -2401,6 +2450,18 @@
     "IntegerLiteral" (let [t (int-type-of (get-in n [:type :qualType]))] {:op :int :v (let [v (bigint (:value n))] (if (> v Long/MAX_VALUE) (long (- v 18446744073709551616N)) (long v))) :ty t :cat :pr})
     "CharacterLiteral" {:op :int :v (long (:value n)) :ty (int-type-of (get-in n [:type :qualType] "char")) :cat :pr}
     ;; a type trait's value (G4: the headers' __is_constructible(T, Args...)), its text evaluated by the templates' hook
+    ;; a user-defined literal ([lex.ext]/3-8): the literal operator's call, operator""X(...) with the literal's value
+    "UserDefinedLiteral"
+    (if-let [u (:_udl n)]
+      (let [callee {:kind "DeclRefExpr" :referencedDecl {:name (str "operator\"\"" (:suffix u))} :range (:range n)}
+            args (case (:k u)
+                   :str [{:kind "StringLiteral" :value (:value u) :type {:qualType (str "const " (:ty u) "[" (:n u) "]")} :valueCategory "lvalue" :range (:range n)}
+                         {:kind "IntegerLiteral" :value (str (dec (long (:n u)))) :type {:qualType "unsigned long"} :valueCategory "prvalue"}]
+                   :chr [{:kind "CharacterLiteral" :value (:value u) :type {:qualType (:ty u)} :valueCategory "prvalue"}]
+                   :int [{:kind "IntegerLiteral" :value (str (:value u)) :type {:qualType "unsigned long long"} :valueCategory "prvalue"}]
+                   :float [{:kind "FloatingLiteral" :value (str (:value u)) :type {:qualType "long double"} :valueCategory "prvalue"}])]
+        (analyze ctx {:kind "CallExpr" :inner (vec (cons callee args)) :range (:range n)}))
+      (fail :expr "a user-defined literal"))
     ;; __builtin_va_arg(ap, T) (clang's VAArgExpr; G5): the next argument of a va_list
     "BuiltinExpr" (if-let [x (:_vaarg n)]
                     (let [t (resolve-type (:scope ctx) (:_vatype n))]

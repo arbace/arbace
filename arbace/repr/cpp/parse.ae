@@ -1329,7 +1329,11 @@
         ss (loop [out []] (if (#{:str :udls} (tk (cur p))) (let [s (ts (cur p))] (adv! p) (recur (conj out s))) out))
         e (last-ix p)]
     (if (some #(re-find #"[\"][A-Za-z_][A-Za-z0-9_]*$" %) ss)
-      (node p "UserDefinedLiteral" b e {})
+      ;; (G5: the literal and its ud-suffix for the code generator's literal operator call, [lex.ext]/5)
+      (let [sfx (some #(second (re-find #"[\"]([A-Za-z_][A-Za-z0-9_]*)$" %)) ss)
+            plain (mapv #(str/replace % #"([\"])[A-Za-z_][A-Za-z0-9_]*$" "$1") ss)
+            [v ty n] (try (lit/string-literal plain (.-year p)) (catch Exception _ nil))]
+        (node p "UserDefinedLiteral" b e (if v {:_udl {:k :str :suffix sfx :value v :ty ty :n n}} {})))
       (let [[v ty n] (lit/string-literal ss (.-year p))]
         (node p "StringLiteral" b e {:value v :type {:qualType (str "const " ty "[" n "]")} :valueCategory "lvalue"})))))
 
@@ -1346,7 +1350,13 @@
         (if (and (re-matches #"(?i)[0-9.][0-9a-z.'+-]*?(i|j)(f|l|u|ul|ll|ull)?|(?i)[0-9.][0-9a-z.'+-]*?(f|l)(i|j)" s)
                  (not (sc/lookup (scope p) (str "operator\"\"" (second (re-find #"([A-Za-z_]+)$" s))))))
           (node p "ImaginaryLiteral" i i {})
-          (node p "UserDefinedLiteral" i i {}))))))
+          (let [[_ num sfx] (re-find #"^(.*?)(_[A-Za-z0-9_]*)$" s)]
+            (node p "UserDefinedLiteral" i i
+                  (if num
+                    (if-let [[v] (lit/int-literal num)]
+                      {:_udl {:k :int :suffix sfx :value v}}
+                      (if-let [[v] (lit/float-literal num)] {:_udl {:k :float :suffix sfx :value v}} {}))
+                    {}))))))))
 
 (defn- simple-type-start?
   "A simple-type-specifier begins at the cursor and a ( or { follows it: a functional cast or construction (not a
@@ -1471,7 +1481,10 @@
     (cond
       (identical? k :num) (parse-number p)
       (identical? k :chr) (let [[v ty] (lit/char-literal s (.-year p))] (adv! p) (node p "CharacterLiteral" b b {:value v :type {:qualType ty} :valueCategory "prvalue"}))
-      (identical? k :udlc) (do (adv! p) (node p "UserDefinedLiteral" b b {}))
+      (identical? k :udlc) (do (adv! p)
+                               (let [[_ lit sfx] (re-find #"^(.*')([A-Za-z_][A-Za-z0-9_]*)$" s)
+                                     [v ty] (when lit (try (lit/char-literal lit (.-year p)) (catch Exception _ nil)))]
+                                 (node p "UserDefinedLiteral" b b (if v {:_udl {:k :chr :suffix sfx :value v :ty ty}} {}))))
       (or (identical? k :str) (identical? k :udls)) (parse-string-literal p)
       (t= t "true") (do (adv! p) (node p "CXXBoolLiteralExpr" b b {:value true :type {:qualType "bool"}}))
       (t= t "false") (do (adv! p) (node p "CXXBoolLiteralExpr" b b {:value false :type {:qualType "bool"}}))
