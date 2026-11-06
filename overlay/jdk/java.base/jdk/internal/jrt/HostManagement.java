@@ -73,4 +73,46 @@ public final class HostManagement {
     public static void setAllocatedMemory(boolean on) {
         allocatedMemory = on;
     }
+
+    /** ThreadInfo's private constructors, as the JVM reaches them (ThreadInfo's static initializer sets it). */
+    public interface ThreadInfoFactory {
+        java.lang.management.ThreadInfo newThreadInfo(Thread t, int state, Object lockObj, Thread lockOwner,
+                                                      long blockedCount, long blockedTime,
+                                                      long waitedCount, long waitedTime,
+                                                      StackTraceElement[] stackTrace,
+                                                      Object[] monitors, int[] stackDepths,
+                                                      Object[] synchronizers);
+    }
+
+    private static ThreadInfoFactory threadInfoFactory;
+
+    public static void setThreadInfoFactory(ThreadInfoFactory f) {
+        threadInfoFactory = f;
+    }
+
+    /** The factory, ThreadInfo initialized first. */
+    public static ThreadInfoFactory threadInfoFactory() {
+        ThreadInfoFactory f = threadInfoFactory;
+        if (f == null) {
+            try {
+                Class.forName("java.lang.management.ThreadInfo");
+            } catch (ClassNotFoundException e) {
+                throw new InternalError(e);
+            }
+            f = threadInfoFactory;
+        }
+        return f;
+    }
+
+    /** A thread's state as jmm reports it (jvmti.h's bits): alive, and runnable, blocked, waiting or timed. */
+    public static int jmmState(Thread t) {
+        switch (t.getState()) {
+            case NEW: return 0;
+            case TERMINATED: return 0x0002;
+            case BLOCKED: return 0x0001 | 0x0400;
+            case WAITING: return 0x0001 | 0x0010;
+            case TIMED_WAITING: return 0x0001 | 0x0020;
+            default: return 0x0001 | 0x0004;
+        }
+    }
 }
