@@ -1054,7 +1054,7 @@ reference) failing. No GHC at build time but the interfaces' dump. About 2 minut
 The three others fail on GHC's own STG under the same cap (`hsi-memory`: `Loop`, `runtime-deep`, which
 `test/haskell/check-hsi.edn` passes at 16 GiB; `hsi`: `AsyncRerun`, a failure of check-hsi too): every program hsi runs
 from GHC's STG now runs from Arbace's. The judges of HF5-HF6 (`bin/repr-haskell stg-check`): desugared Core equal to the
-tc dump in 171 of 227 bindings of the typecheck samples (158 before) and 53 of 85 of the programs (48); STG equal to GHC's
+tc dump in 171 of 227 bindings of the typecheck samples (158 before) and 54 of 85 of the programs (48); STG equal to GHC's
 `-O0` dumps in 65 of 83 bindings (62; S01, S02, S07, S08 entirely); `bin/repr-haskell typecheck-check` 22 of 22, its control
 differing. The STG judge's remaining classes are the Simplifier's shapes (2 above): a newtype-wrapped function's binding
 split by its cast and eta-expanded (`get = \eta -> get1 eta`), local functions inlined, floats' order.
