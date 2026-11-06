@@ -132,6 +132,14 @@
 #                                 HF5-HF6: the match compiler, CorePrep, CoreToStg over DIR's S*.hs (default test/haskell/stg):
 #                                 Core against the tc dump, STG against GHC's -O0 STG, each program run on hsi from our STG
 #                                 against GHC's output (HSI_LIBS: the libraries' STG dumps)
+#   bin/repr-haskell run-check [--record] [ID...]
+#                                 HF5-HF6's decision 3 (a): the run corpus (hsi's samples and synthetic programs,
+#                                 test/haskell/eval/) compiled by Arbace's front end alone (arbace.repr.haskell.front: native
+#                                 read, rename, elaborate, desugar with the simple optimiser, STG; no GHC but the pinned
+#                                 interfaces) and run on hsi, each judged against GHC's -O0 run (test/haskell/ref-ghc914.edn:
+#                                 status, stdout and stderr) and the record test/haskell/run-check.edn (a change either way
+#                                 fails; --record rewrites it, the classes kept); the negative control (each run against the
+#                                 next program's reference) must fail. HSI_LIBS: the libraries' STG dumps
 #   bin/repr-haskell typecheck-check [DIR|LIST.txt]
 #                                 HF3: the elaborator (arbace.repr.haskell.typecheck) against the tc dump over DIR's T*.hs
 #                                 (default test/haskell/typecheck): types and evidence equal, the negative control differs;
@@ -805,6 +813,96 @@ stg_check() {
   return $st
 }
 
+# run_check [--record] [ID...]: HF5-HF6's decision 3 (a) (doc/haskell/FRONTEND-SURVEY.md, "As built: HF7 (first light)"):
+# the samples and synthetic programs of test/haskell/eval/ through Arbace's front end (arbace.repr.haskell.front, one process
+# a shard) and hsi, judged against GHC's recorded -O0 runs and against test/haskell/run-check.edn. The interfaces are the
+# helper's iface dump of the corpus's imports (Tier S's pinned data, HFS3 (a)) with the packages' reexports (ghc-pkg). Light:
+# each front shard about 1 GiB, hsi's runs capped at 2 GiB. Work in .tmp/repr-haskell/run-check/
+run_check() {
+  local record="" ids=() w=$rh/run-check st=0
+  while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; *) ids+=("$1"); shift ;; esac; done
+  local rec=$root/test/haskell/run-check.edn ref=$root/test/haskell/ref-ghc914.edn
+  local libs=${HSI_LIBS:-$root/.tmp/hsi/dumps/stg}
+  rm -rf "${w:?}"; mkdir -p "$w/if" "$w/out" "$w/run"
+  local files=() f id
+  if [ ${#ids[@]} = 0 ]; then
+    for f in "$root"/test/haskell/eval/samples/*.hs "$root"/test/haskell/eval/synthetic/*.hs; do files+=("$f"); done
+  else
+    for id in "${ids[@]}"; do files+=("$root/test/haskell/eval/$id.hs"); done
+  fi
+  # the interfaces: every module the programs import, the helper's closure below them
+  local mods; mods=$(cat "${files[@]}" | sed -n 's/^import *\(qualified \)\?\([A-Z][A-Za-z0-9.]*\).*/\2/p' | sort -u | tr '\n' ' ')
+  # shellcheck disable=SC2086
+  "$helper" iface --libdir "$libdir" -o "$w/if" --ghc -XHaskell2010 --files Prelude $mods > "$w/if.log" 2>&1 || true
+  ghc-pkg field '*' exposed-modules 2> "$w/pkg.err" | tr ',' '\n' \
+    | sed -n 's/^ *\(exposed-modules: *\)\?\([A-Z][A-Za-z0-9.]*\) from [^:]*:\([A-Z][A-Za-z0-9.]*\).*/"\2" "\3"/p' | sort -u \
+    | awk 'BEGIN{print "{"} {print " " $0} END{print "}"}' > "$w/if/reexports.edn"
+  # the front end in four shards, one process each
+  local n=${#files[@]} k=4 i pids=()
+  for i in $(seq 0 $((k - 1))); do
+    local shard=()
+    for f in $(seq $i $k $((n - 1))); do shard+=("${files[$f]}"); done
+    [ ${#shard[@]} = 0 ] && continue
+    (ulimit -v $((3 * 1048576)); arbace_tool -m arbace.repr.haskell.front build --ifaces "$w/if" --libs "${libs//:/,}" -o "$w/out" "${shard[@]}") \
+      > "$w/front.$i.log" 2>&1 &
+    pids+=($!)
+  done
+  for i in "${pids[@]}"; do wait "$i" || true; done
+  cat "$w"/front.*.log | grep -E '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash) ' | sort > "$w/front.txt" || true
+  local exe; exe=$("$root/bin/hsi" build)
+  local img=${HSI_IMAGE:-$root/.tmp/hsi/image} la=() l
+  IFS=: read -r -a dirs <<< "$libs"; for l in "${dirs[@]}"; do la+=(--lib "$l"); done
+  "$exe" image --out "$img" "${la[@]}" 2> "$w/image.log" || { cat "$w/image.log" >&2; return 1; }
+  : > "$w/results.edn"
+  local pass=0 total=0
+  for f in "${files[@]}"; do
+    local d nm sin a so se rl rs rso rse dif res=""
+    d=$(dirname "$f"); nm=$(basename "$f" .hs); id=$(basename "$d")/$nm; total=$((total + 1))
+    if [ ! -f "$w/out/stg/$nm/Main.stg.ae" ]; then
+      res="{:id \"$id\" :result :no-stg :stage \"$(grep "^$nm " "$w/front.txt" | cut -d' ' -f2 | head -1)\"}"
+    else
+      local r=$w/run/$nm s=0
+      rm -rf "$r"; mkdir -p "$r"; cp -r "$d"/. "$r"/; : > "$r/.empty"
+      sin=.empty; [ -f "$d/$nm.stdin" ] && sin=$nm.stdin
+      a=""; [ -f "$d/$nm.args" ] && a=$(cat "$d/$nm.args")
+      (cd "$r" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$r" timeout -s KILL 90 \
+         sh -c "ulimit -v $((2 * 1048576)); export GOMEMLIMIT=1536MiB; ulimit -t 30; exec $(printf '%q ' "$exe" run "${la[@]}" --image "$img" --prog "$w/out/stg/$nm" --name "$nm" --) $a" \
+         < "$r/$sin" > "$w/$nm.stdout" 2> "$w/$nm.stderr") || s=$?
+      rm -rf "$r"
+      echo "$s" > "$w/$nm.status"
+      so=$(sha256sum < "$w/$nm.stdout" | cut -c1-64); se=$(sha256sum < "$w/$nm.stderr" | cut -c1-64)
+      rl=$(grep -F "{:id \"$id\" " "$ref" || true)
+      rs=$(echo "$rl" | sed -n 's/.*:status \([0-9]*\).*/\1/p'); rso=$(echo "$rl" | sed -n 's/.*:stdout "\([0-9a-f]*\)".*/\1/p'); rse=$(echo "$rl" | sed -n 's/.*:stderr "\([0-9a-f]*\)".*/\1/p')
+      dif=""; [ "$s" = "$rs" ] || dif="$dif :status"; [ "$so" = "$rso" ] || dif="$dif :stdout"; [ "$se" = "$rse" ] || dif="$dif :stderr"
+      if [ -z "$rl" ]; then res="{:id \"$id\" :result :no-ref}"
+      elif [ -z "$dif" ]; then res="{:id \"$id\" :result :pass}"; pass=$((pass + 1))
+      else res="{:id \"$id\" :result :fail :differs [${dif# }]}"; fi
+    fi
+    echo "$res" >> "$w/results.edn"
+  done
+  echo "run-check: $pass of $total programs run on hsi from Arbace's own STG with GHC's -O0 output"
+  # the negative control: each program's run against the next program's reference
+  local prev="" ctl=0 nm2
+  for f in "${files[@]}"; do
+    nm2=$(basename "$f" .hs); id=$(basename "$(dirname "$f")")/$nm2
+    if [ -n "$prev" ] && [ -f "$w/$prev.stdout" ]; then
+      rl=$(grep -F "{:id \"$id\" " "$ref" || true)
+      if [ "$(sha256sum < "$w/$prev.stdout" | cut -c1-64)" = "$(echo "$rl" | sed -n 's/.*:stdout "\([0-9a-f]*\)".*/\1/p')" ] &&
+         [ "$(cat "$w/$prev.status")" = "$(echo "$rl" | sed -n 's/.*:status \([0-9]*\).*/\1/p')" ]; then ctl=1; fi
+    fi
+    prev=$nm2
+  done
+  if [ "$ctl" = 1 ] || [ "$total" -lt 2 ]; then echo "run-check: the negative control passed: the judge does not tell programs apart" >&2; st=1
+  else echo "run-check: the negative control fails as it must (each run against the next program's reference)"; fi
+  # the record: each result against its line (the class a line carries is kept by --record)
+  if [ -n "$record" ]; then
+    arbace_tool "$root/test/haskell/run_record.ae" record "$rec" "$w/results.edn" || st=1
+  else
+    arbace_tool "$root/test/haskell/run_record.ae" judge "$rec" "$w/results.edn" || st=1
+  fi
+  return $st
+}
+
 # typecheck_check [DIR]: the elaborator's check (HF3; doc/haskell/FRONTEND-SURVEY.md, "As built: HF3 (start)"): every
 # T*.hs of DIR (default test/haskell/typecheck, Haskell 2010) read natively, renamed (rename-check's judge first), elaborated
 # by arbace.repr.haskell.typecheck and judged against the helper's tc verb (GHC's types of the module's things, its
@@ -985,6 +1083,7 @@ case $cmd in
            hsdump tc -o "$out" --ghc "${flags[@]}" --files "${files[@]}" ;;
   typecheck-check) ghc_check; build; typecheck_check "$@" ;;
   stg-check) ghc_check; build; stg_check "$@" ;;
+  run-check) ghc_check; build; run_check "$@" ;;
   test) exec "$root/bin/lib/repr-haskell/test" "$@" ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
