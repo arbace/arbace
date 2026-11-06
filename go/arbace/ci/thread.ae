@@ -46,9 +46,12 @@
         stack (conv uint64 (.-I (aget a 1)))
         flags (conv uint64 (.-I (aget a 2)))
         arg (.-I (aget a 3))
-        ptid (conv uint64 (.-I (aget a 4)))
-        tls (conv uint64 (.-I (aget a 5)))
-        ctid (conv uint64 (.-I (aget a 6)))]
+        ptid (conv uint64 (argI a 4))
+        tls (conv uint64 (argI a 5))
+        ctid (conv uint64 (argI a 6))]
+    (when (and (!= (bit-and flags crt/CloneVM) 0) (!= (bit-and flags 0x4000) 0) (== (bit-and flags crt/CloneThread) 0))
+      ;; CLONE_VFORK: posix_spawn's child (crt's spawn.go), run here until its exec or exit
+      (return (ai (conv int64 (vforkChild t fnp stack arg)))))
     (when (or (== (bit-and flags crt/CloneVM) 0) (== (bit-and flags crt/CloneThread) 0))
       (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Msg (fmt/Sprintf "clone(%#x) of a process: ci runs one process" flags)))))
     (let [q (.Threads s)]
@@ -87,6 +90,11 @@
     (let [r (.CallAddr p nt fnp (lit (slice Arg) (lit Arg :K \i :I arg)))]
       (.ExitTask s (conv int (.-I r))))))
 
+(go/func argI "argI is the i-th argument's integer, 0 past the arguments given.\n" ^int64 [^{:tag (slice Arg)} a ^int i]
+  (when (>= i (len a))
+    (return 0))
+  (return (.-I (aget a i))))
+
 (go/func traceOf "traceOf is t's interpreted frames, innermost first.\n" ^string [^{:tag (* Thread)} t]
   (let [s ""
         n 0]
@@ -96,6 +104,27 @@
       (set! s + (.-Name (.-Fn fr)))
       (inc! n))
     (return s)))
+
+(go/func vforkChild "vforkChild runs a vfork child's fn(arg) on its stack, on the calling goroutine, with the parent's state
+saved (crt's ForkBegin): its execve's host process's pid, or a pid that waits as its exit's status.\n" ^int [^{:tag (* Thread)} t ^uint64 fnp ^uint64 stack ^int64 arg]
+  (let [p (.-P t)
+        s (.-Sys p)
+        st (.ForkBegin s)
+        ^{:tag (* Thread)} ct (addr (lit Thread :P p :M (.-M p) :SP (bit-and-not stack 15) :Lo 0 :Task (.-Task t) :budget PreemptCalls))
+        pid 0]
+    (when [sl (.Slab (.-M p) (- stack 1))] (!= sl nil)
+      (set! (.-Lo ct) (.-Base sl)))
+    ((fn []
+       (defer ((fn []
+                 (when [r (recover)] (!= r nil)
+                   (type-switch [x r]
+                     (case [(* crt/SpawnExec)] (set! pid (.-Pid x)))
+                     (case [(* crt/SpawnExit)] (set! pid (.ChildExited s (.-Code x))))
+                     (default (.ForkEnd s st) (panic r)))))))
+       (let [r (.CallAddr p ct fnp (lit (slice Arg) (lit Arg :K \i :I arg)))]
+         (set! pid (.ChildExited s (conv int (.-I r)))))))
+    (.ForkEnd s st)
+    (return pid)))
 
 (go/func unmapself "unmapself is musl's __unmapself(base, size): a detached thread's stack unmapped, then its exit.\n" ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a]
   (.Unmap (.-M (.-P t)) (conv uint64 (.-I (aget a 0))) (conv uint64 (.-I (aget a 1))))

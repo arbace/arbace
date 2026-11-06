@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 
 	"arbace/ci"
@@ -56,6 +57,20 @@ func main() {
 	if env {
 		p.Env = os.Environ()
 	}
+	// the program run again as a child process (crt's spawn.go): this cirun, its --env, the node program's absolute path
+	if exe, err := os.Executable(); err == nil {
+		if r, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = r
+		}
+		nodes, _ := filepath.Abs(args[0])
+		sys.SelfExe, sys.Argv0 = exe, "a.out"
+		sys.Self = []string{exe}
+		if env {
+			sys.Self = append(sys.Self, "--env")
+		}
+		sys.Self = append(sys.Self, nodes)
+	}
+	sys.StdFiles = [3]*os.File{os.Stdin, os.Stdout, os.Stderr}
 	l := ci.NewLoader(p)
 	for _, t := range tops {
 		l.Top(t)

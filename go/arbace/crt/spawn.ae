@@ -1,0 +1,167 @@
+;; crt: child processes (RE6, doc/rust/EVAL.md §12): musl's posix_spawn clones a child that shares the parent's memory
+;; (CLONE_VM | CLONE_VFORK), applies the file actions and execs. ci runs that child function on the parent's goroutine with
+;; a copy of the descriptor table, the signal actions, the mask and the working directory (ForkBegin, ForkEnd), and its
+;; execve starts a host process with the child's descriptors: the program itself again (its own executable, or its argv[0],
+;; by Self, the command that runs the program: cirun with its node program, a compiled program's shard) or another program.
+;; wait4 waits for it. A child that fails before its exec ends with its _exit status, as a child that never ran.
+(in-ns 'go.arbace.crt) (go/file "spawn.go" :doc "crt: child processes (doc/rust/EVAL.md §12): posix_spawn's vfork child run on the parent's goroutine with a\ncopy of the descriptors, signal actions, mask and working directory; its execve starts a host process (the program\nitself again by Self, or another), which wait4 waits for.\n" :imports [
+    [os "os"]
+    [filepath "path/filepath"]
+    [strings "strings"]
+    [syscall "syscall"]])
+
+(go/type forkState
+  "forkState is the parent's state while a vfork child runs: its descriptors, signal actions, mask and directory.\n"
+  (struct
+    ^{:tag (map int (* sysFd))} fds
+    ^{:tag (array 65 (array 4 uint64))} actions
+    ^uint64 mask
+    ^string cwd))
+
+(go/type SpawnExec "SpawnExec is the panic of a vfork child's successful execve: the host process's pid.\n" (struct ^int Pid))
+
+(go/type SpawnExit "SpawnExit is the panic of a vfork child's exit before any exec: its status.\n" (struct ^int Code))
+
+(go/type childProc "childProc is a child process: a host one, or a vfork child that exited before its exec (done, status).\n"
+  (struct
+    ^{:tag (* os/Process)} p
+    ^bool done
+    ^int status))
+
+(go/method ForkBegin "ForkBegin enters a vfork child: the parent's state saved, the child given copies (each description's\nreference counted once more).\n" ^{:tag (* forkState)} [^{:tag (* Sys)} s]
+  (let [st (addr (lit forkState :fds (.-fds s) :actions (.-actions s) :mask (.-mask s) :cwd (.-cwd s)))
+        nf (make (map int (* sysFd)))]
+    (range [fd e (.-fds s)]
+      (inc! (.-refs (.-of e)))
+      (aset nf fd (addr (lit sysFd :of (.-of e) :cloexec (.-cloexec e)))))
+    (set! (.-fds s) nf)
+    (set! (.-inChild s) true)
+    (return st)))
+
+(go/method ForkEnd "ForkEnd leaves a vfork child: its descriptors released, the parent's state back.\n" [^{:tag (* Sys)} s ^{:tag (* forkState)} st]
+  (let [^{:tag (slice int)} fds (zero (slice int))]
+    (range [fd _ (.-fds s)]
+      (set! fds (append fds fd)))
+    (range [_ fd fds]
+      (.release s fd)))
+  (set! (.-fds s) (.-fds st))
+  (set! (.-actions s) (.-actions st))
+  (set! (.-mask s) (.-mask st))
+  (set! (.-cwd s) (.-cwd st))
+  (set! (.-inChild s) false))
+
+(go/method ChildExited "ChildExited records a vfork child that exited before its exec: a pid wait4 answers with code.\n" ^int [^{:tag (* Sys)} s ^int code]
+  (inc! (.-nextFake s))
+  (let [pid (+ 900000 (.-nextFake s))]
+    (.child s pid (addr (lit childProc :done true :status (<< (bit-and code 0xff) 8))))
+    (return pid)))
+
+(go/method child [^{:tag (* Sys)} s ^int pid ^{:tag (* childProc)} c]
+  (when (== (.-procs s) nil)
+    (set! (.-procs s) (make (map int (* childProc)))))
+  (aset (.-procs s) pid c))
+
+(go/method cstrings ^{:tag (slice string)} [^{:tag (* Sys)} s ^uint64 a]
+  (let [m (.-M s)
+        ^{:tag (slice string)} out (zero (slice string))]
+    (when (== a 0)
+      (return out))
+    (while true
+      (let [p (.Load64 m a)]
+        (when (== p 0)
+          (return out))
+        (set! out (append out (.CString m p)))
+        (set! a + 8)))
+    (return out)))
+
+(go/method hostFile "hostFile is a descriptor as the host's file for a child process: its file, or the standard stream it is.\n" ^{:tag (* os/File)} [^{:tag (* Sys)} s ^{:tag (* sysFile)} of]
+  (switch
+    (case [(!= (.-f of) nil)] (return (.-f of)))
+    (case [(and (!= (.-rd of) nil) (== (.-rd of) (.-Stdin s)))] (return (aget (.-StdFiles s) 0)))
+    (case [(and (!= (.-wr of) nil) (== (.-wr of) (.-Stdout s)))] (return (aget (.-StdFiles s) 1)))
+    (case [(and (!= (.-wr of) nil) (== (.-wr of) (.-Stderr s)))] (return (aget (.-StdFiles s) 2))))
+  (return nil))
+
+(go/type flusher (interface (Flush ^error [])))
+
+(go/method execve "execve in a vfork child (RE6): the host process started with the child's descriptors (those not\nclose-on-exec), its environment and directory; the program itself again when path is its own executable or names its\nargv[0] (Self, then argv[1:]). Success ends the child (SpawnExec); else -errno.\n" ^int64 [^{:tag (* Sys)} s ^uint64 a1 ^uint64 a2 ^uint64 a3]
+  (let [m (.-M s)
+        path (.CString m a1)
+        argv (.cstrings s a2)
+        envp (.cstrings s a3)
+        exe path
+        ^{:tag (slice string)} args argv]
+    (when (not (.-inChild s))
+      (return (- eNOSYS)))
+    (when (and (!= (.-SelfExe s) "") (> (len (.-Self s)) 0))
+      (let [self false]
+        (when [(values r err) (filepath/EvalSymlinks (.resolveHost s path))] (and (== err nil) (== r (.-SelfExe s)))
+          (set! self true))
+        (when (and (!= (.-Argv0 s) "") (== (filepath/Base path) (filepath/Base (.-Argv0 s))))
+          (set! self true))
+        (when self
+          (set! exe (aget (.-Self s) 0))
+          (set! args (append (append (lit (slice string)) (spread (.-Self s))) (spread (subslice argv (min 1 (len argv)))))))))
+    (when (== exe path)
+      (let [(values fi err) (os/Stat (.resolveHost s path))]
+        (when (!= err nil)
+          (return (eno err)))
+        (when (or (.IsDir fi) (== (bit-and (.Mode fi) 0111) 0))
+          (return (- 13))))
+      (set! exe (.resolveHost s path)))
+    (let [n 0]
+      (range [fd e (.-fds s)]
+        (when (and (not (.-cloexec e)) (>= fd n))
+          (set! n (+ fd 1))))
+      (let [files (make (slice (* os/File)) n)]
+        (range [fd e (.-fds s)]
+          (when (not (.-cloexec e))
+            (aset files fd (.hostFile s (.-of e)))))
+        (when [(values f ok) (assert flusher (.-Stdout s))] ok
+          (.Flush f))
+        (when [(values f ok) (assert flusher (.-Stderr s))] ok
+          (.Flush f))
+        (let [(values p err) (os/StartProcess exe args (addr (lit os/ProcAttr :Dir (.-cwd s) :Env envp :Files files)))]
+          (when (!= err nil)
+            (return (eno err)))
+          (.child s (.-Pid p) (addr (lit childProc :p p)))
+          (panic (addr (lit SpawnExec :Pid (.-Pid p)))))))))
+
+(go/method resolveHost "resolveHost is path as the host sees it (relative to the program's directory).\n" ^string [^{:tag (* Sys)} s ^string path]
+  (when (or (strings/HasPrefix path "/") (== (.-cwd s) ""))
+    (return path))
+  (return (filepath/Join (.-cwd s) path)))
+
+(go/method wait4 "wait4(pid, status, options): a child process's end (WNOHANG: 0 while it runs); pid -1 any child.\n" ^int64 [^{:tag (* Sys)} s ^int64 pid ^uint64 status ^int options]
+  (let [m (.-M s)]
+    (when (== pid -1)
+      (range [k c (.-procs s)]
+        (when (or (.-done c) (!= (.-p c) nil))
+          (set! pid (conv int64 k))
+          (break))))
+    (let [c (aget (.-procs s) (conv int pid))]
+      (when (== c nil)
+        (return (- 10))) ; ECHILD
+      (when (.-done c)
+        (when (!= status 0)
+          (.Store32 m status (conv uint32 (.-status c))))
+        (delete (.-procs s) (conv int pid))
+        (return pid))
+      (let [^syscall/WaitStatus ws 0
+            (values r err) (syscall/Wait4 (conv int pid) (addr ws) options nil)]
+        (when (!= err nil)
+          (return (eno err)))
+        (when (== r 0)
+          (return 0))
+        (when (!= status 0)
+          (.Store32 m status (conv uint32 ws)))
+        (delete (.-procs s) (conv int pid))
+        (return (conv int64 r))))))
+
+(go/method killChild "killChild is kill(2) of a child process; false when pid is none of them.\n" [^{:tag (* Sys)} s ^int pid ^int sig] :results [int64 bool]
+  (let [c (aget (.-procs s) pid)]
+    (when (or (== c nil) (== (.-p c) nil))
+      (return 0 false))
+    (when [err (syscall/Kill pid (conv syscall/Signal sig))] (!= err nil)
+      (return (eno err) true))
+    (return 0 true)))
