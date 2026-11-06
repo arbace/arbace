@@ -4883,3 +4883,8 @@ sequence rather than by the main file's offsets: CS278 below.
 - **CS278 A re-entered copy's directives at eval.** Options: (a) the preprocessor records the copy's `pragma` directives by
   token sequence, and block-items puts a `c/pragma` form before the first kept item after it (ci's read only); (b) the class
   `read` for 95_bitfields. Cost: (a) half a day; (b) none. *Recommended: (a)*, after the tag.
+
+## Decided (2026-11-06, the user: CS278)
+
+- **CS278 (a), after the tag:** the re-entered copy's pragmas placed by token order, so 95_bitfields' `#pragma pack(push,1)`
+  inside `main`'s body reaches the checker (about half a day).
