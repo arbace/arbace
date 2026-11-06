@@ -333,7 +333,7 @@
 
 (defn- void-atom [] (ext-str "GHC.Internal.Prim" "void#"))
 
-(declare floatable-con atomic-args?)
+(declare floatable-con atomic-args? fail-var?)
 
 (defn- atom-of
   "An argument as an atom: [atom [[name stg-rhs]...]], the bindings outermost first; a saturated constructor
@@ -356,6 +356,18 @@
     (let [rs (expr-reps a) r (reps->rep rs) n (fresh "sat")]
       (swap! *reps* assoc n r)
       [n [[:case n r (expr a)]]])
+    ;; an argument of lifted lets around a value: the lets float out of it (CorePrep's cpeArg, wantFloatNested: lazy
+    ;; floats and a value)
+    (and (head? a 'let) (let [inner (loop [x a] (if (and (head? x 'let) (= 1 (count (second x)))) (recur (nth x 2)) x))]
+                          (or (head? inner 'lam) (floatable-con inner))))
+    (let [[binds inner] (loop [x a out []]
+                          (if (and (head? x 'let) (= 1 (count (second x))))
+                            (let [[_ b r] (first (second x))] (recur (nth x 2) (conj out [b r])))
+                            [out x]))]
+      (if (every? (fn [[b _]] (and (lv? b) (= [:L] (local-reps b)) (not (fail-var? b)) (not (:join (meta b))))) binds)
+        (let [[at bs] (atom-of inner)]
+          [at (into (vec (for [[b r] binds] [(local-name b) (rhs r)])) bs)])
+        (let [n (fresh "sat")] [n [[n (rhs a)]]])))
     :else (let [n (fresh "sat")] [n [[n (rhs a)]]])))
 
 (defn- wrap-binds [bnds body]
