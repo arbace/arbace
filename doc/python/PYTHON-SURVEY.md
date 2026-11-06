@@ -3673,3 +3673,61 @@ places), else left classed with its cause.
 
 **The cost.** The compiled loop is not touched: positions are data the loop never reads; the display imports traceback
 only when an exception is displayed. The bench sample is still run (210's method) because the IR's code objects grow.
+
+## As built: 223, the exception state, traceback objects and the error display (2026-11-06, the Mac VM, queue 223)
+
+As designed ("Design: 223"), with what the samples found on the way. Base cd5fd6cf.
+
+**The display.** `PrintException` is `_PyErr_Display`: `traceback._print_exception_bltin(exc)` first, the Go printer
+only when that import or call fails (or while it runs). `PrintUncaught` is `PyErr_Print` for the main module and the
+REPL: `sys.last_exc` and the three others, then `sys.excepthook`; a raising hook gets "Error in sys.excepthook:" and
+"Original exception was:". The builtin `sys.excepthook` puts the given traceback on an exception that has none and
+prints C's line for a non-exception value. The main module's SyntaxError is no longer the reader's error form on stderr:
+`bin/pyi run` hands the compiler's answer to `RunModule`, which raises it as `compile()` does (the parser's `_metadata`,
+a file's source None, a decoding error naming the file as the tokenizer does) and gives it to `sys.excepthook`, so the
+keyword typos ("Did you mean 'and'?") come from traceback as in CPython. `-c`'s source is registered with
+`linecache._register_code` (run_mod). A SyntaxError's file line is decoded by its coding cookie, the BOM skipped
+(err_programtext).
+
+**PEP 657's positions**, as designed: the unit's `:loc` beside `:line`, `flow!` carrying it, the IR's `:positions`
+(`[END-LINE COL END-COL]` or nil), `Code.Positions`, `co_positions()`, `-X no_debug_ranges`. The locations codegen moves
+are ported: attribute load, store and delete and a method call's CALL (`update_start_location_to_match_attr`,
+`maybe_optimize_method_call` with `is_import_originated`), augmented assignment at its target, assert's raise at its
+test, RESUME at `(line, line, 0, 0)` (a traceback at `tb_lasti` 0 prints its empty caret line), an except handler's
+instructions at the handler's span (a bare `raise` in `except*` shows both lines), a comprehension's GET_ITER and
+FOR_ITER at its iterable. The caret lines, chains, groups' boxes and notes then come from traceback.py unchanged.
+
+**Objects.** `types.TracebackType(...)`, `tb_next`'s setter with the loop check, `tb_lasti`/`tb_lineno` as given,
+`__dir__`; `sys.exc_info()`'s traceback; `do_raise`'s cause and class checks; `_PyEval_CheckExceptTypeValid` (a tuple's
+items checked before matching); AttributeError's pickled state; exception groups: ExceptionGroup's two bases set at
+start (a subclass made before the first group had no Exception in its MRO: `except Exception` missed it), `excs_str`,
+read-only `message`/`exceptions`, split's recursion guard (test_deep_split ends with RecursionError instead of a 300 s
+timeout and Go's stack overflow). `sys.stdlib_module_names` (stdlib_module_names.h), `module.__dir__`, the shadowing
+hints of module_getattro and import_from, `sys.is_remote_debug_enabled()` False.
+
+**The exception state.** `_PyErr_ChainStackItem`: an exception thrown into a generator's frame, directly or after its
+delegate's throw raised, takes the generator's handled exception as its context. Found by test_asyncio's
+`test_exception_chaining_after_await`: the task's exception is thrown into the awaiting coroutine by `Task.__wakeup`.
+
+**The classes** (methods named in `:tests`; the patterns kept where noted):
+
+| class | before | after |
+|---|---:|---:|
+| `:exc-state` | 1 (+4 patterns) | 0 (patterns kept: the 9 methods they found on the VM pass) |
+| `:traceback-objects` | 3 (+2 patterns) | 0 (patterns kept) |
+| `:error-display` | 11 | 6 (the -P and -m starts of test_import's five; GBK/cp437 sources) |
+| `:exc-pickle` | 1 | removed |
+| `:code-positions` | 4 | 2 |
+
+Also test_sys's import opened (`sys.is_remote_debug_enabled`): its 102 methods were all `:remote-debugging`; now 38
+equal, the rest `:cpython-only`, `:remote-debugging` (the skips) and the new `:sys-module` (23: sys's own surface,
+outside this work, each for its owner).
+
+**Samples** (goi; before at cd5fd6cf, after at the head):
+- `bin/pyi lib-test-all --fresh test_traceback test_exception_group test_raise test_sys`: 569 methods, before 217 equal,
+  318 classed, 34 failing; after 282 equal, 287 classed, 0 failing.
+- `bin/pyi lib-test test_exceptions`: 109 methods, before 83 equal, 26 classed; after 90 equal, 19 classed, 0 failing.
+- `bin/pyi check --fresh --only` over the methods the patterns found on the VM (test_asyncio's test_timeouts, test_waitfor,
+  test_tasks: 9, all pass) and the named methods of other modules (test_threading's 3 pass, test_fstring's passes,
+  test_setcomps' passes after the comprehension's locations; test_import's five as classed above). The display imports traceback when an exception is displayed (about 4.5 s on
+goi per uncaught exception, CPython does the same), `-c` imports linecache (about 1.3 s on goi).
