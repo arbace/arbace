@@ -364,4 +364,6 @@ and the child's end by a signal. A run a signal ends (a fault: SIGSEGV, SIGILL, 
 `WIFSIGNALED`: with `--signals` (rsi's runs pass it, as `--env`) `tools/cirun` and a compiled program end themselves by the
 signal (`crt.DieBy`: its action back to `SIG_DFL`, no core file, `kill` of itself). The check leaves ci's diagnostic line
 (`cirun: fault: ...`) out of the standard error it compares, keeping it as the row's reason: a process the kernel signals prints
-nothing (`synthetic/trap.rs`'s status was rustc's, its standard error not).
+nothing (`synthetic/trap.rs`'s status was rustc's, its standard error not). A child (the program run again by `Sys.Self`)
+gets `--quiet-faults` as well: no fault line, so its parent reads its standard error as the original's parent does
+(`abi/segfault-no-out-of-stack.rs` prints its child's).
