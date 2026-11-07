@@ -293,6 +293,32 @@ What keeps each crop under 90%:
   `independence.edn` scores OCaml 0 there (20% for the crop, not 60%). The fix is the merge of the fragment's hosts into
   `steps.edn`, on that branch's line.
 
+## Decided (the user, 2026-11-07): a test's own verdict is a judge no toolchain made; a mixed stage the case-weighted mean
+
+Two decisions of the user on 2026-11-07, relayed by the main session:
+
+- A test's own verdict counts as a judge no toolchain made, and scores 1: DejaGnu's `dg-error`, `dg-warning`, `dg-bogus` and
+  `dg-message` directives; an execute test's `exit(0)` or `abort()`; a suite's own expected output or status (tcc's `.expect`,
+  mir's `.expectrc`, CompCert's `Results/`); a round trip's reread forms equal and its `:full` print byte for byte. Judge by it
+  wherever a test has one; the toolchain's records move to the oracle tier, checked by hand at a tag. A test with no verdict of
+  its own, whose only reference is the toolchain's recorded output, keeps 0.5.
+- A mixed stage (cases partly judged by their own verdict, 1, partly by a recorded toolchain reference, 0.5) scores the
+  case-weighted mean over its cases. A stage's fact carries `:cases {:self N :recorded M}` and `test/crops/score.ae` scores it
+
+  ```
+  (N + 0.5 M) / (N + M)  =  0.5 + 0.5 x N / (N + M)
+  ```
+
+  N and M count the crop's REAP cells' cases (each cell's cases as `test/reap/matrix.edn` counts them; a case whose pass rule
+  asks a record counts in M). Both counts are printed beside the stage; the cross-check with the gate's steps applies as
+  before (a named step on a toolchain host scores the stage 0).
+- **C (branch `c-indep-b1`, from `mac/batch1`).** Read 5,483 cases, 72 by a record (the token check's known preprocessor
+  differences whose evidence is gcc -E's digest); eval and AOT 2,268 each, 2,105 by their own verdict (`test/c/selfref.ae`),
+  163 by gcc's runs (benchmarksgame, ci-run and cxgo carry no verdict; 25 exceptions with reasons); print 4,818, 35 by gcc's
+  acceptance (files the reader rejects whose tree cc's does not give). N = 14,404, M = 433: judge 0.985. With read, eval, AOT
+  and print at 1 (Arbace's own target, doc/C23-SURVEY.md, "As built: C's own target"), C's independence is 99.7% (20.0% on
+  `mac/batch1`; 90.0% were the judge left on gcc's records).
+
 ## Left
 
 - The facts at refs other than those in `independence.edn`'s `:at` are main's. `--newest` says so in the output, as

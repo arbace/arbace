@@ -293,9 +293,30 @@
   ^String [^String p]
   (let [i (.lastIndexOf p "/")] (clean (if (neg? i) "" (subs p 0 (inc i))))))
 
+;; ORS9 (a) (doc/ORACLE-RECORDS-SURVEY.md on mac/oracle-records-cpp2, "As built: the tooling and C"), carried for Arbace's own
+;; target (c/README.md): ARBACE_C_SYSROOT names a directory holding the headers under their absolute paths with roots.txt (the
+;; target's search directories; bin/lib/repr-c/sysroot.bash's c_sysroot): a file under one of those roots is read from it
+;; alone, never from the host, and keeps its own name in every output; "/" or unset, the host's files as before.
+(def ^:private sysroot
+  (let [s (System/getenv "ARBACE_C_SYSROOT")]
+    (when (and s (not= s "") (not= s "/")) (str/replace s #"/+$" ""))))
+
+(def ^:private sysroot-roots
+  (delay (when sysroot
+           (vec (for [l (str/split-lines (slurp (str sysroot "/roots.txt"))) :let [l (str/trim l)] :when (not= l "")]
+                  (str/replace l #"/+$" ""))))))
+
+(defn- sysroot-file
+  "The file a name under the sysroot's roots is read from, nil for any other name."
+  ^java.io.File [^String name]
+  (when (and sysroot (some #(or (= name %) (.startsWith name (str % "/"))) @sysroot-roots))
+    (java.io.File. (str sysroot name))))
+
 (defn- resolve-file ^java.io.File [^Cpp c ^String name]
   (let [f (java.io.File. name)]
-    (if (.isAbsolute f) f (java.io.File. (str (:base (.-cfg c))) name))))
+    (if (.isAbsolute f)
+      (or (sysroot-file (.getPath f)) f)
+      (java.io.File. (str (:base (.-cfg c))) name))))
 
 (defn- has-file? [^Cpp c ^String name]
   (let [f (resolve-file c name)] (and (.exists f) (not (.isDirectory f)))))
@@ -415,7 +436,8 @@
 (defn- parse-file
   "The groups of `name` (read from `file`), and its errors."
   [^String name ^java.io.File file trigraphs?]
-  (.add ^java.util.Set opened (.getAbsolutePath file))
+  (.add ^java.util.Set opened (let [p (.getAbsolutePath file)]
+                                (if (and sysroot (.startsWith p (str sysroot "/"))) (subs p (count sysroot)) p)))
   (let [bs (lex/read-bytes (.getPath file))
         key [name (java.util.Arrays/hashCode bs) (alength bs) (if (number? trigraphs?) trigraphs? (boolean trigraphs?))]]
     (or (.get ^java.util.concurrent.ConcurrentHashMap file-cache key)

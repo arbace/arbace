@@ -1,0 +1,360 @@
+/* Arbace's <float.h> (ISO/IEC 9899:2024 §5.2.5.3.3, §7.7, Annex H), for x86_64-linux-musl (c/README.md): the
+   characteristics of the floating types from the predefined macros of c/target (made from c/target/abi.edn). */
+#ifndef __ARBACE_FLOAT_H
+#define __ARBACE_FLOAT_H
+
+#if defined __STDC_VERSION__ && __STDC_VERSION__ > 201710L
+#define __ARBACE_C23 1
+#define __STDC_VERSION_FLOAT_H__ 202311L
+#endif
+#if (defined __STDC_VERSION__ && __STDC_VERSION__ >= 201112L) || !defined __STRICT_ANSI__
+#define __ARBACE_C11 1
+#endif
+
+/* the rounding direction in force (C23 5.2.5.3.3 p10): musl's fegetround as FLT_ROUNDS reports it */
+int __flt_rounds(void);
+#undef FLT_ROUNDS
+#define FLT_ROUNDS (__flt_rounds())
+#undef FLT_EVAL_METHOD
+#define FLT_EVAL_METHOD __FLT_EVAL_METHOD__
+#undef FLT_RADIX
+#define FLT_RADIX __FLT_RADIX__
+#undef FLT_MANT_DIG
+#define FLT_MANT_DIG __FLT_MANT_DIG__
+#undef FLT_DIG
+#define FLT_DIG __FLT_DIG__
+#undef FLT_MIN_EXP
+#define FLT_MIN_EXP __FLT_MIN_EXP__
+#undef FLT_MIN_10_EXP
+#define FLT_MIN_10_EXP __FLT_MIN_10_EXP__
+#undef FLT_MAX_EXP
+#define FLT_MAX_EXP __FLT_MAX_EXP__
+#undef FLT_MAX_10_EXP
+#define FLT_MAX_10_EXP __FLT_MAX_10_EXP__
+#undef FLT_MAX
+#define FLT_MAX __FLT_MAX__
+#undef FLT_EPSILON
+#define FLT_EPSILON __FLT_EPSILON__
+#undef FLT_MIN
+#define FLT_MIN __FLT_MIN__
+#ifdef __ARBACE_C11
+#undef FLT_DECIMAL_DIG
+#define FLT_DECIMAL_DIG __FLT_DECIMAL_DIG__
+#undef FLT_HAS_SUBNORM
+#define FLT_HAS_SUBNORM __FLT_HAS_DENORM__
+#undef FLT_TRUE_MIN
+#define FLT_TRUE_MIN __FLT_DENORM_MIN__
+#endif
+#ifdef __ARBACE_C23
+#undef FLT_NORM_MAX
+#define FLT_NORM_MAX __FLT_NORM_MAX__
+#undef FLT_IS_IEC_60559
+#define FLT_IS_IEC_60559 __FLT_IS_IEC_60559__
+#endif
+#undef DBL_MANT_DIG
+#define DBL_MANT_DIG __DBL_MANT_DIG__
+#undef DBL_DIG
+#define DBL_DIG __DBL_DIG__
+#undef DBL_MIN_EXP
+#define DBL_MIN_EXP __DBL_MIN_EXP__
+#undef DBL_MIN_10_EXP
+#define DBL_MIN_10_EXP __DBL_MIN_10_EXP__
+#undef DBL_MAX_EXP
+#define DBL_MAX_EXP __DBL_MAX_EXP__
+#undef DBL_MAX_10_EXP
+#define DBL_MAX_10_EXP __DBL_MAX_10_EXP__
+#undef DBL_MAX
+#define DBL_MAX __DBL_MAX__
+#undef DBL_EPSILON
+#define DBL_EPSILON __DBL_EPSILON__
+#undef DBL_MIN
+#define DBL_MIN __DBL_MIN__
+#ifdef __ARBACE_C11
+#undef DBL_DECIMAL_DIG
+#define DBL_DECIMAL_DIG __DBL_DECIMAL_DIG__
+#undef DBL_HAS_SUBNORM
+#define DBL_HAS_SUBNORM __DBL_HAS_DENORM__
+#undef DBL_TRUE_MIN
+#define DBL_TRUE_MIN __DBL_DENORM_MIN__
+#endif
+#ifdef __ARBACE_C23
+#undef DBL_NORM_MAX
+#define DBL_NORM_MAX __DBL_NORM_MAX__
+#undef DBL_IS_IEC_60559
+#define DBL_IS_IEC_60559 __DBL_IS_IEC_60559__
+#endif
+#undef LDBL_MANT_DIG
+#define LDBL_MANT_DIG __LDBL_MANT_DIG__
+#undef LDBL_DIG
+#define LDBL_DIG __LDBL_DIG__
+#undef LDBL_MIN_EXP
+#define LDBL_MIN_EXP __LDBL_MIN_EXP__
+#undef LDBL_MIN_10_EXP
+#define LDBL_MIN_10_EXP __LDBL_MIN_10_EXP__
+#undef LDBL_MAX_EXP
+#define LDBL_MAX_EXP __LDBL_MAX_EXP__
+#undef LDBL_MAX_10_EXP
+#define LDBL_MAX_10_EXP __LDBL_MAX_10_EXP__
+#undef LDBL_MAX
+#define LDBL_MAX __LDBL_MAX__
+#undef LDBL_EPSILON
+#define LDBL_EPSILON __LDBL_EPSILON__
+#undef LDBL_MIN
+#define LDBL_MIN __LDBL_MIN__
+#ifdef __ARBACE_C11
+#undef LDBL_DECIMAL_DIG
+#define LDBL_DECIMAL_DIG __LDBL_DECIMAL_DIG__
+#undef LDBL_HAS_SUBNORM
+#define LDBL_HAS_SUBNORM __LDBL_HAS_DENORM__
+#undef LDBL_TRUE_MIN
+#define LDBL_TRUE_MIN __LDBL_DENORM_MIN__
+#endif
+#ifdef __ARBACE_C23
+#undef LDBL_NORM_MAX
+#define LDBL_NORM_MAX __LDBL_NORM_MAX__
+#undef LDBL_IS_IEC_60559
+#define LDBL_IS_IEC_60559 __LDBL_IS_IEC_60559__
+#endif
+#if (defined __STDC_VERSION__ && __STDC_VERSION__ >= 199901L) || !defined __STRICT_ANSI__
+#undef DECIMAL_DIG
+#define DECIMAL_DIG __DECIMAL_DIG__
+#endif
+#ifdef __ARBACE_C23
+/* C23 5.2.5.3.3 p8, 7.7 p? : infinity, a quiet NaN, the signaling NaNs */
+#undef INFINITY
+#define INFINITY (__builtin_inff())
+#undef NAN
+#define NAN (__builtin_nanf(""))
+#undef FLT_SNAN
+#define FLT_SNAN (__builtin_nansf(""))
+#undef DBL_SNAN
+#define DBL_SNAN (__builtin_nans(""))
+#undef LDBL_SNAN
+#define LDBL_SNAN (__builtin_nansl(""))
+#endif
+#ifdef __STDC_WANT_IEC_60559_TYPES_EXT__
+#undef FLT16_MANT_DIG
+#define FLT16_MANT_DIG __FLT16_MANT_DIG__
+#undef FLT16_DECIMAL_DIG
+#define FLT16_DECIMAL_DIG __FLT16_DECIMAL_DIG__
+#undef FLT16_DIG
+#define FLT16_DIG __FLT16_DIG__
+#undef FLT16_MIN_EXP
+#define FLT16_MIN_EXP __FLT16_MIN_EXP__
+#undef FLT16_MIN_10_EXP
+#define FLT16_MIN_10_EXP __FLT16_MIN_10_EXP__
+#undef FLT16_MAX_EXP
+#define FLT16_MAX_EXP __FLT16_MAX_EXP__
+#undef FLT16_MAX_10_EXP
+#define FLT16_MAX_10_EXP __FLT16_MAX_10_EXP__
+#undef FLT16_MAX
+#define FLT16_MAX __FLT16_MAX__
+#undef FLT16_EPSILON
+#define FLT16_EPSILON __FLT16_EPSILON__
+#undef FLT16_MIN
+#define FLT16_MIN __FLT16_MIN__
+#undef FLT16_TRUE_MIN
+#define FLT16_TRUE_MIN __FLT16_DENORM_MIN__
+#undef FLT16_NORM_MAX
+#define FLT16_NORM_MAX __FLT16_NORM_MAX__
+#undef FLT16_SNAN
+#define FLT16_SNAN (__builtin_nansf16(""))
+#undef FLT32_MANT_DIG
+#define FLT32_MANT_DIG __FLT32_MANT_DIG__
+#undef FLT32_DECIMAL_DIG
+#define FLT32_DECIMAL_DIG __FLT32_DECIMAL_DIG__
+#undef FLT32_DIG
+#define FLT32_DIG __FLT32_DIG__
+#undef FLT32_MIN_EXP
+#define FLT32_MIN_EXP __FLT32_MIN_EXP__
+#undef FLT32_MIN_10_EXP
+#define FLT32_MIN_10_EXP __FLT32_MIN_10_EXP__
+#undef FLT32_MAX_EXP
+#define FLT32_MAX_EXP __FLT32_MAX_EXP__
+#undef FLT32_MAX_10_EXP
+#define FLT32_MAX_10_EXP __FLT32_MAX_10_EXP__
+#undef FLT32_MAX
+#define FLT32_MAX __FLT32_MAX__
+#undef FLT32_EPSILON
+#define FLT32_EPSILON __FLT32_EPSILON__
+#undef FLT32_MIN
+#define FLT32_MIN __FLT32_MIN__
+#undef FLT32_TRUE_MIN
+#define FLT32_TRUE_MIN __FLT32_DENORM_MIN__
+#undef FLT32_NORM_MAX
+#define FLT32_NORM_MAX __FLT32_NORM_MAX__
+#undef FLT32_SNAN
+#define FLT32_SNAN (__builtin_nansf32(""))
+#undef FLT64_MANT_DIG
+#define FLT64_MANT_DIG __FLT64_MANT_DIG__
+#undef FLT64_DECIMAL_DIG
+#define FLT64_DECIMAL_DIG __FLT64_DECIMAL_DIG__
+#undef FLT64_DIG
+#define FLT64_DIG __FLT64_DIG__
+#undef FLT64_MIN_EXP
+#define FLT64_MIN_EXP __FLT64_MIN_EXP__
+#undef FLT64_MIN_10_EXP
+#define FLT64_MIN_10_EXP __FLT64_MIN_10_EXP__
+#undef FLT64_MAX_EXP
+#define FLT64_MAX_EXP __FLT64_MAX_EXP__
+#undef FLT64_MAX_10_EXP
+#define FLT64_MAX_10_EXP __FLT64_MAX_10_EXP__
+#undef FLT64_MAX
+#define FLT64_MAX __FLT64_MAX__
+#undef FLT64_EPSILON
+#define FLT64_EPSILON __FLT64_EPSILON__
+#undef FLT64_MIN
+#define FLT64_MIN __FLT64_MIN__
+#undef FLT64_TRUE_MIN
+#define FLT64_TRUE_MIN __FLT64_DENORM_MIN__
+#undef FLT64_NORM_MAX
+#define FLT64_NORM_MAX __FLT64_NORM_MAX__
+#undef FLT64_SNAN
+#define FLT64_SNAN (__builtin_nansf64(""))
+#undef FLT128_MANT_DIG
+#define FLT128_MANT_DIG __FLT128_MANT_DIG__
+#undef FLT128_DECIMAL_DIG
+#define FLT128_DECIMAL_DIG __FLT128_DECIMAL_DIG__
+#undef FLT128_DIG
+#define FLT128_DIG __FLT128_DIG__
+#undef FLT128_MIN_EXP
+#define FLT128_MIN_EXP __FLT128_MIN_EXP__
+#undef FLT128_MIN_10_EXP
+#define FLT128_MIN_10_EXP __FLT128_MIN_10_EXP__
+#undef FLT128_MAX_EXP
+#define FLT128_MAX_EXP __FLT128_MAX_EXP__
+#undef FLT128_MAX_10_EXP
+#define FLT128_MAX_10_EXP __FLT128_MAX_10_EXP__
+#undef FLT128_MAX
+#define FLT128_MAX __FLT128_MAX__
+#undef FLT128_EPSILON
+#define FLT128_EPSILON __FLT128_EPSILON__
+#undef FLT128_MIN
+#define FLT128_MIN __FLT128_MIN__
+#undef FLT128_TRUE_MIN
+#define FLT128_TRUE_MIN __FLT128_DENORM_MIN__
+#undef FLT128_NORM_MAX
+#define FLT128_NORM_MAX __FLT128_NORM_MAX__
+#undef FLT128_SNAN
+#define FLT128_SNAN (__builtin_nansf128(""))
+#undef FLT32X_MANT_DIG
+#define FLT32X_MANT_DIG __FLT32X_MANT_DIG__
+#undef FLT32X_DECIMAL_DIG
+#define FLT32X_DECIMAL_DIG __FLT32X_DECIMAL_DIG__
+#undef FLT32X_DIG
+#define FLT32X_DIG __FLT32X_DIG__
+#undef FLT32X_MIN_EXP
+#define FLT32X_MIN_EXP __FLT32X_MIN_EXP__
+#undef FLT32X_MIN_10_EXP
+#define FLT32X_MIN_10_EXP __FLT32X_MIN_10_EXP__
+#undef FLT32X_MAX_EXP
+#define FLT32X_MAX_EXP __FLT32X_MAX_EXP__
+#undef FLT32X_MAX_10_EXP
+#define FLT32X_MAX_10_EXP __FLT32X_MAX_10_EXP__
+#undef FLT32X_MAX
+#define FLT32X_MAX __FLT32X_MAX__
+#undef FLT32X_EPSILON
+#define FLT32X_EPSILON __FLT32X_EPSILON__
+#undef FLT32X_MIN
+#define FLT32X_MIN __FLT32X_MIN__
+#undef FLT32X_TRUE_MIN
+#define FLT32X_TRUE_MIN __FLT32X_DENORM_MIN__
+#undef FLT32X_NORM_MAX
+#define FLT32X_NORM_MAX __FLT32X_NORM_MAX__
+#undef FLT32X_SNAN
+#define FLT32X_SNAN (__builtin_nansf32x(""))
+#undef FLT64X_MANT_DIG
+#define FLT64X_MANT_DIG __FLT64X_MANT_DIG__
+#undef FLT64X_DECIMAL_DIG
+#define FLT64X_DECIMAL_DIG __FLT64X_DECIMAL_DIG__
+#undef FLT64X_DIG
+#define FLT64X_DIG __FLT64X_DIG__
+#undef FLT64X_MIN_EXP
+#define FLT64X_MIN_EXP __FLT64X_MIN_EXP__
+#undef FLT64X_MIN_10_EXP
+#define FLT64X_MIN_10_EXP __FLT64X_MIN_10_EXP__
+#undef FLT64X_MAX_EXP
+#define FLT64X_MAX_EXP __FLT64X_MAX_EXP__
+#undef FLT64X_MAX_10_EXP
+#define FLT64X_MAX_10_EXP __FLT64X_MAX_10_EXP__
+#undef FLT64X_MAX
+#define FLT64X_MAX __FLT64X_MAX__
+#undef FLT64X_EPSILON
+#define FLT64X_EPSILON __FLT64X_EPSILON__
+#undef FLT64X_MIN
+#define FLT64X_MIN __FLT64X_MIN__
+#undef FLT64X_TRUE_MIN
+#define FLT64X_TRUE_MIN __FLT64X_DENORM_MIN__
+#undef FLT64X_NORM_MAX
+#define FLT64X_NORM_MAX __FLT64X_NORM_MAX__
+#undef FLT64X_SNAN
+#define FLT64X_SNAN (__builtin_nansf64x(""))
+#endif
+#if defined __ARBACE_C23 || defined __STDC_WANT_IEC_60559_DFP_EXT__ || defined __STDC_WANT_DEC_FP__
+#undef DEC32_MANT_DIG
+#define DEC32_MANT_DIG __DEC32_MANT_DIG__
+#undef DEC32_MIN_EXP
+#define DEC32_MIN_EXP __DEC32_MIN_EXP__
+#undef DEC32_MAX_EXP
+#define DEC32_MAX_EXP __DEC32_MAX_EXP__
+#undef DEC32_MAX
+#define DEC32_MAX __DEC32_MAX__
+#undef DEC32_EPSILON
+#define DEC32_EPSILON __DEC32_EPSILON__
+#undef DEC32_MIN
+#define DEC32_MIN __DEC32_MIN__
+#undef DEC32_TRUE_MIN
+#define DEC32_TRUE_MIN __DEC32_SUBNORMAL_MIN__
+#undef DEC32_SUBNORMAL_MIN
+#define DEC32_SUBNORMAL_MIN __DEC32_SUBNORMAL_MIN__
+#undef DEC64_MANT_DIG
+#define DEC64_MANT_DIG __DEC64_MANT_DIG__
+#undef DEC64_MIN_EXP
+#define DEC64_MIN_EXP __DEC64_MIN_EXP__
+#undef DEC64_MAX_EXP
+#define DEC64_MAX_EXP __DEC64_MAX_EXP__
+#undef DEC64_MAX
+#define DEC64_MAX __DEC64_MAX__
+#undef DEC64_EPSILON
+#define DEC64_EPSILON __DEC64_EPSILON__
+#undef DEC64_MIN
+#define DEC64_MIN __DEC64_MIN__
+#undef DEC64_TRUE_MIN
+#define DEC64_TRUE_MIN __DEC64_SUBNORMAL_MIN__
+#undef DEC64_SUBNORMAL_MIN
+#define DEC64_SUBNORMAL_MIN __DEC64_SUBNORMAL_MIN__
+#undef DEC128_MANT_DIG
+#define DEC128_MANT_DIG __DEC128_MANT_DIG__
+#undef DEC128_MIN_EXP
+#define DEC128_MIN_EXP __DEC128_MIN_EXP__
+#undef DEC128_MAX_EXP
+#define DEC128_MAX_EXP __DEC128_MAX_EXP__
+#undef DEC128_MAX
+#define DEC128_MAX __DEC128_MAX__
+#undef DEC128_EPSILON
+#define DEC128_EPSILON __DEC128_EPSILON__
+#undef DEC128_MIN
+#define DEC128_MIN __DEC128_MIN__
+#undef DEC128_TRUE_MIN
+#define DEC128_TRUE_MIN __DEC128_SUBNORMAL_MIN__
+#undef DEC128_SUBNORMAL_MIN
+#define DEC128_SUBNORMAL_MIN __DEC128_SUBNORMAL_MIN__
+#undef DEC_EVAL_METHOD
+#define DEC_EVAL_METHOD __DEC_EVAL_METHOD__
+#endif
+#ifdef __ARBACE_C23
+#undef DEC_INFINITY
+#define DEC_INFINITY (__builtin_infd32())
+#undef DEC_NAN
+#define DEC_NAN (__builtin_nand32(""))
+#undef DEC32_SNAN
+#define DEC32_SNAN (__builtin_nansd32(""))
+#undef DEC64_SNAN
+#define DEC64_SNAN (__builtin_nansd64(""))
+#undef DEC128_SNAN
+#define DEC128_SNAN (__builtin_nansd128(""))
+#endif
+
+#undef __ARBACE_C11
+#undef __ARBACE_C23
+#endif
