@@ -299,3 +299,14 @@ What keeps each crop under 90%:
   "facts of the checkout (no :at for REF)". A new held branch that changes a pipeline needs its `:at` entry.
 - The native front ends that exist but are not the cells' default (Haskell's native reader on `mac/haskell-hf7`, Rust's on
   `mac/rust-rf14`, C++'s codegen on `mac/llvm-ll6`) do not raise a score until a cell's check reads through them.
+
+## Decided (the user, 2026-11-07): a mixed stage
+
+A stage whose cases are judged partly by their own verdict (1: jtreg's status, a suite's own report, a golden file, the
+original text) and partly by a recorded reference (0.5), or live by a host toolchain (0), scores the **case-weighted mean**
+over its cases. Built in `crops.score` (`mixed-score`, test/crops/score.ae): where a fact of `test/crops/independence.edn`
+gives the per-check case counts, the tool computes the mean and uses it in place of the fact's stated `:score`, printing
+"the case-weighted mean of N cases" (and the stated score beside when it differs by more than 0.005):
+`:cases {CHECK [N SCORE] ...}` (Scheme's judge: 5,624 cases, 0.752) or `:mixed {:own N :jdk-record M}` (Java's judge:
+14,482 cases, (14,038 + 0.5 x 444) / 14,482 = 0.985). A fact without counts keeps its stated score. A claim refuted by the
+gate's steps (a step of the stage on a toolchain host) scores 0 as before.

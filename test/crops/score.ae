@@ -219,6 +219,18 @@
 
 ;; ---- independence
 
+;; The user's decision of 2026-11-07 (doc/CROPS-SCORE.md, "Decided (the user, 2026-11-07)"): a stage whose cases are judged
+;; partly by their own verdict (1) and partly by a recorded reference (0.5), or live (0), scores the case-weighted mean. The
+;; facts give the counts as :cases {CHECK [N SCORE] ...} (Scheme's) or :mixed {:own N :jdk-record M} (Java's: own 1, the
+;; JDK's record 0.5); with neither, the fact's stated :score stands.
+(defn- mixed-score [f]
+  (cond (map? (:cases f))
+        (let [cs (vals (:cases f)) n (reduce + (map first cs))]
+          (when (pos? n) [(double (/ (reduce + (map (fn [[k v]] (* k v)) cs)) n)) n]))
+        (and (number? (get-in f [:mixed :own])) (number? (get-in f [:mixed :jdk-record])))
+        (let [o (get-in f [:mixed :own]) j (get-in f [:mixed :jdk-record]) n (+ o j)]
+          (when (pos? n) [(double (/ (+ o (* 0.5 j)) n)) n]))))
+
 (defn- independence [t cfg config ind steps]
   (let [crop (:id cfg)
         facts (get ind crop)
@@ -230,7 +242,9 @@
                          named (mapcat #(by-name (str %)) (:steps f))
                          live (remove #(= :oracle (:phase %)) named)
                          hosted (for [s live h (:hosts s) :when (tool-hosts h)] [(:name s) h])
-                         claim (:score f)
+                         [mixed nmixed] (mixed-score f)
+                         stated (:score f)
+                         claim (if mixed (/ (Math/round (* 1000.0 mixed)) 1000.0) stated)
                          score (cond (nil? claim) 0.0
                                      (and (seq hosted) (pos? claim)) 0.0
                                      :else (double claim))
@@ -240,7 +254,12 @@
                                      (seq live) (if (zero? claim)
                                                   (str "claim 0 though " (str/join ", " (map :name live)) " name no toolchain host")
                                                   (str "steps agree: " (str/join ", " (map :name live)) " on no toolchain host"))
-                                     :else "claimed (no step of the tree runs it)")]]
+                                     :else "claimed (no step of the tree runs it)")
+                         check (if mixed
+                                 (str check "; the case-weighted mean of " nmixed " cases"
+                                      (when (and (number? stated) (> (Math/abs (- (double stated) mixed)) 0.005))
+                                        (str " (the fact states " stated ")")))
+                                 check)]]
                {:stage st :score score :fact f :check check})]
     {:stages rows :score (/ (reduce + (map :score rows)) (count rows))
      :facts-of (cond (nil? (:ref t)) "the checkout" at (:ref t) :else (str "the checkout (no :at for " (:ref t) ")"))
