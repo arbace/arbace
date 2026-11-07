@@ -658,6 +658,16 @@ covers what.
   BSD 3-Clause License, "GHC: the Glasgow Haskell Compiler License" below); the context inference and the choice of
   strategy of `compiler/GHC/Tc/Deriv/{Infer,Utils}.hs` and `Deriv.hs` read as the specification, written anew in
   `typecheck.ae`.
+- `arbace/repr/haskell/unlit.ae` (repr/haskell's native unlit, doc/haskell/NATIVE.md): a port of the
+  same tarball's `utils/unlit/unlit.c`, under the Glasgow Haskell Compiler License (below), on
+  2026-11-04; `arbace/repr/haskell/driver.ae` (GHC's driver's preprocessing: `GHC/SysTools/Cpp.hs`'s
+  doCpp, the package database's units as `GHC/Unit/State.hs` closes them) is Arbace's own, written
+  from that tarball's sources, under the Eclipse Public License 1.0.
+- `arbace/repr/haskell/cpp.ae` (repr/haskell's native C preprocessor in GCC's traditional mode,
+  doc/haskell/NATIVE.md) is Arbace's own, under the Eclipse Public License 1.0: a clean-room
+  implementation (2026-11-04) written from the documented behaviour of traditional mode and judged
+  against Alpine's gcc 15.2.0 `cpp -traditional` run as a black box, no code of GCC's (it replaced a
+  port of GCC's libcpp, under the GPL version 3, made on the branch `haskell-pp` and never merged).
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`

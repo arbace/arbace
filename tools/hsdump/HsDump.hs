@@ -89,7 +89,7 @@ import Data.Bits
 import Data.Char (isSpace, ord, toLower, toUpper, isDigit)
 import Data.Data
 import Data.IORef
-import Data.List (isPrefixOf, isSuffixOf, sortOn, intercalate, nub)
+import Data.List (isPrefixOf, isSuffixOf, sortOn, intercalate, nub, sort)
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe (fromMaybe, mapMaybe, catMaybes, isJust)
 import Data.Ratio (numerator, denominator)
@@ -110,7 +110,7 @@ import Stg (stgMain, Mode(..))
 
 -- The helper's version: bumped when its output changes (recorded in every dump's config).
 helperVersion :: Int
-helperVersion = 4
+helperVersion = 5
 
 -- The GHC this helper was written against (tools/hsdump/GHC_VERSION, passed by the build as
 -- -DGHC_PIN); the helper refuses to run on another (SPEC §8.4, H11).
@@ -391,20 +391,25 @@ parseOne hsc_env o file hsc = do
                 ++ [drop 8 a | a <- cmdWords, "-include" `isPrefixOf` a, length a > 8]
               macrosFile = [f | f <- includes, not ("ghcversion.h" `isSuffixOf` f)]
               configured = map showOpt' (snd (toolSettings_pgm_P (toolSettings dflags0)))
+          -- the MIN_VERSION header's hash with its blocks sorted (version 5: GHC orders them by its
+          -- unit map's uniques, which only its process knows; doc/haskell/NATIVE.md)
           macros <- forM (take 1 macrosFile) $ \f -> do
             e <- doesFileExist f
-            if e then Just . sha256Hex <$> B.readFile f else return Nothing
-          let markerFiles = nub [f | l <- BC.lines out, Just f <- [lineMarkerFile (BC.unpack l)], f /= file, not ("<" `isPrefixOf` f)]
+            if e then Just . sha256Hex . canonicalMacros <$> B.readFile f else return Nothing
+          -- a literate module's CPP input, unlit's temporary output, as <unlit> (version 5)
+          let litIn = [w | lit, (a, w) <- zip cmdWords (drop 1 cmdWords), a == "assembler-with-cpp"]
+              markerFiles = nub [f | l <- BC.lines out, Just f <- [lineMarkerFile (BC.unpack l)], f /= file, f `notElem` litIn, not ("<" `isPrefixOf` f)]
           fileHashes <- forM markerFiles $ \f -> do
             e <- doesFileExist f
-            h <- if e then sha256Hex <$> B.readFile f else return "missing"
+            h <- if e then sha256Hex . (if f `elem` macrosFile then canonicalMacros else id) <$> B.readFile f else return "missing"
             return (if f `elem` macrosFile then "<macros>" else relLibdir (oLibdir o) f, "sha256:" ++ h)
           let record = CppRecord
                 { cCommand = pgm : configured
-                , cArgs = map (roleOf (oLibdir o) outFn file macrosFile) (dropPrefix configured (drop 1 cmdWords))
+                , cArgs = map (\a -> if a `elem` litIn then "<unlit>" else roleOf (oLibdir o) outFn file macrosFile a) (dropPrefix configured (drop 1 cmdWords))
                 , cFiles = fileHashes
                 , cMacros = fmap ("sha256:" ++) (case macros of (Just m : _) -> Just m; _ -> Nothing)
-                , cOutput = "sha256:" ++ sha256Hex (foldr (\m t -> replaceBS (BC.pack m) (BC.pack "<macros>") t) out macrosFile)
+                , cOutput = "sha256:" ++ sha256Hex (foldr (\(m, r) t -> replaceBS (BC.pack m) (BC.pack r) t) out
+                                                     ([(m, "<macros>") | m <- macrosFile] ++ [(m, "<unlit>") | m <- litIn]))
                 , cViewMarkers = viewMarks }
               -- a literate module without CPP went through unlit alone (R6): no CPP record
               cpp = if lit && null cmdLines then Nothing else Just record
@@ -422,6 +427,17 @@ parseOne hsc_env o file hsc = do
     dropPrefix _ xs = xs
     showOpt' (Option s) = s
     showOpt' (FileOption a b) = a ++ b
+
+-- a MIN_VERSION header (generatePackageVersionMacros's) with its blocks sorted: the canonical
+-- order of its definitions (helper version 5)
+canonicalMacros :: B.ByteString -> B.ByteString
+canonicalMacros t = B.concat (sort (go t))
+  where
+    sep = BC.pack "\n\n"
+    go s | B.null s = []
+         | otherwise = case B.breakSubstring sep s of
+             (a, b) | B.null b -> [a]
+                    | otherwise -> B.append a sep : go (B.drop 2 b)
 
 -- every occurrence of a in t replaced by b
 replaceBS :: B.ByteString -> B.ByteString -> B.ByteString -> B.ByteString

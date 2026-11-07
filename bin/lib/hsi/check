@@ -79,10 +79,11 @@ if [ "$images" != none ] && [ -z "$dump_only" ] && [ -z "$verify_progs" ]; then
   for l in "${dirs[@]}"; do [ -d "$l" ] && ia+=(--lib "$l"); done
   "$hsi" image --out "$images" "${ia[@]}" >&2 || { echo "hsi check: hsi image failed" >&2; exit 1; }
 fi
-# the RTS's headers (HsFFI.h, Rts.h) for a program's own C, as ghc gives its C compiler
-rtsinc=$(ls -d "$libdir"/../lib/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1)
-stubprobe=$("$root/bin/hsi" stubs-build)
-export root work hsi libs helper helper_hash libdir ref keep images aot rtsinc stubprobe
+# the RTS's headers (HsFFI.h, Rts.h) for a program's own C, as ghc gives its C compiler: the installation's (live), else
+# the pack haskell-native-inputs-ghc-9.14.1's copy of them (its sysroot, as repr/haskell's native reads take it)
+if [ -n "$live" ]; then rtsinc=$(ls -d "$libdir"/../lib/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1)
+else rtsinc=$(ls -d "$("$root/bin/repr-haskell" native-libdir)"/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1); fi
+export root work hsi libs helper helper_hash libdir ref keep images aot rtsinc
 export HSI_TIMEOUT=${HSI_TIMEOUT:-60}
 # programs that need more than ARBACE_MEM_GIB name their own cap (ID=GIB ...); none today: the deepest stacks, Loop
 # (7.3 GB of RSS) and T16846 (9.7 GB), pass under the default 16 GiB (measured alone, 2026-11-03)
@@ -151,6 +152,26 @@ prog_key() {  # (a program's own C is not in it: the helper's STG is the Haskell
 }
 export -f prog_key
 
+# own_ref ID: "STATUS STDOUT-SHA STDERR-SHA" of the program's own verdict (test/haskell/own-verdicts.tsv: the expected status
+# and the expected outputs shipped with the test, read from its directory), or nothing when it has none (the user's decision
+# of 2026-11-07: a test's own verdict is a judge no toolchain made; the others are judged by GHC's recorded run). HSI_JUDGE=ref:
+# every program by the record (the oracle's comparison of the two judges)
+own_ref() {
+  [ "${HSI_JUDGE:-}" != ref ] || return 0
+  local id=$1 line ex so se d e
+  line=$(awk -F'\t' -v i="$id" '$1 == i' "$root/test/haskell/own-verdicts.tsv")
+  [ -n "$line" ] || return 0
+  IFS=$'\t' read -r _ ex so se <<< "$line"
+  case $id in
+    testsuite/*) d=$root/.tmp/hsi/ghc-9.14.1/testsuite/tests/$(dirname "${id#testsuite/}") ;;
+    nofib/*) d=$root/.tmp/hsi/nofib/${id#nofib/} ;;
+    *) return 0 ;;
+  esac
+  e=$(printf '' | sha256sum | cut -c1-64)
+  echo "$ex $(sha256sum < "$d/$so" | cut -c1-64) $(if [ "$se" = - ]; then echo "$e"; else sha256sum < "$d/$se" | cut -c1-64; fi)"
+}
+export -f own_ref
+
 one() {
   local id src main flags ropts name sin kind
   IFS=$'\037' read -r id src main flags ropts name sin kind <<< "$1"
@@ -195,18 +216,26 @@ one() {
     t1=$(date +%s.%N); td=$(printf '%.2f' "$(echo "$t1 - $t0" | bc)")
     rm -rf "$prog/obj"; touch "$prog/ok"
   fi
-  [ -z "$dump_only" ] || { echo "{:id \"$id\" :result :dumped :dump $td}" > "$res"; return 0; }
   local la=() l
   # the modules' foreign stubs (HES60 (a)): a program whose Haskell exports a function or imports a wrapper gets the C
-  # GHC writes for them (bin/hsi stubs-build's stubprobe --stubs), compiled by ci with its own C
+  # GHC writes for them (bin/hsi stubs-build's stubprobe --stubs, live: made with the dump and recorded with it in
+  # haskell-stg-progs, ID/stubs/), compiled by ci with its own C
   if [ ! -f "$prog/stubs.ok" ]; then
     rm -rf "$prog/stubs"
     if (cd "$src" && grep -qE 'foreign +export|"wrapper"|foreign +import +capi' "$main" $( [ "$kind" != plain ] && [ "$kind" != compile_and_run ] && find . -name '*.hs' -o -name '*.lhs' ) 2> "$prog/stubs.grep"); then
-      (cd "$src" && timeout 300 "$stubprobe" --stubs "$libdir" "$prog/stubs" -O0 ${fl[@]+"${fl[@]}"} -outputdir "$prog/stubobj" -- "$main") > "$prog/stubs.log" 2>&1 || true
-      rm -rf "$prog/stubobj"
+      if [ -n "$live" ]; then
+        (cd "$src" && timeout 300 "$("$root/bin/hsi" stubs-build)" --stubs "$libdir" "$prog/stubs" -O0 ${fl[@]+"${fl[@]}"} -outputdir "$prog/stubobj" -- "$main") > "$prog/stubs.log" 2>&1 || true
+        rm -rf "$prog/stubobj"
+        # GHC wrote none (a capi import of a function, no wrapper): recorded as such, so the records' run knows it
+        [ -n "$(ls "$prog/stubs" 2>"$TMPDIR/hsi-stubs.err")" ] || { mkdir -p "$prog/stubs"; touch "$prog/stubs/NONE"; }
+      elif [ -d "$progs_pack/$id/stubs" ]; then cp -r "$progs_pack/$id/stubs" "$prog/stubs"
+      else
+        echo "{:id \"$id\" :result :unrecorded :error \"UNRECORDED: its foreign stubs are not in haskell-stg-progs (bin/hsi check --live --dump-only --record-progs)\"}" > "$res"; return 0
+      fi
     fi
     touch "$prog/stubs.ok"
   fi
+  [ -z "$dump_only" ] || { echo "{:id \"$id\" :result :dumped :dump $td}" > "$res"; return 0; }
   local sf; for sf in "$prog"/stubs/*_stub.c; do [ -f "$sf" ] && cfiles+=("$sf"); done
   # a wrapper's stub whose parameters hold the x86-64 adjustor's original_return_addr: its name and that parameter's
   # index (the stable pointer's 0), for hsi's createAdjustor (NODES.adjust, read beside the node program)
@@ -293,10 +322,16 @@ one() {
     tm="$tm :aot-build $ab :hsi-run $hrun :vs-hsi :$vs"
   fi
   echo "$st" > "$o.status"
+  local own; own=$(own_ref "$id")
+  if [ -n "$own" ]; then
+    # the program's own verdict: its expected status and shipped outputs, the record not read
+    read -r rst rso rse <<< "$own"; tm="$tm :judge :own"
+  else
   if [ -z "$rl" ]; then echo "{:id \"$id\" :result :no-ref $tm}" > "$res"; return 0; fi
   rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$rl")
   rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
   rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
+  fi
   if grep -q '^hsi: ' "$o.stderr"; then
     local msg rsn; msg=$(grep -m1 '^hsi: ' "$o.stderr" | cut -c1-200 | sed 's/\\/\\\\/g; s/"/\\"/g')
     # why hsi stopped, as hsi words it (HES43 (b)): its hsi-reason line
@@ -368,7 +403,9 @@ record_progs_run() {
     rm -rf "${stage:?}/$name/$id"
     if [ -f "$prog/ok" ]; then
       mkdir -p "$stage/$name/$id/stg"; cp -r "$prog/stg/." "$stage/$name/$id/stg/"
-      (cd "$stage/$name" && find "$id/stg" -type f | LC_ALL=C sort) | while IFS= read -r m; do printf '%s\t%s\n' "$m" "$key"; done >> "$stage/ids"
+      # the foreign stubs GHC wrote for it (HES60 (a)), when it has any
+      if [ -n "$(ls "$prog/stubs" 2>"$TMPDIR/hsi-stubs.err")" ]; then mkdir -p "$stage/$name/$id/stubs"; cp -r "$prog/stubs/." "$stage/$name/$id/stubs/"; fi
+      (cd "$stage/$name" && find "$id/stg" "$id/stubs" -type f 2>"$TMPDIR/hsi-find.err" | LC_ALL=C sort) | while IFS= read -r m; do printf '%s\t%s\n' "$m" "$key"; done >> "$stage/ids"
     elif [ -f "$prog/dump-failed.txt" ]; then
       mkdir -p "$stage/$name/$id"; cp "$prog/dump-failed.txt" "$stage/$name/$id/dump-failed.txt"; printf '%s/dump-failed.txt\t%s\n' "$id" "$key" >> "$stage/ids"
     else echo "record: $id has no dump (not run)" >&2; continue; fi
@@ -454,9 +491,11 @@ while read -r subj refid over; do
   cran=$((cran + 1))
   rl=$(grep -F "{:id \"$refid\" " "$ref" || true)
   rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$rl"); rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
+  rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
+  # a reference with its own verdict is judged by it, as its program is (the own judge's control)
+  ownr=$(own_ref "$refid"); [ -z "$ownr" ] || { read -r rst rso rse <<< "$ownr"; refid="$refid (its own verdict)"; }
   # status=N: the reference with another status (a control of the status's comparison alone)
   case $over in status=*) rst=${over#status=}; refid="$refid ($over)" ;; esac
-  rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
   so=$(sha256sum < "$o.stdout" | cut -c1-64); se=$(sha256sum < "$o.stderr" | cut -c1-64)
   if [ "$(cat "$o.status")" = "$rst" ] && [ "$so" = "$rso" ] && [ "$se" = "$rse" ]; then
     echo "hsi check: control $subj against $refid passes: the judge does not discriminate"; cbad=1

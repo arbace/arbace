@@ -1232,3 +1232,113 @@ is not seen).
 - **1 (a):** evidence bindings placed where GHC's solver places them (constant dictionaries shared once), in the next elaborator slice.
 - **2 (a):** HF4's derived code uses `dataToTag#` and the tag primops, as GHC's generators do.
 - **3 (a):** nofib re-recorded at the night caps (16 GiB, 60 s) to empty the `hsi` class.
+
+## Decided (the user, 2026-11-07)
+
+Relayed by the main session with the brief of the branch `haskell-90` (the crop above 90% on `bin/crops-score`'s three
+measures, doc/CROPS-SCORE.md on `mac/crops-score`):
+
+- **The judge.** A test's own verdict counts as a judge no toolchain made (score 1): the exit status, expected output shipped
+  with the test (GHC's testsuite's `.stdout` and `.stderr` files, nofib's `.stdout`), the round trip's reread forms equal.
+- **A mixed stage** scores the case-weighted mean of its cases' 1 (own verdict) and 0.5 (a recorded toolchain reference).
+- **A pinned input corpus** in the crop's own language counts 1 when no toolchain output about it is a reference.
+- **Toolchain runs** move to the oracle tier (by hand, at a tag).
+
+## As built: the crop's independence (2026-11-07, branch `haskell-90`, from `haskell-simpl`)
+
+Under the day's light rules: main's stage 0, sample checks, every process under 1.5 GB. The stub runs had `ghc ghc-pkg
+runghc ghci hsc2hs gcc cc clang` first on `PATH` as scripts logging their call and exiting 99 (doc/CROPS-SCORE.md, "The stub
+runs"); after each run the log was empty.
+
+**What came in.** `haskell-eval9` (hsi's HE9: allocation counters, the RTS's options) was not merged: its merge with this line
+conflicts in eleven files of hsi's runtime (`go/arbace/hs/{machine,nodes,rts,mem,prim_ctl}.ae`, the driver, `bin/lib/hsi/check`,
+the records), both lines having built HES60 and HES64 (a program's own C, the foreign stubs) independently; not small (proposal
+HFS-I4). From `mac/oracle-records-cpp2` the shared oracle-records tooling and Haskell's ORS12 commits were cherry-picked
+(`c3892e875` `8e5ce6196` `1bf41517c` `54f5e5313` `62e96e5d9` `2b03a6bdd`, `-x`; `oracle.bash` taken whole from that branch's
+head; `prog_key` kept as recorded: a program's own C is not in its STG's key). From `mac/haskell-cpp` its net change over
+`53794ed6^` was applied (unlit, the driver, the clean-room `cpp.ae`, the native mode `:full`, the helper's version 5): the tree
+it gives holds no GPL code (`4b16a392b` replaced the port), and no commit containing `53794ed6` is in this branch's history.
+
+**Read: the native reader as the source of the read stage's forms.** `bin/repr-haskell read --corpus` and `roundtrip` (its tree,
+layout and text levels) read with `arbace.repr.haskell.native` (`REPR_HASKELL_READER=helper`: the helper's dumps, the oracle's).
+GHC's installation, the configure products and hsc2hs's outputs, which the reads of 528 of the 1,345 modules still consume, are
+the pack `haskell-native-inputs-ghc-9.14.1` (doc/haskell/NATIVE.md, "The native reads' inputs"); `cpp.ae` reads absolute paths
+under a sysroot (`*sysroot*`, `--sysroot`), the records naming the host's paths as before. The recording (`bin/repr-haskell
+record-native-inputs`, a live native read of the whole corpus in both modes): 1,345 modules each mode, none failing, 7 min 39 s
+at four jobs, at most 1.4 GB.
+
+**The judge: the round trip's own verdict.** The tree level (and the layout level) reads the printed modules again natively and
+compares their forms with the originals' (`arbace.repr.haskell` `compare-forms`; the module form's records of how its text was
+made, `:config :cpp :hsc2hs :unlit`, left out: the print is CPP's output), known differences in
+`test/haskell/roundtrip-ghc-9.14.1{,-layout}-native-known.edn`; the text level compares the print with the original text (a
+CPP module's module view, which the native reader now writes as `FILE.view`) byte for byte, no tree made (`compare-text
+--bytes-only`). The interface level (GHC compiling the print) and the helper's trees are the oracle tier's
+(`test/gate/crops/haskell.edn`: `haskell-roundtrip-oracle`, `REPR_HASKELL_READER=helper`). Each level has its negative control
+(GTS81 (a)): `test/haskell/roundtrip-controls.edn`'s pairs, a module's reread forms (print, interface) judged against another
+module's reference, and each judged module against the next; one equal pair, or none judged, fails the level. The printer's
+one fix the stricter judge found: `{-# OPTIONS_HADDOCK not-home #-}` printed with its text's own spaces (the reread string was
+`"  not-home  "`).
+
+| stub run (samples) | result |
+|---|---|
+| `bin/repr-haskell test` (the records re-recorded at the helper's version 5, `--record`, 74 files) | 18 ok, 22 GHC checks skipped (class D, `--oracle`), 34 s |
+| `roundtrip --text --layout` over array, deepseq, containers, unix, directory (113 modules, 47 through CPP, 39 `.hsc`) | tree 113 of 113, layout 113 of 113, text 113 of 113 byte for byte; the controls 8, 8 and 7 pairs differ; 3 min 11 s at four jobs |
+
+**Eval and AOT: hsi over the packs.** `bin/hsi check` runs without GHC (ORS12's path): the boot libraries' STG and the programs'
+`-O0` STG from the packs `haskell-stg-libs` and `haskell-stg-progs`; this branch adds to the latter the programs' foreign stubs
+(the C GHC writes for a `foreign export` or a `"wrapper"` import, `ID/stubs/`, `NONE` when GHC wrote none) and takes the RTS's
+headers for a program's own C from the native-inputs pack's sysroot, so `stubs-build` (a GHC build of the probe) runs only
+live. `haskell-stg-progs` recorded afresh (`bin/hsi check --live --dump-only --record-progs --corpus
+nofib,samples,synthetic,testsuite-core --jobs 8`, 4 min 6 s): 908 programs, 849 dumped, 59 GHC's own build errors recorded as
+such. `haskell-stg-libs` is STALE on this line (its members name the helper they were made by: the helper changed with HE7's
+verbs and version 5): its re-recording is the night's (`bin/hsi dumps --record`); the day's sample ran with `HSI_LIBS` naming
+the pinned pack's unpacked members.
+
+| stub run (samples, `HSI_LIBS` the pinned pack's members, 2 GiB) | result |
+|---|---|
+| `bin/hsi check --only` 12 programs (samples, synthetic, testsuite: the controls' subjects and five of the essential list) | 12 of 12 pass (4 by their own verdict), the 4 controls fail as they must, 5 s |
+| the same with three programs with C of their own (`T12622`, `ffi020`, nofib's `callback001`: ci, the recorded stubs) | as recorded (`ffi020` passes; the other two in their classes `:rts` and `:no-reference`); with `.tmp/ci-musl` absent ci's `bin/ci musl ensure` configures musl with gcc (the stub was called): on this line the 87 programs with C need it prepared; `mac/batch1`'s ci (c-indep-b1: musl without a compiler) removes that at the merge |
+
+**The judge: the tests' own verdicts.** `bin/hsi own-verdicts` lists the programs whose shipped expectations (all.T's
+`exit_code` and `NAME.stdout`, `NAME.stderr`, a missing one empty, as the testsuite driver takes them; nofib's `NAME.faststdout`
+or `NAME.stdout`) are exactly GHC's recorded run: 580 of 908 (527 of the testsuite's, 53 of nofib's), `test/haskell/own-verdicts.tsv`.
+`bin/hsi check` judges those by the shipped files alone (`own_ref`; `:judge :own` in the result), the record not read; the others
+by GHC's recorded run. Since the list holds only the programs on which both agree, every verdict is the same either way
+(`HSI_JUDGE=ref`: all by the record, the oracle tier's comparison; `own-verdicts --check`: the list against the trees and the
+record, in `hsi-essential`). The negative controls judge a subject against a reference's own verdict when it has one.
+
+**The gate.** Steps in `test/gate/steps.edn` (`:crops`' `:haskell`), none on `:ghc`: `haskell-read-essential` (`bin/repr-haskell
+test`, the round trip of array, deepseq and containers at the tree and text levels) and `hsi-essential` (`own-verdicts --check`,
+the 123 programs of `test/haskell/hsi/essential.txt`) in the essential gate; `haskell-roundtrip` (the whole corpus, tree, layout,
+text), `hsi-check` and `hsi-check-aot` in `--full`. `test/gate/crops/haskell.edn` keeps the oracle tier's steps alone
+(`haskell-test-oracle`, `haskell-roundtrip-oracle`, `haskell-native-oracle` new: `tables --check`, `native-check` in both modes,
+`HSI_JUDGE=ref` `own-verdicts --check`; `haskell-records-verify`, with the new kind `native-inputs`). `bin/gate --plan` reads them.
+
+**Left** (the night's, one check process at a time, at most 1.5 GB a process): `bin/hsi dumps --record` (the libraries' STG at
+this helper; then `hsi-essential` and `hsi-check` pass their pins), `bin/repr-haskell roundtrip --text --layout` over the whole
+corpus (writes the native known files' first entries, if any differ), `bin/hsi check --corpus nofib,samples,synthetic,testsuite-core
+--record` and `--aot --record` on the packs (the records' lines gain `:judge :own`; T16846 alone needs 10 GB: `HSI_MEM_CAPS`), then
+`bin/reap --record`. The native front end (HF7's run-check, 60 of 63 programs, and nofib's) is not yet hsi check's source of STG
+(HFS-I1).
+
+## Proposed (HFS-I1 to HFS-I4; options with costs, a recommendation each, none decided)
+
+- **HFS-I1 The native front end as hsi check's source of STG.** (a) `bin/hsi check --front native`: the programs the front end
+  compiles (single-module, no GADTs or type families yet) run from Arbace's STG, the others from the pack, each result naming its
+  source; the front end's interfaces from a pack `haskell-ifaces` (the helper's `iface` closure of every program's imports, about
+  11 MB for the run corpus), the default once a night's run shows no pass lost; about a day. (b) Keep the pack's STG until the
+  front end compiles the testsuite's multi-module programs (HF9). (c) Both records side by side (OCaml's TY19 (b)). The stage
+  stays 0.5 in any case while the libraries' STG is GHC's. *Recommended: (a)*, after the night's records.
+- **HFS-I2 The native inputs at 1.** The read stage's 528 preprocessed modules consume the pack (0.5). (a) Derive the configure
+  products and the installation's generated headers from the target's facts (sizes, features: a few dozen `#define`s), the package
+  database from the corpus's `.cabal` files, and run hsc2hs's C program on ci; about two days; read 80% → 100%. (b) Keep the pack.
+  *Recommended: (a)* for the configure products and the database first (they are data), hsc2hs after.
+- **HFS-I3 The interface level in the read cell.** `roundtrip --iface` compiles the print with GHC: it is the oracle tier's now, but
+  the read cell still counts its 1,345 modules from the known file. (a) Mark the source `:role :beside` (counted apart, as the
+  layout's); (b) keep it in the cell, recorded at each tag's oracle run; (c) replace it by the native front end's interfaces of
+  both sides (HF2's renamer and HF3's elaborator: types and exports of the original and the print compared) once they cover the
+  corpus. *Recommended: (b)* now, (c) as the front end grows.
+- **HFS-I4 `haskell-eval9`.** Its merge conflicts in hsi's runtime (two builds of the same C support). (a) A merge by an agent
+  of its own: hsi's forms merged as Go (`git merge-file` per printed file, as `haskell-integrate` did), eval9's HE9 kept, this
+  line's stubs and packs kept; about half a day; check-hsi 806 of 910 on that line. (b) Rebase HE9's commits alone (allocation
+  counters, RTS flags) onto this line. *Recommended: (b)*: HE9 is self-contained, the C support of both lines is the same design.
