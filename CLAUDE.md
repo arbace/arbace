@@ -114,8 +114,8 @@ Prior art:
   `test/arbace-go-aot-results.edn` (classes `test/clojure/divergences-aot.edn`), the two levels'
   disagreements listed (`bin/gate --full`'s `suite-aot`).
 - `bin/reap` (and `make reap`; REAP1, doc/FULL-SUPPORT-SURVEY.md, RPS3, RPS13): the REAP matrix,
-  read, eval, AOT and print for Clojure, Java, Go, C, C++, Scheme, OCaml and Python (eight rows, 32 cells since merge plan batch 1,
-  2026-11-07, the rows' branches merged: four rows, 16 cells since C8, doc/C23-SURVEY.md §10; C++'s since CX10,
+  read, eval, AOT and print for Clojure, Java, Go, C, C++, Scheme, OCaml, Python, LLVM IR and Rust (ten rows, 40 cells since merge plan
+  batch 2, 2026-11-07, llvm-90's and rust-row's rows; eight rows, 32 cells since batch 1, the rows' branches merged: four rows, 16 cells since C8, doc/C23-SURVEY.md §10; C++'s since CX10,
   doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)", "As built: cppi-check": C++'s read the token check's `test/repr/cpp/pp-check-known.edn` with its results
   `pp-check-results.edn` (`:c-known`'s `:id-sep "/"`) and CX9's dg record, eval and AOT CX8's `test/cpp/check{,-aot}-linux-amd64.edn` and the sampling's
   `check{,-aot}-every-25-linux-amd64.edn` (cppi-check; the lowering's `test/cpp/lower-results.edn` beside, reader `:cpp-lower`), print the round trip's `test/repr/cpp/roundtrip-results/`
@@ -292,7 +292,12 @@ Prior art:
     :ocaml`, beside `:gcc`; `bin/gate`'s `gate_host_id`), their pins `:crop-pins` (`bin/gate --pins`), their light `:full` chains
     beside the serial run (`:night-concurrent`, GTS216; `bin/gate --plan` names them), their budgets `:new-crops` and `:shares`
     (`bin/gate --costs`); the rotations take GT9's verbs (`--only-list`, `--cmi-only`, `--no-expect`; test/{ocaml,cpp}/subsets.edn).
-    The fragments of later batches (llvm-rust, natives, haskell, cpp-native, python) wait in `test/gate/crops/`.
+    Since batch 2 (2026-11-07) LLVM IR's and Rust's too: llvm-90's eight steps (LL9a, doc/llvm/LLVM-CROP-SURVEY.md: the chains
+    `llvm-essential` and `llvm-full`, on `:stage0` and `:go` alone: no LLVM tool at check time, each module judged by its own verdict, else
+    opt's and lli's records; clang, llvm-as, opt and lli only by hand, `REPR_LLVM_JUDGE=live`, `LLVMI_JUDGE=lli`), llvmi (`bin/llvmi`,
+    `arbace/llvm/`, in `arbace_crop_paths`) on C's own target; Rust's from `crops/llvm-rust.edn` and `natives.edn` (`rust-read-essential`,
+    `rsi-essential`, `rust-native-essential`; `--full` the chains `rust-full` and `rust-aot`, on the host `:rustc`).
+    The fragments of later batches (haskell, cpp-native, python) wait in `test/gate/crops/`.
     C++'s since CX10 (doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"), on stage 0 with the host's g++
     and clang++ (the host `:cxx`; `bin/gate --pins` runs `bin/repr-cpp pins check` and `host check`, `:crop-pins :cpp`):
     essential `cpp-read-essential` (`bin/repr-cpp pp-check --essential`, `test/cpp/essential-read.txt`; `--only FILE`, CORPUS/NAME a line,
