@@ -1,0 +1,288 @@
+;; The crops' independence, stage by stage (doc/CROPS-SCORE.md, "Independence"): reviewed facts, read by bin/crops-score
+;; (test/crops/score.ae). Read with the Clojure reader.
+;;
+;; Per crop, :stages, the facts of main (the checkout this file is on), and :at, the facts that differ at a held ref (by its
+;; short name, as --ref and --newest give it), merged over them stage by stage. A stage:
+;;   :read :eval :aot :print  the stage's pipeline: Arbace's path from the input to its output, with the inputs it consumes
+;;                            (OCaml's Lambda, GHC's STG, rustc's and clang's IR, the helpers' dumps, installed headers)
+;;   :judge                   what the crop's checks compare with at check time, every cell's (the references, the oracles)
+;; and its fact:
+;;   :score     1: no host toolchain at check time and no record of one consumed; 0.5: none at check time, but the stage consumes
+;;              or compares with a record a host toolchain made, re-recorded by hand (or the toolchain runs only in the oracle
+;;              tier, :phase :oracle, by hand at a tag); 0: a host toolchain runs at check time in the stage (a live dump, a live
+;;              reference run, an installed tree of a toolchain's package read in place), or the stage does not exist on the ref
+;;   :tool      the command; :host the host toolchains it needs (GT9's host names); :why the reason in a phrase
+;;   :evidence  file:line (REF:file:line on a held ref) or a command, what shows it
+;;   :steps     the gate steps that run the stage (the tree's test/gate/steps.edn, else its GT9 fragment): bin/crops-score
+;;              scores 0 a stage claimed above 0 whose step runs on a toolchain host outside the oracle tier, and says so
+;;   :verified  a stub run: the stage run on a tiny sample with the toolchain's commands first on PATH as stubs exiting 99
+;;              (doc/CROPS-SCORE.md, "The stub runs")
+;; Not a host toolchain: Arbace's own executables, TamaGo's go (the seed's toolchain, pinned by seed/goroot.sha256, its
+;; sources Go forms in tamago/cmd/), the frozen jar of arbace-for-java-26-v4 (pinned by test/oracle/frozen-jar.sha256).
+;; The JDK beyond that jar (jdk26u's build) counts. Sources: doc/ORACLE-RECORDS-SURVEY.md on mac/oracle-records-cpp2 (§1.2's
+;; inventory, the crops' "As built"), the scripts at each ref (the evidence lines), 2026-11-06.
+{:clojure
+ {:stages
+  {:read {:score 1 :tool "arbace.lang.LispReader; bin/repr-clojure read" :host []
+          :why "Arbace's own reader" :evidence ["test/reap/cells.edn: [:clojure :read]'s sources run on the test build"]}
+   :eval {:score 1 :tool "the test build (bin/clojure-tests, bin/oracle)" :host [] :why "Arbace's evaluator"
+          :evidence ["test/gate/steps.edn: suite-go, oracle-go on :gate"] :steps [suite-go]}
+   :aot {:score 1 :tool "c2j, j2g, TamaGo's go (bin/clojure-tests --aot)" :host [] :why "Arbace's compiled pipeline"
+         :evidence ["test/gate/steps.edn: suite-aot-essential, suite-aot"] :steps [suite-aot-essential suite-aot]}
+   :print {:score 1 :tool "arbace.core's printer; bin/repr-clojure print" :host [] :why "Arbace's printer"
+           :verified "2026-11-06: bin/repr-clojure roundtrip .tmp/frozen/clojure/walk.clj, 1 of 1 equal, no stub called"}
+   :judge {:score 1 :tool "test/baseline-results.edn, test/oracle/expected; the frozen jar" :host []
+           :why "references recorded from the frozen v4 jar (pinned), the oracle's live reference the same jar"
+           :evidence ["test/oracle/frozen-jar.sha256" "test/gate/steps.edn: oracle-go :hosts [:gate :frozen :jdk]"]
+           :steps [suite-go oracle-go diffcheck suite-aot-essential suite-aot repr-clojure]}}}
+
+ :java
+ {:stages
+  {:read {:score 1 :tool "bin/repr-java read on javac on Arbace" :host [] :why "javac on Arbace, no JVM since JN6"
+          :evidence ["CLAUDE.md: \"Nothing of repr/java starts a JVM (JN6)\""] :steps [java-read]}
+   :eval {:score 1 :tool "bin/java-check interp" :host [] :why "the Java forms' interpreter" :steps [java-check java-interp]}
+   :aot {:score 1 :tool "bin/java-check compiled: j2g, bin/build-go" :host [] :why "j2g and TamaGo's go"
+         :steps [java-compiled java-compiled-full]}
+   :print {:score 1 :tool "arbace.repr.java.print" :host [] :why "Arbace's printer, javac on Arbace accepting it"}
+   :judge {:score 0.5 :tool "test/java/ref-jdk26.edn" :host [:jdk]
+           :why "the JDK's runs and javac's class files recorded by hand (bin/java-check --record-ref, jdk26u's JDK)"
+           :evidence ["bin/java-check:257 (record_ref: javac of the JDK)" "bin/java-check:841 classes_verdict against the record"]
+           :steps [java-check-judge java-judge java-classes java-print java-diagnostics]}}}
+
+ :go
+ {:stages
+  {:read {:score 1 :tool "bin/repr-go read (native since GP5)" :host [] :why "go/parser and goi's checker as Go forms on goi"
+          :evidence ["CLAUDE.md: read reads natively since GP5: no helper and no go command"]}
+   :eval {:score 1 :tool "bin/goi check" :host [] :why "goi" :steps [goi-check goi-check-full]}
+   :aot {:score 1 :tool "bin/goi check --aot: arbace.build.go, TamaGo's go" :host [] :why "TamaGo's go is the seed's toolchain"
+         :steps [goi-aot-essential goi-aot]}
+   :print {:score 1 :tool "arbace.repr.go's printer" :host [] :why "Arbace's printer"}
+   :judge {:score 1 :tool "gc's builds and runs of the originals (TamaGo's go1.27.1)" :host []
+           :why "the reference is gc, run live, but gc is TamaGo's pinned go (seed/goroot.sha256), not a host toolchain; the error tests' go/types errors from tools/godump, built by it"
+           :evidence ["seed/goroot.sha256" "test/gate/steps.edn: goi-check :hosts [:gate :stage0 :go]"]
+           :steps [goi-check goi-aot-essential repr-go repr-go-native goi goi-check-full goi-aot]}}}
+
+ :c
+ {:stages
+  {:read {:score 0 :tool "repr/c's preprocessor and parser (bin/repr-c check, bin/ci dg)" :host [:gcc]
+          :why "the reader reads the host's installed headers (gcc's include directory, musl-dev) in place"
+          :evidence ["test/c/host/search.txt" "doc/ORACLE-RECORDS-SURVEY.md §1.2: c-dg-essential E: the headers"]
+          :steps [c-dg-essential c-tokens c-parse]}
+   :eval {:score 0 :tool "bin/ci check" :host [:gcc] :why "the installed headers; musl's one-time CC=gcc ./configure"
+          :evidence ["bin/lib/ci/musl:45" "test/gate/steps.edn: c-check-essential :hosts [:stage0 :go :gcc]"]
+          :steps [c-check-essential c-check]}
+   :aot {:score 0 :tool "bin/ci check --aot (cf2g, TamaGo's go)" :host [:gcc] :why "as eval: the headers, musl's configure"
+         :steps [c-aot-essential c-aot]}
+   :print {:score 1 :tool "arbace.repr.c.print" :host [] :why "Arbace's printer"}
+   :judge {:score 0 :tool "gcc live: dg's diagnostics, the round trip's objects and runs, C23's acceptance" :host [:gcc]
+           :why "test/c/ref-gcc15.edn is recorded, but bin/ci dg, bin/repr-c roundtrip and check --c23 run gcc"
+           :evidence ["bin/lib/ci/dg:78-91" "bin/lib/repr-c/roundtrip:130-140" "bin/lib/repr-c/c23check:21-32"]
+           :steps [c-dg-essential c-check-essential c-aot-essential c-c23 c-dg c-roundtrip c-check c-aot]}}
+  :at
+  {"mac/oracle-records-cpp2"
+   {:read {:score 0.5 :tool "repr/c over the headers' pack c-headers-gcc15" :host []
+           :why "the installed headers as a pinned pack, recorded from the host's gcc by hand (ORS9 (a))"
+           :evidence ["mac/oracle-records-cpp2:doc/ORACLE-RECORDS-SURVEY.md \"As built: the tooling and C\""]}
+    :eval {:score 0.5 :tool "bin/ci check, musl's configured tree as the pack c-musl-1.2.6-x86_64" :host []
+           :why "headers and musl's configure products as packs, gcc only when the store lacks them"}
+    :aot {:score 0.5 :tool "bin/ci check --aot over the packs" :host [] :why "as eval"}
+    :judge {:score 0.5 :tool "ref-gcc15.edn, ref-dg-gcc15.edn, c23/ref-syntax-gcc15.tsv, c-roundtrip-orig-* packs" :host []
+            :why "gcc's outcomes recorded by hand; the print's objects and C23's print syntax in the oracle tier"
+            :evidence ["mac/oracle-records-cpp2:test/gate/steps.edn: C's steps :hosts without :gcc, c-*-oracle :phase :oracle"]}}}}
+
+ :cpp
+ {:stages
+  {:read {:score 0 :tool "repr/cpp: tools/cxxdump (clang -ast-dump=json), the preprocessor over libstdc++'s headers" :host [:cxx]
+          :why "the forms are converted from clang's AST dump, run live"
+          :evidence ["bin/lib/repr-cpp/roundtrip:49 exe=${REPR_CPP_CXXDUMP_EXE:-.../cxxdump}"]}
+   :eval {:score 0 :tool "bin/cppi lower-check (main); bin/cppi check (held)" :host [:cxx :gcc]
+          :why "clang++ -emit-llvm makes the IR cppi lowers; gcc -O0 of the lowered C"
+          :evidence ["bin/cppi:123 clang++ ... -S -emit-llvm" "bin/cppi:150 gcc $GCC_FLAGS -c lowered.c"]
+          :steps [cpp-check-essential cpp-check cpp-lower-essential cpp-lower]}
+   :aot {:score 0 :tool "none on main (bin/cppi check --aot on the held branches)" :host [:cxx]
+         :why "no AOT on main; on the held branches the same live IR"
+         :evidence ["mac/cppi-deferred:bin/lib/cppi/check-aot:73"] :steps [cpp-aot-essential cpp-aot]}
+   :print {:score 1 :tool "arbace.repr.cpp's printer" :host [] :why "Arbace's printer"}
+   :judge {:score 0 :tool "g++'s and clang++'s objects of the print, g++'s runs (lower-check), cxxdump of the print" :host [:cxx :gcc]
+           :why "the round trip compiles both, lower-check runs g++ live"
+           :evidence ["bin/lib/repr-cpp/roundtrip:96,99" "bin/cppi:132 g++ -x c++ ... -o gxx"]
+           :steps [cpp-read-essential cpp-print-essential cpp-lower-essential cpp-check-essential cpp-aot-essential cpp-tokens
+                   cpp-roundtrip cpp-lower cpp-check cpp-aot]}}
+  :at
+  {"mac/cppi-deferred"
+   {:eval {:score 0 :tool "bin/cppi check" :host [:cxx] :why "clang++ -emit-llvm per program, live"
+           :evidence ["mac/cppi-deferred:bin/lib/cppi/check:84"]}
+    :aot {:score 0 :tool "bin/cppi check --aot" :host [:cxx] :why "the same live IR"
+          :evidence ["mac/cppi-deferred:bin/lib/cppi/check-aot:73,108"]}
+    :judge {:score 0 :tool "ref-gxx15.edn (recorded); lower-check's g++ and the round trip's objects live" :host [:cxx :gcc]
+            :why "check's reference is recorded, lower-check and the round trip run g++/clang++"
+            :evidence ["mac/cppi-deferred:bin/cppi:158" "mac/cppi-deferred:bin/lib/cppi/record-ref:44,55"]}}
+   "mac/oracle-records-cpp2"
+   {:read {:score 0.5 :tool "cxxdump -records over the packs cxxdump-KEY" :host []
+           :why "clang's AST dumps of the originals as packs, recorded by hand"
+           :evidence ["mac/oracle-records-cpp2:bin/lib/repr-cpp/roundtrip:51"]}
+    :eval {:score 0.5 :tool "bin/cppi check over the packs cpp-ir-samples, cpp-runtime-ir" :host []
+           :why "clang++'s IR recorded by bin/cppi record-ir; CPPI_LIVE=1 the live oracle"
+           :evidence ["mac/oracle-records-cpp2:bin/lib/cppi/check:85-86" "mac/oracle-records-cpp2:bin/cppi:284-287"]}
+    :aot {:score 0.5 :tool "bin/cppi check --aot over the packs" :host [] :why "as eval"
+          :evidence ["mac/oracle-records-cpp2:bin/lib/cppi/check-aot:74-75"]}
+    :judge {:score 0.5 :tool "ref-gxx15.edn, ref-dg-gxx15.edn, roundtrip-oracle.edn; the print's levels in the oracle tier" :host []
+            :why "g++'s outcomes recorded by hand, the print's objects and gcc on the lowered C oracle-tier only (ORS27, ORS28 (b))"}}}}
+
+ :llvm
+ {:stages
+  {:read {:score 1 :tool "bin/repr-llvm read" :host [] :why "Arbace's reader of .ll text"
+          :verified "2026-11-06: bin/repr-llvm read, print, read of test/cpp/selftest/atomic-libcalls.ll, the forms equal (but the namespace, the file's name), no stub called"}
+   :eval {:score 0 :tool "none on main (bin/llvmi check on mac/llvm-ll6)" :host [] :why "no llvmi on main"}
+   :aot {:score 0 :tool "none on main (bin/llvmi check --aot on mac/llvm-ll6)" :host [] :why "no llvmi on main"}
+   :print {:score 1 :tool "bin/repr-llvm print" :host [] :why "Arbace's printer" :verified "2026-11-06: with read, above"}
+   :judge {:score 0 :tool "clang -c and llvm-as of the original and the print, opt -passes=verify" :host [:llvm :cxx]
+           :why "the round trip's objects and bitcode and the verifier's reference run live"
+           :evidence ["bin/repr-llvm:25,26 clang -c" "mac/llvm-ll6:bin/repr-llvm:70,78,115,122"]
+           :steps [llvm-roundtrip llvm-verify]}}
+  :at
+  {"mac/llvm-ll6"
+   {:eval {:score 0 :tool "bin/llvmi check" :host [:cxx]
+           :why "the corpora's IR made live by clang -O0/-O2 and clang++ (only ee's .ll read in place)"
+           :evidence ["mac/llvm-ll6:bin/llvmi:76,88,96"]}
+    :aot {:score 0 :tool "bin/llvmi check --aot" :host [:cxx] :why "the same live IR, then cf2g and TamaGo's go"}
+    :judge {:score 0 :tool "test/llvm/ref-lli23.edn (recorded); the round trip and verify-check live" :host [:llvm :cxx]
+            :why "llvmi's reference is recorded (bin/llvmi record-ref: lli), repr/llvm's checks run clang, llvm-as, opt"
+            :evidence ["mac/llvm-ll6:bin/llvmi:153,158" "mac/llvm-ll6:bin/repr-llvm:70,78,115"]}}
+   "mac/oracle-records-cpp2"
+   {:judge {:score 0.5 :tool "test/llvm/records: the originals' objects and bitcode, the llvm-opt-verify pack" :host []
+            :why "the originals' half recorded by hand; the print's objects in the oracle tier (llvm-*-oracle)"
+            :evidence ["mac/oracle-records-cpp2:test/gate/steps.edn: llvm-roundtrip, llvm-verify :hosts [:stage0]"]}}}}
+
+ :ocaml
+ {:stages
+  {:read {:score 0 :tool "bin/repr-ocaml read: tools/ocdump on compiler-libs" :host [:ocaml]
+          :why "the forms are converted from ocdump's parse dumps, ocdump built by the host's ocamlopt"
+          :evidence ["bin/repr-ocaml:148 ocamlopt -I +compiler-libs ... ocdump.ml" "bin/repr-ocaml:332 need_ocdump"]
+          :steps [ocaml-read-essential]}
+   :eval {:score 0 :tool "bin/oi check" :host [:ocaml]
+          :why "oi runs ocamlc's Lambda: ocamlc -c over the stdlib, ocdump --mode lambda per unit and per program, live"
+          :evidence ["mac/ocaml-libs4:bin/oi:248 ocamlc ... -c" "mac/ocaml-libs4:bin/oi:273 ocdump --mode lambda"]
+          :steps [oi-essential oi-check]}
+   :aot {:score 0 :tool "bin/oi check --aot (o2j)" :host [:ocaml] :why "the same live Lambda"
+         :evidence ["mac/ocaml-libs4:bin/oi:701 cmd_check_aot calls cmd_stdlib, cmd_corpus"] :steps [oi-aot oi-suite-aot]}
+   :print {:score 1 :tool "arbace.repr.ocaml's printer" :host [] :why "Arbace's printer"}
+   :judge {:score 0 :tool "ref-ocaml55.edn, ref-suite.edn (recorded); suite expect, the round trip's .cmi live" :host [:ocaml]
+           :why "the runs are recorded by hand, but the expect tool and roundtrip --cmi run ocamlc"
+           :evidence ["bin/repr-ocaml:429 ocamlc -c ... .cmi" "bin/lib/oi/testsuite.bash:75 ocamlc -linkall"]
+           :steps [ocaml-read-essential ocaml-roundtrip oi-essential oi-divergences oi-check oi-aot oi-suite-aot ocaml-judges]}}
+  :at
+  {"mac/oracle-records-cpp2"
+   {:read {:score 0 :tool "bin/repr-ocaml over the packs ocaml-dumps-{samples,stdlib,spec} (the fragment's)" :host [:ocaml]
+           :why "the branch's scripts read ocdump's dumps from packs, but its test/gate/steps.edn still plans the OCaml steps on :ocaml; test/gate/crops/ocaml.edn, which drops it, is the merge's draft (\"On merge, take this file's side\")"
+           :evidence ["mac/oracle-records-cpp2:test/gate/steps.edn: ocaml-read-essential :hosts [:stage0 :ocaml]"
+                      "mac/oracle-records-cpp2:test/gate/crops/ocaml.edn: ocaml-read-essential :hosts [:stage0]"]}
+    :eval {:score 0 :tool "bin/oi check over the packs ocaml-lambda-{stdlib,progs,suite} (the fragment's)" :host [:ocaml]
+           :why "as read: steps.edn's oi-essential, oi-check on :ocaml; the packs (bin/oi record-lambda) only in the fragment's steps"}
+    :aot {:score 0 :tool "bin/oi check --aot (the fragment's: over the packs)" :host [:ocaml] :why "as eval"}
+    :judge {:score 0 :tool "ref-*.edn; class D in the oracle tier (the fragment's)" :host [:ocaml]
+            :why "as read: steps.edn's OCaml steps on :ocaml"}}}}
+
+ :scheme
+ {:stages
+  {:read {:score 1 :tool "arbace.repr.scheme's reader" :host [] :why "Arbace's reader (bin/repr-scheme:4)" :verified "2026-11-06: with print, below"
+          :evidence ["mac/scheme-smr7:bin/repr-scheme:4 The reader and the printer are Arbace"]}
+   :eval {:score 1 :tool "bin/si (psyntax vendored as forms)" :host [] :why "si; Chez and Chibi only with --record/--chez/--chibi"
+          :evidence ["mac/scheme-smr7:test/gate/steps.edn: si-essential :hosts [:stage0 :go]"]
+          :steps [si-essential]
+          :verified "2026-11-06: bin/si check --only si/amb --only si/data, 2 of 2 pass, the control amb-vs-data differs, 554 MB peak, no stub called"}
+   :aot {:score 1 :tool "bin/si check --aot (arbace.scheme.aot, TamaGo's go)" :host [] :why "Arbace's compiled pipeline"
+         :steps [si-aot-essential si-aot]}
+   :print {:score 1 :tool "arbace.repr.scheme's printer; bin/repr-scheme roundtrip" :host []
+           :why "needs no Chez (bin/repr-scheme:23)" :steps [scheme-roundtrip]
+           :verified "2026-11-06: bin/repr-scheme read --full and print --full of test/scheme/chibi/driver.scm, byte for byte, no stub called"}
+   :judge {:score 0 :tool "ref-chez.edn, ref-r7rs-*.edn, ref-ecraven-*.edn (recorded); Chez's dumps and Chibi's tests live" :host [:chez :chibi]
+           :why "bin/repr-scheme check dumps by Chez live, bin/si chibi-tests runs chibi-scheme, si boot --check runs Chez"
+           :evidence ["mac/scheme-smr7:bin/repr-scheme:91 dump_cmd \"$CHEZ\" --script" "mac/scheme-smr7:bin/si:513 chibi-scheme"
+                      "mac/scheme-smr7:bin/si:97 boot.ss"]
+           :steps [scheme-read-essential scheme-read si-check si-corpora si-essential si-aot-essential si-aot si-ecraven si-mats]}}
+  :at
+  {"mac/oracle-records-cpp2"
+   {:judge {:score 0.5 :tool "the pack scheme-chez-dumps, test/scheme/records/chibi-tests; boot --check oracle-tier" :host []
+            :why "Chez's dumps and Chibi's outcomes recorded by hand, si-boot-oracle in the oracle tier"}}}}
+
+ :haskell
+ {:stages
+  {:read {:score 0 :tool "bin/repr-haskell read: tools/hsdump (GHC API)" :host [:ghc]
+          :why "the cells' reads convert hsdump's dumps, live (the native reader of mac/haskell-hf7 is not the default)"
+          :evidence ["mac/haskell-hf7:bin/repr-haskell:1055 reader=${2:-helper}" "mac/haskell-hf7:bin/lib/repr-haskell/tree-job:11"]
+          :steps [haskell-read-essential]}
+   :eval {:score 0 :tool "none on main (bin/hsi check on the held branches)" :host [] :why "no hsi on main" :steps [hsi-essential hsi-check]}
+   :aot {:score 0 :tool "none on main (bin/hsi check --aot on the held branches)" :host [] :why "no hsi on main"}
+   :print {:score 1 :tool "arbace.repr.haskell's printer" :host [] :why "Arbace's printer"}
+   :judge {:score 0 :tool "GHC's trees and interfaces of the original and the print, live" :host [:ghc]
+           :why "the round trip's levels are GHC's (ghc --make, --show-iface)"
+           :evidence ["bin/repr-haskell:56 each package compiled by ghc --make"]
+           :steps [haskell-read-essential haskell-native-essential hsi-essential hsi-check]}}
+  :at
+  {"mac/haskell-hf7"
+   {:eval {:score 0 :tool "bin/hsi check" :host [:ghc] :why "hsdump stg -O0 per program, live; a pinned ghc required"
+           :evidence ["mac/haskell-hf7:bin/lib/hsi/check:40 ghc --numeric-version" "mac/haskell-hf7:bin/lib/hsi/check:149 helper stg"]}
+    :aot {:score 0 :tool "bin/hsi check --aot" :host [:ghc] :why "the same live STG"
+          :evidence ["mac/haskell-hf7:bin/lib/hsi/aot:112,117"]}
+    :judge {:score 0 :tool "ref-ghc914.edn (recorded); the round trip's GHC trees live" :host [:ghc]
+            :why "hsi's reference is recorded by hand, the read and print cells' checks run GHC"
+            :evidence ["mac/haskell-hf7:bin/lib/hsi/record-ref:113"]}}
+   "mac/oracle-records-cpp2"
+   {:read {:score 0.5 :tool "test/haskell/records, the packs haskell-{dumps,trees}*" :host []
+           :why "hsdump's dumps of the originals recorded by hand"}
+    :eval {:score 0.5 :tool "bin/hsi check over the packs haskell-stg-libs, haskell-stg-progs" :host []
+           :why "GHC's STG recorded by hand"}
+    :aot {:score 0.5 :tool "bin/hsi check --aot over the packs" :host [] :why "as eval"}
+    :judge {:score 0 :tool "ref-ghc914.edn; native-check's helper dumps live" :host [:ghc]
+            :why "haskell-native-essential keeps :ghc (ORS20); the round trip oracle-tier"}}}}
+
+ :rust
+ {:stages
+  {:read {:score 0 :tool "bin/repr-rust read: tools/rsdump (rustc_private)" :host [:rustc]
+          :why "the forms are converted from rsdump's dumps, live (the native reader of mac/rust-rf14 is not the default)"
+          :evidence ["mac/rust-re6:bin/lib/repr-rust/test:46" "mac/rust-rf14:bin/repr-rust:1116 reader=${REPR_RUST_READER:-helper}"]
+          :steps [rust-read-essential]}
+   :eval {:score 0 :tool "none on main (bin/rsi check on the held branches)" :host [] :why "no rsi on main" :steps [rsi-essential rsi-check]}
+   :aot {:score 0 :tool "none on main" :host [] :why "no rsi on main" :steps [rsi-aot]}
+   :print {:score 1 :tool "arbace.repr.rust's printer" :host [] :why "Arbace's printer"}
+   :judge {:score 0 :tool "rsdump and rustdoc of the original and the print, rustc builds, live" :host [:rustc]
+           :why "the round trip's levels are rustc's"
+           :steps [rust-read-essential]}}
+  :at
+  {"mac/rust-row"
+   {:eval {:score 0 :tool "bin/rsi check" :host [:rustc :cxx :gcc]
+           :why "rustc --emit=llvm-ir per program, clang's shim, cc of rust_test_helpers.c, live"
+           :evidence ["mac/rust-re6:bin/lib/rsi/plan.bash:22" "mac/rust-re6:bin/lib/rsi/link-ir:19" "mac/rust-re6:bin/lib/rsi/check:121"]}
+    :aot {:score 0 :tool "bin/rsi check --aot (not recorded)" :host [:rustc] :why "the same live IR"}
+    :judge {:score 0 :tool "ref-rustc-1.99.1.edn (recorded); the round trip's rustc live" :host [:rustc]
+            :why "rsi's reference recorded by hand, the read and print cells' checks run rsdump and rustdoc"}}
+   "mac/oracle-records-cpp2"
+   {:read {:score 0.5 :tool "the rsdump packs of the originals" :host [] :why "recorded by hand, :abs normalized"}
+    :eval {:score 0 :tool "bin/rsi check over the IR packs" :host [:cxx :gcc]
+           :why "the programs' IR packed, but the runtime's build still needs clang and gcc (rsi-* :hosts [:stage0 :go :cxx :gcc])"}
+    :aot {:score 0 :tool "bin/rsi check --aot" :host [:cxx :gcc] :why "as eval"}
+    :judge {:score 0.5 :tool "ref-rustc-1.99.1.edn; the print's levels oracle-tier" :host []
+            :why "the outcomes recorded, rustc on the print in rust-*-oracle"}}}}
+
+ :python
+ {:stages
+  {:read {:score 0 :tool "bin/repr-python read: tools/pydump (CPython's ast)" :host [:python]
+          :why "main converts pydump.py's dumps, live" :evidence ["bin/repr-python:295 python3 ... pydump.py tree"]}
+   :eval {:score 0 :tool "bin/pyi run" :host [:python] :why "pyi reads by pydump.py tree --full, live"
+          :evidence ["bin/pyi:29" "bin/pyi:420 command -v python3 ... die"]}
+   :aot {:score 0 :tool "none on main" :host [] :why "no compiled level on main"}
+   :print {:score 1 :tool "arbace.repr.python's printer" :host [] :why "Arbace's printer"}
+   :judge {:score 0 :tool "ref-cpython314*.edn (recorded); the read checks and smoke runs live" :host [:python]
+           :why "the outcomes are recorded by hand, but the round trip and the smoke runs run python3"}}
+  :at
+  {"mac/mac/201-python-py7-py11"
+   {:read {:score 1 :tool "bin/repr-python read --reader native (the default)" :host []
+           :why "the native lexer and parser" :evidence ["mac/mac/201-python-py7-py11:bin/pyi:502 PYI_READER:-native"]}
+    :eval {:score 1 :tool "bin/pyi run" :host [] :why "native read since queue 213, pyi"
+           :evidence ["mac/mac/201-python-py7-py11:bin/pyi:33"]}
+    :aot {:score 1 :tool "bin/pyi check --aot (TamaGo's go)" :host [] :why "the compiled loop; --no-pyi needs no python3"
+          :evidence ["mac/mac/201-python-py7-py11:bin/pyi:144"]}
+    :judge {:score 0 :tool "ref-cpython314*.edn (recorded); parse-check, lex-check and check's universe by python3, live" :host [:python]
+            :why "the read checks compare with pydump.py and tokdump.py live; bin/pyi check's driver is a python3 script"
+            :evidence ["mac/mac/201-python-py7-py11:bin/pyi:183 pyall() { python3 -I -S -B" "mac/mac/201-python-py7-py11:bin/repr-python:458"]}}}}}
