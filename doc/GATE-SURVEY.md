@@ -4749,3 +4749,16 @@ GTS240-GTS245, each as recommended: the hosts wrapper and concurrency into gate-
 ## Decided (2026-11-05, the user)
 
 GTS246 (a): C++'s overshoot accepted until GTS222's first two nightly runs, then cx9's dg-error rotated; GTS247: Rust's and Haskell's round trips whole or :clean-only until a share is exceeded, then their ids files generated.
+
+## As merged: GT9 in merge plan batch 1 (2026-11-07, branch `batch1`)
+
+`gt9-build` and `gt9-verbs` merged after the rows (cx8-cx10, sm9, o8 with their `gt9v-*` branches) and before Python's line;
+the fragments `cpp`, `scheme` and `ocaml` spliced; `gate.crops check` 0 problems. Changes to the fragments at the merge:
+`cpp-c2j` and `scheme-c2j` (e6f88eb3) moved from `:shared` to `:cpp` and `:scheme` with waived controls (compile checks, as
+`c-c2j`); C++'s `cpp-check-essential`, `cpp-check` and `cpp-aot` took `cppi-check`'s measured commands and parts (held to its
+records: samples-runtime and the gxx-dg-run sampling), so `cpp-check`'s 8 GiB takes `cpp-full` out of the night's concurrent
+chains (only `scheme-full` and `ocaml-full` run beside the serial run); the round trips' controls are `crop-controls`' three
+commits for C++/LLVM, OCaml and Scheme, picked. `arbace_crop_paths` gained `bin/lib/crops/*` and pyi's lazy modules.
+`mac/192-rotation-records` (SC233 (a), OC161 (a)) is not redone: the fragments read Scheme's and OCaml's records by an `:id-re`
+of one group (GTS213 (a)), which covers it. `python.edn` waits for Python's records night and the planner's `:slice-re`
+(GTS243 (a), with GTS240).
