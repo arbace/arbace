@@ -27,7 +27,8 @@
             [arbace.repr.scheme.print :as pr]
             [arbace.repr.scheme.full :as fu]
             [arbace.repr.scheme.layout :as lo]
-            [arbace.repr.scheme.check :as ck]))
+            [arbace.repr.scheme.check :as ck]
+            [arbace.scheme.controls :as ctl]))
 
 (defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
 
@@ -77,14 +78,16 @@
   0)
 
 (defn- roundtrip-file
-  "Both roundtrips of a text: nil when they hold, else a map of what failed."
-  [^String text]
+  "Both roundtrips of a text: nil when they hold, else a map of what failed. AGAINST (the negative controls, GTS81 (a)): the
+  text the printed-back text is compared with, another case's, in place of the text itself."
+  ([^String text] (roundtrip-file text text))
+  ([^String text ^String against]
   (let [{:keys [data layer]} (fu/read-full text)
         forms (mapv :form data)
         ae (fu/ae-text forms layer)
         [forms2 layer2] (fu/parse-ae ae)
         back (fu/print-full forms2 layer2)
-        full-ok (= back text)
+        full-ok (= back against)
         forms-ok (and (== (count forms) (count forms2)) (every? true? (map fm/tree= forms forms2)))
         lay (lo/layout-file forms)
         again (:data (rd/read-all lay {}))
@@ -92,10 +95,32 @@
         idem (= lay (lo/layout-file (mapv :form again)))]
     (when-not (and full-ok forms-ok lines-ok idem)
       (cond-> {}
-        (not full-ok) (assoc :full (let [k (count (take-while true? (map = back text)))] {:at k :want (subs text k (min (count text) (+ k 30))) :got (subs back k (min (count back) (+ k 30)))}))
+        (not full-ok) (assoc :full (let [k (count (take-while true? (map = back against)))] {:at k :want (subs against k (min (count against) (+ k 30))) :got (subs back k (min (count back) (+ k 30)))}))
         (not forms-ok) (assoc :forms true)
         (not lines-ok) (assoc :lines (some (fn [[i a b]] (when-not (fm/tree= a b) [i (pr-str a) (pr-str b)])) (map vector (range) forms (map :form again))))
-        (not idem) (assoc :idempotent true)))))
+        (not idem) (assoc :idempotent true))))))
+
+;; GTS81 (a): the negative controls (test/scheme/controls.edn, arbace.scheme.controls). The read check's judge is
+;; ck/compare-file, a text against the dump Chez made of it: a control judges the text of its :subject against the dump of its
+;; :reference text (another case's), made here by Arbace's reader and writer as dump.ss's shape (:data [{:form :off :write}],
+;; :error {:message :at}) since no Chez runs in a control, with the :edit-ed dump: {:write S} another `write` of the first
+;; datum, {:chez-error MESSAGE} an error of Chez's at the end. The round trip's judge is roundtrip-file, the printed-back
+;; text of :subject against :reference's text.
+(defn- stand-in-dump [^String text edit]
+  (let [{:keys [data]} (rd/read-all text {})
+        d {:data (mapv (fn [x] {:form (:form x) :off (:off x) :write (pr/write-form (:form x))}) data)}
+        d (if (:write edit) (assoc-in d [:data 0 :write] (:write edit)) d)]
+    (cond-> d (:chez-error edit) (assoc :error {:message (:chez-error edit) :at (count text)}))))
+
+(defn read-found [{:keys [subject reference edit]}]
+  (if-let [d (ck/compare-file subject (stand-in-dump (or reference subject) edit))] [(pr-str d)] []))
+
+(defn roundtrip-found [{:keys [subject reference]}]
+  (if-let [r (roundtrip-file subject (or reference subject))] [(pr-str r)] []))
+
+(defn- cmd-controls [fams]
+  (apply max 0 (for [f (if (seq fams) (map keyword fams) [:read :roundtrip])]
+                 (ctl/run f (case f :read read-found :roundtrip roundtrip-found)))))
 
 (defn- write-results
   "SM9: a check's record for bin/reap (test/reap/cells.edn's :results reader): one row [KEY RESULT REASON] a line,
@@ -136,7 +161,7 @@
                      "repr/scheme's round trip (bin/repr-scheme roundtrip --record): :full byte for byte, the forms again,\n;; the layout read back and idempotent"
                      @rows))
     (println (str "roundtrip: " (count files) " files, " @bytes " bytes, failing " @bad ", " (quot (- (System/currentTimeMillis) t0) 1000) " s"))
-    (if (zero? @bad) 0 1)))
+    (max (if (zero? @bad) 0 1) (ctl/run :roundtrip roundtrip-found))))
 
 (defn- cmd-prepare [[dir]]
   (let [r (ck/prepare (root) dir)]
@@ -180,7 +205,7 @@
             (str ";; Known differences between repr/scheme and Chez (bin/repr-scheme check --record): key -> {:kind ...}\n"
                  (pr-str (into (sorted-map) (map (fn [[k d]] [k (select-keys d [:kind :chez :mine])]) diffs)))
                  "\n")))
-    (if (or (and (not record) (or (seq unlisted) (seq gone))) (seq scan-bad) @rule-bad) 1 0)))
+    (max (if (or (and (not record) (or (seq unlisted) (seq gone))) (seq scan-bad) @rule-bad) 1 0) (ctl/run :read read-found))))
 
 (defn- spec-blocks
   "The fenced blocks of a markdown file: [[lang text] ...]."
@@ -223,6 +248,7 @@
                  "print" (cmd-print more)
                  "roundtrip" (cmd-roundtrip more)
                  "prepare" (cmd-prepare more)
+                 "controls" (cmd-controls more)
                  "check-dumps" (cmd-check-dumps more)
                  "spec-check" (cmd-spec-check more)
                  (do (println "usage: -m arbace.repr.scheme read|print|prepare|check-dumps ...") 2))]

@@ -1,0 +1,79 @@
+(ns arbace.scheme.controls
+  "The negative controls of the Scheme crop's check families (GTS81 (a), doc/GATE-SURVEY.md \"As built: GTS72, GTS79-GTS82\";
+  doc/scheme/SCHEME-SURVEY.md \"As built: SMR8\"): test/scheme/controls.edn, a vector of
+    {:id ID :family F :subject CASE :reference CASE :edit E :expect REGEXP :sanity BOOL :why TEXT}
+  for the families :read (bin/repr-scheme check), :roundtrip (bin/repr-scheme roundtrip), :r7rs, :srfi, :chibi-tests and
+  :ecraven (bin/si r7rs, srfi, chibi-tests, ecraven; bin/si check's own are test/scheme/si/controls.edn, arbace.scheme.check).
+  A control judges a run of its subject case against the reference case's (the run edited, or a different case's run) by the
+  family's own judge, which gives the reasons it found (the family's found-fn: a vector of strings, empty when the judge
+  passed the run). A control must be found: one that passes, or is found for another reason than :expect, or whose judge
+  throws, fails the check. A :sanity entry is the converse: a run that agrees with its reference must not be found (a judge
+  that finds everything controls nothing). Every family needs one of each. Read with the Clojure reader."
+  (:require [arbace.string :as str]))
+
+(defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
+
+(defn all-controls [] (vec (read-string (slurp (str (root) "/test/scheme/controls.edn")))))
+
+(defn controls-of [family] (filterv #(= family (:family %)) (all-controls)))
+
+(defn verdict
+  "A control's outcome from what the judge found: :differs (as a control must), :sane (a sanity entry found nothing),
+  :passes (the judge passes what differs), :wrong-reason (found, but not what :expect names), :insane (a sanity entry found),
+  :not-judged (the judge threw)."
+  [c {:keys [found error]}]
+  (cond error :not-judged
+        (:sanity c) (if (empty? found) :sane :insane)
+        (empty? found) :passes
+        (and (:expect c) (not (some #(re-find (:expect c) %) found))) :wrong-reason
+        :else :differs))
+
+(defn run*
+  "CONTROLS judged by found-fn, each outcome printed; 0 when every control differs and every sanity entry is sane, else 1;
+  an empty list is 1 (a family without controls), and so is one without a sanity entry."
+  [family controls found-fn]
+  (let [rs (vec (for [c controls]
+                  (let [r (try {:found (vec (found-fn c))} (catch Throwable e {:error (str e)}))]
+                    [c (verdict c r) r])))]
+    (doseq [[c v r] rs]
+      (println (case v
+                 :differs (str "control " (:id c) ": found, as a control must (GTS81 (a)): " (let [s (first (:found r))] (if (> (count s) 100) (subs s 0 100) s)))
+                 :sane (str "control " (:id c) ": sanity, the agreeing run is not found")
+                 :passes (str "control passed: " (:id c) ": the judge passes what differs")
+                 :wrong-reason (str "control passed: " (:id c) ": found, but not as " (pr-str (:expect c)) ": " (first (:found r)))
+                 :insane (str "control passed: " (:id c) ": the judge finds the run that agrees: " (first (:found r)))
+                 :not-judged (str "control not judged: " (:id c) ": " (:error r)))))
+    (let [bad (remove #(#{:differs :sane} (second %)) rs)
+          n-ctl (count (filter #(not (:sanity (first %))) rs))
+          n-san (count (filter #(:sanity (first %)) rs))]
+      (println (str "controls " (name family) ": " n-ctl " controls, " n-san " sanity, " (count bad) " passed or not judged"))
+      (when (zero? n-ctl) (println (str "  no control of the family " (name family))))
+      (when (zero? n-san) (println (str "  no sanity entry of the family " (name family))))
+      (if (or (seq bad) (zero? n-ctl) (zero? n-san)) 1 0))))
+
+(defn run
+  "The controls of FAMILY in test/scheme/controls.edn judged by found-fn (see run*): the code a check ends with."
+  [family found-fn]
+  (run* family (controls-of family) found-fn))
+
+(defn selftest
+  "The wiring's test (bin/si controls-test): for each family of controls.edn, a judge that finds nothing, one that finds
+  everything (for no reason a control names) and one that throws must each fail the family's controls (exit 1), as
+  must a family list with no control or no sanity entry. The real judges are run by their checks and by `controls`. 0, or 1
+  with the failing cases printed."
+  []
+  (let [fams (distinct (map :family (all-controls)))
+        code (fn [fam cs found] (let [r (atom nil)] (binding [*out* (java.io.StringWriter.)] (reset! r (run* fam cs found))) @r))
+        cases (concat
+                (for [fam fams
+                      [what found] [["a judge that finds nothing" (fn [_] [])]
+                                    ["a judge that finds everything" (fn [_] ["found for no reason a control names"])]
+                                    ["a judge that throws" (fn [_] (throw (ex-info "boom" {})))]]]
+                  [(str (name fam) ": " what " fails the family") (= 1 (code fam (controls-of fam) found))])
+                (for [fam fams
+                      [what cs] [["without a sanity entry" (remove :sanity (controls-of fam))]
+                                 ["without a control" (filter :sanity (controls-of fam))]]]
+                  [(str (name fam) ": " what " fails the family") (= 1 (code fam cs (fn [c] (if (:sanity c) [] ["x"]))))]))
+        bad (remove second cases)]
+    (doseq [[n ok] cases] (println (if ok "ok  " "FAIL") n))
+    (if (seq bad) 1 0)))
