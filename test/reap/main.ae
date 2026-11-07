@@ -1,6 +1,6 @@
 (ns reap.main
   "bin/reap (doc/FULL-SUPPORT-SURVEY.md, REAP1, RPS3, RPS13): the REAP matrix, read, eval, AOT and
-  print for Clojure, Java, Go and C, from the checks' recorded results alone (no runs). The cells and
+  print for Clojure, Java, Go, C and C++, from the checks' recorded results alone (no runs). The cells and
   their sources are data, test/reap/cells.edn; each source's reference gives its passing cases and
   its non-passing ones (read-source), each non-pass falls into a class of its classes file, the
   first whose :match finds \"RESULT REASON\" (test/goi/divergences.edn's format), and the matrix
@@ -216,14 +216,17 @@
   (let [m (read-edn (:file src))
         secs (or (:sections src) [(:section src)])
         cls (:classes m)
+        ;; :id-sep (C++'s token check, CX10): the separator of a case's corpus and file, "corpus/file" as C++'s records and
+        ;; the rotation's lists (GT8.4) name them; default " " (C's)
+        sep (or (:id-sep src) " ")
         all (vec (for [sec secs
                        :let [texts (if (contains? cls sec) (get cls sec) cls)]
                        [corpus files] (get m sec)
                        [f v] (sort-by key files)]
-                   (entry (str (name corpus) " " f) :known
+                   (entry (str (name corpus) sep f) :known
                           (str (name (:class v)) ": " (str/replace (str (get texts (:class v))) #"\s+" " ")))))
         ex (set (:exclude-corpora src))
-        counted? (fn [^String id] (not (ex (first (str/split id #" " 2)))))
+        counted? (fn [^String id] (not (ex (first (str/split id (re-pattern (java.util.regex.Pattern/quote sep)) 2)))))
         es (filterv #(counted? (:id %)) all)
         rows (when (exists? (:results src)) (read-edn (:results src)))
         crows (filter #(counted? (first %)) rows)
@@ -237,6 +240,77 @@
       {:pass nil :entries es :sections-missing missing
        :detail (str "the known file only: the check's passing files are not recorded there"
                     (when (:results src) (str " (" (:results src) " not written yet)")) excluded)})))
+
+;; C++'s round trip (CX10; doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"): bin/repr-cpp roundtrip's recorded results,
+;; one file a list, :results-dir/KEY.edn (CP124 (b): {:key :summary :files {CORPUS/NAME verdict}}, the verdict :pass,
+;; the essential lists' KEY-essential.edn (subsets of the others, the gate's) not counted,
+;; [:known CLASS] (a bare :known the old format), :oracle-rejects or :oracle-fails), and the known file (:file,
+;; test/repr/cpp/roundtrip-known.edn: :classes, :files CORPUS/NAME -> CLASS). Two parts of one check:
+;;   :part :recorded  the recorded lists' files, each a case: the passes counted, a known one "CLASS: the class text" (the record's
+;;                    class; the known file's when the record has none), the oracle's verdicts "oracle-rejects: ..." and
+;;                    "oracle-fails: ...". A problem: a record whose :summary :files is not its count of files, a file in two
+;;                    records, a recorded class the known file gives another class (CP172 (b)'s check, which the run makes, read
+;;                    here from the records); a recorded known file the known file no longer lists is counted as recorded (an
+;;                    improvement until the list's next --record-results, CP164 (c)) and said in the detail
+;;   :part :unrecorded the known file's files no record holds (the corpora pending.edn names, HotSpot's, the samples': lists
+;;                    without a record), each a non-pass; their passes are not recorded (the cell's count partial)
+
+(defn- cpp-records [src]
+  (let [d (File. ^String (path (:results-dir src)))]
+    (vec (for [^File f (sort-by #(.getName ^File %) (or (seq (.listFiles d)) []))
+               :let [n (.getName f)]
+               ;; the essential lists' records (gxx-dg-essential.edn: a subset of a recorded list, the gate's) are not counted again
+               :when (and (str/ends-with? n ".edn") (not= n "pending.edn") (not (str/ends-with? n "-essential.edn")))]
+           (assoc (read-edn (str (:results-dir src) "/" n)) :file n)))))
+
+(defmethod read-source :cpp-roundtrip [src]
+  (let [known (read-edn (:file src))
+        texts (:classes known)
+        kfiles (:files known)
+        text (fn [c] (str (name c) ": " (str/replace (str (get texts c)) #"\s+" " ")))
+        recs (cpp-records src)
+        recorded (frequencies (mapcat #(keys (:files %)) recs))]
+    (if (= :unrecorded (:part src))
+      (let [es (vec (for [[f c] (sort-by key kfiles) :when (not (contains? recorded f))]
+                      (entry f :known (text c))))]
+        {:pass nil :entries es
+         :detail (str (count es) " of the known file's " (count kfiles) " files in no record of " (:results-dir src)
+                      "; their lists' passes are not recorded")})
+      (let [rv (fn [x] (if (vector? x) (first x) x))
+            rc (fn [x] (when (vector? x) (second x)))
+            rows (for [r recs [f v] (:files r)] [f v (:file r)])
+            es (vec (for [[f v] (sort-by first rows) :when (not= :pass (rv v))]
+                      (case (rv v)
+                        :known (entry f :known (text (or (rc v) (get kfiles f) :unclassified)))
+                        :oracle-rejects (entry f :oracle-rejects "oracle-rejects: clang rejects the file with its own diagnostics (recorded by name, roundtrip-oracle.edn)")
+                        :oracle-fails (entry f :oracle-fails "oracle-fails: the oracle's dump failed (a timeout or a crash, recorded by name, roundtrip-oracle.edn)")
+                        (entry f (rv v) (str (name (rv v)) ": a verdict the round trip does not record")))))
+            stale (for [[f v] rows :when (and (= :known (rv v)) (not (contains? kfiles f)))] f)]
+        {:pass (count (filter #(= :pass (rv (second %))) rows)) :entries es
+         :results-problems
+         (vec (concat
+               (for [r recs :let [n (get-in r [:summary :files])] :when (and n (not= n (count (:files r))))]
+                 (str (:name src) ": " (:file r) " records " (count (:files r)) " files, its summary " n))
+               (for [[f k] recorded :when (> k 1)] (str (:name src) ": " f " in " k " records"))
+               (for [[f v] rows :let [c (rc v) kc (get kfiles f)] :when (and c kc (not= c kc))]
+                 (str (:name src) ": " f " recorded as " (name c) " in " (nth (vec (first (filter #(= f (first %)) rows))) 2)
+                      ", the known file's class is " (name kc)))))
+         :detail (str (count recs) " recorded lists (" (str/join ", " (map #(str/replace (:file %) #"\.edn$" "") recs)) ")"
+                      (when (seq stale) (str "; " (count stale) " recorded known the known file no longer lists (improvements until"
+                                             " --record-results): " (str/join " " (take 3 stale)))))}))))
+
+;; C++'s lowering check (CX6, CX7; bin/cppi lower-check, the lowered C forms compiled by gcc -O0 and run, the second judge before
+;; ci): test/cpp/lower-results.edn's :files (NAME -> [STATUS OUTCOME]; :cx6, CX6's summaries, not read) and the known file
+;; (:known, test/cpp/lower-known.edn: NAME -> its class), each file a case, a non-pass "CLASS: OUTCOME"
+
+(defmethod read-source :cpp-lower [src]
+  (let [r (read-edn (:file src))
+        known (if (:known src) (read-edn (:known src)) {})
+        fs (:files r)]
+    {:pass (count (filter #(= :pass (first (val %))) fs)) :ids (vec (keys fs))
+     :entries (vec (for [[f [st out]] (sort-by key fs) :when (not= :pass st)]
+                     (entry f st (str (name (or (get known f) :unclassified)) ": " (name (or out :none))))))
+     :detail (str (count fs) " files of " (str/join ", " (map name (keys (dissoc r :files :prefixes :cx6)))))}))
 
 (defmethod read-source :jforms-excluded [src]
   ;; diffcheck's exclusions (test/diffcheck/jforms-excluded.edn: the Java forms' classes not given
@@ -383,10 +457,11 @@
 
 (defn- missing-files
   "The files a source names that are not there: its :file, :upstream, :known, :ref and :same-cases,
-  and the oracle's :expected directory (report 021's finding 3: a directory gone gave no cases)."
+  the oracle's :expected directory, C++'s round trip's :results-dir (report 021's finding 3: a directory gone gave no cases)."
   [src]
   (concat (for [k [:file :upstream :known :ref :same-cases :ref-runs] :let [f (get src k)] :when (and f (not (exists? f)))] f)
-          (when-let [d (:expected src)] (when-not (dir? d) [d]))))
+          (when-let [d (:expected src)] (when-not (dir? d) [d]))
+          (when-let [d (:results-dir src)] (when-not (dir? d) [d]))))
 
 (defn- judge-source
   "A source read and judged: its entries with their classes. Every file it names must be there,
@@ -397,7 +472,9 @@
   [cell src]
   (let [file (or (:file src) "")
         miss (missing-files src)
-        not-yet (and (:until src) (= [(:file src)] miss))
+        ;; a check not recorded yet: its :file missing (with it, the files the same milestone writes: :ref-runs,
+        ;; :same-cases; CX10, C++'s eval and AOT cells wait for CX8's record and its references alike)
+        not-yet (and (:until src) (some #{(:file src)} miss))
         present (and (empty? miss) (or (= :repr-clojure-rules (:reader src)) (exists? (:file src))))
         cf (or (:classes src) (:classes cell))]
     (if-not present

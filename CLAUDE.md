@@ -114,7 +114,11 @@ Prior art:
   `test/arbace-go-aot-results.edn` (classes `test/clojure/divergences-aot.edn`), the two levels'
   disagreements listed (`bin/gate --full`'s `suite-aot`).
 - `bin/reap` (and `make reap`; REAP1, doc/FULL-SUPPORT-SURVEY.md, RPS3, RPS13): the REAP matrix,
-  read, eval, AOT and print for Clojure, Java, Go and C (four rows, 16 cells since C8, doc/C23-SURVEY.md §10), judged from the
+  read, eval, AOT and print for Clojure, Java, Go, C and C++ (four rows, 16 cells since C8, doc/C23-SURVEY.md §10; five, 20 since CX10,
+  doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)": C++'s read the token check's `test/repr/cpp/pp-check-known.edn` with its results
+  `pp-check-results.edn` (`:c-known`'s `:id-sep "/"`) and CX9's dg record, eval and AOT CX8's `test/cpp/check{,-aot}-linux-amd64.edn` (no check yet
+  until they exist; the lowering's `test/cpp/lower-results.edn` beside, reader `:cpp-lower`), print the round trip's `test/repr/cpp/roundtrip-results/`
+  and known file (reader `:cpp-roundtrip`), classes `test/cpp/divergences{,-read,-aot,-print,-dg,-lower}.edn`), judged from the
   checks' recorded results alone (no runs): the cells and their sources in `test/reap/cells.edn`, the judging in
   `test/reap/main.ae`, each level's classes in `test/goi/divergences.edn`'s format
   (`test/clojure/divergences{,-read,-aot,-print}.edn`, `test/repr/go/divergences-{read,print}.edn`,
@@ -240,7 +244,13 @@ Prior art:
   - The other crops, repr/ocaml (`bin/repr-ocaml`, `bin/oi`), repr/scheme (`bin/repr-scheme`, `bin/si`), repr/cpp and repr/llvm
     (`bin/repr-cpp`, `bin/repr-llvm`, `bin/cppi`): their namespaces (`arbace/repr/{ocaml,scheme,cpp,llvm}`, `arbace/scheme/`,
     `arbace/cpp/`) are evaluated from the checkout, not embedded and out of `gate_key` (`arbace/j2g/embed.ae`'s exclusions); no gate step
-    runs them.
+    runs OCaml's or Scheme's. C++'s since CX10 (doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"), on stage 0 with the host's g++
+    and clang++ (the host `:cxx`, `bin/lib/gate-run.bash`'s `gate_cxx_id`; `bin/gate --pins` runs `bin/repr-cpp pins check` and `host check`):
+    essential `cpp-read-essential` (`bin/repr-cpp pp-check --essential`, `test/cpp/essential-read.txt`; `--only FILE`, CORPUS/NAME a line,
+    `--record-results`), `cpp-print-essential` (`bin/repr-cpp roundtrip-corpus gxx-dg-essential` and `samples`: a recorded list made by its
+    key, `test/cpp/essential-print.txt` held to `roundtrip-results/gxx-dg-essential.edn`), `cpp-lower-essential` (`bin/cppi lower-essential`,
+    `test/cpp/essential-lower.txt`), about 2 minutes warm; `--full` `cpp-selftest`, `cpp-tokens`, `cpp-roundtrip` and `cpp-lower` (`bin/cppi
+    lower-corpus KEY`), a part a recorded list; `make cpp-essential`. CX8's `cpp-check`, `cpp-aot` and CX9's `cpp-dg` join with their records.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
