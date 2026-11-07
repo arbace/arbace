@@ -1120,10 +1120,22 @@ JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-
   follow-up).
 - (JC9b's day) With F7 in, F5's `LoggingFileHandler` variant's cut of `lockFileChannel` can go (the JDK's lock
   file over `FileChannel.open` and `tryLock`): a follow-up after both nights.
+- (F10a's day) JC9b's F5 fault (`Logger` and `LogRecord` calling `ResourceBundle.getBundle(String, Locale,
+  ClassLoader)`, which jrt's overlay had not) is fixed on batch 1 (`b8a1951ce`, the overload in jrt's overlay):
+  the joint javac check of batch 1's whole list (2,215 files) has 0 errors, and with the overload removed it fails
+  with exactly F5's two errors. The check is now `.tmp/all9-run.sh CHECKOUT` (JCS165).
+- (F10a's day) `bin/jrt build` on batch 1 fails at `go build ./...` in `arbace/expat` (Python's crop: `Ptr16`
+  passed where `Ptr` is declared, xmltok.go:224 and :869-876): the module bin/jrt prints holds every package of
+  `go/`, the crops' among them; jrt's own package builds, vets and tests (`go build ./jrt` in `.tmp/jrt-go/mod`).
+  Either the crops' packages leave bin/jrt's module (they are out of every key, `arbace_crop_paths`) or expat is
+  fixed on its branch; until then `bin/jrt build` and `bin/jrt test` report failure for a reason not jrt's.
+- (F10a's day) `bin/jrt build`'s print on stage 0 peaked at 3.9 GB without a limit; with `GOMEMLIMIT=1400MiB`
+  1.45 GB and the same output: the light rules' runs of it should set the limit.
 
 
 ## Proposed
 
+JCS162-JCS167 are F10a's and the crop's 90% (at the end, "Proposed (F10a)", branch `java-complete`);
 JCS161 is F13's ("F13 (java.lang.management's MXBeans): not built, JCS161"); JCS158-JCS159 are F6's ("As built:
 F6"), JCS160 F12's ("As built: F12 (write-ahead)"), branch `java-jc9c`;
 JCS155-JCS157 are F3's ("As built: F3 (write-ahead)", branch `java-jc9-tls`); JCS143-JCS154 are JC9b's
@@ -2647,3 +2659,239 @@ Linux-specific half is a file of its own, which the box's build does not compile
 merge `bin/jrt build && bin/jrt test` must still pass (about 15 s with the test data made; the first run in a
 fresh worktree builds the frozen jar). Nothing else of the nights' lists changes; F11's smoke (step 4) and F8's
 (step 7) are the first run of these natives in a program.
+
+## As built: F10a (write-ahead)
+
+Branch `java-complete` (from `batch1`, `0edacad62`), 2026-11-07, by day under the light rules: F10's first part,
+the triage's rank 13 and the first not built after F13 (F16, F8, F7 and F11 are JC9b's, F12, F6, F13 and F19
+JC9c's, F3 JC9's TLS): **selectors, socket and server socket channels, pipes and the sockets' adaptors**. The
+closure's list, jrt's own Java, the variants, the Go natives with their tests, light checks only; nothing
+converted, translated or built into an executable. DatagramChannel, the asynchronous channels and the UNIX family
+are F10b (JCS163, JCS164).
+
+**The shape.** jdk26u's channels are plain Java (`SocketChannelImpl`, `ServerSocketChannelImpl`, `SelectorImpl`,
+`SelectionKeyImpl`, `EPollSelectorImpl`, the pipes' `SourceChannelImpl` and `SinkChannelImpl`, the adaptors) over
+a thin native layer in `sun.nio.ch`: `Net`, `IOUtil`, `SocketDispatcher`, `UnixDispatcher`, `NativeThread`, `EPoll`,
+`EventFD`, `PollSelectorImpl`'s poll. F10a keeps the Java **unchanged** and gives jrt that layer, rule for rule:
+the overlays keep jdk26u's classes, signatures and Java (Net is jdk26u's file with bodies for its natives), and
+their natives are `jdk.internal.jrt.HostChannels`' on the descriptor's number, Go ports of libnio's C
+(`src/java.base/unix/native/libnio/ch/{Net,IOUtil,SocketDispatcher,UnixDispatcher,PollSelectorImpl}.c`,
+`linux/native/libnio/ch/{EPoll,EventFD}.c`, libnet's `NET_SetSockOpt`, `NET_GetSockOpt`, `NET_Bind`): the same
+system calls with the same flags, options, conversions, results (IOStatus's) and exceptions (Net.c's
+`handleSocketError` choosing ConnectException, BindException, NoRouteToHostException, ProtocolException or
+SocketException by the error number; SocketDispatcher.c's ConnectionResetException; convertReturnVal's
+IOException). This is unlike jrt's sockets (`HostSocketImpl` over Go's `net`, JC6) and F7's file channel (jrt's
+own `FileChannelImpl`): a channel's state machine, its locks, its blocking and non-blocking paths and its close
+protocol are jdk26u's own code.
+
+**Two departures, below the natives' interface** (doc/go/JRT-NOTES.md's "Channels", to be written with the
+night's records): every descriptor is non-blocking in the kernel and registered with Go's poller (an `os.File`); a
+descriptor the channel configured blocking (`IOUtil.configureBlocking`) waits there for what the kernel would
+have waited for (a read for data, a write for every byte, a connect for its outcome, an accept for a
+connection), so that `UnixDispatcher.preClose` can wake a thread blocked in it: jdk26u dup2's a closed socket over
+the descriptor and signals the thread (`NativeThread.signal`, SIGIO's EINTR); jrt marks the descriptor (it then
+reads its end, fails a write with EPIPE and polls POLLHUP, as the dup2'd socket) and moves its deadlines to the
+past, which wakes the waiter. `NativeThread.current()` names every thread (never 0, never the virtual marker), so
+the channels' close always takes the pre-close path; `Poller` (virtual threads' parking on epoll in jdk26u) waits
+in Go's poller as a platform thread does, a virtual thread being a goroutine like any other. And jrt has no native
+memory: `IOUtil` reads into and writes from a buffer's array (a temporary one for a read-only buffer), a scatter
+or gather as one read or write of a temporary array (one system call, as readv/writev), `NativeDispatcher` the
+byte[] methods, `EPoll`'s and `PollSelectorImpl`'s event arrays int arrays.
+
+**What comes in, and how** (jdk26u at `baf63fb`; `test/jrt/jrt_sources.ae`'s `selector-sources`, one line in
+`sources`):
+
+| part | how |
+|---|---|
+| java.nio.channels (22) | jdk26u's: `SelectableChannel`, `SelectionKey`, `Selector`, `SocketChannel`, `ServerSocketChannel`, `Pipe`, `NetworkChannel`, the eleven exceptions (`AlreadyBound`, `AlreadyConnected`, `CancelledKey`, `ClosedSelector`, `ConnectionPending`, `IllegalSelector`, `NoConnectionPending`, `NotYetBound`, `NotYetConnected`, `UnresolvedAddress`, `UnsupportedAddressType`), `spi/AbstractSelectableChannel`, `AbstractSelectionKey`, `AbstractSelector`, `SelectorProvider` (variant) |
+| sun.nio.ch (18 + 3 linux) | jdk26u's: `SelectorImpl`, `SelectionKeyImpl`, `SelChImpl`, `SelectorProviderImpl`, `SocketChannelImpl` (variant), `ServerSocketChannelImpl`, `SocketAdaptor`, `ServerSocketAdaptor`, `SocketInputStream`, `SocketOutputStream`, `DummySocketImpl`, `ExtendedSocketOption`, `OptionKey`, `IOStatus`; KIND unix `PipeImpl`, `SourceChannelImpl`, `SinkChannelImpl`, `PollSelectorProvider` (variant); **KIND linux** (new: `print-sources`, `bin/jrt-convert`'s tree and origins, the originals' check, the round trip's origins) `DefaultSelectorProvider`, `EPollSelectorImpl`, `EPollSelectorProvider` (variant): Linux's default selector is jdk26u's epoll selector, the poll selector beside it as on Linux (`-Djava.nio.channels.spi.SelectorProvider=sun.nio.ch.PollSelectorProvider`, which tests use) |
+| beside them (4) | `sun.net.ConnectionResetException`, `sun.net.ext.ExtendedSocketOptions` (jdk.net absent: `NoExtendedSocketOptions`, as the JDK without the module), `jdk.internal.event.SocketReadEvent`, `SocketWriteEvent` (JFR's no-op events) |
+| the native layer (15 overlays) | `jdk.internal.jrt.HostChannels` (the natives, 31); `Net` (derived: jdk26u's file, each native's declaration kept with a body over HostChannels; multicast, DatagramChannelImpl's, refuses until F10b; `discardOOB` Windows' only, as on Linux); `IOUtil`, `NativeDispatcher`, `SocketDispatcher`, `UnixDispatcher`, `NativeThread`, `Poller`, `Util` (ungrowableSet; heap temporary buffers), `UnixDomainSockets` (`isSupported()` false: F9's FileSystems, JCS164), `EventFD`, `FileDispatcherImpl` (closeIntFD alone; jrt's file channel is its own, F7), `EPoll` (an event array's "address" a token naming int arrays, so EPollSelectorImpl stays jdk26u's), `PollSelectorImpl` (derived: the pollfd array as int arrays), `SocketOptionRegistry` (derived from jdk26u's template with Linux's constants, below) |
+| variants (4) | `SelectorProvider$Holder` (no ServiceLoader: the property's class, else `DefaultSelectorProvider`; 1 replaced 1 cut), `SocketChannelImpl` (tryRead, tryWrite: the adaptor's streams through the byte[] dispatcher, not a direct buffer's address; 2 replaced), `PollSelectorProvider` and `EPollSelectorProvider` (inheritedChannel null: jrt's standard input is never an inetd socket, InheritedChannel's answer then; 1 replaced each) |
+| j2g | the VarHandle table (`arbace.j2g.vh`) takes `ConstantBootstraps.fieldVarHandle(lookup, name, VarHandle.class, C.class, T.class)` (SelectionKeyImpl's INTERESTOPS, beside MhUtil.findVarHandle's ATTACHMENT, INVALID, CLOSED); rename `sun/nio/ch/Util` → `Ch_Util` (F13's `sun.management.Util`) |
+| Go | `go/arbace/jrt/channels_linux.ae` (the natives, about 800 lines of forms), `channels_other.ae` (every native "Channels not available" off Linux: TamaGo's, the box's), `channels_test.ae` (TestChannelSockets, TestChannelPipeAndPoll, TestChannelEpoll) |
+
+**The derivations** (scratch scripts in the worktree's `.tmp/f10/`, to be kept with its scratch; JCS166 proposes
+them as committed Arbace): `gennet.py` (jdk26u's `Net.java`: every `native` declaration given the body of a table,
+asserting each native has one and none is left; the helpers `scope`, `inetAddress`, `sockAddress`, `sockPort`,
+`multicast` before `shouldNotReachHere`; `import jdk.internal.jrt.HostChannels`), `genpoll.py` (jdk26u's unix
+`PollSelectorImpl.java`: 14 exact replacements, each asserted once: the AllocatedNativeObject and its Unsafe copy
+as three int arrays and `Arrays.copyOf`, Blocker's begin and end dropped, `poll` and `closeIntFD` over
+HostChannels), `genopts.py` (GensrcMisc.gmk's `generate-preproc-src` without the C preprocessor: the copyright, the
+text after `@@START_HERE@@`, `PREFIX_` removed, `#` lines dropped, the 18 C constants by Linux's generic UAPI
+values; checked against the build's gensrc: the same 17 (option, family, level, name) tuples).
+
+**Light checks done** (stage 0 main's `ARBACE_HOST_EXE`, javac's tool `.tmp/gate-exe/javac-a3300f566f6c87d40d06`,
+`REPR_JAVA_STALE_OK=1`, `GOMEMLIMIT=1400MiB`, each process under 1.5 GiB; scratch `.tmp/f10/`):
+- the closure (F1's `closure.py`, the world being batch 1's whole `print-sources` list, JC9's and JC9b's
+  included; scope `java.nio.channels`, `.spi`, `sun.nio.ch`, `sun.net.ext`, `jdk.internal.event`): the 44 jdk26u
+  files and 3 linux ones above, 10,333 lines; outside the world and the list, each accounted for: the VarHandle
+  machinery (compiled by j2g), DatagramChannel and DatagramChannelImpl (cut: SelectorProviderImpl's
+  openDatagramChannel answers by an operation-level stub), InheritedChannel (the variants), DirectBuffer (the
+  variant), UnixDomainSocketAddress (a cut class: the UNIX family is refused before it is reached), ServiceLoader
+  (the variant), the native-memory classes the overlays replace;
+- `print-sources` of the branch: 2,277 lines, batch 1's 2,215 plus 62 (40 share, 4 unix, 3 linux, 15 overlay), no
+  line twice;
+- **the joint javac check** (JC9b's `all9/run.sh`, made general: `.tmp/all9-run.sh CHECKOUT`, below): all 2,277
+  files compiled by the JDK's javac as java.base's patch against jrt's overlays: **0 errors**, 4,942 classes (13.6 s,
+  1.0 GB); run on batch 1 alone first: 2,215 files, 0 errors (F5's `getBundle` fault, JC9b's finding, is fixed on
+  batch 1: `ResourceBundle.getBundle(String, Locale, ClassLoader)` in jrt's overlay since `b8a1951ce`); and the
+  check's negative control: the overlay's overload renamed, the check fails with F5's two errors (`Logger.java:2191`,
+  `LogRecord.java:716`) and exits 1;
+- the read: `bin/repr-java read-jdk --check` of the 62 files with HostFiles and FileDescriptor (which they use) as a
+  patch of java.base: 64 converted, 0 failed, 0 javac errors, 0 unreadable (4.0 s, 0.6 GB); `--no-javac`: 64
+  native, 0 fallbacks, the forms identical;
+- the variants applied and parsed (F4's `vet.ae`): SocketChannelImpl 2/0/0, PollSelectorProvider 1/0/0,
+  EPollSelectorProvider 1/0/0, SelectorProvider$Holder 1/1/0;
+- Go names: the 73 classes of the new forms (nested ones included) against the gate executable's generated types,
+  jrt's hand-written ones and batch 1's list: one collision, `Util`, renamed;
+- the natives' Go names: the 31 natives of HostChannels mangled as j2g names them, each defined in both Go files;
+- jrt's own build (`bin/jrt build --arch amd64` prints the module; its `go build ./...` stops at `arbace/expat`, a
+  crop's package and not jrt's: Findings), then `go build` and `go vet` of `./jrt` for linux/amd64 and arm64, and
+  `go test ./jrt` on amd64: every test passes, the three new ones among them (a blocking connection through
+  connect, accept, write and read with the peer's address; a non-blocking read's UNAVAILABLE; poll's timeout and
+  readiness; SO_LINGER and SO_RCVBUF with Linux's conversion; a read blocked in Go's poller woken by preClose to its
+  end of stream, a write after it failing; a refused non-blocking connect reported by pollConnect with
+  ECONNREFUSED; a pipe's poll(2) in the selector's shape, write1, drain1 and drain; an epoll instance with an
+  eventfd and a pipe: the timeout, both reported with their descriptors, the eventfd drained, a removal).
+
+**JCS135, the closure's growth**: +13,106 Java lines (10,333 jdk26u's, 2,773 jrt's overlays): **+2.0%** on the
+closure after JC9 and JC9b (about 655,000); the forms +248,759 bytes (+2.2% on `jdk/forms`' 11,161,667, before JC9's
+growth); by F4's ratio about +2.5 MB of executable.
+
+**Expected yield.** The triage's F10 counted 81 / 82 tests touched, 56 / 55 alone; with F7, F11 and F13 built
+(their causes no longer counted), 80 / 80 tests have only built causes besides the selectors, of which 31 / 31 use
+DatagramChannel, an asynchronous channel, a UNIX domain address or a multicast channel (F10b) and **49 / 49 are
+F10a's** (Pipe 5, SelectionKey 2, Selector 24, ServerSocketChannel 2, SocketChannel 11, etc/Shadow, sun/nio/ch's
+Basic, SelProvider, ServerSocketAdaptorTest, TempBuffer, and CompilationMXBean/Basic). At risk: the interrupt
+tests (`LotsOfInterrupts`, `PipeInterrupt`: jrt's Thread has no blocker, so `Thread.interrupt` does not wake a
+selector or a blocked channel: JCS162), `WakeupSpeed` and the stress loops at the interpreted level (speed),
+`OutOfBand`/`SendUrgentData` (urgent data through the kernel's, as the JDK's), the tests reading sun.nio.ch's
+internals at the REPL (JCS136's visibility), `TempBuffer` (jdk26u's temporary-buffer cache, which jrt's `Util` has
+not). About **34 / 34 expected** (0.7 × 49): Java eval and AOT each about +1.0 point, the crop's completeness about
++0.5. `SelProvider` expects `sun.nio.ch.EPollSelectorProvider` on Linux: it is.
+
+**The night's commands** (after JC9's and JC9b's conversions, in the night's worktree with this branch merged;
+heavy ones under `bin/heavy-lock`; about 2 hours with the area's checks, the conversion shared with the night's):
+
+```sh
+# 0. the joint javac check of the merged tree (0 errors expected; a light minute)
+.tmp/all9-run.sh /root/arbace/.tmp/worktrees/next
+# 1. jdk/ converted afresh: expect the sources line +40 share, +4 unix, +3 linux ("N from src/java.base/linux/classes",
+#    new in the line), +15 of jrt's own; 0 failed, 0 javac errors, no javac: 0 fallbacks; jdk/forms + 62 files and the
+#    package index of sun/nio/ch grown (java/nio/channels, .spi exist since F7)
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. j2g's edge afresh (DatagramChannelImpl, InheritedChannel, DirectBuffer, UnixDomainSocketAddress as outside
+#    references), javac's world's edge
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the executable; j2g's report: SelectorProvider$Holder 1/1/0, SocketChannelImpl 2/0/0, PollSelectorProvider and
+#    EPollSelectorProvider 1/0/0; no "VarHandle not constant" (SelectionKeyImpl's INTERESTOPS by fieldVarHandle); no
+#    native without its Go function (HostChannels' 31)
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 4. a smoke of F10a: expect "1 true", "2 hi", "3", "sun.nio.ch.EPollSelectorProvider"
+target/arbace-go/amd64/arbace -e '(import (quote (java.nio ByteBuffer)) (quote (java.nio.channels Selector SelectionKey ServerSocketChannel SocketChannel Pipe)) (quote (java.nio.channels.spi SelectorProvider)) (quote (java.net InetSocketAddress InetAddress)))
+  (let [sel (Selector/open) ss (ServerSocketChannel/open)]
+    (.bind ss (InetSocketAddress. (InetAddress/getLoopbackAddress) 0))
+    (.configureBlocking ss false) (.register ss sel SelectionKey/OP_ACCEPT)
+    (let [c (SocketChannel/open (.getLocalAddress ss))]
+      (println (.select sel 2000) (.isAcceptable (first (.selectedKeys sel))))
+      (let [a (.accept ss) b (ByteBuffer/allocate 8)]
+        (.write c (ByteBuffer/wrap (.getBytes "hi"))) (.read a b)
+        (println (.position b) (String. (.array b) 0 (.position b))) (.close a))
+      (.close c))
+    (let [p (Pipe/open) b (ByteBuffer/allocate 4)]
+      (.write (.sink p) (ByteBuffer/wrap (byte-array [1 2 3]))) (println (.read (.source p) b)))
+    (println (.getName (class (SelectorProvider/provider))))
+    (.close sel) (.close ss))'
+# 5. Java's levels interp and compiled on F10a's area, then the whole corpus with the night's others: saved, not
+#    recorded; expect about 34 / 34 of the 49 / 49 to pass, no passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/(java/nio/channels/(Pipe|SelectionKey|Selector|ServerSocketChannel|SocketChannel|etc)|sun/nio/ch|java/lang/management/CompilationMXBean)' \
+  --save .tmp/f10a-night/check
+```
+
+None of the slice's tests runs at `--only` interp before the night: every one names a class the committed
+`jdk/forms` and the gate's executable do not have yet (`Selector`, `SocketChannel`, `Pipe`...), so their first run
+is step 5.
+
+**Risks and fallbacks**: (1) the blocking emulation: a descriptor shared by two channels (`SocketChannel.socket()`
+and its adaptor's streams) is one entry, one mode, as the kernel's; (2) `os.File`'s finalizer would close a
+descriptor whose entry was dropped: entries are dropped only by `close0`, which closes; (3) the selector's
+`epoll_wait` and `poll` block an OS thread (Go's syscall), as the JDK's block a platform thread; the wakeup is
+jdk26u's (eventfd, the pipe); (4) a test that sets `jdk.net`'s extended options finds none, as on a JDK without
+jdk.net; (5) should j2g refuse a member of the new forms, the night's fallback leaves `selector-sources` out
+(its line in `sources`, the overlays of sun/nio/ch but FileChannelImpl, the four variants, the rename and
+HostChannels): F7, F11 and the rest do not depend on it.
+
+**What is left of F10**: F10b (JCS163: DatagramChannel over Net's multicast natives, then DatagramSocket's NIO
+adaptor as jdk26u's default delegate, and the asynchronous channels over EPollPort), the UNIX family with F9
+(JCS164), the interrupts (JCS162); the night's run and the day's classification and records.
+
+## Proposed (F10a)
+
+Numbered after JCS161; written here at the end with F10a's section (the main "Proposed" above lists the earlier ones).
+
+### JCS162 Thread.interrupt wakes a blocked channel and a selector (F7, F10a)
+
+jdk26u registers a channel's or a selector's `Interruptible` with the thread (`JavaLangAccess.blockedOn`), and
+`Thread.interrupt` calls it: the channel closes (ClosedByInterruptException), the selector wakes. jrt's
+hand-written Thread has no blocker (F7's AbstractInterruptibleChannel variant: blockedOn does nothing, end checks
+the interrupt status). Tests at stake: `Selector/LotsOfInterrupts`, `Pipe/PipeInterrupt`, F7's `ClosedByInterrupt`,
+`InterruptDeadlock`, `InterruptMapDeadlock`, about 6. (a) jrt's Thread gains a blocker: a field set by
+`blockedOn` (the variant then calls a jrt native `Thread_SetBlocker`), and `Interrupt` calls its `interrupt(Thread)`
+through a function the translated `sun.nio.ch.Interruptible` registers at its first use (no hand-written reference to
+a translated type), 1 day with jrt's tests; (b) as now. **Recommended: (a)**, after the night's records show the
+interrupt tests are what is left.
+
+### JCS163 F10b: DatagramChannel, then the asynchronous channels
+
+F10a leaves 31 / 31 tests of the selectors' area to DatagramChannel (about 20), the asynchronous channels (8) and
+multicast channels. (a) DatagramChannel as jdk26u's `DatagramChannelImpl` over F10a's layer: Net's multicast natives
+(`joinOrDrop4/6`, `blockOrUnblock4/6`, `setInterface4/6`, `getInterface4/6`: Net.c's, `IP_ADD_MEMBERSHIP`,
+`MCAST_JOIN_SOURCE_GROUP`...), `DatagramDispatcher`'s natives (recvfrom, sendto into IOUtil's arrays), then
+`DatagramSocketAdaptor` as `DatagramSocket`'s delegate as in jdk26u (retiring F11's legacy delegate, JCS153 (c)'s
+second step), 3 days; the asynchronous channels (`UnixAsynchronousSocketChannelImpl` over `EPollPort`, the default
+group's threads) after, 3 days; (b) DatagramChannel only; (c) neither. **Recommended: (a)**, DatagramChannel first
+(F11's tests then run on the JDK's own default path too).
+
+### JCS164 UNIX domain sockets with F9
+
+`UnixDomainSockets` answers not supported: `UnixDomainSocketAddress.of(Path)` needs the path's FileSystem
+(java.nio.file's FileSystems, F9), and the JDK's natives bind and connect by the path's bytes from the default file
+system's provider. (a) with F9: jdk26u's UnixDomainSockets and UnixDomainSocketAddress, the natives
+(`socket0(AF_UNIX)`, bind, connect, accept, localAddress) in channels_linux.ae, 1 day after F9; (b) never (a few
+tests). **Recommended: (a)**.
+
+### JCS165 The joint javac check as a light gate step
+
+JC9b's finding (the fixes' javac checks compiled against the JDK's java.base, not jrt's overlays) has now a general
+script, `.tmp/all9-run.sh CHECKOUT` (print-sources' list, jdk26u's files, the build's gensrc, the overlays; exit 1
+on any error; its negative control is F5's fault). (a) `bin/jrt-convert check-javac`, the script as a verb, and a
+light essential gate step keyed by the closure's sources and overlays (about 15 s, 1 GB; needs only the JDK
+build's javac, the oracle tier's host, as `bin/javac-vendor classes`); (b) a step of the nights' scripts only, as
+tonight. **Recommended: (a)**: every conversion night would stop at javac errors the day could have seen.
+
+### JCS166 The overlays' derivations committed and checked
+
+F7's `DirectByteBuffer` (gendirect.py), F10a's `Net`, `PollSelectorImpl` and `SocketOptionRegistry` (gennet.py,
+genpoll.py, genopts.py) are derived from jdk26u's files by scratch Python scripts; the overlays are committed, the
+scripts not, so a new jdk26u revision is re-derived by hand from the doc's description. (a) the derivations as
+Arbace (`test/jrt/derive.ae`: the same replacements, each asserted), run by a `bin/jrt-convert derive --check` that
+compares the committed overlays byte for byte (as `bin/generated-check` does for the generated variants), 1 day;
+(b) the Python scripts committed under `test/jrt/derive/` (a host tool, Python, in the vendoring path: against
+independence); (c) as now. **Recommended: (a)**.
+
+### JCS167 Toward 90% strict: serialization out of by design
+
+Java's completeness on batch 1 is 72.9% strict, 80.4% without by design; after tonight's records (JC9's F1, F5,
+F4, F2, JC9b's four, JC9c's F6, F12, F13, F19, F3, F10a; the sections' expected yields, about +530 eval and +500
+AOT) about **80.6% strict and 89% without by design** (eval about 2,390 of 3,322, AOT about 2,440; read and print
+unchanged). The strict mean cannot pass 90% while eval and AOT hold 335 and 308 tests by design (10% of each
+cell): the largest class is **serialization, 168 eval and 117 AOT** (`:serialization`, J2G-SPEC §12; the
+compiled level's `:design-also-compiled` 139 is mostly serialization's too), then XML 22, the class-file API 14,
+class loading 14 / 19. (a) serialization ported (ObjectOutputStream, ObjectInputStream, ObjectStreamClass over
+jrt's reflection; clojure-cdr staged its port, CDR's "serialization's port staged"; j2g's SerialNew), its tests
+deferred again then regained, 8-10 days; (b) by design as decided. **Recommended: (a)** when 90% strict is the
+goal: no other single change moves the strict mean more than a point or two.
