@@ -1,0 +1,214 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SSLSessionContextImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.util ArrayList Collections Enumeration Iterator Locale Map Map$Entry Random)
+        '(java.util.concurrent ConcurrentHashMap)
+        '(javax.net.ssl SSLSession SSLSessionContext)
+        '(sun.security.util Cache Cache$CacheVisitor KeyUtil))
+
+(defclass ^:final SSLSessionContextImpl
+  :implements [SSLSessionContext]
+
+  (field ^:private ^:static ^:final ^int DEFAULT_MAX_CACHE_SIZE 20480)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_MAX_QUEUE_SIZE 10)
+
+  (field ^:static ^:final ^int DEFAULT_SESSION_TIMEOUT 86400)
+
+  (field ^:private ^:final ^{:tag (Cache SessionId SSLSessionImpl)} sessionCache)
+
+  (field ^:private ^:final ^{:tag (Cache String SSLSessionImpl)} sessionHostPortCache)
+
+  (field ^:private ^int cacheLimit)
+
+  (field ^:private ^int timeout)
+
+  (field ^:private ^int currentKeyID)
+
+  (field ^:private ^:final ^{:tag (Map Integer SessionTicketExtension$StatelessKey)} keyHashMap)
+
+  (field ^:private ^boolean statelessSession true)
+
+  (constructor [this ^boolean server]
+    (set! timeout DEFAULT_SESSION_TIMEOUT)
+    (set! cacheLimit (.getDefaults this server))
+    (if server
+        (do
+          (set! sessionCache (Cache/newSoftMemoryCache cacheLimit timeout))
+          (set! sessionHostPortCache (Cache/newSoftMemoryCache cacheLimit timeout))
+          (set! keyHashMap (ConcurrentHashMap.))
+          (set! currentKeyID (.nextInt (Random. (System/nanoTime)))))
+        (do
+          (set! sessionCache (Cache/newSoftMemoryCache cacheLimit timeout))
+          (set! sessionHostPortCache
+                (Cache/newSoftMemoryQueue cacheLimit timeout DEFAULT_MAX_QUEUE_SIZE))
+          (set! keyHashMap (Map/of)))))
+
+  (method statelessEnabled ^boolean [this] statelessSession)
+
+  (method ^:public getSession ^SSLSession [this ^byte/1 sessionId]
+    (when (nil? sessionId) (throw (NullPointerException. "session id cannot be null")))
+    (let [sess (cast SSLSessionImpl (.get sessionCache (SessionId. sessionId)))]
+      (when-not (.isTimedout this sess) sess)))
+
+  (method ^:public getIds ^{:tag (Enumeration byte/1)} [this]
+    (let [scVisitor (SessionCacheVisitor.)]
+      (.accept sessionCache scVisitor)
+      (.getSessionIds scVisitor)))
+
+  (method ^:public setSessionTimeout :throws [IllegalArgumentException] ^void [this ^int seconds]
+    (when (< seconds 0) (throw (IllegalArgumentException.)))
+    (when-not (== timeout seconds)
+      (.setTimeout sessionCache seconds)
+      (.setTimeout sessionHostPortCache seconds)
+      (set! timeout seconds)))
+
+  (method ^:public getSessionTimeout ^int [this] timeout)
+
+  (method ^:public setSessionCacheSize :throws [IllegalArgumentException] ^void [this ^int size]
+    (when (< size 0) (throw (IllegalArgumentException.)))
+    (when-not (== cacheLimit size)
+      (.setCapacity sessionCache size)
+      (.setCapacity sessionHostPortCache size)
+      (set! cacheLimit size)))
+
+  (method ^:public getSessionCacheSize ^int [this] cacheLimit)
+
+  (method ^:private cleanupStatelessKeys ^void [this]
+    (let [^{:tag (Iterator (Map$Entry Integer SessionTicketExtension$StatelessKey))} it (.iterator
+                                                                                          (.entrySet
+                                                                                            keyHashMap))]
+      (while (.hasNext it)
+        (let [^{:tag (Map$Entry Integer SessionTicketExtension$StatelessKey)} entry (cast
+                                                                                      Map$Entry
+                                                                                      (.next it))
+              k (cast SessionTicketExtension$StatelessKey (.getValue entry))]
+          (when (.isInvalid k this) (.remove it) (KeyUtil/destroySecretKeys (.-key k)))))))
+
+  (method getKey ^SessionTicketExtension$StatelessKey [this ^HandshakeContext hc]
+    (let [^:mutable ssk (cast SessionTicketExtension$StatelessKey (.get keyHashMap currentKeyID))]
+      (if (and (some? ssk) (not (.isExpired ssk)))
+          ssk
+          (do
+            (locking this
+              (set! ssk (cast SessionTicketExtension$StatelessKey (.get keyHashMap currentKeyID)))
+              (when (and (some? ssk) (not (.isExpired ssk))) (return ssk))
+              (let [newID (unchecked-add-int currentKeyID 1)]
+                (set! ssk (SessionTicketExtension$StatelessKey. hc newID))
+                (.put keyHashMap (Integer/valueOf newID) ssk)
+                (set! currentKeyID newID)))
+            (.cleanupStatelessKeys this)
+            ssk))))
+
+  (method getKey ^SessionTicketExtension$StatelessKey [this ^int id]
+    (cast SessionTicketExtension$StatelessKey (.get keyHashMap id)))
+
+  (method get ^SSLSessionImpl [this ^byte/1 id]
+    (cast SSLSessionImpl (.getSession this id)))
+
+  (method pull ^SSLSessionImpl [this ^byte/1 id]
+    (when (some? id) (cast SSLSessionImpl (.pull sessionCache (SessionId. id)))))
+
+  (method get ^SSLSessionImpl [this ^String hostname ^int port]
+    (when-not (and (nil? hostname) (== port -1))
+      (let [sess (cast SSLSessionImpl
+                       (.get sessionHostPortCache (SSLSessionContextImpl/getKey hostname port)))]
+        (when-not (.isTimedout this sess) sess))))
+
+  (method ^:private ^:static getKey ^String [^String hostname ^int port]
+    (.toLowerCase (java-str hostname ":" port) Locale/ENGLISH))
+
+  (method put ^void [this ^SSLSessionImpl s] (.put this s false))
+
+  (method put ^void [this ^SSLSessionImpl s ^boolean canQueue]
+    (.put sessionCache (.getSessionId s) s)
+    (when (and (some? (.getPeerHost s)) (not (== (.getPeerPort s) -1)))
+      (.put sessionHostPortCache
+            (SSLSessionContextImpl/getKey (.getPeerHost s) (.getPeerPort s))
+            s
+            canQueue))
+    (.setContext s this))
+
+  (method remove ^void [this ^SessionId key] (.remove this key false))
+
+  (method remove ^void [this ^SessionId key ^boolean isClient]
+    (let [s (cast SSLSessionImpl (.get sessionCache key))]
+      (when (some? s)
+        (.remove sessionCache key)
+        (when-not isClient
+          (.remove sessionHostPortCache
+                   (SSLSessionContextImpl/getKey (.getPeerHost s) (.getPeerPort s)))))))
+
+  (method ^:private getDefaults ^int [this ^boolean server]
+    (try
+      (let [^String st (if server
+                           (System/getProperty "jdk.tls.server.enableSessionTicketExtension" "true")
+                           (System/getProperty "jdk.tls.client.enableSessionTicketExtension" "true"))]
+        (when (== (.compareToIgnoreCase st "false") 0) (set! statelessSession false))
+        (let [s (System/getProperty "jdk.tls.server.sessionTicketTimeout")]
+          (when (some? s)
+            (try
+              (let [t (Integer/parseInt s)]
+                (if (or (< t 0) (> t NewSessionTicket/MAX_TICKET_LIFETIME))
+                    (do
+                      (set! timeout DEFAULT_SESSION_TIMEOUT)
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                        (SSLLogger/warning
+                          (java-str "Invalid timeout given jdk.tls.server.sessionTicketTimeout: "
+                                    t
+                                    ".  Set to default value "
+                                    timeout))))
+                    (set! timeout t)))
+              (catch NumberFormatException e
+                (.setSessionTimeout this DEFAULT_SESSION_TIMEOUT)
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                  (SSLLogger/warning
+                    (java-str "Invalid timeout for jdk.tls.server.sessionTicketTimeout: "
+                              s
+                              ".  Set to default value "
+                              timeout))))))
+          (let [^int defaultCacheLimit (Integer/getInteger
+                                         "javax.net.ssl.sessionCacheSize"
+                                         DEFAULT_MAX_CACHE_SIZE)]
+            (cond
+              (>= defaultCacheLimit 0) (return defaultCacheLimit)
+              (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                (SSLLogger/warning
+                  (java-str
+                    (java-str
+                      "invalid System Property javax.net.ssl.sessionCacheSize, use the default session cache size ("
+                      DEFAULT_MAX_CACHE_SIZE)
+                    ") instead"))))))
+      (catch Exception e
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/warning
+            (java-str
+              (java-str
+                "the System Property javax.net.ssl.sessionCacheSize is not available, use the default value ("
+                DEFAULT_MAX_CACHE_SIZE)
+              ") instead")))))
+    DEFAULT_MAX_CACHE_SIZE)
+
+  (method ^:private isTimedout ^boolean [this ^SSLSession sess]
+    (cond
+      (== timeout 0) false
+      (and (some? sess)
+           (<= (unchecked-add (.getCreationTime sess) (unchecked-multiply timeout 1000))
+               (System/currentTimeMillis)))
+        (do (.invalidate sess) true)
+      :else false))
+
+  (defclass ^:private ^:final SessionCacheVisitor
+    :implements [(Cache$CacheVisitor SessionId SSLSessionImpl)]
+
+    (field ^{:tag (ArrayList byte/1)} ids nil)
+
+    (method ^:public visit ^void [this ^{:tag (Map SessionId SSLSessionImpl)} map]
+      (set! ids (ArrayList. (.size map)))
+      (for-each [^SessionId key (.keySet map)]
+        (let [value (cast SSLSessionImpl (.get map key))]
+          (when-not (.isTimedout SSLSessionContextImpl/this value) (.add ids (.getId key))))))
+
+    (method getSessionIds ^{:tag (Enumeration byte/1)} [this]
+      (if (some? ids) (Collections/enumeration ids) (Collections/emptyEnumeration)))))

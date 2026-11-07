@@ -1,0 +1,303 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/ECDHClientKeyExchange.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security CryptoPrimitive GeneralSecurityException)
+        '(java.security.interfaces ECPublicKey XECPublicKey)
+        '(java.security.spec NamedParameterSpec)
+        '(java.text MessageFormat)
+        '(java.util EnumSet Locale)
+        '(sun.security.util HexDumpEncoder))
+
+(defclass ^:final ECDHClientKeyExchange
+  (field ^:static ^:final ^SSLConsumer ecdhHandshakeConsumer (ECDHClientKeyExchangeConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer ecdhHandshakeProducer (ECDHClientKeyExchangeProducer.))
+
+  (field ^:static ^:final ^SSLConsumer ecdheHandshakeConsumer (ECDHEClientKeyExchangeConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer ecdheHandshakeProducer
+    (ECDHEClientKeyExchangeProducer.))
+
+  (defclass ^:private ^:static ^:final ECDHClientKeyExchangeMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:private ^:final ^byte/1 encodedPoint)
+
+    (constructor [this ^HandshakeContext handshakeContext ^byte/1 encodedPublicKey]
+      (super. handshakeContext)
+      (set! (.-encodedPoint this) encodedPublicKey))
+
+    (constructor :throws [IOException] [this ^HandshakeContext handshakeContext ^ByteBuffer m]
+      (super. handshakeContext)
+      (if (not (== (.remaining m) 0))
+          (set! (.-encodedPoint this) (Record/getBytes8 m))
+          (set! (.-encodedPoint this) (new byte/1 0))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/CLIENT_KEY_EXCHANGE)
+
+    (method ^:public messageLength ^int [this]
+      (if (or (nil? encodedPoint) (== (alength encodedPoint) 0))
+          0
+          (unchecked-add-int 1 (alength encodedPoint))))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (when (and (some? encodedPoint) (not (== (alength encodedPoint) 0)))
+        (.putBytes8 hos encodedPoint)))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"ECDH ClientKeyExchange\": '{'\n  \"ecdh public\": '{'\n{0}\n  '}',\n'}'"
+                            Locale/ENGLISH)]
+        (if (or (nil? encodedPoint) (== (alength encodedPoint) 0))
+            (let [messageFields (new Object/1 ["    <implicit>"])]
+              (.format messageFormat messageFields))
+            (let [hexEncoder (HexDumpEncoder.)
+                  messageFields (new Object/1
+                                     [(Utilities/indent
+                                        (.encodeBuffer hexEncoder encodedPoint)
+                                        "    ")])]
+              (.format messageFormat messageFields))))))
+
+  (defclass ^:private ^:static ^:final ECDHClientKeyExchangeProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)
+            ^:mutable ^X509Authentication$X509Credentials x509Credentials nil]
+        (for-each [^SSLCredentials credential (.-handshakeCredentials chc)]
+          (when (instance? X509Authentication$X509Credentials credential)
+            (set! x509Credentials (cast X509Authentication$X509Credentials credential))
+            (break)))
+        (when (nil? x509Credentials)
+          (throw (.fatal (.-conContext chc)
+                         Alert/INTERNAL_ERROR
+                         "No server certificate for ECDH client key exchange")))
+        (let [publicKey (.-popPublicKey x509Credentials)
+              ^:mutable ^NamedGroup namedGroup nil
+              algorithm (.getAlgorithm publicKey)]
+          (cond
+            (.equals algorithm "EC")
+              (let [params (.getParams (cast ECPublicKey publicKey))]
+                (set! namedGroup (NamedGroup/valueOf params)))
+            (.equals algorithm "XDH")
+              (let [params (.getParams (cast XECPublicKey publicKey))]
+                (when (instance? NamedParameterSpec params)
+                  (let [name (.getName (cast NamedParameterSpec params))]
+                    (set! namedGroup (NamedGroup/nameOf name)))))
+            :else
+              (throw (.fatal (.-conContext chc)
+                             Alert/ILLEGAL_PARAMETER
+                             "Not EC/XDH server certificate for ECDH client key exchange")))
+          (when (nil? namedGroup)
+            (throw (.fatal (.-conContext chc)
+                           Alert/ILLEGAL_PARAMETER
+                           "Unsupported EC/XDH server cert for ECDH client key exchange")))
+          (let [sslPossession (.createPossession namedGroup (.getSecureRandom (.-sslContext chc)))]
+            (.add (.-handshakePossessions chc) sslPossession)
+            (let [cke (ECDHClientKeyExchangeMessage. chc (.encode sslPossession))]
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Produced ECDH ClientKeyExchange handshake message" cke))
+              (.write cke (.-handshakeOutput chc))
+              (.flush (.-handshakeOutput chc))
+              (let [ke (SSLKeyExchange/valueOf (.-keyExchange (.-negotiatedCipherSuite chc))
+                                               (.-negotiatedProtocol chc))]
+                (if (nil? ke)
+                    (throw (.fatal (.-conContext chc)
+                                   Alert/INTERNAL_ERROR
+                                   "Not supported key exchange type"))
+                    (let [masterKD (.createKeyDerivation ke chc)
+                          masterSecret (.deriveKey masterKD "MasterSecret")]
+                      (.setMasterSecret (.-handshakeSession chc) masterSecret)
+                      (let [kd (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol chc))]
+                        (if (nil? kd)
+                            (throw (.fatal (.-conContext chc)
+                                           Alert/INTERNAL_ERROR
+                                           (java-str
+                                             "Not supported key derivation: "
+                                             (.-negotiatedProtocol chc))))
+                            (set! (.-handshakeKeyDerivation chc)
+                                  (.createKeyDerivation kd chc masterSecret))))))
+                nil)))))))
+
+  (defclass ^:private ^:static ^:final ECDHClientKeyExchangeConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [shc (cast ServerHandshakeContext context)
+            ^:mutable ^X509Authentication$X509Possession x509Possession nil]
+        (for-each [^SSLPossession possession (.-handshakePossessions shc)]
+          (when (instance? X509Authentication$X509Possession possession)
+            (set! x509Possession (cast X509Authentication$X509Possession possession))
+            (break)))
+        (when (nil? x509Possession)
+          (throw (.fatal (.-conContext shc)
+                         Alert/INTERNAL_ERROR
+                         "No expected EC server cert for ECDH client key exchange")))
+        (let [^:mutable ^NamedGroup namedGroup nil
+              ecParams (.getECParameterSpec x509Possession)]
+          (if (some? ecParams)
+              (set! namedGroup (NamedGroup/valueOf ecParams))
+              (let [namedParams (.getXECParameterSpec x509Possession)]
+                (when (nil? namedParams)
+                  (throw (.fatal
+                           (.-conContext shc)
+                           Alert/ILLEGAL_PARAMETER
+                           "Unknown named parameters in server cert for ECDH client key exchange")))
+                (set! namedGroup (NamedGroup/nameOf (.getName namedParams)))))
+          (when (nil? namedGroup)
+            (throw (.fatal (.-conContext shc)
+                           Alert/ILLEGAL_PARAMETER
+                           "Unknown named group in server cert for ECDH client key exchange")))
+          (let [ke (SSLKeyExchange/valueOf (.-keyExchange (.-negotiatedCipherSuite shc))
+                                           (.-negotiatedProtocol shc))]
+            (when (nil? ke)
+              (throw (.fatal (.-conContext shc)
+                             Alert/INTERNAL_ERROR
+                             "Not supported key exchange type")))
+            (let [cke (ECDHClientKeyExchangeMessage. shc message)]
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Consuming ECDH ClientKeyExchange handshake message" cke))
+              (try
+                (let [sslCredentials (.decodeCredentials namedGroup (.-encodedPoint cke))]
+                  (when (some? (.-algorithmConstraints shc))
+                    (when-instance [^NamedGroupCredentials namedGroupCredentials sslCredentials]
+                      (when-not (.permits (.-algorithmConstraints shc)
+                                          (EnumSet/of CryptoPrimitive/KEY_AGREEMENT)
+                                          (.getPublicKey namedGroupCredentials))
+                        (.fatal (.-conContext shc)
+                                Alert/INSUFFICIENT_SECURITY
+                                (java-str "ClientKeyExchange for "
+                                          namedGroup
+                                          " does not comply with algorithm constraints")))))
+                  (.add (.-handshakeCredentials shc) sslCredentials))
+                (catch GeneralSecurityException e
+                  (throw (.fatal (.-conContext shc)
+                                 Alert/UNEXPECTED_MESSAGE
+                                 (java-str "Cannot decode ECDH PublicKey: " namedGroup)))))
+              (let [masterKD (.createKeyDerivation ke shc)
+                    masterSecret (.deriveKey masterKD "MasterSecret")]
+                (.setMasterSecret (.-handshakeSession shc) masterSecret)
+                (let [kd (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol shc))]
+                  (if (nil? kd)
+                      (throw (.fatal (.-conContext shc)
+                                     Alert/INTERNAL_ERROR
+                                     (java-str "Not supported key derivation: "
+                                               (.-negotiatedProtocol shc))))
+                      (set! (.-handshakeKeyDerivation shc)
+                            (.createKeyDerivation kd shc masterSecret)))))))))))
+
+  (defclass ^:private ^:static ^:final ECDHEClientKeyExchangeProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)
+            ^:mutable ^SSLCredentials sslCredentials nil
+            ^:mutable ^NamedGroup ng nil]
+        (for-each [^SSLCredentials cd (.-handshakeCredentials chc)]
+          (when-instance [^NamedGroupCredentials creds cd]
+            (set! ng (.getNamedGroup creds))
+            (set! sslCredentials cd)
+            (break)))
+        (when (nil? sslCredentials)
+          (throw (.fatal (.-conContext chc)
+                         Alert/INTERNAL_ERROR
+                         "No ECDHE credentials negotiated for client key exchange")))
+        (let [sslPossession (.createPossession ng (.getSecureRandom (.-sslContext chc)))]
+          (.add (.-handshakePossessions chc) sslPossession)
+          (let [cke (ECDHClientKeyExchangeMessage. chc (.encode sslPossession))]
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Produced ECDHE ClientKeyExchange handshake message" cke))
+            (.write cke (.-handshakeOutput chc))
+            (.flush (.-handshakeOutput chc))
+            (let [ke (SSLKeyExchange/valueOf (.-keyExchange (.-negotiatedCipherSuite chc))
+                                             (.-negotiatedProtocol chc))]
+              (if (nil? ke)
+                  (throw (.fatal (.-conContext chc)
+                                 Alert/INTERNAL_ERROR
+                                 "Not supported key exchange type"))
+                  (let [masterKD (.createKeyDerivation ke chc)
+                        masterSecret (.deriveKey masterKD "MasterSecret")]
+                    (.setMasterSecret (.-handshakeSession chc) masterSecret)
+                    (let [kd (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol chc))]
+                      (if (nil? kd)
+                          (throw (.fatal (.-conContext chc)
+                                         Alert/INTERNAL_ERROR
+                                         (java-str
+                                           "Not supported key derivation: "
+                                           (.-negotiatedProtocol chc))))
+                          (set! (.-handshakeKeyDerivation chc)
+                                (.createKeyDerivation kd chc masterSecret))))))
+              nil))))))
+
+  (defclass ^:private ^:static ^:final ECDHEClientKeyExchangeConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [shc (cast ServerHandshakeContext context)
+            ^:mutable ^SSLPossession sslPossession nil
+            ^:mutable ^NamedGroup namedGroup nil]
+        (for-each [^SSLPossession possession (.-handshakePossessions shc)]
+          (when-instance [^NamedGroupPossession poss possession]
+            (set! namedGroup (.getNamedGroup poss))
+            (set! sslPossession poss)
+            (break)))
+        (when (nil? sslPossession)
+          (throw (.fatal (.-conContext shc)
+                         Alert/INTERNAL_ERROR
+                         "No expected ECDHE possessions for client key exchange")))
+        (when (nil? namedGroup)
+          (throw (.fatal (.-conContext shc)
+                         Alert/ILLEGAL_PARAMETER
+                         "Unsupported EC server cert for ECDHE client key exchange")))
+        (let [ke (SSLKeyExchange/valueOf (.-keyExchange (.-negotiatedCipherSuite shc))
+                                         (.-negotiatedProtocol shc))]
+          (when (nil? ke)
+            (throw (.fatal (.-conContext shc)
+                           Alert/INTERNAL_ERROR
+                           "Not supported key exchange type")))
+          (let [cke (ECDHClientKeyExchangeMessage. shc message)]
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Consuming ECDHE ClientKeyExchange handshake message" cke))
+            (try
+              (let [sslCredentials (.decodeCredentials namedGroup (.-encodedPoint cke))]
+                (when (some? (.-algorithmConstraints shc))
+                  (when-instance [^NamedGroupCredentials namedGroupCredentials sslCredentials]
+                    (when-not (.permits (.-algorithmConstraints shc)
+                                        (EnumSet/of CryptoPrimitive/KEY_AGREEMENT)
+                                        (.getPublicKey namedGroupCredentials))
+                      (.fatal (.-conContext shc)
+                              Alert/INSUFFICIENT_SECURITY
+                              (java-str "ClientKeyExchange for "
+                                        namedGroup
+                                        " does not comply with algorithm constraints")))))
+                (.add (.-handshakeCredentials shc) sslCredentials))
+              (catch GeneralSecurityException e
+                (throw (.fatal (.-conContext shc)
+                               Alert/UNEXPECTED_MESSAGE
+                               (java-str "Cannot decode named group: " namedGroup)))))
+            (let [masterKD (.createKeyDerivation ke shc)
+                  masterSecret (.deriveKey masterKD "MasterSecret")]
+              (.setMasterSecret (.-handshakeSession shc) masterSecret)
+              (let [kd (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol shc))]
+                (if (nil? kd)
+                    (throw (.fatal (.-conContext shc)
+                                   Alert/INTERNAL_ERROR
+                                   (java-str "Not supported key derivation: "
+                                             (.-negotiatedProtocol shc))))
+                    (set! (.-handshakeKeyDerivation shc) (.createKeyDerivation kd shc masterSecret)))))))))))

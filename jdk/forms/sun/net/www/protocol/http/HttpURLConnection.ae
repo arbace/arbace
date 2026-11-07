@@ -1,0 +1,2184 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/protocol/http/HttpURLConnection.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.protocol.http)
+
+(import '(java.io FileNotFoundException
+                  FilterInputStream
+                  FilterOutputStream
+                  IOException
+                  InputStream
+                  OutputStream
+                  PrintStream)
+        '(java.net Authenticator
+                   Authenticator$RequestorType
+                   CacheRequest
+                   CacheResponse
+                   CookieHandler
+                   HttpCookie
+                   HttpRetryException
+                   InetAddress
+                   InetSocketAddress
+                   MalformedURLException
+                   PasswordAuthentication
+                   ProtocolException
+                   Proxy
+                   Proxy$Type
+                   ProxySelector
+                   ResponseCache
+                   SecureCacheResponse
+                   SocketTimeoutException
+                   URL
+                   URLConnection
+                   UnknownHostException)
+        '(java.nio ByteBuffer)
+        '(java.text SimpleDateFormat)
+        '(java.util ArrayList
+                    Arrays
+                    Collections
+                    Date
+                    HashMap
+                    HashSet
+                    Iterator
+                    List
+                    Locale
+                    Map
+                    Map$Entry
+                    Objects
+                    Set
+                    StringJoiner
+                    StringTokenizer
+                    TimeZone)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(jdk.internal.access SharedSecrets)
+        '(sun.net NetProperties NetworkClient)
+        '(sun.net.util IPAddressUtil ProxyUtil)
+        '(sun.net.www MessageHeader MeteredStream ParseUtil)
+        '(sun.net.www.http ChunkedInputStream ChunkedOutputStream HttpClient PosterOutputStream)
+        '(sun.util.logging PlatformLogger PlatformLogger$Level))
+
+(defclasses
+  (defclass ^:public HttpURLConnection
+    :extends java.net.HttpURLConnection
+
+    (field ^:static ^:final ^String HTTP_CONNECT "CONNECT")
+
+    (field ^:static ^:final ^String version)
+
+    (field ^:public ^:static ^:final ^String userAgent)
+
+    (field ^:static ^:final ^int defaultmaxRedirects 20)
+
+    (field ^:static ^:final ^int maxRedirects)
+
+    (field ^:static ^:final ^boolean validateProxy)
+
+    (field ^:static ^:final ^boolean validateServer)
+
+    (field ^:static ^:final ^{:tag (Set String)} disabledProxyingSchemes)
+
+    (field ^:static ^:final ^{:tag (Set String)} disabledTunnelingSchemes)
+
+    (field ^:private ^StreamingOutputStream strOutputStream)
+
+    (field ^:private ^:static ^:final ^String RETRY_MSG1
+      "cannot retry due to proxy authentication, in streaming mode")
+
+    (field ^:private ^:static ^:final ^String RETRY_MSG2
+      "cannot retry due to server authentication, in streaming mode")
+
+    (field ^:private ^:static ^:final ^String RETRY_MSG3
+      "cannot retry due to redirection, in streaming mode")
+
+    (field ^:private ^:static ^:final ^boolean enableESBuffer)
+
+    (field ^:private ^:static ^:final ^int timeout4ESBuffer)
+
+    (field ^:private ^:static ^:final ^int bufSize4ES)
+
+    (field ^:private ^:static ^:final ^int maxHeaderSize)
+
+    (field ^:private ^:static ^:final ^boolean allowRestrictedHeaders)
+
+    (field ^:private ^:static ^:final ^{:tag (Set String)} restrictedHeaderSet)
+
+    (field ^:private ^:static ^:final ^String/1 restrictedHeaders
+      (new String/1
+           ["Access-Control-Request-Headers" "Access-Control-Request-Method" "Connection"
+            "Content-Length" "Content-Transfer-Encoding" "Host" "Keep-Alive" "Origin" "Trailer"
+            "Transfer-Encoding" "Upgrade" "Via"]))
+
+    (method ^:private ^:static schemesListToSet ^{:tag (Set String)} [^String list]
+      (if (or (nil? list) (.isEmpty list))
+          (Collections/emptySet)
+          (let [^{:tag (Set String)} s (HashSet.)
+                parts (.split list "\\s*,\\s*")]
+            (for-each [^String part parts] (.add s (.toLowerCase part Locale/ROOT)))
+            s)))
+
+    (static-initializer
+      (set! maxRedirects (Integer/getInteger "http.maxRedirects" defaultmaxRedirects))
+      (set! version (System/getProperty "java.version"))
+      (let [^:mutable agent (System/getProperty "http.agent")]
+        (if (nil? agent)
+            (set! agent (java-str "Java/" version))
+            (set! agent (java-str agent " Java/" version)))
+        (set! userAgent agent)
+        (let [^:mutable p (NetProperties/get "jdk.http.auth.tunneling.disabledSchemes")]
+          (set! disabledTunnelingSchemes (HttpURLConnection/schemesListToSet p))
+          (set! p (NetProperties/get "jdk.http.auth.proxying.disabledSchemes"))
+          (set! disabledProxyingSchemes (HttpURLConnection/schemesListToSet p))
+          (set! validateProxy (Boolean/getBoolean "http.auth.digest.validateProxy"))
+          (set! validateServer (Boolean/getBoolean "http.auth.digest.validateServer"))
+          (set! enableESBuffer (Boolean/getBoolean "sun.net.http.errorstream.enableBuffering"))
+          (let [^:mutable ^int esBufferTimeout (Integer/getInteger
+                                                 "sun.net.http.errorstream.timeout"
+                                                 300)]
+            (when (<= esBufferTimeout 0) (set! esBufferTimeout 300))
+            (set! timeout4ESBuffer esBufferTimeout)
+            (let [^:mutable ^int esBufSize (Integer/getInteger
+                                             "sun.net.http.errorstream.bufferSize"
+                                             4096)]
+              (when (<= esBufSize 0) (set! esBufSize 4096))
+              (set! bufSize4ES esBufSize)
+              (set! allowRestrictedHeaders
+                    (Boolean/getBoolean "sun.net.http.allowRestrictedHeaders"))
+              (if (not allowRestrictedHeaders)
+                  (do
+                    (set! restrictedHeaderSet (HashSet/newHashSet (alength restrictedHeaders)))
+                    (loop [^int i 0]
+                      (when (< i (alength restrictedHeaders))
+                        (.add restrictedHeaderSet
+                              (.toLowerCase (aget restrictedHeaders i) Locale/ROOT))
+                        (recur (unchecked-inc-int i)))))
+                  (set! restrictedHeaderSet nil))
+              (let [defMaxHeaderSize (unchecked-multiply-int 384 1024)
+                    maxHeaderSizeStr (NetProperties/get "jdk.http.maxHeaderSize")
+                    ^:mutable maxHeaderSizeVal defMaxHeaderSize]
+                (when (some? maxHeaderSizeStr)
+                  (try
+                    (set! maxHeaderSizeVal (Integer/parseInt maxHeaderSizeStr))
+                    (catch NumberFormatException n (set! maxHeaderSizeVal defMaxHeaderSize))))
+                (when (< maxHeaderSizeVal 0) (set! maxHeaderSizeVal 0))
+                (set! maxHeaderSize maxHeaderSizeVal)))))))
+
+    (field ^:static ^:final ^String httpVersion "HTTP/1.1")
+
+    (field ^:static ^:final ^String acceptString "*/*")
+
+    (field ^:private ^:static ^:final ^String/1 EXCLUDE_HEADERS
+      (new String/1 ["Proxy-Authorization" "Authorization"]))
+
+    (field ^:private ^:static ^:final ^String/1 EXCLUDE_HEADERS2
+      (new String/1 ["Proxy-Authorization" "Authorization" "Cookie" "Cookie2"]))
+
+    (field ^:protected ^HttpClient http)
+
+    (field ^:protected ^Handler handler)
+
+    (field ^:protected ^Proxy instProxy)
+
+    (field ^:protected ^:volatile ^Authenticator authenticator)
+
+    (field ^:protected ^:volatile ^AuthCacheImpl authCache (AuthCacheImpl/getDefault))
+
+    (field ^:private ^CookieHandler cookieHandler)
+
+    (field ^:private ^:final ^ResponseCache cacheHandler)
+
+    (field ^:private ^:volatile ^boolean usingProxy)
+
+    (field ^:protected ^CacheResponse cachedResponse)
+
+    (field ^:private ^MessageHeader cachedHeaders)
+
+    (field ^:private ^InputStream cachedInputStream)
+
+    (field ^:protected ^PrintStream ps nil)
+
+    (field ^:private ^InputStream errorStream nil)
+
+    (field ^:private ^boolean setUserCookies true)
+
+    (field ^:private ^String userCookies nil)
+
+    (field ^:private ^String userCookies2 nil)
+
+    (field ^:private ^MessageHeader requests)
+
+    (field ^:private ^:final ^MessageHeader userHeaders)
+
+    (field ^:private ^boolean connecting false)
+
+    (field ^String domain)
+
+    (field ^DigestAuthentication$Parameters digestparams)
+
+    (field ^AuthenticationInfo currentProxyCredentials nil)
+
+    (field ^AuthenticationInfo currentServerCredentials nil)
+
+    (field ^boolean needToCheck true)
+
+    (field ^:private ^boolean doingNTLM2ndStage false)
+
+    (field ^:private ^boolean doingNTLMp2ndStage false)
+
+    (field ^:private ^boolean tryTransparentNTLMServer true)
+
+    (field ^:private ^boolean tryTransparentNTLMProxy true)
+
+    (field ^:private ^boolean useProxyResponseCode false)
+
+    (field ^:private ^Proxy lastProxy)
+
+    (field ^:private authObj)
+
+    (field ^boolean isUserServerAuth)
+
+    (field ^boolean isUserProxyAuth)
+
+    (field ^String serverAuthKey)
+
+    (field ^String proxyAuthKey)
+
+    (field ^:private ^MessageHeader responses)
+
+    (field ^:private ^InputStream inputStream nil)
+
+    (field ^:private ^PosterOutputStream poster nil)
+
+    (field ^:private ^boolean setRequests false)
+
+    (field ^:private ^boolean failedOnce false)
+
+    (field ^:private ^Exception rememberedException nil)
+
+    (field ^:private ^Exception rememberedExceptionOut nil)
+
+    (field ^:private ^HttpClient reuseClient nil)
+
+    (defclass ^:public ^:enum TunnelState
+      (constants NONE SETUP TUNNELING))
+
+    (field ^:private ^TunnelState tunnelState TunnelState/NONE)
+
+    (field ^:private ^int connectTimeout NetworkClient/DEFAULT_CONNECT_TIMEOUT)
+
+    (field ^:private ^int readTimeout NetworkClient/DEFAULT_READ_TIMEOUT)
+
+    (field ^:private ^:static ^:final ^PlatformLogger logger
+      (PlatformLogger/getLogger "sun.net.www.protocol.http.HttpURLConnection"))
+
+    (field ^:private ^:final ^ReentrantLock connectionLock (ReentrantLock.))
+
+    (method ^:private ^:final lock ^void [this] (.lock connectionLock))
+
+    (method ^:private ^:final unlock ^void [this] (.unlock connectionLock))
+
+    (method ^:public ^:final isLockHeldByCurrentThread ^boolean [this]
+      (.isHeldByCurrentThread connectionLock))
+
+    (method ^:private ^:static requestPassword ^PasswordAuthentication [^:final ^Authenticator authenticator
+                                                                        ^:final ^String host
+                                                                        ^:final ^InetAddress addr
+                                                                        ^:final ^int port
+                                                                        ^:final ^String protocol
+                                                                        ^:final ^String prompt
+                                                                        ^:final ^String scheme
+                                                                        ^:final ^URL url
+                                                                        ^:final ^Authenticator$RequestorType authType]
+      (when (.isLoggable logger PlatformLogger$Level/FINEST)
+        (.finest logger (java-str "Requesting Authentication: host =" host " url = " url)))
+      (let [pass (Authenticator/requestPasswordAuthentication
+                   authenticator
+                   host
+                   addr
+                   port
+                   protocol
+                   prompt
+                   scheme
+                   url
+                   authType)]
+        (when (.isLoggable logger PlatformLogger$Level/FINEST)
+          (.finest logger
+                   (java-str "Authentication returned: " (if (some? pass) (.toString pass) "null"))))
+        pass))
+
+    (method ^:private isRestrictedHeader ^boolean [this ^:mutable ^String key ^String value]
+      (if allowRestrictedHeaders
+          false
+          (do
+            (set! key (.toLowerCase key Locale/ROOT))
+            (cond
+              (.contains restrictedHeaderSet key)
+                (if (and (.equals key "connection") (.equalsIgnoreCase value "close")) false true)
+              (.startsWith key "sec-") true
+              :else false))))
+
+    (method ^:private isExternalMessageHeaderAllowed ^boolean [this ^String key ^String value]
+      (.checkMessageHeader this key value)
+      (if (not (.isRestrictedHeader this key value)) true false))
+
+    (method ^:public ^:static getHttpLogger ^PlatformLogger [] logger)
+
+    (method ^:public authObj [this] authObj)
+
+    (method ^:public authObj ^void [this authObj]
+      (set! (.-authObj this) authObj))
+
+    (method ^:public setAuthenticator ^void [this ^Authenticator auth]
+      (.lock this)
+      (try
+        (when (or connecting (.-connected this))
+          (throw (IllegalStateException. "Authenticator must be set before connecting")))
+        (set! authenticator (cast Authenticator (Objects/requireNonNull auth)))
+        (set! authCache (AuthCacheImpl/getAuthCacheFor authenticator))
+        (finally (.unlock this))))
+
+    (method ^:public getAuthCache ^AuthCacheImpl [this] authCache)
+
+    (method ^:private checkMessageHeader ^void [this ^String key ^String value]
+      (let [LF \newline
+            ^:mutable index (.indexOf key LF)
+            index1 (.indexOf key \:)]
+        (if (or (not (== index -1)) (not (== index1 -1)))
+            (throw (IllegalArgumentException.
+                     (java-str "Illegal character(s) in message header field: " key)))
+            (when (some? value)
+              (set! index (.indexOf value LF))
+              (while (not (== index -1))
+                (set! index (unchecked-inc-int index))
+                (when (< index (.length value))
+                  (let [c (.charAt value index)]
+                    (when (or (== c \space) (== c \tab))
+                      (set! index (.indexOf value LF index))
+                      (continue))))
+                (throw (IllegalArgumentException.
+                         (java-str "Illegal character(s) in message header value: " value))))))))
+
+    (method ^:public setRequestMethod :throws [ProtocolException] ^void [this ^String method]
+      (.lock this)
+      (try
+        (when (or (.-connected this) connecting)
+          (throw (IllegalStateException. "Already connected")))
+        (.setRequestMethod super method)
+        (finally (.unlock this))))
+
+    (method ^:private writeRequests :throws [IOException] ^void [this]
+      (java-assert (.isLockHeldByCurrentThread this))
+      (when (and (.-usingProxy http) (not (identical? (.tunnelState this) TunnelState/TUNNELING)))
+        (.setPreemptiveProxyAuthentication this requests))
+      (when-not setRequests
+        (let [requestLine (java-str (.-method this) " " (.getRequestURI this) " " httpVersion)
+              requestLineIndex (.getKey requests requestLine)]
+          (when-not (== requestLineIndex 0) (.prepend requests requestLine nil))
+          (when-not (.getUseCaches this)
+            (.setIfNotSet requests "Cache-Control" "no-cache")
+            (.setIfNotSet requests "Pragma" "no-cache"))
+          (.setIfNotSet requests "User-Agent" userAgent)
+          (let [port (.getPort (.-url this))
+                ^:mutable host (HttpURLConnection/stripIPv6ZoneId (.getHost (.-url this)))]
+            (when (and (not (== port -1)) (not (== port (.getDefaultPort (.-url this)))))
+              (set! host (java-str host (java-str ":" (String/valueOf port)))))
+            (.setIfNotSet requests "Host" host)
+            (.setIfNotSet requests "Accept" acceptString)
+            (if (.getHttpKeepAliveSet http)
+                (if (and (.-usingProxy http)
+                         (not (identical? (.tunnelState this) TunnelState/TUNNELING)))
+                    (.setIfNotSet requests "Proxy-Connection" "keep-alive")
+                    (.setIfNotSet requests "Connection" "keep-alive"))
+                (.setIfNotSet requests "Connection" "close"))
+            (let [modTime (.getIfModifiedSince this)]
+              (when-not (== modTime 0)
+                (let [date (Date. modTime)
+                      fo (SimpleDateFormat. "EEE, dd MMM yyyy HH:mm:ss 'GMT'" Locale/US)]
+                  (.setTimeZone fo (TimeZone/getTimeZone "GMT"))
+                  (.setIfNotSet requests "If-Modified-Since" (.format fo date))))
+              (let [sauth (AuthenticationInfo/getServerAuth (.-url this) authCache)]
+                (when (and (some? sauth) (.supportsPreemptiveAuthorization sauth))
+                  (.setIfNotSet requests
+                                (.getHeaderName sauth)
+                                (.getHeaderValue sauth (.-url this) (.-method this)))
+                  (set! currentServerCredentials sauth))
+                (when (and (not (.equals (.-method this) "PUT"))
+                           (or (some? poster) (.streaming this)))
+                  (.setIfNotSet requests "Content-type" "application/x-www-form-urlencoded"))
+                (let [^:mutable chunked false]
+                  (cond
+                    (.streaming this)
+                      (cond
+                        (not (== (.-chunkLength this) -1))
+                          (do (.set requests "Transfer-Encoding" "chunked") (set! chunked true))
+                        (not (== (.-fixedContentLengthLong this) -1))
+                          (.set requests
+                                "Content-Length"
+                                (String/valueOf (.-fixedContentLengthLong this)))
+                        :else
+                          (when-not (== (.-fixedContentLength this) -1)
+                            (.set requests
+                                  "Content-Length"
+                                  (String/valueOf (.-fixedContentLength this)))))
+                    (some? poster)
+                      (locking poster
+                        (.close poster)
+                        (.set requests "Content-Length" (String/valueOf (.size poster)))))
+                  (when-not chunked
+                    (when (some? (.findValue requests "Transfer-Encoding"))
+                      (.remove requests "Transfer-Encoding")
+                      (when (.isLoggable logger PlatformLogger$Level/WARNING)
+                        (.warning logger "use streaming mode for chunked encoding"))))
+                  (.setCookieHeader this)
+                  (set! setRequests true)))))))
+      (when (.isLoggable logger PlatformLogger$Level/FINE) (.fine logger (.toString requests)))
+      (.writeRequests http requests poster (.streaming this))
+      (when (.checkError ps)
+        (let [proxyHost (.getProxyHostUsed http)
+              proxyPort (.getProxyPortUsed http)]
+          (.disconnectInternal this)
+          (if failedOnce
+              (throw (IOException. "Error writing to server"))
+              (do
+                (set! failedOnce true)
+                (if (some? proxyHost)
+                    (.setProxiedClient this (.-url this) proxyHost proxyPort)
+                    (.setNewClient this (.-url this)))
+                (set! ps (cast PrintStream (.getOutputStream http)))
+                (set! (.-connected this) true)
+                (set! responses (MessageHeader. maxHeaderSize))
+                (set! setRequests false)
+                (.writeRequests this))))))
+
+    (method ^:protected setNewClient :throws [IOException] ^void [this ^URL url]
+      (.setNewClient this url false))
+
+    (method ^:protected setNewClient :throws [IOException] ^void [this ^URL url ^boolean useCache]
+      (set! http (HttpClient/New url nil -1 useCache connectTimeout this))
+      (.setReadTimeout http readTimeout))
+
+    (method ^:protected setProxiedClient :throws [IOException] ^void [this ^URL url
+                                                                      ^String proxyHost
+                                                                      ^int proxyPort]
+      (.setProxiedClient this url proxyHost proxyPort false))
+
+    (method ^:protected setProxiedClient :throws [IOException] ^void [this ^URL url
+                                                                      ^String proxyHost
+                                                                      ^int proxyPort
+                                                                      ^boolean useCache]
+      (.proxiedConnect this url proxyHost proxyPort useCache))
+
+    (method ^:protected proxiedConnect :throws [IOException] ^void [this ^URL url ^String proxyHost
+                                                                    ^int proxyPort ^boolean useCache]
+      (set! http (HttpClient/New url proxyHost proxyPort useCache connectTimeout this))
+      (.setReadTimeout http readTimeout))
+
+    (constructor :throws [IOException] ^:protected [this ^URL u ^Handler handler]
+      (this. u nil handler))
+
+    (method ^:private ^:static checkHost :throws [IOException] ^String [^String h]
+      (when (some? h)
+        (when (> (.indexOf h \newline) -1)
+          (throw (MalformedURLException. "Illegal character in host"))))
+      h)
+
+    (constructor :throws [IOException] ^:public [this ^URL u ^String host ^int port]
+      (this. u
+             (Proxy. Proxy$Type/HTTP
+                     (InetSocketAddress/createUnresolved (HttpURLConnection/checkHost host) port))))
+
+    (constructor :throws [IOException] ^:public [this ^URL u ^Proxy p]
+      (this. u p (Handler.)))
+
+    (method ^:private ^:static checkURL :throws [IOException] ^URL [^URL u]
+      (when (some? u)
+        (when (> (.indexOf (.toExternalForm u) \newline) -1)
+          (throw (MalformedURLException. "Illegal character in URL"))))
+      (let [s (IPAddressUtil/checkAuthority u)]
+        (when (some? s) (throw (MalformedURLException. s)))
+        u))
+
+    (constructor :throws [IOException] ^:protected [this ^URL u ^Proxy p ^Handler handler]
+      (super. (HttpURLConnection/checkURL u))
+      (set! requests (MessageHeader.))
+      (set! responses (MessageHeader. maxHeaderSize))
+      (set! userHeaders (MessageHeader.))
+      (set! (.-handler this) handler)
+      (set! instProxy (ProxyUtil/copyProxy p))
+      (set! cookieHandler (CookieHandler/getDefault))
+      (set! cacheHandler (ResponseCache/getDefault)))
+
+    (method ^:public connect :throws [IOException] ^void [this]
+      (.lock this)
+      (try (set! connecting true) (finally (.unlock this)))
+      (.plainConnect this))
+
+    (method ^:private checkReuseConnection ^boolean [this]
+      (cond
+        (.-connected this) true
+        (some? reuseClient)
+          (do
+            (set! http reuseClient)
+            (.setReadTimeout http (.getReadTimeout this))
+            (set! (.-reuse http) false)
+            (set! reuseClient nil)
+            (set! (.-connected this) true)
+            true)
+        :else false))
+
+    (method ^:protected plainConnect :throws [IOException] ^void [this]
+      (.lock this)
+      (try (when (.-connected this) (return)) (finally (.unlock this)))
+      (.plainConnect0 this))
+
+    (method ^:protected plainConnect0 :throws [IOException] ^void [this]
+      (when (and (some? cacheHandler) (.getUseCaches this))
+        (try
+          (let [uri (ParseUtil/toURI (.-url this))]
+            (when (some? uri)
+              (set! cachedResponse
+                    (.get cacheHandler
+                          uri
+                          (.getRequestMethod this)
+                          (.getHeaders (.getUserSetHeaders this))))
+              (when (and (.equalsIgnoreCase "https" (.getScheme uri))
+                         (not (instance? SecureCacheResponse cachedResponse)))
+                (set! cachedResponse nil))
+              (when (.isLoggable logger PlatformLogger$Level/FINEST)
+                (.finest logger (java-str "Cache Request for " uri " / " (.getRequestMethod this)))
+                (.finest logger
+                         (java-str "From cache: "
+                                   (if (some? cachedResponse) (.toString cachedResponse) "null"))))
+              (when (some? cachedResponse)
+                (set! cachedHeaders (.mapToMessageHeader this (.getHeaders cachedResponse)))
+                (set! cachedInputStream (.getBody cachedResponse)))))
+          (catch IOException ioex))
+        (if (and (some? cachedHeaders) (some? cachedInputStream))
+            (do (set! (.-connected this) true) (return))
+            (set! cachedResponse nil)))
+      (try
+        (cond
+          (nil? instProxy)
+            (let [sel (ProxySelector/getDefault)]
+              (cond
+                (some? sel)
+                  (let [uri (ParseUtil/toURI (.-url this))]
+                    (when (.isLoggable logger PlatformLogger$Level/FINEST)
+                      (.finest logger (java-str "ProxySelector Request for " uri)))
+                    (let [^:mutable ^{:tag (List Proxy)} proxies nil]
+                      (try
+                        (set! proxies (.select sel uri))
+                        (catch IllegalArgumentException iae
+                          (throw (IOException. "Failed to select a proxy" iae))))
+                      (let [^{:tag (Iterator Proxy)} it (.iterator proxies)
+                            ^:mutable ^Proxy p nil]
+                        (while (.hasNext it)
+                          (set! p (ProxyUtil/copyProxy (cast Proxy (.next it))))
+                          (try
+                            (if (not failedOnce)
+                                (do
+                                  (set! http (.getNewHttpClient this (.-url this) p connectTimeout))
+                                  (.setReadTimeout http readTimeout))
+                                (do
+                                  (set!
+                                    http
+                                    (.getNewHttpClient this (.-url this) p connectTimeout false))
+                                  (.setReadTimeout http readTimeout)))
+                            (when (.isLoggable logger PlatformLogger$Level/FINEST)
+                              (when (some? p)
+                                (.finest logger (java-str "Proxy used: " (.toString p)))))
+                            (break)
+                            (catch IOException ioex
+                              (if (not (identical? p Proxy/NO_PROXY))
+                                  (do
+                                    (.connectFailed sel uri (.address p) ioex)
+                                    (when-not (.hasNext it)
+                                      (when (.isLoggable logger PlatformLogger$Level/FINEST)
+                                        (.finest
+                                          logger
+                                          (java-str "Retrying with proxy: " (.toString p))))
+                                      (set! http
+                                            (.getNewHttpClient
+                                              this
+                                              (.-url this)
+                                              p
+                                              connectTimeout
+                                              false))
+                                      (.setReadTimeout http readTimeout)
+                                      (break)))
+                                  (throw ioex))))))))
+                (not failedOnce)
+                  (do
+                    (set! http (.getNewHttpClient this (.-url this) nil connectTimeout))
+                    (.setReadTimeout http readTimeout))
+                :else
+                  (do
+                    (set! http (.getNewHttpClient this (.-url this) nil connectTimeout false))
+                    (.setReadTimeout http readTimeout))))
+          (not failedOnce)
+            (do
+              (set! http (.getNewHttpClient this (.-url this) instProxy connectTimeout))
+              (.setReadTimeout http readTimeout))
+          :else
+            (do
+              (set! http (.getNewHttpClient this (.-url this) instProxy connectTimeout false))
+              (.setReadTimeout http readTimeout)))
+        (set! usingProxy (or usingProxy (.usingProxyInternal this)))
+        (set! ps (cast PrintStream (.getOutputStream http)))
+        (catch IOException e (throw e)))
+      (set! (.-connected this) true))
+
+    (method ^:protected getNewHttpClient :throws [IOException] ^HttpClient [this ^URL url ^Proxy p
+                                                                            ^int connectTimeout]
+      (HttpClient/New url p connectTimeout this))
+
+    (method ^:protected getNewHttpClient :throws [IOException] ^HttpClient [this ^URL url ^Proxy p
+                                                                            ^int connectTimeout
+                                                                            ^boolean useCache]
+      (HttpClient/New url p connectTimeout useCache this))
+
+    (method ^:private expect100Continue :throws [IOException] ^void [this]
+      (let [oldTimeout (.getReadTimeout http)
+            ^:mutable timedOut false
+            ^:mutable tempTimeOutSet false]
+        (when (or (<= oldTimeout 0) (> oldTimeout 5000))
+          (when (.isLoggable logger PlatformLogger$Level/FINE)
+            (.fine logger
+                   (java-str "Timeout currently set to "
+                             oldTimeout
+                             " temporarily setting it to 5 seconds")))
+          (.setReadTimeout http 5000)
+          (set! tempTimeOutSet true))
+        (try
+          (.parseHTTP http responses this)
+          (catch SocketTimeoutException se
+            (when (.isLoggable logger PlatformLogger$Level/FINE)
+              (.fine logger "SocketTimeoutException caught, will attempt to send body regardless"))
+            (set! timedOut true)))
+        (when-not timedOut
+          (let [resp (.getValue responses 0)]
+            (when (and (some? resp) (.startsWith resp "HTTP/"))
+              (let [sa (.split resp "\\s+")]
+                (set! (.-responseCode this) -1)
+                (try
+                  (when (> (alength sa) 1)
+                    (set! (.-responseCode this) (Integer/parseInt (aget sa 1))))
+                  (when (.isLoggable logger PlatformLogger$Level/FINE)
+                    (.fine logger (java-str "response code received " (.-responseCode this))))
+                  (when (> (alength sa) 2)
+                    (set!
+                      (.-responseMessage this)
+                      (String/join " " (cast CharSequence/1 (Arrays/copyOfRange sa 2 (alength sa))))))
+                  (when (.isLoggable logger PlatformLogger$Level/FINE)
+                    (.fine logger (java-str "response message received " (.-responseMessage this))))
+                  (catch NumberFormatException numberFormatException))))
+            (when-not (== (.-responseCode this) 100)
+              (throw (ProtocolException. "Server rejected operation")))))
+        (when tempTimeOutSet
+          (when (.isLoggable logger PlatformLogger$Level/FINE)
+            (.fine logger (java-str "Restoring original timeout : " oldTimeout)))
+          (.setReadTimeout http oldTimeout))
+        (.setIgnoreContinue http true)
+        (when (.isLoggable logger PlatformLogger$Level/FINE)
+          (.fine logger "Set Ignore Continue to true"))
+        (set! (.-responseCode this) -1)
+        (.reset responses)))
+
+    (method ^:public getOutputStream :throws [IOException] ^OutputStream [this]
+      (.lock this)
+      (try (set! connecting true) (.getOutputStream0 this) (finally (.unlock this))))
+
+    (method ^:private getOutputStream0 :throws [IOException] ^OutputStream [this]
+      (java-assert (.isLockHeldByCurrentThread this))
+      (try
+        (when-not (.-doOutput this)
+          (throw (ProtocolException.
+                   "cannot write to a URLConnection if doOutput=false - call setDoOutput(true)")))
+        (when (some? rememberedExceptionOut)
+          (if (instance? RuntimeException rememberedExceptionOut)
+              (throw (RuntimeException. rememberedExceptionOut))
+              (throw (.getChainedException this (cast IOException rememberedExceptionOut)))))
+        (when (.equals (.-method this) "GET") (set! (.-method this) "POST"))
+        (when (and (.equals "TRACE" (.-method this)) (.equals "http" (.getProtocol (.-url this))))
+          (throw (ProtocolException. "HTTP method TRACE doesn't support output")))
+        (when (some? inputStream)
+          (throw (ProtocolException. "Cannot write output after reading input.")))
+        (when-not (.checkReuseConnection this) (.connect this))
+        (let [^:mutable expectContinue false
+              expects (.findValue requests "Expect")]
+          (when (and (.equalsIgnoreCase "100-Continue" expects) (.streaming this))
+            (set! expectContinue true))
+          (when (and (.streaming this) (nil? strOutputStream)) (.writeRequests this))
+          (when expectContinue (.setIgnoreContinue http false) (.expect100Continue this))
+          (set! ps (cast PrintStream (.getOutputStream http)))
+          (if (.streaming this)
+              (do
+                (when (nil? strOutputStream)
+                  (if (not (== (.-chunkLength this) -1))
+                      (set! strOutputStream
+                            (StreamingOutputStream.
+                              (ChunkedOutputStream. ps (.-chunkLength this))
+                              -1))
+                      (let [^:mutable length 0]
+                        (if (not (== (.-fixedContentLengthLong this) -1))
+                            (set! length (.-fixedContentLengthLong this))
+                            (when-not (== (.-fixedContentLength this) -1)
+                              (set! length (.-fixedContentLength this))))
+                        (set! strOutputStream (StreamingOutputStream. ps length)))))
+                strOutputStream)
+              (do (when (nil? poster) (set! poster (PosterOutputStream.))) poster)))
+        (catch ProtocolException e
+          (let [i (.-responseCode this)]
+            (.disconnectInternal this)
+            (set! (.-responseCode this) i)
+            (set! rememberedExceptionOut e)
+            (throw e)))
+        (catch [RuntimeException IOException] e
+          (.disconnectInternal this)
+          (set! rememberedExceptionOut e)
+          (throw e))))
+
+    (method ^:public streaming ^boolean [this]
+      (or (or (not (== (.-fixedContentLength this) -1))
+              (not (== (.-fixedContentLengthLong this) -1)))
+          (not (== (.-chunkLength this) -1))))
+
+    (method ^:private setCookieHeader :throws [IOException] ^void [this]
+      (when (some? cookieHandler)
+        (java-assert (.isLockHeldByCurrentThread this))
+        (when setUserCookies
+          (let [^:mutable k (.getKey requests "Cookie")]
+            (when-not (== k -1) (set! userCookies (.getValue requests k)))
+            (set! k (.getKey requests "Cookie2"))
+            (when-not (== k -1) (set! userCookies2 (.getValue requests k)))
+            (set! setUserCookies false)))
+        (.remove requests "Cookie")
+        (.remove requests "Cookie2")
+        (let [uri (ParseUtil/toURI (.-url this))]
+          (when (some? uri)
+            (when (.isLoggable logger PlatformLogger$Level/FINEST)
+              (.finest logger (java-str "CookieHandler request for " uri)))
+            (let [^{:tag (Map String (List String))} cookies (.get
+                                                               cookieHandler
+                                                               uri
+                                                               (.getHeaders
+                                                                 requests
+                                                                 EXCLUDE_HEADERS))]
+              (when-not (.isEmpty cookies)
+                (when (.isLoggable logger PlatformLogger$Level/FINEST)
+                  (.finest logger (java-str "Cookies retrieved: " (.toString cookies))))
+                (for-each [^{:tag (Map$Entry String (List String))} entry (.entrySet cookies)]
+                  (let [key (cast String (.getKey entry))]
+                    (when-not (and (not (.equalsIgnoreCase "Cookie" key))
+                                   (not (.equalsIgnoreCase "Cookie2" key)))
+                      (let [^{:tag (List String)} l (cast List (.getValue entry))]
+                        (when (and (some? l) (not (.isEmpty l)))
+                          (.add requests key (String/join "; " l))))))))))
+          (when (some? userCookies)
+            (let [^:mutable ^int k 0]
+              (if (not (== (set! k (.getKey requests "Cookie")) -1))
+                  (.set requests "Cookie" (java-str (.getValue requests k) ";" userCookies))
+                  (.set requests "Cookie" userCookies))))
+          (when (some? userCookies2)
+            (let [^:mutable ^int k 0]
+              (if (not (== (set! k (.getKey requests "Cookie2")) -1))
+                  (.set requests "Cookie2" (java-str (.getValue requests k) ";" userCookies2))
+                  (.set requests "Cookie2" userCookies2)))))))
+
+    (method ^:public getInputStream :throws [IOException] ^InputStream [this]
+      (.lock this)
+      (try (set! connecting true) (.getInputStream0 this) (finally (.unlock this))))
+
+    (method ^:private getInputStream0 :throws [IOException] ^InputStream [this]
+      (java-assert (.isLockHeldByCurrentThread this))
+      (when-not (.-doInput this)
+        (throw (ProtocolException.
+                 "Cannot read from URLConnection if doInput=false (call setDoInput(true))")))
+      (when (some? rememberedException)
+        (if (instance? RuntimeException rememberedException)
+            (throw (RuntimeException. rememberedException))
+            (throw (.getChainedException this (cast IOException rememberedException)))))
+      (if (some? inputStream)
+          inputStream
+          (do
+            (when (.streaming this)
+              (when (nil? strOutputStream) (.getOutputStream this))
+              (.close strOutputStream)
+              (when-not (.writtenOK strOutputStream)
+                (throw (IOException. "Incomplete output stream"))))
+            (let [^:mutable ^int redirects 0
+                  ^:mutable ^int respCode 0
+                  ^:mutable cl -1
+                  ^:mutable ^AuthenticationInfo serverAuthentication nil
+                  ^:mutable ^AuthenticationInfo proxyAuthentication nil
+                  ^:mutable ^AuthenticationHeader srvHdr nil
+                  ^:mutable inNegotiate false
+                  ^:mutable inNegotiateProxy false]
+              (set! isUserServerAuth (not (== (.getKey requests "Authorization") -1)))
+              (set! isUserProxyAuth (not (== (.getKey requests "Proxy-Authorization") -1)))
+              (try
+                (loop []
+                  (label :do-body
+                    (when-not (.checkReuseConnection this) (.connect this))
+                    (when (some? cachedInputStream) (return cachedInputStream))
+                    (let [p (.getHttpProxy http)]
+                      (when (or (nil? p) (and (some? lastProxy) (not (.equals lastProxy p))))
+                        (.remove requests "Proxy-Authorization")
+                        (set! lastProxy nil))
+                      (set! ps (cast PrintStream (.getOutputStream http)))
+                      (when-not (.streaming this) (.writeRequests this))
+                      (.parseHTTP http responses this)
+                      (when (.isLoggable logger PlatformLogger$Level/FINE)
+                        (.fine logger (.toString responses)))
+                      (let [b1 (.filterNTLMResponses responses "WWW-Authenticate")
+                            b2 (.filterNTLMResponses responses "Proxy-Authenticate")]
+                        (when (or b1 b2)
+                          (when (.isLoggable logger PlatformLogger$Level/FINE)
+                            (.fine logger ">>>> Headers are filtered")
+                            (.fine logger (.toString responses))))
+                        (set! inputStream (.getInputStream http))
+                        (set! respCode (.getResponseCode this))
+                        (when (== respCode -1)
+                          (.disconnectInternal this)
+                          (throw (IOException. "Invalid Http response")))
+                        (if (and (== respCode HttpURLConnection/HTTP_PROXY_AUTH)
+                                 (not (identical? (.tunnelState this) TunnelState/TUNNELING)))
+                            (do
+                              (when (.streaming this)
+                                (.disconnectInternal this)
+                                (throw (HttpRetryException.
+                                         RETRY_MSG1
+                                         HttpURLConnection/HTTP_PROXY_AUTH)))
+                              (let [^:mutable dontUseNegotiate false
+                                    ^{:tag (Iterator String)} iter (.multiValueIterator
+                                                                     responses
+                                                                     "Proxy-Authenticate")]
+                                (while (.hasNext iter)
+                                  (let [value (.trim (cast String (.next iter)))]
+                                    (when (or (.equalsIgnoreCase value "Negotiate")
+                                              (.equalsIgnoreCase value "Kerberos"))
+                                      (if (not inNegotiateProxy)
+                                          (set! inNegotiateProxy true)
+                                          (do
+                                            (set! dontUseNegotiate true)
+                                            (set! doingNTLMp2ndStage false)
+                                            (set! proxyAuthentication nil)))
+                                      (break))))
+                                (let [authhdr (AuthenticationHeader.
+                                                "Proxy-Authenticate"
+                                                responses
+                                                (.getHttpCallerInfo
+                                                  this
+                                                  (.-url this)
+                                                  (.getProxyHostUsed http)
+                                                  (.getProxyPortUsed http)
+                                                  authenticator)
+                                                dontUseNegotiate
+                                                disabledProxyingSchemes)]
+                                  (if (not doingNTLMp2ndStage)
+                                      (do
+                                        (set! proxyAuthentication
+                                              (.resetProxyAuthentication
+                                                this
+                                                proxyAuthentication
+                                                authhdr))
+                                        (when (some? proxyAuthentication)
+                                          (set! redirects (unchecked-inc-int redirects))
+                                          (.disconnectInternal this)
+                                          (break :do-body)))
+                                      (let [raw (.findValue responses "Proxy-Authenticate")]
+                                        (.reset this)
+                                        (when-not (.setHeaders
+                                                    proxyAuthentication
+                                                    this
+                                                    (.headerParser authhdr)
+                                                    raw)
+                                          (.disconnectInternal this)
+                                          (throw (IOException. "Authentication failure")))
+                                        (when (and
+                                                (and (some? serverAuthentication) (some? srvHdr))
+                                                (not
+                                                  (.setHeaders
+                                                    serverAuthentication
+                                                    this
+                                                    (.headerParser srvHdr)
+                                                    raw)))
+                                          (.disconnectInternal this)
+                                          (throw (IOException. "Authentication failure")))
+                                        (set! authObj nil)
+                                        (set! doingNTLMp2ndStage false)
+                                        (break :do-body))))))
+                            (do
+                              (set! inNegotiateProxy false)
+                              (set! doingNTLMp2ndStage false)
+                              (when-not isUserProxyAuth (.remove requests "Proxy-Authorization"))))
+                        (when (some? proxyAuthentication)
+                          (.addToCache proxyAuthentication authCache))
+                        (when (== respCode HttpURLConnection/HTTP_UNAUTHORIZED)
+                          (when (.streaming this)
+                            (.disconnectInternal this)
+                            (throw (HttpRetryException.
+                                     RETRY_MSG2
+                                     HttpURLConnection/HTTP_UNAUTHORIZED)))
+                          (let [^:mutable dontUseNegotiate false
+                                ^{:tag (Iterator String)} iter (.multiValueIterator
+                                                                 responses
+                                                                 "WWW-Authenticate")]
+                            (while (.hasNext iter)
+                              (let [value (.trim (cast String (.next iter)))]
+                                (when (or (.equalsIgnoreCase value "Negotiate")
+                                          (.equalsIgnoreCase value "Kerberos"))
+                                  (if (not inNegotiate)
+                                      (set! inNegotiate true)
+                                      (do
+                                        (set! dontUseNegotiate true)
+                                        (set! doingNTLM2ndStage false)
+                                        (set! serverAuthentication nil)))
+                                  (break))))
+                            (set! srvHdr
+                                  (AuthenticationHeader.
+                                    "WWW-Authenticate"
+                                    responses
+                                    (.getHttpCallerInfo this (.-url this) authenticator)
+                                    dontUseNegotiate))
+                            (let [raw (.raw srvHdr)]
+                              (if (not doingNTLM2ndStage)
+                                  (do
+                                    (when (and (some? serverAuthentication)
+                                               (not
+                                                 (identical?
+                                                   (.getAuthScheme serverAuthentication)
+                                                   AuthScheme/NTLM)))
+                                      (if (.isAuthorizationStale serverAuthentication raw)
+                                          (do
+                                            (.disconnectWeb this)
+                                            (set! redirects (unchecked-inc-int redirects))
+                                            (.set
+                                              requests
+                                              (.getHeaderName serverAuthentication)
+                                              (.getHeaderValue
+                                                serverAuthentication
+                                                (.-url this)
+                                                (.-method this)))
+                                            (set! currentServerCredentials serverAuthentication)
+                                            (.setCookieHeader this)
+                                            (break :do-body))
+                                          (.removeFromCache serverAuthentication authCache)))
+                                    (set! serverAuthentication
+                                          (.getServerAuthentication this srvHdr))
+                                    (set! currentServerCredentials serverAuthentication)
+                                    (when (some? serverAuthentication)
+                                      (.disconnectWeb this)
+                                      (set! redirects (unchecked-inc-int redirects))
+                                      (.setCookieHeader this)
+                                      (break :do-body)))
+                                  (do
+                                    (.reset this)
+                                    (when-not (.setHeaders serverAuthentication this nil raw)
+                                      (.disconnectWeb this)
+                                      (throw (IOException. "Authentication failure")))
+                                    (set! doingNTLM2ndStage false)
+                                    (set! authObj nil)
+                                    (.setCookieHeader this)
+                                    (break :do-body))))))
+                        (when (some? serverAuthentication)
+                          (if (or (not (instance? DigestAuthentication serverAuthentication))
+                                  (nil? domain))
+                              (do
+                                (when (instance? BasicAuthentication serverAuthentication)
+                                  (let [^:mutable npath (AuthenticationInfo/reducePath
+                                                          (.getPath (.-url this)))
+                                        opath (.-path serverAuthentication)]
+                                    (when (or (not (.startsWith opath npath))
+                                              (>= (.length npath) (.length opath)))
+                                      (set! npath (BasicAuthentication/getRootPath opath npath)))
+                                    (let [a (cast BasicAuthentication (.clone serverAuthentication))]
+                                      (.removeFromCache serverAuthentication authCache)
+                                      (set! (.-path a) npath)
+                                      (set! serverAuthentication a))))
+                                (.addToCache serverAuthentication authCache))
+                              (let [srv (cast DigestAuthentication serverAuthentication)
+                                    tok (StringTokenizer. domain " ")
+                                    realm (.-realm srv)
+                                    pw (.-pw srv)]
+                                (set! digestparams (.-params srv))
+                                (while (.hasMoreTokens tok)
+                                  (let [path (.nextToken tok)]
+                                    (try
+                                      (let [u (HttpURLConnection/newURL (.-url this) path)
+                                            d (DigestAuthentication.
+                                                false
+                                                u
+                                                realm
+                                                "Digest"
+                                                pw
+                                                digestparams)]
+                                        (.addToCache d authCache))
+                                      (catch Exception e)))))))
+                        (set! inNegotiate false)
+                        (set! inNegotiateProxy false)
+                        (set! doingNTLMp2ndStage false)
+                        (set! doingNTLM2ndStage false)
+                        (when-not isUserServerAuth (.remove requests "Authorization"))
+                        (when-not isUserProxyAuth (.remove requests "Proxy-Authorization"))
+                        (if (== respCode HttpURLConnection/HTTP_OK)
+                            (.checkResponseCredentials this false)
+                            (set! needToCheck false))
+                        (set! needToCheck true)
+                        (if (.followRedirect this)
+                            (do
+                              (set! redirects (unchecked-inc-int redirects))
+                              (.setCookieHeader this))
+                            (let [contentLengthVal (.findValue responses "content-length")]
+                              (when (some? contentLengthVal)
+                                (try
+                                  (set! cl (Long/parseLong contentLengthVal))
+                                  (catch NumberFormatException nfe)))
+                              (when (or (or (or (.equals (.-method this) "HEAD") (== cl 0))
+                                            (== respCode HttpURLConnection/HTTP_NOT_MODIFIED))
+                                        (== respCode HttpURLConnection/HTTP_NO_CONTENT))
+                                (.noResponseBody this))
+                              (when (or (or (or (or
+                                                  (or (== respCode 200) (== respCode 203))
+                                                  (== respCode 206))
+                                                (== respCode 300))
+                                            (== respCode 301))
+                                        (== respCode 410))
+                                (when (and (some? cacheHandler) (.getUseCaches this))
+                                  (let [uri (ParseUtil/toURI (.-url this))]
+                                    (when (some? uri)
+                                      (let [^:mutable ^URLConnection uconn this]
+                                        (when (.equalsIgnoreCase "https" (.getScheme uri))
+                                          (try
+                                            (set!
+                                              uconn
+                                              (cast
+                                                URLConnection
+                                                (.get
+                                                  (.getField (.getClass this) "httpsURLConnection")
+                                                  this)))
+                                            (catch [IllegalAccessException NoSuchFieldException] e)))
+                                        (let [cacheRequest (.put cacheHandler uri uconn)]
+                                          (when (and (some? cacheRequest) (some? http))
+                                            (.setCacheRequest http cacheRequest)
+                                            (set!
+                                              inputStream
+                                              (HttpInputStream. inputStream cacheRequest)))))))))
+                              (when-not (instance? HttpInputStream inputStream)
+                                (set! inputStream (HttpInputStream. inputStream)))
+                              (when (>= respCode 400)
+                                (if (or (== respCode 404) (== respCode 410))
+                                    (throw (FileNotFoundException. (.toString (.-url this))))
+                                    (throw (IOException.
+                                             (java-str
+                                               "Server returned HTTP response code: "
+                                               respCode
+                                               " for URL: "
+                                               (.toString (.-url this)))))))
+                              (set! poster nil)
+                              (set! strOutputStream nil)
+                              (return inputStream))))))
+                  (when (< redirects maxRedirects) (recur)))
+                (throw (ProtocolException.
+                         (java-str "Server redirected too many times (" redirects ")")))
+                (catch RuntimeException e
+                  (.disconnectInternal this)
+                  (set! rememberedException e)
+                  (throw e))
+                (catch IOException e
+                  (set! rememberedException e)
+                  (let [te (.findValue responses "Transfer-Encoding")]
+                    (when (and (and (and (some? http) (.isKeepingAlive http)) enableESBuffer)
+                               (or (> cl 0) (and (some? te) (.equalsIgnoreCase te "chunked"))))
+                      (set! errorStream (ErrorStream/getErrorStream inputStream cl http)))
+                    (throw e)))
+                (finally
+                  (when (some? proxyAuthKey) (AuthenticationInfo/endAuthRequest proxyAuthKey))
+                  (when (some? serverAuthKey) (AuthenticationInfo/endAuthRequest serverAuthKey))
+                  (when (some? proxyAuthentication) (.disposeContext proxyAuthentication))
+                  (when (some? serverAuthentication) (.disposeContext serverAuthentication))))))))
+
+    (method ^:protected noResponseBody ^void [this]
+      (.finished http)
+      (set! http nil)
+      (set! inputStream (EmptyInputStream.))
+      (set! (.-connected this) false))
+
+    (method ^:private getChainedException ^IOException [this
+                                                        ^:final ^IOException rememberedException]
+      (try
+        (let [args (new Object/1 [(.getMessage rememberedException)])
+              chainedException (cast IOException
+                                     (.newInstance
+                                       (.getConstructor
+                                         (.getClass rememberedException)
+                                         (new Class/1 [String]))
+                                       args))]
+          (.initCause chainedException rememberedException)
+          chainedException)
+        (catch Exception ignored rememberedException)))
+
+    (method ^:public getErrorStream ^InputStream [this]
+      (when (and (.-connected this) (>= (.-responseCode this) 400))
+        (cond (some? errorStream) (return errorStream) (some? inputStream) (return inputStream)))
+      nil)
+
+    (method ^:private resetProxyAuthentication :throws [IOException] ^AuthenticationInfo [this
+                                                                                          ^:mutable ^AuthenticationInfo proxyAuthentication
+                                                                                          ^AuthenticationHeader auth]
+      (java-assert (.isLockHeldByCurrentThread this))
+      (when (and (some? proxyAuthentication)
+                 (not (identical? (.getAuthScheme proxyAuthentication) AuthScheme/NTLM)))
+        (let [raw (.raw auth)]
+          (if (.isAuthorizationStale proxyAuthentication raw)
+              (let [^:mutable ^String value nil]
+                (if (instance? DigestAuthentication proxyAuthentication)
+                    (let [digestProxy (cast DigestAuthentication proxyAuthentication)]
+                      (if (identical? (.tunnelState this) TunnelState/SETUP)
+                          (set! value
+                                (.getHeaderValue
+                                  digestProxy
+                                  (HttpURLConnection/connectRequestURI (.-url this))
+                                  HTTP_CONNECT))
+                          (set! value
+                                (.getHeaderValue digestProxy (.getRequestURI this) (.-method this)))))
+                    (set! value (.getHeaderValue proxyAuthentication (.-url this) (.-method this))))
+                (.set requests (.getHeaderName proxyAuthentication) value)
+                (set! currentProxyCredentials proxyAuthentication)
+                (return proxyAuthentication))
+              (.removeFromCache proxyAuthentication authCache))))
+      (set! proxyAuthentication (.getHttpProxyAuthentication this auth))
+      (set! currentProxyCredentials proxyAuthentication)
+      proxyAuthentication)
+
+    (method tunnelState ^TunnelState [this] tunnelState)
+
+    (method ^:public setTunnelState ^void [this ^TunnelState tunnelState]
+      (set! (.-tunnelState this) tunnelState))
+
+    (method ^:public doTunneling :throws [IOException] ^void [this]
+      (.lock this)
+      (try (.doTunneling0 this) (finally (.unlock this))))
+
+    (method ^:private doTunneling0 :throws [IOException] ^void [this]
+      (let [^:mutable ^int retryTunnel 0
+            ^:mutable statusLine ""
+            ^:mutable ^int respCode 0
+            ^:mutable ^AuthenticationInfo proxyAuthentication nil
+            ^:mutable ^String proxyHost nil
+            ^:mutable ^int proxyPort -1]
+        (java-assert (.isLockHeldByCurrentThread this))
+        (let [savedRequests requests]
+          (set! requests (MessageHeader.))
+          (let [^:mutable inNegotiateProxy false]
+            (try
+              (.setTunnelState this TunnelState/SETUP)
+              (loop []
+                (label :do-body
+                  (when-not (.checkReuseConnection this)
+                    (.proxiedConnect this (.-url this) proxyHost proxyPort false))
+                  (.sendCONNECTRequest this)
+                  (.reset responses)
+                  (.parseHTTP http responses this)
+                  (when (.isLoggable logger PlatformLogger$Level/FINE)
+                    (.fine logger (.toString responses)))
+                  (when (.filterNTLMResponses responses "Proxy-Authenticate")
+                    (when (.isLoggable logger PlatformLogger$Level/FINE)
+                      (.fine logger ">>>> Headers are filtered")
+                      (.fine logger (.toString responses))))
+                  (set! statusLine (.getValue responses 0))
+                  (let [st (StringTokenizer. statusLine)]
+                    (.nextToken st)
+                    (set! respCode (Integer/parseInt (.trim (.nextToken st))))
+                    (when (== respCode HttpURLConnection/HTTP_PROXY_AUTH)
+                      (let [^:mutable dontUseNegotiate false
+                            ^{:tag (Iterator String)} iter (.multiValueIterator
+                                                             responses
+                                                             "Proxy-Authenticate")]
+                        (while (.hasNext iter)
+                          (let [value (.trim (cast String (.next iter)))]
+                            (when (or (.equalsIgnoreCase value "Negotiate")
+                                      (.equalsIgnoreCase value "Kerberos"))
+                              (if (not inNegotiateProxy)
+                                  (set! inNegotiateProxy true)
+                                  (do
+                                    (set! dontUseNegotiate true)
+                                    (set! doingNTLMp2ndStage false)
+                                    (set! proxyAuthentication nil)))
+                              (break))))
+                        (let [authhdr (AuthenticationHeader.
+                                        "Proxy-Authenticate"
+                                        responses
+                                        (.getHttpCallerInfo
+                                          this
+                                          (.-url this)
+                                          (.getProxyHostUsed http)
+                                          (.getProxyPortUsed http)
+                                          authenticator)
+                                        dontUseNegotiate
+                                        disabledTunnelingSchemes)]
+                          (if (not doingNTLMp2ndStage)
+                              (do
+                                (set! proxyAuthentication
+                                      (.resetProxyAuthentication this proxyAuthentication authhdr))
+                                (when (some? proxyAuthentication)
+                                  (set! proxyHost (.getProxyHostUsed http))
+                                  (set! proxyPort (.getProxyPortUsed http))
+                                  (.disconnectInternal this)
+                                  (set! retryTunnel (unchecked-inc-int retryTunnel))
+                                  (break :do-body)))
+                              (let [raw (.findValue responses "Proxy-Authenticate")]
+                                (.reset this)
+                                (when-not (.setHeaders
+                                            proxyAuthentication
+                                            this
+                                            (.headerParser authhdr)
+                                            raw)
+                                  (.disconnectInternal this)
+                                  (throw (IOException. "Authentication failure")))
+                                (set! authObj nil)
+                                (set! doingNTLMp2ndStage false)
+                                (break :do-body))))))
+                    (when (some? proxyAuthentication) (.addToCache proxyAuthentication authCache))
+                    (when (== respCode HttpURLConnection/HTTP_OK)
+                      (.setTunnelState this TunnelState/TUNNELING)
+                      (.remove savedRequests "Proxy-Authorization")
+                      (break))
+                    (.disconnectInternal this)
+                    (.setTunnelState this TunnelState/NONE)
+                    (break)))
+                (when (< retryTunnel maxRedirects) (recur)))
+              (when (or (>= retryTunnel maxRedirects) (not (== respCode HttpURLConnection/HTTP_OK)))
+                (when-not (== respCode HttpURLConnection/HTTP_PROXY_AUTH) (.reset responses))
+                (throw (IOException. (java-str "Unable to tunnel through proxy. Proxy returns \""
+                                               statusLine
+                                               "\""))))
+              (finally
+                (when (some? proxyAuthKey) (AuthenticationInfo/endAuthRequest proxyAuthKey))
+                (when (some? proxyAuthentication) (.disposeContext proxyAuthentication))))
+            (set! requests savedRequests)
+            (.reset responses)))))
+
+    (method ^:protected getHttpCallerInfo ^HttpCallerInfo [this ^URL url ^String proxy ^int port
+                                                           ^Authenticator authenticator]
+      (HttpCallerInfo. url proxy port authenticator))
+
+    (method ^:protected getHttpCallerInfo ^HttpCallerInfo [this ^URL url
+                                                           ^Authenticator authenticator]
+      (HttpCallerInfo. url authenticator))
+
+    (method ^:static connectRequestURI ^String [^URL url]
+      (let [host (.getHost url)
+            ^:mutable port (.getPort url)]
+        (set! port (if (not (== port -1)) port (.getDefaultPort url)))
+        (java-str host ":" port)))
+
+    (method ^:private sendCONNECTRequest :throws [IOException] ^void [this]
+      (let [port (.getPort (.-url this))]
+        (.set requests
+              0
+              (java-str (java-str HTTP_CONNECT " ")
+                        (HttpURLConnection/connectRequestURI (.-url this))
+                        " "
+                        httpVersion)
+              nil)
+        (.setIfNotSet requests "User-Agent" userAgent)
+        (let [^:mutable host (.getHost (.-url this))]
+          (when (and (not (== port -1)) (not (== port (.getDefaultPort (.-url this)))))
+            (set! host (java-str host (java-str ":" (String/valueOf port)))))
+          (.setIfNotSet requests "Host" host)
+          (.setIfNotSet requests "Accept" acceptString)
+          (when (.getHttpKeepAliveSet http) (.setIfNotSet requests "Proxy-Connection" "keep-alive"))
+          (.setPreemptiveProxyAuthentication this requests)
+          (when (.isLoggable logger PlatformLogger$Level/FINE) (.fine logger (.toString requests)))
+          (.writeRequests http requests nil))))
+
+    (method ^:private setPreemptiveProxyAuthentication :throws [IOException] ^void [this
+                                                                                    ^MessageHeader requests]
+      (let [pauth (AuthenticationInfo/getProxyAuth
+                    (.getProxyHostUsed http)
+                    (.getProxyPortUsed http)
+                    authCache)]
+        (when (and (some? pauth) (.supportsPreemptiveAuthorization pauth))
+          (let [^:mutable ^String value nil]
+            (if (instance? DigestAuthentication pauth)
+                (let [digestProxy (cast DigestAuthentication pauth)]
+                  (if (identical? (.tunnelState this) TunnelState/SETUP)
+                      (set! value
+                            (.getHeaderValue digestProxy
+                                             (HttpURLConnection/connectRequestURI (.-url this))
+                                             HTTP_CONNECT))
+                      (set! value
+                            (.getHeaderValue digestProxy (.getRequestURI this) (.-method this)))))
+                (set! value (.getHeaderValue pauth (.-url this) (.-method this))))
+            (.set requests (.getHeaderName pauth) value)
+            (set! currentProxyCredentials pauth)))))
+
+    (method ^:private getHttpProxyAuthentication :throws [IOException] ^AuthenticationInfo [this
+                                                                                            ^AuthenticationHeader authhdr]
+      (java-assert (.isLockHeldByCurrentThread this))
+      (let [^:mutable ^AuthenticationInfo ret nil
+            raw (.raw authhdr)
+            host (.getProxyHostUsed http)
+            port (.getProxyPortUsed http)]
+        (when (and (some? host) (.isPresent authhdr))
+          (let [p (.headerParser authhdr)
+                ^:mutable realm (.findValue p "realm")
+                charset (.findValue p "charset")
+                isUTF8 (and (some? charset) (.equalsIgnoreCase charset "UTF-8"))
+                scheme (.scheme authhdr)
+                ^:mutable authScheme AuthScheme/UNKNOWN]
+            (cond
+              (.equalsIgnoreCase "basic" scheme) (set! authScheme AuthScheme/BASIC)
+              (.equalsIgnoreCase "digest" scheme) (set! authScheme AuthScheme/DIGEST)
+              (.equalsIgnoreCase "ntlm" scheme)
+                (do (set! authScheme AuthScheme/NTLM) (set! doingNTLMp2ndStage true))
+              (.equalsIgnoreCase "Kerberos" scheme)
+                (do (set! authScheme AuthScheme/KERBEROS) (set! doingNTLMp2ndStage true))
+              :else
+                (when (.equalsIgnoreCase "Negotiate" scheme)
+                  (set! authScheme AuthScheme/NEGOTIATE)
+                  (set! doingNTLMp2ndStage true)))
+            (when (nil? realm) (set! realm ""))
+            (set! proxyAuthKey (AuthenticationInfo/getProxyAuthKey host port realm authScheme))
+            (set! ret (AuthenticationInfo/getProxyAuth proxyAuthKey authCache))
+            (when (nil? ret)
+              (set!
+                ret
+                (label :switch
+                  (switch authScheme
+                    BASIC
+                      (let [^:mutable ^InetAddress addr nil]
+                        (try
+                          (set! addr (InetAddress/getByName host))
+                          (catch UnknownHostException uhe))
+                        (let [a (HttpURLConnection/requestPassword
+                                  authenticator
+                                  host
+                                  addr
+                                  port
+                                  "http"
+                                  realm
+                                  scheme
+                                  (.-url this)
+                                  Authenticator$RequestorType/PROXY)]
+                          (when (some? a)
+                            (break :switch (BasicAuthentication. true host port realm a isUTF8)))
+                          nil))
+                    DIGEST
+                      (let [a (HttpURLConnection/requestPassword
+                                authenticator
+                                host
+                                nil
+                                port
+                                (.getProtocol (.-url this))
+                                realm
+                                scheme
+                                (.-url this)
+                                Authenticator$RequestorType/PROXY)]
+                        (when (some? a)
+                          (let [params (DigestAuthentication$Parameters.)]
+                            (break :switch
+                                   (DigestAuthentication. true host port realm scheme a params))))
+                        nil)
+                    NTLM
+                      (do
+                        (when-not NTLMAuthenticationProxy/supported (break :switch nil))
+                        (when tryTransparentNTLMProxy
+                          (set! tryTransparentNTLMProxy
+                                NTLMAuthenticationProxy/supportsTransparentAuth)
+                          (when (and tryTransparentNTLMProxy useProxyResponseCode)
+                            (set! tryTransparentNTLMProxy false)))
+                        (let [^:mutable ^PasswordAuthentication a nil]
+                          (if tryTransparentNTLMProxy
+                              (.finest logger "Trying Transparent NTLM authentication")
+                              (do
+                                (set! a
+                                      (HttpURLConnection/requestPassword
+                                        authenticator
+                                        host
+                                        nil
+                                        port
+                                        (.getProtocol (.-url this))
+                                        ""
+                                        scheme
+                                        (.-url this)
+                                        Authenticator$RequestorType/PROXY))
+                                (HttpURLConnection/validateNTLMCredentials a)))
+                          (let [^:mutable ^AuthenticationInfo authInfo nil]
+                            (when (or tryTransparentNTLMProxy
+                                      (and (not tryTransparentNTLMProxy) (some? a)))
+                              (set! authInfo
+                                    (.create NTLMAuthenticationProxy/proxy true host port a)))
+                            (set! tryTransparentNTLMProxy false)
+                            authInfo)))
+                    NEGOTIATE
+                      (NegotiateAuthentication.
+                        (HttpCallerInfo. (.getHttpCallerInfo authhdr) "Negotiate"))
+                    KERBEROS
+                      (NegotiateAuthentication.
+                        (HttpCallerInfo. (.getHttpCallerInfo authhdr) "Kerberos"))
+                    UNKNOWN
+                      (do
+                        (when (.isLoggable logger PlatformLogger$Level/FINEST)
+                          (.finest logger
+                                   (java-str "Unknown/Unsupported authentication scheme: " scheme)))
+                        nil)
+                    (throw (MatchException. nil nil))))))
+            (when (some? ret)
+              (when-not (.setHeaders ret this p raw) (.disposeContext ret) (set! ret nil)))))
+        (when (.isLoggable logger PlatformLogger$Level/FINER)
+          (.finer logger
+                  (java-str "Proxy Authentication for "
+                            (.toString authhdr)
+                            " returned "
+                            (if (some? ret) (.toString ret) "null"))))
+        ret))
+
+    (method ^:private getServerAuthentication :throws [IOException] ^AuthenticationInfo [this
+                                                                                         ^AuthenticationHeader authhdr]
+      (java-assert (.isLockHeldByCurrentThread this))
+      (let [^:mutable ^AuthenticationInfo ret nil
+            raw (.raw authhdr)]
+        (when (.isPresent authhdr)
+          (let [p (.headerParser authhdr)
+                ^:mutable realm (.findValue p "realm")
+                scheme (.scheme authhdr)
+                charset (.findValue p "charset")
+                isUTF8 (and (some? charset) (.equalsIgnoreCase charset "UTF-8"))
+                ^:mutable authScheme AuthScheme/UNKNOWN]
+            (cond
+              (.equalsIgnoreCase "basic" scheme) (set! authScheme AuthScheme/BASIC)
+              (.equalsIgnoreCase "digest" scheme) (set! authScheme AuthScheme/DIGEST)
+              (.equalsIgnoreCase "ntlm" scheme)
+                (do (set! authScheme AuthScheme/NTLM) (set! doingNTLM2ndStage true))
+              (.equalsIgnoreCase "Kerberos" scheme)
+                (do (set! authScheme AuthScheme/KERBEROS) (set! doingNTLM2ndStage true))
+              :else
+                (when (.equalsIgnoreCase "Negotiate" scheme)
+                  (set! authScheme AuthScheme/NEGOTIATE)
+                  (set! doingNTLM2ndStage true)))
+            (set! domain (.findValue p "domain"))
+            (when (nil? realm) (set! realm ""))
+            (set! serverAuthKey (AuthenticationInfo/getServerAuthKey (.-url this) realm authScheme))
+            (set! ret (AuthenticationInfo/getServerAuth serverAuthKey authCache))
+            (let [^:mutable ^InetAddress addr nil]
+              (when (nil? ret)
+                (try
+                  (set! addr (InetAddress/getByName (.getHost (.-url this))))
+                  (catch UnknownHostException ignored)))
+              (let [^:mutable port (.getPort (.-url this))]
+                (when (== port -1) (set! port (.getDefaultPort (.-url this))))
+                (when (nil? ret)
+                  (let [^:mutable ^PasswordAuthentication a nil]
+                    (switch authScheme
+                      KERBEROS
+                        (set! ret
+                              (NegotiateAuthentication.
+                                (HttpCallerInfo. (.getHttpCallerInfo authhdr) "Kerberos")))
+                      NEGOTIATE
+                        (set! ret
+                              (NegotiateAuthentication.
+                                (HttpCallerInfo. (.getHttpCallerInfo authhdr) "Negotiate")))
+                      BASIC
+                        (do
+                          (set! a
+                                (HttpURLConnection/requestPassword
+                                  authenticator
+                                  (.getHost (.-url this))
+                                  addr
+                                  port
+                                  (.getProtocol (.-url this))
+                                  realm
+                                  scheme
+                                  (.-url this)
+                                  Authenticator$RequestorType/SERVER))
+                          (when (some? a)
+                            (set! ret (BasicAuthentication. false (.-url this) realm a isUTF8))))
+                      DIGEST
+                        (do
+                          (set! a
+                                (HttpURLConnection/requestPassword
+                                  authenticator
+                                  (.getHost (.-url this))
+                                  addr
+                                  port
+                                  (.getProtocol (.-url this))
+                                  realm
+                                  scheme
+                                  (.-url this)
+                                  Authenticator$RequestorType/SERVER))
+                          (when (some? a)
+                            (set! digestparams (DigestAuthentication$Parameters.))
+                            (set! ret
+                                  (DigestAuthentication.
+                                    false
+                                    (.-url this)
+                                    realm
+                                    scheme
+                                    a
+                                    digestparams))))
+                      NTLM
+                        (when NTLMAuthenticationProxy/supported
+                          (let [^:mutable ^URL url1 nil]
+                            (try
+                              (set! url1 (HttpURLConnection/newURL (.-url this) "/"))
+                              (catch Exception e (set! url1 (.-url this))))
+                            (when tryTransparentNTLMServer
+                              (set! tryTransparentNTLMServer
+                                    NTLMAuthenticationProxy/supportsTransparentAuth)
+                              (when tryTransparentNTLMServer
+                                (set! tryTransparentNTLMServer
+                                      (NTLMAuthenticationProxy/isTrustedSite (.-url this)))))
+                            (set! a nil)
+                            (if tryTransparentNTLMServer
+                                (.finest logger "Trying Transparent NTLM authentication")
+                                (do
+                                  (set! a
+                                        (HttpURLConnection/requestPassword
+                                          authenticator
+                                          (.getHost (.-url this))
+                                          addr
+                                          port
+                                          (.getProtocol (.-url this))
+                                          ""
+                                          scheme
+                                          (.-url this)
+                                          Authenticator$RequestorType/SERVER))
+                                  (HttpURLConnection/validateNTLMCredentials a)))
+                            (when (or tryTransparentNTLMServer
+                                      (and (not tryTransparentNTLMServer) (some? a)))
+                              (set! ret (.create NTLMAuthenticationProxy/proxy false url1 a)))
+                            (set! tryTransparentNTLMServer false)))
+                      UNKNOWN
+                        (do
+                          (when (.isLoggable logger PlatformLogger$Level/FINEST)
+                            (.finest
+                              logger
+                              (java-str "Unknown/Unsupported authentication scheme: " scheme)))
+                          (throw (AssertionError. "should not reach here")))
+                      (throw (AssertionError. "should not reach here")))))
+                (when (some? ret)
+                  (when-not (.setHeaders ret this p raw) (.disposeContext ret) (set! ret nil)))))))
+        (when (.isLoggable logger PlatformLogger$Level/FINER)
+          (.finer logger
+                  (java-str "Server Authentication for "
+                            (.toString authhdr)
+                            " returned "
+                            (if (some? ret) (.toString ret) "null"))))
+        ret))
+
+    (method ^:private checkResponseCredentials :throws [IOException] ^void [this ^boolean inClose]
+      (try
+        (when-not (not needToCheck)
+          (when (and (and validateProxy (some? currentProxyCredentials))
+                     (instance? DigestAuthentication currentProxyCredentials))
+            (let [raw (.findValue responses "Proxy-Authentication-Info")]
+              (when (or inClose (some? raw))
+                (let [da (cast DigestAuthentication currentProxyCredentials)]
+                  (.checkResponse da raw (.-method this) (.getRequestURI this))
+                  (.disposeContext currentProxyCredentials)
+                  (set! currentProxyCredentials nil)))))
+          (when (and (and validateServer (some? currentServerCredentials))
+                     (instance? DigestAuthentication currentServerCredentials))
+            (let [raw (.findValue responses "Authentication-Info")]
+              (when (or inClose (some? raw))
+                (let [da (cast DigestAuthentication currentServerCredentials)]
+                  (.checkResponse da raw (.-method this) (.-url this))
+                  (.disposeContext currentServerCredentials)
+                  (set! currentServerCredentials nil)))))
+          (when (and (nil? currentServerCredentials) (nil? currentProxyCredentials))
+            (set! needToCheck false)))
+        (catch IOException e (.disconnectInternal this) (set! (.-connected this) false) (throw e))))
+
+    (field ^String requestURI nil)
+
+    (method getRequestURI :throws [IOException] ^String [this]
+      (when (nil? requestURI) (set! requestURI (.getURLFile http)))
+      requestURI)
+
+    (method ^:private followRedirect :throws [IOException] ^boolean [this]
+      (if (not (.getInstanceFollowRedirects this))
+          false
+          (let [stat (.getResponseCode this)]
+            (if (or (or (or (< stat 300) (> stat 307)) (== stat 306))
+                    (== stat HttpURLConnection/HTTP_NOT_MODIFIED))
+                false
+                (let [loc (.getHeaderField this "Location")]
+                  (if (nil? loc)
+                      false
+                      (let [^:mutable ^URL locUrl nil]
+                        (try
+                          (set! locUrl (HttpURLConnection/newURL loc))
+                          (when-not (.equalsIgnoreCase
+                                      (.getProtocol (.-url this))
+                                      (.getProtocol locUrl))
+                            (return false))
+                          (catch MalformedURLException mue
+                            (set! locUrl (HttpURLConnection/newURL (.-url this) loc))))
+                        (.followRedirect0 this loc stat locUrl))))))))
+
+    (method ^:private followRedirect0 :throws [IOException] ^boolean [this ^String loc ^int stat
+                                                                      ^URL locUrl]
+      (java-assert (.isLockHeldByCurrentThread this))
+      (set! lastProxy (.getHttpProxy http))
+      (.disconnectInternal this)
+      (when (.streaming this) (throw (HttpRetryException. RETRY_MSG3 stat loc)))
+      (when (.isLoggable logger PlatformLogger$Level/FINE)
+        (.fine logger (java-str "Redirected from " (.-url this) " to " locUrl)))
+      (set! responses (MessageHeader. maxHeaderSize))
+      (if (== stat HttpURLConnection/HTTP_USE_PROXY)
+          (let [proxyHost (.getHost locUrl)
+                proxyPort (.getPort locUrl)]
+            (.setProxiedClient this (.-url this) proxyHost proxyPort)
+            (.set requests
+                  0
+                  (java-str (.-method this) " " (.getRequestURI this) " " httpVersion)
+                  nil)
+            (set! (.-connected this) true)
+            (set! useProxyResponseCode true))
+          (let [prevURL (.-url this)]
+            (set! (.-url this) locUrl)
+            (set! requestURI nil)
+            (if (and (and (.equals (.-method this) "POST")
+                          (not (Boolean/getBoolean "http.strictPostRedirect")))
+                     (not (== stat 307)))
+                (do
+                  (set! requests (MessageHeader.))
+                  (set! setRequests false)
+                  (.setRequestMethod super "GET")
+                  (set! poster nil)
+                  (when-not (.checkReuseConnection this) (.connect this))
+                  (when-not (HttpURLConnection/sameDestination prevURL (.-url this))
+                    (set! userCookies nil)
+                    (set! userCookies2 nil)))
+                (do
+                  (when-not (.checkReuseConnection this) (.connect this))
+                  (when (some? http)
+                    (.set requests
+                          0
+                          (java-str (.-method this) " " (.getRequestURI this) " " httpVersion)
+                          nil)
+                    (let [port (.getPort (.-url this))
+                          ^:mutable host (HttpURLConnection/stripIPv6ZoneId (.getHost (.-url this)))]
+                      (when (and (not (== port -1)) (not (== port (.getDefaultPort (.-url this)))))
+                        (set! host (java-str host (java-str ":" (String/valueOf port)))))
+                      (.set requests "Host" host)))
+                  (when-not (HttpURLConnection/sameDestination prevURL (.-url this))
+                    (set! userCookies nil)
+                    (set! userCookies2 nil)
+                    (.remove requests "Cookie")
+                    (.remove requests "Cookie2")
+                    (.remove requests "Authorization")
+                    (let [sauth (AuthenticationInfo/getServerAuth (.-url this) authCache)]
+                      (when (and (some? sauth) (.supportsPreemptiveAuthorization sauth))
+                        (.setIfNotSet requests
+                                      (.getHeaderName sauth)
+                                      (.getHeaderValue sauth (.-url this) (.-method this)))
+                        (set! currentServerCredentials sauth))))))))
+      true)
+
+    (method ^:private ^:static sameDestination ^boolean [^URL firstURL ^URL secondURL]
+      (java-assert (.equalsIgnoreCase (.getProtocol firstURL) (.getProtocol secondURL))
+        (java-str "protocols not equal: " firstURL " - " secondURL))
+      (if (not (.equalsIgnoreCase (.getHost firstURL) (.getHost secondURL)))
+          false
+          (let [^:mutable firstPort (.getPort firstURL)]
+            (when (== firstPort -1) (set! firstPort (.getDefaultPort firstURL)))
+            (let [^:mutable secondPort (.getPort secondURL)]
+              (when (== secondPort -1) (set! secondPort (.getDefaultPort secondURL)))
+              (if (not (== firstPort secondPort)) false true)))))
+
+    (field ^byte/1 cdata (new byte/1 128))
+
+    (method ^:private reset :throws [IOException] ^void [this]
+      (set! (.-reuse http) true)
+      (set! reuseClient http)
+      (let [is (.getInputStream http)]
+        (when (or (not (.equals (.-method this) "HEAD")) (identical? tunnelState TunnelState/SETUP))
+          (try
+            (if (or (instance? ChunkedInputStream is) (instance? MeteredStream is))
+                (while (> (.read is cdata) 0))
+                (let [^:mutable cl 0
+                      ^:mutable ^int n 0
+                      cls (.findValue responses "Content-Length")]
+                  (when (some? cls)
+                    (try (set! cl (Long/parseLong cls)) (catch NumberFormatException e (set! cl 0))))
+                  (let [^:mutable i 0]
+                    (while (< i cl)
+                      (if (== (set! n (.read is cdata)) -1) (break) (set! i (unchecked-add i n)))))))
+            (catch IOException e
+              (set! (.-reuse http) false)
+              (set! reuseClient nil)
+              (.disconnectInternal this)
+              (return)))
+          (try (when (instance? MeteredStream is) (.close is)) (catch IOException e)))
+        (set! (.-responseCode this) -1)
+        (set! responses (MessageHeader. maxHeaderSize))
+        (set! (.-connected this) false)))
+
+    (method ^:private disconnectWeb :throws [IOException] ^void [this]
+      (if (and (.usingProxyInternal this) (.isKeepingAlive http))
+          (do (set! (.-responseCode this) -1) (.reset this))
+          (.disconnectInternal this)))
+
+    (method ^:private disconnectInternal ^void [this]
+      (set! (.-responseCode this) -1)
+      (set! inputStream nil)
+      (when (some? http) (.closeServer http) (set! http nil) (set! (.-connected this) false)))
+
+    (method ^:public disconnect ^void [this]
+      (set! (.-responseCode this) -1)
+      (when (some? http)
+        (if (some? inputStream)
+            (let [hc http
+                  ka (.isKeepingAlive hc)]
+              (try (.close inputStream) (catch IOException ioe))
+              (when ka (.closeIdleConnection hc)))
+            (do (.setDoNotRetry http true) (.closeServer http)))
+        (set! http nil)
+        (set! (.-connected this) false))
+      (set! cachedInputStream nil)
+      (when (some? cachedHeaders) (.reset cachedHeaders)))
+
+    (method usingProxyInternal ^boolean [this]
+      (if (some? http) (some? (.getProxyHostUsed http)) false))
+
+    (method ^:public usingProxy ^boolean [this]
+      (cond
+        (or usingProxy (.usingProxyInternal this)) true
+        (some? instProxy) (.equals (.type instProxy) Proxy$Type/HTTP)
+        :else false))
+
+    (field ^:private ^:static ^:final ^String SET_COOKIE "set-cookie")
+
+    (field ^:private ^:static ^:final ^String SET_COOKIE2 "set-cookie2")
+
+    (method ^:private filterHeaderField ^String [this ^String name ^String value]
+      (when (some? value)
+        (if (or (.equalsIgnoreCase SET_COOKIE name) (.equalsIgnoreCase SET_COOKIE2 name))
+            (if (or (nil? cookieHandler) (.isEmpty value))
+                value
+                (let [access (SharedSecrets/getJavaNetHttpCookieAccess)
+                      retValue (StringJoiner. ",")
+                      ^{:tag (List HttpCookie)} cookies (.parse access value)]
+                  (for-each [^HttpCookie cookie cookies]
+                    (when-not (.isHttpOnly cookie) (.add retValue (.header access cookie))))
+                  (.toString retValue)))
+            value)))
+
+    (field ^:private ^{:tag (Map String (List String))} filteredHeaders)
+
+    (method ^:private getFilteredHeaderFields ^{:tag (Map String (List String))} [this]
+      (if (some? filteredHeaders)
+          filteredHeaders
+          (let [^:mutable ^{:tag (Map String (List String))} headers nil
+                ^{:tag (Map String (List String))} tmpMap (HashMap.)]
+            (if (some? cachedHeaders)
+                (set! headers (.getHeaders cachedHeaders))
+                (set! headers (.getHeaders responses)))
+            (for-each [^{:tag (Map$Entry String (List String))} e (.entrySet headers)]
+              (let [key (cast String (.getKey e))
+                    ^{:tag (List String)} values (cast List (.getValue e))
+                    ^{:tag (List String)} filteredVals (ArrayList.)]
+                (for-each [^String value values]
+                  (let [fVal (.filterHeaderField this key value)]
+                    (when (some? fVal) (.add filteredVals fVal))))
+                (when-not (.isEmpty filteredVals)
+                  (.put tmpMap key (Collections/unmodifiableList filteredVals)))))
+            (set! filteredHeaders (Collections/unmodifiableMap tmpMap)))))
+
+    (method ^:public getHeaderField ^String [this ^String name]
+      (try (.getInputStream this) (catch IOException e))
+      (if (some? cachedHeaders)
+          (.filterHeaderField this name (.findValue cachedHeaders name))
+          (.filterHeaderField this name (.findValue responses name))))
+
+    (method ^:public getHeaderFields ^{:tag (Map String (List String))} [this]
+      (try (.getInputStream this) (catch IOException e))
+      (.getFilteredHeaderFields this))
+
+    (method ^:public getHeaderField ^String [this ^int n]
+      (try (.getInputStream this) (catch IOException e))
+      (if (some? cachedHeaders)
+          (.filterHeaderField this (.getKey cachedHeaders n) (.getValue cachedHeaders n))
+          (.filterHeaderField this (.getKey responses n) (.getValue responses n))))
+
+    (method ^:public getHeaderFieldKey ^String [this ^int n]
+      (try (.getInputStream this) (catch IOException e))
+      (if (some? cachedHeaders) (.getKey cachedHeaders n) (.getKey responses n)))
+
+    (method ^:public setRequestProperty ^void [this ^String key ^String value]
+      (.lock this)
+      (try
+        (when (or (.-connected this) connecting)
+          (throw (IllegalStateException. "Already connected")))
+        (when (nil? key) (throw (NullPointerException. "key is null")))
+        (when (.isExternalMessageHeaderAllowed this key value)
+          (.set requests key value)
+          (when-not (.equalsIgnoreCase key "Content-Type") (.set userHeaders key value)))
+        (finally (.unlock this))))
+
+    (method getUserSetHeaders ^MessageHeader [this] userHeaders)
+
+    (method ^:public addRequestProperty ^void [this ^String key ^String value]
+      (.lock this)
+      (try
+        (when (or (.-connected this) connecting)
+          (throw (IllegalStateException. "Already connected")))
+        (when (nil? key) (throw (NullPointerException. "key is null")))
+        (when (.isExternalMessageHeaderAllowed this key value)
+          (.add requests key value)
+          (when-not (.equalsIgnoreCase key "Content-Type") (.add userHeaders key value)))
+        (finally (.unlock this))))
+
+    (method ^:public setAuthenticationProperty ^void [this ^String key ^String value]
+      (java-assert (.isLockHeldByCurrentThread this))
+      (.checkMessageHeader this key value)
+      (.set requests key value))
+
+    (method ^:public getRequestProperty ^String [this ^String key]
+      (.lock this)
+      (try
+        (when (some? key)
+          (loop [^int i 0]
+            (if (< i (alength EXCLUDE_HEADERS))
+                (if (.equalsIgnoreCase key (aget EXCLUDE_HEADERS i))
+                    (return nil)
+                    (recur (unchecked-inc-int i)))
+                nil))
+          (when-not setUserCookies
+            (when (.equalsIgnoreCase key "Cookie") (return userCookies))
+            (when (.equalsIgnoreCase key "Cookie2") (return userCookies2)))
+          (.findValue requests key))
+        (finally (.unlock this))))
+
+    (method ^:public getRequestProperties ^{:tag (Map String (List String))} [this]
+      (.lock this)
+      (try
+        (when (.-connected this) (throw (IllegalStateException. "Already connected")))
+        (if setUserCookies
+            (.getHeaders requests EXCLUDE_HEADERS)
+            (let [^:mutable ^{:tag (Map String (List String))} userCookiesMap nil]
+              (when (or (some? userCookies) (some? userCookies2))
+                (set! userCookiesMap (HashMap.))
+                (when (some? userCookies)
+                  (.put userCookiesMap "Cookie" (Arrays/asList (new String/1 [userCookies]))))
+                (when (some? userCookies2)
+                  (.put userCookiesMap "Cookie2" (Arrays/asList (new String/1 [userCookies2])))))
+              (.filterAndAddHeaders requests EXCLUDE_HEADERS2 userCookiesMap)))
+        (finally (.unlock this))))
+
+    (method ^:public setConnectTimeout ^void [this ^int timeout]
+      (when (< timeout 0) (throw (IllegalArgumentException. "timeouts can't be negative")))
+      (set! connectTimeout timeout))
+
+    (method ^:public getConnectTimeout ^int [this]
+      (if (< connectTimeout 0) 0 connectTimeout))
+
+    (method ^:public setReadTimeout ^void [this ^int timeout]
+      (when (< timeout 0) (throw (IllegalArgumentException. "timeouts can't be negative")))
+      (set! readTimeout timeout))
+
+    (method ^:public getReadTimeout ^int [this]
+      (if (< readTimeout 0) 0 readTimeout))
+
+    (method ^:public getCookieHandler ^CookieHandler [this] cookieHandler)
+
+    (method getMethod ^String [this] (.-method this))
+
+    (method ^:private mapToMessageHeader ^MessageHeader [this ^{:tag (Map String (List String))} map]
+      (let [headers (MessageHeader.)]
+        (if (or (nil? map) (.isEmpty map))
+            headers
+            (do
+              (for-each [^{:tag (Map$Entry String (List String))} entry (.entrySet map)]
+                (let [key (cast String (.getKey entry))
+                      ^{:tag (List String)} values (cast List (.getValue entry))]
+                  (for-each [^String value values]
+                    (if (nil? key) (.prepend headers key value) (.add headers key value)))))
+              headers))))
+
+    (method ^:static stripIPv6ZoneId ^String [^String host]
+      (if (not (== (.charAt host 0) \[))
+          host
+          (let [i (.lastIndexOf host \%)] (if (== i -1) host (java-str (.substring host 0 i) "]")))))
+
+    (defclass HttpInputStream
+      :extends FilterInputStream
+
+      (field ^:private ^CacheRequest cacheRequest)
+
+      (field ^:private ^OutputStream outputStream)
+
+      (field ^:private ^boolean marked false)
+
+      (field ^:private ^int inCache 0)
+
+      (field ^:private ^int markCount 0)
+
+      (field ^:private ^boolean closed)
+
+      (constructor ^:public [this ^InputStream is]
+        (super. is)
+        (set! (.-cacheRequest this) nil)
+        (set! (.-outputStream this) nil))
+
+      (constructor ^:public [this ^InputStream is ^CacheRequest cacheRequest]
+        (super. is)
+        (set! (.-cacheRequest this) cacheRequest)
+        (try
+          (set! (.-outputStream this) (.getBody cacheRequest))
+          (catch IOException ioex
+            (.abort (.-cacheRequest this))
+            (set! (.-cacheRequest this) nil)
+            (set! (.-outputStream this) nil))))
+
+      (method ^:public ^:synchronized mark ^void [this ^int readlimit]
+        (.mark super readlimit)
+        (when (some? cacheRequest) (set! marked true) (set! markCount 0)))
+
+      (method ^:public ^:synchronized reset :throws [IOException] ^void [this]
+        (.reset super)
+        (when (some? cacheRequest)
+          (set! marked false)
+          (set! inCache (unchecked-add-int inCache markCount))))
+
+      (method ^:private ensureOpen :throws [IOException] ^void [this]
+        (when closed (throw (IOException. "stream is closed"))))
+
+      (method ^:public read :throws [IOException] ^int [this]
+        (.ensureOpen this)
+        (try
+          (let [b (new byte/1 1)
+                ret (.read this b)]
+            (if (== ret -1) ret (bit-and-int (aget b 0) 0x00FF)))
+          (catch IOException ioex (when (some? cacheRequest) (.abort cacheRequest)) (throw ioex))))
+
+      (method ^:public read :throws [IOException] ^int [this ^byte/1 b]
+        (.read this b 0 (alength b)))
+
+      (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+        (.ensureOpen this)
+        (try
+          (let [newLen (.read super b off len)
+                ^:mutable ^int nWrite 0]
+            (if (> inCache 0)
+                (if (>= inCache newLen)
+                    (do (set! inCache (unchecked-subtract-int inCache newLen)) (set! nWrite 0))
+                    (do (set! nWrite (unchecked-subtract-int newLen inCache)) (set! inCache 0)))
+                (set! nWrite newLen))
+            (when (and (> nWrite 0) (some? outputStream))
+              (.write outputStream
+                      b
+                      (unchecked-add-int off (unchecked-subtract-int newLen nWrite))
+                      nWrite))
+            (when marked (set! markCount (unchecked-add-int markCount newLen)))
+            newLen)
+          (catch IOException ioex (when (some? cacheRequest) (.abort cacheRequest)) (throw ioex))))
+
+      (field ^:private ^byte/1 skipBuffer)
+
+      (field ^:private ^:static ^:final ^int SKIP_BUFFER_SIZE 8096)
+
+      (method ^:public skip :throws [IOException] ^long [this ^long n]
+        (.ensureOpen this)
+        (let [^:mutable remaining n
+              ^:mutable ^int nr 0]
+          (when (nil? skipBuffer) (set! skipBuffer (new byte/1 SKIP_BUFFER_SIZE)))
+          (let [localSkipBuffer skipBuffer]
+            (if (<= n 0)
+                0
+                (do
+                  (while (> remaining 0)
+                    (set! nr
+                          (.read this
+                                 localSkipBuffer
+                                 0
+                                 (unchecked-int (Math/min SKIP_BUFFER_SIZE remaining))))
+                    (when (< nr 0) (break))
+                    (set! remaining (unchecked-subtract remaining nr)))
+                  (unchecked-subtract n remaining))))))
+
+      (method ^:public close :throws [IOException] ^void [this]
+        (when-not closed
+          (try
+            (when (some? outputStream)
+              (if (not (== (.read this) -1)) (.abort cacheRequest) (.close outputStream)))
+            (.close super)
+            (catch IOException ioex (when (some? cacheRequest) (.abort cacheRequest)) (throw ioex))
+            (finally
+              (set! closed true)
+              (set! (.-http HttpURLConnection/this) nil)
+              (.checkResponseCredentials HttpURLConnection/this true))))))
+
+    (defclass StreamingOutputStream
+      :extends FilterOutputStream
+
+      (field ^long expected)
+
+      (field ^long written)
+
+      (field ^boolean closed)
+
+      (field ^boolean error)
+
+      (field ^IOException errorExcp)
+
+      (constructor [this ^OutputStream os ^long expectedLength]
+        (super. os)
+        (set! expected expectedLength)
+        (set! written 0)
+        (set! closed false)
+        (set! error false))
+
+      (method ^:public write :throws [IOException] ^void [this ^int b]
+        (.checkError this)
+        (set! written (unchecked-inc written))
+        (when (and (not (== expected -1)) (> written expected))
+          (throw (IOException. "too many bytes written")))
+        (.write (.-out this) b))
+
+      (method ^:public write :throws [IOException] ^void [this ^byte/1 b]
+        (.write this b 0 (alength b)))
+
+      (method ^:public write :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+        (.checkError this)
+        (set! written (unchecked-add written len))
+        (when (and (not (== expected -1)) (> written expected))
+          (.close (.-out this))
+          (throw (IOException. "too many bytes written")))
+        (.write (.-out this) b off len))
+
+      (method checkError :throws [IOException] ^void [this]
+        (when closed (throw (IOException. "Stream is closed")))
+        (when error (throw errorExcp))
+        (cond
+          (instance? PrintStream (.-out this))
+            (when (.checkError (cast PrintStream (.-out this)))
+              (throw (IOException. "Error writing request body to server")))
+          (instance? ChunkedOutputStream (.-out this))
+            (when (.checkError (cast ChunkedOutputStream (.-out this)))
+              (throw (IOException. "Error writing request body to server")))))
+
+      (method writtenOK ^boolean [this] (and closed (not error)))
+
+      (method ^:public close :throws [IOException] ^void [this]
+        (when-not closed
+          (set! closed true)
+          (if (not (== expected -1))
+              (do
+                (when-not (== written expected)
+                  (set! error true)
+                  (set! errorExcp (IOException. "insufficient data written"))
+                  (.close (.-out this))
+                  (throw errorExcp))
+                (.flush super))
+              (do
+                (.close super)
+                (let [o (.getOutputStream http)] (.write o \return) (.write o \newline) (.flush o)))))))
+
+    (defclass ^:static ErrorStream
+      :extends InputStream
+
+      (field ^ByteBuffer buffer)
+
+      (field ^InputStream is)
+
+      (constructor ^:private [this ^ByteBuffer buf]
+        (set! buffer buf)
+        (set! is nil))
+
+      (constructor ^:private [this ^ByteBuffer buf ^InputStream is]
+        (set! buffer buf)
+        (set! (.-is this) is))
+
+      (method ^:public ^:static getErrorStream ^InputStream [^InputStream is ^long cl
+                                                             ^HttpClient http]
+        (when-not (== cl 0)
+          (try
+            (let [oldTimeout (.getReadTimeout http)]
+              (.setReadTimeout http (unchecked-divide-int timeout4ESBuffer 5))
+              (let [^:mutable expected 0
+                    ^:mutable isChunked false]
+                (if (< cl 0)
+                    (do (set! expected bufSize4ES) (set! isChunked true))
+                    (set! expected cl))
+                (when (<= expected bufSize4ES)
+                  (let [exp (unchecked-int expected)
+                        buffer (new byte/1 exp)
+                        ^:mutable ^int count 0
+                        ^:mutable ^int time 0
+                        ^:mutable ^int len 0]
+                    (loop []
+                      (try
+                        (set! len
+                              (.read is
+                                     buffer
+                                     count
+                                     (unchecked-subtract-int (alength buffer) count)))
+                        (when (< len 0)
+                          (when isChunked (break))
+                          (throw (IOException. (java-str
+                                                 "the server closes before sending "
+                                                 cl
+                                                 " bytes of data"))))
+                        (set! count (unchecked-add-int count len))
+                        (catch SocketTimeoutException ex
+                          (set! time
+                                (unchecked-add-int time (unchecked-divide-int timeout4ESBuffer 5)))))
+                      (when (and (< count exp) (< time timeout4ESBuffer)) (recur)))
+                    (.setReadTimeout http oldTimeout)
+                    (when-not (== count 0)
+                      (if (or (and (== count expected) (not isChunked)) (and isChunked (< len 0)))
+                          (do (.close is) (ErrorStream. (ByteBuffer/wrap buffer 0 count)))
+                          (ErrorStream. (ByteBuffer/wrap buffer 0 count) is)))))))
+            (catch IOException ioex nil))))
+
+      (method ^:public available :throws [IOException] ^int [this]
+        (if (nil? is) (.remaining buffer) (unchecked-add-int (.remaining buffer) (.available is))))
+
+      (method ^:public read :throws [IOException] ^int [this]
+        (let [b (new byte/1 1)
+              ret (.read this b)]
+          (if (== ret -1) ret (bit-and-int (aget b 0) 0x00FF))))
+
+      (method ^:public read :throws [IOException] ^int [this ^byte/1 b]
+        (.read this b 0 (alength b)))
+
+      (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+        (let [rem (.remaining buffer)]
+          (cond
+            (> rem 0) (let [^int ret (if (< rem len) rem len)] (.get buffer b off ret) ret)
+            (nil? is) -1
+            :else (.read is b off len))))
+
+      (method ^:public close :throws [IOException] ^void [this]
+        (set! buffer nil)
+        (when (some? is) (.close is))))
+
+    (method ^:private ^:static newURL :throws [MalformedURLException] ^URL [^String spec]
+      (URL. spec))
+
+    (method ^:private ^:static newURL :throws [MalformedURLException] ^URL [^URL context
+                                                                            ^String spec]
+      (URL. context spec))
+
+    (method ^:private ^:static validateNTLMCredentials :throws [IOException] ^void [^PasswordAuthentication pw]
+      (when (some? pw)
+        (let [password (.getPassword pw)]
+          (when (some? password)
+            (loop [^int i 0]
+              (if (< i (alength password))
+                  (if (== (aget password i) 0)
+                      (throw (IOException. "NUL character not allowed in NTLM password"))
+                      (recur (unchecked-inc-int i)))
+                  nil)))
+          (let [username (.getUserName pw)]
+            (when (and (some? username) (not (== (.indexOf username 0) -1)))
+              (throw (IOException. "NUL character not allowed in NTLM username or domain"))))))))
+
+  (defclass EmptyInputStream
+    :extends InputStream
+
+    (method ^:public available ^int [this] 0)
+
+    (method ^:public read ^int [this] -1)))

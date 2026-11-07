@@ -1,0 +1,571 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/certpath/OCSPResponse.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider.certpath)
+
+(import '(java.io IOException)
+        '(java.security GeneralSecurityException
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        NoSuchAlgorithmException
+                        PublicKey
+                        Signature
+                        SignatureException)
+        '(java.security.cert CRLReason
+                             CertPathValidatorException
+                             CertPathValidatorException$BasicReason
+                             CertificateException
+                             CertificateParsingException
+                             Extension
+                             TrustAnchor
+                             X509Certificate)
+        '(java.util ArrayList Arrays Collections Date HashMap List Map Set)
+        '(javax.security.auth.x500 X500Principal)
+        '(sun.security.util Debug
+                            DerInputStream
+                            DerValue
+                            HexDumpEncoder
+                            KnownOIDs
+                            ObjectIdentifier
+                            SignatureUtil)
+        '(sun.security.x509 AlgorithmId KeyIdentifier PKIXExtensions X509CertImpl))
+
+(defclass ^:public ^:final OCSPResponse
+  (defclass ^:public ^:enum ResponseStatus
+    (constants
+      SUCCESSFUL
+      MALFORMED_REQUEST
+      INTERNAL_ERROR
+      TRY_LATER
+      UNUSED
+      SIG_REQUIRED
+      UNAUTHORIZED))
+
+  (field ^:private ^:static ^:final ^ResponseStatus/1 rsvalues (ResponseStatus/values))
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "certpath"))
+
+  (field ^:private ^:static ^:final ^boolean dump (and (some? debug) (Debug/isOn "ocsp")))
+
+  (field ^:private ^:static ^:final ^ObjectIdentifier OCSP_BASIC_RESPONSE_OID
+    (ObjectIdentifier/of KnownOIDs/OCSPBasicResponse))
+
+  (field ^:private ^:static ^:final ^int CERT_STATUS_GOOD 0)
+
+  (field ^:private ^:static ^:final ^int CERT_STATUS_REVOKED 1)
+
+  (field ^:private ^:static ^:final ^int CERT_STATUS_UNKNOWN 2)
+
+  (field ^:private ^:static ^:final ^int NAME_TAG 1)
+
+  (field ^:private ^:static ^:final ^int KEY_TAG 2)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_MAX_CLOCK_SKEW 900000)
+
+  (field ^:private ^:static ^:final ^int MAX_CLOCK_SKEW (OCSPResponse/initializeClockSkew))
+
+  (method ^:private ^:static initializeClockSkew ^int []
+    (let [tmp (Integer/getInteger "com.sun.security.ocsp.clockSkew")]
+      (if (or (nil? tmp) (< tmp 0)) DEFAULT_MAX_CLOCK_SKEW (unchecked-multiply-int tmp 1000))))
+
+  (field ^:private ^:static ^:final ^CRLReason/1 values (CRLReason/values))
+
+  (field ^:private ^:final ^ResponseStatus responseStatus)
+
+  (field ^:private ^:final ^{:tag (Map CertId SingleResponse)} singleResponseMap)
+
+  (field ^:private ^:final ^AlgorithmId sigAlgId)
+
+  (field ^:private ^:final ^byte/1 signature)
+
+  (field ^:private ^:final ^byte/1 tbsResponseData)
+
+  (field ^:private ^:final ^byte/1 responseNonce)
+
+  (field ^:private ^:final ^{:tag (List X509CertImpl)} certs)
+
+  (field ^:private ^X509CertImpl signerCert nil)
+
+  (field ^:private ^:final ^ResponderId respId)
+
+  (field ^:private ^Date producedAtDate nil)
+
+  (field ^:private ^:final ^{:tag (Map String Extension)} responseExtensions)
+
+  (constructor :throws [IOException] ^:public [this ^byte/1 bytes]
+    (when dump
+      (let [hexEnc (HexDumpEncoder.)]
+        (.println debug (java-str "OCSPResponse bytes...\n\n" (.encode hexEnc bytes) "\n"))))
+    (let [^:mutable der (DerValue. bytes)]
+      (when-not (== (.-tag der) DerValue/tag_Sequence)
+        (throw (IOException. "Bad encoding in OCSP response: expected ASN.1 SEQUENCE tag.")))
+      (let [^:mutable derIn (.getData der)
+            status (.getEnumerated derIn)]
+        (if (and (>= status 0) (< status (alength rsvalues)))
+            (set! responseStatus (aget rsvalues status))
+            (throw (IOException. (java-str "Unknown OCSPResponse status: " status))))
+        (when (some? debug) (.println debug (java-str "OCSP response status: " responseStatus)))
+        (if (not (identical? responseStatus ResponseStatus/SUCCESSFUL))
+            (do
+              (set! singleResponseMap (Collections/emptyMap))
+              (set! certs (ArrayList.))
+              (set! sigAlgId nil)
+              (set! signature nil)
+              (set! tbsResponseData nil)
+              (set! responseNonce nil)
+              (set! responseExtensions (Collections/emptyMap))
+              (set! respId nil))
+            (do
+              (set! der (.getDerValue derIn))
+              (when-not (.isContextSpecific der (unchecked-byte 0))
+                (throw
+                  (IOException.
+                    "Bad encoding in responseBytes element of OCSP response: expected ASN.1 context specific tag 0.")))
+              (let [tmp (.getDerValue (.-data der))]
+                (when-not (== (.-tag tmp) DerValue/tag_Sequence)
+                  (throw
+                    (IOException.
+                      "Bad encoding in responseBytes element of OCSP response: expected ASN.1 SEQUENCE tag.")))
+                (set! derIn (.-data tmp))
+                (let [responseType (.getOID derIn)]
+                  (if (.equals responseType OCSP_BASIC_RESPONSE_OID)
+                      (when (some? debug) (.println debug "OCSP response type: basic"))
+                      (do
+                        (when (some? debug)
+                          (.println debug (java-str "OCSP response type: " responseType)))
+                        (throw (IOException. (java-str
+                                               "Unsupported OCSP response type: "
+                                               responseType)))))
+                  (let [basicOCSPResponse (DerInputStream. (.getOctetString derIn))
+                        seqTmp (.getSequence basicOCSPResponse 3)]
+                    (when (< (alength seqTmp) 3)
+                      (throw (IOException. "Unexpected BasicOCSPResponse value")))
+                    (let [responseData (aget seqTmp 0)]
+                      (set! tbsResponseData (.toByteArray (aget seqTmp 0)))
+                      (when-not (== (.-tag responseData) DerValue/tag_Sequence)
+                        (throw
+                          (IOException.
+                            "Bad encoding in tbsResponseData element of OCSP response: expected ASN.1 SEQUENCE tag.")))
+                      (let [seqDerIn (.-data responseData)
+                            ^:mutable seq (.getDerValue seqDerIn)]
+                        (when (.isContextSpecific seq (unchecked-byte 0))
+                          (when (and (.isConstructed seq) (.isContextSpecific seq))
+                            (set! seq (.getDerValue (.-data seq)))
+                            (let [version (.getInteger seq)]
+                              (when-not (== (.available (.-data seq)) 0)
+                                (throw
+                                  (IOException.
+                                    "Bad encoding in version  element of OCSP response: bad format")))
+                              (set! seq (.getDerValue seqDerIn)))))
+                        (set! respId (ResponderId. (.toByteArray seq)))
+                        (when (some? debug) (.println debug (java-str "Responder ID: " respId)))
+                        (set! seq (.getDerValue seqDerIn))
+                        (set! producedAtDate (.getGeneralizedTime seq))
+                        (when (some? debug)
+                          (.println debug (java-str "OCSP response produced at: " producedAtDate)))
+                        (let [singleResponseDer (.getSequence seqDerIn 1)]
+                          (set! singleResponseMap (HashMap/newHashMap (alength singleResponseDer)))
+                          (when (some? debug)
+                            (.println debug
+                                      (java-str "OCSP number of SingleResponses: "
+                                                (alength singleResponseDer))))
+                          (for-each [^DerValue srDer singleResponseDer]
+                            (let [singleResponse (SingleResponse. srDer)]
+                              (.put singleResponseMap (.getCertId singleResponse) singleResponse)))
+                          (let [^:mutable ^{:tag (Map String Extension)} tmpExtMap (HashMap.)]
+                            (when (> (.available seqDerIn) 0)
+                              (set! seq (.getDerValue seqDerIn))
+                              (when (.isContextSpecific seq (unchecked-byte 1))
+                                (set! tmpExtMap (OCSPResponse/parseExtensions seq))))
+                            (set! responseExtensions tmpExtMap)
+                            (let [nonceExt (cast
+                                             sun.security.x509.Extension
+                                             (.get
+                                               tmpExtMap
+                                               (.toString PKIXExtensions/OCSPNonce_Id)))]
+                              (set! responseNonce
+                                    (when (some? nonceExt) (.getExtensionValue nonceExt)))
+                              (when (and (some? debug) (some? responseNonce))
+                                (.println debug
+                                          (java-str
+                                            "Response nonce: "
+                                            (Arrays/toString responseNonce))))
+                              (set! sigAlgId (AlgorithmId/parse (aget seqTmp 1)))
+                              (set! signature (.getBitString (aget seqTmp 2)))
+                              (if (> (alength seqTmp) 3)
+                                  (let [seqCert (aget seqTmp 3)]
+                                    (when-not (.isContextSpecific seqCert (unchecked-byte 0))
+                                      (throw
+                                        (IOException.
+                                          "Bad encoding in certs element of OCSP response: expected ASN.1 context specific tag 0.")))
+                                    (let [derCerts (.getSequence (.getData seqCert) 3)]
+                                      (set! certs (ArrayList. (alength derCerts)))
+                                      (try
+                                        (loop [^int i 0]
+                                          (when (< i (alength derCerts))
+                                            (let [cert (X509CertImpl/newX509CertImpl
+                                                         (.toByteArray (aget derCerts i)))]
+                                              (.add certs cert)
+                                              (if (some? debug)
+                                                  (do
+                                                    (.println
+                                                      debug
+                                                      (java-str
+                                                        "OCSP response cert #"
+                                                        (unchecked-add-int i 1)
+                                                        ": "
+                                                        (.getSubjectX500Principal cert)))
+                                                    (recur (unchecked-inc-int i)))
+                                                  (recur (unchecked-inc-int i))))))
+                                        (catch CertificateException ce
+                                          (throw
+                                            (IOException. "Bad encoding in X509 Certificate" ce))))))
+                                  (set! certs (ArrayList.))))))))))))))))
+
+  (method verify :throws [CertPathValidatorException] ^void [this ^{:tag (List CertId)} certIds
+                                                             ^IssuerInfo issuerInfo
+                                                             ^X509Certificate responderCert
+                                                             ^Date date ^byte/1 nonce
+                                                             ^String variant]
+    (switch responseStatus
+      SUCCESSFUL nil
+      (TRY_LATER INTERNAL_ERROR)
+        (throw (CertPathValidatorException.
+                 (java-str "OCSP response error: " responseStatus)
+                 nil
+                 nil
+                 -1
+                 CertPathValidatorException$BasicReason/UNDETERMINED_REVOCATION_STATUS))
+      (throw (CertPathValidatorException. (java-str "OCSP response error: " responseStatus))))
+    (for-each [^CertId certId certIds]
+      (let [sr (.getSingleResponse this certId)]
+        (when (nil? sr)
+          (when (some? debug) (.println debug (java-str "No response found for CertId: " certId)))
+          (throw
+            (CertPathValidatorException.
+              "OCSP response does not include a response for a certificate supplied in the OCSP request")))
+        (when (some? debug)
+          (.println debug
+                    (java-str "Status of certificate (with serial number "
+                              (Debug/toString (.getSerialNumber certId))
+                              ") is: "
+                              (.getCertStatus sr))))))
+    (when (nil? signerCert)
+      (try
+        (when (some? (.getCertificate issuerInfo))
+          (.add certs (X509CertImpl/toImpl (.getCertificate issuerInfo))))
+        (when (some? responderCert) (.add certs (X509CertImpl/toImpl responderCert)))
+        (catch CertificateException ce
+          (throw (CertPathValidatorException. "Invalid issuer or trusted responder certificate" ce))))
+      (cond
+        (identical? (.getType respId) ResponderId$Type/BY_NAME)
+          (let [rName (.getResponderName respId)]
+            (for-each [^X509CertImpl cert certs]
+              (when (.equals (.getSubjectX500Principal cert) rName) (set! signerCert cert) (break))))
+        (identical? (.getType respId) ResponderId$Type/BY_KEY)
+          (let [ridKeyId (.getKeyIdentifier respId)]
+            (for-each [^X509CertImpl cert certs]
+              (let [^:mutable certKeyId (.getSubjectKeyId cert)]
+                (if (.equals ridKeyId certKeyId)
+                    (do (set! signerCert cert) (break))
+                    (do
+                      (try
+                        (set! certKeyId (KeyIdentifier. (.getPublicKey cert)))
+                        (catch IOException e))
+                      (when (.equals ridKeyId certKeyId) (set! signerCert cert) (break)))))))))
+    (let [^:mutable signedByTrustedResponder false]
+      (when (some? signerCert)
+        (cond
+          (and (.equals (.getSubjectX500Principal signerCert) (.getName issuerInfo))
+               (.equals (.getPublicKey signerCert) (.getPublicKey issuerInfo)))
+            (when (some? debug)
+              (.println debug "OCSP response is signed by the target's Issuing CA"))
+          (.equals signerCert responderCert)
+            (do
+              (set! signedByTrustedResponder true)
+              (when (some? debug) (.println debug "OCSP response is signed by a Trusted Responder")))
+          (.equals (.getIssuerX500Principal signerCert) (.getName issuerInfo))
+            (do
+              (try
+                (let [^{:tag (List String)} keyPurposes (.getExtendedKeyUsage signerCert)]
+                  (when (or (nil? keyPurposes)
+                            (not (.contains keyPurposes (.value KnownOIDs/OCSPSigning))))
+                    (throw (CertPathValidatorException.
+                             "Responder's certificate not valid for signing OCSP responses"))))
+                (catch CertificateParsingException cpe
+                  (throw (CertPathValidatorException.
+                           "Responder's certificate not valid for signing OCSP responses"
+                           cpe))))
+              (let [algChecker (AlgorithmChecker. (.getAnchor issuerInfo) date variant)]
+                (.init algChecker false)
+                (.check algChecker signerCert (Collections/emptySet))
+                (try
+                  (if (nil? date) (.checkValidity signerCert) (.checkValidity signerCert date))
+                  (catch CertificateException e
+                    (throw (CertPathValidatorException.
+                             "Responder's certificate not within the validity period"
+                             e))))
+                (let [noCheck (.getExtension signerCert PKIXExtensions/OCSPNoCheck_Id)]
+                  (when (some? noCheck)
+                    (when (some? debug)
+                      (.println
+                        debug
+                        "Responder's certificate includes the extension id-pkix-ocsp-nocheck.")))
+                  (try
+                    (.verify signerCert (.getPublicKey issuerInfo))
+                    (when (some? debug)
+                      (.println debug "OCSP response is signed by an Authorized Responder"))
+                    (catch GeneralSecurityException e (set! signerCert nil))))))
+          :else
+            (throw (CertPathValidatorException.
+                     "Responder's certificate is not authorized to sign OCSP responses"))))
+      (if (some? signerCert)
+          (do
+            (AlgorithmChecker/check (.getPublicKey signerCert)
+                                    sigAlgId
+                                    variant
+                                    ^TrustAnchor (if signedByTrustedResponder
+                                                     (TrustAnchor. responderCert nil)
+                                                     (.getAnchor issuerInfo)))
+            (when-not (.verifySignature this signerCert)
+              (throw (CertPathValidatorException. "Error verifying OCSP Response's signature"))))
+          (throw (CertPathValidatorException. "Unable to verify OCSP Response's signature")))
+      (when (some? nonce)
+        (when (and (some? responseNonce) (not (Arrays/equals nonce responseNonce)))
+          (throw (CertPathValidatorException. "Nonces don't match"))))
+      (let [now (if (nil? date) (System/currentTimeMillis) (.getTime date))
+            nowPlusSkew (Date. (unchecked-add now MAX_CLOCK_SKEW))
+            nowMinusSkew (Date. (unchecked-subtract now MAX_CLOCK_SKEW))]
+        (for-each [^SingleResponse sr (.values singleResponseMap)]
+          (when (some? debug)
+            (let [^:mutable until ""]
+              (when (some? (.-nextUpdate sr)) (set! until (java-str " until " (.-nextUpdate sr))))
+              (.println debug
+                        (java-str "OCSP response validity interval is from "
+                                  (.-thisUpdate sr)
+                                  until))
+              (.println debug
+                        (java-str "Checking validity of OCSP response on "
+                                  (Date. now)
+                                  " with allowed interval between "
+                                  nowMinusSkew
+                                  " and "
+                                  nowPlusSkew))))
+          (when (or (.before nowPlusSkew (.-thisUpdate sr))
+                    (.after
+                      nowMinusSkew
+                      ^Date (if (some? (.-nextUpdate sr)) (.-nextUpdate sr) (.-thisUpdate sr))))
+            (throw (CertPathValidatorException.
+                     "Response is unreliable: its validity interval is out-of-date")))))))
+
+  (method ^:public getResponseStatus ^ResponseStatus [this]
+    responseStatus)
+
+  (method ^:private verifySignature :throws [CertPathValidatorException] ^boolean [this
+                                                                                   ^X509Certificate cert]
+    (try
+      (let [respSignature (Signature/getInstance (.getName sigAlgId))]
+        (SignatureUtil/initVerifyWithParam respSignature
+                                           (.getPublicKey cert)
+                                           (SignatureUtil/getParamSpec
+                                             (.getName sigAlgId)
+                                             (.getEncodedParams sigAlgId)))
+        (.update respSignature tbsResponseData)
+        (if (.verify respSignature signature)
+            (do (when (some? debug) (.println debug "Verified signature of OCSP Response")) true)
+            (do
+              (when (some? debug) (.println debug "Error verifying signature of OCSP Response"))
+              false)))
+      (catch [InvalidAlgorithmParameterException
+              InvalidKeyException
+              NoSuchAlgorithmException
+              SignatureException] e
+        (throw (CertPathValidatorException. e)))))
+
+  (method ^:public getSingleResponse ^SingleResponse [this ^CertId certId]
+    (cast SingleResponse (.get singleResponseMap certId)))
+
+  (method ^:public getCertIds ^{:tag (Set CertId)} [this]
+    (Collections/unmodifiableSet (.keySet singleResponseMap)))
+
+  (method getSignerCertificate ^X509Certificate [this] signerCert)
+
+  (method ^:public getResponderId ^ResponderId [this] respId)
+
+  (method ^:public toString ^String [this]
+    (let [sb (StringBuilder.)]
+      (.append sb "OCSP Response:\n")
+      (.append (.append (.append sb "Response Status: ") responseStatus) "\n")
+      (.append (.append (.append sb "Responder ID: ") respId) "\n")
+      (.append (.append (.append sb "Produced at: ") producedAtDate) "\n")
+      (let [^:mutable count (.size singleResponseMap)]
+        (.append (.append sb count) ^String (if (== count 1) " response:\n" " responses:\n"))
+        (for-each [^SingleResponse sr (.values singleResponseMap)] (.append (.append sb sr) "\n"))
+        (when (and (some? responseExtensions) (> (.size responseExtensions) 0))
+          (set! count (.size responseExtensions))
+          (.append (.append sb count) ^String (if (== count 1) " extension:\n" " extensions:\n"))
+          (for-each [^String extId (.keySet responseExtensions)]
+            (.append (.append sb (.get responseExtensions extId)) "\n")))
+        (.toString sb))))
+
+  (method ^:private ^:static parseExtensions :throws [IOException] ^{:tag (Map String Extension)} [^DerValue derVal]
+    (let [extDer (.getSequence (.-data derVal) 3)
+          ^{:tag (Map String Extension)} extMap (HashMap/newHashMap (alength extDer))]
+      (for-each [^DerValue extDerVal extDer]
+        (let [ext (sun.security.x509.Extension. extDerVal)]
+          (when (some? debug) (.println debug (java-str "Extension: " ext)))
+          (when (.isCritical ext)
+            (throw (IOException. (java-str "Unsupported OCSP critical extension: "
+                                           (.getExtensionId ext)))))
+          (.put extMap (.getId ext) ext)))
+      extMap))
+
+  (defclass ^:public ^:static ^:final SingleResponse
+    :implements [OCSP$RevocationStatus]
+
+    (field ^:private ^:final ^CertId certId)
+
+    (field ^:private ^:final ^OCSP$RevocationStatus$CertStatus certStatus)
+
+    (field ^:private ^:final ^Date thisUpdate)
+
+    (field ^:private ^:final ^Date nextUpdate)
+
+    (field ^:private ^:final ^Date revocationTime)
+
+    (field ^:private ^:final ^CRLReason revocationReason)
+
+    (field ^:private ^:final ^{:tag (Map String Extension)} singleExtensions)
+
+    (constructor :throws [IOException] ^:private [this ^DerValue der]
+      (when-not (== (.-tag der) DerValue/tag_Sequence)
+        (throw (IOException. "Bad ASN.1 encoding in SingleResponse")))
+      (let [tmp (.-data der)]
+        (set! certId (CertId. (.-data (.getDerValue tmp))))
+        (let [^:mutable derVal (.getDerValue tmp)
+              ^:mutable ^short tag (unchecked-byte (bit-and-int (.-tag derVal) 0x1f))]
+          (if (== tag CERT_STATUS_REVOKED)
+              (do
+                (set! certStatus OCSP$RevocationStatus$CertStatus/REVOKED)
+                (set! revocationTime (.getGeneralizedTime (.-data derVal)))
+                (if (not (== (.available (.-data derVal)) 0))
+                    (let [dv (.getDerValue (.-data derVal))]
+                      (set! tag (unchecked-byte (bit-and-int (.-tag dv) 0x1f)))
+                      (if (== tag 0)
+                          (let [reason (.getEnumerated (.-data dv))]
+                            (if (and (>= reason 0) (< reason (alength values)))
+                                (set! revocationReason (aget values reason))
+                                (set! revocationReason CRLReason/UNSPECIFIED)))
+                          (set! revocationReason CRLReason/UNSPECIFIED)))
+                    (set! revocationReason CRLReason/UNSPECIFIED))
+                (when (some? debug)
+                  (.println debug (java-str "Revocation time: " revocationTime))
+                  (.println debug (java-str "Revocation reason: " revocationReason))))
+              (do
+                (set! revocationTime nil)
+                (set! revocationReason nil)
+                (cond
+                  (== tag CERT_STATUS_GOOD) (set! certStatus OCSP$RevocationStatus$CertStatus/GOOD)
+                  (== tag CERT_STATUS_UNKNOWN)
+                    (set! certStatus OCSP$RevocationStatus$CertStatus/UNKNOWN)
+                  :else (throw (IOException. "Invalid certificate status")))))
+          (set! thisUpdate (.getGeneralizedTime tmp))
+          (when (some? debug) (.println debug (java-str "thisUpdate: " thisUpdate)))
+          (let [^:mutable ^Date tmpNextUpdate nil
+                ^:mutable ^{:tag (Map String Extension)} tmpMap nil]
+            (when (> (.available tmp) 0)
+              (set! derVal (.getDerValue tmp))
+              (when (.isContextSpecific derVal (unchecked-byte 0))
+                (set! tmpNextUpdate (.getGeneralizedTime (.-data derVal)))
+                (when (some? debug) (.println debug (java-str "nextUpdate: " tmpNextUpdate)))
+                (set! derVal (when (> (.available tmp) 0) (.getDerValue tmp))))
+              (when (some? derVal)
+                (if (.isContextSpecific derVal (unchecked-byte 1))
+                    (do
+                      (set! tmpMap (OCSPResponse/parseExtensions derVal))
+                      (when (> (.available tmp) 0)
+                        (throw (IOException. (java-str
+                                               (.available tmp)
+                                               " bytes of additional data in singleResponse")))))
+                    (throw (IOException. (java-str
+                                           "Unsupported singleResponse item, tag = "
+                                           (String/format "%02X" (new Object/1 [(.-tag derVal)]))))))))
+            (set! nextUpdate tmpNextUpdate)
+            (set! singleExtensions (if (some? tmpMap) tmpMap (Collections/emptyMap)))
+            (when (some? debug)
+              (for-each [^Extension ext (.values singleExtensions)]
+                (.println debug (java-str "singleExtension: " ext))))))))
+
+    (method ^:public getCertStatus ^OCSP$RevocationStatus$CertStatus [this]
+      certStatus)
+
+    (method ^:public getCertId ^CertId [this] certId)
+
+    (method ^:public getThisUpdate ^Date [this]
+      (when (some? thisUpdate) (cast Date (.clone thisUpdate))))
+
+    (method ^:public getNextUpdate ^Date [this]
+      (when (some? nextUpdate) (cast Date (.clone nextUpdate))))
+
+    (method ^:public getRevocationTime ^Date [this]
+      (when (some? revocationTime) (cast Date (.clone revocationTime))))
+
+    (method ^:public getRevocationReason ^CRLReason [this] revocationReason)
+
+    (method ^:public getSingleExtensions ^{:tag (Map String Extension)} [this]
+      (Collections/unmodifiableMap singleExtensions))
+
+    (method ^:public toString ^String [this]
+      (let [sb (StringBuilder.)]
+        (.append sb "SingleResponse:\n")
+        (.append sb certId)
+        (.append (.append (.append sb "\nCertStatus: ") certStatus) "\n")
+        (when (identical? certStatus OCSP$RevocationStatus$CertStatus/REVOKED)
+          (.append sb "revocationTime is ")
+          (.append (.append sb revocationTime) "\n")
+          (.append sb "revocationReason is ")
+          (.append (.append sb revocationReason) "\n"))
+        (.append (.append (.append sb "thisUpdate is ") thisUpdate) "\n")
+        (when (some? nextUpdate) (.append (.append (.append sb "nextUpdate is ") nextUpdate) "\n"))
+        (for-each [^Extension ext (.values singleExtensions)]
+          (.append sb "singleExtension: ")
+          (.append (.append sb (.toString ext)) "\n"))
+        (.toString sb))))
+
+  (defclass ^:static ^:final IssuerInfo
+    (field ^:private ^:final ^TrustAnchor anchor)
+
+    (field ^:private ^:final ^X509Certificate certificate)
+
+    (field ^:private ^:final ^X500Principal name)
+
+    (field ^:private ^:final ^PublicKey pubKey)
+
+    (constructor [this ^TrustAnchor anchor]
+      (this. anchor ^X509Certificate (when (some? anchor) (.getTrustedCert anchor))))
+
+    (constructor [this ^X509Certificate issuerCert] (this. nil issuerCert))
+
+    (constructor [this ^TrustAnchor anchor ^X509Certificate issuerCert]
+      (when (and (nil? anchor) (nil? issuerCert))
+        (throw (NullPointerException. "TrustAnchor and issuerCert cannot be null")))
+      (set! (.-anchor this) anchor)
+      (if (some? issuerCert)
+          (do
+            (set! name (.getSubjectX500Principal issuerCert))
+            (set! pubKey (.getPublicKey issuerCert))
+            (set! certificate issuerCert))
+          (do
+            (set! name (.getCA anchor))
+            (set! pubKey (.getCAPublicKey anchor))
+            (set! certificate (.getTrustedCert anchor)))))
+
+    (method getCertificate ^X509Certificate [this] certificate)
+
+    (method getName ^X500Principal [this] name)
+
+    (method getPublicKey ^PublicKey [this] pubKey)
+
+    (method getAnchor ^TrustAnchor [this] anchor)
+
+    (method ^:public toString ^String [this]
+      (java-str "Issuer Info:\nName: " (.toString name) "\nPublic Key:\n" (.toString pubKey) "\n"))))

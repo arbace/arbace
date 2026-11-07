@@ -1,0 +1,350 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/protocol/ftp/FtpURLConnection.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.protocol.ftp)
+
+(import '(java.io BufferedInputStream
+                  FileNotFoundException
+                  FilterInputStream
+                  FilterOutputStream
+                  IOException
+                  InputStream
+                  OutputStream)
+        '(java.net InetSocketAddress
+                   MalformedURLException
+                   Proxy
+                   Proxy$Type
+                   ProxySelector
+                   SocketPermission
+                   URL
+                   UnknownHostException)
+        '(java.security Permission)
+        '(java.util List StringTokenizer)
+        '(sun.net NetworkClient)
+        '(sun.net.ftp FtpClient FtpLoginException FtpProtocolException)
+        '(sun.net.util IPAddressUtil ProxyUtil)
+        '(sun.net.www MessageHeader MeteredStream ParseUtil)
+        '(sun.net.www.protocol.http HttpURLConnection))
+
+(defclass ^:public FtpURLConnection
+  :extends sun.net.www.URLConnection
+
+  (field ^HttpURLConnection http nil)
+
+  (field ^:private ^:final ^Proxy instProxy)
+
+  (field ^InputStream is nil)
+
+  (field ^OutputStream os nil)
+
+  (field ^FtpClient ftp nil)
+
+  (field ^Permission permission)
+
+  (field ^String password)
+
+  (field ^String user)
+
+  (field ^String host)
+
+  (field ^String pathname)
+
+  (field ^String filename)
+
+  (field ^String fullpath)
+
+  (field ^int port)
+
+  (field ^:static ^:final ^int NONE 0)
+
+  (field ^:static ^:final ^int ASCII 1)
+
+  (field ^:static ^:final ^int BIN 2)
+
+  (field ^:static ^:final ^int DIR 3)
+
+  (field ^int type NONE)
+
+  (field ^:private ^int connectTimeout NetworkClient/DEFAULT_CONNECT_TIMEOUT)
+
+  (field ^:private ^int readTimeout NetworkClient/DEFAULT_READ_TIMEOUT)
+
+  (defclass ^:protected ^:static FtpInputStream
+    :extends FilterInputStream
+
+    (field ^FtpClient ftp)
+
+    (constructor [this ^FtpClient cl ^InputStream fd]
+      (super. (BufferedInputStream. fd))
+      (set! ftp cl))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (.close super)
+      (when (some? ftp) (.close ftp))))
+
+  (defclass ^:protected ^:static FtpOutputStream
+    :extends FilterOutputStream
+
+    (field ^FtpClient ftp)
+
+    (constructor [this ^FtpClient cl ^OutputStream fd]
+      (super. fd)
+      (set! ftp cl))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (.close super)
+      (when (some? ftp) (.close ftp))))
+
+  (method ^:private ^:static checkURL :throws [MalformedURLException] ^URL [^URL u]
+    (when (some? u)
+      (when (> (.indexOf (.toExternalForm u) \newline) -1)
+        (throw (MalformedURLException. "Illegal character in URL"))))
+    (let [errMsg (IPAddressUtil/checkAuthority u)]
+      (when (some? errMsg) (throw (MalformedURLException. errMsg)))
+      u))
+
+  (constructor :throws [MalformedURLException] ^:public [this ^URL url]
+    (this. url nil))
+
+  (constructor :throws [MalformedURLException] [this ^URL url ^Proxy p]
+    (super. (FtpURLConnection/checkURL url))
+    (set! instProxy p)
+    (set! host (.getHost url))
+    (set! port (.getPort url))
+    (let [userInfo (.getUserInfo url)]
+      (when (some? userInfo)
+        (let [^:mutable delimiter (.indexOf userInfo \:)]
+          (if (== delimiter -1)
+              (do (set! user (ParseUtil/decode userInfo)) (set! password nil))
+              (do
+                (set! user (ParseUtil/decode (.substring userInfo 0 delimiter)))
+                (set! delimiter (unchecked-inc-int delimiter))
+                (set! password (ParseUtil/decode (.substring userInfo delimiter)))))))))
+
+  (method ^:private setTimeouts ^void [this]
+    (when (some? ftp)
+      (when (>= connectTimeout 0) (.setConnectTimeout ftp connectTimeout))
+      (when (>= readTimeout 0) (.setReadTimeout ftp readTimeout))))
+
+  (method ^:public ^:synchronized connect :throws [IOException] ^void [this]
+    (when-not (.-connected this)
+      (let [^:mutable ^Proxy p nil]
+        (if (nil? instProxy)
+            (let [sel (ProxySelector/getDefault)]
+              (when (some? sel)
+                (let [uri (ParseUtil/toURI (.-url this))
+                      ^:mutable ^{:tag (List Proxy)} proxies nil]
+                  (try
+                    (set! proxies (.select sel uri))
+                    (catch IllegalArgumentException iae
+                      (throw (IOException. "Failed to select a proxy" iae))))
+                  (for-each [^Proxy proxy proxies]
+                    (set! p (ProxyUtil/copyProxy proxy))
+                    (when (or (or (nil? p) (identical? p Proxy/NO_PROXY))
+                              (identical? (.type p) Proxy$Type/SOCKS))
+                      (break))
+                    (if (or (not (identical? (.type p) Proxy$Type/HTTP))
+                            (not (instance? InetSocketAddress (.address p))))
+                        (.connectFailed sel uri (.address p) (IOException. "Wrong proxy type"))
+                        (let [paddr (cast InetSocketAddress (.address p))]
+                          (try
+                            (set! http (HttpURLConnection. (.-url this) p))
+                            (.setDoInput http (.getDoInput this))
+                            (.setDoOutput http (.getDoOutput this))
+                            (when (>= connectTimeout 0) (.setConnectTimeout http connectTimeout))
+                            (when (>= readTimeout 0) (.setReadTimeout http readTimeout))
+                            (.connect http)
+                            (set! (.-connected this) true)
+                            (return)
+                            (catch IOException ioe
+                              (.connectFailed sel uri paddr ioe)
+                              (set! http nil)))))))))
+            (do
+              (set! p instProxy)
+              (when (identical? (.type p) Proxy$Type/HTTP)
+                (set! http (HttpURLConnection. (.-url this) instProxy))
+                (.setDoInput http (.getDoInput this))
+                (.setDoOutput http (.getDoOutput this))
+                (when (>= connectTimeout 0) (.setConnectTimeout http connectTimeout))
+                (when (>= readTimeout 0) (.setReadTimeout http readTimeout))
+                (.connect http)
+                (set! (.-connected this) true)
+                (return))))
+        (when (nil? user)
+          (set! user "anonymous")
+          (let [vers (System/getProperty "java.version")]
+            (set! password (System/getProperty "ftp.protocol.user" (java-str "Java" vers "@")))))
+        (try
+          (set! ftp (FtpClient/create))
+          (when (some? p) (.setProxy ftp p))
+          (.setTimeouts this)
+          (if (not (== port -1))
+              (.connect ftp (InetSocketAddress. host port))
+              (.connect ftp (InetSocketAddress. host (FtpClient/defaultPort))))
+          (catch UnknownHostException e (throw e))
+          (catch FtpProtocolException fe
+            (when (some? ftp) (try (.close ftp) (catch IOException ioe (.addSuppressed fe ioe))))
+            (throw (IOException. fe))))
+        (try
+          (.login ftp user ^char/1 (when (some? password) (.toCharArray password)))
+          (catch FtpProtocolException e
+            (.close ftp)
+            (throw (FtpLoginException. "Invalid username/password"))))
+        (set! (.-connected this) true))))
+
+  (method ^:private decodePath ^void [this ^:mutable ^String path]
+    (let [^:mutable i (.indexOf path ";type=")]
+      (when (>= i 0)
+        (let [s1 (.substring path (unchecked-add-int i 6) (.length path))]
+          (when (.equalsIgnoreCase "i" s1) (set! type BIN))
+          (when (.equalsIgnoreCase "a" s1) (set! type ASCII))
+          (when (.equalsIgnoreCase "d" s1) (set! type DIR))
+          (set! path (.substring path 0 i))))
+      (when (and (and (some? path) (> (.length path) 1)) (== (.charAt path 0) \/))
+        (set! path (.substring path 1)))
+      (when (or (nil? path) (.isEmpty path)) (set! path "./"))
+      (if (not (.endsWith path "/"))
+          (do
+            (set! i (.lastIndexOf path \/))
+            (if (> i 0)
+                (do
+                  (set! filename (.substring path (unchecked-add-int i 1) (.length path)))
+                  (set! filename (ParseUtil/decode filename))
+                  (set! pathname (.substring path 0 i)))
+                (do (set! filename (ParseUtil/decode path)) (set! pathname nil))))
+          (do
+            (set! pathname (.substring path 0 (unchecked-subtract-int (.length path) 1)))
+            (set! filename nil)))
+      (if (some? pathname)
+          (set! fullpath (java-str pathname "/" (if (some? filename) filename "")))
+          (set! fullpath filename))))
+
+  (method ^:private cd :throws [FtpProtocolException IOException] ^void [this ^String path]
+    (when-not (or (nil? path) (.isEmpty path))
+      (if (== (.indexOf path \/) -1)
+          (.changeDirectory ftp (ParseUtil/decode path))
+          (let [token (StringTokenizer. path "/")]
+            (while (.hasMoreTokens token)
+              (.changeDirectory ftp (ParseUtil/decode (.nextToken token))))))))
+
+  (method ^:public getInputStream :throws [IOException] ^InputStream [this]
+    (when-not (.-connected this) (.connect this))
+    (if (some? http)
+        (.getInputStream http)
+        (do
+          (when (some? os) (throw (IOException. "Already opened for output")))
+          (if (some? is)
+              is
+              (let [msgh (MessageHeader.)
+                    isAdir false]
+                (try
+                  (.decodePath this (.getPath (.-url this)))
+                  (if (or (nil? filename) (== type DIR))
+                      (do
+                        (.setAsciiType ftp)
+                        (.cd this pathname)
+                        (if (nil? filename)
+                            (set! is (FtpInputStream. ftp (.list ftp nil)))
+                            (set! is (FtpInputStream. ftp (.nameList ftp filename)))))
+                      (do
+                        (if (== type ASCII) (.setAsciiType ftp) (.setBinaryType ftp))
+                        (.cd this pathname)
+                        (set! is (FtpInputStream. ftp (.getFileStream ftp filename)))))
+                  (try
+                    (let [l (.getLastTransferSize ftp)]
+                      (.add msgh "content-length" (Long/toString l))
+                      (when (> l 0) (set! is (MeteredStream. is l))))
+                    (catch Exception e (.printStackTrace e)))
+                  (if isAdir
+                      (do
+                        (.add msgh "content-type" "text/plain")
+                        (.add msgh "access-type" "directory"))
+                      (do
+                        (.add msgh "access-type" "file")
+                        (let [^:mutable ftype (FtpURLConnection/guessContentTypeFromName fullpath)]
+                          (when (and (nil? ftype) (.markSupported is))
+                            (set! ftype (FtpURLConnection/guessContentTypeFromStream is)))
+                          (when (some? ftype) (.add msgh "content-type" ftype)))))
+                  (catch FileNotFoundException e
+                    (try
+                      (.cd this fullpath)
+                      (.setAsciiType ftp)
+                      (set! is (FtpInputStream. ftp (.list ftp nil)))
+                      (.add msgh "content-type" "text/plain")
+                      (.add msgh "access-type" "directory")
+                      (catch [IOException FtpProtocolException] ex
+                        (let [fnfe (FileNotFoundException. fullpath)]
+                          (when (some? ftp)
+                            (try (.close ftp) (catch IOException ioe (.addSuppressed fnfe ioe))))
+                          (throw fnfe)))))
+                  (catch FtpProtocolException ftpe
+                    (when (some? ftp)
+                      (try (.close ftp) (catch IOException ioe (.addSuppressed ftpe ioe))))
+                    (throw (IOException. ftpe))))
+                (.setProperties this msgh)
+                is)))))
+
+  (method ^:public getOutputStream :throws [IOException] ^OutputStream [this]
+    (when-not (.-connected this) (.connect this))
+    (if (some? http)
+        (let [out (.getOutputStream http)] (.getInputStream http) out)
+        (do
+          (when (some? is) (throw (IOException. "Already opened for input")))
+          (if (some? os)
+              os
+              (do
+                (.decodePath this (.getPath (.-url this)))
+                (when (or (nil? filename) (.isEmpty filename))
+                  (throw (IOException. "illegal filename for a PUT")))
+                (try
+                  (when (some? pathname) (.cd this pathname))
+                  (if (== type ASCII) (.setAsciiType ftp) (.setBinaryType ftp))
+                  (set! os (FtpOutputStream. ftp (.putFileStream ftp filename false)))
+                  (catch FtpProtocolException e (throw (IOException. e))))
+                os)))))
+
+  (method guessContentTypeFromFilename ^String [this ^String fname]
+    (FtpURLConnection/guessContentTypeFromName fname))
+
+  (method ^:public ^{Deprecated {:since "25" :forRemoval true}} getPermission ^Permission [this]
+    (when (nil? permission)
+      (let [^:mutable urlport (.getPort (.-url this))]
+        (set! urlport (if (< urlport 0) (FtpClient/defaultPort) urlport))
+        (let [urlhost (java-str (.-host this) ":" urlport)]
+          (set! permission (SocketPermission. urlhost "connect")))))
+    permission)
+
+  (method ^:public setRequestProperty ^void [this ^String key ^String value]
+    (.setRequestProperty super key value)
+    (when (.equals "type" key)
+      (cond
+        (.equalsIgnoreCase "i" value) (set! type BIN)
+        (.equalsIgnoreCase "a" value) (set! type ASCII)
+        (.equalsIgnoreCase "d" value) (set! type DIR)
+        :else
+          (throw (IllegalArgumentException.
+                   (java-str "Value of '"
+                             key
+                             "' request property was '"
+                             value
+                             "' when it must be either 'i', 'a' or 'd'"))))))
+
+  (method ^:public getRequestProperty ^String [this ^String key]
+    (let [^:mutable value (.getRequestProperty super key)]
+      (when (nil? value)
+        (when (.equals "type" key)
+          (set! value (cond (== type ASCII) "a" (== type DIR) "d" :else "i"))))
+      value))
+
+  (method ^:public setConnectTimeout ^void [this ^int timeout]
+    (when (< timeout 0) (throw (IllegalArgumentException. "timeouts can't be negative")))
+    (set! connectTimeout timeout))
+
+  (method ^:public getConnectTimeout ^int [this]
+    (if (< connectTimeout 0) 0 connectTimeout))
+
+  (method ^:public setReadTimeout ^void [this ^int timeout]
+    (when (< timeout 0) (throw (IllegalArgumentException. "timeouts can't be negative")))
+    (set! readTimeout timeout))
+
+  (method ^:public getReadTimeout ^int [this]
+    (if (< readTimeout 0) 0 readTimeout)))

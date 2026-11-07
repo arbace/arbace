@@ -1,0 +1,286 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/X509Authentication.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.security Principal PrivateKey PublicKey)
+        '(java.security.cert X509Certificate)
+        '(java.security.interfaces ECKey ECPublicKey XECKey)
+        '(java.security.spec ECParameterSpec NamedParameterSpec)
+        '(java.util AbstractMap$SimpleImmutableEntry Arrays Map$Entry)
+        '(javax.security.auth.x500 X500Principal))
+
+(defclass ^:enum X509Authentication
+  :implements [SSLAuthentication]
+
+  (constants
+    (RSA ["RSA" "RSA"])
+    (RSASSA_PSS ["RSASSA-PSS" "RSASSA-PSS"])
+    (RSA_OR_PSS ["RSA_OR_PSS" "RSA" "RSASSA-PSS"])
+    (DSA ["DSA" "DSA"])
+    (EC ["EC" "EC"])
+    (EDDSA ["EdDSA" "EdDSA"]))
+
+  (field ^:final ^String keyAlgorithm)
+
+  (field ^:final ^String/1 keyTypes)
+
+  (constructor [this ^String keyAlgorithm & ^String/1 keyTypes]
+    (set! (.-keyAlgorithm this) keyAlgorithm)
+    (set! (.-keyTypes this) keyTypes))
+
+  (method ^:static valueOfKeyAlgorithm ^X509Authentication [^String keyAlgorithm]
+    (for-each [^X509Authentication au (X509Authentication/values)]
+      (when (.equals (.-keyAlgorithm au) keyAlgorithm) (return au)))
+    nil)
+
+  (method ^:public createPossession ^SSLPossession [this ^HandshakeContext handshakeContext]
+    (X509Authentication/createPossession handshakeContext keyTypes))
+
+  (method ^:public getRelatedHandshakers ^SSLHandshake/1 [this ^HandshakeContext handshakeContext]
+    (if (not (.useTLS13PlusSpec (.-negotiatedProtocol handshakeContext)))
+        (new SSLHandshake/1 [SSLHandshake/CERTIFICATE SSLHandshake/CERTIFICATE_REQUEST])
+        (new SSLHandshake/1 0)))
+
+  (method ^:public getHandshakeProducers ^{:tag (array (Map$Entry Byte HandshakeProducer))} [this
+                                                                                             ^HandshakeContext handshakeContext]
+    (if (not (.useTLS13PlusSpec (.-negotiatedProtocol handshakeContext)))
+        (new Map$Entry/1
+             [(AbstractMap$SimpleImmutableEntry.
+                (.-id SSLHandshake/CERTIFICATE)
+                SSLHandshake/CERTIFICATE)])
+        (new Map$Entry/1 0)))
+
+  (defclass ^:static ^:final X509Possession
+    :implements [SSLPossession]
+
+    (field ^:final ^X509Certificate/1 popCerts)
+
+    (field ^:final ^PrivateKey popPrivateKey)
+
+    (constructor [this ^PrivateKey popPrivateKey ^X509Certificate/1 popCerts]
+      (set! (.-popCerts this) popCerts)
+      (set! (.-popPrivateKey this) popPrivateKey))
+
+    (method getECParameterSpec ^ECParameterSpec [this]
+      (when-not (or (nil? popPrivateKey) (not (.equals "EC" (.getAlgorithm popPrivateKey))))
+        (if (instance? ECKey popPrivateKey)
+            (.getParams (cast ECKey popPrivateKey))
+            (do
+              (when (and (some? popCerts) (not (== (alength popCerts) 0)))
+                (let [publicKey (.getPublicKey (aget popCerts 0))]
+                  (when (instance? ECKey publicKey) (return (.getParams (cast ECKey publicKey))))))
+              nil))))
+
+    (method getXECParameterSpec ^NamedParameterSpec [this]
+      (when-not (or (nil? popPrivateKey) (not (.equals "XEC" (.getAlgorithm popPrivateKey))))
+        (cond
+          (instance? XECKey popPrivateKey)
+            (let [params (.getParams (cast XECKey popPrivateKey))]
+              (when (instance? NamedParameterSpec params) (return (cast NamedParameterSpec params))))
+          (and (some? popCerts) (not (== (alength popCerts) 0)))
+            (let [publicKey (.getPublicKey (aget popCerts 0))]
+              (when (instance? XECKey publicKey)
+                (let [params (.getParams (cast XECKey publicKey))]
+                  (when (instance? NamedParameterSpec params)
+                    (return (cast NamedParameterSpec params)))))))
+        nil)))
+
+  (defclass ^:static ^:final X509Credentials
+    :implements [SSLCredentials]
+
+    (field ^:final ^X509Certificate/1 popCerts)
+
+    (field ^:final ^PublicKey popPublicKey)
+
+    (constructor [this ^PublicKey popPublicKey ^X509Certificate/1 popCerts]
+      (set! (.-popCerts this) popCerts)
+      (set! (.-popPublicKey this) popPublicKey)))
+
+  (method ^:public ^:static createPossession ^SSLPossession [^HandshakeContext context
+                                                             ^String/1 keyTypes]
+    (if (.-isClientMode (.-sslConfig context))
+        (X509Authentication/createClientPossession (cast ClientHandshakeContext context) keyTypes)
+        (X509Authentication/createServerPossession (cast ServerHandshakeContext context) keyTypes)))
+
+  (method ^:private ^:static createClientPossession ^SSLPossession [^ClientHandshakeContext chc
+                                                                    ^String/1 keyTypes]
+    (let [km (.getX509KeyManager (.-sslContext chc))]
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+        (SSLLogger/finest (java-str "X509KeyManager class: " (.getName (.getClass km)))))
+      (let [^:mutable ^String clientAlias nil]
+        (if-instance [^SSLSocketImpl socket (.-transport (.-conContext chc))]
+          (set! clientAlias
+                (.chooseClientAlias km
+                                    keyTypes
+                                    ^Principal/1 (when (some? (.-peerSupportedAuthorities chc))
+                                                   ^Principal/1 (.clone
+                                                                  (.-peerSupportedAuthorities chc)))
+                                    socket))
+          (if-instance [^SSLEngineImpl engine (.-transport (.-conContext chc))]
+            (set! clientAlias
+                  (.chooseEngineClientAlias
+                    km
+                    keyTypes
+                    ^Principal/1 (when (some? (.-peerSupportedAuthorities chc))
+                                   ^Principal/1 (.clone (.-peerSupportedAuthorities chc)))
+                    engine))
+            (when-instance [^QuicTLSEngineImpl quicEngineImpl (.-transport (.-conContext chc))]
+              (if-instance [^X509KeyManagerCertChecking xkm km]
+                (set! clientAlias
+                      (.chooseQuicClientAlias
+                        xkm
+                        keyTypes
+                        ^Principal/1 (when (some? (.-peerSupportedAuthorities chc))
+                                       ^Principal/1 (.clone (.-peerSupportedAuthorities chc)))
+                        quicEngineImpl))
+                (set! clientAlias
+                      (.chooseClientAlias km
+                                          keyTypes
+                                          ^Principal/1 (when (some?
+                                                               (.-peerSupportedAuthorities chc))
+                                                         ^Principal/1 (.clone
+                                                                        (.-peerSupportedAuthorities
+                                                                          chc)))
+                                          nil))))))
+        (if (nil? clientAlias)
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                (SSLLogger/finest
+                  (java-str "No X.509 cert selected for " (Arrays/toString keyTypes))))
+              nil)
+            (let [clientPrivateKey (.getPrivateKey km clientAlias)]
+              (if (nil? clientPrivateKey)
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                      (SSLLogger/finest (java-str clientAlias " is not a private key entry")))
+                    nil)
+                  (let [clientCerts (.getCertificateChain km clientAlias)]
+                    (if (or (nil? clientCerts) (== (alength clientCerts) 0))
+                        (do
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                            (SSLLogger/finest
+                              (java-str clientAlias
+                                        " is a private key entry with no cert chain stored")))
+                          nil)
+                        (let [privateKeyAlgorithm (.getAlgorithm clientPrivateKey)]
+                          (if (not (.contains (Arrays/asList keyTypes) privateKeyAlgorithm))
+                              (do
+                                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                                  (SSLLogger/fine
+                                    (java-str clientAlias
+                                              " private key algorithm "
+                                              privateKeyAlgorithm
+                                              " not in request list")))
+                                nil)
+                              (let [publicKeyAlgorithm (.getAlgorithm
+                                                         (.getPublicKey (aget clientCerts 0)))]
+                                (if (not (.equals privateKeyAlgorithm publicKeyAlgorithm))
+                                    (do
+                                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                                        (SSLLogger/fine
+                                          (java-str
+                                            clientAlias
+                                            " private or public key is not of same algorithm: "
+                                            privateKeyAlgorithm
+                                            " vs "
+                                            publicKeyAlgorithm)))
+                                      nil)
+                                    (X509Possession. clientPrivateKey clientCerts)))))))))))))
+
+  (method ^:private ^:static createServerPossession ^SSLPossession [^ServerHandshakeContext shc
+                                                                    ^String/1 keyTypes]
+    (let [km (.getX509KeyManager (.-sslContext shc))]
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+        (SSLLogger/finest (java-str "X509KeyManager class: " (.getName (.getClass km)))))
+      (for-each [^String keyType keyTypes]
+        (let [^:mutable ^String serverAlias nil]
+          (if-instance [^SSLSocketImpl socket (.-transport (.-conContext shc))]
+            (set! serverAlias
+                  (.chooseServerAlias
+                    km
+                    keyType
+                    ^Principal/1 (when (some? (.-peerSupportedAuthorities shc))
+                                   ^Principal/1 (.clone (.-peerSupportedAuthorities shc)))
+                    socket))
+            (if-instance [^SSLEngineImpl engine (.-transport (.-conContext shc))]
+              (set! serverAlias
+                    (.chooseEngineServerAlias
+                      km
+                      keyType
+                      ^Principal/1 (when (some? (.-peerSupportedAuthorities shc))
+                                     ^Principal/1 (.clone (.-peerSupportedAuthorities shc)))
+                      engine))
+              (when-instance [^QuicTLSEngineImpl quicEngineImpl (.-transport (.-conContext shc))]
+                (if-instance [^X509KeyManagerCertChecking xkm km]
+                  (set! serverAlias
+                        (.chooseQuicServerAlias xkm
+                                                keyType
+                                                ^X500Principal/1 (when (some?
+                                                                         (.-peerSupportedAuthorities
+                                                                           shc))
+                                                                   (.clone
+                                                                     (.-peerSupportedAuthorities
+                                                                       shc)))
+                                                quicEngineImpl))
+                  (set! serverAlias
+                        (.chooseServerAlias
+                          km
+                          keyType
+                          ^Principal/1 (when (some? (.-peerSupportedAuthorities shc))
+                                         ^Principal/1 (.clone (.-peerSupportedAuthorities shc)))
+                          nil))))))
+          (if (nil? serverAlias)
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                (SSLLogger/finest (java-str "No X.509 cert selected for " keyType)))
+              (let [serverPrivateKey (.getPrivateKey km serverAlias)]
+                (if (nil? serverPrivateKey)
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                      (SSLLogger/finest (java-str serverAlias " is not a private key entry")))
+                    (let [serverCerts (.getCertificateChain km serverAlias)]
+                      (if (or (nil? serverCerts) (== (alength serverCerts) 0))
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                            (SSLLogger/finest (java-str serverAlias " is not a certificate entry")))
+                          (let [serverPublicKey (.getPublicKey (aget serverCerts 0))]
+                            (if (or (not (.equals (.getAlgorithm serverPrivateKey) keyType))
+                                    (not (.equals (.getAlgorithm serverPublicKey) keyType)))
+                                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                                  (SSLLogger/fine
+                                    (java-str serverAlias
+                                              " private or public key is not of "
+                                              keyType
+                                              " algorithm")))
+                                (do
+                                  (when (and (not (.useTLS13PlusSpec (.-negotiatedProtocol shc)))
+                                             (.equals keyType "EC"))
+                                    (when-not (instance? ECPublicKey serverPublicKey)
+                                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                                        (SSLLogger/warning
+                                          (java-str
+                                            serverAlias
+                                            " public key is not an instance of ECPublicKey")))
+                                      (continue))
+                                    (let [params (.getParams (cast ECPublicKey serverPublicKey))
+                                          namedGroup (NamedGroup/valueOf params)]
+                                      (when (or (or
+                                                  (nil? namedGroup)
+                                                  (not
+                                                    (NamedGroup/isEnabled
+                                                      (.-sslConfig shc)
+                                                      namedGroup)))
+                                                (and
+                                                  (some? (.-clientRequestedNamedGroups shc))
+                                                  (not
+                                                    (.contains
+                                                      (.-clientRequestedNamedGroups shc)
+                                                      namedGroup))))
+                                        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                                          (SSLLogger/warning
+                                            (java-str
+                                              "Unsupported named group ("
+                                              namedGroup
+                                              ") used in the "
+                                              serverAlias
+                                              " certificate")))
+                                        (continue))))
+                                  (return (X509Possession. serverPrivateKey serverCerts))))))))))))
+      nil)))

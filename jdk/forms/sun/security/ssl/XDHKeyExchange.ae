@@ -1,0 +1,120 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/XDHKeyExchange.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.security GeneralSecurityException
+                        KeyFactory
+                        KeyPairGenerator
+                        PrivateKey
+                        PublicKey
+                        SecureRandom)
+        '(java.security.interfaces XECPublicKey)
+        '(java.security.spec NamedParameterSpec XECPublicKeySpec)
+        '(sun.security.util ECUtil))
+
+(defclass ^:final XDHKeyExchange
+  (field ^:static ^:final ^SSLKeyAgreementGenerator xdheKAGenerator (XDHEKAGenerator.))
+
+  (defclass ^:static ^:final XDHECredentials
+    :implements [NamedGroupCredentials]
+
+    (field ^:final ^XECPublicKey popPublicKey)
+
+    (field ^:final ^NamedGroup namedGroup)
+
+    (constructor [this ^XECPublicKey popPublicKey ^NamedGroup namedGroup]
+      (set! (.-popPublicKey this) popPublicKey)
+      (set! (.-namedGroup this) namedGroup))
+
+    (method ^:public getPublicKey ^PublicKey [this] popPublicKey)
+
+    (method ^:public getNamedGroup ^NamedGroup [this] namedGroup)
+
+    (method ^:static valueOf :throws [IOException GeneralSecurityException] ^XDHECredentials [^NamedGroup namedGroup
+                                                                                              ^byte/1 encodedPoint]
+      (when-not (identical? (.-spec namedGroup) NamedGroup$NamedGroupSpec/NAMED_GROUP_XDH)
+        (throw (RuntimeException. "Credentials decoding:  Not XDH named group")))
+      (when-not (or (nil? encodedPoint) (== (alength encodedPoint) 0))
+        (let [uBytes (.clone encodedPoint)]
+          (Utilities/reverseBytes uBytes)
+          (let [u (BigInteger. 1 uBytes)
+                xecPublicKeySpec (XECPublicKeySpec. (NamedParameterSpec. (.-name namedGroup)) u)
+                factory (KeyFactory/getInstance (.-algorithm namedGroup))
+                publicKey (cast XECPublicKey (.generatePublic factory xecPublicKeySpec))]
+            (XDHECredentials. publicKey namedGroup))))))
+
+  (defclass ^:static ^:final XDHEPossession
+    :implements [NamedGroupPossession]
+
+    (field ^:final ^PrivateKey privateKey)
+
+    (field ^:final ^XECPublicKey publicKey)
+
+    (field ^:final ^NamedGroup namedGroup)
+
+    (constructor [this ^NamedGroup namedGroup ^SecureRandom random]
+      (try
+        (let [kpg (KeyPairGenerator/getInstance (.-algorithm namedGroup))]
+          (.initialize kpg (.-keAlgParamSpec namedGroup) random)
+          (let [kp (.generateKeyPair kpg)]
+            (set! privateKey (.getPrivate kp))
+            (set! publicKey (cast XECPublicKey (.getPublic kp)))))
+        (catch GeneralSecurityException e
+          (throw (RuntimeException. "Could not generate XDH keypair" e))))
+      (set! (.-namedGroup this) namedGroup))
+
+    (method ^:public encode ^byte/1 [this]
+      (let [^:mutable uBytes (ECUtil/trimZeroes (.toByteArray (.getU publicKey)))
+            ^:mutable ^int expLength 0]
+        (switch namedGroup
+          X25519 (set! expLength 32)
+          X448 (set! expLength 56)
+          (throw (RuntimeException. "Invalid XDH group")))
+        (when (> (alength uBytes) expLength)
+          (throw (RuntimeException. "Encoded XDH key too large")))
+        (when-not (== (alength uBytes) expLength)
+          (let [tmp (new byte/1 expLength)]
+            (System/arraycopy uBytes
+                              0
+                              tmp
+                              (unchecked-subtract-int expLength (alength uBytes))
+                              (alength uBytes))
+            (set! uBytes tmp)))
+        (Utilities/reverseBytes uBytes)
+        uBytes))
+
+    (method ^:public getPublicKey ^PublicKey [this] publicKey)
+
+    (method ^:public getNamedGroup ^NamedGroup [this] namedGroup)
+
+    (method ^:public getPrivateKey ^PrivateKey [this] privateKey))
+
+  (defclass ^:private ^:static ^:final XDHEKAGenerator
+    :implements [SSLKeyAgreementGenerator]
+
+    (constructor ^:private [this])
+
+    (method ^:public createKeyDerivation :throws [IOException] ^SSLKeyDerivation [this
+                                                                                  ^HandshakeContext context]
+      (let [^:mutable ^XDHEPossession xdhePossession nil
+            ^:mutable ^XDHECredentials xdheCredentials nil]
+        (for-each [^SSLPossession poss (.-handshakePossessions context)]
+          (when-not (not (instance? XDHEPossession poss))
+            (let [ng (.-namedGroup (cast XDHEPossession poss))]
+              (for-each [^SSLCredentials cred (.-handshakeCredentials context)]
+                (when-not (not (instance? XDHECredentials cred))
+                  (when (.equals ng (.-namedGroup (cast XDHECredentials cred)))
+                    (set! xdheCredentials (cast XDHECredentials cred))
+                    (break))))
+              (when (some? xdheCredentials)
+                (set! xdhePossession (cast XDHEPossession poss))
+                (break)))))
+        (when (or (nil? xdhePossession) (nil? xdheCredentials))
+          (.fatal (.-conContext context)
+                  Alert/HANDSHAKE_FAILURE
+                  "No sufficient XDHE key agreement parameters negotiated"))
+        (KAKeyDerivation. "XDH"
+                          context
+                          (.-privateKey xdhePossession)
+                          (.-popPublicKey xdheCredentials))))))

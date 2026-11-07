@@ -1,0 +1,252 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/x509/IPAddressName.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.x509)
+
+(import '(java.io IOException)
+        '(java.net InetAddress)
+        '(java.util Arrays)
+        '(sun.security.util BitArray DerOutputStream DerValue HexDumpEncoder))
+
+(defclass ^:public IPAddressName
+  :implements [GeneralNameInterface]
+
+  (field ^:private ^byte/1 address)
+
+  (field ^:private ^:final ^boolean isIPv4)
+
+  (field ^:private ^String name)
+
+  (constructor :throws [IOException] ^:public [this ^DerValue derValue]
+    (this. (.getOctetString derValue)))
+
+  (constructor :throws [IOException] ^:public [this ^byte/1 address]
+    (cond
+      (or (== (alength address) 4) (== (alength address) 8)) (set! isIPv4 true)
+      (or (== (alength address) 16) (== (alength address) 32)) (set! isIPv4 false)
+      :else (throw (IOException. "Invalid IPAddressName")))
+    (set! (.-address this) address))
+
+  (constructor :throws [IOException] ^:public [this ^String name]
+    (when (or (nil? name) (.isEmpty name))
+      (throw (IOException. "IPAddress cannot be null or empty")))
+    (when (== (.charAt name (unchecked-subtract-int (.length name) 1)) \/)
+      (throw (IOException. (java-str "Invalid IPAddress: " name))))
+    (cond
+      (>= (.indexOf name \:) 0) (do (.parseIPv6 this name) (set! isIPv4 false))
+      (>= (.indexOf name \.) 0) (do (.parseIPv4 this name) (set! isIPv4 true))
+      :else (throw (IOException. (java-str "Invalid IPAddress: " name)))))
+
+  (method ^:private parseIPv4 :throws [IOException] ^void [this ^String name]
+    (let [slashNdx (.indexOf name \/)]
+      (if (== slashNdx -1)
+          (set! address (.getAddress (InetAddress/getByName name)))
+          (do
+            (set! address (new byte/1 8))
+            (let [mask (.getAddress (InetAddress/getByName
+                                      (.substring name (unchecked-add-int slashNdx 1))))
+                  host (.getAddress (InetAddress/getByName (.substring name 0 slashNdx)))]
+              (System/arraycopy host 0 address 0 4)
+              (System/arraycopy mask 0 address 4 4))))))
+
+  (field ^:private ^:static ^:final ^int MASKSIZE 16)
+
+  (method ^:private parseIPv6 :throws [IOException] ^void [this ^String name]
+    (let [slashNdx (.indexOf name \/)]
+      (if (== slashNdx -1)
+          (set! address (.getAddress (InetAddress/getByName name)))
+          (do
+            (set! address (new byte/1 32))
+            (let [base (.getAddress (InetAddress/getByName (.substring name 0 slashNdx)))]
+              (System/arraycopy base 0 address 0 16)
+              (let [prefixLen (Integer/parseInt (.substring name (unchecked-add-int slashNdx 1)))]
+                (when (or (< prefixLen 0) (> prefixLen 128))
+                  (throw (IOException. (java-str
+                                         "IPv6Address prefix length ("
+                                         prefixLen
+                                         ") in out of valid range [0,128]"))))
+                (let [bitArray (BitArray. (unchecked-multiply-int MASKSIZE 8))]
+                  (loop [^int i 0]
+                    (when (< i prefixLen) (.set bitArray i true) (recur (unchecked-inc-int i))))
+                  (let [maskArray (.toByteArray bitArray)]
+                    (System/arraycopy maskArray 0 address MASKSIZE MASKSIZE)))))))))
+
+  (method ^:public getType ^int [this] IPAddressName/NAME_IP)
+
+  (method ^:public encode ^void [this ^DerOutputStream out]
+    (.putOctetString out address))
+
+  (method ^:public toString ^String [this]
+    (try
+      (java-str "IPAddress: " (.getName this))
+      (catch IOException ioe
+        (let [enc (HexDumpEncoder.)] (java-str "IPAddress: " (.encodeBuffer enc address))))))
+
+  (method ^:public getName :throws [IOException] ^String [this]
+    (if (some? name)
+        name
+        (do
+          (if isIPv4
+              (let [host (new byte/1 4)]
+                (System/arraycopy address 0 host 0 4)
+                (set! name (.getHostAddress (InetAddress/getByAddress host)))
+                (when (== (alength address) 8)
+                  (let [mask (new byte/1 4)]
+                    (System/arraycopy address 4 mask 0 4)
+                    (set! name (java-str name \/ (.getHostAddress (InetAddress/getByAddress mask)))))))
+              (let [host (new byte/1 16)]
+                (System/arraycopy address 0 host 0 16)
+                (set! name (.getHostAddress (InetAddress/getByAddress host)))
+                (when (== (alength address) 32)
+                  (let [maskBytes (new byte/1 16)]
+                    (System/arraycopy address 16 maskBytes 0 16)
+                    (let [ba (BitArray. (unchecked-multiply-int 16 8) maskBytes)
+                          ^:mutable ^int i 0]
+                      (while (< i (unchecked-multiply-int 16 8))
+                        (when-not (.get ba i) (break))
+                        (set! i (unchecked-inc-int i)))
+                      (set! name (java-str name \/ i))
+                      (while (< i (unchecked-multiply-int 16 8))
+                        (when (.get ba i)
+                          (throw (IOException. (java-str
+                                                 "Invalid IPv6 subdomain - set bit "
+                                                 i
+                                                 " not contiguous"))))
+                        (set! i (unchecked-inc-int i))))))))
+          name)))
+
+  (method ^:public getBytes ^byte/1 [this] (.clone address))
+
+  (method ^:public equals ^boolean [this obj]
+    (if (identical? this obj)
+        true
+        (if-instance [^IPAddressName otherName obj]
+          (let [other (.-address otherName)]
+            (cond
+              (not (== (alength other) (alength address))) false
+              (or (== (alength address) 8) (== (alength address) 32))
+                (let [maskLen (unchecked-divide-int (alength address) 2)]
+                  (loop [^int i 0]
+                    (when (< i maskLen)
+                      (let [maskedThis (unchecked-byte
+                                         (bit-and-int
+                                           (aget address i)
+                                           (aget address (unchecked-add-int i maskLen))))
+                            maskedOther (unchecked-byte
+                                          (bit-and-int
+                                            (aget other i)
+                                            (aget other (unchecked-add-int i maskLen))))]
+                        (if (not (== maskedThis maskedOther))
+                            (return false)
+                            (recur (unchecked-inc-int i))))))
+                  (Arrays/equals address maskLen (alength address) other maskLen (alength address)))
+              :else (Arrays/equals other address)))
+          false)))
+
+  (method ^:public hashCode ^int [this] (Arrays/hashCode address))
+
+  (method ^:public constrains :throws [UnsupportedOperationException] ^int [this
+                                                                            ^GeneralNameInterface inputName]
+    (let [^:mutable ^int constraintType 0]
+      (cond
+        (nil? inputName) (set! constraintType IPAddressName/NAME_DIFF_TYPE)
+        (not (== (.getType inputName) IPAddressName/NAME_IP))
+          (set! constraintType IPAddressName/NAME_DIFF_TYPE)
+        (.equals inputName this) (set! constraintType IPAddressName/NAME_MATCH)
+        :else
+          (let [otherName (cast IPAddressName inputName)
+                otherAddress (.-address otherName)]
+            (cond
+              (or (and (== (alength otherAddress) 4) (== (alength address) 4))
+                  (and (== (alength otherAddress) 16) (== (alength address) 16)))
+                (set! constraintType IPAddressName/NAME_SAME_TYPE)
+              (or (and (== (alength otherAddress) 8) (== (alength address) 8))
+                  (and (== (alength otherAddress) 32) (== (alength address) 32)))
+                (let [^:mutable otherSubsetOfThis true
+                      ^:mutable thisSubsetOfOther true
+                      ^:mutable thisEmpty false
+                      ^:mutable otherEmpty false
+                      maskOffset (unchecked-divide-int (alength address) 2)]
+                  (loop [^int i 0]
+                    (when (< i maskOffset)
+                      (when-not (== (unchecked-byte
+                                      (bit-and-int
+                                        (aget address i)
+                                        (aget address (unchecked-add-int i maskOffset))))
+                                    (aget address i))
+                        (set! thisEmpty true))
+                      (when-not (== (unchecked-byte
+                                      (bit-and-int
+                                        (aget otherAddress i)
+                                        (aget otherAddress (unchecked-add-int i maskOffset))))
+                                    (aget otherAddress i))
+                        (set! otherEmpty true))
+                      (when-not (and (== (unchecked-byte
+                                           (bit-and-int
+                                             (aget address (unchecked-add-int i maskOffset))
+                                             (aget otherAddress (unchecked-add-int i maskOffset))))
+                                         (aget address (unchecked-add-int i maskOffset)))
+                                     (== (unchecked-byte
+                                           (bit-and-int
+                                             (aget address i)
+                                             (aget address (unchecked-add-int i maskOffset))))
+                                         (unchecked-byte
+                                           (bit-and-int
+                                             (aget otherAddress i)
+                                             (aget address (unchecked-add-int i maskOffset))))))
+                        (set! otherSubsetOfThis false))
+                      (if (not
+                            (and (== (unchecked-byte
+                                       (bit-and-int
+                                         (aget otherAddress (unchecked-add-int i maskOffset))
+                                         (aget address (unchecked-add-int i maskOffset))))
+                                     (aget otherAddress (unchecked-add-int i maskOffset)))
+                                 (== (unchecked-byte
+                                       (bit-and-int
+                                         (aget otherAddress i)
+                                         (aget otherAddress (unchecked-add-int i maskOffset))))
+                                     (unchecked-byte
+                                       (bit-and-int
+                                         (aget address i)
+                                         (aget otherAddress (unchecked-add-int i maskOffset)))))))
+                          (do (set! thisSubsetOfOther false) (recur (unchecked-inc-int i)))
+                          (recur (unchecked-inc-int i)))))
+                  (cond
+                    (or thisEmpty otherEmpty)
+                      (cond
+                        (and thisEmpty otherEmpty) (set! constraintType IPAddressName/NAME_MATCH)
+                        thisEmpty (set! constraintType IPAddressName/NAME_WIDENS)
+                        :else (set! constraintType IPAddressName/NAME_NARROWS))
+                    otherSubsetOfThis (set! constraintType IPAddressName/NAME_NARROWS)
+                    thisSubsetOfOther (set! constraintType IPAddressName/NAME_WIDENS)
+                    :else (set! constraintType IPAddressName/NAME_SAME_TYPE)))
+              (or (and (== (alength otherAddress) 8) (== (alength address) 4))
+                  (and (== (alength otherAddress) 32) (== (alength address) 16)))
+                (let [^:mutable ^int i 0
+                      maskOffset (unchecked-divide-int (alength otherAddress) 2)]
+                  (while (< i maskOffset)
+                    (when-not (== (bit-and-int (aget address i)
+                                               (aget otherAddress (unchecked-add-int i maskOffset)))
+                                  (aget otherAddress i))
+                      (break))
+                    (set! i (unchecked-inc-int i)))
+                  (if (== i maskOffset)
+                      (set! constraintType IPAddressName/NAME_WIDENS)
+                      (set! constraintType IPAddressName/NAME_SAME_TYPE)))
+              (or (and (== (alength otherAddress) 4) (== (alength address) 8))
+                  (and (== (alength otherAddress) 16) (== (alength address) 32)))
+                (let [^:mutable ^int i 0
+                      maskOffset (unchecked-divide-int (alength address) 2)]
+                  (while (< i maskOffset)
+                    (when-not (== (bit-and-int (aget otherAddress i)
+                                               (aget address (unchecked-add-int i maskOffset)))
+                                  (aget address i))
+                      (break))
+                    (set! i (unchecked-inc-int i)))
+                  (if (== i maskOffset)
+                      (set! constraintType IPAddressName/NAME_NARROWS)
+                      (set! constraintType IPAddressName/NAME_SAME_TYPE)))
+              :else (set! constraintType IPAddressName/NAME_SAME_TYPE))))
+      constraintType))
+
+  (method ^:public subtreeDepth :throws [UnsupportedOperationException] ^int [this]
+    (throw (UnsupportedOperationException. "subtreeDepth() not defined for IPAddressName"))))

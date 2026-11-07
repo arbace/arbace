@@ -1,0 +1,724 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/Finished.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security GeneralSecurityException
+                        InvalidKeyException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        ProviderException)
+        '(java.text MessageFormat)
+        '(java.util Locale)
+        '(javax.crypto KDF KeyGenerator Mac SecretKey)
+        '(javax.crypto.spec HKDFParameterSpec IvParameterSpec)
+        '(javax.net.ssl SSLPeerUnverifiedException)
+        '(jdk.internal.event EventHelper TLSHandshakeEvent)
+        '(sun.security.internal.spec TlsPrfParameterSpec)
+        '(sun.security.util HexDumpEncoder KeyUtil))
+
+(defclass ^:final Finished
+  (field ^:static ^:final ^SSLConsumer t12HandshakeConsumer (T12FinishedConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer t12HandshakeProducer (T12FinishedProducer.))
+
+  (field ^:static ^:final ^SSLConsumer t13HandshakeConsumer (T13FinishedConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer t13HandshakeProducer (T13FinishedProducer.))
+
+  (defclass ^:private ^:static ^:final FinishedMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:private ^:final ^byte/1 verifyData)
+
+    (constructor :throws [IOException] [this ^HandshakeContext context]
+      (super. context)
+      (let [vds (VerifyDataScheme/valueOf (.-negotiatedProtocol context))
+            ^:mutable ^byte/1 vd nil]
+        (try
+          (set! vd (.createVerifyData vds context false))
+          (catch IOException ioe
+            (throw (.fatal (.-conContext context)
+                           Alert/ILLEGAL_PARAMETER
+                           "Failed to generate verify_data"
+                           ioe))))
+        (set! (.-verifyData this) vd)))
+
+    (constructor :throws [IOException] [this ^HandshakeContext context ^ByteBuffer m]
+      (super. context)
+      (let [^:mutable ^int verifyDataLen 12]
+        (cond
+          (identical? (.-negotiatedProtocol context) ProtocolVersion/SSL30) (set! verifyDataLen 36)
+          (.useTLS13PlusSpec (.-negotiatedProtocol context))
+            (set! verifyDataLen (.-hashLength (.-hashAlg (.-negotiatedCipherSuite context)))))
+        (when-not (== (.remaining m) verifyDataLen)
+          (throw (.fatal (.-conContext context)
+                         Alert/DECODE_ERROR
+                         (java-str "Inappropriate finished message: need "
+                                   verifyDataLen
+                                   " but remaining "
+                                   (.remaining m)
+                                   " bytes verify_data"))))
+        (set! (.-verifyData this) (new byte/1 verifyDataLen))
+        (.get m verifyData)
+        (let [vd (VerifyDataScheme/valueOf (.-negotiatedProtocol context))
+              ^:mutable ^byte/1 myVerifyData nil]
+          (try
+            (set! myVerifyData (.createVerifyData vd context true))
+            (catch IOException ioe
+              (throw (.fatal (.-conContext context)
+                             Alert/ILLEGAL_PARAMETER
+                             "Failed to generate verify_data"
+                             ioe))))
+          (when-not (MessageDigest/isEqual myVerifyData verifyData)
+            (throw (.fatal (.-conContext context)
+                           Alert/DECRYPT_ERROR
+                           "The Finished message cannot be verified."))))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/FINISHED)
+
+    (method ^:public messageLength ^int [this] (alength verifyData))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (.write hos verifyData))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"Finished\": '{'\n  \"verify data\": '{'\n{0}\n  '}'\n'}'"
+                            Locale/ENGLISH)
+            hexEncoder (HexDumpEncoder.)
+            messageFields (new Object/1 [(Utilities/indent (.encode hexEncoder verifyData) "    ")])]
+        (.format messageFormat messageFields))))
+
+  (defclass ^:interface VerifyDataGenerator
+    (method createVerifyData :throws [IOException] ^byte/1 [this ^HandshakeContext context
+                                                            ^boolean isValidation]))
+
+  (defclass ^:enum VerifyDataScheme
+    (constants
+      (SSL30 ["kdf_ssl30" (S30VerifyDataGenerator.)])
+      (TLS10 ["kdf_tls10" (T10VerifyDataGenerator.)])
+      (TLS12 ["kdf_tls12" (T12VerifyDataGenerator.)])
+      (TLS13 ["kdf_tls13" (T13VerifyDataGenerator.)]))
+
+    (field ^:final ^String name)
+
+    (field ^:final ^VerifyDataGenerator generator)
+
+    (constructor [this ^String name ^VerifyDataGenerator verifyDataGenerator]
+      (set! (.-name this) name)
+      (set! (.-generator this) verifyDataGenerator))
+
+    (method ^:static valueOf ^VerifyDataScheme [^ProtocolVersion protocolVersion]
+      (switch protocolVersion
+        SSL30 VerifyDataScheme/SSL30
+        (TLS10 TLS11 DTLS10) VerifyDataScheme/TLS10
+        (TLS12 DTLS12) VerifyDataScheme/TLS12
+        TLS13 VerifyDataScheme/TLS13
+        nil))
+
+    (method ^:public createVerifyData :throws [IOException] ^byte/1 [this ^HandshakeContext context
+                                                                     ^boolean isValidation]
+      (if (some? generator)
+          (.createVerifyData generator context isValidation)
+          (throw (UnsupportedOperationException. "Not supported yet.")))))
+
+  (defclass ^:private ^:static ^:final S30VerifyDataGenerator
+    :implements [VerifyDataGenerator]
+
+    (method ^:public createVerifyData :throws [IOException] ^byte/1 [this ^HandshakeContext context
+                                                                     ^boolean isValidation]
+      (let [handshakeHash (.-handshakeHash context)
+            masterSecretKey (.getMasterSecret (.-handshakeSession context))
+            useClientLabel (or (and (.-isClientMode (.-sslConfig context)) (not isValidation))
+                               (and (not (.-isClientMode (.-sslConfig context))) isValidation))]
+        (.digest handshakeHash useClientLabel masterSecretKey))))
+
+  (defclass ^:private ^:static ^:final T10VerifyDataGenerator
+    :implements [VerifyDataGenerator]
+
+    (method ^:public createVerifyData :throws [IOException] ^byte/1 [this ^HandshakeContext context
+                                                                     ^boolean isValidation]
+      (let [handshakeHash (.-handshakeHash context)
+            masterSecretKey (.getMasterSecret (.-handshakeSession context))
+            useClientLabel (or (and (.-isClientMode (.-sslConfig context)) (not isValidation))
+                               (and (not (.-isClientMode (.-sslConfig context))) isValidation))
+            ^String tlsLabel (if useClientLabel "client finished" "server finished")]
+        (try
+          (let [seed (.digest handshakeHash)
+                prfAlg "SunTlsPrf"
+                hashAlg CipherSuite$HashAlg/H_NONE
+                spec (TlsPrfParameterSpec. masterSecretKey
+                                           tlsLabel
+                                           seed
+                                           12
+                                           (.-name hashAlg)
+                                           (.-hashLength hashAlg)
+                                           (.-blockSize hashAlg))
+                kg (KeyGenerator/getInstance prfAlg)]
+            (.init kg spec)
+            (let [prfKey (.generateKey kg)]
+              (when-not (.equals "RAW" (.getFormat prfKey))
+                (throw (ProviderException.
+                         (java-str "Invalid PRF output, format must be RAW. Format received: "
+                                   (.getFormat prfKey)))))
+              (.getEncoded prfKey)))
+          (catch GeneralSecurityException e (throw (RuntimeException. "PRF failed" e)))))))
+
+  (defclass ^:private ^:static ^:final T12VerifyDataGenerator
+    :implements [VerifyDataGenerator]
+
+    (method ^:public createVerifyData :throws [IOException] ^byte/1 [this ^HandshakeContext context
+                                                                     ^boolean isValidation]
+      (let [cipherSuite (.-negotiatedCipherSuite context)
+            handshakeHash (.-handshakeHash context)
+            masterSecretKey (.getMasterSecret (.-handshakeSession context))
+            useClientLabel (or (and (.-isClientMode (.-sslConfig context)) (not isValidation))
+                               (and (not (.-isClientMode (.-sslConfig context))) isValidation))
+            ^String tlsLabel (if useClientLabel "client finished" "server finished")]
+        (try
+          (let [seed (.digest handshakeHash)
+                prfAlg "SunTls12Prf"
+                hashAlg (.-hashAlg cipherSuite)
+                spec (TlsPrfParameterSpec. masterSecretKey
+                                           tlsLabel
+                                           seed
+                                           12
+                                           (.-name hashAlg)
+                                           (.-hashLength hashAlg)
+                                           (.-blockSize hashAlg))
+                kg (KeyGenerator/getInstance prfAlg)]
+            (.init kg spec)
+            (let [prfKey (.generateKey kg)]
+              (when-not (.equals "RAW" (.getFormat prfKey))
+                (throw (ProviderException.
+                         (java-str "Invalid PRF output, format must be RAW. Format received: "
+                                   (.getFormat prfKey)))))
+              (.getEncoded prfKey)))
+          (catch GeneralSecurityException e (throw (RuntimeException. "PRF failed" e)))))))
+
+  (defclass ^:private ^:static ^:final T13VerifyDataGenerator
+    :implements [VerifyDataGenerator]
+
+    (field ^:private ^:static ^:final ^byte/1 hkdfLabel (.getBytes "tls13 finished"))
+
+    (field ^:private ^:static ^:final ^byte/1 hkdfContext (new byte/1 0))
+
+    (method ^:public createVerifyData :throws [IOException] ^byte/1 [this ^HandshakeContext context
+                                                                     ^boolean isValidation]
+      (let [hashAlg (.-hashAlg (.-negotiatedCipherSuite context))
+            ^SecretKey secret (if isValidation
+                                  (.-baseReadSecret context)
+                                  (.-baseWriteSecret context))
+            kdf (SSLBasicKeyDerivation. secret hashAlg hkdfLabel hkdfContext)
+            finishedSecret (.deriveKey kdf "TlsFinishedSecret")
+            hmacAlg (java-str "Hmac" (.replace (.-name hashAlg) "-" ""))]
+        (try
+          (let [hmac (Mac/getInstance hmacAlg)]
+            (.init hmac finishedSecret)
+            (.doFinal hmac (.digest (.-handshakeHash context))))
+          (catch [NoSuchAlgorithmException InvalidKeyException] ex
+            (throw (ProviderException. "Failed to generate verify_data" ex)))
+          (finally (KeyUtil/destroySecretKeys finishedSecret))))))
+
+  (defclass ^:private ^:static ^:final T12FinishedProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [hc (cast HandshakeContext context)]
+        (if (.-isClientMode (.-sslConfig hc))
+            (.onProduceFinished this (cast ClientHandshakeContext context) message)
+            (.onProduceFinished this (cast ServerHandshakeContext context) message))))
+
+    (method ^:private onProduceFinished :throws [IOException] ^byte/1 [this
+                                                                       ^ClientHandshakeContext chc
+                                                                       ^SSLHandshake$HandshakeMessage message]
+      (.update (.-handshakeHash chc))
+      (let [fm (FinishedMessage. chc)]
+        (.produce ChangeCipherSpec/t10Producer chc message)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Produced client Finished handshake message" fm))
+        (.write fm (.-handshakeOutput chc))
+        (.flush (.-handshakeOutput chc))
+        (when (.-secureRenegotiation (.-conContext chc))
+          (set! (.-clientVerifyData (.-conContext chc)) (.-verifyData fm)))
+        (when (.-statelessResumption chc)
+          (.put (.-handshakeConsumers chc)
+                (.-id SSLHandshake/NEW_SESSION_TICKET)
+                SSLHandshake/NEW_SESSION_TICKET))
+        (if (not (.-isResumption chc))
+            (do
+              (.put (.-consumers (.-conContext chc))
+                    (.-id ContentType/CHANGE_CIPHER_SPEC)
+                    ChangeCipherSpec/t10Consumer)
+              (.put (.-handshakeConsumers chc) (.-id SSLHandshake/FINISHED) SSLHandshake/FINISHED)
+              (.expectingFinishFlight (.-inputRecord (.-conContext chc))))
+            (do
+              (when (.isRejoinable (.-handshakeSession chc))
+                (.put (cast SSLSessionContextImpl
+                            (.engineGetClientSessionContext (.-sslContext chc)))
+                      (.-handshakeSession chc)))
+              (set! (.-conSession (.-conContext chc)) (.finish (.-handshakeSession chc)))
+              (set! (.-protocolVersion (.-conContext chc)) (.-negotiatedProtocol chc))
+              (set! (.-handshakeFinished chc) true)
+              (when-not (.isDTLS (.-sslContext chc)) (.finishHandshake (.-conContext chc)))))
+        nil))
+
+    (method ^:private onProduceFinished :throws [IOException] ^byte/1 [this
+                                                                       ^ServerHandshakeContext shc
+                                                                       ^SSLHandshake$HandshakeMessage message]
+      (when (.-statelessResumption shc) (.produce NewSessionTicket/handshake12Producer shc message))
+      (.update (.-handshakeHash shc))
+      (let [fm (FinishedMessage. shc)]
+        (.produce ChangeCipherSpec/t10Producer shc message)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Produced server Finished handshake message" fm))
+        (.write fm (.-handshakeOutput shc))
+        (.flush (.-handshakeOutput shc))
+        (when (.-secureRenegotiation (.-conContext shc))
+          (set! (.-serverVerifyData (.-conContext shc)) (.-verifyData fm)))
+        (if (.-isResumption shc)
+            (do
+              (.put (.-consumers (.-conContext shc))
+                    (.-id ContentType/CHANGE_CIPHER_SPEC)
+                    ChangeCipherSpec/t10Consumer)
+              (.put (.-handshakeConsumers shc) (.-id SSLHandshake/FINISHED) SSLHandshake/FINISHED)
+              (.expectingFinishFlight (.-inputRecord (.-conContext shc))))
+            (do
+              (cond
+                (and (.-statelessResumption shc) (.isStatelessable (.-handshakeSession shc)))
+                  (.setContext (.-handshakeSession shc)
+                               (cast SSLSessionContextImpl
+                                     (.engineGetServerSessionContext (.-sslContext shc))))
+                (.isRejoinable (.-handshakeSession shc))
+                  (.put (cast SSLSessionContextImpl
+                              (.engineGetServerSessionContext (.-sslContext shc)))
+                        (.-handshakeSession shc)))
+              (set! (.-conSession (.-conContext shc)) (.finish (.-handshakeSession shc)))
+              (set! (.-protocolVersion (.-conContext shc)) (.-negotiatedProtocol shc))
+              (set! (.-handshakeFinished shc) true)
+              (when-not (.isDTLS (.-sslContext shc)) (.finishHandshake (.-conContext shc)))))
+        nil)))
+
+  (defclass ^:private ^:static ^:final T12FinishedConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [hc (cast HandshakeContext context)]
+        (.remove (.-handshakeConsumers hc) (.-id SSLHandshake/FINISHED))
+        (when (.containsKey (.-consumers (.-conContext hc)) (.-id ContentType/CHANGE_CIPHER_SPEC))
+          (throw (.fatal (.-conContext hc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Missing ChangeCipherSpec message")))
+        (if (.-isClientMode (.-sslConfig hc))
+            (.onConsumeFinished this (cast ClientHandshakeContext context) message)
+            (.onConsumeFinished this (cast ServerHandshakeContext context) message))))
+
+    (method ^:private onConsumeFinished :throws [IOException] ^void [this
+                                                                     ^ClientHandshakeContext chc
+                                                                     ^ByteBuffer message]
+      (let [fm (FinishedMessage. chc message)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Consuming server Finished handshake message" fm))
+        (when (.-secureRenegotiation (.-conContext chc))
+          (set! (.-serverVerifyData (.-conContext chc)) (.-verifyData fm)))
+        (if (not (.-isResumption chc))
+            (do
+              (when (.isRejoinable (.-handshakeSession chc))
+                (.put (cast SSLSessionContextImpl
+                            (.engineGetClientSessionContext (.-sslContext chc)))
+                      (.-handshakeSession chc)))
+              (set! (.-conSession (.-conContext chc)) (.finish (.-handshakeSession chc)))
+              (set! (.-protocolVersion (.-conContext chc)) (.-negotiatedProtocol chc))
+              (set! (.-handshakeFinished chc) true)
+              (Finished/recordEvent (.-conSession (.-conContext chc)))
+              (when-not (.isDTLS (.-sslContext chc)) (.finishHandshake (.-conContext chc))))
+            (.put (.-handshakeProducers chc) (.-id SSLHandshake/FINISHED) SSLHandshake/FINISHED))
+        (let [probableHandshakeMessages (new SSLHandshake/1 [SSLHandshake/FINISHED])]
+          (for-each [^SSLHandshake hs probableHandshakeMessages]
+            (let [handshakeProducer (cast HandshakeProducer
+                                          (.remove (.-handshakeProducers chc) (.-id hs)))]
+              (when (some? handshakeProducer) (.produce handshakeProducer chc fm)))))))
+
+    (method ^:private onConsumeFinished :throws [IOException] ^void [this
+                                                                     ^ServerHandshakeContext shc
+                                                                     ^ByteBuffer message]
+      (when-not (.-isResumption shc)
+        (when (.containsKey (.-handshakeConsumers shc) (.-id SSLHandshake/CERTIFICATE_VERIFY))
+          (throw (.fatal (.-conContext shc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected Finished handshake message"))))
+      (let [fm (FinishedMessage. shc message)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Consuming client Finished handshake message" fm))
+        (when (.-secureRenegotiation (.-conContext shc))
+          (set! (.-clientVerifyData (.-conContext shc)) (.-verifyData fm)))
+        (if (.-isResumption shc)
+            (do
+              (when (and (.isRejoinable (.-handshakeSession shc)) (not (.-statelessResumption shc)))
+                (.put (cast SSLSessionContextImpl
+                            (.engineGetServerSessionContext (.-sslContext shc)))
+                      (.-handshakeSession shc)))
+              (set! (.-conSession (.-conContext shc)) (.finish (.-handshakeSession shc)))
+              (set! (.-protocolVersion (.-conContext shc)) (.-negotiatedProtocol shc))
+              (set! (.-handshakeFinished shc) true)
+              (Finished/recordEvent (.-conSession (.-conContext shc)))
+              (when-not (.isDTLS (.-sslContext shc)) (.finishHandshake (.-conContext shc))))
+            (.put (.-handshakeProducers shc) (.-id SSLHandshake/FINISHED) SSLHandshake/FINISHED))
+        (let [probableHandshakeMessages (new SSLHandshake/1 [SSLHandshake/FINISHED])]
+          (for-each [^SSLHandshake hs probableHandshakeMessages]
+            (let [handshakeProducer (cast HandshakeProducer
+                                          (.remove (.-handshakeProducers shc) (.-id hs)))]
+              (when (some? handshakeProducer) (.produce handshakeProducer shc fm))))))))
+
+  (defclass ^:private ^:static ^:final T13FinishedProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [hc (cast HandshakeContext context)]
+        (if (.-isClientMode (.-sslConfig hc))
+            (.onProduceFinished this (cast ClientHandshakeContext context) message)
+            (.onProduceFinished this (cast ServerHandshakeContext context) message))))
+
+    (method ^:private onProduceFinished :throws [IOException] ^byte/1 [this
+                                                                       ^ClientHandshakeContext chc
+                                                                       ^SSLHandshake$HandshakeMessage message]
+      (.update (.-handshakeHash chc))
+      (let [fm (FinishedMessage. chc)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Produced client Finished handshake message" fm))
+        (.write fm (.-handshakeOutput chc))
+        (.flush (.-handshakeOutput chc))
+        (when (.-secureRenegotiation (.-conContext chc))
+          (set! (.-clientVerifyData (.-conContext chc)) (.-verifyData fm)))
+        (let [kd (.-handshakeKeyDerivation chc)]
+          (when (nil? kd)
+            (throw (.fatal (.-conContext chc) Alert/INTERNAL_ERROR "no key derivation")))
+          (let [kdg (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol chc))]
+            (when (nil? kdg)
+              (throw
+                (.fatal (.-conContext chc)
+                        Alert/INTERNAL_ERROR
+                        (java-str "Not supported key derivation: " (.-negotiatedProtocol chc)))))
+            (try
+              (let [writeSecret (.deriveKey kd "TlsClientAppTrafficSecret")
+                    writeKD (.createKeyDerivation kdg chc writeSecret)
+                    writeKey (.deriveKey writeKD "TlsKey")
+                    writeIv (IvParameterSpec. (.deriveData writeKD "TlsIv"))
+                    writeCipher (.createWriteCipher
+                                  (.-bulkCipher (.-negotiatedCipherSuite chc))
+                                  (Authenticator/valueOf (.-negotiatedProtocol chc))
+                                  (.-negotiatedProtocol chc)
+                                  writeKey
+                                  writeIv
+                                  (.getSecureRandom (.-sslContext chc)))]
+                (when (nil? writeCipher)
+                  (throw (.fatal (.-conContext chc)
+                                 Alert/ILLEGAL_PARAMETER
+                                 (java-str "Illegal cipher suite ("
+                                           (.-negotiatedCipherSuite chc)
+                                           ") and protocol version ("
+                                           (.-negotiatedProtocol chc)
+                                           ")"))))
+                (set! (.-baseWriteSecret chc) writeSecret)
+                (.changeWriteCiphers (.-outputRecord (.-conContext chc)) writeCipher false))
+              (catch GeneralSecurityException gse
+                (throw (.fatal (.-conContext chc)
+                               Alert/INTERNAL_ERROR
+                               "Failure to derive application secrets"
+                               gse))))
+            (let [exporterSecret (.deriveKey kd "TlsExporterMasterSecret")]
+              (.setExporterMasterSecret (.-handshakeSession chc) exporterSecret)
+              (let [sd (.forContext (cast SSLSecretDerivation kd) chc)
+                    resumptionMasterSecret (.deriveKey sd "TlsResumptionMasterSecret")]
+                (.setResumptionMasterSecret (.-handshakeSession chc) resumptionMasterSecret)
+                (set! (.-conSession (.-conContext chc)) (.finish (.-handshakeSession chc)))
+                (set! (.-protocolVersion (.-conContext chc)) (.-negotiatedProtocol chc))
+                (set! (.-handshakeFinished chc) true)
+                (.finishHandshake (.-conContext chc))
+                (Finished/recordEvent (.-conSession (.-conContext chc)))
+                nil))))))
+
+    (method ^:private onProduceFinished :throws [IOException] ^byte/1 [this
+                                                                       ^ServerHandshakeContext shc
+                                                                       ^SSLHandshake$HandshakeMessage message]
+      (.update (.-handshakeHash shc))
+      (let [fm (FinishedMessage. shc)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Produced server Finished handshake message" fm))
+        (.write fm (.-handshakeOutput shc))
+        (.flush (.-handshakeOutput shc))
+        (let [kd (.-handshakeKeyDerivation shc)]
+          (when (nil? kd)
+            (throw (.fatal (.-conContext shc) Alert/INTERNAL_ERROR "no key derivation")))
+          (let [kdg (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol shc))]
+            (when (nil? kdg)
+              (throw
+                (.fatal (.-conContext shc)
+                        Alert/INTERNAL_ERROR
+                        (java-str "Not supported key derivation: " (.-negotiatedProtocol shc)))))
+            (let [^:mutable ^SecretKey saltSecret nil]
+              (try
+                (set! saltSecret (.deriveKey kd "TlsSaltSecret"))
+                (let [hashAlg (.-hashAlg (.-negotiatedCipherSuite shc))
+                      hkdf (KDF/getInstance (.-hkdfAlgorithm hashAlg))
+                      zeros (new byte/1 (.-hashLength hashAlg))
+                      masterSecret (.deriveKey hkdf
+                                               "TlsMasterSecret"
+                                               (.extractOnly
+                                                 (.addIKM
+                                                   (.addSalt
+                                                     (HKDFParameterSpec/ofExtract)
+                                                     saltSecret)
+                                                   zeros)))
+                      ^SSLKeyDerivation secretKD (SSLSecretDerivation. shc masterSecret)
+                      writeSecret (.deriveKey secretKD "TlsServerAppTrafficSecret")
+                      writeKD (.createKeyDerivation kdg shc writeSecret)
+                      writeKey (.deriveKey writeKD "TlsKey")
+                      writeIv (IvParameterSpec. (.deriveData writeKD "TlsIv"))
+                      writeCipher (.createWriteCipher
+                                    (.-bulkCipher (.-negotiatedCipherSuite shc))
+                                    (Authenticator/valueOf (.-negotiatedProtocol shc))
+                                    (.-negotiatedProtocol shc)
+                                    writeKey
+                                    writeIv
+                                    (.getSecureRandom (.-sslContext shc)))]
+                  (when (nil? writeCipher)
+                    (throw (.fatal (.-conContext shc)
+                                   Alert/ILLEGAL_PARAMETER
+                                   (java-str "Illegal cipher suite ("
+                                             (.-negotiatedCipherSuite shc)
+                                             ") and protocol version ("
+                                             (.-negotiatedProtocol shc)
+                                             ")"))))
+                  (set! (.-baseWriteSecret shc) writeSecret)
+                  (.changeWriteCiphers (.-outputRecord (.-conContext shc)) writeCipher false)
+                  (set! (.-handshakeKeyDerivation shc) secretKD)
+                  (when (.-isQuic (.-sslConfig shc))
+                    (let [engine (cast QuicTLSEngineImpl (.-transport (.-conContext shc)))]
+                      (try
+                        (.deriveOneRTTKeys engine)
+                        (catch IOException e
+                          (throw (.fatal (.-conContext shc)
+                                         Alert/INTERNAL_ERROR
+                                         "Failure to derive application secrets"
+                                         e)))))))
+                (catch GeneralSecurityException gse
+                  (throw (.fatal (.-conContext shc)
+                                 Alert/INTERNAL_ERROR
+                                 "Failure to derive application secrets"
+                                 gse)))
+                (finally (KeyUtil/destroySecretKeys saltSecret)))
+              (when (.-secureRenegotiation (.-conContext shc))
+                (set! (.-serverVerifyData (.-conContext shc)) (.-verifyData fm)))
+              (.setContext (.-handshakeSession shc)
+                           (cast SSLSessionContextImpl
+                                 (.engineGetServerSessionContext (.-sslContext shc))))
+              (set! (.-conSession (.-conContext shc)) (.finish (.-handshakeSession shc)))
+              (.put (.-handshakeConsumers shc) (.-id SSLHandshake/FINISHED) SSLHandshake/FINISHED)
+              nil))))))
+
+  (defclass ^:private ^:static ^:final T13FinishedConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [hc (cast HandshakeContext context)]
+        (if (.-isClientMode (.-sslConfig hc))
+            (.onConsumeFinished this (cast ClientHandshakeContext context) message)
+            (.onConsumeFinished this (cast ServerHandshakeContext context) message))))
+
+    (method ^:private onConsumeFinished :throws [IOException] ^void [this
+                                                                     ^ClientHandshakeContext chc
+                                                                     ^ByteBuffer message]
+      (when (.containsKey (.-handshakeConsumers chc) (.-id SSLHandshake/ENCRYPTED_EXTENSIONS))
+        (throw (.fatal (.-conContext chc)
+                       Alert/UNEXPECTED_MESSAGE
+                       "Unexpected Finished handshake message")))
+      (when-not (.-isResumption chc)
+        (when (or (.containsKey (.-handshakeConsumers chc) (.-id SSLHandshake/CERTIFICATE))
+                  (.containsKey (.-handshakeConsumers chc) (.-id SSLHandshake/CERTIFICATE_VERIFY)))
+          (throw (.fatal (.-conContext chc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected Finished handshake message"))))
+      (let [fm (FinishedMessage. chc message)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Consuming server Finished handshake message" fm))
+        (when (.-secureRenegotiation (.-conContext chc))
+          (set! (.-serverVerifyData (.-conContext chc)) (.-verifyData fm)))
+        (.remove (.-consumers (.-conContext chc)) (.-id ContentType/CHANGE_CIPHER_SPEC))
+        (.update (.-handshakeHash chc))
+        (let [kd (.-handshakeKeyDerivation chc)]
+          (when (nil? kd)
+            (throw (.fatal (.-conContext chc) Alert/INTERNAL_ERROR "no key derivation")))
+          (let [kdg (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol chc))]
+            (when (nil? kdg)
+              (throw
+                (.fatal (.-conContext chc)
+                        Alert/INTERNAL_ERROR
+                        (java-str "Not supported key derivation: " (.-negotiatedProtocol chc)))))
+            (when (and (not (.-isResumption chc)) (.isRejoinable (.-handshakeSession chc)))
+              (.put (cast SSLSessionContextImpl (.engineGetClientSessionContext (.-sslContext chc)))
+                    (.-handshakeSession chc)))
+            (let [^:mutable ^SecretKey saltSecret nil]
+              (try
+                (set! saltSecret (.deriveKey kd "TlsSaltSecret"))
+                (let [hashAlg (.-hashAlg (.-negotiatedCipherSuite chc))
+                      hkdf (KDF/getInstance (.-hkdfAlgorithm hashAlg))
+                      zeros (new byte/1 (.-hashLength hashAlg))
+                      masterSecret (.deriveKey hkdf
+                                               "TlsMasterSecret"
+                                               (.extractOnly
+                                                 (.addIKM
+                                                   (.addSalt
+                                                     (HKDFParameterSpec/ofExtract)
+                                                     saltSecret)
+                                                   zeros)))
+                      ^SSLKeyDerivation secretKD (SSLSecretDerivation. chc masterSecret)
+                      readSecret (.deriveKey secretKD "TlsServerAppTrafficSecret")
+                      writeKD (.createKeyDerivation kdg chc readSecret)
+                      readKey (.deriveKey writeKD "TlsKey")
+                      readIv (IvParameterSpec. (.deriveData writeKD "TlsIv"))
+                      readCipher (.createReadCipher
+                                   (.-bulkCipher (.-negotiatedCipherSuite chc))
+                                   (Authenticator/valueOf (.-negotiatedProtocol chc))
+                                   (.-negotiatedProtocol chc)
+                                   readKey
+                                   readIv
+                                   (.getSecureRandom (.-sslContext chc)))]
+                  (when (nil? readCipher)
+                    (throw (.fatal (.-conContext chc)
+                                   Alert/ILLEGAL_PARAMETER
+                                   (java-str "Illegal cipher suite ("
+                                             (.-negotiatedCipherSuite chc)
+                                             ") and protocol version ("
+                                             (.-negotiatedProtocol chc)
+                                             ")"))))
+                  (set! (.-baseReadSecret chc) readSecret)
+                  (.changeReadCiphers (.-inputRecord (.-conContext chc)) readCipher)
+                  (set! (.-handshakeKeyDerivation chc) secretKD)
+                  (when (.-isQuic (.-sslConfig chc))
+                    (let [engine (cast QuicTLSEngineImpl (.-transport (.-conContext chc)))]
+                      (try
+                        (.deriveOneRTTKeys engine)
+                        (catch IOException e
+                          (throw (.fatal (.-conContext chc)
+                                         Alert/INTERNAL_ERROR
+                                         "Failure to derive application secrets"
+                                         e)))))))
+                (catch GeneralSecurityException gse
+                  (throw (.fatal (.-conContext chc)
+                                 Alert/INTERNAL_ERROR
+                                 "Failure to derive application secrets"
+                                 gse)))
+                (finally (KeyUtil/destroySecretKeys saltSecret)))
+              (.put (.-handshakeProducers chc) (.-id SSLHandshake/FINISHED) SSLHandshake/FINISHED)
+              (let [probableHandshakeMessages (new
+                                                SSLHandshake/1
+                                                [SSLHandshake/CERTIFICATE
+                                                 SSLHandshake/CERTIFICATE_VERIFY
+                                                 SSLHandshake/FINISHED])]
+                (for-each [^SSLHandshake hs probableHandshakeMessages]
+                  (let [handshakeProducer (cast HandshakeProducer
+                                                (.remove (.-handshakeProducers chc) (.-id hs)))]
+                    (when (some? handshakeProducer) (.produce handshakeProducer chc nil))))))))))
+
+    (method ^:private onConsumeFinished :throws [IOException] ^void [this
+                                                                     ^ServerHandshakeContext shc
+                                                                     ^ByteBuffer message]
+      (when-not (.-isResumption shc)
+        (when (or (.containsKey (.-handshakeConsumers shc) (.-id SSLHandshake/CERTIFICATE))
+                  (.containsKey (.-handshakeConsumers shc) (.-id SSLHandshake/CERTIFICATE_VERIFY)))
+          (throw (.fatal (.-conContext shc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected Finished handshake message"))))
+      (let [fm (FinishedMessage. shc message)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Consuming client Finished handshake message" fm))
+        (when (.-secureRenegotiation (.-conContext shc))
+          (set! (.-clientVerifyData (.-conContext shc)) (.-verifyData fm)))
+        (let [kd (.-handshakeKeyDerivation shc)]
+          (when (nil? kd)
+            (throw (.fatal (.-conContext shc) Alert/INTERNAL_ERROR "no key derivation")))
+          (let [kdg (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol shc))]
+            (when (nil? kdg)
+              (throw
+                (.fatal (.-conContext shc)
+                        Alert/INTERNAL_ERROR
+                        (java-str "Not supported key derivation: " (.-negotiatedProtocol shc)))))
+            (try
+              (let [readSecret (.deriveKey kd "TlsClientAppTrafficSecret")
+                    readKD (.createKeyDerivation kdg shc readSecret)
+                    readKey (.deriveKey readKD "TlsKey")
+                    readIv (IvParameterSpec. (.deriveData readKD "TlsIv"))
+                    readCipher (.createReadCipher
+                                 (.-bulkCipher (.-negotiatedCipherSuite shc))
+                                 (Authenticator/valueOf (.-negotiatedProtocol shc))
+                                 (.-negotiatedProtocol shc)
+                                 readKey
+                                 readIv
+                                 (.getSecureRandom (.-sslContext shc)))]
+                (when (nil? readCipher)
+                  (throw (.fatal (.-conContext shc)
+                                 Alert/ILLEGAL_PARAMETER
+                                 (java-str "Illegal cipher suite ("
+                                           (.-negotiatedCipherSuite shc)
+                                           ") and protocol version ("
+                                           (.-negotiatedProtocol shc)
+                                           ")"))))
+                (set! (.-baseReadSecret shc) readSecret)
+                (.changeReadCiphers (.-inputRecord (.-conContext shc)) readCipher)
+                (let [exporterSecret (.deriveKey kd "TlsExporterMasterSecret")]
+                  (.setExporterMasterSecret (.-handshakeSession shc) exporterSecret)
+                  (.update (.-handshakeHash shc))
+                  (let [sd (.forContext (cast SSLSecretDerivation kd) shc)
+                        resumptionMasterSecret (.deriveKey sd "TlsResumptionMasterSecret")]
+                    (.setResumptionMasterSecret (.-handshakeSession shc) resumptionMasterSecret))))
+              (catch GeneralSecurityException gse
+                (throw (.fatal (.-conContext shc)
+                               Alert/INTERNAL_ERROR
+                               "Failure to derive application secrets"
+                               gse))))
+            (set! (.-conSession (.-conContext shc)) (.finish (.-handshakeSession shc)))
+            (set! (.-protocolVersion (.-conContext shc)) (.-negotiatedProtocol shc))
+            (set! (.-handshakeFinished shc) true)
+            (when-not (.isDTLS (.-sslContext shc)) (.finishHandshake (.-conContext shc)))
+            (Finished/recordEvent (.-conSession (.-conContext shc)))
+            (when (> SSLConfiguration/serverNewSessionTicketCount 0)
+              (.produce NewSessionTicket/t13PosthandshakeProducer shc)))))))
+
+  (method ^:private ^:static recordEvent ^void [^SSLSessionImpl session]
+    (let [event (TLSHandshakeEvent.)]
+      (when (or (.shouldCommit event) (EventHelper/isLoggingSecurity))
+        (let [^:mutable ^int hash 0]
+          (try
+            (set! hash (.hashCode (aget (.getCertificateChain session) 0)))
+            (catch SSLPeerUnverifiedException e))
+          (let [peerCertificateId (Integer/toUnsignedLong hash)]
+            (when (.shouldCommit event)
+              (set! (.-peerHost event) (.getPeerHost session))
+              (set! (.-peerPort event) (.getPeerPort session))
+              (set! (.-cipherSuite event) (.getCipherSuite session))
+              (set! (.-protocolVersion event) (.getProtocol session))
+              (set! (.-certificateId event) peerCertificateId)
+              (.commit event))
+            (when (EventHelper/isLoggingSecurity)
+              (EventHelper/logTLSHandshakeEvent nil
+                                                (.getPeerHost session)
+                                                (.getPeerPort session)
+                                                (.getCipherSuite session)
+                                                (.getProtocol session)
+                                                peerCertificateId))))))))

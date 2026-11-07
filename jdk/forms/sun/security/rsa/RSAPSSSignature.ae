@@ -1,0 +1,390 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/rsa/RSAPSSSignature.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.rsa)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security AlgorithmParameters
+                        DigestException
+                        GeneralSecurityException
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        InvalidParameterException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        PrivateKey
+                        ProviderException
+                        PublicKey
+                        SecureRandom
+                        SignatureException
+                        SignatureSpi)
+        '(java.security.interfaces RSAKey RSAPrivateCrtKey RSAPrivateKey RSAPublicKey)
+        '(java.security.spec AlgorithmParameterSpec MGF1ParameterSpec PSSParameterSpec)
+        '(java.util Arrays Map)
+        '(javax.crypto BadPaddingException)
+        '(sun.security.jca JCAUtil)
+        '(sun.security.util KnownOIDs))
+
+(defclass ^:public RSAPSSSignature
+  :extends SignatureSpi
+
+  (field ^:private ^:static ^:final ^boolean DEBUG false)
+
+  (method ^:private isDigestEqual ^boolean [this ^String stdAlg ^:mutable ^String givenAlg]
+    (cond
+      (or (nil? stdAlg) (nil? givenAlg)) false
+      (.contains givenAlg "-") (.equalsIgnoreCase stdAlg givenAlg)
+      (.equals stdAlg "SHA-1")
+        (or (.equalsIgnoreCase givenAlg "SHA") (.equalsIgnoreCase givenAlg "SHA1"))
+      :else
+        (let [sb (StringBuilder. givenAlg)]
+          (if (.regionMatches givenAlg true 0 "SHA" 0 3)
+              (do
+                (set! givenAlg (.toString (.insert sb 3 "-")))
+                (.equalsIgnoreCase stdAlg givenAlg))
+              (throw (ProviderException. (java-str "Unsupported digest algorithm " givenAlg)))))))
+
+  (field ^:private ^:static ^:final ^byte/1 EIGHT_BYTES_OF_ZEROS (new byte/1 8))
+
+  (field ^:private ^:static ^:final ^{:tag (Map KnownOIDs Integer)} DIGEST_LENGTHS
+    (Map/ofEntries (Map/entry KnownOIDs/SHA_1 (Integer/valueOf 20))
+                   (Map/entry KnownOIDs/SHA_224 (Integer/valueOf 28))
+                   (Map/entry KnownOIDs/SHA_256 (Integer/valueOf 32))
+                   (Map/entry KnownOIDs/SHA_384 (Integer/valueOf 48))
+                   (Map/entry KnownOIDs/SHA_512 (Integer/valueOf 64))
+                   (Map/entry KnownOIDs/SHA_512$224 (Integer/valueOf 28))
+                   (Map/entry KnownOIDs/SHA_512$256 (Integer/valueOf 32))
+                   (Map/entry KnownOIDs/SHA3_224 (Integer/valueOf 28))
+                   (Map/entry KnownOIDs/SHA3_256 (Integer/valueOf 32))
+                   (Map/entry KnownOIDs/SHA3_384 (Integer/valueOf 48))
+                   (Map/entry KnownOIDs/SHA3_512 (Integer/valueOf 64))))
+
+  (field ^:private ^MessageDigest md)
+
+  (field ^:private ^boolean digestReset true)
+
+  (field ^:private ^RSAPrivateKey privKey nil)
+
+  (field ^:private ^RSAPublicKey pubKey nil)
+
+  (field ^:private ^PSSParameterSpec sigParams nil)
+
+  (field ^:private ^SecureRandom random)
+
+  (constructor ^:public [this] (set! (.-md this) nil))
+
+  (method ^:protected engineInitVerify :throws [InvalidKeyException] ^void [this
+                                                                            ^PublicKey publicKey]
+    (if-instance [^RSAPublicKey rsaPubKey publicKey]
+      (do
+        (.isPublicKeyValid this rsaPubKey)
+        (set! (.-pubKey this) rsaPubKey)
+        (set! (.-privKey this) nil)
+        (.resetDigest this))
+      (throw (InvalidKeyException. "key must be RSAPublicKey"))))
+
+  (method ^:protected engineInitSign :throws [InvalidKeyException] ^void [this
+                                                                          ^PrivateKey privateKey]
+    (.engineInitSign this privateKey nil))
+
+  (method ^:protected engineInitSign :throws [InvalidKeyException] ^void [this
+                                                                          ^PrivateKey privateKey
+                                                                          ^SecureRandom random]
+    (if-instance [^RSAPrivateKey rsaPrivateKey privateKey]
+      (do
+        (.isPrivateKeyValid this rsaPrivateKey)
+        (set! (.-privKey this) rsaPrivateKey)
+        (set! (.-pubKey this) nil)
+        (set! (.-random this) (if (nil? random) (JCAUtil/getSecureRandom) random))
+        (.resetDigest this))
+      (throw (InvalidKeyException. "key must be RSAPrivateKey"))))
+
+  (method ^:private ^:static isCompatible ^boolean [^AlgorithmParameterSpec keyParams
+                                                    ^PSSParameterSpec sigParams]
+    (if (nil? keyParams)
+        true
+        (if-instance [^PSSParameterSpec pssKeyParams keyParams]
+          (cond
+            (nil? sigParams) true
+            (> (.getSaltLength pssKeyParams) (.getSaltLength sigParams)) false
+            :else
+              (let [keyParams2 (PSSParameterSpec.
+                                 (.getDigestAlgorithm pssKeyParams)
+                                 (.getMGFAlgorithm pssKeyParams)
+                                 (.getMGFParameters pssKeyParams)
+                                 (.getSaltLength sigParams)
+                                 (.getTrailerField pssKeyParams))
+                    ap (PSSParameters.)]
+                (try
+                  (.engineInit ap keyParams2)
+                  (let [encoded (.engineGetEncoded ap)]
+                    (.engineInit ap sigParams)
+                    (let [encoded2 (.engineGetEncoded ap)] (Arrays/equals encoded encoded2)))
+                  (catch Exception e (when DEBUG (.printStackTrace e)) false))))
+          false)))
+
+  (method ^:private isPrivateKeyValid :throws [InvalidKeyException] ^void [this ^RSAPrivateKey prKey]
+    (try
+      (if-instance [^RSAPrivateCrtKey crtKey prKey]
+        (if (RSAPrivateCrtKeyImpl/checkComponents crtKey)
+            (RSAKeyFactory/checkRSAProviderKeyLengths
+              (.bitLength (.getModulus crtKey))
+              (.getPublicExponent crtKey))
+            (throw (InvalidKeyException. "Some of the CRT-specific components are not available")))
+        (RSAKeyFactory/checkRSAProviderKeyLengths (.bitLength (.getModulus prKey)) nil))
+      (catch InvalidKeyException ikEx (throw ikEx))
+      (catch Exception e (throw (InvalidKeyException. "Can not access private key components" e))))
+    (.isValid this prKey))
+
+  (method ^:private isPublicKeyValid :throws [InvalidKeyException] ^void [this ^RSAPublicKey pKey]
+    (try
+      (RSAKeyFactory/checkRSAProviderKeyLengths (.bitLength (.getModulus pKey))
+                                                (.getPublicExponent pKey))
+      (catch InvalidKeyException ikEx (throw ikEx))
+      (catch Exception e (throw (InvalidKeyException. "Can not access public key components" e))))
+    (.isValid this pKey))
+
+  (method ^:private isValid :throws [InvalidKeyException] ^void [this ^RSAKey rsaKey]
+    (when-not (RSAPSSSignature/isCompatible (.getParams rsaKey) (.-sigParams this))
+      (throw (InvalidKeyException. "Key contains incompatible PSS parameter values")))
+    (when (some? (.-sigParams this))
+      (let [digestAlgo (.getDigestAlgorithm (.-sigParams this))
+            ko (KnownOIDs/findMatch digestAlgo)]
+        (if (some? ko)
+            (let [hLen (cast Integer (.get DIGEST_LENGTHS ko))]
+              (if (some? hLen)
+                  (RSAPSSSignature/checkKeyLength rsaKey hLen (.getSaltLength (.-sigParams this)))
+                  (throw (ProviderException. (java-str "Unsupported digest algo: " digestAlgo)))))
+            (throw (ProviderException. (java-str "Unrecognized digest algo: " digestAlgo)))))))
+
+  (method ^:private validateSigParams :throws [InvalidAlgorithmParameterException] ^PSSParameterSpec [this
+                                                                                                      ^AlgorithmParameterSpec p]
+    (when (nil? p) (throw (InvalidAlgorithmParameterException. "Parameters cannot be null")))
+    (if-instance [^PSSParameterSpec params p]
+      (if (identical? params (.-sigParams this))
+          params
+          (let [^RSAKey key (if (nil? (.-privKey this))
+                                ^RSAKey (.-pubKey this)
+                                ^RSAKey (.-privKey this))]
+            (when (some? key)
+              (when-not (RSAPSSSignature/isCompatible (.getParams key) params)
+                (throw (InvalidAlgorithmParameterException.
+                         "Signature parameters does not match key parameters"))))
+            (when-not (.equalsIgnoreCase (.getMGFAlgorithm params) "MGF1")
+              (throw (InvalidAlgorithmParameterException. "Only supports MGF1")))
+            (when-not (== (.getTrailerField params) PSSParameterSpec/TRAILER_FIELD_BC)
+              (throw (InvalidAlgorithmParameterException. "Only supports TrailerFieldBC(1)")))
+            (when (some? key)
+              (let [digestAlgo (.getDigestAlgorithm params)
+                    ko (KnownOIDs/findMatch digestAlgo)]
+                (if (some? ko)
+                    (let [hLen (cast Integer (.get DIGEST_LENGTHS ko))]
+                      (if (some? hLen)
+                          (try
+                            (RSAPSSSignature/checkKeyLength key hLen (.getSaltLength params))
+                            (catch InvalidKeyException e
+                              (throw (InvalidAlgorithmParameterException. e))))
+                          (throw (InvalidAlgorithmParameterException.
+                                   (java-str "Unsupported digest algo: " digestAlgo)))))
+                    (throw (InvalidAlgorithmParameterException.
+                             (java-str "Unrecognized digest algo: " digestAlgo))))))
+            params))
+      (throw (InvalidAlgorithmParameterException. "parameters must be type PSSParameterSpec"))))
+
+  (method ^:private ensureInit :throws [SignatureException] ^void [this]
+    (let [^RSAKey key (if (nil? (.-privKey this)) ^RSAKey (.-pubKey this) ^RSAKey (.-privKey this))]
+      (when (nil? key) (throw (SignatureException. "Missing key")))
+      (when (nil? (.-sigParams this))
+        (throw (SignatureException. "Parameters required for RSASSA-PSS signatures")))))
+
+  (method ^:private ^:static checkKeyLength :throws [InvalidKeyException] ^void [^RSAKey key
+                                                                                 ^int digestLen
+                                                                                 ^int saltLen]
+    (when (some? key)
+      (let [keyLength (bit-shift-right-int
+                        (unchecked-add-int (RSAPSSSignature/getKeyLengthInBits key) 7)
+                        3)
+            minLength (^[int int] Math/addExact (Math/addExact digestLen saltLen) 2)]
+        (when (< keyLength minLength)
+          (throw (InvalidKeyException. (java-str "Key is too short, need min " minLength " bytes")))))))
+
+  (method ^:private resetDigest ^void [this]
+    (when-not digestReset (.reset (.-md this)) (set! digestReset true)))
+
+  (method ^:private getDigestValue ^byte/1 [this]
+    (set! digestReset true)
+    (.digest (.-md this)))
+
+  (method ^:protected engineUpdate :throws [SignatureException] ^void [this ^byte b]
+    (.ensureInit this)
+    (.update (.-md this) b)
+    (set! digestReset false))
+
+  (method ^:protected engineUpdate :throws [SignatureException] ^void [this ^byte/1 b ^int off
+                                                                       ^int len]
+    (.ensureInit this)
+    (.update (.-md this) b off len)
+    (set! digestReset false))
+
+  (method ^:protected engineUpdate ^void [this ^ByteBuffer b]
+    (try
+      (.ensureInit this)
+      (catch SignatureException se (throw (RuntimeException. (.getMessage se)))))
+    (.update (.-md this) b)
+    (set! digestReset false))
+
+  (method ^:protected engineSign :throws [SignatureException] ^byte/1 [this]
+    (.ensureInit this)
+    (let [mHash (.getDigestValue this)]
+      (try
+        (let [encoded (.encodeSignature this mHash)] (RSACore/rsa encoded privKey true))
+        (catch GeneralSecurityException e (throw (SignatureException. "Could not sign data" e)))
+        (catch IOException e (throw (SignatureException. "Could not encode data" e))))))
+
+  (method ^:protected engineVerify :throws [SignatureException] ^boolean [this ^byte/1 sigBytes]
+    (.ensureInit this)
+    (try
+      (when-not (== (alength sigBytes) (RSACore/getByteLength (.-pubKey this)))
+        (throw (SignatureException.
+                 (java-str "Signature length not correct: got "
+                           (alength sigBytes)
+                           " but was expecting "
+                           (RSACore/getByteLength (.-pubKey this))))))
+      (let [mHash (.getDigestValue this)
+            decrypted (RSACore/rsa sigBytes (.-pubKey this))]
+        (.decodeSignature this mHash decrypted))
+      (catch BadPaddingException e false)
+      (catch IOException e (throw (SignatureException. "Signature encoding error" e)))
+      (finally (.resetDigest this))))
+
+  (method ^:private ^:static getKeyLengthInBits ^int [^RSAKey k]
+    (if (some? k) (.bitLength (.getModulus k)) -1))
+
+  (method ^:private encodeSignature :throws [IOException DigestException] ^byte/1 [this
+                                                                                   ^byte/1 mHash]
+    (let [mgfParams (.getMGFParameters (.-sigParams this))
+          ^String mgfDigestAlgo (if (some? mgfParams)
+                                    (.getDigestAlgorithm (cast MGF1ParameterSpec mgfParams))
+                                    (.getAlgorithm (.-md this)))]
+      (try
+        (let [emBits (unchecked-subtract-int (RSAPSSSignature/getKeyLengthInBits (.-privKey this))
+                                             1)
+              emLen (bit-shift-right-int (unchecked-add-int emBits 7) 3)
+              hLen (.getDigestLength (.-md this))
+              dbLen (unchecked-subtract-int (unchecked-subtract-int emLen hLen) 1)
+              sLen (.getSaltLength (.-sigParams this))
+              em (new byte/1 emLen)]
+          (aset em
+                (unchecked-subtract-int (unchecked-subtract-int dbLen sLen) 1)
+                (unchecked-byte 1))
+          (aset em (unchecked-subtract-int (alength em) 1) (unchecked-byte 0xBC))
+          (when-not digestReset (throw (ProviderException. "Digest should be reset")))
+          (.update (.-md this) EIGHT_BYTES_OF_ZEROS)
+          (set! digestReset false)
+          (.update (.-md this) mHash)
+          (when-not (== sLen 0)
+            (let [salt (new byte/1 sLen)]
+              (.nextBytes (.-random this) salt)
+              (.update (.-md this) salt)
+              (System/arraycopy salt 0 em (unchecked-subtract-int dbLen sLen) sLen)))
+          (.digest (.-md this) em dbLen hLen)
+          (set! digestReset true)
+          (let [mgf1 (MGF1. mgfDigestAlgo)]
+            (.generateAndXor mgf1 em dbLen hLen dbLen em 0)
+            (let [numZeroBits (unchecked-subtract-int (bit-shift-left-int emLen 3) emBits)]
+              (when-not (== numZeroBits 0)
+                (let [MASK (unchecked-byte (unsigned-bit-shift-right-int 0xff numZeroBits))]
+                  (aset em 0 (unchecked-byte (bit-and-int (aget em 0) MASK)))))
+              em)))
+        (catch NoSuchAlgorithmException e (throw (IOException. (.toString e)))))))
+
+  (method ^:private decodeSignature :throws [IOException] ^boolean [this ^byte/1 mHash ^byte/1 em]
+    (let [hLen (alength mHash)
+          sLen (.getSaltLength (.-sigParams this))
+          emBits (unchecked-subtract-int (RSAPSSSignature/getKeyLengthInBits (.-pubKey this)) 1)
+          emLen (bit-shift-right-int (unchecked-add-int emBits 7) 3)
+          emOfs (unchecked-subtract-int (alength em) emLen)]
+      (cond
+        (and (== emOfs 1) (not (== (aget em 0) 0))) false
+        (< emLen (unchecked-add-int (unchecked-add-int hLen sLen) 2)) false
+        (not (== (aget em (unchecked-subtract-int (unchecked-add-int emOfs emLen) 1))
+                 (unchecked-byte 0xBC)))
+          false
+        :else
+          (let [numZeroBits (unchecked-subtract-int (bit-shift-left-int emLen 3) emBits)]
+            (when-not (== numZeroBits 0)
+              (let [MASK (unchecked-byte
+                           (bit-shift-left-int 0xff (unchecked-subtract-int 8 numZeroBits)))]
+                (when-not (== (bit-and-int (aget em emOfs) MASK) 0) (return false))))
+            (let [^:mutable ^String mgfDigestAlgo nil
+                  mgfParams (.getMGFParameters (.-sigParams this))]
+              (if (some? mgfParams)
+                  (set! mgfDigestAlgo (.getDigestAlgorithm (cast MGF1ParameterSpec mgfParams)))
+                  (set! mgfDigestAlgo (.getAlgorithm (.-md this))))
+              (let [dbLen (unchecked-subtract-int (unchecked-subtract-int emLen hLen) 1)]
+                (try
+                  (let [mgf1 (MGF1. mgfDigestAlgo)]
+                    (.generateAndXor mgf1 em (unchecked-add-int emOfs dbLen) hLen dbLen em emOfs))
+                  (catch NoSuchAlgorithmException nsae (throw (IOException. (.toString nsae)))))
+                (when-not (== numZeroBits 0)
+                  (let [MASK (unchecked-byte (unsigned-bit-shift-right-int 0xff numZeroBits))]
+                    (aset em emOfs (unchecked-byte (bit-and-int (aget em emOfs) MASK)))))
+                (let [^:mutable i emOfs]
+                  (while (< i
+                            (unchecked-add-int emOfs
+                                               (unchecked-subtract-int
+                                                 (unchecked-subtract-int dbLen sLen)
+                                                 1)))
+                    (when-not (== (aget em i) 0) (return false))
+                    (set! i (unchecked-inc-int i)))
+                  (if (not (== (aget em i) 0x01))
+                      false
+                      (do
+                        (.update (.-md this) EIGHT_BYTES_OF_ZEROS)
+                        (set! digestReset false)
+                        (.update (.-md this) mHash)
+                        (when (> sLen 0)
+                          (.update (.-md this)
+                                   em
+                                   (unchecked-add-int emOfs (unchecked-subtract-int dbLen sLen))
+                                   sLen))
+                        (let [digest2 (.digest (.-md this))]
+                          (set! digestReset true)
+                          (let [digestInEM (Arrays/copyOfRange
+                                             em
+                                             (unchecked-add-int emOfs dbLen)
+                                             (unchecked-subtract-int
+                                               (unchecked-add-int emOfs emLen)
+                                               1))]
+                            (MessageDigest/isEqual digest2 digestInEM))))))))))))
+
+  (method ^:protected ^{Deprecated true} engineSetParameter :throws [InvalidParameterException] ^void [this
+                                                                                                       ^String param
+                                                                                                       value]
+    (throw (UnsupportedOperationException. "setParameter() not supported")))
+
+  (method ^:protected engineSetParameter :throws [InvalidAlgorithmParameterException] ^void [this
+                                                                                             ^AlgorithmParameterSpec params]
+    (set! (.-sigParams this) (.validateSigParams this params))
+    (when-not digestReset (throw (ProviderException. "Cannot set parameters during operations")))
+    (let [newHashAlg (.getDigestAlgorithm (.-sigParams this))]
+      (when (or (nil? (.-md this)) (not (.equalsIgnoreCase (.getAlgorithm (.-md this)) newHashAlg)))
+        (try
+          (set! (.-md this) (MessageDigest/getInstance newHashAlg))
+          (catch NoSuchAlgorithmException nsae
+            (throw (InvalidAlgorithmParameterException.
+                     (java-str "Unsupported digest algorithm " newHashAlg)
+                     nsae)))))))
+
+  (method ^:protected ^{Deprecated true} engineGetParameter :throws [InvalidParameterException] [this
+                                                                                                 ^String param]
+    (throw (UnsupportedOperationException. "getParameter() not supported")))
+
+  (method ^:protected engineGetParameters ^AlgorithmParameters [this]
+    (let [^:mutable ^AlgorithmParameters ap nil]
+      (when (some? (.-sigParams this))
+        (try
+          (set! ap (AlgorithmParameters/getInstance "RSASSA-PSS"))
+          (.init ap (.-sigParams this))
+          (catch GeneralSecurityException gse (throw (ProviderException. (.getMessage gse))))))
+      ap)))

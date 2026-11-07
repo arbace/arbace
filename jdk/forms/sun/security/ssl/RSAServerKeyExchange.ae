@@ -1,0 +1,194 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/RSAServerKeyExchange.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security CryptoPrimitive
+                        GeneralSecurityException
+                        InvalidKeyException
+                        KeyFactory
+                        NoSuchAlgorithmException
+                        Signature
+                        SignatureException)
+        '(java.security.interfaces RSAPublicKey)
+        '(java.security.spec RSAPublicKeySpec)
+        '(java.text MessageFormat)
+        '(java.util EnumSet Locale)
+        '(sun.security.util HexDumpEncoder))
+
+(defclass ^:final RSAServerKeyExchange
+  (field ^:static ^:final ^SSLConsumer rsaHandshakeConsumer (RSAServerKeyExchangeConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer rsaHandshakeProducer (RSAServerKeyExchangeProducer.))
+
+  (defclass ^:private ^:static ^:final RSAServerKeyExchangeMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:private ^:final ^byte/1 modulus)
+
+    (field ^:private ^:final ^byte/1 exponent)
+
+    (field ^:private ^:final ^byte/1 paramsSignature)
+
+    (constructor :throws [IOException] ^:private [this ^HandshakeContext handshakeContext
+                                                  ^X509Authentication$X509Possession x509Possession
+                                                  ^RSAKeyExchange$EphemeralRSAPossession rsaPossession]
+      (super. handshakeContext)
+      (let [shc (cast ServerHandshakeContext handshakeContext)
+            publicKey (.-popPublicKey rsaPossession)
+            spec (JsseJce/getRSAPublicKeySpec publicKey)]
+        (set! (.-modulus this) (Utilities/toByteArray (.getModulus spec)))
+        (set! (.-exponent this) (Utilities/toByteArray (.getPublicExponent spec)))
+        (let [^:mutable ^byte/1 signature nil]
+          (try
+            (let [signer (RSASignature/getInstance)]
+              (.initSign signer
+                         (.-popPrivateKey x509Possession)
+                         (.getSecureRandom (.-sslContext shc)))
+              (.updateSignature this
+                                signer
+                                (.-randomBytes (.-clientHelloRandom shc))
+                                (.-randomBytes (.-serverHelloRandom shc)))
+              (set! signature (.sign signer)))
+            (catch [NoSuchAlgorithmException InvalidKeyException SignatureException] ex
+              (throw (.fatal (.-conContext shc)
+                             Alert/INTERNAL_ERROR
+                             "Failed to sign ephemeral RSA parameters"
+                             ex))))
+          (set! (.-paramsSignature this) signature))))
+
+    (constructor :throws [IOException] [this ^HandshakeContext handshakeContext ^ByteBuffer m]
+      (super. handshakeContext)
+      (let [chc (cast ClientHandshakeContext handshakeContext)]
+        (set! (.-modulus this) (Record/getBytes16 m))
+        (set! (.-exponent this) (Record/getBytes16 m))
+        (set! (.-paramsSignature this) (Record/getBytes16 m))
+        (let [^:mutable ^X509Authentication$X509Credentials x509Credentials nil]
+          (for-each [^SSLCredentials cd (.-handshakeCredentials chc)]
+            (when (instance? X509Authentication$X509Credentials cd)
+              (set! x509Credentials (cast X509Authentication$X509Credentials cd))
+              (break)))
+          (when (nil? x509Credentials)
+            (throw (.fatal (.-conContext chc)
+                           Alert/ILLEGAL_PARAMETER
+                           "No RSA credentials negotiated for server key exchange")))
+          (try
+            (let [signer (RSASignature/getInstance)]
+              (.initVerify signer (.-popPublicKey x509Credentials))
+              (.updateSignature this
+                                signer
+                                (.-randomBytes (.-clientHelloRandom chc))
+                                (.-randomBytes (.-serverHelloRandom chc)))
+              (when-not (.verify signer paramsSignature)
+                (throw (.fatal (.-conContext chc)
+                               Alert/HANDSHAKE_FAILURE
+                               "Invalid signature of RSA ServerKeyExchange message"))))
+            (catch [NoSuchAlgorithmException InvalidKeyException SignatureException] ex
+              (throw (.fatal (.-conContext chc)
+                             Alert/INTERNAL_ERROR
+                             "Failed to sign ephemeral RSA parameters"
+                             ex)))))))
+
+    (method handshakeType ^SSLHandshake [this]
+      SSLHandshake/SERVER_KEY_EXCHANGE)
+
+    (method messageLength ^int [this]
+      (unchecked-add-int
+        (unchecked-add-int (unchecked-add-int 6 (alength modulus)) (alength exponent))
+        (alength paramsSignature)))
+
+    (method send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (.putBytes16 hos modulus)
+      (.putBytes16 hos exponent)
+      (.putBytes16 hos paramsSignature))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"RSA ServerKeyExchange\": '{'\n  \"parameters\": '{'\n    \"rsa_modulus\": '{'\n{0}\n    '}',\n    \"rsa_exponent\": '{'\n{1}\n    '}'\n  '}',\n  \"digital signature\":  '{'\n    \"signature\": '{'\n{2}\n    '}',\n  '}'\n'}'"
+                            Locale/ENGLISH)
+            hexEncoder (HexDumpEncoder.)
+            messageFields (new Object/1
+                               [(Utilities/indent (.encodeBuffer hexEncoder modulus) "      ")
+                                (Utilities/indent (.encodeBuffer hexEncoder exponent) "      ")
+                                (Utilities/indent
+                                  (.encodeBuffer hexEncoder paramsSignature)
+                                  "      ")])]
+        (.format messageFormat messageFields)))
+
+    (method ^:private updateSignature :throws [SignatureException] ^void [this ^Signature signature
+                                                                          ^byte/1 clntNonce
+                                                                          ^byte/1 svrNonce]
+      (.update signature clntNonce)
+      (.update signature svrNonce)
+      (.update signature (unchecked-byte (bit-shift-right-int (alength modulus) 8)))
+      (.update signature (unchecked-byte (bit-and-int (alength modulus) 0x0ff)))
+      (.update signature modulus)
+      (.update signature (unchecked-byte (bit-shift-right-int (alength exponent) 8)))
+      (.update signature (unchecked-byte (bit-and-int (alength exponent) 0x0ff)))
+      (.update signature exponent)))
+
+  (defclass ^:private ^:static ^:final RSAServerKeyExchangeProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            ^:mutable ^RSAKeyExchange$EphemeralRSAPossession rsaPossession nil
+            ^:mutable ^X509Authentication$X509Possession x509Possession nil]
+        (for-each [^SSLPossession possession (.-handshakePossessions shc)]
+          (if (instance? RSAKeyExchange$EphemeralRSAPossession possession)
+              (do
+                (set! rsaPossession (cast RSAKeyExchange$EphemeralRSAPossession possession))
+                (when (some? x509Possession) (break)))
+              (when (instance? X509Authentication$X509Possession possession)
+                (set! x509Possession (cast X509Authentication$X509Possession possession))
+                (when (some? rsaPossession) (break)))))
+        (when (some? rsaPossession)
+          (if (nil? x509Possession)
+              (throw (.fatal (.-conContext shc)
+                             Alert/ILLEGAL_PARAMETER
+                             "No RSA certificate negotiated for server key exchange"))
+              (when-not (.equals "RSA" (.getAlgorithm (.-popPrivateKey x509Possession)))
+                (throw (.fatal
+                         (.-conContext shc)
+                         Alert/ILLEGAL_PARAMETER
+                         "No X.509 possession can be used for ephemeral RSA ServerKeyExchange"))))
+          (let [skem (RSAServerKeyExchangeMessage. shc x509Possession rsaPossession)]
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Produced RSA ServerKeyExchange handshake message" skem))
+            (.write skem (.-handshakeOutput shc))
+            (.flush (.-handshakeOutput shc))
+            nil)))))
+
+  (defclass ^:private ^:static ^:final RSAServerKeyExchangeConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [chc (cast ClientHandshakeContext context)
+            skem (RSAServerKeyExchangeMessage. chc message)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Consuming RSA ServerKeyExchange handshake message" skem))
+        (let [^:mutable ^RSAPublicKey publicKey nil]
+          (try
+            (let [kf (KeyFactory/getInstance "RSA")
+                  spec (RSAPublicKeySpec. (BigInteger. 1 (.-modulus skem))
+                                          (BigInteger. 1 (.-exponent skem)))]
+              (set! publicKey (cast RSAPublicKey (.generatePublic kf spec))))
+            (catch GeneralSecurityException gse
+              (throw (.fatal (.-conContext chc)
+                             Alert/INSUFFICIENT_SECURITY
+                             "Could not generate RSAPublicKey"
+                             gse))))
+          (when-not (.permits (.-algorithmConstraints chc)
+                              (EnumSet/of CryptoPrimitive/KEY_AGREEMENT)
+                              publicKey)
+            (throw (.fatal (.-conContext chc)
+                           Alert/INSUFFICIENT_SECURITY
+                           "RSA ServerKeyExchange does not comply to algorithm constraints")))
+          (.add (.-handshakeCredentials chc) (RSAKeyExchange$EphemeralRSACredentials. publicKey)))))))

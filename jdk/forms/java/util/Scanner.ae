@@ -1,0 +1,1129 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/Scanner.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.util)
+
+(import '(java.io Closeable
+                  File
+                  FileInputStream
+                  FileNotFoundException
+                  IOException
+                  InputStream
+                  InputStreamReader
+                  StringReader)
+        '(java.nio CharBuffer)
+        '(java.nio.channels Channels ReadableByteChannel)
+        '(java.nio.charset Charset
+                           CharsetDecoder
+                           IllegalCharsetNameException
+                           UnsupportedCharsetException)
+        '(java.nio.file Files Path)
+        '(java.text DecimalFormat DecimalFormatSymbols NumberFormat)
+        '(java.text.spi NumberFormatProvider)
+        '(java.util.function Consumer)
+        '(java.util.regex MatchResult Matcher Pattern)
+        '(java.util.stream Stream StreamSupport)
+        '(sun.util.locale.provider LocaleProviderAdapter ResourceBundleBasedAdapter))
+
+(defclass ^:public ^:final Scanner
+  :implements [(Iterator String) Closeable]
+
+  (field ^:private ^CharBuffer buf)
+
+  (field ^:private ^:static ^:final ^int BUFFER_SIZE 1024)
+
+  (field ^:private ^int position)
+
+  (field ^:private ^:final ^Matcher matcher)
+
+  (field ^:private ^Pattern delimPattern)
+
+  (field ^:private ^Pattern hasNextPattern)
+
+  (field ^:private ^int hasNextPosition)
+
+  (field ^:private ^String hasNextResult)
+
+  (field ^:private ^Readable source)
+
+  (field ^:private ^boolean sourceClosed false)
+
+  (field ^:private ^boolean needInput false)
+
+  (field ^:private ^boolean skipped false)
+
+  (field ^:private ^int savedScannerPosition -1)
+
+  (field ^:private typeCache nil)
+
+  (field ^:private ^boolean matchValid false)
+
+  (field ^:private ^boolean closed false)
+
+  (field ^:private ^int radix 10)
+
+  (field ^:private ^int defaultRadix 10)
+
+  (field ^:private ^Locale locale nil)
+
+  (field ^:private ^:final ^PatternLRUCache patternCache (PatternLRUCache. 7))
+
+  (field ^:private ^IOException lastException)
+
+  (field ^int modCount)
+
+  (field ^:private ^:static ^:final ^Pattern WHITESPACE_PATTERN
+    (Pattern/compile "\\p{javaWhitespace}+"))
+
+  (field ^:private ^:static ^:final ^Pattern FIND_ANY_PATTERN (Pattern/compile "(?s).*"))
+
+  (field ^:private ^:static ^:final ^Pattern NON_ASCII_DIGIT
+    (Pattern/compile "[\\p{javaDigit}&&[^0-9]]"))
+
+  (field ^:private ^String groupSeparator "\\,")
+
+  (field ^:private ^String decimalSeparator "\\.")
+
+  (field ^:private ^String nanString "NaN")
+
+  (field ^:private ^String infinityString "Infinity")
+
+  (field ^:private ^String positivePrefix "")
+
+  (field ^:private ^String negativePrefix "\\-")
+
+  (field ^:private ^String positiveSuffix "")
+
+  (field ^:private ^String negativeSuffix "")
+
+  (field ^:private ^:static ^:volatile ^Pattern boolPattern)
+
+  (field ^:private ^:static ^:final ^String BOOLEAN_PATTERN "true|false")
+
+  (method ^:private ^:static boolPattern ^Pattern []
+    (let [^:mutable bp boolPattern]
+      (when (nil? bp)
+        (set! boolPattern (set! bp (Pattern/compile BOOLEAN_PATTERN Pattern/CASE_INSENSITIVE))))
+      bp))
+
+  (field ^:private ^Pattern integerPattern)
+
+  (field ^:private ^:static ^:final ^String digits "0123456789abcdefghijklmnopqrstuvwxyz")
+
+  (field ^:private ^:static ^:final ^String non0Digit "[\\p{javaDigit}&&[^0]]")
+
+  (field ^:private ^:static ^:final ^int SIMPLE_GROUP_INDEX 5)
+
+  (method ^:private buildIntegerPatternString ^String [this]
+    (let [radixDigits (.substring digits 0 radix)
+          digit (java-str "((?i)[" radixDigits "\\p{javaDigit}])")
+          groupedNumeral (java-str (java-str "(" non0Digit)
+                                   digit
+                                   "?"
+                                   digit
+                                   "?("
+                                   groupSeparator
+                                   digit
+                                   digit
+                                   digit
+                                   ")+)")
+          numeral (java-str "((" digit "++)|" groupedNumeral ")")
+          javaStyleInteger (java-str "([-+]?(" numeral "))")
+          negativeInteger (java-str negativePrefix numeral negativeSuffix)
+          positiveInteger (java-str positivePrefix numeral positiveSuffix)]
+      (java-str "(" javaStyleInteger ")|(" positiveInteger ")|(" negativeInteger ")")))
+
+  (method ^:private integerPattern ^Pattern [this]
+    (when (nil? integerPattern)
+      (set! integerPattern (.forName patternCache (.buildIntegerPatternString this))))
+    integerPattern)
+
+  (field ^:private ^:static ^:volatile ^Pattern separatorPattern)
+
+  (field ^:private ^:static ^:volatile ^Pattern linePattern)
+
+  (field ^:private ^:static ^:final ^String LINE_SEPARATOR_PATTERN "\r\n|[\n\r\u2028\u2029\u0085]")
+
+  (field ^:private ^:static ^:final ^String LINE_PATTERN
+    (java-str (java-str ".*(" LINE_SEPARATOR_PATTERN) ")|.+$"))
+
+  (method ^:private ^:static separatorPattern ^Pattern []
+    (let [^:mutable sp separatorPattern]
+      (when (nil? sp) (set! separatorPattern (set! sp (Pattern/compile LINE_SEPARATOR_PATTERN))))
+      sp))
+
+  (method ^:private ^:static linePattern ^Pattern []
+    (let [^:mutable lp linePattern]
+      (when (nil? lp) (set! linePattern (set! lp (Pattern/compile LINE_PATTERN))))
+      lp))
+
+  (field ^:private ^Pattern floatPattern)
+
+  (field ^:private ^Pattern decimalPattern)
+
+  (method ^:private buildFloatAndDecimalPattern ^void [this]
+    (let [digit "(([0-9\\p{javaDigit}]))"
+          exponent (java-str "([eE][+-]?" digit "+)?")
+          groupedNumeral (java-str (java-str "(" non0Digit)
+                                   digit
+                                   "?"
+                                   digit
+                                   "?("
+                                   groupSeparator
+                                   digit
+                                   digit
+                                   digit
+                                   ")+)")
+          numeral (java-str "((" digit "++)|" groupedNumeral ")")
+          decimalNumeral (java-str "("
+                                   numeral
+                                   "|"
+                                   numeral
+                                   decimalSeparator
+                                   digit
+                                   "*+|"
+                                   decimalSeparator
+                                   digit
+                                   "++)")
+          nonNumber (java-str "(NaN|" nanString "|Infinity|" infinityString ")")
+          positiveFloat (java-str "(" positivePrefix decimalNumeral positiveSuffix exponent ")")
+          negativeFloat (java-str "(" negativePrefix decimalNumeral negativeSuffix exponent ")")
+          decimal (java-str "(([-+]?"
+                            decimalNumeral
+                            exponent
+                            ")|"
+                            positiveFloat
+                            "|"
+                            negativeFloat
+                            ")")
+          hexFloat "[-+]?0[xX][0-9a-fA-F]*\\.[0-9a-fA-F]+([pP][-+]?[0-9]+)?"
+          positiveNonNumber (java-str "(" positivePrefix nonNumber positiveSuffix ")")
+          negativeNonNumber (java-str "(" negativePrefix nonNumber negativeSuffix ")")
+          signedNonNumber (java-str "(([-+]?"
+                                    nonNumber
+                                    ")|"
+                                    positiveNonNumber
+                                    "|"
+                                    negativeNonNumber
+                                    ")")]
+      (set! floatPattern (Pattern/compile (java-str decimal "|" hexFloat "|" signedNonNumber)))
+      (set! decimalPattern (Pattern/compile decimal))))
+
+  (method ^:private floatPattern ^Pattern [this]
+    (when (nil? floatPattern) (.buildFloatAndDecimalPattern this))
+    floatPattern)
+
+  (method ^:private decimalPattern ^Pattern [this]
+    (when (nil? decimalPattern) (.buildFloatAndDecimalPattern this))
+    decimalPattern)
+
+  (constructor ^:private [this ^Readable source ^Pattern pattern]
+    (java-assert (some? source) "source should not be null")
+    (java-assert (some? pattern) "pattern should not be null")
+    (set! (.-source this) source)
+    (set! delimPattern pattern)
+    (set! buf (CharBuffer/allocate BUFFER_SIZE))
+    (.limit buf 0)
+    (set! matcher (.matcher delimPattern buf))
+    (.useTransparentBounds matcher true)
+    (.useAnchoringBounds matcher false)
+    (.useLocale this (Locale/getDefault Locale$Category/FORMAT)))
+
+  (constructor ^:public [this ^Readable source]
+    (this. (cast Readable (Objects/requireNonNull source "source")) WHITESPACE_PATTERN))
+
+  (constructor ^:public [this ^InputStream source]
+    (this. (InputStreamReader. source) WHITESPACE_PATTERN))
+
+  (constructor ^:public [this ^InputStream source ^String charsetName]
+    (this. source (Scanner/toCharset charsetName)))
+
+  (constructor ^:public [this ^InputStream source ^Charset charset]
+    (this. (Scanner/makeReadable (cast InputStream (Objects/requireNonNull source "source"))
+                                 charset)
+           WHITESPACE_PATTERN))
+
+  (method ^:private ^:static toCharset ^Charset [^String csn]
+    (Objects/requireNonNull csn "charsetName")
+    (try
+      (Charset/forName csn)
+      (catch [IllegalCharsetNameException UnsupportedCharsetException] e
+        (throw (IllegalArgumentException. e)))))
+
+  (method ^:private ^:static makeReadable :throws [IOException] ^Readable [^Path source
+                                                                           ^Charset charset]
+    (Objects/requireNonNull charset "charset")
+    (Scanner/makeReadable (Files/newInputStream source) charset))
+
+  (method ^:private ^:static makeReadable ^Readable [^InputStream source ^Charset charset]
+    (Objects/requireNonNull charset "charset")
+    (InputStreamReader. source charset))
+
+  (constructor :throws [FileNotFoundException] ^:public [this ^File source]
+    (this. ^ReadableByteChannel (.getChannel (FileInputStream. source))))
+
+  (constructor :throws [FileNotFoundException] ^:public [this ^File source ^String charsetName]
+    (this. (cast File (Objects/requireNonNull source)) (Scanner/toDecoder charsetName)))
+
+  (constructor :throws [IOException] ^:public [this ^File source ^Charset charset]
+    (this. (cast File (Objects/requireNonNull source)) (.newDecoder charset)))
+
+  (constructor :throws [FileNotFoundException] ^:private [this ^File source ^CharsetDecoder dec]
+    (this. (Scanner/makeReadable ^ReadableByteChannel (.getChannel (FileInputStream. source)) dec)))
+
+  (method ^:private ^:static toDecoder ^CharsetDecoder [^String charsetName]
+    (Objects/requireNonNull charsetName "charsetName")
+    (try
+      (.newDecoder (Charset/forName charsetName))
+      (catch [IllegalCharsetNameException UnsupportedCharsetException] unused
+        (throw (IllegalArgumentException. charsetName)))))
+
+  (method ^:private ^:static makeReadable ^Readable [^ReadableByteChannel source ^CharsetDecoder dec]
+    (Channels/newReader source dec -1))
+
+  (method ^:private ^:static makeReadable ^Readable [^ReadableByteChannel source ^Charset charset]
+    (Objects/requireNonNull charset "charset")
+    (Channels/newReader source charset))
+
+  (constructor :throws [IOException] ^:public [this ^Path source]
+    (this. (Files/newInputStream source)))
+
+  (constructor :throws [IOException] ^:public [this ^Path source ^String charsetName]
+    (this. (cast Path (Objects/requireNonNull source)) (Scanner/toCharset charsetName)))
+
+  (constructor :throws [IOException] ^:public [this ^Path source ^Charset charset]
+    (this. (Scanner/makeReadable source charset)))
+
+  (constructor ^:public [this ^String source]
+    (this. (StringReader. source) WHITESPACE_PATTERN))
+
+  (constructor ^:public [this ^ReadableByteChannel source]
+    (this. (Scanner/makeReadable
+             (cast ReadableByteChannel (Objects/requireNonNull source "source")))
+           WHITESPACE_PATTERN))
+
+  (method ^:private ^:static makeReadable ^Readable [^ReadableByteChannel source]
+    (Scanner/makeReadable source (.newDecoder (Charset/defaultCharset))))
+
+  (constructor ^:public [this ^ReadableByteChannel source ^String charsetName]
+    (this. (Scanner/makeReadable (cast ReadableByteChannel (Objects/requireNonNull source "source"))
+                                 (Scanner/toDecoder charsetName))
+           WHITESPACE_PATTERN))
+
+  (constructor ^:public [this ^ReadableByteChannel source ^Charset charset]
+    (this. (Scanner/makeReadable (cast ReadableByteChannel (Objects/requireNonNull source "source"))
+                                 charset)
+           WHITESPACE_PATTERN))
+
+  (method ^:private saveState ^void [this]
+    (set! savedScannerPosition position))
+
+  (method ^:private revertState ^void [this]
+    (set! (.-position this) savedScannerPosition)
+    (set! savedScannerPosition -1)
+    (set! skipped false))
+
+  (method ^:private revertState ^boolean [this ^boolean b]
+    (set! (.-position this) savedScannerPosition)
+    (set! savedScannerPosition -1)
+    (set! skipped false)
+    b)
+
+  (method ^:private cacheResult ^void [this]
+    (set! hasNextResult (.group matcher))
+    (set! hasNextPosition (.end matcher))
+    (set! hasNextPattern (.pattern matcher)))
+
+  (method ^:private cacheResult ^void [this ^String result]
+    (set! hasNextResult result)
+    (set! hasNextPosition (.end matcher))
+    (set! hasNextPattern (.pattern matcher)))
+
+  (method ^:private clearCaches ^void [this]
+    (set! hasNextPattern nil)
+    (set! typeCache nil))
+
+  (method ^:private getCachedResult ^String [this]
+    (set! position hasNextPosition)
+    (set! hasNextPattern nil)
+    (set! typeCache nil)
+    hasNextResult)
+
+  (method ^:private useTypeCache ^void [this]
+    (when closed (throw (IllegalStateException. "Scanner closed")))
+    (set! position hasNextPosition)
+    (set! hasNextPattern nil)
+    (set! typeCache nil))
+
+  (method ^:private readInput ^void [this]
+    (when (== (.limit buf) (.capacity buf)) (.makeSpace this))
+    (let [p (.position buf)]
+      (.position buf (.limit buf))
+      (.limit buf (.capacity buf))
+      (let [^:mutable ^int n 0]
+        (try
+          (set! n (.read source buf))
+          (catch IOException ioe (set! lastException ioe) (set! n -1)))
+        (when (== n -1) (set! sourceClosed true) (set! needInput false))
+        (when (> n 0) (set! needInput false))
+        (.limit buf (.position buf))
+        (.position buf p))))
+
+  (method ^:private makeSpace ^boolean [this]
+    (.clearCaches this)
+    (let [^int offset (if (== savedScannerPosition -1) position savedScannerPosition)]
+      (.position buf offset)
+      (if (> offset 0)
+          (do
+            (.compact buf)
+            (.translateSavedIndexes this offset)
+            (set! position (unchecked-subtract-int position offset))
+            (.flip buf)
+            true)
+          (let [newSize (unchecked-multiply-int (.capacity buf) 2)
+                newBuf (CharBuffer/allocate newSize)]
+            (.put newBuf buf)
+            (.flip newBuf)
+            (.translateSavedIndexes this offset)
+            (set! position (unchecked-subtract-int position offset))
+            (set! buf newBuf)
+            (.reset matcher buf)
+            true))))
+
+  (method ^:private translateSavedIndexes ^void [this ^int offset]
+    (when-not (== savedScannerPosition -1)
+      (set! savedScannerPosition (unchecked-subtract-int savedScannerPosition offset))))
+
+  (method ^:private throwFor ^void [this]
+    (set! skipped false)
+    (if (and sourceClosed (== position (.limit buf)))
+        (throw (NoSuchElementException.))
+        (throw (InputMismatchException.))))
+
+  (method ^:private hasTokenInBuffer ^boolean [this]
+    (set! matchValid false)
+    (.usePattern matcher delimPattern)
+    (.region matcher position (.limit buf))
+    (when (.lookingAt matcher)
+      (when (and (.hitEnd matcher) (not sourceClosed)) (set! needInput true) (return false))
+      (set! position (.end matcher)))
+    (if (== position (.limit buf)) false true))
+
+  (method ^:private getCompleteTokenInBuffer ^String [this ^:mutable ^Pattern pattern]
+    (set! matchValid false)
+    (.usePattern matcher delimPattern)
+    (when-not skipped
+      (.region matcher position (.limit buf))
+      (when (.lookingAt matcher)
+        (when (and (.hitEnd matcher) (not sourceClosed)) (set! needInput true) (return nil))
+        (set! skipped true)
+        (set! position (.end matcher))))
+    (if (== position (.limit buf))
+        (when-not sourceClosed (set! needInput true) nil)
+        (do
+          (.region matcher position (.limit buf))
+          (let [^:mutable foundNextDelim (.find matcher)]
+            (when (and foundNextDelim (== (.end matcher) position))
+              (set! foundNextDelim (.find matcher)))
+            (cond
+              foundNextDelim
+                (if (and (.requireEnd matcher) (not sourceClosed))
+                    (do (set! needInput true) nil)
+                    (let [tokenEnd (.start matcher)]
+                      (when (nil? pattern) (set! pattern FIND_ANY_PATTERN))
+                      (.usePattern matcher pattern)
+                      (.region matcher position tokenEnd)
+                      (when (.matches matcher)
+                        (let [s (.group matcher)] (set! position (.end matcher)) s))))
+              sourceClosed
+                (do
+                  (when (nil? pattern) (set! pattern FIND_ANY_PATTERN))
+                  (.usePattern matcher pattern)
+                  (.region matcher position (.limit buf))
+                  (when (.matches matcher)
+                    (let [s (.group matcher)] (set! position (.end matcher)) s)))
+              :else (do (set! needInput true) nil))))))
+
+  (method ^:private findPatternInBuffer ^boolean [this ^Pattern pattern ^int horizon]
+    (set! matchValid false)
+    (.usePattern matcher pattern)
+    (let [bufferLimit (.limit buf)
+          ^:mutable ^int horizonLimit -1
+          ^:mutable searchLimit bufferLimit]
+      (when (> horizon 0)
+        (set! horizonLimit (unchecked-add-int position horizon))
+        (when (< horizonLimit bufferLimit) (set! searchLimit horizonLimit)))
+      (.region matcher position searchLimit)
+      (cond
+        (.find matcher)
+          (do
+            (when (and (.hitEnd matcher) (not sourceClosed))
+              (when-not (== searchLimit horizonLimit) (set! needInput true) (return false))
+              (when (and (== searchLimit horizonLimit) (.requireEnd matcher))
+                (set! needInput true)
+                (return false)))
+            (set! position (.end matcher))
+            true)
+        sourceClosed false
+        :else
+          (do
+            (when (or (== horizon 0) (not (== searchLimit horizonLimit))) (set! needInput true))
+            false))))
+
+  (method ^:private matchPatternInBuffer ^boolean [this ^Pattern pattern]
+    (set! matchValid false)
+    (.usePattern matcher pattern)
+    (.region matcher position (.limit buf))
+    (cond
+      (.lookingAt matcher)
+        (if (and (.hitEnd matcher) (not sourceClosed))
+            (do (set! needInput true) false)
+            (do (set! position (.end matcher)) true))
+      sourceClosed false
+      :else (do (set! needInput true) false)))
+
+  (method ^:private ensureOpen ^void [this]
+    (when closed (throw (IllegalStateException. "Scanner closed"))))
+
+  (method ^:public close ^void [this]
+    (when-not closed
+      (when (instance? Closeable source)
+        (try (.close (cast Closeable source)) (catch IOException ioe (set! lastException ioe))))
+      (set! sourceClosed true)
+      (set! source nil)
+      (set! closed true)))
+
+  (method ^:public ioException ^IOException [this] lastException)
+
+  (method ^:public delimiter ^Pattern [this] delimPattern)
+
+  (method ^:public useDelimiter ^Scanner [this ^Pattern pattern]
+    (set! modCount (unchecked-inc-int modCount))
+    (set! delimPattern pattern)
+    this)
+
+  (method ^:public useDelimiter ^Scanner [this ^String pattern]
+    (set! modCount (unchecked-inc-int modCount))
+    (set! delimPattern (.forName patternCache pattern))
+    this)
+
+  (method ^:public locale ^Locale [this] (.-locale this))
+
+  (method ^:public useLocale ^Scanner [this ^Locale locale]
+    (if (.equals locale (.-locale this))
+        this
+        (do
+          (set! modCount (unchecked-inc-int modCount))
+          (set! (.-locale this) locale)
+          (let [^:mutable ^DecimalFormat df nil
+                nf (NumberFormat/getNumberInstance locale)
+                dfs (DecimalFormatSymbols/getInstance locale)]
+            (if (instance? DecimalFormat nf)
+                (set! df (cast DecimalFormat nf))
+                (let [^:mutable adapter (LocaleProviderAdapter/getAdapter
+                                          NumberFormatProvider
+                                          locale)]
+                  (when-not (instance? ResourceBundleBasedAdapter adapter)
+                    (set! adapter (LocaleProviderAdapter/getResourceBundleBased)))
+                  (let [all (.getNumberPatterns (.getLocaleResources adapter locale))]
+                    (set! df (DecimalFormat. (aget all 0) dfs)))))
+            (set! groupSeparator
+                  (java-str "\\x{" (Integer/toHexString (.getGroupingSeparator dfs)) "}"))
+            (set! decimalSeparator
+                  (java-str "\\x{" (Integer/toHexString (.getDecimalSeparator dfs)) "}"))
+            (set! nanString (Pattern/quote (.getNaN dfs)))
+            (set! infinityString (Pattern/quote (.getInfinity dfs)))
+            (set! positivePrefix (.getPositivePrefix df))
+            (when-not (.isEmpty positivePrefix)
+              (set! positivePrefix (Pattern/quote positivePrefix)))
+            (set! negativePrefix (.getNegativePrefix df))
+            (when-not (.isEmpty negativePrefix)
+              (set! negativePrefix (Pattern/quote negativePrefix)))
+            (set! positiveSuffix (.getPositiveSuffix df))
+            (when-not (.isEmpty positiveSuffix)
+              (set! positiveSuffix (Pattern/quote positiveSuffix)))
+            (set! negativeSuffix (.getNegativeSuffix df))
+            (when-not (.isEmpty negativeSuffix)
+              (set! negativeSuffix (Pattern/quote negativeSuffix)))
+            (set! integerPattern nil)
+            (set! floatPattern nil)
+            this))))
+
+  (method ^:public radix ^int [this] (.-defaultRadix this))
+
+  (method ^:public useRadix ^Scanner [this ^int radix]
+    (when (or (< radix Character/MIN_RADIX) (> radix Character/MAX_RADIX))
+      (throw (IllegalArgumentException. (java-str "radix:" radix))))
+    (if (== (.-defaultRadix this) radix)
+        this
+        (do
+          (set! modCount (unchecked-inc-int modCount))
+          (set! (.-defaultRadix this) radix)
+          (set! integerPattern nil)
+          this)))
+
+  (method ^:private setRadix ^void [this ^int radix]
+    (when (or (< radix Character/MIN_RADIX) (> radix Character/MAX_RADIX))
+      (throw (IllegalArgumentException. (java-str "radix:" radix))))
+    (when-not (== (.-radix this) radix) (set! integerPattern nil) (set! (.-radix this) radix)))
+
+  (method ^:public match ^MatchResult [this]
+    (when-not matchValid (throw (IllegalStateException. "No match result available")))
+    (.toMatchResult matcher))
+
+  (method ^:public toString ^String [this]
+    (let [sb (StringBuilder.)]
+      (.append sb "java.util.Scanner")
+      (.append sb (java-str "[delimiters=" delimPattern "]"))
+      (.append sb (java-str "[position=" position "]"))
+      (.append sb (java-str "[match valid=" matchValid "]"))
+      (.append sb (java-str "[need input=" needInput "]"))
+      (.append sb (java-str "[source closed=" sourceClosed "]"))
+      (.append sb (java-str "[skipped=" skipped "]"))
+      (.append sb (java-str "[group separator=" groupSeparator "]"))
+      (.append sb (java-str "[decimal separator=" decimalSeparator "]"))
+      (.append sb (java-str "[positive prefix=" positivePrefix "]"))
+      (.append sb (java-str "[negative prefix=" negativePrefix "]"))
+      (.append sb (java-str "[positive suffix=" positiveSuffix "]"))
+      (.append sb (java-str "[negative suffix=" negativeSuffix "]"))
+      (.append sb (java-str "[NaN string=" nanString "]"))
+      (.append sb (java-str "[infinity string=" infinityString "]"))
+      (.toString sb)))
+
+  (method ^:public hasNext ^boolean [this]
+    (.ensureOpen this)
+    (.saveState this)
+    (set! modCount (unchecked-inc-int modCount))
+    (while (not sourceClosed)
+      (when (.hasTokenInBuffer this) (return (.revertState this true)))
+      (.readInput this))
+    (let [result (.hasTokenInBuffer this)] (.revertState this result)))
+
+  (method ^:public next ^String [this]
+    (.ensureOpen this)
+    (.clearCaches this)
+    (set! modCount (unchecked-inc-int modCount))
+    (while true
+      (let [token (.getCompleteTokenInBuffer this nil)]
+        (when (some? token) (set! matchValid true) (set! skipped false) (return token))
+        (if needInput (.readInput this) (.throwFor this)))))
+
+  (method ^:public remove ^void [this]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:public hasNext ^boolean [this ^String pattern]
+    (.hasNext this (.forName patternCache pattern)))
+
+  (method ^:public next ^String [this ^String pattern]
+    (.next this (.forName patternCache pattern)))
+
+  (method ^:public hasNext ^boolean [this ^Pattern pattern]
+    (.ensureOpen this)
+    (when (nil? pattern) (throw (NullPointerException.)))
+    (set! hasNextPattern nil)
+    (.saveState this)
+    (set! modCount (unchecked-inc-int modCount))
+    (while true
+      (when (some? (.getCompleteTokenInBuffer this pattern))
+        (set! matchValid true)
+        (.cacheResult this)
+        (return (.revertState this true)))
+      (if needInput (.readInput this) (return (.revertState this false)))))
+
+  (method ^:public next ^String [this ^Pattern pattern]
+    (.ensureOpen this)
+    (when (nil? pattern) (throw (NullPointerException.)))
+    (set! modCount (unchecked-inc-int modCount))
+    (if (identical? hasNextPattern pattern)
+        (.getCachedResult this)
+        (do
+          (.clearCaches this)
+          (while true
+            (let [token (.getCompleteTokenInBuffer this pattern)]
+              (when (some? token) (set! matchValid true) (set! skipped false) (return token))
+              (if needInput (.readInput this) (.throwFor this)))))))
+
+  (method ^:public hasNextLine ^boolean [this]
+    (.saveState this)
+    (set! modCount (unchecked-inc-int modCount))
+    (let [^:mutable result (.findWithinHorizon this (Scanner/linePattern) 0)]
+      (when (some? result)
+        (let [mr (.match this)
+              lineSep (.group mr 1)]
+          (if (some? lineSep)
+              (do
+                (set! result
+                      (.substring result
+                                  0
+                                  (unchecked-subtract-int (.length result) (.length lineSep))))
+                (.cacheResult this result))
+              (.cacheResult this))))
+      (.revertState this)
+      (some? result)))
+
+  (method ^:public nextLine ^String [this]
+    (set! modCount (unchecked-inc-int modCount))
+    (if (identical? hasNextPattern (Scanner/linePattern))
+        (.getCachedResult this)
+        (do
+          (.clearCaches this)
+          (let [^:mutable result (.findWithinHorizon this linePattern 0)]
+            (when (nil? result) (throw (NoSuchElementException. "No line found")))
+            (let [mr (.match this)
+                  lineSep (.group mr 1)]
+              (when (some? lineSep)
+                (set! result
+                      (.substring result
+                                  0
+                                  (unchecked-subtract-int (.length result) (.length lineSep)))))
+              (if (nil? result) (throw (NoSuchElementException.)) result))))))
+
+  (method ^:public findInLine ^String [this ^String pattern]
+    (.findInLine this (.forName patternCache pattern)))
+
+  (method ^:public findInLine ^String [this ^Pattern pattern]
+    (.ensureOpen this)
+    (when (nil? pattern) (throw (NullPointerException.)))
+    (.clearCaches this)
+    (set! modCount (unchecked-inc-int modCount))
+    (let [^:mutable ^int endPosition 0]
+      (.saveState this)
+      (while true
+        (when (.findPatternInBuffer this (Scanner/separatorPattern) 0)
+          (set! endPosition (.start matcher))
+          (break))
+        (if needInput (.readInput this) (do (set! endPosition (.limit buf)) (break))))
+      (.revertState this)
+      (let [horizonForLine (unchecked-subtract-int endPosition position)]
+        (when-not (== horizonForLine 0) (.findWithinHorizon this pattern horizonForLine)))))
+
+  (method ^:public findWithinHorizon ^String [this ^String pattern ^int horizon]
+    (.findWithinHorizon this (.forName patternCache pattern) horizon))
+
+  (method ^:public findWithinHorizon ^String [this ^Pattern pattern ^int horizon]
+    (.ensureOpen this)
+    (when (nil? pattern) (throw (NullPointerException.)))
+    (when (< horizon 0) (throw (IllegalArgumentException. "horizon < 0")))
+    (.clearCaches this)
+    (set! modCount (unchecked-inc-int modCount))
+    (while true
+      (when (.findPatternInBuffer this pattern horizon)
+        (set! matchValid true)
+        (return (.group matcher)))
+      (if needInput (.readInput this) (break)))
+    nil)
+
+  (method ^:public skip ^Scanner [this ^Pattern pattern]
+    (.ensureOpen this)
+    (when (nil? pattern) (throw (NullPointerException.)))
+    (.clearCaches this)
+    (set! modCount (unchecked-inc-int modCount))
+    (while true
+      (when (.matchPatternInBuffer this pattern)
+        (set! matchValid true)
+        (set! position (.end matcher))
+        (return this))
+      (if needInput (.readInput this) (throw (NoSuchElementException.)))))
+
+  (method ^:public skip ^Scanner [this ^String pattern]
+    (.skip this (.forName patternCache pattern)))
+
+  (method ^:public hasNextBoolean ^boolean [this]
+    (.hasNext this (Scanner/boolPattern)))
+
+  (method ^:public nextBoolean ^boolean [this]
+    (.clearCaches this)
+    (Boolean/parseBoolean (.next this (Scanner/boolPattern))))
+
+  (method ^:public hasNextByte ^boolean [this]
+    (.hasNextByte this defaultRadix))
+
+  (method ^:public hasNextByte ^boolean [this ^int radix]
+    (.setRadix this radix)
+    (let [^:mutable result (.hasNext this (.integerPattern this))]
+      (when result
+        (try
+          (let [^String s (if (nil? (.group matcher SIMPLE_GROUP_INDEX))
+                              (.processIntegerToken this hasNextResult)
+                              hasNextResult)]
+            (set! typeCache (Byte/parseByte s radix)))
+          (catch NumberFormatException nfe (set! result false))))
+      result))
+
+  (method ^:public nextByte ^byte [this] (.nextByte this defaultRadix))
+
+  (method ^:public nextByte ^byte [this ^int radix]
+    (if (and (and (some? typeCache) (instance? Byte typeCache)) (== (.-radix this) radix))
+        (let [val (.byteValue (cast Byte typeCache))] (.useTypeCache this) val)
+        (do
+          (.setRadix this radix)
+          (.clearCaches this)
+          (try
+            (let [^:mutable s (.next this (.integerPattern this))]
+              (when (nil? (.group matcher SIMPLE_GROUP_INDEX))
+                (set! s (.processIntegerToken this s)))
+              (Byte/parseByte s radix))
+            (catch NumberFormatException nfe
+              (set! position (.start matcher))
+              (throw (InputMismatchException. (.getMessage nfe))))))))
+
+  (method ^:public hasNextShort ^boolean [this]
+    (.hasNextShort this defaultRadix))
+
+  (method ^:public hasNextShort ^boolean [this ^int radix]
+    (.setRadix this radix)
+    (let [^:mutable result (.hasNext this (.integerPattern this))]
+      (when result
+        (try
+          (let [^String s (if (nil? (.group matcher SIMPLE_GROUP_INDEX))
+                              (.processIntegerToken this hasNextResult)
+                              hasNextResult)]
+            (set! typeCache (Short/parseShort s radix)))
+          (catch NumberFormatException nfe (set! result false))))
+      result))
+
+  (method ^:public nextShort ^short [this] (.nextShort this defaultRadix))
+
+  (method ^:public nextShort ^short [this ^int radix]
+    (if (and (and (some? typeCache) (instance? Short typeCache)) (== (.-radix this) radix))
+        (let [val (.shortValue (cast Short typeCache))] (.useTypeCache this) val)
+        (do
+          (.setRadix this radix)
+          (.clearCaches this)
+          (try
+            (let [^:mutable s (.next this (.integerPattern this))]
+              (when (nil? (.group matcher SIMPLE_GROUP_INDEX))
+                (set! s (.processIntegerToken this s)))
+              (Short/parseShort s radix))
+            (catch NumberFormatException nfe
+              (set! position (.start matcher))
+              (throw (InputMismatchException. (.getMessage nfe))))))))
+
+  (method ^:public hasNextInt ^boolean [this]
+    (.hasNextInt this defaultRadix))
+
+  (method ^:public hasNextInt ^boolean [this ^int radix]
+    (.setRadix this radix)
+    (let [^:mutable result (.hasNext this (.integerPattern this))]
+      (when result
+        (try
+          (let [^String s (if (nil? (.group matcher SIMPLE_GROUP_INDEX))
+                              (.processIntegerToken this hasNextResult)
+                              hasNextResult)]
+            (set! typeCache (Integer/parseInt s radix)))
+          (catch NumberFormatException nfe (set! result false))))
+      result))
+
+  (method ^:private processIntegerToken ^String [this ^String token]
+    (let [^:mutable result (.replaceAll token (java-str "" groupSeparator) "")
+          ^:mutable isNegative false
+          preLen (.length negativePrefix)]
+      (when (and (> preLen 0) (.startsWith result negativePrefix))
+        (set! isNegative true)
+        (set! result (.substring result preLen)))
+      (let [sufLen (.length negativeSuffix)]
+        (when (and (> sufLen 0) (.endsWith result negativeSuffix))
+          (set! isNegative true)
+          (set! result
+                (.substring result
+                            (unchecked-subtract-int (.length result) sufLen)
+                            (.length result))))
+        (when isNegative (set! result (java-str "-" result)))
+        result)))
+
+  (method ^:public nextInt ^int [this] (.nextInt this defaultRadix))
+
+  (method ^:public nextInt ^int [this ^int radix]
+    (if (and (and (some? typeCache) (instance? Integer typeCache)) (== (.-radix this) radix))
+        (let [val (.intValue (cast Integer typeCache))] (.useTypeCache this) val)
+        (do
+          (.setRadix this radix)
+          (.clearCaches this)
+          (try
+            (let [^:mutable s (.next this (.integerPattern this))]
+              (when (nil? (.group matcher SIMPLE_GROUP_INDEX))
+                (set! s (.processIntegerToken this s)))
+              (Integer/parseInt s radix))
+            (catch NumberFormatException nfe
+              (set! position (.start matcher))
+              (throw (InputMismatchException. (.getMessage nfe))))))))
+
+  (method ^:public hasNextLong ^boolean [this]
+    (.hasNextLong this defaultRadix))
+
+  (method ^:public hasNextLong ^boolean [this ^int radix]
+    (.setRadix this radix)
+    (let [^:mutable result (.hasNext this (.integerPattern this))]
+      (when result
+        (try
+          (let [^String s (if (nil? (.group matcher SIMPLE_GROUP_INDEX))
+                              (.processIntegerToken this hasNextResult)
+                              hasNextResult)]
+            (set! typeCache (Long/parseLong s radix)))
+          (catch NumberFormatException nfe (set! result false))))
+      result))
+
+  (method ^:public nextLong ^long [this] (.nextLong this defaultRadix))
+
+  (method ^:public nextLong ^long [this ^int radix]
+    (if (and (and (some? typeCache) (instance? Long typeCache)) (== (.-radix this) radix))
+        (let [val (.longValue (cast Long typeCache))] (.useTypeCache this) val)
+        (do
+          (.setRadix this radix)
+          (.clearCaches this)
+          (try
+            (let [^:mutable s (.next this (.integerPattern this))]
+              (when (nil? (.group matcher SIMPLE_GROUP_INDEX))
+                (set! s (.processIntegerToken this s)))
+              (Long/parseLong s radix))
+            (catch NumberFormatException nfe
+              (set! position (.start matcher))
+              (throw (InputMismatchException. (.getMessage nfe))))))))
+
+  (method ^:private processFloatToken ^String [this ^String token]
+    (let [^:mutable result (.replaceAll token groupSeparator "")]
+      (when-not (.equals decimalSeparator "\\.")
+        (set! result (.replaceAll result decimalSeparator ".")))
+      (let [^:mutable isNegative false
+            preLen (.length negativePrefix)]
+        (when (and (> preLen 0) (.startsWith result negativePrefix))
+          (set! isNegative true)
+          (set! result (.substring result preLen)))
+        (let [sufLen (.length negativeSuffix)]
+          (when (and (> sufLen 0) (.endsWith result negativeSuffix))
+            (set! isNegative true)
+            (set! result
+                  (.substring result
+                              (unchecked-subtract-int (.length result) sufLen)
+                              (.length result))))
+          (when (.equals result nanString) (set! result "NaN"))
+          (when (.equals result infinityString) (set! result "Infinity"))
+          (when isNegative (set! result (java-str "-" result)))
+          (let [m (.matcher NON_ASCII_DIGIT result)]
+            (when (.find m)
+              (let [inASCII (StringBuilder.)]
+                (loop [^int i 0]
+                  (when (< i (.length result))
+                    (let [nextChar (.charAt result i)]
+                      (if (Character/isDigit nextChar)
+                          (let [d (Character/digit nextChar 10)]
+                            (if (not (== d -1))
+                                (do (.append inASCII d) (recur (unchecked-inc-int i)))
+                                (do (.append inASCII nextChar) (recur (unchecked-inc-int i)))))
+                          (do (.append inASCII nextChar) (recur (unchecked-inc-int i)))))))
+                (set! result (.toString inASCII))))
+            result)))))
+
+  (method ^:public hasNextFloat ^boolean [this]
+    (.setRadix this 10)
+    (let [^:mutable result (.hasNext this (.floatPattern this))]
+      (when result
+        (try
+          (let [s (.processFloatToken this hasNextResult)]
+            (set! typeCache (Float/valueOf (Float/parseFloat s))))
+          (catch NumberFormatException nfe (set! result false))))
+      result))
+
+  (method ^:public nextFloat ^float [this]
+    (if (and (some? typeCache) (instance? Float typeCache))
+        (let [val (.floatValue (cast Float typeCache))] (.useTypeCache this) val)
+        (do
+          (.setRadix this 10)
+          (.clearCaches this)
+          (try
+            (Float/parseFloat (.processFloatToken this (.next this (.floatPattern this))))
+            (catch NumberFormatException nfe
+              (set! position (.start matcher))
+              (throw (InputMismatchException. (.getMessage nfe))))))))
+
+  (method ^:public hasNextDouble ^boolean [this]
+    (.setRadix this 10)
+    (let [^:mutable result (.hasNext this (.floatPattern this))]
+      (when result
+        (try
+          (let [s (.processFloatToken this hasNextResult)]
+            (set! typeCache (Double/valueOf (Double/parseDouble s))))
+          (catch NumberFormatException nfe (set! result false))))
+      result))
+
+  (method ^:public nextDouble ^double [this]
+    (if (and (some? typeCache) (instance? Double typeCache))
+        (let [val (.doubleValue (cast Double typeCache))] (.useTypeCache this) val)
+        (do
+          (.setRadix this 10)
+          (.clearCaches this)
+          (try
+            (Double/parseDouble (.processFloatToken this (.next this (.floatPattern this))))
+            (catch NumberFormatException nfe
+              (set! position (.start matcher))
+              (throw (InputMismatchException. (.getMessage nfe))))))))
+
+  (method ^:public hasNextBigInteger ^boolean [this]
+    (.hasNextBigInteger this defaultRadix))
+
+  (method ^:public hasNextBigInteger ^boolean [this ^int radix]
+    (.setRadix this radix)
+    (let [^:mutable result (.hasNext this (.integerPattern this))]
+      (when result
+        (try
+          (let [^String s (if (nil? (.group matcher SIMPLE_GROUP_INDEX))
+                              (.processIntegerToken this hasNextResult)
+                              hasNextResult)]
+            (set! typeCache (BigInteger. s radix)))
+          (catch NumberFormatException nfe (set! result false))))
+      result))
+
+  (method ^:public nextBigInteger ^BigInteger [this]
+    (.nextBigInteger this defaultRadix))
+
+  (method ^:public nextBigInteger ^BigInteger [this ^int radix]
+    (when (some? typeCache)
+      (when-instance [^BigInteger val typeCache]
+        (when (== (.-radix this) radix) (.useTypeCache this) (return val))))
+    (.setRadix this radix)
+    (.clearCaches this)
+    (try
+      (let [^:mutable s (.next this (.integerPattern this))]
+        (when (nil? (.group matcher SIMPLE_GROUP_INDEX)) (set! s (.processIntegerToken this s)))
+        (BigInteger. s radix))
+      (catch NumberFormatException nfe
+        (set! position (.start matcher))
+        (throw (InputMismatchException. (.getMessage nfe))))))
+
+  (method ^:public hasNextBigDecimal ^boolean [this]
+    (.setRadix this 10)
+    (let [^:mutable result (.hasNext this (.decimalPattern this))]
+      (when result
+        (try
+          (let [s (.processFloatToken this hasNextResult)] (set! typeCache (BigDecimal. s)))
+          (catch NumberFormatException nfe (set! result false))))
+      result))
+
+  (method ^:public nextBigDecimal ^BigDecimal [this]
+    (when (some? typeCache)
+      (when-instance [^BigDecimal val typeCache] (.useTypeCache this) (return val)))
+    (.setRadix this 10)
+    (.clearCaches this)
+    (try
+      (let [s (.processFloatToken this (.next this (.decimalPattern this)))] (BigDecimal. s))
+      (catch NumberFormatException nfe
+        (set! position (.start matcher))
+        (throw (InputMismatchException. (.getMessage nfe))))))
+
+  (method ^:public reset ^Scanner [this]
+    (set! delimPattern WHITESPACE_PATTERN)
+    (.useLocale this (Locale/getDefault Locale$Category/FORMAT))
+    (.useRadix this 10)
+    (.clearCaches this)
+    (set! modCount (unchecked-inc-int modCount))
+    this)
+
+  (method ^:public tokens ^{:tag (Stream String)} [this]
+    (.ensureOpen this)
+    (let [^{:tag (Stream String)} stream (StreamSupport/stream (TokenSpliterator.) false)]
+      (cast Stream (.onClose stream (method-ref Runnable this Scanner/.close)))))
+
+  (defclass TokenSpliterator
+    :extends (Spliterators$AbstractSpliterator String)
+
+    (field ^int expectedCount -1)
+
+    (constructor [this]
+      (super. Long/MAX_VALUE
+              (bit-or-int (bit-or-int Spliterator/IMMUTABLE Spliterator/NONNULL)
+                          Spliterator/ORDERED)))
+
+    (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super String))} cons]
+      (when (and (>= expectedCount 0) (not (== expectedCount modCount)))
+        (throw (ConcurrentModificationException.)))
+      (if (.hasNext Scanner/this)
+          (let [token (.next Scanner/this)]
+            (set! expectedCount modCount)
+            (.accept cons token)
+            (when-not (== expectedCount modCount) (throw (ConcurrentModificationException.)))
+            true)
+          (do (set! expectedCount modCount) false))))
+
+  (method ^:public findAll ^{:tag (Stream MatchResult)} [this ^Pattern pattern]
+    (Objects/requireNonNull pattern)
+    (.ensureOpen this)
+    (let [^{:tag (Stream MatchResult)} stream (StreamSupport/stream
+                                                (FindSpliterator. pattern)
+                                                false)]
+      (cast Stream (.onClose stream (method-ref Runnable this Scanner/.close)))))
+
+  (method ^:public findAll ^{:tag (Stream MatchResult)} [this ^String patString]
+    (Objects/requireNonNull patString)
+    (.ensureOpen this)
+    (.findAll this (.forName patternCache patString)))
+
+  (defclass FindSpliterator
+    :extends (Spliterators$AbstractSpliterator MatchResult)
+
+    (field ^:final ^Pattern pattern)
+
+    (field ^int expectedCount -1)
+
+    (field ^:private ^boolean advance false)
+
+    (constructor [this ^Pattern pattern]
+      (super. Long/MAX_VALUE
+              (bit-or-int (bit-or-int Spliterator/IMMUTABLE Spliterator/NONNULL)
+                          Spliterator/ORDERED))
+      (set! (.-pattern this) pattern))
+
+    (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super MatchResult))} cons]
+      (.ensureOpen Scanner/this)
+      (if (>= expectedCount 0)
+          (when-not (== expectedCount modCount) (throw (ConcurrentModificationException.)))
+          (do (set! matchValid false) (.usePattern matcher pattern) (set! expectedCount modCount)))
+      (while true
+        (when (.nextInBuffer this)
+          (.accept cons (.toMatchResult matcher))
+          (when-not (== expectedCount modCount) (throw (ConcurrentModificationException.)))
+          (return true))
+        (if needInput (.readInput Scanner/this) (return false))))
+
+    (method ^:private nextInBuffer ^boolean [this]
+      (when advance
+        (when (> (unchecked-add-int position 1) (.limit buf))
+          (when-not sourceClosed (set! needInput true))
+          (return false))
+        (set! position (unchecked-inc-int position))
+        (set! advance false))
+      (.region matcher position (.limit buf))
+      (if (and (.find matcher) (or (not (.hitEnd matcher)) sourceClosed))
+          (do (set! position (.end matcher)) (set! advance (== (.start matcher) position)) true)
+          (do (when-not sourceClosed (set! needInput true)) false))))
+
+  (defclass ^:private ^:static PatternLRUCache
+    (field ^:private ^Pattern/1 oa nil)
+
+    (field ^:private ^:final ^int size)
+
+    (constructor [this ^int size] (set! (.-size this) size))
+
+    (method hasName ^boolean [this ^Pattern p ^String s]
+      (.equals (.pattern p) s))
+
+    (method moveToFront ^void [this ^Object/1 oa ^int i]
+      (let [ob (aget oa i)]
+        (loop [^int j i]
+          (when (> j 0)
+            (aset oa j (aget oa (unchecked-subtract-int j 1)))
+            (recur (unchecked-dec-int j))))
+        (aset oa 0 ob)))
+
+    (method forName ^Pattern [this ^String name]
+      (if (nil? oa)
+          (let [temp (new Pattern/1 size)] (set! oa temp))
+          (loop [^int i 0]
+            (when (< i (alength oa))
+              (let [ob (aget oa i)]
+                (cond
+                  (nil? ob) (recur (unchecked-inc-int i))
+                  (.hasName this ob name) (do (when (> i 0) (.moveToFront this oa i)) (return ob))
+                  :else (recur (unchecked-inc-int i)))))))
+      (let [ob (Pattern/compile name)]
+        (aset oa (unchecked-subtract-int (alength oa) 1) ob)
+        (.moveToFront this oa (unchecked-subtract-int (alength oa) 1))
+        ob))))

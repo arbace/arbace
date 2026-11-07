@@ -1,0 +1,192 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/http/ChunkedOutputStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.http)
+
+(import '(java.io IOException OutputStream PrintStream)
+        '(java.util.concurrent.locks Lock ReentrantLock)
+        '(sun.nio.cs US_ASCII))
+
+(defclass ^:public ChunkedOutputStream
+  :extends OutputStream
+
+  (field ^:static ^:final ^int DEFAULT_CHUNK_SIZE 4096)
+
+  (field ^:private ^:static ^:final ^byte/1 CRLF
+    (new byte/1 [(unchecked-byte \return) (unchecked-byte \newline)]))
+
+  (field ^:private ^:static ^:final ^int CRLF_SIZE (alength CRLF))
+
+  (field ^:private ^:static ^:final ^byte/1 FOOTER CRLF)
+
+  (field ^:private ^:static ^:final ^int FOOTER_SIZE CRLF_SIZE)
+
+  (field ^:private ^:static ^:final ^byte/1 EMPTY_CHUNK_HEADER (ChunkedOutputStream/getHeader 0))
+
+  (field ^:private ^:static ^:final ^int EMPTY_CHUNK_HEADER_SIZE
+    (ChunkedOutputStream/getHeaderSize 0))
+
+  (field ^:private ^:final ^byte/1 buf)
+
+  (field ^:private ^int size)
+
+  (field ^:private ^int count)
+
+  (field ^:private ^int spaceInCurrentChunk)
+
+  (field ^:private ^PrintStream out)
+
+  (field ^:private ^:final ^int preferredChunkDataSize)
+
+  (field ^:private ^:final ^int preferredHeaderSize)
+
+  (field ^:private ^:final ^int preferredChunkGrossSize)
+
+  (field ^:private ^:final ^byte/1 completeHeader)
+
+  (field ^:private ^:final ^Lock writeLock (ReentrantLock.))
+
+  (method ^:private ^:static getHeaderSize ^int [^int size]
+    (unchecked-add-int (.length (Integer/toHexString size)) CRLF_SIZE))
+
+  (method ^:private ^:static getHeader ^byte/1 [^int size]
+    (let [hexStr (Integer/toHexString size)
+          hexBytes (.getBytes hexStr US_ASCII/INSTANCE)
+          header (new byte/1 (ChunkedOutputStream/getHeaderSize size))]
+      (loop [^int i 0]
+        (when (< i (alength hexBytes))
+          (aset header i (aget hexBytes i))
+          (recur (unchecked-inc-int i))))
+      (aset header (alength hexBytes) (aget CRLF 0))
+      (aset header (unchecked-add-int (alength hexBytes) 1) (aget CRLF 1))
+      header))
+
+  (constructor ^:public [this ^PrintStream o]
+    (this. o DEFAULT_CHUNK_SIZE))
+
+  (constructor ^:public [this ^PrintStream o ^:mutable ^int size]
+    (set! out o)
+    (when (<= size 0) (set! size DEFAULT_CHUNK_SIZE))
+    (when (> size 0)
+      (let [^:mutable adjusted_size (unchecked-subtract-int
+                                      (unchecked-subtract-int
+                                        size
+                                        (ChunkedOutputStream/getHeaderSize size))
+                                      FOOTER_SIZE)]
+        (when (< (ChunkedOutputStream/getHeaderSize (unchecked-add-int adjusted_size 1))
+                 (ChunkedOutputStream/getHeaderSize size))
+          (set! adjusted_size (unchecked-inc-int adjusted_size)))
+        (set! size adjusted_size)))
+    (if (> size 0)
+        (set! preferredChunkDataSize size)
+        (set! preferredChunkDataSize
+              (unchecked-subtract-int
+                (unchecked-subtract-int DEFAULT_CHUNK_SIZE
+                                        (ChunkedOutputStream/getHeaderSize DEFAULT_CHUNK_SIZE))
+                FOOTER_SIZE)))
+    (set! preferredHeaderSize (ChunkedOutputStream/getHeaderSize preferredChunkDataSize))
+    (set! preferredChunkGrossSize
+          (unchecked-add-int (unchecked-add-int preferredHeaderSize preferredChunkDataSize)
+                             FOOTER_SIZE))
+    (set! completeHeader (ChunkedOutputStream/getHeader preferredChunkDataSize))
+    (set! buf (new byte/1 preferredChunkGrossSize))
+    (.reset this))
+
+  (method ^:private flush ^void [this ^boolean flushAll]
+    (if (== spaceInCurrentChunk 0)
+        (do (.write out buf 0 preferredChunkGrossSize) (.flush out) (.reset this))
+        (when flushAll
+          (if (> size 0)
+              (let [adjustedHeaderStartIndex (unchecked-subtract-int
+                                               preferredHeaderSize
+                                               (ChunkedOutputStream/getHeaderSize size))]
+                (System/arraycopy (ChunkedOutputStream/getHeader size)
+                                  0
+                                  buf
+                                  adjustedHeaderStartIndex
+                                  (ChunkedOutputStream/getHeaderSize size))
+                (aset buf
+                      (let [old-1 count] (set! count (unchecked-inc-int count)) old-1)
+                      (aget FOOTER 0))
+                (aset buf
+                      (let [old-2 count] (set! count (unchecked-inc-int count)) old-2)
+                      (aget FOOTER 1))
+                (.write out
+                        buf
+                        adjustedHeaderStartIndex
+                        (unchecked-subtract-int count adjustedHeaderStartIndex)))
+              (.write out EMPTY_CHUNK_HEADER 0 EMPTY_CHUNK_HEADER_SIZE))
+          (.flush out)
+          (.reset this))))
+
+  (method ^:public checkError ^boolean [this]
+    (let [out (.-out this)] (or (nil? out) (.checkError out))))
+
+  (method ^:private ensureOpen :throws [IOException] ^void [this]
+    (when (nil? out) (throw (IOException. "closed"))))
+
+  (method ^:public write :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+    (.lock writeLock)
+    (try
+      (.ensureOpen this)
+      (cond
+        (or (or (or (or (< off 0) (> off (alength b))) (< len 0))
+                (> (unchecked-add-int off len) (alength b)))
+            (< (unchecked-add-int off len) 0))
+          (throw (IndexOutOfBoundsException.))
+        (== len 0) (return))
+      (let [^:mutable bytesToWrite len
+            ^:mutable inputIndex off]
+        (loop []
+          (if (>= bytesToWrite spaceInCurrentChunk)
+              (do
+                (loop [^int i 0]
+                  (when (< i (alength completeHeader))
+                    (aset buf i (aget completeHeader i))
+                    (recur (unchecked-inc-int i))))
+                (System/arraycopy b inputIndex buf count spaceInCurrentChunk)
+                (set! inputIndex (unchecked-add-int inputIndex spaceInCurrentChunk))
+                (set! bytesToWrite (unchecked-subtract-int bytesToWrite spaceInCurrentChunk))
+                (set! count (unchecked-add-int count spaceInCurrentChunk))
+                (aset buf
+                      (let [old-3 count] (set! count (unchecked-inc-int count)) old-3)
+                      (aget FOOTER 0))
+                (aset buf
+                      (let [old-4 count] (set! count (unchecked-inc-int count)) old-4)
+                      (aget FOOTER 1))
+                (set! spaceInCurrentChunk 0)
+                (.flush this false)
+                (when (.checkError this) (break)))
+              (do
+                (System/arraycopy b inputIndex buf count bytesToWrite)
+                (set! count (unchecked-add-int count bytesToWrite))
+                (set! size (unchecked-add-int size bytesToWrite))
+                (set! spaceInCurrentChunk (unchecked-subtract-int spaceInCurrentChunk bytesToWrite))
+                (set! bytesToWrite 0)))
+          (when (> bytesToWrite 0) (recur))))
+      (finally (.unlock writeLock))))
+
+  (method ^:public write :throws [IOException] ^void [this ^int _b]
+    (.lock writeLock)
+    (try
+      (let [b (new byte/1 [(unchecked-byte _b)])] (.write this b 0 1))
+      (finally (.unlock writeLock))))
+
+  (method ^:public reset ^void [this]
+    (.lock writeLock)
+    (try
+      (set! count preferredHeaderSize)
+      (set! size 0)
+      (set! spaceInCurrentChunk preferredChunkDataSize)
+      (finally (.unlock writeLock))))
+
+  (method ^:public size ^int [this] size)
+
+  (method ^:public close ^void [this]
+    (.lock writeLock)
+    (try
+      (when (some? out) (when (> size 0) (.flush this true)) (.flush this true) (set! out nil))
+      (finally (.unlock writeLock))))
+
+  (method ^:public flush :throws [IOException] ^void [this]
+    (.lock writeLock)
+    (try (.ensureOpen this) (when (> size 0) (.flush this true)) (finally (.unlock writeLock)))))

@@ -1,0 +1,108 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/MeteredStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www)
+
+(import '(java.io FilterInputStream IOException InputStream)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(sun.net.www.http ChunkedInputStream))
+
+(defclass ^:public MeteredStream
+  :extends FilterInputStream
+
+  (field ^:protected ^boolean closed false)
+
+  (field ^:protected ^long expected)
+
+  (field ^:protected ^long count 0)
+
+  (field ^:protected ^long markedCount 0)
+
+  (field ^:protected ^int markLimit -1)
+
+  (field ^:private ^:final ^ReentrantLock readLock (ReentrantLock.))
+
+  (constructor ^:public [this ^InputStream is ^long expected]
+    (super. is)
+    (set! (.-expected this) expected))
+
+  (method ^:private ^:final justRead :throws [IOException] ^void [this ^long n]
+    (java-assert (.isLockHeldByCurrentThread this))
+    (if (== n -1)
+        (do
+          (when (> expected count) (throw (IOException. "Premature EOF")))
+          (when-not (.isMarked this) (.close this)))
+        (do
+          (set! count (unchecked-add count n))
+          (when (> (unchecked-subtract count markedCount) markLimit) (set! markLimit -1))
+          (when-not (.isMarked this) (when (> expected 0) (when (>= count expected) (.close this)))))))
+
+  (method ^:private isMarked ^boolean [this]
+    (java-assert (.isLockHeldByCurrentThread this))
+    (cond
+      (< markLimit 0) false
+      (> (unchecked-subtract count markedCount) markLimit) false
+      :else true))
+
+  (method ^:public read :throws [IOException] ^int [this]
+    (.lock this)
+    (try
+      (if closed
+          -1
+          (let [c (.read (.-in this))] (if (not (== c -1)) (.justRead this 1) (.justRead this c)) c))
+      (finally (.unlock this))))
+
+  (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (.lock this)
+    (try
+      (if closed -1 (let [n (.read (.-in this) b off len)] (.justRead this n) n))
+      (finally (.unlock this))))
+
+  (method ^:public skip :throws [IOException] ^long [this ^:mutable ^long n]
+    (.lock this)
+    (try
+      (if closed
+          0
+          (do
+            (if (instance? ChunkedInputStream (.-in this))
+                (set! n (.skip (.-in this) n))
+                (let [min (if (> n (unchecked-subtract expected count))
+                              (unchecked-subtract expected count)
+                              n)]
+                  (set! n (.skip (.-in this) min))))
+            (.justRead this n)
+            n))
+      (finally (.unlock this))))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (.lock this)
+    (try (when-not closed (set! closed true) (.close (.-in this))) (finally (.unlock this))))
+
+  (method ^:public available :throws [IOException] ^int [this]
+    (.lock this)
+    (try (if closed 0 (.available (.-in this))) (finally (.unlock this))))
+
+  (method ^:public mark ^void [this ^int readLimit]
+    (.lock this)
+    (try
+      (when-not closed (.mark super readLimit) (set! markedCount count) (set! markLimit readLimit))
+      (finally (.unlock this))))
+
+  (method ^:public reset :throws [IOException] ^void [this]
+    (.lock this)
+    (try
+      (when-not closed
+        (when-not (.isMarked this) (throw (IOException. "Resetting to an invalid mark")))
+        (set! count markedCount)
+        (.reset super))
+      (finally (.unlock this))))
+
+  (method ^:public markSupported ^boolean [this]
+    (.lock this)
+    (try (if closed false (.markSupported super)) (finally (.unlock this))))
+
+  (method ^:public ^:final lock ^void [this] (.lock readLock))
+
+  (method ^:public ^:final unlock ^void [this] (.unlock readLock))
+
+  (method ^:public ^:final isLockHeldByCurrentThread ^boolean [this]
+    (.isHeldByCurrentThread readLock)))

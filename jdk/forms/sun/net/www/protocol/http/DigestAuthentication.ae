@@ -1,0 +1,523 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/protocol/http/DigestAuthentication.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.protocol.http)
+
+(import '(java.io IOException Serializable)
+        '(java.net PasswordAuthentication ProtocolException URL)
+        '(java.nio CharBuffer)
+        '(java.nio.charset CharacterCodingException Charset StandardCharsets)
+        '(java.security MessageDigest NoSuchAlgorithmException Security)
+        '(java.text Normalizer Normalizer$Form)
+        '(java.util Arrays HashSet Locale Random Set)
+        '(java.util.function BiConsumer)
+        '(sun.net NetProperties)
+        '(sun.net.www HeaderParser)
+        '(sun.nio.cs ISO_8859_1)
+        '(sun.security.util KnownOIDs)
+        '(sun.util.logging PlatformLogger PlatformLogger$Level))
+
+(defclass ^:final DigestAuthentication
+  :extends AuthenticationInfo
+
+  (field ^:private ^String authMethod)
+
+  (field ^:private ^:static ^:final ^String propPrefix "http.auth.digest.")
+
+  (field ^:private ^:static ^:final ^String compatPropName (java-str propPrefix "quoteParameters"))
+
+  (method ^:private ^:static processPropValue ^void [^String input ^{:tag (Set String)} theSet
+                                                     ^{:tag (BiConsumer (Set String) String)} consumer]
+    (when (some? input)
+      (let [values (.split (.toUpperCase input Locale/ROOT) ",")]
+        (for-each [^String v values] (.accept consumer theSet (.trim v))))))
+
+  (field ^:private ^:static ^:final ^String secPropName (java-str propPrefix "disabledAlgorithms"))
+
+  (field ^:private ^:static ^:final ^String enabledAlgPropName
+    (java-str propPrefix "reEnabledAlgorithms"))
+
+  (field ^:private ^:static ^:final ^{:tag (Set String)} disabledDigests)
+
+  (field ^:private ^:static ^:final ^boolean delimCompatFlag)
+
+  (field ^:private ^:static ^:final ^PlatformLogger logger (HttpURLConnection/getHttpLogger))
+
+  (static-initializer
+    (let [b (NetProperties/getBoolean compatPropName)]
+      (set! delimCompatFlag (if (nil? b) false (.booleanValue b)))
+      (let [secprops (Security/getProperty secPropName)
+            ^{:tag (Set String)} algs (HashSet.)]
+        (DigestAuthentication/processPropValue secprops
+                                               algs
+                                               (lambda BiConsumer ^void [^Set set ^String elem]
+                                                 (.add set elem)))
+        (let [netprops (NetProperties/get enabledAlgPropName)]
+          (DigestAuthentication/processPropValue
+            netprops
+            algs
+            (lambda BiConsumer ^void [^Set set ^String elem] (.remove set elem)))
+          (set! disabledDigests (Set/copyOf algs))))))
+
+  (defclass ^:static Parameters
+    :implements [Serializable]
+
+    (field ^:private ^:static ^:final ^long serialVersionUID -3584543755194526252)
+
+    (field ^:private ^boolean serverQop)
+
+    (field ^:private ^String opaque)
+
+    (field ^:private ^String cnonce)
+
+    (field ^:private ^String nonce)
+
+    (field ^:private ^String algorithm)
+
+    (field ^:private ^String digestName)
+
+    (field ^:private ^String charset)
+
+    (field ^:private ^int NCcount 0)
+
+    (field ^:private ^boolean userhash)
+
+    (field ^:private ^String cachedHA1)
+
+    (field ^:private ^boolean redoCachedHA1 true)
+
+    (field ^:private ^:static ^:final ^int cnonceRepeat 5)
+
+    (field ^:private ^:static ^:final ^int cnoncelen 40)
+
+    (field ^:private ^:static ^:final ^Random random (Random.))
+
+    (constructor [this]
+      (set! serverQop false)
+      (set! opaque nil)
+      (set! algorithm nil)
+      (set! digestName nil)
+      (set! cachedHA1 nil)
+      (set! nonce nil)
+      (set! charset nil)
+      (.setNewCnonce this))
+
+    (method authQop ^boolean [this] serverQop)
+
+    (method ^:synchronized incrementNC ^void [this]
+      (set! NCcount (unchecked-inc-int NCcount)))
+
+    (method ^:synchronized getNCCount ^int [this] NCcount)
+
+    (field ^int cnonce_count 0)
+
+    (method ^:synchronized getCnonce ^String [this]
+      (when (>= cnonce_count cnonceRepeat) (.setNewCnonce this))
+      (set! cnonce_count (unchecked-inc-int cnonce_count))
+      cnonce)
+
+    (method ^:synchronized setNewCnonce ^void [this]
+      (let [bb (new byte/1 (unchecked-divide-int cnoncelen 2))
+            cc (new char/1 cnoncelen)]
+        (.nextBytes random bb)
+        (loop [^int i 0]
+          (when (< i (unchecked-divide-int cnoncelen 2))
+            (let [x (unchecked-add-int (aget bb i) 128)]
+              (aset cc
+                    (unchecked-multiply-int i 2)
+                    (unchecked-char (unchecked-add-int \A (unchecked-divide-int x 16))))
+              (aset cc
+                    (unchecked-add-int (unchecked-multiply-int i 2) 1)
+                    (unchecked-char (unchecked-add-int \A (unchecked-remainder-int x 16))))
+              (recur (unchecked-inc-int i)))))
+        (set! cnonce (String. cc 0 cnoncelen))
+        (set! cnonce_count 0)
+        (set! redoCachedHA1 true)))
+
+    (method ^:synchronized getUserhash ^boolean [this] userhash)
+
+    (method ^:synchronized setUserhash ^void [this ^boolean userhash]
+      (set! (.-userhash this) userhash))
+
+    (method ^:synchronized getCharset ^Charset [this]
+      (if (.equals "UTF-8" charset) StandardCharsets/UTF_8 StandardCharsets/ISO_8859_1))
+
+    (method ^:synchronized setCharset ^void [this ^String charset]
+      (set! (.-charset this) charset))
+
+    (method ^:synchronized setQop ^void [this ^String qop]
+      (when (some? qop)
+        (let [items (.split qop ",")]
+          (for-each [^String item items]
+            (when (.equalsIgnoreCase "auth" (.trim item)) (set! serverQop true) (return)))))
+      (set! serverQop false))
+
+    (method ^:synchronized getOpaque ^String [this] opaque)
+
+    (method ^:synchronized setOpaque ^void [this ^String s] (set! opaque s))
+
+    (method ^:synchronized getNonce ^String [this] nonce)
+
+    (method ^:synchronized setNonce ^void [this ^String s]
+      (when (or (nil? nonce) (not (.equals s nonce)))
+        (set! nonce s)
+        (set! NCcount 0)
+        (set! redoCachedHA1 true)))
+
+    (method ^:synchronized getCachedHA1 ^String [this]
+      (when-not redoCachedHA1 cachedHA1))
+
+    (method ^:synchronized setCachedHA1 ^void [this ^String s]
+      (set! cachedHA1 s)
+      (set! redoCachedHA1 false))
+
+    (method ^:synchronized getAlgorithm ^String [this] algorithm)
+
+    (method ^:synchronized getDigestName ^String [this] digestName)
+
+    (method ^:synchronized setAlgorithm ^void [this ^String s]
+      (set! algorithm s))
+
+    (method ^:synchronized setDigestName ^void [this ^String s]
+      (set! (.-digestName this) s)))
+
+  (field ^Parameters params)
+
+  (constructor ^:public [this ^boolean isProxy ^URL url ^String realm ^String authMethod
+                         ^PasswordAuthentication pw ^Parameters params]
+    (super. (if isProxy
+                DigestAuthentication/PROXY_AUTHENTICATION
+                DigestAuthentication/SERVER_AUTHENTICATION)
+            AuthScheme/DIGEST
+            url
+            realm)
+    (set! (.-authMethod this) authMethod)
+    (set! (.-pw this) pw)
+    (set! (.-params this) params))
+
+  (constructor ^:public [this ^boolean isProxy ^String host ^int port ^String realm
+                         ^String authMethod ^PasswordAuthentication pw ^Parameters params]
+    (super. (if isProxy
+                DigestAuthentication/PROXY_AUTHENTICATION
+                DigestAuthentication/SERVER_AUTHENTICATION)
+            AuthScheme/DIGEST
+            host
+            port
+            realm)
+    (set! (.-authMethod this) authMethod)
+    (set! (.-pw this) pw)
+    (set! (.-params this) params))
+
+  (method ^:public supportsPreemptiveAuthorization ^boolean [this] true)
+
+  (method ^:public getHeaderValue ^String [this ^URL url ^String method]
+    (.getHeaderValueImpl this (.getFile url) method))
+
+  (method getHeaderValue ^String [this ^String requestURI ^String method]
+    (.getHeaderValueImpl this requestURI method))
+
+  (method ^:public isAuthorizationStale ^boolean [this ^String header]
+    (let [p (HeaderParser. header)
+          s (.findValue p "stale")]
+      (if (or (nil? s) (not (.equals s "true")))
+          false
+          (let [newNonce (.findValue p "nonce")]
+            (if (or (nil? newNonce) (.isEmpty newNonce))
+                false
+                (do (.setNonce params newNonce) true))))))
+
+  (method ^:public setHeaders ^boolean [this ^HttpURLConnection conn ^HeaderParser p ^String raw]
+    (java-assert (.isLockHeldByCurrentThread conn))
+    (.setNonce params (.findValue p "nonce"))
+    (.setOpaque params (.findValue p "opaque"))
+    (.setQop params (.findValue p "qop"))
+    (.setUserhash params (Boolean/valueOf (.findValue p "userhash")))
+    (let [^:mutable charset (.findValue p "charset")]
+      (if (nil? charset)
+          (set! charset "ISO_8859_1")
+          (when-not (.equalsIgnoreCase charset "UTF-8") (return false)))
+      (.setCharset params (.toUpperCase charset Locale/ROOT))
+      (let [^:mutable uri ""
+            ^:mutable ^String method nil]
+        (if (and (== (.-type this) DigestAuthentication/PROXY_AUTHENTICATION)
+                 (identical? (.tunnelState conn) HttpURLConnection$TunnelState/SETUP))
+            (do
+              (set! uri (HttpURLConnection/connectRequestURI (.getURL conn)))
+              (set! method HttpURLConnection/HTTP_CONNECT))
+            (do
+              (try (set! uri (.getRequestURI conn)) (catch IOException e))
+              (set! method (.getMethod conn))))
+        (if (or (or (or (nil? (.-nonce params)) (nil? authMethod)) (nil? (.-pw this)))
+                (nil? (.-realm this)))
+            false
+            (do
+              (when (>= (.length authMethod) 1)
+                (set! authMethod
+                      (java-str (Character/toUpperCase (.charAt authMethod 0))
+                                (.toLowerCase (.substring authMethod 1) Locale/ROOT))))
+              (if (not (DigestAuthentication/setAlgorithmNames p params))
+                  false
+                  (do
+                    (when (.authQop params) (.setNewCnonce params))
+                    (let [value (.getHeaderValueImpl this uri method)]
+                      (if (some? value)
+                          (do (.setAuthenticationProperty conn (.getHeaderName this) value) true)
+                          false)))))))))
+
+  (method ^:private ^:static setAlgorithmNames ^boolean [^HeaderParser p ^Parameters params]
+    (let [^:mutable algorithm (.findValue p "algorithm")
+          ^:mutable digestName algorithm]
+      (if (or (nil? algorithm) (.isEmpty algorithm))
+          (do (set! algorithm "MD5") (set! digestName "MD5"))
+          (do (set! algorithm (.toUpperCase algorithm Locale/ROOT)) (set! digestName algorithm)))
+      (when (.endsWith algorithm "-SESS")
+        (set! digestName (.substring algorithm 0 (unchecked-subtract-int (.length algorithm) 5)))
+        (set! algorithm (java-str digestName "-sess")))
+      (when (.equals digestName "SHA-512-256") (set! digestName "SHA-512/256"))
+      (let [oid (KnownOIDs/findMatch digestName)]
+        (if (nil? oid)
+            (do (DigestAuthentication/log (java-str "unknown algorithm: " algorithm)) false)
+            (do
+              (set! digestName (.stdName oid))
+              (.setAlgorithm params algorithm)
+              (.setDigestName params digestName)
+              true)))))
+
+  (method ^:private getHeaderValueImpl ^String [this ^String uri ^String method]
+    (let [^:mutable ^String response nil
+          passwd (.getPassword (.-pw this))
+          qop (.authQop params)
+          opaque (.getOpaque params)
+          cnonce (.getCnonce params)
+          nonce (.getNonce params)
+          algorithm (.getAlgorithm params)
+          digest (.getDigestName params)]
+      (try (.validateDigest this digest) (catch IOException e (return nil)))
+      (let [charset (.getCharset params)
+            userhash (.getUserhash params)]
+        (.incrementNC params)
+        (let [nccount (.getNCCount params)
+              ^:mutable ^String ncstring nil]
+          (when-not (== nccount -1)
+            (set! ncstring (Integer/toHexString nccount))
+            (let [len (.length ncstring)]
+              (when (< len 8) (set! ncstring (java-str (aget zeroPad len) ncstring)))))
+          (let [session (.endsWith algorithm "-sess")]
+            (try
+              (set! response
+                    (.computeDigest this
+                                    true
+                                    (.getUserName (.-pw this))
+                                    passwd
+                                    (.-realm this)
+                                    method
+                                    uri
+                                    nonce
+                                    cnonce
+                                    ncstring
+                                    digest
+                                    session
+                                    charset))
+              (catch [CharacterCodingException NoSuchAlgorithmException] ex
+                (DigestAuthentication/log (.getMessage ex))
+                (return nil)))
+            (let [^:mutable ncfield "\""]
+              (when qop (set! ncfield (java-str "\", nc=" ncstring)))
+              (let [^:mutable ^String algoS nil
+                    ^:mutable ^String qopS nil]
+                (if delimCompatFlag
+                    (do
+                      (set! algoS (java-str ", algorithm=\"" algorithm "\""))
+                      (set! qopS ", qop=\"auth\""))
+                    (do (set! algoS (java-str ", algorithm=" algorithm)) (set! qopS ", qop=auth")))
+                (let [^:mutable user (.getUserName (.-pw this))
+                      ^:mutable userhashField ""]
+                  (try
+                    (when userhash
+                      (set! user (.computeUserhash this digest user (.-realm this) charset))
+                      (set! userhashField ", userhash=true"))
+                    (catch [CharacterCodingException NoSuchAlgorithmException] ex
+                      (DigestAuthentication/log (.getMessage ex))
+                      (return nil)))
+                  (let [^:mutable value (java-str
+                                          authMethod
+                                          " username=\""
+                                          user
+                                          "\", realm=\""
+                                          (.-realm this)
+                                          "\", nonce=\""
+                                          nonce
+                                          ncfield
+                                          userhashField
+                                          ", uri=\""
+                                          uri
+                                          "\", response=\""
+                                          response
+                                          "\""
+                                          algoS)]
+                    (when (some? opaque)
+                      (set! value (java-str value (java-str ", opaque=\"" opaque "\""))))
+                    (when (some? cnonce)
+                      (set! value (java-str value (java-str ", cnonce=\"" cnonce "\""))))
+                    (when qop (set! value (java-str value qopS)))
+                    value)))))))))
+
+  (method ^:public checkResponse :throws [IOException] ^void [this ^String header ^String method
+                                                              ^URL url]
+    (.checkResponse this header method (.getFile url)))
+
+  (method ^:private ^:static log ^void [^String msg]
+    (when (.isLoggable logger PlatformLogger$Level/INFO) (.info logger msg)))
+
+  (method ^:private validateDigest :throws [IOException] ^void [this ^String name]
+    (when-not (and (identical? (.getAuthType this) AuthCacheValue$Type/Server)
+                   (.equals (.getProtocolScheme this) "https"))
+      (when (.contains disabledDigests name)
+        (let [msg (java-str "Rejecting digest authentication with insecure algorithm: " name)]
+          (DigestAuthentication/log
+            (java-str
+              msg
+              " This constraint may be relaxed by setting the \"http.auth.digest.reEnabledAlgorithms\" system property."))
+          (throw (IOException. msg))))))
+
+  (method ^:public checkResponse :throws [IOException] ^void [this ^String header ^String method
+                                                              ^String uri]
+    (let [passwd (.getPassword (.-pw this))
+          username (.getUserName (.-pw this))
+          qop (.authQop params)
+          opaque (.getOpaque params)
+          cnonce (.-cnonce params)
+          nonce (.getNonce params)
+          ^:mutable algorithm (.getAlgorithm params)
+          digest (.getDigestName params)
+          charset (.getCharset params)]
+      (.validateDigest this digest)
+      (let [nccount (.getNCCount params)
+            ^:mutable ^String ncstring nil]
+        (when (nil? header)
+          (throw (ProtocolException. "No authentication information in response")))
+        (let [session (.endsWith algorithm "-SESS")]
+          (when session
+            (set! algorithm (.substring algorithm 0 (unchecked-subtract-int (.length algorithm) 5))))
+          (when-not (== nccount -1)
+            (set! ncstring (.toUpperCase (Integer/toHexString nccount) Locale/ROOT))
+            (let [len (.length ncstring)]
+              (when (< len 8) (set! ncstring (java-str (aget zeroPad len) ncstring)))))
+          (try
+            (let [expected (.computeDigest this
+                                           false
+                                           username
+                                           passwd
+                                           (.-realm this)
+                                           method
+                                           uri
+                                           nonce
+                                           cnonce
+                                           ncstring
+                                           digest
+                                           session
+                                           charset)
+                  p (HeaderParser. header)
+                  rspauth (.findValue p "rspauth")]
+              (when (nil? rspauth) (throw (ProtocolException. "No digest in response")))
+              (when-not (.equals rspauth expected)
+                (throw (ProtocolException. "Response digest invalid")))
+              (let [nextnonce (.findValue p "nextnonce")]
+                (when (and (some? nextnonce) (not (.isEmpty nextnonce)))
+                  (.setNonce params nextnonce))))
+            (catch NoSuchAlgorithmException ex
+              (throw (ProtocolException. "Unsupported algorithm in response")))
+            (catch CharacterCodingException ex
+              (throw (ProtocolException. "Invalid characters in username or password"))))))))
+
+  (method ^:private computeUserhash :throws [NoSuchAlgorithmException CharacterCodingException] ^String [this
+                                                                                                         ^String digest
+                                                                                                         ^String user
+                                                                                                         ^String realm
+                                                                                                         ^Charset charset]
+    (let [md (MessageDigest/getInstance digest)
+          s (java-str user ":" realm)]
+      (.encode this s nil md charset)))
+
+  (method ^:private computeDigest :throws [NoSuchAlgorithmException CharacterCodingException] ^String [this
+                                                                                                       ^boolean isRequest
+                                                                                                       ^String userName
+                                                                                                       ^char/1 password
+                                                                                                       ^String realm
+                                                                                                       ^String connMethod
+                                                                                                       ^String requestURI
+                                                                                                       ^String nonceString
+                                                                                                       ^String cnonce
+                                                                                                       ^String ncValue
+                                                                                                       ^String algorithm
+                                                                                                       ^boolean session
+                                                                                                       ^Charset charset]
+    (let [^:mutable ^String A1 nil
+          ^:mutable ^String HashA1 nil
+          md (MessageDigest/getInstance algorithm)]
+      (if session
+          (when (nil? (set! HashA1 (.getCachedHA1 params)))
+            (let [s (java-str userName ":" realm ":")
+                  s1 (.encode this s password md charset)]
+              (set! A1 (java-str s1 ":" nonceString ":" cnonce))
+              (set! HashA1 (.encode this A1 nil md charset))
+              (.setCachedHA1 params HashA1)))
+          (do
+            (set! A1 (java-str userName ":" realm ":"))
+            (set! HashA1 (.encode this A1 password md charset))))
+      (let [^String A2 (if isRequest (java-str connMethod ":" requestURI) (java-str ":" requestURI))]
+        (let [HashA2 (.encode this A2 nil md ISO_8859_1/INSTANCE)
+              ^:mutable ^String combo nil
+              ^:mutable ^String finalHash nil]
+          (if (.authQop params)
+              (set! combo (java-str HashA1 ":" nonceString ":" ncValue ":" cnonce ":auth:" HashA2))
+              (set! combo (java-str HashA1 ":" nonceString ":" HashA2)))
+          (set! finalHash (.encode this combo nil md ISO_8859_1/INSTANCE))
+          finalHash))))
+
+  (field ^:private ^:static ^:final ^char/1 charArray
+    (new char/1 [\0 \1 \2 \3 \4 \5 \6 \7 \8 \9 \a \b \c \d \e \f]))
+
+  (field ^:private ^:static ^:final ^String/1 zeroPad
+    (new String/1 ["00000000" "0000000" "000000" "00000" "0000" "000" "00" "0"]))
+
+  (method ^:private encode :throws [CharacterCodingException] ^String [this ^:mutable ^String src
+                                                                       ^char/1 passwd
+                                                                       ^MessageDigest md
+                                                                       ^Charset charset]
+    (let [isUtf8 (.equals charset StandardCharsets/UTF_8)]
+      (when isUtf8 (set! src (Normalizer/normalize src Normalizer$Form/NFC)))
+      (.update md (.getBytes src charset))
+      (when (some? passwd)
+        (let [^:mutable ^byte/1 passwdBytes nil]
+          (if isUtf8
+              (set! passwdBytes (DigestAuthentication/getUtf8Bytes passwd))
+              (do
+                (set! passwdBytes (new byte/1 (alength passwd)))
+                (loop [^int i 0]
+                  (when (< i (alength passwd))
+                    (aset passwdBytes i (unchecked-byte (aget passwd i)))
+                    (recur (unchecked-inc-int i))))))
+          (.update md passwdBytes)
+          (Arrays/fill passwdBytes (unchecked-byte 0x00))))
+      (let [digest (.digest md)
+            res (StringBuilder. (unchecked-multiply-int (alength digest) 2))]
+        (loop [^int i 0]
+          (when (< i (alength digest))
+            (let [^:mutable hashchar (bit-and-int
+                                       (unsigned-bit-shift-right-int (aget digest i) 4)
+                                       0xf)]
+              (.append res (aget charArray hashchar))
+              (set! hashchar (bit-and-int (aget digest i) 0xf))
+              (.append res (aget charArray hashchar))
+              (recur (unchecked-inc-int i)))))
+        (.toString res))))
+
+  (method ^:private ^:static getUtf8Bytes :throws [CharacterCodingException] ^byte/1 [^char/1 passwd]
+    (let [cb (CharBuffer/wrap passwd)
+          encoder (.newEncoder StandardCharsets/UTF_8)
+          bb (.encode encoder cb)
+          buf (new byte/1 (.remaining bb))]
+      (.get bb buf)
+      (when (.hasArray bb)
+        (Arrays/fill (.array bb) (.arrayOffset bb) (.capacity bb) (unchecked-byte 0)))
+      buf)))

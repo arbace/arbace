@@ -1,0 +1,300 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SignatureAlgorithmsExtension.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.text MessageFormat)
+        '(java.util ArrayList Arrays List Locale)
+        '(javax.net.ssl SSLException SSLProtocolException))
+
+(defclass ^:final SignatureAlgorithmsExtension
+  (field ^:static ^:final ^HandshakeProducer chNetworkProducer (CHSignatureSchemesProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer chOnLoadConsumer
+    (CHSignatureSchemesConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence chOnLoadAbsence (CHSignatureSchemesOnLoadAbsence.))
+
+  (field ^:static ^:final ^HandshakeConsumer chOnTradeConsumer (CHSignatureSchemesUpdate.))
+
+  (field ^:static ^:final ^HandshakeAbsence chOnTradeAbsence (CHSignatureSchemesOnTradeAbsence.))
+
+  (field ^:static ^:final ^HandshakeProducer crNetworkProducer (CRSignatureSchemesProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer crOnLoadConsumer
+    (CRSignatureSchemesConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence crOnLoadAbsence (CRSignatureSchemesAbsence.))
+
+  (field ^:static ^:final ^HandshakeConsumer crOnTradeConsumer (CRSignatureSchemesUpdate.))
+
+  (field ^:static ^:final ^SSLStringizer ssStringizer (SignatureSchemesStringizer.))
+
+  (defclass ^:static ^:final SignatureSchemesSpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:final ^int/1 signatureSchemes)
+
+    (constructor [this ^{:tag (List SignatureScheme)} schemes]
+      (if (some? schemes)
+          (do
+            (set! signatureSchemes (new int/1 (.size schemes)))
+            (let [^:mutable ^int i 0]
+              (for-each [^SignatureScheme scheme schemes]
+                (aset signatureSchemes i (.-id scheme))
+                (set! i (unchecked-inc-int i)))))
+          (set! (.-signatureSchemes this) (new int/1 0))))
+
+    (constructor :throws [IOException] [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (when (< (.remaining buffer) 2)
+        (throw (.fatal (.-conContext hc)
+                       Alert/DECODE_ERROR
+                       (SSLProtocolException. "Invalid signature_algorithms: insufficient data"))))
+      (let [algs (Record/getBytes16 buffer)]
+        (when (.hasRemaining buffer)
+          (throw
+            (.fatal (.-conContext hc)
+                    Alert/DECODE_ERROR
+                    (SSLProtocolException. "Invalid signature_algorithms: unknown extra data"))))
+        (when (or (== (alength algs) 0) (not (== (bit-and-int (alength algs) 0x01) 0)))
+          (throw (.fatal (.-conContext hc)
+                         Alert/DECODE_ERROR
+                         (SSLProtocolException. "Invalid signature_algorithms: incomplete data"))))
+        (let [schemes (new int/1 (unchecked-divide-int (alength algs) 2))]
+          (let [^:mutable ^int i 0
+                ^:mutable ^int j 0]
+            (while (< i (alength algs))
+              (let [hash (aget algs (let [old-1 i] (set! i (unchecked-inc-int i)) old-1))
+                    sign (aget algs (let [old-2 i] (set! i (unchecked-inc-int i)) old-2))]
+                (aset schemes
+                      j
+                      (bit-or-int (bit-shift-left-int (bit-and-int hash 0xFF) 8)
+                                  (bit-and-int sign 0xFF)))
+                (set! j (unchecked-inc-int j)))))
+          (set! (.-signatureSchemes this) schemes))))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat. "\"signature schemes\": '['{0}']'" Locale/ENGLISH)]
+        (if (or (nil? signatureSchemes) (== (alength signatureSchemes) 0))
+            (let [messageFields (new Object/1 ["<no supported signature schemes specified>"])]
+              (.format messageFormat messageFields))
+            (let [builder (StringBuilder. 512)
+                  ^:mutable isFirst true]
+              (for-each [^int pv signatureSchemes]
+                (if isFirst (set! isFirst false) (.append builder ", "))
+                (.append builder (SignatureScheme/nameOf pv)))
+              (let [messageFields (new Object/1 [(.toString builder)])]
+                (.format messageFormat messageFields)))))))
+
+  (defclass ^:private ^:static ^:final SignatureSchemesStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (try (.toString (SignatureSchemesSpec. hc buffer)) (catch IOException ioe (.getMessage ioe)))))
+
+  (defclass ^:private ^:static ^:final CHSignatureSchemesProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig chc) SSLExtension/CH_SIGNATURE_ALGORITHMS))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Ignore unavailable signature_algorithms extension"))
+              nil)
+            (do
+              (SignatureScheme/updateHandshakeLocalSupportedAlgs chc)
+              (SignatureAlgorithmsExtension/produceNetworkLoad
+                chc
+                SSLExtension/CH_SIGNATURE_ALGORITHMS
+                SSLExtension/CH_SIGNATURE_ALGORITHMS_CERT))))))
+
+  (defclass ^:private ^:static ^:final CHSignatureSchemesConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [shc (cast ServerHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig shc) SSLExtension/CH_SIGNATURE_ALGORITHMS))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Ignore unavailable signature_algorithms extension"))
+            (let [spec (SignatureSchemesSpec. shc buffer)]
+              (.put (.-handshakeExtensions shc) SSLExtension/CH_SIGNATURE_ALGORITHMS spec))))))
+
+  (defclass ^:private ^:static ^:final CHSignatureSchemesUpdate
+    :implements [HandshakeConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            spec (cast SignatureSchemesSpec
+                       (.get (.-handshakeExtensions shc) SSLExtension/CH_SIGNATURE_ALGORITHMS))]
+        (when (some? spec)
+          (SignatureAlgorithmsExtension/updateHandshakeContext
+            shc
+            (.-signatureSchemes spec)
+            SSLExtension/CH_SIGNATURE_ALGORITHMS_CERT)
+          (when (and (not (.-isResumption shc)) (.useTLS13PlusSpec (.-negotiatedProtocol shc)))
+            (when-not (identical? (.-clientAuthType (.-sslConfig shc))
+                                  ClientAuthType/CLIENT_AUTH_NONE)
+              (.putIfAbsent (.-handshakeProducers shc)
+                            (.-id SSLHandshake/CERTIFICATE_REQUEST)
+                            SSLHandshake/CERTIFICATE_REQUEST))
+            (.put (.-handshakeProducers shc)
+                  (.-id SSLHandshake/CERTIFICATE)
+                  SSLHandshake/CERTIFICATE)
+            (.putIfAbsent (.-handshakeProducers shc)
+                          (.-id SSLHandshake/CERTIFICATE_VERIFY)
+                          SSLHandshake/CERTIFICATE_VERIFY))))))
+
+  (defclass ^:private ^:static ^:final CHSignatureSchemesOnLoadAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when (.useTLS13PlusSpec (.-negotiatedProtocol shc))
+          (throw
+            (.fatal
+              (.-conContext shc)
+              Alert/MISSING_EXTENSION
+              "No mandatory signature_algorithms extension in the received ClientHello handshake message"))))))
+
+  (defclass ^:private ^:static ^:final CHSignatureSchemesOnTradeAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when (.useTLS12PlusSpec (.-negotiatedProtocol shc))
+          (let [^{:tag (List SignatureScheme)} schemes (Arrays/asList
+                                                         (new
+                                                           SignatureScheme/1
+                                                           [SignatureScheme/RSA_PKCS1_SHA1
+                                                            SignatureScheme/DSA_SHA1
+                                                            SignatureScheme/ECDSA_SHA1]))]
+            (set! (.-peerRequestedSignatureSchemes shc) schemes)
+            (when (or (nil? (.-peerRequestedCertSignSchemes shc))
+                      (.isEmpty (.-peerRequestedCertSignSchemes shc)))
+              (set! (.-peerRequestedCertSignSchemes shc) schemes))
+            (.setUseDefaultPeerSignAlgs (.-handshakeSession shc)))))))
+
+  (defclass ^:private ^:static ^:final CRSignatureSchemesProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when-not (.isAvailable (.-sslConfig shc) SSLExtension/CR_SIGNATURE_ALGORITHMS)
+          (throw
+            (.fatal
+              (.-conContext shc)
+              Alert/MISSING_EXTENSION
+              "No available signature_algorithms extension for client certificate authentication")))
+        (SignatureAlgorithmsExtension/produceNetworkLoad
+          shc
+          SSLExtension/CR_SIGNATURE_ALGORITHMS
+          SSLExtension/CR_SIGNATURE_ALGORITHMS_CERT))))
+
+  (defclass ^:private ^:static ^:final CRSignatureSchemesConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [chc (cast ClientHandshakeContext context)]
+        (when-not (.isAvailable (.-sslConfig chc) SSLExtension/CR_SIGNATURE_ALGORITHMS)
+          (throw
+            (.fatal
+              (.-conContext chc)
+              Alert/HANDSHAKE_FAILURE
+              "No available signature_algorithms extension for client certificate authentication")))
+        (let [spec (SignatureSchemesSpec. chc buffer)]
+          (.put (.-handshakeExtensions chc) SSLExtension/CR_SIGNATURE_ALGORITHMS spec)))))
+
+  (defclass ^:private ^:static ^:final CRSignatureSchemesUpdate
+    :implements [HandshakeConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)
+            spec (cast SignatureSchemesSpec
+                       (.get (.-handshakeExtensions chc) SSLExtension/CR_SIGNATURE_ALGORITHMS))]
+        (when (some? spec)
+          (SignatureAlgorithmsExtension/updateHandshakeContext
+            chc
+            (.-signatureSchemes spec)
+            SSLExtension/CR_SIGNATURE_ALGORITHMS_CERT)))))
+
+  (defclass ^:private ^:static ^:final CRSignatureSchemesAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (throw
+          (.fatal
+            (.-conContext chc)
+            Alert/MISSING_EXTENSION
+            "No mandatory signature_algorithms extension in the received CertificateRequest handshake message")))))
+
+  (method ^:private ^:static updateHandshakeContext :throws [SSLException] ^void [^HandshakeContext hc
+                                                                                  ^int/1 signatureSchemes
+                                                                                  ^SSLExtension signatureAlgorithmsCertExt]
+    (let [^{:tag (List SignatureScheme)} handshakeSS (SignatureScheme/getSupportedAlgorithms
+                                                       (.-sslConfig hc)
+                                                       (.-algorithmConstraints hc)
+                                                       (.-negotiatedProtocol hc)
+                                                       signatureSchemes
+                                                       SignatureScheme/HANDSHAKE_SCOPE)]
+      (when (.isEmpty handshakeSS)
+        (throw
+          (.fatal (.-conContext hc) Alert/HANDSHAKE_FAILURE "No supported signature algorithm")))
+      (set! (.-peerRequestedSignatureSchemes hc) handshakeSS)
+      (let [certSpec (cast SignatureSchemesSpec
+                           (.get (.-handshakeExtensions hc) signatureAlgorithmsCertExt))]
+        (when (nil? certSpec)
+          (let [^{:tag (List SignatureScheme)} certSS (SignatureScheme/getSupportedAlgorithms
+                                                        (.-sslConfig hc)
+                                                        (.-algorithmConstraints hc)
+                                                        (.-negotiatedProtocol hc)
+                                                        signatureSchemes
+                                                        SignatureScheme/CERTIFICATE_SCOPE)]
+            (when (.isEmpty certSS)
+              (throw (.fatal (.-conContext hc)
+                             Alert/HANDSHAKE_FAILURE
+                             "No supported signature algorithm")))
+            (set! (.-peerRequestedCertSignSchemes hc) certSS)
+            (.setPeerSupportedSignatureAlgorithms (.-handshakeSession hc) certSS))))))
+
+  (method ^:private ^:static produceNetworkLoad :throws [IOException] ^byte/1 [^HandshakeContext hc
+                                                                               ^SSLExtension signatureAlgorithmsExt
+                                                                               ^SSLExtension signatureAlgorithmsCertExt]
+    (let [^:mutable ^{:tag (List SignatureScheme)} sigAlgs nil]
+      (if (.isAvailable (.-sslConfig hc) signatureAlgorithmsCertExt)
+          (set! sigAlgs (.-localSupportedSignAlgs hc))
+          (do
+            (set! sigAlgs (ArrayList. (.-localSupportedSignAlgs hc)))
+            (.retainAll sigAlgs (.-localSupportedCertSignAlgs hc))))
+      (let [vectorLen (unchecked-multiply-int (SignatureScheme/sizeInRecord) (.size sigAlgs))
+            extData (new byte/1 (unchecked-add-int vectorLen 2))
+            m (ByteBuffer/wrap extData)]
+        (Record/putInt16 m vectorLen)
+        (for-each [^SignatureScheme ss sigAlgs] (Record/putInt16 m (.-id ss)))
+        (.put (.-handshakeExtensions hc) signatureAlgorithmsExt (SignatureSchemesSpec. sigAlgs))
+        extData))))

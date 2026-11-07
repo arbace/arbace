@@ -1,0 +1,1075 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/ftp/impl/FtpClient.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.ftp.impl)
+
+(import '(java.io BufferedInputStream
+                  BufferedOutputStream
+                  BufferedReader
+                  Closeable
+                  FileNotFoundException
+                  IOException
+                  InputStream
+                  InputStreamReader
+                  OutputStream
+                  PrintStream
+                  UnsupportedEncodingException)
+        '(java.net Inet6Address
+                   InetAddress
+                   InetSocketAddress
+                   Proxy
+                   Proxy$Type
+                   ServerSocket
+                   Socket
+                   SocketAddress)
+        '(java.text DateFormat)
+        '(java.time ZoneOffset ZonedDateTime)
+        '(java.time.format DateTimeFormatter DateTimeParseException)
+        '(java.util ArrayList Arrays Base64 Calendar Date Iterator List Locale Vector)
+        '(java.util.function Function Predicate)
+        '(java.util.regex Matcher Pattern)
+        '(javax.net.ssl SSLException SSLSocket SSLSocketFactory)
+        '(sun.net TelnetInputStream TelnetOutputStream)
+        '(sun.net.ftp FtpDirEntry FtpDirEntry$Type FtpDirParser FtpProtocolException FtpReplyCode)
+        '(sun.net.util IPAddressUtil ProxyUtil)
+        '(sun.util.logging PlatformLogger PlatformLogger$Level))
+
+(defclass ^:public FtpClient
+  :extends sun.net.ftp.FtpClient
+
+  (field ^:private ^:static ^int defaultSoTimeout)
+
+  (field ^:private ^:static ^int defaultConnectTimeout)
+
+  (field ^:private ^:static ^:final ^PlatformLogger logger
+    (PlatformLogger/getLogger "sun.net.ftp.FtpClient"))
+
+  (field ^:private ^Proxy proxy)
+
+  (field ^:private ^Socket server)
+
+  (field ^:private ^PrintStream out)
+
+  (field ^:private ^InputStream in)
+
+  (field ^:private ^int readTimeout -1)
+
+  (field ^:private ^int connectTimeout -1)
+
+  (field ^:private ^:static ^String encoding "ISO8859_1")
+
+  (field ^:private ^InetSocketAddress serverAddr)
+
+  (field ^:private ^boolean replyPending false)
+
+  (field ^:private ^boolean loggedIn false)
+
+  (field ^:private ^boolean useCrypto false)
+
+  (field ^:private ^SSLSocketFactory sslFact)
+
+  (field ^:private ^Socket oldSocket)
+
+  (field ^:private ^{:tag (Vector String)} serverResponse (Vector. 1))
+
+  (field ^:private ^FtpReplyCode lastReplyCode nil)
+
+  (field ^:private ^String welcomeMsg)
+
+  (field ^:private ^:final ^boolean passiveMode true)
+
+  (field ^:private ^sun.net.ftp.FtpClient$TransferType type
+    sun.net.ftp.FtpClient$TransferType/BINARY)
+
+  (field ^:private ^long restartOffset 0)
+
+  (field ^:private ^long lastTransSize -1)
+
+  (field ^:private ^String lastFileName)
+
+  (field ^:private ^:static ^String/1 patStrings
+    (new
+      String/1
+      ["([\\-ld](?:[r\\-][w\\-][x\\-]){3})\\s*\\d+ (\\w+)\\s*(\\w+)\\s*(\\d+)\\s*([A-Z][a-z][a-z]\\s*\\d+)\\s*(\\d\\d:\\d\\d)\\s*(\\p{Print}*)"
+       "([\\-ld](?:[r\\-][w\\-][x\\-]){3})\\s*\\d+ (\\w+)\\s*(\\w+)\\s*(\\d+)\\s*([A-Z][a-z][a-z]\\s*\\d+)\\s*(\\d{4})\\s*(\\p{Print}*)"
+       "(\\d{2}/\\d{2}/\\d{4})\\s*(\\d{2}:\\d{2}[ap])\\s*((?:[0-9,]+)|(?:<DIR>))\\s*(\\p{Graph}*)"
+       "(\\d{2}-\\d{2}-\\d{2})\\s*(\\d{2}:\\d{2}[AP]M)\\s*((?:[0-9,]+)|(?:<DIR>))\\s*(\\p{Graph}*)"]))
+
+  (field ^:private ^:static ^int/2 patternGroups
+    (new int/2 [[7 4 5 6 0 1 2 3] [7 4 5 0 6 1 2 3] [4 3 1 2 0 0 0 0] [4 3 1 2 0 0 0 0]]))
+
+  (field ^:private ^:static ^Pattern/1 patterns)
+
+  (field ^:private ^:static ^Pattern linkp (Pattern/compile "(\\p{Print}+) \\-\\> (\\p{Print}+)$"))
+
+  (field ^:private ^DateFormat df (DateFormat/getDateInstance DateFormat/MEDIUM Locale/US))
+
+  (field ^:private ^:static ^:final ^boolean acceptPasvAddressVal)
+
+  (static-initializer
+    (set! defaultSoTimeout
+          (.intValue (Integer/getInteger "sun.net.client.defaultReadTimeout" 300000)))
+    (when (== defaultSoTimeout 0) (set! defaultSoTimeout -1))
+    (set! defaultConnectTimeout
+          (.intValue (Integer/getInteger "sun.net.client.defaultConnectTimeout" 300000)))
+    (when (== defaultConnectTimeout 0) (set! defaultConnectTimeout -1))
+    (set! encoding (System/getProperty "file.encoding" "ISO8859_1"))
+    (try
+      (when-not (FtpClient/isASCIISuperset encoding) (set! encoding "ISO8859_1"))
+      (catch Exception e (set! encoding "ISO8859_1")))
+    (set! patterns (new Pattern/1 (alength patStrings)))
+    (loop [^int i 0]
+      (when (< i (alength patStrings))
+        (aset patterns i (Pattern/compile (aget patStrings i)))
+        (recur (unchecked-inc-int i))))
+    (set! acceptPasvAddressVal (Boolean/getBoolean "jdk.net.ftp.trustPasvAddress")))
+
+  (method ^:private ^:static isASCIISuperset :throws [Exception] ^boolean [^String encoding]
+    (let [chkS "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_.!~*'();/?:@&=+$,"
+          chkB (new byte/1
+                    [48 49 50 51 52 53 54 55 56 57 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80
+                     81 82 83 84 85 86 87 88 89 90 97 98 99 100 101 102 103 104 105 106 107 108 109
+                     110 111 112 113 114 115 116 117 118 119 120 121 122 45 95 46 33 126 42 39 40 41
+                     59 47 63 58 64 38 61 43 36 44])
+          b (.getBytes chkS encoding)]
+      (Arrays/equals b chkB)))
+
+  (defclass ^:private DefaultParser
+    :implements [FtpDirParser]
+
+    (constructor ^:private [this])
+
+    (method ^:public parseLine ^FtpDirEntry [this ^String line]
+      (let [^:mutable ^String fdate nil
+            ^:mutable ^String fsize nil
+            ^:mutable ^String time nil
+            ^:mutable ^String filename nil
+            ^:mutable ^String permstring nil
+            ^:mutable ^String username nil
+            ^:mutable ^String groupname nil
+            ^:mutable dir false
+            now (Calendar/getInstance)
+            year (.get now Calendar/YEAR)
+            ^:mutable ^Matcher m nil]
+        (loop [^int j 0]
+          (when (< j (alength patterns))
+            (set! m (.matcher (aget patterns j) line))
+            (if (.find m)
+                (do
+                  (set! filename (.group m (aget patternGroups j 0)))
+                  (set! fsize (.group m (aget patternGroups j 1)))
+                  (set! fdate (.group m (aget patternGroups j 2)))
+                  (cond
+                    (> (aget patternGroups j 4) 0)
+                      (set! fdate
+                            (java-str fdate (java-str ", " (.group m (aget patternGroups j 4)))))
+                    (> (aget patternGroups j 3) 0)
+                      (set! fdate (java-str fdate (java-str ", " (String/valueOf year)))))
+                  (when (> (aget patternGroups j 3) 0)
+                    (set! time (.group m (aget patternGroups j 3))))
+                  (when (> (aget patternGroups j 5) 0)
+                    (set! permstring (.group m (aget patternGroups j 5)))
+                    (set! dir (.startsWith permstring "d")))
+                  (when (> (aget patternGroups j 6) 0)
+                    (set! username (.group m (aget patternGroups j 6))))
+                  (when (> (aget patternGroups j 7) 0)
+                    (set! groupname (.group m (aget patternGroups j 7))))
+                  (if (.equals "<DIR>" fsize)
+                      (do (set! dir true) (set! fsize nil) (recur (unchecked-inc-int j)))
+                      (recur (unchecked-inc-int j))))
+                (recur (unchecked-inc-int j)))))
+        (when (some? filename)
+          (let [^:mutable ^Date d nil]
+            (try (set! d (.parse df fdate)) (catch Exception e (set! d nil)))
+            (when (and (some? d) (some? time))
+              (let [c (.indexOf time \:)]
+                (.setTime now d)
+                (.set now Calendar/HOUR (Integer/parseInt time 0 c 10))
+                (.set now
+                      Calendar/MINUTE
+                      (Integer/parseInt time (unchecked-add-int c 1) (.length time) 10))
+                (set! d (.getTime now))))
+            (let [m2 (.matcher linkp filename)]
+              (when (.find m2) (set! filename (.group m2 1)))
+              (let [perms (new boolean/2 3 3)]
+                (loop [^int i 0]
+                  (when (< i 3)
+                    (loop [^int j 0]
+                      (when (< j 3)
+                        (aset (aget perms i)
+                              j
+                              (not (== (.charAt permstring
+                                                (unchecked-add-int (unchecked-multiply-int i 3) j))
+                                       \-)))
+                        (recur (unchecked-inc-int j))))
+                    (recur (unchecked-inc-int i))))
+                (let [file (FtpDirEntry. filename)]
+                  (.setGroup (.setUser file username) groupname)
+                  (.setLastModified (.setSize file (Long/parseLong fsize)) d)
+                  (.setPermissions file perms)
+                  (.setType file
+                            ^FtpDirEntry$Type (cond
+                                                dir FtpDirEntry$Type/DIR
+                                                (== (.charAt line 0) \l) FtpDirEntry$Type/LINK
+                                                :else FtpDirEntry$Type/FILE))
+                  file))))))))
+
+  (defclass ^:private ^:static MLSxParser
+    :implements [FtpDirParser]
+
+    (method ^:public parseLine ^FtpDirEntry [this ^:mutable ^String line]
+      (let [^:mutable ^String name nil
+            ^:mutable i (.lastIndexOf line \;)]
+        (if (> i 0)
+            (do
+              (set! name (.trim (.substring line (unchecked-add-int i 1))))
+              (set! line (.substring line 0 i)))
+            (do (set! name (.trim line)) (set! line "")))
+        (let [file (FtpDirEntry. name)]
+          (while (not (.isEmpty line))
+            (let [^:mutable ^String s nil]
+              (set! i (.indexOf line \;))
+              (if (> i 0)
+                  (do
+                    (set! s (.substring line 0 i))
+                    (set! line (.substring line (unchecked-add-int i 1))))
+                  (do (set! s line) (set! line "")))
+              (set! i (.indexOf s \=))
+              (when (> i 0)
+                (let [fact (.substring s 0 i)
+                      value (.substring s (unchecked-add-int i 1))]
+                  (.addFact file fact value)))))
+          (let [^:mutable s (.getFact file "Size")]
+            (when (some? s) (.setSize file (Long/parseLong s)))
+            (set! s (.getFact file "Modify"))
+            (when (some? s)
+              (let [d (FtpClient/parseRfc3659TimeValue s)]
+                (when (some? d) (.setLastModified file d))))
+            (set! s (.getFact file "Create"))
+            (when (some? s)
+              (let [d (FtpClient/parseRfc3659TimeValue s)] (when (some? d) (.setCreated file d))))
+            (set! s (.getFact file "Type"))
+            (when (some? s)
+              (when (.equalsIgnoreCase s "file") (.setType file FtpDirEntry$Type/FILE))
+              (when (.equalsIgnoreCase s "dir") (.setType file FtpDirEntry$Type/DIR))
+              (when (.equalsIgnoreCase s "cdir") (.setType file FtpDirEntry$Type/CDIR))
+              (when (.equalsIgnoreCase s "pdir") (.setType file FtpDirEntry$Type/PDIR)))
+            file)))))
+
+  (field ^:private ^FtpDirParser parser (DefaultParser.))
+
+  (field ^:private ^FtpDirParser mlsxParser (MLSxParser.))
+
+  (field ^:private ^:static ^Pattern transPat nil)
+
+  (method ^:private getTransferSize ^void [this]
+    (set! lastTransSize -1)
+    (let [response (.getLastResponseString this)]
+      (when (nil? transPat) (set! transPat (Pattern/compile "150 Opening .*\\((\\d+) bytes\\).")))
+      (let [m (.matcher transPat response)]
+        (when (.find m) (let [s (.group m 1)] (set! lastTransSize (Long/parseLong s)))))))
+
+  (method ^:private getTransferName ^void [this]
+    (set! lastFileName nil)
+    (let [response (.getLastResponseString this)
+          ^:mutable i (.indexOf response "unique file name:")
+          e (.lastIndexOf response \))]
+      (when (>= i 0)
+        (set! i (unchecked-add-int i 17))
+        (set! lastFileName (.substring response i e)))))
+
+  (method ^:private readServerResponse :throws [IOException] ^int [this]
+    (let [replyBuf (StringBuilder. 32)
+          ^:mutable ^int c 0
+          ^:mutable ^int continuingCode -1
+          ^:mutable ^int code 0
+          ^:mutable ^String response nil]
+      (.setSize serverResponse 0)
+      (while true
+        (while (not (== (set! c (.read in)) -1))
+          (when (== c \return)
+            (when-not (== (set! c (.read in)) \newline) (.append replyBuf \return)))
+          (.append replyBuf (unchecked-char c))
+          (when (== c \newline) (break)))
+        (set! response (.toString replyBuf))
+        (.setLength replyBuf 0)
+        (when (.isLoggable logger PlatformLogger$Level/FINEST)
+          (.finest logger (java-str "Server [" serverAddr "] --> " response)))
+        (if (.isEmpty response)
+            (set! code -1)
+            (try
+              (set! code (Integer/parseInt response 0 3 10))
+              (catch NumberFormatException e (set! code -1))
+              (catch IndexOutOfBoundsException e (continue))))
+        (.addElement serverResponse response)
+        (cond
+          (not (== continuingCode -1))
+            (when-not (or (not (== code continuingCode))
+                          (and (>= (.length response) 4) (== (.charAt response 3) \-)))
+              (set! continuingCode -1)
+              (break))
+          (and (>= (.length response) 4) (== (.charAt response 3) \-)) (set! continuingCode code)
+          :else (break)))
+      code))
+
+  (method ^:private sendServer ^void [this ^String cmd]
+    (.print out cmd)
+    (when (.isLoggable logger PlatformLogger$Level/FINEST)
+      (.finest logger (java-str "Server [" serverAddr "] <-- " cmd))))
+
+  (method ^:private getResponseString ^String [this]
+    (cast String (.elementAt serverResponse 0)))
+
+  (method ^:private getResponseStrings ^{:tag (Vector String)} [this]
+    serverResponse)
+
+  (method ^:private readReply :throws [IOException] ^boolean [this]
+    (set! lastReplyCode (FtpReplyCode/find (.readServerResponse this)))
+    (cond
+      (.isPositivePreliminary lastReplyCode) (do (set! replyPending true) true)
+      (or (.isPositiveCompletion lastReplyCode) (.isPositiveIntermediate lastReplyCode))
+        (do
+          (when (identical? lastReplyCode FtpReplyCode/CLOSING_DATA_CONNECTION)
+            (.getTransferName this))
+          true)
+      :else false))
+
+  (method ^:private issueCommand :throws [IOException FtpProtocolException] ^boolean [this
+                                                                                      ^String cmd]
+    (when-not (.isConnected this) (throw (IllegalStateException. "Not connected")))
+    (when replyPending (try (.completePending this) (catch FtpProtocolException e)))
+    (when-not (== (.indexOf cmd \newline) -1)
+      (let [ex (FtpProtocolException. "Illegal FTP command")]
+        (.initCause ex (IllegalArgumentException. "Illegal carriage return"))
+        (throw ex)))
+    (.sendServer this (java-str cmd "\r\n"))
+    (.readReply this))
+
+  (method ^:private issueCommandCheck :throws [FtpProtocolException IOException] ^void [this
+                                                                                        ^String cmd]
+    (when-not (.issueCommand this cmd)
+      (throw (FtpProtocolException. (java-str cmd ":" (.getResponseString this))
+                                    (.getLastReplyCode this)))))
+
+  (field ^:private ^:static ^Pattern epsvPat nil)
+
+  (field ^:private ^:static ^Pattern pasvPat nil)
+
+  (method ^:private openPassiveDataConnection :throws [FtpProtocolException IOException] ^Socket [this
+                                                                                                  ^String cmd]
+    (let [^:mutable ^String serverAnswer nil
+          ^:mutable ^int port 0
+          ^:mutable ^InetSocketAddress dest nil]
+      (if (.issueCommand this "EPSV ALL")
+          (do
+            (.issueCommandCheck this "EPSV")
+            (set! serverAnswer (.getResponseString this))
+            (when (nil? epsvPat)
+              (set! epsvPat (Pattern/compile "^229 .* \\(\\|\\|\\|(\\d+)\\|\\)")))
+            (let [m (.matcher epsvPat serverAnswer)]
+              (when-not (.find m)
+                (throw (FtpProtocolException. (java-str "EPSV failed : " serverAnswer))))
+              (let [s (.group m 1)]
+                (set! port (Integer/parseInt s))
+                (let [add (.getInetAddress server)]
+                  (if (some? add)
+                      (set! dest (InetSocketAddress. add port))
+                      (set! dest
+                            (InetSocketAddress/createUnresolved (.getHostName serverAddr) port)))))))
+          (do
+            (.issueCommandCheck this "PASV")
+            (set! serverAnswer (.getResponseString this))
+            (when (nil? pasvPat)
+              (set! pasvPat
+                    (Pattern/compile
+                      "227 .* \\(?(\\d{1,3},\\d{1,3},\\d{1,3},\\d{1,3}),(\\d{1,3}),(\\d{1,3})\\)?")))
+            (let [m (.matcher pasvPat serverAnswer)]
+              (when-not (.find m)
+                (throw (FtpProtocolException. (java-str "PASV failed : " serverAnswer))))
+              (set! port
+                    (unchecked-add-int (Integer/parseInt (.group m 3))
+                                       (bit-shift-left-int (Integer/parseInt (.group m 2)) 8)))
+              (let [s (.replace (.group m 1) \, \.)]
+                (when-not (IPAddressUtil/isIPv4LiteralAddress s)
+                  (throw (FtpProtocolException. (java-str "PASV failed : " serverAnswer))))
+                (if acceptPasvAddressVal
+                    (set! dest (InetSocketAddress. s port))
+                    (set! dest (.validatePasvAddress this port s (.getInetAddress server))))))))
+      (let [^:mutable ^Socket s nil]
+        (if (some? proxy)
+            (if (identical? (.type proxy) Proxy$Type/SOCKS)
+                (set! s (Socket. proxy))
+                (set! s (Socket. Proxy/NO_PROXY)))
+            (set! s (Socket.)))
+        (let [serverAddress (.getLocalAddress server)]
+          (.bind s (InetSocketAddress. serverAddress 0))
+          (cond
+            (>= connectTimeout 0) (.connect s dest connectTimeout)
+            (> defaultConnectTimeout 0) (.connect s dest defaultConnectTimeout)
+            :else (.connect s dest))
+          (cond
+            (>= readTimeout 0) (.setSoTimeout s readTimeout)
+            (> defaultSoTimeout 0) (.setSoTimeout s defaultSoTimeout))
+          (when useCrypto
+            (try
+              (set! s (.createSocket sslFact s (.getHostName dest) (.getPort dest) true))
+              (catch Exception e
+                (throw (FtpProtocolException. (java-str "Can't open secure data channel: " e))))))
+          (when-not (.issueCommand this cmd)
+            (.close s)
+            (when (identical? (.getLastReplyCode this) FtpReplyCode/FILE_UNAVAILABLE)
+              (throw (FileNotFoundException. cmd)))
+            (throw (FtpProtocolException. (java-str cmd ":" (.getResponseString this))
+                                          (.getLastReplyCode this))))
+          s))))
+
+  (field ^:static ^:final ^String ERROR_MSG "Address should be the same as originating server")
+
+  (method ^:private validatePasvAddress :throws [FtpProtocolException] ^InetSocketAddress [this
+                                                                                           ^int port
+                                                                                           ^String s
+                                                                                           ^InetAddress address]
+    (if (nil? address)
+        (InetSocketAddress/createUnresolved (.getHostName serverAddr) port)
+        (let [serverAddress (.getHostAddress address)]
+          (cond
+            (.equals serverAddress s) (InetSocketAddress. s port)
+            (and (.isLoopbackAddress address) (.startsWith s "127.")) (InetSocketAddress. s port)
+            :else
+              (do
+                (cond
+                  (.isLoopbackAddress address)
+                    (if (.equals (.getHostAddress (FtpClient/getLocalHost)) s)
+                        (return (InetSocketAddress. s port))
+                        (throw (FtpProtocolException. ERROR_MSG)))
+                  (.startsWith s "127.")
+                    (if (.equals (FtpClient/getLocalHost) address)
+                        (return (InetSocketAddress. s port))
+                        (throw (FtpProtocolException. ERROR_MSG))))
+                (let [hostName (.getHostName address)]
+                  (when-not (or (IPAddressUtil/isIPv4LiteralAddress hostName)
+                                (IPAddressUtil/isIPv6LiteralAddress hostName))
+                    (let [names (FtpClient/getAllByName hostName)
+                          resAddress (cast String
+                                           (.orElse
+                                             (.findFirst
+                                               (.filter
+                                                 (.map
+                                                   (Arrays/stream names)
+                                                   (method-ref
+                                                     Function
+                                                     ^String [InetAddress]
+                                                     InetAddress/.getHostAddress))
+                                                 (method-ref
+                                                   Predicate
+                                                   [String]
+                                                   s
+                                                   String/.equalsIgnoreCase)))
+                                             nil))]
+                      (when (some? resAddress) (return (InetSocketAddress. s port)))))
+                  (throw (FtpProtocolException. ERROR_MSG))))))))
+
+  (method ^:private ^:static getLocalHost :throws [FtpProtocolException] ^InetAddress []
+    (try
+      (InetAddress/getLocalHost)
+      (catch Exception e
+        (let [ftpEx (FtpProtocolException. ERROR_MSG)] (.initCause ftpEx e) (throw ftpEx)))))
+
+  (method ^:private ^:static getAllByName :throws [FtpProtocolException] ^InetAddress/1 [^String hostName]
+    (try
+      (InetAddress/getAllByName hostName)
+      (catch Exception e
+        (let [ftpEx (FtpProtocolException. ERROR_MSG)] (.initCause ftpEx e) (throw ftpEx)))))
+
+  (method ^:private openDataConnection :throws [FtpProtocolException IOException] ^Socket [this
+                                                                                           ^String cmd]
+    (let [^:mutable ^Socket clientSocket nil]
+      (when passiveMode
+        (try
+          (return (.openPassiveDataConnection this cmd))
+          (catch FtpProtocolException e
+            (let [errmsg (.getMessage e)]
+              (when (and (not (.startsWith errmsg "PASV")) (not (.startsWith errmsg "EPSV")))
+                (throw e))))))
+      (let [^:mutable ^ServerSocket portSocket nil
+            ^:mutable ^InetAddress myAddress nil
+            ^:mutable ^String portCmd nil]
+        (when (and (some? proxy) (identical? (.type proxy) Proxy$Type/SOCKS))
+          (throw (FtpProtocolException. "Passive mode failed")))
+        (set! portSocket (ServerSocket. 0 1 (.getLocalAddress server)))
+        (try
+          (set! myAddress (.getInetAddress portSocket))
+          (when (.isAnyLocalAddress myAddress) (set! myAddress (.getLocalAddress server)))
+          (set! portCmd
+                (java-str "EPRT |"
+                          (if (instance? Inet6Address myAddress) "2" "1")
+                          "|"
+                          (.getHostAddress myAddress)
+                          "|"
+                          (.getLocalPort portSocket)
+                          "|"))
+          (when (or (not (.issueCommand this portCmd)) (not (.issueCommand this cmd)))
+            (set! portCmd "PORT ")
+            (let [addr (.getAddress myAddress)]
+              (loop [^int i 0]
+                (when (< i (alength addr))
+                  (set! portCmd (java-str portCmd (bit-and-int (aget addr i) 0xFF) ","))
+                  (recur (unchecked-inc-int i))))
+              (set! portCmd
+                    (java-str portCmd
+                              (bit-and-int (unsigned-bit-shift-right-int
+                                             (.getLocalPort portSocket)
+                                             8)
+                                           0xff)
+                              ","
+                              (bit-and-int (.getLocalPort portSocket) 0xff)))
+              (.issueCommandCheck this portCmd)
+              (.issueCommandCheck this cmd)))
+          (cond
+            (>= connectTimeout 0) (.setSoTimeout portSocket connectTimeout)
+            (> defaultConnectTimeout 0) (.setSoTimeout portSocket defaultConnectTimeout))
+          (set! clientSocket (.accept portSocket))
+          (cond
+            (>= readTimeout 0) (.setSoTimeout clientSocket readTimeout)
+            (> defaultSoTimeout 0) (.setSoTimeout clientSocket defaultSoTimeout))
+          (finally (.close portSocket)))
+        (when useCrypto
+          (try
+            (set! clientSocket
+                  (.createSocket sslFact
+                                 clientSocket
+                                 (.getHostName serverAddr)
+                                 (.getPort serverAddr)
+                                 true))
+            (catch Exception ex (throw (IOException. (.getLocalizedMessage ex))))))
+        clientSocket)))
+
+  (method ^:private createInputStream ^InputStream [this ^InputStream in]
+    (if (identical? type sun.net.ftp.FtpClient$TransferType/ASCII) (TelnetInputStream. in false) in))
+
+  (method ^:private createOutputStream ^OutputStream [this ^OutputStream out]
+    (if (identical? type sun.net.ftp.FtpClient$TransferType/ASCII)
+        (TelnetOutputStream. out false)
+        out))
+
+  (constructor ^:protected [this])
+
+  (method ^:public ^:static create ^sun.net.ftp.FtpClient [] (FtpClient.))
+
+  (method ^:public enablePassiveMode ^sun.net.ftp.FtpClient [this ^boolean passive]
+    this)
+
+  (method ^:public isPassiveModeEnabled ^boolean [this] passiveMode)
+
+  (method ^:public setConnectTimeout ^sun.net.ftp.FtpClient [this ^int timeout]
+    (set! connectTimeout timeout)
+    this)
+
+  (method ^:public getConnectTimeout ^int [this] connectTimeout)
+
+  (method ^:public setReadTimeout ^sun.net.ftp.FtpClient [this ^int timeout]
+    (set! readTimeout timeout)
+    this)
+
+  (method ^:public getReadTimeout ^int [this] readTimeout)
+
+  (method ^:public setProxy ^sun.net.ftp.FtpClient [this ^Proxy p]
+    (set! proxy (ProxyUtil/copyProxy p))
+    this)
+
+  (method ^:public getProxy ^Proxy [this] proxy)
+
+  (method ^:private tryConnect :throws [IOException] ^void [this ^InetSocketAddress dest
+                                                            ^int timeout]
+    (when (.isConnected this) (.disconnect this))
+    (set! server (.doConnect this dest timeout))
+    (try
+      (set! out (PrintStream. (BufferedOutputStream. (.getOutputStream server)) true encoding))
+      (catch UnsupportedEncodingException e
+        (throw (InternalError. (java-str encoding "encoding not found") e))))
+    (set! in (BufferedInputStream. (.getInputStream server))))
+
+  (method ^:private doConnect :throws [IOException] ^Socket [this ^InetSocketAddress dest
+                                                             ^int timeout]
+    (let [^:mutable ^Socket s nil]
+      (if (some? proxy)
+          (if (identical? (.type proxy) Proxy$Type/SOCKS)
+              (set! s (Socket. proxy))
+              (set! s (Socket. Proxy/NO_PROXY)))
+          (set! s (Socket.)))
+      (cond
+        (>= timeout 0) (.connect s dest timeout)
+        (>= connectTimeout 0) (.connect s dest connectTimeout)
+        (> defaultConnectTimeout 0) (.connect s dest defaultConnectTimeout)
+        :else (.connect s dest))
+      (cond
+        (>= readTimeout 0) (.setSoTimeout s readTimeout)
+        (> defaultSoTimeout 0) (.setSoTimeout s defaultSoTimeout))
+      s))
+
+  (method ^:private disconnect :throws [IOException] ^void [this]
+    (when (.isConnected this) (.close server))
+    (set! server nil)
+    (set! in nil)
+    (set! out nil)
+    (set! lastTransSize -1)
+    (set! lastFileName nil)
+    (set! restartOffset 0)
+    (set! welcomeMsg nil)
+    (set! lastReplyCode nil)
+    (.setSize serverResponse 0))
+
+  (method ^:public isConnected ^boolean [this] (some? server))
+
+  (method ^:public getServerAddress ^SocketAddress [this]
+    (when (some? server) (.getRemoteSocketAddress server)))
+
+  (method ^:public connect :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                              ^SocketAddress dest]
+    (.connect this dest -1))
+
+  (method ^:public connect :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                              ^SocketAddress dest
+                                                                                              ^int timeout]
+    (when-not (instance? InetSocketAddress dest)
+      (throw (IllegalArgumentException. "Wrong address type")))
+    (set! serverAddr (cast InetSocketAddress dest))
+    (.tryConnect this serverAddr timeout)
+    (when-not (.readReply this)
+      (throw (FtpProtocolException. (java-str "Welcome message: " (.getResponseString this))
+                                    lastReplyCode)))
+    (set! welcomeMsg (.substring (.getResponseString this) 4))
+    this)
+
+  (method ^:private tryLogin :throws [FtpProtocolException IOException] ^void [this ^String user
+                                                                               ^char/1 password]
+    (.issueCommandCheck this (java-str "USER " user))
+    (when (identical? lastReplyCode FtpReplyCode/NEED_PASSWORD)
+      (when (and (some? password) (> (alength password) 0))
+        (.issueCommandCheck this (java-str "PASS " (String/valueOf password))))))
+
+  (method ^:public login :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                            ^String user
+                                                                                            ^char/1 password]
+    (when-not (.isConnected this)
+      (throw (FtpProtocolException. "Not connected yet" FtpReplyCode/BAD_SEQUENCE)))
+    (when (or (nil? user) (.isEmpty user))
+      (throw (IllegalArgumentException. "User name can't be null or empty")))
+    (.tryLogin this user password)
+    (let [^:mutable ^String l nil
+          sb (StringBuilder.)]
+      (loop [^int i 0]
+        (when (< i (.size serverResponse))
+          (set! l (cast String (.elementAt serverResponse i)))
+          (if (some? l)
+              (do
+                (when (and (>= (.length l) 4) (.startsWith l "230")) (set! l (.substring l 4)))
+                (.append sb l)
+                (recur (unchecked-inc-int i)))
+              (recur (unchecked-inc-int i)))))
+      (set! welcomeMsg (.toString sb))
+      (set! loggedIn true)
+      this))
+
+  (method ^:public login :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                            ^String user
+                                                                                            ^char/1 password
+                                                                                            ^String account]
+    (when-not (.isConnected this)
+      (throw (FtpProtocolException. "Not connected yet" FtpReplyCode/BAD_SEQUENCE)))
+    (when (or (nil? user) (.isEmpty user))
+      (throw (IllegalArgumentException. "User name can't be null or empty")))
+    (.tryLogin this user password)
+    (when (identical? lastReplyCode FtpReplyCode/NEED_ACCOUNT)
+      (.issueCommandCheck this (java-str "ACCT " account)))
+    (let [sb (StringBuilder.)]
+      (when (some? serverResponse)
+        (for-each [^:mutable ^String l serverResponse]
+          (when (some? l)
+            (when (and (>= (.length l) 4) (.startsWith l "230")) (set! l (.substring l 4)))
+            (.append sb l))))
+      (set! welcomeMsg (.toString sb))
+      (set! loggedIn true)
+      this))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (when (.isConnected this)
+      (try (.issueCommand this "QUIT") (catch FtpProtocolException e))
+      (set! loggedIn false))
+    (.disconnect this))
+
+  (method ^:public isLoggedIn ^boolean [this] loggedIn)
+
+  (method ^:public changeDirectory :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                                      ^String remoteDirectory]
+    (when (or (nil? remoteDirectory) (.isEmpty remoteDirectory))
+      (throw (IllegalArgumentException. "directory can't be null or empty")))
+    (.issueCommandCheck this (java-str "CWD " remoteDirectory))
+    this)
+
+  (method ^:public changeToParentDirectory :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this]
+    (.issueCommandCheck this "CDUP")
+    this)
+
+  (method ^:public getWorkingDirectory :throws [FtpProtocolException IOException] ^String [this]
+    (.issueCommandCheck this "PWD")
+    (let [answ (.getResponseString this)]
+      (when-not (not (.startsWith answ "257")) (.substring answ 5 (.lastIndexOf answ \")))))
+
+  (method ^:public setRestartOffset ^sun.net.ftp.FtpClient [this ^long offset]
+    (when (< offset 0) (throw (IllegalArgumentException. "offset can't be negative")))
+    (set! restartOffset offset)
+    this)
+
+  (method ^:public getFile :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                              ^String name
+                                                                                              ^OutputStream local]
+    (if (> restartOffset 0)
+        (let [^:mutable ^Socket s nil]
+          (try
+            (set! s (.openDataConnection this (java-str "REST " restartOffset)))
+            (finally (set! restartOffset 0)))
+          (.issueCommandCheck this (java-str "RETR " name))
+          (.getTransferSize this)
+          (with-resources [remote (.createInputStream this (.getInputStream s))]
+            (.transferTo remote local)))
+        (let [s (.openDataConnection this (java-str "RETR " name))]
+          (.getTransferSize this)
+          (with-resources [remote (.createInputStream this (.getInputStream s))]
+            (.transferTo remote local))))
+    (.completePending this))
+
+  (method ^:public getFileStream :throws [FtpProtocolException IOException] ^InputStream [this
+                                                                                          ^String name]
+    (let [^:mutable ^Socket s nil]
+      (if (> restartOffset 0)
+          (do
+            (try
+              (set! s (.openDataConnection this (java-str "REST " restartOffset)))
+              (finally (set! restartOffset 0)))
+            (when (some? s)
+              (.issueCommandCheck this (java-str "RETR " name))
+              (.getTransferSize this)
+              (.createInputStream this (.getInputStream s))))
+          (do
+            (set! s (.openDataConnection this (java-str "RETR " name)))
+            (when (some? s) (.getTransferSize this) (.createInputStream this (.getInputStream s)))))))
+
+  (method ^:public putFileStream :throws [FtpProtocolException IOException] ^OutputStream [this
+                                                                                           ^String name
+                                                                                           ^boolean unique]
+    (let [^String cmd (if unique "STOU " "STOR ")
+          s (.openDataConnection this (java-str cmd name))]
+      (when (some? s)
+        (let [bm (identical? type sun.net.ftp.FtpClient$TransferType/BINARY)]
+          (TelnetOutputStream. (.getOutputStream s) bm)))))
+
+  (method ^:public putFile :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                              ^String name
+                                                                                              ^InputStream local
+                                                                                              ^boolean unique]
+    (let [^String cmd (if unique "STOU " "STOR ")]
+      (when (identical? type sun.net.ftp.FtpClient$TransferType/BINARY)
+        (let [s (.openDataConnection this (java-str cmd name))]
+          (with-resources [remote (.createOutputStream this (.getOutputStream s))]
+            (.transferTo local remote))))
+      (.completePending this)))
+
+  (method ^:public appendFile :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                                 ^String name
+                                                                                                 ^InputStream local]
+    (let [s (.openDataConnection this (java-str "APPE " name))]
+      (with-resources [remote (.createOutputStream this (.getOutputStream s))]
+        (.transferTo local remote))
+      (.completePending this)))
+
+  (method ^:public rename :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                             ^String from
+                                                                                             ^String to]
+    (.issueCommandCheck this (java-str "RNFR " from))
+    (.issueCommandCheck this (java-str "RNTO " to))
+    this)
+
+  (method ^:public deleteFile :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                                 ^String name]
+    (.issueCommandCheck this (java-str "DELE " name))
+    this)
+
+  (method ^:public makeDirectory :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                                    ^String name]
+    (.issueCommandCheck this (java-str "MKD " name))
+    this)
+
+  (method ^:public removeDirectory :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                                      ^String name]
+    (.issueCommandCheck this (java-str "RMD " name))
+    this)
+
+  (method ^:public noop :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this]
+    (.issueCommandCheck this "NOOP")
+    this)
+
+  (method ^:public getStatus :throws [FtpProtocolException IOException] ^String [this ^String name]
+    (.issueCommandCheck this ^String (if (nil? name) "STAT" (java-str "STAT " name)))
+    (let [^{:tag (Vector String)} resp (.getResponseStrings this)
+          sb (StringBuilder.)]
+      (loop [^int i 1]
+        (when (< i (unchecked-subtract-int (.size resp) 1))
+          (.append sb (cast String (.get resp i)))
+          (recur (unchecked-inc-int i))))
+      (.toString sb)))
+
+  (method ^:public getFeatures :throws [FtpProtocolException IOException] ^{:tag (List String)} [this]
+    (let [^{:tag (ArrayList String)} features (ArrayList.)]
+      (.issueCommandCheck this "FEAT")
+      (let [^{:tag (Vector String)} resp (.getResponseStrings this)]
+        (loop [^int i 1]
+          (when (< i (unchecked-subtract-int (.size resp) 1))
+            (let [s (cast String (.get resp i))]
+              (.add features (.substring s 1 (unchecked-subtract-int (.length s) 1)))
+              (recur (unchecked-inc-int i)))))
+        features)))
+
+  (method ^:public abort :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this]
+    (.issueCommandCheck this "ABOR")
+    this)
+
+  (method ^:public completePending :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this]
+    (while replyPending
+      (set! replyPending false)
+      (when-not (.readReply this)
+        (throw (FtpProtocolException. (.getLastResponseString this) lastReplyCode))))
+    this)
+
+  (method ^:public reInit :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this]
+    (.issueCommandCheck this "REIN")
+    (set! loggedIn false)
+    (when useCrypto
+      (when (instance? SSLSocket server)
+        (let [session (.getSession (cast SSLSocket server))]
+          (.invalidate session)
+          (set! server oldSocket)
+          (set! oldSocket nil)
+          (try
+            (set! out
+                  (PrintStream. (BufferedOutputStream. (.getOutputStream server)) true encoding))
+            (catch UnsupportedEncodingException e
+              (throw (InternalError. (java-str encoding "encoding not found") e))))
+          (set! in (BufferedInputStream. (.getInputStream server))))))
+    (set! useCrypto false)
+    this)
+
+  (method ^:public setType :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                              ^sun.net.ftp.FtpClient$TransferType type]
+    (let [^:mutable cmd "NOOP"]
+      (set! (.-type this) type)
+      (when (identical? type sun.net.ftp.FtpClient$TransferType/ASCII) (set! cmd "TYPE A"))
+      (when (identical? type sun.net.ftp.FtpClient$TransferType/BINARY) (set! cmd "TYPE I"))
+      (when (identical? type sun.net.ftp.FtpClient$TransferType/EBCDIC) (set! cmd "TYPE E"))
+      (.issueCommandCheck this cmd)
+      this))
+
+  (method ^:public list :throws [FtpProtocolException IOException] ^InputStream [this ^String path]
+    (let [^:mutable ^Socket s nil]
+      (set! s (.openDataConnection this ^String (if (nil? path) "LIST" (java-str "LIST " path))))
+      (when (some? s) (.createInputStream this (.getInputStream s)))))
+
+  (method ^:public nameList :throws [FtpProtocolException IOException] ^InputStream [this
+                                                                                     ^String path]
+    (let [^:mutable ^Socket s nil]
+      (set! s (.openDataConnection this ^String (if (nil? path) "NLST" (java-str "NLST " path))))
+      (when (some? s) (.createInputStream this (.getInputStream s)))))
+
+  (method ^:public getSize :throws [FtpProtocolException IOException] ^long [this ^String path]
+    (when (or (nil? path) (.isEmpty path))
+      (throw (IllegalArgumentException. "path can't be null or empty")))
+    (.issueCommandCheck this (java-str "SIZE " path))
+    (if (identical? lastReplyCode FtpReplyCode/FILE_STATUS)
+        (let [^:mutable s (.getResponseString this)]
+          (set! s (.substring s 4 (unchecked-subtract-int (.length s) 1)))
+          (Long/parseLong s))
+        -1))
+
+  (field ^:private ^:static ^:final ^DateTimeFormatter RFC3659_DATETIME_FORMAT
+    (.withZone (DateTimeFormatter/ofPattern "yyyyMMddHHmmss[.SSS]") ZoneOffset/UTC))
+
+  (method ^:public getLastModified :throws [FtpProtocolException IOException] ^Date [this
+                                                                                     ^String path]
+    (.issueCommandCheck this (java-str "MDTM " path))
+    (when (identical? lastReplyCode FtpReplyCode/FILE_STATUS)
+      (let [s (.getResponseString this)]
+        (FtpClient/parseRfc3659TimeValue (.substring s 4 (unchecked-subtract-int (.length s) 1))))))
+
+  (method ^:private ^:static parseRfc3659TimeValue ^Date [^String s]
+    (let [^:mutable ^Date result nil]
+      (try
+        (let [d (ZonedDateTime/parse s RFC3659_DATETIME_FORMAT)]
+          (set! result (Date/from (.toInstant d))))
+        (catch DateTimeParseException ex))
+      result))
+
+  (method ^:public setDirParser ^sun.net.ftp.FtpClient [this ^FtpDirParser p]
+    (set! parser p)
+    this)
+
+  (defclass ^:private ^:static FtpFileIterator
+    :implements [(Iterator FtpDirEntry) Closeable]
+
+    (field ^:private ^BufferedReader in nil)
+
+    (field ^:private ^FtpDirEntry nextFile nil)
+
+    (field ^:private ^FtpDirParser fparser nil)
+
+    (field ^:private ^boolean eof false)
+
+    (constructor ^:public [this ^FtpDirParser p ^BufferedReader in]
+      (set! (.-in this) in)
+      (set! (.-fparser this) p)
+      (.readNext this))
+
+    (method ^:private readNext ^void [this]
+      (set! nextFile nil)
+      (when-not eof
+        (let [^:mutable ^String line nil]
+          (try
+            (loop []
+              (set! line (.readLine in))
+              (when (some? line)
+                (set! nextFile (.parseLine fparser line))
+                (when (some? nextFile) (return)))
+              (when (some? line) (recur)))
+            (.close in)
+            (catch IOException iOException))
+          (set! eof true))))
+
+    (method ^:public hasNext ^boolean [this] (some? nextFile))
+
+    (method ^:public next ^FtpDirEntry [this]
+      (let [ret nextFile] (.readNext this) ret))
+
+    (method ^:public remove ^void [this]
+      (throw (UnsupportedOperationException. "Not supported yet.")))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (when (and (some? in) (not eof)) (.close in))
+      (set! eof true)
+      (set! nextFile nil)))
+
+  (method ^:public listFiles :throws [FtpProtocolException IOException] ^{:tag (Iterator FtpDirEntry)} [this
+                                                                                                        ^String path]
+    (let [^:mutable ^Socket s nil
+          ^:mutable ^BufferedReader sin nil]
+      (try
+        (set! s (.openDataConnection this ^String (if (nil? path) "MLSD" (java-str "MLSD " path))))
+        (catch FtpProtocolException FtpException))
+      (if (some? s)
+          (do
+            (set! sin (BufferedReader. (InputStreamReader. (.getInputStream s))))
+            (FtpFileIterator. mlsxParser sin))
+          (do
+            (set!
+              s
+              (.openDataConnection this ^String (if (nil? path) "LIST" (java-str "LIST " path))))
+            (when (some? s)
+              (set! sin (BufferedReader. (InputStreamReader. (.getInputStream s))))
+              (return (FtpFileIterator. parser sin)))
+            nil))))
+
+  (method ^:private sendSecurityData :throws [IOException FtpProtocolException] ^boolean [this
+                                                                                          ^byte/1 buf]
+    (let [s (.encodeToString (Base64/getMimeEncoder) buf)]
+      (.issueCommand this (java-str "ADAT " s))))
+
+  (method ^:private getSecurityData ^byte/1 [this]
+    (let [s (.getLastResponseString this)]
+      (when (.equalsIgnoreCase (.substring s 4 9) "ADAT=")
+        (.decode (Base64/getMimeDecoder) (.substring s 9 (unchecked-subtract-int (.length s) 1))))))
+
+  (method ^:public useKerberos :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this]
+    this)
+
+  (method ^:public getWelcomeMsg ^String [this] welcomeMsg)
+
+  (method ^:public getLastReplyCode ^FtpReplyCode [this] lastReplyCode)
+
+  (method ^:public getLastResponseString ^String [this]
+    (let [sb (StringBuilder.)]
+      (when (some? serverResponse)
+        (for-each [^String l serverResponse] (when (some? l) (.append sb l))))
+      (.toString sb)))
+
+  (method ^:public getLastTransferSize ^long [this] lastTransSize)
+
+  (method ^:public getLastFileName ^String [this] lastFileName)
+
+  (method ^:public startSecureSession :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this]
+    (when-not (.isConnected this)
+      (throw (FtpProtocolException. "Not connected yet" FtpReplyCode/BAD_SEQUENCE)))
+    (when (nil? sslFact)
+      (try
+        (set! sslFact (cast SSLSocketFactory (SSLSocketFactory/getDefault)))
+        (catch Exception e (throw (IOException. (.getLocalizedMessage e))))))
+    (.issueCommandCheck this "AUTH TLS")
+    (let [^:mutable ^Socket s nil]
+      (try
+        (set! s (.createSocket sslFact server (.getHostName serverAddr) (.getPort serverAddr) true))
+        (catch SSLException ssle (try (.disconnect this) (catch Exception e)) (throw ssle)))
+      (set! oldSocket server)
+      (set! server s)
+      (try
+        (set! out (PrintStream. (BufferedOutputStream. (.getOutputStream server)) true encoding))
+        (catch UnsupportedEncodingException e
+          (throw (InternalError. (java-str encoding "encoding not found") e))))
+      (set! in (BufferedInputStream. (.getInputStream server)))
+      (.issueCommandCheck this "PBSZ 0")
+      (.issueCommandCheck this "PROT P")
+      (set! useCrypto true)
+      this))
+
+  (method ^:public endSecureSession :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this]
+    (if (not useCrypto)
+        this
+        (do
+          (.issueCommandCheck this "CCC")
+          (.issueCommandCheck this "PROT C")
+          (set! useCrypto false)
+          (set! server oldSocket)
+          (set! oldSocket nil)
+          (try
+            (set! out
+                  (PrintStream. (BufferedOutputStream. (.getOutputStream server)) true encoding))
+            (catch UnsupportedEncodingException e
+              (throw (InternalError. (java-str encoding "encoding not found") e))))
+          (set! in (BufferedInputStream. (.getInputStream server)))
+          this)))
+
+  (method ^:public allocate :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                               ^long size]
+    (.issueCommandCheck this (java-str "ALLO " size))
+    this)
+
+  (method ^:public structureMount :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                                     ^String struct]
+    (.issueCommandCheck this (java-str "SMNT " struct))
+    this)
+
+  (method ^:public getSystem :throws [FtpProtocolException IOException] ^String [this]
+    (.issueCommandCheck this "SYST")
+    (let [resp (.getResponseString this)] (.substring resp 4)))
+
+  (method ^:public getHelp :throws [FtpProtocolException IOException] ^String [this ^String cmd]
+    (.issueCommandCheck this (java-str "HELP " cmd))
+    (let [^{:tag (Vector String)} resp (.getResponseStrings this)]
+      (if (== (.size resp) 1)
+          (.substring (cast String (.get resp 0)) 4)
+          (let [sb (StringBuilder.)]
+            (loop [^int i 1]
+              (when (< i (unchecked-subtract-int (.size resp) 1))
+                (.append sb (.substring (cast String (.get resp i)) 3))
+                (recur (unchecked-inc-int i))))
+            (.toString sb)))))
+
+  (method ^:public siteCmd :throws [FtpProtocolException IOException] ^sun.net.ftp.FtpClient [this
+                                                                                              ^String cmd]
+    (.issueCommandCheck this (java-str "SITE " cmd))
+    this))

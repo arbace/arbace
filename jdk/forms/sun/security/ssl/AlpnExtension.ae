@@ -1,0 +1,336 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/AlpnExtension.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.nio.charset Charset)
+        '(java.security Security)
+        '(java.util Arrays Collections LinkedList List)
+        '(javax.net.ssl SSLEngine SSLProtocolException SSLSocket))
+
+(defclass ^:final AlpnExtension
+  (field ^:static ^:final ^HandshakeProducer chNetworkProducer (CHAlpnProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer chOnLoadConsumer (CHAlpnConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence chOnLoadAbsence (CHAlpnAbsence.))
+
+  (field ^:static ^:final ^HandshakeProducer shNetworkProducer (SHAlpnProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer shOnLoadConsumer (SHAlpnConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence shOnLoadAbsence (SHAlpnAbsence.))
+
+  (field ^:static ^:final ^HandshakeProducer eeNetworkProducer (SHAlpnProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer eeOnLoadConsumer (SHAlpnConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence eeOnLoadAbsence (SHAlpnAbsence.))
+
+  (field ^:static ^:final ^SSLStringizer alpnStringizer (AlpnStringizer.))
+
+  (field ^:static ^:final ^Charset alpnCharset)
+
+  (static-initializer
+    (let [^:mutable alpnCharsetString (Security/getProperty "jdk.tls.alpnCharset")]
+      (when (or (nil? alpnCharsetString) (== (.length alpnCharsetString) 0))
+        (set! alpnCharsetString "ISO_8859_1"))
+      (set! alpnCharset (Charset/forName alpnCharsetString))))
+
+  (defclass ^:static ^:final AlpnSpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:final ^{:tag (List String)} applicationProtocols)
+
+    (constructor ^:private [this ^String/1 applicationProtocols]
+      (set! (.-applicationProtocols this) (List/of applicationProtocols)))
+
+    (constructor :throws [IOException] ^:private [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (when (< (.remaining buffer) 2)
+        (throw (.fatal
+                 (.-conContext hc)
+                 Alert/DECODE_ERROR
+                 (SSLProtocolException.
+                   (java-str
+                     "Invalid application_layer_protocol_negotiation: insufficient data (length="
+                     (.remaining buffer)
+                     ")")))))
+      (let [listLen (Record/getInt16 buffer)]
+        (when (or (< listLen 2) (not (== listLen (.remaining buffer))))
+          (throw
+            (.fatal
+              (.-conContext hc)
+              Alert/DECODE_ERROR
+              (SSLProtocolException.
+                (java-str
+                  "Invalid application_layer_protocol_negotiation: incorrect list length (length="
+                  listLen
+                  ")")))))
+        (let [^{:tag (List String)} protocolNames (LinkedList.)]
+          (while (.hasRemaining buffer)
+            (let [bytes (Record/getBytes8 buffer)]
+              (when (== (alength bytes) 0)
+                (throw
+                  (.fatal
+                    (.-conContext hc)
+                    Alert/DECODE_ERROR
+                    (SSLProtocolException.
+                      "Invalid application_layer_protocol_negotiation extension: empty application protocol name"))))
+              (let [appProtocol (String. bytes alpnCharset)] (.add protocolNames appProtocol))))
+          (set! (.-applicationProtocols this) (Collections/unmodifiableList protocolNames)))))
+
+    (method ^:public toString ^String [this]
+      (.toString applicationProtocols)))
+
+  (defclass ^:private ^:static ^:final AlpnStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (try (.toString (AlpnSpec. hc buffer)) (catch IOException ioe (.getMessage ioe)))))
+
+  (defclass ^:private ^:static ^:final CHAlpnProducer
+    :implements [HandshakeProducer]
+
+    (field ^:static ^:final ^int MAX_AP_LENGTH 255)
+
+    (field ^:static ^:final ^int MAX_AP_LIST_LENGTH 65535)
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig chc) SSLExtension/CH_ALPN))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/info
+                  (java-str "Ignore client unavailable extension: " (.-name SSLExtension/CH_ALPN))))
+              (set! (.-applicationProtocol chc) "")
+              (set! (.-applicationProtocol (.-conContext chc)) "")
+              nil)
+            (let [laps (.-applicationProtocols (.-sslConfig chc))]
+              (if (or (nil? laps) (== (alength laps) 0))
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/info "No available application protocols"))
+                    nil)
+                  (let [^:mutable ^int listLength 0]
+                    (for-each [^String ap laps]
+                      (let [length (alength (.getBytes ap alpnCharset))]
+                        (when (== length 0)
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/severe "Application protocol name cannot be empty"))
+                          (throw (.fatal (.-conContext chc)
+                                         Alert/ILLEGAL_PARAMETER
+                                         "Application protocol name cannot be empty")))
+                        (if (<= length MAX_AP_LENGTH)
+                            (set! listLength
+                                  (unchecked-add-int listLength (unchecked-add-int length 1)))
+                            (do
+                              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                                (SSLLogger/severe
+                                  (java-str "Application protocol name ("
+                                            ap
+                                            ") exceeds the size limit ("
+                                            MAX_AP_LENGTH
+                                            " bytes)")))
+                              (throw (.fatal (.-conContext chc)
+                                             Alert/ILLEGAL_PARAMETER
+                                             (java-str
+                                               "Application protocol name ("
+                                               ap
+                                               ") exceeds the size limit ("
+                                               MAX_AP_LENGTH
+                                               " bytes)")))))
+                        (when (> listLength MAX_AP_LIST_LENGTH)
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/severe
+                              (java-str "The configured application protocols ("
+                                        (Arrays/toString laps)
+                                        ") exceed the size limit ("
+                                        MAX_AP_LIST_LENGTH
+                                        " bytes)")))
+                          (throw (.fatal (.-conContext chc)
+                                         Alert/ILLEGAL_PARAMETER
+                                         (java-str
+                                           "The configured application protocols ("
+                                           (Arrays/toString laps)
+                                           ") exceed the size limit ("
+                                           MAX_AP_LIST_LENGTH
+                                           " bytes)"))))))
+                    (let [extData (new byte/1 (unchecked-add-int listLength 2))
+                          m (ByteBuffer/wrap extData)]
+                      (Record/putInt16 m listLength)
+                      (for-each [^String ap laps] (Record/putBytes8 m (.getBytes ap alpnCharset)))
+                      (.put (.-handshakeExtensions chc)
+                            SSLExtension/CH_ALPN
+                            (AlpnSpec. (.-applicationProtocols (.-sslConfig chc))))
+                      extData))))))))
+
+  (defclass ^:private ^:static ^:final CHAlpnConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [shc (cast ServerHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig shc) SSLExtension/CH_ALPN))
+            (do
+              (set! (.-applicationProtocol shc) "")
+              (set! (.-applicationProtocol (.-conContext shc)) "")
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/info
+                  (java-str "Ignore server unavailable extension: " (.-name SSLExtension/CH_ALPN)))))
+            (let [^boolean noAPSelector (if (instance? SSLEngine (.-transport (.-conContext shc)))
+                                            (nil? (.-engineAPSelector (.-sslConfig shc)))
+                                            (nil? (.-socketAPSelector (.-sslConfig shc))))]
+              (let [noAlpnProtocols (or (nil? (.-applicationProtocols (.-sslConfig shc)))
+                                        (== (alength (.-applicationProtocols (.-sslConfig shc))) 0))]
+                (if (and noAPSelector noAlpnProtocols)
+                    (do
+                      (set! (.-applicationProtocol shc) "")
+                      (set! (.-applicationProtocol (.-conContext shc)) "")
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                        (SSLLogger/fine
+                          (java-str "Ignore server unenabled extension: "
+                                    (.-name SSLExtension/CH_ALPN)))))
+                    (let [spec (AlpnSpec. shc buffer)]
+                      (when noAPSelector
+                        (let [^{:tag (List String)} protocolNames (.-applicationProtocols spec)
+                              ^:mutable matched false]
+                          (for-each [^String ap (.-applicationProtocols (.-sslConfig shc))]
+                            (when (.contains protocolNames ap)
+                              (set! (.-applicationProtocol shc) ap)
+                              (set! (.-applicationProtocol (.-conContext shc)) ap)
+                              (set! matched true)
+                              (break)))
+                          (when-not matched
+                            (throw (.fatal (.-conContext shc)
+                                           Alert/NO_APPLICATION_PROTOCOL
+                                           "No matching application layer protocol values")))))
+                      (.put (.-handshakeExtensions shc) SSLExtension/CH_ALPN spec)))))))))
+
+  (defclass ^:private ^:static ^:final CHAlpnAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when (.-isQuic (.-sslConfig shc))
+          (throw (.fatal (.-conContext shc)
+                         Alert/NO_APPLICATION_PROTOCOL
+                         "Client did not offer application layer protocol")))
+        (set! (.-applicationProtocol shc) "")
+        (set! (.-applicationProtocol (.-conContext shc)) ""))))
+
+  (defclass ^:private ^:static ^:final SHAlpnProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            requestedAlps (cast AlpnSpec (.get (.-handshakeExtensions shc) SSLExtension/CH_ALPN))]
+        (if (nil? requestedAlps)
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine
+                  (java-str "Ignore unavailable extension: " (.-name SSLExtension/SH_ALPN))))
+              (set! (.-applicationProtocol shc) "")
+              (set! (.-applicationProtocol (.-conContext shc)) "")
+              nil)
+            (let [^{:tag (List String)} alps (.-applicationProtocols requestedAlps)]
+              (cond
+                (instance? SSLEngine (.-transport (.-conContext shc)))
+                  (when (some? (.-engineAPSelector (.-sslConfig shc)))
+                    (let [engine (cast SSLEngine (.-transport (.-conContext shc)))]
+                      (set! (.-applicationProtocol shc)
+                            (cast String
+                                  (.apply (.-engineAPSelector (.-sslConfig shc)) engine alps)))
+                      (when (or (nil? (.-applicationProtocol shc))
+                                (and (not (.isEmpty (.-applicationProtocol shc)))
+                                     (not (.contains alps (.-applicationProtocol shc)))))
+                        (throw (.fatal (.-conContext shc)
+                                       Alert/NO_APPLICATION_PROTOCOL
+                                       "No matching application layer protocol values")))))
+                (some? (.-socketAPSelector (.-sslConfig shc)))
+                  (let [socket (cast SSLSocket (.-transport (.-conContext shc)))]
+                    (set! (.-applicationProtocol shc)
+                          (cast String (.apply (.-socketAPSelector (.-sslConfig shc)) socket alps)))
+                    (when (or (nil? (.-applicationProtocol shc))
+                              (and (not (.isEmpty (.-applicationProtocol shc)))
+                                   (not (.contains alps (.-applicationProtocol shc)))))
+                      (throw (.fatal (.-conContext shc)
+                                     Alert/NO_APPLICATION_PROTOCOL
+                                     "No matching application layer protocol values")))))
+              (if (or (nil? (.-applicationProtocol shc)) (.isEmpty (.-applicationProtocol shc)))
+                  (do
+                    (set! (.-applicationProtocol shc) "")
+                    (set! (.-applicationProtocol (.-conContext shc)) "")
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/warning "Ignore, no negotiated application layer protocol"))
+                    nil)
+                  (let [bytes (.getBytes (.-applicationProtocol shc) alpnCharset)
+                        listLen (unchecked-add-int (alength bytes) 1)
+                        extData (new byte/1 (unchecked-add-int listLen 2))
+                        m (ByteBuffer/wrap extData)]
+                    (Record/putInt16 m listLen)
+                    (Record/putBytes8 m bytes)
+                    (set! (.-applicationProtocol (.-conContext shc)) (.-applicationProtocol shc))
+                    (.remove (.-handshakeExtensions shc) SSLExtension/CH_ALPN)
+                    extData)))))))
+
+  (defclass ^:private ^:static ^:final SHAlpnConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [chc (cast ClientHandshakeContext context)
+            requestedAlps (cast AlpnSpec (.get (.-handshakeExtensions chc) SSLExtension/CH_ALPN))]
+        (when (or (nil? requestedAlps) (.isEmpty (.-applicationProtocols requestedAlps)))
+          (throw (.fatal (.-conContext chc)
+                         Alert/UNEXPECTED_MESSAGE
+                         (java-str "Unexpected " (.-name SSLExtension/CH_ALPN) " extension"))))
+        (let [spec (AlpnSpec. chc buffer)]
+          (when-not (== (.size (.-applicationProtocols spec)) 1)
+            (throw
+              (.fatal
+                (.-conContext chc)
+                Alert/UNEXPECTED_MESSAGE
+                (java-str
+                  "Invalid "
+                  (.-name SSLExtension/CH_ALPN)
+                  " extension: Only one application protocol name is allowed in ServerHello message"))))
+          (when-not (.containsAll (.-applicationProtocols requestedAlps)
+                                  (.-applicationProtocols spec))
+            (throw
+              (.fatal
+                (.-conContext chc)
+                Alert/UNEXPECTED_MESSAGE
+                (java-str
+                  "Invalid "
+                  (.-name SSLExtension/CH_ALPN)
+                  " extension: Only client specified application protocol is allowed in ServerHello message"))))
+          (set! (.-applicationProtocol chc) (cast String (.get (.-applicationProtocols spec) 0)))
+          (set! (.-applicationProtocol (.-conContext chc)) (.-applicationProtocol chc))
+          (.remove (.-handshakeExtensions chc) SSLExtension/CH_ALPN)))))
+
+  (defclass ^:private ^:static ^:final SHAlpnAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (when (.-isQuic (.-sslConfig chc))
+          (throw (.fatal (.-conContext chc)
+                         Alert/NO_APPLICATION_PROTOCOL
+                         "Server did not offer application layer protocol")))
+        (set! (.-applicationProtocol chc) "")
+        (set! (.-applicationProtocol (.-conContext chc)) "")))))

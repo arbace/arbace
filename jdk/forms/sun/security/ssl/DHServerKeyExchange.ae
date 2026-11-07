@@ -1,0 +1,353 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/DHServerKeyExchange.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security CryptoPrimitive
+                        GeneralSecurityException
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        KeyFactory
+                        NoSuchAlgorithmException
+                        PrivateKey
+                        PublicKey
+                        Signature
+                        SignatureException)
+        '(java.text MessageFormat)
+        '(java.util EnumSet Locale Map$Entry)
+        '(javax.crypto.interfaces DHPublicKey)
+        '(javax.crypto.spec DHPublicKeySpec)
+        '(sun.security.util HexDumpEncoder KeyUtil))
+
+(defclass ^:final DHServerKeyExchange
+  (field ^:static ^:final ^SSLConsumer dhHandshakeConsumer (DHServerKeyExchangeConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer dhHandshakeProducer (DHServerKeyExchangeProducer.))
+
+  (defclass ^:private ^:static ^:final DHServerKeyExchangeMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:private ^:final ^byte/1 p)
+
+    (field ^:private ^:final ^byte/1 g)
+
+    (field ^:private ^:final ^byte/1 y)
+
+    (field ^:private ^:final ^boolean useExplicitSigAlgorithm)
+
+    (field ^:private ^:final ^SignatureScheme signatureScheme)
+
+    (field ^:private ^:final ^byte/1 paramsSignature)
+
+    (constructor :throws [IOException] [this ^HandshakeContext handshakeContext]
+      (super. handshakeContext)
+      (let [shc (cast ServerHandshakeContext handshakeContext)
+            ^:mutable ^DHKeyExchange$DHEPossession dhePossession nil
+            ^:mutable ^X509Authentication$X509Possession x509Possession nil]
+        (for-each [^SSLPossession possession (.-handshakePossessions shc)]
+          (if (instance? DHKeyExchange$DHEPossession possession)
+              (do
+                (set! dhePossession (cast DHKeyExchange$DHEPossession possession))
+                (when (some? x509Possession) (break)))
+              (when (instance? X509Authentication$X509Possession possession)
+                (set! x509Possession (cast X509Authentication$X509Possession possession))
+                (when (some? dhePossession) (break)))))
+        (when (nil? dhePossession)
+          (throw (.fatal (.-conContext shc)
+                         Alert/ILLEGAL_PARAMETER
+                         "No DHE credentials negotiated for server key exchange")))
+        (let [publicKey (.-publicKey dhePossession)
+              params (.getParams publicKey)]
+          (set! (.-p this) (Utilities/toByteArray (.getP params)))
+          (set! (.-g this) (Utilities/toByteArray (.getG params)))
+          (set! (.-y this) (Utilities/toByteArray (.getY publicKey)))
+          (if (nil? x509Possession)
+              (do
+                (set! paramsSignature nil)
+                (set! signatureScheme nil)
+                (set! useExplicitSigAlgorithm false))
+              (do
+                (set! useExplicitSigAlgorithm (.useTLS12PlusSpec (.-negotiatedProtocol shc)))
+                (let [^:mutable ^Signature signer nil]
+                  (if useExplicitSigAlgorithm
+                      (let [^{:tag (Map$Entry SignatureScheme Signature)} schemeAndSigner
+                              (SignatureScheme/getSignerOfPreferableAlgorithm
+                                (.-sslConfig shc)
+                                (.-algorithmConstraints shc)
+                                (.-peerRequestedSignatureSchemes shc)
+                                x509Possession
+                                (.-negotiatedProtocol shc))]
+                        (if (nil? schemeAndSigner)
+                            (throw (.fatal (.-conContext shc)
+                                           Alert/INTERNAL_ERROR
+                                           (java-str
+                                             "No supported signature algorithm for "
+                                             (.getAlgorithm (.-popPrivateKey x509Possession))
+                                             "  key")))
+                            (do
+                              (set! signatureScheme
+                                    (cast SignatureScheme (.getKey schemeAndSigner)))
+                              (set! signer (cast Signature (.getValue schemeAndSigner))))))
+                      (do
+                        (set! signatureScheme nil)
+                        (try
+                          (set! signer
+                                (DHServerKeyExchangeMessage/getSignature
+                                  (.getAlgorithm (.-popPrivateKey x509Possession))
+                                  (.-popPrivateKey x509Possession)))
+                          (catch [NoSuchAlgorithmException InvalidKeyException] e
+                            (throw (.fatal (.-conContext shc)
+                                           Alert/INTERNAL_ERROR
+                                           (java-str
+                                             "Unsupported signature algorithm: "
+                                             (.getAlgorithm (.-popPrivateKey x509Possession)))
+                                           e))))))
+                  (let [^:mutable ^byte/1 signature nil]
+                    (try
+                      (.updateSignature this
+                                        signer
+                                        (.-randomBytes (.-clientHelloRandom shc))
+                                        (.-randomBytes (.-serverHelloRandom shc)))
+                      (set! signature (.sign signer))
+                      (catch SignatureException ex
+                        (throw (.fatal (.-conContext shc)
+                                       Alert/INTERNAL_ERROR
+                                       (java-str
+                                         "Failed to sign dhe parameters: "
+                                         (.getAlgorithm (.-popPrivateKey x509Possession)))
+                                       ex))))
+                    (set! paramsSignature signature))))))))
+
+    (constructor :throws [IOException] [this ^HandshakeContext handshakeContext ^ByteBuffer m]
+      (super. handshakeContext)
+      (let [chc (cast ClientHandshakeContext handshakeContext)]
+        (set! (.-p this) (Record/getBytes16 m))
+        (set! (.-g this) (Record/getBytes16 m))
+        (set! (.-y this) (Record/getBytes16 m))
+        (try
+          (KeyUtil/validate
+            (DHPublicKeySpec. (BigInteger. 1 y) (BigInteger. 1 p) (BigInteger. 1 p)))
+          (catch InvalidKeyException ike
+            (throw (.fatal (.-conContext chc)
+                           Alert/HANDSHAKE_FAILURE
+                           "Invalid DH ServerKeyExchange: invalid parameters"
+                           ike))))
+        (let [^:mutable ^X509Authentication$X509Credentials x509Credentials nil]
+          (for-each [^SSLCredentials cd (.-handshakeCredentials chc)]
+            (when (instance? X509Authentication$X509Credentials cd)
+              (set! x509Credentials (cast X509Authentication$X509Credentials cd))
+              (break)))
+          (if (nil? x509Credentials)
+              (do
+                (when (.hasRemaining m)
+                  (throw (.fatal (.-conContext chc)
+                                 Alert/HANDSHAKE_FAILURE
+                                 "Invalid DH ServerKeyExchange: unknown extra data")))
+                (set! (.-signatureScheme this) nil)
+                (set! (.-paramsSignature this) nil)
+                (set! (.-useExplicitSigAlgorithm this) false))
+              (do
+                (set! (.-useExplicitSigAlgorithm this)
+                      (.useTLS12PlusSpec (.-negotiatedProtocol chc)))
+                (if useExplicitSigAlgorithm
+                    (let [ssid (Record/getInt16 m)]
+                      (set! signatureScheme (SignatureScheme/valueOf ssid))
+                      (when (nil? signatureScheme)
+                        (throw (.fatal (.-conContext chc)
+                                       Alert/HANDSHAKE_FAILURE
+                                       (java-str
+                                         "Invalid signature algorithm ("
+                                         ssid
+                                         ") used in DH ServerKeyExchange handshake message"))))
+                      (when-not (.contains (.-localSupportedSignAlgs chc) signatureScheme)
+                        (throw (.fatal (.-conContext chc)
+                                       Alert/HANDSHAKE_FAILURE
+                                       (java-str
+                                         "Unsupported signature algorithm ("
+                                         (.-name signatureScheme)
+                                         ") used in DH ServerKeyExchange handshake message")))))
+                    (set! (.-signatureScheme this) nil))
+                (set! (.-paramsSignature this) (Record/getBytes16 m))
+                (let [^:mutable ^Signature signer nil]
+                  (if useExplicitSigAlgorithm
+                      (try
+                        (set! signer
+                              (.getVerifier signatureScheme (.-popPublicKey x509Credentials)))
+                        (catch [NoSuchAlgorithmException
+                                InvalidKeyException
+                                InvalidAlgorithmParameterException] nsae
+                          (throw (.fatal (.-conContext chc)
+                                         Alert/INTERNAL_ERROR
+                                         (java-str
+                                           "Unsupported signature algorithm: "
+                                           (.-name signatureScheme))
+                                         nsae))))
+                      (try
+                        (set! signer
+                              (DHServerKeyExchangeMessage/getSignature
+                                (.getAlgorithm (.-popPublicKey x509Credentials))
+                                (.-popPublicKey x509Credentials)))
+                        (catch [NoSuchAlgorithmException InvalidKeyException] e
+                          (throw (.fatal (.-conContext chc)
+                                         Alert/INTERNAL_ERROR
+                                         (java-str
+                                           "Unsupported signature algorithm: "
+                                           (.getAlgorithm (.-popPublicKey x509Credentials)))
+                                         e)))))
+                  (try
+                    (.updateSignature this
+                                      signer
+                                      (.-randomBytes (.-clientHelloRandom chc))
+                                      (.-randomBytes (.-serverHelloRandom chc)))
+                    (when-not (.verify signer paramsSignature)
+                      (throw (.fatal (.-conContext chc)
+                                     Alert/HANDSHAKE_FAILURE
+                                     "Invalid signature on DH ServerKeyExchange message")))
+                    (catch SignatureException ex
+                      (throw (.fatal (.-conContext chc)
+                                     Alert/HANDSHAKE_FAILURE
+                                     "Cannot verify DH ServerKeyExchange signature"
+                                     ex))))))))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/SERVER_KEY_EXCHANGE)
+
+    (method ^:public messageLength ^int [this]
+      (let [^:mutable ^int sigLen 0]
+        (when (some? paramsSignature)
+          (set! sigLen (unchecked-add-int 2 (alength paramsSignature)))
+          (when useExplicitSigAlgorithm
+            (set! sigLen (unchecked-add-int sigLen (SignatureScheme/sizeInRecord)))))
+        (unchecked-add-int
+          (unchecked-add-int (unchecked-add-int (unchecked-add-int 6 (alength p)) (alength g))
+                             (alength y))
+          sigLen)))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (.putBytes16 hos p)
+      (.putBytes16 hos g)
+      (.putBytes16 hos y)
+      (when (some? paramsSignature)
+        (when useExplicitSigAlgorithm (.putInt16 hos (.-id signatureScheme)))
+        (.putBytes16 hos paramsSignature)))
+
+    (method ^:public toString ^String [this]
+      (if (nil? paramsSignature)
+          (let [messageFormat (MessageFormat.
+                                "\"DH ServerKeyExchange\": '{'\n  \"parameters\": '{'\n    \"dh_p\": '{'\n{0}\n    '}',\n    \"dh_g\": '{'\n{1}\n    '}',\n    \"dh_Ys\": '{'\n{2}\n    '}',\n  '}'\n'}'"
+                                Locale/ENGLISH)
+                hexEncoder (HexDumpEncoder.)
+                messageFields (new Object/1
+                                   [(Utilities/indent (.encodeBuffer hexEncoder p) "      ")
+                                    (Utilities/indent (.encodeBuffer hexEncoder g) "      ")
+                                    (Utilities/indent (.encodeBuffer hexEncoder y) "      ")])]
+            (.format messageFormat messageFields))
+          (let [^:mutable ^MessageFormat messageFormat nil
+                hexEncoder (HexDumpEncoder.)
+                ^:mutable ^Object/1 messageFields nil]
+            (if useExplicitSigAlgorithm
+                (do
+                  (set!
+                    messageFormat
+                    (MessageFormat.
+                      "\"DH ServerKeyExchange\": '{'\n  \"parameters\": '{'\n    \"dh_p\": '{'\n{0}\n    '}',\n    \"dh_g\": '{'\n{1}\n    '}',\n    \"dh_Ys\": '{'\n{2}\n    '}',\n  '}',\n  \"digital signature\":  '{'\n    \"signature algorithm\": \"{3}\"\n    \"signature\": '{'\n{4}\n    '}',\n  '}'\n'}'"
+                      Locale/ENGLISH))
+                  (set! messageFields
+                        (new
+                          Object/1
+                          [(Utilities/indent (.encodeBuffer hexEncoder p) "      ")
+                           (Utilities/indent (.encodeBuffer hexEncoder g) "      ")
+                           (Utilities/indent (.encodeBuffer hexEncoder y) "      ")
+                           (.-name signatureScheme)
+                           (Utilities/indent (.encodeBuffer hexEncoder paramsSignature) "      ")])))
+                (do
+                  (set!
+                    messageFormat
+                    (MessageFormat.
+                      "\"DH ServerKeyExchange\": '{'\n  \"parameters\": '{'\n    \"dh_p\": '{'\n{0}\n    '}',\n    \"dh_g\": '{'\n{1}\n    '}',\n    \"dh_Ys\": '{'\n{2}\n    '}',\n  '}',\n  \"signature\": '{'\n{3}\n  '}'\n'}'"
+                      Locale/ENGLISH))
+                  (set!
+                    messageFields
+                    (new Object/1
+                         [(Utilities/indent (.encodeBuffer hexEncoder p) "      ")
+                          (Utilities/indent (.encodeBuffer hexEncoder g) "      ")
+                          (Utilities/indent (.encodeBuffer hexEncoder y) "      ")
+                          (Utilities/indent (.encodeBuffer hexEncoder paramsSignature) "    ")]))))
+            (.format messageFormat messageFields))))
+
+    (method ^:private ^:static getSignature :throws [NoSuchAlgorithmException InvalidKeyException] ^Signature [^String keyAlgorithm
+                                                                                                               ^Key key]
+      (let [^:mutable ^Signature signer nil]
+        (switch keyAlgorithm
+          "DSA" (set! signer (Signature/getInstance JsseJce/SIGNATURE_DSA))
+          "RSA" (set! signer (RSASignature/getInstance))
+          (throw (NoSuchAlgorithmException.
+                   (java-str "neither an RSA or a DSA key : " keyAlgorithm))))
+        (if (instance? PublicKey key)
+            (.initVerify signer (cast PublicKey key))
+            (.initSign signer (cast PrivateKey key)))
+        signer))
+
+    (method ^:private updateSignature :throws [SignatureException] ^void [this ^Signature sig
+                                                                          ^byte/1 clntNonce
+                                                                          ^byte/1 svrNonce]
+      (.update sig clntNonce)
+      (.update sig svrNonce)
+      (.update sig (unchecked-byte (bit-shift-right-int (alength p) 8)))
+      (.update sig (unchecked-byte (bit-and-int (alength p) 0x0ff)))
+      (.update sig p)
+      (.update sig (unchecked-byte (bit-shift-right-int (alength g) 8)))
+      (.update sig (unchecked-byte (bit-and-int (alength g) 0x0ff)))
+      (.update sig g)
+      (.update sig (unchecked-byte (bit-shift-right-int (alength y) 8)))
+      (.update sig (unchecked-byte (bit-and-int (alength y) 0x0ff)))
+      (.update sig y)))
+
+  (defclass ^:static ^:final DHServerKeyExchangeProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            skem (DHServerKeyExchangeMessage. shc)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Produced DH ServerKeyExchange handshake message" skem))
+        (.write skem (.-handshakeOutput shc))
+        (.flush (.-handshakeOutput shc))
+        nil)))
+
+  (defclass ^:static ^:final DHServerKeyExchangeConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [chc (cast ClientHandshakeContext context)
+            skem (DHServerKeyExchangeMessage. chc message)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Consuming DH ServerKeyExchange handshake message" skem))
+        (let [^:mutable ^DHPublicKey publicKey nil]
+          (try
+            (let [kf (KeyFactory/getInstance "DiffieHellman")
+                  spec (DHPublicKeySpec. (BigInteger. 1 (.-y skem))
+                                         (BigInteger. 1 (.-p skem))
+                                         (BigInteger. 1 (.-g skem)))]
+              (set! publicKey (cast DHPublicKey (.generatePublic kf spec))))
+            (catch GeneralSecurityException gse
+              (throw (.fatal (.-conContext chc)
+                             Alert/INSUFFICIENT_SECURITY
+                             "Could not generate DHPublicKey"
+                             gse))))
+          (when-not (.permits (.-algorithmConstraints chc)
+                              (EnumSet/of CryptoPrimitive/KEY_AGREEMENT)
+                              publicKey)
+            (throw (.fatal (.-conContext chc)
+                           Alert/INSUFFICIENT_SECURITY
+                           "DH ServerKeyExchange does not comply to algorithm constraints")))
+          (let [namedGroup (NamedGroup/valueOf (.getParams publicKey))]
+            (.add (.-handshakeCredentials chc) (DHKeyExchange$DHECredentials. publicKey namedGroup))))))))

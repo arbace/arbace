@@ -1,0 +1,964 @@
+;; Converted from jdk26u src/java.logging/share/classes/java/util/logging/LogManager.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.util.logging)
+
+(import '(java.io FileInputStream IOException InputStream)
+        '(java.lang.ref ReferenceQueue WeakReference)
+        '(java.nio.file Paths)
+        '(java.util ArrayList
+                    Arrays
+                    Collections
+                    EnumSet
+                    Enumeration
+                    HashMap
+                    IdentityHashMap
+                    List
+                    Map
+                    Map$Entry
+                    Objects
+                    Optional
+                    Properties
+                    Set
+                    TreeMap
+                    TreeSet)
+        '(java.util.concurrent ConcurrentHashMap CopyOnWriteArrayList)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function BiFunction Consumer Function Predicate Supplier)
+        '(java.util.stream Collectors Stream)
+        '(jdk.internal.logger BootstrapLogger DefaultLoggerFinder)
+        '(sun.util.logging.internal LoggingProviderImpl LoggingProviderImpl$LogManagerAccess))
+
+(defclass ^:public LogManager
+  (field ^:private ^:volatile ^Properties props (Properties.))
+
+  (field ^:private ^:static ^:final ^Level defaultLevel Level/INFO)
+
+  (field ^:private ^:final ^LoggerContext systemContext (SystemLoggerContext.))
+
+  (field ^:private ^:final ^LoggerContext userContext (LoggerContext.))
+
+  (field ^:private ^:volatile ^Logger rootLogger)
+
+  (field ^:private ^:volatile ^boolean readPrimordialConfiguration)
+
+  (field ^:private ^:static ^:final ^int STATE_INITIALIZED 0)
+
+  (field ^:private ^:static ^:final ^int STATE_INITIALIZING 1)
+
+  (field ^:private ^:static ^:final ^int STATE_READING_CONFIG 2)
+
+  (field ^:private ^:static ^:final ^int STATE_UNINITIALIZED 3)
+
+  (field ^:private ^:static ^:final ^int STATE_SHUTDOWN 4)
+
+  (field ^:private ^:volatile ^int globalHandlersState)
+
+  (field ^:private ^:final ^ReentrantLock configurationLock (ReentrantLock.))
+
+  (defclass ^:private ^:static ^:final CloseOnReset
+    (field ^:private ^:final ^Logger logger)
+
+    (constructor ^:private [this ^Logger ref]
+      (set! (.-logger this) (cast Logger (Objects/requireNonNull ref))))
+
+    (method ^:public equals ^boolean [this other]
+      (and (instance? CloseOnReset other) (identical? (.-logger (cast CloseOnReset other)) logger)))
+
+    (method ^:public hashCode ^int [this] (System/identityHashCode logger))
+
+    (method ^:public get ^Logger [this] logger)
+
+    (method ^:public ^:static create ^CloseOnReset [^Logger logger]
+      (CloseOnReset. logger)))
+
+  (field ^:private ^:final ^{:tag (CopyOnWriteArrayList CloseOnReset)} closeOnResetLoggers
+    (CopyOnWriteArrayList.))
+
+  (field ^:private ^:final ^{:tag (Map Object Runnable)} listeners
+    (Collections/synchronizedMap (IdentityHashMap.)))
+
+  (field ^:private ^:static ^:final ^LogManager manager (LogManager/initLogManager))
+
+  (method ^:private ^:static initLogManager ^LogManager []
+    (let [^:mutable ^LogManager mgr nil
+          ^:mutable ^String cname nil]
+      (try
+        (set! cname (System/getProperty "java.util.logging.manager"))
+        (when (some? cname)
+          (try
+            (let [tmp (.newInstance (.loadClass (ClassLoader/getSystemClassLoader) cname))]
+              (set! mgr (cast LogManager tmp)))
+            (catch ClassNotFoundException ex
+              (let [tmp (.newInstance (.loadClass
+                                        (.getContextClassLoader (Thread/currentThread))
+                                        cname))]
+                (set! mgr (cast LogManager tmp))))))
+        (catch Exception ex
+          (.println System/err (java-str "Could not load Logmanager \"" cname "\""))
+          (.printStackTrace ex)))
+      (when (nil? mgr) (set! mgr (LogManager.)))
+      mgr))
+
+  (defclass ^:private Cleaner
+    :extends Thread
+
+    (constructor ^:private [this]
+      (super. nil nil "Logging-Cleaner" 0 false)
+      (.setContextClassLoader this nil))
+
+    (method ^:public run ^void [this]
+      (let [mgr manager]
+        (.lock configurationLock)
+        (set! globalHandlersState STATE_SHUTDOWN)
+        (.unlock configurationLock)
+        (.reset LogManager/this))))
+
+  (constructor ^:protected [this]
+    (try (.addShutdownHook (Runtime/getRuntime) (Cleaner.)) (catch IllegalStateException e)))
+
+  (field ^:private ^boolean initializedCalled false)
+
+  (field ^:private ^:volatile ^boolean initializationDone false)
+
+  (method ^:final ensureLogManagerInitialized ^void [this]
+    (let [owner this]
+      (when-not (or initializationDone (not (identical? owner manager)))
+        (.lock configurationLock)
+        (try
+          (let [isRecursiveInitialization (= initializedCalled true)]
+            (java-assert (or initializedCalled (not initializationDone))
+              "Initialization can't be done if initialized has not been called!")
+            (when-not (or isRecursiveInitialization initializationDone)
+              (set! initializedCalled true)
+              (try
+                (java-assert (nil? rootLogger))
+                (java-assert (and initializedCalled (not initializationDone)))
+                (let [root (set! (.-rootLogger owner) (.new owner RootLogger))]
+                  (.readPrimordialConfiguration owner)
+                  (.addLogger owner root)
+                  (when-not (.isLevelInitialized root) (.setLevel root defaultLevel))
+                  (let [global Logger/global] (.addLogger owner global)))
+                (finally (set! initializationDone true)))))
+          (finally (.unlock configurationLock))))))
+
+  (method ^:public ^:static getLogManager ^LogManager []
+    (when (some? manager) (.ensureLogManagerInitialized manager))
+    manager)
+
+  (method ^:private readPrimordialConfiguration ^void [this]
+    (when-not readPrimordialConfiguration
+      (when (some? System/out)
+        (set! readPrimordialConfiguration true)
+        (try
+          (.readConfiguration this)
+          (BootstrapLogger/redirectTemporaryLoggers)
+          (catch Exception ex
+            (java-assert false
+              (java-str "Exception raised while reading logging configuration: " ex)))))))
+
+  (method ^:private getUserContext ^LoggerContext [this] userContext)
+
+  (method ^:final getSystemContext ^LoggerContext [this] systemContext)
+
+  (method ^:private contexts ^{:tag (List LoggerContext)} [this]
+    (let [^{:tag (List LoggerContext)} cxs (ArrayList.)]
+      (.add cxs (.getSystemContext this))
+      (.add cxs (.getUserContext this))
+      cxs))
+
+  (method demandLogger ^Logger [this ^String name ^String resourceBundleName
+                                ^{:tag (Class ?)} caller]
+    (let [^Module module (when (some? caller) (.getModule caller))]
+      (.demandLogger this name resourceBundleName module)))
+
+  (method demandLogger ^Logger [this ^String name ^String resourceBundleName ^Module module]
+    (let [^:mutable result (.getLogger this name)]
+      (when (nil? result)
+        (let [newLogger (Logger. name resourceBundleName module this false)]
+          (loop []
+            (when (.addLogger this newLogger) (return newLogger))
+            (set! result (.getLogger this name))
+            (when (nil? result) (recur)))))
+      result))
+
+  (method demandSystemLogger ^Logger [this ^String name ^String resourceBundleName
+                                      ^{:tag (Class ?)} caller]
+    (let [^Module module (when (some? caller) (.getModule caller))]
+      (.demandSystemLogger this name resourceBundleName module)))
+
+  (method demandSystemLogger ^Logger [this ^String name ^String resourceBundleName ^Module module]
+    (let [sysLogger (.demandLogger (.getSystemContext this) name resourceBundleName module)
+          ^:mutable ^Logger logger nil]
+      (loop []
+        (if (.addLogger this sysLogger)
+            (set! logger sysLogger)
+            (set! logger (.getLogger this name)))
+        (when (nil? logger) (recur)))
+      (when-not (identical? logger sysLogger) (.mergeWithSystemLogger logger sysLogger))
+      sysLogger))
+
+  (defclass LoggerContext
+    (field ^:private ^:final ^{:tag (ConcurrentHashMap String LoggerWeakRef)} namedLoggers
+      (ConcurrentHashMap.))
+
+    (field ^:private ^:final ^LogNode root)
+
+    (constructor ^:private [this] (set! (.-root this) (LogNode. nil this)))
+
+    (method ^:final requiresDefaultLoggers ^boolean [this]
+      (let [requiresDefaultLoggers (identical? (.getOwner this) manager)]
+        (when requiresDefaultLoggers (.ensureLogManagerInitialized (.getOwner this)))
+        requiresDefaultLoggers))
+
+    (method ^:final getOwner ^LogManager [this] LogManager/this)
+
+    (method ^:final getRootLogger ^Logger [this]
+      (.-rootLogger (.getOwner this)))
+
+    (method ^:final getGlobalLogger ^Logger [this]
+      (let [global Logger/global] global))
+
+    (method demandLogger ^Logger [this ^String name ^String resourceBundleName ^Module module]
+      (let [owner (.getOwner this)] (.demandLogger owner name resourceBundleName module)))
+
+    (method ^:private ensureInitialized ^void [this]
+      (when (.requiresDefaultLoggers this)
+        (.ensureDefaultLogger this (.getRootLogger this))
+        (.ensureDefaultLogger this (.getGlobalLogger this))))
+
+    (method findLogger ^Logger [this ^String name]
+      (let [^:mutable ref (cast LoggerWeakRef (.get namedLoggers name))
+            ^:mutable ^Logger logger (when (some? ref) (cast Logger (.get ref)))]
+        (if (or (some? logger)
+                (and (and (nil? ref) (not (.isEmpty name)))
+                     (not (.equals name Logger/GLOBAL_LOGGER_NAME))))
+            logger
+            (locking this
+              (.ensureInitialized this)
+              (set! ref (cast LoggerWeakRef (.get namedLoggers name)))
+              (when (some? ref)
+                (set! logger (cast Logger (.get ref)))
+                (when (nil? logger) (.dispose ref))
+                logger)))))
+
+    (method ^:private ensureAllDefaultLoggers ^void [this ^Logger logger]
+      (when (.requiresDefaultLoggers this)
+        (let [name (.getName logger)]
+          (when-not (.isEmpty name)
+            (.ensureDefaultLogger this (.getRootLogger this))
+            (when-not (.equals Logger/GLOBAL_LOGGER_NAME name)
+              (.ensureDefaultLogger this (.getGlobalLogger this)))))))
+
+    (method ^:private ensureDefaultLogger ^void [this ^Logger logger]
+      (if (or (or (not (.requiresDefaultLoggers this)) (nil? logger))
+              (and (not (identical? logger (.getGlobalLogger this)))
+                   (not (identical? logger (.-rootLogger LogManager/this)))))
+          (java-assert (nil? logger))
+          (when-not (.containsKey namedLoggers (.getName logger))
+            (.addLocalLogger this logger false))))
+
+    (method addLocalLogger ^boolean [this ^Logger logger]
+      (.addLocalLogger this logger (.requiresDefaultLoggers this)))
+
+    (method ^:synchronized addLocalLogger ^boolean [this ^Logger logger
+                                                    ^boolean addDefaultLoggersIfNeeded]
+      (when addDefaultLoggersIfNeeded (.ensureAllDefaultLoggers this logger))
+      (let [name (.getName logger)]
+        (when (nil? name) (throw (NullPointerException.)))
+        (let [^:mutable ref (cast LoggerWeakRef (.get namedLoggers name))]
+          (when (some? ref) (if (.refersTo ref nil) (.dispose ref) (return false)))
+          (let [owner (.getOwner this)]
+            (.setLogManager logger owner)
+            (set! ref (.new owner LoggerWeakRef logger))
+            (let [level (.getLevelProperty owner (java-str name ".level") nil)]
+              (when (and (some? level) (not (.isLevelInitialized logger))) (.setLevel logger level))
+              (.processParentHandlers this logger name VisitedLoggers/NEVER)
+              (let [node (.getNode this name)]
+                (set! (.-loggerRef node) ref)
+                (let [^:mutable ^Logger parent nil
+                      ^:mutable nodep (.-parent node)]
+                  (while (some? nodep)
+                    (let [nodeRef (.-loggerRef nodep)]
+                      (when (some? nodeRef)
+                        (set! parent (cast Logger (.get nodeRef)))
+                        (when (some? parent) (break)))
+                      (set! nodep (.-parent nodep))))
+                  (when (some? parent) (.setParent logger parent))
+                  (.walkAndSetParent node logger)
+                  (.setNode ref node)
+                  (.put namedLoggers name ref)
+                  true)))))))
+
+    (method removeLoggerRef ^void [this ^String name ^LoggerWeakRef ref]
+      (.remove namedLoggers name ref))
+
+    (method ^:synchronized getLoggerNames ^{:tag (Enumeration String)} [this]
+      (.ensureInitialized this)
+      (Collections/enumeration (.keySet namedLoggers)))
+
+    (method ^:private processParentHandlers ^void [this ^:final ^Logger logger ^:final ^String name
+                                                   ^{:tag (Predicate Logger)} visited]
+      (let [owner (.getOwner this)]
+        (when-not (identical? logger (.-rootLogger owner))
+          (let [useParent (.getBooleanProperty owner (java-str name ".useParentHandlers") true)]
+            (when-not useParent (.setUseParentHandlers logger false))))
+        (let [^:mutable ^int ix 1]
+          (while true
+            (let [ix2 (.indexOf name \. ix)]
+              (when (< ix2 0) (break))
+              (let [pname (.substring name 0 ix2)]
+                (when (or (some? (.getProperty owner (java-str pname ".level")))
+                          (some? (.getProperty owner (java-str pname ".handlers"))))
+                  (when (.test visited (.demandLogger this pname nil nil)) (break)))
+                (set! ix (unchecked-add-int ix2 1))))))))
+
+    (method getNode ^LogNode [this ^:mutable ^String name]
+      (if (or (nil? name) (.isEmpty name))
+          root
+          (let [^:mutable node root]
+            (while (not (.isEmpty name))
+              (let [ix (.indexOf name \.)
+                    ^:mutable ^String head nil]
+                (if (> ix 0)
+                    (do
+                      (set! head (.substring name 0 ix))
+                      (set! name (.substring name (unchecked-add-int ix 1))))
+                    (do (set! head name) (set! name "")))
+                (when (nil? (.-children node)) (set! (.-children node) (HashMap.)))
+                (let [^:mutable child (cast LogNode (.get (.-children node) head))]
+                  (when (nil? child)
+                    (set! child (LogNode. node this))
+                    (.put (.-children node) head child))
+                  (set! node child))))
+            node))))
+
+  (defclass ^:final SystemLoggerContext
+    :extends LoggerContext
+
+    (method demandLogger ^Logger [this ^String name ^String resourceBundleName ^Module module]
+      (let [^:mutable result (.findLogger this name)]
+        (when (nil? result)
+          (let [newLogger (Logger. name resourceBundleName module (.getOwner this) true)]
+            (loop []
+              (if (.addLocalLogger this newLogger)
+                  (set! result newLogger)
+                  (set! result (.findLogger this name)))
+              (when (nil? result) (recur)))))
+        result)))
+
+  (method ^:private loadLoggerHandlers ^void [this ^:final ^Logger logger ^:final ^String name
+                                              ^:final ^String handlersPropertyName]
+    (.setLoggerHandlers this
+                        logger
+                        name
+                        handlersPropertyName
+                        (.createLoggerHandlers this name handlersPropertyName)))
+
+  (method ^:private setLoggerHandlers ^void [this ^:final ^Logger logger ^:final ^String name
+                                             ^:final ^String handlersPropertyName
+                                             ^{:tag (List Handler)} handlers]
+    (let [ensureCloseOnReset (and (not (.isEmpty handlers))
+                                  (.getBooleanProperty
+                                    this
+                                    (java-str handlersPropertyName ".ensureCloseOnReset")
+                                    true))
+          ^:mutable ^int count 0]
+      (for-each [^Handler hdl handlers]
+        (.addHandler logger hdl)
+        (when (and (== (set! count (unchecked-inc-int count)) 1) ensureCloseOnReset)
+          (.addIfAbsent closeOnResetLoggers (CloseOnReset/create logger))))))
+
+  (method ^:private createLoggerHandlers ^{:tag (List Handler)} [this ^:final ^String name
+                                                                 ^:final ^String handlersPropertyName]
+    (let [names (.parseClassNames this handlersPropertyName)
+          ^{:tag (List Handler)} handlers (ArrayList. (alength names))]
+      (for-each [^String type names]
+        (try
+          (let [o (.newInstance (.loadClass (ClassLoader/getSystemClassLoader) type))
+                hdl (cast Handler o)
+                levs (.getProperty this (java-str type ".level"))]
+            (when (some? levs)
+              (let [l (Level/findLevel levs)]
+                (if (some? l)
+                    (.setLevel hdl l)
+                    (.println System/err (java-str "Can't set level for " type)))))
+            (.add handlers hdl))
+          (catch Exception ex
+            (.println System/err (java-str "Can't load log handler \"" type "\""))
+            (.println System/err (java-str "" ex))
+            (.printStackTrace ex))))
+      handlers))
+
+  (field ^:private ^:final ^{:tag (ReferenceQueue Logger)} loggerRefQueue (ReferenceQueue.))
+
+  (defclass ^:final LoggerWeakRef
+    :extends (WeakReference Logger)
+
+    (field ^:private ^String name)
+
+    (field ^:private ^LogNode node)
+
+    (field ^:private ^{:tag (WeakReference Logger)} parentRef)
+
+    (field ^:private ^boolean disposed false)
+
+    (constructor [this ^Logger logger]
+      (super. logger loggerRefQueue)
+      (set! name (.getName logger)))
+
+    (method dispose ^void [this]
+      (locking this (when disposed (return)) (set! disposed true))
+      (let [n node]
+        (when (some? n)
+          (locking (.-context n)
+            (.removeLoggerRef (.-context n) name this)
+            (set! name nil)
+            (when (identical? (.-loggerRef n) this) (set! (.-loggerRef n) nil))
+            (set! node nil)))
+        (when (some? parentRef)
+          (let [parent (cast Logger (.get parentRef))]
+            (when (some? parent) (.removeChildLogger parent this))
+            (set! parentRef nil)))))
+
+    (method setNode ^void [this ^LogNode node] (set! (.-node this) node))
+
+    (method setParentRef ^void [this ^{:tag (WeakReference Logger)} parentRef]
+      (set! (.-parentRef this) parentRef)))
+
+  (field ^:private ^:static ^:final ^int MAX_ITERATIONS 400)
+
+  (method ^:final drainLoggerRefQueueBounded ^void [this]
+    (loop [^int i 0]
+      (when (< i MAX_ITERATIONS)
+        (when (some? loggerRefQueue)
+          (let [ref (cast LoggerWeakRef (.poll loggerRefQueue))]
+            (when (some? ref) (.dispose ref) (recur (unchecked-inc-int i))))))))
+
+  (method ^:public addLogger ^boolean [this ^Logger logger]
+    (let [name (.getName logger)]
+      (when (nil? name) (throw (NullPointerException.)))
+      (.drainLoggerRefQueueBounded this)
+      (let [cx (.getUserContext this)]
+        (if (or (.addLocalLogger cx logger) (.forceLoadHandlers this logger))
+            (do (.loadLoggerHandlers this logger name (java-str name ".handlers")) true)
+            false))))
+
+  (method ^:private forceLoadHandlers ^boolean [this ^Logger logger]
+    (and (and (and (or (identical? logger rootLogger) (identical? logger Logger/global))
+                   (not initializationDone))
+              initializedCalled)
+         (.isHeldByCurrentThread configurationLock)))
+
+  (method ^:public getLogger ^Logger [this ^String name]
+    (.findLogger (.getUserContext this) name))
+
+  (method ^:public getLoggerNames ^{:tag (Enumeration String)} [this]
+    (.getLoggerNames (.getUserContext this)))
+
+  (method ^:public readConfiguration :throws [IOException] ^void [this]
+    (let [cname (System/getProperty "java.util.logging.config.class")]
+      (when (some? cname)
+        (try
+          (try
+            (let [^{:tag (Class ?)} clz (.loadClass (ClassLoader/getSystemClassLoader) cname)
+                  witness (.newInstance clz)]
+              (return))
+            (catch ClassNotFoundException ex
+              (let [^{:tag (Class ?)} clz (.loadClass
+                                            (.getContextClassLoader (Thread/currentThread))
+                                            cname)
+                    witness (.newInstance clz)]
+                (return))))
+          (catch Exception ex
+            (.println System/err (java-str "Logging configuration class \"" cname "\" failed"))
+            (.println System/err (java-str "" ex)))))
+      (let [fname (.getConfigurationFileName this)]
+        (with-resources [^InputStream in (FileInputStream. fname)] (.readConfiguration this in)))))
+
+  (method getConfigurationFileName ^String [this]
+    (let [^:mutable fname (System/getProperty "java.util.logging.config.file")]
+      (when (nil? fname)
+        (set! fname (System/getProperty "java.home"))
+        (when (nil? fname) (throw (Error. "Can't find java.home ??")))
+        (set! fname
+              (.toString (.normalize (.toAbsolutePath
+                                       (Paths/get
+                                         fname
+                                         (new String/1 ["conf" "logging.properties"])))))))
+      fname))
+
+  (method ^:public reset ^void [this]
+    (let [^:mutable ^{:tag (List CloseOnReset)} persistent nil]
+      (.lock configurationLock)
+      (try
+        (set! props (Properties.))
+        (set! persistent (ArrayList. closeOnResetLoggers))
+        (.clear closeOnResetLoggers)
+        (when (and (not (== globalHandlersState STATE_SHUTDOWN))
+                   (not (== globalHandlersState STATE_READING_CONFIG)))
+          (set! globalHandlersState STATE_INITIALIZED))
+        (for-each [^LoggerContext cx (.contexts this)] (.resetLoggerContext this cx))
+        (.clear persistent)
+        (finally (.unlock configurationLock)))))
+
+  (method ^:private resetLoggerContext ^void [this ^LoggerContext cx]
+    (let [^{:tag (Enumeration String)} enum_ (.getLoggerNames cx)]
+      (while (.hasMoreElements enum_)
+        (let [name (cast String (.nextElement enum_))
+              logger (.findLogger cx name)]
+          (when (some? logger) (.resetLogger this logger))))))
+
+  (method ^:private closeHandlers ^void [this ^Logger logger]
+    (let [targets (.getHandlers logger)]
+      (for-each [^Handler h targets]
+        (.removeHandler logger h)
+        (try
+          (.close h)
+          (catch Exception ex)
+          (catch Error e (when-not (== globalHandlersState STATE_SHUTDOWN) (throw e)))))))
+
+  (method ^:private resetLogger ^void [this ^Logger logger]
+    (.closeHandlers this logger)
+    (let [name (.getName logger)]
+      (if (and (some? name) (.isEmpty name)) (.setLevel logger defaultLevel) (.setLevel logger nil))))
+
+  (method ^:private parseClassNames ^String/1 [this ^String propertyName]
+    (let [^:mutable hands (.getProperty this propertyName)]
+      (if (nil? hands)
+          (new String/1 0)
+          (do
+            (set! hands (.trim hands))
+            (let [^:mutable ^int ix 0
+                  ^{:tag (List String)} result (ArrayList.)]
+              (while (< ix (.length hands))
+                (let [^:mutable end ix]
+                  (while (< end (.length hands))
+                    (when (Character/isWhitespace (.charAt hands end)) (break))
+                    (when (== (.charAt hands end) \,) (break))
+                    (set! end (unchecked-inc-int end)))
+                  (let [^:mutable word (.substring hands ix end)]
+                    (set! ix (unchecked-add-int end 1))
+                    (set! word (.trim word))
+                    (when-not (.isEmpty word) (.add result word)))))
+              (cast String/1 (.toArray result (new String/1 (.size result)))))))))
+
+  (method ^:public readConfiguration :throws [IOException] ^void [this ^InputStream ins]
+    (.lock configurationLock)
+    (try
+      (when (== globalHandlersState STATE_SHUTDOWN) (return))
+      (set! globalHandlersState STATE_READING_CONFIG)
+      (try
+        (.reset this)
+        (try
+          (.load props ins)
+          (catch IllegalArgumentException x (throw (IOException. (.getMessage x) x))))
+        (let [names (.parseClassNames this "config")]
+          (for-each [^String word names]
+            (try
+              (let [^{:tag (Class ?)} clz (.loadClass (ClassLoader/getSystemClassLoader) word)
+                    witness (.newInstance clz)]
+                nil)
+              (catch Exception ex
+                (.println System/err (java-str "Can't load config class \"" word "\""))
+                (.println System/err (java-str "" ex)))))
+          (.setLevelsOnExistingLoggers this)
+          (set! globalHandlersState STATE_UNINITIALIZED))
+        (catch Throwable t (set! globalHandlersState STATE_INITIALIZED) (throw t)))
+      (finally (.unlock configurationLock)))
+    (.invokeConfigurationListeners this))
+
+  (defclass ^:static ^:enum ConfigProperty
+    (constants (LEVEL [".level"]) (HANDLERS [".handlers"]) (USEPARENT [".useParentHandlers"]))
+
+    (field ^:final ^String suffix)
+
+    (field ^:final ^int length)
+
+    (constructor ^:private [this ^String suffix]
+      (set! (.-suffix this) (cast String (Objects/requireNonNull suffix)))
+      (set! length (.length suffix)))
+
+    (method ^:public handleKey ^boolean [this ^String key]
+      (cond
+        (and (identical? this HANDLERS) (.equals (.substring suffix 1) key)) true
+        (and (identical? this HANDLERS) (.equals suffix key)) false
+        :else (.endsWith key suffix)))
+
+    (method key ^String [this ^String loggerName]
+      (if (and (identical? this HANDLERS) (or (nil? loggerName) (.isEmpty loggerName)))
+          (.substring suffix 1)
+          (java-str loggerName suffix)))
+
+    (method loggerName ^String [this ^String key]
+      (java-assert (or (and (.equals key (.substring suffix 1)) (identical? this HANDLERS))
+                       (.endsWith key suffix)))
+      (if (and (identical? this HANDLERS) (.equals (.substring suffix 1) key))
+          ""
+          (.substring key 0 (unchecked-subtract-int (.length key) length))))
+
+    (method ^:static getLoggerName ^String [^String property]
+      (for-each [^ConfigProperty p ConfigProperty/ALL]
+        (when (.handleKey p property) (return (.loggerName p property))))
+      nil)
+
+    (method ^:static find ^{:tag (Optional ConfigProperty)} [^String property]
+      (.findFirst (.filter (.stream ConfigProperty/ALL)
+                           (lambda Predicate ^boolean [^ConfigProperty p] (.handleKey p property)))))
+
+    (method ^:static matches ^boolean [^String property]
+      (.isPresent (ConfigProperty/find property)))
+
+    (method ^:static needsUpdating ^boolean [^String k ^Properties previous ^Properties next]
+      (let [p (LogManager/trim (.getProperty previous k nil))
+            n (LogManager/trim (.getProperty next k nil))]
+        (not (Objects/equals p n))))
+
+    (method ^:static merge ^void [^String k ^Properties previous ^Properties next
+                                  ^{:tag (BiFunction String String String)} mappingFunction]
+      (let [p (LogManager/trim (.getProperty previous k nil))
+            n (LogManager/trim (.getProperty next k nil))
+            mapped (LogManager/trim (cast String (.apply mappingFunction p n)))]
+        (when-not (Objects/equals n mapped)
+          (if (nil? mapped) (.remove next k) (.setProperty next k mapped)))))
+
+    (field ^:private ^:static ^:final ^{:tag (EnumSet ConfigProperty)} ALL
+      (EnumSet/allOf ConfigProperty)))
+
+  (method ^:private ^:static trim ^String [^String value]
+    (when (some? value) (.trim value)))
+
+  (defclass ^:static ^:final VisitedLoggers
+    :implements [(Predicate Logger)]
+
+    (field ^:final ^{:tag (IdentityHashMap Logger Boolean)} visited)
+
+    (constructor ^:private [this ^{:tag (IdentityHashMap Logger Boolean)} visited]
+      (set! (.-visited this) visited))
+
+    (constructor [this] (this. (IdentityHashMap.)))
+
+    (method ^:public test ^boolean [this ^Logger logger]
+      (and (some? visited) (some? (.put visited logger Boolean/TRUE))))
+
+    (method ^:public clear ^void [this]
+      (when (some? visited) (.clear visited)))
+
+    (field ^:static ^:final ^VisitedLoggers NEVER (VisitedLoggers. nil)))
+
+  (defclass ^:static ^:enum ModType
+    (constants SAME ADDED CHANGED REMOVED)
+
+    (method ^:static of ^ModType [^String previous ^String next]
+      (cond
+        (and (nil? previous) (some? next)) ADDED
+        (and (nil? next) (some? previous)) REMOVED
+        (not (Objects/equals (LogManager/trim previous) (LogManager/trim next))) CHANGED
+        :else SAME)))
+
+  (method ^:public updateConfiguration :throws [IOException] ^void [this
+                                                                    ^{:tag (Function String (BiFunction String String String))} mapper]
+    (.ensureLogManagerInitialized this)
+    (.drainLoggerRefQueueBounded this)
+    (let [fname (.getConfigurationFileName this)]
+      (with-resources [^InputStream in (FileInputStream. fname)]
+        (.updateConfiguration this in mapper))))
+
+  (method ^:public updateConfiguration :throws [IOException] ^void [this ^InputStream ins
+                                                                    ^{:tag (Function String (BiFunction String String String))} mapper]
+    (.ensureLogManagerInitialized this)
+    (.drainLoggerRefQueueBounded this)
+    (let [^:mutable ^Properties previous nil
+          ^:mutable ^{:tag (Set String)} updatePropertyNames nil
+          ^:mutable ^{:tag (List LoggerContext)} cxs (Collections/emptyList)
+          visited (VisitedLoggers.)
+          next (Properties.)]
+      (try
+        (.load next ins)
+        (catch IllegalArgumentException x (throw (IOException. (.getMessage x) x))))
+      (when-not (== globalHandlersState STATE_SHUTDOWN)
+        (.lock configurationLock)
+        (try
+          (when (== globalHandlersState STATE_SHUTDOWN) (return))
+          (set! previous props)
+          (set! updatePropertyNames
+                (cast Set
+                      (.collect (Stream/concat (.stream (.stringPropertyNames previous))
+                                               (.stream (.stringPropertyNames next)))
+                                (Collectors/toCollection
+                                  (method-ref Supplier ^TreeSet [] TreeSet/new)))))
+          (when (some? mapper)
+            (.forEachOrdered (.stream updatePropertyNames)
+                             (let [previous previous]
+                               (lambda Consumer ^void [^String k]
+                                 (ConfigProperty/merge
+                                   k
+                                   previous
+                                   next
+                                   (cast BiFunction
+                                         (Objects/requireNonNull
+                                           (cast BiFunction (.apply mapper k)))))))))
+          (set! props next)
+          (let [^{:tag (Stream String)} allKeys (.filter
+                                                  (.filter
+                                                    (.stream updatePropertyNames)
+                                                    (method-ref
+                                                      Predicate
+                                                      [String]
+                                                      ConfigProperty/matches))
+                                                  (let [previous previous]
+                                                    (lambda Predicate ^boolean [^String k]
+                                                      (ConfigProperty/needsUpdating k previous next))))
+                ^{:tag (Map String (TreeSet String))} loggerConfigs (cast
+                                                                      Map
+                                                                      (.collect
+                                                                        allKeys
+                                                                        (Collectors/groupingBy
+                                                                          (method-ref
+                                                                            Function
+                                                                            ^String [String]
+                                                                            ConfigProperty/getLoggerName)
+                                                                          (method-ref
+                                                                            Supplier
+                                                                            ^TreeMap []
+                                                                            TreeMap/new)
+                                                                          (Collectors/toCollection
+                                                                            (method-ref
+                                                                              Supplier
+                                                                              ^TreeSet []
+                                                                              TreeSet/new)))))]
+            (when-not (.isEmpty loggerConfigs) (set! cxs (.contexts this)))
+            (let [^{:tag (List Logger)} loggers (if (.isEmpty cxs)
+                                                    (Collections/emptyList)
+                                                    ^List (ArrayList. (.size cxs)))]
+              (for-each [^{:tag (Map$Entry String (TreeSet String))} e (.entrySet loggerConfigs)]
+                (let [name (cast String (.getKey e))
+                      ^{:tag (Set String)} properties (cast Set (.getValue e))]
+                  (.clear loggers)
+                  (for-each [^LoggerContext cx cxs]
+                    (let [l (.findLogger cx name)]
+                      (when (and (some? l) (not (.test visited l))) (.add loggers l))))
+                  (when-not (.isEmpty loggers)
+                    (for-each [^String pk properties]
+                      (let [cp (cast ConfigProperty (.get (ConfigProperty/find pk)))
+                            p (.getProperty previous pk nil)
+                            n (.getProperty next pk nil)
+                            mod (ModType/of p n)]
+                        (when-not (identical? mod ModType/SAME)
+                          (switch cp
+                            LEVEL
+                              (when-not (identical? mod ModType/REMOVED)
+                                (let [level (Level/findLevel (LogManager/trim n))]
+                                  (when (some? level)
+                                    (when (.isEmpty name) (.setLevel rootLogger level))
+                                    (for-each [^Logger l loggers]
+                                      (when (or (not (.isEmpty name))
+                                                (not (identical? l rootLogger)))
+                                        (.setLevel l level))))))
+                            USEPARENT
+                              (when-not (.isEmpty name)
+                                (let [useParent (.getBooleanProperty this pk true)]
+                                  (when (or (some? n) (some? p))
+                                    (for-each [^Logger l loggers]
+                                      (.setUseParentHandlers l useParent)))))
+                            HANDLERS
+                              (let [^:mutable ^{:tag (List Handler)} hdls nil]
+                                (when (.isEmpty name)
+                                  (set! globalHandlersState STATE_READING_CONFIG)
+                                  (try
+                                    (.closeHandlers this rootLogger)
+                                    (set! globalHandlersState STATE_UNINITIALIZED)
+                                    (catch Throwable t
+                                      (set! globalHandlersState STATE_INITIALIZED)
+                                      (throw t))))
+                                (for-each [^Logger l loggers]
+                                  (when-not (identical? l rootLogger)
+                                    (.closeHandlers this l)
+                                    (if (identical? mod ModType/REMOVED)
+                                        (.removeIf
+                                          closeOnResetLoggers
+                                          (lambda Predicate ^boolean [^CloseOnReset c]
+                                            (identical? (.-logger c) l)))
+                                        (do
+                                          (when (nil? hdls)
+                                            (set!
+                                              hdls
+                                              (if (.isEmpty name)
+                                                  (Arrays/asList (.getHandlers rootLogger))
+                                                  (.createLoggerHandlers this name pk))))
+                                          (.setLoggerHandlers this l name pk hdls))))))
+                            nil)))))))))
+          (finally (.unlock configurationLock) (.clear visited)))
+        (.drainLoggerRefQueueBounded this)
+        (for-each [^LoggerContext cx cxs]
+          (loop [^{:tag (Enumeration String)} names (.getLoggerNames cx)]
+            (when (.hasMoreElements names)
+              (let [name (cast String (.nextElement names))]
+                (if (.isEmpty name)
+                    (recur names)
+                    (let [l (.findLogger cx name)]
+                      (if (and (some? l) (not (.test visited l)))
+                          (do (.processParentHandlers cx l name visited) (recur names))
+                          (recur names))))))))
+        (.invokeConfigurationListeners this))))
+
+  (method ^:public getProperty ^String [this ^String name]
+    (.getProperty props name))
+
+  (method getStringProperty ^String [this ^String name ^String defaultValue]
+    (let [val (.getProperty this name)] (if (nil? val) defaultValue (.trim val))))
+
+  (method getIntProperty ^int [this ^String name ^int defaultValue]
+    (let [val (.getProperty this name)]
+      (if (nil? val)
+          defaultValue
+          (try (Integer/parseInt (.trim val)) (catch Exception ex defaultValue)))))
+
+  (method getLongProperty ^long [this ^String name ^long defaultValue]
+    (let [val (.getProperty this name)]
+      (if (nil? val)
+          defaultValue
+          (try (Long/parseLong (.trim val)) (catch Exception ex defaultValue)))))
+
+  (method getBooleanProperty ^boolean [this ^String name ^boolean defaultValue]
+    (let [^:mutable val (.getProperty this name)]
+      (if (nil? val)
+          defaultValue
+          (do
+            (set! val (.toLowerCase val))
+            (cond
+              (or (.equals val "true") (.equals val "1")) true
+              (or (.equals val "false") (.equals val "0")) false
+              :else defaultValue)))))
+
+  (method getLevelProperty ^Level [this ^String name ^Level defaultValue]
+    (let [val (.getProperty this name)]
+      (if (nil? val)
+          defaultValue
+          (let [l (Level/findLevel (.trim val))] (if (some? l) l defaultValue)))))
+
+  (method getFilterProperty ^Filter [this ^String name ^Filter defaultValue]
+    (let [val (.getProperty this name)]
+      (try
+        (when (some? val)
+          (let [o (.newInstance (.loadClass (ClassLoader/getSystemClassLoader) val))]
+            (return (cast Filter o))))
+        (catch Exception ex))
+      defaultValue))
+
+  (method getFormatterProperty ^Formatter [this ^String name ^Formatter defaultValue]
+    (let [val (.getProperty this name)]
+      (try
+        (when (some? val)
+          (let [o (.newInstance (.loadClass (ClassLoader/getSystemClassLoader) val))]
+            (return (cast Formatter o))))
+        (catch Exception ex))
+      defaultValue))
+
+  (method ^:private initializeGlobalHandlers ^void [this]
+    (let [state globalHandlersState]
+      (when-not (or (== state STATE_INITIALIZED) (== state STATE_SHUTDOWN))
+        (.lock configurationLock)
+        (try
+          (when-not (not (== globalHandlersState STATE_UNINITIALIZED))
+            (set! globalHandlersState STATE_INITIALIZING)
+            (try
+              (.loadLoggerHandlers this rootLogger nil "handlers")
+              (finally (set! globalHandlersState STATE_INITIALIZED))))
+          (finally (.unlock configurationLock))))))
+
+  (method ^:public ^{Deprecated {:since "17" :forRemoval true}} checkAccess ^void [this])
+
+  (defclass ^:private ^:static LogNode
+    (field ^{:tag (HashMap String LogNode)} children)
+
+    (field ^LoggerWeakRef loggerRef)
+
+    (field ^LogNode parent)
+
+    (field ^:final ^LoggerContext context)
+
+    (constructor [this ^LogNode parent ^LoggerContext context]
+      (set! (.-parent this) parent)
+      (set! (.-context this) context))
+
+    (method walkAndSetParent ^void [this ^Logger parent]
+      (when (some? children)
+        (for-each [^LogNode node (.values children)]
+          (let [ref (.-loggerRef node)
+                ^Logger logger (when (some? ref) (cast Logger (.get ref)))]
+            (if (nil? logger) (.walkAndSetParent node parent) (.setParent logger parent)))))))
+
+  (defclass ^:private ^:final RootLogger
+    :extends Logger
+
+    (constructor ^:private [this] (super. "" nil nil LogManager/this true))
+
+    (method ^:public log ^void [this ^LogRecord record]
+      (.initializeGlobalHandlers LogManager/this)
+      (.log super record))
+
+    (method ^:public addHandler ^void [this ^Handler h]
+      (.initializeGlobalHandlers LogManager/this)
+      (.addHandler super h))
+
+    (method ^:public removeHandler ^void [this ^Handler h]
+      (.initializeGlobalHandlers LogManager/this)
+      (.removeHandler super h))
+
+    (method accessCheckedHandlers ^Handler/1 [this]
+      (.initializeGlobalHandlers LogManager/this)
+      (.accessCheckedHandlers super)))
+
+  (method ^:private setLevelsOnExistingLoggers ^void [this]
+    (let [^{:tag (Enumeration ?)} enum_ (.propertyNames props)]
+      (while (.hasMoreElements enum_)
+        (let [key (cast String (.nextElement enum_))]
+          (when-not (not (.endsWith key ".level"))
+            (let [ix (unchecked-subtract-int (.length key) 6)
+                  name (.substring key 0 ix)
+                  level (.getLevelProperty this key nil)]
+              (if (nil? level)
+                  (.println System/err (java-str "Bad level value for property: " key))
+                  (for-each [^LoggerContext cx (.contexts this)]
+                    (let [l (.findLogger cx name)] (when (some? l) (.setLevel l level)))))))))))
+
+  (field ^:public ^:static ^:final ^String LOGGING_MXBEAN_NAME "java.util.logging:type=Logging")
+
+  (method ^:public ^:static ^:synchronized ^{Deprecated {:since "9"}} getLoggingMXBean ^LoggingMXBean []
+    (Logging/getInstance))
+
+  (method ^:public addConfigurationListener ^LogManager [this ^Runnable listener]
+    (let [r (cast Runnable (Objects/requireNonNull listener))] (.putIfAbsent listeners r r) this))
+
+  (method ^:public removeConfigurationListener ^void [this ^Runnable listener]
+    (let [key (cast Runnable (Objects/requireNonNull listener))] (.remove listeners key)))
+
+  (method ^:private invokeConfigurationListeners ^void [this]
+    (let [^:mutable ^Throwable t nil]
+      (for-each [^Runnable c (cast Runnable/1 (.toArray (.values listeners) (new Runnable/1 0)))]
+        (try
+          (.run c)
+          (catch [Error RuntimeException] x (if (nil? t) (set! t x) (.addSuppressed t x)))))
+      (when (instance? Error t) (throw (cast Error t)))
+      (when (instance? RuntimeException t) (throw (cast RuntimeException t)))))
+
+  (defclass ^:private ^:static ^:final LoggingProviderAccess
+    :implements [LoggingProviderImpl$LogManagerAccess]
+
+    (constructor ^:private [this])
+
+    (method ^:public demandLoggerFor ^Logger [this ^LogManager manager ^String name ^Module module]
+      (when-not (identical? manager (LogManager/getLogManager))
+        (throw (IllegalArgumentException. "manager")))
+      (Objects/requireNonNull name)
+      (Objects/requireNonNull module)
+      (if (DefaultLoggerFinder/isSystem module)
+          (.demandSystemLogger manager name Logger/SYSTEM_LOGGER_RB_NAME module)
+          (.demandLogger manager name nil module)))
+
+    (method ^:private init ^void [this]
+      (LoggingProviderImpl/setLogManagerAccess INSTANCE))
+
+    (field ^:static ^:final ^LoggingProviderAccess INSTANCE (LoggingProviderAccess.)))
+
+  (static-initializer (.init LoggingProviderAccess/INSTANCE)))

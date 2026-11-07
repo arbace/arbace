@@ -1,0 +1,385 @@
+;; Converted from jdk26u src/java.base/share/classes/java/net/SocksSocketImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.net)
+
+(import '(java.io BufferedOutputStream IOException InputStream OutputStream)
+        '(java.nio.charset StandardCharsets)
+        '(java.util Iterator)
+        '(jdk.internal.util Exceptions Exceptions$SensitiveInfo StaticProperty)
+        '(sun.net SocksProxy)
+        '(sun.net.spi DefaultProxySelector)
+        '(sun.net.util IPAddressUtil)
+        '(sun.net.www ParseUtil))
+
+(defclass SocksSocketImpl
+  :extends DelegatingSocketImpl
+  :implements [SocksConsts]
+
+  (field ^:private ^String server nil)
+
+  (field ^:private ^int serverPort SocksSocketImpl/DEFAULT_PORT)
+
+  (field ^:private ^InetSocketAddress external_address)
+
+  (field ^:private ^boolean useV4 false)
+
+  (field ^:private ^Socket cmdsock nil)
+
+  (field ^:private ^InputStream cmdIn nil)
+
+  (field ^:private ^OutputStream cmdOut nil)
+
+  (constructor [this ^SocketImpl delegate] (super. delegate))
+
+  (constructor [this ^Proxy proxy ^SocketImpl delegate]
+    (super. delegate)
+    (let [a (.address proxy)]
+      (when-instance [^InetSocketAddress ad a]
+        (set! server (.getHostString ad))
+        (set! serverPort (.getPort ad)))
+      (set! useV4 (SocksSocketImpl/useV4 proxy))))
+
+  (method ^:private ^:static useV4 ^boolean [^Proxy proxy]
+    (if (and (instance? SocksProxy proxy) (== (.protocolVersion (cast SocksProxy proxy)) 4))
+        true
+        (== (DefaultProxySelector/socksProxyVersion) 4)))
+
+  (method ^:private ^:synchronized doConnect :throws [IOException] ^void [this ^:final ^String host
+                                                                          ^:final ^int port
+                                                                          ^:final ^int timeout]
+    (.connect (.-delegate this) (InetSocketAddress. host port) timeout)
+    (set! cmdIn (.getInputStream this))
+    (set! cmdOut (.getOutputStream this)))
+
+  (method ^:private ^:static remainingMillis :throws [IOException] ^int [^long deadlineMillis]
+    (if (== deadlineMillis 0)
+        0
+        (let [remaining (unchecked-subtract deadlineMillis (System/currentTimeMillis))]
+          (if (> remaining 0) (unchecked-int remaining) (throw (SocketTimeoutException.))))))
+
+  (method ^:private readSocksReply :throws [IOException] ^int [this ^InputStream in ^byte/1 data
+                                                               ^long deadlineMillis]
+    (let [len (alength data)
+          ^:mutable ^int received 0
+          originalTimeout (.intValue (cast Integer (.getOption this SocketOptions/SO_TIMEOUT)))]
+      (try
+        (while (< received len)
+          (let [^:mutable ^int count 0
+                remaining (SocksSocketImpl/remainingMillis deadlineMillis)]
+            (.setOption this SocketOptions/SO_TIMEOUT remaining)
+            (try
+              (set! count (.read in data received (unchecked-subtract-int len received)))
+              (catch SocketTimeoutException e (throw (SocketTimeoutException. "Connect timed out"))))
+            (when (< count 0) (throw (SocketException. "Malformed reply from SOCKS server")))
+            (set! received (unchecked-add-int received count))))
+        (finally (.setOption this SocketOptions/SO_TIMEOUT originalTimeout)))
+      received))
+
+  (method ^:private authenticate :throws [IOException] ^boolean [this ^byte method ^InputStream in
+                                                                 ^BufferedOutputStream out
+                                                                 ^long deadlineMillis]
+    (cond
+      (== method SocksSocketImpl/NO_AUTH) true
+      (== method SocksSocketImpl/USER_PASSW)
+        (let [^:mutable ^String userName nil
+              ^:mutable ^String password nil
+              addr (InetAddress/getByName server)
+              pw (Authenticator/requestPasswordAuthentication
+                   server
+                   addr
+                   serverPort
+                   "SOCKS5"
+                   "SOCKS authentication"
+                   nil)]
+          (if (some? pw)
+              (do (set! userName (.getUserName pw)) (set! password (String. (.getPassword pw))))
+              (set! userName (StaticProperty/userName)))
+          (if (nil? userName)
+              false
+              (do
+                (.write out 1)
+                (.write out (.length userName))
+                (.write out (.getBytes userName StandardCharsets/ISO_8859_1))
+                (if (some? password)
+                    (do
+                      (.write out (.length password))
+                      (.write out (.getBytes password StandardCharsets/ISO_8859_1)))
+                    (.write out 0))
+                (.flush out)
+                (let [data (new byte/1 2)
+                      i (.readSocksReply this in data deadlineMillis)]
+                  (if (or (not (== i 2)) (not (== (aget data 1) 0)))
+                      (do (.close out) (.close in) false)
+                      true)))))
+      :else false))
+
+  (method ^:private connectV4 :throws [IOException] ^void [this ^InputStream in ^OutputStream out
+                                                           ^InetSocketAddress endpoint
+                                                           ^long deadlineMillis]
+    (when-not (instance? Inet4Address (.getAddress endpoint))
+      (throw (SocketException. "SOCKS V4 requires IPv4 only addresses")))
+    (.write out SocksSocketImpl/PROTO_VERS4)
+    (.write out SocksSocketImpl/CONNECT)
+    (.write out (bit-and-int (bit-shift-right-int (.getPort endpoint) 8) 0xff))
+    (.write out (bit-and-int (bit-shift-right-int (.getPort endpoint) 0) 0xff))
+    (.write out (.getAddress (.getAddress endpoint)))
+    (let [userName (.getUserName this)]
+      (.write out (.getBytes userName StandardCharsets/ISO_8859_1))
+      (.write out 0)
+      (.flush out)
+      (let [data (new byte/1 8)
+            n (.readSocksReply this in data deadlineMillis)]
+        (when-not (== n 8)
+          (throw (SocketException. (java-str "Reply from SOCKS server has bad length: " n))))
+        (when (and (not (== (aget data 0) 0)) (not (== (aget data 0) 4)))
+          (throw (SocketException. "Reply from SOCKS server has bad version")))
+        (let [^SocketException ex (switch (aget data 1)
+                                    90 (do (set! external_address endpoint) nil)
+                                    91 (SocketException. "SOCKS request rejected")
+                                    92 (SocketException. "SOCKS server couldn't reach destination")
+                                    93 (SocketException. "SOCKS authentication failed")
+                                    (SocketException. "Reply from SOCKS server contains bad status"))]
+          (when (some? ex) (.close in) (.close out) (throw ex))))))
+
+  (method ^:protected connect :throws [IOException] ^void [this ^String host ^int port]
+    (.connect this (InetSocketAddress. host port) 0))
+
+  (method ^:protected connect :throws [IOException] ^void [this ^InetAddress address ^int port]
+    (.connect this (InetSocketAddress. address port) 0))
+
+  (method ^:protected connect :throws [IOException] ^void [this ^SocketAddress endpoint ^int timeout]
+    (let [^:mutable ^long deadlineMillis 0]
+      (if (== timeout 0)
+          (set! deadlineMillis 0)
+          (let [finish (unchecked-add (System/currentTimeMillis) timeout)]
+            (set! deadlineMillis (if (< finish 0) Long/MAX_VALUE finish))))
+      (if-instance [^InetSocketAddress epoint endpoint]
+        (do
+          (if (nil? server)
+              (let [sel (ProxySelector/getDefault)]
+                (when (nil? sel)
+                  (.connect (.-delegate this)
+                            epoint
+                            (SocksSocketImpl/remainingMillis deadlineMillis))
+                  (return))
+                (let [^:mutable ^URI uri nil
+                      ^:mutable host (.getHostString epoint)]
+                  (if (IPAddressUtil/isIPv6LiteralAddress host)
+                      (set! host (java-str "[" host "]"))
+                      (set! host (ParseUtil/encodePath host)))
+                  (try
+                    (set! uri (URI. (java-str "socket://" host ":" (.getPort epoint))))
+                    (catch URISyntaxException e (throw (IOException. "Failed to select a proxy" e))))
+                  (let [^:mutable ^Proxy p nil
+                        ^:mutable ^IOException savedExc nil
+                        ^:mutable ^{:tag (Iterator Proxy)} iProxy nil]
+                    (try
+                      (set! iProxy (.iterator (.select sel uri)))
+                      (catch IllegalArgumentException iae
+                        (throw (IOException. "Failed to select a proxy" iae))))
+                    (when (or (nil? iProxy) (not (.hasNext iProxy)))
+                      (.connect (.-delegate this)
+                                epoint
+                                (SocksSocketImpl/remainingMillis deadlineMillis))
+                      (return))
+                    (while (.hasNext iProxy)
+                      (set! p (cast Proxy (.next iProxy)))
+                      (when (or (nil? p) (not (identical? (.type p) Proxy$Type/SOCKS)))
+                        (.connect (.-delegate this)
+                                  epoint
+                                  (SocksSocketImpl/remainingMillis deadlineMillis))
+                        (return))
+                      (when-not (instance? InetSocketAddress (.address p))
+                        (throw (SocketException. (java-str "Unknown address type for proxy: " p))))
+                      (set! server (.getHostString (cast InetSocketAddress (.address p))))
+                      (set! serverPort (.getPort (cast InetSocketAddress (.address p))))
+                      (set! useV4 (SocksSocketImpl/useV4 p))
+                      (try
+                        (.doConnect this
+                                    server
+                                    serverPort
+                                    (SocksSocketImpl/remainingMillis deadlineMillis))
+                        (break)
+                        (catch IOException e
+                          (.connectFailed sel uri (.address p) e)
+                          (set! server nil)
+                          (set! serverPort -1)
+                          (set! savedExc e))))
+                    (when (nil? server)
+                      (throw (SocketException.
+                               (java-str "Can't connect to SOCKS proxy:" (.getMessage savedExc))))))))
+              (try
+                (.doConnect this server serverPort (SocksSocketImpl/remainingMillis deadlineMillis))
+                (catch IOException e (throw (SocketException. (.getMessage e) e)))))
+          (let [out (BufferedOutputStream. cmdOut 512)
+                in cmdIn]
+            (if useV4
+                (do
+                  (when (.isUnresolved epoint)
+                    (throw (UnknownHostException.
+                             (Exceptions/formatMsg
+                               "%s"
+                               (new Exceptions$SensitiveInfo/1
+                                    [(Exceptions/filterSocketInfo (.toString epoint))])))))
+                  (.connectV4 this in out epoint deadlineMillis))
+                (do
+                  (.write out SocksSocketImpl/PROTO_VERS)
+                  (.write out 2)
+                  (.write out SocksSocketImpl/NO_AUTH)
+                  (.write out SocksSocketImpl/USER_PASSW)
+                  (.flush out)
+                  (let [^:mutable data (new byte/1 2)
+                        ^:mutable i (.readSocksReply this in data deadlineMillis)]
+                    (if (or (not (== i 2))
+                            (not (== (int (aget data 0)) SocksSocketImpl/PROTO_VERS)))
+                        (do
+                          (when (.isUnresolved epoint)
+                            (throw (UnknownHostException.
+                                     (Exceptions/formatMsg
+                                       "%s"
+                                       (new Exceptions$SensitiveInfo/1
+                                            [(Exceptions/filterSocketInfo (.toString epoint))])))))
+                          (.connectV4 this in out epoint deadlineMillis))
+                        (do
+                          (when (== (int (aget data 1)) SocksSocketImpl/NO_METHODS)
+                            (throw (SocketException. "SOCKS : No acceptable methods")))
+                          (when-not (.authenticate this (aget data 1) in out deadlineMillis)
+                            (throw (SocketException. "SOCKS : authentication failed")))
+                          (.write out SocksSocketImpl/PROTO_VERS)
+                          (.write out SocksSocketImpl/CONNECT)
+                          (.write out 0)
+                          (cond
+                            (.isUnresolved epoint)
+                              (do
+                                (.write out SocksSocketImpl/DOMAIN_NAME)
+                                (.write out (.length (.getHostName epoint)))
+                                (.write out
+                                        (.getBytes
+                                          (.getHostName epoint)
+                                          StandardCharsets/ISO_8859_1))
+                                (.write
+                                  out
+                                  (bit-and-int (bit-shift-right-int (.getPort epoint) 8) 0xff))
+                                (.write
+                                  out
+                                  (bit-and-int (bit-shift-right-int (.getPort epoint) 0) 0xff)))
+                            (instance? Inet6Address (.getAddress epoint))
+                              (do
+                                (.write out SocksSocketImpl/IPV6)
+                                (.write out (.getAddress (.getAddress epoint)))
+                                (.write
+                                  out
+                                  (bit-and-int (bit-shift-right-int (.getPort epoint) 8) 0xff))
+                                (.write
+                                  out
+                                  (bit-and-int (bit-shift-right-int (.getPort epoint) 0) 0xff)))
+                            :else
+                              (do
+                                (.write out SocksSocketImpl/IPV4)
+                                (.write out (.getAddress (.getAddress epoint)))
+                                (.write
+                                  out
+                                  (bit-and-int (bit-shift-right-int (.getPort epoint) 8) 0xff))
+                                (.write
+                                  out
+                                  (bit-and-int (bit-shift-right-int (.getPort epoint) 0) 0xff))))
+                          (.flush out)
+                          (set! data (new byte/1 4))
+                          (set! i (.readSocksReply this in data deadlineMillis))
+                          (when-not (== i 4)
+                            (throw (SocketException. "Reply from SOCKS server has bad length")))
+                          (let [^:mutable ^SocketException ex nil
+                                ^:mutable ^int len 0
+                                ^:mutable ^byte/1 addr nil]
+                            (switch (aget data 1)
+                              SocksSocketImpl/REQUEST_OK
+                                (switch (aget data 3)
+                                  SocksSocketImpl/IPV4
+                                    (do
+                                      (set! addr (new byte/1 4))
+                                      (set! i (.readSocksReply this in addr deadlineMillis))
+                                      (when-not (== i 4)
+                                        (throw (SocketException.
+                                                 "Reply from SOCKS server badly formatted")))
+                                      (set! data (new byte/1 2))
+                                      (set! i (.readSocksReply this in data deadlineMillis))
+                                      (when-not (== i 2)
+                                        (throw (SocketException.
+                                                 "Reply from SOCKS server badly formatted"))))
+                                  SocksSocketImpl/DOMAIN_NAME
+                                    (let [lenByte (new byte/1 1)]
+                                      (set! i (.readSocksReply this in lenByte deadlineMillis))
+                                      (when-not (== i 1)
+                                        (throw (SocketException.
+                                                 "Reply from SOCKS server badly formatted")))
+                                      (set! len (bit-and-int (aget lenByte 0) 0xFF))
+                                      (let [host (new byte/1 len)]
+                                        (set! i (.readSocksReply this in host deadlineMillis))
+                                        (when-not (== i len)
+                                          (throw
+                                            (SocketException.
+                                              "Reply from SOCKS server badly formatted")))
+                                        (set! data (new byte/1 2))
+                                        (set! i (.readSocksReply this in data deadlineMillis))
+                                        (when-not (== i 2)
+                                          (throw
+                                            (SocketException.
+                                              "Reply from SOCKS server badly formatted")))))
+                                  SocksSocketImpl/IPV6
+                                    (do
+                                      (set! len 16)
+                                      (set! addr (new byte/1 len))
+                                      (set! i (.readSocksReply this in addr deadlineMillis))
+                                      (when-not (== i len)
+                                        (throw (SocketException.
+                                                 "Reply from SOCKS server badly formatted")))
+                                      (set! data (new byte/1 2))
+                                      (set! i (.readSocksReply this in data deadlineMillis))
+                                      (when-not (== i 2)
+                                        (throw (SocketException.
+                                                 "Reply from SOCKS server badly formatted"))))
+                                  (set! ex
+                                        (SocketException.
+                                          "Reply from SOCKS server contains wrong code")))
+                              SocksSocketImpl/GENERAL_FAILURE
+                                (set! ex (SocketException. "SOCKS server general failure"))
+                              SocksSocketImpl/NOT_ALLOWED
+                                (set! ex
+                                      (SocketException. "SOCKS: Connection not allowed by ruleset"))
+                              SocksSocketImpl/NET_UNREACHABLE
+                                (set! ex (SocketException. "SOCKS: Network unreachable"))
+                              SocksSocketImpl/HOST_UNREACHABLE
+                                (set! ex (SocketException. "SOCKS: Host unreachable"))
+                              SocksSocketImpl/CONN_REFUSED
+                                (set! ex (SocketException. "SOCKS: Connection refused"))
+                              SocksSocketImpl/TTL_EXPIRED
+                                (set! ex (SocketException. "SOCKS: TTL expired"))
+                              SocksSocketImpl/CMD_NOT_SUPPORTED
+                                (set! ex (SocketException. "SOCKS: Command not supported"))
+                              SocksSocketImpl/ADDR_TYPE_NOT_SUP
+                                (set! ex (SocketException. "SOCKS: address type not supported")))
+                            (when (some? ex) (.close in) (.close out) (throw ex))
+                            (set! external_address epoint)))))))))
+        (throw (IllegalArgumentException. "Unsupported address type")))))
+
+  (method ^:protected listen ^void [this ^int backlog]
+    (throw (InternalError. "should not get here")))
+
+  (method ^:protected accept ^void [this ^SocketImpl s]
+    (throw (InternalError. "should not get here")))
+
+  (method ^:protected getInetAddress ^InetAddress [this]
+    (if (some? external_address) (.getAddress external_address) (.getInetAddress (.-delegate this))))
+
+  (method ^:protected getPort ^int [this]
+    (if (some? external_address) (.getPort external_address) (.getPort (.-delegate this))))
+
+  (method ^:protected close :throws [IOException] ^void [this]
+    (when (some? cmdsock) (.close cmdsock))
+    (set! cmdsock nil)
+    (.close (.-delegate this)))
+
+  (method ^:private getUserName ^String [this] (StaticProperty/userName))
+
+  (method reset ^void [this]
+    (throw (InternalError. "should not get here"))))

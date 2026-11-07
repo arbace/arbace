@@ -1,0 +1,425 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/DTLSOutputRecord.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.util LinkedList)
+        '(javax.net.ssl SSLHandshakeException))
+
+(defclass ^:final DTLSOutputRecord
+  :extends OutputRecord
+  :implements [DTLSRecord]
+
+  (field ^:private ^DTLSFragmenter fragmenter)
+
+  (field ^int writeEpoch)
+
+  (field ^int prevWriteEpoch)
+
+  (field ^Authenticator prevWriteAuthenticator)
+
+  (field ^SSLCipher$SSLWriteCipher prevWriteCipher)
+
+  (field ^:private ^:volatile ^boolean isCloseWaiting)
+
+  (constructor [this ^HandshakeHash handshakeHash]
+    (super. handshakeHash (SSLCipher$SSLWriteCipher/nullDTlsWriteCipher))
+    (set! (.-writeEpoch this) 0)
+    (set! (.-prevWriteEpoch this) 0)
+    (set! (.-prevWriteCipher this) (SSLCipher$SSLWriteCipher/nullDTlsWriteCipher))
+    (set! (.-packetSize this) DTLSRecord/maxRecordSize)
+    (set! (.-protocolVersion this) ProtocolVersion/NONE))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (.lock (.-recordLock this))
+    (try
+      (when-not (.-isClosed this)
+        (if (and (some? fragmenter) (.hasAlert fragmenter))
+            (set! isCloseWaiting true)
+            (.close super)))
+      (finally (.unlock (.-recordLock this)))))
+
+  (method isClosed ^boolean [this] (or (.-isClosed this) isCloseWaiting))
+
+  (method initHandshaker ^void [this] (set! fragmenter nil))
+
+  (method finishHandshake ^void [this])
+
+  (method changeWriteCiphers ^void [this ^SSLCipher$SSLWriteCipher writeCipher
+                                    ^boolean useChangeCipherSpec]
+    (if (.isClosed this)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/warning "outbound has closed, ignore outbound change_cipher_spec message"))
+        (do
+          (when useChangeCipherSpec (.encodeChangeCipherSpec this))
+          (.dispose prevWriteCipher)
+          (set! (.-prevWriteCipher this) (.-writeCipher this))
+          (set! (.-prevWriteEpoch this) (.-writeEpoch this))
+          (set! (.-writeCipher this) writeCipher)
+          (set! (.-writeEpoch this) (unchecked-inc-int (.-writeEpoch this)))
+          (set! (.-isFirstAppOutputRecord this) true)
+          (.setEpochNumber (.-authenticator (.-writeCipher this)) (.-writeEpoch this)))))
+
+  (method encodeAlert ^void [this ^byte level ^byte description]
+    (if (.isClosed this)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/warning
+            (java-str "outbound has closed, ignore outbound alert message: "
+                      (Alert/nameOf description))))
+        (do
+          (when (nil? fragmenter) (set! fragmenter (DTLSFragmenter.)))
+          (.queueUpAlert fragmenter level description))))
+
+  (method encodeChangeCipherSpec ^void [this]
+    (if (.isClosed this)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/warning "outbound has closed, ignore outbound change_cipher_spec message"))
+        (do
+          (when (nil? fragmenter) (set! fragmenter (DTLSFragmenter.)))
+          (.queueUpChangeCipherSpec fragmenter))))
+
+  (method encodeHandshake ^void [this ^byte/1 source ^int offset ^int length]
+    (if (.isClosed this)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/warning "outbound has closed, ignore outbound handshake message"
+                             (ByteBuffer/wrap source offset length)))
+        (do
+          (when (.-firstMessage this) (set! (.-firstMessage this) false))
+          (when (nil? fragmenter) (set! fragmenter (DTLSFragmenter.)))
+          (.queueUpHandshake fragmenter source offset length))))
+
+  (method encode :throws [IOException] ^Ciphertext [this ^:mutable ^ByteBuffer/1 srcs
+                                                    ^int srcsOffset ^int srcsLength
+                                                    ^ByteBuffer/1 dsts ^int dstsOffset
+                                                    ^int dstsLength]
+    (if (.-isClosed this)
+        (do
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning
+              "outbound has closed, ignore outbound application data or cached messages"))
+          nil)
+        (do
+          (when isCloseWaiting
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+              (SSLLogger/warning "outbound has closed, ignore outbound application data"))
+            (set! srcs nil))
+          (.encode this srcs srcsOffset srcsLength (aget dsts 0)))))
+
+  (method ^:private encode :throws [IOException] ^Ciphertext [this ^ByteBuffer/1 sources ^int offset
+                                                              ^int length ^ByteBuffer destination]
+    (when (.seqNumOverflow (.-authenticator (.-writeCipher this)))
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+        (SSLLogger/fine
+          "sequence number extremely close to overflow (2^64-1 packets). Closing connection."))
+      (throw (SSLHandshakeException. "sequence number overflow")))
+    (when (or (or (not (.isEmpty this)) (nil? sources)) (== (alength sources) 0))
+      (let [ct (.acquireCiphertext this destination)] (when (some? ct) (return ct))))
+    (when-not (or (nil? sources) (== (alength sources) 0))
+      (let [^:mutable ^int srcsRemains 0]
+        (loop [^int i offset]
+          (when (< i (unchecked-add-int offset length))
+            (set! srcsRemains (unchecked-add-int srcsRemains (.remaining (aget sources i))))
+            (recur (unchecked-inc-int i))))
+        (when-not (== srcsRemains 0)
+          (let [^:mutable ^int fragLen 0]
+            (if (> (.-packetSize this) 0)
+                (do
+                  (set! fragLen (Math/min DTLSOutputRecord/maxRecordSize (.-packetSize this)))
+                  (set! fragLen
+                        (.calculateFragmentSize (.-writeCipher this)
+                                                fragLen
+                                                DTLSOutputRecord/headerSize))
+                  (set! fragLen (Math/min fragLen Record/maxDataSize)))
+                (set! fragLen Record/maxDataSize))
+            (set! fragLen (.calculateFragmentSize this fragLen))
+            (let [dstPos (.position destination)
+                  dstLim (.limit destination)
+                  dstContent (unchecked-add-int
+                               (unchecked-add-int dstPos DTLSOutputRecord/headerSize)
+                               (.getExplicitNonceSize (.-writeCipher this)))]
+              (.position destination dstContent)
+              (let [^:mutable remains (Math/min fragLen (.remaining destination))]
+                (set! fragLen 0)
+                (let [srcsLen (unchecked-add-int offset length)]
+                  (loop [^int i offset]
+                    (when (and (< i srcsLen) (> remains 0))
+                      (let [amount (Math/min (.remaining (aget sources i)) remains)
+                            srcLimit (.limit (aget sources i))]
+                        (.limit (aget sources i)
+                                (unchecked-add-int (.position (aget sources i)) amount))
+                        (.put destination (aget sources i))
+                        (.limit (aget sources i) srcLimit)
+                        (set! remains (unchecked-subtract-int remains amount))
+                        (set! fragLen (unchecked-add-int fragLen amount))
+                        (recur (unchecked-inc-int i)))))
+                  (.limit destination (.position destination))
+                  (.position destination dstContent)
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+                    (SSLLogger/fine
+                      (java-str "WRITE: "
+                                (.-name (.-protocolVersion this))
+                                " "
+                                (.-name ContentType/APPLICATION_DATA)
+                                ", length = "
+                                (.remaining destination))))
+                  (let [recordSN (DTLSOutputRecord/encrypt
+                                   (.-writeCipher this)
+                                   (.-id ContentType/APPLICATION_DATA)
+                                   destination
+                                   dstPos
+                                   dstLim
+                                   DTLSOutputRecord/headerSize
+                                   (.-protocolVersion this))]
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet"))
+                      (let [temporary (.duplicate destination)]
+                        (.limit temporary (.position temporary))
+                        (.position temporary dstPos)
+                        (SSLLogger/fine "Raw write" temporary)))
+                    (.limit destination dstLim)
+                    (Ciphertext. (.-id ContentType/APPLICATION_DATA)
+                                 (.-id SSLHandshake/NOT_APPLICABLE)
+                                 recordSN))))))))))
+
+  (method ^:private acquireCiphertext :throws [IOException] ^Ciphertext [this
+                                                                         ^ByteBuffer destination]
+    (when (some? fragmenter) (.acquireCiphertext fragmenter destination)))
+
+  (method isEmpty ^boolean [this]
+    (or (nil? fragmenter) (.isEmpty fragmenter)))
+
+  (method launchRetransmission ^void [this]
+    (when (and (some? fragmenter) (.isRetransmittable fragmenter)) (.setRetransmission fragmenter)))
+
+  (defclass ^:private ^:static RecordMemo
+    (field ^byte contentType)
+
+    (field ^byte majorVersion)
+
+    (field ^byte minorVersion)
+
+    (field ^int encodeEpoch)
+
+    (field ^SSLCipher$SSLWriteCipher encodeCipher)
+
+    (field ^byte/1 fragment))
+
+  (defclass ^:private ^:static HandshakeMemo
+    :extends RecordMemo
+
+    (field ^byte handshakeType)
+
+    (field ^int messageSequence)
+
+    (field ^int acquireOffset))
+
+  (defclass ^:private ^:final DTLSFragmenter
+    (field ^:private ^:final ^{:tag (LinkedList RecordMemo)} handshakeMemos (LinkedList.))
+
+    (field ^:private ^int acquireIndex 0)
+
+    (field ^:private ^int messageSequence 0)
+
+    (field ^:private ^boolean flightIsReady false)
+
+    (field ^:private ^int retransmits 2)
+
+    (method queueUpHandshake ^void [this ^byte/1 buf ^int offset ^int length]
+      (when flightIsReady (.clear handshakeMemos) (set! acquireIndex 0) (set! flightIsReady false))
+      (let [memo (HandshakeMemo.)]
+        (set! (.-contentType memo) (.-id ContentType/HANDSHAKE))
+        (set! (.-majorVersion memo) (.-major (.-protocolVersion DTLSOutputRecord/this)))
+        (set! (.-minorVersion memo) (.-minor (.-protocolVersion DTLSOutputRecord/this)))
+        (set! (.-encodeEpoch memo) writeEpoch)
+        (set! (.-encodeCipher memo) (.-writeCipher DTLSOutputRecord/this))
+        (set! (.-handshakeType memo) (aget buf offset))
+        (set! (.-messageSequence memo)
+              (let [old-1 messageSequence]
+                (set! messageSequence (unchecked-inc-int messageSequence))
+                old-1))
+        (set! (.-acquireOffset memo) 0)
+        (set! (.-fragment memo) (new byte/1 (unchecked-subtract-int length 4)))
+        (System/arraycopy buf
+                          (unchecked-add-int offset 4)
+                          (.-fragment memo)
+                          0
+                          (unchecked-subtract-int length 4))
+        (.handshakeHashing this memo (.-fragment memo))
+        (.add handshakeMemos memo)
+        (when (or (or (or (or (== (.-handshakeType memo) (.-id SSLHandshake/CLIENT_HELLO))
+                              (== (.-handshakeType memo) (.-id SSLHandshake/HELLO_REQUEST)))
+                          (== (.-handshakeType memo) (.-id SSLHandshake/HELLO_VERIFY_REQUEST)))
+                      (== (.-handshakeType memo) (.-id SSLHandshake/SERVER_HELLO_DONE)))
+                  (== (.-handshakeType memo) (.-id SSLHandshake/FINISHED)))
+          (set! flightIsReady true))))
+
+    (method queueUpChangeCipherSpec ^void [this]
+      (when flightIsReady (.clear handshakeMemos) (set! acquireIndex 0) (set! flightIsReady false))
+      (let [memo (RecordMemo.)]
+        (set! (.-contentType memo) (.-id ContentType/CHANGE_CIPHER_SPEC))
+        (set! (.-majorVersion memo) (.-major (.-protocolVersion DTLSOutputRecord/this)))
+        (set! (.-minorVersion memo) (.-minor (.-protocolVersion DTLSOutputRecord/this)))
+        (set! (.-encodeEpoch memo) writeEpoch)
+        (set! (.-encodeCipher memo) (.-writeCipher DTLSOutputRecord/this))
+        (set! (.-fragment memo) (new byte/1 1))
+        (aset (.-fragment memo) 0 1)
+        (.add handshakeMemos memo)))
+
+    (method queueUpAlert ^void [this ^byte level ^byte description]
+      (let [memo (RecordMemo.)]
+        (set! (.-contentType memo) (.-id ContentType/ALERT))
+        (set! (.-majorVersion memo) (.-major (.-protocolVersion DTLSOutputRecord/this)))
+        (set! (.-minorVersion memo) (.-minor (.-protocolVersion DTLSOutputRecord/this)))
+        (set! (.-encodeEpoch memo) writeEpoch)
+        (set! (.-encodeCipher memo) (.-writeCipher DTLSOutputRecord/this))
+        (set! (.-fragment memo) (new byte/1 2))
+        (aset (.-fragment memo) 0 level)
+        (aset (.-fragment memo) 1 description)
+        (.add handshakeMemos memo)))
+
+    (method acquireCiphertext :throws [IOException] ^Ciphertext [this ^ByteBuffer dstBuf]
+      (when (.isEmpty this) (if (.isRetransmittable this) (.setRetransmission this) (return nil)))
+      (let [memo (cast RecordMemo (.get handshakeMemos acquireIndex))
+            ^:mutable ^HandshakeMemo hsMemo nil]
+        (when (== (.-contentType memo) (.-id ContentType/HANDSHAKE))
+          (set! hsMemo (cast HandshakeMemo memo)))
+        (let [^:mutable ^int fragLen 0]
+          (if (> (.-packetSize DTLSOutputRecord/this) 0)
+              (do
+                (set! fragLen
+                      (Math/min DTLSRecord/maxRecordSize (.-packetSize DTLSOutputRecord/this)))
+                (set! fragLen (.calculateFragmentSize (.-encodeCipher memo) fragLen 25))
+                (set! fragLen (Math/min fragLen Record/maxDataSize)))
+              (set! fragLen Record/maxDataSize))
+          (set! fragLen (.calculateFragmentSize DTLSOutputRecord/this fragLen))
+          (let [dstPos (.position dstBuf)
+                dstLim (.limit dstBuf)
+                dstContent (unchecked-add-int (unchecked-add-int dstPos DTLSRecord/headerSize)
+                                              (.getExplicitNonceSize (.-encodeCipher memo)))]
+            (.position dstBuf dstContent)
+            (if (some? hsMemo)
+                (do
+                  (set! fragLen
+                        (Math/min fragLen
+                                  (unchecked-subtract-int
+                                    (alength (.-fragment hsMemo))
+                                    (.-acquireOffset hsMemo))))
+                  (.put dstBuf (.-handshakeType hsMemo))
+                  (.put
+                    dstBuf
+                    (unchecked-byte
+                      (bit-and-int (bit-shift-right-int (alength (.-fragment hsMemo)) 16) 0xFF)))
+                  (.put dstBuf
+                        (unchecked-byte
+                          (bit-and-int (bit-shift-right-int (alength (.-fragment hsMemo)) 8) 0xFF)))
+                  (.put dstBuf (unchecked-byte (bit-and-int (alength (.-fragment hsMemo)) 0xFF)))
+                  (.put dstBuf
+                        (unchecked-byte
+                          (bit-and-int (bit-shift-right-int (.-messageSequence hsMemo) 8) 0xFF)))
+                  (.put dstBuf (unchecked-byte (bit-and-int (.-messageSequence hsMemo) 0xFF)))
+                  (.put dstBuf
+                        (unchecked-byte
+                          (bit-and-int (bit-shift-right-int (.-acquireOffset hsMemo) 16) 0xFF)))
+                  (.put dstBuf
+                        (unchecked-byte
+                          (bit-and-int (bit-shift-right-int (.-acquireOffset hsMemo) 8) 0xFF)))
+                  (.put dstBuf (unchecked-byte (bit-and-int (.-acquireOffset hsMemo) 0xFF)))
+                  (.put dstBuf (unchecked-byte (bit-and-int (bit-shift-right-int fragLen 16) 0xFF)))
+                  (.put dstBuf (unchecked-byte (bit-and-int (bit-shift-right-int fragLen 8) 0xFF)))
+                  (.put dstBuf (unchecked-byte (bit-and-int fragLen 0xFF)))
+                  (.put dstBuf (.-fragment hsMemo) (.-acquireOffset hsMemo) fragLen))
+                (do
+                  (set! fragLen (Math/min fragLen (alength (.-fragment memo))))
+                  (.put dstBuf (.-fragment memo) 0 fragLen)))
+            (.limit dstBuf (.position dstBuf))
+            (.position dstBuf dstContent)
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+              (SSLLogger/fine
+                (java-str "WRITE: "
+                          (.-name (.-protocolVersion DTLSOutputRecord/this))
+                          " "
+                          (ContentType/nameOf (.-contentType memo))
+                          ", length = "
+                          (.remaining dstBuf))))
+            (let [recordSN (OutputRecord/encrypt
+                             (.-encodeCipher memo)
+                             (.-contentType memo)
+                             dstBuf
+                             dstPos
+                             dstLim
+                             DTLSRecord/headerSize
+                             (ProtocolVersion/valueOf (.-majorVersion memo) (.-minorVersion memo)))]
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet"))
+                (let [temporary (.duplicate dstBuf)]
+                  (.limit temporary (.position temporary))
+                  (.position temporary dstPos)
+                  (SSLLogger/fine (java-str "Raw write (" (.remaining temporary) ")") temporary)))
+              (.limit dstBuf dstLim)
+              (if (some? hsMemo)
+                  (do
+                    (set! (.-acquireOffset hsMemo)
+                          (unchecked-add-int (.-acquireOffset hsMemo) fragLen))
+                    (when (== (.-acquireOffset hsMemo) (alength (.-fragment hsMemo)))
+                      (set! acquireIndex (unchecked-inc-int acquireIndex)))
+                    (Ciphertext. (.-contentType hsMemo) (.-handshakeType hsMemo) recordSN))
+                  (do
+                    (when (and isCloseWaiting (== (.-contentType memo) (.-id ContentType/ALERT)))
+                      (.close DTLSOutputRecord/this))
+                    (set! acquireIndex (unchecked-inc-int acquireIndex))
+                    (Ciphertext. (.-contentType memo) (.-id SSLHandshake/NOT_APPLICABLE) recordSN))))))))
+
+    (method ^:private handshakeHashing ^void [this ^HandshakeMemo hsFrag ^byte/1 hsBody]
+      (let [hsType (.-handshakeType hsFrag)]
+        (when-not (not (.isHashable (.-handshakeHash DTLSOutputRecord/this) hsType))
+          (let [temporary (new byte/1 12)]
+            (aset temporary 0 (.-handshakeType hsFrag))
+            (aset temporary
+                  1
+                  (unchecked-byte (bit-and-int (bit-shift-right-int (alength hsBody) 16) 0xFF)))
+            (aset temporary
+                  2
+                  (unchecked-byte (bit-and-int (bit-shift-right-int (alength hsBody) 8) 0xFF)))
+            (aset temporary 3 (unchecked-byte (bit-and-int (alength hsBody) 0xFF)))
+            (aset temporary
+                  4
+                  (unchecked-byte
+                    (bit-and-int (bit-shift-right-int (.-messageSequence hsFrag) 8) 0xFF)))
+            (aset temporary 5 (unchecked-byte (bit-and-int (.-messageSequence hsFrag) 0xFF)))
+            (aset temporary 6 0)
+            (aset temporary 7 0)
+            (aset temporary 8 0)
+            (aset temporary 9 (aget temporary 1))
+            (aset temporary 10 (aget temporary 2))
+            (aset temporary 11 (aget temporary 3))
+            (.deliver (.-handshakeHash DTLSOutputRecord/this) temporary 0 12)
+            (.deliver (.-handshakeHash DTLSOutputRecord/this) hsBody 0 (alength hsBody))))))
+
+    (method isEmpty ^boolean [this]
+      (or (or (not flightIsReady) (.isEmpty handshakeMemos))
+          (>= acquireIndex (.size handshakeMemos))))
+
+    (method hasAlert ^boolean [this]
+      (for-each [^RecordMemo memo handshakeMemos]
+        (when (== (.-contentType memo) (.-id ContentType/ALERT)) (return true)))
+      false)
+
+    (method isRetransmittable ^boolean [this]
+      (and (and flightIsReady (not (.isEmpty handshakeMemos)))
+           (>= acquireIndex (.size handshakeMemos))))
+
+    (method ^:private setRetransmission ^void [this]
+      (set! acquireIndex 0)
+      (for-each [^RecordMemo memo handshakeMemos]
+        (when-instance [^HandshakeMemo hmemo memo] (set! (.-acquireOffset hmemo) 0)))
+      (when (and (and (<= (.-packetSize DTLSOutputRecord/this) DTLSRecord/maxRecordSize)
+                      (> (.-packetSize DTLSOutputRecord/this) 256))
+                 (<= (let [old-2 retransmits]
+                       (set! retransmits (unchecked-dec-int retransmits))
+                       old-2)
+                     0))
+        (.shrinkPacketSize this)
+        (set! retransmits 2)))
+
+    (method ^:private shrinkPacketSize ^void [this]
+      (set! (.-packetSize DTLSOutputRecord/this)
+            (^[int int] Math/max 256 (unchecked-divide-int (.-packetSize DTLSOutputRecord/this) 2))))))

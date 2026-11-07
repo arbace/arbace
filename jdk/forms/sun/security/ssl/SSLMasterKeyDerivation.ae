@@ -1,0 +1,97 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SSLMasterKeyDerivation.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.security InvalidAlgorithmParameterException
+                        NoSuchAlgorithmException
+                        ProviderException)
+        '(javax.crypto KeyGenerator SecretKey)
+        '(sun.security.internal.spec TlsMasterSecretParameterSpec))
+
+(defclass ^:enum SSLMasterKeyDerivation
+  :implements [SSLKeyDerivationGenerator]
+
+  (constants (SSL30 ["kdf_ssl30"]) (TLS10 ["kdf_tls10"]) (TLS12 ["kdf_tls12"]))
+
+  (field ^:final ^String name)
+
+  (constructor [this ^String name] (set! (.-name this) name))
+
+  (method ^:static valueOf ^SSLMasterKeyDerivation [^ProtocolVersion protocolVersion]
+    (switch protocolVersion
+      SSL30 SSLMasterKeyDerivation/SSL30
+      (TLS10 TLS11 DTLS10) SSLMasterKeyDerivation/TLS10
+      (TLS12 DTLS12) SSLMasterKeyDerivation/TLS12
+      nil))
+
+  (method ^:public createKeyDerivation :throws [IOException] ^SSLKeyDerivation [this
+                                                                                ^HandshakeContext context
+                                                                                ^SecretKey secretKey]
+    (LegacyMasterKeyDerivation. context secretKey))
+
+  (defclass ^:private ^:static ^:final LegacyMasterKeyDerivation
+    :implements [SSLKeyDerivation]
+
+    (field ^:final ^HandshakeContext context)
+
+    (field ^:final ^SecretKey preMasterSecret)
+
+    (constructor [this ^HandshakeContext context ^SecretKey preMasterSecret]
+      (set! (.-context this) context)
+      (set! (.-preMasterSecret this) preMasterSecret))
+
+    (method ^:public deriveKey :throws [IOException] ^SecretKey [this ^String typeNotUsed]
+      (let [cipherSuite (.-negotiatedCipherSuite context)
+            protocolVersion (.-negotiatedProtocol context)
+            ^:mutable ^String masterAlg nil
+            ^:mutable ^CipherSuite$HashAlg hashAlg nil
+            ^:mutable majorVersion (.-major protocolVersion)
+            ^:mutable minorVersion (.-minor protocolVersion)]
+        (cond
+          (.-isDTLS protocolVersion)
+            (if (== (.-id protocolVersion) (.-id ProtocolVersion/DTLS10))
+                (do
+                  (set! majorVersion (.-major ProtocolVersion/TLS11))
+                  (set! minorVersion (.-minor ProtocolVersion/TLS11))
+                  (set! masterAlg "SunTlsMasterSecret")
+                  (set! hashAlg CipherSuite$HashAlg/H_NONE))
+                (do
+                  (set! majorVersion (.-major ProtocolVersion/TLS12))
+                  (set! minorVersion (.-minor ProtocolVersion/TLS12))
+                  (set! masterAlg "SunTls12MasterSecret")
+                  (set! hashAlg (.-hashAlg cipherSuite))))
+          (>= (.-id protocolVersion) (.-id ProtocolVersion/TLS12))
+            (do (set! masterAlg "SunTls12MasterSecret") (set! hashAlg (.-hashAlg cipherSuite)))
+          :else (do (set! masterAlg "SunTlsMasterSecret") (set! hashAlg CipherSuite$HashAlg/H_NONE)))
+        (let [^:mutable ^TlsMasterSecretParameterSpec spec nil]
+          (if (.-useExtendedMasterSecret (.-handshakeSession context))
+              (do
+                (set! masterAlg "SunTlsExtendedMasterSecret")
+                (.utilize (.-handshakeHash context))
+                (let [sessionHash (.digest (.-handshakeHash context))]
+                  (set! spec
+                        (TlsMasterSecretParameterSpec.
+                          preMasterSecret
+                          (bit-and-int majorVersion 0xFF)
+                          (bit-and-int minorVersion 0xFF)
+                          sessionHash
+                          (.-name hashAlg)
+                          (.-hashLength hashAlg)
+                          (.-blockSize hashAlg)))))
+              (set! spec
+                    (TlsMasterSecretParameterSpec.
+                      preMasterSecret
+                      (bit-and-int majorVersion 0xFF)
+                      (bit-and-int minorVersion 0xFF)
+                      (.-randomBytes (.-clientHelloRandom context))
+                      (.-randomBytes (.-serverHelloRandom context))
+                      (.-name hashAlg)
+                      (.-hashLength hashAlg)
+                      (.-blockSize hashAlg))))
+          (try
+            (let [kg (KeyGenerator/getInstance masterAlg)] (.init kg spec) (.generateKey kg))
+            (catch [InvalidAlgorithmParameterException NoSuchAlgorithmException] iae
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "handshake"))
+                (SSLLogger/fine "RSA master secret generation error." iae))
+              (throw (ProviderException. iae)))))))))

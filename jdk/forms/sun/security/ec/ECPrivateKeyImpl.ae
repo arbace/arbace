@@ -1,0 +1,156 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ec/ECPrivateKeyImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ec)
+
+(import '(java.io IOException InvalidObjectException ObjectInputStream)
+        '(java.security InvalidKeyException ProviderException PublicKey)
+        '(java.security.interfaces ECPrivateKey)
+        '(java.security.spec ECParameterSpec ECPoint InvalidParameterSpecException)
+        '(java.util Arrays)
+        '(java.util.function Supplier)
+        '(sun.security.pkcs PKCS8Key)
+        '(sun.security.util ArrayUtil
+                            BitArray
+                            DerInputStream
+                            DerOutputStream
+                            DerValue
+                            ECParameters
+                            ECUtil)
+        '(sun.security.x509 AlgorithmId X509Key))
+
+(defclass ^:public ^:final ECPrivateKeyImpl
+  :extends PKCS8Key
+  :implements [ECPrivateKey]
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 88695385615075129)
+
+  (field ^:private ^BigInteger s)
+
+  (field ^:private ^byte/1 arrayS)
+
+  (field ^:private ^ECParameterSpec params)
+
+  (field ^:private ^byte/1 domainParams)
+
+  (field ^:private ^:final ^byte SEC1v2 1)
+
+  (constructor :throws [InvalidKeyException] [this ^byte/1 encoded]
+    (super. encoded)
+    (.parseKeyBits this))
+
+  (constructor :throws [InvalidKeyException] [this ^BigInteger s ^ECParameterSpec params]
+    (set! (.-s this) s)
+    (set! (.-params this) params)
+    (let [sArr (.toByteArray s)
+          numOctets (unchecked-divide-int (unchecked-add-int (.bitLength (.getOrder params)) 7) 8)
+          sOctets (new byte/1 numOctets)
+          inPos (^[int int] Math/max (unchecked-subtract-int (alength sArr) (alength sOctets)) 0)
+          outPos (^[int int] Math/max (unchecked-subtract-int (alength sOctets) (alength sArr)) 0)
+          length (Math/min (alength sArr) (alength sOctets))]
+      (System/arraycopy sArr inPos sOctets outPos length)
+      (Arrays/fill sArr (unchecked-byte 0))
+      (try (.makeEncoding this sOctets) (finally (Arrays/fill sOctets (unchecked-byte 0))))))
+
+  (constructor :throws [InvalidKeyException] [this ^byte/1 s ^ECParameterSpec params]
+    (set! (.-arrayS this) (.clone s))
+    (set! (.-params this) params)
+    (let [privBytes (.clone arrayS)]
+      (ArrayUtil/reverse privBytes)
+      (try (.makeEncoding this privBytes) (finally (Arrays/fill privBytes (unchecked-byte 0))))))
+
+  (method ^:private makeEncoding :throws [InvalidKeyException] ^void [this ^byte/1 privBytes]
+    (set! (.-algid this)
+          (AlgorithmId. AlgorithmId/EC_oid (ECParameters/getAlgorithmParameters params)))
+    (let [out (DerOutputStream.)]
+      (.putInteger out 1)
+      (.putOctetString out privBytes)
+      (let [val (DerValue/wrap DerValue/tag_Sequence out)]
+        (set! (.-privKeyMaterial this) (.toByteArray val))
+        (.clear val))))
+
+  (method ^:public getAlgorithm ^String [this] "EC")
+
+  (method ^:public getS ^BigInteger [this]
+    (when (nil? s)
+      (let [arrCopy (.clone arrayS)]
+        (ArrayUtil/reverse arrCopy)
+        (set! s (BigInteger. 1 arrCopy))
+        (Arrays/fill arrCopy (unchecked-byte 0))))
+    s)
+
+  (method ^:public getArrayS ^byte/1 [this]
+    (when (nil? arrayS) (set! arrayS (ECUtil/sArray (.getS this) params)))
+    arrayS)
+
+  (method ^:public getParams ^ECParameterSpec [this] params)
+
+  (method ^:private parseKeyBits :throws [InvalidKeyException] ^void [this]
+    (try
+      (let [in (DerInputStream. (.-privKeyMaterial this))
+            derValue (.getDerValue in)]
+        (when-not (== (.-tag derValue) DerValue/tag_Sequence)
+          (throw (IOException. "Not a SEQUENCE")))
+        (let [data (.-data derValue)
+              version (.getInteger data)]
+          (when-not (== version SEC1v2) (throw (IOException. "Version must be 1")))
+          (let [privData (.getOctetString data)]
+            (ArrayUtil/reverse privData)
+            (set! arrayS privData)
+            (let [algParams (.getParameters (.-algid this))]
+              (when (nil? algParams)
+                (throw (InvalidKeyException.
+                         "EC domain parameters must be encoded in the algorithm identifier")))
+              (set! params (cast ECParameterSpec (.getParameterSpec algParams ECParameterSpec)))
+              (when-not (== (.available data) 0)
+                (let [^:mutable value (.getDerValue data)]
+                  (when (.isContextSpecific value (unchecked-byte 0))
+                    (set! domainParams (.getDataBytes value))
+                    (when (== (.available data) 0) (return))
+                    (set! value (.getDerValue data)))
+                  (if (.isContextSpecific value (unchecked-byte 1))
+                      (let [bits (.withTag value DerValue/tag_BitString)]
+                        (set! (.-pubKeyEncoded this)
+                              (.getEncoded (X509Key.
+                                             (.-algid this)
+                                             (.getUnalignedBitString (.-data bits))))))
+                      (throw (InvalidKeyException. (java-str "Unexpected value: " value))))))))))
+      (catch [IOException InvalidParameterSpecException] e
+        (throw (InvalidKeyException. "Invalid EC private key" e)))))
+
+  (method ^:public calculatePublicKey ^PublicKey [this]
+    (let [ecParams (.getParams this)
+          ops (cast
+                ECOperations
+                (.orElseThrow (ECOperations/forParameters ecParams)
+                              (method-ref Supplier ^ProviderException [] ProviderException/new)))
+          pub (.multiply ops (.getGenerator ecParams) (.getArrayS this))
+          affPub (.asAffine pub)
+          w (ECPoint. (.asBigInteger (.getX affPub)) (.asBigInteger (.getY affPub)))]
+      (try
+        (ECPublicKeyImpl. w ecParams)
+        (catch InvalidKeyException e
+          (throw (ProviderException. "Unexpected error calculating public key" e))))))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream stream]
+    (throw (InvalidObjectException. "ECPrivateKeyImpl keys are not directly deserializable")))
+
+  (method ^:public ^:static parsePublicBits ^BitArray [^byte/1 privateBytes]
+    (let [^:mutable ^DerValue seq nil]
+      (try
+        (set! seq (DerValue. privateBytes))
+        (when (== (.-tag seq) DerValue/tag_Sequence)
+          (let [version (.getInteger (.-data seq))]
+            (when (== version 1)
+              (.getDerValue (.-data seq))
+              (when-not (== (.available (.-data seq)) 0)
+                (let [^:mutable derValue (.getDerValue (.-data seq))]
+                  (when (.isContextSpecific derValue (unchecked-byte 0))
+                    (when (== (.available (.-data seq)) 0) (return nil))
+                    (set! derValue (.getDerValue (.-data seq))))
+                  (when (.isContextSpecific derValue (unchecked-byte 1))
+                    (set! derValue (.getDerValue (.-data derValue)))
+                    (return (.getUnalignedBitString derValue))))))))
+        (catch IOException e (throw (IllegalArgumentException. e)))
+        (finally (when (some? seq) (.clear seq))))
+      nil)))

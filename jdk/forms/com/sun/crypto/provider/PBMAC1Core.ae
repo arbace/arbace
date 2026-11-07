@@ -1,0 +1,154 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/crypto/provider/PBMAC1Core.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.crypto.provider)
+
+(import '(java.security InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        NoSuchAlgorithmException
+                        ProviderException)
+        '(java.security.spec AlgorithmParameterSpec InvalidKeySpecException)
+        '(java.util Arrays)
+        '(javax.crypto SecretKey)
+        '(javax.crypto.spec PBEKeySpec PBEParameterSpec SecretKeySpec)
+        '(jdk.internal.access SharedSecrets))
+
+(defclass ^:abstract PBMAC1Core
+  :extends HmacCore
+
+  (field ^:private ^:final ^String kdfAlgo)
+
+  (field ^:private ^:final ^String hashAlgo)
+
+  (field ^:private ^:final ^int blockLength)
+
+  (constructor :throws [NoSuchAlgorithmException] [this ^String kdfAlgo ^String hashAlgo
+                                                   ^int blockLength]
+    (super. hashAlgo blockLength)
+    (set! (.-kdfAlgo this) kdfAlgo)
+    (set! (.-hashAlgo this) hashAlgo)
+    (set! (.-blockLength this) blockLength))
+
+  (method ^:private ^:static getKDFImpl ^PBKDF2Core [^String algo]
+    (let [^:mutable ^PBKDF2Core kdf nil]
+      (switch algo
+        "HmacSHA1" (set! kdf (PBKDF2Core$HmacSHA1.))
+        "HmacSHA224" (set! kdf (PBKDF2Core$HmacSHA224.))
+        "HmacSHA256" (set! kdf (PBKDF2Core$HmacSHA256.))
+        "HmacSHA384" (set! kdf (PBKDF2Core$HmacSHA384.))
+        "HmacSHA512" (set! kdf (PBKDF2Core$HmacSHA512.))
+        "HmacSHA512/224" (set! kdf (PBKDF2Core$HmacSHA512_224.))
+        "HmacSHA512/256" (set! kdf (PBKDF2Core$HmacSHA512_256.))
+        (throw (ProviderException. (java-str "No MAC implementation for " algo))))
+      kdf))
+
+  (method ^:protected engineInit :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                         ^Key key
+                                                                                                         ^AlgorithmParameterSpec params]
+    (let [^:mutable ^char/1 passwdChars nil
+          ^:mutable ^byte/1 salt nil
+          ^:mutable ^int iCount 0]
+      (cond
+        (instance? javax.crypto.interfaces.PBEKey key)
+          (let [pbeKey (cast javax.crypto.interfaces.PBEKey key)]
+            (set! passwdChars (.getPassword pbeKey))
+            (set! salt (.getSalt pbeKey))
+            (set! iCount (.getIterationCount pbeKey)))
+        (instance? SecretKey key)
+          (let [^:mutable ^byte/1 passwdBytes nil]
+            (when (or (not (.regionMatches (.getAlgorithm key) true 0 "PBE" 0 3))
+                      (nil? (set! passwdBytes (.getEncoded key))))
+              (throw (InvalidKeyException. "Missing password")))
+            (set! passwdChars (new char/1 (alength passwdBytes)))
+            (loop [^int i 0]
+              (when (< i (alength passwdChars))
+                (aset passwdChars i (unchecked-char (bit-and-int (aget passwdBytes i) 0x7f)))
+                (recur (unchecked-inc-int i))))
+            (Arrays/fill passwdBytes (unchecked-byte 0x00)))
+        :else (throw (InvalidKeyException. "SecretKey of PBE type required")))
+      (let [^:mutable ^PBEKeySpec pbeSpec nil]
+        (try
+          (cond
+            (nil? params)
+              (when (or (nil? salt) (== iCount 0))
+                (throw (InvalidAlgorithmParameterException.
+                         "PBEParameterSpec required for salt and iteration count")))
+            (not (instance? PBEParameterSpec params))
+              (throw (InvalidAlgorithmParameterException. "PBEParameterSpec type required"))
+            :else
+              (let [pbeParams (cast PBEParameterSpec params)]
+                (if (some? salt)
+                    (when-not (Arrays/equals salt (.getSalt pbeParams))
+                      (throw (InvalidAlgorithmParameterException.
+                               "Inconsistent value of salt between key and params")))
+                    (set! salt (.getSalt pbeParams)))
+                (if (not (== iCount 0))
+                    (when-not (== iCount (.getIterationCount pbeParams))
+                      (throw (InvalidAlgorithmParameterException.
+                               "Different iteration count between key and params")))
+                    (set! iCount (.getIterationCount pbeParams)))))
+          (when (< (alength salt) 8)
+            (throw (InvalidAlgorithmParameterException. "Salt must be at least 8 bytes long")))
+          (when (<= iCount 0)
+            (throw (InvalidAlgorithmParameterException. "IterationCount must be a positive number")))
+          (set! pbeSpec (PBEKeySpec. passwdChars salt iCount blockLength))
+          (finally (Arrays/fill passwdChars \u0000)))
+        (let [^:mutable ^PBKDF2KeyImpl s nil
+              ^:mutable ^byte/1 derivedKey nil
+              ^:mutable ^SecretKeySpec cipherKey nil]
+          (try
+            (let [kdf (PBMAC1Core/getKDFImpl kdfAlgo)]
+              (set! s (cast PBKDF2KeyImpl (.engineGenerateSecret kdf pbeSpec)))
+              (set! derivedKey (.getEncoded s))
+              (set! cipherKey (SecretKeySpec. derivedKey kdfAlgo))
+              (.engineInit super cipherKey nil))
+            (catch InvalidKeySpecException ikse
+              (throw (InvalidKeyException. "Cannot construct PBE key" ikse)))
+            (finally
+              (when (some? cipherKey)
+                (.clearSecretKeySpec (SharedSecrets/getJavaxCryptoSpecAccess) cipherKey))
+              (when (some? derivedKey) (Arrays/fill derivedKey (unchecked-byte 0)))
+              (when (some? s) (.clear s))
+              (.clearPassword pbeSpec)))))))
+
+  (defclass ^:public ^:static ^:final HmacSHA1
+    :extends PBMAC1Core
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. "HmacSHA1" "SHA1" 64)))
+
+  (defclass ^:public ^:static ^:final HmacSHA224
+    :extends PBMAC1Core
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. "HmacSHA224" "SHA-224" 64)))
+
+  (defclass ^:public ^:static ^:final HmacSHA256
+    :extends PBMAC1Core
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. "HmacSHA256" "SHA-256" 64)))
+
+  (defclass ^:public ^:static ^:final HmacSHA384
+    :extends PBMAC1Core
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. "HmacSHA384" "SHA-384" 128)))
+
+  (defclass ^:public ^:static ^:final HmacSHA512
+    :extends PBMAC1Core
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. "HmacSHA512" "SHA-512" 128)))
+
+  (defclass ^:public ^:static ^:final HmacSHA512_224
+    :extends PBMAC1Core
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. "HmacSHA512/224" "SHA-512/224" 128)))
+
+  (defclass ^:public ^:static ^:final HmacSHA512_256
+    :extends PBMAC1Core
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. "HmacSHA512/256" "SHA-512/256" 128))))

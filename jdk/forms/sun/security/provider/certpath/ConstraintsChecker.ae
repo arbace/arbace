@@ -1,0 +1,141 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/certpath/ConstraintsChecker.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider.certpath)
+
+(import '(java.io IOException)
+        '(java.security.cert CertPathValidatorException
+                             Certificate
+                             CertificateException
+                             PKIXCertPathChecker
+                             PKIXReason
+                             X509Certificate)
+        '(java.util Collection Collections HashSet Set)
+        '(sun.security.util Debug)
+        '(sun.security.x509 NameConstraintsExtension PKIXExtensions X509CertImpl))
+
+(defclass ConstraintsChecker
+  :extends PKIXCertPathChecker
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "certpath"))
+
+  (field ^:private ^:final ^int certPathLength)
+
+  (field ^:private ^int maxPathLength)
+
+  (field ^:private ^int i)
+
+  (field ^:private ^NameConstraintsExtension prevNC)
+
+  (field ^:private ^{:tag (Set String)} supportedExts)
+
+  (constructor [this ^int certPathLength]
+    (set! (.-certPathLength this) certPathLength))
+
+  (method ^:public init :throws [CertPathValidatorException] ^void [this ^boolean forward]
+    (if (not forward)
+        (do (set! i 0) (set! maxPathLength certPathLength) (set! prevNC nil))
+        (throw (CertPathValidatorException. "forward checking not supported"))))
+
+  (method ^:public isForwardCheckingSupported ^boolean [this] false)
+
+  (method ^:public getSupportedExtensions ^{:tag (Set String)} [this]
+    (when (nil? supportedExts)
+      (set! supportedExts (HashSet/newHashSet 2))
+      (.add supportedExts (.toString PKIXExtensions/BasicConstraints_Id))
+      (.add supportedExts (.toString PKIXExtensions/NameConstraints_Id))
+      (set! supportedExts (Collections/unmodifiableSet supportedExts)))
+    supportedExts)
+
+  (method ^:public check :throws [CertPathValidatorException] ^void [this ^Certificate cert
+                                                                     ^{:tag (Collection String)} unresCritExts]
+    (let [currCert (cast X509Certificate cert)]
+      (set! i (unchecked-inc-int i))
+      (.checkBasicConstraints this currCert)
+      (.verifyNameConstraints this currCert)
+      (when (and (some? unresCritExts) (not (.isEmpty unresCritExts)))
+        (.remove unresCritExts (.toString PKIXExtensions/BasicConstraints_Id))
+        (.remove unresCritExts (.toString PKIXExtensions/NameConstraints_Id)))))
+
+  (method ^:private verifyNameConstraints :throws [CertPathValidatorException] ^void [this
+                                                                                      ^X509Certificate currCert]
+    (let [msg "name constraints"]
+      (when (some? debug) (.println debug (java-str "---checking " msg "...")))
+      (when (and (some? prevNC)
+                 (or (== i certPathLength) (not (X509CertImpl/isSelfIssued currCert))))
+        (when (some? debug)
+          (.println debug
+                    (java-str "prevNC = " prevNC ", currDN = " (.getSubjectX500Principal currCert))))
+        (try
+          (when-not (.verify prevNC currCert)
+            (throw (CertPathValidatorException. (java-str msg " check failed")
+                                                nil
+                                                nil
+                                                -1
+                                                PKIXReason/INVALID_NAME)))
+          (catch IOException ioe (throw (CertPathValidatorException. ioe)))))
+      (set! prevNC (ConstraintsChecker/mergeNameConstraints currCert prevNC))
+      (when (some? debug) (.println debug (java-str msg " verified.")))))
+
+  (method ^:static mergeNameConstraints :throws [CertPathValidatorException] ^NameConstraintsExtension [^X509Certificate currCert
+                                                                                                        ^NameConstraintsExtension prevNC]
+    (let [^:mutable ^X509CertImpl currCertImpl nil]
+      (try
+        (set! currCertImpl (X509CertImpl/toImpl currCert))
+        (catch CertificateException ce (throw (CertPathValidatorException. ce))))
+      (let [newConstraints (.getNameConstraintsExtension currCertImpl)]
+        (when (some? debug)
+          (.println debug (java-str "prevNC = " prevNC ", newNC = " newConstraints)))
+        (if (nil? prevNC)
+            (do
+              (when (some? debug) (.println debug (java-str "mergedNC = " newConstraints)))
+              (when (some? newConstraints) (cast NameConstraintsExtension (.clone newConstraints))))
+            (do
+              (try
+                (.merge prevNC newConstraints)
+                (catch IOException ioe (throw (CertPathValidatorException. ioe))))
+              (when (some? debug) (.println debug (java-str "mergedNC = " prevNC)))
+              prevNC)))))
+
+  (method ^:private checkBasicConstraints :throws [CertPathValidatorException] ^void [this
+                                                                                      ^X509Certificate currCert]
+    (let [msg "basic constraints"]
+      (when (some? debug)
+        (.println debug (java-str "---checking " msg "..."))
+        (.println debug (java-str "i = " i ", maxPathLength = " maxPathLength)))
+      (when (< i certPathLength)
+        (let [^:mutable ^int pathLenConstraint -1]
+          (if (< (.getVersion currCert) 3)
+              (when (== i 1)
+                (when (X509CertImpl/isSelfIssued currCert)
+                  (set! pathLenConstraint Integer/MAX_VALUE)))
+              (set! pathLenConstraint (.getBasicConstraints currCert)))
+          (when (== pathLenConstraint -1)
+            (throw (CertPathValidatorException.
+                     (java-str msg " check failed: this is not a CA certificate")
+                     nil
+                     nil
+                     -1
+                     PKIXReason/NOT_CA_CERT)))
+          (when-not (X509CertImpl/isSelfIssued currCert)
+            (when (<= maxPathLength 0)
+              (throw
+                (CertPathValidatorException.
+                  (java-str
+                    msg
+                    " check failed: pathLenConstraint violated - this cert must be the last cert in the certification path")
+                  nil
+                  nil
+                  -1
+                  PKIXReason/PATH_TOO_LONG)))
+            (set! maxPathLength (unchecked-dec-int maxPathLength)))
+          (when (< pathLenConstraint maxPathLength) (set! maxPathLength pathLenConstraint))))
+      (when (some? debug)
+        (.println debug (java-str "after processing, maxPathLength = " maxPathLength))
+        (.println debug (java-str msg " verified.")))))
+
+  (method ^:static mergeBasicConstraints ^int [^X509Certificate cert ^:mutable ^int maxPathLength]
+    (let [pathLenConstraint (.getBasicConstraints cert)]
+      (when-not (X509CertImpl/isSelfIssued cert)
+        (set! maxPathLength (unchecked-dec-int maxPathLength)))
+      (when (< pathLenConstraint maxPathLength) (set! maxPathLength pathLenConstraint))
+      maxPathLength)))

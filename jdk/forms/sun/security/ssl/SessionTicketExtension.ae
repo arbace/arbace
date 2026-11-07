@@ -1,0 +1,353 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SessionTicketExtension.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io ByteArrayInputStream ByteArrayOutputStream IOException)
+        '(java.nio ByteBuffer)
+        '(java.security NoSuchAlgorithmException)
+        '(java.text MessageFormat)
+        '(java.util Locale)
+        '(java.util.zip GZIPInputStream GZIPOutputStream)
+        '(javax.crypto Cipher KeyGenerator SecretKey)
+        '(javax.crypto.spec GCMParameterSpec)
+        '(javax.net.ssl SSLProtocolException SSLSessionContext)
+        '(sun.security.util HexDumpEncoder))
+
+(defclass ^:final SessionTicketExtension
+  (field ^:static ^:final ^HandshakeProducer chNetworkProducer (T12CHSessionTicketProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer chOnLoadConsumer
+    (T12CHSessionTicketConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer shNetworkProducer (T12SHSessionTicketProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer shOnLoadConsumer
+    (T12SHSessionTicketConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence shOnLoadAbsence (T12SHSessionTicketOnLoadAbsence.))
+
+  (field ^:static ^:final ^SSLStringizer steStringizer (SessionTicketStringizer.))
+
+  (field ^:static ^:final ^int MIN_COMPRESS_SIZE 600)
+
+  (field ^:private ^:static ^:final ^int TIMEOUT_DEFAULT (unchecked-multiply-int 3600 1000))
+
+  (field ^:private ^:static ^:final ^int keyTimeout)
+
+  (field ^:private ^:static ^:final ^int KEYLEN 256)
+
+  (static-initializer
+    (let [s (System/getProperty "jdk.tls.server.statelessKeyTimeout")]
+      (if (some? s)
+          (let [^:mutable ^int kt 0]
+            (try
+              (set! kt (unchecked-multiply-int (Integer/parseInt s) 1000))
+              (when (or (< kt 0) (> kt NewSessionTicket/MAX_TICKET_LIFETIME))
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                  (SSLLogger/warning
+                    (java-str "Invalid timeout for jdk.tls.server.statelessKeyTimeout: "
+                              kt
+                              ".  Set to default value "
+                              TIMEOUT_DEFAULT
+                              "sec")))
+                (set! kt TIMEOUT_DEFAULT))
+              (catch NumberFormatException e
+                (set! kt TIMEOUT_DEFAULT)
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                  (SSLLogger/warning
+                    (java-str "Invalid timeout for jdk.tls.server.statelessKeyTimeout: "
+                              s
+                              ".  Set to default value "
+                              TIMEOUT_DEFAULT
+                              "sec")))))
+            (set! keyTimeout kt))
+          (set! keyTimeout TIMEOUT_DEFAULT))))
+
+  (defclass ^:static ^:final StatelessKey
+    (field ^:final ^long timeout)
+
+    (field ^:final ^SecretKey key)
+
+    (field ^:final ^int num)
+
+    (constructor [this ^HandshakeContext hc ^int num]
+      (let [^:mutable ^SecretKey k nil]
+        (try
+          (let [kg (KeyGenerator/getInstance "AES")]
+            (.init kg KEYLEN (.getSecureRandom (.-sslContext hc)))
+            (set! k (.generateKey kg)))
+          (catch NoSuchAlgorithmException e))
+        (set! key k)
+        (set! timeout (unchecked-add (System/currentTimeMillis) keyTimeout))
+        (set! (.-num this) num)))
+
+    (method isExpired ^boolean [this]
+      (> (System/currentTimeMillis) timeout))
+
+    (method isInvalid ^boolean [this ^SSLSessionContext sslSessionContext]
+      (let [sessionTimeout (unchecked-multiply-int (.getSessionTimeout sslSessionContext) 1000)]
+        (> (System/currentTimeMillis) (unchecked-add timeout sessionTimeout)))))
+
+  (defclass ^:private ^:static ^:final KeyState
+    (method ^:static getKey ^StatelessKey [^HandshakeContext hc ^int num]
+      (let [serverCache (cast SSLSessionContextImpl
+                              (.engineGetServerSessionContext (.-sslContext hc)))
+            ssk (.getKey serverCache num)]
+        (when-not (or (nil? ssk) (.isInvalid ssk serverCache)) ssk)))
+
+    (method ^:static getCurrentKey ^StatelessKey [^HandshakeContext hc]
+      (let [serverCache (cast SSLSessionContextImpl
+                              (.engineGetServerSessionContext (.-sslContext hc)))]
+        (.getKey serverCache hc))))
+
+  (defclass ^:static ^:final SessionTicketSpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:private ^:static ^:final ^int GCM_TAG_LEN 128)
+
+    (field ^ByteBuffer data)
+
+    (field ^:static ^:final ^ByteBuffer zero (ByteBuffer/wrap (new byte/1 0)))
+
+    (constructor [this] (set! data zero))
+
+    (constructor :throws [IOException] [this ^HandshakeContext hc ^byte/1 b]
+      (this. hc (ByteBuffer/wrap b)))
+
+    (constructor :throws [IOException] [this ^HandshakeContext hc ^ByteBuffer buf]
+      (when (nil? buf)
+        (throw (.fatal (.-conContext hc)
+                       Alert/DECODE_ERROR
+                       (SSLProtocolException. "SessionTicket buffer too small"))))
+      (when (> (.remaining buf) 65536)
+        (throw (.fatal (.-conContext hc)
+                       Alert/DECODE_ERROR
+                       (SSLProtocolException.
+                         (java-str "SessionTicket buffer too large. " (.remaining buf))))))
+      (set! data buf))
+
+    (method encrypt ^byte/1 [this ^HandshakeContext hc ^SSLSessionImpl session]
+      (let [^:mutable ^byte/1 encrypted nil]
+        (if (or (not (.-statelessResumption hc)) (not (.isStatelessable (.-handshakeSession hc))))
+            (new byte/1 0)
+            (try
+              (let [key (KeyState/getCurrentKey hc)
+                    iv (new byte/1 16)
+                    random (.getSecureRandom (.-sslContext hc))]
+                (.nextBytes random iv)
+                (let [c (Cipher/getInstance "AES/GCM/NoPadding")]
+                  (.init c Cipher/ENCRYPT_MODE (.-key key) (GCMParameterSpec. GCM_TAG_LEN iv))
+                  (let [^:mutable data (.write session)]
+                    (if (== (alength data) 0)
+                        data
+                        (let [^:mutable ^byte compressed 0]
+                          (when (>= (alength data) MIN_COMPRESS_SIZE)
+                            (set! data (SessionTicketSpec/compress data))
+                            (set! compressed 1))
+                          (let [aad (ByteBuffer/allocate (unchecked-add-int Integer/BYTES 1))]
+                            (.put (.putInt aad (.-num key)) compressed)
+                            (.updateAAD c aad)
+                            (set! encrypted (.doFinal c data))
+                            (let [result (new byte/1
+                                              (unchecked-add-int
+                                                (unchecked-add-int
+                                                  (unchecked-add-int
+                                                    (alength encrypted)
+                                                    Integer/BYTES)
+                                                  (alength iv))
+                                                1))]
+                              (aset result
+                                    0
+                                    (unchecked-byte (unsigned-bit-shift-right-int (.-num key) 24)))
+                              (aset result
+                                    1
+                                    (unchecked-byte (unsigned-bit-shift-right-int (.-num key) 16)))
+                              (aset result
+                                    2
+                                    (unchecked-byte (unsigned-bit-shift-right-int (.-num key) 8)))
+                              (aset result 3 (unchecked-byte (.-num key)))
+                              (System/arraycopy iv 0 result Integer/BYTES (alength iv))
+                              (aset result
+                                    (unchecked-add-int Integer/BYTES (alength iv))
+                                    compressed)
+                              (System/arraycopy encrypted
+                                                0
+                                                result
+                                                (unchecked-add-int
+                                                  (unchecked-add-int Integer/BYTES (alength iv))
+                                                  1)
+                                                (alength encrypted))
+                              result)))))))
+              (catch Exception e
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                  (SSLLogger/fine (java-str "Encryption failed." e)))
+                (new byte/1 0))))))
+
+    (method decrypt ^ByteBuffer [this ^HandshakeContext hc]
+      (let [^:mutable ^int keyID 0
+            ^:mutable ^byte/1 iv nil]
+        (try
+          (set! keyID (.getInt data))
+          (let [key (KeyState/getKey hc keyID)]
+            (when (nil? key) (return nil))
+            (set! iv (new byte/1 16))
+            (.get data iv)
+            (let [c (Cipher/getInstance "AES/GCM/NoPadding")]
+              (.init c Cipher/DECRYPT_MODE (.-key key) (GCMParameterSpec. GCM_TAG_LEN iv))
+              (let [compressed (.get data)
+                    aad (ByteBuffer/allocate (unchecked-add-int Integer/BYTES 1))]
+                (.put (.putInt aad keyID) compressed)
+                (.updateAAD c aad)
+                (let [^:mutable out (ByteBuffer/allocate (.getOutputSize c (.remaining data)))]
+                  (.doFinal c data out)
+                  (.flip out)
+                  (when (== compressed 1) (set! out (SessionTicketSpec/decompress out)))
+                  (return out)))))
+          (catch Exception e
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine (java-str "Decryption failed." e)))))
+        nil))
+
+    (method ^:private ^:static compress :throws [IOException] ^byte/1 [^byte/1 input]
+      (with-resources [baos (ByteArrayOutputStream.)
+                       gos (GZIPOutputStream. baos)]
+        (let [decompressedLen (alength input)]
+          (.write gos input 0 decompressedLen)
+          (.finish gos)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine
+              (java-str "decompressed bytes: " decompressedLen "; compressed bytes: " (.size baos))))
+          (.toByteArray baos))))
+
+    (method ^:private ^:static decompress :throws [IOException] ^ByteBuffer [^ByteBuffer input]
+      (let [compressedLen (.remaining input)
+            bytes (new byte/1 compressedLen)]
+        (.get input bytes)
+        (with-resources [gis (GZIPInputStream. (ByteArrayInputStream. bytes))]
+          (let [out (.readAllBytes gis)]
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine
+                (java-str "compressed bytes: " compressedLen "; decompressed bytes: " (alength out))))
+            (ByteBuffer/wrap out)))))
+
+    (method getEncoded ^byte/1 [this]
+      (let [out (new byte/1 (.capacity data))] (.get (.duplicate data) out) out))
+
+    (method ^:public toString ^String [this]
+      (cond
+        (nil? data) "<null>"
+        (== (.capacity data) 0) "<empty>"
+        :else
+          (let [messageFormat (MessageFormat. "  \"ticket\" : '{'\n{0}\n  '}'" Locale/ENGLISH)
+                hexEncoder (HexDumpEncoder.)
+                messageFields (new
+                                Object/1
+                                [(Utilities/indent (.encode hexEncoder (.duplicate data)) "    ")])]
+            (.format messageFormat messageFields)))))
+
+  (defclass ^:static ^:final SessionTicketStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (try (.toString (SessionTicketSpec. hc buffer)) (catch IOException e (.getMessage e)))))
+
+  (defclass ^:private ^:static ^:final T12CHSessionTicketProducer
+    :implements [HandshakeProducer]
+
+    (constructor [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (if (not
+              (.statelessEnabled
+                (cast SSLSessionContextImpl (.engineGetClientSessionContext (.-sslContext chc)))))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Stateless resumption not supported"))
+              nil)
+            (do
+              (set! (.-statelessResumption chc) true)
+              (if (or (or (or (not (.-isResumption chc)) (nil? (.-resumingSession chc)))
+                          (nil? (.getPskIdentity (.-resumingSession chc))))
+                      (.useTLS13PlusSpec (.getProtocolVersion (.-resumingSession chc))))
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/fine "Stateless resumption supported"))
+                    (new byte/1 0))
+                  (do
+                    (SignatureScheme/updateHandshakeLocalSupportedAlgs chc)
+                    (.getPskIdentity (.-resumingSession chc)))))))))
+
+  (defclass ^:private ^:static ^:final T12CHSessionTicketConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when-not (not (.isAvailable (.-sslConfig shc) SSLExtension/CH_SESSION_TICKET))
+          (when-not (.-statelessResumption shc)
+            (let [cache (cast SSLSessionContextImpl
+                              (.engineGetServerSessionContext (.-sslContext shc)))]
+              (when-not (not (.statelessEnabled cache))
+                (set! (.-statelessResumption shc) true)
+                (if (== (.remaining buffer) 0)
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/fine "Client accepts session tickets."))
+                    (let [spec (SessionTicketSpec. shc buffer)
+                          b (.decrypt spec shc)]
+                      (cond
+                        (some? b)
+                          (do
+                            (set! (.-resumingSession shc) (SSLSessionImpl. shc b))
+                            (set! (.-isResumption shc) true)
+                            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                              (SSLLogger/fine "Valid stateless session ticket found")))
+                        (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                          (SSLLogger/fine "Invalid stateless session ticket found")))))))))))
+
+  (defclass ^:private ^:static ^:final T12SHSessionTicketProducer
+    :implements [HandshakeProducer]
+
+    (constructor [this])
+
+    (method ^:public produce ^byte/1 [this ^ConnectionContext context
+                                      ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when-not (not (.-statelessResumption shc))
+          (let [cache (cast SSLSessionContextImpl
+                            (.engineGetServerSessionContext (.-sslContext shc)))]
+            (if (.statelessEnabled cache)
+                (new byte/1 0)
+                (do (set! (.-statelessResumption shc) false) nil)))))))
+
+  (defclass ^:private ^:static ^:final T12SHSessionTicketConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [chc (cast ClientHandshakeContext context)]
+        (cond
+          (not (.isAvailable (.-sslConfig chc) SSLExtension/SH_SESSION_TICKET))
+            (set! (.-statelessResumption chc) false)
+          (not (.statelessEnabled
+                 (cast SSLSessionContextImpl (.engineGetClientSessionContext (.-sslContext chc)))))
+            (set! (.-statelessResumption chc) false)
+          :else (let [spec (SessionTicketSpec. chc buffer)] (set! (.-statelessResumption chc) true))))))
+
+  (defclass ^:private ^:static ^:final T12SHSessionTicketOnLoadAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent ^void [this ^ConnectionContext context
+                                   ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (when (.-statelessResumption chc)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/info "Server doesn't support stateless resumption"))
+          (set! (.-statelessResumption chc) false))))))

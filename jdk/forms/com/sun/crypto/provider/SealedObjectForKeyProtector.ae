@@ -1,0 +1,85 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/crypto/provider/SealedObjectForKeyProtector.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.crypto.provider)
+
+(import '(java.io IOException
+                  InvalidClassException
+                  ObjectInputFilter
+                  ObjectInputFilter$Config
+                  ObjectInputFilter$FilterInfo
+                  ObjectInputFilter$Status
+                  Serializable)
+        '(java.security AlgorithmParameters Key NoSuchAlgorithmException Security)
+        '(javax.crypto BadPaddingException Cipher IllegalBlockSizeException SealedObject)
+        '(jdk.internal.access SharedSecrets))
+
+(defclass ^:final SealedObjectForKeyProtector
+  :extends SealedObject
+
+  (field ^:static ^:final ^long serialVersionUID -3650226485480866989)
+
+  (field ^:private ^:static ^:final ^String KEY_SERIAL_FILTER "jceks.key.serialFilter")
+
+  (constructor :throws [IOException IllegalBlockSizeException] [this ^Serializable object ^Cipher c]
+    (super. object c))
+
+  (constructor [this ^SealedObject so] (super. so))
+
+  (method getParameters ^AlgorithmParameters [this]
+    (let [^:mutable ^AlgorithmParameters params nil]
+      (when (some? (.-encodedParams super))
+        (try
+          (set! params (AlgorithmParameters/getInstance "PBE" (SunJCE/getInstance)))
+          (.init params (.-encodedParams super))
+          (catch NoSuchAlgorithmException nsae
+            (throw (RuntimeException. "SunJCE provider is not configured properly")))
+          (catch IOException io
+            (throw (RuntimeException. (java-str "Parameter failure: " (.getMessage io)))))))
+      params))
+
+  (method ^:final getKey :throws [IOException
+                                  ClassNotFoundException
+                                  IllegalBlockSizeException
+                                  BadPaddingException] ^Key [this ^Cipher c ^int maxLength]
+    (with-resources [ois (.getExtObjectInputStream
+                           (SharedSecrets/getJavaxCryptoSealedObjectAccess)
+                           this
+                           c)]
+      (.setObjectInputFilter ois (DeserializationChecker. maxLength))
+      (try
+        (let [t (cast Key (.readObject ois))] t)
+        (catch InvalidClassException ice
+          (let [msg (.getMessage ice)]
+            (if (.contains msg "REJECTED")
+                (throw (IOException.
+                         "Rejected by the jceks.key.serialFilter or jdk.serialFilter property"
+                         ice))
+                (throw ice)))))))
+
+  (defclass ^:private ^:static DeserializationChecker
+    :implements [ObjectInputFilter]
+
+    (field ^:private ^:static ^:final ^ObjectInputFilter OWN_FILTER)
+
+    (static-initializer
+      (let [prop (System/getProperty KEY_SERIAL_FILTER (Security/getProperty KEY_SERIAL_FILTER))]
+        (set! OWN_FILTER (when (some? prop) (ObjectInputFilter$Config/createFilter prop)))))
+
+    (field ^:private ^:final ^int maxLength)
+
+    (constructor ^:private [this ^int maxLength]
+      (set! (.-maxLength this) maxLength))
+
+    (method ^:public checkInput ^ObjectInputFilter$Status [this ^ObjectInputFilter$FilterInfo info]
+      (cond
+        (> (.arrayLength info) maxLength) ObjectInputFilter$Status/REJECTED
+        (identical? (.serialClass info) Object) ObjectInputFilter$Status/UNDECIDED
+        :else
+          (do
+            (when (some? OWN_FILTER)
+              (let [result (.checkInput OWN_FILTER info)]
+                (when-not (identical? result ObjectInputFilter$Status/UNDECIDED) (return result))))
+            (let [defaultFilter (ObjectInputFilter$Config/getSerialFilter)]
+              (if (some? defaultFilter)
+                  (.checkInput defaultFilter info)
+                  ObjectInputFilter$Status/UNDECIDED)))))))

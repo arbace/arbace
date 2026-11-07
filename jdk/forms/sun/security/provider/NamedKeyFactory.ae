@@ -1,0 +1,170 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/NamedKeyFactory.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.security AsymmetricKey InvalidKeyException Key KeyFactorySpi PrivateKey PublicKey)
+        '(java.security.spec EncodedKeySpec
+                             InvalidKeySpecException
+                             KeySpec
+                             NamedParameterSpec
+                             PKCS8EncodedKeySpec
+                             X509EncodedKeySpec)
+        '(java.util Arrays)
+        '(sun.security.pkcs NamedPKCS8Key NamedPKCS8Key$Expander)
+        '(sun.security.util RawKeySpec)
+        '(sun.security.x509 NamedX509Key))
+
+(defclass ^:public ^:abstract NamedKeyFactory
+  :extends KeyFactorySpi
+
+  (field ^:private ^:final ^String fname)
+
+  (field ^:private ^:final ^String/1 pnames)
+
+  (constructor ^:protected [this ^String fname & ^String/1 pnames]
+    (when (nil? fname) (throw (AssertionError. "fname cannot be null")))
+    (when (or (nil? pnames) (== (alength pnames) 0))
+      (throw (AssertionError. "pnames cannot be null or empty")))
+    (set! (.-fname this) fname)
+    (set! (.-pnames this) pnames))
+
+  (method ^:private checkName :throws [InvalidKeyException] ^String [this ^String pname]
+    (for-each [^String n pnames] (when (.equalsIgnoreCase n pname) (return n)))
+    (throw (InvalidKeyException. (java-str "Unsupported parameter set name: " pname))))
+
+  (method ^:protected engineGeneratePublic :throws [InvalidKeySpecException] ^PublicKey [this
+                                                                                         ^KeySpec keySpec]
+    (switch keySpec
+      [^X509EncodedKeySpec xspec]
+        (try
+          (.fromX509 this (.getEncoded xspec))
+          (catch InvalidKeyException e (throw (InvalidKeySpecException. e))))
+      [^RawKeySpec rks]
+        (if (== (alength pnames) 1)
+            (NamedX509Key. fname (aget pnames 0) (.getKeyArr rks))
+            (throw (InvalidKeySpecException. "Parameter set name unavailable")))
+      [^EncodedKeySpec espec :when (.equalsIgnoreCase (.getFormat espec) "RAW")]
+        (if (== (alength pnames) 1)
+            (NamedX509Key. fname (aget pnames 0) (.getEncoded espec))
+            (throw (InvalidKeySpecException. "Parameter set name unavailable")))
+      nil (throw (InvalidKeySpecException. "keySpec must not be null"))
+      (throw (InvalidKeySpecException. (java-str (.getName (.getClass keySpec)) " not supported.")))))
+
+  (method ^:protected engineGeneratePrivate :throws [InvalidKeySpecException] ^PrivateKey [this
+                                                                                           ^KeySpec keySpec]
+    (switch keySpec
+      [^PKCS8EncodedKeySpec pspec]
+        (let [bytes (.getEncoded pspec)]
+          (try
+            (.fromPKCS8 this bytes)
+            (catch InvalidKeyException e (throw (InvalidKeySpecException. e)))
+            (finally (Arrays/fill bytes (unchecked-byte 0)))))
+      [^RawKeySpec rks]
+        (if (== (alength pnames) 1)
+            (let [raw (.getKeyArr rks)]
+              (try
+                (.fromRaw this (aget pnames 0) raw)
+                (catch InvalidKeyException e
+                  (throw (InvalidKeySpecException. "Invalid key input" e)))))
+            (throw (InvalidKeySpecException. "Parameter set name unavailable")))
+      [^EncodedKeySpec espec :when (.equalsIgnoreCase (.getFormat espec) "RAW")]
+        (if (== (alength pnames) 1)
+            (let [raw (.getEncoded espec)]
+              (try
+                (.fromRaw this (aget pnames 0) raw)
+                (catch InvalidKeyException e
+                  (throw (InvalidKeySpecException. "Invalid key input" e)))))
+            (throw (InvalidKeySpecException. "Parameter set name unavailable")))
+      nil (throw (InvalidKeySpecException. "keySpec must not be null"))
+      (throw (InvalidKeySpecException. (java-str (.getName (.getClass keySpec)) " not supported.")))))
+
+  (method ^:private fromRaw :throws [InvalidKeyException] ^PrivateKey [this ^String pname
+                                                                       ^byte/1 raw]
+    (NamedPKCS8Key/internalCreate fname pname raw (.implExpand this pname raw)))
+
+  (method ^:private fromPKCS8 :throws [InvalidKeyException] ^PrivateKey [this ^byte/1 bytes]
+    (let [k (NamedPKCS8Key. fname
+                            bytes
+                            (method-ref NamedPKCS8Key$Expander this NamedKeyFactory/.implExpand))]
+      (.checkName this (.getName (.getParams k)))
+      k))
+
+  (method ^:private fromX509 :throws [InvalidKeyException] ^PublicKey [this ^byte/1 bytes]
+    (let [k (NamedX509Key. fname bytes)] (.checkName this (.getName (.getParams k))) k))
+
+  (defclass ^:private ^:static RawEncodedKeySpec
+    :extends EncodedKeySpec
+
+    (constructor ^:public [this ^byte/1 encodedKey] (super. encodedKey))
+
+    (method ^:public getFormat ^String [this] "RAW"))
+
+  (method ^:protected engineGetKeySpec :type-params [(T extends KeySpec)] :throws [InvalidKeySpecException] ^T [this
+                                                                                                                ^:mutable ^Key key
+                                                                                                                ^{:tag (Class T)} keySpec]
+    (try
+      (set! key (.toNamedKey this key))
+      (catch InvalidKeyException e (throw (InvalidKeySpecException. e))))
+    (if-instance [^NamedPKCS8Key nk key]
+      (let [^:mutable ^byte/1 bytes nil]
+        (try
+          (cond
+            (identical? keySpec PKCS8EncodedKeySpec)
+              (return (cast KeySpec
+                            (.cast keySpec (PKCS8EncodedKeySpec. (set! bytes (.getEncoded key))))))
+            (identical? keySpec RawKeySpec)
+              (return (cast KeySpec (.cast keySpec (RawKeySpec. (.getRawBytes nk)))))
+            (.isAssignableFrom keySpec EncodedKeySpec)
+              (return (cast KeySpec (.cast keySpec (RawEncodedKeySpec. (.getRawBytes nk)))))
+            :else (throw (InvalidKeySpecException. (java-str "Unsupported type: " keySpec))))
+          (finally (when (some? bytes) (Arrays/fill bytes (unchecked-byte 0))))))
+      (when-instance [^NamedX509Key nk key]
+        (cond
+          (and (identical? keySpec X509EncodedKeySpec) (.equalsIgnoreCase (.getFormat key) "X.509"))
+            (return (cast KeySpec (.cast keySpec (X509EncodedKeySpec. (.getEncoded key)))))
+          (identical? keySpec RawKeySpec)
+            (return (cast KeySpec (.cast keySpec (RawKeySpec. (.getRawBytes nk)))))
+          (.isAssignableFrom keySpec EncodedKeySpec)
+            (return (cast KeySpec (.cast keySpec (RawEncodedKeySpec. (.getRawBytes nk)))))
+          :else (throw (InvalidKeySpecException. (java-str "Unsupported type: " keySpec))))))
+    (throw (AssertionError. (java-str "No " (.getName keySpec) " for " (.getClass key)))))
+
+  (method ^:protected engineTranslateKey :throws [InvalidKeyException] ^Key [this ^Key key]
+    (.toNamedKey this key))
+
+  (method ^:protected toNamedKey :throws [InvalidKeyException] ^Key [this ^Key key]
+    (when (nil? key) (throw (InvalidKeyException. "Key must not be null")))
+    (if-instance [^NamedX509Key nk key]
+      (do (.checkName this (.getName (.getParams nk))) key)
+      (if-instance [^NamedPKCS8Key nk key]
+        (do (.checkName this (.getName (.getParams nk))) key)
+        (let [format (.getFormat key)]
+          (cond
+            (nil? format) (throw (InvalidKeyException. "Unextractable key"))
+            (.equalsIgnoreCase format "RAW")
+              (let [kAlg (.getAlgorithm key)]
+                (if-instance [^AsymmetricKey pk key]
+                  (let [^:mutable ^String pname nil]
+                    (if-instance [^NamedParameterSpec nps (.getParams pk)]
+                      (set! pname (.checkName this (.getName nps)))
+                      (if (.equalsIgnoreCase kAlg fname)
+                          (if (== (alength pnames) 1)
+                              (set! pname (aget pnames 0))
+                              (throw (InvalidKeyException. "No parameter set info")))
+                          (set! pname (.checkName this kAlg))))
+                    (let [raw (.getEncoded key)]
+                      (if (instance? PrivateKey key)
+                          ^Key (.fromRaw this pname raw)
+                          ^Key (NamedX509Key. fname pname raw))))
+                  (throw (InvalidKeyException. (java-str "Unsupported key type: " (.getClass key))))))
+            (and (.equalsIgnoreCase format "PKCS#8") (instance? PrivateKey key))
+              (let [bytes (.getEncoded key)]
+                (try (.fromPKCS8 this bytes) (finally (Arrays/fill bytes (unchecked-byte 0)))))
+            (and (.equalsIgnoreCase format "X.509") (instance? PublicKey key))
+              (.fromX509 this (.getEncoded key))
+            :else
+              (throw (InvalidKeyException. (java-str "Unsupported key format: " (.getFormat key)))))))))
+
+  (method ^:protected ^:abstract implExpand :throws [InvalidKeyException] ^byte/1 [this
+                                                                                   ^String pname
+                                                                                   ^byte/1 input]))

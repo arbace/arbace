@@ -1,0 +1,183 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/rsa/RSAKeyPairGenerator.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.rsa)
+
+(import '(java.security InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        InvalidParameterException
+                        KeyPair
+                        KeyPairGeneratorSpi
+                        PrivateKey
+                        ProviderException
+                        PublicKey
+                        SecureRandom)
+        '(java.security.spec AlgorithmParameterSpec RSAKeyGenParameterSpec)
+        '(sun.security.jca JCAUtil)
+        '(sun.security.util SecurityProviderConstants))
+
+(defclass ^:abstract RSAKeyPairGenerator
+  :extends KeyPairGeneratorSpi
+
+  (field ^:private ^:static ^:final ^BigInteger SQRT_2048)
+
+  (field ^:private ^:static ^:final ^BigInteger SQRT_3072)
+
+  (field ^:private ^:static ^:final ^BigInteger SQRT_4096)
+
+  (static-initializer
+    (set! SQRT_2048 (.sqrt (.pow BigInteger/TWO 2047)))
+    (set! SQRT_3072 (.sqrt (.pow BigInteger/TWO 3071)))
+    (set! SQRT_4096 (.sqrt (.pow BigInteger/TWO 4095))))
+
+  (field ^:private ^BigInteger publicExponent)
+
+  (field ^:private ^int keySize)
+
+  (field ^:private ^:final ^RSAUtil$KeyType type)
+
+  (field ^:private ^AlgorithmParameterSpec keyParams)
+
+  (field ^:private ^SecureRandom random)
+
+  (field ^:private ^boolean useNew)
+
+  (constructor [this ^RSAUtil$KeyType type ^int defKeySize]
+    (set! (.-type this) type)
+    (.initialize this defKeySize nil))
+
+  (method ^:public initialize ^void [this ^int keySize ^SecureRandom random]
+    (try
+      (.initialize this (RSAKeyGenParameterSpec. keySize RSAKeyGenParameterSpec/F4) random)
+      (catch InvalidAlgorithmParameterException iape (throw (InvalidParameterException. iape)))))
+
+  (method ^:public initialize :throws [InvalidAlgorithmParameterException] ^void [this
+                                                                                  ^AlgorithmParameterSpec params
+                                                                                  ^SecureRandom random]
+    (if-instance [^RSAKeyGenParameterSpec rsaSpec params]
+      (let [tmpKeySize (.getKeysize rsaSpec)
+            ^:mutable tmpPubExp (.getPublicExponent rsaSpec)
+            tmpParams (.getKeyParams rsaSpec)
+            ^:mutable useNew (and (>= tmpKeySize 2048) (== (bit-and-int tmpKeySize 1) 0))]
+        (if (nil? tmpPubExp)
+            (set! tmpPubExp RSAKeyGenParameterSpec/F4)
+            (do
+              (when-not (.testBit tmpPubExp 0)
+                (throw
+                  (InvalidAlgorithmParameterException. "Public exponent must be an odd number")))
+              (let [minValue RSAKeyGenParameterSpec/F0]
+                (when (< (.compareTo tmpPubExp RSAKeyGenParameterSpec/F0) 0)
+                  (throw (InvalidAlgorithmParameterException.
+                           (java-str "Public exponent must be " minValue " or larger"))))
+                (when (> (.bitLength tmpPubExp) tmpKeySize)
+                  (throw (InvalidAlgorithmParameterException.
+                           (java-str "Public exponent must be no longer than " tmpKeySize " bits"))))
+                (set! useNew
+                      (let [a-1 useNew
+                            b-2 (and (>= (.compareTo tmpPubExp RSAKeyGenParameterSpec/F4) 0)
+                                     (< (.bitLength tmpPubExp) 256))]
+                        (and a-1 b-2))))))
+        (try
+          (RSAKeyFactory/checkKeyLengths tmpKeySize tmpPubExp 512 (unchecked-multiply-int 64 1024))
+          (catch InvalidKeyException e
+            (throw (InvalidAlgorithmParameterException. "Invalid key sizes" e))))
+        (try
+          (set! (.-keyParams this) (RSAUtil/checkParamsAgainstType type tmpParams))
+          (catch ProviderException e
+            (throw (InvalidAlgorithmParameterException. "Invalid key parameters" e))))
+        (set! (.-keySize this) tmpKeySize)
+        (set! (.-publicExponent this) tmpPubExp)
+        (set! (.-random this) (if (nil? random) (JCAUtil/getSecureRandom) random))
+        (set! (.-useNew this) useNew))
+      (throw (InvalidAlgorithmParameterException.
+               "Params must be instance of RSAKeyGenParameterSpec"))))
+
+  (method ^:public generateKeyPair ^KeyPair [this]
+    (let [e publicExponent
+          ^BigInteger minValue (if useNew (RSAKeyPairGenerator/getSqrt keySize) BigInteger/ZERO)
+          lp (bit-shift-right-int (unchecked-add-int keySize 1) 1)
+          lq (unchecked-subtract-int keySize lp)
+          pqDiffSize (unchecked-subtract-int lp 100)]
+      (while true
+        (let [^:mutable ^BigInteger p nil
+              ^:mutable ^BigInteger q nil
+              ^:mutable ^int i 0]
+          (while (< (let [old-3 i] (set! i (unchecked-inc-int i)) old-3)
+                    (unchecked-multiply-int 10 lp))
+            (let [tmpP (BigInteger/probablePrime lp random)]
+              (when (and (or (not useNew) (== (.compareTo tmpP minValue) 1))
+                         (RSAKeyPairGenerator/isRelativePrime e (.subtract tmpP BigInteger/ONE)))
+                (set! p tmpP)
+                (break))))
+          (when (nil? p) (throw (ProviderException. "Cannot find prime P")))
+          (set! i 0)
+          (while (< (let [old-4 i] (set! i (unchecked-inc-int i)) old-4)
+                    (unchecked-multiply-int 20 lq))
+            (let [tmpQ (BigInteger/probablePrime lq random)]
+              (when (and (and (or (not useNew) (== (.compareTo tmpQ minValue) 1))
+                              (== (.compareTo (.abs (.subtract p tmpQ))
+                                              (.pow BigInteger/TWO pqDiffSize))
+                                  1))
+                         (RSAKeyPairGenerator/isRelativePrime e (.subtract tmpQ BigInteger/ONE)))
+                (set! q tmpQ)
+                (break))))
+          (when (nil? q) (throw (ProviderException. "Cannot find prime Q")))
+          (let [n (.multiply p q)]
+            (when-not (not (== (.bitLength n) keySize))
+              (let [kp (RSAKeyPairGenerator/createKeyPair type keyParams n e p q)]
+                (when (some? kp) (return kp)))))))))
+
+  (method ^:private ^:static getSqrt ^BigInteger [^int keySize]
+    (let [^:mutable ^BigInteger sqrt nil]
+      (switch keySize
+        2048 (set! sqrt SQRT_2048)
+        3072 (set! sqrt SQRT_3072)
+        4096 (set! sqrt SQRT_4096)
+        (set! sqrt (.sqrt (.pow BigInteger/TWO (unchecked-subtract-int keySize 1)))))
+      sqrt))
+
+  (method ^:private ^:static isRelativePrime ^boolean [^BigInteger e ^BigInteger bi]
+    (if (or (== (.compareTo e RSAKeyGenParameterSpec/F4) 0)
+            (== (.compareTo e RSAKeyGenParameterSpec/F0) 0))
+        (not (.equals (.mod bi e) BigInteger/ZERO))
+        (.equals (.gcd e bi) BigInteger/ONE)))
+
+  (method ^:private ^:static createKeyPair ^KeyPair [^RSAUtil$KeyType type
+                                                     ^AlgorithmParameterSpec keyParams ^BigInteger n
+                                                     ^BigInteger e ^BigInteger p ^BigInteger q]
+    (let [p1 (.subtract p BigInteger/ONE)
+          q1 (.subtract q BigInteger/ONE)
+          phi (.multiply p1 q1)
+          gcd (.gcd p1 q1)
+          ^BigInteger lcm (if (.equals gcd BigInteger/ONE) phi (.divide phi gcd))
+          d (.modInverse e lcm)]
+      (when-not (not (== (.compareTo d (.pow BigInteger/TWO (.bitLength p))) 1))
+        (let [pe (.mod d p1)
+              qe (.mod d q1)
+              coeff (.modInverse q p)]
+          (try
+            (let [^PublicKey publicKey (RSAPublicKeyImpl. type keyParams n e)
+                  ^PrivateKey privateKey (RSAPrivateCrtKeyImpl.
+                                           type
+                                           keyParams
+                                           n
+                                           e
+                                           d
+                                           p
+                                           q
+                                           pe
+                                           qe
+                                           coeff)]
+              (KeyPair. publicKey privateKey))
+            (catch InvalidKeyException exc (throw (RuntimeException. exc))))))))
+
+  (defclass ^:public ^:static ^:final Legacy
+    :extends RSAKeyPairGenerator
+
+    (constructor ^:public [this]
+      (super. RSAUtil$KeyType/RSA SecurityProviderConstants/DEF_RSA_KEY_SIZE)))
+
+  (defclass ^:public ^:static ^:final PSS
+    :extends RSAKeyPairGenerator
+
+    (constructor ^:public [this]
+      (super. RSAUtil$KeyType/PSS SecurityProviderConstants/DEF_RSASSA_PSS_KEY_SIZE))))

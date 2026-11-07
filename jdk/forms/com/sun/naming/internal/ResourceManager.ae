@@ -1,0 +1,242 @@
+;; Converted from jdk26u src/java.naming/share/classes/com/sun/naming/internal/ResourceManager.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.naming.internal)
+
+(import '(java.io IOException InputStream)
+        '(java.lang.ref WeakReference)
+        '(java.util ArrayList HashMap Hashtable List Map Properties StringTokenizer WeakHashMap)
+        '(javax.naming ConfigurationException Context NamingEnumeration NamingException)
+        '(javax.naming.ldap LdapContext))
+
+(defclass ^:public ^:final ResourceManager
+  (field ^:private ^:static ^:final ^String PROVIDER_RESOURCE_FILE_NAME "jndiprovider.properties")
+
+  (field ^:private ^:static ^:final ^String APP_RESOURCE_FILE_NAME "jndi.properties")
+
+  (field ^:private ^:static ^:final ^String JRE_CONF_PROPERTY_FILE_NAME "jndi.properties")
+
+  (field ^:private ^:static ^:final ^String DISABLE_APP_RESOURCE_FILES
+    "com.sun.naming.disable.app.resource.files")
+
+  (field ^:private ^:static ^:final ^String/1 listProperties
+    (new String/1
+         [Context/OBJECT_FACTORIES
+          Context/URL_PKG_PREFIXES
+          Context/STATE_FACTORIES
+          LdapContext/CONTROL_FACTORIES]))
+
+  (field ^:private ^:static ^:final ^VersionHelper helper (VersionHelper/getVersionHelper))
+
+  (field ^:private ^:static ^:final ^{:tag (WeakHashMap Object (Hashtable (? super String) Object))} propertiesCache
+    (WeakHashMap. 11))
+
+  (field ^:private ^:static ^:final ^{:tag (WeakHashMap ClassLoader (Map String (List (NamedWeakReference Object))))} factoryCache
+    (WeakHashMap. 11))
+
+  (field ^:private ^:static ^:final ^{:tag (WeakHashMap ClassLoader (Map String (WeakReference Object)))} urlFactoryCache
+    (WeakHashMap. 11))
+
+  (field ^:private ^:static ^:final ^{:tag (WeakReference Object)} NO_FACTORY (WeakReference. nil))
+
+  (constructor ^:private [this])
+
+  (method ^:public ^:static getInitialEnvironment :throws [NamingException] ^{:tag (Hashtable ? ?)} [^:mutable ^{:tag (Hashtable ? ?)} env]
+    (let [props VersionHelper/PROPS]
+      (when (nil? env) (set! env (Hashtable. 11)))
+      (let [jndiSysProps (.getJndiProperties helper)]
+        (loop [^int i 0]
+          (when (< i (alength props))
+            (let [^:mutable val (.get env (aget props i))]
+              (when (nil? val)
+                (set! val
+                      (if (some? jndiSysProps)
+                          ^Object (aget jndiSysProps i)
+                          ^Object (.getJndiProperty helper i))))
+              (if (some? val)
+                  (do (.put env (aget props i) val) (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i))))))
+        (let [disableAppRes (cast String (.get env DISABLE_APP_RESOURCE_FILES))]
+          (if (and (some? disableAppRes) (.equalsIgnoreCase disableAppRes "true"))
+              env
+              (do (ResourceManager/mergeTables env (ResourceManager/getApplicationResources)) env))))))
+
+  (method ^:public ^:static getProperty :throws [NamingException] ^String [^String propName
+                                                                           ^{:tag (Hashtable ? ?)} env
+                                                                           ^Context ctx
+                                                                           ^boolean concat]
+    (let [^String val1 (when (some? env) (cast String (.get env propName)))]
+      (if (or (nil? ctx) (and (some? val1) (not concat)))
+          val1
+          (let [val2 (cast String (.get (ResourceManager/getProviderResource ctx) propName))]
+            (cond
+              (nil? val1) val2
+              (or (nil? val2) (not concat)) val1
+              :else (java-str val1 ":" val2))))))
+
+  (method ^:public ^:static getFactories :throws [NamingException] ^FactoryEnumeration [^String propName
+                                                                                        ^{:tag (Hashtable ? ?)} env
+                                                                                        ^Context ctx]
+    (let [facProp (ResourceManager/getProperty propName env ctx true)]
+      (when (some? facProp)
+        (let [loader (.getContextClassLoader helper)
+              ^:mutable ^{:tag (Map String (List (NamedWeakReference Object)))} perLoaderCache nil]
+          (locking factoryCache
+            (set! perLoaderCache (cast Map (.get factoryCache loader)))
+            (when (nil? perLoaderCache)
+              (set! perLoaderCache (HashMap. 11))
+              (.put factoryCache loader perLoaderCache)))
+          (locking perLoaderCache
+            (let [^:mutable ^{:tag (List (NamedWeakReference Object))} factories (cast
+                                                                                   List
+                                                                                   (.get
+                                                                                     perLoaderCache
+                                                                                     facProp))]
+              (if (some? factories)
+                  (when-not (== (.size factories) 0) (FactoryEnumeration. factories loader))
+                  (let [parser (StringTokenizer. facProp ":")]
+                    (set! factories (ArrayList. 5))
+                    (while (.hasMoreTokens parser)
+                      (try
+                        (let [className (.nextToken parser)
+                              ^{:tag (Class ?)} c (.loadClass helper className loader)]
+                          (.add factories (NamedWeakReference. c className)))
+                        (catch Exception e)))
+                    (.put perLoaderCache facProp factories)
+                    (FactoryEnumeration. factories loader)))))))))
+
+  (method ^:public ^:static getFactory :throws [NamingException] [^String propName
+                                                                  ^{:tag (Hashtable ? ?)} env
+                                                                  ^Context ctx ^String classSuffix
+                                                                  ^String defaultPkgPrefix]
+    (let [^:mutable facProp (ResourceManager/getProperty propName env ctx true)]
+      (if (some? facProp)
+          (set! facProp (java-str facProp (java-str ":" defaultPkgPrefix)))
+          (set! facProp defaultPkgPrefix))
+      (let [loader (.getContextClassLoader helper)
+            key (java-str classSuffix " " facProp)
+            ^:mutable ^{:tag (Map String (WeakReference Object))} perLoaderCache nil]
+        (locking urlFactoryCache
+          (set! perLoaderCache (cast Map (.get urlFactoryCache loader)))
+          (when (nil? perLoaderCache)
+            (set! perLoaderCache (HashMap. 11))
+            (.put urlFactoryCache loader perLoaderCache)))
+        (locking perLoaderCache
+          (let [^:mutable ^Object factory nil
+                ^{:tag (WeakReference Object)} factoryRef (cast
+                                                            WeakReference
+                                                            (.get perLoaderCache key))]
+            (when-not (identical? factoryRef NO_FACTORY)
+              (when (some? factoryRef)
+                (set! factory (.get factoryRef))
+                (when (some? factory) (return factory)))
+              (let [parser (StringTokenizer. facProp ":")
+                    ^:mutable ^String className nil]
+                (while (and (nil? factory) (.hasMoreTokens parser))
+                  (set! className (java-str (.nextToken parser) classSuffix))
+                  (try
+                    (let [tmp (.newInstance (.loadClass helper className loader))]
+                      (set! factory tmp))
+                    (catch InstantiationException e
+                      (let [ne (NamingException. (java-str "Cannot instantiate " className))]
+                        (.setRootCause ne e)
+                        (throw ne)))
+                    (catch IllegalAccessException e
+                      (let [ne (NamingException. (java-str "Cannot access " className))]
+                        (.setRootCause ne e)
+                        (throw ne)))
+                    (catch Exception e)))
+                (.put perLoaderCache
+                      key
+                      ^WeakReference (if (some? factory) (WeakReference. factory) NO_FACTORY))
+                factory)))))))
+
+  (method ^:private ^:static getProviderResource :throws [NamingException] ^{:tag (Hashtable (? super String) Object)} [obj]
+    (if (nil? obj)
+        (Hashtable. 1)
+        (locking propertiesCache
+          (let [^{:tag (Class ?)} c (.getClass obj)
+                ^:mutable ^{:tag (Hashtable (? super String) Object)} props (cast
+                                                                              Hashtable
+                                                                              (.get
+                                                                                propertiesCache
+                                                                                c))]
+            (if (some? props)
+                props
+                (do
+                  (set! props (Properties.))
+                  (let [istream (.getResourceAsStream helper c PROVIDER_RESOURCE_FILE_NAME)]
+                    (when (some? istream)
+                      (try
+                        (.load (cast Properties props) istream)
+                        (catch IOException e
+                          (let [^NamingException ne (ConfigurationException.
+                                                      (java-str
+                                                        "Error reading provider resource file for "
+                                                        c))]
+                            (.setRootCause ne e)
+                            (throw ne)))))
+                    (.put propertiesCache c props)
+                    props)))))))
+
+  (method ^:private ^:static getApplicationResources :throws [NamingException] ^{:tag (Hashtable (? super String) Object)} []
+    (let [cl (.getContextClassLoader helper)]
+      (locking propertiesCache
+        (let [^:mutable ^{:tag (Hashtable (? super String) Object)} result (cast
+                                                                             Hashtable
+                                                                             (.get
+                                                                               propertiesCache
+                                                                               cl))]
+          (if (some? result)
+              result
+              (do
+                (try
+                  (let [^{:tag (NamingEnumeration InputStream)} resources (.getResources
+                                                                            helper
+                                                                            cl
+                                                                            APP_RESOURCE_FILE_NAME)]
+                    (try
+                      (while (.hasMore resources)
+                        (let [props (Properties.)
+                              istream (cast InputStream (.next resources))]
+                          (try (.load props istream) (finally (.close istream)))
+                          (if (nil? result)
+                              (set! result props)
+                              (ResourceManager/mergeTables result props))))
+                      (finally
+                        (while (.hasMore resources) (.close (cast InputStream (.next resources))))))
+                    (let [istream (.getJavaHomeConfStream helper JRE_CONF_PROPERTY_FILE_NAME)]
+                      (when (some? istream)
+                        (try
+                          (let [props (Properties.)]
+                            (.load props istream)
+                            (if (nil? result)
+                                (set! result props)
+                                (ResourceManager/mergeTables result props)))
+                          (finally (.close istream))))))
+                  (catch IOException e
+                    (let [^NamingException ne (ConfigurationException.
+                                                "Error reading application resource file")]
+                      (.setRootCause ne e)
+                      (throw ne))))
+                (when (nil? result) (set! result (Hashtable. 11)))
+                (.put propertiesCache cl result)
+                result))))))
+
+  (method ^:private ^:static mergeTables ^void [^{:tag (Hashtable (? super String) Object)} props1
+                                                ^{:tag (Hashtable (? super String) Object)} props2]
+    (for-each [key (.keySet props2)]
+      (let [prop (cast String key)
+            val1 (.get props1 prop)]
+        (cond
+          (nil? val1) (.put props1 prop (.get props2 prop))
+          (ResourceManager/isListProperty prop)
+            (let [val2 (cast String (.get props2 prop))]
+              (.put props1 prop (java-str (cast String val1) ":" val2)))))))
+
+  (method ^:private ^:static isListProperty ^boolean [^:mutable ^String prop]
+    (set! prop (.intern prop))
+    (loop [^int i 0]
+      (if (< i (alength listProperties))
+          (if (identical? prop (aget listProperties i)) (return true) (recur (unchecked-inc-int i)))
+          nil))
+    false))

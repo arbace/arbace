@@ -1,0 +1,196 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/pkcs/PKCS8Key.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.pkcs)
+
+(import '(java.io IOException ObjectInputStream ObjectStreamException)
+        '(java.security InvalidKeyException
+                        Key
+                        KeyFactory
+                        KeyRep
+                        KeyRep$Type
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        PrivateKey
+                        Provider)
+        '(java.security.spec InvalidKeySpecException PKCS8EncodedKeySpec)
+        '(java.util Arrays)
+        '(jdk.internal.access SharedSecrets)
+        '(sun.security.ec ECPrivateKeyImpl)
+        '(sun.security.util DerOutputStream DerValue InternalPrivateKey)
+        '(sun.security.x509 AlgorithmId X509Key))
+
+(defclass ^:public PKCS8Key
+  :implements [PrivateKey InternalPrivateKey]
+
+  (field ^:private ^:static ^:final ^long serialVersionUID -3836890099307167124)
+
+  (field ^:protected ^AlgorithmId algid)
+
+  (field ^:protected ^byte/1 privKeyMaterial)
+
+  (field ^:protected ^byte/1 encodedKey)
+
+  (field ^:protected ^byte/1 pubKeyEncoded nil)
+
+  (field ^:private ^byte/1 attributes)
+
+  (field ^:private ^int version)
+
+  (field ^:public ^:static ^:final ^int V1 0)
+
+  (field ^:public ^:static ^:final ^int V2 1)
+
+  (constructor ^:protected [this])
+
+  (constructor :throws [InvalidKeyException] ^:public [this ^byte/1 input]
+    (try
+      (.decode this (DerValue. input))
+      (catch IOException e (throw (InvalidKeyException. "Unable to decode key" e)))))
+
+  (constructor :throws [InvalidKeyException] ^:public [this ^byte/1 publicEncoding
+                                                       ^byte/1 privateEncoding]
+    (this. privateEncoding)
+    (when (some? publicEncoding)
+      (if (some? pubKeyEncoded)
+          (when-not (Arrays/equals pubKeyEncoded publicEncoding)
+            (Arrays/fill privKeyMaterial (unchecked-byte 0x0))
+            (throw
+              (InvalidKeyException.
+                "PrivateKey encoding has a public key that does not match the given PublicKey")))
+          (do (set! pubKeyEncoded publicEncoding) (set! version V2)))))
+
+  (method ^:public getVersion ^int [this] version)
+
+  (method ^:private decode :throws [InvalidKeyException] ^void [this ^DerValue val]
+    (try
+      (when-not (== (.-tag val) DerValue/tag_Sequence)
+        (throw (InvalidKeyException. "invalid key format")))
+      (set! version (.getInteger (.-data val)))
+      (when (and (not (== version V1)) (not (== version V2)))
+        (throw (InvalidKeyException. (java-str "unknown version: " version))))
+      (set! algid (AlgorithmId/parse (.getDerValue (.-data val))))
+      (set! privKeyMaterial (.getOctetString (.-data val)))
+      (when (.equals (.getOID algid) AlgorithmId/EC_oid)
+        (let [bits (ECPrivateKeyImpl/parsePublicBits privKeyMaterial)]
+          (when (some? bits) (set! pubKeyEncoded (.getEncoded (X509Key. algid bits))))))
+      (when-not (== (.available (.-data val)) 0)
+        (let [^:mutable v (.getDerValue (.-data val))]
+          (when (.isContextSpecific v (unchecked-byte 0))
+            (set! attributes (.getDataBytes v))
+            (when (== (.available (.-data val)) 0) (return))
+            (set! v (.getDerValue (.-data val))))
+          (when (== version V2)
+            (if (.isContextSpecific v (unchecked-byte 1))
+                (let [bits (.withTag v DerValue/tag_BitString)]
+                  (set! pubKeyEncoded (.getEncoded (X509Key. algid (.getUnalignedBitString bits)))))
+                (throw (InvalidKeyException. "Invalid context tag")))
+            (when (== (.available (.-data val)) 0) (return)))
+          (throw (InvalidKeyException. "Extra bytes"))))
+      (catch IOException e (throw (InvalidKeyException. "Unable to decode key" e)))
+      (finally (when (some? val) (.clear val)))))
+
+  (method ^:public ^:static parseKey :throws [InvalidKeyException] ^PrivateKey [^byte/1 encoded]
+    (PKCS8Key/parseKey encoded nil))
+
+  (method ^:public ^:static parseKey :throws [InvalidKeyException] ^PrivateKey [^byte/1 encoded
+                                                                                ^Provider provider]
+    (try
+      (let [rawKey (PKCS8Key. encoded)
+            pkcs8KeySpec (PKCS8EncodedKeySpec. (.generateEncoding rawKey))
+            ^:mutable ^PrivateKey result nil]
+        (try
+          (if (nil? provider)
+              (set! result
+                    (.generatePrivate (KeyFactory/getInstance (.getName (.-algid rawKey)))
+                                      pkcs8KeySpec))
+              (set! result
+                    (.generatePrivate (KeyFactory/getInstance (.getName (.-algid rawKey)) provider)
+                                      pkcs8KeySpec)))
+          (catch [NoSuchAlgorithmException InvalidKeySpecException] e (set! result rawKey))
+          (finally
+            (when-not (identical? result rawKey) (.clear rawKey))
+            (.clearEncodedKeySpec (SharedSecrets/getJavaSecuritySpecAccess) pkcs8KeySpec)))
+        result)
+      (catch IOException e (throw (InvalidKeyException. e)))))
+
+  (method ^:public getAlgorithm ^String [this] (.getName algid))
+
+  (method ^:public getPubKeyEncoded ^byte/1 [this] pubKeyEncoded)
+
+  (method ^:public hasPublicKey ^boolean [this] (some? pubKeyEncoded))
+
+  (method ^:public getAlgorithmId ^AlgorithmId [this] algid)
+
+  (method ^:public getEncoded ^byte/1 [this]
+    (let [b (.getEncodedInternal this)] (when (some? b) (.clone b))))
+
+  (method ^:public getFormat ^String [this] "PKCS#8")
+
+  (method ^:public ^:static getEncoded :throws [IOException] ^byte/1 [^byte/1 pubKeyEncoded
+                                                                      ^byte/1 privKeyEncoded]
+    (let [^:mutable ^PKCS8Key pkcs8Key nil]
+      (try
+        (set! pkcs8Key (PKCS8Key. pubKeyEncoded privKeyEncoded))
+        (catch InvalidKeyException e (throw (IOException. e))))
+      (try (.clone (.generateEncoding pkcs8Key)) (finally (.clear pkcs8Key)))))
+
+  (method ^:private ^:synchronized getEncodedInternal ^byte/1 [this]
+    (when (nil? encodedKey) (try (.generateEncoding this) (catch IOException e (return nil))))
+    encodedKey)
+
+  (method ^:private generateEncoding :throws [IOException] ^byte/1 [this]
+    (let [out (DerOutputStream.)]
+      (.putInteger out version)
+      (.encode algid out)
+      (.putOctetString out privKeyMaterial)
+      (when (== version V2)
+        (when (some? attributes)
+          (.writeImplicit out
+                          (DerValue/createTag
+                            (unchecked-byte
+                              (bit-or-int DerValue/TAG_CONTEXT DerValue/TAG_CONSTRUCT))
+                            false
+                            (unchecked-byte 0))
+                          (.putOctetString (DerOutputStream.) attributes)))
+        (when (some? pubKeyEncoded)
+          (let [x (X509Key.)]
+            (try (.decode x pubKeyEncoded) (catch InvalidKeyException e (throw (IOException. e))))
+            (let [pubOut (DerOutputStream.)]
+              (.putUnalignedBitString pubOut (.getKey x))
+              (.writeImplicit out
+                              (DerValue/createTag DerValue/TAG_CONTEXT false (unchecked-byte 1))
+                              pubOut)))))
+      (let [val (DerValue/wrap DerValue/tag_Sequence out)]
+        (set! encodedKey (.toByteArray val))
+        (.clear val)
+        encodedKey)))
+
+  (method ^:protected writeReplace :throws [ObjectStreamException] [this]
+    (KeyRep. KeyRep$Type/PRIVATE (.getAlgorithm this) (.getFormat this) (.getEncodedInternal this)))
+
+  (method ^:private readObject :throws [IOException] ^void [this ^ObjectInputStream stream]
+    (try
+      (.decode this (DerValue. stream))
+      (catch InvalidKeyException e (throw (IOException. "deserialized key is invalid" e)))))
+
+  (method ^:public equals ^boolean [this object]
+    (cond
+      (identical? this object) true
+      (instance? PKCS8Key object)
+        (MessageDigest/isEqual (.getEncodedInternal this)
+                               (.getEncodedInternal (cast PKCS8Key object)))
+      :else
+        (do
+          (when (instance? Key object)
+            (let [otherEncoded (.getEncoded (cast Key object))]
+              (try
+                (return (MessageDigest/isEqual (.getEncodedInternal this) otherEncoded))
+                (finally (when (some? otherEncoded) (Arrays/fill otherEncoded (unchecked-byte 0)))))))
+          false)))
+
+  (method ^:public hashCode ^int [this]
+    (Arrays/hashCode (.getEncodedInternal this)))
+
+  (method ^:public clear ^void [this]
+    (when (some? encodedKey) (Arrays/fill encodedKey (unchecked-byte 0)))
+    (Arrays/fill privKeyMaterial (unchecked-byte 0))))

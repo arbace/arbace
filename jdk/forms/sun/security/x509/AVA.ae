@@ -1,0 +1,634 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/x509/AVA.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.x509)
+
+(import '(java.io ByteArrayOutputStream IOException Reader)
+        '(java.nio.charset Charset StandardCharsets)
+        '(java.text Normalizer Normalizer$Form)
+        '(java.util ArrayList Collections HashMap HexFormat List Locale Map)
+        '(sun.security.pkcs PKCS9Attribute)
+        '(sun.security.util Debug
+                            DerEncoder
+                            DerInputStream
+                            DerOutputStream
+                            DerValue
+                            ObjectIdentifier))
+
+(defclasses
+  (defclass ^:public AVA
+    :implements [DerEncoder]
+
+    (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "x509" "\t[AVA]"))
+
+    (field ^:private ^:static ^:final ^boolean PRESERVE_OLD_DC_ENCODING
+      (Boolean/getBoolean "com.sun.security.preserveOldDCEncoding"))
+
+    (field ^:static ^:final ^int DEFAULT 1)
+
+    (field ^:static ^:final ^int RFC1779 2)
+
+    (field ^:static ^:final ^int RFC2253 3)
+
+    (field ^:final ^ObjectIdentifier oid)
+
+    (field ^:final ^DerValue value)
+
+    (field ^:private ^:static ^:final ^String specialChars1779 ",=\n+<>#;\\\"")
+
+    (field ^:private ^:static ^:final ^String specialChars2253 ",=+<>#;\\\"")
+
+    (field ^:private ^:static ^:final ^String specialCharsDefault ",=\n+<>#;\\\" ")
+
+    (field ^:private ^:static ^:final ^String escapedDefault ",+<>;\"")
+
+    (constructor ^:public [this ^ObjectIdentifier type ^DerValue val]
+      (when (or (nil? type) (nil? val)) (throw (NullPointerException.)))
+      (set! oid type)
+      (set! value val))
+
+    (constructor :throws [IOException] [this ^Reader in] (this. in DEFAULT))
+
+    (constructor :throws [IOException] [this ^Reader in ^{:tag (Map String String)} keywordMap]
+      (this. in DEFAULT keywordMap))
+
+    (constructor :throws [IOException] [this ^Reader in ^int format]
+      (this. in format (Collections/emptyMap)))
+
+    (constructor :throws [IOException] [this ^Reader in ^int format
+                                        ^{:tag (Map String String)} keywordMap]
+      (let [temp (StringBuilder.)
+            ^:mutable ^int c 0]
+        (while true
+          (set! c (AVA/readChar in "Incorrect AVA format"))
+          (when (== c \=) (break))
+          (.append temp (unchecked-char c)))
+        (set! oid (AVAKeyword/getOID (.toString temp) format keywordMap))
+        (.setLength temp 0)
+        (if (== format RFC2253)
+            (do
+              (set! c (.read in))
+              (when (== c \space)
+                (throw
+                  (IOException. "Incorrect AVA RFC2253 format - leading space must be escaped"))))
+            (loop [] (set! c (.read in)) (when (or (== c \space) (== c \newline)) (recur))))
+        (cond
+          (== c -1) (set! value (DerValue. ""))
+          (== c \#) (set! value (AVA/parseHexString in format))
+          (and (== c \") (not (== format RFC2253))) (set! value (.parseQuotedString this in temp))
+          :else (set! value (.parseString this in c format temp)))))
+
+    (method ^:public getObjectIdentifier ^ObjectIdentifier [this] oid)
+
+    (method ^:public getDerValue ^DerValue [this] value)
+
+    (method ^:public getValueString ^String [this]
+      (try
+        (let [s (.getAsString value)]
+          (when (nil? s) (throw (RuntimeException. "AVA string is null")))
+          s)
+        (catch IOException e (throw (RuntimeException. (java-str "AVA error: " e) e)))))
+
+    (method ^:private ^:static parseHexString :throws [IOException] ^DerValue [^Reader in
+                                                                               ^int format]
+      (let [^:mutable ^int c 0
+            baos (ByteArrayOutputStream.)
+            ^:mutable ^byte b 0
+            ^:mutable ^int cNdx 0]
+        (while true
+          (set! c (.read in))
+          (when (AVA/isTerminator c format) (break))
+          (try
+            (let [cVal (HexFormat/fromHexDigit c)]
+              (if (== (unchecked-remainder-int cNdx 2) 1)
+                  (do
+                    (set!
+                      b
+                      (unchecked-byte
+                        (unchecked-add-int (unchecked-multiply-int b 16) (unchecked-byte cVal))))
+                    (.write baos b))
+                  (set! b (unchecked-byte cVal)))
+              (set! cNdx (unchecked-inc-int cNdx)))
+            (catch NumberFormatException nfe
+              (throw (IOException. (java-str "AVA parse, invalid hex digit: " (unchecked-char c)))))))
+        (when (== cNdx 0) (throw (IOException. "AVA parse, zero hex digits")))
+        (when (== (unchecked-remainder-int cNdx 2) 1)
+          (throw (IOException. "AVA parse, odd number of hex digits")))
+        (DerValue. (.toByteArray baos))))
+
+    (method ^:private parseQuotedString :throws [IOException] ^DerValue [this ^Reader in
+                                                                         ^StringBuilder temp]
+      (let [^:mutable c (AVA/readChar in "Quoted string did not end in quote")
+            ^{:tag (List Byte)} embeddedHex (ArrayList.)
+            ^:mutable isPrintableString true]
+        (while (not (== c \"))
+          (when (== c \\)
+            (set! c (AVA/readChar in "Quoted string did not end in quote"))
+            (let [^:mutable ^Byte hexByte nil]
+              (when (some? (set! hexByte (AVA/getEmbeddedHexPair c in)))
+                (set! isPrintableString false)
+                (.add embeddedHex hexByte)
+                (set! c (.read in))
+                (continue))
+              (when (< (.indexOf specialChars1779 (unchecked-char c)) 0)
+                (throw (IOException. (java-str "Invalid escaped character in AVA: "
+                                               (unchecked-char c)))))))
+          (when (> (.size embeddedHex) 0)
+            (let [hexString (AVA/getEmbeddedHexString embeddedHex)]
+              (.append temp hexString)
+              (.clear embeddedHex)))
+          (set! isPrintableString
+                (let [a-1 isPrintableString
+                      b-2 (DerValue/isPrintableStringChar (unchecked-char c))]
+                  (and a-1 b-2)))
+          (.append temp (unchecked-char c))
+          (set! c (AVA/readChar in "Quoted string did not end in quote")))
+        (when (> (.size embeddedHex) 0)
+          (let [hexString (AVA/getEmbeddedHexString embeddedHex)]
+            (.append temp hexString)
+            (.clear embeddedHex)))
+        (loop [] (set! c (.read in)) (when (or (== c \newline) (== c \space)) (recur)))
+        (when-not (== c -1)
+          (throw (IOException. "AVA had characters other than whitespace after terminating quote")))
+        (cond
+          (or (.equals (.-oid this) PKCS9Attribute/EMAIL_ADDRESS_OID)
+              (and (.equals (.-oid this) X500Name/DOMAIN_COMPONENT_OID)
+                   (not PRESERVE_OLD_DC_ENCODING)))
+            (DerValue. DerValue/tag_IA5String (.trim (.toString temp)))
+          isPrintableString (DerValue. (.trim (.toString temp)))
+          :else (DerValue. DerValue/tag_UTF8String (.trim (.toString temp))))))
+
+    (method ^:private parseString :throws [IOException] ^DerValue [this ^Reader in ^:mutable ^int c
+                                                                   ^int format ^StringBuilder temp]
+      (let [^{:tag (List Byte)} embeddedHex (ArrayList.)
+            ^:mutable isPrintableString true
+            ^:mutable ^boolean escape false
+            ^:mutable leadingChar true
+            ^:mutable ^int spaceCount 0]
+        (loop []
+          (label :do-body
+            (set! escape false)
+            (cond
+              (== c \\)
+                (do
+                  (set! escape true)
+                  (set! c (AVA/readChar in "Invalid trailing backslash"))
+                  (let [^:mutable ^Byte hexByte nil]
+                    (when (some? (set! hexByte (AVA/getEmbeddedHexPair c in)))
+                      (set! isPrintableString false)
+                      (.add embeddedHex hexByte)
+                      (set! c (.read in))
+                      (set! leadingChar false)
+                      (break :do-body))
+                    (cond
+                      (and (== format DEFAULT)
+                           (== (.indexOf specialCharsDefault (unchecked-char c)) -1))
+                        (throw (IOException. (java-str
+                                               "Invalid escaped character in AVA: '"
+                                               (unchecked-char c)
+                                               "'")))
+                      (== format RFC2253)
+                        (cond
+                          (== c \space)
+                            (when (and (not leadingChar) (not (AVA/trailingSpace in)))
+                              (throw
+                                (IOException.
+                                  "Invalid escaped space character in AVA.  Only a leading or trailing space character can be escaped.")))
+                          (== c \#)
+                            (when-not leadingChar
+                              (throw
+                                (IOException.
+                                  "Invalid escaped '#' character in AVA.  Only a leading '#' can be escaped.")))
+                          (== (.indexOf specialChars2253 (unchecked-char c)) -1)
+                            (throw (IOException.
+                                     (java-str "Invalid escaped character in AVA: '"
+                                               (unchecked-char c)
+                                               "'")))))))
+              (== format RFC2253)
+                (when-not (== (.indexOf specialChars2253 (unchecked-char c)) -1)
+                  (throw (IOException. (java-str
+                                         "Character '"
+                                         (unchecked-char c)
+                                         "' in AVA appears without escape"))))
+              :else
+                (when-not (== (.indexOf escapedDefault (unchecked-char c)) -1)
+                  (throw (IOException. (java-str
+                                         "Character '"
+                                         (unchecked-char c)
+                                         "' in AVA appears without escape")))))
+            (when (> (.size embeddedHex) 0)
+              (.append temp (.repeat " " spaceCount))
+              (set! spaceCount 0)
+              (let [hexString (AVA/getEmbeddedHexString embeddedHex)]
+                (.append temp hexString)
+                (.clear embeddedHex)))
+            (set! isPrintableString
+                  (let [a-3 isPrintableString
+                        b-4 (DerValue/isPrintableStringChar (unchecked-char c))]
+                    (and a-3 b-4)))
+            (if (and (== c \space) (not escape))
+                (set! spaceCount (unchecked-inc-int spaceCount))
+                (do
+                  (.append temp (.repeat " " spaceCount))
+                  (set! spaceCount 0)
+                  (.append temp (unchecked-char c))))
+            (set! c (.read in))
+            (set! leadingChar false))
+          (when-not (AVA/isTerminator c format) (recur)))
+        (when (and (== format RFC2253) (> spaceCount 0))
+          (throw (IOException. "Incorrect AVA RFC2253 format - trailing space must be escaped")))
+        (when (> (.size embeddedHex) 0)
+          (let [hexString (AVA/getEmbeddedHexString embeddedHex)]
+            (.append temp hexString)
+            (.clear embeddedHex)))
+        (cond
+          (or (.equals (.-oid this) PKCS9Attribute/EMAIL_ADDRESS_OID)
+              (and (.equals (.-oid this) X500Name/DOMAIN_COMPONENT_OID)
+                   (not PRESERVE_OLD_DC_ENCODING)))
+            (DerValue. DerValue/tag_IA5String (.toString temp))
+          isPrintableString (DerValue. (.toString temp))
+          :else (DerValue. DerValue/tag_UTF8String (.toString temp)))))
+
+    (method ^:private ^:static getEmbeddedHexPair :throws [IOException] ^Byte [^int c1 ^Reader in]
+      (when (HexFormat/isHexDigit c1)
+        (let [c2 (AVA/readChar in
+                               "unexpected EOF - escaped hex value must include two valid digits")]
+          (if (HexFormat/isHexDigit c2)
+              (let [hi (HexFormat/fromHexDigit c1)
+                    lo (HexFormat/fromHexDigit c2)]
+                (return (unchecked-byte (unchecked-add-int (bit-shift-left-int hi 4) lo))))
+              (throw (IOException. "escaped hex value must include two valid digits")))))
+      nil)
+
+    (method ^:private ^:static getEmbeddedHexString ^String [^{:tag (List Byte)} hexList]
+      (let [n (.size hexList)
+            hexBytes (new byte/1 n)]
+        (loop [^int i 0]
+          (when (< i n)
+            (aset hexBytes i (.byteValue (cast Byte (.get hexList i))))
+            (recur (unchecked-inc-int i))))
+        (String. hexBytes StandardCharsets/UTF_8)))
+
+    (method ^:private ^:static isTerminator ^boolean [^int ch ^int format]
+      (switch ch (-1 \+ \,) true \; (not (== format RFC2253)) false))
+
+    (method ^:private ^:static readChar :throws [IOException] ^int [^Reader in ^String errMsg]
+      (let [c (.read in)] (when (== c -1) (throw (IOException. errMsg))) c))
+
+    (method ^:private ^:static trailingSpace :throws [IOException] ^boolean [^Reader in]
+      (let [^:mutable ^boolean trailing false]
+        (if (not (.markSupported in))
+            true
+            (do
+              (.mark in 9999)
+              (while true
+                (let [nextChar (.read in)]
+                  (if (== nextChar -1)
+                      (do (set! trailing true) (break))
+                      (when-not (== nextChar \space)
+                        (if (== nextChar \\)
+                            (let [followingChar (.read in)]
+                              (when-not (== followingChar \space) (set! trailing false) (break)))
+                            (do (set! trailing false) (break)))))))
+              (.reset in)
+              trailing))))
+
+    (constructor :throws [IOException] [this ^DerValue derval]
+      (when-not (== (.-tag derval) DerValue/tag_Sequence)
+        (throw (IOException. "AVA not a sequence")))
+      (set! oid (.getOID (.-data derval)))
+      (set! value (.getDerValue (.-data derval)))
+      (when-not (== (.available (.-data derval)) 0)
+        (throw (IOException. (java-str "AVA, extra bytes = " (.available (.-data derval))))))
+      (when (== (.-tag value) DerValue/tag_BMPString) (.validateBMPString value)))
+
+    (constructor :throws [IOException] [this ^DerInputStream in]
+      (this. (.getDerValue in)))
+
+    (method ^:public equals ^boolean [this obj]
+      (if (identical? this obj)
+          true
+          (if-instance [^AVA other obj]
+            (.equals (.toRFC2253CanonicalString this) (.toRFC2253CanonicalString other))
+            false)))
+
+    (method ^:public hashCode ^int [this]
+      (.hashCode (.toRFC2253CanonicalString this)))
+
+    (method ^:public encode ^void [this ^DerOutputStream out]
+      (let [tmp (DerOutputStream.)]
+        (.putOID tmp oid)
+        (.encode value tmp)
+        (.write out DerValue/tag_Sequence tmp)))
+
+    (method ^:private toKeyword ^String [this ^int format ^{:tag (Map String String)} oidMap]
+      (AVAKeyword/getKeyword oid format oidMap))
+
+    (method ^:public toString ^String [this]
+      (.toKeywordValueString this (.toKeyword this DEFAULT (Collections/emptyMap)) true))
+
+    (method ^:public toRFC1779String ^String [this]
+      (.toRFC1779String this (Collections/emptyMap)))
+
+    (method ^:public toRFC1779String ^String [this ^{:tag (Map String String)} oidMap]
+      (.toKeywordValueString this (.toKeyword this RFC1779 oidMap) false))
+
+    (method ^:public toRFC2253String ^String [this]
+      (.toRFC2253String this (Collections/emptyMap)))
+
+    (method ^:public toRFC2253String ^String [this ^{:tag (Map String String)} oidMap]
+      (let [typeAndValue (StringBuilder. 100)]
+        (.append typeAndValue (.toKeyword this RFC2253 oidMap))
+        (.append typeAndValue \=)
+        (if (or (and (>= (.charAt typeAndValue 0) \0) (<= (.charAt typeAndValue 0) \9))
+                (not (AVA/isDerString value false)))
+            (let [data (.toByteArray value)]
+              (.append typeAndValue \#)
+              (.formatHex (HexFormat/of) typeAndValue data))
+            (let [valStr (String. (.getDataBytes value) (AVA/getCharset value false))
+                  ^:const escapees ",=+<>#;\"\\"
+                  ^:mutable sbuffer (StringBuilder.)]
+              (loop [^int i 0]
+                (when (< i (.length valStr))
+                  (let [c (.charAt valStr i)]
+                    (cond
+                      (or (DerValue/isPrintableStringChar c) (>= (.indexOf escapees c) 0))
+                        (do
+                          (when (>= (.indexOf escapees c) 0) (.append sbuffer \\))
+                          (.append sbuffer c)
+                          (recur (unchecked-inc-int i)))
+                      (== c \u0000) (do (.append sbuffer "\\00") (recur (unchecked-inc-int i)))
+                      :else (do (.append sbuffer c) (recur (unchecked-inc-int i)))))))
+              (let [chars (.toCharArray (.toString sbuffer))]
+                (set! sbuffer (StringBuilder.))
+                (let [^:mutable ^int lead 0]
+                  (set! lead 0)
+                  (while (< lead (alength chars))
+                    (when (and (not (== (aget chars lead) \space))
+                               (not (== (aget chars lead) \return)))
+                      (break))
+                    (set! lead (unchecked-inc-int lead)))
+                  (let [^:mutable ^int trail 0]
+                    (set! trail (unchecked-subtract-int (alength chars) 1))
+                    (while (>= trail 0)
+                      (when (and (not (== (aget chars trail) \space))
+                                 (not (== (aget chars trail) \return)))
+                        (break))
+                      (set! trail (unchecked-dec-int trail)))
+                    (loop [^int i 0]
+                      (when (< i (alength chars))
+                        (let [c (aget chars i)]
+                          (when (or (< i lead) (> i trail)) (.append sbuffer \\))
+                          (.append sbuffer c)
+                          (recur (unchecked-inc-int i)))))
+                    (.append typeAndValue sbuffer))))))
+        (.toString typeAndValue)))
+
+    (method ^:public toRFC2253CanonicalString ^String [this]
+      (let [typeAndValue (StringBuilder. 40)]
+        (.append typeAndValue (.toKeyword this RFC2253 (Collections/emptyMap)))
+        (.append typeAndValue \=)
+        (if (or (and (>= (.charAt typeAndValue 0) \0) (<= (.charAt typeAndValue 0) \9))
+                (not (AVA/isDerString value true)))
+            (let [data (.toByteArray value)]
+              (.append typeAndValue \#)
+              (.formatHex (HexFormat/of) typeAndValue data))
+            (let [valStr (String. (.getDataBytes value) (AVA/getCharset value true))
+                  ^:const escapees ",+<>;\"\\"
+                  sbuffer (StringBuilder.)
+                  ^:mutable previousWhite false]
+              (loop [^int i 0]
+                (when (< i (.length valStr))
+                  (let [c (.charAt valStr i)]
+                    (if (or (or (DerValue/isPrintableStringChar c) (>= (.indexOf escapees c) 0))
+                            (and (== i 0) (== c \#)))
+                        (do
+                          (when (or (and (== i 0) (== c \#)) (>= (.indexOf escapees c) 0))
+                            (.append sbuffer \\))
+                          (cond
+                            (not (Character/isWhitespace c))
+                              (do
+                                (set! previousWhite false)
+                                (.append sbuffer c)
+                                (recur (unchecked-inc-int i)))
+                            (not previousWhite)
+                              (do
+                                (set! previousWhite true)
+                                (.append sbuffer c)
+                                (recur (unchecked-inc-int i)))
+                            :else (recur (unchecked-inc-int i))))
+                        (do
+                          (set! previousWhite false)
+                          (.append sbuffer c)
+                          (recur (unchecked-inc-int i)))))))
+              (.append typeAndValue (.trim (.toString sbuffer)))))
+        (let [^:mutable canon (.toString typeAndValue)]
+          (set! canon (.toLowerCase (.toUpperCase canon Locale/US) Locale/US))
+          (Normalizer/normalize canon Normalizer$Form/NFKD))))
+
+    (method ^:private ^:static isDerString ^boolean [^DerValue value ^boolean canonical]
+      (if canonical
+          (switch (.-tag value) (DerValue/tag_PrintableString DerValue/tag_UTF8String) true false)
+          (switch (.-tag value)
+            (DerValue/tag_PrintableString DerValue/tag_T61String
+                                          DerValue/tag_IA5String
+                                          DerValue/tag_GeneralString
+                                          DerValue/tag_BMPString
+                                          DerValue/tag_UTF8String)
+              true
+            false)))
+
+    (method ^:private ^:static getCharset ^Charset [^DerValue value ^boolean canonical]
+      (if canonical
+          (switch (.-tag value)
+            DerValue/tag_PrintableString StandardCharsets/ISO_8859_1
+            DerValue/tag_UTF8String StandardCharsets/UTF_8
+            (throw (Error. (java-str "unexpected tag: " (.-tag value)))))
+          (switch (.-tag value)
+            (DerValue/tag_PrintableString DerValue/tag_T61String
+                                          DerValue/tag_IA5String
+                                          DerValue/tag_GeneralString)
+              StandardCharsets/ISO_8859_1
+            DerValue/tag_BMPString StandardCharsets/UTF_16BE
+            DerValue/tag_UTF8String StandardCharsets/UTF_8
+            (throw (Error. (java-str "unexpected tag: " (.-tag value)))))))
+
+    (method hasRFC2253Keyword ^boolean [this]
+      (AVAKeyword/hasKeyword oid RFC2253))
+
+    (method ^:private toKeywordValueString ^String [this ^String keyword ^Boolean isFromToString]
+      (let [retval (StringBuilder. 40)]
+        (.append retval keyword)
+        (.append retval \=)
+        (try
+          (let [valStr (.getAsString value)]
+            (if (nil? valStr)
+                (let [data (.toByteArray value)]
+                  (.append retval \#)
+                  (.formatHex (HexFormat/of) retval data))
+                (let [^:mutable quoteNeeded false
+                      sbuffer (StringBuilder.)
+                      ^:mutable previousWhite false
+                      ^:const escapees ",+=\n<>#;\\\""
+                      length (.length valStr)
+                      alreadyQuoted (and (and (> length 1) (== (.charAt valStr 0) \"))
+                                         (== (.charAt valStr (unchecked-subtract-int length 1)) \"))]
+                  (loop [^int i 0]
+                    (when (< i length)
+                      (let [c (.charAt valStr i)]
+                        (cond
+                          (and alreadyQuoted (or (== i 0) (== i (unchecked-subtract-int length 1))))
+                            (do (.append sbuffer c) (recur (unchecked-inc-int i)))
+                          (or (DerValue/isPrintableStringChar c) (>= (.indexOf escapees c) 0))
+                            (do
+                              (when (and (not quoteNeeded)
+                                         (or (and (== i 0) (or (== c \space) (== c \newline)))
+                                             (>= (.indexOf escapees c) 0)))
+                                (set! quoteNeeded true))
+                              (if (not (or (== c \space) (== c \newline)))
+                                  (do
+                                    (when (or (== c \") (== c \\)) (.append sbuffer \\))
+                                    (set! previousWhite false))
+                                  (do
+                                    (when (and (not quoteNeeded) previousWhite)
+                                      (set! quoteNeeded true))
+                                    (set! previousWhite true)))
+                              (.append sbuffer c)
+                              (recur (unchecked-inc-int i)))
+                          (and (and (some? debug) (.booleanValue isFromToString))
+                               (Debug/isOn "ava"))
+                            (do
+                              (set! previousWhite false)
+                              (let [valueBytes (.getBytes
+                                                 (Character/toString c)
+                                                 StandardCharsets/UTF_8)]
+                                (.formatHex (.withUpperCase (.withPrefix (HexFormat/of) "\\"))
+                                            sbuffer
+                                            valueBytes)
+                                (recur (unchecked-inc-int i))))
+                          :else
+                            (do
+                              (set! previousWhite false)
+                              (.append sbuffer c)
+                              (recur (unchecked-inc-int i)))))))
+                  (when (> (.length sbuffer) 0)
+                    (let [trailChar (.charAt sbuffer (unchecked-subtract-int (.length sbuffer) 1))]
+                      (when (or (== trailChar \space) (== trailChar \newline))
+                        (set! quoteNeeded true))))
+                  (if (and (not alreadyQuoted) quoteNeeded)
+                      (.append (.append (.append retval \") sbuffer) \")
+                      (.append retval sbuffer)))))
+          (catch IOException e (throw (IllegalArgumentException. "DER Value conversion"))))
+        (.toString retval))))
+
+  (defclass AVAKeyword
+    (field ^:private ^:static ^:final ^{:tag (Map ObjectIdentifier AVAKeyword)} oidMap)
+
+    (field ^:private ^:static ^:final ^{:tag (Map String AVAKeyword)} keywordMap)
+
+    (field ^:private ^:final ^String keyword)
+
+    (field ^:private ^:final ^ObjectIdentifier oid)
+
+    (field ^:private ^:final ^boolean rfc1779Compliant)
+
+    (field ^:private ^:final ^boolean rfc2253Compliant)
+
+    (constructor ^:private [this ^String keyword ^ObjectIdentifier oid ^boolean rfc1779Compliant
+                            ^boolean rfc2253Compliant]
+      (set! (.-keyword this) keyword)
+      (set! (.-oid this) oid)
+      (set! (.-rfc1779Compliant this) rfc1779Compliant)
+      (set! (.-rfc2253Compliant this) rfc2253Compliant)
+      (.put oidMap oid this)
+      (.put keywordMap keyword this))
+
+    (method ^:private isCompliant ^boolean [this ^int standard]
+      (switch standard
+        AVA/RFC1779 rfc1779Compliant
+        AVA/RFC2253 rfc2253Compliant
+        AVA/DEFAULT true
+        (throw (IllegalArgumentException. (java-str "Invalid standard " standard)))))
+
+    (method ^:static getOID :throws [IOException] ^ObjectIdentifier [^:mutable ^String keyword
+                                                                     ^int standard
+                                                                     ^{:tag (Map String String)} extraKeywordMap]
+      (set! keyword (.toUpperCase keyword Locale/ENGLISH))
+      (if (== standard AVA/RFC2253)
+          (when (or (.startsWith keyword " ") (.endsWith keyword " "))
+            (throw (IOException. (java-str "Invalid leading or trailing space in keyword \""
+                                           keyword
+                                           "\""))))
+          (set! keyword (.trim keyword)))
+      (let [oidString (cast String (.get extraKeywordMap keyword))]
+        (if (nil? oidString)
+            (do
+              (let [ak (cast AVAKeyword (.get keywordMap keyword))]
+                (when (and (some? ak) (.isCompliant ak standard)) (return (.-oid ak))))
+              (when (and (== standard AVA/DEFAULT) (.startsWith keyword "OID."))
+                (set! keyword (.substring keyword 4)))
+              (let [^:mutable number false]
+                (when-not (.isEmpty keyword)
+                  (let [ch (.charAt keyword 0)]
+                    (when (and (>= ch \0) (<= ch \9)) (set! number true))))
+                (when-not number
+                  (throw (IOException. (java-str "Invalid keyword \"" keyword "\""))))
+                (ObjectIdentifier/of keyword)))
+            (ObjectIdentifier/of oidString))))
+
+    (method ^:static getKeyword ^String [^ObjectIdentifier oid ^int standard]
+      (AVAKeyword/getKeyword oid standard (Collections/emptyMap)))
+
+    (method ^:static getKeyword ^String [^ObjectIdentifier oid ^int standard
+                                         ^{:tag (Map String String)} extraOidMap]
+      (let [oidString (.toString oid)
+            ^:mutable keywordString (cast String (.get extraOidMap oidString))]
+        (if (nil? keywordString)
+            (do
+              (let [ak (cast AVAKeyword (.get oidMap oid))]
+                (when (and (some? ak) (.isCompliant ak standard)) (return (.-keyword ak))))
+              (if (== standard AVA/RFC2253) oidString (java-str "OID." oidString)))
+            (do
+              (when (.isEmpty keywordString)
+                (throw (IllegalArgumentException. "keyword cannot be empty")))
+              (set! keywordString (.trim keywordString))
+              (let [^:mutable c (.charAt keywordString 0)]
+                (when (or (or (< c 65) (> c 122)) (and (> c 90) (< c 97)))
+                  (throw (IllegalArgumentException. "keyword does not start with letter")))
+                (loop [^int i 1]
+                  (when (< i (.length keywordString))
+                    (set! c (.charAt keywordString i))
+                    (if (and (and (or (or (< c 65) (> c 122)) (and (> c 90) (< c 97)))
+                                  (or (< c 48) (> c 57)))
+                             (not (== c \_)))
+                        (throw (IllegalArgumentException.
+                                 "keyword character is not a letter, digit, or underscore"))
+                        (recur (unchecked-inc-int i)))))
+                keywordString)))))
+
+    (method ^:static hasKeyword ^boolean [^ObjectIdentifier oid ^int standard]
+      (let [ak (cast AVAKeyword (.get oidMap oid))] (if (nil? ak) false (.isCompliant ak standard))))
+
+    (static-initializer
+      (set! oidMap (HashMap.))
+      (set! keywordMap (HashMap.))
+      (AVAKeyword. "CN" X500Name/commonName_oid true true)
+      (AVAKeyword. "C" X500Name/countryName_oid true true)
+      (AVAKeyword. "L" X500Name/localityName_oid true true)
+      (AVAKeyword. "S" X500Name/stateName_oid false false)
+      (AVAKeyword. "ST" X500Name/stateName_oid true true)
+      (AVAKeyword. "O" X500Name/orgName_oid true true)
+      (AVAKeyword. "OU" X500Name/orgUnitName_oid true true)
+      (AVAKeyword. "T" X500Name/title_oid false false)
+      (AVAKeyword. "IP" X500Name/ipAddress_oid false false)
+      (AVAKeyword. "STREET" X500Name/streetAddress_oid true true)
+      (AVAKeyword. "DC" X500Name/DOMAIN_COMPONENT_OID false true)
+      (AVAKeyword. "DNQUALIFIER" X500Name/DNQUALIFIER_OID false false)
+      (AVAKeyword. "DNQ" X500Name/DNQUALIFIER_OID false false)
+      (AVAKeyword. "SURNAME" X500Name/SURNAME_OID false false)
+      (AVAKeyword. "GIVENNAME" X500Name/GIVENNAME_OID false false)
+      (AVAKeyword. "INITIALS" X500Name/INITIALS_OID false false)
+      (AVAKeyword. "GENERATION" X500Name/GENERATIONQUALIFIER_OID false false)
+      (AVAKeyword. "EMAIL" PKCS9Attribute/EMAIL_ADDRESS_OID false false)
+      (AVAKeyword. "EMAILADDRESS" PKCS9Attribute/EMAIL_ADDRESS_OID false false)
+      (AVAKeyword. "UID" X500Name/userid_oid false true)
+      (AVAKeyword. "SERIALNUMBER" X500Name/SERIALNUMBER_OID false false))))

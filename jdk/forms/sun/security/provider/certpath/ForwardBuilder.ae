@@ -1,0 +1,356 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/certpath/ForwardBuilder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider.certpath)
+
+(import '(java.io IOException)
+        '(java.security GeneralSecurityException InvalidKeyException)
+        '(java.security.cert CertPathValidatorException
+                             CertStore
+                             CertStoreException
+                             CertificateException
+                             PKIXCertPathChecker
+                             PKIXReason
+                             TrustAnchor
+                             X509CertSelector
+                             X509Certificate)
+        '(java.util ArrayList Collection Collections Comparator HashSet LinkedList List Set TreeSet)
+        '(javax.security.auth.x500 X500Principal)
+        '(jdk.internal.misc ThreadTracker)
+        '(sun.security.util Debug)
+        '(sun.security.x509 AVA
+                            AccessDescription
+                            AuthorityInfoAccessExtension
+                            PKIXExtensions
+                            RDN
+                            X500Name
+                            X509CertImpl))
+
+(defclass ^:public ^:final ForwardBuilder
+  :extends Builder
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "certpath"))
+
+  (field ^:private ^:final ^{:tag (Set X509Certificate)} trustedCerts)
+
+  (field ^:private ^:final ^{:tag (Set X500Principal)} trustedSubjectDNs)
+
+  (field ^:private ^:final ^{:tag (Set TrustAnchor)} trustAnchors)
+
+  (field ^:private ^X509CertSelector eeSelector)
+
+  (field ^:private ^AdaptableX509CertSelector caSelector)
+
+  (field ^:private ^X509CertSelector caTargetSelector)
+
+  (field ^TrustAnchor trustAnchor)
+
+  (field ^:private ^:final ^boolean searchAllCertStores)
+
+  (defclass ^:private ^:static ThreadTrackerHolder
+    (field ^:static ^:final ^ThreadTracker AIA_TRACKER (ThreadTracker.)))
+
+  (constructor [this ^PKIX$BuilderParams buildParams ^boolean searchAllCertStores]
+    (super. buildParams)
+    (set! trustAnchors (.trustAnchors buildParams))
+    (set! trustedCerts (HashSet/newHashSet (.size trustAnchors)))
+    (set! trustedSubjectDNs (HashSet/newHashSet (.size trustAnchors)))
+    (for-each [^TrustAnchor anchor trustAnchors]
+      (let [trustedCert (.getTrustedCert anchor)]
+        (if (some? trustedCert)
+            (do
+              (.add trustedCerts trustedCert)
+              (.add trustedSubjectDNs (.getSubjectX500Principal trustedCert)))
+            (.add trustedSubjectDNs (.getCA anchor)))))
+    (set! (.-searchAllCertStores this) searchAllCertStores))
+
+  (method getMatchingCerts :throws [IOException] ^{:tag (Collection X509Certificate)} [this
+                                                                                       ^State currentState
+                                                                                       ^{:tag (List CertStore)} certStores]
+    (when (some? debug) (.println debug "ForwardBuilder.getMatchingCerts()..."))
+    (let [currState (cast ForwardState currentState)
+          ^{:tag (Comparator X509Certificate)} comparator (PKIXCertComparator.
+                                                            trustedSubjectDNs
+                                                            (.-cert currState))
+          ^{:tag (Set X509Certificate)} certs (TreeSet. comparator)]
+      (when (.isInitial currState) (.getMatchingEECerts this currState certStores certs))
+      (.getMatchingCACerts this currState certStores certs)
+      certs))
+
+  (method ^:private getMatchingEECerts :throws [IOException] ^void [this ^ForwardState currentState
+                                                                    ^{:tag (List CertStore)} certStores
+                                                                    ^{:tag (Collection X509Certificate)} eeCerts]
+    (when (some? debug) (.println debug "ForwardBuilder.getMatchingEECerts()..."))
+    (when (nil? eeSelector)
+      (set! eeSelector (cast X509CertSelector (.clone (.-targetCertConstraints this))))
+      (.setCertificateValid eeSelector (.date (.-buildParams this)))
+      (when (.explicitPolicyRequired (.-buildParams this))
+        (.setPolicy eeSelector (.getMatchingPolicies this)))
+      (.setBasicConstraints eeSelector -2))
+    (.addMatchingCerts this eeSelector certStores eeCerts searchAllCertStores))
+
+  (method ^:private getMatchingCACerts :throws [IOException] ^void [this ^ForwardState currentState
+                                                                    ^{:tag (List CertStore)} certStores
+                                                                    ^{:tag (Collection X509Certificate)} caCerts]
+    (when (some? debug) (.println debug "ForwardBuilder.getMatchingCACerts()..."))
+    (let [initialSize (.size caCerts)
+          ^:mutable ^X509CertSelector sel nil]
+      (if (.isInitial currentState)
+          (do
+            (when (== (.getBasicConstraints (.-targetCertConstraints this)) -2) (return))
+            (when (some? debug)
+              (.println debug "ForwardBuilder.getMatchingCACerts(): the target is a CA"))
+            (when (nil? caTargetSelector)
+              (set! caTargetSelector
+                    (cast X509CertSelector (.clone (.-targetCertConstraints this))))
+              (when (.explicitPolicyRequired (.-buildParams this))
+                (.setPolicy caTargetSelector (.getMatchingPolicies this))))
+            (set! sel caTargetSelector))
+          (do
+            (when (nil? caSelector)
+              (set! caSelector (AdaptableX509CertSelector.))
+              (when (.explicitPolicyRequired (.-buildParams this))
+                (.setPolicy caSelector (.getMatchingPolicies this))))
+            (.setSubject caSelector (.-issuerDN currentState))
+            (.setValidityPeriod caSelector
+                                (.getNotBefore (.-cert currentState))
+                                (.getNotAfter (.-cert currentState)))
+            (set! sel caSelector)))
+      (.setBasicConstraints sel -1)
+      (for-each [^X509Certificate trustedCert trustedCerts]
+        (when (.match sel trustedCert)
+          (when (some? debug)
+            (.println debug
+                      (java-str
+                        "ForwardBuilder.getMatchingCACerts: found matching trust anchor.\n  SN: "
+                        (Debug/toString (.getSerialNumber trustedCert))
+                        "\n  Subject: "
+                        (.getSubjectX500Principal trustedCert)
+                        "\n  Issuer: "
+                        (.getIssuerX500Principal trustedCert))))
+          (.add caCerts trustedCert)))
+      (.setCertificateValid sel (.date (.-buildParams this)))
+      (.setBasicConstraints sel (.-traversedCACerts currentState))
+      (when (or (or (.isInitial currentState) (== (.maxPathLength (.-buildParams this)) -1))
+                (> (.maxPathLength (.-buildParams this)) (.-traversedCACerts currentState)))
+        (when (and (.addMatchingCerts this sel certStores caCerts searchAllCertStores)
+                   (not searchAllCertStores))
+          (return)))
+      (when (and (not (.isInitial currentState)) Builder/USE_AIA)
+        (let [aiaExt (.getAuthorityInfoAccessExtension (.-cert currentState))]
+          (when (some? aiaExt) (.getCerts this aiaExt caCerts))))
+      (when (some? debug)
+        (let [numCerts (unchecked-subtract-int (.size caCerts) initialSize)]
+          (.println debug
+                    (java-str "ForwardBuilder.getMatchingCACerts: found " numCerts " CA certs"))))))
+
+  (method ^:private getCerts ^boolean [this ^AuthorityInfoAccessExtension aiaExt
+                                       ^{:tag (Collection X509Certificate)} certs]
+    (if (not Builder/USE_AIA)
+        false
+        (let [^{:tag (List AccessDescription)} adList (.getAccessDescriptions aiaExt)]
+          (if (or (nil? adList) (.isEmpty adList))
+              false
+              (let [key (.tryBegin ThreadTrackerHolder/AIA_TRACKER)]
+                (if (nil? key)
+                    (do
+                      (when (some? debug)
+                        (.println debug
+                                  "Recursive fetching of certs via the AIA extension detected"))
+                      false)
+                    (try
+                      (let [^:mutable add false]
+                        (for-each [^AccessDescription ad adList]
+                          (let [cs (URICertStore/getInstance ad)]
+                            (when (some? cs)
+                              (try
+                                (when (.addAll certs (.getCertificates cs caSelector))
+                                  (set! add true)
+                                  (when-not searchAllCertStores (return true)))
+                                (catch CertStoreException cse
+                                  (when (some? debug)
+                                    (.println debug "exception getting certs from CertStore:")
+                                    (.printStackTrace cse)))))))
+                        add)
+                      (finally (.end ThreadTrackerHolder/AIA_TRACKER key)))))))))
+
+  (defclass ^:static PKIXCertComparator
+    :implements [(Comparator X509Certificate)]
+
+    (field ^:static ^:final ^String METHOD_NME "PKIXCertComparator.compare()")
+
+    (field ^:private ^:final ^{:tag (Set X500Principal)} trustedSubjectDNs)
+
+    (field ^:private ^:final ^X509CertSelector certSkidSelector)
+
+    (constructor :throws [IOException] [this ^{:tag (Set X500Principal)} trustedSubjectDNs
+                                        ^X509CertImpl previousCert]
+      (set! (.-trustedSubjectDNs this) trustedSubjectDNs)
+      (set! (.-certSkidSelector this) (.getSelector this previousCert)))
+
+    (method ^:private getSelector :throws [IOException] ^X509CertSelector [this
+                                                                           ^X509CertImpl previousCert]
+      (when (some? previousCert)
+        (let [akidExt (.getAuthorityKeyIdentifierExtension previousCert)]
+          (when (some? akidExt)
+            (let [skid (.getEncodedKeyIdentifier akidExt)]
+              (when (some? skid)
+                (let [selector (X509CertSelector.)]
+                  (.setSubjectKeyIdentifier selector skid)
+                  (return selector)))))))
+      nil)
+
+    (method ^:public compare ^int [this ^X509Certificate oCert1 ^X509Certificate oCert2]
+      (if (.equals oCert1 oCert2)
+          0
+          (do
+            (when (some? certSkidSelector)
+              (when (.match certSkidSelector oCert1) (return -1))
+              (when (.match certSkidSelector oCert2) (return 1)))
+            (let [cIssuer1 (.getIssuerX500Principal oCert1)
+                  cIssuer2 (.getIssuerX500Principal oCert2)]
+              (when (some? debug)
+                (.println debug (java-str (java-str METHOD_NME " cert1 Issuer:  ") cIssuer1))
+                (.println debug (java-str (java-str METHOD_NME " cert2 Issuer:  ") cIssuer2))
+                (.println debug (java-str METHOD_NME " MATCH TRUSTED SUBJECT TEST...")))
+              (cond
+                (.contains trustedSubjectDNs cIssuer1) -1
+                (.contains trustedSubjectDNs cIssuer2) 1
+                :else
+                  (let [^:mutable ^String debugMsg nil]
+                    (when (some? debug)
+                      (.println debug (java-str METHOD_NME " SAME NAMESPACE AS TRUSTED TEST..."))
+                      (set!
+                        debugMsg
+                        (java-str
+                          METHOD_NME
+                          " distance (number of RDNs) from cert%1$s issuer to trusted subject %2$s: %3$d")))
+                    (let [cIssuer1Name (X500Name/asX500Name cIssuer1)
+                          cIssuer2Name (X500Name/asX500Name cIssuer2)]
+                      (for-each [^X500Principal tSubject trustedSubjectDNs]
+                        (let [tSubjectName (X500Name/asX500Name tSubject)
+                              d1 (ForwardBuilder/distanceToCommonAncestor tSubjectName cIssuer1Name)
+                              d2 (ForwardBuilder/distanceToCommonAncestor tSubjectName cIssuer2Name)]
+                          (when (some? debug)
+                            (when-not (== d1 -1)
+                              (.println debug
+                                        (String/format debugMsg (new Object/1 ["1" tSubject d1]))))
+                            (when-not (== d2 -1)
+                              (.println debug
+                                        (String/format debugMsg (new Object/1 ["2" tSubject d2])))))
+                          (when-not (and (== d1 -1) (== d2 -1))
+                            (if (not (== d1 -1))
+                                (if (not (== d2 -1)) (return (if (> d1 d2) 1 -1)) (return -1))
+                                (when-not (== d2 -1) (return 1))))))
+                      (when (some? debug)
+                        (.println debug (java-str METHOD_NME " no tests matched; RETURN -1")))
+                      -1))))))))
+
+  (method ^:private ^:static distanceToCommonAncestor ^int [^X500Name anchor ^X500Name issuer]
+    (let [^{:tag (List RDN)} anchorRdns (.rdns anchor)
+          ^{:tag (List RDN)} issuerRdns (.rdns issuer)
+          minLen (Math/min (.size anchorRdns) (.size issuerRdns))]
+      (if (== minLen 0)
+          -1
+          (let [^:mutable ^int i 0]
+            (while (< i minLen)
+              (let [rdn (cast RDN (.get anchorRdns i))]
+                (when-not (.equals rdn (.get issuerRdns i)) (if (== i 0) (return -1) (break))))
+              (set! i (unchecked-inc-int i)))
+            (let [lastRDN (cast RDN (.get anchorRdns (unchecked-subtract-int i 1)))]
+              (for-each [^AVA ava (.avas lastRDN)]
+                (let [oid (.getObjectIdentifier ava)]
+                  (when (or (or (or (.equals oid X500Name/countryName_oid)
+                                    (.equals oid X500Name/stateName_oid))
+                                (.equals oid X500Name/localityName_oid))
+                            (.equals oid X500Name/streetAddress_oid))
+                    (return -1))))
+              (unchecked-subtract-int (.size issuer) i))))))
+
+  (method verifyCert :throws [GeneralSecurityException] ^void [this ^X509Certificate cert
+                                                               ^State currentState
+                                                               ^{:tag (List X509Certificate)} certPathList]
+    (when (some? debug)
+      (.println debug
+                (java-str "ForwardBuilder.verifyCert(SN: "
+                          (Debug/toString (.getSerialNumber cert))
+                          "\n  Issuer: "
+                          (.getIssuerX500Principal cert)
+                          ")\n  Subject: "
+                          (.getSubjectX500Principal cert)
+                          ")")))
+    (let [currState (cast ForwardState currentState)]
+      (.check (.-untrustedChecker currState) cert (Collections/emptySet))
+      (let [isTrustedCert (.contains trustedCerts cert)]
+        (when-not isTrustedCert
+          (let [^:mutable ^{:tag (Set String)} unresCritExts (.getCriticalExtensionOIDs cert)]
+            (when (nil? unresCritExts) (set! unresCritExts (Collections/emptySet)))
+            (for-each [^PKIXCertPathChecker checker (.-forwardCheckers currState)]
+              (.check checker cert unresCritExts))
+            (for-each [^PKIXCertPathChecker checker (.certPathCheckers (.-buildParams this))]
+              (when-not (.isForwardCheckingSupported checker)
+                (let [^{:tag (Set String)} supportedExts (.getSupportedExtensions checker)]
+                  (when (some? supportedExts) (.removeAll unresCritExts supportedExts)))))
+            (when-not (.isEmpty unresCritExts)
+              (.remove unresCritExts (.toString PKIXExtensions/BasicConstraints_Id))
+              (.remove unresCritExts (.toString PKIXExtensions/NameConstraints_Id))
+              (.remove unresCritExts (.toString PKIXExtensions/CertificatePolicies_Id))
+              (.remove unresCritExts (.toString PKIXExtensions/PolicyMappings_Id))
+              (.remove unresCritExts (.toString PKIXExtensions/PolicyConstraints_Id))
+              (.remove unresCritExts (.toString PKIXExtensions/InhibitAnyPolicy_Id))
+              (.remove unresCritExts (.toString PKIXExtensions/SubjectAlternativeName_Id))
+              (.remove unresCritExts (.toString PKIXExtensions/KeyUsage_Id))
+              (.remove unresCritExts (.toString PKIXExtensions/ExtendedKeyUsage_Id))
+              (when-not (.isEmpty unresCritExts)
+                (throw (CertPathValidatorException.
+                         "Unrecognized critical extension(s)"
+                         nil
+                         nil
+                         -1
+                         PKIXReason/UNRECOGNIZED_CRIT_EXT))))))
+        (when-not (.isInitial currState)
+          (when-not isTrustedCert
+            (when (== (.getBasicConstraints cert) -1)
+              (throw (CertificateException. "cert is NOT a CA cert")))
+            (KeyChecker/verifyCAKeyUsage cert))))))
+
+  (method isPathCompleted ^boolean [this ^X509Certificate cert]
+    (let [^{:tag (List TrustAnchor)} otherAnchors (ArrayList.)]
+      (for-each [^TrustAnchor anchor trustAnchors]
+        (when (some? (.getTrustedCert anchor))
+          (if (.equals cert (.getTrustedCert anchor))
+              (do (set! (.-trustAnchor this) anchor) (return true))
+              (continue)))
+        (let [principal (.getCA anchor)
+              publicKey (.getCAPublicKey anchor)]
+          (when (and (and (some? principal) (some? publicKey))
+                     (.equals principal (.getSubjectX500Principal cert)))
+            (when (.equals publicKey (.getPublicKey cert))
+              (set! (.-trustAnchor this) anchor)
+              (return true)))
+          (.add otherAnchors anchor)))
+      (for-each [^TrustAnchor anchor otherAnchors]
+        (let [principal (.getCA anchor)
+              publicKey (.getCAPublicKey anchor)]
+          (when-not (or (nil? principal) (not (.equals principal (.getIssuerX500Principal cert))))
+            (when-not (PKIX/isDSAPublicKeyWithoutParams publicKey)
+              (try
+                (.verify cert publicKey (.sigProvider (.-buildParams this)))
+                (catch InvalidKeyException ike
+                  (when (some? debug)
+                    (.println debug "ForwardBuilder.isPathCompleted() invalid DSA key found"))
+                  (continue))
+                (catch GeneralSecurityException e
+                  (when (some? debug)
+                    (.println debug "ForwardBuilder.isPathCompleted() unexpected exception")
+                    (.printStackTrace e))
+                  (continue)))
+              (set! (.-trustAnchor this) anchor)
+              (return true)))))
+      false))
+
+  (method addCertToPath ^void [this ^X509Certificate cert
+                               ^{:tag (LinkedList X509Certificate)} certPathList]
+    (.addFirst certPathList cert))
+
+  (method removeFinalCertFromPath ^void [this ^{:tag (LinkedList X509Certificate)} certPathList]
+    (.removeFirst certPathList)))

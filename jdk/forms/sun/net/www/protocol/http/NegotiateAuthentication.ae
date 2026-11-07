@@ -1,0 +1,107 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/protocol/http/NegotiateAuthentication.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.protocol.http)
+
+(import '(java.io IOException)
+        '(java.net Authenticator$RequestorType URL)
+        '(java.util Base64 HashMap Locale)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(sun.net.www HeaderParser))
+
+(defclass ^:final NegotiateAuthentication
+  :extends AuthenticationInfo
+
+  (field ^:private ^:final ^HttpCallerInfo hci)
+
+  (field ^:static ^{:tag (HashMap String Boolean)} supported nil)
+
+  (field ^:static ^{:tag (ThreadLocal (HashMap String Negotiator))} cache nil)
+
+  (field ^:private ^:static ^:final ^ReentrantLock negotiateLock (ReentrantLock.))
+
+  (field ^:private ^Negotiator negotiator nil)
+
+  (constructor ^:public [this ^HttpCallerInfo hci]
+    (super. (if (identical? Authenticator$RequestorType/PROXY (.-authType hci))
+                NegotiateAuthentication/PROXY_AUTHENTICATION
+                NegotiateAuthentication/SERVER_AUTHENTICATION)
+            ^AuthScheme (if (.equalsIgnoreCase (.-scheme hci) "Negotiate")
+                            AuthScheme/NEGOTIATE
+                            AuthScheme/KERBEROS)
+            (.-url hci)
+            "")
+    (set! (.-hci this) hci))
+
+  (method ^:public supportsPreemptiveAuthorization ^boolean [this] false)
+
+  (method ^:public ^:static isSupported ^boolean [^HttpCallerInfo hci]
+    (.lock negotiateLock)
+    (try
+      (when (nil? supported) (set! supported (HashMap.)))
+      (let [^:mutable hostname (.-host hci)]
+        (set! hostname (.toLowerCase hostname Locale/ROOT))
+        (if (.containsKey supported hostname)
+            (.booleanValue (cast Boolean (.get supported hostname)))
+            (let [neg (Negotiator/getNegotiator hci)]
+              (if (some? neg)
+                  (do
+                    (.put supported hostname true)
+                    (when (nil? cache)
+                      (set!
+                        cache
+                        (anon (ThreadLocal (HashMap String Negotiator)) []
+                          (method ^:protected initialValue ^{:tag (HashMap String Negotiator)} [this]
+                            (HashMap.)))))
+                    (.put (cast HashMap (.get cache)) hostname neg)
+                    true)
+                  (do (.put supported hostname false) false)))))
+      (finally (.unlock negotiateLock))))
+
+  (method ^:private ^:static getCache ^{:tag (HashMap String Negotiator)} []
+    (.lock negotiateLock)
+    (try (when (some? cache) (cast HashMap (.get cache))) (finally (.unlock negotiateLock))))
+
+  (method ^:protected useAuthCache ^boolean [this] false)
+
+  (method ^:public getHeaderValue ^String [this ^URL url ^String method]
+    (throw (RuntimeException. "getHeaderValue not supported")))
+
+  (method ^:public isAuthorizationStale ^boolean [this ^String header]
+    false)
+
+  (method ^:public setHeaders ^boolean [this ^HttpURLConnection conn ^HeaderParser p ^String raw]
+    (java-assert (.isLockHeldByCurrentThread conn))
+    (try
+      (let [^:mutable ^String response nil
+            ^:mutable ^byte/1 incoming nil
+            parts (.split raw "\\s+")]
+        (when (> (alength parts) 1) (set! incoming (.decode (Base64/getDecoder) (aget parts 1))))
+        (set! response
+              (java-str (.-scheme hci)
+                        " "
+                        (.encodeToString (Base64/getEncoder)
+                                         ^byte/1 (if (nil? incoming)
+                                                     (.firstToken this)
+                                                     (.nextToken this incoming)))))
+        (.setAuthenticationProperty conn (.getHeaderName this) response)
+        true)
+      (catch IOException e false)))
+
+  (method ^:private firstToken :throws [IOException] ^byte/1 [this]
+    (set! negotiator nil)
+    (let [^{:tag (HashMap String Negotiator)} cachedMap (NegotiateAuthentication/getCache)]
+      (when (some? cachedMap)
+        (set! negotiator (cast Negotiator (.remove cachedMap (.getHost this)))))
+      (when (nil? negotiator)
+        (set! negotiator (Negotiator/getNegotiator hci))
+        (when (nil? negotiator)
+          (let [ioe (IOException. "Cannot initialize Negotiator")] (throw ioe))))
+      (.firstToken negotiator)))
+
+  (method ^:private nextToken :throws [IOException] ^byte/1 [this ^byte/1 token]
+    (.nextToken negotiator token))
+
+  (method ^:public disposeContext ^void [this]
+    (when (some? negotiator)
+      (try (.disposeContext negotiator) (catch IOException ioEx))
+      (set! negotiator nil))))

@@ -1,0 +1,208 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/Timer.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.util)
+
+(import '(java.lang.ref Cleaner$Cleanable)
+        '(java.util.concurrent.atomic AtomicInteger)
+        '(jdk.internal.ref CleanerFactory))
+
+(defclasses
+  (defclass ^:public Timer
+    (field ^:private ^:final ^TaskQueue queue (TaskQueue.))
+
+    (field ^:private ^:final ^TimerThread thread (TimerThread. queue))
+
+    (defclass ^:private ^:static ThreadReaper
+      :implements [Runnable]
+
+      (field ^:private ^:final ^TaskQueue queue)
+
+      (field ^:private ^:final ^TimerThread thread)
+
+      (constructor [this ^TaskQueue queue ^TimerThread thread]
+        (set! (.-queue this) queue)
+        (set! (.-thread this) thread))
+
+      (method ^:public run ^void [this]
+        (locking queue (set! (.-newTasksMayBeScheduled thread) false) (.notify queue))))
+
+    (field ^:private ^:final ^Cleaner$Cleanable cleanup)
+
+    (field ^:private ^:static ^:final ^AtomicInteger nextSerialNumber (AtomicInteger.))
+
+    (method ^:private ^:static serialNumber ^int []
+      (.getAndIncrement nextSerialNumber))
+
+    (constructor ^:public [this]
+      (this. (java-str "Timer-" (Timer/serialNumber))))
+
+    (constructor ^:public [this ^boolean isDaemon]
+      (this. (java-str "Timer-" (Timer/serialNumber)) isDaemon))
+
+    (constructor ^:public [this ^String name] (this. name false))
+
+    (constructor ^:public [this ^String name ^boolean isDaemon]
+      (let [threadReaper (ThreadReaper. queue thread)]
+        (set! (.-cleanup this) (.register (CleanerFactory/cleaner) this threadReaper))
+        (.setName thread name)
+        (.setDaemon thread isDaemon)
+        (.start thread)))
+
+    (method ^:public schedule ^void [this ^TimerTask task ^long delay]
+      (when (< delay 0) (throw (IllegalArgumentException. "Negative delay.")))
+      (.sched this task (unchecked-add (System/currentTimeMillis) delay) 0))
+
+    (method ^:public schedule ^void [this ^TimerTask task ^Date time]
+      (.sched this task (.getTime time) 0))
+
+    (method ^:public schedule ^void [this ^TimerTask task ^long delay ^long period]
+      (when (< delay 0) (throw (IllegalArgumentException. "Negative delay.")))
+      (when (<= period 0) (throw (IllegalArgumentException. "Non-positive period.")))
+      (.sched this task (unchecked-add (System/currentTimeMillis) delay) (unchecked-negate period)))
+
+    (method ^:public schedule ^void [this ^TimerTask task ^Date firstTime ^long period]
+      (when (<= period 0) (throw (IllegalArgumentException. "Non-positive period.")))
+      (.sched this task (.getTime firstTime) (unchecked-negate period)))
+
+    (method ^:public scheduleAtFixedRate ^void [this ^TimerTask task ^long delay ^long period]
+      (when (< delay 0) (throw (IllegalArgumentException. "Negative delay.")))
+      (when (<= period 0) (throw (IllegalArgumentException. "Non-positive period.")))
+      (.sched this task (unchecked-add (System/currentTimeMillis) delay) period))
+
+    (method ^:public scheduleAtFixedRate ^void [this ^TimerTask task ^Date firstTime ^long period]
+      (when (<= period 0) (throw (IllegalArgumentException. "Non-positive period.")))
+      (.sched this task (.getTime firstTime) period))
+
+    (method ^:private sched ^void [this ^TimerTask task ^long time ^:mutable ^long period]
+      (when (< time 0) (throw (IllegalArgumentException. "Illegal execution time.")))
+      (when (> (Math/abs period) (bit-shift-right Long/MAX_VALUE 1))
+        (set! period (bit-shift-right period 1)))
+      (locking queue
+        (when-not (.-newTasksMayBeScheduled thread)
+          (throw (IllegalStateException. "Timer already cancelled.")))
+        (locking (.-lock task)
+          (when-not (== (.-state task) TimerTask/VIRGIN)
+            (throw (IllegalStateException. "Task already scheduled or cancelled")))
+          (set! (.-nextExecutionTime task) time)
+          (set! (.-period task) period)
+          (set! (.-state task) TimerTask/SCHEDULED))
+        (.add queue task)
+        (when (identical? (.getMin queue) task) (.notify queue))))
+
+    (method ^:public cancel ^void [this]
+      (locking queue (.clear queue) (.clean cleanup)))
+
+    (method ^:public purge ^int [this]
+      (let [^:mutable ^int result 0]
+        (locking queue
+          (loop [^int i (.size queue)]
+            (if (> i 0)
+                (if (== (.-state (.get queue i)) TimerTask/CANCELLED)
+                    (do
+                      (.quickRemove queue i)
+                      (set! result (unchecked-inc-int result))
+                      (recur (unchecked-dec-int i)))
+                    (recur (unchecked-dec-int i)))
+                nil))
+          (when-not (== result 0) (.heapify queue)))
+        result)))
+
+  (defclass TimerThread
+    :extends Thread
+
+    (field ^boolean newTasksMayBeScheduled true)
+
+    (field ^:private ^TaskQueue queue)
+
+    (constructor [this ^TaskQueue queue] (set! (.-queue this) queue))
+
+    (method ^:public run ^void [this]
+      (try
+        (.mainLoop this)
+        (finally (locking queue (set! newTasksMayBeScheduled false) (.clear queue)))))
+
+    (method ^:private mainLoop ^void [this]
+      (while true
+        (try
+          (let [^:mutable ^TimerTask task nil
+                ^:mutable ^boolean taskFired false]
+            (locking queue
+              (while (and (.isEmpty queue) newTasksMayBeScheduled) (.wait queue))
+              (when (.isEmpty queue) (break))
+              (let [^:mutable ^long currentTime 0
+                    ^:mutable ^long executionTime 0]
+                (set! task (.getMin queue))
+                (locking (.-lock task)
+                  (when (== (.-state task) TimerTask/CANCELLED) (.removeMin queue) (continue))
+                  (set! currentTime (System/currentTimeMillis))
+                  (set! executionTime (.-nextExecutionTime task))
+                  (when (set! taskFired (<= executionTime currentTime))
+                    (if (== (.-period task) 0)
+                        (do (.removeMin queue) (set! (.-state task) TimerTask/EXECUTED))
+                        (.rescheduleMin queue
+                                        (if (< (.-period task) 0)
+                                            (unchecked-subtract currentTime (.-period task))
+                                            (unchecked-add executionTime (.-period task)))))))
+                (when-not taskFired (.wait queue (unchecked-subtract executionTime currentTime)))))
+            (when taskFired (.run task)))
+          (catch InterruptedException e)))))
+
+  (defclass TaskQueue
+    (field ^:private ^TimerTask/1 queue (new TimerTask/1 128))
+
+    (field ^:private ^int size 0)
+
+    (method size ^int [this] size)
+
+    (method add ^void [this ^TimerTask task]
+      (when (== (unchecked-add-int size 1) (alength queue))
+        (set! queue
+              (cast TimerTask/1 (Arrays/copyOf queue (unchecked-multiply-int 2 (alength queue))))))
+      (aset queue (set! size (unchecked-inc-int size)) task)
+      (.fixUp this size))
+
+    (method getMin ^TimerTask [this] (aget queue 1))
+
+    (method get ^TimerTask [this ^int i] (aget queue i))
+
+    (method removeMin ^void [this]
+      (aset queue 1 (aget queue size))
+      (aset queue (let [old-1 size] (set! size (unchecked-dec-int size)) old-1) nil)
+      (.fixDown this 1))
+
+    (method quickRemove ^void [this ^int i]
+      (java-assert (<= i size))
+      (aset queue i (aget queue size))
+      (aset queue (let [old-2 size] (set! size (unchecked-dec-int size)) old-2) nil))
+
+    (method rescheduleMin ^void [this ^long newTime]
+      (set! (.-nextExecutionTime (aget queue 1)) newTime)
+      (.fixDown this 1))
+
+    (method isEmpty ^boolean [this] (== size 0))
+
+    (method clear ^void [this]
+      (loop [^int i 1] (when (<= i size) (aset queue i nil) (recur (unchecked-inc-int i))))
+      (set! size 0))
+
+    (method ^:private fixUp ^void [this ^:mutable ^int k]
+      (while (> k 1)
+        (let [j (bit-shift-right-int k 1)]
+          (when (<= (.-nextExecutionTime (aget queue j)) (.-nextExecutionTime (aget queue k)))
+            (break))
+          (let [tmp (aget queue j)] (aset queue j (aget queue k)) (aset queue k tmp) (set! k j)))))
+
+    (method ^:private fixDown ^void [this ^:mutable ^int k]
+      (let [^:mutable ^int j 0]
+        (while (and (<= (set! j (bit-shift-left-int k 1)) size) (> j 0))
+          (when (and (< j size)
+                     (> (.-nextExecutionTime (aget queue j))
+                        (.-nextExecutionTime (aget queue (unchecked-add-int j 1)))))
+            (set! j (unchecked-inc-int j)))
+          (when (<= (.-nextExecutionTime (aget queue k)) (.-nextExecutionTime (aget queue j)))
+            (break))
+          (let [tmp (aget queue j)] (aset queue j (aget queue k)) (aset queue k tmp) (set! k j)))))
+
+    (method heapify ^void [this]
+      (loop [^int i (unchecked-divide-int size 2)]
+        (when (>= i 1) (.fixDown this i) (recur (unchecked-dec-int i)))))))

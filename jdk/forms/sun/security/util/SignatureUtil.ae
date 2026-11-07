@@ -1,0 +1,303 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/util/SignatureUtil.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.util)
+
+(import '(java.io IOException)
+        '(java.security AlgorithmParameters
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        NoSuchAlgorithmException
+                        NoSuchProviderException
+                        PrivateKey
+                        Provider
+                        ProviderException
+                        PublicKey
+                        SecureRandom
+                        Signature
+                        SignatureException)
+        '(java.security.cert Certificate)
+        '(java.security.interfaces EdECKey EdECPrivateKey RSAKey)
+        '(java.security.spec AlgorithmParameterSpec
+                             ECParameterSpec
+                             InvalidParameterSpecException
+                             MGF1ParameterSpec
+                             NamedParameterSpec
+                             PSSParameterSpec)
+        '(java.util Locale)
+        '(jdk.internal.access SharedSecrets)
+        '(sun.security.pkcs NamedPKCS8Key)
+        '(sun.security.rsa RSAUtil)
+        '(sun.security.x509 AlgorithmId))
+
+(defclass ^:public SignatureUtil
+  (method ^:private ^:static checkName ^String [^:mutable ^String algName]
+    (set! algName (.toUpperCase algName Locale/ENGLISH))
+    (when (.contains algName ".")
+      (when (.startsWith algName "OID.") (set! algName (.substring algName 4)))
+      (let [ko (KnownOIDs/findMatch algName)]
+        (when (some? ko) (return (.toUpperCase (.stdName ko) Locale/ENGLISH)))))
+    algName)
+
+  (method ^:private ^:static createAlgorithmParameters :throws [ProviderException] ^AlgorithmParameters [^String algName
+                                                                                                         ^byte/1 paramBytes]
+    (try
+      (let [result (AlgorithmParameters/getInstance algName)] (.init result paramBytes) result)
+      (catch [NoSuchAlgorithmException IOException] e (throw (ProviderException. e)))))
+
+  (method ^:public ^:static getParamSpec :throws [ProviderException] ^AlgorithmParameterSpec [^:mutable ^String sigName
+                                                                                              ^:mutable ^AlgorithmParameters params]
+    (let [^:mutable ^AlgorithmParameterSpec paramSpec nil]
+      (when (some? params)
+        (set! sigName (SignatureUtil/checkName sigName))
+        (when (.contains (.getAlgorithm params) ".")
+          (try
+            (set! params (SignatureUtil/createAlgorithmParameters sigName (.getEncoded params)))
+            (catch IOException e (throw (ProviderException. e)))))
+        (cond
+          (.contains sigName "RSA") (set! paramSpec (RSAUtil/getParamSpec params))
+          (.contains sigName "ECDSA")
+            (try
+              (set! paramSpec (.getParameterSpec params ECParameterSpec))
+              (catch Exception e (throw (ProviderException. "Error handling EC parameters" e))))
+          :else
+            (throw (ProviderException.
+                     (java-str "Unrecognized algorithm for signature parameters " sigName)))))
+      paramSpec))
+
+  (method ^:public ^:static getParamSpec :throws [ProviderException] ^AlgorithmParameterSpec [^:mutable ^String sigName
+                                                                                              ^byte/1 paramBytes]
+    (let [^:mutable ^AlgorithmParameterSpec paramSpec nil]
+      (when (some? paramBytes)
+        (set! sigName (SignatureUtil/checkName sigName))
+        (cond
+          (.contains sigName "RSA")
+            (let [params (SignatureUtil/createAlgorithmParameters sigName paramBytes)]
+              (set! paramSpec (RSAUtil/getParamSpec params)))
+          (.contains sigName "ECDSA") (return nil)
+          :else
+            (throw (ProviderException.
+                     (java-str "Unrecognized algorithm for signature parameters " sigName)))))
+      paramSpec))
+
+  (method ^:public ^:static initVerifyWithParam :throws [InvalidAlgorithmParameterException
+                                                         InvalidKeyException] ^void [^Signature s
+                                                                                     ^PublicKey key
+                                                                                     ^AlgorithmParameterSpec params]
+    (.initVerify (SharedSecrets/getJavaSecuritySignatureAccess) s key params))
+
+  (method ^:public ^:static initVerifyWithParam :throws [InvalidAlgorithmParameterException
+                                                         InvalidKeyException] ^void [^Signature s
+                                                                                     ^Certificate cert
+                                                                                     ^AlgorithmParameterSpec params]
+    (.initVerify (SharedSecrets/getJavaSecuritySignatureAccess) s cert params))
+
+  (method ^:public ^:static initSignWithParam :throws [InvalidAlgorithmParameterException
+                                                       InvalidKeyException] ^void [^Signature s
+                                                                                   ^PrivateKey key
+                                                                                   ^AlgorithmParameterSpec params
+                                                                                   ^SecureRandom sr]
+    (.initSign (SharedSecrets/getJavaSecuritySignatureAccess) s key params sr))
+
+  (defclass ^:public ^:static DigestAlgHolder
+    (field ^:public ^:static ^:final ^AlgorithmId sha512)
+
+    (field ^:public ^:static ^:final ^AlgorithmId shake256_512)
+
+    (field ^:public ^:static ^:final ^AlgorithmId shake256lenWith512)
+
+    (static-initializer
+      (try
+        (set! sha512 (AlgorithmId. AlgorithmId/SHA512_oid))
+        (set! shake256_512 (AlgorithmId. AlgorithmId/SHAKE256_512_oid))
+        (set! shake256lenWith512
+              (AlgorithmId. (ObjectIdentifier/of KnownOIDs/SHAKE256_LEN)
+                            (DerValue. (unchecked-byte 2) (new byte/1 [2 0]))))
+        (catch IOException e (throw (AssertionError. "Should not happen" e))))))
+
+  (method ^:public ^:static getDigestAlgInPkcs7SignerInfo :throws [NoSuchAlgorithmException] ^AlgorithmId [^Signature signer
+                                                                                                           ^String sigalg
+                                                                                                           ^PrivateKey privateKey
+                                                                                                           ^PublicKey publicKey
+                                                                                                           ^boolean directsign]
+    (let [^:mutable ^AlgorithmId digAlgID nil
+          ^:mutable kAlg (.getAlgorithm privateKey)]
+      (cond
+        (or (or (instance? EdECPrivateKey privateKey) (.equalsIgnoreCase kAlg "Ed25519"))
+            (.equalsIgnoreCase kAlg "Ed448"))
+          (do
+            (when (instance? EdECPrivateKey privateKey)
+              (set! kAlg (.getName (.getParams (cast EdECPrivateKey privateKey)))))
+            (switch (.toUpperCase kAlg Locale/ENGLISH)
+              "ED25519" (set! digAlgID DigestAlgHolder/sha512)
+              "ED448"
+                (if directsign
+                    (set! digAlgID DigestAlgHolder/shake256_512)
+                    (set! digAlgID DigestAlgHolder/shake256lenWith512))
+              (throw (AssertionError. (java-str "Unknown curve name: " kAlg)))))
+        (.startsWith (.toUpperCase kAlg Locale/ENGLISH) "ML-DSA")
+          (set! digAlgID DigestAlgHolder/sha512)
+        (.equalsIgnoreCase sigalg "RSASSA-PSS")
+          (try
+            (set! digAlgID
+                  (AlgorithmId/get
+                    (.getDigestAlgorithm
+                      (cast PSSParameterSpec
+                            (.getParameterSpec (.getParameters signer) PSSParameterSpec)))))
+            (catch InvalidParameterSpecException e (throw (AssertionError. "Should not happen" e))))
+        (.equalsIgnoreCase sigalg "HSS/LMS")
+          (set! digAlgID (AlgorithmId. (KeyUtil/hashAlgFromHSS publicKey)))
+        :else (set! digAlgID (AlgorithmId/get (SignatureUtil/extractDigestAlgFromDwithE sigalg))))
+      digAlgID))
+
+  (method ^:public ^:static extractDigestAlgFromDwithE ^String [^:mutable ^String signatureAlgorithm]
+    (set! signatureAlgorithm (.toUpperCase signatureAlgorithm Locale/ENGLISH))
+    (let [with (.indexOf signatureAlgorithm "WITH")]
+      (if (> with 0)
+          (.substring signatureAlgorithm 0 with)
+          (throw (IllegalArgumentException.
+                   (java-str "Cannot extract digest algorithm from " signatureAlgorithm))))))
+
+  (method ^:public ^:static extractKeyAlgFromDwithE ^String [^:mutable ^String signatureAlgorithm]
+    (set! signatureAlgorithm (.toUpperCase signatureAlgorithm Locale/ENGLISH))
+    (let [with (.indexOf signatureAlgorithm "WITH")
+          ^:mutable ^String keyAlgorithm nil]
+      (when (> with 0)
+        (let [and (.indexOf signatureAlgorithm "AND" (unchecked-add-int with 4))]
+          (if (> and 0)
+              (set! keyAlgorithm (.substring signatureAlgorithm (unchecked-add-int with 4) and))
+              (set! keyAlgorithm (.substring signatureAlgorithm (unchecked-add-int with 4))))
+          (when (.endsWith keyAlgorithm "INP1363FORMAT")
+            (set! keyAlgorithm
+                  (.substring keyAlgorithm 0 (unchecked-subtract-int (.length keyAlgorithm) 13))))
+          (when (.equalsIgnoreCase keyAlgorithm "ECDSA") (set! keyAlgorithm "EC"))))
+      keyAlgorithm))
+
+  (method ^:public ^:static getDefaultParamSpec ^AlgorithmParameterSpec [^:mutable ^String sigAlg
+                                                                         ^Key k]
+    (set! sigAlg (SignatureUtil/checkName sigAlg))
+    (when (.equals sigAlg "RSASSA-PSS")
+      (when (instance? RSAKey k)
+        (let [spec (.getParams (cast RSAKey k))]
+          (when (instance? PSSParameterSpec spec) (return spec))))
+      (switch (SignatureUtil/ifcFfcStrength (KeyUtil/getKeySize k))
+        "SHA256" PSSParamsHolder/PSS_256_SPEC
+        "SHA384" PSSParamsHolder/PSS_384_SPEC
+        "SHA512" PSSParamsHolder/PSS_512_SPEC
+        (throw (AssertionError. "Should not happen")))))
+
+  (method ^:public ^:static fromKey :throws [NoSuchAlgorithmException
+                                             NoSuchProviderException
+                                             InvalidKeyException] ^Signature [^String sigAlg
+                                                                              ^PrivateKey key
+                                                                              ^String provider]
+    (let [^Signature sigEngine (if (or (nil? provider) (.isEmpty provider))
+                                   (Signature/getInstance sigAlg)
+                                   (Signature/getInstance sigAlg provider))]
+      (SignatureUtil/autoInitInternal sigAlg key sigEngine)))
+
+  (method ^:public ^:static fromKey :throws [NoSuchAlgorithmException InvalidKeyException] ^Signature [^String sigAlg
+                                                                                                       ^PrivateKey key
+                                                                                                       ^Provider provider]
+    (let [^Signature sigEngine (if (nil? provider)
+                                   (Signature/getInstance sigAlg)
+                                   (Signature/getInstance sigAlg provider))]
+      (SignatureUtil/autoInitInternal sigAlg key sigEngine)))
+
+  (method ^:private ^:static autoInitInternal :throws [InvalidKeyException] ^Signature [^String alg
+                                                                                        ^PrivateKey key
+                                                                                        ^Signature s]
+    (let [params (SignatureUtil/getDefaultParamSpec alg key)]
+      (try
+        (SignatureUtil/initSignWithParam s key params nil)
+        (catch InvalidAlgorithmParameterException e (throw (AssertionError. "Should not happen" e))))
+      s))
+
+  (method ^:public ^:static fromSignature :throws [SignatureException] ^AlgorithmId [^Signature sigEngine
+                                                                                     ^PrivateKey key]
+    (try
+      (if-instance [^NamedParameterSpec nps (.getParams key)]
+        (AlgorithmId/get (.getName nps))
+        (let [^:mutable ^AlgorithmParameters params nil]
+          (try (set! params (.getParameters sigEngine)) (catch UnsupportedOperationException e))
+          (if (some? params)
+              (AlgorithmId/get (.getParameters sigEngine))
+              (let [^:mutable sigAlg (.getAlgorithm sigEngine)]
+                (when (.equalsIgnoreCase sigAlg "EdDSA") (set! sigAlg (.getAlgorithm key)))
+                (AlgorithmId/get sigAlg)))))
+      (catch NoSuchAlgorithmException e
+        (throw (SignatureException. "Cannot derive AlgorithmIdentifier" e)))))
+
+  (method ^:public ^:static checkKeyAndSigAlgMatch ^void [^PrivateKey key ^:mutable ^String sAlg]
+    (let [kAlg (.toUpperCase (.getAlgorithm key) Locale/ENGLISH)]
+      (set! sAlg (SignatureUtil/checkName sAlg))
+      (if-instance [^NamedPKCS8Key n8k key]
+        (when (and (not (.equalsIgnoreCase sAlg (.getAlgorithm n8k)))
+                   (not (.equalsIgnoreCase sAlg (.getName (.getParams n8k)))))
+          (throw
+            (IllegalArgumentException. "key algorithm not compatible with signature algorithm")))
+        (switch sAlg
+          "RSASSA-PSS"
+            (when (and (not (.equals kAlg "RSASSA-PSS")) (not (.equals kAlg "RSA")))
+              (throw (IllegalArgumentException.
+                       "key algorithm not compatible with signature algorithm")))
+          "EDDSA"
+            (when (and (and (not (.equals kAlg "EDDSA")) (not (.equals kAlg "ED448")))
+                       (not (.equals kAlg "ED25519")))
+              (throw (IllegalArgumentException.
+                       "key algorithm not compatible with signature algorithm")))
+          ("ED25519" "ED448")
+            (cond
+              (instance? EdECKey key)
+                (let [groupName (.toUpperCase (.getName (.getParams (cast EdECKey key))) Locale/US)]
+                  (when-not (.equals sAlg groupName)
+                    (throw (IllegalArgumentException.
+                             "key algorithm not compatible with signature algorithm"))))
+              (and (not (.equals kAlg "EDDSA")) (not (.equals kAlg sAlg)))
+                (throw (IllegalArgumentException.
+                         "key algorithm not compatible with signature algorithm")))
+          (when (.contains sAlg "WITH")
+            (when (or (or (and (.endsWith sAlg "WITHRSA") (not (.equals kAlg "RSA")))
+                          (and (.endsWith sAlg "WITHECDSA") (not (.equals kAlg "EC"))))
+                      (and (.endsWith sAlg "WITHDSA") (not (.equals kAlg "DSA"))))
+              (throw (IllegalArgumentException.
+                       "key algorithm not compatible with signature algorithm"))))))))
+
+  (method ^:public ^:static getDefaultSigAlgForKey ^String [^PrivateKey k]
+    (let [kAlg (.toUpperCase (.getAlgorithm k) Locale/ENGLISH)]
+      (switch kAlg
+        ("DH" "XDH" "X25519" "X448") nil
+        "DSA" "SHA256withDSA"
+        "RSA" (java-str (SignatureUtil/ifcFfcStrength (KeyUtil/getKeySize k)) "withRSA")
+        "EC" (java-str (SignatureUtil/ecStrength (KeyUtil/getKeySize k)) "withECDSA")
+        "EDDSA"
+          (if (instance? EdECPrivateKey k) (.getName (.getParams (cast EdECPrivateKey k))) kAlg)
+        (when-not (.contains kAlg "KEM") kAlg))))
+
+  (defclass ^:private ^:static PSSParamsHolder
+    (field ^:static ^:final ^PSSParameterSpec PSS_256_SPEC
+      (PSSParameterSpec. "SHA-256"
+                         "MGF1"
+                         MGF1ParameterSpec/SHA256
+                         32
+                         PSSParameterSpec/TRAILER_FIELD_BC))
+
+    (field ^:static ^:final ^PSSParameterSpec PSS_384_SPEC
+      (PSSParameterSpec. "SHA-384"
+                         "MGF1"
+                         MGF1ParameterSpec/SHA384
+                         48
+                         PSSParameterSpec/TRAILER_FIELD_BC))
+
+    (field ^:static ^:final ^PSSParameterSpec PSS_512_SPEC
+      (PSSParameterSpec. "SHA-512"
+                         "MGF1"
+                         MGF1ParameterSpec/SHA512
+                         64
+                         PSSParameterSpec/TRAILER_FIELD_BC)))
+
+  (method ^:private ^:static ecStrength ^String [^int bitLength]
+    (if (>= bitLength 512) "SHA512" "SHA384"))
+
+  (method ^:private ^:static ifcFfcStrength ^String [^int bitLength]
+    (cond (> bitLength 7680) "SHA512" (>= bitLength 624) "SHA384" :else "SHA256")))

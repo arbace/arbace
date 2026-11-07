@@ -1,0 +1,90 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SSLTransport.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io EOFException IOException InterruptedIOException)
+        '(java.net SocketException)
+        '(java.nio ByteBuffer)
+        '(javax.crypto AEADBadTagException BadPaddingException)
+        '(javax.net.ssl SSLHandshakeException))
+
+(defclass ^:interface SSLTransport
+  (method getPeerHost ^String [this])
+
+  (method getPeerPort ^int [this])
+
+  (method ^:default shutdown :throws [IOException] ^void [this])
+
+  (method useDelegatedTask ^boolean [this])
+
+  (method ^:static decode :throws [IOException] ^Plaintext [^TransportContext context
+                                                            ^ByteBuffer/1 srcs ^int srcsOffset
+                                                            ^int srcsLength ^ByteBuffer/1 dsts
+                                                            ^:mutable ^int dstsOffset
+                                                            ^int dstsLength]
+    (let [^:mutable ^Plaintext/1 plaintexts nil]
+      (try
+        (set! plaintexts (.decode (.-inputRecord context) srcs srcsOffset srcsLength))
+        (catch UnsupportedOperationException unsoe
+          (when-not (.isDTLS (.-sslContext context))
+            (.encodeV2NoCipher (.-outputRecord context))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+              (SSLLogger/finest "may be talking to SSLv2")))
+          (throw (.fatal context Alert/UNEXPECTED_MESSAGE unsoe)))
+        (catch AEADBadTagException bte (throw (.fatal context Alert/BAD_RECORD_MAC bte)))
+        (catch BadPaddingException bpe
+          (let [^Alert alert (if (some? (.-handshakeContext context))
+                                 Alert/HANDSHAKE_FAILURE
+                                 Alert/BAD_RECORD_MAC)]
+            (throw (.fatal context alert bpe))))
+        (catch SSLHandshakeException she (throw (.fatal context Alert/HANDSHAKE_FAILURE she)))
+        (catch EOFException eofe (throw eofe))
+        (catch [InterruptedIOException SocketException] se (throw se))
+        (catch IOException ioe (throw (.fatal context Alert/UNEXPECTED_MESSAGE ioe))))
+      (if (or (nil? plaintexts) (== (alength plaintexts) 0))
+          Plaintext/PLAINTEXT_NULL
+          (let [^:mutable finalPlaintext Plaintext/PLAINTEXT_NULL]
+            (for-each [^:mutable ^Plaintext plainText plaintexts]
+              (cond
+                (identical? plainText Plaintext/PLAINTEXT_NULL)
+                  (when (and (and (some? (.-handshakeContext context))
+                                  (.-enableRetransmissions
+                                    (.-sslConfig (.-handshakeContext context))))
+                             (.isDTLS (.-sslContext context)))
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,verbose"))
+                      (SSLLogger/finest "retransmitted handshake flight"))
+                    (.launchRetransmission (.-outputRecord context)))
+                (and (some? plainText)
+                     (not (== (.-contentType plainText) (.-id ContentType/APPLICATION_DATA))))
+                  (.dispatch context plainText))
+              (if (nil? plainText)
+                  (set! plainText Plaintext/PLAINTEXT_NULL)
+                  (when (== (.-contentType plainText) (.-id ContentType/APPLICATION_DATA))
+                    (when-not (.-isNegotiated context)
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,verbose"))
+                        (SSLLogger/warning
+                          "unexpected application data before handshake completion"))
+                      (throw (.fatal context
+                                     Alert/UNEXPECTED_MESSAGE
+                                     "Receiving application data before handshake complete")))
+                    (when (and (some? dsts) (> dstsLength 0))
+                      (let [fragment (.-fragment plainText)
+                            ^:mutable remains (.remaining fragment)
+                            limit (unchecked-add-int dstsOffset dstsLength)]
+                        (loop [^int i dstsOffset]
+                          (when (and (< i limit) (> remains 0))
+                            (let [amount (Math/min (.remaining (aget dsts i)) remains)]
+                              (.limit fragment (unchecked-add-int (.position fragment) amount))
+                              (.put (aget dsts i) fragment)
+                              (set! remains (unchecked-subtract-int remains amount))
+                              (if (not (.hasRemaining (aget dsts i)))
+                                  (do
+                                    (set! dstsOffset (unchecked-inc-int dstsOffset))
+                                    (recur (unchecked-inc-int i)))
+                                  (recur (unchecked-inc-int i))))))
+                        (when (> remains 0)
+                          (throw (.fatal context
+                                         Alert/INTERNAL_ERROR
+                                         "no sufficient room in the destination buffers")))))))
+              (set! finalPlaintext plainText))
+            finalPlaintext)))))

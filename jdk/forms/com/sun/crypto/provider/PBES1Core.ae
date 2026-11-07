@@ -1,0 +1,250 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/crypto/provider/PBES1Core.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.crypto.provider)
+
+(import '(java.security AlgorithmParameters
+                        DigestException
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        ProviderException
+                        SecureRandom)
+        '(java.security.spec AlgorithmParameterSpec InvalidParameterSpecException)
+        '(java.util Arrays)
+        '(javax.crypto BadPaddingException
+                       Cipher
+                       IllegalBlockSizeException
+                       NoSuchPaddingException
+                       ShortBufferException)
+        '(javax.crypto.spec DESedeKeySpec IvParameterSpec PBEParameterSpec SecretKeySpec))
+
+(defclass ^:final PBES1Core
+  (field ^:private ^:final ^CipherCore cipher)
+
+  (field ^:private ^:final ^MessageDigest md)
+
+  (field ^:private ^:final ^String algo)
+
+  (field ^:private ^byte/1 salt nil)
+
+  (field ^:private ^int iCount PKCS12PBECipherCore/DEFAULT_COUNT)
+
+  (method ^:private ^:static isWeak ^boolean [^byte/1 s]
+    (if (Arrays/equals s 0 4 s 4 8)
+        (and (== (aget s 0) (aget s 3)) (== (aget s 1) (aget s 2)))
+        false))
+
+  (method ^:private ^:static generateSalt ^byte/1 [^String algo ^SecureRandom sr]
+    (let [salt (new byte/1 8)]
+      (.nextBytes sr salt)
+      (when (.equals algo "DESede")
+        (let [^:mutable ^int numAttempts 50]
+          (while (PBES1Core/isWeak salt)
+            (.nextBytes sr salt)
+            (when (< (let [old-1 numAttempts]
+                       (set! numAttempts (unchecked-dec-int numAttempts))
+                       old-1)
+                     0)
+              (throw (ProviderException. "Unable to find salts after 50 attempts"))))))
+      salt))
+
+  (constructor :throws [NoSuchAlgorithmException NoSuchPaddingException] [this ^String cipherAlg]
+    (set! algo cipherAlg)
+    (cond
+      (.equals algo "DES") (set! cipher (CipherCore. (DESCrypt.) DESConstants/DES_BLOCK_SIZE))
+      (.equals algo "DESede") (set! cipher (CipherCore. (DESedeCrypt.) DESConstants/DES_BLOCK_SIZE))
+      :else
+        (throw (NoSuchAlgorithmException.
+                 (java-str "No Cipher implementation for PBEWithMD5And" algo))))
+    (.setMode cipher "CBC")
+    (.setPadding cipher "PKCS5Padding")
+    (set! md (MessageDigest/getInstance "MD5")))
+
+  (method setMode :throws [NoSuchAlgorithmException] ^void [this ^String mode]
+    (.setMode cipher mode))
+
+  (method setPadding :throws [NoSuchPaddingException] ^void [this ^String paddingScheme]
+    (.setPadding cipher paddingScheme))
+
+  (method getBlockSize ^int [this] DESConstants/DES_BLOCK_SIZE)
+
+  (method getOutputSize ^int [this ^int inputLen]
+    (.getOutputSize cipher inputLen))
+
+  (method getIV ^byte/1 [this] (.getIV cipher))
+
+  (method getParameters ^AlgorithmParameters [this]
+    (let [^:mutable ^AlgorithmParameters params nil]
+      (when (nil? salt) (set! salt (PBES1Core/generateSalt algo (SunJCE/getRandom))))
+      (let [pbeSpec (PBEParameterSpec. salt iCount)]
+        (try
+          (set! params
+                (AlgorithmParameters/getInstance
+                  (java-str "PBEWithMD5And" (if (.equalsIgnoreCase algo "DES") "DES" "TripleDES"))
+                  (SunJCE/getInstance)))
+          (.init params pbeSpec)
+          (catch NoSuchAlgorithmException nsae
+            (throw (RuntimeException. "SunJCE called, but not configured")))
+          (catch InvalidParameterSpecException ipse
+            (throw (RuntimeException. "PBEParameterSpec not supported"))))
+        params)))
+
+  (method init :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                       ^int opmode
+                                                                                       ^Key key
+                                                                                       ^AlgorithmParameterSpec params
+                                                                                       ^SecureRandom random]
+    (when (and (or (== opmode Cipher/DECRYPT_MODE) (== opmode Cipher/UNWRAP_MODE)) (nil? params))
+      (throw (InvalidAlgorithmParameterException. "Parameters missing")))
+    (when (nil? key) (throw (InvalidKeyException. "Null key")))
+    (let [^:mutable ^byte/1 derivedKey nil
+          passwdBytes (.getEncoded key)]
+      (try
+        (when (or (nil? passwdBytes) (not (.regionMatches (.getAlgorithm key) true 0 "PBE" 0 3)))
+          (throw (InvalidKeyException. "Missing password")))
+        (if (nil? params)
+            (set! salt (PBES1Core/generateSalt algo random))
+            (do
+              (when-not (instance? PBEParameterSpec params)
+                (throw (InvalidAlgorithmParameterException. "Wrong parameter type: PBE expected")))
+              (set! salt (.getSalt (cast PBEParameterSpec params)))
+              (when-not (== (alength salt) 8)
+                (throw (InvalidAlgorithmParameterException. "Salt must be 8 bytes long")))
+              (when (and (and (.equals algo "DESede")
+                              (or (== opmode Cipher/ENCRYPT_MODE) (== opmode Cipher/WRAP_MODE)))
+                         (PBES1Core/isWeak salt))
+                (throw (InvalidAlgorithmParameterException.
+                         "Weak salts cannot be used for encryption")))
+              (set! iCount (.getIterationCount (cast PBEParameterSpec params)))
+              (when (<= iCount 0)
+                (throw (InvalidAlgorithmParameterException.
+                         "IterationCount must be a positive number")))))
+        (set! derivedKey (.deriveCipherKey this passwdBytes))
+        (finally (when (some? passwdBytes) (Arrays/fill passwdBytes (unchecked-byte 0x00)))))
+      (let [cipherKey (SecretKeySpec. derivedKey
+                                      0
+                                      (unchecked-subtract-int (alength derivedKey) 8)
+                                      algo)
+            ivSpec (IvParameterSpec. derivedKey (unchecked-subtract-int (alength derivedKey) 8) 8)]
+        (.init cipher opmode cipherKey ivSpec random))))
+
+  (method ^:private deriveCipherKey ^byte/1 [this ^byte/1 passwdBytes]
+    (let [^:mutable ^byte/1 result nil]
+      (cond
+        (.equals algo "DES")
+          (do
+            (.update md passwdBytes)
+            (.update md salt)
+            (let [toBeHashed (.digest md)]
+              (loop [^int i 1]
+                (when (< i iCount)
+                  (.update md toBeHashed)
+                  (try
+                    (.digest md toBeHashed 0 (alength toBeHashed))
+                    (catch DigestException e (throw (ProviderException. "Internal error" e))))
+                  (recur (unchecked-inc-int i))))
+              (set! result toBeHashed)))
+        (.equals algo "DESede")
+          (let [^:mutable ^int i 0]
+            (set! i 0)
+            (while (< i 4)
+              (when-not (== (aget salt i) (aget salt (unchecked-add-int i 4))) (break))
+              (set! i (unchecked-inc-int i)))
+            (when (== i 4)
+              (set! i 0)
+              (while (< i 2)
+                (let [tmp (aget salt i)]
+                  (aset salt i (aget salt (unchecked-subtract-int 3 i)))
+                  (aset salt (unchecked-subtract-int 3 i) tmp))
+                (set! i (unchecked-inc-int i))))
+            (let [^:mutable ^byte/1 toBeHashed nil]
+              (set! result
+                    (new byte/1
+                         (unchecked-add-int DESedeKeySpec/DES_EDE_KEY_LEN
+                                            DESConstants/DES_BLOCK_SIZE)))
+              (set! i 0)
+              (while (< i 2)
+                (.update md
+                         salt
+                         (unchecked-multiply-int i (unchecked-divide-int (alength salt) 2))
+                         (unchecked-divide-int (alength salt) 2))
+                (.update md passwdBytes)
+                (set! toBeHashed (.digest md))
+                (loop [^int j 1]
+                  (when (< j iCount)
+                    (.update md toBeHashed)
+                    (.update md passwdBytes)
+                    (try
+                      (.digest md toBeHashed 0 (alength toBeHashed))
+                      (catch DigestException e (throw (ProviderException. "Internal error" e))))
+                    (recur (unchecked-inc-int j))))
+                (System/arraycopy toBeHashed
+                                  0
+                                  result
+                                  (unchecked-multiply-int i 16)
+                                  (alength toBeHashed))
+                (set! i (unchecked-inc-int i))))))
+      (.reset md)
+      result))
+
+  (method init :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                       ^int opmode
+                                                                                       ^Key key
+                                                                                       ^AlgorithmParameters params
+                                                                                       ^SecureRandom random]
+    (let [^:mutable ^PBEParameterSpec pbeSpec nil]
+      (when (some? params)
+        (try
+          (set! pbeSpec (cast PBEParameterSpec (.getParameterSpec params PBEParameterSpec)))
+          (catch InvalidParameterSpecException ipse
+            (throw (InvalidAlgorithmParameterException. "Wrong parameter type: PBE expected")))))
+      (.init this opmode key pbeSpec random)))
+
+  (method update ^byte/1 [this ^byte/1 input ^int inputOffset ^int inputLen]
+    (.update cipher input inputOffset inputLen))
+
+  (method update :throws [ShortBufferException] ^int [this ^byte/1 input ^int inputOffset
+                                                      ^int inputLen ^byte/1 output ^int outputOffset]
+    (.update cipher input inputOffset inputLen output outputOffset))
+
+  (method doFinal :throws [IllegalBlockSizeException BadPaddingException] ^byte/1 [this
+                                                                                   ^byte/1 input
+                                                                                   ^int inputOffset
+                                                                                   ^int inputLen]
+    (.doFinal cipher input inputOffset inputLen))
+
+  (method doFinal :throws [ShortBufferException IllegalBlockSizeException BadPaddingException] ^int [this
+                                                                                                     ^byte/1 input
+                                                                                                     ^int inputOffset
+                                                                                                     ^int inputLen
+                                                                                                     ^byte/1 output
+                                                                                                     ^int outputOffset]
+    (.doFinal cipher input inputOffset inputLen output outputOffset))
+
+  (method wrap :throws [IllegalBlockSizeException InvalidKeyException] ^byte/1 [this ^Key key]
+    (let [^:mutable ^byte/1 result nil
+          ^:mutable ^byte/1 encodedKey nil]
+      (try
+        (set! encodedKey (.getEncoded key))
+        (when (or (nil? encodedKey) (== (alength encodedKey) 0))
+          (throw (InvalidKeyException. "Cannot get an encoding of the key to be wrapped")))
+        (set! result (.doFinal this encodedKey 0 (alength encodedKey)))
+        (catch BadPaddingException e)
+        (finally (when (some? encodedKey) (Arrays/fill encodedKey (unchecked-byte 0x00)))))
+      result))
+
+  (method unwrap :throws [InvalidKeyException NoSuchAlgorithmException] ^Key [this
+                                                                              ^byte/1 wrappedKey
+                                                                              ^String wrappedKeyAlgorithm
+                                                                              ^int wrappedKeyType]
+    (try
+      (let [encodedKey (.doFinal this wrappedKey 0 (alength wrappedKey))]
+        (try
+          (ConstructKeys/constructKey encodedKey wrappedKeyAlgorithm wrappedKeyType)
+          (finally (Arrays/fill encodedKey (unchecked-byte 0)))))
+      (catch BadPaddingException ePadding
+        (throw (InvalidKeyException. "The wrapped key is not padded correctly")))
+      (catch IllegalBlockSizeException eBlockSize
+        (throw (InvalidKeyException. "The wrapped key does not have the correct length"))))))

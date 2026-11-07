@@ -1,0 +1,209 @@
+;; Converted from jdk26u src/java.base/share/classes/java/nio/channels/Channels.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.nio.channels)
+
+(import '(java.io FileInputStream
+                  FileOutputStream
+                  IOException
+                  InputStream
+                  OutputStream
+                  Reader
+                  Writer)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels.spi AbstractInterruptibleChannel)
+        '(java.nio.charset Charset CharsetDecoder CharsetEncoder)
+        '(java.util Objects)
+        '(java.util.concurrent ExecutionException)
+        '(sun.nio.ch Streams)
+        '(sun.nio.cs StreamDecoder StreamEncoder))
+
+(defclass ^:public ^:final Channels
+  (constructor ^:private [this] (throw (Error. "no instances")))
+
+  (method ^:public ^:static newInputStream ^InputStream [^ReadableByteChannel ch]
+    (Objects/requireNonNull ch "ch")
+    (Streams/of ch))
+
+  (method ^:public ^:static newOutputStream ^OutputStream [^WritableByteChannel ch]
+    (Objects/requireNonNull ch "ch")
+    (Streams/of ch))
+
+  (method ^:public ^:static newInputStream ^InputStream [^AsynchronousByteChannel ch]
+    (Objects/requireNonNull ch "ch")
+    (anon InputStream []
+      (field ^:private ^ByteBuffer bb)
+
+      (field ^:private ^byte/1 bs)
+
+      (field ^:private ^byte/1 b1)
+
+      (method ^:public ^:synchronized read :throws [IOException] ^int [this]
+        (when (nil? b1) (set! b1 (new byte/1 1)))
+        (let [n (.read this b1)] (if (== n 1) (bit-and-int (aget b1 0) 0xff) -1)))
+
+      (method ^:public ^:synchronized read :throws [IOException] ^int [this ^byte/1 bs ^int off
+                                                                       ^int len]
+        (Objects/checkFromIndexSize off len (alength bs))
+        (if (== len 0)
+            0
+            (let [^ByteBuffer bb (if (identical? (.-bs this) bs) (.-bb this) (ByteBuffer/wrap bs))]
+              (.position bb off)
+              (.limit bb (Math/min (unchecked-add-int off len) (.capacity bb)))
+              (set! (.-bb this) bb)
+              (set! (.-bs this) bs)
+              (let [^:mutable interrupted false]
+                (try
+                  (while true
+                    (try
+                      (return (.intValue (cast Integer (.get (.read ch bb)))))
+                      (catch ExecutionException ee (throw (IOException. (.getCause ee))))
+                      (catch InterruptedException ie (set! interrupted true))))
+                  (finally (when interrupted (.interrupt (Thread/currentThread)))))))))
+
+      (method ^:public close :throws [IOException] ^void [this] (.close ch))))
+
+  (method ^:public ^:static newOutputStream ^OutputStream [^AsynchronousByteChannel ch]
+    (Objects/requireNonNull ch "ch")
+    (anon OutputStream []
+      (field ^:private ^ByteBuffer bb)
+
+      (field ^:private ^byte/1 bs)
+
+      (field ^:private ^byte/1 b1)
+
+      (method ^:public ^:synchronized write :throws [IOException] ^void [this ^int b]
+        (when (nil? b1) (set! b1 (new byte/1 1)))
+        (aset b1 0 (unchecked-byte b))
+        (.write this b1))
+
+      (method ^:public ^:synchronized write :throws [IOException] ^void [this ^byte/1 bs ^int off
+                                                                         ^int len]
+        (cond
+          (or (or (or (or (< off 0) (> off (alength bs))) (< len 0))
+                  (> (unchecked-add-int off len) (alength bs)))
+              (< (unchecked-add-int off len) 0))
+            (throw (IndexOutOfBoundsException.))
+          (== len 0) (return))
+        (let [^ByteBuffer bb (if (identical? (.-bs this) bs) (.-bb this) (ByteBuffer/wrap bs))]
+          (.limit bb (Math/min (unchecked-add-int off len) (.capacity bb)))
+          (.position bb off)
+          (set! (.-bb this) bb)
+          (set! (.-bs this) bs)
+          (let [^:mutable interrupted false]
+            (try
+              (while (> (.remaining bb) 0)
+                (try
+                  (.get (.write ch bb))
+                  (catch ExecutionException ee (throw (IOException. (.getCause ee))))
+                  (catch InterruptedException ie (set! interrupted true))))
+              (finally (when interrupted (.interrupt (Thread/currentThread))))))))
+
+      (method ^:public close :throws [IOException] ^void [this] (.close ch))))
+
+  (method ^:public ^:static newChannel ^ReadableByteChannel [^InputStream in]
+    (Objects/requireNonNull in "in")
+    (if (identical? (.getClass in) FileInputStream)
+        (.getChannel (cast FileInputStream in))
+        (ReadableByteChannelImpl. in)))
+
+  (defclass ^:private ^:static ReadableByteChannelImpl
+    :extends AbstractInterruptibleChannel
+    :implements [ReadableByteChannel]
+
+    (field ^:private ^:final ^InputStream in)
+
+    (field ^:private ^:static ^:final ^int TRANSFER_SIZE 8192)
+
+    (field ^:private ^byte/1 buf (new byte/1 0))
+
+    (field ^:private ^:final readLock (Object.))
+
+    (constructor [this ^InputStream in] (set! (.-in this) in))
+
+    (method ^:public read :throws [IOException] ^int [this ^ByteBuffer dst]
+      (when-not (.isOpen this) (throw (ClosedChannelException.)))
+      (when (.isReadOnly dst) (throw (IllegalArgumentException.)))
+      (let [len (.remaining dst)
+            ^:mutable ^int totalRead 0
+            ^:mutable ^int bytesRead 0]
+        (locking readLock
+          (while (< totalRead len)
+            (let [bytesToRead (Math/min (unchecked-subtract-int len totalRead) TRANSFER_SIZE)]
+              (when (< (alength buf) bytesToRead) (set! buf (new byte/1 bytesToRead)))
+              (when (and (> totalRead 0) (not (> (.available in) 0))) (break))
+              (try
+                (.begin this)
+                (set! bytesRead (.read in buf 0 bytesToRead))
+                (finally (.end this (> bytesRead 0))))
+              (if (< bytesRead 0) (break) (set! totalRead (unchecked-add-int totalRead bytesRead)))
+              (.put dst buf 0 bytesRead)))
+          (if (and (< bytesRead 0) (== totalRead 0)) -1 totalRead))))
+
+    (method ^:protected implCloseChannel :throws [IOException] ^void [this]
+      (.close in)))
+
+  (method ^:public ^:static newChannel ^WritableByteChannel [^OutputStream out]
+    (Objects/requireNonNull out "out")
+    (if (identical? (.getClass out) FileOutputStream)
+        (.getChannel (cast FileOutputStream out))
+        (WritableByteChannelImpl. out)))
+
+  (defclass ^:private ^:static WritableByteChannelImpl
+    :extends AbstractInterruptibleChannel
+    :implements [WritableByteChannel]
+
+    (field ^:private ^:final ^OutputStream out)
+
+    (field ^:private ^:static ^:final ^int TRANSFER_SIZE 8192)
+
+    (field ^:private ^byte/1 buf (new byte/1 0))
+
+    (field ^:private ^:final writeLock (Object.))
+
+    (constructor [this ^OutputStream out] (set! (.-out this) out))
+
+    (method ^:public write :throws [IOException] ^int [this ^ByteBuffer src]
+      (when-not (.isOpen this) (throw (ClosedChannelException.)))
+      (let [len (.remaining src)
+            ^:mutable ^int totalWritten 0]
+        (locking writeLock
+          (while (< totalWritten len)
+            (let [bytesToWrite (Math/min (unchecked-subtract-int len totalWritten) TRANSFER_SIZE)]
+              (when (< (alength buf) bytesToWrite) (set! buf (new byte/1 bytesToWrite)))
+              (.get src buf 0 bytesToWrite)
+              (try
+                (.begin this)
+                (.write out buf 0 bytesToWrite)
+                (finally (.end this (> bytesToWrite 0))))
+              (set! totalWritten (unchecked-add-int totalWritten bytesToWrite))))
+          totalWritten)))
+
+    (method ^:protected implCloseChannel :throws [IOException] ^void [this]
+      (.close out)))
+
+  (method ^:public ^:static newReader ^Reader [^ReadableByteChannel ch ^CharsetDecoder dec
+                                               ^int minBufferCap]
+    (Objects/requireNonNull ch "ch")
+    (StreamDecoder/forDecoder ch (.reset dec) minBufferCap))
+
+  (method ^:public ^:static newReader ^Reader [^ReadableByteChannel ch ^String csName]
+    (Objects/requireNonNull csName "csName")
+    (Channels/newReader ch (.newDecoder (Charset/forName csName)) -1))
+
+  (method ^:public ^:static newReader ^Reader [^ReadableByteChannel ch ^Charset charset]
+    (Objects/requireNonNull charset "charset")
+    (Channels/newReader ch (.newDecoder charset) -1))
+
+  (method ^:public ^:static newWriter ^Writer [^WritableByteChannel ch ^CharsetEncoder enc
+                                               ^int minBufferCap]
+    (Objects/requireNonNull ch "ch")
+    (Objects/requireNonNull enc "enc")
+    (let [out (Channels/newOutputStream ch)] (StreamEncoder/forOutputStreamWriter out (.reset enc))))
+
+  (method ^:public ^:static newWriter ^Writer [^WritableByteChannel ch ^String csName]
+    (Objects/requireNonNull csName "csName")
+    (Channels/newWriter ch (.newEncoder (Charset/forName csName)) -1))
+
+  (method ^:public ^:static newWriter ^Writer [^WritableByteChannel ch ^Charset charset]
+    (Objects/requireNonNull charset "charset")
+    (Channels/newWriter ch (.newEncoder charset) -1)))

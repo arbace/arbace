@@ -1,0 +1,169 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/smtp/SmtpClient.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.smtp)
+
+(import '(java.io IOException OutputStream PrintStream UnsupportedEncodingException)
+        '(java.net InetAddress)
+        '(sun.net TransferProtocolClient))
+
+(defclasses
+  (defclass ^:public SmtpClient
+    :extends TransferProtocolClient
+
+    (field ^:private ^:static ^int DEFAULT_SMTP_PORT 25)
+
+    (field ^String mailhost)
+
+    (field ^SmtpPrintStream message)
+
+    (method ^:public closeServer :throws [IOException] ^void [this]
+      (when (.serverIsOpen this)
+        (.closeMessage this)
+        (.issueCommand this "QUIT\r\n" 221)
+        (.closeServer super)))
+
+    (method issueCommand :throws [IOException] ^void [this ^String cmd ^int expect]
+      (.sendServer this cmd)
+      (let [^:mutable ^int reply 0]
+        (while (not (== (set! reply (.readServerResponse this)) expect))
+          (when-not (== reply 220) (throw (SmtpProtocolException. (.getResponseString this)))))))
+
+    (method ^:private toCanonical :throws [IOException] ^void [this ^String s]
+      (if (.startsWith s "<")
+          (.issueCommand this (java-str "rcpt to: " s "\r\n") 250)
+          (.issueCommand this (java-str "rcpt to: <" s ">\r\n") 250)))
+
+    (method ^:public to :throws [IOException] ^void [this ^String s]
+      (when-not (== (.indexOf s \newline) -1)
+        (throw (IOException. "Illegal SMTP command"
+                             (IllegalArgumentException. "Illegal carriage return"))))
+      (let [^:mutable ^int st 0
+            limit (.length s)
+            ^:mutable ^int pos 0
+            ^:mutable ^int lastnonsp 0
+            ^:mutable ^int parendepth 0
+            ^:mutable ignore false]
+        (while (< pos limit)
+          (let [^int c (.charAt s pos)]
+            (cond
+              (> parendepth 0)
+                (do
+                  (cond
+                    (== c \() (set! parendepth (unchecked-inc-int parendepth))
+                    (== c \)) (set! parendepth (unchecked-dec-int parendepth)))
+                  (when (== parendepth 0)
+                    (if (> lastnonsp st) (set! ignore true) (set! st (unchecked-add-int pos 1)))))
+              (== c \() (set! parendepth (unchecked-inc-int parendepth))
+              (== c \<) (set! st (set! lastnonsp (unchecked-add-int pos 1)))
+              (== c \>) (set! ignore true)
+              (== c \,)
+                (do
+                  (when (> lastnonsp st) (.toCanonical this (.substring s st lastnonsp)))
+                  (set! st (unchecked-add-int pos 1))
+                  (set! ignore false))
+              (and (> c \space) (not ignore)) (set! lastnonsp (unchecked-add-int pos 1))
+              (== st pos) (set! st (unchecked-inc-int st)))
+            (set! pos (unchecked-inc-int pos))))
+        (when (> lastnonsp st) (.toCanonical this (.substring s st lastnonsp)))))
+
+    (method ^:public from :throws [IOException] ^void [this ^String s]
+      (when-not (== (.indexOf s \newline) -1)
+        (throw (IOException. "Illegal SMTP command"
+                             (IllegalArgumentException. "Illegal carriage return"))))
+      (if (.startsWith s "<")
+          (.issueCommand this (java-str "mail from: " s "\r\n") 250)
+          (.issueCommand this (java-str "mail from: <" s ">\r\n") 250)))
+
+    (method ^:private openServer :throws [IOException] ^void [this ^String host]
+      (set! mailhost host)
+      (.openServer this mailhost DEFAULT_SMTP_PORT)
+      (.issueCommand this (java-str "helo " (.getHostName (InetAddress/getLocalHost)) "\r\n") 250))
+
+    (method ^:public startMessage :throws [IOException] ^PrintStream [this]
+      (.issueCommand this "data\r\n" 354)
+      (try
+        (set! message (SmtpPrintStream. (.-serverOutput this) this))
+        (catch UnsupportedEncodingException e
+          (throw (InternalError. (java-str SmtpClient/encoding " encoding not found") e))))
+      message)
+
+    (method closeMessage :throws [IOException] ^void [this]
+      (when (some? message) (.close message)))
+
+    (constructor :throws [IOException] ^:public [this ^String host]
+      (super.)
+      (when (some? host)
+        (try (.openServer this host) (set! mailhost host) (return) (catch Exception e)))
+      (try
+        (let [^:mutable ^String s nil]
+          (set! mailhost (System/getProperty "mail.host"))
+          (when (some? mailhost) (.openServer this mailhost) (return)))
+        (catch Exception e))
+      (try
+        (set! mailhost "localhost")
+        (.openServer this mailhost)
+        (catch Exception e (set! mailhost "mailhost") (.openServer this mailhost))))
+
+    (constructor :throws [IOException] ^:public [this] (this. nil))
+
+    (constructor :throws [IOException] ^:public [this ^int to]
+      (super.)
+      (.setConnectTimeout this to)
+      (try
+        (let [^:mutable ^String s nil]
+          (set! mailhost (System/getProperty "mail.host"))
+          (when (some? mailhost) (.openServer this mailhost) (return)))
+        (catch Exception e))
+      (try
+        (set! mailhost "localhost")
+        (.openServer this mailhost)
+        (catch Exception e (set! mailhost "mailhost") (.openServer this mailhost))))
+
+    (method ^:public getMailHost ^String [this] mailhost)
+
+    (method getEncoding ^String [this] SmtpClient/encoding))
+
+  (defclass SmtpPrintStream
+    :extends PrintStream
+
+    (field ^:private ^SmtpClient target)
+
+    (field ^:private ^int lastc \newline)
+
+    (constructor :throws [UnsupportedEncodingException] [this ^OutputStream fos ^SmtpClient cl]
+      (super. fos false (.getEncoding cl))
+      (set! target cl))
+
+    (method ^:public close ^void [this]
+      (when (some? target)
+        (when-not (== lastc \newline) (.write this \newline))
+        (try
+          (.issueCommand target ".\r\n" 250)
+          (set! (.-message target) nil)
+          (set! (.-out this) nil)
+          (set! target nil)
+          (catch IOException e))))
+
+    (method ^:public write ^void [this ^int b]
+      (try
+        (when (and (== lastc \newline) (== b \.)) (.write (.-out this) \.))
+        (when (and (== b \newline) (not (== lastc \return))) (.write (.-out this) \return))
+        (.write (.-out this) b)
+        (set! lastc b)
+        (catch IOException e)))
+
+    (method ^:public write ^void [this ^byte/1 b ^:mutable ^int off ^:mutable ^int len]
+      (try
+        (let [^:mutable lc lastc]
+          (while (>= (set! len (unchecked-dec-int len)) 0)
+            (let [^int c (aget b (let [old-1 off] (set! off (unchecked-inc-int off)) old-1))]
+              (when (and (== lc \newline) (== c \.)) (.write (.-out this) \.))
+              (when (and (== c \newline) (not (== lc \return))) (.write (.-out this) \return))
+              (.write (.-out this) c)
+              (set! lc c)))
+          (set! lastc lc))
+        (catch IOException e)))
+
+    (method ^:public print ^void [this ^String s]
+      (let [len (.length s)]
+        (loop [^int i 0] (when (< i len) (.write this (.charAt s i)) (recur (unchecked-inc-int i))))))))

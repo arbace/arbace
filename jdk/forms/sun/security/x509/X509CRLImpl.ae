@@ -1,0 +1,564 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/x509/X509CRLImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.x509)
+
+(import '(java.io IOException InputStream)
+        '(java.security InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        NoSuchAlgorithmException
+                        NoSuchProviderException
+                        Principal
+                        PrivateKey
+                        Provider
+                        ProviderException
+                        PublicKey
+                        Signature
+                        SignatureException)
+        '(java.security.cert CRLException Certificate X509CRL X509CRLEntry X509Certificate)
+        '(java.util Collection Date Iterator LinkedList List Map Objects Set TreeMap TreeSet)
+        '(javax.security.auth.x500 X500Principal)
+        '(sun.security.provider X509Factory)
+        '(sun.security.util DerEncoder
+                            DerInputStream
+                            DerOutputStream
+                            DerValue
+                            HexDumpEncoder
+                            ObjectIdentifier
+                            SignatureUtil))
+
+(defclass ^:public X509CRLImpl
+  :extends X509CRL
+  :implements [DerEncoder]
+
+  (field ^:private ^byte/1 signedCRL nil)
+
+  (field ^:private ^byte/1 signature nil)
+
+  (field ^:private ^byte/1 tbsCertList nil)
+
+  (field ^:private ^AlgorithmId sigAlgId nil)
+
+  (field ^:private ^TBSCertList info)
+
+  (defclass ^:public ^:static TBSCertList
+    (field ^:private ^int version)
+
+    (field ^:private ^AlgorithmId infoSigAlgId)
+
+    (field ^:private ^X500Name issuer nil)
+
+    (field ^:private ^X500Principal issuerPrincipal nil)
+
+    (field ^:private ^Date thisUpdate nil)
+
+    (field ^:private ^Date nextUpdate nil)
+
+    (field ^:private ^:final ^{:tag (Map X509IssuerSerial X509CRLEntry)} revokedMap (TreeMap.))
+
+    (field ^:private ^:final ^{:tag (List X509CRLEntry)} revokedList (LinkedList.))
+
+    (field ^:private ^CRLExtensions extensions nil)
+
+    (constructor ^:public [this ^X500Name issuer ^Date thisDate ^Date nextDate]
+      (set! (.-issuer this) issuer)
+      (set! (.-thisUpdate this) thisDate)
+      (set! (.-nextUpdate this) nextDate))
+
+    (constructor :throws [CRLException] ^:public [this ^X500Name issuer ^Date thisDate
+                                                  ^Date nextDate ^X509CRLEntry/1 badCerts]
+      (set! (.-issuer this) issuer)
+      (set! (.-thisUpdate this) thisDate)
+      (set! (.-nextUpdate this) nextDate)
+      (when (some? badCerts)
+        (let [crlIssuer (.getIssuerX500Principal this)
+              ^:mutable badCertIssuer crlIssuer]
+          (loop [^int i 0]
+            (when (< i (alength badCerts))
+              (let [badCert (cast X509CRLEntryImpl (aget badCerts i))]
+                (set! badCertIssuer (.getCertIssuer this badCert badCertIssuer))
+                (.setCertificateIssuer badCert crlIssuer badCertIssuer)
+                (let [issuerSerial (X509IssuerSerial. badCertIssuer (.getSerialNumber badCert))]
+                  (.put (.-revokedMap this) issuerSerial badCert)
+                  (.add (.-revokedList this) badCert)
+                  (if (.hasExtensions badCert)
+                      (do (set! (.-version this) 1) (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i))))))))))
+
+    (constructor :throws [CRLException] ^:public [this ^X500Name issuer ^Date thisDate
+                                                  ^Date nextDate ^X509CRLEntry/1 badCerts
+                                                  ^CRLExtensions crlExts]
+      (this. issuer thisDate nextDate badCerts)
+      (when (some? crlExts) (set! (.-extensions this) crlExts) (set! (.-version this) 1)))
+
+    (constructor :throws [IOException CRLException] ^:public [this ^DerValue value]
+      (when-not (== (.-tag value) DerValue/tag_Sequence)
+        (throw (CRLException. "signed CRL fields invalid")))
+      (let [derStrm (.-data value)
+            ^:mutable ^DerValue tmp nil
+            ^:mutable ^byte nextByte 0]
+        (set! version 0)
+        (set! nextByte (unchecked-byte (.peekByte derStrm)))
+        (when (== nextByte DerValue/tag_Integer)
+          (set! version (.getInteger derStrm))
+          (when-not (== version 1) (throw (CRLException. "Invalid version"))))
+        (set! tmp (.getDerValue derStrm))
+        (set! infoSigAlgId (AlgorithmId/parse tmp))
+        (set! issuer (X500Name. derStrm))
+        (when (.isEmpty issuer) (throw (CRLException. "Empty issuer DN not allowed in X509CRLs")))
+        (set! nextByte (unchecked-byte (.peekByte derStrm)))
+        (cond
+          (== nextByte DerValue/tag_UtcTime) (set! thisUpdate (.getUTCTime derStrm))
+          (== nextByte DerValue/tag_GeneralizedTime) (set! thisUpdate (.getGeneralizedTime derStrm))
+          :else
+            (throw (CRLException. (java-str "Invalid encoding for thisUpdate (tag=" nextByte ")"))))
+        (when-not (== (.available derStrm) 0)
+          (set! nextByte (unchecked-byte (.peekByte derStrm)))
+          (cond
+            (== nextByte DerValue/tag_UtcTime) (set! nextUpdate (.getUTCTime derStrm))
+            (== nextByte DerValue/tag_GeneralizedTime)
+              (set! nextUpdate (.getGeneralizedTime derStrm)))
+          (when-not (== (.available derStrm) 0)
+            (set! nextByte (unchecked-byte (.peekByte derStrm)))
+            (when (== nextByte DerValue/tag_SequenceOf)
+              (let [badCerts (.getSequence derStrm 4)
+                    crlIssuer (.getIssuerX500Principal this)
+                    ^:mutable badCertIssuer crlIssuer]
+                (loop [^int i 0]
+                  (when (< i (alength badCerts))
+                    (let [entry (X509CRLEntryImpl. (aget badCerts i))]
+                      (set! badCertIssuer (.getCertIssuer this entry badCertIssuer))
+                      (.setCertificateIssuer entry crlIssuer badCertIssuer)
+                      (let [issuerSerial (X509IssuerSerial. badCertIssuer (.getSerialNumber entry))]
+                        (.put revokedMap issuerSerial entry)
+                        (.add revokedList entry)
+                        (recur (unchecked-inc-int i))))))))
+            (when-not (== (.available derStrm) 0)
+              (set! tmp (.getDerValue derStrm))
+              (when (and (.isConstructed tmp) (.isContextSpecific tmp (unchecked-byte 0)))
+                (set! extensions (CRLExtensions. (.-data tmp)))))))))
+
+    (method ^:public getIssuerX500Principal ^X500Principal [this]
+      (when (nil? issuerPrincipal) (set! issuerPrincipal (.asX500Principal issuer)))
+      issuerPrincipal)
+
+    (method ^:private getCertIssuer :throws [CRLException] ^X500Principal [this
+                                                                           ^X509CRLEntryImpl entry
+                                                                           ^X500Principal prevCertIssuer]
+      (let [ciExt (.getCertificateIssuerExtension entry)]
+        (if (some? ciExt)
+            (let [names (.getNames ciExt)
+                  ^{:tag (Iterator GeneralName)} itr (.iterator names)]
+              (while (.hasNext itr)
+                (when-instance [^X500Name issuerDN (.getName (cast GeneralName (.next itr)))]
+                  (return (.asX500Principal issuerDN))))
+              (throw (CRLException.
+                       "Parsing error: CertificateIssuer field does not contain an X.500 DN")))
+            prevCertIssuer)))
+
+    (method ^:public encodeInfo :throws [CRLException] ^byte/1 [this]
+      (let [tmp (DerOutputStream.)
+            rCerts (DerOutputStream.)
+            seq (DerOutputStream.)]
+        (when-not (== version 0) (.putInteger tmp version))
+        (.encode infoSigAlgId tmp)
+        (when (and (== version 0) (nil? (.toString issuer)))
+          (throw (CRLException. "Null Issuer DN not allowed in v1 CRL")))
+        (.encode issuer tmp)
+        (if (< (.getTime thisUpdate) CertificateValidity/YR_2050)
+            (.putUTCTime tmp thisUpdate)
+            (.putGeneralizedTime tmp thisUpdate))
+        (when (some? nextUpdate)
+          (if (< (.getTime nextUpdate) CertificateValidity/YR_2050)
+              (.putUTCTime tmp nextUpdate)
+              (.putGeneralizedTime tmp nextUpdate)))
+        (when-not (.isEmpty revokedList)
+          (for-each [^X509CRLEntry entry revokedList]
+            (.encode (cast X509CRLEntryImpl entry) rCerts))
+          (.write tmp DerValue/tag_Sequence rCerts))
+        (when (some? extensions) (.encode extensions tmp isExplicit))
+        (.write seq DerValue/tag_Sequence tmp)
+        (.toByteArray seq))))
+
+  (field ^:private ^:static ^:final ^boolean isExplicit true)
+
+  (field ^:private ^PublicKey verifiedPublicKey)
+
+  (field ^:private ^String verifiedProvider)
+
+  (constructor ^:public [this ^TBSCertList info ^AlgorithmId sigAlgId ^byte/1 signature
+                         ^byte/1 tbsCertList ^byte/1 signedCRL]
+    (set! (.-info this) info)
+    (set! (.-sigAlgId this) sigAlgId)
+    (set! (.-signature this) signature)
+    (set! (.-tbsCertList this) tbsCertList)
+    (set! (.-signedCRL this) (cast byte/1 (Objects/requireNonNull signedCRL))))
+
+  (constructor :throws [CRLException] ^:public [this ^byte/1 crlData]
+    (try
+      (.parse this (DerValue. crlData))
+      (catch IOException e (throw (CRLException. (java-str "Parsing error: " (.getMessage e)))))))
+
+  (constructor :throws [CRLException] ^:public [this ^DerValue val]
+    (try
+      (.parse this val)
+      (catch IOException e (throw (CRLException. (java-str "Parsing error: " (.getMessage e)))))))
+
+  (constructor :throws [CRLException] ^:public [this ^InputStream inStrm]
+    (try
+      (.parse this (DerValue. inStrm))
+      (catch IOException e (throw (CRLException. (java-str "Parsing error: " (.getMessage e)))))))
+
+  (method ^:public info ^TBSCertList [this] info)
+
+  (method ^:public getEncodedInternal :throws [CRLException] ^byte/1 [this]
+    signedCRL)
+
+  (method ^:public getEncoded :throws [CRLException] ^byte/1 [this]
+    (.clone (.getEncodedInternal this)))
+
+  (method ^:public verify :throws [CRLException
+                                   NoSuchAlgorithmException
+                                   InvalidKeyException
+                                   NoSuchProviderException
+                                   SignatureException] ^void [this ^PublicKey key]
+    (.verify this key ""))
+
+  (method ^:public ^:synchronized verify :throws [CRLException
+                                                  NoSuchAlgorithmException
+                                                  InvalidKeyException
+                                                  NoSuchProviderException
+                                                  SignatureException] ^void [this ^PublicKey key
+                                                                             ^:mutable ^String sigProvider]
+    (when (nil? sigProvider) (set! sigProvider ""))
+    (when (and (some? verifiedPublicKey) (.equals verifiedPublicKey key))
+      (when (.equals sigProvider verifiedProvider) (return)))
+    (let [^:mutable ^Signature sigVerf nil
+          sigName (.getName sigAlgId)]
+      (if (.isEmpty sigProvider)
+          (set! sigVerf (Signature/getInstance sigName))
+          (set! sigVerf (Signature/getInstance sigName sigProvider)))
+      (try
+        (SignatureUtil/initVerifyWithParam sigVerf
+                                           key
+                                           (SignatureUtil/getParamSpec
+                                             sigName
+                                             (.getSigAlgParams this)))
+        (catch ProviderException e (throw (CRLException. (.getMessage e) (.getCause e))))
+        (catch InvalidAlgorithmParameterException e (throw (CRLException. e))))
+      (when (nil? tbsCertList) (throw (CRLException. "Uninitialized CRL")))
+      (.update sigVerf tbsCertList 0 (alength tbsCertList))
+      (when-not (.verify sigVerf signature)
+        (throw (SignatureException. "Signature does not match.")))
+      (set! verifiedPublicKey key)
+      (set! verifiedProvider sigProvider)))
+
+  (method ^:public ^:synchronized verify :throws [CRLException
+                                                  NoSuchAlgorithmException
+                                                  InvalidKeyException
+                                                  SignatureException] ^void [this ^PublicKey key
+                                                                             ^Provider sigProvider]
+    (let [^:mutable ^Signature sigVerf nil
+          sigName (.getName sigAlgId)]
+      (if (nil? sigProvider)
+          (set! sigVerf (Signature/getInstance sigName))
+          (set! sigVerf (Signature/getInstance sigName sigProvider)))
+      (try
+        (SignatureUtil/initVerifyWithParam sigVerf
+                                           key
+                                           (SignatureUtil/getParamSpec
+                                             sigName
+                                             (.getSigAlgParams this)))
+        (catch ProviderException e (throw (CRLException. (.getMessage e) (.getCause e))))
+        (catch InvalidAlgorithmParameterException e (throw (CRLException. e))))
+      (when (nil? tbsCertList) (throw (CRLException. "Uninitialized CRL")))
+      (.update sigVerf tbsCertList 0 (alength tbsCertList))
+      (when-not (.verify sigVerf signature)
+        (throw (SignatureException. "Signature does not match.")))
+      (set! verifiedPublicKey key)))
+
+  (method ^:public ^:static newSigned :throws [CRLException
+                                               NoSuchAlgorithmException
+                                               InvalidKeyException
+                                               NoSuchProviderException
+                                               SignatureException] ^X509CRLImpl [^TBSCertList info
+                                                                                 ^PrivateKey key
+                                                                                 ^String algorithm]
+    (X509CRLImpl/newSigned info key algorithm nil))
+
+  (method ^:public ^:static newSigned :throws [CRLException
+                                               NoSuchAlgorithmException
+                                               InvalidKeyException
+                                               NoSuchProviderException
+                                               SignatureException] ^X509CRLImpl [^TBSCertList info
+                                                                                 ^PrivateKey key
+                                                                                 ^String algorithm
+                                                                                 ^String provider]
+    (let [sigEngine (SignatureUtil/fromKey algorithm key provider)
+          sigAlgId (SignatureUtil/fromSignature sigEngine key)]
+      (set! (.-infoSigAlgId info) sigAlgId)
+      (let [out (DerOutputStream.)
+            tmp (DerOutputStream.)
+            tbsCertList (.encodeInfo info)]
+        (.writeBytes tmp tbsCertList)
+        (.encode sigAlgId tmp)
+        (.update sigEngine tbsCertList 0 (alength tbsCertList))
+        (let [signature (.sign sigEngine)]
+          (.putBitString tmp signature)
+          (.write out DerValue/tag_Sequence tmp)
+          (let [signedCRL (.toByteArray out)]
+            (X509CRLImpl. info sigAlgId signature tbsCertList signedCRL))))))
+
+  (method ^:public toString ^String [this]
+    (.toStringWithAlgName this (java-str "" sigAlgId)))
+
+  (method ^:public toStringWithAlgName ^String [this ^String name]
+    (let [sb (StringBuilder.)]
+      (.append (.append (.append sb "X.509 CRL v") (unchecked-add-int (.-version info) 1)) \newline)
+      (when (some? sigAlgId)
+        (.append (.append (.append (.append (.append sb "Signature Algorithm: ") name) ", OID=")
+                          (.getOID sigAlgId))
+                 \newline))
+      (when (some? (.-issuer info))
+        (.append (.append (.append sb "Issuer: ") (.-issuer info)) \newline))
+      (when (some? (.-thisUpdate info))
+        (.append (.append (.append sb "\nThis Update: ") (.-thisUpdate info)) \newline))
+      (when (some? (.-nextUpdate info))
+        (.append (.append (.append sb "Next Update: ") (.-nextUpdate info)) \newline))
+      (if (.isEmpty (.-revokedList info))
+          (.append sb "\nNO certificates have been revoked\n")
+          (do
+            (.append (.append sb "\nRevoked Certificates: ") (.size (.-revokedList info)))
+            (let [^:mutable ^int i 1]
+              (for-each [^X509CRLEntry entry (.-revokedList info)]
+                (.append (.append (.append (.append sb "\n[") i) "] ") entry)
+                (set! i (unchecked-inc-int i))))))
+      (when (some? (.-extensions info))
+        (let [^{:tag (Collection Extension)} allExts (.getAllExtensions (.-extensions info))
+              objs (.toArray allExts)]
+          (.append (.append sb "\nCRL Extensions: ") (alength objs))
+          (loop [^int i 0]
+            (when (< i (alength objs))
+              (.append (.append (.append sb "\n[") (unchecked-add-int i 1)) "]: ")
+              (let [ext (cast Extension (aget objs i))]
+                (try
+                  (if (nil? (OIDMap/getClass (.getExtensionId ext)))
+                      (do
+                        (.append sb ext)
+                        (let [^:mutable extValue (.getExtensionValue ext)]
+                          (when (some? extValue)
+                            (let [out (DerOutputStream.)]
+                              (.putOctetString out extValue)
+                              (set! extValue (.toByteArray out))
+                              (let [enc (HexDumpEncoder.)]
+                                (.append (.append
+                                           (.append
+                                             (.append sb "Extension unknown: ")
+                                             "DER encoded OCTET string =\n")
+                                           (.encodeBuffer enc extValue))
+                                         \newline))))))
+                      (.append sb ext))
+                  (catch Exception e (.append sb ", Error parsing this extension")))
+                (recur (unchecked-inc-int i)))))))
+      (if (some? signature)
+          (let [encoder (HexDumpEncoder.)]
+            (.append (.append (.append sb "\nSignature:\n") (.encodeBuffer encoder signature))
+                     \newline))
+          (.append sb "NOT signed yet\n"))
+      (.toString sb)))
+
+  (method ^:public isRevoked ^boolean [this ^Certificate cert]
+    (if (.isEmpty (.-revokedMap info))
+        false
+        (if-instance [^X509Certificate xcert cert]
+          (let [issuerSerial (X509IssuerSerial. xcert)]
+            (.containsKey (.-revokedMap info) issuerSerial))
+          false)))
+
+  (method ^:public getVersion ^int [this]
+    (unchecked-add-int (.-version info) 1))
+
+  (method ^:public getIssuerDN ^Principal [this] (.-issuer info))
+
+  (method ^:public getIssuerX500Principal ^X500Principal [this]
+    (.getIssuerX500Principal info))
+
+  (method ^:public getThisUpdate ^Date [this]
+    (Date. (.getTime (.-thisUpdate info))))
+
+  (method ^:public getNextUpdate ^Date [this]
+    (when (some? (.-nextUpdate info)) (Date. (.getTime (.-nextUpdate info)))))
+
+  (method ^:public getRevokedCertificate ^X509CRLEntry [this ^BigInteger serialNumber]
+    (when-not (.isEmpty (.-revokedMap info))
+      (let [issuerSerial (X509IssuerSerial. (.getIssuerX500Principal this) serialNumber)]
+        (cast X509CRLEntry (.get (.-revokedMap info) issuerSerial)))))
+
+  (method ^:public getRevokedCertificate ^X509CRLEntry [this ^X509Certificate cert]
+    (when-not (.isEmpty (.-revokedMap info))
+      (let [issuerSerial (X509IssuerSerial. cert)]
+        (cast X509CRLEntry (.get (.-revokedMap info) issuerSerial)))))
+
+  (method ^:public getRevokedCertificates ^{:tag (Set X509CRLEntry)} [this]
+    (when-not (.isEmpty (.-revokedList info)) (TreeSet. (.-revokedList info))))
+
+  (method ^:public getTBSCertList :throws [CRLException] ^byte/1 [this]
+    (when (nil? tbsCertList) (throw (CRLException. "Uninitialized CRL")))
+    (.clone tbsCertList))
+
+  (method ^:public getSignature ^byte/1 [this]
+    (when (some? signature) (.clone signature)))
+
+  (method ^:public getSigAlgName ^String [this]
+    (when (some? sigAlgId) (.getName sigAlgId)))
+
+  (method ^:public getSigAlgOID ^String [this]
+    (when (some? sigAlgId) (let [oid (.getOID sigAlgId)] (.toString oid))))
+
+  (method ^:public getSigAlgParams ^byte/1 [this]
+    (when (some? sigAlgId) (.getEncodedParams sigAlgId)))
+
+  (method ^:public getSigAlgId ^AlgorithmId [this] sigAlgId)
+
+  (method ^:public getAuthKeyId ^KeyIdentifier [this]
+    (let [aki (.getAuthKeyIdExtension this)] (when (some? aki) (.getKeyIdentifier aki))))
+
+  (method ^:public getAuthKeyIdExtension ^AuthorityKeyIdentifierExtension [this]
+    (cast AuthorityKeyIdentifierExtension (.getExtension this PKIXExtensions/AuthorityKey_Id)))
+
+  (method ^:public getCRLNumberExtension ^CRLNumberExtension [this]
+    (cast CRLNumberExtension (.getExtension this PKIXExtensions/CRLNumber_Id)))
+
+  (method ^:public getCRLNumber ^BigInteger [this]
+    (let [numExt (.getCRLNumberExtension this)] (when (some? numExt) (.getCrlNumber numExt))))
+
+  (method ^:public getDeltaCRLIndicatorExtension ^DeltaCRLIndicatorExtension [this]
+    (cast DeltaCRLIndicatorExtension (.getExtension this PKIXExtensions/DeltaCRLIndicator_Id)))
+
+  (method ^:public getBaseCRLNumber ^BigInteger [this]
+    (let [dciExt (.getDeltaCRLIndicatorExtension this)]
+      (when (some? dciExt) (.getCrlNumber dciExt))))
+
+  (method ^:public getIssuerAltNameExtension ^IssuerAlternativeNameExtension [this]
+    (cast IssuerAlternativeNameExtension
+          (.getExtension this PKIXExtensions/IssuerAlternativeName_Id)))
+
+  (method ^:public getIssuingDistributionPointExtension ^IssuingDistributionPointExtension [this]
+    (cast IssuingDistributionPointExtension
+          (.getExtension this PKIXExtensions/IssuingDistributionPoint_Id)))
+
+  (method ^:public hasUnsupportedCriticalExtension ^boolean [this]
+    (if (nil? (.-extensions info)) false (.hasUnsupportedCriticalExtension (.-extensions info))))
+
+  (method ^:public getCriticalExtensionOIDs ^{:tag (Set String)} [this]
+    (when (some? (.-extensions info))
+      (let [^{:tag (Set String)} extSet (TreeSet.)]
+        (for-each [^Extension ex (.getAllExtensions (.-extensions info))]
+          (when (.isCritical ex) (.add extSet (.toString (.getExtensionId ex)))))
+        extSet)))
+
+  (method ^:public getNonCriticalExtensionOIDs ^{:tag (Set String)} [this]
+    (when (some? (.-extensions info))
+      (let [^{:tag (Set String)} extSet (TreeSet.)]
+        (for-each [^Extension ex (.getAllExtensions (.-extensions info))]
+          (when-not (.isCritical ex) (.add extSet (.toString (.getExtensionId ex)))))
+        extSet)))
+
+  (method ^:public getExtensionValue ^byte/1 [this ^String oid]
+    (when (some? (.-extensions info))
+      (try
+        (let [extAlias (OIDMap/getName (ObjectIdentifier/of oid))
+              ^:mutable ^Extension crlExt nil]
+          (if (nil? extAlias)
+              (let [findOID (ObjectIdentifier/of oid)]
+                (for-each [^Extension ex (.getAllExtensions (.-extensions info))]
+                  (let [inCertOID (.getExtensionId ex)]
+                    (when (.equals inCertOID findOID) (set! crlExt ex) (break)))))
+              (set! crlExt (.getExtension (.-extensions info) extAlias)))
+          (when (some? crlExt)
+            (let [extData (.getExtensionValue crlExt)]
+              (when (some? extData)
+                (let [out (DerOutputStream.)] (.putOctetString out extData) (.toByteArray out))))))
+        (catch Exception e nil))))
+
+  (method ^:public getExtension [this ^ObjectIdentifier oid]
+    (when (some? (.-extensions info)) (.getExtension (.-extensions info) (OIDMap/getName oid))))
+
+  (method ^:private parse :throws [CRLException IOException] ^void [this ^DerValue val]
+    (when (or (nil? (.getData val)) (not (== (.-tag val) DerValue/tag_Sequence)))
+      (throw (CRLException. "Invalid DER-encoded CRL data")))
+    (set! signedCRL (.toByteArray val))
+    (let [seq (new DerValue/1 3)]
+      (aset seq 0 (.getDerValue (.-data val)))
+      (aset seq 1 (.getDerValue (.-data val)))
+      (aset seq 2 (.getDerValue (.-data val)))
+      (when-not (== (.available (.-data val)) 0)
+        (throw (CRLException. (java-str "signed overrun, bytes = " (.available (.-data val))))))
+      (set! info (TBSCertList. (aget seq 0)))
+      (set! sigAlgId (AlgorithmId/parse (aget seq 1)))
+      (when-not (.equals sigAlgId (.-infoSigAlgId info))
+        (throw (CRLException. "Signature algorithm mismatch")))
+      (set! signature (.getBitString (aget seq 2)))
+      (when-not (== (.available (.-data (aget seq 1))) 0)
+        (throw (CRLException. "AlgorithmId field overrun")))
+      (when-not (== (.available (.-data (aget seq 2))) 0)
+        (throw (CRLException. "Signature field overrun")))
+      (set! tbsCertList (.toByteArray (aget seq 0)))))
+
+  (method ^:public ^:static getIssuerX500Principal ^X500Principal [^X509CRL crl]
+    (try
+      (let [encoded (.getEncoded crl)
+            derIn (DerInputStream. encoded)
+            tbsCert (aget (.getSequence derIn 3) 0)
+            tbsIn (.-data tbsCert)
+            ^:mutable ^DerValue tmp nil
+            nextByte (unchecked-byte (.peekByte tbsIn))]
+        (when (== nextByte DerValue/tag_Integer) (set! tmp (.getDerValue tbsIn)))
+        (set! tmp (.getDerValue tbsIn))
+        (set! tmp (.getDerValue tbsIn))
+        (let [principalBytes (.toByteArray tmp)] (X500Principal. principalBytes)))
+      (catch Exception e (throw (RuntimeException. "Could not parse issuer" e)))))
+
+  (method ^:public ^:static getEncodedInternal :throws [CRLException] ^byte/1 [^X509CRL crl]
+    (if (instance? X509CRLImpl crl) (.getEncodedInternal (cast X509CRLImpl crl)) (.getEncoded crl)))
+
+  (method ^:public ^:static toImpl :throws [CRLException] ^X509CRLImpl [^X509CRL crl]
+    (if (instance? X509CRLImpl crl) (cast X509CRLImpl crl) (X509Factory/intern crl)))
+
+  (method ^:public encode ^void [this ^DerOutputStream out]
+    (.writeBytes out signedCRL))
+
+  (defclass ^:private ^:static ^:final X509IssuerSerial
+    :implements [(Comparable X509IssuerSerial)]
+
+    (field ^:final ^X500Principal issuer)
+
+    (field ^:final ^BigInteger serial)
+
+    (field ^:volatile ^int hashcode)
+
+    (constructor [this ^X500Principal issuer ^BigInteger serial]
+      (set! (.-issuer this) issuer)
+      (set! (.-serial this) serial))
+
+    (constructor [this ^X509Certificate cert]
+      (this. (.getIssuerX500Principal cert) (.getSerialNumber cert)))
+
+    (method getIssuer ^X500Principal [this] issuer)
+
+    (method getSerial ^BigInteger [this] serial)
+
+    (method ^:public equals ^boolean [this o]
+      (if (identical? o this)
+          true
+          (if-instance [^X509IssuerSerial other o]
+            (and (.equals serial (.getSerial other)) (.equals issuer (.getIssuer other)))
+            false)))
+
+    (method ^:public hashCode ^int [this]
+      (let [^:mutable h hashcode]
+        (when (== h 0) (set! h (Objects/hash issuer serial)) (when-not (== h 0) (set! hashcode h)))
+        h))
+
+    (method ^:public compareTo ^int [this ^X509IssuerSerial another]
+      (let [cissuer (.compareTo (.toString issuer) (.toString (.-issuer another)))]
+        (if (not (== cissuer 0)) cissuer (.compareTo (.-serial this) (.-serial another)))))))

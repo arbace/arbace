@@ -1,0 +1,262 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/util/Pem.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.util)
+
+(import '(java.io ByteArrayOutputStream EOFException IOException InputStream)
+        '(java.nio.charset StandardCharsets)
+        '(java.security DEREncodable
+                        GeneralSecurityException
+                        InvalidKeyException
+                        KeyFactory
+                        KeyPair
+                        NoSuchAlgorithmException
+                        PEM
+                        PrivateKey
+                        Provider
+                        PublicKey
+                        Security)
+        '(java.security.spec InvalidKeySpecException PKCS8EncodedKeySpec X509EncodedKeySpec)
+        '(java.util Arrays Base64 Base64$Encoder HexFormat Objects)
+        '(java.util.regex Pattern)
+        '(javax.crypto EncryptedPrivateKeyInfo SecretKeyFactory)
+        '(javax.crypto.spec PBEKeySpec)
+        '(sun.security.pkcs PKCS8Key)
+        '(sun.security.x509 AlgorithmId))
+
+(defclass ^:public Pem
+  (field ^:private ^:static ^:final ^char WS 0x20)
+
+  (field ^:private ^:static ^:final ^byte/1 CRLF
+    (new byte/1 [(unchecked-byte \return) (unchecked-byte \newline)]))
+
+  (field ^:public ^:static ^:final ^String DEFAULT_ALGO)
+
+  (field ^:private ^:static ^:final ^Pattern PBE_PATTERN)
+
+  (field ^:private ^:static ^:final ^Pattern STRIP_WHITESPACE_PATTERN)
+
+  (field ^:private ^:static ^ObjectIdentifier PBES2OID)
+
+  (field ^:private ^:static ^Base64$Encoder b64Encoder)
+
+  (static-initializer
+    (let [algo (Security/getProperty "jdk.epkcs8.defaultAlgorithm")]
+      (set! DEFAULT_ALGO (if (or (nil? algo) (.isBlank algo)) "PBEWithHmacSHA256AndAES_128" algo))
+      (set! PBE_PATTERN (Pattern/compile "^PBEWith.*And.*" Pattern/CASE_INSENSITIVE))
+      (set! STRIP_WHITESPACE_PATTERN (Pattern/compile "\\s+"))))
+
+  (field ^:public ^:static ^:final ^String CERTIFICATE "CERTIFICATE")
+
+  (field ^:public ^:static ^:final ^String X509_CRL "X509 CRL")
+
+  (field ^:public ^:static ^:final ^String ENCRYPTED_PRIVATE_KEY "ENCRYPTED PRIVATE KEY")
+
+  (field ^:public ^:static ^:final ^String PRIVATE_KEY "PRIVATE KEY")
+
+  (field ^:public ^:static ^:final ^String RSA_PRIVATE_KEY "RSA PRIVATE KEY")
+
+  (field ^:public ^:static ^:final ^String PUBLIC_KEY "PUBLIC KEY")
+
+  (field ^:public ^:static ^:final ^String X509_CERTIFICATE "X509 CERTIFICATE")
+
+  (field ^:public ^:static ^:final ^String X_509_CERTIFICATE "X.509 CERTIFICATE")
+
+  (field ^:public ^:static ^:final ^String CRL "CRL")
+
+  (method ^:public ^:static decode ^byte/1 [^String input]
+    (let [src (.getBytes (.replaceAll (.matcher STRIP_WHITESPACE_PATTERN input) "")
+                         StandardCharsets/ISO_8859_1)]
+      (.decode (Base64/getDecoder) src)))
+
+  (method ^:public ^:static getPBEID ^ObjectIdentifier [^String algorithm]
+    (when-not (.matches (.matcher PBE_PATTERN algorithm))
+      (throw (IllegalArgumentException. "Invalid algorithm format.")))
+    (try (return (.getOID (AlgorithmId/get algorithm))) (catch NoSuchAlgorithmException e))
+    (when (nil? PBES2OID)
+      (try
+        (set! PBES2OID (.getOID (AlgorithmId/get "PBES2")))
+        (catch NoSuchAlgorithmException e (throw (IllegalArgumentException. e)))))
+    PBES2OID)
+
+  (method ^:private ^:static typeConverter ^String [^String type]
+    (switch type
+      (Pem/X509_CERTIFICATE Pem/X_509_CERTIFICATE) Pem/CERTIFICATE
+      Pem/CRL Pem/X509_CRL
+      type))
+
+  (method ^:public ^:static readPEM :throws [IOException] ^PEM [^InputStream is ^boolean shortHeader]
+    (Objects/requireNonNull is)
+    (let [^:mutable ^int hyphen (if shortHeader 1 0)
+          ^:mutable ^int eol 0
+          os (ByteArrayOutputStream. 6)
+          ^:mutable headerStarted false]
+      (loop []
+        (let [d (.read is)]
+          (switch d
+            \- (set! hyphen (unchecked-inc-int hyphen))
+            -1
+              (do
+                (when (== (.size os) 0) (throw (EOFException. "No data available")))
+                (throw (EOFException. "No PEM data found")))
+            \B (if (== hyphen 5) (set! headerStarted true) (set! hyphen 0))
+            (set! hyphen 0))
+          (.write os d))
+        (when-not headerStarted (recur)))
+      (let [^:mutable sb (StringBuilder. 64)]
+        (.append sb "-----B")
+        (set! hyphen 0)
+        (let [^:mutable ^int c 0]
+          (loop []
+            (switch (set! c (.read is))
+              \- (set! hyphen (unchecked-inc-int hyphen))
+              -1 (throw (EOFException. "Input ended prematurely"))
+              (\newline \return) (throw (IOException. "Incomplete header"))
+              (.append sb (unchecked-char c)))
+            (when (== hyphen 0) (recur)))
+          (loop []
+            (switch (.read is)
+              \- (set! hyphen (unchecked-inc-int hyphen))
+              (throw (IOException. "Incomplete header")))
+            (when (< hyphen 5) (recur)))
+          (.append sb "-----")
+          (let [header (.toString sb)]
+            (when (or (or (< (.length header) 16) (not (.startsWith header "-----BEGIN ")))
+                      (not (.endsWith header "-----")))
+              (throw (IOException. (java-str "Illegal header: " header))))
+            (set! hyphen 0)
+            (set! sb (StringBuilder. 1024))
+            (switch (.read is)
+              WS nil
+              \return
+                (do
+                  (set! c (.read is))
+                  (if (== c \newline)
+                      (set! eol \newline)
+                      (do (set! eol \return) (.append sb (unchecked-char c)))))
+              \newline (set! eol \newline)
+              (throw (IOException. "No EOL character found")))
+            (loop []
+              (switch (set! c (.read is))
+                -1 (throw (EOFException. "Incomplete header"))
+                \- (set! hyphen (unchecked-inc-int hyphen))
+                (WS \tab \return \newline) nil
+                (.append sb (unchecked-char c)))
+              (when (== hyphen 0) (recur)))
+            (let [data (.toString sb)]
+              (loop []
+                (switch (.read is)
+                  \- (set! hyphen (unchecked-inc-int hyphen))
+                  -1 (throw (EOFException. "Input ended prematurely"))
+                  (throw (IOException. "Incomplete footer")))
+                (when (< hyphen 5) (recur)))
+              (set! hyphen 0)
+              (set! sb (StringBuilder. 64))
+              (.append sb "-----")
+              (loop []
+                (switch (set! c (.read is))
+                  \- (set! hyphen (unchecked-inc-int hyphen))
+                  -1 (throw (EOFException. "Input ended prematurely"))
+                  (.append sb (unchecked-char c)))
+                (when (== hyphen 0) (recur)))
+              (loop []
+                (switch (.read is)
+                  \- (set! hyphen (unchecked-inc-int hyphen))
+                  -1 (throw (EOFException. "Input ended prematurely"))
+                  (throw (IOException. "Incomplete footer")))
+                (when (< hyphen 5) (recur)))
+              (while (and (and (not (== (set! c (.read is)) eol)) (not (== c -1))) (not (== c WS)))
+                (when-not (== c \return)
+                  (throw (IOException. (java-str
+                                         "Invalid PEM format:  No EOL char found in footer:  0x"
+                                         (.toHexDigits (HexFormat/of) (unchecked-byte c)))))))
+              (.append sb "-----")
+              (let [footer (.toString sb)]
+                (when (or (or (< (.length footer) 14) (not (.startsWith footer "-----END ")))
+                          (not (.endsWith footer "-----")))
+                  (throw (IOException. (java-str "Illegal footer: " footer))))
+                (let [headerType (.substring header 11 (unchecked-subtract-int (.length header) 5))
+                      footerType (.substring footer 9 (unchecked-subtract-int (.length footer) 5))]
+                  (when-not (.equals headerType footerType)
+                    (throw (IOException. (java-str
+                                           "Header and footer do not match: "
+                                           headerType
+                                           " "
+                                           footerType))))
+                  (let [^:mutable ^byte/1 preData nil]
+                    (when (> (.size os) 6)
+                      (set! preData
+                            (Arrays/copyOf (.toByteArray os) (unchecked-subtract-int (.size os) 6))))
+                    (PEM. (Pem/typeConverter headerType) data preData))))))))))
+
+  (method ^:public ^:static readPEM :throws [IOException] ^PEM [^InputStream is]
+    (Pem/readPEM is false))
+
+  (method ^:private ^:static pemEncoded ^String [^String type ^String base64]
+    (java-str "-----BEGIN "
+              type
+              "-----\r\n"
+              base64
+              (if (not (.endsWith base64 "\n")) "\r\n" "")
+              "-----END "
+              type
+              "-----\r\n"))
+
+  (method ^:public ^:static pemEncoded ^String [^String type ^byte/1 der]
+    (when (nil? b64Encoder) (set! b64Encoder (Base64/getMimeEncoder 64 CRLF)))
+    (Pem/pemEncoded type (.encodeToString b64Encoder der)))
+
+  (method ^:public ^:static pemEncoded ^String [^PEM pem]
+    (let [p (.replaceAll (.content pem) "(.{64})" "$1\r\n")] (Pem/pemEncoded (.type pem) p)))
+
+  (method ^:public ^:static decryptEncoding :throws [GeneralSecurityException] ^byte/1 [^byte/1 encoded
+                                                                                        ^char/1 password]
+    (let [^:mutable ^EncryptedPrivateKeyInfo ekpi nil]
+      (Objects/requireNonNull password "password cannot be null")
+      (let [keySpec (PBEKeySpec. password)]
+        (try
+          (set! ekpi (EncryptedPrivateKeyInfo. encoded))
+          (Pem/decryptEncoding ekpi keySpec)
+          (catch IOException e (throw (IllegalArgumentException. e)))
+          (finally (.clearPassword keySpec))))))
+
+  (method ^:public ^:static decryptEncoding :throws [NoSuchAlgorithmException InvalidKeyException] ^byte/1 [^EncryptedPrivateKeyInfo ekpi
+                                                                                                            ^PBEKeySpec keySpec]
+    (let [^:mutable ^PKCS8EncodedKeySpec p8KeySpec nil]
+      (try
+        (let [skf (SecretKeyFactory/getInstance (.getAlgName ekpi))]
+          (set! p8KeySpec (.getKeySpec ekpi (.generateSecret skf keySpec)))
+          (.getEncoded p8KeySpec))
+        (catch InvalidKeySpecException e (throw (InvalidKeyException. e)))
+        (finally (KeyUtil/clear p8KeySpec)))))
+
+  (method ^:public ^:static toDEREncodable :throws [InvalidKeyException] ^DEREncodable [^byte/1 encoded
+                                                                                        ^boolean pair
+                                                                                        ^Provider provider]
+    (let [^:mutable ^PrivateKey privKey nil
+          ^:mutable ^PublicKey pubKey nil
+          ^:mutable ^PKCS8EncodedKeySpec p8KeySpec nil
+          p8key (PKCS8Key. encoded)
+          ^:mutable ^KeyFactory kf nil]
+      (try
+        (set! p8KeySpec (PKCS8EncodedKeySpec. encoded))
+        (catch NullPointerException e
+          (.clear p8key)
+          (throw (InvalidKeyException. "No encoding found" e))))
+      (try
+        (if (nil? provider)
+            (set! kf (KeyFactory/getInstance (.getAlgorithm p8key)))
+            (set! kf (KeyFactory/getInstance (.getAlgorithm p8key) provider)))
+        (catch NoSuchAlgorithmException e
+          (KeyUtil/clear p8KeySpec p8key)
+          (throw (InvalidKeyException.
+                   (java-str "Unable to find the algorithm: " (.getAlgorithm p8key))
+                   e))))
+      (try
+        (set! privKey (.generatePrivate kf p8KeySpec))
+        (when-not pair (return privKey))
+        (if (.hasPublicKey p8key)
+            (set! pubKey (.generatePublic kf (X509EncodedKeySpec. (.getPubKeyEncoded p8key))))
+            (try (set! pubKey (.generatePublic kf p8KeySpec)) (catch InvalidKeySpecException e)))
+        (catch InvalidKeySpecException e (throw (InvalidKeyException. e)))
+        (finally (KeyUtil/clear p8KeySpec p8key)))
+      (if (and pair (some? pubKey)) (KeyPair. pubKey privKey) privKey))))

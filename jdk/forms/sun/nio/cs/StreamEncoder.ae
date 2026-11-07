@@ -1,0 +1,202 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/nio/cs/StreamEncoder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.cs)
+
+(import '(java.io IOException OutputStream UnsupportedEncodingException Writer)
+        '(java.nio ByteBuffer CharBuffer)
+        '(java.nio.charset Charset
+                           CharsetEncoder
+                           CodingErrorAction
+                           IllegalCharsetNameException
+                           UnsupportedCharsetException))
+
+(defclass ^:public ^:final StreamEncoder
+  :extends Writer
+
+  (field ^:private ^:static ^:final ^int INITIAL_BYTE_BUFFER_CAPACITY 512)
+
+  (field ^:private ^:static ^:final ^int MAX_BYTE_BUFFER_CAPACITY 8192)
+
+  (field ^:private ^:volatile ^boolean closed)
+
+  (method ^:private ensureOpen :throws [IOException] ^void [this]
+    (when closed (throw (IOException. "Stream closed"))))
+
+  (method ^:public ^:static forOutputStreamWriter :throws [UnsupportedEncodingException] ^StreamEncoder [^OutputStream out
+                                                                                                         lock
+                                                                                                         ^String charsetName]
+    (try
+      (StreamEncoder. out lock (Charset/forName charsetName))
+      (catch [IllegalCharsetNameException UnsupportedCharsetException] x
+        (throw (UnsupportedEncodingException. charsetName)))))
+
+  (method ^:public ^:static forOutputStreamWriter ^StreamEncoder [^OutputStream out lock ^Charset cs]
+    (StreamEncoder. out lock cs))
+
+  (method ^:public ^:static forOutputStreamWriter ^StreamEncoder [^OutputStream out lock
+                                                                  ^CharsetEncoder enc]
+    (StreamEncoder. out lock enc))
+
+  (method ^:public ^:static forOutputStreamWriter ^StreamEncoder [^OutputStream out
+                                                                  ^CharsetEncoder enc]
+    (StreamEncoder. out enc))
+
+  (method ^:public getEncoding ^String [this]
+    (when (.isOpen this) (.encodingName this)))
+
+  (method ^:public flushBuffer :throws [IOException] ^void [this]
+    (locking (.-lock this)
+      (if (.isOpen this) (.implFlushBuffer this) (throw (IOException. "Stream closed")))))
+
+  (method ^:public write :throws [IOException] ^void [this ^int c]
+    (let [cbuf (new char/1 1)] (aset cbuf 0 (unchecked-char c)) (.write this cbuf 0 1)))
+
+  (method ^:public write :throws [IOException] ^void [this ^char/1 cbuf ^int off ^int len]
+    (locking (.-lock this)
+      (.ensureOpen this)
+      (cond
+        (or (or (or (or (< off 0) (> off (alength cbuf))) (< len 0))
+                (> (unchecked-add-int off len) (alength cbuf)))
+            (< (unchecked-add-int off len) 0))
+          (throw (IndexOutOfBoundsException.))
+        (== len 0) (return))
+      (.implWrite this cbuf off len)))
+
+  (method ^:public write :throws [IOException] ^void [this ^String str ^int off ^int len]
+    (when (< len 0) (throw (IndexOutOfBoundsException.)))
+    (let [cbuf (new char/1 len)]
+      (.getChars str off (unchecked-add-int off len) cbuf 0)
+      (.write this cbuf 0 len)))
+
+  (method ^:public write :throws [IOException] ^void [this ^CharBuffer cb]
+    (let [position (.position cb)]
+      (try
+        (locking (.-lock this) (.ensureOpen this) (.implWrite this cb))
+        (finally (.position cb position)))))
+
+  (method ^:public flush :throws [IOException] ^void [this]
+    (locking (.-lock this) (.ensureOpen this) (.implFlush this)))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (locking (.-lock this) (when-not closed (try (.implClose this) (finally (set! closed true))))))
+
+  (method ^:private isOpen ^boolean [this] (not closed))
+
+  (field ^:private ^:final ^Charset cs)
+
+  (field ^:private ^:final ^CharsetEncoder encoder)
+
+  (field ^:private ^ByteBuffer bb)
+
+  (field ^:private ^:final ^int maxBufferCapacity)
+
+  (field ^:private ^:final ^OutputStream out)
+
+  (field ^:private ^boolean haveLeftoverChar false)
+
+  (field ^:private ^char leftoverChar)
+
+  (field ^:private ^CharBuffer lcb nil)
+
+  (constructor ^:private [this ^OutputStream out lock ^Charset cs]
+    (this. out
+           lock
+           (.onUnmappableCharacter (.onMalformedInput (.newEncoder cs) CodingErrorAction/REPLACE)
+                                   CodingErrorAction/REPLACE)))
+
+  (constructor ^:private [this ^OutputStream out lock ^CharsetEncoder enc]
+    (super. lock)
+    (set! (.-out this) out)
+    (set! (.-cs this) (.charset enc))
+    (set! (.-encoder this) enc)
+    (set! (.-bb this) (ByteBuffer/allocate INITIAL_BYTE_BUFFER_CAPACITY))
+    (set! (.-maxBufferCapacity this) MAX_BYTE_BUFFER_CAPACITY))
+
+  (constructor ^:private [this ^OutputStream out ^CharsetEncoder enc]
+    (super.)
+    (set! (.-out this) out)
+    (set! (.-cs this) (.charset enc))
+    (set! (.-encoder this) enc)
+    (set! (.-bb this) (ByteBuffer/allocate INITIAL_BYTE_BUFFER_CAPACITY))
+    (set! (.-maxBufferCapacity this) MAX_BYTE_BUFFER_CAPACITY))
+
+  (method ^:private writeBytes :throws [IOException] ^void [this]
+    (.flip bb)
+    (let [lim (.limit bb)
+          pos (.position bb)]
+      (java-assert (<= pos lim))
+      (let [^int rem (if (<= pos lim) (unchecked-subtract-int lim pos) 0)]
+        (when (> rem 0) (.write out (.array bb) (unchecked-add-int (.arrayOffset bb) pos) rem))
+        (.clear bb))))
+
+  (method ^:private flushLeftoverChar :throws [IOException] ^void [this ^CharBuffer cb
+                                                                   ^boolean endOfInput]
+    (when-not (and (not haveLeftoverChar) (not endOfInput))
+      (if (nil? lcb) (set! lcb (CharBuffer/allocate 2)) (.clear lcb))
+      (when haveLeftoverChar (.put lcb leftoverChar))
+      (when (and (some? cb) (.hasRemaining cb)) (.put lcb (.get cb)))
+      (.flip lcb)
+      (while (or (.hasRemaining lcb) endOfInput)
+        (let [cr (.encode encoder lcb bb endOfInput)]
+          (when (.isUnderflow cr)
+            (when (.hasRemaining lcb)
+              (set! leftoverChar (.get lcb))
+              (when (and (some? cb) (.hasRemaining cb))
+                (.clear lcb)
+                (.flip (.put (.put lcb leftoverChar) (.get cb)))
+                (continue))
+              (return))
+            (break))
+          (if (.isOverflow cr)
+              (do (java-assert (> (.position bb) 0)) (.writeBytes this))
+              (.throwException cr))))
+      (set! haveLeftoverChar false)))
+
+  (method implWrite :throws [IOException] ^void [this ^char/1 cbuf ^int off ^int len]
+    (let [cb (CharBuffer/wrap cbuf off len)] (.implWrite this cb)))
+
+  (method implWrite :throws [IOException] ^void [this ^CharBuffer cb]
+    (when haveLeftoverChar (.flushLeftoverChar this cb false))
+    (.growByteBufferIfNeeded this (.remaining cb))
+    (while (.hasRemaining cb)
+      (let [cr (.encode encoder cb bb false)]
+        (when (.isUnderflow cr)
+          (java-assert (<= (.remaining cb) 1) (.remaining cb))
+          (when (== (.remaining cb) 1) (set! haveLeftoverChar true) (set! leftoverChar (.get cb)))
+          (break))
+        (if (.isOverflow cr)
+            (do (java-assert (> (.position bb) 0)) (.writeBytes this))
+            (.throwException cr)))))
+
+  (method growByteBufferIfNeeded :throws [IOException] ^void [this ^int len]
+    (let [cap (.capacity bb)]
+      (when (< cap maxBufferCapacity)
+        (let [maxBytes (unchecked-multiply-int len (Math/round (.maxBytesPerChar encoder)))
+              newCap (Math/min maxBytes maxBufferCapacity)]
+          (when (> newCap cap) (.implFlushBuffer this) (set! bb (ByteBuffer/allocate newCap)))))))
+
+  (method implFlushBuffer :throws [IOException] ^void [this]
+    (when (> (.position bb) 0) (.writeBytes this)))
+
+  (method implFlush :throws [IOException] ^void [this]
+    (.implFlushBuffer this)
+    (.flush out))
+
+  (method implClose :throws [IOException] ^void [this]
+    (try
+      (with-resources [out out]
+        (.flushLeftoverChar this nil true)
+        (while true
+          (let [cr (.flush encoder bb)]
+            (when (.isUnderflow cr) (break))
+            (if (.isOverflow cr)
+                (do (java-assert (> (.position bb) 0)) (.writeBytes this))
+                (.throwException cr))))
+        (when (> (.position bb) 0) (.writeBytes this))
+        (.flush out))
+      (catch IOException x (.reset encoder) (throw x))))
+
+  (method encodingName ^String [this]
+    (if (instance? HistoricallyNamedCharset cs)
+        (.historicalName (cast HistoricallyNamedCharset cs))
+        (.name cs))))

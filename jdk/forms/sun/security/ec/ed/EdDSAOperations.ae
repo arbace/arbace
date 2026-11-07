@@ -1,0 +1,182 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ec/ed/EdDSAOperations.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ec.ed)
+
+(import '(java.security InvalidKeyException
+                        NoSuchAlgorithmException
+                        SecureRandom
+                        SignatureException)
+        '(java.security.spec EdDSAParameterSpec EdECPoint)
+        '(java.util Arrays)
+        '(java.util.function Function)
+        '(sun.security.ec.point AffinePoint Point)
+        '(sun.security.util ArrayUtil)
+        '(sun.security.util.math IntegerModuloP))
+
+(defclass ^:public EdDSAOperations
+  (field ^:private ^:final ^EdDSAParameters params)
+
+  (constructor :throws [NoSuchAlgorithmException] ^:public [this ^EdDSAParameters params]
+    (set! (.-params this) params))
+
+  (method ^:public getParameters ^EdDSAParameters [this] params)
+
+  (method ^:public generatePrivate ^byte/1 [this ^SecureRandom random]
+    (let [result (new byte/1 (.getKeyLength params))] (.nextBytes random result) result))
+
+  (method ^:public computePublic ^EdECPoint [this ^byte/1 privateKey]
+    (let [privateKeyHash (.digest params privateKey)
+          byteLength (unchecked-divide-int (alength privateKeyHash) 2)
+          s (Arrays/copyOf privateKeyHash byteLength)]
+      (.prune this s)
+      (let [^IntegerModuloP fieldS (.getElement (.getOrderField params) s)]
+        (.asByteArray fieldS s)
+        (let [A (.basePointMultiply (.getEdOperations params) s)]
+          (EdDSAOperations/asEdECPoint (.asAffine A))))))
+
+  (method ^:private ^:static asEdECPoint ^EdECPoint [^AffinePoint p]
+    (EdECPoint. (.testBit (.asBigInteger (.getX p)) 0) (.asBigInteger (.getY p))))
+
+  (method ^:public sign ^byte/1 [this ^EdDSAParameterSpec sigParams ^byte/1 privateKey
+                                 ^byte/1 message]
+    (let [privateKeyHash (.digest params privateKey)
+          byteLength (unchecked-divide-int (alength privateKeyHash) 2)
+          s (Arrays/copyOf privateKeyHash byteLength)]
+      (.prune this s)
+      (let [^IntegerModuloP sElem (.getElement (.getOrderField params) s)]
+        (.asByteArray sElem s)
+        (let [A (.basePointMultiply (.getEdOperations params) s)
+              prefix (Arrays/copyOfRange privateKeyHash
+                                         (unchecked-divide-int (alength privateKeyHash) 2)
+                                         (alength privateKeyHash))
+              dom (.dom params sigParams)
+              ^:mutable r (.digest params dom prefix message)
+              ^IntegerModuloP fieldR (.getElement (.getOrderField params) r)]
+          (set! r (new byte/1 (.getKeyLength params)))
+          (.asByteArray fieldR r)
+          (let [R (.basePointMultiply (.getEdOperations params) r)
+                encodedR (EdDSAOperations/encode byteLength R)
+                encodedA (EdDSAOperations/encode byteLength A)
+                k (.digest params dom encodedR encodedA message)
+                subField (.getOrderField params)
+                ^IntegerModuloP kElem (.getElement subField k)
+                ^IntegerModuloP rElem (.getElement subField r)
+                S (.setProduct (.mutable kElem) sElem)]
+            (.setSum S rElem)
+            (let [sArr (.asByteArray S byteLength)
+                  rArr (EdDSAOperations/encode byteLength R)
+                  result (new byte/1 (unchecked-multiply-int byteLength 2))]
+              (System/arraycopy rArr 0 result 0 byteLength)
+              (System/arraycopy sArr 0 result byteLength byteLength)
+              result))))))
+
+  (method ^:public verify :throws [SignatureException] ^boolean [this ^EdDSAParameterSpec sigParams
+                                                                 ^AffinePoint affineA
+                                                                 ^byte/1 publicKey ^byte/1 message
+                                                                 ^byte/1 signature]
+    (when (nil? signature) (throw (SignatureException. "signature was null")))
+    (when-not (== (unchecked-multiply-int (.getKeyLength params) 2) (alength signature))
+      (throw (SignatureException. "signature length invalid")))
+    (let [encR (Arrays/copyOf signature (unchecked-divide-int (alength signature) 2))
+          encS (Arrays/copyOfRange signature
+                                   (unchecked-divide-int (alength signature) 2)
+                                   (alength signature))]
+      (ArrayUtil/reverse encS)
+      (let [bigS (BigInteger. 1 encS)]
+        (when (>= (.compareTo bigS (.getSize (.getOrderField params))) 0)
+          (throw (SignatureException. "s is too large")))
+        (ArrayUtil/reverse encS)
+        (let [dom (.dom params sigParams)
+              affineR (.decodeAffinePoint this
+                                          (method-ref
+                                            Function
+                                            ^SignatureException [String]
+                                            SignatureException/new)
+                                          encR)
+              ^:mutable k (.digest params dom encR publicKey message)
+              subField (.getOrderField params)
+              ^IntegerModuloP kElem (.getElement subField k)]
+          (set! k (.asByteArray kElem (unchecked-divide-int (alength k) 2)))
+          (let [^Point pointR (.of (.getEdOperations params) affineR)
+                ^Point pointA (.of (.getEdOperations params) affineA)
+                edOps (.getEdOperations params)
+                lhs (.basePointMultiply edOps encS)
+                ^Point rhs (.setSum edOps (.setProduct edOps (.mutable pointA) k) (.mutable pointR))]
+            (.affineEquals lhs rhs))))))
+
+  (method ^:public verify :throws [InvalidKeyException SignatureException] ^boolean [this
+                                                                                     ^EdDSAParameterSpec sigParams
+                                                                                     ^byte/1 publicKey
+                                                                                     ^byte/1 message
+                                                                                     ^byte/1 signature]
+    (let [affineA (.decodeAffinePoint this
+                                      (method-ref
+                                        Function
+                                        ^InvalidKeyException [String]
+                                        InvalidKeyException/new)
+                                      publicKey)]
+      (.verify this sigParams affineA publicKey message signature)))
+
+  (method ^:public decodeAffinePoint :type-params [(T extends Throwable)] :throws [T] ^AffinePoint [this
+                                                                                                    ^{:tag (Function String T)} exception
+                                                                                                    ^:mutable ^byte/1 arr]
+    (when-not (== (alength arr) (.getKeyLength params))
+      (throw (cast Throwable (.apply exception "incorrect length"))))
+    (set! arr (.clone arr))
+    (let [xLSB (unsigned-bit-shift-right-int
+                 (bit-and-int 0xFF (aget arr (unchecked-subtract-int (alength arr) 1)))
+                 7)]
+      (let [i-1 (unchecked-subtract-int (alength arr) 1)]
+        (aset arr i-1 (unchecked-byte (bit-and-int (aget arr i-1) 0x7F))))
+      (let [yLength (bit-shift-right-int (unchecked-add-int (.getBits params) 7) 3)
+            ^IntegerModuloP y (.getElement (.getField params) arr 0 yLength (unchecked-byte 0))]
+        (ArrayUtil/reverse arr)
+        (let [bigY (BigInteger. 1 arr)]
+          (when (>= (.compareTo bigY (.getSize (.getField params))) 0)
+            (throw (cast Throwable (.apply exception "y value is too large"))))
+          (.decodeAffinePoint (.getEdOperations params) exception xLSB y)))))
+
+  (method ^:public decodeAffinePoint :type-params [(T extends Throwable)] :throws [T] ^AffinePoint [this
+                                                                                                    ^{:tag (Function String T)} exception
+                                                                                                    ^EdECPoint point]
+    (when (>= (.compareTo (.getY point) (.getSize (.getField params))) 0)
+      (throw (cast Throwable (.apply exception "y value is too large"))))
+    (let [^int xLSB (if (.isXOdd point) 1 0)
+          ^IntegerModuloP y (.getElement (.getField params) (.getY point))]
+      (.decodeAffinePoint (.getEdOperations params) exception xLSB y)))
+
+  (method ^:private ^:static maskHighOrder ^int [^byte/1 arr ^int bits]
+    (let [lastByteIndex (unchecked-subtract-int (alength arr) 1)
+          bitsDiff (unchecked-subtract-int (unchecked-multiply-int (alength arr) 8) bits)
+          highBits (unchecked-subtract-int 8 bitsDiff)
+          msbMaskOff (unchecked-byte (unchecked-subtract-int (bit-shift-left-int 1 highBits) 1))]
+      (aset arr lastByteIndex (unchecked-byte (bit-and-int (aget arr lastByteIndex) msbMaskOff)))
+      highBits))
+
+  (method ^:private ^:static prune ^void [^byte/1 k ^int bits ^int logCofactor]
+    (let [lastByteIndex (unchecked-subtract-int (alength k) 1)
+          highBits (EdDSAOperations/maskHighOrder k bits)]
+      (if (== highBits 0)
+          (let [i-2 (unchecked-subtract-int lastByteIndex 1)]
+            (aset k i-2 (unchecked-byte (bit-or-int (aget k i-2) (unchecked-byte 0x80)))))
+          (let [msbMaskOn (unchecked-byte
+                            (bit-shift-left-int 1 (unchecked-subtract-int highBits 1)))]
+            (aset k lastByteIndex (unchecked-byte (bit-or-int (aget k lastByteIndex) msbMaskOn)))))
+      (let [lsbMaskOff (unchecked-byte (bit-shift-left-int 0xFF logCofactor))]
+        (aset k 0 (unchecked-byte (bit-and-int (aget k 0) lsbMaskOff))))))
+
+  (method prune ^void [this ^byte/1 arr]
+    (EdDSAOperations/prune arr (.getBits params) (.getLogCofactor params)))
+
+  (method ^:private ^:static encode ^byte/1 [^int length ^Point p]
+    (EdDSAOperations/encode length (.asAffine p)))
+
+  (method ^:private ^:static encode ^byte/1 [^int length ^AffinePoint p]
+    (let [result (.asByteArray (.getY p) length)
+          xLSB (bit-and-int (aget (.asByteArray (.getX p) 1) 0) 0x01)]
+      (let [i-3 (unchecked-subtract-int (alength result) 1)]
+        (aset result
+              i-3
+              (unchecked-byte
+                (bit-or-int (aget result i-3) (unchecked-byte (bit-shift-left-int xLSB 7))))))
+      result)))

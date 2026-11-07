@@ -1,0 +1,908 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/QuicKeyManager.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException UncheckedIOException)
+        '(java.nio ByteBuffer)
+        '(java.nio.charset StandardCharsets)
+        '(java.security GeneralSecurityException NoSuchAlgorithmException)
+        '(java.util HexFormat Objects)
+        '(java.util.concurrent.atomic AtomicLong)
+        '(java.util.concurrent.locks Lock ReentrantLock)
+        '(java.util.function IntFunction)
+        '(javax.crypto AEADBadTagException Cipher KDF SecretKey ShortBufferException)
+        '(javax.crypto.spec GCMParameterSpec HKDFParameterSpec SecretKeySpec)
+        '(javax.net.ssl SSLException SSLHandshakeException)
+        '(jdk.internal.net.quic QuicKeyUnavailableException
+                                QuicOneRttContext
+                                QuicTLSEngine$KeySpace
+                                QuicTransportErrors
+                                QuicTransportException
+                                QuicVersion)
+        '(jdk.internal.vm.annotation Stable)
+        '(sun.security.util KeyUtil))
+
+(defclass ^:abstract ^:sealed QuicKeyManager
+  :permits [QuicKeyManager$HandshakeKeyManager
+            QuicKeyManager$InitialKeyManager
+            QuicKeyManager$OneRttKeyManager]
+
+  (defclass ^:private ^:record QuicKeys [^SecretKey key ^byte/1 iv ^SecretKey hp])
+
+  (defclass ^:private ^:record CipherPair [^QuicCipher$QuicReadCipher readCipher
+                                           ^QuicCipher$QuicWriteCipher writeCipher]
+    (method discard ^void [this ^boolean destroyHP]
+      (.discard writeCipher destroyHP)
+      (.discard readCipher destroyHP))
+
+    (method usedByBothEndpoints ^boolean [this]
+      (and (.hasDecryptedAny (.-readCipher this)) (.hasEncryptedAny (.-writeCipher this)))))
+
+  (field ^:final ^QuicTLSEngine$KeySpace keySpace)
+
+  (field ^:final ^AtomicLong invalidPackets (AtomicLong.))
+
+  (field ^:volatile ^boolean keysDiscarded)
+
+  (constructor ^:private [this ^:final ^QuicTLSEngine$KeySpace keySpace]
+    (set! (.-keySpace this) keySpace))
+
+  (method ^:protected ^:abstract keysAvailable ^boolean [this])
+
+  (method ^:protected ^:abstract getReadCipher :throws [QuicKeyUnavailableException] ^QuicCipher$QuicReadCipher [this])
+
+  (method ^:protected ^:abstract getWriteCipher :throws [QuicKeyUnavailableException] ^QuicCipher$QuicWriteCipher [this])
+
+  (method ^:abstract discardKeys ^void [this])
+
+  (method decryptPacket :throws [QuicKeyUnavailableException
+                                 IllegalArgumentException
+                                 AEADBadTagException
+                                 QuicTransportException
+                                 ShortBufferException] ^void [this ^:final ^long packetNumber
+                                                              ^:final ^int keyPhase
+                                                              ^:final ^ByteBuffer packet
+                                                              ^:final ^int headerLength
+                                                              ^:final ^ByteBuffer output]
+    (when-not (== keyPhase -1)
+      (throw (IllegalArgumentException. (java-str "Unexpected key phase value: " keyPhase))))
+    (let [readCipher (.getReadCipher this)]
+      (try
+        (.decryptPacket readCipher packetNumber packet headerLength output)
+        (catch AEADBadTagException e
+          (when (>= (.incrementAndGet invalidPackets) (.integrityLimit readCipher))
+            (throw (QuicTransportException. "Integrity limit reached"
+                                            keySpace
+                                            0
+                                            QuicTransportErrors/AEAD_LIMIT_REACHED)))
+          (throw e)))))
+
+  (method encryptPacket :throws [QuicKeyUnavailableException
+                                 QuicTransportException
+                                 ShortBufferException] ^void [this ^:final ^long packetNumber
+                                                              ^:final ^{:tag (IntFunction ByteBuffer)} headerGenerator
+                                                              ^:final ^ByteBuffer packetPayload
+                                                              ^:final ^ByteBuffer output]
+    (let [header (cast ByteBuffer (.apply headerGenerator 0))]
+      (.encryptPacket (.getWriteCipher this) packetNumber header packetPayload output)))
+
+  (method ^:private ^:static deriveQuicKeys :throws [IOException] ^QuicKeys [^:final ^QuicVersion quicVersion
+                                                                             ^:final ^CipherSuite cs
+                                                                             ^:final ^SecretKey traffic_secret]
+    (let [^SSLKeyDerivation kd (QuicTLSKeyDerivation. cs traffic_secret)
+          tlsData (QuicKeyManager/getQuicData quicVersion)
+          quic_key (.deriveKey kd (.getTlsKeyLabel tlsData))
+          quic_iv (.deriveData kd (.getTlsIvLabel tlsData))
+          quic_hp (.deriveKey kd (.getTlsHpLabel tlsData))]
+      (QuicKeys. quic_key quic_iv quic_hp)))
+
+  (method ^:private ^:static deriveQuicKeys :throws [IOException] ^QuicKeys [^:final ^QuicVersion quicVersion
+                                                                             ^:final ^CipherSuite cs
+                                                                             ^:final ^SecretKey traffic_secret
+                                                                             ^:final ^SecretKey quic_hp]
+    (let [^SSLKeyDerivation kd (QuicTLSKeyDerivation. cs traffic_secret)
+          tlsData (QuicKeyManager/getQuicData quicVersion)
+          quic_key (.deriveKey kd (.getTlsKeyLabel tlsData))
+          quic_iv (.deriveData kd (.getTlsIvLabel tlsData))]
+      (QuicKeys. quic_key quic_iv quic_hp)))
+
+  (method ^:private ^:static getQuicData ^QuicTLSData [^:final ^QuicVersion quicVersion]
+    (switch quicVersion
+      QUIC_V1 QuicTLSData/V1
+      QUIC_V2 QuicTLSData/V2
+      (throw (MatchException. nil nil))))
+
+  (method ^:private ^:static createHkdfInfo ^byte/1 [^:final ^String label ^:final ^int length]
+    (let [tls13Label (.getBytes (java-str "tls13 " label) StandardCharsets/UTF_8)]
+      (QuicKeyManager/createHkdfInfo tls13Label length)))
+
+  (method ^:private ^:static createHkdfInfo ^byte/1 [^:final ^byte/1 tls13Label ^:final ^int length]
+    (let [info (new byte/1 (unchecked-add-int 4 (alength tls13Label)))
+          m (ByteBuffer/wrap info)]
+      (try
+        (Record/putInt16 m length)
+        (Record/putBytes8 m tls13Label)
+        (Record/putInt8 m 0x00)
+        (catch IOException ioe (throw (UncheckedIOException. "Unexpected exception" ioe))))
+      info))
+
+  (defclass ^:static ^:final InitialKeyManager
+    :extends QuicKeyManager
+
+    (field ^:private ^:volatile ^CipherPair cipherPair)
+
+    (constructor [this] (super. QuicTLSEngine$KeySpace/INITIAL))
+
+    (method ^:protected keysAvailable ^boolean [this]
+      (and (some? (.-cipherPair this)) (not (.-keysDiscarded this))))
+
+    (method ^:protected getReadCipher :throws [QuicKeyUnavailableException] ^QuicCipher$QuicReadCipher [this]
+      (let [pair (.-cipherPair this)]
+        (when (nil? pair)
+          (let [^String msg (if (.-keysDiscarded this)
+                                "Keys have been discarded"
+                                "Keys not available")]
+            (throw (QuicKeyUnavailableException. msg (.-keySpace this)))))
+        (.-readCipher pair)))
+
+    (method ^:protected getWriteCipher :throws [QuicKeyUnavailableException] ^QuicCipher$QuicWriteCipher [this]
+      (let [pair (.-cipherPair this)]
+        (when (nil? pair)
+          (let [^String msg (if (.-keysDiscarded this)
+                                "Keys have been discarded"
+                                "Keys not available")]
+            (throw (QuicKeyUnavailableException. msg (.-keySpace this)))))
+        (.-writeCipher pair)))
+
+    (method discardKeys ^void [this]
+      (let [toDiscard (.-cipherPair this)]
+        (set! (.-keysDiscarded this) true)
+        (set! (.-cipherPair this) nil)
+        (when (some? toDiscard)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/finest
+              (java-str "discarding keys (keyphase="
+                        (.getKeyPhase (.-writeCipher toDiscard))
+                        ") of "
+                        (.-keySpace this)
+                        " key space")))
+          (.discard toDiscard true))))
+
+    (method deriveKeys :throws [IOException] ^void [this ^:final ^QuicVersion quicVersion
+                                                    ^:final ^byte/1 connectionId
+                                                    ^:final ^boolean clientMode]
+      (Objects/requireNonNull quicVersion)
+      (let [cs CipherSuite/TLS_AES_128_GCM_SHA256
+            hashAlg (.-hashAlg cs)
+            ^:mutable ^KDF hkdf nil]
+        (try
+          (set! hkdf (KDF/getInstance (.-hkdfAlgorithm hashAlg)))
+          (catch NoSuchAlgorithmException e
+            (throw (SSLHandshakeException. "Could not generate secret" e))))
+        (let [tlsData (QuicKeyManager/getQuicData quicVersion)
+              ^:mutable ^SecretKey initial_secret nil
+              ^:mutable ^SecretKey server_initial_secret nil
+              ^:mutable ^SecretKey client_initial_secret nil]
+          (try
+            (set! initial_secret
+                  (.deriveKey hkdf
+                              "TlsInitialSecret"
+                              (.extractOnly (.addIKM
+                                              (.addSalt
+                                                (HKDFParameterSpec/ofExtract)
+                                                (.getInitialSalt tlsData))
+                                              connectionId))))
+            (let [clientInfo (QuicKeyManager/createHkdfInfo "client in" (.-hashLength hashAlg))]
+              (set! client_initial_secret
+                    (.deriveKey hkdf
+                                "TlsClientInitialTrafficSecret"
+                                (HKDFParameterSpec/expandOnly
+                                  initial_secret
+                                  clientInfo
+                                  (.-hashLength hashAlg))))
+              (let [clientKeys (QuicKeyManager/deriveQuicKeys quicVersion cs client_initial_secret)
+                    serverInfo (QuicKeyManager/createHkdfInfo "server in" (.-hashLength hashAlg))]
+                (set! server_initial_secret
+                      (.deriveKey hkdf
+                                  "TlsServerInitialTrafficSecret"
+                                  (HKDFParameterSpec/expandOnly
+                                    initial_secret
+                                    serverInfo
+                                    (.-hashLength hashAlg))))
+                (let [serverKeys (QuicKeyManager/deriveQuicKeys
+                                   quicVersion
+                                   cs
+                                   server_initial_secret)
+                      ^:mutable ^QuicCipher$QuicReadCipher readCipher nil
+                      ^:mutable ^QuicCipher$QuicWriteCipher writeCipher nil
+                      ^:const ^int keyPhase 0]
+                  (if clientMode
+                      (do
+                        (set! readCipher
+                              (QuicCipher/createReadCipher
+                                cs
+                                server_initial_secret
+                                (.-key serverKeys)
+                                (.-iv serverKeys)
+                                (.-hp serverKeys)
+                                keyPhase))
+                        (set! writeCipher
+                              (QuicCipher/createWriteCipher
+                                cs
+                                client_initial_secret
+                                (.-key clientKeys)
+                                (.-iv clientKeys)
+                                (.-hp clientKeys)
+                                keyPhase)))
+                      (do
+                        (set! readCipher
+                              (QuicCipher/createReadCipher
+                                cs
+                                client_initial_secret
+                                (.-key clientKeys)
+                                (.-iv clientKeys)
+                                (.-hp clientKeys)
+                                keyPhase))
+                        (set! writeCipher
+                              (QuicCipher/createWriteCipher
+                                cs
+                                server_initial_secret
+                                (.-key serverKeys)
+                                (.-iv serverKeys)
+                                (.-hp serverKeys)
+                                keyPhase))))
+                  (let [old (.-cipherPair this)]
+                    (set! (.-cipherPair this) (CipherPair. readCipher writeCipher))
+                    (when (some? old) (.discard old true))))))
+            (catch GeneralSecurityException e (throw (SSLException. "Missing cipher algorithm" e)))
+            (finally
+              (KeyUtil/destroySecretKeys initial_secret client_initial_secret server_initial_secret))))))
+
+    (method ^:static getRetryCipher :throws [QuicTransportException] ^Cipher [^:final ^QuicVersion quicVersion
+                                                                              ^:final ^boolean incoming]
+      (let [tlsData (QuicKeyManager/getQuicData quicVersion)] (.getRetryCipher tlsData incoming))))
+
+  (defclass ^:static ^:final HandshakeKeyManager
+    :extends QuicKeyManager
+
+    (field ^:private ^:volatile ^CipherPair cipherPair)
+
+    (constructor [this] (super. QuicTLSEngine$KeySpace/HANDSHAKE))
+
+    (method ^:protected keysAvailable ^boolean [this]
+      (and (some? (.-cipherPair this)) (not (.-keysDiscarded this))))
+
+    (method ^:protected getReadCipher :throws [QuicKeyUnavailableException] ^QuicCipher$QuicReadCipher [this]
+      (let [pair (.-cipherPair this)]
+        (when (nil? pair)
+          (let [^String msg (if (.-keysDiscarded this)
+                                "Keys have been discarded"
+                                "Keys not available")]
+            (throw (QuicKeyUnavailableException. msg (.-keySpace this)))))
+        (.-readCipher pair)))
+
+    (method ^:protected getWriteCipher :throws [QuicKeyUnavailableException] ^QuicCipher$QuicWriteCipher [this]
+      (let [pair (.-cipherPair this)]
+        (when (nil? pair)
+          (let [^String msg (if (.-keysDiscarded this)
+                                "Keys have been discarded"
+                                "Keys not available")]
+            (throw (QuicKeyUnavailableException. msg (.-keySpace this)))))
+        (.-writeCipher pair)))
+
+    (method discardKeys ^void [this]
+      (let [toDiscard (.-cipherPair this)]
+        (set! (.-cipherPair this) nil)
+        (set! (.-keysDiscarded this) true)
+        (when (some? toDiscard)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/finest
+              (java-str "discarding keys (keyphase="
+                        (.getKeyPhase (.-writeCipher toDiscard))
+                        ") of "
+                        (.-keySpace this)
+                        " key space")))
+          (.discard toDiscard true))))
+
+    (method deriveKeys :throws [IOException] ^void [this ^:final ^QuicVersion quicVersion
+                                                    ^:final ^HandshakeContext handshakeContext
+                                                    ^:final ^boolean clientMode]
+      (Objects/requireNonNull quicVersion)
+      (when (.keysAvailable this)
+        (throw (IllegalStateException.
+                 (java-str "Keys already derived for " (.-keySpace this) " key space"))))
+      (let [^:mutable ^SecretKey client_handshake_traffic_secret nil
+            ^:mutable ^SecretKey server_handshake_traffic_secret nil]
+        (try
+          (let [kd (.-handshakeKeyDerivation handshakeContext)]
+            (set! client_handshake_traffic_secret (.deriveKey kd "TlsClientHandshakeTrafficSecret"))
+            (let [clientKeys (QuicKeyManager/deriveQuicKeys
+                               quicVersion
+                               (.-negotiatedCipherSuite handshakeContext)
+                               client_handshake_traffic_secret)]
+              (set! server_handshake_traffic_secret
+                    (.deriveKey kd "TlsServerHandshakeTrafficSecret"))
+              (let [serverKeys (QuicKeyManager/deriveQuicKeys
+                                 quicVersion
+                                 (.-negotiatedCipherSuite handshakeContext)
+                                 server_handshake_traffic_secret)
+                    negotiatedCipherSuite (.-negotiatedCipherSuite handshakeContext)
+                    ^:mutable ^QuicCipher$QuicReadCipher readCipher nil
+                    ^:mutable ^QuicCipher$QuicWriteCipher writeCipher nil
+                    ^:const ^int keyPhase 0]
+                (if clientMode
+                    (do
+                      (set! readCipher
+                            (QuicCipher/createReadCipher
+                              negotiatedCipherSuite
+                              server_handshake_traffic_secret
+                              (.-key serverKeys)
+                              (.-iv serverKeys)
+                              (.-hp serverKeys)
+                              keyPhase))
+                      (set! writeCipher
+                            (QuicCipher/createWriteCipher
+                              negotiatedCipherSuite
+                              client_handshake_traffic_secret
+                              (.-key clientKeys)
+                              (.-iv clientKeys)
+                              (.-hp clientKeys)
+                              keyPhase)))
+                    (do
+                      (set! readCipher
+                            (QuicCipher/createReadCipher
+                              negotiatedCipherSuite
+                              client_handshake_traffic_secret
+                              (.-key clientKeys)
+                              (.-iv clientKeys)
+                              (.-hp clientKeys)
+                              keyPhase))
+                      (set! writeCipher
+                            (QuicCipher/createWriteCipher
+                              negotiatedCipherSuite
+                              server_handshake_traffic_secret
+                              (.-key serverKeys)
+                              (.-iv serverKeys)
+                              (.-hp serverKeys)
+                              keyPhase))))
+                (locking this
+                  (when (some? (.-cipherPair this))
+                    (throw (IllegalStateException.
+                             (java-str "Keys already available for keyspace: " (.-keySpace this)))))
+                  (set! (.-cipherPair this) (CipherPair. readCipher writeCipher))))))
+          (catch GeneralSecurityException e (throw (SSLException. "Missing cipher algorithm" e)))
+          (finally
+            (KeyUtil/destroySecretKeys client_handshake_traffic_secret
+                                       server_handshake_traffic_secret))))))
+
+  (defclass ^:static ^:final OneRttKeyManager
+    :extends QuicKeyManager
+
+    (defclass ^:private ^:record KeySeries [^QuicCipher$QuicReadCipher old ^CipherPair current
+                                            ^CipherPair next]
+      (constructor ^:private ^:compact [this]
+        (Objects/requireNonNull current)
+        (when (some? old)
+          (when (== (.getKeyPhase old) (.getKeyPhase (.-writeCipher current)))
+            (throw (IllegalArgumentException.
+                     (java-str "Both old keys and current keys have the same key phase: "
+                               (.getKeyPhase (.-writeCipher current)))))))
+        (when (some? next)
+          (when (== (.getKeyPhase (.-writeCipher next)) (.getKeyPhase (.-writeCipher current)))
+            (throw (IllegalArgumentException.
+                     (java-str "Both next keys and current keys have the same key phase: "
+                               (.getKeyPhase (.-writeCipher current))))))))
+
+      (method canUseOldDecryptKey ^boolean [this ^:final ^long pktNum]
+        (java-assert (>= pktNum 0) (java-str "unexpected packet number: " pktNum))
+        (if (nil? (.-old this))
+            false
+            (let [currentKey (.-readCipher (.-current this))
+                  lowestDecrypted (.lowestDecryptedPktNum currentKey)]
+              (if (== lowestDecrypted -1) true (< pktNum lowestDecrypted))))))
+
+    (field ^:private ^:volatile ^QuicVersion negotiatedVersion)
+
+    (field ^:private ^:final ^Lock keySeriesLock (ReentrantLock.))
+
+    (field ^:private ^:volatile ^KeySeries keySeries)
+
+    (field ^:private ^:volatile ^{Stable true} ^QuicOneRttContext oneRttContext)
+
+    (constructor [this] (super. QuicTLSEngine$KeySpace/ONE_RTT))
+
+    (method ^:protected keysAvailable ^boolean [this]
+      (and (some? (.-keySeries this)) (not (.-keysDiscarded this))))
+
+    (method ^:protected getReadCipher :throws [QuicKeyUnavailableException] ^QuicCipher$QuicReadCipher [this]
+      (let [series (.requireKeySeries this)] (.-readCipher (.-current series))))
+
+    (method ^:protected getWriteCipher :throws [QuicKeyUnavailableException] ^QuicCipher$QuicWriteCipher [this]
+      (let [series (.requireKeySeries this)] (.-writeCipher (.-current series))))
+
+    (method discardKeys ^void [this]
+      (set! (.-keysDiscarded this) true)
+      (let [^:mutable ^KeySeries series nil]
+        (.lock (.-keySeriesLock this))
+        (try
+          (set! series (.-keySeries this))
+          (set! (.-keySeries this) nil)
+          (finally (.unlock (.-keySeriesLock this))))
+        (when (some? series)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/finest
+              (java-str "discarding key (series) of " (.-keySpace this) " key space")))
+          (when (some? (.-old series)) (.discard (.-old series) false))
+          (OneRttKeyManager/discardKeys (.-current series))
+          (OneRttKeyManager/discardKeys (.-next series)))))
+
+    (method decryptPacket :throws [QuicKeyUnavailableException
+                                   QuicTransportException
+                                   AEADBadTagException
+                                   ShortBufferException] ^void [this ^:final ^long packetNumber
+                                                                ^:final ^int keyPhase
+                                                                ^:final ^ByteBuffer packet
+                                                                ^:final ^int headerLength
+                                                                ^:final ^ByteBuffer output]
+      (when (and (not (== keyPhase 0)) (not (== keyPhase 1)))
+        (throw (IllegalArgumentException. (java-str "Unexpected key phase value: " keyPhase))))
+      (let [series (.requireKeySeries this)
+            current (.-current series)
+            currentKeyPhase (.getKeyPhase (.-writeCipher current))]
+        (cond
+          (== keyPhase currentKeyPhase)
+            (.decryptPacket (.-readCipher current) packetNumber packet headerLength output)
+          (.canUseOldDecryptKey series packetNumber)
+            (let [oldReadCipher (.-old series)]
+              (java-assert (some? oldReadCipher) "old key is unexpectedly null")
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                (SSLLogger/finest
+                  (java-str "using old read key to decrypt packet: "
+                            packetNumber
+                            ", with incoming key phase: "
+                            keyPhase
+                            ", current key phase: "
+                            currentKeyPhase)))
+              (.decryptPacket oldReadCipher packetNumber packet headerLength output)
+              (when (and (and (not (.usedByBothEndpoints (.-current series)))
+                              (.hasEncryptedAny (.-writeCipher (.-current series))))
+                         (>= (.getLargestPeerAckedPN oneRttContext)
+                             (.lowestEncryptedPktNum (.-writeCipher (.-current series)))))
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                  (SSLLogger/finest
+                    (java-str
+                      "peer used incorrect key, was expected to use updated key of key phase: "
+                      currentKeyPhase
+                      ", incoming key phase: "
+                      keyPhase
+                      ", packet number: "
+                      packetNumber)))
+                (throw (QuicTransportException.
+                         "peer used incorrect key, was expected to use updated key"
+                         (.-keySpace this)
+                         0
+                         QuicTransportErrors/KEY_UPDATE_ERROR))))
+          :else
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                (SSLLogger/finest
+                  (java-str "detected ONE_RTT key update, current key phase: "
+                            currentKeyPhase
+                            ", incoming key phase: "
+                            keyPhase
+                            ", packet number: "
+                            packetNumber)))
+              (.decryptUsingNextKeys this series packetNumber packet headerLength output)))))
+
+    (method encryptPacket :throws [QuicKeyUnavailableException
+                                   QuicTransportException
+                                   ShortBufferException] ^void [this ^:final ^long packetNumber
+                                                                ^:final ^{:tag (IntFunction ByteBuffer)} headerGenerator
+                                                                ^:final ^ByteBuffer packetPayload
+                                                                ^:final ^ByteBuffer output]
+      (let [^:mutable currentSeries (.requireKeySeries this)]
+        (when (nil? (.-next currentSeries))
+          (try
+            (set! currentSeries (.generateNextKeys this (.-negotiatedVersion this) currentSeries))
+            (catch [GeneralSecurityException IOException] e
+              (throw (QuicTransportException. "Failed to update keys"
+                                              QuicTLSEngine$KeySpace/ONE_RTT
+                                              0
+                                              (unchecked-add
+                                                QuicTLSEngineImpl/BASE_CRYPTO_ERROR
+                                                (.-id Alert/INTERNAL_ERROR))
+                                              e)))))
+        (.maybeInitiateKeyUpdate this currentSeries packetNumber)
+        (let [writeCipher (.getWriteCipher this)
+              keyPhase (.getKeyPhase writeCipher)
+              header (cast ByteBuffer (.apply headerGenerator keyPhase))]
+          (.encryptPacket writeCipher packetNumber header packetPayload output))))
+
+    (method setOneRttContext ^void [this ^:final ^QuicOneRttContext ctx]
+      (Objects/requireNonNull ctx)
+      (set! (.-oneRttContext this) ctx))
+
+    (method ^:private requireKeySeries :throws [QuicKeyUnavailableException] ^KeySeries [this]
+      (let [series (.-keySeries this)]
+        (if (some? series)
+            series
+            (let [^String msg (if (.-keysDiscarded this)
+                                  "Keys have been discarded"
+                                  "Keys not available")]
+              (throw (QuicKeyUnavailableException. msg (.-keySpace this)))))))
+
+    (method ^:private maybeInitiateKeyUpdate ^boolean [this ^:final ^KeySeries currentSeries
+                                                       ^:final ^long packetNumber]
+      (let [cipher (.-writeCipher (.-current currentSeries))
+            confidentialityLimit (.confidentialityLimit cipher)]
+        (if (< confidentialityLimit 0)
+            false
+            (let [numEncrypted (.getNumEncrypted cipher)]
+              (if (>= numEncrypted (unchecked-multiply 0.8 confidentialityLimit))
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                      (SSLLogger/finest
+                        (java-str
+                          "about to reach confidentiality limit, attempting to initiate a 1-RTT key update, packet number: "
+                          packetNumber
+                          ", current key phase: "
+                          (.getKeyPhase cipher))))
+                    (let [initiated (.initiateKeyUpdate this currentSeries)]
+                      (when initiated
+                        (let [newKeyPhase (.getKeyPhase
+                                            (.-writeCipher (.-current (.-keySeries this))))]
+                          (java-assert (not (== (.getKeyPhase cipher) newKeyPhase))
+                            (java-str "key phase of updated key unexpectedly matches the key phase "
+                                      (.getKeyPhase cipher)
+                                      " of current keys"))
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                            (SSLLogger/finest
+                              (java-str "1-RTT key update initiated, new key phase: " newKeyPhase)))))
+                      initiated))
+                  false)))))
+
+    (method ^:private initiateKeyUpdate ^boolean [this ^:final ^KeySeries series]
+      (if (not (.usedByBothEndpoints (.-current series)))
+          (do
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+              (SSLLogger/finest
+                (java-str
+                  "skipping key update initiation because peer hasn't yet sent us a packet encrypted with current key of key phase: "
+                  (.getKeyPhase (.-readCipher (.-current series))))))
+            false)
+          (do (.rolloverKeys this (.-negotiatedVersion this) series) true)))
+
+    (method ^:private ^:static discardKeys ^void [^:final ^CipherPair cipherPair]
+      (when (some? cipherPair) (.discard cipherPair true)))
+
+    (method ^:private decryptUsingNextKeys :throws [QuicKeyUnavailableException
+                                                    AEADBadTagException
+                                                    ShortBufferException
+                                                    QuicTransportException] ^void [this
+                                                                                   ^:final ^KeySeries currentKeySeries
+                                                                                   ^:final ^long packetNumber
+                                                                                   ^:final ^ByteBuffer packet
+                                                                                   ^:final ^int headerLength
+                                                                                   ^:final ^ByteBuffer output]
+      (when (nil? (.-next currentKeySeries))
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/finest
+            "next keys unavailable, won't decrypt a packet which appears to be a key update"))
+        (throw (QuicKeyUnavailableException. "next keys unavailable to handle key update"
+                                             (.-keySpace this))))
+      (.decryptPacket (.-readCipher (.-next currentKeySeries))
+                      packetNumber
+                      packet
+                      headerLength
+                      output)
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+        (SSLLogger/finest
+          (java-str
+            "decrypted using next keys for peer-initiated key update; will now switch to new key phase: "
+            (.getKeyPhase (.-readCipher (.-next currentKeySeries))))))
+      (.rolloverKeys this (.-negotiatedVersion this) currentKeySeries))
+
+    (method deriveKeys :throws [IOException] ^void [this ^:final ^QuicVersion negotiatedVersion
+                                                    ^:final ^HandshakeContext handshakeContext
+                                                    ^:final ^boolean clientMode]
+      (Objects/requireNonNull negotiatedVersion)
+      (when (.keysAvailable this)
+        (throw (IllegalStateException.
+                 (java-str "Keys already derived for " (.-keySpace this) " key space"))))
+      (set! (.-negotiatedVersion this) negotiatedVersion)
+      (try
+        (let [kd (.-handshakeKeyDerivation handshakeContext)
+              client_application_traffic_secret_0 (.deriveKey kd "TlsClientAppTrafficSecret")
+              server_application_traffic_secret_0 (.deriveKey kd "TlsServerAppTrafficSecret")]
+          (.deriveOneRttKeys this
+                             (.-negotiatedVersion this)
+                             client_application_traffic_secret_0
+                             server_application_traffic_secret_0
+                             (.-negotiatedCipherSuite handshakeContext)
+                             clientMode))
+        (catch GeneralSecurityException e (throw (SSLException. "Missing cipher algorithm" e)))))
+
+    (method deriveOneRttKeys :throws [IOException GeneralSecurityException] ^void [this
+                                                                                   ^:final ^QuicVersion version
+                                                                                   ^:final ^SecretKey client_application_traffic_secret_0
+                                                                                   ^:final ^SecretKey server_application_traffic_secret_0
+                                                                                   ^:final ^CipherSuite negotiatedCipherSuite
+                                                                                   ^:final ^boolean clientMode]
+      (let [clientKeys (QuicKeyManager/deriveQuicKeys
+                         version
+                         negotiatedCipherSuite
+                         client_application_traffic_secret_0)
+            serverKeys (QuicKeyManager/deriveQuicKeys
+                         version
+                         negotiatedCipherSuite
+                         server_application_traffic_secret_0)
+            ^:mutable ^QuicCipher$QuicReadCipher readCipher nil
+            ^:mutable ^QuicCipher$QuicWriteCipher writeCipher nil
+            ^:const ^int keyPhase 0]
+        (if clientMode
+            (do
+              (set! readCipher
+                    (QuicCipher/createReadCipher
+                      negotiatedCipherSuite
+                      server_application_traffic_secret_0
+                      (.-key serverKeys)
+                      (.-iv serverKeys)
+                      (.-hp serverKeys)
+                      keyPhase))
+              (set! writeCipher
+                    (QuicCipher/createWriteCipher
+                      negotiatedCipherSuite
+                      client_application_traffic_secret_0
+                      (.-key clientKeys)
+                      (.-iv clientKeys)
+                      (.-hp clientKeys)
+                      keyPhase)))
+            (do
+              (set! readCipher
+                    (QuicCipher/createReadCipher
+                      negotiatedCipherSuite
+                      client_application_traffic_secret_0
+                      (.-key clientKeys)
+                      (.-iv clientKeys)
+                      (.-hp clientKeys)
+                      keyPhase))
+              (set! writeCipher
+                    (QuicCipher/createWriteCipher
+                      negotiatedCipherSuite
+                      server_application_traffic_secret_0
+                      (.-key serverKeys)
+                      (.-iv serverKeys)
+                      (.-hp serverKeys)
+                      keyPhase))))
+        (let [nPlus1ReadCipher (OneRttKeyManager/generateNextReadCipher version readCipher)
+              nPlus1WriteCipher (OneRttKeyManager/generateNextWriteCipher version writeCipher)]
+          (.lock (.-keySeriesLock this))
+          (try
+            (when (some? (.-keySeries this))
+              (throw (IllegalStateException.
+                       (java-str "Keys already available for keyspace: " (.-keySpace this)))))
+            (set! (.-keySeries this)
+                  (KeySeries. nil
+                              (CipherPair. readCipher writeCipher)
+                              (CipherPair. nPlus1ReadCipher nPlus1WriteCipher)))
+            (finally (.unlock (.-keySeriesLock this)))))))
+
+    (method ^:private ^:static generateNextWriteCipher :throws [IOException
+                                                                GeneralSecurityException] ^QuicCipher$QuicWriteCipher [^:final ^QuicVersion quicVersion
+                                                                                                                       ^:final ^QuicCipher$QuicWriteCipher current]
+      (let [^SSLKeyDerivation kd (QuicTLSKeyDerivation.
+                                   (.getCipherSuite current)
+                                   (.getBaseSecret current))
+            tlsData (QuicKeyManager/getQuicData quicVersion)
+            nplus1Secret (.deriveKey kd (.getTlsKeyUpdateLabel tlsData))
+            quicKeys (QuicKeyManager/deriveQuicKeys
+                       quicVersion
+                       (.getCipherSuite current)
+                       nplus1Secret
+                       (.getHeaderProtectionKey current))
+            ^int nextKeyPhase (if (== (.getKeyPhase current) 0) 1 0)
+            next (QuicCipher/createWriteCipher (.getCipherSuite current)
+                                               nplus1Secret
+                                               (.-key quicKeys)
+                                               (.-iv quicKeys)
+                                               (.-hp quicKeys)
+                                               nextKeyPhase)]
+        next))
+
+    (method ^:private ^:static generateNextReadCipher :throws [IOException GeneralSecurityException] ^QuicCipher$QuicReadCipher [^:final ^QuicVersion quicVersion
+                                                                                                                                 ^:final ^QuicCipher$QuicReadCipher current]
+      (let [^SSLKeyDerivation kd (QuicTLSKeyDerivation.
+                                   (.getCipherSuite current)
+                                   (.getBaseSecret current))
+            tlsData (QuicKeyManager/getQuicData quicVersion)
+            nPlus1Secret (.deriveKey kd (.getTlsKeyUpdateLabel tlsData))
+            quicKeys (QuicKeyManager/deriveQuicKeys
+                       quicVersion
+                       (.getCipherSuite current)
+                       nPlus1Secret
+                       (.getHeaderProtectionKey current))
+            ^int nextKeyPhase (if (== (.getKeyPhase current) 0) 1 0)
+            next (QuicCipher/createReadCipher (.getCipherSuite current)
+                                              nPlus1Secret
+                                              (.-key quicKeys)
+                                              (.-iv quicKeys)
+                                              (.-hp quicKeys)
+                                              nextKeyPhase)]
+        next))
+
+    (method ^:private generateNextKeys :throws [GeneralSecurityException IOException] ^KeySeries [this
+                                                                                                  ^:final ^QuicVersion version
+                                                                                                  ^:final ^KeySeries currentSeries]
+      (.lock (.-keySeriesLock this))
+      (try
+        (if (not (identical? (.-keySeries this) currentSeries))
+            (.-keySeries this)
+            (let [nPlus1ReadCipher (OneRttKeyManager/generateNextReadCipher
+                                     version
+                                     (.-readCipher (.-current currentSeries)))
+                  nPlus1WriteCipher (OneRttKeyManager/generateNextWriteCipher
+                                      version
+                                      (.-writeCipher (.-current currentSeries)))
+                  newSeries (KeySeries. (.-old currentSeries)
+                                        (.-current currentSeries)
+                                        (CipherPair. nPlus1ReadCipher nPlus1WriteCipher))]
+              (set! (.-keySeries this) newSeries)
+              newSeries))
+        (finally (.unlock (.-keySeriesLock this)))))
+
+    (method ^:private rolloverKeys ^KeySeries [this ^:final ^QuicVersion version
+                                               ^:final ^KeySeries currentSeries]
+      (.lock (.-keySeriesLock this))
+      (try
+        (if (not (identical? (.-keySeries this) currentSeries))
+            (.-keySeries this)
+            (do
+              (java-assert (some? (.-next currentSeries)) "Key series missing next keys")
+              (let [oldReadCipher (.-old currentSeries)
+                    writeCipherToDiscard (.-writeCipher (.-current currentSeries))
+                    newSeries (KeySeries. (.-readCipher (.-current currentSeries))
+                                          (.-next currentSeries)
+                                          nil)]
+                (set! (.-keySeries this) newSeries)
+                (when (some? oldReadCipher)
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                    (SSLLogger/finest
+                      (java-str "discarding old read key of key phase: "
+                                (.getKeyPhase oldReadCipher))))
+                  (.discard oldReadCipher false))
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                  (SSLLogger/finest
+                    (java-str "discarding write key of key phase: "
+                              (.getKeyPhase writeCipherToDiscard))))
+                (.discard writeCipherToDiscard false)
+                newSeries)))
+        (finally (.unlock (.-keySeriesLock this))))))
+
+  (defclass ^:private ^:static ^:final QuicTLSKeyDerivation
+    :implements [SSLKeyDerivation]
+
+    (defclass ^:private ^:enum HkdfLabel
+      (constants
+        (quickey ["quic key"])
+        (quiciv ["quic iv"])
+        (quichp ["quic hp"])
+        (quicku ["quic ku"])
+        (quicv2key ["quicv2 key"])
+        (quicv2iv ["quicv2 iv"])
+        (quicv2hp ["quicv2 hp"])
+        (quicv2ku ["quicv2 ku"]))
+
+      (field ^:private ^:final ^String label)
+
+      (field ^:private ^:final ^byte/1 tls13LabelBytes)
+
+      (constructor [this ^:final ^String label]
+        (Objects/requireNonNull label)
+        (set! (.-label this) label)
+        (set! (.-tls13LabelBytes this) (.getBytes (java-str "tls13 " label) StandardCharsets/UTF_8)))
+
+      (method ^:private ^:static fromLabel ^HkdfLabel [^:final ^String label]
+        (Objects/requireNonNull label)
+        (for-each [^HkdfLabel hkdfLabel (HkdfLabel/values)]
+          (when (.equals (.-label hkdfLabel) label) (return hkdfLabel)))
+        (throw (IllegalArgumentException. (java-str "unrecognized label: " label)))))
+
+    (field ^:private ^:final ^CipherSuite cs)
+
+    (field ^:private ^:final ^SecretKey secret)
+
+    (constructor ^:private [this ^:final ^CipherSuite cs ^:final ^SecretKey secret]
+      (set! (.-cs this) (cast CipherSuite (Objects/requireNonNull cs)))
+      (set! (.-secret this) (cast SecretKey (Objects/requireNonNull secret))))
+
+    (method ^:public deriveKey :throws [IOException] ^SecretKey [this ^:final ^String algorithm]
+      (let [hkdfLabel (HkdfLabel/fromLabel algorithm)]
+        (try
+          (let [hkdf (KDF/getInstance (.-hkdfAlgorithm (.-hashAlg (.-cs this))))
+                keyLength (.getKeyLength this hkdfLabel)
+                hkdfInfo (QuicKeyManager/createHkdfInfo (.-tls13LabelBytes hkdfLabel) keyLength)
+                keyAlgo (.getKeyAlgorithm this hkdfLabel)]
+            (.deriveKey hkdf keyAlgo (HKDFParameterSpec/expandOnly secret hkdfInfo keyLength)))
+          (catch GeneralSecurityException gse
+            (throw (SSLHandshakeException. "Could not derive key" gse))))))
+
+    (method ^:public deriveData :throws [IOException] ^byte/1 [this ^:final ^String algorithm]
+      (let [hkdfLabel (HkdfLabel/fromLabel algorithm)]
+        (try
+          (let [hkdf (KDF/getInstance (.-hkdfAlgorithm (.-hashAlg (.-cs this))))
+                keyLength (.getKeyLength this hkdfLabel)
+                hkdfInfo (QuicKeyManager/createHkdfInfo (.-tls13LabelBytes hkdfLabel) keyLength)]
+            (.deriveData hkdf (HKDFParameterSpec/expandOnly secret hkdfInfo keyLength)))
+          (catch GeneralSecurityException gse
+            (throw (SSLHandshakeException. "Could not derive key" gse))))))
+
+    (method ^:private getKeyLength ^int [this ^:final ^HkdfLabel hkdfLabel]
+      (switch hkdfLabel
+        (quicku quicv2ku) (.-hashLength (.-hashAlg (.-cs this)))
+        (quiciv quicv2iv) (.-ivSize (.-bulkCipher (.-cs this)))
+        (.-keySize (.-bulkCipher (.-cs this)))))
+
+    (method ^:private getKeyAlgorithm ^String [this ^:final ^HkdfLabel hkdfLabel]
+      (switch hkdfLabel
+        (quicku quicv2ku) "TlsUpdateNplus1"
+        (quiciv quicv2iv) (throw (IllegalArgumentException. "IV not expected"))
+        (.-algorithm (.-bulkCipher (.-cs this))))))
+
+  (defclass ^:private ^:enum QuicTLSData
+    (constants
+      (V1 ["38762cf7f55934b34d179ae6a4c80cadccbb7f0a" "be0c690b9f66575a1d766b54e368c84e"
+           "461599d35d632bf2239825bb" "quic key" "quic iv" "quic hp" "quic ku"])
+      (V2 ["0dede3def700a6db819381be6e269dcbf9bd2ed9" "8fb4b01b56ac48e260fbcbcead7ccc92"
+           "d86969bc2d7c6d9990efb04a" "quicv2 key" "quicv2 iv" "quicv2 hp" "quicv2 ku"]))
+
+    (field ^:private ^:final ^byte/1 initialSalt)
+
+    (field ^:private ^:final ^SecretKey retryKey)
+
+    (field ^:private ^:final ^GCMParameterSpec retryIvSpec)
+
+    (field ^:private ^:final ^String keyLabel)
+
+    (field ^:private ^:final ^String ivLabel)
+
+    (field ^:private ^:final ^String hpLabel)
+
+    (field ^:private ^:final ^String kuLabel)
+
+    (constructor [this ^String initialSalt ^String retryKey ^String retryIv ^String keyLabel
+                  ^String ivLabel ^String hpLabel ^String kuLabel]
+      (set! (.-initialSalt this) (.parseHex (HexFormat/of) initialSalt))
+      (set! (.-retryKey this) (SecretKeySpec. (.parseHex (HexFormat/of) retryKey) "AES"))
+      (set! retryIvSpec (GCMParameterSpec. 128 (.parseHex (HexFormat/of) retryIv)))
+      (set! (.-keyLabel this) keyLabel)
+      (set! (.-ivLabel this) ivLabel)
+      (set! (.-hpLabel this) hpLabel)
+      (set! (.-kuLabel this) kuLabel))
+
+    (method ^:public getInitialSalt ^byte/1 [this] initialSalt)
+
+    (method ^:public getRetryCipher :throws [QuicTransportException] ^Cipher [this ^boolean incoming]
+      (let [^:mutable ^Cipher retryCipher nil]
+        (try
+          (set! retryCipher (Cipher/getInstance "AES/GCM/NoPadding"))
+          (.init retryCipher
+                 (if incoming Cipher/DECRYPT_MODE Cipher/ENCRYPT_MODE)
+                 retryKey
+                 retryIvSpec)
+          (catch Exception e
+            (throw (QuicTransportException. "Cipher not available"
+                                            nil
+                                            0
+                                            (unchecked-add
+                                              QuicTLSEngineImpl/BASE_CRYPTO_ERROR
+                                              (.-id Alert/INTERNAL_ERROR))
+                                            e))))
+        retryCipher))
+
+    (method ^:public getTlsKeyLabel ^String [this] keyLabel)
+
+    (method ^:public getTlsIvLabel ^String [this] ivLabel)
+
+    (method ^:public getTlsHpLabel ^String [this] hpLabel)
+
+    (method ^:public getTlsKeyUpdateLabel ^String [this] kuLabel)))

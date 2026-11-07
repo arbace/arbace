@@ -1,0 +1,189 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/rsa/RSACore.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.rsa)
+
+(import '(java.security.interfaces RSAKey RSAPrivateCrtKey RSAPrivateKey RSAPublicKey)
+        '(java.util Arrays Map WeakHashMap)
+        '(java.util.concurrent ConcurrentLinkedQueue)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function Function)
+        '(javax.crypto BadPaddingException)
+        '(sun.security.jca JCAUtil))
+
+(defclass ^:public ^:final RSACore
+  (field ^:private ^:static ^:final ^boolean ENABLE_BLINDING true)
+
+  (field ^:private ^:static ^:final ^{:tag (Map BigInteger (ConcurrentLinkedQueue BlindingParameters))} blindingCache
+    (WeakHashMap.))
+
+  (field ^:private ^:static ^:final ^ReentrantLock lock (ReentrantLock.))
+
+  (constructor ^:private [this])
+
+  (method ^:public ^:static getByteLength ^int [^BigInteger b]
+    (let [n (.bitLength b)] (bit-shift-right-int (unchecked-add-int n 7) 3)))
+
+  (method ^:public ^:static getByteLength ^int [^RSAKey key]
+    (RSACore/getByteLength (.getModulus key)))
+
+  (method ^:public ^:static convert ^byte/1 [^byte/1 b ^int ofs ^int len]
+    (if (and (== ofs 0) (== len (alength b)))
+        b
+        (let [t (new byte/1 len)] (System/arraycopy b ofs t 0 len) t)))
+
+  (method ^:public ^:static rsa :throws [BadPaddingException] ^byte/1 [^byte/1 msg ^RSAPublicKey key]
+    (RSACore/crypt msg (.getModulus key) (.getPublicExponent key)))
+
+  (method ^:public ^:static ^{Deprecated true} rsa :throws [BadPaddingException] ^byte/1 [^byte/1 msg
+                                                                                          ^RSAPrivateKey key]
+    (RSACore/rsa msg key true))
+
+  (method ^:public ^:static rsa :throws [BadPaddingException] ^byte/1 [^byte/1 msg
+                                                                       ^RSAPrivateKey key
+                                                                       ^boolean verify]
+    (if (instance? RSAPrivateCrtKey key)
+        (RSACore/crtCrypt msg (cast RSAPrivateCrtKey key) verify)
+        (RSACore/priCrypt msg (.getModulus key) (.getPrivateExponent key))))
+
+  (method ^:private ^:static crypt :throws [BadPaddingException] ^byte/1 [^byte/1 msg ^BigInteger n
+                                                                          ^BigInteger exp]
+    (let [m (RSACore/parseMsg msg n)
+          c (.modPow m exp n)]
+      (RSACore/toByteArray c (RSACore/getByteLength n))))
+
+  (method ^:private ^:static priCrypt :throws [BadPaddingException] ^byte/1 [^byte/1 msg
+                                                                             ^BigInteger n
+                                                                             ^BigInteger exp]
+    (let [^:mutable c (RSACore/parseMsg msg n)
+          ^:mutable ^BlindingRandomPair brp nil
+          ^:mutable ^BigInteger m nil]
+      (if ENABLE_BLINDING
+          (do
+            (set! brp (RSACore/getBlindingRandomPair nil exp n))
+            (set! c (.mod (.multiply c (.-u brp)) n))
+            (set! m (.modPow c exp n))
+            (set! m (.mod (.multiply m (.-v brp)) n)))
+          (set! m (.modPow c exp n)))
+      (RSACore/toByteArray m (RSACore/getByteLength n))))
+
+  (method ^:private ^:static crtCrypt :throws [BadPaddingException] ^byte/1 [^byte/1 msg
+                                                                             ^RSAPrivateCrtKey key
+                                                                             ^boolean verify]
+    (let [n (.getModulus key)
+          c0 (RSACore/parseMsg msg n)
+          ^:mutable c c0
+          p (.getPrimeP key)
+          q (.getPrimeQ key)
+          dP (.getPrimeExponentP key)
+          dQ (.getPrimeExponentQ key)
+          qInv (.getCrtCoefficient key)
+          e (.getPublicExponent key)
+          d (.getPrivateExponent key)
+          ^:mutable ^BlindingRandomPair brp nil]
+      (when ENABLE_BLINDING
+        (set! brp (RSACore/getBlindingRandomPair e d n))
+        (set! c (.mod (.multiply c (.-u brp)) n)))
+      (let [m1 (.modPow c dP p)
+            m2 (.modPow c dQ q)
+            ^:mutable mtmp (.subtract m1 m2)]
+        (when (< (.signum mtmp) 0) (set! mtmp (.add mtmp p)))
+        (let [h (.mod (.multiply mtmp qInv) p)
+              ^:mutable m (.add (.multiply h q) m2)]
+          (when ENABLE_BLINDING (set! m (.mod (.multiply m (.-v brp)) n)))
+          (when (and verify (not (.equals c0 (.modPow m e n))))
+            (throw (BadPaddingException. "RSA private key operation failed")))
+          (RSACore/toByteArray m (RSACore/getByteLength n))))))
+
+  (method ^:private ^:static parseMsg :throws [BadPaddingException] ^BigInteger [^byte/1 msg
+                                                                                 ^BigInteger n]
+    (let [m (BigInteger. 1 msg)]
+      (when (>= (.compareTo m n) 0) (throw (BadPaddingException. "Message is larger than modulus")))
+      m))
+
+  (method ^:private ^:static toByteArray ^byte/1 [^BigInteger bi ^int len]
+    (let [b (.toByteArray bi)
+          n (alength b)]
+      (cond
+        (== n len) b
+        (and (== n (unchecked-add-int len 1)) (== (aget b 0) 0))
+          (let [t (new byte/1 len)]
+            (System/arraycopy b 1 t 0 len)
+            (Arrays/fill b (unchecked-byte 0))
+            t)
+        :else
+          (do
+            (java-assert (< n len))
+            (let [t (new byte/1 len)]
+              (System/arraycopy b 0 t (unchecked-subtract-int len n) n)
+              (Arrays/fill b (unchecked-byte 0))
+              t)))))
+
+  (defclass ^:private ^:static ^:final BlindingRandomPair
+    (field ^:final ^BigInteger u)
+
+    (field ^:final ^BigInteger v)
+
+    (constructor [this ^BigInteger u ^BigInteger v]
+      (set! (.-u this) u)
+      (set! (.-v this) v)))
+
+  (defclass ^:private ^:static ^:final BlindingParameters
+    (field ^:private ^:static ^:final ^BigInteger BIG_TWO (BigInteger/valueOf 2))
+
+    (field ^:private ^:final ^BigInteger e)
+
+    (field ^:private ^:final ^BigInteger d)
+
+    (field ^:private ^BigInteger u)
+
+    (field ^:private ^BigInteger v)
+
+    (constructor [this ^BigInteger e ^BigInteger d ^BigInteger n]
+      (set! (.-u this) nil)
+      (set! (.-v this) nil)
+      (set! (.-e this) e)
+      (set! (.-d this) d)
+      (let [len (.bitLength n)
+            random (JCAUtil/getSecureRandom)]
+        (set! u (.mod (BigInteger. len random) n))
+        (when (.equals u BigInteger/ZERO) (set! u BigInteger/ONE))
+        (try
+          (set! v (.modInverse u n))
+          (catch ArithmeticException ae (set! u BigInteger/ONE) (set! v BigInteger/ONE)))
+        (if (some? e) (set! u (.modPow u e n)) (set! v (.modPow v d n)))))
+
+    (method getBlindingRandomPair ^BlindingRandomPair [this ^BigInteger e ^BigInteger d
+                                                       ^BigInteger n]
+      (when (or (and (some? (.-e this)) (.equals (.-e this) e))
+                (and (some? (.-d this)) (.equals (.-d this) d)))
+        (let [brp (BlindingRandomPair. u v)]
+          (if (or (<= (.compareTo u BigInteger/ONE) 0) (<= (.compareTo v BigInteger/ONE) 0))
+              (do (set! u BigInteger/ZERO) (set! v BigInteger/ZERO))
+              (do (set! u (.modPow u BIG_TWO n)) (set! v (.modPow v BIG_TWO n))))
+          brp)))
+
+    (method isReusable ^boolean [this]
+      (and (not (.equals u BigInteger/ZERO)) (not (.equals v BigInteger/ZERO)))))
+
+  (method ^:private ^:static getBlindingRandomPair ^BlindingRandomPair [^BigInteger e ^BigInteger d
+                                                                        ^BigInteger n]
+    (let [^:mutable ^{:tag (ConcurrentLinkedQueue BlindingParameters)} queue nil]
+      (.lock lock)
+      (try
+        (set! queue
+              (cast ConcurrentLinkedQueue
+                    (.computeIfAbsent blindingCache
+                                      n
+                                      (lambda Function ^ConcurrentLinkedQueue [^BigInteger ignored]
+                                        (ConcurrentLinkedQueue.)))))
+        (finally (.unlock lock)))
+      (let [^:mutable bps (cast BlindingParameters (.poll queue))]
+        (when (nil? bps) (set! bps (BlindingParameters. e d n)))
+        (let [^:mutable ^BlindingRandomPair brp nil]
+          (while (nil? brp)
+            (set! brp (.getBlindingRandomPair bps e d n))
+            (when (nil? brp)
+              (set! bps (cast BlindingParameters (.poll queue)))
+              (when (nil? bps) (set! bps (BlindingParameters. e d n)))))
+          (when (.isReusable bps) (.add queue bps))
+          brp)))))

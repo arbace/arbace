@@ -1,0 +1,857 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/certpath/RevocationChecker.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider.certpath)
+
+(import '(java.io IOException)
+        '(java.net URI URISyntaxException)
+        '(java.security InvalidAlgorithmParameterException
+                        NoSuchAlgorithmException
+                        PublicKey
+                        Security)
+        '(java.security.cert CRL
+                             CRLException
+                             CRLReason
+                             CertPathBuilder
+                             CertPathBuilderException
+                             CertPathValidatorException
+                             CertPathValidatorException$BasicReason
+                             CertStore
+                             CertStoreException
+                             Certificate
+                             CertificateException
+                             CertificateRevokedException
+                             CollectionCertStoreParameters
+                             Extension
+                             PKIXBuilderParameters
+                             PKIXCertPathBuilderResult
+                             PKIXCertPathChecker
+                             PKIXRevocationChecker
+                             PKIXRevocationChecker$Option
+                             TrustAnchor
+                             X509CRL
+                             X509CRLSelector
+                             X509CertSelector
+                             X509Certificate)
+        '(java.util ArrayList
+                    Arrays
+                    Collection
+                    Collections
+                    HashSet
+                    HexFormat
+                    LinkedList
+                    List
+                    Map
+                    Set)
+        '(java.util.function Predicate)
+        '(javax.security.auth.x500 X500Principal)
+        '(sun.security.util Debug KnownOIDs)
+        '(sun.security.x509 AccessDescription
+                            AuthorityInfoAccessExtension
+                            DistributionPoint
+                            GeneralName
+                            GeneralNames
+                            PKIXExtensions
+                            X500Name
+                            X509CRLEntryImpl
+                            X509CertImpl))
+
+(defclass RevocationChecker
+  :extends PKIXRevocationChecker
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "certpath"))
+
+  (field ^:private ^TrustAnchor anchor)
+
+  (field ^:private ^PKIX$ValidatorParams params)
+
+  (field ^:private ^boolean onlyEE)
+
+  (field ^:private ^boolean softFail)
+
+  (field ^:private ^boolean crlDP)
+
+  (field ^:private ^URI responderURI)
+
+  (field ^:private ^X509Certificate responderCert)
+
+  (field ^:private ^{:tag (List CertStore)} certStores)
+
+  (field ^:private ^{:tag (Map X509Certificate byte/1)} ocspResponses)
+
+  (field ^:private ^{:tag (List Extension)} ocspExtensions)
+
+  (field ^:private ^:final ^boolean legacy)
+
+  (field ^:private ^:final ^{:tag (LinkedList CertPathValidatorException)} softFailExceptions
+    (LinkedList.))
+
+  (field ^:private ^OCSPResponse$IssuerInfo issuerInfo)
+
+  (field ^:private ^PublicKey prevPubKey)
+
+  (field ^:private ^boolean crlSignFlag)
+
+  (field ^:private ^int certIndex)
+
+  (defclass ^:private ^:enum Mode
+    (constants PREFER_OCSP PREFER_CRLS ONLY_CRLS ONLY_OCSP))
+
+  (field ^:private ^Mode mode Mode/PREFER_OCSP)
+
+  (defclass ^:private ^:static RevocationProperties
+    (field ^boolean onlyEE)
+
+    (field ^boolean ocspEnabled)
+
+    (field ^boolean crlDPEnabled)
+
+    (field ^String ocspUrl)
+
+    (field ^String ocspSubject)
+
+    (field ^String ocspIssuer)
+
+    (field ^String ocspSerial)
+
+    (field ^boolean ocspNonce))
+
+  (field ^:private ^RevocationProperties rp)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_NONCE_BYTES 16)
+
+  (constructor [this] (set! legacy false))
+
+  (constructor :throws [CertPathValidatorException] [this ^TrustAnchor anchor
+                                                     ^PKIX$ValidatorParams params]
+    (set! legacy true)
+    (.init this anchor params))
+
+  (method init :throws [CertPathValidatorException] ^void [this ^TrustAnchor anchor
+                                                           ^PKIX$ValidatorParams params]
+    (set! rp (RevocationChecker/getRevocationProperties))
+    (let [uri (.getOcspResponder this)]
+      (set! responderURI (if (nil? uri) (RevocationChecker/toURI (.-ocspUrl rp)) uri))
+      (let [cert (.getOcspResponderCert this)]
+        (set! responderCert
+              (if (nil? cert)
+                  (RevocationChecker/getResponderCert
+                    rp
+                    (.trustAnchors params)
+                    (.certStores params))
+                  cert))
+        (let [^{:tag (Set PKIXRevocationChecker$Option)} options (.getOptions this)]
+          (for-each [^PKIXRevocationChecker$Option option options]
+            (switch option
+              (ONLY_END_ENTITY PREFER_CRLS SOFT_FAIL NO_FALLBACK) nil
+              (throw (CertPathValidatorException.
+                       (java-str "Unrecognized revocation parameter option: " option)))))
+          (set! softFail (.contains options PKIXRevocationChecker$Option/SOFT_FAIL))
+          (if legacy
+              (do
+                (set! mode (if (.-ocspEnabled rp) Mode/PREFER_OCSP Mode/ONLY_CRLS))
+                (set! onlyEE (.-onlyEE rp)))
+              (do
+                (cond
+                  (.contains options PKIXRevocationChecker$Option/NO_FALLBACK)
+                    (if (.contains options PKIXRevocationChecker$Option/PREFER_CRLS)
+                        (set! mode Mode/ONLY_CRLS)
+                        (set! mode Mode/ONLY_OCSP))
+                  (.contains options PKIXRevocationChecker$Option/PREFER_CRLS)
+                    (set! mode Mode/PREFER_CRLS))
+                (set! onlyEE (.contains options PKIXRevocationChecker$Option/ONLY_END_ENTITY))))
+          (if legacy (set! crlDP (.-crlDPEnabled rp)) (set! crlDP true))
+          (set! ocspResponses (.getOcspResponses this))
+          (set! ocspExtensions (.getOcspExtensions this))
+          (set! (.-anchor this) anchor)
+          (set! (.-params this) params)
+          (set! (.-certStores this) (ArrayList. (.certStores params)))
+          (try
+            (.add (.-certStores this)
+                  (CertStore/getInstance "Collection"
+                                         (CollectionCertStoreParameters. (.certificates params))))
+            (catch [InvalidAlgorithmParameterException NoSuchAlgorithmException] e
+              (when (some? debug)
+                (.println debug
+                          (java-str "RevocationChecker: error creating Collection CertStore: " e)))))))))
+
+  (method ^:private ^:static toURI :throws [CertPathValidatorException] ^URI [^String uriString]
+    (try
+      (when (some? uriString) (URI. uriString))
+      (catch URISyntaxException e
+        (throw (CertPathValidatorException. "cannot parse ocsp.responderURL property" e)))))
+
+  (method ^:private ^:static getRevocationProperties ^RevocationProperties []
+    (let [rp (RevocationProperties.)
+          onlyEE (Security/getProperty "com.sun.security.onlyCheckRevocationOfEECert")]
+      (set! (.-onlyEE rp) (and (some? onlyEE) (.equalsIgnoreCase onlyEE "true")))
+      (let [ocspEnabled (Security/getProperty "ocsp.enable")]
+        (set! (.-ocspEnabled rp) (and (some? ocspEnabled) (.equalsIgnoreCase ocspEnabled "true")))
+        (set! (.-ocspUrl rp) (Security/getProperty "ocsp.responderURL"))
+        (set! (.-ocspSubject rp) (Security/getProperty "ocsp.responderCertSubjectName"))
+        (set! (.-ocspIssuer rp) (Security/getProperty "ocsp.responderCertIssuerName"))
+        (set! (.-ocspSerial rp) (Security/getProperty "ocsp.responderCertSerialNumber"))
+        (set! (.-crlDPEnabled rp) (Boolean/getBoolean "com.sun.security.enableCRLDP"))
+        (set! (.-ocspNonce rp) (Boolean/getBoolean "jdk.security.certpath.ocspNonce"))
+        rp)))
+
+  (method ^:private ^:static getResponderCert :throws [CertPathValidatorException] ^X509Certificate [^RevocationProperties rp
+                                                                                                     ^{:tag (Set TrustAnchor)} anchors
+                                                                                                     ^{:tag (List CertStore)} stores]
+    (cond
+      (some? (.-ocspSubject rp))
+        (RevocationChecker/getResponderCert (.-ocspSubject rp) anchors stores)
+      (and (some? (.-ocspIssuer rp)) (some? (.-ocspSerial rp)))
+        (RevocationChecker/getResponderCert (.-ocspIssuer rp) (.-ocspSerial rp) anchors stores)
+      :else
+        (do
+          (when (or (some? (.-ocspIssuer rp)) (some? (.-ocspSerial rp)))
+            (throw
+              (CertPathValidatorException.
+                "Must specify both ocsp.responderCertIssuerName and ocsp.responderCertSerialNumber properties")))
+          nil)))
+
+  (method ^:private ^:static getResponderCert :throws [CertPathValidatorException] ^X509Certificate [^String subject
+                                                                                                     ^{:tag (Set TrustAnchor)} anchors
+                                                                                                     ^{:tag (List CertStore)} stores]
+    (let [sel (X509CertSelector.)]
+      (try
+        (.setSubject sel (X500Principal. subject))
+        (catch IllegalArgumentException e
+          (throw (CertPathValidatorException. "cannot parse ocsp.responderCertSubjectName property"
+                                              e))))
+      (RevocationChecker/getResponderCert sel anchors stores)))
+
+  (method ^:private ^:static getResponderCert :throws [CertPathValidatorException] ^X509Certificate [^String issuer
+                                                                                                     ^String serial
+                                                                                                     ^{:tag (Set TrustAnchor)} anchors
+                                                                                                     ^{:tag (List CertStore)} stores]
+    (let [sel (X509CertSelector.)]
+      (try
+        (.setIssuer sel (X500Principal. issuer))
+        (catch IllegalArgumentException e
+          (throw (CertPathValidatorException. "cannot parse ocsp.responderCertIssuerName property"
+                                              e))))
+      (try
+        (.setSerialNumber sel (BigInteger. (RevocationChecker/stripOutSeparators serial) 16))
+        (catch NumberFormatException e
+          (throw (CertPathValidatorException. "cannot parse ocsp.responderCertSerialNumber property"
+                                              e))))
+      (RevocationChecker/getResponderCert sel anchors stores)))
+
+  (method ^:private ^:static getResponderCert :throws [CertPathValidatorException] ^X509Certificate [^X509CertSelector sel
+                                                                                                     ^{:tag (Set TrustAnchor)} anchors
+                                                                                                     ^{:tag (List CertStore)} stores]
+    (for-each [^TrustAnchor anchor anchors]
+      (let [cert (.getTrustedCert anchor)]
+        (when (some? cert) (when (.match sel cert) (return cert)))))
+    (for-each [^CertStore store stores]
+      (try
+        (let [^{:tag (Collection (? extends Certificate))} certs (.getCertificates store sel)]
+          (when-not (.isEmpty certs) (return (cast X509Certificate (.next (.iterator certs))))))
+        (catch CertStoreException e
+          (when (some? debug) (.println debug (java-str "CertStore exception:" e))))))
+    (throw (CertPathValidatorException.
+             "Cannot find the responder's certificate (set using the OCSP security properties).")))
+
+  (method ^:public init :throws [CertPathValidatorException] ^void [this ^boolean forward]
+    (when forward (throw (CertPathValidatorException. "forward checking not supported")))
+    (when (some? anchor)
+      (set! issuerInfo (OCSPResponse$IssuerInfo. anchor))
+      (set! prevPubKey (.getPublicKey issuerInfo)))
+    (set! crlSignFlag true)
+    (if (and (some? params) (some? (.certPath params)))
+        (set! certIndex (unchecked-subtract-int (.size (.getCertificates (.certPath params))) 1))
+        (set! certIndex -1))
+    (.clear softFailExceptions))
+
+  (method ^:public isForwardCheckingSupported ^boolean [this] false)
+
+  (method ^:public getSupportedExtensions ^{:tag (Set String)} [this] nil)
+
+  (method ^:public getSoftFailExceptions ^{:tag (List CertPathValidatorException)} [this]
+    (Collections/unmodifiableList softFailExceptions))
+
+  (method ^:public check :throws [CertPathValidatorException] ^void [this ^Certificate cert
+                                                                     ^{:tag (Collection String)} unresolvedCritExts]
+    (.check this (cast X509Certificate cert) unresolvedCritExts prevPubKey crlSignFlag))
+
+  (method ^:private check :throws [CertPathValidatorException] ^void [this ^X509Certificate xcert
+                                                                      ^{:tag (Collection String)} unresolvedCritExts
+                                                                      ^PublicKey pubKey
+                                                                      ^boolean crlSignFlag]
+    (when (some? debug)
+      (.println debug
+                (java-str "RevocationChecker.check: checking cert\n  SN: "
+                          (Debug/toString (.getSerialNumber xcert))
+                          "\n  Subject: "
+                          (.getSubjectX500Principal xcert)
+                          "\n  Issuer: "
+                          (.getIssuerX500Principal xcert))))
+    (try
+      (if (and onlyEE (not (== (.getBasicConstraints xcert) -1)))
+          (when (some? debug)
+            (.println debug "Skipping revocation check; cert is not an end entity cert"))
+          (switch mode
+            (PREFER_OCSP ONLY_OCSP) (.checkOCSP this xcert unresolvedCritExts)
+            (PREFER_CRLS ONLY_CRLS)
+              (.checkCRLs this xcert unresolvedCritExts nil pubKey crlSignFlag)))
+      (catch CertPathValidatorException e
+        (when (identical? (.getReason e) CertPathValidatorException$BasicReason/REVOKED) (throw e))
+        (let [eSoftFail (.isSoftFailException this e)]
+          (cond
+            eSoftFail
+              (when (or (identical? mode Mode/ONLY_OCSP) (identical? mode Mode/ONLY_CRLS)) (return))
+            (or (identical? mode Mode/ONLY_OCSP) (identical? mode Mode/ONLY_CRLS)) (throw e))
+          (when (some? debug)
+            (.println debug (java-str "RevocationChecker.check() " (.getMessage e)))
+            (.println debug "RevocationChecker.check() preparing to failover"))
+          (try
+            (switch mode
+              PREFER_OCSP (.checkCRLs this xcert unresolvedCritExts nil pubKey crlSignFlag)
+              PREFER_CRLS (.checkOCSP this xcert unresolvedCritExts))
+            (catch CertPathValidatorException x
+              (when (some? debug)
+                (.println debug "RevocationChecker.check() failover failed")
+                (.println debug (java-str "RevocationChecker.check() " (.getMessage x))))
+              (when (identical? (.getReason x) CertPathValidatorException$BasicReason/REVOKED)
+                (throw x))
+              (if (not (.isSoftFailException this x))
+                  (do (.addSuppressed e x) (throw e))
+                  (when-not eSoftFail (throw e)))))))
+      (finally (.updateState this xcert))))
+
+  (method ^:private isSoftFailException ^boolean [this ^CertPathValidatorException e]
+    (if (and softFail
+             (identical? (.getReason e)
+                         CertPathValidatorException$BasicReason/UNDETERMINED_REVOCATION_STATUS))
+        (let [e2 (CertPathValidatorException. (.getMessage e)
+                                              (.getCause e)
+                                              (.certPath params)
+                                              certIndex
+                                              (.getReason e))]
+          (.addFirst softFailExceptions e2)
+          true)
+        false))
+
+  (method ^:private updateState :throws [CertPathValidatorException] ^void [this
+                                                                            ^X509Certificate cert]
+    (set! issuerInfo (OCSPResponse$IssuerInfo. anchor cert))
+    (let [^:mutable pubKey (.getPublicKey cert)]
+      (when (PKIX/isDSAPublicKeyWithoutParams pubKey)
+        (set! pubKey (BasicChecker/makeInheritedParamsKey pubKey prevPubKey)))
+      (set! prevPubKey pubKey)
+      (set! crlSignFlag (RevocationChecker/certCanSignCrl cert))
+      (when (> certIndex 0) (set! certIndex (unchecked-dec-int certIndex)))))
+
+  (field ^:private ^:static ^:final ^long MAX_CLOCK_SKEW 900000)
+
+  (method ^:private checkCRLs :throws [CertPathValidatorException] ^void [this ^X509Certificate cert
+                                                                          ^{:tag (Collection String)} unresolvedCritExts
+                                                                          ^{:tag (Set X509Certificate)} stackedCerts
+                                                                          ^PublicKey pubKey
+                                                                          ^boolean signFlag]
+    (.checkCRLs this cert pubKey nil signFlag true stackedCerts (.trustAnchors params)))
+
+  (method ^:static isCausedByNetworkIssue ^boolean [^String type ^CertStoreException cse]
+    (let [^:mutable ^boolean result false
+          t (.getCause cse)]
+      (switch type
+        "LDAP"
+          (if (some? t)
+              (let [cn (.getName (.getClass t))]
+                (set! result
+                      (or (.equals cn "javax.naming.ServiceUnavailableException")
+                          (.equals cn "javax.naming.CommunicationException"))))
+              (set! result false))
+        ("SSLServer" "URI") (set! result (instance? IOException t))
+        (return false))
+      result))
+
+  (method ^:private checkCRLs :throws [CertPathValidatorException] ^void [this ^X509Certificate cert
+                                                                          ^PublicKey prevKey
+                                                                          ^X509Certificate prevCert
+                                                                          ^boolean signFlag
+                                                                          ^boolean allowSeparateKey
+                                                                          ^{:tag (Set X509Certificate)} stackedCerts
+                                                                          ^{:tag (Set TrustAnchor)} anchors]
+    (when (some? debug)
+      (.println debug "RevocationChecker.checkCRLs() ---checking revocation status ..."))
+    (when (and (some? stackedCerts) (.contains stackedCerts cert))
+      (when (some? debug) (.println debug "RevocationChecker.checkCRLs() circular dependency"))
+      (throw (CertPathValidatorException.
+               "Could not determine revocation status"
+               nil
+               nil
+               -1
+               CertPathValidatorException$BasicReason/UNDETERMINED_REVOCATION_STATUS)))
+    (let [^{:tag (Set X509CRL)} possibleCRLs (HashSet.)
+          ^{:tag (Set X509CRL)} approvedCRLs (HashSet.)
+          sel (X509CRLSelector.)]
+      (.setCertificateChecking sel cert)
+      (CertPathHelper/setDateAndTime sel (.date params) MAX_CLOCK_SKEW)
+      (let [^:mutable ^CertPathValidatorException networkFailureException nil]
+        (for-each [^CertStore store certStores]
+          (try
+            (for-each [^CRL crl (.getCRLs store sel)] (.add possibleCRLs (cast X509CRL crl)))
+            (catch CertStoreException e
+              (when (some? debug)
+                (.println debug
+                          (java-str "RevocationChecker.checkCRLs() CertStoreException: "
+                                    (.getMessage e))))
+              (when (and (nil? networkFailureException)
+                         (RevocationChecker/isCausedByNetworkIssue (.getType store) e))
+                (set! networkFailureException
+                      (CertPathValidatorException.
+                        "Unable to determine revocation status due to network error"
+                        e
+                        nil
+                        -1
+                        CertPathValidatorException$BasicReason/UNDETERMINED_REVOCATION_STATUS))))))
+        (when (some? debug)
+          (.println debug
+                    (java-str "RevocationChecker.checkCRLs() possible crls.size() = "
+                              (.size possibleCRLs))))
+        (let [reasonsMask (new boolean/1 9)]
+          (when-not (.isEmpty possibleCRLs)
+            (.addAll approvedCRLs
+                     (.verifyPossibleCRLs this
+                                          possibleCRLs
+                                          cert
+                                          prevKey
+                                          signFlag
+                                          reasonsMask
+                                          anchors)))
+          (when (some? debug)
+            (.println debug
+                      (java-str "RevocationChecker.checkCRLs() approved crls.size() = "
+                                (.size approvedCRLs))))
+          (if (and (not (.isEmpty approvedCRLs)) (Arrays/equals reasonsMask ALL_REASONS))
+              (.checkApprovedCRLs this cert approvedCRLs)
+              (do
+                (try
+                  (when crlDP
+                    (.addAll approvedCRLs
+                             (DistributionPointFetcher/getCRLs
+                               sel
+                               signFlag
+                               prevKey
+                               prevCert
+                               (.sigProvider params)
+                               certStores
+                               reasonsMask
+                               anchors
+                               nil
+                               (.variant params)
+                               anchor)))
+                  (catch CertStoreException e
+                    (when-instance [^PKIX$CertStoreTypeException cste e]
+                      (when (RevocationChecker/isCausedByNetworkIssue (.getType cste) e)
+                        (throw
+                          (CertPathValidatorException.
+                            "Unable to determine revocation status due to network error"
+                            e
+                            nil
+                            -1
+                            CertPathValidatorException$BasicReason/UNDETERMINED_REVOCATION_STATUS))))
+                    (throw (CertPathValidatorException. e))))
+                (cond
+                  (and (not (.isEmpty approvedCRLs)) (Arrays/equals reasonsMask ALL_REASONS))
+                    (.checkApprovedCRLs this cert approvedCRLs)
+                  allowSeparateKey
+                    (try
+                      (.verifyWithSeparateSigningKey this cert prevKey signFlag stackedCerts)
+                      (catch CertPathValidatorException cpve
+                        (when (some? networkFailureException) (throw networkFailureException))
+                        (throw cpve)))
+                  :else
+                    (do
+                      (when (some? networkFailureException) (throw networkFailureException))
+                      (throw
+                        (CertPathValidatorException.
+                          "Could not determine revocation status"
+                          nil
+                          nil
+                          -1
+                          CertPathValidatorException$BasicReason/UNDETERMINED_REVOCATION_STATUS))))))))))
+
+  (method ^:private checkApprovedCRLs :throws [CertPathValidatorException] ^void [this
+                                                                                  ^X509Certificate cert
+                                                                                  ^{:tag (Set X509CRL)} approvedCRLs]
+    (when (some? debug)
+      (let [sn (.getSerialNumber cert)]
+        (.println debug "RevocationChecker.checkApprovedCRLs() starting the final sweep...")
+        (.println debug
+                  (java-str "RevocationChecker.checkApprovedCRLs() cert SN: " (Debug/toString sn)))))
+    (let [^:mutable reasonCode CRLReason/UNSPECIFIED
+          ^:mutable ^X509CRLEntryImpl entry nil]
+      (for-each [^X509CRL crl approvedCRLs]
+        (let [e (.getRevokedCertificate crl cert)]
+          (when (some? e)
+            (try
+              (set! entry (X509CRLEntryImpl/toImpl e))
+              (catch CRLException ce (throw (CertPathValidatorException. ce))))
+            (when (some? debug)
+              (.println debug
+                        (java-str "RevocationChecker.checkApprovedCRLs() CRL entry: "
+                                  (.toString entry))))
+            (let [^{:tag (Set String)} unresCritExts (.getCriticalExtensionOIDs entry)]
+              (when (and (some? unresCritExts) (not (.isEmpty unresCritExts)))
+                (.remove unresCritExts (.toString PKIXExtensions/ReasonCode_Id))
+                (.remove unresCritExts (.toString PKIXExtensions/CertificateIssuer_Id))
+                (when-not (.isEmpty unresCritExts)
+                  (throw (CertPathValidatorException.
+                           "Unrecognized critical extension(s) in revoked CRL entry"))))
+              (set! reasonCode (.getRevocationReason entry))
+              (when (nil? reasonCode) (set! reasonCode CRLReason/UNSPECIFIED))
+              (let [revocationDate (.getRevocationDate entry)]
+                (when (.before revocationDate (.date params))
+                  (let [^Throwable t (CertificateRevokedException.
+                                       revocationDate
+                                       reasonCode
+                                       (.getIssuerX500Principal crl)
+                                       (.getExtensions entry))]
+                    (throw (CertPathValidatorException.
+                             (.getMessage t)
+                             t
+                             nil
+                             -1
+                             CertPathValidatorException$BasicReason/REVOKED)))))))))))
+
+  (method ^:private checkOCSP :throws [CertPathValidatorException] ^void [this ^X509Certificate cert
+                                                                          ^{:tag (Collection String)} unresolvedCritExts]
+    (let [^:mutable ^X509CertImpl currCert nil]
+      (try
+        (set! currCert (X509CertImpl/toImpl cert))
+        (catch CertificateException ce (throw (CertPathValidatorException. ce))))
+      (let [^:mutable ^OCSPResponse response nil
+            ^:mutable ^CertId certId nil]
+        (try
+          (set! certId
+                (CertId. (.getName issuerInfo)
+                         (.getPublicKey issuerInfo)
+                         (.getSerialNumberObject currCert)))
+          (let [^:mutable ^byte/1 nonce nil]
+            (for-each [^Extension ext ocspExtensions]
+              (when (.equals (.getId ext) (.value KnownOIDs/OCSPNonceExt))
+                (set! nonce (.getValue ext))))
+            (let [responseBytes (cast byte/1 (.get ocspResponses cert))]
+              (if (some? responseBytes)
+                  (do
+                    (when (some? debug) (.println debug "Found cached OCSP response"))
+                    (set! response (OCSPResponse. responseBytes))
+                    (.verify response
+                             (Collections/singletonList certId)
+                             issuerInfo
+                             responderCert
+                             (.date params)
+                             nonce
+                             (.variant params)))
+                  (let [^URI responderURI (if (some? (.-responderURI this))
+                                              (.-responderURI this)
+                                              (OCSP/getResponderURI currCert))]
+                    (when (nil? responderURI)
+                      (throw (CertPathValidatorException.
+                               "Certificate does not specify OCSP responder"
+                               nil
+                               nil
+                               -1)))
+                    (let [^:mutable ^{:tag (List Extension)} tmpExtensions nil]
+                      (cond
+                        (.-ocspNonce rp)
+                          (if (nil? nonce)
+                              (try
+                                (let [^Extension nonceExt (OCSPNonceExtension. DEFAULT_NONCE_BYTES)]
+                                  (if (> (.size ocspExtensions) 0)
+                                      (do
+                                        (set! tmpExtensions (ArrayList. ocspExtensions))
+                                        (.add tmpExtensions nonceExt))
+                                      (set! tmpExtensions (List/of nonceExt)))
+                                  (when (some? debug)
+                                    (.println
+                                      debug
+                                      "Default nonce has been created in the OCSP extensions")))
+                                (catch IOException e
+                                  (throw (CertPathValidatorException.
+                                           "Failed to create the default nonce in OCSP extensions"
+                                           e))))
+                              (throw
+                                (CertPathValidatorException.
+                                  "Application provided nonce cannot be used if the value of the jdk.security.certpath.ocspNonce system property is true")))
+                        (some? nonce)
+                          (when (some? debug) (.println debug "Using application provided nonce")))
+                      (set! response
+                            (OCSP/check (Collections/singletonList certId)
+                                        responderURI
+                                        issuerInfo
+                                        responderCert
+                                        nil
+                                        ^List (if (.-ocspNonce rp) tmpExtensions ocspExtensions)
+                                        (.variant params))))))))
+          (catch IOException e
+            (throw (CertPathValidatorException.
+                     "Unable to determine revocation status due to network error"
+                     e
+                     nil
+                     -1
+                     CertPathValidatorException$BasicReason/UNDETERMINED_REVOCATION_STATUS))))
+        (let [^OCSP$RevocationStatus rs (.getSingleResponse response certId)
+              certStatus (.getCertStatus rs)]
+          (cond
+            (identical? certStatus OCSP$RevocationStatus$CertStatus/REVOKED)
+              (let [revocationTime (.getRevocationTime rs)]
+                (when (.before revocationTime (.date params))
+                  (let [^Throwable t (CertificateRevokedException.
+                                       revocationTime
+                                       (.getRevocationReason rs)
+                                       (.getSubjectX500Principal (.getSignerCertificate response))
+                                       (.getSingleExtensions rs))]
+                    (throw (CertPathValidatorException.
+                             (.getMessage t)
+                             t
+                             nil
+                             -1
+                             CertPathValidatorException$BasicReason/REVOKED)))))
+            (identical? certStatus OCSP$RevocationStatus$CertStatus/UNKNOWN)
+              (throw (CertPathValidatorException.
+                       "Certificate's revocation status is unknown"
+                       nil
+                       (.certPath params)
+                       -1
+                       CertPathValidatorException$BasicReason/UNDETERMINED_REVOCATION_STATUS)))))))
+
+  (method ^:private ^:static stripOutSeparators ^String [^String value]
+    (let [chars (.toCharArray value)
+          hexNumber (StringBuilder.)]
+      (loop [^int i 0]
+        (if (< i (alength chars))
+            (if (HexFormat/isHexDigit (aget chars i))
+                (do (.append hexNumber (aget chars i)) (recur (unchecked-inc-int i)))
+                (recur (unchecked-inc-int i)))
+            nil))
+      (.toString hexNumber)))
+
+  (method ^:static certCanSignCrl ^boolean [^X509Certificate cert]
+    (let [keyUsage (.getKeyUsage cert)] (if (some? keyUsage) (aget keyUsage 6) false)))
+
+  (field ^:private ^:static ^:final ^boolean/1 ALL_REASONS
+    (new boolean/1 [true true true true true true true true true]))
+
+  (method ^:private verifyPossibleCRLs ^{:tag (Collection X509CRL)} [this ^{:tag (Set X509CRL)} crls
+                                                                     ^X509Certificate cert
+                                                                     ^PublicKey prevKey
+                                                                     ^boolean signFlag
+                                                                     ^boolean/1 reasonsMask
+                                                                     ^{:tag (Set TrustAnchor)} anchors]
+    (try
+      (let [certImpl (X509CertImpl/toImpl cert)]
+        (when (some? debug)
+          (.println debug
+                    (java-str "RevocationChecker.verifyPossibleCRLs: Checking CRLDPs for "
+                              (.getSubjectX500Principal certImpl))))
+        (let [ext (.getCRLDistributionPointsExtension certImpl)
+              ^:mutable ^{:tag (List DistributionPoint)} points nil]
+          (if (nil? ext)
+              (let [certIssuer (cast X500Name (.getIssuerDN certImpl))
+                    point (DistributionPoint. (.add (GeneralNames.) (GeneralName. certIssuer))
+                                              nil
+                                              nil)]
+                (set! points (Collections/singletonList point)))
+              (set! points (.getDistributionPoints ext)))
+          (let [^{:tag (Set X509CRL)} results (HashSet.)]
+            (for-each [^DistributionPoint point points]
+              (for-each [^X509CRL crl crls]
+                (when (DistributionPointFetcher/verifyCRL
+                        certImpl
+                        point
+                        crl
+                        reasonsMask
+                        signFlag
+                        prevKey
+                        nil
+                        (.sigProvider params)
+                        anchors
+                        certStores
+                        (.date params)
+                        (.variant params)
+                        anchor)
+                  (.add results crl)))
+              (when (Arrays/equals reasonsMask ALL_REASONS) (break)))
+            results)))
+      (catch [CertificateException CRLException IOException] e
+        (when (some? debug)
+          (.println debug (java-str "Exception while verifying CRL: " (.getMessage e)))
+          (.printStackTrace e))
+        (Collections/emptySet))))
+
+  (method ^:private verifyWithSeparateSigningKey :throws [CertPathValidatorException] ^void [this
+                                                                                             ^X509Certificate cert
+                                                                                             ^PublicKey prevKey
+                                                                                             ^boolean signFlag
+                                                                                             ^{:tag (Set X509Certificate)} stackedCerts]
+    (let [msg "revocation status"]
+      (when (some? debug)
+        (.println debug
+                  (java-str "RevocationChecker.verifyWithSeparateSigningKey() ---checking "
+                            msg
+                            "...")))
+      (when (and (some? stackedCerts) (.contains stackedCerts cert))
+        (when (some? debug)
+          (.println debug "RevocationChecker.verifyWithSeparateSigningKey() circular dependency"))
+        (throw (CertPathValidatorException.
+                 "Could not determine revocation status"
+                 nil
+                 nil
+                 -1
+                 CertPathValidatorException$BasicReason/UNDETERMINED_REVOCATION_STATUS)))
+      (if (not signFlag)
+          (.buildToNewKey this cert nil stackedCerts)
+          (.buildToNewKey this cert prevKey stackedCerts))))
+
+  (field ^:private ^:static ^:final ^boolean/1 CRL_SIGN_USAGE
+    (new boolean/1 [false false false false false false true]))
+
+  (method ^:private buildToNewKey :throws [CertPathValidatorException] ^void [this
+                                                                              ^X509Certificate currCert
+                                                                              ^PublicKey prevKey
+                                                                              ^:mutable ^{:tag (Set X509Certificate)} stackedCerts]
+    (when (some? debug) (.println debug "RevocationChecker.buildToNewKey() starting work"))
+    (let [^{:tag (Set PublicKey)} badKeys (HashSet.)]
+      (when (some? prevKey) (.add badKeys prevKey))
+      (let [^X509CertSelector certSel (RejectKeySelector. badKeys)]
+        (.setSubject certSel (.getIssuerX500Principal currCert))
+        (.setKeyUsage certSel CRL_SIGN_USAGE)
+        (let [^{:tag (Set TrustAnchor)} newAnchors (if (nil? anchor)
+                                                       (.trustAnchors params)
+                                                       (Collections/singleton anchor))
+              ^:mutable ^PKIXBuilderParameters builderParams nil]
+          (try
+            (set! builderParams (PKIXBuilderParameters. newAnchors certSel))
+            (catch InvalidAlgorithmParameterException iape (throw (RuntimeException. iape))))
+          (.setInitialPolicies builderParams (.initialPolicies params))
+          (.setCertStores builderParams certStores)
+          (.setExplicitPolicyRequired builderParams (.explicitPolicyRequired params))
+          (.setPolicyMappingInhibited builderParams (.policyMappingInhibited params))
+          (.setAnyPolicyInhibited builderParams (.anyPolicyInhibited params))
+          (.setDate builderParams (.date params))
+          (.setSigProvider builderParams (.sigProvider params))
+          (.setRevocationEnabled builderParams false)
+          (.setCertPathCheckers builderParams
+                                (.toList (.filter
+                                           (.stream (.certPathCheckers params))
+                                           (lambda Predicate ^boolean [^PKIXCertPathChecker checker]
+                                             (not (identical? checker this))))))
+          (when Builder/USE_AIA
+            (let [^:mutable ^X509CertImpl currCertImpl nil]
+              (try
+                (set! currCertImpl (X509CertImpl/toImpl currCert))
+                (catch CertificateException ce
+                  (when (some? debug)
+                    (.println
+                      debug
+                      (java-str "RevocationChecker.buildToNewKey: error decoding cert: " ce)))))
+              (let [^:mutable ^AuthorityInfoAccessExtension aiaExt nil]
+                (when (some? currCertImpl)
+                  (set! aiaExt (.getAuthorityInfoAccessExtension currCertImpl)))
+                (when (some? aiaExt)
+                  (let [^{:tag (List AccessDescription)} adList (.getAccessDescriptions aiaExt)]
+                    (when (some? adList)
+                      (for-each [^AccessDescription ad adList]
+                        (let [cs (URICertStore/getInstance ad)]
+                          (when (some? cs)
+                            (when (some? debug) (.println debug "adding AIAext CertStore"))
+                            (.addCertStore builderParams cs))))))))))
+          (let [^:mutable ^CertPathBuilder builder nil]
+            (try
+              (set! builder (CertPathBuilder/getInstance "PKIX"))
+              (catch NoSuchAlgorithmException nsae (throw (CertPathValidatorException. nsae))))
+            (while true
+              (try
+                (when (some? debug)
+                  (.println debug "RevocationChecker.buildToNewKey() about to try build ..."))
+                (let [cpbr (cast PKIXCertPathBuilderResult (.build builder builderParams))]
+                  (when (some? debug)
+                    (.println debug
+                              "RevocationChecker.buildToNewKey() about to check revocation ..."))
+                  (when (nil? stackedCerts) (set! stackedCerts (HashSet.)))
+                  (.add stackedCerts currCert)
+                  (let [ta (.getTrustAnchor cpbr)
+                        ^:mutable prevKey2 (.getCAPublicKey ta)]
+                    (when (nil? prevKey2) (set! prevKey2 (.getPublicKey (.getTrustedCert ta))))
+                    (let [^:mutable signFlag true
+                          ^{:tag (List (? extends Certificate))} cpList (.getCertificates
+                                                                          (.getCertPath cpbr))]
+                      (try
+                        (loop [^int i (unchecked-subtract-int (.size cpList) 1)]
+                          (when (>= i 0)
+                            (let [cert (cast X509Certificate (.get cpList i))]
+                              (when (some? debug)
+                                (.println debug
+                                          (java-str
+                                            "RevocationChecker.buildToNewKey() index "
+                                            i
+                                            " checking "
+                                            cert)))
+                              (.checkCRLs this
+                                          cert
+                                          prevKey2
+                                          nil
+                                          signFlag
+                                          true
+                                          stackedCerts
+                                          newAnchors)
+                              (set! signFlag (RevocationChecker/certCanSignCrl cert))
+                              (set! prevKey2 (.getPublicKey cert))
+                              (recur (unchecked-dec-int i)))))
+                        (catch CertPathValidatorException cpve
+                          (.add badKeys (.getPublicKey cpbr))
+                          (continue)))
+                      (when (some? debug)
+                        (.println debug
+                                  (java-str "RevocationChecker.buildToNewKey() got key "
+                                            (.getPublicKey cpbr))))
+                      (let [newKey (.getPublicKey cpbr)
+                            ^X509Certificate newCert (when-not (.isEmpty cpList)
+                                                       (cast X509Certificate (.get cpList 0)))]
+                        (try
+                          (.checkCRLs this
+                                      currCert
+                                      newKey
+                                      newCert
+                                      true
+                                      false
+                                      nil
+                                      (.trustAnchors params))
+                          (return)
+                          (catch CertPathValidatorException cpve
+                            (when (identical? (.getReason cpve)
+                                              CertPathValidatorException$BasicReason/REVOKED)
+                              (throw cpve))))
+                        (.add badKeys newKey)))))
+                (catch InvalidAlgorithmParameterException iape
+                  (throw (CertPathValidatorException. iape)))
+                (catch CertPathBuilderException cpbe
+                  (throw (CertPathValidatorException.
+                           "Could not determine revocation status"
+                           nil
+                           nil
+                           -1
+                           CertPathValidatorException$BasicReason/UNDETERMINED_REVOCATION_STATUS))))))))))
+
+  (defclass ^:private ^:static RejectKeySelector
+    :extends X509CertSelector
+
+    (field ^:private ^:final ^{:tag (Set PublicKey)} badKeySet)
+
+    (constructor [this ^{:tag (Set PublicKey)} badPublicKeys]
+      (set! (.-badKeySet this) badPublicKeys))
+
+    (method ^:public match ^boolean [this ^Certificate cert]
+      (cond
+        (not (.match super cert)) false
+        (.contains badKeySet (.getPublicKey cert))
+          (do (when (some? debug) (.println debug "RejectKeySelector.match: bad key")) false)
+        :else
+          (do (when (some? debug) (.println debug "RejectKeySelector.match: returning true")) true)))
+
+    (method ^:public toString ^String [this]
+      (java-str "RejectKeySelector: [\n" (.toString super) badKeySet "]"))))

@@ -1,0 +1,333 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/rsa/RSAPadding.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.rsa)
+
+(import '(java.security InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        SecureRandom)
+        '(java.security.spec MGF1ParameterSpec)
+        '(java.util Arrays Collections HashMap Map)
+        '(javax.crypto.spec OAEPParameterSpec PSource$PSpecified)
+        '(sun.security.jca JCAUtil))
+
+(defclass ^:public ^:final RSAPadding
+  (field ^:public ^:static ^:final ^int PAD_BLOCKTYPE_1 1)
+
+  (field ^:public ^:static ^:final ^int PAD_BLOCKTYPE_2 2)
+
+  (field ^:public ^:static ^:final ^int PAD_NONE 3)
+
+  (field ^:public ^:static ^:final ^int PAD_OAEP_MGF1 4)
+
+  (field ^:private ^:final ^int type)
+
+  (field ^:private ^:final ^int paddedSize)
+
+  (field ^:private ^SecureRandom random)
+
+  (field ^:private ^:final ^int maxDataSize)
+
+  (field ^:private ^MGF1 mgf)
+
+  (field ^:private ^byte/1 lHash)
+
+  (method ^:public ^:static getInstance :throws [InvalidKeyException
+                                                 InvalidAlgorithmParameterException] ^RSAPadding [^int type
+                                                                                                  ^int paddedSize]
+    (RSAPadding. type paddedSize nil nil))
+
+  (method ^:public ^:static getInstance :throws [InvalidKeyException
+                                                 InvalidAlgorithmParameterException] ^RSAPadding [^int type
+                                                                                                  ^int paddedSize
+                                                                                                  ^SecureRandom random]
+    (RSAPadding. type paddedSize random nil))
+
+  (method ^:public ^:static getInstance :throws [InvalidKeyException
+                                                 InvalidAlgorithmParameterException] ^RSAPadding [^int type
+                                                                                                  ^int paddedSize
+                                                                                                  ^SecureRandom random
+                                                                                                  ^OAEPParameterSpec spec]
+    (RSAPadding. type paddedSize random spec))
+
+  (constructor :throws [InvalidKeyException InvalidAlgorithmParameterException] ^:private [this
+                                                                                           ^int type
+                                                                                           ^int paddedSize
+                                                                                           ^SecureRandom random
+                                                                                           ^OAEPParameterSpec spec]
+    (set! (.-type this) type)
+    (set! (.-paddedSize this) paddedSize)
+    (set! (.-random this) random)
+    (when (< paddedSize 64) (throw (InvalidKeyException. "Padded size must be at least 64")))
+    (let [^:mutable ^MessageDigest md nil]
+      (switch type
+        (PAD_BLOCKTYPE_1 PAD_BLOCKTYPE_2) (set! maxDataSize (unchecked-subtract-int paddedSize 11))
+        PAD_NONE (set! maxDataSize paddedSize)
+        PAD_OAEP_MGF1
+          (let [^:mutable mdName "SHA-1"
+                ^:mutable mgfMdName mdName
+                ^:mutable ^byte/1 digestInput nil]
+            (try
+              (when (some? spec)
+                (set! mdName (.getDigestAlgorithm spec))
+                (let [mgfName (.getMGFAlgorithm spec)]
+                  (when-not (.equalsIgnoreCase mgfName "MGF1")
+                    (throw (InvalidAlgorithmParameterException.
+                             (java-str "Unsupported MGF algo: " mgfName))))
+                  (set! mgfMdName
+                        (.getDigestAlgorithm (cast MGF1ParameterSpec (.getMGFParameters spec))))
+                  (let [pSrc (.getPSource spec)
+                        pSrcAlgo (.getAlgorithm pSrc)]
+                    (when-not (.equalsIgnoreCase pSrcAlgo "PSpecified")
+                      (throw (InvalidAlgorithmParameterException.
+                               (java-str "Unsupported pSource algo: " pSrcAlgo))))
+                    (set! digestInput (.getValue (cast PSource$PSpecified pSrc))))))
+              (set! md (MessageDigest/getInstance mdName))
+              (set! mgf (MGF1. mgfMdName))
+              (catch NoSuchAlgorithmException e
+                (throw (InvalidKeyException. "Digest not available" e))))
+            (set! lHash (RSAPadding/getInitialHash md digestInput))
+            (let [digestLen (alength lHash)]
+              (set! maxDataSize
+                    (unchecked-subtract-int (unchecked-subtract-int paddedSize 2)
+                                            (unchecked-multiply-int 2 digestLen)))
+              (when (<= maxDataSize 0)
+                (throw (InvalidKeyException.
+                         (java-str "Key is too short for encryption using OAEPPadding with "
+                                   mdName
+                                   " and "
+                                   (.getName mgf)))))))
+        (throw (InvalidKeyException. (java-str "Invalid padding: " type))))))
+
+  (field ^:private ^:static ^:final ^{:tag (Map String byte/1)} emptyHashes
+    (Collections/synchronizedMap (HashMap.)))
+
+  (method ^:private ^:static getInitialHash ^byte/1 [^MessageDigest md ^byte/1 digestInput]
+    (let [^:mutable ^byte/1 result nil]
+      (if (or (nil? digestInput) (== (alength digestInput) 0))
+          (let [digestName (.getAlgorithm md)]
+            (set! result (cast byte/1 (.get emptyHashes digestName)))
+            (when (nil? result) (set! result (.digest md)) (.put emptyHashes digestName result)))
+          (set! result (.digest md digestInput)))
+      result))
+
+  (method ^:public getMaxDataSize ^int [this] maxDataSize)
+
+  (method ^:public pad ^byte/1 [this ^byte/1 data]
+    (.pad this data 0 (alength data)))
+
+  (method ^:public pad ^byte/1 [this ^byte/1 data ^int ofs ^int len]
+    (when-not (> len maxDataSize)
+      (switch type
+        PAD_NONE (RSACore/convert data ofs len)
+        (PAD_BLOCKTYPE_1 PAD_BLOCKTYPE_2) (.padV15 this data ofs len)
+        PAD_OAEP_MGF1 (.padOAEP this data ofs len)
+        (throw (AssertionError.)))))
+
+  (method ^:public unpad ^byte/1 [this ^byte/1 padded]
+    (when (== (alength padded) paddedSize)
+      (switch type
+        PAD_NONE padded
+        (PAD_BLOCKTYPE_1 PAD_BLOCKTYPE_2) (.unpadV15 this padded)
+        PAD_OAEP_MGF1 (.unpadOAEP this padded)
+        (throw (AssertionError.)))))
+
+  (method ^:private padV15 ^byte/1 [this ^byte/1 data ^int ofs ^int len]
+    (let [padded (new byte/1 paddedSize)]
+      (System/arraycopy data ofs padded (unchecked-subtract-int paddedSize len) len)
+      (let [^:mutable psSize (unchecked-subtract-int (unchecked-subtract-int paddedSize 3) len)
+            ^:mutable ^int k 0]
+        (aset padded k 0)
+        (set! k (unchecked-inc-int k))
+        (aset padded k (unchecked-byte type))
+        (set! k (unchecked-inc-int k))
+        (if (== type PAD_BLOCKTYPE_1)
+            (while (> (let [old-1 psSize] (set! psSize (unchecked-dec-int psSize)) old-1) 0)
+              (aset padded k (unchecked-byte 0xff))
+              (set! k (unchecked-inc-int k)))
+            (do
+              (when (nil? random) (set! random (JCAUtil/getSecureRandom)))
+              (while (> psSize 0)
+                (let [r (new byte/1 (unchecked-add-int psSize 4))]
+                  (.nextBytes random r)
+                  (loop [^int i 0]
+                    (if (and (< i (alength r)) (> psSize 0))
+                        (if (not (== (aget r i) 0))
+                            (do
+                              (aset padded k (aget r i))
+                              (set! k (unchecked-inc-int k))
+                              (set! psSize (unchecked-dec-int psSize))
+                              (recur (unchecked-inc-int i)))
+                            (recur (unchecked-inc-int i)))
+                        nil))))))
+        padded)))
+
+  (method ^:private unpadV15 ^byte/1 [this ^byte/1 padded]
+    (let [paddedLength (alength padded)]
+      (when-not (< paddedLength 2)
+        (let [^int p0 (aget padded 0)
+              ^int p1 (aget padded 1)
+              ^:mutable bp (unsigned-bit-shift-right-int
+                             (bit-or-int (unchecked-negate-int (bit-and-int p0 0xff))
+                                         (bit-or-int
+                                           (unchecked-subtract-int p1 type)
+                                           (unchecked-subtract-int type p1)))
+                             31)
+              ^:mutable ^int padLen 0
+              ^:mutable ^int k 2]
+          (while (< k paddedLength)
+            (let [b (bit-and-int (aget padded (let [old-2 k] (set! k (unchecked-inc-int k)) old-2))
+                                 0xff)]
+              (set! padLen
+                    (unchecked-add-int padLen
+                                       (unchecked-multiply-int
+                                         k
+                                         (unchecked-subtract-int
+                                           1
+                                           (unsigned-bit-shift-right-int
+                                             (unchecked-negate-int (bit-or-int b padLen))
+                                             31)))))
+              (when (== k paddedLength)
+                (set! bp
+                      (bit-or-int
+                        bp
+                        (unchecked-subtract-int 1
+                                                (unsigned-bit-shift-right-int
+                                                  (unchecked-negate-int padLen)
+                                                  31)))))
+              (set! bp
+                    (bit-or-int bp
+                                (unchecked-subtract-int
+                                  1
+                                  (unsigned-bit-shift-right-int
+                                    (unchecked-negate-int
+                                      (bit-or-int
+                                        (bit-or-int
+                                          (bit-and-int
+                                            (unchecked-subtract-int type PAD_BLOCKTYPE_1)
+                                            0xff)
+                                          padLen)
+                                        (unchecked-subtract-int
+                                          1
+                                          (unsigned-bit-shift-right-int
+                                            (unchecked-subtract-int b 0xff)
+                                            31))))
+                                    31))))))
+          (let [n (unchecked-subtract-int paddedLength padLen)]
+            (set! bp
+                  (bit-or-int bp
+                              (unsigned-bit-shift-right-int
+                                (unchecked-subtract-int maxDataSize n)
+                                31)))
+            (let [padding (new byte/1 (unchecked-add-int padLen 2))]
+              (loop [^int i 0]
+                (when (< i padLen) (aset padding i (aget padded i)) (recur (unchecked-inc-int i))))
+              (let [data (new byte/1 n)]
+                (loop [^int i 0]
+                  (when (< i n)
+                    (aset data i (aget padded (unchecked-add-int padLen i)))
+                    (recur (unchecked-inc-int i))))
+                (when-not (not (== (bit-or-int bp (aget padding bp)) 0)) data))))))))
+
+  (method ^:public unpadForTls ^byte/1 [this ^byte/1 padded ^int clientVersion ^int serverVersion]
+    (let [paddedLength (alength padded)
+          ^:mutable bp (bit-and-int (bit-or-int (int (aget padded 0))
+                                                (unchecked-subtract-int
+                                                  (int (aget padded 1))
+                                                  PAD_BLOCKTYPE_2))
+                                    0xFFF)
+          ^:mutable ^int k 2]
+      (while (< k (unchecked-subtract-int paddedLength 49))
+        (let [b (bit-and-int (aget padded (let [old-3 k] (set! k (unchecked-inc-int k)) old-3))
+                             0xFF)]
+          (set! bp
+                (bit-or-int bp
+                            (unchecked-subtract-int
+                              1
+                              (unsigned-bit-shift-right-int (unchecked-negate-int b) 31))))))
+      (set! bp (bit-or-int bp (bit-and-int (int (aget padded k)) 0xFF)))
+      (set! k (unchecked-inc-int k))
+      (let [encodedVersion (bit-or-int (bit-shift-left-int (bit-and-int (aget padded k) 0xFF) 8)
+                                       (bit-and-int (aget padded (unchecked-add-int k 1)) 0xFF))
+            ^:mutable bv1 (unchecked-subtract-int clientVersion encodedVersion)]
+        (set! bv1 (bit-or-int bv1 (unchecked-negate-int bv1)))
+        (let [^:mutable bv3 (unchecked-subtract-int serverVersion encodedVersion)]
+          (set! bv3 (bit-or-int bv3 (unchecked-negate-int bv3)))
+          (let [bv2 (unchecked-subtract-int 0x301 clientVersion)]
+            (set! bp
+                  (bit-or-int bp
+                              (unsigned-bit-shift-right-int
+                                (bit-and-int bv1 (bit-or-int bv2 bv3))
+                                28)))
+            (let [data (Arrays/copyOfRange padded
+                                           (unchecked-subtract-int paddedLength 48)
+                                           paddedLength)]
+              (when (nil? random) (set! random (JCAUtil/getSecureRandom)))
+              (let [fake (new byte/1 48)]
+                (.nextBytes random fake)
+                (set! bp (bit-shift-right-int (unchecked-negate-int bp) 24))
+                (loop [^int i 0]
+                  (when (< i 48)
+                    (aset data
+                          i
+                          (unchecked-byte
+                            (bit-or-int (bit-and-int (bit-not-int bp) (aget data i))
+                                        (bit-and-int bp (aget fake i)))))
+                    (recur (unchecked-inc-int i))))
+                data)))))))
+
+  (method ^:private padOAEP ^byte/1 [this ^byte/1 M ^int ofs ^int len]
+    (when (nil? random) (set! random (JCAUtil/getSecureRandom)))
+    (let [hLen (alength lHash)
+          seed (new byte/1 hLen)]
+      (.nextBytes random seed)
+      (let [EM (new byte/1 paddedSize)
+            ^int seedStart 1
+            seedLen hLen]
+        (System/arraycopy seed 0 EM seedStart seedLen)
+        (let [dbStart (unchecked-add-int hLen 1)
+              dbLen (unchecked-subtract-int (alength EM) dbStart)
+              mStart (unchecked-subtract-int paddedSize len)]
+          (System/arraycopy lHash 0 EM dbStart hLen)
+          (aset EM (unchecked-subtract-int mStart 1) 1)
+          (System/arraycopy M ofs EM mStart len)
+          (.generateAndXor mgf EM seedStart seedLen dbLen EM dbStart)
+          (.generateAndXor mgf EM dbStart dbLen seedLen EM seedStart)
+          EM))))
+
+  (method ^:private unpadOAEP ^byte/1 [this ^byte/1 padded]
+    (let [EM padded
+          ^:mutable bp false
+          hLen (alength lHash)]
+      (when-not (== (aget EM 0) 0) (set! bp true))
+      (let [^int seedStart 1
+            seedLen hLen
+            dbStart (unchecked-add-int hLen 1)
+            dbLen (unchecked-subtract-int (alength EM) dbStart)]
+        (.generateAndXor mgf EM dbStart dbLen seedLen EM seedStart)
+        (.generateAndXor mgf EM seedStart seedLen dbLen EM dbStart)
+        (loop [^int i 0]
+          (if (< i hLen)
+              (if (not (== (aget lHash i) (aget EM (unchecked-add-int dbStart i))))
+                  (do (set! bp true) (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i)))
+              nil))
+        (let [padStart (unchecked-add-int dbStart hLen)
+              ^:mutable ^int onePos -1]
+          (loop [^int i padStart]
+            (when (< i (alength EM))
+              (let [^int value (aget EM i)]
+                (if (== onePos -1)
+                    (cond
+                      (== value 0x00) (recur (unchecked-inc-int i))
+                      (== value 0x01) (do (set! onePos i) (recur (unchecked-inc-int i)))
+                      :else (do (set! bp true) (recur (unchecked-inc-int i))))
+                    (recur (unchecked-inc-int i))))))
+          (when (== onePos -1) (set! bp true) (set! onePos (unchecked-subtract-int (alength EM) 1)))
+          (let [mStart (unchecked-add-int onePos 1)
+                tmp (new byte/1 (unchecked-subtract-int mStart padStart))]
+            (System/arraycopy EM padStart tmp 0 (alength tmp))
+            (let [m (new byte/1 (unchecked-subtract-int (alength EM) mStart))]
+              (System/arraycopy EM mStart m 0 (alength m))
+              (when-not bp m))))))))

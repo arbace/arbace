@@ -1,0 +1,374 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/Authenticator.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.nio ByteBuffer)
+        '(java.security InvalidKeyException NoSuchAlgorithmException)
+        '(java.util Arrays)
+        '(javax.crypto Mac SecretKey))
+
+(defclass ^:abstract Authenticator
+  (field ^:protected ^:final ^byte/1 block)
+
+  (constructor ^:private [this ^byte/1 block] (set! (.-block this) block))
+
+  (method ^:static valueOf ^Authenticator [^ProtocolVersion protocolVersion]
+    (cond
+      (.-isDTLS protocolVersion)
+        (if (.useTLS13PlusSpec protocolVersion)
+            (DTLS13Authenticator. protocolVersion)
+            (DTLS10Authenticator. protocolVersion))
+      (.useTLS13PlusSpec protocolVersion) (TLS13Authenticator. protocolVersion)
+      (.useTLS10PlusSpec protocolVersion) (TLS10Authenticator. protocolVersion)
+      :else (SSL30Authenticator.)))
+
+  (method ^:static valueOf :type-params [(T extends Authenticator MAC)] :throws [NoSuchAlgorithmException
+                                                                                 InvalidKeyException] ^T [^ProtocolVersion protocolVersion
+                                                                                                          ^CipherSuite$MacAlg macAlg
+                                                                                                          ^SecretKey key]
+    (cond
+      (.-isDTLS protocolVersion)
+        (if (.useTLS13PlusSpec protocolVersion)
+            (throw (RuntimeException. "No MacAlg used in DTLS 1.3"))
+            ^Authenticator (DTLS10Mac. protocolVersion macAlg key))
+      (.useTLS13PlusSpec protocolVersion) (throw (RuntimeException. "No MacAlg used in TLS 1.3"))
+      (.useTLS10PlusSpec protocolVersion) ^Authenticator (TLS10Mac. protocolVersion macAlg key)
+      :else ^Authenticator (SSL30Mac. protocolVersion macAlg key)))
+
+  (method ^:static nullTlsMac ^Authenticator [] (SSLNullMac.))
+
+  (method ^:static nullDtlsMac ^Authenticator [] (DTLSNullMac.))
+
+  (method ^:abstract seqNumOverflow ^boolean [this])
+
+  (method ^:abstract seqNumIsHuge ^boolean [this])
+
+  (method ^:final sequenceNumber ^byte/1 [this] (Arrays/copyOf block 8))
+
+  (method setEpochNumber ^void [this ^int epoch]
+    (throw (UnsupportedOperationException. "Epoch numbers apply to DTLS protocols only")))
+
+  (method ^:final increaseSequenceNumber ^void [this]
+    (let [^:mutable ^int k 7]
+      (while (and (>= k 0)
+                  (== (aset block k (unchecked-byte (unchecked-inc-int (aget block k)))) 0))
+        (set! k (unchecked-dec-int k)))))
+
+  (method acquireAuthenticationBytes ^byte/1 [this ^byte type ^int length ^byte/1 sequence]
+    (throw (UnsupportedOperationException. "Used by AEAD algorithms only")))
+
+  (defclass ^:private ^:static SSLAuthenticator
+    :extends Authenticator
+
+    (constructor ^:private [this ^byte/1 block] (super. block))
+
+    (method seqNumOverflow ^boolean [this]
+      (and (and (and (and (and (and (and (not (== (alength (.-block this)) 0))
+                                         (== (aget (.-block this) 0) (unchecked-byte 0xFF)))
+                                    (== (aget (.-block this) 1) (unchecked-byte 0xFF)))
+                               (== (aget (.-block this) 2) (unchecked-byte 0xFF)))
+                          (== (aget (.-block this) 3) (unchecked-byte 0xFF)))
+                     (== (aget (.-block this) 4) (unchecked-byte 0xFF)))
+                (== (aget (.-block this) 5) (unchecked-byte 0xFF)))
+           (== (aget (.-block this) 6) (unchecked-byte 0xFF))))
+
+    (method seqNumIsHuge ^boolean [this]
+      (and (and (and (and (not (== (alength (.-block this)) 0))
+                          (== (aget (.-block this) 0) (unchecked-byte 0xFF)))
+                     (== (aget (.-block this) 1) (unchecked-byte 0xFF)))
+                (== (aget (.-block this) 2) (unchecked-byte 0xFF)))
+           (== (aget (.-block this) 3) (unchecked-byte 0xFF)))))
+
+  (defclass ^:private ^:static SSLNullAuthenticator
+    :extends SSLAuthenticator
+
+    (constructor ^:private [this] (super. (new byte/1 8))))
+
+  (defclass ^:private ^:static SSL30Authenticator
+    :extends SSLAuthenticator
+
+    (field ^:private ^:static ^:final ^int BLOCK_SIZE 11)
+
+    (constructor ^:private [this] (super. (new byte/1 BLOCK_SIZE)))
+
+    (method acquireAuthenticationBytes ^byte/1 [this ^byte type ^int length ^byte/1 sequence]
+      (let [ad (.clone (.-block this))]
+        (.increaseSequenceNumber this)
+        (aset ad 8 type)
+        (aset ad 9 (unchecked-byte (bit-shift-right-int length 8)))
+        (aset ad 10 (unchecked-byte length))
+        ad)))
+
+  (defclass ^:private ^:static TLS10Authenticator
+    :extends SSLAuthenticator
+
+    (field ^:private ^:static ^:final ^int BLOCK_SIZE 13)
+
+    (constructor ^:private [this ^ProtocolVersion protocolVersion]
+      (super. (new byte/1 BLOCK_SIZE))
+      (aset (.-block this) 9 (.-major protocolVersion))
+      (aset (.-block this) 10 (.-minor protocolVersion)))
+
+    (method acquireAuthenticationBytes ^byte/1 [this ^byte type ^int length ^byte/1 sequence]
+      (let [ad (.clone (.-block this))]
+        (if (some? sequence)
+            (do
+              (when-not (== (alength sequence) 8)
+                (throw (RuntimeException. "Insufficient explicit sequence number bytes")))
+              (System/arraycopy sequence 0 ad 0 (alength sequence)))
+            (.increaseSequenceNumber this))
+        (aset ad 8 type)
+        (aset ad 11 (unchecked-byte (bit-shift-right-int length 8)))
+        (aset ad 12 (unchecked-byte length))
+        ad)))
+
+  (defclass ^:private ^:static ^:final TLS13Authenticator
+    :extends SSLAuthenticator
+
+    (field ^:private ^:static ^:final ^int BLOCK_SIZE 13)
+
+    (constructor ^:private [this ^ProtocolVersion protocolVersion]
+      (super. (new byte/1 BLOCK_SIZE))
+      (aset (.-block this) 9 (.-major ProtocolVersion/TLS12))
+      (aset (.-block this) 10 (.-minor ProtocolVersion/TLS12)))
+
+    (method acquireAuthenticationBytes ^byte/1 [this ^byte type ^int length ^byte/1 sequence]
+      (let [ad (Arrays/copyOfRange (.-block this) 8 13)]
+        (.increaseSequenceNumber this)
+        (aset ad 0 type)
+        (aset ad 3 (unchecked-byte (bit-shift-right-int length 8)))
+        (aset ad 4 (unchecked-byte (bit-and-int length 0xFF)))
+        ad)))
+
+  (defclass ^:private ^:static DTLSAuthenticator
+    :extends Authenticator
+
+    (constructor ^:private [this ^byte/1 block] (super. block))
+
+    (method seqNumOverflow ^boolean [this]
+      (and (and (and (and (and (not (== (alength (.-block this)) 0))
+                               (== (aget (.-block this) 2) (unchecked-byte 0xFF)))
+                          (== (aget (.-block this) 3) (unchecked-byte 0xFF)))
+                     (== (aget (.-block this) 4) (unchecked-byte 0xFF)))
+                (== (aget (.-block this) 5) (unchecked-byte 0xFF)))
+           (== (aget (.-block this) 6) (unchecked-byte 0xFF))))
+
+    (method seqNumIsHuge ^boolean [this]
+      (and (and (not (== (alength (.-block this)) 0))
+                (== (aget (.-block this) 2) (unchecked-byte 0xFF)))
+           (== (aget (.-block this) 3) (unchecked-byte 0xFF))))
+
+    (method setEpochNumber ^void [this ^int epoch]
+      (aset (.-block this) 0 (unchecked-byte (bit-and-int (bit-shift-right-int epoch 8) 0xFF)))
+      (aset (.-block this) 1 (unchecked-byte (bit-and-int epoch 0xFF)))))
+
+  (defclass ^:private ^:static DTLSNullAuthenticator
+    :extends DTLSAuthenticator
+
+    (constructor ^:private [this] (super. (new byte/1 8))))
+
+  (defclass ^:private ^:static DTLS10Authenticator
+    :extends DTLSAuthenticator
+
+    (field ^:private ^:static ^:final ^int BLOCK_SIZE 13)
+
+    (constructor ^:private [this ^ProtocolVersion protocolVersion]
+      (super. (new byte/1 BLOCK_SIZE))
+      (aset (.-block this) 9 (.-major protocolVersion))
+      (aset (.-block this) 10 (.-minor protocolVersion)))
+
+    (method acquireAuthenticationBytes ^byte/1 [this ^byte type ^int length ^byte/1 sequence]
+      (let [ad (.clone (.-block this))]
+        (if (some? sequence)
+            (do
+              (when-not (== (alength sequence) 8)
+                (throw (RuntimeException. "Insufficient explicit sequence number bytes")))
+              (System/arraycopy sequence 0 ad 0 (alength sequence)))
+            (.increaseSequenceNumber this))
+        (aset ad 8 type)
+        (aset ad 11 (unchecked-byte (bit-shift-right-int length 8)))
+        (aset ad 12 (unchecked-byte length))
+        ad)))
+
+  (defclass ^:private ^:static ^:final DTLS13Authenticator
+    :extends DTLSAuthenticator
+
+    (field ^:private ^:static ^:final ^int BLOCK_SIZE 13)
+
+    (constructor ^:private [this ^ProtocolVersion protocolVersion]
+      (super. (new byte/1 BLOCK_SIZE))
+      (aset (.-block this) 9 (.-major ProtocolVersion/TLS12))
+      (aset (.-block this) 10 (.-minor ProtocolVersion/TLS12)))
+
+    (method acquireAuthenticationBytes ^byte/1 [this ^byte type ^int length ^byte/1 sequence]
+      (let [ad (Arrays/copyOfRange (.-block this) 8 13)]
+        (.increaseSequenceNumber this)
+        (aset ad 0 type)
+        (aset ad 3 (unchecked-byte (bit-shift-right-int length 8)))
+        (aset ad 4 (unchecked-byte (bit-and-int length 0xFF)))
+        ad)))
+
+  (defclass ^:interface MAC
+    (method macAlg ^CipherSuite$MacAlg [this])
+
+    (method compute ^byte/1 [this ^byte type ^ByteBuffer bb ^byte/1 sequence ^boolean isSimulated])
+
+    (method ^:default compute ^byte/1 [this ^byte type ^ByteBuffer bb ^boolean isSimulated]
+      (.compute this type bb nil isSimulated)))
+
+  (defclass ^:private MacImpl
+    :implements [MAC]
+
+    (field ^:private ^:final ^CipherSuite$MacAlg macAlg)
+
+    (field ^:private ^:final ^Mac mac)
+
+    (constructor ^:private [this]
+      (set! macAlg CipherSuite$MacAlg/M_NULL)
+      (set! mac nil))
+
+    (constructor :throws [NoSuchAlgorithmException InvalidKeyException] ^:private [this
+                                                                                   ^ProtocolVersion protocolVersion
+                                                                                   ^CipherSuite$MacAlg macAlg
+                                                                                   ^SecretKey key]
+      (when (nil? macAlg) (throw (RuntimeException. "Null MacAlg")))
+      (let [useSSLMac (< (.-id protocolVersion) (.-id ProtocolVersion/TLS10))
+            ^:mutable ^String algorithm nil]
+        (switch macAlg
+          M_MD5 (set! algorithm (if useSSLMac "SslMacMD5" "HmacMD5"))
+          M_SHA (set! algorithm (if useSSLMac "SslMacSHA1" "HmacSHA1"))
+          M_SHA256 (set! algorithm "HmacSHA256")
+          M_SHA384 (set! algorithm "HmacSHA384")
+          (throw (RuntimeException. (java-str "Unknown MacAlg " macAlg))))
+        (let [m (Mac/getInstance algorithm)]
+          (.init m key)
+          (set! (.-macAlg this) macAlg)
+          (set! (.-mac this) m))))
+
+    (method ^:public macAlg ^CipherSuite$MacAlg [this] macAlg)
+
+    (method ^:public compute ^byte/1 [this ^byte type ^ByteBuffer bb ^byte/1 sequence
+                                      ^boolean isSimulated]
+      (if (== (.-size macAlg) 0)
+          (new byte/1 0)
+          (do
+            (when-not isSimulated
+              (let [additional (.acquireAuthenticationBytes
+                                 Authenticator/this
+                                 type
+                                 (.remaining bb)
+                                 sequence)]
+                (.update mac additional)))
+            (.update mac bb)
+            (.doFinal mac)))))
+
+  (defclass ^:private ^:static ^:final SSLNullMac
+    :extends SSLNullAuthenticator
+    :implements [MAC]
+
+    (field ^:private ^:final ^MacImpl macImpl)
+
+    (constructor ^:public [this]
+      (super.)
+      (set! (.-macImpl this) (MacImpl.)))
+
+    (method ^:public macAlg ^CipherSuite$MacAlg [this] (.-macAlg macImpl))
+
+    (method ^:public compute ^byte/1 [this ^byte type ^ByteBuffer bb ^byte/1 sequence
+                                      ^boolean isSimulated]
+      (.compute macImpl type bb sequence isSimulated)))
+
+  (defclass ^:private ^:static ^:final SSL30Mac
+    :extends SSL30Authenticator
+    :implements [MAC]
+
+    (field ^:private ^:final ^MacImpl macImpl)
+
+    (constructor :throws [NoSuchAlgorithmException InvalidKeyException] ^:public [this
+                                                                                  ^ProtocolVersion protocolVersion
+                                                                                  ^CipherSuite$MacAlg macAlg
+                                                                                  ^SecretKey key]
+      (super.)
+      (set! (.-macImpl this) (MacImpl. protocolVersion macAlg key)))
+
+    (method ^:public macAlg ^CipherSuite$MacAlg [this] (.-macAlg macImpl))
+
+    (method ^:public compute ^byte/1 [this ^byte type ^ByteBuffer bb ^byte/1 sequence
+                                      ^boolean isSimulated]
+      (.compute macImpl type bb sequence isSimulated)))
+
+  (defclass ^:private ^:static ^:final TLS10Mac
+    :extends TLS10Authenticator
+    :implements [MAC]
+
+    (field ^:private ^:final ^MacImpl macImpl)
+
+    (constructor :throws [NoSuchAlgorithmException InvalidKeyException] ^:public [this
+                                                                                  ^ProtocolVersion protocolVersion
+                                                                                  ^CipherSuite$MacAlg macAlg
+                                                                                  ^SecretKey key]
+      (super. protocolVersion)
+      (set! (.-macImpl this) (MacImpl. protocolVersion macAlg key)))
+
+    (method ^:public macAlg ^CipherSuite$MacAlg [this] (.-macAlg macImpl))
+
+    (method ^:public compute ^byte/1 [this ^byte type ^ByteBuffer bb ^byte/1 sequence
+                                      ^boolean isSimulated]
+      (.compute macImpl type bb sequence isSimulated)))
+
+  (defclass ^:private ^:static ^:final DTLSNullMac
+    :extends DTLSNullAuthenticator
+    :implements [MAC]
+
+    (field ^:private ^:final ^MacImpl macImpl)
+
+    (constructor ^:public [this]
+      (super.)
+      (set! (.-macImpl this) (MacImpl.)))
+
+    (method ^:public macAlg ^CipherSuite$MacAlg [this] (.-macAlg macImpl))
+
+    (method ^:public compute ^byte/1 [this ^byte type ^ByteBuffer bb ^byte/1 sequence
+                                      ^boolean isSimulated]
+      (.compute macImpl type bb sequence isSimulated)))
+
+  (defclass ^:private ^:static ^:final DTLS10Mac
+    :extends DTLS10Authenticator
+    :implements [MAC]
+
+    (field ^:private ^:final ^MacImpl macImpl)
+
+    (constructor :throws [NoSuchAlgorithmException InvalidKeyException] ^:public [this
+                                                                                  ^ProtocolVersion protocolVersion
+                                                                                  ^CipherSuite$MacAlg macAlg
+                                                                                  ^SecretKey key]
+      (super. protocolVersion)
+      (set! (.-macImpl this) (MacImpl. protocolVersion macAlg key)))
+
+    (method ^:public macAlg ^CipherSuite$MacAlg [this] (.-macAlg macImpl))
+
+    (method ^:public compute ^byte/1 [this ^byte type ^ByteBuffer bb ^byte/1 sequence
+                                      ^boolean isSimulated]
+      (.compute macImpl type bb sequence isSimulated)))
+
+  (method ^:static ^:final toLong ^long [^byte/1 recordEnS]
+    (if (and (some? recordEnS) (== (alength recordEnS) 8))
+        (bit-or (bit-or (bit-or (bit-or (bit-or (bit-or
+                                                  (bit-or
+                                                    (bit-shift-left
+                                                      (bit-and (aget recordEnS 0) 0xFF)
+                                                      56)
+                                                    (bit-shift-left
+                                                      (bit-and (aget recordEnS 1) 0xFF)
+                                                      48))
+                                                  (bit-shift-left
+                                                    (bit-and (aget recordEnS 2) 0xFF)
+                                                    40))
+                                                (bit-shift-left
+                                                  (bit-and (aget recordEnS 3) 0xFF)
+                                                  32))
+                                        (bit-shift-left (bit-and (aget recordEnS 4) 0xFF) 24))
+                                (bit-shift-left (bit-and (aget recordEnS 5) 0xFF) 16))
+                        (bit-shift-left (bit-and (aget recordEnS 6) 0xFF) 8))
+                (bit-and (aget recordEnS 7) 0xFF))
+        -1)))

@@ -1,0 +1,202 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/certpath/AlgorithmChecker.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider.certpath)
+
+(import '(java.security AlgorithmConstraints
+                        CryptoPrimitive
+                        GeneralSecurityException
+                        KeyFactory
+                        PublicKey)
+        '(java.security.cert CertPathValidatorException
+                             CertPathValidatorException$BasicReason
+                             Certificate
+                             CertificateException
+                             PKIXCertPathChecker
+                             PKIXReason
+                             TrustAnchor
+                             X509Certificate)
+        '(java.security.interfaces DSAPublicKey)
+        '(java.security.spec DSAPublicKeySpec)
+        '(java.util Collection Collections Date EnumSet Set)
+        '(sun.security.util Debug DisabledAlgorithmConstraints KeyUtil)
+        '(sun.security.validator Validator)
+        '(sun.security.x509 AlgorithmId X509CertImpl))
+
+(defclass ^:public ^:final AlgorithmChecker
+  :extends PKIXCertPathChecker
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "certpath"))
+
+  (field ^:private ^:final ^AlgorithmConstraints constraints)
+
+  (field ^:private ^:final ^Date date)
+
+  (field ^:private ^:final ^String variant)
+
+  (field ^:private ^PublicKey trustedPubKey)
+
+  (field ^:private ^PublicKey prevPubKey)
+
+  (field ^:private ^TrustAnchor anchor)
+
+  (field ^:private ^:static ^:final ^{:tag (Set CryptoPrimitive)} SIGNATURE_PRIMITIVE_SET
+    (Collections/unmodifiableSet (EnumSet/of CryptoPrimitive/SIGNATURE)))
+
+  (field ^:private ^:static ^:final ^{:tag (Set CryptoPrimitive)} KU_PRIMITIVE_SET
+    (Collections/unmodifiableSet
+      (EnumSet/of CryptoPrimitive/SIGNATURE
+                  CryptoPrimitive/KEY_ENCAPSULATION
+                  CryptoPrimitive/PUBLIC_KEY_ENCRYPTION
+                  CryptoPrimitive/KEY_AGREEMENT)))
+
+  (constructor ^:public [this ^TrustAnchor anchor ^String variant]
+    (this. anchor nil nil variant))
+
+  (constructor ^:public [this ^AlgorithmConstraints constraints ^String variant]
+    (this. nil constraints nil variant))
+
+  (constructor ^:public [this ^TrustAnchor anchor ^AlgorithmConstraints constraints ^Date date
+                         ^String variant]
+    (when (some? anchor) (.setTrustAnchorAndKeys this anchor))
+    (set! (.-constraints this)
+          (if (nil? constraints)
+              ^AlgorithmConstraints (DisabledAlgorithmConstraints/certPathConstraints)
+              constraints))
+    (set! (.-date this) date)
+    (set! (.-variant this) (if (nil? variant) Validator/VAR_GENERIC variant)))
+
+  (constructor ^:public [this ^TrustAnchor anchor ^Date date ^String variant]
+    (this. anchor nil date variant))
+
+  (method ^:public init :throws [CertPathValidatorException] ^void [this ^boolean forward]
+    (if (not forward)
+        (set! prevPubKey trustedPubKey)
+        (throw (CertPathValidatorException. "forward checking not supported"))))
+
+  (method ^:public isForwardCheckingSupported ^boolean [this] false)
+
+  (method ^:public getSupportedExtensions ^{:tag (Set String)} [this] nil)
+
+  (method ^:public check :throws [CertPathValidatorException] ^void [this ^Certificate cert
+                                                                     ^{:tag (Collection String)} unresolvedCritExts]
+    (when-not (not (instance? X509Certificate cert))
+      (let [keyUsage (.getKeyUsage (cast X509Certificate cert))]
+        (when (and (some? keyUsage) (< (alength keyUsage) 9))
+          (throw (CertPathValidatorException. "incorrect KeyUsage extension"
+                                              nil
+                                              nil
+                                              -1
+                                              PKIXReason/INVALID_KEY_USAGE)))
+        (let [^:mutable ^X509CertImpl x509Cert nil
+              ^:mutable ^AlgorithmId algorithmId nil]
+          (try
+            (set! x509Cert (X509CertImpl/toImpl (cast X509Certificate cert)))
+            (set! algorithmId (.getSigAlg x509Cert))
+            (catch CertificateException ce (throw (CertPathValidatorException. ce))))
+          (let [currSigAlgParams (.getParameters algorithmId)
+                ^:mutable currPubKey (.getPublicKey cert)
+                currSigAlg (.getSigAlgName x509Cert)]
+            (if-instance [^DisabledAlgorithmConstraints dac constraints]
+              (do
+                (when (and (some? prevPubKey) (identical? prevPubKey trustedPubKey))
+                  (let [cp (CertPathConstraintsParameters. trustedPubKey variant anchor date)]
+                    (.permits dac (KeyUtil/getAlgorithm trustedPubKey) cp true)))
+                (let [cp (CertPathConstraintsParameters. x509Cert variant anchor date)]
+                  (.permits dac currSigAlg currSigAlgParams cp true)))
+              (do
+                (if (some? prevPubKey)
+                    (when-not (.permits constraints
+                                        SIGNATURE_PRIMITIVE_SET
+                                        currSigAlg
+                                        prevPubKey
+                                        currSigAlgParams)
+                      (throw (CertPathValidatorException.
+                               (java-str "Algorithm constraints check failed on "
+                                         currSigAlg
+                                         " signature and "
+                                         (.getAlgorithm currPubKey)
+                                         " key with size of "
+                                         (KeyUtil/getKeySize currPubKey)
+                                         "bits")
+                               nil
+                               nil
+                               -1
+                               CertPathValidatorException$BasicReason/ALGORITHM_CONSTRAINED)))
+                    (when-not (.permits constraints
+                                        SIGNATURE_PRIMITIVE_SET
+                                        currSigAlg
+                                        currSigAlgParams)
+                      (throw (CertPathValidatorException.
+                               (java-str
+                                 "Algorithm constraints check failed on signature algorithm: "
+                                 currSigAlg)
+                               nil
+                               nil
+                               -1
+                               CertPathValidatorException$BasicReason/ALGORITHM_CONSTRAINED))))
+                (let [^:mutable ^{:tag (Set CryptoPrimitive)} primitives KU_PRIMITIVE_SET]
+                  (when (some? keyUsage)
+                    (set! primitives (EnumSet/noneOf CryptoPrimitive))
+                    (when (or (or (or (aget keyUsage 0) (aget keyUsage 1)) (aget keyUsage 5))
+                              (aget keyUsage 6))
+                      (.add primitives CryptoPrimitive/SIGNATURE))
+                    (when (aget keyUsage 2) (.add primitives CryptoPrimitive/KEY_ENCAPSULATION))
+                    (when (aget keyUsage 3) (.add primitives CryptoPrimitive/PUBLIC_KEY_ENCRYPTION))
+                    (when (aget keyUsage 4) (.add primitives CryptoPrimitive/KEY_AGREEMENT))
+                    (when (.isEmpty primitives)
+                      (throw (CertPathValidatorException.
+                               "incorrect KeyUsage extension bits"
+                               nil
+                               nil
+                               -1
+                               PKIXReason/INVALID_KEY_USAGE))))
+                  (when-not (.permits constraints primitives currPubKey)
+                    (throw (CertPathValidatorException.
+                             (java-str "Algorithm constraints check failed on "
+                                       (.getAlgorithm currPubKey)
+                                       " key with size of "
+                                       (KeyUtil/getKeySize currPubKey)
+                                       "bits")
+                             nil
+                             nil
+                             -1
+                             CertPathValidatorException$BasicReason/ALGORITHM_CONSTRAINED))))))
+            (when (some? prevPubKey)
+              (when (PKIX/isDSAPublicKeyWithoutParams currPubKey)
+                (when-not (instance? DSAPublicKey prevPubKey)
+                  (throw (CertPathValidatorException.
+                           "Input key is not of a appropriate type for inheriting parameters")))
+                (let [params (.getParams (cast DSAPublicKey prevPubKey))]
+                  (when (nil? params)
+                    (throw (CertPathValidatorException. "Key parameters missing from public key.")))
+                  (try
+                    (let [y (.getY (cast DSAPublicKey currPubKey))
+                          kf (KeyFactory/getInstance "DSA")
+                          ks (DSAPublicKeySpec. y (.getP params) (.getQ params) (.getG params))]
+                      (set! currPubKey (.generatePublic kf ks)))
+                    (catch GeneralSecurityException e
+                      (throw (CertPathValidatorException.
+                               (java-str "Unable to generate key with inherited parameters: "
+                                         (.getMessage e))
+                               e)))))))
+            (set! prevPubKey currPubKey))))))
+
+  (method ^:private setTrustAnchorAndKeys ^void [this ^TrustAnchor anchor]
+    (if (some? (.getTrustedCert anchor))
+        (set! (.-trustedPubKey this) (.getPublicKey (.getTrustedCert anchor)))
+        (set! (.-trustedPubKey this) (.getCAPublicKey anchor)))
+    (set! (.-anchor this) anchor)
+    (set! (.-prevPubKey this) (.-trustedPubKey this)))
+
+  (method trySetTrustAnchor ^void [this ^TrustAnchor anchor]
+    (when (nil? (.-trustedPubKey this)) (.setTrustAnchorAndKeys this anchor)))
+
+  (method ^:static check :throws [CertPathValidatorException] ^void [^PublicKey key
+                                                                     ^AlgorithmId algorithmId
+                                                                     ^String variant
+                                                                     ^TrustAnchor anchor]
+    (.permits (DisabledAlgorithmConstraints/certPathConstraints)
+              (.getName algorithmId)
+              (.getParameters algorithmId)
+              (CertPathConstraintsParameters. key variant anchor nil)
+              true)))

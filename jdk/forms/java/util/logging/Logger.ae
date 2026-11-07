@@ -1,0 +1,696 @@
+;; Converted from jdk26u src/java.logging/share/classes/java/util/logging/Logger.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.util.logging)
+
+(import '(java.lang.ref WeakReference)
+        '(java.util ArrayList Iterator Locale MissingResourceException Objects ResourceBundle)
+        '(java.util.concurrent CopyOnWriteArrayList)
+        '(java.util.function Supplier)
+        '(jdk.internal.access JavaUtilResourceBundleAccess SharedSecrets)
+        '(jdk.internal.logger DefaultLoggerFinder)
+        '(jdk.internal.reflect CallerSensitive CallerSensitiveAdapter Reflection))
+
+(defclass ^:public Logger
+  (field ^:private ^:static ^:final ^Handler/1 emptyHandlers (new Handler/1 0))
+
+  (field ^:private ^:static ^:final ^int offValue (.intValue Level/OFF))
+
+  (field ^:static ^:final ^String SYSTEM_LOGGER_RB_NAME "sun.util.logging.resources.logging")
+
+  (defclass ^:private ^:static ^:final LoggerBundle
+    (field ^:final ^String resourceBundleName)
+
+    (field ^:final ^ResourceBundle userBundle)
+
+    (constructor ^:private [this ^String resourceBundleName ^ResourceBundle bundle]
+      (set! (.-resourceBundleName this) resourceBundleName)
+      (set! (.-userBundle this) bundle))
+
+    (method isSystemBundle ^boolean [this]
+      (.equals SYSTEM_LOGGER_RB_NAME resourceBundleName))
+
+    (method ^:static get ^LoggerBundle [^String name ^ResourceBundle bundle]
+      (cond
+        (and (nil? name) (nil? bundle)) NO_RESOURCE_BUNDLE
+        (and (.equals SYSTEM_LOGGER_RB_NAME name) (nil? bundle)) SYSTEM_BUNDLE
+        :else (LoggerBundle. name bundle))))
+
+  (field ^:private ^:static ^:final ^LoggerBundle SYSTEM_BUNDLE
+    (LoggerBundle. SYSTEM_LOGGER_RB_NAME nil))
+
+  (field ^:private ^:static ^:final ^LoggerBundle NO_RESOURCE_BUNDLE (LoggerBundle. nil nil))
+
+  (defclass ^:private ^:static ^:final RbAccess
+    (field ^:static ^:final ^JavaUtilResourceBundleAccess RB_ACCESS
+      (SharedSecrets/getJavaUtilResourceBundleAccess)))
+
+  (defclass ^:private ^:static ^:final ConfigurationData
+    (field ^:private ^:volatile ^ConfigurationData delegate)
+
+    (field ^:volatile ^boolean useParentHandlers)
+
+    (field ^:volatile ^Filter filter)
+
+    (field ^:volatile ^Level levelObject)
+
+    (field ^:volatile ^int levelValue)
+
+    (field ^:final ^{:tag (CopyOnWriteArrayList Handler)} handlers (CopyOnWriteArrayList.))
+
+    (constructor [this]
+      (set! delegate this)
+      (set! useParentHandlers true)
+      (set! levelValue (.intValue Level/INFO)))
+
+    (method setUseParentHandlers ^void [this ^boolean flag]
+      (set! useParentHandlers flag)
+      (when-not (identical? delegate this)
+        (let [system delegate]
+          (locking system (set! (.-useParentHandlers system) useParentHandlers)))))
+
+    (method setFilter ^void [this ^Filter f]
+      (set! filter f)
+      (when-not (identical? delegate this)
+        (let [system delegate] (locking system (set! (.-filter system) filter)))))
+
+    (method setLevelObject ^void [this ^Level l]
+      (set! levelObject l)
+      (when-not (identical? delegate this)
+        (let [system delegate] (locking system (set! (.-levelObject system) levelObject)))))
+
+    (method setLevelValue ^void [this ^int v]
+      (set! levelValue v)
+      (when-not (identical? delegate this)
+        (let [system delegate] (locking system (set! (.-levelValue system) levelValue)))))
+
+    (method addHandler ^void [this ^Handler h]
+      (when (.add handlers h)
+        (when-not (identical? delegate this)
+          (let [system delegate] (locking system (.addIfAbsent (.-handlers system) h))))))
+
+    (method removeHandler ^void [this ^Handler h]
+      (when (.remove handlers h)
+        (when-not (identical? delegate this)
+          (let [system delegate] (locking system (.remove (.-handlers system) h))))))
+
+    (method merge ^ConfigurationData [this ^Logger systemPeer]
+      (when-not (.-isSystemLogger systemPeer) (throw (InternalError. "not a system logger")))
+      (let [system (.-config systemPeer)]
+        (if (identical? system this)
+            system
+            (do
+              (locking system
+                (when (identical? delegate system) (return system))
+                (set! delegate system)
+                (set! (.-useParentHandlers system) useParentHandlers)
+                (set! (.-filter system) filter)
+                (set! (.-levelObject system) levelObject)
+                (set! (.-levelValue system) levelValue)
+                (for-each [^Handler h handlers]
+                  (when-not (.contains (.-handlers system) h) (.addHandler systemPeer h)))
+                (.retainAll (.-handlers system) handlers)
+                (.addAllAbsent (.-handlers system) handlers))
+              (locking treeLock (.updateEffectiveLevel systemPeer))
+              system)))))
+
+  (field ^:private ^:volatile ^ConfigurationData config)
+
+  (field ^:private ^:volatile ^LogManager manager)
+
+  (field ^:private ^String name)
+
+  (field ^:private ^:volatile ^LoggerBundle loggerBundle NO_RESOURCE_BUNDLE)
+
+  (field ^:private ^boolean anonymous)
+
+  (field ^:private ^{:tag (WeakReference ResourceBundle)} catalogRef)
+
+  (field ^:private ^String catalogName)
+
+  (field ^:private ^Locale catalogLocale)
+
+  (field ^:private ^:static ^:final treeLock (Object.))
+
+  (field ^:private ^:volatile ^Logger parent)
+
+  (field ^:private ^{:tag (ArrayList LogManager$LoggerWeakRef)} kids)
+
+  (field ^:private ^{:tag (WeakReference Module)} callerModuleRef)
+
+  (field ^:private ^:final ^boolean isSystemLogger)
+
+  (field ^:public ^:static ^:final ^String GLOBAL_LOGGER_NAME "global")
+
+  (method ^:public ^:static ^:final getGlobal ^Logger []
+    (LogManager/getLogManager)
+    global)
+
+  (field ^:public ^:static ^:final ^{Deprecated true} ^Logger global (Logger. GLOBAL_LOGGER_NAME))
+
+  (constructor ^:protected [this ^String name ^String resourceBundleName]
+    (this. name resourceBundleName nil (LogManager/getLogManager) false))
+
+  (constructor [this ^String name ^String resourceBundleName ^Module caller ^LogManager manager
+                ^boolean isSystemLogger]
+    (set! (.-manager this) manager)
+    (set! (.-isSystemLogger this) isSystemLogger)
+    (set! (.-config this) (ConfigurationData.))
+    (set! (.-name this) name)
+    (.setupResourceInfo this resourceBundleName caller))
+
+  (method ^:final mergeWithSystemLogger ^void [this ^Logger system]
+    (when (or (or (or (not (.-isSystemLogger system)) anonymous) (nil? name))
+              (not (.equals name (.-name system))))
+      (throw (InternalError. "invalid logger merge")))
+    (.ensureManagerInitialized this)
+    (let [cfg config]
+      (when-not (identical? cfg (.-config system)) (set! config (.merge cfg system)))))
+
+  (method ^:private setCallerModuleRef ^void [this ^Module callerModule]
+    (when (some? callerModule) (set! (.-callerModuleRef this) (WeakReference. callerModule))))
+
+  (method ^:private getCallerModule ^Module [this]
+    (when (some? callerModuleRef) (cast Module (.get callerModuleRef))))
+
+  (constructor ^:private [this ^String name]
+    (set! (.-name this) name)
+    (set! (.-isSystemLogger this) true)
+    (set! config (ConfigurationData.)))
+
+  (method setLogManager ^void [this ^LogManager manager]
+    (set! (.-manager this) manager))
+
+  (method ^:private ensureManagerInitialized ^void [this]
+    (when-not anonymous (when (nil? manager) (set! manager (LogManager/getLogManager)))))
+
+  (defclass ^:private ^:static SystemLoggerHelper
+    (field ^:static ^boolean disableCallerCheck
+      (Boolean/getBoolean "sun.util.logging.disableCallerCheck")))
+
+  (method ^:private ^:static demandLogger ^Logger [^String name ^String resourceBundleName
+                                                   ^{:tag (Class ?)} caller]
+    (let [manager (LogManager/getLogManager)]
+      (when-not SystemLoggerHelper/disableCallerCheck
+        (when (DefaultLoggerFinder/isSystem (.getModule caller))
+          (return (.demandSystemLogger manager name resourceBundleName caller))))
+      (.demandLogger manager name resourceBundleName caller)))
+
+  (method ^:public ^:static ^{CallerSensitive true} getLogger ^Logger [^String name]
+    (Logger/getLogger name (Reflection/getCallerClass)))
+
+  (method ^:private ^:static ^{CallerSensitiveAdapter true} getLogger ^Logger [^String name
+                                                                               ^{:tag (Class ?)} callerClass]
+    (Logger/demandLogger name nil callerClass))
+
+  (method ^:public ^:static ^{CallerSensitive true} getLogger ^Logger [^String name
+                                                                       ^String resourceBundleName]
+    (Logger/getLogger name resourceBundleName (Reflection/getCallerClass)))
+
+  (method ^:private ^:static ^{CallerSensitiveAdapter true} getLogger ^Logger [^String name
+                                                                               ^String resourceBundleName
+                                                                               ^{:tag (Class ?)} callerClass]
+    (let [result (Logger/demandLogger name resourceBundleName callerClass)]
+      (.setupResourceInfo result resourceBundleName callerClass)
+      result))
+
+  (method ^:static getPlatformLogger ^Logger [^String name]
+    (let [manager (LogManager/getLogManager)
+          result (.demandSystemLogger manager name SYSTEM_LOGGER_RB_NAME (cast Module nil))]
+      result))
+
+  (method ^:public ^:static getAnonymousLogger ^Logger []
+    (Logger/getAnonymousLogger nil))
+
+  (method ^:public ^:static ^{CallerSensitive true} getAnonymousLogger ^Logger [^String resourceBundleName]
+    (let [manager (LogManager/getLogManager)]
+      (.drainLoggerRefQueueBounded manager)
+      (let [^{:tag (Class ?)} callerClass (Reflection/getCallerClass)
+            module (.getModule callerClass)
+            result (Logger. nil resourceBundleName module manager false)]
+        (set! (.-anonymous result) true)
+        (let [root (.getLogger manager "")] (.doSetParent result root) result))))
+
+  (method ^:public getResourceBundle ^ResourceBundle [this]
+    (.findResourceBundle this (.getResourceBundleName this) true))
+
+  (method ^:public getResourceBundleName ^String [this]
+    (.-resourceBundleName loggerBundle))
+
+  (method ^:public setFilter ^void [this ^Filter newFilter]
+    (.ensureManagerInitialized this)
+    (.setFilter config newFilter))
+
+  (method ^:public getFilter ^Filter [this] (.-filter config))
+
+  (method ^:public log ^void [this ^LogRecord record]
+    (when-not (not (.isLoggable this (.getLevel record)))
+      (let [theFilter (.-filter config)]
+        (when-not (and (some? theFilter) (not (.isLoggable theFilter record)))
+          (let [^:mutable logger this]
+            (while (some? logger)
+              (let [^Handler/1 loggerHandlers (if isSystemLogger
+                                                  (.accessCheckedHandlers logger)
+                                                  (.getHandlers logger))]
+                (for-each [^Handler handler loggerHandlers] (.publish handler record))
+                (let [useParentHdls (if isSystemLogger
+                                        (.-useParentHandlers (.-config logger))
+                                        (.getUseParentHandlers logger))]
+                  (when-not useParentHdls (break))
+                  (set! logger (if isSystemLogger (.-parent logger) (.getParent logger)))))))))))
+
+  (method ^:private doLog ^void [this ^LogRecord lr]
+    (.setLoggerName lr name)
+    (let [lb (.getEffectiveLoggerBundle this)
+          bundle (.-userBundle lb)
+          ebname (.-resourceBundleName lb)]
+      (when (and (some? ebname) (some? bundle))
+        (.setResourceBundleName lr ebname)
+        (.setResourceBundle lr bundle))
+      (.log this lr)))
+
+  (method ^:public log ^void [this ^Level level ^String msg]
+    (when-not (not (.isLoggable this level)) (let [lr (LogRecord. level msg)] (.doLog this lr))))
+
+  (method ^:public log ^void [this ^Level level ^{:tag (Supplier String)} msgSupplier]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level (cast String (.get msgSupplier)))] (.doLog this lr))))
+
+  (method ^:public log ^void [this ^Level level ^String msg param1]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)
+            params (new Object/1 [param1])]
+        (.setParameters lr params)
+        (.doLog this lr))))
+
+  (method ^:public log ^void [this ^Level level ^String msg ^Object/1 params]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)] (.setParameters lr params) (.doLog this lr))))
+
+  (method ^:public log ^void [this ^Level level ^String msg ^Throwable thrown]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)] (.setThrown lr thrown) (.doLog this lr))))
+
+  (method ^:public log ^void [this ^Level level ^Throwable thrown
+                              ^{:tag (Supplier String)} msgSupplier]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level (cast String (.get msgSupplier)))]
+        (.setThrown lr thrown)
+        (.doLog this lr))))
+
+  (method ^:public logp ^void [this ^Level level ^String sourceClass ^String sourceMethod
+                               ^String msg]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (.doLog this lr))))
+
+  (method ^:public logp ^void [this ^Level level ^String sourceClass ^String sourceMethod
+                               ^{:tag (Supplier String)} msgSupplier]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level (cast String (.get msgSupplier)))]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (.doLog this lr))))
+
+  (method ^:public logp ^void [this ^Level level ^String sourceClass ^String sourceMethod
+                               ^String msg param1]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (let [params (new Object/1 [param1])] (.setParameters lr params) (.doLog this lr)))))
+
+  (method ^:public logp ^void [this ^Level level ^String sourceClass ^String sourceMethod
+                               ^String msg ^Object/1 params]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (.setParameters lr params)
+        (.doLog this lr))))
+
+  (method ^:public logp ^void [this ^Level level ^String sourceClass ^String sourceMethod
+                               ^String msg ^Throwable thrown]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (.setThrown lr thrown)
+        (.doLog this lr))))
+
+  (method ^:public logp ^void [this ^Level level ^String sourceClass ^String sourceMethod
+                               ^Throwable thrown ^{:tag (Supplier String)} msgSupplier]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level (cast String (.get msgSupplier)))]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (.setThrown lr thrown)
+        (.doLog this lr))))
+
+  (method ^:private doLog ^void [this ^LogRecord lr ^String rbname]
+    (.setLoggerName lr name)
+    (when (some? rbname)
+      (.setResourceBundleName lr rbname)
+      (.setResourceBundle lr (.findResourceBundle this rbname false)))
+    (.log this lr))
+
+  (method ^:private doLog ^void [this ^LogRecord lr ^ResourceBundle rb]
+    (.setLoggerName lr name)
+    (when (some? rb) (.setResourceBundleName lr (.getBaseBundleName rb)) (.setResourceBundle lr rb))
+    (.log this lr))
+
+  (method ^:public ^{Deprecated true} logrb ^void [this ^Level level ^String sourceClass
+                                                   ^String sourceMethod ^String bundleName
+                                                   ^String msg]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (.doLog this lr bundleName))))
+
+  (method ^:public ^{Deprecated true} logrb ^void [this ^Level level ^String sourceClass
+                                                   ^String sourceMethod ^String bundleName
+                                                   ^String msg param1]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (let [params (new Object/1 [param1])]
+          (.setParameters lr params)
+          (.doLog this lr bundleName)))))
+
+  (method ^:public ^{Deprecated true} logrb ^void [this ^Level level ^String sourceClass
+                                                   ^String sourceMethod ^String bundleName
+                                                   ^String msg ^Object/1 params]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (.setParameters lr params)
+        (.doLog this lr bundleName))))
+
+  (method ^:public logrb ^void [this ^Level level ^String sourceClass ^String sourceMethod
+                                ^ResourceBundle bundle ^String msg & ^Object/1 params]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (when (and (some? params) (not (== (alength params) 0))) (.setParameters lr params))
+        (.doLog this lr bundle))))
+
+  (method ^:public logrb ^void [this ^Level level ^ResourceBundle bundle ^String msg &
+                                ^Object/1 params]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)]
+        (when (and (some? params) (not (== (alength params) 0))) (.setParameters lr params))
+        (.doLog this lr bundle))))
+
+  (method ^:public ^{Deprecated true} logrb ^void [this ^Level level ^String sourceClass
+                                                   ^String sourceMethod ^String bundleName
+                                                   ^String msg ^Throwable thrown]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (.setThrown lr thrown)
+        (.doLog this lr bundleName))))
+
+  (method ^:public logrb ^void [this ^Level level ^String sourceClass ^String sourceMethod
+                                ^ResourceBundle bundle ^String msg ^Throwable thrown]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (.setThrown lr thrown)
+        (.doLog this lr bundle))))
+
+  (method ^:public logrb ^void [this ^Level level ^ResourceBundle bundle ^String msg
+                                ^Throwable thrown]
+    (when-not (not (.isLoggable this level))
+      (let [lr (LogRecord. level msg)] (.setThrown lr thrown) (.doLog this lr bundle))))
+
+  (method ^:public entering ^void [this ^String sourceClass ^String sourceMethod]
+    (.logp this Level/FINER sourceClass sourceMethod "ENTRY"))
+
+  (method ^:public entering ^void [this ^String sourceClass ^String sourceMethod param1]
+    (.logp this Level/FINER sourceClass sourceMethod "ENTRY {0}" param1))
+
+  (method ^:public entering ^void [this ^String sourceClass ^String sourceMethod ^Object/1 params]
+    (let [^:mutable msg "ENTRY"]
+      (if (nil? params)
+          (.logp this Level/FINER sourceClass sourceMethod msg)
+          (when-not (not (.isLoggable this Level/FINER))
+            (when (> (alength params) 0)
+              (let [b (StringBuilder. msg)]
+                (loop [^int i 0]
+                  (when (< i (alength params))
+                    (.append (.append (.append (.append b \space) \{) i) \})
+                    (recur (unchecked-inc-int i))))
+                (set! msg (.toString b))))
+            (.logp this Level/FINER sourceClass sourceMethod msg params)))))
+
+  (method ^:public exiting ^void [this ^String sourceClass ^String sourceMethod]
+    (.logp this Level/FINER sourceClass sourceMethod "RETURN"))
+
+  (method ^:public exiting ^void [this ^String sourceClass ^String sourceMethod result]
+    (.logp this Level/FINER sourceClass sourceMethod "RETURN {0}" result))
+
+  (method ^:public throwing ^void [this ^String sourceClass ^String sourceMethod ^Throwable thrown]
+    (when-not (not (.isLoggable this Level/FINER))
+      (let [lr (LogRecord. Level/FINER "THROW")]
+        (.setSourceClassName lr sourceClass)
+        (.setSourceMethodName lr sourceMethod)
+        (.setThrown lr thrown)
+        (.doLog this lr))))
+
+  (method ^:public severe ^void [this ^String msg]
+    (.log this Level/SEVERE msg))
+
+  (method ^:public warning ^void [this ^String msg]
+    (.log this Level/WARNING msg))
+
+  (method ^:public info ^void [this ^String msg]
+    (.log this Level/INFO msg))
+
+  (method ^:public config ^void [this ^String msg]
+    (.log this Level/CONFIG msg))
+
+  (method ^:public fine ^void [this ^String msg]
+    (.log this Level/FINE msg))
+
+  (method ^:public finer ^void [this ^String msg]
+    (.log this Level/FINER msg))
+
+  (method ^:public finest ^void [this ^String msg]
+    (.log this Level/FINEST msg))
+
+  (method ^:public severe ^void [this ^{:tag (Supplier String)} msgSupplier]
+    (.log this Level/SEVERE msgSupplier))
+
+  (method ^:public warning ^void [this ^{:tag (Supplier String)} msgSupplier]
+    (.log this Level/WARNING msgSupplier))
+
+  (method ^:public info ^void [this ^{:tag (Supplier String)} msgSupplier]
+    (.log this Level/INFO msgSupplier))
+
+  (method ^:public config ^void [this ^{:tag (Supplier String)} msgSupplier]
+    (.log this Level/CONFIG msgSupplier))
+
+  (method ^:public fine ^void [this ^{:tag (Supplier String)} msgSupplier]
+    (.log this Level/FINE msgSupplier))
+
+  (method ^:public finer ^void [this ^{:tag (Supplier String)} msgSupplier]
+    (.log this Level/FINER msgSupplier))
+
+  (method ^:public finest ^void [this ^{:tag (Supplier String)} msgSupplier]
+    (.log this Level/FINEST msgSupplier))
+
+  (method ^:public setLevel ^void [this ^Level newLevel]
+    (.ensureManagerInitialized this)
+    (locking treeLock (.setLevelObject config newLevel) (.updateEffectiveLevel this)))
+
+  (method ^:final isLevelInitialized ^boolean [this]
+    (some? (.-levelObject config)))
+
+  (method ^:public getLevel ^Level [this] (.-levelObject config))
+
+  (method ^:public isLoggable ^boolean [this ^Level level]
+    (let [levelValue (.-levelValue config)]
+      (if (or (< (.intValue level) levelValue) (== levelValue offValue)) false true)))
+
+  (method ^:public getName ^String [this] name)
+
+  (method ^:public addHandler ^void [this ^Handler handler]
+    (Objects/requireNonNull handler)
+    (.ensureManagerInitialized this)
+    (.addHandler config handler))
+
+  (method ^:public removeHandler ^void [this ^Handler handler]
+    (.ensureManagerInitialized this)
+    (when (some? handler) (.removeHandler config handler)))
+
+  (method ^:public getHandlers ^Handler/1 [this]
+    (.accessCheckedHandlers this))
+
+  (method accessCheckedHandlers ^Handler/1 [this]
+    (cast Handler/1 (.toArray (.-handlers config) emptyHandlers)))
+
+  (method ^:public setUseParentHandlers ^void [this ^boolean useParentHandlers]
+    (.ensureManagerInitialized this)
+    (.setUseParentHandlers config useParentHandlers))
+
+  (method ^:public getUseParentHandlers ^boolean [this]
+    (.-useParentHandlers config))
+
+  (method ^:private catalog ^ResourceBundle [this]
+    (let [^{:tag (WeakReference ResourceBundle)} ref catalogRef]
+      (when (some? ref) (cast ResourceBundle (.get ref)))))
+
+  (method ^:private ^:synchronized findResourceBundle ^ResourceBundle [this ^String name
+                                                                       ^boolean useCallersModule]
+    (when (some? name)
+      (let [currentLocale (Locale/getDefault)
+            lb loggerBundle
+            ^:mutable catalog (.catalog this)]
+        (cond
+          (and (some? (.-userBundle lb)) (.equals name (.-resourceBundleName lb))) (.-userBundle lb)
+          (and (and (some? catalog) (.equals currentLocale catalogLocale))
+               (.equals name catalogName))
+            catalog
+          :else
+            (let [^:mutable cl (.getContextClassLoader (Thread/currentThread))]
+              (when (nil? cl) (set! cl (ClassLoader/getSystemClassLoader)))
+              (let [callerModule (.getCallerModule this)]
+                (if (or (or (not useCallersModule) (nil? callerModule))
+                        (not (.isNamed callerModule)))
+                    (try
+                      (let [mod (.getUnnamedModule cl)]
+                        (set! catalog (.getBundle RbAccess/RB_ACCESS name currentLocale mod))
+                        (set! catalogRef (WeakReference. catalog))
+                        (set! catalogName name)
+                        (set! catalogLocale currentLocale)
+                        catalog)
+                      (catch MissingResourceException ex
+                        (when (and useCallersModule (some? callerModule))
+                          (try
+                            (let [moduleCL (.getClassLoader callerModule)]
+                              (when-not (or (identical? moduleCL cl) (nil? moduleCL))
+                                (set! catalog
+                                      (ResourceBundle/getBundle name currentLocale moduleCL))
+                                (set! catalogRef (WeakReference. catalog))
+                                (set! catalogName name)
+                                (set! catalogLocale currentLocale)
+                                catalog))
+                            (catch MissingResourceException x nil)))))
+                    (try
+                      (set! catalog (.getBundle RbAccess/RB_ACCESS name currentLocale callerModule))
+                      (set! catalogRef (WeakReference. catalog))
+                      (set! catalogName name)
+                      (set! catalogLocale currentLocale)
+                      catalog
+                      (catch MissingResourceException ex nil)))))))))
+
+  (method ^:private setupResourceInfo ^void [this ^String name ^{:tag (Class ?)} caller]
+    (let [^Module module (when (some? caller) (.getModule caller))]
+      (.setupResourceInfo this name module)))
+
+  (method ^:private ^:synchronized setupResourceInfo ^void [this ^String name ^Module callerModule]
+    (let [lb loggerBundle]
+      (when (some? (.-resourceBundleName lb))
+        (when (.equals (.-resourceBundleName lb) name) (return))
+        (throw (IllegalArgumentException. (java-str (.-resourceBundleName lb) " != " name))))
+      (when (some? name)
+        (.setCallerModuleRef this callerModule)
+        (when (and isSystemLogger
+                   (and (some? callerModule) (not (DefaultLoggerFinder/isSystem callerModule))))
+          (.ensureManagerInitialized this))
+        (if (.equals name SYSTEM_LOGGER_RB_NAME)
+            (set! loggerBundle SYSTEM_BUNDLE)
+            (let [bundle (.findResourceBundle this name true)]
+              (when (nil? bundle)
+                (set! (.-callerModuleRef this) nil)
+                (throw (MissingResourceException.
+                         (java-str "Can't find " name " bundle from ")
+                         name
+                         "")))
+              (set! loggerBundle (LoggerBundle/get name nil)))))))
+
+  (method ^:public setResourceBundle ^void [this ^ResourceBundle bundle]
+    (.ensureManagerInitialized this)
+    (let [baseName (.getBaseBundleName bundle)]
+      (when (or (nil? baseName) (.isEmpty baseName))
+        (throw (IllegalArgumentException. "resource bundle must have a name")))
+      (locking this
+        (let [lb loggerBundle
+              canReplaceResourceBundle (or (nil? (.-resourceBundleName lb))
+                                           (.equals (.-resourceBundleName lb) baseName))]
+          (when-not canReplaceResourceBundle
+            (throw (IllegalArgumentException. "can't replace resource bundle")))
+          (set! loggerBundle (LoggerBundle/get baseName bundle))))))
+
+  (method ^:public getParent ^Logger [this] parent)
+
+  (method ^:public setParent ^void [this ^Logger parent]
+    (when (nil? parent) (throw (NullPointerException.)))
+    (.ensureManagerInitialized this)
+    (.doSetParent this parent))
+
+  (method ^:private doSetParent ^void [this ^Logger newParent]
+    (locking treeLock
+      (let [^:mutable ^LogManager$LoggerWeakRef ref nil]
+        (when (some? parent)
+          (loop [^{:tag (Iterator LogManager$LoggerWeakRef)} iter (.iterator (.-kids parent))]
+            (when (.hasNext iter)
+              (set! ref (cast LogManager$LoggerWeakRef (.next iter)))
+              (if (.refersTo ref this) (.remove iter) (do (set! ref nil) (recur iter))))))
+        (set! parent newParent)
+        (when (nil? (.-kids parent)) (set! (.-kids parent) (ArrayList. 2)))
+        (when (nil? ref) (set! ref (.new manager LogManager$LoggerWeakRef this)))
+        (.setParentRef ref (WeakReference. parent))
+        (.add (.-kids parent) ref)
+        (.updateEffectiveLevel this))))
+
+  (method ^:final removeChildLogger ^void [this ^LogManager$LoggerWeakRef child]
+    (locking treeLock
+      (loop [^{:tag (Iterator LogManager$LoggerWeakRef)} iter (.iterator kids)]
+        (when (.hasNext iter)
+          (let [ref (cast LogManager$LoggerWeakRef (.next iter))]
+            (if (identical? ref child) (do (.remove iter) (return)) (recur iter)))))))
+
+  (method ^:private updateEffectiveLevel ^void [this]
+    (let [^:mutable ^int newLevelValue 0
+          cfg config
+          levelObject (.-levelObject cfg)]
+      (cond
+        (some? levelObject) (set! newLevelValue (.intValue levelObject))
+        (some? parent) (set! newLevelValue (.-levelValue (.-config parent)))
+        :else (set! newLevelValue (.intValue Level/INFO)))
+      (when-not (== (.-levelValue cfg) newLevelValue)
+        (.setLevelValue cfg newLevelValue)
+        (when (some? kids)
+          (for-each [^LogManager$LoggerWeakRef ref kids]
+            (let [kid (cast Logger (.get ref))] (when (some? kid) (.updateEffectiveLevel kid))))))))
+
+  (method ^:private getEffectiveLoggerBundle ^LoggerBundle [this]
+    (let [lb loggerBundle]
+      (if (.isSystemBundle lb)
+          SYSTEM_BUNDLE
+          (let [b (.getResourceBundle this)]
+            (cond
+              (and (some? b) (identical? b (.-userBundle lb))) lb
+              (some? b) (let [rbName (.getResourceBundleName this)] (LoggerBundle/get rbName b))
+              :else
+                (let [^:mutable target (.-parent this)]
+                  (while (some? target)
+                    (let [trb (.-loggerBundle target)]
+                      (when (.isSystemBundle trb) (return SYSTEM_BUNDLE))
+                      (when (some? (.-userBundle trb)) (return trb))
+                      (let [^String rbName (if isSystemLogger
+                                               (when (.-isSystemLogger target)
+                                                 (.-resourceBundleName trb))
+                                               (.getResourceBundleName target))]
+                        (when (some? rbName)
+                          (return (LoggerBundle/get rbName (.findResourceBundle this rbName true))))
+                        (set! target (if isSystemLogger (.-parent target) (.getParent target))))))
+                  NO_RESOURCE_BUNDLE)))))))

@@ -1,0 +1,248 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/validator/PKIXValidator.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.validator)
+
+(import '(java.security AlgorithmConstraints
+                        GeneralSecurityException
+                        InvalidAlgorithmParameterException
+                        NoSuchAlgorithmException
+                        PublicKey
+                        Timestamp)
+        '(java.security.cert CertPath
+                             CertPathBuilder
+                             CertPathValidator
+                             CertStore
+                             Certificate
+                             CertificateException
+                             CertificateFactory
+                             CollectionCertStoreParameters
+                             PKIXBuilderParameters
+                             PKIXCertPathBuilderResult
+                             PKIXCertPathChecker
+                             PKIXCertPathValidatorResult
+                             PKIXRevocationChecker
+                             TrustAnchor
+                             X509CertSelector
+                             X509Certificate)
+        '(java.util ArrayList Arrays Collection HashMap HashSet List Map Set)
+        '(javax.security.auth.x500 X500Principal)
+        '(sun.security.provider.certpath AlgorithmChecker PKIXExtendedParameters)
+        '(sun.security.util SecurityProperties))
+
+(defclass ^:public ^:final PKIXValidator
+  :extends Validator
+
+  (field ^:private ^:static ^:final ^boolean checkTLSRevocation
+    (Boolean/getBoolean "com.sun.net.ssl.checkRevocation"))
+
+  (field ^:private ^:static ^:final ^boolean ALLOW_NON_CA_ANCHOR (PKIXValidator/allowNonCaAnchor))
+
+  (method ^:private ^:static allowNonCaAnchor ^boolean []
+    (let [prop (SecurityProperties/getOverridableProperty "jdk.security.allowNonCaAnchor")]
+      (and (some? prop) (or (.isEmpty prop) (.equalsIgnoreCase prop "true")))))
+
+  (field ^:private ^:final ^{:tag (Set X509Certificate)} trustedCerts)
+
+  (field ^:private ^:final ^PKIXBuilderParameters parameterTemplate)
+
+  (field ^:private ^int certPathLength -1)
+
+  (field ^:private ^:final ^{:tag (Map X500Principal (List PublicKey))} trustedSubjects)
+
+  (field ^:private ^:final ^CertificateFactory factory)
+
+  (constructor [this ^String variant ^{:tag (Collection X509Certificate)} trustedCerts]
+    (super. PKIXValidator/TYPE_PKIX variant)
+    (set! (.-trustedCerts this)
+          (if (instance? Set trustedCerts) (cast Set trustedCerts) ^Set (HashSet. trustedCerts)))
+    (let [^{:tag (Set TrustAnchor)} trustAnchors (HashSet.)]
+      (for-each [^X509Certificate cert trustedCerts] (.add trustAnchors (TrustAnchor. cert nil)))
+      (try
+        (set! parameterTemplate (PKIXBuilderParameters. trustAnchors nil))
+        (set! factory (CertificateFactory/getInstance "X.509"))
+        (catch InvalidAlgorithmParameterException e
+          (throw (RuntimeException. (java-str "Unexpected error: " (.toString e)) e)))
+        (catch CertificateException e (throw (RuntimeException. "Internal error" e))))
+      (.setDefaultParameters this variant)
+      (set! trustedSubjects (.setTrustedSubjects this))))
+
+  (constructor [this ^String variant ^PKIXBuilderParameters params]
+    (super. PKIXValidator/TYPE_PKIX variant)
+    (set! trustedCerts (HashSet.))
+    (for-each [^TrustAnchor anchor (.getTrustAnchors params)]
+      (let [cert (.getTrustedCert anchor)] (when (some? cert) (.add trustedCerts cert))))
+    (set! parameterTemplate params)
+    (try
+      (set! factory (CertificateFactory/getInstance "X.509"))
+      (catch CertificateException e (throw (RuntimeException. "Internal error" e))))
+    (set! trustedSubjects (.setTrustedSubjects this)))
+
+  (method ^:private setTrustedSubjects ^{:tag (Map X500Principal (List PublicKey))} [this]
+    (let [^{:tag (Map X500Principal (List PublicKey))} subjectMap (HashMap.)]
+      (for-each [^X509Certificate cert trustedCerts]
+        (let [dn (.getSubjectX500Principal cert)
+              ^:mutable ^{:tag (List PublicKey)} keys nil]
+          (if (.containsKey subjectMap dn)
+              (set! keys (cast List (.get subjectMap dn)))
+              (do (set! keys (ArrayList.)) (.put subjectMap dn keys)))
+          (.add keys (.getPublicKey cert))))
+      subjectMap))
+
+  (method ^:public getTrustedCertificates ^{:tag (Collection X509Certificate)} [this]
+    trustedCerts)
+
+  (method ^:public getCertPathLength ^int [this] certPathLength)
+
+  (method ^:private setDefaultParameters ^void [this ^String variant]
+    (if (or (identical? variant Validator/VAR_TLS_SERVER)
+            (identical? variant Validator/VAR_TLS_CLIENT))
+        (.setRevocationEnabled parameterTemplate checkTLSRevocation)
+        (.setRevocationEnabled parameterTemplate false)))
+
+  (method ^:public getParameters ^PKIXBuilderParameters [this]
+    parameterTemplate)
+
+  (method engineValidate :throws [CertificateException] ^X509Certificate/1 [this
+                                                                            ^X509Certificate/1 chain
+                                                                            ^{:tag (Collection X509Certificate)} otherCerts
+                                                                            ^{:tag (List byte/1)} responseList
+                                                                            ^AlgorithmConstraints constraints
+                                                                            parameter]
+    (when (or (nil? chain) (== (alength chain) 0))
+      (throw (CertificateException. "null or zero-length certificate chain")))
+    (let [^:mutable ^PKIXBuilderParameters pkixParameters nil]
+      (try
+        (set! pkixParameters
+              (PKIXExtendedParameters. (cast PKIXBuilderParameters (.clone parameterTemplate))
+                                       ^Timestamp (when (instance? Timestamp parameter)
+                                                    (cast Timestamp parameter))
+                                       (.-variant this)))
+        (catch InvalidAlgorithmParameterException e))
+      (when (some? constraints)
+        (.addCertPathChecker pkixParameters (AlgorithmChecker. constraints (.-variant this))))
+      (when-not (.isEmpty responseList)
+        (PKIXValidator/addResponses pkixParameters chain responseList))
+      (let [^:mutable ^X500Principal prevIssuer nil]
+        (loop [^int i 0]
+          (when (< i (alength chain))
+            (let [cert (aget chain i)
+                  dn (.getSubjectX500Principal cert)]
+              (if (== i 0)
+                  (when (.contains trustedCerts cert)
+                    (return (new X509Certificate/1 [(aget chain 0)])))
+                  (do
+                    (when-not (.equals dn prevIssuer)
+                      (return (.doBuild this chain otherCerts pkixParameters)))
+                    (when (or (.contains trustedCerts cert)
+                              (and (.containsKey trustedSubjects dn)
+                                   (.contains (cast List (.get trustedSubjects dn))
+                                              (.getPublicKey cert))))
+                      (let [newChain (new X509Certificate/1 i)]
+                        (System/arraycopy chain 0 newChain 0 i)
+                        (return (.doValidate this newChain pkixParameters))))))
+              (set! prevIssuer (.getIssuerX500Principal cert))
+              (recur (unchecked-inc-int i)))))
+        (let [last (aget chain (unchecked-subtract-int (alength chain) 1))
+              issuer (.getIssuerX500Principal last)]
+          (if (.containsKey trustedSubjects issuer)
+              (.doValidate this chain pkixParameters)
+              (.doBuild this chain otherCerts pkixParameters))))))
+
+  (method ^:private ^:static toArray :throws [CertificateException] ^X509Certificate/1 [^CertPath path
+                                                                                        ^TrustAnchor anchor]
+    (let [trustedCert (.getTrustedCert anchor)]
+      (when (nil? trustedCert)
+        (throw (ValidatorException. "TrustAnchor must be specified as certificate")))
+      (PKIXValidator/verifyTrustAnchor trustedCert)
+      (let [^{:tag (List (? extends Certificate))} list (.getCertificates path)
+            chain (new X509Certificate/1 (unchecked-add-int (.size list) 1))]
+        (.toArray list chain)
+        (aset chain (unchecked-subtract-int (alength chain) 1) trustedCert)
+        chain)))
+
+  (method ^:private setDate ^void [this ^PKIXBuilderParameters params]
+    (let [date (.-validationDate this)] (when (some? date) (.setDate params date))))
+
+  (method ^:private doValidate :throws [CertificateException] ^X509Certificate/1 [this
+                                                                                  ^X509Certificate/1 chain
+                                                                                  ^PKIXBuilderParameters params]
+    (try
+      (.setDate this params)
+      (let [validator (CertPathValidator/getInstance "PKIX")
+            path (.generateCertPath factory (Arrays/asList chain))]
+        (set! certPathLength (alength chain))
+        (let [result (cast PKIXCertPathValidatorResult (.validate validator path params))]
+          (PKIXValidator/toArray path (.getTrustAnchor result))))
+      (catch GeneralSecurityException e
+        (throw (ValidatorException. (java-str "PKIX path validation failed: " (.toString e)) e)))))
+
+  (method ^:private ^:static verifyTrustAnchor :throws [ValidatorException] ^void [^X509Certificate trustedCert]
+    (when-not ALLOW_NON_CA_ANCHOR
+      (when-not (< (.getVersion trustedCert) 3)
+        (when (== (.getBasicConstraints trustedCert) -1)
+          (throw (ValidatorException.
+                   (java-str "TrustAnchor with subject \""
+                             (.getSubjectX500Principal trustedCert)
+                             "\" is not a CA certificate"))))
+        (let [keyUsageBits (.getKeyUsage trustedCert)]
+          (when (and (some? keyUsageBits) (not (aget keyUsageBits 5)))
+            (throw (ValidatorException.
+                     (java-str "TrustAnchor with subject \""
+                               (.getSubjectX500Principal trustedCert)
+                               "\" does not have keyCertSign bit set in KeyUsage extension"))))))))
+
+  (method ^:private doBuild :throws [CertificateException] ^X509Certificate/1 [this
+                                                                               ^X509Certificate/1 chain
+                                                                               ^{:tag (Collection X509Certificate)} otherCerts
+                                                                               ^PKIXBuilderParameters params]
+    (try
+      (.setDate this params)
+      (let [selector (X509CertSelector.)]
+        (.setCertificate selector (aget chain 0))
+        (.setTargetCertConstraints params selector)
+        (let [^{:tag (Collection X509Certificate)} certs (ArrayList.)]
+          (.addAll certs (Arrays/asList chain))
+          (when (some? otherCerts) (.addAll certs otherCerts))
+          (let [store (CertStore/getInstance "Collection" (CollectionCertStoreParameters. certs))]
+            (.addCertStore params store)
+            (let [builder (CertPathBuilder/getInstance "PKIX")
+                  result (cast PKIXCertPathBuilderResult (.build builder params))]
+              (PKIXValidator/toArray (.getCertPath result) (.getTrustAnchor result))))))
+      (catch GeneralSecurityException e
+        (throw (ValidatorException. (java-str "PKIX path building failed: " (.toString e)) e)))))
+
+  (method ^:private ^:static addResponses ^void [^PKIXBuilderParameters pkixParams
+                                                 ^X509Certificate/1 chain
+                                                 ^{:tag (List byte/1)} responseList]
+    (try
+      (let [^:mutable createdRevChk false
+            ^:mutable ^PKIXRevocationChecker revChecker nil
+            ^{:tag (List PKIXCertPathChecker)} checkerList (.getCertPathCheckers pkixParams)]
+        (for-each [^PKIXCertPathChecker checker checkerList]
+          (when (instance? PKIXRevocationChecker checker)
+            (set! revChecker (cast PKIXRevocationChecker checker))
+            (break)))
+        (when (nil? revChecker)
+          (if (.isRevocationEnabled pkixParams)
+              (do
+                (set! revChecker
+                      (cast PKIXRevocationChecker
+                            (.getRevocationChecker (CertPathValidator/getInstance "PKIX"))))
+                (set! createdRevChk true))
+              (return)))
+        (let [^{:tag (Map X509Certificate byte/1)} responseMap (.getOcspResponses revChecker)
+              limit (Integer/min (alength chain) (.size responseList))]
+          (loop [^int idx 0]
+            (when (< idx limit)
+              (let [respBytes (cast byte/1 (.get responseList idx))]
+                (if (and (and (some? respBytes) (> (alength respBytes) 0))
+                         (not (.containsKey responseMap (aget chain idx))))
+                    (do
+                      (.put responseMap (aget chain idx) respBytes)
+                      (recur (unchecked-inc-int idx)))
+                    (recur (unchecked-inc-int idx))))))
+          (.setOcspResponses revChecker responseMap)
+          (if createdRevChk
+              (.addCertPathChecker pkixParams revChecker)
+              (.setCertPathCheckers pkixParams checkerList))))
+      (catch NoSuchAlgorithmException exc))))

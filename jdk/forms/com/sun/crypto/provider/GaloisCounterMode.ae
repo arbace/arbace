@@ -1,0 +1,1277 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/crypto/provider/GaloisCounterMode.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.crypto.provider)
+
+(import '(java.lang.invoke MethodHandles VarHandle)
+        '(java.nio Buffer ByteBuffer ByteOrder)
+        '(java.security AlgorithmParameters
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        ProviderException
+                        SecureRandom)
+        '(java.security.spec AlgorithmParameterSpec InvalidParameterSpecException)
+        '(java.util Arrays)
+        '(javax.crypto AEADBadTagException
+                       BadPaddingException
+                       Cipher
+                       CipherSpi
+                       IllegalBlockSizeException
+                       NoSuchPaddingException
+                       ShortBufferException)
+        '(javax.crypto.spec GCMParameterSpec)
+        '(jdk.internal.access JavaNioAccess SharedSecrets)
+        '(jdk.internal.misc Unsafe)
+        '(jdk.internal.vm.annotation IntrinsicCandidate)
+        '(sun.nio.ch DirectBuffer)
+        '(sun.security.jca JCAUtil)
+        '(sun.security.util ArrayUtil))
+
+(defclass ^:abstract GaloisCounterMode
+  :extends CipherSpi
+
+  (field ^:private ^:static ^:final ^int DEFAULT_IV_LEN 12)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_TAG_LEN 16)
+
+  (field ^:private ^:static ^:final ^int MAX_BUF_SIZE Integer/MAX_VALUE)
+
+  (field ^:private ^:static ^:final ^int TRIGGERLEN 65536)
+
+  (field ^:private ^:static ^:final ^int PARALLEL_LEN 512)
+
+  (field ^:private ^:static ^:final ^int SPLIT_LEN 1048576)
+
+  (field ^:static ^:final ^byte/1 EMPTY_BUF (new byte/1 0))
+
+  (field ^:private ^:static ^:final ^JavaNioAccess NIO_ACCESS (SharedSecrets/getJavaNioAccess))
+
+  (field ^:private ^boolean initialized false)
+
+  (field ^:final ^SymmetricCipher blockCipher)
+
+  (field ^:private ^GCMEngine engine)
+
+  (field ^:private ^boolean encryption true)
+
+  (field ^int tagLenBytes DEFAULT_TAG_LEN)
+
+  (field ^:private ^:final ^int keySize)
+
+  (field ^boolean reInit false)
+
+  (field ^byte/1 lastKey EMPTY_BUF)
+
+  (field ^byte/1 lastIv EMPTY_BUF)
+
+  (field ^byte/1 iv nil)
+
+  (field ^SecureRandom random nil)
+
+  (constructor [this ^int keySize ^SymmetricCipher embeddedCipher]
+    (set! blockCipher embeddedCipher)
+    (set! (.-keySize this) keySize))
+
+  (method init :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                       ^int opmode
+                                                                                       ^Key key
+                                                                                       ^GCMParameterSpec spec]
+    (set! encryption (or (== opmode Cipher/ENCRYPT_MODE) (== opmode Cipher/WRAP_MODE)))
+    (let [tagLen (.getTLen spec)]
+      (when (or (or (< tagLen 96) (> tagLen 128)) (not (== (bit-and-int tagLen 0x07) 0)))
+        (throw (InvalidAlgorithmParameterException.
+                 "Unsupported TLen value.  Must be one of {128, 120, 112, 104, 96}")))
+      (set! tagLenBytes (bit-shift-right-int tagLen 3))
+      (when (nil? key) (throw (InvalidKeyException. "The key must not be null")))
+      (let [keyValue (.getEncoded key)]
+        (if (nil? keyValue)
+            (throw (InvalidKeyException. "Key encoding must not be null"))
+            (when (and (not (== keySize -1)) (not (== (alength keyValue) keySize)))
+              (Arrays/fill keyValue (unchecked-byte 0))
+              (throw (InvalidKeyException. (java-str "The key must be " keySize " bytes")))))
+        (when encryption
+          (when (and (MessageDigest/isEqual keyValue lastKey) (MessageDigest/isEqual iv lastIv))
+            (Arrays/fill keyValue (unchecked-byte 0))
+            (throw (InvalidAlgorithmParameterException. "Cannot reuse iv for GCM encryption")))
+          (when (some? lastKey) (Arrays/fill lastKey (unchecked-byte 0)))
+          (set! lastKey keyValue)
+          (set! lastIv iv))
+        (set! reInit false)
+        (try
+          (.init blockCipher false (.getAlgorithm key) keyValue)
+          (finally (when-not encryption (Arrays/fill keyValue (unchecked-byte 0))))))))
+
+  (method ^:protected engineSetMode :throws [NoSuchAlgorithmException] ^void [this ^String mode]
+    (when-not (.equalsIgnoreCase mode "GCM") (throw (NoSuchAlgorithmException. "Mode must be GCM"))))
+
+  (method ^:protected engineSetPadding :throws [NoSuchPaddingException] ^void [this ^String padding]
+    (when-not (.equalsIgnoreCase padding "NoPadding")
+      (throw (NoSuchPaddingException. "Padding must be NoPadding"))))
+
+  (method ^:protected engineGetBlockSize ^int [this]
+    (.getBlockSize blockCipher))
+
+  (method ^:protected engineGetOutputSize ^int [this ^int inputLen]
+    (.checkInit this)
+    (.getOutputSize engine inputLen true))
+
+  (method ^:protected engineGetKeySize :throws [InvalidKeyException] ^int [this ^Key key]
+    (let [encoded (.getEncoded key)]
+      (Arrays/fill encoded (unchecked-byte 0))
+      (when-not (AES_Crypt/isKeySizeValid (alength encoded))
+        (throw (InvalidKeyException. (java-str "Invalid key length: " (alength encoded) " bytes"))))
+      (^[int int] Math/multiplyExact (alength encoded) 8)))
+
+  (method ^:protected engineGetIV ^byte/1 [this]
+    (when (some? iv) (.clone iv)))
+
+  (method ^:private ^:static createIv ^byte/1 [^:mutable ^SecureRandom rand]
+    (let [iv (new byte/1 DEFAULT_IV_LEN)]
+      (when (nil? rand) (set! rand (JCAUtil/getDefSecureRandom)))
+      (.nextBytes rand iv)
+      iv))
+
+  (method ^:protected engineGetParameters ^AlgorithmParameters [this]
+    (let [^:mutable ^GCMParameterSpec spec nil]
+      (set! spec
+            (GCMParameterSpec. (unchecked-multiply-int tagLenBytes 8)
+                               ^byte/1 (if (nil? iv) (GaloisCounterMode/createIv random) iv)))
+      (try
+        (let [params (AlgorithmParameters/getInstance "GCM" (SunJCE/getInstance))]
+          (.init params spec)
+          params)
+        (catch [NoSuchAlgorithmException InvalidParameterSpecException] e
+          (throw (ProviderException. e))))))
+
+  (method ^:protected engineInit :throws [InvalidKeyException] ^void [this ^int opmode ^Key key
+                                                                      ^SecureRandom random]
+    (set! engine nil)
+    (when (or (== opmode Cipher/DECRYPT_MODE) (== opmode Cipher/UNWRAP_MODE))
+      (throw (InvalidKeyException. "No GCMParameterSpec specified")))
+    (try
+      (.engineInit this opmode key (cast AlgorithmParameterSpec nil) random)
+      (catch InvalidAlgorithmParameterException e)))
+
+  (method ^:protected engineInit :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                         ^int opmode
+                                                                                                         ^Key key
+                                                                                                         ^AlgorithmParameterSpec params
+                                                                                                         ^SecureRandom random]
+    (let [^:mutable ^GCMParameterSpec spec nil]
+      (set! (.-random this) random)
+      (set! engine nil)
+      (if (nil? params)
+          (do
+            (set! iv (GaloisCounterMode/createIv random))
+            (set! spec (GCMParameterSpec. (unchecked-multiply-int DEFAULT_TAG_LEN 8) iv)))
+          (do
+            (when-not (instance? GCMParameterSpec params)
+              (throw (InvalidAlgorithmParameterException.
+                       "AlgorithmParameterSpec not of GCMParameterSpec")))
+            (set! spec (cast GCMParameterSpec params))
+            (set! iv (.getIV spec))
+            (when (nil? iv) (throw (InvalidAlgorithmParameterException. "IV is null")))
+            (when (== (alength iv) 0) (throw (InvalidAlgorithmParameterException. "IV is empty")))))
+      (.init this opmode key spec)
+      (set! initialized true)))
+
+  (method ^:protected engineInit :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                         ^int opmode
+                                                                                                         ^Key key
+                                                                                                         ^AlgorithmParameters params
+                                                                                                         ^SecureRandom random]
+    (let [^:mutable ^GCMParameterSpec spec nil]
+      (set! engine nil)
+      (when (some? params)
+        (try
+          (set! spec (cast GCMParameterSpec (.getParameterSpec params GCMParameterSpec)))
+          (catch InvalidParameterSpecException e (throw (InvalidAlgorithmParameterException. e)))))
+      (.engineInit this opmode key spec random)))
+
+  (method checkInit ^void [this]
+    (when-not initialized (throw (IllegalStateException. "Operation not initialized.")))
+    (when (nil? engine)
+      (if encryption
+          (set! engine (GCMEncrypt. blockCipher))
+          (set! engine (GCMDecrypt. blockCipher)))))
+
+  (method checkReInit ^void [this]
+    (when reInit
+      (throw (IllegalStateException. "Must use either different key or  iv for GCM encryption"))))
+
+  (method ^:protected engineUpdate ^byte/1 [this ^byte/1 input ^int inputOffset ^int inputLen]
+    (.checkInit this)
+    (ArrayUtil/nullAndBoundsCheck input inputOffset inputLen)
+    (.doUpdate engine input inputOffset inputLen))
+
+  (method ^:protected engineUpdate :throws [ShortBufferException] ^int [this ^byte/1 input
+                                                                        ^int inputOffset
+                                                                        ^int inputLen ^byte/1 output
+                                                                        ^int outputOffset]
+    (.checkInit this)
+    (ArrayUtil/nullAndBoundsCheck input inputOffset inputLen)
+    (ArrayUtil/nullAndBoundsCheck output
+                                  outputOffset
+                                  (unchecked-subtract-int (alength output) outputOffset))
+    (let [len (.getOutputSize engine inputLen false)]
+      (when (> len (unchecked-subtract-int (alength output) outputOffset))
+        (throw (ShortBufferException.
+                 (java-str "Output buffer too small, must be at least " len " bytes long"))))
+      (.doUpdate engine input inputOffset inputLen output outputOffset)))
+
+  (method ^:protected engineUpdate :throws [ShortBufferException] ^int [this ^ByteBuffer src
+                                                                        ^ByteBuffer dst]
+    (.checkInit this)
+    (let [len (.getOutputSize engine (.remaining src) false)]
+      (when (> len (.remaining dst))
+        (throw (ShortBufferException.
+                 (java-str "Output buffer must be at least " len " bytes long"))))
+      (.doUpdate engine src dst)))
+
+  (method ^:protected engineUpdateAAD ^void [this ^byte/1 src ^int offset ^int len]
+    (.checkInit this)
+    (.updateAAD engine src offset len))
+
+  (method ^:protected engineUpdateAAD ^void [this ^ByteBuffer src]
+    (.checkInit this)
+    (if (.hasArray src)
+        (let [pos (.position src)
+              len (.remaining src)]
+          (.updateAAD engine (.array src) (unchecked-add-int (.arrayOffset src) pos) len)
+          (.position src (unchecked-add-int pos len)))
+        (let [aad (new byte/1 (.remaining src))]
+          (.get src aad)
+          (.updateAAD engine aad 0 (alength aad)))))
+
+  (method ^:protected engineDoFinal :throws [IllegalBlockSizeException BadPaddingException] ^byte/1 [this
+                                                                                                     ^:mutable ^byte/1 input
+                                                                                                     ^int inputOffset
+                                                                                                     ^int inputLen]
+    (when (nil? input) (set! input EMPTY_BUF))
+    (try
+      (ArrayUtil/nullAndBoundsCheck input inputOffset inputLen)
+      (catch ArrayIndexOutOfBoundsException e
+        (throw (IllegalBlockSizeException. "input array invalid"))))
+    (.checkInit this)
+    (let [output (new byte/1 (.getOutputSize engine inputLen true))]
+      (try
+        (.doFinal engine input inputOffset inputLen output 0)
+        (catch ShortBufferException e (throw (ProviderException. e)))
+        (finally (set! engine nil)))
+      output))
+
+  (method ^:protected engineDoFinal :throws [ShortBufferException
+                                             IllegalBlockSizeException
+                                             BadPaddingException] ^int [this ^:mutable ^byte/1 input
+                                                                        ^int inputOffset
+                                                                        ^int inputLen ^byte/1 output
+                                                                        ^int outputOffset]
+    (when (nil? input) (set! input EMPTY_BUF))
+    (try
+      (ArrayUtil/nullAndBoundsCheck input inputOffset inputLen)
+      (catch ArrayIndexOutOfBoundsException e
+        (set! engine nil)
+        (throw (IllegalBlockSizeException. "input array invalid"))))
+    (.checkInit this)
+    (let [len (.doFinal engine input inputOffset inputLen output outputOffset)]
+      (set! engine nil)
+      len))
+
+  (method ^:protected engineDoFinal :throws [ShortBufferException
+                                             IllegalBlockSizeException
+                                             BadPaddingException] ^int [this ^ByteBuffer src
+                                                                        ^ByteBuffer dst]
+    (.checkInit this)
+    (let [len (.doFinal engine src dst)] (set! engine nil) len))
+
+  (method ^:protected engineWrap :throws [IllegalBlockSizeException InvalidKeyException] ^byte/1 [this
+                                                                                                  ^Key key]
+    (let [^:mutable ^byte/1 encodedKey nil]
+      (.checkInit this)
+      (try
+        (set! encodedKey (.getEncoded key))
+        (when (or (nil? encodedKey) (== (alength encodedKey) 0))
+          (throw (InvalidKeyException. "Cannot get an encoding of the key to be wrapped")))
+        (return (.engineDoFinal this encodedKey 0 (alength encodedKey)))
+        (catch BadPaddingException e)
+        (finally
+          (set! engine nil)
+          (when (some? encodedKey) (Arrays/fill encodedKey (unchecked-byte 0)))))
+      nil))
+
+  (method ^:protected engineUnwrap :throws [InvalidKeyException NoSuchAlgorithmException] ^Key [this
+                                                                                                ^byte/1 wrappedKey
+                                                                                                ^String wrappedKeyAlgorithm
+                                                                                                ^int wrappedKeyType]
+    (.checkInit this)
+    (let [^:mutable ^byte/1 encodedKey nil]
+      (try
+        (set! encodedKey (.engineDoFinal this wrappedKey 0 (alength wrappedKey)))
+        (catch BadPaddingException ePadding
+          (throw (InvalidKeyException. "The wrapped key is not padded correctly")))
+        (catch IllegalBlockSizeException eBlockSize
+          (throw (InvalidKeyException. "The wrapped key does not have the correct length"))))
+      (try
+        (ConstructKeys/constructKey encodedKey wrappedKeyAlgorithm wrappedKeyType)
+        (finally (Arrays/fill encodedKey (unchecked-byte 0))))))
+
+  (method ^:static increment32 ^void [^byte/1 value]
+    (let [^:mutable n (unchecked-subtract-int (alength value) 1)]
+      (while (and (>= n (unchecked-subtract-int (alength value) 4))
+                  (== (aset value n (unchecked-byte (unchecked-inc-int (aget value n)))) 0))
+        (set! n (unchecked-dec-int n)))))
+
+  (field ^:private ^:static ^:final ^VarHandle wrapToByteArray
+    (MethodHandles/byteArrayViewVarHandle long/1 ByteOrder/BIG_ENDIAN))
+
+  (method ^:private ^:static getLengthBlock ^byte/1 [^int ivLenInBytes]
+    (let [out (new byte/1 16)]
+      ^void (^[byte/1 int long] VarHandle/.set wrapToByteArray
+                                               out
+                                               8
+                                               (bit-shift-left
+                                                 (bit-and (long ivLenInBytes) 0xFFFFFFFF)
+                                                 3))
+      out))
+
+  (method ^:private ^:static getLengthBlock ^byte/1 [^int aLenInBytes ^int cLenInBytes]
+    (let [out (new byte/1 16)]
+      ^void (^[byte/1 int long] VarHandle/.set wrapToByteArray
+                                               out
+                                               0
+                                               (bit-shift-left
+                                                 (bit-and (long aLenInBytes) 0xFFFFFFFF)
+                                                 3))
+      ^void (^[byte/1 int long] VarHandle/.set wrapToByteArray
+                                               out
+                                               8
+                                               (bit-shift-left
+                                                 (bit-and (long cLenInBytes) 0xFFFFFFFF)
+                                                 3))
+      out))
+
+  (method ^:private ^:static expandToOneBlock ^byte/1 [^byte/1 in ^int inOfs ^int len ^int blockSize]
+    (when (> len blockSize) (throw (ProviderException. (java-str "input " len " too long"))))
+    (if (and (== len blockSize) (== inOfs 0))
+        in
+        (let [paddedIn (new byte/1 blockSize)] (System/arraycopy in inOfs paddedIn 0 len) paddedIn)))
+
+  (method ^:private ^:static getJ0 ^byte/1 [^byte/1 iv ^byte/1 subkeyH ^int blockSize]
+    (let [^:mutable ^byte/1 j0 nil]
+      (if (== (alength iv) 12)
+          (do
+            (set! j0 (GaloisCounterMode/expandToOneBlock iv 0 (alength iv) blockSize))
+            (aset j0 (unchecked-subtract-int blockSize 1) 1))
+          (let [g (GHASH. subkeyH)
+                lastLen (unchecked-remainder-int (alength iv) blockSize)]
+            (if (not (== lastLen 0))
+                (do
+                  (.update g iv 0 (unchecked-subtract-int (alength iv) lastLen))
+                  (let [padded (GaloisCounterMode/expandToOneBlock
+                                 iv
+                                 (unchecked-subtract-int (alength iv) lastLen)
+                                 lastLen
+                                 blockSize)]
+                    (.update g padded)))
+                (.update g iv))
+            (.update g (GaloisCounterMode/getLengthBlock (alength iv)))
+            (set! j0 (.digest g))))
+      j0))
+
+  (method ^:private ^:static implGCMCrypt ^int [^byte/1 in ^int inOfs ^:mutable ^int inLen
+                                                ^byte/1 ct ^int ctOfs ^byte/1 out ^int outOfs
+                                                ^GCTR gctr ^GHASH ghash]
+    (let [^:mutable ^int len 0]
+      (when (and (> inLen SPLIT_LEN) (some? ct))
+        (let [^:mutable ^int partlen 0]
+          (while (>= inLen SPLIT_LEN)
+            (set! partlen
+                  (GaloisCounterMode/implGCMCrypt0
+                    in
+                    (unchecked-add-int inOfs len)
+                    SPLIT_LEN
+                    ct
+                    (unchecked-add-int ctOfs len)
+                    out
+                    (unchecked-add-int outOfs len)
+                    gctr
+                    ghash))
+            (set! len (unchecked-add-int len partlen))
+            (set! inLen (unchecked-subtract-int inLen partlen)))))
+      (when (> inLen 0)
+        (if (nil? ct)
+            (do
+              (.update ghash in (unchecked-add-int inOfs len) inLen)
+              (set! len
+                    (unchecked-add-int len
+                                       (.update gctr
+                                                in
+                                                (unchecked-add-int inOfs len)
+                                                inLen
+                                                out
+                                                outOfs))))
+            (set! len
+                  (unchecked-add-int len
+                                     (GaloisCounterMode/implGCMCrypt0
+                                       in
+                                       (unchecked-add-int inOfs len)
+                                       inLen
+                                       ct
+                                       (unchecked-add-int ctOfs len)
+                                       out
+                                       (unchecked-add-int outOfs len)
+                                       gctr
+                                       ghash)))))
+      len))
+
+  (method ^:private ^:static ^{IntrinsicCandidate true} implGCMCrypt0 ^int [^byte/1 in ^int inOfs
+                                                                            ^:mutable ^int inLen
+                                                                            ^byte/1 ct ^int ctOfs
+                                                                            ^byte/1 out ^int outOfs
+                                                                            ^GCTR gctr ^GHASH ghash]
+    (set! inLen (unchecked-subtract-int inLen (unchecked-remainder-int inLen PARALLEL_LEN)))
+    (let [^:mutable ^int len 0
+          ^:mutable cOfs ctOfs]
+      (when (>= inLen TRIGGERLEN)
+        (let [^:mutable ^int i 0
+              ^:mutable segments (unchecked-divide-int inLen 6)]
+          (set! segments
+                (unchecked-subtract-int segments
+                                        (unchecked-remainder-int segments (.-blockSize gctr))))
+          (loop []
+            (set! len
+                  (unchecked-add-int len
+                                     (.update gctr
+                                              in
+                                              (unchecked-add-int inOfs len)
+                                              segments
+                                              out
+                                              (unchecked-add-int outOfs len))))
+            (.update ghash ct cOfs segments)
+            (set! cOfs (unchecked-add-int ctOfs len))
+            (when (< (set! i (unchecked-inc-int i)) 5) (recur)))
+          (set! inLen (unchecked-subtract-int inLen len))))
+      (set! len
+            (unchecked-add-int len
+                               (.update gctr
+                                        in
+                                        (unchecked-add-int inOfs len)
+                                        inLen
+                                        out
+                                        (unchecked-add-int outOfs len))))
+      (.update ghash ct cOfs inLen)
+      len))
+
+  (defclass ^:abstract GCMEngine
+    (field ^byte/1 preCounterBlock)
+
+    (field ^GCTR gctr)
+
+    (field ^GHASH ghash)
+
+    (field ^:final ^int blockSize)
+
+    (field ^AEADBufferedStream aadBuffer nil)
+
+    (field ^int sizeOfAAD 0)
+
+    (field ^boolean aadProcessed false)
+
+    (field ^AEADBufferedStream ibuffer nil)
+
+    (field ^ByteBuffer originalDst nil)
+
+    (field ^byte/1 originalOut nil)
+
+    (field ^int originalOutOfs 0)
+
+    (field ^boolean inPlaceArray false)
+
+    (constructor [this ^SymmetricCipher blockCipher]
+      (set! blockSize (.getBlockSize blockCipher))
+      (let [subkeyH (new byte/1 blockSize)]
+        (.encryptBlock blockCipher subkeyH 0 subkeyH 0)
+        (set! preCounterBlock (GaloisCounterMode/getJ0 iv subkeyH blockSize))
+        (let [j0Plus1 (.clone preCounterBlock)]
+          (GaloisCounterMode/increment32 j0Plus1)
+          (set! gctr (GCTR. blockCipher j0Plus1))
+          (set! ghash (GHASH. subkeyH)))))
+
+    (method ^:abstract getOutputSize ^int [this ^int inLen ^boolean isFinal])
+
+    (method ^:abstract doUpdate ^byte/1 [this ^byte/1 in ^int inOfs ^int inLen])
+
+    (method ^:abstract doUpdate :throws [ShortBufferException] ^int [this ^byte/1 in ^int inOfs
+                                                                     ^int inLen ^byte/1 out
+                                                                     ^int outOfs])
+
+    (method ^:abstract doUpdate :throws [ShortBufferException] ^int [this ^ByteBuffer src
+                                                                     ^ByteBuffer dst])
+
+    (method ^:abstract doFinal :throws [IllegalBlockSizeException
+                                        AEADBadTagException
+                                        ShortBufferException] ^int [this ^byte/1 in ^int inOfs
+                                                                    ^int inLen ^byte/1 out
+                                                                    ^int outOfs])
+
+    (method ^:abstract doFinal :throws [IllegalBlockSizeException
+                                        AEADBadTagException
+                                        ShortBufferException] ^int [this ^ByteBuffer src
+                                                                    ^ByteBuffer dst])
+
+    (method initBuffer ^void [this ^int len]
+      (when (nil? ibuffer) (set! ibuffer (AEADBufferedStream. len))))
+
+    (method getBufferedLength ^int [this]
+      (if (nil? ibuffer) 0 (.size ibuffer)))
+
+    (method implGCMCrypt ^int [this ^ByteBuffer src ^ByteBuffer dst]
+      (let [srcLen (unchecked-subtract-int (.remaining src)
+                                           (unchecked-remainder-int (.remaining src) PARALLEL_LEN))]
+        (if (< srcLen PARALLEL_LEN)
+            0
+            (let [^:mutable ^int len 0]
+              (if (and (.hasArray src) (.hasArray dst))
+                  (let [^ByteBuffer ct (if encryption dst src)]
+                    (set! len
+                          (GaloisCounterMode/implGCMCrypt
+                            (.array src)
+                            (unchecked-add-int (.arrayOffset src) (.position src))
+                            srcLen
+                            ^byte/1 (when-not inPlaceArray (.array ct))
+                            (unchecked-add-int (.arrayOffset ct) (.position ct))
+                            (.array dst)
+                            (unchecked-add-int (.arrayOffset dst) (.position dst))
+                            gctr
+                            ghash))
+                    (.position src (unchecked-add-int (.position src) len))
+                    (.position dst (unchecked-add-int (.position dst) len))
+                    len)
+                  (let [bin (new byte/1 PARALLEL_LEN)
+                        bout (new byte/1 PARALLEL_LEN)
+                        ^byte/1 ct (if encryption bout bin)]
+                    (set! len srcLen)
+                    (loop []
+                      (.get src bin 0 PARALLEL_LEN)
+                      (set! len
+                            (unchecked-subtract-int
+                              len
+                              (GaloisCounterMode/implGCMCrypt
+                                bin
+                                0
+                                PARALLEL_LEN
+                                ct
+                                0
+                                bout
+                                0
+                                gctr
+                                ghash)))
+                      (.put dst bout 0 PARALLEL_LEN)
+                      (when (>= len PARALLEL_LEN) (recur)))
+                    (unchecked-subtract-int srcLen len)))))))
+
+    (method mergeBlock ^int [this ^byte/1 buffer ^int bufOfs ^int bufLen ^byte/1 in ^int inOfs
+                             ^int inLen ^byte/1 block]
+      (when (> bufLen blockSize)
+        (throw (ProviderException.
+                 (java-str "mergeBlock called on an ibuffer too big:  " bufLen " bytes"))))
+      (System/arraycopy buffer bufOfs block 0 bufLen)
+      (let [inUsed (Math/min (unchecked-subtract-int (alength block) bufLen) inLen)]
+        (System/arraycopy in inOfs block bufLen inUsed)
+        inUsed))
+
+    (method updateAAD ^void [this ^byte/1 src ^int offset ^int len]
+      (when encryption (.checkReInit GaloisCounterMode/this))
+      (when (nil? aadBuffer)
+        (if (and (== sizeOfAAD 0) (not aadProcessed))
+            (set! aadBuffer (AEADBufferedStream. len))
+            (throw (IllegalStateException. "Update has been called; no more AAD data"))))
+      (.write aadBuffer src offset len))
+
+    (method processAAD ^void [this]
+      (when (some? aadBuffer)
+        (set! sizeOfAAD (.size aadBuffer))
+        (when (> sizeOfAAD 0)
+          (let [aad (.getBuffer aadBuffer)
+                lastLen (unchecked-remainder-int sizeOfAAD blockSize)]
+            (if (not (== lastLen 0))
+                (do
+                  (.update ghash aad 0 (unchecked-subtract-int sizeOfAAD lastLen))
+                  (let [padded (GaloisCounterMode/expandToOneBlock
+                                 aad
+                                 (unchecked-subtract-int sizeOfAAD lastLen)
+                                 lastLen
+                                 blockSize)]
+                    (.update ghash padded)))
+                (.update ghash aad 0 sizeOfAAD))))
+        (set! aadBuffer nil))
+      (set! aadProcessed true))
+
+    (method doLastBlock ^int [this ^GCMOperation op ^ByteBuffer buffer ^ByteBuffer src
+                              ^ByteBuffer dst]
+      (let [^:mutable ^int len 0
+            ^:mutable ^int resultLen 0
+            ^:mutable ^int bLen (if (some? buffer) (.remaining buffer) 0)]
+        (when (> bLen 0)
+          (when (>= bLen PARALLEL_LEN)
+            (set! len (.implGCMCrypt this buffer dst))
+            (set! bLen (unchecked-subtract-int bLen len)))
+          (when (>= bLen blockSize)
+            (set! resultLen (.update op buffer dst))
+            (set! bLen (unchecked-subtract-int bLen resultLen))
+            (set! len (unchecked-add-int len resultLen)))
+          (when (> bLen 0)
+            (let [block (new byte/1 blockSize)
+                  over (.remaining buffer)]
+              (.get buffer block 0 over)
+              (let [slen (Math/min (.remaining src) (unchecked-subtract-int blockSize over))]
+                (when (> slen 0) (.get src block over slen))
+                (let [l (unchecked-add-int slen over)]
+                  (if (== l blockSize)
+                      (set! len (unchecked-add-int len (.update op block 0 blockSize dst)))
+                      (do
+                        (set! len (unchecked-add-int len (.doFinal op block 0 l block 0)))
+                        (when (some? dst) (.put dst block 0 l))
+                        (return len))))))))
+        (when (>= (.remaining src) PARALLEL_LEN)
+          (set! len (unchecked-add-int len (.implGCMCrypt this src dst))))
+        (unchecked-add-int len (.doFinal op src dst))))
+
+    (method overlapDetection ^ByteBuffer [this ^ByteBuffer src ^ByteBuffer dst]
+      (cond
+        (and (.isDirect src) (.isDirect dst))
+          (let [^:mutable dsrc (cast DirectBuffer src)
+                ^:mutable ddst (cast DirectBuffer dst)
+                ^:mutable srcaddr (.getBufferAddress NIO_ACCESS src)
+                ^:mutable dstaddr (.getBufferAddress NIO_ACCESS dst)]
+            (while (some? (.attachment dsrc))
+              (set! srcaddr (.getBufferAddress NIO_ACCESS (cast Buffer (.attachment dsrc))))
+              (set! dsrc (cast DirectBuffer (.attachment dsrc))))
+            (while (some? (.attachment ddst))
+              (set! dstaddr (.getBufferAddress NIO_ACCESS (cast Buffer (.attachment ddst))))
+              (set! ddst (cast DirectBuffer (.attachment ddst))))
+            (when-not (== srcaddr dstaddr) (return dst))
+            (when (>= (unchecked-add (unchecked-subtract (.getBufferAddress NIO_ACCESS src) srcaddr)
+                                     (.position src))
+                      (unchecked-add (unchecked-subtract (.getBufferAddress NIO_ACCESS dst) dstaddr)
+                                     (.position dst)))
+              (return dst)))
+        (and (not (.isDirect src)) (not (.isDirect dst)))
+          (when-not (.isReadOnly src)
+            (when-not (identical? (.array src) (.array dst)) (return dst))
+            (when (>= (unchecked-add-int (.position src) (.arrayOffset src))
+                      (unchecked-add-int (.position dst) (.arrayOffset dst)))
+              (set! inPlaceArray (not encryption))
+              (return dst)))
+        :else (return dst))
+      (let [tmp (.duplicate dst)
+            bb (ByteBuffer/allocate (.remaining dst))]
+        (.limit tmp (.limit dst))
+        (.position tmp (.position dst))
+        (.put bb tmp)
+        (.flip bb)
+        (set! originalDst dst)
+        bb))
+
+    (method overlapDetection ^byte/1 [this ^byte/1 in ^int inOfs ^byte/1 out ^int outOfs]
+      (when (identical? in out)
+        (when (< inOfs outOfs)
+          (set! originalOut out)
+          (set! originalOutOfs outOfs)
+          (return (new byte/1 (alength out))))
+        (set! inPlaceArray (not encryption)))
+      out)
+
+    (method restoreDst ^void [this ^ByteBuffer dst]
+      (when (some? originalDst) (.flip dst) (.put originalDst dst) (set! originalDst nil)))
+
+    (method restoreOut ^void [this ^byte/1 out ^int len]
+      (when (some? originalOut)
+        (System/arraycopy out originalOutOfs originalOut originalOutOfs len)
+        (set! originalOut nil))))
+
+  (defclass GCMEncrypt
+    :extends GCMEngine
+
+    (field ^GCMOperation op)
+
+    (field ^int processed 0)
+
+    (constructor [this ^SymmetricCipher blockCipher]
+      (super. blockCipher)
+      (set! op (EncryptOp. (.-gctr this) (.-ghash this))))
+
+    (method ^:private checkDataLength ^void [this & ^int/1 lengths]
+      (let [^:mutable max MAX_BUF_SIZE]
+        (for-each [^int len lengths]
+          (set! max (Math/subtractExact max len))
+          (when (> processed max)
+            (throw (ProviderException.
+                     (java-str (java-str "SunJCE provider only supports input size up to "
+                                         MAX_BUF_SIZE)
+                               " bytes")))))))
+
+    (method ^:public getOutputSize ^int [this ^int inLen ^boolean isFinal]
+      (let [^:mutable len (.getBufferedLength this)]
+        (if isFinal
+            (unchecked-add-int (unchecked-add-int len inLen) tagLenBytes)
+            (do
+              (set! len (unchecked-add-int len inLen))
+              (unchecked-subtract-int len (unchecked-remainder-int len (.getBlockSize blockCipher)))))))
+
+    (method doUpdate ^byte/1 [this ^byte/1 in ^int inOff ^int inLen]
+      (.checkReInit GaloisCounterMode/this)
+      (let [output (new byte/1 (.getOutputSize this inLen false))]
+        (try
+          (.doUpdate this in inOff inLen output 0)
+          (catch ShortBufferException e
+            (throw (ProviderException. "output buffer creation failed" e))))
+        output))
+
+    (method ^:public doUpdate :throws [ShortBufferException] ^int [this ^byte/1 in
+                                                                   ^:mutable ^int inOfs
+                                                                   ^:mutable ^int inLen
+                                                                   ^:mutable ^byte/1 out
+                                                                   ^:mutable ^int outOfs]
+      (.checkReInit GaloisCounterMode/this)
+      (let [^:mutable ^int len 0
+            bLen (.getBufferedLength this)]
+        (.checkDataLength this inLen bLen)
+        (.processAAD this)
+        (set! out (.overlapDetection this in inOfs out outOfs))
+        (when (> bLen 0)
+          (let [buffer (.getBuffer (.-ibuffer this))
+                remainder (unchecked-subtract-int (.-blockSize this) bLen)]
+            (when (>= (unchecked-add-int inLen bLen) (.-blockSize this))
+              (let [block (new byte/1 (.-blockSize this))]
+                (System/arraycopy buffer 0 block 0 bLen)
+                (System/arraycopy in inOfs block bLen remainder)
+                (set! len (.update op block 0 (.-blockSize this) out outOfs))
+                (set! inOfs (unchecked-add-int inOfs remainder))
+                (set! inLen (unchecked-subtract-int inLen remainder))
+                (set! outOfs (unchecked-add-int outOfs (.-blockSize this)))
+                (.reset (.-ibuffer this))))))
+        (when (>= inLen PARALLEL_LEN)
+          (let [r (GaloisCounterMode/implGCMCrypt
+                    in
+                    inOfs
+                    inLen
+                    out
+                    outOfs
+                    out
+                    outOfs
+                    (.-gctr this)
+                    (.-ghash this))]
+            (set! len (unchecked-add-int len r))
+            (set! inOfs (unchecked-add-int inOfs r))
+            (set! inLen (unchecked-subtract-int inLen r))
+            (set! outOfs (unchecked-add-int outOfs r))))
+        (when (>= inLen (.-blockSize this))
+          (let [r (.update op in inOfs inLen out outOfs)]
+            (set! len (unchecked-add-int len r))
+            (set! inOfs (unchecked-add-int inOfs r))
+            (set! inLen (unchecked-subtract-int inLen r))))
+        (let [remainder (unchecked-remainder-int inLen (.-blockSize this))]
+          (when (> remainder 0)
+            (.initBuffer this remainder)
+            (set! inLen (unchecked-subtract-int inLen remainder))
+            (.write (.-ibuffer this) in (unchecked-add-int inOfs inLen) remainder))
+          (.restoreOut this out len)
+          (set! processed (unchecked-add-int processed len))
+          len)))
+
+    (method ^:public doUpdate :throws [ShortBufferException] ^int [this ^ByteBuffer src
+                                                                   ^:mutable ^ByteBuffer dst]
+      (.checkReInit GaloisCounterMode/this)
+      (let [bLen (.getBufferedLength this)]
+        (.checkDataLength this (.remaining src) bLen)
+        (let [^:mutable ^int len 0]
+          (.processAAD this)
+          (set! dst (.overlapDetection this src dst))
+          (when (> bLen 0)
+            (let [remainder (unchecked-subtract-int (.-blockSize this) bLen)]
+              (when (>= (.remaining src) remainder)
+                (let [block (new byte/1 (.-blockSize this))
+                      buffer (ByteBuffer/wrap (.getBuffer (.-ibuffer this))
+                                              0
+                                              (.size (.-ibuffer this)))]
+                  (.get buffer block 0 bLen)
+                  (.get src block bLen remainder)
+                  (set! len
+                        (unchecked-add-int len
+                                           (.update
+                                             op
+                                             (ByteBuffer/wrap block 0 (.-blockSize this))
+                                             dst)))
+                  (.reset (.-ibuffer this))))))
+          (let [^:mutable srcLen (.remaining src)
+                ^:mutable ^int resultLen 0]
+            (when (>= srcLen PARALLEL_LEN)
+              (set! resultLen (.implGCMCrypt this src dst))
+              (set! srcLen (unchecked-subtract-int srcLen resultLen))
+              (set! len (unchecked-add-int len resultLen)))
+            (when (>= srcLen (.-blockSize this))
+              (set! resultLen (.update op src dst))
+              (set! srcLen (unchecked-subtract-int srcLen resultLen))
+              (set! len (unchecked-add-int len resultLen)))
+            (when (> srcLen 0) (.initBuffer this srcLen) (.write (.-ibuffer this) src))
+            (.restoreDst this dst)
+            (set! processed (unchecked-add-int processed len))
+            len))))
+
+    (method ^:public doFinal :throws [IllegalBlockSizeException ShortBufferException] ^int [this
+                                                                                            ^:mutable ^byte/1 in
+                                                                                            ^:mutable ^int inOfs
+                                                                                            ^:mutable ^int inLen
+                                                                                            ^:mutable ^byte/1 out
+                                                                                            ^:mutable ^int outOfs]
+      (.checkReInit GaloisCounterMode/this)
+      (try
+        (ArrayUtil/nullAndBoundsCheck out outOfs (.getOutputSize this inLen true))
+        (catch ArrayIndexOutOfBoundsException e
+          (throw (ShortBufferException. "Output buffer invalid"))))
+      (let [bLen (.getBufferedLength this)]
+        (.checkDataLength this inLen bLen tagLenBytes)
+        (.processAAD this)
+        (set! out (.overlapDetection this in inOfs out outOfs))
+        (let [^:mutable ^int len 0
+              ^:mutable ^byte/1 block nil]
+          (when (> bLen 0)
+            (let [buffer (.getBuffer (.-ibuffer this))]
+              (if (>= (unchecked-add-int bLen inLen) (.-blockSize this))
+                  (let [^:mutable ^int r 0]
+                    (set! block (new byte/1 (.-blockSize this)))
+                    (set! r
+                          (.mergeBlock this buffer 0 (.size (.-ibuffer this)) in inOfs inLen block))
+                    (set! inOfs (unchecked-add-int inOfs r))
+                    (set! inLen (unchecked-subtract-int inLen r))
+                    (.update op block 0 (.-blockSize this) out outOfs)
+                    (set! outOfs (unchecked-add-int outOfs (.-blockSize this)))
+                    (set! len (unchecked-add-int len (.-blockSize this))))
+                  (do
+                    (set! block (new byte/1 (unchecked-add-int bLen inLen)))
+                    (System/arraycopy buffer 0 block 0 bLen)
+                    (System/arraycopy in inOfs block bLen inLen)
+                    (set! inLen (unchecked-add-int inLen bLen))
+                    (set! in block)
+                    (set! inOfs 0)))))
+          (set! len (unchecked-add-int len (.doFinal op in inOfs inLen out outOfs)))
+          (set! outOfs (unchecked-add-int outOfs inLen))
+          (set! block
+                (GaloisCounterMode/getLengthBlock
+                  (.-sizeOfAAD this)
+                  (unchecked-add-int processed len)))
+          (.update (.-ghash this) block)
+          (set! block (.digest (.-ghash this)))
+          (.doFinal (GCTR. blockCipher (.-preCounterBlock this)) block 0 tagLenBytes block 0)
+          (System/arraycopy block 0 out outOfs tagLenBytes)
+          (set! len (unchecked-add-int len tagLenBytes))
+          (.restoreOut this out len)
+          (set! reInit true)
+          len)))
+
+    (method ^:public doFinal :throws [IllegalBlockSizeException ShortBufferException] ^int [this
+                                                                                            ^ByteBuffer src
+                                                                                            ^:mutable ^ByteBuffer dst]
+      (.checkReInit GaloisCounterMode/this)
+      (set! dst (.overlapDetection this src dst))
+      (let [len (unchecked-add-int (.remaining src) (.getBufferedLength this))]
+        (.checkDataLength this len tagLenBytes)
+        (when (< (.remaining dst) (unchecked-add-int len tagLenBytes))
+          (throw (ShortBufferException.
+                   (java-str "Output buffer too small, must be at least "
+                             (unchecked-add-int len tagLenBytes)
+                             " bytes long"))))
+        (.processAAD this)
+        (when (> len 0)
+          (set! processed
+                (unchecked-add-int processed
+                                   (.doLastBlock
+                                     this
+                                     op
+                                     ^ByteBuffer (when-not (or
+                                                             (nil? (.-ibuffer this))
+                                                             (== (.size (.-ibuffer this)) 0))
+                                                   (ByteBuffer/wrap
+                                                     (.getBuffer (.-ibuffer this))
+                                                     0
+                                                     (.size (.-ibuffer this))))
+                                     src
+                                     dst))))
+        (when (some? (.-ibuffer this)) (.reset (.-ibuffer this)))
+        (let [^:mutable block (GaloisCounterMode/getLengthBlock (.-sizeOfAAD this) processed)]
+          (.update (.-ghash this) block)
+          (set! block (.digest (.-ghash this)))
+          (.doFinal (GCTR. blockCipher (.-preCounterBlock this)) block 0 tagLenBytes block 0)
+          (.put dst block 0 tagLenBytes)
+          (.restoreDst this dst)
+          (set! reInit true)
+          (unchecked-add-int len tagLenBytes)))))
+
+  (defclass GCMDecrypt
+    :extends GCMEngine
+
+    (field ^byte/1 tag)
+
+    (field ^int tagOfs 0)
+
+    (constructor [this ^SymmetricCipher blockCipher] (super. blockCipher))
+
+    (method ^:private checkDataLength ^void [this & ^int/1 lengths]
+      (let [^:mutable max MAX_BUF_SIZE]
+        (for-each [^int len lengths]
+          (set! max (Math/subtractExact max len))
+          (when (< max 0)
+            (throw (ProviderException.
+                     (java-str (java-str "SunJCE provider only supports input size up to "
+                                         MAX_BUF_SIZE)
+                               " bytes")))))))
+
+    (method ^:public getOutputSize ^int [this ^int inLen ^boolean isFinal]
+      (if (not isFinal)
+          0
+          (^[int int] Math/max
+            (unchecked-subtract-int (unchecked-add-int inLen (.getBufferedLength this)) tagLenBytes)
+            0)))
+
+    (method findTag ^void [this ^byte/1 in ^int inOfs ^int inLen]
+      (set! tag (new byte/1 tagLenBytes))
+      (if (>= inLen tagLenBytes)
+          (do
+            (set! tagOfs (unchecked-subtract-int inLen tagLenBytes))
+            (System/arraycopy in (unchecked-add-int inOfs tagOfs) tag 0 tagLenBytes))
+          (let [buffer (.getBuffer (.-ibuffer this))
+                ofs (unchecked-subtract-int (.size (.-ibuffer this))
+                                            (unchecked-subtract-int tagLenBytes inLen))]
+            (set! tagOfs
+                  (unchecked-subtract-int
+                    (.mergeBlock this
+                                 buffer
+                                 ofs
+                                 (unchecked-subtract-int (.size (.-ibuffer this)) ofs)
+                                 in
+                                 inOfs
+                                 inLen
+                                 tag)
+                    tagLenBytes)))))
+
+    (method doUpdate ^byte/1 [this ^byte/1 in ^int inOff ^int inLen]
+      (try (.doUpdate this in inOff inLen nil 0) (catch ShortBufferException e))
+      (new byte/1 0))
+
+    (method ^:public doUpdate :throws [ShortBufferException] ^int [this ^byte/1 in ^int inOfs
+                                                                   ^int inLen ^byte/1 out
+                                                                   ^int outOfs]
+      (.processAAD this)
+      (when (> inLen 0) (.initBuffer this inLen) (.write (.-ibuffer this) in inOfs inLen))
+      0)
+
+    (method ^:public doUpdate :throws [ShortBufferException] ^int [this ^ByteBuffer src
+                                                                   ^ByteBuffer dst]
+      (.processAAD this)
+      (when (> (.remaining src) 0)
+        (if (.hasArray src)
+            (do
+              (.doUpdate this
+                         (.array src)
+                         (unchecked-add-int (.arrayOffset src) (.position src))
+                         (.remaining src)
+                         nil
+                         0)
+              (.position src (.limit src)))
+            (do (.initBuffer this (.remaining src)) (.write (.-ibuffer this) src))))
+      0)
+
+    (method ^:public doFinal :throws [IllegalBlockSizeException
+                                      AEADBadTagException
+                                      ShortBufferException] ^int [this ^byte/1 in ^int inOfs
+                                                                  ^int inLen ^:mutable ^byte/1 out
+                                                                  ^int outOfs]
+      (let [^:mutable len (unchecked-add-int inLen (.getBufferedLength this))]
+        (when (< len tagLenBytes)
+          (throw (AEADBadTagException.
+                   (java-str "Input data too short to contain an expected tag length of "
+                             tagLenBytes
+                             "bytes"))))
+        (try
+          (ArrayUtil/nullAndBoundsCheck out outOfs (unchecked-subtract-int len tagLenBytes))
+          (catch ArrayIndexOutOfBoundsException e
+            (throw (ShortBufferException. "Output buffer invalid"))))
+        (when (> (unchecked-subtract-int len tagLenBytes)
+                 (unchecked-subtract-int (alength out) outOfs))
+          (throw (ShortBufferException.
+                   (java-str "Output buffer too small, must be at least "
+                             (unchecked-subtract-int len tagLenBytes)
+                             " bytes long"))))
+        (.checkDataLength this (unchecked-subtract-int len tagLenBytes))
+        (.processAAD this)
+        (.findTag this in inOfs inLen)
+        (set! out (.overlapDetection this in inOfs out outOfs))
+        (set! len
+              (.decryptBlocks this
+                              (DecryptOp. (.-gctr this) (.-ghash this))
+                              in
+                              inOfs
+                              inLen
+                              out
+                              outOfs))
+        (let [^:mutable block (GaloisCounterMode/getLengthBlock (.-sizeOfAAD this) len)]
+          (.update (.-ghash this) block)
+          (set! block (.digest (.-ghash this)))
+          (.doFinal (GCTR. blockCipher (.-preCounterBlock this)) block 0 tagLenBytes block 0)
+          (let [^:mutable ^int mismatch 0]
+            (loop [^int i 0]
+              (when (< i tagLenBytes)
+                (set! mismatch (bit-or-int mismatch (bit-xor-int (aget tag i) (aget block i))))
+                (recur (unchecked-inc-int i))))
+            (when-not (== mismatch 0)
+              (when-not (.-inPlaceArray this)
+                (Arrays/fill out outOfs (unchecked-add-int outOfs len) (unchecked-byte 0)))
+              (throw (AEADBadTagException. "Tag mismatch")))
+            (.restoreOut this out len)
+            len))))
+
+    (method ^:public doFinal :throws [IllegalBlockSizeException
+                                      AEADBadTagException
+                                      ShortBufferException] ^int [this ^ByteBuffer src
+                                                                  ^:mutable ^ByteBuffer dst]
+      (let [^:mutable ^ByteBuffer tag nil
+            ct (.duplicate src)
+            ^:mutable ^ByteBuffer buffer nil
+            ^:mutable len (unchecked-subtract-int (.remaining ct) tagLenBytes)]
+        (when-not (== (.getBufferedLength this) 0)
+          (set! buffer (ByteBuffer/wrap (.getBuffer (.-ibuffer this)) 0 (.size (.-ibuffer this))))
+          (set! len (unchecked-add-int len (.remaining buffer))))
+        (when (< len 0)
+          (throw (AEADBadTagException.
+                   (java-str "Input data too short to contain an expected tag length of "
+                             tagLenBytes
+                             "bytes"))))
+        (.checkDataLength this len)
+        (when (> len (.remaining dst))
+          (throw (ShortBufferException.
+                   (java-str "Output buffer too small, must be at least " len " bytes long"))))
+        (cond
+          (>= (.remaining ct) tagLenBytes)
+            (do
+              (set! tag (.duplicate src))
+              (.position tag (unchecked-subtract-int (.limit ct) tagLenBytes))
+              (.limit ct (unchecked-subtract-int (.limit ct) tagLenBytes)))
+          (some? buffer)
+            (do
+              (set! tag (ByteBuffer/allocate tagLenBytes))
+              (let [limit (unchecked-subtract-int
+                            (.remaining buffer)
+                            (unchecked-subtract-int tagLenBytes (.remaining ct)))]
+                (.mark buffer)
+                (.position buffer limit)
+                (.put tag buffer)
+                (.reset buffer)
+                (.limit buffer limit)
+                (.put tag ct)
+                (.flip tag)))
+          :else
+            (throw (AEADBadTagException.
+                     (java-str "Input data too short to contain an expected tag length of "
+                               tagLenBytes
+                               "bytes"))))
+        (set! dst (.overlapDetection this src dst))
+        (.mark dst)
+        (.processAAD this)
+        (set! len (.doLastBlock this (DecryptOp. (.-gctr this) (.-ghash this)) buffer ct dst))
+        (let [^:mutable block (GaloisCounterMode/getLengthBlock (.-sizeOfAAD this) len)]
+          (.update (.-ghash this) block)
+          (set! block (.digest (.-ghash this)))
+          (.doFinal (GCTR. blockCipher (.-preCounterBlock this)) block 0 tagLenBytes block 0)
+          (let [^:mutable ^int mismatch 0]
+            (loop [^int i 0]
+              (when (< i tagLenBytes)
+                (set! mismatch (bit-or-int mismatch (bit-xor-int (.get tag) (aget block i))))
+                (recur (unchecked-inc-int i))))
+            (when-not (== mismatch 0)
+              (.reset dst)
+              (when-not (.-inPlaceArray this)
+                (if (.hasArray dst)
+                    (let [ofs (unchecked-add-int (.arrayOffset dst) (.position dst))]
+                      (Arrays/fill (.array dst) ofs (unchecked-add-int ofs len) (unchecked-byte 0)))
+                    (do
+                      (.acquireSession NIO_ACCESS dst)
+                      (try
+                        (.setMemory (Unsafe/getUnsafe)
+                                    (.getBufferAddress NIO_ACCESS dst)
+                                    (unchecked-add-int len (.position dst))
+                                    (unchecked-byte 0))
+                        (finally (.releaseSession NIO_ACCESS dst))))))
+              (throw (AEADBadTagException. "Tag mismatch")))
+            (.position src (.limit src))
+            (set! engine nil)
+            (.restoreDst this dst)
+            len))))
+
+    (method decryptBlocks ^int [this ^GCMOperation op ^:mutable ^byte/1 in ^:mutable ^int inOfs
+                                ^:mutable ^int inLen ^byte/1 out ^:mutable ^int outOfs]
+      (let [^:mutable ^byte/1 buffer nil
+            ^:mutable ^byte/1 block nil
+            ^:mutable ^int len 0
+            ^:mutable ^int resultLen 0
+            ^:mutable bLen (.getBufferedLength this)]
+        (if (< tagOfs 0)
+            (do (set! inLen 0) (set! bLen (unchecked-add-int bLen tagOfs)))
+            (set! inLen (unchecked-subtract-int inLen tagLenBytes)))
+        (when (> bLen 0)
+          (set! buffer (.getBuffer (.-ibuffer this)))
+          (when (>= bLen PARALLEL_LEN)
+            (set! len
+                  (GaloisCounterMode/implGCMCrypt
+                    buffer
+                    0
+                    bLen
+                    buffer
+                    0
+                    out
+                    outOfs
+                    (.-gctr this)
+                    (.-ghash this)))
+            (set! outOfs (unchecked-add-int outOfs len)))
+          (let [^:mutable bufRemainder (unchecked-subtract-int bLen len)]
+            (when (>= bufRemainder (.-blockSize this))
+              (set! resultLen (.update op buffer len bufRemainder out outOfs))
+              (set! len (unchecked-add-int len resultLen))
+              (set! outOfs (unchecked-add-int outOfs resultLen))
+              (set! bufRemainder (unchecked-subtract-int bufRemainder resultLen)))
+            (when (> bufRemainder 0)
+              (set! block (new byte/1 (.-blockSize this)))
+              (let [inUsed (.mergeBlock this buffer len bufRemainder in inOfs inLen block)]
+                (set! inOfs (unchecked-add-int inOfs inUsed))
+                (set! inLen (unchecked-subtract-int inLen inUsed))
+                (if (> inLen 0)
+                    (do
+                      (set! resultLen (.update op block 0 (.-blockSize this) out outOfs))
+                      (set! outOfs (unchecked-add-int outOfs resultLen))
+                      (set! len (unchecked-add-int len resultLen)))
+                    (do
+                      (set! in block)
+                      (set! inOfs 0)
+                      (set! inLen (unchecked-add-int inUsed bufRemainder))))))))
+        (unchecked-add-int len (.doFinal op in inOfs inLen out outOfs)))))
+
+  (defclass ^:public ^:static ^:final AESGCM
+    :extends GaloisCounterMode
+
+    (constructor ^:public [this] (super. -1 (AES_Crypt.))))
+
+  (defclass ^:public ^:static ^:final AES128
+    :extends GaloisCounterMode
+
+    (constructor ^:public [this] (super. 16 (AES_Crypt.))))
+
+  (defclass ^:public ^:static ^:final AES192
+    :extends GaloisCounterMode
+
+    (constructor ^:public [this] (super. 24 (AES_Crypt.))))
+
+  (defclass ^:public ^:static ^:final AES256
+    :extends GaloisCounterMode
+
+    (constructor ^:public [this] (super. 32 (AES_Crypt.))))
+
+  (defclass ^:static ^:final EncryptOp
+    :implements [GCMOperation]
+
+    (field ^GCTR gctr)
+
+    (field ^GHASH ghash)
+
+    (constructor [this ^GCTR c ^GHASH g] (set! gctr c) (set! ghash g))
+
+    (method ^:public update ^int [this ^byte/1 in ^int inOfs ^int inLen ^byte/1 out ^int outOfs]
+      (let [len (.update gctr in inOfs inLen out outOfs)] (.update ghash out outOfs len) len))
+
+    (method ^:public update ^int [this ^byte/1 in ^int inOfs ^int inLen ^ByteBuffer dst]
+      (.mark dst)
+      (let [len (.update gctr in inOfs inLen dst)] (.reset dst) (.update ghash dst len) len))
+
+    (method ^:public update ^int [this ^ByteBuffer src ^ByteBuffer dst]
+      (.mark dst)
+      (let [len (.update gctr src dst)] (.reset dst) (.update ghash dst len) len))
+
+    (method ^:public doFinal ^int [this ^byte/1 in ^int inOfs ^:mutable ^int inLen ^byte/1 out
+                                   ^:mutable ^int outOfs]
+      (let [^:mutable ^int len 0]
+        (when (>= inLen PARALLEL_LEN)
+          (set! len
+                (GaloisCounterMode/implGCMCrypt in inOfs inLen out outOfs out outOfs gctr ghash))
+          (set! inLen (unchecked-subtract-int inLen len))
+          (set! outOfs (unchecked-add-int outOfs len)))
+        (.doFinal gctr in (unchecked-add-int inOfs len) inLen out outOfs)
+        (unchecked-add-int len (.doFinal ghash out outOfs inLen))))
+
+    (method ^:public doFinal ^int [this ^ByteBuffer src ^ByteBuffer dst]
+      (.mark dst)
+      (let [len (.doFinal gctr src dst)] (.reset dst) (.doFinal ghash dst len) len)))
+
+  (defclass ^:static ^:final DecryptOp
+    :implements [GCMOperation]
+
+    (field ^GCTR gctr)
+
+    (field ^GHASH ghash)
+
+    (constructor [this ^GCTR c ^GHASH g] (set! gctr c) (set! ghash g))
+
+    (method ^:public update ^int [this ^byte/1 in ^int inOfs ^int inLen ^byte/1 out ^int outOfs]
+      (.update ghash in inOfs inLen)
+      (.update gctr in inOfs inLen out outOfs))
+
+    (method ^:public update ^int [this ^byte/1 in ^int inOfs ^int inLen ^ByteBuffer dst]
+      (.update ghash in inOfs inLen)
+      (.update gctr in inOfs inLen dst))
+
+    (method ^:public update ^int [this ^ByteBuffer src ^ByteBuffer dst]
+      (.mark src)
+      (.update ghash src (.remaining src))
+      (.reset src)
+      (.update gctr src dst))
+
+    (method ^:public doFinal ^int [this ^byte/1 in ^int inOfs ^int inLen ^byte/1 out ^int outOfs]
+      (let [^:mutable ^int len 0]
+        (when (>= inLen PARALLEL_LEN)
+          (set! len
+                (unchecked-add-int len
+                                   (GaloisCounterMode/implGCMCrypt
+                                     in
+                                     inOfs
+                                     inLen
+                                     ^byte/1 (when-not (identical? in out) in)
+                                     inOfs
+                                     out
+                                     outOfs
+                                     gctr
+                                     ghash))))
+        (.doFinal ghash in (unchecked-add-int inOfs len) (unchecked-subtract-int inLen len))
+        (unchecked-add-int len
+                           (.doFinal gctr
+                                     in
+                                     (unchecked-add-int inOfs len)
+                                     (unchecked-subtract-int inLen len)
+                                     out
+                                     (unchecked-add-int outOfs len)))))
+
+    (method ^:public doFinal ^int [this ^ByteBuffer src ^ByteBuffer dst]
+      (.mark src)
+      (.doFinal ghash src (.remaining src))
+      (.reset src)
+      (.doFinal gctr src dst)))
+
+  (defclass ^:public ^:interface GCMOperation
+    (method update ^int [this ^byte/1 in ^int inOfs ^int inLen ^byte/1 out ^int outOfs])
+
+    (method update ^int [this ^byte/1 in ^int inOfs ^int inLen ^ByteBuffer dst])
+
+    (method update ^int [this ^ByteBuffer src ^ByteBuffer dst])
+
+    (method doFinal ^int [this ^byte/1 in ^int inOfs ^int inLen ^byte/1 out ^int outOfs])
+
+    (method doFinal ^int [this ^ByteBuffer src ^ByteBuffer dst])))

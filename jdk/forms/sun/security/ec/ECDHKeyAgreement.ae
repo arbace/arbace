@@ -1,0 +1,155 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ec/ECDHKeyAgreement.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ec)
+
+(import '(java.security InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        NoSuchAlgorithmException
+                        PrivateKey
+                        SecureRandom)
+        '(java.security.interfaces ECPrivateKey ECPublicKey)
+        '(java.security.spec AlgorithmParameterSpec)
+        '(java.util Arrays Optional)
+        '(javax.crypto KeyAgreementSpi SecretKey ShortBufferException)
+        '(javax.crypto.spec SecretKeySpec)
+        '(sun.security.ec.point Point)
+        '(sun.security.util ArrayUtil CurveDB ECUtil KeyUtil)
+        '(sun.security.util.math IntegerMontgomeryFieldModuloP))
+
+(defclass ^:public ^:final ECDHKeyAgreement
+  :extends KeyAgreementSpi
+
+  (field ^:private ^ECPrivateKey privateKey)
+
+  (field ^:private ^ECOperations privateKeyOps)
+
+  (field ^:private ^ECPublicKey publicKey)
+
+  (field ^:private ^int secretLen)
+
+  (constructor ^:public [this])
+
+  (method ^:private init :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                 ^Key key]
+    (set! privateKey nil)
+    (set! privateKeyOps nil)
+    (set! publicKey nil)
+    (when-not (instance? PrivateKey key)
+      (throw (InvalidKeyException. "Key must be instance of PrivateKey")))
+    (let [ecPrivateKey (cast ECPrivateKey (ECKeyFactory/toECKey key))
+          ^{:tag (Optional ECOperations)} opsOpt (ECOperations/forParameters
+                                                   (.getParams ecPrivateKey))]
+      (when (.isEmpty opsOpt)
+        (let [nc (CurveDB/lookup (.getParams ecPrivateKey))]
+          (throw (InvalidAlgorithmParameterException.
+                   (java-str "Curve not supported: " (if (some? nc) (.toString nc) "unknown"))))))
+      (ECUtil/checkPrivateKey ecPrivateKey)
+      (set! privateKey ecPrivateKey)
+      (set! privateKeyOps (cast ECOperations (.get opsOpt)))))
+
+  (method ^:protected engineInit :throws [InvalidKeyException] ^void [this ^Key key
+                                                                      ^SecureRandom random]
+    (try
+      (.init this key)
+      (catch InvalidAlgorithmParameterException e (throw (InvalidKeyException. e)))))
+
+  (method ^:protected engineInit :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                         ^Key key
+                                                                                                         ^AlgorithmParameterSpec params
+                                                                                                         ^SecureRandom random]
+    (when (some? params) (throw (InvalidAlgorithmParameterException. "Parameters not supported")))
+    (.init this key))
+
+  (method ^:protected engineDoPhase :throws [InvalidKeyException IllegalStateException] ^Key [this
+                                                                                              ^Key key
+                                                                                              ^boolean lastPhase]
+    (when (nil? privateKey) (throw (IllegalStateException. "Not initialized")))
+    (when (some? publicKey) (throw (IllegalStateException. "Phase already executed")))
+    (when-not lastPhase
+      (throw (IllegalStateException. "Only two party agreement supported, lastPhase must be true")))
+    (when-not (instance? ECPublicKey key)
+      (throw (InvalidKeyException. "Key must be a PublicKey with algorithm EC")))
+    (ECDHKeyAgreement/validate privateKeyOps (cast ECPublicKey key))
+    (set! (.-publicKey this) (cast ECPublicKey key))
+    (let [keyLenBits (.getFieldSize (.getField (.getCurve (.getParams publicKey))))]
+      (set! secretLen (bit-shift-right-int (unchecked-add-int keyLenBits 7) 3))
+      nil))
+
+  (method ^:private ^:static validateCoordinate :throws [InvalidKeyException] ^void [^BigInteger c
+                                                                                     ^BigInteger mod]
+    (when (or (< (.compareTo c BigInteger/ZERO) 0) (>= (.compareTo c mod) 0))
+      (throw (InvalidKeyException. "Invalid coordinate"))))
+
+  (method ^:private ^:static validate :throws [InvalidKeyException] ^void [^ECOperations ops
+                                                                           ^ECPublicKey key]
+    (let [spec (.getParams key)
+          x (.getAffineX (.getW key))
+          y (.getAffineY (.getW key))
+          p (.getSize (.getField ops))]
+      (ECDHKeyAgreement/validateCoordinate x p)
+      (ECDHKeyAgreement/validateCoordinate y p)
+      (let [curve (.getCurve spec)
+            rhs (.mod (.add (.add (.modPow x (BigInteger/valueOf 3) p) (.multiply (.getA curve) x))
+                            (.getB curve))
+                      p)
+            lhs (.modPow y BigInteger/TWO p)]
+        (when-not (.equals rhs lhs) (throw (InvalidKeyException. "Point is not on curve")))
+        (let [order (.toByteArray (.getOrder spec))]
+          (ArrayUtil/reverse order)
+          (let [^Point product (.multiply ops (.getW key) order)]
+            (when-not (.isNeutral ops product)
+              (throw (InvalidKeyException. "Point has incorrect order"))))))))
+
+  (method ^:protected engineGenerateSecret :throws [IllegalStateException] ^byte/1 [this]
+    (when (or (nil? privateKey) (nil? publicKey))
+      (throw (IllegalStateException. "Not initialized correctly")))
+    (let [^:mutable ^byte/1 result nil]
+      (try
+        (set! result (ECDHKeyAgreement/deriveKeyImpl privateKey privateKeyOps publicKey))
+        (catch Exception e (throw (IllegalStateException. e))))
+      (set! publicKey nil)
+      result))
+
+  (method ^:protected engineGenerateSecret :throws [IllegalStateException ShortBufferException] ^int [this
+                                                                                                      ^byte/1 sharedSecret
+                                                                                                      ^int offset]
+    (when (> secretLen (unchecked-subtract-int (alength sharedSecret) offset))
+      (throw (ShortBufferException.
+               (java-str "Need "
+                         secretLen
+                         " bytes, only "
+                         (unchecked-subtract-int (alength sharedSecret) offset)
+                         " available"))))
+    (let [secret (.engineGenerateSecret this)]
+      (System/arraycopy secret 0 sharedSecret offset (alength secret))
+      (alength secret)))
+
+  (method ^:protected engineGenerateSecret :throws [IllegalStateException
+                                                    NoSuchAlgorithmException
+                                                    InvalidKeyException] ^SecretKey [this
+                                                                                     ^String algorithm]
+    (when (nil? algorithm) (throw (NoSuchAlgorithmException. "Algorithm must not be null")))
+    (when-not (KeyUtil/isSupportedKeyAgreementOutputAlgorithm algorithm)
+      (throw (NoSuchAlgorithmException. (java-str "Unsupported secret key algorithm: " algorithm))))
+    (let [bytes (.engineGenerateSecret this)]
+      (try (SecretKeySpec. bytes algorithm) (finally (Arrays/fill bytes (unchecked-byte 0))))))
+
+  (method ^:private ^:static deriveKeyImpl :throws [InvalidKeyException] ^byte/1 [^ECPrivateKey priv
+                                                                                  ^ECOperations ops
+                                                                                  ^ECPublicKey pubKey]
+    (let [^:mutable field (.getField ops)]
+      (when (instance? IntegerMontgomeryFieldModuloP field)
+        (set! field (.residueField (cast IntegerMontgomeryFieldModuloP field))))
+      (let [scalar (.mutable (.getElement field (.getS priv)))
+            cofactor (.getSmallValue field (.getCofactor (.getParams priv)))]
+        (.setProduct scalar cofactor)
+        (let [keySize (unchecked-divide-int
+                        (unchecked-add-int (.getFieldSize (.getField (.getCurve (.getParams priv))))
+                                           7)
+                        8)
+              ^Point product (.multiply ops (.getW pubKey) (.asByteArray scalar keySize))]
+          (when (.isNeutral ops product) (throw (InvalidKeyException. "Product is zero")))
+          (let [result (.asByteArray (.getX (.asAffine product)) keySize)]
+            (ArrayUtil/reverse result)
+            result))))))

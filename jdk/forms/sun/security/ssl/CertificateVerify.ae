@@ -1,0 +1,901 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/CertificateVerify.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security GeneralSecurityException
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        NoSuchAlgorithmException
+                        PrivateKey
+                        PublicKey
+                        Signature
+                        SignatureException)
+        '(java.text MessageFormat)
+        '(java.util Arrays Locale Map$Entry)
+        '(sun.security.util HexDumpEncoder))
+
+(defclass ^:final CertificateVerify
+  (field ^:static ^:final ^SSLConsumer s30HandshakeConsumer (S30CertificateVerifyConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer s30HandshakeProducer (S30CertificateVerifyProducer.))
+
+  (field ^:static ^:final ^SSLConsumer t10HandshakeConsumer (T10CertificateVerifyConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer t10HandshakeProducer (T10CertificateVerifyProducer.))
+
+  (field ^:static ^:final ^SSLConsumer t12HandshakeConsumer (T12CertificateVerifyConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer t12HandshakeProducer (T12CertificateVerifyProducer.))
+
+  (field ^:static ^:final ^SSLConsumer t13HandshakeConsumer (T13CertificateVerifyConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer t13HandshakeProducer (T13CertificateVerifyProducer.))
+
+  (defclass ^:static ^:final S30CertificateVerifyMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:private ^:final ^byte/1 signature)
+
+    (constructor :throws [IOException] [this ^HandshakeContext context
+                                        ^X509Authentication$X509Possession x509Possession]
+      (super. context)
+      (let [chc (cast ClientHandshakeContext context)
+            ^:mutable ^byte/1 temporary nil
+            algorithm (.getAlgorithm (.-popPrivateKey x509Possession))]
+        (try
+          (let [signer (S30CertificateVerifyMessage/getSignature
+                         algorithm
+                         (.-popPrivateKey x509Possession))
+                hashes (.digest (.-handshakeHash chc)
+                                algorithm
+                                (.getMasterSecret (.-handshakeSession chc)))]
+            (.update signer hashes)
+            (set! temporary (.sign signer)))
+          (catch NoSuchAlgorithmException nsae
+            (throw (.fatal (.-conContext chc)
+                           Alert/INTERNAL_ERROR
+                           (java-str "Unsupported signature algorithm ("
+                                     algorithm
+                                     ") used in CertificateVerify handshake message")
+                           nsae)))
+          (catch GeneralSecurityException gse
+            (throw (.fatal (.-conContext chc)
+                           Alert/HANDSHAKE_FAILURE
+                           "Cannot produce CertificateVerify signature"
+                           gse))))
+        (set! (.-signature this) temporary)))
+
+    (constructor :throws [IOException] [this ^HandshakeContext context ^ByteBuffer m]
+      (super. context)
+      (let [shc (cast ServerHandshakeContext context)]
+        (when (< (.remaining m) 2)
+          (throw (.fatal (.-conContext shc)
+                         Alert/ILLEGAL_PARAMETER
+                         "Invalid CertificateVerify message: no sufficient data")))
+        (set! (.-signature this) (Record/getBytes16 m))
+        (let [^:mutable ^X509Authentication$X509Credentials x509Credentials nil]
+          (for-each [^SSLCredentials cd (.-handshakeCredentials shc)]
+            (when (instance? X509Authentication$X509Credentials cd)
+              (set! x509Credentials (cast X509Authentication$X509Credentials cd))
+              (break)))
+          (when (or (nil? x509Credentials) (nil? (.-popPublicKey x509Credentials)))
+            (throw (.fatal (.-conContext shc)
+                           Alert/HANDSHAKE_FAILURE
+                           "No X509 credentials negotiated for CertificateVerify")))
+          (let [algorithm (.getAlgorithm (.-popPublicKey x509Credentials))]
+            (try
+              (let [signer (S30CertificateVerifyMessage/getSignature
+                             algorithm
+                             (.-popPublicKey x509Credentials))
+                    hashes (.digest (.-handshakeHash shc)
+                                    algorithm
+                                    (.getMasterSecret (.-handshakeSession shc)))]
+                (.update signer hashes)
+                (when-not (.verify signer signature)
+                  (throw (.fatal (.-conContext shc)
+                                 Alert/HANDSHAKE_FAILURE
+                                 "Invalid CertificateVerify message: invalid signature"))))
+              (catch NoSuchAlgorithmException nsae
+                (throw (.fatal (.-conContext shc)
+                               Alert/INTERNAL_ERROR
+                               (java-str "Unsupported signature algorithm ("
+                                         algorithm
+                                         ") used in CertificateVerify handshake message")
+                               nsae)))
+              (catch GeneralSecurityException gse
+                (throw (.fatal (.-conContext shc)
+                               Alert/HANDSHAKE_FAILURE
+                               "Cannot verify CertificateVerify signature"
+                               gse))))))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/CERTIFICATE_VERIFY)
+
+    (method ^:public messageLength ^int [this]
+      (unchecked-add-int 2 (alength signature)))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (.putBytes16 hos signature))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"CertificateVerify\": '{'\n  \"signature\": '{'\n{0}\n  '}'\n'}'"
+                            Locale/ENGLISH)
+            hexEncoder (HexDumpEncoder.)
+            messageFields (new Object/1
+                               [(Utilities/indent (.encodeBuffer hexEncoder signature) "    ")])]
+        (.format messageFormat messageFields)))
+
+    (method ^:private ^:static getSignature :throws [GeneralSecurityException] ^Signature [^String algorithm
+                                                                                           ^Key key]
+      (let [^:mutable ^Signature signer nil]
+        (switch algorithm
+          "RSA" (set! signer (Signature/getInstance JsseJce/SIGNATURE_RAWRSA))
+          "DSA" (set! signer (Signature/getInstance JsseJce/SIGNATURE_RAWDSA))
+          "EC" (set! signer (Signature/getInstance JsseJce/SIGNATURE_RAWECDSA))
+          (throw (SignatureException. (java-str "Unrecognized algorithm: " algorithm))))
+        (if (instance? PublicKey key)
+            (.initVerify signer (cast PublicKey key))
+            (.initSign signer (cast PrivateKey key)))
+        signer)))
+
+  (defclass ^:private ^:static ^:final S30CertificateVerifyProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)
+            ^:mutable ^X509Authentication$X509Possession x509Possession nil]
+        (for-each [^SSLPossession possession (.-handshakePossessions chc)]
+          (when (instance? X509Authentication$X509Possession possession)
+            (set! x509Possession (cast X509Authentication$X509Possession possession))
+            (break)))
+        (if (or (nil? x509Possession) (nil? (.-popPrivateKey x509Possession)))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "No X.509 credentials negotiated for CertificateVerify"))
+              nil)
+            (let [cvm (S30CertificateVerifyMessage. chc x509Possession)]
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Produced CertificateVerify handshake message" cvm))
+              (.write cvm (.-handshakeOutput chc))
+              (.flush (.-handshakeOutput chc))
+              nil)))))
+
+  (defclass ^:private ^:static ^:final S30CertificateVerifyConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (.remove (.-handshakeConsumers shc) (.-id SSLHandshake/CERTIFICATE_VERIFY))
+        (when (.containsKey (.-handshakeConsumers shc) (.-id SSLHandshake/CLIENT_KEY_EXCHANGE))
+          (throw (.fatal (.-conContext shc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected CertificateVerify handshake message")))
+        (let [cvm (S30CertificateVerifyMessage. shc message)]
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "Consuming CertificateVerify handshake message" cvm))))))
+
+  (defclass ^:static ^:final T10CertificateVerifyMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:private ^:final ^byte/1 signature)
+
+    (constructor :throws [IOException] [this ^HandshakeContext context
+                                        ^X509Authentication$X509Possession x509Possession]
+      (super. context)
+      (let [chc (cast ClientHandshakeContext context)
+            ^:mutable ^byte/1 temporary nil
+            algorithm (.getAlgorithm (.-popPrivateKey x509Possession))]
+        (try
+          (let [signer (T10CertificateVerifyMessage/getSignature
+                         algorithm
+                         (.-popPrivateKey x509Possession))
+                hashes (.digest (.-handshakeHash chc) algorithm)]
+            (.update signer hashes)
+            (set! temporary (.sign signer)))
+          (catch NoSuchAlgorithmException nsae
+            (throw (.fatal (.-conContext chc)
+                           Alert/INTERNAL_ERROR
+                           (java-str "Unsupported signature algorithm ("
+                                     algorithm
+                                     ") used in CertificateVerify handshake message")
+                           nsae)))
+          (catch GeneralSecurityException gse
+            (throw (.fatal (.-conContext chc)
+                           Alert/HANDSHAKE_FAILURE
+                           "Cannot produce CertificateVerify signature"
+                           gse))))
+        (set! (.-signature this) temporary)))
+
+    (constructor :throws [IOException] [this ^HandshakeContext context ^ByteBuffer m]
+      (super. context)
+      (let [shc (cast ServerHandshakeContext context)]
+        (when (< (.remaining m) 2)
+          (throw (.fatal (.-conContext shc)
+                         Alert/ILLEGAL_PARAMETER
+                         "Invalid CertificateVerify message: no sufficient data")))
+        (set! (.-signature this) (Record/getBytes16 m))
+        (let [^:mutable ^X509Authentication$X509Credentials x509Credentials nil]
+          (for-each [^SSLCredentials cd (.-handshakeCredentials shc)]
+            (when (instance? X509Authentication$X509Credentials cd)
+              (set! x509Credentials (cast X509Authentication$X509Credentials cd))
+              (break)))
+          (when (or (nil? x509Credentials) (nil? (.-popPublicKey x509Credentials)))
+            (throw (.fatal (.-conContext shc)
+                           Alert/HANDSHAKE_FAILURE
+                           "No X509 credentials negotiated for CertificateVerify")))
+          (let [algorithm (.getAlgorithm (.-popPublicKey x509Credentials))]
+            (try
+              (let [signer (T10CertificateVerifyMessage/getSignature
+                             algorithm
+                             (.-popPublicKey x509Credentials))
+                    hashes (.digest (.-handshakeHash shc) algorithm)]
+                (.update signer hashes)
+                (when-not (.verify signer signature)
+                  (throw (.fatal (.-conContext shc)
+                                 Alert/HANDSHAKE_FAILURE
+                                 "Invalid CertificateVerify message: invalid signature"))))
+              (catch NoSuchAlgorithmException nsae
+                (throw (.fatal (.-conContext shc)
+                               Alert/INTERNAL_ERROR
+                               (java-str "Unsupported signature algorithm ("
+                                         algorithm
+                                         ") used in CertificateVerify handshake message")
+                               nsae)))
+              (catch GeneralSecurityException gse
+                (throw (.fatal (.-conContext shc)
+                               Alert/HANDSHAKE_FAILURE
+                               "Cannot verify CertificateVerify signature"
+                               gse))))))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/CERTIFICATE_VERIFY)
+
+    (method ^:public messageLength ^int [this]
+      (unchecked-add-int 2 (alength signature)))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (.putBytes16 hos signature))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"CertificateVerify\": '{'\n  \"signature\": '{'\n{0}\n  '}'\n'}'"
+                            Locale/ENGLISH)
+            hexEncoder (HexDumpEncoder.)
+            messageFields (new Object/1
+                               [(Utilities/indent (.encodeBuffer hexEncoder signature) "    ")])]
+        (.format messageFormat messageFields)))
+
+    (method ^:private ^:static getSignature :throws [GeneralSecurityException] ^Signature [^String algorithm
+                                                                                           ^Key key]
+      (let [^:mutable ^Signature signer nil]
+        (switch algorithm
+          "RSA" (set! signer (Signature/getInstance JsseJce/SIGNATURE_RAWRSA))
+          "DSA" (set! signer (Signature/getInstance JsseJce/SIGNATURE_RAWDSA))
+          "EC" (set! signer (Signature/getInstance JsseJce/SIGNATURE_RAWECDSA))
+          "EdDSA" (set! signer (Signature/getInstance JsseJce/SIGNATURE_EDDSA))
+          (throw (SignatureException. (java-str "Unrecognized algorithm: " algorithm))))
+        (if (instance? PublicKey key)
+            (.initVerify signer (cast PublicKey key))
+            (.initSign signer (cast PrivateKey key)))
+        signer)))
+
+  (defclass ^:private ^:static ^:final T10CertificateVerifyProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)
+            ^:mutable ^X509Authentication$X509Possession x509Possession nil]
+        (for-each [^SSLPossession possession (.-handshakePossessions chc)]
+          (when (instance? X509Authentication$X509Possession possession)
+            (set! x509Possession (cast X509Authentication$X509Possession possession))
+            (break)))
+        (if (or (nil? x509Possession) (nil? (.-popPrivateKey x509Possession)))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "No X.509 credentials negotiated for CertificateVerify"))
+              nil)
+            (let [cvm (T10CertificateVerifyMessage. chc x509Possession)]
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Produced CertificateVerify handshake message" cvm))
+              (.write cvm (.-handshakeOutput chc))
+              (.flush (.-handshakeOutput chc))
+              nil)))))
+
+  (defclass ^:private ^:static ^:final T10CertificateVerifyConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (.remove (.-handshakeConsumers shc) (.-id SSLHandshake/CERTIFICATE_VERIFY))
+        (when (.containsKey (.-handshakeConsumers shc) (.-id SSLHandshake/CLIENT_KEY_EXCHANGE))
+          (throw (.fatal (.-conContext shc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected CertificateVerify handshake message")))
+        (let [cvm (T10CertificateVerifyMessage. shc message)]
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "Consuming CertificateVerify handshake message" cvm))))))
+
+  (defclass ^:static ^:final T12CertificateVerifyMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:private ^:final ^SignatureScheme signatureScheme)
+
+    (field ^:private ^:final ^byte/1 signature)
+
+    (constructor :throws [IOException] [this ^HandshakeContext context
+                                        ^X509Authentication$X509Possession x509Possession]
+      (super. context)
+      (let [chc (cast ClientHandshakeContext context)
+            ^{:tag (Map$Entry SignatureScheme Signature)} schemeAndSigner
+              (SignatureScheme/getSignerOfPreferableAlgorithm
+                (.-sslConfig chc)
+                (.-algorithmConstraints chc)
+                (.-peerRequestedSignatureSchemes chc)
+                x509Possession
+                (.-negotiatedProtocol chc))]
+        (when (nil? schemeAndSigner)
+          (throw (.fatal (.-conContext chc)
+                         Alert/INTERNAL_ERROR
+                         (java-str "No supported CertificateVerify signature algorithm for "
+                                   (.getAlgorithm (.-popPrivateKey x509Possession))
+                                   "  key"))))
+        (set! (.-signatureScheme this) (cast SignatureScheme (.getKey schemeAndSigner)))
+        (let [^:mutable ^byte/1 temporary nil]
+          (try
+            (let [signer (cast Signature (.getValue schemeAndSigner))]
+              (.update signer (.archived (.-handshakeHash chc)))
+              (set! temporary (.sign signer)))
+            (catch SignatureException ikse
+              (throw (.fatal (.-conContext chc)
+                             Alert/HANDSHAKE_FAILURE
+                             "Cannot produce CertificateVerify signature"
+                             ikse))))
+          (set! (.-signature this) temporary))))
+
+    (constructor :throws [IOException] [this ^HandshakeContext handshakeContext ^ByteBuffer m]
+      (super. handshakeContext)
+      (let [shc (cast ServerHandshakeContext handshakeContext)]
+        (when (< (.remaining m) 4)
+          (throw (.fatal (.-conContext shc)
+                         Alert/ILLEGAL_PARAMETER
+                         "Invalid CertificateVerify message: no sufficient data")))
+        (let [ssid (Record/getInt16 m)]
+          (set! (.-signatureScheme this) (SignatureScheme/valueOf ssid))
+          (when (nil? signatureScheme)
+            (throw (.fatal (.-conContext shc)
+                           Alert/HANDSHAKE_FAILURE
+                           (java-str "Invalid signature algorithm ("
+                                     ssid
+                                     ") used in CertificateVerify handshake message"))))
+          (when-not (.contains (.-localSupportedSignAlgs shc) signatureScheme)
+            (throw (.fatal (.-conContext shc)
+                           Alert/HANDSHAKE_FAILURE
+                           (java-str "Unsupported signature algorithm ("
+                                     (.-name signatureScheme)
+                                     ") used in CertificateVerify handshake message"))))
+          (let [^:mutable ^X509Authentication$X509Credentials x509Credentials nil]
+            (for-each [^SSLCredentials cd (.-handshakeCredentials shc)]
+              (when (instance? X509Authentication$X509Credentials cd)
+                (set! x509Credentials (cast X509Authentication$X509Credentials cd))
+                (break)))
+            (when (or (nil? x509Credentials) (nil? (.-popPublicKey x509Credentials)))
+              (throw (.fatal (.-conContext shc)
+                             Alert/HANDSHAKE_FAILURE
+                             "No X509 credentials negotiated for CertificateVerify")))
+            (set! (.-signature this) (Record/getBytes16 m))
+            (try
+              (let [signer (.getVerifier signatureScheme (.-popPublicKey x509Credentials))]
+                (.update signer (.archived (.-handshakeHash shc)))
+                (when-not (.verify signer signature)
+                  (throw (.fatal (.-conContext shc)
+                                 Alert/HANDSHAKE_FAILURE
+                                 "Invalid CertificateVerify signature"))))
+              (catch [NoSuchAlgorithmException InvalidAlgorithmParameterException] nsae
+                (throw (.fatal (.-conContext shc)
+                               Alert/INTERNAL_ERROR
+                               (java-str "Unsupported signature algorithm ("
+                                         (.-name signatureScheme)
+                                         ") used in CertificateVerify handshake message")
+                               nsae)))
+              (catch [InvalidKeyException SignatureException] ikse
+                (throw (.fatal (.-conContext shc)
+                               Alert/HANDSHAKE_FAILURE
+                               "Cannot verify CertificateVerify signature"
+                               ikse))))))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/CERTIFICATE_VERIFY)
+
+    (method ^:public messageLength ^int [this]
+      (unchecked-add-int 4 (alength signature)))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (.putInt16 hos (.-id signatureScheme))
+      (.putBytes16 hos signature))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"CertificateVerify\": '{'\n  \"signature algorithm\": {0}\n  \"signature\": '{'\n{1}\n  '}'\n'}'"
+                            Locale/ENGLISH)
+            hexEncoder (HexDumpEncoder.)
+            messageFields (new Object/1
+                               [(.-name signatureScheme)
+                                (Utilities/indent (.encodeBuffer hexEncoder signature) "    ")])]
+        (.format messageFormat messageFields))))
+
+  (defclass ^:private ^:static ^:final T12CertificateVerifyProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)
+            ^:mutable ^X509Authentication$X509Possession x509Possession nil]
+        (for-each [^SSLPossession possession (.-handshakePossessions chc)]
+          (when (instance? X509Authentication$X509Possession possession)
+            (set! x509Possession (cast X509Authentication$X509Possession possession))
+            (break)))
+        (if (or (nil? x509Possession) (nil? (.-popPrivateKey x509Possession)))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "No X.509 credentials negotiated for CertificateVerify"))
+              nil)
+            (let [cvm (T12CertificateVerifyMessage. chc x509Possession)]
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Produced CertificateVerify handshake message" cvm))
+              (.write cvm (.-handshakeOutput chc))
+              (.flush (.-handshakeOutput chc))
+              nil)))))
+
+  (defclass ^:private ^:static ^:final T12CertificateVerifyConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (.remove (.-handshakeConsumers shc) (.-id SSLHandshake/CERTIFICATE_VERIFY))
+        (when (.containsKey (.-handshakeConsumers shc) (.-id SSLHandshake/CLIENT_KEY_EXCHANGE))
+          (throw (.fatal (.-conContext shc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected CertificateVerify handshake message")))
+        (let [cvm (T12CertificateVerifyMessage. shc message)]
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "Consuming CertificateVerify handshake message" cvm))))))
+
+  (defclass ^:static ^:final T13CertificateVerifyMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:private ^:static ^:final ^byte/1 serverSignHead
+      (new byte/1
+           [(unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x54)
+            (unchecked-byte 0x4c)
+            (unchecked-byte 0x53)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x31)
+            (unchecked-byte 0x2e)
+            (unchecked-byte 0x33)
+            (unchecked-byte 0x2c)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x73)
+            (unchecked-byte 0x65)
+            (unchecked-byte 0x72)
+            (unchecked-byte 0x76)
+            (unchecked-byte 0x65)
+            (unchecked-byte 0x72)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x43)
+            (unchecked-byte 0x65)
+            (unchecked-byte 0x72)
+            (unchecked-byte 0x74)
+            (unchecked-byte 0x69)
+            (unchecked-byte 0x66)
+            (unchecked-byte 0x69)
+            (unchecked-byte 0x63)
+            (unchecked-byte 0x61)
+            (unchecked-byte 0x74)
+            (unchecked-byte 0x65)
+            (unchecked-byte 0x56)
+            (unchecked-byte 0x65)
+            (unchecked-byte 0x72)
+            (unchecked-byte 0x69)
+            (unchecked-byte 0x66)
+            (unchecked-byte 0x79)
+            (unchecked-byte 0x00)]))
+
+    (field ^:private ^:static ^:final ^byte/1 clientSignHead
+      (new byte/1
+           [(unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x54)
+            (unchecked-byte 0x4c)
+            (unchecked-byte 0x53)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x31)
+            (unchecked-byte 0x2e)
+            (unchecked-byte 0x33)
+            (unchecked-byte 0x2c)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x63)
+            (unchecked-byte 0x6c)
+            (unchecked-byte 0x69)
+            (unchecked-byte 0x65)
+            (unchecked-byte 0x6e)
+            (unchecked-byte 0x74)
+            (unchecked-byte 0x20)
+            (unchecked-byte 0x43)
+            (unchecked-byte 0x65)
+            (unchecked-byte 0x72)
+            (unchecked-byte 0x74)
+            (unchecked-byte 0x69)
+            (unchecked-byte 0x66)
+            (unchecked-byte 0x69)
+            (unchecked-byte 0x63)
+            (unchecked-byte 0x61)
+            (unchecked-byte 0x74)
+            (unchecked-byte 0x65)
+            (unchecked-byte 0x56)
+            (unchecked-byte 0x65)
+            (unchecked-byte 0x72)
+            (unchecked-byte 0x69)
+            (unchecked-byte 0x66)
+            (unchecked-byte 0x79)
+            (unchecked-byte 0x00)]))
+
+    (field ^:private ^:final ^SignatureScheme signatureScheme)
+
+    (field ^:private ^:final ^byte/1 signature)
+
+    (constructor :throws [IOException] [this ^HandshakeContext context
+                                        ^X509Authentication$X509Possession x509Possession]
+      (super. context)
+      (let [^{:tag (Map$Entry SignatureScheme Signature)} schemeAndSigner
+              (SignatureScheme/getSignerOfPreferableAlgorithm
+                (.-sslConfig context)
+                (.-algorithmConstraints context)
+                (.-peerRequestedSignatureSchemes context)
+                x509Possession
+                (.-negotiatedProtocol context))]
+        (when (nil? schemeAndSigner)
+          (throw (.fatal (.-conContext context)
+                         Alert/INTERNAL_ERROR
+                         (java-str "No supported CertificateVerify signature algorithm for "
+                                   (.getAlgorithm (.-popPrivateKey x509Possession))
+                                   "  key"))))
+        (set! (.-signatureScheme this) (cast SignatureScheme (.getKey schemeAndSigner)))
+        (let [hashValue (.digest (.-handshakeHash context))
+              ^:mutable ^byte/1 contentCovered nil]
+          (if (.-isClientMode (.-sslConfig context))
+              (do
+                (set! contentCovered
+                      (Arrays/copyOf clientSignHead
+                                     (unchecked-add-int
+                                       (alength clientSignHead)
+                                       (alength hashValue))))
+                (System/arraycopy hashValue
+                                  0
+                                  contentCovered
+                                  (alength clientSignHead)
+                                  (alength hashValue)))
+              (do
+                (set! contentCovered
+                      (Arrays/copyOf serverSignHead
+                                     (unchecked-add-int
+                                       (alength serverSignHead)
+                                       (alength hashValue))))
+                (System/arraycopy hashValue
+                                  0
+                                  contentCovered
+                                  (alength serverSignHead)
+                                  (alength hashValue))))
+          (let [^:mutable ^byte/1 temporary nil]
+            (try
+              (let [signer (cast Signature (.getValue schemeAndSigner))]
+                (.update signer contentCovered)
+                (set! temporary (.sign signer)))
+              (catch SignatureException ikse
+                (throw (.fatal (.-conContext context)
+                               Alert/HANDSHAKE_FAILURE
+                               "Cannot produce CertificateVerify signature"
+                               ikse))))
+            (set! (.-signature this) temporary)))))
+
+    (constructor :throws [IOException] [this ^HandshakeContext context ^ByteBuffer m]
+      (super. context)
+      (when (< (.remaining m) 4)
+        (throw (.fatal (.-conContext context)
+                       Alert/ILLEGAL_PARAMETER
+                       "Invalid CertificateVerify message: no sufficient data")))
+      (let [ssid (Record/getInt16 m)]
+        (set! (.-signatureScheme this) (SignatureScheme/valueOf ssid))
+        (when (nil? signatureScheme)
+          (throw (.fatal (.-conContext context)
+                         Alert/HANDSHAKE_FAILURE
+                         (java-str "Invalid signature algorithm ("
+                                   ssid
+                                   ") used in CertificateVerify handshake message"))))
+        (when-not (.contains (.-localSupportedSignAlgs context) signatureScheme)
+          (throw (.fatal (.-conContext context)
+                         Alert/HANDSHAKE_FAILURE
+                         (java-str "Unsupported signature algorithm ("
+                                   (.-name signatureScheme)
+                                   ") used in CertificateVerify handshake message"))))
+        (let [^:mutable ^X509Authentication$X509Credentials x509Credentials nil]
+          (for-each [^SSLCredentials cd (.-handshakeCredentials context)]
+            (when (instance? X509Authentication$X509Credentials cd)
+              (set! x509Credentials (cast X509Authentication$X509Credentials cd))
+              (break)))
+          (when (or (nil? x509Credentials) (nil? (.-popPublicKey x509Credentials)))
+            (throw (.fatal (.-conContext context)
+                           Alert/HANDSHAKE_FAILURE
+                           "No X509 credentials negotiated for CertificateVerify")))
+          (set! (.-signature this) (Record/getBytes16 m))
+          (let [hashValue (.digest (.-handshakeHash context))
+                ^:mutable ^byte/1 contentCovered nil]
+            (if (.-isClientMode (.-sslConfig context))
+                (do
+                  (set! contentCovered
+                        (Arrays/copyOf serverSignHead
+                                       (unchecked-add-int
+                                         (alength serverSignHead)
+                                         (alength hashValue))))
+                  (System/arraycopy hashValue
+                                    0
+                                    contentCovered
+                                    (alength serverSignHead)
+                                    (alength hashValue)))
+                (do
+                  (set! contentCovered
+                        (Arrays/copyOf clientSignHead
+                                       (unchecked-add-int
+                                         (alength clientSignHead)
+                                         (alength hashValue))))
+                  (System/arraycopy hashValue
+                                    0
+                                    contentCovered
+                                    (alength clientSignHead)
+                                    (alength hashValue))))
+            (try
+              (let [signer (.getVerifier signatureScheme (.-popPublicKey x509Credentials))]
+                (.update signer contentCovered)
+                (when-not (.verify signer signature)
+                  (throw (.fatal (.-conContext context)
+                                 Alert/HANDSHAKE_FAILURE
+                                 "Invalid CertificateVerify signature"))))
+              (catch [NoSuchAlgorithmException InvalidAlgorithmParameterException] nsae
+                (throw (.fatal (.-conContext context)
+                               Alert/INTERNAL_ERROR
+                               (java-str "Unsupported signature algorithm ("
+                                         (.-name signatureScheme)
+                                         ") used in CertificateVerify handshake message")
+                               nsae)))
+              (catch [InvalidKeyException SignatureException] ikse
+                (throw (.fatal (.-conContext context)
+                               Alert/HANDSHAKE_FAILURE
+                               "Cannot verify CertificateVerify signature"
+                               ikse))))))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/CERTIFICATE_VERIFY)
+
+    (method ^:public messageLength ^int [this]
+      (unchecked-add-int 4 (alength signature)))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (.putInt16 hos (.-id signatureScheme))
+      (.putBytes16 hos signature))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"CertificateVerify\": '{'\n  \"signature algorithm\": {0}\n  \"signature\": '{'\n{1}\n  '}'\n'}'"
+                            Locale/ENGLISH)
+            hexEncoder (HexDumpEncoder.)
+            messageFields (new Object/1
+                               [(.-name signatureScheme)
+                                (Utilities/indent (.encodeBuffer hexEncoder signature) "    ")])]
+        (.format messageFormat messageFields))))
+
+  (defclass ^:private ^:static ^:final T13CertificateVerifyProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [hc (cast HandshakeContext context)
+            ^:mutable ^X509Authentication$X509Possession x509Possession nil]
+        (for-each [^SSLPossession possession (.-handshakePossessions hc)]
+          (when (instance? X509Authentication$X509Possession possession)
+            (set! x509Possession (cast X509Authentication$X509Possession possession))
+            (break)))
+        (cond
+          (or (nil? x509Possession) (nil? (.-popPrivateKey x509Possession)))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "No X.509 credentials negotiated for CertificateVerify"))
+              nil)
+          (.-isClientMode (.-sslConfig hc))
+            (.onProduceCertificateVerify this (cast ClientHandshakeContext context) x509Possession)
+          :else
+            (.onProduceCertificateVerify this (cast ServerHandshakeContext context) x509Possession))))
+
+    (method ^:private onProduceCertificateVerify :throws [IOException] ^byte/1 [this
+                                                                                ^ServerHandshakeContext shc
+                                                                                ^X509Authentication$X509Possession x509Possession]
+      (let [cvm (T13CertificateVerifyMessage. shc x509Possession)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Produced server CertificateVerify handshake message" cvm))
+        (.write cvm (.-handshakeOutput shc))
+        (.flush (.-handshakeOutput shc))
+        nil))
+
+    (method ^:private onProduceCertificateVerify :throws [IOException] ^byte/1 [this
+                                                                                ^ClientHandshakeContext chc
+                                                                                ^X509Authentication$X509Possession x509Possession]
+      (let [cvm (T13CertificateVerifyMessage. chc x509Possession)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Produced client CertificateVerify handshake message" cvm))
+        (.write cvm (.-handshakeOutput chc))
+        (.flush (.-handshakeOutput chc))
+        nil)))
+
+  (defclass ^:private ^:static ^:final T13CertificateVerifyConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [hc (cast HandshakeContext context)]
+        (.remove (.-handshakeConsumers hc) (.-id SSLHandshake/CERTIFICATE_VERIFY))
+        (when (.containsKey (.-handshakeConsumers hc) (.-id SSLHandshake/CERTIFICATE))
+          (throw (.fatal (.-conContext hc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected Certificate Verify handshake message")))
+        (let [cvm (T13CertificateVerifyMessage. hc message)]
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "Consuming CertificateVerify handshake message" cvm)))))))

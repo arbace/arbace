@@ -1,0 +1,273 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/PolicyParser.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.io BufferedReader IOException Reader StreamTokenizer)
+        '(java.security GeneralSecurityException)
+        '(java.util Collection HashMap Locale Map Map$Entry TreeMap)
+        '(sun.security.util LocalizedMessage PropertyExpander PropertyExpander$ExpandException))
+
+(defclass ^:public PolicyParser
+  (field ^:private ^{:tag (Map String DomainEntry)} domainEntries)
+
+  (field ^:private ^StreamTokenizer st)
+
+  (field ^:private ^int lookahead)
+
+  (field ^:private ^boolean expandProp false)
+
+  (method ^:private expand :throws [PropertyExpander$ExpandException] ^String [this ^String value]
+    (.expand this value false))
+
+  (method ^:private expand :throws [PropertyExpander$ExpandException] ^String [this ^String value
+                                                                               ^boolean encodeURL]
+    (if (not expandProp) value (PropertyExpander/expand value encodeURL)))
+
+  (constructor ^:public [this ^boolean expandProp]
+    (set! (.-expandProp this) expandProp))
+
+  (method ^:public read :throws [ParsingException IOException] ^void [this ^:mutable ^Reader policy]
+    (when-not (instance? BufferedReader policy) (set! policy (BufferedReader. policy)))
+    (set! st (StreamTokenizer. policy))
+    (.resetSyntax st)
+    (.wordChars st \a \z)
+    (.wordChars st \A \Z)
+    (.wordChars st \. \.)
+    (.wordChars st \0 \9)
+    (.wordChars st \_ \_)
+    (.wordChars st \$ \$)
+    (.wordChars st (unchecked-add-int 128 32) 255)
+    (.whitespaceChars st 0 \space)
+    (.commentChar st \/)
+    (.quoteChar st \')
+    (.quoteChar st \")
+    (.lowerCaseMode st false)
+    (.ordinaryChar st \/)
+    (.slashSlashComments st true)
+    (.slashStarComments st true)
+    (set! lookahead (.nextToken st))
+    (while (not (== lookahead StreamTokenizer/TT_EOF))
+      (when (.peek this "domain")
+        (when (nil? domainEntries) (set! domainEntries (TreeMap.)))
+        (let [de (.parseDomainEntry this)
+              domainName (.getName de)]
+          (when (some? (.putIfAbsent domainEntries domainName de))
+            (let [localizedMsg (LocalizedMessage. "duplicate.keystore.domain.name")
+                  source (new Object/1 [domainName])
+                  msg (java-str "duplicate keystore domain name: " domainName)]
+              (throw (ParsingException. msg localizedMsg source))))))
+      (.match this ";")))
+
+  (method ^:public getDomainEntries ^{:tag (Collection DomainEntry)} [this]
+    (.values domainEntries))
+
+  (method ^:private parseDomainEntry :throws [ParsingException IOException] ^DomainEntry [this]
+    (let [^:mutable ^DomainEntry domainEntry nil
+          ^:mutable ^String name nil
+          ^:mutable ^{:tag (Map String String)} properties (HashMap.)]
+      (.match this "domain")
+      (set! name (.match this "domain name"))
+      (while (not (.peek this "{")) (set! properties (.parseProperties this "{")))
+      (.match this "{")
+      (set! domainEntry (DomainEntry. name properties))
+      (while (not (.peek this "}"))
+        (.match this "keystore")
+        (set! name (.match this "keystore name"))
+        (when-not (.peek this "}") (set! properties (.parseProperties this ";")))
+        (.match this ";")
+        (.add domainEntry (KeyStoreEntry. name properties)))
+      (.match this "}")
+      domainEntry))
+
+  (method ^:private parseProperties :throws [ParsingException IOException] ^{:tag (Map String String)} [this
+                                                                                                        ^String terminator]
+    (let [^{:tag (Map String String)} properties (HashMap.)
+          ^:mutable ^String key nil
+          ^:mutable ^String value nil]
+      (while (not (.peek this terminator))
+        (set! key (.match this "property name"))
+        (.match this "=")
+        (try
+          (set! value (.expand this (.match this "quoted string")))
+          (catch PropertyExpander$ExpandException peee
+            (throw (IOException. (.getLocalizedMessage peee)))))
+        (.put properties (.toLowerCase key Locale/ENGLISH) value))
+      properties))
+
+  (method ^:private peekAndMatch :throws [ParsingException IOException] ^boolean [this
+                                                                                  ^String expect]
+    (if (.peek this expect) (do (.match this expect) true) false))
+
+  (method ^:private peek ^boolean [this ^String expect]
+    (let [^:mutable found false]
+      (switch lookahead
+        StreamTokenizer/TT_WORD (when (.equalsIgnoreCase expect (.-sval st)) (set! found true))
+        \, (when (.equalsIgnoreCase expect ",") (set! found true))
+        \{ (when (.equalsIgnoreCase expect "{") (set! found true))
+        \} (when (.equalsIgnoreCase expect "}") (set! found true))
+        \" (when (.equalsIgnoreCase expect "\"") (set! found true))
+        \* (when (.equalsIgnoreCase expect "*") (set! found true))
+        \; (when (.equalsIgnoreCase expect ";") (set! found true))
+        nil)
+      found))
+
+  (method ^:private match :throws [ParsingException IOException] ^String [this ^String expect]
+    (let [^:mutable ^String value nil]
+      (switch lookahead
+        StreamTokenizer/TT_NUMBER
+          (throw (ParsingException. (.lineno st)
+                                    expect
+                                    (java-str (LocalizedMessage/getNonlocalized "number.")
+                                              (.-nval st))))
+        StreamTokenizer/TT_EOF
+          (let [localizedMsg (LocalizedMessage. "expected.expect.read.end.of.file.")
+                source (new Object/1 [expect])
+                msg (java-str "expected [" expect "], read [end of file]")]
+            (throw (ParsingException. msg localizedMsg source)))
+        StreamTokenizer/TT_WORD
+          (cond
+            (.equalsIgnoreCase expect (.-sval st)) (set! lookahead (.nextToken st))
+            (or (or (.equalsIgnoreCase expect "domain name")
+                    (.equalsIgnoreCase expect "keystore name"))
+                (.equalsIgnoreCase expect "property name"))
+              (do (set! value (.-sval st)) (set! lookahead (.nextToken st)))
+            :else (throw (ParsingException. (.lineno st) expect (.-sval st))))
+        \"
+          (if (.equalsIgnoreCase expect "quoted string")
+              (do (set! value (.-sval st)) (set! lookahead (.nextToken st)))
+              (throw (ParsingException. (.lineno st) expect (.-sval st))))
+        \,
+          (if (.equalsIgnoreCase expect ",")
+              (set! lookahead (.nextToken st))
+              (throw (ParsingException. (.lineno st) expect ",")))
+        \{
+          (if (.equalsIgnoreCase expect "{")
+              (set! lookahead (.nextToken st))
+              (throw (ParsingException. (.lineno st) expect "{")))
+        \}
+          (if (.equalsIgnoreCase expect "}")
+              (set! lookahead (.nextToken st))
+              (throw (ParsingException. (.lineno st) expect "}")))
+        \;
+          (if (.equalsIgnoreCase expect ";")
+              (set! lookahead (.nextToken st))
+              (throw (ParsingException. (.lineno st) expect ";")))
+        \*
+          (if (.equalsIgnoreCase expect "*")
+              (set! lookahead (.nextToken st))
+              (throw (ParsingException. (.lineno st) expect "*")))
+        \=
+          (if (.equalsIgnoreCase expect "=")
+              (set! lookahead (.nextToken st))
+              (throw (ParsingException. (.lineno st) expect "=")))
+        (throw (ParsingException. (.lineno st) expect (String/valueOf (unchecked-char lookahead)))))
+      value))
+
+  (method ^:private skipEntry :throws [ParsingException IOException] ^void [this]
+    (while (not (== lookahead \;))
+      (switch lookahead
+        StreamTokenizer/TT_NUMBER
+          (throw (ParsingException. (.lineno st)
+                                    ";"
+                                    (java-str (LocalizedMessage/getNonlocalized "number.")
+                                              (.-nval st))))
+        StreamTokenizer/TT_EOF
+          (throw
+            (ParsingException. (LocalizedMessage/getNonlocalized "expected.read.end.of.file.")))
+        (set! lookahead (.nextToken st)))))
+
+  (defclass ^:static DomainEntry
+    (field ^:private ^:final ^String name)
+
+    (field ^:private ^:final ^{:tag (Map String String)} properties)
+
+    (field ^:private ^:final ^{:tag (Map String KeyStoreEntry)} entries)
+
+    (constructor [this ^String name ^{:tag (Map String String)} properties]
+      (set! (.-name this) name)
+      (set! (.-properties this) properties)
+      (set! entries (HashMap.)))
+
+    (method getName ^String [this] name)
+
+    (method getProperties ^{:tag (Map String String)} [this] properties)
+
+    (method getEntries ^{:tag (Collection KeyStoreEntry)} [this]
+      (.values entries))
+
+    (method add :throws [ParsingException] ^void [this ^KeyStoreEntry entry]
+      (let [keystoreName (.getName entry)]
+        (if (not (.containsKey entries keystoreName))
+            (.put entries keystoreName entry)
+            (let [localizedMsg (LocalizedMessage. "duplicate.keystore.name")
+                  source (new Object/1 [keystoreName])
+                  msg (java-str "duplicate keystore name: " keystoreName)]
+              (throw (ParsingException. msg localizedMsg source))))))
+
+    (method ^:public toString ^String [this]
+      (let [s (.append (StringBuilder. "\ndomain ") name)]
+        (when (some? properties)
+          (for-each [^{:tag (Map$Entry String String)} property (.entrySet properties)]
+            (.append (.append (.append (.append s "\n        ") (cast String (.getKey property)))
+                              \=)
+                     (cast String (.getValue property)))))
+        (.append s " {\n")
+        (for-each [^KeyStoreEntry entry (.values entries)] (.append (.append s entry) "\n"))
+        (.append s "}")
+        (.toString s))))
+
+  (defclass ^:static KeyStoreEntry
+    (field ^:private ^:final ^String name)
+
+    (field ^:private ^:final ^{:tag (Map String String)} properties)
+
+    (constructor [this ^String name ^{:tag (Map String String)} properties]
+      (set! (.-name this) name)
+      (set! (.-properties this) properties))
+
+    (method getName ^String [this] name)
+
+    (method getProperties ^{:tag (Map String String)} [this] properties)
+
+    (method ^:public toString ^String [this]
+      (let [s (.append (StringBuilder. "\n    keystore ") name)]
+        (when (some? properties)
+          (for-each [^{:tag (Map$Entry String String)} property (.entrySet properties)]
+            (.append (.append (.append (.append s "\n        ") (cast String (.getKey property)))
+                              \=)
+                     (cast String (.getValue property)))))
+        (.append s ";")
+        (.toString s))))
+
+  (defclass ^:public ^:static ParsingException
+    :extends GeneralSecurityException
+
+    (field ^:private ^:static ^:final ^long serialVersionUID -4330692689482574072)
+
+    (field ^:private ^String i18nMessage)
+
+    (field ^:private ^LocalizedMessage localizedMsg)
+
+    (field ^:private ^Object/1 source)
+
+    (constructor ^:public [this ^String msg]
+      (super. msg)
+      (set! i18nMessage msg))
+
+    (constructor ^:public [this ^String msg ^LocalizedMessage localizedMsg ^Object/1 source]
+      (super. msg)
+      (set! (.-localizedMsg this) localizedMsg)
+      (set! (.-source this) source))
+
+    (constructor ^:public [this ^int line ^String msg]
+      (super. (java-str "line " line ": " msg))
+      (set! localizedMsg (LocalizedMessage. "line.number.msg"))
+      (set! source (new Object/1 [line msg])))
+
+    (constructor ^:public [this ^int line ^String expect ^String actual]
+      (super. (java-str "line " line ": expected [" expect "], found [" actual "]"))
+      (set! localizedMsg (LocalizedMessage. "line.number.expected.expect.found.actual."))
+      (set! source (new Object/1 [line expect actual])))
+
+    (method ^:public getNonlocalizedMessage ^String [this]
+      (if (some? i18nMessage) i18nMessage (.formatNonlocalized localizedMsg source)))))

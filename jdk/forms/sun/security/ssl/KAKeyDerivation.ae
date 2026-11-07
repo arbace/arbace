@@ -1,0 +1,83 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/KAKeyDerivation.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.security GeneralSecurityException PrivateKey PublicKey)
+        '(javax.crypto KDF KeyAgreement SecretKey)
+        '(javax.crypto.spec HKDFParameterSpec)
+        '(javax.net.ssl SSLHandshakeException)
+        '(sun.security.util KeyUtil))
+
+(defclass ^:public KAKeyDerivation
+  :implements [SSLKeyDerivation]
+
+  (field ^:private ^:final ^String algorithmName)
+
+  (field ^:private ^:final ^HandshakeContext context)
+
+  (field ^:private ^:final ^PrivateKey localPrivateKey)
+
+  (field ^:private ^:final ^PublicKey peerPublicKey)
+
+  (constructor [this ^String algorithmName ^HandshakeContext context ^PrivateKey localPrivateKey
+                ^PublicKey peerPublicKey]
+    (set! (.-algorithmName this) algorithmName)
+    (set! (.-context this) context)
+    (set! (.-localPrivateKey this) localPrivateKey)
+    (set! (.-peerPublicKey this) peerPublicKey))
+
+  (method ^:public deriveKey :throws [IOException] ^SecretKey [this ^String type]
+    (if (not (.useTLS13PlusSpec (.-negotiatedProtocol context)))
+        (.t12DeriveKey this)
+        (.t13DeriveKey this type)))
+
+  (method ^:private t12DeriveKey :throws [IOException] ^SecretKey [this]
+    (let [^:mutable ^SecretKey preMasterSecret nil]
+      (try
+        (let [ka (KeyAgreement/getInstance algorithmName)]
+          (.init ka localPrivateKey)
+          (.doPhase ka peerPublicKey true)
+          (set! preMasterSecret (.generateSecret ka "TlsPremasterSecret"))
+          (let [mskd (SSLMasterKeyDerivation/valueOf (.-negotiatedProtocol context))]
+            (when (nil? mskd)
+              (throw (SSLHandshakeException.
+                       (java-str "No expected master key derivation for protocol: "
+                                 (.-name (.-negotiatedProtocol context))))))
+            (let [kd (.createKeyDerivation mskd context preMasterSecret)]
+              (.deriveKey kd "MasterSecret"))))
+        (catch GeneralSecurityException gse
+          (throw (SSLHandshakeException. "Could not generate secret" gse)))
+        (finally (KeyUtil/destroySecretKeys preMasterSecret)))))
+
+  (method ^:private t13DeriveKey :throws [IOException] ^SecretKey [this ^String type]
+    (let [^:mutable ^SecretKey sharedSecret nil
+          ^:mutable ^SecretKey earlySecret nil
+          ^:mutable ^SecretKey saltSecret nil]
+      (try
+        (let [ka (KeyAgreement/getInstance algorithmName)]
+          (.init ka localPrivateKey)
+          (.doPhase ka peerPublicKey true)
+          (set! sharedSecret (.generateSecret ka "TlsPremasterSecret"))
+          (let [hashAlg (.-hashAlg (.-negotiatedCipherSuite context))
+                ^:mutable kd (.-handshakeKeyDerivation context)]
+            (when (nil? kd)
+              (let [zeros (new byte/1 (.-hashLength hashAlg))
+                    hkdf (KDF/getInstance (.-hkdfAlgorithm hashAlg))]
+                (set! earlySecret
+                      (.deriveKey hkdf
+                                  "TlsEarlySecret"
+                                  (.extractOnly (.addIKM
+                                                  (.addSalt (HKDFParameterSpec/ofExtract) zeros)
+                                                  zeros))))
+                (set! kd (SSLSecretDerivation. context earlySecret))))
+            (set! saltSecret (.deriveKey kd "TlsSaltSecret"))
+            (let [hkdf (KDF/getInstance (.-hkdfAlgorithm hashAlg))]
+              (.deriveKey hkdf
+                          type
+                          (.extractOnly (.addIKM
+                                          (.addSalt (HKDFParameterSpec/ofExtract) saltSecret)
+                                          sharedSecret))))))
+        (catch GeneralSecurityException gse
+          (throw (SSLHandshakeException. "Could not generate secret" gse)))
+        (finally (KeyUtil/destroySecretKeys sharedSecret earlySecret saltSecret))))))

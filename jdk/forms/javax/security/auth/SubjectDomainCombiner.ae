@@ -1,0 +1,189 @@
+;; Converted from jdk26u src/java.base/share/classes/javax/security/auth/SubjectDomainCombiner.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'javax.security.auth)
+
+(import '(java.lang.ref WeakReference)
+        '(java.security DomainCombiner Principal ProtectionDomain)
+        '(java.util HashSet Set WeakHashMap)
+        '(sun.security.util Debug))
+
+(defclass ^:public ^{Deprecated {:since "17" :forRemoval true}} SubjectDomainCombiner
+  :implements [DomainCombiner]
+
+  (field ^:private ^Subject subject)
+
+  (field ^:private ^{:tag (WeakKeyValueMap ProtectionDomain ProtectionDomain)} cachedPDs
+    (WeakKeyValueMap.))
+
+  (field ^:private ^{:tag (Set Principal)} principalSet)
+
+  (field ^:private ^Principal/1 principals)
+
+  (field ^:private ^:static ^:final ^Debug debug
+    (Debug/getInstance "combiner" "\t[SubjectDomainCombiner]"))
+
+  (constructor ^:public [this ^Subject subject]
+    (set! (.-subject this) subject)
+    (when (.isReadOnly subject)
+      (set! principalSet (.getPrincipals subject))
+      (set! principals
+            (cast Principal/1 (.toArray principalSet (new Principal/1 (.size principalSet)))))))
+
+  (method ^:public getSubject ^Subject [this] subject)
+
+  (method ^:public combine ^ProtectionDomain/1 [this ^:mutable ^ProtectionDomain/1 currentDomains
+                                                ^ProtectionDomain/1 assignedDomains]
+    (when (some? debug)
+      (if (nil? subject) (.println debug "null subject") (.println debug (.toString subject)))
+      (SubjectDomainCombiner/printInputDomains currentDomains assignedDomains))
+    (if (or (nil? currentDomains) (== (alength currentDomains) 0))
+        assignedDomains
+        (do
+          (set! currentDomains (SubjectDomainCombiner/optimize currentDomains))
+          (when (some? debug)
+            (.println debug "after optimize")
+            (SubjectDomainCombiner/printInputDomains currentDomains assignedDomains))
+          (when-not (and (nil? currentDomains) (nil? assignedDomains))
+            (let [^int cLen (if (nil? currentDomains) 0 (alength currentDomains))
+                  ^int aLen (if (nil? assignedDomains) 0 (alength assignedDomains))
+                  ^:mutable newDomains (new ProtectionDomain/1 (unchecked-add-int cLen aLen))
+                  ^:mutable allNew true]
+              (locking cachedPDs
+                (when (and (not (.isReadOnly subject))
+                           (not (.equals (.getPrincipals subject) principalSet)))
+                  (let [^{:tag (Set Principal)} newSet (.getPrincipals subject)]
+                    (locking newSet (set! principalSet (HashSet. newSet)))
+                    (set! principals
+                          (cast Principal/1
+                                (.toArray principalSet (new Principal/1 (.size principalSet)))))
+                    (.clear cachedPDs)
+                    (when (some? debug) (.println debug "Subject mutated - clearing cache"))))
+                (let [^:mutable ^ProtectionDomain subjectPd nil]
+                  (loop [^int i 0]
+                    (when (< i cLen)
+                      (let [pd (aget currentDomains i)]
+                        (set! subjectPd (cast ProtectionDomain (.getValue cachedPDs pd)))
+                        (if (nil? subjectPd)
+                            (do
+                              (if (.staticPermissionsOnly pd)
+                                  (set! subjectPd pd)
+                                  (set! subjectPd
+                                        (ProtectionDomain.
+                                          (.getCodeSource pd)
+                                          (.getPermissions pd)
+                                          (.getClassLoader pd)
+                                          principals)))
+                              (.putValue cachedPDs pd subjectPd))
+                            (set! allNew false))
+                        (aset newDomains i subjectPd)
+                        (recur (unchecked-inc-int i)))))))
+              (when (some? debug)
+                (.println debug "updated current: ")
+                (loop [^int i 0]
+                  (when (< i cLen)
+                    (.println debug
+                              (java-str "\tupdated["
+                                        i
+                                        "] = "
+                                        (SubjectDomainCombiner/printDomain (aget newDomains i))))
+                    (recur (unchecked-inc-int i)))))
+              (when (> aLen 0)
+                (System/arraycopy assignedDomains 0 newDomains cLen aLen)
+                (when-not allNew (set! newDomains (SubjectDomainCombiner/optimize newDomains))))
+              (when (some? debug)
+                (if (or (nil? newDomains) (== (alength newDomains) 0))
+                    (.println debug "returning null")
+                    (do
+                      (.println debug "combinedDomains: ")
+                      (loop [^int i 0]
+                        (when (< i (alength newDomains))
+                          (.println debug
+                                    (java-str "newDomain "
+                                              i
+                                              ": "
+                                              (SubjectDomainCombiner/printDomain
+                                                (aget newDomains i))))
+                          (recur (unchecked-inc-int i)))))))
+              (when-not (or (nil? newDomains) (== (alength newDomains) 0)) newDomains))))))
+
+  (method ^:private ^:static optimize ^ProtectionDomain/1 [^ProtectionDomain/1 domains]
+    (when-not (or (nil? domains) (== (alength domains) 0))
+      (let [^:mutable optimized (new ProtectionDomain/1 (alength domains))
+            ^:mutable ^ProtectionDomain pd nil
+            ^:mutable ^int num 0]
+        (loop [^int i 0]
+          (if (< i (alength domains))
+              (if (some? (set! pd (aget domains i)))
+                  (let [^:mutable found false]
+                    (loop [^int j 0]
+                      (when (and (< j num) (not found))
+                        (set! found (identical? (aget optimized j) pd))
+                        (recur (unchecked-inc-int j))))
+                    (if (not found)
+                        (do
+                          (aset optimized num pd)
+                          (set! num (unchecked-inc-int num))
+                          (recur (unchecked-inc-int i)))
+                        (recur (unchecked-inc-int i))))
+                  (recur (unchecked-inc-int i)))
+              nil))
+        (when (and (> num 0) (< num (alength domains)))
+          (let [downSize (new ProtectionDomain/1 num)]
+            (System/arraycopy optimized 0 downSize 0 (alength downSize))
+            (set! optimized downSize)))
+        (when-not (or (== num 0) (== (alength optimized) 0)) optimized))))
+
+  (method ^:private ^:static printInputDomains ^void [^ProtectionDomain/1 currentDomains
+                                                      ^ProtectionDomain/1 assignedDomains]
+    (if (or (nil? currentDomains) (== (alength currentDomains) 0))
+        (.println debug "currentDomains null or 0 length")
+        (loop [^int i 0]
+          (if (and (some? currentDomains) (< i (alength currentDomains)))
+              (if (nil? (aget currentDomains i))
+                  (do
+                    (.println debug (java-str "currentDomain " i ": SystemDomain"))
+                    (recur (unchecked-inc-int i)))
+                  (do
+                    (.println
+                      debug
+                      (java-str "currentDomain "
+                                i
+                                ": "
+                                (SubjectDomainCombiner/printDomain (aget currentDomains i))))
+                    (recur (unchecked-inc-int i))))
+              nil)))
+    (if (or (nil? assignedDomains) (== (alength assignedDomains) 0))
+        (.println debug "assignedDomains null or 0 length")
+        (do
+          (.println debug "assignedDomains = ")
+          (loop [^int i 0]
+            (if (and (some? assignedDomains) (< i (alength assignedDomains)))
+                (if (nil? (aget assignedDomains i))
+                    (do
+                      (.println debug (java-str "assignedDomain " i ": SystemDomain"))
+                      (recur (unchecked-inc-int i)))
+                    (do
+                      (.println debug
+                                (java-str "assignedDomain "
+                                          i
+                                          ": "
+                                          (SubjectDomainCombiner/printDomain
+                                            (aget assignedDomains i))))
+                      (recur (unchecked-inc-int i))))
+                nil)))))
+
+  (method ^:private ^:static printDomain ^String [^:final ^ProtectionDomain pd]
+    (if (nil? pd) "null" (.toString pd)))
+
+  (defclass ^:private ^:static WeakKeyValueMap
+    :extends (WeakHashMap K (WeakReference V))
+    :type-params [K V]
+
+    (method ^:public getValue ^V [this ^K key]
+      (let [^{:tag (WeakReference V)} wr (cast WeakReference (.get super key))]
+        (when (some? wr) (.get wr))))
+
+    (method ^:public putValue ^V [this ^K key ^V value]
+      (let [^{:tag (WeakReference V)} wr (cast WeakReference
+                                               (.put super key (WeakReference. value)))]
+        (when (some? wr) (.get wr))))))

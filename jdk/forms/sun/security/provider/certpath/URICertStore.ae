@@ -1,0 +1,473 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/certpath/URICertStore.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider.certpath)
+
+(import '(java.io FilterInputStream IOException InputStream)
+        '(java.net HttpURLConnection URI URISyntaxException)
+        '(java.security InvalidAlgorithmParameterException NoSuchAlgorithmException Provider)
+        '(java.security.cert CRLException
+                             CRLSelector
+                             CertSelector
+                             CertStore
+                             CertStoreException
+                             CertStoreParameters
+                             CertStoreSpi
+                             CertificateException
+                             CertificateFactory
+                             URICertStoreParameters
+                             X509CRL
+                             X509Certificate)
+        '(java.util ArrayList Collection Collections LinkedHashSet List Locale Optional Set)
+        '(java.util.function Function Predicate)
+        '(javax.security.auth.x500 X500Principal)
+        '(sun.security.util Cache Debug SecurityProperties)
+        '(sun.security.x509 AccessDescription URIName))
+
+(defclass URICertStore
+  :extends CertStoreSpi
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "certpath"))
+
+  (field ^:private ^:static ^:final ^int CHECK_INTERVAL (unchecked-multiply-int 30 1000))
+
+  (field ^:private ^:static ^:final ^int CACHE_SIZE 185)
+
+  (field ^:private ^:final ^CertificateFactory factory)
+
+  (field ^:private ^{:tag (Collection X509Certificate)} certs (Collections/emptySet))
+
+  (field ^:private ^X509CRL crl)
+
+  (field ^:private ^long lastChecked)
+
+  (field ^:private ^long lastModified)
+
+  (field ^:private ^:final ^URI uri)
+
+  (field ^:private ^boolean ldap false)
+
+  (field ^:private ^CertStore ldapCertStore)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_CRL_CONNECT_TIMEOUT 15000)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_CRL_READ_TIMEOUT 15000)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_CACERT_CONNECT_TIMEOUT 15000)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_CACERT_READ_TIMEOUT 15000)
+
+  (field ^:private ^:static ^:final ^int CRL_CONNECT_TIMEOUT
+    (URICertStore/initializeTimeout "com.sun.security.crl.timeout" DEFAULT_CRL_CONNECT_TIMEOUT))
+
+  (field ^:private ^:static ^:final ^int CRL_READ_TIMEOUT
+    (URICertStore/initializeTimeout "com.sun.security.crl.readtimeout" DEFAULT_CRL_READ_TIMEOUT))
+
+  (field ^:private ^:static ^:final ^int CACERT_CONNECT_TIMEOUT
+    (URICertStore/initializeTimeout "com.sun.security.cert.timeout" DEFAULT_CACERT_CONNECT_TIMEOUT))
+
+  (field ^:private ^:static ^:final ^int CACERT_READ_TIMEOUT
+    (URICertStore/initializeTimeout "com.sun.security.cert.readtimeout" DEFAULT_CACERT_READ_TIMEOUT))
+
+  (method ^:private ^:static initializeTimeout ^int [^String prop ^int def]
+    (let [timeoutVal (SecurityProperties/getTimeoutSystemProp prop def debug)]
+      (when (some? debug) (.println debug (java-str prop " set to " timeoutVal " milliseconds")))
+      timeoutVal))
+
+  (field ^:private ^:static ^:final ^long MAX_CRL_DOWNLOAD_SIZE
+    (SecurityProperties/getOverridableLongProp "com.sun.security.crl.maxSize" 20971520 debug))
+
+  (defclass ^:private ^:enum AllowedScheme
+    (constants
+      (HTTP [HttpFtpRuleMatcher/HTTP])
+      (HTTPS [HttpFtpRuleMatcher/HTTPS])
+      (LDAP [LdapRuleMatcher/LDAP])
+      (LDAPS [LdapRuleMatcher/LDAPS])
+      (FTP [HttpFtpRuleMatcher/FTP]))
+
+    (field ^:final ^URIRuleMatcher ruleMatcher)
+
+    (constructor [this ^URIRuleMatcher matcher] (set! ruleMatcher matcher))
+
+    (method ^:static nameOf ^AllowedScheme [^String name]
+      (when (some? name)
+        (try
+          (AllowedScheme/valueOf (.toUpperCase name Locale/ROOT))
+          (catch IllegalArgumentException _ nil)))))
+
+  (field ^:private ^:static ^{:tag (Set URI)} CA_ISS_URI_FILTERS nil)
+
+  (field ^:private ^:static ^:final ^boolean CA_ISS_ALLOW_ANY)
+
+  (static-initializer
+    (when (some? debug)
+      (.println debug
+                (java-str "Maximum downloadable CRL size: "
+                          MAX_CRL_DOWNLOAD_SIZE
+                          (if (< MAX_CRL_DOWNLOAD_SIZE 0) " (DISABLED)" ""))))
+    (let [^:mutable allowAny false]
+      (try
+        (when Builder/USE_AIA
+          (set! CA_ISS_URI_FILTERS (LinkedHashSet.))
+          (let [aiaPropVal (cast String
+                                 (.orElse (.map (Optional/ofNullable
+                                                  (SecurityProperties/getOverridableProperty
+                                                    "com.sun.security.allowedAIALocations"))
+                                                (method-ref Function ^String [String] String/.trim))
+                                          ""))]
+            (if (.equalsIgnoreCase aiaPropVal "any")
+                (do
+                  (set! allowAny true)
+                  (when (some? debug)
+                    (.println debug
+                              "allowedAIALocations: Warning: Allow-All URI filtering enabled!")))
+                (do
+                  (when-not (.isEmpty aiaPropVal)
+                    (let [aiaUriStrs (.split (.trim aiaPropVal) "\\s+")]
+                      (URICertStore/addCaIssUriFilters aiaUriStrs)))
+                  (when (.isEmpty CA_ISS_URI_FILTERS)
+                    (when (some? debug)
+                      (.println
+                        debug
+                        "allowedAIALocations: Warning: No valid filters found. Deny-all URI filtering is active.")))))))
+        (finally (set! CA_ISS_ALLOW_ANY allowAny)))))
+
+  (method ^:private ^:static addCaIssUriFilters ^void [^String/1 aiaUriStrs]
+    (for-each [^String aiaStr aiaUriStrs]
+      (when (and (some? aiaStr) (not (.isEmpty aiaStr)))
+        (try
+          (let [^:mutable ^AllowedScheme scheme nil
+                aiaUri (.normalize (URI. aiaStr))]
+            (cond
+              (or (not (.isAbsolute aiaUri)) (.isOpaque aiaUri))
+                (when (some? debug)
+                  (.println debug
+                            (java-str "allowedAIALocations: Skipping non-absolute or opaque URI "
+                                      aiaUri)))
+              (nil? (.getHost aiaUri))
+                (when (some? debug)
+                  (.println debug
+                            (java-str
+                              "allowedAIALocations: Skipping URI rule with no hostname or address: "
+                              aiaUri)))
+              (some? (set! scheme (AllowedScheme/nameOf (.getScheme aiaUri))))
+                (do
+                  (when (or (identical? scheme AllowedScheme/LDAP)
+                            (identical? scheme AllowedScheme/LDAPS))
+                    (try
+                      (X500Principal. (.replaceFirst (.getPath aiaUri) "^/+" ""))
+                      (catch IllegalArgumentException iae
+                        (when (some? debug)
+                          (.println debug
+                                    (java-str "allowedAIALocations: Skipping LDAP rule: " iae)))
+                        (continue))))
+                  (when (some? (.getQuery aiaUri))
+                    (when (some? debug)
+                      (.println debug "allowedAIALocations: Rule will ignore non-null query")))
+                  (when (some? (.getFragment aiaUri))
+                    (when (some? debug)
+                      (.println debug "allowedAIALocations: Rule will ignore non-null fragment")))
+                  (.add CA_ISS_URI_FILTERS aiaUri)
+                  (when (some? debug)
+                    (.println debug
+                              (java-str "allowedAIALocations: Added " aiaUri " to URI filters"))))
+              (some? debug)
+                (.println debug
+                          (java-str "allowedAIALocations: Disallowed filter URI scheme: "
+                                    (.getScheme aiaUri)))))
+          (catch URISyntaxException urise
+            (when (some? debug)
+              (.println debug
+                        (java-str "allowedAIALocations: Skipping filter URI entry "
+                                  aiaStr
+                                  ": parse failure at index "
+                                  (.getIndex urise)))))))))
+
+  (constructor :throws [InvalidAlgorithmParameterException NoSuchAlgorithmException] [this
+                                                                                      ^CertStoreParameters params]
+    (super. params)
+    (when-not (instance? URICertStoreParameters params)
+      (throw (InvalidAlgorithmParameterException.
+               "params must be instanceof URICertStoreParameters")))
+    (set! (.-uri this) (.getURI (cast URICertStoreParameters params)))
+    (when (.equals (.toLowerCase (.getScheme uri) Locale/ENGLISH) "ldap")
+      (set! ldap true)
+      (set! ldapCertStore (CertStore/getInstance "LDAP" params)))
+    (try
+      (set! factory (CertificateFactory/getInstance "X.509"))
+      (catch CertificateException e (throw (RuntimeException.)))))
+
+  (field ^:private ^:static ^:final ^{:tag (Cache URICertStoreParameters CertStore)} certStoreCache
+    (Cache/newSoftMemoryCache CACHE_SIZE))
+
+  (method ^:static ^:synchronized getInstance :throws [NoSuchAlgorithmException
+                                                       InvalidAlgorithmParameterException] ^CertStore [^URICertStoreParameters params]
+    (when (some? debug) (.println debug (java-str "CertStore URI:" (.getURI params))))
+    (let [^:mutable ucs (cast CertStore (.get certStoreCache params))]
+      (cond
+        (nil? ucs)
+          (do
+            (set! ucs (UCS. (URICertStore. params) nil "URI" params))
+            (.put certStoreCache params ucs))
+        (some? debug) (.println debug "URICertStore.getInstance: cache hit"))
+      ucs))
+
+  (method ^:static getInstance ^CertStore [^AccessDescription ad]
+    (when-not (not (.equals (.getAccessMethod ad) AccessDescription/Ad_CAISSUERS_Id))
+      (let [gn (.getName (.getAccessLocation ad))]
+        (when-not (not (instance? URIName gn))
+          (let [uri (.getURI (cast URIName gn))]
+            (when (and Builder/USE_AIA (not CA_ISS_ALLOW_ANY))
+              (let [normAIAUri (.normalize uri)
+                    scheme (AllowedScheme/nameOf (.getScheme normAIAUri))]
+                (when (nil? scheme)
+                  (when (some? debug)
+                    (.println debug
+                              (java-str "allowedAIALocations: No matching ruleset for scheme "
+                                        (.getScheme normAIAUri))))
+                  (return nil))
+                (when (.noneMatch (.stream CA_ISS_URI_FILTERS)
+                                  (lambda Predicate ^boolean [^URI rule]
+                                    (.matchRule (.-ruleMatcher scheme) rule normAIAUri)))
+                  (when (some? debug)
+                    (.println
+                      debug
+                      (java-str
+                        "allowedAIALocations: Warning - The caIssuer URI "
+                        normAIAUri
+                        " in the AuthorityInfoAccess extension is denied access. Use the com.sun.security.allowedAIALocations security/system property to allow access.")))
+                  (return nil))))
+            (try
+              (URICertStore/getInstance (URICertStoreParameters. uri))
+              (catch Exception ex
+                (when (some? debug)
+                  (.println debug (java-str "exception creating CertStore: " ex))
+                  (.printStackTrace ex))
+                nil)))))))
+
+  (method ^:public ^:synchronized engineGetCertificates :throws [CertStoreException] ^{:tag (Collection X509Certificate)} [this
+                                                                                                                           ^CertSelector selector]
+    (if ldap
+        (.getCertificates ldapCertStore selector)
+        (let [time (System/currentTimeMillis)]
+          (if (< (unchecked-subtract time lastChecked) CHECK_INTERVAL)
+              (do
+                (when (some? debug) (.println debug "Returning certificates from cache"))
+                (URICertStore/getMatchingCerts certs selector))
+              (do
+                (set! lastChecked time)
+                (try
+                  (let [connection (.openConnection (.toURL uri))]
+                    (when-not (== lastModified 0) (.setIfModifiedSince connection lastModified))
+                    (let [oldLastModified lastModified]
+                      (.setConnectTimeout connection CACERT_CONNECT_TIMEOUT)
+                      (.setReadTimeout connection CACERT_READ_TIMEOUT)
+                      (with-resources [in (.getInputStream connection)]
+                        (set! lastModified (.getLastModified connection))
+                        (when-not (== oldLastModified 0)
+                          (if (== oldLastModified lastModified)
+                              (do
+                                (when (some? debug)
+                                  (.println debug "Not modified, using cached copy"))
+                                (return (URICertStore/getMatchingCerts certs selector)))
+                              (when-instance [^HttpURLConnection hconn connection]
+                                (when (== (.getResponseCode hconn)
+                                          HttpURLConnection/HTTP_NOT_MODIFIED)
+                                  (when (some? debug)
+                                    (.println debug "Not modified, using cached copy"))
+                                  (return (URICertStore/getMatchingCerts certs selector))))))
+                        (when (some? debug) (.println debug "Downloading new certificates..."))
+                        (set! certs (.generateCertificates factory in)))
+                      (return (URICertStore/getMatchingCerts certs selector))))
+                  (catch [IOException CertificateException] e
+                    (when (some? debug)
+                      (.println debug "Exception fetching certificates:")
+                      (.printStackTrace e))))
+                (set! lastModified 0)
+                (set! certs (Collections/emptySet))
+                certs)))))
+
+  (method ^:private ^:static getMatchingCerts ^{:tag (Collection X509Certificate)} [^{:tag (Collection X509Certificate)} certs
+                                                                                    ^CertSelector selector]
+    (if (nil? selector)
+        certs
+        (let [^{:tag (List X509Certificate)} matchedCerts (ArrayList. (.size certs))]
+          (for-each [^X509Certificate cert certs]
+            (when (.match selector cert) (.add matchedCerts cert)))
+          matchedCerts)))
+
+  (method ^:public ^:synchronized engineGetCRLs :throws [CertStoreException] ^{:tag (Collection X509CRL)} [this
+                                                                                                           ^CRLSelector selector]
+    (when ldap
+      (try
+        (return (.getCRLs ldapCertStore selector))
+        (catch CertStoreException cse (throw (PKIX$CertStoreTypeException. "LDAP" cse)))))
+    (let [time (System/currentTimeMillis)]
+      (if (< (unchecked-subtract time lastChecked) CHECK_INTERVAL)
+          (do
+            (when (some? debug) (.println debug "Returning CRL from cache"))
+            (URICertStore/getMatchingCRLs crl selector))
+          (do
+            (set! lastChecked time)
+            (try
+              (let [connection (.openConnection (.toURL uri))]
+                (when-not (== lastModified 0) (.setIfModifiedSince connection lastModified))
+                (let [oldLastModified lastModified]
+                  (.setConnectTimeout connection CRL_CONNECT_TIMEOUT)
+                  (.setReadTimeout connection CRL_READ_TIMEOUT)
+                  (with-resources [in (.getInputStream connection)]
+                    (set! lastModified (.getLastModified connection))
+                    (when-not (== oldLastModified 0)
+                      (if (== oldLastModified lastModified)
+                          (do
+                            (when (some? debug) (.println debug "Not modified, using cached copy"))
+                            (return (URICertStore/getMatchingCRLs crl selector)))
+                          (when-instance [^HttpURLConnection hconn connection]
+                            (when (== (.getResponseCode hconn) HttpURLConnection/HTTP_NOT_MODIFIED)
+                              (when (some? debug)
+                                (.println debug "Not modified, using cached copy"))
+                              (return (URICertStore/getMatchingCRLs crl selector))))))
+                    (when (some? debug) (.println debug "Downloading new CRL..."))
+                    (let [^InputStream crlIn (if (> MAX_CRL_DOWNLOAD_SIZE -1)
+                                                 ^InputStream (SizeLimitedInputStream.
+                                                                in
+                                                                MAX_CRL_DOWNLOAD_SIZE)
+                                                 in)]
+                      (try
+                        (set! crl (cast X509CRL (.generateCRL factory crlIn)))
+                        (catch IllegalArgumentException iae
+                          (when (some? debug)
+                            (.println debug (java-str "Discarding CRL: " (.getMessage iae)))
+                            (set! crl nil))))))
+                  (URICertStore/getMatchingCRLs crl selector)))
+              (catch [IOException CRLException] e
+                (when (some? debug) (.println debug "Exception fetching CRL:") (.printStackTrace e))
+                (set! lastModified 0)
+                (set! crl nil)
+                (throw (PKIX$CertStoreTypeException. "URI" (CertStoreException. e)))))))))
+
+  (method ^:private ^:static getMatchingCRLs ^{:tag (Collection X509CRL)} [^X509CRL crl
+                                                                           ^CRLSelector selector]
+    (if (or (nil? selector) (and (some? crl) (.match selector crl)))
+        (Collections/singletonList crl)
+        (Collections/emptyList)))
+
+  (defclass ^:private ^:static UCS
+    :extends CertStore
+
+    (constructor ^:protected [this ^CertStoreSpi spi ^Provider p ^String type
+                              ^CertStoreParameters params]
+      (super. spi p type params)))
+
+  (defclass ^:abstract ^:static URIRuleMatcher
+    (field ^:protected ^:final ^int wellKnownPort)
+
+    (constructor ^:protected [this ^int port] (set! wellKnownPort port))
+
+    (method schemeHostPortCheck ^boolean [this ^URI filterRule ^URI caIssuer]
+      (cond
+        (not (.equalsIgnoreCase (.getScheme filterRule) (.getScheme caIssuer))) false
+        (not (.equalsIgnoreCase (.getHost filterRule) (.getHost caIssuer))) false
+        :else
+          (do
+            (try
+              (let [^int fPort (if (== (.getPort filterRule) -1)
+                                   wellKnownPort
+                                   (.getPort filterRule))
+                    ^int caiPort (if (== (.getPort caIssuer) -1) wellKnownPort (.getPort caIssuer))]
+                (when-not (== fPort caiPort) (return false)))
+              (catch IllegalArgumentException iae (return false)))
+            true)))
+
+    (method ^:abstract matchRule ^boolean [this ^URI filterRule ^URI caIssuer]))
+
+  (defclass ^:static HttpFtpRuleMatcher
+    :extends URIRuleMatcher
+
+    (field ^:static ^:final ^HttpFtpRuleMatcher HTTP (HttpFtpRuleMatcher. 80))
+
+    (field ^:static ^:final ^HttpFtpRuleMatcher HTTPS (HttpFtpRuleMatcher. 443))
+
+    (field ^:static ^:final ^HttpFtpRuleMatcher FTP (HttpFtpRuleMatcher. 21))
+
+    (constructor ^:private [this ^int port] (super. port))
+
+    (method matchRule ^boolean [this ^URI filterRule ^URI caIssuer]
+      (cond
+        (not (.schemeHostPortCheck this filterRule caIssuer)) false
+        (not (HttpFtpRuleMatcher/isRootOf filterRule caIssuer))
+          (do
+            (when (some? debug)
+              (.println
+                debug
+                "allowedAIALocations: Match failed: AIA URI is not within the rule's path hierarchy."))
+            false)
+        :else true))
+
+    (method ^:private ^:static isRootOf ^boolean [^URI base ^URI candidate]
+      (let [basePath (cast String
+                           (.orElse (.filter (Optional/of (.getPath base))
+                                             (lambda Predicate ^boolean [^String p]
+                                               (not (.isEmpty p))))
+                                    "/"))
+            candPath (cast String
+                           (.orElse (.filter (Optional/of (.getPath candidate))
+                                             (lambda Predicate ^boolean [^String p]
+                                               (not (.isEmpty p))))
+                                    "/"))]
+        (if (.endsWith basePath "/") (.startsWith candPath basePath) (.equals candPath basePath)))))
+
+  (defclass ^:static LdapRuleMatcher
+    :extends URIRuleMatcher
+
+    (field ^:static ^:final ^LdapRuleMatcher LDAP (LdapRuleMatcher. 389))
+
+    (field ^:static ^:final ^LdapRuleMatcher LDAPS (LdapRuleMatcher. 636))
+
+    (constructor ^:private [this ^int port] (super. port))
+
+    (method matchRule ^boolean [this ^URI filterRule ^URI caIssuer]
+      (if (not (.schemeHostPortCheck this filterRule caIssuer))
+          false
+          (do
+            (try
+              (let [filterBaseDn (X500Principal. (.replaceFirst (.getPath filterRule) "^/+" ""))
+                    caIssBaseDn (X500Principal. (.replaceFirst (.getPath caIssuer) "^/+" ""))]
+                (when-not (.equals filterBaseDn caIssBaseDn)
+                  (when (some? debug)
+                    (.println debug
+                              (java-str "allowedAIALocations: Match failed: Base DN mismatch ("
+                                        filterBaseDn
+                                        " vs "
+                                        caIssBaseDn
+                                        ")")))
+                  (return false)))
+              (catch IllegalArgumentException iae
+                (when (some? debug)
+                  (.println debug (java-str "allowedAIALocations: Match failed on DN: " iae)))
+                (return false)))
+            true))))
+
+  (defclass ^:private ^:static SizeLimitedInputStream
+    :extends FilterInputStream
+
+    (field ^:private ^:final ^long maxBytes)
+
+    (field ^:private ^long bytesRead 0)
+
+    (constructor ^:private [this ^InputStream in ^long maxBytes]
+      (super. in)
+      (set! (.-maxBytes this) maxBytes))
+
+    (method ^:public read :throws [IOException] ^int [this]
+      (when (>= bytesRead maxBytes)
+        (throw (IllegalArgumentException. (java-str "InputStream exceeded max size of " maxBytes))))
+      (let [b (.read super)] (when-not (== b -1) (set! bytesRead (unchecked-inc bytesRead))) b))
+
+    (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+      (when (>= bytesRead maxBytes)
+        (throw (IllegalArgumentException. (java-str "InputStream exceeded max size of " maxBytes))))
+      (let [remaining (unchecked-subtract maxBytes bytesRead)
+            toRead (unchecked-int (Math/min len remaining))
+            n (.read super b off toRead)]
+        (when-not (== n -1) (set! bytesRead (unchecked-add bytesRead n)))
+        n))))

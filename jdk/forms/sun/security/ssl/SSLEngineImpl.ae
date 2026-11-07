@@ -1,0 +1,731 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SSLEngineImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer ReadOnlyBufferException)
+        '(java.util List Map$Entry)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function BiFunction)
+        '(javax.net.ssl SSLEngine
+                        SSLEngineResult
+                        SSLEngineResult$HandshakeStatus
+                        SSLEngineResult$Status
+                        SSLException
+                        SSLHandshakeException
+                        SSLKeyException
+                        SSLParameters
+                        SSLPeerUnverifiedException
+                        SSLProtocolException
+                        SSLSession))
+
+(defclass ^:final SSLEngineImpl
+  :extends SSLEngine
+  :implements [SSLTransport]
+
+  (field ^:private ^:final ^SSLContextImpl sslContext)
+
+  (field ^:final ^TransportContext conContext)
+
+  (field ^:private ^:final ^ReentrantLock engineLock (ReentrantLock.))
+
+  (constructor [this ^SSLContextImpl sslContext]
+    (this. sslContext nil -1))
+
+  (constructor [this ^SSLContextImpl sslContext ^String host ^int port]
+    (super. host port)
+    (set! (.-sslContext this) sslContext)
+    (let [handshakeHash (HandshakeHash.)]
+      (if (.isDTLS sslContext)
+          (set! (.-conContext this)
+                (TransportContext. sslContext
+                                   this
+                                   (DTLSInputRecord. handshakeHash)
+                                   (DTLSOutputRecord. handshakeHash)))
+          (set! (.-conContext this)
+                (TransportContext. sslContext
+                                   this
+                                   (SSLEngineInputRecord. handshakeHash)
+                                   (SSLEngineOutputRecord. handshakeHash))))
+      (when (some? host)
+        (set! (.-serverNames (.-sslConfig (.-conContext this)))
+              (Utilities/addToSNIServerNameList (.-serverNames (.-sslConfig conContext)) host)))))
+
+  (method ^:public beginHandshake :throws [SSLException] ^void [this]
+    (.lock engineLock)
+    (try
+      (when (.-isUnsureMode conContext)
+        (throw (IllegalStateException. "Client/Server mode has not yet been set.")))
+      (try
+        (.kickstart conContext)
+        (catch IOException ioe
+          (throw (.fatal conContext Alert/HANDSHAKE_FAILURE "Couldn't kickstart handshaking" ioe)))
+        (catch Exception ex
+          (throw (.fatal conContext Alert/INTERNAL_ERROR "Fail to begin handshake" ex))))
+      (finally (.unlock engineLock))))
+
+  (method ^:public wrap :throws [SSLException] ^SSLEngineResult [this ^ByteBuffer/1 appData
+                                                                 ^int offset ^int length
+                                                                 ^ByteBuffer netData]
+    (.wrap this appData offset length (new ByteBuffer/1 [netData]) 0 1))
+
+  (method ^:public wrap :throws [SSLException] ^SSLEngineResult [this ^ByteBuffer/1 srcs
+                                                                 ^int srcsOffset ^int srcsLength
+                                                                 ^ByteBuffer/1 dsts ^int dstsOffset
+                                                                 ^int dstsLength]
+    (.lock engineLock)
+    (try
+      (when (.-isUnsureMode conContext)
+        (throw (IllegalStateException. "Client/Server mode has not yet been set.")))
+      (.checkTaskThrown this)
+      (SSLEngineImpl/checkParams srcs srcsOffset srcsLength dsts dstsOffset dstsLength)
+      (try
+        (.writeRecord this srcs srcsOffset srcsLength dsts dstsOffset dstsLength)
+        (catch SSLProtocolException spe (throw (.fatal conContext Alert/UNEXPECTED_MESSAGE spe)))
+        (catch IOException ioe
+          (throw (.fatal conContext Alert/INTERNAL_ERROR "problem wrapping app data" ioe)))
+        (catch Exception ex
+          (throw (.fatal conContext Alert/INTERNAL_ERROR "Fail to wrap application data" ex))))
+      (finally (.unlock engineLock))))
+
+  (method ^:private writeRecord :throws [IOException] ^SSLEngineResult [this ^ByteBuffer/1 srcs
+                                                                        ^int srcsOffset
+                                                                        ^int srcsLength
+                                                                        ^ByteBuffer/1 dsts
+                                                                        ^int dstsOffset
+                                                                        ^int dstsLength]
+    (cond
+      (.-needHandshakeFinishedStatus conContext)
+        (do
+          (set! (.-needHandshakeFinishedStatus conContext) false)
+          (SSLEngineResult. SSLEngineResult$Status/OK SSLEngineResult$HandshakeStatus/FINISHED 0 0))
+      (.isOutboundDone this)
+        (SSLEngineResult. SSLEngineResult$Status/CLOSED (.getHandshakeStatus conContext) 0 0)
+      :else
+        (let [hc (.-handshakeContext conContext)
+              ^:mutable ^SSLEngineResult$HandshakeStatus hsStatus nil]
+          (when (and (and (and (not (.-isNegotiated conContext)) (not (.-isBroken conContext)))
+                          (not (.isInboundClosed conContext)))
+                     (not (.isOutboundClosed conContext)))
+            (.kickstart conContext)
+            (set! hsStatus (.getHandshakeStatus conContext))
+            (when (identical? hsStatus SSLEngineResult$HandshakeStatus/NEED_UNWRAP)
+              (when (or (or (or (not (.isDTLS sslContext)) (nil? hc))
+                            (not (.-enableRetransmissions (.-sslConfig hc))))
+                        (.-firstMessage (.-outputRecord conContext)))
+                (return (SSLEngineResult. SSLEngineResult$Status/OK hsStatus 0 0)))))
+          (when (nil? hsStatus) (set! hsStatus (.getHandshakeStatus conContext)))
+          (if (identical? hsStatus SSLEngineResult$HandshakeStatus/NEED_TASK)
+              (SSLEngineResult. SSLEngineResult$Status/OK hsStatus 0 0)
+              (let [^:mutable ^int dstsRemains 0]
+                (loop [^int i dstsOffset]
+                  (when (< i (unchecked-add-int dstsOffset dstsLength))
+                    (set! dstsRemains (unchecked-add-int dstsRemains (.remaining (aget dsts i))))
+                    (recur (unchecked-inc-int i))))
+                (if (< dstsRemains (.getPacketBufferSize (.-conSession conContext)))
+                    (SSLEngineResult. SSLEngineResult$Status/BUFFER_OVERFLOW
+                                      (.getHandshakeStatus conContext)
+                                      0
+                                      0)
+                    (let [^:mutable ^int srcsRemains 0]
+                      (loop [^int i srcsOffset]
+                        (when (< i (unchecked-add-int srcsOffset srcsLength))
+                          (set! srcsRemains
+                                (unchecked-add-int srcsRemains (.remaining (aget srcs i))))
+                          (recur (unchecked-inc-int i))))
+                      (let [^:mutable ^Ciphertext ciphertext nil]
+                        (try
+                          (when (or (not (.isEmpty (.-outputRecord conContext)))
+                                    (and (and (and
+                                                (some? hc)
+                                                (.-enableRetransmissions (.-sslConfig hc)))
+                                              (.isDTLS (.-sslContext hc)))
+                                         (identical?
+                                           hsStatus
+                                           SSLEngineResult$HandshakeStatus/NEED_UNWRAP)))
+                            (set! ciphertext (.encode this nil 0 0 dsts dstsOffset dstsLength)))
+                          (when (and (nil? ciphertext) (not (== srcsRemains 0)))
+                            (set! ciphertext
+                                  (.encode this
+                                           srcs
+                                           srcsOffset
+                                           srcsLength
+                                           dsts
+                                           dstsOffset
+                                           dstsLength)))
+                          (catch IOException ioe
+                            (if (instance? SSLException ioe)
+                                (throw ioe)
+                                (throw (SSLException. "Write problems" ioe)))))
+                        (let [^:mutable ^SSLEngineResult$Status status (if (.isOutboundDone this)
+                                                                           SSLEngineResult$Status/CLOSED
+                                                                           SSLEngineResult$Status/OK)]
+                          (if (and (some? ciphertext) (some? (.-handshakeStatus ciphertext)))
+                              (set! hsStatus (.-handshakeStatus ciphertext))
+                              (do
+                                (set! hsStatus (.getHandshakeStatus conContext))
+                                (when (and (and (and
+                                                  (nil? ciphertext)
+                                                  (not (.-isNegotiated conContext)))
+                                                (.isInboundClosed conContext))
+                                           (identical?
+                                             hsStatus
+                                             SSLEngineResult$HandshakeStatus/NEED_WRAP))
+                                  (set! status SSLEngineResult$Status/CLOSED))))
+                          (let [^:mutable deltaSrcs srcsRemains]
+                            (loop [^int i srcsOffset]
+                              (when (< i (unchecked-add-int srcsOffset srcsLength))
+                                (set! deltaSrcs
+                                      (unchecked-subtract-int deltaSrcs (.remaining (aget srcs i))))
+                                (recur (unchecked-inc-int i))))
+                            (let [^:mutable deltaDsts dstsRemains]
+                              (loop [^int i dstsOffset]
+                                (when (< i (unchecked-add-int dstsOffset dstsLength))
+                                  (set! deltaDsts
+                                        (unchecked-subtract-int
+                                          deltaDsts
+                                          (.remaining (aget dsts i))))
+                                  (recur (unchecked-inc-int i))))
+                              (SSLEngineResult. status
+                                                hsStatus
+                                                deltaSrcs
+                                                deltaDsts
+                                                (if (some? ciphertext) (.-recordSN ciphertext) -1)))))))))))))
+
+  (method ^:private encode :throws [IOException] ^Ciphertext [this ^ByteBuffer/1 srcs
+                                                              ^int srcsOffset ^int srcsLength
+                                                              ^ByteBuffer/1 dsts ^int dstsOffset
+                                                              ^int dstsLength]
+    (let [^:mutable ^Ciphertext ciphertext nil]
+      (try
+        (set! ciphertext
+              (.encode (.-outputRecord conContext)
+                       srcs
+                       srcsOffset
+                       srcsLength
+                       dsts
+                       dstsOffset
+                       dstsLength))
+        (catch SSLHandshakeException she (throw (.fatal conContext Alert/HANDSHAKE_FAILURE she)))
+        (catch IOException e (throw (.fatal conContext Alert/UNEXPECTED_MESSAGE e))))
+      (when (some? ciphertext)
+        (let [needRetransmission (and (and (.isDTLS (.-sslContext conContext))
+                                           (some? (.-handshakeContext conContext)))
+                                      (.-enableRetransmissions
+                                        (.-sslConfig (.-handshakeContext conContext))))
+              ^:mutable hsStatus (.tryToFinishHandshake this (.-contentType ciphertext))]
+          (when (and (and (and needRetransmission
+                               (identical? hsStatus SSLEngineResult$HandshakeStatus/FINISHED))
+                          (.isDTLS (.-sslContext conContext)))
+                     (== (.-handshakeType ciphertext) (.-id SSLHandshake/FINISHED)))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,verbose"))
+              (SSLLogger/finest "retransmit the last flight messages"))
+            (.launchRetransmission (.-outputRecord conContext))
+            (set! hsStatus SSLEngineResult$HandshakeStatus/NEED_WRAP))
+          (when (nil? hsStatus) (set! hsStatus (.getHandshakeStatus conContext)))
+          (when (or (.seqNumIsHuge (.-outputRecord conContext))
+                    (.atKeyLimit (.-writeCipher (.-outputRecord conContext))))
+            (set! hsStatus (.tryKeyUpdate this hsStatus)))
+          (when (and (.-updateNST (.-conSession conContext))
+                     (not (.-isClientMode (.-sslConfig conContext))))
+            (set! hsStatus (.tryNewSessionTicket this hsStatus)))
+          (set! (.-handshakeStatus ciphertext) hsStatus)
+          ciphertext))))
+
+  (method ^:private tryToFinishHandshake ^SSLEngineResult$HandshakeStatus [this ^byte contentType]
+    (let [^:mutable ^SSLEngineResult$HandshakeStatus hsStatus nil]
+      (when (and (== contentType (.-id ContentType/HANDSHAKE))
+                 (.isEmpty (.-outputRecord conContext)))
+        (cond
+          (nil? (.-handshakeContext conContext))
+            (set! hsStatus SSLEngineResult$HandshakeStatus/FINISHED)
+          (.isPostHandshakeContext conContext) (set! hsStatus (.finishPostHandshake conContext))
+          (.-handshakeFinished (.-handshakeContext conContext))
+            (set! hsStatus (.finishHandshake conContext))))
+      hsStatus))
+
+  (method ^:private tryKeyUpdate :throws [IOException] ^SSLEngineResult$HandshakeStatus [this
+                                                                                         ^SSLEngineResult$HandshakeStatus currentHandshakeStatus]
+    (if (and (and (nil? (.-handshakeContext conContext)) (not (.isOutboundClosed conContext)))
+             (not (.-isBroken conContext)))
+        (do
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/finest "trigger key update"))
+          (.beginHandshake this)
+          (.getHandshakeStatus conContext))
+        currentHandshakeStatus))
+
+  (method ^:private tryNewSessionTicket :throws [IOException] ^SSLEngineResult$HandshakeStatus [this
+                                                                                                ^SSLEngineResult$HandshakeStatus currentHandshakeStatus]
+    (if (and (and (and (and (and (> SSLConfiguration/serverNewSessionTicketCount 0)
+                                 (nil? (.-handshakeContext conContext)))
+                            (.useTLS13PlusSpec (.-protocolVersion conContext)))
+                       (not (.isOutboundClosed conContext)))
+                  (not (.isInboundClosed conContext)))
+             (not (.-isBroken conContext)))
+        (do
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl")) (SSLLogger/finest "trigger NST"))
+          (set! (.-updateNST (.-conSession conContext)) false)
+          (.produce NewSessionTicket/t13PosthandshakeProducer (PostHandshakeContext. conContext))
+          (.getHandshakeStatus conContext))
+        currentHandshakeStatus))
+
+  (method ^:private ^:static checkParams ^void [^ByteBuffer/1 srcs ^int srcsOffset ^int srcsLength
+                                                ^ByteBuffer/1 dsts ^int dstsOffset ^int dstsLength]
+    (when (or (nil? srcs) (nil? dsts))
+      (throw (IllegalArgumentException. "source or destination buffer is null")))
+    (when (or (or (< dstsOffset 0) (< dstsLength 0))
+              (> dstsOffset (unchecked-subtract-int (alength dsts) dstsLength)))
+      (throw (IndexOutOfBoundsException. "index out of bound of the destination buffers")))
+    (when (or (or (< srcsOffset 0) (< srcsLength 0))
+              (> srcsOffset (unchecked-subtract-int (alength srcs) srcsLength)))
+      (throw (IndexOutOfBoundsException. "index out of bound of the source buffers")))
+    (loop [^int i dstsOffset]
+      (when (< i (unchecked-add-int dstsOffset dstsLength))
+        (when (nil? (aget dsts i))
+          (throw (IllegalArgumentException. (java-str "destination buffer[" i "] == null"))))
+        (if (.isReadOnly (aget dsts i))
+            (throw (ReadOnlyBufferException.))
+            (recur (unchecked-inc-int i)))))
+    (loop [^int i srcsOffset]
+      (if (< i (unchecked-add-int srcsOffset srcsLength))
+          (if (nil? (aget srcs i))
+              (throw (IllegalArgumentException. (java-str "source buffer[" i "] == null")))
+              (recur (unchecked-inc-int i)))
+          nil)))
+
+  (method ^:public unwrap :throws [SSLException] ^SSLEngineResult [this ^ByteBuffer src
+                                                                   ^ByteBuffer/1 dsts ^int offset
+                                                                   ^int length]
+    (.unwrap this (new ByteBuffer/1 [src]) 0 1 dsts offset length))
+
+  (method ^:public unwrap :throws [SSLException] ^SSLEngineResult [this ^ByteBuffer/1 srcs
+                                                                   ^int srcsOffset ^int srcsLength
+                                                                   ^ByteBuffer/1 dsts
+                                                                   ^int dstsOffset ^int dstsLength]
+    (.lock engineLock)
+    (try
+      (when (.-isUnsureMode conContext)
+        (throw (IllegalStateException. "Client/Server mode has not yet been set.")))
+      (.checkTaskThrown this)
+      (SSLEngineImpl/checkParams srcs srcsOffset srcsLength dsts dstsOffset dstsLength)
+      (try
+        (.readRecord this srcs srcsOffset srcsLength dsts dstsOffset dstsLength)
+        (catch SSLProtocolException spe
+          (throw (.fatal conContext Alert/UNEXPECTED_MESSAGE (.getMessage spe) spe)))
+        (catch IOException ioe
+          (throw (.fatal conContext Alert/INTERNAL_ERROR "problem unwrapping net record" ioe)))
+        (catch Exception ex
+          (throw (.fatal conContext Alert/INTERNAL_ERROR "Fail to unwrap network record" ex))))
+      (finally (.unlock engineLock))))
+
+  (method ^:private readRecord :throws [IOException] ^SSLEngineResult [this ^ByteBuffer/1 srcs
+                                                                       ^int srcsOffset
+                                                                       ^int srcsLength
+                                                                       ^ByteBuffer/1 dsts
+                                                                       ^int dstsOffset
+                                                                       ^int dstsLength]
+    (if (.isInboundDone this)
+        (SSLEngineResult. SSLEngineResult$Status/CLOSED (.getHandshakeStatus conContext) 0 0)
+        (let [^:mutable ^SSLEngineResult$HandshakeStatus hsStatus nil]
+          (when (and (and (and (not (.-isNegotiated conContext)) (not (.-isBroken conContext)))
+                          (not (.isInboundClosed conContext)))
+                     (not (.isOutboundClosed conContext)))
+            (.kickstart conContext)
+            (set! hsStatus (.getHandshakeStatus conContext))
+            (when (identical? hsStatus SSLEngineResult$HandshakeStatus/NEED_WRAP)
+              (return (SSLEngineResult. SSLEngineResult$Status/OK hsStatus 0 0))))
+          (when (nil? hsStatus) (set! hsStatus (.getHandshakeStatus conContext)))
+          (cond
+            (identical? hsStatus SSLEngineResult$HandshakeStatus/NEED_TASK)
+              (SSLEngineResult. SSLEngineResult$Status/OK hsStatus 0 0)
+            (identical? hsStatus SSLEngineResult$HandshakeStatus/NEED_UNWRAP_AGAIN)
+              (let [^:mutable ^Plaintext plainText nil]
+                (try
+                  (set! plainText (.decode this nil 0 0 dsts dstsOffset dstsLength))
+                  (catch IOException ioe
+                    (if (instance? SSLException ioe)
+                        (throw ioe)
+                        (throw (SSLException. "readRecord" ioe)))))
+                (let [^SSLEngineResult$Status status (if (.isInboundDone this)
+                                                         SSLEngineResult$Status/CLOSED
+                                                         SSLEngineResult$Status/OK)]
+                  (if (some? (.-handshakeStatus plainText))
+                      (set! hsStatus (.-handshakeStatus plainText))
+                      (set! hsStatus (.getHandshakeStatus conContext)))
+                  (SSLEngineResult. status hsStatus 0 0 (.-recordSN plainText))))
+            :else
+              (let [^:mutable ^int srcsRemains 0]
+                (loop [^int i srcsOffset]
+                  (when (< i (unchecked-add-int srcsOffset srcsLength))
+                    (set! srcsRemains (unchecked-add-int srcsRemains (.remaining (aget srcs i))))
+                    (recur (unchecked-inc-int i))))
+                (if (== srcsRemains 0)
+                    (SSLEngineResult. SSLEngineResult$Status/BUFFER_UNDERFLOW hsStatus 0 0)
+                    (let [^:mutable ^int packetLen 0]
+                      (try
+                        (set! packetLen
+                              (.bytesInCompletePacket
+                                (.-inputRecord conContext)
+                                srcs
+                                srcsOffset
+                                srcsLength))
+                        (catch SSLException ssle
+                          (if (.isDTLS sslContext)
+                              (do
+                                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,verbose"))
+                                  (SSLLogger/finest "Discard invalid DTLS records" ssle))
+                                (loop [^int i srcsOffset]
+                                  (when (< i (unchecked-add-int srcsOffset srcsLength))
+                                    (.position (aget srcs i) (.limit (aget srcs i)))
+                                    (recur (unchecked-inc-int i))))
+                                (let [^SSLEngineResult$Status status (if (.isInboundDone this)
+                                                                         SSLEngineResult$Status/CLOSED
+                                                                         SSLEngineResult$Status/OK)]
+                                  (when (nil? hsStatus)
+                                    (set! hsStatus (.getHandshakeStatus conContext)))
+                                  (return (SSLEngineResult. status hsStatus srcsRemains 0 -1))))
+                              (throw ssle))))
+                      (when (> packetLen (.getPacketBufferSize (.-conSession conContext)))
+                        (let [^:mutable ^int largestRecordSize (if (.isDTLS sslContext)
+                                                                   DTLSRecord/maxRecordSize
+                                                                   SSLRecord/maxLargeRecordSize)]
+                          (when (and (<= packetLen largestRecordSize) (not (.isDTLS sslContext)))
+                            (.expandBufferSizes (.-conSession conContext)))
+                          (set! largestRecordSize (.getPacketBufferSize (.-conSession conContext)))
+                          (when (> packetLen largestRecordSize)
+                            (throw (SSLProtocolException.
+                                     (java-str "Input record too big: max = "
+                                               largestRecordSize
+                                               " len = "
+                                               packetLen))))))
+                      (let [^:mutable ^int dstsRemains 0]
+                        (loop [^int i dstsOffset]
+                          (when (< i (unchecked-add-int dstsOffset dstsLength))
+                            (set! dstsRemains
+                                  (unchecked-add-int dstsRemains (.remaining (aget dsts i))))
+                            (recur (unchecked-inc-int i))))
+                        (when (.-isNegotiated conContext)
+                          (let [FragLen (.estimateFragmentSize (.-inputRecord conContext) packetLen)]
+                            (when (> FragLen dstsRemains)
+                              (return (SSLEngineResult.
+                                        SSLEngineResult$Status/BUFFER_OVERFLOW
+                                        hsStatus
+                                        0
+                                        0)))))
+                        (if (or (== packetLen -1) (< srcsRemains packetLen))
+                            (SSLEngineResult. SSLEngineResult$Status/BUFFER_UNDERFLOW hsStatus 0 0)
+                            (let [^:mutable ^Plaintext plainText nil]
+                              (try
+                                (set! plainText
+                                      (.decode this
+                                               srcs
+                                               srcsOffset
+                                               srcsLength
+                                               dsts
+                                               dstsOffset
+                                               dstsLength))
+                                (catch IOException ioe
+                                  (if (instance? SSLException ioe)
+                                      (throw ioe)
+                                      (throw (SSLException. "readRecord" ioe)))))
+                              (let [^SSLEngineResult$Status status (if (.isInboundDone this)
+                                                                       SSLEngineResult$Status/CLOSED
+                                                                       SSLEngineResult$Status/OK)]
+                                (if (some? (.-handshakeStatus plainText))
+                                    (set! hsStatus (.-handshakeStatus plainText))
+                                    (set! hsStatus (.getHandshakeStatus conContext)))
+                                (let [^:mutable deltaNet srcsRemains]
+                                  (loop [^int i srcsOffset]
+                                    (when (< i (unchecked-add-int srcsOffset srcsLength))
+                                      (set! deltaNet
+                                            (unchecked-subtract-int
+                                              deltaNet
+                                              (.remaining (aget srcs i))))
+                                      (recur (unchecked-inc-int i))))
+                                  (let [^:mutable deltaApp dstsRemains]
+                                    (loop [^int i dstsOffset]
+                                      (when (< i (unchecked-add-int dstsOffset dstsLength))
+                                        (set! deltaApp
+                                              (unchecked-subtract-int
+                                                deltaApp
+                                                (.remaining (aget dsts i))))
+                                        (recur (unchecked-inc-int i))))
+                                    (SSLEngineResult.
+                                      status
+                                      hsStatus
+                                      deltaNet
+                                      deltaApp
+                                      (.-recordSN plainText)))))))))))))))
+
+  (method ^:private decode :throws [IOException] ^Plaintext [this ^ByteBuffer/1 srcs ^int srcsOffset
+                                                             ^int srcsLength ^ByteBuffer/1 dsts
+                                                             ^int dstsOffset ^int dstsLength]
+    (let [pt (SSLTransport/decode conContext srcs srcsOffset srcsLength dsts dstsOffset dstsLength)]
+      (when-not (identical? pt Plaintext/PLAINTEXT_NULL)
+        (let [hsStatus (.tryToFinishHandshake this (.-contentType pt))]
+          (if (nil? hsStatus)
+              (set! (.-handshakeStatus pt) (.getHandshakeStatus conContext))
+              (set! (.-handshakeStatus pt) hsStatus))
+          (when (or (.seqNumIsHuge (.-inputRecord conContext))
+                    (.atKeyLimit (.-readCipher (.-inputRecord conContext))))
+            (set! (.-handshakeStatus pt) (.tryKeyUpdate this (.-handshakeStatus pt))))))
+      pt))
+
+  (method ^:public getDelegatedTask ^Runnable [this]
+    (.lock engineLock)
+    (try
+      (when (and (and (some? (.-handshakeContext conContext))
+                      (not (.-taskDelegated (.-handshakeContext conContext))))
+                 (not (.isEmpty (.-delegatedActions (.-handshakeContext conContext)))))
+        (set! (.-taskDelegated (.-handshakeContext conContext)) true)
+        (return (DelegatedTask. this)))
+      (finally (.unlock engineLock)))
+    nil)
+
+  (method ^:public closeInbound :throws [SSLException] ^void [this]
+    (.lock engineLock)
+    (try
+      (when-not (.isInboundDone this)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/finest "Closing inbound of SSLEngine"))
+        (when (and (not (.-isInputCloseNotified conContext))
+                   (or (.-isNegotiated conContext) (some? (.-handshakeContext conContext))))
+          (throw (SSLException. "closing inbound before receiving peer's close_notify"))))
+      (finally (try (.closeInbound conContext) (finally (.unlock engineLock))))))
+
+  (method ^:public isInboundDone ^boolean [this]
+    (.lock engineLock)
+    (try (.isInboundClosed conContext) (finally (.unlock engineLock))))
+
+  (method ^:public closeOutbound ^void [this]
+    (.lock engineLock)
+    (try
+      (when-not (.isOutboundClosed conContext)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/finest "Closing outbound of SSLEngine"))
+        (.closeOutbound conContext))
+      (finally (.unlock engineLock))))
+
+  (method ^:public isOutboundDone ^boolean [this]
+    (.lock engineLock)
+    (try (.isOutboundDone conContext) (finally (.unlock engineLock))))
+
+  (method ^:public getSupportedCipherSuites ^String/1 [this]
+    (CipherSuite/namesOf (.getSupportedCipherSuites sslContext)))
+
+  (method ^:public getEnabledCipherSuites ^String/1 [this]
+    (.lock engineLock)
+    (try
+      (CipherSuite/namesOf (.-enabledCipherSuites (.-sslConfig conContext)))
+      (finally (.unlock engineLock))))
+
+  (method ^:public setEnabledCipherSuites ^void [this ^String/1 suites]
+    (.lock engineLock)
+    (try
+      (set! (.-enabledCipherSuites (.-sslConfig conContext)) (CipherSuite/validValuesOf suites))
+      (finally (.unlock engineLock))))
+
+  (method ^:public getSupportedProtocols ^String/1 [this]
+    (ProtocolVersion/toStringArray (.getSupportedProtocolVersions sslContext)))
+
+  (method ^:public getEnabledProtocols ^String/1 [this]
+    (.lock engineLock)
+    (try
+      (ProtocolVersion/toStringArray (.-enabledProtocols (.-sslConfig conContext)))
+      (finally (.unlock engineLock))))
+
+  (method ^:public setEnabledProtocols ^void [this ^String/1 protocols]
+    (.lock engineLock)
+    (try
+      (when (nil? protocols) (throw (IllegalArgumentException. "Protocols cannot be null")))
+      (set! (.-enabledProtocols (.-sslConfig conContext)) (ProtocolVersion/namesOf protocols))
+      (finally (.unlock engineLock))))
+
+  (method ^:public getSession ^SSLSession [this]
+    (.lock engineLock)
+    (try (.-conSession conContext) (finally (.unlock engineLock))))
+
+  (method ^:public getHandshakeSession ^SSLSession [this]
+    (.lock engineLock)
+    (try
+      (when (some? (.-handshakeContext conContext))
+        ^SSLSession (.-handshakeSession (.-handshakeContext conContext)))
+      (finally (.unlock engineLock))))
+
+  (method ^:public getHandshakeStatus ^SSLEngineResult$HandshakeStatus [this]
+    (.lock engineLock)
+    (try (.getHandshakeStatus conContext) (finally (.unlock engineLock))))
+
+  (method ^:public setUseClientMode ^void [this ^boolean mode]
+    (.lock engineLock)
+    (try (.setUseClientMode conContext mode) (finally (.unlock engineLock))))
+
+  (method ^:public getUseClientMode ^boolean [this]
+    (.lock engineLock)
+    (try (.-isClientMode (.-sslConfig conContext)) (finally (.unlock engineLock))))
+
+  (method ^:public setNeedClientAuth ^void [this ^boolean need]
+    (.lock engineLock)
+    (try
+      (set! (.-clientAuthType (.-sslConfig conContext))
+            (if need ClientAuthType/CLIENT_AUTH_REQUIRED ClientAuthType/CLIENT_AUTH_NONE))
+      (finally (.unlock engineLock))))
+
+  (method ^:public getNeedClientAuth ^boolean [this]
+    (.lock engineLock)
+    (try
+      (identical? (.-clientAuthType (.-sslConfig conContext)) ClientAuthType/CLIENT_AUTH_REQUIRED)
+      (finally (.unlock engineLock))))
+
+  (method ^:public setWantClientAuth ^void [this ^boolean want]
+    (.lock engineLock)
+    (try
+      (set! (.-clientAuthType (.-sslConfig conContext))
+            (if want ClientAuthType/CLIENT_AUTH_REQUESTED ClientAuthType/CLIENT_AUTH_NONE))
+      (finally (.unlock engineLock))))
+
+  (method ^:public getWantClientAuth ^boolean [this]
+    (.lock engineLock)
+    (try
+      (identical? (.-clientAuthType (.-sslConfig conContext)) ClientAuthType/CLIENT_AUTH_REQUESTED)
+      (finally (.unlock engineLock))))
+
+  (method ^:public setEnableSessionCreation ^void [this ^boolean flag]
+    (.lock engineLock)
+    (try
+      (set! (.-enableSessionCreation (.-sslConfig conContext)) flag)
+      (finally (.unlock engineLock))))
+
+  (method ^:public getEnableSessionCreation ^boolean [this]
+    (.lock engineLock)
+    (try (.-enableSessionCreation (.-sslConfig conContext)) (finally (.unlock engineLock))))
+
+  (method ^:public getSSLParameters ^SSLParameters [this]
+    (.lock engineLock)
+    (try (.getSSLParameters (.-sslConfig conContext)) (finally (.unlock engineLock))))
+
+  (method ^:public setSSLParameters ^void [this ^SSLParameters params]
+    (.lock engineLock)
+    (try
+      (.setSSLParameters (.-sslConfig conContext) params)
+      (when-not (== (.-maximumPacketSize (.-sslConfig conContext)) 0)
+        (.changePacketSize (.-outputRecord conContext)
+                           (.-maximumPacketSize (.-sslConfig conContext))))
+      (finally (.unlock engineLock))))
+
+  (method ^:public getApplicationProtocol ^String [this]
+    (.lock engineLock)
+    (try (.-applicationProtocol conContext) (finally (.unlock engineLock))))
+
+  (method ^:public getHandshakeApplicationProtocol ^String [this]
+    (.lock engineLock)
+    (try
+      (when (some? (.-handshakeContext conContext))
+        (.-applicationProtocol (.-handshakeContext conContext)))
+      (finally (.unlock engineLock))))
+
+  (method ^:public setHandshakeApplicationProtocolSelector ^void [this
+                                                                  ^{:tag (BiFunction SSLEngine (List String) String)} selector]
+    (.lock engineLock)
+    (try
+      (set! (.-engineAPSelector (.-sslConfig conContext)) selector)
+      (finally (.unlock engineLock))))
+
+  (method ^:public getHandshakeApplicationProtocolSelector ^{:tag (BiFunction SSLEngine (List String) String)} [this]
+    (.lock engineLock)
+    (try (.-engineAPSelector (.-sslConfig conContext)) (finally (.unlock engineLock))))
+
+  (method ^:public useDelegatedTask ^boolean [this] true)
+
+  (method ^:public toString ^String [this]
+    (java-str "SSLEngine[hostname="
+              (.getPeerHost this)
+              ", port="
+              (.getPeerPort this)
+              ", "
+              (.-conSession conContext)
+              "]"))
+
+  (method ^:private checkTaskThrown :throws [SSLException] ^void [this]
+    (let [^:mutable ^Exception exc nil]
+      (.lock engineLock)
+      (try
+        (let [hc (.-handshakeContext conContext)]
+          (when (and (some? hc) (some? (.-delegatedThrown hc)))
+            (set! exc (.-delegatedThrown hc))
+            (set! (.-delegatedThrown hc) nil))
+          (when (some? (.-delegatedThrown conContext))
+            (if (some? exc)
+                (when (identical? (.-delegatedThrown conContext) exc)
+                  (set! (.-delegatedThrown conContext) nil))
+                (do
+                  (set! exc (.-delegatedThrown conContext))
+                  (set! (.-delegatedThrown conContext) nil)))))
+        (finally (.unlock engineLock)))
+      (when (some? exc)
+        (cond
+          (instance? SSLException exc) (throw (cast SSLException exc))
+          (instance? RuntimeException exc) (throw (cast RuntimeException exc))
+          :else (throw (SSLEngineImpl/getTaskThrown exc))))))
+
+  (method ^:private ^:static getTaskThrown ^SSLException [^Exception taskThrown]
+    (let [^:mutable msg (.getMessage taskThrown)]
+      (when (nil? msg) (set! msg "Delegated task threw Exception or Error"))
+      (cond
+        (instance? RuntimeException taskThrown) (throw (RuntimeException. msg taskThrown))
+        (instance? SSLHandshakeException taskThrown) (SSLHandshakeException. msg taskThrown)
+        (instance? SSLKeyException taskThrown) (SSLKeyException. msg taskThrown)
+        (instance? SSLPeerUnverifiedException taskThrown)
+          (SSLPeerUnverifiedException. msg taskThrown)
+        (instance? SSLProtocolException taskThrown) (SSLProtocolException. msg taskThrown)
+        (instance? SSLException taskThrown) (cast SSLException taskThrown)
+        :else (SSLException. msg taskThrown))))
+
+  (defclass ^:private ^:static DelegatedTask
+    :implements [Runnable]
+
+    (field ^:private ^:final ^SSLEngineImpl engine)
+
+    (constructor [this ^SSLEngineImpl engineInstance]
+      (set! (.-engine this) engineInstance))
+
+    (method ^:public run ^void [this]
+      (.lock (.-engineLock engine))
+      (try
+        (let [^:mutable hc (.-handshakeContext (.-conContext engine))]
+          (when-not (or (nil? hc) (.isEmpty (.-delegatedActions hc)))
+            (try
+              (while (not (.isEmpty (.-delegatedActions hc)))
+                (let [^{:tag (Map$Entry Byte ByteBuffer)} me (cast
+                                                               Map$Entry
+                                                               (.poll (.-delegatedActions hc)))]
+                  (when (some? me)
+                    (try
+                      (.dispatch hc
+                                 (.byteValue (cast Byte (.getKey me)))
+                                 (cast ByteBuffer (.getValue me)))
+                      (catch Exception e
+                        (throw (.fatal (.-conContext hc)
+                                       Alert/INTERNAL_ERROR
+                                       "Unhandled exception"
+                                       e)))))))
+              (catch SSLException se
+                (when (nil? (.-delegatedThrown (.-conContext engine)))
+                  (set! (.-delegatedThrown (.-conContext engine)) se))
+                (set! hc (.-handshakeContext (.-conContext engine)))
+                (cond
+                  (some? hc) (set! (.-delegatedThrown hc) se)
+                  (some? (.-closeReason (.-conContext engine)))
+                    (set! (.-closeReason (.-conContext engine)) (SSLEngineImpl/getTaskThrown se))))
+              (catch RuntimeException rte
+                (when (nil? (.-delegatedThrown (.-conContext engine)))
+                  (set! (.-delegatedThrown (.-conContext engine)) rte))
+                (set! hc (.-handshakeContext (.-conContext engine)))
+                (cond
+                  (some? hc) (set! (.-delegatedThrown hc) rte)
+                  (some? (.-closeReason (.-conContext engine)))
+                    (set! (.-closeReason (.-conContext engine)) rte))))
+            (set! hc (.-handshakeContext (.-conContext engine)))
+            (when (some? hc) (set! (.-taskDelegated hc) false))))
+        (finally (.unlock (.-engineLock engine)))))))

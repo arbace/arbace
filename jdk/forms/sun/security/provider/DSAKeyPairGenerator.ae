@@ -1,0 +1,136 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/DSAKeyPairGenerator.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.security GeneralSecurityException
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        InvalidParameterException
+                        KeyPair
+                        KeyPairGenerator
+                        ProviderException)
+        '(java.security.interfaces DSAParams)
+        '(java.security.spec AlgorithmParameterSpec DSAParameterSpec)
+        '(sun.security.jca JCAUtil)
+        '(sun.security.util SecurityProviderConstants))
+
+(defclass DSAKeyPairGenerator
+  :extends KeyPairGenerator
+
+  (field ^:private ^int plen)
+
+  (field ^:private ^int qlen)
+
+  (field ^boolean forceNewParameters)
+
+  (field ^:private ^DSAParameterSpec params)
+
+  (field ^:private ^java.security.SecureRandom random)
+
+  (constructor [this ^int defaultKeySize]
+    (super. "DSA")
+    (.initialize this defaultKeySize nil))
+
+  (method ^:private ^:static checkStrength ^void [^int sizeP ^int sizeQ]
+    (when-not (and (and (and (>= sizeP 512) (<= sizeP 1024))
+                        (== (unchecked-remainder-int sizeP 64) 0))
+                   (== sizeQ 160))
+      (when-not (and (== sizeP 2048) (or (== sizeQ 224) (== sizeQ 256)))
+        (when-not (and (== sizeP 3072) (== sizeQ 256))
+          (throw (InvalidParameterException.
+                   (java-str "Unsupported prime and subprime size combination: " sizeP ", " sizeQ)))))))
+
+  (method ^:public initialize ^void [this ^int modlen ^java.security.SecureRandom random]
+    (.init this modlen random false))
+
+  (method ^:public initialize :throws [InvalidAlgorithmParameterException] ^void [this
+                                                                                  ^AlgorithmParameterSpec params
+                                                                                  ^java.security.SecureRandom random]
+    (when-not (instance? DSAParameterSpec params)
+      (throw (InvalidAlgorithmParameterException. "Inappropriate parameter")))
+    (.init this (cast DSAParameterSpec params) random false))
+
+  (method init ^void [this ^int modlen ^java.security.SecureRandom random ^boolean forceNew]
+    (let [subPrimeLen (SecurityProviderConstants/getDefDSASubprimeSize modlen)]
+      (DSAKeyPairGenerator/checkStrength modlen subPrimeLen)
+      (set! (.-plen this) modlen)
+      (set! (.-qlen this) subPrimeLen)
+      (set! (.-params this) nil)
+      (set! (.-random this) random)
+      (set! (.-forceNewParameters this) forceNew)))
+
+  (method init ^void [this ^DSAParameterSpec params ^java.security.SecureRandom random
+                      ^boolean forceNew]
+    (let [sizeP (.bitLength (.getP params))
+          sizeQ (.bitLength (.getQ params))]
+      (DSAKeyPairGenerator/checkStrength sizeP sizeQ)
+      (set! (.-plen this) sizeP)
+      (set! (.-qlen this) sizeQ)
+      (set! (.-params this) params)
+      (set! (.-random this) random)
+      (set! (.-forceNewParameters this) forceNew)))
+
+  (method ^:public generateKeyPair ^KeyPair [this]
+    (when (nil? random) (set! random (JCAUtil/getSecureRandom)))
+    (let [^:mutable ^DSAParameterSpec spec nil]
+      (try
+        (if forceNewParameters
+            (set! spec (ParameterCache/getNewDSAParameterSpec plen qlen random))
+            (do
+              (when (nil? params)
+                (set! params (ParameterCache/getDSAParameterSpec plen qlen random)))
+              (set! spec params)))
+        (catch GeneralSecurityException e (throw (ProviderException. e))))
+      (.generateKeyPair this (.getP spec) (.getQ spec) (.getG spec) random)))
+
+  (method ^:private generateKeyPair ^KeyPair [this ^BigInteger p ^BigInteger q ^BigInteger g
+                                              ^java.security.SecureRandom random]
+    (let [x (.generateX this random q)
+          y (.generateY this x p g)]
+      (try
+        (let [^:mutable ^DSAPublicKey pub nil]
+          (set! pub (DSAPublicKeyImpl. y p q g))
+          (let [priv (DSAPrivateKey. x p q g)] (KeyPair. pub priv)))
+        (catch InvalidKeyException e (throw (ProviderException. e))))))
+
+  (method ^:private generateX ^BigInteger [this ^java.security.SecureRandom random ^BigInteger q]
+    (let [^:mutable ^BigInteger x nil
+          temp (new byte/1 qlen)]
+      (while true
+        (.nextBytes random temp)
+        (set! x (.mod (BigInteger. 1 temp) q))
+        (when (and (> (.signum x) 0) (< (.compareTo x q) 0)) (return x)))))
+
+  (method generateY ^BigInteger [this ^BigInteger x ^BigInteger p ^BigInteger g]
+    (.modPow g x p))
+
+  (defclass ^:public ^:static ^:final Current
+    :extends DSAKeyPairGenerator
+
+    (constructor ^:public [this]
+      (super. SecurityProviderConstants/DEF_DSA_KEY_SIZE)))
+
+  (defclass ^:public ^:static ^:final Legacy
+    :extends DSAKeyPairGenerator
+    :implements [java.security.interfaces.DSAKeyPairGenerator]
+
+    (constructor ^:public [this] (super. 1024))
+
+    (method ^:public initialize :throws [InvalidParameterException] ^void [this ^int modlen
+                                                                           ^boolean genParams
+                                                                           ^java.security.SecureRandom random]
+      (if genParams
+          (.init super modlen random true)
+          (let [cachedParams (ParameterCache/getCachedDSAParameterSpec
+                               modlen
+                               (SecurityProviderConstants/getDefDSASubprimeSize modlen))]
+            (when (nil? cachedParams)
+              (throw (InvalidParameterException.
+                       "No precomputed parameters for requested modulus size available")))
+            (.init super cachedParams random false))))
+
+    (method ^:public initialize :throws [InvalidParameterException] ^void [this ^DSAParams params
+                                                                           ^java.security.SecureRandom random]
+      (when (nil? params) (throw (InvalidParameterException. "Params must not be null")))
+      (let [spec (DSAParameterSpec. (.getP params) (.getQ params) (.getG params))]
+        (.init super spec random false)))))

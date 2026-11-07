@@ -1,0 +1,159 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/certpath/PKIXCertPathValidator.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider.certpath)
+
+(import '(java.io IOException)
+        '(java.security InvalidAlgorithmParameterException)
+        '(java.security.cert CertPath
+                             CertPathChecker
+                             CertPathParameters
+                             CertPathValidatorException
+                             CertPathValidatorResult
+                             CertPathValidatorSpi
+                             Certificate
+                             CertificateException
+                             PKIXCertPathChecker
+                             PKIXCertPathValidatorResult
+                             PKIXReason
+                             PKIXRevocationChecker
+                             TrustAnchor
+                             X509Certificate)
+        '(java.util ArrayList Collections List)
+        '(java.util.concurrent.atomic AtomicLong)
+        '(java.util.function IntToLongFunction ToIntFunction)
+        '(jdk.internal.event EventHelper X509ValidationEvent)
+        '(sun.security.util Debug)
+        '(sun.security.x509 X509CertImpl))
+
+(defclass ^:public ^:final PKIXCertPathValidator
+  :extends CertPathValidatorSpi
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "certpath"))
+
+  (field ^:private ^:static ^:final ^AtomicLong validationCounter (AtomicLong.))
+
+  (constructor ^:public [this])
+
+  (method ^:public engineGetRevocationChecker ^CertPathChecker [this]
+    (RevocationChecker.))
+
+  (method ^:public engineValidate :throws [CertPathValidatorException
+                                           InvalidAlgorithmParameterException] ^CertPathValidatorResult [this
+                                                                                                         ^CertPath cp
+                                                                                                         ^CertPathParameters params]
+    (let [valParams (PKIX/checkParams cp params)] (PKIXCertPathValidator/validate valParams)))
+
+  (method ^:private ^:static validate :throws [CertPathValidatorException] ^PKIXCertPathValidatorResult [^PKIX$ValidatorParams params]
+    (when (some? debug) (.println debug "PKIXCertPathValidator.engineValidate()..."))
+    (let [^:mutable ^AdaptableX509CertSelector selector nil
+          ^{:tag (List X509Certificate)} certList (.certificates params)]
+      (when-not (.isEmpty certList)
+        (set! selector (AdaptableX509CertSelector.))
+        (let [firstCert (cast X509Certificate (.get certList 0))]
+          (.setSubject selector (.getIssuerX500Principal firstCert))
+          (try
+            (let [firstCertImpl (X509CertImpl/toImpl firstCert)]
+              (.setSkiAndSerialNumber selector (.getAuthorityKeyIdentifierExtension firstCertImpl)))
+            (catch [CertificateException IOException] e))))
+      (let [^:mutable ^CertPathValidatorException lastException nil]
+        (for-each [^TrustAnchor anchor (.trustAnchors params)]
+          (let [trustedCert (.getTrustedCert anchor)]
+            (cond
+              (some? trustedCert)
+                (do
+                  (when (and (some? selector) (not (.match selector trustedCert)))
+                    (when (and (some? debug) (Debug/isVerbose))
+                      (.println debug "NO - don't try this trustedCert"))
+                    (continue))
+                  (when (some? debug)
+                    (.println debug "YES - try this trustedCert")
+                    (.println debug
+                              (java-str "anchor.getTrustedCert().getSubjectX500Principal() = "
+                                        (.getSubjectX500Principal trustedCert)))))
+              (some? debug)
+                (.println debug
+                          "PKIXCertPathValidator.engineValidate(): anchor.getTrustedCert() == null"))
+            (try
+              (return (PKIXCertPathValidator/validate anchor params))
+              (catch CertPathValidatorException cpe (set! lastException cpe)))))
+        (when (some? lastException) (throw lastException))
+        (throw (CertPathValidatorException. "Path does not chain with any of the trust anchors"
+                                            nil
+                                            nil
+                                            -1
+                                            PKIXReason/NO_TRUST_ANCHOR)))))
+
+  (method ^:private ^:static validate :throws [CertPathValidatorException] ^PKIXCertPathValidatorResult [^TrustAnchor anchor
+                                                                                                         ^PKIX$ValidatorParams params]
+    (let [untrustedChecker (UntrustedChecker.)
+          anchorCert (.getTrustedCert anchor)]
+      (when (some? anchorCert) (.check untrustedChecker anchorCert))
+      (let [certPathLen (.size (.certificates params))
+            ^{:tag (List PKIXCertPathChecker)} certPathCheckers (ArrayList.)]
+        (.add certPathCheckers untrustedChecker)
+        (.add certPathCheckers (AlgorithmChecker. anchor (.timestamp params) (.variant params)))
+        (.add certPathCheckers (KeyChecker. certPathLen (.targetCertConstraints params)))
+        (.add certPathCheckers (ConstraintsChecker. certPathLen))
+        (let [rootNode (PolicyNodeImpl. nil
+                                        PolicyChecker/ANY_POLICY
+                                        nil
+                                        false
+                                        (Collections/singleton PolicyChecker/ANY_POLICY)
+                                        false)
+              pc (PolicyChecker. (.initialPolicies params)
+                                 certPathLen
+                                 (.explicitPolicyRequired params)
+                                 (.policyMappingInhibited params)
+                                 (.anyPolicyInhibited params)
+                                 (.policyQualifiersRejected params)
+                                 rootNode)]
+          (.add certPathCheckers pc)
+          (let [bc (BasicChecker. anchor (.date params) (.sigProvider params) false)]
+            (.add certPathCheckers bc)
+            (let [^:mutable revCheckerAdded false
+                  ^{:tag (List PKIXCertPathChecker)} checkers (.certPathCheckers params)]
+              (for-each [^PKIXCertPathChecker checker checkers]
+                (when (instance? PKIXRevocationChecker checker)
+                  (when revCheckerAdded
+                    (throw (CertPathValidatorException.
+                             "Only one PKIXRevocationChecker can be specified")))
+                  (set! revCheckerAdded true)
+                  (when (instance? RevocationChecker checker)
+                    (.init (cast RevocationChecker checker) anchor params)))
+                (when-instance [^AlgorithmChecker algChecker checker]
+                  (.trySetTrustAnchor algChecker anchor)))
+              (when (and (.revocationEnabled params) (not revCheckerAdded))
+                (.add certPathCheckers (RevocationChecker. anchor params)))
+              (.addAll certPathCheckers checkers)
+              (PKIXMasterCertPathValidator/validate
+                (.certPath params)
+                (.certificates params)
+                certPathCheckers)
+              (let [xve (X509ValidationEvent.)]
+                (when (or (.shouldCommit xve) (EventHelper/isLoggingSecurity))
+                  (let [certIds (.toArray (.mapToLong
+                                            (.mapToInt
+                                              (.stream (.certificates params))
+                                              (method-ref
+                                                ToIntFunction
+                                                [X509Certificate]
+                                                Certificate/.hashCode))
+                                            (method-ref IntToLongFunction Integer/toUnsignedLong)))
+                        ^int hash (if (some? anchorCert)
+                                      (.hashCode anchorCert)
+                                      (.hashCode (.getCAPublicKey anchor)))
+                        anchorCertId (Integer/toUnsignedLong hash)]
+                    (when (.shouldCommit xve)
+                      (set! (.-certificateId xve) anchorCertId)
+                      (let [^:mutable ^int certificatePos 1]
+                        (set! (.-certificatePosition xve) certificatePos)
+                        (set! (.-validationCounter xve) (.incrementAndGet validationCounter))
+                        (.commit xve)
+                        (for-each [^long id certIds]
+                          (set! (.-certificateId xve) id)
+                          (set! (.-certificatePosition xve)
+                                (set! certificatePos (unchecked-inc-int certificatePos)))
+                          (.commit xve))))
+                    (when (EventHelper/isLoggingSecurity)
+                      (EventHelper/logX509ValidationEvent anchorCertId certIds))))
+                (PKIXCertPathValidatorResult. anchor (.getPolicyTree pc) (.getPublicKey bc))))))))))

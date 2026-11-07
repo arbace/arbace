@@ -1,0 +1,225 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/crypto/provider/GCTR.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.crypto.provider)
+
+(import '(java.nio ByteBuffer ByteOrder)
+        '(java.util Arrays))
+
+(defclass ^:final GCTR
+  :extends CounterMode
+  :implements [GCM]
+
+  (field ^:private ^:static ^:final ^int MAX_LEN 1024)
+
+  (field ^:private ^byte/1 block)
+
+  (constructor [this ^SymmetricCipher cipher ^byte/1 initialCounterBlk]
+    (super. cipher)
+    (when-not (== (alength initialCounterBlk) (.-blockSize this))
+      (throw (RuntimeException.
+               (java-str "length of initial counter block ("
+                         (alength initialCounterBlk)
+                         ") not equal to blockSize ("
+                         (.-blockSize this)
+                         ")"))))
+    (set! (.-iv this) initialCounterBlk)
+    (.reset this))
+
+  (method getFeedback ^String [this] "GCTR")
+
+  (method ^:private blocksUntilRollover ^long [this]
+    (let [buf (ByteBuffer/wrap (.-counter this)
+                               (unchecked-subtract-int (alength (.-counter this)) 4)
+                               4)]
+      (.order buf ByteOrder/BIG_ENDIAN)
+      (let [ctr32 (bit-and 0xFFFFFFFF (.getInt buf))]
+        (unchecked-subtract (bit-shift-left 1 32) ctr32))))
+
+  (method ^:private checkBlock ^void [this]
+    (if (nil? block)
+        (set! block (new byte/1 (.-blockSize this)))
+        (Arrays/fill block (unchecked-byte 0))))
+
+  (method ^:public update ^int [this ^byte/1 in ^int inOfs ^:mutable ^int inLen ^byte/1 out
+                                ^int outOfs]
+    (if (== inLen 0)
+        0
+        (do
+          (when (> (unchecked-subtract-int inLen inOfs) (alength in))
+            (throw (RuntimeException. "input length out of bound")))
+          (when (< inLen 0) (throw (RuntimeException. "input length unsupported")))
+          (when (<
+                  (unchecked-subtract-int (alength out) outOfs)
+                  (unchecked-subtract-int inLen (unchecked-remainder-int inLen (.-blockSize this))))
+            (throw (RuntimeException. "output buffer too small")))
+          (set! inLen
+                (unchecked-subtract-int inLen (unchecked-remainder-int inLen (.-blockSize this))))
+          (let [blocksLeft (.blocksUntilRollover this)
+                numOfCompleteBlocks (unchecked-divide-int inLen (.-blockSize this))]
+            (if (>= numOfCompleteBlocks blocksLeft)
+                (do
+                  (.checkBlock this)
+                  (loop [^int i 0]
+                    (when (< i numOfCompleteBlocks)
+                      (.encryptBlock (.-embeddedCipher this) (.-counter this) 0 block 0)
+                      (loop [^int n 0]
+                        (when (< n (.-blockSize this))
+                          (let [index (unchecked-add-int
+                                        (unchecked-multiply-int i (.-blockSize this))
+                                        n)]
+                            (aset out
+                                  (unchecked-add-int outOfs index)
+                                  (unchecked-byte
+                                    (bit-xor-int
+                                      (aget in (unchecked-add-int inOfs index))
+                                      (aget block n))))
+                            (recur (unchecked-inc-int n)))))
+                      (GaloisCounterMode/increment32 (.-counter this))
+                      (recur (unchecked-inc-int i))))
+                  inLen)
+                (.encrypt this in inOfs inLen out outOfs))))))
+
+  (method ^:public update ^int [this ^byte/1 in ^int inOfs ^int inLen ^ByteBuffer dst]
+    (if (not (.isDirect dst))
+        (let [len (.update this
+                           in
+                           inOfs
+                           inLen
+                           (.array dst)
+                           (unchecked-add-int (.arrayOffset dst) (.position dst)))]
+          (.position dst (unchecked-add-int (.position dst) len))
+          len)
+        (do
+          (when (> (unchecked-subtract-int inLen inOfs) (alength in))
+            (throw (RuntimeException. "input length out of bound")))
+          (when (< inLen 0) (throw (RuntimeException. "input length unsupported")))
+          (let [blocksLeft (.blocksUntilRollover this)
+                numOfCompleteBlocks (unchecked-divide-int inLen (.-blockSize this))]
+            (if (>= numOfCompleteBlocks blocksLeft)
+                (do
+                  (.checkBlock this)
+                  (loop [^int i 0]
+                    (when (< i numOfCompleteBlocks)
+                      (.encryptBlock (.-embeddedCipher this) (.-counter this) 0 block 0)
+                      (loop [^int n 0]
+                        (when (< n (.-blockSize this))
+                          (let [index (unchecked-add-int
+                                        (unchecked-multiply-int i (.-blockSize this))
+                                        n)]
+                            (.put dst
+                                  (unchecked-byte
+                                    (bit-xor-int
+                                      (aget in (unchecked-add-int inOfs index))
+                                      (aget block n))))
+                            (recur (unchecked-inc-int n)))))
+                      (GaloisCounterMode/increment32 (.-counter this))
+                      (recur (unchecked-inc-int i))))
+                  inLen)
+                (let [len (unchecked-subtract-int
+                            inLen
+                            (unchecked-remainder-int inLen (.-blockSize this)))
+                      ^:mutable processed len
+                      out (new byte/1 (Math/min MAX_LEN len))
+                      ^:mutable offset inOfs]
+                  (while (> processed MAX_LEN)
+                    (.encrypt this in offset MAX_LEN out 0)
+                    (.put dst out 0 MAX_LEN)
+                    (set! processed (unchecked-subtract-int processed MAX_LEN))
+                    (set! offset (unchecked-add-int offset MAX_LEN)))
+                  (.encrypt this in offset processed out 0)
+                  (.put dst out 0 (Math/min (.remaining dst) processed))
+                  len))))))
+
+  (method ^:public update ^int [this ^ByteBuffer src ^ByteBuffer dst]
+    (let [^:mutable ^int len 0]
+      (if (and (.hasArray src) (.hasArray dst))
+          (do
+            (set! len
+                  (.update this
+                           (.array src)
+                           (unchecked-add-int (.arrayOffset src) (.position src))
+                           (unchecked-subtract-int
+                             (.remaining src)
+                             (unchecked-remainder-int (.remaining src) (.-blockSize this)))
+                           (.array dst)
+                           (unchecked-add-int (.arrayOffset dst) (.position dst))))
+            (.position src (unchecked-add-int (.position src) len))
+            (.position dst (unchecked-add-int (.position dst) len))
+            len)
+          (let [blocksLeft (.blocksUntilRollover this)
+                numOfCompleteBlocks (unchecked-divide-int (.remaining src) (.-blockSize this))]
+            (if (>= numOfCompleteBlocks blocksLeft)
+                (do
+                  (.checkBlock this)
+                  (loop [^int i 0]
+                    (when (< i numOfCompleteBlocks)
+                      (.encryptBlock (.-embeddedCipher this) (.-counter this) 0 block 0)
+                      (loop [^int n 0]
+                        (when (< n (.-blockSize this))
+                          (.put dst (unchecked-byte (bit-xor-int (.get src) (aget block n))))
+                          (recur (unchecked-inc-int n))))
+                      (GaloisCounterMode/increment32 (.-counter this))
+                      (recur (unchecked-inc-int i))))
+                  (unchecked-multiply-int numOfCompleteBlocks (.-blockSize this)))
+                (do
+                  (set! len
+                        (unchecked-subtract-int (.remaining src)
+                                                (unchecked-remainder-int
+                                                  (.remaining src)
+                                                  (.-blockSize this))))
+                  (let [^:mutable processed len
+                        in (new byte/1 (Math/min MAX_LEN len))]
+                    (while (> processed MAX_LEN)
+                      (.get src in 0 MAX_LEN)
+                      (.encrypt this in 0 MAX_LEN in 0)
+                      (.put dst in 0 MAX_LEN)
+                      (set! processed (unchecked-subtract-int processed MAX_LEN)))
+                    (.get src in 0 processed)
+                    (.encrypt this in 0 processed in 0)
+                    (.put dst in 0 processed)
+                    len)))))))
+
+  (method ^:public doFinal ^int [this ^byte/1 in ^int inOfs ^int inLen ^byte/1 out ^int outOfs]
+    (if (== inLen 0)
+        0
+        (let [lastBlockSize (unchecked-remainder-int inLen (.-blockSize this))
+              completeBlkLen (unchecked-subtract-int inLen lastBlockSize)]
+          (.update this in inOfs completeBlkLen out outOfs)
+          (when-not (== lastBlockSize 0)
+            (.checkBlock this)
+            (.encryptBlock (.-embeddedCipher this) (.-counter this) 0 block 0)
+            (loop [^int n 0]
+              (when (< n lastBlockSize)
+                (aset out
+                      (unchecked-add-int (unchecked-add-int outOfs completeBlkLen) n)
+                      (unchecked-byte
+                        (bit-xor-int (aget in
+                                           (unchecked-add-int
+                                             (unchecked-add-int inOfs completeBlkLen)
+                                             n))
+                                     (aget block n))))
+                (recur (unchecked-inc-int n)))))
+          inLen)))
+
+  (method ^:public doFinal ^int [this ^ByteBuffer src ^ByteBuffer dst]
+    (if (and (.hasArray src) (.hasArray dst))
+        (let [len (.doFinal this
+                            (.array src)
+                            (unchecked-add-int (.arrayOffset src) (.position src))
+                            (.remaining src)
+                            (.array dst)
+                            (unchecked-add-int (.arrayOffset dst) (.position dst)))]
+          (.position src (unchecked-add-int (.position src) len))
+          (.position dst (unchecked-add-int (.position dst) len))
+          len)
+        (let [len (.remaining src)
+              lastBlockSize (unchecked-remainder-int len (.-blockSize this))]
+          (.update this src dst)
+          (when-not (== lastBlockSize 0)
+            (.checkBlock this)
+            (.encryptBlock (.-embeddedCipher this) (.-counter this) 0 block 0)
+            (loop [^int n 0]
+              (when (< n lastBlockSize)
+                (.put dst (unchecked-byte (bit-xor-int (.get src) (aget block n))))
+                (recur (unchecked-inc-int n)))))
+          len))))

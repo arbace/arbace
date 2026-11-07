@@ -1,0 +1,246 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/validator/SimpleValidator.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.validator)
+
+(import '(java.io IOException)
+        '(java.security AlgorithmConstraints GeneralSecurityException Principal)
+        '(java.security.cert CertPathValidatorException
+                             CertificateException
+                             TrustAnchor
+                             X509Certificate)
+        '(java.util ArrayList Collection Collections Date HashMap List Map Set)
+        '(javax.security.auth.x500 X500Principal)
+        '(sun.security.provider.certpath AlgorithmChecker UntrustedChecker)
+        '(sun.security.util DerInputStream DerValue KnownOIDs ObjectIdentifier)
+        '(sun.security.x509 NetscapeCertTypeExtension X509CertImpl))
+
+(defclass ^:public ^:final SimpleValidator
+  :extends Validator
+
+  (field ^:static ^:final ^String OID_BASIC_CONSTRAINTS (.value KnownOIDs/BasicConstraints))
+
+  (field ^:static ^:final ^String OID_NETSCAPE_CERT_TYPE (.value KnownOIDs/NETSCAPE_CertType))
+
+  (field ^:static ^:final ^String OID_KEY_USAGE (.value KnownOIDs/KeyUsage))
+
+  (field ^:static ^:final ^String OID_EXTENDED_KEY_USAGE (.value KnownOIDs/extendedKeyUsage))
+
+  (field ^:static ^:final ^String OID_EKU_ANY_USAGE (.value KnownOIDs/anyExtendedKeyUsage))
+
+  (field ^:static ^:final ^ObjectIdentifier OBJID_NETSCAPE_CERT_TYPE
+    NetscapeCertTypeExtension/NetscapeCertType_Id)
+
+  (field ^:private ^:static ^:final ^String NSCT_SSL_CA NetscapeCertTypeExtension/SSL_CA)
+
+  (field ^:private ^:static ^:final ^String NSCT_CODE_SIGNING_CA
+    NetscapeCertTypeExtension/OBJECT_SIGNING_CA)
+
+  (field ^:private ^:final ^{:tag (Map X500Principal (List X509Certificate))} trustedX500Principals)
+
+  (field ^:private ^:final ^{:tag (Collection X509Certificate)} trustedCerts)
+
+  (constructor [this ^String variant ^{:tag (Collection X509Certificate)} trustedCerts]
+    (super. SimpleValidator/TYPE_SIMPLE variant)
+    (set! (.-trustedCerts this) trustedCerts)
+    (set! trustedX500Principals (HashMap.))
+    (for-each [^X509Certificate cert trustedCerts]
+      (let [principal (.getSubjectX500Principal cert)
+            ^:mutable ^{:tag (List X509Certificate)} list (cast
+                                                            List
+                                                            (.get trustedX500Principals principal))]
+        (when (nil? list) (set! list (ArrayList. 2)) (.put trustedX500Principals principal list))
+        (.add list cert))))
+
+  (method ^:public getTrustedCertificates ^{:tag (Collection X509Certificate)} [this]
+    trustedCerts)
+
+  (method engineValidate :throws [CertificateException] ^X509Certificate/1 [this
+                                                                            ^:mutable ^X509Certificate/1 chain
+                                                                            ^{:tag (Collection X509Certificate)} otherCerts
+                                                                            ^{:tag (List byte/1)} responseList
+                                                                            ^AlgorithmConstraints constraints
+                                                                            parameter]
+    (when (or (nil? chain) (== (alength chain) 0))
+      (throw (CertificateException. "null or zero-length certificate chain")))
+    (set! chain (.buildTrustedChain this chain))
+    (let [^:mutable date (.-validationDate this)]
+      (when (nil? date) (set! date (Date.)))
+      (let [untrustedChecker (UntrustedChecker.)
+            anchorCert (aget chain (unchecked-subtract-int (alength chain) 1))]
+        (try
+          (.check untrustedChecker anchorCert)
+          (catch CertPathValidatorException cpve
+            (throw (ValidatorException.
+                     (java-str "Untrusted certificate: " (.getSubjectX500Principal anchorCert))
+                     ValidatorException/T_UNTRUSTED_CERT
+                     anchorCert
+                     cpve))))
+        (let [anchor (TrustAnchor. anchorCert nil)
+              defaultAlgChecker (AlgorithmChecker. anchor (.-variant this))
+              ^:mutable ^AlgorithmChecker appAlgChecker nil]
+          (when (some? constraints)
+            (set! appAlgChecker (AlgorithmChecker. anchor constraints nil (.-variant this))))
+          (let [^:mutable maxPathLength (unchecked-subtract-int (alength chain) 1)]
+            (loop [^int i (unchecked-subtract-int (alength chain) 2)]
+              (when (>= i 0)
+                (let [issuerCert (aget chain (unchecked-add-int i 1))
+                      cert (aget chain i)]
+                  (try
+                    (.check untrustedChecker cert (Collections/emptySet))
+                    (catch CertPathValidatorException cpve
+                      (throw (ValidatorException.
+                               (java-str "Untrusted certificate: " (.getSubjectX500Principal cert))
+                               ValidatorException/T_UNTRUSTED_CERT
+                               cert
+                               cpve))))
+                  (try
+                    (.check defaultAlgChecker cert (Collections/emptySet))
+                    (when (some? appAlgChecker) (.check appAlgChecker cert (Collections/emptySet)))
+                    (catch CertPathValidatorException cpve
+                      (throw
+                        (ValidatorException. ValidatorException/T_ALGORITHM_DISABLED cert cpve))))
+                  (when (and (not (.equals (.-variant this) SimpleValidator/VAR_CODE_SIGNING))
+                             (not (.equals (.-variant this) SimpleValidator/VAR_JCE_SIGNING)))
+                    (.checkValidity cert date))
+                  (when-not (.equals (.getIssuerX500Principal cert)
+                                     (.getSubjectX500Principal issuerCert))
+                    (throw (ValidatorException. ValidatorException/T_NAME_CHAINING cert)))
+                  (try
+                    (.verify cert (.getPublicKey issuerCert))
+                    (catch GeneralSecurityException e
+                      (throw (ValidatorException. ValidatorException/T_SIGNATURE_ERROR cert e))))
+                  (if (not (== i 0))
+                      (do
+                        (set! maxPathLength (.checkExtensions this cert maxPathLength))
+                        (recur (unchecked-dec-int i)))
+                      (recur (unchecked-dec-int i))))))
+            chain)))))
+
+  (method ^:private checkExtensions :throws [CertificateException] ^int [this ^X509Certificate cert
+                                                                         ^int maxPathLen]
+    (let [^:mutable ^{:tag (Set String)} critSet (.getCriticalExtensionOIDs cert)]
+      (when (nil? critSet) (set! critSet (Collections/emptySet)))
+      (let [pathLenConstraint (.checkBasicConstraints this cert critSet maxPathLen)]
+        (.checkKeyUsage this cert critSet)
+        (.checkNetscapeCertType this cert critSet)
+        (when-not (.isEmpty critSet)
+          (throw (ValidatorException.
+                   (java-str "Certificate contains unknown critical extensions: " critSet)
+                   ValidatorException/T_CA_EXTENSIONS
+                   cert)))
+        pathLenConstraint)))
+
+  (method ^:private checkNetscapeCertType :throws [CertificateException] ^void [this
+                                                                                ^X509Certificate cert
+                                                                                ^{:tag (Set String)} critSet]
+    (when-not (.equals (.-variant this) SimpleValidator/VAR_GENERIC)
+      (cond
+        (or (.equals (.-variant this) SimpleValidator/VAR_TLS_CLIENT)
+            (.equals (.-variant this) SimpleValidator/VAR_TLS_SERVER))
+          (do
+            (when-not (SimpleValidator/getNetscapeCertTypeBit cert NSCT_SSL_CA)
+              (throw (ValidatorException.
+                       "Invalid Netscape CertType extension for SSL CA certificate"
+                       ValidatorException/T_CA_EXTENSIONS
+                       cert)))
+            (.remove critSet OID_NETSCAPE_CERT_TYPE))
+        (or (.equals (.-variant this) SimpleValidator/VAR_CODE_SIGNING)
+            (.equals (.-variant this) SimpleValidator/VAR_JCE_SIGNING))
+          (do
+            (when-not (SimpleValidator/getNetscapeCertTypeBit cert NSCT_CODE_SIGNING_CA)
+              (throw (ValidatorException.
+                       "Invalid Netscape CertType extension for code signing CA certificate"
+                       ValidatorException/T_CA_EXTENSIONS
+                       cert)))
+            (.remove critSet OID_NETSCAPE_CERT_TYPE))
+        :else (throw (CertificateException. (java-str "Unknown variant " (.-variant this)))))))
+
+  (method ^:static getNetscapeCertTypeBit ^boolean [^X509Certificate cert ^String type]
+    (try
+      (let [^:mutable ^NetscapeCertTypeExtension ext nil]
+        (if-instance [^X509CertImpl certImpl cert]
+          (do
+            (set!
+              ext
+              (cast NetscapeCertTypeExtension (.getExtension certImpl OBJID_NETSCAPE_CERT_TYPE)))
+            (when (nil? ext) (return true)))
+          (let [extVal (.getExtensionValue cert OID_NETSCAPE_CERT_TYPE)]
+            (when (nil? extVal) (return true))
+            (let [in (DerInputStream. extVal)
+                  ^:mutable encoded (.getOctetString in)]
+              (set! encoded (.toByteArray (.getUnalignedBitString (DerValue. encoded))))
+              (set! ext (NetscapeCertTypeExtension. encoded)))))
+        (.get ext type))
+      (catch IOException e false)))
+
+  (method ^:private checkBasicConstraints :throws [CertificateException] ^int [this
+                                                                               ^X509Certificate cert
+                                                                               ^{:tag (Set String)} critSet
+                                                                               ^:mutable ^int maxPathLen]
+    (.remove critSet OID_BASIC_CONSTRAINTS)
+    (let [constraints (.getBasicConstraints cert)]
+      (when (< constraints 0)
+        (throw (ValidatorException. "End user tried to act as a CA"
+                                    ValidatorException/T_CA_EXTENSIONS
+                                    cert)))
+      (when-not (X509CertImpl/isSelfIssued cert)
+        (when (<= maxPathLen 0)
+          (throw (ValidatorException. "Violated path length constraints"
+                                      ValidatorException/T_CA_EXTENSIONS
+                                      cert)))
+        (set! maxPathLen (unchecked-dec-int maxPathLen)))
+      (when (> maxPathLen constraints) (set! maxPathLen constraints))
+      maxPathLen))
+
+  (method ^:private checkKeyUsage :throws [CertificateException] ^void [this ^X509Certificate cert
+                                                                        ^{:tag (Set String)} critSet]
+    (.remove critSet OID_KEY_USAGE)
+    (.remove critSet OID_EXTENDED_KEY_USAGE)
+    (let [keyUsageInfo (.getKeyUsage cert)]
+      (when (some? keyUsageInfo)
+        (when (or (< (alength keyUsageInfo) 6) (not (aget keyUsageInfo 5)))
+          (throw (ValidatorException. "Wrong key usage: expected keyCertSign"
+                                      ValidatorException/T_CA_EXTENSIONS
+                                      cert))))))
+
+  (method ^:private buildTrustedChain :throws [CertificateException] ^X509Certificate/1 [this
+                                                                                         ^X509Certificate/1 chain]
+    (let [^{:tag (List X509Certificate)} c (ArrayList. (alength chain))]
+      (loop [^int i 0]
+        (when (< i (alength chain))
+          (let [cert (aget chain i)
+                trustedCert (.getTrustedCertificate this cert)]
+            (when (some? trustedCert)
+              (.add c trustedCert)
+              (return (cast X509Certificate/1 (.toArray c SimpleValidator/CHAIN0))))
+            (.add c cert)
+            (recur (unchecked-inc-int i)))))
+      (let [cert (aget chain (unchecked-subtract-int (alength chain) 1))
+            subject (.getSubjectX500Principal cert)
+            issuer (.getIssuerX500Principal cert)
+            ^{:tag (List X509Certificate)} list (cast List (.get trustedX500Principals issuer))]
+        (if (some? list)
+            (let [^:mutable matchedCert (cast X509Certificate (.get list 0))
+                  certImpl (X509CertImpl/toImpl cert)
+                  akid (.getAuthKeyId certImpl)]
+              (when (some? akid)
+                (for-each [^X509Certificate sup list]
+                  (let [supCert (X509CertImpl/toImpl sup)]
+                    (when (.equals akid (.getSubjectKeyId supCert)) (set! matchedCert sup) (break)))))
+              (.add c matchedCert)
+              (cast X509Certificate/1 (.toArray c SimpleValidator/CHAIN0)))
+            (throw (ValidatorException. ValidatorException/T_NO_TRUST_ANCHOR))))))
+
+  (method ^:private getTrustedCertificate ^X509Certificate [this ^X509Certificate cert]
+    (let [^Principal certSubjectName (.getSubjectX500Principal cert)
+          ^{:tag (List X509Certificate)} list (cast
+                                                List
+                                                (.get trustedX500Principals certSubjectName))]
+      (when (some? list)
+        (let [^Principal certIssuerName (.getIssuerX500Principal cert)
+              certPublicKey (.getPublicKey cert)]
+          (for-each [^X509Certificate mycert list]
+            (when (.equals mycert cert) (return cert))
+            (when-not (not (.equals (.getIssuerX500Principal mycert) certIssuerName))
+              (when-not (not (.equals (.getPublicKey mycert) certPublicKey)) (return mycert))))
+          nil)))))

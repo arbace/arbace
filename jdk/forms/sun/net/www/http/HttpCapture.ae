@@ -1,0 +1,95 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/http/HttpCapture.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.http)
+
+(import '(java.io BufferedReader
+                  BufferedWriter
+                  File
+                  FileNotFoundException
+                  FileReader
+                  FileWriter
+                  IOException)
+        '(java.net URL)
+        '(java.util ArrayList Random)
+        '(java.util.regex Pattern)
+        '(sun.net NetProperties)
+        '(sun.util.logging PlatformLogger))
+
+(defclass ^:public HttpCapture
+  (field ^:private ^:final ^File file)
+
+  (field ^:private ^boolean incoming true)
+
+  (field ^:private ^BufferedWriter out)
+
+  (field ^:private ^:static ^boolean initialized)
+
+  (field ^:private ^:static ^:volatile ^{:tag (ArrayList Pattern)} patterns)
+
+  (field ^:private ^:static ^:volatile ^{:tag (ArrayList String)} capFiles)
+
+  (method ^:private ^:static ^:synchronized init ^void []
+    (set! initialized true)
+    (let [rulesFile (NetProperties/get "sun.net.http.captureRules")]
+      (when (and (some? rulesFile) (not (.isEmpty rulesFile)))
+        (let [^:mutable ^BufferedReader in nil]
+          (try
+            (set! in (BufferedReader. (FileReader. rulesFile)))
+            (catch FileNotFoundException ex (return)))
+          (try
+            (let [^:mutable line (.readLine in)]
+              (while (some? line)
+                (set! line (.trim line))
+                (when-not (.startsWith line "#")
+                  (let [s (.split line ",")]
+                    (when (== (alength s) 2)
+                      (when (nil? patterns)
+                        (set! patterns (ArrayList.))
+                        (set! capFiles (ArrayList.)))
+                      (.add patterns (Pattern/compile (.trim (aget s 0))))
+                      (.add capFiles (.trim (aget s 1))))))
+                (set! line (.readLine in))))
+            (catch IOException ioe)
+            (finally (try (.close in) (catch IOException ex))))))))
+
+  (method ^:private ^:static ^:synchronized isInitialized ^boolean []
+    initialized)
+
+  (constructor ^:private [this ^File f ^URL url]
+    (set! file f)
+    (try
+      (set! out (BufferedWriter. (FileWriter. file true)))
+      (.write out (java-str "URL: " url "\n"))
+      (catch IOException ex (.severe (PlatformLogger/getLogger (.getName HttpCapture)) nil ex))))
+
+  (method ^:public ^:synchronized sent :throws [IOException] ^void [this ^int c]
+    (when incoming (.write out "\n------>\n") (set! incoming false) (.flush out))
+    (.write out c))
+
+  (method ^:public ^:synchronized received :throws [IOException] ^void [this ^int c]
+    (when-not incoming (.write out "\n<------\n") (set! incoming true) (.flush out))
+    (.write out c))
+
+  (method ^:public ^:synchronized flush :throws [IOException] ^void [this]
+    (.flush out))
+
+  (method ^:public ^:static getCapture ^HttpCapture [^URL url]
+    (when-not (HttpCapture/isInitialized) (HttpCapture/init))
+    (when-not (or (nil? patterns) (.isEmpty patterns))
+      (let [s (.toString url)]
+        (loop [^int i 0]
+          (when (< i (.size patterns))
+            (let [p (cast Pattern (.get patterns i))]
+              (if (.find (.matcher p s))
+                  (let [f (cast String (.get capFiles i))
+                        ^:mutable ^File fi nil]
+                    (if (.contains f "%d")
+                        (let [rand (Random.)]
+                          (loop []
+                            (let [f2 (.replace f "%d" (Integer/toString (.nextInt rand)))]
+                              (set! fi (File. f2)))
+                            (when (.exists fi) (recur))))
+                        (set! fi (File. f)))
+                    (return (HttpCapture. fi url)))
+                  (recur (unchecked-inc-int i))))))
+        nil))))

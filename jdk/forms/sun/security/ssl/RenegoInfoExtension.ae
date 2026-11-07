@@ -1,0 +1,333 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/RenegoInfoExtension.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security MessageDigest)
+        '(java.text MessageFormat)
+        '(java.util Arrays Locale)
+        '(javax.net.ssl SSLProtocolException)
+        '(sun.security.util ByteArrays))
+
+(defclass ^:final RenegoInfoExtension
+  (field ^:static ^:final ^HandshakeProducer chNetworkProducer (CHRenegotiationInfoProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer chOnLoadConsumer
+    (CHRenegotiationInfoConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence chOnLoadAbsence (CHRenegotiationInfoAbsence.))
+
+  (field ^:static ^:final ^HandshakeProducer shNetworkProducer (SHRenegotiationInfoProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer shOnLoadConsumer
+    (SHRenegotiationInfoConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence shOnLoadAbsence (SHRenegotiationInfoAbsence.))
+
+  (field ^:static ^:final ^SSLStringizer rniStringizer (RenegotiationInfoStringizer.))
+
+  (defclass ^:static ^:final RenegotiationInfoSpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:static ^:final ^RenegotiationInfoSpec NOMINAL (RenegotiationInfoSpec. (new byte/1 0)))
+
+    (field ^:private ^:final ^byte/1 renegotiatedConnection)
+
+    (constructor ^:private [this ^byte/1 renegotiatedConnection]
+      (set! (.-renegotiatedConnection this)
+            (Arrays/copyOf renegotiatedConnection (alength renegotiatedConnection))))
+
+    (constructor :throws [IOException] ^:private [this ^HandshakeContext hc ^ByteBuffer m]
+      (when (or (not (.hasRemaining m)) (< (.remaining m) 1))
+        (throw (.fatal (.-conContext hc)
+                       Alert/DECODE_ERROR
+                       (SSLProtocolException.
+                         "Invalid renegotiation_info extension data: insufficient data"))))
+      (set! (.-renegotiatedConnection this) (Record/getBytes8 m)))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat. "\"renegotiated connection\": '['{0}']'" Locale/ENGLISH)
+            ^Object/1 messageFields (if (== (alength renegotiatedConnection) 0)
+                                        (new Object/1 ["<no renegotiated connection>"])
+                                        (new Object/1
+                                             [(Utilities/toHexString renegotiatedConnection)]))]
+        (.format messageFormat messageFields))))
+
+  (defclass ^:private ^:static ^:final RenegotiationInfoStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (try (.toString (RenegotiationInfoSpec. hc buffer)) (catch IOException ioe (.getMessage ioe)))))
+
+  (defclass ^:private ^:static ^:final CHRenegotiationInfoProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (cond
+          (not (.isAvailable (.-sslConfig chc) SSLExtension/CH_RENEGOTIATION_INFO))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Ignore unavailable renegotiation_info extension"))
+              nil)
+          (not (.-isNegotiated (.-conContext chc)))
+            (when-not (.contains (.-activeCipherSuites chc)
+                                 CipherSuite/TLS_EMPTY_RENEGOTIATION_INFO_SCSV)
+              (let [extData (new byte/1 [0x00])]
+                (.put (.-handshakeExtensions chc)
+                      SSLExtension/CH_RENEGOTIATION_INFO
+                      RenegotiationInfoSpec/NOMINAL)
+                extData))
+          (.-secureRenegotiation (.-conContext chc))
+            (let [extData (new byte/1
+                               (unchecked-add-int
+                                 (alength (.-clientVerifyData (.-conContext chc)))
+                                 1))
+                  m (ByteBuffer/wrap extData)]
+              (Record/putBytes8 m (.-clientVerifyData (.-conContext chc)))
+              (.put (.-handshakeExtensions chc)
+                    SSLExtension/CH_RENEGOTIATION_INFO
+                    RenegotiationInfoSpec/NOMINAL)
+              extData)
+          HandshakeContext/allowUnsafeRenegotiation
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/warning "Using insecure renegotiation"))
+              nil)
+          :else
+            (throw (.fatal (.-conContext chc)
+                           Alert/HANDSHAKE_FAILURE
+                           "insecure renegotiation is not allowed"))))))
+
+  (defclass ^:private ^:static ^:final CHRenegotiationInfoConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [shc (cast ServerHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig shc) SSLExtension/CH_RENEGOTIATION_INFO))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine
+                (java-str "Ignore unavailable extension: "
+                          (.-name SSLExtension/CH_RENEGOTIATION_INFO))))
+            (let [spec (RenegotiationInfoSpec. shc buffer)]
+              (cond
+                (not (.-isNegotiated (.-conContext shc)))
+                  (do
+                    (when-not (== (alength (.-renegotiatedConnection spec)) 0)
+                      (throw (.fatal (.-conContext shc)
+                                     Alert/UNEXPECTED_MESSAGE
+                                     "Invalid renegotiation_info extension data: not empty")))
+                    (set! (.-secureRenegotiation (.-conContext shc)) true))
+                (not (.-secureRenegotiation (.-conContext shc)))
+                  (throw (.fatal (.-conContext shc)
+                                 Alert/HANDSHAKE_FAILURE
+                                 "The renegotiation_info is present in a insecure renegotiation"))
+                :else
+                  (when-not (MessageDigest/isEqual
+                              (.-clientVerifyData (.-conContext shc))
+                              (.-renegotiatedConnection spec))
+                    (throw
+                      (.fatal
+                        (.-conContext shc)
+                        Alert/UNEXPECTED_MESSAGE
+                        "Invalid renegotiation_info extension data: incorrect verify data in ClientHello"))))
+              (.put (.-handshakeExtensions shc)
+                    SSLExtension/CH_RENEGOTIATION_INFO
+                    RenegotiationInfoSpec/NOMINAL))))))
+
+  (defclass ^:private ^:static ^:final CHRenegotiationInfoAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            clientHello (cast ClientHello$ClientHelloMessage message)]
+        (cond
+          (not (.-isNegotiated (.-conContext shc)))
+            (do
+              (for-each [^int id (.-cipherSuiteIds clientHello)]
+                (when (== id (.-id CipherSuite/TLS_EMPTY_RENEGOTIATION_INFO_SCSV))
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                    (SSLLogger/finest "Safe renegotiation, using the SCSV signaling"))
+                  (set! (.-secureRenegotiation (.-conContext shc)) true)
+                  (return)))
+              (when-not HandshakeContext/allowLegacyHelloMessages
+                (throw (.fatal (.-conContext shc)
+                               Alert/HANDSHAKE_FAILURE
+                               "Failed to negotiate the use of secure renegotiation")))
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/warning
+                  "Warning: No renegotiation indication in ClientHello, allow legacy ClientHello"))
+              (set! (.-secureRenegotiation (.-conContext shc)) false))
+          (.-secureRenegotiation (.-conContext shc))
+            (throw (.fatal (.-conContext shc)
+                           Alert/HANDSHAKE_FAILURE
+                           "Inconsistent secure renegotiation indication"))
+          HandshakeContext/allowUnsafeRenegotiation
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/warning "Using insecure renegotiation"))
+          :else
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Terminate insecure renegotiation"))
+              (throw (.fatal (.-conContext shc)
+                             Alert/HANDSHAKE_FAILURE
+                             "Unsafe renegotiation is not allowed")))))))
+
+  (defclass ^:private ^:static ^:final SHRenegotiationInfoProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            requestedSpec (cast RenegotiationInfoSpec
+                                (.get (.-handshakeExtensions shc)
+                                      SSLExtension/CH_RENEGOTIATION_INFO))]
+        (cond
+          (and (nil? requestedSpec) (not (.-secureRenegotiation (.-conContext shc))))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/finest "Ignore unavailable renegotiation_info extension"))
+              nil)
+          (not (.-secureRenegotiation (.-conContext shc)))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/finest "No secure renegotiation has been negotiated"))
+              nil)
+          (not (.-isNegotiated (.-conContext shc)))
+            (let [extData (new byte/1 [0x00])]
+              (.put (.-handshakeExtensions shc)
+                    SSLExtension/SH_RENEGOTIATION_INFO
+                    RenegotiationInfoSpec/NOMINAL)
+              extData)
+          :else
+            (let [infoLen (unchecked-add-int (alength (.-clientVerifyData (.-conContext shc)))
+                                             (alength (.-serverVerifyData (.-conContext shc))))
+                  extData (new byte/1 (unchecked-add-int infoLen 1))
+                  m (ByteBuffer/wrap extData)]
+              (Record/putInt8 m infoLen)
+              (.put m (.-clientVerifyData (.-conContext shc)))
+              (.put m (.-serverVerifyData (.-conContext shc)))
+              (.put (.-handshakeExtensions shc)
+                    SSLExtension/SH_RENEGOTIATION_INFO
+                    RenegotiationInfoSpec/NOMINAL)
+              extData)))))
+
+  (defclass ^:private ^:static ^:final SHRenegotiationInfoConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [chc (cast ClientHandshakeContext context)
+            requestedSpec (cast RenegotiationInfoSpec
+                                (.get (.-handshakeExtensions chc)
+                                      SSLExtension/CH_RENEGOTIATION_INFO))]
+        (when (and (nil? requestedSpec)
+                   (not (.contains (.-activeCipherSuites chc)
+                                   CipherSuite/TLS_EMPTY_RENEGOTIATION_INFO_SCSV)))
+          (throw (.fatal (.-conContext chc)
+                         Alert/INTERNAL_ERROR
+                         "Missing renegotiation_info and SCSV detected in ClientHello")))
+        (let [spec (RenegotiationInfoSpec. chc buffer)]
+          (if (not (.-isNegotiated (.-conContext chc)))
+              (do
+                (when-not (== (alength (.-renegotiatedConnection spec)) 0)
+                  (throw
+                    (.fatal
+                      (.-conContext chc)
+                      Alert/HANDSHAKE_FAILURE
+                      "Invalid renegotiation_info in ServerHello: not empty renegotiated_connection")))
+                (set! (.-secureRenegotiation (.-conContext chc)) true))
+              (let [infoLen (unchecked-add-int (alength (.-clientVerifyData (.-conContext chc)))
+                                               (alength (.-serverVerifyData (.-conContext chc))))]
+                (when-not (== (alength (.-renegotiatedConnection spec)) infoLen)
+                  (throw
+                    (.fatal
+                      (.-conContext chc)
+                      Alert/HANDSHAKE_FAILURE
+                      (java-str
+                        "Invalid renegotiation_info in ServerHello: invalid renegotiated_connection length ("
+                        (alength (.-renegotiatedConnection spec))
+                        ")"))))
+                (let [cvd (.-clientVerifyData (.-conContext chc))]
+                  (when-not (ByteArrays/isEqual (.-renegotiatedConnection spec)
+                                                0
+                                                (alength cvd)
+                                                cvd
+                                                0
+                                                (alength cvd))
+                    (throw
+                      (.fatal
+                        (.-conContext chc)
+                        Alert/HANDSHAKE_FAILURE
+                        "Invalid renegotiation_info in ServerHello: unmatched client_verify_data value")))
+                  (let [svd (.-serverVerifyData (.-conContext chc))]
+                    (when-not (ByteArrays/isEqual
+                                (.-renegotiatedConnection spec)
+                                (alength cvd)
+                                infoLen
+                                svd
+                                0
+                                (alength svd))
+                      (throw
+                        (.fatal
+                          (.-conContext chc)
+                          Alert/HANDSHAKE_FAILURE
+                          "Invalid renegotiation_info in ServerHello: unmatched server_verify_data value")))))))
+          (.put (.-handshakeExtensions chc)
+                SSLExtension/SH_RENEGOTIATION_INFO
+                RenegotiationInfoSpec/NOMINAL)))))
+
+  (defclass ^:private ^:static ^:final SHRenegotiationInfoAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)
+            requestedSpec (cast RenegotiationInfoSpec
+                                (.get (.-handshakeExtensions chc)
+                                      SSLExtension/CH_RENEGOTIATION_INFO))]
+        (when (and (nil? requestedSpec)
+                   (not (.contains (.-activeCipherSuites chc)
+                                   CipherSuite/TLS_EMPTY_RENEGOTIATION_INFO_SCSV)))
+          (throw (.fatal (.-conContext chc)
+                         Alert/INTERNAL_ERROR
+                         "Missing renegotiation_info and SCSV detected in ClientHello")))
+        (cond
+          (not (.-isNegotiated (.-conContext chc)))
+            (do
+              (when-not HandshakeContext/allowLegacyHelloMessages
+                (throw (.fatal (.-conContext chc)
+                               Alert/HANDSHAKE_FAILURE
+                               "Failed to negotiate the use of secure renegotiation")))
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/warning
+                  "Warning: No renegotiation indication in ServerHello, allow legacy ServerHello"))
+              (set! (.-secureRenegotiation (.-conContext chc)) false))
+          (.-secureRenegotiation (.-conContext chc))
+            (throw (.fatal (.-conContext chc)
+                           Alert/HANDSHAKE_FAILURE
+                           "Inconsistent secure renegotiation indication"))
+          HandshakeContext/allowUnsafeRenegotiation
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/warning "Using insecure renegotiation"))
+          :else
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Terminate insecure renegotiation"))
+              (throw (.fatal (.-conContext chc)
+                             Alert/HANDSHAKE_FAILURE
+                             "Unsafe renegotiation is not allowed"))))))))

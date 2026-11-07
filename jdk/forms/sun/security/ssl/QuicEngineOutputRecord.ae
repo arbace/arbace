@@ -1,0 +1,135 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/QuicEngineOutputRecord.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.util LinkedList)
+        '(jdk.internal.net.quic QuicTLSEngine$KeySpace))
+
+(defclass ^:final QuicEngineOutputRecord
+  :extends OutputRecord
+  :implements [SSLRecord]
+
+  (field ^:private ^:final ^HandshakeFragment fragmenter (HandshakeFragment.))
+
+  (field ^:private ^:volatile ^boolean isCloseWaiting)
+
+  (field ^:private ^Alert alert)
+
+  (constructor [this ^HandshakeHash handshakeHash]
+    (super. handshakeHash (SSLCipher$SSLWriteCipher/nullTlsWriteCipher))
+    (set! (.-packetSize this) SSLRecord/maxRecordSize)
+    (set! (.-protocolVersion this) ProtocolVersion/NONE))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (.lock (.-recordLock this))
+    (try
+      (when-not (.-isClosed this)
+        (if (not (.isEmpty fragmenter)) (set! isCloseWaiting true) (.close super)))
+      (finally (.unlock (.-recordLock this)))))
+
+  (method isClosed ^boolean [this] (or (.-isClosed this) isCloseWaiting))
+
+  (method encodeAlert :throws [IOException] ^void [this ^byte level ^byte description]
+    (.lock (.-recordLock this))
+    (try
+      (cond
+        (.isClosed this)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning
+              (java-str "outbound has closed, ignore outbound alert message: "
+                        (Alert/nameOf description))))
+        (== level (.-level Alert$Level/WARNING))
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning
+              (java-str "Suppressing warning-level alert message: " (Alert/nameOf description))))
+        (some? alert)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning
+              (java-str "Suppressing subsequent alert: " description ", original: " (.-id alert))))
+        :else (set! alert (Alert/valueOf description)))
+      (finally (.unlock (.-recordLock this)))))
+
+  (method encodeHandshake :throws [IOException] ^void [this ^byte/1 source ^int offset ^int length]
+    (.lock (.-recordLock this))
+    (try
+      (if (.isClosed this)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning "outbound has closed, ignore outbound handshake message"
+                               (ByteBuffer/wrap source offset length)))
+          (do
+            (set! (.-firstMessage this) false)
+            (let [handshakeType (aget source offset)]
+              (when (.isHashable (.-handshakeHash this) handshakeType)
+                (.deliver (.-handshakeHash this) source offset length))
+              (.queueUpFragment fragmenter source offset length))))
+      (finally (.unlock (.-recordLock this)))))
+
+  (method encodeChangeCipherSpec :throws [IOException] ^void [this]
+    (throw (UnsupportedOperationException.)))
+
+  (method changeWriteCiphers :throws [IOException] ^void [this ^SSLCipher$SSLWriteCipher writeCipher
+                                                          ^boolean useChangeCipherSpec]
+    (.lock (.-recordLock this))
+    (try (.changePacketSpace fragmenter) (finally (.unlock (.-recordLock this)))))
+
+  (method changeWriteCiphers :throws [IOException] ^void [this ^SSLCipher$SSLWriteCipher writeCipher
+                                                          ^byte keyUpdateRequest]
+    (throw (UnsupportedOperationException. "Should not call this")))
+
+  (method getHandshakeMessage ^byte/1 [this]
+    (.lock (.-recordLock this))
+    (try (.acquireCiphertext fragmenter) (finally (.unlock (.-recordLock this)))))
+
+  (method getHandshakeMessageKeySpace ^QuicTLSEngine$KeySpace [this]
+    (.lock (.-recordLock this))
+    (try
+      (switch (.-currentPacketSpace fragmenter)
+        0 QuicTLSEngine$KeySpace/INITIAL
+        1 QuicTLSEngine$KeySpace/HANDSHAKE
+        2 QuicTLSEngine$KeySpace/ONE_RTT
+        (throw (IllegalStateException. "Unexpected state")))
+      (finally (.unlock (.-recordLock this)))))
+
+  (method isEmpty ^boolean [this]
+    (.lock (.-recordLock this))
+    (try (.isEmpty fragmenter) (finally (.unlock (.-recordLock this)))))
+
+  (method getAlert ^Alert [this]
+    (.lock (.-recordLock this))
+    (try alert (finally (.unlock (.-recordLock this)))))
+
+  (defclass ^:private ^:static HandshakeMemo
+    (field ^boolean changeSpace)
+
+    (field ^byte/1 fragment))
+
+  (defclass ^:static ^:final HandshakeFragment
+    (field ^:private ^:final ^{:tag (LinkedList HandshakeMemo)} handshakeMemos (LinkedList.))
+
+    (field ^:private ^int currentPacketSpace)
+
+    (method queueUpFragment :throws [IOException] ^void [this ^byte/1 source ^int offset ^int length]
+      (let [memo (HandshakeMemo.)]
+        (set! (.-fragment memo) (new byte/1 length))
+        (java-assert (== (Record/getInt24 (ByteBuffer/wrap source (unchecked-add-int offset 1) 3))
+                         (unchecked-subtract-int length 4))
+          "Invalid handshake message length")
+        (System/arraycopy source offset (.-fragment memo) 0 length)
+        (.add handshakeMemos memo)))
+
+    (method changePacketSpace ^void [this]
+      (let [lastMemo (cast HandshakeMemo (.peekLast handshakeMemos))]
+        (if (some? lastMemo)
+            (set! (.-changeSpace lastMemo) true)
+            (set! currentPacketSpace (unchecked-inc-int currentPacketSpace)))))
+
+    (method acquireCiphertext ^byte/1 [this]
+      (let [hsMemo (cast HandshakeMemo (.pollFirst handshakeMemos))]
+        (when (some? hsMemo)
+          (when (.-changeSpace hsMemo)
+            (set! currentPacketSpace (unchecked-inc-int currentPacketSpace)))
+          (.-fragment hsMemo))))
+
+    (method isEmpty ^boolean [this] (.isEmpty handshakeMemos))))

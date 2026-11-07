@@ -1,0 +1,385 @@
+;; Converted from jdk26u src/java.base/share/classes/java/net/NetMulticastSocket.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.net)
+
+(import '(java.io IOException UncheckedIOException)
+        '(java.util Collections Enumeration Objects Set))
+
+(defclass ^:final NetMulticastSocket
+  :extends MulticastSocket
+
+  (field ^:private ^boolean bound false)
+
+  (field ^:private ^boolean closed false)
+
+  (field ^:private ^:volatile ^boolean created)
+
+  (field ^:private ^:final closeLock (Object.))
+
+  (field ^:private ^:final ^DatagramSocketImpl impl)
+
+  (field ^:private ^boolean explicitFilter false)
+
+  (field ^:private ^int bytesLeftToFilter)
+
+  (field ^:static ^:final ^int ST_NOT_CONNECTED 0)
+
+  (field ^:static ^:final ^int ST_CONNECTED 1)
+
+  (field ^int connectState ST_NOT_CONNECTED)
+
+  (field ^InetAddress connectedAddress nil)
+
+  (field ^int connectedPort -1)
+
+  (constructor [this ^DatagramSocketImpl impl]
+    (super. (cast MulticastSocket nil))
+    (set! (.-impl this) (cast DatagramSocketImpl (Objects/requireNonNull impl))))
+
+  (method ^:private ^:synchronized connectInternal :throws [SocketException] ^void [this
+                                                                                    ^InetAddress address
+                                                                                    ^int port]
+    (when (or (< port 0) (> port 0xFFFF))
+      (throw (IllegalArgumentException. (java-str "connect: " port))))
+    (when (nil? address) (throw (IllegalArgumentException. "connect: null address")))
+    (NetMulticastSocket/checkAddress address "connect")
+    (when-not (.isClosed this)
+      (when (== port 0) (throw (SocketException. "Can't connect to port 0")))
+      (when-not (.isBound this) (.bind this (InetSocketAddress. 0)))
+      (.connect (.getImpl this) address port)
+      (set! connectState ST_CONNECTED)
+      (let [avail (.dataAvailable (.getImpl this))]
+        (when (== avail -1) (throw (SocketException.)))
+        (set! explicitFilter (> avail 0))
+        (when explicitFilter (set! bytesLeftToFilter (.getReceiveBufferSize this)))
+        (set! connectedAddress address)
+        (set! connectedPort port))))
+
+  (method ^:final getImpl :throws [SocketException] ^DatagramSocketImpl [this]
+    (when-not created (locking this (when-not created (.create impl) (set! created true))))
+    impl)
+
+  (method ^:public ^:synchronized bind :throws [SocketException] ^void [this
+                                                                        ^:mutable ^SocketAddress addr]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (when (.isBound this) (throw (SocketException. "already bound")))
+    (when (nil? addr) (set! addr (InetSocketAddress. 0)))
+    (if-instance [^InetSocketAddress epoint addr]
+      (do
+        (when (.isUnresolved epoint) (throw (SocketException. "Unresolved address")))
+        (let [iaddr (.getAddress epoint)
+              port (.getPort epoint)]
+          (NetMulticastSocket/checkAddress iaddr "bind")
+          (try
+            (.bind (.getImpl this) port iaddr)
+            (catch SocketException e (.close (.getImpl this)) (throw e)))
+          (set! bound true)))
+      (throw (IllegalArgumentException. "Unsupported address type!"))))
+
+  (method ^:static checkAddress ^void [^InetAddress addr ^String op]
+    (when (some? addr)
+      (when-not (or (instance? Inet4Address addr) (instance? Inet6Address addr))
+        (throw (IllegalArgumentException. (java-str op ": invalid address type"))))))
+
+  (method ^:public connect ^void [this ^InetAddress address ^int port]
+    (try
+      (.connectInternal this address port)
+      (catch SocketException se (throw (UncheckedIOException. "connect failed" se)))))
+
+  (method ^:public connect :throws [SocketException] ^void [this ^SocketAddress addr]
+    (when (nil? addr) (throw (IllegalArgumentException. "Address can't be null")))
+    (if-instance [^InetSocketAddress epoint addr]
+      (do
+        (when (.isUnresolved epoint) (throw (SocketException. "Unresolved address")))
+        (.connectInternal this (.getAddress epoint) (.getPort epoint)))
+      (throw (IllegalArgumentException. "Unsupported address type"))))
+
+  (method ^:public disconnect ^void [this]
+    (locking this
+      (when-not (.isClosed this)
+        (when (== connectState ST_CONNECTED) (.disconnect impl))
+        (set! connectedAddress nil)
+        (set! connectedPort -1)
+        (set! connectState ST_NOT_CONNECTED)
+        (set! explicitFilter false))))
+
+  (method ^:public isBound ^boolean [this] bound)
+
+  (method ^:public isConnected ^boolean [this]
+    (not (== connectState ST_NOT_CONNECTED)))
+
+  (method ^:public getInetAddress ^InetAddress [this] connectedAddress)
+
+  (method ^:public getPort ^int [this] connectedPort)
+
+  (method ^:public getRemoteSocketAddress ^SocketAddress [this]
+    (when-not (not (.isConnected this)) (InetSocketAddress. (.getInetAddress this) (.getPort this))))
+
+  (method ^:public getLocalSocketAddress ^SocketAddress [this]
+    (when-not (.isClosed this)
+      (when-not (not (.isBound this))
+        (InetSocketAddress. (.getLocalAddress this) (.getLocalPort this)))))
+
+  (method ^:public send :throws [IOException] ^void [this ^DatagramPacket p]
+    (locking p
+      (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+      (let [packetAddress (.getAddress p)
+            packetPort (.getPort p)]
+        (NetMulticastSocket/checkAddress packetAddress "send")
+        (cond
+          (== connectState ST_NOT_CONNECTED)
+            (do
+              (when (nil? packetAddress) (throw (IllegalArgumentException. "Address not set")))
+              (when (or (< packetPort 0) (> packetPort 0xFFFF))
+                (throw (IllegalArgumentException. (java-str "port out of range: " packetPort))))
+              (when (== packetPort 0) (throw (SocketException. "Can't send to port 0"))))
+          (nil? packetAddress) (do (.setAddress p connectedAddress) (.setPort p connectedPort))
+          (or (not (.equals packetAddress connectedAddress)) (not (== packetPort connectedPort)))
+            (throw (IllegalArgumentException. "connected address and packet address differ")))
+        (when-not (.isBound this) (.bind this (InetSocketAddress. 0)))
+        (.send (.getImpl this) p))))
+
+  (method ^:public ^:synchronized receive :throws [IOException] ^void [this ^DatagramPacket p]
+    (locking p
+      (when-not (.isBound this) (.bind this (InetSocketAddress. 0)))
+      (let [^:mutable ^DatagramPacket tmp nil]
+        (when explicitFilter
+          (java-assert (== connectState ST_CONNECTED))
+          (let [^:mutable stop false]
+            (while (not stop)
+              (let [peekPacket (DatagramPacket. (new byte/1 1) 1)
+                    peekPort (.peekData (.getImpl this) peekPacket)
+                    peekAddress (.getAddress peekPacket)]
+                (if (or (not (.equals connectedAddress peekAddress))
+                        (not (== connectedPort peekPort)))
+                    (do
+                      (set! tmp (DatagramPacket. (new byte/1 1024) 1024))
+                      (.receive (.getImpl this) tmp)
+                      (when explicitFilter (when (.checkFiltering this tmp) (set! stop true))))
+                    (set! stop true))))))
+        (.receive (.getImpl this) p)
+        (when (and explicitFilter (nil? tmp)) (.checkFiltering this p)))))
+
+  (method ^:private checkFiltering :throws [SocketException] ^boolean [this ^DatagramPacket p]
+    (set! bytesLeftToFilter (unchecked-subtract-int bytesLeftToFilter (.getLength p)))
+    (if (or (<= bytesLeftToFilter 0) (<= (.dataAvailable (.getImpl this)) 0))
+        (do (set! explicitFilter false) true)
+        false))
+
+  (method ^:public getLocalAddress ^InetAddress [this]
+    (when-not (.isClosed this)
+      (let [^:mutable ^InetAddress in nil]
+        (try
+          (set! in (cast InetAddress (.getOption (.getImpl this) SocketOptions/SO_BINDADDR)))
+          (when (.isAnyLocalAddress in) (set! in (InetAddress/anyLocalAddress)))
+          (catch Exception e (set! in (InetAddress/anyLocalAddress))))
+        in)))
+
+  (method ^:public getLocalPort ^int [this]
+    (if (.isClosed this) -1 (try (.getLocalPort (.getImpl this)) (catch Exception e 0))))
+
+  (method ^:public ^:synchronized setSoTimeout :throws [SocketException] ^void [this ^int timeout]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (when (< timeout 0) (throw (IllegalArgumentException. "timeout < 0")))
+    (.setOption (.getImpl this) SocketOptions/SO_TIMEOUT timeout))
+
+  (method ^:public ^:synchronized getSoTimeout :throws [SocketException] ^int [this]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (if (nil? (.getImpl this))
+        0
+        (let [o (.getOption (.getImpl this) SocketOptions/SO_TIMEOUT)]
+          (if (instance? Integer o) (.intValue (cast Integer o)) 0))))
+
+  (method ^:public ^:synchronized setSendBufferSize :throws [SocketException] ^void [this ^int size]
+    (when-not (> size 0) (throw (IllegalArgumentException. "negative send size")))
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.setOption (.getImpl this) SocketOptions/SO_SNDBUF size))
+
+  (method ^:public ^:synchronized getSendBufferSize :throws [SocketException] ^int [this]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (let [^:mutable ^int result 0
+          o (.getOption (.getImpl this) SocketOptions/SO_SNDBUF)]
+      (when (instance? Integer o) (set! result (.intValue (cast Integer o))))
+      result))
+
+  (method ^:public ^:synchronized setReceiveBufferSize :throws [SocketException] ^void [this
+                                                                                        ^int size]
+    (when (<= size 0) (throw (IllegalArgumentException. "invalid receive size")))
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.setOption (.getImpl this) SocketOptions/SO_RCVBUF size))
+
+  (method ^:public ^:synchronized getReceiveBufferSize :throws [SocketException] ^int [this]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (let [^:mutable ^int result 0
+          o (.getOption (.getImpl this) SocketOptions/SO_RCVBUF)]
+      (when (instance? Integer o) (set! result (.intValue (cast Integer o))))
+      result))
+
+  (method ^:public ^:synchronized setReuseAddress :throws [SocketException] ^void [this ^boolean on]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.setOption (.getImpl this) SocketOptions/SO_REUSEADDR (Boolean/valueOf on)))
+
+  (method ^:public ^:synchronized getReuseAddress :throws [SocketException] ^boolean [this]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (let [o (.getOption (.getImpl this) SocketOptions/SO_REUSEADDR)]
+      (.booleanValue (cast Boolean o))))
+
+  (method ^:public ^:synchronized setBroadcast :throws [SocketException] ^void [this ^boolean on]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.setOption (.getImpl this) SocketOptions/SO_BROADCAST (Boolean/valueOf on)))
+
+  (method ^:public ^:synchronized getBroadcast :throws [SocketException] ^boolean [this]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.booleanValue (cast Boolean (.getOption (.getImpl this) SocketOptions/SO_BROADCAST))))
+
+  (method ^:public ^:synchronized setTrafficClass :throws [SocketException] ^void [this ^int tc]
+    (when (or (< tc 0) (> tc 255))
+      (throw (IllegalArgumentException. "tc is not in range 0 -- 255")))
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (try
+      (.setOption (.getImpl this) SocketOptions/IP_TOS tc)
+      (catch SocketException se (when-not (.isConnected this) (throw se)))))
+
+  (method ^:public ^:synchronized getTrafficClass :throws [SocketException] ^int [this]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.intValue (cast Integer (.getOption (.getImpl this) SocketOptions/IP_TOS))))
+
+  (method ^:public close ^void [this]
+    (locking closeLock (when-not (.isClosed this) (.close impl) (set! closed true))))
+
+  (method ^:public isClosed ^boolean [this] (locking closeLock closed))
+
+  (method ^:public setOption :type-params [T] :throws [IOException] ^DatagramSocket [this
+                                                                                     ^{:tag (SocketOption T)} name
+                                                                                     ^T value]
+    (Objects/requireNonNull name)
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.setOption (.getImpl this) name value)
+    this)
+
+  (method ^:public getOption :type-params [T] :throws [IOException] ^T [this
+                                                                        ^{:tag (SocketOption T)} name]
+    (Objects/requireNonNull name)
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.getOption (.getImpl this) name))
+
+  (field ^:private ^:volatile ^{:tag (Set (SocketOption ?))} options)
+
+  (field ^:private ^:final optionsLock (Object.))
+
+  (method ^:public supportedOptions ^{:tag (Set (SocketOption ?))} [this]
+    (let [^:mutable ^{:tag (Set (SocketOption ?))} options (.-options this)]
+      (if (some? options)
+          options
+          (locking optionsLock
+            (set! options (.-options this))
+            (if (some? options)
+                options
+                (do
+                  (try
+                    (let [impl (.getImpl this)]
+                      (set! options (Collections/unmodifiableSet (.supportedOptions impl))))
+                    (catch IOException e (set! options (Collections/emptySet))))
+                  (set! (.-options this) options)))))))
+
+  (field ^:private ^boolean interfaceSet)
+
+  (field ^:private ^:final infLock (Object.))
+
+  (field ^:private ^InetAddress infAddress nil)
+
+  (method ^:public setTimeToLive :throws [IOException] ^void [this ^int ttl]
+    (when (or (< ttl 0) (> ttl 255)) (throw (IllegalArgumentException. "ttl out of range")))
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.setTimeToLive (.getImpl this) ttl))
+
+  (method ^:public getTimeToLive :throws [IOException] ^int [this]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.getTimeToLive (.getImpl this)))
+
+  (method ^:public ^{Deprecated true} joinGroup :throws [IOException] ^void [this
+                                                                             ^InetAddress mcastaddr]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (NetMulticastSocket/checkAddress mcastaddr "joinGroup")
+    (when-not (.isMulticastAddress mcastaddr) (throw (SocketException. "Not a multicast address")))
+    (let [defaultInterface (NetworkInterface/getDefault)]
+      (when (and (not interfaceSet) (some? defaultInterface))
+        (.setNetworkInterface this defaultInterface))
+      (.join (.getImpl this) mcastaddr)))
+
+  (method ^:public ^{Deprecated true} leaveGroup :throws [IOException] ^void [this
+                                                                              ^InetAddress mcastaddr]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (NetMulticastSocket/checkAddress mcastaddr "leaveGroup")
+    (when-not (.isMulticastAddress mcastaddr) (throw (SocketException. "Not a multicast address")))
+    (.leave (.getImpl this) mcastaddr))
+
+  (method ^:public joinGroup :throws [IOException] ^void [this ^SocketAddress mcastaddr
+                                                          ^NetworkInterface netIf]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (if-instance [^InetSocketAddress addr mcastaddr]
+      (do
+        (NetMulticastSocket/checkAddress (.getAddress addr) "joinGroup")
+        (when-not (.isMulticastAddress (.getAddress addr))
+          (throw (SocketException. "Not a multicast address")))
+        (.joinGroup (.getImpl this) mcastaddr netIf))
+      (throw (IllegalArgumentException. "Unsupported address type"))))
+
+  (method ^:public leaveGroup :throws [IOException] ^void [this ^SocketAddress mcastaddr
+                                                           ^NetworkInterface netIf]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (if-instance [^InetSocketAddress addr mcastaddr]
+      (do
+        (NetMulticastSocket/checkAddress (.getAddress addr) "leaveGroup")
+        (when-not (.isMulticastAddress (.getAddress addr))
+          (throw (SocketException. "Not a multicast address")))
+        (.leaveGroup (.getImpl this) mcastaddr netIf))
+      (throw (IllegalArgumentException. "Unsupported address type"))))
+
+  (method ^:public ^{Deprecated true} setInterface :throws [SocketException] ^void [this
+                                                                                    ^InetAddress inf]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (NetMulticastSocket/checkAddress inf "setInterface")
+    (locking infLock
+      (.setOption (.getImpl this) SocketOptions/IP_MULTICAST_IF inf)
+      (set! infAddress inf)
+      (set! interfaceSet true)))
+
+  (method ^:public ^{Deprecated true} getInterface :throws [SocketException] ^InetAddress [this]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (locking infLock
+      (let [ia (cast InetAddress (.getOption (.getImpl this) SocketOptions/IP_MULTICAST_IF))]
+        (cond
+          (nil? infAddress) ia
+          (.equals ia infAddress) ia
+          :else
+            (try
+              (let [ni (NetworkInterface/getByInetAddress ia)
+                    ^{:tag (Enumeration InetAddress)} addrs (.getInetAddresses ni)]
+                (while (.hasMoreElements addrs)
+                  (let [addr (cast InetAddress (.nextElement addrs))]
+                    (when (.equals addr infAddress) (return infAddress))))
+                (set! infAddress nil)
+                ia)
+              (catch Exception e ia))))))
+
+  (method ^:public setNetworkInterface :throws [SocketException] ^void [this ^NetworkInterface netIf]
+    (locking infLock
+      (.setOption (.getImpl this) SocketOptions/IP_MULTICAST_IF2 netIf)
+      (set! infAddress nil)
+      (set! interfaceSet true)))
+
+  (method ^:public getNetworkInterface :throws [SocketException] ^NetworkInterface [this]
+    (let [ni (cast NetworkInterface (.getOption (.getImpl this) SocketOptions/IP_MULTICAST_IF2))]
+      (if (nil? ni)
+          (let [addrs (new InetAddress/1 1)]
+            (aset addrs 0 (InetAddress/anyLocalAddress))
+            (NetworkInterface. (.getHostName (aget addrs 0)) 0 addrs))
+          ni)))
+
+  (method ^:public ^{Deprecated true} setLoopbackMode :throws [SocketException] ^void [this
+                                                                                       ^boolean disable]
+    (.setOption (.getImpl this) SocketOptions/IP_MULTICAST_LOOP (Boolean/valueOf disable)))
+
+  (method ^:public ^{Deprecated true} getLoopbackMode :throws [SocketException] ^boolean [this]
+    (.booleanValue (cast Boolean (.getOption (.getImpl this) SocketOptions/IP_MULTICAST_LOOP)))))

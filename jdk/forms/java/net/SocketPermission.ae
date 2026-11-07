@@ -1,0 +1,690 @@
+;; Converted from jdk26u src/java.base/share/classes/java/net/SocketPermission.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.net)
+
+(import '(java.io IOException ObjectInputStream ObjectOutputStream ObjectStreamField Serializable)
+        '(java.security Permission PermissionCollection)
+        '(java.util Collections Enumeration Locale Map StringJoiner StringTokenizer Vector)
+        '(java.util.concurrent ConcurrentHashMap)
+        '(java.util.function BiFunction Function)
+        '(jdk.internal.util Exceptions Exceptions$SensitiveInfo)
+        '(sun.net PortConfig)
+        '(sun.net.util IPAddressUtil)
+        '(sun.security.util Debug RegisteredDomain SecurityConstants))
+
+(defclasses
+  (defclass ^:public ^:final ^{Deprecated {:since "26" :forRemoval true}} SocketPermission
+    :extends Permission
+    :implements [Serializable]
+
+    (field ^:private ^:static ^:final ^long serialVersionUID -7204263841984476862)
+
+    (field ^:private ^:static ^:final ^int CONNECT 0x1)
+
+    (field ^:private ^:static ^:final ^int LISTEN 0x2)
+
+    (field ^:private ^:static ^:final ^int ACCEPT 0x4)
+
+    (field ^:private ^:static ^:final ^int RESOLVE 0x8)
+
+    (field ^:private ^:static ^:final ^int NONE 0x0)
+
+    (field ^:private ^:static ^:final ^int ALL
+      (bit-or-int (bit-or-int (bit-or-int CONNECT LISTEN) ACCEPT) RESOLVE))
+
+    (field ^:private ^:static ^:final ^int PORT_MIN 0)
+
+    (field ^:private ^:static ^:final ^int PORT_MAX 65535)
+
+    (field ^:private ^:transient ^int mask)
+
+    (field ^:private ^String actions)
+
+    (field ^:private ^:transient ^String hostname)
+
+    (field ^:private ^:transient ^String cname)
+
+    (field ^:private ^:transient ^InetAddress/1 addresses)
+
+    (field ^:private ^:transient ^boolean wildcard)
+
+    (field ^:private ^:transient ^boolean init_with_ip)
+
+    (field ^:private ^:transient ^boolean invalid)
+
+    (field ^:private ^:transient ^int/1 portrange)
+
+    (field ^:private ^:transient ^boolean defaultDeny false)
+
+    (field ^:private ^:transient ^boolean untrusted)
+
+    (field ^:private ^:transient ^boolean trusted)
+
+    (field ^:private ^:static ^:final ^boolean trustNameService
+      (Boolean/getBoolean "sun.net.trustNameService"))
+
+    (field ^:private ^:static ^Debug debug nil)
+
+    (field ^:private ^:static ^boolean debugInit false)
+
+    (defclass ^:private ^:static EphemeralRange
+      (field ^:static ^:final ^int low (SocketPermission/initEphemeralPorts "low"))
+
+      (field ^:static ^:final ^int high (SocketPermission/initEphemeralPorts "high")))
+
+    (method ^:private ^:static ^:synchronized getDebug ^Debug []
+      (when-not debugInit (set! debug (Debug/getInstance "access")) (set! debugInit true))
+      debug)
+
+    (constructor ^:public [this ^String host ^String action]
+      (super. (SocketPermission/getHost host))
+      (.init this (.getName this) (SocketPermission/getMask action)))
+
+    (constructor [this ^String host ^int mask]
+      (super. (SocketPermission/getHost host))
+      (.init this (.getName this) mask))
+
+    (method ^:private setDeny ^void [this] (set! defaultDeny true))
+
+    (method ^:private ^:static getHost ^String [^:mutable ^String host]
+      (if (.isEmpty host)
+          "localhost"
+          (let [^:mutable ^int ind 0]
+            (when-not (== (.charAt host 0) \[)
+              (when-not (== (set! ind (.indexOf host \:)) (.lastIndexOf host \:))
+                (let [st (StringTokenizer. host ":")
+                      tokens (.countTokens st)]
+                  (cond
+                    (== tokens 9)
+                      (do
+                        (set! ind (.lastIndexOf host \:))
+                        (set! host (java-str "[" (.substring host 0 ind) "]" (.substring host ind))))
+                    (and (== tokens 8) (not (.contains host "::")))
+                      (set! host (java-str "[" host "]"))
+                    :else (throw (IllegalArgumentException. "Ambiguous hostport part"))))))
+            host)))
+
+    (method ^:private parsePort ^int/1 [this ^String port]
+      (if (or (or (nil? port) (.isEmpty port)) (.equals port "*"))
+          (new int/1 [PORT_MIN PORT_MAX])
+          (let [dash (.indexOf port \-)]
+            (if (== dash -1)
+                (let [p (Integer/parseInt port)] (new int/1 [p p]))
+                (let [low (.substring port 0 dash)
+                      high (.substring port (unchecked-add-int dash 1))
+                      ^:mutable ^int l 0
+                      ^:mutable ^int h 0]
+                  (if (.isEmpty low) (set! l PORT_MIN) (set! l (Integer/parseInt low)))
+                  (if (.isEmpty high) (set! h PORT_MAX) (set! h (Integer/parseInt high)))
+                  (when (or (or (< l 0) (< h 0)) (< h l))
+                    (throw (IllegalArgumentException. "invalid port range")))
+                  (new int/1 [l h]))))))
+
+    (method ^:private includesEphemerals ^boolean [this]
+      (== (aget portrange 0) 0))
+
+    (method ^:private init ^void [this ^:mutable ^String host ^int mask]
+      (when-not (== (bit-and-int mask ALL) mask)
+        (throw (IllegalArgumentException. "invalid actions mask")))
+      (set! (.-mask this) (bit-or-int mask RESOLVE))
+      (let [^:mutable ^int rb 0
+            ^:mutable ^int start 0
+            ^:mutable ^int end 0
+            ^:mutable ^int sep -1
+            hostport host]
+        (if (== (.charAt host 0) \[)
+            (do
+              (set! start 1)
+              (set! rb (.indexOf host \]))
+              (if (not (== rb -1))
+                  (set! host (.substring host start rb))
+                  (throw (IllegalArgumentException.
+                           (Exceptions/formatMsg
+                             "invalid host/port%s"
+                             (new Exceptions$SensitiveInfo/1
+                                  [(.prefixWith (Exceptions/filterNonSocketInfo host) ": ")])))))
+              (set! sep (.indexOf hostport \: (unchecked-add-int rb 1))))
+            (do
+              (set! start 0)
+              (set! sep (.indexOf host \: rb))
+              (set! end sep)
+              (when-not (== sep -1) (set! host (.substring host start end)))))
+        (if (not (== sep -1))
+            (let [port (.substring hostport (unchecked-add-int sep 1))]
+              (try
+                (set! portrange (.parsePort this port))
+                (catch Exception e
+                  (throw (IllegalArgumentException.
+                           (Exceptions/formatMsg
+                             "invalid port range%s"
+                             (new Exceptions$SensitiveInfo/1
+                                  [(.prefixWith (Exceptions/filterNonSocketInfo port) ": ")])))))))
+            (set! portrange (new int/1 [PORT_MIN PORT_MAX])))
+        (set! hostname host)
+        (cond
+          (> (.lastIndexOf host \*) 0)
+            (throw (IllegalArgumentException. "invalid host wildcard specification"))
+          (.startsWith host "*")
+            (do
+              (set! wildcard true)
+              (cond
+                (.equals host "*") (set! cname "")
+                (.startsWith host "*.") (set! cname (.toLowerCase (.substring host 1) Locale/ROOT))
+                :else (throw (IllegalArgumentException. "invalid host wildcard specification"))))
+          :else
+            (when-not (.isEmpty host)
+              (let [ch (.charAt host 0)]
+                (when (or (== ch \:) (not (== (IPAddressUtil/digit ch 16) -1)))
+                  (let [^:mutable ip (IPAddressUtil/textToNumericFormatV4 host)]
+                    (when (nil? ip) (set! ip (IPAddressUtil/textToNumericFormatV6 host)))
+                    (when (some? ip)
+                      (try
+                        (set! addresses (new InetAddress/1 [(InetAddress/getByAddress ip)]))
+                        (set! init_with_ip true)
+                        (catch UnknownHostException uhe (set! invalid true)))))))))))
+
+    (method ^:private ^:static getMask ^int [^String action]
+      (when (nil? action) (throw (NullPointerException. "action can't be null")))
+      (when (.isEmpty action) (throw (IllegalArgumentException. "action can't be empty")))
+      (let [^:mutable mask NONE]
+        (cond
+          (identical? action SecurityConstants/SOCKET_RESOLVE_ACTION) RESOLVE
+          (identical? action SecurityConstants/SOCKET_CONNECT_ACTION) CONNECT
+          (identical? action SecurityConstants/SOCKET_LISTEN_ACTION) LISTEN
+          (identical? action SecurityConstants/SOCKET_ACCEPT_ACTION) ACCEPT
+          (identical? action SecurityConstants/SOCKET_CONNECT_ACCEPT_ACTION)
+            (bit-or-int CONNECT ACCEPT)
+          :else
+            (let [a (.toCharArray action)
+                  ^:mutable i (unchecked-subtract-int (alength a) 1)]
+              (while (not (== i -1))
+                (let [^:mutable ^char c (unchecked-char 0)]
+                  (while (and (not (== i -1))
+                              (or (or (or (or (== (set! c (aget a i)) \space) (== c \return))
+                                          (== c \newline))
+                                      (== c \formfeed))
+                                  (== c \tab)))
+                    (set! i (unchecked-dec-int i)))
+                  (let [^:mutable ^int matchlen 0]
+                    (cond
+                      (and (and (and (and (and (and
+                                                 (and
+                                                   (>= i 6)
+                                                   (or
+                                                     (== (aget a (unchecked-subtract-int i 6)) \c)
+                                                     (== (aget a (unchecked-subtract-int i 6)) \C)))
+                                                 (or
+                                                   (== (aget a (unchecked-subtract-int i 5)) \o)
+                                                   (== (aget a (unchecked-subtract-int i 5)) \O)))
+                                               (or
+                                                 (== (aget a (unchecked-subtract-int i 4)) \n)
+                                                 (== (aget a (unchecked-subtract-int i 4)) \N)))
+                                          (or (== (aget a (unchecked-subtract-int i 3)) \n)
+                                              (== (aget a (unchecked-subtract-int i 3)) \N)))
+                                     (or (== (aget a (unchecked-subtract-int i 2)) \e)
+                                         (== (aget a (unchecked-subtract-int i 2)) \E)))
+                                (or (== (aget a (unchecked-subtract-int i 1)) \c)
+                                    (== (aget a (unchecked-subtract-int i 1)) \C)))
+                           (or (== (aget a i) \t) (== (aget a i) \T)))
+                        (do (set! matchlen 7) (set! mask (bit-or-int mask CONNECT)))
+                      (and (and (and (and (and (and
+                                                 (and
+                                                   (>= i 6)
+                                                   (or
+                                                     (== (aget a (unchecked-subtract-int i 6)) \r)
+                                                     (== (aget a (unchecked-subtract-int i 6)) \R)))
+                                                 (or
+                                                   (== (aget a (unchecked-subtract-int i 5)) \e)
+                                                   (== (aget a (unchecked-subtract-int i 5)) \E)))
+                                               (or
+                                                 (== (aget a (unchecked-subtract-int i 4)) \s)
+                                                 (== (aget a (unchecked-subtract-int i 4)) \S)))
+                                          (or (== (aget a (unchecked-subtract-int i 3)) \o)
+                                              (== (aget a (unchecked-subtract-int i 3)) \O)))
+                                     (or (== (aget a (unchecked-subtract-int i 2)) \l)
+                                         (== (aget a (unchecked-subtract-int i 2)) \L)))
+                                (or (== (aget a (unchecked-subtract-int i 1)) \v)
+                                    (== (aget a (unchecked-subtract-int i 1)) \V)))
+                           (or (== (aget a i) \e) (== (aget a i) \E)))
+                        (do (set! matchlen 7) (set! mask (bit-or-int mask RESOLVE)))
+                      (and (and (and (and (and (and
+                                                 (>= i 5)
+                                                 (or
+                                                   (== (aget a (unchecked-subtract-int i 5)) \l)
+                                                   (== (aget a (unchecked-subtract-int i 5)) \L)))
+                                               (or
+                                                 (== (aget a (unchecked-subtract-int i 4)) \i)
+                                                 (== (aget a (unchecked-subtract-int i 4)) \I)))
+                                          (or (== (aget a (unchecked-subtract-int i 3)) \s)
+                                              (== (aget a (unchecked-subtract-int i 3)) \S)))
+                                     (or (== (aget a (unchecked-subtract-int i 2)) \t)
+                                         (== (aget a (unchecked-subtract-int i 2)) \T)))
+                                (or (== (aget a (unchecked-subtract-int i 1)) \e)
+                                    (== (aget a (unchecked-subtract-int i 1)) \E)))
+                           (or (== (aget a i) \n) (== (aget a i) \N)))
+                        (do (set! matchlen 6) (set! mask (bit-or-int mask LISTEN)))
+                      (and (and (and (and (and (and
+                                                 (>= i 5)
+                                                 (or
+                                                   (== (aget a (unchecked-subtract-int i 5)) \a)
+                                                   (== (aget a (unchecked-subtract-int i 5)) \A)))
+                                               (or
+                                                 (== (aget a (unchecked-subtract-int i 4)) \c)
+                                                 (== (aget a (unchecked-subtract-int i 4)) \C)))
+                                          (or (== (aget a (unchecked-subtract-int i 3)) \c)
+                                              (== (aget a (unchecked-subtract-int i 3)) \C)))
+                                     (or (== (aget a (unchecked-subtract-int i 2)) \e)
+                                         (== (aget a (unchecked-subtract-int i 2)) \E)))
+                                (or (== (aget a (unchecked-subtract-int i 1)) \p)
+                                    (== (aget a (unchecked-subtract-int i 1)) \P)))
+                           (or (== (aget a i) \t) (== (aget a i) \T)))
+                        (do (set! matchlen 6) (set! mask (bit-or-int mask ACCEPT)))
+                      :else
+                        (throw (IllegalArgumentException. (java-str "invalid permission: " action))))
+                    (let [^:mutable seencomma false]
+                      (while (and (>= i matchlen) (not seencomma))
+                        (switch (set! c (aget a (unchecked-subtract-int i matchlen)))
+                          (\space \return \newline \formfeed \tab) nil
+                          (if (and (== c \,) (> i matchlen))
+                              (set! seencomma true)
+                              (throw (IllegalArgumentException.
+                                       (java-str "invalid permission: " action)))))
+                        (set! i (unchecked-dec-int i)))
+                      (set! i (unchecked-subtract-int i matchlen))))))
+              mask))))
+
+    (method ^:private isUntrusted :throws [UnknownHostException] ^boolean [this]
+      (cond
+        trusted false
+        (or invalid untrusted) true
+        :else
+          (do
+            (try
+              (when (and (not trustNameService)
+                         (or defaultDeny (sun.net.www.URLConnection/isProxiedHost hostname)))
+                (when (nil? (.-cname this)) (.getCanonName this))
+                (when-not (.match this cname hostname)
+                  (when-not (.authorized this (.getAddress (aget addresses 0)))
+                    (set! untrusted true)
+                    (let [debug (SocketPermission/getDebug)]
+                      (when (and (some? debug) (Debug/isOn "failure"))
+                        (.println debug
+                                  (java-str "socket access restriction: proxied host ("
+                                            (aget addresses 0)
+                                            ") does not match "
+                                            cname
+                                            " from reverse lookup")))
+                      (return true))))
+                (set! trusted true))
+              (catch UnknownHostException uhe (set! invalid true) (throw uhe)))
+            false)))
+
+    (method getCanonName :throws [UnknownHostException] ^void [this]
+      (when-not (or (or (some? cname) invalid) untrusted)
+        (try
+          (when (nil? addresses) (.getIP this))
+          (if init_with_ip
+              (set! cname (.toLowerCase (.getHostName (aget addresses 0)) Locale/ROOT))
+              (set! cname
+                    (.toLowerCase (.getHostName (InetAddress/getByName
+                                                  (.getHostAddress (aget addresses 0))))
+                                  Locale/ROOT)))
+          (catch UnknownHostException uhe (set! invalid true) (throw uhe)))))
+
+    (field ^:private ^:transient ^String cdomain)
+
+    (field ^:private ^:transient ^String hdomain)
+
+    (method ^:private ^:static checkForIDN ^String [^String name]
+      (if (or (.startsWith name "xn--") (.contains name ".xn--")) (IDN/toUnicode name) name))
+
+    (method ^:private match ^boolean [this ^String cname ^String hname]
+      (let [a (SocketPermission/checkForIDN (.toLowerCase cname Locale/ROOT))
+            b (SocketPermission/checkForIDN (.toLowerCase hname Locale/ROOT))]
+        (if (and (.startsWith a b)
+                 (or (== (.length a) (.length b)) (== (.charAt a (.length b)) \.)))
+            true
+            (do
+              (when (nil? cdomain)
+                (set! cdomain
+                      (cast String
+                            (.orElse (.map (RegisteredDomain/from a)
+                                           (method-ref
+                                             Function
+                                             ^String [RegisteredDomain]
+                                             RegisteredDomain/.name))
+                                     a))))
+              (when (nil? hdomain)
+                (set! hdomain
+                      (cast String
+                            (.orElse (.map (RegisteredDomain/from b)
+                                           (method-ref
+                                             Function
+                                             ^String [RegisteredDomain]
+                                             RegisteredDomain/.name))
+                                     b))))
+              (and (and (not (.isEmpty cdomain)) (not (.isEmpty hdomain)))
+                   (.equals cdomain hdomain))))))
+
+    (method ^:private authorized ^boolean [this ^byte/1 addr]
+      (cond
+        (== (alength addr) 4) (.authorizedIPv4 this addr)
+        (== (alength addr) 16) (.authorizedIPv6 this addr)
+        :else false))
+
+    (method ^:private authorizedIPv4 ^boolean [this ^byte/1 addr]
+      (let [^:mutable authHost ""
+            ^:mutable ^InetAddress auth nil]
+        (try
+          (set! authHost
+                (java-str "auth."
+                          (bit-and-int (aget addr 3) 0xff)
+                          "."
+                          (bit-and-int (aget addr 2) 0xff)
+                          "."
+                          (bit-and-int (aget addr 1) 0xff)
+                          "."
+                          (bit-and-int (aget addr 0) 0xff)
+                          ".in-addr.arpa"))
+          (set! authHost (java-str hostname \. authHost))
+          (set! auth (aget (InetAddress/getAllByName0 authHost) 0))
+          (when (.equals auth (InetAddress/getByAddress addr)) (return true))
+          (let [debug (SocketPermission/getDebug)]
+            (when (and (some? debug) (Debug/isOn "failure"))
+              (.println debug
+                        (java-str "socket access restriction: IP address of "
+                                  auth
+                                  " != "
+                                  (InetAddress/getByAddress addr)))))
+          (catch UnknownHostException uhe
+            (let [debug (SocketPermission/getDebug)]
+              (when (and (some? debug) (Debug/isOn "failure"))
+                (.println debug
+                          (java-str "socket access restriction: forward lookup failed for "
+                                    authHost))))))
+        false))
+
+    (method ^:private authorizedIPv6 ^boolean [this ^byte/1 addr]
+      (let [^:mutable authHost ""
+            ^:mutable ^InetAddress auth nil]
+        (try
+          (let [sb (StringBuilder. 39)]
+            (loop [^int i 15]
+              (when (>= i 0)
+                (.append sb (Integer/toHexString (bit-and-int (aget addr i) 0x0f)))
+                (.append sb \.)
+                (.append sb
+                         (Integer/toHexString
+                           (bit-and-int (bit-shift-right-int (aget addr i) 4) 0x0f)))
+                (.append sb \.)
+                (recur (unchecked-dec-int i))))
+            (set! authHost (java-str "auth." (.toString sb) "IP6.ARPA"))
+            (set! authHost (java-str hostname \. authHost))
+            (set! auth (aget (InetAddress/getAllByName0 authHost) 0))
+            (when (.equals auth (InetAddress/getByAddress addr)) (return true))
+            (let [debug (SocketPermission/getDebug)]
+              (when (and (some? debug) (Debug/isOn "failure"))
+                (.println debug
+                          (java-str "socket access restriction: IP address of "
+                                    auth
+                                    " != "
+                                    (InetAddress/getByAddress addr))))))
+          (catch UnknownHostException uhe
+            (let [debug (SocketPermission/getDebug)]
+              (when (and (some? debug) (Debug/isOn "failure"))
+                (.println debug
+                          (java-str "socket access restriction: forward lookup failed for "
+                                    authHost))))))
+        false))
+
+    (method getIP :throws [UnknownHostException] ^void [this]
+      (when-not (or (or (some? addresses) wildcard) invalid)
+        (try
+          (let [^:mutable ^String host nil]
+            (if (== (.charAt (.getName this) 0) \[)
+                (set! host (.substring (.getName this) 1 (.indexOf (.getName this) \])))
+                (let [i (.indexOf (.getName this) \:)]
+                  (if (== i -1)
+                      (set! host (.getName this))
+                      (set! host (.substring (.getName this) 0 i)))))
+            (set! addresses (new InetAddress/1 [(aget (InetAddress/getAllByName0 host) 0)])))
+          (catch UnknownHostException uhe (set! invalid true) (throw uhe))
+          (catch IndexOutOfBoundsException iobe
+            (set! invalid true)
+            (throw
+              (UnknownHostException.
+                (Exceptions/formatMsg "%s"
+                                      (new Exceptions$SensitiveInfo/1
+                                           [(Exceptions/filterNonSocketInfo (.getName this))]))))))))
+
+    (method ^:public implies ^boolean [this ^Permission p]
+      (if-instance [^SocketPermission that p]
+        (if (identical? p this)
+            true
+            (and (== (bit-and-int (.-mask this) (.-mask that)) (.-mask that))
+                 (.impliesIgnoreMask this that)))
+        false))
+
+    (method impliesIgnoreMask ^boolean [this ^SocketPermission that]
+      (let [^:mutable ^int i 0
+            ^:mutable ^int j 0]
+        (when-not (== (bit-and-int (.-mask that) RESOLVE) (.-mask that))
+          (when (or (< (aget (.-portrange that) 0) (aget (.-portrange this) 0))
+                    (> (aget (.-portrange that) 1) (aget (.-portrange this) 1)))
+            (if (or (.includesEphemerals this) (.includesEphemerals that))
+                (when-not (SocketPermission/inRange
+                            (aget (.-portrange this) 0)
+                            (aget (.-portrange this) 1)
+                            (aget (.-portrange that) 0)
+                            (aget (.-portrange that) 1))
+                  (return false))
+                (return false))))
+        (cond
+          (and (.-wildcard this) (.equals "" (.-cname this))) true
+          (or (.-invalid this) (.-invalid that)) (.compareHostnames this that)
+          :else
+            (do
+              (try
+                (when (.-init_with_ip this)
+                  (when (.-wildcard that) (return false))
+                  (if (.-init_with_ip that)
+                      (return (.equals (aget (.-addresses this) 0) (aget (.-addresses that) 0)))
+                      (do
+                        (when (nil? (.-addresses that)) (.getIP that))
+                        (set! i 0)
+                        (while (< i (alength (.-addresses that)))
+                          (when (.equals (aget (.-addresses this) 0) (aget (.-addresses that) i))
+                            (return true))
+                          (set! i (unchecked-inc-int i)))))
+                  (return false))
+                (when (or (.-wildcard this) (.-wildcard that))
+                  (when (and (.-wildcard this) (.-wildcard that))
+                    (return (.endsWith (.-cname that) (.-cname this))))
+                  (when (.-wildcard that) (return false))
+                  (when (nil? (.-cname that)) (.getCanonName that))
+                  (return (.endsWith (.-cname that) (.-cname this))))
+                (when (nil? (.-addresses this)) (.getIP this))
+                (when (nil? (.-addresses that)) (.getIP that))
+                (when-not (and (.-init_with_ip that) (.isUntrusted this))
+                  (set! j 0)
+                  (while (< j (alength (.-addresses this)))
+                    (set! i 0)
+                    (while (< i (alength (.-addresses that)))
+                      (when (.equals (aget (.-addresses this) j) (aget (.-addresses that) i))
+                        (return true))
+                      (set! i (unchecked-inc-int i)))
+                    (set! j (unchecked-inc-int j)))
+                  (when (nil? (.-cname this)) (.getCanonName this))
+                  (when (nil? (.-cname that)) (.getCanonName that))
+                  (return (.equalsIgnoreCase (.-cname this) (.-cname that))))
+                (catch UnknownHostException uhe (return (.compareHostnames this that))))
+              false))))
+
+    (method ^:private compareHostnames ^boolean [this ^SocketPermission that]
+      (let [thisHost hostname
+            thatHost (.-hostname that)]
+        (cond
+          (nil? thisHost) false
+          (.-wildcard this)
+            (let [cnameLength (.length (.-cname this))]
+              (.regionMatches thatHost
+                              true
+                              (unchecked-subtract-int (.length thatHost) cnameLength)
+                              (.-cname this)
+                              0
+                              cnameLength))
+          :else (.equalsIgnoreCase thisHost thatHost))))
+
+    (method ^:public equals ^boolean [this obj]
+      (if (identical? obj this)
+          true
+          (if-instance [^SocketPermission that obj]
+            (if (not (== (.-mask this) (.-mask that)))
+                false
+                (do
+                  (when-not (== (bit-and-int (.-mask that) RESOLVE) (.-mask that))
+                    (when (or (not (== (aget (.-portrange this) 0) (aget (.-portrange that) 0)))
+                              (not (== (aget (.-portrange this) 1) (aget (.-portrange that) 1))))
+                      (return false)))
+                  (if (.equalsIgnoreCase (.getName this) (.getName that))
+                      true
+                      (do
+                        (try
+                          (.getCanonName this)
+                          (.getCanonName that)
+                          (catch UnknownHostException uhe (return false)))
+                        (cond
+                          (or (.-invalid this) (.-invalid that)) false
+                          (some? (.-cname this)) (.equalsIgnoreCase (.-cname this) (.-cname that))
+                          :else false)))))
+            false)))
+
+    (method ^:public hashCode ^int [this]
+      (if (or init_with_ip wildcard)
+          (.hashCode (.getName this))
+          (do
+            (try (.getCanonName this) (catch UnknownHostException uhe))
+            (if (or invalid (nil? cname)) (.hashCode (.getName this)) (.hashCode (.-cname this))))))
+
+    (method getMask ^int [this] mask)
+
+    (method ^:private ^:static getActions ^String [^int mask]
+      (let [sj (StringJoiner. ",")]
+        (when (== (bit-and-int mask CONNECT) CONNECT) (.add sj "connect"))
+        (when (== (bit-and-int mask LISTEN) LISTEN) (.add sj "listen"))
+        (when (== (bit-and-int mask ACCEPT) ACCEPT) (.add sj "accept"))
+        (when (== (bit-and-int mask RESOLVE) RESOLVE) (.add sj "resolve"))
+        (.toString sj)))
+
+    (method ^:public getActions ^String [this]
+      (when (nil? actions) (set! actions (SocketPermission/getActions (.-mask this))))
+      actions)
+
+    (method ^:public newPermissionCollection ^PermissionCollection [this]
+      (SocketPermissionCollection.))
+
+    (method ^:private ^:synchronized writeObject :throws [IOException] ^void [this
+                                                                              ^ObjectOutputStream s]
+      (when (nil? actions) (.getActions this))
+      (.defaultWriteObject s))
+
+    (method ^:private ^:synchronized readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                                    ^ObjectInputStream s]
+      (.defaultReadObject s)
+      (.init this (.getName this) (SocketPermission/getMask actions)))
+
+    (method ^:private ^:static initEphemeralPorts ^int [^String suffix]
+      (let [^int val (Integer/getInteger (java-str "jdk.net.ephemeralPortRange." suffix) -1)]
+        (cond
+          (not (== val -1)) val
+          (.equals suffix "low") (PortConfig/getLower)
+          :else (PortConfig/getUpper))))
+
+    (method ^:private ^:static inRange ^boolean [^int policyLow ^int policyHigh
+                                                 ^:mutable ^int targetLow ^int targetHigh]
+      (let [ephemeralLow EphemeralRange/low
+            ephemeralHigh EphemeralRange/high]
+        (when (== targetLow 0)
+          (when-not (SocketPermission/inRange policyLow policyHigh ephemeralLow ephemeralHigh)
+            (return false))
+          (when (== targetHigh 0) (return true))
+          (set! targetLow 1))
+        (cond
+          (and (== policyLow 0) (== policyHigh 0))
+            (and (>= targetLow ephemeralLow) (<= targetHigh ephemeralHigh))
+          (not (== policyLow 0)) (and (>= targetLow policyLow) (<= targetHigh policyHigh))
+          (>= policyHigh (unchecked-subtract-int ephemeralLow 1)) (<= targetHigh ephemeralHigh)
+          :else
+            (or (and (<= targetLow policyHigh) (<= targetHigh policyHigh))
+                (and (>= targetLow ephemeralLow) (<= targetHigh ephemeralHigh)))))))
+
+  (defclass ^:final SocketPermissionCollection
+    :extends PermissionCollection
+    :implements [Serializable]
+
+    (field ^:private ^:transient ^{:tag (Map String SocketPermission)} perms)
+
+    (constructor ^:public [this] (set! perms (ConcurrentHashMap.)))
+
+    (method ^:public add ^void [this ^Permission permission]
+      (if-instance [^SocketPermission sp permission]
+        (do
+          (when (.isReadOnly this)
+            (throw (SecurityException.
+                     "attempt to add a Permission to a readonly PermissionCollection")))
+          (.merge perms
+                  (.getName sp)
+                  sp
+                  (lambda BiFunction ^SocketPermission [^SocketPermission existingVal
+                                                        ^SocketPermission newVal]
+                    (let [oldMask (.getMask existingVal)
+                          newMask (.getMask newVal)]
+                      (when-not (== oldMask newMask)
+                        (let [effective (bit-or-int oldMask newMask)]
+                          (when (== effective newMask) (return newVal))
+                          (when-not (== effective oldMask)
+                            (return (SocketPermission. (.getName sp) effective)))))
+                      existingVal))))
+        (throw (IllegalArgumentException. (java-str "invalid permission: " permission)))))
+
+    (method ^:public implies ^boolean [this ^Permission permission]
+      (if-instance [^SocketPermission np permission]
+        (let [desired (.getMask np)
+              ^:mutable ^int effective 0
+              ^:mutable needed desired
+              hit (cast SocketPermission (.get perms (.getName np)))]
+          (when (some? hit)
+            (when (and (not (== (bit-and-int needed (.getMask hit)) 0)) (.impliesIgnoreMask hit np))
+              (set! effective (bit-or-int effective (.getMask hit)))
+              (when (== (bit-and-int effective desired) desired) (return true))
+              (set! needed (bit-and-int desired (bit-not-int effective)))))
+          (for-each [^SocketPermission x (.values perms)]
+            (when (and (not (== (bit-and-int needed (.getMask x)) 0)) (.impliesIgnoreMask x np))
+              (set! effective (bit-or-int effective (.getMask x)))
+              (when (== (bit-and-int effective desired) desired) (return true))
+              (set! needed (bit-and-int desired (bit-not-int effective)))))
+          false)
+        false))
+
+    (method ^:public elements ^{:tag (Enumeration Permission)} [this]
+      (Collections/enumeration (.values perms)))
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 2787186408602843674)
+
+    (field ^:private ^:static ^:final ^ObjectStreamField/1 serialPersistentFields
+      (new ObjectStreamField/1 [(ObjectStreamField. "permissions" Vector)]))
+
+    (method ^:private writeObject :throws [IOException] ^void [this ^ObjectOutputStream out]
+      (let [^{:tag (Vector SocketPermission)} permissions (Vector. (.values perms))
+            pfields (.putFields out)]
+        (.put pfields "permissions" permissions)
+        (.writeFields out)))
+
+    (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                     ^ObjectInputStream in]
+      (let [gfields (.readFields in)
+            ^{:tag (Vector SocketPermission)} permissions (cast
+                                                            Vector
+                                                            (.get gfields "permissions" nil))]
+        (set! perms (ConcurrentHashMap. (.size permissions)))
+        (for-each [^SocketPermission sp permissions] (.put perms (.getName sp) sp))))))

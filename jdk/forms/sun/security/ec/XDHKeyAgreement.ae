@@ -1,0 +1,148 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ec/XDHKeyAgreement.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ec)
+
+(import '(java.security InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        NoSuchAlgorithmException
+                        ProviderException
+                        SecureRandom)
+        '(java.security.interfaces XECPrivateKey XECPublicKey)
+        '(java.security.spec AlgorithmParameterSpec NamedParameterSpec)
+        '(java.util Arrays)
+        '(java.util.function Function Supplier)
+        '(javax.crypto KeyAgreementSpi SecretKey ShortBufferException)
+        '(javax.crypto.spec SecretKeySpec)
+        '(sun.security.util KeyUtil))
+
+(defclass ^:public XDHKeyAgreement
+  :extends KeyAgreementSpi
+
+  (field ^:private ^XECPrivateKey privateKey)
+
+  (field ^:private ^byte/1 secret)
+
+  (field ^:private ^XECOperations ops)
+
+  (field ^:private ^XECParameters lockedParams nil)
+
+  (constructor [this])
+
+  (constructor [this ^AlgorithmParameterSpec paramSpec]
+    (set! lockedParams
+          (XECParameters/get (method-ref Function ^ProviderException [String] ProviderException/new)
+                             paramSpec)))
+
+  (method ^:protected engineInit :throws [InvalidKeyException] ^void [this ^Key key
+                                                                      ^SecureRandom random]
+    (.initImpl this key))
+
+  (method ^:protected engineInit :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                         ^Key key
+                                                                                                         ^:final ^AlgorithmParameterSpec params
+                                                                                                         ^SecureRandom random]
+    (.initImpl this key)
+    (when (some? params)
+      (let [xecParams (XECParameters/get
+                        (method-ref Function
+                                    ^InvalidAlgorithmParameterException [String]
+                                    InvalidAlgorithmParameterException/new)
+                        params)]
+        (when-not (.oidEquals xecParams (.getParameters (.-ops this)))
+          (throw (InvalidKeyException. "Incorrect private key parameters"))))))
+
+  (method ^:private checkLockedParams :type-params [(T extends Throwable)] :throws [T] ^void [this
+                                                                                              ^{:tag (Function String T)} exception
+                                                                                              ^XECParameters params]
+    (when (and (some? lockedParams) (not (identical? lockedParams params)))
+      (throw (cast Throwable
+                   (.apply exception (java-str "Parameters must be " (.getName lockedParams)))))))
+
+  (method ^:private initImpl :throws [InvalidKeyException] ^void [this ^Key key]
+    (when-not (instance? XECPrivateKey key) (throw (InvalidKeyException. "Unsupported key type")))
+    (set! privateKey (cast XECPrivateKey key))
+    (let [xecParams (XECParameters/get
+                      (method-ref Function ^InvalidKeyException [String] InvalidKeyException/new)
+                      (.getParams privateKey))]
+      (.checkLockedParams this
+                          (method-ref Function
+                                      ^InvalidKeyException [String]
+                                      InvalidKeyException/new)
+                          xecParams)
+      (set! (.-ops this) (XECOperations. xecParams))
+      (let [tmp (cast byte/1
+                      (.orElseThrow (.getScalar privateKey)
+                                    (lambda Supplier ^InvalidKeyException []
+                                      (InvalidKeyException. "No private key value"))))]
+        (Arrays/fill tmp (unchecked-byte 0))
+        (set! secret nil))))
+
+  (method ^:protected engineDoPhase :throws [InvalidKeyException IllegalStateException] ^Key [this
+                                                                                              ^Key key
+                                                                                              ^boolean lastPhase]
+    (when (nil? (.-privateKey this)) (throw (IllegalStateException. "Not initialized")))
+    (when (some? (.-secret this)) (throw (IllegalStateException. "Phase already executed")))
+    (when-not lastPhase
+      (throw (IllegalStateException. "Only two party agreement supported, lastPhase must be true")))
+    (when-not (instance? XECPublicKey key) (throw (InvalidKeyException. "Unsupported key type")))
+    (let [publicKey (cast XECPublicKey key)
+          xecParams (XECParameters/get
+                      (method-ref Function ^InvalidKeyException [String] InvalidKeyException/new)
+                      (.getParams publicKey))]
+      (when-not (.oidEquals (.getParameters ops) xecParams)
+        (throw (InvalidKeyException. "Public key parameters are not compatible with private key.")))
+      (let [scalar (cast byte/1 (.get (.getScalar (.-privateKey this))))
+            computedSecret (.encodedPointMultiply ops scalar (.getU publicKey))]
+        (Arrays/fill scalar (unchecked-byte 0))
+        (when (.allZero this computedSecret) (throw (InvalidKeyException. "Point has small order")))
+        (set! (.-secret this) computedSecret)
+        nil)))
+
+  (method ^:private allZero ^boolean [this ^byte/1 arr]
+    (let [^:mutable orValue (unchecked-byte 0)]
+      (loop [^int i 0]
+        (when (< i (alength arr))
+          (set! orValue (unchecked-byte (bit-or-int orValue (aget arr i))))
+          (recur (unchecked-inc-int i))))
+      (== orValue (unchecked-byte 0))))
+
+  (method ^:protected engineGenerateSecret :throws [IllegalStateException] ^byte/1 [this]
+    (when (nil? secret) (throw (IllegalStateException. "Not initialized correctly")))
+    (let [result secret] (set! secret nil) result))
+
+  (method ^:protected engineGenerateSecret :throws [IllegalStateException ShortBufferException] ^int [this
+                                                                                                      ^byte/1 sharedSecret
+                                                                                                      ^int offset]
+    (when (nil? secret) (throw (IllegalStateException. "Not initialized correctly")))
+    (let [secretLen (alength (.-secret this))]
+      (when (> secretLen (unchecked-subtract-int (alength sharedSecret) offset))
+        (throw (ShortBufferException.
+                 (java-str "Need "
+                           secretLen
+                           " bytes, only "
+                           (unchecked-subtract-int (alength sharedSecret) offset)
+                           " available"))))
+      (System/arraycopy (.-secret this) 0 sharedSecret offset secretLen)
+      (set! secret nil)
+      secretLen))
+
+  (method ^:protected engineGenerateSecret :throws [IllegalStateException
+                                                    NoSuchAlgorithmException
+                                                    InvalidKeyException] ^SecretKey [this
+                                                                                     ^String algorithm]
+    (when (nil? algorithm) (throw (NoSuchAlgorithmException. "Algorithm must not be null")))
+    (when-not (KeyUtil/isSupportedKeyAgreementOutputAlgorithm algorithm)
+      (throw (NoSuchAlgorithmException. (java-str "Unsupported secret key algorithm: " algorithm))))
+    (let [bytes (.engineGenerateSecret this)]
+      (try (SecretKeySpec. bytes algorithm) (finally (Arrays/fill bytes (unchecked-byte 0))))))
+
+  (defclass ^:static X25519
+    :extends XDHKeyAgreement
+
+    (constructor ^:public [this] (super. NamedParameterSpec/X25519)))
+
+  (defclass ^:static X448
+    :extends XDHKeyAgreement
+
+    (constructor ^:public [this] (super. NamedParameterSpec/X448))))
