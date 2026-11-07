@@ -1,0 +1,197 @@
+;; Converted from jdk26u make/jdk/src/classes/build/tools/charsetmapping/SBCS.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'build.tools.charsetmapping)
+
+(import '(java.io File FileInputStream FileOutputStream PrintStream)
+        '(java.util ArrayList Arrays Formatter Scanner)
+        '(java.util.regex Pattern))
+
+(defclass ^:public SBCS
+  (field ^:static ^Pattern sbmap
+    (Pattern/compile "0x(\\p{XDigit}++)\\s++(?:U\\+|0x)?(\\p{XDigit}++)(?:\\s++#.*)?"))
+
+  (method ^:public ^:static genClass :throws [Exception] ^void [^Charset cs ^String srcDir
+                                                                ^String dstDir ^String template]
+    (let [clzName (.-clzName cs)
+          csName (.-csName cs)
+          histName (.-histName cs)
+          pkgName (.-pkgName cs)
+          isASCII (.-isASCII cs)
+          ^:mutable isLatin1Decodable true
+          b2cSB (StringBuilder.)
+          b2cNRSB (StringBuilder.)
+          c2bNRSB (StringBuilder.)
+          sb (new char/1 0x100)
+          c2bIndex (new char/1 0x100)
+          ^:mutable ^int c2bOff 0]
+      (Arrays/fill sb Utils/UNMAPPABLE_DECODING)
+      (Arrays/fill c2bIndex Utils/UNMAPPABLE_DECODING)
+      (let [^:mutable in (FileInputStream. (File. srcDir (java-str clzName ".map")))
+            ^:mutable p (Utils$Parser. in sbmap)
+            ^:mutable ^Utils$Entry e nil]
+        (while (some? (set! e (.next p)))
+          (aset sb (.-bs e) (unchecked-char (.-cp e)))
+          (when (== (aget c2bIndex (bit-shift-right-int (.-cp e) 8)) Utils/UNMAPPABLE_DECODING)
+            (set! c2bOff (unchecked-add-int c2bOff 0x100))
+            (aset c2bIndex (bit-shift-right-int (.-cp e) 8) 1))
+          (when (> (.-cp e) 0xFF) (set! isLatin1Decodable false)))
+        (let [^:mutable fm (Formatter. b2cSB)]
+          (.format fm "%n" (new Object/1 []))
+          (SBCS/toString sb 0x80 0x100 fm "+" true)
+          (SBCS/toString sb 0x00 0x80 fm ";" true)
+          (.close fm)
+          (let [^:mutable f (File. srcDir (java-str clzName ".nr"))]
+            (when (.exists f)
+              (set! in (FileInputStream. f))
+              (set! fm (Formatter. b2cNRSB))
+              (set! p (Utils$Parser. in sbmap))
+              (set! e nil)
+              (.format fm "// remove non-roundtrip entries%n" (new Object/1 []))
+              (.format fm "        b2cMap = b2cTable.toCharArray();%n" (new Object/1 []))
+              (while (some? (set! e (.next p)))
+                (.format fm
+                         "        b2cMap[%d] = UNMAPPABLE_DECODING;%n"
+                         (new Object/1
+                              [(if (>= (.-bs e) 0x80)
+                                   (unchecked-subtract-int (.-bs e) 0x80)
+                                   (unchecked-add-int (.-bs e) 0x80))])))
+              (.close fm))
+            (set! f (File. srcDir (java-str clzName ".c2b")))
+            (when (.exists f)
+              (set! in (FileInputStream. f))
+              (set! fm (Formatter. c2bNRSB))
+              (set! p (Utils$Parser. in sbmap))
+              (set! e nil)
+              (let [^{:tag (ArrayList Utils$Entry)} es (ArrayList.)]
+                (while (some? (set! e (.next p)))
+                  (when (== (aget c2bIndex (bit-shift-right-int (.-cp e) 8))
+                            Utils/UNMAPPABLE_DECODING)
+                    (set! c2bOff (unchecked-add-int c2bOff 0x100))
+                    (aset c2bIndex (bit-shift-right-int (.-cp e) 8) 1))
+                  (.add es e))
+                (.format fm "// non-roundtrip c2b only entries%n" (new Object/1 []))
+                (if (< (.size es) 100)
+                    (do
+                      (.format fm
+                               "        c2bNR = new char[%d];%n"
+                               (new Object/1 [(unchecked-multiply-int (.size es) 2)]))
+                      (let [^:mutable ^int i 0]
+                        (for-each [^Utils$Entry entry es]
+                          (.format fm
+                                   "        c2bNR[%d] = 0x%x; c2bNR[%d] = 0x%x;%n"
+                                   (new Object/1
+                                        [(let [old-1 i] (set! i (unchecked-inc-int i)) old-1)
+                                         (.-bs entry)
+                                         (let [old-2 i] (set! i (unchecked-inc-int i)) old-2)
+                                         (.-cp entry)])))))
+                    (let [cc (new char/1 (unchecked-multiply-int (.size es) 2))
+                          ^:mutable ^int i 0]
+                      (for-each [^Utils$Entry entry es]
+                        (aset cc i (unchecked-char (.-bs entry)))
+                        (set! i (unchecked-inc-int i))
+                        (aset cc i (unchecked-char (.-cp entry)))
+                        (set! i (unchecked-inc-int i)))
+                      (.format fm "        c2bNR = (%n" (new Object/1 []))
+                      (SBCS/toString cc 0 i fm ").toCharArray();" false)))
+                (.close fm)))
+            (let [b2c (.toString b2cSB)
+                  b2cNR (.toString b2cNRSB)
+                  c2bNR (.toString c2bNRSB)
+                  s (Scanner. (File. srcDir template))
+                  out (PrintStream. (FileOutputStream. (File. dstDir (java-str clzName ".java"))))]
+              (while (.hasNextLine s)
+                (let [^:mutable line (.nextLine s)
+                      i (.indexOf line "$")]
+                  (if (== i -1)
+                      (.println out line)
+                      (do
+                        (when-not (== (.indexOf line "$PACKAGE$" i) -1)
+                          (set! line (.replace line "$PACKAGE$" pkgName)))
+                        (when-not (== (.indexOf line "$NAME_CLZ$" i) -1)
+                          (set! line (.replace line "$NAME_CLZ$" clzName)))
+                        (when-not (== (.indexOf line "$NAME_CS$" i) -1)
+                          (set! line (.replace line "$NAME_CS$" csName)))
+                        (when-not (== (.indexOf line "$NAME_ALIASES$" i) -1)
+                          (if (.equals "sun.nio.cs" pkgName)
+                              (set! line
+                                    (.replace line
+                                              "$NAME_ALIASES$"
+                                              (java-str "StandardCharsets.aliases_" clzName "()")))
+                              (set! line
+                                    (.replace line
+                                              "$NAME_ALIASES$"
+                                              (java-str
+                                                "ExtendedCharsets.aliasesFor(\""
+                                                csName
+                                                "\")")))))
+                        (when-not (== (.indexOf line "$NAME_HIST$" i) -1)
+                          (set! line (.replace line "$NAME_HIST$" histName)))
+                        (when-not (== (.indexOf line "$CONTAINS$" i) -1)
+                          (if isASCII
+                              (set!
+                                line
+                                (java-str
+                                  "        return ((cs.name().equals(\"US-ASCII\")) || (cs instanceof "
+                                  clzName
+                                  "));"))
+                              (set! line (java-str "        return (cs instanceof " clzName ");"))))
+                        (when-not (== (.indexOf line "$ASCIICOMPATIBLE$") -1)
+                          (set! line
+                                (.replace line
+                                          "$ASCIICOMPATIBLE$"
+                                          ^CharSequence (if isASCII "true" "false"))))
+                        (when-not (== (.indexOf line "$LATIN1DECODABLE$") -1)
+                          (set! line
+                                (.replace line
+                                          "$LATIN1DECODABLE$"
+                                          ^CharSequence (if isLatin1Decodable "true" "false"))))
+                        (when-not (== (.indexOf line "$B2CTABLE$") -1)
+                          (set! line (.replace line "$B2CTABLE$" b2c)))
+                        (when-not (== (.indexOf line "$C2BLENGTH$") -1)
+                          (set! line
+                                (.replace line
+                                          "$C2BLENGTH$"
+                                          (java-str "0x" (Integer/toString c2bOff 16)))))
+                        (when-not (== (.indexOf line "$NONROUNDTRIP_B2C$") -1)
+                          (when (== (.length b2cNR) 0) (continue))
+                          (set! line (.replace line "$NONROUNDTRIP_B2C$" b2cNR)))
+                        (when-not (== (.indexOf line "$NONROUNDTRIP_C2B$") -1)
+                          (when (== (.length c2bNR) 0) (continue))
+                          (set! line (.replace line "$NONROUNDTRIP_C2B$" c2bNR)))
+                        (.println out line)))))
+              (.close out)))))))
+
+  (method ^:private ^:static toString ^void [^char/1 sb ^:mutable ^int off ^int end ^Formatter out
+                                             ^String closure ^boolean comment]
+    (while (< off end)
+      (.format out "        \"" (new Object/1 []))
+      (loop [^int j 0]
+        (when (< j 8)
+          (when-not (== off end)
+            (let [c (aget sb (let [old-3 off] (set! off (unchecked-inc-int off)) old-3))]
+              (switch c
+                \backspace (do (.format out "\\b" (new Object/1 [])) (recur (unchecked-inc-int j)))
+                \tab (do (.format out "\\t" (new Object/1 [])) (recur (unchecked-inc-int j)))
+                \newline (do (.format out "\\n" (new Object/1 [])) (recur (unchecked-inc-int j)))
+                \formfeed (do (.format out "\\f" (new Object/1 [])) (recur (unchecked-inc-int j)))
+                \return (do (.format out "\\r" (new Object/1 [])) (recur (unchecked-inc-int j)))
+                \" (do (.format out "\\\"" (new Object/1 [])) (recur (unchecked-inc-int j)))
+                \' (do (.format out "\\'" (new Object/1 [])) (recur (unchecked-inc-int j)))
+                \\ (do (.format out "\\\\" (new Object/1 [])) (recur (unchecked-inc-int j)))
+                (do
+                  (.format out "\\u%04X" (new Object/1 [(bit-and-int c 0xffff)]))
+                  (recur (unchecked-inc-int j))))))))
+      (cond
+        comment
+          (if (== off end)
+              (.format
+                out
+                "\" %s      // 0x%02x - 0x%02x%n"
+                (new Object/1
+                     [closure (unchecked-subtract-int off 8) (unchecked-subtract-int off 1)]))
+              (.format out
+                       "\" +      // 0x%02x - 0x%02x%n"
+                       (new Object/1
+                            [(unchecked-subtract-int off 8) (unchecked-subtract-int off 1)])))
+        (== off end) (.format out "\"%s%n" (new Object/1 [closure]))
+        :else (.format out "\" +%n" (new Object/1 []))))))
