@@ -323,29 +323,92 @@ commit, OT11-OT15's decision text, already in libs4's doc).
 - **`bin/gate --full --plan`** on batch 2: 309 steps, 295 run, 8 after; `--costs`: nightly 10.3 h of measured step seconds, 86 steps
   unmeasured (the crops' first passes: LLVM's 10, Rust's 12 never passed; about 2 h more by GT9's estimates): about 12 h, over the 8 h plan.
 
-### Batch 2's night, in order (one heavy job at a time under `bin/heavy-lock`; at most 1.5 GiB a process outside the gate)
+### Batch 2, second round (rust-90, haskell-90, cpp-90, LLS31 (b); 2026-11-07, on `batch2` 590a8588)
 
-0. Before the gate: the host's clang moved to 23.1.5 (2026-11-06 20:11): `test/cpp/runtime/ir.sha256` fails for every unit (the `!ident`
-   line only), so `cpp-runtime` (needed by C++'s, Rust's and the lowering's steps) fails. Proposal 1 below.
-1. The essential gate on `next` (rekeys everything on `:gate`, `:prog`, `:javac`: re6, ll6's list), `bin/gate --pins`.
-2. `bin/gate --full`, keyed (about 12 h with the first passes; proposal 2).
-3. Records, after the gate:
-   - C++: `CPPI_THREADS=2 bin/cppi check --record`, `--aot --record` (deferred.cpp, thread-throw's new shape; up to 6.7 GB measured at one
-     thread: under the heavy lock).
-   - rsi (RE6.4): `bin/rsi check --corpus samples,synthetic --record`, `--corpus ui --only .tmp/re6/uicheck.ids`, then `--corpus ui --record`
-     (about 5.5 h at 3 threads), `bin/rsi divergences`; `rsi-lower-check-all` (3,718, about 40 min, `RSI_JOBS=8`, heavy); `bin/rsi
-     runtime-build` (4 GiB) and `runtime-ci` (6 GiB) first where stale.
-   - C: `bin/ci check --record`, `--aot --record` (the recorded failures that now pass).
-   - LLVM IR: `bin/llvmi check --aot --record` (33 min, 1.5 GB), `LLVMI_TX_ALL=1 bin/llvmi check` (16 min); the oracle tier by hand
-     (`REPR_LLVM_JUDGE=live bin/repr-llvm check FAMILY`, `LLVMI_JUDGE=lli bin/llvmi check`).
-   - OCaml (`OI_TYPER_GOMEMLIMIT=1200MiB`, `O2J_JOBS=1`, one process at a time): `bin/oi stdlib` (4 min), `check --record` (35 min),
-     `check --aot --record` (40), `suite check --record` (35), `suite check --aot --record` (35), `bin/repr-ocaml roundtrip --text
-     --record-results all` (40 min, 1.5 GB), `roundtrip --text --types samples stdlib` (5); then OC185's cells change if each native record
-     has no fewer passes than its oracle twin.
-   - Rust native: `bin/repr-rust native-check` beyond the 68 (core/std), the error mutants (1,400).
+One merge commit each: `rust-90` 58ca6783 (`105c549d8`), `haskell-90` 0fb4591b (`b71b3e9be`; no commit containing 53794ed6), `cpp-90`
+4e0a8fc5 (`ef0af119c`); then LLS31 (b) (`f95e6c26b`) and the decisions' docs (`ffbcc29cd`).
+
+- **Conflicts of note.** rust-90: `arbace/repr/rust/native.ae` (errors2's rejecting dump kept, rust-90's `tree` verb beside `errors`,
+  its `file-trees` taught errors2's diagnostics); `test/gate/steps.edn` (rust-90's six Rust steps replace GT9's four of the same names;
+  GT9's rustc levels `rust-iface`, `rust-behaviour`, `rust-native-essential`, `rust-native` kept with a `:rust-helper` group until the
+  planner has `:phase :oracle`; `rsi-aot` on the packs; `rsi-essential`'s 4 GiB moved to `--full`, RES61). **Moved:** rust-90's edit
+  controls to `test/rust/roundtrip-edit-controls.edn` (GT9's crossed pairs keep `roundtrip-controls.edn`), their switch
+  `REPR_RUST_EDIT_CONTROLS`. haskell-90 (on old main d86cb874, 164 commits): LICENSE.md (its musl section folded into the whole
+  COPYRIGHT's), Makefile, `bin/gate` (the new crops' pins and the oracles' packs both), `bin/arbace-go` (batch 2's gate_key:
+  `arbace_not_crops` already covers hs, libm, hsi), `test/reap/{cells.edn,main.ae}` (eleven rows; one `:corpus-known` reader with
+  `:hs-modules`), `test/gate/crops/haskell.edn` (haskell-90's: the oracle tier alone); its five steps auto-merged, their `:controls`
+  added. Its packs copied (no clobber) into the main checkout's `.tmp/oracle-packs/` (native-inputs 2, stg-progs 2).
+  cpp-90: LICENSE.md, Makefile (`cppi-codegen-check` once), `bin/cppi` (each verb once), `bin/lib/repr-cpp/roundtrip`, ARBACE.md,
+  CPP-SURVEY; `arbace/cpp/lower.ae` auto-merged on batch2-lower's integration (cpp-90's x86_fp80 literal already in it). The three
+  lines' independence and crops-rules diffs applied (the facts moved into `:stages`; Haskell's ci C cases 0.5 now that batch 1
+  derives musl without gcc).
+- **LLS31 (b)** (the user): LLVM's four first-record families (2,558 cases on lost clang-made inputs) kept in `cells.edn` as
+  `:role :beside`; read fact 1, judge (2,068 + 0.5 x 948) / 3,016 = 0.843. LLS31 (a)'s pack `rt` planned precisely in
+  doc/llvm/LLVM-CROP-SURVEY.md, "LLS31 (a): the pack rt, planned".
+- **Keys** unchanged by all five commits: gate `1bfe8ffffe7e`, runtime `6b114cbcf8f0`, javac `54e889c46334` (every changed file is under
+  `arbace_crop_paths` or no key's).
+- **Checks (light).** After each merge: `gate.crops check` 0 problems; `bin/gate --plan` (49 steps, 43 run) and `--full --plan` (319, 305
+  run, 8 after) clean; `bin/reap` 41 of 44 cells checked, 1 problem (deferred.cpp's, tonight's record; the matrix recorded with that
+  row held out); `bin/crops-score --judge --strict` 0 problems after `--record`. Crops: `bin/rsi judge-test`, `bin/repr-rust controls`
+  (7 of 7), a native round trip of two std files (equal at every level, the controls failing); `bin/repr-haskell test` (18 ok), `bin/hsi
+  own-verdicts --check` (580 of 908), `bin/oracle-records pins` (the seven Haskell packs); `bin/repr-cpp roundtrip-corpus samples --judge
+  own` (9 of 9, the control failing, 1.4 GB). Found: `bin/hsi own-verdicts --check` fetched GHC's source and testsuite tarballs and nofib
+  from the network into the worktree's `.tmp/` (no local copy there; the pins matched): a worktree should point `bin/hsi`'s work and
+  repr-haskell's corpus at the main checkout's before Haskell's checks.
+
+| crop | batch2 before (590a8588) | batch2 after (ffbcc29c) |
+|---|---|---|
+| Clojure | 99.0 / 96.3 / 100 | 99.0 / 96.3 / 100 |
+| Java | 72.9 / 100 / 99.7 | 72.9 / 100 / 99.7 |
+| Go | 94.9 / 95.8 / 100 | 94.9 / 95.8 / 100 |
+| C | 95.1 / 100 / 99.7 | 95.1 / 100 / 99.7 |
+| C++ | 75.4 / 91.7 / 20 | 75.4 / 100 / 31.4 |
+| OCaml | 80.9 / 100 / 87.4 | 80.9 / 100 / 87.4 |
+| Scheme | 98.4 / 100 / 95.0 | 98.4 / 100 / 95.0 |
+| Haskell | 0 / 8.3 / 20 | 96.3 / 100 / 74.9 |
+| Rust | 75.0 / 95.8 / 20 | 75.0 / 95.8 / 80.0 |
+| LLVM IR | 95.9 / 93.3 / 88.3 | 96.0 / 100 / 96.9 |
+| Python | 0 / 83.3 / 20 | 0 / 83.3 / 20 |
+
+- **`bin/gate --full --costs`**: nightly 10.3 h of measured step seconds (319 steps, 96 unmeasured: Haskell's 5, Rust's 17, LLVM's and
+  the others' first passes), about 3 h more for them by the lines' own estimates (hsi-check and hsi-check-aot heavy, Rust's round trips'
+  33,346 files): about 13 h, over the 6 h budget: proposal 2 (c), two nights (below).
+
+### Batch 2's nights (decided 2 (c): over two nights; one heavy job at a time under `bin/heavy-lock`; at most 1.5 GiB a process outside the gate)
+
+Night A (on `next` once batch 2 is there; the rekey night):
+
+0. On batch1/next, before the gate: the C++ runtime's IR pin re-recorded on clang 23.1.5 (proposal 1 (a), decided: `bin/cppi
+   runtime-build --update`, the `!ident` line only); not run on `batch2`.
+1. The essential gate (rekeys everything on `:gate`, `:prog`, `:javac`: re6, ll6's list), `bin/gate --pins` (now also `bin/oracle-records
+   pins`: the seven Haskell packs in the store), `bin/reap`, `bin/crops-score --judge --strict`.
+2. The four new crops' `--full` chains, keyed: LLVM (`llvm-full`), Rust (`rust-full`: `rsi-essential` first, 4 GiB; `rust-roundtrip`
+   over 33,346 files natively, RES59 (a)), Haskell (`haskell-roundtrip`; `hsi-check` 10 GiB and `hsi-check-aot` 8 GiB, heavy), OCaml.
+3. Records (one process at a time):
+   - C++ (`CPPI_THREADS=2`): `bin/cppi check --record`, `--aot --record` (deferred.cpp, thread-throw's new shape; up to 6.7 GB at one
+     thread: under the heavy lock); cpp-90's own round trips `bin/repr-cpp roundtrip-corpus KEY --judge own --record-results` for its six
+     keys (1-2 h), then CP243 (a) (CPP-SURVEY "The night's commands"); the routes compared (`CPPI_ROUTE=auto bin/cppi check --corpus
+     gxx-dg-run --sample 25`, `--aot`, the samples).
+   - Haskell: `bin/hsi dumps --record` (the libraries' STG at this helper: GHC, the oracle tier, by hand), then `bin/repr-haskell
+     roundtrip --text --layout` whole, `bin/hsi check --corpus nofib,samples,synthetic,testsuite-core --record` and `--aot --record` (T16846
+     alone 10 GB: `HSI_MEM_CAPS`).
+   - Rust: `bin/rsi ir-pack --corpus ui` (rustc, the oracle tier; then commit `test/rust/ir/ui.sha256`, RES56 (a)); `RSI_BATCH=2
+     RSI_THREADS=1 RSI_JOBS=2 RSI_CI_MEMLIMIT=1400MiB bin/rsi check --corpus samples,synthetic --record` (about 2 h), RES61's measure
+     (`RSI_BATCH=1 bin/rsi check --essential` under `time -v`).
    - Last: `bin/reap --record`, `bin/crops-score --record`.
 
-### Proposed (batch 2)
+Night B (the night after, keyed: what A did not reach):
+
+1. The rest of `bin/gate --full` (the four crops' chains skip at their keys).
+2. Records: rsi's UI corpus `bin/rsi check --corpus ui --record` (about 5.5 h at one builder thread), `bin/rsi divergences`, `own-verdicts`;
+   `rsi-lower-check-all` (3,718, about 40 min, heavy); `bin/rsi runtime-build` (4 GiB) and `runtime-ci` (6 GiB) first where stale; C `bin/ci
+   check --record`, `--aot --record`; LLVM `bin/llvmi check --aot --record` (33 min, 1.5 GB), `LLVMI_TX_ALL=1 bin/llvmi check` (16 min);
+   OCaml's (`OI_TYPER_GOMEMLIMIT=1200MiB`, `O2J_JOBS=1`): `bin/oi stdlib`, `check --record`, `--aot --record`, `suite check --record`, `--aot
+   --record`, `bin/repr-ocaml roundtrip --text --record-results all`, `--types samples stdlib`, then OC185's cells; Rust native-check beyond
+   the 68 and the 1,400 error mutants (the oracle tier).
+3. Last: `bin/reap --record`, `bin/crops-score --record`.
+
+### Proposed (batch 2) (1 (a), 2 (c) and 3 (b) meanwhile decided by the user, 2026-11-07)
 
 1. **The C++ runtime's IR pin after clang 23.1.5.** (a) Re-record `test/cpp/runtime/ir.sha256` (`bin/cppi runtime-build --update`, only
    `!ident` differs) and the clang pins with it, before the night; cost: C++'s and the lowering's records keep their numbers, the pin names
@@ -367,6 +430,14 @@ commit, OT11-OT15's decision text, already in libs4's doc).
    native-check covers the corpora, and record rsi's UI check into the eval cell; (b) leave. *Recommended: (a)*, a Rust agent's day after the
    night's records.
 6. **C++'s independence (20%)** is unchanged: the codegen line (now merged with ll6) is not the cells' default. A C++ agent's task, batch 5.
+7. **RES61, rsi-essential's memory** (doc/rust/RUST-EVAL-SURVEY.md, "Proposed (batch 2: RES61)"): 3.8 GB measured, the essential tier's
+   cap 3 GiB, so the step runs in `--full` now. (a) Measure `RSI_BATCH=1` at night and return it at 3 GiB if it fits; (b) leave it in
+   `--full`; (c) a smaller essential list. *Recommended: (a)*.
+8. **The worktrees' Haskell inputs.** `bin/hsi` and `bin/repr-haskell` fetch their pinned tarballs and nofib when the checkout's `.tmp/`
+   lacks them (found on batch 2). (a) Both read the main checkout's `.tmp/hsi` and `.tmp/repr-haskell/corpus` from a linked worktree, as
+   Scheme's corpora do (GTS212); (b) leave it. *Recommended: (a)*.
+- Still open from the lines: LLS31 (a) (the pack rt, planned), LLS32, CP242, OCaml's OC182, OC186-OC190; the branches `res34` (RES34,
+  then HFS-I1 on `hfs-i1`) and `cpp-indep` (CP240 (a), CP241 (b)) come after this batch.
 
 ## After the tag
 

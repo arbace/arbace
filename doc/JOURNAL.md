@@ -296,3 +296,44 @@ in the oracle tier). What was done, in doc/haskell/FRONTEND-SURVEY.md, "As built
   `test/gate/crops/haskell.edn`. The REAP row's read and print sources name the native judges, `bin/reap --record`.
 - Stub runs (ghc, ghc-pkg, runghc, ghci, hsc2hs, gcc, cc, clang exiting 99): `bin/repr-haskell test` 18 ok; the round trip of
   five packages, 113 of 113 at the tree, layout and text levels; `bin/hsi check` of 16 programs, all as recorded; no stub called.
+
+## 2026-11-07: batch 2, second round: rust-90, haskell-90, cpp-90, LLS31 (b) and the user's decisions (branch batch2)
+
+On `batch2` at 590a8588, one merge commit each, the earlier merges' rules (union for docs and the Makefile, the lines' `.tmp` diffs
+applied, the three keys computed after each):
+
+- **`mac/rust-90` 58ca6783** (`105c549d8`): native.ae kept rust-errors2's rejecting dump and added rust-90's `tree` verb beside `errors`;
+  its `file-trees` and `read-error` were taught errors2's diagnostics (maps, not rust-90's `[msg pos]`), and a parse that recovered from
+  an error rejects the file there too. The two lines' round-trip controls both used `test/rust/roundtrip-controls.edn` with different
+  formats (GT9's crossed pairs, judged inside each level's compare; rust-90's edited subjects, a `controls` verb run last), and both used
+  `REPR_RUST_CONTROLS` (a file path; an on/off switch): rust-90's moved to `test/rust/roundtrip-edit-controls.edn` and
+  `REPR_RUST_EDIT_CONTROLS`. Alternative considered: one file with both kinds (each reader would see the other's entries). The gate:
+  rust-90's six steps (no rustc) replace GT9's four of the same names; GT9's rustc levels are kept (`:rust-helper` for the helper's
+  sources) until the planner has `:phase :oracle`, rather than dropped as LLVM's interim step was, since they are the only runs of the
+  interface and behaviour levels; `rsi-essential`'s 4 GiB is over GTS215's essential cap, so it runs in `--full` (RES61 proposed).
+- **`mac/haskell-90` 0fb4591b** (`b71b3e9be`): no commit containing 53794ed6 (checked with `merge-base --is-ancestor`); its CPP is the
+  clean-room `cpp.ae` (haskell-90 applied `mac/haskell-cpp`'s net diff). The branch sits on old main d86cb874 (164 commits, with
+  oracle-records-cpp2's tooling cherry-picked): `bin/arbace-go` kept batch 2's gate_key (its `arbace_not_crops` already excludes hsi's
+  Go forms and scripts, so no key moved), `bin/gate --pins` runs both the new crops' pins and `bin/oracle-records pins`, the REAP reader
+  `:corpus-known` was one method for Rust and Haskell (haskell-90's second `defmethod` would have replaced Rust's). The packs
+  haskell-native-inputs (2 files) and haskell-stg-progs (2) were copied, no clobber, into the main checkout's `.tmp/oracle-packs/`.
+- **`mac/cpp-90` 4e0a8fc5** (`ef0af119c`): mostly docs and scripts; `bin/cppi`'s moved usage blocks and verbs kept once; lower.ae
+  auto-merged (its only hunk, the x86_fp80 decimal literal, already in batch2-lower's integration).
+- **LLS31 (b)** (`f95e6c26b`, the user's decision): LLVM's four first-record families kept as `:role :beside` in `test/reap/cells.edn`
+  (not deleted, so the records stay visible until the pack `rt` re-records them); the read fact 1 and the judge recounted
+  (2,068 + 0.5 x 948) / 3,016 = 0.843, so LLVM's independence is 96.9 rather than the estimate's 94.2 (which held the judge at 0.711).
+  LLS31 (a)'s plan written in the LLVM survey: the ids' builds, `bin/llvmi ir-make rt` with `rt-list`, the families roundtrip-rt,
+  text-rt, verify-rt with controls, the night's clang commands.
+- **Decisions recorded** (`ffbcc29cd`): Rust RES54 (a), RES55 (a), RES56-RES60 as recommended; Haskell HFS-I1 (a), HFS-I2 (a), HFS-I3
+  (b), HFS-I4 (b); C++ CP240 (a)(b)(c) in that order, CP241 (b), CP243 (a); Java JCS162-JCS164 (a), JCS165-JCS166 (a), JCS167 (a)
+  (recorded in batch 2's JAVA-DEFERRED-TRIAGE.md: the proposals' text is on batch 1's later head from java-complete); batch 2's proposal
+  1 (a) (the C++ runtime's IR pin on clang 23.1.5, tonight's step 0 on batch1/next, not run here) and 2 (c) (the night over two nights).
+- **Keys**: gate `1bfe8ffffe7e`, runtime `6b114cbcf8f0`, javac `54e889c46334` after every commit (unchanged).
+- **Checks**: `gate.crops check` 0; `bin/gate --plan` 49 steps, `--full --plan` 319 (305 run, 8 after); `bin/reap` 41 of 44 checked, the
+  one problem deferred.cpp's (the matrix recorded with its reference row held out, as batch 1 did); `bin/crops-score --judge --strict` 0.
+  Light samples: rsi judge-test, repr-rust controls 7/7 and a two-file native round trip, repr-haskell test, hsi own-verdicts --check,
+  oracle-records pins, repr-cpp roundtrip-corpus samples --judge own 9/9. A slip: `bin/hsi own-verdicts --check` downloaded GHC's source
+  and testsuite tarballs and nofib into the worktree's `.tmp/` (the worktree had none; pins matched); proposal 8 in the agenda.
+- **Scores** (batch 2 before → after): C++ 75.4 / 91.7 / 20 → 75.4 / 100 / 31.4; Haskell 0 / 8.3 / 20 → 96.3 / 100 / 74.9; Rust
+  75.0 / 95.8 / 20 → 75.0 / 95.8 / 80.0; LLVM IR 95.9 / 93.3 / 88.3 → 96.0 / 100 / 96.9; the others unchanged.
+- Not merged here: `res34` and `cpp-indep` (later, on these heads).
