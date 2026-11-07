@@ -785,6 +785,13 @@ is `FtpClient`), `sun/net/www/protocol/http/HttpURLConnection` → `Http_HttpURL
 → `Naming_Reference` (jrt's `java.lang.ref.Reference`). Since F13: `com/sun/management/ThreadMXBean` → `Sun_ThreadMXBean`,
 `com/sun/management/OperatingSystemMXBean` → `Sun_OperatingSystemMXBean` (java.lang.management's are
 `ThreadMXBean`, `OperatingSystemMXBean`).
+Since the JCA (F1, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F1 (write-ahead)") the
+providers' key classes named as the API's interfaces: `com/sun/crypto/provider/DHPrivateKey`,
+`DHPublicKey`, `PBEKey`, `EncryptedPrivateKeyInfo` → `Jce_DHPrivateKey`, `Jce_DHPublicKey`,
+`Jce_PBEKey`, `Jce_EncryptedPrivateKeyInfo` (javax.crypto's and javax.crypto.interfaces' are
+`DHPrivateKey` ...), and `sun/security/provider/DSAKeyPairGenerator`, `DSAPrivateKey`,
+`DSAPublicKey` → `Sun_DSAKeyPairGenerator`, `Sun_DSAPrivateKey`, `Sun_DSAPublicKey`
+(java.security.interfaces' are `DSAKeyPairGenerator` ...).
 The check runs after translation (`arbace.j2g.checks`) over every Go package's package-level
 names and every type's method names, across j2g's generated files **and jrt's hand-written
 ones** (the stand-in files excepted, since replaced stand-ins are removed, §4.3); a collision is
