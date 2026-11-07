@@ -55,9 +55,19 @@
 (defn- simple-escape [c]
   ({\n \newline \t \tab \r \return \\ \\ \' \' \" \" \a (char 7) \b (char 8) \f (char 12) \v (char 11)} c))
 
+(defn- pair-split!
+  "Before an escape's code point `cp`: a low surrogate after a high one would read as one code point in a Java string,
+  so the text so far goes to `parts` (CPython keeps \\ud800\\udc00 as two code points; queue 226)"
+  [^StringBuilder sb parts cp]
+  (let [l (.length sb)]
+    (when (and (<= 0xDC00 cp 0xDFFF) (pos? l) (Character/isHighSurrogate (.charAt sb (dec l))))
+      (swap! parts conj (str sb))
+      (.setLength sb 0))))
+
 (defn decode-str
   "The value of a string body as written (escapes decoded unless raw); a \\N{NAME} escape by the platform's Unicode
-  names (Character/codePointOf), one it does not know kept as the marker {:named NAME} in a vector of parts"
+  names (Character/codePointOf), one it does not know kept as the marker {:named NAME} in a vector of parts; two
+  surrogate escapes that a Java string would combine are parts of their own (pair-split!)"
   [^String body raw? bytes?]
   (if raw?
     body
@@ -77,8 +87,12 @@
                     (.appendCodePoint sb (Integer/parseInt m 8)) (recur (+ i 1 (count m))))
                   (= d \x) (let [h (subs body (+ i 2) (+ i 4))]
                              (.appendCodePoint sb (Integer/parseInt h 16)) (recur (+ i 4)))
-                  (and (not bytes?) (= d \u)) (do (.append sb (char (Integer/parseInt (subs body (+ i 2) (+ i 6)) 16))) (recur (+ i 6)))
-                  (and (not bytes?) (= d \U)) (do (.appendCodePoint sb (Integer/parseInt (subs body (+ i 2) (+ i 10)) 16)) (recur (+ i 10)))
+                  (and (not bytes?) (= d \u)) (let [cp (Integer/parseInt (subs body (+ i 2) (+ i 6)) 16)]
+                                                (pair-split! sb parts cp)
+                                                (.append sb (char cp)) (recur (+ i 6)))
+                  (and (not bytes?) (= d \U)) (let [cp (Integer/parseInt (subs body (+ i 2) (+ i 10)) 16)]
+                                                (pair-split! sb parts cp)
+                                                (.appendCodePoint sb cp) (recur (+ i 10)))
                   (and (not bytes?) (= d \N) (< (+ i 2) n) (= (.charAt body (+ i 2)) \{))
                   (let [e (.indexOf body "}" (int (+ i 3)))
                         nm (subs body (+ i 3) e)
@@ -100,8 +114,16 @@
       {:bytes (if (string? v) (vec (map #(bit-and (int %) 255) v)) v)}
       v)))
 
+(defn- pair-at?
+  "Strings `a` then `b` meet in a high and a low surrogate: joined in a Java string they would read as one code point"
+  [^String a ^String b]
+  (and (pos? (.length a)) (pos? (.length b))
+       (Character/isHighSurrogate (.charAt a (dec (.length a)))) (Character/isLowSurrogate (.charAt b 0))))
+
 (defn- join-strs [vs]
-  (if (every? string? vs) (apply str vs) {:joined (vec vs)}))
+  (if (and (every? string? vs) (not-any? (fn [[a b]] (pair-at? a b)) (partition 2 1 (remove empty? vs))))
+    (apply str vs)
+    {:joined (vec vs)}))
 
 ;; ---- the compilation unit ----
 
@@ -212,6 +234,13 @@
         f (.indexOf ^java.util.List (:frees @u) nm)]
     (cond (>= c 0) c (>= f 0) (+ (count (:cells @u)) f))))
 
+(defn- free-index
+  "A FREE name's index: the free variables first (compiler_nameop's u_freevars), for a class whose __class__ is both
+  the enclosing scope's name and its own cell"
+  [u nm]
+  (let [f (.indexOf ^java.util.List (:frees @u) nm)]
+    (if (>= f 0) (+ (count (:cells @u)) f) (deref-index u nm))))
+
 (defn- mangle [u nm]
   (let [mn (:mangled-names @(:block @u))]
     (if (and mn (not (contains? mn nm))) nm (sc/mangle (:private @u) nm))))
@@ -232,10 +261,10 @@
       (vector? hidden) (emit! u deref (second hidden))
       hidden (emit! u fast hidden)
       (= scope 4) (cond (and (= what :load) (= btype :class))
-                        (do (emit! u :load-locals nil) (emit! u :load-dict-or-deref (deref-index u nm)))
+                        (do (emit! u :load-locals nil) (emit! u :load-dict-or-deref (free-index u nm)))
                         (and (= what :load) (:can-see-class b) (not= nm "__classdict__"))
-                        (do (emit! u :load-deref (deref-index u "__classdict__")) (emit! u :load-dict-or-deref (deref-index u nm)))
-                        :else (emit! u deref (deref-index u nm)))
+                        (do (emit! u :load-deref (deref-index u "__classdict__")) (emit! u :load-dict-or-deref (free-index u nm)))
+                        :else (emit! u deref (free-index u nm)))
       (= scope 5) (emit! u deref (deref-index u nm))
       (and (= scope 1) (:optimized @u)) (emit! u fast (add-local! u nm))
       (= scope 2) (emit! u global (name-index! u nm))
@@ -689,6 +718,9 @@
                (let [pq (:qualname @v) pk (:kind @v)]
                  (cond (= :type-params pk) (if-let [p (:parent @v)] (recur p) name)
                        (#{:module} pk) name
+                       ;; compiler_set_qualname's force_global: a name declared global in its parent
+                       (and (#{:function :class} kind)
+                            (= sc/GLOBAL_EXPLICIT (sc/scope-of* (get (:symbols @(:block @v)) (mangle v name) 0)))) name
                        (#{:function :lambda :comprehension :annotation :type-alias :type-variable} pk) (str pq ".<locals>." name)
                        :else (str pq "." name))))
         cu (new-unit block kind name qual u)

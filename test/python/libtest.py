@@ -6,6 +6,20 @@
 # test/python/libtest_judge.ae). Run by pyi with sys.path's Lib holding the test package.
 import sys
 
+
+def inline_values_stand_in(name):
+    """test_class imports _testinternalcapi's has_inline_values at module level (CPython's inline values, which pyi's
+    objects do not have, class :inline-values; queue 226): a stand-in for that one name, for that one module, so that
+    its other tests run. The module stays absent for the rest of Lib/test, whose tests skip without it."""
+    if name.endswith("test_class") and sys.implementation.name != "cpython":
+        import types
+        m = types.ModuleType("_testinternalcapi")
+        def has_inline_values(obj):
+            raise NotImplementedError("pyi's objects have no inline values")
+        m.has_inline_values = has_inline_values
+        sys.modules.setdefault("_testinternalcapi", m)
+
+
 name = sys.argv[1]
 
 
@@ -18,6 +32,7 @@ try:
     from test import support
     support.use_resources = []  # regrtest's -u none, before the module's decorators ask: no network, cpu ...
     support.verbose = 0  # regrtest without -v (its "testing with ..." prints would split the CASE lines; PY6c)
+    inline_values_stand_in(name)
     mod = __import__("test." + name, fromlist=["*"])
     import unittest
 except BaseException as e:
