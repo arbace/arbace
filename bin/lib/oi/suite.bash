@@ -135,8 +135,8 @@ suite_dump() {
 }
 
 # suite_dump_native DIR FLAGS INCS UNITS (TY24 (a), the native path): each unit in link order typed and translated by Arbace's typer
-# (no ocamlc, no ocdump), the earlier units' interfaces found in DIR (--include): an .mli of the program's own, else the signature the
-# typer wrote for the unit (--sig-out, as the toplevel's top_N.mli); a unit with its .mli is coerced to it (--intf)
+# (no ocamlc, no ocdump), the earlier units' interfaces found in DIR (--include): an .mli of the program's own, else the typed signature
+# the typer wrote for the unit as data (--cmi-out, OC184 (a)); a unit with its .mli is coerced to it (--intf)
 suite_dump_native() {
   local d=$1 flags=$2 incs=$3 units=$4 u n b U nf="" f inc
   for f in $flags; do
@@ -149,7 +149,11 @@ suite_dump_native() {
     n=$(basename "${u#=}"); b=${n%.*}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
     case $n in *.mli) continue ;; esac
     local extra=""
-    if [ -f "$d/$b.mli" ]; then extra=--intf; else extra="--sig-out $d/$b.mli"; fi
+    # OC184 (a): a unit without an .mli of its own leaves its typed signature as data, a native .cmi (NAME.cmi.ae, read back by the
+    # typer's find-unit as OCaml reads a .cmi), not Printtyp's text as an .mli (OI_SUITE_SIG_TEXT=1: the printed interface, as before)
+    if [ -f "$d/$b.mli" ]; then extra=--intf
+    elif [ -n "${OI_SUITE_SIG_TEXT:-}" ]; then extra="--sig-out $d/$b.mli"
+    else extra="--cmi-out $d/$b.cmi.ae"; fi
     if ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" --include "$inc" $nf $extra --file "$n" "$n" > "$U.ae" 2> "$n.typer.err"); then
       echo "typer $n: $(typer_err_text "$d/$n.typer.err")" > "$d/error"; return
     fi

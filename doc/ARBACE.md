@@ -150,7 +150,9 @@ code. Three kinds of things live here:
   approx_modtype and transl_recmodule_modtypes, translmod.ml's Tstr_open and init_shape's classes, env.ml's
   lookup_apply and normalize_modtype_path, ctype.ml's update_level scope expansion and eq_package_path, and (TY23,
   TYPER.md §22) the modular explicits' Tfunctor of types.mli, ctype.ml, typetexp.ml, typecore.ml, typedtree.ml and oprint.ml, by hand, the
-  files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own.
+  files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own, and so is
+  `typer/cmi.ae` (2026-11-07, OC184 (a): a unit's typed signature written as forms and read back, after the role of
+  typing/cmi_format.ml's read_cmi, not its code).
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go
