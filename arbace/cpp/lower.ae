@@ -57,7 +57,7 @@
   (let [b (StringBuilder.)]
     (doseq [c s]
       (cond
-        (or (Character/isLetterOrDigit c) (= c \_)) (if (< (int c) 128) (.append b c) (.append b (format "$%02x" (bit-and (int c) 0xff))))
+        (or (Character/isLetterOrDigit (char c)) (= c \_)) (if (< (int c) 128) (.append b c) (.append b (format "$%02x" (bit-and (int c) 0xff))))
         (= c \.) (.append b "$_")
         :else (.append b (format "$%02x" (bit-and (int c) 0xff)))))
     (str b)))
@@ -145,8 +145,12 @@
         (seq? t) (case (first t)
                    ptr [8 8]
                    array (let [[s a] (size-align (nth t 2))] [(* (long (nth t 1)) (long s)) a])
-                   vector (let [[s _] (size-align (nth t 2))
-                                bytes (* (long (nth t 1)) (long s))
+                   vector (let [k (int-bits (nth t 2))
+                                ;; a vector of elements narrower than a byte (<N x i1>) is bit-packed in memory (LangRef: its
+                                ;; alloc size is that of its N*k bits): <16 x i1> takes 2 bytes, its value's C struct 16
+                                bytes (if (and k (not (#{8 16 32 64 128} k)))
+                                        (quot (+ (* (long (nth t 1)) (long k)) 7) 8)
+                                        (* (long (nth t 1)) (long (first (size-align (nth t 2))))))
                                 al (loop [p 1] (if (>= p bytes) p (recur (* 2 p))))]
                             [(* al (quot (+ bytes al -1) al)) al])
                    struct (let [[_ s a] (struct-layout (rest t) false)] [s a])
@@ -161,6 +165,58 @@
 
 (declare ctype)
 
+(defn- sha256-hex ^String [^String s]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes s "UTF-8"))]
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) d))))
+
+(declare complex-ld?)
+
+(defn- slot-type?
+  "An LLVM type whose C type's layout in ci is not the IR's (CS35: ci's long double is 8 bytes, the IR's x86_fp80 16, and
+  _Complex long double 16 against 32): as a member or an element of an aggregate it is held in a slot union (cppi-deferred)."
+  [t]
+  (or (and (symbol? t) (= (name t) "x86_fp80")) (complex-ld? t)))
+
+(defn- slot-union
+  "The slot union of an x86_fp80 (cx$f80) or of a _Complex long double (cx$c80): the value as member v, padded to the IR's
+  size and aligned to its alignment by a byte array, so a struct holding one has the IR's layout under gcc (where the union is
+  the type's own layout) and in ci (CS35) alike; defined once a unit, with its static assertion."
+  [t]
+  (let [ld? (and (symbol? t) (= (name t) "x86_fp80"))
+        tag (if ld? 'cx$f80 'cx$c80) n (if ld? 16 32)]
+    (when-not (get-in @*structs* [:unions tag])
+      (swap! *structs* assoc-in [:unions tag] true)
+      (swap! *structs* update :defs conj
+             ;; the alignment on the member (ci's checker raises a member's alignment by its aligned attribute; the union's own
+             ;; attribute left its alignment 8 in a struct)
+             (list 'c/union tag [(with-meta 'v {:tag (if ld? 'long-double '(complex long-double)) :c/attrs [(list '__attribute__ ['aligned 16])]})
+                                 (with-meta 'b {:tag (list 'array n 'unsigned-char)})])
+             (list 'c/static-assert (list '== (list 'sizeof-type (list 'union tag)) n))))
+    (list 'union tag)))
+
+(defn- mtype
+  "The C type of an aggregate's member or element of LLVM type t: its slot union for a slot type, else its C type."
+  [t]
+  (if (slot-type? t) (slot-union t) (ctype t)))
+
+(defn- slot-get
+  "A member's or element's place e of LLVM type t as its value's place (the slot union's v)."
+  [e t]
+  (if (slot-type? t) (list '.-v e) e))
+
+(defn- slot-init
+  "An initializer of a member or element of LLVM type t (braced for a slot union)."
+  [x t]
+  (if (slot-type? t) (list 'init x) x))
+(declare packed-vector?)
+
+(defn- packed-vector-c-size-align
+  "[size alignment] of a bit-packed vector's value (<N x i1>): the C struct of one array, a byte an element (size-align gives
+  its size in memory, the bits')."
+  [t]
+  (let [bytes (long (nth t 1)) al (loop [p 1] (if (>= p bytes) p (recur (* 2 p))))]
+    [(* al (quot (+ bytes al -1) al)) al]))
+
 (defn- struct-tag
   "The C struct tag that stands for an aggregate LLVM type, its definition added (members first) on first use."
   [t]
@@ -169,14 +225,18 @@
             d (if named (get *types* t) t)
             tag (if named
                   (symbol (str "t$" (esc (lname-str t))))
-                  (symbol (str "lt$" (:n (swap! *structs* update :n inc)))))]
+                  ;; a literal type named by its content (CX8): units name the same type alike, as ci's builder, which
+                  ;; resolves a function's type across the program's units, needs (CX6-CX7: a number per unit)
+                  (symbol (str "lt$" (subs (sha256-hex (pr-str t)) 0 16))))]
         (swap! *structs* assoc-in [:tags t] tag)
         (if (or (nil? d) (= d 'opaque))
           (swap! *structs* update :defs conj (list 'c/struct tag))
-          (let [[s a] (size-align d)
+          (let [[s a] (if (packed-vector? d) (packed-vector-c-size-align d) (size-align d))
+                _ (when (and (#{'struct 'packed 'array} (first d)) (some packed-vector? (if (= 'array (first d)) [(nth d 2)] (rest d))))
+                    (refuse :vector "a bit-packed vector inside " (pr-str d)))
                 members (case (first d)
-                          (struct packed) (vec (map-indexed (fn [i ft] (with-meta (symbol (str "f" i)) {:tag (ctype ft)})) (rest d)))
-                          (array vector) [(with-meta 'e {:tag (list 'array (nth d 1) (ctype (nth d 2)))})]
+                          (struct packed) (vec (map-indexed (fn [i ft] (with-meta (symbol (str "f" i)) {:tag (mtype ft)})) (rest d)))
+                          (array vector) [(with-meta 'e {:tag (list 'array (nth d 1) (mtype (nth d 2)))})]
                           (refuse :type "aggregate " (pr-str d)))
                 attrs (case (first d)
                         packed [(list '__attribute__ 'packed)]
@@ -226,7 +286,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Constants
 
-(defn- big [x] (biginteger x))
+(defn- big ^BigInteger [x] (biginteger x))
 (def ^:private two64 (.shiftLeft BigInteger/ONE 64))
 
 (defn int-lit
@@ -345,6 +405,12 @@
 
 (declare value gep-expr const-expr splat-value)
 
+(defn- md-head?
+  "Whether x is metadata's symbol: `!N`, `!name`, or a node's head, `!` (a string or a tuple), `!DILocation`, `!DIExpression`
+  ... (the structured DI nodes since llvm-read, LLVM.md §4; `!DI` and the node's text before)."
+  [x]
+  (and (symbol? x) (nil? (namespace x)) (str/starts-with? (name x) "!")))
+
 (defn- global-ref
   "The address of a global as a void pointer."
   [g]
@@ -369,6 +435,7 @@
         (complex-ld? t) '(__builtin_complex (lit long-double 0.0) (lit long-double 0.0))
         (aggregate? t) (list 'compound-lit (ctype t))
         :else (refuse :value "a zero of " (pr-str t)))
+      (md-head? v) (refuse :metadata "a metadata value " v)
       :else (local-sym v))
     (and (seq? v) (= (first v) 'g)) (global-ref v)
     (or (integer? v) (true? v) (false? v))
@@ -378,12 +445,13 @@
     (and (seq? v) ('#{struct packed array vector c-string} (first v)))
     (let [elems (if (= (first v) 'c-string)
                   (map #(int-lit (int %) 8) (second v))
-                  (map (fn [[et ev]] (value ev et)) (rest v)))]
+                  (map (fn [[et ev]] (if (complex-ld? t) (value ev et) (slot-init (value ev et) et))) (rest v)))]
       (cond
         (complex-ld? t) (apply list '__builtin_complex elems)
         ('#{array vector c-string} (first v))
         (list 'compound-lit (ctype t) (apply list 'init elems))
         :else (apply list 'compound-lit (ctype t) elems)))
+    ;; an operand already lowered (a scalarized vector intrinsic's lanes, LL5)
     (and (seq? v) (= (first v) 'c-expr)) (second v)
     (and (seq? v) (= (first v) 'splat)) (splat-value v t)
     (seq? v) (const-expr v t)
@@ -453,6 +521,40 @@
         (refuse :op "the floating operator " op))
       (refuse :vector "the operator " op " on " (pr-str t)))))
 
+;; vectors whose elements are narrower than a byte (RES6 (a)): their bitcasts go through the bits
+(defn- packed-vector? [t]
+  (and (vec-type? t) (let [k (int-bits (vec-et t))] (and k (not (#{8 16 32 64 128} k))))))
+
+(defn- packed-bytes
+  "A bit-packed vector's bytes in memory: ceil(N*k/8)."
+  ^long [t] (quot (+ (* (long (nth t 1)) (long (int-bits (nth t 2)))) 7) 8))
+
+(defn- bits-type [^long n]
+  (cond (<= n 64) 'unsigned-long (<= n 128) 'unsigned-__int128 :else (refuse :vector "a bitcast of " n " bits")))
+
+(defn- value-bits
+  "The bits of an integer or integer vector expression as an unsigned integer expression (element i at bits i*k)."
+  [t e]
+  (if-let [w (int-bits t)]
+    (list 'conv (bits-type w) (uval e w))
+    (let [t (resolve-type t)
+          _ (when-not (and (seq? t) (= 'vector (first t))) (refuse :vector "a bitcast of " (pr-str t) " through bits"))
+          [_ n et] t k (or (int-bits et) (refuse :vector "a bitcast of " (pr-str t))) bt (bits-type (* (long n) (long k)))]
+      (apply list 'bit-or (list 'conv bt 0)
+             (for [i (range n)] (list '<< (list 'conv bt (mask (list 'conv (utype (container-bits k)) (list 'aget (list '.-e e) i)) k)) (* i k)))))))
+
+(defn- bits-value
+  "An integer or integer vector of type t from the bits expression x."
+  [t x]
+  (if-let [w (int-bits t)]
+    (mask (list 'conv (ctype t) x) w)
+    (let [ct (ctype t) t (resolve-type t)
+          _ (when-not (and (seq? t) (= 'vector (first t))) (refuse :vector "a bitcast to " (pr-str t) " through bits"))
+          [_ n et] t k (or (int-bits et) (refuse :vector "a bitcast to " (pr-str t)))]
+      (bits-type (* (long n) (long k)))
+      (list 'compound-lit ct
+            (apply list 'init (for [i (range n)] (mask (list 'conv (ctype et) (list '>> x (* i k))) k)))))))
+
 (defn- cast-expr
   [op t1 e t2]
   (let [w1 (int-bits t1) w2 (int-bits t2) c2 (when (or w2 (float-type? t2) (ptr-type? t2) (aggregate? t2)) (ctype t2))]
@@ -471,7 +573,16 @@
       bitcast (cond
                 (and (ptr-type? t1) (ptr-type? t2)) e
                 (= t1 t2) e
+                ;; a vector of elements narrower than a byte (<N x i1>, <1 x i4>) is bit-packed in LLVM and a byte an element
+                ;; here: through the bits as an integer (element i at bits i*k)
+                (or (packed-vector? t1) (packed-vector? t2)) (bits-value t2 (value-bits t1 e))
                 ;; gcc's C has no __builtin_bit_cast: the bytes copied through a compound literal of the source type
+                ;; from an aggregate (a vector's struct): through a temporary of its type, which a compound literal's braces
+                ;; cannot initialize from a struct
+                (aggregate? t1) (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$s {:tag (ctype t1)}) e)
+                                                             (list 'c/var (with-meta 'cx$u {:tag c2}))]
+                                                       (list '__builtin_memcpy (list 'addr 'cx$u) (list 'addr 'cx$s) (first (size-align t2)))
+                                                       'cx$u))
                 :else (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$u {:tag c2}))]
                                              (list '__builtin_memcpy (list 'addr 'cx$u) (list 'addr (list 'compound-lit (ctype t1) e))
                                                    (first (size-align t2)))
@@ -493,7 +604,7 @@
       (= h 'no_cfi) (value (second v) t)
       (= h 'blockaddress) (let [[_ f l] v] (list 'conv '(* void) (list 'conv 'unsigned-long (block-token (gname-str f) l))))
       (= h 'asm) (refuse :inline-asm "inline assembly")
-      (#{'! '!DI} h) (refuse :metadata "a metadata value")
+      (md-head? h) (refuse :metadata "a metadata value")
       :else (refuse :const "the constant " (pr-str v)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -506,9 +617,9 @@
     (and (symbol? v) (#{"zeroinitializer" "undef" "poison"} (name v)) (nil? (namespace v)))
     (if (and (aggregate? t) (not (complex-ld? t))) '(init) (value v t))
     (and (seq? v) (= (first v) 'c-string)) (list 'init (apply list 'init (map #(int-lit (int %) 8) (second v))))
-    (and (seq? v) ('#{array vector} (first v))) (list 'init (apply list 'init (map (fn [[et ev]] (cinit ev et)) (rest v))))
+    (and (seq? v) ('#{array vector} (first v))) (list 'init (apply list 'init (map (fn [[et ev]] (slot-init (cinit ev et) et)) (rest v))))
     (complex-ld? t) (value v t)
-    (and (seq? v) ('#{struct packed} (first v))) (apply list 'init (map (fn [[et ev]] (cinit ev et)) (rest v)))
+    (and (seq? v) ('#{struct packed} (first v))) (apply list 'init (map (fn [[et ev]] (slot-init (cinit ev et) et)) (rest v)))
     :else (value v t)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -547,8 +658,9 @@
       getelementptr 'ptr
       phi (first args)
       select (first (nth args 1))
-      (call invoke) (let [t (second x)] (if (and (seq? t) (= (first t) 'fn)) (second t) t))
+      (call invoke callbr) (let [t (second x)] (if (and (seq? t) (= (first t) 'fn)) (second t) t))
       landingpad (second x)
+      (catchswitch catchpad cleanuppad) (refuse :windows-eh "Windows EH's " h)
       extractvalue (loop [t (first (second x)) is (nnext x)]
                      (if (empty? is) t
                          (let [rt (resolve-type t)]
@@ -661,7 +773,7 @@
         (set-res (list 'conv 'unsigned-__int128 e)))
       (re-matches #"llvm\.frexp\.(f32|f64|f80)\.i32" nm)
       (let [sfx ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2))]
-        [(list 'set! (list '.-f0 res) (list (symbol (str "__builtin_frexp" sfx)) (a 0) (list 'conv '(* int) (list 'addr (list '.-f1 res)))))])
+        [(list 'set! (if (= sfx "l") (list '.-v (list '.-f0 res)) (list '.-f0 res)) (list (symbol (str "__builtin_frexp" sfx)) (a 0) (list 'conv '(* int) (list 'addr (list '.-f1 res)))))])
       ;; LL5: the counts of integers wider than 64 bits (but i128's, above) by 64-bit limbs
       (and (re-matches #"llvm\.(ctpop|ctlz|cttz)\.i[0-9]+" nm) (> (long (w 0)) 64))
       (let [wd (w 0)
@@ -712,6 +824,38 @@
       (let [sfx ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2))]
         (set-res (apply list (symbol (str "__builtin_" (math-fns (nth parts 1)) sfx)) (map a (range (count args))))))
       (re-matches #"llvm\.coro\..*" nm) (refuse :coroutine nm)
+      ;; rustc's (doc/rust/RUST-EVAL-SURVEY.md §5.3; RE2), beside LL6's saturating arithmetic and llvmi's funnel shifts and three-way
+      ;; compares above: bit reversal, i128's byte swap, saturating float-to-int casts (Rust's `as`), ptrmask, powi, the IEEE
+      ;; minimumNumber and maximumNumber, load.relative
+      (re-matches #"llvm\.bitreverse\.i[0-9]+" nm)
+      (let [wd (w 0) x (uval (a 0) wd)]
+        (when (> wd 128) (refuse :intrinsic nm))
+        (set-res (apply list 'bit-or (for [i (range wd)]
+                                       (list '<< (list 'bit-and (list '>> x i) (int-lit 1 (wide-bits wd))) (- wd 1 i))))))
+      (= nm "llvm.bswap.i128")
+      (let [x (uval (a 0) 128)]
+        (set-res (list 'bit-or (list '<< (list 'conv 'unsigned-__int128 (list '__builtin_bswap64 (list 'conv 'unsigned-long x))) 64)
+                       (list 'conv 'unsigned-__int128 (list '__builtin_bswap64 (list 'conv 'unsigned-long (list '>> x 64)))))))
+      (re-matches #"llvm\.fpto[su]i\.sat\.i[0-9]+\.(f32|f64|f80)" nm)
+      (let [sgn (= \s (nth nm 9)) rw (int-bits rt) x (a 0)
+            p2 (fn [k] (list '__builtin_ldexpl (list 'lit 'long-double 1.0) k))]
+        (when-not (#{8 16 32 64 128} rw) (refuse :intrinsic nm))
+        (set-res (if sgn
+                   (list '? (list '!= x x) (int-lit 0 rw)
+                         (list '? (list '<= x (list '- (p2 (dec rw)))) (int-lit (.shiftLeft BigInteger/ONE (int (dec rw))) rw)
+                               (list '? (list '>= x (p2 (dec rw))) (int-lit (.subtract (.shiftLeft BigInteger/ONE (int (dec rw))) BigInteger/ONE) rw)
+                                     (list 'conv (utype rw) (list 'conv (stype rw) x)))))
+                   (list '? (list 'not (list '> x -1.0)) (int-lit 0 rw)
+                         (list '? (list '>= x (p2 rw)) (int-lit -1 rw) (list 'conv (utype rw) x))))))
+      (re-matches #"llvm\.ptrmask\.p0\.i64" nm)
+      (set-res (list 'conv '(* void) (list 'bit-and (list 'conv 'unsigned-long (a 0)) (uval (a 1) 64))))
+      (re-matches #"llvm\.powi\.(f32|f64|f80)\.i32" nm)
+      (set-res (list (symbol (str "__builtin_powi" ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2)))) (a 0) (sval (a 1) 32)))
+      (re-matches #"llvm\.(minimumnum|maximumnum)\.(f32|f64|f80)" nm)
+      (set-res (list (symbol (str "__builtin_f" (if (= (nth parts 1) "minimumnum") "min" "max") ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2)))) (a 0) (a 1)))
+      (re-matches #"llvm\.load\.relative\.i(32|64)" nm)
+      (set-res (list 'conv '(* void) (list '+ (list 'conv '(* char) (a 0))
+                                           (list 'deref (list 'conv '(* int) (list '+ (list 'conv '(* char) (a 0)) (sval (a 1) (w 1))))))))
       :else (refuse :intrinsic nm))))
 
 (defn- edge
@@ -727,6 +871,10 @@
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Vectors, LL5: the lanes' operations (a separate section on purpose: C++'s branches share this file)
+;; (with rustc's, RES6 (a), doc/rust/RUST-EVAL-SURVEY.md §5.3: <N x i1> holds a byte, 0 or 1, a lane in its value's C struct
+;; but is bit-packed in memory, LangRef's layout, so its loads, stores and bitcasts go through the bits, `value-bits` and
+;; `bits-value`, element i at bit i*k; every other vector bitcast by memory, `cast-expr`; llvm.vector.reduce.* folded in order;
+;; the elementwise intrinsics of `lane-intrinsics` lane by lane through their scalar forms; scalable vectors refused)
 
 (defn- lane
   "The C lvalue of lane i of the vector expression e."
@@ -760,7 +908,7 @@
   "A splat constant `(splat [et v])` of the vector type t."
   [v t]
   (let [[et ev] (second v)]
-    (list 'compound-lit (ctype t) (apply list 'init (repeat (vec-n t) (value ev et))))))
+    (list 'compound-lit (ctype t) (apply list 'init (repeat (vec-n t) (slot-init (value ev et) et))))))
 
 (defn- shuffle-indices
   "The mask's lane indices (nil: an undefined lane, taken as lane 0) of a shufflevector mask value over n lanes."
@@ -770,33 +918,12 @@
     (= (first mv) 'splat) (vec (repeat n (let [k (second (second mv))] (if (integer? k) k 0))))
     :else (vec (for [[_ k] (rest mv)] (if (integer? k) k 0)))))
 
-(defn- bitcast-bytes
-  "A bitcast through memory (little endian): the bytes of e copied into a variable of the destination type."
-  [e t1 t2]
-  (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$a {:tag (ctype t1)}) e) (list 'c/var (with-meta 'cx$u {:tag (ctype t2)}))]
-                         (list '__builtin_memcpy (list 'addr 'cx$u) (list 'addr 'cx$a) (first (size-align t2)))
-                         'cx$u)))
-
-(defn- vector-bitcast
-  "The statements of a bitcast with a vector on a side: <N x i1> and iN by bits, anything else by memory."
-  [res e t1 t2]
-  (let [bits? (fn [t] (and (vec-type? t) (= (vec-et t) 'i1)))]
-    (cond
-      (and (bits? t1) (int-bits t2))
-      (do (when (> (vec-n t1) 64) (refuse :vector "a bitcast of " (pr-str t1)))
-          [(list 'set! res (list 'conv (ctype t2)
-                                 (apply list 'bit-or (for [i (lanes t1)] (list '<< (list 'conv 'unsigned-long (lane e i)) i)))))])
-      (and (bits? t2) (int-bits t1))
-      (do (when (> (vec-n t2) 64) (refuse :vector "a bitcast to " (pr-str t2)))
-          (vec (for [i (lanes t2)]
-                 (list 'set! (lane res i) (list 'conv 'unsigned-char (list 'bit-and (list '>> (list 'conv 'unsigned-long e) i) 1))))))
-      (or (bits? t1) (bits? t2)) (refuse :vector "a bitcast of " (pr-str t1) " to " (pr-str t2))
-      :else [(list 'set! res (bitcast-bytes e t1 t2))])))
-
 (def ^:private lane-intrinsics
   #{"fabs" "sqrt" "floor" "ceil" "trunc" "round" "rint" "nearbyint" "copysign" "pow" "exp" "exp2" "log" "log2" "log10" "sin" "cos" "tan"
     "fma" "fmuladd" "minnum" "maxnum" "roundeven" "smax" "smin" "umax" "umin" "abs" "ctpop" "ctlz" "cttz" "bswap" "fshl" "fshr"
-    "ucmp" "scmp" "is" "ldexp"})
+    "ucmp" "scmp" "is" "ldexp"
+    ;; rustc's (RE4-RE6): the saturating arithmetic and float-to-int casts, bitreverse, ptrmask, powi, minimumnum and maximumnum
+    "sadd" "uadd" "ssub" "usub" "fptosi" "fptoui" "bitreverse" "ptrmask" "powi" "minimumnum" "maximumnum"})
 
 (defn- reduce-stmts
   "llvm.vector.reduce.OP: the lanes folded in order into res."
@@ -826,11 +953,11 @@
         vec-arg (some #(when (vec-type? (first %)) %) args)]
     (cond
       (re-matches #"llvm\.vector\.reduce\.[a-z]+\.v.*" nm) (reduce-stmts nm args res)
-      (and res (vec-type? rt) (re-find #"\.v\d+[if]\d+" nm) (lane-intrinsics (nth parts 1)))
-      (let [sc (str/replace nm #"\.v\d+([if]\d+)" ".$1") et (vec-et rt)]
+      (and (vec-type? rt) (re-find #"\.v\d+([if]\d+|p0)" nm) (lane-intrinsics (nth parts 1)))
+      (let [sc (str/replace nm #"\.v\d+([if]\d+|p0)" ".$1") et (vec-et rt)]
         (vec (mapcat (fn [i]
                        (intrinsic* sc (mapv (fn [x] (if (vec-type? (first x)) [(vec-et (first x)) (list 'c-expr (lane (value (peek x) (first x)) i))] x)) args)
-                                   (lane res i) et))
+                                   (when res (lane res i)) et))
                      (lanes rt))))
       :else (intrinsic* nm args res rt))))
 
@@ -855,8 +982,6 @@
       (let [[t1 v t2] args e (value v t1)]
         (when-not (and (vec-type? t1) (vec-type? t2)) (refuse :vector h " between " (pr-str t1) " and " (pr-str t2)))
         (vec (for [i (lanes t1)] (list 'set! (lane res i) (cast-expr h (vec-et t1) (lane e i) (vec-et t2))))))
-      (and (= h 'bitcast) (not= t (nth args 2)) (or (vec-type? t) (vec-type? (nth args 2))))
-      (let [[t1 v t2] args] (vector-bitcast res (value v t1) t1 t2))
       (and (= h 'select) (vec-type? (first (first args))))
       (let [[c a b] args ec (value (second c) (first c)) ea (typed-value a) eb (typed-value b)]
         (vec (for [i (lanes (first a))] (list 'set! (lane res i) (list '? (lane ec i) (lane ea i) (lane eb i))))))
@@ -886,7 +1011,12 @@
       (let [info (when gname (get *globals* gname))
             arg-exprs (vec (for [a args]
                              (let [bt (param-attr a :byval) v (typed-value [(first a) (peek a)])]
-                               (if bt (list 'deref (list 'conv (list '* (ctype bt)) v)) v))))
+                               (cond bt (list 'deref (list 'conv (list '* (ctype bt)) v))
+                                     ;; a va_list's storage passed (vsnprintf's ap): the va_list, which C's array type decays to
+                                     ;; the same address for gcc, and which ci, whose va_list is a pointer of its own, needs (CX8)
+                                     ;; (not for llvmi's *ci*, which keeps the IR's SysV va_list: va-list-args below)
+                                     (and (not *ci*) (contains? (:va-lists @*fn*) v)) (list 'deref (list 'conv '(* __builtin_va_list) v))
+                                     :else v))))
             call-sig [rt (vec (map first args)) (boolean variadic) (vec (map #(param-attr % :byval) args))]
             arg-exprs (if-let [i (and *ci* gname (= (quote llvm/declare) (first (:form info))) (va-list-args gname))]
                         (if (< i (count arg-exprs)) (update arg-exprs i va-overflow) arg-exprs)
@@ -956,6 +1086,35 @@
   [t]
   (or (ptr-type? t) (#{8 16 32 64 128} (int-bits t))))
 
+(defn- va-field
+  "K when a GEP of source type st and indices is takes field K of x86-64's %struct.__va_list_tag (gp_offset, fp_offset,
+  overflow_arg_area, reg_save_area: indices 0 K), else nil."
+  [st is]
+  (when (and (named? st) (= "struct.__va_list_tag" (lname-str st)) (= 2 (count is))
+             (= 0 (second (first is))) (integer? (second (second is))) (<= 0 (long (second (second is))) 3))
+    (long (second (second is)))))
+
+(def va-field-macros
+  "x86-64's va_list fields as clang's inline va_arg reads them (cppi-deferred). Under gcc (the lowered C's own definitions, when
+  ci's are not given) each is the field's address. ci's va_list is one pointer to the next 8-byte slot of the variadic
+  arguments (doc/c/SPEC.md §7.9), what x86-64's overflow_arg_area is: in ci (arbace.cpp.run/opts) gp_offset and fp_offset read
+  48 and 176 (the registers used up: clang's code takes the overflow path, which reads the argument at overflow_arg_area and
+  advances it by the size rounded to 8, as ci's va_arg), overflow_arg_area is the place of the va_list's pointer (pl: the va_list's
+  storage, or for a va_list parameter, which ci passes as the pointer itself, the place it was loaded from) and reg_save_area a
+  pointer no path reads: the runtime layer's cx$va_full and cx$va_rs (arbace/cpp/rt/eh.c.ae)."
+  {:gcc [["cx$va_f0(ap,pl)" "((void *)(ap))"] ["cx$va_f1(ap,pl)" "((void *)((char *)(ap) + 4))"]
+         ["cx$va_f2(ap,pl)" "((void *)((char *)(ap) + 8))"] ["cx$va_f3(ap,pl)" "((void *)((char *)(ap) + 16))"]]
+   :ci [["cx$va_f0(ap,pl)" "((void *)&cx$va_full[0])"] ["cx$va_f1(ap,pl)" "((void *)&cx$va_full[1])"]
+        ["cx$va_f2(ap,pl)" "((void *)(pl))"] ["cx$va_f3(ap,pl)" "((void *)&cx$va_rs)"]]})
+
+(defn- atomic-int
+  "The integer type of a float's or a double's bits (i32, i64), whose _n builtins the lowering writes for an atomic of that type
+  (cppi-deferred): the same lock-free operation gcc's generic builtins do on 4 and 8 bytes, and the one form ci's read takes
+  (arbace.cpp.run/ci-atomics: repr/c's <builtin> declares the generic __atomic_load, __atomic_store and __atomic_exchange
+  without parameters, so ci refused the calls, the class atomic-generic). Else nil (x86_fp80: the generic builtins)."
+  [t]
+  (when (symbol? t) ({"float" 'i32 "double" 'i64} (name t))))
+
 (defn- atomic-place
   "The pointer operand cast to the C type's pointer, volatile when the instruction is."
   [pv ct o]
@@ -983,7 +1142,11 @@
         (when (and (not= h 'bitcast) (or (vec? t1) (vec? t2))) (refuse :vector h " of " (pr-str t1)))
         (set (cast-expr h t1 (value v t1) t2)))
       alloca (let [[t] args [s a] (size-align t) cnt (:count o) al (max (long a) (long (or (:align o) 1)))
-                   entry (:entry-block @*fn*)]
+                   entry (:entry-block @*fn*)
+                   ;; a va_list (x86-64's [1 x %struct.__va_list_tag]): its address passed to a call is the va_list itself (CX8)
+                   _ (when (and (seq? t) (= 'array (first t)) (= 1 (second t)) (named? (nth t 2))
+                                (= "struct.__va_list_tag" (lname-str (nth t 2))))
+                       (swap! *fn* update :va-lists (fnil conj #{}) res))]
                (if (and entry (or (nil? cnt) (integer? (second cnt))))
                  (let [n (* (long s) (long (if cnt (second cnt) 1))) m (symbol (str res "$m"))]
                    (swap! *fn* update :allocas conj (with-meta m {:tag (list 'array (max n 1) 'unsigned-char) :c/alignas al}))
@@ -996,9 +1159,13 @@
       ;; i48, i56: bit-field access units clang does not widen over the next field) loaded and stored by those bytes only
       load (let [[t pv] [(second x) (nth x 2)] ct0 (ctype t) ct (if (:volatile o) (list 'volatile ct0) ct0) w (int-bits t)
                  ss (when w (store-bytes w))]
+             ;; a pointer's load remembers its place: a va_list parameter's fields are read through it (va-field-macros)
+             (when (and res (ptr-type? t)) (swap! *fn* assoc-in [:ptr-loads res] (typed-value pv)))
              (cond
                (:atomic o) (cond
                              (atomic-n? t) (set (list '__atomic_load_n (atomic-place pv ct0 o) (atomic-order (:atomic o))))
+                             (atomic-int t) (let [it (atomic-int t)]
+                                              (set (cast-expr 'bitcast it (list '__atomic_load_n (atomic-place pv (ctype it) o) (atomic-order (:atomic o))) t)))
                              (float-type? t) [(list '__atomic_load (atomic-place pv ct0 o) (list 'addr res) (atomic-order (:atomic o)))]
                              :else (refuse :atomic "an atomic load of " (pr-str t)))
                ss (set (mask (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$u {:tag ct0}) (int-lit 0 w))]
@@ -1006,23 +1173,56 @@
                                                     'cx$u))
                              w))
                w (set (mask (list 'deref (list 'conv (list '* ct) (typed-value pv))) w))
+               ;; a bit-packed vector (<N x i1>): its N*k bits read as an integer, element i at bit i*k
+               (packed-vector? t) (let [n (packed-bytes t) bt (bits-type (* 8 (long n)))]
+                                    (set (bits-value t (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$u {:tag bt}) (list 'conv bt 0))]
+                                                                              (list '__builtin_memcpy (list 'addr 'cx$u) (typed-value pv) n)
+                                                                              'cx$u)))))
                :else (set (list 'deref (list 'conv (list '* ct) (typed-value pv))))))
       store (let [[v pv] [(second x) (nth x 2)] ct0 (ctype (first v)) ct (if (:volatile o) (list 'volatile ct0) ct0) w (int-bits (first v))
                   ss (when w (store-bytes w))]
               (cond
                 (:atomic o) (cond
                               (atomic-n? (first v)) [(list '__atomic_store_n (atomic-place pv ct0 o) (typed-value v) (atomic-order (:atomic o)))]
+                              (atomic-int (first v)) (let [it (atomic-int (first v))]
+                                                       [(list '__atomic_store_n (atomic-place pv (ctype it) o) (cast-expr 'bitcast (first v) (typed-value v) it)
+                                                              (atomic-order (:atomic o)))])
                               (float-type? (first v)) [(list '__atomic_store (atomic-place pv ct0 o) (list 'addr (list 'compound-lit ct0 (typed-value v))) (atomic-order (:atomic o)))]
                               :else (refuse :atomic "an atomic store of " (pr-str (first v))))
                 ss
                 [(list '__builtin_memcpy (typed-value pv) (list 'addr (list 'compound-lit ct0 (typed-value v))) ss)]
+                ;; a bit-packed vector (<N x i1>): its bits written as ceil(N*k/8) bytes (LLVM's layout, element i at bit i*k)
+                (packed-vector? (first v))
+                (let [n (packed-bytes (first v)) bt (bits-type (* 8 (long n)))]
+                  [(list '__builtin_memcpy (typed-value pv) (list 'addr (list 'compound-lit bt (value-bits (first v) (typed-value v)))) n)])
                 :else
                 [(list 'set! (list 'deref (list 'conv (list '* ct) (typed-value pv))) (typed-value v))]))
-      getelementptr (let [[st base & idxs] args] (set (gep-expr st (typed-value base) (take-while vector? idxs))))
+      getelementptr (let [[st base & idxs] args
+                          is (take-while vector? idxs)]
+                      (when (and (contains? (:va-lists @*fn*) (typed-value base)) (every? #(= 0 (second %)) is))
+                        (swap! *fn* update :va-lists conj res))
+                      (if-let [k (and (not *ci*) (va-field st is))]
+                        ;; a field of x86-64's va_list (clang's inline va_arg at -O0): by the macro cx$va_fK, the field's address
+                        ;; under gcc, ci's own va_list in ci (cppi-deferred; LLVM.md §11). Not under *ci* (llvmi, LL6), whose
+                        ;; va_start fills the IR's SysV va_list itself (gp_offset 48, fp_offset 176, overflow_arg_area ci's
+                        ;; pointer), so the fields are plain memory there
+                        (let [b (typed-value base)
+                              ;; where ci's va_list (one pointer) is: the va_list's own storage when the base is the va_list the
+                              ;; function allocated, else the place the base was loaded from (a va_list parameter is ci's pointer
+                              ;; itself, kept in the parameter's alloca by clang's -O0 code)
+                              place (cond (contains? (:va-lists @*fn*) b) b
+                                          (get-in @*fn* [:ptr-loads b]) (get-in @*fn* [:ptr-loads b])
+                                          :else b)]
+                          (swap! *structs* assoc :va-fields true)
+                          (set (list (symbol (str "cx$va_f" k)) b place)))
+                        (set (gep-expr st (typed-value base) is))))
       phi []
       select (let [[c a b] args]
                (when (and (seq? (first c)) (= (first (first c)) 'vector)) (refuse :vector "select on a vector"))
-               (set (list '? (typed-value c) (typed-value a) (typed-value b))))
+               (if (seq? (resolve-type (first a)))
+                 ;; an aggregate select as an if (CX8): ci's builder refuses a struct-valued conditional operator
+                 [(list 'if (typed-value c) (list 'set! res (typed-value a)) (list 'set! res (typed-value b)))]
+                 (set (list '? (typed-value c) (typed-value a) (typed-value b)))))
       (call invoke) (call-stmts x res)
       landingpad (landingpad-stmts x res)
       extractvalue (let [[[t a] & is] (rest x)]
@@ -1032,16 +1232,16 @@
                                   (if (complex-ld? rt)
                                     (recur (list (if (zero? i) 'real 'imag) e) 'x86_fp80 (rest is))
                                   (if ('#{struct packed} (first rt))
-                                    (recur (list (symbol (str ".-f" i)) e) (nth (rest rt) i) (rest is))
-                                    (recur (list 'aget (list '.-e e) i) (nth rt 2) (rest is)))))))))
+                                    (let [ft (nth (rest rt) i)] (recur (slot-get (list (symbol (str ".-f" i)) e) ft) ft (rest is)))
+                                    (recur (slot-get (list 'aget (list '.-e e) i) (nth rt 2)) (nth rt 2) (rest is)))))))))
       insertvalue (let [[[t a] [vt v] & is] (rest x)
                         place (loop [e res t t is is]
                                 (if (empty? is) e
                                     (let [rt (resolve-type t) i (first is)]
                                       (cond
                                         (complex-ld? rt) (recur (list (if (zero? i) 'real 'imag) e) 'x86_fp80 (rest is))
-                                        ('#{struct packed} (first rt)) (recur (list (symbol (str ".-f" i)) e) (nth (rest rt) i) (rest is))
-                                        :else (recur (list 'aget (list '.-e e) i) (nth rt 2) (rest is))))))]
+                                        ('#{struct packed} (first rt)) (let [ft (nth (rest rt) i)] (recur (slot-get (list (symbol (str ".-f" i)) e) ft) ft (rest is)))
+                                        :else (recur (slot-get (list 'aget (list '.-e e) i) (nth rt 2)) (nth rt 2) (rest is))))))]
                     [(list 'set! res (value a t)) (list 'set! place (value v vt))])
       extractelement (let [[[t v] i] (rest x)] (set (list 'aget (list '.-e (value v t)) (typed-value i))))
       insertelement (let [[[t v] e i] (rest x)] [(list 'set! res (value v t)) (list 'set! (list 'aget (list '.-e res) (typed-value i)) (typed-value e))])
@@ -1054,6 +1254,8 @@
                               :xor '__atomic_fetch_xor :nand '__atomic_fetch_nand} op)]
                   (cond
                     (and (= op :xchg) (atomic-n? vt)) (set (list '__atomic_exchange_n place val ord))
+                    (and (= op :xchg) (atomic-int vt)) (let [it (atomic-int vt)]
+                                                         (set (cast-expr 'bitcast it (list '__atomic_exchange_n (atomic-place pv (ctype it) o) (cast-expr 'bitcast vt val it) ord) vt)))
                     (= op :xchg) [(list '__atomic_exchange (atomic-place pv ct o) (list 'addr (list 'compound-lit ct val)) (list 'addr res) ord)]
                     (and fetch w (atomic-n? vt)) (set (list fetch place val ord))
                     :else
@@ -1064,7 +1266,12 @@
                                (:fadd :fsub) (list (if (= op :fadd) '+ '-) res val)
                                (refuse :atomic "atomicrmw " op))
                           gplace (atomic-place pv ct o)]
-                      [(list '__atomic_load gplace (list 'addr res) 0)
+                      [(cond
+                         ;; the old value by the _n load where one takes the type (cppi-deferred: ci has no generic __atomic_load)
+                         (atomic-n? vt) (list 'set! res (list '__atomic_load_n gplace 0))
+                         (atomic-int vt) (let [it (atomic-int vt)]
+                                           (list 'set! res (cast-expr 'bitcast it (list '__atomic_load_n (atomic-place pv (ctype it) o) 0) vt)))
+                         :else (list '__atomic_load gplace (list 'addr res) 0))
                        (list 'do-while (list 'not (list '__atomic_compare_exchange gplace (list 'addr res) (list 'addr (list 'compound-lit ct nv)) 0 ord 0)))])))
       cmpxchg (let [[pv [ct c] [_ n]] (rest x) cty (ctype ct)]
                 (when-not (atomic-n? ct) (refuse :atomic "cmpxchg of " (pr-str ct)))
@@ -1089,6 +1296,14 @@
                    [(apply list 'switch (list 'conv 'unsigned-long (value p t))
                            (concat (mapcat (fn [l] (cons (list 'case (block-token (:name @*fn*) l)) (edge l))) (distinct ls))
                                    ['(default) '(__builtin_trap)]))])
+      ;; asm goto (LLVM.md §7): an empty template with no outputs never jumps, so its fall-through edge; any other assembly is
+      ;; the C library's or the machine's, which cppi does not run
+      callbr (let [[_ rt callee] x]
+               (if (and (= rt 'void) (seq? callee) (= (first callee) 'asm) (= "" (second callee)))
+                 (edge (:to o))
+                 (refuse :callbr "callbr (asm goto) of " (pr-str callee))))
+      ;; Windows EH's funclets: the target is x86-64 Linux, whose clang writes landingpads only
+      (catchswitch catchpad cleanuppad catchret cleanupret) (refuse :windows-eh "Windows EH's " h)
       ;; va_arg (LL6): from the overflow area, the next slot of size rounded to 8 (ci's layout, no 16-byte alignment); natively gcc's
       va_arg (let [[_ [pt p] t] x]
                (if *ci*
@@ -1112,13 +1327,22 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Functions
 
+(defn- dbg-free
+  "A block without its debug records (#dbg_value ... #dbg_declare_value, LLVM.md §5) and its instructions without their
+  metadata attachments (`:md`, !dbg among them): what -g adds to -g0's IR at -O0, which C runs alike without (§7)."
+  [b]
+  (let [strip (fn [x] (let [[a m] (split-with #(not= % :md) x)] (if (seq m) (apply list (concat a (drop 2 m))) x)))]
+    (apply list (concat (take 2 b)
+                        (for [x (nnext b) :when (not (str/starts-with? (name (first x)) "dbg_"))]
+                          (if (= (first x) '=) (list '= (second x) (strip (nth x 2))) (strip x)))))))
+
 (defn- lower-define
   "A define's C function definition."
   [f info]
   (let [[_ _ rt ps & more] f
         o (apply hash-map more)
         nnum (count (filter #(and (vector? %) (> (count %) 1) (symbol? (peek %)) (re-matches #"%[0-9]+" (name (peek %)))) ps))
-        blocks (vec (map-indexed (fn [i b] (if (and (zero? i) (nil? (second b))) (apply list 'block (symbol (str "%" nnum)) (nnext b)) b)) (:body o)))
+        blocks (vec (map-indexed (fn [i b] (if (and (zero? i) (nil? (second b))) (apply list 'block (symbol (str "%" nnum)) (nnext b)) b)) (map dbg-free (:body o))))
         locals (atom {})
         params (vec (for [[i p] (map-indexed vector (remove #{'&} ps))]
                       (let [t (first p) nm (when (and (> (count p) 1) (or (symbol? (peek p)) (seq? (peek p))) (not (keyword? (peek p)))
@@ -1282,7 +1506,14 @@
                    *ci* (conj (list 'c/declare 'cx$dyn_alloc (with-meta [(with-meta 'n {:tag 'unsigned-long}) (with-meta 'al {:tag 'unsigned-long}) (with-meta 'h {:tag '(* (* void))})] {:tag '(* void)}))
                               (list 'c/declare 'cx$dyn_restore (with-meta [(with-meta 'h {:tag '(* (* void))}) (with-meta 'to {:tag '(* void)})] {:tag 'void}))))]
         [(list 'c/file c-name :std :gnu23)
-         (vec (concat (:defs @*structs*) head protos aliases (keep first gvars) (keep second gvars) defs ctor-defs dtor-defs (when wrapper [wrapper])))]))))
+         (vec (concat (:defs @*structs*) head
+                      (when (:va-fields @*structs*)
+                        (concat [(list 'c/var (with-meta 'cx$va_full {:extern true :tag '(array 2 unsigned)}))
+                                 (list 'c/var (with-meta 'cx$va_rs {:extern true :tag '(* void)}))
+                                 (list 'c/directive "#ifndef cx$va_f0")]
+                                (for [[n d] (:gcc va-field-macros)] (list 'c/directive (str "#define " n " " d)))
+                                [(list 'c/directive "#endif")]))
+                      protos aliases (keep first gvars) (keep second gvars) defs ctor-defs dtor-defs (when wrapper [wrapper])))]))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; bin/cppi lower
@@ -1318,7 +1549,7 @@
   [verb & args]
   (case verb
     "lower" (let [[f & more] args o (apply hash-map more)
-                  r (lower-file f (.getName (java.io.File. ^String (or (get o "-o") (str/replace f #"\.ll$" ".c")))))]
+                  r (lower-file f (.getName (java.io.File. (str (or (get o "-o") (str/replace f #"\.ll$" ".c"))))))]
               (if (:refused r)
                 (do (binding [*out* *err*] (println (str f ": refused (" (name (:refused r)) "): " (:message r)))) (System/exit 3))
                 (do (when-let [fo (get o "--forms")] (spit fo (:ae r)))
