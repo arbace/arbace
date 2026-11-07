@@ -2481,3 +2481,11 @@ helper --cmi`, `native-check`, `dumps`, `bin/oi stdlib-check`, `typer-check`, `j
   about 1 minute) and the other libraries (49 units, a process each, three at once, about 3 minutes). (a) one process for all the
   library units (`stdlib-build`'s loop, a per-unit timeout by a watchdog thread that ends the process on a hang): about an hour,
   1 minute; (b) as it is. *Recommended: (a)* before the night's records if they run more than once.
+
+## Decided (the user, 2026-11-07: batch 3's proposal 4) and as built
+
+**4 (a).** A linked worktree's or the clean clone's OCaml inputs are the main checkout's: `bin/repr-ocaml corpus fetch` and the opam set
+take a missing tarball from the main checkout's `.tmp/repr-ocaml/src` by hard link (`bin/lib/crops/take.bash`, `crop_take`), refuse when it
+has none, and never download there (the main checkout fetches once). Proved under stubs of curl, wget and the C compilers (each exiting
+99): the refusal, then the eleven tarballs taken; `native-check samples stdlib` 8 + 150 files equal to the helper's dumps byte for byte
+(the speed commits re-applied on batch 3 included), `errors-check` 100 of 100; no stub called.

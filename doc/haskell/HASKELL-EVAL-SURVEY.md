@@ -2023,3 +2023,12 @@ every process under 2.5 GB). The compiled level takes GHC's `-O1` STG; hsi's own
   work, with HES75 (a)'s library packages compiled once per runtime key (the first essential run after a runtime change
   generates and compiles them: 8.5 minutes at 2 jobs, peak 1.6 GB).
 - HES74 (a), frameless evaluation of a compiled case's scrutinee, as decided: next.
+
+## Decided (the user, 2026-11-07: batch 3's proposal 1)
+
+**1 (a).** HE9 (`haskell-eval9`'s 3f57a1d3: the allocation counters and limits, the RTS's options from rts/RtsFlags.c) is ported by hand
+onto batch 3's hsi, the day after batch 3's night has re-recorded hsi's packs: its new files (`go/arbace/hs/alloclimit.ae`,
+`test/haskell/hsi/cmd/rtsflags.ae`, `rtsusage.ae`) as they are, its hunks of `machine.ae`, `prim_ctl.ae`, `alloc.ae`, `ffi.ae`,
+`test/haskell/hsi/cmd/main.ae` and `bin/lib/hsi/check` re-applied, `go/arbace/hs.ae`'s files and init order made again; proved by
+cgrun057 and T16916 byte for byte and the night's `bin/hsi check`. HFS-I4 (b)'s rebase did not apply (ten files conflict). The GPL line's
+branches (`haskell-pp`, `haskell-cpp`, `haskell-full2`) are deleted once batch 3 is on `next` (batch 3's proposal 3 (a)).

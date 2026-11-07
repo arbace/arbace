@@ -1406,3 +1406,15 @@ As LL1's (under `bin/heavy-lock` on the loaded host; `ARBACE_HOST_EXE` unset in 
 ## Decided (2026-11-05, the user: LL4's proposals)
 
 LL4's three proposals (a): LL4 closed at these numbers, the remainder classed in test/llvm/divergences-verify.edn after the night's run; the rejection lists and the 420 valid modules as parts of the interim llvm gate step; the generated intrinsic and debug-info tables committed, their regeneration diffed in the night's vendoring checks.
+
+## Decided (the user, 2026-11-07: batch 3's proposal 2) and as built
+
+**2 (a)+(b).** The own verdict (LL9a) takes lit's substitution: `bin/repr-llvm`'s `own_verdicts` gives, as a fourth column, the first RUN
+line's `sed 's/A/B/g' %s |` (a plain substitution alone), and `verify-check` reads a module judged by its own verdict as sed's output
+(`WORK/subst/NAME.ll`), as the test's tools read it; a `valid` claim from a RUN line reading the module with `--disable-verify` is no own
+verdict (the test claims no verification). On batch 3 (`55f9900c8`): valid-wide 413 -> 419 of 420 (`CodeGen-RISCV-rvv-{masked-tama,
+sf_vfexp32e,vbrev,vfmv.s.f,vmnor}`, `s/iXLen/i32/g`; `tools-llubi-divrem_ub3`, `s/DIVREM/sdiv/g`), the reader's answers unchanged; the
+one left, `LTO-Resolution-X86-protected-def-dllimport` (`llvm-as --disable-verify`), judged by opt's verdict, not yet recorded: classed
+`disable-verify` in `test/llvm/valid-wide-known.tsv` (`REPR_LLVM_KNOWN`) until the night's `bin/repr-llvm record-opt`, the class removed
+when it passes. The other lists' records unchanged (valid, reject, split, reject-av, reject-other); `check verify-llvmtest` re-recorded
+(792 of 806: 11 fixed by LL4's messages), roundtrip-llvmtest and text-llvmtest 304/304, verify-probes 472/478.

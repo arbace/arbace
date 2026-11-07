@@ -614,3 +614,13 @@ remaps, are printed by `form-text` of the converted tree.
 - hsc2hs natively: it runs a C program (above); an `.hsc` module still needs the helper.
 - Speed: on stage 0's evaluator about 0.06 to 0.2 s a module after the tuning above (0.1 to 0.3 s before); not yet
   compiled (c2j).
+
+## Decided (the user, 2026-11-07: batch 2's proposal 9) and as built
+
+**9 (a).** `bin/repr-haskell corpus fetch` in native mode no longer runs the packages' configure scripts: its test (`[ -n "$live" ] || [ !
+-f "$ninputs_pin" ] || [ -n "${REPR_HASKELL_CONFIGURE:-}" ] && continue`) skipped exactly when configure was meant to run; now configure
+runs only live, without the native-inputs pin, or with `REPR_HASKELL_CONFIGURE=1`; the configure products come from the pack
+`haskell-native-inputs-ghc-9.14.1`. Proved on batch 3 (`bc4fb64f8`): a fresh worktree corpus fetched under stubs of the C compilers,
+GHC's tools, curl and wget (exiting 99), none called; the control `REPR_HASKELL_CONFIGURE=1` calls the gcc stub. The native reads are
+STALE until the night's `bin/repr-haskell record-native-inputs` (the pack is keyed by the helper's hash, which haskell-errors3's verbs
+moved).

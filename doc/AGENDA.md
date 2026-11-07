@@ -590,7 +590,8 @@ a branch unless said otherwise. No commit containing 53794ed6 is in the history 
 2. C: `bin/ci check --aot --corpus ci-run --record` (builtin-atomic.c, fnptr-result-width.c), then their names back into ci-run's
    `:subset-cf2g`.
 3. Java: the three new JDK references' levels (`bin/java-check --levels read,interp,classes,compiled,print --only t08351,t08362,t08376 --record`).
-4. Haskell (the helper re-dump; GHC, the oracle tier, by hand): `bin/repr-haskell helper`, `bin/repr-haskell test --record`, `bin/hsi dumps
+4. Haskell (the helper re-dump; GHC, the oracle tier, by hand): `bin/repr-haskell helper`, `bin/repr-haskell record-native-inputs` (first: the
+   native reads are STALE until it), `bin/repr-haskell test --record`, `bin/hsi dumps
    --record`, `bin/hsi check --live --dump-only --record-progs`, then `bin/hsi check --record` and `--aot --record` (HSI_MEM_CAPS), `bin/hsi
    record-ref --opt O1` and `check --aot --opt O1 --record`; `bin/repr-haskell native-check` (60 modules), `native-check --errors --count 0` and
    the mutant seeds 1-5, `typecheck-check`, `roundtrip --text --layout` whole, `bin/hsi compare-front` after `check --front native --record`.
@@ -598,8 +599,8 @@ a branch unless said otherwise. No commit containing 53794ed6 is in the history 
    (the 177-module list) against the errors line's counts.
 6. C++: `bin/repr-cpp native-check` on the 977-file sample and `--tree` on its light lists; `roundtrip-corpus` and `dg` with `--reader native` on
    gxx-dg's essential and every-10 lists; CPR1's `--record-known-rejected` re-record.
-7. LLVM: `bin/repr-llvm record-opt` for reject-av's 15 and reject-other's 148 unrecorded modules (opt, the oracle tier), then `bin/llvm-corpus
-   verify-record` for both lists again.
+7. LLVM: `bin/repr-llvm record-opt` for reject-av's 15, reject-other's 148 and valid-wide's LTO-Resolution-X86-protected-def-dllimport
+   (opt, the oracle tier), then `bin/llvm-corpus verify-record` for the three lists again.
 8. goi's whole record: `bin/goi check --jobs 8 --record`, `check --aot --jobs 8 --record` (full-forms and liveness on every program).
 9. Last: `bin/reap --record` (nothing held any more), `bin/crops-score --judge --strict --record`.
 
@@ -618,7 +619,38 @@ a branch unless said otherwise. No commit containing 53794ed6 is in the history 
 4. **The worktrees' corpora for light checks**: the parsers' proofs read the corpora from other worktrees' `.tmp/` (batch 2's Haskell corpus,
    ocaml-90's OCaml tarball tree). (a) The native-check and errors-check scripts take the main checkout's `.tmp/repr-ocaml` and
    `.tmp/repr-haskell` as proposal 8 (a) did for GHC's tarballs; (b) leave. *Recommended: (a)*.
-- Still open from batch 2: RES61, RES64-RES66, LLS31 (a), CP242, OC182, OC186-OC190; batch 2's proposal 9 (corpus fetch's configure test).
+- Still open from batch 2: RES61, RES64-RES66, LLS31 (a), CP242, OC182, OC186-OC190.
+
+### Decided (the user, 2026-11-07: batch 3's proposals and batch 2's 9)
+
+- **1 (a), HE9 by hand: the next day's task, after batch 3's night has re-recorded hsi's packs** (below, "The day after batch 3's night").
+- **2 (a)+(b), built** (`55f9900c8`, `21ee57c3e`): `bin/repr-llvm`'s `own_verdicts` gives lit's substitution, the first RUN line's
+  `sed 's/A/B/g' %s |`, and `verify-check` reads a module judged by its own verdict as sed's output (`WORK/subst/NAME.ll`); a `valid` claim from
+  a RUN line reading the module with `--disable-verify` is no own verdict. valid-wide 413 -> 419 of 420 (RISCV's five `iXLen` modules,
+  llubi's `DIVREM`); the one left, LTO's protected dllimport (read with `llvm-as --disable-verify`, opt's verdict unrecorded), in the class
+  file `test/llvm/valid-wide-known.tsv` (`REPR_LLVM_KNOWN`) until tonight's `record-opt`, then removed when it passes. The other five
+  lists' records unchanged; `check verify-llvmtest` 792 of 806 (11 fixed by LL4's messages, re-recorded), roundtrip-llvmtest and
+  text-llvmtest 304/304, verify-probes 472/478, the essential step's command passing.
+- **3 (a)**: `haskell-pp`, `haskell-cpp` and `haskell-full2` are deleted, locally and on `mac`, by the main session once batch 3 is on `next`;
+  the GPL port is kept nowhere.
+- **4 (a), built**: `bin/lib/crops/take.bash` (`crop_take`: a linked worktree's or the clean clone's missing input hard-linked from the main
+  checkout, a refusal when the main checkout has none, never a download), used by `bin/repr-ocaml corpus fetch` and its opam set (Haskell's
+  were batch 2's proposal 8 (a); LLVM's corpus and Scheme's already read the main checkout's). The main checkout's `.tmp/repr-ocaml/src`
+  seeded from ocaml-90's copies (hard links, the pins checked). Proved under stubs (curl, wget, the C compilers, GHC's tools exiting 99):
+  the refusal with no main copy, then the fetch, `native-check samples stdlib` (158 files equal) and `errors-check` 100/100, no stub called.
+- **Batch 2's 9 (a), built**: `bin/repr-haskell corpus fetch`'s configure test was inverted; configure now runs only live, without the
+  native-inputs pin, or with `REPR_HASKELL_CONFIGURE=1`. Proved: a fresh worktree corpus fetched under the stubs, none called; the control
+  `REPR_HASKELL_CONFIGURE=1` calls the gcc stub (6 calls). Found: the round trip's native path is STALE until tonight (`haskell-native-inputs`
+  is keyed by the helper's hash, which errors3's verbs moved): `bin/repr-haskell record-native-inputs` comes first in the night's Haskell list.
+
+### The day after batch 3's night
+
+1. HE9 (decided 1 (a)): an agent ports `haskell-eval9`'s 3f57a1d3 by hand onto `next` (batch 3): the new files `go/arbace/hs/alloclimit.ae`,
+   `test/haskell/hsi/cmd/rtsflags.ae`, `rtsusage.ae` as they are; the hunks of `go/arbace/hs/{machine,prim_ctl,alloc,ffi}.ae`,
+   `test/haskell/hsi/cmd/main.ae` and `bin/lib/hsi/check` re-applied by hand; `go/arbace/hs.ae`'s files and init order made again; proved
+   by cgrun057 and T16916 byte for byte, the essential list, then the night's `bin/hsi check --record`; HASKELL-EVAL-SURVEY's HES80-HES82
+   (decided 2026-11-06) carried.
+2. LLVM: `test/llvm/valid-wide-known.tsv` emptied once the night's `record-opt` makes its row pass (decided 2 (b)).
 
 ## After the tag
 

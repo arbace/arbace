@@ -655,3 +655,27 @@ branch, the light checks after each (doc/AGENDA.md, "Batch 3", has the commits, 
   c2j-pool-encode, ci-lls21 and batch 2's third round). Scores: Go 94.9 to 97.0 completeness, LLVM 96.0 to 96.3, C++ independence 31.4 to
   54.3 (batch 2's cpp-indep); the rest unchanged. Proposed: HE9 by hand (1), LLVM's RUN-line substitutions in the own verdict (2), the GPL
   line's branches deleted (3), the worktrees' corpora from the main checkout (4).
+
+## 2026-11-07: batch 3's proposals decided and built (branch `batch3`)
+
+The user's decisions (relayed by the main session, about 13:45) on doc/AGENDA.md's "Batch 3, Proposed" and batch 2's proposal 9:
+
+- **2 (a)+(b), built.** LLVM's own verdict takes lit's RUN-line substitution (`bin/repr-llvm`'s `own_verdicts`: the first RUN line's
+  `sed 's/A/B/g' %s |`; `verify-check` reads sed's output for a module judged by its own verdict), and a `valid` claim from a RUN line
+  reading the module with `--disable-verify` is no own verdict. valid-wide 413 -> 419 of 420; the one left classed in
+  `test/llvm/valid-wide-known.tsv` until opt's record. A first version made every `--disable-verify` RUN line void the own verdict and
+  lost reject-av's `Assembler-attribute-builtin` (an `invalid` claim from another RUN line): restricted to `valid` claims, the other
+  lists' records came back unchanged. `check verify-llvmtest` re-recorded (11 fixed by LL4's messages). Alternative considered: running
+  each RUN line's substitution and requiring every result to verify (lit runs each); one substitution suffices for a verdict of the
+  module's text, and the corpora's tests substitute a type or an opcode alike in every line.
+- **4 (a), built.** `bin/lib/crops/take.bash` (`crop_take`): a worktree's missing crop input taken from the main checkout by hard link,
+  refused when the main checkout has none; used by `bin/repr-ocaml corpus fetch` and its opam set. The main checkout's
+  `.tmp/repr-ocaml/src` seeded from ocaml-90's copies (hard links; pins checked). Proved under stubs: no download, no compiler call.
+  Alternative considered: generalizing `bin/lib/repr-haskell/inputs.bash` in place (rejected: batch 2's proven code, and Haskell's git
+  checkout of nofib has its own function).
+- **Batch 2's 9 (a), built.** `bin/repr-haskell corpus fetch`'s configure test un-inverted; proved under stubs, with a control that calls
+  the compiler stub when `REPR_HASKELL_CONFIGURE=1`. Found: `haskell-native-inputs` is STALE at the helper's new hash, so the native reads
+  wait for the night's `record-native-inputs`.
+- **1 (a)**: HE9 ported by hand the day after batch 3's night (doc/AGENDA.md, "The day after batch 3's night"); not started.
+- **3 (a)**: the GPL line's branches deleted locally and on `mac` by the main session once batch 3 is on `next`.
+- The REAP matrix and the scores re-recorded (LLVM's read cell after the verify re-record: completeness 96.4).
