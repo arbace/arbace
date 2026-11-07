@@ -305,6 +305,37 @@ module, alex's outputs with and without CPP and HR26's module included, equal.
 `test/haskell/full/Space.hs` (tabs, a CRLF, trailing blanks, a form feed, Unicode syntax...) read
 natively and printed: byte for byte.
 
+### The converter's limits of mode `:full`, lifted (2026-11-04, branch `haskell-full2`)
+
+The 3 modules of the list and the 4 of the 88 that the converter rejected in mode `:full`, for the
+helper's dump as for the native one, had two causes, both in the pairing of the full layout's tokens
+with the dump's (`arbace.repr.haskell.full`), neither in the tree:
+
+- **Haskell from another file** (`Incl.hs`, `Trad.hs`, `filepath`'s and `os-string`'s Posix and Windows
+  modules: a CPP `#include` of a file whose text is Haskell). The dump's text is the module view (SPEC
+  §2.8: the other files' lines dropped) and its tokens are the module's file's, so the tokens of the
+  included nodes (the converter marks the first form of each file with `:hs/file`, R5) are in no text. The
+  full layout (`print.ae`) now follows the forms' files: a node of a file other than the module's
+  (`:file`, or `:hs/module-file` for an `.hsc`'s output) prints no token (`foreign?`; `at!` takes the
+  file of a form, a documentation form's included, a pragma's not: its file only names a `{-# LINE #-}`),
+  so the printed module is the module view byte for byte, as §2.8 defines the text level's reference.
+  The forms keep the included nodes (the layouts of mode `:lines` print them with `{-# LINE #-}`). What
+  it does not do is HR18 (c): the other files' text and tokens in the forms, which the module view would
+  then hold whole; the helper's dump has neither.
+- **A macro expansion in a literate module** (`Lit.lhs`: unlit, then CPP). The dump's text is the
+  literate source, its tokens the lexer's on unlit's and CPP's output, so `x = __GLASGOW_HASKELL__` has
+  the token `914` at the columns of three of the source's characters. `full/expand-macros` finds, where
+  the printer's token is not the source's at a position, the identifier there (the macro's name) and
+  replaces it in the text by the token, when the dump's span has the token's width, so that the text is
+  the source with its object-like macros expanded and the later tokens of the line at their columns: the
+  text the forms print back (as a CPP module's, which is the preprocessed text, never the source with its
+  macros). A function-like macro or an expansion of several tokens is still an error. `native-check`
+  expects that text (`want`).
+
+Results (same day, stage 0 as above): `native-check --full` 60 of 60 equal (`:lines` 60 of 60), the 88
+preprocessed modules 88 of 88 in `:full` and in `:lines`, and `bin/repr-haskell test`'s ten steps ok
+(the samples' round trips, mode `:full` byte for byte, unchanged).
+
 ## The converter's fixes (2026-11-04, branch `haskell-pp`)
 
 The three rare-syntax modules the native reader was checked on showed bugs of the converter
@@ -357,11 +388,239 @@ derived from the target's facts (they are a few dozen `#define`s of sizes and fe
 from the corpus's own `.cabal` files, and hsc2hs's run on ci (the C program hsc2hs writes, run by Arbace's C interpreter, as
 `bin/hsi`'s programs' own C already is): FRONTEND-SURVEY's proposal HFS-I2.
 
+## Messages
+
+A module GHC rejects gets, from the native reader, the text `ghc -fno-code` prints for it on standard
+error (built on 2026-11-04, branch `haskell-errors` from `haskell-native` at `61d0f191`): the parser's
+messages in GHC's format, `FILE:LINE:COL: error: [GHC-NNNNN]` (or `warning: [GHC-NNNNN] [-Wflag]`)
+hung over the message, its hints (`Suggested fix:`), the caret lines and a blank line.
+
+- **The reference.** The helper's verb `errors` (`hsdump errors -o DIR ... FILE...`) writes
+  `DIR/FILE.errors`, empty for a module GHC accepts, and `DIR/FILE.errors.hspp`, the text parsed (so a
+  CPP module's messages are checked on the same text). It emulates the driver's two parses: the
+  header first (`GHC.Parser.Header.getImports`' `parseHeader`, a `%partial` parser), its errors alone
+  when it fails or records errors (the downsweep's, no `Compiling` line); else the module's, a failed
+  parse's warnings and then its errors (`handleWarningsThrowErrors`), a parse that succeeds with errors
+  its errors alone (the Hsc monad's warnings are dropped with the exception). It prints through GHC's
+  own `printMessages` and `defaultLogActionWithHandles` at the module's flags, so the text is GHC's:
+  checked equal to `ghc -fno-code`'s standard error on hand cases. The `dump` verb now rejects the
+  modules the driver rejects as well (a header error, a parse with errors); the dumps of the modules
+  it accepts are unchanged (the helper's version stays 4).
+- **The messages as data** (`arbace.repr.haskell.errors`): `{:con :span :args}`, the constructor of
+  `GHC.Parser.Errors.Types` (`:PsErrParse`, `:PsErrLexer`, `:PsErrInPat`...) with its fields as the
+  native reader has them. A fatal one (`addFatalError`) is thrown (`lex/fatal!`, the message in the
+  exception's `:ps-message`); a non-fatal one (`addError`) is kept in the lexer state's errors, a
+  warning in its warnings (the tab warning counted as `getPsMessages` adds it, at the first tab;
+  `-Wunrecognised-pragmas` with its suggestions, `-Woperator-whitespace-ext-conflict`,
+  `-Wstar-is-type`, `-Wdeprecated-pragmas`' SPECIALISE), filtered by the module's `-W` flags
+  (`header/warning-on?`: `-w`, `-W`, `-Wall`, `-Weverything`, `-Wcompat`, `-W<flag>`,
+  `-Wno-<flag>`; `standardWarnings` by default). `native/read-text` gives `{:messages [warnings
+  errors]}` in the driver's order, the header's parse run when the module's fails.
+- **Where they are made.** The lexer: `reportLexError` with the span to where Alex's automaton
+  stops (`lex/dfa-stop`: within a string or a character literal), a `\0` as a UTF-8 decoding error
+  at its position, unterminated comments (a documentation comment's from after its decoration),
+  OPTIONS pragmas and quasi-quotes to the end, a numeric escape out of range at its digit, smart
+  quotes (`PsErrUnicodeCharLooksLike`), the suffix `@`, `Missing block`, lambda-case, numeric
+  underscores, primitive strings. The parser: `srcParseErr` from the last token (its text, or none for
+  a virtual token: the message's "possibly incorrect indentation"), with its details for the hints
+  (the last 100 and 8 characters as `StringBuffer.decodePrevNChars` takes them, which leaves out the
+  character before the position), `popContext`'s, and the `%partial` header parser's accept on the
+  error token. The post-processing and the actions: every `PsErr` constructor the port raises, with
+  GHC's spans and fields (patterns with the parse context: an infix function binding's operator,
+  `bindpat`'s incomplete do block), and the non-fatal checks of `PostProcess.hs` and `Parser.y`
+  (`BlockArguments`, an empty lambda, as-, lazy and bang patterns in expressions and `BangPatterns`,
+  or-patterns, multi-way if, `forall`, linear arrows and `looksLikeMult`, qualified do, explicit
+  namespaces, `ImportQualifiedPost`, `data T where`, `TraditionalRecordSyntax`, `DoAndIfThenElse`,
+  `@` in a pattern).
+- **The text.** `arbace.repr.haskell.doc` ports `GHC.Utils.Ppr` (Hughes and Peyton Jones's
+  printer: `beside`, `above`, `sep`, `fill`, `best`, `display`, 100 columns and 1.5 ribbons) with
+  Outputable's combinators (Unicode quotes); its reduction and its rendering walk long `vcat`s in loops,
+  as a 1,400-line message needs (the interpreter's depth of 10,000 calls). `arbace.repr.haskell.errors`
+  holds the codes (`GHC.Types.Error.Codes`' 123 of the parser), each constructor's documents, its
+  reason and hints (`GHC.Types.Hint.Ppr`'s, the implied extensions from `impliedXFlags`, the pragma
+  and role suggestions by `fuzzyLookup`), the header, `formatBulleted`, the caret lines
+  (`getCaretDiagnostic`: tabs expanded, `\0` shown as U+FFFD, a multi-line span's `...`, the line read
+  from the file the span names) and the order (`sortMsgBag`: by span, stably over the bag, whose
+  newest message is first). `arbace.repr.haskell.pprhs` is the parsed tree as GHC's Outputable
+  instances print it (expressions, patterns, `PatBuilder`, types, literals, matches, statements,
+  bindings, signatures), with `pprDeeper`'s depth of 5 and `pprDeeperList`'s `....`.
+
+- **The driver's header phase** (`arbace.repr.haskell.fileargs`, 2026-11-05, branch `haskell-errors2`).
+  GHC's driver reads a module's header before it parses it (`getFileArgs`: `getOptions`, then the
+  pragmas' flags through `parseDynamicFilePragma`, then `checkProcessArgsResult`), and what it finds there
+  stops it or comes before the parse's messages. The helper's `errors` verb runs the same three
+  functions (`driverHeader`); the native reader ports them. `getOptions'` over the pragma-state lexer's
+  tokens: a LANGUAGE pragma that does not parse (`PsErrParseLanguagePragma`, at the token), an OPTIONS_GHC one
+  (`toArgs` with GHC's locations: `PsErrParseOptionsPragma`, over the pragma), an extension GHC does not
+  support (`PsErrUnsupportedExt`, with `fuzzyMatch` over `supportedLanguagePragmas`, in the order of the
+  generated `arbace.repr.haskell.flags`; GHC throws it when `processArgs` reaches the argument, so after
+  any pragma that does not parse); the misplaced pragmas' warnings (`-Wmisplaced-pragmas`), lazily. `processArgs`
+  over the table of `flagsDynamic` (`flags.ae`, 2,300 names and `OptKind`s, generated by `hsdump flags`;
+  `findArg`'s shortest rest, `processOneArg`'s kinds): a malformed argument (`-fmax-errors=x`) or a missing
+  one is a usage error, printed as ghc's driver does (`ghc-9.14.1: FILE:L:C1-C2: malformed integer argument in
+  -fmax-errors=x`, then the usage line); a flag no dynamic flag takes (`-fbogus`, `-XFooBar`) is
+  `PsErrUnknownOptionsPragma`, one message each; an unrecognised `-W` flag a warning
+  (`DriverUnrecognisedFlag`, `-Wunrecognised-warning-flags`), `-#include` a deprecation
+  (`DriverDeprecatedFlag`), both printed before the parse's messages. The flag effects the messages need
+  are `header/dyn-flags`'s (the extensions, the warnings, the diagnostics' flags below); other
+  dynamic flags are checked for their shape and ignored.
+- **`-Werror` and the warnings' flags.** `-W`, `-Wno-`, `-Werror=`, `-Wwarn=`, `-Wno-error=` and their groups
+  (`-Wall`, `-Wcompat`, `-Weverything`...), `-fwarn-` and `-fno-warn-`, `-Werror`, `-Wwarn`, in the
+  command line and in OPTIONS_GHC: a warning that is fatal is an error printed `error: [GHC-94817] [-Wtabs,
+  Werror=tabs]`. As in GHC (`partitionMessages` does not see -Werror warnings) a failed parse prints
+  every warning first (the fatal ones as errors) and then its errors; a parse that succeeds with only fatal
+  warnings is rejected (`errorsOrFatalWarningsFound`), all its warnings in one batch.
+- **The diagnostics' flags.** `-ferror-spans` (`FILE:L:C1-C2:`, `FILE:(L,C)-(L,C):`), `-fdiagnostics-show-caret`
+  and `-fno-diagnostics-show-caret` (GHC 9.14 spells them so; `-fno-show-caret` is an unrecognised
+  flag), `-dppr-cols=N` (the width of the rendering), and `-fdiagnostics-as-json` (schema 1.1: one JSON line a
+  message, `GHC.Types.Error`'s `ToJson`: span, severity, code, message and hints rendered one by one, the
+  warning's flag; the helper points standard error at the file while it prints, as the JSON log action
+  writes there whatever the hook). In a pragma these apply to the messages after the header, as in
+  GHC (checked: `-fno-diagnostics-show-caret` in OPTIONS_GHC).
+- **Constructors added.** `PsErrIllegalDataTypeContext` (`mkDataDefn`), `PsErrUnpackDataCon`,
+  `PsErrInvalidInfixDataCon`, `PsErrIllegalPromotionQuoteDataCon` (`mkUnpackednessPV`, `mkHsOpTyPV`,
+  `tyToDataConBuilder`), `PsErrIllegalGadtRecordMultiplicity` (`mkGadtDecl`), `PsErrIllegalUnboxedStringInPat`
+  and `...FloatingLitInPat` (`checkUnboxedLitPat`), `PsErrDeclSpliceNotAtTopLevel` (`cvBindsAndSigs`),
+  `PsErrUnallowedPragma` (`rejectPragmaPV` at an infix operand, a type signature and a section),
+  `PsErrInvalidPun` (`requireLTPuns`, seven rules), `PsErrInvalidPackageName` (`maybe_pkg`),
+  `PsErrInvalidRuleActivationMarker`, `PsErrOverloadedRecordUpdateNoQualifiedFields` (fatal, at the first
+  qualified field), and `-Wstar-binder`; the printing of `{-# SCC #-}`, declaration splices, `Float#` and
+  `Double#` literals and strictness marks in record types.
+
+The check: `bin/repr-haskell native-check --errors [--count N] [--seed S] [LIST]` gives each module
+of the list, the rejected samples of `test/haskell/errors/` (119 small modules, one or a few errors
+each, their flags in `errors.txt`) and N mutants of each listed module that GHC parses as it is
+(`arbace.repr.haskell.mutate`: one edit at a token or a line from a seeded `java.util.Random`: a token
+deleted, doubled, swapped, replaced or preceded by one of a pool of tokens and fragments, a line's
+indentation changed, a line broken or joined) to the helper's `errors` verb and to the native reader,
+and compares the texts (`accepted`: both accept; `equal`: the same messages); report
+`.tmp/repr-haskell/errors-check/report.edn`. `native-check` compares a listed module the helper
+rejects by its messages the same way (`test/haskell/native-check.txt`'s two rejected samples).
+
+Results on 2026-11-04 (stage 0 `/root/arbace/target/seed/amd64/arbace`): the samples and the list
+alone (`--count 0`): 135 modules, 80 equal, 55 accepted; with mutants, every run all equal or
+accepted: seed 1 and 30 mutants a module 1,254 modules (782 equal, 472 accepted), seed 2 and 40
+1,654, seed 3 and 40 1,654, seed 4 and 40 1,735 (1,096 equal, 639 accepted), seed 5 and 60 2,657 (1,724 equal, 933
+  accepted, 2.7 minutes); about 0.1 s a
+module natively, the helper's runs most of the two minutes of a run of 1,700. `native-check`: 54 of 54
+trees equal, the 2 rejected modules' messages equal.
+
+Results on 2026-11-05 (branch `haskell-errors2`; the same stage 0): the samples are 121 now (39 more: the
+header phase, `-Werror`, the diagnostics' flags, the rarer constructors; `errors.txt`), and every one of
+the 121 prints, from the helper and from the native reader, what `ghc -fno-code FLAGS FILE` prints on standard
+error, byte for byte (checked against ghc itself, not only against the helper). Mutants of the list with
+the samples: seed 6 and 40 a module 1,854 modules (1,186 equal, 668 accepted), seed 13 the same
+(1,219, 635), seed 14 (after the last fixes) 1,857 (1,166, 691), all equal or accepted; and `test/haskell/errors-check.txt` (two accepted modules with rich
+headers, `test/haskell/errors-base/`, the mutator's pool with header pragmas and flags added): seeds 7 to
+12 and 15 and 150 mutants each 420 modules a run (about 300 equal, 120 accepted), after three differences
+found and fixed (a record field's `!` in a message; Alex's last smart quote inside an unterminated
+string; the stop point after a prefix of an escape's name, `'\\Foo`).
+`native-check` (the trees): 54 of 54 equal, the 2 rejected modules' messages equal.
+
+- **The rarer messages (2026-11-04, branch `haskell-errors3`).**
+  `PsErrSpliceOrQuoteTwice` (`import splice M quote`: `importDeclLevelStyle`; ExplicitLevelImports).
+  `PsErrExpectedHyphen` is a constructor of `GHC.Parser.Errors.Types` that nothing in GHC 9.14.1 raises
+  (grep over `compiler/`: its type, its Ppr and its code only), so there is nothing to port.
+  The warnings: `-Wunicode-bidirectional-format-characters` (`hscParse'`'s `checkBidirectionFormatChars`,
+  which logs before the parse, so only a parse that goes through has it, in the one batch of a rejected
+  `-Werror` module; the helper's `errors` verb has the same check now, `bidiWarning`, GHC's being
+  unexported), `-Wview-pattern-signatures` (`addSigPatP`: both parses, `add_parens_sig` and
+  `add_parens_view`, as a three-document message), the two Haddock warnings of `-Winvalid-haddock` (the
+  comments left over, `PsWarnHaddockInvalidPos`, and `selectDocString`'s extra ones,
+  `PsWarnHaddockIgnoreMulti`, whose state a `peekHdkM` rolls back; the pass ends GHC's parse of a module,
+  so its warnings are the parse's), `-Wpattern-namespace-specifier` (the export and import items).
+  `PsWarnTransitionalLayout` needs the alternative layout rule, which the native lexer does not run
+  (`AlternativeLayoutRule` is a bit, not a mode), so it stays unraised.
+  The deprecated flags: `flags.ae` holds `deprecated-flags` now, generated by `hsdump flags`, which runs
+  each flag of `flagsDynamic` through `parseDynamicFlagsCmdLine` with the arguments 1 and 2 and records
+  the `DriverDeprecatedFlag` it warns with (a message that names the argument is a template, `%s`: 189
+  flags, `-fglasgow-exts`, `-fcontext-stack=N`, the `-fwarn-`/`-Wno-` names of removed warnings, the
+  `-X` of deprecated extensions); `processArgs` adds `deprecate`'s warning when the flag took its
+  argument. The command line's flags are processed the same way (`fileargs/command-line`): ghc's main
+  prints their warnings first, `on the commandline: warning: ...`, newest first, and stops there when one
+  is fatal (`-Werror`); the helper passes its flags located `on the commandline` (as ghc's main does) and
+  prints that batch before the module's. Response files: `@file` in the command line and in an OPTIONS_GHC
+  pragma, `parseResponseFile` over `unescapeArgs` (quotes, backslashes, nested files), the arguments
+  located at the file's name (`resp.txt: warning: ...`), looked for in the module's directory; a file that
+  cannot be read is the error `Could not open response file` (ghc's command line panics in that case, its
+  pragma path was not checked).
+  The placeholders of `pprhs`: arrow commands (`ppr_cmd`: application, lambda, case, if, let, do, the
+  four arrow applications, `(| |)` forms, with `pprCmd`'s depth), quasi-quotes and splices in expressions
+  and types, the quotation brackets (`[| |]`, `[e| |]`, `[p| |]`, `[t| |]`, `[d| |]` with value
+  declarations, `[|| ||]`), `.field` selections and projections, `{-# SCC #-}` before an expression
+  (and its unquoted name), parallel and transform comprehensions, the spacing of arithmetic sequences
+  (`[x .. ]`); the location of `PsErrOverloadedRecordUpdateNotEnabled` (the record expression's). Still
+  placeholders: type, class and instance declarations inside `[d| |]` (`<TyClD>`: the Outputable
+  instances of `GHC.Hs.Decls`). Their samples are in `test/haskell/errors/` (`Pr*`, `Pq*`, `Pt*`
+  for the placeholders, the others named by their message).
+
+Results on 2026-11-04 (branch `haskell-errors3`; the same stage 0): the samples are 166 now, each printed
+from the helper and from the native reader as `ghc -fno-code FLAGS FILE` prints it (the new ones checked
+against ghc itself while written), all equal. The seeds the earlier branch ran and nobody re-checked, on
+`test/haskell/native-check.txt` with 40 mutants a module: seed 6 1,899 modules, 1,209 equal and 689
+accepted, and one difference (`PsErrUnexpectedTypeInDecl` of a family printed a trailing blank: the
+words after the head are `empty` there, not `text ""`), fixed and run again: 1,210 equal, 689 accepted;
+seed 13 1,899 (1,264 equal, 635 accepted); seed 14 1,899 (1,208 equal, 691 accepted); and the rich-header
+list `test/haskell/errors-check.txt`, seed 16 and 150 mutants: 468 modules (352 equal, 116 accepted).
+`native-check` (the trees): 54 of 54 equal. The mutator's pool did not change (the seeds stay
+reproducible): its headers do not reach the deprecated flags or the response files, the samples do.
+
+## Speed (2026-11-04, branch `parsers-speed`)
+
+Profiled on stage 0 (the evaluator over the checkout's namespaces; the method and the evaluator's costs, one call 100 to 150
+ns, an allocation 100 ns and more, `aset` of a boxed value into a typed array 50 to 100 times dearer, in doc/ocaml/OCAML-SURVEY.md,
+"Speed (OC173)"). Where the time went, a 40 KB module of 4,520 tokens (Cabal's `PackageDescription/Parsec.hs`) before: lexing
+218 ms (a token and its blank 30 to 60 µs: `scan!` allocated its accumulator, tried every rule's predicates by calls of the
+character functions and walked `m-run` with a function per code point), the driver and the actions 270 ms (an `ArrayList` of
+states and one of values, a sub-list copied to a vector for every reduction), the Haddock pass 10 ms, `to-dump` 55 ms and
+`pr-str` 97 ms.
+
+| | before | after |
+|---|---:|---:|
+| `Parsec.hs` (40 KB): lexing alone; parse with lexing; Haddock; `to-dump`; text | 218; 487; 10; 55; 97 ms | 140; 265; 10; 60; 79 ms |
+| `Data/Fixed.hs` (15 KB), the same | 81; 158; 14; 20; 33 ms | 59; 97; 14; 19; 28 ms |
+| `read` of 15 modules (407 KB), process start included | 11 s | 7 s |
+| `read` of 128 modules (1.4 MB), process start included | 27 s | 16 s |
+| `native-check` (54 modules), the native reads | 7.6 s (recorded) | 6.0 s |
+
+What changed (`parse.ae`, `lex.ae`, `ast.ae`, `native.ae`; the dumps byte for byte the same on 15 and on 124 modules, the
+failures the same): the LR driver keeps the states and the values in two arrays of a `loop`, and calls an action with its
+arguments read from the array (no vector, no sub-list), the token's terminal found in a `HashMap` (the `Long/valueOf`
+that was reflective is typed); the lexer has a table of the character classes (the predicates' answers for ASCII, computed
+from the predicates themselves; macros `small?*`, `idchar?*`, `run*`... inline them) and `scan-fast`, which answers in the
+start codes `:s0` and `:bol` when the byte alone decides (blanks, a lowercase letter's variable, a newline, a special
+character, an operator that begins no comment or bracket, the empty `do_bol` rule), leaving `scan!` the rest; `scan!`
+reuses its accumulator, `set-input!` and the span are made without intermediate vectors, `combine` without three; `read`
+writes the dump with `write-form`/`write-dump`, a printer for the dump's data (lists, vectors, strings, symbols, keywords,
+integers; any other value by `pr-str`) that also applies `to-dump`'s changes while it writes, the text the same as
+`pr-str` of the converted tree (tried on all code points below 400 in a string). The start of the process (the namespaces
+from source, `tables.ae` decoded) is about 2 s, unchanged. What is left: the lexer is a third of a module's time, the actions
+25 µs a token (the ECP closures and `comb`s), the process start; compiled with the program (c2j) at a re-seed the next step.
+
+On batch 3 (2026-11-07) the speed commits were re-applied onto the errors and preprocessing lines (merge plan §3 item 32):
+the fused writer writes mode `:lines`' dumps (`read` without `--mode full`); mode `:full`'s dumps, whose tree `full-data`
+remaps, are printed by `form-text` of the converted tree.
+
 ## What is left
 
-- Rejected files' messages: a parse error throws with the offending token's span (`parse error on
-  input`), not GHC's `PsMessage` text, and PostProcess's errors are reported with their spans in
-  short words; GHC's messages (and the lexer's) are a later step. The warnings (`-Winvalid-haddock`,
-  `-Woperator-whitespace`...) are not kept, as the dump has none.
+- Messages: `PsWarnTransitionalLayout` (the alternative layout rule is a lexer bit, not run);
+  declarations inside `[d| |]` in a message (`<TyClD>`, `<InstD>`, `<DerivD>`, `<ForD>`, `<FixSig>`,
+  `<InlineSig>`, `<DefD>`, `<PatSynBind>`, `<SpliceD>`, `<RoleAnnotD>`, `<RuleD>`, `<AnnD>`: the Outputable
+  instances of `GHC.Hs.Decls`); the effects of dynamic flags other than the extensions, warnings,
+  diagnostics and `-cpp`/`-haddock` (shape only); `-fdiagnostics-color=always` and
+  `-fprint-error-index-links=always` (escape sequences); a response file ghc cannot open (its command line
+  panics); Alex's stopping point beyond strings and characters. `PsErrExpectedHyphen` is not raised by GHC
+  9.14.1 itself.
 - hsc2hs natively: it runs a C program (above); an `.hsc` module still needs the helper.
-- Speed: on stage 0's evaluator about 0.1 to 0.3 s a module; not yet compiled (c2j) or tuned.
+- Speed: on stage 0's evaluator about 0.06 to 0.2 s a module after the tuning above (0.1 to 0.3 s before); not yet
+  compiled (c2j).
+
+## Decided (the user, 2026-11-07: batch 2's proposal 9) and as built
+
+**9 (a).** `bin/repr-haskell corpus fetch` in native mode no longer runs the packages' configure scripts: its test (`[ -n "$live" ] || [ !
+-f "$ninputs_pin" ] || [ -n "${REPR_HASKELL_CONFIGURE:-}" ] && continue`) skipped exactly when configure was meant to run; now configure
+runs only live, without the native-inputs pin, or with `REPR_HASKELL_CONFIGURE=1`; the configure products come from the pack
+`haskell-native-inputs-ghc-9.14.1`. Proved on batch 3 (`bc4fb64f8`): a fresh worktree corpus fetched under stubs of the C compilers,
+GHC's tools, curl and wget (exiting 99), none called; the control `REPR_HASKELL_CONFIGURE=1` calls the gcc stub. The native reads are
+STALE until the night's `bin/repr-haskell record-native-inputs` (the pack is keyed by the helper's hash, which haskell-errors3's verbs
+moved).

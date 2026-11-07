@@ -54,7 +54,9 @@
 #                                 or for forms of mode :full the full layout (the original text, byte
 #                                 for byte; --layout braces: the braces layout); --layout layout: the
 #                                 layout layout (Haskell's layout rule, as a person writes it; R4)
-#   bin/repr-haskell roundtrip [--only REGEX] [CORPUS]
+#   bin/repr-haskell roundtrip [--only REGEX | --only-list FILE] [CORPUS]
+#                                 (--only-list FILE, GT9: the modules FILE names, PKG/FILE a line (the package and file columns of `corpus list`), as one --only
+#                                 regex of those names alone: the gate's rotation)
 #                                 the round trip's tree level (SPEC §9.1, §9.2) over the corpus:
 #                                 read, print into .tmp/repr-haskell/cand/CORPUS/PKG/, and compare
 #                                 GHC's trees (hsdump tree: showAstData BlankSrcSpan
@@ -127,7 +129,20 @@
 #                                 .tmp/repr-haskell/native-check/report.edn; --full: mode :full (the
 #                                 helper's dump --full; the text and the lexer's tokens with the
 #                                 comments compared too, the native forms printed in the full layout
-#                                 against the text, byte for byte)
+#                                 against the text, byte for byte); a module the helper rejects
+#                                 compared by its messages (below). The negative controls (GT9;
+#                                 test/haskell/native-controls.txt, REPR_HASKELL_NATIVE_CONTROLS): `ID SUBJECT
+#                                 REFERENCE`, modules of the list: the subject's module read natively and judged by
+#                                 the check against the reference's dump, which must differ (`control ID fails as
+#                                 it must`), else the check fails
+#   bin/repr-haskell native-check --errors [--count N] [--seed S] [LIST]
+#                                 the parser's messages (doc/haskell/NATIVE.md, "Messages"): each
+#                                 module of LIST, the rejected samples of test/haskell/errors/ (their
+#                                 flags in its errors.txt) and N mutants (default 10, seed 1) of each
+#                                 listed module that needs no preprocessing (arbace.repr.haskell.mutate)
+#                                 given to the helper's errors verb (what ghc -fno-code prints) and
+#                                 read natively, the texts compared; report
+#                                 .tmp/repr-haskell/errors-check/report.edn
 #   bin/repr-haskell test [--oracle | --record | --verify-records]
 #                                 (ORS12: on the records, no GHC; --oracle with GHC reading the print; bin/lib/repr-haskell/test)
 #                                 the spec's cases (test/haskell/; bin/lib/repr-haskell/test): the
@@ -306,8 +321,10 @@ corpus_fetch() {
     local pl; pl=$(mktemp "$TMPDIR/repr-haskell-plan.XXXXXX")
     corpus_configure "$c" > "$pl"
     while IFS=$'\t' read -r pname pdir pfiles; do
-      # the native reads take the products from the pack (native_place_inputs): no C compiler at check time
-      [ -n "$live" ] || [ ! -f "$ninputs_pin" ] || [ -n "${REPR_HASKELL_CONFIGURE:-}" ] && continue
+      # the native reads take the products from the pack (native_place_inputs): no C compiler at check time; configure runs
+      # only live (the helper's reads), without the pack's pin, or with REPR_HASKELL_CONFIGURE=1 (batch 2's proposal 9 (a): the
+      # test was inverted, `A || B || C && continue` skipping exactly when configure was meant to run)
+      if [ -z "$live" ] && [ -f "$ninputs_pin" ] && [ -z "${REPR_HASKELL_CONFIGURE:-}" ]; then continue; fi
       need=""
       for f in $pfiles; do [ -f "$dir/$name/$pdir/$f" ] || need=1; done
       [ -n "$need" ] || continue
@@ -789,10 +806,11 @@ iface_level() {
 }
 
 roundtrip() {
-  local c=ghc-9.14.1 only="" iface="" tree=1 text="" layout="" st=0
+  local c=ghc-9.14.1 only="" only_list="" iface="" tree=1 text="" layout="" st=0
   while [ $# -gt 0 ]; do
     case $1 in
       --only) only=$2; shift 2 ;;
+      --only-list) only_list=$2; shift 2 ;;
       --iface) iface=1; shift ;;
       --iface-only) iface=1; tree=""; shift ;;
       --text) text=1; shift ;;
@@ -802,6 +820,14 @@ roundtrip() {
       *) c=$1; shift ;;
     esac
   done
+  # GT9 --only-list FILE (the gate's rotation): the modules' files FILE names, a path a line, as `corpus list` prints them, as one --only regex of
+  # those names alone (not inside a longer name: not preceded by a word character, a . or a -, not followed by a word character, a - or a /)
+  if [ -n "$only_list" ]; then
+    [ -z "$only" ] || { echo "repr-haskell: --only-list and --only are two ways to the same selection" >&2; return 2; }
+    [ -s "$only_list" ] || { echo "repr-haskell: --only-list $only_list: no such file or empty" >&2; return 2; }
+    only=$(awk 'NF { printf "%s\\Q%s\\E", (n++ ? "|" : ""), $0 }' "$only_list")
+    only="(?<![\\w.-])(?:$only)(?![\\w/-])"
+  fi
   # the reader of both sides (2026-11-07): native by default, no GHC (the round trip's verdict its own: the printed modules
   # read again give the originals' forms, the text level's print the original text byte for byte); REPR_HASKELL_READER=helper:
   # GHC's trees of both sides, the oracle tier's; the interface level is GHC's (the oracle tier's) whatever the reader
@@ -1349,7 +1375,7 @@ native_check() {
   rm -rf "$w"; mkdir -p "$w"
   local pl; pl=$(mktemp "$TMPDIR/repr-haskell-plan.XXXXXX")
   corpus_plan ghc-9.14.1 all > "$pl"
-  : > "$w/list.txt"
+  : > "$w/list.txt"; : > "$w/errors.txt"
   local d f rest hargs mf
   while read -r d f rest; do
     case $d in ''|'#'*) continue ;; esac
@@ -1377,13 +1403,93 @@ native_check() {
          --ghc $flags --files "$f") 2>> "$w/helper.err" || true
       src=$w/hspp/$key/$mf.hspp
     fi
+    if grep -q '^(hsdump/error' "$w/dumps/$key/$mf.edn" 2> "$TMPDIR/repr-haskell-grep.txt"; then
+      # a module the helper rejects: compared by its messages (the helper's errors verb)
+      # shellcheck disable=SC2086
+      (cd "$dir" && "$helper" errors -o "$w/errors/$key" --libdir "$libdir" --repo "$root" $hargs --ghc $flags --files "$f") 2>> "$w/helper.err" || true
+      printf '%s %s %s %s %s\n' "$w/errors/$key/$mf.errors" "$w/errors/$key/$mf.errors.hspp" "$mf" "$dir" "$flags" >> "$w/errors.txt"
+      continue
+    fi
     # the native reader preprocesses natively from the module's directory; the helper's text is
     # the reference its preprocessing is compared with
     [ "$src" = "$dir/$f" ] && src=-
     printf '%s %s %s %s\n' "$w/dumps/$key/$mf.edn" "$dir" "$mf" "$src" >> "$w/list.txt"
   done < "$list"
   rm -f "$pl"
-  arbace_tool -m arbace.repr.haskell.native check --list "$w/list.txt" --libdir "$libdir" --mode $mode --report "$w/report.edn"
+  local st=0
+  arbace_tool -m arbace.repr.haskell.native check --list "$w/list.txt" --libdir "$libdir" --mode $mode --report "$w/report.edn" \
+    --controls "${REPR_HASKELL_NATIVE_CONTROLS:-$root/test/haskell/native-controls.txt}" || st=1
+  if [ -s "$w/errors.txt" ]; then
+    arbace_tool -m arbace.repr.haskell.native errors --list "$w/errors.txt" --report "$w/errors-report.edn" || st=1
+  fi
+  return $st
+}
+
+# errors_check [--count N] [--seed S] [LIST]: the messages' check (native-check --errors)
+errors_check() {
+  local count=10 seed=1 list=$root/test/haskell/native-check.txt w=$rh/errors-check
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --count) count=$2; shift 2 ;;
+      --seed) seed=$2; shift 2 ;;
+      *) list=$1; shift ;;
+    esac
+  done
+  corpus_fetch ghc-9.14.1 > "$TMPDIR/repr-haskell-fetch.txt"
+  rm -rf "$w"; mkdir -p "$w/base" "$w/m"
+  local pl; pl=$(mktemp "$TMPDIR/repr-haskell-plan.XXXXXX")
+  corpus_plan ghc-9.14.1 all > "$pl"
+  : > "$w/list.txt"; : > "$w/bases.txt"
+  local d f rest hargs mf dir flags key
+  # the rejected samples (test/haskell/errors/errors.txt: FILE [FLAG...])
+  if [ -f "$root/test/haskell/errors/errors.txt" ]; then
+    mkdir -p "$w/src/errors"; cp -R "$root/test/haskell/errors/." "$w/src/errors/"
+    while read -r f rest; do
+      case $f in ''|'#'*) continue ;; esac
+      flags=${rest:--XGHC2021}
+      # shellcheck disable=SC2086
+      (cd "$w/src/errors" && "$helper" errors -o "$w/errors/errors" --libdir "$libdir" --ghc $flags --files "$f") 2>> "$w/helper.err" || true
+      printf '%s %s %s %s %s\n' "$w/errors/errors/$f.errors" "$w/errors/errors/$f.errors.hspp" "$f" "$w/src/errors" "$flags" >> "$w/list.txt"
+    done < "$root/test/haskell/errors/errors.txt"
+  fi
+  while read -r d f rest; do
+    case $d in ''|'#'*) continue ;; esac
+    hargs=""
+    if [ "${d#test:}" != "$d" ]; then
+      dir=$w/src/${d#test:}; flags=${rest:--XGHC2021 -haddock}; key=test/${d#test:}
+      [ -d "$dir" ] || { mkdir -p "$dir" && cp -R "$root/test/haskell/${d#test:}/." "$dir/"; }
+    else
+      IFS=$'\t' read -r _ dir flags _ hargs < <(grep -P "^$d\t" "$pl")
+      [ -n "$dir" ] || { echo "repr-haskell: native-check --errors: no package $d" >&2; continue; }
+      dir=$srcroot/$dir; key=$d
+    fi
+    mf=$f; [ "${f%.hsc}" != "$f" ] && mf=${f%c}
+    # shellcheck disable=SC2086
+    (cd "$dir" && "$helper" errors -o "$w/errors/$key" --libdir "$libdir" --repo "$root" $hargs --ghc $flags --files "$f") 2>> "$w/helper.err" || true
+    printf '%s %s %s %s %s\n' "$w/errors/$key/$mf.errors" "$w/errors/$key/$mf.errors.hspp" "$mf" "$dir" "$flags" >> "$w/list.txt"
+    # mutants of a module GHC parses as it is (no preprocessing)
+    if [ "$mf" = "$f" ] && [ -f "$w/errors/$key/$mf.errors.hspp" ] && cmp -s "$dir/$f" "$w/errors/$key/$mf.errors.hspp" &&
+       [ "${f%.hs}" != "$f" ]; then
+      mkdir -p "$(dirname "$w/base/$key/$f")"; cp "$dir/$f" "$w/base/$key/$f"
+      printf '%s\t%s\t%s\n' "$key" "$f" "$flags" >> "$w/bases.txt"
+    fi
+  done < "$list"
+  rm -f "$pl"
+  if [ "$count" -gt 0 ] && [ -s "$w/bases.txt" ]; then
+    # shellcheck disable=SC2046
+    (cd "$w/base" && arbace_tool -m arbace.repr.haskell.mutate --seed "$seed" --count "$count" -o "$w/m" \
+       $(cut -f1,2 "$w/bases.txt" | tr '\t' /)) > "$w/mutants.txt"
+    local k ms
+    while IFS=$'\t' read -r key f flags; do
+      mapfile -t ms < <(grep -F "$key/$f/m" "$w/mutants.txt")
+      # shellcheck disable=SC2086
+      (cd "$w/m" && "$helper" errors -o "$w/errors-m" --libdir "$libdir" --ghc $flags --files "${ms[@]}") 2>> "$w/helper.err" || true
+      for k in "${ms[@]}"; do
+        printf '%s %s %s %s %s\n' "$w/errors-m/$k.errors" "$w/errors-m/$k.errors.hspp" "$k" "$w/m" "$flags" >> "$w/list.txt"
+      done
+    done < "$w/bases.txt"
+  fi
+  arbace_tool -m arbace.repr.haskell.native errors --list "$w/list.txt" --report "$w/report.edn" --quiet 1
 }
 
 cmd=${1:-}
@@ -1459,7 +1565,8 @@ case $cmd in
     fi ;;
   print) arbace_tool -m arbace.repr.haskell print --jobs "$jobs" "$@" ;;
   roundtrip) roundtrip "$@" ;;
-  native-check) ghc_check; build; native_check "$@" ;;
+  native-check) ghc_check; build
+                if [ "${1:-}" = --errors ]; then shift; errors_check "$@"; else native_check "$@"; fi ;;
   tables) ghc_check; tables "$@" ;;
   rn-dump) ghc_check; build; out=$work/out; [ "${1:-}" = -o ] && { out=$2; shift 2; }; flags=(); files=()
            while [ $# -gt 0 ]; do case $1 in --ghc) shift; flags=("$@"); break ;; *) files+=("$1"); shift ;; esac; done

@@ -1839,3 +1839,196 @@ trees' `eval`, not a second machine.
 ## Decided (2026-11-05, the user: HES70-HES73)
 
 All (a): the 1,320 library modules compiled at night once per key under the heavy lock; then the metadata emitted for a standalone executable; the build through Go forms at HE8's end; speed before size (typed locals for unlifted binders, then direct calls between compiled closures).
+
+## As built: HES73 (write-ahead)
+
+Built 2026-11-05 on branch `haskell-speed` from `haskell-integrate` (`7bda6b88`), light work by day (2 jobs, no gate, no lock,
+every process under 2.5 GB; HE8's packages over 4 MB left whole to the night, `HSI_AOT_MAX_KB`). HES73 (a)'s first steps: the
+compiled code's typed locals and direct calls, and what the profiles showed beside them. Not 3 times: the numbers below, and
+why (HES74).
+
+### The profile first
+
+Go's pprof on HE8's compiled `nfib 32` (`hsi run --cpuprofile`): 35 % under the machine's `ret` (the frames' pop, the arena's
+reset, the continuations' dispatch), 14 % in `aotApp`, 15 % allocating thunks, 13 % in Go's allocator and collector, and about
+10 % still interpreted: `GHC.Internal.Classes` (5.7 MB of Go, over `HSI_AOT_MAX_KB`) was left whole to the interpreter, so
+every `<` on `Int` (`ltInt`) ran as nodes. The generated functions themselves were a few percent.
+
+### What is in the tree
+
+- **Typed locals** (`go/arbace/hs/aot.ae`, `aotGen.typed`): an inline primop's value (the 48 of HE8, now with their argument
+  and result types: `Int#` and `Char#` as `int64`, `Word#` as `uint64`, `Double#` as `float64`) in a case of kind prim is a
+  typed Go local, not a boxed `Value` through the return register; its binder's uses by the next inline primops read the
+  local (no interface boxing between primops: a `Double#` chain allocated a box per intermediate value before), a literal
+  case switches on it, other uses box it at the use. env holds it only after a flush, emitted where anything else may read
+  the frame: before a case's frame is pushed, before a jump to a join point, before a node is left to the interpreter; any
+  write of the slot ends the local, and each alternative is a scope of its own. The conversions are hs.AotI/AotW/AotD's
+  whenever the types differ, so a run computes what it computed.
+- **Call sites resolved once** (`CallSite`, `aotCallG`, `aotResolve`): a call whose function is a global resolves its callee
+  at its first evaluated sight and keeps it: the global's function, or, for a class method's selector applied to a global
+  dictionary (the `-O0` programs' every `+`, `-`, `<`), the method itself; an unevaluated callee is resolved later, anything
+  else (a PAP, a thunk's value not a function, another arity) takes `aotApp`'s paths as before. The callee is entered with its
+  frame from the arena (or the caller's in a tail call, as `App.eval`), the argument buffer no longer cleared (eight values).
+- **Direct calls between compiled code** (`aotJump`): a compiled function's next code, when it is compiled too (a known call's
+  body, a thunk's code after `enter` pushed its update frame, a join point's body), is called directly from Go instead of
+  returned to the trampoline, at most `HSI_AOT_DEPTH` (default 4) calls deep between two bounces of `runSlice` (Go has no
+  tail calls), each counted in the slice's budget and only below the stack's limit; the caller returns what the callee
+  returns, nothing is held on Go's stack across it, so update frames, exceptions, asynchronous exceptions, the masks, STM,
+  `control0#` and preemption see the same stack as before. Measured: depth 4 a little faster than none on nfib, 16 slower.
+- **The machine's frames in place** (`machine.ae`; hsi gains too): a case's and an update's frame written into the stack's
+  free slot and read and cleared there on return, no frame copied in and out (`ret`'s two frequent kinds; the rest by
+  `pop`), the cleared slot keeping only its kind and mark.
+- **An oversized library module compiled in part** (`bin/lib/hsi/aot`): a library package over `HSI_AOT_MAX_KB` is
+  generated again with only the closures the program's profile entered (the generator's `UNIT:MODULE NAME` selection), kept
+  by their list's digest (`.tmp/hsi/aot/lib/KEY/part/ID-DIGEST`), compiled when it fits (nfib's part of
+  `GHC.Internal.Classes`: two closures); `HSI_AOT_PARTS=0` leaves it whole to the interpreter as HE8 did. `HSI_RT_MOD`,
+  `HSI_RT_KEY` with `HSI_EXE`: a runtime being edited as Go built against (the method of this step: the Go printed once,
+  edited and measured, read back by `bin/hsi runtime read`).
+- **`bin/hsi cnodes`'s musl** (the integration's race): `bin/ci musl ensure` under a lock (`.tmp/hsi/cnodes-musl.lock`),
+  the first job preparing, the others finding it ready, each with a log of its own (it was one shared log).
+
+### Results
+
+- **Speed** (wall seconds, one run each, the same host one after the other, its load about 11 of 64 cores; `nfib 32`, nofib's
+  four at their fast arguments as `bin/hsi check` runs them; HE8 is `haskell-integrate`'s hsi and HE8's compiled build of the
+  same profile, `Classes` left whole):
+
+  | program | HE8 hsi | HE8 compiled | hsi now | compiled now | compiled now / HE8 hsi | / HE8 compiled |
+  |---|---|---|---|---|---|---|
+  | nfib 32 | 5.84 | 5.28 | 5.26 | 4.04 | 1.45 | 1.31 |
+  | imaginary/tak | 25.85 | 25.00 | 23.51 | 19.33 | 1.34 | 1.29 |
+  | imaginary/rfib | 25.88 | 23.53 | 23.36 | 17.89 | 1.45 | 1.32 |
+  | spectral/fibheaps | 29.95 | 28.58 | 28.69 | 26.81 | 1.12 | 1.07 |
+  | spectral/sphere | 22.13 | 21.65 | 20.25 | 18.98 | 1.17 | 1.14 |
+
+  Step by step on nfib (each a build of the step, single runs, noise about 0.1 s): HE8 5.1 s; `Classes`' two closures
+  compiled in part 4.7; typed locals 4.7 (nfib's primops feed constructors at once: the typed locals pay on `Double#`
+  chains, sphere); call sites and direct calls 16 deep 4.9-5.1 (slower: the Go calls' cost above the bounce's), none deep
+  4.75; the frames in place 4.25; the argument buffer not cleared and 4 deep 4.0-4.1. hsi itself gains 4-11 % from the
+  frames in place. All outputs equal to GHC's.
+- **Where the time is now** (pprof, compiled nfib and tak alike): about 30 % the machine's frames (case and update frames
+  pushed, popped, the arena reset on each pop, the continuation's dispatch), about 30 % allocation (each `-O0` call
+  allocates its arguments' thunks, five a call of nfib, each entered under an update frame, and its result's `I#` with its
+  boxed `Int#`), 15-18 % the calls (the frame from the arena, the copies), the generated functions themselves under 10 %.
+  The typed locals and the direct calls removed what was theirs to remove; the rest is the machine's representation, which
+  compiled code shares by design (HE8), so 3 times needs HES74.
+- **Correctness**: `bin/hsi check --aot --corpus samples,synthetic,testsuite-core --only @test/haskell/hsi/essential.txt`
+  (2 jobs, every library package generated and compiled afresh for the new runtime's key: 710 s, peak 2.5 GB): **123 of
+  123** equal to GHC's runs, **all 123 the same as hsi's**, the four controls failing; `bin/hsi check --aot` (samples,
+  synthetic: 63 programs, Loop included, whose 7 GB stack is the run's peak): 62 pass, AsyncRerun in its class
+  `:async-revert`, none unclassed, **all 63 the same as hsi's**; `bin/hsi check` on the essential list (hsi's frames
+  changed): 123 of 123; `bin/hsi runtime check`: the same forms. `bin/hsi cnodes` run twice at once: both node programs
+  byte for byte equal, one log each.
+
+### Proposed (HES74 onward)
+
+- **HES74 The next factor.** (a) **Frameless evaluation** of a compiled case's scrutinee: the case's frame not pushed but
+  kept in Go's locals while its scrutinee runs in a nested loop of the trampoline (bounded depth), the frame materialized
+  into the stack, at its place, only when something reads the stack (an exception's unwinding, `control0#`, the collector's
+  walk, a block or the slice's end: those return a deferred node that the nested loops pass out, each inserting its frame);
+  the same for the update frames of thunks entered there. Estimate: the frames' 30 % halved, 1.15-1.3 times, 3-4 days with
+  the exceptions', masks', STM's and `control0#`'s cases tested again; (b) **unboxed fields**: `I#`, `W#`, `C#`, `D#` as
+  constructors of their own Go type holding the scalar (no `Value` box, one allocation), every reader of `Con.F` taught them
+  (hsi's primops, the FFI, the collector's walk, `show`): 1.1-1.2 times on Int code, 2-3 days, the whole machine touched;
+  (c) **optimised STG for the AOT** (`-O1` dumps of the program for the compiled level: GHC's strictness analysis and worker/
+  wrapper remove most thunks and dictionary calls, the main factor between GHCi's 3.6 s and `-O0` code's 0.32 s on nfib):
+  the compiled level no longer the same STG as hsi's run (its reference stays GHC's `-O0` run; a program whose output depends
+  on evaluation order, `trace`, imprecise exceptions, would differ: a class), 1-2 days (the dumps per level, the check's
+  second reference); (d) stop at this step's 1.1-1.45 times. *Recommended: (c) then (a)*: (c) is where the factor of 3 is
+  (GHC's own `-O0` to `-O1` gap on these programs is 3 to 10 times), (a) the machine's share after it; (b) only if the
+  profiles still show the boxes then.
+- **HES75 The essential list's AOT peak.** The check's first pass compiles every library package afresh after a runtime
+  change (710 s, 2.5 GB at 2 jobs, a build of `GHC.Internal.Base`-sized packages); (a) the library packages compiled once per
+  runtime key at night (HES70 (a)'s run) before a day's check; (b) as built. *Recommended: (a)*, with HES70.
+
+## Decided (2026-11-05, the user: HES74, HES75)
+
+HES74: (c) -O1 STG for the compiled level first (evaluation-order-dependent programs a class), then (a) frameless evaluation of a compiled case's scrutinee; HES75 (a): the library packages compiled once per runtime key at night with HES70.
+
+## As built: HES74 (c) (write-ahead)
+
+Built 2026-11-05 on branch `haskell-o1` from `haskell-speed` (`5615a0eb`), light work by day (2 jobs, no gate, no lock,
+every process under 2.5 GB). The compiled level takes GHC's `-O1` STG; hsi's own level stays on `-O0`, the reference.
+
+### What is in the tree
+
+- **The dumps at -O1** (no change to the helper: `tools/hsdump stg --ghc -O1`, the same serializer with GHC's optimiser on,
+  the program's modules compiled against the libraries' installed `-O2` interfaces, so their unfoldings, workers (`$w...`)
+  and specialisations are inlined or called by name). The libraries' dumps are unchanged: they were already `-O2` builds of
+  the installed units (HES6 (a)), so every name an `-O1` program calls is a closure of `.tmp/hsi/dumps`; none was missing on
+  the essential list or the benchmarks.
+- **`bin/hsi check --opt O1`** (`bin/lib/hsi/check`): the programs dumped at `-O1` (their own cache, `.tmp/hsi/progs-O1`,
+  the key with the level), the stubs probe at `-O1` too, results in `.tmp/hsi/check[-aot]-O1`, judged against
+  `test/haskell/ref-ghc914-O1.edn`, `--record` into `test/haskell/check-hsi[-aot]-O1.edn`; a non-pass's class looked up in
+  `test/haskell/divergences-O1.edn` first, then in `test/haskell/divergences.edn`. With `--aot` the profile's run (the
+  closures it enters) is hsi on the same `-O1` dumps, so `:vs-hsi` still compares the compiled code with the interpreter on
+  one STG (diffcheck's kind); `--opt O1` without `--aot` runs hsi on `-O1` dumps (allowed, not the reference). `bin/hsi
+  aot run` takes `HSI_OPT=O1`. Makefile: `hsi-check-aot-o1`, `hsi-record-ref-o1`.
+- **`bin/hsi record-ref --opt O1`**: GHC's `-O1` builds run as the `-O0` ones are, into `test/haskell/ref-ghc914-O1.edn`
+  (recorded: the 123 programs of the essential list and the five benchmarks, 128 lines, `--only`; the other corpora's lines
+  are night work). Against `-O0`'s references five differ, all in GHC's own `-O1` constant folding, not evaluation order:
+  `synthetic/class-num`, `class-enum`, `class-real-fractional`, `class-realfrac` (`0 + (-0.0)` folded to `-0.0`, `x * 0`'s
+  sign) and `synthetic/primops-float` (`float2Int#` of an out-of-range literal folded to another value); the compiled
+  level passes all five against `-O1`'s references (the dumped STG is already folded).
+- **`:eval-order`** (`test/haskell/divergences-O1.edn`, by design): a program whose output depends on when or whether a
+  thunk is forced (`trace`, `unsafePerformIO`, which of two imprecise exceptions is raised) may differ between the STG
+  GHC dumps and the code GHC's `-O1` build runs after it; hsi follows the dumped STG's order exactly, and such programs keep
+  `-O0` (hsi's level) as their reference. No member on the essential list: `samples/Trace` and the exception tests pass.
+- **Two fixes the -O1 code needed** (read back into the forms by `bin/hsi runtime read`):
+  - *A slice ends after a compiled continuation* (`machine.ae`, `runSlice`): at `-O1`, `yield#`, `fork#` and the MVar
+    primops sit inline in the program's compiled code, and a case continuation the machine's `ret` runs may be compiled
+    code that runs a `yield#` (the budget set to 0) and returns; `runSlice`'s return path did not look at the budget (the
+    interpreter's continuation is an expression evaluated on the eval path, which does), so the yield was lost and a forked
+    thread missed its turn (`samples/MVarOrder`: the reader queued after the put, `BlockedIndefinitelyOnMVar`;
+    `samples/ThrowMasked`). Now the slice ends after `ret` when the budget is spent (not while blocked, not in a
+    transaction), as after an eval. `-O0` code was not affected (its `yield#` is inside `GHC.Conc`'s wrapper).
+  - *`integer_gmp_gcd_word`* (`ffi.ae`): the installed `ghc-internal` is built with the gmp backend, and `-O1` inlines its
+    `gcdWord` into the program (`synthetic/class-integral`); hsi's table gains it (Euclid on two words).
+
+### Results
+
+- **Speed** (wall seconds, one run each, one after the other on the same host, its load about 15 of 64 cores; the same
+  programs and arguments as HES73's table; hsi and the compiled executables of this branch's final runtime, each built
+  from its level's profile):
+
+  | program | hsi -O0 | compiled -O0 | hsi -O1 | compiled -O1 | compiled -O1 / compiled -O0 | / HES73's compiled | / HE8 hsi |
+  |---|---|---|---|---|---|---|---|
+  | nfib 32 | 6.67 | 4.69 | 1.21 | 0.53 | 8.8 | 7.6 | 11.0 |
+  | imaginary/tak | 29.15 | 22.94 | 5.81 | 2.23 | 10.3 | 8.7 | 11.6 |
+  | imaginary/rfib | 29.14 | 19.97 | 5.72 | 2.98 | 6.7 | 6.0 | 8.7 |
+  | spectral/fibheaps | 33.61 | 31.00 | 6.07 | 3.97 | 7.8 | 6.8 | 7.5 |
+  | spectral/sphere | 24.41 | 23.07 | 4.40 | 2.39 | 9.7 | 7.9 | 9.3 |
+
+  The target (3 times or better over HES73's compiled level) is met on all five: 6.0 to 8.7 times HES73's own numbers, 6.7
+  to 10.3 times this host's `-O0` compiled runs measured beside them (the host was busier than at HES73's run: its `-O0`
+  compiled numbers are 12-22 % slower here). GHC's own `-O0` to `-O1` gap on these programs is 10 to 17 times (the
+  references' run seconds: nfib 0.35 to 0.03, tak 1.32 to 0.10, rfib 1.36 to 0.08, fibheaps 1.69 to 0.17, sphere 1.17 to
+  0.11); hsi's own gain from the same dumps is 5.0 to 5.5 times, and the compiled code is another 1.5 to 2.6 times over hsi
+  on them (HES73's was 1.1 to 1.45 at `-O0`: the `-O1` code's strict worker loops on `Int#` are where the typed locals and
+  direct calls pay). A first series before the slice fix gave the same picture (compiled `-O1` 0.53, 2.40, 3.66, 3.86,
+  2.41 s): the fix costs nothing measurable.
+- **Correctness** (2 jobs): `bin/hsi check
+  --aot --opt O1 --corpus samples,synthetic,testsuite-core --only @test/haskell/hsi/essential.txt`: **123 of 123** equal to
+  GHC's `-O1` runs, **all 123 the same as hsi's** on the same dumps, the four controls failing (recorded,
+  `test/haskell/check-hsi-aot-O1.edn`; 3 min 47 s, peak 1.3 GB; a first run before the fixes, every library package
+  generated and compiled afresh: 8 min 32 s, peak 1.6 GB, 120 of 123, MVarOrder and ThrowMasked failing and class-integral stopping
+  at `integer_gmp_gcd_word`, which led to the two fixes). After the machine's change, `-O0`: `bin/hsi check --aot` on the
+  essential list 123 of 123, all the same as hsi (12 min 44 s, peak 2.5 GB, its library packages compiled afresh), and
+  `bin/hsi check` (hsi) 123 of 123; `bin/hsi runtime check`: the same forms. The benchmarks pass at both levels.
+
+### What is left
+
+- The `-O1` references of the other corpora (samples, synthetic and testsuite-core beyond the essential list, nofib),
+  `bin/hsi record-ref --opt O1` (the 128 programs took 65 s at 4 jobs) and `bin/hsi check --aot --opt O1` over them: night
+  work, with HES75 (a)'s library packages compiled once per runtime key (the first essential run after a runtime change
+  generates and compiles them: 8.5 minutes at 2 jobs, peak 1.6 GB).
+- HES74 (a), frameless evaluation of a compiled case's scrutinee, as decided: next.
+
+## Decided (the user, 2026-11-07: batch 3's proposal 1)
+
+**1 (a).** HE9 (`haskell-eval9`'s 3f57a1d3: the allocation counters and limits, the RTS's options from rts/RtsFlags.c) is ported by hand
+onto batch 3's hsi, the day after batch 3's night has re-recorded hsi's packs: its new files (`go/arbace/hs/alloclimit.ae`,
+`test/haskell/hsi/cmd/rtsflags.ae`, `rtsusage.ae`) as they are, its hunks of `machine.ae`, `prim_ctl.ae`, `alloc.ae`, `ffi.ae`,
+`test/haskell/hsi/cmd/main.ae` and `bin/lib/hsi/check` re-applied, `go/arbace/hs.ae`'s files and init order made again; proved by
+cgrun057 and T16916 byte for byte and the night's `bin/hsi check`. HFS-I4 (b)'s rebase did not apply (ten files conflict). The GPL line's
+branches (`haskell-pp`, `haskell-cpp`, `haskell-full2`) are deleted once batch 3 is on `next` (batch 3's proposal 3 (a)).

@@ -75,6 +75,9 @@
 
 (defn- fatal! [msg span] (pp/fatal! msg span))
 
+(defn- near? "Whether role is near the name r (fuzzyLookup)" [role r]
+  (contains? (set (a/fuzzy-lookup role [r])) r))
+
 (defn tv "A token's value" [t] (nth t 1))
 
 (defn vcons "x : xs, on a vector" [x xs] (into [x] xs))
@@ -458,21 +461,29 @@
   (let [tc (unLoc ltc) occ (a/rdr-occ tc)]
     (if (ok-con-occ? occ)
       (L (getLoc ltc) (set-rdr-name-space tc 'data))
-      (fatal! (str "Not a data constructor: '" occ "'") (getLoc ltc)))))
+      (pp/fatal! (lx/msg :PsErrNotADataCon (getLoc ltc) tc)))))
+
+(defn- check-not-promoted-data-con
+  "checkNotPromotedDataCon: a data/newtype constructor is not written 'MkT"
+  [prom ldc]
+  (when (= 'IsPromoted prom)
+    (pp/add-error! (lx/msg :PsErrIllegalPromotionQuoteDataCon (getLoc ldc) (unLoc ldc)))))
 
 (defn ty-to-data-con-builder
   "tyToDataConBuilder: the head of a constructor declaration: a type constructor, or a tuple's"
   [t]
   (let [l (getLoc t) n (unLoc t)]
     (case (first n)
-      HsTyVar (L l (list 'PrefixDataConBuilder [] (ty-con-to-data-con (nth n 3))))
+      HsTyVar (let [dc (ty-con-to-data-con (nth n 3))]
+                (check-not-promoted-data-con (nth n 2) dc)
+                (L l (list 'PrefixDataConBuilder [] dc)))
       HsTupleTy (case (nth n 2)
                   HsBoxedOrConstraintTuple
                   (L l (list 'PrefixDataConBuilder (vec (nth n 3)) (L l (a/exact 'data (tuple-datacon-occ true (count (nth n 3)))))))
                   HsUnboxedTuple
                   (L l (list 'PrefixDataConBuilder (vec (nth n 3)) (L l (a/exact 'data (tuple-datacon-occ false (count (nth n 3)))))))
-                  (fatal! "Cannot parse data constructor in a data/newtype declaration" l))
-      (fatal! "Cannot parse data constructor in a data/newtype declaration" l))))
+                  (pp/fatal! (lx/msg :PsErrInvalidDataCon l t)))
+      (pp/fatal! (lx/msg :PsErrInvalidDataCon l t)))))
 
 (defn mk-hs-app-ty-head-pv "mkHsAppTyHeadPV" [mode t]
   (case mode :ty t :dcb (ty-to-data-con-builder t)))
@@ -488,12 +499,26 @@
 (defn mk-hs-app-kind-ty-pv "mkHsAppKindTyPV" [mode b at ki]
   (case mode
     :ty (mk-hs-app-kind-ty at b ki)
-    :dcb (fatal! "Unexpected kind application in a data/newtype declaration" (gl at))))
+    :dcb (pp/fatal! (lx/msg :PsErrUnexpectedKindAppInDataCon (combine (getLoc b) (getLoc ki))
+                            (let [d (unLoc b)]
+                              (if (= 'PrefixDataConBuilder (first d))
+                                (reduce (fn [acc t] (L nil (con HsAppTy nx acc t))) (L nil (con HsTyVar nil 'NotPromoted (nth d 2))) (nth d 1))
+                                b))
+                            ki))))
 
 (defn mk-hs-op-ty-pv "mkHsOpTyPV" [mode prom lhs op rhs]
   (case mode
     :ty (mk-lhs-op-ty prom lhs op rhs)
-    :dcb (L (combine (getLoc lhs) (getLoc rhs)) (list 'InfixDataConBuilder lhs (ty-con-to-data-con op) rhs))))
+    :dcb (let [l (combine (getLoc lhs) (getLoc rhs))
+               no-ops (fn no-ops [t]
+                        (let [n (unLoc t)]
+                          (cond (bang-ty? n) (no-ops (nth (second n) 3))
+                                (= 'HsOpTy (first n)) (pp/add-error! (lx/msg :PsErrInvalidInfixDataCon l (unLoc lhs) (unLoc op) n))
+                                :else nil)))
+               _ (no-ops rhs)
+               dc (ty-con-to-data-con op)]
+           (check-not-promoted-data-con prom dc)
+           (L l (list 'InfixDataConBuilder lhs dc rhs)))))
 
 (defn mk-unpackedness-pv "mkUnpackednessPV" [mode unpk b]
   (case mode
@@ -502,7 +527,8 @@
            (if (= 'InfixDataConBuilder (first d))
              (L (combine (getLoc unpk) (getLoc b))
                 (list 'InfixDataConBuilder (add-unpackedness-p unpk (nth d 1)) (nth d 2) (nth d 3)))
-             b))))
+             (do (pp/add-error! (lx/msg :PsErrUnpackDataCon (getLoc unpk)))
+                 b)))))
 
 (defn data-con-builder-con "dataConBuilderCon" [b] (nth (unLoc b) 2))
 
@@ -534,13 +560,14 @@
   [name [arg...] fixity n-parens], the arguments HsValArg/HsTypeArg, n-parens the parentheses
   around the head taken off (their tokens are FamEqn's ([nil...] [nil...] _))"
   [is-cls ty]
-  (let [malformed (fn [l] (fatal! "Malformed head of type or class declaration" l))]
+  (let [malformed (fn [l] (pp/fatal! (lx/msg :PsErrMalformedTyOrClDecl l ty)))]
     (loop [t ty acc () np 0 fix 'Prefix]
       (let [l (getLoc t) n (unLoc t)]
         (case (first n)
           HsParTy (let [inner (nth n 2) ni (unLoc inner)]
                     (if (= 'HsStarTy (first ni))
-                      [(L (combine (getLoc inner) l) (a/unqual 'tc (if (nth ni 2) "★" "*"))) (vec acc) fix np]
+                      (do (lx/add-warning! pp/*ps* (lx/msg :PsWarnStarBinder (getLoc inner)))
+                      [(L (combine (getLoc inner) l) (a/unqual 'tc (if (nth ni 2) "★" "*"))) (vec acc) fix np])
                       (recur inner acc (inc np) fix)))
           HsTyVar (let [ltc (nth n 3)]
                     (if (rdr-tc? (unLoc ltc)) [ltc (vec acc) fix np] (malformed l)))
@@ -568,15 +595,15 @@
 (defn check-ty-vars
   "checkTyVars: the head's arguments as binders (each a type variable or a wild card, with a
   kind signature or not, in parentheses or not; an @k invisible), their spans widened over the
-  parentheses (and the '@')"
-  [tc tparams]
+  parentheses (and the '@'); what and eq the messages' words (\"data\", \"= ...\")"
+  [what eq tc tparams]
   (mk-hs-qtvs
    (mapv (fn [arg]
            (let [[bvis fw ty]
                  (case (first arg)
                    HsTypeArg [(con HsBndrInvisible nil) (at-span arg) (nth arg 2)]
                    HsValArg [(con HsBndrRequired nx) nil (nth arg 2)]
-                   (fatal! (str "Malformed declaration for '" (a/rdr-occ (unLoc tc)) "'") (nth arg 1)))]
+                   (pp/fatal! (lx/msg :PsErrMalformedDecl (nth arg 1) what (unLoc tc))))]
              (loop [t ty ops () cps []]
                (let [l (getLoc t) n (unLoc t)]
                  (if (= 'HsParTy (first n))
@@ -590,7 +617,7 @@
                        (match-bndr-var n)
                        (L (widen l) (con HsTvb nil bvis (match-bndr-var n) (con HsBndrNoKind nx)))
                        :else
-                       (fatal! (str "Unexpected type in the declaration of '" (a/rdr-occ (unLoc tc)) "'") l))))))))
+                       (pp/fatal! (lx/msg :PsErrUnexpectedTypeInDecl l t what (unLoc tc) tparams eq)))))))))
          tparams)))
 
 (defn from-spec-ty-var-bndr
@@ -598,7 +625,7 @@
   [lt]
   (let [[_ x flag v k] (unLoc lt)]
     (when (= flag 'InferredSpec)
-      (fatal! "Inferred type variables are not allowed here" (getLoc lt)))
+      (pp/fatal! (lx/msg :PsErrInferredTypeVarNotAllowed (getLoc lt))))
     (L (getLoc lt) (list 'HsTvb x () v k))))
 
 (defn from-spec-ty-var-bndrs "fromSpecTyVarBndrs" [ts] (mapv from-spec-ty-var-bndr ts))
@@ -688,6 +715,10 @@
   "cvBindsAndSigs: a binding group's declarations (splices dropped) as [binds sigs families
   type-family-instances data-family-instances docs]"
   [decls]
+  ;; drop_bad_decls: a declaration splice is not allowed here
+  (doseq [d decls]
+    (when (= 'SpliceD (first (unLoc d)))
+      (pp/add-error! (lx/msg :PsErrDeclSpliceNotAtTopLevel (getLoc d) (nth (unLoc d) 2)))))
   (partition-binds-and-sigs (get-mono-bind-all (remove #(= 'SpliceD (first (unLoc %))) decls))))
 
 (defn cv-bind-group
@@ -721,7 +752,7 @@
   (let [[mcxt head] (unLoc hdr)
         [binds sigs ats at-defs _ docs] (cv-binds-and-sigs where-decls)
         [cls tparams fixity] (check-ty-cl-hdr true head)
-        tyvars (check-ty-vars cls tparams)]
+        tyvars (check-ty-vars "class" "where ..." cls tparams)]
     (L loc (con ClassDecl (tuple wtok layout nil) mcxt cls tyvars fixity (vec (second (unLoc fds)))
                 (mk-class-op-sigs sigs) binds ats at-defs docs))))
 
@@ -743,13 +774,16 @@
     (and (= new-or-data 'NewType) (= 1 (count cons))) (con NewTypeCon (first cons))
     (= new-or-data 'DataType)
     (con DataTypeCons (boolean is-type-data) (if is-type-data (mapv promote-constructor cons) (vec cons)))
-    :else (fatal! (str "A newtype must have exactly one constructor, but '" (a/rdr-occ name) "' has "
-                       (count cons)) span)))
+    :else (pp/fatal! (lx/msg :PsErrMultipleConForNewtype span name (count cons)))))
 
 (defn mk-data-defn
   "mkDataDefn: ext a GADT-style declaration's `where` token (nil when none), which the Haddock
   pass reads (dd_ext's AnnDataDefn; the dump has it nil)"
   [ext ctype mcxt ksig cons derivs]
+  ;; checkDatatypeContext
+  (when-let [c (a/from-just mcxt)]
+    (when-not (lx/get-bit pp/*ps* :DatatypeContextsBit)
+      (pp/add-error! (lx/msg :PsErrIllegalDataTypeContext (getLoc c) c))))
   (con HsDataDefn ext mcxt ctype ksig cons (vec derivs)))
 
 (defn mk-ty-data
@@ -758,7 +792,7 @@
   [loc is-type-data new-or-data ctype hdr ksig data-cons derivs wtok]
   (let [[mcxt head] (unLoc hdr)
         [tc tparams fixity] (check-ty-cl-hdr false head)
-        tyvars (check-ty-vars tc tparams)
+        tyvars (check-ty-vars (if (= new-or-data 'NewType) "newtype" "data") "= ..." tc tparams)
         cons (check-new-or-data loc (unLoc tc) is-type-data new-or-data data-cons)]
     (L loc (con DataDecl nx tc tyvars fixity (mk-data-defn wtok ctype mcxt ksig cons (unLoc derivs))))))
 
@@ -766,7 +800,7 @@
   "mkTySynonym"
   [loc lhs rhs]
   (let [[tc tparams fixity] (check-ty-cl-hdr false lhs)
-        tyvars (check-ty-vars tc tparams)]
+        tyvars (check-ty-vars "type" "= ..." tc tparams)]
     (L loc (con SynDecl nil tc tyvars fixity rhs))))
 
 (defn mk-standalone-kind-sig
@@ -776,10 +810,10 @@
                    (let [n (unLoc v)]
                      (if (and (a/rdr-unqual? n) (rdr-tc? n))
                        v
-                       (fatal! (str "Expected an unqualified type constructor: " (a/rdr-occ n)) (getLoc v)))))
+                       (pp/fatal! (lx/msg :PsErrUnexpectedQualifiedConstructor (getLoc v) n)))))
                  (unLoc lhs))]
     (when-not (= 1 (count vs))
-      (fatal! "Standalone kind signatures do not support multiple names" (getLoc lhs)))
+      (pp/fatal! (lx/msg :PsErrMultipleNamesInStandaloneKindSignature (getLoc lhs) (mapv unLoc (reverse vs)))))
     (L loc (con StandaloneKindSig (tuple nil nil) (first vs) rhs))))
 
 (defn- nils [^long n] (vec (repeat n nil)))
@@ -809,7 +843,9 @@
   FamilyResultSig; inj Maybe the injectivity annotation"
   [loc info top-level lhs ksig inj]
   (let [[tc tparams fixity] (check-ty-cl-hdr false lhs)
-        tyvars (check-ty-vars tc tparams)]
+        ih (if (seq? info) (first info) info)
+        tyvars (check-ty-vars (case ih DataFamily "data family" "type family")
+                              (if (= 'ClosedTypeFamily ih) "where ..." "") tc tparams)]
     (L loc (con FamDecl nx (con FamilyDecl nil info top-level tc tyvars fixity ksig inj)))))
 
 (defn mk-splice-decl
@@ -833,7 +869,9 @@
                           (L (getLoc lr) 'Nothing)
                           (if-let [role (roles (second r))]
                             (L (getLoc lr) (just role))
-                            (fatal! (str "Illegal role name " (second r)) (getLoc lr))))))
+                            (pp/fatal! (lx/msg :PsErrIllegalRoleName (getLoc lr) (second r)
+                                               ;; the roles whose names are near (fuzzyMatch)
+                                               (vec (filter #(near? (second r) %) ["nominal" "representational" "phantom"]))))))))
                     rs))))
 
 (defn mk-con-decl-h98
@@ -865,12 +903,20 @@
         b (unLoc body)
         [args res] (if (and (= 'HsFunTy (first b)) (rec-ty? (unLoc (nth b 3))))
                      (let [rt (nth b 3)]
+                       (when-not (= 'HsUnannotated (first (nth b 2)))
+                         (pp/add-error! (lx/msg :PsErrIllegalGadtRecordMultiplicity (getLoc body) (nth b 2))))
                        [(con RecConGADT nil (L (getLoc rt) (vec (nth (second (unLoc rt)) 2)))) (nth b 4)])
                      (let [[_ _ as r] (split-hs-fun-type body)] [(con PrefixConGADT nx as) r]))
         outer-loc (if (= 'HsOuterImplicit (first outer)) (getLoc ty) (anchor outer))]
     (L loc (con ConDeclGADT nil (vec names) (L outer-loc outer) (vec inner) mcxt args res 'Nothing))))
 
-(defn check-record-syntax "checkRecordSyntax (TraditionalRecordSyntax: a non-fatal error)" [lr] lr)
+(defn check-record-syntax
+  "checkRecordSyntax: without TraditionalRecordSyntax an error (not fatal) showing the record"
+  [lr]
+  (when-not (lx/get-bit pp/*ps* :TraditionalRecordSyntaxBit)
+    (pp/add-error! (lx/msg :PsErrIllegalTraditionalRecordSyntax (getLoc lr)
+                           ((requiring-resolve 'arbace.repr.haskell.pprhs/ppr-type) (unLoc lr)))))
+  lr)
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Pattern synonyms
@@ -892,19 +938,17 @@
                      (if (and pat (= 'ConPat (first pat)))
                        (let [ln (nth pat 2) details (nth pat 3) rhs (nth pb 4)]
                          (when-not (= (unLoc ln) name)
-                           (fatal! (str "In a pattern synonym's 'where' clause the equations must define '"
-                                        (a/rdr-occ name) "'") l))
+                           (pp/fatal! (lx/msg :PsErrInvalidWhereBindInPatSynDecl l name d)))
                          (case (first details)
                            PrefixCon (let [pats (vec (nth details 1))]
                                        (L l (con Match nx (con FunRhs ln 'Prefix 'NoSrcStrict nil) (L (list-location pats) pats) rhs)))
                            InfixCon (let [pats [(nth details 1) (nth details 2)]]
                                       (L l (con Match nx (con FunRhs ln 'Infix 'NoSrcStrict nil) (L (list-location pats) pats) rhs)))
-                           (fatal! "record syntax not supported for pattern synonym declarations" l)))
-                       (fatal! (str "pattern synonym 'where' clause must bind the pattern synonym's name '"
-                                    (a/rdr-occ name) "'") l))))
+                           (pp/fatal! (lx/msg :PsErrRecordSyntaxInPatSynDecl l (nth pb 2)))))
+                       (pp/fatal! (lx/msg :PsErrNoSingleWhereBindInPatSynDecl l name d)))))
                  (unLoc ldecls))]
     (when (empty? ms)
-      (fatal! (str "pattern synonym 'where' clause cannot be empty: '" (a/rdr-occ name) "'") (getLoc lname)))
+      (pp/fatal! (lx/msg :PsErrEmptyWhereInPatSynDecl (getLoc ldecls) name)))
     (mk-match-group (L (getLoc ldecls) ms))))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -938,7 +982,7 @@
     (let [lname (nth (unLoc lv) 2) n (unLoc lname)]
       (if (a/rdr-unqual? n)
         (when (#{"family" "role"} (a/rdr-occ n))
-          (fatal! (str "parse error on input '" (a/rdr-occ n) "'") (getLoc lname)))
+          (pp/fatal! (lx/msg :PsErrParseErrorOnInput (getLoc lname) (a/rdr-occ n))))
         (throw (ex-info "checkRuleTyVarBndrNames" {:span (getLoc lname)}))))))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -1046,12 +1090,12 @@
         return-spec (fn [spec] (fn [_] (con ForD nx (con ForeignImport (tuple nil nil nil) v ty spec))))
         mk-cimport (fn []
                      (or (parse-c-import cconv safety (mk-ext-name (unLoc v)) entity (L loc esrc))
-                         (fatal! "Malformed entity string" loc)))]
+                         (pp/fatal! (lx/msg :PsErrMalformedEntityString loc))))]
     (case (unLoc cconv)
       (CCallConv StdCallConv) (return-spec (mk-cimport))
       CApiConv (let [imp (mk-cimport)]
                  (if (= 'CWrapper (nth imp 5))
-                   (fatal! "Wrapper stubs can't be used with CApiFFI." loc)
+                   (pp/fatal! (lx/msg :PsErrInvalidCApiImport loc))
                    (return-spec imp)))
       (PrimCallConv JavaScriptCallConv)
       (let [entity' (if (= "" entity) (mk-ext-name (unLoc v)) entity)]

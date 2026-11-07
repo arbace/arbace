@@ -25,7 +25,8 @@
   text, `dump-data` the forms Arbace's reader reads from it)."
   (:require [arbace.repr.ocaml.lex :as lex]
             [arbace.repr.ocaml.docstrings :as ds]
-            [arbace.string :as str]))
+            [arbace.string :as str])
+  (:import [arbace.repr.ocaml.docstrings Pos]))
 
 (set! *warn-on-reflection* false)
 
@@ -205,6 +206,9 @@
 (deftype A [t ^long n])
 (deftype L [items ^long flen ^long lastchk])
 (deftype M [kvs ^long flen ^long lastchk])
+;; IV: a location's vector of six integers [line col line col offset offset], as the atoms of a vector would print
+;; (flen: the length of its flat text, always ASCII); written in one piece, spread into atoms only when it does not fit
+(deftype IV [^Pos s ^Pos e ^long flen])
 
 (declare quoted)
 
@@ -218,6 +222,7 @@
     (string? x) (let [n (utf8-len (quoted x))] [n n])
     (instance? L x) [(.-flen ^L x) (.-lastchk ^L x)]
     (instance? M x) [(.-flen ^M x) (.-lastchk ^M x)]
+    (instance? IV x) [(.-flen ^IV x) (dec (.-flen ^IV x))]
     :else (let [k (count x)]
             (loop [i 0 off 1 last -1]
               (if (= i k)
@@ -225,8 +230,27 @@
                 (let [[fl lc] (measure (nth x i))]
                   (recur (inc i) (+ off fl 1) (if (>= lc 0) (+ off lc) last))))))))
 
+(defn- flen-of [x]
+  (cond (instance? A x) (.-n ^A x)
+        (instance? L x) (.-flen ^L x)
+        (instance? IV x) (.-flen ^IV x)
+        (instance? M x) (.-flen ^M x)
+        :else (first (measure x))))
+
+(defn- last-of [x]
+  (cond (instance? A x) (.-n ^A x)
+        (instance? L x) (.-lastchk ^L x)
+        (instance? IV x) (dec (.-flen ^IV x))
+        (instance? M x) (.-lastchk ^M x)
+        :else (second (measure x))))
+
 (defn- mk-l [items]
-  (let [items (vec items) [fl lc] (measure items)] (L. items fl lc)))
+  (let [items (vec items) k (count items)]
+    (loop [i 0 off 1 last -1]
+      (if (= i k)
+        (L. items (if (pos? k) off (inc off)) last)
+        (let [c (nth items i) fl (flen-of c)]
+          (recur (inc i) (+ off fl 1) (let [lc (last-of c)] (if (>= lc 0) (+ off lc) last))))))))
 
 (defn- mk-m [kvs]
   (let [kvs (vec kvs)
@@ -234,32 +258,71 @@
              (if (= i (count kvs))
                (inc n)
                (let [[k v] (nth kvs i)]
-                 (recur (inc i) (+ n (if (pos? i) 1 0) 2 (count k) (first (measure v)))))))]
+                 (recur (inc i) (+ n (if (pos? i) 1 0) 2 (count k) (flen-of v))))))]
     (M. kvs fl fl)))
 
 (def ^:dynamic *with-loc* false)
 
-(defn- a [^String t] (A. t (utf8-len t)))
+(defn- a* [^String t] (A. t (utf8-len t)))
+(defn- a-ascii [^String t] (A. t (.length t)))
+(defmacro ^:private a
+  "An atom: the length of a literal text is computed at compile time"
+  [t]
+  (if (string? t) `(A. ~t ~(long (alength (.getBytes ^String t "UTF-8")))) `(a* ~t)))
 (def ^:private anil (a "nil"))
-(defn- kw [k] (a (str ":" k)))
-(defn- int-a [n] (a (str n)))
-(defn- bool-a [b] (a (if b "true" "false")))
+(defn- kw* [k] (a* (str ":" k)))
+(defmacro ^:private kw [k]
+  (if (string? k) `(A. ~(str ":" k) ~(long (alength (.getBytes ^String (str ":" k) "UTF-8")))) `(kw* ~k)))
+(def ^:private a-true (a "true"))
+(def ^:private a-false (a "false"))
+(defn- int-a [n] (a-ascii (str n)))
+(defn- bool-a [b] (if b a-true a-false))
 (defn- l [& xs] (mk-l xs))
 (defn- lv [xs] (mk-l xs))
 
 (defn- text
   "A byte string's text for the dump (the helper writes the bytes: valid UTF-8 is its text)"
-  [s]
-  (or (lex/utf8-text s) (String. (lex/bstr->bytes s) "UTF-8")))
+  [^String s]
+  (if (= (.length s) (alength (.getBytes s "UTF-8")))
+    s ; every char below U+0080: the bytes are the text
+    (or (lex/utf8-text s) (String. (lex/bstr->bytes s) "UTF-8"))))
+
+(defn- dlen
+  "The number of characters of the decimal text of a non-negative integer"
+  ^long [^long n]
+  (cond (< n 10) 1 (< n 100) 2 (< n 1000) 3 (< n 10000) 4 (< n 100000) 5 (< n 1000000) 6 (< n 10000000) 7
+        :else (alength (.getBytes (str n) "UTF-8"))))
 
 (defn- pos-vec [lc]
-  (let [s (nth lc 0) e (nth lc 1)]
+  (let [^Pos s (nth lc 0) ^Pos e (nth lc 1)
+        cs (.-cnum s) ce (.-cnum e)]
+    (IV. s e (+ 7 (dlen (.-lnum s)) (dlen (- cs (.-bol s))) (dlen (.-lnum e)) (dlen (- ce (.-bol e))) (dlen cs) (dlen ce)))))
+
+(defn- write-iv [^StringBuilder b ^IV x]
+  (let [^Pos s (.-s x) ^Pos e (.-e x) cs (.-cnum s) ce (.-cnum e)]
+    (.append b "[") (.append b (long (.-lnum s))) (.append b " ") (.append b (long (- cs (.-bol s)))) (.append b " ")
+    (.append b (long (.-lnum e))) (.append b " ") (.append b (long (- ce (.-bol e)))) (.append b " ")
+    (.append b (long cs)) (.append b " ") (.append b (long ce)) (.append b "]")))
+
+(defn- iv-atoms
+  "The six atoms of an IV, for printing it broken"
+  [^IV x]
+  (let [s (.-s x) e (.-e x)]
     [(int-a (lex/pos-lnum s)) (int-a (- (lex/pos-cnum s) (lex/pos-bol s)))
      (int-a (lex/pos-lnum e)) (int-a (- (lex/pos-cnum e) (lex/pos-bol e)))
      (int-a (lex/pos-cnum s)) (int-a (lex/pos-cnum e))]))
 
+(declare meta-of*)
 (defn- meta-of
   "The metadata of a node: attributes first, then positions"
+  ([attrs stack lc]
+   (if (and (not (seq attrs)) (not (and *with-loc* (seq stack))))
+     (if (and lc *with-loc*)
+       (if (nth lc 2) [["loc" (pos-vec lc)] ["ghost" a-true]] [["loc" (pos-vec lc)]])
+       [])
+     (meta-of* attrs stack lc))))
+
+(defn- meta-of*
   ([attrs stack lc]
    (let [m []
          m (if (seq attrs) (conj m ["attrs" (vec attrs)]) m)
@@ -273,14 +336,12 @@
   ([head fields] (node nil nil nil head fields))
   ([attrs stack lc head fields]
    (let [m (meta-of attrs stack lc)]
-     (mk-l (cond-> (into [(a head)] fields) (seq m) (conj (mk-m m)))))))
+     (mk-l (cond-> (into [(a-ascii head)] fields) (seq m) (conj (mk-m m)))))))
 
 (defn- at [lc x] (if *with-loc* (l (a "at") x (pos-vec lc)) x))
 
-(defn- alpha? [c] (or (and (>= c 97) (<= c 122)) (and (>= c 65) (<= c 90)) (= c 95)))
-(defn- alnum? [c] (or (alpha? c) (and (>= c 48) (<= c 57)) (= c 39)))
 (defn- bare-component? [^String c]
-  (and (pos? (count c)) (alpha? (int (.charAt c 0))) (every? #(alnum? (int %)) c)))
+  (boolean (re-matches #"[A-Za-z_][A-Za-z0-9_']*" c)))
 (defn- bare-name? [c] (and (bare-component? c) (not (#{"true" "false" "nil"} c))))
 
 (defn- name-s [c] (if (bare-name? c) (a c) (l (a "name") (text c))))
@@ -767,6 +828,7 @@
 (defn- flat [^StringBuilder b x]
   (cond
     (instance? A x) (.append b ^String (.-t ^A x))
+    (instance? IV x) (write-iv b x)
     (string? x) (do (.append b "\"") (escape b x) (.append b "\""))
     (instance? L x) (do (.append b "(") (let [xs (.-items ^L x)] (dotimes [i (count xs)] (when (pos? i) (.append b " ")) (flat b (nth xs i)))) (.append b ")"))
     (vector? x) (do (.append b "[") (dotimes [i (count x)] (when (pos? i) (.append b " ")) (flat b (nth x i))) (.append b "]"))
@@ -786,10 +848,11 @@
 
 (defn- pretty [^StringBuilder b ind width x]
   (let [ind (min ind max-indent)
-        fits (or (instance? A x) (string? x) (<= (second (measure x)) (- width ind)))]
+        fits (or (instance? A x) (string? x) (<= (last-of x) (- width ind)))]
     (if fits
       (flat b x)
       (cond
+        (instance? IV x) (pretty b ind width (iv-atoms x))
         (and (instance? L x) (seq (.-items ^L x)))
         (let [[h & rest] (.-items ^L x)]
           (.append b "(") (flat b h)
@@ -832,4 +895,5 @@
     (string? x) x
     (instance? L x) (apply list (map dump-data (.-items ^L x)))
     (vector? x) (mapv dump-data x)
+    (instance? IV x) (mapv dump-data (iv-atoms x))
     (instance? M x) (into {} (map (fn [[k v]] [(keyword k) (dump-data v)]) (.-kvs ^M x)))))

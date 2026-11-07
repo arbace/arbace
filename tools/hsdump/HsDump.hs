@@ -39,6 +39,16 @@
 --       modules compiled each by a process of its own (--single) in dependency order, -jN at once, as hadrian
 --       runs ghc -c per module
 --   hsdump core -o OUTDIR ...   the Core alone
+--   hsdump errors -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] FILE...
+--       one OUTDIR/FILE.errors per module: the parser's messages of a module GHC rejects, as
+--       ghc -fno-code prints them (the driver's header parse, parseHeader, then the module's
+--       parse: its warnings, then its errors; GHC's own printMessages and log action), empty for a
+--       module it accepts; and OUTDIR/FILE.errors.hspp, the text parsed (doc/haskell/NATIVE.md)
+--       Before them the driver's first phase for the module (getFileArgs: getOptions, the pragmas'
+--       flags, checkProcessArgsResult): a header error stops there, its warnings come first.
+--   hsdump flags --libdir DIR
+--       the Haskell of arbace/repr/haskell/flags.ae: the names and kinds of flagsDynamic and the
+--       names LANGUAGE accepts (supportedLanguagePragmas)
 -- FILE is relative to the current directory (the package's directory: it is the file name of
 -- every span). R6: an .hsc FILE is run through the host's hsc2hs first (--hsc2hs-arg A, repeated:
 -- its arguments; the output X.hs written beside X.hsc, as Cabal's build writes it, recorded in
@@ -54,14 +64,24 @@ import GHC.Driver.Session
 import GHC.Driver.Env (HscEnv(..), hscSetFlags)
 import GHC.Driver.Config.Parser (initParserOpts, supportedLanguagePragmas)
 import GHC.Driver.Pipeline (preprocess)
-import GHC.Driver.Errors.Types (DriverMessages, DriverMessage)
-import GHC.Parser.Errors.Types (PsMessage)
-import GHC.Utils.Logger (LogAction, Logger, pushLogHook, setLogFlags)
+import GHC.Driver.Errors.Types (DriverMessages, DriverMessage(..))
+import GHC.Parser.Errors.Types (PsMessage(..))
+import GHC.Utils.Logger (LogAction, Logger, pushLogHook, setLogFlags, defaultLogActionWithHandles)
+import GHC.Driver.Config.Diagnostic (initDiagOpts)
+import GHC.Driver.Errors (printMessages)
+import GHC.Types.Error (Messages, errorsOrFatalWarningsFound, partitionMessages, isEmptyMessages, unionMessages, NoDiagnosticOpts(..), singleMessage)
+import System.IO.Unsafe (unsafePerformIO)
 import GHC.Driver.Config.Logger (initLogFlags)
-import GHC.Parser.Lexer (ParserOpts, initParserState, initPragState, unP, lexer, lexTokenStream, ParseResult(..), Token(..), getPsErrorMessages)
+import GHC.Parser.Lexer (ParserOpts, initParserState, initPragState, unP, lexer, lexTokenStream, ParseResult(..), Token(..), getPsErrorMessages, getPsMessages)
 import qualified GHC.Parser as P
-import GHC.Parser.Header (toArgs)
-import GHC.Data.StringBuffer (StringBuffer, hGetStringBuffer, lexemeToString, atLine, stringToStringBuffer)
+import GHC.Parser.Header (toArgs, getOptions, checkProcessArgsResult)
+import GHC.Driver.Config.Diagnostic (initPrintConfig)
+import GHC.Driver.Errors.Types (GhcMessage(..))
+import GHC.Types.SourceError (SourceError, srcErrorMessages)
+import GHC.Utils.Panic (GhcException(..))
+import GHC.Data.Bag (bagToList)
+import qualified GHC.Driver.CmdLine as CL
+import GHC.Data.StringBuffer (StringBuffer, hGetStringBuffer, lexemeToString, atLine, stringToStringBuffer, containsBidirectionalFormatChar, bidirectionalFormatChars, nextChar, atEnd)
 import GHC.Data.FastString
 import qualified GHC.Data.Strict
 import GHC.Types.SrcLoc
@@ -74,7 +94,7 @@ import GHC.Unit.Module (unitString)
 import GHC.Hs.Dump (showAstData, BlankSrcSpan(..), BlankEpAnnotations(..))
 import GHC.Hs.DocString (HsDocStringChunk, unpackHDSC)
 import GHC.Utils.Outputable (showSDocUnsafe, renderWithContext, defaultSDocContext)
-import GHC.Utils.Error (pprMessages)
+import GHC.Utils.Error (pprMessages, mkPlainMsgEnvelope)
 import GHC.Types.Error (getMessages, MsgEnvelope(..), defaultDiagnosticOpts)
 import GHC.Settings.Config (cProjectVersion)
 import GHC.Platform.ArchOS (stringEncodeArch, stringEncodeOS)
@@ -105,6 +125,7 @@ import System.Process (readProcessWithExitCode)
 import System.Directory (renameFile, removeFile)
 import System.FilePath (takeDirectory, takeFileName, (</>), makeRelative, normalise)
 import System.IO
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 
 import Stg (stgMain, Mode(..))
 
@@ -188,11 +209,58 @@ main = do
              | otherwise = Make
     stgMain (oVerb o == "stg") core mode libdir out (oGhc o) (oFiles o) header
     exitWith ExitSuccess
+  -- the dynamic flags a pragma can give and the extensions and languages LANGUAGE names, as data
+  -- for the native reader (arbace.repr.haskell.flags, generated)
+  when (oVerb o == "flags") $ do
+    let kind k = case k of
+          CL.NoArg _ -> "no-arg"; CL.HasArg _ -> "has-arg"; CL.SepArg _ -> "sep-arg"; CL.Prefix _ -> "prefix"
+          CL.OptPrefix _ -> "opt-prefix"; CL.OptIntSuffix _ -> "opt-int-suffix"; CL.IntSuffix _ -> "int-suffix"
+          CL.Word64Suffix _ -> "word64-suffix"; CL.FloatSuffix _ -> "float-suffix"; CL.PassFlag _ -> "pass-flag"
+          CL.AnySuffix _ -> "any-suffix"
+    d0 <- runGhc (Just libdir) getSessionDynFlags
+    putStrLn "(ns arbace.repr.haskell.flags\n  \"Generated by `hsdump flags` (tools/hsdump/HsDump.hs, GHC 9.14.1): the dynamic flags a header pragma can give (flagsDynamic: name and kind of GHC.Driver.CmdLine's OptKind) and the names LANGUAGE accepts (supportedLanguagePragmas), in GHC's order.\")\n"
+    putStrLn "(def dynamic-flags\n  [" 
+    forM_ flagsDynamic $ \f -> putStrLn ("   [" ++ show (CL.flagName f) ++ " :" ++ kind (CL.flagOptKind f) ++ "]")
+    putStrLn "   ])\n"
+    putStrLn "(def supported-pragmas\n  ["
+    forM_ (supportedLanguagePragmas d0) $ \x -> putStrLn ("   " ++ show x)
+    putStrLn "   ])"
+    -- the deprecated flags: each flag of flagsDynamic run through parseDynamicFlagsCmdLine with a
+    -- sample argument (1, then 2: a message that names the argument is a template, %s), and the
+    -- DriverDeprecatedFlag it warns with (GHC's `deprecate`)
+    let probeArgs f v = case CL.flagOptKind f of
+          CL.SepArg _ -> ["-" ++ CL.flagName f, v]
+          _ -> ["-" ++ CL.flagName f ++ (case CL.flagOptKind f of CL.NoArg _ -> ""; CL.PassFlag _ -> ""; _ -> v)]
+        probe f v = do
+          r <- try (runGhc (Just libdir) (do
+                  d <- getSessionDynFlags
+                  lg <- getLogger
+                  (_, _, ws) <- parseDynamicFlagsCmdLine lg d (map noLoc (probeArgs f v))
+                  return [(a, s) | m <- bagToList (getMessages ws), DriverDeprecatedFlag a s <- [errMsgDiagnostic m]]))
+          return (case r of Right x -> x; Left (_ :: SomeException) -> [])
+        rep v s = go s where
+          go [] = []
+          go t@(c : cs) | v `isPrefixOf` t = "%s" ++ go (drop (length v) t)
+                        | otherwise = c : go cs
+    putStrLn "\n(def deprecated-flags\n  \"The flags GHC warns about as deprecated: [name message], %s the flag's argument (generated by probing each flag with the arguments 1 and 2)\"\n  ["
+    forM_ flagsDynamic $ \f -> do
+      r1 <- probe f "1"
+      case r1 of
+        [] -> return ()
+        ((_, s1) : _) -> do
+          r2 <- probe f "2"
+          let s2 = case r2 of ((_, s) : _) -> s; [] -> s1
+              m = if s1 == s2 then s1 else rep "1" s1
+          putStrLn ("   [" ++ show (CL.flagName f) ++ " " ++ show m ++ "]")
+    putStrLn "   ])"
+    exitWith ExitSuccess
   failures <- newIORef (0 :: Int)
+  writeIORef errorsModeRef (oVerb o == "errors")
   runGhc (Just libdir) $ do
     dflags0 <- getSessionDynFlags
     logger <- getLogger
-    (dflags1, leftover, _) <- parseDynamicFlagsCmdLine logger dflags0 (map noLoc (oGhc o))
+    (dflags1, leftover, cmdWarns) <- parseDynamicFlagsCmdLine logger dflags0 (map (mkGeneralLocated "on the commandline") (oGhc o))
+    liftIO (writeIORef cmdWarnRef (dflags1, cmdWarns))
     unless (null leftover) $ liftIO $ do
       hPutStrLn stderr ("hsdump: unknown GHC flags: " ++ unwords (map unLoc leftover))
       exitWith (ExitFailure 2)
@@ -259,6 +327,42 @@ main = do
               B.writeFile out (pText p)
               cfg <- configOf o libdir (fromMaybe "" ghcUnit) dflags2 p
               withUtf8File outc $ \h -> hPutBuilder' h (cfg <> BB.char7 '\n')
+        -- the parser's messages as ghc -fno-code prints them (a rejected module's), from the
+        -- failure parseText recorded
+        "errors" -> do
+          out <- outFile o file ".errors"
+          fl0 <- readIORef failureRef
+          writeIORef failureRef Nothing
+          -- the command line's flag warnings (ghc's main prints them before it compiles anything; a
+          -- fatal one stops it there): the first batch, with the command line's flags
+          (cmdDfl, cmdMsgs) <- readIORef cmdWarnRef
+          let cmdPrinter :: Printer
+              cmdPrinter h lg _ = ghcPrinter (GhcDriverMessage <$> cmdMsgs) h lg cmdDfl
+              cmdAny = not (isEmptyMessages cmdMsgs)
+              cmdFatal = errorsOrFatalWarningsFound cmdMsgs
+          src <- B.readFile file
+          let fl = case (cmdFatal, fl0) of
+                (True, _) -> Just (cmdDfl, src, [cmdPrinter])
+                (False, Just (dfl, text, msgs)) | cmdAny -> Just (dfl, text, cmdPrinter : msgs)
+                _ -> fl0
+              res' = if cmdFatal then Left "the command line's flags" else res
+          case (res', fl) of
+            (Left _, Just (dfl, text, msgs)) -> do
+              B.writeFile (out ++ ".hspp") text
+              withFile out WriteMode $ \h -> do
+                hSetEncoding h utf8
+                let lg = pushLogHook (const (defaultLogActionWithHandles h h)) (setLogFlags (hsc_logger hsc_env) (initLogFlags dfl))
+                -- the JSON log action writes to standard error whatever the hook: point it at the file meanwhile
+                hFlush stderr
+                saved <- hDuplicate stderr
+                hDuplicateTo h stderr
+                hSetEncoding stderr utf8
+                forM_ msgs (\pr -> pr h lg dfl)
+                hFlush stderr
+                hDuplicateTo saved stderr
+                hClose saved
+            (Left msg, Nothing) -> withUtf8File out $ \h -> hPutStrLn h ("hsdump/error " ++ firstLine msg)
+            (Right p, _) -> B.writeFile out B.empty >> B.writeFile (out ++ ".hspp") (pText p)
         v -> hPutStrLn stderr ("hsdump: unknown verb " ++ v) >> exitWith (ExitFailure 2)
   n <- readIORef failures
   when (n > 0) $ exitWith (ExitFailure 1)
@@ -369,7 +473,7 @@ parseOne hsc_env o file hsc = do
   let popts0 = initParserOpts dflags0
       cppOn0 = xopt LangExt.Cpp dflags0
       lit = isLiterate file
-  (dflagsP, _, _) <- parseDynamicFilePragma (hsc_logger' hsc_env) dflags0 (snd (headerOptions popts0 dflags0 buf0 file))
+  (dflagsP, _, _) <- filePragma (hsc_logger' hsc_env) dflags0 (snd (headerOptions popts0 dflags0 buf0 file))
   if xopt LangExt.Cpp dflagsP || cppOn0 || lit
     then do
       -- through GHC's driver, as it preprocesses before parsing (SPEC §2.8, §8.5); the command
@@ -488,21 +592,106 @@ relLibdir :: Maybe FilePath -> FilePath -> FilePath
 relLibdir (Just d) f | d `isPrefixOf` f = "$libdir" ++ drop (length d) f
 relLibdir _ f = f
 
+-- the file pragmas' flags; in the errors verb a failure is the driver's phase to report
+-- (driverHeader), the flags in force then those of the command line
+filePragma :: Logger -> DynFlags -> [Located String] -> IO (DynFlags, [Located String], Messages DriverMessage)
+filePragma lg dfl os = do
+  em <- readIORef errorsModeRef
+  if not em then parseDynamicFilePragma lg dfl os else do
+    r <- try (parseDynamicFilePragma lg dfl os)
+    case r of
+      Right x -> return x
+      Left (_ :: SomeException) -> do
+        r2 <- try (parseDynamicFilePragma lg dfl (filter (\o -> not ("-X" `isPrefixOf` unLoc o)) os))
+        case r2 of
+          Right x -> return x
+          Left (_ :: SomeException) -> return (dfl, [], mempty)
+
 parseText :: HscEnv -> DynFlags -> FilePath -> B.ByteString -> B.ByteString -> Maybe CppRecord -> String -> Bool -> Maybe HscRecord -> IO (Either String ModP)
 parseText hsc_env dflagsIn file src text cpp view lit hsc = do
   let buf = bufferOf text
       popts = initParserOpts dflagsIn
       (prags, opts) = headerOptions popts dflagsIn buf file
-  (dflags, _, _) <- parseDynamicFilePragma (hsc_logger hsc_env) dflagsIn opts
+  (dflags, _, _) <- filePragma (hsc_logger hsc_env) dflagsIn opts
   let st = initParserState (initParserOpts dflags) buf (mkRealSrcLoc (mkFastString file) 1 1)
       -- the raw token stream (comments kept), as -dkeep-comments keeps them (SPEC §8.2)
       toks = case lexTokenStream (initParserOpts dflags) buf (mkRealSrcLoc (mkFastString file) 1 1) of
         POk _ ts -> Right ts
         PFailed _ -> Left "the lexer's token stream failed"
   -- a signature by GHC's parseSignature (R6), any other module by parseModule
-  case unP (if isSignature file then P.parseSignature else P.parseModule) st of
-    POk _ m -> return (Right (ModP m src text prags cpp dflags toks view lit hsc))
-    PFailed pst -> return (Left ("parse failed: " ++ showSDocUnsafe (pprMessages (defaultDiagnosticOpts @PsMessage) (getPsErrorMessages pst))))
+  -- the driver's order (GHC.Driver.Make's summarise, then hscParse'): the header (getImports'
+  -- parseHeader) first, its errors alone; then the module, its warnings and then its errors when
+  -- the parse fails, its errors alone when it succeeds with errors (recorded for the errors verb)
+  em <- readIORef errorsModeRef
+  hdr <- if em then driverHeader hsc_env dflagsIn file buf else return (Right [])
+  let failure' dfl ms = do
+        writeIORef failureRef (Just (dfl, text, ms))
+        return (Left "parse failed")
+      failure ms = case hdr of
+        Right pre -> failure' dflags (pre ++ map psPrinter ms)
+        Left _ -> failure' dflags (map psPrinter ms)
+  case hdr of
+   Left ps -> failure' dflagsIn ps
+   Right _ -> case unP P.parseHeader st of
+    PFailed pst -> failure [getPsErrorMessages pst]
+    POk pst _ | not (isEmptyMessages (getPsErrorMessages pst)) -> failure [getPsErrorMessages pst]
+    _ -> case unP (if isSignature file then P.parseSignature else P.parseModule) st of
+      POk pst m
+        | not (isEmptyMessages (getPsErrorMessages pst)) -> failure [getPsErrorMessages pst]
+        | (ws0, _) <- getPsMessages pst
+        , let ws = bidiWarning dflags file buf `unionMessages` ws0
+        , errorsOrFatalWarningsFound ws -> failure [ws]
+        | otherwise -> return (Right (ModP m src text prags cpp dflags toks view lit hsc))
+      PFailed pst -> let (ws, es) = getPsMessages pst
+                         (wWarns, wErrs) = partitionMessages ws
+                     in failure [wWarns, es `unionMessages` wErrs]
+
+-- the failure of the last module parsed: its flags, the text parsed and the messages ghc prints
+-- (the errors verb's; a helper of one thread)
+{-# NOINLINE cmdWarnRef #-}
+cmdWarnRef :: IORef (DynFlags, Messages DriverMessage)
+cmdWarnRef = unsafePerformIO (newIORef (undefined, mempty))
+
+{-# NOINLINE failureRef #-}
+failureRef :: IORef (Maybe (DynFlags, B.ByteString, [Printer]))
+failureRef = unsafePerformIO (newIORef Nothing)
+
+-- a batch of messages as the errors verb prints it: the handle, the logger and the flags in force
+type Printer = Handle -> Logger -> DynFlags -> IO ()
+
+psPrinter :: Messages PsMessage -> Printer
+psPrinter m _ lg dfl = printMessages lg NoDiagnosticOpts (initDiagOpts dfl) m
+
+ghcPrinter :: Messages GhcMessage -> Printer
+ghcPrinter m _ lg dfl = printMessages lg (initPrintConfig dfl) (initDiagOpts dfl) m
+
+-- whether the verb is `errors` (parseText then runs the driver's header phase too)
+{-# NOINLINE errorsModeRef #-}
+errorsModeRef :: IORef Bool
+errorsModeRef = unsafePerformIO (newIORef False)
+
+-- the driver's first phase for a module (GHC.Driver.Pipeline.Execute's getFileArgs): the header
+-- pragmas (getOptions: an unsupported extension, a malformed LANGUAGE or OPTIONS_GHC pragma, which
+-- throw), the dynamic flags they give (parseDynamicFilePragma: a flag's error is a usage error),
+-- the options no dynamic flag takes (checkProcessArgsResult); Right the batches of warnings that
+-- come before the parse's messages, Left the batches of the failure
+driverHeader :: HscEnv -> DynFlags -> FilePath -> StringBuffer -> IO (Either [Printer] [Printer])
+driverHeader hsc_env dfl file buf = do
+  let popts = initParserOpts dfl
+      forced = let (w, os) = getOptions popts (supportedLanguagePragmas dfl) buf file
+               in length (bagToList (getMessages w)) `seq` length os `seq` foldr seq () (map unLoc os) `seq` (w, os)
+  r <- try (evaluate forced)
+  case r of
+    Left (e :: SourceError) -> return (Left [ghcPrinter (srcErrorMessages e)])
+    Right (w, os) -> do
+      r2 <- try (parseDynamicFilePragma (hsc_logger hsc_env) dfl os)
+      case r2 of
+        Left (e :: GhcException) -> return (Left [\h _ _ -> hPutStr h ("ghc-" ++ cProjectVersion ++ ": " ++ show e ++ "\n")])
+        Right (_, leftover, wd) -> do
+          r3 <- try (checkProcessArgsResult leftover)
+          case r3 of
+            Left (e :: SourceError) -> return (Left [ghcPrinter (srcErrorMessages e)])
+            Right () -> return (Right [psPrinter w, ghcPrinter (GhcDriverMessage <$> wd)])
 
 bufferOf :: B.ByteString -> StringBuffer
 bufferOf = stringToStringBuffer . decodeUtf8
@@ -1073,3 +1262,22 @@ sha256Hex msg = concatMap hex8 (go h0 (pad msg))
               0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
               0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
               0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2] :: [Word32]
+
+-- hscParse's check for bidirectional formatting characters (GHC.Driver.Main, not exported): its
+-- warning, logged before the parse, so one of the parse's batches when the parse goes through
+bidiWarning :: DynFlags -> FilePath -> StringBuffer -> Messages PsMessage
+bidiWarning dflags file buf
+  | not (wopt Opt_WarnUnicodeBidirectionalFormatCharacters dflags) = mempty
+  | not (containsBidirectionalFormatChar buf) = mempty
+  | otherwise = case go (PsLoc (mkRealSrcLoc (mkFastString file) 1 1) (BufPos 0)) buf of
+      [] -> mempty
+      chars@((eloc, chr, _) : rest) ->
+        singleMessage (mkPlainMsgEnvelope (initDiagOpts dflags) (mkSrcSpanPs (mkPsSpan eloc (advancePsLoc eloc chr)))
+                         (PsWarnBidirectionalFormatChars (NE.fromList chars)))
+  where
+    go loc sb
+      | atEnd sb = []
+      | otherwise = case nextChar sb of
+          (chr, sb')
+            | Just desc <- lookup chr bidirectionalFormatChars -> (loc, chr, desc) : go (advancePsLoc loc chr) sb'
+            | otherwise -> go (advancePsLoc loc chr) sb'

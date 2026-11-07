@@ -241,8 +241,16 @@ Prior art:
     `tools/hsdump/GHC_VERSION`; `bin/repr-haskell read`, `print`, `roundtrip` (`--iface`: GHC's
     interfaces too; `--text`: mode `:full` printed back to the original text, byte for byte;
     `--layout`: printed by Haskell's layout rule, as a person writes it), `test`; corpus GHC
-    9.14.1's boot libraries, `test/haskell/corpus-ghc-9.14.1.edn`), evaluated from the checkout,
-    not embedded; `arbace.repr.rust` (`arbace/repr/rust{.ae,/}`), Rust as Rust forms and back
+    9.14.1's boot libraries, `test/haskell/corpus-ghc-9.14.1.edn`; the helper's verbs `cpp`, `errors`, `flags`,
+    `stg`, `core`, `rn`, `iface`, `tc`), evaluated from the checkout, not embedded; its native reader
+    (doc/haskell/NATIVE.md; the round trip's and `read --corpus`'s default since haskell-90, `REPR_HASKELL_READER=helper`
+    the oracle's): GHC's lexer and parser ported (`lex.ae`, `parse.ae` over the generated `tables.ae`, `bin/repr-haskell
+    tables --check`), unlit ported, the C preprocessor `cpp.ae` a clean-room implementation of GCC's traditional mode
+    (no GPL code: the GPL port of `haskell-pp`, 53794ed6, never entered the history), the driver's header phase
+    `fileargs.ae` and GHC's parse messages (`errors.ae`, `pprhs.ae`, `doc.ae`; `native-check --errors [--count N --seed S]`
+    with mutants), mode `:full` natively; `native-check` with its negative controls (`test/haskell/native-controls.txt`);
+    hsi, the STG evaluator (`bin/hsi`, `go/arbace/hs`, doc/haskell/HASKELL-EVAL-SURVEY.md; `check --aot [--opt O1]`, `--front
+    native`; out of every key); `arbace.repr.rust` (`arbace/repr/rust{.ae,/}`), Rust as Rust forms and back
     (spec `doc/rust/SPEC.md`, notes `doc/rust/RUST-NOTES.md`; helper `tools/rsdump`, a
     `rustc_private` driver on the host's rustc, pinned by `tools/rsdump/RUSTC_VERSION`, built
     against `rustc-dev` fetched as an apk into `.tmp/` and pinned by `tools/rsdump/apks.sha256`;
@@ -316,6 +324,10 @@ Prior art:
     read libstdc++'s headers and gcc's include directory as `test/cpp/target.ae` makes them from the pinned gcc tarball and `cpp/target/`
     (`bin/repr-cpp target tree|answers|oracle`, with musl's headers from its tarball: `bin/lib/repr-cpp/sysroot.bash`, `REPR_CPP_HEADERS=arbace|libstdcxx|host`);
     the live parts wait in `test/gate/crops/cpp-oracle.edn` for the oracle tier.
+    repr/cpp's native parser (doc/cpp/NATIVE.md, CX11): `read --reader native`, `bin/repr-cpp native-check LIST WORK` against clang's
+    AST (`--tree`: the tree level, `arbace.repr.cpp.tcheck`, `test/repr/cpp/native-tree-known.edn`; its controls
+    `test/repr/cpp/native-controls.edn`), the skim cache `REPR_CPP_SKIM_CACHE`; the print cell's oracle rejections read natively
+    and judged at levels 1 and R (CPR1-CPR4, doc/cpp/PRINT-DESIGN-REVIEW.md; `roundtrip --record-known-rejected`).
     Scheme's since SM9: repr/scheme against Chez 10.3.0 run live (the host `:chez`) and si's light driver
     (`go/arbace/scm` built alone by TamaGo's go, not Arbace's executable) against Chez's and Chibi's recorded runs, the corpora fetched
     by pin into the main checkout's `.tmp/scheme/corpora` (a worktree's and the clean clone's too); `--corpus ID` (`bin/repr-scheme

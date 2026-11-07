@@ -1,0 +1,750 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Parser/Errors/Ppr.hs
+;; (the Diagnostic instance of PsMessage: its messages, reasons and hints), GHC/Types/Hint/Ppr.hs
+;; (the hints the parser gives), GHC/Types/Error/Codes.hs (the parser's diagnostic codes),
+;; GHC/Types/Error.hs (mkLocMessageWarningGroups, getCaretDiagnostic), GHC/Utils/Error.hs
+;; (formatBulleted, sortMsgBag), GHC/Driver/Errors.hs (printMessages) and GHC/Utils/Logger.hs
+;; (defaultLogActionWithHandles), whose notice follows
+;; (LICENSE.md, "GHC: the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.errors
+  "The parser's messages as ghc -fno-code prints them (doc/haskell/NATIVE.md, \"Messages\").
+
+  A message is {:con :span :args}: :con GHC's PsMessage constructor as a keyword (:PsErrParse,
+  :PsErrLexer, :PsWarnTab...), :span the native reader's span, :args the constructor's fields as the
+  native reader has them (names, located nodes, keywords for GHC's enumerations, strings).
+  (text msgs opts) is what GHC's driver writes to standard error for them: each message sorted by
+  its span (sortMsgBag's leftmost_smallest), then `FILE:LINE:COL: error: [GHC-NNNNN]` (or `warning:
+  [GHC-NNNNN] [-Wflag]`) hung over the message's text and hints (printMessages, formatBulleted),
+  the caret lines of the span's first line (getCaretDiagnostic: the line read from the file the
+  span names, through opts' :source-line), a blank line."
+  (:require [arbace.repr.haskell.ast :as a]
+            [arbace.repr.haskell.doc :as d :refer [text <> <+> $$ $+$ nest hang vcat sep quotes]]
+            [arbace.repr.haskell.pprhs :as ph]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn msg "A message: constructor con at span, its fields args" [con span & args]
+  {:con con :span span :args (vec args)})
+
+;;; ------------------------------------------------------------------------------------------
+;;; Codes (GHC.Types.Error.Codes's GhcDiagnosticCode of the parser's constructors)
+
+(def codes
+  {:PsErrParseLanguagePragma "68686" :PsErrUnsupportedExt "46537" :PsErrParseOptionsPragma "24342"
+   :PsErrUnknownOptionsPragma "04924" :PsWarnBidirectionalFormatChars "03272" :PsWarnTab "94817"
+   :PsWarnTransitionalLayout "93617" :PsWarnOperatorWhitespaceExtConflict "47082"
+   :PsWarnOperatorWhitespace "40798" :PsWarnHaddockInvalidPos "94458" :PsWarnHaddockIgnoreMulti "05641"
+   :PsWarnStarBinder "21887" :PsWarnStarIsType "39567" :PsWarnUnrecognisedPragma "42044"
+   :PsWarnMisplacedPragma "28007" :PsWarnImportPreQualified "07924" :PsWarnViewPatternSignatures "00834"
+   :PsErrLexer "21231" :PsErrCmmLexer "75725" :PsErrCmmParser "09848" :PsErrParse "58481"
+   :PsErrTypeAppWithoutSpace "84077" :PsErrLazyPatWithoutSpace "27207" :PsErrBangPatWithoutSpace "95644"
+   :PsErrInvalidInfixHole "45106" :PsErrExpectedHyphen "44524" :PsErrSpaceInSCC "76176"
+   :PsErrEmptyDoubleQuotes "11861" :PsErrLambdaCase "51179" :PsErrEmptyLambda "71614"
+   :PsErrLinearFunction "31574" :PsErrMultiWayIf "28985" :PsErrOverloadedRecordUpdateNotEnabled "82135"
+   :PsErrNumUnderscores "62330" :PsErrIllegalBangPattern "79767" :PsErrOverloadedRecordDotInvalid "26832"
+   :PsErrIllegalPatSynExport "89515" :PsErrOverloadedRecordUpdateNoQualifiedFields "94863"
+   :PsErrExplicitForall "25955" :PsErrIllegalQualifiedDo "40280" :PsErrQualifiedDoInCmd "54089"
+   :PsErrRecordSyntaxInPatSynDecl "28021" :PsErrEmptyWhereInPatSynDecl "13248"
+   :PsErrInvalidWhereBindInPatSynDecl "24737" :PsErrNoSingleWhereBindInPatSynDecl "65536"
+   :PsErrDeclSpliceNotAtTopLevel "08451" :PsErrMultipleNamesInStandaloneKindSignature "42569"
+   :PsErrIllegalExplicitNamespace "47007" :PsErrUnallowedPragma "85314" :PsErrImportPostQualified "87491"
+   :PsErrImportQualifiedTwice "05661" :PsErrSpliceOrQuoteTwice "26105" :PsErrIllegalImportBundleForm "81284"
+   :PsErrInvalidRuleActivationMarker "50396" :PsErrMissingBlock "16849" :PsErrUnsupportedBoxedSumExpr "09550"
+   :PsErrUnsupportedBoxedSumPat "16863" :PsErrUnexpectedQualifiedConstructor "73413"
+   :PsErrTupleSectionInPat "09646" :PsErrOpFewArgs "24180" :PsErrVarForTyCon "18208"
+   :PsErrMalformedEntityString "26204" :PsErrDotsInRecordUpdate "70712" :PsErrInvalidDataCon "46574"
+   :PsErrInvalidInfixDataCon "30670" :PsErrIllegalPromotionQuoteDataCon "80236" :PsErrUnpackDataCon "40845"
+   :PsErrUnexpectedKindAppInDataCon "83653" :PsErrInvalidRecordCon "08195"
+   :PsErrIllegalUnboxedStringInPat "69925" :PsErrIllegalUnboxedFloatingLitInPat "76595"
+   :PsErrDoNotationInPat "06446" :PsErrIfThenElseInPat "45696" :PsErrCaseInPat "53786"
+   :PsErrLetInPat "78892" :PsErrLambdaInPat "00482" :PsErrArrowExprInPat "04584" :PsErrArrowCmdInPat "98980"
+   :PsErrArrowCmdInExpr "66043" :PsErrOrPatInExpr "66718" :PsErrLambdaCmdInFunAppCmd "12178"
+   :PsErrCaseCmdInFunAppCmd "92971" :PsErrIfCmdInFunAppCmd "97005" :PsErrLetCmdInFunAppCmd "70526"
+   :PsErrDoCmdInFunAppCmd "77808" :PsErrDoInFunAppExpr "52095" :PsErrMDoInFunAppExpr "67630"
+   :PsErrLambdaInFunAppExpr "06074" :PsErrCaseInFunAppExpr "25037" :PsErrLetInFunAppExpr "90355"
+   :PsErrIfInFunAppExpr "01239" :PsErrProcInFunAppExpr "04807" :PsErrMalformedTyOrClDecl "47568"
+   :PsErrIllegalWhereInDataDecl "36952" :PsErrIllegalDataTypeContext "87429" :PsErrPrimStringInvalidChar "43080"
+   :PsErrSuffixAT "33856" :PsErrPrecedenceOutOfRange "25078" :PsErrSemiColonsInCondExpr "75254"
+   :PsErrSemiColonsInCondCmd "18910" :PsErrAtInPatPos "08382" :PsErrParseErrorOnInput "66418"
+   :PsErrMalformedDecl "85316" :PsErrNotADataCon "25742" :PsErrInferredTypeVarNotAllowed "57342"
+   :PsErrIllegalTraditionalRecordSyntax "65719" :PsErrParseErrorInCmd "03790" :PsErrInPat "07626"
+   :PsErrIllegalRoleName "09009" :PsErrInvalidTypeSignature "94426" :PsErrUnexpectedTypeInDecl "77878"
+   :PsErrInvalidPackageName "21926" :PsErrParseRightOpSectionInPat "72516"
+   :PsErrIllegalGadtRecordMultiplicity "37475" :PsErrInvalidCApiImport "72744"
+   :PsErrMultipleConForNewtype "05380" :PsErrUnicodeCharLooksLike "31623" :PsErrInvalidPun "52943"
+   :PsErrIllegalOrPat "29847" :PsErrTypeSyntaxInPat "32181" :PsErrSpecExprMultipleTypeAscription "62037"
+   :PsWarnSpecMultipleTypeAscription "73026" :PsWarnPatternNamespaceSpecifier "68383"
+   :DriverUnrecognisedFlag "93741" :DriverDeprecatedFlag "53692"})
+
+;;; The warnings' flags (diagnosticReason's WarningWithFlag, warnFlagNames' first name)
+(def ^:private warning-flags
+  {:PsWarnBidirectionalFormatChars "unicode-bidirectional-format-characters" :PsWarnTab "tabs"
+   :PsWarnTransitionalLayout "alternative-layout-rule-transitional"
+   :PsWarnOperatorWhitespaceExtConflict "operator-whitespace-ext-conflict"
+   :PsWarnOperatorWhitespace "operator-whitespace" :PsWarnHaddockInvalidPos "invalid-haddock"
+   :PsWarnHaddockIgnoreMulti "invalid-haddock" :PsWarnStarBinder "star-binder" :PsWarnStarIsType "star-is-type"
+   :PsWarnUnrecognisedPragma "unrecognised-pragmas" :PsWarnMisplacedPragma "misplaced-pragmas"
+   :PsWarnImportPreQualified "prepositive-qualified-module"
+   :PsWarnViewPatternSignatures "view-pattern-signatures" :PsWarnSpecMultipleTypeAscription "deprecated-pragmas"
+   :PsWarnPatternNamespaceSpecifier "pattern-namespace-specifier"
+   :DriverUnrecognisedFlag "unrecognised-warning-flags"
+   :DriverDeprecatedFlag "deprecated-flags"})
+
+(defn warning? [m] (contains? warning-flags (:con m)))
+(defn warning-flag "A warning's flag" [m] (warning-flags (:con m)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Haskell's show of a Char and a String (showLitChar)
+
+(def ^:private ascii-names
+  ["NUL" "SOH" "STX" "ETX" "EOT" "ENQ" "ACK" "a" "b" "t" "n" "v" "f" "r" "SO" "SI" "DLE" "DC1" "DC2"
+   "DC3" "DC4" "NAK" "SYN" "ETB" "CAN" "EM" "SUB" "ESC" "FS" "GS" "RS" "US"])
+
+(defn- show-lit-char
+  "showLitChar of code point c, and whether a following digit needs \\& (a numeric escape) or a
+  following H (\\SO)"
+  [^long c]
+  (cond
+    (> c 127) [(str "\\" c) :digit]
+    (= c 127) ["\\DEL" nil]
+    (= c 92) ["\\\\" nil]
+    (>= c 32) [(str (char c)) nil]
+    :else [(str "\\" (nth ascii-names c)) (when (= c 14) :h)]))
+
+(defn show-char "Haskell's show of a Char (a code point)" [^long c]
+  (if (= c 39) "'\\''" (str "'" (first (show-lit-char c)) "'")))
+
+(defn show-string "Haskell's show of a String" [^String s]
+  (let [cps (vec (.toArray (.codePoints s)))
+        sb (StringBuilder. "\"")]
+    (loop [i 0 prev nil]
+      (if (< i (count cps))
+        (let [c (long (nth cps i))
+              [t p] (if (= c 34) ["\\\"" nil] (show-lit-char c))]
+          (when (or (and (= prev :digit) (<= 48 c 57)) (and (= prev :h) (= c 72))) (.append sb "\\&"))
+          (.append sb ^String t)
+          (recur (inc i) p))
+        (.toString (.append sb "\""))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Hints (GHC.Types.Hint.Ppr)
+
+(def ^:private deprecated-extensions
+  #{"TypeInType" "NullaryTypeClasses" "RelaxedPolyRec" "DatatypeContexts" "AutoDeriveTypeable"
+    "OverlappingInstances"})
+
+(defn- implied-by
+  "pprImpliedExtensions: the extensions that imply ext (impliedXFlags' On), not deprecated"
+  [ext]
+  (let [imp @(requiring-resolve 'arbace.repr.haskell.header/implied-xflags)
+        xs (for [[impl k orig] imp :when (and (= k :on) (= orig ext) (not (deprecated-extensions impl)))]
+             (quotes (text impl)))]
+    (if (empty? xs) d/empty (d/parens (<+> (text "implied by") (d/unquoted-list-with (text "and") xs))))))
+
+(defn- ppr-hint [[h & xs]]
+  (case h
+    :suggest-extension
+    (let [[ext extra] xs]
+      ($$ (<+> (text "Perhaps you intended to use") (text "the") (quotes (text ext)) (text "extension") (implied-by ext))
+          (or extra d/empty)))
+    :extension-in-order-to
+    (let [[ext extra] xs]
+      ($$ (<+> (text "Use") (text "the") (quotes (text ext)) (text "extension") (implied-by ext))
+          (or extra d/empty)))
+    :missing-do (text "Possibly caused by a missing 'do'?")
+    :let-in-do ($$ (text "Perhaps you need a 'let' in a 'do' block?")
+                   (text "e.g. 'let x = 5' instead of 'x = 5'"))
+    :use-spaces (text "Please use spaces instead.")
+    :parentheses (text "Use parentheses.")
+    :use-whitespace-after (<> (<+> (text "Add whitespace after the") (quotes (text (first xs)))) (d/char* \.))
+    :use-whitespace-around (<> (<+> (text "Add whitespace around") (quotes (text (first xs)))) (d/char* \.))
+    :correct-pragma-name (<+> (text "Perhaps you meant") (d/quoted-list-with "or" (map text (first xs))))
+    :place-pragma-in-header
+    ($$ (text "Perhaps you meant to place it in the module header?")
+        (<+> (text "The module header is the section at the top of the file, before the")
+             (quotes (text "module")) (text "keyword")))
+    :qualified-after-module-name (<+> (text "Place") (quotes (text "qualified")) (text "after the module name."))
+    :th-quotation-syntax (vcat [(text "Perhaps you intended to use quotation syntax of TemplateHaskell,")
+                                (text "but the type variable or constructor is missing")])
+    :roles (let [[nearby] xs]
+             (case (count nearby)
+               0 d/empty
+               1 (<+> (text "Perhaps you meant") (quotes (text (first nearby))))
+               (hang (text "Perhaps you meant one of these:") 2 (d/ppr-with-commas #(quotes (text %)) nearby))))
+    :qualify-star-operator ($$ (<+> (text "To use (or export) this operator in") (text "modules with StarIsType,"))
+                               (text "    including the definition module, you must qualify it."))
+    :use-type-from-data-kind (<+> (text "Use") (quotes (text "Type")) (text "from") (quotes (text "Data.Kind"))
+                                  (text "instead."))
+    :type-signature-remove-qualifier (text "Perhaps you meant to omit the qualifier")
+    :parenthesize-pattern-rhs (text "Parenthesize the RHS of the view pattern")
+    :splitting-specialise (text "Split the SPECIALISE pragma into multiple pragmas, one for each type signature")
+    :data-keyword (<+> (text "Use the") (quotes (text "data")) (text "keyword instead."))
+    :unknown (first xs)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The messages (diagnosticMessage)
+
+(defn- lam-case-keyword [v]
+  (case (keyword (name v)) :LamSingle (text "lambda") :LamCase (text "\\case") :LamCases (text "\\cases")))
+
+(defn- pp-unexpected-fun-app [e x]
+  ($$ (<> (text "Unexpected ") e (text " in function application:"))
+      (nest 4 (ph/ppr-lexpr x))))
+
+(def ^:private parse-error-in-pat (text "Parse error in pattern:"))
+(def ^:private perhaps-as-pat (text "Perhaps you meant an as-pattern, which must not be surrounded by whitespace"))
+(defn- forall-sym [u] (text (if u "∀" "forall")))
+(defn- mod-name "A module name: (mod \"M\"), located or not, or a string" [m]
+  (let [m (if (a/L? m) (a/unLoc m) m)] (if (seq? m) (second m) (str m))))
+(defn- prepend-qualified [m d] (if m (<> (text (str (mod-name m) ".")) d) d))
+
+(defn- semicolons-in-cond [[c st t se e] pp]
+  (let [opt (fn [b] (if b d/semi d/empty))]
+    ($$ (text "Unexpected semi-colons in conditional:")
+        (nest 4 (<+> (<> (<+> (text "if") (pp c)) (opt st))
+                     (<> (<+> (text "then") (pp t)) (opt se))
+                     (<+> (text "else") (pp e)))))))
+
+(defn- ppr-header-pragma-type [k]
+  (case k :OptionsPrag (text "OPTIONS") :IncludePrag (text "INCLUDE") :LanguagePrag (text "LANGUAGE")
+        :DocOptionsPrag (text "OPTIONS_HADDOCK")))
+
+(defn- ppr-whitespace-symbol [s]
+  (case s :PrefixPercent (text "%") :PrefixDollar (text "$") :PrefixDollarDollar (text "$$")))
+
+(defn message-docs
+  "diagnosticMessage: the message's documents (a DecoratedSDoc's list)"
+  [{:keys [con args]}]
+  (let [[x y z w v] args]
+    (case con
+      :PsErrParse (if (empty? x)
+                    [(text "parse error (possibly incorrect indentation or mismatched brackets)")]
+                    [(<+> (text "parse error on input") (quotes (text x)))])
+      :PsErrLexer [(d/hcat [(text (case x
+                                     :LexError "lexical error"
+                                     :LexUnknownPragma "unknown pragma"
+                                     :LexErrorInPragma "lexical error in pragma"
+                                     :LexNumEscapeRange "numeric escape sequence out of range"
+                                     :LexUnterminatedComment "unterminated `{-'"
+                                     :LexUnterminatedOptions "unterminated OPTIONS pragma"
+                                     :LexUnterminatedQQ "unterminated quasiquotation"))
+                             (text (case (first y)
+                                     :eof " at end of input"
+                                     :utf8 " (UTF-8 decoding error)"
+                                     :char (str " at character " (show-char (second y)))))])]
+      :PsWarnTab [(<> (text "Tab character found here")
+                      (if (= 1 x) (text "")
+                          (<+> (text ", and in") (d/speak-n-of (dec (long x)) (text "further location"))))
+                      (text "."))]
+      :PsWarnTransitionalLayout
+      [($$ (text "transitional layout will not be accepted in the future:")
+           (case x
+             :Where (text "`where' clause at the same depth as implicit layout block")
+             :Pipe (text "`|' at the same depth as implicit layout block")))]
+      :PsWarnOperatorWhitespaceExtConflict
+      (let [[ext meaning] (case x :PrefixPercent ["LinearTypes" "a multiplicity annotation"]
+                                :PrefixDollar ["TemplateHaskell" "an untyped splice"]
+                                :PrefixDollarDollar ["TemplateHaskell" "a typed splice"])]
+        [($$ (<+> (text "The prefix use of a") (quotes (ppr-whitespace-symbol x)) (text "would denote") (text meaning))
+             (nest 2 (<+> (text "were the") (text ext) (text "extension enabled."))))])
+      :PsWarnOperatorWhitespace
+      [($$ (<+> (text "The") (text (case y :Prefix "prefix" :Suffix "suffix" :TightInfix "tight infix"))
+                (text "use of a") (quotes (text x)) (text "might be repurposed as special syntax"))
+           (nest 2 (text "by a future language extension.")))]
+      :PsWarnStarBinder [(<+> (text "Found binding occurrence of") (quotes (text "*")) (text "yet StarIsType is enabled."))]
+      :PsWarnStarIsType [($$ (<+> (text "Using") (quotes (text "*")) (text "(or its Unicode variant) to mean")
+                                  (quotes (text "Data.Kind.Type")))
+                             (text "relies on the StarIsType extension, which will become")
+                             (text "deprecated in the future."))]
+      :PsWarnUnrecognisedPragma [(<> (text "Unrecognised pragma") (if (empty? x) d/empty (<+> (text ":") (text x))))]
+      :PsWarnMisplacedPragma [(<+> (text "Misplaced") (ppr-header-pragma-type x) (text "pragma"))]
+      :PsWarnImportPreQualified [(<+> (text "Found") (quotes (text "qualified")) (text "in prepositive position"))]
+      ;; x: [[offset description]...], the first the one the span is at
+      :PsWarnBidirectionalFormatChars
+      (let [[[n desc] & more] x]
+        [(vcat (concat [(<+> (text "A unicode bidirectional formatting character") (d/parens (text desc)))
+                        (<+> (text "was found at offset") (text (str n)) (text "in the file"))]
+                       (when (seq more)
+                         [(<+> (text "along with further bidirectional formatting characters at")
+                               (vcat (map (fn [[m dsc]] (<+> (<> (<+> (text "offset") (text (str m))) (text ":")) (text dsc)))
+                                          more)))])
+                       [(text "Bidirectional formatting characters may be rendered misleadingly in certain editors")]))])
+      ;; x the legacy parse, y the future one (mkDecorated: three documents)
+      :PsWarnViewPatternSignatures
+      (let [par (fn [p] (a/L nil (list 'ParPat nil p)))
+            add-parens-sig (fn go [p] (let [n (a/unLoc p)]
+                                        (case (first n)
+                                          ViewPat (a/L (nth p 1) (list 'ViewPat (nth n 1) (nth n 2) (go (nth n 3))))
+                                          SigPat (par p)
+                                          p)))
+            add-parens-view (fn go [p] (let [n (a/unLoc p)]
+                                         (case (first n)
+                                           ViewPat (par p)
+                                           SigPat (a/L (nth p 1) (list 'SigPat (nth n 1) (go (nth n 2)) (nth n 3)))
+                                           p)))]
+        [(text "Found an unparenthesized pattern signature on the RHS of a view pattern.")
+         (vcat [(text "This code might stop working in a future GHC release")
+                (text "due to a planned change to the precedence of view patterns,")
+                (text "unless the view function is an endofunction.")])
+         (nest 2 (vcat [(<+> (text "Current parse:") (quotes (ph/ppr-lpat (add-parens-sig x))))
+                        (<+> (text "Future parse:") (quotes (ph/ppr-lpat (add-parens-view y))))]))])
+      :PsWarnHaddockInvalidPos [(text "A Haddock comment cannot appear in this position and will be ignored.")]
+      :PsWarnHaddockIgnoreMulti [($$ (text "Multiple Haddock comments for a single entity are not allowed.")
+                                     (text "The extraneous comment will be ignored."))]
+      :PsErrTypeAppWithoutSpace [($$ (sep [(text "@-pattern in expression context:")
+                                           (nest 4 (<> (ph/ppr-prefix-occ x) (text "@") (ph/ppr-lexpr y)))])
+                                     (text "Type application syntax requires a space before '@'"))]
+      :PsErrLazyPatWithoutSpace [($$ (sep [(text "Lazy pattern in expression context:")
+                                           (nest 4 (<> (text "~") (ph/ppr-lexpr x)))])
+                                     (text "Did you mean to add a space after the '~'?"))]
+      :PsErrBangPatWithoutSpace [($$ (sep [(text "Bang pattern in expression context:")
+                                           (nest 4 (<> (text "!") (ph/ppr-lexpr x)))])
+                                     (text "Did you mean to add a space after the '!'?"))]
+      :PsErrInvalidInfixHole [(text "Invalid infix hole, expected an infix operator")]
+      :PsErrExpectedHyphen [(text "Expected a hyphen")]
+      :PsErrSpaceInSCC [(text "Spaces are not allowed in SCCs")]
+      :PsErrEmptyDoubleQuotes [(vcat [(text "Parser error on `''`") (text "Character literals may not be empty")])]
+      :PsErrLambdaCase [(<+> (text "Illegal") (lam-case-keyword :LamCase))]
+      :PsErrEmptyLambda [(text "A lambda requires at least one parameter")]
+      :PsErrLinearFunction [(text "Illegal use of linear functions")]
+      :PsErrOverloadedRecordUpdateNotEnabled [(text "Illegal overloaded record update")]
+      :PsErrMultiWayIf [(text "Illegal multi-way if-expression")]
+      :PsErrNumUnderscores [(text (case x :Integral "Illegal underscores in integer literals"
+                                        :Float "Illegal underscores in floating literals"))]
+      :PsErrIllegalBangPattern [($$ (text "Illegal bang-pattern or strict binding") (ph/ppr-lpat x))]
+      :PsErrOverloadedRecordDotInvalid
+      [(text "Use of OverloadedRecordDot '.' not valid ('.' isn't allowed when constructing records or in record patterns)")]
+      :PsErrIllegalPatSynExport [(text "Illegal export form")]
+      :PsErrOverloadedRecordUpdateNoQualifiedFields [(text "Fields cannot be qualified when OverloadedRecordUpdate is enabled")]
+      :PsErrExplicitForall [(<+> (text "Illegal symbol") (quotes (forall-sym x)) (text "in type"))]
+      :PsErrIllegalQualifiedDo [(<+> (text "Illegal qualified") (quotes x) (text "block"))]
+      :PsErrQualifiedDoInCmd [(hang (text "Parse error in command:") 2
+                                    ($$ (<> (<+> (text "Found a qualified") (text (mod-name x))) (text ".do block in a command, but"))
+                                        (text "qualified 'do' is not supported in commands.")))]
+      :PsErrRecordSyntaxInPatSynDecl [($$ (text "record syntax not supported for pattern synonym declarations:")
+                                          (ph/ppr-lpat x))]
+      :PsErrEmptyWhereInPatSynDecl [($$ (text "pattern synonym 'where' clause cannot be empty")
+                                        (<+> (text "In the pattern synonym declaration for: ") (ph/ppr-name x)))]
+      :PsErrInvalidWhereBindInPatSynDecl
+      [($$ (<+> (text "pattern synonym 'where' clause must bind the pattern synonym's name") (quotes (ph/ppr-name x)))
+           (ph/ppr-decl y))]
+      :PsErrNoSingleWhereBindInPatSynDecl
+      [($$ (text "pattern synonym 'where' clause must contain a single binding:") (ph/ppr-decl y))]
+      :PsErrDeclSpliceNotAtTopLevel [(hang (<+> (text "Declaration splices are allowed only") (text "at the top level:"))
+                                           2 (ph/ppr-decl x))]
+      :PsErrMultipleNamesInStandaloneKindSignature
+      [(vcat [(hang (text "Standalone kind signatures do not support multiple names at the moment:")
+                    2 (d/ppr-with-commas ph/ppr-name x))
+              (text "See https://gitlab.haskell.org/ghc/ghc/issues/16754 for details.")])]
+      :PsErrIllegalExplicitNamespace [(<+> (text "Illegal keyword") (quotes (text (case x :type "type" :data "data"))))]
+      :PsErrUnallowedPragma [(hang (text "A pragma is not allowed in this position:") 2 (ph/ppr-pragma x))]
+      :PsErrImportPostQualified [(<+> (text "Found") (quotes (text "qualified")) (text "in postpositive position. "))]
+      :PsErrImportQualifiedTwice [(text "Multiple occurrences of 'qualified'")]
+      :PsErrSpliceOrQuoteTwice [(text "Multiple occurrences of a splice or quote keyword")]
+      :PsErrIllegalImportBundleForm [($+$ (text "Illegal import form, this syntax can only be used to bundle")
+                                          (text "pattern synonyms with types in module exports."))]
+      :PsErrInvalidRuleActivationMarker [(text "Invalid rule activation marker")]
+      :PsErrMissingBlock [(text "Missing block")]
+      :PsErrUnsupportedBoxedSumExpr [(hang (text "Boxed sums not supported:") 2 (ph/ppr-sum-or-tuple x))]
+      :PsErrUnsupportedBoxedSumPat [(hang (text "Boxed sums not supported:") 2 (ph/ppr-sum-or-tuple x))]
+      :PsErrUnexpectedQualifiedConstructor [(hang (text "Expected an unqualified type constructor:") 2 (ph/ppr-name x))]
+      :PsErrTupleSectionInPat [(text "Tuple section in pattern context")]
+      :PsErrOpFewArgs [(<+> (text "Operator applied to too few arguments:") (ph/ppr-name y))]
+      :PsErrVarForTyCon [($$ (<> (<+> (text "Expecting a type constructor but found a variable,") (quotes (ph/ppr-name x)))
+                                 (text "."))
+                             (if (ph/sym-occ? x)
+                               (<+> (text "If") (quotes (ph/ppr-name x)) (text "is a type constructor")
+                                    (text "then enable ExplicitNamespaces and use the 'type' keyword."))
+                               d/empty))]
+      :PsErrMalformedEntityString [(text "Malformed entity string")]
+      :PsErrDotsInRecordUpdate [(text "You cannot use `..' in a record update")]
+      :PsErrInvalidDataCon [(hang (text "Cannot parse data constructor in a data/newtype declaration:") 2 (ph/ppr-ltype x))]
+      :PsErrInvalidInfixDataCon [(hang (text "Cannot parse an infix data constructor in a data/newtype declaration:") 2
+                                       (<+> (ph/ppr-ltype x) (ph/ppr-name y) (ph/ppr-ltype z)))]
+      :PsErrIllegalPromotionQuoteDataCon [($$ (text "Illegal promotion quote mark in the declaration of")
+                                              (<+> (text "data/newtype constructor") (ph/ppr-prefix-occ x)))]
+      :PsErrUnpackDataCon [(text "{-# UNPACK #-} cannot be applied to a data constructor.")]
+      :PsErrUnexpectedKindAppInDataCon [(hang (text "Unexpected kind application in a data/newtype declaration:") 2
+                                              (<+> (ph/ppr-ltype x) (<> (text "@") (ph/ppr-ltype y))))]
+      :PsErrInvalidRecordCon [(<+> (text "Not a record constructor:") (ph/ppr-patbuilder x))]
+      :PsErrIllegalUnboxedStringInPat [($$ (text "Illegal unboxed string literal in pattern:") (ph/ppr-lit x))]
+      :PsErrIllegalUnboxedFloatingLitInPat [($$ (text "Illegal unboxed floating point literal in pattern:") (ph/ppr-lit x))]
+      :PsErrDoNotationInPat [(text "do-notation in pattern")]
+      :PsErrIfThenElseInPat [(text "(if ... then ... else ...)-syntax in pattern")]
+      :PsErrCaseInPat [(text "(case ... of ...)-syntax in pattern")]
+      :PsErrLetInPat [(text "(let ... in ...)-syntax in pattern")]
+      :PsErrLambdaInPat [(<> (<+> (text "Illegal") (lam-case-keyword x)) (text "-syntax in pattern"))]
+      :PsErrArrowExprInPat [(<+> (text "Expression syntax in pattern:") (ph/ppr-expr x))]
+      :PsErrArrowCmdInPat [(<+> (text "Command syntax in pattern:") (ph/ppr-cmd x))]
+      :PsErrArrowCmdInExpr [(vcat [(text "Arrow command found where an expression was expected:") (nest 2 (ph/ppr-cmd x))])]
+      :PsErrOrPatInExpr [(sep [(text "Or pattern in expression context:") (nest 4 (ph/ppr-lpat x))])]
+      :PsErrCaseCmdInFunAppCmd [(pp-unexpected-fun-app (text "case command") x)]
+      :PsErrLambdaCmdInFunAppCmd [(pp-unexpected-fun-app (<+> (lam-case-keyword x) (text "command")) y)]
+      :PsErrIfCmdInFunAppCmd [(pp-unexpected-fun-app (text "if command") x)]
+      :PsErrLetCmdInFunAppCmd [(pp-unexpected-fun-app (text "let command") x)]
+      :PsErrDoCmdInFunAppCmd [(pp-unexpected-fun-app (text "do command") x)]
+      :PsErrDoInFunAppExpr [(pp-unexpected-fun-app (prepend-qualified x (text "do block")) y)]
+      :PsErrMDoInFunAppExpr [(pp-unexpected-fun-app (prepend-qualified x (text "mdo block")) y)]
+      :PsErrCaseInFunAppExpr [(pp-unexpected-fun-app (text "case expression") x)]
+      :PsErrLambdaInFunAppExpr [(pp-unexpected-fun-app (<+> (lam-case-keyword x) (text "expression")) y)]
+      :PsErrLetInFunAppExpr [(pp-unexpected-fun-app (text "let expression") x)]
+      :PsErrIfInFunAppExpr [(pp-unexpected-fun-app (text "if expression") x)]
+      :PsErrProcInFunAppExpr [(pp-unexpected-fun-app (text "proc expression") x)]
+      :PsErrMalformedTyOrClDecl [(<+> (text "Malformed head of type or class declaration:") (ph/ppr-ltype x))]
+      :PsErrIllegalWhereInDataDecl [(text "Illegal keyword 'where' in data declaration")]
+      :PsErrIllegalDataTypeContext [(<+> (text "Illegal datatype context:") (ph/ppr-lcontext x))]
+      :PsErrPrimStringInvalidChar [(text "primitive string literal must contain only characters <= '\\xFF'")]
+      :PsErrSuffixAT [($$ (text "The symbol '@' occurs as a suffix.")
+                          (text "For an as-pattern, there must not be any whitespace surrounding '@'."))]
+      :PsErrPrecedenceOutOfRange [(<> (text "Precedence out of range: ") (d/int* x))]
+      :PsErrSemiColonsInCondExpr [(semicolons-in-cond args ph/ppr-lexpr)]
+      :PsErrSemiColonsInCondCmd [(semicolons-in-cond args ph/ppr-lcmd)]
+      :PsErrAtInPatPos [($$ (<+> (text "Found a binding for the") (quotes (text "@")) (text "operator in a pattern position."))
+                            perhaps-as-pat)]
+      :PsErrParseErrorOnInput [(<+> (text "parse error on input") (text x))]
+      :PsErrMalformedDecl [(<+> (text "Malformed") (text x) (text "declaration for") (quotes (ph/ppr-name y)))]
+      :PsErrNotADataCon [(<+> (text "Not a data constructor:") (quotes (ph/ppr-name x)))]
+      :PsErrInferredTypeVarNotAllowed [(text "Inferred type variables are not allowed here")]
+      :PsErrIllegalTraditionalRecordSyntax [(<+> (text "Illegal record syntax:") x)]
+      :PsErrParseErrorInCmd [(hang (text "Parse error in command:") 2 x)]
+      :PsErrInPat (let [[s details] args
+                        body (case (first details)
+                               :NegApp (<> (text "-") (ph/ppr-patbuilder s))
+                               :Other (let [[_ fun] details]
+                                        (if fun
+                                          ($$ (<+> (ph/ppr-patbuilder s) (text "In a function binding for the")
+                                                   (quotes (ph/ppr-name fun)) (text "operator."))
+                                              (if (= "@" (a/rdr-occ fun)) perhaps-as-pat d/empty))
+                                          (ph/ppr-patbuilder s)))
+                               (ph/ppr-patbuilder s))]
+                    [(<+> parse-error-in-pat body)])
+      :PsErrParseRightOpSectionInPat [(<+> parse-error-in-pat (<> (ph/ppr-infix-occ x) (ph/ppr-patbuilder y)))]
+      :PsErrIllegalRoleName [(<+> (text "Illegal role name") (quotes (text x)))]
+      :PsErrInvalidTypeSignature
+      [(case x
+         :DataCon ($$ (<> (<+> (text "Invalid data constructor") (quotes (ph/ppr-lexpr y)) (text "in type signature"))
+                          d/colon)
+                      (text "You can only define data constructors in data type declarations."))
+         :Qualified (text "Invalid qualified name in type signature.")
+         :Other ($$ (<> (text "Invalid type signature") d/colon)
+                    (<> (<+> (text "A type signature should be of form") (d/angle-brackets (text "variables"))
+                             d/dcolon (d/angle-brackets (text "type")))
+                        d/dot)))]
+      :PsErrUnexpectedTypeInDecl
+      (let [[t what tc tparms eq] args
+            names (map str "abcdefghijklmnopqrstuvwxyz")]
+        [(vcat [(<+> (text "Unexpected type") (quotes (ph/ppr-ltype t)))
+                (<+> (text "In the") (text what) (text "declaration for") (quotes (ph/ppr-name tc)))
+                (vcat [(<+> (text "A") (text what) (text "declaration should have form"))
+                       (nest 2 (<+> (text what) (ph/ppr-name tc) (d/hsep (map text (take (count tparms) names)))
+                                    (if (seq eq) (text eq) d/empty)))])])])
+      :PsErrInvalidPackageName [(vcat [(<+> (<> (text "Parse error") d/colon) (quotes (text x)))
+                                       (<+> (text "Version number or non-alphanumeric") (text "character in package name"))])]
+      :PsErrIllegalGadtRecordMultiplicity [(vcat [(<+> (<> (text "Parse error") d/colon) (quotes (d/parens (ph/ppr-arrow x))))
+                                                  (text "Record constructors in GADTs must use an ordinary, non-linear arrow.")])]
+      :PsErrInvalidCApiImport [(vcat [(text "Wrapper stubs can't be used with CApiFFI.")])]
+      :PsErrMultipleConForNewtype [(vcat [(sep [(text "A newtype must have exactly one constructor,")
+                                                (nest 2 (<+> (text "but") (quotes (ph/ppr-name x)) (text "has") (d/speak-n y)))])
+                                          (<+> (text "In the newtype declaration for") (quotes (ph/ppr-name x)))])]
+      :PsErrUnicodeCharLooksLike
+      [(d/hsep [(text "Unicode character")
+                (<> (text "'") (text (String. (Character/toChars (int x)))) (text "' (") (text (show-char x)) (text ")"))
+                (text "looks like")
+                (<> (text "'") (text (String. (Character/toChars (int y)))) (text "' (") (text z) (text ")") d/comma)
+                (text "but it is not")])]
+      :PsErrInvalidPun [(case x
+                          :QuoteDisambiguation (vcat [(text "Disambiguating data constructors of tuples and lists is disabled.")
+                                                      (text "Remove the quote to use the data constructor.")])
+                          :TupleSyntaxType (vcat [(text "Unboxed tuple data constructors are not supported in types.")
+                                                  (<+> (text "Use") (quotes (text "Tuple<n># a b c ...")) (text "to refer to the type constructor."))])
+                          :SumSyntaxType (vcat [(text "Unboxed sum data constructors are not supported in types.")
+                                                (<+> (text "Use") (quotes (text "Sum<n># a b c ...")) (text "to refer to the type constructor."))]))]
+      :PsErrTypeSyntaxInPat [(vcat [(<+> (text "Illegal") (text x) (text "in pattern:") (quotes y))
+                                    (text "Type syntax in patterns isn't supported at the time")])]
+      :PsErrIllegalOrPat [(vcat [(<+> (text "Illegal or-pattern:") (ph/ppr-pat (a/unLoc x)))])]
+      :PsErrSpecExprMultipleTypeAscription [(text "SPECIALISE expression doesn't support multiple type ascriptions")]
+      :PsWarnSpecMultipleTypeAscription
+      [(text "SPECIALISE pragmas with multiple type ascriptions are deprecated, and will be removed in GHC 9.18")]
+      :PsWarnPatternNamespaceSpecifier [(<+> (text "The") (quotes (text "pattern")) (text "namespace specifier is deprecated."))]
+      ;; the header's (PsHeaderMessage)
+      :PsErrParseLanguagePragma [(vcat [(text "Cannot parse LANGUAGE pragma")
+                                        (text "Expecting comma-separated list of language options,")
+                                        (text "each starting with a capital letter")
+                                        (nest 2 (text "E.g. {-# LANGUAGE TemplateHaskell, GADTs #-}"))])]
+      :PsErrUnsupportedExt [(<> (text "Unsupported extension: ") (text x))]
+      :PsErrParseOptionsPragma [(vcat [(text "Error while parsing OPTIONS_GHC pragma.")
+                                       (text "Expecting whitespace-separated list of GHC options.")
+                                       (text "  E.g. {-# OPTIONS_GHC -Wall -O2 #-}")
+                                       (text (str "Input was: " (show-string x)))])]
+      :PsErrUnknownOptionsPragma [(<+> (text "Unknown flag in  {-# OPTIONS_GHC #-} pragma:") (text x))]
+      ;; the driver's flag warning (DriverUnrecognisedFlag arg)
+      :DriverUnrecognisedFlag [(text (str "unrecognised warning flag: -" x))]
+      :DriverDeprecatedFlag [(text (str x " is deprecated: " y))]
+      ;; a message the native reader does not make as GHC does yet
+      :Unported [(text (str "<unported: " x ">"))])))
+
+(defn- ext-hint [ext] [:suggest-extension ext])
+
+(defn hints
+  "diagnosticHints"
+  [{:keys [con args]}]
+  (let [[x y] args]
+    (case con
+      :PsErrParse (let [{:keys [th do100 mdo100 patsyn pattern]} y]
+                    (cond
+                      (= x "") []
+                      (and (#{"$" "$$"} x) (not th)) [(ext-hint "TemplateHaskell")]
+                      (= x "<-") (if mdo100 [(ext-hint "RecursiveDo")] [[:missing-do]])
+                      (and (= x "=") do100) [[:let-in-do]]
+                      (and (not patsyn) pattern) [(ext-hint "PatternSynonyms")]
+                      :else []))
+      :PsWarnTab [[:use-spaces]]
+      :PsWarnOperatorWhitespaceExtConflict [[:use-whitespace-after (case x :PrefixPercent "%" :PrefixDollar "$" :PrefixDollarDollar "$$")]]
+      :PsWarnOperatorWhitespace [[:use-whitespace-around x]]
+      :PsWarnStarBinder [[:qualify-star-operator]]
+      :PsWarnStarIsType [[:use-type-from-data-kind]]
+      :PsWarnUnrecognisedPragma (let [s (when (seq x) (a/fuzzy-lookup x y))] (if (seq s) [[:correct-pragma-name s]] []))
+      :PsWarnMisplacedPragma [[:place-pragma-in-header]]
+      :PsWarnImportPreQualified [[:qualified-after-module-name] (ext-hint "ImportQualifiedPost")]
+      :PsWarnViewPatternSignatures [[:parenthesize-pattern-rhs]]
+      :PsErrEmptyDoubleQuotes (if x [[:th-quotation-syntax]] [])
+      :PsErrLambdaCase [(ext-hint "LambdaCase")]
+      :PsErrLinearFunction [(ext-hint "LinearTypes")]
+      :PsErrMultiWayIf [(ext-hint "MultiWayIf")]
+      :PsErrOverloadedRecordUpdateNotEnabled [(ext-hint "OverloadedRecordUpdate")]
+      :PsErrNumUnderscores [(ext-hint "NumericUnderscores")]
+      :PsErrIllegalBangPattern [(ext-hint "BangPatterns")]
+      :PsErrIllegalPatSynExport [(ext-hint "PatternSynonyms")]
+      :PsErrExplicitForall [[:extension-in-order-to "ExplicitForAll"
+                             (<+> (text "to enable syntax:") (forall-sym x) (<> (d/angle-brackets (text "tvs")) d/dot)
+                                  (d/angle-brackets (text "type")))]]
+      :PsErrIllegalQualifiedDo [(ext-hint "QualifiedDo")]
+      :PsErrIllegalExplicitNamespace [(ext-hint "ExplicitNamespaces")]
+      :PsErrImportPostQualified [(ext-hint "ImportQualifiedPost")]
+      :PsErrOpFewArgs (if (and x (= "*" (a/rdr-occ y))) [[:use-type-from-data-kind]] [])
+      (:PsErrLambdaCmdInFunAppCmd :PsErrCaseCmdInFunAppCmd :PsErrIfCmdInFunAppCmd :PsErrLetCmdInFunAppCmd
+       :PsErrDoCmdInFunAppCmd :PsErrDoInFunAppExpr :PsErrMDoInFunAppExpr :PsErrLambdaInFunAppExpr
+       :PsErrCaseInFunAppExpr :PsErrLetInFunAppExpr :PsErrIfInFunAppExpr :PsErrProcInFunAppExpr)
+      [[:parentheses] (ext-hint "BlockArguments")]
+      :PsErrIllegalWhereInDataDecl [[:extension-in-order-to "GADTSyntax" (text "to enable syntax: data T where")]]
+      :PsErrIllegalDataTypeContext [(ext-hint "DatatypeContexts")]
+      (:PsErrSemiColonsInCondExpr :PsErrSemiColonsInCondCmd) [(ext-hint "DoAndIfThenElse")]
+      :PsErrIllegalTraditionalRecordSyntax [(ext-hint "TraditionalRecordSyntax")]
+      :PsErrInPat (let [[_ details] args]
+                    (case (first details)
+                      :RecPattern (let [[_ nargs incomplete-do] details]
+                                    (vec (concat (when (pos? (long nargs)) [(ext-hint "RecursiveDo")])
+                                                 (when incomplete-do [[:missing-do]]))))
+                      :Other (if (nth details 2 nil) [[:missing-do]] [])
+                      []))
+      :PsErrIllegalRoleName [[:roles y]]
+      :PsErrInvalidTypeSignature
+      (let [looks-like (fn [s] (loop [e y]
+                                 (let [n (a/unLoc e)]
+                                   (case (first n)
+                                     HsVar (let [r (a/unLoc (nth n 2))] (and (a/rdr-unqual? r) (= s (a/rdr-occ r))))
+                                     HsApp (recur (nth n 2))
+                                     false))))]
+        (cond (looks-like "foreign") [(ext-hint "ForeignFunctionInterface")]
+              (looks-like "default") [(ext-hint "DefaultSignatures")]
+              (looks-like "pattern") [(ext-hint "PatternSynonyms")]
+              (= x :Qualified) [[:type-signature-remove-qualifier]]
+              :else []))
+      :PsErrInvalidPun [(ext-hint "ListTuplePuns")]
+      :PsErrIllegalOrPat [(ext-hint "OrPatterns")]
+      (:PsErrSpecExprMultipleTypeAscription :PsWarnSpecMultipleTypeAscription) [[:splitting-specialise]]
+      :PsWarnPatternNamespaceSpecifier
+      (if x [[:data-keyword]]
+          [[:extension-in-order-to "ExplicitNamespaces"
+            (<> (<+> (text "and replace") (quotes (text "pattern")) (text "with") (quotes (text "data"))) (text "."))]])
+      :PsErrUnsupportedExt (if (seq y) [[:unknown (<+> (text "Perhaps you meant") (d/quoted-list-with "or" (map text y)))]] [])
+      [])))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Printing (printMessages, mkLocMessageWarningGroups, getCaretDiagnostic)
+
+(defn- format-bulleted [docs]
+  (let [ds (remove d/is-empty? docs)]
+    (case (count ds)
+      0 d/empty
+      1 (first ds)
+      (vcat (map #(<+> d/bullet %) ds)))))
+
+(defn- message-with-hints [m]
+  (let [main (format-bulleted (message-docs m))
+        hs (hints m)]
+    (case (count hs)
+      0 main
+      1 ($$ main (hang (text "Suggested fix:") 2 (ppr-hint (first hs))))
+      ($$ main (hang (text "Suggested fixes:") 2 (format-bulleted (map ppr-hint hs)))))))
+
+(defn- expand-tabs [^String s]
+  (let [sb (StringBuilder.)]
+    (loop [i 0 col 0]
+      (if (< i (.length s))
+        (let [c (.charAt s i)]
+          (if (= c \tab)
+            (let [w (- 8 (mod col 8))] (dotimes [_ w] (.append sb \space)) (recur (inc i) (+ col w)))
+            (do (.append sb c) (recur (inc i) (if (Character/isLowSurrogate c) col (inc col))))))
+        (.toString sb)))))
+
+(defn- cp-split [^String s ^long n]
+  (let [n (min n (.codePointCount s 0 (.length s)))
+        i (.offsetByCodePoints s 0 (int (max 0 n)))]
+    [(subs s 0 i) (subs s i)]))
+
+(defn- caret
+  "getCaretDiagnostic: the span's first line with its carets, empty without the line"
+  [span source-line]
+  (if-let [line (when (and (vector? span) source-line) (source-line (nth span 0) (nth span 1)))]
+    (let [row (str (nth span 1))
+          multiline (not= (nth span 1) (nth span 3))
+          src (expand-tabs (str/replace (str/replace line "\n" "") "\u0000" "\ufffd"))
+          start (dec (long (nth span 2)))
+          end (if multiline (.codePointCount ^String src 0 (count src)) (dec (long (nth span 4))))
+          width (max 1 (- end start))
+          [pre rst] (cp-split src start)
+          [spn post] (cp-split rst width)
+          margin (str (apply str (repeat (count row) \space)) " |")]
+      (d/hcat [(text margin) (text "\n") (text (str row " |")) (text (str " " pre)) (text spn) (text (str post "\n"))
+               (text margin)
+               (text (str " " (apply str (repeat start \space)) (apply str (repeat width \^)) (if multiline "..." "")))]))
+    d/empty))
+
+(defn span-text
+  "A span as GHC prints it (pprUserRealSpan): file:line:col, with -ferror-spans file:line:col-col
+  (the end column inclusive; just file:line:col for a span of one column or none), or
+  file:(line,col)-(line,col) over lines; nil: no location"
+  [span error-spans]
+  (if-not (vector? span)
+    (cond (= :commandline span) "on the commandline" (string? span) span :else "<no location info>")
+    (let [[f l1 c1 l2 c2] span]
+      (cond
+        (not error-spans) (str f ":" l1 ":" c1)
+        (= l1 l2) (str f ":" l1 ":" c1 (when (> (- c2 c1) 1) (str "-" (dec c2))))
+        :else (str f ":(" l1 "," c1 ")-(" l2 "," (if (zero? c2) c2 (dec c2)) ")")))))
+
+(defn- location [span] (span-text span false))
+
+(defn message-text
+  "One message as GHC's default log action prints it; opts: {:error-spans :show-caret (default
+  true) :ppr-cols (default 100)}; a message with :fatal is an error that was a warning (-Werror)"
+  ([m source-line] (message-text m source-line nil))
+  ([m source-line opts]
+   (let [w (and (warning? m) (not (:fatal m)))
+         header (<+> (<> (text (span-text (:span m) (:error-spans opts))) d/colon)
+                     (<> (text (if w "warning" "error")) d/colon)
+                     (d/brackets (text (str "GHC-" (codes (:con m) "?????"))))
+                     (cond w (d/brackets (text (str "-W" (warning-flags (:con m)))))
+                           (and (warning? m) (:fatal m))
+                           (d/brackets (text (str "-W" (warning-flags (:con m)) ", Werror=" (warning-flags (:con m)))))
+                           :else d/empty))
+         car (if (false? (:show-caret opts)) d/empty (caret (:span m) source-line))
+         doc ($$ ($+$ (hang header 4 (message-with-hints m)) car d/blank-line)
+                 (text ""))]
+     (d/render doc (or (:ppr-cols opts) 100)))))
+
+;;; -fdiagnostics-as-json (GHC.Types.Error's ToJson (MsgEnvelope e), schema 1.1; GHC.Utils.Json)
+
+(defn- json-string [^String s]
+  (let [sb (StringBuilder. "\"")]
+    (doseq [c s]
+      (let [ch (long (int c))]
+        (case ch
+          8 (.append sb "\\b") 12 (.append sb "\\f") 10 (.append sb "\\n") 13 (.append sb "\\r") 9 (.append sb "\\t")
+          34 (.append sb "\\\"") 92 (.append sb "\\\\")
+          (if (or (< ch 32) (>= ch 127))
+            (.append sb (str "\\u" (let [h (Long/toHexString ch)] (str (apply str (repeat (- 4 (count h)) \0)) h))))
+            (.append sb c)))))
+    (.append sb "\"")
+    (.toString sb)))
+
+(defn message-json
+  "One message as -fdiagnostics-as-json prints it: a line of JSON"
+  [m]
+  (let [w (warning? m)
+        [f l1 c1 l2 c2] (:span m)
+        docs (remove d/is-empty? (message-docs m))
+        sev (if (and w (not (:fatal m))) "Warning" "Error")]
+    (str "{\"version\":\"1.1\",\"ghcVersion\":\"ghc-9.14.1\","
+         (when (vector? (:span m))
+           (str "\"span\":{\"file\":" (json-string f) ",\"start\":{\"line\":" l1 ",\"column\":" c1
+                "},\"end\":{\"line\":" l2 ",\"column\":" c2 "}},"))
+         "\"severity\":\"" sev "\",\"code\":" (parse-long (codes (:con m)))
+         ",\"message\":[" (str/join "," (map #(json-string (d/render %)) docs))
+         "],\"hints\":[" (str/join "," (map #(json-string (d/render (ppr-hint %))) (hints m))) "]"
+         (when w (str ",\"reason\":{\"flags\":[" (json-string (warning-flags (:con m))) "]}"))
+         "}")))
+
+(defn- span-key [s]
+  (if (vector? s) [1 (nth s 1) (nth s 2) (nth s 3) (nth s 4)] [0]))
+
+(defn sort-messages
+  "sortMsgBag: by span, leftmost and smallest first, stably over the bag's order (newest first: a
+  message is consed onto it)"
+  [ms]
+  (sort-by (comp span-key :span) #(compare %1 %2) (reverse ms)))
+
+(defn messages-text
+  "The messages as printMessages prints them, sorted, each with its caret lines; source-line a fn
+  of a span's file and line to that line's text (nil: none); opts as message-text's"
+  ([ms source-line] (messages-text ms source-line nil))
+  ([ms source-line opts]
+   ;; sortMsgBag's limit, -fmax-errors=N (a limit below one prints one)
+   (let [sorted (sort-messages ms)
+         sorted (if-let [n (:max-errors opts)] (take (max 1 (long n)) sorted) sorted)]
+     (if (:json opts)
+       (apply str (map #(str (message-json %) "\n") sorted))
+       (apply str (map #(message-text % source-line opts) sorted))))))
+
+(defn text-lines
+  "A source-line fn over texts: files a fn of a file name to its text (nil when unreadable), the
+  lines as GHC's StringBuffer's atLine finds them (lines split at \\n)"
+  [files]
+  (let [cache (atom {})]
+    (fn [file line]
+      (let [ls (or (get @cache file)
+                   (let [t (files file)
+                         v (if t (vec (str/split t #"\n" -1)) [])]
+                     (swap! cache assoc file v)
+                     v))
+            i (dec (long line))]
+        (when (and (>= i 0) (< i (count ls)))
+          ;; atLine on the last line of a file without a final newline still finds it; an empty
+          ;; line has no lines (Nothing)
+          (let [l (nth ls i)]
+            (when-not (and (= "" l) (= i (dec (count ls)))) l)))))))

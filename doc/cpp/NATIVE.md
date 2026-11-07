@@ -1,7 +1,8 @@
 # repr/cpp's native parser (CX11)
 
 Status: CX11's first part, on the branch `cpp-native` from `cpp-cx9` (2026-11-04); its second part on `cpp-native2` from
-`cpp-native` (2026-11-04, §7); Sema's minimum for the recorded classes on `cpp-sema` from `cpp-native2` (2026-11-04, §8). The survey's §4.4 and its CX11 row
+`cpp-native` (2026-11-04, §7); Sema's minimum for the recorded classes on `cpp-sema` from `cpp-native2` (2026-11-04, §8); the tree level on
+`cpp-tree` from `cpp-sema` (2026-11-04, §9). The survey's §4.4 and its CX11 row
 ([CPP-SURVEY.md](CPP-SURVEY.md) §11) planned a C++ parser of Arbace's own, "name-kind tracking, a port of the grammar", so that
 repr/cpp reads C++23 without the oracle's AST dump at read time; clang stays the oracle. This note is its design: what C++'s
 parsing needs beyond C's (§1), the reference model and why (§2), the design as built (§3), the check (§4), what is left (§5).
@@ -222,11 +223,12 @@ natively, without objects: 62 of 62 pass; dg over cpp26 and five modules files: 
 
 - **Sema's facts** beyond §8's minimum (clang's builtin table, overload resolution, CTAD with packs or user guides), and the instantiation-dependent kinds (`S<int>::x` a type or a value by the specialization a
   program selects; a name declared only in a template's instance): a checker's work (CX12's), or classes.
-- **The tree level**: the native tree against the oracle's node for node (the fields the converter reads), as JN8's parse-check;
-  mutants for the error recovery; the whole g++.dg compile corpus, libstdc++'s headers as a read corpus (the survey's stress test),
-  the other corpora; CX11's exit: trees equal over the corpora or known.
-- **The grammar's remainder**: dump1.C's `typedef __future_base::_Ptr<_Result<_Res>> _Ptr_type;` (declined in that file's context,
-  read in every reduction tried; `native-decline`), C++26's
+- **The tree level** (since §9: `native-check --tree`): what is left is §9's classes, the Sema facts the converter does not need and the
+  parser does not compute (overload resolution's operator and conversion calls, constructions of header classes, range-for's hidden
+  declarations, template arguments of partial specializations and instances); mutants for the error recovery; the whole g++.dg
+  compile corpus, libstdc++'s headers as a read corpus (the survey's stress test), the other corpora; CX11's exit: trees equal over
+  the corpora or known.
+- **The grammar's remainder**: C++26's
   contracts and reflection (clang 23 rejects them), header units (`import <h>;`: clang without `-fmodule-header` rejects them, so the
   parser does not read the header's names), Objective-C++, `__declspec`, nested functions, `asm` operands, `if consteval`'s forms
   (the converter's gap), generic lambdas' forms (the converter's gap).
@@ -349,3 +351,105 @@ The check, light (`native-check`, 4 jobs; every class's files before and after; 
 Numbers (2026-11-04): samples 9 of 9 (68 of 68 items); native 1 of 1 (30 of 30); gxx-a 62 of 62 (293 of 293); gxx-b 162 of 163
 (743 of 744), 1 known; gxx-26 38 of 38 (244 of 244); gxx-mod 109 of 109 (389 of 389); the 977-file sample 975 the same (5,133 of
 5,135 items) in 122 s, 2 known, 1 construct declined; no failure. `REPR_CPP_SEMA_DEBUG=1` says why a CTAD was not decided.
+
+
+## 9. The tree level (cpp-tree, 2026-11-04)
+
+The check of §4 compares the forms the converter makes from the native tree with those from clang's dump: a native tree that differs
+where the converter does not look is not seen. `bin/repr-cpp native-check LIST|samples|native|gxx-a|gxx-b|gxx-26|gxx-mod WORK --tree`
+(`arbace.repr.cpp.tcheck`, `arbace/repr/cpp/tcheck.ae`; the same dumps and lists as §4, JN8's parse-check in spirit) compares the trees
+themselves, node for node, and says which differences the converter reads.
+
+**The comparison.** The nodes of the two trees (clang's dump of the main file's declarations, the parser's `:nodes`) are aligned list
+by list: the longest common subsequence over kind, name and first offset (the common prefix and suffix first; a greedy alignment looking
+40 nodes ahead beyond 1.5 million cells), then within each gap the nodes paired through clang's wrappers the native tree omits
+(`ImplicitCastExpr`, `ConstantExpr`, `ExprWithCleanups`, `MaterializeTemporaryExpr`, `CXXBindTemporaryExpr`) over a core of the same
+offsets, then by kind and name, then by the same first and last offset under another kind (the parser's `CallExpr` for clang's
+`CXXMemberCallExpr`). A pair's fields are compared recursively (clang's `:id`, `:line` and `:col` and the parser's `_` keys left out;
+types as clang prints them, positions as offset, token length and file, macro locations by their spelling and expansion). The
+differences: `missing` (a node clang has and the native tree lacks, with the size of its subtree), `wrapper` (a missing node whose only
+child is paired), `extra`, `value` (a field that differs), `absent-n` and `absent-c` (a field the native tree or clang's lacks). A file's
+first difference is reported by its path (`FunctionDecl main@410 > CompoundStmt@421 > CXXForRangeStmt@524 > ...`, kind, name, offset).
+
+**Read or ignored.** A difference is *read* when the converter's forms change with it, *ignored* otherwise, tried on the converter itself:
+the difference applied to the tree the forms come from (a field of the native tree put into clang's, a missing node taken out of it, a
+node only the native tree has taken out of that) and the forms compared with the unchanged tree's (an error or a refusal counts as a
+change). A unit of differences (a node kind missing, a field of a kind absent) is tried first on every node of its kind, all units of a
+type together and then each; if the forms stay, the whole unit is ignored (the converter does not look at that kind or that field), else its
+differences are tried by halves, each applied alone (a wrapper's removal changes what the converter finds around it, which is why the
+unit is tried on the whole kind first: all `ImplicitCastExpr` out, as the native tree has it, leaves the forms; one of them out does not).
+At most 600 conversions and 120 s a file; the rest are `UNKNOWN` (none in the lists). A file whose dump exceeds 4 MB is `skipped` (memory
+of the light tier: `warn/Wsequence-point-4.C`, 15 MB). A file is `same` when no difference is read, `differ` otherwise; the forms level's own
+result is beside it (`forms differ in N`), and `tree reads differ with the forms the same in N` is what the forms level hides.
+
+**Outputs.** `WORK/tree-results.tsv` (name, tree result, forms result, the nodes of each tree, the pairs, those with a differing field, missing, extra,
+read, ignored, seconds, the first read difference), `WORK/tree/NAME.txt` (the read differences with their paths and classes, then the ignored
+ones by unit with a count and a first path), `WORK/tree-units.tsv` (every unit, read or ignored, its differences and files), the summary on
+stdout with each class's differences and files. **The classes** are `test/repr/cpp/native-tree-classes.edn` (a regex over a difference's
+detail line gives its class, the first that matches) and the known file `test/repr/cpp/native-tree-known.edn` (a file that differs, with the
+classes of its read differences: it fails when a difference is of a class not listed for it, or of none, and is said when it turns `same`).
+
+**What it found, fixed in the parser** (the forms equal throughout: the lists, the 977-file sample at the forms level 976 the same and
+1 known, as before, `builtin-signature`'s pr45679-1_1.C):
+
+- a non-static member named unqualified in a function's body (a default member initializer's too) is clang's `MemberExpr` through an
+  implicit `this` (`CXXThisExpr`, `:implicit`), not a `DeclRefExpr` (121 `CXXThisExpr` missing in the lists before, 2 after; the sample's
+  member-access class 46 to 29: members of overloaded or dependent members in odd places); marked on the `DeclRefExpr` while parsing, so the parser's own uses of it are
+  unchanged, and rewritten after the unit (`this-members`);
+- a member of a type-dependent object that no class of the current instantiation has is a `CXXDependentScopeMemberExpr` (`:member`),
+  not a `MemberExpr` (36 of the kind differences, 18 left: conversion-function names `b.operator typename A<T>::type()` and a
+  lambda's `template operator()`);
+- a `DecompositionDecl`'s initializer is its first child, before the bindings;
+- a cast to a reference type has the referent's type and the value category lvalue or xvalue (`static_cast<T&&>(x)` is a `T` xvalue),
+  not the reference with prvalue; `char...` without the comma: the parameter ends at `char`;
+- a constructor's mem-initializer naming its own class (not in a template, no arguments) is `delegatingInit`, not `baseInit`;
+- **dump1.C's declined typedef** (§5's last grammar gap): `struct __future_base::_Task_state_base<_Res(_Args...)> { typedef
+  __future_base::_Ptr<_Result<_Res>> _Ptr_type; }`. The tree check showed `NativeDecline` where clang has a `TypedefDecl`, and a reduction
+  to ten lines (`.tmp/x/t1.C` of the worktree: a member class template `Res` of `F`, an alias template `Ptr`, `struct F::TSB<R(A...)>`
+  defined outside `F`) showed the cause: a class defined outside its enclosing class took only the namespace as its parent scope, so
+  `Res`, a member template of `F`, was not a template in its body ([basic.lookup.unqual]/7: the names of the enclosing class follow the
+  class's own). The class's scope now has a lookup scope of the qualifier's class (`F`) as its parent. dump1.C is read in full: the forms
+  equal, no decline (its `native-decline` entry left `test/repr/cpp/native-known.edn`; the 977-file sample has no declined construct now).
+
+**The classes** (what the parser does not compute and the converter does not need: each is a Sema fact, the same kind as §4's). The six
+light lists together (382 files, 295 `same`, 86 `differ`, 1 `skipped`; 410 differences read, 37,000 ignored) and the 977-file sample
+(744 `same`, 232 `differ`, 1 `skipped`; 770 read, 132,000 ignored; 231 of the 232 differ at the tree level with the forms the same):
+
+| class | the fact | the lists | the sample |
+|---|---|---|---|
+| `implicit-construction` | a `CXXConstructExpr`, `CXXTemporaryObjectExpr` or default argument clang adds (copy and move constructions, a class's temporary, `ParenListExpr` for a mem-initializer), a cast clang reads as a construction | 41 / 15 files | 175 / 68 |
+| `operator-call` | `CXXOperatorCallExpr` for an overloaded operator on class operands (overload resolution; the native tree has the operator's own node) | 39 / 23 | 130 / 81 |
+| `template-instances` | the `TemplateArgument` nodes of a partial specialization (`type-parameter-0-0`'s canonical spelling) and a function template's instances | 51 / 27 | 91 / 43 |
+| `conversion-function` | an implicit call of a conversion function (`while (S{})` through `operator bool`: `CXXMemberCallExpr` over a `MemberExpr` of the conversion) | 95 / 16 | 73 / 27 |
+| `init-list-form` | an initializer list's semantic form beyond §8's (`std::vector<int> v = {1, 2}`'s `CXXStdInitializerListExpr`, an array's `array_filler`, an elided nested aggregate) | 88 / 17 | 64 / 31 |
+| `dependent-member` | the unresolved forms of dependent names beyond the member access (a conversion-function name, a template `operator()`) | 30 / 5 | 59 / 12 |
+| `range-for` | the hidden declarations and expressions of a range-based `for` (`__range1`, `__begin1`, `__end1`, the condition and the increment) | 39 / 7 | 55 / 11 |
+| `member-access` | implicit-this accesses of overloaded or dependent members, a destructor's pseudo-destructor call | 8 / 6 | 29 / 18 |
+| `abbreviated-template` | the invented template parameters of `void f(auto p)` (`FunctionTemplateDecl`, `TemplateTypeParmDecl`) | 16 / 8 | 13 / 5 |
+| `unresolved-lookup`, `attributes`, `gnu-vector`, `friend-template`, `coroutine`, `builtin-signature`, `pragma-range` | `UnresolvedLookupExpr`'s name; clang's attribute nodes (`UnusedAttr`...) for the parser's `NativeAttr`; `__vector_size__` in a type; a friend member template; `CoroutineBodyStmt`; §8's `_Nonnull`; a `#pragma omp` before a declaration | 2 files (coroutine, builtin-signature) | 29, 21, 6, 3, 1 (unclassed: 21 in 12 files) |
+
+**The ignored differences** (132,248 in the sample; the same shapes in the lists), what the native tree deliberately does not carry because
+the converter does not read it: clang's expression types and value categories (over a third of them together: every `DeclRefExpr`, `MemberExpr`,
+`BinaryOperator`, call and literal's `:type` and `:valueCategory`), `isUsed`, `isReferenced`, `mangledName`, `isHidden`,
+`previousDecl`, `parentDeclContextId`, declaration links (`referencedDecl`'s kind and type, `referencedMemberDecl`,
+`foundReferencedDecl`), `definitionData`, `depth` and `index` of template parameters, `castKind`, `nonOdrUseReason`, `canOverflow`;
+the implicit nodes (`ImplicitCastExpr`, `ConstantExpr`, `ExprWithCleanups`, `MaterializeTemporaryExpr`), the implicit members and
+injected class names of every class, the instantiations under every template, the type nodes (`BuiltinType`, `TemplateTypeParmType`,
+`TypedefType`) under declarations; the macro locations' spelling (the parser's `<macro>` file where clang has the definition's
+position, and `\n` as `\012` in a string from a macro: the converter reads the expansion).
+
+**The numbers** (2026-11-04, the light tier, 4 jobs; per list: files `same` / `differ`, nodes of clang's tree and the native tree, pairs
+(with all fields equal), missing, extra, differences read / ignored, files whose tree reads differ with the forms the same):
+
+| list | files | clang / native nodes | pairs (equal) | missing / extra | read / ignored | forms hide |
+|---|---|---|---|---|---|---|
+| samples | 9: 4 / 5 | 1,158 / 622 | 611 (225) | 430 / 11 | 14 / 1,197 | 5 |
+| native | 1: 0 / 1 | 929 / 547 | 524 (162) | 303 / 23 | 14 / 1,184 | 1 |
+| gxx-a | 62: 45 / 17 | 3,323 / 2,013 | 1,974 (722) | 1,047 / 39 | 64 / 3,807 | 17 |
+| gxx-26 | 38: 18 / 20 | 8,909 / 6,037 | 5,838 (2,135) | 1,927 / 199 | 165 / 11,132 | 20 |
+| gxx-b | 163: 127 / 35, 1 skipped | 10,975 / 7,059 | 6,988 (2,157) | 2,660 / 71 | 137 / 16,236 | 34 |
+| gxx-mod | 109: 101 / 8 | 2,161 / 1,555 | 1,551 (330) | 467 / 4 | 16 / 3,488 | 8 |
+| the 977-file sample | 977: 744 / 232, 1 skipped | 75,930 / 46,676 | 46,220 (12,259) | 20,737 / 456 | 770 / 132,248 | 231 |
+
+Every list passes the judgment (the files' classes are in the known file). Forms level, unchanged by the fixes: samples 9 of 9, native 1 of
+1, gxx-a 62 of 62, gxx-26 38 of 38, gxx-mod 109 of 109, gxx-b 162 of 163 (1 known), the 977-file sample 976 of 977 (1 known), 0 declines.

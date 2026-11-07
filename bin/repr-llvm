@@ -127,8 +127,12 @@ case $judge_mode in own|record|live) ;; *) echo "repr-llvm: REPR_LLVM_JUDGE is o
 # verify) on the file with no option that changes how it is read (-data-layout, -mtriple, ...: only -o, -S, -disable-output,
 # -passes=verify, redirections): the test says the module is rejected; `valid`: RUN lines, none of them a `not` of an LLVM tool,
 # no split-file: the test says it is taken; `-`: no RUN line, a split-file test, a `not` of another tool, of opt's passes, or only
-# with such options (no own verdict of verification). FRAGMENT, for `invalid`, what follows `error:` on the first check line of the
-# prefixes those RUN lines give FileCheck (--check-prefix[es], default CHECK), its {{...}} and [[...]] taken out; empty when none
+# with such options (no own verdict of verification), or, for `valid`, a RUN line that reads it with `--disable-verify` (the test
+# claims no verification of it). FRAGMENT, for `invalid`, what follows `error:` on the first check line of the
+# prefixes those RUN lines give FileCheck (--check-prefix[es], default CHECK), its {{...}} and [[...]] taken out; empty when none.
+# SED (the 4th column; the user's decision of 2026-11-07, batch 3's proposal 2 (a)): lit's substitution when the first RUN line
+# feeds the file through `sed 's/A/B/g' %s |` (RISCV's iXLen, llubi's DIVREM): the test's input is sed's output, so verify-check
+# reads that (a plain s/A/B/ or s/A/B/g alone, no other sed command); empty when none
 own_verdicts() {
   local n p
   while IFS=$'\t' read -r n p; do
@@ -158,12 +162,15 @@ own_verdicts() {
                 continue }
               if (r ~ /[ ;|(]not +(--crash +)?(llc|lli|llvm-[a-z-]+|opt|clang)[ ]/) { v = "-"; break } }
             if (v == "?") v = "-"
+            if (v == "valid") for (i = 1; i <= nr; i++) if ((" " runs[i] " ") ~ /[ ;|(](llvm-as|opt) [^|;]*--?disable-verify[ ]/) v = "-"
+            sx = ""; if (nr > 0 && match(runs[1], /^ *sed +(-e +)?\047s\/[^\/\047]*\/[^\/\047]*\/g?\047 +%s *\|/)) {
+              sx = substr(runs[1], RSTART, RLENGTH); sub(/^ *sed +(-e +)?\047/, "", sx); sub(/\047 +%s *\|$/, "", sx) }
             frag = ""
             if (v == "invalid") for (i = 1; i <= nl && frag == ""; i++) { l = lines[i]
               if (match(l, /^[;#\/ ]*[A-Za-z][A-Za-z0-9_-]*(-NEXT|-SAME)?: *.*error: /)) {
                 q = l; sub(/^[;#\/ ]*/, "", q); sub(/(-NEXT|-SAME)?:.*$/, "", q)
                 if (q in pre) { f = l; sub(/^.*error: */, "", f); gsub(/\{\{[^}]*\}\}/, "", f); gsub(/\[\[[^]]*\]\]/, "", f); sub(/[[:space:]]+$/, "", f); frag = f } } }
-            printf "%s\t%s\t%s\n", n, v, frag }' "$p"
+            printf "%s\t%s\t%s\t%s\n", n, v, frag, sx }' "$p"
   done < "$1" > "$2"
 }
 
@@ -390,10 +397,19 @@ case ${1:-} in
     mkdir -p "$work/opt"; work=$(cd "$work" && pwd)
     opt=${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}
     rm -rf "$work/arb"; mkdir -p "$work/arb"
-    REPR_LLVM_OPT=$opt REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm verify-list "$list" "$work/arbace.tsv" "$work/arb"
     # the modules' own verdicts (mode own); the others are opt's (live or recorded)
     if [ "$judge_mode" = own ]; then own_verdicts "$list" "$work/own.tsv"
     else awk -F'\t' 'NF { print $1 "\t-\t" }' "$list" > "$work/own.tsv"; fi
+    # lit's substitution (own_verdicts' SED): a module judged by its own verdict whose RUN line feeds it through sed is read as
+    # sed's output, WORK/subst/NAME.ll, as the test's tools read it
+    rm -rf "$work/subst"; mkdir -p "$work/subst"; : > "$work/input.list"
+    while IFS=$'\t' read -r n p; do
+      [ -n "$n" ] || continue
+      sx=$(awk -F'\t' -v n="$n" '$1 == n && ($2 == "valid" || $2 == "invalid") { print $4; exit }' "$work/own.tsv")
+      if [ -n "$sx" ]; then sed -e "$sx" "$p" > "$work/subst/$n.ll"; printf '%s\t%s\n' "$n" "$work/subst/$n.ll" >> "$work/input.list"
+      else printf '%s\t%s\n' "$n" "$p" >> "$work/input.list"; fi
+    done < "$list"
+    REPR_LLVM_OPT=$opt REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm verify-list "$work/input.list" "$work/arbace.tsv" "$work/arb"
     awk -F'\t' 'FILENAME == ARGV[1] { if ($2 != "-") o[$1] = 1; next } NF && !($1 in o)' "$work/own.tsv" "$list" > "$work/opt.list"
     : > "$work/ref.tsv"
     if [ "$judge_mode" = live ]; then

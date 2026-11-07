@@ -567,6 +567,207 @@ ORS29-ORS32 (doc/ORACLE-RECORDS-SURVEY.md, "Proposed (batch 4)"): Rust's helper 
 leaves the oracle tier (a); LLVM IR's live judges as oracle steps (a); C++'s remaining `:cxx` steps (`cpp-dg`, `cpp-roundtrip`,
 `cpp-roundtrip-dg`) on own verdicts and records, with batch 3's C++ lines (a); the line's unpinned packs kept in the store (a).
 
+## Batch 3 (merged on `batch3`, 2026-11-07, on `batch2` 93db65e8 with `mac/batch2` 3ff5ad69 merged at the end)
+
+Merge plan batches 4 and 5 and the small independent branches (`.tmp/tag-v2/merge-plan.md` §3, rehearsal §4 steps 4-5), one merge commit
+a branch unless said otherwise. No commit containing 53794ed6 is in the history (`git merge-base --is-ancestor`, checked after each Haskell step).
+
+- **Haskell (batch 4).** `haskell-errors3` ed461dd2 (`a1205a73a`; holds `haskell-errors`, `-errors2`); `haskell-cpp`'s clean-room net diff was
+  already in through haskell-90 (batch 2), so of `haskell-full2` only its one commit after `haskell-cpp`, 4ed75d38, was cherry-picked (`-x`,
+  `8cf073b6b`), never merged; `haskell-deriving-via` aa7d0b52 (`5e57fbbb2`); `haskell-o1` b76f992e (`eb677bc45`; holds `haskell-speed`);
+  `gt9v-haskell` a9853476 (`0634f5d51`); `crop-controls-haskell` 72f76e22 (`db1a96e05`); `parsers-speed` **rebuilt**, its six speed commits
+  re-applied by cherry-pick onto the merged tree (`08a4126bb` `13f4572d5` `ead52b6d6` `96cd3beff` `f14281143` `474ab79d3`), as the plan's item
+  32 asks. **Not merged:** `haskell-eval9`: HFS-I4 (b) tried, its HE9 commit 3f57a1d3 conflicts in ten files (hsi's `machine.ae` 16 hunks,
+  `prim_ctl.ae` 6, `test/haskell/hsi/cmd/main.ae` 6, `hs.ae`'s files and init order, the records): not self-contained on this line (proposal 1).
+- **C++ (batch 5).** `cpp-tree` f0e631c3 (`9e386c430`), `cpp-cpr1` ee6f606f (`2ead76232`; holds `cpp-print-review`, CPR1-CPR4), `crop-controls-cpp`
+  25a62973 (`df789d53d`); `crop-controls`' remaining commits: `0d1ae970` (GT9.8's section) picked (`bd2b57940`), Haskell's round-trip pair
+  6dc54221 **superseded** by haskell-90's controls in the same file (the same crossed-pair design over the own-verdict judges); its C++/LLVM,
+  OCaml, Scheme and Rust commits were picked in batches 1 and 2.
+- **The small ones.** `goi-budgets` 741e989e (`824533289`; holds `goi-not-applicable`), `goi-full-forms` 53f076ea (`2fbe20166`; holds
+  `goi-liveness`), `java-internal-pkgs` e3d5b57a (`89d787b18`), `c2j-pool-encode` 74e60353 (`d36edc653`), `ci-lls21` cd76b572 (`b2525912c`),
+  `llvm-ll4` a9a95f40 (`e72f1d3d6`, LLS32 (a): merged, its records re-made on batch 3). **Superseded:** `trio-off` 2e86cdba (its one commit is
+  main's d86cb874a, patch for patch: `git cherry` `-`; C's steps carry no PATH_FIRST trio; rsi's steps keep theirs on purpose).
+- Then `mac/batch2` 3ff5ad69 (`278ee9c1d`) and the records (`6ab48c754`).
+
+- **Conflicts of note.**
+  - repr/haskell's `native.ae`: errors' `read-text*` (messages, the header phase `fileargs`) with pp's mode `:full` (`:cs`/`:bits` kept in an
+    accepted read for `full-data`), the rejection in `read-files` before the native preprocessing; native-check's four-field list kept, the
+    controls adapted to it (`check-one`'s installation); `bin/repr-haskell`: `native-check --errors` (`errors_check`) beside the native
+    preprocessing, `--only-list` before batch 2's reader choice; `HsDump.hs`: stg/core/rn and errors/flags, helper version 5.
+  - hsi: `bin/lib/hsi/check` carries ORS12's records, -O1 (`--opt O1` implies `--live`; -O1's programs keyed and stored apart) and hfs-i1's
+    `--front native` (refused at -O1: the front end's STG is -O0's).
+  - parsers-speed: OCaml's LR driver over flat tables with errors' Menhir simplified strategy (the error terminal, column 0, shifted in error
+    mode), `keyword-token`'s buffer argument in the new lexer fast path; Haskell's lexer slots `:acc 18 :tab-first 19 :tab-count 20`
+    (`object-array 21`), the array driver with `lx/fatal!` and the `%partial` accept, the fused writer for mode `:lines` only (mode `:full`'s
+    tree is remapped, so `form-text`).
+  - repr/cpp: `parse.ae` (written-name with `:_this`/`:_depscope`; batch 2's G5 lookup for a class defined outside its class kept, it covers
+    cpp-tree's case; `this-members` over the full-header guard); `rtcheck.ae` and `roundtrip` (cpp-90's own judge beside CPR1's native
+    rejections, level R only under the clang judge).
+  - goi's record: five programs recorded differently; the branch's passes kept where its change is the cause (devirtualization_nil_panics.go,
+    fixedbugs/issue27518b.go), batch 3's records where the branch had gc's `-m`/`-l` tests unsupported.
+  - `llvm-ll4`'s `verify.ae`: batch 3's four hunks (LL6, LL9a); repr/llvm's origins written into doc/ARBACE.md (they were missing there).
+  - `ci-lls21`: ci-run's `:count 17`; its two new programs held out of `:subset-cf2g` until their AOT record (bin/gate --full --plan's rule).
+- **Keys** (12 hex; before: gate `1bfe8ffffe7e`, runtime `6b114cbcf8f0`, javac `54e889c46334`): the Haskell and C++ merges, the GT9.8 pick,
+  goi-budgets and llvm-ll4 moved none; `goi-full-forms` all three (`go/arbace/goi`, `arbace/go`), then `java-internal-pkgs` (jdk/, j2g),
+  `c2j-pool-encode` (c2j), `ci-lls21` (`arbace/c`) and batch 2's third round: at the end gate `bd0295a51879`, runtime `e55979557036`, javac
+  `a7060fc7d33d`. Tonight's builds take the two-run path.
+- **Checks (light, day; stage 0 main's, each process under 1.5 GB).** After each merge: `gate.crops check` 0 problems; `bin/gate --plan` 49
+  steps, 43 run; `--full --plan` 317 steps, 303 run, 8 after (clean once ci-run's subset was fixed). The parsers' rebuild proved byte for
+  byte: 36 stdlib files' and the 8 samples' OCaml native dumps with positions, 8 files' tokens layout, `errors-check` 100 of 100 equal to
+  ocamlc's recorded stderr; 42 corpus modules' Haskell native dumps and the 166 rejected samples' messages, `read` of 15 modules (mode
+  `:lines`, the fused writer) and 4 (`:full`) byte for byte the errors line's; OCaml's reads 20.2 s to 13.2 s on the sample, Haskell's 4.1 s to
+  3.0 s. C++: `native-check samples` 9 of 9 same (68 of 68 items), `--tree` within its known file, both controls failing; `roundtrip-corpus
+  samples --judge own` and `--judge clang --no-objects` 9 of 9, the control failing. goi: `bin/goi divergences` and `--aot` every non-pass in a
+  class (1,754 of 1,837 pass in the record). LLVM: the `llvm-read-essential` step's command passes (43, 43, 4 modules, the controls failing);
+  LL4's records re-made by `bin/llvm-corpus verify-record` (reject-av 543 of 578 verdicts: 4 better than the branch's opt-judged, 15
+  unrecorded in `ref-opt23.edn`; reject-other 31 of 179, 148 unrecorded; valid 300/300, valid-wide 413/420 (proposal 2), reject 195/200,
+  split 60/60; no row worse by the reader). `test/gate/claude-md-test.bash` ok.
+  **Not run by day:** anything needing the helper (GHC's `hsdump`: its hash moved with errors3's verbs, so `bin/repr-haskell test`'s ORS12
+  records and every hsi program are STALE until the night re-records them), hsi, goi's and C's runs (their keys moved: a build), Java's levels.
+- **`bin/reap`**: 41 of 44 cells checked; the matrix recorded with the night's records held out for the run (deferred.cpp's C++ reference;
+  ci-run's two new programs, eval rows without their AOT record; java-internal-pkgs' three JDK reference lines t08351, t08362, t08376 without
+  their levels' records): 0 problems held, 9 as committed (those seven, and the C eval cell's 2 passes the held run did not count).
+  **`bin/crops-score --judge --strict`** 0 problems under the same hold (scores recorded so).
+
+| crop | batch 3 before (93db65e8) | batch 3 after (6ab48c75) |
+|---|---|---|
+| Clojure | 99.0 / 96.3 / 100 | 99.0 / 96.3 / 100 |
+| Java | 72.9 / 100 / 99.7 | 72.9 / 100 / 99.7 |
+| Go | 94.9 / 95.8 / 100 | 97.0 / 95.8 / 100 |
+| C | 95.1 / 100 / 99.7 | 95.1 / 100 / 99.7 |
+| C++ | 75.4 / 100 / 31.4 | 75.4 / 100 / 54.3 |
+| OCaml | 80.9 / 100 / 87.4 | 80.9 / 100 / 87.4 |
+| Scheme | 98.4 / 100 / 95.0 | 98.4 / 100 / 95.0 |
+| Haskell | 96.3 / 100 / 74.9 | 96.3 / 100 / 74.9 |
+| Rust | 75.0 / 95.8 / 80.0 | 75.0 / 95.8 / 80.0 |
+| LLVM IR | 96.0 / 100 / 96.9 | 96.3 / 100 / 96.9 |
+| Python | 0 / 83.3 / 20 | 0 / 83.3 / 20 |
+
+(C++'s independence moved with batch 2's third round, cpp-indep; Go's completeness with goi-full-forms' records; LLVM's with ci-lls21's.)
+`bin/gate --full --costs`: nightly 10.3 h of measured step seconds, 317 steps, 94 unmeasured: over the 6 h budget, as batch 2.
+
+### Batch 3's night (after batch 2's two nights; one heavy job at a time under `bin/heavy-lock`; at most 1.5 GiB a process outside the gate)
+
+1. The essential gate on `next` with batch 3 (rekeys all three keys: goi-full-forms, ci-lls21, c2j, java-internal-pkgs; the two-run builds):
+   its goi steps judge full-forms' and liveness' record lines, C's ci-lls21's, `bin/gate --pins`, `bin/reap`, `bin/crops-score --judge --strict`.
+2. C: `bin/ci check --aot --corpus ci-run --record` (builtin-atomic.c, fnptr-result-width.c), then their names back into ci-run's
+   `:subset-cf2g`.
+3. Java: the three new JDK references' levels (`bin/java-check --levels read,interp,classes,compiled,print --only t08351,t08362,t08376 --record`).
+4. Haskell (the helper re-dump; GHC, the oracle tier, by hand): `bin/repr-haskell helper`, `bin/repr-haskell record-native-inputs` (first: the
+   native reads are STALE until it), `bin/repr-haskell test --record`, `bin/hsi dumps
+   --record`, `bin/hsi check --live --dump-only --record-progs`, then `bin/hsi check --record` and `--aot --record` (HSI_MEM_CAPS), `bin/hsi
+   record-ref --opt O1` and `check --aot --opt O1 --record`; `bin/repr-haskell native-check` (60 modules), `native-check --errors --count 0` and
+   the mutant seeds 1-5, `typecheck-check`, `roundtrip --text --layout` whole, `bin/hsi compare-front` after `check --front native --record`.
+5. The parsers' speed proof whole: `bin/repr-ocaml native-check` (1,512 files) and `errors-check`; Haskell's `native-check --errors`
+   (the 177-module list) against the errors line's counts.
+6. C++: `bin/repr-cpp native-check` on the 977-file sample and `--tree` on its light lists; `roundtrip-corpus` and `dg` with `--reader native` on
+   gxx-dg's essential and every-10 lists; CPR1's `--record-known-rejected` re-record.
+7. LLVM: `bin/repr-llvm record-opt` for reject-av's 15, reject-other's 148 and valid-wide's LTO-Resolution-X86-protected-def-dllimport
+   (opt, the oracle tier), then `bin/llvm-corpus verify-record` for the three lists again.
+8. goi's whole record: `bin/goi check --jobs 8 --record`, `check --aot --jobs 8 --record` (full-forms and liveness on every program).
+9. Last: `bin/reap --record` (nothing held any more), `bin/crops-score --judge --strict --record`.
+
+### Proposed (batch 3)
+
+1. **`haskell-eval9`'s HE9** (HFS-I4 (b) was decided; it does not apply as a rebase). (a) An agent's day: HE9's allocation counters and RTS
+   options ported by hand onto batch 3's hsi (the new files `alloclimit.ae`, `test/haskell/hsi/cmd/rtsflags.ae`, `rtsusage.ae` taken as they
+   are, the hunks of `machine.ae`, `prim_ctl.ae` and `cmd/main.ae` re-applied, `hs.ae`'s files and init order made again), proved by cgrun057
+   and T16916 byte for byte and the night's hsi check; (b) HFS-I4 (a), the Go-level merge (`git merge-file` per printed file), about half a
+   day; (c) leave HE9 on its branch. *Recommended: (a)*, after batch 3's night has re-recorded hsi's packs.
+2. **LLVM valid-wide's 7 rows** whose own verdict (LL9a) is "valid" only after their RUN line's `sed` (RISCV's `iXLen`, an LTO resolution, an
+   llubi test): (a) the own verdict applies the RUN line's substitutions before the reader reads the module, as lit does; (b) class them in
+   `test/llvm/divergences-verify.edn`; (c) drop them from the list. *Recommended: (a)*; (b) meanwhile.
+3. **The GPL line's branches** (merge plan risk 2): `haskell-pp`, `haskell-cpp`, `haskell-full2` hold 53794ed6. (a) Delete them locally and on
+   `mac` once batch 3 is on `next` (the port kept nowhere); (b) keep the port off the repository. *Recommended: (a)*.
+4. **The worktrees' corpora for light checks**: the parsers' proofs read the corpora from other worktrees' `.tmp/` (batch 2's Haskell corpus,
+   ocaml-90's OCaml tarball tree). (a) The native-check and errors-check scripts take the main checkout's `.tmp/repr-ocaml` and
+   `.tmp/repr-haskell` as proposal 8 (a) did for GHC's tarballs; (b) leave. *Recommended: (a)*.
+- Still open from batch 2: RES61, RES64-RES66, LLS31 (a), CP242, OC182, OC186-OC190.
+
+### Decided (the user, 2026-11-07: batch 3's proposals and batch 2's 9)
+
+- **1 (a), HE9 by hand: the next day's task, after batch 3's night has re-recorded hsi's packs** (below, "The day after batch 3's night").
+- **2 (a)+(b), built** (`55f9900c8`, `21ee57c3e`): `bin/repr-llvm`'s `own_verdicts` gives lit's substitution, the first RUN line's
+  `sed 's/A/B/g' %s |`, and `verify-check` reads a module judged by its own verdict as sed's output (`WORK/subst/NAME.ll`); a `valid` claim from
+  a RUN line reading the module with `--disable-verify` is no own verdict. valid-wide 413 -> 419 of 420 (RISCV's five `iXLen` modules,
+  llubi's `DIVREM`); the one left, LTO's protected dllimport (read with `llvm-as --disable-verify`, opt's verdict unrecorded), in the class
+  file `test/llvm/valid-wide-known.tsv` (`REPR_LLVM_KNOWN`) until tonight's `record-opt`, then removed when it passes. The other five
+  lists' records unchanged; `check verify-llvmtest` 792 of 806 (11 fixed by LL4's messages, re-recorded), roundtrip-llvmtest and
+  text-llvmtest 304/304, verify-probes 472/478, the essential step's command passing.
+- **3 (a)**: `haskell-pp`, `haskell-cpp` and `haskell-full2` are deleted, locally and on `mac`, by the main session once batch 3 is on `next`;
+  the GPL port is kept nowhere.
+- **4 (a), built**: `bin/lib/crops/take.bash` (`crop_take`: a linked worktree's or the clean clone's missing input hard-linked from the main
+  checkout, a refusal when the main checkout has none, never a download), used by `bin/repr-ocaml corpus fetch` and its opam set (Haskell's
+  were batch 2's proposal 8 (a); LLVM's corpus and Scheme's already read the main checkout's). The main checkout's `.tmp/repr-ocaml/src`
+  seeded from ocaml-90's copies (hard links, the pins checked). Proved under stubs (curl, wget, the C compilers, GHC's tools exiting 99):
+  the refusal with no main copy, then the fetch, `native-check samples stdlib` (158 files equal) and `errors-check` 100/100, no stub called.
+- **Batch 2's 9 (a), built**: `bin/repr-haskell corpus fetch`'s configure test was inverted; configure now runs only live, without the
+  native-inputs pin, or with `REPR_HASKELL_CONFIGURE=1`. Proved: a fresh worktree corpus fetched under the stubs, none called; the control
+  `REPR_HASKELL_CONFIGURE=1` calls the gcc stub (6 calls). Found: the round trip's native path is STALE until tonight (`haskell-native-inputs`
+  is keyed by the helper's hash, which errors3's verbs moved): `bin/repr-haskell record-native-inputs` comes first in the night's Haskell list.
+
+### The day after batch 3's night
+
+1. HE9 (decided 1 (a)): an agent ports `haskell-eval9`'s 3f57a1d3 by hand onto `next` (batch 3): the new files `go/arbace/hs/alloclimit.ae`,
+   `test/haskell/hsi/cmd/rtsflags.ae`, `rtsusage.ae` as they are; the hunks of `go/arbace/hs/{machine,prim_ctl,alloc,ffi}.ae`,
+   `test/haskell/hsi/cmd/main.ae` and `bin/lib/hsi/check` re-applied by hand; `go/arbace/hs.ae`'s files and init order made again; proved
+   by cgrun057 and T16916 byte for byte, the essential list, then the night's `bin/hsi check --record`; HASKELL-EVAL-SURVEY's HES80-HES82
+   (decided 2026-11-06) carried.
+2. LLVM: `test/llvm/valid-wide-known.tsv` emptied once the night's `record-opt` makes its row pass (decided 2 (b)).
+
+## Batches 2-4: the nights after batch 1 (one ordered list; `batch4` holds batches 2, 3 and 4, on `batch1`)
+
+`batch4` is the single head of everything after batch 1 (batch 3's `mac/batch3` 90396a29 merged into it). Each night: one heavy job at a
+time under `bin/heavy-lock` (`:heavy` steps by the gate itself), at most 1.5 GiB a process outside the gate, one check process at a time
+beside it. The details of each item are in its batch's section above ("Batch 2's nights", "Batch 3's night", "Batch 4's night"); this is
+their order. Keys at `batch4`: gate `bd0295a51879`, runtime `e55979557036`, javac `4414d352e77c` (all three move from batch 1's: a rekey
+night, the builds on the two-run path).
+
+Night A (the rekey night):
+
+0. Before the gate: the C++ runtime's IR pin on clang 23.1.5 (batch 2's 1 (a): `bin/cppi runtime-build --update`, the `!ident` line), then
+   the C++ packs re-recorded on clang 23.1.5 with cpp-indep's commands (batch 2, Night A, 3.), which supersede step 0's update alone.
+1. The essential gate at `batch4`'s head: the builds (gate, test build, two runs), then every step at its new key; it measures
+   `samples/io.cpp` in `cpp-check-essential`/`cpp-aot-essential` (ORS28 (b), above 2 GiB by day) and judges goi's full-forms and liveness lines,
+   C's ci-lls21, the Haskell and C++ native steps. Then `bin/gate --pins` (13 packs, the crops' pins), `bin/reap` (9 problems expected: the
+   held rows of 2., 3. and 7.), `bin/crops-score --judge --strict`.
+2. Haskell first among the records (its native reads are STALE until it): `bin/repr-haskell helper`, `bin/repr-haskell record-native-inputs`,
+   `test --record`, `bin/hsi dumps --record`, `bin/hsi check --live --dump-only --record-progs`; then `bin/hsi check --record`, `--aot --record`
+   (`HSI_MEM_CAPS`; T16846 10 GB: heavy), `record-ref --opt O1`, `check --aot --opt O1 --record`; HFS-I1's `check --front native --record` and
+   `compare-front` (and `--aot`) against that `check-hsi.edn`, then hfs-i1's switch commit if no pass is lost (batch 2, Night A).
+3. C: `bin/ci check --aot --corpus ci-run --record` (builtin-atomic.c, fnptr-result-width.c; their names back into `:subset-cf2g`); the
+   shared `.tmp/ci-aot-lib`'s first build (`RSI_AOT_LIB_CACHED=1 bin/rsi aot-lib`) before Rust's AOT.
+4. C++: `bin/cppi check --record`, `--aot --record` (deferred.cpp, thread-throw; up to 6.7 GB: heavy), cpp-90's own round trips
+   `roundtrip-corpus KEY --judge own --record-results` (six keys, 1-2 h), CP243 (a), the routes compared (`CPPI_ROUTE=auto|clang`), `bin/cppi
+   record-ir --corpus libstdcxx --every 15,25` (then `cpp-lower`'s libstdcxx-every-15th part returns from `cpp-lower-oracle`); batch 3's
+   `bin/repr-cpp native-check` on the 977-file sample, `--tree`, `roundtrip-corpus` and `dg --reader native` on gxx-dg's lists, CPR1's
+   `--record-known-rejected`.
+5. Rust: `bin/rsi ir-pack --corpus ui` (rustc, the oracle tier; commit `test/rust/ir/ui.sha256`), `bin/rsi check --corpus samples,synthetic
+   --record` (`RSI_BATCH=2 RSI_THREADS=1 RSI_JOBS=2 RSI_CI_MEMLIMIT=1400MiB`, about 2 h), RES61's measure, after RES34 `bin/rsi check
+   --essential` and the AOT cell `check --aot --corpus samples,synthetic --record` (about 4 h; RES66's three above 2 GB last).
+6. The four new crops' `--full` chains, keyed (LLVM `llvm-full`, Rust `rust-full`, Haskell `haskell-roundtrip` with `hsi-check` heavy, OCaml),
+   if the night has room; else Night B's first.
+7. Java: the three new JDK references' levels (`bin/java-check --levels read,interp,classes,compiled,print --only t08351,t08362,t08376 --record`).
+8. Last: `bin/reap --record` (nothing held any more), `bin/crops-score --judge --strict --record`.
+
+Night B (keyed: what A did not reach):
+
+1. The rest of `bin/gate --full` (311 steps; javac's tool at `4414d352e77c` first, `bin/javac-vendor tool`, heavy; the crops' chains skip at
+   their keys).
+2. The oracle tier's first run, `bin/gate --oracle` (52 steps, 47 on this host; `c-roundtrip-oracle` heavy, a part a corpus); if short, the
+   verifies (`c-records-verify`, `scheme-records-verify`, `cpp-records-verify`, `haskell-records-verify`), `cpp-selftest-oracle`, `c-c23-oracle`.
+3. Records: rsi's UI corpus `bin/rsi check --corpus ui --record` (about 5.5 h), `divergences`, `own-verdicts`; `rsi-lower-check-all`
+   (heavy); C `bin/ci check --record`, `--aot --record`; LLVM `bin/llvmi check --aot --record`, `LLVMI_TX_ALL=1 bin/llvmi check`, `bin/repr-llvm
+   record-opt` for reject-av's 15, reject-other's 148 and valid-wide's dllimport row (then `bin/llvm-corpus verify-record`, and
+   `valid-wide-known.tsv` emptied the day after); OCaml's (`OI_TYPER_GOMEMLIMIT=1200MiB`, `O2J_JOBS=1`) `bin/oi stdlib`, `check --record`, `--aot
+   --record`, `suite check --record`, `--aot --record`, `roundtrip --text --record-results all`, `--types`, OC185's cells; the parsers' speed proof
+   (`bin/repr-ocaml native-check` 1,512 files, `errors-check`, Haskell's `native-check --errors` 177 modules); goi's whole record (`bin/goi
+   check --jobs 8 --record`, `check --aot --jobs 8 --record`); Rust's native-check beyond the 68 (the oracle tier).
+4. Last: `bin/reap --record`, `bin/crops-score --judge --strict --record`.
+
+The day after: HE9 by hand (batch 3's decided 1 (a)), `valid-wide-known.tsv` emptied once its row passes, the GPL line's three branches
+deleted once batch 3 is on `next` (decided 3 (a)), ORS29-ORS32 and batch 3's open items.
+
 ## After the tag
 
 - **The held branches, in batches into `next`** (`.tmp/tag-v2/merge-plan.md`): the crops' rows (batch 1, above), the LLVM IR line (the reader's gaps, `:full`, the verifier, the lowering of

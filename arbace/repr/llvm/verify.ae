@@ -1,3 +1,6 @@
+;; Parts of this file reimplement llvm-project 23.1.4's (llvmorg-23.1.4) lib/IR/Verifier.cpp and lib/AsmParser/LLParser.cpp's checks (with the parts of lib/IR/AutoUpgrade.cpp, Type.cpp,
+;; Attributes.cpp, AsmWriter.cpp and DebugInfoMetadata.cpp they call), by hand;
+;; Apache License 2.0 with LLVM Exceptions (LICENSE.md, doc/ARBACE.md).
 (ns arbace.repr.llvm.verify
   "LLVM IR's verifier over LLVM forms (doc/llvm/SPEC.md §6.2; doc/llvm/LLVM-CROP-SURVEY.md, LL4, LLS6 (a)): `verify-forms`
   gives a module's first error, {:rule R :message M}, or nil. Two phases, as the pin's `opt -passes=verify` runs them:
@@ -766,7 +769,7 @@
       (verr :parser/align "alignment is not a power of two" {:at [:attr-val-of "align" (str a)]}))
     (when (> (long a) 4294967296) (verr :parser/align "huge alignments are not supported yet" {:at [:attr-val-of "align" (str a)]}))))
 
-(declare use-value check-di-parse node-of di-kind callee-of phase-parser* check-uselistorder fp-class-compatible? resolve-type gep-indexed-type sized? token-like? check-fn-attr-pairs check-target-features alloc-bytes call-fty strip-casts)
+(declare use-value check-di-parse node-of di-kind callee-of phase-parser* check-uselistorder fp-class-compatible? resolve-type gep-indexed-type sized? token-like? check-fn-attr-pairs check-target-features alloc-bytes call-fty strip-casts scalable?)
 
 (defn- note-md! [x]
   (letfn [(walk [y] (cond (md-ref? y) (.add *mrefs* y)
@@ -817,7 +820,10 @@
     (= v 'null) (when-not (ptr-type? t) (verr :parser/null "null must be a pointer type" {:at [:val {:text "null"}]}))
     ('#{undef poison zeroinitializer} v)
     (let [rt (resolve-type t)]
-      (when (or (not (first-class? rt)) (= rt 'opaque) (= rt 'label) (named-type? rt))
+      (when (or (not (first-class? rt)) (= rt 'opaque) (= rt 'label) (named-type? rt)
+                (and (= v 'zeroinitializer) (seq? rt) (= 'target (first rt))   ; TargetExtType's HasZeroInit
+                     (not (let [nm (second rt)] (or (and (str/starts-with? nm "spirv.") (not (#{"spirv.Image" "spirv.SignedImage" "spirv.Type" "spirv.IntegralConstant" "spirv.Literal" "spirv.Padding"} nm)))
+                                                    (#{"aarch64.svcount" "riscv.vector.tuple" "wasm.funcref" "wasm.externref"} nm))))))
         (verr :parser/constant-type (str "invalid type for " ('{undef "undef" poison "poison" zeroinitializer "null"} v) " constant") {:at [:val {:text (str v)}]})))
     (= v 'none) (when-not (= t 'token) (verr :parser/constant-type "invalid type for none constant" {:at [:val {:text "none"}]}))
     (and (seq? v) ('#{struct packed} (first v)) (not (vector? (second v))) (empty? (rest v))) nil
@@ -863,6 +869,7 @@
                          (when (and @w (not= @w (nth it 1))) (verr :parser/gep "getelementptr vector index has a wrong number of elements" at))
                          (vreset! w (nth it 1)))))
                    (when (and (seq idxs) (not (sized? (norm-type st)))) (verr :parser/gep "base element of getelementptr must be sized" at))
+                   (when (scalable? (norm-type st)) (verr :parser/gep "invalid base element for constant getelementptr" at))
                    (when-not (gep-indexed-type (norm-type st) idxs) (verr :parser/gep "invalid getelementptr indices" at)))
                  ('#{extractelement insertelement shufflevector} h)
                  (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e)))))
@@ -919,14 +926,14 @@
   (let [[h ps o] (split-inst b)
         ps* (strip-flags ps)]
     (cond
-      (bin-ops h) (let [t (norm-type (first ps*))]
+      (bin-ops h) (let [t (resolve-type (norm-type (first ps*)))]
                     (when-not (if (fp-ops h) (fp-ish? t) (int-ish? t)) (verr :parser/operand-type "invalid operand type for instruction" {:at [:ty]})))
-      (= h 'fneg) (when-not (fp-ish? (norm-type (first ps*))) (verr :parser/operand-type "invalid operand type for instruction" {:at [:ty]}))
-      (= h 'icmp) (let [t (norm-type (first (drop-while keyword? ps)))]
+      (= h 'fneg) (when-not (fp-ish? (resolve-type (norm-type (first ps*)))) (verr :parser/operand-type "invalid operand type for instruction" {:at [:ty]}))
+      (= h 'icmp) (let [t (resolve-type (norm-type (first (drop-while keyword? ps))))]
                     (when-not (or (int-ish? t) (ptr-ish? t)) (verr :parser/icmp "icmp requires integer operands" {:at [:body 2]})))
-      (= h 'fcmp) (let [t (norm-type (first (drop-while keyword? ps)))]
+      (= h 'fcmp) (let [t (resolve-type (norm-type (first (drop-while keyword? ps))))]
                     (when-not (fp-ish? t) (verr :parser/fcmp "fcmp requires floating point operands" {:at [:body 2]})))
-      (cast-ops h) (let [[t _ t2] ps* a (norm-type t) c (norm-type t2)]
+      (cast-ops h) (let [[t _ t2] ps* a (resolve-type (norm-type t)) c (resolve-type (norm-type t2))]
                      (when-not (cast-valid? h a c)
                        (verr :parser/cast (str "invalid cast opcode for cast from '" (tstr a) "' to '" (tstr c) "'") {:at [:ty]})))
       (= h 'catchpad) (when (= (first ps) 'none) (verr :parser/syntax "expected scope value for catchpad" {:at [:body 2]}))
@@ -964,6 +971,7 @@
                        (verr :parser/phi "fast-math-flags specified for phi without floating-point scalar or vector return type" {:at [:body 0]}))
                      (when-not (first-class? (norm-type (first ps*))) (verr :parser/phi "phi node must have first class type" {:at [:ty]})))
       (= h 'select) (let [[[ct] [at] [bt]] ps* ct (norm-type ct)]
+                      (when (token-like? (norm-type at)) (verr :parser/select "select values cannot have token type" {:at [:ty]}))
                       (when (and (vec-type? ct) (= 'i1 (elem ct)))
                         (when-not (vec-type? (norm-type at)) (verr :parser/select "selected values for vector select must be vectors" {:at [:ty]}))
                         (when-not (= (shape ct) (shape (norm-type at)))
@@ -1045,9 +1053,78 @@
 
 (def ^:dynamic *caller-varargs* false)
 
+(defn- parse-asm-constraints
+  "InlineAsm::ParseConstraints and ConstraintInfo::Parse: [{:kind :indirect}...], nil when the string does not parse (split
+  at every comma, no empty constraint, none after a trailing comma)."
+  [^String cs]
+  (if (= "" cs) []
+      (let [parts (str/split cs #"," -1)]
+        (when (every? seq parts)
+          (reduce
+           (fn [acc ^String p]
+             (if (nil? acc) (reduced nil)
+                 (let [n (count p)
+                       [k i] (case (.charAt p 0) \~ [:clobber 1] \= [:output 1] \! [:label 1] [:input 0])
+                       bad? (volatile! (and (= k :clobber) (< i n) (not= \{ (.charAt p (int i)))))
+                       ind (and (< i n) (= \* (.charAt p (int i))))
+                       i (if ind (inc i) i)]
+                   (when (>= i n) (vreset! bad? true))
+                   ;; modifiers
+                   (let [i (loop [i i ec false cm false]
+                             (if (or @bad? (>= i n)) i
+                                 (case (.charAt p (int i))
+                                   \& (if (or (not= k :output) ec) (do (vreset! bad? true) i) (if (>= (inc i) n) (do (vreset! bad? true) i) (recur (inc i) true cm)))
+                                   \% (if (or (= k :clobber) cm) (do (vreset! bad? true) i) (if (>= (inc i) n) (do (vreset! bad? true) i) (recur (inc i) ec true)))
+                                   (\# \*) (do (vreset! bad? true) i)
+                                   i)))]
+                     (loop [i i]
+                       (when (and (not @bad?) (< i n))
+                         (let [c (.charAt p (int i))]
+                           (cond
+                             (= c \{) (let [e (.indexOf p "}" (int i))] (if (neg? e) (vreset! bad? true) (recur (inc e))))
+                             (Character/isDigit c) (let [j (loop [j i] (if (and (< j n) (Character/isDigit (.charAt p (int j)))) (recur (inc j)) j))
+                                                         m (Long/parseLong (subs p i j))]
+                                                     (when (or (>= m (count acc)) (not= :output (:kind (nth acc m))) (not= k :input)) (vreset! bad? true))
+                                                     (recur j))
+                             (= c \^) (recur (+ i 3))
+                             (= c \@) (recur (+ i 2 (- (int (.charAt p (int (inc i)))) 48)))
+                             :else (recur (inc i)))))))
+                   (if @bad? (reduced nil) (conj acc {:kind k :indirect ind})))))
+           [] parts)))))
+
+(defn- check-asm-string
+  "InlineAsm::verify at LLParser's conversion of the inline asm: the constraints' parse, their order, the outputs against
+  the return type and the inputs against the parameters."
+  [cs fty]
+  (let [at {:at [:find "asm"]} [_ rt pts] fty]
+    (when (some #{'&} pts) (verr :parser/asm "inline asm cannot be variadic" at))
+    (let [cons (parse-asm-constraints (str cs))]
+      (when (nil? cons) (verr :parser/asm "failed to parse constraints" at))
+      (let [st (volatile! {:out 0 :in 0 :clob 0 :ind 0 :lab 0})]
+        (doseq [c cons]
+          (let [{:keys [out in clob ind lab]} @st]
+            (case (:kind c)
+              :output (do (when (or (not= 0 (- in ind)) (pos? clob) (pos? lab))
+                            (verr :parser/asm "output constraint occurs after input, clobber or label constraint" at))
+                          (if (:indirect c) (vswap! st #(-> % (update :ind inc) (update :in inc))) (vswap! st update :out inc))
+                          (when (and (:indirect c) (pos? clob)) (verr :parser/asm "input constraint occurs after clobber constraint" at)))
+              :input (do (when (pos? clob) (verr :parser/asm "input constraint occurs after clobber constraint" at)) (vswap! st update :in inc))
+              :clobber (vswap! st update :clob inc)
+              :label (do (when (pos? clob) (verr :parser/asm "label constraint occurs after clobber constraint" at)) (vswap! st update :lab inc)))))
+        (let [{:keys [out in]} @st rt (resolve-type (norm-type rt))]
+          (case (long out)
+            0 (when-not (= rt 'void) (verr :parser/asm "inline asm without outputs must return void" at))
+            1 (when (and (seq? rt) (#{'struct 'packed} (first rt))) (verr :parser/asm "inline asm with one output cannot return struct" at))
+            (when-not (and (seq? rt) (#{'struct 'packed} (first rt)) (= out (count (rest rt))))
+              (verr :parser/asm "number of output constraints does not match number of return struct elements" at)))
+          (when-not (= in (count (remove #{'&} pts)))
+            (verr :parser/asm "number of input constraints does not match number of parameters" at)))))))
+
 (defn- parse-call-attrs
   "LLParser's attribute checks of a call's text: return value, arguments, function attributes."
   [ps o]
+  (let [c (second ps)]
+    (when (and (seq? c) (= 'asm (first c))) (check-asm-string (nth c 2 "") (call-fty (first ps) (nth ps 2)))))
   (when (and (seq (:fmf o)) (not (fp-class-compatible? (norm-type (second (call-fty (first ps) (nth ps 2)))))))
     (verr :parser/call "fast-math-flags specified for call without floating-point scalar or vector return type" {:at [:find "call"]}))
   (doseq [[i a] (map-indexed vector (nth ps 2))]
@@ -1166,8 +1243,8 @@
     (when-let [p (:prologue o)] (use-value nil (second p) (norm-type (first p))))
     (when-let [ft (.get *gfwd* k)]
       (let [pft (norm-type (list 'ptr (or (:addrspace o) *prog-as*)))]
-        (when (and (not= ft true) (not= (norm-type ft) pft))
-          (verr :parser/forward-type (str "invalid forward reference to function '" k "' with wrong type: expected '" (tstr pft) "' but was '" (tstr (norm-type ft)) "'")
+        (when (and (not= ft true) (not= (resolve-type (norm-type ft)) pft))
+          (verr :parser/forward-type (str "invalid forward reference to function '" k "' with wrong type: expected '" (tstr pft) "' but was '" (tstr (resolve-type (norm-type ft))) "'")
                 {:at [:mod-find (pr/global-str nm)]}))))
     (.put *gdefs* k {:kind :function :fty (list 'fn (norm-type rt) (mapv #(if (= % '&) % (norm-type (first %))) ps)) :form f})
     (.remove *gfwd* k)
@@ -1184,7 +1261,7 @@
         (verr :parser/global-type "invalid type for global variable" {:at [:after (if (:constant o) "constant" "global")]})))
     (when (.containsKey *gdefs* k) (verr :parser/redefinition (str "redefinition of global '@" k "'") {:at [:kind :gname]}))
     (when-let [ft (.get *gfwd* k)]
-      (when (and (not= ft true) (not= (addrspace (norm-type ft)) (or (:addrspace o) 0)))
+      (when (and (not= ft true) (not= (addrspace (resolve-type (norm-type ft))) (or (:addrspace o) 0)))
         (verr :parser/forward-type "forward reference and definition of global have different types" {:at [:after (if (:constant o) "constant" "global")]})))
     (when (some? init) (use-value nil init (norm-type t)))
     (check-align (:align o))
@@ -1221,7 +1298,9 @@
                      (doseq [f forms :when (not (#{'llvm/meta 'llvm/named-meta} (first f)))] (walk f)))
                    @n)]
       (when (> n-refs (count calls)) (verr :parser/intrinsic "intrinsic can only be used as callee" at))
-      (when-not (intr/recognized? k) (verr :parser/intrinsic (str "unknown intrinsic '" k "'") at))
+      ;; a target's name the table lacks may be one AutoUpgrade renames (UpgradeIntrinsicFunction): taken
+      (when-not (or (intr/recognized? k) (re-find #"^llvm\.(riscv|arm|aarch64|amdgcn|nvvm|ppc|wasm|hexagon|mips|s390)\." k))
+        (verr :parser/intrinsic (str "unknown intrinsic '" k "'") at))
       (doseq [[fty args] (reverse calls)]
         (if (old-form-decl? k fty)
           ;; AutoUpgrade's masked intrinsics with their alignment argument (UpgradeIntrinsicCall): a fatal error for a bad one
@@ -1445,7 +1524,7 @@
     (and (re-find #"^llvm\.(memcpy|memmove|memset)\." nm) (= n 5)) (into (subvec ps 0 3) ['(ov 98 :any) '(ov 99 :any)])
     (and (re-find #"^llvm\.lifetime\.(start|end)\." nm) (= n 2)) ['i64 '(ov 0 :ptr)]
     (and (re-find #"^llvm\.(ctlz|cttz)\." nm) (= n 1)) (subvec ps 0 1)
-    (and (re-find #"^llvm\.objectsize\." nm) (= n 3)) (subvec ps 0 3)
+    (and (re-find #"^llvm\.objectsize\." nm) (#{2 3} n)) (subvec ps 0 n)
     (and (re-find #"^llvm\.masked\.load\." nm) (= n 4)) (into [(first ps) 'i32] (rest ps))
     (and (re-find #"^llvm\.masked\.store\." nm) (= n 4)) (into (subvec ps 0 2) (into ['i32] (subvec ps 2)))
     :else ps))
@@ -1455,6 +1534,9 @@
   [^String nm fty]
   (let [n (count (remove #{'&} (nth fty 2)))]
     (or (and (re-find #"^llvm\.masked\.(load|gather|store|scatter)" nm) (= n 4))
+        (#{"llvm.lifetime.start.i64" "llvm.lifetime.end.i64"} nm)   ; deleted with their calls
+        (and (= nm "llvm.dbg.value") (= n 4))   ; the old form with an offset
+        (named-type? (second fty))   ; an identified struct returned: upgraded to the literal one
         (when-let [[_ ps] (intrinsic-entry nm)]
           (not= ps (old-form-pattern nm ps n))))))
 
@@ -1464,7 +1546,9 @@
   checked."
   [^String nm fty]
   (when-let [e (intr/lookup nm)]
-    (when-not (old-form-decl? nm fty)
+    (when-not (or (old-form-decl? nm fty)
+                  ;; AutoUpgrade rewrites many old x86 intrinsics' signatures (UpgradeX86IntrinsicCall): not judged here
+                  (str/starts-with? nm "llvm.x86."))
       (when-let [m (intr/signature-error e fty tstr resolve-type)]
         (verr :verifier/intrinsic-signature m :decl)))))
 
@@ -1832,7 +1916,13 @@
     (visiting
      (check-function-attrs (group-items (:ret-attrs o)) (norm-type (second fty)) (subvec pattrs 0 (min nparams (count pattrs)))
                            (subvec ptypes 0 (min nparams (count ptypes))) fattrs llvm-callee? (and (seq? c) (= (first c) 'asm)) true))
-    (when (has-attr? fattrs "speculatable") (verr :verifier/attr-misc "speculatable attribute may not apply to call sites"))
+    (when (and (has-attr? fattrs "speculatable")
+               ;; unless the callee is speculatable: its declaration's attributes, an intrinsic's own (IntrSpeculatable)
+               (not (when (global? c)
+                      (or (:speculatable (intr/lookup (global-key c)))
+                          (when-let [d (.get *gdefs* (global-key c))]
+                            (when (= :function (:kind d)) (has-attr? (group-items (:attrs (apply hash-map (drop 4 (:form d))))) "speculatable")))))))
+      (verr :verifier/attr-misc "speculatable attribute may not apply to call sites"))
     (let [d (when (global? c) (.get *gdefs* (global-key c)))
           dps (when (and d (= (:kind d) :function)) (vec (remove #{'&} (nth (:form d) 3))))
           intr-pos (when (and (global? c) (intr/recognized? (global-key c))
@@ -3134,8 +3224,10 @@
                                 (when-not (and (local? t) (when-let [[_ _ db] (.get defs (local-key t))] (= 'catchpad (first db))))
                                   (verr :verifier/intrinsic-call "eh.exceptionpointer argument must be a catchpad"))))
                             (when (re-find #"^llvm\.lifetime\.(start|end)" (global-key c))
-                              (let [a (peek (last (nth ps 2)))]
-                                (when-not (or (= a 'poison)
+                              (let [a (peek (last (nth ps 2)))
+                                    old? (= 2 (count (nth ps 2)))   ; AutoUpgrade: the old form's marker on a non-alloca is removed
+                                    a (if old? (strip-casts a) a)]
+                                (when-not (or (= a 'poison) old?
                                               (and (local? a) (when-let [[_ _ db] (.get defs (local-key a))] (= 'alloca (first db)))))
                                   (verr :verifier/lifetime "llvm.lifetime.start/end can only be used on alloca or poison")))))))
                       (when (= hd 'invoke)

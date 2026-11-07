@@ -1281,3 +1281,140 @@ samples, `.o2` 41, `.lto` 50, `.win` 44: the builds clang accepted), the nine C+
    `bin/reap --record`, the read and judge facts recounted (read stays 1: the pack is pinned input in the crop's language, LLS27 (a);
    the judge gains the families' own verdicts and opt's records at 0.5), the gate's `llvm-read` and `llvm-print` taking the new
    families as parts. The numbers change once (new inputs: the corners dropped, the builds clang 23.1.5's).
+## As built: LLS21 (a), ci's gaps (2026-11-05, branch `ci-lls21`)
+
+What the user decided (LLS21 (a)) is in ci, C's crop (`arbace/c/build.ae`, `arbace/c/check.ae`), no new native and no Go
+change: nothing of go/arbace/ci or crt moves, so cf2g's AOT needs no new node kind.
+
+- `fmodf` and `fmodl` are in the builder's `builtin-aliases`: `__builtin_fmodf` and `__builtin_fmodl` call musl 1.2.6's functions
+  (long double is double in ci, CS35), as `fmod` always did.
+- The `__atomic_*` and `__sync_*` families are lowered by the builder to plain loads and stores (`atomic-call`, `atomic-name`):
+  ci runs one thread, so every memory order is sequential consistency and a read-modify-write is not interrupted, no `sync/atomic`
+  needed; the memory-order arguments are evaluated for their effects and ignored. Covered: `load_n`, `store_n`, `exchange_n`,
+  `compare_exchange_n` and the generic `load`, `store`, `exchange`, `compare_exchange` (their value arguments by pointer),
+  `fetch_{add,sub,and,or,xor,nand}`, `{add,sub,and,or,xor,nand}_fetch`, `test_and_set`, `clear`, `thread_fence`, `signal_fence`,
+  and the `__sync_` spellings (`fetch_and_OP`, `OP_and_fetch`, `bool_compare_and_swap`, `val_compare_and_swap`, `lock_test_and_set`,
+  `lock_release`, `synchronize`). `__atomic_always_lock_free` and `__atomic_is_lock_free` stay as before. The object is an integer,
+  a pointer or a `_Bool` (anything else is refused by the builder: a `_BitInt` wider than 64 bits, an `__int128`, a float). The checker
+  types the result (`atomic-res`: the pointed-to type for a value, `_Bool` for compare-exchange, test-and-set and
+  `__sync_bool_compare_and_swap`, void for the rest) and no longer lets the parser's prelude declarations `void __atomic_load ();`,
+  `__atomic_store ()`, `__atomic_exchange ()` (cc's, for `<stdatomic.h>`) make the generic forms "too many arguments".
+- A call through a function pointer reads its result at the pointer's return width (`call-node`: `(cv "i32" ...)` around an integer
+  call of 8, 16 or 32 bits when the callee is not a named function): gcc's code reads `eax`, whatever type the callee was defined
+  with, so a comparator lowered as returning `unsigned`, called by musl's `qsort` and `bsearch` as `int`, gives -1. Direct calls are
+  untouched (the callee's own type is the call's).
+- Samples in `test/c/run/` (the `ci-run` corpus, 11 files to 13, gcc 15.2's runs in `test/c/ref-gcc15.edn`, results in
+  `test/c/check-linux-amd64.edn`, in the corpora's `subset-cf2g`, `subset-read` and `subset-run`): `builtin-atomic.c` (every
+  operation above, at char, short, int, long long, pointer and `_Bool`, both compare-exchange forms succeeding and failing, the
+  `__sync_` spellings, fmodf/fmodl) and `fnptr-result-width.c` (qsort with a comparator returning unsigned, a long read as int, an
+  int read as unsigned char). Both equal gcc -O0's output byte for byte.
+
+Checked (on main's stage 0 with `arbace.c.check` and `arbace.c.build` loaded from the branch: the embedded copies are older, so the
+tools' host loads these two files over them; light, nothing built):
+
+| check | result |
+|-|-|
+| `bin/llvmi check --only` of the 7 modules (`ee.MCJIT.frem`, `c-O{0,2}.synth.{decl-atomic,decl-qualifiers,ext-callbacks}`) | 7 of 7 pass (were: ci-builtins 5, abi-punning 2) |
+| `bin/ci check --corpus ci-run --only` (the two new files and three old) | 5 of 5 pass |
+| `bin/ci judge-test` | 104 tests, 464 assertions, 0 failures |
+| `bin/ci dg --essential` | 92 of 92 listed files pass, the control differs |
+| `bin/ci check --only test/c/essential-check.txt` | every program passes (the essential run check) |
+
+`test/llvm/check-eval-linux-amd64.edn`: the 7 rows are `:pass` now (edited by hand from the 7-module run; the next full
+`bin/llvmi check --record` confirms them). The classes `ci-builtins` and `abi-punning` stay in `divergences-eval.edn` because
+`test/llvm/check-aot-linux-amd64.edn` still records the 7 as non-passes (AOT not rerun: cf2g's Go build is not a light check);
+once the AOT record is rewritten both classes have no members and go. This moves `gate_key` (ci is embedded): the main host merges
+it in a rekey night, and the 7 rows of the AOT record and the new samples' `check --aot` rows (`test/c/check-aot-linux-amd64.edn`:
+`ci-run/builtin-atomic.c`, `ci-run/fnptr-result-width.c`, not recorded here) are the night's.
+## As built: LL4, the corpus loop (2026-11-05)
+
+Branch `llvm-ll4` from `llvm-ll1`. Light runs only (main's keyed `--full`, then tonight's gate): every process under 2 GiB,
+`ARBACE_HOST_EXE` the main checkout's stage 0, the lists a few hundred files, opt the pin's `/usr/lib/llvm23/bin/opt`. The rules,
+the tables and the machinery are doc/llvm/SPEC.md §6.2.3; the sources read are llvm-project 23.1.4's (the pinned tarball, LLS11),
+`lib/IR/{Verifier,Intrinsics,AutoUpgrade,Type,Attributes,AsmWriter,DebugInfoMetadata}.cpp`, `lib/AsmParser/{LLParser,LLLexer}.cpp`,
+`include/llvm/IR/Intrinsics*.td`, `DebugInfoFlags.def`, `include/llvm/BinaryFormat/Dwarf.{def,h}` (extracted into the worktree's
+`.tmp/`; no other network). Two tables are generated from them and committed: `arbace/repr/llvm/intr_table.ae` (`bin/llvm-corpus
+intrinsics`, the pin's `llvm-tblgen --dump-json` over Intrinsics.td: 16,423 intrinsics) and `di_table.ae` (`bin/llvm-corpus
+di-table`: 246 fields of 29 node kinds, 234 print fields, the DWARF names, flags and op codes).
+
+**The samples, before and after** (`bin/llvm-corpus verify-record LIST WORK OUT`; the records `test/llvm/llvm-test-*-verify.tsv`,
+NAME, opt's verdict, Arbace's, verdicts same, first messages same, whole stderr same; "before" the verifier of `llvm-ll1`):
+
+| list | files | verdicts as opt's | first messages | whole stderr |
+|---|---|---|---|---|
+| `llvm-test-valid.list` (LL1's 300 valid) | 300 | 277 → **300** | | 277 → **300** |
+| `llvm-test-valid-wide.list` (new: every 97th module of input.list, under 60 KB) | 420 | **420** | | **420** |
+| `llvm-test-reject.list` (LL1's 200 rejections) | 200 | 77 → **195** | 60 → **189** | 43 → **183** |
+| `llvm-test-split.list` (60 sections) | 60 | 57 → **60** | | 57 → **60** |
+| `llvm-test-reject-av.list` (new: every Assembler/ and Verifier/ rejection opt rejects) | 578 | 227 → **554** (95.8 %) | 184 → **538** | 133 → **516** (89.3 %) |
+| `llvm-test-reject-other.list` (new: the other directories', acceptance only) | 179 | 43 → **176** (98.3 %) | 25 → 173 | 24 → 172 |
+
+Two more valid samples held out (not committed, each run once after the rules of the day): every 97th from the 50th (415 modules):
+414 of 415 verdicts, the one a template file (`[SIZE x ptr]`, a parse error read in other words); every 37th from the 11th (1,088
+modules): **1,087 of 1,088 verdicts**, 1,086 whole stderr; the one false error an AMDGPU `wmma` declaration AutoUpgrade rewrites.
+Their false errors found on the way (named types not resolved in operand checks, common globals' float zeros, speculatable
+intrinsic callees, self-references in unreachable blocks, AutoUpgrade's old forms) were fixed before.
+
+The tests' own declarations (`bin/llvm-corpus reject-check`, an `error:` in a CHECK-style line): of the 200, 67 declare one, opt
+prints it in 65, Arbace's verify now in **64** (17 before); of the 578, 190 declare, opt 188, Arbace **185**; of the 179, 27, opt 16,
+Arbace 14. The reader side holds: `roundtrip` over the 300 valid: forms **300 of 300**, bitcode 300 of 300, objects 252 (48 `none`);
+`roundtrip --text` **300 of 300** byte for byte; `test/llvm/essential.txt` 43 of 43 forms, the control fails as it must. The regression
+sets of LL4b/c: the probes (`test/llvm/probes.list`) verdicts 472 → **474** of 478, whole stderr 470 → **471** (the rest the classes of
+`probes-known.tsv`); 269 mutants of the 300 valid (`bin/repr-llvm mutants .tmp/valid.abs OUT 300 700000`, held out, generated once):
+verdicts 252 → **268** of 269, whole stderr 226 → **251**.
+
+The 24 Assembler/ and Verifier/ rejections Arbace still takes (or cannot read): the AMDGPU intrinsics' and allocas' rules (9, Verifier/
+AMDGPU), the vector-predication, vector insert/extract, `get_dynamic_area_offset`, statepoint relocation (2), `callbr` intrinsic,
+memprof, `modular-format`, funclet-token, logical-pointer, structured-gep and non-byte vector GEP rules (one each), `DILocation not
+allowed within this metadata node`, and two of the lexer (`*/` at the top level, `u0x` integers). Of the other directories':
+`dso_local_equivalent`, a DIAssignID operand, `amdhsa_code_object_version` in a constant. The 38 with the verdict right but not the
+rest of the output: mostly later messages of the same families (statepoints, matrix, convergence, deoptimize, guard, the use-list
+order of two users of one intrinsic, a node opt prints by its address, attribute groups of intrinsic declarations).
+
+### The night's runs (commands and what to expect)
+
+As LL1's (under `bin/heavy-lock` on the loaded host; `ARBACE_HOST_EXE` unset in the gate):
+
+| what | command | expected |
+|---|---|---|
+| the lists | `bin/llvm-corpus full-lists; bin/llvm-corpus reject-lists` | 578 and 179 files; `git diff test/llvm/llvm-test-reject-{av,other}.list` empty |
+| the tables | `bin/llvm-corpus intrinsics; bin/llvm-corpus di-table` | `git diff arbace/repr/llvm/{intr,di}_table.ae` empty (llvm-tblgen and python3 of the host) |
+| the records | `bin/llvm-corpus valid-wide`, then `bin/llvm-corpus verify-record LIST WORK test/llvm/llvm-test-NAME-verify.tsv` for valid, valid-wide, reject, split, reject-av, reject-other (resolved by `bin/llvm-corpus resolve`) | `git diff test/llvm/*-verify.tsv` empty; under a minute each at 4 threads |
+| every rejection test | `bin/repr-llvm verify-check .tmp/llvm/lists/reject.list WORK` | 1,706 files: the 757 opt rejects as the two records (verdicts about 96.5 %), the rest (`not llc`, passes' rejections opt -passes=verify takes) `valid`/`valid` |
+| the valid corpus | `bin/repr-llvm verify-check LIST WORK` over `.tmp/llvm/lists/input.list` in shards of 2,000 (`split -l`) | the held-out samples (1,087 of 1,088) predict about 0.1-0.5 % false errors, a few hundred of 42,555, mostly AutoUpgrade's rewrites and large CodeGen modules; each one a class of `test/llvm/divergences-verify.edn` or a rule to fix |
+| the mutants | `bin/repr-llvm mutants .tmp/valid.abs OUT 600 800000` then `verify-check` | about 99 % verdicts, 93 % whole stderr (the 269 held out) |
+
+### Proposed
+
+1. **LL4's close** (LLS6). (a) Close LL4 at these numbers: the A/V rejections at 95.8 % of verdicts and 89.3 % of opt's whole
+   stderr, the target directories at 98.3 % of verdicts, the valid samples 300 of 300 and 420 of 420 (1,087 of 1,088 held out); the rest classed after the night's whole-corpus
+   run in `test/llvm/divergences-verify.edn` (`:target-intrinsic`, `:intrinsic-family`, `:md-debug-locs`, `:lexer`, `:use-list-order`,
+   `:printed-address`), ported when a client crop needs them. Cost: the classing, an hour, after the night. (b) One more day for
+   the target intrinsics (AMDGPU, NVPTX, the vector-predication and matrix families) and the rest of the first-message-only list:
+   about 1 day for A/V verdicts near 99 % and whole stderr near 95 %. Recommend (a): the residue is target-specific, and LL2's
+   lowering, not the verifier, is the row's next need.
+2. **The rejection lists as the interim llvm step's parts** (GT9, LLS20). (a) Add `llvm-test-reject.list`, `-reject-av.list` and
+   `-reject-other.list` as parts of the interim `llvm-roundtrip` step's verify check, their records the expected outputs (957 files,
+   about 1.5 minutes at 4 threads, under 2 GiB a process; opt of the pin as the reference, which the step already needs; and
+   `llvm-test-valid-wide.list`, 420, for the false errors). (b) Only
+   the 300 valid modules (as decided after LL1) until LL4 closes. Recommend (a): the rejection tests are what moved; without them a
+   regression of the verifier's rules is seen only by hand.
+3. **The generated tables** (`intr_table.ae`, `di_table.ae`: 0.9 MB and 30 KB, from the pinned tarball with the host's llvm-tblgen
+   and python3). (a) Committed, with the two verbs re-run and diffed in the night's vendoring checks. (b) Generated at use from the
+   tarball (no committed copy; every verify run would need the tarball and llvm-tblgen). Recommend (a).
+
+## Decided (2026-11-05, the user: LL4's proposals)
+
+LL4's three proposals (a): LL4 closed at these numbers, the remainder classed in test/llvm/divergences-verify.edn after the night's run; the rejection lists and the 420 valid modules as parts of the interim llvm gate step; the generated intrinsic and debug-info tables committed, their regeneration diffed in the night's vendoring checks.
+
+## Decided (the user, 2026-11-07: batch 3's proposal 2) and as built
+
+**2 (a)+(b).** The own verdict (LL9a) takes lit's substitution: `bin/repr-llvm`'s `own_verdicts` gives, as a fourth column, the first RUN
+line's `sed 's/A/B/g' %s |` (a plain substitution alone), and `verify-check` reads a module judged by its own verdict as sed's output
+(`WORK/subst/NAME.ll`), as the test's tools read it; a `valid` claim from a RUN line reading the module with `--disable-verify` is no own
+verdict (the test claims no verification). On batch 3 (`55f9900c8`): valid-wide 413 -> 419 of 420 (`CodeGen-RISCV-rvv-{masked-tama,
+sf_vfexp32e,vbrev,vfmv.s.f,vmnor}`, `s/iXLen/i32/g`; `tools-llubi-divrem_ub3`, `s/DIVREM/sdiv/g`), the reader's answers unchanged; the
+one left, `LTO-Resolution-X86-protected-def-dllimport` (`llvm-as --disable-verify`), judged by opt's verdict, not yet recorded: classed
+`disable-verify` in `test/llvm/valid-wide-known.tsv` (`REPR_LLVM_KNOWN`) until the night's `bin/repr-llvm record-opt`, the class removed
+when it passes. The other lists' records unchanged (valid, reject, split, reject-av, reject-other); `check verify-llvmtest` re-recorded
+(792 of 806: 11 fixed by LL4's messages), roundtrip-llvmtest and text-llvmtest 304/304, verify-probes 472/478.

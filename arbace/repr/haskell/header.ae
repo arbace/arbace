@@ -152,15 +152,88 @@
             ;; foldr ($) (xopt_set dflags f) deps: the last dependency applied first
             (reverse deps))))
 
+(def all-warnings
+  "The parser's warnings' flags"
+  #{"tabs" "unrecognised-pragmas" "misplaced-pragmas" "operator-whitespace-ext-conflict"
+    "operator-whitespace" "invalid-haddock" "star-binder" "star-is-type" "prepositive-qualified-module"
+    "view-pattern-signatures" "deprecated-pragmas" "pattern-namespace-specifier"
+    "alternative-layout-rule-transitional" "unicode-bidirectional-format-characters"
+    "unrecognised-warning-flags" "deprecated-flags"})
+
+(def default-warnings
+  "standardWarnings' parser warnings"
+  #{"tabs" "unrecognised-pragmas" "misplaced-pragmas" "operator-whitespace-ext-conflict" "star-binder"
+    "star-is-type" "view-pattern-signatures" "deprecated-pragmas" "alternative-layout-rule-transitional"
+    "unicode-bidirectional-format-characters" "unrecognised-warning-flags" "deprecated-flags"})
+
+(defn warning-on? "Whether the warning flag w is on in the flags' state d" [d w]
+  (contains? (or (:warnings d) default-warnings) w))
+
+(def implied-xflags "impliedXFlags (the messages' hints)" implied)
+
+(defn- group-members
+  "The parser's warnings a warning group (or one flag) names: -Wall, -Wextra, -W and -Wdefault the
+  standard ones, -Wcompat with pattern-namespace-specifier, -Weverything all; nil for a name that is
+  neither"
+  [w]
+  (case w
+    ("all" "extra" "" "default") default-warnings
+    "compat" (conj default-warnings "pattern-namespace-specifier")
+    "everything" all-warnings
+    (when (all-warnings w) #{w})))
+
+(defn- set-warnings [d ws on?]
+  (update d :warnings (fn [cur] ((if on? into (fn [c xs] (apply disj c xs))) (or cur default-warnings) ws))))
+
+(defn- warning-flag-form
+  "A -W flag as [kind names]: kind :on, :off, :error (on and fatal), :warn (not fatal), the
+  warning names it covers (-fwarn-x and -fno-warn-x are -Wx and -Wno-x); nil for another flag"
+  [^String f]
+  (let [f (cond (str/starts-with? f "-fno-warn-") (str "-Wno-" (subs f 10))
+                (str/starts-with? f "-fwarn-") (str "-W" (subs f 7))
+                :else f)]
+    (when (str/starts-with? f "-W")
+      (let [r (subs f 2)
+            fm (fn [kind n] (when-let [ms (group-members n)] [kind ms]))]
+        (cond
+          (str/starts-with? r "no-error=") (fm :warn (subs r 9))
+          (str/starts-with? r "error=") (fm :error (subs r 6))
+          (str/starts-with? r "warn=") (fm :warn (subs r 5))
+          (str/starts-with? r "no-") (fm :off (subs r 3))
+          :else (fm :on r))))))
+
 (defn dyn-flags
   "The dynamic flags' state after flags (strings, in order) from state d ({:language :onoff
-  :safe :haddock}): -X<extension>, -XNo<extension>, -X<language>, -XSafe/-XTrustworthy/-XUnsafe,
-  -cpp, -haddock; the others ignored"
+  :safe :haddock :warnings :fatal ...}): -X<extension>, -XNo<extension>, -X<language>,
+  -XSafe/-XTrustworthy/-XUnsafe, -cpp, -haddock, the warnings' flags (-W, -Wno-, -Werror=, -Wwarn=,
+  -Wno-error=, the groups; -Werror and -Wwarn: every parser warning fatal or not, :fatal the
+  fatal ones), the diagnostics' (-ferror-spans, -fdiagnostics-show-caret, -fdiagnostics-as-json
+  and their negations, -dppr-cols=N); the others ignored"
   ([flags] (dyn-flags {:language nil :onoff '() :safe nil :haddock false} flags))
   ([d flags]
    (reduce
     (fn [d ^String f]
       (cond
+        (= f "-w") (assoc d :warnings #{})
+        (= f "-Werror") (assoc d :fatal all-warnings)
+        (= f "-Wwarn") (assoc d :fatal #{})
+        (= f "-ferror-spans") (assoc d :error-spans true)
+        (= f "-fno-error-spans") (assoc d :error-spans false)
+        (= f "-fdiagnostics-show-caret") (assoc d :show-caret true)
+        (= f "-fno-diagnostics-show-caret") (assoc d :show-caret false)
+        (= f "-fdiagnostics-as-json") (assoc d :json true)
+        (= f "-fno-diagnostics-as-json") (assoc d :json false)
+        (str/starts-with? f "-dppr-cols=") (assoc d :ppr-cols (parse-long (subs f 11)))
+        (str/starts-with? f "-fmax-errors=") (assoc d :max-errors (parse-long (subs f 13)))
+        (str/starts-with? f "-fdiagnostics-color=") (assoc d :color (subs f 20))
+        (str/starts-with? f "-fprint-error-index-links=") (assoc d :index-links (subs f 26))
+        (warning-flag-form f)
+        (let [[kind ws] (warning-flag-form f)]
+          (case kind
+            :on (set-warnings d ws true)
+            :off (set-warnings d ws false)
+            :error (-> d (set-warnings ws true) (update :fatal (fnil into #{}) ws))
+            :warn (update d :fatal (fn [c] (apply disj (or c #{}) ws)))))
         (= f "-cpp") (update d :onoff set-extension "CPP")
         (= f "-haddock") (assoc d :haddock true)
         (= f "-no-haddock") (assoc d :haddock false)
@@ -191,7 +264,7 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; The header pragmas (getOptions; the helper's headerOptions)
 
-(defn- read-hs-string
+(defn read-hs-string
   "A Haskell string literal at the start of s: [value rest] (the escapes the lexer knows), or nil"
   [^String s]
   (when (str/starts-with? s "\"")

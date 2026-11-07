@@ -30,7 +30,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-ocaml-native-check repr-ocaml-menhir \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
   oi-check-ocdump oi-own-verdicts \
-  repr-haskell-native-check repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror
+  repr-haskell-native-check repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -305,6 +305,12 @@ hsi-check-essential: ## GT8's list of Haskell's eval, test/haskell/hsi/essential
 
 hsi-check-aot: ## HE8's AOT: the samples and the synthetic corpus compiled to Go over hsi's machine and run against test/haskell/ref-ghc914.edn and against hsi (bin/hsi check --aot)
 	bin/hsi check --aot
+
+hsi-check-aot-o1: ## HES74 (c): the essential list compiled from GHC's -O1 STG against GHC's -O1 runs, test/haskell/ref-ghc914-O1.edn (bin/hsi check --aot --opt O1)
+	bin/hsi check --aot --opt O1 --corpus samples,synthetic,testsuite-core --only @test/haskell/hsi/essential.txt
+
+hsi-record-ref-o1: ## GHC 9.14.1's -O1 runs of the run corpora into test/haskell/ref-ghc914-O1.edn, the compiled level's reference at -O1 (bin/hsi record-ref --opt O1)
+	bin/hsi record-ref --opt O1
 
 hsi-stubs-build: ## HES60's probe and stub writer (tools/hsdump/probe/StubProbe.hs) built by the host's ghc into .tmp/hsi/stubprobe (bin/hsi stubs-build)
 	bin/hsi stubs-build

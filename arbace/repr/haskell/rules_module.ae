@@ -224,7 +224,7 @@
   (let [[_ l spec] lspec
         nm (unLoc (nth spec 2))
         nameT (fn []
-                (when (var-name-space? nm) (pp/fatal! "Expecting a type constructor" l))
+                (when (var-name-space? nm) (pp/fatal! (lx/msg :PsErrVarForTyCon l nm)))
                 (ie-wrapped-name spec))]
     (case (first subs)
       :abs (if (var-name-space? nm)
@@ -234,7 +234,9 @@
       :list (let [xs (second subs)]
               (con IEThingWith (tuple warning (tuple nil nil nil nil)) (L l (nameT)) 'NoIEWildcard
                    (mapv (fn [[_ ll s]] (L ll (ie-wrapped-name s))) xs) 'Nothing))
-      :all-with (let [xs (second subs)
+      :all-with (let [_ (when-not (lx/get-bit pp/*ps* :PatternSynonymsBit)
+                          (pp/fatal! (lx/msg :PsErrIllegalPatSynExport l)))
+                      xs (second subs)
                       withs (map unLoc xs)
                       pos (first (keep-indexed (fn [i s] (when (= :wildcard (first s)) i)) withs))]
                   (con IEThingWith (tuple warning (tuple nil nil nil nil)) (L l (nameT))
@@ -258,6 +260,7 @@
   (let [span (if (= $1 'Nothing) (comb2 $2 $3) (comb3 $1 $2 $3))]
     (L span (con IEModuleContents (tuple $1 nil) $3))))
 (defrule "export" "maybe_warning_pragma 'pattern' qcon" [ps $1 $2 $3]
+  (lx/add-warning! ps (lx/msg :PsWarnPatternNamespaceSpecifier (gl $2) (boolean (lx/get-bit ps :ExplicitNamespacesBit))))
   (let [span (if (= $1 'Nothing) (comb2 $2 $3) (comb3 $1 $2 $3))]
     (L span (con IEVar $1 (sLL $2 $3 (con IEPattern nil $3)) 'Nothing))))
 (defrule "export" "maybe_warning_pragma 'default' qtycon" [ps $1 $2 $3]
@@ -279,9 +282,15 @@
 (defrule "qcname_ext_w_wildcard" "'..'" [ps $1] (sL1 $1 [:wildcard]))
 
 (defrule "qcname_ext" "qcname" [ps $1] (sL1 $1 [:name nil $1]))
+(defn- require-explicit-namespaces "requireExplicitNamespaces" [kw tok]
+  (when-not (lx/get-bit pp/*ps* :ExplicitNamespacesBit)
+    (pp/add-error! (lx/msg :PsErrIllegalExplicitNamespace (gl tok) kw))))
+
 (defrule "qcname_ext" "'type' oqtycon" [ps $1 $2]
+  (require-explicit-namespaces :type $1)
   (sLL $1 $2 [:name :type (L (getLoc $2) (a/set-rdr-ns (unLoc $2) 'tc))]))
 (defrule "qcname_ext" "'data' qvarcon" [ps $1 $2]
+  (require-explicit-namespaces :data $1)
   (sLL $1 $2 [:name :data $2]))
 
 (defrule "qcname" "qvar" [ps $1] $1)
@@ -318,6 +327,11 @@
 
 (defrule "importdecl" "'import' maybe_src maybe_splice maybe_safe optqualified maybe_pkg modid maybe_splice optqualified maybeas maybeimpspec"
   [ps $1 $2 $3 $4 $5 $6 $7 $8 $9 $10 $11]
+  ;; checkImportDecl
+  (when (and $9 (not (lx/get-bit ps :ImportQualifiedPostBit)))
+    (pp/add-error! (lx/msg :PsErrImportPostQualified (gl $9))))
+  (when (and $5 $9) (pp/add-error! (lx/msg :PsErrImportQualifiedTwice (gl $9))))
+  (when (and $3 $8) (pp/add-error! (lx/msg :PsErrSpliceOrQuoteTwice (second $8))))
   (let [qual (import-qualified-style $5 $9)
         level (import-level-style (first $3) (first $8))
         loc (comb6 $1 $7 (second $8) (when $9 (gl $9)) (second $10) $11)
@@ -341,7 +355,12 @@
 
 ;; maybe_pkg: [ann RawPkgQual]
 (defrule "maybe_pkg" "STRING" [ps $1]
-  (let [[src s] (tv $1)] [nil (con RawPkgQual (con StringLiteral src s 'Nothing))]))
+  (let [[src s] (tv $1)]
+    ;; looksLikePackageName: dash-separated parts of letters and digits, none all digits
+    (when-not (every? #(and (every? (fn [c] (Character/isLetterOrDigit (int c))) %) (not (every? (fn [c] (Character/isDigit (int c))) %)))
+                      (str/split s #"-" -1))
+      (lx/add-error! ps (lx/msg :PsErrInvalidPackageName (a/gl $1) s)))
+    [nil (con RawPkgQual (con StringLiteral src s 'Nothing))]))
 (defrule "maybe_pkg" "" [ps] [nil 'NoRawPkgQual])
 
 ;; optqualified: the token (its location) or nil
@@ -356,7 +375,7 @@
   (let [[b ie] (unLoc $1)]
     (doseq [s (unLoc ie)]
       (when (and (= 'IEThingWith (first (unLoc s))) (seq? (nth (unLoc s) 3)) (= 'IEWildcard (first (nth (unLoc s) 3))))
-        (pp/fatal! "Illegal import form, this syntax can only be used to bundle pattern synonyms" (getLoc s))))
+        (pp/fatal! (lx/msg :PsErrIllegalImportBundleForm (getLoc s)))))
     (L (gl $1) (just (tuple b ie)))))
 (defrule "maybeimpspec" "" [ps] (noLoc 'Nothing))
 
@@ -378,6 +397,7 @@
 (defrule "import" "'module' modid" [ps $1 $2]
   [(sLL $1 $2 (con IEModuleContents (tuple 'Nothing nil) $2))])
 (defrule "import" "'pattern' qcon" [ps $1 $2]
+  (lx/add-warning! ps (lx/msg :PsWarnPatternNamespaceSpecifier (gl $1) (boolean (lx/get-bit ps :ExplicitNamespacesBit))))
   [(sLL $1 $2 (con IEVar 'Nothing (sLL $1 $2 (con IEPattern nil $2)) 'Nothing))])
 
 ;;; ------------------------------------------------------------------------------------------
@@ -473,6 +493,7 @@
   (let [n (inc (long (second $2)))]
     (sLL $1 $3 (if (puns? ps) (built-in :unboxed-tuple-tycon n) (built-in :unboxed-tuple-datacon n)))))
 (defrule "ntgtycon" "'(#' bars '#)'" [ps $1 $2 $3]
+  (pp/require-lt-puns :SumSyntaxType $1 $3)
   (sLL $1 $3 (built-in :sum-tycon (inc (long (second $2))))))
 (defrule "ntgtycon" "'(' '->' ')'" [ps $1 $2 $3] (sLL $1 $3 (built-in :fun-tycon)))
 

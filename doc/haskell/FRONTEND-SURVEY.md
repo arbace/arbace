@@ -937,7 +937,7 @@ choice of strategy). Nothing else of GHC was needed beyond the pinned tarball's 
   extension, a coerced method as a binding of its own except when its dictionary is the instance's parameter,
   GHC's choice of strategy with both `GeneralizedNewtypeDeriving` and `DeriveAnyClass` on, `foldMap`/`null` and the
   tuple cases of `functorLikeTraverse`.
-- **Not covered**: `Generic`, `Data`, `Lift`, `Typeable` (built in), `DerivingVia`, `deriving newtype`/`stock`/`anyclass`
+- **Not covered**: `Generic`, `Data`, `Lift`, `Typeable` (built in), (HF4b: `DerivingVia` and the strategy keywords now, below)
   strategies written in the clause (the choice is GHC's default), `DeriveAnyClass` contexts inferred from default
   signatures, function fields (contravariance) in Functor-like classes, deriving for data families and GADTs,
   existentials, `-XStandaloneDeriving` of a type of another module, strict-field unboxed types; `show` and `read` runs
@@ -965,6 +965,35 @@ choice of strategy). Nothing else of GHC was needed beyond the pinned tarball's 
 ## Decided (2026-11-05, the user: HF4's proposals)
 
 HF4's four as recommended: $tag2con/$maxtag inlined until HF5; a haskell-front step, the samples essential and the nofib list in --full; DerivingVia and the strategy keywords next, Generic/Data/Lift at HF9; Tier S's exit does not cover Generic/Data/Lift.
+
+## As built: HF4b, the strategy keywords and DerivingVia (2026-11-05, branch `haskell-deriving-via`)
+
+Proposal 3 (b) of HF4, decided as recommended. `Deriv.hs`'s choice of strategy (`mkEqnHelp`, `mkNewTypeEqn`, `via`'s
+`mkViaEqn`) read as the specification, as in HF4 (no new GHC text ported: BSD-3, origin in `LICENSE.md` and
+`doc/ARBACE.md` as for HF4); the changes are in `typecheck.ae` and one line of `rename.ae`.
+
+- **Strategies written** in a clause (`deriving stock (..)`, `deriving newtype (..)`, `deriving anyclass (..)`, `deriving (..) via T`)
+  and in a standalone declaration (`deriving stock instance ...`, `deriving via T instance ...`): the request carries
+  `:strat`; `stock` is the generators whatever the extensions, `newtype` the representation type's methods coerced for any
+  class (Show and Read too), `anyclass` an empty instance, `via T` the methods of `C T` coerced, `T` as written (of the
+  class's kind: `deriving Functor via []`), its type variables those of the declaration, the context inferred as for the
+  newtype strategy (`C T` reduced by the instances) or the standalone declaration's own. A standalone `newtype` strategy
+  substitutes the declaration's parameters for the data type's. Without a keyword the choice is HF4's.
+- **What the judge found**: (1) a class of one method and no superclass has a newtype dictionary, GHC's simple optimiser
+  makes the coerced method the dictionary itself (no `$cm` binding), with or without a context; (2) a superclass
+  dictionary that is a dictionary function applied to the instance's own context parameters alone is inlined into the
+  dictionary (no `$cpN` binding; it also changed a hand-written `instance Num a => Monoid (Sum' a)`, which had differed);
+  (3) in a standalone declaration with a strategy GHC binds the implicit type variables at the strategy's span
+  (renamer, `rename-check`'s `hsrn/occs`).
+- **Samples** `T23Strategies` (every keyword in clauses, newtype strategy for Show, stock beside newtype, anyclass on a newtype,
+  standalone with each strategy including `deriving newtype instance Functor F`) and `T24Via` (`Semigroup`/`Monoid` via a
+  `Sum'`, `Show` via `Wrap Int`, via an applicative wrapper with a parameterised type, via a type application, `Functor via []`,
+  a single-method class via `Int`, standalone via with and without a context).
+- **Results**: `bin/repr-haskell typecheck-check`: **24 of 24 equal**, the negative control differs on 13 (the only "GHC only"
+  bindings the enumerations' `$tag2con`/`$maxtag` as before and T04's `ds`); the list `test/haskell/typecheck-check.txt`: 48 of 57 equal, the 9 known, unchanged.
+- **Not covered**: coercibility of the via type is not checked (GHC rejects a via type not representationally equal), nor
+  that a `newtype` strategy's class is derivable; `deriving anyclass` contexts from default signatures; `Generic`, `Data`, `Lift`
+  (HF9); a via type in a data declaration with more type variables than the declaration binds.
 
 ## As built: HF5-HF6's second slice, HF7 (first light), HF3's second slice (2026-11-06, branch `haskell-hf7`)
 

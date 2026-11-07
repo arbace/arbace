@@ -42,17 +42,16 @@
   (cond
     (nil? a) b
     (nil? b) a
-    (not= (nth a 0) (nth b 0)) nil
+    (not (let [fa (nth a 0) fb (nth b 0)] (or (identical? fa fb) (= fa fb)))) nil
     :else
     (let [al1 (long (nth a 1)) ac1 (long (nth a 2)) al2 (long (nth a 3)) ac2 (long (nth a 4))
           bl1 (long (nth b 1)) bc1 (long (nth b 2)) bl2 (long (nth b 3)) bc2 (long (nth b 4))
-          [l1 c1] (if (or (< al1 bl1) (and (= al1 bl1) (<= ac1 bc1))) [al1 ac1] [bl1 bc1])
-          [l2 c2] (if (or (> al2 bl2) (and (= al2 bl2) (>= ac2 bc2))) [al2 ac2] [bl2 bc2])
+          a-first (or (< al1 bl1) (and (= al1 bl1) (<= ac1 bc1)))
+          a-last (or (> al2 bl2) (and (= al2 bl2) (>= ac2 bc2)))
           ab1 (nth a 5) bb1 (nth b 5)
-          [b1 b2] (if (and ab1 bb1)
-                    [(min (long ab1) (long bb1)) (max (long (nth a 6)) (long (nth b 6)))]
-                    [nil nil])]
-      [(nth a 0) l1 c1 l2 c2 b1 b2])))
+          both (and ab1 bb1)]
+      [(nth a 0) (if a-first al1 bl1) (if a-first ac1 bc1) (if a-last al2 bl2) (if a-last ac2 bc2)
+       (when both (min (long ab1) (long bb1))) (when both (max (long (nth a 6)) (long (nth b 6))))])))
 
 (defn token? [x] (and (vector? x) (= 3 (count x)) (keyword? (nth x 0))))
 
@@ -207,3 +206,37 @@
   $1... the values of the right-hand side (a token is [kind value span])"
   [lhs rhs args & body]
   `(.put ^java.util.HashMap actions ~(rule-key lhs rhs) (fn ~args ~@body)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Suggestions (GHC.Utils.Misc's fuzzyLookup, restrictedDamerauLevenshteinDistance)
+
+(defn- rdl-distance
+  "restrictedDamerauLevenshteinDistance: edits, adjacent transpositions counted once"
+  ^long [^String a ^String b]
+  (let [n (count a) m (count b)
+        d (make-array Long/TYPE (inc n) (inc m))]
+    (dotimes [i (inc n)] (aset-long d i 0 i))
+    (dotimes [j (inc m)] (aset-long d 0 j j))
+    (doseq [i (range 1 (inc n)) j (range 1 (inc m))]
+      (let [cost (if (= (.charAt a (dec i)) (.charAt b (dec j))) 0 1)
+            v (min (inc (aget ^longs (aget ^objects d (dec i)) j))
+                   (inc (aget ^longs (aget ^objects d i) (dec j)))
+                   (+ (aget ^longs (aget ^objects d (dec i)) (dec j)) cost))
+            v (if (and (> i 1) (> j 1) (= (.charAt a (dec i)) (.charAt b (- j 2)))
+                       (= (.charAt a (- i 2)) (.charAt b (dec j))))
+                (min v (+ (aget ^longs (aget ^objects d (- i 2)) (- j 2)) cost))
+                v)]
+        (aset-long d i j v)))
+    (aget ^longs (aget ^objects d n) m)))
+
+(defn fuzzy-lookup
+  "fuzzyLookup: the possibilities within (length user + 2) / 4 edits of user, nearest first, at
+  most 3"
+  [^String user possibilities]
+  (let [threshold (quot (+ (count user) 2) 4)]
+    (->> possibilities
+         (keep (fn [^String p] (let [dd (rdl-distance p user)] (when (<= dd threshold) [p [dd (count p) p]]))))
+         (sort-by second #(compare %1 %2))
+         (take 3)
+         (mapv first))))
+

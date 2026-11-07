@@ -1990,8 +1990,8 @@ Equal counts include 7 rejected files whose error form (kind, message, location)
 by both with another message (the 2 templates, 3 testsuite files, 3 `#use` files) are the later step's (below): 6 need
 Menhir's error token ("Syntax error: end expected", "`)` expected"), 2 the lexer's wording; every location agrees. `read --reader native` gives the
 helper path's forms exactly (`:lines` and `:full`, samples and `stdlib/list.ml`); `menhir --check`: 0 differences.
-Speed on stage 0: about 40 KB/s (the stdlib's 1.9 MB in 48 s, the compiler's 4.0 MB in 118 s, peak RSS 1.0 GB), half
-lexing; the helper reads about 2 MB/s.
+Speed on stage 0 as first built: about 40 KB/s (the stdlib's 1.9 MB in 48 s, the compiler's 4.0 MB in 118 s, peak RSS
+1.0 GB), half lexing; the helper reads about 2 MB/s. After OC173: about 80 KB/s ("Speed (OC173)" below).
 
 **Left** (none run here: whole corpora, mutants, the gate)
 
@@ -2000,7 +2000,56 @@ lexing; the helper reads about 2 MB/s.
   the lexer's messages as Format prints them (its `@ ` breaks, `%S` quoting); warnings (comment start, illegal backslash)
   not reported.
 - The whole corpora: the testsuite's 1,862 files, go-whim's whiml (57k lines in one file), the opam set.
-- Speed (OC173).
+- Speed: OC173 (b) done, 2x ("Speed (OC173)" below); (c), the reader compiled with the program at a re-seed, is what is
+  left for a further step.
+
+**Speed (OC173)** (2026-11-04, branch `parsers-speed`; the trees identical, the checks above unchanged)
+
+Where the time went, profiled on stage 0 (`target/seed/amd64/arbace`, the evaluator over the checkout's namespaces). The Go
+CPU profile (`ARBACE_CPUPROFILE=FILE`, `go tool pprof`) shows the evaluator's nodes (`Compiler_Code*`), not Arbace's
+functions, so the phases were timed by experiment: a scratch script (in `.tmp/`, not committed) times each phase in one
+process over the 210 files that are the stdlib's 150 and the first 60 of the compiler sources' list (2.81 MB), and stubs of a
+phase (the actions returning nil, no plans at all) give the rest. The costs the experiments found in the evaluator, which
+decided the changes: a function call 100 to 150 ns; a vector or a `deftype` 100 ns and 100 to 130 ns a field; `aget` on a
+`byte` array 300 ns (an `int`, `long` or object array 30 ns); `aset` of a boxed value into a typed array is 50 to 100 times
+dearer (reflective: coerce the value with `(long ...)` or `(int ...)`), an unhinted `aget` likewise; `case` and `into`
+about 1 µs, a `String` from bytes 0.5 µs; `str` of 13 arguments several µs. Before: lexing 33% of the parse and a token
+30 to 45 µs (a candidate list of closures for every operator, a map lookup and a byte `aget` for each byte, five volatiles
+and an allocated position for each match); the driver 7.6 µs a reduction (3.5 a token), among them the plans' walk
+(`eval-plan`: vectors destructured, three arrays and an environment per plan, each of 126,000 evaluations a
+`camlinternalFormat.ml`, 59,000 of them identity projections) and `$`'s linear search of the item names; the dump (the
+forms, then their text) a third of the total, with the six atoms of every location.
+
+| phase, 210 files, 2.81 MB, one process | before | after |
+|---|---:|---:|
+| lexing alone | 22.8 s | 4.8 s |
+| parse (lexing, LR driver, actions) | 43.7 s | 16.4 s |
+| the dump's forms (`--loc`) | 17.8 s | 10.8 s |
+| the dump's text | 8.6 s | 8.0 s |
+| the four phases | 70.0 s, 40 KB/s | 35.2 s, 80 KB/s |
+| `read --loc` of the 210 files, the process and the writing included | 72 s | 38 s |
+| `read --mode tokens` (the layouts) of the 210 files | 39 s | 25 s |
+| `camlinternalFormat.ml` (126 KB): lexing, parse (lexing included), forms, text | 0.94, 2.45, 1.0, 0.54 s | 0.20, 1.05, 0.50, 0.38 s |
+| `native-check stdlib` (150 files, 1.9 MB) | 48 s | 22.7 s |
+
+What changed, in the hot paths only (`lex.ae`, `parser.ae`, `actions.ae`, `ast.ae`, the `Pos` type moved to
+`docstrings.ae` so that `docstrings` hints it): the lexer's buffer is also an `int` array padded with -1 (no bounds check,
+no byte `aget`), the characters' classes one table of bits (`cls`, macros `digit?`, `identchar?`, `run-end`... inline),
+the state one `long` array (offsets, lines, `bol`) with the positions made when asked for (a fresh object each time, as
+Lexing's: the parser compares them by identity); `token-rule` decides the common tokens on the byte and its class (blanks,
+identifiers, keywords, newlines, integers, punctuation and operators whose longest match is unambiguous: ocamllex's earlier
+rule on a tie, as `token-general`, the old function, which does the rest), comments and strings skip a run of ordinary
+bytes at once and store it as a range, `token` files docstrings without a closure per token; the driver runs on flat `int`
+tables (`action-table` by state and terminal, `goto-table`), the stacks as arrays in a `loop`, no volatiles or closures,
+the plans as typed nodes (`Plan`: an environment reads the stack in place for a plan over its first cells, a plan whose
+action text mentions no position gets none, a plan that only returns one item (`$1`, or an item's name, checked against
+the action itself at load) is that cell, also when inlined), `$` a macro and the item names a map; the dump writes a
+location as one node (`IV`, its text written only when it prints) and counts lengths without allocating; the load of the
+tables is 150 ms shorter. The process start (the namespaces evaluated from source, 2 s) is unchanged. Checks after the
+changes: `menhir --check` 0 differences; `native-check samples stdlib` 8 of 8 and 148 of 150 equal, 2 rejected by both,
+as before; `--layout samples stdlib` 8 and 150 of 150; the 210 files' dumps and layouts byte for byte those of the code
+before. What is left: the dump is a third of the time (270,000 nodes, each built as a list of atoms and measured for the
+width, then written), the actions 5 µs each, the process start; the next step is (c).
 
 **Proposals** (OC170-OC174; options, recommendation first, none decided)
 
@@ -2012,8 +2061,9 @@ lexing; the helper reads about 2 MB/s.
 - **OC172 Error messages.** (built 2026-11-04, "As built: OC172 (a)" and "As built: OC172 (b)") (a) port MenhirLib's simplified strategy and the error printers (`Syntaxerr`, `Lexer`'s
   `prepare_error`, Format's breaks), judged by `native-check` on every rejected file (message and location); (b) the
   strategy only; (c) kinds only, as built. *Recommended: (a)*, next.
-- **OC173 Speed.** (a) as built; (b) the lexer buffer as a type with fields (no map lookups per byte), fewer position
+- **OC173 Speed.** (a) as first built; (b) the lexer buffer as a type with fields (no map lookups per byte), fewer position
   objects; (c) embedded and compiled with the program at a re-seed (OC30). *Recommended: (b)* when a corpus run needs it.
+  *Done: (b), and more than it named (2.0x, "Speed (OC173)" above); (c) remains.*
 - **OC174 The actions' translation.** (a) by hand, keyed by text (as built; the loader refuses tables with an
   untranslated action); (b) by machine from parser.mly through this reader. *Recommended: (a)*; (b) at a new OCaml.
 
@@ -2431,3 +2481,11 @@ helper --cmi`, `native-check`, `dumps`, `bin/oi stdlib-check`, `typer-check`, `j
   about 1 minute) and the other libraries (49 units, a process each, three at once, about 3 minutes). (a) one process for all the
   library units (`stdlib-build`'s loop, a per-unit timeout by a watchdog thread that ends the process on a hang): about an hour,
   1 minute; (b) as it is. *Recommended: (a)* before the night's records if they run more than once.
+
+## Decided (the user, 2026-11-07: batch 3's proposal 4) and as built
+
+**4 (a).** A linked worktree's or the clean clone's OCaml inputs are the main checkout's: `bin/repr-ocaml corpus fetch` and the opam set
+take a missing tarball from the main checkout's `.tmp/repr-ocaml/src` by hard link (`bin/lib/crops/take.bash`, `crop_take`), refuse when it
+has none, and never download there (the main checkout fetches once). Proved under stubs of curl, wget and the C compilers (each exiting
+99): the refusal, then the eleven tarballs taken; `native-check samples stdlib` 8 + 150 files equal to the helper's dumps byte for byte
+(the speed commits re-applied on batch 3 included), `errors-check` 100 of 100; no stub called.

@@ -83,7 +83,7 @@
 (defn- fail-op-few-args
   "failOpFewArgs"
   [lop]
-  (pp/fatal! (str "Operator applied to too few arguments: " (a/rdr-occ (unLoc lop))) (getLoc lop)))
+  (pp/fatal! (lx/msg :PsErrOpFewArgs (getLoc lop) (lx/get-bit pp/*ps* :StarIsTypeBit) (unLoc lop))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Top-level declarations
@@ -232,6 +232,7 @@
 (defrule "ty_fam_inst_eqns" "" [ps] (L nil []))
 
 (defrule "ty_fam_inst_eqn" "'forall' tv_bndrs '.' type '=' ktype" [ps $1 $2 $3 $4 $5 $6]
+  (pp/hint-explicit-forall $1)
   (let [tvbs (pd/from-spec-ty-var-bndrs $2)]
     (pd/mk-ty-fam-inst-eqn (comb2 $1 $6) (pd/mk-hs-outer-explicit (comb2 $1 $3) tvbs) $4 $6)))
 (defrule "ty_fam_inst_eqn" "type '=' ktype" [ps $1 $2 $3]
@@ -304,9 +305,11 @@
 
 ;; (L span [Maybe-context outer-bndrs head])
 (defrule "datafam_inst_hdr" "'forall' tv_bndrs '.' context '=>' type" [ps $1 $2 $3 $4 $5 $6]
+  (pp/hint-explicit-forall $1)
   (let [tvbs (pd/from-spec-ty-var-bndrs $2)]
     (L (comb2 $1 $6) [(just $4) (pd/mk-hs-outer-explicit (comb2 $1 $3) tvbs) $6])))
 (defrule "datafam_inst_hdr" "'forall' tv_bndrs '.' type" [ps $1 $2 $3 $4]
+  (pp/hint-explicit-forall $1)
   (let [tvbs (pd/from-spec-ty-var-bndrs $2)]
     (L (comb2 $1 $4) ['Nothing (pd/mk-hs-outer-explicit (comb2 $1 $3) tvbs) $4])))
 (defrule "datafam_inst_hdr" "context '=>' type" [ps $1 $2 $3] (L (comb2 $1 $3) [(just $1) (pd/mk-hs-outer-implicit) $3]))
@@ -469,7 +472,10 @@
 
 ;; Maybe (EpToken "~")
 (defrule "rule_activation_marker" "PREFIX_TILDE" [ps $1] (just nil))
-(defrule "rule_activation_marker" "VARSYM" [ps $1] (if (= "~" (tv $1)) (just nil) 'Nothing))
+(defrule "rule_activation_marker" "VARSYM" [ps $1]
+  (if (= "~" (tv $1))
+    (just nil)
+    (do (lx/add-error! ps (lx/msg :PsErrInvalidRuleActivationMarker (a/gl $1))) 'Nothing)))
 
 ;; [ActivationAnn activation]
 (defrule "rule_explicit_activation" "'[' INTEGER ']'" [ps $1 $2 $3]
@@ -620,8 +626,10 @@
 (defrule "unpackedness" "'{-# NOUNPACK' '#-}'" [ps $1 $2] (sLL $1 $2 [(tv $1) 'SrcNoUnpack]))
 
 (defrule "forall_telescope" "'forall' tv_bndrs '.'" [ps $1 $2 $3]
+  (pp/hint-explicit-forall $1)
   (let [l (comb2 $1 $3)] (L l (pd/mk-hs-forall-invis-tele l $2))))
 (defrule "forall_telescope" "'forall' tv_bndrs '->'" [ps $1 $2 $3]
+  (pp/hint-explicit-forall $1)
   (let [l (comb2 $1 $3)] (L l (pd/mk-hs-forall-vis-tele l (pd/from-spec-ty-var-bndrs $2)))))
 
 (defrule "ktype" "ctype" [ps $1] $1)
@@ -639,8 +647,8 @@
 
 (defrule "type" "btype" [ps $1] $1)
 (defrule "type" "btype '->' ctype" [ps $1 $2 $3] (sLL $1 $3 (con HsFunTy nx (con HsUnannotated nil) $1 $3)))
-(defrule "type" "btype mult '->' ctype" [ps $1 $2 $3 $4] (sLL $1 $4 (con HsFunTy nx ((unLoc $2) $3) $1 $4)))
-(defrule "type" "btype '->.' ctype" [ps $1 $2 $3] (sLL $1 $3 (con HsFunTy nx (con HsLinearAnn nil) $1 $3)))
+(defrule "type" "btype mult '->' ctype" [ps $1 $2 $3 $4] (pp/hint-linear (gl $2)) (sLL $1 $4 (con HsFunTy nx ((unLoc $2) $3) $1 $4)))
+(defrule "type" "btype '->.' ctype" [ps $1 $2 $3] (pp/hint-linear (gl $2)) (sLL $1 $3 (con HsFunTy nx (con HsLinearAnn nil) $1 $3)))
 
 ;; Located (arrow -> HsMultAnn)
 (defrule "mult" "PREFIX_PERCENT atype" [ps $1 $2] (sLL $1 $2 (fn [arr] (pd/mk-mult-ann $1 $2 arr))))
@@ -653,8 +661,19 @@
 
 ;; forall b. DisambTD b => PV (LocatedA b): fns of the mode (:ty, :dcb)
 (defrule "infixtype" "ftype" [ps $1] $1)
+(defn- looks-like-mult?
+  "looksLikeMult: ty1 %ty2, a space before the % and none after"
+  [ty1 lop ty2]
+  (let [s1 (getLoc ty1) so (getLoc lop) s2 (getLoc ty2)]
+    (boolean (and (a/rdr-unqual? (unLoc lop)) (= "%" (a/rdr-occ (unLoc lop))) s1 so s2 (nth s1 6) (nth so 5) (nth s2 5)
+                  (not= (nth s1 6) (nth so 5)) (= (nth so 6) (nth s2 5))))))
+
 (defrule "infixtype" "ftype tyop infixtype" [ps $1 $2 $3]
-  (let [[op prom] $2] (fn [mode] (pd/mk-hs-op-ty-pv mode prom ($1 :ty) op ($3 :ty)))))
+  (let [[op prom] $2]
+    (fn [mode]
+      (let [t1 ($1 :ty) t3 ($3 :ty)]
+        (when (looks-like-mult? t1 op t3) (pp/hint-linear (getLoc op)))
+        (pd/mk-hs-op-ty-pv mode prom t1 op t3)))))
 (defrule "infixtype" "unpackedness infixtype" [ps $1 $2] (fn [mode] (pd/mk-unpackedness-pv mode $1 ($2 mode))))
 
 (defrule "ftype" "atype" [ps $1] (fn [mode] (pd/mk-hs-app-ty-head-pv mode $1)))
@@ -674,7 +693,7 @@
 (defrule "atype" "ntgtycon" [ps $1] (sL1 $1 (con HsTyVar nil 'NotPromoted $1)))
 (defrule "atype" "tyvar" [ps $1] (sL1 $1 (con HsTyVar nil 'NotPromoted $1)))
 (defrule "atype" "'_'" [ps $1] (sL1 $1 (pd/mk-anon-wild-card-ty)))
-(defrule "atype" "'*'" [ps $1] (sL1 $1 (con HsStarTy nx (= :unicode (tv $1)))))
+(defrule "atype" "'*'" [ps $1] (pp/warn-star-is-type $1) (sL1 $1 (con HsStarTy nx (= :unicode (tv $1)))))
 (defrule "atype" "PREFIX_TILDE atype" [ps $1 $2] (sLL $1 $2 (pd/mk-bang-ty 'SrcLazy $2)))
 (defrule "atype" "PREFIX_BANG atype" [ps $1 $2] (sLL $1 $2 (pd/mk-bang-ty 'SrcStrict $2)))
 (defrule "atype" "'{' fielddecls '}'" [ps $1 $2 $3]
@@ -682,18 +701,20 @@
 (defrule "atype" "'(' ')'" [ps $1 $2] (sLL $1 $2 (pd/mk-tuple-syntax-ty ps [])))
 (defrule "atype" "'(' ktype ',' comma_types1 ')'" [ps $1 $2 $3 $4 $5]
   (sLL $1 $5 (pd/mk-tuple-syntax-ty ps (vcons $2 $4))))
-(defrule "atype" "'(#' '#)'" [ps $1 $2] (sLL $1 $2 (con HsTupleTy nil 'HsUnboxedTuple [])))
-(defrule "atype" "'(#' comma_types1 '#)'" [ps $1 $2 $3] (sLL $1 $3 (con HsTupleTy nil 'HsUnboxedTuple (vec $2))))
-(defrule "atype" "'(#' bar_types2 '#)'" [ps $1 $2 $3] (sLL $1 $3 (con HsSumTy nil (vec $2))))
+(defrule "atype" "'(#' '#)'" [ps $1 $2] (pp/require-lt-puns :TupleSyntaxType $1 $2) (sLL $1 $2 (con HsTupleTy nil 'HsUnboxedTuple [])))
+(defrule "atype" "'(#' comma_types1 '#)'" [ps $1 $2 $3] (pp/require-lt-puns :TupleSyntaxType $1 $3) (sLL $1 $3 (con HsTupleTy nil 'HsUnboxedTuple (vec $2))))
+(defrule "atype" "'(#' bar_types2 '#)'" [ps $1 $2 $3] (pp/require-lt-puns :SumSyntaxType $1 $3) (sLL $1 $3 (con HsSumTy nil (vec $2))))
 (defrule "atype" "'[' ktype ']'" [ps $1 $2 $3] (sLL $1 $3 (pd/mk-list-syntax-ty1 ps $2)))
 (defrule "atype" "'(' ktype ')'" [ps $1 $2 $3] (sLL $1 $3 (con HsParTy (tuple nil nil) $2)))
-(defrule "atype" "SIMPLEQUOTE '(' ')'" [ps $1 $2 $3] (sLL $1 $3 (con HsExplicitTupleTy (tuple nil nil nil) 'IsPromoted [])))
+(defrule "atype" "SIMPLEQUOTE '(' ')'" [ps $1 $2 $3] (pp/require-lt-puns :QuoteDisambiguation $1 $3) (sLL $1 $3 (con HsExplicitTupleTy (tuple nil nil nil) 'IsPromoted [])))
 (defrule "atype" "SIMPLEQUOTE gen_qcon" [ps $1 $2] (sLL $1 $2 (con HsTyVar nil 'IsPromoted $2)))
-(defrule "atype" "SIMPLEQUOTE sysdcon_nolist" [ps $1 $2] (sLL $1 $2 (con HsTyVar nil 'IsPromoted (L (getLoc $2) (unLoc $2)))))
+(defrule "atype" "SIMPLEQUOTE sysdcon_nolist" [ps $1 $2] (pp/require-lt-puns :QuoteDisambiguation $1 $2) (sLL $1 $2 (con HsTyVar nil 'IsPromoted (L (getLoc $2) (unLoc $2)))))
 (defrule "atype" "SIMPLEQUOTE '(' ktype ',' comma_types1 ')'" [ps $1 $2 $3 $4 $5 $6]
+  (pp/require-lt-puns :QuoteDisambiguation $1 $6)
   (sLL $1 $6 (con HsExplicitTupleTy (tuple nil nil nil) 'IsPromoted (vcons $3 $5))))
 (defrule "atype" "'[' ']'" [ps $1 $2] (let [l (comb2 $1 $2)] (L l (pd/mk-list-syntax-ty0 ps l))))
 (defrule "atype" "SIMPLEQUOTE '[' comma_types0 ']'" [ps $1 $2 $3 $4]
+  (pp/require-lt-puns :QuoteDisambiguation $1 $4)
   (sLL $1 $4 (con HsExplicitListTy (tuple nil nil nil) 'IsPromoted (vec $3))))
 (defrule "atype" "SIMPLEQUOTE var" [ps $1 $2] (sLL $1 $2 (con HsTyVar nil 'IsPromoted $2)))
 (defrule "atype" "quasiquote" [ps $1] (L (getLoc $1) (con HsSpliceTy nx (unLoc $1))))
@@ -761,8 +782,12 @@
 ;;; Data type declarations
 
 ;; (L span [where-token cons]), in order
-(defrule "gadt_constrlist" "'where' '{' gadt_constrs '}'" [ps $1 $2 $3 $4] (L (comb2 $1 $4) [$1 (unLoc $3)]))
-(defrule "gadt_constrlist" "'where' vocurly gadt_constrs close" [ps $1 $2 $3 $4] (L (comb2 $1 $3) [$1 (unLoc $3)]))
+(defn- check-empty-gadts "checkEmptyGADTs: data T where without GADTSyntax" [l]
+  (when (and (empty? (second (unLoc l))) (not (lx/get-bit pp/*ps* :GadtSyntaxBit)))
+    (pp/add-error! (lx/msg :PsErrIllegalWhereInDataDecl (getLoc l))))
+  l)
+(defrule "gadt_constrlist" "'where' '{' gadt_constrs '}'" [ps $1 $2 $3 $4] (check-empty-gadts (L (comb2 $1 $4) [$1 (unLoc $3)])))
+(defrule "gadt_constrlist" "'where' vocurly gadt_constrs close" [ps $1 $2 $3 $4] (check-empty-gadts (L (comb2 $1 $3) [$1 (unLoc $3)])))
 (defrule "gadt_constrlist" "" [ps] (L nil [nil []]))
 
 (defrule "gadt_constrs" "gadt_constr ';' gadt_constrs" [ps $1 $2 $3] (L (comb2 $1 $3) (vcons $1 (unLoc $3))))
