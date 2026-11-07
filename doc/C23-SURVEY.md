@@ -4528,7 +4528,7 @@ C9.2's heavy runs (the table above), on main from the essential gate's pass at `
 | (merge) | `seed-c9` and `rec-class` (with `parse-class`) | | main `b2a4911f` |
 | 11 | `bin/seed --build`, `bin/ci judge-test`, `bin/reap`, `bin/ci dg --essential` | 22:11:52-22:19:08 | stage 0 from the new seed (2m19s), reap 16 of 16 with 0 problems, dg ok; judge-test failed (3 assertions, two host-dependent tests: below) |
 | 11a | `CI_AOT_NODES=1 CI_JOBS=4 bin/ci check --aot` | 22:19:08-22:59:38, 40m30s | failed: two regressions (one file in two corpora) and one improvement (below) |
-| 12 | `bin/gate --full` (keyed) | from 22:59:38 | `c-c2j` failed (02:16, below); the night's script stopped at 05:21 (the user, 2026-11-03: C's full steps the next night), the audit of C's steps not run; the `--full` stopped by a watcher at its first heavy C step; TODO(tag): when, and the other steps' outcome |
+| 12 | `bin/gate --full` (keyed) | from 22:59:38 | `c-c2j` failed (02:16, below); the night's script stopped at 05:21 (the user, 2026-11-03: C's full steps the next night), the audit of C's steps not run; the `--full` stopped by hand at 05:49:22 in goi's AOT check, before any C full step (the watcher `.tmp/window/stop-before-c.sh` never fired): `c-c2j` failed at 02:16 (fixed, `c14a5eca`), the passes of the steps it ran kept in the store at their keys |
 
 **The records classified (steps 7a2; `14873a86`, `255c9d54`, merged `b2a4911f`).** The tree check's 276 files of no class: none a regression. Each parses as
 cc's dump at C3 (`c65620c8`, the known file's last record) and as the run's at `fe50e1c7` (2026-11-01): the differences are C7's decided parser changes (CS131 (c),
@@ -4583,7 +4583,10 @@ the keyed `bin/gate --full` (C's seven full checks among its steps) and `bin/see
 superseding it: the tag waits for GT8 (doc/GATE-SURVEY.md) and the backlog (doc/AGENDA.md), and stands on an audited clean
 run of the four crops over GT8's compressed corpora, within GT8's budget: row 12 again, compressed. The keyed `--full` of
 the night of 2026-11-02 was stopped by hand in goi's AOT check (its non-C steps' passes stay in the store at their keys).
-TODO(tag): the clean run's record.
+The clean run's record (2026-11-07): `test/gate/clean-arbace-reaps-4-crops-v1.edn`, passed at `99873f98`, 234 steps with C's
+seven full checks among them, a part a corpus, each passed clean under the audit; the first run's C failures, `c-check.compcert.sub`'s
+two timeouts under strace (a 30 s budget for `qsort.c` and `sha1.c`, `test/c/check-budget.edn`) and `c-tokens.gcc-embed`
+(`embed-11.c`'s `absolute-name`, deferred), passed in the reruns (doc/FULL-SUPPORT-SURVEY.md, REAP v3's caveats).
 
 ## As built: ci's prebuilt runtime (2026-11-03)
 

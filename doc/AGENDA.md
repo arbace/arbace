@@ -55,17 +55,20 @@ The current state of the work. This file is rewritten as things change. For the 
 - **`arbace-reaps-3-crops-v1`** (2026-10-27) and **`-v2`** (2026-11-01, at `c4f85ace`): REAP for Clojure, Java 26 and
   Go 1.27.1, 12 of 12 cells; v2 with the gate made efficient and run clean in a fresh clone
   (`test/gate/clean-arbace-reaps-3-crops-v2.edn`).
-- **`arbace-reaps-4-crops-v1`** (not yet tagged: it waits for its clean run, the user, 2026-11-03; TODO(tag): the date and
-  the commit): C the fourth row (C1-C9, [C23-SURVEY.md](C23-SURVEY.md)): read 5,201 / 232 / 50, eval 2,111 / 124 / 33,
-  AOT 2,120 / 115 / 33, print 4,768 / 6 / 82 (pass / by design / deferred); 16 of 16 cells, none failing ("REAP v3's
+- **`arbace-reaps-4-crops-v1`** (2026-11-07, on the tag docs' commit above the record's `99873f98`): C the fourth row
+  (C1-C9, [C23-SURVEY.md](C23-SURVEY.md)): read 5,201 / 231 / 51, eval 2,111 / 124 / 33,
+  AOT 2,120 / 115 / 33, print 4,768 / 5 / 78 (pass / by design / deferred); 16 of 16 cells, none failing ("REAP v3's
   divergences"). The merge window after v2 (the gate's branches and audits, the crops, JN10), C8, C9 and its re-seed window
   (C9.2, the seed `1fe1063f`), GT8 and the backlog, the re-seed of 2026-11-05 (seed `d5548e72`, verified). Its record: an
-  audited clean run of the four crops over GT8's compressed corpora, within budget (TODO(tag): its result).
+  audited clean run of the four crops over GT8's compressed corpora (`test/gate/clean-arbace-reaps-4-crops-v1.edn`):
+  passed, 234 steps clean, every audited one ok, over three runs in two nights (77,700 s: the first run 39,146 s, then two
+  `--only` reruns), the budget's two nights at most.
 
-## Now: the tag `arbace-reaps-4-crops-v1` (as of 2026-11-05, morning)
+## Now: the tag `arbace-reaps-4-crops-v1` (as of 2026-11-07, morning)
 
-The tag waits for GT8 and the backlog (the user, 2026-11-03), and stands on an audited clean run of the four crops over
-GT8's compressed corpora within budget. The backlog is merged; GT8's tooling is on main (dedup, coverage subsets for C,
+The clean run's record passed (2026-11-07 04:24 UTC, at `99873f98`); the tag is the user's, by hand, on the tag docs'
+commit. Below, how it got there. The tag waited for GT8 and the backlog (the user, 2026-11-03), and stands on an audited
+clean run of the four crops over GT8's compressed corpora within budget. The backlog is merged; GT8's tooling is on main (dedup, coverage subsets for C,
 goi and Java's interpreted level, the nightly rotation, the tiers, `bin/gate --costs`).
 
 The budgets (the user, 2026-11-04, GTS224-GTS226, GATE-SURVEY.md "Decided (2026-11-04)"):
@@ -89,7 +92,8 @@ The nights to the tag:
    8dfd5840; the crops' Go forms out of `arbace_runtime_key` and `arbace_javac_key`; the PATH_FIRST trio removed after)
    passed every step: seed `d5548e72`, verify `d503777b`, main at d86cb874a. The keyed `--full --concurrent` runs from
    03:14 to at most 16:00.
-3. **Night 6 (and 7 if needed):** `next` gated and fast-forwarded first (with `java-compiled-subset`, GTS228, and
+3. **Night 5's clean run (2026-11-05/06) and night 6's two `--only` reruns (2026-11-06/07): passed** (REAP v3's caveats,
+   FULL-SUPPORT-SURVEY.md). The plan was: `next` gated and fast-forwarded first (with `java-compiled-subset`, GTS228, and
    `audit-race`, the reducer race of night 5's first gate); GTS229 (C's reads timed) by day from the keyed `--full`'s
    logs; then the clean run of the four crops, `.tmp/night5/clean.sh`, estimated about 12 hours, over one night's plan
    (the options to fit it: `.tmp/night5/clean-fit.md`). Then the tag, by hand, on the record.

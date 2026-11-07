@@ -406,3 +406,69 @@ Each branch's doc records it.
   converter then overflowed Go's 1 GB stack, a fatal error that ended the corpus's run. A nesting bound in the parser
   (4,000) now fails such a file the old way. Until the next re-seed, stage 0 evaluates the changed parser from the
   checkout: torture-compile's parse check took 178 s, against 132 s compiled.
+
+## 2026-11-07: the clean run's record; the tag `arbace-reaps-4-crops-v1`
+
+The record `test/gate/clean-arbace-reaps-4-crops-v1.edn` passed at 04:24 UTC at `99873f98`: 234 steps, each passed clean in
+a fresh clone with empty caches, every audited step's audit ok (`pins`, `makefile` and `seed` unaudited, as in v2's
+record). Three runs, 77,700 s in all, over two nights (GTS225: one night of about 10 hours planned, two at most; the night shift
+is nominally 12 hours, 19:00 to 07:00 UTC; the first run, 10 h 52 min, fit one night), serial,
+under the big lock held once (`GATE_HEAVY_CMD=env`), the rotation not required (`GATE_CLEAN_ROTATION=0`):
+
+| run | commit | selection | when (UTC) | wall | steps passed | failed |
+|---|---|---|---|---:|---:|---|
+| 0 | `59f546ad` | all | 2026-11-05 18:51 - 11-06 05:43 | 39,146 s | 58 | goi-aot, c-check.compcert.sub, c-tokens.gcc-embed, gate-tests, and steps whose checks passed but whose audits missed |
+| 1 | `8d0bb009` | `failed,changed` | 2026-11-06 16:54 - 21:11 | 15,459 s | 15 | the Java levels' `.sub` steps (no forms cache), goi-aot, c-check.compcert.sub, gate-tests' audit |
+| 2 | `99873f98` | `failed,changed,java-read` | 2026-11-06 21:59 - 11-07 04:24 | 23,095 s | 161 | none |
+
+(Each start is the run's end less its wall time; night 5's script `.tmp/night5/clean.sh` started at 18:12 with its
+preconditions, night 6's rerun at 16:53, when the night shift began early.) What the runs found, and the fixes
+between them, all on `next`, gated by the essential gate and fast-forwarded to `main` before the next run:
+
+- **The audit's declarations** (`af997b9c`, `b06872f7`, `d50ead9f`, 2026-11-05/06): the JDK the steps run lies in
+  jdk26u's build tree, the host `:jdk`'s, and its parent directories need no host; a rotated check (`NAME.PART.sub`) is
+  audited against its part's declaration; a PATH search's misses read no tree; the steps that read the crops' trees or
+  the JDK declare them. Each fix was replayed on the run's own traces (`gate.audit` on the step's `.paths` and
+  `.loaded`), with the negative control failing.
+- **`c-tokens.gcc-embed`** (`ac67a54c`, `8d0bb009`): `c-c++-common/cpp/embed-11.c`'s `:gcc` digest held the checkout's
+  path (the file `#embed`s its own name); known as the deferred `absolute-name` until the digest writes `${srcdir}`
+  after the tag (`.tmp/tag-v2/ppcheck-srcdir.patch`). REAP's C read 5,201 / 231 / 51.
+- **`gate-tests`** (`9c2a9f29`): it declares `:jdk` (frozen-test sources `bin/lib/java26.bash`, which runs the JDK's
+  `java -version`) and `LICENSE.md`, `gate-reads-test`'s canary, which `gate-tests-test`'s fake-strace cases read under
+  the clean run's audit; `gate-reads-test` drops the canary from the inputs it checks.
+- **goi's AOT check under strace** (`99873f98`): strace 7.2 took a thread stopped by Go's preemption signal (SIGURG) for a
+  group stop and aborted (`ptrace(PTRACE_LISTEN): I/O error`), three times in each run (the audit retries three
+  times); reproduced in the clone. Under the audit (`GATE_AUDITED`) the step runs with `GODEBUG=asyncpreemptoff=1`: the
+  whole check passed traced, 1,691 of 1,838, the rest classed. Alternatives: a newer strace (a package: not installed);
+  running goi-aot unaudited (rejected: the record audits every step).
+- **compcert's `qsort.c` and `sha1.c`** (`99873f98`): 8.6 s alone and 9.8 s under strace against ci check's 10 s budget,
+  timeouts under the audit in both runs of night 5; `test/c/check-budget.edn` gives them 30 s (`perlin.c` had it).
+- **The Java levels in run 1**: `--only failed,changed` skipped `java-read`, so the clone's forms cache
+  (`GATE_JAVA_FORMS`, which no step declares as an output) was empty and every `.sub` step failed at once ("forms not in
+  the read's cache"); run 2 names `java-read` (a step's name selects its parts), and all Java levels passed audited
+  (`java-compiled-full.jdk-run.sub` 5,026 s).
+
+The kept clones' directories but their logs were removed at 01:46 when the disk reached 88% (`59f546ad`, `8d0bb009`:
+their `.logs`, which the record cites, kept); run 2's clone is kept. `bin/gate --rotation-status` at the tag lists nine
+parts incomplete (the Java compiled subsets not yet run with their new lists, `java-interp.jdk-run`'s failed slices of
+2026-11-05, compcert's two timeouts): the next whole night completes them.
+
+REAP v3's tables refreshed from `bin/reap` of 2026-11-07 (`doc/v3-record/refresh.sh`): 16 of 16 cells checked, 0
+problems; since the tables of 2026-11-05, Java eval 1,847 / 254 / 1,221 and AOT 1,920 / 160 / 1,242 (t05445
+`memory-limit`'s, d0d9ba0e), C read 5,201 / 231 / 51, print 4,768 / 5 / 78 (the parser's nesting bound, 808d08d6, and
+the round trip's five stale known entries removed). The `TODO(tag)`s of README, CLAUDE.md, AGENDA, C23-SURVEY and
+FULL-SUPPORT-SURVEY filled.
+
+**Correction to the entry "2026-11-03: the night's three fixes"**: the keyed `--full` of that night was not stopped by
+the watcher `.tmp/window/stop-before-c.sh` (it never fired), but by hand at 05:49:22 in goi's AOT check, before any of
+C's full steps (`.tmp/window/progress.log`; the user: GT8 and the backlog before the tag); `c-c2j`, which failed at 02:16,
+was fixed by `c14a5eca`; the passes of the steps it ran stayed in the store at their keys. That entry's `TODO(tag)` is
+answered here.
+
+The tag is the user's, by hand, on this commit (the record's commit `99873f98` with the tag's docs and the record above
+it). Of the checks, only `gate-tests`' key changes (it reads CLAUDE.md and the clean records): the essential gate passed
+on this commit before main took it. That gate's `gate-tests` first failed: with the record committed, `gate.lanes`
+mem-check (lanes-test) found four declarations under the clean run's peaks, `suite-aot` 27 GiB (32.1 recorded),
+`c-parse.torture-compile` 6 (12.6), `c-parse.mutants` 6 (8.0) and `c-roundtrip.torture-compile` 9 (15.5); they are 32,
+12, 8 and 14 in `test/gate/steps.edn` now. `:mem-gib` is in no key (`test/gate/plan.ae`'s unkeyed fields), so no pass
+moved.

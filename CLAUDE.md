@@ -39,7 +39,7 @@ Direction:
   every non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences"), with the efficient gate
   (doc/GATE-SURVEY.md, GT1-GT7), its clean run in a fresh clone recorded in
   `test/gate/clean-arbace-reaps-3-crops-v2.edn`. Then REAP for four crops, C joining (doc/C23-SURVEY.md, C8, C9), a
-  milestone on main (tag `arbace-reaps-4-crops-v1`, TODO(tag): the date): the matrix's 16 of 16 cells checked, none
+  milestone on main (tag `arbace-reaps-4-crops-v1`, 2026-11-07): the matrix's 16 of 16 cells checked, none
   failing, every non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v3's divergences"), on the seed that
   embeds C (`d5548e72`, verified 2026-11-05) and an audited clean run of the four crops over GT8's compressed corpora
   within its budget (doc/GATE-SURVEY.md, GT8), recorded in `test/gate/clean-arbace-reaps-4-crops-v1.edn`. Parked (the user,
@@ -526,7 +526,7 @@ Prior art:
   `arbace-for-java-26`, from then to 2026-10-11 on `arbace-for-golang`, from then to 2026-10-15 at
   the tag `arbace-inside-itself-v1`, from then to 2026-10-20 at the tag
   `arbace-interprets-go1.27.1-v1`, from then to 2026-10-27 at the tag `arbace-reaps-3-crops-v1`, from then to
-  2026-11-01 at the tag `arbace-reaps-3-crops-v2`, from then to the tag `arbace-reaps-4-crops-v1` (TODO(tag): its date), and
+  2026-11-01 at the tag `arbace-reaps-3-crops-v2`, from then to 2026-11-07 at the tag `arbace-reaps-4-crops-v1`, and
   all of it in git.
 - When vendoring code from prior art, record its origin (repo, path, revision) in the journal and
   next to the vendored code (for `arbace/`, which holds only `.ae` files: `doc/ARBACE.md`), and
