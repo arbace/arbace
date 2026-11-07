@@ -212,3 +212,49 @@ completeness or maturity. On `mac/batch1` C scores 20.0% (every C step on `:gcc`
   `:hosts` loses `:gcc`.
 - **Rekeys** (embedded, gate_key): `arbace/repr/c/host.ae`, `pp.ae`, `ppcheck.ae`, `rtcheck.ae`, `c23check.ae`; stage 0
   evaluates them from the checkout (repr namespaces are tool sources).
+
+## 2026-11-07: F10a, java.nio's selectors and socket channels over jrt's natives at sun.nio.ch's layer (branch java-complete)
+
+Branch `java-complete` from `mac/batch1` 0edacad62, the main session's brief: raise Java's completeness (72.9% strict, 80.4%
+without by design on batch 1) by the triage's next ranks not yet built. F16, F8, F7 and F11 are JC9b's (merged in batch 1,
+write-ahead), F12, F6, F13 and F19 JC9c's, F3 JC9's; the next rank was F10 (selectors and channels, rank 13), built here as
+F10a: selectors, socket and server socket channels, pipes and the sockets' adaptors (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+"As built: F10a (write-ahead)").
+
+- **First, the main session's check of JC9's slices together**: JC9b's finding (F5's `Logger`/`LogRecord` calling
+  `ResourceBundle.getBundle(String, Locale, ClassLoader)`, absent from jrt's overlay) is fixed on batch 1 (`b8a1951ce`). JC9b's
+  joint javac check (`.tmp/keep/java-jc9b/jc9b/all9/run.sh`, which named the removed java-jc9b worktree) is now
+  `.tmp/all9-run.sh CHECKOUT` in this worktree's scratch (default the `next` worktree; writes only `CHECKOUT/.tmp/jc9-check/`;
+  exit 1 on a javac error or a missing file; KIND linux handled): batch 1's 2,215 files 0 errors; its negative control (the
+  overload renamed) fails with F5's two errors.
+- **The design**: jdk26u's channel Java unchanged (`SocketChannelImpl`, `ServerSocketChannelImpl`, `SelectorImpl`,
+  `SelectionKeyImpl`, `EPollSelectorImpl`, the pipes, the adaptors: jdk26u `baf63fb`), and jrt's own native layer below it, as
+  overlays keeping jdk26u's classes and signatures: `Net` (jdk26u's file, its natives given bodies by `.tmp/f10/gennet.py`),
+  `IOUtil`, `NativeDispatcher`, `SocketDispatcher`, `UnixDispatcher`, `NativeThread`, `Poller`, `Util`, `UnixDomainSockets`,
+  `EPoll`, `EventFD`, `FileDispatcherImpl`, `PollSelectorImpl` (derived, `genpoll.py`), `SocketOptionRegistry` (derived from the
+  template, `genopts.py`, equal by its 17 options to the build's gensrc), all over `jdk.internal.jrt.HostChannels`' 31 natives,
+  Go ports of jdk26u's `src/java.base/unix/native/libnio/ch/{Net,IOUtil,SocketDispatcher,UnixDispatcher,PollSelectorImpl}.c`,
+  `src/java.base/linux/native/libnio/ch/{EPoll,EventFD}.c` and libnet's `NET_SetSockOpt`/`NET_GetSockOpt`/`NET_Bind`
+  (`go/arbace/jrt/channels_linux.ae`; `channels_other.ae` off Linux). Alternatives considered: jrt's own channel classes over
+  Go's `net` (as `HostSocketImpl` and F7's `FileChannelImpl`): rejected, the channels' state machines and close protocol are
+  jdk26u's own code worth keeping; the poll selector as Linux's default (AIX's choice, one class fewer): rejected for jdk26u's
+  Linux default, epoll, whose EPollSelectorImpl stays unchanged once EPoll's event array is a token over int arrays; the
+  kernel's blocking descriptors: rejected, a thread blocked in the kernel cannot be woken by the JDK's dup2-and-signal close in
+  Go, so every descriptor is non-blocking and a blocking one waits in Go's poller, which `preClose` wakes.
+- **New**: KIND `linux` in `print-sources` and its consumers (`bin/jrt-convert`'s tree, origins and summary line, the originals'
+  check, the round trip's origins); j2g's VarHandle table takes `ConstantBootstraps.fieldVarHandle`; the rename
+  `sun/nio/ch/Util` → `Ch_Util`; variants of `SelectorProvider$Holder`, `SocketChannelImpl`, `PollSelectorProvider`,
+  `EPollSelectorProvider`.
+- **Checked by day** (light): the joint javac check of the 2,277 files 0 errors; `bin/repr-java read-jdk --check` of the 62
+  new files 0 failed, `--no-javac` 64 native and identical; the variants applied and parsed; Go names (one collision, renamed);
+  `go build`/`go vet` of `arbace/jrt` for amd64 and arm64 and `go test` on amd64, three new tests passing with every other.
+  Not run: the conversion, j2g, the executable and the tests (the night's: the section's commands).
+- **Expected**: 49 / 49 tests are F10a's with F7, F11 and F13 built; about 34 / 34 to pass, Java eval and AOT about +1.0
+  point each. Java after tonight's records, all the write-ahead slices' expected yields together: about 80.6% strict, 89%
+  without by design.
+- **Findings**: `bin/jrt build` fails on batch 1 at `arbace/expat` (a crop's package in bin/jrt's module); its print needs
+  `GOMEMLIMIT` under the light rules (3.9 GB without, 1.45 GB with 1400 MiB).
+- **Proposed** (the triage's "Proposed (F10a)"): JCS162 Thread's blocker (interrupts), JCS163 F10b (DatagramChannel, then the
+  asynchronous channels), JCS164 UNIX domain sockets with F9, JCS165 the joint javac check as a gate step, JCS166 the
+  derivations committed as Arbace with a check, JCS167 serialization out of by design (the strict mean cannot pass 90% while
+  10% of eval and AOT are by design; serialization is 168 / 117 of it).
