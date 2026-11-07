@@ -722,3 +722,26 @@ then becomes `native` (one line of bin/oi, with its header and the Makefile's `o
 without an `.mli`); `bin/oi run` is `run-native`. The switch was made before the night's whole-corpus record that TY24 (a) names, on
 a branch: the record (`bin/oi check --record`) must be made before the branch reaches `next`. The judgment and its own verdicts:
 doc/ocaml/OCAML-SURVEY.md, "As built: the crop's independence".
+
+## 24. As built: the typer line's merge (2026-11-07, branch `batch2-ocaml`)
+
+- **A unit's signature as data, a native `.cmi` (OC184 (a)).** `arbace.repr.ocaml.typer.cmi` writes a unit's typed signature
+  (Typemod's items with their `Types` graph: type nodes, row extensions and field kinds are atoms, shared and cyclic) as forms,
+  `NAME.cmi.ae` (`(ocaml/cmi {:unit :ocaml :nodes [...] :sig ...})`: every atom numbered once in `:nodes`, a reference
+  `{:arbace.cmi/node N}` where it is reached; a declaration's infinite `:variance (repeat :inv)` as `{:arbace.cmi/repeat :inv}`),
+  and reads it back as cmi_format.ml's `read_cmi` does: the atoms made, then filled, the unit's local identifiers stamped
+  afresh in the units' range (Ident's stamps are per process), the type nodes given fresh ids. `lambda --cmi-out FILE`
+  writes it; `Env.unit-file` takes an `--include` directory's `NAME.mli`, else its `NAME.cmi.ae`; `find-unit` reads either.
+  The suite's native path writes `--cmi-out` for a unit without an `.mli` of its own instead of Printtyp's text (`--sig-out`,
+  kept as `OI_SUITE_SIG_TEXT=1`).
+- **`with type t = t` and `with type t := t` (Typedecl.transl_with_constraint).** The constraint's declaration is translated in
+  the outer environment, non-recursively (`transl-type-decls ... :Nonrecursive`): before, the right-hand `t` named the
+  constrained type itself, a cyclic abbreviation, and the typer did not end (compiler-libs' `Identifiable.Thing`,
+  `include Hashtbl.HashedType with type t := t`; `Numbers` through it).
+- **`sigs` (OC183 (a))**: each file's signature, Printtyp's text, for `bin/repr-ocaml roundtrip --types`.
+- **`with module M := P` (Typemod's `With_modsubst`)**: M taken out of the signature and the paths through it substituted by P's
+  (`subst-items`, Subst.add_module). And a unit's interface with a hole (an item the slice does not type, read leniently) is a
+  clean refusal when an implementation is coerced to it (`runtime-ids`: "a part of the interface is outside the slice"), not an
+  index out of bounds.
+- Left (the native libraries' refusals, `DIR/failed.txt`, 9 of compiler-libs' 44 units: `Lexer` without ocamllex (OC186), `Identifiable` (a functor body's earlier module, `T_set`, unbound), `Numbers` (`Set.Make(Int_base.T).t` against `Set.Make(T).t` through `with module :=`), `Local_store` (GADT constructors with inline records), `Consistbl` (an index error in a coercion), `Stable_matching` (a record field unbound), `Location` (a value less general than its specification), `Pprintast` (an optional argument's elimination), `Ast_mapper` (`Ppat_open`)): the units of compiler-libs that link a refused one fail as
+  a typer note of the program.

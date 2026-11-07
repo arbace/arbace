@@ -2271,3 +2271,163 @@ compiled shards of the AOT level are big (O2J_GOMEMLIMIT 900 MiB a process, O2J_
 - **OC183 The `.cmi` level natively.** (a) the typer's signatures of the original and of the print compared (`types` on both: an
   own verdict, the typer covering what it types), ocamlc's `.cmi` bytes in the oracle tier; (b) the oracle tier only.
   *Recommended: (a)* for the stdlib and the samples now (the typer types the stdlib 71 of 71), the rest as T12 widens it.
+
+## Decided (the user, 2026-11-07): OC180-OC185
+
+Relayed by the main session with the brief of the branch `batch2-ocaml`: OC180 (a) (the steps off `:ocaml`, the `.cmi` part and
+`ocaml-dumps` to the oracle tier, a new `ocaml-oracle`), OC181 (a), OC183 (a), OC184 (a) (before the suite's native record) and
+OC185 (a) (the REAP cells to the native records once they have no fewer passes), each to be built if a day's work or less.
+
+## As built: the typer line's merge (2026-11-07, branch `batch2-ocaml`)
+
+The branch `batch2-ocaml` (from batch 2's head `531289398`: batch 1 with ocaml-o8, gt9v-ocaml and ocaml-libs4, batch 2's LLVM
+and rsi merges, ocaml-native, ocaml-errors, ocaml-errors2, crop-controls-ocaml) merges `ocaml-t12` (`394c7a2f7`) and then
+`ocaml-90` (`c0fdfca44`), one merge commit each, under the day's light rules (sample checks only, no gate run, each process under
+2 GiB).
+
+**The merges' conflicts and their resolutions.**
+
+- `ocaml-t12`: the Makefile (the union of `.PHONY`), `bin/oi` (six hunks), `bin/lib/oi/suite.bash`, the survey (both sections in
+  date order) and the journal (batch 2's side). In `bin/oi`: the libraries' directories follow `OI_STDLIB` as the stdlib's do
+  (native: `lib`, `testlib`, `unixlib`, `threadlib`, `strlib`, `complib`; ocamlc: the same with `-ocamlc`); libs4's build of
+  unix, threads, str and compiler-libs by ocamlc and ocdump is `libs_ocamlc` (the oracle's library), and the native library builds
+  them too (`libs_native`, below); the oracle's dumps against the native directories get their `.cmi` from ocamlc
+  (`oracle_libs`, beside `oracle_testlib`, from `need_tree`); `--only-list` is one option (its absolute path, `ONLY` kept for the
+  `-only` modes); `select_from` (libs4's, with `@OCAMLSRCDIR@`) serves both corpora; the native path's run line is libs4's
+  `run_redirected`; the magic numbers of compiler-libs' `config.ml` come from the tarball's `build-aux/ocaml_version.m4` (the
+  host's `ocamlc -config` gives the same), so the native library reads no host tool for them.
+- `ocaml-90`: CLAUDE.md (batch 1's paragraph, the native reader as `read`'s default), the Makefile, `bin/oi` (`opts` with libs4's
+  `LEVEL` and the native default, record-ref's and the oracle check's `need_tree`, check --aot's oi column from
+  `check-native.tsv` with `OI_SELECTED`), the suite's `--aot` exports, `bin/repr-ocaml` (O8's `--only-list`, `opam`, `all`,
+  `need_ocdump` for `--reader helper` alone), `test/ocaml/oi_check.ae` (the own verdicts with record-ref-only's merge). After it:
+  `bin/oi key` and `suite key` give the default path's key; `oi_key_test` and `aot_oi_column_test` follow the native default;
+  own-verdicts writes no `/dev` path.
+
+**The native library with libs4's units (TY18 over OT9-OT29).** `libs_native` types and translates each library unit natively
+against the native stdlib, coerced to its `.mli` (`typer lambda --intf`, the `-I` directories its Makefile gives: threads over
+unix), in parallel (`OI_LIB_JOBS`, default 3), each under `OI_LIB_TIMEOUT` (240 s); a unit the typer refuses is listed in
+`DIR/failed.txt` and a program that loads it gets the typer note "library unit M not built natively: REASON" (`lib_missing`, in
+`oi_one` and `suite_oi_one`), not a wrong run. The native path's programs type against their libraries' sources
+(`--include` of `inc_dirs`) and run with `inc_units`' Lambda, libs4's `complib_need` included. Results: unix, unixLabels, thread,
+event, str: 5 of 5 built natively; compiler-libs: 40 of the 49 library units built natively: unix, unixLabels, thread, event and str (5 of 5) and 35 of compiler-libs' 44; refused `Lexer` (no `lexer.ml` without ocamllex), `Identifiable` (a functor body's earlier module unbound, `T_set`), `Numbers` (an applicative path through `with module :=`), `Local_store` (GADT constructors with inline records), `Consistbl` (an index error in the coercion), `Stable_matching` (a record field), `Location` (a value less general than its specification), `Pprintast` (an optional argument's elimination), `Ast_mapper` (`Ppat_open`); about 4 minutes for the whole native library (the stdlib's 71 units in one process, the other 49 three at a time). Two typer fixes came from it: `with type t = t` and
+`with type t := t` translated in the outer environment, non-recursively, as `Typedecl.transl_with_constraint` does (before: a
+cyclic abbreviation and no end, `Identifiable.Thing`); the refusals left are TYPER.md §24's. compiler-libs' `lexer.ml` is
+ocamllex's output: the oracle's library runs the host's `ocamllex`; the native one only with `OI_OCAMLLEX=1` (Proposed OC186),
+so by default the native compiler-libs lack `Lexer` and what links it.
+
+**The checks after the merges** (`ARBACE_HOST_EXE` main's stage 0; the stub runs with `ocamlc ocamlopt ocamlfind ocaml ocamlrun
+ocamldep ocamllex` first on `PATH` as scripts exiting 99, their log empty after the run):
+
+| command | result |
+|---|---|
+| `bin/oi test` | go vet and go test of the printed package: ok, 13 s |
+| `bin/oi repl-check --native` | 24 phrases, the output equal to the ocaml toplevel's |
+| `OI_TYPER_NO_OCDUMP=1 bin/oi typer-check` (stubs) | 79 of 79 samples: types, raw and simplified Lambda equal; 79 runs on oi equal to the toplevel's; 301 s with the native library's rebuild |
+| `bin/oi check --only-list test/ocaml/essential-check.txt` (native, stubs) | 58 of 58 pass (the 59th classed by its header), 57 by their own verdict; the control differs; 191 s |
+| the same with `--ocdump` | 58 of 58; 73 s |
+| `bin/oi own-verdicts --check` (stubs) | run corpus 360 of 377 by their own verdict at oi's level, 370 at the AOT level; suite 87 and 97 of 120; own = recorded on every one, 0 stale (after libs4's three exceptions) |
+| `bin/oi divergences`, `--aot` (stubs) | every non-pass in a class |
+| `bin/repr-ocaml native-check samples` (the oracle tier's) | 8 of 8 equal to the helper's dump byte for byte; the control differs |
+| `bin/repr-ocaml roundtrip --text samples stdlib` | 8 of 8; 148 of 150 equal (the 2 templates classed), text 148 of 148 byte for byte; 2 min 21 s |
+| `bin/repr-ocaml roundtrip --text --types samples`, `--types stdlib` (OC183) | signatures 2 of 2, 148 of 148 equal; the controls differ |
+| `bin/oi suite check --only-list` of ocaml-90's six (stubs) | 5 of 6 with the native `.cmi` (OC184), 4 of 6 with Printtyp's text |
+| `bin/oi check --native --only-list` of libs4's 18 (stubs) | 14 of 18, the 4 others classed typer notes; ocamlc's library on the oracle's path 18 of 18 |
+| `bin/oi judges-test --fixtures` (stubs) | judges_test's 46 cases (7 of the expect action's counted, left to the oracle tier), repr_levels_test, floors_test, oi_key_test, aot_oi_column_test: all ok; 0 stub calls; 767 s with a rebuild |
+| `gate.crops check`, `bin/gate --plan`, `bin/gate --full --plan` | the base's 8 LLVM problems only; both plans clean |
+
+**OC180 (a)** (ocaml-90's `steps-batch1.diff`, adapted): `oi-essential` (`repl-check --native`, `own-verdicts --check`),
+`ocaml-read-essential` (`corpus check`, `roundtrip --text samples stdlib`, `menhir --check`, `embed-check`), `ocaml-roundtrip`,
+`oi-check`, `oi-aot`, `oi-suite-aot` off `:ocaml`. This tree's planner knows no `:phase :oracle` (it is `mac/oracle-records-cpp2`'s
+ORS1 (a), not merged; teaching `test/gate/plan.ae` would rekey every step), so `ocaml-dumps` and the new `ocaml-oracle` wait in the
+fragment `test/gate/crops/ocaml-oracle.edn` as `:phase :oracle`, to be spliced after that branch; `crops/ocaml.edn` is synced
+with `steps.edn`. `gate.crops check`: the 8 problems of the base `531289398` (LLVM's steps without a control), none of OCaml's;
+`bin/gate --plan` and `--full --plan` clean.
+
+**OC181 (a).** `bin/oi judges-test --fixtures`: `judges_test` without the expect action's six cases (`OI_JUDGES_NO_HOST`, counted as
+run), `repr_levels_test` with x.ml read natively and without its ocdump case, `floors_test`, `oi_key_test`, `aot_oi_column_test`:
+`ocaml-judges` on `[:stage0 :go]`; `judges-test --oracle` (the two files whole, the dumps' determinism, `suite expect`) ends
+`ocaml-oracle`. Under the stubs `--fixtures` ran 0 toolchain commands; two of its cases needed a fix for it: the rollup's
+`suite roles` called `need_tree` (it reads the tarball alone: `need_source` now), and the CPU-limit case read the oracle path's
+`check.tsv` (the native default's `check-native.tsv` now).
+
+**OC183 (a).** `bin/repr-ocaml roundtrip --types` (the typer's `sigs` verb): each file's signature, Printtyp's text, typed from the
+original and from the `:lines` print against the native library's interfaces (the stdlib corpus's files named and flagged as
+stdlib/Compflags does), the texts equal; a negative control (one file's print against another's original); the floor
+`types-typed`. stdlib 148 typed, 148 equal, 0 differ (the 2 templates not typed), 4 min 11 s; samples 2 of 2 equal (the other six
+are syntax showcases the typer refuses: unbound names, `module ... := ...`, classes outside a method). `ocaml-roundtrip`'s stdlib
+and samples parts run `--text --types`; ocamlc's `.cmi` bytes are `ocaml-oracle`'s.
+
+**OC184 (a).** A unit's signature as data, `NAME.cmi.ae` (TYPER.md §24): `lambda --cmi-out`, read back by `find-unit` from an
+`--include` directory when the unit has no `.mli`; the suite's native path writes it instead of Printtyp's `.mli`
+(`OI_SUITE_SIG_TEXT=1` the old way). The proof on the suite sample whose gaps came from the printed interfaces (ocaml-90's six programs:
+basic-modules/main, basic-multdef/usemultdef, basic-private/tlength, raise-counts/main, typing-multifile/pr7563, opam/astring/test),
+`bin/oi suite check --only-list` under the stubs: with the native `.cmi` 5 of 6 pass in 108 s (basic-modules/main, which failed with
+Printtyp's text by a stack overflow substituting `Set.Make(String).t`, passes); with `OI_SUITE_SIG_TEXT=1` 4 of 6 in 392 s (basic-modules/main
+fails as before). opam/astring/test fails in both, a mismatch of astring.ml against its own `.mli` (`Char.equal`), not an
+interface the typer printed. A two-unit sample (`.tmp/cmit`: a `Set.Make (String)` instance, a reference, a record with a mutable
+field used from the next unit) runs on oi with the next unit typed against `a.cmi.ae`.
+
+**OC185 (a).** Not yet: on the merged tree `check-oi-native.edn` has 273 passes of 309 programs, `check-oi.edn` 336 of 377 (libs4
+widened the run corpus by 68 programs the native record has not run). The cells' change is prepared as a comment beside OCaml's
+row in `test/reap/cells.edn` (the native files, the eval cell's classes `[divergences-native.edn divergences.edn]`), for the night's
+records.
+
+**libs4's corpus on the native path (a sample).** 18 programs of `test/ocaml/check-oi.edn`'s passes that libs4 made pass (unix: lib-unix/common/dup, rename,
+truncate, test_unixlabels, pipe_eof, lib-sys/signal; threads: lib-threads/bank, prodcons, sieve, tls, lib-systhreads/boundscheck; str:
+lib-str/t01, parallel; compiler-libs: misc/stable_matching_test, utils/edit_distance, parsing/change_start_loc, formatting/errors_batch;
+and basic-more/safer_matching, whose header's `@OCAMLSRCDIR@` libs4 expands). `bin/oi check --native --only-list` under the stubs:
+14 of 18 pass (unix 6 of 6, threads 5 of 5, str 2 of 2, compiler-libs 1 of 4), the other 4 classed typer notes: the flag
+`-safer-matching` not modelled, and three programs whose compiler-libs units the native library lacks (`Stable_matching`, `Numbers`,
+`Location`); 358 s with the native library's rebuild. The oracle's path on ocamlc's library
+(`OI_STDLIB=ocamlc bin/oi check --ocdump --only-list`): 18 of 18, as recorded (62 s). One fix came from it: `dump_required` read
+the required globals only from ocdump's layout (the vector on lines of its own), so the native dumps' (on the first line) linked
+no compiler-libs unit ("no unit Misc in the library"); it reads both now. The native path with ocdump's dumps against the native
+library (`--ocdump`, OI_STDLIB native) passes 14 of 18 too (the same missing units).
+
+**Scores** (`bin/crops-score --crop ocaml`, the merged tree's records): completeness 80.9% (95.2% without by design; the cells read
+the oracle path's records until OC185), maturity 100%, independence 87.4% (read 1, eval 0.880, AOT 0.5, print 1, judge 0.988; batch 2's
+base 20%), no fact refuted by the steps; `test/crops/scores.edn`'s OCaml line recorded.
+
+**The night's commands for OCaml** (in order, one check process at a time, each process at most 1.5 GB: `OI_TYPER_GOMEMLIMIT=1200MiB`,
+`O2J_JOBS=1`; times from today's samples, scaled):
+1. `bin/oi stdlib` (the native library: about 4 minutes, three typer processes of 1.2-1.5 GB at once; `OI_LIB_JOBS=1` for one: about 8).
+2. `bin/oi check --record` (the native path over the run corpus's 377 programs, `OI_JOBS=2`: about 35 minutes; writes
+   `check-oi-native.edn`, its 68 new rows libs4's; the typer notes of the refused compiler-libs units and `-safer-matching` need
+   divergences-native.edn's `:typer-*` classes, which take them as the sample showed).
+3. `bin/oi check --aot --record` (writes `check-aot-native.edn`; about 40 minutes at `O2J_JOBS=1`, 900 MiB a shard).
+4. `bin/oi suite check --record` (writes `check-suite-oi-native.edn`, the suite's 120 programs with OC184's `.cmi`: about 35 minutes).
+5. `bin/oi suite check --aot --record` (writes `check-suite-aot-native.edn`: about 35 minutes).
+6. `bin/repr-ocaml roundtrip --text --record-results` over every corpus (`all`; about 40 minutes, 1.5 GB), then
+   `bin/repr-ocaml roundtrip --text --types samples stdlib` (5 minutes; `--record` there records the floors).
+7. OC185: if each native record has no fewer passes than its oracle twin, the cells' change prepared in `test/reap/cells.edn`'s
+   comment, then `bin/reap` and `bin/crops-score --record`; the facts' eval and AOT to 1 (`test/crops/independence.edn`).
+The oracle tier's (by hand at a tag, the host `:ocaml`): `bin/oi record-ref`, `suite record-ref`, `bin/repr-ocaml roundtrip --reader
+helper --cmi`, `native-check`, `dumps`, `bin/oi stdlib-check`, `typer-check`, `judges-test --oracle`.
+
+## Proposed (OC182, OC186-OC190; options with costs, a recommendation each, none decided)
+
+- **OC182** (ocaml-90's, open): the expect tests natively. As there: *(a)* with T12's messages; until then (c), the oracle tier.
+- **OC186 compiler-libs' `lexer.ml` without the host's ocamllex.** The native library takes `parsing/lexer.ml` only from the
+  host's `ocamllex` (`OI_OCAMLLEX=1`); by default the native compiler-libs lack `Lexer` (and `Parse`, `Pprintast`... that link it).
+  (a) port ocamllex's generator (the tarball's `lex/`: lexgen.ml, compact.ml, output.ml, about 2,000 lines, its `.mll` parser
+  over the menhir port's engine) into `arbace/repr/ocaml/`, `lexer.mll` → `lexer.ml` natively, compared with ocamllex's output in
+  the oracle tier: about a day; (b) run `lex/` on oi itself (typed natively: its `lexer.ml`/`parser.ml` are generated by
+  ocamllex/ocamlyacc, a bootstrap problem, so (b) needs (a) or a committed generated file); (c) commit ocamllex's `lexer.ml` as a
+  recorded input (0.5 by the scoring rule); (d) leave it to `OI_OCAMLLEX=1` and class the programs that link Lexer natively.
+  *Recommended: (a)*; until then (d).
+- **OC187 The oracle tier's planner on this line.** `ocaml-dumps` and `ocaml-oracle` wait in `test/gate/crops/ocaml-oracle.edn`.
+  (a) splice it when `mac/oracle-records-cpp2` (`:phase :oracle`, `bin/gate --oracle`) is merged: minutes; (b) port that planner's
+  two lines here now: every step's key moves (the planner is in every key), a whole `--full` rerun. *Recommended: (a)*.
+- **OC188 compiler-libs typed natively.** The native library builds unix, unixLabels, thread, event, str; of compiler-libs' 44
+  units 35 of 44 (the nine refused are listed above). The typer's gaps there: an applicative path through a destructive module substitution
+  (`Numbers`: `Set.Make(Int_base.T).t` against `Set.Make(T).t`), a functor body's earlier module unbound (`Identifiable.Make_map`'s
+  `T_set`), GADT constructors with inline records (`Local_store`), and what links them. (a) T12's module-system slice extended for
+  them (Mtype's path normalization under `with module :=`, the functor body's environment): one to two days; (b) class the programs
+  that link them (`:typer` in divergences-native.edn) until T12. *Recommended: (a)* in T12, (b) for the night's record.
+- **OC189 The toplevel's phrases as native `.cmi`.** `bin/oi repl --native` keeps each phrase's signature as `top_N.mli`
+  (Printtyp's text), as the suite's native path did before OC184. (a) `phrase` writes `top_N.cmi.ae` (the same module, an hour);
+  (b) as it is (repl-check passes 24 of 24). *Recommended: (a)* with OC182.
+- **OC190 The native library's build time.** Every change to the typer's sources rebuilds the stdlib (71 units, one process,
+  about 1 minute) and the other libraries (49 units, a process each, three at once, about 3 minutes). (a) one process for all the
+  library units (`stdlib-build`'s loop, a per-unit timeout by a watchdog thread that ends the process on a hang): about an hour,
+  1 minute; (b) as it is. *Recommended: (a)* before the night's records if they run more than once.
