@@ -14,14 +14,18 @@
                                                     --loc; --mode tokens: the layouts, ocdump --mode tokens), so a
                                                     file both reject compares its error's kind, message and location;
                                                     --ocamlc ODIR: and each file's report (below) equal to ocamlc's
-                                                    stderr ODIR/REL.err (ocamlc -stop-after parsing -nopervasives -w -a -c REL)
-    report --file NAME FILE                         the report ocamlc prints for FILE named NAME (nothing when it
-                                                    parses; arbace.repr.ocaml.report)
+                                                    stderr ODIR/REL.err (--flags FLAGS: given to both) (ocamlc -stop-after parsing -nopervasives -c REL, its default warnings)
+    report [--flags FLAGS] --file NAME FILE        the report ocamlc prints for FILE named NAME (nothing when it
+                                                    parses without a warning; arbace.repr.ocaml.report); FLAGS are
+                                                    ocamlc's -w, -warn-error, -no-app-funct, -keywords (OC172 (b))
+    errors-check --dir DIR                          the hand cases of DIR (test/ocaml/errors/: FILE.ml/.mli, FILE.flags,
+                                                    FILE.err recorded from ocamlc) reported natively, equal to FILE.err
     mutants --root DIR --list LIST --out OUT [--n N] [--seed S]
                                                     N mutants of each file of LIST (default 40, seed 1): one token
                                                     deleted, inserted or swapped with the next, OUT/mNNNNN.ml(i) and
                                                     OUT/list.txt (each with its origin and edit)"
   (:require [arbace.repr.ocaml.parser :as p]
+            [arbace.repr.ocaml.actions :as act]
             [arbace.repr.ocaml.lex :as lex]
             [arbace.repr.ocaml.docstrings :as ds]
             [arbace.repr.ocaml.report :as report]
@@ -99,13 +103,74 @@
               (p/error-text :lexer (:message d) nil)
               (throw ex))))))))
 
+(def ^:private default-warnings "+a-4-7-9-27-29-30-32..42-44-45-48-50-60-66..70")
+
+(defn- warning-letter [c]
+  (case c
+    \a (range 1 90) \c [1 2] \d [3] \e [4] \f [5] \k (range 32 40) \l [6] \m [7] \p [8] \r [9] \s [10]
+    \u [11 12] \v [13] \x [14 15 16 17 18 19 20 21 22 23 24 30] \y [26] \z [27] []))
+
+(defn parse-warnings
+  "Warnings.parse_opt over the active set: the -w spec SPEC applied to ACTIVE (a set of numbers); letters, + - @ with a
+  number, a range N..M or a letter (an uppercase letter sets, a lowercase clears); names are not supported"
+  [active ^String spec]
+  (loop [i 0 active active modifier nil]
+    (if (>= i (count spec))
+      active
+      (let [c (.charAt spec i)]
+        (cond
+          (Character/isLetter c)
+          (let [lc (Character/toLowerCase c)
+                m (or modifier (if (= c lc) :clear :set))
+                ws (warning-letter lc)]
+            (recur (inc i) (if (= m :clear) (reduce disj active ws) (into active ws)) nil))
+          (#{\+ \- \@} c) (recur (inc i) active ({\+ :set \- :clear \@ :set} c))
+          (Character/isDigit c)
+          (let [[_ a b] (re-find #"^(\d+)(?:\.\.(\d+))?" (subs spec i))
+                n1 (Long/parseLong a) n2 (if b (Long/parseLong b) n1)]
+            (recur (+ i (count (re-find #"^\d+(?:\.\.\d+)?" (subs spec i))))
+                   (if (= modifier :clear) (reduce disj active (range n1 (inc n2))) (into active (range n1 (inc n2))))
+                   nil))
+          :else (throw (ex-info (str "unsupported -w spec " spec) {})))))))
+
+(defn parse-flags
+  "ocamlc's flags that matter to the parse, as one string: -w SPEC (repeated), -no-app-funct, -keywords SPEC; the rest ignored.
+  {:warnings active-set :app-func bool :keywords table}"
+  [^String flags]
+  (let [toks (vec (remove str/blank? (str/split (str/trim (or flags "")) #"\s+")))]
+    (loop [ts toks st {:warnings (parse-warnings #{} default-warnings) :errors (parse-warnings #{} "-a+31") :app-func true :keywords nil}]
+      (if (empty? ts)
+        st
+        (let [[t & more] ts]
+          (case t
+            "-w" (recur (rest more) (let [spec (first more)]
+                                      ;; -w @N sets the error flag as well (parse_opt's Set_all)
+                                      (-> st
+                                          (update :warnings parse-warnings spec)
+                                          (update :errors (fn [e] (reduce (fn [e n] (conj e n)) e
+                                                                          (for [[_ n] (re-seq #"@(\d+)" spec)] (Long/parseLong n))))))))
+            "-warn-error" (recur (rest more) (update st :errors parse-warnings (first more)))
+            "-no-app-funct" (recur more (assoc st :app-func false))
+            "-keywords" (let [[version extra] (lex/parse-keyword-edition (first more))]
+                          (recur (rest more) (assoc st :keywords (lex/keyword-table version extra))))
+            (recur more st)))))))
+
 (defn report-of
-  "The report ocamlc prints for the bytes of a file named rel (a byte string), or \"\" when the file parses"
-  [^bytes b rel kind]
-  (let [r (p/parse b rel kind)]
-    (if (= :ok (first r))
-      ""
-      (let [[_ _ msg lc sub] r] (report/report b rel msg lc sub)))))
+  "The report ocamlc prints for the bytes of a file named rel (a byte string), or \"\" when the file parses without a
+  warning: the active warnings the lexer and the docstrings raise (FLAGS: ocamlc's -w, -no-app-funct and -keywords,
+  default none), each followed by a blank line before the next report, then the error"
+  ([b rel kind] (report-of b rel kind ""))
+  ([^bytes b rel kind flags]
+   (let [{:keys [warnings errors keywords app-func]} (parse-flags flags)
+         ws (volatile! [])
+         r (binding [lex/*warn* (fn [k loc] (when (contains? warnings (report/warning-number k)) (vswap! ws conj [k loc])))
+                     lex/*keywords* (or keywords lex/*keywords*)
+                     act/*app-func* app-func]
+             (p/parse b rel kind))
+         parts (concat (map (fn [[k loc]] (report/warning-report b rel k loc (contains? errors (report/warning-number k)))) @ws)
+                       (when-not (= :ok (first r))
+                         (let [[_ _ msg lc sub] r] [(report/report b rel msg lc sub)])))]
+     (str/join "\n" parts))))
 
 (defn- dump-of [^bytes b rel opts]
   (if (= "tokens" (get opts "--mode"))
@@ -129,7 +194,7 @@
             hk (error-head theirs) mk (error-head mine)]
         (when (and odir (not= :toplevel (kind-of rel opts)))
           (let [oc (String. (read-bytes (str odir "/" rel ".err")) "ISO-8859-1")
-                nr (try (report-of (read-bytes path) rel (kind-of rel opts))
+                nr (try (report-of (read-bytes path) rel (kind-of rel opts) (or (get opts "--flags") ""))
                         (catch Throwable t (str "(native-failure " (.getMessage t) ")")))]
             (when (or (seq oc) (seq nr))
               (swap! st update :reports inc)
@@ -177,7 +242,7 @@
   (let [f (first args)
         name (or (get opts "--file") f)
         b (read-bytes f)
-        out (lex/bstr->bytes (report-of b name (kind-of name opts)))]
+        out (lex/bstr->bytes (report-of b name (kind-of name opts) (or (get opts "--flags") "")))]
     (.write System/out out 0 (alength out))
     (flush)))
 
@@ -186,7 +251,7 @@
 
 (def ^:private insert-pool
   ["(" ")" "[" "]" "{" "}" "[|" "|]" "begin" "end" "struct" "sig" "object" "do" "done" "\"" "(*" "*)" "'" "{<" ">}"
-   ".(" "let" "in" "|" "->" ";;" "=" ":" "," "with" "''" "\\" "{|" "#" "?" "~" "fun" "match" "type" "module" "if"
+   "(*)" "*)" "\\q" "(** d *)" ".(" "let" "in" "|" "->" ";;" "=" ":" "," "with" "''" "\\" "{|" "#" "?" "~" "fun" "match" "type" "module" "if"
    "then" "else" "@@" "[@" "[%" "." "..." "<-" ":=" "!" "_" "0x" "1e" "'\\" "`" ";" "of" "val" "->" "*"])
 
 (defn- token-spans
@@ -236,6 +301,24 @@
     (spit-mk (str out "/list.txt") (str listing))
     (println (str "mutants: " @k " files in " out))))
 
+(defn- do-errors-check
+  "errors-check --dir DIR: every FILE.ml/.mli of DIR with its FILE.flags (ocamlc's flags, optional) reported natively,
+  equal to FILE.err, the stderr of ocamlc -stop-after parsing -nopervasives FLAGS -c FILE (empty when none)"
+  [{:keys [opts]}]
+  (let [dir (get opts "--dir")
+        files (sort (filter #(re-find #"\.mli?$" %) (map #(.getName ^File %) (.listFiles (File. ^String dir)))))
+        bad (atom 0)]
+    (doseq [f files]
+      (let [flags (let [ff (File. (str dir "/" f ".flags"))] (if (.exists ff) (str/trim (slurp ff)) ""))
+            want (String. (read-bytes (str dir "/" f ".err")) "ISO-8859-1")
+            got (try (report-of (read-bytes (str dir "/" f)) f (kind-of f {}) flags)
+                     (catch Throwable t (str "(native-failure " (.getMessage t) ")")))]
+        (when-not (= want got)
+          (swap! bad inc)
+          (println "DIFF" f "\n  ocamlc" (pr-str want) "\n  native" (pr-str got)))))
+    (println (str "errors-check: " (count files) " cases, " (- (count files) @bad) " equal to ocamlc's stderr, " @bad " differ"))
+    (System/exit (if (zero? @bad) 0 1))))
+
 (defn- do-dump [{:keys [opts args]}]
   (let [f (first args)
         name (or (get opts "--file") f)]
@@ -248,7 +331,8 @@
     (case verb
       "dump" (do-dump (pa #{"--file" "--mode"}))
       "read" (do-read (pa #{"--root" "--list" "--out" "--mode"}))
-      "check" (do-check (pa #{"--root" "--list" "--helper" "--report" "--mode" "--ocamlc"}))
-      "report" (do-report (pa #{"--file"}))
+      "check" (do-check (pa #{"--root" "--list" "--helper" "--report" "--mode" "--ocamlc" "--flags"}))
+      "report" (do-report (pa #{"--file" "--flags"}))
+      "errors-check" (do-errors-check (pa #{"--dir"}))
       "mutants" (do-mutants (pa #{"--root" "--list" "--out" "--n" "--seed"}))
-      (do (println "usage: -m arbace.repr.ocaml.native dump|read|check|report|mutants ...") (System/exit 2)))))
+      (do (println "usage: -m arbace.repr.ocaml.native dump|read|check|report|errors-check|mutants ...") (System/exit 2)))))

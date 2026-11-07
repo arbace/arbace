@@ -2009,7 +2009,7 @@ lexing; the helper reads about 2 MB/s.
 - **OC171 A gate step.** (a) with OCaml's steps (OC120 (b)), a light `--full` step `bin/repr-ocaml menhir --check`
   `--verify` plus `native-check samples` (seconds), the stdlib's run by hand; (b) the stdlib in it too (about a minute);
   (c) none. *Recommended: (a)*.
-- **OC172 Error messages.** (built 2026-11-04, "As built: OC172 (a)") (a) port MenhirLib's simplified strategy and the error printers (`Syntaxerr`, `Lexer`'s
+- **OC172 Error messages.** (built 2026-11-04, "As built: OC172 (a)" and "As built: OC172 (b)") (a) port MenhirLib's simplified strategy and the error printers (`Syntaxerr`, `Lexer`'s
   `prepare_error`, Format's breaks), judged by `native-check` on every rejected file (message and location); (b) the
   strategy only; (c) kinds only, as built. *Recommended: (a)*, next.
 - **OC173 Speed.** (a) as built; (b) the lexer buffer as a type with fields (no map lookups per byte), fewer position
@@ -2074,4 +2074,53 @@ reports (the corpora's 13 counted once), every helper error form equal.
   `Applicative_path` under `-no-app-func`) are not produced.
 - Format is ported only as far as the messages need it (text and `@ ` hints in one box); a message with nested boxes
   would need more of it.
+- The whole corpora and the gate (OC170, OC171) as before.
+
+## As built: OC172 (b), the errors outside the parser and the lexer's warnings (2026-11-04)
+
+What OC172 (a) left, built on the branch `ocaml-errors2` from `ocaml-errors` (`0e25bd25`), the same light rules (stage 0, no
+gate, no build). `bin/repr-ocaml native-check` now runs `ocamlc -stop-after parsing -nopervasives -c REL` with its **default
+warnings** (no `-w -a`), so a file's report is the warnings the lexer raised before the error (or alone, for a file that
+parses) and then the error.
+
+- **Warnings** (`lex.ae`'s `*warn*`, `report.ae`'s `warning-report`, `native.ae`'s `report-of`): Comment_start (1, `(*)`),
+  Comment_not_end (2, a `*)` outside a comment), Illegal_backslash (14, outside comments), and the docstrings' Unexpected_docstring
+  (50, unattached or ambiguous, `docstrings.ae`'s `bad-docstrings` after a parse that succeeds, as `Parse.wrap` does). Each is
+  printed as location.ml's `warning_format` does (the quote, then `Warning N [name]: text` in a `@[<b 2>` box at column 0, its
+  hints as Format's breaks), a blank line before every report after the first (`separate_new_message`), in the order the
+  lexer raised them, so the tokens after an error are never lexed. `report-of` takes ocamlc's flags: `-w SPEC` (letters,
+  `+N -N @N`, ranges; names not), `-warn-error SPEC` (a warning made an error prints `Error (warning N [name]): ...` and the parse
+  goes on, as ocamlc does), `-no-app-funct`, `-keywords`; the default set is ocamlc's (`+a-4-7-9-27-29-30-32..42-44-45-48-50-60-66..70`,
+  so 50 only with `-w +50`).
+- **Errors outside the parser**: Applicative_path (`actions.ae`'s `lapply` under `-no-app-funct`; the message names the option
+  `-no-app-func`, as syntaxerr's text does), Variable_in_scope (`ast.ae`'s `varify-constructors` for a method's
+  `type a. ...`: the message was missing, the tree was lazy so the error escaped to the dump, and the arrows are evaluated right to
+  left as OCaml's constructor arguments are; `Pprintast.tyvar_of_name`'s spellings), Unknown_keyword (`lex.ae`'s
+  `keyword-table` and `parse-keyword-edition`: `-keywords 5.2`, `-keywords 5.4+foo`; also `is_keyword` for labels). Ill_formed_ast
+  (`Ast_invariants`) is **unreachable from the grammar**: 17 attempts (`fun (type a) -> 1`, attributes on inherited row fields,
+  `module type S :=`, empty records and tuples, local `let include`, ...) were either accepted or syntax errors in both readers, so
+  no code for it (`test/ocaml/errors/invariant_*`). Invalid_package_type and the other lexer errors were already done.
+- **The hand cases** `test/ocaml/errors/` (100 cases: `FILE.ml`/`.mli`, ocamlc's flags in `FILE.flags`, ocamlc's recorded stderr in
+  `FILE.err`): `bin/repr-ocaml errors-check` (native only, seconds), `--ocamlc` (also against live ocamlc), `--record` (rewrites the
+  `.err`). File names must be module names (warning 24 otherwise).
+
+**The checks** (byte for byte, ocamlc's stderr and the helper's dumps; mutants with the pool extended by `(*)`, `*)`, `\q`, `(** d *)`)
+
+| set | files | dumps equal | reports equal (ocamlc output non-empty) |
+|---|---:|---:|---:|
+| stdlib, compiler sources (default warnings) | 398 | 398 | 2 of 2 |
+| hand cases (`errors-check`) | 100 | | 100 of 100 (77 non-empty) |
+| mutants of the samples, seeds 11, 12 (`-w +a-4-9-40-41-42-44-45 -warn-error +14`), 13 (`-no-app-funct -keywords 5.2+foo`): 60 a file | 1,440 | 1,440 | 1,259 of 1,259 |
+| mutants of the samples, seeds 14 (`-w +a-4-9-40-41-42-44-45`) and 15, 300 a file | 4,800 | 4,800 | 4,130 of 4,130 |
+| mutants of the 234 testsuite files, seed 12, 4 a file | 912 | 912 | 748 of 748 |
+| mutants of the stdlib, seed 13, 2 a file | 288 | 288 | 227 of 227 |
+
+(Of the 7,440 mutants, 64 of seed 14's carry a warning: 8 of 1, 9 of 2, 49 of 50; a mutant rarely adds one before its error, the
+hand cases are the check of the warnings.)
+
+**Left**
+
+- Warnings by name in `-w` (`-w +comment-start`), `-alert`, the toplevel's printer (`//toplevel//`, phrase skipping),
+  `-keywords` with an ill-formed version (Arg.Bad), `-unsafe` and the other flags that change the parse.
+- Format ported as far as messages need it (one box with `@ ` hints); nested boxes would need more.
 - The whole corpora and the gate (OC170, OC171) as before.

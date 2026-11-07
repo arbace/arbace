@@ -207,9 +207,31 @@
    "lor" [:INFIXOP3 "lor"] "lxor" [:INFIXOP3 "lxor"] "mod" [:INFIXOP3 "mod"] "land" [:INFIXOP3 "land"]
    "lsl" [:INFIXOP4 "lsl"] "lsr" [:INFIXOP4 "lsr"] "asr" [:INFIXOP4 "asr"]})
 
-(defn- keyword-token [name]
-  (let [k (get keywords name)]
-    (cond (nil? k) [:LIDENT name] (vector? k) k :else [k])))
+(def keyword-since
+  "Lexer.all_keywords' third column: the OCaml version a keyword appeared in (none: always)"
+  {"assert" [1 6] "class" [1 0] "constraint" [1 0] "effect" [5 3] "inherit" [1 0] "initializer" [1 0] "lazy" [1 6]
+   "method" [1 0] "new" [1 0] "nonrec" [4 2] "object" [1 0] "private" [1 0] "virtual" [1 0]})
+
+(defn keyword-table
+  "Lexer.populate_keywords: the keywords of VERSION ([major minor] or nil: all), then the names of EXTRA added (a name
+  that is no keyword at all becomes :unknown, an additional keyword this lexer cannot know)"
+  [version extra]
+  (let [base (into {} (filter (fn [[n _]]
+                                (let [since (get keyword-since n)]
+                                  (or (nil? version) (nil? since) (>= (compare version since) 0)))))
+                   keywords)]
+    (reduce (fn [t n] (assoc t n (if (contains? keywords n) (get keywords n) :unknown))) base extra)))
+
+(defn parse-keyword-edition
+  "Clflags.parse_keyword_edition of the -keywords argument: [version extra], or nil for an ill-formed version"
+  [^String s]
+  (let [parts (str/split s #"\+" -1)
+        v (first parts)
+        version (cond (= "" v) :none
+                      :else (when-let [[_ a b] (re-matches #"(\d+)\.(\d+)" v)] [(Long/parseLong a) (Long/parseLong b)]))]
+    (when version [(if (= version :none) nil version) (vec (rest parts))])))
+
+(def ^:dynamic *keywords* keywords)
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The lexer buffer: the bytes, the offsets of the current match, Lexing's positions, the string buffer
@@ -254,6 +276,19 @@
   ([loc msg sub] (throw (ex-info msg {:ocaml-error :lexer :message msg :loc loc :sub sub}))))
 
 (defn- error [lb msg] (lex-error (curr-loc lb) msg))
+
+;; The lexer's warnings (Location.prerr_warning): *warn* is a function of the warning's kind (:comment-start,
+;; :comment-not-end, :illegal-backslash) and its location, or nil (the reader's other uses); the caller decides
+;; which are active. *keywords* is the keyword table (Lexer.keyword_table): a name to its token, or :unknown for
+;; an additional keyword this lexer does not know (-keywords)
+(def ^:dynamic *warn* nil)
+(defn warn! [kind loc] (when *warn* (*warn* kind loc)))
+
+(defn- keyword-token [lb name]
+  (let [k (get *keywords* name)]
+    (cond (nil? k) [:LIDENT name]
+          (= :unknown k) (error lb (str name " has been defined as an additional keyword.\u0001This version of OCaml does not support this keyword."))
+          (vector? k) k :else [k])))
 
 (defn- escaped
   "String.escaped of a byte string (Char.escaped when quote? also escapes ')"
@@ -464,7 +499,7 @@
 (defn- check-label-name [lb name raw-escape]
   (when (is-capitalized name)
     (error lb (str name " cannot be used as label name, it must start with a lowercase letter")))
-  (when (and (not raw-escape) (contains? keywords name))
+  (when (and (not raw-escape) (contains? *keywords* name))
     (error lb (str name " is a keyword, it cannot be used as label name"))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -506,7 +541,9 @@
                   (if (in-comment? lb) (store-lexeme lb) (store-string lb (utf8-encode u))))
                 (recur))
             (= c1 -1) (do (matched! lb 1) (store-lexeme lb) (recur))
-            :else (do (matched! lb 2) (store-lexeme lb) (recur))))
+            :else (do (matched! lb 2)
+                      (when-not (in-comment? lb) (warn! :illegal-backslash (curr-loc lb)))
+                      (store-lexeme lb) (recur))))
         (newline-len lb i)
         (let [nl (newline-len lb i)]
           (matched! lb nl) (update-loc lb nil 1 false 0)
@@ -710,7 +747,7 @@
       (let [e (run-end lb (inc i) identchar?)]
         (matched! lb (- e i))
         (cond (and (= c 95) (= e (inc i))) [:UNDERSCORE]
-              (lower? c) (keyword-token (lexeme lb))
+              (lower? c) (keyword-token lb (lexeme lb))
               :else [:UIDENT (lexeme lb)]))
       :else
       (let [cands
@@ -750,7 +787,7 @@
                    (when (> e (inc i)) [[(- e i) 89 (fn [] (matched! lb (- e i)) [:PREFIXOP (lexeme lb)])]])))
                (when (lower? c)
                  (let [e (run-end lb (inc i) identchar?)]
-                   [[(- e i) 12 (fn [] (matched! lb (- e i)) (keyword-token (lexeme lb)))]]))
+                   [[(- e i) 12 (fn [] (matched! lb (- e i)) (keyword-token lb (lexeme lb)))]]))
                (when (upper? c)
                  (let [e (run-end lb (inc i) identchar?)]
                    [[(- e i) 13 (fn [] (matched! lb (- e i)) [:UIDENT (lexeme lb)])]]))
@@ -865,7 +902,7 @@
                                    (let [stars (sub lb (+ i 3) e)
                                          [s l] (wrap-comment-lexer lb (fn [lb] (store-string lb (str "*" stars)) (comment-rule lb)))]
                                      [:COMMENT [s l]]))]))
-                 (when (and (= c1 42) (= c2 41)) [3 37 (fn [] (matched! lb 3) (let [[s l] (wrap-comment-lexer lb comment-rule)] [:COMMENT [s l]]))])
+                 (when (and (= c1 42) (= c2 41)) [3 37 (fn [] (matched! lb 3) (warn! :comment-start (curr-loc lb)) (let [[s l] (wrap-comment-lexer lb comment-rule)] [:COMMENT [s l]]))])
                  ;; "(*" ('*'* as stars) "*)": the stars then *): the last star of the run starts the closing
                  (when (and (= c1 42) (> star-end (+ i 2)) (= 41 (byte-at lb star-end)))
                    [(- (inc star-end) i) 38
@@ -879,7 +916,7 @@
                     run-h (run-end lb (inc i) symbolchar-or-hash?)
                     op (fn [len rule kind] [len rule (fn [] (matched! lb len) [kind (lexeme lb)])])]
                 (case (int c)
-                  42 [(when (= c1 41) [2 39 (fn [] (matched! lb 2)
+                  42 [(when (= c1 41) [2 39 (fn [] (matched! lb 2) (warn! :comment-not-end (curr-loc lb))
                                               ;; the star alone: the parenthesis is lexed again
                                               (vswap! (:pos lb) dec)
                                               (let [^Pos p @(:curr-p lb)] (vreset! (:curr-p lb) (Pos. (.-fname p) (.-lnum p) (.-bol p) (dec (.-cnum p)))))
