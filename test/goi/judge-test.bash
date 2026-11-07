@@ -78,7 +78,9 @@ test_no_forms() {
     && [ "$(no_forms_row bad2.go 1 "$tsv" | cut -f2)" = unsupported ] \
     && [ "$(no_forms_row missing.go 1 "$tsv" | cut -f2)" = error ] \
     && [ "$(no_forms_row valid.go 1 "$tsv" | cut -f2)" = error ] \
-    && [ "$(no_forms_row valid2.go "" "$tsv" | cut -f2)" = error ]
+    && [ "$(no_forms_row valid2.go "" "$tsv" | cut -f2)" = error ] \
+    && printf 'errors\tpath.go\t1\t1\t1\t1\tpath.go:5: label l already defined at /go/test/path.go:3:3\n' >> "$tsv" \
+    && [ "$(goroot=/go no_forms_row path.go 1 "$tsv")" = "path.go${T}unsupported${T}no forms: an invalid program repr/go does not convert (errors: path.go:5: label l already defined at \${GOROOT}/test/path.go:3:3)" ]
 }
 t no-forms-only-for-invalid-programs test_no_forms
 

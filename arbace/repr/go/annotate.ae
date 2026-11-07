@@ -697,11 +697,43 @@
 (defn- convert-full [d ctx]
   (cv/convert-package d (assoc ctx :positions :full)))
 
+;; The negative controls of native-check (doc/GATE-SURVEY.md, GTS81 (a); test/repr/go/native-controls.edn): a control
+;; crosses two dumps of the run, the native read of the SUBJECT judged by each level's own comparison (E-tree's ps/diff,
+;; E-ann's same-package, E-forms' forms-diff) against the helper's dump of the REFERENCE, which must differ. The run keeps
+;; what a control needs of its two jobs (control-ids), judged after the corpora (control-verdicts).
+(def ^:private control-ids (atom #{}))
+(def ^:private kept (atom {}))
+
+(defn- keep! [id m] (when (contains? @control-ids id) (swap! kept update id merge m)))
+
+(defn control-verdicts
+  "The controls [{:id :subject :reference :levels [:tree :ann :forms]}] judged over kept (id NAME/KEY -> the parts the run
+  kept of that job: :n :d :ad :actx :nc :fc :dctx, and :own-tree :own-ann :own-forms when the job's own comparison with the
+  helper passed). Per control {:id :held [levels differing] :passed [levels equal: the control fails] :left [levels not
+  judged: a part missing, the subject's own comparison not passed]}."
+  [controls kept]
+  (for [c controls
+        :let [s (get kept (:subject c)) r (get kept (:reference c))
+              judge (fn [lv]
+                      (case lv
+                        :tree (when (and (:own-tree s) (:n s) (:d r))
+                                [(some? (ps/diff (ps/tree-of (:d r)) (ps/tree-of (:n s)) []))])
+                        :ann (when (and (:own-ann s) (:nc s) (:fc r))
+                               [(some? (same-package (:nc s) (:fc r)))])
+                        :forms (when (and (:own-forms s) (:ad s) (:nc s) (:fc r) (:d r) (:dctx r))
+                                 [(some? (forms-diff (:ad s) (:actx s) (:d r) (:dctx r) (:nc s) (:fc r)))])))
+              res (for [lv (:levels c [:tree :ann :forms])] [lv (judge lv)])]]
+    {:id (:id c)
+     :held (vec (for [[lv v] res :when (= v [true])] lv))
+     :passed (vec (for [[lv v] res :when (= v [false])] lv))
+     :left (vec (for [[lv v] res :when (nil? v)] lv))}))
+
 (defn- check-job
   "A corpus job's checks against the helper's dump at path (nil: none): E-tree, the raw forms'
   conformance to the final ones, E-ann."
-  [load sess-of j ^String path]
-  (let [base {:key (:key j) :path path :package (get-in j [:header :package]) :files (count (:files j))
+  [nm load sess-of j ^String path]
+  (let [cid (str nm "/" (:key j))
+        base {:key (:key j) :path path :package (get-in j [:header :package]) :files (count (:files j))
               :keys (vec (for [f (:files j)] (str (get-in j [:header :dir]) "/" f)))}]
     (try
       (let [t0 (System/nanoTime)
@@ -717,14 +749,16 @@
           :else
           (let [base (assoc base :nodes (count (mapcat (comp rd/nodes :ast) (:files n))) :times times
                             :open (assoc (cv/open-counts (mapcat :forms (:files (:rc r)))) :init-order 1))
-                tree (when d (ps/diff (ps/tree-of d) (ps/tree-of n) []))]
+                tree (when d (ps/diff (ps/tree-of d) (ps/tree-of n) []))
+                _ (keep! cid (cond-> {:n n :d d} (and d (not tree)) (assoc :own-tree true)))]
             (cond
               (nil? d) (assoc base :extra true)
               tree (assoc base :diff [(ps/file-at d (first tree)) (first tree) (short-str (second tree)) (short-str (nth tree 2))])
               :else
               (let [rel (str (:key j) ".edn")
                     fc (try (convert-full d (rg/dump-context d rel (:goroot j)))
-                            (catch Throwable ex {:final-fail (str (.getName (class ex)) ": " (.getMessage ex))}))]
+                            (catch Throwable ex {:final-fail (str (.getName (class ex)) ": " (.getMessage ex))}))
+                    _ (when-not (:final-fail fc) (keep! cid {:fc fc :dctx (rg/dump-context d rel (:goroot j))}))]
                 (if (:final-fail fc)
                   ;; E-forms: the native path fails where the helper's does, with its message
                   (let [{ad :dump} (annotate n (:answers (:src r)) (when pkg (e/o pkg :result)))
@@ -757,7 +791,8 @@
                                   (assoc base :ann-diff (vec df))
                                   ;; E-forms: the .ae text in modes :full and :lines
                                   (let [t4 (System/nanoTime)
-                                        fd (forms-diff ad (:ctx r) d (rg/dump-context d rel (:goroot j)) nc fc)]
+                                        fd (forms-diff ad (:ctx r) d (rg/dump-context d rel (:goroot j)) nc fc)
+                                        _ (keep! cid {:ad ad :actx (:ctx r) :nc nc :own-ann true :own-forms (not fd)})]
                                     (cond-> (assoc base :equal true :forms-ms (/ (- (System/nanoTime) t4) 1e6))
                                       fd (assoc :forms-diff fd)
                                       (not fd) (assoc :forms-equal true))))))))))))))
@@ -815,7 +850,7 @@
         results (vec (mapcat #(nth % 2) loads))
         futs (mapv (fn [[l sess-of j]]
                      (.submit ^java.util.concurrent.ExecutorService pool
-                              ^Callable (fn [] (check-job l sess-of j (get helper (:key j))))))
+                              ^Callable (fn [] (check-job nm l sess-of j (get helper (:key j))))))
                    work)
         rs (mapv #(.get ^java.util.concurrent.Future %) futs)
         jkeys (set (map :key js))
@@ -1010,7 +1045,12 @@
                          "--text-known" (recur (assoc opts :text-known (first more)) (rest more))
                          "--quiet" (recur (assoc opts :quiet true) more)
                          "--only" (recur (assoc opts :only (first more)) (rest more))
+                         "--controls" (recur (assoc opts :controls (first more)) (rest more))
                          [opts args]))
+        ;; the negative controls (test/repr/go/native-controls.edn): kept ids registered before the run
+        controls (when (and (= cmd "check") (:controls opts))
+                   (binding [*read-eval* false] (read-string (slurp ^String (:controls opts)))))
+        _ (reset! control-ids (set (mapcat (juxt :subject :reference) controls)))
         ;; GT8 (the rotation's lists): check --only FILE, the ids NAME/KEY of FILE alone (a partial check)
         only (when-let [f (:only opts)]
                (set (remove #(or (str/blank? %) (str/starts-with? % "#")) (map str/trim (str/split-lines (slurp f))))))
@@ -1048,7 +1088,13 @@
                      (apply concat)
                      (sort-by first)
                      (mapv second))
-        unknown (+ forms-bad (reduce + (keep :unknown results)))]
+        verdicts (vec (control-verdicts controls @kept))
+        _ (doseq [v verdicts]
+            (println (cond (seq (:passed v)) "CONTROL FAILED" (seq (:held v)) "CONTROL ok" :else "CONTROL left") (:id v)
+                     (str "held " (pr-str (:held v)) ", passed " (pr-str (:passed v)) ", left " (pr-str (:left v)))))
+        ;; a control that passes (a level's comparison passes what differs) fails the check; one not judged is left
+        control-failed (count (filter #(seq (:passed %)) verdicts))
+        unknown (+ forms-bad control-failed (reduce + (keep :unknown results)))]
     (.shutdown pool)
     (some-> ^java.util.concurrent.ExecutorService (:pool @prefetch) .shutdownNow)
     (.awaitTermination pool 1 TimeUnit/MINUTES)
@@ -1060,7 +1106,7 @@
                        (reduce + (map (comp count :ann-fail) results))
                        (reduce + (keep :forms-equal results)) (reduce + (map (comp count :forms-differ) results)) unknown)))
     (when-let [rf (when (= cmd "check") (:report opts))]
-      (spit rf (with-out-str (binding [*print-length* nil *print-level* nil] (prn (cond-> {:forms fc :corpora results} only (assoc :partial (count only))))))))
+      (spit rf (with-out-str (binding [*print-length* nil *print-level* nil] (prn (cond-> {:forms fc :corpora results} only (assoc :partial (count only)) (seq verdicts) (assoc :controls verdicts)))))))
     (when only
       (println (format "native-check: a partial check (--only, %d ids): %d dumps of the listed ones checked; the others neither checked nor missing"
                        (count only) (reduce + (keep :dumps results)))))
