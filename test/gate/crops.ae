@@ -1,0 +1,277 @@
+(ns gate.crops
+  "GT9, the crops' gate (doc/GATE-SURVEY.md, \"GT9: the crops' gate\", GTS210-GTS223 decided (a), \"As built: GT9
+  (write-ahead)\"): what bin/gate and bin/gate --costs need for the seven crops beyond the four, read from
+  test/gate/steps.edn's :host-ids, :crop-pins, :controls, :night-concurrent and :budgets. In no key: bin/gate reads it
+  (unkeyed), and a step on a host is keyed by the host's identity, not by its recipe.
+
+  -main host-recipes TABLE HOSTS-EDN   the recipes (HOST<TAB>OP<TAB>ARG...) of the :host-ids hosts a step of TABLE names
+                                       that HOSTS-EDN (plan_inputs' hosts.edn) does not hold, for bin/gate's gate_host_id
+  -main host-names TABLE               the :host-ids hosts, one a line (the tests' fabricated hosts.edn)
+  -main pins TABLE                     the gated crops' :crop-pins (CROP<TAB>WHAT<TAB>COMMAND), as bin/gate --pins's awk
+                                       reads them (crops-test compares the two)
+  -main concurrent TABLE               the :full chains GTS216 (a) runs beside the serial run, one a line
+  -main check ROOT TABLE               the GT9 rules (problems below), printed; exit 1 on one
+  -main splice TABLE FRAGMENT          TABLE's text with FRAGMENT's sections spliced in above its ;;@ markers, on stdout
+
+  TABLE: the table's file (bin/gate passes GATE_STEPS's, else the checkout's test/gate/steps.edn)."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File PushbackReader)))
+
+(defn read-table [^String f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+(def ^:private four #{:clojure :java :go :c :shared})
+
+(defn new-crops [table] (vec (get-in table [:budgets :new-crops])))
+
+(defn known-crops
+  "the crops bin/gate --costs knows: the four, :shared and the table's :budgets :new-crops"
+  [table]
+  (into four (new-crops table)))
+
+(defn crop-of
+  "{STEP-NAME CROP} from :crops"
+  [table]
+  (into {} (for [[c ns] (:crops table) n ns] [(str n) c])))
+
+(defn- chain-of [s] (str (or (:chain s) (:name s))))
+
+(defn- check? [s] (contains? #{nil :check} (:kind s)))
+
+(defn- peak
+  "a step's declared peak: the largest of its :mem-gib and its parts'; nil when it declares none"
+  [s]
+  (let [xs (keep :mem-gib (cons s (:parts s)))]
+    (when (seq xs) (apply max xs))))
+
+;; ---- hosts (GTS210 (a))
+
+(def ops #{:require :version :version-any :lines :exe :prog :dir :file :digest-list})
+
+(defn used-hosts
+  "the hosts the table's steps and parts name, in the table's order"
+  [table]
+  (vec (distinct (for [s (:steps table) h (concat (:hosts s) (mapcat :hosts (:parts s)))] h))))
+
+(defn host-recipes
+  "[[HOST OP ARG...] ...]: the :host-ids recipes of the hosts named by a step and absent from HOSTS (a map)"
+  [table hosts]
+  (vec (for [h (used-hosts table)
+             :when (and (contains? (:host-ids table) h) (not (contains? hosts h)))
+             item (get-in table [:host-ids h])]
+         (into [(name h) (name (first item))] (map str (rest item))))))
+
+;; ---- pins (GTS211 (a))
+
+(defn gated
+  "the new crops that have a step in :crops"
+  [table]
+  (let [n (set (new-crops table))]
+    (set (for [[c ns] (:crops table) :when (and (n c) (seq ns))] c))))
+
+(defn pins
+  "the gated crops' :crop-pins entries, in order"
+  [table]
+  (let [g (gated table)]
+    (vec (filter #(g (first %)) (:crop-pins table)))))
+
+;; ---- the night's concurrent chains (GTS216 (a))
+
+(defn concurrent-chains
+  "the :full chains that run beside the serial run: every step a new crop's, none :heavy, each declaring a peak of at most
+  :max-step-gib, no :needs on a :full step of another chain and none of another chain's on theirs; admitted in the
+  table's order while their peaks sum to at most :max-gib"
+  [table]
+  (let [{:keys [max-step-gib max-gib] :or {max-step-gib 4 max-gib 24}} (:night-concurrent table)
+        nc (set (new-crops table))
+        co (crop-of table)
+        full (filter #(= :full (:phase %)) (:steps table))
+        chain (into {} (for [s full] [(str (:name s)) (chain-of s)]))
+        order (distinct (map chain-of full))
+        by (group-by chain-of full)
+        foreign (fn [s] (for [x (concat (:needs s) (map #(first (str/split (str %) #"/")) (:uses s)))
+                              :let [c (chain (str x))]
+                              :when (and c (not= c (chain-of s)))]
+                          c))
+        ;; the chains another chain's steps need
+        needed (set (mapcat foreign full))
+        ok? (fn [c]
+              (let [ss (by c)]
+                (and (not (needed c))
+                     (every? (fn [s] (and (nc (co (str (:name s))))
+                                          (not (:heavy s))
+                                          (let [p (peak s)] (and p (<= p max-step-gib)))
+                                          (empty? (foreign s))))
+                             ss))))]
+    (loop [cs order acc [] sum 0]
+      (if-let [c (first cs)]
+        (if (ok? c)
+          (let [p (apply max (map peak (by c)))]
+            (if (<= (+ sum p) max-gib)
+              (recur (rest cs) (conj acc c) (+ sum p))
+              (recur (rest cs) acc sum)))
+          (recur (rest cs) acc sum))
+        acc))))
+
+;; ---- the rules (GTS210, GTS211, GTS215, GTS218, GT9.1)
+
+(defn- glob-re
+  "an :inputs rule as the planner reads it: \"dir/\" every file below, a glob (* within a name, ** across), else the file"
+  [^String r]
+  (re-pattern
+   (str "^"
+        (-> r
+            (str/replace #"[.+?^$()\[\]{}|\\]" (fn [m] (str "\\" m)))
+            (str/replace "**" "\u0000")
+            (str/replace "*" "[^/]*")
+            (str/replace "\u0000" ".*"))
+        (if (str/ends-with? r "/") ".*" "")
+        "$")))
+
+(defn- expand
+  "a step's :inputs, the groups expanded, in order"
+  [groups rules]
+  (mapcat (fn [r] (if (keyword? r) (expand groups (get groups r)) [r])) rules))
+
+(defn covered?
+  "FILE among the rules (the last rule that matches wins; a \"!\" rule takes it back out)"
+  [groups rules ^String file]
+  (reduce (fn [in r]
+            (let [r (str r) neg (str/starts-with? r "!") p (if neg (subs r 1) r)]
+              (if (re-find (glob-re p) file) (not neg) in)))
+          false (expand groups rules)))
+
+(defn problems
+  "the GT9 rules' problems over TABLE (ROOT: the checkout, for the files the table names)"
+  [root table]
+  (let [nc (new-crops table)
+        ncs (set nc)
+        co (crop-of table)
+        steps (:steps table)
+        by-name (into {} (for [s steps] [(str (:name s)) s]))
+        b (:budgets table)
+        exists? (fn [f] (.isFile (File. (str root "/" f))))
+        bad-arg? (fn [a] (or (not (string? a)) (re-find #"[\t\n]" a)))
+        controls (:controls table)]
+    (vec
+     (concat
+      ;; :host-ids
+      (for [[h items] (:host-ids table)
+            p (concat
+               (when-not (and (keyword? h) (vector? items) (seq items)) [(str "not HOST [ITEM ...]")])
+               (for [it items
+                     :let [op (when (vector? it) (first it))]
+                     q (concat
+                        (when-not (ops op) [(str "unknown op " (pr-str op))])
+                        (when (some bad-arg? (rest it)) [(str (pr-str op) ": an argument that is no string or holds a tab or newline")])
+                        (when (and (#{:version :version-any :lines :exe :dir :digest-list} op) (empty? (rest it))) [(str (pr-str op) " without an argument")])
+                        (when (and (= :prog op) (< (count it) 3)) [":prog without MISSING and a command"])
+                        (when (and (= :digest-list op) (string? (second it)) (not (exists? (second it)))) [(str ":digest-list " (second it) " is no file")]))]
+                 q))]
+        (str ":host-ids " h ": " p))
+      ;; :crop-pins
+      (for [e (:crop-pins table)
+            p (concat
+               (when-not (and (vector? e) (= 3 (count e)) (keyword? (first e)) (every? string? (rest e))) ["not [CROP \"WHAT\" \"COMMAND\"]"])
+               (when (and (vector? e) (keyword? (first e)) (not (ncs (first e)))) [(str "crop " (first e) " is not in :budgets :new-crops")])
+               (when (and (vector? e) (some #(and (string? %) (re-find #"[\t\n\"]" %)) (rest e))) ["a tab, newline or double quote in its text (the awk reading)"]))]
+        (str ":crop-pins " (pr-str (when (vector? e) (first e))) ": " p))
+      ;; :budgets: the weights
+      (for [[c _] (:shares b) :when (not (ncs c))] (str ":budgets :shares: " c " is not in :new-crops"))
+      (when (seq nc)
+        (let [w (+ 4 (reduce + 0 (for [c nc] (double (get (:shares b) c 1)))))]
+          (when (> (Math/abs (- w (double (or (:crops b) 10)))) 1e-9)
+            [(str ":budgets: the four and the new crops' weights sum to " w ", not :crops " (:crops b))])))
+      ;; the new crops' steps (GTS215, GTS218)
+      (for [s steps
+            :let [nm (str (:name s)) c (co nm)]
+            :when (ncs c)
+            p (concat
+               (when-not (peak s) [(str "no :mem-gib (GTS216, the lanes)")])
+               (when (and (= :essential (:phase s)) (check? s) (:heavy s)) ["an essential check :heavy (GTS215: never)"])
+               (when (and (= :essential (:phase s)) (check? s) (peak s) (> (peak s) (or (:essential-mem-gib b) 3)))
+                 [(str "an essential check of " (peak s) " GiB, above :essential-mem-gib " (or (:essential-mem-gib b) 3) " (GTS215)")])
+               (when (check? s)
+                 (let [ct (get controls (:name s) (get controls nm))]
+                   (cond
+                     (nil? ct) [(str "no negative control in :controls (GTS218: a FILE, or {:waived \"WHY\"})")]
+                     (map? ct) (when (str/blank? (str (:waived ct))) [":controls: a map without :waived \"WHY\""])
+                     (not (string? ct)) [":controls: neither a FILE nor {:waived \"WHY\"}"]
+                     (not (exists? ct)) [(str ":controls: " ct " is no file")]
+                     (not (or (covered? (:groups table) (:inputs s) ct)
+                              (some #(covered? (:groups table) (:inputs %) ct) (:parts s))))
+                     [(str ":controls: " ct " is not among its :inputs (its run must read the control)")]))))]
+        (str c " " nm ": " p))
+      (for [[k _] controls :when (not (by-name (str k)))] (str ":controls: " k " is no step"))))))
+
+;; ---- splice
+
+(defn- section-of [^String line]
+  (second (re-find #"^\s*;;@ ([a-z-]+)\b" line)))
+
+(defn- crops-merge
+  "TABLE-TEXT with the crops section's entries (each one line, :CROP [NAME ...]) whose crop :crops already holds appended to
+  that crop's vector (a later batch's steps of a crop already gated); returns [text the entries left for the marker]"
+  [^String t entries]
+  (let [start (str/index-of t " :crops {")
+        end (when start (str/index-of t ";;@ crops" start))]
+    (reduce (fn [[t left] ^String l]
+              (if-let [[_ k names] (re-find #"^\s*(:[a-z][a-z0-9-]*) \[([^\]]*)\]\s*$" l)]
+                (let [m (re-matcher (re-pattern (str "[{\\s]" k " \\[")) t)
+                      at (when (and start end (.find m start) (< (.end m) end)) (.end m))]
+                  (if at
+                    (let [close (str/index-of t "]" at)]
+                      [(str (subs t 0 close) " " (str/trim names) (subs t close)) left])
+                    [t (conj left l)]))
+                [t (conj left l)]))
+            [t []] entries)))
+
+(defn splice
+  "TABLE-TEXT with each of FRAGMENT-TEXT's sections (\";;@ NAME\" header lines: groups, steps, crops, controls) put above
+  the table's own \";;@ NAME\" marker line; a fragment's lines before its first header are its notes, left out. A crops entry
+  of a crop :crops already holds is appended to its vector instead"
+  [^String table-text ^String fragment-text]
+  (let [secs (loop [ls (str/split-lines fragment-text) cur nil acc {}]
+               (if-let [l (first ls)]
+                 (if-let [n (section-of l)]
+                   (recur (rest ls) n (update acc n #(or % [])))
+                   (recur (rest ls) cur (if cur (update acc cur conj l) acc)))
+                 acc))
+        [table-text left] (if-let [c (get secs "crops")]
+                            (crops-merge table-text (remove #(re-find #"^\s*(;.*)?$" %) c))
+                            [table-text nil])
+        secs (if (get secs "crops") (assoc secs "crops" left) secs)
+        tl (str/split-lines table-text)
+        marked (set (keep section-of tl))
+        missing (remove marked (keys secs))]
+    (when (seq missing)
+      (throw (ex-info (str "splice: the table has no ;;@ marker for " (str/join ", " missing)) {})))
+    (str (str/join "\n" (mapcat (fn [l] (if-let [n (section-of l)] (concat (get secs n) [l]) [l])) tl)) "\n")))
+
+(defn- edn-controls-marker
+  "the table's :controls {} becomes a map with a marker, so that a fragment's controls can be spliced into it"
+  [^String t]
+  (str/replace t " :controls {}}" " :controls {\n  ;;@ controls (GT9: a crop's controls spliced above this line)\n  }}"))
+
+(defn -main [& args]
+  (case (first args)
+    "host-recipes" (let [[_ t h] args
+                         hosts (read-table h)]
+                     (doseq [r (host-recipes (read-table t) hosts)] (println (str/join "\t" r))))
+    "host-names" (doseq [h (keys (:host-ids (read-table (second args))))] (println (name h)))
+    "pins" (doseq [[c w cmd] (pins (read-table (second args)))] (println (str (name c) "\t" w "\t" cmd)))
+    "concurrent" (doseq [c (concurrent-chains (read-table (second args)))] (println c))
+    "check" (let [[_ root t] args
+                  ps (problems root (read-table t))]
+              (doseq [p ps] (println (str "   " p)))
+              (println (str "gate.crops: " (count ps) " problem(s)"))
+              (when (seq ps) (System/exit 1)))
+    "splice" (let [[_ t f] args
+                   out (splice (edn-controls-marker (slurp t)) (slurp f))]
+               ;; the result must read
+               (read-string out)
+               (print out) (flush))
+    (do (println "usage: gate.crops host-recipes TABLE HOSTS-EDN | host-names TABLE | pins TABLE | concurrent TABLE | check ROOT TABLE | splice TABLE FRAGMENT")
+        (System/exit 2))))

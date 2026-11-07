@@ -103,7 +103,7 @@ cat > "$w/table.ae" <<F
 (def t (with-open [r (java.io.PushbackReader. (io/reader "$src/test/gate/steps.edn"))] (read r)))
 (doseq [p (c/problems t)] (println "problem:" p))
 (println "budgets" (:budgets t))
-(System/exit (if (and (empty? (c/problems t)) (every? number? (vals (:budgets t)))) 0 1))
+(System/exit (if (and (empty? (c/problems t)) (every? number? (vals (select-keys (:budgets t) [:crops :essential-s :nightly-s :clean-s :chain-s :essential-mem-gib]))) (every? number? (vals (:shares (:budgets t))))) 0 1))
 F
 ARBACE_PATH=$src/test "$exe" "$w/table.ae" > "$w/table.txt" 2>&1 && ok "steps.edn: every step in one crop, the budgets numbers" \
   || { bad "steps.edn's :crops or :budgets"; cat "$w/table.txt"; }
@@ -114,6 +114,44 @@ ARBACE_HOST_EXE=$exe ARBACE_GATE_STORE=$w/store GATE_STEPS=$w/steps.edn "$src/bi
 has "$w/gate.txt" '^   a +essential clojure +2 store +0m15s +0m20s' "bin/gate --costs --last 2: a's two latest passes"
 "$src/bin/gate" --last 2 > "$w/usage.txt" 2>&1; st=$?
 [ $st = 2 ] && ok "--last without --costs: usage" || bad "--last without --costs: exit $st"
+
+# GT9 (GT9.1, GTS215, GTS222): the new crops known, a share weighted by :shares, "measuring" in place of OVER until every
+# row of the crop has two passes, the essential chains against :chain-s (:chain-s-by), GT9's rules among the problems
+cat > "$w/gt9.edn" <<'F'
+{:groups {}
+ :steps
+ [{:name a :phase :essential :cmd "true"}
+  {:name o1 :phase :essential :chain oc :cmd "true" :mem-gib 1}
+  {:name o2 :phase :essential :chain oc :cmd "true" :mem-gib 1}
+  {:name l1 :phase :essential :cmd "true" :mem-gib 1}
+  {:name of :phase :full :cmd "true" :mem-gib 1}
+  {:name lf :phase :full :cmd "true" :mem-gib 1}]
+ :crops {:clojure [a] :ocaml [o1 o2 of] :llvm [l1 lf]}
+ :controls {o1 {:waived "t"} o2 {:waived "t"} l1 {:waived "t"} of {:waived "t"} lf {:waived "t"}}
+ :budgets {:crops 5.5 :essential-s 600 :nightly-s 3600 :clean-s 7200 :new-crops [:ocaml :llvm] :shares {:llvm 0.5}
+           :chain-s 60 :chain-s-by {:llvm 30}}}
+F
+rm -rf "$w/store9"; s0=$w/store; w0=$w
+pass9() { mkdir -p "$w/store9/$1"; printf '{:step "%s" :key "%s" :commit "c" :dirty false :worktree "/w" :date "%s"\n :secs %s :cpu-s 1.0 :maxrss-kib 1 :tree-peak-kib nil\n :log-sha256 "%064d"}\n' "$1" "$2" "$3" "$4" 0 > "$w/store9/$1/$2.edn"; }
+pass9 a k1 2026-11-01T10:00:00Z 10
+pass9 o1 k1 2026-11-01T10:00:00Z 50; pass9 o1 k2 2026-11-01T11:00:00Z 50
+pass9 o2 k1 2026-11-01T10:00:00Z 40; pass9 o2 k2 2026-11-01T11:00:00Z 40
+pass9 l1 k1 2026-11-01T10:00:00Z 400
+pass9 of k1 2026-11-01T10:00:00Z 9000; pass9 of k2 2026-11-01T11:00:00Z 9000
+pass9 lf k1 2026-11-01T10:00:00Z 9000
+mkdir -p "$w/logs9"
+ARBACE_PATH=$src/test GATE_STEPS=$w/gt9.edn "$exe" -m gate.costs costs "$src" "$w/store9" "$w/logs9" full 5 text > "$w/gt9.txt" 2>&1; st=$?
+[ $st = 0 ] && ok "GT9: the new crops known (exit 0)" || { bad "GT9: exit $st"; cat "$w/gt9.txt"; }
+# essential share: (600 - 0) / 5.5 = 109 s; llvm's half: 54.5 s. ocaml's 90 s within, llvm's 400 s over but measured once
+has "$w/gt9.txt" '^   ocaml essential +1m30s .*share 1m49s \(83%\)$' "GT9: ocaml's share, weight 1"
+has "$w/gt9.txt" '^   llvm essential +6m40s .*share 0m55s \([0-9]+%\) over, measuring \(GTS222: 0 of 1 rows with two passes\)$' "GT9: llvm's half share, measuring (one pass)"
+has "$w/gt9.txt" '^   ocaml full +2h30m00s .*OVER$' "GT9: ocaml's full row measured twice: OVER binds"
+has "$w/gt9.txt" '^   llvm full .*over, measuring' "GT9: llvm's full row measured once: measuring"
+has "$w/gt9.txt" '^   ocaml oc +1m30s +2 steps; limit 1m00s OVER$' "GT9: ocaml's essential chain against :chain-s"
+has "$w/gt9.txt" '^   llvm l1 +6m40s +1 steps; limit 0m30s OVER$' "GT9: llvm's chain against :chain-s-by"
+sed 's/ :controls {o1 {:waived "t"} /  :controls {/' "$w/gt9.edn" > "$w/gt9b.edn"
+ARBACE_PATH=$src/test GATE_STEPS=$w/gt9b.edn "$exe" -m gate.costs costs "$src" "$w/store9" "$w/logs9" essential 5 text > "$w/gt9b.txt" 2>&1; st=$?
+[ $st = 1 ] && grep -q 'ocaml o1: no negative control' "$w/gt9b.txt" && ok "GT9: a rule's problem (no control) fails --costs" || { bad "GT9 rules in --costs: exit $st"; tail -5 "$w/gt9b.txt"; }
 
 [ $fail = 0 ] && echo "costs-test: passed" || echo "costs-test: failed"
 exit $fail

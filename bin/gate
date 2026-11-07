@@ -535,17 +535,102 @@ fi
 . "$root/bin/lib/gate-cache.bash" # arbace_main_checkout, arbace_gate_exes
 . "$root/bin/lib/tools.bash"
 
+# ---- GT9 (doc/GATE-SURVEY.md, "As built: GT9 (write-ahead)"; GTS210 (a), GTS216 (a)): the crops' hosts as data and their
+# light chains at night. Here, not in bin/lib/gate-run.bash, so that GT9 rekeys none of the four crops' steps (the runner and
+# the planner are in every key): a host's identity reaches only the keys of the steps on that host, and the order the steps
+# run in decides no outcome. The move into the runner, with :gcc's gate_gcc_id dropped, waits for its next change (Proposed
+# GTS240). Between the markers below: test/gate/crops-test.bash extracts these functions.
+# --- gt9-hosts begin
+gate_host_expand() {  # gate_host_expand TOKEN: ${NAME:-DEFAULT} as NAME's value (else DEFAULT), {dir} as the recipe's :dir
+  local t=$1 re='\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}' v
+  while [[ $t =~ $re ]]; do v=${!BASH_REMATCH[1]:-${BASH_REMATCH[2]}}; t=${t/"${BASH_REMATCH[0]}"/$v}; done
+  printf '%s' "${t//\{dir\}/${hdir:-}}"
+}
+gate_host_id() {  # gate_host_id RECIPE: a host's identity from its recipe (OP<TAB>ARG... lines, test/gate/steps.edn's :host-ids
+  # as test/gate/crops.ae prints them): the SHA-256 of the items' lines; none when a :require command is missing
+  local f=$1 line op x p g m hdir= a=()
+  while IFS= read -r -u 3 line; do
+    IFS=$'\t' read -r -a a <<< "$line"
+    [ "${a[0]}" = require ] || continue
+    for x in "${a[@]:1}"; do command -v "$(gate_host_expand "$x")" > "$TMPDIR/gate-host.which" || { echo none; return; }; done
+  done 3< "$f"
+  { while IFS= read -r -u 3 line; do
+      IFS=$'\t' read -r -a a <<< "$line"; op=${a[0]}; a=("${a[@]:1}")
+      for x in "${!a[@]}"; do a[$x]=$(gate_host_expand "${a[$x]}"); done
+      case $op in
+        require) ;;
+        version) "${a[@]}" 2>"$TMPDIR/gate-host.err" | head -1 ;;
+        version-any) "${a[@]}" 2>&1 | head -1 ;;
+        lines) "${a[@]}" 2>"$TMPDIR/gate-host.err" ;;
+        exe) sha256sum < "$(readlink -f "$(command -v "${a[0]}")")" | cut -c1-64 ;;
+        prog) m=${a[0]}; p=$(readlink -f "$("${a[@]:1}" 2>"$TMPDIR/gate-host.err")" 2>"$TMPDIR/gate-host.err")
+              if [ -f "$p" ]; then sha256sum < "$p" | cut -c1-64; else echo "$m"; fi ;;
+        dir) hdir=$("${a[@]}" 2>"$TMPDIR/gate-host.err") ;;
+        file) for g in "${a[@]}"; do
+                m=0
+                for p in $g; do [ -f "$p" ] && { sha256sum < "$p" | cut -c1-64; m=1; }; done
+                [ $m = 1 ] || echo "missing $g"
+              done ;;
+        digest-list) awk '{print $2}' "$root/${a[0]}" 2>"$TMPDIR/gate-host.err" | while read -r p; do
+                       if [ -f "$p" ]; then sha256sum "$p"; else echo "missing $p"; fi; done ;;
+        *) echo "unknown $op" ;;
+      esac
+    done 3< "$f"; } | sha256sum | cut -c1-64
+}
+gate_host_ids() {  # gate_host_ids DIR: DIR/hosts.edn gains the :host-ids hosts a step names that plan_inputs does not write
+  local d=$1 f h add=
+  rm -rf "${d:?}/host-recipes"; mkdir -p "$d/host-recipes"
+  arbace_tool -p "$root/test" -m gate.crops host-recipes "${GATE_STEPS:-$root/test/gate/steps.edn}" "$d/hosts.edn" \
+    > "$d/host-recipes.tsv" 2> "$d/host-recipes.err" || { echo "gate: the hosts' recipes (test/gate/crops.ae):" >&2; cat "$d/host-recipes.err" >&2; return 1; }
+  [ -s "$d/host-recipes.tsv" ] || return 0
+  awk -F'\t' -v o="$d/host-recipes" '{ f = o "/" $1 ".tsv"; sub(/^[^\t]*\t/, ""); print > f }' "$d/host-recipes.tsv"
+  for f in "$d"/host-recipes/*.tsv; do
+    h=$(basename "$f" .tsv); add="$add :$h \"$(gate_host_id "$f")\""$'\n'
+  done
+  # the map's closing brace, the file's last character, after the new hosts
+  { sed '$ s/}$//' "$d/hosts.edn"; printf '%s}\n' "$add"; } > "$d/hosts.edn.new" && mv "$d/hosts.edn.new" "$d/hosts.edn"
+}
+# --- gt9-hosts end
+# plan_inputs (bin/lib/gate-run.bash) followed by the table's hosts, for every plan (run_plan, the audit's, the clean run's)
+eval "gate_plan_inputs_base() $(declare -f plan_inputs | tail -n +2)"
+plan_inputs() { gate_plan_inputs_base "$@" && gate_host_ids "$1"; }
+# GTS216 (a): the :full chains run beside the serial run (test/gate/crops.ae's concurrent): none in the clean run (serial, §7),
+# with GATE_FULL_PARALLEL (every chain at once already) or GATE_CROPS_CONCURRENT=0
+gate_crop_chains() {
+  [ -z "${GATE_CLEAN_INNER:-}" ] && [ -z "${GATE_FULL_PARALLEL:-}" ] && [ "${GATE_CROPS_CONCURRENT:-1}" != 0 ] || return 0
+  arbace_tool -p "$root/test" -m gate.crops concurrent "${GATE_STEPS:-$root/test/gate/steps.edn}"
+}
+
 # ---- GT7 (doc/GATE-SURVEY.md, §7, "As built: GT7 (tooling)"): the clean run at a tag, the pins of
 # what a clone cannot make fresh, the concurrent --full (GTS37 (a)). Here, not in bin/lib: none of it
 # decides a step's outcome (the runner's audit_all, audit_compare and the :clean mark are
 # bin/lib/gate-run.bash's), so no key holds it.
 
+# GTS211 (a): the gated new crops' pins (test/gate/steps.edn's :crop-pins, one [CROP "WHAT" "COMMAND"] a line), read with awk:
+# the clean run's pins step runs before stage 0 exists. A crop is gated when :crops has an entry for it with a step; the
+# new crops are :budgets :new-crops's. Prints CROP<TAB>WHAT<TAB>COMMAND; test/gate/crops-test.bash compares it with
+# test/gate/crops.ae's pins
+gate_crop_pins_list() {  # gate_crop_pins_list TABLE
+  awk '
+    /^ :crops \{/ { incrops = 1 }
+    incrops && /^ :budgets/ { incrops = 0 }
+    incrops { s = $0; sub(/;.*/, "", s)
+              while (match(s, /:[a-z][a-z0-9-]* \[[^]]*[a-z]/)) { k = substr(s, RSTART + 1, RLENGTH); sub(/ .*/, "", k); gated[k] = 1; s = substr(s, RSTART + RLENGTH) } }
+    /:new-crops \[/ { s = $0; sub(/.*:new-crops \[/, "", s); sub(/\].*/, "", s); n = split(s, a, / +/); for (i = 1; i <= n; i++) { k = a[i]; sub(/^:/, "", k); if (k != "") isnew[k] = 1 } }
+    /^ :crop-pins/ { inpins = 1; next }
+    inpins && /^ :[a-z]/ { inpins = 0 }
+    inpins && match($0, /\[:[a-z][a-z0-9-]* "[^"]*" "[^"]*"\]/) {
+      e = substr($0, RSTART + 2, RLENGTH - 3); k = e; sub(/ .*/, "", k)
+      sub(/^[^ ]* "/, "", e); w = e; sub(/" ".*/, "", w); c = e; sub(/^[^"]*" "/, "", c); sub(/"$/, "", c)
+      line[++np] = k "\t" w "\t" c; key[np] = k }
+    END { for (i = 1; i <= np; i++) if (isnew[key[i]] && gated[key[i]]) print line[i] }' "$1"
+}
 # clean_pins [FILE]: what the clean run takes from outside its clone, checked by its pins (§7):
 # TamaGo's go (seed/goroot.sha256), jdk26u and the JDK build tree's platform (jdk/javac/platform.sha256),
 # the frozen jar (test/oracle/frozen-jar.sha256, when FROZEN_JAR gives it: else the clone builds it from
 # its tag and frozen_jar checks it), the system JDK (the reference javac, named by its version and its
 # release file), $GOROOT/test (seed/goroot-test.sha256, GTS50 (a)), C's gcc and musl tarballs, test/c/host/, go-whim's commit and ccorpus2's module hash,
-# C++'s pins and test/cpp/host/ (CX10); FILE gets them as a map. Exit 1 on a pin that fails
+# the gated crops' :crop-pins commands (GTS211; C++'s pins and test/cpp/host/ among them, CX10); FILE gets them as a map. Exit 1 on a pin that fails
 clean_pins() {
   local out=${1:-} st=0 g pv ph have gt tp jdk c jv jrel fj want got pd ft
   . "$root/bin/lib/seed-go.bash"
@@ -628,15 +713,18 @@ clean_pins() {
   else echo "pins: FAILED: modernc.org/ccorpus2 v1.6.0 in $mc is $cch, test/c/corpora.edn pins ${ccwant:-nothing}"; st=1; fi
   if ct=$("$root/bin/repr-c" host check 2>&1); then ch=true; echo "pins: the host's gcc ($(gcc --version 2>"$TMPDIR/pins.err" | head -1)): test/c/host/'s answers ($(ls "$root/test/c/host/predefined" | wc -l) standards, $(wc -l < "$root/test/c/host/headers.sha256") headers)"
   else echo "pins: FAILED: the host's gcc against test/c/host/ (bin/repr-c host check):"; printf '%s\n' "$ct" | grep -v ': OK$' | head -5 | sed 's/^/   /'; st=1; fi
-  # C++'s (CX10; doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"): test/cpp/corpora.edn's pins (gcc 15.2.0's tarball, the compilers'
-  # versions; bin/repr-cpp pins check) and test/cpp/host/'s recorded answers of the host's g++ and clang++ (bin/repr-cpp host check)
-  local xt xh=false xp=false
-  if xt=$("$root/bin/repr-cpp" pins check 2>&1); then xp=true; echo "pins: C++'s pins (bin/repr-cpp pins check): test/cpp/corpora.edn's"
-  else echo "pins: FAILED: C++'s pins (bin/repr-cpp pins check):"; printf '%s\n' "$xt" | tail -5 | sed 's/^/   /'; st=1; fi
-  if xt=$("$root/bin/repr-cpp" host check 2>&1); then xh=true; echo "pins: the host's g++ and clang++ ($(g++ --version 2>"$TMPDIR/pins.err" | head -1); $(clang++ --version 2>"$TMPDIR/pins.err" | head -1)): test/cpp/host/'s answers"
-  else echo "pins: FAILED: the host's g++ and clang++ against test/cpp/host/ (bin/repr-cpp host check):"; printf '%s\n' "$xt" | tail -5 | sed 's/^/   /'; st=1; fi
-  [ -n "$out" ] && printf '{:go {:goroot "%s" :version "%s" :sources-sha256 "%s"} :goroot-test-sha256 "%s"\n  :jdk26u {:dir "%s" :commit "%s"} :system-jdk {:version "%s" :release-sha256 "%s"}\n  :frozen-jar "%s" :frozen-tree "%s"\n  :c {:gcc-tarball %s :musl-tarball %s :host-check %s :go-whim {:dir "%s" :commit "%s"} :ccorpus2 {:version "v1.6.0" :h1 "%s"}}\n  :cpp {:pins-check %s :host-check %s}\n  :ok %s}\n' \
-    "$g" "$pv" "$have" "$gt" "$jdk" "$(git -C "$jdk" rev-parse HEAD 2>"$TMPDIR/pins.err")" "$jv" "$jrel" "$fj" "$ft" "$cg" "$cm" "$ch" "$gw" "$gwh" "$cch" "$xp" "$xh" "$([ $st = 0 ] && echo true || echo false)" > "$out"
+  # GTS211 (a): the gated new crops' pins verbs, each run in the checkout; recorded as :crops (absent while no new crop is gated)
+  local crop what cmd cok crops_edn=
+  esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+  gate_crop_pins_list "${GATE_STEPS:-$root/test/gate/steps.edn}" > "$TMPDIR/pins-crops.tsv"
+  while IFS=$'\t' read -r crop what cmd; do
+    if (cd "$root" && bash -c "$cmd") > "$TMPDIR/pins-crop.$crop.log" 2>&1; then cok=true; echo "pins: $crop: $what ($cmd)"
+    else cok=false; st=1; echo "pins: FAILED: $crop: $what ($cmd; $TMPDIR/pins-crop.$crop.log):"; tail -5 "$TMPDIR/pins-crop.$crop.log" | sed 's/^/   /'; fi
+    crops_edn="$crops_edn {:crop :$crop :what \"$(esc "$what")\" :cmd \"$(esc "$cmd")\" :ok $cok}"
+  done < "$TMPDIR/pins-crops.tsv"
+  [ -z "$crops_edn" ] || crops_edn=$'\n'"  :crops [${crops_edn# }]"
+  [ -n "$out" ] && printf '{:go {:goroot "%s" :version "%s" :sources-sha256 "%s"} :goroot-test-sha256 "%s"\n  :jdk26u {:dir "%s" :commit "%s"} :system-jdk {:version "%s" :release-sha256 "%s"}\n  :frozen-jar "%s" :frozen-tree "%s"\n  :c {:gcc-tarball %s :musl-tarball %s :host-check %s :go-whim {:dir "%s" :commit "%s"} :ccorpus2 {:version "v1.6.0" :h1 "%s"}}%s\n  :ok %s}\n' \
+    "$g" "$pv" "$have" "$gt" "$jdk" "$(git -C "$jdk" rev-parse HEAD 2>"$TMPDIR/pins.err")" "$jv" "$jrel" "$fj" "$ft" "$cg" "$cm" "$ch" "$gw" "$gwh" "$cch" "$crops_edn" "$([ $st = 0 ] && echo true || echo false)" > "$out"
   [ $st = 0 ] && echo "pins: ok" || echo "pins: FAILED"
   return $st
 }
@@ -1016,6 +1104,11 @@ if [ -n "$plan_only$why" ]; then
   else
     echo "== gate$( [ -n "$nightly" ] && echo ' --nightly' || { [ -n "$full" ] && echo ' --full'; })$( [ -n "$clean" ] && echo ' --clean')$( [ -n "$concurrent" ] && echo ' --concurrent') --plan: $(git log -1 --format='%h %s'), store $store"
     run_plan "$d" ${rerun:+--rerun} || exit 1
+    # GTS216 (a): the chains a --full or --nightly would run beside its serial run (said only when there are some)
+    if [ -n "$full" ] && [ -z "$clean" ] && [ -z "$concurrent" ]; then
+      cc=$(gate_crop_chains | tr '\n' ' ')
+      [ -z "$cc" ] || echo "   the crops' chains beside the serial run (GTS216 (a)): $cc"
+    fi
     # GTS227 (a): the lanes the run would use, each step's lane and a simulated schedule (durations: the main store's
     # passes, GATE_LANES_STORE's, else the newest clean record's, the committed ones and GATE_LANES_RECORDS' files, a
     # record of estimates among them; GATE_LANES_PREFER=clean: the records first)
@@ -1164,7 +1257,11 @@ if [ -n "$full" ]; then
     for c in $(chains_of full); do run_chain full "$c" & pids+=($!); done
     wait "${pids[@]}"
   else
-    for n in $(names_of full); do run_one "$n"; done
+    # GTS216 (a): the new crops' light chains beside the serial run (none: the serial run alone, as before)
+    cchains=" $(gate_crop_chains | tr '\n' ' ')" cpids=()
+    for c in $cchains; do run_chain full "$c" & cpids+=($!); done
+    for n in $(names_of full); do case $cchains in *" ${chain[$n]} "*) continue ;; esac; run_one "$n"; done
+    [ ${#cpids[@]} -eq 0 ] || wait "${cpids[@]}"
   fi
   for n in $(names_of full); do [ "${kind[$n]}" = build ] || report "$n"; done
   stall_report

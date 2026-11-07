@@ -49,9 +49,9 @@ mkdir -p "$d/goroot"; echo go-fake > "$d/goroot/VERSION"
 # listed FN: the files FN's key hashes (its input, stubbed)
 listed() {
   env -i PATH="$PATH" ARBACE_GOROOT="$d/goroot" bash -c '
-    root=$1; . "$2"
+    root=$1; . "$4"; . "$2"
     xargs() { cat; }; sha256sum() { cat; }; cut() { cat; }
-    "$3"' _ "$r" "$d/fns.bash" "$1"
+    "$3"' _ "$r" "$d/fns.bash" "$1" "$ver"
 }
 gk=$(listed gate_key); rk=$(listed gate_rest_key)
 echo "$gk" | grep -qx go-fake && echo "$gk" | grep -qx arbace/core.ae || { echo "FAIL: gate_key's stubbed run printed no list"; echo "$gk" | head; exit 1; }
@@ -95,7 +95,7 @@ for f in go/arbace/scminterp.ae go/arbace/scminterp/natives.ae seed/arbace-seed-
 done
 keys() {
   env -i PATH="$PATH" ARBACE_GOROOT="$d/goroot" TMPDIR="$TMPDIR" bash -c '
-    . "$2"; echo "runtime $(arbace_runtime_key "$1")"; echo "javac $(arbace_javac_key "$1")"' _ "$r" "$d/keys.bash"
+    . "$3"; . "$2"; echo "runtime $(arbace_runtime_key "$1")"; echo "javac $(arbace_javac_key "$1")"' _ "$r" "$d/keys.bash" "$ver"
 }
 k0=$(keys)
 echo "$k0" | grep -qE '^runtime [0-9a-f]{64}$' && echo "$k0" | grep -qE '^javac [0-9a-f]{64}$' \
@@ -121,5 +121,55 @@ for p in '!go/arbace/oi.ae' '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm
          '!go/arbace/scminterp/' '!go/arbace/py.ae' '!go/arbace/py/' '!go/arbace/libm.ae' '!go/arbace/libm/'; do
   if echo "$jb" | grep -qF "\"$p\""; then ok "audit :javac names $p"; else bad "audit :javac does not name $p"; fi
 done
+# PYS30 (a), the keys commit (doc/GATE-SURVEY.md, "As built: GT9 (write-ahead)"): bin/lib/version.bash's arbace_crop_paths, the one
+# list of the crops' paths, out of all three keys: gate_key, arbace_runtime_key and arbace_javac_key computed for real on the
+# fabricated checkout (gate_key with its scripts beside), a new file under each crop path moves none of them; an embedded path
+# (the runtime's, jrt's, an embedded namespace) still moves those that hash it; embed.ae's excluded and the audit's crop-rules
+# name the list's Arbace namespaces and paths alike
+set -f  # the list's patterns are words here, never globs
+sed -n '/^gate_key() {/,/^}/p' "$ago" > "$d/gk.bash"
+cat "$d/keys.bash" "$d/gk.bash" > "$d/keys3.bash"
+mkdir -p "$r/bin/lib"; cp "$ver" "$r/bin/lib/version.bash"; cp "$jkb" "$r/bin/lib/javac-key.bash"
+keys3() {
+  env -i PATH="$PATH" ARBACE_GOROOT="$d/goroot" TMPDIR="$TMPDIR" bash -c '
+    root=$1; . "$2"; . "$3"
+    echo "gate $(gate_key)"; echo "runtime $(arbace_runtime_key "$1")"; echo "javac $(arbace_javac_key "$1")"' _ "$r" "$ver" "$d/keys3.bash"
+}
+crops=$(env -i PATH="$PATH" bash -c '. "$1"; printf "%s\n" "${arbace_crop_paths[@]}"' _ "$ver")
+[ "$(echo "$crops" | wc -l)" -ge 40 ] && ok "arbace_crop_paths: $(echo "$crops" | wc -l) patterns" || bad "arbace_crop_paths: $(echo "$crops" | wc -l) patterns"
+b0=$(keys3)
+echo "$b0" | grep -qE '^gate [0-9a-f]{64}$' && echo "$b0" | grep -qE '^runtime [0-9a-f]{64}$' && echo "$b0" | grep -qE '^javac [0-9a-f]{64}$' \
+  || { echo "FAIL: the three keys' run printed no keys"; echo "$b0"; exit 1; }
+for p in $crops; do
+  f=${p%\*}; case $p in *'*') f=${f}gt9-new.ae ;; esac
+  mkdir -p "$r/$(dirname "$f")"; echo new > "$r/$f"
+  k=$(keys3)
+  if [ "$k" = "$b0" ]; then ok "a file at $f moves no key (gate, runtime, javac)"
+  else bad "a file at $f moves $(for n in gate runtime javac; do [ "$(echo "$k" | grep "^$n ")" = "$(echo "$b0" | grep "^$n ")" ] || printf '%s ' "$n"; done)"; fi
+  rm -f "$r/$f"
+done
+for spec in "arbace/core.ae gate javac" "arbace/repr/java/read.ae javac" "arbace/lang/RT.ae gate runtime javac" "go/arbace/jrt/x.ae gate runtime javac" \
+            "go/arbace/ci/expr.ae gate runtime javac" "arbace/o2j.ae gate javac" "jdk/forms/java.base/x.ae gate runtime javac"; do
+  set -- $spec; f=$1; shift
+  k1=$(keys3); mkdir -p "$r/$(dirname "$f")"; echo "moved $RANDOM" >> "$r/$f"; k=$(keys3)
+  moved=$(for n in gate runtime javac; do [ "$(echo "$k" | grep "^$n ")" = "$(echo "$k1" | grep "^$n ")" ] || printf '%s ' "$n"; done)
+  [ "$moved" = "$* " ] && ok "a change to $f moves $*" || bad "a change to $f moves '${moved}', not '$* '"
+done
+# the list and its mirrors
+emb=$(sed -n '/^(def excluded/,/^   "arbace\/instant_timestamp.ae"\])/p' "$src/arbace/j2g/embed.ae")
+for p in $(echo "$crops" | grep '^arbace/'); do
+  q=${p%\*}
+  if echo "$emb" | grep -qF "\"$q\""; then ok "embed.ae's excluded names $q"; else bad "embed.ae's excluded does not name $q"; fi
+done
+cr=$(sed -n '/^(def crop-rules/,/\])$/p' "$aud")
+for p in $crops; do
+  q="!${p%\*}"
+  if echo "$cr" | grep -qF "\"$q\""; then ok "the audit's crop-rules name $q"; else bad "the audit's crop-rules do not name $q"; fi
+done
+[ "$(echo "$cr" | grep -o '"![^"]*"' | wc -l)" = "$(echo "$crops" | wc -l)" ] && ok "the audit's crop-rules are the list, no more" \
+  || bad "the audit's crop-rules: $(echo "$cr" | grep -o '"![^"]*"' | wc -l) rules, the list $(echo "$crops" | wc -l)"
+[ "$(grep -c 'crop-rules seed-pins build-scripts)' "$aud")" = 4 ] && ok "the audit's :gate, :javac, :prog and :javac-prog take crop-rules" \
+  || bad "crop-rules in $(grep -c 'crop-rules seed-pins build-scripts)' "$aud") of the audit's four hosts"
+
 [ $fails = 0 ] && { echo "PASS: gate-key-crops-test"; exit 0; }
 echo "FAIL: gate-key-crops-test, $fails failures"; exit 1
