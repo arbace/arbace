@@ -171,16 +171,41 @@ std_build() {
   sha256sum < "$sb/ir.sha256" | cut -d' ' -f1 > "$sb/key"
 }
 
+std_ir_current() { # std's IR at the checkout's pin (the ci leg's input; no sysroot): its ir.sha256 the committed one
+  [ -f "$1/ir.sha256" ] && [ -d "$1/ir" ] && cmp -s "$1/ir.sha256" "$root/test/rust/runtime/ir.sha256"
+}
+
 std_current() { # std's build at the checkout's pin: its ir.sha256 the committed one, its sysroot there
   local sb=$1
   [ -f "$sb/ir.sha256" ] && [ -d "$sb/sysroot" ] && cmp -s "$sb/ir.sha256" "$root/test/rust/runtime/ir.sha256"
 }
 
+# repr/c's reader: arbace.repr.c and the namespaces it loads (not its checks: annot, c23check, parsecheck, ppcheck, results,
+# rtcheck), what the lowering prints and runtime-ci reads with
+rc_reader() { echo arbace/repr/c.ae arbace/repr/c/{convert,host,layout,lex,parse,pedantic,pp,print,tree}.ae; }
+
+lowered_key() { # what std's lowered C (the ci leg's library) is made from, a digest a line: the namespaces the lowering loads,
+  # repr/c's reader, the layer, std's IR pin and profile, the tools' host; not gcc, clang or the gcc leg's steps (rt_unit), so
+  # that the ci leg's library needs no C toolchain to be current (rust-90: rsi's independence)
+  local exe
+  # shellcheck disable=SC2046
+  ( cd "$root" && sha256sum arbace/cpp/lower.ae arbace/rust/lower.ae arbace/rust/rt/eh.c.ae arbace/repr/llvm.ae arbace/repr/llvm/*.ae \
+      $(rc_reader) test/rust/runtime/std.edn test/rust/runtime/ir.sha256 )
+  . "$root/bin/lib/host.bash"
+  exe=$(arbace_host_exe)
+  printf '%s  the tools'"'"' host\n' "$(sha256sum < "$exe" | cut -d' ' -f1)"
+}
+
+lowered_current() { # lowered_current OUT: OUT's lowered std at the checkout's lowered_key
+  [ -f "$1/lowered.key" ] && [ "$(cat "$1/lowered.key")" = "$(lowered_key | sha256sum | cut -d' ' -f1)" ]
+}
+
 runtime_key() { # what the lowered std is built from, a digest a line (as bin/cppi's runtime-key): the namespaces the lowering
   # loads, the layer, std's IR pin and profile, runtime-build's own steps, gcc's flags, gcc, clang and the tools' host
   local exe
+  # shellcheck disable=SC2046
   ( cd "$root" && sha256sum arbace/cpp/lower.ae arbace/rust/lower.ae arbace/rust/rt/eh.c.ae arbace/repr/llvm.ae arbace/repr/llvm/*.ae \
-      arbace/repr/c.ae arbace/repr/c/*.ae test/rust/runtime/std.edn test/rust/runtime/ir.sha256 )
+      $(rc_reader) test/rust/runtime/std.edn test/rust/runtime/ir.sha256 )
   printf '%s  bin/rsi:runtime_build,rt_unit\n' "$(declare -f runtime_build rt_unit | sha256sum | cut -d' ' -f1)"
   printf '%s  GCC_FLAGS\n' "$(printf '%s' "$GCC_FLAGS" | sha256sum | cut -d' ' -f1)"
   printf '%s  gcc --version\n' "$(gcc --version | head -1 | sha256sum | cut -d' ' -f1)"
@@ -206,10 +231,15 @@ rt_unit() { # rt_unit DIR: one unit's print's object against its IR's, gcc -O0 o
 }
 export -f rt_unit; export GCC_FLAGS
 
-runtime_build() { # bin/rsi runtime-build [OUT] [--jobs N]: std's IR lowered (EVAL.md §8)
-  local out=$root/.tmp/rsi/runtime jobs=${RSI_JOBS:-4} sb=${RSI_STD_DIR:-$root/.tmp/rsi/std}
-  while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; -*) echo "runtime-build: unknown option $1" >&2; exit 2 ;; *) out=$1; shift ;; esac; done
-  std_current "$sb" || ( std_build )
+runtime_build() { # bin/rsi runtime-build [OUT] [--jobs N] [--ci]: std's IR lowered (EVAL.md §8); --ci: the lowered C alone (the
+  # ci leg's library: no object comparison, no gcc), from std's pinned IR without its sysroot
+  local out=$root/.tmp/rsi/runtime jobs=${RSI_JOBS:-4} sb=${RSI_STD_DIR:-$root/.tmp/rsi/std} ci=""
+  while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; --ci) ci=1; shift ;; -*) echo "runtime-build: unknown option $1" >&2; exit 2 ;; *) out=$1; shift ;; esac; done
+  if [ -n "$ci" ]; then
+    std_ir_current "$sb" || { echo "rsi runtime-build --ci: std's IR in $sb is not at test/rust/runtime/ir.sha256 (bin/rsi std-build, the oracle tier)" >&2; exit 1; }
+  else
+    std_current "$sb" || ( std_build )
+  fi
   disk_ok
   mkdir -p "$out"; out=$(cd "$out" && pwd)
   rm -rf "$out/units" "$out/lib" "$out/key" "$out/key.txt"; mkdir -p "$out/units" "$out/lib"
@@ -223,8 +253,19 @@ runtime_build() { # bin/rsi runtime-build [OUT] [--jobs N]: std's IR lowered (EV
     printf '%s\t%s\t%s\n' "$(basename "$u")" "$sb/ir/$f" "$out/units/$u"
   done > "$out/lower.tsv"
   t0=$(date +%s)
+  lowered_key > "$out/lowered.key.start"
   GOMAXPROCS=$jobs GOMEMLIMIT=${RSI_RT_GOMEMLIMIT:-4GiB} RSI_THREADS=$jobs arbace_tool -m arbace.rust.lower lower-list "$out/lower.tsv" --runtime > "$out/lower.log" 2>&1 || true
   t1=$(date +%s)
+  if [ -n "$ci" ]; then
+    arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/rust/rt/eh.c.ae" "$out/rt.c" 2> "$out/rt.log"
+    local nl=0 nr=0
+    for d in $(cut -f3 "$out/lower.tsv"); do if [ -f "$d/lowered.c" ]; then nl=$((nl+1)); else nr=$((nr+1)); fi; done
+    echo "runtime-build --ci: $((nl+nr)) units, $nl lowered, $nr refused; $((t1-t0)) s" | tee "$out/times.txt"
+    [ "$nr" = 0 ] || exit 1
+    mv "$out/lowered.key.start" "$out/lowered.key.txt"
+    sha256sum < "$out/lowered.key.txt" | cut -d' ' -f1 > "$out/lowered.key"
+    return 0
+  fi
   cut -f3 "$out/lower.tsv" | tr '\n' '\0' | xargs -0 -P "$jobs" -I{} nice bash -c 'rt_unit "$1"' _ {}
   for d in "$out"/units/*; do
     c=$(basename "$d")
@@ -249,6 +290,8 @@ runtime_build() { # bin/rsi runtime-build [OUT] [--jobs N]: std's IR lowered (EV
   [ "$bad" = 0 ] || { awk -F'\t' '$3 != "same" || $4 != "lowered" || $5 != "0"' "$out/results.tsv" | head -20 >&2; exit 1; }
   mv "$out/key.start" "$out/key.txt"
   sha256sum < "$out/key.txt" | cut -d' ' -f1 > "$out/key"
+  mv "$out/lowered.key.start" "$out/lowered.key.txt"
+  sha256sum < "$out/lowered.key.txt" | cut -d' ' -f1 > "$out/lowered.key"
 }
 
 runtime_ci() { # runtime_ci [OUT]: OUT/ci (RE4, EVAL.md §9): std's lowered units and the layer read by repr/c as ci's library
@@ -256,14 +299,16 @@ runtime_ci() { # runtime_ci [OUT]: OUT/ci (RE4, EVAL.md §9): std's lowered unit
   # sources and options: arbace/rust/run.ae's marked part, repr/c, test/c/host, the ports) changed; runtime-build first when OUT
   # is not at the checkout's key. Prints OUT/ci.
   local out=${1:-${RSI_RUNTIME_DIR:-$root/.tmp/rsi/runtime}} k f u d sb=${RSI_STD_DIR:-$root/.tmp/rsi/std}
-  if ! runtime_current "$out" || [ ! -f "$out/rt.c" ] \
+  # the lowered C at the checkout's lowered_key (no C toolchain in the key: the ci leg needs none), else runtime-build --ci
+  if ! lowered_current "$out" || [ ! -f "$out/rt.c" ] \
      || cut -f3 "$out/lower.tsv" | while read -r d; do [ -f "$d/lowered.c" ] || echo missing; done | grep -q missing; then
-    echo "runtime-ci: the lowered std in $out is not at the checkout's key (or has no lowered C): runtime-build" >&2
-    ( runtime_build "$out" ) >&2 || exit 1
+    echo "runtime-ci: the lowered std in $out is not at the checkout's key (or has no lowered C): runtime-build --ci" >&2
+    ( runtime_build "$out" --ci ) >&2 || exit 1
   fi
   out=$(cd "$out" && pwd)
-  k=$( { cat "$out/key"; (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/rust/run.ae | sha256sum
-                                 find arbace/repr/c.ae arbace/repr/c test/c/host -type f | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -d' ' -f1)
+  # shellcheck disable=SC2046
+  k=$( { cat "$out/lowered.key"; (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/rust/run.ae | sha256sum
+                                 { rc_reader | tr ' ' '\n'; find test/c/host -type f; } | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -d' ' -f1)
   if [ "$(cat "$out/ci/key" 2>"$TMPDIR/rsi-cikey.err")" != "$k" ]; then
     # an interrupted read at the same key (ci/pending) resumes: read-lib keeps the units read whole
     [ "$(cat "$out/ci/pending" 2>"$TMPDIR/rsi-cikey.err")" = "$k" ] || rm -rf "$out/ci"
@@ -290,7 +335,7 @@ runtime_ci() { # runtime_ci [OUT]: OUT/ci (RE4, EVAL.md §9): std's lowered unit
   # keyed apart (the reader's options and sources, the ports), so that a port does not read std again
   local kp
   kp=$( (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/rust/run.ae | sha256sum
-         find arbace/repr/c.ae arbace/repr/c test/c/host test/rust/runtime/ci -type f | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -d' ' -f1)
+         { rc_reader | tr ' ' '\n'; find test/c/host test/rust/runtime/ci -type f; } | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -d' ' -f1)
   if [ "$(cat "$out/ci/ports/key" 2>"$TMPDIR/rsi-cikey.err")" != "$kp" ]; then
     rm -rf "$out/ci/ports"; mkdir -p "$out/ci/ports"
     for f in "$root"/test/rust/runtime/ci/*.c; do [ -f "$f" ] && printf '%s\t%s\n' "ci-$(basename "$f" .c)" "$f"; done > "$out/ci/ports/list.tsv"
@@ -358,6 +403,15 @@ case ${1:-} in
   sets) sets ;;
   std-build) shift; std_build "$@" ;;
   runtime-build) shift; runtime_build "$@" ;;
+  runtime-keys) # the ci leg's keys of the checkout: lowered_key's digest, runtime-ci's library's and its ports' (a runtime made
+    # elsewhere at the same sources is current here when its lowered.key, ci/key and ci/ports/key are these)
+    lk=$(lowered_key | sha256sum | cut -d' ' -f1)
+    # shellcheck disable=SC2046
+    k=$( { echo "$lk"; (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/rust/run.ae | sha256sum
+                                  { rc_reader | tr ' ' '\n'; find test/c/host -type f; } | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -d' ' -f1)
+    kp=$( (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/rust/run.ae | sha256sum
+           { rc_reader | tr ' ' '\n'; find test/c/host test/rust/runtime/ci -type f; } | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -d' ' -f1)
+    printf 'lowered %s\nci %s\nports %s\n' "$lk" "$k" "$kp" ;;
   lower-check) shift; lower_check "$@" ;;
   runtime-ci) shift; runtime_ci "$@" ;;
   lower-unit) shift # the lowering's unit cases (test/rust/lower/*.ll, or FILE.ll...): each run by lli and lowered, compiled by gcc -O0 and run, the outputs equal
@@ -399,9 +453,17 @@ case ${1:-} in
     arbace_tool -m arbace.rust.check make-fake "$jw" test/rust/synthetic/fmt.rs samples synthetic
     if arbace_tool -m arbace.rust.check run-judge "$jw" eval samples synthetic > "$jw/mut.out" 2>&1; then echo "judge-test: a changed output PASSES"; jbad=1
     elif grep -q 'FAIL test/rust/synthetic/fmt.rs differ stdout' "$jw/mut.out"; then echo "judge-test: a changed output fails, as it must"; else echo "judge-test: the changed output failed otherwise"; cat "$jw/mut.out"; jbad=1; fi
+    arbace_tool -m arbace.rust.check own-test || jbad=1
     rm -rf "$jw"; exit $jbad ;;
   check) shift; exec "$root/bin/lib/rsi/check" "$@" ;;
+  ir-pack) shift # the oracle tier, by hand (rust-90): each program's IR made by rustc as check's RSI_IR=rustc makes it, packed
+    # deterministically into test/rust/ir/CORPUS.tar.xz (the UI corpus's into RSI_IR_PACKS, default .tmp/rsi/ir-packs/ui.tar.xz),
+    # every file pinned by test/rust/ir/CORPUS.sha256; check's options (--corpus, --set, --only, --sample)
+    RSI_CHECK_WORK=${RSI_CHECK_WORK:-$root/.tmp/rsi-pack} exec "$root/bin/lib/rsi/check" --make-pack "$@" ;;
   run) shift; exec "$root/bin/lib/rsi/run" "$@" ;;
+  own-verdicts) shift # the UI programs' own verdicts (compiletest's rule on the status; rust-90): counted over the corpus and the
+    # record, and rustc's recorded runs against them (from the records alone, seconds)
+    cd "$root"; GOMEMLIMIT=1GiB arbace_tool -m arbace.rust.check own-verdicts "$@" ;;
   divergences) shift; lvl=eval; [ "${1:-}" = --aot ] && lvl=aot; GOMEMLIMIT=1GiB arbace_tool -m arbace.rust.check divergences "$lvl" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
 esac

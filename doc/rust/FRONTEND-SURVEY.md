@@ -1425,3 +1425,28 @@ miss is now small and scattered; the judge's corpus (RFP14's UI suite and the cr
 - **RFP20 (a):** the helper's `--typeck` gains each closure's kind and captures, and rustc's capture analysis is ported in full, judged
   fact by fact before RF10 reads it.
 - **RFP21 (a):** RFP15 (loading `mod m;` files through expansion, resolution, lowering and collection) comes before RF10.
+
+## As built: rust-90, the read stage native and what eval still takes from rustc (2026-11-07)
+
+Branch `rust-90` (doc/rust/RUST-EVAL-SURVEY.md, "As built: rust-90"). The native reader (the survey's calibration, doc/rust/NATIVE-READER.md)
+is now the read stage's default: `bin/repr-rust read`, `dump` and `roundtrip` run no rustc, and the round trip's tree level compares
+the native reader's trees and lines (`arbace.repr.rust.native tree`, byte for byte rsdump's on `native-check`'s 68 files). The
+round trip's sample by day with rustc, rustdoc, cargo, cc, gcc, clang and the LLVM tools first on `PATH` exiting 99: std's eight files
+and 82 UI files (tree, text and mode `:full`'s tree levels) equal, the seven controls differing, the stubs' log empty.
+
+**How far rsi can run from the native front end instead of rustc's IR.** The front end ends today at type checking (RF9b: 99.7% of
+the samples' facts, 99.6% of the crates'); rsi runs rustc's `-O0` LLVM IR. The path between, by milestone (§7), and what each
+consumes from rustc after it is built:
+
+| piece | state | what it would still take from rustc |
+|---|---|---|
+| RF10: THIR, MIR building, promotion, the semantic passes, CTFE | not started; needs RF9's captures (RFP20 (a)) and RFP15 (a) first (RFP21 (a)) | nothing for the program's own bodies |
+| RF3's back half (monomorphization, layout, ABI, codegen to LLVM forms) | a first slice: `bin/rsi run --front mir`, from rustc's MIR, `no_std` programs with an `extern "C"` main | std's generic MIR (Tier U: std's MIR library dumped by the helper at the pin, a record) |
+| RF11: Tier U's first light, `check --front arbace` | not started | std's interface and MIR library (Tier U's data), std's lowered IR (`test/rust/runtime/ir.sha256`) |
+| RF12: Tier S, std from source | not started | nothing |
+
+So until RF12 every eval and AOT case consumes a record a toolchain made (std's MIR or IR at the least): **eval and AOT stay at 0.5
+whatever the front end does before Tier S**, as RF10-RF11 move only the program's own nine-in-266 functions (§2.4) off rustc's IR.
+What rust-90 pinned instead: the programs' IR as packs (`test/rust/ir/`, `bin/rsi ir-pack`, the oracle tier), std's IR at its pin,
+and the ci leg's library keyed without the C toolchains (EVAL.md §13). The estimates of §7 stand: RF10 14-22 days, RF11 5-8, RF12
+35-60.

@@ -1123,3 +1123,111 @@ env, ci-param-width, c-variadic, lto). Over the whole suite the causes size so (
   process (`.tmp/re6/batch.sh`). Options: (a) **`bin/rsi check` itself batches (`RSI_BATCH`, a process per N programs) in the
   light tier, the night's runs one process as now**; (b) find what the builder keeps (the library fragments as loaded: the
   link's cache, RES43) and bound it. *Recommended: (a) now, (b) with RES43*.
+
+## Decided (the user, 2026-11-07)
+
+Relayed by the main session (doc/CROPS-SCORE.md on `mac/batch1`, "Decided (the user, 2026-11-07)"): a test's own verdict counts as
+a judge no toolchain made (exit status; rustc's UI tests' `//~ ERROR` annotations and run-pass/check-pass headers; expected output
+shipped with the test; the round trip's reread forms equal); a mixed stage is the case-weighted mean of 1 and 0.5; a pinned input
+corpus in the crop's own language counts 1 when no toolchain output about it is a reference; toolchain runs move to the oracle tier.
+
+## As built: rust-90 (2026-11-07)
+
+Branch `rust-90` from `mac/rust-rf9b` (`523640cd8`) with `mac/rust-row` and `mac/rust-re6` merged in (both clean), by an agent on the
+main host by day (the light tier: no gate but its planner, no build of Arbace, sample checks only, every process under about 2 GiB;
+stage 0 `/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated with `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1
+ARBACE_NO_IMAGE=1`). The brief: Rust above 90% on `bin/crops-score`'s completeness, maturity and independence. The order, by what
+moves the scores most per day: independence first (the read stage native, the judge by own verdicts, eval's inputs pinned: one day's
+code each, and three of five stages), then maturity (the gate's steps and the controls: data and small scripts), then completeness
+(the eval and AOT cells need runs the day cannot give: the night's).
+
+### What was built
+
+| piece | files | what |
+|---|---|---|
+| the native read as the default | `bin/repr-rust`, `arbace/repr/rust/native.ae` | `dump`, `read` and `roundtrip` read with the native reader (`--reader helper`: rsdump, the oracle tier); the round trip's tree level from the native trees: `arbace.repr.rust.native tree` writes `rsdump tree`'s `.tree` and `.lines` from the native tree, byte for byte the helper's (`bin/repr-rust native-check --trees`: 68 of 68 files); rustc only for `--reader helper` and the rustc levels (`--iface`, `--run`, `--std`, `--code`); a round trip's `--only` dumps and parses only its files (doc/rust/NATIVE-READER.md, SPEC §11.3) |
+| the round trips' controls | `test/rust/roundtrip-edit-controls.edn` (named so at batch 2's merge: GT9's crossed pairs hold `roundtrip-controls.edn`), `arbace/repr/rust.ae` (`controls`), `bin/repr-rust controls` | seven controls of the tree, lines and text judges (GTS81 (a)), run last by every round trip |
+| the programs' IR packs | `bin/lib/rsi/check` (`RSI_IR=pack`, `--make-pack`), `bin/rsi ir-pack`, `bin/lib/rsi/link-ir`, `test/rust/ir/` | rustc's `-O0` IR of each program made once by hand and pinned (EVAL.md §13): samples and synthetic committed (1.4 MB), the UI corpus's in `.tmp/rsi/ir-packs` (its every-40th pinned today) |
+| the ci leg's keys | `bin/rsi` (`lowered_key`, `runtime-build --ci`, `runtime-keys`, `rc_reader`) | std's lowered library current without gcc or clang in its key; repr/c's reader alone keys it (its checks changed on this line and would have read std again, about four hours) |
+| the tests' own verdicts | `arbace/rust/check.ae` (`own-verdict`, `verdict-met?`, `own-verdicts`, `own-test`), `bin/rsi own-verdicts` | compiletest 1.99.1's run rule (EVAL.md §13): 3,409 of the 3,718 UI programs judged by their own verdict |
+| the builder's batches | `bin/lib/rsi/check` (`RSI_BATCH`) | RES53 (a): a fresh builder process every N programs |
+| the gate's steps | `test/gate/steps.edn`, `test/gate/costs.ae` | `rust-read-essential`, `rsi-judge-test`, `rsi-essential`; `rust-roundtrip` (five corpora), `rsi-check` (samples, synthetic), `rsi-check-ui` (every 40th); hosts `:stage0` and `:go` alone; the group `:rust`, `:crops`' `:rust`, `reap`'s inputs; the planner validates them (`gate.plan plan`, every Rust step planned), `test/gate/costs-test.bash` passes |
+| the REAP row | `test/reap/cells.edn`, `matrix.edn` | the read cell's rustdoc level beside (`:role :beside`, the oracle tier); `bin/reap` 0 problems |
+
+### Results (the day's, light; rustc, rustdoc, cargo, cc, gcc, g++, c++, clang, clang++, clang-23, llvm-as, opt, lli, llc, ld and ar first on `PATH` exiting 99, the log empty after every run)
+
+| check | result |
+|---|---|
+| `bin/repr-rust native-check --trees` (with rustc: the oracle) | 68 of 68 files' `.tree` and `.lines` byte for byte the helper's, 18 s |
+| `bin/repr-rust roundtrip --text --only` std's 8 files (`rust-read-essential`'s) | every file equal at the tree, text and `:full` tree levels; the controls 7 of 7 |
+| the same over 82 UI files (`try-block`, `return`, `deprecation`, `offset-of`) | 82 of 82 at each level, 9,323 spans, 3 min, 1.5 GB at the peak |
+| `bin/repr-rust roundtrip --reader helper` (rustc's parser, the oracle tier) | 2 of 2: the helper path unchanged |
+| `bin/repr-rust controls` | 7 of 7 differ, each subject against itself equal |
+| `bin/rsi ir-pack --corpus samples,synthetic` twice in two places | 73 programs, the packs byte for byte equal (after the shim's ModuleID fix) |
+| `bin/rsi runtime-ci` | current at `lowered_key` (rust-re6's library re-keyed), no toolchain |
+| `bin/ci musl ensure` (repr/c's checks changed on this line: reread) | 1,331 units in about 45 minutes at 2 threads, 1.5 GB; no gcc (the copied tree configured) |
+| `bin/rsi check --essential` (13 synthetic programs from the pack, `RSI_BATCH=3 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB`) | **13 of 13 pass**, the two controls in the run differing; 34.5 minutes; the builder's peak 3.8 GB, over the day's 2 GiB line (its GOMEMLIMIT is soft): the steps declare 4 GiB, and RES60 |
+| `bin/rsi judge-test` | the judge's own runs pass, a changed output fails, the own verdicts 12 of 12 |
+| `bin/rsi own-verdicts` | 3,409 of 3,718 UI programs by their own verdict; rustc's runs meet 277 of 281 |
+| `bin/reap` | 19 of 20 cells checked (Rust's AOT: no check yet), 0 problems |
+| the gate's planner (`gate.plan plan` on a hand-made hosts file), `test/gate/costs-test.bash` | every Rust step planned; passed |
+
+The scores (`bin/crops-score --ref rust-90 --crop rust` from `mac/batch1`'s tool, with `.tmp/independence.diff` and
+`.tmp/crops-rules.diff` applied to its data): completeness **75.0 → 75.0** (the AOT cell), maturity **66.7 → 95.8** (controls 0.25 → 1,
+gate 0 → 1; the AOT cell's 0.75 left), independence **20.0 → 80.0** (read 0 → 1, eval and AOT 0 → 0.5, print 1, judge 0 → 1.0: 66,692
+cases by their own verdict, 5 by rustc's records).
+
+What is left: the AOT cell (RES55), independence above 80% (RES54), the whole corpora natively and the eval record over the UI corpus
+(the night's).
+
+### Night commands (through `bin/heavy-lock`, the night's 1.5 GiB a process, one check at a time; `. .tmp/env.sh` first: stage 0, the checkout's sources evaluated)
+
+1. `bin/repr-rust roundtrip --text all` (the native reader over the five corpora, 33,346 files; `REPR_RUST_JOBS=4`), then `bin/repr-rust
+   native-check --trees` and the oracle tier's `roundtrip --reader helper --iface --run --code all` only at a tag (RES59).
+2. `bin/rsi ir-pack --corpus ui` (rustc 1.99.1 on the 3,718 programs, about 20 minutes at 2 jobs: the oracle tier), then commit
+   `test/rust/ir/ui.sha256` (RES56 (a)).
+3. `RSI_BATCH=2 RSI_THREADS=1 RSI_JOBS=2 RSI_CI_MEMLIMIT=1400MiB bin/rsi check --corpus samples,synthetic --record` (73 programs, about two
+   hours in batches; `threads.rs`, `collections.rs`, `errors.rs` near the line), then `bin/rsi check --corpus ui --record` (about 5.5 hours
+   at one builder thread; the UI programs by their own verdict), `bin/rsi divergences`, `bin/rsi own-verdicts`, `bin/reap --record`,
+   `bin/crops-score --ref rust-90 --crop rust` from `mac/batch1`'s tool.
+4. AOT: none until RES34 (RES55).
+
+### Proposed (RES54-RES60)
+
+- **RES54 Independence above 80%.** With the read, print and judge stages at 1, eval and AOT are 0.5 as long as any case consumes a
+  toolchain's record, and every Rust program consumes std's (its MIR or IR) until std is built from source (FRONTEND-SURVEY, "As
+  built: rust-90": RF10, RF11 move only the program's own bodies off rustc; RF12, Tier S, 35 to 60 days, removes std's). So the
+  crop's independence is at most (1 + 0.5 + 0.5 + 1 + 1) / 5 = 80% before RF12. Options: (a) **accept 80% until Tier S, and go on
+  with the front end in the surveys' order (RFP20, RFP15, RF10, RF11, RF12)**; (b) count std's pinned data (its IR at
+  `test/rust/runtime/ir.sha256`, Tier U's MIR library) as the crop's own pinned input (it is rustc's output: against the rule of
+  2026-11-07); (c) score eval and AOT case by case once Tier U runs (the program's own functions native, std's recorded), still 0.5
+  by the rule. *Recommended: (a)*: the number is honest, and RF12 is the only route the rule rewards.
+- **RES55 AOT's cell.** `bin/rsi check --aot` translates each program's node program with its linked std (RE4: about 1,000 s and up
+  to 7 GiB for `panics.rs`): over the night's 1.5 GiB a process, so the AOT cell stays "no check yet" (completeness 75%, maturity's
+  first item 0.75). Options: (a) **RES34 (a) first: std's fragments translated once per key into a Go package the programs call
+  (CS273's next step, shared with C++), then `check --aot` over the samples, the synthetic corpus and the UI corpus's every 40th,
+  recorded**; (b) record the AOT cell over the samples alone on a heavy night slot (7 GiB a process, about 20 minutes to 1.5 hours a
+  program), the rest later; (c) leave it. *Recommended: (a)*; (b) only if the user wants the cell recorded before RES34.
+- **RES56 The UI corpus's IR pack.** About 18 MB for the 3,718 programs (the every-40th's 452 KiB). Options: (a) **in the main
+  checkout's `.tmp/rsi/ir-packs/`, made by hand (`bin/rsi ir-pack --corpus ui`), each file pinned by the committed
+  `test/rust/ir/ui.sha256`; a clone or worktree reads the main checkout's (as built)**; (b) committed as `test/rust/ir/ui.tar.xz`.
+  *Recommended: (a)*: the pin is the record; (b) if a clean run's clone must hold it.
+- **RES57 ci's libc on this line.** musl's ci forms read `test/c/host`'s predefined macros (gcc's record) and, on `rust-90`, musl's
+  configure products made by gcc (`bin/lib/ci/musl` prepares with `CC=gcc ./configure` when the tree is not configured).
+  `mac/batch1` (C's `c-indep-b1`) derives them without gcc. Options: (a) **take batch1's side at the merge; Rust's eval fact then
+  rests on C's derived musl, no gcc even on a fresh `.tmp`**; (b) carry a copy of C's change here. *Recommended: (a)*.
+- **RES58 The four programs the two judges see apart.** rustc's recorded runs fail four own verdicts (`compiletest-self-test/
+  trim-env-name.rs#set`, `#unset`, `process/process-spawn-with-unicode-params.rs`, `std/stdio-from.rs`): run-program's harness, not
+  the programs (environment trimming, a spawned child's arguments, stdio redirection). Options: (a) **a class `harness` in
+  `divergences.edn` when the night's run fails them, each with its cause**; (b) fix run-program's environment and stdio to
+  compiletest's. *Recommended: (a) now, (b) with RE7*.
+- **RES59 The round trips' known files under the native reader.** The five corpora's known files were recorded on rsdump's trees;
+  the native reader equals the helper on every file checked (native-check, 92 more by hand, 1,400 mutants, today's 90 round-tripped),
+  but the whole corpora were not round-tripped natively by day. Options: (a) **the night's `bin/repr-rust roundtrip --text all`
+  confirms them (a file that differs natively is a failure, to classify or fix)**; (b) keep `--reader helper` the gate's default until
+  then. *Recommended: (a)*.
+- **RES60 Rust's steps' memory.** `rsi-essential` and `rsi-check` declare 2 and 3 GiB, the builder held under 1.4 GiB
+  (`RSI_CI_MEMLIMIT`) in batches (`RSI_BATCH`); a first run of std's lowered library (`runtime-build --ci` and `runtime-ci`'s read,
+  about four hours, 6 GiB) is outside any budget. Options: (a) **the library kept by its key in the main checkout's `.tmp/rsi/runtime`
+  (as the gate's executables), the steps reading it (`RSI_RUNTIME_DIR`), its first build by hand**; (b) `:heavy` steps that build it
+  when missing. *Recommended: (a)*, with RES52's per-unit read.

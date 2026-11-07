@@ -56,7 +56,7 @@
 #   bin/repr-rust read [--reader helper|native] [--full] --corpus [CORPUS]
 #                                 dump the corpus and convert it into .tmp/repr-rust/forms/CORPUS/
 #                                 (CORPUS-full/; SPEC §2.1); report .tmp/repr-rust/forms/CORPUS.report.edn
-#   bin/repr-rust native-check [--full] [--edition E] [FILE...]
+#   bin/repr-rust native-check [--trees] [--full] [--edition E] [FILE...]
 #                                 the native reader against the helper (doc/rust/NATIVE-READER.md):
 #                                 each file dumped by both, the dumps equal as data (the
 #                                 configuration but the reader's name), or both an error; the first
@@ -64,7 +64,9 @@
 #                                 expression files). The files relative to the current directory;
 #                                 without, the list test/rust/native-check.txt (the samples and a
 #                                 few dozen files of std's crates, each line ROOT EDITION FILE).
-#                                 --full: dump --full's dumps (the tokens). Work and reports in
+#                                 --full: dump --full's dumps (the tokens); --trees: the round trip's
+#                                 tree level's texts instead (rsdump tree's .tree and .lines against
+#                                 the native reader's, byte for byte). Work and reports in
 #                                 .tmp/repr-rust/native-check/
 #                                 The negative controls (GT9; test/rust/native-controls.txt, REPR_RUST_NATIVE_CONTROLS): `ID SUBJECT REFERENCE`,
 #                                 two files of a group: the subject's native dump, with the reference's configuration, judged by the check's
@@ -143,6 +145,10 @@
 #                                 level's own comparison, the subject's print against the reference's original; it must differ (`control ID
 #                                 fails as it must`), else (`control passed`, or nothing to compare) the run fails. The behaviour levels
 #                                 (--run, --std, --code) have none
+#   bin/repr-rust controls        the round trips' negative controls (test/rust/roundtrip-edit-controls.edn,
+#                                 GTS81 (a)): each a subject and an edited candidate the tree level's
+#                                 or the text level's judge must find different (roundtrip runs them
+#                                 last; REPR_RUST_EDIT_CONTROLS=0 not)
 #   bin/repr-rust test [--samples] the spec's cases (test/rust/; bin/lib/repr-rust/test): the reader's
 #                                 samples, the worked example converted and its round trip, the
 #                                 interface level's cases, mode :full's cases, edition 2015's, the
@@ -267,10 +273,13 @@ corpus_file() {
 edition_plan() {
   local f
   f=$(corpus_file "$1")
-  arbace_tool -e "(let [c (read-string (slurp \"$f\"))]
+  # with the round trip's --only (\$only, a regular expression over the files), its files alone: a
+  # sample dumps and parses only what it converts
+  arbace_tool -e "(let [c (read-string (slurp \"$f\")) only (System/getenv \"REPR_RUST_PLAN_ONLY\")
+                         keep (fn [fs] (if (seq only) (filter #(re-find (re-pattern only) %) fs) fs))]
     (doseq [[ed ks] (sort-by key (group-by :edition (:crates c)))
-            :let [xs (set (mapcat :include-expr-files ks)) fs (remove xs (mapcat :files ks))]
-            [e fs] [[ed fs] [(str ed \"+expr\") (filter xs (mapcat :files ks))]] :when (seq fs)]
+            :let [xs (set (mapcat :include-expr-files ks)) fs (keep (remove xs (mapcat :files ks)))]
+            [e fs] [[ed fs] [(str ed \"+expr\") (keep (filter xs (mapcat :files ks)))]] :when (seq fs)]
       (println (str ed \"\t\" e \"\t\" (apply str (interpose \" \" fs))))))"
 }
 
@@ -422,9 +431,31 @@ run_native() {
     --edition "$ed" --helper-hash "sha256:$h"
 }
 
+# run_native_tree OUT EDITION FILE...: rsdump tree's .tree and .lines (the round trip's tree level,
+# SPEC §11.2) written from the native reader's trees (arbace.repr.rust.native tree), no rustc
+run_native_tree() {
+  local out=$1 ed=$2 flags=() nj=${REPR_RUST_NATIVE_JOBS:-4} exe; shift 2
+  case $ed in *+expr) ed=${ed%+expr}; flags+=(--expr) ;; esac
+  [ $# -gt 0 ] || return 0
+  . "$root/bin/lib/host.bash"
+  exe=$(arbace_host_exe)
+  printf '%s\n' "$@" | ARBACE_PATH=$root xargs -r -P "$nj" -n $(( ($# + nj - 1) / nj )) \
+    "$exe" -m arbace.repr.rust.native tree --pin "$root/tools/rsdump/RUSTC_VERSION" "${flags[@]}" -o "$out" --edition "$ed"
+}
+
+# run_trees OUT EDITION FILE...: the trees and lines of the round trip's tree level by $reader: the
+# native reader's (the default) or the helper's (rsdump tree, rustc's parser: the oracle tier)
+run_trees() {
+  case ${reader:-native} in
+    helper) run_helper tree "$@" ;;
+    native) run_native_tree "$@" ;;
+    *) echo "repr-rust: no reader ${reader} (helper or native)" >&2; return 2 ;;
+  esac
+}
+
 # run_reader dump OUT EDITION FILE...: run_helper's or run_native's, by $reader
 run_reader() {
-  case ${reader:-helper} in
+  case ${reader:-native} in
     helper) run_helper "$@" ;;
     native) run_native "$@" ;;
     *) echo "repr-rust: no reader ${reader} (helper or native)" >&2; return 2 ;;
@@ -455,9 +486,10 @@ dump_corpus() {
 # of root and edition, each group's files dumped by the helper into ref/N/ and by the native reader
 # into native/N/, compared by arbace.repr.rust.native check (a report N.report.edn each)
 native_check() {
-  local nc=$work/native-check ed=2024 files=() rc=0 i=0 dir e fs list l dump_full=0 full=()
+  local nc=$work/native-check ed=2024 files=() rc=0 i=0 dir e fs list l dump_full=0 full=() trees=0
   while [ $# -gt 0 ]; do
     case $1 in
+      --trees) trees=1; shift ;;
       --full) dump_full=1; full=(--full); shift ;;
       --edition) ed=$2; shift 2 ;;
       *) files+=("$1"); shift ;;
@@ -484,11 +516,31 @@ native_check() {
     local xf=() en=$e
     case $e in *+expr) en=${e%+expr}; xf=(--expr) ;; esac
     echo "== repr-rust native-check: $(wc -l < "$l") files, edition $e, in ${dir#"$root"/}" >&2
+    if [ "$trees" = 1 ]; then
+      # the round trip's tree level's texts: rsdump tree's against the native reader's, byte for byte
+      # shellcheck disable=SC2086
+      (cd "$dir" && run_helper tree "$nc/ref/$i" "$e" $fs) 2>> "$nc/helper.err" || true
+      # shellcheck disable=SC2086
+      (cd "$dir" && run_native_tree "$nc/native/$i" "$e" $fs) 2>> "$nc/native.err" || true
+      local f q=0 dd=0
+      for f in $fs; do
+        if cmp -s "$nc/ref/$i/$f.tree" "$nc/native/$i/$f.tree" && cmp -s "$nc/ref/$i/$f.lines" "$nc/native/$i/$f.lines"; then q=$((q + 1))
+        else dd=$((dd + 1)); echo "differs        $f"; fi
+      done | tee "$nc/$i.log"
+      [ -n "$(grep -l '^differs' "$nc/$i.log")" ] && rc=1
+      echo "repr-rust native-check --trees: $(wc -w <<< "$fs") files, $(( $(wc -w <<< "$fs") - $(grep -c '^differs' "$nc/$i.log") )) equal byte for byte (.tree and .lines), $(grep -c '^differs' "$nc/$i.log") differ" | tee -a "$nc/$i.log"
+      continue
+    fi
     # shellcheck disable=SC2086
     (cd "$dir" && run_helper dump "$nc/ref/$i" "$e" $fs) 2>> "$nc/helper.err" || true
     (cd "$dir" && native_tool check "${full[@]}" "${xf[@]}" --brief --ref "$nc/ref/$i" --out "$nc/native/$i" \
        --edition "$en" --list "$l" --report "$nc/$i.report.edn" --controls "${REPR_RUST_NATIVE_CONTROLS:-$root/test/rust/native-controls.txt}") | tee "$nc/$i.log" || rc=1
   done < "$list"
+  if [ "$trees" = 1 ]; then
+    cat "$nc"/[0-9]*.log | awk '/^repr-rust native-check --trees:/ { f += $4; q += $6; d += $(NF-1) }
+      END { printf "repr-rust native-check --trees total: %d files, %d equal byte for byte, %d differ\n", f, q, d }'
+    return $rc
+  fi
   # the total of the groups' summaries
   cat "$nc"/[0-9]*.log | awk '/^repr-rust native-check:/ { f += $3; q += $5; b += $7; d += $10; n += $12; h += $19; t += $(NF-2) }
     END { printf "repr-rust native-check total: %d files, %d equal, %d both rejected, %d differ, %d rejected by the native reader alone, %d by the helper alone; %.1f s reading\n", f, q, b, d, n, h, t }'
@@ -563,8 +615,10 @@ all_corpora="rustc-1.99.1 rustc-1.99.1-library rustc-1.99.1-compiler crates-2026
 roundtrip() {
   local cs=() only="" only_list="" iface=0 text=0 text_only=0 pretty=0 pretty_only=0 st=0 c
   run=0; run_only=0; std=0; code=0; code_only=0
+  reader=${REPR_RUST_READER:-native}
   while [ $# -gt 0 ]; do
     case $1 in
+      --reader) reader=$2; reader_check "$reader"; shift 2 ;;
       --code) code=1; shift ;;
       --code-only) code=1; code_only=1; shift ;;
       --only) only=$2; shift 2 ;;
@@ -591,8 +645,15 @@ roundtrip() {
     only=$(awk 'NF { printf "%s\\Q%s\\E", (n++ ? "|" : ""), $0 }' "$only_list")
     only="(?<![\\w.-])(?:$only)(?![\\w/-])"
   fi
+  export REPR_RUST_PLAN_ONLY=$only
   if [ "$iface" = 1 ] && [ -n "$only" ]; then echo "repr-rust: --iface documents whole crates: not with --only" >&2; return 2; fi
-  build
+  # the native reader's levels (tree, lines, text, pretty) need no rustc; the helper's reader and the
+  # levels that run rustc or rustdoc (--iface, --run, --std, --code: the oracle tier) build the helper
+  if [ "$reader" = helper ] || [ "$iface" = 1 ] || [ "$run" = 1 ] || [ "$std" = 1 ] || [ "$code" = 1 ]; then
+    rustc_check; build
+  else
+    mkdir -p "$work"
+  fi
   if [ "$std" = 1 ]; then
     # std built from its printed files (RR5): std's five crates and the rest of library/ printed
     # first, then the UI suite's programs against it
@@ -605,6 +666,11 @@ roundtrip() {
   done
   if [ "$std" = 1 ]; then
     std_level "$only" || st=1
+  fi
+  # the negative controls of the tree and text levels' judges (test/rust/roundtrip-edit-controls.edn,
+  # GTS81 (a)): each must fail its judge
+  if [ "${REPR_RUST_EDIT_CONTROLS:-1}" = 1 ]; then
+    (cd "$root" && arbace_tool -m arbace.repr.rust controls --file "$root/test/rust/roundtrip-edit-controls.edn" --work "$work/controls") || st=1
   fi
   return $st
 }
@@ -649,9 +715,9 @@ roundtrip_one() {
   edition_plan "$c" > "$pl"
   while IFS=$'\t' read -r name ed files; do
     # shellcheck disable=SC2086
-    (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true
+    (cd "$srcroot" && run_trees "$orig" "$ed" $files) 2>> "$orig.err" || true
     # shellcheck disable=SC2086
-    (cd "$cand" && run_helper tree "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
+    (cd "$cand" && run_trees "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
   done < "$pl"
   rm -f "$pl"
   t4=$(date +%s)
@@ -917,9 +983,9 @@ pretty_level() {
   edition_plan "$c" > "$pl"
   while IFS=$'\t' read -r name ed files; do
     # shellcheck disable=SC2086
-    (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true
+    (cd "$srcroot" && run_trees "$orig" "$ed" $files) 2>> "$orig.err" || true
     # shellcheck disable=SC2086
-    (cd "$cand" && run_helper tree "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
+    (cd "$cand" && run_trees "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
   done < "$pl"
   rm -f "$pl"
   t2=$(date +%s)
@@ -965,9 +1031,9 @@ text_level() {
   edition_plan "$c" > "$pl"
   while IFS=$'\t' read -r name ed files; do
     # shellcheck disable=SC2086
-    (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true
+    (cd "$srcroot" && run_trees "$orig" "$ed" $files) 2>> "$orig.err" || true
     # shellcheck disable=SC2086
-    (cd "$cand" && run_helper tree "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
+    (cd "$cand" && run_trees "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
   done < "$pl"
   rm -f "$pl"
   t4=$(date +%s)
@@ -1197,7 +1263,7 @@ case $cmd in
       *) echo "usage: bin/repr-rust corpus fetch|list [CORPUS] | corpus make-ui" >&2; exit 2 ;;
     esac ;;
   dump)
-    reader=${REPR_RUST_READER:-helper}
+    reader=${REPR_RUST_READER:-native}
     if [ "${1:-}" = --reader ]; then reader=${2:-}; shift 2; fi
     reader_check "$reader"
     # the native reader needs no rustc (corpus fetch extracts the corpora without it)
@@ -1221,7 +1287,7 @@ case $cmd in
     done
     run_reader dump "$out" "$ed$expr" "${files[@]}" ;;
   read)
-    reader=${REPR_RUST_READER:-helper}
+    reader=${REPR_RUST_READER:-native}
     if [ "${1:-}" = --reader ]; then reader=${2:-}; shift 2; fi
     reader_check "$reader"
     full=(); sfx=""
@@ -1259,7 +1325,8 @@ case $cmd in
   native-check) native_check "$@" ;;
   native-errors) native_errors "$@" ;;
   print) arbace_tool -m arbace.repr.rust print --jobs "$jobs" "$@" ;;
-  roundtrip) rustc_check; roundtrip "$@" ;;
+  roundtrip) roundtrip "$@" ;;
+  controls) mkdir -p "$work"; cd "$root" && arbace_tool -m arbace.repr.rust controls --file "$root/test/rust/roundtrip-edit-controls.edn" --work "$work/controls" ;;
   test) exec "$root/bin/lib/repr-rust/test" "$@" ;;
   pins) case ${1:-} in check|--check) pins_check ;; *) echo "usage: bin/repr-rust pins check" >&2; exit 2 ;; esac ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;

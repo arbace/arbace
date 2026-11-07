@@ -833,6 +833,14 @@ covers what.
   contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License
   ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `typeck_check.ae`) is Arbace's own, under the
   Eclipse Public License 1.0.
+- The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
+  doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
+  `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the
+  run-pass, run-fail and run-crash checks; `directives.rs`: the `//@` and `//@[REV]` directive lines and the output
+  directives): copyright the Rust project's contributors, dual-licensed under the MIT License or the Apache License 2.0
+  at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0"
+  below). The rest of `check.ae`, `native.ae`'s tree texts (after Arbace's own helper `tools/rsdump`'s transcoder) and
+  `test/rust/roundtrip-controls.edn` are Arbace's own, under the Eclipse Public License 1.0.
 - The non-javac branches of `skip-parens`, `tree-name`, `full-name`, `diamond?` and `class-kind` in
   `arbace/repr/java/tree.ae` (repr/java's interface to the tree, doc/classes/JAVA-FRONTEND-SURVEY.md,
   "As built: JFS66 (b)"): Arbace forms reimplementing, for the native parser's trees,
