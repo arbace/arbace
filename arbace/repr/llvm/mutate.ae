@@ -61,11 +61,13 @@
 (def ^:private terminators '#{ret br switch indirectbr invoke resume unreachable cleanupret catchret catchswitch callbr})
 (def ^:private cast-ops '#{trunc zext sext ptrtoint inttoptr bitcast})
 
+(def ^:dynamic *type-names* #{})   ; the module's named types, which `%name` also spells
+
 (defn- operands-of
-  "The local values an instruction's body uses (a rough walk: the symbols that are %names)."
+  "The local values an instruction's body uses (a rough walk: the symbols that are %names but not a type's)."
   [x]
   (let [out (java.util.ArrayList.)]
-    (letfn [(walk [y] (cond (and (symbol? y) (nil? (namespace y)) (str/starts-with? (name y) "%")) (.add out y)
+    (letfn [(walk [y] (cond (and (symbol? y) (nil? (namespace y)) (str/starts-with? (name y) "%") (not (contains? *type-names* y))) (.add out y)
                             (or (seq? y) (vector? y)) (doseq [z y] (walk z))))]
       (walk (rest (body x))))
     (vec out)))
@@ -274,17 +276,439 @@
   (when-let [[fi bi ii x] (pick r (filter #(let [y (nth % 3)] (and (result y) (not= 'phi (first (body y))) (seq (operands-of y)))) (inst-places forms)))]
     (set-inst forms fi bi ii [(rename-first x (pick r (operands-of x)) (result x))])))
 
+;; ---------------------------------------------------------------------------------------------
+;; Attribute, calling convention, musttail and operand bundle kinds (LL4b)
+
+(defn- fn-forms [forms] (keep-indexed (fn [i f] (when (#{'llvm/define 'llvm/declare} (first f)) i)) forms))
+
+(defn- opt-update
+  "Form (a vector or list) `f` with its option `k` (after the fixed positions `from`) replaced by (g old)."
+  [f k from g]
+  (let [v (vec f) i (first (keep-indexed (fn [j x] (when (and (>= j from) (= x k)) j)) v))]
+    (apply list (if i (assoc v (inc i) (g (nth v (inc i)))) (conj v k (g nil))))))
+
+(defn- param-sites
+  "Every parameter of a define or declare and every argument of a call: {:type T :ret R :n N :set (fn [attrs] forms) :call?}
+  where `set` gives the forms with `attrs` added after the type."
+  [forms]
+  (concat
+   (for [fi (fn-forms forms) :let [f (nth forms fi) ps (nth f 3)]
+         [pi p] (map-indexed vector ps) :when (vector? p)]
+     {:type (first p) :ret (nth f 2) :n (count (remove #{'&} ps)) :pi pi :fn? true :fi fi
+      :set (fn [attrs] (assoc forms fi (apply list (assoc (vec f) 3 (assoc ps pi (into [(first p)] (concat attrs (rest p))))))))})
+   (for [[fi bi ii x] (inst-places forms) :let [b (body x)] :when (= 'call (first b))
+         [ai a] (map-indexed vector (nth b 3)) :when (vector? a)]
+     {:type (first a) :ret (nth b 1) :n (count (nth b 3)) :pi ai :call? true
+      :set (fn [attrs] (set-inst forms fi bi ii [(rebody x (apply list (assoc (vec b) 3 (assoc (nth b 3) ai (into [(first a)] (concat attrs (rest a)))))))]))})))
+
+(defn- attr-sites
+  "Where function attributes (`:attrs`) and return attributes (`:ret-attrs`) go: {:key K :set (fn [attrs] forms) :call?}."
+  [forms k]
+  (concat
+   (for [fi (fn-forms forms) :let [f (nth forms fi)]]
+     {:ret (nth f 2) :fn? true :fi fi :set (fn [attrs] (assoc forms fi (opt-update f k 4 #(vec (concat % attrs)))))})
+   (for [[fi bi ii x] (inst-places forms) :let [b (body x)] :when (= 'call (first b))]
+     {:ret (nth b 1) :call? true :set (fn [attrs] (set-inst forms fi bi ii [(rebody x (opt-update b k 4 #(vec (concat % attrs))))]))})))
+
+(defn- ptr? [t] (or (= t 'ptr) (and (seq? t) (= (first t) 'ptr))))
+(defn- int-t? [t] (boolean (and (symbol? t) (re-matches #"i[0-9]+" (name t)))))
+
+(defn- m-attr-type
+  "A pointer-only attribute on a non-pointer, an integer-only one on a pointer."
+  [r forms]
+  (when-let [s (pick r (param-sites forms))]
+    (let [t (:type s)]
+      ((:set s) [(if (ptr? t)
+                   (pick r [:zeroext :signext '(:range "i32 0, 5") '(:nofpclass "nan") '(:range "i64 0, 9")])
+                   (pick r [:nonnull '(:sret i32) '(:byval i32) '(:align 4) :noalias '(:dereferenceable "8") :readonly :writable
+                            '(:inalloca i32) '(:byref i32) :nest :swifterror '(:preallocated i32) :readnone :nocapture '(:initializes "(0, 4)")]))]))))
+
+(defn- m-attr-pair
+  "Two attributes that exclude each other, on a parameter, an argument or the function."
+  [r forms]
+  (if (pos? (.nextInt ^java.util.Random r 3))
+    (when-let [s (pick r (filter #(or (ptr? (:type %)) (int-t? (:type %))) (param-sites forms)))]
+      ((:set s) (if (ptr? (:type s))
+                  (pick r [[:readonly :writeonly] [:readnone :readonly] [:readnone :writeonly] ['(:byval i32) '(:sret i32)] ['(:byval i32) :inreg]
+                           ['(:inalloca i32) :readonly] ['(:sret i32) :returned] [:writable :readonly] [:nest '(:byref i32)] [:nocapture :immarg]])
+                  (pick r [[:zeroext :signext] [:immarg :noundef :signext] [:inreg :nest]]))))
+    (when-let [s (pick r (attr-sites forms :attrs))]
+      ((:set s) (pick r [[:noinline :alwaysinline] [:optnone] [:optnone :noinline :minsize] [:optnone :noinline :optsize]
+                         [:optnone :noinline :optdebug] [:optdebug :optsize] [:optdebug :minsize] [:jumptable]])))))
+
+(defn- m-attr-place
+  "An attribute where Attributes.td does not allow it: parameter-only on a return value or function, function-only on a
+  parameter or return value."
+  [r forms]
+  (case (.nextInt ^java.util.Random r 3)
+    0 (when-let [s (pick r (attr-sites forms :ret-attrs))]
+        ((:set s) [(pick r [:nounwind :noinline '(:sret i32) :nest :swifterror :returned :cold :willreturn '(:byval i32)])]))
+    1 (when-let [s (pick r (attr-sites forms :attrs))]
+        ((:set s) [(pick r [:nonnull :zeroext '(:sret i32) :returned :nest :noalias '(:dereferenceable "8") :signext :swiftself :noundef])]))
+    2 (when-let [s (pick r (param-sites forms))]
+        ((:set s) [(pick r [:nounwind :noinline :alwaysinline :cold :norecurse :willreturn '(:uwtable "sync") :optnone :hot])]))))
+
+(defn- m-attr-dup
+  "The same once-only attribute on two parameters."
+  [r forms]
+  (let [cands (for [fi (fn-forms forms) :let [f (nth forms fi) ps (nth f 3)]
+                    :let [ptrs (keep-indexed (fn [i p] (when (and (vector? p) (ptr? (first p))) i)) ps)]
+                    :when (>= (count ptrs) 2)] [fi f ps ptrs])]
+    (when-let [[fi f ps ptrs] (pick r cands)]
+      (let [a (pick r [:nest :returned :swifterror :swiftself :swiftasync '(:sret i32) :nest])
+            add (fn [ps i] (assoc ps i (let [p (nth ps i)] (into [(first p)] (concat [a] (rest p))))))
+            [i j] [(first ptrs) (second ptrs)]]
+        (assoc forms fi (apply list (assoc (vec f) 3 (add (add ps i) j))))))))
+
+(defn- m-attr-returned
+  "`returned` on a parameter whose type is not the return type's."
+  [r forms]
+  (when-let [s (pick r (filter #(and (:type %) (not= (:type %) (:ret %))) (param-sites forms)))]
+    ((:set s) [:returned])))
+
+(defn- m-attr-value
+  "A function or parameter attribute with an invalid value."
+  [r forms]
+  (if (.nextBoolean ^java.util.Random r)
+    (when-let [s (pick r (attr-sites forms :attrs))]
+      ((:set s) [(pick r ['(:vscale_range "0,4") '(:vscale_range "3,5") '(:vscale_range "4,2") ["frame-pointer" "bogus"] '(:allocsize "9")
+                          '(:allocsize "0, 1") ["patchable-function-entry" "x"] ["warn-stack-size" "-1"] '(:alignstack "3")
+                          '(:allockind "\"alloc,free\"") '(:allockind "\"alloc,zeroed,uninitialized\"") ["sign-return-address" "bogus"]
+                          ["branch-target-enforcement" "x"] '(:allockind "\"bogus\"")])]))
+    (when-let [s (pick r (param-sites forms))]
+      ((:set s) [(pick r ['(:dereferenceable "0") '(:align 3) '(:nofpclass "0") '(:initializes "(4, 8), (0, 2)") '(:byval void)])]))))
+
+(defn- m-attr-immarg
+  "`immarg` on a parameter of a function that is not an intrinsic."
+  [r forms]
+  (when-let [s (pick r (param-sites forms))] ((:set s) [:immarg])))
+
+(defn- m-cc-def
+  "A calling convention that restricts the function it names."
+  [r forms]
+  (when-let [fi (pick r (filter #(let [f (nth forms %)] (not (some #{:cconv} f))) (fn-forms forms)))]
+    (let [f (nth forms fi) ps (nth f 3) varargs? (some #{'&} ps)
+          cc (cond varargs? (pick r ["fastcc" "coldcc" "ptx_kernel" "amdgpu_ps" "spir_kernel"])
+                   (not= (nth f 2) 'void) (pick r ["spir_kernel" "amdgpu_kernel" "amdgpu_cs_chain" "fastcc"])
+                   (and (seq ps) (vector? (first ps)) (not (some #(and (seq? %) (= (first %) :byval)) (first ps)))) (pick r ["x86_intrcc" "amdgpu_ps" "fastcc"])
+                   :else (pick r ["amdgpu_ps" "spir_kernel" "amdgpu_kernel" "x86_intrcc" "fastcc"]))]
+      (assoc forms fi (opt-update f :cconv 4 (constantly cc))))))
+
+(defn- m-cc-call
+  "A call with the calling convention of a kernel or shader, which no call may use."
+  [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(= 'call (first (body (nth % 3)))) (inst-places forms)))]
+    (set-inst forms fi bi ii [(rebody x (opt-update (body x) :cconv 4 (constantly (pick r ["spir_kernel" "amdgpu_kernel" "amdgpu_ps" "ptx_kernel" "amdgpu_cs_chain"]))))])))
+
+(defn- m-musttail
+  "A call marked musttail: wrong place, prototype, calling convention or result."
+  [r forms]
+  (let [places (inst-places forms)
+        followed (for [[fi bi ii x] places :when (= 'call (first (body x)))
+                       :let [[_ blocks] (body-of (nth forms fi)) items (vec (drop 2 (nth blocks bi)))
+                             nx (get items (inc ii))]
+                       :when (and nx (= 'ret (first (body nx))))] [fi bi ii x])
+        any (filter #(= 'call (first (body (nth % 3)))) places)]
+    (when-let [[fi bi ii x] (pick r (if (and (seq followed) (.nextBoolean ^java.util.Random r)) followed any))]
+      (set-inst forms fi bi ii [(rebody x (opt-update (body x) :tail 4 (constantly :musttail)))]))))
+
+(defn- m-bundle
+  "An operand bundle on a call: repeated, with the wrong operands, or of the funclet kind on a non-pad."
+  [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(and (= 'call (first (body (nth % 3)))) (not (some #{:bundles} (body (nth % 3))))) (inst-places forms)))]
+    (let [bs (pick r [[["deopt"] ["deopt"]] [["funclet" '[token none]]] [["funclet" '[i32 0]]] [["cfguardtarget"]] [["ptrauth" '[i32 0]]]
+                      [["ptrauth" '[i32 0] '[i64 1]]] [["kcfi" '[i32 1] '[i32 2]]] [["kcfi" '[i64 1]]] [["convergencectrl"]]
+                      [["gc-transition"] ["gc-transition"]] [["gc-live"] ["gc-live"]] [["deopt"]] [["foo" '[i32 1]]]
+                      [["funclet" '[token none]] ["funclet" '[token none]]]])]
+      (set-inst forms fi bi ii [(rebody x (opt-update (body x) :bundles 4 (constantly bs)))]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Intrinsics (LL4b)
+
+(defn- intrinsic-decls [forms]
+  (keep-indexed (fn [i f] (when (and (= (first f) 'llvm/declare) (symbol? (second f)) (= "g" (namespace (second f)))
+                                     (str/starts-with? (name (second f)) "llvm.") (not (str/starts-with? (name (second f)) "llvm.dbg.")))
+                            i))
+                forms))
+
+(defn- other-type [r t]
+  (cond (ptr? t) (pick r ['i32 'i64 'double])
+        (= t 'void) (pick r ['i32 'ptr])
+        (= t 'i1) (pick r ['i8 'i32 'ptr])
+        (int-t? t) (pick r ['ptr 'float 'i1 (if (= t 'i32) 'i64 'i32)])
+        (#{'float 'double 'half} t) (pick r ['i32 'ptr 'double 'float])
+        (and (seq? t) (= (first t) 'vector)) (pick r ['i32 'ptr (list 'vector (nth t 1) 'i1)])
+        :else 'ptr))
+
+(defn- m-intr-decl
+  "An intrinsic's declaration with a parameter or the return type changed, or a parameter added or dropped."
+  [r forms]
+  (when-let [fi (pick r (intrinsic-decls forms))]
+    (let [f (vec (nth forms fi)) ps (nth f 3) np (count ps)]
+      (apply list
+             (case (.nextInt ^java.util.Random r 4)
+               0 (assoc f 2 (other-type r (nth f 2)))
+               1 (when (pos? np) (let [k (.nextInt ^java.util.Random r np)] (assoc f 3 (assoc ps k (if (vector? (nth ps k)) (assoc (nth ps k) 0 (other-type r (first (nth ps k)))) (nth ps k))))))
+               2 (assoc f 3 (conj ps ['i32]))
+               3 (when (pos? np) (assoc f 3 (subvec ps 0 (dec np)))))))))
+
+(defn- m-intr-decl* [r forms]
+  (when-let [fi (pick r (intrinsic-decls forms))]
+    (let [nf (m-intr-decl (java.util.Random. (.nextLong ^java.util.Random r)) (vec (concat [(nth forms fi)] [])))]
+      (when nf (assoc forms fi nf)))))
+
+(defn- m-intr-arg
+  "An intrinsic call's argument replaced by `undef` (an immediate argument must be a constant)."
+  [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(let [b (body (nth % 3))]
+                                             (and (= 'call (first b)) (symbol? (nth b 2)) (= "g" (namespace (nth b 2)))
+                                                  (str/starts-with? (name (nth b 2)) "llvm.") (seq (nth b 3))
+                                                  (not (str/starts-with? (name (nth b 2)) "llvm.dbg."))))
+                                          (inst-places forms)))]
+    (let [b (vec (body x)) args (nth b 3) k (.nextInt ^java.util.Random r (count args)) a (nth args k)]
+      (when (vector? a)
+        (set-inst forms fi bi ii [(rebody x (apply list (assoc b 3 (assoc args k (conj (pop a) 'undef)))))])))))
+
+(defn- rename-global [x from to]
+  (cond (= x from) to
+        (vector? x) (mapv #(rename-global % from to) x)
+        (seq? x) (apply list (map #(rename-global % from to) x))
+        :else x))
+
+(defn- m-intr-rename
+  "An intrinsic's name (declaration and calls) replaced by another intrinsic's, whose signature differs."
+  [r forms]
+  (when-let [fi (pick r (intrinsic-decls forms))]
+    (let [from (second (nth forms fi))
+          to (symbol "g" (pick r ["llvm.memset.p0.i64" "llvm.smax.i32" "llvm.ctlz.i32" "llvm.sqrt.f64" "llvm.fshl.i32" "llvm.expect.i32"
+                                  "llvm.vector.reduce.add.v4i32" "llvm.sadd.with.overflow.i32" "llvm.is.fpclass.f32" "llvm.ptrmask.p0.i64"]))]
+      (when-not (some #(= (second (nth forms %)) to) (intrinsic-decls forms))
+        (mapv #(rename-global % from to) forms)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Funclets and exception handling (LL4b)
+
+(def ^:private funclet-heads '#{catchswitch catchpad cleanuppad catchret cleanupret})
+
+(defn- m-funclet
+  "A funclet instruction changed: the pad it names, its parent, its place in its block, a handler of a catchswitch, a
+  funclet bundle's token; or the personality of its function dropped."
+  [r forms]
+  (let [places (inst-places forms)
+        pads (filter #(funclet-heads (first (body (nth % 3)))) places)]
+    (when-let [[fi bi ii x] (pick r pads)]
+      (let [b (body x) h (first b)
+            f (nth forms fi)
+            [_ blocks] (body-of f)
+            others (vec (keep (fn [[fj _ _ y]] (when (and (= fj fi) (result y) (#{'catchpad 'cleanuppad 'catchswitch} (first (body y)))) (result y)))
+                              places))]
+        (case (.nextInt ^java.util.Random r 5)
+          0 (when (#{'catchret 'cleanupret} h)
+              (let [t (pick r (conj (vec (remove #{(second b)} others)) (second b)))
+                    t2 (pick r (vec (remove #{(second b)} (map (fn [[_ _ _ y]] (result y)) (filter #(= (first %) fi) places)))))]
+                (set-inst forms fi bi ii [(rebody x (apply list h (or t2 t) (drop 2 b)))])))
+          1 (when (#{'catchpad 'cleanuppad 'catchswitch} h)
+              (set-inst forms fi bi ii [(rebody x (apply list h (if (= (second b) 'none) (or (pick r (remove #{(result x)} others)) 'none) 'none) (drop 2 b)))]))
+          2 (when (#{'catchpad 'cleanuppad 'catchswitch} h)
+              (let [items (vec (drop 2 (nth blocks bi)))]
+                (when (> (count items) (+ ii 2))
+                  (set-inst (set-inst forms fi bi (inc ii) [x]) fi bi ii [(nth items (inc ii))]))))
+          3 (when (= h 'catchswitch)
+              (let [ls (labels-of f) l2 (or (pick r (remove (set (second (rest b))) ls)) (first ls))]
+                (set-inst forms fi bi ii [(rebody x (apply list h (second b) (assoc (vec (nth b 2)) 0 l2) (drop 3 b)))])))
+          4 (let [v (vec f)] (when (some #{:personality} v)
+                               (assoc forms fi (apply list (let [i (.indexOf ^java.util.List v :personality)] (concat (subvec v 0 i) (subvec v (+ i 2)))))))))))))
+
+(defn- m-personality
+  "A function with exception handling and no personality."
+  [r forms]
+  (when-let [fi (pick r (filter #(and (= 'llvm/define (first (nth forms %))) (some #{:personality} (nth forms %))) (range (count forms))))]
+    (let [v (vec (nth forms fi)) i (.indexOf ^java.util.List v :personality)]
+      (assoc forms fi (apply list (concat (subvec v 0 i) (subvec v (+ i 2))))))))
+
+(defn- m-unwind-dest
+  "An invoke's unwind edge sent to its normal destination, a block without an exception handling instruction."
+  [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(= 'invoke (first (body (nth % 3)))) (inst-places forms)))]
+    (let [b (body x) o (apply hash-map (drop 4 b))]
+      (set-inst forms fi bi ii [(rebody x (opt-update b :unwind 4 (constantly (:to o))))]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Metadata (LL4b)
+
+(defn- md-id? [x] (and (symbol? x) (nil? (namespace x)) (boolean (re-matches #"![0-9]+" (name x)))))
+
+(defn- max-md-id [forms]
+  (reduce max 0 (for [f forms :when (= (first f) 'llvm/meta)] (Long/parseLong (subs (name (second f)) 1)))))
+
+(defn- md-add
+  "The forms with a new node `ops` (a tuple) as the next metadata id; [forms id]."
+  [forms ops]
+  (let [id (symbol (str "!" (inc (max-md-id forms))))]
+    [(conj (vec forms) (list 'llvm/meta id (list '! (vec ops)))) id]))
+
+(defn- m-md-attach
+  "A metadata attachment that the Verifier checks, with a node that breaks its rules, on an instruction of the wrong kind
+  or type or with the wrong operands."
+  [r forms]
+  (let [places (filter #(let [b (body (nth % 3))] (not (or (str/starts-with? (name (first b)) "dbg_") (and (terminators (first b)) (not= 'br (first b)))))) (inst-places forms))
+        loads (filter #(= 'load (first (body (nth % 3)))) places)
+        [fi bi ii x] (pick r (if (and (seq loads) (< (.nextInt ^java.util.Random r 10) 7)) loads places))]
+    (when x
+      (let [b (body x) t (vf/result-type b) h (first b)
+            has? (fn [k] (some #{k} (:md (apply hash-map (drop 4 (vec b))))))
+            i32 (fn [n] ['i32 n]) i64 (fn [n] ['i64 n])
+            tt (if (int-t? t) t 'i32) ot (if (= tt 'i32) 'i64 'i32)
+            ldptr (and (= h 'load) (ptr? t))
+            cands [['!range [[tt 0] [tt 0]]] ['!range [[tt 0]]] ['!range []] ['!range [[ot 0] [ot 4]]] ['!range [[tt 0] [tt 4] [tt 2] [tt 6]]]
+                   ['!range [[tt 0] [tt 4] [tt 4] [tt 6]]] ['!range [(list '! "a") (list '! "b")]] ['!range [[tt 1] [tt 4]]]
+                   ['!nonnull [(i32 1)]] ['!noundef [(i32 1)]] ['!noundef []] ['!align [(i32 8)]] ['!align [(i64 3)]] ['!align []]
+                   ['!dereferenceable [(i32 8)]] ['!dereferenceable [(i64 8) (i64 9)]] ['!dereferenceable_or_null []]
+                   ['!invariant.load []] ['!invariant.group []] ['!fpmath [['float '(fp "1.0")]]] ['!fpmath [['double '(fp "1.0")]]]
+                   ['!fpmath [['float '(fp "-1.0")]]] ['!prof [(list '! "branch_weights") (i32 1) (i32 2)]]
+                   ['!prof [(list '! "branch_weights") (i32 1)]] ['!prof [(list '! "bogus") (i32 1)]] ['!prof [(i32 1) (i32 2)]]
+                   ['!prof [(list '! "branch_weights")]] ['!tbaa []] ['!alias.scope [(i32 1)]] ['!noalias [(list '! [(list '! "x")])]]
+                   ['!noalias.addrspace [(i64 0) (i64 1)]]]
+            legal (fn [k] (case k
+                            !range (and (#{'load 'call 'invoke} h) (int-t? t))
+                            (!nonnull !align !dereferenceable !dereferenceable_or_null) ldptr
+                            (!noundef !invariant.load) (= h 'load)
+                            !invariant.group (#{'load 'store} h)
+                            !fpmath (boolean (#{'float 'double} t))
+                            !prof (#{'br 'switch 'select 'call} h)
+                            (!tbaa !alias.scope !noalias !noalias.addrspace) (#{'load 'store} h)
+                            false))
+            ok (remove #(has? (first %)) cands)
+            on-kind (filter #(legal (first %)) ok)
+            [k ops] (pick r (if (and (seq on-kind) (< (.nextInt ^java.util.Random r 10) 8)) on-kind ok))]
+        (when k
+          (let [[forms2 id] (md-add forms ops)]
+            (set-inst forms2 fi bi ii [(rebody x (opt-update b :md 4 #(vec (concat % [k id]))))])))))))
+
+(defn- node-refs
+  "Metadata ids with the way they are used: [kind id], kind a symbol `!range` ..., `:flag` or `:ident`."
+  [forms]
+  (concat
+   (for [[_ _ _ x] (inst-places forms) :let [b (body x) md (partition 2 (:md (apply hash-map (drop (if (= 'call (first b)) 4 2) (vec b)))))]
+         [k id] md :when (md-id? id)] [k id])
+   (for [f forms :when (and (= (first f) 'llvm/named-meta) (#{'!llvm.module.flags '!llvm.ident} (second f)))
+         id (nth f 2) :when (md-id? id)] [(if (= (second f) '!llvm.ident) :ident :flag) id])))
+
+(defn- m-md-edit
+  "A node used by a !range, !prof, !tbaa, module flag or llvm.ident edited: an operand dropped, added, or replaced."
+  [r forms]
+  (let [byid (into {} (keep-indexed (fn [i f] (when (= (first f) 'llvm/meta) [(second f) i])) forms))
+        refs (filter (fn [[k id]] (and (byid id) (let [n (nth (nth forms (byid id)) 2)] (and (seq? n) (= (first n) '!) (vector? (second n))))))
+                     (node-refs forms))]
+    (when-let [[k id] (pick r (filter (fn [[k _]] (#{'!range '!prof '!tbaa '!align '!nonnull '!alias.scope :flag :ident} k)) refs))]
+      (let [fi (byid id) f (nth forms fi) ops (second (nth f 2)) n (count ops)
+            ops2 (case (.nextInt ^java.util.Random r 5)
+                   0 (when (pos? n) (subvec ops 0 (dec n)))
+                   1 (when (pos? n) (subvec ops 1))
+                   2 (conj ops (pick r [['i32 7] ['i64 1] (list '! "x")]))
+                   3 (when (pos? n) (assoc ops (.nextInt ^java.util.Random r n) (pick r [(list '! "x") ['i64 3] ['float '(fp "1.0")] ['i32 99] ['i1 true]])))
+                   4 (when (pos? n) (conj ops (peek ops))))]
+        (when ops2 (assoc forms fi (apply list (assoc (vec f) 2 (list '! ops2)))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Debug info (LL4b)
+
+(def ^:private di-plain-kinds #(and (seq? %) (symbol? (first %)) (str/starts-with? (name (first %)) "!DI")
+                                    (not (#{"!DIExpression" "!DIArgList" "!DIAssignID"} (name (first %))))))
+
+(defn- di-places [forms]
+  (keep-indexed (fn [i f] (when (and (= (first f) 'llvm/meta) (di-plain-kinds (nth f 2))) i)) forms))
+
+(defn- di-with-fields [forms i fields]
+  (let [f (vec (nth forms i)) n (nth f 2)]
+    (assoc forms i (apply list (assoc f 2 (apply list (first n) (apply concat fields)))))))
+
+(defn- m-di-drop
+  "A field of a DI node dropped."
+  [r forms]
+  (when-let [i (pick r (di-places forms))]
+    (let [fields (vec (partition 2 (rest (nth (nth forms i) 2))))]
+      (when (seq fields)
+        (di-with-fields forms i (let [k (.nextInt ^java.util.Random r (count fields))] (vec (concat (subvec fields 0 k) (subvec fields (inc k))))))))))
+
+(defn- m-di-retarget
+  "A reference of a DI node (scope, type, file, unit ...) sent to a node of another kind."
+  [r forms]
+  (let [ids (vec (keep (fn [i] (second (nth forms i))) (di-places forms)))]
+    (when-let [i (pick r (di-places forms))]
+      (let [fields (vec (partition 2 (rest (nth (nth forms i) 2))))
+            refs (keep-indexed (fn [k [_ v]] (when (md-id? v) k)) fields)]
+        (when-let [k (pick r refs)]
+          (when-let [to (pick r (remove #{(second (nth fields k))} ids))]
+            (di-with-fields forms i (assoc fields k [(first (nth fields k)) to]))))))))
+
+(defn- m-di-record
+  "A debug record's variable, expression or location replaced by another node's."
+  [r forms]
+  (let [ids (vec (keep (fn [i] (second (nth forms i))) (di-places forms)))
+        recs (filter #(#{'dbg_declare 'dbg_value 'dbg_declare_value} (first (body (nth % 3)))) (inst-places forms))]
+    (when-let [[fi bi ii x] (pick r recs)]
+      (let [b (vec (body x)) k (pick r [2 3 4])]
+        (when (and (> (count b) k) (pick r ids))
+          (set-inst forms fi bi ii [(apply list (assoc b k (pick r ids)))]))))))
+
+(defn- m-di-attach
+  "A function's, an instruction's or a global's !dbg attachment sent to another node."
+  [r forms]
+  (let [ids (vec (keep (fn [i] (second (nth forms i))) (di-places forms)))
+        fns (filter #(some #{'!dbg} (:md (apply hash-map (drop 4 (nth forms %))))) (fn-forms forms))
+        insts (filter #(some #{'!dbg} (:md (apply hash-map (drop 4 (vec (body (nth % 3))))))) (inst-places forms))]
+    (when (seq ids)
+      (case (.nextInt ^java.util.Random r 3)
+        0 (when-let [fi (pick r fns)]
+            (assoc forms fi (opt-update (nth forms fi) :md 4 (fn [md] (vec (mapcat (fn [[k v]] [k (if (= k '!dbg) (pick r ids) v)]) (partition 2 md)))))))
+        1 (when-let [[fi bi ii x] (pick r insts)]
+            (set-inst forms fi bi ii [(rebody x (opt-update (body x) :md 4 (fn [md] (vec (mapcat (fn [[k v]] [k (if (= k '!dbg) (pick r ids) v)]) (partition 2 md))))))]))
+        2 (when-let [i (pick r (filter #(and (= 'llvm/global (first (nth forms %))) (some #{'!dbg} (:md (apply hash-map (drop 3 (nth forms %)))))) (range (count forms))))]
+            (assoc forms i (opt-update (nth forms i) :md 3 (fn [md] (vec (mapcat (fn [[k v]] [k (if (= k '!dbg) (pick r ids) v)]) (partition 2 md)))))))))))
+
+(defn- m-di-version
+  "The Debug Info Version module flag changed or removed."
+  [r forms]
+  (when-let [i (first (keep-indexed (fn [i f] (when (and (= (first f) 'llvm/meta) (= (first (nth f 2)) '!) (vector? (second (nth f 2)))
+                                                         (= (second (second (nth f 2))) '(! "Debug Info Version"))) i)) forms))]
+    (let [f (vec (nth forms i)) ops (second (nth f 2))]
+      (assoc forms i (apply list (assoc f 2 (list '! (assoc ops 2 ['i32 (pick r [0 1 2 4 7])]))))))))
+
 (def kinds
   [[:type m-type] [:hoist m-hoist] [:noterm m-noterm] [:phiblock m-phiblock] [:phimove m-phimove] [:align m-align]
    [:linkage m-linkage] [:undef m-undef] [:dupdef m-dupdef] [:lpad m-lpad] [:intrinsic m-intrinsic]
    [:hoistr (renumbered m-hoist)] [:phimover (renumbered m-phimove)] [:lpadr (renumbered m-lpad)] [:entrybr (renumbered m-entrybr)]
-   [:phicount m-phicount] [:selfref m-selfref]])
+   [:phicount m-phicount] [:selfref m-selfref]
+   [:attr-type m-attr-type] [:attr-pair m-attr-pair] [:attr-place m-attr-place] [:attr-dup m-attr-dup] [:attr-returned m-attr-returned]
+   [:attr-value m-attr-value] [:attr-immarg m-attr-immarg] [:cc-def m-cc-def] [:cc-call m-cc-call] [:musttail m-musttail]
+   [:bundle m-bundle] [:intr-decl m-intr-decl*] [:intr-arg m-intr-arg] [:intr-rename m-intr-rename]
+   [:funclet m-funclet] [:personality m-personality] [:unwind-dest m-unwind-dest]
+   [:md-attach m-md-attach] [:md-edit m-md-edit]
+   [:di-drop m-di-drop] [:di-retarget m-di-retarget] [:di-record m-di-record] [:di-attach m-di-attach] [:di-version m-di-version]])
+
+(def families
+  "The kinds by rule family, for `bin/repr-llvm mutants LIST OUT N FIRST FAMILY`."
+  {"base" [:type :hoist :noterm :phiblock :phimove :align :linkage :undef :dupdef :lpad :intrinsic :hoistr :phimover :lpadr :entrybr :phicount :selfref]
+   "attrs" [:attr-type :attr-pair :attr-place :attr-dup :attr-returned :attr-value :attr-immarg]
+   "cc" [:cc-def :cc-call]
+   "musttail" [:musttail]
+   "bundles" [:bundle]
+   "intrinsics" [:intr-decl :intr-arg :intr-rename :intrinsic]
+   "funclets" [:funclet :personality :unwind-dest :lpad :lpadr]
+   "metadata" [:md-attach :md-edit]
+   "debug" [:di-drop :di-retarget :di-record :di-attach :di-version]})
 
 (defn -main
-  "LIST OUT N [FIRST]: N mutants of LIST's modules (NAME<tab>PATH.ll), the K-th of them K = FIRST (default 0) ...,
-  OUT/NAME.KIND.K.ll and OUT/mutants.list."
-  [lst out n & [first-k]]
-  (let [rows (vec (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t")))
+  "LIST OUT N [FIRST [FAMILY]]: N mutants of LIST's modules (NAME<tab>PATH.ll), the K-th of them K = FIRST (default 0) ...,
+  OUT/NAME.KIND.K.ll and OUT/mutants.list; FAMILY (`families`) restricts the kinds to its."
+  [lst out n & [first-k family]]
+  (let [kinds (if (seq family)
+                (let [ks (set (get families family))]
+                  (when (empty? ks) (throw (ex-info (str "unknown family " family) {})))
+                  (vec (filter #(ks (first %)) kinds)))
+                kinds)
+        rows (vec (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t")))
         n (Integer/parseInt n)
         cache (java.util.HashMap.)
         forms-of (fn [p] (or (.get cache p) (let [f (try (rd/read-module (latin1 p)) (catch Throwable _ [])) ] (.put cache p f) f)))
@@ -297,7 +721,9 @@
             (let [r (java.util.Random. (long (+ (* 1000 k) j)))
                   [nm p] (nth rows (mod (+ start j) (count rows)))
                   forms (forms-of p)
-                  m (when (seq (defines forms)) (try (f r (vec forms)) (catch Throwable _ nil)))
+                  m (when (seq (defines forms))
+                      (binding [*type-names* (set (keep #(when (= (first %) 'llvm/type) (second %)) forms))]
+                        (try (f r (vec forms)) (catch Throwable _ nil))))
                   txt (when (and m (not= m forms)) (try (pr/print-module m) (catch Throwable _ nil)))]
               (if txt
                 (let [mn (str nm "." (name kind) "." k) path (str out "/" mn ".ll")]

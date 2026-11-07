@@ -1,0 +1,288 @@
+(ns arbace.repr.llvm.diag
+  "The diagnostics of repr/llvm's verifier as `opt -passes=verify` prints them (doc/cpp/LLVM.md §6.2.2, LL4c): the
+  position of a parser error in the text (`file:line:col`, the source line and a caret under the column), and the
+  values the Verifier prints after its message (an instruction, `ptr @f`, `label %bb`, a metadata node).
+
+  A parser error's place is found in the item's text (arbace.repr.llvm.full's items: a top-level form, a definition's
+  header, a label, an instruction) from a hint, the token the message is reported at:
+
+    nil, :start       the item's first token (the instruction's, after `%x =`: `:body`)
+    [:tok N]          the Nth token of the item
+    [:body N]         the Nth token after the result `%x =` (the opcode is 0)
+    [:find W]         the first token whose text is W, [:find W K] the Kth (from 0), [:find-last W] the last
+    [:after W]        the token after the first W; [:after-last W] the last W's
+    [:ty]             an instruction's first type token: after the opcode and its flags
+    [:op N]           the Nth top-level operand after the type, a comma list (`add float %c, %c`: 0 is the type)
+    [:str F]          F called with the tokens [{:t text :s start :e end} ...] of the item, giving an index
+    [:global NAME]    the first token `@NAME` of the module (a use, not the definition); [:local NAME] in the item's function
+    [:meta N]         the first `!N` token of the module
+
+  Tokens are the reader's (arbace.repr.llvm.read/lex): a name is one token, `%x`."
+  (:require [arbace.repr.llvm.read :as rd]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private flag-words
+  #{"nuw" "nsw" "exact" "disjoint" "nneg" "samesign" "inbounds" "nusw" "fast" "nnan" "ninf" "nsz" "arcp" "contract" "afn" "reassoc"
+    "volatile" "weak" "tail" "musttail" "notail"})
+
+(defn tokens
+  "The tokens of the text between `s` and `e` of `src`, {:t text :s start :e end :k kind}, offsets in `src`."
+  [^String src ^long s ^long e]
+  (let [^arbace.repr.llvm.read.Toks t (rd/lex (subs src (int s) (int e)))
+        n (dec (alength ^objects (.kinds t)))]
+    (vec (for [i (range n)]
+           {:t (let [^String sub (subs src (int s) (int e))] (subs sub (aget ^ints (.starts t) i) (aget ^ints (.ends t) i)))
+            :k (aget ^objects (.kinds t) i)
+            :s (+ s (aget ^ints (.starts t) i)) :e (+ s (aget ^ints (.ends t) i))}))))
+
+(defn- body-start ^long [toks] (if (and (> (count toks) 1) (= "=" (:t (nth toks 1)))) 2 0))
+
+
+(defn- matching
+  "The index of the token closing the parenthesis at `i`."
+  [toks i]
+  (when (= "(" (:t (nth toks i nil)))
+    (loop [j (inc i) d 1]
+      (when (< j (count toks))
+        (let [t (:t (nth toks j))]
+          (cond (= t "(") (recur (inc j) (inc d))
+                (= t ")") (if (= d 1) j (recur (inc j) (dec d)))
+                :else (recur (inc j) d)))))))
+
+(declare call-open)
+
+(defn- last-attr
+  "The index of the last attribute of a call's function attributes: after the arguments' `)`, up to a bundle or an attachment."
+  [toks]
+  (let [o (call-open toks) c (when o (matching toks o))]
+    (when c
+      (loop [j (inc c) last nil]
+        (if (or (>= j (count toks)) (#{"[" "," "!"} (:t (nth toks j))) (= :meta (:k (nth toks j)))) last (recur (inc j) j))))))
+
+(defn- function-open [toks]
+  (some-> (first (keep-indexed (fn [i t] (when (= (:k t) :gname) i)) toks)) inc))
+
+(defn- call-open
+  "The `(` of a call's arguments: after its callee, the first name after the opcode (a function type's `(` is before it);
+  for inline asm after its last string."
+  [toks]
+  (let [b (body-start toks)
+        asm (first (keep-indexed (fn [i t] (when (= (:t t) "asm") i)) toks))]
+    (if asm
+      (first (keep-indexed (fn [i t] (when (and (> i asm) (= (:t t) "(") (= :str (:k (nth toks (dec i) nil)))) i)) toks))
+      (some-> (first (keep-indexed (fn [i t] (when (and (> i b) (#{:gname :lname} (:k t))) i)) toks)) inc))))
+
+(defn- call-open-dbg [toks] 1)
+
+(defn- list-item
+  "The first token of the `n`th item of the comma list inside the parenthesis at `open`."
+  [toks open n]
+  (when (and open (#{"(" "{"} (:t (nth toks open nil))))
+    (loop [j (inc open) d 0 k 0]
+      (when (< j (count toks))
+        (let [t (:t (nth toks j))]
+          (cond
+            (= k n) (if (= t ")") nil j)
+            (#{"(" "[" "{" "<"} t) (recur (inc j) (inc d) k)
+            (#{")" "]" "}" ">"} t) (if (zero? d) nil (recur (inc j) (dec d) k))
+            (and (= t ",") (zero? d)) (recur (inc j) d (inc k))
+            :else (recur (inc j) d k)))))))
+
+(defn- nth-comma
+  "The index of the `n`th comma (from 0) at depth 0 inside the parenthesis at `open`, else its closing parenthesis."
+  [toks open n]
+  (loop [j (inc open) d 0 k 0]
+    (when (< j (count toks))
+      (let [t (:t (nth toks j))]
+        (cond
+          (#{"(" "[" "{" "<"} t) (recur (inc j) (inc d) k)
+          (#{")" "]" "}" ">"} t) (if (zero? d) j (recur (inc j) (dec d) k))
+          (and (= t ",") (zero? d)) (if (= k n) j (recur (inc j) d (inc k)))
+          :else (recur (inc j) d k))))))
+
+(defn- find-tok [toks w k]
+  (let [ix (keep-indexed (fn [i t] (when (= (:t t) w) i)) toks)] (nth ix k nil)))
+
+(defn offset-of
+  "The offset in `src` a hint names inside the item [s e] (the item's start when the hint finds nothing)."
+  ^long [^String src ^long s ^long e hint]
+  (let [toks (tokens src s e)
+        at (fn [i] (if-let [t (and i (nth toks i nil))] (long (:s t)) s))]
+    (cond
+      (or (nil? hint) (= hint :start)) (at 0)
+      (= hint :body) (at (body-start toks))
+      :else
+      (case (first hint)
+        :tok (at (second hint))
+        :body (at (+ (body-start toks) (long (second hint))))
+        :find (at (find-tok toks (second hint) (long (or (nth hint 2 nil) 0))))
+        :find-last (at (last (keep-indexed (fn [i t] (when (= (:t t) (second hint)) i)) toks)))
+        :after (at (some-> (find-tok toks (second hint) 0) inc))
+        :after-last (at (some-> (last (keep-indexed (fn [i t] (when (= (:t t) (second hint)) i)) toks)) inc))
+        :ty (let [b (body-start toks)
+                  i (loop [i (inc b)] (if (and (< i (count toks)) (flag-words (:t (nth toks i)))) (recur (inc i)) i))]
+              (at i))
+        :op (let [b (body-start toks)
+                  i (loop [i (inc b)] (if (and (< i (count toks)) (flag-words (:t (nth toks i)))) (recur (inc i)) i))
+                  ;; the Nth comma-separated operand after the opcode's flags: its first token
+                  starts (loop [j i depth 0 out [i]]
+                           (if (>= j (count toks)) out
+                               (let [t (:t (nth toks j))]
+                                 (cond
+                                   (#{"(" "[" "{" "<"} t) (recur (inc j) (inc depth) out)
+                                   (#{")" "]" "}" ">"} t) (recur (inc j) (dec depth) out)
+                                   (and (= t ",") (zero? depth)) (recur (inc j) depth (conj out (inc j)))
+                                   :else (recur (inc j) depth out)))))]
+              (at (nth starts (second hint) nil)))
+        :str (at ((second hint) toks))
+        :before-gname (at (some-> (first (keep-indexed (fn [i t] (when (= (:k t) :gname) i)) toks)) dec))
+        :linkage (at (first (keep-indexed (fn [i t] (when (#{"private" "internal" "available_externally" "linkonce" "linkonce_odr" "weak" "weak_odr"
+                                                           "appending" "common" "extern_weak" "external"} (:t t)) i)) toks)))
+        :last-attr (at (last-attr toks))
+        :kind (at (first (keep-indexed (fn [i t] (when (= (:k t) (second hint)) i)) toks)))
+        :use (let [b (inc (body-start toks))]
+               (at (first (keep-indexed (fn [i t] (when (and (>= i b) (= (:t t) (second hint))) i)) toks))))
+        :plus (+ (offset-of src s e (second hint)) (long (nth hint 2)))
+        :attr-val (let [i (find-tok toks (second hint) 0)]
+                    (at (when i (if (= "(" (:t (nth toks (inc i) nil))) (+ i 2) (inc i)))))
+        :attr-val-of (let [name (second hint) v (nth hint 2)
+                           i (first (keep-indexed (fn [i t] (when (and (= (:t t) name)
+                                                                      (let [j (if (= "(" (:t (nth toks (inc i) nil))) (+ i 2) (inc i))] (= (:t (nth toks j nil)) v)))
+                                                             i))
+                                                  toks))]
+                       (at (when i (if (= "(" (:t (nth toks (inc i) nil))) (+ i 2) (inc i)))))
+        :attr-close (let [i (find-tok toks (second hint) 0)] (at (when i (matching toks (inc i)))))
+        :attr-after (let [i (find-tok toks (second hint) 0)] (at (when i (some-> (matching toks (inc i)) inc))))
+        :param (at (list-item toks (function-open toks) (second hint)))
+        :brace-item (let [open (find-tok toks "{" 0)
+                          i (when open (list-item toks open (second hint)))]
+                      (at (when i (+ i (long (nth hint 2))))))
+        :call-arg (at (list-item toks (call-open toks) (second hint)))
+        :comma (let [open (call-open-dbg toks)]
+                 (at (nth-comma toks open (second hint))))
+        :case (let [i (find-tok toks "[" 0)] (at (when i (+ i 1 (* 5 (long (second hint)))))))
+        :val (let [v (second hint) txt (:text v) b (inc (body-start toks))
+                   i (or (first (keep-indexed (fn [i t] (when (and (>= i b) (= (:t t) txt)) i)) toks))
+                         (when (:fp v) (first (keep-indexed (fn [i t] (when (and (>= i b) (#{:float :hexfp} (:k t))) i)) toks))))]
+               (at i))
+        :abs (long (second hint))
+        s))))
+
+(defn line-col
+  "[line col] (1-based) of offset `off` in `src`."
+  [^String src ^long off]
+  (loop [i 0 line 1 ls 0]
+    (if (>= i off)
+      [line (inc (- off ls))]
+      (if (= (.charAt src (int i)) \newline) (recur (inc i) (inc line) (inc i)) (recur (inc i) line ls)))))
+
+(defn source-line ^String [^String src ^long line]
+  (let [ls (str/split src #"\n" -1)] (nth ls (dec line) "")))
+
+(defn caret-line
+  "The line under a source line: spaces (tabs kept) up to the column, then `^`."
+  ^String [^String text ^long col]
+  (str (apply str (map #(if (= % \tab) \tab \space) (take (dec col) text))) "^"))
+
+(defn parse-error-text
+  "A parser error as SMDiagnostic prints it: `PROG: FILE:L:C: error: MSG`, the source line and the caret line."
+  ^String [^String prog ^String file ^String src ^long off ^String msg]
+  (let [[l c] (line-col src off)
+        text (source-line src l)]
+    (str prog ": " file ":" l ":" c ": error: " msg "\n" text "\n" (caret-line text c) "\n")))
+
+;; ---------------------------------------------------------------------------------------------
+;; Metadata numbers as the AsmWriter's slot tracker gives them (what the Verifier prints: `!dbg !91`)
+;;
+;; The text's numbers are the AsmWriter's for a module it printed; a module changed since has its instructions'
+;; nodes numbered in another order. The module-level nodes (globals', named metadata's, functions' attachments, and
+;; what they reach) keep theirs; the nodes first reached from the instructions (debug records, a call's metadata
+;; arguments, attachments) are numbered after them in the order of use, a node before its operands.
+
+(def ^:private di-operand-order
+  {"DILocation" [:scope :inlinedAt] "DILexicalBlock" [:file :scope] "DILexicalBlockFile" [:file :scope]
+   "DILocalVariable" [:scope :name :file :type :annotations] "DILabel" [:scope :name :file]
+   "DISubprogram" [:file :scope :name :linkageName :type :unit :declaration :retainedNodes :containingType :templateParams :thrownTypes :annotations :targetFuncName]
+   "DIDerivedType" [:file :scope :name :baseType :extraData :annotations]
+   "DICompositeType" [:file :scope :name :baseType :elements :vtableHolder :templateParams :identifier :discriminator :dataLocation :associated :allocated :rank :annotations]
+   "DIGlobalVariable" [:scope :name :linkageName :file :type :staticDataMemberDeclaration :templateParams :annotations]
+   "DIGlobalVariableExpression" [:var :expr]
+   "DICompileUnit" [:file :producer :flags :splitDebugFilename :enums :retainedTypes :globals :imports :macros]})
+
+(defn- md-ref? [x] (and (symbol? x) (nil? (namespace x)) (boolean (re-matches #"![0-9]+" (name x)))))
+
+(defn- refs-in
+  "The metadata references inside a value, in order."
+  [x]
+  (cond (md-ref? x) [x]
+        (or (seq? x) (vector? x)) (vec (mapcat refs-in x))
+        :else []))
+
+(defn node-operands
+  "A node's operand references in the slot tracker's order."
+  [node]
+  (let [h (when (and (seq? node) (symbol? (first node))) (name (first node)))
+        kind (when (and h (.startsWith ^String h "!DI")) (subs h 1))]
+    (if-let [order (and kind (get di-operand-order kind))]
+      (let [fields (apply hash-map (rest node))
+            listed (set order)]
+        (vec (concat (mapcat #(refs-in (get fields %)) order)
+                     (mapcat (fn [[k v]] (when-not (listed k) (refs-in v))) (partition 2 (rest node))))))
+      (refs-in node))))
+
+(defn- md-vals [md] (vec (take-nth 2 (rest md))))
+
+(defn- opt-of [b k] (some (fn [[i y]] (when (= y k) (nth b (inc i) nil))) (map-indexed vector b)))
+
+(defn md-slots
+  "{old-symbol new-symbol} of the nodes the slot tracker numbers differently from the text, by its traversal: the
+  globals' attachments, named metadata's operands, then each function's attachments and its instructions' metadata (the
+  debug records' variable, value and location, a call's metadata arguments, the attachments), a node before its operands."
+  [forms]
+  (let [nodes (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
+        assigned (java.util.LinkedHashMap.)
+        visit (fn visit [r]
+                (when (and (md-ref? r) (contains? nodes r) (not (.containsKey assigned r)))
+                  (.put assigned r (symbol (str "!" (.size assigned))))
+                  (doseq [c (node-operands (get nodes r))] (visit c))))
+        roots (concat
+               (for [f forms :when (= (first f) 'llvm/global)
+                     :let [[_ _ _ & more] f o (apply hash-map (if (and (seq more) (not (keyword? (first more)))) (rest more) more))]
+                     v (md-vals (:md o))] v)
+               (for [f forms :when (= (first f) 'llvm/named-meta) r (refs-in (nth f 2))] r))
+        fn-roots
+        (fn [f]
+          (let [o (apply hash-map (drop 4 f))]
+            (concat
+             (md-vals (:md o))
+             (for [blk (:body o) x (drop 2 blk)
+                   :let [b (if (= (first x) '=) (nth x 2) x)]
+                   r (if (and (symbol? (first b)) (.startsWith ^String (name (first b)) "dbg_"))
+                       ;; the value, the variable and the location, never the expression (processDbgRecordMetadata)
+                       (concat (when-not (vector? (nth b 1 nil)) (refs-in (nth b 1 nil)))
+                               (refs-in (nth b 2 nil))
+                               (when (= (first b) 'dbg_assign) (concat (refs-in (nth b 4 nil)) (refs-in (nth b 5 nil))))
+                               (refs-in (last b)))
+                       (concat (when (#{'call 'invoke 'callbr} (first b)) (refs-in (nth b 3 nil)))
+                               (md-vals (opt-of b :md))))]
+               r))))]
+    (doseq [r roots] (visit r))
+    (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f)) r (fn-roots f)] (visit r))
+    (into {} (for [[k v] assigned :when (not= k v)] [k v]))))
+
+(defn renumber
+  "A printed text with its `!N` references numbered by `slots` (md-slots)."
+  ^String [^String text slots]
+  (if (empty? slots)
+    text
+    (let [m (re-matcher #"!([0-9]+)" text) b (StringBuilder.)]
+      (loop [last 0]
+        (if (.find m)
+          (let [k (symbol (str "!" (.group m 1)))]
+            (.append b (subs text last (.start m)))
+            (.append b (str (get slots k k)))
+            (recur (.end m)))
+          (.append b (subs text last))))
+      (str b))))
