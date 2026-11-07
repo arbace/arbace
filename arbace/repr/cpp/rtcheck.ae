@@ -124,10 +124,67 @@
     (println (str "record: " ck ": " (count rej) " rejected, " (count fails) " failing, in " oracle-file
                  (when (pos? kept) (str "; " kept " recorded names the run does not have kept (--replace-oracle drops them)"))))))
 
+(defn- full-bytes
+  "Level 5's other side (mode :full): the file read in mode :full, written as .ae text and read back, printed: the text's bytes,
+  or nil when the file is refused or crashes."
+  [^String dump ^String src ^String nm ^String std]
+  (try
+    (let [rd (rc/read-cpp dump src nm std true)]
+      (when-not (:refused rd)
+        (let [[ff forms] (rc/read-unit-text (rc/unit-text rd))]
+          (.getBytes ^String (rc/print-cpp ff forms) "ISO-8859-1"))))
+    (catch Throwable _ nil)))
+
+(defn controls
+  "The negative controls of the round trip (doc/GATE-SURVEY.md, GTS81 (a), \"As built: GT9's controls\"; CONTROLS-FILE, test/repr/cpp/
+  roundtrip-controls.edn): each is a crossed pair [:subject :reference] of two files of the run, both passing, the subject's level
+  artifact judged by the level's own comparison against the REFERENCE's original, which must differ: level 1 (the subject's forms
+  again against the reference's forms, `same?` of the .ae texts), level 3 (the subject's print's normalized dump against the reference's
+  original's), level 4 (the subject's print's object against the reference's original's, each compiler), level 5 (the subject's :full
+  print against the reference's source, byte for byte). A control that is the same at a level (the comparison passes what differs)
+  prints `control passed:`; one that was compared at no level while its subject was in the run prints `control not judged:`; one
+  whose subject or reference the run does not have is left; each failing one counts. Prints `control ID fails as it must` and returns
+  the number of failing controls. NAMES: the run's names; QUAL: the name as the known file qualifies it."
+  [^String work ^String controls-file names qual]
+  (if-not (and (seq controls-file) (.exists (java.io.File. controls-file)))
+    (do (println (str "controls: no file " controls-file)) 1)
+    (let [cs (read-string (slurp controls-file))
+          rows (into {} (for [l (str/split-lines (slurp (str work "/list.tsv"))) :when (seq l) :let [r (str/split l #"\t" -1)]] [(first r) r]))
+          by (fn [x] (some #(when (or (= % x) (= (qual %) x)) %) names))
+          srcroot (let [f (java.io.File. (str work "/srcroot.txt"))] (when (.exists f) (str/trim (slurp f))))
+          r1 (tsv (str work "/read.tsv"))
+          ok? (fn [nm] (and (= "0" (status (str work "/orig/" nm ".status"))) (= "ok" (second (get r1 nm)))))
+          bad (atom 0)]
+      (doseq [{:keys [id subject reference]} cs]
+        (let [s (by subject) r (by reference)]
+          (cond
+            (or (nil? s) (nil? r)) (println (str "control " id " left: " (if (nil? s) subject reference) " is not in the run"))
+            (not (and (ok? s) (ok? r))) (println (str "control " id " left: " (if (ok? s) reference subject) " did not read"))
+            :else
+            (let [obj (fn [side who nm] (str work "/obj/" side "/" who "/" nm ".o"))
+                  st (fn [side who nm] (status (str work "/obj/" side "/" who "/" nm ".status")))
+                  l4 (fn [who] (when (and (= "0" (st "print" who s)) (= "0" (st "orig" who r)))
+                                 (not (same? (obj "print" who s) (obj "orig" who r)))))
+                  l5 (when srcroot
+                       (let [a (full-bytes (str work "/orig/" s ".edn") (str srcroot "/" s) s (nth (get rows s) 1))
+                             b (bytes-of (str srcroot "/" r))]
+                         (when (and a b) (not (java.util.Arrays/equals ^bytes a ^bytes b)))))
+                  lv [[:l1 (when (and (.exists (java.io.File. (str work "/forms2/" s ".ae"))) (.exists (java.io.File. (str work "/forms/" r ".ae"))))
+                             (not (same? (str work "/forms2/" s ".ae") (str work "/forms/" r ".ae"))))]
+                      [:l3 (when (and (= "0" (status (str work "/dump2/" s ".status"))) (= "0" (status (str work "/orig/" r ".norm.status"))))
+                             (not (same? (str work "/dump2/" s ".norm") (str work "/orig/" r ".norm"))))]
+                      [:l4-gxx (l4 "gxx")] [:l4-clang (l4 "clang")] [:l5 l5]]
+                  judged (remove (comp nil? second) lv)
+                  same (map first (filter (comp false? second) judged))]
+              (cond (empty? judged) (do (swap! bad inc) (println (str "control not judged: " id " (" subject " against " reference ": no level had both sides)")))
+                    (seq same) (do (swap! bad inc) (println (str "control passed: " id " (" subject " against " reference ") is the same at " (str/join " " (map name same)))))
+                    :else (println (str "control " id " fails as it must (" (str/join " " (map (comp name first) judged)) " differ)")))))))
+      @bad)))
+
 (defn judge
   "The levels of each file of WORK's list, against the known file: WORK/results.tsv (name, verdict, class, read, l1,
   l3, l4 g++, l4 clang, text forms) and WORK/summary.edn; prints the table's line. Exit status 1 when a file fails."
-  [^String work ^String known-file & [objects oracle-file results-dir results-mode]]
+  [^String work ^String known-file & [objects oracle-file results-dir results-mode controls-file]]
   (let [known (if (.exists (java.io.File. known-file)) (read-string (slurp known-file)) {})
         ;; CP130 (c): the oracle's rejections and failures of the corpus WORK/list.key names, recorded by name (and kind) in
         ;; ORACLE-FILE: a rejection or failure not recorded fails; no key or no entry: unrecorded (any rejection stands)
@@ -324,7 +381,8 @@
                                          (str/join (for [r (sort-by first rows)] (str "  " (pr-str (first r)) " " (if (and (= (second r) "known") (not= (nth r 2) "-")) (pr-str [:known (keyword (nth r 2))]) (keyword (second r))) "\n")))
                                          " }}\n"))
                         (println (str "rtcheck: recorded " (count rows) " results of " okey " in " rfile)))))
-      (System/exit (if (or (seq fails) held-bad unheld shrinks (seq stale) unknown improved-fail) 1 0)))))
+      (let [ctl-bad (if (and (not record?) (seq controls-file)) (controls work controls-file names qual) 0)]
+        (System/exit (if (or (seq fails) held-bad unheld shrinks (seq stale) unknown improved-fail (pos? ctl-bad)) 1 0))))))
 
 (defn -main [cmd & args]
   (case cmd
