@@ -1,0 +1,1712 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Rename/HsType.hs
+;; (mkOpAppRn, mkNegAppRn, mkConOpPatRn, mkHsOpTyRn) and compiler/GHC/Types/Fixity.hs (compareFixity), and, as the specification read, the other
+;; modules of compiler/GHC/Rename/ (Env, Names, Expr, Pat, Bind, Module, Fixity), whose notice follows
+;; (LICENSE.md, "GHC: the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.rename
+  "The renamer of Arbace's Haskell front end (doc/haskell/FRONTEND-SURVEY.md, HF2): the native reader's
+  parse tree (HsModule GhcPs, doc/haskell/NATIVE.md) renamed as GHC 9.14.1's renamer does, down to what the
+  helper's `rn` verb (tools/hsdump/HsRn.hs, HF1) records of its output (HsGroup GhcRn): every name
+  resolved to its defining module or to its binding site, fixities applied to the operator trees,
+  the binding groups by SCC, the import and export lists resolved.
+
+  Written anew against GHC's behaviour, reading its renamer (compiler/GHC/Rename/{Env,Names,Expr,
+  HsType,Pat,Bind,Module,Utils,Fixity}.hs, ghc-9.14.1-src.tar.xz) as the specification: mkOpAppRn,
+  mkNegAppRn, mkConOpPatRn, mkHsOpTyRn and compareFixity (Rename/HsType.hs, Rename/Utils.hs) are
+  ported (BSD-3-Clause, the GHC Team and the University of Glasgow; LICENSE.md, doc/ARBACE.md); the
+  scoping, the import and export resolution and the dependency analyses (depAnalBinds,
+  depAnalTyClDecls) follow GHC's behaviour as the dumps show it.
+
+  The output is the dump's forms, so the judge is a text comparison: (hsrn/module \"M\"), (hsrn/imports
+  [...]), (hsrn/occs [[span name]...]), (hsrn/ops [...]), (hsrn/groups [...]), (hsrn/group-order [...]),
+  (hsrn/exports [...]). A name is (ext ns \"Module\" \"occ\") for a top-level or imported one, (loc ns
+  \"occ\" l1 c1 l2 c2) for a local one (its binding site), the namespaces var, data, tc, tv and fld.
+
+  The libraries' interfaces are the helper's `iface` verb's forms, (hsiface/exports [...]) and
+  (hsiface/fixities [...]) of each module (tools/hsdump/HsRn.hs); a module of the program renamed
+  earlier writes its own."
+  (:require [arbace.string :as str]
+            [arbace.set :as set])
+  (:import [java.io File]))
+
+(set! *warn-on-reflection* true)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Names, spans, the output
+
+(defn- strs [form] (mapv #(if (symbol? %) (name %) %) form))
+
+(defn ext-name [ns m occ] ["ext" ns m occ])
+(defn- s4 [sp] (subvec sp (- (count sp) 4)))
+(defn loc-name [ns occ sp]
+  (if sp
+    (let [[a b c d] (s4 sp)] ["loc" ns occ a b c d])
+    ["loc" ns occ nil]))
+(defn ext? [n] (= "ext" (nth n 0)))
+(defn name-ns [n] (nth n 1))
+(defn name-mod [n] (when (ext? n) (nth n 2)))
+(defn name-occ [n] (if (ext? n) (nth n 3) (nth n 2)))
+
+(defn- esc [s]
+  (str "\""
+       (apply str (map (fn [c] (case c \" "\\\"" \\ "\\\\" \newline "\\n" \tab "\\t" \return "\\r" (str c))) s))
+       "\""))
+
+(defn name-str [n]
+  (if (ext? n)
+    (str "(ext " (nth n 1) " " (esc (nth n 2)) " " (esc (nth n 3)) ")")
+    (str "(loc " (nth n 1) " " (esc (nth n 2))
+         (if (nth n 3) (str " " (nth n 3) " " (nth n 4) " " (nth n 5) " " (nth n 6)) " nil") ")")))
+
+(defn span-key [sp] (if sp (s4 sp) []))
+(defn span-str [sp] (if sp (let [[a b c d] (s4 sp)] (str "[" a " " b " " c " " d "]")) "nil"))
+
+(defn- combine
+  "combineSrcSpans (the spans of the dump: [file l1 c1 l2 c2 b1 b2], nil an unhelpful one)"
+  [a b]
+  (cond
+    (nil? a) b
+    (nil? b) a
+    :else
+    (let [[al1 ac1 al2 ac2] (s4 a)
+          [bl1 bc1 bl2 bc2] (s4 b)
+          [l1 c1] (if (or (< al1 bl1) (and (= al1 bl1) (<= ac1 bc1))) [al1 ac1] [bl1 bc1])
+          [l2 c2] (if (or (> al2 bl2) (and (= al2 bl2) (>= ac2 bc2))) [al2 ac2] [bl2 bc2])]
+      [l1 c1 l2 c2])))
+
+;; the output of one module: sets of [key text], the groups in the order made
+(def ^:dynamic *occs* nil)
+(def ^:dynamic *ops* nil)
+(def ^:dynamic *groups* nil)
+(def ^:dynamic *errors* nil)
+(def ^:dynamic *uses* nil)      ; atom: the names the binding being renamed uses
+
+(defn- emit! [sp n]
+  (when *occs* (swap! *occs* conj [(span-key sp) (str "[" (span-str sp) " " (name-str n) "]")])))
+
+(declare lsp lval)
+
+(def ^:dynamic *rnames* nil)    ; IdentityHashMap: the RdrName object of a located name of the tree -> [Name...]
+(def ^:dynamic *rnodes* nil)    ; IdentityHashMap: a node of the tree -> {:shape :implicit :groups}
+
+(defn- note-name!
+  "Record that the tree's RdrName object rdr resolved to n (the renamed tree's substitution)"
+  [rdr n]
+  (when (and *occs* *rnames* rdr n)
+    (let [^java.util.IdentityHashMap m *rnames*] (.put m rdr (conj (or (.get m rdr) []) n)))))
+
+(defn- note-node!
+  "Record a fact of the renamed tree about node: k updated by f"
+  [node k f & args]
+  (when (and *occs* *rnodes* node)
+    (let [^java.util.IdentityHashMap m *rnodes*] (.put m node (apply update (or (.get m node) {}) k f args)))))
+
+(defn- emit-l!
+  "Emit the occurrence n of the located name nl (L sp rdr) and record it for the tree"
+  [nl n]
+  (emit! (lsp nl) n)
+  (note-name! (lval nl) n))
+
+(defn- emit-on!
+  "Emit a name the renamer attaches to node (an implicit name: negate, >>=, fromInteger...), recorded on the node"
+  [node sp n]
+  (emit! sp n)
+  (note-node! node :implicit (fnil conj []) [n sp]))
+
+(defn- emit-op! [sp text]
+  (when *ops* (swap! *ops* conj [(span-key sp) text])))
+
+(defn- error! [& msg]
+  (when *errors* (swap! *errors* conj (apply str msg))))
+
+(defn- use! [n] (when *uses* (swap! *uses* conj n)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The tree
+
+(defn- L? [x] (and (seq? x) (= 'L (first x))))
+(defn- lsp [x] (nth x 1))
+(defn- lval [x] (nth x 2))
+(defn- node? [x] (and (seq? x) (symbol? (first x))))
+(defn- con [x] (when (node? x) (first x)))
+(defn- arg [x i] (nth x i nil))
+(defn- just? [x] (and (seq? x) (= 'Just (first x))))
+(defn- just-val [x] (when (just? x) (second x)))
+(defn- rdr? [x] (and (seq? x) (contains? '#{unqual qual exact orig} (first x))))
+(defn- rdr-ns [r] (name (nth r 1)))
+(defn- rdr-occ [r] (case (first r) (unqual exact) (nth r 2) qual (nth r 3) orig (nth r 3)))
+(defn- rdr-mod [r] (case (first r) qual (nth r 2) nil))
+(defn- modname [m] (nth m 1))   ; (mod "M")
+(defn- dump-vec [x] (if (vector? x) x (vec x)))
+
+(defn- nskey
+  "The namespace a lookup uses: values (variables and fields), data constructors, types (and type variables)"
+  [ns]
+  (case ns ("var" "fld") :v "data" :d ("tc" "tv") :t :t))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Interfaces
+
+(def ^:dynamic *ifdirs* [])          ; directories of NAME.iface.edn, the first that has it
+(def iface-cache (atom {}))
+
+(defn- read-forms [text] (read-string (str "[" text "]")))
+
+(defn- parse-iface [text]
+  (let [forms (read-forms text)
+        by (into {} (map (fn [f] [(first f) f]) forms))
+        exps (second (get by 'hsiface/exports))
+        fixes (second (get by 'hsiface/fixities))
+        things (second (get by 'hsiface/things))]
+    {:cons (into {} (for [t things :when (and (seq? t) (= 'datacon (first t)) (seq (nth t 4)))]
+                      [(strs (nth t 1)) (vec (nth t 4))]))
+     :exports (mapv (fn [a] [(strs (nth a 1)) (mapv strs (nth a 2))]) exps)
+     :fixities (into {} (map (fn [f] [[(name (nth f 1)) (nth f 2)] [(nth f 3) (name (nth f 4))]]) fixes))}))
+
+(defn load-iface
+  "The interface of module m ((hsiface/exports ...), (hsiface/fixities ...)), nil when there is none"
+  [m]
+  (let [c @iface-cache k [*ifdirs* m]]
+    (if (contains? c k)
+      (get c k)
+      (let [f (first (filter #(.isFile ^File %) (map #(File. (str % "/" m ".iface.edn")) *ifdirs*)))
+            ;; a reexported module (a package's "M from unit:N", GHC.Prim's): its target's interface, by the
+            ;; directories' reexports.edn ({"M" "N"}, ghc-pkg's exposed-modules)
+            alias (when-not f
+                    (some (fn [d] (let [af (File. (str d "/reexports.edn"))]
+                                    (when (.isFile af) (get (read-string (slurp af)) m))))
+                          *ifdirs*))
+            r (cond f (parse-iface (slurp f))
+                    alias (load-iface alias))]
+        (swap! iface-cache assoc k r)
+        r))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The global environment: entries {:name :unq :quals :parent}, by [nskey occ]
+
+(def ^:dynamic *genv* nil)       ; atom: {[nskey occ] [entry...]}
+(def ^:dynamic *mod* nil)        ; the module being renamed
+(def ^:dynamic *fixities* nil)   ; atom: {name [prec dir]} of the fixity declarations of this module
+(def ^:dynamic *children* nil)   ; atom: {parent-name [child-name...]} (what the imports and this module give)
+(def ^:dynamic *fields* nil)     ; atom: {constructor-name [field-name...]}
+(def ^:dynamic *exts* #{})       ; the extensions on
+
+(defn- add-gre! [name quals unq parent]
+  (let [k [(nskey (name-ns name)) (name-occ name)]]
+    (swap! *genv* update k
+           (fn [es]
+             (let [es (or es [])
+                   i (first (keep-indexed (fn [i e] (when (= (:name e) name) i)) es))]
+               (if i
+                 (update es i (fn [e] (assoc e :unq (or (:unq e) unq) :quals (into (:quals e) quals)
+                                             :parent (or (:parent e) parent))))
+                 (conj es {:name name :unq unq :quals (set quals) :parent parent})))))))
+
+(defn- note-children! [parent kids]
+  (swap! *children* update parent (fn [c] (vec (distinct (concat c kids))))))
+
+(def wired
+  {["data" "[]"] (ext-name "data" "GHC.Internal.Types" "[]")
+   ["data" ":"] (ext-name "data" "GHC.Internal.Types" ":")
+   ["data" "()"] (ext-name "data" "GHC.Internal.Tuple" "()")
+   ["tc" "[]"] (ext-name "tc" "GHC.Internal.Types" "List")
+   ["tc" "()"] (ext-name "tc" "GHC.Internal.Tuple" "Unit")})
+
+(defn- tuple-name [ns occ]
+  (when (and (> (count occ) 2) (= \( (first occ)) (= \, (second occ)))
+    (let [n (dec (count occ))]
+      (ext-name ns "GHC.Internal.Tuple" (if (= ns "data") occ (str "Tuple" n))))))
+
+(defn con-fields
+  "The field Names of a data constructor: this module's, else its defining module's interface's"
+  [n]
+  (or (get @*fields* n)
+      (when (and n (ext? n))
+        (when-let [i (load-iface (name-mod n))]
+          (some->> (get (:cons i) n) (mapv #(ext-name "fld" (name-mod n) %)))))))
+
+(defn- wired-name [ns occ]
+  (or (get wired [ns occ]) (tuple-name ns occ)
+      (when (and (= ns "data") (str/starts-with? occ "(#")) (ext-name "data" "GHC.Internal.Types" occ))
+      (when (= ns "tc")
+        (cond (= occ "List") (ext-name "tc" "GHC.Internal.Types" "List")
+              (= occ "->") (ext-name "tc" "GHC.Internal.Types" "->")
+              (= occ "Unit") (ext-name "tc" "GHC.Internal.Tuple" "Unit")
+              (re-matches #"Tuple[0-9]+" occ) (ext-name "tc" "GHC.Internal.Tuple" occ)))))
+
+(defn lookup-global
+  "The name of an occurrence (nskey, occ, qualifier or nil) in the global environment: the entries in
+  scope; nil when none"
+  [ns occ q]
+  (let [es (get @*genv* [(nskey ns) occ])
+        es (if q (filter #(contains? (:quals %) q) es) (filter :unq es))]
+    (case (count es)
+      0 nil
+      1 (:name (first es))
+      (do (when (> (count (distinct (map :name es))) 1)
+            (error! "ambiguous occurrence " occ " " (pr-str (map :name es))))
+          (:name (first es))))))
+
+(defn- lookup-local [env ns occ]
+  (get (:l env) [(nskey ns) occ]))
+
+(defn resolve-rdr
+  "The Name an RdrName refers to: locals first, then the global environment, then wired-in names;
+  field? (a record field) looks in the globals only"
+  [env r & {:keys [field?]}]
+  (let [ns (rdr-ns r) occ (rdr-occ r) q (rdr-mod r)]
+    (or (when (and (nil? q) (not field?)) (lookup-local env ns occ))
+        (when (= 'exact (first r)) (wired-name ns occ))
+        (lookup-global ns occ q)
+        (wired-name ns occ)
+        ;; DataKinds: a type-level occurrence of a data constructor
+        (when (and (= ns "tc") (not (lookup-local env "tc" occ))) (lookup-global "data" occ q))
+        (do (error! "not in scope: " ns " " (when q (str q ".")) occ) nil))))
+
+(defn- occ-at!
+  "Emit the occurrence of rdr at span sp, record its use; the Name or nil"
+  [env sp r & opts]
+  (when-let [n (apply resolve-rdr env r opts)]
+    (use! n)
+    (emit! sp n)
+    (note-name! r n)
+    n))
+
+;;; Fixities
+
+(defn lookup-fixity
+  "The fixity [prec dir] of a Name: this module's declarations, else its defining module's interface"
+  [n]
+  (or (get @*fixities* n)
+      (when (ext? n)
+        (when-let [i (load-iface (name-mod n))]
+          (get (:fixities i) [(name-ns n) (name-occ n)])))
+      (when (= n (ext-name "data" "GHC.Internal.Types" ":")) [5 "r"])
+      [9 "l"]))
+
+(def negate-fixity [6 "l"])
+
+(defn- compare-fixity
+  "[nofix-error associate-right]"
+  [[p1 d1] [p2 d2]]
+  (cond (> p1 p2) [false false]
+        (< p1 p2) [false true]
+        (and (= d1 "r") (= d2 "r")) [false true]
+        (and (= d1 "l") (= d2 "l")) [false false]
+        :else [true false]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Operator trees (mkOpAppRn, mkNegAppRn, mkConOpPatRn, mkHsOpTyRn)
+
+(defn- leaf [sp] {:t :leaf :sp sp})
+
+(defn- emit-tree!
+  "Record the operator nodes of a shape (the final tree of a maximal operator application)"
+  [s]
+  (case (:t s)
+    :opapp (do (emit-op! (:sp s) (str "(opapp " (span-str (:sp s)) " " (span-str (:sp (:l s))) " "
+                                      (span-str (:sp (:op s))) " " (span-str (:sp (:r s))) " "
+                                      (first (:fix s)) " " (second (:fix s)) ")"))
+               (emit-tree! (:l s)) (emit-tree! (:r s)))
+    :neg (do (emit-op! (:sp s) (str "(neg " (span-str (:sp s)) " " (span-str (:sp (:arg s))) ")"))
+             (emit-tree! (:arg s)))
+    :conop (do (emit-op! (:sp s) (str "(conop " (span-str (:sp s)) " " (span-str (:con s)) " "
+                                      (span-str (:sp (:l s))) " " (span-str (:sp (:r s))) ")"))
+               (emit-tree! (:l s)) (emit-tree! (:r s)))
+    :tyop (do (emit-op! (:sp s) (str "(tyop " (span-str (:sp s)) " " (span-str (:sp (:l s))) " "
+                                     (span-str (:sp (:op s))) " " (span-str (:sp (:r s))) ")"))
+              (emit-tree! (:l s)) (emit-tree! (:r s)))
+    nil))
+
+(defn- mk-opapp
+  "mkOpAppRn: e1 op e2 with the fixity of op, e1 already arranged; a shape without its span"
+  [e1 op fix2 e2]
+  (let [default {:t :opapp :fix fix2 :l e1 :op op :r e2}]
+    (case (:t e1)
+      :opapp (let [fix1 (:fix e1) [nofix assoc-r] (compare-fixity fix1 fix2)]
+               (if (and (not nofix) assoc-r)
+                 (let [new (mk-opapp (:r e1) op fix2 e2)
+                       loc' (combine (:sp (:r e1)) (:sp e2))]
+                   {:t :opapp :fix fix1 :l (:l e1) :op (:op e1) :r (assoc new :sp loc')})
+                 default))
+      :neg (let [[nofix assoc-r] (compare-fixity negate-fixity fix2)]
+             (if (and (not nofix) assoc-r)
+               (let [new (mk-opapp (:arg e1) op fix2 e2)
+                     loc' (combine (:sp (:arg e1)) (:sp e2))]
+                 {:t :neg :arg (assoc new :sp loc')})
+               default))
+      default)))
+
+(defn- mk-conop
+  "mkConOpPatRn: p1 `op2` p2; shapes with :con the span of the constructor, :cfix its fixity"
+  [con2 fix2 p1 p2 & [cname]]
+  (let [default {:t :conop :con con2 :con-name cname :cfix fix2 :l p1 :r p2}]
+    (if (= (:t p1) :conop)
+      (let [[nofix assoc-r] (compare-fixity (:cfix p1) fix2)]
+        (if (and (not nofix) assoc-r)
+          (let [new (mk-conop con2 fix2 (:r p1) p2 cname)]
+            {:t :conop :con (:con p1) :con-name (:con-name p1) :cfix (:cfix p1) :l (:l p1) :r (assoc new :sp (:sp p1))})
+          default))
+      default)))
+
+(defn- mk-tyop
+  "mkHsOpTyRn: ty1 `op1` ty2"
+  [op1 fix1 ty1 ty2]
+  (if (= (:t ty2) :tyop)
+    (let [fix2 (:ofix ty2) [nofix assoc-r] (compare-fixity fix1 fix2)]
+      (if (or nofix assoc-r)
+        {:t :tyop :op op1 :ofix fix1 :l ty1 :r ty2}
+        (let [new (mk-tyop op1 fix1 ty1 (:l ty2))]
+          {:t :tyop :op (:op ty2) :ofix fix2 :l (assoc new :sp nil) :r (:r ty2)})))
+    {:t :tyop :op op1 :ofix fix1 :l ty1 :r ty2}))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Types
+
+(declare children-of rn rn-l rn-pat rn-binds rn-expr rn-type-shape rn-fieldbind rn-defn rn-class rn-instance rn-fameqn rn-local-binds rn-node name-of-tycl rn-grhss)
+
+(defn- name-rdr-of
+  "The rdr inside (L sp rdr)"
+  [x] (when (and (L? x) (rdr? (lval x))) (lval x)))
+
+(defn- tvb-name
+  "[sp rdr] of a binder (HsTvb ann vis (HsBndrVar ext (L sp rdr)) kind)"
+  [tvb]
+  (let [v (if (L? tvb) (lval tvb) tvb)
+        b (arg v 3)
+        nm (when (and (node? b) (= 'HsBndrVar (first b))) (arg b 2))]
+    (when (and nm (L? nm)) [(lsp nm) (lval nm)])))
+
+(defn- bind-tv [env sp rdr nsp]
+  (let [n (loc-name "tv" (rdr-occ rdr) nsp)]
+    (emit! nsp n)
+    (note-name! rdr n)
+    (assoc-in env [:l [:t (rdr-occ rdr)]] n)))
+
+(defn rn-tvbs
+  "Bind explicit type variable binders in order (kinds see the earlier ones); the new env"
+  [env tvbs]
+  (reduce (fn [env tvb]
+            (let [v (if (L? tvb) (lval tvb) tvb)
+                  k (arg v 4)]
+              (when k (rn env k))
+              (if-let [[nsp rdr] (tvb-name tvb)]
+                (if-let [old (and (:assoc-tvs env) (get (:l env) [:t (rdr-occ rdr)]))]
+                  (do (emit! nsp old) (note-name! rdr old) env)
+                  (bind-tv env nsp rdr nsp))
+                env)))
+          env tvbs))
+
+(defn- tvbs-of
+  "The binders of an HsQTvs / telescope / (HsOuterExplicit ext [tvbs])"
+  [x]
+  (let [v (if (L? x) (lval x) x)]
+    (case (con v)
+      HsQTvs (arg v 2)
+      (HsOuterExplicit HsForAllInvis HsForAllVis) (arg v 2)
+      [])))
+
+(defn rn-tc-name
+  "The name of a declared type constructor or class: always in the type namespace (an operator is a data
+  name for the parser)"
+  [env nl]
+  (when (and (L? nl) (rdr? (lval nl)))
+    (let [r (lval nl) n (occ-at! env (lsp nl) (list 'unqual 'tc (rdr-occ r)))]
+      (note-name! r n)
+      n)))
+
+(declare free-tvs)
+
+(defn rn-qtvs
+  "A declaration's (HsQTvs ext [tvbs]): the kind variables of the binders' kinds bound implicitly at the
+  declaration's span, then the binders; the env"
+  [env qtvs]
+  (let [tvbs (tvbs-of qtvs)
+        bound (set (keep (fn [t] (some-> (tvb-name t) second rdr-occ)) tvbs))
+        fvs (remove bound (free-tvs env (vec (keep (fn [t] (arg (if (L? t) (lval t) t) 4)) tvbs))))
+        env1 (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o (:sp env)))) env fvs)]
+    (rn-tvbs env1 tvbs)))
+
+(defn free-tvs
+  "The type variables of tree x (in order of first occurrence) not bound in env and not bound inside x"
+  [env x]
+  (let [seen (atom []) seen-set (atom #{})]
+    (letfn [(walk [x bound]
+              (cond
+                (L? x) (let [v (lval x)]
+                         (if (and (rdr? v) (= "tv" (rdr-ns v)) (nil? (rdr-mod v)))
+                           (let [o (rdr-occ v)]
+                             (when (and (not (contains? bound o)) (not (get (:l env) [:t o]))
+                                        (not (contains? @seen-set o)))
+                               (swap! seen conj o) (swap! seen-set conj o)))
+                           (walk v bound)))
+                (vector? x) (doseq [y x] (walk y bound))
+                (node? x)
+                (case (first x)
+                  HsForAllTy
+                  (let [tvbs (tvbs-of (arg x 2))
+                        names (keep (fn [t] (some-> (tvb-name t) second rdr-occ)) tvbs)]
+                    (doseq [t tvbs] (when-let [k (arg (if (L? t) (lval t) t) 4)] (walk k bound)))
+                    (walk (arg x 3) (into bound names)))
+                  (doseq [y (rest x)] (walk y bound)))
+                :else nil))]
+      (walk x #{}))
+    @seen))
+
+(defn rn-sig
+  "(HsSig ext outer body) renamed: implicit type variables bound at the signature's span; {:env env' :scoped [explicit tv Names]}"
+  [env sp sig]
+  (let [outer (arg sig 2) body (arg sig 3)
+        o (if (L? outer) (lval outer) outer)]
+    (case (con o)
+      HsOuterExplicit
+      (let [tvbs (arg o 2) env' (rn-tvbs env tvbs)
+            scoped (vec (keep (fn [t] (some-> (tvb-name t) second rdr-occ (->> (conj [:t]) (get (:l env'))))) tvbs))]
+        (rn env' body)
+        {:env env' :scoped scoped})
+      (let [fvs (free-tvs env body)
+            env' (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o sp))) env fvs)]
+        (rn env' body)
+        {:env env' :scoped []}))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Patterns
+
+(defn- fixity-of-name [n] (if n (lookup-fixity n) [0 "l"]))
+
+(defn- resolve-con [env sp rdr]
+  (let [n (occ-at! env sp rdr)] n))
+
+(defn- lit-name [env val]
+  (when-not (contains? *exts* "RebindableSyntax")
+    (case (con val)
+      HsIntegral (ext-name "var" "GHC.Internal.Num" "fromInteger")
+      HsFractional (ext-name "var" "GHC.Internal.Real" "fromRational")
+      HsIsString (ext-name "var" "GHC.Internal.Data.String" "fromString")
+      nil)))
+
+(declare rn-pat-shape rn-expr-shape)
+
+(defn- rn-pats [env pats] (reduce (fn [e p] (rn-pat e p)) env pats))
+
+(defn- field-label! [env lbl]
+  ;; (L sp (FieldOcc ext (L nsp rdr))) or the FieldOcc: the field's name, looked up in the globals
+  (let [fo (if (L? lbl) (lval lbl) lbl)
+        nl (arg fo 2)]
+    (when (and nl (L? nl) (rdr? (lval nl)))
+      (occ-at! env (lsp nl) (lval nl) :field? true))))
+
+(declare rn-pat-shape*)
+
+(defn rn-pat-shape
+  "A pattern renamed (binders added to env): [env' shape], a leaf carrying its subtree (:x)"
+  [env p]
+  (let [[env' s] (rn-pat-shape* env p)]
+    [env' (if (= :leaf (:t s)) (assoc s :x p) s)]))
+
+(defn rn-pat-shape*
+  [env p]
+  (let [sp (lsp p) v (lval p) env (assoc env :sp sp)]
+    (case (con v)
+      WildPat [env (leaf sp)]
+      VarPat (let [nl (arg v 2) nsp (lsp nl) rdr (lval nl) occ (rdr-occ rdr)]
+               (case (:patmode env)
+                 :lookup (let [n (get (:l env) [:v occ])] (when n (emit-l! nl n)) [env (leaf sp)])
+                 :top (let [n (lookup-global "var" occ nil)] (when n (emit-l! nl n)) [env (leaf sp)])
+                 (let [n (loc-name "var" occ nsp)]
+                   (emit-l! nl n)
+                   [(assoc-in env [:l [:v occ]] n) (leaf sp)])))
+      AsPat (let [nl (arg v 2) nsp (lsp nl) occ (rdr-occ (lval nl))
+                  [env1 n] (case (:patmode env)
+                             :lookup [env (get (:l env) [:v occ])]
+                             :top [env (lookup-global "var" occ nil)]
+                             (let [n (loc-name "var" occ nsp)] [(assoc-in env [:l [:v occ]] n) n]))]
+              (when n (emit-l! nl n))
+              [(rn-pat env1 (arg v 3)) (leaf sp)])
+      (LazyPat BangPat ParPat) [(rn-pat env (arg v 2)) (leaf sp)]
+      ListPat [(rn-pats env (arg v 2)) (leaf sp)]
+      TuplePat [(rn-pats env (arg v 2)) (leaf sp)]
+      OrPat [(rn-pats env (arg v 2)) (leaf sp)]
+      SumPat [(rn-pat env (arg v 2)) (leaf sp)]
+      ViewPat (do (rn env (arg v 2)) [(rn-pat env (arg v 3)) (leaf sp)])
+      SigPat (let [env1 (rn-pat env (arg v 2))
+                   ps (arg v 3)  ; (HsPS ext type)
+                   body (arg ps 2)
+                   fvs (free-tvs env1 body)
+                   env2 (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o sp))) env1 fvs)]
+               (rn env2 body)
+               [env2 (leaf sp)])
+      LitPat (do (when (and (contains? *exts* "OverloadedStrings") (= 'HsString (con (arg v 2))))
+                   (emit-on! v sp (ext-name "var" "GHC.Internal.Data.String" "fromString"))
+                   (emit-on! v nil (ext-name "var" "GHC.Internal.Classes" "==")))
+                 [env (leaf sp)])
+      NPat (do (when-let [n (lit-name env (arg (lval (arg v 2)) 2))] (emit-on! v sp n))
+               (when-not (contains? *exts* "RebindableSyntax")
+                 (emit-on! v nil (ext-name "var" "GHC.Internal.Classes" "=="))
+                 (when (just? (arg v 3)) (emit-on! v nil (ext-name "var" "GHC.Internal.Num" "negate"))))
+               [env (leaf sp)])
+      ConPat
+      (let [cl (arg v 2) det (arg v 3) csp (lsp cl) crdr (lval cl)]
+        (case (con det)
+          InfixCon
+          (let [n (resolve-con env csp crdr)
+                [env1 s1] (rn-pat-shape env (arg det 1))
+                [env2 s2] (rn-pat-shape env1 (arg det 2))
+                s (mk-conop csp (fixity-of-name n) s1 s2 (when n (list 'rn/name n)))]
+            [env2 (assoc s :sp sp)])
+          RecCon
+          (let [n (resolve-con env csp crdr)
+                rf (arg det 1) fields (arg rf 2) dd (just-val (arg rf 3))
+                env1 (reduce (fn [e f]
+                               (let [fb (lval f)]
+                                 (field-label! e (arg fb 2))
+                                 (if (true? (arg fb 4))
+                                   (let [nl (arg (lval (arg fb 2)) 2) occ (rdr-occ (lval nl))
+                                         b (loc-name "var" occ (lsp nl))]
+                                     (emit-l! nl b)
+                                     (assoc-in e [:l [:v occ]] b))
+                                   (rn-pat e (arg fb 3)))))
+                             env fields)
+                mentioned (set (keep (fn [f] (let [fo (lval (arg (lval f) 2))] (some-> (arg fo 2) lval rdr-occ))) fields))
+                env2 (if dd
+                       (reduce (fn [e fname]
+                                 (let [occ (name-occ fname)]
+                                   (if (or (contains? mentioned occ) (not= fname (lookup-global "var" occ nil)))
+                                     e
+                                     (let [b (loc-name "var" occ (lsp dd))]
+                                       (emit-l! dd fname) (emit-l! dd b)
+                                       (assoc-in e [:l [:v occ]] b)))))
+                               env1 (con-fields n))
+                       env1)]
+            [env2 (leaf sp)])
+          ;; PrefixCon [pats] (or type arguments first)
+          (let [pats (last (rest det))
+                _ (resolve-con env csp crdr)]
+            [(rn-pats env (if (vector? pats) pats [])) (leaf sp)])))
+      ;; others: names are occurrences
+      (do (rn env v) [env (leaf sp)]))))
+
+(defn rn-pat
+  "Rename a pattern, the binders added to env: env'"
+  [env p]
+  (let [[env' s] (rn-pat-shape env p)]
+    (emit-tree! s)
+    (when-not (= :leaf (:t s)) (note-node! (lval p) :shape (constantly s)))
+    env'))
+
+(defn- binders-of-pats
+  "The binders [occ sp] of patterns, in order, found by renaming them silently"
+  [env pats]
+  (binding [*occs* nil *ops* nil *errors* nil *uses* nil]
+    (let [env0 (assoc env :patmode nil :l {})
+          env1 (reduce (fn [e p] (rn-pat e p)) env0 pats)]
+      (vec (for [[[k occ] n] (:l env1)] [occ n])))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Expressions
+
+(defn- op-name
+  "Rename the operator of an OpApp/section (emitting it), its Name or nil"
+  [env opl]
+  (let [v (lval opl)]
+    (if (and (= 'HsVar (con v)) (L? (arg v 2)) (rdr? (lval (arg v 2))))
+      (let [nl (arg v 2)] (occ-at! (assoc env :sp (lsp opl)) (lsp nl) (lval nl)))
+      (do (rn-l env opl) nil))))
+
+(declare rn-expr-shape*)
+
+(defn rn-expr-shape
+  "An expression renamed, as the shape of its operator tree, a leaf carrying its subtree (:x)"
+  [env e]
+  (let [s (rn-expr-shape* env e)]
+    (if (= :leaf (:t s)) (assoc s :x e) s)))
+
+(defn rn-expr-shape*
+  [env e]
+  (let [sp (lsp e) v (lval e) env (assoc env :sp sp)]
+    (case (con v)
+      OpApp (let [s1 (rn-expr-shape env (arg v 2))
+                  s2 (rn-expr-shape env (arg v 4))
+                  n (op-name env (arg v 3))
+                  fix (if n (lookup-fixity n) [0 "l"])
+                  opl (arg v 3)]
+              (assoc (mk-opapp s1 (assoc (leaf (lsp opl)) :x opl :name n) fix s2) :sp sp))
+      NegApp (let [s (rn-expr-shape env (arg v 2))]
+               (when-not (contains? *exts* "RebindableSyntax") (emit-on! v nil (ext-name "var" "GHC.Internal.Num" "negate")))
+               {:t :neg :sp sp :arg s})
+      (do (rn-node env sp v) (leaf sp)))))
+
+(defn rn-expr [env e]
+  (let [s (rn-expr-shape env e)]
+    (emit-tree! s)
+    (when-not (= :leaf (:t s)) (note-node! (lval e) :shape (constantly s)))))
+
+(defn- irrefutable?
+  "isIrrefutableHsPat: the pattern cannot fail (variables, wildcards, lazy patterns, tuples and constructors of
+  single-constructor types over irrefutable patterns)"
+  [env p]
+  (let [v (lval p)]
+    (case (con v)
+      (WildPat VarPat LazyPat) true
+      (AsPat) (irrefutable? env (arg v 3))
+      (BangPat ParPat) (irrefutable? env (arg v 2))
+      SigPat (irrefutable? env (arg v 2))
+      TuplePat (every? #(irrefutable? env %) (arg v 2))
+      ConPat
+      (let [cl (arg v 2) det (arg v 3)
+            n (binding [*errors* nil] (resolve-rdr env (lval cl)))
+            par (when n (some (fn [e] (when (= (:name e) n) (:parent e))) (get @*genv* [(nskey (name-ns n)) (name-occ n)])))
+            single? (or (= n (ext-name "data" "GHC.Internal.Tuple" "()"))
+                        (and par (= 1 (count (filter #(= "data" (name-ns %)) (children-of par))))))
+            args (case (con det)
+                   InfixCon [(arg det 1) (arg det 2)]
+                   RecCon (keep (fn [f] (let [fb (lval f)] (when-not (true? (arg fb 4)) (arg fb 3)))) (arg (arg det 1) 2))
+                   (let [x (last (rest det))] (if (vector? x) x [])))]
+        (boolean (and single? (every? #(irrefutable? env %) args))))
+      false)))
+
+(defn rn-stmts
+  "Statements in order, each binding for the later ones; k is called with the final env. fl: the flavour
+  of a do or comprehension (its implicit names), nil for guards"
+  [env stmts k & [fl]]
+  (if (empty? stmts)
+    (k env)
+    (let [s (first stmts) v (lval s) env (assoc env :sp (lsp s))
+          more (rest stmts)
+          mdo? (and (:mdo env) (seq? fl) (= 'MDoExpr (first fl)))
+          sys (fn [m occ] (when (and fl (not (contains? *exts* "RebindableSyntax")))
+                            (emit-on! v nil (ext-name "var" m occ))))]
+      (case (con v)
+        BindStmt (do (sys "GHC.Internal.Base" ">>=")
+                     (when mdo?
+                       (rn env (arg v 3))
+                       (rn-pat (assoc env :patmode :lookup :mdo nil) (arg v 2)))
+                     (when (and fl (not (contains? '#{GuardStmt ListComp} fl)) (not (irrefutable? env (arg v 2))))
+                       (sys "GHC.Internal.Control.Monad.Fail" "fail"))
+                     (if mdo?
+                       (recur env more k [fl])
+                       (do (rn env (arg v 3)) (recur (rn-pat env (arg v 2)) more k [fl]))))
+        LetStmt (recur (rn-local-binds env (arg v 2)) more k [fl])
+        ParStmt (let [blocks (arg v 2)
+                      envs (mapv (fn [b] (rn-stmts env (arg (if (L? b) (lval b) b) 2) identity fl)) blocks)
+                      merged (reduce (fn [e e2] (update e :l merge (:l e2))) env envs)]
+                  (sys "GHC.Internal.Base" "return")
+                  (when (> (count blocks) 1) (sys "GHC.Internal.Control.Monad.Zip" "mzip"))
+                  (recur merged more k [fl]))
+        TransStmt (let [env2 (rn-stmts env (arg v 3) identity fl)]
+                    (rn env2 (arg v 5)) (when (just? (arg v 6)) (rn env2 (just-val (arg v 6))))
+                    (sys "GHC.Internal.Base" "return")
+                    (recur env2 more k [fl]))
+        BodyStmt (do (when-not (and (empty? more) (not (contains? '#{GuardStmt ListComp} fl)))
+                       (sys "GHC.Internal.Base" ">>"))
+                     (when (= fl 'ListComp) (sys "GHC.Internal.Control.Monad" "guard"))
+                     (rn-node env (lsp s) v) (recur env more k [fl]))
+        (do (rn-node env (lsp s) v) (recur env more k [fl]))))))
+
+(defn rn-local-binds [env lb]
+  (case (con lb)
+    HsValBinds (let [vb (arg lb 2)] (rn-binds env (arg vb 2) (arg vb 3) :local))
+    (do (rn env lb) env)))
+
+(defn- rn-grhss [env grhss]
+  ;; (GRHSs ext [GRHS...] localbinds): where-bindings scope over the guards and bodies
+  (let [env1 (rn-local-binds env (arg grhss 3))]
+    (doseq [g (arg grhss 2)]
+      (let [gv (lval g)]
+        (rn-stmts (assoc env1 :sp (lsp g)) (arg gv 2) (fn [e] (rn e (arg gv 3))) 'GuardStmt)))))
+
+(defn rn-mg [env mg & {:keys [fname]}]
+  (doseq [m (lval (arg mg 2))]
+    (let [mv (lval m) env (assoc env :sp (lsp m))
+          ctxt (arg mv 2)]
+      (when (= 'FunRhs (con ctxt))
+        (let [nl (arg ctxt 1)]
+          (if fname (emit-l! nl fname) (rn env nl))))
+      (let [env1 (rn-pats (assoc env :patmode nil) (lval (arg mv 3)))]
+        (rn-grhss env1 (arg mv 4))))))
+
+(defn rn-funbind [env fb & {:keys [fname scoped]}]
+  (let [nl (arg fb 2)]
+    (if fname (emit-l! nl fname) (when (rdr? (lval nl)) (let [n (resolve-rdr env (lval nl))] (when n (emit-l! nl n)))))
+    (let [env1 (reduce (fn [e n] (assoc-in e [:l [:t (name-occ n)]] n)) env scoped)]
+      (rn-mg env1 (arg fb 3) :fname (or fname (resolve-rdr env (lval nl)))))))
+
+(defn rn-node
+  "A node (inside a located node of span sp) renamed"
+  [env sp v]
+  (case (con v)
+    (OpApp NegApp) (rn-expr (assoc env :sp sp) (list 'L sp v))
+    OverLit (when-let [n (lit-name env (arg v 2))] (emit-on! v (:sp env) n))
+    SectionL (let [e (arg v 2) op (arg v 3)]
+               (rn-expr env e) (op-name env op)
+               (emit-op! sp (str "(secl " (span-str sp) " " (span-str (lsp e)) " " (span-str (lsp op)) ")")))
+    SectionR (let [op (arg v 2) e (arg v 3)]
+               (op-name env op) (rn-expr env e)
+               (emit-op! sp (str "(secr " (span-str sp) " " (span-str (lsp op)) " " (span-str (lsp e)) ")")))
+    HsLam (rn-mg env (arg v 3))
+    HsCase (do (rn env (arg v 2)) (rn-mg env (arg v 3)))
+    HsLet (rn (rn-local-binds env (arg v 2)) (arg v 3))
+    HsDo (let [fl (arg v 2) stmts (lval (arg v 3))
+               mdo? (= 'MDoExpr (if (seq? fl) (first fl) fl))
+               ;; mdo: the binders of all the statements scope over all of them
+               env1 (if mdo?
+                      (let [pats (vec (mapcat (fn [s] (let [sv (lval s)]
+                                                        (case (con sv)
+                                                          BindStmt [(arg sv 2)]
+                                                          [])))
+                                              stmts))]
+                        (reduce (fn [e [occ n]] (assoc-in e [:l [:v occ]] n)) env (binders-of-pats env pats)))
+                      env)]
+           (when (and mdo? (not (contains? *exts* "RebindableSyntax")))
+             (emit-on! v nil (ext-name "var" "GHC.Internal.Control.Monad.Fix" "mfix"))
+             (emit-on! v nil (ext-name "var" "GHC.Internal.Base" "return")))
+           (rn-stmts (assoc env1 :mdo mdo?) stmts (fn [_] nil) fl))
+    HsMultiIf (doseq [g (arg v 2)]
+                (let [gv (lval g)] (rn-stmts env (arg gv 2) (fn [e] (rn e (arg gv 3))) 'GuardStmt)))
+    ExprWithTySig (do (rn env (arg v 2))
+                      (let [wc (arg v 3) sig (arg wc 2)]
+                        (rn-sig (assoc env :sp (lsp sig)) sp (lval sig))))
+    DerivDecl (let [wc (arg v 2) sig (arg wc 2)
+                    strat (just-val (arg v 3))
+                    via (when (and strat (= 'ViaStrategy (con (lval strat)))) (arg (arg (lval strat) 1) 2))
+                    ;; a via type's variables are bound at the strategy's span, before the instance's
+                    env1 (if via (:env (rn-sig (assoc env :sp (lsp via)) (lsp via) (lval via))) env)]
+                (rn-sig (assoc env1 :sp (lsp sig)) sp (lval sig))
+                (when (and strat (not via)) (rn env strat)))
+    HsWC (rn env (arg v 2))
+    HsSig (rn-sig env sp v)
+    MG (rn-mg env v)
+    RecordCon (let [cn (occ-at! env (lsp (arg v 2)) (lval (arg v 2))) rf (arg v 3)
+                    dd (just-val (arg rf 3))
+                    mentioned (set (keep (fn [f] (some-> (arg (lval f) 2) lval (arg 2) lval rdr-occ)) (arg rf 2)))]
+                (doseq [f (arg rf 2)] (rn-fieldbind env f))
+                ;; {..}: each field not mentioned whose name is a variable in scope that is not a field
+                (when dd
+                  (doseq [fname (con-fields cn)]
+                    (let [occ (name-occ fname)
+                          var (or (get (:l env) [:v occ])
+                                  (let [g (lookup-global "var" occ nil)] (when (and g (not= g fname) (not= "fld" (name-ns g))) g)))]
+                      (when (and var (not (contains? mentioned occ)))
+                        (use! var) (emit-l! dd fname) (emit-l! dd var))))))
+    RecordUpd (do (rn env (arg v 2))
+                  (let [u (arg v 3)] (doseq [f (arg u 2)] (rn-fieldbind env f))))
+    FieldOcc (field-label! env v)
+    HsForAllTy (let [env1 (rn-tvbs env (tvbs-of (arg v 2)))] (rn env1 (arg v 3)))
+    HsOpTy (let [s (rn-type-shape env (list 'L sp v))]
+             (emit-tree! s)
+             (note-node! v :shape (constantly s)))
+    ;; declarations
+    DataDecl (let [env1 (rn-qtvs env (arg v 3))]
+               (rn-tc-name env (arg v 2)) (rn-defn env env1 (arg v 5)))
+    SynDecl (let [env1 (rn-qtvs env (arg v 3))]
+              (rn-tc-name env (arg v 2)) (rn env1 (arg v 5)))
+    ClassDecl (rn-class env v)
+    FamilyDecl (let [env1 (rn-qtvs env (arg v 5))]
+                 (rn-tc-name env (arg v 4))
+                 (let [r (arg v 7) rv (if (L? r) (lval r) r)
+                       env2 (if (= 'TyVarSig (con rv)) (rn-tvbs env1 [(arg rv 2)]) (do (rn env1 r) env1))]
+                   (rn env2 (arg v 8)))
+                 (let [info (arg v 2)]
+                   (when (= 'ClosedTypeFamily (con info))
+                     (doseq [eq (just-val (arg info 1))] (rn env eq)))))
+    FamEqn (rn-fameqn env sp v)
+    ClsInstDecl (rn-instance env sp v)
+    ConDeclH98 (let [env1 (rn-tvbs env (arg v 4))]
+                 (rn env (arg v 2)) (rn env1 (arg v 5)) (rn env1 (arg v 6)))
+    ConDeclGADT (let [outer (lval (arg v 3))
+                      fvs (when (= 'HsOuterImplicit (con outer)) (free-tvs env [(arg v 5) (arg v 6) (arg v 7)]))
+                      env1 (if (= 'HsOuterExplicit (con outer))
+                             (rn-tvbs env (arg outer 2))
+                             (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o sp))) env fvs))]
+                (rn env (arg v 2)) (rn env1 (arg v 5)) (rn env1 (arg v 6)) (rn env1 (arg v 7)))
+    WarningD nil
+    SpecSig (let [nl (arg v 2)]
+              (rn env nl)
+              (doseq [t (arg v 3)]
+                (rn-sig (assoc env :sp (lsp t)) (combine (lsp nl) (lsp t)) (lval t))))
+    HsRule (let [bs (arg v 4) bndrs (arg bs 3)
+                 sigtys (vec (keep (fn [b] (let [bv (lval b)] (when (= 'RuleBndrSig (con bv)) (arg bv 3)))) bndrs))
+                 fvs (free-tvs env sigtys)
+                 env (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o (:sp env)))) env fvs)
+                 env1 (reduce (fn [e b]
+                                (let [bv (lval b) nl (arg bv 2) occ (rdr-occ (lval nl))
+                                      n (loc-name "var" occ (lsp nl))]
+                                  (emit-l! nl n)
+                                  (when (= 'RuleBndrSig (con bv)) (rn e (arg bv 3)))
+                                  (assoc-in e [:l [:v occ]] n)))
+                              (rn-tvbs env (or (just-val (arg bs 2)) [])) bndrs)]
+             (rn env1 (arg v 5)) (rn env1 (arg v 6)))
+    ;; a fixity declaration names what this module declares in any namespace
+    FixitySig (doseq [nl (arg v 2)]
+                (let [occ (rdr-occ (lval nl))]
+                  (doseq [[k ns] [[:v "var"] [:d "data"] [:t "tc"]]]
+                    (when-let [n (or (get (:l env) [k occ])
+                                     (let [g (lookup-global ns occ nil)] (when (and g (= (name-mod g) *mod*)) g)))]
+                      (emit-l! nl n)))))
+    HsLit (when (and (contains? *exts* "OverloadedStrings") (= 'HsString (con (arg v 2))))
+            (emit-on! v sp (ext-name "var" "GHC.Internal.Data.String" "fromString")))
+    ;; a field binding outside patterns
+    HsFieldBind (rn-fieldbind env v)
+    ;; default: the children
+    (doseq [c (rest v)] (rn env c))))
+
+(defn- field-label-span [lbl]
+  (let [fo (if (L? lbl) (lval lbl) lbl) nl (arg fo 2)] (lsp nl)))
+
+(defn- rn-fieldbind [env f]
+  (let [fb (if (L? f) (lval f) f)]
+    (field-label! env (arg fb 2))
+    (if (true? (arg fb 4))
+      ;; a pun: the variable named as the field, at the label
+      (let [fo (lval (arg fb 2)) nl (arg fo 2)
+            n (resolve-rdr env (list 'unqual 'var (rdr-occ (lval nl))))]
+        (when n (use! n) (emit-l! nl n)))
+      (rn env (arg fb 3)))))
+
+(defn rn-l [env x] (rn env x))
+
+(defn rn
+  "Rename x (a located node, a node, a vector of them): occurrences become output"
+  [env x]
+  (cond
+    (L? x) (let [v (lval x) env (assoc env :sp (lsp x))]
+             (cond (rdr? v) (occ-at! env (lsp x) v)
+                   (node? v) (rn-node env (lsp x) v)
+                   (vector? v) (doseq [y v] (rn env y))
+                   :else nil))
+    (vector? x) (doseq [y x] (rn env y))
+    (node? x) (rn-node env (:sp env) x)
+    :else nil))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Types' operator trees
+
+(declare rn-type-shape*)
+
+(defn rn-type-shape [env t]
+  (let [s (rn-type-shape* env t)]
+    (if (= :leaf (:t s)) (assoc s :x t) s)))
+
+(defn rn-type-shape* [env t]
+  (let [sp (lsp t) v (lval t) env (assoc env :sp sp)]
+    (if (= 'HsOpTy (con v))
+      (let [s1 (rn-type-shape env (arg v 3))
+            opl (arg v 4)
+            n (when (rdr? (lval opl)) (occ-at! env (lsp opl) (lval opl)))
+            s2 (rn-type-shape env (arg v 5))
+            fix (fixity-of-name n)]
+        (assoc (mk-tyop (assoc (leaf (lsp opl)) :x opl :name n) fix s1 s2) :sp sp))
+      (do (rn-node env sp v) (leaf sp)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Declarations
+
+(defn- rn-defn
+  "(HsDataDefn ext ctx ctype ksig cons derivs); env1 has the declaration's type variables, which a GADT
+  constructor's signature does not see"
+  [env0 env d]
+  (rn env (arg d 2)) (rn env (arg d 4))
+  (let [cs (arg d 5)
+        cenv (fn [c] (if (= 'ConDeclGADT (con (lval c))) env0 env))]
+    (case (con cs)
+      DataTypeCons (doseq [c (arg cs 2)] (rn (cenv c) c))
+      NewTypeCon (rn (cenv (arg cs 1)) (arg cs 1))
+      nil))
+  (rn env (arg d 6)))
+
+(defn- rn-fameqn [env sp eq]
+  ;; (FamEqn ext lname bndrs pats fix rhs)
+  (let [bndrs (arg eq 3) b (if (L? bndrs) (lval bndrs) bndrs)
+        env1 (case (con b)
+               HsOuterExplicit (rn-tvbs env (arg b 2))
+               (let [fvs (free-tvs env [(arg eq 4) (arg eq 6)])]
+                 (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o sp))) env fvs)))]
+    (rn-tc-name env (arg eq 2)) (rn env1 (arg eq 4)) (rn env1 (arg eq 6))))
+
+(defn- rn-class [env v]
+  ;; (ClassDecl ext ctx lname qtvs fix fundeps sigs binds ats atdefs docs)
+  (let [env1 (rn-qtvs env (arg v 4))]
+    (rn env1 (arg v 2)) (rn-tc-name env (arg v 3)) (rn env1 (arg v 6))
+    (doseq [s (arg v 7)] (rn env1 s))
+    (doseq [b (arg v 8)] (let [bv (lval b)] (if (= 'FunBind (con bv)) (rn-funbind (assoc env1 :sp (lsp b)) bv) (rn env1 b))))
+    (rn (assoc env1 :assoc-tvs true) (arg v 9)) (rn env (arg v 10))))
+
+(defn- children-of [n]
+  (or (get @*children* n)
+      (when (ext? n)
+        (when-let [i (load-iface (name-mod n))]
+          (some (fn [[a kids]] (when (= a n) kids)) (:exports i))))))
+
+(defn- head-class
+  "The class Name of an instance head type"
+  [env body]
+  (let [v (lval body)]
+    (case (con v)
+      (HsAppTy) (head-class env (arg v 2))
+      (HsParTy) (head-class env (arg v 2))
+      HsTyVar (let [nl (arg v 3)] (when (rdr? (lval nl)) (binding [*errors* nil *occs* nil *uses* nil] (resolve-rdr env (lval nl)))))
+      nil)))
+
+(defn- rn-instance [env sp v]
+  ;; (ClsInstDecl ext (L sp HsSig) binds sigs ats adts overlap)
+  (let [sigl (arg v 2) {env1 :env} (rn-sig (assoc env :sp (lsp sigl)) (lsp sigl) (lval sigl))
+        cls (head-class env1 (arg (lval sigl) 3))
+        kids (children-of cls)]
+    (doseq [b (arg v 3)]
+      (let [bv (lval b) benv (assoc env1 :sp (lsp b))]
+        (if (= 'FunBind (con bv))
+          (let [nl (arg bv 2) occ (rdr-occ (lval nl))
+                m (or (first (filter #(= (name-occ %) occ) kids)) (resolve-rdr env1 (lval nl)))]
+            (rn-funbind benv bv :fname m))
+          (rn env1 b))))
+    (rn env1 (arg v 4)) (rn env1 (arg v 5)) (rn env1 (arg v 6))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Binding groups
+
+(defn- scc
+  "Tarjan: nodes 0..n-1, edges (fn i -> [j...]); the components, dependencies first; each [indexes]; the
+  nodes visited last to first (GHC's order of independent nodes)"
+  [n edges]
+  (let [index (atom {}) low (atom {}) on (atom #{}) stack (atom []) counter (atom 0) out (atom [])]
+    (letfn [(visit [v]
+              (swap! index assoc v @counter) (swap! low assoc v @counter) (swap! counter inc)
+              (swap! stack conj v) (swap! on conj v)
+              (doseq [w (edges v)]
+                (cond (not (contains? @index w)) (do (visit w) (swap! low assoc v (min (@low v) (@low w))))
+                      (contains? @on w) (swap! low assoc v (min (@low v) (@index w)))))
+              (when (= (@low v) (@index v))
+                (let [comp (loop [acc []]
+                             (let [w (peek @stack)]
+                               (swap! stack pop) (swap! on disj w)
+                               (if (= w v) (conj acc w) (recur (conj acc w)))))]
+                  (swap! out conj (vec (sort comp))))))]
+      (doseq [v (reverse (range n))] (when-not (contains? @index v) (visit v))))
+    @out))
+
+(defn- names-text [ns] (str "[" (str/join " " (sort (map name-str ns))) "]"))
+
+(defn rn-binds
+  "Value bindings with their signatures: binders in scope (local: new names), signatures, bodies,
+  the groups by SCC. mode :top (the binders are the module's) or :local; the env with the binders"
+  [env binds sigs mode]
+  (let [pb (if (= mode :top) :top :lookup)
+        mk (fn [occ sp] (if (= mode :top) (lookup-global "var" occ nil) (loc-name "var" occ sp)))
+        bind-info (vec (for [b binds]
+                         (let [bv (lval b)]
+                           (case (con bv)
+                             FunBind (let [nl (arg bv 2) occ (rdr-occ (lval nl))]
+                                       {:b b :defs [[occ (mk occ (lsp nl))]]})
+                             PatSynBind (let [occ (rdr-occ (lval (arg (arg bv 2) 2)))]
+                                          {:b b :defs [[occ (lookup-global "data" occ nil)]]})
+                             PatBind {:b b :defs (if (= mode :top)
+                                                   (vec (for [[occ _] (binders-of-pats env [(arg bv 2)])] [occ (lookup-global "var" occ nil)]))
+                                                   (binders-of-pats env [(arg bv 2)]))}
+                             {:b b :defs []}))))
+        env1 (if (= mode :top)
+               env
+               (reduce (fn [e [occ n]] (assoc-in e [:l [:v occ]] n)) env (mapcat :defs bind-info)))
+        ;; fixity declarations
+        _ (doseq [s sigs]
+            (let [sv (lval s)]
+              (when (= 'FixSig (con sv))
+                (let [fs (arg sv 2) f (arg fs 3)
+                      fix [(some #(when (number? %) %) (rest f)) (case (name (some #(when (#{'InfixL 'InfixR 'InfixN} %) %) (rest f))) "InfixL" "l" "InfixR" "r" "n")]]
+                  (doseq [nl (arg fs 2)]
+                    (let [occ (rdr-occ (lval nl))]
+                      (doseq [k [:v :d :t]]
+                        (when-let [n (or (get (:l env1) [k occ])
+                                         (lookup-global (case k :v "var" :d "data" :t "tc") occ nil))]
+                          (swap! *fixities* assoc n fix)))))))))
+        ;; signatures: the scoped type variables of the binders
+        scoped (atom {})
+        _ (doseq [s sigs]
+            (let [sv (lval s) env2 (assoc env1 :sp (lsp s))]
+              (if (= 'TypeSig (con sv))
+                (do (doseq [nl (arg sv 2)] (rn env2 nl))
+                    (let [wc (arg sv 3) sig (arg wc 2)
+                          r (rn-sig (assoc env2 :sp (lsp sig)) (lsp s) (lval sig))]
+                      (doseq [nl (arg sv 2)] (swap! scoped assoc (rdr-occ (lval nl)) (:scoped r)))))
+                (rn env2 s))))
+        results (vec (for [{:keys [b defs]} bind-info]
+                       (let [uses (atom #{})]
+                         (binding [*uses* uses]
+                           (let [bv (lval b) benv (assoc env1 :sp (lsp b))]
+                             (case (con bv)
+                               FunBind (let [occ (rdr-occ (lval (arg bv 2)))]
+                                         (rn-funbind benv bv :scoped (get @scoped occ)
+                                                     :fname (if (= mode :top) (lookup-global "var" occ nil) (get (:l env1) [:v occ]))))
+                               PatSynBind (let [psb (arg bv 2) nl (arg psb 2)
+                                                n (lookup-global "data" (rdr-occ (lval nl)) nil)
+                                                env2 (rn-pat (assoc benv :patmode nil) (arg psb 4))
+                                                args (arg psb 3)]
+                                            (when n (emit-l! nl n))
+                                            (case (con args)
+                                              PrefixCon (doseq [a (arg args 1)]
+                                                          (when-let [b (get (:l env2) [:v (rdr-occ (lval a))])] (emit-l! a b)))
+                                              InfixCon (doseq [a [(arg args 1) (arg args 2)]]
+                                                         (when-let [b (get (:l env2) [:v (rdr-occ (lval a))])] (emit-l! a b)))
+                                              RecCon (doseq [a (arg args 1)]
+                                                       (field-label! benv (arg a 1))
+                                                       (let [vl (arg a 2)]
+                                                         (when-let [b (get (:l env2) [:v (rdr-occ (lval vl))])] (emit-l! vl b))))
+                                              nil)
+                                            ;; the builder's name is not a use of the synonym itself
+                                            (let [tmp (atom #{})]
+                                              (binding [*uses* tmp] (rn env2 (arg psb 5)))
+                                              (doseq [u (disj @tmp n)] (use! u))))
+                               PatBind (do (rn-pat (assoc benv :patmode pb) (arg bv 2))
+                                           (let [rhs (arg bv 4)] (rn-grhss benv rhs)))
+                               (rn benv b))))
+                         @uses)))
+        _ (doseq [r results u r] (use! u))
+        names-of (fn [i] (map second (:defs (nth bind-info i))))
+        defset (mapv (fn [i] (set (names-of i))) (range (count bind-info)))
+        edges (fn [i] (vec (for [j (range (count bind-info)) :when (seq (set/intersection (nth results i) (nth defset j)))] j)))
+        comps (scc (count bind-info) edges)]
+    (doseq [c comps]
+      (let [rec? (or (> (count c) 1) (some #(= % (first c)) (edges (first c))))]
+        (swap! *groups* conj (str "(vals " (if rec? "rec" "nonrec") " " (names-text (mapcat names-of c)) ")"))
+        (note-node! binds :groups (fnil conj []) [(if rec? 'rec 'nonrec) (mapv #(:b (nth bind-info %)) c)])))
+    (assoc env1 :patmode nil)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The module
+
+(defn- find-nodes
+  "Every node of the given constructor below x"
+  [con-sym x]
+  (filter #(and (seq? %) (= con-sym (first %))) (tree-seq coll? seq x)))
+
+(defn- field-names-of [x]
+  (vec (distinct (for [fo (find-nodes 'FieldOcc x)
+                       :let [nl (arg fo 2)] :when (and (L? nl) (rdr? (lval nl)))]
+                   (rdr-occ (lval nl))))))
+
+(defn- collect-tops
+  "The module's top-level binders: [{:name :parent}], with the constructors' fields noted"
+  [m decls]
+  (let [out (atom []) cons-fields (atom {})
+        add! (fn [ns occ parent] (swap! out conj {:name (ext-name ns m occ) :parent parent}))
+        add-tycon! (fn [lname]
+                     (let [occ (rdr-occ (lval lname)) n (ext-name "tc" m occ)]
+                       (swap! out conj {:name n :parent nil}) n))]
+    (doseq [d decls]
+      (let [v (lval d)]
+        (case (con v)
+          TyClD
+          (let [t (arg v 2)]
+            (case (con t)
+              DataDecl
+              (let [tn (add-tycon! (arg t 2)) defn* (arg t 5) cs (arg defn* 5)
+                    conlist (case (con cs) DataTypeCons (arg cs 2) NewTypeCon [(arg cs 1)] [])]
+                (doseq [c conlist]
+                  (let [cv (lval c)
+                        names (case (con cv) ConDeclH98 [(arg cv 2)] ConDeclGADT (arg cv 2) [])
+                        fields (field-names-of cv)
+                        fnames (mapv #(ext-name "fld" m %) fields)]
+                    (doseq [f fields] (add! "fld" f tn))
+                    (doseq [cn names]
+                      (let [cname (ext-name "data" m (rdr-occ (lval cn)))]
+                        (swap! out conj {:name cname :parent tn})
+                        (swap! cons-fields assoc cname fnames))))))
+              SynDecl (add-tycon! (arg t 2))
+              FamDecl (add-tycon! (arg (arg t 2) 4))
+              ClassDecl
+              (let [cn (add-tycon! (arg t 3))]
+                (doseq [s (arg t 7)]
+                  (let [sv (lval s)]
+                    (when (= 'ClassOpSig (con sv))
+                      (doseq [nl (arg sv 3)] (add! "var" (rdr-occ (lval nl)) cn)))))
+                (doseq [a (arg t 9)]
+                  (let [av (lval a)]
+                    (when (= 'FamilyDecl (con av))
+                      (swap! out conj {:name (ext-name "tc" m (rdr-occ (lval (arg av 4)))) :parent cn})))))
+              nil))
+          ValD
+          (let [b (arg v 2)]
+            (case (con b)
+              FunBind (add! "var" (rdr-occ (lval (arg b 2))) nil)
+              PatBind (doseq [[occ _] (binders-of-pats {} [(arg b 2)])] (add! "var" occ nil))
+              PatSynBind (do (add! "data" (rdr-occ (lval (arg (arg b 2) 2))) nil)
+                             (let [args (arg (arg b 2) 3)]
+                               (when (= 'RecCon (con args))
+                                 (doseq [a (arg args 1)]
+                                   (add! "fld" (rdr-occ (lval (arg (arg a 1) 2))) nil)))))
+              nil))
+          InstD
+          (let [i (arg v 2)
+                dfis (case (con i)
+                       DataFamInstD [(arg (arg i 2) 1)]
+                       ClsInstD (map (fn [a] (arg (lval a) 1)) (arg (arg i 2) 6))
+                       [])]
+            (doseq [eq dfis]
+              (when (and (node? eq) (= 'FamEqn (first eq)))
+                (let [fam (ext-name "tc" m (rdr-occ (lval (arg eq 2))))
+                      defn* (arg eq 6) cs (arg defn* 5)
+                      conlist (case (con cs) DataTypeCons (arg cs 2) NewTypeCon [(arg cs 1)] [])]
+                  (doseq [c conlist]
+                    (let [cv (lval c)
+                          names (case (con cv) ConDeclH98 [(arg cv 2)] ConDeclGADT (arg cv 2) [])
+                          fields (field-names-of cv)]
+                      (doseq [f fields] (add! "fld" f fam))
+                      (doseq [cn names]
+                        (let [cname (ext-name "data" m (rdr-occ (lval cn)))]
+                          (swap! out conj {:name cname :parent fam})
+                          (swap! cons-fields assoc cname (mapv #(ext-name "fld" m %) fields))))))))))
+          ForD
+          (let [f (arg v 2)]
+            (when (and (node? f) (L? (arg f 2)) (rdr? (lval (arg f 2))))
+              (add! "var" (rdr-occ (lval (arg f 2))) nil)))
+          nil)))
+    {:tops @out :cons-fields @cons-fields}))
+
+(defn- ie-name
+  "[sp rdr] of an IE wrapper (IEName ext (L sp rdr)) / IEType / IEPattern"
+  [w]
+  (let [wv (if (L? w) (lval w) w) nl (last wv)]
+    [(lsp nl) (lval nl)]))
+
+(defn- avail-text [n kids]
+  (str "(avail " (name-str n) " [" (str/join " " (sort (map name-str kids))) "])"))
+
+(defn- mk-avails
+  "AvailInfos (texts) of names with parents [[name parent]...]"
+  [nps]
+  (let [m (atom {}) singles (atom [])]
+    (doseq [[n p] nps]
+      (cond p (swap! m update p (fn [s] (conj (or s #{}) n)))
+            (= "tc" (name-ns n)) (swap! m update n (fn [s] (or s #{})))
+            :else (swap! singles conj n)))
+    (vec (concat (for [[p kids] @m] [p kids])
+                 (for [n @singles] [n #{}])))))
+
+(defn- in-scope? [n]
+  (boolean (some (fn [e] (= (:name e) n)) (get @*genv* [(nskey (name-ns n)) (name-occ n)]))))
+
+(defn- find-child [parent occ]
+  (first (filter #(= (name-occ %) occ) (children-of parent))))
+
+(defn- rn-exports
+  "The export list renamed (occurrences emitted): the avails [[name kids]...]"
+  [items]
+  (let [env {:l {}}
+        acc (atom [])]
+    (doseq [it items]
+      (let [v (lval it)]
+        (case (con v)
+          IEVar (let [[nsp rdr] (ie-name (arg v 2))]
+                  (when-let [n (occ-at! env nsp rdr)]
+                    ;; a method or field exported alone belongs to its parent's avail
+                    (let [par (some (fn [e] (when (= (:name e) n) (:parent e))) (get @*genv* [(nskey (name-ns n)) (name-occ n)]))]
+                      (swap! acc conj (if par [par #{n}] [n #{}])))))
+          IEThingAbs (let [[nsp rdr] (ie-name (arg v 2))]
+                       (when-let [n (occ-at! env nsp rdr)] (swap! acc conj [n #{}])))
+          IEThingAll (let [[nsp rdr] (ie-name (arg v 2))]
+                       (when-let [n (occ-at! env nsp rdr)]
+                         (swap! acc conj [n (set (filter in-scope? (children-of n)))])))
+          IEThingWith (let [[nsp rdr] (ie-name (arg v 2))]
+                        (when-let [n (occ-at! env nsp rdr)]
+                          (let [kids (keep (fn [w] (let [[ksp krdr] (ie-name w)
+                                                         k (or (find-child n (rdr-occ krdr)) (lookup-global "data" (rdr-occ krdr) nil) (lookup-global "var" (rdr-occ krdr) nil))]
+                                                     (when k (emit! ksp k) (note-name! krdr k) k)))
+                                           (arg v 4))]
+                            (swap! acc conj [n (into (set kids)
+                                                     (when (not= 'NoIEWildcard (arg v 3))
+                                                       (filter in-scope? (children-of n))))]))))
+          IEModuleContents
+          (let [mname (modname (lval (arg v 2)))
+                es (for [[_ es] @*genv* e es :when (and (:unq e) (contains? (:quals e) mname))] e)]
+            (doseq [[n kids] (mk-avails (map (fn [e] [(:name e) (:parent e)]) es))]
+              (swap! acc conj [n kids])))
+          nil)))
+    ;; merge avails with the same head
+    (let [merged (reduce (fn [m [n kids]] (update m n (fn [s] (into (or s #{}) kids)))) {} @acc)]
+      (vec merged))))
+
+(defn- bring-in!
+  [name quals unq parent]
+  (add-gre! name quals unq parent))
+
+(defn- import-item-names
+  "The names an import item selects from the avails [[N kids]...]: [{:name :parent :emit [sp name]}]; a
+  hiding item names a type and a data constructor of its spelling"
+  [avails item hiding?]
+  (let [v (lval item)
+        [nsp rdr] (ie-name (arg v 2))
+        occ (rdr-occ rdr)
+        all (for [[n kids] avails] [n kids])
+        find-top (fn [pred] (first (filter (fn [[n _]] (pred n)) all)))]
+    (case (con v)
+      IEVar
+      (let [hit (or (some (fn [[n kids]] (when (and (not= "tc" (name-ns n)) (= (name-occ n) occ)) {:name n :parent nil :emit [nsp n]})) all)
+                    (some (fn [[n kids]] (some (fn [k] (when (and (not= "tc" (name-ns k)) (= (name-occ k) occ)) {:name k :parent n :emit [nsp k]})) kids)) all))]
+        (if hit [hit] []))
+      IEThingAbs
+      (let [hit (find-top (fn [n] (and (= "tc" (name-ns n)) (= (name-occ n) occ))))
+            dcs (concat
+                 (for [[n _] all :when (and (not= "tc" (name-ns n)) (= (name-occ n) occ))] {:name n :parent nil :emit [nsp n]})
+                 (for [[n kids] all k kids :when (and (= "data" (name-ns k)) (= (name-occ k) occ))] {:name k :parent n :emit [nsp k]}))]
+        (cond (and hit hiding?) (into [{:name (first hit) :parent nil :emit [nsp (first hit)]}] dcs)
+              hit [{:name (first hit) :parent nil :emit [nsp (first hit)]}]
+              :else (vec (take 1 dcs))))
+      IEThingAll
+      (if-let [[n kids] (find-top (fn [n] (and (= "tc" (name-ns n)) (= (name-occ n) occ))))]
+        (into [{:name n :parent nil :emit [nsp n]}] (map (fn [k] {:name k :parent n}) kids))
+        [])
+      IEThingWith
+      (if-let [[n kids] (find-top (fn [n] (and (= "tc" (name-ns n)) (= (name-occ n) occ))))]
+        (let [wanted (arg v 4)
+              ks (for [w wanted
+                       :let [[ksp krdr] (ie-name w) k (first (filter #(= (name-occ %) (rdr-occ krdr)) kids))]
+                       :when k]
+                   {:name k :parent n :emit [ksp k]})]
+          (into [{:name n :parent nil :emit [nsp n]}]
+                (concat ks (when (not= 'NoIEWildcard (arg v 3))
+                             (map (fn [k] {:name k :parent n}) kids)))))
+        [])
+      [])))
+
+(defn- process-import! [imp]
+  ;; (ImportDecl ext (L sp (mod M)) pkg src lev safe qual as list)
+  (let [v (lval imp)
+        m (modname (lval (arg v 2)))
+        qual? (not= 'NotQualified (arg v 7))
+        as (some-> (just-val (arg v 8)) lval modname)
+        lst (just-val (arg v 9))
+        hiding? (and lst (= 'EverythingBut (nth lst 1)))
+        items (when lst (lval (nth lst 2)))
+        i (load-iface m)
+        avails (:exports i)]
+    (when-not i (error! "no interface for " m))
+    (doseq [[n kids] avails] (note-children! n kids))
+    (let [sel (when (and lst (not hiding?)) (mapcat #(import-item-names avails % false) items))
+          hid (when hiding? (mapcat #(import-item-names avails % true) items))
+          hidden (set (map :name hid))
+          ;; hiding C also hides the data constructor C
+          hidden-occs (set (map (fn [h] (name-occ (:name h))) hid))
+          q (or as m)
+          included
+          (cond
+            (and lst (not hiding?)) (map (fn [h] [(:name h) (:parent h)]) sel)
+            :else (for [[n kids] avails
+                        x (cons [n nil] (map (fn [k] [k n]) kids))
+                        :let [nm (first x)]
+                        :when (not (and hiding? (or (contains? hidden nm)
+                                                    (and (= "data" (name-ns nm)) (contains? hidden-occs (name-occ nm))))))]
+                    x))]
+      (doseq [h (concat sel hid)] (when-let [[sp nm] (:emit h)] (emit! sp nm)))
+      (doseq [[n p] included] (bring-in! n #{q} (not qual?) p))
+      {:span (lsp imp) :module m :qualified qual? :as as :hiding hiding?
+       :items (vec (keep :emit (concat sel hid)))
+       :implicit (nth (arg v 1) 3)})))
+
+(defn- import-text [{:keys [span module qualified as hiding implicit]}]
+  (str "(import " (span-str span) " " (esc module) " " (if qualified "true" "false") " "
+       (if as (esc as) "nil") " " (if hiding "true" "false") " " (if implicit "true" "false") ")"))
+
+(defn- tycl-decl-name [d]
+  (let [t (arg (lval d) 2)]
+    (case (con t)
+      (DataDecl SynDecl) (lval (arg t 2))
+      ClassDecl (lval (arg t 3))
+      FamDecl (lval (arg (arg t 2) 4))
+      nil)))
+
+(defn- register-fixities! [m sigs]
+  (doseq [s sigs]
+    (let [sv (lval s)]
+      (when (= 'FixSig (con sv))
+        (let [fs (arg sv 2) f (arg fs 3)
+              fix [(some #(when (number? %) %) (rest f))
+                   (case (name (some #(when (#{'InfixL 'InfixR 'InfixN} %) (identity %)) (rest f))) "InfixL" "l" "InfixR" "r" "n")]]
+          (doseq [nl (arg fs 2)]
+            (let [occ (rdr-occ (lval nl))]
+              (doseq [ns ["var" "data" "tc" "fld"]]
+                (when-let [n (lookup-global ns occ nil)]
+                  (when (= (name-mod n) m) (swap! *fixities* assoc n fix)))))))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The renamed tree (HF3's input; doc/haskell/FRONTEND-SURVEY.md, "Decided", HF1-HF2's proposal 1 (a))
+;;;
+;;; The walk above records, beside the facts, what the tree needs: each RdrName object of the parse tree the Names
+;;; it resolved to (*rnames*), each operator application's final shape, the implicit names a node carries and the
+;;; binding groups of each list of value bindings (*rnodes*), keyed by the parse tree's own objects (identity, not
+;;; spans). The tree is the parse tree with those substituted:
+;;;   (L sp RDR)                 -> (L sp (rn/name NAME)), (L sp (rn/names [NAME...])) when one place names two
+;;;                                 (a pun: the field and the variable), the RdrName kept when unresolved
+;;;   an operator application    -> rebuilt by its fixities: (OpApp (rn/fixity P D) L OP R), (NegApp (rn/implicit [negate]) E),
+;;;                                 (ConPat (rn/fixity P D) CON (InfixCon L R)), (HsOpTy (rn/fixity P D) nil L OP R) as mkOpAppRn ... build them
+;;;   a node with implicit names -> the node with (rn/implicit [NAME...]) appended (literals' fromInteger, do's >>=...)
+;;;   (ValBinds ext [b...] sigs) -> (ValBindsRn [(rn/group rec|nonrec [b...])...] sigs), the groups dependencies first
+;;; and the module (rn/module {:module :decls :binds :sigs :exports :imports}). The facts are its projection:
+;;; rename-check also requires every located name of the tree among the facts (tree-names).
+
+(declare rtree local-things)
+
+(defn- rname [ns]
+  (if (= 1 (count ns)) (list 'rn/name (first ns)) (list 'rn/names (vec (distinct ns)))))
+
+(defn- build-shape
+  "The tree of an operator application's final shape"
+  [s]
+  (case (:t s)
+    :leaf (rtree (:x s))
+    :opapp (list 'L (:sp s) (list 'OpApp (list 'rn/fixity (first (:fix s)) (second (:fix s)))
+                                  (build-shape (:l s)) (rtree (:x (:op s))) (build-shape (:r s))))
+    :neg (list 'L (:sp s) (list 'NegApp (if (contains? *exts* "RebindableSyntax")
+                                          (list 'rn/implicit [] [])
+                                          (list 'rn/implicit [(ext-name "var" "GHC.Internal.Num" "negate")] [nil]))
+                                (build-shape (:arg s))))
+    :conop (list 'L (:sp s) (list 'ConPat (list 'rn/fixity (first (:cfix s)) (second (:cfix s)))
+                                  (list 'L (:con s) (:con-name s))
+                                  (list 'InfixCon (build-shape (:l s)) (build-shape (:r s)))))
+    :tyop (list 'L (:sp s) (list 'HsOpTy (list 'rn/fixity (first (:ofix s)) (second (:ofix s))) nil
+                                 (build-shape (:l s)) (rtree (:x (:op s))) (build-shape (:r s))))
+    nil))
+
+(defn rtree
+  "The renamed tree of a parse tree x (after the walk, under the same bindings)"
+  [x]
+  (let [^java.util.IdentityHashMap rn *rnames* ^java.util.IdentityHashMap nd *rnodes*]
+    (cond
+      (L? x) (let [v (lval x)]
+               (cond
+                 (rdr? v) (if-let [ns (.get rn v)] (list 'L (lsp x) (rname ns)) x)
+                 (and (node? v) (:shape (.get nd v))) (let [t (build-shape (:shape (.get nd v)))]
+                                                         (if (L? t) (list 'L (lsp x) (lval t)) t))
+                 ;; a record wildcard's (..): the fields it fills and the variables filling them
+                 :else (let [v' (rtree v) ns (when (some? v) (.get rn v))]
+                         (list 'L (lsp x) (if ns (list 'rn/dotdot v' (vec ns)) v')))))
+      (vector? x) (mapv rtree x)
+      (node? x) (let [info (.get nd x)]
+                  (do
+                    (let [kids (map rtree (rest x))
+                          base (if (and (= 'ValBinds (first x)) (.get nd (arg x 2)))
+                                 (list 'ValBindsRn
+                                       (mapv (fn [[r bs]] (list 'rn/group r (mapv rtree bs))) (:groups (.get nd (arg x 2))))
+                                       (rtree (arg x 3)))
+                                 (if (= 'ValBinds (first x))
+                                   (list 'ValBindsRn [] (rtree (arg x 3)))
+                                   (apply list (first x) kids)))]
+                      (if-let [imp (:implicit info)]
+                        (concat base [(list 'rn/implicit (mapv first imp) (mapv second imp))])
+                        base))))
+      :else x)))
+
+(defn tree-names
+  "Every located name of a renamed tree: [span-key text] as the facts write them"
+  [t]
+  (let [out (atom #{})
+        put! (fn [sp n] (swap! out conj [(span-key sp) (str "[" (span-str sp) " " (name-str n) "]")]))]
+    (letfn [(walk [x]
+              (cond
+                (and (L? x) (seq? (lval x)) (contains? '#{rn/name rn/names} (first (lval x))))
+                (let [v (lval x) ns (if (= 'rn/name (first v)) [(second v)] (second v))]
+                  (doseq [n ns] (put! (lsp x) n)))
+                (and (L? x) (seq? (lval x)) (= 'rn/dotdot (first (lval x))))
+                (do (doseq [n (nth (lval x) 2)] (put! (lsp x) n)) (walk (second (lval x))))
+                (and (seq? x) (= 'rn/implicit (first x)))
+                (doseq [[n sp] (map vector (nth x 1) (nth x 2))] (when sp (put! sp n)))
+                (and (map? x) (contains? x :items) (contains? x :module))
+                (doseq [[sp n] (:items x)] (put! sp n))
+                (coll? x) (doseq [y x] (walk y))
+                :else nil))]
+      (walk t))
+    @out))
+
+(defn rename-module
+  "Rename a module's parse tree (the dump's forms): the output as a map of strings"
+  [forms]
+  (let [by (into {} (map (fn [f] [(when (seq? f) (first f)) f]) (filter seq? forms)))
+        cfg (second (get by 'hsdump/config))
+        prag (second (get by 'hsdump/pragmas))
+        tree (first (filter L? forms))
+        hm (lval tree)  ; (HsModule ext name exports imports decls)
+        mname-l (just-val (arg hm 2))
+        m (if mname-l (modname (lval mname-l)) "Main")
+        export-l (just-val (arg hm 3))
+        imports (arg hm 4)
+        decls (arg hm 5)
+        exts (into (set (map str (:extensions cfg)))
+                   (mapcat (fn [p] (when (= 'language (first p)) (nth p 2))) prag))]
+    (binding [*mod* m *exts* exts
+              *genv* (atom {}) *fixities* (atom {}) *children* (atom {}) *fields* (atom {})
+              *occs* (atom #{}) *ops* (atom #{}) *groups* (atom []) *errors* (atom [])
+              *uses* nil *rnames* (java.util.IdentityHashMap.) *rnodes* (java.util.IdentityHashMap.)]
+      (let [{:keys [tops cons-fields]} (collect-tops m decls)
+            _ (reset! *fields* cons-fields)
+            _ (doseq [{:keys [name parent]} tops] (add-gre! name #{m} true parent))
+            _ (doseq [{:keys [name parent]} tops] (when parent (note-children! parent [name])))
+            parent-of (into {} (map (fn [{:keys [name parent]}] [name parent]) tops))
+            implicit? (and (not (contains? exts "NoImplicitPrelude"))
+                           (not-any? (fn [i] (= "Prelude" (modname (lval (arg (lval i) 2))))) imports))
+            imp-infos (vec (concat
+                            (when implicit?
+                              [(process-import!
+                                (list 'L (if mname-l (lsp mname-l) (lsp tree))
+                                      (list 'ImportDecl (list 'XImportDeclPass nil nil true)
+                                            (list 'L nil (list 'mod "Prelude")) 'NoRawPkgQual 'NotBoot 'NotLevelled false
+                                            'NotQualified 'Nothing 'Nothing)))])
+                            (map process-import! imports)))
+            env {:l {}}
+            top-sigs (vec (for [d decls :when (= 'SigD (con (lval d)))]
+                            (list 'L (lsp d) (arg (lval d) 2))))
+            class-sigs (vec (for [d decls :let [v (lval d)]
+                                  :when (and (= 'TyClD (con v)) (= 'ClassDecl (con (arg v 2))))
+                                  s (arg (arg v 2) 7)] s))
+            _ (register-fixities! m (concat top-sigs class-sigs))
+            val-binds (vec (for [d decls :when (= 'ValD (con (lval d)))]
+                             (list 'L (lsp d) (arg (lval d) 2))))
+            tycl (atom [])
+            _ (doseq [d decls]
+                (let [v (lval d)]
+                  (case (con v)
+                    TyClD (let [uses (atom #{})]
+                            (binding [*uses* uses] (rn env d))
+                            (swap! tycl conj {:name (name-of-tycl m d) :uses @uses}))
+                    InstD (do (rn env d) (swap! *groups* conj "(tycl [] 1)"))
+                    (ValD SigD) nil
+                    (rn env d))))
+            _ (rn-binds env val-binds top-sigs :top)
+            ;; type and class declarations: SCC over their uses, data constructors mapped to their parents
+            tnames (mapv :name @tycl)
+            idx (into {} (map-indexed (fn [i n] [n i]) tnames))
+            deps (fn [i] (vec (distinct (keep (fn [u] (get idx (or (get parent-of u) u))) (:uses (nth @tycl i))))))
+            comps (scc (count tnames) deps)
+            _ (doseq [c comps]
+                (swap! *groups* conj (str "(tycl " (names-text (map #(nth tnames %) c)) " 0)")))
+            ;; exports
+            avails (if export-l
+                     (rn-exports (lval export-l))
+                     (if mname-l
+                       (mk-avails (map (fn [{:keys [name parent]}] [name parent]) tops))
+                       (let [mn (lookup-global "var" "main" nil)] (when mn (emit! nil mn)) (if mn [[mn #{}]] []))))
+            avails (if (map? avails) (vec avails) avails)
+            avails (mapv (fn [[n k]] [n (set k)]) avails)
+            sorted (fn [xs] (vec (sort xs)))]
+        {:module m
+         :tree (list 'rn/module
+                     {:module m
+                      :decls (vec (for [d decls :when (not (contains? '#{ValD SigD} (con (lval d))))] (rtree d)))
+                      :binds (mapv (fn [[r bs]] (list 'rn/group r (mapv rtree bs))) (:groups (.get ^java.util.IdentityHashMap *rnodes* val-binds)))
+                      :sigs (mapv rtree top-sigs)
+                      :export-list (when export-l (rtree export-l))
+                      :exports avails
+                      :imports imp-infos
+                      :exts (vec (sort exts))})
+         :imports (mapv import-text imp-infos)
+         :occs (mapv second (sort @*occs*))
+         :ops (mapv second (sort @*ops*))
+         :groups (sorted @*groups*)
+         :group-order (let [g @*groups*] (vec (concat (remove #(str/starts-with? % "(tycl") g) (filter #(str/starts-with? % "(tycl") g))))
+         :exports (sorted (map (fn [[n k]] (avail-text n k)) avails))
+         :avails avails
+         :fixities (into {} (for [[n f] @*fixities* :when (= (name-mod n) m)] [n f]))
+         :things (local-things m decls)
+         :errors @*errors*}))))
+
+(defn- with-projection
+  "The renamed tree's projection on the facts: its located names all among the facts (:outside the others),
+  the located facts it does not carry (:absent, a count)"
+  [r]
+  (let [tn (tree-names (:tree r))
+        facts (set (keep (fn [o] (when-not (str/starts-with? o "[nil") o)) (:occs r)))
+        texts (set (map second tn))]
+    (assoc r :projection {:names (count texts)
+                          :outside (vec (take 20 (remove facts texts)))
+                          :absent (count (remove texts facts))
+                          :absent-some (vec (take 12 (remove texts facts)))})))
+
+(defn- name-of-tycl [m d]
+  (let [nl (tycl-decl-name d)]
+    (ext-name "tc" m (rdr-occ (if (L? nl) (lval nl) nl)))))
+
+(defn output-text [r]
+  (str "(hsrn/module " (esc (:module r)) ")\n"
+       "(hsrn/imports [" (str/join " " (:imports r)) "])\n"
+       "(hsrn/occs [" (str/join "\n  " (:occs r)) "])\n"
+       "(hsrn/ops [" (str/join "\n  " (:ops r)) "])\n"
+       "(hsrn/groups [" (str/join "\n  " (:groups r)) "])\n"
+       "(hsrn/group-order [" (str/join "\n  " (:group-order r)) "])\n"
+       "(hsrn/exports [" (str/join "\n  " (:exports r)) "])\n"))
+
+(defn- bang-text
+  "A field's source bang as GHC prints an HsSrcBang: \"\" lazy by default, \"!\" strict, \"~\" lazy, {-# UNPACK #-} ahead"
+  [cdf]
+  (let [u (nth cdf 2 nil) st (nth cdf 3 nil)]
+    (str (case u SrcUnpack "{-# UNPACK #-} " SrcNoUnpack "{-# NOUNPACK #-} " "")
+         (case st SrcStrict "!" SrcLazy "~" ""))))
+
+(defn local-things
+  "What the renamer knows of the module's own things, in the helper's iface forms with the types left nil (the
+  elaborator writes them, arbace.repr.haskell.typecheck's iface-text): type constructors with their constructors,
+  constructors with their arity, fields and source bangs, classes with their methods, functional dependencies and
+  default methods (HF1-HF2's proposal 2)"
+  [m decls]
+  (let [occ-of (fn [nl] (rdr-occ (lval nl)))
+        n-str (fn [ns o] (name-str (ext-name ns m o)))]
+    (vec (for [d decls :let [v (lval d)] :when (= 'TyClD (con v))
+               :let [t (arg v 2)]
+               x (case (con t)
+                   DataDecl
+                   (let [tn (occ-of (arg t 2)) defn* (arg t 5) cs (arg defn* 5)
+                         kind (if (= 'NewTypeCon (con cs)) "newtype" "data")
+                         conlist (case (con cs) DataTypeCons (arg cs 2) NewTypeCon [(arg cs 1)] [])
+                         cdecls (for [c conlist :let [cv (lval c)] :when (= 'ConDeclH98 (con cv))]
+                                (let [det (arg cv 6)
+                                      cdfs (case (con det)
+                                             PrefixCon (vec (last (rest det)))
+                                             InfixCon [(arg det 1) (arg det 2)]
+                                             RecCon (vec (mapcat (fn [f] (let [fv (lval f)] (repeat (count (arg fv 2)) (arg fv 3)))) (lval (arg det 1))))
+                                             [])
+                                      fields (when (= 'RecCon (con det))
+                                               (vec (mapcat (fn [f] (map (fn [fo] (rdr-occ (lval (arg (lval fo) 2)))) (arg (lval f) 2))) (lval (arg det 1)))))]
+                                  [(occ-of (arg cv 2)) (count cdfs) fields (mapv bang-text cdfs)]))]
+                     (cons (str "(tycon " (n-str "tc" tn) " nil " kind " [" (str/join " " (map #(n-str "data" (first %)) cdecls)) "] nil {})")
+                           (for [[cn ar fs bangs] cdecls]
+                             (str "(datacon " (n-str "data" cn) " nil " ar " [" (str/join " " (map pr-str fs)) "] nil {:src-bangs ["
+                                  (str/join " " (map pr-str bangs)) "]})"))))
+                   SynDecl [(str "(tycon " (n-str "tc" (occ-of (arg t 2))) " nil synonym [] nil {})")]
+                   ClassDecl
+                   (let [cn (occ-of (arg t 3))
+                         methods (for [s (arg t 7) :let [sv (lval s)] :when (and (= 'ClassOpSig (con sv)) (not (true? (arg sv 2)))) nl (arg sv 3)] (occ-of nl))
+                         defaults (set (keep (fn [b] (let [bv (lval b)] (when (= 'FunBind (con bv)) (occ-of (arg bv 2))))) (arg t 8)))
+                         fds (for [fd (arg t 6) :let [fv (lval fd)] :when (= 'FunDep (con fv))]
+                               [(mapv occ-of (arg fv 2)) (mapv occ-of (arg fv 3))])]
+                     [(str "(class " (n-str "tc" cn) " [] [" (str/join " " (map #(str "(" (n-str "var" %) " nil nil)") methods)) "] nil {:fundeps "
+                           (pr-str (vec fds)) " :defaults [" (str/join " " (for [o methods] (str "[" (n-str "var" o) " " (if (contains? defaults o) (n-str "var" (str "$dm" o)) "nil") "]")))
+                           "]})")])
+                   [])]
+           x))))
+
+(defn iface-text
+  "The module's interface for the modules that import it (the helper's iface forms: exports, fixities, and the
+  things as far as the renamer knows them, local-things)"
+  [r]
+  (str "(hsiface/module " (esc (:module r)) " {:unit \"main\"})\n"
+       "(hsiface/exports [" (str/join "\n  " (:exports r)) "])\n"
+       "(hsiface/fixities [" (str/join "\n  " (for [[n [p d]] (sort-by (comp name-str key) (:fixities r))]
+                                                 (str "(fixity " (name-ns n) " " (esc (name-occ n)) " " p " " d ")"))) "])\n"
+       "(hsiface/things [" (str/join "\n  " (sort (:things r))) "])\n"))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Command line
+
+(defn- read-dump [f] (read-forms (slurp f)))
+
+(defn- base-name [^String f] (.getName (File. f)))
+
+(defn rename-file
+  "Rename a dump file; writes the output beside the named directories; the result map. The output is named
+  by the dump's path below root (default: its file name)"
+  [f out local & [root]]
+  (let [r (with-projection (rename-module (read-dump f)))
+        b (if (and root (str/starts-with? f (str root "/"))) (subs f (inc (count root))) (base-name f))
+        nm (if (str/ends-with? b ".edn") (subs b 0 (- (count b) 4)) b)]
+    (when out
+      (let [o (File. (str out "/" nm ".rn.edn"))]
+        (.mkdirs (.getParentFile o))
+        (spit o (output-text r))
+        (spit (File. (str out "/" nm ".rn-tree.edn")) (binding [*print-length* nil *print-level* nil] (pr-str (:tree r))))))
+    (when local
+      (.mkdirs (File. ^String local))
+      (spit (str local "/" (:module r) ".iface.edn") (iface-text r))
+      (swap! iface-cache (fn [c] (into {} (remove (fn [[[_ m] _]] (= m (:module r))) c)))))
+    (assoc r :name nm)))
+
+(defn- section [forms k]
+  (some (fn [f] (when (and (seq? f) (= (first f) k)) (second f))) forms))
+
+(defn compare-with-ghc
+  "Compare a renamed module with the helper's rn dump text; {:status :ok|:diff, :diffs {...}, :order-equal bool}"
+  [r ghc-file]
+  (let [g (read-forms (slurp ghc-file))
+        ours (read-forms (output-text r))
+        cmp (fn [k]
+              (let [a (section g k) b (section ours k)]
+                (when-not (= (vec a) (vec b))
+                  [k {:missing (vec (take 30 (remove (set b) a)))
+                      :extra (vec (take 30 (remove (set a) b)))
+                      :counts [(count a) (count b)]}])))
+        diffs (into {} (keep cmp '[hsrn/module hsrn/imports hsrn/occs hsrn/ops hsrn/groups hsrn/exports]))]
+    {:status (if (and (empty? diffs) (empty? (:outside (:projection r)))) :ok :diff) :diffs diffs
+     :order-equal (= (section g 'hsrn/group-order) (section ours 'hsrn/group-order))}))
+
+(defn- parse-args [args]
+  (loop [as args opts {} pos []]
+    (if (empty? as)
+      [opts pos]
+      (let [[x & more] as]
+        (if (and (str/starts-with? x "-") (seq more))
+          (recur (rest more) (assoc opts x (first more)) pos)
+          (recur more opts (conj pos x)))))))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        [opts pos] (parse-args more)
+        dirs (vec (concat (when (get opts "--local") [(get opts "--local")])
+                          (remove empty? (str/split (or (get opts "--ifaces") "") #","))))]
+    (binding [*ifdirs* dirs]
+      (case verb
+        "rn" (do (doseq [f pos]
+                   (let [r (rename-file f (get opts "-o") (get opts "--local") (get opts "--root"))]
+                     (println "renamed" (:module r) (count (:occs r)) "occs" (count (:errors r)) "errors")
+                     (doseq [e (take 5 (:errors r))] (println "  " e))))
+                 (System/exit 0))
+        "check" (let [res (vec (for [f pos]
+                                 (let [r (rename-file f (get opts "-o") (get opts "--local") (get opts "--root"))
+                                       gf (str (get opts "--ghc") "/" (:name r) ".rn.edn")
+                                       c (compare-with-ghc r gf)]
+                                   (println (name (:status c)) (:name r) (if (:order-equal c) "" "(group order differs)")
+                                            (if (seq (:errors r)) (str "errors " (count (:errors r))) ""))
+                                   (doseq [[k d] (:diffs c)]
+                                     (println "   " k (:counts d))
+                                     (doseq [x (:missing d)] (println "      GHC only:" (pr-str x)))
+                                     (doseq [x (:extra d)] (println "      ours only:" (pr-str x))))
+                                   (doseq [e (take 3 (:errors r))] (println "   error:" e))
+                                   (let [pj (:projection r)]
+                                     (when (or (seq (:outside pj)) (pos? (:absent pj)))
+                                       (println "    tree:" (:names pj) "names," (:absent pj) "located facts not in the tree")
+                                       (doseq [x (:outside pj)] (println "      tree only:" x))
+                                       (doseq [x (:absent-some pj)] (println "      facts only:" x))))
+                                   (assoc c :name (:name r)))))
+                      ok (count (filter #(= :ok (:status %)) res))]
+                  (println (str "rename-check: " ok " of " (count res) " modules equal; group order equal in "
+                                (count (filter :order-equal res))))
+                  (System/exit (if (= ok (count res)) 0 1)))
+        (do (println "usage: -m arbace.repr.haskell.rename rn|check [--ifaces D,D] [--local DIR] [--ghc DIR] [-o DIR] DUMP.edn...")
+            (System/exit 2))))))

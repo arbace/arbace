@@ -14,7 +14,8 @@ covers what.
 - `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`,
   `arbace/repr/`, `arbace/build/`, `arbace/j2g/` and `arbace/c2j/`, which are Arbace's own but
   for repr/java's native lexer and parser, ports of jdk26u's javac, repr/c's lexer and
-  preprocessor, ports of cc, and repr/rust's native lexer and parser, ports of rustc, below) is
+  preprocessor, ports of cc, repr/rust's native lexer and parser, ports of rustc, and repr/haskell's native
+  reader, ports of GHC, below) is
   derived from Clojure, https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`,
   with ASM, https://gitlab.ow2.org/asm/asm at `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
@@ -954,6 +955,77 @@ covers what.
   members' original annotations) and `comp/MemberEnter.java` (`handleDeprecatedAnnotations`):
   Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
   Classpath Exception (text below; each file carries the notice).
+- `arbace/repr/haskell/lex.ae`, `header.ae`, `post.ae`, `post_decl.ae`, `rules_module.ae`,
+  `rules_decl.ae`, `rules_expr.ae`, `haddock.ae` and `haddocklex.ae` (repr/haskell's native reader,
+  doc/haskell/NATIVE.md): ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz
+  (SHA-256 `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin):
+  `compiler/GHC/Parser/Lexer.x` (with `Lexer/String.x`, `Lexer/Interface.hs`, `String.hs`,
+  `CharClass.hs`), `GHC/Parser/Header.hs`, the language extensions of `GHC/Driver/{DynFlags,Flags,Session}.hs`,
+  `GHC/Parser.y`'s actions, `GHC/Parser/PostProcess.hs`, `GHC/Parser/PostProcess/Haddock.hs`,
+  `GHC/Parser/HaddockLex.x` and the builders of `GHC/Hs/{Utils,Type}.hs` they use (the tarball names
+  the Alex and Happy sources `*.x.source` and `Parser.y.source`), by hand on 2026-11-04, each file
+  carrying GHC's notice: Copyright 2002, The University Court of the University
+  of Glasgow, under the Glasgow Haskell Compiler License, a BSD 3-Clause License ("GHC: the Glasgow
+  Haskell Compiler License" below). `arbace/repr/haskell/tables.ae` is generated from that tarball's
+  `compiler/GHC/Parser.y.source` (its grammar, the same Glasgow license) by `happy.ae`, Arbace's own port of
+  Happy's LALR(1) construction (no Happy code: Happy is a tool, its tables in GHC's generated
+  `Parser.hs` the check); `happy.ae`, `ast.ae`, `parse.ae` and `native.ae` are Arbace's own, under the
+  Eclipse Public License 1.0.
+- `arbace/repr/haskell/rename.ae` (repr/haskell's renamer, HF2, doc/haskell/FRONTEND-SURVEY.md, "As built: HF1-HF2"):
+  ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): `mkOpAppRn`,
+  `mkNegAppRn`, `mkConOpPatRn` and `mkHsOpTyRn` of `compiler/GHC/Rename/HsType.hs` and `compareFixity` of
+  `compiler/GHC/Types/Fixity.hs`, by hand on 2026-11-05, the file carrying GHC's notice (Copyright 2002, The
+  University Court of the University of Glasgow, the Glasgow Haskell Compiler License, a BSD 3-Clause License,
+  "GHC: the Glasgow Haskell Compiler License" below); the rest of `compiler/GHC/Rename/` read as the
+  specification of the scoping and of the dependency analyses. The helper's `rn` and `iface` verbs,
+  `tools/hsdump/HsRn.hs`, are Arbace's own, written against GHC's API.
+- `arbace/repr/haskell/desugar.ae` and `arbace/repr/haskell/tostg.ae` (the front end's match compiler, HF5, and its
+  CorePrep, CoreToStg and Unarise, HF6; doc/haskell/FRONTEND-SURVEY.md, "As built: HF5-HF6"): written on 2026-11-05
+  after GHC 9.14.1's algorithms (the same tarball and pin: `compiler/GHC/HsToCore/Match.hs`, `Match/Constructor.hs`,
+  `Match/Literal.hs`, `GuardedRHSs.hs`, `ListComp.hs`, `compiler/GHC/Core/Utils.hs`'s `refineDefaultAlt`,
+  `compiler/GHC/CoreToStg/Prep.hs`, `CoreToStg.hs`, `compiler/GHC/Stg/Unarise.hs`, `Stg/FVs.hs`,
+  `compiler/GHC/Types/Id/Make.hs`'s dictionary selectors), the files carrying GHC's notice (the Glasgow Haskell
+  Compiler License, "GHC: the Glasgow Haskell Compiler License" below); `stgcmp.ae`, the STG judge, is Arbace's own.
+- `arbace/repr/haskell/simpleopt.ae` and `arbace/repr/haskell/constfold.ae` (the front end's simple optimiser and the
+  floating-point primops' built-in rules, HF5-HF6's decision 2 (a); doc/haskell/FRONTEND-SURVEY.md, "As built: HF7 (first
+  light)"): ports of GHC 9.14.1 (the same tarball and pin) by hand on 2026-11-06: `compiler/GHC/Core/SimpleOpt.hs`
+  (`simpleOptPgm`, `simple_opt_expr`, `simple_app`, `simple_opt_bind`, `simple_bind_pair`, `simple_out_bind_pair`,
+  `safe_to_inline`, `exprIsConApp_maybe`'s constructor case), the occurrence information of
+  `compiler/GHC/Core/Opt/OccurAnal.hs`, the compulsory unfoldings of `compiler/GHC/Types/Id/Make.hs`, and
+  `compiler/GHC/Core/Opt/ConstantFold.hs`'s `Float#`/`Double#` rules with `compiler/GHC/Types/Literal.hs`'s
+  conversions, the files carrying GHC's notice (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell
+  Compiler License" below). `front.ae` (the driver) and `test/haskell/run_record.ae` are Arbace's own.
+- `arbace/repr/haskell/simplify.ae`, `arbace/repr/haskell/occanal.ae`, `arbace/repr/haskell/core.ae` and
+  `arbace/repr/haskell/primops.ae` (the front end's -O0 Simplifier, the user's decision of 2026-11-06;
+  doc/haskell/FRONTEND-SURVEY.md, "As built: the -O0 Simplifier"): ports of GHC 9.14.1 (the same tarball and pin) by
+  hand on 2026-11-06: `compiler/GHC/Core/Opt/Simplify.hs`, `Simplify/Iteration.hs`, `Simplify/Utils.hs`,
+  `Simplify/Env.hs`, `Simplify/Inline.hs`, `compiler/GHC/Core/Opt/OccurAnal.hs`, `compiler/GHC/Core/Opt/Arity.hs`,
+  `compiler/GHC/Core/Unfold.hs`, `Unfold/Make.hs`, `compiler/GHC/Core/Utils.hs`, `compiler/GHC/Core/SimpleOpt.hs`'s
+  `exprIsConApp_maybe` and `compiler/GHC/Types/Id/Make.hs`'s class-op rule; `primops.ae` is generated by
+  `tools/hsprimops/primops.awk` (Arbace's own) from `compiler/GHC/Builtin/primops.txt.pp`; the files carrying GHC's
+  notice (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell Compiler License" below). `simplcmp.ae`, the
+  simplified Core's judge, is Arbace's own.
+- `arbace/repr/haskell/deriv.ae` (repr/haskell's deriving, HF4, doc/haskell/FRONTEND-SURVEY.md, "As built: HF4", HFS5 (a)):
+  ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): the generators of
+  `compiler/GHC/Tc/Deriv/Generate.hs` (`gen_Eq_binds`, `gen_Ord_binds`, `gen_Enum_binds`, `gen_Bounded_binds`,
+  `gen_Ix_binds`, `gen_Read_binds`, `gen_Show_binds`) and of `compiler/GHC/Tc/Deriv/Functor.hs` (`gen_Functor_binds`,
+  `gen_Foldable_binds`, `gen_Traversable_binds`, `functorLikeTraverse`), by hand on 2026-11-05, the file carrying GHC's
+  notice (Copyright 2002, The University Court of the University of Glasgow, the Glasgow Haskell Compiler License, a
+  BSD 3-Clause License, "GHC: the Glasgow Haskell Compiler License" below); the context inference and the choice of
+  strategy of `compiler/GHC/Tc/Deriv/{Infer,Utils}.hs` and `Deriv.hs` read as the specification, written anew in
+  `typecheck.ae`.
+- `arbace/repr/haskell/unlit.ae` (repr/haskell's native unlit, doc/haskell/NATIVE.md): a port of the
+  same tarball's `utils/unlit/unlit.c`, under the Glasgow Haskell Compiler License (below), on
+  2026-11-04; `arbace/repr/haskell/driver.ae` (GHC's driver's preprocessing: `GHC/SysTools/Cpp.hs`'s
+  doCpp, the package database's units as `GHC/Unit/State.hs` closes them) is Arbace's own, written
+  from that tarball's sources, under the Eclipse Public License 1.0.
+- `arbace/repr/haskell/cpp.ae` (repr/haskell's native C preprocessor in GCC's traditional mode,
+  doc/haskell/NATIVE.md) is Arbace's own, under the Eclipse Public License 1.0: a clean-room
+  implementation (2026-11-04) written from the documented behaviour of traditional mode and judged
+  against Alpine's gcc 15.2.0 `cpp -traditional` run as a black box, no code of GCC's (it replaced a
+  port of GCC's libcpp, under the GPL version 3, made on the branch `haskell-pp` and never merged).
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`
@@ -1143,6 +1215,28 @@ covers what.
   rule of `mangleFunctionEncodingBareType` and the `sr` form of `mangleUnresolvedPrefix`, under the Apache License
   2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the files carrying clang's notice. The rest of
   `arbace/cpp/` is Arbace's own, under the Eclipse Public License 1.0.
+- `go/arbace/libm.ae` and `go/arbace/libm/` (the package `arbace/libm`, musl's libm in Go, shared by hsi and pyi;
+  also `go/arbace/hs/prim_scalar.ae`'s `fmaf`, musl 1.2.6's `src/math/fmaf.c` ported likewise, HE4e;
+  doc/haskell/HASKELL-EVAL-SURVEY.md, HES37 (a), "As built: HE4b, HE4c (write-ahead)", "As built: HES38's :full
+  forms"; until then `go/arbace/hs/libm.ae` and `libm_data.ae`): ported to Go by hand, then converted to Go forms, from musl 1.2.6's
+  `src/math` (https://musl.libc.org/releases/musl-1.2.6.tar.gz, SHA-256
+  `d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a`, the pin of `test/c/corpora.edn`; the files the
+  first file's header names): musl, Copyright (c) 2005-2020 Rich Felker, et al., under the MIT License below ("musl");
+  its exp, log, pow, expf, logf and powf code and their tables Copyright (c) 2017-2018 Arm Limited, MIT; the rest from
+  FreeBSD's msun, Copyright (C) 1993 Sun Microsystems, Inc. ("Permission to use, copy, modify, and distribute this
+  software is freely granted, provided that this notice is preserved"), the float kernels and the argument reductions
+  as optimized by Bruce D. Evans and David Schultz (Copyright (c) 2003-2011, "extremely permissive terms", musl's
+  COPYRIGHT). `go/arbace/hs/` and `test/haskell/hsi/libm-ref.c` are Arbace's own, under the Eclipse Public
+  License 1.0.
+- `go/arbace/hs/cbits.ae` and `go/arbace/hs/cdata.ae` (hsi's C for the packages bytestring and text, doc/haskell/HASKELL-EVAL-SURVEY.md,
+  "As built: HE5 (write-ahead)"): bytestring's `cbits/itoa.c`, `fpstring.c`, `shortbytestring.c`, `is-valid-utf8.c` (its
+  result by Go's `unicode/utf8`) and the tables of `cbits/aligned-static-hs-data.c` (`cdata.ae`, generated by
+  `bin/lib/hsi/cdata-gen`) ported to Go, and text's `cbits/is_ascii.c`, `measure_off.c`, `reverse.c` and `utils.c`, from GHC
+  9.14.1's source tarball (`libraries/bytestring`, `libraries/text`; the pin of `tools/repr-haskell`'s corpus): bytestring,
+  Copyright (c) Don Stewart 2005-2009, Duncan Coutts 2006-2015, David Roundy 2003-2005, Simon Meier 2010-2011, Koz Ross 2021,
+  under the BSD 3-Clause License below ("bytestring"); text, Copyright (c) 2008-2009 Tom Harper (the cbits files' own notices
+  too, Andrew Lelechenko 2021), under the BSD 2-Clause License below ("text"). The rest of `go/arbace/hs/` (`posix.ae`,
+  `cformat.ae` and the rest) is Arbace's own, under the Eclipse Public License 1.0.
 - `scheme/psyntax/` (Scheme's expander, doc/scheme/SCHEME-SURVEY.md, "As built: SM4"; origins in
   `scheme/provenance.edn`): `expander.ae`, `library-manager.ae`, `builders.ae` and `config.ae` are
   psyntax, the R6RS library and syntax-case system of Abdulaziz Ghuloum and R. Kent Dybvig, as Ikarus
@@ -3438,7 +3532,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## musl: MIT License
 
 The `COPYRIGHT` of musl 1.2.6 (https://musl.libc.org/releases/musl-1.2.6.tar.gz, test/c/corpora.edn's pin), whole; it
-covers musl's part of the node programs in `go/arbace/clib/` (above):
+covers musl's part of the node programs in `go/arbace/clib/` and hsi's libm, `go/arbace/libm` (above; merged at batch 2 with
+haskell-90's section of musl's `COPYRIGHT`, its part for the whole and for `src/math`, the same text):
 
 ```
 musl as a whole is licensed under the following standard MIT license:
@@ -3634,6 +3729,43 @@ to be subject to copyright, resulting in confusion over whether it
 negated the permissions granted in the license. In the spirit of
 permissive licensing, and of not having licensing issues being an
 obstacle to adoption, that text has been removed.
+## GHC: the Glasgow Haskell Compiler License
+
+The `LICENSE` of GHC 9.14.1's source tarball (above), covering what repr/haskell's native reader
+ports from GHC:
+
+```
+The Glasgow Haskell Compiler License
+
+Copyright 2002, The University Court of the University of Glasgow.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+- Neither name of the University nor the names of its contributors may be
+used to endorse or promote products derived from this software without
+specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
 ```
 
 ## CPython: the PSF License Agreement for Python 3.14
@@ -4889,7 +5021,6 @@ the library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.  But first, please read
 <http://www.gnu.org/philosophy/why-not-lgpl.html>.
 ```
-=======
 ## Rust (rustc 1.99.1): MIT License or Apache License 2.0
 
 The Rust project's sources are dual-licensed under the MIT License or the Apache License 2.0, at
@@ -4924,3 +5055,73 @@ DEALINGS IN THE SOFTWARE.
 
 The Apache License 2.0's text (the escaper's `LICENSE-APACHE`, the same terms) is given in full in
 the section "Murmur3 (Guava): Apache License 2.0" above.
+## bytestring: BSD 3-Clause License
+
+The license of the Haskell package bytestring (libraries/bytestring/LICENSE of GHC 9.14.1's source tarball), which covers hsi's ports of its cbits:
+
+```
+Copyright (c) Don Stewart 2005-2009
+          (c) Duncan Coutts 2006-2015
+          (c) David Roundy 2003-2005
+          (c) Simon Meier 2010-2011
+          (c) Koz Ross 2021
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+3. Neither the name of the author nor the names of his contributors
+   may be used to endorse or promote products derived from this software
+   without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHORS OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
+```
+
+## text: BSD 2-Clause License
+
+The license of the Haskell package text (libraries/text/LICENSE of GHC 9.14.1's source tarball), which covers hsi's ports of its cbits:
+
+```
+Copyright (c) 2008-2009, Tom Harper
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```

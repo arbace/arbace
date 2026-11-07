@@ -1,0 +1,409 @@
+;; Following GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/HsToCore/Match.hs, Match/Constructor.hs, Match/Literal.hs,
+;; GuardedRHSs.hs, ListComp.hs and GHC/Core/Utils.hs (refineDefaultAlt)
+;; (the algorithms and their output's shape, written from them; HFS5's line-by-line port is the next step), whose notice follows
+;; (LICENSE.md, "GHC: the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.desugar
+  "The desugarer's remaining part of Arbace's Haskell front end (doc/haskell/FRONTEND-SURVEY.md, HF5, Tier S): the
+  elaborator's (arbace.repr.haskell.typecheck) pattern matches, guards and list comprehensions compiled into Core's
+  cases, so the program is the helper's tc vocabulary alone: (v NAME) (lv \"occ\" ID) (lit \"text\") (app F [ARG...])
+  (lam [B...] E) (let [(bind B E)...] E) (letrec [...] E) (case E B [(alt CON [B...] E)...]).
+
+  The match compiler follows GHC 9.14.1's (compiler/GHC/HsToCore/Match.hs, Match/Constructor.hs, Match/Literal.hs,
+  GuardedRHSs.hs, ListComp.hs; BSD-3-Clause, LICENSE.md): Wadler's algorithm (SPJ's book, chapter 5) as GHC runs it:
+  each equation's first pattern tidied (tidy1: a variable bound to the match variable, an as-pattern's variable too,
+  a list pattern as conses, a literal at Int, Word, Char, Double, Float as its boxing constructor around the
+  primitive literal (tidyLitPat, tidyNPat), a string literal pattern as a list of characters, a newtype's constructor
+  transparent), the equations grouped by the kind of their first pattern (groupEquations: variables, constructors,
+  primitive literals, overloaded literals), each group matched with the next groups as its failure; a constructor
+  group one case on the match variable with an alternative per constructor (the equations of one constructor
+  gathered in their order, the alternatives in the constructors' tag order, DEFAULT first and only when a constructor
+  is missing: mkCoAlgCaseMatchResult), a primitive literal group one case on the literals, an overloaded literal
+  group a chain of (==) tests (matchNPats); guards as GHC's dsGuarded (otherwise and True drop out, a pattern guard
+  a match of its own), list comprehensions as deListComp (the -O0 translation without foldr/build).
+
+  Failure is a value: GHC binds a shared failure handler as a join point taking a void argument (mkFailurePair); here
+  it is a let-bound thunk, inlined when used once and dropped when unused (a normaliser class, recorded)."
+  (:require [arbace.string :as str]
+            [arbace.repr.haskell.simpleopt :as so]
+            [arbace.repr.haskell.constfold :as cf]))
+
+(def ^:dynamic *cons* nil)    ; {NAME {:arity n :tycon NAME :tag n}}
+(def ^:dynamic *tycons* nil)  ; {TYCON {:flavour data|newtype :cons [NAME...]}}
+(def ^:dynamic *n* nil)       ; atom: fresh names
+(def ^:dynamic *casts* false) ; the -O0 Simplifier's input (arbace.repr.haskell.simplify): the newtypes' casts kept, the
+                              ; failure handlers functions of the void (##) as GHC's mkFailurePair makes them
+(def ^:dynamic *where* "")    ; the binding being compiled, for patError's text
+
+(defn- ext [ns m o] ["ext" ns m o])
+(def true-c (ext "data" "GHC.Internal.Types" "True"))
+(def false-c (ext "data" "GHC.Internal.Types" "False"))
+(def nil-c (ext "data" "GHC.Internal.Types" "[]"))
+(def cons-c (ext "data" "GHC.Internal.Types" ":"))
+
+(defn- fresh [o] (list 'lv o (str "d" (swap! *n* inc))))
+(defn- lv? [x] (and (seq? x) (= 'lv (first x))))
+(defn- head? [x h] (and (seq? x) (= h (first x))))
+(defn- trivial? [x] (and (seq? x) (contains? '#{lv v} (first x))))
+(defn- worker [c] (list 'v (ext "var" (nth c 2) (nth c 3))))
+
+(defn subst
+  "Variables (lv) replaced by the map's terms"
+  [m x]
+  (cond (empty? m) x
+        (lv? x) (get m x x)
+        (seq? x) (apply list (map #(subst m %) x))
+        (vector? x) (mapv #(subst m %) x)
+        :else x))
+
+(defn- occurrences [v x]
+  (cond (= v x) 1
+        (coll? x) (reduce + 0 (map #(occurrences v %) x))
+        :else 0))
+
+(defn- pat-error []
+  (list 'app (list 'v (ext "var" "GHC.Internal.Control.Exception.Base" "patError"))
+        [(list 'lit (str (pr-str (str *where* "|non-exhaustive patterns")) "#"))]))
+
+(defn- with-fail
+  "k given a trivial failure expression: fail itself, or a variable let-bound to it (GHC's mkFailurePair, a thunk
+  here)"
+  [fail k]
+  (if (trivial? fail)
+    (k fail)
+    (let [f (fresh "fail")] (list 'let [(list 'bind f fail)] (k f)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Tidying (GHC's tidy1, tidyLitPat, tidyNPat)
+
+(defn- lit-pat
+  "A literal pattern (plit CORE) at a type with built-in literals: its boxing constructor around the primitive
+  literal; a string: the list of its characters"
+  [lc]
+  (let [[f [a]] (when (head? lc 'app) [(second lc) (nth lc 2)])
+        fname (when (head? f 'v) (second f))]
+    (cond
+      (and fname (#{"unpackCString#" "unpackCStringUtf8#"} (nth fname 3)) (head? a 'lit))
+      (let [t (second a) s (read-string (subs t 0 (dec (count t))))]
+        (list 'plist (mapv (fn [ch] (list 'pcon (ext "data" "GHC.Internal.Types" "C#") [(list 'plitp (str "'(char " (int ch) ")'#"))])) s)))
+      (and fname (head? a 'lit))
+      (list 'pcon (ext "data" (nth fname 2) (nth fname 3)) [(list 'plitp (second a))])
+      :else (list 'pwild))))
+
+(defn- newtype-con? [c]
+  (let [i (get *cons* c)] (= 'newtype (:flavour (get *tycons* (:tycon i))))))
+
+(defn- pat-vars [p]
+  (cond (lv? p) [p]
+        (head? p 'pas) (cons (second p) (pat-vars (nth p 2)))
+        (head? p 'pcon) (mapcat pat-vars (nth p 2))
+        (head? p 'plist) (mapcat pat-vars (second p))
+        (head? p 'plazy) (pat-vars (second p))
+        :else []))
+
+(declare match)
+
+(defn- tidy
+  "The first pattern of an equation against match variable v: [pattern' {lv v}]"
+  [p v]
+  (case (first p)
+    lv [(list 'pwild) {p v}]
+    pwild [p {}]
+    pas (let [[p2 s] (tidy (nth p 2) v)] [p2 (assoc s (second p) v)])
+    plist (tidy (reduce (fn [tl x] (list 'pcon cons-c [x tl])) (list 'pcon nil-c []) (reverse (second p))) v)
+    plit (if (= 2 (count p)) (tidy (lit-pat (second p)) v) [p {}])
+    ;; a newtype's constructor: its field's pattern against v |> co (the Simplifier's input keeps the cast)
+    pcon (if (newtype-con? (second p))
+           (let [co (when so/*newtype-co* (so/*newtype-co* (second p)))
+                 v2 (if (and co (lv? v)) (list 'cast v {:l (:r co) :r (:l co)}) v)]
+             (tidy (first (nth p 2)) v2))
+           [p {}])
+    ;; a lazy pattern (tidy1's LazyPat, mkSelectorBinds): each variable a thunk selecting it from v
+    plazy (let [xs (pat-vars (second p))]
+            [(list 'pwild) (into {} (for [x xs] [x (match [v] [{:pats [(second p)] :sub {} :rhs (fn [_] x)}] (pat-error))]))])
+    [p {}]))
+
+(defn- pkind [p]
+  (case (first p) pwild :any pcon :con plitp :lit plit :npat :any))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Matching: an equation is {:pats [PAT...] :sub {lv term} :rhs (fn [fail] core)}
+
+(declare match ds ds-rhs)
+
+(defn- run-rhs [e f] (subst (:sub e) ((:rhs e) f)))
+
+(defn- combine
+  "Equations without patterns left: the first, failing into the second, and so on"
+  [eqns fail]
+  (reduce (fn [acc e] (with-fail acc (fn [f] (run-rhs e f)))) fail (reverse eqns)))
+
+(defn- drop-first [e] (update e :pats rest))
+
+(defn- distinct-by [f xs]
+  (loop [xs xs seen #{} out []]
+    (if (empty? xs) out
+        (let [k (f (first xs))] (if (contains? seen k) (recur (rest xs) seen out) (recur (rest xs) (conj seen k) (conj out k)))))))
+
+(defn- lit-key [p] (second p))
+(defn- lit-order [t]
+  (let [s (str/replace (str/replace (str/replace (str/replace t "#" "") "'" "") "(char " "") ")" "")]
+    (if (re-matches #"-?[0-9]+" s) [0 (Long/parseLong s) t] [1 0 t])))
+
+(defn- match-cons [v vars g f]
+  (let [cs (distinct-by #(second (first (:pats %))) g)
+        tycon (:tycon (get *cons* (first cs)))
+        all (:cons (get *tycons* tycon))
+        alts (for [c cs]
+               (let [eqs (filter #(= c (second (first (:pats %)))) g)
+                     n (count (nth (first (:pats (first eqs))) 2))
+                     first-sub (nth (first (:pats (first eqs))) 2)
+                     xs (mapv (fn [i] (let [p (nth first-sub i)] (fresh (if (lv? p) (second p) "ds")))) (range n))
+                     eqs2 (map (fn [e] (assoc e :pats (concat (nth (first (:pats e)) 2) (rest (:pats e))))) eqs)]
+                 [(or (:tag (get *cons* c)) 0) (list 'alt c xs (match (into xs vars) eqs2 f))]))
+        missing (remove (set cs) all)
+        ;; a DEFAULT that stands for one constructor is that constructor's alternative (GHC.Core.Utils'
+        ;; refineDefaultAlt, which -O0's pipeline applies: the binders ipv)
+        alts (if (and (seq all) (= 1 (count missing)))
+               (let [c (first missing) n (or (:arity (get *cons* c)) 0)]
+                 (conj (vec alts) [(or (:tag (get *cons* c)) 0) (list 'alt c (mapv (fn [_] (fresh "ipv")) (range n)) f)]))
+               alts)
+        alts (mapv second (sort-by first alts))
+        complete? (and (seq all) (<= (count missing) 1))]
+    (list 'case v (fresh "wild") (if complete? alts (into [(list 'alt :default [] f)] alts)))))
+
+(defn- match-lits [v vars g f]
+  (let [ls (sort-by lit-order (distinct-by #(lit-key (first (:pats %))) g))]
+    (list 'case v (fresh "wild")
+          (into [(list 'alt :default [] f)]
+                (for [l ls] (list 'alt (list 'lit l) [] (match vars (map drop-first (filter #(= l (lit-key (first (:pats %)))) g)) f)))))))
+
+(defn- match-npats [v vars g f]
+  (let [ks (distinct-by #(vec (rest (first (:pats %)))) g)]
+    (reduce (fn [acc [eq lc]]
+              (with-fail acc
+                (fn [f2]
+                  (let [eqs (map drop-first (filter #(= [eq lc] (vec (rest (first (:pats %))))) g))
+                        test (if (head? eq 'app) (list 'app (second eq) (into (nth eq 2) [v lc])) (list 'app eq [v lc]))]
+                    (list 'case test (fresh "wild") [(list 'alt false-c [] f2) (list 'alt true-c [] (match vars eqs f2))])))))
+            f (reverse ks))))
+
+(defn- match-group [v vars g f]
+  (case (pkind (first (:pats (first g))))
+    :any (match vars (map drop-first g) f)
+    :con (match-cons v vars g f)
+    :lit (match-lits v vars g f)
+    :npat (match-npats v vars g f)))
+
+(defn match
+  "GHC's match: the match variables, the equations, the failure expression: core"
+  [vars eqns fail]
+  (with-fail fail
+    (fn [fail]
+      (if (empty? vars)
+        (combine eqns fail)
+        (let [v (first vars)
+              eqns (map (fn [e] (let [[p s] (tidy (first (:pats e)) v)]
+                                  (assoc e :pats (cons p (rest (:pats e))) :sub (merge (:sub e) s))))
+                        eqns)
+              groups (partition-by (comp pkind first :pats) eqns)]
+          (reduce (fn [acc g] (with-fail acc (fn [f] (match-group v (rest vars) g f)))) fail (reverse groups)))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Guards and right-hand sides (GHC's dsGuarded, matchGuards)
+
+(defn- otherwise? [g]
+  (and (head? g 'v) (contains? #{["ext" "var" "GHC.Internal.Base" "otherwise"] ["ext" "var" "GHC.Internal.Types" "True"]} (second g))))
+
+(defn- ds-binds [bs] (mapv (fn [[_ b e]] (list 'bind b (ds e))) bs))
+
+(defn- wrap-local
+  "The elaborator's local bindings (bind and rec-group entries) around a body"
+  [bs body]
+  (reduce (fn [body b] (if (= 'rec-group (first b)) (list 'letrec (ds-binds (second b)) body) (list 'let (ds-binds [b]) body)))
+          body (reverse bs)))
+
+(defn- ds-guards [gs body fail]
+  (if (empty? gs)
+    (ds-rhs body fail)
+    (let [g (first gs) more (rest gs)]
+      (cond
+        (head? g 'pguard) (let [e (ds (nth g 2))
+                                k (fn [x] (match [x] [{:pats [(second g)] :sub {} :rhs (fn [f] (ds-guards more body f))}] fail))]
+                            (if (lv? e) (k e) (let [x (fresh "ds")] (list 'let [(list 'bind x e)] (k x)))))
+        (head? g 'plet) (wrap-local (second g) (ds-guards more body fail))
+        (otherwise? g) (ds-guards more body fail)
+        :else (list 'case (ds g) (fresh "wild") [(list 'alt false-c [] fail) (list 'alt true-c [] (ds-guards more body fail))])))))
+
+(defn- ds-guarded [g fail]
+  (if (head? g 'guarded) (ds-guards (second g) (nth g 2) fail) (ds-rhs g fail)))
+
+(defn ds-rhs
+  "A right-hand side (lets around guards, or an expression) with its failure"
+  [b fail]
+  (cond
+    (head? b 'guards) (reduce (fn [acc alt] (with-fail acc (fn [f] (ds-guarded alt f)))) fail (reverse (second b)))
+    (head? b 'guarded) (with-fail fail (fn [f] (ds-guarded b f)))
+    (head? b 'let) (list 'let (ds-binds (second b)) (ds-rhs (nth b 2) fail))
+    (head? b 'letrec) (list 'letrec (ds-binds (second b)) (ds-rhs (nth b 2) fail))
+    :else (ds b)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; List comprehensions (GHC's deListComp, deBindComp)
+
+(defn- ds-listcomp [quals e tail]
+  (if (empty? quals)
+    (list 'app (worker cons-c) [(ds e) tail])
+    (let [q (first quals) more (rest quals)]
+      (cond
+        (head? q 'gen) (let [h (fresh "h") u1 (fresh "ds") u2 (fresh "ds") u3 (fresh "ds")
+                             fail (list 'app h [u3])
+                             rest* (ds-listcomp more e fail)
+                             m (match [u2] [{:pats [(second q)] :sub {} :rhs (fn [_] rest*)}] fail)]
+                         (list 'letrec [(list 'bind h (list 'lam [u1] (list 'case u1 (fresh "wild") [(list 'alt nil-c [] tail) (list 'alt cons-c [u2 u3] m)])))]
+                               (list 'app h [(ds (nth q 2))])))
+        (head? q 'qlet) (wrap-local (second q) (ds-listcomp more e tail))
+        :else (list 'case (ds q) (fresh "wild") [(list 'alt false-c [] tail) (list 'alt true-c [] (ds-listcomp more e tail))])))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Expressions
+
+(defn ds
+  "An elaborated expression without matches: core"
+  [x]
+  (if-not (seq? x)
+    x
+    (case (first x)
+      (v lv lit) x
+      app (list 'app (ds (second x)) (mapv ds (nth x 2)))
+      lam (let [bs (second x)]
+            (if (every? lv? bs)
+              (list 'lam bs (ds (nth x 2)))
+              (let [xs (mapv (fn [b] (if (lv? b) b (fresh "ds"))) bs)]
+                (list 'lam xs (match xs [{:pats bs :sub {} :rhs (fn [_] (ds (nth x 2)))}] (pat-error))))))
+      let (list 'let (ds-binds (second x)) (ds (nth x 2)))
+      letrec (list 'letrec (ds-binds (second x)) (ds (nth x 2)))
+      case (list 'case (ds (nth x 1)) (nth x 2) (mapv (fn [[_ c bs e]] (list 'alt c bs (ds e))) (nth x 3)))
+      match (let [ss (mapv ds (second x))
+                  vs (mapv (fn [s] (if (lv? s) s (fresh "ds"))) ss)
+                  body (match vs (mapv (fn [cl] {:pats (second cl) :sub {} :rhs (fn [f] (ds-rhs (nth cl 2) f))}) (nth x 2)) (pat-error))]
+              (reduce (fn [b [s v]] (if (= s v) b (list 'let [(list 'bind v s)] b))) body (reverse (map vector ss vs))))
+      (guards guarded) (ds-rhs x (pat-error))
+      listcomp (ds-listcomp (second x) (nth x 2) (worker nil-c))
+      (apply list (map ds x)))))
+
+(defn- simplify
+  "The failure thunks: dropped when unused, inlined when used once"
+  [x]
+  (cond
+    (and (head? x 'let) (= 1 (count (second x))) (lv? (second (first (second x)))) (= "fail" (second (second (first (second x))))))
+    (let [[_ f e] (first (second x)) body (simplify (nth x 2)) n (occurrences f body)]
+      (case n
+        0 body
+        1 (subst {f (simplify e)} body)
+        (if (and *casts* (not (and (head? e 'lam) (= "void" (second (first (second e)))))))
+          ;; GHC's mkFailurePair: the failure a function of the void (##), each use applied to it
+          (let [v (fresh "void")]
+            (list 'let [(list 'bind f (list 'lam [v] (simplify e)))]
+                  (subst {f (list 'app f [(list 'v (ext "var" "GHC.Internal.Types" "(##)"))])} body)))
+          (list 'let [(list 'bind f (simplify e))] body))))
+    ;; a lambda applied (an inlined unfolding): beta-reduced as GHC's simple optimiser does at -O0, a trivial
+    ;; argument substituted, another let-bound
+    (and (head? x 'app) (head? (second x) 'lam) (every? lv? (second (second x))))
+    (let [[_ [_ bs body] args] x
+          k (min (count bs) (count args))
+          pairs (map vector (take k bs) (take k args))
+          triv (into {} (filter (fn [[_ a]] (trivial? a)) pairs))
+          lets (remove (fn [[_ a]] (trivial? a)) pairs)
+          body (subst triv body)
+          body (if (< k (count bs)) (list 'lam (vec (drop k bs)) body) body)
+          body (reduce (fn [b [v a]] (list 'let [(list 'bind v a)] b)) body (reverse lets))]
+      (simplify (if (< k (count args)) (list 'app body (vec (drop k args))) body)))
+    ;; a variable's case binder replaces it in the alternatives (what GHC's -O0 output shows: SimpleOpt's
+    ;; case-binder substitution)
+    (and (head? x 'case) (lv? (second x)) (lv? (nth x 2)) (not= (second x) (nth x 2)))
+    (let [[_ v b alts] x]
+      (list 'case v b (mapv (fn [[_ c bs e]] (list 'alt c bs (simplify (subst {v b} e)))) alts)))
+    ;; Core's lambdas collected (mkLams: the dictionaries' and the equations' binders one lambda)
+    (and (head? x 'lam) (head? (nth x 2) 'lam)) (simplify (list 'lam (into (vec (second x)) (second (nth x 2))) (nth (nth x 2) 2)))
+    (seq? x) (apply list (map simplify x))
+    (vector? x) (mapv simplify x)
+    :else x))
+
+(defn- norm-iface
+  "The interfaces' unfoldings (inlined by the elaborator) in the program's spelling: (ext ns M occ) as a name
+  vector, an alternative's default as :default"
+  [x]
+  (cond
+    (and (seq? x) (= 'ext (first x)) (= 4 (count x))) ["ext" (name (nth x 1)) (nth x 2) (nth x 3)]
+    (and (seq? x) (= 'alt (first x)) (= 'default (second x))) (apply list 'alt :default (map norm-iface (drop 2 x)))
+    (seq? x) (apply list (map norm-iface x))
+    (vector? x) (mapv norm-iface x)
+    :else x))
+
+(defn newtype-co
+  "The coercion of a newtype's constructor CON, {:l REP :r NEWTYPE} (its type variables left uninstantiated)"
+  [r con]
+  (let [tc (:tycon (get (:all-cons r) con))
+        t (get (:genv r) con)
+        body (if (= :forall (first t)) (nth t 3) t)]
+    {:l (when (and (vector? body) (= :tc (first body))) (first (nth body 2))) :r [:tc tc nil]}))
+
+(defn program-exported
+  "isExportedId: the export list's, and the Ids GHC makes exported or keeps alive (dictionary functions, default
+  methods, the instances' methods and superclasses a DFunUnfolding mentions, Typeable's, record selectors, class
+  methods)"
+  [r prog]
+  (let [fields (set (mapcat :fields (vals (:all-cons r))))
+        methods (set (mapcat :methods (vals (:all-classes r))))]
+    (into (set (:exported r))
+          (for [[_ b] prog :when (and (vector? b) (or (str/starts-with? (nth b 3) "$") (contains? fields b) (contains? methods b)
+                                                      (not= (nth b 2) (:module r))))]
+            b))))
+
+(defn desugar-program
+  "The elaborator's result (:core, :all-cons, :tycons): its bindings without matches"
+  [r]
+  (binding [*cons* (:all-cons r) *tycons* (:tycons r) *n* (atom 0)
+            so/*newtype-co* (when *casts* (fn [con] (when (contains? (:all-cons r) con) (newtype-co r con))))]
+    (let [prog (mapv (fn [[_ b e]] (binding [*where* (if (vector? b) (nth b 3) (str (second b)))] (list 'bind b (simplify (simplify (ds (norm-iface e))))))) (:core r))
+          exported (program-exported r prog)
+          cons (into {} (for [[c i] (:all-cons r)] [c {:arity (:arity i) :flavour (:flavour (get (:tycons r) (:tycon i)))}]))
+          ;; a class of one method and no superclass, or one superclass and no method, is a newtype (GHC's mkClass):
+          ;; its dictionary constructor is a newtype constructor, the identity
+          cons (into cons (for [[cls i] (:all-classes r) :when (= 1 (+ (count (:methods i)) (or (:nsupers i) (count (:supers i)))))]
+                            [["ext" "data" (nth cls 2) (str "C:" (nth cls 3))] {:arity 1 :flavour 'newtype}]))]
+      (cf/fold-program (so/simple-opt-pgm prog exported cons)))))

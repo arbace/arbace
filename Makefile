@@ -29,7 +29,8 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   oi-check-compiled check-makefile \
   repr-ocaml-native-check repr-ocaml-menhir \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
-  oi-check-ocdump oi-own-verdicts
+  oi-check-ocdump oi-own-verdicts \
+  repr-haskell-native-check repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -141,7 +142,17 @@ cover-build: ## GT8.3: the cover build, the gate's executable and test build wit
 	bin/cover build
 provenance-check: ## the provenance files' repr/java hash equals the reader's (bin/provenance-check; the gate's essential step, seconds)
 	bin/provenance-check
-reap: ## the REAP matrix: read, eval, AOT, print for Clojure, Java, Go, C, C++, Scheme, OCaml, Python from the checks' recorded results; every non-pass in a class, by design or deferred (bin/reap; no runs, seconds)
+oracle-records-list: ## the oracles' records and packs and their state here (bin/oracle-records list; doc/ORACLE-RECORDS-SURVEY.md)
+	bin/oracle-records list
+oracle-records-check: ## every pinned pack in the store, its members as its manifest says, and the tampered-pack control (bin/oracle-records check)
+	bin/oracle-records check
+oracle-records-verify: ## a crop's records against its live toolchain, CROP=c [KIND=...] [CORPUS=...] [SAMPLE=N] (bin/oracle-records verify; a moved toolchain reported, not failed)
+	bin/oracle-records verify $(CROP) $(KIND) $(if $(CORPUS),--corpus $(CORPUS)) $(if $(SAMPLE),--sample $(SAMPLE))
+oracle-records-record: ## a crop's kind recorded by hand on the host with its toolchain, CROP=c KIND=... [CORPUS=...] (bin/oracle-records record)
+	bin/oracle-records record $(CROP) $(KIND) $(if $(CORPUS),--corpus $(CORPUS))
+oracle-records-mirror: ## the packs' mirror commands, the orphan branch oracle-packs for the Mac's bare repository (bin/oracle-records mirror; PUSH=1 pushes)
+	bin/oracle-records mirror $(if $(PUSH),--push)
+reap: ## the REAP matrix: read, eval, AOT, print for Clojure, Java, Go, C, C++, Scheme, OCaml, Python, LLVM IR, Rust, Haskell from the checks' recorded results; every non-pass in a class, by design or deferred (bin/reap; no runs, seconds)
 	bin/reap
 crops-score: ## each crop's completeness, maturity and independence as percentages, from the recorded results (bin/crops-score [ARGS="--newest|--ref REF|--crop C|--tsv"]; doc/CROPS-SCORE.md; no runs, seconds)
 	bin/crops-score $(ARGS)
@@ -245,8 +256,70 @@ repr-haskell-text: ## the same in mode :full: each module printed back byte for 
 	bin/repr-haskell roundtrip --text-only
 repr-haskell-layout: ## the same forms printed by Haskell's layout rule, as a person writes them: GHC's trees and lines, then interfaces (bin/repr-haskell roundtrip --layout-only --iface)
 	bin/repr-haskell roundtrip --layout-only --iface
-repr-haskell-test: ## repr/haskell's cases: the reader's samples, the spec's worked example, mode :full, the layout layout, R5's and R6's cases (bin/repr-haskell test)
+repr-haskell-test: ## repr/haskell's cases on the records, no GHC: the reader's samples, the spec's worked example, mode :full, the layout layout, R5's and R6's cases (bin/repr-haskell test)
 	bin/repr-haskell test
+repr-haskell-native-check: ## the native reader (GHC 9.14.1's lexer, grammar and PostProcess in Arbace) against the helper over test/haskell/native-check.txt: trees, pragmas, forms (bin/repr-haskell native-check)
+	bin/repr-haskell native-check
+repr-haskell-tables-check: ## the native parser's LALR(1) tables generated from GHC's Parser.y against Happy's in the tarball's Parser.hs (bin/repr-haskell tables --check)
+	bin/repr-haskell tables --check
+repr-haskell-rename-check: ## the front end's renamer (HF2) against GHC's: the rn dump over test/haskell/rename-check.txt (samples, ghc-internal modules, nofib programs) (bin/repr-haskell rename-check)
+	bin/repr-haskell rename-check
+repr-haskell-typecheck-check: ## the front end's elaborator (HF3) against GHC's types and desugared Core's evidence over test/haskell/typecheck's samples, with its negative control (bin/repr-haskell typecheck-check)
+	bin/repr-haskell typecheck-check
+repr-haskell-stg-check: ## HF5-HF6: the match compiler, the -O0 Simplifier, CorePrep and CoreToStg; desugared and simplified Core and STG against GHC's -O0, test/haskell/stg's programs run on hsi from Arbace's STG against GHC's output (bin/repr-haskell stg-check)
+	bin/repr-haskell stg-check
+repr-haskell-run-check: ## HF7's first light: the run corpus (test/haskell/eval's samples and synthetic programs) compiled by Arbace's front end alone and run on hsi, against GHC's recorded runs and test/haskell/run-check.edn (bin/repr-haskell run-check)
+	bin/repr-haskell run-check
+repr-haskell-run-check-nofib: ## HF3's second slice measured: the single-module nofib programs of test/haskell/run-check-nofib.txt by Arbace's front end on hsi, against test/haskell/ref-nofib.edn and test/haskell/run-check-nofib.edn (bin/repr-haskell run-check --nofib)
+	bin/repr-haskell run-check --nofib
+repr-haskell-test-oracle: ## the same cases with GHC reading the printed modules (class D; the oracle tier's haskell-test-oracle; bin/repr-haskell test --oracle)
+	bin/repr-haskell test --oracle
+repr-haskell-record-corpus: ## the corpus's originals dumped and parsed by the helper into the four packs, by hand (bin/repr-haskell record-corpus; REPR_HASKELL_ONLY_PACKAGES="P Q" some packages)
+	bin/repr-haskell record-corpus
+hsi-pins: ## Haskell's eval corpora: the testsuite tarball and nofib fetched by their pins, every corpus's measures against test/haskell/eval-corpora.edn (bin/hsi pins --check)
+	bin/hsi pins --check
+hsi-spec-check: ## doc/haskell/STG-SPEC.md's checklist against GHC 9.14.1's STG constructors (bin/hsi spec-check)
+	bin/hsi spec-check
+hsi-tests: ## the testsuite's all.T files read, its run tests listed in test/haskell/eval/testsuite-run.edn (bin/hsi tests)
+	bin/hsi tests
+hsi-dumps: ## the boot libraries and the samples compiled to STG forms by the helper, ABI hashes against the installed, read back, twice (bin/hsi dumps --samples --again; heavy: run by night)
+	bin/hsi dumps --samples --again
+hsi-record-libs: ## the boot libraries' STG dumped and packed into haskell-stg-libs, by hand (bin/hsi dumps --record; heavy: run by night)
+	bin/hsi dumps --record
+hsi-record-progs: ## the run corpora's programs' STG dumped by the helper and packed into haskell-stg-progs, by hand (bin/hsi check --live --dump-only --record-progs)
+	bin/hsi check --live --dump-only --record-progs --corpus samples,synthetic,testsuite-core
+hsi-generate: ## the synthetic corpus test/haskell/eval/synthetic/ against its generator (bin/hsi generate --check)
+	bin/hsi generate --check
+hsi-record-ref: ## GHC 9.14.1's -O0 runs of the run corpora into test/haskell/ref-ghc914.edn (bin/hsi record-ref)
+	bin/hsi record-ref
+hsi-build: ## hsi's light driver: go/arbace/hs printed by repr/go and built by TamaGo's go into .tmp/hsi/bin/hsi (bin/hsi build)
+	bin/hsi build
+hsi-check: ## the samples and the synthetic corpus on hsi against test/haskell/ref-ghc914.edn, every non-pass in a class (bin/hsi check)
+	bin/hsi check
+
+hsi-check-core: ## the samples, the synthetic corpus and the testsuite's language core (701 run tests) on hsi, about 4 minutes (bin/hsi check --corpus samples,synthetic,testsuite-core)
+	bin/hsi check --corpus samples,synthetic,testsuite-core
+
+hsi-check-essential: ## GT8's list of Haskell's eval, test/haskell/hsi/essential.txt, on hsi (bin/hsi check --only @test/haskell/hsi/essential.txt)
+	bin/hsi check --corpus samples,synthetic,testsuite-core --only @test/haskell/hsi/essential.txt
+
+hsi-check-aot: ## HE8's AOT: the samples and the synthetic corpus compiled to Go over hsi's machine and run against test/haskell/ref-ghc914.edn and against hsi (bin/hsi check --aot)
+	bin/hsi check --aot
+
+hsi-stubs-build: ## HES60's probe and stub writer (tools/hsdump/probe/StubProbe.hs) built by the host's ghc into .tmp/hsi/stubprobe (bin/hsi stubs-build)
+	bin/hsi stubs-build
+
+hsi-repl-session: ## HE7's REPL: test/haskell/repl/'s sessions through bin/hsi repl, stdout byte for byte against GHCi's recorded transcripts, and the negative control (bin/hsi repl-session)
+	bin/hsi repl-session
+
+hsi-primops: ## hsi's primops against GHC.Prim's 742 non-SIMD names (bin/hsi primops)
+	bin/hsi primops
+
+hsi-libm-check: ## hsi's port of musl's libm against the host's musl, bit for bit, function by function, and its negative control (bin/hsi libm-check)
+	bin/hsi libm-check
+
+hsi-runtime-check: ## hsi's runtime (go/arbace/hs, go/arbace/libm, the driver) printed from its :full Go forms and read again: the same forms (bin/hsi runtime check)
+	bin/hsi runtime check
 repr-rust-roundtrip: ## Rust -> forms -> Rust over std's five crates of rustc 1.99.1: rustc's trees and lines (bin/repr-rust roundtrip)
 	bin/repr-rust roundtrip
 repr-rust-iface: ## the same, then rustdoc's JSON of the five crates from the originals and from the printed files, compared without spans (bin/repr-rust roundtrip --iface)

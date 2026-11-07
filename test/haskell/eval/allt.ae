@@ -1,0 +1,311 @@
+;; GHC's testsuite's all.T files read as data (doc/haskell/HASKELL-EVAL-SURVEY.md §8.2, HES17 (a): Arbace's own
+;; runner reads all.T's common forms; a small reader of that subset until repr/python's exists). An all.T is Python
+;; run by the testsuite's driver (testsuite/driver/testlib.py); this reads its statements without running them:
+;; Python's lexical syntax (comments, strings of every quoting, brackets that join lines, backslash continuations,
+;; indentation), and of its statements the calls test(...) and setTestOpts(...) at any depth, their arguments parsed
+;; as expressions: names (symbols), numbers, strings (adjacent ones joined), lists (vectors), tuples ((tuple ...)),
+;; calls ((f arg... (kw NAME v)...)), attributes ((. x NAME)), subscripts ((get x i)), the operators (op "+" a b),
+;; (not x), (if c a b), and lambdas kept as (lambda "source"). A test(...) inside an indented block (if, for, def)
+;; is read too and marked :block with the block's header lines; a statement this reader cannot parse is kept
+;; as an error with its line.
+;;
+;; usage: arbace test/haskell/eval/allt.ae TESTS-DIR OUT.edn SUMMARY.edn
+;;   TESTS-DIR the testsuite's tests/ directory; OUT one map per test, sorted by directory and name; SUMMARY the
+;;   counts by function and by top directory, and the run tests' count (compile_and_run, multimod_compile_and_run,
+;;   multi_compile_and_run: programs GHC builds and the testsuite runs, eval's corpus)
+(require '[arbace.string :as s])
+(import '[java.io File])
+
+;; ---------------------------------------------------------------------------------------------------------
+;; Lexing: a vector of tokens {:t kind :v value :line n :col c}; kinds :name :num :str :op :nl :indent
+
+(defn- name-start? [c] (or (Character/isLetter (char c)) (= c \_)))
+(defn- name-char? [c] (or (Character/isLetterOrDigit (char c)) (= c \_)))
+
+(def ops3 #{"**=" "//=" ">>=" "<<=" "..."})
+(def ops2 #{"==" "!=" "<=" ">=" "**" "//" "+=" "-=" "*=" "/=" "%=" "->" ":=" "<<" ">>" "&=" "|=" "^="})
+
+(defn- unescape [^String body raw?]
+  (if raw? body
+      (let [sb (StringBuilder.) n (count body)]
+        (loop [i 0]
+          (if (>= i n) (str sb)
+              (let [c (.charAt body i)]
+                (if (and (= c \\) (< (inc i) n))
+                  (let [d (.charAt body (inc i))]
+                    (case d
+                      \n (do (.append sb \newline) (recur (+ i 2)))
+                      \t (do (.append sb \tab) (recur (+ i 2)))
+                      \r (do (.append sb \return) (recur (+ i 2)))
+                      \\ (do (.append sb \\) (recur (+ i 2)))
+                      \' (do (.append sb \') (recur (+ i 2)))
+                      \" (do (.append sb \") (recur (+ i 2)))
+                      \newline (recur (+ i 2))
+                      (do (.append sb c) (.append sb d) (recur (+ i 2)))))
+                  (do (.append sb c) (recur (inc i))))))))))
+
+(defn lex [^String src]
+  (let [n (count src)
+        toks (java.util.ArrayList.)
+        add! (fn [t v line col] (.add toks {:t t :v v :line line :col col}))]
+    (loop [i 0 line 1 lstart 0 depth 0 bol true]
+      (if (>= i n)
+        (do (add! :nl nil line 0) (vec toks))
+        (let [c (.charAt src i)]
+          (cond
+            ;; the indentation of a logical line's first token
+            (and bol (zero? depth))
+            (let [j (loop [j i] (if (and (< j n) (#{\space \tab} (.charAt src j))) (recur (inc j)) j))]
+              (if (or (>= j n) (#{\newline \# \return} (.charAt src j)))
+                (recur j line lstart depth false)
+                (do (add! :indent (- j i) line 0) (recur j line lstart depth false))))
+            (= c \newline)
+            (do (when (zero? depth) (add! :nl nil line (- i lstart)))
+                (recur (inc i) (inc line) (inc i) depth (zero? depth)))
+            (#{\space \tab \return \formfeed} c) (recur (inc i) line lstart depth bol)
+            (= c \#) (let [j (or (s/index-of src "\n" i) n)] (recur j line lstart depth bol))
+            (and (= c \\) (< (inc i) n) (= (.charAt src (inc i)) \newline))
+            (recur (+ i 2) (inc line) (+ i 2) depth false)
+            ;; strings, with prefixes r b f u in any case and order
+            (let [j (loop [j i] (if (and (< j n) (#{\r \R \b \B \f \F \u \U} (.charAt src j)) (< (- j i) 2)) (recur (inc j)) j))]
+              (and (< j n) (#{\" \'} (.charAt src j))))
+            (let [j (loop [j i] (if (#{\r \R \b \B \f \F \u \U} (.charAt src j)) (recur (inc j)) j))
+                  prefix (s/lower-case (subs src i j))
+                  q (.charAt src j)
+                  triple (and (< (+ j 2) n) (= q (.charAt src (inc j)) (.charAt src (+ j 2))))
+                  delim (if triple (str q q q) (str q))
+                  start (+ j (count delim))
+                  end (loop [k start]
+                        (cond (>= k n) (throw (ex-info (str "unterminated string at line " line) {}))
+                              (= (.charAt src k) \\) (recur (+ k 2))
+                              (and (not triple) (= (.charAt src k) \newline)) (throw (ex-info (str "newline in a string at line " line) {}))
+                              (.startsWith src delim k) k
+                              :else (recur (inc k))))
+                  body (subs src start end)
+                  nl (count (filter #(= % \newline) body))]
+              (add! :str (cond-> {:s (unescape body (s/includes? prefix "r"))} (s/includes? prefix "f") (assoc :f true)) line (- i lstart))
+              (recur (+ end (count delim)) (+ line nl) (if (pos? nl) (inc (s/last-index-of src "\n" end)) lstart) depth false))
+            (name-start? c)
+            (let [j (loop [j i] (if (and (< j n) (name-char? (.charAt src j))) (recur (inc j)) j))]
+              (add! :name (subs src i j) line (- i lstart)) (recur j line lstart depth false))
+            (or (Character/isDigit c) (and (= c \.) (< (inc i) n) (Character/isDigit (.charAt src (inc i)))))
+            (let [j (loop [j i] (if (and (< j n) (or (Character/isLetterOrDigit (.charAt src j)) (= (.charAt src j) \.) (= (.charAt src j) \_))) (recur (inc j)) j))]
+              (add! :num (subs src i j) line (- i lstart)) (recur j line lstart depth false))
+            :else
+            (let [o (cond (and (<= (+ i 3) n) (ops3 (subs src i (+ i 3)))) (subs src i (+ i 3))
+                          (and (<= (+ i 2) n) (ops2 (subs src i (+ i 2)))) (subs src i (+ i 2))
+                          :else (str c))
+                  d (case o ("(" "[" "{") (inc depth) (")" "]" "}") (max 0 (dec depth)) depth)]
+              (add! :op o line (- i lstart)) (recur (+ i (count o)) line lstart d false))))))))
+
+;; ---------------------------------------------------------------------------------------------------------
+;; Parsing an expression: a recursive descent over a token vector, the position in an atom
+
+(declare expr)
+
+(defn- peek-t [ts pos] (nth ts @pos {:t :eof}))
+(defn- next-t! [ts pos] (let [t (peek-t ts pos)] (swap! pos inc) t))
+(defn- op? [t o] (and (= :op (:t t)) (= o (:v t))))
+(defn- name-tok? [t o] (and (= :name (:t t)) (= o (:v t))))
+(defn- expect! [ts pos o] (let [t (next-t! ts pos)] (when-not (op? t o) (throw (ex-info (str "expected " o " at line " (:line t) ", got " (pr-str (:v t))) {})))))
+
+(defn- num-value [^String v]
+  (try (cond (re-matches #"[0-9]+" v) (Long/parseLong v)
+             (re-matches #"0[xX][0-9a-fA-F]+" v) (Long/parseLong (subs v 2) 16)
+             :else (Double/parseDouble v))
+       (catch Throwable _ (list 'num v))))
+
+(defn- args! [ts pos close]
+  (loop [acc []]
+    (if (op? (peek-t ts pos) close) (do (next-t! ts pos) acc)
+        (let [t (peek-t ts pos) t2 (nth ts (inc @pos) {:t :eof})
+              a (cond (and (= :name (:t t)) (op? t2 "=")) (do (swap! pos + 2) (list 'kw (symbol (:v t)) (expr ts pos)))
+                      (op? t "*") (do (next-t! ts pos) (list 'star (expr ts pos)))
+                      (op? t "**") (do (next-t! ts pos) (list 'starstar (expr ts pos)))
+                      :else (expr ts pos))
+              ;; a comprehension: kept as its source tokens' values
+              a (if (name-tok? (peek-t ts pos) "for")
+                  (list 'comprehension a (loop [acc [] d 0]
+                                          (let [t (peek-t ts pos)]
+                                            (if (and (zero? d) (op? t close)) acc
+                                                (do (next-t! ts pos)
+                                                    (recur (conj acc (:v t))
+                                                           (cond (#{"(" "[" "{"} (:v t)) (inc d) (#{")" "]" "}"} (:v t)) (dec d) :else d)))))))
+                  a)]
+          (when (op? (peek-t ts pos) ",") (next-t! ts pos))
+          (recur (conj acc a))))))
+
+(defn- atom! [ts pos]
+  (let [t (next-t! ts pos)]
+    (case (:t t)
+      :name (case (:v t) "None" nil "True" true "False" false
+                  "lambda" (let [start (dec @pos)]
+                             ;; to the end of the enclosing argument: a comma or a closing bracket at depth 0
+                             (loop [d 0]
+                               (let [u (peek-t ts pos)]
+                                 (if (or (= :eof (:t u)) (= :nl (:t u)) (and (zero? d) (or (op? u ",") (op? u ")") (op? u "]") (op? u "}"))))
+                                   (list 'lambda (s/join " " (map #(str (or (:v %) "")) (subvec ts start @pos))))
+                                   (do (next-t! ts pos) (recur (cond (#{"(" "[" "{"} (:v u)) (inc d) (#{")" "]" "}"} (:v u)) (dec d) :else d)))))))
+                  "not" (list 'not (expr ts pos))
+                  (symbol (:v t)))
+      :num (num-value (:v t))
+      :str (loop [acc (:s (:v t)) f (:f (:v t))]
+             (if (= :str (:t (peek-t ts pos)))
+               (let [u (next-t! ts pos)] (recur (str acc (:s (:v u))) (or f (:f (:v u)))))
+               (if f (list 'fstring acc) acc)))
+      :op (case (:v t)
+            "(" (let [xs (args! ts pos ")")] (if (and (= 1 (count xs)) (not (op? (nth ts (- @pos 2)) ","))) (first xs) (apply list 'tuple xs)))
+            "[" (args! ts pos "]")
+            "{" (let [xs (args! ts pos "}")] (apply list 'dict-or-set xs))
+            "-" (list 'op "-" 0 (atom! ts pos))
+            (throw (ex-info (str "unexpected " (:v t) " at line " (:line t)) {})))
+      (throw (ex-info (str "unexpected end at line " (:line t)) {})))))
+
+(defn- postfix! [ts pos]
+  (loop [x (atom! ts pos)]
+    (let [t (peek-t ts pos)]
+      (cond (op? t "(") (do (next-t! ts pos) (recur (apply list x (args! ts pos ")"))))
+            (op? t ".") (do (next-t! ts pos) (recur (list '. x (symbol (:v (next-t! ts pos))))))
+            (op? t "[") (do (next-t! ts pos) (recur (list 'get x (first (args! ts pos "]")))))
+            :else x))))
+
+(def binops #{"+" "-" "*" "/" "%" "//" "**" "==" "!=" "<" ">" "<=" ">=" "|" "&" "^" "<<" ">>"})
+
+(defn- binary! [ts pos]
+  (loop [x (postfix! ts pos)]
+    (let [t (peek-t ts pos)]
+      (cond (and (= :op (:t t)) (binops (:v t))) (do (next-t! ts pos) (recur (list 'op (:v t) x (postfix! ts pos))))
+            (and (= :name (:t t)) (#{"and" "or" "in" "is"} (:v t)))
+            (do (next-t! ts pos)
+                (let [o (cond (and (= "is" (:v t)) (name-tok? (peek-t ts pos) "not")) (do (next-t! ts pos) "is not") :else (:v t))]
+                  (recur (list 'op o x (postfix! ts pos)))))
+            (and (name-tok? t "not") (name-tok? (nth ts (inc @pos) {}) "in"))
+            (do (swap! pos + 2) (recur (list 'op "not in" x (postfix! ts pos))))
+            :else x))))
+
+(defn expr [ts pos]
+  (let [x (binary! ts pos)]
+    (if (name-tok? (peek-t ts pos) "if")
+      (do (next-t! ts pos)
+          (let [c (binary! ts pos)]
+            (when-not (name-tok? (next-t! ts pos) "else") (throw (ex-info "if without else" {})))
+            (list 'if c x (expr ts pos))))
+      x)))
+
+;; ---------------------------------------------------------------------------------------------------------
+;; Statements: the logical lines, each with its indentation; the calls test(...) and setTestOpts(...)
+
+(defn logical-lines [toks]
+  (loop [ts toks cur [] ind 0 acc []]
+    (if (empty? ts) (if (seq cur) (conj acc {:indent ind :toks cur}) acc)
+        (let [t (first ts)]
+          (case (:t t)
+            :indent (recur (rest ts) [] (:v t) acc)
+            :nl (recur (rest ts) [] ind (if (seq cur) (conj acc {:indent ind :toks cur}) acc))
+            (recur (rest ts) (conj cur t) ind acc))))))
+
+(defn- line-src [toks] (s/join " " (map #(let [v (:v %)] (if (map? v) (pr-str (:s v)) (str v))) toks)))
+
+(defn read-allt
+  "The statements of one all.T: {:tests [...] :set-opts [...] :errors [...]}."
+  [^String file]
+  (let [lls (logical-lines (lex (slurp file)))]
+    (loop [ls lls headers [] acc {:tests [] :set-opts [] :errors []}]
+      (if (empty? ls) acc
+          (let [{:keys [indent toks]} (first ls)
+                headers (vec (filter #(< (:indent %) indent) headers))
+                t0 (first toks)
+                block-header? (= ":" (:v (last toks)))
+                headers' (if block-header? (conj headers {:indent indent :src (line-src toks)}) headers)
+                ;; a trailing ; or , (an expression statement's tuple of one) is not part of the call
+                toks (if (and (#{";" ","} (:v (last toks))) (= :op (:t (last toks)))) (vec (butlast toks)) toks)
+                call (when (and (= :name (:t t0)) (#{"test" "setTestOpts"} (:v t0)) (op? (second toks) "("))
+                       (try (let [pos (atom 0) x (postfix! (vec toks) pos)]
+                              (when (< @pos (count toks)) (throw (ex-info (str "trailing tokens at line " (:line t0)) {})))
+                              x)
+                            (catch Throwable e {:error (str (.getMessage e)) :line (:line t0) :src (line-src toks)})))
+                acc (cond (nil? call) acc
+                          (map? call) (update acc :errors conj call)
+                          (= 'test (first call))
+                          (update acc :tests conj (cond-> {:line (:line t0) :call call}
+                                                    (pos? indent) (assoc :block (mapv :src headers))))
+                          :else (update acc :set-opts conj (cond-> {:line (:line t0) :opts (second call)}
+                                                             (pos? indent) (assoc :block (mapv :src headers)))))]
+            (recur (rest ls) headers' acc))))))
+
+;; ---------------------------------------------------------------------------------------------------------
+;; A test's options: the calls of its opts argument, flattened (a list of them, a call, a name)
+
+(defn opts-flat [o]
+  (cond (vector? o) (mapcat opts-flat o)
+        (symbol? o) [(list o)]
+        (and (seq? o) (= 'when (first o))) (map #(list 'when (second o) %) (opts-flat (nth o 2 nil)))
+        (and (seq? o) (= 'unless (first o))) (map #(list 'unless (second o) %) (opts-flat (nth o 2 nil)))
+        (seq? o) [o]
+        :else []))
+
+(def run-funcs '#{compile_and_run multimod_compile_and_run multi_compile_and_run})
+
+;; the function a test's call names: a symbol; a conditional's branch that is a run function (the run is
+;; conditional: :options records it); a vector's run function (an all.T whose opts list was not closed)
+(defn func-of [f]
+  (cond (symbol? f) f
+        (and (seq? f) (= 'if (first f))) (or (some run-funcs (rest (rest f))) f)
+        (vector? f) (or (some run-funcs f) f)
+        :else f))
+
+(defn- opt-name [o] (let [x (if (#{'when 'unless} (first o)) (first (nth o 2)) (first o))] x))
+
+(defn test-map [dir file {:keys [line call block]} set-opts]
+  (let [[_ nm opts func args] call
+        flat (opts-flat opts)
+        plain (filter #(not (#{'when 'unless} (first %))) flat)
+        find1 (fn [k] (some #(when (= k (first %)) (second %)) plain))
+        names (vec (distinct (map opt-name flat)))
+        tdir (File. ^String file)
+        sname (when (string? nm) nm)
+        files (when sname (vec (sort (filter #(or (s/starts-with? % (str sname ".")) (s/starts-with? % (str sname "_")))
+                                             (map #(.getName ^File %) (.listFiles tdir))))))]
+    (cond-> {:dir dir :name (if (string? nm) nm (list 'expr nm)) :func (func-of func) :line line}
+      (not= func (func-of func)) (assoc :func-as-read func)
+      (not= opts 'normal) (assoc :opts opts)
+      (some? args) (assoc :args args)
+      block (assoc :block block)
+      (seq set-opts) (assoc :file-opts set-opts)
+      (seq names) (assoc :options names)
+      (find1 'exit_code) (assoc :exit-code (find1 'exit_code))
+      (find1 'extra_run_opts) (assoc :run-opts (find1 'extra_run_opts))
+      (find1 'extra_hc_opts) (assoc :hc-opts (find1 'extra_hc_opts))
+      (find1 'extra_files) (assoc :extra-files (find1 'extra_files))
+      (and (run-funcs func) (seq files)) (assoc :files files))))
+
+(let [[tests-dir out summary] *command-line-args*
+      root (File. ^String tests-dir)
+      alls (sort (filter #(= "all.T" (.getName ^File %)) (file-seq root)))
+      rel (fn [^File f] (s/replace (subs (.getPath f) (inc (count (.getPath root)))) "\\" "/"))
+      per (for [^File f alls]
+            (let [r (read-allt (.getPath f)) d (rel (.getParentFile f))]
+              {:dir d :read r
+               :tests (for [t (:tests r)] (test-map d (.getPath (.getParentFile f)) t (mapv :opts (:set-opts r))))}))
+      tests (sort-by (juxt :dir #(str (:name %)) :line) (mapcat :tests per))
+      ;; the test map's :dir is the directory's path under tests/ (test-map got the full path for the file listing)
+      tests (map (fn [t] t) tests)
+      errors (vec (for [p per e (:errors (:read p))] (assoc e :dir (:dir p))))
+      runs (filter #(run-funcs (:func %)) tests)
+      top (fn [t] (first (s/split (:dir t) #"/")))]
+  (spit out (with-out-str
+              (println ";; GHC 9.14.1's testsuite's tests, read from its all.T files by test/haskell/eval/allt.ae (bin/hsi tests;")
+              (println ";; doc/haskell/HASKELL-EVAL-SURVEY.md HES17 (a)): one map per test(...) call, sorted by directory and name.")
+              (println ";; :func the test's function, :opts its options as read, :options their names, :exit-code :run-opts :hc-opts")
+              (println ";; :extra-files when given plainly, :files the directory's files named after a run test, :block the headers")
+              (println ";; of the blocks a call is in, :file-opts the all.T's setTestOpts.")
+              (doseq [t tests] (prn t))))
+  (spit summary (with-out-str
+                  (prn {:all-t (count alls) :tests (count tests) :errors errors
+                        :by-func (into (sorted-map) (frequencies (map (comp str :func) tests)))
+                        :run-tests (count runs)
+                        :run-by-func (into (sorted-map) (frequencies (map (comp str :func) runs)))
+                        :run-by-top (into (sorted-map) (frequencies (map top runs)))
+                        :run-in-blocks (count (filter :block runs))
+                        :run-expected-broken (count (filter #(some #{'expect_broken 'expect_broken_for} (:options %)) runs))})))
+  (println (str "hsi tests: " (count alls) " all.T, " (count tests) " tests, " (count runs) " run tests, " (count errors) " statements unread")))

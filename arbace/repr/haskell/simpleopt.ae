@@ -1,0 +1,361 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Core/SimpleOpt.hs (simpleOptPgm,
+;; simple_opt_expr, simple_app, simple_opt_bind, simple_bind_pair, simple_out_bind_pair, safe_to_inline,
+;; exprIsConApp_maybe's data-constructor case), the occurrence information it reads from
+;; compiler/GHC/Core/Opt/OccurAnal.hs (OccInfo: IAmDead, OneOcc NotInsideLam with one branch, ManyOccs, loop breakers;
+;; the top level's binding groups in dependency order) and the compulsory unfoldings of
+;; compiler/GHC/Types/Id/Make.hs (seqId, oneShotId, leftSectionId, rightSectionId, coerceId, nullAddrId), on Arbace's
+;; untyped Core; GHC's notice follows (LICENSE.md, "GHC: the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.simpleopt
+  "GHC's simple optimiser (GHC.Core.SimpleOpt.simpleOptPgm), which the desugarer runs on its output at every
+  optimisation level, -O0's included (GHC.HsToCore.deSugar), ported to Arbace's untyped Core (the tc vocabulary:
+  (v NAME) (lv \"occ\" ID) (lit \"text\") (app F [ARG...]) (lam [B...] E) (let [(bind B E)...] E) (letrec [...] E)
+  (case E B [(alt CON [B...] E)...])).
+
+  As GHC's: the program's occurrences analysed first (OccurAnal: each binder dead, once outside a lambda in one
+  branch, or many; a recursive group's binders loop breakers; the top level's bindings split into their binding
+  groups in dependency order), then one pass in which
+  - a binder that is dead or occurs once outside a lambda is inlined unconditionally, unoptimised, at its occurrence,
+    with the environment of its binding (preInlineUnconditionally: soe_inl), unless exported or a loop breaker;
+  - a binder whose optimised right-hand side is trivial (a variable or a literal but a string) is substituted
+    (postInlineUnconditionally), unless exported or a loop breaker;
+  - an application of a lambda is beta-reduced, each argument bound as a let would be (simple_bind_pair), a let in
+    head position floated over the arguments (simple_app's Let case);
+  - an Id with a compulsory unfolding is replaced by it (simple_app; GHC.Types.Id.Make's seq, oneShot, the sections,
+    coerce, nullAddr#), so `seq a b` becomes `case a of _ -> b`;
+  - a case whose binder is dead on a saturated data constructor application is resolved at its alternative (case
+    of known constructor, exprIsConApp_maybe), the fields bound to the arguments (simple_out_bind);
+  - nested lambdas are one (go_lam's mkLams).
+  Not ported: types, coercions and casts (erased), rules (none at -O0 in a program), eta reduction (go_lam's
+  tryEtaReduce, which needs the arities of the program's and the libraries' Ids: recorded, FRONTEND-SURVEY.md)."
+  (:require [arbace.string :as str]))
+
+(defn- head? [x h] (and (seq? x) (= h (first x))))
+(defn- lv? [x] (head? x 'lv))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Occurrence analysis (GHC.Core.Opt.OccurAnal, the information simple_opt reads)
+
+(def ^:dynamic *occ* nil)      ; atom {binder {:n count :lam bool}}
+(def ^:dynamic *depth* nil)    ; atom {binder lambda-depth at its binding}
+(def ^:dynamic *breakers* nil) ; atom #{binder}: loop breakers (every binder of a recursive group)
+
+(defn- key-of [x] (if (head? x 'v) (second x) x))
+
+(defn- occ! [x d]
+  (let [k (key-of x)]
+    (when-let [bd (get @*depth* k)]
+      (swap! *occ* update k (fn [o] {:n (inc (:n o 0)) :lam (or (:lam o) (> d bd))})))))
+
+(defn- bind! [b d] (swap! *depth* assoc (key-of b) d))
+
+(defn- occ-expr [e d]
+  (when (seq? e)
+    (case (first e)
+      (lv v) (occ! e d)
+      lit nil
+      cast (occ-expr (second e) d)
+      app (do (occ-expr (second e) d) (doseq [a (nth e 2)] (occ-expr a d)))
+      lam (let [d2 (inc d)] (doseq [b (second e)] (bind! b d2)) (occ-expr (nth e 2) d2))
+      let (doseq [[_ b r] (second e)] (bind! b d) (occ-expr r d))
+      letrec (do (doseq [[_ b _] (second e)] (bind! b d) (swap! *breakers* conj b))
+                 (doseq [[_ _ r] (second e)] (occ-expr r d)))
+      case (do (occ-expr (second e) d) (bind! (nth e 2) d)
+               (doseq [[_ _ bs r] (nth e 3)] (doseq [b bs] (bind! b d)) (occ-expr r d)))
+      nil)
+    (when (head? e 'let) (occ-expr (nth e 2) d))
+    (when (head? e 'letrec) (occ-expr (nth e 2) d))))
+
+(defn- occ-info [b] (get @*occ* (key-of b) {:n 0 :lam false}))
+
+(defn- safe-to-inline?
+  "GHC's safe_to_inline: dead, or one occurrence outside a lambda; never a loop breaker"
+  [b]
+  (and (not (contains? @*breakers* b))
+       (let [{:keys [n lam]} (occ-info b)] (or (zero? n) (and (= 1 n) (not lam))))))
+
+(defn- dead? [b] (zero? (:n (occ-info b))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The top level's binding groups (OccurAnal's SCCs over the desugarer's one recursive group)
+
+(defn- free-tops
+  "The module's top-level names an expression mentions"
+  [e tops]
+  (let [acc (transient #{})]
+    ((fn walk [x] (cond (and (head? x 'v) (contains? tops (second x))) (conj! acc (second x))
+                        (and (lv? x) (contains? tops x)) (conj! acc x)
+                        (coll? x) (doseq [y x] (walk y))))
+     e)
+    (persistent! acc)))
+
+(defn- sccs
+  "Tarjan's strongly connected components of the bindings, dependencies first: [[bind...] recursive?]..."
+  [binds tops]
+  (let [names (mapv second binds)
+        by (zipmap names binds)
+        deps (into {} (for [[_ b e] binds] [b (filterv #(contains? by %) (sort-by str (free-tops e tops)))]))
+        idx (atom 0) index (atom {}) low (atom {}) stack (atom []) on (atom #{}) out (atom [])]
+    (letfn [(strong [v]
+              (swap! index assoc v @idx) (swap! low assoc v @idx) (swap! idx inc)
+              (swap! stack conj v) (swap! on conj v)
+              (doseq [w (get deps v)]
+                (cond (not (contains? @index w)) (do (strong w) (swap! low update v min (get @low w)))
+                      (contains? @on w) (swap! low update v min (get @index w))))
+              (when (= (get @low v) (get @index v))
+                (let [comp (loop [c []]
+                             (let [w (peek @stack)]
+                               (swap! stack pop) (swap! on disj w)
+                               (if (= w v) (conj c w) (recur (conj c w)))))
+                      comp (vec (sort-by #(.indexOf ^java.util.List names %) comp))]
+                  (swap! out conj [(mapv by comp)
+                                   (or (> (count comp) 1) (contains? (set (get deps v)) v))]))))]
+      (doseq [v names] (when-not (contains? @index v) (strong v)))
+      @out)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Compulsory unfoldings (GHC.Types.Id.Make): a fresh copy at each use
+
+(def ^:dynamic *fresh* nil)
+(def ^:dynamic *cons* nil)     ; {CON {:arity n :flavour data|newtype}}
+(defn- fresh [o] (list 'lv o (str "so" (swap! *fresh* inc))))
+
+(def ^:dynamic *newtype-co*
+  "nil, or (fn [CON]) -> the coercion {:l REP :r NEWTYPE} of a newtype's constructor (the -O0 Simplifier's casts)"
+  nil)
+
+(defn- compulsory
+  "The compulsory unfolding of a global name, or nil"
+  [g]
+  (when (vector? g)
+    (case (if (= 'newtype (:flavour (get *cons* (assoc g 1 "data")))) :newtype [(nth g 2) (nth g 3)])
+      ;; a newtype's constructor: the identity (Note [Compulsory newtype unfolding]), a cast of its argument when
+      ;; the Simplifier runs, else the cast erased
+      :newtype (let [x (fresh "nt")]
+                 (if-let [co (and *newtype-co* (*newtype-co* (assoc g 1 "data")))]
+                   (list 'lam [x] (list 'cast x co))
+                   (list 'lam [x] x)))
+      ["GHC.Internal.Prim" "seq"] (let [a (fresh "a") b (fresh "b")] (list 'lam [a b] (list 'case a (fresh "wild") [(list 'alt :default [] b)])))
+      ["GHC.Internal.Magic" "oneShot"] (let [f (fresh "f")] (list 'lam [f] f))
+      ["GHC.Internal.Prim" "coerce"] (let [x (fresh "x")] (list 'lam [x] x))
+      ["GHC.Internal.Prim" "nullAddr#"] (list 'lit "__NULL")
+      ["GHC.Internal.Types" "leftSection"] (let [f (fresh "f") x (fresh "x")] (list 'lam [f x] (list 'app f [x])))
+      ["GHC.Internal.Types" "rightSection"]
+      (let [f (fresh "f") y (fresh "y") x (fresh "x")]
+        (if *newtype-co*
+          ;; the template's occurrences analysed: f and y occur under x's lambda, so a section's operator and
+          ;; operand are let-bound around it (as GHC's -O0 Core has them)
+          (let [u (list 'lam [f y] (list 'lam [x] (list 'app f [x y])))] (occ-expr u 0) u)
+          (list 'lam [f y x] (list 'app f [x y]))))
+      nil)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The simple optimiser (simple_opt_expr and friends); env {:inl {binder [env expr]} :subst {binder expr}}
+
+(def ^:dynamic *dfun-parts* nil)
+(def ^:dynamic *exported* nil) ; #{name}: never inlined, never dropped (isExportedId)
+
+(defn- exported? [b] (and (vector? b) (contains? *exported* b)))
+
+(defn- trivial?
+  "exprIsTrivial: a variable, or a literal but a string, or a cast of one"
+  [e]
+  (or (lv? e) (head? e 'v) (and (head? e 'lit) (not (re-matches #"(?s)\".*\"#?" (second e))))
+      (and (head? e 'cast) (trivial? (second e)))))
+
+(declare so-expr so-app)
+
+(defn- lookup [env x]
+  (let [k (key-of x)]
+    (if-let [[cenv ce] (get (:inl env) k)]
+      [:inl cenv ce]
+      (if-let [s (get (:subst env) k)] [:subst s] nil))))
+
+(defn- so-out-bind
+  "simple_out_bind_pair: an optimised right-hand side substituted when trivial, else bound: [env bind-or-nil]"
+  [env b out-rhs]
+  (if (and (not (exported? b)) (not (contains? @*breakers* b)) (trivial? out-rhs))
+    [(assoc-in env [:subst (key-of b)] out-rhs) nil]
+    [env [b out-rhs]]))
+
+(def ^:dynamic *unlifted?* (constantly false)) ; an expression of an unlifted type (tostg's representations)
+
+(defn- so-bind-pair
+  "simple_bind_pair: a binder and its (unoptimised) closure: inlined unconditionally, substituted, or bound; a binder
+  of an unlifted type is case-bound in GHC's Core (needsCaseBinding, the desugarer's bindNonRec), so never inlined
+  unoptimised (tostg makes its let a case)"
+  [env b [cenv ce]]
+  (if (and (not (exported? b)) (safe-to-inline? b) (not (*unlifted?* ce)))
+    [(assoc-in env [:inl (key-of b)] [cenv ce]) nil]
+    (so-out-bind env b (so-expr cenv ce))))
+
+(defn- wrap-let [pr body] (if pr (list 'let [(list 'bind (first pr) (second pr))] body) body))
+
+(defn- con-app
+  "exprIsConApp_maybe's data-constructor case: a saturated constructor application [CON ARGS], or nil"
+  [e cons]
+  (let [[f args] (cond (head? e 'app) [(second e) (nth e 2)] (head? e 'v) [e []] :else [nil nil])]
+    (when (head? f 'v)
+      (let [g (second f) c (when (vector? g) (assoc g 1 "data")) i (get cons c)]
+        (when (and i (not= 'newtype (:flavour i)) (= (:arity i) (count args))) [c args])))))
+
+
+(defn- so-binds
+  "A let's bindings, in order: [env [bind...]]"
+  [env bs]
+  (reduce (fn [[env out] [_ b r]]
+            (let [[env2 pr] (so-bind-pair env b [env r])] [env2 (if pr (conj out pr) out)]))
+          [env []] bs))
+
+(defn so-expr
+  "simple_opt_expr"
+  [env e]
+  (if-not (seq? e)
+    e
+    (case (first e)
+      (lv v) (if-let [[k a b] (lookup env e)]
+               (if (= k :inl) (so-expr a b) a)
+               (if-let [u (and (head? e 'v) (compulsory (second e)))] u e))
+      lit e
+      cast (let [b (so-expr env (second e)) co (nth e 2)]
+             (cond (and (= (:l co) (:r co)) (some? (:l co))) b
+                   (head? b 'cast) (let [co2 {:l (:l (nth b 2)) :r (:r co)}]
+                                     (if (and (= (:l co2) (:r co2)) (some? (:l co2))) (second b) (list 'cast (second b) co2)))
+                   :else (list 'cast b co)))
+      app (so-app env (second e) (mapv (fn [a] [env a]) (nth e 2)))
+      lam (loop [bs (vec (second e)) body (nth e 2)]
+            (if (head? body 'lam) (recur (into bs (second body)) (nth body 2))
+                (list 'lam bs (so-expr env body))))
+      let (let [[env2 prs] (so-binds env (second e))]
+            (reduce (fn [b pr] (wrap-let pr b)) (so-expr env2 (nth e 2)) (reverse prs)))
+      letrec (let [bs (second e)
+                   prs (vec (keep (fn [[_ b r]] (when-not (and (dead? b) (not (exported? b)) false) [b (so-expr env r)])) bs))]
+               (list 'letrec (mapv (fn [[b r]] (list 'bind b r)) prs) (so-expr env (nth e 2))))
+      case (if (and (= 1 (count (nth e 3))) (vector? (second (first (nth e 3))))
+                    (= 'newtype (:flavour (get *cons* (second (first (nth e 3)))))))
+             ;; a newtype's constructor matched: no case in GHC's Core (the match is a cast, erased): the field and
+             ;; the case binder are the scrutinee
+             (let [[_ s b [[_ c [x] rhs]]] e
+                   co (when *newtype-co* (*newtype-co* c))
+                   xr (if co (list 'cast b {:l (:r co) :r (:l co)}) b)]
+               (so-expr env (list 'let [(list 'bind b s)] (list 'let [(list 'bind x xr)] rhs))))
+           (let [[_ s b alts] e
+                 s2 (so-expr env s)
+                 known (when (dead? b) (con-app s2 *cons*))
+                 alt (when known (or (some (fn [a] (when (= (second a) (first known)) a)) alts)
+                                     (some (fn [a] (when (= :default (second a)) a)) alts)))]
+             (if alt
+               (let [[_ c bs rhs] alt]
+                 (if (= :default c)
+                   (so-expr env rhs)
+                   (let [[env2 prs] (reduce (fn [[env out] [x a]] (let [[env2 pr] (so-out-bind env x a)] [env2 (if pr (conj out pr) out)]))
+                                            [env []] (map vector bs (second known)))]
+                     (reduce (fn [bd pr] (wrap-let pr bd)) (so-expr env2 rhs) (reverse prs)))))
+               (list 'case s2 b (mapv (fn [[_ c bs rhs]] (list 'alt c bs (so-expr env rhs))) alts)))))
+      (apply list (map #(so-expr env %) e)))))
+
+(defn- finish-app [f args]
+  (let [as (mapv (fn [[cenv a]] (so-expr cenv a)) args)]
+    (cond (empty? as) f
+          (head? f 'app) (list 'app (second f) (into (vec (nth f 2)) as))
+          :else (list 'app f as))))
+
+(defn so-app
+  "simple_app: a head and its argument closures"
+  [env f args]
+  (cond
+    (or (lv? f) (head? f 'v))
+    (if-let [[k a b] (lookup env f)]
+      (if (= k :inl) (so-app a b args) (finish-app a args))
+      (if-let [u (and (head? f 'v) (compulsory (second f)))]
+        (so-app {} u args)
+        (finish-app f args)))
+    (head? f 'app) (so-app env (second f) (into (mapv (fn [a] [env a]) (nth f 2)) args))
+    (and (head? f 'lam) (seq args))
+    (let [[_ bs body] f]
+      (loop [env env bs (seq bs) args (seq args) prs []]
+        (if (and bs args)
+          (let [[env2 pr] (so-bind-pair env (first bs) (first args))]
+            (recur env2 (next bs) (next args) (if pr (conj prs pr) prs)))
+          (let [inner (cond bs (so-expr env (list 'lam (vec bs) body))
+                            args (so-app env body (vec args))
+                            :else (so-expr env body))]
+            (reduce (fn [bd pr] (wrap-let pr bd)) inner (reverse prs))))))
+    (and (head? f 'let) (seq args))
+    (let [[env2 prs] (so-binds env (second f))]
+      (reduce (fn [bd pr] (wrap-let pr bd)) (so-app env2 (nth f 2) args) (reverse prs)))
+    :else (finish-app (so-expr env f) args)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The program
+
+(defn simple-opt-pgm
+  "simpleOptPgm: the program's top-level bindings [(bind NAME E)...] optimised; exported: the names never inlined
+  or dropped; cons: {CON {:arity :flavour}}"
+  [binds exported cons]
+  (binding [*occ* (atom {}) *depth* (atom {}) *breakers* (atom #{}) *fresh* (atom 0)
+            *exported* exported *cons* cons *dfun-parts* nil]
+    (let [tops (set (map second binds))
+          groups (sccs binds tops)
+          ;; a dictionary function's DFunUnfolding mentions its methods and superclasses again: they occur
+          ;; more than once (OccurAnal counts the unfoldings' occurrences)
+          dfun-parts (set (for [[_ b e] binds :when (and (vector? b) (str/starts-with? (nth b 3) "$f"))
+                                x (free-tops e tops)]
+                            x))]
+      (doseq [b tops] (bind! b 0))
+      (doseq [[bs rec?] groups :when rec?] (doseq [[_ b _] bs] (swap! *breakers* conj b)))
+      (if *newtype-co*
+        ;; OccurAnal's dead code: the groups analysed last first, a group's right-hand sides only when one of its
+        ;; binders is exported or occurs in what was kept (a dead binding's occurrences do not count)
+        (doseq [[bs _] (reverse groups)]
+          (when (some (fn [[_ b _]] (or (exported? b) (pos? (:n (occ-info b))))) bs)
+            (doseq [[_ _ e] bs] (occ-expr e 0))))
+        (doseq [[_ _ e] binds] (occ-expr e 0)))
+      (doseq [x dfun-parts] (swap! *occ* update (key-of x) (fn [o] (assoc o :n (+ 2 (:n o 0))))))
+      (loop [gs groups env {} out []]
+        (if (empty? gs)
+          out
+          (let [[bs rec?] (first gs)]
+            (cond
+              ;; a dead group dropped (the Simplifier's input only)
+              (and *newtype-co* (not (some (fn [[_ b _]] (or (exported? b) (pos? (:n (occ-info b))))) bs)))
+              (recur (rest gs) env out)
+              rec?
+              (recur (rest gs) env (into out (map (fn [[_ b e]] (list 'bind b (so-expr env e))) bs)))
+              :else
+              (let [[_ b e] (first bs)
+                    [env2 pr] (so-bind-pair env b [env e])]
+                (recur (rest gs) env2 (if pr (conj out (list 'bind (first pr) (second pr))) out))))))))))

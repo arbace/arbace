@@ -395,21 +395,24 @@
 ;; ---- the crops' readers (the REAP rows of Rust, Haskell and LLVM): one block each, so that the branches merge by keeping all
 
 (defmethod read-source :corpus-known [src]
-  ;; A round trip's known file (bin/repr-rust roundtrip's test/rust/roundtrip-CORPUS[-LEVEL]-known.edn: a map from a file, crate or
-  ;; program to the reason it differs; the passes are not recorded, the round trip passes every other unit of the corpus): each
+  ;; A round trip's known file (bin/repr-rust roundtrip's test/rust/roundtrip-CORPUS[-LEVEL]-known.edn, bin/repr-haskell roundtrip's
+  ;; test/haskell/roundtrip-CORPUS[-LEVEL]-known.edn: a map from a file, crate, program or PKG/FILE module to
+  ;; the reason it differs; the passes are not recorded, the round trip passes every other unit of the corpus): each
   ;; :parts entry {:corpus CORPUS-FILE :known KNOWN-FILE}, the units of the corpus (:count :files, the files of its crates;
-  ;; :ifaces, the crates rustdoc documents; :programs, the behaviour level's) less the known file's. A case is
+  ;; :ifaces, the crates rustdoc documents; :programs, the behaviour level's; :hs-modules, Haskell's modules) less the known file's. A case is
   ;; "CORPUS KEY" of the result :known, its reason "LEVEL: REASON" (:level, the source's).
   (let [parts (for [{:keys [corpus known]} (:parts src)]
                 (let [c (read-edn corpus)
                       total (case (:count src)
                               :files (reduce + (map #(count (:files %)) (:crates c)))
                               :ifaces (count (filter :iface (:crates c)))
-                              :programs (count (:programs c)))
+                              :programs (count (:programs c))
+                              ;; Haskell's (haskell-90, merged at batch 2): the modules, .hsc modules and boot files of its packages
+                              :hs-modules (reduce + (map #(+ (count (:modules %)) (count (:hsc %)) (count (:boot %))) (:packages c))))
                       ks (sort-by (comp str key) (read-edn known))]
                   {:total total
                    :entries (for [[k why] ks]
-                              (entry (str (:name c) " " k) :known (str (:level src) ": " (str/replace (str why) #"\s+" " "))))}))]
+                              (entry (str (if (= :hs-modules (:count src)) (str "ghc-" (:ghc c)) (:name c)) " " k) :known (str (:level src) ": " (str/replace (str why) #"\s+" " "))))}))]
     {:pass (- (reduce + (map :total parts)) (count (mapcat :entries parts)))
      :entries (vec (mapcat :entries parts))
      :detail (str (str/join ", " (map #(format "%,d" (long (:total %))) parts)) " " (name (:count src)) " in the corpora")}))
@@ -444,6 +447,18 @@
     (loop [xs []]
       (let [x (read r false ::eof)]
         (if (= ::eof x) xs (recur (conj xs x)))))))
+
+;; ---- Haskell's readers (its round trips' known files are :corpus-known's, :count :hs-modules, above)
+
+(defmethod read-source :hsi-check [src]
+  ;; bin/hsi check's record (test/haskell/check-hsi.edn: one map a program, {:id :result :error ...}; :result :pass, :fail, :hsi, :no-dump,
+  ;; :no-ref, :skipped): a non-pass an entry of its result, reason its message (:error, else the result), taken by the class whose
+  ;; :ids name the program (test/haskell/divergences.edn).
+  (let [rows (read-forms (:file src))]
+    {:pass (count (filter #(= :pass (:result %)) rows)) :ids (mapv :id rows)
+     :entries (vec (for [r rows :when (not= :pass (:result r))]
+                     (entry (:id r) (:result r) (let [e (str (:error r))] (if (seq e) e (name (:result r)))))))
+     :detail (str (count rows) " programs in " (:file src))}))
 
 (def ^:private ref-run-ids
   (memoize
@@ -580,11 +595,13 @@
           classes)))
 
 (defn- classify-entry
-  "An entry that names its class (:class-id, a check that records the class: rsi's lowering check) is taken by it, else classify's."
+  "An entry that names its class (:class-id, a check that records the class) is taken by it, one a class's :ids lists (hsi's classes
+  name their programs, HES43 (a)) by that class, else classify's."
   [classes e]
   (if-let [id (:class-id e)]
     (first (filter #(= id (:id %)) classes))
-    (classify classes e)))
+    (or (first (filter #(some #{(:id e)} (:ids %)) classes))
+        (classify classes e))))
 
 (defn- kind-of [cell c]
   (let [k (:kind c)]

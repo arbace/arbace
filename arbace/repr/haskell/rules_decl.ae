@@ -1,0 +1,838 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Parser.y.source's
+;; actions of the top-level declarations, classes, default declarations, type synonyms and
+;; families, data and newtype declarations, standalone kind signatures, instances, deriving,
+;; role annotations, pattern synonyms, class and instance bodies, binding groups, rules, warnings
+;; and deprecations, annotations, foreign declarations, signatures' types, the types, the kinds and
+;; the data constructors (from topdecls through deriv_clause_types), whose notice follows
+;; (LICENSE.md, "GHC: the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.rules-decl
+  "Parser.y's actions (doc/haskell/NATIVE.md) of the declarations and the types: Parser.y.source
+  from topdecls through deriv_clause_types (the top-level declarations, classes, default
+  declarations, type synonyms, type and data families, data and newtype declarations with their
+  constructors (H98 and GADT) and deriving clauses, standalone kind signatures, instances with
+  their overlap pragmas, standalone deriving, role annotations, pattern synonyms, the bodies of
+  classes and instances, binding groups (decls, binds, wherebinds), rules, warnings and
+  deprecations, annotations, foreign declarations, the types of signatures, the types, kinds and
+  type variable binders), with the post-processing of arbace.repr.haskell.post-decl.
+
+  Each value is its production's Parser.y type in arbace.repr.haskell.ast's representation; the
+  parser's own values (not in the tree) as post-decl says: a Located pair (L span [a b]), the
+  exact-print annotations in it nil; the lists Parser.y builds reversed (constrs1, derivings,
+  sig_vars, fds1, varids0, roles, rules, ty_fam_inst_eqns...) reversed as it does; infixtype's
+  and ftype's values fns of the mode (:ty, :dcb), expcontext's and expmult's of the mode of an
+  ECP (:expr, :pat, :cmd)."
+  (:require [arbace.repr.haskell.ast :as a :refer [defrule L unLoc getLoc gl comb2 comb3 comb4 comb5 sL1 sLL sLZ nx con just tuple]]
+            [arbace.repr.haskell.lex :as lx]
+            [arbace.repr.haskell.post :as pp]
+            [arbace.repr.haskell.post-decl :as pd]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- tv "A token's value" [t] (nth t 1))
+(defn- integer-src "getINTEGERs" [t] (nth (tv t) 1))
+(defn- integer-val "il_value of getINTEGER" [t] (nth (tv t) 3))
+(defn- string-src "getSTRINGs, getSTRINGMULTIs, getCHARs" [t] (nth (tv t) 0))
+(defn- string-val "getSTRING, getSTRINGMULTI, getCHAR" [t] (nth (tv t) 1))
+(defn- string-literal "getStringLiteral, getStringMultiLiteral" [t] (con StringLiteral (string-src t) (string-val t) 'Nothing))
+
+(def ^:private vcons pd/vcons)
+
+(defn- rev "reverse, as a vector" [xs] (vec (reverse xs)))
+
+(defn- rev-loc "fmap reverse of a located list" [lxs] (L (getLoc lxs) (rev (unLoc lxs))))
+
+(def no-activation-ann "noAnn of ActivationAnn" (con ActivationAnn nil nil 'Nothing 'Nothing))
+
+(defn- doc-wsts "map stringLiteralToHsDocWst" [ps strs] (mapv #(pd/string-literal-to-hs-doc-wst ps %) strs))
+
+(defn- fail-op-few-args
+  "failOpFewArgs"
+  [lop]
+  (pp/fatal! (str "Operator applied to too few arguments: " (a/rdr-occ (unLoc lop))) (getLoc lop)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Top-level declarations
+
+(defrule "topdecls" "topdecls_semi topdecl" [ps $1 $2] (conj $1 $2))
+(defrule "topdecls_semi" "topdecls_semi topdecl semis1" [ps $1 $2 $3] (conj $1 $2))
+(defrule "topdecls_semi" "" [ps] [])
+
+(defrule "topdecls_cs" "topdecls_cs_semi topdecl_cs" [ps $1 $2] (conj $1 $2))
+(defrule "topdecls_cs_semi" "topdecls_cs_semi topdecl_cs semis1" [ps $1 $2 $3] (conj $1 $2))
+(defrule "topdecls_cs_semi" "" [ps] [])
+(defrule "topdecl_cs" "topdecl" [ps $1] $1)
+
+(defrule "topdecl" "cl_decl" [ps $1] (L (getLoc $1) (con TyClD nx (unLoc $1))))
+(defrule "topdecl" "ty_decl" [ps $1] (L (getLoc $1) (con TyClD nx (unLoc $1))))
+(defrule "topdecl" "standalone_kind_sig" [ps $1] (L (getLoc $1) (con KindSigD nx (unLoc $1))))
+(defrule "topdecl" "inst_decl" [ps $1] (L (getLoc $1) (con InstD nx (unLoc $1))))
+(defrule "topdecl" "stand_alone_deriving" [ps $1] (L (getLoc $1) (con DerivD nx (unLoc $1))))
+(defrule "topdecl" "role_annot" [ps $1] (L (getLoc $1) (con RoleAnnotD nx (unLoc $1))))
+(defrule "topdecl" "default_decl" [ps $1] (L (getLoc $1) (con DefD nx (unLoc $1))))
+(defrule "topdecl" "'foreign' fdecl" [ps $1 $2] (sLL $1 $2 ((unLoc $2) $1)))
+(defrule "topdecl" "'{-# DEPRECATED' deprecations '#-}'" [ps $1 $2 $3]
+  (sLL $1 $3 (con WarningD nx (con Warnings (tuple (tuple nil nil) (tv $1)) (vec $2)))))
+(defrule "topdecl" "'{-# WARNING' warnings '#-}'" [ps $1 $2 $3]
+  (sLL $1 $3 (con WarningD nx (con Warnings (tuple (tuple nil nil) (tv $1)) (vec $2)))))
+(defrule "topdecl" "'{-# RULES' rules '#-}'" [ps $1 $2 $3]
+  (sLL $1 $3 (con RuleD nx (con HsRules (tuple (tuple nil nil) (tv $1)) (rev $2)))))
+(defrule "topdecl" "annotation" [ps $1] $1)
+(defrule "topdecl" "decl_no_th" [ps $1] $1)
+;; Template Haskell: any expression is a splice
+(defrule "topdecl" "infixexp" [ps $1] (pd/mk-splice-decl (pp/run-expr $1)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Classes, default declarations, type declarations
+
+;; where_cls: (L span [where-token decls layout])
+(defrule "cl_decl" "'class' tycl_hdr fds where_cls" [ps $1 $2 $3 $4]
+  (let [[wtok decls layout] (unLoc $4)]
+    (pd/mk-class-decl (comb4 $1 $2 $3 $4) $2 $3 wtok decls layout)))
+
+(defrule "default_decl" "'default' opt_class '(' comma_types0 ')'" [ps $1 $2 $3 $4 $5]
+  (sLL $1 $5 (con DefaultDecl (tuple nil nil nil) $2 (vec $4))))
+
+(defrule "ty_decl" "'type' type '=' ktype" [ps $1 $2 $3 $4]
+  (pd/mk-ty-synonym (comb2 $1 $4) $2 $4))
+
+;; opt_tyfam_kind_sig (L _ [ann sig]), opt_injective_info (L _ [ann Maybe-inj]),
+;; where_type_family (L _ [ann info])
+(defrule "ty_decl" "'type' 'family' type opt_tyfam_kind_sig opt_injective_info where_type_family"
+  [ps $1 $2 $3 $4 $5 $6]
+  (pd/mk-fam-decl (comb5 $1 $3 $4 $5 $6) (second (unLoc $6)) 'TopLevel $3 (second (unLoc $4)) (second (unLoc $5))))
+
+;; type_data_or_newtype (L _ [ann type-data? new-or-data]), constrs (L _ [ann cons-reversed])
+(defrule "ty_decl" "type_data_or_newtype capi_ctype tycl_hdr constrs maybe_derivings" [ps $1 $2 $3 $4 $5]
+  (let [[_ type-data? new-or-data] (unLoc $1)]
+    (pd/mk-ty-data (comb4 $1 $3 $4 $5) type-data? new-or-data $2 $3 'Nothing (rev (second (unLoc $4))) (rev-loc $5) nil)))
+
+;; opt_kind_sig (L _ [ann Maybe-kind]), gadt_constrlist (L _ [where-token cons])
+(defrule "ty_decl" "type_data_or_newtype capi_ctype tycl_hdr opt_kind_sig gadt_constrlist maybe_derivings"
+  [ps $1 $2 $3 $4 $5 $6]
+  (let [[_ type-data? new-or-data] (unLoc $1)]
+    (pd/mk-ty-data (comb5 $1 $3 $4 $5 $6) type-data? new-or-data $2 $3 (second (unLoc $4)) (second (unLoc $5)) (rev-loc $6)
+                   (first (unLoc $5)))))
+
+(defrule "ty_decl" "'data' 'family' type opt_datafam_kind_sig" [ps $1 $2 $3 $4]
+  (pd/mk-fam-decl (comb4 $1 $2 $3 $4) 'DataFamily 'TopLevel $3 (second (unLoc $4)) 'Nothing))
+
+(defrule "standalone_kind_sig" "'type' sks_vars '::' sigktype" [ps $1 $2 $3 $4]
+  (pd/mk-standalone-kind-sig (comb2 $1 $4) (L (gl $2) (unLoc $2)) $4))
+
+;; reversed
+(defrule "sks_vars" "sks_vars ',' oqtycon" [ps $1 $2 $3] (sLL $1 $3 (vcons $3 (unLoc $1))))
+(defrule "sks_vars" "oqtycon" [ps $1] (sL1 $1 [$1]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Instances
+
+;; where_inst (L _ [ann decls])
+(defrule "inst_decl" "'instance' maybe_warning_pragma overlap_pragma inst_type where_inst" [ps $1 $2 $3 $4 $5]
+  (let [[binds sigs _ ats adts] (pd/cv-binds-and-sigs (second (unLoc $5)))]
+    (L (comb3 $1 $4 $5)
+       (con ClsInstD nx (con ClsInstDecl (tuple $2 nil nil) $4 binds (pd/mk-class-op-sigs sigs) ats adts $3)))))
+
+(defrule "inst_decl" "'type' 'instance' ty_fam_inst_eqn" [ps $1 $2 $3]
+  (pd/mk-ty-fam-inst (comb2 $1 $3) (unLoc $3)))
+
+;; data_or_newtype (L _ [ann new-or-data]), datafam_inst_hdr (L _ [Maybe-context bndrs head])
+(defrule "inst_decl" "data_or_newtype 'instance' capi_ctype datafam_inst_hdr constrs maybe_derivings"
+  [ps $1 $2 $3 $4 $5 $6]
+  (pd/mk-data-fam-inst (comb4 $1 $4 $5 $6) (second (unLoc $1)) $3 (unLoc $4) 'Nothing (rev (second (unLoc $5))) (rev-loc $6) nil))
+
+(defrule "inst_decl" "data_or_newtype 'instance' capi_ctype datafam_inst_hdr opt_kind_sig gadt_constrlist maybe_derivings"
+  [ps $1 $2 $3 $4 $5 $6 $7]
+  (pd/mk-data-fam-inst (comb4 $1 $4 $6 $7) (second (unLoc $1)) $3 (unLoc $4) (second (unLoc $5)) (second (unLoc $6)) (rev-loc $7)
+                       (first (unLoc $6))))
+
+(defrule "overlap_pragma" "'{-# OVERLAPPABLE' '#-}'" [ps $1 $2] (just (sLL $1 $2 (con Overlappable (tv $1)))))
+(defrule "overlap_pragma" "'{-# OVERLAPPING' '#-}'" [ps $1 $2] (just (sLL $1 $2 (con Overlapping (tv $1)))))
+(defrule "overlap_pragma" "'{-# OVERLAPS' '#-}'" [ps $1 $2] (just (sLL $1 $2 (con Overlaps (tv $1)))))
+(defrule "overlap_pragma" "'{-# INCOHERENT' '#-}'" [ps $1 $2] (just (sLL $1 $2 (con Incoherent (tv $1)))))
+(defrule "overlap_pragma" "" [ps] 'Nothing)
+
+(defrule "deriv_strategy_no_via" "'stock'" [ps $1] (sL1 $1 (con StockStrategy nil)))
+(defrule "deriv_strategy_no_via" "'anyclass'" [ps $1] (sL1 $1 (con AnyclassStrategy nil)))
+(defrule "deriv_strategy_no_via" "'newtype'" [ps $1] (sL1 $1 (con NewtypeStrategy nil)))
+
+(defrule "deriv_strategy_via" "'via' sigktype" [ps $1 $2] (sLL $1 $2 (con ViaStrategy (con XViaStrategyPs nil $2))))
+
+(defrule "deriv_standalone_strategy" "'stock'" [ps $1] (just (sL1 $1 (con StockStrategy nil))))
+(defrule "deriv_standalone_strategy" "'anyclass'" [ps $1] (just (sL1 $1 (con AnyclassStrategy nil))))
+(defrule "deriv_standalone_strategy" "'newtype'" [ps $1] (just (sL1 $1 (con NewtypeStrategy nil))))
+(defrule "deriv_standalone_strategy" "deriv_strategy_via" [ps $1] (just $1))
+(defrule "deriv_standalone_strategy" "" [ps] 'Nothing)
+
+(defrule "opt_class" "" [ps] 'Nothing)
+(defrule "opt_class" "qtycon" [ps $1] (just $1))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Injective type families, closed type families
+
+(defrule "opt_injective_info" "" [ps] (L nil [nil 'Nothing]))
+(defrule "opt_injective_info" "'|' injectivity_cond" [ps $1 $2] (sLL $1 $2 [nil (just $2)]))
+
+(defrule "injectivity_cond" "tyvarid '->' inj_varids" [ps $1 $2 $3]
+  (sLL $1 $3 (con InjectivityAnn nil $1 (rev (unLoc $3)))))
+
+;; reversed
+(defrule "inj_varids" "inj_varids tyvarid" [ps $1 $2] (sLL $1 $2 (vcons $2 (unLoc $1))))
+(defrule "inj_varids" "tyvarid" [ps $1] (sL1 $1 [$1]))
+
+;; ty_fam_inst_eqn_list (L _ [ann Maybe-eqns-reversed])
+(defrule "where_type_family" "" [ps] (L nil [nil 'OpenTypeFamily]))
+(defrule "where_type_family" "'where' ty_fam_inst_eqn_list" [ps $1 $2]
+  (let [m (second (unLoc $2))]
+    (sLL $1 $2 [nil (con ClosedTypeFamily (if (a/just? m) (just (rev (second m))) m))])))
+
+(defrule "ty_fam_inst_eqn_list" "'{' ty_fam_inst_eqns '}'" [ps $1 $2 $3] (sLL $1 $3 [nil (just (unLoc $2))]))
+(defrule "ty_fam_inst_eqn_list" "vocurly ty_fam_inst_eqns close" [ps $1 $2 $3] (L (getLoc $2) [nil (just (unLoc $2))]))
+(defrule "ty_fam_inst_eqn_list" "'{' '..' '}'" [ps $1 $2 $3] (sLL $1 $3 [nil 'Nothing]))
+(defrule "ty_fam_inst_eqn_list" "vocurly '..' close" [ps $1 $2 $3] (L (gl $2) [nil 'Nothing]))
+
+;; reversed
+(defrule "ty_fam_inst_eqns" "ty_fam_inst_eqns ';' ty_fam_inst_eqn" [ps $1 $2 $3] (sLL $1 $3 (vcons $3 (unLoc $1))))
+(defrule "ty_fam_inst_eqns" "ty_fam_inst_eqns ';'" [ps $1 $2] (sLZ $1 $2 (unLoc $1)))
+(defrule "ty_fam_inst_eqns" "ty_fam_inst_eqn" [ps $1] (sLL $1 $1 [$1]))
+(defrule "ty_fam_inst_eqns" "" [ps] (L nil []))
+
+(defrule "ty_fam_inst_eqn" "'forall' tv_bndrs '.' type '=' ktype" [ps $1 $2 $3 $4 $5 $6]
+  (let [tvbs (pd/from-spec-ty-var-bndrs $2)]
+    (pd/mk-ty-fam-inst-eqn (comb2 $1 $6) (pd/mk-hs-outer-explicit (comb2 $1 $3) tvbs) $4 $6)))
+(defrule "ty_fam_inst_eqn" "type '=' ktype" [ps $1 $2 $3]
+  (pd/mk-ty-fam-inst-eqn (comb2 $1 $3) (pd/mk-hs-outer-implicit) $1 $3))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Associated types and instances
+
+;; opt_datafam_kind_sig (L _ [ann sig]), opt_at_kind_inj_sig (L _ [ann [sig Maybe-inj]])
+(defrule "at_decl_cls" "'data' opt_family type opt_datafam_kind_sig" [ps $1 $2 $3 $4]
+  (pd/mk-ty-cl-d (pd/mk-fam-decl (comb3 $1 $3 $4) 'DataFamily 'NotTopLevel $3 (second (unLoc $4)) 'Nothing)))
+(defrule "at_decl_cls" "'type' type opt_at_kind_inj_sig" [ps $1 $2 $3]
+  (let [[sig inj] (second (unLoc $3))]
+    (pd/mk-ty-cl-d (pd/mk-fam-decl (comb3 $1 $2 $3) 'OpenTypeFamily 'NotTopLevel $2 sig inj))))
+(defrule "at_decl_cls" "'type' 'family' type opt_at_kind_inj_sig" [ps $1 $2 $3 $4]
+  (let [[sig inj] (second (unLoc $4))]
+    (pd/mk-ty-cl-d (pd/mk-fam-decl (comb3 $1 $3 $4) 'OpenTypeFamily 'NotTopLevel $3 sig inj))))
+(defrule "at_decl_cls" "'type' ty_fam_inst_eqn" [ps $1 $2]
+  (pd/mk-inst-d (pd/mk-ty-fam-inst (comb2 $1 $2) (unLoc $2))))
+(defrule "at_decl_cls" "'type' 'instance' ty_fam_inst_eqn" [ps $1 $2 $3]
+  (pd/mk-inst-d (pd/mk-ty-fam-inst (comb2 $1 $3) (unLoc $3))))
+
+;; EpToken "family" / "instance": the token or nil
+(defrule "opt_family" "" [ps] nil)
+(defrule "opt_family" "'family'" [ps $1] $1)
+(defrule "opt_instance" "" [ps] nil)
+(defrule "opt_instance" "'instance'" [ps $1] $1)
+
+(defrule "at_decl_inst" "'type' opt_instance ty_fam_inst_eqn" [ps $1 $2 $3]
+  (pd/mk-ty-fam-inst (comb2 $1 $3) (unLoc $3)))
+(defrule "at_decl_inst" "data_or_newtype opt_instance capi_ctype datafam_inst_hdr constrs maybe_derivings"
+  [ps $1 $2 $3 $4 $5 $6]
+  (pd/mk-data-fam-inst (comb4 $1 $4 $5 $6) (second (unLoc $1)) $3 (unLoc $4) 'Nothing (rev (second (unLoc $5))) (rev-loc $6) nil))
+(defrule "at_decl_inst" "data_or_newtype opt_instance capi_ctype datafam_inst_hdr opt_kind_sig gadt_constrlist maybe_derivings"
+  [ps $1 $2 $3 $4 $5 $6 $7]
+  (pd/mk-data-fam-inst (comb4 $1 $4 $6 $7) (second (unLoc $1)) $3 (unLoc $4) (second (unLoc $5)) (second (unLoc $6)) (rev-loc $7)
+                       (first (unLoc $6))))
+
+(defrule "type_data_or_newtype" "'data'" [ps $1] (sL1 $1 [nil false 'DataType]))
+(defrule "type_data_or_newtype" "'newtype'" [ps $1] (sL1 $1 [nil false 'NewType]))
+(defrule "type_data_or_newtype" "'type' 'data'" [ps $1 $2] (sL1 $1 [nil true 'DataType]))
+
+(defrule "data_or_newtype" "'data'" [ps $1] (sL1 $1 [nil 'DataType]))
+(defrule "data_or_newtype" "'newtype'" [ps $1] (sL1 $1 [nil 'NewType]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Families' result signatures, declaration heads
+
+(defrule "opt_kind_sig" "" [ps] (L nil [nil 'Nothing]))
+(defrule "opt_kind_sig" "'::' kind" [ps $1 $2] (sLL $1 $2 [nil (just $2)]))
+
+(defrule "opt_datafam_kind_sig" "" [ps] (L nil [nil (L nil (con NoSig nx))]))
+(defrule "opt_datafam_kind_sig" "'::' kind" [ps $1 $2] (sLL $1 $2 [nil (sLL $1 $2 (con KindSig nx $2))]))
+
+(defrule "opt_tyfam_kind_sig" "" [ps] (L nil [nil (L nil (con NoSig nx))]))
+(defrule "opt_tyfam_kind_sig" "'::' kind" [ps $1 $2] (sLL $1 $2 [nil (sLL $1 $2 (con KindSig nx $2))]))
+(defrule "opt_tyfam_kind_sig" "'=' tv_bndr" [ps $1 $2]
+  (let [tvb (pd/from-spec-ty-var-bndr $2)]
+    (sLL $1 $2 [nil (sLL $1 $2 (con TyVarSig nx tvb))])))
+
+(defrule "opt_at_kind_inj_sig" "" [ps] (L nil [nil [(L nil (con NoSig nx)) 'Nothing]]))
+(defrule "opt_at_kind_inj_sig" "'::' kind" [ps $1 $2] (sLL $1 $2 [nil [(sL1 $2 (con KindSig nx $2)) 'Nothing]]))
+(defrule "opt_at_kind_inj_sig" "'=' tv_bndr_no_braces '|' injectivity_cond" [ps $1 $2 $3 $4]
+  (let [tvb (pd/from-spec-ty-var-bndr $2)]
+    (sLL $1 $4 [nil [(sLL $1 $2 (con TyVarSig nx tvb)) (just $4)]])))
+
+;; (L span [Maybe-context head])
+(defrule "tycl_hdr" "context '=>' type" [ps $1 $2 $3] (L (comb2 $1 $3) [(just $1) $3]))
+(defrule "tycl_hdr" "type" [ps $1] (sL1 $1 ['Nothing $1]))
+
+;; (L span [Maybe-context outer-bndrs head])
+(defrule "datafam_inst_hdr" "'forall' tv_bndrs '.' context '=>' type" [ps $1 $2 $3 $4 $5 $6]
+  (let [tvbs (pd/from-spec-ty-var-bndrs $2)]
+    (L (comb2 $1 $6) [(just $4) (pd/mk-hs-outer-explicit (comb2 $1 $3) tvbs) $6])))
+(defrule "datafam_inst_hdr" "'forall' tv_bndrs '.' type" [ps $1 $2 $3 $4]
+  (let [tvbs (pd/from-spec-ty-var-bndrs $2)]
+    (L (comb2 $1 $4) ['Nothing (pd/mk-hs-outer-explicit (comb2 $1 $3) tvbs) $4])))
+(defrule "datafam_inst_hdr" "context '=>' type" [ps $1 $2 $3] (L (comb2 $1 $3) [(just $1) (pd/mk-hs-outer-implicit) $3]))
+(defrule "datafam_inst_hdr" "type" [ps $1] (sL1 $1 ['Nothing (pd/mk-hs-outer-implicit) $1]))
+
+(defrule "capi_ctype" "'{-# CTYPE' STRING STRING '#-}'" [ps $1 $2 $3 $4]
+  (just (sLL $1 $4 (con CType (tv $1) (just (con Header (string-src $2) (string-val $2))) (tuple (string-src $3) (string-val $3))))))
+(defrule "capi_ctype" "'{-# CTYPE' STRING '#-}'" [ps $1 $2 $3]
+  (just (sLL $1 $3 (con CType (tv $1) 'Nothing (tuple (string-src $2) (string-val $2))))))
+(defrule "capi_ctype" "" [ps] 'Nothing)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Standalone deriving, role annotations
+
+(defrule "stand_alone_deriving" "'deriving' deriv_standalone_strategy 'instance' maybe_warning_pragma overlap_pragma inst_type"
+  [ps $1 $2 $3 $4 $5 $6]
+  (sLL $1 $6 (con DerivDecl (tuple $4 (tuple nil nil)) (pd/mk-hs-wild-card-bndrs $6) $2 $5)))
+
+;; maybe_roles reversed
+(defrule "role_annot" "'type' 'role' oqtycon maybe_roles" [ps $1 $2 $3 $4]
+  (pd/mk-role-annot-decl (comb3 $1 $4 $3) $3 (rev (unLoc $4))))
+
+(defrule "maybe_roles" "" [ps] (L nil []))
+(defrule "maybe_roles" "roles" [ps $1] $1)
+
+(defrule "roles" "role" [ps $1] (sLL $1 $1 [$1]))
+(defrule "roles" "roles role" [ps $1 $2] (sLL $1 $2 (vcons $2 (unLoc $1))))
+
+;; Located (Maybe FastString)
+(defrule "role" "VARID" [ps $1] (sL1 $1 (just (tv $1))))
+(defrule "role" "'_'" [ps $1] (sL1 $1 'Nothing))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Pattern synonyms
+
+;; pattern_synonym_lhs [name details ann]
+(defrule "pattern_synonym_decl" "'pattern' pattern_synonym_lhs '=' pat_syn_pat" [ps $1 $2 $3 $4]
+  (let [[name args] $2]
+    (sLL $1 $4 (con ValD nx (pd/mk-pat-syn-bind name args $4 'ImplicitBidirectional)))))
+(defrule "pattern_synonym_decl" "'pattern' pattern_synonym_lhs '<-' pat_syn_pat" [ps $1 $2 $3 $4]
+  (let [[name args] $2]
+    (sLL $1 $4 (con ValD nx (pd/mk-pat-syn-bind name args $4 'Unidirectional)))))
+(defrule "pattern_synonym_decl" "'pattern' pattern_synonym_lhs '<-' pat_syn_pat where_decls" [ps $1 $2 $3 $4 $5]
+  (let [[name args] $2
+        mg (pd/mk-pat-syn-match-group name $5)]
+    (sLL $1 $5 (con ValD nx (pd/mk-pat-syn-bind name args $4 (con ExplicitBidirectional mg))))))
+
+(defrule "pattern_synonym_lhs" "con vars0" [ps $1 $2] [$1 (con PrefixCon (vec $2)) nil])
+(defrule "pattern_synonym_lhs" "varid conop varid" [ps $1 $2 $3] [$2 (con InfixCon $1 $3) nil])
+(defrule "pattern_synonym_lhs" "con '{' cvars1 '}'" [ps $1 $2 $3 $4] [$1 (con RecCon (vec $3)) nil])
+
+(defrule "vars0" "" [ps] [])
+(defrule "vars0" "varid vars0" [ps $1 $2] (vcons $1 $2))
+
+(defrule "cvars1" "var" [ps $1] [(con RecordPatSynField (con FieldOcc nx $1) $1)])
+(defrule "cvars1" "var ',' cvars1" [ps $1 $2 $3] (vcons (con RecordPatSynField (con FieldOcc nx $1) $1) $3))
+
+;; LocatedLW (OrdList (LHsDecl)); decls (L span [anchor semis decls])
+(defrule "where_decls" "'where' '{' decls '}'" [ps $1 $2 $3 $4] (sLL $1 $4 (nth (unLoc $3) 2)))
+(defrule "where_decls" "'where' vocurly decls close" [ps $1 $2 $3 $4] (sLL $1 $3 (nth (unLoc $3) 2)))
+
+(defrule "pattern_synonym_sig" "'pattern' con_list '::' sigtype" [ps $1 $2 $3 $4]
+  (sLL $1 $4 (con PatSynSig nil (vec (unLoc $2)) $4)))
+
+(defrule "qvarcon" "qvar" [ps $1] $1)
+(defrule "qvarcon" "qcon" [ps $1] $1)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Class and instance bodies
+
+(defrule "decl_cls" "at_decl_cls" [ps $1] $1)
+(defrule "decl_cls" "decl" [ps $1] $1)
+;; a default method's signature
+(defrule "decl_cls" "'default' infixexp '::' sigtype" [ps $1 $2 $3 $4]
+  (let [v (pp/check-val-sig-lhs (pp/run-expr $2))]
+    (sLL $1 $4 (con SigD nx (con ClassOpSig nil true [v] $4)))))
+
+;; (L span [semis decls]), in order
+(defrule "decls_cls" "decls_cls ';' decl_cls" [ps $1 $2 $3] (sLL $1 $3 [nil (conj (second (unLoc $1)) $3)]))
+(defrule "decls_cls" "decls_cls ';'" [ps $1 $2] (sLZ $1 $2 [nil (second (unLoc $1))]))
+(defrule "decls_cls" "decl_cls" [ps $1] (sL1 $1 [nil [$1]]))
+(defrule "decls_cls" "" [ps] (L nil [nil []]))
+
+;; (L span [ann decls layout]), the layout (EpExplicitBraces open close) or (EpVirtualBraces
+;; column), getVOCURLY the vocurly's start column
+(defrule "decllist_cls" "'{' decls_cls '}'" [ps $1 $2 $3]
+  (sLL $1 $3 [nil (second (unLoc $2)) (list 'EpExplicitBraces $1 $3)]))
+(defrule "decllist_cls" "vocurly decls_cls close" [ps $1 $2 $3]
+  (L (getLoc $2) [nil (second (unLoc $2)) (list 'EpVirtualBraces (nth (gl $1) 2))]))
+
+;; (L span [where-token decls layout])
+(defrule "where_cls" "'where' decllist_cls" [ps $1 $2] (sLL $1 $2 [$1 (second (unLoc $2)) (nth (unLoc $2) 2)]))
+(defrule "where_cls" "" [ps] (L nil [nil [] 'EpNoLayout]))
+
+;; Located (OrdList (LHsDecl))
+(defrule "decl_inst" "at_decl_inst" [ps $1] (sL1 $1 [(sL1 $1 (con InstD nx (unLoc $1)))]))
+(defrule "decl_inst" "decl" [ps $1] (sL1 $1 [$1]))
+
+;; (L span [semis decls]), in order
+(defrule "decls_inst" "decls_inst ';' decl_inst" [ps $1 $2 $3] (sLL $1 $3 [nil (into (second (unLoc $1)) (unLoc $3))]))
+(defrule "decls_inst" "decls_inst ';'" [ps $1 $2] (sLZ $1 $2 [nil (second (unLoc $1))]))
+(defrule "decls_inst" "decl_inst" [ps $1] (sL1 $1 [nil (unLoc $1)]))
+(defrule "decls_inst" "" [ps] (L nil [nil []]))
+
+;; (L span [ann decls])
+(defrule "decllist_inst" "'{' decls_inst '}'" [ps $1 $2 $3] (sLL $1 $3 [nil (second (unLoc $2))]))
+(defrule "decllist_inst" "vocurly decls_inst close" [ps $1 $2 $3] (L (gl $2) [nil (second (unLoc $2))]))
+
+(defrule "where_inst" "'where' decllist_inst" [ps $1 $2] (sLL $1 $2 [nil (second (unLoc $2))]))
+(defrule "where_inst" "" [ps] (L nil [nil []]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Binding groups
+
+;; (L span [anchor semis decls]), in order
+(defrule "decls" "decls ';' decl" [ps $1 $2 $3]
+  (let [ds (nth (unLoc $1) 2)]
+    (if (empty? ds)
+      (sLL $2 $3 [nil nil [$3]])
+      (sLL $1 $3 [nil nil (conj ds $3)]))))
+(defrule "decls" "decls ';'" [ps $1 $2] (sLZ $1 $2 [nil nil (nth (unLoc $1) 2)]))
+(defrule "decls" "decl" [ps $1] (sL1 $1 [nil nil [$1]]))
+(defrule "decls" "" [ps] (L nil [nil nil []]))
+
+;; (L span [ann (L span decls)])
+(defrule "decllist" "'{' decls '}'" [ps $1 $2 $3] (sLL $1 $3 [nil (sL1 $2 (nth (unLoc $2) 2))]))
+(defrule "decllist" "vocurly decls close" [ps $1 $2 $3] (sL1 $2 [nil (sL1 $2 (nth (unLoc $2) 2))]))
+
+;; Located (HsLocalBinds); dbinds (L span [ipbind...]) reversed
+(defrule "binds" "decllist" [ps $1]
+  (sL1 $1 (con HsValBinds nil (pd/cv-bind-group (unLoc (second (unLoc $1)))))))
+(defrule "binds" "'{' dbinds '}'" [ps $1 $2 $3]
+  (L (comb3 $1 $2 $3) (con HsIPBinds nil (con IPBinds nx (rev (unLoc $2))))))
+(defrule "binds" "vocurly dbinds close" [ps $1 $2 $3]
+  (L (gl $2) (con HsIPBinds nil (con IPBinds nx (rev (unLoc $2))))))
+
+;; Maybe (Located (HsLocalBinds, Maybe EpAnnComments)): (Just (L span [binds nil]))
+(defrule "wherebinds" "'where' binds" [ps $1 $2] (just (L (comb2 $1 $2) [(unLoc $2) nil])))
+(defrule "wherebinds" "" [ps] 'Nothing)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Rules
+
+;; reversed
+(defrule "rules" "rules ';' rule" [ps $1 $2 $3] (vcons $3 $1))
+(defrule "rules" "rules ';'" [ps $1 $2] $1)
+(defrule "rules" "rule" [ps $1] [$1])
+(defrule "rules" "" [ps] [])
+
+;; rule_activation [ActivationAnn Maybe-activation]
+(defrule "rule" "STRING rule_activation rule_foralls infixexp '=' exp" [ps $1 $2 $3 $4 $5 $6]
+  (let [lhs (pp/run-expr $4)
+        rhs (pp/run-expr $6)
+        [ann act] $2]
+    (sLL $1 rhs (con HsRule (tuple (tuple ann nil) (string-src $1)) (L (gl $1) (string-val $1))
+                     (if (a/just? act) (second act) 'AlwaysActive) (pd/rule-bndrs-or-def $3) lhs rhs))))
+
+(defrule "rule_activation" "" [ps] [no-activation-ann 'Nothing])
+(defrule "rule_activation" "rule_explicit_activation" [ps $1] [(first $1) (just (second $1))])
+
+;; Maybe (EpToken "~")
+(defrule "rule_activation_marker" "PREFIX_TILDE" [ps $1] (just nil))
+(defrule "rule_activation_marker" "VARSYM" [ps $1] (if (= "~" (tv $1)) (just nil) 'Nothing))
+
+;; [ActivationAnn activation]
+(defrule "rule_explicit_activation" "'[' INTEGER ']'" [ps $1 $2 $3]
+  [(con ActivationAnn nil nil 'Nothing (just nil)) (con ActiveAfter (integer-src $2) (integer-val $2))])
+(defrule "rule_explicit_activation" "'[' rule_activation_marker INTEGER ']'" [ps $1 $2 $3 $4]
+  [(con ActivationAnn nil nil $2 (just nil)) (con ActiveBefore (integer-src $3) (integer-val $3))])
+(defrule "rule_explicit_activation" "'[' rule_activation_marker ']'" [ps $1 $2 $3]
+  [(con ActivationAnn nil nil $2 'Nothing) 'NeverActive])
+
+;; Maybe (RuleBndrs)
+(defrule "rule_foralls" "'forall' rule_vars '.' 'forall' rule_vars '.'" [ps $1 $2 $3 $4 $5 $6]
+  (do (pd/check-rule-ty-var-bndr-names $2)
+      (just (pd/mk-rule-bndrs (con HsRuleBndrsAnn (just (tuple nil nil)) (just (tuple nil nil))) (just $2) $5))))
+(defrule "rule_foralls" "'forall' rule_vars '.'" [ps $1 $2 $3]
+  (just (pd/mk-rule-bndrs (con HsRuleBndrsAnn 'Nothing (just (tuple nil nil))) 'Nothing $2)))
+(defrule "rule_foralls" "" [ps] 'Nothing)
+
+(defrule "rule_vars" "rule_var rule_vars" [ps $1 $2] (vcons $1 $2))
+(defrule "rule_vars" "" [ps] [])
+
+;; (L span (RuleTyTmVar ann name Maybe-type))
+(defrule "rule_var" "varid" [ps $1] (sL1 $1 (con RuleTyTmVar nil $1 'Nothing)))
+(defrule "rule_var" "'(' varid '::' ctype ')'" [ps $1 $2 $3 $4 $5] (sLL $1 $5 (con RuleTyTmVar nil $2 (just $4))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Warnings and deprecations
+
+;; strings (L span [ann [(L span StringLiteral)...]])
+(defrule "maybe_warning_pragma" "'{-# DEPRECATED' strings '#-}'" [ps $1 $2 $3]
+  (just (sLL $1 $3 (con DeprecatedTxt (tv $1) (doc-wsts ps (second (unLoc $2)))))))
+(defrule "maybe_warning_pragma" "'{-# WARNING' warning_category strings '#-}'" [ps $1 $2 $3 $4]
+  (just (sLL $1 $4 (con WarningTxt $2 (tv $1) (doc-wsts ps (second (unLoc $3)))))))
+(defrule "maybe_warning_pragma" "" [ps] 'Nothing)
+
+(defrule "warning_category" "'in' STRING" [ps $1 $2]
+  (just (sLL $1 $2 (con InWarningCategory nil (string-src $2) (sL1 $2 (con WarningCategory (string-val $2)))))))
+(defrule "warning_category" "" [ps] 'Nothing)
+
+;; OrdList, in order
+(defrule "warnings" "warnings ';' warning" [ps $1 $2 $3] (into $1 $3))
+(defrule "warnings" "warnings ';'" [ps $1 $2] $1)
+(defrule "warnings" "warning" [ps $1] $1)
+(defrule "warnings" "" [ps] [])
+
+(defrule "warning" "warning_category namespace_spec namelist strings" [ps $1 $2 $3 $4]
+  [(L (comb4 $1 $2 $3 $4)
+      (con Warning (tuple (unLoc $2) (tuple nil nil)) (vec (unLoc $3))
+           (con WarningTxt $1 nil (doc-wsts ps (second (unLoc $4))))))])
+
+(defrule "namespace_spec" "'type'" [ps $1] (sL1 $1 (con TypeNamespaceSpecifier nil)))
+(defrule "namespace_spec" "'data'" [ps $1] (sL1 $1 (con DataNamespaceSpecifier nil)))
+(defrule "namespace_spec" "" [ps] (L nil 'NoNamespaceSpecifier))
+
+(defrule "deprecations" "deprecations ';' deprecation" [ps $1 $2 $3] (into $1 $3))
+(defrule "deprecations" "deprecations ';'" [ps $1 $2] $1)
+(defrule "deprecations" "deprecation" [ps $1] $1)
+(defrule "deprecations" "" [ps] [])
+
+(defrule "deprecation" "namespace_spec namelist strings" [ps $1 $2 $3]
+  [(L (comb3 $1 $2 $3)
+      (con Warning (tuple (unLoc $1) (tuple nil nil)) (vec (unLoc $2))
+           (con DeprecatedTxt nil (doc-wsts ps (second (unLoc $3))))))])
+
+(defrule "strings" "STRING" [ps $1] (sL1 $1 [nil [(L (gl $1) (string-literal $1))]]))
+(defrule "strings" "'[' stringlist ']'" [ps $1 $2 $3] (sLL $1 $3 [nil (unLoc $2)]))
+
+(defn- add-trailing-comma-s
+  "addTrailingCommaS: the last string's span widened over the comma, its sl_tc (Just nil)"
+  [xs comma]
+  (let [ls (peek xs) [_ src fs] (unLoc ls)]
+    (conj (pop xs) (L (a/combine (getLoc ls) (gl comma)) (con StringLiteral src fs (just nil))))))
+
+;; Located (OrdList (Located StringLiteral))
+(defrule "stringlist" "stringlist ',' STRING" [ps $1 $2 $3]
+  (let [xs (unLoc $1)]
+    (sLL $1 $3 (conj (if (empty? xs) xs (add-trailing-comma-s xs $2)) (L (gl $3) (string-literal $3))))))
+(defrule "stringlist" "STRING" [ps $1] (sLL $1 $1 [(L (gl $1) (string-literal $1))]))
+(defrule "stringlist" "" [ps] (L nil []))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Annotations
+
+(defrule "annotation" "'{-# ANN' name_var aexp '#-}'" [ps $1 $2 $3 $4]
+  (let [e (pp/run-expr $3)]
+    (sLL $1 $4 (con AnnD nx (con HsAnnotation (tuple nil (tv $1)) (con ValueAnnProvenance $2) e)))))
+(defrule "annotation" "'{-# ANN' 'type' otycon aexp '#-}'" [ps $1 $2 $3 $4 $5]
+  (let [e (pp/run-expr $4)]
+    (sLL $1 $5 (con AnnD nx (con HsAnnotation (tuple nil (tv $1)) (con TypeAnnProvenance $3) e)))))
+(defrule "annotation" "'{-# ANN' 'module' aexp '#-}'" [ps $1 $2 $3 $4]
+  (let [e (pp/run-expr $3)]
+    (sLL $1 $4 (con AnnD nx (con HsAnnotation (tuple nil (tv $1)) 'ModuleAnnProvenance e)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Foreign declarations
+
+;; Located (EpToken "foreign" -> HsDecl); fspec (L span [ann [(L span StringLiteral) name sigtype]])
+(defrule "fdecl" "'import' callconv safety fspec" [ps $1 $2 $3 $4] (sLL $1 $4 (pd/mk-import $2 $3 (second (unLoc $4)))))
+(defrule "fdecl" "'import' callconv fspec" [ps $1 $2 $3] (sLL $1 $3 (pd/mk-import $2 (L nil 'PlaySafe) (second (unLoc $3)))))
+(defrule "fdecl" "'export' callconv fspec" [ps $1 $2 $3] (sLL $1 $3 (pd/mk-export $2 (second (unLoc $3)))))
+
+(defrule "callconv" "'stdcall'" [ps $1] (sLL $1 $1 'StdCallConv))
+(defrule "callconv" "'ccall'" [ps $1] (sLL $1 $1 'CCallConv))
+(defrule "callconv" "'capi'" [ps $1] (sLL $1 $1 'CApiConv))
+(defrule "callconv" "'prim'" [ps $1] (sLL $1 $1 'PrimCallConv))
+(defrule "callconv" "'javascript'" [ps $1] (sLL $1 $1 'JavaScriptCallConv))
+
+(defrule "safety" "'unsafe'" [ps $1] (sLL $1 $1 'PlayRisky))
+(defrule "safety" "'safe'" [ps $1] (sLL $1 $1 'PlaySafe))
+(defrule "safety" "'interruptible'" [ps $1] (sLL $1 $1 'PlayInterruptible))
+
+(defrule "fspec" "STRING var '::' sigtype" [ps $1 $2 $3 $4]
+  (sLL $1 $4 [nil [(L (gl $1) (string-literal $1)) $2 $4]]))
+(defrule "fspec" "STRING_MULTI var '::' sigtype" [ps $1 $2 $3 $4]
+  (sLL $1 $4 [nil [(L (gl $1) (string-literal $1)) $2 $4]]))
+(defrule "fspec" "var '::' sigtype" [ps $1 $2 $3]
+  (sLL $1 $3 [nil [(L nil (con StringLiteral nil "" 'Nothing)) $1 $3]]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Type signatures
+
+;; Maybe (EpUniToken, LHsType): (Just [nil ctype])
+(defrule "opt_sig" "" [ps] 'Nothing)
+(defrule "opt_sig" "'::' ctype" [ps $1 $2] (just [nil $2]))
+
+;; [Maybe-token Maybe-name]
+(defrule "opt_tyconsig" "" [ps] ['Nothing 'Nothing])
+(defrule "opt_tyconsig" "'::' gtycon" [ps $1 $2] [(just nil) (just $2)])
+
+(defrule "sigktype" "sigtype" [ps $1] $1)
+(defrule "sigktype" "ctype '::' kind" [ps $1 $2 $3]
+  (sLL $1 $3 (pd/mk-hs-implicit-sig-type (sLL $1 $3 (con HsKindSig nil $1 $3)))))
+
+(defrule "sigtype" "ctype" [ps $1] (pd/hs-type-to-hs-sig-type $1))
+
+;; reversed
+(defrule "sig_vars" "sig_vars ',' var" [ps $1 $2 $3] (sLL $1 $3 (vcons $3 (unLoc $1))))
+(defrule "sig_vars" "var" [ps $1] (sL1 $1 [$1]))
+
+;; Located (OrdList (LHsSigType)), in order
+(defrule "sigtypes1" "sigtype" [ps $1] (sL1 $1 [$1]))
+(defrule "sigtypes1" "sigtype ',' sigtypes1" [ps $1 $2 $3] (sLL $1 $3 (vcons $1 (unLoc $3))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Types
+
+;; Located UnpackednessPragma: (L span [source-text SrcUnpack|SrcNoUnpack])
+(defrule "unpackedness" "'{-# UNPACK' '#-}'" [ps $1 $2] (sLL $1 $2 [(tv $1) 'SrcUnpack]))
+(defrule "unpackedness" "'{-# NOUNPACK' '#-}'" [ps $1 $2] (sLL $1 $2 [(tv $1) 'SrcNoUnpack]))
+
+(defrule "forall_telescope" "'forall' tv_bndrs '.'" [ps $1 $2 $3]
+  (let [l (comb2 $1 $3)] (L l (pd/mk-hs-forall-invis-tele l $2))))
+(defrule "forall_telescope" "'forall' tv_bndrs '->'" [ps $1 $2 $3]
+  (let [l (comb2 $1 $3)] (L l (pd/mk-hs-forall-vis-tele l (pd/from-spec-ty-var-bndrs $2)))))
+
+(defrule "ktype" "ctype" [ps $1] $1)
+(defrule "ktype" "ctype '::' kind" [ps $1 $2 $3] (sLL $1 $3 (con HsKindSig nil $1 $3)))
+
+(defrule "ctype" "forall_telescope ctype" [ps $1 $2] (sLL $1 $2 (con HsForAllTy nx (unLoc $1) $2)))
+(defrule "ctype" "context '=>' ctype" [ps $1 $2 $3] (L (comb2 $1 $3) (con HsQualTy nx $1 $3)))
+(defrule "ctype" "ipvar '::' ctype" [ps $1 $2 $3] (sLL $1 $3 (con HsIParamTy nil $1 $3)))
+(defrule "ctype" "type" [ps $1] $1)
+
+(defrule "context" "btype" [ps $1] (pd/check-context ps $1))
+
+;; forall b. DisambECP b => PV (LocatedC [LocatedA b]): a fn of the mode
+(defrule "expcontext" "infixexp" [ps $1] (fn [mode] (pp/check-context-pv ps mode ($1 mode))))
+
+(defrule "type" "btype" [ps $1] $1)
+(defrule "type" "btype '->' ctype" [ps $1 $2 $3] (sLL $1 $3 (con HsFunTy nx (con HsUnannotated nil) $1 $3)))
+(defrule "type" "btype mult '->' ctype" [ps $1 $2 $3 $4] (sLL $1 $4 (con HsFunTy nx ((unLoc $2) $3) $1 $4)))
+(defrule "type" "btype '->.' ctype" [ps $1 $2 $3] (sLL $1 $3 (con HsFunTy nx (con HsLinearAnn nil) $1 $3)))
+
+;; Located (arrow -> HsMultAnn)
+(defrule "mult" "PREFIX_PERCENT atype" [ps $1 $2] (sLL $1 $2 (fn [arr] (pd/mk-mult-ann $1 $2 arr))))
+
+;; forall b. DisambECP b => PV (Located (arrow -> HsMultAnnOf ...)): a fn of the mode
+(defrule "expmult" "PREFIX_PERCENT aexp" [ps $1 $2]
+  (fn [mode] (let [e ($2 mode)] (sLL $1 e (pp/mk-hs-mult-pv ps mode $1 e)))))
+
+(defrule "btype" "infixtype" [ps $1] ($1 :ty))
+
+;; forall b. DisambTD b => PV (LocatedA b): fns of the mode (:ty, :dcb)
+(defrule "infixtype" "ftype" [ps $1] $1)
+(defrule "infixtype" "ftype tyop infixtype" [ps $1 $2 $3]
+  (let [[op prom] $2] (fn [mode] (pd/mk-hs-op-ty-pv mode prom ($1 :ty) op ($3 :ty)))))
+(defrule "infixtype" "unpackedness infixtype" [ps $1 $2] (fn [mode] (pd/mk-unpackedness-pv mode $1 ($2 mode))))
+
+(defrule "ftype" "atype" [ps $1] (fn [mode] (pd/mk-hs-app-ty-head-pv mode $1)))
+(defrule "ftype" "tyop" [ps $1] (fn [mode] (fail-op-few-args (first $1))))
+(defrule "ftype" "ftype tyarg" [ps $1 $2] (fn [mode] (pd/mk-hs-app-ty-pv mode ($1 mode) $2)))
+(defrule "ftype" "ftype PREFIX_AT atype" [ps $1 $2 $3] (fn [mode] (pd/mk-hs-app-kind-ty-pv mode ($1 mode) $2 $3)))
+
+(defrule "tyarg" "atype" [ps $1] $1)
+(defrule "tyarg" "unpackedness atype" [ps $1 $2] (pd/add-unpackedness-p $1 $2))
+
+;; [name PromotionFlag]
+(defrule "tyop" "qtyconop" [ps $1] [$1 'NotPromoted])
+(defrule "tyop" "tyvarop" [ps $1] [$1 'NotPromoted])
+(defrule "tyop" "SIMPLEQUOTE qconop" [ps $1 $2] [(sLL $1 $2 (unLoc $2)) 'IsPromoted])
+(defrule "tyop" "SIMPLEQUOTE varop" [ps $1 $2] [(sLL $1 $2 (unLoc $2)) 'IsPromoted])
+
+(defrule "atype" "ntgtycon" [ps $1] (sL1 $1 (con HsTyVar nil 'NotPromoted $1)))
+(defrule "atype" "tyvar" [ps $1] (sL1 $1 (con HsTyVar nil 'NotPromoted $1)))
+(defrule "atype" "'_'" [ps $1] (sL1 $1 (pd/mk-anon-wild-card-ty)))
+(defrule "atype" "'*'" [ps $1] (sL1 $1 (con HsStarTy nx (= :unicode (tv $1)))))
+(defrule "atype" "PREFIX_TILDE atype" [ps $1 $2] (sLL $1 $2 (pd/mk-bang-ty 'SrcLazy $2)))
+(defrule "atype" "PREFIX_BANG atype" [ps $1 $2] (sLL $1 $2 (pd/mk-bang-ty 'SrcStrict $2)))
+(defrule "atype" "'{' fielddecls '}'" [ps $1 $2 $3]
+  (pd/check-record-syntax (sLL $1 $3 (con XHsType (con HsRecTy nil (vec $2))))))
+(defrule "atype" "'(' ')'" [ps $1 $2] (sLL $1 $2 (pd/mk-tuple-syntax-ty ps [])))
+(defrule "atype" "'(' ktype ',' comma_types1 ')'" [ps $1 $2 $3 $4 $5]
+  (sLL $1 $5 (pd/mk-tuple-syntax-ty ps (vcons $2 $4))))
+(defrule "atype" "'(#' '#)'" [ps $1 $2] (sLL $1 $2 (con HsTupleTy nil 'HsUnboxedTuple [])))
+(defrule "atype" "'(#' comma_types1 '#)'" [ps $1 $2 $3] (sLL $1 $3 (con HsTupleTy nil 'HsUnboxedTuple (vec $2))))
+(defrule "atype" "'(#' bar_types2 '#)'" [ps $1 $2 $3] (sLL $1 $3 (con HsSumTy nil (vec $2))))
+(defrule "atype" "'[' ktype ']'" [ps $1 $2 $3] (sLL $1 $3 (pd/mk-list-syntax-ty1 ps $2)))
+(defrule "atype" "'(' ktype ')'" [ps $1 $2 $3] (sLL $1 $3 (con HsParTy (tuple nil nil) $2)))
+(defrule "atype" "SIMPLEQUOTE '(' ')'" [ps $1 $2 $3] (sLL $1 $3 (con HsExplicitTupleTy (tuple nil nil nil) 'IsPromoted [])))
+(defrule "atype" "SIMPLEQUOTE gen_qcon" [ps $1 $2] (sLL $1 $2 (con HsTyVar nil 'IsPromoted $2)))
+(defrule "atype" "SIMPLEQUOTE sysdcon_nolist" [ps $1 $2] (sLL $1 $2 (con HsTyVar nil 'IsPromoted (L (getLoc $2) (unLoc $2)))))
+(defrule "atype" "SIMPLEQUOTE '(' ktype ',' comma_types1 ')'" [ps $1 $2 $3 $4 $5 $6]
+  (sLL $1 $6 (con HsExplicitTupleTy (tuple nil nil nil) 'IsPromoted (vcons $3 $5))))
+(defrule "atype" "'[' ']'" [ps $1 $2] (let [l (comb2 $1 $2)] (L l (pd/mk-list-syntax-ty0 ps l))))
+(defrule "atype" "SIMPLEQUOTE '[' comma_types0 ']'" [ps $1 $2 $3 $4]
+  (sLL $1 $4 (con HsExplicitListTy (tuple nil nil nil) 'IsPromoted (vec $3))))
+(defrule "atype" "SIMPLEQUOTE var" [ps $1 $2] (sLL $1 $2 (con HsTyVar nil 'IsPromoted $2)))
+(defrule "atype" "quasiquote" [ps $1] (L (getLoc $1) (con HsSpliceTy nx (unLoc $1))))
+(defrule "atype" "splice_untyped" [ps $1] (L (getLoc $1) (con HsSpliceTy nx (unLoc $1))))
+;; two or more types in brackets: a promoted list
+(defrule "atype" "'[' ktype ',' comma_types1 ']'" [ps $1 $2 $3 $4 $5]
+  (sLL $1 $5 (con HsExplicitListTy (tuple nil nil nil) 'NotPromoted (vcons $2 $4))))
+(defrule "atype" "INTEGER" [ps $1] (sLL $1 $1 (con HsTyLit nx (con HsNumTy (integer-src $1) (integer-val $1)))))
+(defrule "atype" "CHAR" [ps $1] (sLL $1 $1 (con HsTyLit nx (con HsCharTy (string-src $1) (a/hs-char (string-val $1))))))
+(defrule "atype" "STRING" [ps $1] (sLL $1 $1 (con HsTyLit nx (con HsStrTy (string-src $1) (string-val $1)))))
+(defrule "atype" "STRING_MULTI" [ps $1] (sLL $1 $1 (con HsTyLit nx (con HsStrTy (string-src $1) (string-val $1)))))
+;; a qualified type variable: rejected by the renamer, not the parser
+(defrule "atype" "QVARID" [ps $1]
+  (let [[m nm] (tv $1)] (sL1 $1 (con HsTyVar nil 'NotPromoted (sL1 $1 (a/qual 'tv m nm))))))
+
+(defrule "inst_type" "sigtype" [ps $1] $1)
+
+(defrule "deriv_types" "sigktype" [ps $1] [$1])
+(defrule "deriv_types" "sigktype ',' deriv_types" [ps $1 $2 $3] (vcons $1 $3))
+
+(defrule "comma_types0" "comma_types1" [ps $1] $1)
+(defrule "comma_types0" "" [ps] [])
+
+(defrule "comma_types1" "ktype" [ps $1] [$1])
+(defrule "comma_types1" "ktype ',' comma_types1" [ps $1 $2 $3] (vcons $1 $3))
+
+(defrule "bar_types2" "ktype '|' ktype" [ps $1 $2 $3] [$1 $3])
+(defrule "bar_types2" "ktype '|' bar_types2" [ps $1 $2 $3] (vcons $1 $3))
+
+(defrule "tv_bndrs" "tv_bndr tv_bndrs" [ps $1 $2] (vcons $1 $2))
+(defrule "tv_bndrs" "" [ps] [])
+
+(defrule "tv_bndr" "tv_bndr_no_braces" [ps $1] $1)
+(defrule "tv_bndr" "'{' tyvar '}'" [ps $1 $2 $3]
+  (sLL $1 $3 (con HsTvb nil 'InferredSpec (con HsBndrVar nx $2) (con HsBndrNoKind nx))))
+(defrule "tv_bndr" "'{' tyvar '::' kind '}'" [ps $1 $2 $3 $4 $5]
+  (sLL $1 $5 (con HsTvb nil 'InferredSpec (con HsBndrVar nx $2) (con HsBndrKind nx $4))))
+
+(defrule "tv_bndr_no_braces" "tyvar_wc" [ps $1] (sL1 $1 (con HsTvb nil 'SpecifiedSpec (unLoc $1) (con HsBndrNoKind nx))))
+(defrule "tv_bndr_no_braces" "'(' tyvar_wc '::' kind ')'" [ps $1 $2 $3 $4 $5]
+  (sLL $1 $5 (con HsTvb nil 'SpecifiedSpec (unLoc $2) (con HsBndrKind nx $4))))
+
+;; Located (HsBndrVar)
+(defrule "tyvar_wc" "tyvar" [ps $1] (sL1 $1 (con HsBndrVar nx $1)))
+(defrule "tyvar_wc" "'_'" [ps $1] (sL1 $1 (con HsBndrWildCard nil)))
+
+;; (L span [ann fundeps])
+(defrule "fds" "" [ps] (L nil [nil []]))
+(defrule "fds" "'|' fds1" [ps $1 $2] (sLL $1 $2 [nil (rev (unLoc $2))]))
+
+;; reversed
+(defrule "fds1" "fds1 ',' fd" [ps $1 $2 $3] (sLL $1 $3 (vcons $3 (unLoc $1))))
+(defrule "fds1" "fd" [ps $1] (sL1 $1 [$1]))
+
+(defrule "fd" "varids0 '->' varids0" [ps $1 $2 $3]
+  (L (comb3 $1 $2 $3) (con FunDep nil (rev (unLoc $1)) (rev (unLoc $3)))))
+
+;; reversed
+(defrule "varids0" "" [ps] (L nil []))
+(defrule "varids0" "varids0 tyvar" [ps $1 $2] (sLL $1 $2 (vcons $2 (unLoc $1))))
+
+(defrule "kind" "ctype" [ps $1] $1)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Data type declarations
+
+;; (L span [where-token cons]), in order
+(defrule "gadt_constrlist" "'where' '{' gadt_constrs '}'" [ps $1 $2 $3 $4] (L (comb2 $1 $4) [$1 (unLoc $3)]))
+(defrule "gadt_constrlist" "'where' vocurly gadt_constrs close" [ps $1 $2 $3 $4] (L (comb2 $1 $3) [$1 (unLoc $3)]))
+(defrule "gadt_constrlist" "" [ps] (L nil [nil []]))
+
+(defrule "gadt_constrs" "gadt_constr ';' gadt_constrs" [ps $1 $2 $3] (L (comb2 $1 $3) (vcons $1 (unLoc $3))))
+(defrule "gadt_constrs" "gadt_constr" [ps $1] (L (gl $1) [$1]))
+(defrule "gadt_constrs" "" [ps] (L nil []))
+
+(defrule "gadt_constr" "optSemi con_list '::' sigtype" [ps $1 $2 $3 $4]
+  (pd/mk-gadt-decl (comb2 $2 $4) (unLoc $2) $4))
+
+;; (L span [ann cons-reversed])
+(defrule "constrs" "'=' constrs1" [ps $1 $2] (sLL $1 $2 [nil (unLoc $2)]))
+
+;; reversed
+(defrule "constrs1" "constrs1 '|' constr" [ps $1 $2 $3] (sLL $1 $3 (vcons $3 (unLoc $1))))
+(defrule "constrs1" "constr" [ps $1] (sL1 $1 [$1]))
+
+;; forall (L span [ann Maybe-binders]), constr_stuff (L span [name details])
+(defrule "constr" "forall context '=>' constr_stuff" [ps $1 $2 $3 $4]
+  (let [[c details] (unLoc $4)]
+    (L (comb4 $1 $2 $3 $4) (pd/mk-con-decl-h98 c (second (unLoc $1)) (just $2) details))))
+(defrule "constr" "forall constr_stuff" [ps $1 $2]
+  (let [[c details] (unLoc $2)]
+    (L (comb2 $1 $2) (pd/mk-con-decl-h98 c (second (unLoc $1)) 'Nothing details))))
+
+(defrule "forall" "'forall' tv_bndrs '.'" [ps $1 $2 $3] (sLL $1 $3 [nil (just $2)]))
+(defrule "forall" "" [ps] (L nil [nil 'Nothing]))
+
+(defrule "constr_stuff" "infixtype" [ps $1]
+  (let [b ($1 :dcb)] (sL1 b [(pd/data-con-builder-con b) (pd/data-con-builder-details b)])))
+;; usum_constr [type tag arity]
+(defrule "constr_stuff" "'(#' usum_constr '#)'" [ps $1 $2 $3]
+  (let [[t tag arity] $2] (sLL $1 $3 (pd/mk-unboxed-sum-con t tag arity))))
+
+;; bars, bars0 [tokens count]
+(defrule "usum_constr" "ktype bars" [ps $1 $2] [$1 1 (inc (long (second $2)))])
+(defrule "usum_constr" "bars ktype bars0" [ps $1 $2 $3]
+  [$2 (inc (long (second $1))) (+ (long (second $1)) (long (second $3)) 1)])
+
+(defrule "fielddecls" "" [ps] [])
+(defrule "fielddecls" "fielddecls1" [ps $1] $1)
+
+(defrule "fielddecls1" "fielddecl ',' fielddecls1" [ps $1 $2 $3] (vcons $1 $3))
+(defrule "fielddecls1" "fielddecl" [ps $1] [$1])
+
+(defn- field-occs
+  "A record field declaration's names (sig_vars, reversed) as FieldOccs in order"
+  [lvs]
+  (rev (map (fn [ln] (L (getLoc ln) (con FieldOcc nx (L (getLoc ln) (unLoc ln))))) (unLoc lvs))))
+
+(defrule "fielddecl" "sig_vars '::' ctype" [ps $1 $2 $3]
+  (L (comb2 $1 $3) (con HsConDeclRecField nx (field-occs $1) (pd/mk-con-decl-field (con HsUnannotated nil) $3))))
+(defrule "fielddecl" "sig_vars PREFIX_PERCENT atype '::' ctype" [ps $1 $2 $3 $4 $5]
+  (L (comb4 $1 $2 $3 $5) (con HsConDeclRecField nx (field-occs $1) (pd/mk-mult-field $2 $3 $4 $5))))
+
+;; reversed
+(defrule "maybe_derivings" "" [ps] (L nil []))
+(defrule "maybe_derivings" "derivings" [ps $1] $1)
+
+(defrule "derivings" "derivings deriving" [ps $1 $2] (sLL $1 $2 (vcons $2 (unLoc $1))))
+(defrule "derivings" "deriving" [ps $1] (sL1 $1 [$1]))
+
+(defrule "deriving" "'deriving' deriv_clause_types" [ps $1 $2]
+  (L (comb2 $1 $2) (con HsDerivingClause nil 'Nothing $2)))
+(defrule "deriving" "'deriving' deriv_strategy_no_via deriv_clause_types" [ps $1 $2 $3]
+  (L (comb2 $1 $3) (con HsDerivingClause nil (just $2) $3)))
+(defrule "deriving" "'deriving' deriv_clause_types deriv_strategy_via" [ps $1 $2 $3]
+  (L (comb2 $1 $3) (con HsDerivingClause nil (just $3) $2)))
+
+(defrule "deriv_clause_types" "qtycon" [ps $1]
+  (let [tc (sL1 $1 (pd/mk-hs-implicit-sig-type (sL1 $1 (con HsTyVar nil 'NotPromoted $1))))]
+    (sL1 $1 (con DctSingle nx tc))))
+(defrule "deriv_clause_types" "'(' ')'" [ps $1 $2] (sLL $1 $2 (con DctMulti nx [])))
+(defrule "deriv_clause_types" "'(' deriv_types ')'" [ps $1 $2 $3] (sLL $1 $3 (con DctMulti nx (vec $2))))

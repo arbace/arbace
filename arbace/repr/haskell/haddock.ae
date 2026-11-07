@@ -1,0 +1,728 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77):
+;; compiler/GHC/Parser/PostProcess/Haddock.hs, GHC/Hs/Decls.hs's partitionBindsAndSigs,
+;; GHC/Hs/DocString.hs's isEmptyDocString and GHC/Utils/Misc.hs's mergeListsBy, whose notice
+;; follows (LICENSE.md, "GHC: the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.haddock
+  "GHC 9.14.1's Haddock pass, a port of compiler/GHC/Parser/PostProcess/Haddock.hs
+  (addHaddockToModule; doc/haskell/NATIVE.md): the documentation comments the lexer kept
+  (arbace.repr.haskell.lex/hdk-comments) put into the parser's tree where GHC puts them (the
+  module header, the export list's items and sections, DocD declarations between declarations
+  and in class bodies, the docs of data constructors, record fields, constructor arguments, and
+  HsDocTy in the types of signatures), each documentation string's identifiers found by
+  arbace.repr.haskell.haddocklex (lexHsDoc). The traversal is GHC's: HdkA, a buffer span and a
+  computation, combined applicatively (each computation sees only the comments between its
+  neighbours' buffer spans, its LocRange), the computations HdkM's over the pending comments
+  (taken out once used); the pass's warnings (-Winvalid-haddock) are not kept.
+
+  The tree is the parser's, its spans of the parser's form (arbace.repr.haskell.ast), every
+  exact-print annotation nil but four the pass reads, which the parser leaves in their slots:
+  - XModulePs's hsmodAnn: the module's `module` (or `signature`) keyword: its span or token, or
+    GHC's (EpAnn anchor (AnnsModule sig mod ...) comments); nil without a header;
+  - XModulePs's hsmodLayout: the module's EpLayout, (EpVirtualBraces column),
+    (EpExplicitBraces open close) or EpNoLayout (nil is EpNoLayout);
+  - ClassDecl's tcdCExt (tuple x layout sort-key): x the class's `where` (its span or token, or
+    GHC's AnnClassDecl), layout the body's EpLayout;
+  - HsDataDefn's dd_ext: the `where` of a GADT-style declaration (its span or token, or GHC's
+    AnnDataDefn), nil when none.
+  A keyword may be given as a span [file l1 c1 l2 c2 b1 b2], a token [kind value span], or GHC's
+  (EpTok (EpaSpan span)), NoEpTok. The result has them nil, as the dump: the module's, the
+  top-level declarations' and the data family instances' of instance bodies (which the pass does
+  not visit); erase-annotations does the same without the pass (a module read without
+  -haddock). Declaration quotes ([d| ... |]) are not visited: the parser leaves nil there. A
+  buffer position is the lexer's (code points); a BufSpan here is [b1 b2], nil for none."
+  (:require [arbace.repr.haskell.ast :as ast]
+            [arbace.repr.haskell.haddocklex :as hl]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private nx 'NoExtField)
+
+(defn- L [sp x] (list 'L sp x))
+(defn- loc-of [lx] (nth lx 1))
+(defn- un-loc [lx] (nth lx 2))
+(defn- just [x] (list 'Just x))
+(defn- just? [x] (and (seq? x) (= 'Just (first x))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Buffer spans and location ranges (GHC.Types.SrcLoc's BufSpan, Haddock.hs's LocRange)
+
+(defn- bufspan
+  "getBufSpan: the BufSpan [b1 b2] of a span, nil for noSrcSpan or a span without one"
+  [s]
+  (when s (let [b1 (nth s 5)] (when (some? b1) [b1 (nth s 6)]))))
+
+(defn- start-pos "getBufPos . srcSpanStart" [s] (when s (nth s 5)))
+(defn- end-pos "getBufPos . srcSpanEnd" [s] (when s (nth s 6)))
+
+(defn- bs-union
+  "The Strict.Maybe BufSpan semigroup: the smallest span covering both (min start, max end)"
+  [a b]
+  (cond (nil? a) b
+        (nil? b) a
+        :else [(min (long (nth a 0)) (long (nth b 0))) (max (long (nth a 1)) (long (nth b 1)))]))
+
+(defn- token-bufspan
+  "getEpTokenBufSpan of a keyword as the parser leaves it: a span, a token [kind value span],
+  (EpTok (EpaSpan span)) or (EpTok span); nil or NoEpTok for none"
+  [x]
+  (cond
+    (nil? x) nil
+    (vector? x) (if (keyword? (nth x 0)) (bufspan (nth x 2)) (bufspan x))
+    (and (seq? x) (= 'EpTok (first x)))
+    (let [l (second x)] (if (and (seq? l) (= 'EpaSpan (first l))) (bufspan (second l)) (bufspan l)))
+    :else nil))
+
+(def ^:private range0
+  "mempty: StartOfFile, EndOfFile, ColumnFrom leftmostColumn"
+  [nil nil 1])
+
+(defn- restrict
+  "The range r tightened by a lower bound lo (StartLoc) and an upper bound hi (EndLoc), nil for
+  none (inLocRange of locRangeFrom lo <> locRangeTo hi)"
+  [r lo hi]
+  (let [from (nth r 0) to (nth r 1)]
+    [(if lo (if from (max (long from) (long lo)) lo) from)
+     (if hi (if to (min (long to) (long hi)) hi) to)
+     (nth r 2)]))
+
+(defn- restrict-col
+  "The range r tightened by ColumnFrom n"
+  [r ^long n]
+  [(nth r 0) (nth r 1) (max (long (nth r 2)) n)])
+
+;;; ------------------------------------------------------------------------------------------
+;;; HdkM: the pending comments ([span hdk-comment] in the order of their start positions), taken
+;;; out once used; a journal of the taken ones undoes a peek (peekHdkM)
+
+(defn- make-st
+  "HdkSt over the lexer's documentation comments: [comments starts columns taken journal]"
+  [comments]
+  (let [cv (vec comments) n (count cv)
+        starts (long-array n) cols (long-array n)]
+    (dotimes [i n]
+      (let [sp (nth (nth cv i) 0)]
+        (aset starts i (long (nth sp 5)))
+        (aset cols i (long (nth sp 2)))))
+    (object-array [cv starts cols (boolean-array n) (java.util.ArrayList.)])))
+
+(defn- lower-bound
+  "The first index of the sorted a whose value is at least x"
+  ^long [^longs a ^long x]
+  (loop [lo 0 hi (alength a)]
+    (if (< lo hi)
+      (let [mid (unsigned-bit-shift-right (+ lo hi) 1)]
+        (if (< (aget a mid) x) (recur (inc mid) hi) (recur lo mid)))
+      lo)))
+
+(defn- take-comments
+  "takeHdkComments f: in range r, the pending comments from the first starting at its lower
+  bound on, while they start before its upper bound at its column or right of it: those f
+  accepts (a non-nil result) taken out, f's results in order"
+  [^objects st r f]
+  (let [cv (aget st 0) ^longs starts (aget st 1) ^longs cols (aget st 2)
+        ^booleans taken (aget st 3) ^java.util.ArrayList jr (aget st 4)
+        n (alength starts)
+        from (nth r 0) to (nth r 1) col (long (nth r 2))
+        j0 (if from (lower-bound starts (long from)) 0)]
+    (loop [j j0 out []]
+      (if (< j n)
+        (cond
+          (aget taken j) (recur (inc j) out)
+          (and (or (nil? to) (<= (aget starts j) (long to))) (>= (aget cols j) col))
+          (if-let [x (f (nth cv j))]
+            (do (aset taken j true)
+                (.add jr j)
+                (recur (inc j) (conj out x)))
+            (recur (inc j) out))
+          :else out)
+        out))))
+
+(defn- peek-hdk
+  "peekHdkM: m's result, the state as it was before"
+  [^objects st m]
+  (let [^java.util.ArrayList jr (aget st 4) ^booleans taken (aget st 3)
+        mark (.size jr)
+        x (m)]
+    (loop [k (dec (.size jr))]
+      (when (>= k mark)
+        (aset taken (int (.get jr k)) false)
+        (.remove jr (int k))
+        (recur (dec k))))
+    x))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Matching functions (mkDocNext, mkDocPrev, mkDocHsDecl, mkDocIE) and documentation strings
+
+(defn- mk-doc-next "mkDocNext: (L span docstring) of a HdkCommentNext" [c]
+  (let [h (nth c 1)] (when (= 'HdkCommentNext (first h)) (L (nth c 0) (nth h 1)))))
+
+(defn- mk-doc-prev "mkDocPrev: (L span docstring) of a HdkCommentPrev" [c]
+  (let [h (nth c 1)] (when (= 'HdkCommentPrev (first h)) (L (nth c 0) (nth h 1)))))
+
+(defn- mk-doc-next-or-prev [c] (or (mk-doc-next c) (mk-doc-prev c)))
+
+(defn- virtual-col
+  "The column of an EpVirtualBraces layout, else nil"
+  [layout]
+  (when (and (seq? layout) (= 'EpVirtualBraces (first layout))) (long (second layout))))
+
+(defn- lex-doc "lexHsDocString" [ds] (hl/lex-hs-doc ds))
+
+(defn- mk-doc-hs-decl
+  "mkDocHsDecl layout: a comment as a DocD declaration, unless the layout's virtual braces want
+  another column (indent_mismatch)"
+  [layout]
+  (let [n (virtual-col layout)]
+    (fn [c]
+      (let [sp (nth c 0) h (nth c 1)]
+        (when-not (and n (not= (long n) (long (nth sp 2))))
+          (L sp (list 'DocD nx
+                      (case (first h)
+                        HdkCommentNext (list 'DocCommentNext (L sp (lex-doc (nth h 1))))
+                        HdkCommentPrev (list 'DocCommentPrev (L sp (lex-doc (nth h 1))))
+                        HdkCommentNamed (list 'DocCommentNamed (nth h 1) (L sp (lex-doc (nth h 2))))
+                        HdkCommentSection (list 'DocGroup (nth h 1) (L sp (lex-doc (nth h 2))))))))))))
+
+(defn- mk-doc-ie
+  "mkDocIE: a comment as an export list's item"
+  [c]
+  (let [sp (nth c 0) h (nth c 1)]
+    (L sp (case (first h)
+            HdkCommentSection (list 'IEGroup nx (nth h 1) (L sp (lex-doc (nth h 2))))
+            HdkCommentNamed (list 'IEDocNamed nx (nth h 1))
+            (HdkCommentNext HdkCommentPrev) (list 'IEDoc nx (L sp (lex-doc (nth h 1))))))))
+
+(defn- empty-doc?
+  "isEmptyDocString"
+  [ds]
+  (case (first ds)
+    MultiLineDocString (every? (fn [ch] (= "" (second (nth ch 2)))) (nth ds 2))
+    NestedDocString (= "" (second (nth (nth ds 2) 2)))
+    GeneratedDocString (= "" (second (nth ds 1)))))
+
+(defn- select-doc-string
+  "selectDocString: the first non-empty one (the others are warnings), or nil"
+  [docs]
+  (first (remove (fn [d] (empty-doc? (nth d 2))) docs)))
+
+(defn- maybe-ldoc
+  "lexLHsDocString <$> doc: (Just (L span (WithHsDocIdentifiers ...))), or Nothing"
+  [doc]
+  (if doc (just (hl/lex-l-hs-doc doc)) 'Nothing))
+
+(defn- get-prev-next-doc
+  "getPrevNextDoc: the docnext comment before span l, or the docprev after it"
+  [st r l]
+  (let [nexts (take-comments st (restrict r nil (start-pos l)) mk-doc-next)
+        prevs (take-comments st (restrict r (end-pos l) nil) mk-doc-prev)]
+    (select-doc-string (into nexts prevs))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; HdkA: [bufspan run], run (fn [st range] result)
+
+(defn- hdk-pure "pure" [x] [nil (fn [_ _] x)])
+(defn- lift "liftHdkA" [run] [nil run])
+(defn- register "registerLocHdkA" [sp] [(bufspan sp) (fn [_ _] nil)])
+(defn- register-bs "an HdkA over a BufSpan, doing nothing" [bs] [bs (fn [_ _] nil)])
+(defn- extend-hdk "extendHdkA" [sp h] [(bs-union (bufspan sp) (nth h 0)) (nth h 1)])
+(defn- hoist "hoistHdkA" [f h] [(nth h 0) (f (nth h 1))])
+(defn- fmap-hdk [f h] (let [run (nth h 1)] [(nth h 0) (fn [st r] (f (run st r)))]))
+
+(defn- in-col
+  "hoistHdkA (inLocRange mempty {loc_range_col = ColumnFrom n})"
+  [^long n h]
+  (hoist (fn [run] (fn [st r] (run st (restrict-col r n)))) h))
+
+(defn- hdk-seq
+  "The applicative sequence of HdkA's: their results in a vector, each computation run in its
+  range tightened by its neighbours' (after the end of every one before it with a span, before
+  the start of every one after it), the span the union of theirs"
+  [hs]
+  (let [hs (vec hs) n (count hs)
+        sps (mapv #(nth % 0) hs)
+        span (reduce bs-union nil sps)
+        ;; ups[i]: the least start of the spans after i
+        ups (loop [i (dec n) m nil acc ()]
+              (if (neg? i)
+                (vec acc)
+                (let [s (nth sps i)]
+                  (recur (dec i) (if s (if m (min (long m) (long (nth s 0))) (nth s 0)) m) (cons m acc)))))]
+    [span
+     (fn [st r]
+       (loop [i 0 lo nil out (transient [])]
+         (if (< i n)
+           (let [x ((nth (nth hs i) 1) st (restrict r lo (nth ups i)))
+                 s (nth sps i)]
+             (recur (inc i) (if s (if lo (max (long lo) (long (nth s 1))) (nth s 1)) lo) (conj! out x)))
+           (persistent! out))))]))
+
+(defmacro ^:private hdk-do
+  "ApplicativeDo over HdkA: (hdk-do [x a _ b ...] body), the statements in order"
+  [bindings body]
+  (let [ps (partition 2 bindings)]
+    `(fmap-hdk (fn [[~@(map first ps)]] ~body) (hdk-seq [~@(map second ps)]))))
+
+(defn- register-all "traverse_ registerHdkA" [lxs] (hdk-seq (map #(register (loc-of %)) lxs)))
+
+(declare hdk-type hdk-sig-type hdk-ldecl)
+
+;;; ------------------------------------------------------------------------------------------
+;;; addHaddockInterleaveItems
+
+(defn- interleave-items
+  "addHaddockInterleaveItems layout get-doc items: the documentation items get-doc makes of the
+  comments between the items, around the items as add-item processes them (each in columns
+  right of virtual braces')"
+  [layout get-doc items add-item]
+  (let [take-docs (lift (fn [st r] (take-comments st r get-doc)))
+        n (virtual-col layout)
+        wl (if n (fn [h] (in-col (inc (long n)) h)) identity)
+        hs (conj (into [] (mapcat (fn [it] [take-docs (wl (add-item it))])) items) take-docs)]
+    (fmap-hdk (fn [xs]
+                (loop [i 0 out (transient [])]
+                  (if (< i (count xs))
+                    (let [x (nth xs i)]
+                      (recur (inc i) (if (even? i) (reduce conj! out x) (conj! out x))))
+                    (persistent! out))))
+              (hdk-seq hs))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Types (HasHaddock (LocatedA (HsType GhcPs)), HsSigType, HsWildCardBndrs)
+
+(defn- tyvar-bndrs-loc
+  "getLHsTyVarBndrsLoc: the binders' spans combined (foldr combineSrcSpans noSrcSpan)"
+  [bndrs]
+  (reduce (fn [acc b] (ast/combine (loc-of b) acc)) nil (reverse bndrs)))
+
+(defn- hdk-type
+  "addHaddock of an LHsType: foralls, contexts and arrows traversed (their binders and contexts
+  registered, the arrows not), another type documented as a whole (HsDocTy)"
+  [lt]
+  (let [l (loc-of lt) t (un-loc lt)]
+    (extend-hdk l
+      (case (first t)
+        HsForAllTy (let [[_ x tele body] t]
+                     (hdk-do [_ (register (tyvar-bndrs-loc (nth tele 2)))
+                              body' (hdk-type body)]
+                       (L l (list 'HsForAllTy x tele body'))))
+        HsQualTy (let [[_ x lhs rhs] t]
+                   (hdk-do [_ (register (loc-of lhs))
+                            rhs' (hdk-type rhs)]
+                     (L l (list 'HsQualTy x lhs rhs'))))
+        HsFunTy (let [[_ u mult lhs rhs] t]
+                  (hdk-do [lhs' (hdk-type lhs)
+                           rhs' (hdk-type rhs)]
+                    (L l (list 'HsFunTy u mult lhs' rhs'))))
+        (lift (fn [st r]
+                (if-let [doc (get-prev-next-doc st r l)]
+                  (L l (list 'HsDocTy nx lt (hl/lex-l-hs-doc doc)))
+                  lt)))))))
+
+(defn- hdk-sig-type
+  "addHaddock of an LHsSigType: an explicit forall's binders registered, the body's type"
+  [ls]
+  (let [l (loc-of ls) [_ _ outer body] (un-loc ls)]
+    (extend-hdk l
+      (hdk-do [_ (if (= 'HsOuterExplicit (first outer))
+                   (register (tyvar-bndrs-loc (nth outer 2)))
+                   (hdk-pure nil))
+               body' (hdk-type body)]
+        (L l (list 'HsSig nx outer body'))))))
+
+(defn- hdk-wc "addHaddock of HsWC" [wc]
+  (fmap-hdk (fn [t'] (list 'HsWC nx t')) (hdk-sig-type (nth wc 2))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Data declarations (HsDataDefn, ConDecl, fields, deriving clauses)
+
+(defn- hdk-cdf
+  "addHaddock of an HsConDeclField: its type's doc moved to cdf_doc"
+  [cdf]
+  (let [[_ ext unpack bang mult ty doc] cdf]
+    (fmap-hdk (fn [ty']
+                (let [t (un-loc ty')]
+                  (if (= 'HsDocTy (first t))
+                    (list 'CDF ext unpack bang mult (nth t 2) (just (nth t 3)))
+                    (list 'CDF ext unpack bang mult ty' doc))))
+              (hdk-type ty))))
+
+(defn- hdk-rec-field
+  "addHaddock of an LHsConDeclRecField: the docnext before it or the docprev after it"
+  [lf]
+  (let [l (loc-of lf) [_ ext names cdf] (un-loc lf)]
+    (extend-hdk l
+      (lift (fn [st r]
+              (let [doc (maybe-ldoc (get-prev-next-doc st r l))
+                    [_ cext unpack bang mult ty _] cdf]
+                (L l (list 'HsConDeclRecField ext names (list 'CDF cext unpack bang mult ty doc)))))))))
+
+(defn- get-con-doc
+  "getConDoc: the doc of a constructor's name at span l"
+  [l]
+  (extend-hdk l (lift (fn [st r] (get-prev-next-doc st r l)))))
+
+(defn- only-trailing-or-leading?
+  "onlyTrailingOrLeading: whether the only comments of a constructor at span l are a leading or
+  trailing one (the state left as it was)"
+  [st r l]
+  (peek-hdk st
+    (fn []
+      (let [leading (take-comments st (restrict r nil (start-pos l)) mk-doc-next)
+            inner (take-comments st (if-let [b (bufspan l)] (restrict r (nth b 0) (nth b 1)) r)
+                                 mk-doc-next-or-prev)
+            trailing (take-comments st (restrict r (end-pos l) nil) mk-doc-prev)]
+        (and (empty? inner) (not= (empty? leading) (empty? trailing)))))))
+
+(defn- hdk-con-decl
+  "addHaddock of an LConDecl (Note [Leading and trailing comments on H98 constructors])"
+  [lc]
+  (let [l (loc-of lc) c (un-loc lc)]
+    (extend-hdk l
+      (case (first c)
+        ConDeclGADT
+        (let [[_ ext names outer inner cxt args res _] c]
+          (hdk-do [doc' (get-con-doc (loc-of (first names)))
+                   args' (case (first args)
+                           PrefixConGADT (let [[_ x ts] args]
+                                           (fmap-hdk (fn [ts'] (list 'PrefixConGADT x ts'))
+                                                     (hdk-seq (map hdk-cdf ts))))
+                           RecConGADT (let [[_ arr lrec] args]
+                                        (fmap-hdk (fn [fs'] (list 'RecConGADT arr (L (loc-of lrec) fs')))
+                                                  (hdk-seq (map hdk-rec-field (un-loc lrec))))))
+                   res' (hdk-type res)]
+            (L l (list 'ConDeclGADT ext names outer inner cxt args' res' (maybe-ldoc doc')))))
+        ConDeclH98
+        (let [[_ ext name forall ex-tvs cxt args _] c
+              mk (fn [args' doc'] (L l (list 'ConDeclH98 ext name forall ex-tvs cxt args' (maybe-ldoc doc'))))
+              mixed (case (first args)
+                      PrefixCon (hdk-do [doc' (get-con-doc (loc-of name))
+                                         ts' (hdk-seq (map hdk-cdf (nth args 1)))]
+                                  (mk (list 'PrefixCon ts') doc'))
+                      InfixCon (hdk-do [t1' (hdk-cdf (nth args 1))
+                                        doc' (get-con-doc (loc-of name))
+                                        t2' (hdk-cdf (nth args 2))]
+                                 (mk (list 'InfixCon t1' t2') doc'))
+                      RecCon (let [lrec (nth args 1)]
+                               (hdk-do [doc' (get-con-doc (loc-of name))
+                                        fs' (hdk-seq (map hdk-rec-field (un-loc lrec)))]
+                                 (mk (list 'RecCon (L (loc-of lrec) fs')) doc'))))]
+          (hoist (fn [m]
+                   (fn [st r]
+                     (if (only-trailing-or-leading? st r l)
+                       (mk args (get-prev-next-doc st r l))
+                       (m st r))))
+                 mixed))))))
+
+(defn- hdk-dct
+  "addHaddock of an LDerivClauseTys"
+  [ld]
+  (let [l (loc-of ld) d (un-loc ld)]
+    (extend-hdk l
+      (case (first d)
+        DctSingle (fmap-hdk (fn [t'] (L l (list 'DctSingle (nth d 1) t'))) (hdk-sig-type (nth d 2)))
+        DctMulti (fmap-hdk (fn [ts'] (L l (list 'DctMulti (nth d 1) ts')))
+                           (hdk-seq (map hdk-sig-type (nth d 2))))))))
+
+(defn- hdk-deriv-clause
+  "addHaddock of an LHsDerivingClause: a stock, anyclass or newtype strategy registered before
+  the types, via after them"
+  [ld]
+  (let [l (loc-of ld) [_ ext strat tys] (un-loc ld)
+        sl (when (just? strat) (second strat))
+        via? (and sl (= 'ViaStrategy (first (un-loc sl))))]
+    (extend-hdk l
+      (hdk-do [_ (if (and sl (not via?)) (register (loc-of sl)) (hdk-pure nil))
+               tys' (hdk-dct tys)
+               _ (if via? (register (loc-of sl)) (hdk-pure nil))]
+        (L l (list 'HsDerivingClause ext strat tys'))))))
+
+(defn- defn-where
+  "andd_where of an HsDataDefn's dd_ext as the parser leaves it"
+  [ext]
+  (if (and (seq? ext) (= 'AnnDataDefn (first ext))) (token-bufspan (nth ext 8)) (token-bufspan ext)))
+
+(defn- hdk-data-defn
+  "addHaddock of an HsDataDefn: the kind signature and `where` registered, the constructors and
+  the deriving clauses"
+  [dd]
+  (let [[_ ext ctxt ctype kind cons derivs] dd]
+    (hdk-do [_ (if (just? kind) (register (loc-of (second kind))) (hdk-pure nil))
+             _ (register-bs (defn-where ext))
+             cons' (case (first cons)
+                     NewTypeCon (fmap-hdk (fn [c] (list 'NewTypeCon c)) (hdk-con-decl (nth cons 1)))
+                     DataTypeCons (fmap-hdk (fn [cs] (list 'DataTypeCons (nth cons 1) cs))
+                                            (hdk-seq (map hdk-con-decl (nth cons 2)))))
+             derivs' (hdk-seq (map hdk-deriv-clause derivs))]
+      (list 'HsDataDefn nil ctxt ctype kind cons' derivs'))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Class bodies (flattenBindsAndSigs, partitionBindsAndSigs)
+
+(defn- bs-compare
+  "cmpBufSpan: two located items by their BufSpans"
+  [a b]
+  (let [x (or (bufspan (loc-of a)) [0 0]) y (or (bufspan (loc-of b)) [0 0])]
+    (compare [(long (nth x 0)) (long (nth x 1))] [(long (nth y 0)) (long (nth y 1))])))
+
+(defn- merge-lists-by
+  "mergeListsBy: sorted lists merged pairwise, the left one's item first on a tie"
+  [cmp lists]
+  (letfn [(merge2 [xs ys]
+            (loop [xs xs ys ys out (transient [])]
+              (cond
+                (empty? xs) (persistent! (reduce conj! out ys))
+                (empty? ys) (persistent! (reduce conj! out xs))
+                (pos? (long (cmp (first xs) (first ys)))) (recur xs (rest ys) (conj! out (first ys)))
+                :else (recur (rest xs) ys (conj! out (first xs))))))
+          (neighbours [ls]
+            (loop [ls ls out []]
+              (cond (empty? ls) out
+                    (empty? (rest ls)) (conj out (first ls))
+                    :else (recur (drop 2 ls) (conj out (merge2 (first ls) (second ls)))))))]
+    (loop [ls lists]
+      (let [ls' (neighbours ls)]
+        (case (count ls')
+          0 []
+          1 (vec (first ls'))
+          (recur ls'))))))
+
+(defn- flatten-binds-and-sigs
+  "flattenBindsAndSigs: a class's bindings, signatures, associated types and defaults as
+  declarations in the order of their positions"
+  [meths sigs ats atdefs]
+  (merge-lists-by bs-compare
+                  [(mapv (fn [b] (L (loc-of b) (list 'ValD nx (un-loc b)))) meths)
+                   (mapv (fn [s] (L (loc-of s) (list 'SigD nx (un-loc s)))) sigs)
+                   (mapv (fn [t] (L (loc-of t) (list 'TyClD nx (list 'FamDecl nx (un-loc t))))) ats)
+                   (mapv (fn [t] (L (loc-of t) (list 'InstD nx (list 'TyFamInstD nx (un-loc t))))) atdefs)
+                   []
+                   []]))
+
+(defn- partition-binds-and-sigs
+  "partitionBindsAndSigs: [binds sigs families family-instances data-family-instances docs]"
+  [decls]
+  (reduce (fn [[bs ss ts tfis dfis docs] ld]
+            (let [l (loc-of ld) d (un-loc ld)]
+              (case (first d)
+                ValD [(conj bs (L l (nth d 2))) ss ts tfis dfis docs]
+                SigD [bs (conj ss (L l (nth d 2))) ts tfis dfis docs]
+                TyClD [bs ss (conj ts (L l (nth (nth d 2) 2))) tfis dfis docs]
+                InstD (let [i (nth d 2)]
+                        (if (= 'TyFamInstD (first i))
+                          [bs ss ts (conj tfis (L l (nth i 2))) dfis docs]
+                          [bs ss ts tfis (conj dfis (L l (nth i 2))) docs]))
+                DocD [bs ss ts tfis dfis (conj docs (L l (nth d 2)))])))
+          [[] [] [] [] [] []] decls))
+
+(defn- class-where
+  "acd_where of a ClassDecl's annotation as the parser leaves it"
+  [x]
+  (if (and (seq? x) (= 'AnnClassDecl (first x))) (token-bufspan (nth x 5)) (token-bufspan x)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The annotations the pass reads, written nil where it does not visit them
+
+(defn- erase-defn "An HsDataDefn with dd_ext nil" [dd]
+  (if (nil? (nth dd 1)) dd (apply list 'HsDataDefn nil (drop 2 dd))))
+
+(defn- erase-dfi-decl
+  "A DataFamInstDecl (DataFamInstDecl (FamEqn ... rhs)) with its rhs's dd_ext nil"
+  [dfi]
+  (let [[_ fext tycon bndrs pats fixity rhs] (nth dfi 1)]
+    (list 'DataFamInstDecl (list 'FamEqn fext tycon bndrs pats fixity (erase-defn rhs)))))
+
+(defn- erase-cls-inst
+  "An instance declaration (InstD x (ClsInstD x (ClsInstDecl ...))) with its data family
+  instances' dd_ext nil"
+  [d]
+  (let [[_ x [_ cx [_ ext poly binds sigs tfis dfis overlap]]] d]
+    (if (empty? dfis)
+      d
+      (list 'InstD x
+            (list 'ClsInstD cx
+                  (list 'ClsInstDecl ext poly binds sigs tfis
+                        (mapv (fn [ld] (L (loc-of ld) (erase-dfi-decl (un-loc ld)))) dfis) overlap))))))
+
+(defn- erase-decl
+  "A top-level declaration with the annotations the pass reads nil"
+  [d]
+  (case (first d)
+    TyClD (let [decl (nth d 2)]
+            (case (first decl)
+              DataDecl (let [[_ ext lname tyvars fixity defn] decl]
+                         (list 'TyClD (nth d 1) (list 'DataDecl ext lname tyvars fixity (erase-defn defn))))
+              ClassDecl (list 'TyClD (nth d 1) (apply list 'ClassDecl (list 'tuple nil nil nil) (drop 2 decl)))
+              d))
+    InstD (let [decl (nth d 2)]
+            (case (first decl)
+              DataFamInstD (list 'InstD (nth d 1)
+                                 (list 'DataFamInstD (nth decl 1) (erase-dfi-decl (nth decl 2))))
+              ClsInstD (erase-cls-inst d)
+              d))
+    d))
+
+(defn erase-annotations
+  "The module without the pass, the annotations the pass would read (the module's keyword and
+  layout, the classes' `where` and layout, the data definitions' `where`, also in instance
+  bodies) written nil, as the dump has them: a module read without -haddock"
+  [lmod]
+  (let [[_ lm [_ [_ _ _ deprec header] name exports imports decls]] lmod]
+    (L lm (list 'HsModule (list 'XModulePs nil nil deprec header) name exports imports
+                (mapv (fn [ld] (L (loc-of ld) (erase-decl (un-loc ld)))) decls)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Declarations (HasHaddock (HsDecl GhcPs), LHsDecl)
+
+(defn- hdk-decl
+  "addHaddock of an HsDecl: the comments inside a declaration (signatures' types, data and
+  class declarations, data family instances, type synonyms, foreign declarations)"
+  [d]
+  (case (first d)
+    SigD (let [s (nth d 2)]
+           (case (first s)
+             TypeSig (let [[_ x names t] s]
+                       (hdk-do [_ (register-all names) t' (hdk-wc t)]
+                         (list 'SigD nx (list 'TypeSig x names t'))))
+             PatSynSig (let [[_ x names t] s]
+                         (hdk-do [_ (register-all names) t' (hdk-sig-type t)]
+                           (list 'SigD nx (list 'PatSynSig x names t'))))
+             ClassOpSig (let [[_ x dflt names t] s]
+                          (hdk-do [_ (register-all names) t' (hdk-sig-type t)]
+                            (list 'SigD nx (list 'ClassOpSig x dflt names t'))))
+             (hdk-pure d)))
+    TyClD (let [x (nth d 1) decl (nth d 2)]
+            (case (first decl)
+              DataDecl (let [[_ ext lname tyvars fixity defn] decl]
+                         (hdk-do [_ (register (loc-of lname)) defn' (hdk-data-defn defn)]
+                           (list 'TyClD x (list 'DataDecl ext lname tyvars fixity defn'))))
+              ClassDecl (let [[_ cext ctxt lname tyvars fixity fds sigs meths ats atdefs _] decl
+                              [_ ax layout] cext]
+                          (hdk-do [_ (register (loc-of lname))
+                                   _ (register-bs (class-where ax))
+                                   items (interleave-items layout (mk-doc-hs-decl layout)
+                                                           (flatten-binds-and-sigs meths sigs ats atdefs)
+                                                           hdk-ldecl)]
+                            (let [[meths' sigs' ats' atdefs' _ docs'] (partition-binds-and-sigs items)]
+                              (list 'TyClD nx (list 'ClassDecl (list 'tuple nil nil nil) ctxt lname tyvars
+                                                    fixity fds sigs' meths' ats' atdefs' docs')))))
+              SynDecl (let [[_ ext lname tyvars fixity rhs] decl]
+                        (hdk-do [_ (register (loc-of lname)) rhs' (hdk-type rhs)]
+                          (list 'TyClD nx (list 'SynDecl ext lname tyvars fixity rhs'))))
+              (hdk-pure d)))
+    InstD (let [decl (nth d 2)]
+            (if (= 'DataFamInstD (first decl))
+              (let [[_ dext [_ eqn]] decl
+                    [_ fext tycon bndrs pats fixity rhs] eqn]
+                (hdk-do [_ (register (loc-of tycon)) rhs' (hdk-data-defn rhs)]
+                  (list 'InstD nx (list 'DataFamInstD dext
+                                        (list 'DataFamInstDecl (list 'FamEqn fext tycon bndrs pats fixity rhs'))))))
+              (hdk-pure (erase-decl d))))
+    ForD (let [[k ext name sigty fi] (nth d 2)]
+           (hdk-do [_ (register (loc-of name)) t' (hdk-sig-type sigty)]
+             (list 'ForD nx (list k ext name t' fi))))
+    (hdk-pure d)))
+
+(defn- hdk-ldecl
+  "addHaddock of an LHsDecl"
+  [ld]
+  (let [l (loc-of ld)]
+    (extend-hdk l (fmap-hdk (fn [d] (L l d)) (hdk-decl (un-loc ld))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The module (HasHaddock (Located (HsModule GhcPs)), the export list)
+
+(defn- hdk-ie
+  "addHaddock of an export item: the docprev after it"
+  [lie]
+  (let [l (loc-of lie) ie (un-loc lie)]
+    (extend-hdk l
+      (lift (fn [st r]
+              (let [docs (take-comments st (restrict r (end-pos l) nil) mk-doc-prev)
+                    mb (maybe-ldoc (select-doc-string docs))]
+                (L l (case (first ie)
+                       (IEVar IEThingAbs IEThingAll) (list (nth ie 0) (nth ie 1) (nth ie 2) mb)
+                       IEThingWith (list 'IEThingWith (nth ie 1) (nth ie 2) (nth ie 3) (nth ie 4) mb)
+                       ie))))))))
+
+(defn- hdk-exports
+  "addHaddock of the export list: its items and the documentation between them, the comments
+  after its closing parenthesis left out"
+  [lexports]
+  (let [l (loc-of lexports)]
+    (extend-hdk l
+      (hdk-do [ex (interleave-items 'EpNoLayout mk-doc-ie (un-loc lexports) hdk-ie)
+               _ (register-bs (when-let [b (end-pos l)] [b b]))]
+        (L l ex)))))
+
+(defn- module-keyword
+  "The BufSpan of a module's `module` or `signature` keyword as the parser leaves it in hsmodAnn"
+  [anns]
+  (let [a (if (and (seq? anns) (= 'EpAnn (first anns))) (nth anns 2) anns)]
+    (if (and (seq? a) (= 'AnnsModule (first a)))
+      (bs-union (token-bufspan (nth a 2)) (token-bufspan (nth a 1)))
+      (token-bufspan a))))
+
+(defn- hdk-module
+  "addHaddock of the module: its header's doc, the export list, the imports registered, the
+  declarations with the documentation between them"
+  [lmod]
+  (let [lm (loc-of lmod)
+        [_ ext name exports imports decls] (un-loc lmod)
+        [_ anns layout deprec _] ext
+        layout (or layout 'EpNoLayout)
+        header (if (just? name)
+                 (let [modspan (bs-union (module-keyword anns) (bufspan (loc-of (second name))))]
+                   [modspan (fn [st r]
+                              (let [docs (take-comments st (restrict r nil (when modspan (nth modspan 0)))
+                                                        mk-doc-next)]
+                                (maybe-ldoc (select-doc-string docs))))])
+                 (hdk-pure 'Nothing))
+        exports' (if (just? exports)
+                   (fmap-hdk just (hdk-exports (second exports)))
+                   (hdk-pure exports))]
+    (hdk-do [hd header
+             ex exports'
+             _ (register-all imports)
+             ds (interleave-items layout (mk-doc-hs-decl layout) decls hdk-ldecl)]
+      (L lm (list 'HsModule (list 'XModulePs nil nil deprec hd) name ex imports ds)))))
+
+(defn add-haddock
+  "addHaddockToModule: the module (L span (HsModule ...)) with the documentation comments
+  inserted, hdk-comments the lexer's ([span hdk-comment]... in order); the annotations the pass
+  reads written nil"
+  [lmod hdk-comments]
+  ((nth (hdk-module lmod) 1) (make-st hdk-comments) range0))

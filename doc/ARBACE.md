@@ -42,7 +42,47 @@ code. Three kinds of things live here:
   2026-10-27, the files carrying their notice; "As built: JN9e" (the read without javac itself,
   `repr/java.ae`'s `convert-units-nojavac`, `resolve.ae`'s native class infos and `split.ae`'s summary,
   is Arbace's own);
-  `repr/java/classfile.ae`, `nattr.ae` are Arbace's own), `repr/c/` (repr/c, C's bridge,
+  `repr/java/classfile.ae`, `nattr.ae` are Arbace's own), `repr/haskell.ae` and `repr/haskell/`
+  (repr/haskell, Haskell's bridge, `arbace.repr.haskell.*`; doc/haskell/SPEC.md, HASKELL-NOTES.md: the
+  converter, the printer and the checks are Arbace's own; its native reader, doc/haskell/NATIVE.md,
+  ports GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c...101e77`, the corpus's pin): `repr/haskell/lex.ae` ports `compiler/GHC/Parser/Lexer.x` with
+  `Lexer/String.x`, `Lexer/Interface.hs`, `String.hs`, `CharClass.hs`; `header.ae` `GHC/Parser/Header.hs` and
+  the extension flags of `GHC/Driver/{DynFlags,Flags,Session}.hs`; `rules_module.ae`, `rules_decl.ae`
+  and `rules_expr.ae` the actions of `GHC/Parser.y`; `post.ae` and `post_decl.ae`
+  `GHC/Parser/PostProcess.hs` with the builders of `GHC/Hs/{Utils,Type}.hs`; `haddock.ae` and
+  `haddocklex.ae` `GHC/Parser/PostProcess/Haddock.hs` and `GHC/Parser/HaddockLex.x`; ported by hand on
+  2026-11-04 (the tarball names the Alex and Happy sources `*.x.source`, `Parser.y.source`), the files
+  carrying GHC's notice; `tables.ae` is generated from the tarball's `Parser.y.source` by
+  `happy.ae`, Arbace's own port of Happy's LALR(1) construction, checked equal to the tables of the
+  tarball's `Parser.hs` (Happy 1.20.1.1's output); `unlit.ae` ports the tarball's `utils/unlit/unlit.c`
+  (2026-11-04); `cpp.ae`, GCC's traditional preprocessor as GHC runs it, is a clean-room implementation of
+  Arbace's own (2026-11-04): written from the documented behaviour of `-traditional` and judged against Alpine's
+  gcc 15.2.0 `cpp -traditional` as a black box (its output and line markers on probe inputs), no GCC code read
+  or kept; `ast.ae`, `parse.ae`, `native.ae`, `driver.ae` are Arbace's own;
+  `rename.ae`, the renamer of the front end (doc/haskell/FRONTEND-SURVEY.md, HF2), ports `mkOpAppRn`, `mkNegAppRn`,
+  `mkConOpPatRn`, `mkHsOpTyRn` of `compiler/GHC/Rename/HsType.hs` and `compareFixity` of `compiler/GHC/Types/Fixity.hs`
+  from the same tarball on 2026-11-05, reading the rest of `compiler/GHC/Rename/` as the specification, the file
+  carrying GHC's notice; the helper's `rn`, `iface` and `tc` verbs, `tools/hsdump/HsRn.hs`, are Arbace's own;
+  `typecheck.ae`, the front end's elaborator (HF3's first slice, 2026-11-05), is Arbace's own, written anew with GHC's
+  `compiler/GHC/Tc/` and Jones's "Typing Haskell in Haskell" (1999) read as the specification, no code ported;
+  `desugar.ae` (HF5, the match compiler) and `tostg.ae` (HF6, CorePrep, CoreToStg, Unarise) follow GHC 9.14.1's
+  `compiler/GHC/HsToCore/Match*.hs`, `GuardedRHSs.hs`, `ListComp.hs`, `compiler/GHC/CoreToStg/Prep.hs`,
+  `CoreToStg.hs`, `compiler/GHC/Stg/Unarise.hs`, `Stg/FVs.hs` from the same tarball (2026-11-05, written after their
+  algorithms, carrying GHC's notice), `stgcmp.ae` is Arbace's own; `simpleopt.ae` (2026-11-06) ports
+  `compiler/GHC/Core/SimpleOpt.hs` with the occurrence information of `Core/Opt/OccurAnal.hs` and the compulsory
+  unfoldings of `Types/Id/Make.hs`, `constfold.ae` (2026-11-06) the `Float#`/`Double#` rules of
+  `compiler/GHC/Core/Opt/ConstantFold.hs` with `Types/Literal.hs`'s conversions, both from the same tarball and carrying
+  GHC's notice; `front.ae`, the front end's driver, is Arbace's own; `simplify.ae`, `occanal.ae` and `core.ae`
+  (2026-11-06, the -O0 Simplifier) port `compiler/GHC/Core/Opt/Simplify.hs` with `Simplify/Iteration.hs`, `Utils.hs`,
+  `Env.hs`, `Inline.hs`, `compiler/GHC/Core/Opt/OccurAnal.hs`, `Opt/Arity.hs`, `compiler/GHC/Core/Unfold.hs` with
+  `Unfold/Make.hs`, `compiler/GHC/Core/Utils.hs` and `SimpleOpt.hs`'s `exprIsConApp_maybe` from the same tarball, carrying
+  GHC's notice; `primops.ae` is generated from `compiler/GHC/Builtin/primops.txt.pp` by `tools/hsprimops/primops.awk`;
+  `simplcmp.ae`, the simplified Core's judge, is Arbace's own),
+  `deriv.ae` (HF4, 2026-11-05) ports the generators of `compiler/GHC/Tc/Deriv/Generate.hs` (Eq, Ord, Enum, Bounded, Ix, Read,
+  Show) and `Deriv/Functor.hs` (Functor, Foldable, Traversable) from the same tarball, the file carrying GHC's notice;
+  `Deriv/Infer.hs` and `Deriv.hs` read as the specification of the contexts and strategies),
+  `repr/c/` (repr/c, C's bridge,
   `arbace.repr.c.*`; doc/C23-SURVEY.md, doc/c/SPEC.md: its lexer and preprocessor, `repr/c/lex.ae` and
   `pp.ae`, are ports of modernc.org/cc/v4 v4.29.7 as go-whim carries it, https://github.com/arbace/go-whim
   at `80c49bf53cd6340487ac623f3d6d135b77ac1db6`, `crefactor/cc/scanner.go` and `cpp.go` with the parts of

@@ -20,6 +20,25 @@
 --       BlankSrcSpan BlankEpAnnotations after eraseEpLayout (NoBlank... with --full), and
 --       OUTDIR/FILE.lines: the start line of every located node (hsdump lines)
 --   hsdump lines [--libdir DIR] [--ghc FLAG... --files] FILE...   the lines, to standard output
+--   hsdump cpp -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] FILE...
+--       one OUTDIR/FILE.hspp per module: the text GHC parses (CPP's output, unlit's, hsc2hs's),
+--       which repr/haskell's native reader reads (arbace.repr.haskell.native), and
+--       OUTDIR/FILE.hspp.edn, the dump's (hsdump/config {...}) of it (the preprocessing's keys)
+--   hsdump rn    -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] FILE...
+--   hsdump iface -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] MODULE...
+--   hsdump tc    -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] FILE...
+--       HF1 (doc/haskell/FRONTEND-SURVEY.md, "As built: HF1-HF2"), in HsRn.hs: GHC's renamer's output reduced to the
+--       resolved names, operator trees, binding groups, imports and exports (OUTDIR/FILE.rn.edn), and the libraries'
+--       interfaces (OUTDIR/MODULE.iface.edn); tc (HF3): each module's typed things in the iface verb's forms and its
+--       desugared Core with the types erased (OUTDIR/FILE.tc.edn)
+--   hsdump stg [--core] [--one-shot] -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] FILE...
+--       the files compiled as ghc --make compiles them (the GHC flags as given: -O, -this-unit-id,
+--       -i, -outputdir...; no link), each module's final STG written as OUTDIR/MODULE.stg.ae by a
+--       hook between STG and Cmm, and with --core its simplified Core as OUTDIR/MODULE.core.ae
+--       (doc/haskell/STG-SPEC.md); the exit status is 1 when a module fails to compile; --one-shot: the
+--       modules compiled each by a process of its own (--single) in dependency order, -jN at once, as hadrian
+--       runs ghc -c per module
+--   hsdump core -o OUTDIR ...   the Core alone
 -- FILE is relative to the current directory (the package's directory: it is the file name of
 -- every span). R6: an .hsc FILE is run through the host's hsc2hs first (--hsc2hs-arg A, repeated:
 -- its arguments; the output X.hs written beside X.hsc, as Cabal's build writes it, recorded in
@@ -30,6 +49,7 @@
 module Main (main) where
 
 import GHC
+import HsRn (rnVerb, ifaceVerb, tcVerb)
 import GHC.Driver.Session
 import GHC.Driver.Env (HscEnv(..), hscSetFlags)
 import GHC.Driver.Config.Parser (initParserOpts, supportedLanguagePragmas)
@@ -69,7 +89,7 @@ import Data.Bits
 import Data.Char (isSpace, ord, toLower, toUpper, isDigit)
 import Data.Data
 import Data.IORef
-import Data.List (isPrefixOf, isSuffixOf, sortOn, intercalate, nub)
+import Data.List (isPrefixOf, isSuffixOf, sortOn, intercalate, nub, sort)
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe (fromMaybe, mapMaybe, catMaybes, isJust)
 import Data.Ratio (numerator, denominator)
@@ -86,9 +106,11 @@ import System.Directory (renameFile, removeFile)
 import System.FilePath (takeDirectory, takeFileName, (</>), makeRelative, normalise)
 import System.IO
 
+import Stg (stgMain, Mode(..))
+
 -- The helper's version: bumped when its output changes (recorded in every dump's config).
 helperVersion :: Int
-helperVersion = 4
+helperVersion = 5
 
 -- The GHC this helper was written against (tools/hsdump/GHC_VERSION, passed by the build as
 -- -DGHC_PIN); the helper refuses to run on another (SPEC §8.4, H11).
@@ -102,13 +124,16 @@ pinnedGhc = "unset"
 data Opts = Opts
   { oVerb :: String, oFull :: Bool, oOut :: Maybe FilePath, oLibdir :: Maybe FilePath
   , oCorpus :: Maybe String, oSrcHash :: Maybe String, oFiles :: [FilePath], oGhc :: [String]
-  , oHscArgs :: [String], oRepo :: Maybe FilePath }
+  , oHscArgs :: [String], oRepo :: Maybe FilePath, oCore :: Bool, oOneShot :: Bool, oSingle :: Bool }
 
 parseOpts :: [String] -> Either String Opts
-parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing [] [] [] Nothing) rest
+parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing [] [] [] Nothing False False False) rest
   where
     go o ("--ghc" : fs) = let (gs, r) = break (== "--files") fs in go o { oGhc = oGhc o ++ gs } (drop 1 r)
     go o ("--full" : xs) = go o { oFull = True } xs
+    go o ("--core" : xs) = go o { oCore = True } xs
+    go o ("--one-shot" : xs) = go o { oOneShot = True } xs
+    go o ("--single" : xs) = go o { oSingle = True } xs
     go o ("-o" : d : xs) = go o { oOut = Just d } xs
     go o ("--libdir" : d : xs) = go o { oLibdir = Just d } xs
     go o ("--corpus" : c : xs) = go o { oCorpus = Just c } xs
@@ -135,6 +160,34 @@ main = do
       hPutStrLn stderr ("hsdump: " ++ libdir ++ " holds no ghc-" ++ cProjectVersion ++ " unit: not the GHC this helper was built with")
       exitWith (ExitFailure 2)
     Just _ -> return ()
+  -- HF1: the front end's oracles (HsRn.hs), their own session
+  when (oVerb o `elem` ["rn", "iface", "tc"]) $ do
+    let out = fromMaybe ".tmp/hsdump/out" (oOut o)
+    ok <- case oVerb o of
+      "rn" -> rnVerb libdir (oGhc o) out (oFiles o)
+      "tc" -> tcVerb libdir (oGhc o) out (oFiles o)
+      _ -> ifaceVerb libdir (oGhc o) out True (oFiles o)
+    exitWith (if ok then ExitSuccess else ExitFailure 1)
+  -- the STG and Core modes (doc/haskell/STG-SPEC.md): the files compiled as ghc --make does
+  when (oVerb o `elem` ["stg", "core"]) $ do
+    out <- maybe (fail "hsdump: -o OUTDIR") return (oOut o)
+    let header = [("ghc", show cProjectVersion), ("helper", show helperVersion)]
+                 ++ [("helper-hash", show h) | Just h <- [oSrcHash o]]
+                 ++ [("flags", "[" ++ unwords (map show (recorded (oGhc o))) ++ "]")]
+        -- the flags that decide the STG; not where the objects go, nor the parallelism
+        recorded ("-outputdir" : _ : fs) = recorded fs
+        recorded (f : fs) | "-j" `isPrefixOf` f = recorded fs
+                          | otherwise = f : recorded fs
+        recorded [] = []
+    let core = oVerb o == "core" || oCore o
+        childArgs f = [oVerb o, "--single"] ++ ["--core" | oCore o] ++ ["-o", out, "--libdir", libdir]
+                      ++ concat [["--helper-hash", h] | Just h <- [oSrcHash o]]
+                      ++ ["--ghc"] ++ filter (not . ("-j" `isPrefixOf`)) (oGhc o) ++ ["--files", f]
+        mode | oSingle o = Single
+             | oOneShot o = OneShotAll childArgs
+             | otherwise = Make
+    stgMain (oVerb o == "stg") core mode libdir out (oGhc o) (oFiles o) header
+    exitWith ExitSuccess
   failures <- newIORef (0 :: Int)
   runGhc (Just libdir) $ do
     dflags0 <- getSessionDynFlags
@@ -192,6 +245,20 @@ main = do
         "lines" -> case res of
           Left msg -> putStrLn ("hsdump/error " ++ firstLine msg)
           Right p -> hPutBuilder' stdout (linesOf (mkFastString file) (pModule p))
+        -- the text GHC parses (the CPP output, unlit's, hsc2hs's; the source otherwise), for the
+        -- native reader (arbace.repr.haskell.native), which leaves the preprocessing to GHC's driver
+        -- and the preprocessing's configuration, the dump's (hsdump/config {...}) in FILE.hspp.edn
+        "cpp" -> do
+          out <- outFile o file ".hspp"
+          outc <- outFile o file ".hspp.edn"
+          case res of
+            Left msg -> do
+              withUtf8File out $ \h -> hPutStrLn h ("hsdump/error " ++ firstLine msg)
+              withUtf8File outc $ \h -> hPutBuilder' h (BB.string7 "(hsdump/error " <> str msg <> BB.char7 ')' <> BB.char7 '\n')
+            Right p -> do
+              B.writeFile out (pText p)
+              cfg <- configOf o libdir (fromMaybe "" ghcUnit) dflags2 p
+              withUtf8File outc $ \h -> hPutBuilder' h (cfg <> BB.char7 '\n')
         v -> hPutStrLn stderr ("hsdump: unknown verb " ++ v) >> exitWith (ExitFailure 2)
   n <- readIORef failures
   when (n > 0) $ exitWith (ExitFailure 1)
@@ -324,20 +391,25 @@ parseOne hsc_env o file hsc = do
                 ++ [drop 8 a | a <- cmdWords, "-include" `isPrefixOf` a, length a > 8]
               macrosFile = [f | f <- includes, not ("ghcversion.h" `isSuffixOf` f)]
               configured = map showOpt' (snd (toolSettings_pgm_P (toolSettings dflags0)))
+          -- the MIN_VERSION header's hash with its blocks sorted (version 5: GHC orders them by its
+          -- unit map's uniques, which only its process knows; doc/haskell/NATIVE.md)
           macros <- forM (take 1 macrosFile) $ \f -> do
             e <- doesFileExist f
-            if e then Just . sha256Hex <$> B.readFile f else return Nothing
-          let markerFiles = nub [f | l <- BC.lines out, Just f <- [lineMarkerFile (BC.unpack l)], f /= file, not ("<" `isPrefixOf` f)]
+            if e then Just . sha256Hex . canonicalMacros <$> B.readFile f else return Nothing
+          -- a literate module's CPP input, unlit's temporary output, as <unlit> (version 5)
+          let litIn = [w | lit, (a, w) <- zip cmdWords (drop 1 cmdWords), a == "assembler-with-cpp"]
+              markerFiles = nub [f | l <- BC.lines out, Just f <- [lineMarkerFile (BC.unpack l)], f /= file, f `notElem` litIn, not ("<" `isPrefixOf` f)]
           fileHashes <- forM markerFiles $ \f -> do
             e <- doesFileExist f
-            h <- if e then sha256Hex <$> B.readFile f else return "missing"
+            h <- if e then sha256Hex . (if f `elem` macrosFile then canonicalMacros else id) <$> B.readFile f else return "missing"
             return (if f `elem` macrosFile then "<macros>" else relLibdir (oLibdir o) f, "sha256:" ++ h)
           let record = CppRecord
                 { cCommand = pgm : configured
-                , cArgs = map (roleOf (oLibdir o) outFn file macrosFile) (dropPrefix configured (drop 1 cmdWords))
+                , cArgs = map (\a -> if a `elem` litIn then "<unlit>" else roleOf (oLibdir o) outFn file macrosFile a) (dropPrefix configured (drop 1 cmdWords))
                 , cFiles = fileHashes
                 , cMacros = fmap ("sha256:" ++) (case macros of (Just m : _) -> Just m; _ -> Nothing)
-                , cOutput = "sha256:" ++ sha256Hex (foldr (\m t -> replaceBS (BC.pack m) (BC.pack "<macros>") t) out macrosFile)
+                , cOutput = "sha256:" ++ sha256Hex (foldr (\(m, r) t -> replaceBS (BC.pack m) (BC.pack r) t) out
+                                                     ([(m, "<macros>") | m <- macrosFile] ++ [(m, "<unlit>") | m <- litIn]))
                 , cViewMarkers = viewMarks }
               -- a literate module without CPP went through unlit alone (R6): no CPP record
               cpp = if lit && null cmdLines then Nothing else Just record
@@ -355,6 +427,17 @@ parseOne hsc_env o file hsc = do
     dropPrefix _ xs = xs
     showOpt' (Option s) = s
     showOpt' (FileOption a b) = a ++ b
+
+-- a MIN_VERSION header (generatePackageVersionMacros's) with its blocks sorted: the canonical
+-- order of its definitions (helper version 5)
+canonicalMacros :: B.ByteString -> B.ByteString
+canonicalMacros t = B.concat (sort (go t))
+  where
+    sep = BC.pack "\n\n"
+    go s | B.null s = []
+         | otherwise = case B.breakSubstring sep s of
+             (a, b) | B.null b -> [a]
+                    | otherwise -> B.append a sep : go (B.drop 2 b)
 
 -- every occurrence of a in t replaced by b
 replaceBS :: B.ByteString -> B.ByteString -> B.ByteString -> B.ByteString

@@ -1,0 +1,209 @@
+(ns arbace.repr.haskell.ast
+  "The native reader's data (doc/haskell/NATIVE.md): GHC 9.14.1's parsed tree (HsModule GhcPs) as
+  the helper tools/hsdump writes it in mode :lines (SPEC §8.2), built directly by the parser's
+  actions, with spans kept in the parser's form until the tree is written out (to-dump).
+
+  - A span is [file l1 c1 l2 c2 b1 b2] (GHC's RealSrcSpan with its BufSpan, b1 b2 nil when GHC's
+    has none); nil is noSrcSpan (an UnhelpfulSpan). The lexer makes them (arbace.repr.haskell.lex).
+  - A located node is (L span x): Located, LocatedA, LocatedN... alike (their exact-print
+    annotations are not kept; the location of an EpAnn is its anchor's span).
+  - A node is (Con field...), positional in the constructor's field order, as the helper dumps it:
+    an exact-print annotation (EpAnn, EpToken, AnnList... and every Ep* and Ann* type) nil,
+    NoExtField the symbol NoExtField, a Maybe Nothing or (Just x), lists and NonEmpty vectors,
+    tuples (tuple a b...), Bool true/false, Char (char n), Rational (:% n d), SourceText (src
+    \"text\") or nil, a name (unqual ns \"occ\") / (qual ns \"M\" \"occ\") / (exact ns \"occ\"),
+    ns one of var data tv tc fld, a module name (mod \"M\"), a doc chunk (chunk \"text\").
+  - A token is [kind value span] (the lexer's).
+
+  Helpers here are GHC's location utilities (GHC.Types.SrcLoc's combineSrcSpans, Parser.y's comb2
+  ... sLL, GHC.Parser.Annotation's HasLoc) and the names' constructors (GHC.Types.Name.Reader)."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Spans
+
+(defn span?
+  "A span of the parser's form"
+  [x]
+  (and (vector? x) (= 7 (count x)) (not (keyword? (nth x 0)))
+       (number? (nth x 1)) (number? (nth x 4))))
+
+(defn mk-span
+  "A span of file from (l1 c1) to (l2 c2), its buffer positions b1 b2 (nil: none)"
+  [file l1 c1 l2 c2 b1 b2]
+  [file l1 c1 l2 c2 b1 b2])
+
+(defn combine
+  "combineSrcSpans: the smallest span covering both (min start, max end); an unhelpful span gives
+  the other; spans of two files give noSrcSpan; the BufSpan only when both have one"
+  [a b]
+  (cond
+    (nil? a) b
+    (nil? b) a
+    (not= (nth a 0) (nth b 0)) nil
+    :else
+    (let [al1 (long (nth a 1)) ac1 (long (nth a 2)) al2 (long (nth a 3)) ac2 (long (nth a 4))
+          bl1 (long (nth b 1)) bc1 (long (nth b 2)) bl2 (long (nth b 3)) bc2 (long (nth b 4))
+          [l1 c1] (if (or (< al1 bl1) (and (= al1 bl1) (<= ac1 bc1))) [al1 ac1] [bl1 bc1])
+          [l2 c2] (if (or (> al2 bl2) (and (= al2 bl2) (>= ac2 bc2))) [al2 ac2] [bl2 bc2])
+          ab1 (nth a 5) bb1 (nth b 5)
+          [b1 b2] (if (and ab1 bb1)
+                    [(min (long ab1) (long bb1)) (max (long (nth a 6)) (long (nth b 6)))]
+                    [nil nil])]
+      [(nth a 0) l1 c1 l2 c2 b1 b2])))
+
+(defn token? [x] (and (vector? x) (= 3 (count x)) (keyword? (nth x 0))))
+
+(defn L? [x] (and (seq? x) (= 'L (first x))))
+
+(defn gl
+  "getHasLoc: the span of a token, a located node (L s x), a span, a Maybe (Nothing: noSrcSpan)"
+  [x]
+  (cond
+    (nil? x) nil
+    (token? x) (nth x 2)
+    (seq? x) (let [h (first x)]
+               (cond (= h 'L) (nth x 1)
+                     (= h 'Just) (gl (second x))
+                     :else nil))
+    (span? x) x
+    (= x 'Nothing) nil
+    :else nil))
+
+(defn comb2 [a b] (combine (gl a) (gl b)))
+(defn comb3 [a b c] (combine (gl a) (combine (gl b) (gl c))))
+(defn comb4 [a b c d] (combine (gl a) (combine (gl b) (combine (gl c) (gl d)))))
+(defn comb5 [a b c d e] (combine (gl a) (combine (gl b) (combine (gl c) (combine (gl d) (gl e))))))
+(defn comb6 [a b c d e f] (combine (gl a) (combine (gl b) (combine (gl c) (combine (gl d) (combine (gl e) (gl f)))))))
+
+(defn zero-width?
+  "isZeroWidthSpan (an unhelpful span is not)"
+  [s]
+  (boolean (and s (= (nth s 1) (nth s 3)) (= (nth s 2) (nth s 4)))))
+
+(defn first-char-span
+  "srcSpanFirstCharacter"
+  [s]
+  (when s
+    (let [[f l c _ _ b1 _] s]
+      [f l c l (inc (long c)) b1 (when b1 (inc (long b1)))])))
+
+(defn span-start [s] (when s [(nth s 1) (nth s 2)]))
+(defn span-end [s] (when s [(nth s 3) (nth s 4)]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Located nodes
+
+(defn L "A located node" [sp x] (list 'L sp x))
+(defn unLoc "The node of a located node" [x] (nth x 2))
+(defn getLoc "The span of a located node" [x] (nth x 1))
+(defn noLoc "A node located at noSrcSpan" [x] (list 'L nil x))
+(defn sL1 "sL1: x located at a's span" [a x] (L (gl a) x))
+(defn sLL "sLL: x located over a and b" [a b x] (L (comb2 a b) x))
+(defn sLZ "sLZ: over a and b, or a's when b's span is zero-width" [a b x]
+  (if (zero-width? (gl b)) (L (gl a) x) (L (comb2 a b) x)))
+(defn reloc "reLoc, la2la...: the same location (annotations dropped)" [x] x)
+
+(defmacro con
+  "A node: (con HsVar a b) is (HsVar a b)"
+  [c & fields]
+  `(list '~c ~@fields))
+
+(def nx 'NoExtField)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Haskell data
+
+(defn just [x] (list 'Just x))
+(defn just? [x] (and (seq? x) (= 'Just (first x))))
+(defn from-just [x] (when (just? x) (second x)))
+(defn maybe "Nothing for nil, else (Just x)" [x] (if (nil? x) 'Nothing (just x)))
+(defn tuple [& xs] (apply list 'tuple xs))
+(defn hs-char "A Char: (char n)" [c] (list 'char (long c)))
+(defn src "A SourceText" [^String s] (list 'src s))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Names (GHC.Types.Name.Reader's RdrName; the OccName namespaces var data tv tc fld)
+
+(defn unqual [ns ^String occ] (list 'unqual ns occ))
+(defn qual [ns ^String m ^String occ] (list 'qual ns m occ))
+(defn exact [ns ^String occ] (list 'exact ns occ))
+
+(defn rdr-ns "The namespace of a name" [r] (second r))
+(defn rdr-occ "The occurrence's string of a name" [r]
+  (case (first r) unqual (nth r 2) qual (nth r 3) exact (nth r 2) orig (nth r 4)))
+(defn rdr-qual? [r] (= 'qual (first r)))
+(defn rdr-unqual? [r] (= 'unqual (first r)))
+(defn rdr-exact? [r] (= 'exact (first r)))
+
+(defn set-rdr-ns
+  "setRdrNameSpace for a name of the parser (Unqual, Qual, Exact: an Exact built-in name keeps
+  its own)"
+  [r ns]
+  (case (first r)
+    unqual (list 'unqual ns (nth r 2))
+    qual (list 'qual ns (nth r 2) (nth r 3))
+    r))
+
+(defn mod-name "A ModuleName: (mod \"M\")" [^String m] (list 'mod m))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Writing out: spans in the dump's form
+
+(defn dump-span
+  "A span as the helper writes it: [l1 c1 l2 c2], [\"file\" l1 c1 l2 c2] in another file than the
+  module's, nil for noSrcSpan"
+  [s ^String module-file]
+  (when s
+    (let [[f l1 c1 l2 c2] s]
+      (if (= f module-file) [l1 c1 l2 c2] [f l1 c1 l2 c2]))))
+
+(defn node?
+  "A node (Con field...) or a dump form ((src ...), (:% n d)...): a seq headed by a symbol or a
+  keyword; any other seq is a Haskell list the parser built by consing"
+  [x]
+  (and (seq? x) (seq x) (let [h (first x)] (or (symbol? h) (keyword? h)))))
+
+(defn to-dump
+  "The tree with every located node's span in the dump's form, and every list a vector; the
+  annotations the parser keeps for the Haddock pass (XModulePs's keyword and layout, ClassDecl's
+  `where` and layout, HsDataDefn's `where`) nil, as the dump has every annotation"
+  [x ^String module-file]
+  (letfn [(walk [x]
+            (cond
+              (seq? x) (cond
+                         (empty? x) []
+                         (= 'L (first x)) (list 'L (dump-span (nth x 1) module-file) (walk (nth x 2)))
+                         (node? x) (case (first x)
+                                     XModulePs (list 'XModulePs nil nil (walk (nth x 3)) (walk (nth x 4)))
+                                     ClassDecl (apply list 'ClassDecl (list 'tuple nil nil nil) (map walk (drop 2 x)))
+                                     HsDataDefn (apply list 'HsDataDefn nil (map walk (drop 2 x)))
+                                     (apply list (map walk x)))
+                         :else (mapv walk x))
+              (vector? x) (mapv walk x)
+              :else x))]
+    (walk x)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The parser's actions (Parser.y's semantic actions), registered by rule
+
+(def actions
+  "The parser's actions by rule: \"lhs : rhs...\" (Parser.y's rule as written, parameters
+  unsubstituted, symbols single-spaced; \"lhs : \" for an empty right-hand side) to a fn of the
+  lexer state and the right-hand side's values"
+  (java.util.HashMap.))
+
+(defn rule-key
+  "The registry's key of a rule"
+  ^String [^String lhs rhs]
+  (let [rhs (if (string? rhs) (str/split (str/trim rhs) #"\s+") rhs)
+        rhs (remove empty? rhs)]
+    (str lhs " :" (apply str (map #(str " " %) rhs)))))
+
+(defmacro defrule
+  "An action of Parser.y: (defrule \"exp10\" \"'-' fexp\" [ps $1 $2] body): ps the lexer state,
+  $1... the values of the right-hand side (a token is [kind value span])"
+  [lhs rhs args & body]
+  `(.put ^java.util.HashMap actions ~(rule-key lhs rhs) (fn ~args ~@body)))
