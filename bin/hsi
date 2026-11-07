@@ -10,6 +10,9 @@
 #                                  name, checked by its SHA-256 and SHA-512) and extracted into .tmp/hsi/ghc-9.14.1/;
 #                                  nofib at its commit into .tmp/hsi/nofib (git fetch of the one commit, its tree
 #                                  hash checked); the source tarball by bin/repr-haskell corpus fetch (its pin)
+#                                  In a linked worktree or the gate's clean clone each is the main checkout's
+#                                  (hard-linked; nofib fetched from its checkout), never downloaded: a refusal
+#                                  when the main checkout has none (bin/lib/repr-haskell/inputs.bash, batch 2's proposal 8 (a))
 #   bin/hsi pins --count           every corpus's measures as they are now (ID KEY VALUE lines)
 #   bin/hsi pins --check           the pins hold (GHC's version, the tarballs' digests, nofib's tree) and every
 #                                  corpus's measures equal test/haskell/eval-corpora.edn's (fetches first)
@@ -57,6 +60,12 @@
 #                                  --only @FILE: a list of ids (test/haskell/hsi/essential.txt, GT8); --record writes
 #                                  test/haskell/check-hsi.edn; --aot --opt O1 (HES74 (c)): the compiled level on -O1 dumps
 #                                  against GHC's -O1 runs (record-ref --opt O1: test/haskell/ref-ghc914-O1.edn)
+#   bin/hsi check --front native [...]   HFS-I1 (a): the programs the native front end compiles run from its STG (over the pack
+#                                  haskell-ifaces-ghc-9.14.1), the others from haskell-stg-progs, each result naming its :stg; work
+#                                  .tmp/hsi/check-native, --record test/haskell/check-hsi-native.edn; --record-ifaces (GHC, by hand)
+#                                  records the interfaces pack (bin/lib/hsi/check's header)
+#   bin/hsi compare-front [--aot] [NATIVE [GHC]]   the native run's results against GHC's STG's record program by program
+#                                  (lost and gained passes); fails on a pass lost from native STG
 #   bin/hsi aot build|run ...      HE8's AOT, the first slice (bin/lib/hsi/aot): a program's STG and the library closures
 #                                  it enters compiled to Go over hsi's machine and built with it; aot run FILE.hs [ARG...]
 #                                  as bin/hsi run; bin/hsi check --aot judges the corpora so
@@ -109,6 +118,7 @@ jobs=${HSI_JOBS:-8}
 pin=$(cat "$root/tools/hsdump/GHC_VERSION")
 
 die() { echo "hsi: $*" >&2; exit 1; }
+. "$root/bin/lib/repr-haskell/inputs.bash" # batch 2's proposal 8 (a): a worktree's tarballs and nofib are the main checkout's
 . "$root/bin/lib/hsi/records.bash" # ORS12: the libraries' and the programs' STG as records
 
 # stage 0 reads the data: ARBACE_HOST_EXE, else the checkout's stage 0, else the main checkout's (never built here)
@@ -145,7 +155,7 @@ testsuite_fetch() {
   url=$(pin_field :ghc-9.14.1-testsuite :url); sha=$(pin_field :ghc-9.14.1-testsuite :sha256)
   sha512=$(pin_field :ghc-9.14.1-testsuite :sha512)
   mkdir -p "$WORK/src"
-  if [ ! -f "$tb" ]; then
+  if [ ! -f "$tb" ] && ! haskell_take "$tb"; then
     echo "== hsi: fetching $url" >&2
     curl -fsSL -o "$tb.part" "$url" && mv "$tb.part" "$tb"
   fi
@@ -162,11 +172,13 @@ nofib_fetch() {
   local repo commit tree d=$WORK/nofib
   repo=$(pin_field :nofib :repo); commit=$(pin_field :nofib :commit); tree=$(pin_field :nofib :tree)
   if [ ! -d "$d/.git" ] || [ "$(git -C "$d" rev-parse HEAD)" != "$commit" ]; then
-    echo "== hsi: fetching nofib $commit" >&2
-    rm -rf "$d"; mkdir -p "$d"
-    git -C "$d" init -q
-    git -C "$d" fetch -q --depth 1 "$repo" "$commit"
-    git -C "$d" -c advice.detachedHead=false checkout -q FETCH_HEAD
+    if ! haskell_take_git "$d" "$commit"; then
+      echo "== hsi: fetching nofib $commit" >&2
+      rm -rf "$d"; mkdir -p "$d"
+      git -C "$d" init -q
+      git -C "$d" fetch -q --depth 1 "$repo" "$commit"
+      git -C "$d" -c advice.detachedHead=false checkout -q FETCH_HEAD
+    fi
   fi
   [ "$(git -C "$d" rev-parse HEAD)" = "$commit" ] || die "nofib: HEAD is not the pin's commit"
   [ "$(git -C "$d" rev-parse 'HEAD^{tree}')" = "$tree" ] || die "nofib: the tree is not the pin's"
@@ -754,6 +766,7 @@ case $cmd in
     cd "$here" && ARBACE_PATH=$root "$(arbace_exe)" "$root/test/haskell/eval/cnodes.ae" "$root" "$out" "$@" ;;
   check) exec "$root/bin/lib/hsi/check" "$@" ;;
   own-verdicts) exec "$root/bin/lib/hsi/own-verdicts" "$@" ;;
+  compare-front) exec "$root/bin/lib/hsi/compare-front" "$@" ;;
   aot) exec "$root/bin/lib/hsi/aot" "$@" ;;
   primops) primops_hsi "$@" ;;
   libm-check) libm_check "$@" ;;

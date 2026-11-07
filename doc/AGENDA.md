@@ -374,6 +374,54 @@ One merge commit each: `rust-90` 58ca6783 (`105c549d8`), `haskell-90` 0fb4591b (
   the others' first passes), about 3 h more for them by the lines' own estimates (hsi-check and hsi-check-aot heavy, Rust's round trips'
   33,346 files): about 13 h, over the 6 h budget: proposal 2 (c), two nights (below).
 
+### Batch 2, third round (batch1's last head, cpp-indep, res34, hfs-i1, proposal 8 (a); 2026-11-07, on `batch2` 93db65e8)
+
+One merge commit each: `mac/batch1` 23d640f5 (`69d8704c2`: java-complete's F10a), `mac/cpp-indep` 605c62e6 (`2bc42fc1c`; scores
+recorded `5fc449d4e`), `mac/res34` 5d85bff6 (`b3de90d41`), `mac/hfs-i1` ce89c383 (`d0964c426`); then proposal 8 (a) (`2f9eb4fa4`, `2a124fbe9`).
+
+- **Conflicts of note.** batch1: the journal and JAVA-DEFERRED-TRIAGE (F10a's "As built" with JCS162-JCS167's proposals before batch 2's
+  "Decided"). cpp-indep: `bin/gate`'s oracle-packs pins (the same block as haskell-90's, kept in batch 2's place), the Makefile (haskell-90's
+  `oracle-records-*` targets already in), `test/oracle-records/kinds.edn` (C++'s six kinds beside Haskell's), CPP-SURVEY (batch 2's Decided
+  CP240/CP241/CP243 kept, "As built: cpp-indep" after it); its facts (`.tmp/independence.diff`) applied to `test/crops/independence.edn`.
+  Two `--full` parts (`cpp-check.gxx-dg-run-every-25`, `cpp-aot.gxx-dg-run-every-25`) moved to `test/gate/crops/cpp-oracle.edn` (waiting for
+  `:phase :oracle`, like `ocaml-oracle.edn`): `--full` 319 to 317 steps. res34: `arbace/c/cf2g.ae` (batch 1's CS277 `apack`/`vplen` with
+  RES34's placeholders and `ref-expr`, both kept), the Makefile (`rsi-aot-lib`, `ci-aot-lib`), RUST-EVAL-SURVEY. **Moved:** res34's proposals
+  RES61-RES63 renumbered **RES64-RES66** (RES61 is batch 2's rsi-essential memory). hfs-i1: FRONTEND-SURVEY (batch 2's Decided HFS-I1-HFS-I4
+  kept); its facts applied (the ref `"hfs-i1"`, no score change); its switch diff not applied (after the night's `compare-front`).
+- **Proposal 8 (a), built**: `bin/lib/repr-haskell/inputs.bash` (`haskell_take`, `haskell_take_git`): in a linked worktree or the clean
+  clone, GHC's source and testsuite tarballs are hard-linked from the main checkout's `.tmp/repr-haskell/corpus` and `.tmp/hsi/src`, nofib
+  fetched from its `.tmp/hsi/nofib`; when the main checkout has none, a refusal, never a download; every pin checked after as before.
+  `bin/repr-haskell corpus fetch` and `bin/hsi pins --fetch` take them; the Haskell steps declare `bin/lib/gate-cache.bash`. The main
+  checkout had no copy: seeded from batch 2's (hard links, pins verified; nofib at d4750745, tree 1f5a8852). Checked: `bin/hsi pins
+  --fetch` with the worktree's copies moved aside takes all three from the main checkout (no fetch); a missing one is refused.
+- **Keys** (12 hex; before `1bfe8ffffe7e`, `6b114cbcf8f0`, `54e889c46334`): after batch1 `6725b5801608`, `cb6a54899d99`, `343e3c44918d`
+  (all three: F10a's `go/arbace/jrt`, `overlay/jdk`, j2g's names); cpp-indep none; res34 gate `fc2cc71ebe1f`, javac `cc2abcd735f9`, runtime
+  unchanged (RES34's `arbace/c/{build,cf2g,runtime,aotlib}.ae`: C's embedded set); hfs-i1 and proposal 8 none. At the end: gate
+  `fc2cc71ebe1f`, runtime `cb6a54899d99`, javac `cc2abcd735f9`.
+- **Checks (light), after each merge:** `gate.crops check` 0 problems; `bin/gate --plan` 49 steps, 43 run; `--full --plan` 319 (batch1),
+  then 317 steps, 303 run, 8 after; `bin/reap` 41 of 44 cells checked, 1 problem (deferred.cpp's, the night's C++ record: CP245);
+  `bin/crops-score --judge --strict` 0 problems (after `--record` at cpp-indep). Crops: `bin/oracle-records pins` (ten packs with C++'s two
+  and Haskell's new `haskell-ifaces-ghc-9.14.1`, the tampered-pack control refused), `bin/repr-cpp pp-check --essential` on the derived
+  tree (1.47 GB), `bin/rsi judge-test` (12 of 12), `bin/repr-haskell test` (ok). Not run by day: C's and Rust's `check --aot` after RES34
+  (the shared cache `.tmp/ci-aot-lib` is empty, its first build is the night's), cppi's runtime-ci (3 GB, CP246).
+- **Found:** `bin/repr-haskell corpus fetch` runs the packages' configure scripts (the host's C compiler) in native mode: its skip test
+  (`[ -n "$live" ] || [ ! -f "$ninputs_pin" ] || ... && continue`) is inverted against its comment; the native reads take the products
+  from the pack anyway (proposal 9 below).
+
+| crop | batch2 before (93db65e8) | batch2 after (2a124fbe) |
+|---|---|---|
+| Clojure | 99.0 / 96.3 / 100 | 99.0 / 96.3 / 100 |
+| Java | 72.9 / 100 / 99.7 | 72.9 / 100 / 99.7 |
+| Go | 94.9 / 95.8 / 100 | 94.9 / 95.8 / 100 |
+| C | 95.1 / 100 / 99.7 | 95.1 / 100 / 99.7 |
+| C++ | 75.4 / 100 / 31.4 | 75.4 / 100 / 54.3 |
+| OCaml | 80.9 / 100 / 87.4 | 80.9 / 100 / 87.4 |
+| Scheme | 98.4 / 100 / 95.0 | 98.4 / 100 / 95.0 |
+| Haskell | 96.3 / 100 / 74.9 | 96.3 / 100 / 74.9 |
+| Rust | 75.0 / 95.8 / 80.0 | 75.0 / 95.8 / 80.0 |
+| LLVM IR | 96.0 / 100 / 96.9 | 96.0 / 100 / 96.9 |
+| Python | 0 / 83.3 / 20 | 0 / 83.3 / 20 |
+
 ### Batch 2's nights (decided 2 (c): over two nights; one heavy job at a time under `bin/heavy-lock`; at most 1.5 GiB a process outside the gate)
 
 Night A (on `next` once batch 2 is there; the rekey night):
@@ -395,6 +443,18 @@ Night A (on `next` once batch 2 is there; the rekey night):
    - Rust: `bin/rsi ir-pack --corpus ui` (rustc, the oracle tier; then commit `test/rust/ir/ui.sha256`, RES56 (a)); `RSI_BATCH=2
      RSI_THREADS=1 RSI_JOBS=2 RSI_CI_MEMLIMIT=1400MiB bin/rsi check --corpus samples,synthetic --record` (about 2 h), RES61's measure
      (`RSI_BATCH=1 bin/rsi check --essential` under `time -v`).
+   - C++ (cpp-indep, before C++'s other records; doc/cpp/CPP-SURVEY.md, "As built: cpp-indep", "The night's commands"): the packs
+     re-recorded on clang 23.1.5 (`bin/repr-cpp host record`, `bin/cppi record-ir`, `--runtime`, `runtime-build --update`, the sampling's
+     pack `record-ir --corpus gxx-dg-run --every 25`), `bin/oracle-records verify cpp ir runtime-ir --sample 8`, `bin/repr-cpp target
+     oracle`, `runtime-build && runtime-ci` (`CPPI_JOBS=1`, CP246 (a)), `check`, `check --aot`, `pp-check`; then CP240 (b)'s routes
+     compared (`CPPI_ROUTE=clang|auto`); this replaces step 0's `runtime-build --update` alone.
+   - Rust after RES34 (doc/rust/RUST-EVAL-SURVEY.md, "As built: RES34 on rust-90's line", "Night commands"): `bin/rsi check --essential`
+     (std's fragments at the merged keys), `RSI_AOT_LIB_CACHED=1 bin/rsi aot-lib` (the shared `.tmp/ci-aot-lib`), then the AOT cell
+     `bin/rsi check --aot --corpus samples,synthetic --record` (about 4 h; RES66's three programs above 2 GB last), the UI corpus's
+     every 40th judged (RES65).
+   - Haskell HFS-I1 (doc/haskell/FRONTEND-SURVEY.md, "As built: HFS-I1 (a)"): after `bin/hsi dumps --record`, `bin/hsi check --front
+     native ... --record` and `bin/hsi compare-front` (and `--aot`) against the same night's `check-hsi.edn`; no pass lost: the switch
+     (hfs-i1's `.tmp/hfs-i1-switch.diff`, one commit).
    - Last: `bin/reap --record`, `bin/crops-score --record`.
 
 Night B (the night after, keyed: what A did not reach):
@@ -433,11 +493,16 @@ Night B (the night after, keyed: what A did not reach):
 7. **RES61, rsi-essential's memory** (doc/rust/RUST-EVAL-SURVEY.md, "Proposed (batch 2: RES61)"): 3.8 GB measured, the essential tier's
    cap 3 GiB, so the step runs in `--full` now. (a) Measure `RSI_BATCH=1` at night and return it at 3 GiB if it fits; (b) leave it in
    `--full`; (c) a smaller essential list. *Recommended: (a)*.
-8. **The worktrees' Haskell inputs.** `bin/hsi` and `bin/repr-haskell` fetch their pinned tarballs and nofib when the checkout's `.tmp/`
+8. **(built, third round)** **The worktrees' Haskell inputs.** `bin/hsi` and `bin/repr-haskell` fetch their pinned tarballs and nofib when the checkout's `.tmp/`
    lacks them (found on batch 2). (a) Both read the main checkout's `.tmp/hsi` and `.tmp/repr-haskell/corpus` from a linked worktree, as
    Scheme's corpora do (GTS212); (b) leave it. *Recommended: (a)*.
-- Still open from the lines: LLS31 (a) (the pack rt, planned), LLS32, CP242, OCaml's OC182, OC186-OC190; the branches `res34` (RES34,
-  then HFS-I1 on `hfs-i1`) and `cpp-indep` (CP240 (a), CP241 (b)) come after this batch.
+9. **repr-haskell's configure in native mode** (found, third round): (a) invert the skip test so the native mode runs no configure
+   script (the products from the pack, as its comment says), checked by a `corpus fetch` in a fresh `.tmp` with cc stubbed; (b) leave
+   (the extraction's products unused by the native reads). *Recommended: (a)*, a Haskell agent's light task.
+- Open from the third round's lines: CP244-CP246 (C++, CPP-SURVEY), RES61 (proposal 7), RES64-RES66 (res34's, renumbered: the glue as tables, the UI corpus's AOT record, the builders above 2 GB),
+  HFS-I5-HFS-I7 (Haskell, FRONTEND-SURVEY), JCS162-JCS167 decided (F10a's).
+- Still open from the lines: LLS31 (a) (the pack rt, planned), LLS32, CP242, OCaml's OC182, OC186-OC190; the branches `res34`, `hfs-i1`
+  and `cpp-indep` merged in the third round (above); CP240 (b) and (c) after the night's routes compared.
 
 ## After the tag
 

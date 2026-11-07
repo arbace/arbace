@@ -310,6 +310,12 @@ Prior art:
     `cpp-aot`, parts the recorded corpora samples and runtime (`test/cpp/check{,-aot}-linux-amd64.edn`) and the sampling `--sample 25` of gxx-dg-run
     (`test/cpp/check{,-aot}-every-25-linux-amd64.edn`: a `--sample N` run is held to and `--record`ed into its own record), against g++ 15.2's runs
     `test/cpp/ref-gxx15.edn` (reap's `:ref-corpora`); CX9's `cpp-dg` (`bin/repr-cpp dg`), `cpp-runtime` (the lowered runtime, a build step), `cpp-roundtrip-dg` (rotated) and `cpp-c2j` with GT9's fragment.
+    Since cpp-indep (2026-11-07; doc/cpp/CPP-SURVEY.md, "As built: cpp-indep", CP240 (a), CP241 (b)) the run checks and the runtime's build
+    read clang's IR from the packs `cpp-ir-samples` and `cpp-runtime-ir` (`test/cpp/records/`, mac/oracle-records-cpp2's tooling
+    `test/oracle-records/`, `bin/oracle-records`; `bin/cppi record-ir` by hand, `CPPI_LIVE=1` live, no gcc unless `CPPI_GCC=1`), and the readers
+    read libstdc++'s headers and gcc's include directory as `test/cpp/target.ae` makes them from the pinned gcc tarball and `cpp/target/`
+    (`bin/repr-cpp target tree|answers|oracle`, with musl's headers from its tarball: `bin/lib/repr-cpp/sysroot.bash`, `REPR_CPP_HEADERS=arbace|libstdcxx|host`);
+    the live parts wait in `test/gate/crops/cpp-oracle.edn` for the oracle tier.
     Scheme's since SM9: repr/scheme against Chez 10.3.0 run live (the host `:chez`) and si's light driver
     (`go/arbace/scm` built alone by TamaGo's go, not Arbace's executable) against Chez's and Chibi's recorded runs, the corpora fetched
     by pin into the main checkout's `.tmp/scheme/corpora` (a worktree's and the clean clone's too); `--corpus ID` (`bin/repr-scheme

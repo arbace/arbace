@@ -82,6 +82,7 @@
 (def ^:dynamic *level* 0)
 (def ^:dynamic *counter* nil) ; atom
 (def ^:dynamic *errors* nil)  ; atom []
+(def ^:dynamic *strict-binds* nil) ; {:atom (atom [[pn pattern]...]) :level n}: a let's banged pattern bindings, which its body forces (HsLet)
 (def ^:dynamic *control* false) ; the negative control: defaulting's order reversed, superclass-implied constraints kept
 
 (defn- fresh-id [] (swap! *counter* inc))
@@ -661,8 +662,11 @@
              (unify tc (con-ty tc-bool)) (unify tt te)
              [tt (list 'case cc (fresh-lv "wild") [(list 'alt (ext-name "data" "GHC.Internal.Types" "False") [] ce)
                                                    (list 'alt (ext-name "data" "GHC.Internal.Types" "True") [] ct)])])
-      HsLet (let [[env1 binds] (tc-local-binds env (arg v 2))
-                  [t c] (infer env1 (arg v 3))]
+      HsLet (let [sb (atom [])
+                  [env1 binds] (binding [*strict-binds* {:atom sb :level (inc *level*)}] (tc-local-binds env (arg v 2)))
+                  [t c] (infer env1 (arg v 3))
+                  ;; the banged pattern bindings' matches around the body, innermost last
+                  c (reduce (fn [c [pn pc]] (list 'match [(lv pn)] [(list 'clause [pc] c)])) c (reverse @sb))]
               [t (wrap-lets binds c)])
       HsDo (let [fl (arg v 2)]
              (case (if (seq? fl) (first fl) fl)
@@ -1054,6 +1058,12 @@
                                         (doseq [[n m] es] (unify m (:mono (get env2 n))))
                                         ;; the right-hand side bound once, each variable selected from it
                                         (let [pn ["loc" "var" "pat" (str "u" (fresh-id))]]
+                                          ;; a banged pattern binding (`let !(Just (Just y)) = e in b`, GHC's strict pattern
+                                          ;; binding, dsStrictBind): the whole match forced before the let's body (T11601)
+                                          (let [pv (lval (arg (lval b) 2))]
+                                            (when (and *strict-binds* (= *level* (:level *strict-binds*)) (= 'BangPat (con pv)) (not= 'VarPat (con (lval (arg pv 2)))))
+                                              (let [sm (into {} (map (fn [[x _]] [(lv x) (list 'lv (occ x) (str "sel" (fresh-id)))]) es))]
+                                                (swap! (:atom *strict-binds*) conj [pn (substitute sm pc)]))))
                                           ;; each selector's pattern variables locals of its own (the top level's
                                           ;; rename-mono turns the binders' names into the globals)
                                           (into [[pn c]] (mapv (fn [[n _]]

@@ -1,0 +1,276 @@
+(ns cpp.target
+  "libstdc++'s installed headers made without the host's g++ (doc/cpp/CPP-SURVEY.md, \"As built: cpp-indep\", CP241 (b)): the
+  tree g++ 15.2 installs under /usr/include/c++/15.2.0, derived from the pinned gcc-15.2.0 tarball (test/cpp/corpora.edn's
+  :gcc-15.2.0) and the target's facts (cpp/target/libstdcxx.edn) with no compiler run or read. Of its 834 files 827 are the
+  tarball's own files, laid out by the description's :layout; the other 7 are products of libstdc++'s build, made here by
+  rules stated from the inputs and the outputs (the build's GPL makefiles were not ported):
+  bits/std.cc and bits/std.compat.cc (two inputs joined), the five gthr headers (libgcc's with the library's names), and
+  bits/c++config.h (the prewritten configuration, its switches set, then configure's config.h: each #undef of config.h.in
+  answered from the target's C library headers, musl 1.2.6's as C's own target lays them out (c/README.md), or by a fact of
+  the description). The compiler's own include directory (gcc's, :compiler-include) likewise: 148 of its 151 files the tarball's,
+  limits.h, omp.h and mm_malloc.h made by stated rules. The oracle (`oracle`) compares a tree with the installed one file for file,
+  byte for byte, by hand.
+
+  plan SRC OUT          OUT/copy.tsv: INSTALLED<TAB>SOURCE for the tarball's own files (SRC: the extracted gcc-15.2.0)
+  plan-compiler SRC OUT OUT/copy-compiler.tsv: the same for the compiler's own include directory (gcc's, :compiler-include)
+  derive-compiler SRC OUT  its 3 made files (limits.h, omp.h, mm_malloc.h) under OUT
+  derive SRC SYSROOT OUT  the 7 products under OUT (SYSROOT: C's sysroot, ARBACE_C_SYSROOT; its usr/include is musl's), and
+                        OUT/answers.tsv: each configure answer, its value and how it was found (probe or fact)
+  oracle OUT REF        OUT's files against REF's (the installed tree): missing, extra, differing (exit 1 on one)"
+  (:require [arbace.string :as str])
+  (:import (java.io File)))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private description "cpp/target/libstdcxx.edn")
+
+(defn- desc [] (read-string (slurp description)))
+
+(defn- files-under
+  "Every file under dir, as paths relative to it, sorted."
+  [^String dir]
+  (let [d (File. dir) n (inc (count (.getPath d)))]
+    (sort (for [^File f (file-seq d) :when (.isFile f)] (subs (.getPath f) n)))))
+
+(defn- top-files
+  "The files directly in dir, sorted."
+  [^String dir]
+  (sort (for [^File f (.listFiles (File. dir)) :when (.isFile f)] (.getName f))))
+
+;; ---------------------------------------------------------------------------------------------
+;; the layout: where each of the tarball's own files is installed
+
+(defn layout-plan
+  "[installed source] for every file a layout installs from the tarball (sources relative to SRC)."
+  [^String src layout target]
+  (let [sub (fn [to] (str/replace (str to) "{target}" target))]
+    (sort
+      (for [{:keys [to from only except recursive files]} layout
+            :let [to (sub to) pre (if (= to "") "" (str to "/"))]
+            [inst source] (cond
+                            files (for [[i s] files] [(sub i) s])
+                            recursive (for [f (files-under (str src "/" from)) :when (not (some #{f} except))] [(str pre f) (str from "/" f)])
+                            only (for [f only] [(str pre f) (str from "/" f)])
+                            :else (for [f (top-files (str src "/" from)) :when (not (some #{f} except))] [(str pre f) (str from "/" f)]))]
+        [inst source]))))
+
+(defn plan
+  "libstdc++'s: [installed source] for every file the layout installs from the tarball."
+  [^String src]
+  (let [{:keys [layout target]} (desc)] (layout-plan src layout target)))
+
+(defn compiler-plan
+  "The compiler's own include directory's: [installed source] for the tarball's files it holds as they are."
+  [^String src]
+  (let [{:keys [compiler-include target]} (desc)] (layout-plan src (:layout compiler-include) target)))
+
+(defn compiler-products
+  "{installed text} of the compiler's include directory's three made files: limits.h (three files joined), omp.h (libgomp's
+  @NAME@ placeholders set), mm_malloc.h (the package's substitutions over pmm_malloc.h)."
+  [^String src]
+  (let [{:keys [limits omp mm-malloc]} (:compiler-include (desc))
+        rd (fn [f] (slurp (str src "/" f)))]
+    {"limits.h" (apply str (map rd limits))
+     "omp.h" (reduce (fn [^String t [k v]] (str/replace t (str "@" k "@") v)) (rd (:from omp)) (:values omp))
+     "mm_malloc.h" (reduce (fn [^String t [a b]]
+                             (when-not (str/includes? t a) (throw (ex-info (str "cpp.target: mm_malloc.h's substitution has nothing to replace: " a) {})))
+                             (str/replace t a b))
+                           (rd (:from mm-malloc)) (:replace mm-malloc))}))
+
+;; ---------------------------------------------------------------------------------------------
+;; the probes of the target's C library (configure's checks, answered from the headers' text)
+
+(defn- strip-comments [^String t]
+  (-> t (str/replace #"(?s)/\*.*?\*/" " ") (str/replace #"//[^\n]*" "")))
+
+(defn- headers
+  "{relative-path text} of the C library's headers: the sysroot's usr/include (musl's) and usr/lib/arbace/include (the
+  target's own), comments removed."
+  [^String sysroot]
+  (into {} (for [root ["/usr/lib/arbace/include" "/usr/include"]
+                 :let [d (str sysroot root)] :when (.isDirectory (File. d))
+                 f (files-under d)]
+             [f (strip-comments (slurp (str d "/" f)))])))
+
+(defn- closure
+  "The header h and every header it includes (#include <...>), transitively, that the library has."
+  [hs ^String h]
+  (loop [todo [h] seen []]
+    (if-let [x (first todo)]
+      (if (or (some #{x} seen) (not (contains? hs x)))
+        (recur (rest todo) seen)
+        (recur (concat (rest todo) (map second (re-seq #"#\s*include\s*<([^>]+)>" (get hs x)))) (conj seen x)))
+      seen)))
+
+(defn- texts [hs h] (if h (map hs (closure hs h)) (vals hs)))
+
+(defn- function-declared?
+  "A function f declared (an identifier followed by its parameter list outside a #define line) in h's closure (or anywhere)."
+  [hs f h]
+  (let [p (re-pattern (str "\\b" f "\\s*\\("))]
+    (boolean (some (fn [^String t] (some #(and (re-find p %) (not (re-find #"^\s*#\s*define" %))) (str/split-lines t))) (texts hs h)))))
+
+(defn- macro-defined? [hs m h]
+  (let [p (re-pattern (str "(?m)^\\s*#\\s*define\\s+" m "\\b"))]
+    (boolean (some #(re-find p %) (texts hs h)))))
+
+(defn- identifier-present? [hs n h]
+  (let [p (re-pattern (str "\\b" n "\\b"))] (boolean (some #(re-find p %) (texts hs h)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; config.h.in's answers
+
+(defn- blocks
+  "config.h.in as [comment name] for each #undef (the comment above it, whitespace collapsed)."
+  [^String in]
+  (for [[_ c n] (re-seq #"(?s)/\*((?:(?!\*/).)*)\*/\n(?:#if [^\n]*\n)?#undef (\S+)" in)] [(str/join " " (str/split (str/trim c) #"\s+")) n]))
+
+(defn- probe
+  "The answer of configure's check of name from its comment, by the C library's headers: [value how] or nil (no probe)."
+  [hs extra-headers ^String c]
+  (or (when-let [[_ x] (re-find #"^Define to the value of the (\w+) integer constant\.$" c)]
+        ;; the constant's value as <stdio.h>'s #define gives it, its parentheses removed
+        (when-let [v (some #(second (re-find (re-pattern (str "(?m)^\\s*#\\s*define\\s+" x "\\s+(\\S+)")) %)) (texts hs "stdio.h"))]
+          [(str/replace v #"[()]" "") (str "probe: the value of " x " in <stdio.h>")]))
+      (when-let [[_ f] (re-find #"^Define to 1 if you have the `(\w+)' function\.$" c)]
+        [(function-declared? hs f nil) (str "probe: function " f)])
+      (when-let [[_ h] (re-find #"^Define to 1 if you have the <([^>]+)> header file\.$" c)]
+        [(or (contains? hs h) (boolean (some #{h} extra-headers))) (str "probe: header <" h ">")])
+      (when-let [[_ x h] (re-find #"^Defined? if (?:usable )?(\w+) (?:is available in <([^>]+)>|exists)\.$" c)]
+        (if (re-find #"^[A-Z_][A-Z0-9_]*$" x)
+          [(or (macro-defined? hs x h) (identifier-present? hs x h)) (str "probe: " x (when h (str " in <" h ">")))]
+          [(function-declared? hs x h) (str "probe: " x "()" (when h (str " in <" h ">")))]))))
+
+(defn answers
+  "[name value how] for each #undef of config.h.in: value a string (#define NAME value), :undef (/* #undef NAME */) or :drop
+  (the line removed). The description's :facts first (a fact names the answer whatever a probe says), then the probes."
+  [^String in hs]
+  (let [{:keys [facts extra-headers]} (desc)
+        by-name (into {} (for [{:keys [names value why]} facts n names] [n [value why]]))]
+    (for [[c n] (blocks in)]
+      (if-let [[v why] (get by-name n)]
+        [n (cond (keyword? v) v (nil? v) :undef :else (str v)) (str "fact: " why)]
+        (if-let [[ok how] (probe hs extra-headers c)]
+          [n (cond (string? ok) ok ok "1" :else :undef) how]
+          [n ::unanswered "no fact and no probe"])))))
+
+(defn- rename
+  "config.h's names on a preprocessor line: the library's prefix on configure's own names (HAVE_..., PACKAGE..., VERSION, ...)."
+  [^String l]
+  (if-not (re-find #"^\s*#" l)
+    l
+    (reduce (fn [^String l [from to]] (str/replace l from to)) l
+            [["HAVE_" "_GLIBCXX_HAVE_"] ["PACKAGE" "_GLIBCXX_PACKAGE"] ["VERSION" "_GLIBCXX_VERSION"] ["ICONV_CONST" "_GLIBCXX_ICONV_CONST"]
+             ["LT_OBJDIR" "_GLIBCXX_LT_OBJDIR"] ["STDC_HEADERS" "_GLIBCXX_STDC_HEADERS"] ["_DARWIN_USE_64_BIT_INODE" "_GLIBCXX_DARWIN_USE_64_BIT_INODE"]
+             ["_FILE_OFFSET_BITS" "_GLIBCXX_FILE_OFFSET_BITS"] ["_LARGE_FILES" "_GLIBCXX_LARGE_FILES"]])))
+
+(defn config-h
+  "config.h as configure writes it from config.h.in and the answers, with the library's names."
+  [^String in as]
+  (let [by (into {} (for [[n v] as] [n v]))]
+    (str "/* config.h.  Generated from config.h.in by configure.  */\n"
+         (str/join "\n"
+                   (keep (fn [^String l]
+                           (if-let [[_ n] (re-find #"^#undef (\S+)$" l)]
+                             (let [v (get by n)]
+                               (cond (= v :drop) nil
+                                     (= v :undef) (str "/* #undef " (subs (rename (str "#" n)) 1) " */")
+                                     :else (rename (str "#define " n " " v))))
+                             (rename l)))
+                         (str/split (str/replace in #"\n$" "") #"\n" -1)))
+         "\n")))
+
+(defn cxxconfig
+  "bits/c++config.h: the prewritten bits/c++config with the release, the date and the build's switches set, then config.h,
+  then the guard's end."
+  [^String template ^String config]
+  (let [{:keys [version switches]} (desc)
+        sw (into {} (for [[n v] switches] [n (str v)]))
+        line (fn [^String l]
+               (or (some (fn [[n v]] (when (= l (str "#define " n)) (str "#define " n " " v))) version)
+                   (when-let [[_ n rest] (re-find #"^#define (\S+)(\s*)$" l)] (when-let [v (sw n)] (str "# define " n " " v rest)))
+                   (when-let [[_ ind n] (re-find #"^#(\s+)define (\S+)$" l)] (when-let [v (sw n)] (str "#" ind "define " n " " v)))
+                   (when-let [[_ n] (re-find #"^#undef (\S+)$" l)] (when-let [v (sw n)] (str "#define " n " " v)))
+                   l))]
+    (str (str/join "\n" (map line (str/split template #"\n" -1)))
+         config
+         "\n#endif // _GLIBCXX_CXX_CONFIG_H\n")))
+
+;; ---------------------------------------------------------------------------------------------
+;; the gthr headers: libgcc's thread interface with the library's names (bits/gthr*.h)
+
+(defn gthr
+  "A gthr header of libgcc as libstdc++ installs it: its own macros under the library's prefix, the weak-symbol switch the
+  compiler's __GXX_WEAK__, the default model's header by its installed name."
+  [^String t]
+  (let [line (fn [^String l]
+               (let [l (if (str/includes? l "__GLIBC_PREREQ")
+                         ;; the glibc version test: every name of capitals and underscores on the line takes the prefix
+                         (str/replace l #"[A-Z_]+" #(str "_GLIBCXX_" %))
+                         l)]
+                 (-> l
+                     (str/replace #"\b(GCC_GTHR(?:_[A-Z]+)?_H)\b" "_GLIBCXX_$1")
+                     (str/replace #"\bSUPPORTS_WEAK\b" "__GXX_WEAK__")
+                     (str/replace #"\b(GTHREAD_USE_WEAK|HIDE_EXPORTS|UNUSED)\b" "_GLIBCXX_$1")
+                     (str/replace "#include \"gthr-default.h\"" "#include <bits/gthr-default.h>"))))]
+    (str/join "\n" (map line (str/split t #"\n" -1)))))
+
+;; ---------------------------------------------------------------------------------------------
+
+(defn derive-products
+  "{installed text} of the build's 7 products, and the answers."
+  [^String src ^String sysroot]
+  (let [{:keys [target thread-model]} (desc)
+        l (str src "/libstdc++-v3")
+        hs (headers sysroot)
+        in (slurp (str l "/config.h.in"))
+        as (answers in hs)
+        un (filter #(= ::unanswered (second %)) as)
+        _ (when (seq un) (throw (ex-info (str "cpp.target: no answer for " (str/join ", " (map first un))) {})))
+        cfg (config-h in as)
+        tb (str target "/bits/")]
+    {:files {(str tb "c++config.h") (cxxconfig (slurp (str l "/include/bits/c++config")) cfg)
+             (str tb "gthr.h") (gthr (slurp (str src "/libgcc/gthr.h")))
+             (str tb "gthr-single.h") (gthr (slurp (str src "/libgcc/gthr-single.h")))
+             (str tb "gthr-posix.h") (gthr (slurp (str src "/libgcc/gthr-posix.h")))
+             (str tb "gthr-default.h") (gthr (slurp (str src "/libgcc/gthr-" thread-model ".h")))
+             "bits/std.cc" (str (slurp (str l "/src/c++23/std.cc.in")) (slurp (str l "/src/c++23/std-clib.cc.in")))
+             "bits/std.compat.cc" (str (slurp (str l "/src/c++23/std.compat.cc.in")) (slurp (str l "/src/c++23/std-clib.cc.in")))}
+     :answers as}))
+
+(defn -main [cmd & args]
+  (case cmd
+    "plan" (let [[src out] args
+                 rows (plan src)]
+             (spit (str out "/copy.tsv") (apply str (for [[i s] rows] (str i "\t" s "\n"))))
+             (println (str "cpp.target: " (count rows) " files of the tarball laid out")))
+    "plan-compiler" (let [[src out] args
+                          rows (compiler-plan src)]
+                      (spit (str out "/copy-compiler.tsv") (apply str (for [[i s] rows] (str i "\t" s "\n"))))
+                      (println (str "cpp.target: " (count rows) " files of the compiler's include directory laid out")))
+    "derive-compiler" (let [[src out] args]
+                        (doseq [[f t] (compiler-products src) :let [g (File. (str out "/" f))]]
+                          (.mkdirs (.getParentFile g)) (spit g t))
+                        (println "cpp.target: the compiler's include directory's 3 products derived"))
+    "derive" (let [[src sysroot out] args
+                   {:keys [files answers]} (derive-products src sysroot)]
+               (doseq [[f t] files :let [g (File. (str out "/" f))]]
+                 (.mkdirs (.getParentFile g)) (spit g t))
+               (spit (str out "/answers.tsv")
+                     (apply str (for [[n v how] answers] (str n "\t" (if (keyword? v) (name v) v) "\t" how "\n"))))
+               (println (str "cpp.target: " (count files) " products derived; configure's " (count answers) " answers: "
+                             (count (filter #(str/starts-with? (nth % 2) "probe") answers)) " by probes of the C library's headers, "
+                             (count (filter #(str/starts-with? (nth % 2) "fact") answers)) " by the description's facts")))
+    "oracle" (let [[out ref] args
+                   ours (set (files-under out)) theirs (set (files-under ref))
+                   missing (sort (remove ours theirs)) extra (sort (remove theirs ours))
+                   differ (sort (for [f ours :when (and (theirs f)
+                                                        (not (java.util.Arrays/equals (java.nio.file.Files/readAllBytes (.toPath (File. (str out "/" f))))
+                                                                                      (java.nio.file.Files/readAllBytes (.toPath (File. (str ref "/" f)))))))] f))]
+               (println (str "cpp.target oracle: " (count ours) " files made, " (count theirs) " installed; "
+                             (- (count ours) (count extra) (count differ)) " equal byte for byte, " (count differ) " differ, "
+                             (count missing) " missing, " (count extra) " extra"))
+               (doseq [f differ] (println "  differs:" f))
+               (doseq [f (take 20 missing)] (println "  missing:" f))
+               (doseq [f (take 20 extra)] (println "  extra:" f))
+               (System/exit (if (or (seq differ) (seq missing) (seq extra)) 1 0)))))

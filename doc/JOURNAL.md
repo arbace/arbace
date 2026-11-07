@@ -480,3 +480,147 @@ coercibility now (needs a Coercible solver; left to HF5's Core).
   0.53 s, tak 2.23, rfib 2.98, fibheaps 3.97, sphere 2.39), 6.0-8.7 times HES73's numbers: the target of 3 met. `bin/hsi check
   --aot --opt O1` on the essential list: 123 of 123, all the same as hsi on the same dumps, the controls failing; after the
   machine's change `bin/hsi check --aot` (`-O0`) and `bin/hsi check` (hsi) on the essential list 123 of 123 each. Details: doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES74 (c)".
+## 2026-11-07: F10a, java.nio's selectors and socket channels over jrt's natives at sun.nio.ch's layer (branch java-complete)
+
+Branch `java-complete` from `mac/batch1` 0edacad62, the main session's brief: raise Java's completeness (72.9% strict, 80.4%
+without by design on batch 1) by the triage's next ranks not yet built. F16, F8, F7 and F11 are JC9b's (merged in batch 1,
+write-ahead), F12, F6, F13 and F19 JC9c's, F3 JC9's; the next rank was F10 (selectors and channels, rank 13), built here as
+F10a: selectors, socket and server socket channels, pipes and the sockets' adaptors (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+"As built: F10a (write-ahead)").
+
+- **First, the main session's check of JC9's slices together**: JC9b's finding (F5's `Logger`/`LogRecord` calling
+  `ResourceBundle.getBundle(String, Locale, ClassLoader)`, absent from jrt's overlay) is fixed on batch 1 (`b8a1951ce`). JC9b's
+  joint javac check (`.tmp/keep/java-jc9b/jc9b/all9/run.sh`, which named the removed java-jc9b worktree) is now
+  `.tmp/all9-run.sh CHECKOUT` in this worktree's scratch (default the `next` worktree; writes only `CHECKOUT/.tmp/jc9-check/`;
+  exit 1 on a javac error or a missing file; KIND linux handled): batch 1's 2,215 files 0 errors; its negative control (the
+  overload renamed) fails with F5's two errors.
+- **The design**: jdk26u's channel Java unchanged (`SocketChannelImpl`, `ServerSocketChannelImpl`, `SelectorImpl`,
+  `SelectionKeyImpl`, `EPollSelectorImpl`, the pipes, the adaptors: jdk26u `baf63fb`), and jrt's own native layer below it, as
+  overlays keeping jdk26u's classes and signatures: `Net` (jdk26u's file, its natives given bodies by `.tmp/f10/gennet.py`),
+  `IOUtil`, `NativeDispatcher`, `SocketDispatcher`, `UnixDispatcher`, `NativeThread`, `Poller`, `Util`, `UnixDomainSockets`,
+  `EPoll`, `EventFD`, `FileDispatcherImpl`, `PollSelectorImpl` (derived, `genpoll.py`), `SocketOptionRegistry` (derived from the
+  template, `genopts.py`, equal by its 17 options to the build's gensrc), all over `jdk.internal.jrt.HostChannels`' 31 natives,
+  Go ports of jdk26u's `src/java.base/unix/native/libnio/ch/{Net,IOUtil,SocketDispatcher,UnixDispatcher,PollSelectorImpl}.c`,
+  `src/java.base/linux/native/libnio/ch/{EPoll,EventFD}.c` and libnet's `NET_SetSockOpt`/`NET_GetSockOpt`/`NET_Bind`
+  (`go/arbace/jrt/channels_linux.ae`; `channels_other.ae` off Linux). Alternatives considered: jrt's own channel classes over
+  Go's `net` (as `HostSocketImpl` and F7's `FileChannelImpl`): rejected, the channels' state machines and close protocol are
+  jdk26u's own code worth keeping; the poll selector as Linux's default (AIX's choice, one class fewer): rejected for jdk26u's
+  Linux default, epoll, whose EPollSelectorImpl stays unchanged once EPoll's event array is a token over int arrays; the
+  kernel's blocking descriptors: rejected, a thread blocked in the kernel cannot be woken by the JDK's dup2-and-signal close in
+  Go, so every descriptor is non-blocking and a blocking one waits in Go's poller, which `preClose` wakes.
+- **New**: KIND `linux` in `print-sources` and its consumers (`bin/jrt-convert`'s tree, origins and summary line, the originals'
+  check, the round trip's origins); j2g's VarHandle table takes `ConstantBootstraps.fieldVarHandle`; the rename
+  `sun/nio/ch/Util` → `Ch_Util`; variants of `SelectorProvider$Holder`, `SocketChannelImpl`, `PollSelectorProvider`,
+  `EPollSelectorProvider`.
+- **Checked by day** (light): the joint javac check of the 2,277 files 0 errors; `bin/repr-java read-jdk --check` of the 62
+  new files 0 failed, `--no-javac` 64 native and identical; the variants applied and parsed; Go names (one collision, renamed);
+  `go build`/`go vet` of `arbace/jrt` for amd64 and arm64 and `go test` on amd64, three new tests passing with every other.
+  Not run: the conversion, j2g, the executable and the tests (the night's: the section's commands).
+- **Expected**: 49 / 49 tests are F10a's with F7, F11 and F13 built; about 34 / 34 to pass, Java eval and AOT about +1.0
+  point each. Java after tonight's records, all the write-ahead slices' expected yields together: about 80.6% strict, 89%
+  without by design.
+- **Findings**: `bin/jrt build` fails on batch 1 at `arbace/expat` (a crop's package in bin/jrt's module); its print needs
+  `GOMEMLIMIT` under the light rules (3.9 GB without, 1.45 GB with 1400 MiB).
+- **Proposed** (the triage's "Proposed (F10a)"): JCS162 Thread's blocker (interrupts), JCS163 F10b (DatagramChannel, then the
+  asynchronous channels), JCS164 UNIX domain sockets with F9, JCS165 the joint javac check as a gate step, JCS166 the
+  derivations committed as Arbace with a check, JCS167 serialization out of by design (the strict mean cannot pass 90% while
+  10% of eval and AOT are by design; serialization is 168 / 117 of it).
+
+## 2026-11-07: C++ without clang and g++ at check time, CP240 (a) and CP241 (b) (branch cpp-indep)
+
+The user decided CP240 ((a), (b), (c) in that order) and CP241 (b) (doc/cpp/CPP-SURVEY.md, "Decided (the user, 2026-11-07): CP240,
+CP241"). On `cpp-indep` from `mac/cpp-90` (4e0a8fc5b), the day's light tier.
+
+- **CP240 (a).** From `mac/oracle-records-cpp2`: the shared tooling as `mac/haskell-90` took it (`a08c614e9`, its cherry-pick of
+  `c3892e875`), then `4ec2da932`, `e63d37180` and `15a312026` with `-x`, each cut to C++'s eval and AOT (the IR packs `cpp-ir-samples`,
+  pin `0730915b`, and `cpp-runtime-ir`, `ea55ad3c`, read unless `CPPI_LIVE=1`; `record-ir`, `--every`; the lowering's gcc half behind
+  `CPPI_GCC`); left out: tools/cxxdump's records, the round trip's records mode, the cxxdump packs (the print is judged by its own verdict
+  on this line). Conflicts: `Makefile` and `bin/gate` (both sides: the oracle-records targets beside batch 1's, the packs' pins check
+  beside GTS211's crop pins), `bin/cppi` (cpp-90's codegen verbs and record-ir both kept; runtime-ci's key on `key.records` with
+  cppi-deferred's reader key). The gate's C++ run steps and the runtime's build lose `:cxx` and `:gcc`; the live sampling and the packs'
+  verify wait in `test/gate/crops/cpp-oracle.edn` for the oracle tier. Proved with the toolchain stubbed: `bin/cppi runtime-build` from
+  the pack (198 of 198), `bin/cppi lower-essential` (6 of 6). `bin/cppi check` on ci was stopped (runtime-ci's read at 3.0 GB, over the
+  day's 2 GiB): the night's. `runtime/deferred.cpp` is not in the pack (CP245).
+- **CP241 (b).** `test/cpp/target.ae` and `cpp/target/libstdcxx.edn`: libstdc++'s installed tree (834 files) and gcc's own include
+  directory (151) made from the pinned gcc-15.2.0 tarball (test/cpp/corpora.edn's `:gcc-15.2.0`, sha256 438fd996…) with no compiler:
+  827 + 148 files laid out, the build's products by rules stated from inputs and outputs (no GPL makefile or configure ported):
+  std.cc and std.compat.cc joined, the gthr headers renamed, c++config.h's switches and configure's 299 answers (173 probes of musl
+  1.2.6's headers from its tarball, C's own target's; 126 facts with reasons), limits.h, omp.h and mm_malloc.h (Alpine's patch as four
+  substitutions). `bin/repr-cpp target oracle`: 834 of 834 and 151 of 151 byte for byte. The readers read it through `ARBACE_C_SYSROOT`
+  (`bin/lib/repr-cpp/sysroot.bash`; with musl's headers and fortify-headers' nine files at recorded digests, every search directory a
+  root): pp-check's essential and a sampling of 949 files as with the host's headers, no host header opened (strace).
+- **Alternatives**: for the headers, a pack of the installed tree (CP241 (a), 0.5) or a clean-room set (c, weeks, a clean-room runtime
+  with it); taking all of `mac/oracle-records-cpp2` (its gate tier's planner changes rekey every step); musl's headers left in place
+  (the token check would still read a library's installed tree: the first measure showed only fortify and the compiler's directory
+  mattered, so both were made or taken at digests).
+- **Scores** (`bin/crops-score --crop cpp`, facts in the worktree's `.tmp/independence.diff`): completeness 75.4, maturity 100,
+  independence 31.4 to 54.3 (read 0.148, eval 0.5, AOT 0.5). The night re-records the packs on clang 23.1.5 by hand (the survey's
+  commands) and compares the routes for CP240 (b). Proposed CP244-CP246.
+
+## 2026-11-07: RES34 on rust-90's line (branch `res34`, from `mac/rust-90` 58ca67832, `mac/rust-res34` merged)
+
+The user's decision RES55 (a): RES34 first, then Rust's AOT cell. `mac/rust-res34` (std's units translated once per key by cf2g,
+`arbace.c.aotlib`, the link's provenance `*link-trace*`) merged into rust-90's line: the Makefile's target list and the survey's
+sections conflicted, both resolved by keeping both sides; the code merged clean. RES40 (a) built in the scripts (the prebuilt cache
+the main checkout's `.tmp/ci-aot-lib`, shared by the worktrees; `CI_AOT_LIB` exported to the builder), not in `aotlib.ae`, whose source
+is in the units' key. `bin/rsi aot-lib` gained `RSI_AOT_LIB_CACHED=1` (the units whose fragments exist) and `compile-list` a line of
+the translation's parts. C's embedded set is RES34's own four files (`arbace/c/{build,cf2g,runtime,aotlib}.ae`), unchanged here; their
+merge rekeys every library's fragments (the day hard-linked rust-90's after checking fragments made at the new key byte for byte equal).
+
+Proved by day under 2 GiB a process: std's 74 linked units translated once (19,843 functions, none refused, 69 MB of Go, 28 minutes,
+1.37 GB); five synthetic programs AOT-built against them pass (2 to 5 minutes each, the builder at most 1.71 GB; Go's build 14 to 17 s
+after the first shard's 324 s), against RE4's about 1,000 s and 7 GiB a program whole. The translation is now mostly the printing of
+the glue (51 to 77 s: 11,343 `SetCompiled` and 7,786 data runs for `exit-code.rs`): RES64. `collections.rs`'s builder passed 2.3 GB:
+RES66. Night commands, the expected scores (completeness 75 → 100, maturity 95.8 → 100) and RES64-RES66 in
+doc/rust/RUST-EVAL-SURVEY.md, "As built: RES34 on rust-90's line". Alternatives considered: a per-crate Go package (RES34.1's
+rejection stands), and changing `aotlib.ae`'s default root (rejected: it would retranslate every unit).
+
+## 2026-11-07: HFS-I1 (a), hsi from the native front end's STG (branch `hfs-i1`, from `mac/haskell-90` 0fb4591bf)
+
+The user's decision HFS-I1 (a). `bin/hsi check --front native` (`bin/lib/hsi/check`): each program the front end can take (a single
+module of library imports, no C, CPP or foreign stubs, no deferred type errors or RULES: about 690 of 908) is compiled by
+`arbace.repr.haskell.front` (one process a shard, each program with its own `-X` flags through `front.ae`'s new `--plan`, a program
+that loops stopped after `HSI_FRONT_TIMEOUT`) and run from Arbace's STG; the rest from `haskell-stg-progs`; each result names its
+`:stg`. The interfaces are a new pack, `haskell-ifaces-ghc-9.14.1` (440 members: the helper's iface closure of the run corpora's
+imports and ghc-pkg's reexports, recorded by hand with GHC, `--record-ifaces`). `bin/hsi compare-front` judges a native run against
+the GHC-STG record program by program; the default stays ghc (`default_front`) until a night's run shows no pass lost; the switch is
+written (`.tmp/hfs-i1-switch.diff` in the worktree, and the survey).
+
+By day (light caps, 2 GiB): 100 programs, 84 from native STG, 79 pass, no pass lost but the two that fail at the light cap from GHC's
+STG too. The first slice found four lost passes; two were front-end bugs fixed by GHC's rules (exprIsConApp_maybe and a strict
+field's argument, `cgrun051`; dsStrictBind's banged pattern binding, `T11601`), two programs outside the subset (deferred type errors,
+RULES). Eval stays 0.5 a case: the libraries' STG and interfaces are GHC's; 1 needs HF9 and HF10. The libraries' pack is stale at
+this helper (haskell-90's night item): the day ran with `HSI_LIBS` its unpacked members. doc/haskell/FRONTEND-SURVEY.md, "As built:
+HFS-I1 (a)", HFS-I5-HFS-I7. Alternatives considered: run-check's one `-XHaskell2010` for every program (rejected: GHC compiled the
+pack's STG in GHC2021 with each test's flags), eligibility by trying the front end on every program (kept as the fallback: a stop
+runs from the pack).
+
+## 2026-11-07: batch 2, third round: batch1's last head, cpp-indep, res34, hfs-i1, and the worktrees' Haskell inputs (branch batch2)
+
+On `batch2` 93db65e83, by an agent by day in the light tier (no gate but `--plan`, no build, no heavy lock: the night shift ran on
+`next`). One merge commit each, the keys computed after each (`bin/arbace-go --gate-key`, `arbace_runtime_key`, `arbace_javac_key`):
+
+- `mac/batch1` 23d640f54 (java-complete's F10a) as `69d8704c2`: the journal and JAVA-DEFERRED-TRIAGE as unions; all three keys move
+  (F10a's jrt natives and overlays): gate `6725b5801608`, runtime `cb6a54899d99`, javac `343e3c44918d`.
+- `mac/cpp-indep` 605c62e69 (CP240 (a), CP241 (b)) as `2bc42fc1c`: `bin/gate`'s oracle-packs block (the same as haskell-90's, kept in
+  place), the Makefile (the `oracle-records-*` targets already in), `kinds.edn` (both crops' kinds), CPP-SURVEY (batch 2's Decided kept,
+  cpp-indep's As built after); its facts from its worktree's `.tmp/independence.diff` applied; C++ independence 31.4% to 54.3% (read 0.148,
+  eval and AOT 0.5), `test/crops/scores.edn` recorded (`5fc449d4e`). Two sampling parts moved to `crops/cpp-oracle.edn` (`--full` 317
+  steps). No key moved.
+- `mac/res34` 5d85bff6e (RES34 on rust-90's line) as `b3de90d41`: `arbace/c/cf2g.ae` (batch 1's CS277 `apack`/`vplen` and RES34's
+  placeholders both kept; the namespace loads), the Makefile, RUST-EVAL-SURVEY. res34's RES61-RES63 renumbered RES64-RES66, since batch 2
+  had proposed its own RES61 (rsi-essential's memory) the same day; the alternative, renumbering batch 2's, would have moved a number the
+  user had already read in batch 2's proposals. Gate `fc2cc71ebe1f`, javac `cc2abcd735f9` (C's embedded set), runtime unchanged.
+- `mac/hfs-i1` ce89c3836 (HFS-I1 (a)) as `d0964c426`: FRONTEND-SURVEY and the journal; its facts applied (no score change); the switch
+  diff left for the night's `compare-front`, as the main session said. No key moved.
+- Proposal 8 (a) built (`2f9eb4fa4`, `2a124fbe9`): `bin/lib/repr-haskell/inputs.bash`, sourced by `bin/repr-haskell` and `bin/hsi`: in a
+  linked worktree (git's common dir) or the clean clone (`.tmp/gate-clean/SHA`) the GHC source and testsuite tarballs are hard-linked from
+  the main checkout's copies and nofib fetched from its checkout; with no copy there, a refusal: a worktree never downloads (the user's
+  network rule). Scheme's SM9 shares the corpora directory itself; here only the immutable inputs are shared, each worktree extracting its
+  own (the extraction gets configure products written into it). The main checkout had none: seeded by hard links from batch 2's `.tmp`
+  (SHA-256 84aefc21 testsuite, 2a83779c source, the pins'; nofib d4750745 cloned, tree 1f5a8852). Checked by `bin/hsi pins --fetch` with
+  batch 2's copies moved aside (all three taken from the main checkout, nothing fetched) and a missing file refused.
+- Checks after each merge: `gate.crops check` 0 problems, both plans clean, `bin/reap` 41 of 44 with deferred.cpp's one problem (CP245),
+  `bin/crops-score --judge --strict` 0; samples under 2 GiB (`bin/oracle-records pins`, `bin/repr-cpp pp-check --essential` 1.47 GB, `bin/rsi
+  judge-test`, `bin/repr-haskell test`). Not run: C's and Rust's AOT after RES34 (the shared `.tmp/ci-aot-lib` is the night's first build).
+- Found: repr-haskell's configure skip test is inverted in native mode (proposal 9 in the AGENDA).
