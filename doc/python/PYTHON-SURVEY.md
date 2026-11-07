@@ -3965,3 +3965,58 @@ positional refusal; `sq_repeat`'s messages. **Surrogates**: as designed; `ast.pa
 
 **Measured** (VM, the native driver on both sides, per method): see report 226. The classes: `:data-model` 90 listed tests to 13,
 `:module-subclasses` 9 to 0, `:str-protocol` 19 to 6, `:surrogate-pairs` 14 to 0.
+
+## As built: 227, pickling the core types, the iterators and the exceptions (2026-11-07, the Mac VM, queue 227)
+
+As designed ("Design: 227"), on 226's head merged first (760899239). Base c44a0b5d. Counts are `bin/pyi lib-test --aot` (the compiled driver,
+samples; the record is the main host's).
+
+| class | before | after |
+|---|---|---|
+| `:pickle-core` | 41 listed | 2 listed and the PickleBuffer patterns: 8 methods of test_pickle (the other 19 that wait on PickleBuffer stay in `:c-accelerators`' list) |
+| `:pickle-iterators` | a pattern, 26 methods of the sample (test_iter 10, test_enumerate 8, test_set 4, test_range 3, test_deque 1) | removed |
+| `:array-pickle` | 28 | removed |
+| `:exc-pickle` | gone with 223 | test_exceptions' 11 pickling, copying and state methods pass (run alone: see the Lows) |
+
+| module (sample) | not equal before | after |
+|---|---|---|
+| test_pickle | 56 of the 471 run | 27 (`_pickle`'s PickleBuffer 25, 2 by `_pyio`) |
+| test_array | 56 | 28 (`:buffer-exports`) |
+| test_iter | 13 | 0 |
+| test_enumerate | 11 | 0 |
+| test_range | 10 | 2 |
+| test_set | 116 | 21 |
+| test_deque | 14 | 8 |
+| test_list | 4 | 0 |
+| test_tuple | 2 | 0 |
+| test_pickletools | 23 | 11 |
+
+**The iterators** are as designed, in `iterreduce.go`, with `__length_hint__` beside them (test_enumerate's test_len and test_set
+asked for it), `reversed` on its `__reversed__ = None` block, and calliter_iternext's clearing of the sentinel (gh-101892). An
+enumerate, zip, map, filter or reversed subclass was a bare iterator of type `t` and had no `__dict__`: they now keep the built-in
+type and `wrapNew` wraps them as any built-in's subclass; `iter(e) is e` needed `unwrapSlots`' `Iter` to give back the instance
+when the value is its own iterator. `range_iter` and `range_reverse` choose `range_iterator` and `longrange_iterator` by the C's
+overflow conditions, which test_range's pickling checks by type.
+
+**The core types.** `set` follows `set_new` and `set_init`: `__new__` ignores its arguments and `__init__` fills, so a subclass's
+own `__init__` signature works and `super().__init__(x)` no longer reaches `object.__init__` (the cause of test_pickle's
+`test_complex_newobj` family and of most of test_set's). `frozenset_new` keeps its arguments, keywords refused for frozenset alone.
+A subclass's repr names it for set, frozenset and bytearray. `deque.__reduce__` is `(type, ((), maxlen), state, iter(self))`, so
+a deque holding itself pickles; `deque_copy` calls a subclass. `array.__reduce_ex__` takes the instance, so a subclass's `__dict__`
+is its state. A method descriptor's and a slot wrapper's reduce is `getattr(owner, name)`; `bytearray.maketrans`; None passes
+the required check of `object_getstate_default`, memoryview and code are var-sized for it.
+
+**Identity for pickle's memo.** The memo goes by `id`, so byte-equal pickles need CPython's sharing: a static type's `__module__` is one
+interned object, a built-in function's another (`funcModuleStr`, m_module's), and `pickle.dumps(map(int, x), 5)` is now byte
+for byte CPython's. `type(...)` pickles still differ in one memo reference: `sys.modules`' key is not that interned string (Low).
+
+**Found on the way.** `islice_next` overflowed `next` with a huge step and looped forever (test_islice had not returned after six minutes, when I stopped it): ported
+whole. `tee` got `__copy__` and "cannot re-enter the tee iterator" (test_tee_concurrent waited forever). `set_lookkey`'s restart was
+missing from `Set.lookup`, so an `__eq__` that clears the set was a Go panic (64 methods of test_set). `Contains` keeps a non-TypeError
+of `__iter__`; `range()` keeps `__index__`'s exception; `_PyObject_FunctionStr` in "argument after **".
+
+**`_pickle`.** Not cleared. pickle.py imports PickleBuffer from `_pickle` alone, test_inspect does `import _pickle` at its top,
+and test_pickle takes the module's presence for the C classes (`has_c_implementation`), so no change short of a `_pickle` module helps;
+see 227's DECISION in the report. The 27 methods of test_pickle and test_inspect's 363 wait on it.
+
+**The cost.** The compiled loop is untouched. `str` iteration gains a nil test; `set(x)` runs New and Init as `deque` does.
