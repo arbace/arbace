@@ -4891,3 +4891,115 @@ sequence rather than by the main file's offsets: CS278 below.
 
 - **CS278 (a), after the tag:** the re-entered copy's pragmas placed by token order, so 95_bitfields' `#pragma pack(push,1)`
   inside `main`'s body reaches the checker (about half a day).
+
+## As built: C's own target, and the judge by each test's own verdict (2026-11-07, branch `c-indep-b1`)
+
+The brief (2026-11-07): raise the C crop's independence, as `bin/crops-score` measures it (doc/CROPS-SCORE.md), above 90%
+without lowering its completeness or maturity. Built first on `c-indep` (on `mac/oracle-records-cpp2`), then ported here onto
+`mac/batch1` 1dd5bcc71 (doc/JOURNAL.md, 2026-11-07). On `mac/batch1` C scores 20.0% (every C step on `:gcc`: the installed
+headers in place, musl's `CC=gcc ./configure`, gcc live in dg, the round trip and C23's check). On `c-indep-b1`: read, eval,
+AOT and print 1, judge 0.985 (the case-weighted mean): **99.7%**; completeness 95.1% and maturity 100.0% unchanged.
+
+### The target (read, eval, AOT)
+
+- **The description** `c/target/` (c/README.md), in `test/c/host/`'s layout: `predefined/STD.h` for the 13 standards and
+  `has.tsv` computed by `test/c/target.ae` (`bin/repr-c target gen`, `verify`) from `abi.edn` (the AMD64 ABI's types, the
+  floating formats with C23 §5.2.5.3.3's formulas, the decimal formats, the dialect's identification) and `dialect.edn` (the
+  `__has_` rules) over `probes.tsv` (the names the corpora probe). `bin/repr-c target oracle`: **14 of 14 files equal** to gcc
+  15.2's recorded answers, so the readers' input is unchanged where it was gcc's, and made without it.
+- **The headers** `c/include/` at `/usr/lib/arbace/include`, before musl's `/usr/include`: Arbace's own from C23 §7 and the ABI
+  (`float.h`, `limits.h`, `stdarg.h`, `stddef.h`, `stdbool.h`, `stdalign.h`, `stdnoreturn.h`, `iso646.h`, `stdint.h` over
+  musl's, `stdatomic.h`, `stdbit.h`, `stdckdint.h`, `varargs.h`); `omp.h` and the x86 intrinsics declared only (no SIMD, SPEC
+  §14). gcc's headers were not read (clean-room).
+- **musl's headers** from its pinned release tarball as `make install-headers` lays them out; its configure products made
+  without a compiler (`bin/lib/ci/musl`'s `derive_tree`, musl's Makefile's sed rules; `config.mak` from configure's rules with
+  no probe; on `c-indep` byte for byte the configured pack's three headers, and the musl forms read from them the main
+  checkout's file for file). `bin/ci musl verify-derived`: the same against gcc's configure afresh, by hand with gcc.
+- **The libraries' headers** `gmp.h` and `pcre2.h` (four benchmarksgame programs): from the host's packages, each with
+  `test/c/host/headers.sha256`'s digest (`c/target/libraries.txt`).
+- **The sysroot** (`bin/lib/repr-c/sysroot.bash`, `ARBACE_C_SYSROOT`; carried from `mac/oracle-records-cpp2`'s ORS9 (a), only
+  its reading: `arbace.repr.c.pp`'s `sysroot-file` and `tools/ccdump/sysroot.go`): a name under the target's roots is read from
+  the assembled tree alone and keeps its own name in every output. `ARBACE_C_TARGET=gcc` reads `test/c/host` and the host's
+  files in place (`ARBACE_C_SYSROOT=/`), as before: the oracle tier's. `arbace.repr.c.host/load-host` reads `ARBACE_C_HOST`.
+
+### Decided (the user, 2026-11-07): the judge
+
+A test's own verdict counts as a judge no toolchain made; a mixed stage scores the case-weighted mean (doc/CROPS-SCORE.md,
+"Decided (the user, 2026-11-07)"). Built as the default; `ARBACE_C_JUDGE=gcc` runs gcc as before, by hand (the oracle tier):
+
+- **dg** (`bin/lib/ci/dg`): the checker's errors against the file's directives alone; gcc's runs (which only named its
+  agreement with the directives on a failing row) are not made.
+- **The run corpora** (`test/c/selfref.ae`, `bin/lib/ci/selfref.bash`'s `c_run_ref`, `bin/ci selfref ref|agree`): each case
+  with a verdict of its own judged by it: the torture tests' exit 0 (execute.exp), dg-do run's exit 0 (not with dg-output,
+  dg-shouldfail or an xfailed run), tcc's `.expect` (its programs return 0), mir's `.expectrc` and `.expect`, CompCert's
+  `Results/`; an output the verdict leaves open is `:o2 :differ` in `arbace.c.run/result`'s terms (the embedded judge
+  unchanged). 25 cases whose verdict the harness does not meet keep gcc's run, each with its reason
+  (`test/c/selfref-exceptions.edn`). `bin/ci selfref agree` (from the records alone): 2,105 cases have their own verdict,
+  gcc's recorded run meets every one, and 2,104 of the 2,105 recorded rows are judged alike; the other,
+  `mir/lacc/long-double-load.c`, passes by its own status.
+- **The token check** (`arbace.repr.c.ppcheck`): the port's tokens against cc's; gcc -E's digests, the `:gcc` known entries
+  and the `:gcc-digest` control the oracle tier's; a known preprocessor difference passes by its reviewed class (72 entries,
+  counted as judged by a record). `bin/lib/repr-c/check` asks gcc only for `--record` and `--judge-all`.
+- **The round trip** (`bin/lib/repr-c/roundtrip`, `arbace.repr.c.rtcheck/load-acceptance`): levels 1 and 2; levels 3 and 4
+  not run, the known entries only they give deferred (`mac/oracle-records-cpp2`'s `--no-gcc`, now the default); the reader's
+  acceptance against cc's (the tree check's record), gcc's recorded one for the 35 files cc's tree does not give.
+- **C23's conformance check** (`bin/lib/repr-c/c23check`, `arbace.repr.c.c23check`): each file by its own claim, valid C23 and
+  its print the same program, but those `test/c/c23/expected.edn` records rejected at judge 1 (a reviewed reason); the objects
+  (judge 5's) and the control's objects not compiled, so not judged.
+- **The steps**: every C step of `test/gate/steps.edn` loses `:gcc`; `:c` takes `c/`.
+- **The controls**: two `:run` controls more (a torture test's run against tcc's `.expect` and mir's `.expectrc`).
+
+### What was checked (light, by day, in the worktree, main's stage 0)
+
+With `gcc cc clang clang++ g++ cpp cc1 x86_64-alpine-linux-musl-gcc` first on `PATH` as stubs that log their call and exit 99;
+the log empty after each:
+
+| stage | command | result |
+|---|---|---|
+| read | `bin/repr-c check --tokens --corpus benchmarksgame --only` (8 files: the intrinsics', omp's, gmp's, pcre2's) | lex 8, pp 8 equal |
+| read | `bin/repr-c check --tokens` over the 56 gcc corpora files that include a standard header | 51 equal, 4 known by class, 1 equal; exit 0 |
+| read | `bin/repr-c parse-check --corpus benchmarksgame --only` (8) | 8 equal |
+| read | `bin/ci dg --essential` | 92 of 92 |
+| eval | `bin/ci check --only test/c/essential-check.txt` (45) | 0 failing; 3 recorded failures now pass (`c23-complit-2.c`, `long-double-load.c`, `torture-execute-mirror/20101011-1.c`); the three `:run` controls differ; 1.65 GB (with musl's forms reread) |
+| AOT | `bin/ci check --aot --only test/c/essential-aot.txt` (11) | 0 failing, the controls differ; 1.66 GB |
+| print | `bin/repr-c roundtrip --corpus benchmarksgame --only` (8) | 8 pass, no gcc |
+| judge | `bin/repr-c check --c23`; `bin/ci repl-session`; `bin/ci judge-test` (104 tests, none failing) | 62 files: 59 pass, 3 expected, the control's 4 wrong prints refused |
+| judge | `bin/ci selfref agree` (records alone) | 2,105 own verdicts, gcc meets all; 2,104 of 2,105 rows judged alike |
+| oracle | `bin/repr-c target oracle` | 14 of 14 files equal to gcc's |
+
+### The night's commands (whole corpora; the main session's, one at a time, under 1.5 GiB a process)
+
+The records were made over gcc's headers; the token check's per-file digests and the tree check's node counts change where a
+header is Arbace's, so the read records are re-recorded once (repr/c's own outputs, no gcc):
+
+1. `CI_THREADS=2 bin/ci musl read` (7 min, 1.4 GB): the forms cache under the new key.
+2. A corpus at a time (`--corpus C`): `bin/repr-c check --tokens --record` (runs gcc -E for `pp-gcc.sha256`: by hand on the host
+   with gcc, the oracle tier's record), `bin/repr-c parse-check --record`, `bin/ci annotations --record`, then `bin/repr-c
+   roundtrip --corpus C` (no gcc: a judge run).
+3. `bin/ci check --record`, `bin/ci check --aot --record` (expect the three improvements above, no regression), `bin/ci dg
+   --record`.
+4. `bin/reap --record`, then `bin/crops-score --judge --strict`, `--record`.
+5. The oracle tier, by hand on the host with gcc: `bin/repr-c target oracle`, `bin/ci musl verify-derived`, `bin/ci selfref
+   agree`, `ARBACE_C_TARGET=gcc ARBACE_C_JUDGE=gcc bin/repr-c check --tokens`, `ARBACE_C_JUDGE=gcc bin/repr-c check --c23`.
+
+### Rekeys
+
+`arbace/repr/c/host.ae`, `pp.ae`, `ppcheck.ae`, `rtcheck.ae`, `c23check.ae` (embedded, gate_key; stage 0 evaluates them from
+the checkout as tool sources until the re-seed). `tools/ccdump` (the `:c-ccdump` steps). Outside gate_key: `bin/lib/ci/`,
+`bin/lib/repr-c/`, `bin/ci`, `bin/repr-c`, `test/`, `c/`.
+
+### Left
+
+- The night's re-recording above.
+- `bin/ci annotations` (`:beside`) still compares the checker's errors with gcc's recorded acceptance (`parse-gcc.tsv`).
+- `__has_builtin` follows the GNU dialect (CS14 (a)), not ci's own tables: CS279. The intrinsics headers declare the corpora's
+  subset of Intel's interface only.
+
+### Proposed (2026-11-07): CS279-CS280
+
+- **CS279 `__has_builtin` from ci's tables.** `c/target/dialect.edn` lists the dialect's builtins (gcc 15.2's answers for the
+  probed names, CS14 (a)). (a) Keep; (b) answer from the builtins ci implements, so `#if __has_builtin` takes ci's real path.
+  Cost (b): half a day, and some gcc tests' outcomes change. Recommended: (a) until ci's builtins are what the dialect lists.
+- **CS280 The libraries' headers.** `gmp.h` and `pcre2.h` come from the host's packages by digest. (a) Keep (a host's library
+  packages, not a toolchain); (b) a pinned pack of their own with gmp's and pcre2's tarballs' provenance. Cost (b): an hour and
+  a night's pack. Recommended: (b) when the oracle records' packs land on main.
