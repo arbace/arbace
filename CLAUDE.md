@@ -114,8 +114,9 @@ Prior art:
   `test/arbace-go-aot-results.edn` (classes `test/clojure/divergences-aot.edn`), the two levels'
   disagreements listed (`bin/gate --full`'s `suite-aot`).
 - `bin/reap` (and `make reap`; REAP1, doc/FULL-SUPPORT-SURVEY.md, RPS3, RPS13): the REAP matrix,
-  read, eval, AOT and print for Clojure, Java, Go, C and C++ (four rows, 16 cells since C8, doc/C23-SURVEY.md §10; five, 20 since CX10,
-  doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)": C++'s read the token check's `test/repr/cpp/pp-check-known.edn` with its results
+  read, eval, AOT and print for Clojure, Java, Go, C, C++, Scheme, OCaml and Python (eight rows, 32 cells since merge plan batch 1,
+  2026-11-07, the rows' branches merged: four rows, 16 cells since C8, doc/C23-SURVEY.md §10; C++'s since CX10,
+  doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)", "As built: cppi-check": C++'s read the token check's `test/repr/cpp/pp-check-known.edn` with its results
   `pp-check-results.edn` (`:c-known`'s `:id-sep "/"`) and CX9's dg record, eval and AOT CX8's `test/cpp/check{,-aot}-linux-amd64.edn` and the sampling's
   `check{,-aot}-every-25-linux-amd64.edn` (cppi-check; the lowering's `test/cpp/lower-results.edn` beside, reader `:cpp-lower`), print the round trip's `test/repr/cpp/roundtrip-results/`
   and known file (reader `:cpp-roundtrip`), classes `test/cpp/divergences{,-read,-aot,-print,-dg,-lower}.edn`), judged from the
@@ -128,17 +129,23 @@ Prior art:
   `bin/reap record-native-check`); the C known files' results files (`test/repr/c/{pp-check,parse-check,annot,roundtrip}-results.edn`,
   CS240 (a)), written by the full runs' `--record` since C9.2's window (2026-11-02), give C's read and print cells their passes; a cell whose check
   is not recorded yet prints "no check yet".
-  Scheme's row since SM9 (doc/scheme/SCHEME-SURVEY.md, "As built: SM9 (write-ahead)"; 20 cells): its records one map a case
+  Scheme's row since SM9 (doc/scheme/SCHEME-SURVEY.md, "As built: SM9 (write-ahead)"): its records one map a case
   (`test/scheme/check{,-aot,-r7rs,-srfi,-chibi-tests,-ecraven,-mats}-linux-amd64.edn`, the reader `:scheme`, the class an item records
   held to the matrix's), repr/scheme's read and print records `test/scheme/{check-read,roundtrip}-results.edn` (`bin/repr-scheme check
   --record`, `roundtrip --record`, whole runs), classes `test/scheme/divergences{,-aot,-corpora,-read,-print}.edn`; the mats and Chibi's
   own (chibi test) beside; the row counts as many rows as `cells.edn` has.
-  OCaml's row since O8 (doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)"; 20 cells): the reader `:ocaml` (rows
+  OCaml's row since O8 (doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)"): the reader `:ocaml` (rows
   `[ID RESULT REASON ...]`, RESULT a string), eval `test/ocaml/check-oi.edn` and `check-suite-oi.edn` (oi against ocamlc's recorded
   runs), AOT `check-aot.edn` and `check-suite-aot.edn` (the light level, OC87 (a)), read and print `test/ocaml/{read,print}-results.edn`
   (repr/ocaml's round trip over the 16 corpora against ocamlc's own parser, `bin/repr-ocaml roundtrip --record-results`, a corpus's rows
   replaced, from a passing run), classes `test/ocaml/divergences{,-suite,-aot,-suite-aot,-read,-print}.edn` (`:corpus` by design,
   `:light` deferred).
+  Python's row since PY10 (doc/python/PYTHON-SURVEY.md §10.1, "As built: PY10"; the Mac VM's line): read repr/python's `:lines`
+  round trip and the native reader's token and tree checks (`test/python/{roundtrip,lex-check,parse-check}-known.edn` with their
+  results files), eval `bin/pyi check` over Lib/test (`test/python/check-lib-test-linux-amd64.edn`, against CPython 3.14.10's
+  `ref-cpython314-lib-test*.edn`, reader `:results` with `:py-ref`) and pyi's compiled loop, AOT `bin/pyi check --aot`
+  (`check-aot-linux-amd64.edn`, reader `:pyi-aot`), print the `:full` round trip; eval and AOT "no check yet" until Python's amd64
+  records night writes them.
   `bin/clojure-tests --divergences [RESULTS]` judges a suite run per test against the Clojure classes.
 - `bin/crops-score` (and `make crops-score`; doc/CROPS-SCORE.md): each of the eleven crops' completeness (the REAP cells'
   pass / (pass + by design + deferred + pending) from a tree's `test/reap/matrix.edn`), maturity (a checklist measured on the
@@ -262,19 +269,34 @@ Prior art:
     `check --aot`, `dg`, `annotations`, `bin/repr-c check --tokens`, `parse-check`, `roundtrip`) are heavy `--full` steps since 2026-11-02,
     which judge the records and never `--record`: the records are recorded by hand (`--record`), and `bin/reap` judges them.
   - The other crops, repr/ocaml (`bin/repr-ocaml`, `bin/oi`), repr/scheme (`bin/repr-scheme`, `bin/si`), repr/cpp and repr/llvm
-    (`bin/repr-cpp`, `bin/repr-llvm`, `bin/cppi`): their namespaces (`arbace/repr/{ocaml,scheme,cpp,llvm}`, `arbace/scheme/`,
-    `arbace/cpp/`) are evaluated from the checkout, not embedded and out of `gate_key` (`arbace/j2g/embed.ae`'s exclusions); no gate step
-    runs OCaml's. C++'s since CX10 (doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"), on stage 0 with the host's g++
-    and clang++ (the host `:cxx`, `bin/lib/gate-run.bash`'s `gate_cxx_id`; `bin/gate --pins` runs `bin/repr-cpp pins check` and `host check`):
+    (`bin/repr-cpp`, `bin/repr-llvm`, `bin/cppi`), repr/python and pyi (`bin/repr-python`, `bin/pyi`; doc/python/PYTHON-SURVEY.md, the
+    Mac VM's line, merged with batch 1): their namespaces (`arbace/repr/{ocaml,scheme,cpp,llvm,python}`, `arbace/scheme/`, `arbace/cpp/`,
+    `arbace/python/`) are evaluated from the checkout, not embedded (`arbace/j2g/embed.ae`'s exclusions; pyi's embedding waits for the
+    re-seed window W, PYS18 (a)), and out of every key: since the keys commit (PYS30 (a), the user 2026-11-04; batch 1, 2026-11-07)
+    one list, `bin/lib/version.bash`'s `arbace_crop_paths` (the crops' namespaces, their Go forms `go/arbace/{oi,scm,scminterp,py,
+    expat,pyexpat,hs,libm}` and pyi's lazy modules `go/arbace/{clib,pybz2,pylzma,pyzstd,pyssl,pysqlite3}`, OCaml's `jdk/ocaml/`, the
+    crops' script libraries `bin/lib/{oi,repr-cpp,cppi,rsi,hsi,si,pyi,repr-*,crops}`), is left out by `gate_key`, `gate_rest_key`,
+    `arbace_runtime_key`, `arbace_embedded_sources`, `arbace_javac_key` and `arbace_javac_rest_key`, and the audit's hosts take it
+    (`test/gate/audit.ae`'s `crop-rules`; `test/gate/gate-key-crops-test.bash`): a crop's commit under it moves none of the keys.
+    Since batch 1, C++'s, Scheme's and OCaml's steps are in the gate (GT9, doc/GATE-SURVEY.md, "As built: GT9 (write-ahead)",
+    GTS210-GTS223, GTS240-GTS247): spliced into `test/gate/steps.edn` from their fragments `test/gate/crops/{cpp,scheme,ocaml}.edn`
+    (`gate.crops splice`, `test/gate/crops.ae`; `gate.crops check`: every new crop's step declares `:mem-gib`, its essential checks
+    at most 3 GiB, every check a negative control in `:controls` or a waiver), their hosts as data (`:host-ids` `:cxx :chez :chibi
+    :ocaml`, beside `:gcc`; `bin/gate`'s `gate_host_id`), their pins `:crop-pins` (`bin/gate --pins`), their light `:full` chains
+    beside the serial run (`:night-concurrent`, GTS216; `bin/gate --plan` names them), their budgets `:new-crops` and `:shares`
+    (`bin/gate --costs`); the rotations take GT9's verbs (`--only-list`, `--cmi-only`, `--no-expect`; test/{ocaml,cpp}/subsets.edn).
+    The fragments of later batches (llvm-rust, natives, haskell, cpp-native, python) wait in `test/gate/crops/`.
+    C++'s since CX10 (doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"), on stage 0 with the host's g++
+    and clang++ (the host `:cxx`; `bin/gate --pins` runs `bin/repr-cpp pins check` and `host check`, `:crop-pins :cpp`):
     essential `cpp-read-essential` (`bin/repr-cpp pp-check --essential`, `test/cpp/essential-read.txt`; `--only FILE`, CORPUS/NAME a line,
     `--record-results`), `cpp-print-essential` (`bin/repr-cpp roundtrip-corpus gxx-dg-essential` and `samples`: a recorded list made by its
     key, `test/cpp/essential-print.txt` held to `roundtrip-results/gxx-dg-essential.edn`), `cpp-lower-essential` (`bin/cppi lower-essential`,
     `test/cpp/essential-lower.txt`), about 2 minutes warm; `--full` `cpp-selftest`, `cpp-tokens`, `cpp-roundtrip` and `cpp-lower` (`bin/cppi
     lower-corpus KEY`), a part a recorded list; `make cpp-essential`. Since cppi-check (2026-11-05; "As built: cppi-check") CX8's run checks too:
-    essential `cpp-check-essential` and `cpp-aot-essential` (`bin/cppi check [--aot] --only test/cpp/essential-check.txt`), `--full` `cpp-check` and
+    essential `cpp-check-essential` (`bin/cppi check --only test/cpp/essential-check.txt`; cppi-check's `cpp-aot-essential`, 4 GiB, is not a step: GTS215's 3 GiB), `--full` `cpp-check` and
     `cpp-aot`, parts the recorded corpora samples and runtime (`test/cpp/check{,-aot}-linux-amd64.edn`) and the sampling `--sample 25` of gxx-dg-run
     (`test/cpp/check{,-aot}-every-25-linux-amd64.edn`: a `--sample N` run is held to and `--record`ed into its own record), against g++ 15.2's runs
-    `test/cpp/ref-gxx15.edn` (reap's `:ref-corpora`); CX9's `cpp-dg` joins later.
+    `test/cpp/ref-gxx15.edn` (reap's `:ref-corpora`); CX9's `cpp-dg` (`bin/repr-cpp dg`), `cpp-runtime` (the lowered runtime, a build step), `cpp-roundtrip-dg` (rotated) and `cpp-c2j` with GT9's fragment.
     Scheme's since SM9: repr/scheme against Chez 10.3.0 run live (the host `:chez`) and si's light driver
     (`go/arbace/scm` built alone by TamaGo's go, not Arbace's executable) against Chez's and Chibi's recorded runs, the corpora fetched
     by pin into the main checkout's `.tmp/scheme/corpora` (a worktree's and the clean clone's too); `--corpus ID` (`bin/repr-scheme
@@ -366,7 +388,7 @@ Prior art:
   mixed) against their runs (`bin/gate` the `mixed` sample and `bad-go`, the one that must not build, `make programs-essential`; `--full` all). Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
   default since S6; `ARBACE_AOT=0`: evaluated from the image of prepared namespaces, as before):
   by the host when its runtime (`bin/lib/version.bash`'s `arbace_runtime_key`: `arbace/lang`,
-  `go`, `overlay/jdk`, `jdk` but j2g's edge, `jdk/javac/`, `jdk/provenance.edn` and `overlay/jdk/javac/`) is the checkout's, one j2g run, started as the host
+  `go`, `overlay/jdk`, `jdk` but j2g's edge, `jdk/javac/`, `jdk/provenance.edn`, `overlay/jdk/javac/` and `arbace_crop_paths`) is the checkout's, one j2g run, started as the host
   compiles them (SA160), about 2.5 to 3 minutes; else by a first build of the program, two runs, about
   5.5 minutes (after a change to the runtime). The test build reuses the shipped build's compiled namespaces when made from the same sources and
   runtime (`target/arbace-go/aot.key`); `bin/build-go` keeps a cache of printed packages
@@ -498,10 +520,9 @@ Prior art:
   the worktree's `target/seed`, `bin/seed --link`, GTS83 (a)), the executable and the test build by stage 0 (`bin/arbace-go
   --gate-build`, cached by key in `ARBACE_GATE_EXES/KEY20` (`KEY20` the first 20 characters of `bin/arbace-go --gate-key`; the one function `bin/lib/gate-cache.bash`'s `arbace_gate_cache` computes it for the gate and for the scripts run by hand; `ARBACE_GATE_CACHE` overrides, and a miss replaces only a directory of its own making, built beside it and swapped in under a lock, so a second run waits and then hits), and keyed by a hash of what they are built from,
   `gate_key`: `arbace/` less the namespaces no executable embeds (`bin/lib/version.bash`'s `arbace_embedded_sources`:
-  repr/java, repr/haskell, repr/rust, repr/ocaml, repr/scheme, `arbace/scheme`, repr/cpp, repr/llvm,
-  `arbace/cpp`), `go/` less the crops' Go forms (`go/arbace/{oi,scm}`; ci's, cinterp's and crt's are in it since C9: j2g copies them into the program), `overlay/` and `jdk/` less
+  repr/java and `arbace_crop_paths`' namespaces), `go/` less the crops' Go forms (`arbace_crop_paths`'; ci's, cinterp's and crt's are in it since C9: j2g copies them into the program), `overlay/` and `jdk/` less
   javac's world, `jdk/platform/`, OCaml's `jdk/ocaml/` and the provenance files, `x509roots/`, the fixtures' forms,
-  `bin/lib` (less the repr checks', the crops' `ci/`, `oi/`, `repr-cpp/` and `gate-run.bash`; queue 111: no build
+  `bin/lib` (less the repr checks', C's `ci/`, `arbace_crop_paths`' libraries and `gate-run.bash`; queue 111: no build
   reads them), since GT7 `tamago/goroot` and `tools/godump` (goi's table), the build's scripts, the
   seed's and Go's pins, Go's `VERSION` and `ARBACE_HOST_EXE`'s bytes when set; seconds when unchanged, else two Go-hosted builds, about 8 minutes: the
   test build reuses the executable's compiled namespaces), then
