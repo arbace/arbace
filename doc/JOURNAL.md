@@ -337,3 +337,15 @@ applied, the three keys computed after each):
 - **Scores** (batch 2 before → after): C++ 75.4 / 91.7 / 20 → 75.4 / 100 / 31.4; Haskell 0 / 8.3 / 20 → 96.3 / 100 / 74.9; Rust
   75.0 / 95.8 / 20 → 75.0 / 95.8 / 80.0; LLVM IR 95.9 / 93.3 / 88.3 → 96.0 / 100 / 96.9; the others unchanged.
 - Not merged here: `res34` and `cpp-indep` (later, on these heads).
+
+## 2026-11-05: HF4b, the deriving strategy keywords and DerivingVia (branch `haskell-deriving-via`)
+
+HF4's proposal 3 (b), decided by the user. Strategies written in a deriving clause or a standalone declaration
+(`stock`, `newtype`, `anyclass`, `via T`) now set the request's strategy in `arbace/repr/haskell/typecheck.ae`
+(`strategy-of`, `rep-of`, `gnd-of`); `via T` is the newtype strategy's coercion with `T` as the representation. Source read:
+GHC 9.14.1's `compiler/GHC/Tc/Deriv.hs` (strategy choice, `mkNewTypeEqn`, via) from the pinned tarball, as the specification;
+nothing new ported (origin as HF4's, `LICENSE.md`, `doc/ARBACE.md`). Judge findings fixed: a one-method, no-superclass class's
+coerced method is the dictionary; a superclass dictionary applying a dictionary function to the instance's parameters alone is
+inlined; standalone deriving with a strategy binds implicit type variables at the strategy's span (`rename.ae`). Samples
+T23Strategies, T24Via; results in the survey ("As built: HF4b"). Alternative considered: checking the via type's
+coercibility now (needs a Coercible solver; left to HF5's Core).
