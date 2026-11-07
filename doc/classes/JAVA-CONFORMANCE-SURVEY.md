@@ -3720,3 +3720,174 @@ the two trees differ by their file names (each test's own classes, its `package 
 contents: a comparison that ignored the files' contents would still fail them. At diagnostics c00002's output and the
 golden file differ by the file names in the messages (`T5017953.java:...` against `T6304921.java:...`) as well as the
 messages' keys: not a judge that ignores the messages' text.
+
+## Decided (the user, 2026-11-07): the test's own verdict (JCV1)
+
+The aim: Java's independence as `bin/crops-score` measures it (`mac/crops-score`, doc/CROPS-SCORE.md, "Independence")
+above 90%. It was 90.0: read, eval, AOT and print 1, the judge 0.5, because every check compared with the JDK's recorded
+runs (`test/java/ref-jdk26.edn`, `bin/java-check --record-ref` with jdk26u's JDK). The user's decision:
+
+- a test's own verdict counts as a judge no toolchain made (1). Judge by it wherever the test has one: a jtreg `main`
+  returning normally against throwing, its exit status, jtreg's `@run main/fail` and expected-exception forms, javac's
+  acceptance of a test that must compile or must fail (`@compile/fail`), the golden files a diagnostics test ships, the
+  print level's reread forms equal;
+- the JDK's recorded runs move to the oracle tier, checked by hand at a tag;
+- a test without a verdict of its own (whose only reference is the JDK's recorded stdout) keeps 0.5;
+- without lowering completeness or maturity (the classes, the records and the negative controls still hold);
+- the crops-score formula for a stage that mixes the two is the C agent's to propose (C builds the same on its own
+  branch): here the shares are measured per level.
+
+## As built: JCV1 (2026-11-07)
+
+**Whose verdict.** `bin/java-check verdicts` (`java.check/verdicts`, seconds, no run) reads every test the JDK passes in
+place at the platform's pin and writes `test/java/verdicts.edn`, `[id kind why]` (`--verify` compares; `make
+java-verdicts`):
+
+- `:status`: a run test whose source set can fail by itself, by jtreg's rule for `main` (it passes when main returns
+  normally): a `throw` statement, `System.exit` or `Runtime.getRuntime().exit`/`halt` in the code of any file of the
+  source set, comments and literals left out (`java.check/code-only`), 2,501 tests (2,419 `throw`, 82 `System.exit`);
+  or a test that prints nothing on the JDK, so that what it checks is that the runtime throws nothing and does not
+  crash (most of hotspot's compiler tests: jtreg's status again, the JDK's stdout would only say "nothing"), 599 tests;
+- `:stdout`: a run test with no way to fail but a crash that prints (`assert` does not count: the JDK's runs had no
+  `-ea`), and Arbace's own corpus jls, whose programs print what they check (EvalOrder, Overloads, ...): the JDK's
+  recorded stdout is its only reference, 222 tests (jdk-run 49, jdk-other 43, langtools-run 45, hotspot-compiler 58,
+  hotspot-runtime 12, jls 15);
+- `:golden`: the 1,194 golden-diagnostics tests: each action's status from its `@compile` mode (`/fail`: 1, else 0) and
+  its `ref=` golden file, shipped with the test. For every test the JDK passes the JDK's record says the same, action for
+  action (`verdicts` checks it: "the same for every action"), so the diagnostics level was the test's own already; since
+  JCV1 `java.check/plan-diag` writes the expectations from the modes (`diag-want`), not from the record.
+
+No test of the corpora is `@run main/fail`, `@compile/fail` or of an expected exception: those categories (`:other`,
+`:compile-fail`, survey §3.1) are not in the run corpora, and the compile-fail-ref tests are the diagnostics level's.
+
+**The shares per level** (tests whose verdict judges them at the level, of the level's tests):
+
+| level | own verdict | the JDK's record | the own verdict |
+|---|---|---|---|
+| read | 3,322 of 3,322 | 0 | repr/java's read completes (it never compared with the JDK) |
+| interp | 3,100 of 3,322 (93.3%) | 222 (`:stdout`) | jtreg's status |
+| compiled | 3,100 of 3,322 (93.3%) | 222 (`:stdout`) | jtreg's status |
+| classes | 3,322 of 3,322 | 0 | javac on Arbace accepts the test (each must compile) |
+| print | 3,322 of 3,322 | 0 | javac on Arbace accepts the printed Java, its reread forms equal, mode `:full` byte for byte, its class files the original's by javac on Arbace |
+| diagnostics | 1,194 of 1,194 | 0 | the `@compile` modes and the golden files |
+
+Over the judged test-levels (read apart): 14,038 own, 444 the JDK's stdout (96.9%).
+
+**The judges.** `bin/java-check`'s `judge_own STATUS ERR [WANT]` is jtreg's verdict for a main action: pass at status 0;
+fail otherwise ("status N (expected 0)"); timeout as before. `test/java/run.ae` ports jtreg's rule for the other threads
+(its `MainWrapper` runs main in a thread group whose `uncaughtException` keeps the first `Throwable` but a `ThreadDeath`,
+and a test whose main returned fails on it; openjdk/jtreg's agent, studied, not vendored): a default uncaught-exception
+handler keeps the first (printing it as the JVM's default handler does) and a main that returned exits 97, which
+`judge_own` fails ("an uncaught exception in another thread (jtreg's rule)"); KillThread's `ThreadDeath` stays a pass, as
+on jtreg. In `run_actions` a `:status` test (the plan's `verdict` line, `java.check/plan` from `verdicts.edn`) is judged by
+`judge_own`, a `:stdout` test by `judge` against the record as before; every action runs (no stdout difference stops the
+test any more). The record's judgment is made in the same run (97 taken as the launcher's 0) and written as a row
+`ID LEVEL.jdk RESULT REASON` where it says otherwise. At classes the row is `pass` when javac on Arbace accepts the test,
+the digest against the JDK javac's a `classes.jdk` row when it differs. At print the printed Java's class files are
+compared with the original's compiled by javac on Arbace in the same run (`print_check_one`, no longer the JDK javac's
+digest first).
+
+**The judgment.** `java.check/report` judges the rows by the own verdict: `own-row` judges a row of a run before JCV1
+(judged by the record) again (a `:status` test's `differ` at interp or compiled passes, its "status N (the JDK's 0)" reads
+"(expected 0)"; a classes `differ` "the class files differ from the JDK javac's" passes), so the gate's saved results of
+before JCV1 judge as a JCV1 run's would; the `.jdk` rows are left out; a control's row is its judge's, as it is. It prints
+per level the two judgments' agreement and the disagreements by kind. `bin/java-check --judge --oracle` is the oracle
+tier's (by hand, at a tag): the rows `LEVEL.jdk` where a run wrote one, else the row, at interp, compiled and classes,
+against `test/java/oracle/check-LEVEL.edn` and `test/java/oracle/levels-known.edn` (the records of before JCV1, moved
+there: the JDK's record's judgment). `--latest-saved` takes the newest saved results of each part of the gate's Java level
+steps in the store of passes (`make java-check-rejudge`, `make java-check-oracle`). `bin/java-check rejudge-records` made
+`test/java/check-{interp,compiled,classes}.edn` and `levels-known.edn` from the oracle's by `own-row`: interp 1,865 pass
+(the oracle's 1,847), compiled 1,938 (1,920), classes 3,320 (3,320); levels-known.edn 87 (the oracle's 85 judged again,
+two new: t04544 interp pass, compiled timeout; t08123 interp load-failed, compiled pass). Then t05507 by hand, from the sample run below (a `rejudge-records` again would undo it: the own records are a run's from now on, `--record`).
+
+**The controls.** c00001's interp, compiled and classes controls now judge the `:stdout` judge and the record's digest
+(t03208 is jls, `:stdout`). **c00003** (`:inverted true`, no reference) is the own verdict's: t04488
+MakeBooleanComparable's run judged by its own verdict inverted (jtreg's `main/fail`, `@compile/fail`;
+`java.check/plan`'s `control-own CID`, `judge_own ... fail`, the classes level's acceptance likewise), at interp,
+compiled and classes: it returns normally and compiles, so the control fails; a judge that passes every status, or every
+compile, passes it. Over saved results of a run before JCV1 the report makes c00003's row from its subject's own row
+inverted (said in the reason); `--oracle` has no `:inverted` control. The essential run (428 tests, `bin/java-check
+--essential --jobs 2`, 92 s): 428 pass, c00001 differ, c00003 fail, as they must; 428 agree with the record.
+
+**The whole corpus judged again from saved results** (no run: `bin/java-check --judge --latest-saved`, the store's
+passes of 2026-11-05 and 2026-11-06, 17,809 rows, 11 s on stage 0): exit 0, no regression, no test in no class, every
+control as it must; `--oracle` over the same rows: exit 0 as well. The own verdict against the record:
+
+| level | agree | disagree |
+|---|---|---|
+| read, classes, print | 3,322 | 0 |
+| diagnostics | 1,194 | 0 |
+| interp | 3,304 | 18 |
+| compiled | 3,303 | 19 |
+
+Every disagreement is the same kind, the own verdict passing where the record's stdout differs (the 18 at interp and
+t08123 at compiled; t04544 passes at interp, times out compiled):
+
+- the test prints its environment and does not check it: `Java Version: null` (java.vm.version, t03382-t03384), "FTP not
+  supported by this runtime" (t05023, t08123), a file's date (t08129), a canonical path (t04272);
+- the output interleaves threads: t03289 (Test8267042), t04319 (PipedInputStream/Constructors), t04544 (GetResource);
+- jrt behaves otherwise than the JDK in what the test prints but does not assert: CounterOverflow's unflushed stdout
+  (t04243), the providers listed (t05309), the locales tried (t05393 prints "Test passed." where the JDK lists 1,976
+  bytes), a ClassCastException's trace (t05480, t05481), an algorithm list (t07916), Priority_Inversion's lines (t08237),
+  Collator's Norwegian (t08304), and DateGregorianCalendarTest's "Part II: FAILED" printed by a worker thread (t05507),
+  which jtreg's rule for the other threads now judges (the sample below).
+
+**A sample run with JCV1's judges** (2026-11-07, light: 192 tests, the 24 of the record's `differ`s, every 25th
+`:status` test and every 5th `:stdout` one, t03208 and t04488; `bin/java-check --list FILE --levels read,interp,classes
+--jobs 2 --save`, 590 s, read afresh on javac's tool `javac-a3300f56`, the gate's executable `0276a6db`): read 192 pass;
+classes 192 pass, the record's digest equal for all (no `classes.jdk` row); interp 112 pass, 66 load-failed, 9 fail, 4
+differ (`:stdout` tests), 1 timeout; 24 `interp.jdk` rows (17 a `differ`, 7 a `fail` whose reason reads "the JDK's 0").
+The two judgments: 175 agree, 17 disagree: 16 the own verdict passing where the record's stdout differs (the kinds
+above), and **t05507** DateGregorianCalendarTest failing by its own verdict where the record said only `differ`:
+jtreg's rule for the other threads finds the worker thread's `RuntimeException: GregorinCalendar and Date returned
+different values. year=-2147481748, ...` (jrt's dates, the class `:jrt-dates` names it). The own verdict is the stricter
+one there, as jtreg is: `test/java/check-interp.edn` and `check-compiled.edn` record t05507 `:fail` with that reason
+(compiled not run: its record's `differ` had the same output). `--judge` of the sample: no regression but t05507 before
+its record moved, every control as it must (c00001 differ, c00003 fail); `--oracle`: no regression. The rule itself, on
+a scratch class (`main` starting a thread that throws, then returning): status 97, "uncaught: in thread "Thread-1":
+java.lang.RuntimeException: boom"; a `ThreadDeath` cannot be made in the Go build ("ThreadDeath's constructor is not in
+the Go build", which is why t05655 KillThread is load-failed at `java.util.Timer` anyway), so its exception is untested.
+
+These are the oracle tier's findings, still classed in `test/java/divergences.edn` (the `differ` classes hold at
+`--oracle`). The stdout tests' 4 `differ` at interp and compiled (t03503, t04238, t06134, t07649) stay the record's.
+
+**Independence** (doc/CROPS-SCORE.md's five stages; `test/crops/independence.edn` is on `mac/crops-score`, not here: the
+facts as a patch, `doc/classes/JCV1-crops-independence.patch`). Before: read, eval, AOT, print 1, judge 0.5: 90.0%.
+After: the judge is mixed, 14,038 test-levels by their own verdict (1) and 444 by the JDK's recorded stdout (0.5):
+share-weighted 0.985, Java's independence 99.7% (JCV4's (a)); by the stage's weakest part (JCV4's (b)) it stays 90.0%
+until JCV2 moves the last 222 tests. Completeness rises (interp 1,847 to 1,864 pass, compiled 1,920 to 1,937, by the
+records, t05507 moved to `:fail` by jtreg's rule; the rest equal), maturity holds: every class, record, control and list still judges, the oracle's in
+`test/java/oracle/`.
+
+**The night** (light: the judgment of saved runs alone): `bin/java-check --judge --latest-saved` (`make
+java-check-rejudge`) and `bin/java-check --judge --oracle --latest-saved` (`make java-check-oracle`), each seconds; the
+gate's `java-judge` and `java-check-judge` run the own verdict's judgment unchanged. `bin/java-check`, `test/java/run.ae`
+and `test/java/verdicts.edn` are in `:java-run`, so the next `--full` reruns the Java level steps (their keys change);
+their new rows (`LEVEL.jdk` beside) judge as above. `--record` after that run rewrites the own records from real runs
+(t05507 may move: jtreg's rule for the other threads).
+
+### Proposed (JCV2-JCV6)
+
+1. **JCV2, the 222 `:stdout` tests.** (a) Keep them on the JDK's recorded stdout (0.5); (b) give the jls corpus (15,
+   Arbace's own programs) golden files of its own, `test/java/jls/NAME.out`, each line reviewed by hand against the JLS
+   section the program cites, judged as langtools' golden files are (own, 1; 207 left); (c) (b) and, for the 207 jtreg
+   tests, the JDK's stdout committed beside each as a golden file once reviewed (a person's verdict on the JDK's output:
+   own by review, a day's reading). Cost: (b) an afternoon, (c) days. Recommended: (b) now, (c) never unless the formula
+   is JCV4 (b).
+2. **JCV3, the corpus's selection and source sets.** The corpora hold the tests the JDK passes (`:jdk :pass`) and their
+   source sets as the JDK's javac `-sourcepath` found them: a record of the JDK, the read stage's input, not a judge.
+   (a) Keep (a record of what to run); (b) compute the source sets by javac on Arbace (`bin/repr-java javac -sourcepath`,
+   the same option) at `verdicts`, and select by jtreg's tags alone (a test the JDK fails then fails on Arbace too, in a
+   class of its own). Cost: (b) a day and a re-record of the selection. Recommended: (a) until crops-score counts the read
+   stage's corpus records.
+3. **JCV4, the formula for a mixed judge** (C's agent proposes crops-score's): (a) share-weighted over the stage's
+   test-levels (Java 0.985); (b) the weakest part (0.5 while any test needs a record); (c) per level, then the mean (Java:
+   interp and compiled 0.967, the rest 1: 0.987). Recommended: (a), which rewards each test moved.
+4. **JCV5, `assert`.** jtreg runs tests with `-ea -esa`; the JDK's recorded runs had no `-ea`, so `assert` is not a
+   self-check here. (a) Leave it; (b) run the interp and compiled levels with assertions enabled (the interpreter's and
+   j2g's `assert` honoured), re-record the reference with `-ea -esa`, and count `assert` (a few `:stdout` tests move).
+   Cost: (b) a record and a check that both back ends honour `-ea`. Recommended: (b) with JCV2.
+5. **JCV6, the oracle between tags.** The own verdict passes where jrt prints otherwise than the JDK and the test does
+   not assert it (the kinds above). (a) The oracle by hand at a tag only (the decision); (b) `make java-check-oracle` in
+   the night's report too, printed, never failing a gate (seconds, the same saved rows). Recommended: (b), so a jrt
+   regression in what the tests print is seen before the tag.

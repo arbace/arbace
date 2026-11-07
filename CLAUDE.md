@@ -435,11 +435,15 @@ Prior art:
   before the first line), the JDK's runs recorded as data (`test/java/ref-jdk26.edn`, `--record-ref` with
   the system's JDK, `--only` keeping and checking every other line; the check needs no JVM), the levels `read` (repr/java on javac's tool executable), `nread` (JFS123 (b), outside the gate: the read without javac, `bin/repr-java read --no-javac`, its forms against `read`'s byte for byte, `test/java/check-nread.edn`, `make java-check-nread`),
   `interp` (each package required file by file as the REPL loads it, `--load do` the one-`do` mode, and
-  `main` run on the executable, `test/java/run.ae`; status and stdout's digest, also with identity hash
-  codes masked, against the JDK's), `compiled` (JC2, "As built: JC2": the tests translated by j2g in
+  `main` run on the executable, `test/java/run.ae`; since JCV1 (the user's decision of 2026-11-07, "As built: JCV1")
+  a test `test/java/verdicts.edn` marks `:status` (`bin/java-check verdicts`: its source set can fail by itself, or it prints
+  nothing) judged by its own verdict, jtreg's (status 0, no other thread's exception uncaught), the rest (`:stdout`) by
+  status and stdout's digest, also with identity hash codes masked, against the JDK's), `compiled` (JC2, "As built: JC2": the tests translated by j2g in
   shards of programs, `bin/j2g --program` with the build's compiled namespaces (`program_base`'s, RPS161 (b); `JAVA_CHECK_AOT` overrides) and `bin/build-go`, a
   test j2g refuses or whose Go does not compile taken out, each `main` run on its program) and `classes`
-  (javac on Arbace's class files against the JDK javac's), results against `test/java/check-LEVEL.edn` (`--record`),
+  (javac on Arbace's class files against the JDK javac's; since JCV1 javac's acceptance, the digest the oracle tier's), results
+  against `test/java/check-LEVEL.edn` (`--record`; the JDK's record's judgment, rows `LEVEL.jdk`, is the oracle tier's, by hand at a tag:
+  `bin/java-check --judge --oracle [--latest-saved]` against `test/java/oracle/`),
   every test not passing in a class of `test/java/divergences.edn`; the namespace `java.check`
   (`test/java/check.ae`) on the tools' host; the essential subset's forms committed in `test/java/forms/`
   (`--forms verify|update`); `diagnostics` (JC3, "As built: JC3"): langtools' golden-diagnostics tests
