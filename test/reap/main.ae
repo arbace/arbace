@@ -277,6 +277,40 @@
   {:pass nil :entries (vec (for [[p why] (sort-by key (read-edn (:file src)))] (entry p :known (str "text: " why))))
    :detail "the known file only: the level's passing files are not recorded"})
 
+;; ---- the crops' readers (the REAP rows of Rust, Haskell and LLVM): one block each, so that the branches merge by keeping all
+
+(defmethod read-source :corpus-known [src]
+  ;; A round trip's known file (bin/repr-rust roundtrip's test/rust/roundtrip-CORPUS[-LEVEL]-known.edn: a map from a file, crate or
+  ;; program to the reason it differs; the passes are not recorded, the round trip passes every other unit of the corpus): each
+  ;; :parts entry {:corpus CORPUS-FILE :known KNOWN-FILE}, the units of the corpus (:count :files, the files of its crates;
+  ;; :ifaces, the crates rustdoc documents; :programs, the behaviour level's) less the known file's. A case is
+  ;; "CORPUS KEY" of the result :known, its reason "LEVEL: REASON" (:level, the source's).
+  (let [parts (for [{:keys [corpus known]} (:parts src)]
+                (let [c (read-edn corpus)
+                      total (case (:count src)
+                              :files (reduce + (map #(count (:files %)) (:crates c)))
+                              :ifaces (count (filter :iface (:crates c)))
+                              :programs (count (:programs c)))
+                      ks (sort-by (comp str key) (read-edn known))]
+                  {:total total
+                   :entries (for [[k why] ks]
+                              (entry (str (:name c) " " k) :known (str (:level src) ": " (str/replace (str why) #"\s+" " "))))}))]
+    {:pass (- (reduce + (map :total parts)) (count (mapcat :entries parts)))
+     :entries (vec (mapcat :entries parts))
+     :detail (str (str/join ", " (map #(format "%,d" (long (:total %))) parts)) " " (name (:count src)) " in the corpora")}))
+
+(defmethod read-source :rust-lower [src]
+  ;; rsi lower-check's results (test/rust/lower-results.edn, lower-std-results.edn: {PROGRAM :pass | :nondet | :skip | [RESULT CLASS]},
+  ;; EVAL.md section 7): a non-pass an entry of its RESULT, reason the CLASS's id, taken by that class (:class-id) of the classes file;
+  ;; :nondet (the judge's own runs differ) and :skip are no cases.
+  (let [m (read-edn (:file src))
+        vs (vals m)]
+    {:pass (count (filter #{:pass} vs))
+     :entries (vec (for [[id v] (sort-by (comp str key) m) :when (vector? v)]
+                     (assoc (entry id (first v) (name (second v))) :class-id (second v))))
+     :detail (str (count m) " programs in " (:file src) "; " (count (filter #{:nondet} vs)) " nondeterministic and "
+                  (count (filter #{:skip} vs)) " skipped, not counted")}))
+
 ;; the cases a source must have (report 021's finding 1: a shrunk record is a valid record)
 
 (def ^:private ref-ids
@@ -361,6 +395,13 @@
                     c))
           classes)))
 
+(defn- classify-entry
+  "An entry that names its class (:class-id, a check that records the class: rsi's lowering check) is taken by it, else classify's."
+  [classes e]
+  (if-let [id (:class-id e)]
+    (first (filter #(= id (:id %)) classes))
+    (classify classes e)))
+
 (defn- kind-of [cell c]
   (let [k (:kind c)]
     (if (#{:design :deferred} k) k (get (:kind-map cell) k))))
@@ -386,6 +427,7 @@
   and the oracle's :expected directory (report 021's finding 3: a directory gone gave no cases)."
   [src]
   (concat (for [k [:file :upstream :known :ref :same-cases :ref-runs] :let [f (get src k)] :when (and f (not (exists? f)))] f)
+          (for [{:keys [corpus known]} (:parts src) f [corpus known] :when (not (exists? f))] f)
           (when-let [d (:expected src)] (when-not (dir? d) [d]))))
 
 (defn- judge-source
@@ -405,7 +447,7 @@
                  :problems (when-not not-yet (vec (for [f miss] (str (:name src) ": no " f)))))
       (let [r (read-source src)
             classes (classes-of cf)
-            es (for [e (:entries r)] (let [c (classify classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))
+            es (for [e (:entries r)] (let [c (classify-entry classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))
             ;; :per-file (the token check's three sections, queue 122 finding 4): a file the known file lists at several levels
             ;; is one non-pass, of its deferred class when any is (the worst kind), else of its first; an entry in no class stays
             es (if (:per-file src) (per-file es) es)]
