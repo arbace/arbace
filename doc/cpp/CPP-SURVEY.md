@@ -3129,6 +3129,17 @@ done                                                                  # estimate
 # bin/crops-score --record
 ```
 
+The runs' routes compared (after the runtime is rebuilt at the checkout's key: `bin/cppi runtime-build`, clang 23.1.5 now, see above;
+one check process, CPPI_THREADS=2 CPPI_CI_MEMLIMIT=1400MiB, about 1.5 GB):
+
+```
+CPPI_ROUTE=auto bin/cppi check --corpus gxx-dg-run --sample 25        # against check-every-25's record (clang's IR): expect 61 of 67
+CPPI_ROUTE=auto bin/cppi check --aot --corpus gxx-dg-run --sample 25  # (initp1.C passing: an improvement, the record's oracle-rejected)
+CPPI_ROUTE=auto bin/cppi check                                        # samples and runtime: ours where it generates
+```
+
+If they hold, `auto` becomes the default (CP240 (b)) and the records are written again with `--record`.
+
 A file that fails (a crash, a timeout, an unclassed refusal) stops its key's recording: fix or class it (the known file), run the key
 again. The clang judge stays the oracle tier's: `bin/repr-cpp roundtrip-corpus KEY --judge clang` by hand at a tag.
 
