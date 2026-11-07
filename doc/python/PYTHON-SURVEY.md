@@ -3973,11 +3973,25 @@ The IR gained one key, `:threaded`.
 | the 9 files of the slice | 491 | 412 (83.9%) | 452 (92.1%) | 475 (96.7%) | 443 (90.2%) | 315 (64.2%) | 296 (60.3%) |
 
 test_dis: before 0 of 145 equal (the module did not import: `code.replace(co_linetable=)`); after 107 equal, 26 classed (`@cpython_only`,
-the specializing ones among them), 12 in the narrowed `:dis`. test__opcode: 6 of 7 before `stack_effect`'s last fix, not rerun (suspended: see the report).
+the specializing ones among them), 12 in the narrowed `:dis`. test__opcode: 7 of 7 (before: 5).
 
 **The tail** (first differences over the 67 modules, largest first): a jump's offset after an earlier difference; `LOAD_FAST` left strong after some `try` statements (not established; read: `optimize_load_fast`'s walk
 stops at an empty block, and the IR, after flow!, has not CPython's empty blocks); constant order; `all`, `any` and `tuple` of a generator expression (codegen.c inlines the
 loop); keyword dicts in calls with `**`; `f"{x!r}"`'s pieces' locations. Handlers whose region lost every instruction in flow! (an `except E as e: return`,
 `try: pass`) leave their blocks unreachable in the view: their depth is not in the IR. `async for`'s `END_ASYNC_FOR` jump. Each is a small
 change in compile.ae or `irPlan`; none is structural.
+
+### As built: the close (the user's decisions, 2026-11-07)
+
+- Route: (a), the generator from the IR with flowgraph.c and assemble.c ported, decided by the user; the tail goes to later tasks.
+- The specializing names: (a), `:specializing` by design. `_opcode.ENABLE_SPECIALIZATION` (and `_FT`) is 0: pyi has no adaptive interpreter, so
+  `test.support.requires_specialization` skips, and the class matches the skip.
+- Found on the way: sys.settrace's jump tests check `lineno_matches_lasti` (f_lasti inside the co_lines range of f_lineno) in every frame. Two
+  places disagreed: an IR instruction the view folded or moved (`viewLasti` now picks a code unit of the IR instruction's line nearby), and a list
+  or set display of constants, whose elements pyi loaded at their own lines (line events CPython never has: the loads are folded). 19 JumpTestCase
+  methods failed on the sample until both were fixed.
+- The sample against the base (6e85c5c7b), the same modules, `lib-test-all --fresh`: test_sys_settrace 365 equal, 6 failing (base the same); test_code
+  8 equal, 20 failing (base 5 and 22); test_listcomps 64 equal, 2 failing (base the same: the walrus and name-reuse cases, the save and restore of
+  hidden names, before and after); test__opcode 7 of 7 (base 5); test_dis 107 equal, 38 classed (12 `:dis`), 0 failing (base: none, it did not import).
+  No method fails that passed on the base.
 
