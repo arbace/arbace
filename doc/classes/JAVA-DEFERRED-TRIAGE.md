@@ -2052,8 +2052,9 @@ src/java.base/share/classes, and `charset-gensrc`, 51 generated, one line each i
 | jrt's own (overlay, 2) | `sun.nio.cs.JrtCharsets`: the 60 standard charsets constructed by class name (the generated provider's `Class.forName(...).newInstance()` replaced by variant `CsStandardCharsets.ae`; no class loading by name, as jrt's providers' services); `jdk.internal.jrt.CharsetStrings`: String's Charset overloads for the charsets jrt's String does not code itself, as jdk26u's `String.decode`, `encodeWithEncoder` and `lookupCharset` code them (the ArrayDecoder/ArrayEncoder paths, else the decoder or encoder over heap buffers, malformed and unmappable input replaced; the String's coder Latin1 when every char is at most U+00FF, as COMPACT_STRINGS chooses) |
 | j2g | renames `sun/nio/cs/StandardCharsets` → `Cs_StandardCharsets` (java.nio.charset's keeps the Go names `StandardCharsets_UTF_8` ... jrt's code uses), `sun/nio/cs/StringUTF16` → `Cs_StringUTF16` (java.lang.StringUTF16's hand-written functions hold the prefix); `class-supers` + `Charset`, `CharsetDecoder`, `CharsetEncoder` (the tests' own charsets and coders: `CharsetDecoder/AverageMax`, `NaNinCtor`, `CharsetEncoder/NaNinCtor`) |
 
-**jrt's hand-written Go, the day of the night** (designed, not edited: no Go is built by day; about half a day,
-checked by `bin/jrt build` and `bin/jrt test`, jrt's own build, before the night's build):
+**jrt's hand-written Go** (written 2026-11-05 on `java-jc9b-natives`, from `java-jc9b`, checked by `bin/jrt build`
+(amd64 and arm64: `go build`, `go vet`) and `bin/jrt test` (amd64), jrt's own build, no j2g run: see "As built: the
+Go natives of F8 and F11" below for what was written and how it departs from this design):
 - `charset.ae` becomes `standin_charset.ae` (Charset, Unicode, the six charsets, StandardCharsets, the lookup,
   `Charset.forName`, `defaultCharset` ...: replaced as a whole in a j2g program, as `standin_locale.ae` is), and
   `test/jrt/manifest.ae` drops their nine entries (regenerated `manifest.edn`), as Locale's were dropped; the
@@ -2116,8 +2117,8 @@ literals of 300 KB).
 
 ```sh
 cd /root/arbace/.tmp/worktrees/java-jc9b
-# 0. the day's Go (above): standin_charset.ae, charset.ae's String overloads, codec.ae, access.ae, the manifest;
-#    bin/jrt build && bin/jrt test pass
+# 0. the Go (above) is written and committed on java-jc9b-natives (merge it first): standin_charset.ae, charset.ae's
+#    String overloads, codec.ae, access.ae, the manifest; bin/jrt build && bin/jrt test pass (rerun them after the merge)
 # 1. javac's world gains the JDK build's charsetmapping tool: expect jdk/javac/sources.txt +11 lines
 #    ("buildtools make build/tools/charsetmapping/{Charset,DBCS,EUC_TW,HKSCS,Hasher,JIS0213,Main,SBCS,SPI,SRC,Utils}.java"),
 #    jdk/javac/forms +11 files
@@ -2336,9 +2337,9 @@ Branch `java-jc9b` (from `java-jc9-pki`), 2026-11-05, prepared by day under the 
 the closure's list, jrt's own Java, the variants, light checks only; nothing converted, translated or built.
 **F11 needs nothing of JC9 or of F16, F8, F7**: its closure was computed against the world plus F1's, F5's, F4's
 and F2's lists (by reference; `datagram-sources` names none of their files, nor any of JC9b's other lists'),
-and none of its files is java.nio's. **Its Go natives are not written** (no Go can be built by day): the night
-writes `go/arbace/jrt/udp.ae` to the design below before the build, or the build fails at j2g's natives check
-on `HostDatagram`'s six natives.
+and none of its files is java.nio's. **Its Go natives are written** (`java-jc9b-natives`, 2026-11-05: `go/arbace/jrt/udp.ae`,
+`udp_linux.ae`, `udp_test.ae`; "As built: the Go natives of F8 and F11" below), to the design below; without
+them the build would fail at j2g's natives check on `HostDatagram`'s six natives.
 
 **The mechanism.** jdk26u's `DatagramSocket` delegates to `sun.nio.ch.DatagramSocketAdaptor` over
 `DatagramChannelImpl` (java.nio's channels, selectors and the VM's natives: F10's world, not F11's), or, when a
@@ -2360,7 +2361,7 @@ interfaces (Go's `net.Interfaces`).
 | the variants (3) | `DatagramSocket.ae` (`createDelegate`: the factory's impl or `HostDatagramSocketImpl`, both in `NetMulticastSocket`; the constructor's assert without `DatagramSocketAdaptor`), `NetworkInterface.ae`, `InterfaceAddress.ae` |
 | j2g | nothing: no rename (the new classes' Go names collide with none), no `class-supers` (no test of the list extends a datagram class or sets a factory); `NetworkInterface` leaves `j2g_cut.go` (it was a cut class), `DatagramChannel` enters it (`getChannel`'s type) |
 
-**The Go side (the night's, before the build)**: a datagram socket is a handle of `HostNet`'s table (`netSock`
+**The Go side (written, with the departures listed below)**: a datagram socket is a handle of `HostNet`'s table (`netSock`
 with `c` a `*net.UDPConn`), so HostNet's `close0`, `available0` (FIONREAD: the next datagram's size, which
 `NetMulticastSocket`'s connect filter asks), `address0`, `port0`, `setOption0` and `getOption0` serve it. In
 `go/arbace/jrt/udp.ae` (new; `net.ae`'s helpers):
@@ -2563,3 +2564,86 @@ world's until F16, then the program's, with the variant either way).
 ## Decided (2026-11-05, the user: JCS143-JCS154)
 
 JCS143-JCS154 as recommended: 143 (b) F16b after JC9b's nights; 144 (a) version 26, the version-printing tests to the harness class; 145 (a) field updaters as built, the exact check with F20; 146 (b) jdk.charsets later; 147 (a) jdk26u's readers and writers, jrt's as fallback; 148 (a) tables generated on javac's tool; 149 (c) positional I/O and locks over today's natives; 150 (a) mappings as heap copies written back; 151 (b) DirectByteBuffer generated; 152 (a) isDirect false; 153 (c) the legacy datagram delegate, the adaptor with F10; 154 (a) IPv6 scope names with F11.
+
+## As built: the Go natives of F8 and F11
+
+Branch `java-jc9b-natives` (from `java-jc9b`), 2026-11-05, by day under the light rules: Go forms written and
+checked by jrt's own build alone (`bin/jrt build --arch amd64` and `--arch arm64`: print, `go build`, `go vet` of
+the package with TamaGo's go; `bin/jrt test --arch amd64`: jrt passes, with `TestDatagrams`, `TestMulticastJoin`,
+`TestInterfaces` new). No j2g run, no conversion, no gate build, so what a j2g program does with them (the natives
+check, the stand-in drop, the Go names of the translated classes) is the nights' first check. The branch's merge
+into `java-jc9b` precedes both nights. Main's stage 0 hosted the printer (`ARBACE_HOST_EXE`); `bin/jrt build` ran
+`jrt.testdata` once on the frozen jar of the worktree (built then, 2.5 minutes) and `bin/jrt manifest` once (16 s).
+
+**F11, `udp.ae` and `udp_linux.ae`** (about 420 lines with the tests' 150; the design said 250: the
+Linux-specific half is a file of its own, which the box's build does not compile).
+- `UDPHost` (udp.ae), the optional interface beside `NetHost`, is wider than designed: `ListenUDP`, `Peek`,
+  `ConnectUDP`, `Membership`, `Interfaces`. The designed split put `syscall.Recvfrom`, `Connect` and the multicast
+  structs in the natives themselves, which would have made `udp.go` Linux-only; the natives (portable: Go's
+  `net.UDPConn`, `errors`, `syscall.Errno`) stay in `udp.ae` and every descriptor-level call is OSHost's method in
+  `udp_linux.ae` (`//go:build linux`, as `net_linux.ae`). A host without `UDPHost` (the box's, TamaGo's OSHost)
+  answers `HostNet.UNSUPPORTED` from each native; `HostNet`'s own natives serve a datagram handle unchanged
+  (`close0`, `available0`: TIOCINQ is the next datagram's size on Linux, as the design said).
+- The six natives, by their `j2g` names: `HostDatagram_Open0_String_I_Z_Z_String1__I_native` (a
+  `net.ListenConfig` with `Control` setting SO_REUSEADDR and SO_REUSEPORT before the bind),
+  `Send0_I_B1_I_I_String_I_String1__I` (`WriteToUDP`, or `Write` for a null host), `Receive0_I_B1_I_I_I_Z_B2_I1_String1__I`
+  (read deadline by the timeout; `ReadFromUDP`; peek through `RawConn.Read` with `Recvfrom(MSG_PEEK|MSG_DONTWAIT)`,
+  EAGAIN waits under the deadline), `Connect0_I_String_I_String1__I` (`syscall.Connect` inside `RawConn.Control`,
+  the sockaddr built for the socket's family by `SO_DOMAIN`, so an IPv4 peer of a dual-stack socket is v4-mapped; a
+  null host: `connect(AF_UNSPEC)`), `Join0_I_B1_I_B1_Z_String1__I` (`IPMreqn`, `IPv6Mreq`, and for a v4 source
+  `ip_mreq_source` with the interface's first IPv4 address), `Interfaces0_String1__O1` (the `Object[]` rows of
+  `HostDatagram.Row`: name, `int[]{index, flags, mtu}` with Go's `net.Flags` bits, hardware address or none, the
+  addresses, prefix lengths, IPv4 broadcast as `ip | ^mask` when the interface broadcasts).
+- ECONNREFUSED on a send or a receive is `PORT_UNREACHABLE` (-14, "ICMP Port Unreachable"); EMSGSIZE's text is
+  Go's, capitalised ("Message too long", the JVM's).
+- **A finding**: Linux's disconnect (`connect(AF_UNSPEC)`) releases a port the bind took by itself (bound to port
+  0), so a socket would lose its port. `ConnectUDP` with a nil address reads `getsockname` before and after and
+  binds the old address again when the port changed; the test (`TestDatagrams`, "after disconnect") caught it.
+- `net_linux.ae`: `SO_BROADCAST` (0x20) joins `sockopt`'s table; `SetOption` and `GetOption` send jrt's option
+  numbers 0x2001 to 0x2003 to `mcastSet` and `mcastGet` (udp_linux.ae), before the generic table, so the boolean
+  folding (any non-zero value is 1) does not touch the multicast TTL, which is a number: TTL (`IP_MULTICAST_TTL`
+  and, on an IPv6 socket, `IPV6_MULTICAST_HOPS` too), loopback (likewise), interface by index (`ip_mreqn`, and
+  `IPV6_MULTICAST_IF` on an IPv6 socket). `getOption` of the interface answers an index on an IPv6 socket and 0 on
+  an IPv4 one (the kernel gives an address there; `HostDatagramSocketImpl` only sets it). `net.ae`'s `sockAddr`
+  takes a `*net.UDPAddr` and answers its IP and port as a `*net.TCPAddr`, so `address0` and `port0` serve it.
+- Left as designed or cut: IPv6 source-specific membership (`MCAST_JOIN_SOURCE_GROUP`) answers EOPNOTSUPP (nothing
+  uses it before F10's MulticastChannel); the IPv6 scope in a destination is passed to Go's resolver as the zone
+  and to the kernel by index; a join with a group of neither 4 nor 16 bytes is EINVAL.
+- Light checks: the loopback test sends and receives, checks the sender's address and port, peeks (the datagram
+  stays, `available0` sees its size), cuts a 40-byte datagram to 16, times out (50 ms), connects (a stranger's
+  datagram filtered, sending without an address, the closed peer's ICMP error as -14, dissolving), the options
+  (broadcast, TTL 7 read back, loopback 0 read back), a send on a closed handle (`netClosed`), a join and a leave of
+  224.0.0.251 on `lo`, and the interfaces (`lo` with its flags and no hardware address, every row's six parts, the
+  addresses', prefixes' and broadcasts' lengths equal). All pass on this host.
+
+**F8, the Go side**:
+- `charset.ae` is `standin_charset.ae` (`git mv`; the loader's table and `go/arbace/jrt.ae` name it), with the String
+  overloads taken out and `jdk.internal.jrt.CharsetStrings`'s class and its three functions added over phase 1's
+  coding: `CharsetStrings_Lookup_String__Charset` (UnsupportedEncodingException for an unknown name),
+  `CharsetStrings_Decode_B1_I_I_Charset__String`, `CharsetStrings_Encode_String_Charset__B1`. A j2g program drops the
+  file as it drops `standin_locale.ae` and links the translated class.
+- A new `charset.ae`: `String_New_B1_Charset`, `String_New_B1_I_I_Charset`, `GetBytes_Charset__B1`, and the
+  charset-name overloads `String_New_B1_I_I_String`, `String_New_B1_String`, `GetBytes_String__B1` (moved from
+  string.ae: a name no longer reaches the hand-written charsets). Written against `Charset_I`, the identity with
+  `UTF_8_INSTANCE`, `ISO_8859_1_INSTANCE` and `US_ASCII_INSTANCE` (phase 1's coding), and the translated
+  `CharsetStrings` for any other charset; for a name, jrt's six names (a table of codec.ae's own: `charsetOf` with
+  `charsetKinds`, the names and aliases the stand-in had, lower-cased) are coded here and any other name is looked
+  up through `CharsetStrings_Lookup_String__Charset`, then the Charset overload. `codec.ae` gains `decodeKind` and
+  `encodeKind` (the switch `DecodeBytes` and `EncodeBytes` had, by kind), which they now call.
+- `access.ae`: `DecodeASCII_B1_I_C1_I_I__I` and `UncheckedEncodeASCII_C1_I_B1_I_I__I` (the scratch forms of
+  `go-access.ae.txt`, unchanged), in the interface and as methods.
+- The manifest: the nine entries out of `test/jrt/manifest.ae`; `bin/jrt manifest` regenerated `manifest.edn`
+  (-119 lines), `manifest_test.ae` (-30), `reflect_tables.ae` (-93: Charset's and its subclasses' tables); the
+  JVM's reflection cases of Charset, UTF_8 and StandardCharsets out of `test/jrt/testdata_reflect.ae`
+  (`TestReflectAgainstJVM` compared the stand-in's tables with the JVM's, which no longer exist; the classes stay
+  for `Class.forName` and `getSuperclass`). `edge.edn` was absent, so the manifest's coverage line for the edge is
+  not printed.
+- Not checked (nights): that the program's translated `Charset` has the Go interface `Charset_I` and the instances
+  `UTF_8_INSTANCE`, `ISO_8859_1_INSTANCE`, `US_ASCII_INSTANCE` the new `charset.ae` names (the stand-in's shapes
+  were made after j2g's, but F8's translation is the proof); if a name differs, `charset.ae` changes, not the
+  design. `shims_test.ae`'s `TestCharsetsAgainstJVM` still runs, on the stand-in, and passes.
+
+**The nights' commands, changed**: F8's step 0 and F11's "own share" are done (merge the branch first); after the
+merge `bin/jrt build && bin/jrt test` must still pass (about 15 s with the test data made; the first run in a
+fresh worktree builds the frozen jar). Nothing else of the nights' lists changes; F11's smoke (step 4) and F8's
+(step 7) are the first run of these natives in a program.
