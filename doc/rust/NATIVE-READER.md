@@ -82,15 +82,66 @@ in rustc's parsed tree).
 - `include!` expression files (`--expr`) are read with nothing stripped, as rustc does; an empty
   span at the file's very start would be written as the dummy span (`nil`) where the helper,
   whose expression file follows an empty crate root in the source map, writes `[1 1 1 1]`.
-- Unicode: `XID_Start`/`XID_Continue` come from the host's Unicode identifier tables
-  (`Character/isUnicodeIdentifierStart`, `Part`, less the ignorables; ZWJ and ZWNJ continue), not
-  from `unicode-ident` 1.0.22's; emoji in identifiers (an error) are approximated. Files whose
-  identifiers lie where the two tables differ may disagree.
 - Speed: stage 0 evaluates the reader from the checkout: about 3,300 lines a second (core's
   and std's 60 files, 53,158 lines, in 16 s, one process, 0.55 GB at its peak); a corpus is read
   by `REPR_RUST_NATIVE_JOBS` processes (default 4).
 
+## Unicode
+
+The lexer's character classes are rustc 1.99.1's own: `rustc_lexer` calls `unicode_ident::is_xid_start`
+and `is_xid_continue` (with `_` added to the start) and, for the recovery of identifiers with emoji,
+`unicode_properties::UnicodeEmoji::is_emoji_char`. The crates and versions are those of rustc's
+`Cargo.lock` (`unicode-ident` 1.0.24, `unicode-properties` 0.1.4, both Unicode 17.0.0; the manifest says
+1.0.22, the lock decides), not the host's Unicode tables. `arbace/repr/rust/unicode.ae` is generated:
+
+    bin/rust-unicode generate     arbace/repr/rust/unicode.ae from the crates' `src/tables.rs`
+    bin/rust-unicode check        generated again into .tmp/ and compared
+    bin/rust-unicode probe [all]  the probe below
+
+`bin/rust-unicode` takes the two `.crate` files, pinned by SHA-256 in `tools/rsdump/unicode-crates.sha256`
+(and compared with rustc's `Cargo.lock` when the rust-src apk is extracted), from `REPR_RUST_CRATES`, the
+host's Cargo cache or static.crates.io into `.tmp/repr-rust/unicode/`; `test/rust/unicode_gen.ae` decodes
+unicode-ident's trie as its `is_xid_start` reads it, and `EMOJI_STATUS` as `is_emoji_char` tests it, into
+maximal ranges of the non-ASCII code points (about 700 for XID_Start, 800 for XID_Continue, 100 for
+emoji). The ASCII classes stay in `lex.ae`. U+200C and U+200D are XID_Continue in Unicode 17; U+FEFF and
+the other invisible characters are not identifiers.
+
+What the classes change in a token or a tree, found by the probe:
+
+- Identifier boundaries (where an identifier stops and an unknown character starts): the host's tables
+  that the lexer used (Java's `isUnicodeIdentifierStart`/`Part` less the ignorables, which are ID_Start and
+  ID_Continue, not the XID properties, which drop the characters whose NFKC form is no identifier) differed
+  from unicode-ident's in 24 code points of XID_Start and 20 of XID_Continue (U+037A, U+0E33, U+0EB3,
+  U+2E2F, U+309B, U+309C, the Arabic presentation forms from U+FC5E, ...).
+- Emoji in identifiers. rustc's lexer recovers an identifier with emoji (`InvalidIdent`) as an `Ident`
+  token (its symbol NFC-normalized) and reports "identifiers cannot contain emoji" only in
+  `rustc_interface`'s passes after parsing, which reading never runs: the helper accepts `fn 😀() {}` and
+  gives the identifier. The native lexer used to reject it; it now gives the `Ident`, except for a lone
+  character that is a confusable of `rustc_parse/src/lexer/unicode_chars.rs`'s `UNICODE_ARRAY` and an
+  emoji (U+2795, U+2796), which is an unknown start of token, an error.
+- NFC: `nfc_normalize` (`unicode-normalization` 0.1.25, Unicode 17.0.0) changes only the symbol of an
+  identifier or lifetime that is not NFC. The host's `java.text.Normalizer` (jdk26u, Unicode 17.0.0)
+  agrees with it on the probe (NFD forms of every identifier character, Hangul jamo sequences, singletons
+  such as U+212B, composition exclusions), so it stays. Confusables are lints (`uncommon_codepoints`),
+  which reading does not run.
+
+The probe (`bin/rust-unicode probe`, `test/rust/unicode_probe.ae`): for every boundary of the three
+tables (the characters either side of each change of class, 3,774 of them) or, with `all`, every
+non-ASCII code point of planes 0-3 and 14 and the edges of the others: `start.rs` has a line `c` each and `cont.rs` `ac`; the lines
+`rustc -Z parse-crate-root-only` rejects as an unknown start of token (`RUSTC_BOOTSTRAP=1`, the pinned
+rustc; its lexer runs before its parser, so every lexer error is listed) against the lines on which the
+native lexer throws; and `ident.rs`, each identifier character bound by a `let` (its NFD form too), read by
+both readers through `bin/repr-rust native-check` (modes `:lines` and `:full`).
+
 ## Checks (2026-11-04)
+
+- Unicode (`bin/rust-unicode probe`, `probe all`): boundaries, 3,774 characters: start 2,312 and continue
+  1,589 lines rejected by rustc, the same lines by the native lexer; `all` (planes 0-3 and 14 and the
+  edges, 264,073 characters, rustc about 10 minutes): 116,804 and 113,485, the same lines; the 3,351
+  identifiers of the boundaries' `ident.rs` equal in both modes, and the 319,230 of `all` (every
+  identifier character, its NFD form too) equal in mode `:lines` (17 minutes on a loaded host);
+  `bin/rust-unicode check`: the generated file is what the pinned crates give, the pins those of rustc's
+  `Cargo.lock`; native-check 68 of 68, and 68 of 68 with `--full`, after the change.
 
 - `bin/repr-rust native-check`: 68 of 68 files equal (the 8 samples and the 60 library files),
   and 68 of 68 with `--full`; 45 s and 53 s.
