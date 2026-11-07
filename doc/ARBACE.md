@@ -135,6 +135,38 @@ code. Three kinds of things live here:
   https://crates.io, the versions and checksums of rustc 1.99.1's `Cargo.lock` (SHA-256
   `e6e4313c...47da75` and `7df058c7...f8d71d`, `tools/rsdump/unicode-crates.sha256`), on 2026-11-04
   (LICENSE.md); the rest of `repr/rust/` is Arbace's own.
+  `arbace/rust/front/mir.ae` (MIR forms' reader and printer, after `rustc_middle/src/mir/pretty.rs`), `arbace/rust/back/codegen.ae`
+  (MIR forms to LLVM forms, after `rustc_codegen_ssa/src/mir/` and `rustc_codegen_llvm/src/intrinsic.rs`), `arbace/rust/back/collect.ae`
+  (the collector's traversal, after `rustc_monomorphize/src/collector.rs`) and `tools/rsdump/mirdata.rs` (the helper's `mir`, `census` and
+  `iface` modes, walking rustc_middle's `Body` as `pretty.rs` does) port rustc 1.99.1, the same revision and sources as above, by
+  hand on 2026-11-05 (RF1-RF3, doc/rust/FRONTEND-SURVEY.md, "As built: RF1-RF3 (trial)"; LICENSE.md names the files; MIT OR
+  Apache-2.0); evaluated from the checkout, not embedded, out of `gate_key` (RFS13).
+  `arbace/rust/front/expand.ae` with `expand_format.ae` and `expand_derive.ae` (macro expansion: macro_rules! after
+  `rustc_expand/src/mbe/`, the builtins after `rustc_builtin_macros/src/{format,assert,edition_panic,source_util,concat,cfg}.rs` and
+  `rustc_parse_format`, the derives after `rustc_builtin_macros/src/deriving/`, cfg after `rustc_expand/src/config.rs`),
+  `arbace/rust/front/resolve.ae` (name resolution after `rustc_resolve/src/{build_reduced_graph,imports,ident,late}.rs`) and
+  `tools/rsdump/front.rs` (the helper's `expanded`, `resolve` and `std-names` modes) port rustc 1.99.1, the same revision and sources,
+  by hand on 2026-11-05 (RF4-RF5, doc/rust/FRONTEND-SURVEY.md, "As built: RF4-RF5 start"; LICENSE.md names the files; MIT OR
+  Apache-2.0); evaluated from the checkout, not embedded, out of `gate_key` (RFS13).
+  `arbace/rust/front/pp.ae` (the pretty printer engine after `rustc_ast_pretty/src/pp.rs` and `pp/ring.rs`, the comments after
+  `rustc_ast_pretty/src/pprust/state.rs`'s `gather_comments`), `arbace/rust/front/lower.ae` (AST to HIR after
+  `rustc_ast_lowering/src/{lib,item,expr,pat,block,format}.rs`) and `arbace/rust/front/hir_pretty.ae` (the HIR printer after
+  `rustc_hir_pretty/src/lib.rs`, with `pprust/state.rs`'s PrintState, token streams and macro definitions, and
+  `rustc_ast/src/util/literal.rs`'s literal display) port rustc 1.99.1, the same revision and sources, by hand on 2026-11-05 (RF6,
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF6"; LICENSE.md names the files; MIT OR Apache-2.0); evaluated from the checkout, not
+  embedded, out of `gate_key` (RFS13).
+  `arbace/rust/front/collect.ae` (collection: the def collector after `rustc_resolve/src/def_collector.rs`, generics, types,
+  signatures and clauses after `rustc_hir_analysis/src/{collect/{generics_of,resolve_bound_vars,type_of,clauses_of},
+  constrained_generic_params,hir_ty_lowering/{mod,bounds,dyn_trait}}.rs`, visible paths after `rustc_metadata`'s visible_parent_map,
+  the type printer after `rustc_middle/src/ty/print/{mod,pretty}.rs`) ports rustc 1.99.1, the same revision and sources, by hand on
+  2026-11-06 (RF7, doc/rust/FRONTEND-SURVEY.md, "As built: RF7"; LICENSE.md names the files; MIT OR Apache-2.0); evaluated from the
+  checkout, not embedded, out of `gate_key` (RFS13).
+  `arbace/rust/front/typeck.ae` (type checking's first slice after `rustc_hir_typeck/src/` and `method/`, with the trait solver's
+  selection, normalization and pending obligations after `rustc_trait_selection/src/traits/`, over std's interface from the helper's
+  `--std-iface`) ports rustc 1.99.1, the same revision and sources, by hand on 2026-11-06 (RF9a, doc/rust/FRONTEND-SURVEY.md, "As built:
+  RF9a"; RF9b's second slice, the same day: ambiguity and where-clause candidates, normalization through the parameter environment and
+  item bounds, CoerceMany, closure kinds, writeback's fix-ups, "As built: RF9b"; LICENSE.md names the files; MIT OR Apache-2.0);
+  evaluated from the checkout, out of `gate_key` (RFS13).
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

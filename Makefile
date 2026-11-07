@@ -21,6 +21,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
   repr-rust-native-check \
   repr-rust-native-errors \
+  rust-front-corpus rust-front-mir-check rust-front-codegen-check rust-front-coverage rust-front-collect rust-front-run-native rust-front-oracles rust-front-expand-check rust-front-resolve-check rust-front-hir-check rust-front-collect-check rust-front-typeck-check \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
   repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam repr-python-fetch repr-python-pins repr-python-count repr-python-spec-check repr-python-samples repr-python-roundtrip repr-python-record repr-python-check repr-python-text repr-python-text-record pyi-gen pyi-gen-check pyi-record-ref pyi-record-ref-check pyi-scope-check pyi-compile-check pyi-run pyi-repl pyi-repl-check pyi-lib-test pyi-lib-test-oracle pyi-runtime-print pyi-runtime-read pyi-runtime-vet pyi-runtime-check \
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
@@ -325,6 +326,30 @@ rsi-synthetic-check: ## RE5: the committed synthetic programs equal what the tab
 	bin/rsi synthetic check && bin/rsi synthetic ref
 rsi-judge-test: ## RE5: the check's judge without ci: the judge's own runs pass, a changed output fails, the controls differ (bin/rsi judge-test)
 	bin/rsi judge-test
+rust-front-corpus: ## RF1: the helper's mir, census and iface modes over the synthetic corpus and the samples, the new solver's MIR against the old's (bin/rust-front corpus)
+	bin/rust-front corpus
+rust-front-mir-check: ## RF2: each program's MIR forms read and printed back equal to rustc's -Zunpretty=mir text (bin/rust-front mir-check)
+	bin/rust-front mir-check
+rust-front-codegen-check: ## RF3: the no_std samples (test/rust/front/) through arbace.rust.back.codegen, each function against rustc's IR, then the run (bin/rust-front codegen-check)
+	bin/rust-front codegen-check test/rust/front/a[1-57].rs
+rust-front-coverage: ## RF3: the mono items rustc collects for the synthetic corpus and the samples, codegen'd and judged against rustc's IR, the refusals ranked (bin/rust-front coverage)
+	bin/rust-front coverage test/rust/synthetic/*.rs test/rust/sample/space.rs test/rust/sample/shapes.rs test/rust/eval/*.rs test/rust/front/a*.rs
+rust-front-collect: ## RF3: the collector slice's item set of each program against rustc's (bin/rust-front collect)
+	bin/rust-front collect test/rust/synthetic/*.rs test/rust/sample/space.rs test/rust/sample/shapes.rs test/rust/eval/*.rs test/rust/front/a*.rs
+rust-front-run-native: ## RF3: the synthetic programs the front codegens completely, run from its IR with the host's std, against rustc's runs (bin/rust-front run-native)
+	for n in abort exit-code panic-assert panic-todo panic-unwrap-err trap; do bin/rust-front run-native test/rust/synthetic/$$n.rs || exit 1; done
+rust-front-oracles: ## RF4-RF5: the helper's expanded crates, HIR paths' resolutions and std's names and macros for the corpus and samples (bin/rust-front front-oracles)
+	bin/rust-front front-oracles
+rust-front-expand-check: ## RF4: arbace.rust.front.expand's crates against rustc's expansion, per item (bin/rust-front expand-check)
+	bin/rust-front expand-check
+rust-front-resolve-check: ## RF5: arbace.rust.front.resolve over rustc's expanded crates and over ours, against rustc's resolutions per path (bin/rust-front resolve-check)
+	bin/rust-front resolve-check && bin/rust-front resolve-check --ours
+rust-front-hir-check: ## RF6: arbace.rust.front.lower and hir-pretty over rustc's expanded crates and over the pipeline, against rustc's -Zunpretty=hir text (bin/rust-front hir-check)
+	bin/rust-front hir-check && bin/rust-front hir-check --ours
+rust-front-collect-check: ## RF7: arbace.rust.front.collect (generics, types, signatures, clauses) over both inputs against the helper's iface (bin/rust-front collect-check)
+	bin/rust-front collect-check && bin/rust-front collect-check --ours
+rust-front-typeck-check: ## RF9: arbace.rust.front.typeck (expressions' types and adjustments, bindings) over both inputs against the helper's typeck (bin/rust-front typeck-check)
+	bin/rust-front typeck-check && bin/rust-front typeck-check --ours
 rsi-check-essential: ## RE5: the essential programs (test/rust/essential.txt) on ci against the judge's runs (bin/rsi check --essential)
 	bin/rsi check --essential
 rsi-divergences: ## RE4: the recorded check's non-passes by class (bin/rsi divergences [--aot])

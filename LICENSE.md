@@ -750,6 +750,65 @@ covers what.
   `license = "MIT/Apache-2.0"` (copyright the Rust project's developers; the MIT License below); the file
   carries the notice. The rest of `native.ae` (the facts, after `tools/rsdump`'s visitor, the dump and the check) and
   `test/rust/native-check.txt` are Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/mir.ae` (the printer), `arbace/rust/back/codegen.ae` and `collect.ae` (the first slice of RF3, doc/rust/FRONTEND-SURVEY.md,
+  "As built: RF1-RF3 (trial)"), and the helper's `tools/rsdump/mirdata.rs`: Arbace forms and Rust written after rustc 1.99.1,
+  https://github.com/rust-lang/rust at `58cf8f9c3` (the sources of Alpine's `rustc-dev-1.99.1-r0` and `rust-src-1.99.1-r0`,
+  pinned by `tools/rsdump/apks.sha256`), reading `compiler/rustc_middle/src/mir/{pretty,syntax,terminator,consts,statement}.rs`
+  (the text of MIR: `write_mir_fn`, the `Debug` impls of places, operands, rvalues, statements and terminators, the labels of
+  successors, `fmt_assert_args`) and `compiler/rustc_codegen_ssa/src/mir/{mod,analyze,block,operand,place,rvalue,statement}.rs`
+  (the SSA analysis of locals, the order and merging of blocks, operands, places, rvalues, terminators), `compiler/rustc_mir_transform/src/
+  remove_noop_landing_pads.rs`, `compiler/rustc_middle/src/mir/{traversal,mod}.rs` (mono reachability, `get_caller_location`'s walk),
+  `compiler/rustc_monomorphize/src/collector.rs` (the collector's roots and uses) and `compiler/rustc_codegen_llvm/src/intrinsic.rs`
+  (the intrinsics' lowering): copyright the Rust
+  project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here
+  under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the forms' shapes,
+  `doc/rust/MIR.md`, the judges, `bin/rust-front`) is Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/expand.ae`, `expand_format.ae`, `expand_derive.ae` and `resolve.ae` (RF4-RF5, doc/rust/FRONTEND-SURVEY.md, "As built:
+  RF4-RF5 start"), and the helper's `tools/rsdump/front.rs`: Arbace forms and Rust written after rustc 1.99.1, the same revision and
+  sources, reading `compiler/rustc_expand/src/{expand,config}.rs` and `mbe/{macro_parser,macro_rules,quoted,transcribe}.rs` (macro_rules!'
+  arms, matching, transcription and its spacing, the statement macros' semicolon), `compiler/rustc_builtin_macros/src/{format,assert,
+  edition_panic,source_util,concat,cfg,standard_library_imports}.rs` and `deriving/` (the builtins' and derives' expansions),
+  `compiler/rustc_parse_format/src/lib.rs` (format strings), `compiler/rustc_resolve/src/{build_reduced_graph,imports,ident,late}.rs`
+  (the def collector, imports, globs, preludes, ribs) and `compiler/rustc_middle/src/metadata.rs`, `compiler/rustc_metadata/src/creader.rs`
+  (the helper's modes): copyright the Rust project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the
+  licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the
+  judges `expand_check.ae` and `resolve_check.ae`, the samples `test/rust/front/expand1.rs` and `resolve1.rs`) is Arbace's own, under
+  the Eclipse Public License 1.0.
+- `arbace/rust/front/pp.ae`, `lower.ae` and `hir_pretty.ae` (RF6, doc/rust/FRONTEND-SURVEY.md, "As built: RF6"): Arbace forms written
+  after rustc 1.99.1, the same revision and sources, reading `compiler/rustc_ast_pretty/src/pp.rs`, `pp/ring.rs` and
+  `pprust/state.rs` (Oppen's printer as rustc keeps it, the comments copied forward, PrintState, token streams, macro definitions),
+  `compiler/rustc_ast_lowering/src/{lib,item,expr,pat,block,format}.rs` (AST to HIR: the desugarings of `for`, `while`, `while let`,
+  `?`, ranges and `format_args!`'s bytecode, use trees, generics, implicit self, elided lifetimes), `compiler/rustc_hir_pretty/src/lib.rs`
+  (the HIR printer), `compiler/rustc_hir/src/hir.rs` (expression precedence), `compiler/rustc_ast/src/util/literal.rs` (literals'
+  display) and `compiler/rustc_macros/src/print_attribute.rs` (parsed attributes' printing): copyright the Rust project's contributors,
+  dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc
+  1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `hir_check.ae`, the sample `test/rust/front/lower1.rs`) is
+  Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/collect.ae` (RF7, doc/rust/FRONTEND-SURVEY.md, "As built: RF7") and the helper's RF7 additions to
+  `tools/rsdump/front.rs`'s `--std-names` (defaults, aliases, supertraits, lang items, doc(hidden)): Arbace forms and Rust written after
+  rustc 1.99.1, the same revision and sources, reading `compiler/rustc_resolve/src/def_collector.rs` (definitions and their def path
+  data), `compiler/rustc_hir_analysis/src/collect/{generics_of,resolve_bound_vars,type_of,clauses_of}.rs` (own parameters,
+  is_late_bound_map, gather_explicit_clauses_of), `constrained_generic_params.rs` (setup_constraining_clauses), `hir_ty_lowering/{mod,
+  bounds,dyn_trait}.rs` (type lowering, generic arguments with their defaults, poly trait refs, implicit sizedness bounds, associated
+  item constraints), `compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs` (visible_parent_map),
+  `compiler/rustc_middle/src/ty/print/{mod,pretty}.rs` (the type printer: def paths, visible paths, impl paths, regions, binders' names,
+  trait objects, opaque types, clauses) and `compiler/rustc_middle/src/ty/generics.rs` (own_args_no_defaults): copyright the Rust
+  project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the
+  MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `collect_check.ae`, the samples
+  `test/rust/front/collect1.rs` and `collect2.rs`) is Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/typeck.ae` (RF9's first slice with RF8's part, doc/rust/FRONTEND-SURVEY.md, "As built: RF9a") and the helper's
+  `--typeck` and `--std-iface` modes in `tools/rsdump/front.rs`: Arbace forms and Rust written after rustc 1.99.1, the same revision and
+  sources, reading `compiler/rustc_hir_typeck/src/{expr,expectation,coercion,callee,op,place_op,pat,fallback,writeback,closure}.rs` and
+  `method/{probe,confirm}.rs` (expressions with expectations, coercions, calls, operators, indexing, patterns and default binding
+  modes, closures' signature deduction, the method probe), `compiler/rustc_infer/src/infer/` (type, integer and float variables),
+  `compiler/rustc_trait_selection/src/traits/{select,project,fulfill}.rs` (selection of impls, normalization of projections, pending
+  obligations) and `compiler/rustc_middle/src/ty/{typeck_results,adjustment}.rs` (the facts' shapes), and since RF9b ("As built: RF9b")
+  `rustc_hir_typeck/src/{upvar,expr_use_visitor,cast,fn_ctxt/checks,gather_locals}.rs` (closure kinds, argument checking, casts, locals'
+  initializers), `rustc_infer/src/infer/relate/{generalize,lattice}.rs` and `region_constraints/mod.rs` (generalization, LUB and GLB of
+  regions) and `rustc_infer/src/traits/util.rs` with `rustc_type_ir/src/elaborate.rs` (the parameter environment's elaboration): copyright the Rust project's
+  contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License
+  ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `typeck_check.ae`) is Arbace's own, under the
+  Eclipse Public License 1.0.
 - The non-javac branches of `skip-parens`, `tree-name`, `full-name`, `diamond?` and `class-kind` in
   `arbace/repr/java/tree.ae` (repr/java's interface to the tree, doc/classes/JAVA-FRONTEND-SURVEY.md,
   "As built: JFS66 (b)"): Arbace forms reimplementing, for the native parser's trees,

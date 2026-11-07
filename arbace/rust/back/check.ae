@@ -1,0 +1,205 @@
+(ns arbace.rust.back.check
+  "RF3's judge (bin/rust-front codegen-check): the LLVM forms arbace.rust.back.codegen makes from the MIR forms of a program,
+  against the forms repr/llvm reads from rustc's own `-O0 -Zshare-generics=no` IR of the same program, per function after a
+  normalizer: values and blocks renamed by first occurrence, symbols by their path (v0 names demangled), attribute groups,
+  metadata, linkage and unnamed_addr dropped. Then the run: both IRs built by clang, the exit statuses compared."
+  (:require [arbace.rust.front.mir :as mir]
+            [arbace.rust.back.codegen :as cg]
+            [arbace.repr.llvm :as llvm]
+            [arbace.string :as str]))
+
+(defn demangle
+  "The path of a v0 symbol of a local item (`_RNvCsHASH_2a21f` -> \"f\", crate dropped), or nil."
+  [s]
+  (when-let [m (re-matches #"_R((?:Nv|Nt|Ni)+)C[sS]?[0-9A-Za-z]*_(.*)" s)]
+    (let [tail0 (nth m 2)]
+      (loop [r tail0 parts []]
+        (if (empty? r)
+          (str/join "." (rest parts))
+          (if-let [[_ n tail] (re-matches #"(\d+)(.*)" r)]
+            (let [n (Long/parseLong n) tail (if (.startsWith ^String tail "_") (subs tail 1) tail)]
+              (recur (subs tail n) (conj parts (subs tail 0 n))))
+            nil))))))
+
+(defn- canon-sym [s]
+  (let [n (name s)]
+    (if (.startsWith n "_R") (or (demangle n) n) n)))
+
+(defn normalize
+  "A define form's normal form: [name ret params ret-attrs body] with local names renamed by first occurrence and a
+  constant global by its content (`gm`: global-map)."
+  [f gm]
+  (let [v (vec f)
+        name (canon-sym (nth v 1))
+        ret (nth v 2)
+        params (nth v 3)
+        opts (apply hash-map (drop 4 v))
+        env (volatile! {})
+        params' (letfn [(ren [x]
+                          (cond
+                            (and (symbol? x) (.startsWith (str x) "%"))
+                            (or (get @env x) (let [n (symbol (str "%v" (count @env)))] (vswap! env assoc x n) n))
+                            (and (symbol? x) (= "g" (namespace x))) (if-let [c (get gm x)] c (symbol "g" (canon-sym x)))
+                            (seq? x) (apply list (ren-args x))
+                            (vector? x) (mapv ren x)
+                            :else x))
+                        (ren-args [x]
+                          (loop [xs (seq x) out []]
+                            (cond (empty? xs) out
+                                  (#{:attrs :md} (first xs)) (recur (nnext xs) out)
+                                  :else (recur (next xs) (conj out (ren (first xs)))))))]
+                  (let [p (ren params)] (vswap! env assoc ::ren ren) p))
+        ren (get @env ::ren)
+        body' (ren (:body opts))]
+    [name ret params' (:ret-attrs opts) body' (:personality opts)]))
+
+(defn- lines [n] (concat [(str "name " (nth n 0)) (str "ret " (nth n 1)) (str "params " (pr-str (nth n 2))) (str "ret-attrs " (pr-str (nth n 3)))]
+                         (mapcat (fn [[_ l & is]] (cons (str "block " l) (map #(str "  " (pr-str %)) is))) (nth n 4))))
+
+(defn norm-lines [n] (lines n))
+
+(defn diff-text [ours theirs]
+  (let [a (vec (lines ours)) b (vec (lines theirs))
+        _ (when (System/getenv "CG_SHOW") (println "--- ours") (doseq [l a] (println l)) (println "--- rustc") (doseq [l b] (println l)))
+        i (first (filter #(not= (nth a % nil) (nth b % nil)) (range (max (count a) (count b)))))]
+    (when i (str "line " i ": ours " (pr-str (nth a i nil)) " rustc " (pr-str (nth b i nil))))))
+
+(defn reachable
+  "The bodies reachable from main by calls of the crate's own functions."
+  [bodies]
+  (let [by (into {} (map (juxt :name identity)) (filter #(= :body (:form %)) bodies))
+        calls (fn [b] (set (keep (fn [bb] (let [t (:term bb)] (when (and t (= "call" (name (first t)))) (cg/fn-callee-of (second t))))) (:blocks b))))]
+    (loop [todo ["main"] seen #{}]
+      (if-let [n (first todo)]
+        (if (or (seen n) (not (by n)))
+          (recur (rest todo) seen)
+          (recur (concat (rest todo) (calls (by n))) (conj seen n)))
+        (vec (keep by (sort seen)))))))
+
+(defn global-map
+  "name -> the constant's resolved content [type value align] (references to other globals replaced by theirs)."
+  [forms]
+  (let [gs (into {} (keep (fn [f] (when (= 'llvm/global (first f))
+                                    (let [[_ n ty v & more] f o (into {} (map vec (partition 2 more)))] [n [ty (if (keyword? v) nil v) (:align o)]])))
+                          forms))
+        res (fn res [x] (cond (and (symbol? x) (= "g" (namespace x)) (gs x)) (let [[ty v a] (gs x)] [ty (res v) a])
+                              (seq? x) (apply list (map res x))
+                              (vector? x) (mapv res x)
+                              :else x))]
+    (into {} (map (fn [[n [ty v a]]] [n (pr-str [ty (res v) a])]) gs))))
+
+(defn resolve-globals [forms] (set (vals (global-map forms))))
+
+(defn check-one [dir n]
+  (let [all (mir/read-all (slurp (str dir "/" n ".mir.edn")))
+        bodies (:bodies all) lt (:layouts all)
+        theirs-forms0 (llvm/read-ll (str dir "/" n ".ll"))
+        theirs (into {} (keep (fn [f] (when (= 'llvm/define (first f)) (let [x (normalize f (global-map theirs-forms0))] [(first x) x]))) theirs-forms0))
+        gl (cg/new-globals (:langsyms all))
+        theirs-forms (llvm/read-ll (str dir "/" n ".ll"))
+        tgm (global-map theirs-forms)
+        res (for [b (reachable bodies)]
+              (let [nm (str/replace (:name b) "::" ".")
+                    t (get theirs nm)]
+                (try
+                  (let [o (normalize (cg/codegen-fn b lt gl) (global-map (cg/module-extras gl)))]
+                    [nm (cond (nil? t) "no rustc function" (= o t) :pass :else (diff-text o t))])
+                  (catch Throwable e [nm (if-let [u (:codegen/unsupported (ex-data e))] (str "unsupported: " u) (str "error: " (.getMessage e)))]))))
+        res (vec res)
+        ;; the negative control: one function's forms against another function's rustc IR must differ
+        ctl (let [ok (filter #(and (not= :pass (second %)) false) res)
+                  names2 (vec (keep (fn [b] (let [nm (str/replace (:name b) "::" ".")] (when (get theirs nm) nm))) (reachable bodies)))]
+              (when (>= (count names2) 2)
+                (let [a (first names2) b (second names2)
+                      oa (try (normalize (cg/codegen-fn (first (filter #(= a (str/replace (:name %) "::" ".")) (reachable bodies))) lt (cg/new-globals)) (global-map (cg/module-extras gl))) (catch Throwable e nil))]
+                  (when oa ["(control)" (if (= oa (get theirs b)) "the control PASSED: the judge cannot tell two functions apart" :pass)]))))
+        ours-g (resolve-globals (cg/module-extras gl))
+        theirs-g (resolve-globals theirs-forms)
+        supported (not-any? #(and (string? (second %)) (.startsWith ^String (second %) "unsupported")) res)]
+    (cond-> (cond-> res ctl (conj ctl))
+      supported (conj ["(constants)" (cond (= ours-g theirs-g) :pass
+                                            :else (str "ours " (count ours-g) " rustc " (count theirs-g) ": only ours " (pr-str (take 2 (remove theirs-g ours-g)))
+                                                       " only rustc's " (pr-str (take 2 (remove ours-g theirs-g)))))]))))
+
+(defn module-forms
+  "A whole module: the header of rustc's IR and the forms of every function reachable from main."
+  [dir n]
+  (let [all (mir/read-all (slurp (str dir "/" n ".mir.edn")))
+        bodies (:bodies all) lt (:layouts all)
+        theirs (llvm/read-ll (str dir "/" n ".ll"))
+        header (filter #(#{'llvm/source-filename 'llvm/datalayout 'llvm/triple} (first %)) theirs)]
+    (let [gl (cg/new-globals)
+          fns (doall (map (fn [b] (try (cg/codegen-fn b lt gl) (catch Throwable e ::unsupported))) (reachable bodies)))]
+      (when-not (some #{::unsupported} fns)
+        (let [extras (cg/module-extras gl)
+              ;; the run's stubs: the panic functions abort
+              stubs (for [f extras :when (and (= 'llvm/declare (first f)) (not (.startsWith (name (second f)) "llvm.")))]
+                      (list 'llvm/define (second f) 'void (vec (map-indexed (fn [i [t & _]] [t (symbol (str "%p" i))]) (nth f 3)))
+                            :body [(list 'block '%start (list 'call 'void (symbol "g" "abort") []) '(unreachable))]))]
+          (vec (concat header
+                       (remove #(and (= 'llvm/declare (first %)) (not (.startsWith (name (second %)) "llvm."))) extras)
+                       (when (seq stubs) [(list 'llvm/declare (symbol "g" "abort") 'void [])])
+                       stubs fns)))))))
+
+(defn emit-ll
+  "Writes DIR/NAME.ours.ll, our forms printed as IR."
+  [dir n]
+  (when-let [m (module-forms dir n)]
+    (llvm/spit-latin1 (str dir "/" n ".ours.ll") (llvm/print-ll m))))
+
+(def datalayout "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128")
+(def triple "x86_64-alpine-linux-musl")
+
+(defn emit-mono
+  "DIR/NAME.mono.edn (the helper's --mono-mir) to DIR/NAME.ours.ll: every function instance of the program codegen'd; the
+  functions it calls but does not define stubbed to abort (`native?` false: a no_std program to run alone) or declared (the
+  host's std supplies them); or the first refusal: [:unsupported WHAT]."
+  [dir n native?]
+  (let [all (mir/read-all (slurp (str dir "/" n ".mono.edn")))
+        lt (:layouts all)
+        gl (cg/new-globals (:langsyms all))
+        entry (:entry all)
+        wrapper (when entry
+                  (let [{:keys [main lang-start sigpipe]} entry
+                        gs (fn [x] (symbol "g" x))]
+                    ;; maybe_create_entry_wrapper: the C main calls lang_start::<T>(main, argc as isize, argv, sigpipe)
+                    (list 'llvm/define (gs "main") 'i32 [['i32 '%0] ['ptr '%1]]
+                          :body [(list 'block '%top
+                                       (list '= '%2 (list 'sext 'i32 '%0 'i64))
+                                       (list '= '%3 (list 'call 'i64 (gs lang-start) [['ptr (gs main)] ['i64 '%2] ['ptr '%1] ['i8 sigpipe]]))
+                                       (list '= '%4 (list 'trunc 'i64 '%3 'i32))
+                                       '(ret i32 %4))])))
+        fns (try (doall (concat (map (fn [b] (cg/codegen-fn b lt gl)) (filter #(= :body (:form %)) (:bodies all))) (when wrapper [wrapper])))
+                 (catch Throwable e [:unsupported (or (:codegen/unsupported (ex-data e)) (.getMessage e))]))]
+    (if (= :unsupported (first fns))
+      fns
+      (let [extras (cg/module-extras gl)
+            defined (set (map (comp name second) fns))
+            decls (filter #(and (= 'llvm/declare (first %)) (not (defined (name (second %))))) extras)
+            real (filter #(and (not (.startsWith (name (second %)) "llvm.")) ) decls)
+            stubs (for [f (if native? [] real)]
+                    (list 'llvm/define (second f) 'void (vec (map-indexed (fn [i [t & _]] [t (symbol (str "%p" i))]) (nth f 3)))
+                          :body [(list 'block '%start (list 'call 'void (symbol "g" "abort") []) '(unreachable))]))
+            forms (vec (concat [(list 'llvm/source-filename n) (list 'llvm/datalayout datalayout) (list 'llvm/triple triple)]
+                               (filter #(= 'llvm/global (first %)) extras)
+                               (filter #(and (= 'llvm/declare (first %)) (.startsWith (name (second %)) "llvm.")) decls)
+                               (when (and (seq real) (not native?)) [(list 'llvm/declare (symbol "g" "abort") 'void [])])
+                               (when native? real)
+                               stubs fns))]
+        (llvm/spit-latin1 (str dir "/" n ".ours.ll") (llvm/print-ll forms))
+        [:ok (count fns)]))))
+
+(defn -main [dir & names]
+  (when (= "--emit-mono" dir)
+    (let [[st what] (emit-mono (first names) (second names) (= "--native" (nth names 2 nil)))]
+      (println (name st) what)
+      (System/exit (if (= st :ok) 0 3))))
+  (when (= "--emit" dir)
+    (doseq [n (rest names)] (emit-ll (first names) n))
+    (System/exit 0))
+  (let [rs (for [n names] [n (check-one dir n)])
+        total (reduce + (map (comp count second) rs))
+        pass (reduce + (map (fn [[_ r]] (count (filter #(= :pass (second %)) r))) rs))]
+    (doseq [[n r] rs [f v] r :when (not= :pass v)] (println "FAIL" n f v))
+    (println "codegen-check:" pass "of" total "functions equal to rustc's IR after normalization (" (count names) "programs)")
+    (System/exit (if (= pass total) 0 1))))

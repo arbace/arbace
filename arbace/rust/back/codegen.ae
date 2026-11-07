@@ -1,0 +1,1511 @@
+(ns arbace.rust.back.codegen
+  "RF3's first slice (doc/rust/FRONTEND-SURVEY.md, \"As built: RF1-RF3 (trial)\"; RFS2 (a)): MIR forms (arbace.rust.front.mir) to
+  LLVM forms (arbace.repr.llvm), after rustc_codegen_ssa (rustc 1.99.1, compiler/rustc_codegen_ssa/src/mir/{mod,analyze,block,
+  operand,place,rvalue,statement}.rs, MIT or Apache-2.0; recorded in doc/ARBACE.md and LICENSE.md) for the scalar and scalar-pair
+  subset: integers, bool, char, pointers, unit, structs and tuples of up to two scalars (immediates and pairs) and of more
+  (memory, by fields); locals as SSA values or allocas by analyze.rs's rule; arithmetic, bit operations, shifts, comparisons,
+  integer casts, borrows, derefs, field projections, aggregates, switchInt, goto, return, calls of the crate's own functions.
+  The layouts are the helper's (`layout_of`, the `mir/layouts` table): Arbace's own port of rustc_abi's layout is the next piece.
+  What it does not take is refused as {:codegen/unsupported WHAT}."
+  (:require [arbace.string :as str]))
+
+(defn unsupported [what & [data]] (throw (ex-info (str "codegen unsupported: " what) (assoc data :codegen/unsupported what))))
+
+;; ---------------------------------------------------------------- layouts (from the helper's table)
+
+(defn- scalar-of [s]
+  (case (name (first s))
+    "int" (let [[_ bits signed [lo hi]] s
+                bool (and (= 8 bits) (= 0 lo) (= 1 hi))]
+            {:prim :int :bits bits :signed signed :bool bool :ibits (if bool 1 bits) :lo lo :hi hi
+             :imm (if bool "i1" (str "i" bits)) :mem (if bool "i8" (str "i" bits))
+             :size (quot bits 8)})
+    "float" (let [bits (second s)]
+              (when-not (#{32 64} bits) (unsupported (str "float of " bits " bits")))
+              {:prim :float :bits bits :ibits bits :imm (if (= 32 bits) "float" "double") :mem (if (= 32 bits) "float" "double") :size (quot bits 8)})
+    "ptr" (let [[_ [lo hi]] s] {:prim :ptr :bits 64 :ibits 64 :imm "ptr" :mem "ptr" :size 8 :lo lo :hi hi})
+    (unsupported (str "scalar " (first s)))))
+
+(defn- parse-variants [v]
+  (case (name (first v))
+    "empty" {:kind :empty}
+    "single" {:kind :single :index (second v)}
+    "multiple" (let [m (second v) enc (:encoding m)]
+                 {:kind :multiple :tag (scalar-of (:tag m)) :tag-field (:tag-field m)
+                  :enc (case (name (first enc))
+                         "direct" {:kind :direct}
+                         "niche" (let [[_ u s e n] enc] {:kind :niche :untagged u :start s :end e :niche-start n}))
+                  :vs (:variants m)})))
+
+(defn layout
+  "A type form's layout from the table: {:kind :zst|:scalar|:pair|:memory :size :align :offsets :scalar :pair :ty}."
+  [lt t]
+  (let [e (get lt (second t))]
+    (when-not e (unsupported (str "no layout for " (second t))))
+    (let [abi (:abi e)
+          ak (name (first abi))
+          zst (and (zero? (:size e)) (= ak "memory"))]
+      (cond-> {:size (:size e) :align (:align e) :ty t
+               :offsets (when (vector? (:fields e)) (:fields e))
+               :array (let [f (:fields e)] (when (and (seq? f) (= "array" (name (first f)))) {:stride (second f) :count (nth f 2)}))
+               :kind (cond zst :zst
+                           (= ak "scalar") :scalar
+                           (= ak "pair") :pair
+                           (= ak "memory") :memory
+                           :else (unsupported (str "abi " ak)))}
+        (= ak "scalar") (assoc :scalar (scalar-of (second abi)))
+        (= ak "pair") (assoc :pair [(scalar-of (second abi)) (scalar-of (nth abi 2)) (nth abi 3)])
+        true (assoc :variants (parse-variants (:variants e)) :discrs (:discrs e))))))
+
+(defn zst? [l] (= :zst (:kind l)))
+
+(defn- ty-struct [t] (nth t 2))
+(defn- ty-kind [t] (let [s (ty-struct t)] (if (seq? s) (name (first s)) (name s))))
+(defn ref-type? [t] (= "ref" (ty-kind t)))
+(defn pointee-type [t] (second (ty-struct t)))
+
+(defn- restrict-align [align offset]
+  (if (zero? offset) align (min align (bit-and offset (- offset)))))
+
+(defn- sym [n] (symbol n))
+
+;; ---------------------------------------------------------------- the CFG
+
+(defn successors
+  "A terminator's successors in rustc's order (TerminatorKind::successors)."
+  [t]
+  (let [k (name (first t))
+        cl (fn [u] (when (= "cleanup" (name (first u))) (second u)))]
+    (case k
+      "goto" [(second t)]
+      "switch" (conj (mapv second (nth t 2)) (nth t 3))
+      ("resume" "terminate" "return" "unreachable" "tailcall" "coroutine-drop") []
+      "drop" (let [[_ _ target u _ drop] t] (cond-> [target] (cl u) (conj (cl u)) drop (conj drop)))
+      "call" (let [[_ _ _ _ target u] t] (cond-> [] target (conj target) (cl u) (conj (cl u))))
+      "assert" (let [[_ _ _ _ target u] t] (cond-> [target] (cl u) (conj (cl u))))
+      "false-edge" [(second t) (nth t 2)]
+      "false-unwind" (let [[_ real u] t] (cond-> [real] (cl u) (conj (cl u))))
+      (unsupported (str "terminator " k)))))
+
+(defn- unwind-cleanup [t]
+  (let [u (case (name (first t)) "call" (nth t 5) "assert" (nth t 5) "drop" (nth t 3) "false-unwind" (nth t 2) nil)]
+    (when (and u (= "cleanup" (name (first u)))) (second u))))
+
+(defn nop-landing-pads
+  "find_noop_landing_pads (rustc_mir_transform/remove_noop_landing_pads.rs): the cleanup blocks that do nothing but resume: their
+  statements trivial (or writes of a local, a drop flag), their terminator a goto, resume, switch or false edge whose
+  successors are all such blocks, or a drop that needs no glue likewise. A call that unwinds to one is a plain call."
+  [blocks]
+  (let [trivial #{"nop" "storage-dead" "storage-live" "fake-read" "place-mention" "const-eval-counter" "bidh" "raw"}
+        ok-stmt (fn [st] (let [st (if (= "dbg-stmt" (name (first st))) (second st) st) k (name (first st))]
+                           (or (trivial k)
+                               (and (= k "assign") (empty? (drop 2 (nth st 1))) (#{"use" "use-noretag" "discriminant"} (name (first (nth st 2))))))))]
+    (loop [nops #{}]
+      (let [nops' (into nops
+                        (for [b (range (count blocks))
+                              :let [blk (nth blocks b)]
+                              :when (and (:cleanup blk) (not (nops b))
+                                         (every? ok-stmt (:stmts blk))
+                                         (let [t (:term blk) all-nop (fn [] (every? nops (successors t)))]
+                                           (case (name (first t))
+                                             ("resume" "goto" "switch" "false-edge" "false-unwind") (all-nop)
+                                             "drop" (and (nil? (nth t 6)) (all-nop))
+                                             false)))]
+                          b))]
+        (if (= nops' nops) nops (recur nops'))))))
+
+(defn const-switch-bits
+  "Body::try_const_mono_switchint: the value a block's switchInt is decided by when its discriminant is a constant, a runtime
+  check, or a local the block's last statement (not a storage marker) assigns a constant; else nil."
+  [blk]
+  (let [t (:term blk)]
+    (when (and t (= "switch" (name (first t))))
+      (let [d (second t)
+            bits-of (fn [o] (case (name (first o))
+                              "const" (let [v (nth o 3)] (when (= "scalar" (name (first v))) (second v)))
+                              "runtime-checks" (case (second o)
+                                                 "UbChecks" 1
+                                                 "OverflowChecks" (if (= "0" (System/getenv "RF_OVERFLOW_CHECKS")) 0 1)
+                                                 0)
+                              nil))]
+        (case (name (first d))
+          ("const" "runtime-checks") (bits-of d)
+          ("copy" "move")
+          (let [p (second d)
+                last-stmt (first (filter #(not (#{"storage-dead" "storage-live"} (name (first (if (= "dbg-stmt" (name (first %))) (second %) %))))) (reverse (:stmts blk))))
+                st (when last-stmt (if (= "dbg-stmt" (name (first last-stmt))) (second last-stmt) last-stmt))]
+            (when (and st (= "assign" (name (first st))) (= p (nth st 1)) (= "use" (name (first (nth st 2)))))
+              (bits-of (second (nth st 2)))))
+          nil)))))
+
+(defn rpo
+  "Reverse postorder of the blocks reachable from bb0, rustc's Postorder (last successor first); an edge to a nop landing pad
+  is not followed, nor a switch edge a constant discriminant rules out (mono reachability)."
+  ([blocks] (rpo blocks #{}))
+  ([blocks nops]
+  (let [seen (volatile! #{0}) out (volatile! [])
+        succs (fn [b] (let [blk (nth blocks b) t (:term blk) u (unwind-cleanup t)]
+                        (if-let [bits (const-switch-bits blk)]
+                          (let [[_ _ vals other] t] [(or (some (fn [[v tg]] (when (= (bigint v) (bigint bits)) tg)) vals) other)])
+                          (if (and u (nops u)) (vec (remove #(= % u) (successors t))) (successors t)))))]
+    (letfn [(visit [b]
+              (doseq [s (reverse (succs b))]
+                (when-not (@seen s) (vswap! seen conj s) (visit s)))
+              (vswap! out conj b))]
+      (visit 0))
+    (vec (reverse @out)))))
+
+(defn dominators
+  "Immediate dominators by the iterative algorithm over the RPO: a map block -> idom (bb0 -> bb0)."
+  [blocks order]
+  (let [idx (zipmap order (range))
+        preds (reduce (fn [m b] (reduce (fn [m s] (update m s (fnil conj []) b)) m (successors (:term (nth blocks b))))) {} order)]
+    (loop [idom {0 0}]
+      (let [idom' (reduce
+                   (fn [idom b]
+                     (if (zero? b)
+                       idom
+                       (let [ps (filter idom (preds b))
+                             inter (fn [a c]
+                                     (loop [a a c c]
+                                       (cond (= a c) a
+                                             (> (idx a) (idx c)) (recur (idom a) c)
+                                             :else (recur a (idom c)))))
+                             n (when (seq ps) (reduce inter ps))]
+                         (if (and n (not= n (idom b))) (assoc idom b n) idom))))
+                   idom order)]
+        (if (= idom' idom) idom (recur idom'))))))
+
+(defn dominates? [idom a b]
+  (loop [b b]
+    (cond (= a b) true
+          (zero? b) false
+          :else (recur (idom b)))))
+
+;; ---------------------------------------------------------------- analyze.rs: which locals need an alloca
+
+(defn- place-local [p] (second p))
+(defn- place-projs [p] (drop 2 p))
+(defn- proj-kind [e] (name (first e)))
+
+(defn- stmt-of [s] (if (= "dbg-stmt" (name (first s))) (second s) s))
+
+(defn place-type
+  "The type form of a place: the local's type, a deref's pointee, a field's type."
+  [body p]
+  (reduce (fn [t e]
+            (case (proj-kind e)
+              "deref" (pointee-type t)
+              "field" (nth e 2)
+              "index" (second (ty-struct t))
+              (unsupported (str "projection " (first e)))))
+          (:ty (nth (:locals body) (place-local p)))
+          (place-projs p)))
+
+(defn non-ssa-locals
+  "analyze.rs's non_ssa_locals: the set of locals that need an alloca."
+  [body lt order idom]
+  (let [blocks (:blocks body)
+        locs (:locals body)
+        kinds (volatile! (vec (map (fn [d] (let [l (layout lt (:ty d))] (if (zst? l) :zst :unused))) locs)))
+        define! (fn [l def]
+                  (let [k (nth @kinds l)]
+                    (case k
+                      (:zst :mem) nil
+                      :unused (if (= :memory (:kind (layout lt (:ty (nth locs l)))))
+                                (vswap! kinds assoc l :mem)
+                                (vswap! kinds assoc l [:ssa def]))
+                      (vswap! kinds assoc l :mem))))
+        dom-loc? (fn [def [ub ui]]
+                   (case (first def)
+                     :arg true
+                     :assign (let [[_ [db di]] def] (if (= db ub) (<= (inc di) ui) (dominates? idom db ub)))
+                     :call (let [[_ call target] def] (boolean (and target (not= call target) (dominates? idom call target) (dominates? idom target ub))))))
+        use! (fn [l ctx loc]
+               (case ctx
+                 (:copy :move) (let [k (nth @kinds l)]
+                                 (cond (#{:zst :mem} k) nil
+                                       (and (vector? k) (dom-loc? (second k) loc)) nil
+                                       :else (vswap! kinds assoc l :mem)))
+                 (vswap! kinds assoc l :mem)))
+        visit-place (fn [p ctx loc]
+                      (let [projs (place-projs p) l (place-local p)]
+                        (doseq [e projs] (when (= "index" (proj-kind e)) (use! (second e) :copy loc)))
+                        (cond
+                          (empty? projs) (use! l ctx loc)
+                          (= :mem (nth @kinds l)) nil
+                          (= "deref" (proj-kind (first projs))) (use! l :copy loc)
+                          (#{:store :call :borrow :rawborrow} ctx) (vswap! kinds assoc l :mem)
+                          (every? #(= "field" (proj-kind %)) projs) (use! l ctx loc)
+                          :else (vswap! kinds assoc l :mem))))
+        visit-operand (fn [o loc]
+                        (case (name (first o))
+                          "copy" (visit-place (second o) :copy loc)
+                          "move" (visit-place (second o) :move loc)
+                          nil))
+        visit-rvalue (fn [r loc]
+                       (case (name (first r))
+                         ("use" "use-noretag") (visit-operand (second r) loc)
+                         "cast" (visit-operand (nth r 2) loc)
+                         "binop" (do (visit-operand (nth r 2) loc) (visit-operand (nth r 3) loc))
+                         "unop" (visit-operand (nth r 2) loc)
+                         "ref" (visit-place (nth r 2) :borrow loc)
+                         "rawptr" (visit-place (nth r 2) :rawborrow loc)
+                         "aggregate" (doseq [o (nth r 2)] (visit-operand o loc))
+                         "discriminant" (visit-place (second r) :copy loc)
+                         (unsupported (str "rvalue " (first r)))))]
+    (doseq [a (range 1 (inc (:args body)))] (define! a [:arg]))
+    (doseq [b order]
+      (let [bb (nth blocks b)]
+        (doseq [[i s0] (map-indexed vector (:stmts bb)) :let [s (stmt-of s0)]]
+          (let [loc [b i]]
+            (case (name (first s))
+              "assign" (let [[_ p r] s]
+                         (if (empty? (place-projs p)) (define! (place-local p) [:assign loc]) (visit-place p :store loc))
+                         (visit-rvalue r loc))
+              ("storage-live" "storage-dead" "nop" "fake-read" "place-mention" "const-eval-counter" "bidh") nil
+              "assume" (visit-operand (second s) loc)
+              "copy-nonoverlapping" (doseq [o (rest s)] (visit-operand o loc))
+              "set-discriminant" (visit-place (second s) :store loc)
+              (unsupported (str "statement " (first s))))))
+        (let [loc [b (count (:stmts bb))] t (:term bb)]
+          (case (name (first t))
+            "goto" nil
+            ("resume" "terminate") nil
+            "drop" (let [[_ p _ _ _ _ glue] t projs (place-projs p)]
+                     (cond
+                       (and (seq projs) (= "deref" (proj-kind (first projs)))) (use! (place-local p) :copy loc)
+                       (seq projs) (vswap! kinds assoc (place-local p) :mem)
+                       glue (vswap! kinds assoc (place-local p) :mem)))
+            "switch" (visit-operand (second t) loc)
+            "return" (use! 0 :move loc)
+            "unreachable" nil
+            "assert" (visit-operand (second t) loc)
+            "call" (let [[_ f args dest target _ ci] t]
+                     (visit-operand f loc)
+                     (doseq [a args] (visit-operand a loc))
+                     (when (and (seq? ci) (map? (second ci)) (= "black_box" (:intrinsic (second ci))) (empty? (place-projs dest)))
+                       (vswap! kinds assoc (place-local dest) :mem))
+                     (if (empty? (place-projs dest))
+                       (define! (place-local dest) [:call b target])
+                       (visit-place dest :call loc)))
+            (unsupported (str "terminator " (first t)))))))
+    (set (keep-indexed (fn [i k] (when (= k :mem) i)) @kinds))))
+
+;; ---------------------------------------------------------------- the function
+
+(defn- sext-const [bits v]
+  (let [v (java.math.BigInteger. (str v))
+        two (java.math.BigInteger/valueOf 2)
+        half (.pow two (dec bits))
+        full (.pow two bits)]
+    (if (>= (.compareTo v half) 0) (.subtract v full) v)))
+
+(defn- as-num [^java.math.BigInteger x] (if (<= (.bitLength x) 63) (long x) (bigint x)))
+
+(defn- fold-bin
+  "LLVM's IRBuilder folds an operation on constants: [type value] or nil."
+  [op a b sc]
+  (when (and (number? a) (number? b) (= :int (:prim sc)))
+    (let [bits (:ibits sc)
+          two (java.math.BigInteger/valueOf 2)
+          M (.pow two bits)
+          big (fn [x] (java.math.BigInteger/valueOf (long x)))
+          u (fn [x] (.mod (big x) M))
+          sg (fn [x] (let [x (u x)] (if (>= (.compareTo x (.pow two (dec bits))) 0) (.subtract x M) x)))
+          wrap (fn [x] (as-num (if (:signed sc) (sg x) (u x))))
+          key (fn [x] (if (:signed sc) (sg x) (u x)))
+          c (fn [x y] (.compareTo ^java.math.BigInteger x ^java.math.BigInteger y))]
+      (case op
+        "BitAnd" [(:imm sc) (wrap (.and (u a) (u b)))]
+        "BitOr" [(:imm sc) (wrap (.or (u a) (u b)))]
+        "BitXor" [(:imm sc) (wrap (.xor (u a) (u b)))]
+        "Add" [(:imm sc) (wrap (.add (big a) (big b)))]
+        "Sub" [(:imm sc) (wrap (.subtract (big a) (big b)))]
+        "Mul" [(:imm sc) (wrap (.multiply (big a) (big b)))]
+        "Eq" ["i1" (zero? (c (u a) (u b)))]
+        "Ne" ["i1" (not (zero? (c (u a) (u b))))]
+        "Lt" ["i1" (neg? (c (key a) (key b)))]
+        "Le" ["i1" (<= (c (key a) (key b)) 0)]
+        "Gt" ["i1" (pos? (c (key a) (key b)))]
+        "Ge" ["i1" (>= (c (key a) (key b)) 0)]
+        nil))))
+
+(defn- fp-form
+  "LLVM's text of a floating constant: `%e` when that reads back as the same double, else the double's bits in hex (a float
+  is written as the double it widens to); +inf, -inf."
+  [bits pattern]
+  (let [pattern (java.math.BigInteger. (str pattern))
+        d (if (= 32 bits)
+            (double (Float/intBitsToFloat (.intValue pattern)))
+            (Double/longBitsToDouble (.longValue pattern)))]
+    (list 'fp
+          (cond
+            (Double/isNaN d) (str "0x" (.toUpperCase (Long/toHexString (Double/doubleToRawLongBits d))))
+            (Double/isInfinite d) (if (pos? d) "+inf" "-inf")
+            :else (let [t (String/format java.util.Locale/ROOT "%.6e" (object-array [d]))]
+                    (if (= d (Double/parseDouble t)) t
+                        (str "0x" (.toUpperCase (Long/toHexString (Double/doubleToRawLongBits d))))))))))
+
+(defn- const-val
+  "A constant operand's value: {:ty :v} or {:pair [...]}, or nil for a zero-sized one; `ag` gives the global of an allocation,
+  `ind` the value of a constant held in an allocation at an offset."
+  [lt c ag ind]
+  (let [[_ _ t v] c
+        l (layout lt t)]
+    (case (name (first v))
+      "scalar" (let [[_ bits _] v sc (:scalar l)]
+                 (when-not sc (unsupported "scalar const of a non-scalar layout"))
+                 (case (:prim sc)
+                   :int (if (:bool sc)
+                          {:ty "i1" :v (if (zero? bits) 'false 'true)}
+                          {:ty (:imm sc) :v (as-num (sext-const (:bits sc) bits))})
+                   :float {:ty (:imm sc) :v (fp-form (:bits sc) bits)}
+                   :ptr (if (zero? (.signum (java.math.BigInteger. (str bits))))
+                          {:ty "ptr" :v 'null}
+                          {:ty "ptr" :v (list 'inttoptr 'i64 (as-num (sext-const 64 bits)) 'ptr)})))
+      "ptr" (let [[_ id off _] v]
+              (when-not (zero? off) (unsupported "pointer constant with an offset"))
+              {:ty "ptr" :v (ag id)})
+      "slice" (let [[_ id n] v]
+                {:pair [{:ty "ptr" :v (ag id)} {:ty "i64" :v n}]})
+      "indirect" (let [[_ id off] v] (ind id off l))
+      "zst" nil
+      (unsupported (str "const " (first v))))))
+
+(defn fn-callee [f]
+  (let [s (ty-struct (nth f 2))]
+    (when (= "fndef" (name (first s))) (second s))))
+
+(defn fn-callee-of [f] (fn-callee f))
+
+(defn callee-symbol [path] (symbol "g" (str/replace path "::" ".")))
+
+(defn body-symbol
+  "The symbol a body's function is defined under: rustc's own when the dump is of a monomorphic instance."
+  [body]
+  (if (:symbol body) (symbol "g" (:symbol body)) (callee-symbol (:name body))))
+
+(defn call-symbol
+  "The symbol a call's function operand names: the resolved instance's when the call carries it (a monomorphic dump), else
+  the path of the item."
+  [f callee]
+  (cond
+    (and (seq? callee) (= "callee" (name (first callee))))
+    (let [c (second callee)]
+      (case (:kind c)
+        ("item" "fnptr-shim" "closure-once-shim" "drop-glue" "vtable-shim" "reify-shim" "clone-shim" "shim") (symbol "g" (:symbol c))
+        (unsupported (str "callee of kind " (:kind c)) {:callee c})))
+    :else (callee-symbol (fn-callee f))))
+
+(defn- sc-attrs
+  "The attributes of a scalar passed as a parameter or argument: [:zeroext] for bool."
+  [sc]
+  (when (:bool sc) [:zeroext]))
+
+(defn- param-forms
+  "The parameters (or arguments) a value of layout `l` makes: a vector of forms [type attrs... name-or-value]; `ra` the
+  align attribute of a pointer."
+  [l ra names-or-vals]
+  (case (:kind l)
+    :zst []
+    :scalar (let [sc (:scalar l)
+                  nm (first names-or-vals)]
+              [(vec (concat [(symbol (:imm sc))]
+                            (if (:bool sc) [:zeroext]
+                                (when (and (= :ptr (:prim sc)) ra) [(list :align ra)]))
+                            [nm]))])
+    :pair (vec (map-indexed (fn [i [sc nm]] (vec (concat [(symbol (:imm sc))] (sc-attrs sc)
+                                                                  (when-let [al (nth (:pair-aligns l) i nil)] (when (= :ptr (:prim sc)) [(list :align al)]))
+                                                                  [nm])))
+                            (map vector (take 2 (:pair l)) names-or-vals)))
+    (unsupported "memory aggregate as a parameter")))
+
+(defn ref-align
+  "The align attribute a pointer scalar of type `t` gets: a reference's pointee alignment, and for an enum or struct
+  around a reference (Option<&T>) that reference's (found among its generic arguments: a heuristic, PointeeInfo's job)."
+  [lt t]
+  (let [k (ty-kind t)]
+    (cond
+      (= k "ref") (let [pt (pointee-type t) pk (ty-kind pt)]
+                    (cond
+                      (= pk "slice") (let [el (layout lt (second (ty-struct pt)))] (when (and (not (zst? el)) (> (:align el) 1)) (:align el)))
+                      (#{"str" "dyn"} pk) nil
+                      :else (let [pl (layout lt pt)] (when (and (not (zst? pl)) (> (:align pl) 1)) (:align pl)))))
+      ;; a Box<T> is a unique pointer to T; other wrappers (Option<&T>...) carry a reference among their arguments
+      (and (= k "adt") (= "std::boxed::Box" (second (ty-struct t))))
+      (let [a (first (nth (ty-struct t) 3))]
+        (when (and (seq? a) (= "ty" (name (first a))) (not (#{"dyn" "slice" "str"} (ty-kind a))))
+          (let [pl (layout lt a)] (when (and (not (zst? pl)) (> (:align pl) 1)) (:align pl)))))
+      (= k "adt") (some (fn [a] (when (and (seq? a) (= "ty" (name (first a))) (= "ref" (ty-kind a))) (ref-align lt a))) (nth (ty-struct t) 3))
+      :else nil)))
+
+(defn pair-align
+  "The align attribute of component `i` of a fat reference's pair: a slice reference's data pointer (its element's alignment),
+  a trait object reference's vtable pointer (8); likewise for Box<[T]> and Box<dyn Trait>."
+  [lt t i]
+  (when (or (= "ref" (ty-kind t)) (and (= "adt" (ty-kind t)) (= "std::boxed::Box" (second (ty-struct t)))))
+    (let [pt (if (= "ref" (ty-kind t)) (pointee-type t) (first (nth (ty-struct t) 3))) pk (ty-kind pt)]
+      (cond
+        (and (= i 0) (= pk "slice")) (let [el (layout lt (second (ty-struct pt)))] (when (and (not (zst? el)) (> (:align el) 1)) (:align el)))
+        (and (= i 1) (= pk "dyn")) 8
+        :else nil))))
+
+(defn ret-attrs-of
+  "The attributes of a returned value: zeroext for bool, align for a reference."
+  [lt t l]
+  (case (:kind l)
+    :scalar (cond (:bool (:scalar l)) [:zeroext]
+                  (and (= :ptr (:prim (:scalar l))) (ref-align lt t))
+                  [(list :align (ref-align lt t))])
+    nil))
+
+(defn indirect?
+  "A memory aggregate the Rust ABI passes and returns by pointer (larger than a pointer)."
+  [l]
+  (and (= :memory (:kind l)) (> (:size l) 8)))
+
+(defn cast-int
+  "The integer type a small memory aggregate is passed and returned as (the Rust ABI: size up to a pointer's)."
+  [l]
+  (if (<= 1 (:size l) 8) (symbol (str "i" (* 8 (:size l)))) (unsupported "memory aggregate larger than a pointer" {:size (:size l)})))
+
+(defn llvm-type [l]
+  (case (:kind l)
+    :zst 'void
+    :scalar (symbol (:imm (:scalar l)))
+    :pair (list 'struct (symbol (:imm (first (:pair l)))) (symbol (:imm (second (:pair l)))))
+    :memory (if (indirect? l) 'void (cast-int l))
+    (unsupported "aggregate as a return")))
+
+(defn new-globals
+  "The module's interned constants and external declarations: pass it to codegen-fn, read it with `module-extras`; `langs`
+  the symbols of the lang items codegen calls (the dump's mir/langsyms)."
+  ([] (new-globals {}))
+  ([langs] (volatile! {:consts {} :decls {} :n 0 :langs langs})))
+
+(defn- le-bytes [n k] (apply str (map (fn [i] (char (bit-and (bit-shift-right n (* 8 i)) 255))) (range k))))
+
+(defn intern-const!
+  "A private constant global of the module, interned by content: its name."
+  [gl ty value align]
+  (let [k [ty value align]]
+    (or (get-in @gl [:consts k])
+        (let [n (symbol "g" (str "alloc" (:n @gl)))]
+          (vswap! gl (fn [m] (-> m (update :n inc) (assoc-in [:consts k] n))))
+          n))))
+
+(defn module-extras
+  "The globals' and declarations' forms of a module codegen made."
+  [gl]
+  (vec (concat
+        (for [[[ty value align] n] (sort-by (comp name val) (:consts @gl))]
+          (list 'llvm/global n ty value :linkage :private :unnamed-addr :unnamed_addr :constant true :align align))
+        (vals (:decls @gl)))))
+
+(defn declare!
+  [gl name ret params]
+  (vswap! gl assoc-in [:decls name] (list 'llvm/declare name ret params)))
+
+(defn codegen-fn
+  "One body's LLVM define form; `lt` is the layouts table, `gl` the module's globals (new-globals)."
+  [body lt gl]
+  (let [blocks (:blocks body)
+        nops (nop-landing-pads blocks)
+        order (rpo blocks nops)
+        idom (dominators blocks order)
+        locs (:locals body)
+        lay (mapv #(layout lt (:ty %)) locs)
+        spread (:spread-arg body)
+        mem (cond-> (non-ssa-locals body lt order idom) spread (conj spread))
+        preds (reduce (fn [m b] (reduce (fn [m s] (update m s (fnil conj []) b)) m (successors (:term (nth blocks b))))) {} (range (count blocks)))
+        mergeable (fn [t] (let [ss (successors t)] (when (and (= 1 (count ss)) (= 1 (count (get preds (first ss))))) (first ss))))
+        allocs (into {} (:alloc-data body))
+        alloc-sym! (fn alloc-sym! [id]
+                     (let [a (get allocs (str id))]
+                       (case (:kind a)
+                         :fn (symbol "g" (:symbol a))
+                         :static (symbol "g" (:symbol a))
+                         :memory
+                         (do
+                           (when (:mutable a) (unsupported "mutable allocation"))
+                           (let [bs (:bytes a)
+                                 init (:init a)
+                                 byte (fn [i] (Integer/parseInt (subs bs (* 2 i) (+ 2 (* 2 i))) 16))
+                                 n (quot (count bs) 2)
+                                 relocs (sort-by first (:relocs a))
+                                 ;; a run of bytes [from to): undef when uninitialized, zeroinitializer when all zero, else the bytes
+                                 run (fn [from to]
+                                       (let [ty (list 'array (- to from) 'i8)]
+                                         (cond
+                                           (every? #(= \0 (nth init %)) (range from to)) [ty 'undef]
+                                           (every? #(zero? (byte %)) (range from to)) [ty 'zeroinitializer]
+                                           :else [ty (list 'c-string (apply str (map #(char (byte %)) (range from to))))])))
+                                 ;; split a span at the changes of initialization
+                                 runs (fn [from to]
+                                        (if (= from to)
+                                          []
+                                          (loop [i from start from out []]
+                                            (cond (= i to) (conj out (run start to))
+                                                  (and (> i start) (not= (nth init i) (nth init (dec i)))) (recur (inc i) i (conj out (run start i)))
+                                                  :else (recur (inc i) start out)))))]
+                             (if (and (empty? relocs) (= 1 (count (runs 0 n))))
+                               (let [[ty v] (first (runs 0 n))] (intern-const! gl ty v (:align a)))
+                               (let [segs (loop [pos 0 rs relocs out []]
+                                            (cond
+                                              (and (empty? rs) (= pos n)) out
+                                              (empty? rs) (into out (runs pos n))
+                                              :else (let [[off tid] (first rs)]
+                                                      (recur (+ off 8) (rest rs)
+                                                             (-> out (into (runs pos off)) (conj [:ptr tid]))))))
+                                     tys (mapv (fn [x] (if (= :ptr (first x)) 'ptr (first x))) segs)
+                                     vals (mapv (fn [x] (if (= :ptr (first x)) ['ptr (alloc-sym! (second x))] [(first x) (second x)])) segs)]
+                                 (intern-const! gl (apply list 'packed tys) (apply list 'packed vals) (:align a))))))
+                         (unsupported "allocation of this kind"))))
+        ;; a constant held in an allocation: scalars and pairs read from its bytes, aggregates by reference to its global
+        alloc-const! (fn [id off l]
+                       (let [a (get allocs (str id))
+                             bs (:bytes a)
+                             relocs (into {} (:relocs a))
+                             rd (fn [o sc]
+                                  (if-let [t (get relocs o)]
+                                    {:ty "ptr" :v (alloc-sym! t)}
+                                    (let [n (:size sc)
+                                          v (reduce (fn [acc i] (.add (.shiftLeft acc 8) (java.math.BigInteger/valueOf (Integer/parseInt (subs bs (* 2 (+ o (- n 1 i))) (+ 2 (* 2 (+ o (- n 1 i))))) 16))))
+                                                    java.math.BigInteger/ZERO (range n))]
+                                      (cond (:bool sc) {:ty "i1" :v (if (zero? (.signum v)) 'false 'true)}
+                                            (= :ptr (:prim sc)) (if (zero? (.signum v)) {:ty "ptr" :v 'null} (unsupported "pointer constant"))
+                                            :else {:ty (:imm sc) :v (as-num (sext-const (:bits sc) v))}))))]
+                         (when-not (zero? off) (unsupported "indirect constant at an offset"))
+                         (case (:kind l)
+                           (:scalar :pair)
+                           (if (some #(= \0 %) (:init a))
+                             ;; not fully initialized: read from the global at run time
+                             {:load-from {:ptr (alloc-sym! id) :align (:align a) :ly l}}
+                             (if (= :scalar (:kind l))
+                               (rd 0 (:scalar l))
+                               (let [[sa sb boff] (:pair l)] {:pair [(rd 0 sa) (rd boff sb)]})))
+                           :memory {:ref {:ptr (alloc-sym! id) :align (:align a) :ly l}}
+                           (unsupported "indirect constant of this layout"))))
+        st (volatile! {:n 0 :skip #{} :bbs {} :bb-order [] :vals {} :allocas {} :start []})
+        fresh! (fn [] (let [n (:n @st)] (vswap! st assoc :n (inc n)) (symbol (str "%t" n))))
+        emit! (fn [bb f] (vswap! st update-in [:bbs bb] (fnil conj []) f) nil)
+        llbb! (fn [b] (let [nm (if (zero? b) "start" (str "bb" b))]
+                        (when-not (some #{nm} (:bb-order @st)) (vswap! st update :bb-order conj nm))
+                        (symbol (str "%" nm))))
+        br-or-merge (fn [bb t target] (if-let [m (mergeable t)] m (do (emit! bb (list 'br (llbb! target))) nil)))
+        new-block! (fn [prefix]
+                     (let [nm (loop [i 0] (let [c (if (zero? i) prefix (str prefix i))] (if (some #{c} (:bb-order @st)) (recur (inc i)) c)))]
+                       (vswap! st update :bb-order conj nm)
+                       nm))
+        alloca! (fn [l] (let [ly (nth lay l) nm (symbol (str "%a" l))]
+                          (vswap! st update :start #(into [(list '= nm (list 'alloca (list 'array (:size ly) 'i8) :align (:align ly)))] %))
+                          (vswap! st assoc-in [:allocas l] nm)))
+        scratch! (fn [size align]
+                   (let [nm (symbol (str "%s" (:n @st)))]
+                     (vswap! st assoc :n (inc (:n @st)))
+                     (vswap! st update :start #(into [(list '= nm (list 'alloca (list 'array size 'i8) :align align))] %))
+                     nm))
+        ;; a value of the cast integer type stored into a place: directly when the place is aligned enough, else through a
+        ;; scratch alloca and a memcpy (PassMode::Cast's store)
+        store-cast! (fn [bb ci val pl size]
+                      (let [calign size]
+                        (if (>= (:align pl) calign)
+                          (emit! bb (list 'store [ci val] ['ptr (:ptr pl)] :align (:align pl)))
+                          (let [sc (scratch! size calign)]
+                            (emit! bb (list 'store [ci val] ['ptr sc] :align calign))
+                            (declare! gl (symbol "g" "llvm.memcpy.p0.p0.i64") 'void [['ptr] ['ptr] ['i64] ['i1]])
+                            (emit! bb (list 'call 'void (symbol "g" "llvm.memcpy.p0.p0.i64")
+                                            [['ptr (list :align (:align pl)) (:ptr pl)] ['ptr (list :align calign) sc] ['i64 size] ['i1 'false]]))))))
+        ;; a place in memory: {:ptr :align :ly}
+        gep! (fn [bb ptr off]
+               (cond
+                 (zero? off) ptr
+                 ;; an offset into a global (or a constant expression) is a constant expression, not an instruction
+                 (or (and (symbol? ptr) (= "g" (namespace ptr))) (seq? ptr))
+                 (list 'getelementptr :inbounds 'i8 ['ptr ptr] ['i64 off])
+                 :else (let [r (fresh!)] (emit! bb (list '= r (list 'getelementptr :inbounds 'i8 ['ptr ptr] ['i64 off]))) r)))
+        load-scalar! (fn [bb sc ptr align]
+                       (if (:bool sc)
+                         (let [a (fresh!) b (fresh!)]
+                           (emit! bb (list '= a (list 'load 'i8 ['ptr ptr] :align align)))
+                           (emit! bb (list '= b (list 'trunc :nuw 'i8 a 'i1)))
+                           {:ty "i1" :v b})
+                         (let [a (fresh!)]
+                           (emit! bb (list '= a (list 'load (symbol (:mem sc)) ['ptr ptr] :align align)))
+                           {:ty (:imm sc) :v a})))
+        store-scalar! (fn [bb sc {:keys [ty v]} ptr align]
+                        (cond
+                          (and (:bool sc) (boolean? v)) (emit! bb (list 'store ['i8 (if v 1 0)] ['ptr ptr] :align align))
+                          (:bool sc) (let [z (fresh!)]
+                                       (emit! bb (list '= z (list 'zext (symbol ty) v 'i8)))
+                                       (emit! bb (list 'store ['i8 z] ['ptr ptr] :align align)))
+                          :else (emit! bb (list 'store [(symbol ty) v] ['ptr ptr] :align align))))
+        load-place! (fn [bb {:keys [ptr align ly] :as pl}]
+                      (case (:kind ly)
+                        :memory {:ref pl}
+                        :zst nil
+                        :scalar (load-scalar! bb (:scalar ly) ptr align)
+                        :pair (let [[sa sb off] (:pair ly)
+                                    a (load-scalar! bb sa ptr align)
+                                    p2 (gep! bb ptr off)
+                                    b (load-scalar! bb sb p2 (restrict-align align off))]
+                                {:pair [a b]})
+                        (unsupported "load")))
+        memcpy! (fn [bb dst src size]
+                  (let [nm (symbol "g" "llvm.memcpy.p0.p0.i64")]
+                    (declare! gl nm 'void [['ptr] ['ptr] ['i64] ['i1]])
+                    (emit! bb (list 'call 'void nm [['ptr (list :align (:align dst)) (:ptr dst)] ['ptr (list :align (:align src)) (:ptr src)] ['i64 size] ['i1 'false]]))))
+        store-val! (fn [bb {:keys [ptr align ly] :as dstpl} val]
+                     (case (:kind ly)
+                       :zst nil
+                       :scalar (store-scalar! bb (:scalar ly) val ptr align)
+                       :pair (let [[sa sb off] (:pair ly) [a b] (:pair val)
+                                   _ (store-scalar! bb sa a ptr align)
+                                   p2 (gep! bb ptr off)]
+                               (store-scalar! bb sb b p2 (restrict-align align off)))
+                       :memory (if (:ref val)
+                                 (memcpy! bb dstpl (:ref val) (:size ly))
+                                 (unsupported "store of a memory aggregate from a value"))
+                       (unsupported "store of an aggregate")))
+        ;; the pair component a field of a pair/scalar layout lives in
+        comp-index (fn [ly fi]
+                     (let [offs (:offsets ly)
+                           live (filter #(not (zero? (:size (get-in ly [:fields-ly %] {:size 1})))) (range (count offs)))]
+                       nil))
+        project-field (fn [bb {:keys [ptr align]} e]
+                        (let [[_ fi t] e
+                              parent-ly (:ly (second e))]
+                          nil))
+        ;; the place of an in-memory operand: a memory local, or a deref'd pointer, then fields
+        place-of! (fn [bb p]
+                    (let [l (place-local p) projs (place-projs p)
+                          base (if (and (seq projs) (= "deref" (proj-kind (first projs))))
+                                 (let [ptr (if (contains? mem l)
+                                             (:v (load-scalar! bb (:scalar (nth lay l)) (get-in @st [:allocas l]) (:align (nth lay l))))
+                                             (:v (get-in @st [:vals l])))
+                                       pt (pointee-type (:ty (nth locs l)))
+                                       pl (layout lt pt)]
+                                   {:ptr ptr :align (:align pl) :ly pl :ty pt :rest (rest projs)})
+                                 (do (when-not (contains? mem l) (unsupported "place of an SSA local"))
+                                     {:ptr (get-in @st [:allocas l]) :align (:align (nth lay l)) :ly (nth lay l) :ty (:ty (nth locs l)) :rest projs}))]
+                      (reduce (fn [pl e]
+                                (case (proj-kind e)
+                                  "downcast" (assoc pl :variant (nth e 2))
+                                  "field" (let [[_ fi t] e
+                                                ly (:ly pl)
+                                                offs (if (and (:variant pl) (= :multiple (:kind (:variants ly))))
+                                                       (:offsets (nth (:vs (:variants ly)) (:variant pl)))
+                                                       (:offsets ly))
+                                                off (nth offs fi)
+                                                fl (layout lt t)]
+                                            {:ptr (gep! bb (:ptr pl) off) :align (restrict-align (:align pl) off) :ly fl :ty t})
+                                  "index" (let [el (layout lt (second (ty-struct (:ty pl))))
+                                                idx (if (contains? mem (second e))
+                                                      (:v (load-scalar! bb (:scalar (nth lay (second e))) (get-in @st [:allocas (second e)]) (:align (nth lay (second e)))))
+                                                      (:v (get-in @st [:vals (second e)])))
+                                                r (fresh!)]
+                                            (when-not (:array (:ly pl)) (unsupported "index of a non-array"))
+                                            (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (symbol (:mem (:scalar el))) ['ptr (:ptr pl)] ['i64 idx])))
+                                            {:ptr r :align (restrict-align (:align pl) (:size el)) :ly el :ty (second (ty-struct (:ty pl)))})
+                                  (unsupported (str "place projection " (first e)))))
+                              base (:rest base))))
+        ;; field of an SSA pair/scalar value
+        field-of-value (fn [val ly fi]
+                         (let [offs (:offsets ly)]
+                           (case (:kind ly)
+                             :scalar val
+                             :pair (let [fo (nth offs fi) other (first (remove #(= % fi) (range (count offs))))]
+                                     ;; the component a field is: the lower offset is a
+                                     (if (every? #(<= fo (nth offs %)) (filter #(not= % fi) (range (count offs)))) (first (:pair val)) (second (:pair val))))
+                             (unsupported "field of an SSA value"))))
+        operand! (fn operand! [bb o]
+                   (case (name (first o))
+                     ("copy" "move")
+                     (let [p (second o) l (place-local p) projs (place-projs p)]
+                       (cond
+                         (and (empty? projs) (zst? (nth lay l))) nil
+                         (and (empty? projs) (not (contains? mem l))) (get-in @st [:vals l])
+                         (and (seq projs) (not (contains? mem l)) (every? #(= "field" (proj-kind %)) projs))
+                         (let [ty (reduce (fn [[val ly] e]
+                                            (let [fl (layout lt (nth e 2))
+                                                  fi (second e)]
+                                              [(when-not (zst? fl) (field-of-value val ly fi)) fl]))
+                                          [(get-in @st [:vals l]) (nth lay l)] projs)]
+                           (first ty))
+                         :else (load-place! bb (place-of! bb p))))
+                     "const" (let [v (const-val lt o alloc-sym! alloc-const!)]
+                               (if (and (map? v) (:load-from v)) (load-place! bb (:load-from v)) v))
+                     ;; the session's checks, decided at codegen: ub checks follow debug assertions (on at -O0), overflow
+                     ;; checks the flag of the run, contract checks are off
+                     "runtime-checks" {:ty "i1" :v (case (second o)
+                                                     "UbChecks" 'true
+                                                     "OverflowChecks" (if (= "0" (System/getenv "RF_OVERFLOW_CHECKS")) 'false 'true)
+                                                     'false)}))
+        assign! (fn [bb p val]
+                  (let [l (place-local p) projs (place-projs p)]
+                    (cond
+                      (zst? (nth lay l)) (when (seq projs) nil)
+                      (and (empty? projs) (not (contains? mem l))) (vswap! st assoc-in [:vals l] val)
+                      :else (store-val! bb (place-of! bb p) val))))
+        ty-of (fn [o] (case (name (first o))
+                        "runtime-checks" '(ty "bool" bool)
+                        "const" (nth o 2)
+                        ("copy" "move") (place-type body (second o))))
+        bin! (fn [bb op a b sc]
+               (if-let [[t v] (fold-bin op (:v a) (:v b) sc)]
+                 {:ty t :v v}
+                 (let [t (symbol (:imm sc)) r (fresh!)
+                       ins (fn [name & args] (emit! bb (list '= r (apply list name args))) {:ty (:imm sc) :v r})
+                       cmp (fn [c] (emit! bb (list '= r (list 'icmp c t (:v a) (:v b)))) {:ty "i1" :v r})
+                       sg (:signed sc)]
+                   (case op
+                     "Add" (ins 'add t (:v a) (:v b))
+                     "Sub" (ins 'sub t (:v a) (:v b))
+                     "Mul" (ins 'mul t (:v a) (:v b))
+                     ("AddUnchecked" "SubUnchecked" "MulUnchecked")
+                   (ins (case op "AddUnchecked" 'add "SubUnchecked" 'sub "MulUnchecked" 'mul) (if sg :nsw :nuw) t (:v a) (:v b))
+                   "Div" (ins (if sg 'sdiv 'udiv) t (:v a) (:v b))
+                     "Rem" (ins (if sg 'srem 'urem) t (:v a) (:v b))
+                     "BitAnd" (ins 'and t (:v a) (:v b))
+                     "BitOr" (ins 'or t (:v a) (:v b))
+                     "BitXor" (ins 'xor t (:v a) (:v b))
+                     "Eq" (cmp :eq) "Ne" (cmp :ne)
+                     "Lt" (cmp (if sg :slt :ult)) "Le" (cmp (if sg :sle :ule))
+                     "Gt" (cmp (if sg :sgt :ugt)) "Ge" (cmp (if sg :sge :uge))
+                     (unsupported (str "binop " op))))))
+        ;; a shift: the right operand cast to the left's type, masked, then shl / lshr / ashr
+        fbin! (fn [bb op a b sc]
+                (let [t (symbol (:imm sc)) r (fresh!)
+                      ins (fn [nm] (emit! bb (list '= r (list nm t (:v a) (:v b)))) {:ty (:imm sc) :v r})
+                      cmp (fn [c] (emit! bb (list '= r (list 'fcmp c t (:v a) (:v b)))) {:ty "i1" :v r})]
+                  (case op
+                    "Add" (ins 'fadd) "Sub" (ins 'fsub) "Mul" (ins 'fmul) "Div" (ins 'fdiv) "Rem" (ins 'frem)
+                    "Eq" (cmp :oeq) "Ne" (cmp :une) "Lt" (cmp :olt) "Le" (cmp :ole) "Gt" (cmp :ogt) "Ge" (cmp :oge)
+                    (unsupported (str "float binop " op)))))
+        shift! (fn [bb op a b sc bsc]
+                 (let [t (symbol (:imm sc))
+                       bv (cond (= (:ibits sc) (:ibits bsc)) (:v b)
+                                (number? (:v b)) (:v b)
+                                (< (:ibits bsc) (:ibits sc)) (let [r (fresh!)] (emit! bb (list '= r (list 'zext (symbol (:imm bsc)) (:v b) t))) r)
+                                :else (let [r (fresh!)] (emit! bb (list '= r (list 'trunc (symbol (:imm bsc)) (:v b) t))) r))
+                       mask (dec (:ibits sc))
+                       masked (if (number? bv)
+                                (bit-and bv mask)
+                                (let [r (fresh!)] (emit! bb (list '= r (list 'and t bv mask))) r))
+                       bits (:ibits sc)
+                       two (java.math.BigInteger/valueOf 2)
+                       M (.pow two bits)]
+                   (if (and (number? (:v a)) (number? masked))
+                     ;; the builder folds a shift of constants
+                     (let [ua (.mod (java.math.BigInteger/valueOf (long (:v a))) M)
+                           res (cond (#{"Shl" "ShlUnchecked"} op) (.mod (.shiftLeft ua (long masked)) M)
+                                     (:signed sc) (.mod (.shiftRight (let [x ua] (if (>= (.compareTo x (.pow two (dec bits))) 0) (.subtract x M) x)) (long masked)) M)
+                                     :else (.shiftRight ua (long masked)))]
+                       {:ty (:imm sc) :v (as-num (if (:signed sc) (sext-const bits res) res))})
+                     (let [r (fresh!)]
+                       (emit! bb (list '= r (list (if (#{"Shl" "ShlUnchecked"} op) 'shl (if (:signed sc) 'ashr 'lshr)) t (:v a) masked)))
+                       {:ty (:imm sc) :v r}))))
+        ;; checked arithmetic: the pair (value, overflowed)
+        overflow! (fn [bb op a b sc]
+                    (let [t (symbol (:imm sc))
+                          base (case op "AddWithOverflow" "add" "SubWithOverflow" "sub" "MulWithOverflow" "mul")]
+                      (if (and (#{"sub" "add"} base) (not (:signed sc)))
+                        (let [r (fresh!) f (fresh!)]
+                          (emit! bb (list '= r (list (symbol base) t (:v a) (:v b))))
+                          ;; unsigned: the wrapped result against an operand (add) or the operands (sub)
+                          (emit! bb (list '= f (if (= base "sub") (list 'icmp :ult t (:v a) (:v b)) (list 'icmp :ult t r (:v a)))))
+                          {:pair [{:ty (:imm sc) :v r} {:ty "i1" :v f}]})
+                        (let [iname (symbol "g" (str "llvm." (if (:signed sc) "s" "u") base ".with.overflow.i" (:ibits sc)))
+                              rt (list 'struct t 'i1)
+                              c (fresh!) v (fresh!) f (fresh!)]
+                          (declare! gl iname rt [[t] [t]])
+                          (emit! bb (list '= c (list 'call rt iname [[t (:v a)] [t (:v b)]])))
+                          (emit! bb (list '= v (list 'extractvalue [rt c] 0)))
+                          (emit! bb (list '= f (list 'extractvalue [rt c] 1)))
+                          {:pair [{:ty (:imm sc) :v v} {:ty "i1" :v f}]}))))
+        cast! (fn [bb o to-sc from-sc]
+                (let [v (operand! bb o)
+                      fb (:ibits from-sc) tb (:ibits to-sc)]
+                  (cond
+                    (= fb tb) {:ty (:imm to-sc) :v (:v v)}
+                    (< fb tb) (if (number? (:v v))
+                                {:ty (:imm to-sc) :v (:v v)}
+                                (let [r (fresh!)]
+                                  (emit! bb (list '= r (list (if (and (:signed from-sc) (not (:bool from-sc))) 'sext 'zext) (symbol (:imm from-sc)) (:v v) (symbol (:imm to-sc)))))
+                                  {:ty (:imm to-sc) :v r}))
+                    :else (let [r (fresh!)]
+                            (emit! bb (list '= r (list 'trunc (symbol (:imm from-sc)) (:v v) (symbol (:imm to-sc)))))
+                            {:ty (:imm to-sc) :v r}))))
+        scalar-of-op (fn [o] (let [l (layout lt (ty-of o))] (or (:scalar l) (unsupported "scalar operation on a non-scalar"))))
+        ;; the aggregate's operand value for an SSA destination
+        ;; the tag value codegen_tag_value gives a variant: nil (nothing to store) or [tag-field imm-value]
+        tag-value (fn [dly v]
+                    (let [vr (:variants dly)]
+                      (case (:kind vr)
+                        :single nil
+                        :multiple
+                        (let [tag (:tag vr) tf (:tag-field vr)]
+                          (when (:uninhabited (nth (:vs vr) v)) (unsupported "uninhabited variant"))
+                          (case (:kind (:enc vr))
+                            :direct [tf {:ty (:imm tag) :v (let [d (nth (:discrs dly) v)] (if (:bool tag) (if (zero? d) 'false 'true) (as-num (sext-const (:bits tag) d))))}]
+                            :niche (let [{:keys [untagged start niche-start]} (:enc vr)]
+                                     (when-not (= v untagged)
+                                       (let [mask (.subtract (.pow (java.math.BigInteger/valueOf 2) (:bits tag)) java.math.BigInteger/ONE)
+                                             nv (.and (.add (java.math.BigInteger/valueOf (long (- v start))) (java.math.BigInteger. (str niche-start))) mask)]
+                                         (if (= :ptr (:prim tag))
+                                           (if (zero? (.signum nv)) [tf {:ty "ptr" :v 'null}] (unsupported "pointer niche value"))
+                                           [tf {:ty (:imm tag) :v (as-num (sext-const (:bits tag) nv))}]))))))
+                        (unsupported "variants of this layout"))))
+        aggregate-value (fn [bb dest-ly ops variant]
+                          (let [vals (mapv #(operand! bb %) ops)
+                                vr (:variants dest-ly)
+                                offs (if (= :multiple (:kind vr)) (:offsets (nth (:vs vr) variant)) (:offsets dest-ly))
+                                tv (tag-value dest-ly variant)
+                                tag-off (when tv (nth (:offsets dest-ly) (first tv)))
+                                live (concat (remove nil? (map-indexed (fn [i v] (when v [(nth offs i) v])) vals))
+                                             (when tv [[tag-off (second tv)]]))]
+                            (case (:kind dest-ly)
+                              :zst nil
+                              :scalar (second (first live))
+                              :pair (let [[sa sb boff] (:pair dest-ly)
+                                          at (fn [off sc] (or (some (fn [[o v]] (when (= o off) v)) live) {:ty (:imm sc) :v 'poison}))
+                                          whole (some (fn [[_ v]] (when (:pair v) v)) live)]
+                                      ;; a field that is itself the whole pair (Option<&str>'s Some)
+                                      (or whole {:pair [(at 0 sa) (at boff sb)]}))
+                              (unsupported "aggregate into an SSA local"))))
+        set-discr! (fn [bb pl v]
+                     (when-let [[tf imm] (tag-value (:ly pl) v)]
+                       (let [tag (:tag (:variants (:ly pl)))
+                             off (nth (:offsets (:ly pl)) tf)
+                             tl {:kind :scalar :scalar tag :size (:size tag) :align (:size tag)}]
+                         (store-val! bb {:ptr (gep! bb (:ptr pl) off) :align (restrict-align (:align pl) off) :ly tl} imm))))
+        aggregate-into! (fn [bb pl ops variant]
+                          (let [ly (:ly pl)
+                                vr (:variants ly)
+                                offs (if (= :multiple (:kind vr)) (:offsets (nth (:vs vr) variant)) (:offsets ly))]
+                            (if (:array ly)
+                              (let [el (layout lt (second (ty-struct (:ty ly))))]
+                                (when-not (= :scalar (:kind el)) (unsupported "array of non-scalars"))
+                                (doseq [[i o] (map-indexed vector ops)]
+                                  (let [v (operand! bb o) r (fresh!)]
+                                    (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (symbol (:mem (:scalar el))) ['ptr (:ptr pl)] ['i64 i])))
+                                    (store-val! bb {:ptr r :align (restrict-align (:align pl) (* i (:size el))) :ly el} v))))
+                              (do
+                                (doseq [[i o] (map-indexed vector ops)]
+                                  (let [v (operand! bb o)
+                                        off (or (nth offs i nil) (unsupported "aggregate field without an offset"))
+                                        ft (ty-of o)
+                                        fl (layout lt ft)]
+                                    (when v
+                                      (store-val! bb {:ptr (gep! bb (:ptr pl) off) :align (restrict-align (:align pl) off) :ly fl} v))))
+                                (set-discr! bb pl variant)))))
+        ;; codegen_get_discr: the discriminant of the enum at a place or in an operand, cast to the scalar `dsc`
+        get-discr! (fn [bb pl-or-val ly dsc]
+                     (let [vr (:variants ly)]
+                       (case (:kind vr)
+                         :single {:ty (:imm dsc) :v (as-num (sext-const (:bits dsc) (if-let [d (:discrs ly)] (nth d (:index vr)) 0)))}
+                         :multiple
+                         (let [tag (:tag vr) tf (:tag-field vr)
+                               tv (if (:ptr pl-or-val)
+                                    (let [off (nth (:offsets ly) tf)
+                                          pl pl-or-val]
+                                      (case (:kind ly)
+                                        :memory (load-scalar! bb tag (gep! bb (:ptr pl) off) (restrict-align (:align pl) off))
+                                        (let [v (load-place! bb pl)] (if (= :pair (:kind ly)) (first (:pair v)) v))))
+                                    (if (= :pair (:kind ly)) (first (:pair pl-or-val)) pl-or-val))
+                               tb (:ibits tag) db (:ibits dsc)
+                               intcast (fn [v from-bits to-bits signed from-ty to-ty]
+                                         (cond (= from-bits to-bits) (:v v)
+                                               (< from-bits to-bits) (let [r (fresh!)] (emit! bb (list '= r (list (if signed 'sext 'zext) (symbol from-ty) (:v v) (symbol to-ty)))) r)
+                                               :else (let [r (fresh!)] (emit! bb (list '= r (list 'trunc (symbol from-ty) (:v v) (symbol to-ty)))) r)))]
+                           (case (:kind (:enc vr))
+                             :direct {:ty (:imm dsc) :v (intcast tv tb db (and (not (:bool tag)) (:signed tag)) (:imm tag) (:imm dsc))}
+                             :niche
+                             (let [{:keys [untagged start end niche-start]} (:enc vr)
+                                   [tagv tag-ty tag-bits] (if (= :ptr (:prim tag))
+                                                            (let [r (fresh!)] (emit! bb (list '= r (list 'ptrtoint 'ptr (:v tv) 'i64))) [{:ty "i64" :v r} "i64" 64])
+                                                            [tv (:imm tag) (:ibits tag)])
+                                   niche-start (as-num (sext-const tag-bits niche-start))
+                                   relative-max (- end start)
+                                   cmp (fn [c a b] (let [r (fresh!)] (emit! bb (list '= r (list 'icmp c (symbol tag-ty) a b))) r))]
+                               (when-not (zero? relative-max)
+                                 (when-not (<= (:lo tag) (:hi tag)) (unsupported "niche tag range wraps")))
+                               (let [[is-niche tagged delta]
+                                     (if (zero? relative-max)
+                                       [(cmp :eq (:v tagv) niche-start) {:ty (:imm dsc) :v start} 0]
+                                       (let [rel (fresh!)
+                                             _ (emit! bb (list '= rel (list 'sub (symbol tag-ty) (:v tagv) niche-start)))
+                                             cast (intcast {:v rel} tag-bits db false tag-ty (:imm dsc))
+                                             niche-end (as-num (.and (.add (java.math.BigInteger/valueOf (long relative-max)) (java.math.BigInteger. (str niche-start))) (.subtract (.pow (java.math.BigInteger/valueOf 2) tag-bits) java.math.BigInteger/ONE)))
+                                             lo (if (= :ptr (:prim tag)) (:lo tag) (:lo tag))
+                                             isn (cond (= niche-start lo) (cmp :ule (:v tagv) niche-end)
+                                                       :else (cmp :uge (:v tagv) niche-start))]
+                                         [isn {:ty (:imm dsc) :v cast} start]))
+                                     tagged (if (zero? delta) tagged
+                                                (let [r (fresh!)] (emit! bb (list '= r (list 'add (symbol (:imm dsc)) (:v tagged) delta))) {:ty (:imm dsc) :v r}))
+                                     r (fresh!)]
+                                 (emit! bb (list '= r (list 'select ['i1 is-niche] [(symbol (:imm dsc)) (:v tagged)] [(symbol (:imm dsc)) untagged])))
+                                 {:ty (:imm dsc) :v r})))))))
+        rvalue! (fn [bb r dly]
+                  (case (name (first r))
+                    "discriminant" (let [p (second r)
+                                         l (place-local p)
+                                         ply (layout lt (place-type body p))
+                                         dsc (or (:scalar dly) (unsupported "discriminant into a non-scalar"))]
+                                     (cond
+                                       (and (empty? (place-projs p)) (not (contains? mem l)))
+                                       (get-discr! bb (get-in @st [:vals l]) ply dsc)
+                                       :else
+                                       (get-discr! bb (place-of! bb p) ply dsc)))
+                    ("use" "use-noretag") (operand! bb (second r))
+                    "binop" (let [[_ op a b] r sc (scalar-of-op a)]
+                              (cond
+                                (= :float (:prim sc)) (fbin! bb op (operand! bb a) (operand! bb b) sc)
+                                (= op "Offset")
+                                (let [pv (operand! bb a) nv (operand! bb b)
+                                      el (layout lt (second (ty-struct (ty-of a))))
+                                      rr (fresh!)]
+                                  (when-not (= :scalar (:kind el)) (unsupported "Offset of a non-scalar pointee"))
+                                  (emit! bb (list '= rr (apply list 'getelementptr :inbounds (concat (when-not (:signed (scalar-of-op b)) [:nuw]) [(symbol (:mem (:scalar el))) ['ptr (:v pv)] [(symbol (:ty nv)) (:v nv)]]))))
+                                  {:ty "ptr" :v rr})
+                                (#{"Shl" "Shr" "ShlUnchecked" "ShrUnchecked"} op) (shift! bb op (operand! bb a) (operand! bb b) sc (scalar-of-op b))
+                                (#{"AddWithOverflow" "SubWithOverflow" "MulWithOverflow"} op) (overflow! bb op (operand! bb a) (operand! bb b) sc)
+                                :else (bin! bb op (operand! bb a) (operand! bb b) sc)))
+                    "unop" (if (= "PtrMetadata" (second r))
+                             (let [v (operand! bb (nth r 2))]
+                               (if (:pair v) (second (:pair v)) nil))
+                             (let [[_ op a] r sc (scalar-of-op a) v (operand! bb a) x (fresh!)]
+                             (case op
+                               "Not" (do (emit! bb (list '= x (list 'xor (symbol (:imm sc)) (:v v) (if (:bool sc) 'true -1))))
+                                         {:ty (:imm sc) :v x})
+                               "Neg" (if (= :float (:prim sc))
+                                       (do (emit! bb (list '= x (list 'fneg (symbol (:imm sc)) (:v v)))) {:ty (:imm sc) :v x})
+                                       (do (emit! bb (list '= x (list 'sub (symbol (:imm sc)) 0 (:v v)))) {:ty (:imm sc) :v x}))
+                               (unsupported (str "unop " op)))))
+                    "cast" (let [[_ kind o t] r]
+                             (cond
+                               (= kind "IntToInt") (cast! bb o (or (:scalar (layout lt t)) (unsupported "cast to a non-scalar")) (scalar-of-op o))
+                               (#{"FloatToFloat" "IntToFloat" "FloatToInt"} kind)
+                               (let [to (or (:scalar (layout lt t)) (unsupported "cast to a non-scalar")) from (scalar-of-op o)
+                                     v (operand! bb o) x (fresh!)]
+                                 (case kind
+                                   "FloatToFloat" (if (= (:bits to) (:bits from))
+                                                    v
+                                                    (do (emit! bb (list '= x (list (if (< (:bits from) (:bits to)) 'fpext 'fptrunc) (symbol (:imm from)) (:v v) (symbol (:imm to)))))
+                                                        {:ty (:imm to) :v x}))
+                                   "IntToFloat" (do (emit! bb (list '= x (list (if (:signed from) 'sitofp 'uitofp) (symbol (:imm from)) (:v v) (symbol (:imm to)))))
+                                                    {:ty (:imm to) :v x})
+                                   "FloatToInt" (let [iname (symbol "g" (str "llvm.fpto" (if (:signed to) "s" "u") "i.sat.i" (:ibits to) "." (if (= 32 (:bits from)) "f32" "f64")))]
+                                                  (declare! gl iname (symbol (:imm to)) [[(symbol (:imm from))]])
+                                                  (emit! bb (list '= x (list 'call (symbol (:imm to)) iname [[(symbol (:imm from)) (:v v)]])))
+                                                  {:ty (:imm to) :v x})))
+                               ;; a pointer cast between thin pointers changes nothing in LLVM's opaque pointers
+                               (.startsWith ^String kind "PointerCoercion(ReifyFnPointer")
+                               (if-let [sym (second (drop-while #(not= :fn-symbol %) o))]
+                                 {:ty "ptr" :v (symbol "g" sym)}
+                                 (unsupported "reified function without a symbol"))
+                               (and (.startsWith ^String kind "PointerCoercion(Unsize") (some #{:vtable} r))
+                               (let [v (operand! bb o)
+                                     vt (second (drop-while #(not= :vtable %) r))]
+                                 {:pair [v {:ty "ptr" :v (alloc-sym! vt)}]})
+                               (and (.startsWith ^String kind "PointerCoercion(Unsize") (#{"ref" "ptr"} (ty-kind (ty-of o))) (#{"ref" "ptr"} (ty-kind t))
+                                    (= "array" (ty-kind (pointee-type (ty-of o)))) (= "slice" (ty-kind (pointee-type t))))
+                               (let [v (operand! bb o) n (Long/parseLong (nth (ty-struct (pointee-type (ty-of o))) 2))]
+                                 {:pair [v {:ty "i64" :v n}]})
+                               (= kind "PtrToPtr")
+                               (let [fl (layout lt (ty-of o)) tl (layout lt t) v (operand! bb o)]
+                                 (cond (and (= :scalar (:kind fl)) (= :scalar (:kind tl))) v
+                                       (and (= :pair (:kind fl)) (= :pair (:kind tl))) v
+                                       (and (= :pair (:kind fl)) (= :scalar (:kind tl))) (first (:pair v))
+                                       :else (unsupported "PtrToPtr between these layouts")))
+                               (= kind "Transmute")
+                               (let [fl (layout lt (ty-of o)) tl (layout lt t) v (operand! bb o)]
+                                 (cond (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= (:imm (:scalar fl)) (:imm (:scalar tl)))) v
+                                       (and (= :pair (:kind fl)) (= :pair (:kind tl))
+                                            (= (map :imm (take 2 (:pair fl))) (map :imm (take 2 (:pair tl))))) v
+                                       (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= :ptr (:prim (:scalar fl))) (= :int (:prim (:scalar tl))))
+                                       (let [r (fresh!)] (emit! bb (list '= r (list 'ptrtoint 'ptr (:v v) (symbol (:imm (:scalar tl)))))) {:ty (:imm (:scalar tl)) :v r})
+                                       (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= :int (:prim (:scalar fl))) (= :ptr (:prim (:scalar tl))))
+                                       (if (number? (:v v))
+                                         ;; a constant expression, not an instruction
+                                         {:ty "ptr" :v (list 'inttoptr (symbol (:imm (:scalar fl))) (:v v) 'ptr)}
+                                         (let [r (fresh!)] (emit! bb (list '= r (list 'inttoptr (symbol (:imm (:scalar fl))) (:v v) 'ptr))) {:ty "ptr" :v r}))
+                                       (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= (:bits (:scalar fl)) (:bits (:scalar tl)))
+                                            (#{:int :float} (:prim (:scalar fl))) (#{:int :float} (:prim (:scalar tl))))
+                                       ;; the same bits in another scalar class
+                                       (if (number? (:v v))
+                                         (unsupported "transmute of a constant between int and float")
+                                         (let [r (fresh!)] (emit! bb (list '= r (list 'bitcast (symbol (:imm (:scalar fl))) (:v v) (symbol (:imm (:scalar tl)))))) {:ty (:imm (:scalar tl)) :v r}))
+                                       :else (unsupported "Transmute between these layouts")))
+                               :else (unsupported (str "cast " kind))))
+                    "rawptr" (let [p (nth r 2) projs (place-projs p)]
+                               (if (and (= 1 (count projs)) (= "deref" (proj-kind (first projs))))
+                                 ;; the address of `*p` is p (a fat pointer stays a pair)
+                                 (operand! bb (list 'copy (list 'place (place-local p))))
+                                 (let [pl (place-of! bb p)] {:ty "ptr" :v (:ptr pl)})))
+                    "ref" (let [p (nth r 2) projs (place-projs p)]
+                            (if (and (= 1 (count projs)) (= "deref" (proj-kind (first projs))))
+                              (operand! bb (list 'copy (list 'place (place-local p))))
+                              (let [pl (place-of! bb p)] {:ty "ptr" :v (:ptr pl)})))
+                    (unsupported (str "rvalue " (first r)))))
+        statement! (fn [bb s]
+                     (case (name (first (stmt-of s)))
+                       "set-discriminant" (let [[_ p v] (stmt-of s)] (set-discr! bb (place-of! bb p) v))
+                       ;; copy_nonoverlapping: a memcpy of count * size_of::<T>() bytes
+                       "copy-nonoverlapping" (let [[_ dst src cnt] (stmt-of s)
+                                                   el (layout lt (second (ty-struct (ty-of dst))))
+                                                   dv (operand! bb dst) sv (operand! bb src) cv (operand! bb cnt)
+                                                   nm (symbol "g" "llvm.memcpy.p0.p0.i64")
+                                                   bytes (if (number? (:v cv))
+                                                           (* (:size el) (:v cv))
+                                                           (let [r (fresh!)] (emit! bb (list '= r (list 'mul :nuw :nsw 'i64 (:v cv) (:size el)))) r))]
+                                               (declare! gl nm 'void [['ptr] ['ptr] ['i64] ['i1]])
+                                               (emit! bb (list 'call 'void nm [['ptr (list :align (:align el)) (:v dv)] ['ptr (list :align (:align el)) (:v sv)] ['i64 bytes] ['i1 'false]])))
+                       "assign" (let [[_ p r] (stmt-of s)
+                                      dly (layout lt (place-type body p))
+                                      l (place-local p)
+                                      ssa-dest (and (empty? (place-projs p)) (not (contains? mem l)))]
+                                  (cond
+                                    (= "aggregate" (name (first r)))
+                                    (let [ops (nth r 2)
+                                          kind (second r)
+                                          variant (if (= "adt" (name (first kind))) (nth kind 5) 0)]
+                                      (if ssa-dest
+                                        (when-let [v (aggregate-value bb dly ops variant)] (assign! bb p v))
+                                        (when-not (zst? dly) (aggregate-into! bb (place-of! bb p) ops variant))))
+                                    ssa-dest (when-let [v (rvalue! bb r dly)] (assign! bb p v))
+                                    ;; rustc codegens the destination place before the rvalue
+                                    :else (let [pl (if (zst? dly) nil (place-of! bb p))
+                                                v (rvalue! bb r dly)]
+                                            (when (and pl v) (store-val! bb pl v)))))
+                       nil))
+        ret-value! (fn [bb]
+                     (let [ly (first lay)
+                           v (if (contains? mem 0) (load-place! bb {:ptr (get-in @st [:allocas 0]) :align (:align ly) :ly ly}) (get-in @st [:vals 0]))]
+                       (case (:kind ly)
+                         :zst (emit! bb '(ret void))
+                         :scalar (emit! bb (list 'ret (symbol (:ty v)) (:v v)))
+                         :pair (let [ty (llvm-type ly)
+                                     [a b] (:pair v)
+                                     r0 (fresh!) r1 (fresh!)]
+                                 (emit! bb (list '= r0 (list 'insertvalue [ty 'poison] [(symbol (:ty a)) (:v a)] 0)))
+                                 (emit! bb (list '= r1 (list 'insertvalue [ty r0] [(symbol (:ty b)) (:v b)] 1)))
+                                 (emit! bb (list 'ret ty r1)))
+                         :memory (if (indirect? ly)
+                                   (emit! bb '(ret void))
+                                   (let [pl (:ref v) ci (cast-int ly) r (fresh!)]
+                                     (emit! bb (list '= r (list 'load ci ['ptr (:ptr pl)] :align (:align pl))))
+                                     (emit! bb (list 'ret ci r))))
+                         (unsupported "return of an aggregate"))))
+        arg-forms (fn [bb o]
+                    (let [v (operand! bb o) l (layout lt (ty-of o))]
+                      (case (:kind l)
+                        :zst []
+                        :scalar [(let [sc (:scalar l)]
+                                   (vec (concat [(symbol (:ty v))]
+                                                (when (:bool sc) [:zeroext])
+                                                (when (and (= :ptr (:prim sc)) (ref-align lt (ty-of o)))
+                                                  [(list :align (ref-align lt (ty-of o)))])
+                                                [(:v v)])))]
+                        :pair (vec (map-indexed (fn [i [c sc]] (vec (concat [(symbol (or (:ty c) (unsupported "pair operand of an unexpected shape" {:v v})))] (sc-attrs sc)
+                                                                            (when (and (= :ptr (:prim sc)) (pair-align lt (ty-of o) i)) [(list :align (pair-align lt (ty-of o) i))])
+                                                                            [(:v c)])))
+                                                (map vector (:pair v) (take 2 (:pair l)))))
+                        :memory (if (indirect? l)
+                                  ;; passed by pointer: a move hands the place over, a copy goes through a temporary of its own
+                                  (let [pl (:ref v)]
+                                    (if (= "copy" (name (first o)))
+                                      (let [tmp (scratch! (:size l) (:align l))]
+                                        (memcpy! bb {:ptr tmp :align (:align l)} pl (:size l))
+                                        [['ptr (list :align (:align l)) tmp]])
+                                      [['ptr (list :align (:align l)) (:ptr pl)]]))
+                                  (let [pl (:ref v) ci (cast-int l) r (fresh!)]
+                                    (emit! bb (list '= r (list 'load ci ['ptr (:ptr pl)] :align (:align pl))))
+                                    [[ci r]]))
+                        (unsupported "aggregate as an argument"))))
+        ;; --- unwinding: landing pads, the personality slot, the terminate and unreachable blocks
+        slot! (fn [] (or (get @st :slot)
+                         (let [nm (symbol "%slot")]
+                           (vswap! st update :start #(into [(list '= nm (list 'alloca (list 'array 16 'i8) :align 8))] %))
+                           (vswap! st assoc :slot nm)
+                           nm)))
+        landing-pad! (fn [target]
+                       (or (get-in @st [:pads target])
+                           (let [ll (llbb! target)
+                                 nm (new-block! "cleanup")
+                                 lp (fresh!) e0 (fresh!) e1 (fresh!) sl (slot!) g (fresh!)]
+                             (vswap! st assoc :personality true)
+                             (emit! nm (list '= lp (list 'landingpad (list 'struct 'ptr 'i32) :cleanup)))
+                             (emit! nm (list '= e0 (list 'extractvalue [(list 'struct 'ptr 'i32) lp] 0)))
+                             (emit! nm (list '= e1 (list 'extractvalue [(list 'struct 'ptr 'i32) lp] 1)))
+                             (emit! nm (list 'store ['ptr e0] ['ptr sl] :align 8))
+                             (emit! nm (list '= g (list 'getelementptr :inbounds 'i8 ['ptr sl] ['i64 8])))
+                             (emit! nm (list 'store ['i32 e1] ['ptr g] :align 8))
+                             (emit! nm (list 'br ll))
+                             (let [r (symbol (str "%" nm))] (vswap! st assoc-in [:pads target] r) r))))
+        terminate-block! (fn [reason]
+                           (or (get-in @st [:terminate reason])
+                               (let [nm (new-block! "terminate") lp (fresh!)
+                                     callee (symbol "g" (let [k (if (= reason "cleanup") "panic_in_cleanup" "panic_cannot_unwind")]
+                                                          (or (get-in @gl [:langs k]) (str "panicking." k))))]
+                                 (vswap! st assoc :personality true)
+                                 (declare! gl callee 'void [])
+                                 (emit! nm (list '= lp (list 'landingpad (list 'struct 'ptr 'i32) (list 'filter (list 'array 0 'ptr) 'zeroinitializer))))
+                                 (emit! nm (list 'call 'void callee []))
+                                 (emit! nm '(unreachable))
+                                 (let [r (symbol (str "%" nm))] (vswap! st assoc-in [:terminate reason] r) r))))
+        unreachable-block! (fn []
+                             (or (get @st :unreachable)
+                                 (let [nm (new-block! "unreachable")]
+                                   (emit! nm '(unreachable))
+                                   (let [r (symbol (str "%" nm))] (vswap! st assoc :unreachable r) r))))
+        ;; llbb_with_cleanup: a jump from a block to a cleanup block goes through its landing pad
+        llbb-wc! (fn [from target]
+                   (if (and (not (:cleanup (nth blocks from))) (:cleanup (nth blocks target)))
+                     (landing-pad! target)
+                     (llbb! target)))
+        ;; the unwind destination of a call: nil (a plain call) or a block
+        unwind-block! (fn [from unwind]
+                        (case (name (first unwind))
+                          "cleanup" (when-not (contains? nops (second unwind)) (llbb-wc! from (second unwind)))
+                          "terminate" (terminate-block! (second unwind))
+                          nil))
+        assign-in! (fn [rbb p val]
+                     ;; the value of a call's result, stored (or bound) in the block the call continues in
+                     (let [l (place-local p) projs (place-projs p)]
+                       (cond
+                         (zst? (nth lay l)) nil
+                         (and (empty? projs) (not (contains? mem l))) (vswap! st assoc-in [:vals l] val)
+                         :else (store-val! rbb (place-of! rbb p) val))))
+        ;; a `Location` constant for (loc FILE LINE COL): the file's name and the packed location, interned
+        loc-global! (fn [[_ file line col]]
+                      (let [fname (str file "\u0000")
+                            fg (intern-const! gl (list 'array (count fname) 'i8) (list 'c-string fname) 1)]
+                        (intern-const! gl (list 'packed 'ptr (list 'array 16 'i8))
+                                       (list 'packed ['ptr fg] [(list 'array 16 'i8) (list 'c-string (str (le-bytes (count file) 8) (le-bytes line 4) (le-bytes col 4)))]) 8)))
+        ;; get_caller_location: walk the inlined scopes while their callee is track_caller, then pass the function's own
+        ;; location parameter on when it is track_caller itself
+        caller-location! (fn [loc scope]
+                           (loop [loc loc scope (or scope 0)]
+                             (let [[_ inl ip site tc] (nth (:scopes body) scope)
+                                   [loc stop] (if inl (if tc [site false] [loc true]) [loc false])]
+                               (cond stop (loc-global! loc)
+                                     ip (recur loc ip)
+                                     (:track-caller body) (symbol "%_loc")
+                                     :else (loc-global! loc)))))
+        terminator! (fn [bb b t]
+                      (case (name (first t))
+                        "goto" (br-or-merge bb t (second t))
+                        "return" (ret-value! bb)
+                        "unreachable" (emit! bb '(unreachable))
+                        "assert" (let [[_ c expected msg target unwind loc scope] t v (operand! bb c)]
+                                   (if (and (boolean? (:v v)) (= (:v v) expected))
+                                     (br-or-merge bb t target)
+                                     (let [lltarget (llbb! target)
+                                           pb (new-block! "panic")
+                                           lg (caller-location! loc scope)
+                                           mk (name (first msg))
+                                           panic-name (case mk
+                                                        "overflow" (str "panic_const_" (str/lower-case (nth msg 1)) "_overflow")
+                                                        "overflow-neg" "panic_const_neg_overflow"
+                                                        "div-zero" "panic_const_div_by_zero"
+                                                        "rem-zero" "panic_const_rem_by_zero"
+                                                        "bounds-check" "panic_bounds_check"
+                                                        (unsupported (str "assert message " mk)))
+                                           callee (symbol "g" (or (get-in @gl [:langs panic-name])
+                                                                  (if (= mk "bounds-check") "panicking.panic_bounds_check" (str "panicking.panic_const." panic-name))))
+                                           pbs (symbol (str "%" pb))
+                                           _ (emit! bb (if expected (list 'br 'i1 (:v v) lltarget pbs) (list 'br 'i1 (:v v) pbs lltarget)))
+                                           [cargs ptypes] (if (= mk "bounds-check")
+                                                            (let [idx (operand! pb (nth msg 2)) len (operand! pb (nth msg 1))]
+                                                              [[['i64 (:v idx)] ['i64 (:v len)] ['ptr (list :align 8) lg]] [['i64] ['i64] ['ptr (list :align 8)]]])
+                                                            [[['ptr (list :align 8) lg]] [['ptr (list :align 8)]]])
+                                           unw (unwind-block! b unwind)]
+                                       (declare! gl callee 'void ptypes)
+                                       (if unw
+                                         (emit! pb (list 'invoke 'void callee cargs :to (unreachable-block!) :unwind unw))
+                                         (do (emit! pb (list 'call 'void callee cargs))
+                                             (emit! pb '(unreachable))))
+                                       nil)))
+                        "resume" (let [sl (slot!)
+                                       a (fresh!) g (fresh!) c (fresh!) i0 (fresh!) i1 (fresh!)
+                                       ty (list 'struct 'ptr 'i32)]
+                                   (emit! bb (list '= a (list 'load 'ptr ['ptr sl] :align 8)))
+                                   (emit! bb (list '= g (list 'getelementptr :inbounds 'i8 ['ptr sl] ['i64 8])))
+                                   (emit! bb (list '= c (list 'load 'i32 ['ptr g] :align 8)))
+                                   (emit! bb (list '= i0 (list 'insertvalue [ty 'poison] ['ptr a] 0)))
+                                   (emit! bb (list '= i1 (list 'insertvalue [ty i0] ['i32 c] 1)))
+                                   (emit! bb (list 'resume ty i1)))
+                        "terminate" (emit! bb (list 'br (terminate-block! (second t))))
+                        "drop" (let [[_ p target unwind _ _ glue] t]
+                                 (if (nil? glue)
+                                   (br-or-merge bb t target)
+                                   (let [pl (place-of! bb p)
+                                         callee (symbol "g" (:symbol (second glue)))
+                                         argv [(vec (concat ['ptr] (when (> (:align (:ly pl)) 1) [(list :align (:align (:ly pl)))]) [(:ptr pl)]))]
+                                         unw (unwind-block! b unwind)]
+                                     (if unw
+                                       (let [ret-bb (llbb-wc! b target)]
+                                         (emit! bb (list 'invoke 'void callee argv :to ret-bb :unwind unw))
+                                         nil)
+                                       (do (emit! bb (list 'call 'void callee argv))
+                                           (br-or-merge bb t target))))))
+                        "switch" (let [[_ d vals other] t
+                                       dv (operand! bb d) sc (scalar-of-op d)
+                                       key (fn [v] (as-num (sext-const (:bits sc) v)))
+                                       empty-unreachable (fn [b] (let [blk (nth blocks b)] (and (empty? (:stmts blk)) (= "unreachable" (name (first (:term blk)))))))
+                                       cmpbr (fn [v lt* lf]
+                                               (let [c (fresh!)]
+                                                 (emit! bb (list '= c (list 'icmp :eq (symbol (:ty dv)) (:v dv) (key v))))
+                                                 (emit! bb (list 'br 'i1 c lt* lf))))]
+                                   (cond
+                                     (or (number? (:v dv)) (boolean? (:v dv)))
+                                     (let [dvv (cond (true? (:v dv)) 1 (false? (:v dv)) 0 :else (let [x (bigint (:v dv))] (if (neg? x) (+ x (.pow (java.math.BigInteger/valueOf 2) (:bits sc))) x)))
+                                           target (or (some (fn [[v tg]] (when (= (bigint v) (bigint dvv)) tg)) vals) other)]
+                                       (emit! bb (list 'br (llbb! target))))
+                                     (= 1 (count vals))
+                                     (let [[v target] (first vals)
+                                           lt* (llbb! target) lf (llbb! other)]
+                                       (if (:bool sc)
+                                         (if (zero? v)
+                                           (emit! bb (list 'br 'i1 (:v dv) lf lt*))
+                                           (emit! bb (list 'br 'i1 (:v dv) lt* lf)))
+                                         (cmpbr v lt* lf)))
+                                     (and (= 2 (count vals)) (empty-unreachable other) (= #{0 1} (set (map (comp long first) vals))))
+                                     (let [tb (second (first (filter #(= 1 (first %)) vals)))
+                                           fb (second (first (filter #(= 0 (first %)) vals)))
+                                           tl (llbb! tb) fl (llbb! fb)
+                                           cond-v (if (:bool sc)
+                                                    (:v dv)
+                                                    (let [r (fresh!)] (emit! bb (list '= r (list 'trunc :nuw (symbol (:ty dv)) (:v dv) 'i1))) r))]
+                                       (emit! bb (list 'br 'i1 cond-v tl fl)))
+                                     (and (= 2 (count vals)) (empty-unreachable other))
+                                     (let [[v1 t1] (first vals) [_ t2] (second vals)
+                                           l1 (llbb! t1) l2 (llbb! t2)]
+                                       (let [c (fresh!)]
+                                         (emit! bb (list '= c (list 'icmp :eq (symbol (:ty dv)) (:v dv) (key v1))))
+                                         (emit! bb (list 'br 'i1 c l1 l2))))
+                                     :else
+                                     (let [ld (llbb! other)
+                                           cases (mapv (fn [[v target]] [(symbol (:ty dv)) (key v) (llbb! target)]) vals)]
+                                       (emit! bb (list 'switch (symbol (:ty dv)) (:v dv) ld cases)))))
+                        "call" (let [[_ f args dest target unwind callee-info fn-loc scope] t
+                                     ci (when (and (seq? callee-info) (map? (second callee-info))) (second callee-info))
+                                     intrinsic (when (= "intrinsic" (:kind ci)) (:intrinsic ci))]
+                                 (if (= "drop-glue-empty" (:kind ci))
+                                   ;; a call of empty drop glue is a no-op: a branch to the return target
+                                   (when target (br-or-merge bb t target))
+                                 (if intrinsic
+                                   (case intrinsic
+                                     "abort" (do (declare! gl (symbol "g" "llvm.trap") 'void [])
+                                                 (emit! bb (list 'call 'void (symbol "g" "llvm.trap") []))
+                                                 (if target (br-or-merge bb t target) (emit! bb '(unreachable))))
+                                     ("cold_path" "assert_inhabited" "assert_zero_valid" "assert_mem_uninitialized_valid")
+                                     (when target (br-or-merge bb t target))
+                                     "black_box" (let [pl (place-of! bb dest) v (operand! bb (first args)) dl (layout lt (place-type body dest))]
+                                                   (when v (store-val! bb pl v))
+                                                   (emit! bb (if (zst? dl)
+                                                               (list 'call 'void (list 'asm "" "~{memory}" :sideeffect) [])
+                                                               (list 'call 'void (list 'asm "" "r,~{memory}" :sideeffect) [['ptr (:ptr pl)]])))
+                                                   (when target (br-or-merge bb t target)))
+                                     ("ctpop" "ctlz" "ctlz_nonzero" "cttz" "cttz_nonzero" "bswap" "bitreverse" "saturating_add" "saturating_sub"
+                                      "unchecked_funnel_shl" "unchecked_funnel_shr" "rotate_left" "rotate_right")
+                                     (let [a0 (first args)
+                                           sc (scalar-of-op a0)
+                                           w (:ibits sc)
+                                           ity (symbol (:imm sc))
+                                           dl (layout lt (place-type body dest))
+                                           dsc (:scalar dl)
+                                           call! (fn [nm argvals]
+                                                   (let [iname (symbol "g" (str "llvm." nm ".i" w)) r (fresh!)]
+                                                     (declare! gl iname ity (mapv (fn [[t _]] [t]) argvals))
+                                                     (emit! bb (list '= r (list 'call ity iname (vec argvals))))
+                                                     {:ty (:imm sc) :v r}))
+                                           intcast (fn [v]
+                                                     (let [fb (:ibits sc) tb (:ibits dsc)]
+                                                       (cond (= fb tb) v
+                                                             (< fb tb) (let [r (fresh!)] (emit! bb (list '= r (list 'zext (symbol (:imm sc)) (:v v) (symbol (:imm dsc))))) {:ty (:imm dsc) :v r})
+                                                             :else (let [r (fresh!)] (emit! bb (list '= r (list 'trunc (symbol (:imm sc)) (:v v) (symbol (:imm dsc))))) {:ty (:imm dsc) :v r}))))
+                                           x (operand! bb a0)
+                                           v (case intrinsic
+                                               ("ctlz" "ctlz_nonzero" "cttz" "cttz_nonzero")
+                                               (intcast (call! (if (#{"ctlz" "ctlz_nonzero"} intrinsic) "ctlz" "cttz")
+                                                               [[ity (:v x)] ['i1 (if (#{"ctlz_nonzero" "cttz_nonzero"} intrinsic) 'true 'false)]]))
+                                               "ctpop" (intcast (call! "ctpop" [[ity (:v x)]]))
+                                               "bswap" (if (= w 8) x (call! "bswap" [[ity (:v x)]]))
+                                               "bitreverse" (call! "bitreverse" [[ity (:v x)]])
+                                               ("saturating_add" "saturating_sub")
+                                               (let [y (operand! bb (second args))]
+                                                 (call! (str (if (:signed sc) "s" "u") (if (= intrinsic "saturating_add") "add" "sub") ".sat") [[ity (:v x)] [ity (:v y)]]))
+                                               ("unchecked_funnel_shl" "unchecked_funnel_shr")
+                                               (let [y (operand! bb (second args)) sh (operand! bb (nth args 2))
+                                                     shc (let [fb (:ibits (scalar-of-op (nth args 2)))]
+                                                           (cond (= fb w) sh
+                                                                 (< fb w) (let [r (fresh!)] (emit! bb (list '= r (list 'zext (symbol (:ty sh)) (:v sh) ity))) {:ty (:imm sc) :v r})
+                                                                 :else (let [r (fresh!)] (emit! bb (list '= r (list 'trunc (symbol (:ty sh)) (:v sh) ity))) {:ty (:imm sc) :v r})))]
+                                                 (call! (if (= intrinsic "unchecked_funnel_shl") "fshl" "fshr") [[ity (:v x)] [ity (:v y)] [ity (:v shc)]]))
+                                               ("rotate_left" "rotate_right")
+                                               (let [sh (operand! bb (second args))
+                                                     shc (let [fb (:ibits (scalar-of-op (second args)))]
+                                                           (cond (= fb w) sh
+                                                                 (< fb w) (let [r (fresh!)] (emit! bb (list '= r (list 'zext (symbol (:ty sh)) (:v sh) ity))) {:ty (:imm sc) :v r})
+                                                                 :else (let [r (fresh!)] (emit! bb (list '= r (list 'trunc (symbol (:ty sh)) (:v sh) ity))) {:ty (:imm sc) :v r})))]
+                                                 (call! (if (= intrinsic "rotate_left") "fshl" "fshr") [[ity (:v x)] [ity (:v x)] [ity (:v shc)]])))]
+                                       (assign! bb dest v)
+                                       (when target (br-or-merge bb t target)))
+                                     ("ptr_offset_from_unsigned" "ptr_offset_from")
+                                     (let [a (operand! bb (first args)) b (operand! bb (second args))
+                                           el (layout lt (second (ty-struct (ty-of (first args)))))
+                                           ra (fresh!) rb (fresh!) d (fresh!) r (fresh!)
+                                           unsigned? (= intrinsic "ptr_offset_from_unsigned")]
+                                       (emit! bb (list '= ra (list 'ptrtoint 'ptr (:v a) 'i64)))
+                                       (emit! bb (list '= rb (list 'ptrtoint 'ptr (:v b) 'i64)))
+                                       (emit! bb (list '= d (if unsigned? (list 'sub :nuw 'i64 ra rb) (list 'sub 'i64 ra rb))))
+                                       (emit! bb (list '= r (list (if unsigned? 'udiv 'sdiv) :exact 'i64 d (:size el))))
+                                       (assign! bb dest {:ty "i64" :v r})
+                                       (when target (br-or-merge bb t target)))
+                                     "is_val_statically_known"
+                                     (do (assign! bb dest {:ty "i1" :v 'false})
+                                         (when target (br-or-merge bb t target)))
+                                     "write_bytes"
+                                     (let [d (operand! bb (first args)) v (operand! bb (second args)) c (operand! bb (nth args 2))
+                                           el (layout lt (second (ty-struct (ty-of (first args)))))
+                                           nm (symbol "g" "llvm.memset.p0.i64")
+                                           bytes (if (number? (:v c)) (* (:size el) (:v c)) (let [r (fresh!)] (emit! bb (list '= r (list 'mul :nuw :nsw 'i64 (:v c) (:size el)))) r))]
+                                       (declare! gl nm 'void [['ptr] ['i8] ['i64] ['i1]])
+                                       (emit! bb (list 'call 'void nm [['ptr (list :align (:align el)) (:v d)] ['i8 (:v v)] ['i64 bytes] ['i1 'false]]))
+                                       (when target (br-or-merge bb t target)))
+                                     (if-let [[_ fname w] (re-matches #"(fabs|sqrt|sin|cos|exp|exp2|log|log2|log10|floor|ceil|trunc|round|rint|nearbyint|roundeven)f(32|64)" intrinsic)]
+                                       (let [ft (if (= w "32") 'float 'double) iname (symbol "g" (str "llvm." fname ".f" w))
+                                             x (operand! bb (first args)) r (fresh!)]
+                                         (declare! gl iname ft [[ft]])
+                                         (emit! bb (list '= r (list 'call ft iname [[ft (:v x)]])))
+                                         (assign! bb dest {:ty (name ft) :v r})
+                                         (when target (br-or-merge bb t target)))
+                                       (unsupported (str "intrinsic " intrinsic))))
+                                 (let [callee (if (and (not= "const" (name (first f))) (not (and ci (= "item" (:kind ci)))))
+                                                (let [v (operand! bb f)] (:v v))
+                                                (call-symbol f callee-info))
+                                     can-unwind (if (and (seq? callee-info) (map? (second callee-info))) (:can-unwind (second callee-info)) true)
+                                     dl0 (let [d (nth lay (place-local dest))] (if (seq (place-projs dest)) (layout lt (place-type body dest)) d))
+                                     sret-pl (when (indirect? dl0) (place-of! bb dest))
+                                     argfs (vec (mapcat #(arg-forms bb %) args))
+                                     argfs (if sret-pl (into [['ptr (list :sret (list 'array (:size dl0) 'i8)) (list :align (:align dl0)) (:ptr sret-pl)]] argfs) argfs)
+                                     argfs (if (and (seq? callee-info) (map? (second callee-info)) (:track-caller (second callee-info)))
+                                             (conj argfs ['ptr (list :align 8) (caller-location! fn-loc scope)])
+                                             argfs)
+                                     dl (nth lay (place-local dest))
+                                     dl (if (seq (place-projs dest)) (layout lt (place-type body dest)) dl)
+                                     ret (llvm-type dl)
+                                     ret-attrs (when-let [ra (ret-attrs-of lt (place-type body dest) dl)] [:ret-attrs ra])
+                                     unw (when can-unwind (unwind-block! b unwind))
+                                     rbb (if unw (if target (if (zero? target) "start" (str "bb" target)) nil) bb)
+                                     ;; an invoke continues in its normal destination: the result is handled there
+                                     callf (if unw
+                                             (concat (list 'invoke ret callee argfs :to (if target (llbb-wc! b target) (unreachable-block!)) :unwind unw) ret-attrs)
+                                             (concat (list 'call ret callee argfs) ret-attrs))
+                                     handle (fn [instr-form]
+                                              (case (:kind dl)
+                                                :zst (emit! bb instr-form)
+                                                :scalar (let [r (fresh!)]
+                                                          (emit! bb (list '= r instr-form))
+                                                          (assign-in! rbb dest {:ty (:imm (:scalar dl)) :v r}))
+                                                :pair (let [r (fresh!) a (fresh!) c (fresh!) [sa sb] (:pair dl)]
+                                                        (emit! bb (list '= r instr-form))
+                                                        (emit! rbb (list '= a (list 'extractvalue [ret r] 0)))
+                                                        (emit! rbb (list '= c (list 'extractvalue [ret r] 1)))
+                                                        (assign-in! rbb dest {:pair [{:ty (:imm sa) :v a} {:ty (:imm sb) :v c}]}))
+                                                :memory (if (indirect? dl)
+                                                          (emit! bb instr-form)
+                                                          (let [r (fresh!) ci (cast-int dl) pl (place-of! bb dest)]
+                                                            (emit! bb (list '= r instr-form))
+                                                            (store-cast! rbb ci r pl (:size dl))))
+                                                (unsupported "aggregate returned")))]
+                                 (when (and ci (symbol? callee))
+                                   (declare! gl callee ret (mapv #(vec (butlast %)) argfs)))
+                                 (handle (apply list callf))
+                                 (cond
+                                   unw nil
+                                   target (br-or-merge bb t target)
+                                   :else (emit! bb '(unreachable)))))))
+                        (unsupported (str "terminator " (first t)))))]
+    (llbb! 0)
+    (doseq [l (concat (range 1 (inc (:args body))) [0] (range (inc (:args body)) (count locs)))]
+      (when (and (contains? mem l)
+                 ;; an argument passed by pointer and an sret return live in the caller's memory
+                 (not (and (indirect? (nth lay l)) (or (= l 0) (<= 1 l (:args body))) (not= l spread))))
+        (alloca! l)))
+    (when (indirect? (first lay)) (vswap! st assoc-in [:allocas 0] (symbol "%_0")))
+    ;; arguments: parameters; memory ones stored into their alloca
+    (let [params (vec (mapcat
+                       (fn [a]
+                         (let [ly (nth lay a)]
+                           (if (= a spread)
+                             ;; a "rust-call" ABI tuple argument arrives spread over one parameter per field and is rebuilt in
+                             ;; a place of its own
+                             (let [tys (rest (ty-struct (:ty (nth locs a))))
+                                   pl {:ptr (get-in @st [:allocas a]) :align (:align ly) :ly ly}]
+                               (vec (mapcat
+                                     (fn [i ft]
+                                       (let [fl (layout lt ft) off (nth (:offsets ly) i)
+                                             fp {:ptr (gep! "start" (:ptr pl) off) :align (restrict-align (:align pl) off) :ly fl}
+                                             n (fn [k] (symbol (str "%_" a "." i (when k (str "." k)))))]
+                                         (case (:kind fl)
+                                           :zst []
+                                           :scalar (do (store-val! "start" fp {:ty (:imm (:scalar fl)) :v (n nil)})
+                                                       (param-forms fl (ref-align lt ft) [(n nil)]))
+                                           :pair (let [[sa sb _] (:pair fl)]
+                                                   (store-val! "start" fp {:pair [{:ty (:imm sa) :v (n 0)} {:ty (:imm sb) :v (n 1)}]})
+                                                   (param-forms fl nil [(n 0) (n 1)]))
+                                           (unsupported "memory aggregate in a spread argument"))))
+                                     (range) tys)))
+                           (case (:kind ly)
+                             :zst []
+                             :scalar (let [sc (:scalar ly) nm (symbol (str "%_" a))]
+                                       (if (contains? mem a)
+                                         (store-scalar! "start" sc {:ty (:imm sc) :v nm} (get-in @st [:allocas a]) (:align ly))
+                                         (vswap! st assoc-in [:vals a] {:ty (:imm sc) :v nm}))
+                                       (param-forms ly (ref-align lt (:ty (nth locs a))) [nm]))
+                             :pair (let [[sa sb off] (:pair ly) n0 (symbol (str "%_" a ".0")) n1 (symbol (str "%_" a ".1"))
+                                         val {:pair [{:ty (:imm sa) :v n0} {:ty (:imm sb) :v n1}]}]
+                                     (if (contains? mem a)
+                                       (store-val! "start" {:ptr (get-in @st [:allocas a]) :align (:align ly) :ly ly} val)
+                                       (vswap! st assoc-in [:vals a] val))
+                                     (param-forms (assoc ly :pair-aligns [(pair-align lt (:ty (nth locs a)) 0) (pair-align lt (:ty (nth locs a)) 1)]) nil [n0 n1]))
+                             :memory (let [nm (symbol (str "%_" a))]
+                                       (when-not (contains? mem a) (unsupported "SSA memory aggregate"))
+                                       (if (indirect? ly)
+                                         (do (vswap! st assoc-in [:allocas a] nm)
+                                             [['ptr (list :align (:align ly)) nm]])
+                                         (let [ci (cast-int ly)]
+                                           (store-cast! "start" ci nm {:ptr (get-in @st [:allocas a]) :align (:align ly)} (:size ly))
+                                           [[ci nm]])))
+                             (unsupported "aggregate parameter")))))
+                       (range 1 (inc (:args body)))))]
+      (doseq [b order]
+        (when-not (contains? (:skip @st) b)
+          (let [bb (if (zero? b) "start" (str "bb" b))]
+            (llbb! b)
+            (loop [b b]
+              (let [blk (nth blocks b)]
+                (doseq [s (:stmts blk)] (statement! bb s))
+                (when-let [m (let [r (terminator! bb b (:term blk))] (when (number? r) r))]
+                  (vswap! st update :skip conj m)
+                  (recur m)))))))
+      ;; the blocks no traversal reached (and no merge took) are codegen'd as `unreachable`, in index order
+      (doseq [b (range (count blocks))]
+        (when-not (or (some #{b} order) (contains? (:skip @st) b))
+          (let [nm (if (zero? b) "start" (str "bb" b))]
+            (llbb! b)
+            (emit! nm '(unreachable)))))
+      (let [params (if (:track-caller body) (conj params ['ptr (list :align 8) (symbol "%_loc")]) params)
+            params (if (indirect? (first lay)) (into [['ptr (list :sret (list 'array (:size (first lay)) 'i8)) (list :align (:align (first lay))) (symbol "%_0")]] params) params)
+            s @st
+            start-code (into (:start s) (get-in s [:bbs "start"]))
+            bbs (for [nm (:bb-order s)] (list* 'block (symbol (str "%" nm)) (if (= nm "start") start-code (get-in s [:bbs nm]))))
+            rl (first lay)]
+        (apply list 'llvm/define (body-symbol body) (llvm-type rl) params
+               (concat (when-let [ra (ret-attrs-of lt (:ret body) rl)] [:ret-attrs ra])
+                       (when (or (:personality s) (some :cleanup blocks)) [:personality ['ptr (symbol "g" "rust_eh_personality")]])
+                       [:body (vec bbs)]))))))

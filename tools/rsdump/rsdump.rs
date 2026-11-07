@@ -10,7 +10,9 @@
 //   rsdump tree  [--expr] -o DIR --edition E FILE...             DIR/FILE.tree, DIR/FILE.lines
 //   rsdump lines [--expr] --edition E FILE                       the lines on standard output
 //   rsdump rustc [--hir FILE] [--mir FILE] -- RUSTC-ARGS...      rustc, the crate's HIR and MIR
-//                                                                written after analysis (RR6)
+//                                                                written after analysis (RR6); RF1's modes
+//                                                                (mirdata.rs), RF4-RF5's --expanded, --resolve,
+//                                                                --std-names (front.rs)
 //
 // With --expr each FILE is an expression file of include! (RR6, SPEC RSS6): parsed as one
 // expression, as include! in an expression's place parses it (nothing stripped), the dump's tree
@@ -46,6 +48,8 @@ extern crate rustc_hir;
 extern crate rustc_hir_pretty;
 extern crate rustc_interface;
 extern crate rustc_lexer;
+extern crate rustc_metadata;
+extern crate rustc_abi;
 extern crate rustc_middle;
 extern crate rustc_parse;
 extern crate rustc_session;
@@ -60,6 +64,9 @@ use rustc_errors::emitter::SilentEmitter;
 use rustc_interface::interface::Compiler;
 use rustc_session::parse::ParseSess;
 use std::fmt::Write;
+
+mod front;
+mod mirdata;
 
 const PIN: &str = include_str!("RUSTC_VERSION");
 
@@ -159,6 +166,8 @@ struct T<'a> {
     names: Vec<String>,
     key: String,
     depth: usize,
+    /// RF4: spans of any file (the expanded crate's, std's macros'): other files' as (span "FILE" l1 c1 l2 c2 ctxt)
+    any: bool,
 }
 
 fn is_ident_start(b: u8) -> bool {
@@ -167,7 +176,7 @@ fn is_ident_start(b: u8) -> bool {
 
 impl<'a> T<'a> {
     fn new(s: &'a str, file: &'a str, mode: Mode) -> T<'a> {
-        T { s: s.as_bytes(), i: 0, file: file.as_bytes(), mode, out: String::new(), names: Vec::new(), key: String::new(), depth: 0 }
+        T { s: s.as_bytes(), i: 0, file: file.as_bytes(), mode, out: String::new(), names: Vec::new(), key: String::new(), depth: 0, any: false }
     }
     fn fail(&self, what: &str) -> ! {
         let a = self.i.saturating_sub(80);
@@ -262,6 +271,19 @@ impl<'a> T<'a> {
             if self.starts(b"..") {
                 self.i += 2;
                 self.emit(" :..");
+                continue;
+            }
+            if self.any && self.peek() == b'"' {
+                // RF4: a map with string keys (FormatArgs' names)
+                let k = self.string(b'"');
+                if !self.eat(b':') {
+                    self.fail("a map entry without a colon");
+                }
+                self.emit(" ");
+                self.clj(&k);
+                self.emit(" ");
+                self.value();
+                self.eat(b',');
                 continue;
             }
             let k = self.word();
@@ -403,11 +425,78 @@ impl<'a> T<'a> {
             }
         }
     }
+    /// RF4: the length of a span's file name at i (`FILE:l:c: l:c`), any file
+    fn any_span(&self) -> Option<usize> {
+        let mut j = self.i;
+        while j < self.s.len() && !b" ,()[]{}\"\n".contains(&self.s[j]) && self.s[j] != b':' {
+            j += 1;
+        }
+        if j == self.i || j >= self.s.len() || self.s[j] != b':' {
+            return None;
+        }
+        let r = &self.s[j..];
+        let mut k = 1;
+        let digits = |k: &mut usize| -> bool {
+            let st = *k;
+            while *k < r.len() && r[*k].is_ascii_digit() {
+                *k += 1;
+            }
+            *k > st
+        };
+        if !digits(&mut k) || r.get(k) != Some(&b':') { return None; }
+        k += 1;
+        if !digits(&mut k) || r.get(k) != Some(&b':') || r.get(k + 1) != Some(&b' ') { return None; }
+        k += 2;
+        if !digits(&mut k) || r.get(k) != Some(&b':') { return None; }
+        k += 1;
+        if !digits(&mut k) { return None; }
+        Some(j - self.i)
+    }
     fn value(&mut self) {
         self.ws();
         let c = self.peek();
-        if self.starts(self.file) && self.s.get(self.i + self.file.len()) == Some(&b':') {
+        if self.starts(self.file) && !self.file.is_empty() && self.s.get(self.i + self.file.len()) == Some(&b':') {
             return self.span();
+        }
+        if self.any {
+            if let Some(n) = self.any_span() {
+                let f = String::from_utf8(self.s[self.i..self.i + n].to_vec()).unwrap();
+                self.i += n + 1;
+                let mut ns = Vec::new();
+                for k in 0..4 {
+                    ns.push(self.num());
+                    if k == 1 { self.i += 2; } else if k < 3 { self.i += 1; }
+                }
+                let save = self.i;
+                self.ws();
+                let c = if self.peek() == b'(' && self.at(1) == b'#' {
+                    self.i += 2;
+                    let n = self.num();
+                    self.eat(b')');
+                    n
+                } else {
+                    self.i = save;
+                    "0".into()
+                };
+                let fq = clj_str(&f);
+                self.emit(&format!("(span {} {} {} {} {} {})", fq, ns[0], ns[1], ns[2], ns[3], c));
+                return;
+            }
+            if c == b'$' && is_ident_start(self.at(1)) {
+                self.i += 1;
+                let w = format!("${}", self.word());
+                if self.peek() == b'#' {
+                    self.i += 1;
+                    let n = self.num();
+                    self.emit("(id ");
+                    self.clj(&w);
+                    self.emit(&format!(" {}", n));
+                    self.emit(")");
+                } else {
+                    self.emit(&w);
+                }
+                return;
+            }
         }
         if self.starts(b"no-location") {
             self.i += 11;
@@ -602,6 +691,18 @@ impl<'a> T<'a> {
             }
         }
     }
+}
+
+/// RF4: the dump's transcoding with spans of any file (tools/rsdump/front.rs)
+pub fn transcode_any(text: &str, file: &str) -> String {
+    let mut t = T::new(text, file, Mode::Dump);
+    t.any = true;
+    t.value();
+    t.ws();
+    if t.i != t.s.len() {
+        t.fail("trailing text");
+    }
+    t.out
 }
 
 fn transcode(text: &str, file: &str, mode: Mode) -> String {
@@ -934,6 +1035,15 @@ fn write_file(path: &str, text: &str) {
 struct Compile {
     hir: Option<String>,
     mir: Option<String>,
+    mir_data: Option<String>,
+    census: Option<String>,
+    iface: Option<String>,
+    mono: Option<String>,
+    expanded: Option<String>,
+    resolve: Option<String>,
+    std_names: Option<String>,
+    typeck: Option<String>,
+    std_iface: Option<String>,
 }
 
 fn write_mir<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, w: &mut dyn std::io::Write) -> std::io::Result<()> {
@@ -986,6 +1096,18 @@ fn write_mir<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, w: &mut dyn std::io::Wri
 }
 
 impl Callbacks for Compile {
+    fn after_expansion<'tcx>(&mut self, _compiler: &Compiler, tcx: rustc_middle::ty::TyCtxt<'tcx>) -> Compilation {
+        if let Some(p) = &self.expanded {
+            write_file(p, &format!("{}\n", front::expanded(tcx)));
+        }
+        if let Some(p) = &self.std_names {
+            write_file(p, &front::std_names(tcx));
+        }
+        if let Some(p) = &self.std_iface {
+            write_file(p, &front::std_iface(tcx));
+        }
+        Compilation::Continue
+    }
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: rustc_middle::ty::TyCtxt<'tcx>) -> Compilation {
         if let Some(p) = &self.hir {
             let sm = tcx.sess.source_map();
@@ -1000,12 +1122,200 @@ impl Callbacks for Compile {
             write_mir(tcx, &mut out).unwrap_or_else(|e| panic!("rsdump: MIR of {p}: {e}"));
             write_file(p, &String::from_utf8_lossy(&out));
         }
+        if let Some(p) = &self.mono {
+            write_file(p, &mono_mir(tcx));
+        }
+        if let Some(p) = &self.resolve {
+            write_file(p, &front::resolve(tcx));
+        }
+        if let Some(p) = &self.iface {
+            write_file(p, &mirdata::iface(tcx));
+        }
+        if let Some(p) = &self.typeck {
+            write_file(p, &front::typeck(tcx));
+        }
+        if let Some(p) = &self.census {
+            write_file(p, &mirdata::census(tcx));
+        }
+        if let Some(p) = &self.mir_data {
+            write_file(p, &mir_data(tcx));
+        }
         Compilation::Continue
     }
 }
 
+/// `--mir-data FILE` (RF1, tools/rsdump/mirdata.rs): the bodies `write_mir` prints, as forms, in the
+/// same order and with the same choices of body
+fn mir_data<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
+    use rustc_hir::ConstContext;
+    use rustc_hir::def::DefKind;
+    use rustc_middle::mir::Const;
+    use rustc_middle::ty::{InstanceKind, TypeVisitableExt};
+    let w = mirdata::W { tcx, mono: false, allocs: Default::default(), seen: Default::default() };
+    let mut out = String::new();
+    for &def_id in tcx.mir_keys(()) {
+        let mut one = |b: &rustc_middle::mir::Body<'tcx>, ph: &str, ctfe: bool, out: &mut String| {
+            out.push_str(&w.body(b, ph, ctfe));
+            out.push('\n');
+        };
+        let mut render = |body: &rustc_middle::mir::Body<'tcx>, ph: &str, ctfe: bool, out: &mut String| {
+            one(body, ph, ctfe, out);
+            for p in tcx.promoted_mir(def_id) {
+                one(p, ph, ctfe, out);
+            }
+        };
+        if matches!(tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn)
+            && matches!(tcx.hir_body_const_context(def_id), Some(ConstContext::Const { .. }))
+        {
+            render(tcx.mir_for_ctfe(def_id), "ctfe", true, &mut out);
+        } else if tcx.is_const_fn(def_id) {
+            render(tcx.optimized_mir(def_id), "optimized", false, &mut out);
+            one(tcx.mir_for_ctfe(def_id), "ctfe", true, &mut out);
+        } else if let Some((val, ty)) = tcx.trivial_const(def_id) {
+            let name = {
+                let _g = rustc_middle::ty::print::ForcedImplGuard::new();
+                tcx.def_path_str(def_id)
+            };
+            out.push_str(&format!(
+                "(mir/trivial-const {{:def {} :ty {} :text {}}})\n",
+                mirdata::q(&name), w.ty(ty), mirdata::q(&format!("const {}: {} = const {};", name, ty, Const::Val(val, ty)))
+            ));
+        } else {
+            render(tcx.instance_mir(InstanceKind::Item(def_id.to_def_id())), "optimized", false, &mut out);
+        }
+    }
+    // the layouts of the monomorphic types of the locals
+    let mut tys = std::collections::BTreeMap::new();
+    for &def_id in tcx.mir_keys(()) {
+        let b = if tcx.is_const_fn(def_id) { tcx.optimized_mir(def_id) } else { tcx.instance_mir(InstanceKind::Item(def_id.to_def_id())) };
+        for d in b.local_decls.iter() {
+            collect_ty(tcx, d.ty, &mut tys);
+        }
+    }
+    out.push_str(&mirdata::layouts(tcx, &tys));
+    out
+}
+
+/// `--mono-mir FILE` (RF3's oracle for the collector): the mono items rustc collects (`collect_and_partition_mono_items`),
+/// each function instance's monomorphic MIR (`instance_mir` instantiated at its arguments) with its symbol, the callees of its
+/// calls resolved (`Instance::try_resolve`) with theirs, and the layouts of the locals' types
+fn mono_mir<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
+    use rustc_middle::mono::MonoItem;
+    use rustc_middle::ty::{self, TypeVisitableExt};
+    let w = mirdata::W { tcx, mono: true, allocs: Default::default(), seen: Default::default() };
+    let env = ty::TypingEnv::fully_monomorphized();
+    let parts = tcx.collect_and_partition_mono_items(());
+    let mut out = String::new();
+    let mut tys = std::collections::BTreeMap::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for cgu in parts.codegen_units {
+        for (item, data) in cgu.items_in_deterministic_order(tcx) {
+            let MonoItem::Fn(inst) = item else {
+                if let MonoItem::Static(d) = item {
+                    out.push_str(&format!("(mir/static {{:symbol {} :def {}}})\n", mirdata::q(&tcx.symbol_name(ty::Instance::mono(tcx, d)).name.to_string()), mirdata::q(&format!("{d:?}"))));
+                }
+                continue;
+            };
+            let sym = tcx.symbol_name(inst).name.to_string();
+            if !seen.insert(sym.clone()) {
+                continue;
+            }
+            if matches!(inst.def, ty::InstanceKind::Intrinsic(_)) || (matches!(inst.def, ty::InstanceKind::Item(d) if !tcx.is_mir_available(d))) {
+                out.push_str(&format!("(mir/external {{:symbol {} :def {}}})\n", mirdata::q(&sym), mirdata::q(&format!("{inst}"))));
+                continue;
+            }
+            let body = tcx.instance_mir(inst.def);
+            let mono = inst.instantiate_mir_and_normalize_erasing_regions(tcx, env, ty::EarlyBinder::bind(tcx, body.clone()));
+            for d in mono.local_decls.iter() {
+                collect_ty(tcx, d.ty, &mut tys);
+            }
+            let _ = data;
+            out.push_str(&w.body_sym(&mono, "optimized", false, Some(&sym)));
+            out.push('\n');
+        }
+    }
+    let seen: Vec<_> = w.seen.borrow().values().copied().collect();
+    for t in seen {
+        collect_ty(tcx, t, &mut tys);
+    }
+    out.push_str(&mirdata::layouts(tcx, &tys));
+    out.push_str(&langsyms(tcx));
+    out.push_str(&entry(tcx));
+    out
+}
+
+/// `(mir/entry {:main S :lang-start S :sigpipe N})`: what `maybe_create_entry_wrapper` makes the C `main` of
+fn entry<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
+    use rustc_hir::attrs::lang_items::LangItem as L;
+    use rustc_middle::ty::{self, Instance};
+    let Some((def_id, et)) = tcx.entry_fn(()) else { return String::new() };
+    let sigpipe = match et {
+        rustc_session::config::EntryFnType::Main { sigpipe } => sigpipe,
+    };
+    let main_i = Instance::mono(tcx, def_id);
+    let ret = tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip().skip_binder().output();
+    let start = tcx.require_lang_item(L::Start, rustc_span::DUMMY_SP);
+    let start_i = Instance::expect_resolve(tcx, ty::TypingEnv::fully_monomorphized(), start, tcx.mk_args(&[ret.into()]), rustc_span::DUMMY_SP);
+    format!("(mir/entry {{:main {} :lang-start {} :sigpipe {}}})\n", mirdata::q(&tcx.symbol_name(main_i).name.to_string()), mirdata::q(&tcx.symbol_name(start_i).name.to_string()), sigpipe)
+}
+
+/// `(mir/langsyms {"panic_const_add_overflow" "SYMBOL" ...})`: the symbols of the lang items codegen calls
+fn langsyms<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
+    use rustc_hir::attrs::lang_items::LangItem as L;
+    let items: &[(&str, L)] = &[
+        ("panic_const_add_overflow", L::PanicAddOverflow), ("panic_const_sub_overflow", L::PanicSubOverflow),
+        ("panic_const_mul_overflow", L::PanicMulOverflow), ("panic_const_div_overflow", L::PanicDivOverflow),
+        ("panic_const_rem_overflow", L::PanicRemOverflow), ("panic_const_neg_overflow", L::PanicNegOverflow),
+        ("panic_const_shr_overflow", L::PanicShrOverflow), ("panic_const_shl_overflow", L::PanicShlOverflow),
+        ("panic_const_div_by_zero", L::PanicDivZero), ("panic_const_rem_by_zero", L::PanicRemZero),
+        ("panic_bounds_check", L::PanicBoundsCheck), ("panic_cannot_unwind", L::PanicCannotUnwind),
+        ("panic_in_cleanup", L::PanicInCleanup), ("panic_null_pointer_dereference", L::PanicNullPointerDereference),
+        ("panic_null_reference_constructed", L::PanicNullReferenceConstructed),
+        ("panic_misaligned_pointer_dereference", L::PanicMisalignedPointerDereference),
+        ("eh_personality", L::EhPersonality),
+    ];
+    let mut o = String::from("(mir/langsyms {");
+    for (n, l) in items {
+        if let Some(d) = tcx.lang_items().get(*l) {
+            let i = rustc_middle::ty::Instance::mono(tcx, d);
+            o.push_str(&format!("{} {} ", mirdata::q(n), mirdata::q(&tcx.symbol_name(i).name.to_string())));
+        }
+    }
+    o.push_str("})\n");
+    o
+}
+
+/// a type and the types its layout is made of (pointees, elements, fields), for the `mir/layouts` table
+fn collect_ty<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, t: rustc_middle::ty::Ty<'tcx>, tys: &mut std::collections::BTreeMap<String, rustc_middle::ty::Ty<'tcx>>) {
+    use rustc_middle::ty::{self, TypeVisitableExt};
+    let t = tcx.erase_and_anonymize_regions(t);
+    if t.has_param() || t.has_non_region_infer() || t.has_aliases() {
+        return;
+    }
+    let key = format!("{}", ty::print::with_no_trimmed_paths!(t));
+    if tys.contains_key(&key) {
+        return;
+    }
+    tys.insert(key, t);
+    match *t.kind() {
+        ty::Ref(_, e, _) | ty::RawPtr(e, _) | ty::Slice(e) | ty::Array(e, _) => collect_ty(tcx, e, tys),
+        ty::Tuple(ts) => {
+            for x in ts.iter() {
+                collect_ty(tcx, x, tys);
+            }
+        }
+        ty::Adt(d, args) if !d.is_enum() => {
+            for f in d.all_fields() {
+                let ft = f.ty(tcx, args).skip_norm_wip();
+                collect_ty(tcx, ft, tys);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn compile(args: &[String]) -> ! {
-    let mut c = Compile { hir: None, mir: None };
+    let mut c = Compile { hir: None, mir: None, mir_data: None, census: None, iface: None, mono: None, expanded: None, resolve: None, std_names: None, typeck: None, std_iface: None };
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -1015,6 +1325,42 @@ fn compile(args: &[String]) -> ! {
             }
             "--mir" => {
                 c.mir = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--mono-mir" => {
+                c.mono = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--iface" => {
+                c.iface = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--census" => {
+                c.census = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--expanded" => {
+                c.expanded = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--resolve" => {
+                c.resolve = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--std-names" => {
+                c.std_names = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--std-iface" => {
+                c.std_iface = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--typeck" => {
+                c.typeck = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--mir-data" => {
+                c.mir_data = args.get(i + 1).cloned();
                 i += 2
             }
             "--" => {
@@ -1031,7 +1377,7 @@ fn compile(args: &[String]) -> ! {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: rsdump dump [--full] [--expr] -o DIR --edition E [--helper-hash H] FILE...\n       rsdump tree [--expr] -o DIR --edition E FILE...\n       rsdump lines [--expr] --edition E FILE\n       rsdump rustc [--hir FILE] [--mir FILE] -- RUSTC-ARGS...");
+    eprintln!("usage: rsdump dump [--full] [--expr] -o DIR --edition E [--helper-hash H] FILE...\n       rsdump tree [--expr] -o DIR --edition E FILE...\n       rsdump lines [--expr] --edition E FILE\n       rsdump rustc [--hir FILE] [--mir FILE] [--expanded FILE] [--resolve FILE] [--std-names FILE] ... -- RUSTC-ARGS...");
     std::process::exit(2)
 }
 

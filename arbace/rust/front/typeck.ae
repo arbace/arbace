@@ -1,0 +1,2124 @@
+;; Ported from rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's
+;; rust-src-1.99.1-r0, pinned by tools/rsdump/apks.sha256): the first slice of compiler/rustc_hir_typeck/src/
+;; {expr.rs (check_expr_with_expectation and its kinds: literals, paths, calls, operators, blocks, if, loops, match,
+;; struct expressions, fields, casts, references), expectation.rs, coercion.rs (coerce: identity, never to any, reborrows,
+;; the arrays' unsizing behind references; CoerceMany's LUB for if, match and blocks), callee.rs (calls of fn items and fn
+;; pointers), op.rs (is_builtin_binop: scalars), place_op.rs (builtin indexing of arrays and slices), pat.rs (bindings,
+;; tuples, structs, literals, default binding modes), fallback.rs (integer and float fallback), writeback.rs}, and
+;; compiler/rustc_infer/src/infer/ (type, integer and float variables, unification without regions);
+;; rustc is dual-licensed MIT OR Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.typeck
+  "RF9's first slice (doc/rust/FRONTEND-SURVEY.md, \"As built: RF9a\"): type checking of bodies over RF7's collection
+  (arbace.rust.front.collect, in its with-crate context): each body's expressions' types (node types, before
+  adjustments), their adjustments, the bindings' types and modes, as the helper's --typeck writes rustc's TypeckResults,
+  so RF9's judge compares fact by fact. Regions are erased (RFS5). What the slice does not check yet (method calls through
+  traits, closures, operators through traits, std's functions) is the type {unknown}, a fact that cannot be equal.
+
+    (check-crate)    within collect/with-crate: [{:owner :span :kind :ty :adj} ...] and [{:owner :span :ty :mode :pat true} ...]"
+  (:require [arbace.rust.front.collect :as c] [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- head [x] (when (seq? x) (first x)))
+
+(declare fn-traits)
+
+;; ---------------------------------------------------------------------------------------------
+;; Inference variables (rustc_infer: ty, int and float variables; unification with regions erased)
+
+(def ^:dynamic *vars* nil)
+(def ^:dynamic *budget* nil)   ; atom: the impl candidates a body may still try (a runaway selection gives up, its facts unknown)   ; atom: id -> {:kind :ty|:int|:float :val TY}
+
+(def ^:dynamic *next-var* nil)   ; atom: the next variable's id (never reused: a rolled-back variable may still be named)
+
+(defn- fresh [k] (let [id (swap! *next-var* inc)] (swap! *vars* assoc id {:kind k}) [:infer k id]))
+(defn- tvar? [t] (and (vector? t) (= :infer (first t))))
+
+(declare normalize)
+
+(defn- shallow
+  "A type with its variables resolved at the top; a projection whose self type is known normalized (the obligation
+  rustc registers, solved when it can be)"
+  [t]
+  (cond (tvar? t) (if-let [v (:val (get @*vars* (nth t 2)))] (shallow v) t)
+        (and (vector? t) (= :proj (first t)))
+        (let [self (let [x (first (nth t 2))] (if (tvar? x) (if-let [v (:val (get @*vars* (nth x 2)))] v x) x))]
+          (if (tvar? self) t (let [n (normalize t)] (if (= n t) t (shallow n)))))
+        :else t))
+
+(defn- deep [t]
+  (let [t (shallow t)]
+    (cond (tvar? t) t
+          (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (deep %) (map? %) (into {} (for [[k v] %] [k (deep v)])) :else %) (rest t)))
+          (vector? t) (mapv deep t)
+          :else t)))
+
+(def ^:private int-tys #{:int :uint})
+(def ^:private unit [:tuple []])
+
+(defn- generalize
+  "A type variable's value as generalization makes it (generalize.rs): each free region a fresh region variable, so two
+  values of one written type are not the same type (the reborrows CoerceMany's LUB adds); bound regions kept"
+  [t]
+  (cond (and (vector? t) (#{:re-static :re-early :re-erased :re-var} (first t))) [:re-var (swap! *next-var* inc)]
+        (and (vector? t) (= :infer (first t))) t
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (generalize %) (map? %) (into {} (for [[k v] %] [k (generalize v)])) :else %) (rest t)))
+        (vector? t) (mapv generalize t)
+        :else t))
+
+(defn- fudge
+  "fudge_inference_if_ok's result: the region variables in it fresh ones ('static and named regions kept)"
+  [t]
+  (cond (and (vector? t) (#{:re-erased :re-var} (first t))) [:re-var (swap! *next-var* inc)]
+        (and (vector? t) (= :infer (first t))) t
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (fudge %) (map? %) (into {} (for [[k v] %] [k (fudge v)])) :else %) (rest t)))
+        (vector? t) (mapv fudge t)
+        :else t))
+
+(defn- bind! [v t] (swap! *vars* assoc-in [(nth v 2) :val] t) true)
+
+(declare unify)
+
+(defn- unify-all [as bs] (and (= (count as) (count bs)) (every? true? (map unify as bs))))
+
+(declare normalize)
+
+(defn unify
+  "Equate two types (regions ignored): true when they unify, binding variables; a projection normalized first"
+  [a b]
+  (let [a (shallow a) b (shallow b)
+        a (if (= :proj (first a)) (normalize a) a)
+        b (if (= :proj (first b)) (normalize b) b)]
+    (cond
+      (= a b) true
+      (or (= [:unknown] a) (= [:unknown] b)) true
+      (c/region? a) true
+      (and (tvar? a) (= :ty (second a))) (bind! a b)
+      (and (tvar? b) (= :ty (second b))) (bind! b a)
+      (and (tvar? a) (tvar? b)) (if (= (second a) (second b)) (bind! a b) false)
+      (and (tvar? a) (= :int (second a))) (if (int-tys (first b)) (bind! a b) false)
+      (and (tvar? b) (= :int (second b))) (if (int-tys (first a)) (bind! b a) false)
+      (and (tvar? a) (= :const (second a))) (bind! a b)
+      (and (tvar? b) (= :const (second b))) (bind! b a)
+      (and (tvar? a) (= :float (second a))) (if (= :float (first b)) (bind! a b) false)
+      (and (tvar? b) (= :float (second b))) (if (= :float (first a)) (bind! b a) false)
+      (not= (first a) (first b)) false
+      :else
+      (case (first a)
+        :adt (and (= (second a) (second b)) (unify-all (nth a 2) (nth b 2)))
+        :ref (and (= (nth a 2) (nth b 2)) (unify (nth a 3) (nth b 3)))
+        :ptr (and (= (nth a 1) (nth b 1)) (unify (nth a 2) (nth b 2)))
+        (:slice) (unify (second a) (second b))
+        :array (and (unify (second a) (second b)) (do (unify (nth a 2) (nth b 2)) true))
+        :tuple (unify-all (second a) (second b))
+        :fndef (and (= (second a) (second b)) (unify-all (nth a 2) (nth b 2)))
+        :proj (and (= (second a) (second b)) (unify-all (nth a 2) (nth b 2)))
+        ;; a trait object: its principal's and projections' arguments, its auto traits; its region ignored
+        :dyn (let [x (second a) y (second b)]
+               (and (= (first (:principal x)) (first (:principal y)))
+                    (= (set (:autos x)) (set (:autos y)))
+                    (= (map first (:projections x)) (map first (:projections y)))
+                    (unify-all (vec (second (:principal x))) (vec (second (:principal y))))
+                    (every? true? (map (fn [[_ as t] [_ bs u]] (and (unify-all (vec as) (vec bs)) (unify t u))) (:projections x) (:projections y)))))
+        (= a b)))))
+
+(declare holds? impls-for normalize)
+
+;; ---------------------------------------------------------------------------------------------
+;; The facts
+
+(def ^:dynamic *owner* nil)
+(def ^:dynamic *facts* nil)  ; atom [fact]
+(def ^:dynamic *env* nil)    ; the bindings in scope: [{name type}] innermost last
+(def ^:dynamic *ret* nil)    ; the body's return type
+(def ^:dynamic *loops* nil)
+(def ^:dynamic *mutable-place* false)   ; checking an assignment's left side (IndexMut, &mut autoref)  ; atom: the enclosing loops' break types, innermost first
+
+(def ^:private kind-names
+  {:lit "Lit" :path "Path" :call "Call" :method "MethodCall" :binary "Binary" :unary "Unary" :addr-of "AddrOf"
+   :cast "Cast" :field "Field" :index "Index" :tup "Tup" :array "Array" :repeat "Repeat" :assign "Assign"
+   :assign-op "AssignOp" :block "Block" :if "If" :loop "Loop" :match "Match" :ret "Ret" :break "Break"
+   :continue "Continue" :struct "Struct" :closure "Closure" :let "Let" :drop-temps "DropTemps" :type-relative "Path"
+   :qpath "Path" :type "Type"})
+
+(defn- record! [e ty & [adj]]
+  ;; a desugaring's lang item path is no fact of rustc's (its span is the desugared expression's)
+  (when (and (vector? (:span e)) (not (:synthesized e)) (not (and (= :path (:kind e)) (:lang (:path e)))))
+    (swap! *facts* conj {:owner *owner* :span (:span e) :kind (get kind-names (:kind e) (str (:kind e))) :ty ty :adj (or adj [])}))
+  ty)
+
+(defn- adjust!
+  "Adjustments recorded on an expression after the fact (coercions, autoderef of a field's base)"
+  [e adj]
+  (when (seq adj)
+    (swap! *facts* (fn [fs] (let [i (last (keep-indexed (fn [i f] (when (and (= (:span f) (:span e)) (= (:kind f) (get kind-names (:kind e)))) i)) fs))]
+                              (if i (update-in fs [i :adj] into adj) fs))))))
+
+(def ^:dynamic *anon-consts* nil)   ; atom: the body owner's next anonymous constant's disambiguator
+
+(defn- array-lens
+  "A HIR type's array lengths in the def collector's order (an element type's before its array's)"
+  [t]
+  (cond (and (map? t) (= :array (:kind t))) (concat (array-lens (:ty t)) [(:len t)])
+        (map? t) (mapcat array-lens (vals (dissoc t :len)))
+        (sequential? t) (mapcat array-lens t)
+        :else nil))
+
+(defn- ty-consts
+  "A HIR type's anonymous constants: its array lengths (an element type's before its array's) and its paths' const
+  arguments"
+  [t]
+  (cond (and (map? t) (= :array (:kind t))) (concat (ty-consts (:ty t)) [(:len t)])
+        (and (map? t) (map? (:const t)) (not (:node t))) [(:const t)]
+        (map? t) (mapcat ty-consts (vals (dissoc t :len)))
+        (sequential? t) (mapcat ty-consts t)
+        :else nil))
+
+(def ^:dynamic *anon-order* nil)   ; {hir-id disambiguator}: the body's anonymous constants in the def collector's order
+
+(defn- body-const-order
+  "The anonymous constants of a body (repeat counts, array lengths, const arguments; a closure's are its own) numbered in
+  the def collector's order from BASE: the body's own fragment first, then each macro expansion's (as body-children
+  orders closures), each in lowering order"
+  [body base]
+  (let [acc (java.util.ArrayList.)]
+    (letfn [(walk [x expn]
+              (cond
+                (map? x) (let [expn (or expn (when (or (= :foreign (:span x)) (:expansion x)) (or (:hir-id x) [0 0])))]
+                           (cond (and (= :expr (:node x)) (= :closure (:kind x))) nil
+                                 (and (= :expr (:node x)) (= :repeat (:kind x))) (do (walk (:expr x) expn) (.add acc [(:count x) expn]))
+                                 (and (= :array (:kind x)) (contains? x :len)) (do (walk (:ty x) expn) (.add acc [(:len x) expn]))
+                                 (and (map? (:const x)) (not (:node x))) (.add acc [(:const x) expn])
+                                 :else (doseq [v (vals x)] (walk v expn))))
+                (sequential? x) (doseq [v x] (walk v expn))
+                :else nil))]
+      (walk body nil))
+    (into {} (map-indexed (fn [i [n _]] [(:hir-id n) (+ (long base) i)])
+                          (sort-by (fn [[n expn]] [(if expn 1 0) (if expn (long (second expn)) 0) (let [h (:hir-id n)] (if h (long (second h)) -1))])
+                                   (vec acc))))))
+
+(declare check-expr coerce! solve-obligations! fallback! print-fact-ty mut-borrow! unadjust! deduced-kind scalar?)
+(def ^:dynamic *obligations* nil)   ; atom: the clauses the instantiated items' predicates registered ([:trait [D ARGS]], [:proj AD ARGS TERM])
+(def ^:dynamic *select-cache* nil)
+(def ^:dynamic *norm-cache* nil)
+(def ^:dynamic *casts* nil)
+(def ^:dynamic *scalar-fixes* nil)
+(def ^:dynamic *closures* nil)        ; atom: the body's closures {:text :node :env :kind}
+(def ^:dynamic *closure-calls* nil)   ; atom: the calls of closure values [callee closure-text]
+
+(defn- anon-const!
+  "An anonymous constant (an array length, a repeat count, a const argument): its own typeck root `OWNER::{constant#K}`
+  types its literal or path usize; written in the body, the body's results have it untyped (`?`)"
+  [x in-body?]
+  (when *anon-consts*
+    (let [k (if (and in-body? *anon-order*) (get *anon-order* (:hir-id x) -1) (dec (long (swap! *anon-consts* inc))))
+          x (if (and (= :block (:kind x)) (empty? (:stmts (:block x)))) (:expr (:block x)) x)
+          kind (get kind-names (:kind x))]
+      (cond
+        (and (vector? (:span x)) (#{"Lit" "Path"} kind) (>= (long k) 0))
+        (do (swap! *facts* conj {:owner (str *owner* "::{constant#" k "}") :span (:span x) :kind kind :ty [:uint "usize"] :adj []})
+            (when in-body? (swap! *facts* conj {:owner *owner* :span (:span x) :kind kind :ty "?" :adj []})))
+        ;; RF9b: an expression (`[u8; (B / 7 + 1) as usize]`): its own typeck root, checked against usize with inference
+        ;; variables of its own, its facts resolved there; written in the body, each of its expressions untyped there
+        (and (map? x) (:node x) (>= (long k) 0))
+        (let [own (str *owner* "::{constant#" k "}")
+              nested (atom [])]
+          (binding [*vars* (atom {}) *facts* nested *owner* own *env* [{}] *loops* nil *obligations* (atom [])
+                    *anon-order* nil *select-cache* (atom {}) *norm-cache* (atom {}) *casts* (atom []) *scalar-fixes* (atom [])]
+            (try (let [t (check-expr x [:uint "usize"])] (coerce! x t [:uint "usize"])) (catch Throwable _ nil))
+            (solve-obligations!) (fallback!) (solve-obligations!)
+            (reset! nested (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %)))
+                                             (update :adj (fn [as] (mapv (fn [[k t]] [k (if (string? t) t (print-fact-ty t))]) (or as []))))))
+                                 @nested)))
+          (swap! *facts* into @nested)
+          (when in-body?
+            (let [acc (java.util.ArrayList.)]
+              (letfn [(walk [y] (cond (map? y) (do (when (and (= :expr (:node y)) (vector? (:span y)) (get kind-names (:kind y))
+                                                              (not (:synthesized y)))
+                                                     (.add acc {:owner *owner* :span (:span y) :kind (get kind-names (:kind y)) :ty "?" :adj []}))
+                                                   (when-not (= :closure (:kind y)) (doseq [v (vals y)] (walk v))))
+                                      (sequential? y) (doseq [v y] (walk v))
+                                      :else nil))]
+                (walk x))
+              (swap! *facts* into acc))))
+        :else nil))))
+
+(defn- lookup-local [nm] (some #(get % nm) (rseq *env*)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types of definitions, instantiated with fresh variables
+
+(defn- params-of
+  "A definition's generic parameters, its parents' first (std's: an impl's before its items')"
+  [def]
+  (if (number? def)
+    (c/all-params (c/generics-of def))
+    (let [g (c/generics-any def)]
+      (concat (when (pos? (long (:parent-count g))) (when-let [p (c/path-parent def)] (params-of p))) (:params g)))))
+
+(defn- fresh-args [def]
+  (vec (for [p (params-of def)]
+         (case (:kind p) :lifetime [:re-var (swap! *next-var* inc)] :const (fresh :const) (fresh :ty)))))
+
+(defn- erase
+  "A type's anonymous regions erased; 'static and the named ones kept (coercion's no-op case compares them)"
+  [t]
+  (cond (= [:re-static] t) t
+        (and (vector? t) (= :re-var (first t))) t
+        (and (vector? t) (= :re-bound (first t)) (= :inner (nth t 2 nil))) t
+        (and (vector? t) (= :re-early (first t)) (not= "'_" (nth t 2))) t
+        (and (vector? t) (= :re-bound (first t)) (string? (second t)) (not= "'_" (second t))) [:re-bound (second t)]
+        (c/region? t) [:re-erased]
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (erase %) (map? %) (into {} (for [[k v] %] [k (erase v)])) :else %) (rest t)))
+        (vector? t) (mapv erase t)
+        :else t))
+
+(defn- infer-holes
+  "A type written in a body: `_` and the arguments a value path leaves out are inference variables"
+  [t]
+  (cond (and (vector? t) (= :err (first t)) (or (= "_" (second t)) (str/starts-with? (str (second t)) "missing"))) (fresh :ty)
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (infer-holes %) (map? %) (into {} (for [[k v] %] [k (infer-holes v)])) :else %) (rest t)))
+        (vector? t) (mapv infer-holes t)
+        :else t))
+
+(defn- body-ty [t] (infer-holes (erase (c/lower-ty t))))
+
+(defn- fn-item-ty [def] [:fndef def (fresh-args def)])
+
+(declare deep-normalize)
+
+
+(defn- fn-clauses
+  "A function's own clauses as data ([:trait [D ARGS]] and [:proj AD ARGS TERM]), uninstantiated"
+  [d]
+  (if (number? d)
+    (if (#{"Fn" "AssocFn"} (:kind (c/def-of d))) (c/explicit-clauses d) [])
+    (vec (keep (fn [c] (case (head c)
+                         trait [:trait [(nth c 1) (mapv c/sty->ty (nth c 2))]]
+                         proj [:proj (nth c 1) (mapv c/sty->ty (nth c 2)) (c/sty->ty (nth c 3))]
+                         nil))
+               (:predicates (get (:fns c/*si*) d))))))
+
+(defn- register-obligations! [d args]
+  (when *obligations*
+    ;; a trait's method: its trait's `Self: Trait<..>` predicate first (predicates_of a trait item)
+    (let [tr (c/def-parent d)
+          n (cond (and (string? d) (get (:traits c/*si*) tr)) (count (:generics (get (:traits c/*si*) tr)))
+                  (and (number? d) (number? tr) (= "Trait" (:kind (c/def-of tr)))) (count (c/all-params (c/generics-of tr)))
+                  :else nil)]
+      (when (and n (>= (count args) n))
+        (swap! *obligations* conj [:trait [tr (vec (take n args))]])))
+    (doseq [cl (fn-clauses d)]
+      (swap! *obligations* conj (erase (c/subst cl (vec args)))))))
+
+(defn- instantiate-late
+  "instantiate_binder_with_fresh_vars: a signature's late-bound regions (anonymous or named, not those a trait object's
+  or fn pointer's binder inside binds) each a fresh region variable, the same region the same variable"
+  [sig]
+  (let [m (atom {})
+        late? (fn [r] (and (vector? r) (= :re-bound (first r)) (not= :inner (nth r 2 nil))))
+        f (fn f [x] (cond (late? x) (or (get @m x) (let [v [:re-var (swap! *next-var* inc)]] (swap! m assoc x v) v))
+                          (and (vector? x) (#{:fnptr :dyn} (first x))) x
+                          (and (vector? x) (keyword? (first x))) (into [(first x)] (map #(cond (vector? %) (f %) (map? %) (into {} (for [[k v] %] [k (f v)])) :else %) (rest x)))
+                          (vector? x) (mapv f x)
+                          (map? x) (into {} (for [[k v] x] [k (f v)]))
+                          :else x))]
+    (f sig)))
+
+(defn- sig-of
+  "A function item's or a constructor's signature, instantiated with its arguments (its clauses registered as
+  obligations, for the closures among its arguments)"
+  [[_ d args]]
+  (let [sig (erase (instantiate-late (c/subst* (select-keys (c/fndef-sig d) [:inputs :output]) (vec args))))]
+    (register-obligations! d args)
+    {:inputs (mapv deep-normalize (:inputs sig)) :output (deep-normalize (:output sig))}))
+
+(defn- adt-fields
+  "A struct's or a variant's fields: [[name type] ...] with the ADT's arguments substituted (std's from its interface: VID
+  the struct's or the variant's path)"
+  [vid args]
+  (if (string? vid)
+    (let [a (get (:adts c/*si*) vid)
+          v (if a (first (:variants a)) (some #(when (= vid (:path %)) %) (:variants (get (:adts c/*si*) (c/path-parent vid)))))]
+      (vec (for [[n t] (:fields v)] [n (erase (c/subst (c/sty->ty t) (vec args)))])))
+  (let [fs (filter #(and (= vid (:parent %)) (= "Field" (:kind %))) (c/defs))]
+    (vec (for [f fs] [(second (:data f)) (erase (c/subst (c/type-of (:id f)) (vec args)))])))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Impls and method probing (method/probe.rs: the autoderef steps, by value then autoref, inherent before trait
+;; candidates; method/confirm.rs: the receiver's adjustments, the method's arguments)
+
+(defn- snapshot [] @*vars*)
+(defn- rollback! [s] (reset! *vars* s))
+
+(defn- try-unify
+  "unify in a snapshot: the bindings kept only on success"
+  [a b]
+  (let [s (snapshot)] (or (unify a b) (do (rollback! s) false))))
+
+(defn- self-key [t]
+  (let [t (shallow t)]
+    (case (first t)
+      :adt (when (string? (second t)) (second t))
+      (:int :uint :float) (str "prim:" (second t))
+      :bool "prim:bool" :char "prim:char" :str "prim:str" :slice "prim:slice" :array "prim:array" :ptr "prim:ptr"
+      :ref "prim:ref" :tuple "prim:tuple"
+      :dyn (str "dyn:" (first (:principal (second t))))
+      nil)))
+
+(defn- std-impl-instance
+  "A std impl instantiated: [impl-path args self-ty trait-ref]"
+  [ip]
+  (let [m (get (:impls c/*si*) ip)
+        args (fresh-args ip)]
+    [ip args (erase (c/subst (c/sty->ty (:self m)) args))
+     (when-let [t (:trait m)] [(nth t 1) (erase (c/subst (mapv c/sty->ty (nth t 2)) args))])]))
+
+(defn- local-impls
+  "The crate's impls: [id self-ty trait-ref] instantiated with fresh arguments"
+  [trait?]
+  (for [d (c/defs) :when (str/starts-with? (str (:kind d)) "Impl")
+        :let [[self-ty tr] (c/impl-header (:id d))]
+        :when (if trait? tr (nil? tr))]
+    (let [args (fresh-args (:id d))]
+      [(:id d) args (erase (c/subst self-ty args)) (when tr [(first tr) (erase (c/subst (second tr) args))])])))
+
+(defn- impl-item
+  "An impl's item named NM: [def kind] (std's or the crate's)"
+  [impl nm]
+  (if (number? impl)
+    (some (fn [d] (when (and (= impl (:parent d)) (= nm (second (:data d)))) [(:id d) (:kind d)])) (c/defs))
+    (some (fn [[n k p]] (when (= n nm) [p k])) (:items (get (:impls c/*si*) impl)))))
+
+(defn- trait-item [tr nm]
+  (if (number? tr)
+    (some (fn [d] (when (and (= tr (:parent d)) (= nm (second (:data d)))) [(:id d) (:kind d)])) (c/defs))
+    (some (fn [[n k p]] (when (= n nm) [p k])) (:items (get (:traits c/*si*) tr)))))
+
+(defn- impl-clauses
+  "An impl's own clauses instantiated: [TRAIT ARGS] for a trait clause, [:proj AD ARGS TERM] for a projection"
+  [ip args]
+  (if (number? ip)
+    (vec (keep (fn [c] (case (first c)
+                         :trait (let [[d as] (second c)] [d (erase (c/subst as args))])
+                         :proj (erase (c/subst c args))
+                         nil))
+               (c/explicit-clauses ip)))
+    (vec (keep (fn [c] (case (head c)
+                         trait [(nth c 1) (erase (c/subst (mapv c/sty->ty (nth c 2)) args))]
+                         proj [:proj (nth c 1) (erase (c/subst (mapv c/sty->ty (nth c 2)) args)) (erase (c/subst (c/sty->ty (nth c 3)) args))]
+                         nil))
+               (:predicates (get (:impls c/*si*) ip))))))
+
+(defn impl-predicates-hold?
+  "An impl's clauses: its trait clauses proven, its projection clauses' terms unified with the normalized projections
+  (which binds the impl's parameters that only they determine: Map's B by its closure's output)"
+  [ip args]
+  (every? (fn [c]
+            (if (= :proj (first c))
+              (let [[_ ad as term] c n (normalize [:proj ad as])]
+                (if (= :proj (first n)) true (unify n term)))
+              (holds? c)))
+          (impl-clauses ip args)))
+
+(declare has-var? param-env alias-implements? deep-normalize)
+
+(defn- mentions-param?
+  "A type with a type parameter (or an alias, an opaque type) in it: where clauses may apply to it"
+  [t]
+  (let [t (shallow t)]
+    (cond (and (vector? t) (#{:param :proj :opaque} (first t))) true
+          (tvar? t) false
+          (vector? t) (boolean (some #(cond (vector? %) (mentions-param? %) (map? %) (some mentions-param? (vals %)) :else false) t))
+          :else false)))
+
+(defn- erase-regions [t]
+  (cond (c/region? t) [:re-erased]
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (erase-regions %) (map? %) (into {} (for [[k v] %] [k (erase-regions v)])) :else %) (rest t)))
+        (vector? t) (mapv erase-regions t)
+        :else t))
+
+(def ^:dynamic *depth* 0)
+(def ^:dynamic *profile* nil)   ; TYPECK_PROFILE: atom, the impl candidates tried per [trait self-kind vars? evaluating]
+(def ^:dynamic *evaluating* false)   ; within holds?'s evaluation, whose bindings are rolled back: the first impl suffices
+
+(defn- impls-for
+  "The impls (inherent, or of TRAIT) whose self type unifies with T (and the trait's other arguments with TARGS when
+  given) and whose clauses hold: [impl args trait-ref], the first kept bound (an accepted program's impl is the one rustc
+  selected)"
+  [t trait & [targs]]
+  (let [cands (if trait
+                (concat (for [x (local-impls true) :when (= trait (first (nth x 3)))] x)
+                        ;; std's: those of the self type's key and the blanket ones (all when the type has no key)
+                        (let [k (self-key t) by (get (:trait-impls-by c/*si*) trait)]
+                          (for [ip (let [st (shallow t)]
+                                     (cond (and (= :adt (first st)) (number? (second st))) (get by :blanket)   ; the crate's own type
+                                           ;; an integer (float) variable: the integral (floating) types' impls
+                                           (and (tvar? st) (#{:int :float} (second st)))
+                                           (concat (for [k (keys by) :when (string? k)
+                                                         :when (if (= :int (second st)) (re-matches #"prim:[iu](8|16|32|64|128|size)" k) (re-matches #"prim:f(16|32|64|128)" k))
+                                                         ip (get by k)] ip)
+                                                   (get by :blanket))
+                                           k (concat (get by k) (get by :blanket))
+                                           :else (get (:trait-impls c/*si*) trait)))]
+                            (std-impl-instance ip))))
+                (concat (local-impls false)
+                        (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))]
+    ;; candidate assembly and winnowing (select.rs): a goal with inference variables in it that two impls match is
+    ;; ambiguous (no impl selected, nothing bound; the obligation stays pending), else the one impl that matches
+    (let [vars? (or (has-var? t) (some has-var? targs))
+          ;; where-clause candidates (assemble_candidates_from_caller_bounds) win over impls: the parameter environment's
+          ;; clauses of the trait whose self type is this one
+          st (shallow t)
+          dst (when (and trait (mentions-param? st)) (erase-regions (deep st)))
+          envs (when dst
+                 (vec (filter (fn [cl] (and (= :trait (first cl)) (= trait (first (second cl))) (= dst (erase-regions (deep (first (second (second cl))))))
+                                            (let [s (snapshot) ok (or (nil? targs) (unify-all (vec (rest (second (second cl)))) (vec (take (dec (count (second (second cl)))) targs))))]
+                                              (rollback! s) ok)))
+                              (param-env))))
+          try! (fn [[ip args self tr]]
+                 (when *profile* (swap! *profile* update [trait (first (shallow t)) vars? *evaluating*] (fnil inc 0)))
+                 (and (or (nil? *budget*) (pos? (long (swap! *budget* dec))))
+                      (unify self t)
+                      (or (nil? targs) (unify-all (vec (rest (second tr))) (vec (take (dec (count (second tr))) targs))))
+                      (impl-predicates-hold? ip args)))]
+      (let [key (when (and vars? *select-cache* (not *evaluating*) (zero? (long *depth*))) [trait (deep t) (deep targs)])]
+       (cond
+        (= 1 (count (distinct envs)))
+        (let [cl (first envs)] (when targs (unify-all (vec (rest (second (second cl)))) (vec (take (dec (count (second (second cl)))) targs)))) [:env [] (second cl)])
+        (seq envs) :ambiguous
+        :else
+       (if (and key (contains? @*select-cache* key))
+        (get @*select-cache* key)
+        (let [r
+      (loop [cs cands]
+        (when-let [[ip args _ tr :as c] (first cs)]
+          (let [s (snapshot)]
+            (if (try! c)
+              (if (or (not vars?) *evaluating*)
+                [ip args tr]
+                (let [after (snapshot)
+                      other (some (fn [c2] (when (not= ip (first c2))
+                                             (rollback! s)
+                                             (let [ok (try! c2)] (rollback! s) (when ok c2))))
+                                  (rest cs))]
+                  (if other
+                    (do (rollback! s) (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "ambiguous" trait (deep t) (deep targs) ip (first other)))) :ambiguous)
+                    (do (reset! *vars* after) [ip args tr]))))
+              (do (rollback! s) (recur (rest cs)))))))]
+          ;; an ambiguous or failed goal's answer is the same while its variables are as they are (the evaluation
+          ;; cache's role)
+          (when (and key (not (vector? r))) (swap! *select-cache* assoc key r))
+          ;; a selected impl's nested obligations with variables in them stay pending (confirmation's nested
+          ;; obligations: `U: From<T>` of the blanket Into impl binds T's variables once it is selected)
+          (when (and (vector? r) *obligations* (not *evaluating*) (number? (long *depth*)) (zero? (long *depth*)))
+            (let [[ip args _] r]
+              (when (not= :env ip)
+                (doseq [c (impl-clauses ip args)]
+                  (let [o (if (= :proj (first c)) c [:trait c])]
+                    (when (and (has-var? (if (= :proj (first c)) (nth c 2) (second c)))
+                               (not (#{(c/lang "sized") (c/lang "meta_sized")} (first (second o)))))
+                      (swap! *obligations* conj o)))))))
+          r)))))))
+
+(defn- callable-output
+  "A closure's, function item's or function pointer's return type (FnOnce::Output's builtin impl)"
+  [self]
+  (case (first self)
+    :closure (:output (nth self 2))
+    :fndef (:output (sig-of self))
+    :fnptr (erase (:output (second self)))
+    nil))
+
+(defn- trait-supers
+  "A trait clause's supertrait clauses (elaborate.rs: the trait's own `Self: Super<..>` clauses with its arguments)"
+  [[tr args]]
+  (let [cs (if (number? tr)
+             (try (c/explicit-clauses tr) (catch Throwable _ []))
+             (vec (keep (fn [c] (case (head c)
+                                  trait [:trait [(nth c 1) (mapv c/sty->ty (nth c 2))]]
+                                  proj [:proj (nth c 1) (mapv c/sty->ty (nth c 2)) (c/sty->ty (nth c 3))]
+                                  nil))
+                        (:predicates (get (:traits c/*si*) tr)))))]
+    (for [c cs
+          :when (case (first c) :trait (= [:param 0 "Self"] (first (second (second c)))) :proj (= [:param 0 "Self"] (first (nth c 2))) false)
+          :when (not (and (= :trait (first c)) (#{(c/lang "meta_sized") (c/lang "sized") (c/lang "pointee_sized")} (first (second c)))))]
+      (erase (c/subst c (vec args))))))
+
+(def ^:dynamic *param-env-cache* nil)   ; atom: {scope's identity: clauses}
+
+(defn- param-env
+  "The parameter environment: the clauses of the definitions whose generics are in scope (a function's, its impl's or
+  trait's), elaborated with their traits' supertraits, regions erased"
+  []
+  (let [k (System/identityHashCode c/*scope*)]
+    (or (when *param-env-cache* (get @*param-env-cache* k))
+        (let [own (vec (concat
+                        ;; a trait's own `Self: Trait<..>` (predicates_of a trait and its items)
+                        (for [g c/*scope* :let [d (:def g)] :when (and (number? d) (= "Trait" (:kind (c/def-of d))))]
+                          [:trait [d (erase (c/identity-args (c/generics-of d)))]])
+                        (for [g c/*scope* :let [d (:def g)] :when (number? d)
+                              cl (try (c/explicit-clauses d) (catch Throwable _ []))]
+                          (erase cl))))
+              r (loop [acc own todo (filter #(= :trait (first %)) own) n 0]
+                  (if (or (empty? todo) (> n 64))
+                    (vec (distinct acc))
+                    (let [more (remove (set acc) (mapcat (fn [c] (trait-supers (second c))) todo))]
+                      (recur (into acc more) (filter #(= :trait (first %)) more) (inc n)))))]
+          (when *param-env-cache* (swap! *param-env-cache* assoc k r))
+          r))))
+
+(defn- env-projection
+  "A projection clause of the parameter environment for <ARGS0 as Trait<..>>::AD: its term (the arguments unified)"
+  [ad args]
+  (some (fn [cl] (when (and (= :proj (first cl)) (= ad (second cl)) (= (count args) (count (nth cl 2))))
+                   (let [s (snapshot)]
+                     (if (unify-all (vec (nth cl 2)) (vec args)) (nth cl 3) (do (rollback! s) nil)))))
+        (param-env)))
+
+(defn- alias-bound-projection
+  "An alias self type's item bounds (the crate's associated types' explicit_item_bounds; an opaque type's bounds): a
+  projection clause on the alias for AD, its term"
+  [ad args]
+  (let [self (shallow (first args))]
+    (case (first self)
+      :proj (let [[_ sad sargs] self
+                  bounds (if (number? sad)
+                           (try (c/item-bounds sad) (catch Throwable _ []))
+                           ;; std's: the trait's item's bounds from its interface
+                           (vec (for [[_ _ p bs] (:items (get (:traits c/*si*) (c/path-parent sad)))
+                                      :when (= p sad)
+                                      b bs :when (= 'proj (head b))]
+                                  [:proj (nth b 1) (mapv c/sty->ty (nth b 2)) (c/sty->ty (nth b 3))])))]
+              (some (fn [cl] (when (and (= :proj (first cl)) (= ad (second cl)))
+                               (let [cl (erase (c/subst cl (vec sargs))) s (snapshot)]
+                                 (if (unify-all (vec (nth cl 2)) (vec args)) (nth cl 3) (do (rollback! s) nil)))))
+                    bounds))
+      :opaque (some (fn [cl] (when (and (= :proj (first cl)) (= ad (second cl))) (nth cl 3))) (second self))
+      nil)))
+
+(defn- resolve-vars
+  "A type with its bound variables replaced by their values, nothing normalized"
+  [t]
+  (cond (tvar? t) (if-let [v (:val (get @*vars* (nth t 2)))] (resolve-vars v) t)
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (resolve-vars %) (map? %) (into {} (for [[k v] %] [k (resolve-vars v)])) :else %) (rest t)))
+        (vector? t) (mapv resolve-vars t)
+        :else t))
+
+(defn- raw-var?
+  "An unbound variable in a resolved type"
+  [t]
+  (cond (tvar? t) true
+        (vector? t) (boolean (some #(cond (vector? %) (raw-var? %) (map? %) (some raw-var? (vals %)) :else false) t))
+        :else false))
+
+
+(declare normalize*)
+
+(defn normalize
+  "normalize* with a body's cache of the projections that have no variables (their normal form is fixed)"
+  [t]
+  (let [t (resolve-vars t)]
+    (if (and *norm-cache* (not (raw-var? t)))
+      (or (get @*norm-cache* t)
+          (let [r (normalize* t)] (when-not (raw-var? (resolve-vars r)) (swap! *norm-cache* assoc t r)) r))
+      (normalize* t))))
+
+(defn normalize*
+  "A projection <T as Trait<..>>::Name normalized through the impl that selection finds (its associated type's value),
+  a rigid projection (a parameter's) left as it is; FnOnce::Output of a callable by its signature"
+  [t]
+  (let [[_ ad args] t
+        self (shallow (first args))]
+    (cond
+      (or (tvar? self) (nil? self))
+      t
+      ;; a rigid self type (a parameter, an alias): the parameter environment's projection clauses, then the alias's item
+      ;; bounds (project.rs: assemble_candidates_from_param_env, assemble_candidates_from_object_ty/trait_def)
+      (and (#{:param :proj :opaque} (first self)) (or (env-projection ad args) (alias-bound-projection ad args)))
+      (or (env-projection ad args) (alias-bound-projection ad args))
+      ;; another self type with a parameter in it (`&'b Iter1`): a where clause's projection first, then the impls (a
+      ;; blanket impl's for a rigid type too: `impl<I: Iterator> IntoIterator for I`)
+      (and (mentions-param? self) (env-projection ad args))
+      (env-projection ad args)
+      (and (= "core::ops::function::FnOnce::Output" ad) (#{:closure :fndef :fnptr} (first self)))
+      (or (callable-output self) t)
+      :else
+      (let [tr (c/def-parent ad)
+            nm (if (number? ad) (second (:data (c/def-of ad))) (c/path-name ad))
+            s (snapshot)]
+        (if-let [[ip iargs _] (let [r (impls-for self tr (vec (rest args)))] (when (and (vector? r) (not= :env (first r))) r))]
+          (let [v (if (number? ip)
+                    (some (fn [d] (when (and (= ip (:parent d)) (= [:type nm] (:data d))) (erase (c/subst (c/type-of (:id d)) iargs)))) (c/defs))
+                    (some (fn [[n k _ v]] (when (= n nm) (erase (c/subst (c/sty->ty v) iargs)))) (:items (get (:impls c/*si*) ip))))]
+            (if v (deep v) (do (rollback! s) t)))
+          (do (rollback! s) t))))))
+
+
+(defn- deep-normalize [t]
+  (let [t (if (vector? t) (deep t) t)]
+    (cond (not (vector? t)) t
+          (= :proj (first t)) (let [n (normalize t)] (if (= n t) t (deep-normalize n)))
+          (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (deep-normalize %) (map? %) (into {} (for [[k v] %] [k (deep-normalize v)])) :else %) (rest t)))
+          (vector? t) (mapv deep-normalize t)
+          :else t)))
+
+(declare impl-predicates-hold? impls-for)
+
+(defn- unsized? [t] (#{:slice :str :dyn} (first (shallow t))))
+
+(declare supertraits-of)
+
+(defn dyn-implements?
+  "A trait object implements its principal, the principal's supertraits and its auto traits (the object candidate)"
+  [t tr]
+  (let [t (shallow t)]
+    (when (= :dyn (first t))
+      (let [{:keys [principal autos]} (second t)]
+        (or (some #(= tr %) autos)
+            (when principal
+              (loop [queue [(first principal)] seen #{}]
+                (when-let [d (first queue)]
+                  (if (= d tr) true
+                      (recur (into (vec (rest queue)) (remove seen (supertraits-of d))) (conj seen d)))))))))))
+
+(defn- supertraits-of
+  "A trait's direct supertraits' definitions (the crate's or std's)"
+  [d]
+  (if (number? d)
+    (vec (keep (fn [b] (when (:trait b) (let [r (c/res-def (:trait b))] (when (#{:local :ext} (first r)) (second r)))))
+               (:bounds (:node (c/def-of d)))))
+    (vec (keep (fn [c] (when (= 'trait (head c)) (let [p (nth c 1)] (when-not (#{(c/lang "meta_sized") (c/lang "sized")} p) p))))
+               (:predicates (get (:traits c/*si*) d))))))
+
+(defn holds?
+  "Selection of a trait clause [TRAIT ARGS] (the solver's slice, RF8): Sized by the self type, a variable or a parameter
+  assumed (an accepted program's obligation), else an impl whose header unifies and whose own clauses hold"
+  [[tr args]]
+  (let [self (shallow (first args))]
+    (cond
+      (= tr (c/lang "sized")) (not (unsized? self))
+      (#{(c/lang "meta_sized") (c/lang "pointee_sized")} tr) true
+      (dyn-implements? self tr) true
+      ;; an alias's item bounds (assemble_candidates_from_projected_tys)
+      (alias-implements? self tr) true
+      ;; the builtin impls: closures, function items and pointers implement the Fn traits (their signature's inputs the
+      ;; arguments' tuple, unified: a closure's parameters from an impl's `F: FnMut(char) -> bool`); closures Clone and Copy
+      (and (#{:closure :fndef :fnptr} (first self)) (fn-traits tr))
+      (let [sig (case (first self) :closure (nth self 2) :fndef (sig-of self) :fnptr (erase (second self)))
+            tup (some-> (second args) shallow)]
+        (if (and (= :tuple (first tup)) (= (count (second tup)) (count (:inputs sig))))
+          (unify-all (vec (:inputs sig)) (vec (second tup)))
+          true))
+      (and (#{:closure :fndef :fnptr} (first self)) (#{"core::clone::Clone" "core::marker::Copy"} tr)) true
+      ;; an integer or float variable: the one impl among the integral (floating) ones that unifies, selected (the index
+      ;; `v[0]`'s `{integer}: SliceIndex<[T]>` makes it usize)
+      (and (tvar? self) (#{:int :float} (second self)) (<= (long *depth*) 4))
+      (let [by (get (:trait-impls-by c/*si*) tr)
+            keys (for [k (keys by) :when (string? k) :when (str/starts-with? k (if (= :int (second self)) "prim:" "prim:f"))] k)
+            cands (for [k keys ip (get by k)] ip)
+            hits (vec (filter (fn [ip] (let [sn (snapshot)
+                                             [_ _ st itr] (std-impl-instance ip)
+                                             ok (and (unify st self) (unify-all (vec (rest (second itr))) (vec (rest args))))]
+                                         (rollback! sn) ok))
+                              cands))]
+        (when (= 1 (count (distinct hits)))
+          (binding [*depth* (inc (long *depth*))] (impls-for self tr (vec (rest args)))))
+        true)
+      (or (tvar? self) (= :param (first self)) (= [:unknown] self)) true
+      ;; a cycle or a chain too deep: not proven (the old solver's overflow is an error, never a success)
+      (> (long *depth*) 4) false
+      ;; evaluation (the bindings rolled back): whether some impl may apply, no winnowing needed
+      :else (let [s (snapshot)
+                  r (binding [*depth* (inc (long *depth*)) *evaluating* true] (impls-for self tr (vec (rest args))))]
+              (rollback! s)
+              (boolean r)))))
+
+(defn- deref-target
+  "One overloaded autoderef step: `<T as Deref>::Target` from the impl of Deref for T"
+  [t]
+  (let [s (snapshot)]
+    (if-let [[ip args _] (let [r (impls-for t "core::ops::deref::Deref")] (when (and (vector? r) (not= :env (first r))) r))]
+      (let [tgt (if (number? ip)
+                  (some (fn [d] (when (and (= ip (:parent d)) (= [:type "Target"] (:data d))) (erase (c/subst (c/type-of (:id d)) args)))) (c/defs))
+                  (some (fn [[n k _ v]] (when (= n "Target") (erase (c/subst (c/sty->ty v) args)))) (:items (get (:impls c/*si*) ip))))]
+        (let [tgt (some-> tgt deep)] (rollback! s) tgt))
+      (do (rollback! s) nil))))
+
+(defn- autoderef
+  "Autoderef's steps of T: references, then Deref impls (at most 8)"
+  [t]
+  (loop [t (shallow t) acc [t] n 0]
+    (let [nx (cond (= :ref (first t)) (shallow (nth t 3))
+                   (and (= :adt (first t)) (< n 8)) (some-> (deref-target t) shallow)
+                   :else nil)]
+      (if (and nx (< n 8)) (recur nx (conj acc nx) (inc n)) acc))))
+
+(def ^:dynamic *scope-traits* nil)   ; std's traits in scope: the edition's prelude's and those the crate imports
+
+(defn- std-traits-in-scope
+  "The resolver's traits_in_scope for std's traits (crate-wide): the prelude's traits and every trait a use item names
+  (a glob of a module, its traits)"
+  []
+  (let [pre (str c/*root-crate* "::prelude::rust_" (if (= 2015 c/*edition*) 2015 c/*edition*))
+        kids (fn [m] (for [ch (:children (get (:mods c/*std*) m)) :when (= "Trait" (:kind ch))] (:path ch)))
+        uses (for [d (c/defs) u (:uses d)
+                   :let [r (try (c/resolve-written (mapv :ident (:path u)) (:id d)) (catch Throwable _ nil))]
+                   :when (= :ext (first r))
+                   p (if (= :glob (:use u)) (kids (second r)) [(second r)])
+                   :when (get (:traits c/*si*) p)]
+               p)]
+    (set (concat (kids pre) uses))))
+
+(defn- traits-in-scope
+  "The traits a method call may name: the crate's own, then std's in scope (*scope-traits*)"
+  [nm]
+  (concat (for [d (c/defs) :when (= "Trait" (:kind d)) :when (trait-item (:id d) nm)] (:id d))
+          (for [p (or *scope-traits* (keys (:traits c/*si*)))
+                :let [m (get (:traits c/*si*) p)]
+                :when (some #(= nm (first %)) (:items m))] p)))
+
+(defn- alias-implements?
+  "An alias self type's item bounds name the trait: a projection's (the crate's associated type's bounds, std's from
+  its interface), an opaque type's"
+  [self tr]
+  (case (first self)
+    :proj (let [[_ sad sargs] self
+                bounds (if (number? sad)
+                         (try (c/item-bounds sad) (catch Throwable _ []))
+                         (vec (for [[_ _ p bs] (:items (get (:traits c/*si*) (c/path-parent sad))) :when (= p sad)
+                                    b bs :when (= 'trait (head b))]
+                                [:trait [(nth b 1) (mapv c/sty->ty (nth b 2))]])))]
+            (boolean (some (fn [cl] (and (= :trait (first cl)) (or (= tr (first (second cl))) (some #(= tr (first (second %))) (trait-supers (second cl)))))) bounds)))
+    :opaque (boolean (some (fn [cl] (and (= :trait (first cl)) (= tr (first (second cl))))) (second self)))
+    false))
+
+(defn- method-candidate
+  "At one step type T with receiver adjustment AUTOREF (nil, :not, :mut): the method named NM of an inherent impl, then of a
+  trait in scope, whose self parameter's type is the adjusted receiver: [def args sig]"
+  [t nm autoref]
+  (let [recv (case autoref nil t :not [:ref [:re-erased] false t] :mut [:ref [:re-erased] true t])
+        try-def (fn [def parent-args]
+                  (let [own (vec (drop (count parent-args) (fresh-args def)))
+                        args (into (vec parent-args) own)
+                        sig (sig-of [:fndef def args])]
+                    (when (and (seq (:inputs sig)) (try-unify (first (:inputs sig)) recv)) [def args sig])))]
+    (or
+     ;; inherent impls
+     (let [s (snapshot)]
+       (or (some (fn [[ip args self _]]
+                   (let [s2 (snapshot)]
+                     (if (try-unify self t)
+                       (if-let [[def k] (impl-item ip nm)]
+                         (or (when (#{"AssocFn"} k) (try-def def args)) (do (rollback! s2) nil))
+                         (do (rollback! s2) nil))
+                       nil)))
+                 (concat (local-impls false)
+                         (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
+           (do (rollback! s) nil)))
+     ;; traits in scope (assemble_extension_candidates_for_trait): Self a fresh variable, the method's self type unified
+     ;; with the adjusted receiver, then `Self: Trait` proven (an impl, or a parameter's bound)
+     (some (fn [tr]
+             (let [s (snapshot)]
+               (if-let [[def k] (trait-item tr nm)]
+                 (let [targs (fresh-args tr)
+                       r (when (= "AssocFn" (str k)) (try-def def targs))
+                       self (some-> (first targs) shallow)]
+                   (if (and r self (or (not (tvar? self)) (#{:int :float} (second self)))
+                            (or ;; a parameter: its where clause's arguments (a WhereClausePick)
+                                ;; (only a trait its where clauses, or an impl, give it)
+                                (when (= :param (first self)) (impls-for self tr (vec (rest targs))))
+                                ;; the object candidate: a trait object of the trait (or of a trait it extends)
+                                (dyn-implements? self tr)
+                                ;; an alias's item bounds (a projection's, an opaque type's)
+                                (alias-implements? self tr)
+                                (let [sn (snapshot) ok (impls-for self tr (vec (rest targs)))]
+                                  (when (> (count targs) 1) (rollback! sn))
+                                  ok)))
+                     (do (when (and *obligations* (> (count targs) 1)) (swap! *obligations* conj [:trait [tr targs]])) r)
+                     (do (rollback! s) nil)))
+                 nil)))
+           (traits-in-scope nm)))))
+
+(defn- probe-method
+  "probe_op: the receiver's autoderef steps, each by value, then &, then &mut: [def args sig adjustments]"
+  [recv-ty nm]
+  (let [steps (autoderef recv-ty)
+        last-step (shallow (peek steps))
+        ;; an array's last step is its slice, reached by autoref and unsizing (method_autoderef_steps' reached_raw_pointer
+        ;; aside: `arr.iter()`)
+        unsized (when (= :array (first last-step)) [:slice (second last-step)])]
+    (when-not (= [:unknown] (shallow recv-ty))
+     (or
+    (some (fn [[i t]]
+            (some (fn [ar]
+                    (when-let [[def args sig] (method-candidate t nm ar)]
+                      [def args sig (vec (concat (for [s (rest (take (inc i) steps))] ["Deref" s])
+                                                 (case ar
+                                                   ;; pick_by_value_method: a reference receiver is reborrowed (`&*x`)
+                                                   nil (let [st (shallow t)]
+                                                         (if (= :ref (first st))
+                                                           [["Deref" (nth st 3)] ["Borrow" [:ref [:re-erased] (nth st 2) (nth st 3)]]]
+                                                           []))
+                                                   :not [["Borrow" [:ref [:re-erased] false t]]]
+                                                   :mut [["Borrow" [:ref [:re-erased] true t]]])))]))
+                  [nil :not :mut]))
+          (map-indexed vector steps))
+    (when unsized
+      (some (fn [ar]
+              (when-let [[def args sig] (method-candidate unsized nm ar)]
+                [def args sig (vec (concat (for [s (rest steps)] ["Deref" s])
+                                           [["Borrow" [:ref [:re-erased] (= ar :mut) last-step]]
+                                            ["Pointer" [:ref [:re-erased] (= ar :mut) unsized]]]))]))
+            [:not :mut]))))))
+
+(defn probe-assoc-fn
+  "A type-relative value path's definition (`Vec::new`, `String::from`, `i32::MAX`): an inherent impl's function or
+  constant (its type), else a trait's for the type"
+  [t nm]
+  (or (some (fn [[ip args self _]]
+              (let [s (snapshot)]
+                (if (try-unify self t)
+                  (if-let [[def k] (impl-item ip nm)]
+                    (cond (= "AssocFn" k) (let [own (drop (count args) (fresh-args def))] [:fndef def (into (vec args) own)])
+                          (str/starts-with? (str k) "AssocConst")
+                          (if (number? def)
+                            (erase (c/subst (c/type-of def) (vec args)))
+                            (if-let [v (some (fn [[n kk _ v]] (when (= n nm) v)) (:items (get (:impls c/*si*) ip)))]
+                              (erase (c/subst (c/sty->ty v) (vec args)))
+                              (do (rollback! s) nil)))
+                          :else (do (rollback! s) nil))
+                    (do (rollback! s) nil))
+                  nil)))
+            (concat (local-impls false)
+                    (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
+      (some (fn [tr]
+              (when-let [[def k] (trait-item tr nm)]
+                (if (and (str/starts-with? (str k) "AssocConst") (number? def))
+                  ;; a trait's associated constant for the type: its declared type with Self the type
+                  (let [targs (vec (cons t (drop 1 (fresh-args tr)))) s (snapshot) ok (impls-for t tr (vec (rest targs)))]
+                    (rollback! s)
+                    (when ok (erase (c/subst (c/type-of def) targs))))
+                (when (= "AssocFn" (str k))
+                  (let [targs (vec (cons t (drop 1 (fresh-args tr))))
+                        s (snapshot)
+                        ok (impls-for t tr (vec (rest targs)))]
+                    ;; an impl exists; which one the other arguments decide later (the registered obligation)
+                    (rollback! s)
+                    (when ok
+                      (when *obligations* (swap! *obligations* conj [:trait [tr targs]]))
+                      [:fndef def (into targs (drop (count targs) (fresh-args def)))]))))))
+            (traits-in-scope nm))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Coercion (coercion.rs: identity, never to any, reborrows, unsizing behind references)
+
+(declare autoderef)
+
+(def ^:dynamic *use-lub* false)   ; coercing within CoerceMany's LUB (a later arm to the previous arms' type)
+
+(defn- dyn-upcast?
+  "Unsize between trait objects (the builtin upcast candidate): the same principal (or none in the target), the target's
+  auto traits among the source's"
+  [a b]
+  (let [pa (first (:principal (second a))) pb (first (:principal (second b)))]
+    (and (or (nil? pb) (= pa pb))
+         (every? (set (:autos (second a))) (:autos (second b))))))
+
+(defn- coerce!
+  "coerce: E (of type FROM) to TO, the adjustments recorded on E; false when neither coerces nor unifies. Never to any
+  (NeverToAny, even to `!`), a reference from &mut reborrowed (Deref, Borrow: coerce_borrowed_pointer; & to & is the
+  identity), &[T; N] to &[T] (Deref, Borrow, Pointer(Unsize))"
+  [e from to]
+  (let [f (shallow from) t (shallow to)]
+    (cond
+      ;; (a variable a diverging expression is coerced to is a diverging one: its fallback the never type's)
+      (= [:never] f) (do (when (and (tvar? t) (= :ty (second t))) (swap! *vars* assoc-in [(nth t 2) :diverging] true))
+                         (adjust! e [["NeverToAny" to]]) true)
+      ;; a function item (a non-capturing closure) to a function pointer: ReifyFnPointer (ClosureFnPointer)
+      (and (#{:fndef :closure} (first f)) (= :fnptr (first t)))
+      (let [sig (if (= :fndef (first f)) (sig-of f) (nth f 2))
+            ok (and (unify-all (:inputs sig) (:inputs (second t))) (unify (:output sig) (:output (second t))))]
+        (when ok (adjust! e [["Pointer" to]]))
+        ok)
+      (and (= :ref (first f)) (= :ref (first t)) (= :array (first (shallow (nth f 3)))) (= :slice (first (shallow (nth t 3)))))
+      (do (adjust! e [["Deref" (nth f 3)] ["Borrow" [:ref [:re-erased] (nth t 2) (nth f 3)]] ["Pointer" to]])
+          (unify (second (shallow (nth f 3))) (second (shallow (nth t 3)))))
+      ;; &T to &dyn Trait (Unsize): a reborrow, then Pointer(Unsize)
+      ;; (a trait object to one of its principal or none: the builtin upcast, a region change at least)
+      (and (= :ref (first f)) (= :ref (first t)) (= :dyn (first (shallow (nth t 3))))
+           (or (not= :dyn (first (shallow (nth f 3)))) (dyn-upcast? (shallow (nth f 3)) (shallow (nth t 3)))))
+      (do (adjust! e [["Deref" (nth f 3)] ["Borrow" [:ref [:re-erased] (nth t 2) (nth f 3)]] ["Pointer" to]]) true)
+      ;; coerce_borrowed_pointer: a reference to a reference type is reborrowed (`&*x`: the target's region is a new
+      ;; one, so the no-op case `ty == a` does not arise), &mut to & included
+      ;; the same 'static on both sides: `&'a *x` would be the type itself (the no-op case)
+      ;; in CoerceMany's LUB (use_lub) the autoref'd type's region is the GLB of the previous type's and the new one's: a
+      ;; no-op when the previous type's is 'static or the new one's own
+      (and (= :ref (first f)) (= :ref (first t)) (= (nth f 2) (nth t 2)) (not (nth f 2))
+           (or (and (= (second f) (second t)) (not= [:re-erased] (second f)))
+               (and *use-lub* (= [:re-static] (second t)))))
+      (unify from to)
+      ;; &T (&mut T) to *const T (*mut T): Deref, Borrow(RawPtr)
+      (and (= :ref (first f)) (= :ptr (first t)) (or (nth f 2) (not (second t))))
+      (let [ok (unify (nth f 3) (nth t 2))]
+        (when ok (adjust! e [["Deref" (nth f 3)] ["Borrow" to]]))
+        ok)
+      (and (= :ref (first f)) (= :ref (first t)) (or (nth f 2) (not (nth t 2))))
+      ;; coerce_borrowed_pointer's autoderef: the first step of the referent (then its Deref impls) that unifies
+      (let [steps (autoderef (nth f 3))
+            hit (some (fn [[i st]] (let [sn (snapshot)] (if (unify st (nth t 3)) [i st] (do (rollback! sn) nil)))) (map-indexed vector steps))]
+        (if-let [[i st] hit]
+          (do (adjust! e (vec (concat (for [x (take (inc i) steps)] ["Deref" x]) [["Borrow" [:ref [:re-erased] (nth t 2) st]]]))) true)
+          (unify (nth f 3) (nth t 3))))
+      ;; Box<T> (Rc<T>, Arc<T>) to Box<dyn Trait> or Box<[T]> (CoerceUnsized): Pointer(Unsize)
+      (and (= :adt (first f)) (= :adt (first t)) (= (second f) (second t))
+           (#{"alloc::boxed::Box" "alloc::rc::Rc" "alloc::sync::Arc"} (second f))
+           (let [a (shallow (first (nth f 2))) b (shallow (first (nth t 2)))]
+             (or (and (= :dyn (first b)) (not (tvar? a)) (or (not= :dyn (first a)) (dyn-upcast? a b)))
+                 (and (= :slice (first b)) (= :array (first a))))))
+      (let [a (shallow (first (nth f 2))) b (shallow (first (nth t 2)))]
+        (when (= :slice (first b)) (unify (second a) (second b)))
+        (adjust! e [["Pointer" to]]) true)
+      ;; coercing into a type variable: sup(?T, FROM), the value generalized (its free regions fresh variables)
+      (and (tvar? t) (= :ty (second t)) (not (tvar? f))) (bind! t (generalize f))
+      :else (unify from to))))
+
+(defn- lub!
+  "CoerceMany: the arms' common type, the expectation's when there is one, else a fresh variable's; the first arm coerced
+  to it, each later one (whose type is not the previous arms' already) coerced to the previous arms' type in LUB mode
+  (try_find_coercion_lub)"
+  [arms expected]
+  (let [tys (remove #(= [:never] (shallow (second %))) arms)]
+    (if (and (empty? tys) (nil? expected))
+      (do (doseq [[e ty] arms] (coerce! e ty [:never])) [:never])
+      (let [target (or expected (fresh :ty))]
+        (doseq [[i [e ty]] (map-indexed vector arms)]
+          (if (zero? i)
+            (coerce! e ty target)
+            (let [prev (deep target)]
+              (when-not (= prev (deep ty))
+                (binding [*use-lub* true] (coerce! e ty prev))))))
+        target))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions (check_expr_with_expectation)
+
+(declare check-expr check-block check-pat)
+
+(defn- lit-ty [l expected]
+  (let [k (str (:lit-kind l)) suf (some-> (:suffix l) str)
+        ex (some-> expected shallow)]
+    (case k
+      "Integer" (cond (and suf (not= "None" suf)) (get c/prim-tys (str/replace suf #"^\(?Some \"?|\"?\)?$" "") [:unknown])
+                      (and ex (or (int-tys (first ex)) (and (tvar? ex) (= :int (second ex))))) ex
+                      (and ex (= :char (first ex))) (fresh :int)
+                      :else (fresh :int))
+      "Float" (cond (and suf (not= "None" suf)) (get c/prim-tys (str/replace suf #"^\(?Some \"?|\"?\)?$" "") [:unknown])
+                    (and ex (= :float (first ex))) ex
+                    :else (fresh :float))
+      "Bool" [:bool]
+      "Char" [:char]
+      ("Str" "StrRaw") [:ref [:re-static] false [:str]]
+      "ByteStr" [:ref [:re-erased] false [:array [:uint "u8"] [:cval (str (count (str (:symbol l))))]]]
+      "Byte" [:uint "u8"]
+      [:unknown])))
+
+(defn- std-adt-of
+  "The ADT a std constructor's path belongs to (its variant's enum, or its struct)"
+  [p]
+  (let [v (c/path-parent p)]
+    (if (get (:adts c/*si*) v) v (c/path-parent v))))
+
+(declare probe-assoc-fn)
+
+(defn- type-relative-value
+  "A value path `Type::name` (its prefix a type): the associated function an inherent impl or a trait gives the type"
+  [e]
+  (let [path (:path e) segs (:segs path)]
+    (or
+     ;; a longer path an expansion wrote (`$crate::vec::Vec::new`): its prefix a std or local type by the written names
+     (when (> (count segs) 2)
+       (let [r (c/res-def (assoc path :segs (vec (butlast segs)) :res nil :span nil))]
+         (when (and (#{:ext :local} (first r)) (#{"Struct" "Enum" "Union"} (nth r 2)))
+           (probe-assoc-fn [:adt (second r) (fresh-args (second r))] (:ident (peek segs))))))
+    (when (= 2 (count segs))
+      (let [sp (:span path)
+            base-name (:ident (first segs))
+            psp (when (vector? sp) [(nth sp 0) (nth sp 1) (nth sp 0) (+ (long (nth sp 1)) (count base-name))])
+            base-res (or (get c/*res* psp) (:res path))
+            bty (try (body-ty {:kind :path :path {:segs [(first segs)] :res base-res :span psp}}) (catch Throwable _ nil))]
+        (when (and bty (not (#{:err :unknown} (first bty))))
+          (or (probe-assoc-fn bty (:ident (peek segs)))
+              ;; an enum's variant through a type (`Self::Auto`, an alias's): its constructor or its value
+              (let [st (shallow bty) nm (:ident (peek segs))]
+                (when (and (= :adt (first st)) (number? (second st)))
+                  (when-let [v (some #(when (and (= (second st) (:parent %)) (= "Variant" (:kind %)) (= nm (second (:data %)))) %) (c/defs))]
+                    (if-let [ctor (:ctor v)]
+                      (if (= "Ctor(Variant, Fn)" (:kind (c/def-of ctor))) [:fndef ctor (nth st 2)] st)
+                      st))))
+              ;; a parameter's (a trait's Self): the trait's associated constant or function
+              (when (= :param (first (shallow bty)))
+                (some (fn [g] (let [d (c/def-of (:def g))]
+                                (when (= "Trait" (:kind d))
+                                  (when-let [[item k] (trait-item (:id d) (:ident (peek segs)))]
+                                    ;; (Self the parameter itself: `Self::read_uint(..)` in a provided method)
+                                    (cond (str/starts-with? (str k) "AssocConst") (erase (c/subst (c/type-of item) (vec (cons (shallow bty) (rest (fresh-args (:id d)))))))
+                                          (= "AssocFn" (str k)) [:fndef item (vec (cons (shallow bty) (rest (fresh-args item))))]
+                                          :else nil)))))
+                      c/*scope*))
+              ;; a parameter's bounds in the parameter environment (`T::default()` under `T: Default`): the bound
+              ;; trait's item with Self the parameter
+              (when (= :param (first (shallow bty)))
+                (let [nm (:ident (peek segs))]
+                  (some (fn [cl] (when (and (= :trait (first cl)) (= (shallow bty) (shallow (first (second (second cl))))))
+                                   (let [[tr targs] (second cl)]
+                                     (when-let [[item k] (trait-item tr nm)]
+                                       (cond (= "AssocFn" (str k)) [:fndef item (into (vec targs) (drop (count targs) (fresh-args item)))]
+                                             (and (str/starts-with? (str k) "AssocConst") (number? item)) (erase (c/subst (c/type-of item) (vec targs)))
+                                             :else nil)))))
+                        (param-env)))))))))))
+
+(defn- std-value-ty
+  "A std value path's type: a function item, a constructor (a tuple variant's as a function item, a unit one as its ADT)"
+  [p]
+  (cond (get (:fns c/*si*) p) [:fndef p (fresh-args p)]
+        (let [a (get (:adts c/*si*) (c/path-parent p))] (some #(when (= p (:path %)) %) (:variants a)))
+        (let [adt (c/path-parent p) a (get (:adts c/*si*) adt) v (some #(when (= p (:path %)) %) (:variants a))]
+          (if (= "Fn" (:ctor v)) [:fndef (str p "::{constructor#0}") (fresh-args adt)] [:adt adt (fresh-args adt)]))
+        :else [:unknown]))
+
+(defn- lang-value-ty [names]
+  (let [p (c/lang (first names))]
+    (cond (nil? p) [:unknown]
+          (= 1 (count names)) (std-value-ty p)
+          :else [:unknown])))
+
+(defn- apply-turbofish
+  "A value path's explicit generic arguments (`size_of::<T>`): its own parameters' variables unified with them"
+  [e t]
+  (let [ga (:args (peek (:segs (:path e))))
+        tys (seq (filter #(or (:ty %) (map? (:const %))) (:args ga)))]
+    (when (and tys (= :fndef (first t)))
+      ;; the explicit type and const arguments, in order, for the item's own non-lifetime parameters
+      (let [own (vec (take-last (count tys) (remove c/region? (nth t 2))))]
+        (doseq [[v a] (map vector own tys)]
+          (if (:ty a) (unify v (body-ty (:ty a))) (unify v (c/lower-const-arg (:const a)))))))
+    t))
+
+(defn- path-ty
+  "A value path's type: a local, a function item (fresh arguments), a constant or static, a unit or tuple
+  constructor"
+  [e]
+  (let [path (:path e) segs (:segs path) r (first (:res path))]
+    (cond
+      ;; a desugaring's lang item path (into_iter, next, Some, None, branch, ...)
+      (:lang path) (lang-value-ty (mapv :ident segs))
+      ;; a desugaring's own binding (`iter`, `residual`, `val`): no resolution, a local by its name
+      (and (nil? r) (= 1 (count segs)) (lookup-local (:ident (first segs)))) (lookup-local (:ident (first segs)))
+      :else
+    (if (= 'local (head r))
+      (or (lookup-local (:ident (peek segs))) [:unknown])
+      (let [rd (c/res-def path)]
+        (case (first rd)
+          :local (let [[_ id k] rd]
+                   (cond (#{"Fn" "AssocFn"} k) (fn-item-ty id)
+                         (= "Ctor(Struct, Fn)" k) (let [id (:ctor (c/def-of id) id)] (fn-item-ty id))
+                         (= "Ctor(Variant, Fn)" k) (let [v (c/def-of id) cid (or (:ctor v) id)] (fn-item-ty cid))
+                         ;; (a tuple struct's or variant's name resolved in the type namespace: its constructor function)
+                         (and (#{"Struct" "Variant"} k) (:ctor (c/def-of id))
+                              (= "Ctor(Struct, Fn)" (:kind (c/def-of (:ctor (c/def-of id))))))
+                         (fn-item-ty (:ctor (c/def-of id)))
+                         (and (= "Variant" k) (:ctor (c/def-of id))
+                              (= "Ctor(Variant, Fn)" (:kind (c/def-of (:ctor (c/def-of id))))))
+                         (fn-item-ty (:ctor (c/def-of id)))
+                         (#{"Ctor(Struct, Const)" "Ctor(Variant, Const)" "Struct"} k)
+                         (let [d (c/def-of id) adt (or (:adt d) id)] [:adt adt (fresh-args adt)])
+                         (= "Variant" k) (let [d (c/def-of id)] [:adt (:adt d (:parent d)) (fresh-args (:parent d))])
+                         (or (str/starts-with? (str k) "Const") (str/starts-with? (str k) "Static")) (erase (c/type-of id))
+                         :else [:unknown]))
+          ;; a const parameter's value: its declared type
+          :param (let [p (second rd)]
+                   (if (and p (= :const (:kind p)) (:hir p)) (erase (c/lower-ty (:ty (:hir p)))) [:unknown]))
+          :ext (let [[_ p k] rd]
+                 (cond (#{"Fn" "AssocFn"} k) [:fndef p (fresh-args p)]
+                       ;; RF9b: std's constants and statics by their types
+                       (get (:consts c/*si*) p) (erase (c/sty->ty (:ty (get (:consts c/*si*) p))))
+                       (#{"Ctor(Variant, Fn)" "Ctor(Struct, Fn)"} k) [:fndef p (fresh-args (std-adt-of p))]
+                       (#{"Ctor(Variant, Const)" "Ctor(Struct, Const)"} k) (let [a (std-adt-of p)] [:adt a (fresh-args a)])
+                       :else [:unknown]))
+          ;; `Self` as a value in an impl of a tuple or unit struct: its constructor at the impl's self type's arguments
+          :self-alias (let [st (erase c/*self-ty*)]
+                        (if-let [ctor (and (= :adt (first st)) (number? (second st)) (:ctor (c/def-of (second st))))]
+                          (if (= "Ctor(Struct, Fn)" (:kind (c/def-of ctor))) [:fndef ctor (nth st 2)] st)
+                          [:unknown]))
+          (or (type-relative-value e) [:unknown])))))))
+
+(defn- builtin-binop?
+  "op.rs's is_builtin_binop over the operands' types (variables of the right kind count)"
+  [op l r]
+  (let [l (shallow l) r (shallow r)
+        num? (fn [t] (or (int-tys (first t)) (= :float (first t)) (and (tvar? t) (#{:int :float} (second t)))))
+        int? (fn [t] (or (int-tys (first t)) (and (tvar? t) (= :int (second t)))))]
+    (case op
+      ("+" "-" "*" "/" "%") (and (num? l) (num? r))
+      ("&" "|" "^") (or (and (int? l) (int? r)) (and (= [:bool] l) (= [:bool] r)))
+      ("<<" ">>") (and (int? l) (int? r))
+      ("==" "!=" "<" "<=" ">" ">=") (or (and (num? l) (num? r)) (and (= l r) (#{:bool :char} (first l))))
+      ("&&" "||") true
+      false)))
+
+(defn- autoderef-steps [t]
+  (loop [t (shallow t) acc [t]]
+    (if (= :ref (first t)) (let [n (shallow (nth t 3))] (recur n (conj acc n))) acc)))
+
+(defn- field-of
+  "check_field: the base's autoderef steps until one has the field (a struct's named or positional field, a tuple's)"
+  [e base-ty nm]
+  (loop [steps (autoderef base-ty) i 0]
+    (if-let [t (first steps)]
+      (let [found (case (first t)
+                    :adt (let [d (if (number? (second t)) (c/def-of (second t)) {:kind (:kind (get (:adts c/*si*) (second t)))})]
+                           (when (#{"Struct" "Union"} (:kind d))
+                             (some (fn [[fname fty]] (when (= fname nm) fty)) (adt-fields (second t) (nth t 2)))))
+                    :tuple (when (re-matches #"\d+" nm) (nth (second t) (Long/parseLong nm) nil))
+                    nil)]
+        (if found
+          (do (when (pos? i) (adjust! (:expr e) (vec (for [s (rest (take (inc i) (autoderef base-ty)))] ["Deref" s])))) found)
+          (recur (rest steps) (inc i))))
+      [:unknown])))
+
+(def ^:private op-traits
+  {"+" "add" "-" "sub" "*" "mul" "/" "div" "%" "rem" "&" "bitand" "|" "bitor" "^" "bitxor" "<<" "shl" ">>" "shr"
+   "==" "eq" "!=" "eq" "<" "partial_ord" "<=" "partial_ord" ">" "partial_ord" ">=" "partial_ord"})
+
+(declare has-num-var?)
+
+
+(defn- overloaded-binop
+  "check_overloaded_binop: the operator's trait for the operands' types (lookup_op_method); a comparison by reference
+  (both operands autoref'd), its type bool, else `<L as Op<R>>::Output`; with integer or float variables in an operand
+  (`&{integer} % {integer}`) the obligation stays pending and the output is the projection, normalized after fallback"
+  [e op lt rt]
+  (let [tr (c/lang (get op-traits op))
+        cmp? (#{"==" "!=" "<" "<=" ">" ">="} op)]
+    ;; (a left operand that is a variable (`|x: _, y: u8| x + y`, `3.14 * r`): the obligation `L: Op<R>` registered, the
+    ;; output `<L as Op<R>>::Output` a fresh variable with its projection obligation, as normalizing an unresolved
+    ;; projection makes it)
+    (if (and tr (or (has-num-var? lt) (has-num-var? rt) (tvar? (shallow lt))))
+      (do (when *obligations* (swap! *obligations* conj [:trait [tr [lt rt]]]))
+          (when cmp?
+            (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] false lt]]])
+            (adjust! (:rhs e) [["Borrow" [:ref [:re-erased] false rt]]])
+            (when *scalar-fixes* (swap! *scalar-fixes* conj [(:lhs e) (:rhs e) lt rt])))
+          (if cmp? [:bool] (let [out (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr)))]
+                             (if out
+                               (let [v (fresh :ty)]
+                                 (when *obligations* (swap! *obligations* conj [:proj out [lt rt] v]))
+                                 v)
+                               [:unknown]))))
+    (if (and tr (not= [:unknown] (shallow lt)) (not= [:unknown] (shallow rt)) (not (tvar? (shallow lt)))
+             (or ;; a parameter (a rigid projection): its where clause `T: Op<R>` (the parameter environment's candidate)
+                 (when (#{:param :proj} (first (shallow lt)))
+                   (some (fn [cl] (when (and (= :trait (first cl)) (= tr (first (second cl))) (= (shallow lt) (shallow (first (second (second cl))))))
+                                    (let [sn (snapshot)] (if (unify rt (second (second (second cl)))) true (do (rollback! sn) nil)))))
+                         (param-env)))
+                 (impls-for (shallow lt) tr [rt])
+                 ;; the rhs coerced to the impl's Rhs (`String + &String`: &str by deref coercion)
+                 (let [rv (fresh :ty) sn (snapshot)]
+                   (if (and (impls-for (shallow lt) tr [rv]) (not (tvar? (shallow rv))) (coerce! (:rhs e) rt rv))
+                     true
+                     (do (rollback! sn) false)))))
+      (do (when cmp?
+            (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] false lt]]])
+            (adjust! (:rhs e) [["Borrow" [:ref [:re-erased] false rt]]])
+            (when *scalar-fixes* (swap! *scalar-fixes* conj [(:lhs e) (:rhs e) lt rt])))
+          (if cmp? [:bool] (let [out (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr)))]
+                             (if out (shallow [:proj out [lt rt]]) [:unknown]))))
+      [:unknown]))))
+
+(declare param-fn-bound fn-traits solve-obligations!)
+
+(defn- check-args!
+  "check_argument_types: each argument checked with its formal input type (the expectation's when it has one) and
+  coerced to it, the closures last, after select_obligations_where_possible (their signatures deduced from what the other
+  arguments decided)"
+  [args]
+  (doseq [closures? [false true]]
+    (when closures? (solve-obligations!))
+    (doseq [[a ty xi] args :when (= closures? (= :closure (:kind a)))]
+      ;; the argument coerced to its expected input type (`Some(&e)` expecting Option<&dyn Error>: &dyn Error), which
+      ;; the formal input type is then a supertype of
+      (let [xi (when (and xi (not (tvar? (shallow xi)))) xi)
+            at (check-expr a (or xi ty))]
+        (when (System/getenv "TYPECK_ARGS") (binding [*out* *err*] (println "arg" (:kind a) (:span a) (deep at) (deep ty) (some-> xi deep))))
+        (when ty
+          (if xi
+            (let [sn (snapshot)]
+              (if (coerce! a at xi) (unify ty xi) (do (rollback! sn) (coerce! a at ty))))
+            (coerce! a at ty)))))))
+
+(defn- check-call [e expected]
+  (let [callee (:func e)
+        ft (shallow (check-expr callee nil))]
+    (case (first ft)
+      :fndef (let [{:keys [inputs output]} (sig-of ft)
+                   ;; expected_inputs_for_expected_output: the expectation unified with the output in a snapshot gives the
+                   ;; arguments' expectations
+                   exp-ins (when expected
+                             (let [sn (snapshot)
+                                   ;; (fudge_inference_if_ok: what the probe made, regions among them, fresh)
+                                   r (when (unify output expected) (mapv (comp fudge deep) inputs))]
+                               (rollback! sn)
+                               r))]
+               (check-args! (map vector (:args e) (concat inputs (repeat nil)) (concat exp-ins (repeat nil))))
+               (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "call" (second ft) (deep output) (shallow output))))
+               output)
+      ;; a closure's own signature (deferred call resolution), the callee autoref'd (its kind taken as Fn)
+      ;; (its kind decided after the body, by closure_analyze: the autoref fixed up then)
+      :closure (let [{:keys [inputs output]} (nth ft 2)]
+                 (adjust! (:func e) [["Borrow" [:ref [:re-erased] false ft]]])
+                 (when *closure-calls* (swap! *closure-calls* conj [(:func e) (second ft)]))
+                 (check-args! (map vector (:args e) (concat inputs (repeat nil))))
+                 output)
+      :fnptr (let [{:keys [inputs output]} (second ft)]
+               (check-args! (map vector (:args e) (concat inputs (repeat nil))))
+               (erase output))
+      ;; try_overloaded_call_traits: a parameter with a Fn bound, a trait object of one, through its reference (the callee
+      ;; autoref'd for Fn and FnMut)
+      (let [steps (autoderef ft)
+            hit (some (fn [[i st]] (let [st (shallow st)]
+                                     (cond ;; a Box of a Fn trait object: the Box's own Fn impl (`impl<F: Fn<A> + ?Sized> Fn<A> for Box<F>`)
+                                           (and (= :adt (first st)) (= "alloc::boxed::Box" (second st)) (= :dyn (first (shallow (first (nth st 2))))))
+                                           (let [d (shallow (first (nth st 2))) {:keys [principal projections]} (second d)]
+                                             (when (and principal (fn-traits (first principal)))
+                                               [i st (first principal) (shallow (first (second principal)))
+                                                (some (fn [[ad _ term]] (when (= "core::ops::function::FnOnce::Output" ad) term)) projections)]))
+                                           (= :dyn (first st)) (let [{:keys [principal projections]} (second st)]
+                                                                 (when (and principal (fn-traits (first principal)))
+                                                                   [i st (first principal) (shallow (first (second principal)))
+                                                                    (some (fn [[ad _ term]] (when (= "core::ops::function::FnOnce::Output" ad) term)) projections)]))
+                                           (= :param (first st)) (some (fn [[tr out]] [i st tr (first (second tr)) out]) (param-fn-bound st))
+                                           ;; an opaque type's Fn bound
+                                           (= :opaque (first st))
+                                           (let [cs (second st)
+                                                 tr (some (fn [c] (when (and (= :trait (first c)) (fn-traits (first (second c)))) (second c))) cs)
+                                                 out (some (fn [c] (when (and (= :proj (first c)) (= "core::ops::function::FnOnce::Output" (second c))) (nth c 3))) cs)]
+                                             (when tr [i st (first tr) (second (second tr)) out]))
+                                           :else nil)))
+                      (map-indexed vector steps))]
+        (if-let [[i st tr targs out] hit]
+          (let [ins (if (= :tuple (first (shallow targs))) (second (shallow targs)) [])
+                trn (if (vector? tr) (first tr) tr)]
+            (adjust! (:func e) (vec (concat (for [x (rest (take (inc i) steps))] ["Deref" x])
+                                            (case trn "core::ops::function::Fn" [["Borrow" [:ref [:re-erased] false st]]]
+                                                  "core::ops::function::FnMut" [["Borrow" [:ref [:re-erased] true st]]] []))))
+            (check-args! (map vector (:args e) (concat ins (repeat nil))))
+            (or out [:unknown]))
+          (do (doseq [a (:args e)] (check-expr a nil)) [:unknown]))))))
+
+(defn- param-fn-bound
+  "A type parameter's Fn bounds in scope: [[[TRAIT ARGS] OUTPUT] ...]"
+  [p]
+  (vec (for [g c/*scope*
+             d [(c/def-of (:def g))]
+             :when (#{"Fn" "AssocFn" "Impl { of_trait: true }" "Impl { of_trait: false }" "Struct" "Trait"} (:kind d))
+             :let [cs (try (c/explicit-clauses (:id d)) (catch Throwable _ []))]
+             cl cs
+             :when (= :trait (first cl))
+             :let [[tr args] (second cl)]
+             :when (fn-traits tr)
+             :when (= p (first args))]
+         [[tr (vec (rest args))]
+          (some (fn [c] (when (and (= :proj (first c)) (= "core::ops::function::FnOnce::Output" (second c)) (= p (first (nth c 2)))) (nth c 3))) cs)])))
+
+(defn- std-struct-ty
+  "A std struct's or variant's path in a struct expression or pattern: [adt-ty variant-key args]"
+  [p]
+  (cond (get (:adts c/*si*) p) (let [args (fresh-args p)] [[:adt p args] p args])
+        :else (let [adt (c/path-parent p) a (get (:adts c/*si*) adt)]
+                (when a (let [args (fresh-args adt)] [[:adt adt args] p args])))))
+
+(def ^:dynamic *root-file* nil)   ; the root file's path, as closures' types print it
+
+(defn- closure-decl-span
+  "A closure's fn_decl_span: from its start (`move`) to the end of its parameters' bars (and its return type)"
+  [e]
+  (let [sp (:span e) src c/*src*]
+    (when (and (vector? sp) src)
+      (let [{:keys [^ints cps lines n]} src
+            off (+ (long (nth lines (dec (long (sp 0))))) (dec (long (sp 1))))
+            n (long n)
+            at (fn [i] (when (< i n) (char (aget cps (int i)))))
+            skip-ws (fn [i] (loop [i i] (if (and (< i n) (Character/isWhitespace (char (at i)))) (recur (inc i)) i)))
+            ;; the closure's own start: past the parentheses whose span its node took (`(|| ..)()`) and its outer attributes
+            st (loop [i off] (cond (= \( (at i)) (recur (skip-ws (inc i)))
+                                   (and (= \# (at i)) (= \[ (at (inc i))))
+                                   (recur (skip-ws (loop [j (+ i 2) depth 1]
+                                                     (let [ch (at j)]
+                                                       (cond (nil? ch) j
+                                                             (= ch \[) (recur (inc j) (inc depth))
+                                                             (= ch \]) (if (= 1 depth) (inc j) (recur (inc j) (dec depth)))
+                                                             :else (recur (inc j) depth))))))
+                                   :else i))
+            off st
+            i (loop [i off] (cond (= "move" (String. cps (int i) (int (min 4 (- n i))))) (recur (skip-ws (+ i 4)))
+                                  ;; an outer attribute (`#[allow(unused)] || ..`): not the closure's declaration
+                                  (and (= \# (at i)) (= \[ (at (inc i))))
+                                  (recur (skip-ws (loop [j (+ i 2) depth 1]
+                                                    (let [ch (at j)]
+                                                      (cond (nil? ch) j
+                                                            (= ch \[) (recur (inc j) (inc depth))
+                                                            (= ch \]) (if (= 1 depth) (inc j) (recur (inc j) (dec depth)))
+                                                            :else (recur (inc j) depth))))))
+                                  (= "async" (String. cps (int i) (int (min 5 (- n i))))) (recur (skip-ws (+ i 5)))
+                                  :else i))
+            end (if (= \| (at (inc i)))
+                  (+ i 2)
+                  (loop [j (inc i) depth 0]
+                    (let [ch (at j)]
+                      (cond (nil? ch) j
+                            (and (= ch \|) (zero? depth)) (inc j)
+                            (#{\( \[ \{ \<} ch) (recur (inc j) (inc depth))
+                            (#{\) \] \} \>} ch) (recur (inc j) (max 0 (dec depth)))
+                            :else (recur (inc j) depth)))))
+            ;; a return type: up to the body's block
+            end (let [k (skip-ws end)]
+                  (if (= "->" (String. cps (int k) (int (min 2 (- n k)))))
+                    (let [b (loop [j (+ k 2)] (if (or (>= j n) (= \{ (at j))) j (recur (inc j))))]
+                      (loop [j b] (if (and (> j k) (Character/isWhitespace (char (at (dec j))))) (recur (dec j)) j)))
+                    end))
+            lc (fn [o] (let [li (loop [a 0 b (dec (count lines))] (if (>= a b) a (let [m (quot (+ a b 1) 2)] (if (<= (long (nth lines m)) o) (recur m b) (recur a (dec m))))))]
+                         [(inc li) (inc (- o (long (nth lines li))))]))]
+        (let [[l1 c1] (lc off) [l2 c2] (lc end)] [l1 c1 l2 c2])))))
+
+(def ^:private fn-traits #{"core::ops::function::Fn" "core::ops::function::FnMut" "core::ops::function::FnOnce"})
+
+(defn- deduce-closure-sig
+  "deduce_closure_signature: from the expectation (a variable whose pending obligations name a Fn trait, a trait object of
+  one): [inputs output] or nil"
+  [expected]
+  (let [ex (some-> expected shallow)]
+    (cond
+      (nil? ex) nil
+      (tvar? ex)
+      (let [obs (when *obligations* @*obligations*)
+            tr (some (fn [o] (when (and (= :trait (first o)) (fn-traits (first (second o))) (= ex (shallow (first (second (second o)))))) (second o))) obs)
+            out (some (fn [o] (when (and (= :proj (first o)) (= "core::ops::function::FnOnce::Output" (second o)) (= ex (shallow (first (nth o 2))))) (nth o 3))) obs)]
+        (when tr (let [args (shallow (second (second tr)))] (when (= :tuple (first args)) [(second args) (or out (fresh :ty))]))))
+      ;; a fn pointer: its signature
+      (= :fnptr (first ex)) [(:inputs (second ex)) (:output (second ex))]
+      ;; a return-position impl Trait: its bounds
+      (= :opaque (first ex))
+      (let [cs (second ex)
+            tr (some (fn [c] (when (and (= :trait (first c)) (fn-traits (first (second c)))) (second c))) cs)
+            out (some (fn [c] (when (and (= :proj (first c)) (= "core::ops::function::FnOnce::Output" (second c))) (nth c 3))) cs)]
+        (when tr (let [args (shallow (second (second tr)))] (when (= :tuple (first args)) [(second args) (or out (fresh :ty))]))))
+      (= :dyn (first ex))
+      (let [{:keys [principal projections]} (second ex)]
+        (when (and principal (fn-traits (first principal)))
+          (let [args (shallow (first (second principal)))]
+            (when (= :tuple (first args))
+              [(second args) (or (some (fn [[ad _ term]] (when (= "core::ops::function::FnOnce::Output" ad) term)) projections) (fresh :ty))]))))
+      :else nil)))
+
+(defn- check-closure [e expected]
+  (let [[ins out] (or (deduce-closure-sig expected) [nil nil])
+        ptys (vec (map-indexed (fn [i p] (if (and (:ty p) (not= :infer (:kind (:ty p)))) (body-ty (:ty p)) (or (nth ins i nil) (fresh :ty)))) (:params e)))
+        ret (if (:output e) (body-ty (:output e)) (or out (fresh :ty)))
+        env (atom {})]
+    (doseq [[p t] (map vector (:params e) ptys)] (check-pat (:pat p) t env :none))
+    (binding [*env* (conj *env* @env) *ret* ret *loops* nil]
+      (let [bt (check-expr (:body e) ret)] (coerce! (:body e) bt ret)))
+    (let [sp (closure-decl-span e)
+          text (if (and sp *root-file*) (str "{closure@" *root-file* ":" (sp 0) ":" (sp 1) ": " (sp 2) ":" (sp 3) "}") "{closure}")]
+      (when *closures* (swap! *closures* conj {:text text :node e :env *env* :kind (deduced-kind expected)}))
+      [:closure text {:inputs ptys :output ret}])))
+
+;; ---------------------------------------------------------------------------------------------
+;; Closure kinds (upvar.rs's closure_analyze over expr_use_visitor.rs's uses): a closure whose expectation names a Fn
+;; trait has that kind; else the uses of its captured variables decide it: a move out of one (a consume of a place
+;; whose type is not Copy) makes it FnOnce, a mutation or a mutable borrow FnMut, else it is Fn
+
+(defn- deduced-kind
+  "The kind an expectation gives a closure (deduce_closure_signature's expected_kind)"
+  [expected]
+  (let [ex (some-> expected shallow)
+        kind-of {"core::ops::function::Fn" :fn "core::ops::function::FnMut" :fn-mut "core::ops::function::FnOnce" :fn-once}
+        trs (cond (nil? ex) nil
+                  (tvar? ex) (for [o (when *obligations* @*obligations*)
+                                   :when (and (= :trait (first o)) (fn-traits (first (second o))) (= ex (shallow (first (second (second o))))))]
+                               (first (second o)))
+                  (= :dyn (first ex)) [(first (:principal (second ex)))]
+                  (= :opaque (first ex)) (for [c (second ex) :when (and (= :trait (first c)) (fn-traits (first (second c))))] (first (second c)))
+                  :else nil)]
+    ;; the most permissive kind the bounds allow (Fn over FnMut over FnOnce among the bounds named)
+    (let [ks (set (keep kind-of trs))]
+      (cond (ks :fn) :fn (ks :fn-mut) :fn-mut (ks :fn-once) :fn-once :else nil))))
+
+(defn- copy-ty?
+  "Whether a (resolved) type is Copy: scalars, shared references, raw and fn pointers, fn items, tuples and arrays of
+  Copy types, a parameter with a Copy where clause, an ADT with a Copy impl"
+  [t]
+  (let [t (shallow t)]
+    (case (first t)
+      (:bool :char :int :uint :float :ptr :fnptr :fndef :never) true
+      :ref (not (nth t 2))
+      :tuple (every? copy-ty? (second t))
+      :array (copy-ty? (second t))
+      :infer (#{:int :float} (second t))
+      :param (boolean (some (fn [cl] (and (= :trait (first cl)) (= (c/lang "copy") (first (second cl))) (= t (shallow (first (second (second cl))))))) (param-env)))
+      :adt (let [s (snapshot) r (impls-for t (c/lang "copy") [])] (rollback! s) (vector? r))
+      false)))
+
+(defn- fact-of
+  "The recorded fact of an expression (the last for its span and kind)"
+  [e]
+  (last (filter #(and (= (:span %) (:span e)) (= (:kind %) (get kind-names (:kind e))) (= *owner* (:owner %))) @*facts*)))
+
+(defn- closure-uses
+  "The uses of a closure body's captured variables: [[name mode] ...], mode :consume, :borrow or :mut
+  (ExprUseVisitor: consume, borrow, mutate), the consume of a Copy place a borrow"
+  [body upvars]
+  (let [acc (java.util.ArrayList.)
+        place? (fn [e] (#{:path :field :index :unary} (:kind e)))]
+    (letfn [(use! [e mode]
+              (case (:kind e)
+                :path (let [segs (:segs (:path e)) nm (:ident (first segs))]
+                        (when (and (= 1 (count segs)) (contains? upvars nm)) (.add acc [nm mode])))
+                :field (walk (:expr e) (if (= mode :consume) :consume mode))
+                :index (do (walk (:expr e) (if (= mode :mut) :mut :borrow)) (walk (:index e) :consume))
+                :unary (if (= "*" (:op e)) (walk (:expr e) (if (= mode :mut) :mut :borrow)) (walk (:expr e) :consume))
+                nil))
+            (walk [e mode]
+              (when (map? e)
+                (case (:kind e)
+                  (:path :field :index)
+                  (use! e (if (and (= mode :consume) (some-> (fact-of e) :ty deep copy-ty?)) :borrow mode))
+                  :unary (if (= "*" (:op e))
+                           (use! e (if (and (= mode :consume) (some-> (fact-of e) :ty deep copy-ty?)) :borrow mode))
+                           (walk (:expr e) :consume))
+                  :addr-of (walk (:expr e) (if (:mutbl e) :mut :borrow))
+                  (:assign :assign-op) (do (walk (:lhs e) :mut) (walk (:rhs e) :consume))
+                  :method (let [adj (:adj (fact-of (:receiver e)))
+                                m (cond (some (fn [[k t]] (and (= "Borrow" k) (vector? t) (= :ref (first t)) (nth t 2))) adj) :mut
+                                        (some (fn [[k _]] (= "Borrow" k)) adj) :borrow
+                                        :else :consume)]
+                            (walk (:receiver e) m)
+                            (doseq [a (:args e)] (walk a :consume)))
+                  :call (let [adj (:adj (fact-of (:func e)))
+                              m (cond (some (fn [[k t]] (and (= "Borrow" k) (vector? t) (= :ref (first t)) (nth t 2))) adj) :mut
+                                      (some (fn [[k _]] (= "Borrow" k)) adj) :borrow
+                                      (place? (:func e)) :consume
+                                      :else :borrow)]
+                          (walk (:func e) m)
+                          (doseq [a (:args e)] (walk a :consume)))
+                  :binary (let [m (if (#{"==" "!=" "<" "<=" ">" ">="} (:op e)) :borrow :consume)]
+                            (walk (:lhs e) m) (walk (:rhs e) m))
+                  :match (do (walk (:expr e) :borrow) (doseq [a (:arms e)] (walk (:guard a) :borrow) (walk (:body a) mode)))
+                  :let (walk (:init e) :borrow)
+                  :block (do (doseq [st (:stmts (:block e))]
+                               (case (:kind st)
+                                 :let (walk (:init st) (if (:by-ref (:pat st)) :borrow :consume))
+                                 (:semi :expr) (walk (:expr st) :consume)
+                                 nil))
+                             (walk (:expr (:block e)) mode))
+                  :closure (walk (:body e) :consume)
+                  (doseq [v (vals (select-keys e [:expr :exprs :args :fields :base :cond :then :else :block :body :receiver :count]))]
+                    (cond (map? v) (if (:node v) (walk v :consume) (doseq [x (vals v)] (when (map? x) (walk x :consume))))
+                          (sequential? v) (doseq [x v] (cond (and (map? x) (:node x)) (walk x :consume)
+                                                             (map? x) (walk (:expr x) :consume)))
+                          :else nil)))))]
+      (walk body :consume))
+    (vec acc)))
+
+(defn- closure-kinds!
+  "closure_analyze: each closure's kind (the expectation's, else its captured variables' uses), then each call of a
+  closure value's autoref as the kind needs: `&` for Fn, `&mut` for FnMut, none for FnOnce"
+  []
+  (let [kinds (into {}
+                    (for [{:keys [text node env kind]} (when *closures* @*closures*)]
+                      [text (or kind
+                                (let [;; the closure's own bindings (its parameters', its lets') shadow the captured names
+                                      own (let [acc (java.util.HashSet.)]
+                                            (letfn [(w [y] (cond (map? y) (do (when (and (= :binding (:kind y)) (:name y)) (.add acc (:name y)))
+                                                                              (doseq [v (vals y)] (w v)))
+                                                                 (sequential? y) (doseq [v y] (w v))
+                                                                 :else nil))]
+                                              (w (:params node)) (w (:body node)))
+                                            (set acc))
+                                      upvars (set (remove own (mapcat keys env)))
+                                      uses (closure-uses (:body node) upvars)
+                                      ty-of (fn [nm] (some #(get % nm) (rseq env)))]
+                                  (cond (some (fn [[nm m]] (and (= m :consume) (not (copy-ty? (deep (ty-of nm)))))) uses) :fn-once
+                                        (some (fn [[_ m]] (= m :mut)) uses) :fn-mut
+                                        :else :fn)))]))]
+    (doseq [[f text] (when *closure-calls* @*closure-calls*)]
+      (case (get kinds text :fn)
+        :fn-mut (mut-borrow! f)
+        :fn-once (unadjust! f)
+        nil))))
+
+(defn- struct-ty [e]
+  (let [rd (if (:lang (:path e)) (when-let [p (c/lang (:ident (first (:segs (:path e)))))] [:ext p "Struct"]) (c/res-def (:path e)))
+        ;; `Self { .. }` in an impl: the impl's self type's struct, at its arguments
+        rd (if (= :self-alias (first rd))
+             (let [st (erase c/*self-ty*)]
+               (when (= :adt (first st)) [:self-adt st]))
+             rd)]
+    (case (first rd)
+      :self-adt (let [[_ [_ id args]] rd] [[:adt id args] id args])
+      :ext (std-struct-ty (let [p (second rd)] (if (re-find #"\{constructor#\d+\}$" p) (c/path-parent p) p)))
+      :local (let [[_ id k] rd d (c/def-of id)]
+               (cond (#{"Struct" "Union"} k) (let [args (fresh-args id)] [[:adt id args] id args])
+                     (= "Variant" k) (let [args (fresh-args (:parent d))] [[:adt (:parent d) args] id args])
+                     :else nil))
+      nil)))
+
+(defn- castable-lit?
+  "An operand ExpectCastableToType reaches as a literal's expectation: a literal, under unary minus or not"
+  [x]
+  (case (:kind x) :lit true :unary (and (#{"-" "!"} (:op x)) (castable-lit? (:expr x))) false))
+
+(defn- mut-borrow!
+  "E's fact's last Borrow adjustment made mutable (`&` to `&mut`)"
+  [e]
+  (swap! *facts* (fn [fs] (let [i (last (keep-indexed (fn [i f] (when (and (= (:span f) (:span e)) (= (:kind f) (get kind-names (:kind e)))) i)) fs))]
+                            (if-let [j (and i (last (keep-indexed (fn [j [k t]] (when (and (= "Borrow" k) (= :ref (first t))) j)) (:adj (nth fs i)))))]
+                              (update-in fs [i :adj j 1] (fn [t] (assoc t 2 true)))
+                              fs)))))
+
+(defn- place-mutable!
+  "convert_place_derefs_to_mutable: a place used mutably (a `&mut` autoref of it): its Index operators IndexMut and
+  its overloaded derefs DerefMut, their bases' autorefs mutable, down the place's projections"
+  [e]
+  (case (:kind e)
+    :index (do (mut-borrow! (:expr e)) (place-mutable! (:expr e)))
+    :field (place-mutable! (:expr e))
+    :unary (when (= "*" (:op e)) (mut-borrow! (:expr e)) (place-mutable! (:expr e)))
+    nil))
+
+(defn check-expr
+  "check_expr_with_expectation: E's type (recorded), EXPECTED a type or nil"
+  [e expected]
+  (let [ty
+        (case (:kind e)
+          :lit (lit-ty (:lit e) expected)
+          ;; a type-relative value path whose type has generic arguments (`Pair::<u8, 4>::len`): resolve_fully_qualified_call
+          ;; on the lowered self type
+          :type-relative (let [_ (doseq [l (ty-consts (:qself e))] (anon-const! l true))
+                               bt (body-ty (:qself e))]
+                           (or (when-not (#{:err :unknown} (first bt)) (probe-assoc-fn bt (:ident (:seg e)))) [:unknown]))
+          ;; a qualified path `<T as Trait>::item`: the trait's item with Self the type (its other arguments fresh)
+          :qpath (let [bt (body-ty (:qself e))
+                       path (:path e) segs (:segs path)
+                       nm (:ident (peek segs))
+                       r (when (> (count segs) 1) (try (c/res-def (assoc path :segs (vec (butlast segs)) :res nil :span nil)) (catch Throwable _ nil)))
+                       tr (when (#{:local :ext} (first r)) (second r))]
+                   (or (when-let [[def k] (and tr (trait-item tr nm))]
+                         (let [targs (vec (cons bt (drop 1 (fresh-args tr))))]
+                           (when *obligations* (swap! *obligations* conj [:trait [tr targs]]))
+                           (cond (= "AssocFn" (str k)) [:fndef def (into targs (drop (count targs) (fresh-args def)))]
+                                 (and (str/starts-with? (str k) "AssocConst") (number? def)) (erase (c/subst (c/type-of def) targs))
+                                 :else nil)))
+                       [:unknown]))
+          :path (do (doseq [seg (:segs (:path e)) a (:args (:args seg)) :when (and (map? (:const a)) (not (:node a)))] (anon-const! (:const a) true))
+                    (apply-turbofish e (path-ty e)))
+          :call (check-call e expected)
+          :method (let [rt (check-expr (:receiver e) nil)
+                        _ (when (tvar? (shallow rt)) (solve-obligations!))]
+                    (if-let [[def args sig adj] (probe-method rt (:ident (:seg e)))]
+                      (do (adjust! (:receiver e) adj)
+                          ;; a mutable autoref of the receiver: its place's index and deref operators made mutable
+                          (when (some (fn [[k t]] (and (= "Borrow" k) (= :ref (first t)) (nth t 2))) adj)
+                            (place-mutable! (:receiver e)))
+                          ;; a turbofish: the method's own arguments
+                          (when-let [ga (seq (filter :ty (:args (:args (:seg e)))))]
+                            (let [own (vec (take-last (count ga) (remove c/region? args)))]
+                              (doseq [[v a] (map vector own ga)] (unify v (body-ty (:ty a))))))
+                          (check-args! (map vector (:args e) (concat (rest (:inputs sig)) (repeat nil))))
+                          (:output sig))
+                      (do (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "no method" (:ident (:seg e)) (deep rt))))
+                          (doseq [a (:args e)] (check-expr a nil)) [:unknown])))
+          :binary (let [op (:op e)
+                        lt (check-expr (:lhs e) nil)
+                        ;; check_overloaded_binop: the right operand's expectation a fresh `?R` that `L: Op<?R>`'s selection
+                        ;; binds when one impl matches (before the operand is checked); a scalar's left operand's type
+                        ;; otherwise (enforce_builtin_binop_types gives the same)
+                        tr (c/lang (get op-traits op))
+                        rv (when (and tr (not (#{"&&" "||"} op)) (not (tvar? (shallow lt))) (not (scalar? lt)))
+                             (let [v (fresh :ty) sn (snapshot) r (impls-for (shallow lt) tr [v])]
+                               (if (and (vector? r) (not (tvar? (shallow v)))) v (do (rollback! sn) nil))))
+                        rt (check-expr (:rhs e) (or rv (when (and (#{"+" "-" "*" "/" "%" "&" "|" "^" "==" "!=" "<" "<=" ">" ">="} op) (or (scalar? lt) (tvar? (shallow lt)))) lt)))
+                        ;; (check_expr_coercible_to_type: the right operand coerced to ?R)
+                        rt (if (and rv (coerce! (:rhs e) rt rv)) rv rt)]
+                    (cond
+                      (#{"&&" "||"} op) (do (unify lt [:bool]) (unify rt [:bool]) [:bool])
+                      (builtin-binop? op lt rt)
+                      (do (when-not (#{"<<" ">>"} op) (unify lt rt))
+                          (if (#{"==" "!=" "<" "<=" ">" ">="} op) [:bool] lt))
+                      :else (overloaded-binop e op lt rt)))
+          :unary (let [t (check-expr (:expr e) (when (#{"-" "!"} (:op e)) expected))
+                       s (shallow t)]
+                   (case (:op e)
+                     ;; a builtin deref of a reference or pointer, else an overloaded one (Deref, DerefMut on an assigned
+                     ;; place), the operand autoref'd
+                     "*" (cond (#{:ref :ptr} (first s)) (if (= :ref (first s)) (nth s 3) (nth s 2))
+                               ;; a Box's deref is builtin (no Deref call, no autoref)
+                               (and (= :adt (first s)) (= "alloc::boxed::Box" (second s))) (first (nth s 2))
+                               (= :adt (first s)) (if-let [tgt (deref-target s)]
+                                                    (do (adjust! (:expr e) [["Borrow" [:ref [:re-erased] (boolean *mutable-place*) s]]]) tgt)
+                                                    [:unknown])
+                               :else [:unknown])
+                     ("-" "!") (if (or (int-tys (first s)) (= :float (first s)) (= :bool (first s)) (tvar? s))
+                                 t
+                                 ;; an overloaded unary operator (check_user_unop): `<T as Neg>::Output`, `<T as Not>::Output`
+                                 (let [tr (c/lang (if (= "-" (:op e)) "neg" "not"))
+                                       out (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr)))]
+                                   (if (and tr out (not= [:unknown] s) (impls-for s tr []))
+                                     (shallow [:proj out [s]])
+                                     [:unknown])))
+                     [:unknown]))
+          :addr-of (let [ex (some-> expected shallow)
+                         inner-ex (when (and ex (= :ref (first ex))) (nth ex 3))
+                         t (check-expr (:expr e) inner-ex)]
+                     (if (:raw e) [:ptr (:mutbl e) t] [:ref [:re-erased] (:mutbl e) t]))
+          ;; check_expr_cast: the operand checked with ExpectCastableToType (a literal takes the type, a block does not
+                  ;; coerce to it)
+          :cast (let [t (body-ty (:ty e))
+                      _ (doseq [l (ty-consts (:ty e))] (anon-const! l true))
+                      x (check-expr (:expr e) (when (castable-lit? (:expr e)) t))]
+                  ;; checked after fallback (check_casts): a cast that is a coercion takes its adjustments
+                  (when *casts* (swap! *casts* conj [(:expr e) x t]))
+                  t)
+          :type (let [t (body-ty (:ty e))] (let [x (check-expr (:expr e) t)] (coerce! (:expr e) x t)) t)
+          :field (let [bt (check-expr (:expr e) nil)] (field-of e bt (:ident e)))
+          :index (let [bt (check-expr (:expr e) nil)
+                       it (check-expr (:index e) nil)
+                       steps (autoderef-steps bt)
+                       hit (first (keep-indexed (fn [i t] (when (#{:array :slice} (first t)) [i t])) steps))]
+                   (if (and hit (let [s (shallow it)] (or (= [:uint "usize"] s) (and (tvar? s) (= :int (second s))))))
+                     (do (unify it [:uint "usize"])
+                         (let [[i t] hit]
+                           (when (pos? i) (adjust! (:expr e) (vec (for [s (rest (take (inc i) steps))] ["Deref" s]))))
+                           (second t)))
+                     ;; lookup_indexing: the base's autoderef steps, an Index impl for the step, the base autoref'd (mutably
+                     ;; when the place is assigned to)
+                     (let [steps (autoderef bt)
+                           tr (c/lang "index")
+                           hit (some (fn [[i st]] (when-let [r (impls-for st tr [it])] [i st r])) (map-indexed vector steps))]
+                       (if-let [[i st _] hit]
+                         (do (adjust! (:expr e) (vec (concat (for [x (rest (take (inc i) steps))] ["Deref" x])
+                                                             [["Borrow" [:ref [:re-erased] (boolean *mutable-place*) st]]])))
+                             (shallow [:proj (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr))) [st it]]))
+                         [:unknown]))))
+          ;; check_expr_tuple: an element with an expected type is coerced to it (and has its type)
+          :tup (let [ex (some-> expected shallow)
+                     exs (when (= :tuple (first ex)) (second ex))]
+                 [:tuple (vec (map-indexed (fn [i x] (let [ety (nth exs i nil) t (check-expr x ety)]
+                                                       (if (and ety (not (tvar? (shallow ety))) (coerce! x t ety)) ety t)))
+                                           (:exprs e)))])
+          ;; check_expr_array: the elements' CoerceMany to the expectation's element type (else a fresh variable)
+          :array (let [ex (some-> expected shallow)
+                       elt (if (#{:array :slice} (first ex)) (second ex) (fresh :ty))]
+                   (doseq [[i x] (map-indexed vector (:exprs e))]
+                     (let [t (check-expr x elt)]
+                       (if (zero? i)
+                         (coerce! x t elt)
+                         (let [prev (deep elt)] (when-not (= prev (deep t)) (binding [*use-lub* true] (coerce! x t prev)))))))
+                   [:array elt [:cval (str (count (:exprs e)))]])
+          :repeat (let [ex (some-> expected shallow)
+                        elt (if (#{:array :slice} (first ex)) (second ex) (fresh :ty))]
+                    (let [t (check-expr (:expr e) elt)] (coerce! (:expr e) t elt))
+                    (anon-const! (:count e) true)
+                    [:array elt (c/lower-const-arg (:count e))])
+          :assign (let [lt (binding [*mutable-place* true] (check-expr (:lhs e) nil))] (let [rt (check-expr (:rhs e) lt)] (coerce! (:rhs e) rt lt)) unit)
+          ;; check_overloaded_binop with IsAssign: the left side a mutated place (its derefs DerefMut), the right
+          ;; operand's expectation the `?R` that `L: OpAssign<?R>`'s selection binds (a scalar's: its own type), the
+          ;; right operand coerced to it (`String += &&str`)
+          :assign-op (let [op (str/replace (str (:op e)) "=" "")
+                           lt (binding [*mutable-place* true] (check-expr (:lhs e) nil))
+                           tr (c/lang (str (get op-traits op) "_assign"))
+                           rv (when (and tr (not (tvar? (shallow lt))) (not (scalar? lt)))
+                                (let [v (fresh :ty) sn (snapshot) r (impls-for (shallow lt) tr [v])]
+                                  (if (and (vector? r) (not (tvar? (shallow v)))) v (do (rollback! sn) nil))))
+                           rt (check-expr (:rhs e) (or rv (when-not (#{"<<" ">>"} op) lt)))]
+                       (if (builtin-binop? op lt rt)
+                         (when-not (#{"<<=" ">>="} (:op e)) (unify lt rt))
+                         ;; an overloaded compound assignment: OpAssign<R> for the left side, which is autoref'd mutably
+                         (when tr
+                           (if rv
+                             (do (coerce! (:rhs e) rt rv) (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] true lt]]]))
+                             (when (impls-for (shallow lt) tr [rt])
+                               (adjust! (:lhs e) [["Borrow" [:ref [:re-erased] true lt]]])))))
+                       unit)
+          :block (if (:label e)
+                   ;; a labeled block: its tail and its breaks' values coerced to one type
+                   (let [brk (atom nil)
+                         t (binding [*loops* (cons {:label (:label e) :brk brk :block? true} *loops*)] (check-block (:block e) expected))]
+                     (cond (nil? @brk) t
+                           (= [:never] (shallow t)) @brk
+                           :else (do (unify t @brk) t)))
+                   (check-block (:block e) expected))
+          :if (let [ct (check-expr (:cond e) [:bool])
+                    tt (check-expr (:then e) (when (:else e) expected))]
+                (if (:else e)
+                  (let [et (check-expr (:else e) expected)]
+                    (lub! [[(:then e) tt] [(:else e) et]] (when (and expected (not (tvar? (shallow expected)))) expected)))
+                  (do (coerce! (:then e) tt unit) unit)))
+          ;; the enclosing breakable scopes (loops, labeled blocks) by label: a `break` without one leaves the innermost loop
+          :loop (let [brk (atom nil)]
+                  (binding [*loops* (cons {:label (:label e) :brk brk} *loops*)]
+                    (check-block (:block e) unit))
+                  (or @brk (if (= :while (:source e)) unit [:never])))
+          :break (let [target (if-let [l (:label e)] (some #(when (= l (:label %)) %) *loops*) (some #(when-not (:block? %) %) *loops*))
+                       b (:brk target)]
+                   (when-let [x (:expr e)]
+                     (let [t (check-expr x (some-> b deref))] (when b (if @b (coerce! x t @b) (reset! b t)))))
+                   (when (and b (not @b)) (reset! b unit))
+                   [:never])
+          :continue [:never]
+          :ret (do (when-let [x (:expr e)] (let [t (check-expr x *ret*)] (coerce! x t *ret*))) [:never])
+          :match (let [st (check-expr (:expr e) nil)
+                       arms (vec (for [a (:arms e)]
+                                   (binding [*env* (conj *env* {})]
+                                     (let [env (atom {})]
+                                       (check-pat (:pat a) st env :none)
+                                       (binding [*env* (conj *env* @env)]
+                                         (when (:guard a) (check-expr (:guard a) [:bool]))
+                                         [(:body a) (check-expr (:body a) expected)])))))]
+                   (lub! arms (when (and expected (not (tvar? (shallow expected)))) expected)))
+          :let (let [t (check-expr (:init e) nil) env (atom {})]
+                 (check-pat (:pat e) t env :none)
+                 (set! *env* (conj *env* @env))
+                 [:bool])
+          :struct (if-let [[t vid args] (struct-ty e)]
+                    (let [fs (into {} (adt-fields vid args))]
+                      (doseq [f (:fields e)]
+                        (let [fty (get fs (:ident f))
+                              x (check-expr (:expr f) fty)]
+                          (when fty (coerce! (:expr f) x fty))))
+                      ;; the functional update's base has the struct's type (coerced to it)
+                      (when (:base e) (let [bt (check-expr (:base e) t)] (coerce! (:base e) bt t)))
+                      t)
+                    (do (doseq [f (:fields e)] (check-expr (:expr f) nil)) [:unknown]))
+          :drop-temps (check-expr (:expr e) expected)
+          :closure (check-closure e expected)
+          (do (doseq [x (vals (select-keys e [:receiver :args :expr :body :exprs]))]
+                (cond (map? x) (when (:node x) (try (check-expr x nil) (catch Throwable _ nil)))
+                      (vector? x) (doseq [y x] (when (map? y) (try (check-expr y nil) (catch Throwable _ nil))))))
+              [:unknown]))]
+    (record! e ty)))
+
+(defn- check-stmt [s]
+  (case (:kind s)
+    :let (let [_ (doseq [l (ty-consts (:ty s))] (anon-const! l true))
+               decl (when (:ty s) (body-ty (:ty s)))
+               ;; check_decl_initializer: the initializer coerced to the local's type (a fresh variable without a type
+               ;; annotation, which a block initializer takes as its coercion target)
+               t (if-let [init (:init s)]
+                   (let [lt (or decl (fresh :ty)) x (check-expr init lt)] (coerce! init x lt) lt)
+                   (or decl (fresh :ty)))
+               env (atom {})]
+           (check-pat (:pat s) t env :none)
+           (when (:els s) (let [bt (check-block (:els s) [:never])] bt))
+           (set! *env* (conj *env* @env))
+           (when (:init s) t))
+    (:semi :expr) (check-expr (:expr s) (when (= :expr (:kind s)) unit))
+    nil))
+
+(defn- fresh-diverging
+  "A type variable a diverging expression was coerced to (its fallback is the never type's: `()`, `!` since 2024)"
+  []
+  (let [v (fresh :ty)] (swap! *vars* assoc-in [(nth v 2) :diverging] true) v))
+
+(defn check-block [b expected]
+  (binding [*env* (conj *env* {})]
+    (let [diverges (atom false)]
+      ;; a statement of the never type makes the block diverge (FnCtxt::diverges)
+      (doseq [s (:stmts b)]
+        (let [t (check-stmt s)]
+          (when (and (vector? t) (= [:never] (shallow t))) (reset! diverges true))))
+      (if-let [x (:expr b)]
+        ;; check_block_with_expected: the tail's CoerceMany to the expected type (else a fresh variable), which is then
+        ;; the block's type; a diverging tail's target falls back as diverging variables do
+        (let [has? (and expected (not (tvar? (shallow expected))))
+              var? (and expected (tvar? (shallow expected)) (= :ty (second (shallow expected))))
+              t (check-expr x expected)]
+          (cond has? (if (coerce! x t expected) expected t)
+                ;; an expected type variable (a local's, ExpectHasType(?T)): the tail coerced into it, the block's type
+                var? (do (coerce! x t expected) expected)
+                (= [:never] (shallow t)) (let [v (fresh-diverging)] (coerce! x t v) v)
+                :else t))
+        ;; no tail: `!` when the block diverges (nothing pushed), else the forced unit
+        (if @diverges [:never] unit)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Patterns (pat.rs, with the default binding modes)
+
+(defn- bm-text [by-ref mutbl] (str "BindingMode(" (case by-ref :not "Yes(Not, Not)" :mut "Yes(Not, Mut)" "No") ", " (if mutbl "Mut" "Not") ")"))
+
+(defn check-pat
+  "check_pat: P against EXPECTED; bindings into the atom ENV; DBM the default binding mode (:none, :ref, :ref-mut)"
+  [p expected env dbm]
+  (let [ex (shallow expected)
+        ;; peel references for non-reference patterns (match ergonomics)
+        [ex dbm] (if (and (#{:tuple :struct :tuple-struct :lit} (:kind p)) (= :ref (first ex)))
+                   (loop [t ex m dbm] (if (= :ref (first t)) (recur (shallow (nth t 3)) (if (or (= m :ref) (not (nth t 2))) :ref :ref-mut)) [t m]))
+                   [ex dbm])]
+    (case (:kind p)
+      :binding (let [by-ref (or (:by-ref p) (case dbm :ref :not :ref-mut :mut nil))
+                     t (case by-ref :not [:ref [:re-erased] false ex] :mut [:ref [:re-erased] true ex] ex)]
+                 (swap! env assoc (:name p) t)
+                 (when (and (vector? (:span p)) (not (:synthesized p)))
+                   (swap! *facts* conj {:owner *owner* :span (:span p) :ty t :pat true :mode (bm-text by-ref (:mutbl p))}))
+                 (when (:sub p) (check-pat (:sub p) ex env dbm)))
+      :tuple (let [ts (if (= :tuple (first ex)) (second ex) (vec (repeatedly (count (:pats p)) #(fresh :ty))))]
+               (when-not (= :tuple (first ex)) (unify ex [:tuple ts]))
+               (doseq [[sp t] (map vector (:pats p) ts)] (check-pat sp t env dbm)))
+      :ref (let [inner (if (= :ref (first ex)) (nth ex 3) (fresh :ty))] (check-pat (:pat p) inner env :none))
+      :lit (let [t (check-expr (:expr p) ex)] (unify t ex))
+      (:tuple-struct :struct :path)
+      (let [rd (if (:lang (:path p)) (when-let [lp (c/lang (:ident (first (:segs (:path p)))))] [:ext lp "Variant"]) (c/res-def (:path p)))]
+        (when (= :ext (first rd))
+          (let [vp (let [x (second rd)] (if (re-find #"\{constructor#\d+\}$" x) (c/path-parent x) x))]
+            (when-let [[t vk args] (std-struct-ty vp)]
+              (unify ex t)
+              (let [fs (adt-fields vk args)]
+                (case (:kind p)
+                  :tuple-struct (doseq [[sp [_ ft]] (map vector (:pats p) fs)] (check-pat sp ft env dbm))
+                  :struct (let [m (into {} fs)]
+                            (doseq [[i f] (map-indexed vector (:fields p))]
+                              (check-pat (:pat f) (or (get m (:ident f)) (second (nth fs i nil)) [:unknown]) env dbm)))
+                  nil)))))
+        (when (= :local (first rd))
+          (let [[_ id k] rd d (c/def-of id)
+                ;; a constructor's resolution finds its variant (the same identifier) or struct
+                vid (cond (= "Variant" k) id
+                          (= "Variant" (:kind d)) id
+                          (str/starts-with? (str k) "Ctor") (if (:variant d) (:variant d) (or (:adt d) id))
+                          :else id)
+                adt (or (:adt (c/def-of vid)) vid)
+                args (if (and (= :adt (first ex)) (= adt (second ex))) (nth ex 2) (let [a (fresh-args adt)] (unify ex [:adt adt a]) a))
+                fs (adt-fields vid args)]
+            (case (:kind p)
+              :tuple-struct (doseq [[sp [_ t]] (map vector (:pats p) fs)] (check-pat sp t env dbm))
+              :struct (let [m (into {} fs)] (doseq [f (:fields p)] (check-pat (:pat f) (get m (:ident f) [:unknown]) env dbm)))
+              nil))))
+      :or (doseq [sp (:pats p)] (check-pat sp ex env dbm))
+      ;; a slice pattern: each element the array's or slice's element type, a rest binding (`r @ ..`) the subslice
+      :slice (let [[ex dbm] (if (= :ref (first ex))
+                               (loop [t ex m dbm] (if (= :ref (first t)) (recur (shallow (nth t 3)) (if (or (= m :ref) (not (nth t 2))) :ref :ref-mut)) [t m]))
+                               [ex dbm])
+                   elt (if (#{:array :slice} (first ex)) (second ex) (fresh :ty))]
+               (doseq [sp (:pats p)]
+                 (cond (= :rest (:kind sp)) nil
+                       (and (= :binding (:kind sp)) (= :rest (:kind (:sub sp))))
+                       (check-pat (dissoc sp :sub) (if (= :slice (first ex)) ex [:slice elt]) env dbm)
+                       :else (check-pat sp elt env dbm))))
+      nil)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Bodies, fallback and writeback
+
+(defn has-num-var?
+  "An integer or float variable inside a type"
+  [t]
+  (let [t (shallow t)]
+    (cond (tvar? t) (boolean (#{:int :float} (second t)))
+          (and (vector? t) (keyword? (first t))) (boolean (some #(cond (vector? %) (has-num-var? %) :else false) (rest t)))
+          (vector? t) (boolean (some has-num-var? t))
+          :else false)))
+
+(defn- has-var? [t]
+  (let [t (shallow t)]
+    (cond (tvar? t) true
+          (and (vector? t) (keyword? (first t))) (boolean (some #(cond (vector? %) (has-var? %) (map? %) (some has-var? (vals %)) :else false) (rest t)))
+          (vector? t) (boolean (some has-var? t))
+          :else false)))
+
+(defn solve-obligations!
+  "select_obligations_where_possible: each pending trait obligation whose self type is known selects its impl (binding
+  the other arguments' variables, a FromIterator's element), each projection obligation's term unified with the
+  normalized projection; again while something changes"
+  []
+  (loop [n 0]
+    (let [before @*vars*
+          ;; each obligation processed: :keep while it may still make progress, else dropped (selected, normalized, holding
+          ;; by assumption, or failed), as the fulfillment context removes what it has processed
+          step (fn [o]
+                 (case (first o)
+                   :trait (let [[tr args] (second o) self (shallow (first args))]
+                            ;; the builtin Fn impls of a callable: its signature's inputs are the obligation's tuple
+                            (if (and (fn-traits tr) (#{:fndef :closure :fnptr} (first self)) (= :tuple (first (shallow (second args)))))
+                              (let [sig (case (first self) :closure (nth self 2) :fndef (sig-of self) :fnptr (erase (second self)))
+                                    tys (second (shallow (second args)))]
+                                (when (= (count tys) (count (:inputs sig))) (let [sn (snapshot)] (when-not (unify-all (vec (:inputs sig)) (vec tys)) (rollback! sn))))
+                                nil)
+                              (cond (or (= [:unknown] self)
+                                        (#{(c/lang "sized") (c/lang "meta_sized")} tr)
+                                        (not (some has-var? args))) nil
+                                    (and (tvar? self) (not (#{:int :float} (second self)))) :keep
+                                    :else (let [sn (snapshot) r (impls-for self tr (vec (rest args)))]
+                                            (cond (vector? r) nil
+                                                  (= :ambiguous r) :keep
+                                                  :else (do (rollback! sn) nil))))))
+                   :proj (let [[_ ad args term] o self (shallow (first args))]
+                           (if (tvar? self)
+                             :keep
+                             (let [nv (normalize [:proj ad args])]
+                               (if (not= :proj (first nv))
+                                 (let [sn (snapshot)] (when-not (unify nv term) (rollback! sn)) nil)
+                                 (when (some has-var? args) :keep)))))
+                   nil))]
+      (when *obligations*
+        (let [os @*obligations*
+              kept (vec (filter #(= :keep (step %)) os))]
+          ;; obligations registered while these were processed are kept as well
+          (swap! *obligations* (fn [now] (into kept (drop (count os) now))))))
+      (when (and (not= before @*vars*) (< n 8)) (recur (inc n))))))
+
+(defn- fallback!
+  "fallback.rs: unresolved integer variables are i32, float variables f64"
+  []
+  (doseq [[id {:keys [kind val diverging]}] @*vars*]
+    (when (nil? val)
+      (case kind
+        :int (bind! [:infer :int id] [:int "i32"])
+        :float (bind! [:infer :float id] [:float "f64"])
+        ;; diverging variables: `()`, the never type since edition 2024 (never_type_fallback)
+        :ty (when diverging (bind! [:infer :ty id] (if (>= (long c/*edition*) 2024) [:never] unit)))
+        nil))))
+
+(defn- erase-all [t]
+  (cond (and (vector? t) (= :re-bound (first t)) (= :inner (nth t 2 nil))) t   ; bound within the type: kept
+        (c/region? t) [:re-erased]
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (erase-all %) (map? %) (into {} (for [[k v] %] [k (erase-all v)])) :else %) (rest t)))
+        (vector? t) (mapv erase-all t)
+        :else t))
+
+(defn- scalar? [t]
+  (let [t (shallow t)]
+    (or (#{:bool :char :int :uint :float :fnptr :ptr} (first t)) (and (tvar? t) (#{:int :float} (second t))))))
+
+(defn- unadjust!
+  "Drop the last adjustment of E's fact"
+  [e]
+  (swap! *facts* (fn [fs] (let [i (last (keep-indexed (fn [i f] (when (and (= (:span f) (:span e)) (= (:kind f) (get kind-names (:kind e)))) i)) fs))]
+                            (if (and i (seq (:adj (nth fs i)))) (update-in fs [i :adj] pop) fs)))))
+
+(defn- check-casts!
+  "check_casts' try_coercion_cast: a reference cast to a raw pointer, a function item or non-capturing closure to a fn
+  pointer, `&mut` to `&`: the coercion's adjustments on the operand"
+  []
+  (doseq [[x from to] (when *casts* @*casts*)]
+    (let [f (shallow from) t (shallow to)]
+      (when (or (and (= :ref (first f)) (= :ptr (first t)))
+                ;; (an unsizing cast: `Box::new(c) as Box<dyn Fn()>`)
+                (and (= :adt (first f)) (= :adt (first t)) (= (second f) (second t)) (#{"alloc::boxed::Box" "alloc::rc::Rc" "alloc::sync::Arc"} (second f))
+                     (= :dyn (first (shallow (first (nth t 2))))))
+                (and (#{:fndef :closure} (first f)) (= :fnptr (first t)))
+                (and (= :ref (first f)) (= :ref (first t)) (nth f 2) (not (nth t 2))))
+        (let [sn (snapshot)] (when-not (coerce! x from to) (rollback! sn)))))))
+
+(defn- fix-scalar-builtins!
+  "writeback's fix_scalar_builtin_expr: an operator both of whose operands ended scalar is builtin, its by-reference
+  operands' autorefs dropped"
+  []
+  (doseq [[l r lt rt] (when *scalar-fixes* @*scalar-fixes*)]
+    (when (and (scalar? (deep-normalize lt)) (scalar? (deep-normalize rt)))
+      (unadjust! l)
+      (when r (unadjust! r)))))
+
+(defn- print-fact-ty
+  "writeback: a fact's type resolved, normalized, its regions erased"
+  [t]
+  (let [t (erase-all (deep-normalize t))]
+    (binding [c/*in-value* false] (c/print-ty t))))
+
+(defn- check-body
+  "One typeck root's body: a function's parameters and block, a constant's or static's initializer"
+  [d]
+  (let [n (:node d) k (:kind d)
+        owner (binding [c/*in-value* true] (c/print-def-path (:id d) []))
+        facts (atom [])]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *norm-cache* (atom {}) *param-env-cache* (atom {}) *scalar-fixes* (atom []) *casts* (atom []) *closures* (atom []) *closure-calls* (atom []) *owner* owner *env* [{}] *loops* nil]
+      (c/in-def (:id d)
+        (if (#{"Fn" "AssocFn"} k)
+          (let [sig (erase (c/fn-sig (:id d)))
+                env (atom {})
+                _ (doseq [l (ty-consts (concat (map :ty (:params n)) [(:output n)]))] (anon-const! l false))]
+            (doseq [[p t] (map vector (:params n) (:inputs sig))] (check-pat (:pat p) t env :none))
+            ;; a return-position `impl Trait` defined here: inside its defining body a hidden type variable, its bounds
+            ;; obligations on it (replace_opaque_types_with_inference_vars)
+            (let [out (:output sig)
+                  out (if (= :opaque (first out))
+                        (let [h (fresh :ty)]
+                          (when *obligations*
+                            (doseq [cl (second out)]
+                              ;; (each bound's self type, the opaque type, the hidden type's variable)
+                              (case (first cl)
+                                :trait (swap! *obligations* conj (assoc-in cl [1 1 0] h))
+                                :proj (swap! *obligations* conj (assoc-in cl [2 0] h))
+                                nil)))
+                          h)
+                        out)]
+            (binding [*env* [@env] *ret* out *anon-order* (body-const-order (:body n) @*anon-consts*)]
+              (let [t (check-block (:body n) out)
+                    be {:kind :block :span (:span (:body n))}]
+                ;; the body's block expression is a fact of its own, coerced to the return type
+                (record! be t)
+                (coerce! be t out)
+                t))))
+          (let [_ (doseq [l (ty-consts (:ty n))] (anon-const! l false))
+                t (erase (c/type-of (:id d)))]
+            (binding [*ret* t] (let [x (check-expr (:expr n) t)] (coerce! (:expr n) x t))))))
+      (solve-obligations!)
+      (fallback!)
+      (check-casts!)
+      (closure-kinds!)
+      (solve-obligations!)
+      (fix-scalar-builtins!)
+      (when *profile*
+        (binding [*out* *err*]
+          (println "profile" owner "budget left" @*budget*)
+          (doseq [[k n] (take 12 (sort-by (comp - val) @*profile*))] (println "  " n k)))
+        (reset! *profile* {}))
+      (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %))) (update :adj (fn [as] (mapv (fn [[k t]] [k (if (string? t) t (print-fact-ty t))]) (or as []))))))
+            @facts))))
+
+(defn- repr-int
+  "An enum's discriminant type: its #[repr(int)], else isize"
+  [enum-node]
+  (or (some (fn [a] (some #(when (and (string? %) (re-matches #"[iu](8|16|32|64|128|size)" %)) %) (:toks a))) (:attrs enum-node))
+      "isize"))
+
+(defn- check-discriminant
+  "An explicit discriminant (`A = 1`): the anonymous constant `Variant::{constant#0}`, typed by the enum's repr"
+  [d]
+  (let [v (:node d)
+        owner (str (binding [c/*in-value* true] (c/print-def-path (:id d) [])) "::{constant#0}")
+        t (get c/prim-tys (repr-int (:node (c/def-of (:parent d)))))
+        facts (atom [])]
+    (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *owner* owner *env* [{}] *loops* nil *obligations* (atom [])]
+      (c/in-def (:parent d)
+        (let [x (check-expr (:disr v) t)] (coerce! (:disr v) x t)))
+      (fallback!)
+      (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %))) (update :adj (fn [as] (mapv (fn [[k t]] [k (if (string? t) t (print-fact-ty t))]) (or as []))))))
+            @facts))))
+
+(defn check-crate
+  "RF9: every typeck root's facts (within collect/with-crate)"
+  []
+  (binding [*scope-traits* (std-traits-in-scope) *profile* (when (System/getenv "TYPECK_PROFILE") (atom {}))]
+  (vec (mapcat (fn [d]
+                 (try (if (= "Variant" (:kind d)) (check-discriminant d) (check-body d))
+                      (catch Throwable ex
+                        (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "body" (:id d) "failed:" ex) (.printStackTrace ex)))
+                        [{:owner "?" :error (str ex)}])))
+               (filter (fn [d] (or (and (= "Variant" (:kind d)) (:disr (:node d)))
+                                   (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
+                                   (and (or (str/starts-with? (str (:kind d)) "Const") (str/starts-with? (str (:kind d)) "Static")
+                                            (str/starts-with? (str (:kind d)) "AssocConst"))
+                                        (:expr (:node d)))))
+                       (c/defs))))))
