@@ -1,0 +1,152 @@
+;; The Unix library's core externals (doc/ocaml/DEFERRED-TRIAGE.md, §4 item 2, "As built: OT9's second fix"), the AOT
+;; runtime's mirror of oi's ext_unix.go: the caml_unix_* primitives of otherlibs/unix's unix.ml (OCaml 5.5.0, LGPL-2.1 with the
+;; linking exception) that its initialisation and the core need: errors, the environment, process ids, time, sleeping, the
+;; working directory, stat. A caml_unix_* primitive not here is a throw of Rt/missing, as every external the runtime lacks.
+;;
+;; Java's limits, and how they are met: no setenv (putenv and unsetenv keep an overlay, ExtUnix/env, that ExtSys's getenv
+;; reads first), no chdir (ExtSys/cwd, as Sys.chdir), no stat(2) record (stat's ints but the kind, the permissions, the size
+;; and the times are 0: st_dev, st_ino, st_nlink, st_uid, st_gid, st_rdev), gettimeofday to the millisecond.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.io File)
+        '(java.util HashMap Map Map$Entry ArrayList))
+
+(defclass ^:public ^:final ExtUnix
+  ;; Unix.error's constant constructors' errnos (Linux), in unix.mli's order, and strerror's texts (oi's, Go's syscall)
+  (field ^:static ^:final ^int/1 errnos (new int/1 [7 13 11 9 16 10 35 33 17 14 27 4 22 5 21 24 31 36 23 19 2 8 37 12 28 38 20 39 25 6 1 32 34 30 29 3 18 11 115 114 88 89 90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 40 75]))
+  (field ^:static ^:final ^String/1 texts (new String/1 ["Argument list too long" "Permission denied" "Resource temporarily unavailable" "Bad file descriptor" "Device or resource busy" "No child processes" "Resource deadlock avoided" "Numerical argument out of domain" "File exists" "Bad address" "File too large" "Interrupted system call" "Invalid argument" "Input/output error" "Is a directory" "Too many open files" "Too many links" "File name too long" "Too many open files in system" "No such device" "No such file or directory" "Exec format error" "No locks available" "Cannot allocate memory" "No space left on device" "Function not implemented" "Not a directory" "Directory not empty" "Inappropriate ioctl for device" "No such device or address" "Operation not permitted" "Broken pipe" "Numerical result out of range" "Read-only file system" "Illegal seek" "No such process" "Invalid cross-device link" "Resource temporarily unavailable" "Operation now in progress" "Operation already in progress" "Socket operation on non-socket" "Destination address required" "Message too long" "Protocol wrong type for socket" "Protocol not available" "Protocol not supported" "Socket type not supported" "Operation not supported" "Protocol family not supported" "Address family not supported by protocol" "Address already in use" "Cannot assign requested address" "Network is down" "Network is unreachable" "Network dropped connection on reset" "Software caused connection abort" "Connection reset by peer" "No buffer space available" "Transport endpoint is already connected" "Transport endpoint is not connected" "Cannot send after transport endpoint shutdown" "Too many references: cannot splice" "Connection timed out" "Connection refused" "Host is down" "No route to host" "Too many levels of symbolic links" "Value too large for defined data type"]))
+  ;; the environment's changes: name -> value, or nil for an unset name
+  (field ^:public ^:static ^:final ^HashMap env (HashMap.))
+
+  ;; ---- Unix_error
+
+  ;; an errno as a Unix.error: its constructor's index, else EUNKNOWNERR errno
+  (method ^:static errorValue [^int e]
+    (loop [^int i 0]
+      (cond (>= i (alength errnos)) (Block. 0 (new Object/1 [(Long/valueOf (long e))]))
+            (== (aget errnos i) e) (Long/valueOf (long i))
+            :else (recur (unchecked-inc-int i)))))
+  (method ^:static errnoOf ^int [v]
+    (if (instance? Block v)
+      (Rt/ii (aget (.-f (cast Block v)) 0))
+      (let [i (Rt/ii v)] (if (and (>= i 0) (< i (alength errnos))) (aget errnos i) 0))))
+
+  ;; Unix.Unix_error (e, fn, arg), the exception unix.ml registers
+  (method ^:public ^:static error ^RuntimeException [^int e ^String fn ^String arg]
+    (let [v (.get Rt/named "Unix.Unix_error")]
+      (when (nil? v) (throw (Rt/invalidArg "Exception Unix.Unix_error not initialized, please link unix.cma")))
+      (let [ctor (if (and (instance? Block v) (== (.-tag (cast Block v)) 0)) (aget (.-f (cast Block v)) 0) v)]
+        (Exn. (Block. 0 (new Object/1 [ctor (ExtUnix/errorValue e) (Rt/ofUtf8 fn) (Rt/ofUtf8 arg)]))))))
+
+  (method ^:public ^:static caml_unix_error_message [e]
+    (let [n (ExtUnix/errnoOf e)]
+      (loop [^int i 0]
+        (cond (>= i (alength errnos)) (Rt/s (java-str "Unknown error " n))
+              (== (aget errnos i) n) (Rt/s (aget texts i))
+              :else (recur (unchecked-inc-int i))))))
+
+  ;; ---- the environment
+
+  ;; a name's value with the overlay (ExtSys/getenv's)
+  (method ^:public ^:static getenv ^String [^String k]
+    (if (.containsKey env k) (cast String (.get env k)) (System/getenv k)))
+
+  (method ^:static checkName ^String [n ^String fn]
+    (let [k (Rt/utf8 n)]
+      (when (or (not (ExtSys/cSafe n)) (.isEmpty k) (.contains k "=")) (throw (ExtUnix/error 22 fn k)))
+      k))
+
+  (method ^:public ^:static caml_unix_environment [u]
+    (let [m (HashMap. (System/getenv))
+          out (ArrayList.)]
+      (.putAll m env)
+      (let [it (.iterator (.entrySet m))]
+        (while (.hasNext it)
+          (let [e (cast Map$Entry (.next it))]
+            (when (some? (.getValue e))
+              (.add out (Rt/ofUtf8 (java-str (.getKey e) "=" (.getValue e))))))))
+      (Block. 0 (.toArray out (new Object/1 0)))))
+  (method ^:public ^:static caml_unix_unsafe_environment [u] (ExtUnix/caml_unix_environment u))
+  (method ^:public ^:static caml_unix_putenv [n v]
+    (let [k (ExtUnix/checkName n "putenv")]
+      (when (not (ExtSys/cSafe v)) (throw (ExtUnix/error 22 "putenv" k)))
+      (.put env k (Rt/utf8 v))
+      Rt/UNIT))
+  (method ^:public ^:static caml_unix_unsetenv [n]
+    (let [k (ExtUnix/checkName n "unsetenv")]
+      (.put env k nil)
+      Rt/UNIT))
+
+  ;; ---- processes and time
+
+  (method ^:public ^:static caml_unix_getpid [u] (Long/valueOf (.pid (ProcessHandle/current))))
+  (method ^:public ^:static caml_unix_getppid [u]
+    (let [p (.parent (ProcessHandle/current))]
+      (Long/valueOf (if (.isPresent p) (.pid (cast ProcessHandle (.get p))) 1))))
+  (method ^:public ^:static caml_unix_time [u]
+    (Double/valueOf (double (unchecked-divide (System/currentTimeMillis) 1000))))
+  (method ^:public ^:static caml_unix_gettimeofday [u]
+    (Double/valueOf (unchecked-divide (double (System/currentTimeMillis)) 1000.0)))
+  ;; sleep, a float of seconds, outside the runtime's lock
+  (method ^:public ^:static caml_unix_sleep [d]
+    (let [s (Rt/d d)]
+      (when (> s 0.0)
+        (Gil/unlock)
+        (try (Thread/sleep (unchecked-long (* s 1000.0)))
+             (catch InterruptedException e nil)
+             (finally (Gil/lock))))
+      Rt/UNIT))
+
+  ;; ---- the working directory (ExtSys/cwd) and stat
+
+  (method ^:public ^:static caml_unix_getcwd [u] (Rt/ofUtf8 ExtSys/cwd))
+  (method ^:public ^:static caml_unix_chdir [n]
+    (let [s (Rt/utf8 n)
+          f (File. (ExtSys/resolve s))]
+      (when (not (.exists f)) (throw (ExtUnix/error (if (.equals (ExtSys/statError s) "Not a directory") 20 2) "chdir" s)))
+      (when (not (.isDirectory f)) (throw (ExtUnix/error 20 "chdir" s)))
+      (set! ExtSys/cwd (.getPath (.toFile (.normalize (.toPath (.getAbsoluteFile f))))))
+      Rt/UNIT))
+
+  ;; a symbolic link (no Files.isSymbolicLink in the runtime's world): its canonical path is not its parent's and its name
+  (method ^:static isLink ^boolean [^File f]
+    (try
+      (let [a (.getAbsoluteFile f)
+            par (.getParentFile a)]
+        (and (some? par)
+             (not (.equals (.getCanonicalPath a) (java-str (.getCanonicalPath par) "/" (.getName a))))
+             (or (.exists a) (.exists par))))
+      (catch java.io.IOException e false)))
+
+  (method ^:static stat [n ^String fn ^boolean follow]
+    (let [s (Rt/utf8 n)
+          f (File. (ExtSys/resolve s))
+          link (and (not follow) (ExtUnix/isLink f))]
+      (when (and (not link) (not (.exists f)))
+        (throw (ExtUnix/error (if (.equals (ExtSys/statError s) "Not a directory") 20 2) fn s)))
+      (let [kind (cond link 4 (.isDirectory f) 1 (.isFile f) 0 :else 2)
+            perm (bit-or (if (.canRead f) 0400 0) (bit-or (if (.canWrite f) 0200 0) (if (.canExecute f) 0111 0)))
+            t (Double/valueOf (unchecked-divide (double (.lastModified f)) 1000.0))
+            z (Long/valueOf 0)]
+        (Block. 0 (new Object/1 [z z (Long/valueOf kind) (Long/valueOf perm) z z z z (Long/valueOf (.length f)) t t t])))))
+  (method ^:public ^:static caml_unix_stat [n] (ExtUnix/stat n "stat" true))
+  (method ^:public ^:static caml_unix_lstat [n] (ExtUnix/stat n "lstat" false))
+
+  ;; an inet_addr is its 4 or 16 bytes as a string; unix.ml's initialisation makes inet_addr_any and the loopbacks (the
+  ;; dotted quads and "::", "::1" are all it needs)
+  (method ^:public ^:static caml_unix_inet_addr_of_string [v]
+    (let [s (Rt/utf8 v)]
+      (cond (.equals s "::") (new byte/1 16)
+            (.equals s "::1") (let [b (new byte/1 16)] (aset b 15 (unchecked-byte 1)) b)
+            :else
+            (let [parts (.split s "\\.")]
+              (when (not (== (alength parts) 4)) (throw (Rt/failwith "inet_addr_of_string")))
+              (let [b (new byte/1 4)]
+                (loop [^int i 0]
+                  (when (< i 4)
+                    (let [x (try (Integer/parseInt (aget parts i)) (catch NumberFormatException e -1))]
+                      (when (or (< x 0) (> x 255)) (throw (Rt/failwith "inet_addr_of_string")))
+                      (aset b i (unchecked-byte x)))
+                    (recur (unchecked-inc-int i))))
+                b))))))

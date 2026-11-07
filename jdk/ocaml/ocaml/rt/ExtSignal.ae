@@ -1,0 +1,145 @@
+;; Signals (doc/ocaml/DEFERRED-TRIAGE.md, §3 fix 7, OT18 (a), "As built: OT9's fixes 6-8"), the AOT runtime's mirror of the part of
+;; oi's ext_signal.go Java allows: the signals a program sends itself. Java receives no signal of the OS, so a signal is the
+;; runtime's own: Unix.kill of the process's own pid (or 0) and Unix.alarm's timer record it as pending (a bit a signal), and it is
+;; delivered at a call's or a loop's tick (Rt/tick) and at the end of the externals that send or unblock one, unless the mask blocks
+;; it (one mask a thread, TState's, a new thread or domain starting with its creator's); a pipe's wait is interrupted by a signal its thread
+;; takes (Pipe: the handlers run, the read or write ends with EINTR, a channel's retries). Unix.sigprocmask, sigpending, sigwait and
+;; sigsuspend over the pending set; a pending signal with the default action ends the process with status 128 + its number (the
+;; ones whose default is to be ignored are dropped). Signals sent to another process, and the interruption of the other blocking calls
+;; (sockets, sleeps), stay oi's.
+
+(in-ns 'ocaml.rt)
+
+(defclass ^:public ^:final ExtSignal
+  (field ^:public ^:static ^long pending 0)
+  (field ^:static ^boolean insig false)
+  ;; the alarm: its generation (a new alarm cancels the last) and its time (System/currentTimeMillis), 0 when none is armed
+  (field ^:static ^long alarmGen 0)
+  (field ^:static ^long alarmAt 0)
+
+  (method ^:static bit ^long [^long n] (bit-shift-left 1 n))
+
+  (method ^:static maskOf ^long [l]
+    (let [xs (ExtUnixFd/ints l)]
+      (loop [^int i 0 ^long m 0]
+        (if (>= i (.size xs))
+          m
+          (let [n (ExtSys/convertSignal (Rt/l (.get xs i)))]
+            (when (or (<= n 0) (>= n 64)) (throw (Rt/invalidArg "Unix.sigprocmask: invalid signal")))
+            (recur (unchecked-inc-int i) (bit-or m (ExtSignal/bit n))))))))
+
+  (method ^:static listOf [^long m]
+    (let [out (java.util.ArrayList.)]
+      (loop [^long n 1]
+        (when (< n 64)
+          (when (not (== (bit-and m (ExtSignal/bit n)) 0))
+            (.add out (ExtSys/caml_sys_rev_convert_signal_number (Long/valueOf n))))
+          (recur (unchecked-inc n))))
+      (Rt/list (.toArray out))))
+
+  ;; a signal recorded as pending (the Gil held)
+  (method ^:public ^:static post ^void [^long n]
+    (when (and (> n 0) (< n 64) (not (== (aget ExtSys/sigAct (unchecked-int n)) 1)))
+      (set! pending (bit-or pending (ExtSignal/bit n)))
+      (Gil/broadcast)))
+
+  ;; a wait of a pipe interrupted: the pending signals the thread may take are handled, true when there were some (EINTR)
+  (method ^:public ^:static interrupted ^boolean []
+    (if (or insig (== (bit-and pending (bit-not (.-sigmask (Effects/st)))) 0))
+      false
+      (do (ExtSignal/process) true)))
+
+  ;; the default action of a signal no handler takes
+  (method ^:static dflt ^void [^long n]
+    (when (not (or (== n 17) (== n 18) (== n 23) (== n 28)))
+      (System/exit (unchecked-int (unchecked-add 128 n)))))
+
+  ;; the handlers of the pending signals the mask lets through (caml_process_pending_signals)
+  (method ^:public ^:static process ^void []
+    (when (not insig)
+      (loop []
+        (let [p (bit-and pending (bit-not (.-sigmask (Effects/st))))]
+          (when (not (== p 0))
+            (let [n (long (Long/numberOfTrailingZeros p))
+                  i (unchecked-int n)]
+              (set! pending (bit-and pending (bit-not (ExtSignal/bit n))))
+              (let [act (aget ExtSys/sigAct i)]
+                (cond (== act 2)
+                      (do (set! insig true)
+                          (try (Rt/ap1 (aget ExtSys/sigHandler i) (ExtSys/caml_sys_rev_convert_signal_number (Long/valueOf n)))
+                               (finally (set! insig false))))
+                      (== act 0) (ExtSignal/dflt n)))
+              (recur)))))))
+
+  (method ^:public ^:static caml_unix_kill [pid s]
+    (let [p (Rt/l pid)
+          n (ExtSys/convertSignal (Rt/l s))]
+      (when (not (or (== p 0) (== p (.pid (ProcessHandle/current)))))
+        (throw (ExtUnix/error 1 "kill" "")))
+      (when (or (< n 0) (>= n 65)) (throw (ExtUnix/error 22 "kill" "")))
+      (when (== n 9) (System/exit 137))
+      (ExtSignal/post n)
+      (ExtSignal/process)
+      Rt/UNIT))
+
+  (method ^:public ^:static caml_unix_sigprocmask [how l]
+    (let [st (Effects/st)
+          old (.-sigmask st)
+          m (ExtSignal/maskOf l)
+          h (Rt/l how)]
+      (set! (.-sigmask st) (cond (== h 0) m
+                       (== h 1) (bit-or old m)
+                       :else (bit-and old (bit-not m))))
+      (ExtSignal/process)
+      (ExtSignal/listOf old)))
+
+  (method ^:public ^:static caml_unix_sigpending [u] (ExtSignal/listOf (bit-and pending (.-sigmask (Effects/st)))))
+
+  (method ^:public ^:static caml_unix_sigwait [l]
+    (let [set (ExtSignal/maskOf l)]
+      (loop []
+        (let [p (bit-and pending set)]
+          (if (not (== p 0))
+            (let [n (long (Long/numberOfTrailingZeros p))]
+              (set! pending (bit-and pending (bit-not (ExtSignal/bit n))))
+              (ExtSys/caml_sys_rev_convert_signal_number (Long/valueOf n)))
+            (do (Gil/unlock)
+                (try (Thread/sleep 1) (catch InterruptedException e nil) (finally (Gil/lock)))
+                (recur)))))))
+
+  (method ^:public ^:static caml_unix_sigsuspend [l]
+    (let [st (Effects/st)
+          old (.-sigmask st)]
+      (set! (.-sigmask st) (ExtSignal/maskOf l))
+      (while (== (bit-and pending (bit-not (.-sigmask (Effects/st)))) 0)
+        (Gil/unlock)
+        (try (Thread/sleep 1) (catch InterruptedException e nil) (finally (Gil/lock))))
+      (try (ExtSignal/process) (finally (set! (.-sigmask st) old)))
+      (throw (ExtUnix/error 4 "sigsuspend" ""))))
+
+  ;; alarm n: SIGALRM in n seconds on a thread of its own, counted among the running domains while armed so that Rt/tick lets it in
+  (method ^:public ^:static caml_unix_alarm [secs]
+    (let [now (System/currentTimeMillis)
+          left (if (== alarmAt 0) 0 (Math/max (long 0) (Math/floorDiv (unchecked-add (unchecked-subtract alarmAt now) 999) (long 1000))))
+          n (Rt/l secs)]
+      (when (not (== alarmAt 0))
+        (set! Effects/domainsRunning (unchecked-dec Effects/domainsRunning)))
+      (set! alarmGen (unchecked-inc alarmGen))
+      (set! alarmAt 0)
+      (when (> n 0)
+        (let [gen alarmGen
+              at (unchecked-add now (unchecked-multiply n 1000))
+              t (Thread. (lambda Runnable []
+                           (try (Thread/sleep (Math/max (long 0) (unchecked-subtract at (System/currentTimeMillis)))) (catch InterruptedException e nil))
+                           (Gil/lock)
+                           (when (== gen alarmGen)
+                             (set! alarmAt 0)
+                             (set! Effects/domainsRunning (unchecked-dec Effects/domainsRunning))
+                             (ExtSignal/post 14)
+                             (Gil/broadcast))
+                           (Gil/unlock)))]
+          (set! alarmAt at)
+          (set! Effects/domainsRunning (unchecked-inc Effects/domainsRunning))
+          (.setDaemon t true)
+          (.start t)))
+      (Long/valueOf left))))

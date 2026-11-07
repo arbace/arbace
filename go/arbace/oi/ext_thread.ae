@@ -1,0 +1,86 @@
+(in-ns 'go.arbace.oi) (go/file "ext_thread.go" :imports [
+    [fmt "fmt"]
+    [os "os"]])
+
+;; The threads library (doc/ocaml/DEFERRED-TRIAGE.md, §4 item 5, "As built: OT9's next three fixes"): the externals of
+;; otherlibs/systhreads' thread.ml (OCaml 5.5.0, LGPL-2.1 with the linking exception; st_stubs.c read for their behaviour,
+;; written anew). A thread is a goroutine of its domain under the interpreter's lock, which plays the master lock: it is given
+;; up in blocking calls (sleeps, reads, writes, joins, a mutex's or a condition's wait) and at the calls' polls while more
+;; than one goroutine runs (thread.go's poll), as OCaml's tick thread forces a yield every 50 ms. A Thread.t is the block
+;; [| id |] (st_stubs.c's descriptor's first field, Thread.id's); its end is a channel join waits on outside the lock.
+;; Event is event.ml over the stdlib's Mutex and Condition (ext_domain.go).
+
+(go/type sysThread "sysThread is a thread's end: done is closed when its function returned.\n" (struct
+    ^{:tag (chan (struct))} done))
+
+(go/var ^{:tag int :doc "threadSeq is the last thread identifier given (the main thread is 0).\n"} threadSeq)
+
+(go/var ^{:doc "sysThreads are the threads created, by their descriptor.\n"} sysThreads (make (map Value (* sysThread))))
+
+(go/var ^{:tag (chan (struct)) :doc "lastStarted is closed when the last thread created holds the lock for the first time: threads start in the\norder of their creation, as OCaml's master lock (a FIFO of waiters) starts them (lib-threads/tls).\n"} lastStarted)
+
+(go/method threadDescr "threadDescr is th's Thread.t, made at its first use (a domain's first thread).\n" ^Value [^{:tag (* Thread)} th]
+  (when (== (.-sys th) nil)
+    (if (== (.-ID (.-Dom th)) 0)
+      (set! (.-sys th) (Tuple 0))
+      (do (inc! threadSeq)
+          (set! (.-sys th) (Tuple threadSeq)))))
+  (.-sys th))
+
+(go/func spawnThread "spawnThread runs f () on a new goroutine of th's domain, a new thread; it returns its Thread.t.\n" ^Value [^{:tag (* Thread)} th ^Value f]
+  (inc! threadSeq)
+  (let [descr (Tuple threadSeq)
+        st (addr (lit sysThread :done (make (chan (struct)))))
+        dom (.-Dom th)
+        prev lastStarted
+        mask (.-sigmask th)
+        mine (make (chan (struct)))]
+    (set! lastStarted mine)
+    (aset sysThreads descr st)
+    (.Add domainsRun 1)
+    (go ((fn []
+      (when (!= prev nil)
+        (<! prev))
+      (.Lock gil)
+      (close mine)
+      (let [nt (addr (lit Thread :Dom dom :sys descr :sigmask mask))]
+        ((fn []
+          (defer ((fn []
+            (when [r (recover)] (!= r nil)
+              (when [(values e ok) (assert (* ExitSignal) r)] ok
+                ;; exit in a thread: Stdlib.exit ran the at_exit functions, the process ends
+                (os/Exit (.-Code e)))
+              (when [(values e ok) (assert (* Exn) r)] ok
+                ;; thread.ml's wrapper catches the function's exceptions; one that escapes it ends the thread
+                (fmt/Fprintf os/Stderr "Thread %d killed on uncaught exception %s\n" (AsInt (aget (.-F (AsBlock descr)) 0)) (FormatException (.-V e)))
+                (return))
+              (when [(values ie ok) (assert (* InternalError) r)] ok
+                ;; an internal error in a thread (an external oi lacks): reported as the main program's, the process ends
+                (flushStdQuiet)
+                (fmt/Fprintf os/Stderr "%v\n" ie)
+                (os/Exit StatusInternal))
+              (panic r)))))
+          (.Apply nt f Unit))))
+      (.Add domainsRun -1)
+      (close (.-done st))
+      (.Unlock gil))))
+    descr))
+
+(go/func init []
+  (let [r RegisterExt]
+    (r "caml_thread_initialize" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+    (r "caml_thread_cleanup" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+    (r "caml_thread_new" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (spawnThread th (aget a 0))))
+    (r "caml_thread_self" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.threadDescr th)))
+    (r "caml_thread_id" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (aget (.-F (AsBlock (aget a 0))) 0)))
+    (r "caml_thread_yield" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.Yield th) Unit))
+    (r "caml_thread_join" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [(values st ok) (aget sysThreads (aget a 0))]
+        (when ok
+          (Blocking (fn [] (<! (.-done st))))))
+      Unit))
+    ;; st_stubs.c's default handler: the message on stderr (the channels were flushed by thread.ml)
+    (r "caml_thread_uncaught_exception" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (fmt/Fprintf os/Stderr "Thread %d killed on uncaught exception %s\n" (AsInt (aget (.-F (AsBlock (.threadDescr th))) 0)) (FormatException (aget a 0)))
+      Unit))
+    (r "caml_set_current_thread_name" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))))
