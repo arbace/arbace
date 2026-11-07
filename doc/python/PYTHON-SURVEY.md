@@ -3733,3 +3733,25 @@ outside this work, each for its owner).
   test_tasks: 9, all pass) and the named methods of other modules (test_threading's 3 pass, test_fstring's passes,
   test_setcomps' passes after the comprehension's locations; test_import's five as classed above). The display imports traceback when an exception is displayed (about 4.5 s on
 goi per uncaught exception, CPython does the same), `-c` imports linecache (about 1.3 s on goi).
+
+## Design: 225 (typing's runtime, PEP 695's and PEP 649's scopes)
+
+The classes `:type-params`, `:module-annotations` and `:typing-runtime`, judged by test_type_params, test_annotationlib,
+test_typing and test_type_aliases, CPython 3.14.10's own algorithms ported rather than stand-ins:
+
+- The objects: `Objects/typevarobject.c`, `genericaliasobject.c` and `unionobject.c` ported whole into typing.go: TypeVar,
+  ParamSpec, TypeVarTuple with their constructors' checks, the managed dict that holds `__module__` (a type parameter of
+  PEP 695 has none: its `__module__` is the type's), `evaluate_*` (the function, else a `_ConstEvaluator`), `__reduce__` and
+  `__mro_entries__`; ParamSpecArgs and ParamSpecKwargs as native types; TypeAliasType's constructor; `_Py_make_parameters`
+  and `_Py_subs_parameters` for GenericAlias and Union, `ga_reduce`, `ga_getattro`'s lists, the union builder.
+- The compiler: `codegen_type_param_bound_or_default` and `codegen_typealias_body` (the evaluators' `.format`, position-only,
+  default VALUE, the prologue), `codegen_finish_annotations_scope` (an `__annotate__`'s parameter named `format`),
+  `dictbytype(FREE, DEF_FREE_CLASS)` for every block, a class's type-parameter scope taking the class's private name,
+  `compiler_set_qualname` whole (the name declared global, annotation scopes looked through), and the inlined comprehension
+  in a class body under its own scopes (`_PyCompile_TweakInlinedComprehensionScopes`' `in_class_block`); a name free outside
+  and a cell inside an inlined comprehension stays free.
+- The surroundings the tests show: `__class_getitem__` of the built-in classes as real class methods, a built-in type's
+  class method a `builtin_function_or_method`, `isinstance`'s and `issubclass`'s union, `__set_name__`'s note, the number
+  slots in a built-in type's `__dict__` (typing's Protocols read them).
+
+No trade-off needs the user so far: each item has CPython's answer.
