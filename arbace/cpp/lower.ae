@@ -367,6 +367,12 @@
 
 (declare value gep-expr const-expr)
 
+(defn- md-head?
+  "Whether x is metadata's symbol: `!N`, `!name`, or a node's head, `!` (a string or a tuple), `!DILocation`, `!DIExpression`
+  ... (the structured DI nodes since llvm-read, LLVM.md §4; `!DI` and the node's text before)."
+  [x]
+  (and (symbol? x) (nil? (namespace x)) (str/starts-with? (name x) "!")))
+
 (defn- global-ref
   "The address of a global as a void pointer."
   [g]
@@ -391,6 +397,7 @@
         (complex-ld? t) '(__builtin_complex (lit long-double 0.0) (lit long-double 0.0))
         (aggregate? t) (list 'compound-lit (ctype t))
         :else (refuse :value "a zero of " (pr-str t)))
+      (md-head? v) (refuse :metadata "a metadata value " v)
       :else (local-sym v))
     (and (seq? v) (= (first v) 'g)) (global-ref v)
     (or (integer? v) (true? v) (false? v))
@@ -559,7 +566,7 @@
       (= h 'no_cfi) (value (second v) t)
       (= h 'blockaddress) (refuse :blockaddress "blockaddress")
       (= h 'asm) (refuse :inline-asm "inline assembly")
-      (#{'! '!DI} h) (refuse :metadata "a metadata value")
+      (md-head? h) (refuse :metadata "a metadata value")
       :else (refuse :const "the constant " (pr-str v)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -614,8 +621,9 @@
       getelementptr 'ptr
       phi (first args)
       select (first (nth args 1))
-      (call invoke) (let [t (second x)] (if (and (seq? t) (= (first t) 'fn)) (second t) t))
+      (call invoke callbr) (let [t (second x)] (if (and (seq? t) (= (first t) 'fn)) (second t) t))
       landingpad (second x)
+      (catchswitch catchpad cleanuppad) (refuse :windows-eh "Windows EH's " h)
       extractvalue (loop [t (first (second x)) is (nnext x)]
                      (if (empty? is) t
                          (let [rt (resolve-type t)]
@@ -1197,6 +1205,14 @@
       unreachable ['(__builtin_trap)]
       resume [(list 'cx$resume (list '.-f0 (value (nth x 2) (second x)))) (dummy-return)]
       indirectbr (refuse :indirectbr "indirectbr")
+      ;; asm goto (LLVM.md §7): an empty template with no outputs never jumps, so its fall-through edge; any other assembly is
+      ;; the C library's or the machine's, which cppi does not run
+      callbr (let [[_ rt callee] x]
+               (if (and (= rt 'void) (seq? callee) (= (first callee) 'asm) (= "" (second callee)))
+                 (edge (:to o))
+                 (refuse :callbr "callbr (asm goto) of " (pr-str callee))))
+      ;; Windows EH's funclets: the target is x86-64 Linux, whose clang writes landingpads only
+      (catchswitch catchpad cleanuppad catchret cleanupret) (refuse :windows-eh "Windows EH's " h)
       va_arg (refuse :va "the va_arg instruction")
       extractelement-dynamic (refuse :vector (str h))
       (refuse :instruction "the instruction " h)))))
@@ -1204,13 +1220,22 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Functions
 
+(defn- dbg-free
+  "A block without its debug records (#dbg_value ... #dbg_declare_value, LLVM.md §5) and its instructions without their
+  metadata attachments (`:md`, !dbg among them): what -g adds to -g0's IR at -O0, which C runs alike without (§7)."
+  [b]
+  (let [strip (fn [x] (let [[a m] (split-with #(not= % :md) x)] (if (seq m) (apply list (concat a (drop 2 m))) x)))]
+    (apply list (concat (take 2 b)
+                        (for [x (nnext b) :when (not (str/starts-with? (name (first x)) "dbg_"))]
+                          (if (= (first x) '=) (list '= (second x) (strip (nth x 2))) (strip x)))))))
+
 (defn- lower-define
   "A define's C function definition."
   [f info]
   (let [[_ _ rt ps & more] f
         o (apply hash-map more)
         nnum (count (filter #(and (vector? %) (> (count %) 1) (symbol? (peek %)) (re-matches #"%[0-9]+" (name (peek %)))) ps))
-        blocks (vec (map-indexed (fn [i b] (if (and (zero? i) (nil? (second b))) (apply list 'block (symbol (str "%" nnum)) (nnext b)) b)) (:body o)))
+        blocks (vec (map-indexed (fn [i b] (if (and (zero? i) (nil? (second b))) (apply list 'block (symbol (str "%" nnum)) (nnext b)) b)) (map dbg-free (:body o))))
         locals (atom {})
         params (vec (for [[i p] (map-indexed vector (remove #{'&} ps))]
                       (let [t (first p) nm (when (and (> (count p) 1) (or (symbol? (peek p)) (seq? (peek p))) (not (keyword? (peek p)))
