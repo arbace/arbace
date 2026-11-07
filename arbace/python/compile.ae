@@ -110,10 +110,13 @@
         symbols (:symbols b)
         scope (fn [nm] (sc/scope-of* (get symbols nm 0)))
         ;; a cell: CELL, or an inlined comprehension's cell (DEF_COMP_CELL, CPython's compiler_enter_scope)
-        cells (vec (sort (for [[nm f] symbols :when (or (= 5 (sc/scope-of* f)) (sc/has-bit? f sc/DEF_COMP_CELL))] nm)))
+        ;; a name free here and a cell in an inlined comprehension stays free: deref either way, the comprehension's cell in
+        ;; its slot (CPython's codegen_push_inlined_comprehension_locals, MAKE_CELL of a freevar)
+        cells (vec (sort (for [[nm f] symbols :when (or (= 5 (sc/scope-of* f))
+                                                        (and (sc/has-bit? f sc/DEF_COMP_CELL) (not= 4 (sc/scope-of* f))))] nm)))
+        ;; dictbytype(FREE, DEF_FREE_CLASS): a class's or a class-visible annotation scope's own name free in a child
         frees (vec (sort (for [[nm f] symbols
-                               :when (or (= 4 (sc/scope-of* f))
-                                         (and (sc/has-bit? f sc/DEF_FREE_CLASS) (= :class (:type b))))] nm)))
+                               :when (or (= 4 (sc/scope-of* f)) (sc/has-bit? f sc/DEF_FREE_CLASS))] nm)))
         cells (if (= :class (:type b))
                 (vec (sort (distinct (concat cells (when (:needs-class-closure b) ["__class__"])
                                              (when (:needs-classdict b) ["__classdict__"])
@@ -222,16 +225,18 @@
   (let [nm (mangle u nm)
         b @(:block @u)
         btype (:type b)
-        flags (get (:symbols b) nm 0)
+        ;; in a comprehension inlined in a class body its own scopes (_PyCompile_TweakInlinedComprehensionScopes' in_class_block)
+        comp-syms (:comp-syms @u)
+        flags (or (get comp-syms nm) (get (:symbols b) nm 0))
         scope (sc/scope-of* flags)
         hidden (get (:hidden @u) nm)
-        [fast deref global named] (case what :load [:load-fast :load-deref :load-global :load-name]
+        [fast deref global named] (case what :load [:load-fast :load-deref :load-global (if comp-syms :load-global :load-name)]
                                     :store [:store-fast :store-deref :store-global :store-name]
                                     :del [:delete-fast :delete-deref :delete-global :delete-name])]
     (cond
       (vector? hidden) (emit! u deref (second hidden))
       hidden (emit! u fast hidden)
-      (= scope 4) (cond (and (= what :load) (= btype :class))
+      (= scope 4) (cond (and (= what :load) (= btype :class) (not comp-syms))
                         (do (emit! u :load-locals nil) (emit! u :load-dict-or-deref (deref-index u nm)))
                         (and (= what :load) (:can-see-class b) (not= nm "__classdict__"))
                         (do (emit! u :load-deref (deref-index u "__classdict__")) (emit! u :load-dict-or-deref (deref-index u nm)))
@@ -684,14 +689,25 @@
     (expr! u (last vs))
     (doseq [e @ends] (label! u e))))
 
+(defn- qualname-of
+  "compiler_set_qualname: name under the enclosing unit u, an annotation scope's parent looked through, a name declared
+  global in it (a def or class) unqualified"
+  [u kind name comp?]
+  (let [annotation? (fn [v] (#{:annotation :type-params :type-alias :type-variable} (:kind @v)))
+        size (loop [v u n 0] (if v (recur (:parent @v) (inc n)) n))]
+    (if (or (<= size 1) (and (= size 2) (annotation? u)))
+      name
+      (let [parent (if (annotation? u) (:parent @u) u)
+            scope (when (and (#{:function :class} kind) (not comp?))
+                    (sc/scope-of* (get (:symbols @(:block @parent)) (sc/mangle (:private @parent) name) 0)))]
+        (cond (= scope 2) name
+              (and (#{:function :lambda} (:kind @parent)) (not (:comp? @parent))) (str (:qualname @parent) ".<locals>." name)
+              :else (str (:qualname @parent) "." name))))))
+
 (defn- function-code! [u block kind name args body-thunk opts]
-  (let [qual (loop [v u]
-               (let [pq (:qualname @v) pk (:kind @v)]
-                 (cond (= :type-params pk) (if-let [p (:parent @v)] (recur p) name)
-                       (#{:module} pk) name
-                       (#{:function :lambda :comprehension :annotation :type-alias :type-variable} pk) (str pq ".<locals>." name)
-                       :else (str pq "." name))))
-        cu (new-unit block kind name qual u)
+  (let [qual (qualname-of u kind name (:comp? opts))
+        cu (doto (new-unit block kind name qual u)
+             (swap! (fn [m] (cond-> (assoc m :comp? (:comp? opts)) (:private opts) (assoc :private (:private opts))))))
         ao (when args (nth (node args) 2))]
     ;; co_firstlineno: the definition's first line (its first decorator's), else the expression's or statement's
     (swap! cu assoc :firstlineno (or (:firstlineno opts) (first *pos*) (:line @u)))
@@ -880,11 +896,51 @@
 (defn- arg-ann [a] (when (seq? a) (nth (second (node a)) 1 nil)))
 (defn- arg-name [a] (if (seq? a) (ident (second a)) (ident a)))
 
+(declare string-token-value)
+
+(defn- str-repr
+  "repr of a str's value (unicode_repr: single quotes unless the text has one and no double one)"
+  [^String v]
+  (let [q (if (and (str/includes? v "'") (not (str/includes? v "\""))) \" \')
+        sb (StringBuilder.)]
+    (.append sb q)
+    (doseq [c v]
+      (let [i (int c)]
+        (cond (or (= c q) (= c \\)) (do (.append sb \\) (.append sb c))
+              (= c \newline) (.append sb "\\n")
+              (= c \return) (.append sb "\\r")
+              (= c \tab) (.append sb "\\t")
+              (or (< i 32) (= i 127)) (.append sb (format "\\x%02x" i))
+              :else (.append sb c))))
+    (.append sb q)
+    (str sb)))
+
+(defn- annotation-text
+  "An annotation's text under from __future__ import annotations (ast_unparse: a string constant by its repr)"
+  [an]
+  (binding [pp/*string-repr* (fn [x] (str-repr (if (string? x) x (string-token-value x))))]
+    (pp/expr an 0)))
+
+(defn- annotations-prologue!
+  "codegen_emit_annotations_prologue, codegen_setup_annotations_scope's: one positional-only parameter, and a format
+  above VALUE_WITH_FAKE_GLOBALS raises NotImplementedError"
+  [cu]
+  (swap! cu assoc :argcount 1 :posonly 1)
+  (emit! cu :load-fast 0) (load-const! cu 2) (emit! cu :compare '>)
+  (let [j (jump! cu :jump-if-false)]
+    (emit! cu :call-intrinsic [:not-implemented-error 0]) (emit! cu :raise 1)
+    (label! cu j)))
+
+(defn- format-param
+  "codegen_finish_annotations_scope: an __annotate__ function's parameter is named format in its signature"
+  [code]
+  (update code :locals assoc 0 "format"))
+
 (defn- function-annotations!
   "Pushes the __annotate__ function of a function's annotations when it has any; true then"
   [u args returns]
   (let [ao (nth (node args) 2)
-        anns (concat (for [a (concat (:posonly ao) (:args ao)) :let [an (arg-ann a)] :when an] [(arg-name a) an])
+        anns (concat (for [a (concat (:args ao) (:posonly ao)) :let [an (arg-ann a)] :when an] [(arg-name a) an])
                      (when-let [v (:vararg ao)] (when-let [an (arg-ann v)] [[(arg-name v) an]]))
                      (for [a (:kwonly ao) :let [an (arg-ann a)] :when an] [(arg-name a) an])
                      (when-let [k (:kwarg ao)] (when-let [an (arg-ann k)] [[(arg-name k) an]]))
@@ -893,21 +949,17 @@
       (let [block (block-of args)
             code (function-code! u block :annotation "__annotate__" nil
                                  (fn [cu]
-                                   (swap! cu assoc :argcount 1)
-                                   (emit! cu :load-fast 0) (load-const! cu 2) (emit! cu :compare '>)
-                                   (let [j (jump! cu :jump-if-false)]
-                                     (emit! cu :call-intrinsic [:not-implemented-error 0]) (emit! cu :raise 1)
-                                     (label! cu j))
+                                   (annotations-prologue! cu)
                                    (doseq [[nm an] anns]
                                      (load-const! cu (mangle u nm))
-                                     (cond (:future-annotations *table*) (load-const! cu (pp/expr an 0))
+                                     (cond (:future-annotations *table*) (load-const! cu (annotation-text an))
                                            ;; *args: *Ts: the starred annotation unpacked (CPython: UNPACK_SEQUENCE 1)
                                            (starred? an) (do (expr! cu (first (second (node an)))) (emit! cu :unpack-sequence 1))
                                            :else (expr! cu an)))
                                    (emit! cu :build-map (count anns))
                                    (emit! cu :return nil))
                                  {})]
-        (make-function! u code [])
+        (make-function! u (format-param code) [])
         true))))
 
 (declare line-of)
@@ -1060,7 +1112,7 @@
                                       (name-op! tu ".generic_base" :store)
                                       (build tu)
                                       (emit! tu :return nil))
-                                    {})]
+                                    {:private nm})]
           (make-function! u tcode [])
           (emit! u :call [0 nil]))
         (build u)))
@@ -1084,12 +1136,21 @@
 (defn type-param! [u tp]
   (let [[h [nm] o _] (node tp)
         nm (ident nm)
+        ;; codegen_type_param_bound_or_default: the evaluator's .format defaults to VALUE; a TypeVarTuple's starred default
+        ;; unpacked (the annotation's UNPACK_SEQUENCE 1)
         lazy (fn [k e info]
                (let [m (if (= k :bound) (:keys-bound *table*) (:keys-default *table*))
                      b (.get ^java.util.IdentityHashMap m tp)
+                     _ (load-const! u {:tuple [1]})
                      code (function-code! u b :type-variable nm nil
-                                          (fn [cu] (swap! cu assoc :argcount 1) (expr! cu e) (emit! cu :return nil)) {})]
-                 (make-function! u code [])))]
+                                          (fn [cu]
+                                            (annotations-prologue! cu)
+                                            (if (and (= h 'type-var-tuple) (starred? e))
+                                              (do (expr! cu (first (second (node e)))) (emit! cu :unpack-sequence 1))
+                                              (expr! cu e))
+                                            (emit! cu :return nil))
+                                          {:firstlineno (line-of e)})]
+                 (make-function! u code [:defaults])))]
     (load-const! u nm)
     (case h
       type-var (do (if-let [b (:bound o)] (lazy :bound b nil) (load-const! u nil))
@@ -1108,9 +1169,11 @@
         build (fn [u2]
                 (load-const! u2 nm)
                 (if (seq tps) (name-op! u2 ".type_params" :load) (load-const! u2 nil))
+                (load-const! u2 {:tuple [1]})
                 (let [code (function-code! u2 (block-of x) :type-alias nm nil
-                                           (fn [cu] (swap! cu assoc :argcount 1) (expr! cu v) (emit! cu :return nil)) {})]
-                  (make-function! u2 code []))
+                                           (fn [cu] (annotations-prologue! cu) (expr! cu v) (emit! cu :return nil))
+                                           {:firstlineno (line-of x)})]
+                  (make-function! u2 code [:defaults]))
                 (emit! u2 :call-intrinsic [:typealias 3]))]
     (if (seq tps)
       (let [tcode (function-code! u (block-of tps) :type-params (str "<generic parameters of " nm ">") nil
@@ -1168,11 +1231,7 @@
       (when ab
         (let [code (function-code! u ab :annotation "__annotate__" nil
                                    (fn [cu]
-                                     (swap! cu assoc :argcount 1)
-                                     (emit! cu :load-fast 0) (load-const! cu 2) (emit! cu :compare '>)
-                                     (let [j (jump! cu :jump-if-false)]
-                                       (emit! cu :call-intrinsic [:not-implemented-error 0]) (emit! cu :raise 1)
-                                       (label! cu j))
+                                     (annotations-prologue! cu)
                                      (emit! cu :build-map 0)
                                      (doseq [[i [nm an]] (map-indexed vector anns)]
                                        (let [skip (when conditional
@@ -1191,7 +1250,7 @@
                                      (emit! cu :return nil))
                                    {})]
           (let [start (here u)]
-            (make-function! u code [])
+            (make-function! u (format-param code) [])
             (name-op! u (if (= :class (:type b)) "__annotate_func__" "__annotate__") :store)
             (when ph
               (let [moved (subvec (:code @u) start)]
@@ -1259,6 +1318,7 @@
       ;; inlined: its own names are hidden fast locals of this unit, their outer values saved and restored around it
       (let [own (vec (sort (for [[nm f] (:symbols @block) :when (and (not= nm ".0") (sc/has-bit? f sc/DEF_LOCAL))] nm)))
             saved (:hidden @u)
+            saved-syms (:comp-syms @u)
             k (count own)]
         (expr! u it0)
         (at-node! u it0 #(emit! u (if (:async o0) :get-aiter :get-iter) nil))
@@ -1272,15 +1332,18 @@
           (swap! u update :hidden into (for [nm own] [nm (if (cell? nm) [:cell (deref-index u nm)] (local-index u nm))])))
         (build! u)
         (emit! u :swap 2)
+        (when (and (= :class (:type @(:block @u))) (nil? saved-syms))
+          (swap! u assoc :comp-syms (:symbols @block)))
         (comp-loops! u gens 0 #(elt! u %) 0)
-        (swap! u assoc :hidden saved)
+        (swap! u assoc :hidden saved :comp-syms saved-syms)
         (when (pos? k)
           (emit! u :swap 2) (emit! u :unpack-sequence k)
           (doseq [nm own]
             (if (= 5 (sc/scope-of* (get (:symbols @block) nm 0)))
               (emit! u :store-cell (deref-index u nm))
               (emit! u :store-fast (local-index u nm))))))
-      (let [code (function-code! u block (if (= kind :generator) :function :comprehension) (str "<" (name h) ">") nil
+      (let [code (function-code! u block (if (= kind :generator) :function :comprehension)
+                                 ({'list-comp "<listcomp>" 'set-comp "<setcomp>" 'dict-comp "<dictcomp>" 'generator-exp "<genexpr>"} h) nil
                                  (fn [cu]
                                    ;; the expression's line (PY7: a generator expression's instructions had none)
                                    (when-let [l (or (line-of x) (:line @u))] (set-line! cu l))
@@ -1290,7 +1353,7 @@
                                    (comp-loops! cu gens 0 #(elt! cu %) 0)
                                    (when (= kind :generator) (load-const! cu nil))
                                    (emit! cu :return nil))
-                                 {})]
+                                 {:comp? true})]
         (make-function! u code [])
         (expr! u it0)
         (at-node! u it0 #(emit! u (if (:async o0) :get-aiter :get-iter) nil))
@@ -1662,7 +1725,7 @@
                      (and simple (#{:module :class} (:kind @u)) (not (:future-annotations *table*))) (record-annotation! u (name-of t) an)
                      ;; from __future__ import annotations: the text into __annotations__ (SETUP_ANNOTATIONS made it)
                      (and simple (#{:module :class} (:kind @u)))
-                     (do (load-const! u (pp/expr an 0)) (name-op! u "__annotations__" :load)
+                     (do (load-const! u (annotation-text an)) (name-op! u "__annotations__" :load)
                          (load-const! u (mangle u (name-of t))) (emit! u :store-subscr nil))
                      (and (nil? v) (= 'attribute (head t))) (do (expr! u (first (second (node t)))) (emit! u :pop nil))
                      (and (nil? v) (= 'subscript (head t))) (let [[_ [obj k] _ _] (node t)] (expr! u obj) (emit! u :pop nil) (expr! u k) (emit! u :pop nil))
