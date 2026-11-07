@@ -4,7 +4,8 @@
  * close0 closes the descriptor; preClose0 is UnixDispatcher.c's dup2 of a closed socket over the
  * descriptor, done by the host as a mark that also wakes a thread blocked in it (no signal is
  * needed: NativeThread.signal does nothing in jrt, and SUPPORTS_PENDING_SIGNALS is false).
- * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ * jdk26u's code: Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception
+ * (LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package sun.nio.ch;
 

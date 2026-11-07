@@ -4,7 +4,8 @@
  * buffer's, or an iovec array's); jrt has no native memory, so its dispatcher reads into and
  * writes from a byte[] (IOUtil's buffers' arrays). The address methods stay, refusing, so that
  * jdk26u's callers compile; preClose is jdk26u's, its descriptor access IOUtil.fdVal.
- * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ * jdk26u's code: Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception
+ * (LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package sun.nio.ch;
 

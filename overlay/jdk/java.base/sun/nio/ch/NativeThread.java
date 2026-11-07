@@ -5,7 +5,8 @@
  * is a goroutine and a thread blocked in a descriptor waits in Go's poller, which the descriptor's
  * preClose wakes: current() is a token naming a thread (never 0, never jdk26u's virtual marker),
  * so that the channels' close calls preClose, and signal does nothing.
- * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ * jdk26u's code: Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception
+ * (LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package sun.nio.ch;
 

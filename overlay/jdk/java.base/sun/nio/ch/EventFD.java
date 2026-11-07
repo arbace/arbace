@@ -2,7 +2,8 @@
  * Arbace (overlay/jdk, F10 of doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10a"): jdk26u's
  * sun.nio.ch.EventFD (linux, baf63fb) with its natives over jdk.internal.jrt.HostChannels
  * (EventFD.c's eventfd and its 8-byte write).
- * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ * jdk26u's code: Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception
+ * (LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package sun.nio.ch;
 
