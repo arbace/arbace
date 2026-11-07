@@ -82,8 +82,9 @@
                             e (if (eat p :Colon) [:explicit (parse-ty p) m] [:value m])]
                         [e i hi]))
         not-typed (fn [] (let [i (self-ident)]
-                           (when (check p :Colon)
-                             (when (attempt (bump p) (parse-ty p) true) (fail p "incorrect type on `self`")))
+                           (when (eat-ne p :Colon)
+                             (when-let [ty (attempt (parse-ty p))]
+                               (emit p "type not allowed for shorthand `self` parameter" (ty-span ty))))
                            i))
         r (case (tk)
             :And
@@ -98,8 +99,9 @@
                     (isolated-pin-mut-self? p (inc skip))
                     (do (bump p) (let [lt (when has-lt (expect-lifetime p))] (bump p) (bump p) (let [hi (tsp)] [[:pinned lt 'Mut] (not-typed) hi])))
                     :else nil))
-            :Star (when (or (isolated-self? p 1) (and (mutability? (la p 1)) (isolated-self? p 2)))
-                    (fail p "cannot pass `self` by raw pointer"))
+            :Star (cond (isolated-self? p 1) (do (bump p) (emit p "cannot pass `self` by raw pointer"))
+                        (and (mutability? (la p 1)) (isolated-self? p 2))
+                        (do (bump p) (bump p) (emit p "cannot pass `self` by raw pointer")))
             :Ident (cond (isolated-self? p 0) (typed 'Not)
                          (isolated-mut-self? p 0) (do (bump p) (typed 'Mut))
                          :else nil)
@@ -119,6 +121,19 @@
   (let [off (if (or (is? :And) (is? :AndAnd) (kw? (tok) "mut")) 1 0)]
     (and (ident-tok? (la p off)) (identical? (.-kind (la p (inc off))) :Colon))))
 
+(defn- parameter-without-type
+  "parameter_without_type: whether rustc recovers (the error then emitted): a C-style `Type name`,
+  or a parameter name or type alone before `,`, `<` or `)` where a name is required"
+  [^P p pat require-name]
+  (let [k (pat-kind pat)]
+    (cond (and (check-ident p) (contains? #{:Comma :CloseParen} (.-kind ^Tok (la p 1))))
+          (do (parse-ident-common p) true)
+          (and require-name (contains? #{:Comma :Lt :CloseParen} (tk)))
+          (and (or (variant? k 'Ident)
+                   (and (variant? k 'Ref) (variant? (pat-kind (nth k 1)) 'Ident)))
+               (not (is? :Lt)))
+          :else false)))
+
 (defn parse-param-general
   "parse_param_general"
   [^P p mode first-param recover-arg-parse]
@@ -133,7 +148,15 @@
             [pat ty]
             (if (or req (named-param? p))
               (let [[pat colon] (parse-fn-param-pat-colon p)]
-                (when-not colon (unexpected p))
+                (when-not colon
+                  (let [d (try (unexpected p) nil
+                               (catch Throwable e
+                                 (if (and (identical? e perr) (pending p))
+                                   (let [d (pending p)] (clear-pending! p) d)
+                                   (throw e))))]
+                    (if (parameter-without-type p pat req)
+                      (emit-diag p d)
+                      (fail-diag p d))))
                 (eat-incorrect-doc-comment-for-param-type p)
                 [pat (parse-ty-for-param p)])
               (let [s (snap p)]
@@ -161,7 +184,9 @@
   [^P p mode]
   (when-not (or (is? :OpenParen) (kw? (tok) "for")) (emit p "missing parameters for function definition" (sp-hi (psp))))
   (let [fst (volatile! true)]
-    (vec (first (paren-comma-seq p #(let [r (parse-param-general p mode @fst true)] (vreset! fst false) r))))))
+    (vec (first (paren-comma-seq p #(let [r (on-err p (parse-param-general p mode @fst true)
+                                                 (fn [_] (emit-diag p (pending p))))]
+                                      (vreset! fst false) r))))))
 
 (defn- parse-fn-body
   "parse_fn_body: [body inner-attrs sig-hi]"
@@ -435,6 +460,7 @@
     (let [wc (where-clause (or (fget before :has_where_token) (fget after :has_where_token))
                            (into (fget before :predicates) (fget after :predicates))
                            (if (fget after :has_where_token) (fget after :span) (fget before :span)))]
+      (when (and rhs (pos? (nget INFN))) (missing-semi-from-binop p rhs))
       (expect-semi p)
       [ident (fset g :where_clause wc) ty rhs])))
 
@@ -453,7 +479,7 @@
   "parse_field_ident: an identifier (a keyword is an error; _ names an enum's variant)"
   ^Id [^P p adt]
   (let [^Tok t (tok)]
-    (when-not (ident-tok? t) (fail p (str "expected identifier, found " (describe t))))
+    (when-not (ident-tok? t) (expected-ident-found p true))
     (when (and (not (raw? t)) (lx/reserved? (.-sym t) (ed)) (not (and (= "_" (.-sym t)) (= adt "enum"))))
       (fail p (str "expected identifier, found keyword `" (.-sym t) "`")))
     (bump p)
@@ -470,17 +496,17 @@
                                    v (parse-visibility p true)
                                    mr (parse-mut-restriction p)
                                    ty (parse-ty p)
-                                   default (when (check p :Eq) (attempt (bump p) (parse-expr-anon-const p)))]
+                                   default (when (is? :Eq) (attempt (bump p) (parse-expr-anon-const p)))]
                                (list 'FieldDef :attrs attrs :span (sp-to lo (ty-span ty)) :vis v
                                      :extras (field-def-extras 'Default mr default) :ident 'None :ty ty :is_placeholder false)))))
 
 (defn- parse-name-and-ty [^P p adt ^Sp lo v mr safety attrs]
   (let [name (parse-field-ident p adt)]
-    (when (check p :Bang) (fail p "macros cannot expand to struct fields"))
+    (when (is? :Bang) (unexpected p))
     (when-not (eat p :Colon) (fail p (str "expected `:`, found " (describe (tok)))))
     (let [ty (parse-ty p)]
-      (when (and (check p :Colon) (not (identical? (.-kind (la p 1)) :Colon))) (fail p "found single colon in a struct field type path"))
-      (let [default (when (eat p :Eq) (parse-expr-anon-const p))]
+      (when (and (is? :Colon) (not (identical? (.-kind (la p 1)) :Colon))) (fail p "found single colon in a struct field type path"))
+      (let [default (when (is? :Eq) (bump p) (parse-expr-anon-const p))]
         (list 'FieldDef :attrs attrs :span (sp-to lo (psp)) :vis v :extras (field-def-extras safety mr default)
               :ident (list 'Some name) :ty ty :is_placeholder false)))))
 
@@ -498,7 +524,9 @@
       :DocComment (let [d (diag "found a documentation comment that doesn't document anything" (tsp) "E0585")]
                     (bump p)
                     (if (or (eat p :Comma) (is? :CloseBrace)) (emit-diag p d) (fail-diag p d)))
-      (let [d (diag (str "expected `,`, or `}`, found " (describe (tok))) (sp-hi (psp)))]
+      (let [d (diag (str "expected `,`, or `}`, found " (describe (tok))) (sp-hi (psp)))
+            _ (when (variant? (ty-kind (fget f :ty)) 'Path)
+                (check-trailing-angle-brackets p (peek (path-segs (nth (ty-kind (fget f :ty)) 2))) #{:Comma :CloseBrace}))]
         (if (or (ident-tok? (tok)) (and (is? :Pound) (identical? (.-kind (la p 1)) :OpenBracket)))
           (emit-diag p d)
           (fail-diag p d))))
@@ -521,7 +549,7 @@
         v (parse-visibility p false)]
     (recover-nested-adt-item p)
     (let [ident (parse-field-ident p "enum")]
-      (when (check p :Bang) (fail p "macros cannot expand to enum variants"))
+      (when (is? :Bang) (on-err p (unexpected p) (fn [_] (emit-diag p (pending p)))))
       (let [data (cond (check p :OpenBrace) (list 'Struct :fields (parse-record-struct-body p "struct") :recovered 'No)
                        (check p :OpenParen) (list 'Tuple (parse-tuple-struct-body p))
                        :else (list 'Unit))

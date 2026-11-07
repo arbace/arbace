@@ -207,12 +207,54 @@ and compares. What decides the first error, ported from rustc_parse 1.99.1
   first (rustc emits those as it lexes), then the mismatched closing delimiters, then the
   stream's error (an unexpected closer at the top, the file's end in an open delimiter).
 
+- The second round (branch `rust-errors2`, 2026-11-04), the recoveries the first left out, each
+  ported from `rustc_parse` 1.99.1 rule for rule:
+  `parse_assoc_op_cast`'s snapshot (`x as usize < y`: "`<` is interpreted as a start of generic
+  arguments for `usize`, not a comparison", `<<` likewise, the `'a: loop` typo, the postfix operators
+  after a cast); `parse_generic_arg`'s `recover_unbraced_const_arg_that_can_begin_ty` and
+  `recover_const_arg` (a type that fails to parse is tried as a const expression, whose own emitted
+  errors, a label's for `S<'a, ...>`, come first); `parse_angle_args_with_leading_angle_bracket_recovery`
+  ("unmatched angle bracket(s)", the state before the `<`s restored) and `check_trailing_angle_brackets`
+  (its count and the struct fields' call); `parse_if_after_cond` and `parse_expr_else`
+  (`recover_block_from_condition`, `error_on_extra_if`, `ExpectedElseBlock`), `error_block_no_opening_brace_msg`
+  (rustc parses a statement from the token before it reports "expected `{`", and what that emits
+  comes first), `maybe_recover_unexpected_block_label` (emitted), `recover_loop_else`, `parse_for_head`
+  (`error_missing_in_for_loop`'s spans, `in in`, the parentheses of a head) and
+  `LoopElseNotSupported`'s text; `parse_expr_labeled` whole (`recover_unclosed_char` with the lexer's
+  stashed `LifetimeIsChar` error stolen, `UnexpectedTokenAfterLabel`, `RequireColonAfterLabeledExpression`
+  at the expression's span) and the same for patterns and literals; the attribute policies of
+  `parse_outer_attributes`/`error_on_forbidden_inner_attr` (after a doc comment, after an outer
+  attribute, in a code block; the last attribute's span) and `E0753`; `parse_param_general` with
+  `parameter_without_type` (a C-style `Type name`, a name or a type alone) and `parse_fn_params`
+  emitting the parameter's error as rustc does; `parse_self_param`'s noexpect colon and
+  `IncorrectTypeOnSelf`; `maybe_recover_bad_struct_literal_path` (a `{ a, b }` or `_ { a }` body parsed
+  as the struct it is, the error at its span), `maybe_suggest_struct_literal` (a block of `field: value`,
+  both parses run, rustc's four outcomes), `maybe_parse_struct_expr`'s span, `parse_expr_fn_call`
+  with `maybe_recover_struct_lit_bad_delims` ("invalid `struct` delimiters or `fn` call arguments") and
+  `recover_seq_parse_error` for the arguments and for tuples; `try_recover_let_missing_semi` and the
+  `const` item's (`missing_semi_from_binop`), `attr_on_non_tail_expr` (an `ExpectedSemi`, not the feature
+  gate's text), `check_mistyped_turbofish_with_multiple_type_params`, the `:` of a typed declaration
+  followed by `.`, `recover_stmt_local_after_let` (the declaration parsed before the error) and
+  `mut let`'s span; the ternary operator inside `expected_one_of_not_found` (a `?` before the missing
+  `;`: rustc parses the two branches first and the first error may be theirs); the await recovery
+  (`await?`, `await!(..)`, `await::x`), the closure-body recoveries (`recover_closure_body`'s two
+  emitted cases and `recover_missing_braces_around_closure_body` through `current_closure`, a slot of the
+  parser's state, cleared where rustc takes it), the fn-path bound (`F: fn() -> A`, `ExpectedFnPathFoundFnKeyword`),
+  an `impl Trait` where a bound is (a wrong index let `B<e: impl I>` through unrejected), the
+  visibility, `impl` and `mut` restrictions' `E0704` family, `expected_ident_found` for fields and
+  variants, noexpect comparisons (`token == Bang`, `Eq`, `Colon` of fields and variants, a tuple field's
+  default), `expect_lifetime` and `eat_label` emitting their keyword errors, and the front matter's
+  errors of `validate_frontmatter` (opening whitespace, infostring, bare CR, unclosed, closing
+  whitespace, length mismatch, characters after the close; `FrontmatterTooManyDashes` has no span and is
+  not compared). `bin/repr-rust native-errors` and `arbace.repr.rust.native errors` now report a crash of
+  the reader ("native reader failed") as an error line of its own: before, it printed as an acceptance and
+  agreed with rustc on a file rustc accepts.
+
 Not ported: suggestions, labels and notes (only the message, code and primary span are compared);
-the recoveries after the first error; `parameter_without_type`'s and `recover_fn_ptr_with_generics`'s
-finer cases, `check_mistyped_turbofish_with_multiple_type_params` ("`<` is interpreted as a start
-of generic arguments ..."), `maybe_recover_struct_lit_bad_delims`, the closure-body recovery
-(`recover_missing_braces_around_closure_body`), the block-label and `if`-without-block
-recoveries, frontmatter's errors, the text-direction lints (warnings).
+the recoveries after the first error; `recover_fn_ptr_with_generics`'s finer cases;
+`check_no_chained_comparison`'s token-consuming branches and `attempt_chained_comparison_suggestion`'s probes
+(the message is the same in every branch, they decide only whether the error is returned or emitted, which
+matters inside a speculative parse); `recover_raw_ref_call_args`; the text-direction lints (warnings).
 
 ## Checks (2026-11-04)
 
@@ -250,3 +292,19 @@ recoveries, frontmatter's errors, the text-direction lints (warnings).
   accepted files' dumps are still the helper's: the 60 and 50 library files and the 42
   compiler files of the first checks (and the 60 with `--full`), the mutants' and edge cases'
   equal dumps.
+- The first errors, second round (branch `rust-errors2`, 2026-11-04; same scratch layout, `.tmp/re/`):
+  the same three sets (the edge cases and 1,100 mutants, the 400 new, the 300 held out of the first
+  round) all equal now: of 2,256 files, 571 accepted by both and 1,685 rejected by both with 1,685 first
+  errors equal (message, code and primary span), where the first round had 1,650 (35 left: 1,432 of 1,464
+  on the sets worked on, 218 of 221 held out). Two development sets of 500 mutants each (seeds 4242 at
+  2021 and 31337 at 2024, 50 files each of the library and the compiler not used before), used to find
+  what the round had still missed (405 of 406 and 360 of 364 at their first runs), end at 406 of 406
+  and 364 of 364; two held-out sets of 300 mutants of 40 other files each, generated for the checks and
+  not worked on: seed 777001 at 2024 (run once before the last fixes: 223 of 226 rejected by both equal,
+  and one file rustc rejects that the reader accepted, `B<e: impl I>`; 227 of 227 and none accepted
+  afterwards) and seed 9100913 at 2021 (run once, after every fix: 224 of 224 rejected by both equal, 76 accepted by both, none by one
+  reader alone). The accepted files still dump equal: `bin/repr-rust native-check` 68 of 68 (and 68 of
+  68 with `--full`), and in every set above the files both readers accept, their dumps equal to the
+  helper's (`bin/repr-rust native-check --edition E FILES` from the set's directory: 571 of 571 in the
+  first three, 94 + 136 + 73 + 76 in the others, none differing).
+
