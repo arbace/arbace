@@ -279,3 +279,14 @@ On branch `night-fix` (from `b2a4911f`), not merged while `--full` ran on main:
 - Result, the 37 files on one key, record written from the run: 436 / 99 / 536 / 6 of 1,077 mats to 560 / 89 / 470 / 6 of 1,125; 0 items in no class
   (new class `mats-after-smr7`). Regressions: `bin/si unit`, `r7rs`, `srfi`, `test --si`, `test`, `check`, `check --aot` essential, `fixpoint`,
   `boot --check`: none. R7RS-small: nothing left but the decided `e+308` printing and SMR8; the corpora import no other SRFI.
+
+## 2026-11-07, Scheme: SCS1, the scores' round (branch `scheme-90`, from `mac/scheme-smr7` 9b672f2f3)
+
+The user's goal: the Scheme crop above 90% on bin/crops-score's three measures (98.3 / 87.5 / 80.0 at smr7). Done: negative controls for the six check
+families that lacked them (r7rs, srfi, chibi-tests, ecraven, the read check, the round trip: `arbace.scheme.controls`, `test/scheme/controls.edn`, wired into each
+check's exit code, with `bin/si corpora controls-test` as the wiring's test and in `si-essential`); the user's decision of the day (a test's own verdict is a judge
+no toolchain made) built for si's checks (`own-verdict`, `bin/si own`: 27 of 50 programs judged by their own verdict, 22 agree with the recorded-output judge,
+5 are failures Chez shares, 0 the other way), `bin/si chibi-tests` without chibi-scheme at check time (`--chibi` by hand). Scores with the rules and facts
+patches in a scratch worktree of `mac/crops-score`: maturity 100.0, independence 95.0 (judge 0.75, case-weighted), completeness unchanged 98.3. Alternatives:
+the controls as run-level fixtures (rejected: a control needs no run, the records hold what a judge reads), the judge as the check's only verdict (kept as SCS3).
+Doc: doc/scheme/SCHEME-SURVEY.md, "As built: SCS1".

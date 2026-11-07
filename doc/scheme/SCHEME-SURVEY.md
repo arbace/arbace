@@ -3291,3 +3291,80 @@ The row as built needs no embedding: its records are the light path's. Proposed 
 
 None known. Not run: the gate itself (`bin/gate --plan` and `--full --plan` only: every Scheme step planned, no table problem), the
 audit, ecraven and the mats whole (their subsets only: 3 benchmarks, 14 mat files), arm64.
+
+## Decided (the user, 2026-11-07): a test's own verdict is a judge
+
+The crops' independence (bin/crops-score, doc/CROPS-SCORE.md) counts what a crop's checks compare with at check time, its judge. The
+user decided, 2026-11-07: a test's own verdict counts as a judge no toolchain made (score 1); Chez's and Chibi's recorded outputs move to the
+oracle tier (re-recorded by hand at a tag); a test without an own verdict keeps the recorded output (0.5); a live toolchain run at check
+time is 0. Scheme's checks judge by the test's own verdict wherever it has one: Chez's mats report their pass or fail, Chibi's r7rs-tests and
+its own tests of the libraries report per test, the SRFIs' programs print a report line, ecraven's benchmarks check their result, the R6RS suites'
+programs report "N tests passed" or the failing expressions.
+
+## As built: SCS1, the scores' round (2026-11-07, branch scheme-90)
+
+Goal: Scheme above 90% on all three of `bin/crops-score`'s measures (at `mac/scheme-smr7`: completeness 98.3, maturity 87.5, independence 80.0).
+
+### Negative controls for every check family (maturity)
+
+`arbace.scheme.controls` and `test/scheme/controls.edn` (GTS81 (a); bin/si check's own are `test/scheme/si/controls.edn`). A control is a case
+(`:subject`) judged against a reference case's (`:reference`, or the edit of a run) by the family's own judge, which must find it; a `:sanity` entry
+is the converse (the run that agrees is not found: a judge that finds everything controls nothing). The judges are the functions the checks
+call, refactored out of the commands for it (`r7rs-result`, `srfi-judge`, `chibi-test-result`, `bench-item`, `ck/compare-file`, `roundtrip-file`);
+the reasons found are the regress lines (`arbace.scheme.regress`) of the judged run against the judge's result for the reference case's own run, so a
+control uses the check's two judgments, the test's own verdict and the record's. Nothing is run: a run is made from the family's record.
+
+| family | check | controls | sanity |
+|---|---|---|---|
+| r7rs | `bin/si r7rs` | a test fails (own verdict), fails where Chez and Chibi pass (against-references), a run cut short (count), a crash | the run again |
+| srfi | `bin/si srfi` | srfi-13's report as srfi-1's (counts), a FAIL line, no report line, a crash | srfi-1 again |
+| chibi-tests | `bin/si chibi-tests` | diff-test's marks as optional-test's, a failing mark, fewer marks than Chibi's, a crash | diff again |
+| ecraven | `bin/si ecraven` | INCORRECT, no result line, a timeout | a correct result |
+| read | `bin/repr-scheme check` | another text's data, a datum fewer, other offsets, another `write`, an error Chez does not raise and the reverse | the text against its own dump |
+| roundtrip | `bin/repr-scheme roundtrip` | the printed-back text against another text, against one with a newline more | the text against itself |
+
+The read check's reference is Chez's dump, made live by the check; a control has no Chez, so the dump of the reference text, made by Arbace's reader in
+dump.ss's shape, stands in (the judge, `ck/compare-file`, is the same). Wiring: each check ends with `(ctl/run FAMILY found-fn)` in its exit code
+(`max`), so a control that passes, passes for another reason than `:expect`, or whose judge throws fails the check; `bin/si corpora controls-test`
+(in `si-essential`) is the wiring's test: for each family a judge that finds nothing, one that finds everything and one that throws must each fail
+the family's controls, as must a family with no control or no sanity entry. `bin/si corpora controls [FAMILY...]`, `bin/repr-scheme controls`
+run them alone (7 s, 0.5 GB).
+
+### The own-verdict judge (independence)
+
+`arbace.scheme.check/own-verdict` (bin/si check's judge for the R6RS suites' programs, `:suite`): the run's test report alone, no reference.
+`bin/si own [--aot] [--list]` compares it with the recorded-output judge (`items-of`) program by program on the last check's runs. At
+`scheme-smr7`'s check (49 programs, fib out): 27 judged by their own verdict (55.1%); of them 22 agree on a pass, 0 on a fail, 3 are failures the
+recorded-output judge passes because Chez fails the same tests (`racket/base` 5 of 2,049, `racket/exceptions` 1 of 12, `racket/io/ports` 2 of 399:
+`chez-fails-too`), 2 end with the same error in both (`racket/run`, `racket/test`: the library `(tests r6rs run)` is not found by either:
+`chez-errors-too`), and 0 pass their own verdict where the recorded-output judge finds an item. The other 22 (Larceny's 13, si's own 10 but
+`si/amb`...: no report) have none. The compiled check (essential subset, 11 programs): 4 by their own verdict, 2 agree on a pass, 1 on a fail
+(`racket/syntax-case` refused), 1 `chez-fails-too` (`racket/base`). The records: 27 of 50 programs in `check-linux-amd64.edn` and in
+`check-aot-linux-amd64.edn`. Not an own verdict's blind spot: a run that stops early with status 0 reports fewer tests, which only the recorded count
+sees (`count` items); the recorded-output judge stays beside.
+
+Share of cases judged by their own verdict, per check: `bin/si check` 27 of 50 programs (54%), `check --aot` 27 of 50 (54%), `r7rs` 1,232 of 1,232
+tests, `srfi` 1,231 of 1,231 checks (11 programs), `chibi-tests` 268 of 268, `ecraven` 58 of 58 benchmarks, `mats` (Chez's, beside the row) all, `roundtrip`
+1,364 of 1,364 files (the original text), the read check 0 of 1,371 (Chez's dump).
+
+`bin/si chibi-tests` no longer runs chibi-scheme at check time: Chibi's marks are the record's (`check-chibi-tests-linux-amd64.edn`), `--chibi` runs the
+host's Chibi afresh (by hand, with `--record`, at a tag); `si-corpora` loses `:chibi` from its hosts. Stub run (chibi-scheme and chez first on PATH,
+exiting 99): `bin/si chibi-tests`, `r7rs`, `srfi`, `corpora controls-test` exit 0 and call no stub.
+
+### The numbers
+
+Scored by `bin/crops-score --ref scheme-90 --crop scheme` with the rules and facts patches applied in a scratch worktree of `mac/crops-score`
+(`.tmp/crops-rules.diff`, `.tmp/independence.diff` in the branch's worktree; crops.edn and independence.edn are not on this branch):
+completeness 98.3 (98.8), maturity 87.5 to 100.0 (controls 2 of 8 families to 8 of 8), independence 80.0 to 95.0 (judge 0 to 0.75).
+The judge's 0.75 is the cases' mean: read 1,371 cases at 0 (live Chez dumps), roundtrip 1,364 at 1, `check` and `--aot` 50 each at 0.77 (27 own, 23
+recorded), r7rs 1,232, srfi 1,231, chibi-tests 268, ecraven 58 at 1: 4,230 of 5,624.
+
+### Proposed
+
+- **SCS2 The read check's Chez dumps.** The only judge term at 0 is the read check (Chez's dumps live). (a) the pack `scheme-chez-dumps` of
+  `mac/oracle-records-cpp2` (dumps recorded by hand at a tag, the check reads them: 0.5, judge 0.82); (b) a digest per file of Chez's dump,
+  compared with the digest of Arbace's rendering in dump.ss's shape (small record, no first difference on a failure); (c) leave. *Recommended: (a), with the
+  merge of that branch.*
+- **SCS3 Judge by the own verdict alone for the suites.** (a) as built (the recorded-output judge beside, the own verdict reported); (b) the suites' programs
+  judged by their own verdict only, the 5 programs that Chez fails too classed (`chez-fails-too`, `chez-errors-too`), Chez's run for the programs without a
+  report alone. *Recommended: (b) when the records are next remade (a night's run): the recorded runs of the 27 programs then leave the oracle tier's reach.*
