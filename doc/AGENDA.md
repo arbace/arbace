@@ -1,7 +1,9 @@
 # Agenda
 
 The current state of the work. This file is rewritten as things change. For the history, see
-[JOURNAL.md](JOURNAL.md) (since 2026-11-01), the journals at the tags
+[JOURNAL.md](JOURNAL.md) (since 2026-11-07), the journals at the tags
+[`arbace-reaps-4-crops-v1`](https://github.com/arbace/arbace/blob/arbace-reaps-4-crops-v1/doc/JOURNAL.md)
+(2026-11-01 to 2026-11-07),
 [`arbace-reaps-3-crops-v2`](https://github.com/arbace/arbace/blob/arbace-reaps-3-crops-v2/doc/JOURNAL.md)
 (2026-10-27 to 2026-11-01),
 [`arbace-reaps-3-crops-v1`](https://github.com/arbace/arbace/blob/arbace-reaps-3-crops-v1/doc/JOURNAL.md)
@@ -55,7 +57,7 @@ The current state of the work. This file is rewritten as things change. For the 
 - **`arbace-reaps-3-crops-v1`** (2026-10-27) and **`-v2`** (2026-11-01, at `c4f85ace`): REAP for Clojure, Java 26 and
   Go 1.27.1, 12 of 12 cells; v2 with the gate made efficient and run clean in a fresh clone
   (`test/gate/clean-arbace-reaps-3-crops-v2.edn`).
-- **`arbace-reaps-4-crops-v1`** (2026-11-07, on the tag docs' commit above the record's `99873f98`): C the fourth row
+- **`arbace-reaps-4-crops-v1`** (2026-11-07, at `a4a84533`; the record's commit `99873f98`): C the fourth row
   (C1-C9, [C23-SURVEY.md](C23-SURVEY.md)): read 5,201 / 231 / 51, eval 2,111 / 124 / 33,
   AOT 2,120 / 115 / 33, print 4,768 / 5 / 78 (pass / by design / deferred); 16 of 16 cells, none failing ("REAP v3's
   divergences"). The merge window after v2 (the gate's branches and audits, the crops, JN10), C8, C9 and its re-seed window
@@ -64,10 +66,10 @@ The current state of the work. This file is rewritten as things change. For the 
   passed, 234 steps clean, every audited one ok, over three runs in two nights (77,700 s: the first run 39,146 s, then two
   `--only` reruns), the budget's two nights at most.
 
-## Now: the tag `arbace-reaps-4-crops-v1` (as of 2026-11-07, morning)
+## Done: the tag `arbace-reaps-4-crops-v1` (2026-11-07)
 
-The clean run's record passed (2026-11-07 04:24 UTC, at `99873f98`); the tag is the user's, by hand, on the tag docs'
-commit. Below, how it got there. The tag waited for GT8 and the backlog (the user, 2026-11-03), and stands on an audited
+The clean run's record passed (2026-11-07 04:24 UTC, at `99873f98`); tagged at `a4a84533` (the essential gate passed on it)
+at the user's go-ahead, and the journal started over. Next: "After the tag" below. How it got there: The tag waited for GT8 and the backlog (the user, 2026-11-03), and stands on an audited
 clean run of the four crops over GT8's compressed corpora within budget. The backlog is merged; GT8's tooling is on main (dedup, coverage subsets for C,
 goi and Java's interpreted level, the nightly rotation, the tiers, `bin/gate --costs`).
 
