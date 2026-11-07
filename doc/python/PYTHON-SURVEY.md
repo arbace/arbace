@@ -3827,4 +3827,4 @@ positional refusal; `sq_repeat`'s messages. **Surrogates**: as designed; `ast.pa
 33 files' skips into failures.
 
 **Measured** (VM, the native driver on both sides, per method): see report 226. The classes: `:data-model` 90 listed tests to 13,
-`:module-subclasses` 9 to 0, `:str-protocol` 19 to 6, `:surrogate-pairs` 14 to 0.
+`:module-subclasses` 9 to 0, `:str-protocol` 19 to 5, `:surrogate-pairs` 14 to 0.
