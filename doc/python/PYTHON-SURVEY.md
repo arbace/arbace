@@ -3840,3 +3840,34 @@ Least compiled wall time in ms of 3 rounds, base and head back to back (210's me
 | bm_generators | 159 | 682 | 676 | -0.9% |
 
 bm_async_generators pays for the firstiter hook, which the base skipped in `async for` (a bug): a WeakSet add per generator, as CPython does.
+
+## Design: 227, pickling the core types, the iterators and the exceptions (2026-11-07, the Mac VM, queue 227)
+
+The classes `:pickle-core`, `:pickle-iterators` and `:array-pickle` (`:exc-pickle` went with 223), judged by test_pickle (the
+pure Pickler; the `_pickle` twin stays, PY6g's DECISION 1), test_itertools, test_array and test_exceptions, then test_iter,
+test_enumerate, test_range, test_set, test_deque and test_bytes for the iterators. Base c44a0b5d. The rules are the pinned
+3.14.10's C; a 1,088-line probe of `__reduce_ex__` at protocols 0, 1, 2 and 4, `pickle` and `copy` over about 150 objects, against
+`python3 -I -B`, finds the gaps before the tests do.
+
+**On 226.** 226 (running beside this task) ported `object_getstate_default` with its required check, `reduce_newobj`'s
+conditions and the reduces of set, method, deque subclasses, bytearray and the str iterator. This task does not port them a
+second time: 226's head is merged here first, by the printed-Go method (only `func.go` conflicts: two fields of `Builtin`).
+
+**The iterators.** One new file, `iterreduce.go`, holds what `Objects/*.c` spreads out: `enum_reduce`, `map_reduce`,
+`map_setstate`, `filter_reduce`, `zip_reduce`, `zip_setstate`, `iter_reduce`, `iter_setstate`, `calliter_reduce`, the
+`striter`, `bytearrayiter`, `unicodeiter`, `rangeiter`, `longrangeiter` and `listreviter` pairs, `setiter_reduce`,
+`dequeiter_reduce` and `dequeiter_new`. Each reads the builtin (`_PyEval_GetBuiltin`, by the dict's own lookup) before it reads the
+iterator (issue #101765: a key's `__eq__` may exhaust it). What the iterators' structs must keep for that: bytes' and bytearray's
+iterators their object, `filter` that its function was `bool`, a deque iterator its deque after the end and the C's counter,
+and an exhausted str or bytes iterator its nil sequence.
+
+**Types pyi lacks.** `list_reverseiterator` (`list.__reversed__`), `str_iterator` beside `str_ascii_iterator`,
+`longrange_iterator` and `range.__reversed__` (`range_reverse`): the reduces name them, and an unpickled iterator's type shows
+them. itertools' `__reduce__` went in 3.14: its types refuse (`cannot pickle 'itertools.count' object`), which the required
+check gives without a line of its own, and test_itertools' pickling tests are the reference's as they stand.
+
+**Out of the design.** `OrderedDict` is pyi's pure-Python twin, so `iter(od)` is a generator that does not pickle where
+`odict_iterator` does: classed with the twin, not ported.
+
+**The cost.** The compiled loop is not touched. `strIter` and `rangeIter` get a type by field or by test, and `Next` of a str
+iterator one nil test; the bench sample checks the iteration programs.
